@@ -1,0 +1,17 @@
+server:
+  port: 8080
+  mode: debug  # debug / release
+
+database:
+  path: ./data/fast_ship.db
+
+jwt:
+  secret: "change-me-in-production"
+  expire_hours: 24
+
+upload:
+  max_file_size: 524288000  # 500MB
+  storage_path: ./data/uploads
+
+encryption:
+  key: "change-me-32-bytes-in-production"  # 32 字节 AES 密钥
