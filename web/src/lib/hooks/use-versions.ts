@@ -1,11 +1,11 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { versionApi } from "@/lib/api/versions";
 
-export function useVersions(projectId: string) {
+export function useVersions(projectId: string, status?: string) {
   return useQuery({
-    queryKey: ["projects", projectId, "versions"],
+    queryKey: ["projects", projectId, "versions", status ?? "all"],
     queryFn: async () => {
-      const res = await versionApi.list(projectId);
+      const res = await versionApi.list(projectId, status);
       return res.data;
     },
     enabled: !!projectId,

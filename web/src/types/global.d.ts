@@ -15,6 +15,12 @@ interface Project {
   description: string;
   github_owner: string;
   github_repo: string;
+  latest_version?: {
+    id: string;
+    version_number: string;
+    status: "pending" | "shipped";
+    created_at: string;
+  } | null;
   created_at: string;
   updated_at: string;
 }

@@ -1,8 +1,16 @@
+import { useState } from "react";
 import { Link, useParams, useNavigate } from "react-router";
 import { Plus, Pencil, Trash2, GitFork, Package } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -30,8 +38,12 @@ import { toast } from "sonner";
 export default function ProjectDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [statusFilter, setStatusFilter] = useState("all");
   const { data: project, isLoading: projectLoading } = useProject(id!);
-  const { data: versionsData, isLoading: versionsLoading } = useVersions(id!);
+  const { data: versionsData, isLoading: versionsLoading } = useVersions(
+    id!,
+    statusFilter === "all" ? undefined : statusFilter,
+  );
   const deleteProject = useDeleteProject();
 
   const versions = versionsData?.items ?? [];
@@ -130,7 +142,22 @@ export default function ProjectDetailPage() {
         {/* 版本列表 */}
         <div>
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">版本</h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-semibold">版本</h2>
+              <Select
+                value={statusFilter}
+                onValueChange={(value) => setStatusFilter(value ?? "all")}
+              >
+                <SelectTrigger className="w-36">
+                  <SelectValue placeholder="全部状态" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">全部状态</SelectItem>
+                  <SelectItem value="pending">待发货</SelectItem>
+                  <SelectItem value="shipped">已发货</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             <Button size="sm" render={<Link to={`/projects/${id}/versions/new`} />}>
               <Plus className="mr-1.5 h-3.5 w-3.5" />
               创建版本
@@ -148,7 +175,9 @@ export default function ProjectDetailPage() {
               <CardContent className="flex flex-col items-center py-10">
                 <Package className="mb-3 h-10 w-10 text-muted-foreground/50" />
                 <p className="text-sm text-muted-foreground">
-                  暂无版本，创建第一个版本开始发布
+                  {statusFilter === "all"
+                    ? "暂无版本，创建第一个版本开始发布"
+                    : "当前筛选条件下暂无版本"}
                 </p>
               </CardContent>
             </Card>
