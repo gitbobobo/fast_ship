@@ -67,6 +67,7 @@ interface Artifact {
   file_size: number;
   file_path: string;
   platform: string | null;
+  uploaded_by: string | null;
   uploaded_at: string;
 }
 

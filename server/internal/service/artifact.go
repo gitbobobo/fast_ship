@@ -35,7 +35,7 @@ func NewArtifactService(
 	}
 }
 
-func (s *ArtifactService) Upload(versionID, userID, fileName string, fileSize int64, platform string, reader io.Reader) (*model.Artifact, error) {
+func (s *ArtifactService) Upload(versionID, userID, fileName string, fileSize int64, platform, uploadedBy string, reader io.Reader) (*model.Artifact, error) {
 	version, err := s.versionRepo.FindByID(versionID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -65,6 +65,7 @@ func (s *ArtifactService) Upload(versionID, userID, fileName string, fileSize in
 		existing.FileSize = fileSize
 		existing.Platform = platform
 		existing.FilePath = storagePath
+		existing.UploadedBy = uploadedBy
 		existing.UploadedAt = now
 
 		if err := s.artifactRepo.Update(existing); err != nil {
@@ -84,6 +85,7 @@ func (s *ArtifactService) Upload(versionID, userID, fileName string, fileSize in
 		FileSize:   fileSize,
 		FilePath:   storagePath,
 		Platform:   platform,
+		UploadedBy: uploadedBy,
 		UploadedAt: now,
 	}
 

@@ -19,6 +19,19 @@ func (h *ArtifactHandler) Upload(c *gin.Context) {
 	vid := c.Param("vid")
 	userID := middleware.GetUserID(c)
 	platform := c.PostForm("platform")
+	uploadedBy := middleware.GetUserName(c)
+	if uploadedBy == "" {
+		if middleware.IsJWTAuth(c) {
+			uploadedBy = "Web 用户"
+		} else {
+			apiKeyName := middleware.GetAPIKeyName(c)
+			if apiKeyName == "" {
+				uploadedBy = "API Key"
+			} else {
+				uploadedBy = "API Key: " + apiKeyName
+			}
+		}
+	}
 
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
@@ -27,7 +40,7 @@ func (h *ArtifactHandler) Upload(c *gin.Context) {
 	}
 	defer file.Close()
 
-	result, err := h.artifactService.Upload(vid, userID, header.Filename, header.Size, platform, file)
+	result, err := h.artifactService.Upload(vid, userID, header.Filename, header.Size, platform, uploadedBy, file)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

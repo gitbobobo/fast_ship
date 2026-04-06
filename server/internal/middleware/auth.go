@@ -19,6 +19,8 @@ const (
 	ContextKeyAuthType = "auth_type"
 	ContextKeyJTI      = "jti"
 	ContextKeyExp      = "exp"
+	ContextKeyUserName = "username"
+	ContextKeyAPIKey   = "api_key_name"
 
 	AuthTypeJWT    = "jwt"
 	AuthTypeApiKey = "api_key"
@@ -98,6 +100,7 @@ func handleJWTAuth(c *gin.Context, tokenString string, cfg *config.Config, authS
 
 	jti, _ := claims["jti"].(string)
 	sub, _ := claims["sub"].(string)
+	username, _ := claims["username"].(string)
 	exp, _ := claims["exp"].(float64)
 
 	// 检查黑名单
@@ -112,6 +115,7 @@ func handleJWTAuth(c *gin.Context, tokenString string, cfg *config.Config, authS
 	c.Set(ContextKeyAuthType, AuthTypeJWT)
 	c.Set(ContextKeyJTI, jti)
 	c.Set(ContextKeyExp, exp)
+	c.Set(ContextKeyUserName, username)
 	c.Next()
 }
 
@@ -134,6 +138,7 @@ func handleApiKeyAuth(c *gin.Context, token string, apiKeyRepo *repository.ApiKe
 
 	c.Set(ContextKeyUserID, apiKey.UserID)
 	c.Set(ContextKeyAuthType, AuthTypeApiKey)
+	c.Set(ContextKeyAPIKey, apiKey.Name)
 	c.Next()
 }
 
@@ -150,6 +155,14 @@ func GetAuthType(c *gin.Context) string {
 // IsJWTAuth 检查是否为 JWT 认证
 func IsJWTAuth(c *gin.Context) bool {
 	return GetAuthType(c) == AuthTypeJWT
+}
+
+func GetUserName(c *gin.Context) string {
+	return c.GetString(ContextKeyUserName)
+}
+
+func GetAPIKeyName(c *gin.Context) string {
+	return c.GetString(ContextKeyAPIKey)
 }
 
 // HandleAppError 将 AppError 转换为 HTTP 响应

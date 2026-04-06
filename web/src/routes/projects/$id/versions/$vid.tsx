@@ -61,6 +61,7 @@ import {
 import { useUploadArtifact, useDeleteArtifact } from "@/lib/hooks/use-artifacts";
 import { artifactApi } from "@/lib/api/artifacts";
 import { formatDate, formatFileSize } from "@/lib/utils/format";
+import { versionSchema } from "@/lib/utils/validators";
 import { toast } from "sonner";
 
 export default function VersionDetailPage() {
@@ -71,9 +72,9 @@ export default function VersionDetailPage() {
     isLoading,
     refetch: refetchVersion,
   } = useVersion(vid!);
-  const updateVersion = useUpdateVersion(vid!);
+  const updateVersion = useUpdateVersion(vid!, id);
   const deleteVersion = useDeleteVersion(id!);
-  const shipVersion = useShipVersion(vid!);
+  const shipVersion = useShipVersion(vid!, id);
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
   const [shouldPollShip, setShouldPollShip] = useState(false);
   const {
@@ -86,6 +87,8 @@ export default function VersionDetailPage() {
 
   const [editingNotes, setEditingNotes] = useState(false);
   const [notes, setNotes] = useState("");
+  const [editingVersionNumber, setEditingVersionNumber] = useState(false);
+  const [versionNumber, setVersionNumber] = useState("");
   const [editingCommitish, setEditingCommitish] = useState(false);
   const [commitish, setCommitish] = useState("");
   const [uploadPlatform, setUploadPlatform] = useState("");
@@ -130,6 +133,22 @@ export default function VersionDetailPage() {
       toast.success("Release 说明已更新");
     } catch {
       toast.error("更新失败");
+    }
+  };
+
+  const handleSaveVersionNumber = async () => {
+    const parsed = versionSchema.shape.version_number.safeParse(versionNumber);
+    if (!parsed.success) {
+      toast.error(parsed.error.issues[0]?.message ?? "版本号格式无效");
+      return;
+    }
+
+    try {
+      await updateVersion.mutateAsync({ version_number: parsed.data });
+      setEditingVersionNumber(false);
+      toast.success("版本号已更新");
+    } catch {
+      toast.error("更新失败，版本号可能已存在");
     }
   };
 
@@ -322,7 +341,48 @@ export default function VersionDetailPage() {
           <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
             <div>
               <span className="text-muted-foreground">版本号：</span>
-              {version.version_number}
+              {editingVersionNumber ? (
+                <span className="inline-flex items-center gap-2">
+                  <Input
+                    className="h-7 w-40 text-sm"
+                    value={versionNumber}
+                    onChange={(e) => setVersionNumber(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7"
+                    onClick={handleSaveVersionNumber}
+                  >
+                    保存
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7"
+                    onClick={() => setEditingVersionNumber(false)}
+                  >
+                    取消
+                  </Button>
+                </span>
+              ) : (
+                <span>
+                  {version.version_number}
+                  {isEditable && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-2 h-6 px-2"
+                      onClick={() => {
+                        setVersionNumber(version.version_number);
+                        setEditingVersionNumber(true);
+                      }}
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </Button>
+                  )}
+                </span>
+              )}
             </div>
             <div>
               <span className="text-muted-foreground">状态：</span>
@@ -512,12 +572,13 @@ export default function VersionDetailPage() {
             ) : (
               <Table>
                 <TableHeader>
-                  <TableRow>
-                    <TableHead>文件名</TableHead>
-                    <TableHead>大小</TableHead>
-                    <TableHead>平台</TableHead>
-                    <TableHead>上传时间</TableHead>
-                    <TableHead className="text-right">操作</TableHead>
+                    <TableRow>
+                      <TableHead>文件名</TableHead>
+                      <TableHead>大小</TableHead>
+                      <TableHead>上传者</TableHead>
+                      <TableHead>平台</TableHead>
+                      <TableHead>上传时间</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -527,6 +588,7 @@ export default function VersionDetailPage() {
                         {artifact.file_name}
                       </TableCell>
                       <TableCell>{formatFileSize(artifact.file_size)}</TableCell>
+                      <TableCell>{artifact.uploaded_by || "-"}</TableCell>
                       <TableCell>{artifact.platform || "-"}</TableCell>
                       <TableCell>{formatDate(artifact.uploaded_at)}</TableCell>
                       <TableCell className="text-right">

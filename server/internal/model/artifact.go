@@ -9,6 +9,7 @@ type Artifact struct {
 	FileSize   int64     `gorm:"not null" json:"file_size"`
 	FilePath   string    `gorm:"type:text;not null" json:"-"`
 	Platform   string    `gorm:"type:text" json:"platform"`
+	UploadedBy string    `gorm:"type:text" json:"uploaded_by"`
 	UploadedAt time.Time `gorm:"not null" json:"uploaded_at"`
 
 	Version Version `gorm:"foreignKey:VersionID;constraint:OnDelete:CASCADE" json:"-"`

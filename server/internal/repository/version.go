@@ -38,7 +38,7 @@ func (r *VersionRepository) List(projectID string, status string, page, pageSize
 	query.Model(&model.Version{}).Count(&total)
 
 	err := query.Preload("Artifacts").
-		Offset((page-1)*pageSize).Limit(pageSize).
+		Offset((page - 1) * pageSize).Limit(pageSize).
 		Order("created_at DESC").Find(&versions).Error
 	return versions, total, err
 }
@@ -55,6 +55,14 @@ func (r *VersionRepository) ExistsByVersionNumber(projectID, versionNumber strin
 	var count int64
 	err := r.db.Model(&model.Version{}).
 		Where("project_id = ? AND version_number = ?", projectID, versionNumber).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (r *VersionRepository) ExistsByVersionNumberExcludeID(projectID, versionNumber, excludeID string) (bool, error) {
+	var count int64
+	err := r.db.Model(&model.Version{}).
+		Where("project_id = ? AND version_number = ? AND id != ?", projectID, versionNumber, excludeID).
 		Count(&count).Error
 	return count > 0, err
 }

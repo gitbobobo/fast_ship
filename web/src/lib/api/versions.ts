@@ -7,6 +7,7 @@ interface CreateVersionRequest {
 }
 
 interface UpdateVersionRequest {
+  version_number?: string;
   release_notes?: string;
   target_commitish?: string;
 }

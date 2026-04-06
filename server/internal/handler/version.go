@@ -83,7 +83,7 @@ func (h *VersionHandler) Update(c *gin.Context) {
 	}
 
 	userID := middleware.GetUserID(c)
-	result, err := h.versionService.Update(vid, userID, &req)
+	result, err := h.versionService.Update(vid, userID, middleware.IsJWTAuth(c), &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

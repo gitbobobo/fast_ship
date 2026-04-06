@@ -32,8 +32,9 @@ type CreateVersionRequest struct {
 }
 
 type UpdateVersionRequest struct {
-	ReleaseNotes    string `json:"release_notes"`
-	TargetCommitish string `json:"target_commitish"`
+	VersionNumber   *string `json:"version_number"`
+	ReleaseNotes    *string `json:"release_notes"`
+	TargetCommitish *string `json:"target_commitish"`
 }
 
 func (s *VersionService) Create(projectID, userID string, req *CreateVersionRequest) (*model.Version, error) {
@@ -102,7 +103,7 @@ func (s *VersionService) List(projectID, userID string, status string, page, pag
 	return s.versionRepo.List(projectID, status, page, pageSize)
 }
 
-func (s *VersionService) Update(id, userID string, req *UpdateVersionRequest) (*model.Version, error) {
+func (s *VersionService) Update(id, userID string, allowVersionNumberEdit bool, req *UpdateVersionRequest) (*model.Version, error) {
 	version, err := s.versionRepo.FindByID(id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -121,8 +122,32 @@ func (s *VersionService) Update(id, userID string, req *UpdateVersionRequest) (*
 		return nil, errs.ErrNotOwner
 	}
 
-	version.ReleaseNotes = req.ReleaseNotes
-	version.TargetCommitish = req.TargetCommitish
+	if req.VersionNumber != nil {
+		if !allowVersionNumberEdit {
+			return nil, errs.ErrApiKeyForbidden
+		}
+		if *req.VersionNumber == "" {
+			return nil, errs.ErrInvalidParams
+		}
+		if *req.VersionNumber != version.VersionNumber {
+			exists, err := s.versionRepo.ExistsByVersionNumberExcludeID(version.ProjectID, *req.VersionNumber, version.ID)
+			if err != nil {
+				return nil, errs.ErrInternal
+			}
+			if exists {
+				return nil, errs.ErrVersionNumberExists
+			}
+			version.VersionNumber = *req.VersionNumber
+		}
+	}
+
+	if req.ReleaseNotes != nil {
+		version.ReleaseNotes = *req.ReleaseNotes
+	}
+
+	if req.TargetCommitish != nil {
+		version.TargetCommitish = *req.TargetCommitish
+	}
 
 	if err := s.versionRepo.Update(version); err != nil {
 		return nil, errs.ErrInternal

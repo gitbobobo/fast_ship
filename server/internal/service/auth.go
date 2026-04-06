@@ -100,7 +100,7 @@ func (s *AuthService) Register(req *RegisterRequest) (*AuthResponse, error) {
 		return nil, errs.ErrInternal
 	}
 
-	token, err := s.generateToken(user.ID)
+	token, err := s.generateToken(user.ID, user.Username)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -124,7 +124,7 @@ func (s *AuthService) Login(req *LoginRequest) (*AuthResponse, error) {
 		return nil, errs.ErrLoginFailed
 	}
 
-	token, err := s.generateToken(user.ID)
+	token, err := s.generateToken(user.ID, user.Username)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -207,13 +207,14 @@ func (s *AuthService) IsTokenBlacklisted(jti string) (bool, error) {
 	return s.jwtBlacklistRepo.Exists(jti)
 }
 
-func (s *AuthService) generateToken(userID string) (string, error) {
+func (s *AuthService) generateToken(userID, username string) (string, error) {
 	jti := uuid.New().String()
 	claims := jwt.MapClaims{
-		"sub": userID,
-		"jti": jti,
-		"iat": time.Now().Unix(),
-		"exp": time.Now().Add(time.Duration(s.cfg.JWT.ExpireHours) * time.Hour).Unix(),
+		"sub":      userID,
+		"username": username,
+		"jti":      jti,
+		"iat":      time.Now().Unix(),
+		"exp":      time.Now().Add(time.Duration(s.cfg.JWT.ExpireHours) * time.Hour).Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

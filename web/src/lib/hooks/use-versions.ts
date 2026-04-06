@@ -48,13 +48,19 @@ export function useCreateVersion(projectId: string) {
   });
 }
 
-export function useUpdateVersion(vid: string) {
+export function useUpdateVersion(vid: string, projectId?: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: Parameters<typeof versionApi.update>[1]) =>
       versionApi.update(vid, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["versions", vid] });
+      if (projectId) {
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "versions"],
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
 }
@@ -71,13 +77,19 @@ export function useDeleteVersion(projectId: string) {
   });
 }
 
-export function useShipVersion(vid: string) {
+export function useShipVersion(vid: string, projectId?: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => versionApi.ship(vid),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["versions", vid] });
       queryClient.invalidateQueries({ queryKey: ["versions", vid, "ship-check"] });
+      if (projectId) {
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "versions"],
+        });
+      }
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
 }
