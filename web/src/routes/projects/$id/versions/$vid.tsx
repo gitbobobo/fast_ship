@@ -1,5 +1,5 @@
 import { useParams, useNavigate, Link } from "react-router";
-import { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Rocket,
   Upload,
@@ -55,6 +55,7 @@ import {
   useVersion,
   useUpdateVersion,
   useDeleteVersion,
+  useShipCheck,
   useShipVersion,
 } from "@/lib/hooks/use-versions";
 import { useUploadArtifact, useDeleteArtifact } from "@/lib/hooks/use-artifacts";
@@ -65,10 +66,21 @@ import { toast } from "sonner";
 export default function VersionDetailPage() {
   const { id, vid } = useParams();
   const navigate = useNavigate();
-  const { data: version, isLoading } = useVersion(vid!);
+  const {
+    data: version,
+    isLoading,
+    refetch: refetchVersion,
+  } = useVersion(vid!);
   const updateVersion = useUpdateVersion(vid!);
   const deleteVersion = useDeleteVersion(id!);
   const shipVersion = useShipVersion(vid!);
+  const [shipDialogOpen, setShipDialogOpen] = useState(false);
+  const [shouldPollShip, setShouldPollShip] = useState(false);
+  const {
+    data: shipCheck,
+    isLoading: shipCheckLoading,
+    refetch: refetchShipCheck,
+  } = useShipCheck(vid!, shipDialogOpen);
   const uploadArtifact = useUploadArtifact(vid!);
   const deleteArtifact = useDeleteArtifact(vid!);
 
@@ -77,11 +89,39 @@ export default function VersionDetailPage() {
   const [editingCommitish, setEditingCommitish] = useState(false);
   const [commitish, setCommitish] = useState("");
   const [uploadPlatform, setUploadPlatform] = useState("");
-  const [shipDialogOpen, setShipDialogOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isPending = version?.status === "pending";
+  const isShipping =
+    shipVersion.isPending || version?.ship_status === "in_progress";
+  const isEditable = isPending && !isShipping;
   const artifacts = version?.artifacts ?? [];
+
+  useEffect(() => {
+    if (!vid) return;
+
+    if (version?.ship_status === "in_progress") {
+      setShouldPollShip(true);
+    }
+  }, [vid, version?.ship_status]);
+
+  useEffect(() => {
+    if (!shouldPollShip || !vid) return;
+
+    const timer = window.setInterval(() => {
+      void refetchVersion();
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [refetchVersion, shouldPollShip, vid]);
+
+  useEffect(() => {
+    if (!shouldPollShip) return;
+
+    if (version?.ship_status && version.ship_status !== "in_progress") {
+      setShouldPollShip(false);
+    }
+  }, [shouldPollShip, version?.ship_status]);
 
   const handleSaveNotes = async () => {
     try {
@@ -143,24 +183,54 @@ export default function VersionDetailPage() {
   };
 
   const handleShip = async () => {
+    const checkResult = await refetchShipCheck();
+    if (!checkResult.data?.can_ship) {
+      toast.error("发货校验未通过");
+      return;
+    }
+
     setShipDialogOpen(false);
+    setShouldPollShip(true);
     try {
       await shipVersion.mutateAsync();
       toast.success("发货成功！");
     } catch {
       toast.error("发货失败，请查看错误日志");
+    } finally {
+      await refetchVersion();
     }
   };
 
-  // 发货前校验
-  const shipChecks = version
-    ? [
-        { label: "Release 说明", ok: !!version.release_notes },
-        { label: "安装包", ok: artifacts.length > 0 },
-        { label: "目标分支 / Commit", ok: !!version.target_commitish },
-      ]
-    : [];
-  const canShip = shipChecks.every((c) => c.ok);
+  const shipChecks = shipCheck?.items ?? [];
+  const canShip = shipCheck?.can_ship ?? false;
+  const shipSteps = [
+    { key: "precheck", label: "发货前校验" },
+    { key: "create_tag", label: "创建 Git Tag" },
+    { key: "create_release", label: "创建 GitHub Release" },
+    { key: "upload_assets", label: "上传安装包" },
+    { key: "finalize", label: "更新版本状态" },
+  ] as const;
+
+  const currentShipStepIndex = shipSteps.findIndex(
+    (step) => step.key === version?.ship_stage,
+  );
+
+  const getShipStepState = (index: number) => {
+    if (version?.status === "shipped" || version?.ship_status === "completed") {
+      return "done";
+    }
+    if (version?.ship_status === "failed") {
+      if (index < currentShipStepIndex) return "done";
+      if (index === currentShipStepIndex) return "failed";
+      return "todo";
+    }
+    if (version?.ship_status === "in_progress") {
+      if (index < currentShipStepIndex) return "done";
+      if (index === currentShipStepIndex) return "doing";
+      return "todo";
+    }
+    return "todo";
+  };
 
   if (isLoading) {
     return (
@@ -207,7 +277,7 @@ export default function VersionDetailPage() {
             </Badge>
           </div>
           <div className="flex gap-2">
-            {isPending && (
+            {isEditable && (
               <AlertDialog>
                 <AlertDialogTrigger render={<Button variant="outline" size="sm" />}>
                     <Trash2 className="mr-1.5 h-3.5 w-3.5" />
@@ -287,7 +357,7 @@ export default function VersionDetailPage() {
               ) : (
                 <span>
                   {version.target_commitish || "未设置"}
-                  {isPending && (
+                  {isEditable && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -320,7 +390,7 @@ export default function VersionDetailPage() {
         <Card>
           <CardHeader className="flex-row items-center justify-between space-y-0">
             <CardTitle className="text-base">Release 说明</CardTitle>
-            {isPending && !editingNotes && (
+            {isEditable && !editingNotes && (
               <Button
                 variant="outline"
                 size="sm"
@@ -400,7 +470,7 @@ export default function VersionDetailPage() {
                 </span>
               )}
             </CardTitle>
-            {isPending && (
+            {isEditable && (
               <>
                 <Button
                   variant="outline"
@@ -422,7 +492,7 @@ export default function VersionDetailPage() {
             )}
           </CardHeader>
           <CardContent>
-            {isPending && (
+            {isEditable && (
               <div className="mb-4 flex flex-col gap-2 sm:max-w-xs">
                 <span className="text-sm text-muted-foreground">
                   平台标识（可选）
@@ -469,7 +539,7 @@ export default function VersionDetailPage() {
                           }>
                               <Download className="h-4 w-4" />
                           </Button>
-                          {isPending && (
+                          {isEditable && (
                             <AlertDialog>
                               <AlertDialogTrigger render={<Button variant="ghost" size="sm" />}>
                                   <Trash2 className="h-4 w-4" />
@@ -509,6 +579,55 @@ export default function VersionDetailPage() {
           </CardContent>
         </Card>
 
+        {/* 发货进度 */}
+        {isPending &&
+          (isShipping ||
+            version.ship_status === "failed" ||
+            version.ship_status === "completed") && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">发货进度</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {shipSteps.map((step, index) => {
+                  const state = getShipStepState(index);
+                  return (
+                    <div
+                      key={step.key}
+                      className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
+                    >
+                      <span>{step.label}</span>
+                      <span
+                        className={
+                          state === "done"
+                            ? "text-emerald-600"
+                            : state === "doing"
+                              ? "text-amber-600"
+                              : state === "failed"
+                                ? "text-destructive"
+                                : "text-muted-foreground"
+                        }
+                      >
+                        {state === "done"
+                          ? "已完成"
+                          : state === "doing"
+                            ? "进行中"
+                            : state === "failed"
+                              ? "失败"
+                              : "等待中"}
+                      </span>
+                    </div>
+                  );
+                })}
+                {version.ship_message && (
+                  <p className="text-sm text-muted-foreground">
+                    {version.ship_message}
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
         {/* 错误日志 */}
         {version.error_log && (
           <Card className="border-destructive/50">
@@ -531,10 +650,10 @@ export default function VersionDetailPage() {
             <Button
               size="lg"
               onClick={() => setShipDialogOpen(true)}
-              disabled={shipVersion.isPending}
+              disabled={isShipping}
             >
               <Rocket className="mr-2 h-4 w-4" />
-              {shipVersion.isPending ? "发货中..." : "发货到 GitHub"}
+              {isShipping ? "发货中..." : "发货到 GitHub"}
             </Button>
           </div>
         )}
@@ -549,14 +668,28 @@ export default function VersionDetailPage() {
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-2 py-2">
-              {shipChecks.map((check) => (
-                <div key={check.label} className="flex items-center gap-2 text-sm">
-                  <span>{check.ok ? "✅" : "❌"}</span>
-                  <span className={check.ok ? "" : "text-destructive"}>
-                    {check.label}
-                  </span>
-                </div>
-              ))}
+              {shipCheckLoading ? (
+                <p className="text-sm text-muted-foreground">正在校验发货条件...</p>
+              ) : (
+                shipChecks.map((check) => (
+                  <div
+                    key={check.key}
+                    className="flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
+                  >
+                    <span>{check.ok ? "✅" : "❌"}</span>
+                    <div className="space-y-0.5">
+                      <p className={check.ok ? "" : "text-destructive"}>
+                        {check.label}
+                      </p>
+                      {!check.ok && check.detail && (
+                        <p className="text-xs text-muted-foreground">
+                          {check.detail}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
             {!canShip && (
               <p className="text-sm text-destructive">
@@ -567,10 +700,14 @@ export default function VersionDetailPage() {
               <Button
                 variant="outline"
                 onClick={() => setShipDialogOpen(false)}
+                disabled={shipVersion.isPending}
               >
                 取消
               </Button>
-              <Button onClick={handleShip} disabled={!canShip}>
+              <Button
+                onClick={handleShip}
+                disabled={!canShip || shipCheckLoading || shipVersion.isPending}
+              >
                 <Rocket className="mr-2 h-4 w-4" />
                 确认发货
               </Button>

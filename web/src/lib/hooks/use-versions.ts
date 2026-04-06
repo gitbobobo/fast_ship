@@ -23,6 +23,18 @@ export function useVersion(vid: string) {
   });
 }
 
+export function useShipCheck(vid: string, enabled = true) {
+  return useQuery({
+    queryKey: ["versions", vid, "ship-check"],
+    queryFn: async () => {
+      const res = await versionApi.shipCheck(vid);
+      return res.data;
+    },
+    enabled: !!vid && enabled,
+    retry: false,
+  });
+}
+
 export function useCreateVersion(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
@@ -65,6 +77,7 @@ export function useShipVersion(vid: string) {
     mutationFn: () => versionApi.ship(vid),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["versions", vid] });
+      queryClient.invalidateQueries({ queryKey: ["versions", vid, "ship-check"] });
     },
   });
 }

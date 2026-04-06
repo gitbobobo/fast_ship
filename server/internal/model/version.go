@@ -9,6 +9,25 @@ const (
 	VersionStatusShipped VersionStatus = "shipped"
 )
 
+type ShipStatus string
+
+const (
+	ShipStatusIdle       ShipStatus = ""
+	ShipStatusInProgress ShipStatus = "in_progress"
+	ShipStatusFailed     ShipStatus = "failed"
+	ShipStatusCompleted  ShipStatus = "completed"
+)
+
+type ShipStage string
+
+const (
+	ShipStagePreCheck      ShipStage = "precheck"
+	ShipStageCreateTag     ShipStage = "create_tag"
+	ShipStageCreateRelease ShipStage = "create_release"
+	ShipStageUploadAssets  ShipStage = "upload_assets"
+	ShipStageFinalize      ShipStage = "finalize"
+)
+
 type Version struct {
 	ID               string        `gorm:"type:text;primaryKey" json:"id"`
 	ProjectID        string        `gorm:"type:text;not null;index" json:"project_id"`
@@ -18,6 +37,9 @@ type Version struct {
 	TargetCommitish  string        `gorm:"type:text" json:"target_commitish"`
 	GithubReleaseURL string        `gorm:"type:text" json:"github_release_url"`
 	ErrorLog         string        `gorm:"type:text" json:"error_log"`
+	ShipStatus       ShipStatus    `gorm:"type:text" json:"ship_status"`
+	ShipStage        ShipStage     `gorm:"type:text" json:"ship_stage"`
+	ShipMessage      string        `gorm:"type:text" json:"ship_message"`
 	CreatedAt        time.Time     `gorm:"not null" json:"created_at"`
 	ShippedAt        *time.Time    `json:"shipped_at"`
 

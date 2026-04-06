@@ -115,3 +115,16 @@ func (h *VersionHandler) Ship(c *gin.Context) {
 
 	response.Success(c, nil)
 }
+
+func (h *VersionHandler) ShipCheck(c *gin.Context) {
+	vid := c.Param("vid")
+	userID := middleware.GetUserID(c)
+
+	result, err := h.shipService.Check(vid, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}

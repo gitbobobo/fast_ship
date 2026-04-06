@@ -27,6 +27,11 @@ func NewClient(token, owner, repo string) *Client {
 	}
 }
 
+func (c *Client) ValidateRepository(ctx context.Context) error {
+	_, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
+	return err
+}
+
 // CreateTag 创建 Git Tag（如果不存在）
 func (c *Client) CreateTag(ctx context.Context, tag, commitish string) error {
 	// 检查 tag 是否已存在

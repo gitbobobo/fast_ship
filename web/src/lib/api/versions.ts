@@ -26,6 +26,9 @@ export const versionApi = {
   get: (vid: string) =>
     api.get(`versions/${vid}`).json<ApiResponse<Version>>(),
 
+  shipCheck: (vid: string) =>
+    api.get(`versions/${vid}/ship-check`).json<ApiResponse<ShipCheck>>(),
+
   create: (projectId: string, data: CreateVersionRequest) =>
     api
       .post(`projects/${projectId}/versions`, { json: data })

@@ -69,6 +69,7 @@ func Setup(
 
 		// JWT 必须 — 版本删除和发货
 		api.DELETE("/versions/:vid", middleware.RequireJWT(cfg, authService), versionHandler.Delete)
+		api.GET("/versions/:vid/ship-check", middleware.RequireJWT(cfg, authService), versionHandler.ShipCheck)
 		api.POST("/versions/:vid/ship", middleware.RequireJWT(cfg, authService), versionHandler.Ship)
 
 		// JWT / API Key 均可 — 版本读写

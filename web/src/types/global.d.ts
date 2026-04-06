@@ -34,9 +34,30 @@ interface Version {
   target_commitish: string | null;
   github_release_url: string | null;
   error_log: string | null;
+  ship_status: "" | "in_progress" | "failed" | "completed";
+  ship_stage:
+    | ""
+    | "precheck"
+    | "create_tag"
+    | "create_release"
+    | "upload_assets"
+    | "finalize";
+  ship_message: string | null;
   created_at: string;
   shipped_at: string | null;
   artifacts?: Artifact[];
+}
+
+interface ShipCheckItem {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail?: string;
+}
+
+interface ShipCheck {
+  can_ship: boolean;
+  items: ShipCheckItem[];
 }
 
 interface Artifact {
