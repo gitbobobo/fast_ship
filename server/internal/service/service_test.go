@@ -8,6 +8,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
@@ -20,6 +21,7 @@ import (
 type testServices struct {
 	db              *gorm.DB
 	storage         storage.Storage
+	cfg             *config.Config
 	projectRepo     *repository.ProjectRepository
 	versionRepo     *repository.VersionRepository
 	artifactRepo    *repository.ArtifactRepository
@@ -67,6 +69,7 @@ func setupTestServices(t *testing.T) *testServices {
 	return &testServices{
 		db:              db,
 		storage:         fileStorage,
+		cfg:             cfg,
 		projectRepo:     projectRepo,
 		versionRepo:     versionRepo,
 		artifactRepo:    artifactRepo,
@@ -100,6 +103,16 @@ func createTestProject(t *testing.T, db *gorm.DB, userID string, opts ...func(*m
 	}
 
 	return project
+}
+
+func encryptTestToken(t *testing.T, cfg *config.Config, plaintext string) []byte {
+	t.Helper()
+
+	encrypted, err := crypto.Encrypt([]byte(plaintext), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt github token: %v", err)
+	}
+	return encrypted
 }
 
 func createTestUser(t *testing.T, db *gorm.DB, userID string) *model.User {

@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -39,6 +40,9 @@ func (c *Client) CreateTag(ctx context.Context, tag, commitish string) error {
 	if err == nil {
 		return nil // tag 已存在，跳过
 	}
+	if !isNotFound(err) {
+		return err
+	}
 
 	ref := &gh.Reference{
 		Ref:    ptr("refs/tags/" + tag),
@@ -55,6 +59,9 @@ func (c *Client) CreateRelease(ctx context.Context, tag, name, body string) (*gh
 	if err == nil {
 		return release, nil
 	}
+	if !isNotFound(err) {
+		return nil, err
+	}
 
 	rel := &gh.RepositoryRelease{
 		TagName: ptr(tag),
@@ -69,12 +76,15 @@ func (c *Client) CreateRelease(ctx context.Context, tag, name, body string) (*gh
 func (c *Client) UploadAsset(ctx context.Context, releaseID int64, filename string, file *os.File) error {
 	// 先检查是否有同名 asset，有则删除
 	assets, _, err := c.client.Repositories.ListReleaseAssets(ctx, c.owner, c.repo, releaseID, nil)
-	if err == nil {
-		for _, asset := range assets {
-			if asset.GetName() == filename {
-				_, _ = c.client.Repositories.DeleteReleaseAsset(ctx, c.owner, c.repo, asset.GetID())
-				break
+	if err != nil {
+		return fmt.Errorf("list release assets failed: %w", err)
+	}
+	for _, asset := range assets {
+		if asset.GetName() == filename {
+			if _, err := c.client.Repositories.DeleteReleaseAsset(ctx, c.owner, c.repo, asset.GetID()); err != nil {
+				return fmt.Errorf("delete existing asset %s failed: %w", filename, err)
 			}
+			break
 		}
 	}
 
@@ -84,4 +94,9 @@ func (c *Client) UploadAsset(ctx context.Context, releaseID int64, filename stri
 		return fmt.Errorf("upload asset %s failed: %w", filename, err)
 	}
 	return nil
+}
+
+func isNotFound(err error) bool {
+	var errResp *gh.ErrorResponse
+	return errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == 404
 }

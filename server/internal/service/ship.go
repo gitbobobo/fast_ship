@@ -15,9 +15,19 @@ import (
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
+	gh "github.com/google/go-github/v62/github"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
+
+type gitHubClient interface {
+	ValidateRepository(ctx context.Context) error
+	CreateTag(ctx context.Context, tag, commitish string) error
+	CreateRelease(ctx context.Context, tag, name, body string) (*gh.RepositoryRelease, error)
+	UploadAsset(ctx context.Context, releaseID int64, filename string, file *os.File) error
+}
+
+type gitHubClientFactory func(token, owner, repo string) gitHubClient
 
 type ShipService struct {
 	versionRepo  *repository.VersionRepository
@@ -26,6 +36,7 @@ type ShipService struct {
 	storage      storage.Storage
 	cfg          *config.Config
 	logger       *zap.Logger
+	newClient    gitHubClientFactory
 }
 
 type ShipCheckItem struct {
@@ -55,6 +66,9 @@ func NewShipService(
 		storage:      storage,
 		cfg:          cfg,
 		logger:       logger,
+		newClient: func(token, owner, repo string) gitHubClient {
+			return ghclient.NewClient(token, owner, repo)
+		},
 	}
 }
 
@@ -107,7 +121,7 @@ func (s *ShipService) Ship(versionID, userID string) error {
 		return appErr
 	}
 
-	gh := ghclient.NewClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+	gh := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 	ctx := context.Background()
 
 	// 创建 Tag
@@ -265,7 +279,7 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 			githubItem.OK = false
 			githubItem.Detail = err.Message
 		} else {
-			gh := ghclient.NewClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+			gh := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 			if err := gh.ValidateRepository(ctx); err != nil {
 				githubItem.OK = false
 				githubItem.Detail = "无法访问 GitHub 仓库或 Token 无效"
