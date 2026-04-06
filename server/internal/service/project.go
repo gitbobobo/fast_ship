@@ -7,6 +7,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -14,11 +15,23 @@ import (
 
 type ProjectService struct {
 	projectRepo *repository.ProjectRepository
+	versionRepo *repository.VersionRepository
+	storage     storage.Storage
 	cfg         *config.Config
 }
 
-func NewProjectService(projectRepo *repository.ProjectRepository, cfg *config.Config) *ProjectService {
-	return &ProjectService{projectRepo: projectRepo, cfg: cfg}
+func NewProjectService(
+	projectRepo *repository.ProjectRepository,
+	versionRepo *repository.VersionRepository,
+	storage storage.Storage,
+	cfg *config.Config,
+) *ProjectService {
+	return &ProjectService{
+		projectRepo: projectRepo,
+		versionRepo: versionRepo,
+		storage:     storage,
+		cfg:         cfg,
+	}
 }
 
 type CreateProjectRequest struct {
@@ -38,13 +51,21 @@ type UpdateProjectRequest struct {
 }
 
 type ProjectResponse struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	GithubOwner string `json:"github_owner"`
-	GithubRepo  string `json:"github_repo"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	ID            string                 `json:"id"`
+	Name          string                 `json:"name"`
+	Description   string                 `json:"description"`
+	GithubOwner   string                 `json:"github_owner"`
+	GithubRepo    string                 `json:"github_repo"`
+	LatestVersion *LatestVersionResponse `json:"latest_version,omitempty"`
+	CreatedAt     string                 `json:"created_at"`
+	UpdatedAt     string                 `json:"updated_at"`
+}
+
+type LatestVersionResponse struct {
+	ID            string              `json:"id"`
+	VersionNumber string              `json:"version_number"`
+	Status        model.VersionStatus `json:"status"`
+	CreatedAt     string              `json:"created_at"`
 }
 
 func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*ProjectResponse, error) {
@@ -97,7 +118,20 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 
 	resp := make([]ProjectResponse, len(projects))
 	for i, p := range projects {
-		resp[i] = *s.toResponse(&p)
+		projectResp := s.toResponse(&p)
+		latest, err := s.versionRepo.GetLatestByProjectID(p.ID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, 0, errs.ErrInternal
+		}
+		if err == nil {
+			projectResp.LatestVersion = &LatestVersionResponse{
+				ID:            latest.ID,
+				VersionNumber: latest.VersionNumber,
+				Status:        latest.Status,
+				CreatedAt:     latest.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			}
+		}
+		resp[i] = *projectResp
 	}
 	return resp, total, nil
 }
@@ -146,14 +180,20 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 }
 
 func (s *ProjectService) Delete(id, userID string) error {
-	_, err := s.projectRepo.FindByID(id, userID)
+	project, err := s.projectRepo.FindByID(id, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errs.ErrProjectNotFound
 		}
 		return errs.ErrInternal
 	}
-	return s.projectRepo.Delete(id, userID)
+
+	if err := s.projectRepo.Delete(id, userID); err != nil {
+		return errs.ErrInternal
+	}
+
+	_ = s.storage.DeletePrefix(project.ID)
+	return nil
 }
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {

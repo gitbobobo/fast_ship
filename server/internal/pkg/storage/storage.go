@@ -8,6 +8,8 @@ type Storage interface {
 	Save(path string, reader io.Reader) error
 	// Delete 删除文件
 	Delete(path string) error
+	// DeletePrefix 删除指定前缀下的所有文件
+	DeletePrefix(path string) error
 	// Get 获取文件读取器
 	Get(path string) (io.ReadCloser, error)
 	// Exists 检查文件是否存在

@@ -36,6 +36,11 @@ func (s *LocalStorage) Delete(path string) error {
 	return os.Remove(fullPath)
 }
 
+func (s *LocalStorage) DeletePrefix(path string) error {
+	fullPath := filepath.Join(s.basePath, path)
+	return os.RemoveAll(fullPath)
+}
+
 func (s *LocalStorage) Get(path string) (io.ReadCloser, error) {
 	fullPath := filepath.Join(s.basePath, path)
 	return os.Open(fullPath)

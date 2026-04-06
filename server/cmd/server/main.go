@@ -92,7 +92,7 @@ func main() {
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
-	projectService := service.NewProjectService(projectRepo, cfg)
+	projectService := service.NewProjectService(projectRepo, versionRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
