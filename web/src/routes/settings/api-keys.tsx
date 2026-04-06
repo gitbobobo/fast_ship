@@ -129,6 +129,7 @@ export default function ApiKeysPage() {
                       <Button
                         variant="ghost"
                         size="sm"
+                        aria-label="复制 API Key"
                         onClick={() => handleCopy(createdKey)}
                       >
                         <Copy className="h-4 w-4" />
@@ -216,7 +217,15 @@ export default function ApiKeysPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <AlertDialog>
-                          <AlertDialogTrigger render={<Button variant="ghost" size="sm" />}>
+                          <AlertDialogTrigger
+                            render={
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                aria-label={`删除 API Key ${key.name}`}
+                              />
+                            }
+                          >
                               <Trash2 className="h-4 w-4" />
                         </AlertDialogTrigger>
                           <AlertDialogContent>
