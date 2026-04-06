@@ -50,8 +50,9 @@ func (h *ArtifactHandler) Delete(c *gin.Context) {
 
 func (h *ArtifactHandler) Download(c *gin.Context) {
 	aid := c.Param("aid")
+	userID := middleware.GetUserID(c)
 
-	reader, fileName, err := h.artifactService.Download(aid)
+	reader, fileName, err := h.artifactService.Download(aid, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

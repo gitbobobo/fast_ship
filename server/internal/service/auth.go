@@ -1,8 +1,8 @@
 package service
 
 import (
-	"crypto/sha256"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -54,8 +54,9 @@ type UpdatePasswordRequest struct {
 	NewPassword string `json:"new_password" binding:"required,min=8"`
 }
 
-type TokenResponse struct {
-	Token string `json:"token"`
+type AuthResponse struct {
+	Token string       `json:"token"`
+	User  UserResponse `json:"user"`
 }
 
 type UserResponse struct {
@@ -63,9 +64,10 @@ type UserResponse struct {
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
 	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func (s *AuthService) Register(req *RegisterRequest) (*UserResponse, error) {
+func (s *AuthService) Register(req *RegisterRequest) (*AuthResponse, error) {
 	exists, err := s.userRepo.ExistsByUsername(req.Username)
 	if err != nil {
 		return nil, errs.ErrInternal
@@ -98,15 +100,18 @@ func (s *AuthService) Register(req *RegisterRequest) (*UserResponse, error) {
 		return nil, errs.ErrInternal
 	}
 
-	return &UserResponse{
-		ID:        user.ID,
-		Username:  user.Username,
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt,
+	token, err := s.generateToken(user.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	return &AuthResponse{
+		Token: token,
+		User:  s.toUserResponse(user),
 	}, nil
 }
 
-func (s *AuthService) Login(req *LoginRequest) (*TokenResponse, error) {
+func (s *AuthService) Login(req *LoginRequest) (*AuthResponse, error) {
 	user, err := s.userRepo.FindByUsernameOrEmail(req.Login)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -124,7 +129,10 @@ func (s *AuthService) Login(req *LoginRequest) (*TokenResponse, error) {
 		return nil, errs.ErrInternal
 	}
 
-	return &TokenResponse{Token: token}, nil
+	return &AuthResponse{
+		Token: token,
+		User:  s.toUserResponse(user),
+	}, nil
 }
 
 func (s *AuthService) Logout(jti string, exp time.Time) error {
@@ -136,12 +144,8 @@ func (s *AuthService) GetMe(userID string) (*UserResponse, error) {
 	if err != nil {
 		return nil, errs.ErrUserNotFound
 	}
-	return &UserResponse{
-		ID:        user.ID,
-		Username:  user.Username,
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt,
-	}, nil
+	resp := s.toUserResponse(user)
+	return &resp, nil
 }
 
 func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*UserResponse, error) {
@@ -176,12 +180,8 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 		return nil, errs.ErrInternal
 	}
 
-	return &UserResponse{
-		ID:        user.ID,
-		Username:  user.Username,
-		Email:     user.Email,
-		CreatedAt: user.CreatedAt,
-	}, nil
+	resp := s.toUserResponse(user)
+	return &resp, nil
 }
 
 func (s *AuthService) UpdatePassword(userID string, req *UpdatePasswordRequest) error {
@@ -218,6 +218,16 @@ func (s *AuthService) generateToken(userID string) (string, error) {
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(s.cfg.JWT.Secret))
+}
+
+func (s *AuthService) toUserResponse(user *model.User) UserResponse {
+	return UserResponse{
+		ID:        user.ID,
+		Username:  user.Username,
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	}
 }
 
 // GenerateApiKeyRaw 生成 API Key 原始值（Base62 编码的随机字节）

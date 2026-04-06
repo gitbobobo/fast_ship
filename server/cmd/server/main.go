@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
@@ -17,7 +18,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/router"
 	"github.com/godbobo/fast_ship/server/internal/service"
 	"go.uber.org/zap"
-	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -93,7 +93,7 @@ func main() {
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, cfg)
-	versionService := service.NewVersionService(versionRepo, projectRepo, artifactRepo)
+	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
 

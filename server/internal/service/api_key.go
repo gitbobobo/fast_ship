@@ -21,7 +21,7 @@ type CreateApiKeyRequest struct {
 
 type ApiKeyResponse struct {
 	model.ApiKey
-	FullKey string `json:"full_key,omitempty"`
+	Key string `json:"key,omitempty"`
 }
 
 func (s *ApiKeyService) Create(userID string, req *CreateApiKeyRequest) (*ApiKeyResponse, error) {
@@ -47,8 +47,8 @@ func (s *ApiKeyService) Create(userID string, req *CreateApiKeyRequest) (*ApiKey
 	}
 
 	return &ApiKeyResponse{
-		ApiKey:  *apiKey,
-		FullKey: fullKey,
+		ApiKey: *apiKey,
+		Key:    fullKey,
 	}, nil
 }
 

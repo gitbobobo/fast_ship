@@ -41,7 +41,8 @@ func (h *VersionHandler) Create(c *gin.Context) {
 
 func (h *VersionHandler) Get(c *gin.Context) {
 	vid := c.Param("vid")
-	result, err := h.versionService.Get(vid)
+	userID := middleware.GetUserID(c)
+	result, err := h.versionService.Get(vid, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

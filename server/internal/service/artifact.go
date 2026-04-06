@@ -59,6 +59,24 @@ func (s *ArtifactService) Upload(versionID, userID, fileName string, fileSize in
 		return nil, errs.ErrInternal
 	}
 
+	now := time.Now()
+	existing, err := s.artifactRepo.FindByVersionIDAndFileName(versionID, fileName)
+	if err == nil {
+		existing.FileSize = fileSize
+		existing.Platform = platform
+		existing.FilePath = storagePath
+		existing.UploadedAt = now
+
+		if err := s.artifactRepo.Update(existing); err != nil {
+			return nil, errs.ErrInternal
+		}
+
+		return existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errs.ErrInternal
+	}
+
 	artifact := &model.Artifact{
 		ID:         uuid.New().String(),
 		VersionID:  versionID,
@@ -66,7 +84,7 @@ func (s *ArtifactService) Upload(versionID, userID, fileName string, fileSize in
 		FileSize:   fileSize,
 		FilePath:   storagePath,
 		Platform:   platform,
-		UploadedAt: time.Now(),
+		UploadedAt: now,
 	}
 
 	if err := s.artifactRepo.Create(artifact); err != nil {
@@ -110,13 +128,25 @@ func (s *ArtifactService) Delete(id, userID string) error {
 	return nil
 }
 
-func (s *ArtifactService) Download(id string) (io.ReadCloser, string, error) {
+func (s *ArtifactService) Download(id, userID string) (io.ReadCloser, string, error) {
 	artifact, err := s.artifactRepo.FindByID(id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, "", errs.ErrArtifactNotFound
 		}
 		return nil, "", errs.ErrInternal
+	}
+
+	version, err := s.versionRepo.FindByID(artifact.VersionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", errs.ErrVersionNotFound
+		}
+		return nil, "", errs.ErrInternal
+	}
+
+	if _, err := s.projectRepo.FindByID(version.ProjectID, userID); err != nil {
+		return nil, "", errs.ErrNotOwner
 	}
 
 	reader, err := s.storage.Get(artifact.FilePath)

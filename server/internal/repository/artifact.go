@@ -26,10 +26,23 @@ func (r *ArtifactRepository) FindByID(id string) (*model.Artifact, error) {
 	return &artifact, nil
 }
 
+func (r *ArtifactRepository) FindByVersionIDAndFileName(versionID, fileName string) (*model.Artifact, error) {
+	var artifact model.Artifact
+	err := r.db.Where("version_id = ? AND file_name = ?", versionID, fileName).First(&artifact).Error
+	if err != nil {
+		return nil, err
+	}
+	return &artifact, nil
+}
+
 func (r *ArtifactRepository) ListByVersionID(versionID string) ([]model.Artifact, error) {
 	var artifacts []model.Artifact
 	err := r.db.Where("version_id = ?", versionID).Order("uploaded_at DESC").Find(&artifacts).Error
 	return artifacts, err
+}
+
+func (r *ArtifactRepository) Update(artifact *model.Artifact) error {
+	return r.db.Save(artifact).Error
 }
 
 func (r *ArtifactRepository) Delete(id string) error {

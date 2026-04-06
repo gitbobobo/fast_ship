@@ -5,22 +5,23 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 type VersionService struct {
-	versionRepo  *repository.VersionRepository
-	projectRepo  *repository.ProjectRepository
-	artifactRepo *repository.ArtifactRepository
+	versionRepo *repository.VersionRepository
+	projectRepo *repository.ProjectRepository
+	storage     storage.Storage
 }
 
-func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *repository.ProjectRepository, artifactRepo *repository.ArtifactRepository) *VersionService {
+func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *repository.ProjectRepository, storage storage.Storage) *VersionService {
 	return &VersionService{
-		versionRepo:  versionRepo,
-		projectRepo:  projectRepo,
-		artifactRepo: artifactRepo,
+		versionRepo: versionRepo,
+		projectRepo: projectRepo,
+		storage:     storage,
 	}
 }
 
@@ -69,7 +70,7 @@ func (s *VersionService) Create(projectID, userID string, req *CreateVersionRequ
 	return version, nil
 }
 
-func (s *VersionService) Get(id string) (*model.Version, error) {
+func (s *VersionService) Get(id, userID string) (*model.Version, error) {
 	version, err := s.versionRepo.FindByID(id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -77,6 +78,14 @@ func (s *VersionService) Get(id string) (*model.Version, error) {
 		}
 		return nil, errs.ErrInternal
 	}
+
+	if _, err := s.projectRepo.FindByID(version.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrNotOwner
+	}
+
 	return version, nil
 }
 
@@ -141,5 +150,13 @@ func (s *VersionService) Delete(id, userID string) error {
 		return errs.ErrNotOwner
 	}
 
-	return s.versionRepo.Delete(id)
+	if err := s.versionRepo.Delete(id); err != nil {
+		return errs.ErrInternal
+	}
+
+	for _, artifact := range version.Artifacts {
+		_ = s.storage.Delete(artifact.FilePath)
+	}
+
+	return nil
 }
