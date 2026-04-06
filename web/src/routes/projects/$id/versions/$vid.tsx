@@ -61,8 +61,19 @@ import {
 import { useUploadArtifact, useDeleteArtifact } from "@/lib/hooks/use-artifacts";
 import { artifactApi } from "@/lib/api/artifacts";
 import { formatDate, formatFileSize } from "@/lib/utils/format";
+import { cn } from "@/lib/utils";
 import { versionSchema } from "@/lib/utils/validators";
 import { toast } from "sonner";
+
+interface UploadProgressState {
+  currentFileName: string;
+  currentFileIndex: number;
+  totalFiles: number;
+  completedFiles: number;
+  failedFiles: number;
+  percent: number;
+  status: "uploading" | "completed" | "failed";
+}
 
 export default function VersionDetailPage() {
   const { id, vid } = useParams();
@@ -76,6 +87,8 @@ export default function VersionDetailPage() {
   const deleteVersion = useDeleteVersion(id!);
   const shipVersion = useShipVersion(vid!, id);
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
+  const [shipFailureDialogOpen, setShipFailureDialogOpen] = useState(false);
+  const [shipFailureMessage, setShipFailureMessage] = useState("");
   const [shouldPollShip, setShouldPollShip] = useState(false);
   const {
     data: shipCheck,
@@ -92,11 +105,16 @@ export default function VersionDetailPage() {
   const [editingCommitish, setEditingCommitish] = useState(false);
   const [commitish, setCommitish] = useState("");
   const [uploadPlatform, setUploadPlatform] = useState("");
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgressState | null>(
+    null,
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const isPending = version?.status === "pending";
   const isShipping =
     shipVersion.isPending || version?.ship_status === "in_progress";
+  const isUploading = uploadProgress?.status === "uploading";
   const isEditable = isPending && !isShipping;
   const artifacts = version?.artifacts ?? [];
 
@@ -162,24 +180,72 @@ export default function VersionDetailPage() {
     }
   };
 
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files?.length) return;
+  const handleUploadFiles = async (files: File[]) => {
+    if (!files.length || isUploading) return;
 
-    for (const file of Array.from(files)) {
+    let completedFiles = 0;
+    let failedFiles = 0;
+
+    for (const [index, file] of files.entries()) {
+      setUploadProgress({
+        currentFileName: file.name,
+        currentFileIndex: index + 1,
+        totalFiles: files.length,
+        completedFiles,
+        failedFiles,
+        percent: 0,
+        status: "uploading",
+      });
+
       const formData = new FormData();
       formData.append("file", file);
       if (uploadPlatform.trim()) {
         formData.append("platform", uploadPlatform.trim());
       }
+
       try {
-        await uploadArtifact.mutateAsync(formData);
+        await uploadArtifact.mutateAsync({
+          formData,
+          onProgress: (percent) => {
+            setUploadProgress((current) => {
+              if (!current) return current;
+              return {
+                ...current,
+                currentFileName: file.name,
+                currentFileIndex: index + 1,
+                percent,
+              };
+            });
+          },
+        });
+        completedFiles += 1;
         toast.success(`${file.name} 上传成功`);
       } catch {
+        failedFiles += 1;
         toast.error(`${file.name} 上传失败`);
       }
     }
-    if (fileInputRef.current) fileInputRef.current.value = "";
+
+    setUploadProgress({
+      currentFileName: files.at(-1)?.name || "",
+      currentFileIndex: files.length,
+      totalFiles: files.length,
+      completedFiles,
+      failedFiles,
+      percent: 100,
+      status: failedFiles > 0 ? "failed" : "completed",
+    });
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+
+    await handleUploadFiles(Array.from(files));
   };
 
   const handleDeleteArtifact = async (aid: string, name: string) => {
@@ -213,10 +279,16 @@ export default function VersionDetailPage() {
     try {
       await shipVersion.mutateAsync();
       toast.success("发货成功！");
-    } catch {
-      toast.error("发货失败，请查看错误日志");
-    } finally {
       await refetchVersion();
+    } catch {
+      const result = await refetchVersion();
+      const failureMessage =
+        result.data?.error_log ||
+        result.data?.ship_message ||
+        "发货失败，请修复后重试";
+      setShipFailureMessage(failureMessage);
+      setShipFailureDialogOpen(true);
+      toast.error("发货失败");
     }
   };
 
@@ -536,10 +608,10 @@ export default function VersionDetailPage() {
                   variant="outline"
                   size="sm"
                   onClick={() => fileInputRef.current?.click()}
-                  disabled={uploadArtifact.isPending}
+                  disabled={isUploading}
                 >
                   <Upload className="mr-1.5 h-3.5 w-3.5" />
-                  {uploadArtifact.isPending ? "上传中..." : "上传文件"}
+                  {isUploading ? "上传中..." : "上传文件"}
                 </Button>
                 <input
                   ref={fileInputRef}
@@ -547,13 +619,15 @@ export default function VersionDetailPage() {
                   multiple
                   className="hidden"
                   onChange={handleUpload}
+                  disabled={isUploading}
                 />
               </>
             )}
           </CardHeader>
           <CardContent>
             {isEditable && (
-              <div className="mb-4 flex flex-col gap-2 sm:max-w-xs">
+              <div className="mb-4 space-y-4">
+                <div className="flex flex-col gap-2 sm:max-w-xs">
                 <span className="text-sm text-muted-foreground">
                   平台标识（可选）
                 </span>
@@ -565,6 +639,92 @@ export default function VersionDetailPage() {
                 <p className="text-xs text-muted-foreground">
                   同名文件会按替换处理，并更新平台与大小信息
                 </p>
+                </div>
+                <div
+                  role="button"
+                  tabIndex={0}
+                  className={cn(
+                    "rounded-lg border border-dashed px-4 py-8 text-center transition-colors",
+                    isUploading
+                      ? "cursor-not-allowed border-muted-foreground/30 bg-muted/40"
+                      : isDragOver
+                        ? "border-primary bg-primary/5"
+                        : "border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/30",
+                  )}
+                  onClick={() => {
+                    if (isUploading) return;
+                    fileInputRef.current?.click();
+                  }}
+                  onKeyDown={(e) => {
+                    if (isUploading) return;
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      fileInputRef.current?.click();
+                    }
+                  }}
+                  onDragEnter={(e) => {
+                    e.preventDefault();
+                    if (!isUploading) setIsDragOver(true);
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    if (!isUploading) setIsDragOver(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    const nextTarget = e.relatedTarget;
+                    if (!e.currentTarget.contains(nextTarget as Node | null)) {
+                      setIsDragOver(false);
+                    }
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDragOver(false);
+                    if (isUploading) return;
+                    const droppedFiles = Array.from(e.dataTransfer.files || []);
+                    void handleUploadFiles(droppedFiles);
+                  }}
+                >
+                  <Upload className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
+                  <p className="text-sm font-medium">
+                    拖拽文件到这里，或点击选择安装包
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    支持多文件上传，上传期间会禁止重复提交
+                  </p>
+                </div>
+                {uploadProgress && (
+                  <div className="rounded-lg border px-4 py-3">
+                    <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">
+                          {uploadProgress.currentFileName}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {uploadProgress.status === "uploading"
+                            ? `正在上传第 ${uploadProgress.currentFileIndex}/${uploadProgress.totalFiles} 个文件`
+                            : uploadProgress.status === "completed"
+                              ? `上传完成，共 ${uploadProgress.completedFiles} 个文件`
+                              : `上传结束，成功 ${uploadProgress.completedFiles} 个，失败 ${uploadProgress.failedFiles} 个`}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-sm font-medium">
+                        {uploadProgress.percent}%
+                      </span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className={cn(
+                          "h-full transition-all",
+                          uploadProgress.status === "failed"
+                            ? "bg-destructive"
+                            : "bg-primary",
+                        )}
+                        style={{ width: `${uploadProgress.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {artifacts.length === 0 ? (
@@ -772,6 +932,31 @@ export default function VersionDetailPage() {
               >
                 <Rocket className="mr-2 h-4 w-4" />
                 确认发货
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          open={shipFailureDialogOpen}
+          onOpenChange={setShipFailureDialogOpen}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>发货失败</DialogTitle>
+              <DialogDescription>
+                GitHub 发货流程未完成，版本状态保持为待发货。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+              {shipFailureMessage}
+            </div>
+            <p className="text-sm text-muted-foreground">
+              请根据失败原因修复配置或重新上传安装包后，再次发货。
+            </p>
+            <DialogFooter>
+              <Button onClick={() => setShipFailureDialogOpen(false)}>
+                我知道了
               </Button>
             </DialogFooter>
           </DialogContent>
