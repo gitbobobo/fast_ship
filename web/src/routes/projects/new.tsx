@@ -115,54 +115,91 @@ export default function NewProjectPage() {
                       如何获取？
                       <ExternalLinkIcon className="size-3" />
                     </DialogTrigger>
-                    <DialogContent className="sm:max-w-md">
+                    <DialogContent className="sm:max-w-lg">
                       <DialogHeader>
                         <DialogTitle>如何获取 GitHub Access Token</DialogTitle>
                       </DialogHeader>
-                      <div className="space-y-4 text-sm">
-                        <div className="space-y-3">
-                          <p className="text-muted-foreground">
-                            需要创建一个具有 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">repo</code> 权限的 Personal Access Token（PAT），用于访问你的 GitHub 仓库。
+                      <div className="space-y-5 text-sm">
+                        {/* Fine-grained Token (Recommended) */}
+                        <div className="rounded-lg border border-green-200 bg-green-50/50 p-4 dark:border-green-900 dark:bg-green-950/20">
+                          <div className="mb-3 flex items-center gap-2">
+                            <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900 dark:text-green-200">
+                              推荐
+                            </span>
+                            <span className="font-semibold text-green-900 dark:text-green-200">
+                              Fine-grained personal access token
+                            </span>
+                          </div>
+                          <p className="mb-3 text-muted-foreground">
+                            权限更精细、更安全，仅授予特定仓库所需的权限。
                           </p>
-                          <ol className="space-y-2.5 text-foreground">
+                          <ol className="space-y-2 text-foreground">
                             <li className="flex gap-2">
-                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">1</span>
-                              <span>登录 GitHub，点击右上角头像，选择 <strong>Settings</strong></span>
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">1</span>
+                              <span>前往 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer" className="text-primary underline underline-offset-2 hover:no-underline">GitHub Token 创建页</a></span>
                             </li>
                             <li className="flex gap-2">
-                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">2</span>
-                              <span>在左侧菜单最底部，点击 <strong>Developer settings</strong></span>
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">2</span>
+                              <span>填写 Token name（如：FastShip）</span>
                             </li>
                             <li className="flex gap-2">
-                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">3</span>
-                              <span>选择 <strong>Personal access tokens</strong> → <strong>Tokens (classic)</strong></span>
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">3</span>
+                              <span>在 <strong>Repository access</strong> 中选择该 Token 可访问的仓库</span>
                             </li>
                             <li className="flex gap-2">
-                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">4</span>
-                              <span>点击 <strong>Generate new token</strong> → <strong>Generate new token (classic)</strong></span>
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">4</span>
+                              <span>在 <strong>Permissions</strong> → <strong>Repository permissions</strong> 中设置 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">Contents</code> 为 <strong>Read and write</strong></span>
                             </li>
                             <li className="flex gap-2">
-                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">5</span>
-                              <span>填写备注名称，在 <strong>Scopes</strong> 中勾选 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">repo</code> 权限</span>
-                            </li>
-                            <li className="flex gap-2">
-                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">6</span>
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">5</span>
                               <span>点击 <strong>Generate token</strong>，复制生成的 Token（仅显示一次）</span>
                             </li>
                           </ol>
                         </div>
+
+                        {/* Classic Token */}
+                        <div className="rounded-lg border border-border p-4">
+                          <div className="mb-3 flex items-center gap-2">
+                            <span className="inline-flex items-center rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              备选
+                            </span>
+                            <span className="font-semibold">Classic personal access token</span>
+                          </div>
+                          <p className="mb-3 text-muted-foreground">
+                            如果你需要访问多个仓库或组织仓库，可以使用 Classic Token。
+                          </p>
+                          <ol className="space-y-2 text-foreground">
+                            <li className="flex gap-2">
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">1</span>
+                              <span>前往 <strong>Settings</strong> → <strong>Developer settings</strong> → <strong>Personal access tokens</strong> → <strong>Tokens (classic)</strong></span>
+                            </li>
+                            <li className="flex gap-2">
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">2</span>
+                              <span>点击 <strong>Generate new token (classic)</strong></span>
+                            </li>
+                            <li className="flex gap-2">
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">3</span>
+                              <span>在 <strong>Scopes</strong> 中勾选 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">repo</code> 权限</span>
+                            </li>
+                            <li className="flex gap-2">
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">4</span>
+                              <span>点击 <strong>Generate token</strong>，复制生成的 Token</span>
+                            </li>
+                          </ol>
+                        </div>
+
                         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-400">
                           <p className="text-xs">Token 生成后只显示一次，请立即复制保存。如果遗失，需重新生成。</p>
                         </div>
                       </div>
-                      <DialogFooter showCloseButton>
+                      <DialogFooter>
                         <a
-                          href="https://github.com/settings/tokens/new"
+                          href="https://github.com/settings/personal-access-tokens/new"
                           target="_blank"
                           rel="noopener noreferrer"
                           className="inline-flex items-center gap-1.5 text-xs text-primary underline underline-offset-2 hover:no-underline"
                         >
-                          前往 GitHub 创建 Token
+                          前往 GitHub 创建 Fine-grained Token
                           <ExternalLinkIcon className="size-3" />
                         </a>
                       </DialogFooter>
@@ -172,7 +209,7 @@ export default function NewProjectPage() {
                 <Input
                   id="github_token"
                   type="password"
-                  placeholder="ghp_xxxxxxxxxxxx"
+                  placeholder="github_pat_xxx 或 ghp_xxx"
                   {...register("github_token")}
                 />
                 {errors.github_token && (
@@ -181,7 +218,7 @@ export default function NewProjectPage() {
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  需要 repo 权限的 Personal Access Token
+                  推荐 Fine-grained Token（前缀 github_pat_），权限更精细安全
                 </p>
               </div>
 
