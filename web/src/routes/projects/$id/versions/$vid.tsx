@@ -89,7 +89,6 @@ export default function VersionDetailPage() {
   const [shipDialogOpen, setShipDialogOpen] = useState(false);
   const [shipFailureDialogOpen, setShipFailureDialogOpen] = useState(false);
   const [shipFailureMessage, setShipFailureMessage] = useState("");
-  const [shouldPollShip, setShouldPollShip] = useState(false);
   const {
     data: shipCheck,
     isLoading: shipCheckLoading,
@@ -114,17 +113,10 @@ export default function VersionDetailPage() {
   const isPending = version?.status === "pending";
   const isShipping =
     shipVersion.isPending || version?.ship_status === "in_progress";
+  const shouldPollShip = Boolean(vid && isShipping);
   const isUploading = uploadProgress?.status === "uploading";
   const isEditable = isPending && !isShipping;
   const artifacts = version?.artifacts ?? [];
-
-  useEffect(() => {
-    if (!vid) return;
-
-    if (version?.ship_status === "in_progress") {
-      setShouldPollShip(true);
-    }
-  }, [vid, version?.ship_status]);
 
   useEffect(() => {
     if (!shouldPollShip || !vid) return;
@@ -135,14 +127,6 @@ export default function VersionDetailPage() {
 
     return () => window.clearInterval(timer);
   }, [refetchVersion, shouldPollShip, vid]);
-
-  useEffect(() => {
-    if (!shouldPollShip) return;
-
-    if (version?.ship_status && version.ship_status !== "in_progress") {
-      setShouldPollShip(false);
-    }
-  }, [shouldPollShip, version?.ship_status]);
 
   const handleSaveNotes = async () => {
     try {
@@ -275,7 +259,6 @@ export default function VersionDetailPage() {
     }
 
     setShipDialogOpen(false);
-    setShouldPollShip(true);
     try {
       await shipVersion.mutateAsync();
       toast.success("发货成功！");

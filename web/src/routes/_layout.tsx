@@ -6,17 +6,19 @@ import { useAuthStore } from "@/lib/store/auth-store";
 
 export default function AppLayout() {
   const { token, user, setUser, logout } = useAuthStore();
-  const [bootstrapping, setBootstrapping] = useState(false);
+  const shouldBootstrapUser = Boolean(token && !user);
+  const [hasBootstrappedUser, setHasBootstrappedUser] = useState(
+    () => !shouldBootstrapUser,
+  );
+  const isBootstrapping = shouldBootstrapUser && !hasBootstrappedUser;
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!token || user) {
-      setBootstrapping(false);
+    if (!shouldBootstrapUser) {
       return;
     }
 
-    setBootstrapping(true);
     authApi
       .me()
       .then((res) => {
@@ -31,20 +33,20 @@ export default function AppLayout() {
       })
       .finally(() => {
         if (!cancelled) {
-          setBootstrapping(false);
+          setHasBootstrappedUser(true);
         }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [logout, setUser, token, user]);
+  }, [logout, setUser, shouldBootstrapUser]);
 
   if (!token) {
     return <Navigate to="/login" replace />;
   }
 
-  if (bootstrapping) {
+  if (isBootstrapping) {
     return <div className="flex min-h-dvh items-center justify-center text-sm text-muted-foreground">加载用户信息中...</div>;
   }
 
