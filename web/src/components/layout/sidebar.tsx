@@ -6,9 +6,11 @@ import {
   LogOut,
   Rocket,
   Menu,
+  User,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { authApi } from "@/lib/api/auth";
 import { useState } from "react";
@@ -60,17 +62,24 @@ function NavContent({ onNavigate }: { onNavigate?: () => void }) {
         ))}
       </nav>
       <Separator />
-      <div className="p-3">
-        <div className="mb-2 px-3 text-xs text-muted-foreground truncate">
-          {user?.username ?? ""}
+      <div className="p-2">
+        <div className="flex items-center gap-2 rounded-md px-2 py-1.5">
+          <Avatar className="size-6">
+            <AvatarFallback className="bg-muted">
+              <User className="h-3 w-3" />
+            </AvatarFallback>
+          </Avatar>
+          <span className="flex-1 text-sm font-medium text-foreground truncate">
+            {user?.username ?? ""}
+          </span>
+          <button
+            onClick={handleLogout}
+            className="flex items-center justify-center rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            title="退出登录"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+          </button>
         </div>
-        <button
-          onClick={handleLogout}
-          className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        >
-          <LogOut className="h-4 w-4" />
-          退出登录
-        </button>
       </div>
     </div>
   );
