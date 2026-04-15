@@ -13,5 +13,5 @@ WORKDIR /app
 RUN mkdir -p /app/data
 COPY --from=builder /build/fast_ship .
 COPY --from=builder /build/configs ./configs
-EXPOSE 8080
+EXPOSE 4888
 CMD ["./fast_ship"]
