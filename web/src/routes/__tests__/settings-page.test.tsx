@@ -1,7 +1,8 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import SettingsPage from "@/routes/settings";
+import ProfilePage from "@/routes/settings/profile";
+import PasswordPage from "@/routes/settings/password";
 import { renderWithRoute } from "@/test/render";
 import { authApi } from "@/lib/api/auth";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -24,7 +25,7 @@ vi.mock("@/lib/store/auth-store", () => ({
   useAuthStore: vi.fn(),
 }));
 
-describe("SettingsPage", () => {
+describe("Settings Profile Page", () => {
   const setUser = vi.fn();
 
   beforeEach(() => {
@@ -57,9 +58,9 @@ describe("SettingsPage", () => {
 
     const user = userEvent.setup();
 
-    renderWithRoute(<SettingsPage />, {
-      path: "/settings",
-      initialEntry: "/settings",
+    renderWithRoute(<ProfilePage />, {
+      path: "/settings/profile",
+      initialEntry: "/settings/profile",
     });
 
     const usernameInput = screen.getByLabelText("用户名");
@@ -85,6 +86,24 @@ describe("SettingsPage", () => {
       updated_at: "2026-04-06T11:00:00Z",
     });
   });
+});
+
+describe("Settings Password Page", () => {
+  beforeEach(() => {
+    vi.mocked(useAuthStore).mockReturnValue({
+      user: {
+        id: "user-1",
+        username: "test-user",
+        email: "test@example.com",
+        created_at: "2026-04-06T10:00:00Z",
+        updated_at: "2026-04-06T10:00:00Z",
+      },
+    } as unknown as ReturnType<typeof useAuthStore>);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
 
   it("updates password and resets password fields on success", async () => {
     vi.mocked(authApi.updatePassword).mockResolvedValue({
@@ -93,9 +112,9 @@ describe("SettingsPage", () => {
 
     const user = userEvent.setup();
 
-    renderWithRoute(<SettingsPage />, {
-      path: "/settings",
-      initialEntry: "/settings",
+    renderWithRoute(<PasswordPage />, {
+      path: "/settings/password",
+      initialEntry: "/settings/password",
     });
 
     const oldPasswordInput = screen.getByLabelText("当前密码");
