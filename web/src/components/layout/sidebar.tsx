@@ -5,11 +5,15 @@ import {
   Settings,
   Rocket,
   Menu,
+  Tags,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 
-const navItems = [{ to: "/projects", label: "项目", icon: Package }];
+const navItems = [
+  { to: "/projects", label: "项目", icon: Package },
+  { to: "/versions", label: "版本", icon: Tags },
+];
 
 const bottomNavItems = [{ to: "/settings", label: "设置", icon: Settings }];
 

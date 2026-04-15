@@ -11,6 +11,7 @@ import SettingsLayout from "@/routes/settings/layout";
 const LoginPage = lazy(() => import("@/routes/login"));
 const RegisterPage = lazy(() => import("@/routes/register"));
 const ProjectsPage = lazy(() => import("@/routes/projects/index"));
+const VersionsPage = lazy(() => import("@/routes/versions/index"));
 const NewProjectPage = lazy(() => import("@/routes/projects/new"));
 const ProjectDetailPage = lazy(() => import("@/routes/projects/$id/index"));
 const EditProjectPage = lazy(() => import("@/routes/projects/$id/edit"));
@@ -52,6 +53,10 @@ export default function App() {
               <Route
                 path="/projects"
                 element={<LazyPage render={<ProjectsPage />} />}
+              />
+              <Route
+                path="/versions"
+                element={<LazyPage render={<VersionsPage />} />}
               />
               <Route
                 path="/projects/new"
