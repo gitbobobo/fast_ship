@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
+import SettingsLayout from "@/routes/settings/layout";
 
 const LoginPage = lazy(() => import("@/routes/login"));
 const RegisterPage = lazy(() => import("@/routes/register"));
@@ -17,7 +18,9 @@ const NewVersionPage = lazy(() => import("@/routes/projects/$id/versions/new"));
 const VersionDetailPage = lazy(
   () => import("@/routes/projects/$id/versions/$vid"),
 );
-const SettingsPage = lazy(() => import("@/routes/settings/index"));
+const SettingsGeneralPage = lazy(() => import("@/routes/settings/general"));
+const SettingsProfilePage = lazy(() => import("@/routes/settings/profile"));
+const SettingsPasswordPage = lazy(() => import("@/routes/settings/password"));
 const ApiKeysPage = lazy(() => import("@/routes/settings/api-keys"));
 
 const queryClient = new QueryClient({
@@ -70,14 +73,25 @@ export default function App() {
                 path="/projects/:id/versions/:vid"
                 element={<LazyPage render={<VersionDetailPage />} />}
               />
-              <Route
-                path="/settings"
-                element={<LazyPage render={<SettingsPage />} />}
-              />
-              <Route
-                path="/settings/api-keys"
-                element={<LazyPage render={<ApiKeysPage />} />}
-              />
+              {/* 设置页面嵌套路由 */}
+              <Route path="/settings" element={<LazyPage render={<SettingsLayout />} />}>
+                <Route
+                  path="general"
+                  element={<LazyPage render={<SettingsGeneralPage />} />}
+                />
+                <Route
+                  path="profile"
+                  element={<LazyPage render={<SettingsProfilePage />} />}
+                />
+                <Route
+                  path="password"
+                  element={<LazyPage render={<SettingsPasswordPage />} />}
+                />
+                <Route
+                  path="api-keys"
+                  element={<LazyPage render={<ApiKeysPage />} />}
+                />
+              </Route>
             </Route>
 
             {/* 默认重定向 */}
