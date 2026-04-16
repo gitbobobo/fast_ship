@@ -47,6 +47,9 @@ export default function RegisterPage() {
             <Input
               id="username"
               autoComplete="username"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
               {...register("username")}
             />
             {errors.username && (
@@ -61,6 +64,9 @@ export default function RegisterPage() {
               id="email"
               type="email"
               autoComplete="email"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
               {...register("email")}
             />
             {errors.email && (
@@ -75,6 +81,9 @@ export default function RegisterPage() {
               id="password"
               type="password"
               autoComplete="new-password"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
               {...register("password")}
             />
             {errors.password && (

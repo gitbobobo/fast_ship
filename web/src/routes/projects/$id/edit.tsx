@@ -169,14 +169,18 @@ export default function EditProjectPage() {
                             </li>
                             <li className="flex gap-2">
                               <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">3</span>
-                              <span>在 <strong>Repository access</strong> 中选择该 Token 可访问的仓库</span>
+                              <span>设置 <strong>Expiration</strong> 时，建议选择不超过 <strong>366 天</strong>，部分组织会拒绝更长期限的 Fine-grained Token</span>
                             </li>
                             <li className="flex gap-2">
                               <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">4</span>
-                              <span>在 <strong>Permissions</strong> → <strong>Repository permissions</strong> 中设置 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">Contents</code> 为 <strong>Read and write</strong></span>
+                              <span>在 <strong>Repository access</strong> 中选择该 Token 可访问的仓库</span>
                             </li>
                             <li className="flex gap-2">
                               <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">5</span>
+                              <span>在 <strong>Permissions</strong> → <strong>Repository permissions</strong> 中设置 <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">Contents</code> 为 <strong>Read and write</strong></span>
+                            </li>
+                            <li className="flex gap-2">
+                              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-semibold text-green-800 dark:bg-green-900 dark:text-green-200">6</span>
                               <span>点击 <strong>Generate token</strong>，复制生成的 Token（仅显示一次）</span>
                             </li>
                           </ol>

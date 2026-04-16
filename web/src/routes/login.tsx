@@ -48,6 +48,9 @@ export default function LoginPage() {
             <Input
               id="login"
               autoComplete="username"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
               {...register("login")}
             />
             {errors.login && (
@@ -60,6 +63,9 @@ export default function LoginPage() {
               id="password"
               type="password"
               autoComplete="current-password"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
               {...register("password")}
             />
             {errors.password && (
