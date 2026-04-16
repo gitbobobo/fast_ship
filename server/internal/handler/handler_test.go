@@ -54,6 +54,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.Issue{},
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
+		&model.IssueInternalMeta{},
 		&model.IssueSyncState{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
@@ -86,13 +87,14 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issueRepo := repository.NewIssueRepository(db)
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
+	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueSyncStateRepo, projectRepo, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 
@@ -172,6 +174,37 @@ func createHandlerTestVersion(t *testing.T, db *gorm.DB, projectID string, opts 
 	}
 
 	return version
+}
+
+func createHandlerTestIssue(t *testing.T, db *gorm.DB, projectID string, opts ...func(*model.Issue)) *model.Issue {
+	t.Helper()
+
+	now := time.Now().UTC()
+	issue := &model.Issue{
+		ID:              uuid.NewString(),
+		ProjectID:       projectID,
+		GitHubIssueID:   1001,
+		GitHubNodeID:    "I_kw_handler",
+		Number:          42,
+		State:           model.IssueStateOpen,
+		Title:           "Crash on launch",
+		Body:            "App crashes",
+		HTMLURL:         "https://github.com/owner/repo/issues/42",
+		AuthorLogin:     "alice",
+		GitHubCreatedAt: now.Add(-2 * time.Hour),
+		GitHubUpdatedAt: now.Add(-1 * time.Hour),
+		SyncedAt:        now,
+	}
+
+	for _, opt := range opts {
+		opt(issue)
+	}
+
+	if err := db.Create(issue).Error; err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	return issue
 }
 
 func newJSONContext(method, target string, body []byte) (*gin.Context, *httptest.ResponseRecorder) {

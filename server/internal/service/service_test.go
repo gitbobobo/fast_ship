@@ -19,20 +19,21 @@ import (
 )
 
 type testServices struct {
-	db              *gorm.DB
-	storage         storage.Storage
-	cfg             *config.Config
-	projectRepo     *repository.ProjectRepository
-	versionRepo     *repository.VersionRepository
-	issueRepo       *repository.IssueRepository
-	commentRepo     *repository.IssueCommentRepository
-	timelineRepo    *repository.IssueTimelineRepository
-	syncStateRepo   *repository.IssueSyncStateRepository
-	artifactRepo    *repository.ArtifactRepository
-	issueService    *IssueService
-	versionService  *VersionService
-	artifactService *ArtifactService
-	shipService     *ShipService
+	db               *gorm.DB
+	storage          storage.Storage
+	cfg              *config.Config
+	projectRepo      *repository.ProjectRepository
+	versionRepo      *repository.VersionRepository
+	issueRepo        *repository.IssueRepository
+	commentRepo      *repository.IssueCommentRepository
+	timelineRepo     *repository.IssueTimelineRepository
+	internalMetaRepo *repository.IssueInternalMetaRepository
+	syncStateRepo    *repository.IssueSyncStateRepository
+	artifactRepo     *repository.ArtifactRepository
+	issueService     *IssueService
+	versionService   *VersionService
+	artifactService  *ArtifactService
+	shipService      *ShipService
 }
 
 func setupTestServices(t *testing.T) *testServices {
@@ -52,6 +53,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.Issue{},
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
+		&model.IssueInternalMeta{},
 		&model.IssueSyncState{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
@@ -74,6 +76,7 @@ func setupTestServices(t *testing.T) *testServices {
 	issueRepo := repository.NewIssueRepository(db)
 	commentRepo := repository.NewIssueCommentRepository(db)
 	timelineRepo := repository.NewIssueTimelineRepository(db)
+	internalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	syncStateRepo := repository.NewIssueSyncStateRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 
@@ -84,20 +87,21 @@ func setupTestServices(t *testing.T) *testServices {
 	}
 
 	return &testServices{
-		db:              db,
-		storage:         fileStorage,
-		cfg:             cfg,
-		projectRepo:     projectRepo,
-		versionRepo:     versionRepo,
-		issueRepo:       issueRepo,
-		commentRepo:     commentRepo,
-		timelineRepo:    timelineRepo,
-		syncStateRepo:   syncStateRepo,
-		artifactRepo:    artifactRepo,
-		issueService:    NewIssueService(issueRepo, commentRepo, timelineRepo, syncStateRepo, projectRepo, cfg, zap.NewNop()),
-		versionService:  NewVersionService(versionRepo, projectRepo, fileStorage),
-		artifactService: NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
-		shipService:     NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
+		db:               db,
+		storage:          fileStorage,
+		cfg:              cfg,
+		projectRepo:      projectRepo,
+		versionRepo:      versionRepo,
+		issueRepo:        issueRepo,
+		commentRepo:      commentRepo,
+		timelineRepo:     timelineRepo,
+		internalMetaRepo: internalMetaRepo,
+		syncStateRepo:    syncStateRepo,
+		artifactRepo:     artifactRepo,
+		issueService:     NewIssueService(issueRepo, commentRepo, timelineRepo, internalMetaRepo, syncStateRepo, projectRepo, cfg, zap.NewNop()),
+		versionService:   NewVersionService(versionRepo, projectRepo, fileStorage),
+		artifactService:  NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
+		shipService:      NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
 	}
 }
 
@@ -178,6 +182,38 @@ func createTestVersion(t *testing.T, db *gorm.DB, projectID string, opts ...func
 	}
 
 	return version
+}
+
+func createTestIssue(t *testing.T, db *gorm.DB, projectID string, opts ...func(*model.Issue)) *model.Issue {
+	t.Helper()
+
+	now := time.Now().UTC()
+	issue := &model.Issue{
+		ID:              uuid.New().String(),
+		ProjectID:       projectID,
+		GitHubIssueID:   1001,
+		GitHubNodeID:    "I_kw_test",
+		Number:          42,
+		State:           model.IssueStateOpen,
+		Title:           "Crash on launch",
+		Body:            "App crashes",
+		HTMLURL:         "https://github.com/owner/repo/issues/42",
+		AuthorLogin:     "alice",
+		CommentsCount:   0,
+		GitHubCreatedAt: now.Add(-2 * time.Hour),
+		GitHubUpdatedAt: now.Add(-1 * time.Hour),
+		SyncedAt:        now,
+	}
+
+	for _, opt := range opts {
+		opt(issue)
+	}
+
+	if err := db.Create(issue).Error; err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	return issue
 }
 
 func artifactFileExists(t *testing.T, baseDir, relPath string) bool {

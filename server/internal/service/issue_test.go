@@ -190,3 +190,45 @@ func TestIssueSyncStateRepositoryGetOrCreate_IsAtomic(t *testing.T) {
 		t.Fatalf("expected exactly one sync state row, got %d", count)
 	}
 }
+
+func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, "user-1")
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	meta, err := svc.issueService.UpdateInternalMeta(issue.ID, project.UserID, model.IssueWorkflowStatusInProgress)
+	if err != nil {
+		t.Fatalf("update internal meta: %v", err)
+	}
+	if meta == nil || meta.WorkflowStatus != model.IssueWorkflowStatusInProgress {
+		t.Fatalf("unexpected internal meta response: %+v", meta)
+	}
+	if meta.StartedAt == nil {
+		t.Fatalf("expected started_at to be set")
+	}
+
+	got, err := svc.issueService.Get(issue.ID, project.UserID)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got.InternalMeta == nil || got.InternalMeta.WorkflowStatus != model.IssueWorkflowStatusInProgress {
+		t.Fatalf("expected internal meta on get, got %+v", got.InternalMeta)
+	}
+
+	items, total, err := svc.issueService.List(project.ID, project.UserID, IssueListFilters{Workflow: "in_progress"}, 1, 20)
+	if err != nil {
+		t.Fatalf("list issues by workflow: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("expected one filtered issue, got total=%d len=%d", total, len(items))
+	}
+
+	items, total, err = svc.issueService.List(project.ID, project.UserID, IssueListFilters{Workflow: "unset"}, 1, 20)
+	if err != nil {
+		t.Fatalf("list issues by unset workflow: %v", err)
+	}
+	if total != 0 || len(items) != 0 {
+		t.Fatalf("expected no unset issues, got total=%d len=%d", total, len(items))
+	}
+}

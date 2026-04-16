@@ -40,6 +40,40 @@ import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 
+const ISSUE_WORKFLOW_STATUS_LABELS = {
+  todo: "待处理",
+  in_progress: "开发中",
+  done: "已完成",
+} as const;
+
+function IssueWorkflowBadge({
+  status,
+}: {
+  status?: "" | "todo" | "in_progress" | "done";
+}) {
+  if (!status) {
+    return null;
+  }
+
+  const className = {
+    todo: "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-300",
+    in_progress:
+      "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+    done: "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  }[status];
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+        className,
+      )}
+    >
+      {ISSUE_WORKFLOW_STATUS_LABELS[status]}
+    </span>
+  );
+}
+
 function getActiveProjectId(
   projects: Project[],
   selectedId: string,
@@ -95,6 +129,7 @@ export default function IssuesPage() {
   const issueLabelFilter = searchParams.get("label") ?? "all";
   const issueAssigneeFilter = searchParams.get("assignee") ?? "all";
   const issueMilestoneFilter = searchParams.get("milestone") ?? "all";
+  const issueWorkflowFilter = searchParams.get("workflow_status") ?? "all";
   const issueSort = searchParams.get("sort") ?? "updated_desc";
   const issuePage = Math.max(
     Number(searchParams.get("page") ?? "1") || 1,
@@ -112,6 +147,8 @@ export default function IssuesPage() {
         issueAssigneeFilter === "all" ? undefined : issueAssigneeFilter,
       milestone:
         issueMilestoneFilter === "all" ? undefined : issueMilestoneFilter,
+      workflow_status:
+        issueWorkflowFilter === "all" ? undefined : issueWorkflowFilter,
       sort: issueSort,
       page: issuePage,
       page_size: 20,
@@ -197,6 +234,7 @@ export default function IssuesPage() {
         label: issueLabelFilter,
         assignee: issueAssigneeFilter,
         milestone: issueMilestoneFilter,
+        workflowStatus: issueWorkflowFilter,
         sort: issueSort,
         page: issuePage,
       }).toString();
@@ -219,6 +257,7 @@ export default function IssuesPage() {
     issueLabelFilter !== "all" ||
     issueAssigneeFilter !== "all" ||
     issueMilestoneFilter !== "all" ||
+    issueWorkflowFilter !== "all" ||
     deferredIssueQuery.length > 0;
   const issueDetailSearch = buildIssueDetailSearchParams({
     state: issueStateFilter,
@@ -226,6 +265,7 @@ export default function IssuesPage() {
     label: issueLabelFilter,
     assignee: issueAssigneeFilter,
     milestone: issueMilestoneFilter,
+    workflowStatus: issueWorkflowFilter,
     sort: issueSort,
     page: issuePage,
   }).toString();
@@ -424,6 +464,31 @@ export default function IssuesPage() {
               </SelectContent>
             </Select>
             <Select
+              value={issueWorkflowFilter}
+              onValueChange={(value) =>
+                updateSearchParams({ workflow_status: value ?? null }, true)
+              }
+            >
+              <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
+                <SelectValue placeholder="内部状态">
+                  {issueWorkflowFilter === "all"
+                    ? "内部状态"
+                    : issueWorkflowFilter === "unset"
+                      ? "未设置"
+                      : ISSUE_WORKFLOW_STATUS_LABELS[
+                          issueWorkflowFilter as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
+                        ]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部内部状态</SelectItem>
+                <SelectItem value="unset">未设置</SelectItem>
+                <SelectItem value="todo">待处理</SelectItem>
+                <SelectItem value="in_progress">开发中</SelectItem>
+                <SelectItem value="done">已完成</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
               value={issueSort}
               onValueChange={(value) =>
                 updateSearchParams({ sort: value ?? null }, true)
@@ -549,6 +614,9 @@ export default function IssuesPage() {
                           >
                             {issue.state === "open" ? "Open" : "Closed"}
                           </Badge>
+                          <IssueWorkflowBadge
+                            status={issue.internal_meta?.workflow_status}
+                          />
                           {issue.labels.slice(0, 4).map((label) => (
                             <span
                               key={label.name}

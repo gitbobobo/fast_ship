@@ -6,9 +6,14 @@ interface IssueListParams {
   label?: string;
   assignee?: string;
   milestone?: string;
+  workflow_status?: string;
   sort?: string;
   page?: number;
   page_size?: number;
+}
+
+interface UpdateIssueInternalMetaRequest {
+  workflow_status: "" | "todo" | "in_progress" | "done";
 }
 
 export const issueApi = {
@@ -23,6 +28,7 @@ export const issueApi = {
           ...(params.label ? { label: params.label } : {}),
           ...(params.assignee ? { assignee: params.assignee } : {}),
           ...(params.milestone ? { milestone: params.milestone } : {}),
+          ...(params.workflow_status ? { workflow_status: params.workflow_status } : {}),
           ...(params.sort ? { sort: params.sort } : {}),
         },
       })
@@ -54,4 +60,9 @@ export const issueApi = {
     api
       .post(`projects/${projectId}/issues/sync`)
       .json<ApiResponse<IssueSyncResult>>(),
+
+  updateInternalMeta: (issueId: string, data: UpdateIssueInternalMetaRequest) =>
+    api
+      .put(`issues/${issueId}/internal-meta`, { json: data })
+      .json<ApiResponse<IssueInternalMeta | null>>(),
 };

@@ -72,6 +72,7 @@ func Setup(
 		{
 			issueWrite.POST("/sync", issueHandler.Sync)
 		}
+		api.PUT("/issues/:iid/internal-meta", middleware.RequireJWT(cfg, authService), issueHandler.UpdateInternalMeta)
 
 		// JWT 必须 — 版本删除和发货
 		api.DELETE("/versions/:vid", middleware.RequireJWT(cfg, authService), versionHandler.Delete)

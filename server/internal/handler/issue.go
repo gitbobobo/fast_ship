@@ -5,12 +5,18 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
+	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
 
 type IssueHandler struct {
 	issueService *service.IssueService
+}
+
+type updateIssueInternalMetaRequest struct {
+	WorkflowStatus *model.IssueWorkflowStatus `json:"workflow_status"`
 }
 
 func NewIssueHandler(issueService *service.IssueService) *IssueHandler {
@@ -26,6 +32,7 @@ func (h *IssueHandler) List(c *gin.Context) {
 		Label:     c.Query("label"),
 		Assignee:  c.Query("assignee"),
 		Milestone: c.Query("milestone"),
+		Workflow:  c.Query("workflow_status"),
 		Sort:      c.DefaultQuery("sort", "updated_desc"),
 	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -122,6 +129,25 @@ func (h *IssueHandler) Sync(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 
 	result, err := h.issueService.SyncProjectIssues(projectID, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+func (h *IssueHandler) UpdateInternalMeta(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	var req updateIssueInternalMetaRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.WorkflowStatus == nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.issueService.UpdateInternalMeta(issueID, userID, *req.WorkflowStatus)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

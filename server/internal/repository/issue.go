@@ -249,3 +249,49 @@ func (r *IssueSyncStateRepository) GetOrCreate(projectID string) (*model.IssueSy
 func (r *IssueSyncStateRepository) Save(state *model.IssueSyncState) error {
 	return r.db.Save(state).Error
 }
+
+type IssueInternalMetaRepository struct {
+	db *gorm.DB
+}
+
+func NewIssueInternalMetaRepository(db *gorm.DB) *IssueInternalMetaRepository {
+	return &IssueInternalMetaRepository{db: db}
+}
+
+func (r *IssueInternalMetaRepository) Get(issueID string) (*model.IssueInternalMeta, error) {
+	var meta model.IssueInternalMeta
+	if err := r.db.Where("issue_id = ?", issueID).First(&meta).Error; err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+func (r *IssueInternalMetaRepository) ListByIssueIDs(issueIDs []string) (map[string]model.IssueInternalMeta, error) {
+	result := make(map[string]model.IssueInternalMeta, len(issueIDs))
+	if len(issueIDs) == 0 {
+		return result, nil
+	}
+
+	var metas []model.IssueInternalMeta
+	if err := r.db.Where("issue_id IN ?", issueIDs).Find(&metas).Error; err != nil {
+		return nil, err
+	}
+
+	for _, meta := range metas {
+		result[meta.IssueID] = meta
+	}
+	return result, nil
+}
+
+func (r *IssueInternalMetaRepository) Upsert(meta *model.IssueInternalMeta) error {
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "issue_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"workflow_status",
+			"started_at",
+			"completed_at",
+			"updated_by_user_id",
+			"updated_at",
+		}),
+	}).Create(meta).Error
+}

@@ -45,11 +45,19 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   useIssue,
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
   useIssues,
   useSyncProjectIssues,
+  useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { cn } from "@/lib/utils";
@@ -246,6 +254,40 @@ function StateBadge({ state }: { state: "open" | "closed" }) {
   );
 }
 
+const ISSUE_WORKFLOW_STATUS_LABELS = {
+  todo: "待处理",
+  in_progress: "开发中",
+  done: "已完成",
+} as const;
+
+function WorkflowStatusBadge({
+  status,
+}: {
+  status?: "" | "todo" | "in_progress" | "done";
+}) {
+  if (!status) {
+    return null;
+  }
+
+  const className = {
+    todo: "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-300",
+    in_progress:
+      "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+    done: "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+  }[status];
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
+        className,
+      )}
+    >
+      {ISSUE_WORKFLOW_STATUS_LABELS[status]}
+    </span>
+  );
+}
+
 function EmptyState({ message }: { message: string }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-14 text-center">
@@ -289,12 +331,17 @@ export default function IssueDetailPage() {
   }, []);
 
   const { data: issue, isLoading } = useIssue(iid!);
+  const updateInternalMeta = useUpdateIssueInternalMeta(iid!, id);
   const { data: issueListData } = useIssues(id!, {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
     q: issueContext.q || undefined,
     label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
     assignee: issueContext.assignee === "all" ? undefined : issueContext.assignee || undefined,
     milestone: issueContext.milestone === "all" ? undefined : issueContext.milestone || undefined,
+    workflow_status:
+      issueContext.workflowStatus === "all"
+        ? undefined
+        : issueContext.workflowStatus || undefined,
     sort: issueContext.sort,
     page: issueContext.page,
     page_size: 20,
@@ -305,6 +352,10 @@ export default function IssueDetailPage() {
     label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
     assignee: issueContext.assignee === "all" ? undefined : issueContext.assignee || undefined,
     milestone: issueContext.milestone === "all" ? undefined : issueContext.milestone || undefined,
+    workflow_status:
+      issueContext.workflowStatus === "all"
+        ? undefined
+        : issueContext.workflowStatus || undefined,
     sort: issueContext.sort,
     page: issueContext.page > 1 ? issueContext.page - 1 : 1,
     page_size: 20,
@@ -315,6 +366,10 @@ export default function IssueDetailPage() {
     label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
     assignee: issueContext.assignee === "all" ? undefined : issueContext.assignee || undefined,
     milestone: issueContext.milestone === "all" ? undefined : issueContext.milestone || undefined,
+    workflow_status:
+      issueContext.workflowStatus === "all"
+        ? undefined
+        : issueContext.workflowStatus || undefined,
     sort: issueContext.sort,
     page: issueContext.page + 1,
     page_size: 20,
@@ -359,13 +414,6 @@ export default function IssueDetailPage() {
   const loadedTimelinePages = infiniteTimelineData?.pages.length ?? 1;
   const targetCommentAnchorId = isCommentAnchorHash ? location.hash.slice(1) : null;
   const targetTimelineAnchorId = isTimelineAnchorHash ? location.hash.slice(1) : null;
-  const activeComment = targetCommentAnchorId
-    ? comments.find((comment) => getCommentAnchorId(comment.github_comment_id) === targetCommentAnchorId)
-    : null;
-  const activeTimelineEvent = targetTimelineAnchorId
-    ? timeline.find((event) => getTimelineAnchorId(event.github_event_id) === targetTimelineAnchorId)
-    : null;
-
   const timelineItems: TimelineItem[] = useMemo(() => {
     const items: TimelineItem[] = [
       ...comments.map((c) => ({ type: "comment" as const, data: c, created_at: c.created_at })),
@@ -609,6 +657,15 @@ export default function IssueDetailPage() {
     await copyGitHubUrl(targetUrl, successMessage);
   };
 
+  const handleWorkflowStatusChange = async (value: "" | "todo" | "in_progress" | "done") => {
+    try {
+      await updateInternalMeta.mutateAsync({ workflow_status: value });
+      toast.success(value ? "已更新内部状态" : "已清除内部状态");
+    } catch {
+      toast.error("更新内部状态失败");
+    }
+  };
+
   if (isLoading) {
     return (
       <>
@@ -737,6 +794,7 @@ export default function IssueDetailPage() {
               <div className="p-5 md:p-6">
                 <div className="flex flex-wrap items-start gap-3">
                   <StateBadge state={issue.state} />
+                  <WorkflowStatusBadge status={issue.internal_meta?.workflow_status} />
                   {issue.labels.map((label) => (
                     <span
                       key={label.name}
@@ -1038,6 +1096,58 @@ export default function IssueDetailPage() {
                     </div>
                   </div>
                 )}
+
+                {/* 内部状态 */}
+                <div className="-mx-5 -mb-5 border-t bg-muted/30 px-5 py-4">
+                  <p className="mb-2 text-xs font-medium text-muted-foreground">内部状态</p>
+                  <Select
+                    value={issue.internal_meta?.workflow_status ?? "unset"}
+                    onValueChange={(value) =>
+                      void handleWorkflowStatusChange(
+                        (value === "unset" ? "" : value) as
+                          | ""
+                          | "todo"
+                          | "in_progress"
+                          | "done",
+                      )
+                    }
+                    disabled={updateInternalMeta.isPending}
+                  >
+                    <SelectTrigger className="w-full bg-card hover:bg-accent/50 transition-colors">
+                      <SelectValue placeholder="未设置">
+                        {issue.internal_meta?.workflow_status
+                          ? ISSUE_WORKFLOW_STATUS_LABELS[issue.internal_meta.workflow_status]
+                          : "未设置"}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="unset">
+                        <span className="inline-flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full bg-slate-400" />
+                          未设置
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="todo">
+                        <span className="inline-flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full bg-slate-500" />
+                          待处理
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="in_progress">
+                        <span className="inline-flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full bg-amber-500" />
+                          开发中
+                        </span>
+                      </SelectItem>
+                      <SelectItem value="done">
+                        <span className="inline-flex items-center gap-2">
+                          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                          已完成
+                        </span>
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </CardContent>
             </Card>
 
@@ -1046,7 +1156,7 @@ export default function IssueDetailPage() {
       </div>
 
       {/* Image Lightbox */}
-      <Dialog open={lightboxOpen} onOpenChange={setLightboxOpen} dismissible>
+      <Dialog open={lightboxOpen} onOpenChange={setLightboxOpen}>
         <DialogContent
           className="max-w-[90vw] place-items-center border-none bg-transparent p-0 shadow-none ring-0 sm:max-w-[90vw]"
           overlayClassName="bg-black/80 supports-backdrop-filter:backdrop-blur-sm"

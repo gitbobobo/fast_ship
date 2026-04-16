@@ -36,6 +36,7 @@ type IssueService struct {
 	issueRepo        *repository.IssueRepository
 	commentRepo      *repository.IssueCommentRepository
 	timelineRepo     *repository.IssueTimelineRepository
+	internalMetaRepo *repository.IssueInternalMetaRepository
 	syncStateRepo    *repository.IssueSyncStateRepository
 	projectRepo      *repository.ProjectRepository
 	cfg              *config.Config
@@ -51,6 +52,7 @@ type IssueListFilters struct {
 	Label     string
 	Assignee  string
 	Milestone string
+	Workflow  string
 	Sort      string
 }
 
@@ -109,6 +111,7 @@ type IssueResponse struct {
 	CreatedAt         string                       `json:"created_at"`
 	UpdatedAt         string                       `json:"updated_at"`
 	SyncedAt          string                       `json:"synced_at"`
+	InternalMeta      *IssueInternalMetaResponse   `json:"internal_meta,omitempty"`
 }
 
 type IssueCommentResponse struct {
@@ -163,6 +166,13 @@ type IssueSyncStateResponse struct {
 	LastError            string                `json:"last_error"`
 }
 
+type IssueInternalMetaResponse struct {
+	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
+	StartedAt      *string                   `json:"started_at,omitempty"`
+	CompletedAt    *string                   `json:"completed_at,omitempty"`
+	UpdatedAt      *string                   `json:"updated_at,omitempty"`
+}
+
 type issueUserPayload struct {
 	Login     string `json:"login"`
 	AvatarURL string `json:"avatar_url"`
@@ -185,19 +195,21 @@ func NewIssueService(
 	issueRepo *repository.IssueRepository,
 	commentRepo *repository.IssueCommentRepository,
 	timelineRepo *repository.IssueTimelineRepository,
+	internalMetaRepo *repository.IssueInternalMetaRepository,
 	syncStateRepo *repository.IssueSyncStateRepository,
 	projectRepo *repository.ProjectRepository,
 	cfg *config.Config,
 	logger *zap.Logger,
 ) *IssueService {
 	return &IssueService{
-		issueRepo:     issueRepo,
-		commentRepo:   commentRepo,
-		timelineRepo:  timelineRepo,
-		syncStateRepo: syncStateRepo,
-		projectRepo:   projectRepo,
-		cfg:           cfg,
-		logger:        logger,
+		issueRepo:        issueRepo,
+		commentRepo:      commentRepo,
+		timelineRepo:     timelineRepo,
+		internalMetaRepo: internalMetaRepo,
+		syncStateRepo:    syncStateRepo,
+		projectRepo:      projectRepo,
+		cfg:              cfg,
+		logger:           logger,
 		newClient: func(token, owner, repo string) gitHubIssueClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -218,9 +230,18 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 		return nil, 0, errs.ErrInternal
 	}
 
+	metaByIssueID, err := s.internalMetaByIssueIDs(issues)
+	if err != nil {
+		return nil, 0, errs.ErrInternal
+	}
+
 	filtered := make([]model.Issue, 0, len(issues))
 	for _, issue := range issues {
-		if !matchesIssueFilters(issue, filters) {
+		var meta *model.IssueInternalMeta
+		if current, ok := metaByIssueID[issue.ID]; ok {
+			meta = current
+		}
+		if !matchesIssueFilters(issue, meta, filters) {
 			continue
 		}
 		filtered = append(filtered, issue)
@@ -239,7 +260,7 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 
 	resp := make([]IssueResponse, 0, end-start)
 	for _, issue := range filtered[start:end] {
-		resp = append(resp, toIssueResponse(issue))
+		resp = append(resp, toIssueResponse(issue, metaByIssueID[issue.ID]))
 	}
 	return resp, total, nil
 }
@@ -316,8 +337,78 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 		return nil, errs.ErrNotOwner
 	}
 
-	resp := toIssueResponse(*issue)
+	meta, err := s.internalMetaRepo.Get(issue.ID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errs.ErrInternal
+	}
+
+	resp := toIssueResponse(*issue, meta)
 	return &resp, nil
+}
+
+func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus model.IssueWorkflowStatus) (*IssueInternalMetaResponse, error) {
+	if !model.IsValidIssueWorkflowStatus(workflowStatus) {
+		return nil, errs.ErrInvalidParams
+	}
+
+	issue, err := s.issueRepo.FindByID(issueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrIssueNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	if _, err := s.projectRepo.FindByID(issue.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrNotOwner
+	}
+
+	now := time.Now().UTC()
+	meta, err := s.internalMetaRepo.Get(issue.ID)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrInternal
+		}
+		meta = &model.IssueInternalMeta{
+			IssueID:   issue.ID,
+			CreatedAt: now,
+		}
+	}
+
+	meta.WorkflowStatus = workflowStatus
+	meta.UpdatedByUserID = userID
+	meta.UpdatedAt = now
+
+	switch workflowStatus {
+	case "":
+		meta.StartedAt = nil
+		meta.CompletedAt = nil
+	case model.IssueWorkflowStatusTodo:
+		meta.StartedAt = nil
+		meta.CompletedAt = nil
+	case model.IssueWorkflowStatusInProgress:
+		if meta.StartedAt == nil {
+			value := now
+			meta.StartedAt = &value
+		}
+		meta.CompletedAt = nil
+	case model.IssueWorkflowStatusDone:
+		if meta.StartedAt == nil {
+			value := now
+			meta.StartedAt = &value
+		}
+		value := now
+		meta.CompletedAt = &value
+	}
+
+	if err := s.internalMetaRepo.Upsert(meta); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	return toIssueInternalMetaResponse(meta), nil
 }
 
 func (s *IssueService) ListComments(issueID, userID string, page, pageSize int) ([]IssueCommentResponse, int64, error) {
@@ -701,7 +792,7 @@ func (s *IssueService) endSync(projectID string) {
 	delete(s.syncingProjectID, projectID)
 }
 
-func toIssueResponse(issue model.Issue) IssueResponse {
+func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResponse {
 	assignees := parseJSON[[]issueUserPayload](issue.AssigneesJSON)
 	labels := parseJSON[[]issueLabelPayload](issue.LabelsJSON)
 	milestone := parseJSON[*issueMilestonePayload](issue.MilestoneJSON)
@@ -730,6 +821,7 @@ func toIssueResponse(issue model.Issue) IssueResponse {
 		CreatedAt:         formatTime(issue.GitHubCreatedAt),
 		UpdatedAt:         formatTime(issue.GitHubUpdatedAt),
 		SyncedAt:          formatTime(issue.SyncedAt),
+		InternalMeta:      toIssueInternalMetaResponse(meta),
 	}
 	for _, assignee := range assignees {
 		resp.Assignees = append(resp.Assignees, IssueActorResponse{Login: assignee.Login, AvatarURL: assignee.AvatarURL})
@@ -750,6 +842,48 @@ func toIssueResponse(issue model.Issue) IssueResponse {
 		resp.ClosedAt = &value
 	}
 	return resp
+}
+
+func toIssueInternalMetaResponse(meta *model.IssueInternalMeta) *IssueInternalMetaResponse {
+	if meta == nil || meta.WorkflowStatus == "" {
+		return nil
+	}
+
+	resp := &IssueInternalMetaResponse{
+		WorkflowStatus: meta.WorkflowStatus,
+	}
+	if meta.StartedAt != nil {
+		value := formatTime(meta.StartedAt.UTC())
+		resp.StartedAt = &value
+	}
+	if meta.CompletedAt != nil {
+		value := formatTime(meta.CompletedAt.UTC())
+		resp.CompletedAt = &value
+	}
+	if !meta.UpdatedAt.IsZero() {
+		value := formatTime(meta.UpdatedAt.UTC())
+		resp.UpdatedAt = &value
+	}
+	return resp
+}
+
+func (s *IssueService) internalMetaByIssueIDs(issues []model.Issue) (map[string]*model.IssueInternalMeta, error) {
+	issueIDs := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		issueIDs = append(issueIDs, issue.ID)
+	}
+
+	raw, err := s.internalMetaRepo.ListByIssueIDs(issueIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*model.IssueInternalMeta, len(raw))
+	for issueID, meta := range raw {
+		current := meta
+		result[issueID] = &current
+	}
+	return result, nil
 }
 
 func toIssueSyncStateResponse(state *model.IssueSyncState) *IssueSyncStateResponse {
@@ -1048,9 +1182,21 @@ func sortIssues(items []model.Issue, sortKey string) {
 	}
 }
 
-func matchesIssueFilters(issue model.Issue, filters IssueListFilters) bool {
+func matchesIssueFilters(issue model.Issue, meta *model.IssueInternalMeta, filters IssueListFilters) bool {
 	if filters.State != "" && string(issue.State) != filters.State {
 		return false
+	}
+
+	switch filters.Workflow {
+	case "":
+	case "unset":
+		if meta != nil && meta.WorkflowStatus != "" {
+			return false
+		}
+	default:
+		if meta == nil || string(meta.WorkflowStatus) != filters.Workflow {
+			return false
+		}
 	}
 
 	query := strings.TrimSpace(filters.Query)

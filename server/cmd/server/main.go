@@ -72,6 +72,7 @@ func main() {
 		&model.Issue{},
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
+		&model.IssueInternalMeta{},
 		&model.IssueSyncState{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
@@ -98,6 +99,7 @@ func main() {
 	issueRepo := repository.NewIssueRepository(db)
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
+	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
@@ -107,7 +109,7 @@ func main() {
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueSyncStateRepo, projectRepo, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, cfg, zapLogger)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
 

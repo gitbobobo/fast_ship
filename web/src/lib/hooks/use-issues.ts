@@ -12,6 +12,7 @@ interface UseIssuesFilters {
   label?: string;
   assignee?: string;
   milestone?: string;
+  workflow_status?: string;
   sort?: string;
   page?: number;
   page_size?: number;
@@ -28,6 +29,7 @@ export function useIssues(projectId: string, filters: UseIssuesFilters = {}) {
       filters.label ?? "",
       filters.assignee ?? "",
       filters.milestone ?? "",
+      filters.workflow_status ?? "",
       filters.sort ?? "updated_desc",
       filters.page ?? 1,
       filters.page_size ?? 20,
@@ -134,6 +136,20 @@ export function useSyncProjectIssues(projectId: string) {
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       queryClient.invalidateQueries({ queryKey: ["projects", projectId] });
       queryClient.invalidateQueries({ queryKey: ["issues"] });
+    },
+  });
+}
+
+export function useUpdateIssueInternalMeta(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof issueApi.updateInternalMeta>[1]) =>
+      issueApi.updateInternalMeta(issueId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+      }
     },
   });
 }

@@ -1,4 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import ProjectDetailPage from "@/routes/projects/$id/index";
 import IssueDetailPage from "@/routes/projects/$id/issues/$iid";
@@ -13,6 +14,7 @@ import {
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
   useSyncProjectIssues,
+  useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { toast } from "sonner";
 
@@ -46,6 +48,7 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useInfiniteIssueComments: vi.fn(),
   useInfiniteIssueTimeline: vi.fn(),
   useSyncProjectIssues: vi.fn(),
+  useUpdateIssueInternalMeta: vi.fn(),
 }));
 
 function mockIssueDetailData() {
@@ -119,6 +122,11 @@ function mockIssueDetailData() {
           created_at: "2026-04-10T10:00:00Z",
           updated_at: "2026-04-12T10:00:00Z",
           synced_at: "2026-04-12T10:05:00Z",
+          internal_meta: {
+            workflow_status: "in_progress",
+            started_at: "2026-04-12T09:00:00Z",
+            updated_at: "2026-04-12T09:00:00Z",
+          },
         },
         {
           id: "issue-2",
@@ -197,6 +205,11 @@ function mockIssueDetailData() {
       created_at: "2026-04-10T10:00:00Z",
       updated_at: "2026-04-12T10:00:00Z",
       synced_at: "2026-04-12T10:05:00Z",
+      internal_meta: {
+        workflow_status: "in_progress",
+        started_at: "2026-04-12T09:00:00Z",
+        updated_at: "2026-04-12T09:00:00Z",
+      },
     },
     isLoading: false,
   } as unknown as ReturnType<typeof useIssue>);
@@ -330,6 +343,11 @@ describe("Issue pages", () => {
       isPending: false,
     } as unknown as ReturnType<typeof useSyncProjectIssues>);
 
+    vi.mocked(useUpdateIssueInternalMeta).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssueInternalMeta>);
+
     vi.mocked(useIssueFilterOptions).mockReturnValue({
       data: {
         labels: ["bug"],
@@ -441,6 +459,12 @@ describe("Issue pages", () => {
             created_at: "2026-04-10T10:00:00Z",
             updated_at: "2026-04-12T10:00:00Z",
             synced_at: "2026-04-12T10:05:00Z",
+            internal_meta: {
+              workflow_status: "done",
+              started_at: "2026-04-11T10:00:00Z",
+              completed_at: "2026-04-12T09:30:00Z",
+              updated_at: "2026-04-12T09:30:00Z",
+            },
           },
         ],
         total: 1,
@@ -477,6 +501,7 @@ describe("Issue pages", () => {
 
     expect(screen.getByText("#42 Crash on launch")).toBeInTheDocument();
     expect(screen.getByText("负责人")).toBeInTheDocument();
+    expect(screen.getAllByText("开发中").length).toBeGreaterThan(0);
     expect(screen.getByText("上一条")).toBeInTheDocument();
     expect(screen.getByText("下一条")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
@@ -553,6 +578,36 @@ describe("Issue pages", () => {
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith("https://github.com/acme/alpha/issues/42"),
     );
+  });
+
+  it("updates internal workflow status from the issue detail page", async () => {
+    mockIssueDetailData();
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        workflow_status: "done",
+        started_at: "2026-04-12T09:00:00Z",
+        completed_at: "2026-04-12T10:00:00Z",
+        updated_at: "2026-04-12T10:00:00Z",
+      },
+    });
+    vi.mocked(useUpdateIssueInternalMeta).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssueInternalMeta>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: "已完成" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({ workflow_status: "done" }),
+    );
+    expect(toast.success).toHaveBeenCalledWith("已更新内部状态");
   });
 
   it("preserves list filters when linking from the issues page to detail", async () => {

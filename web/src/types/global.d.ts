@@ -139,6 +139,14 @@ interface Issue {
   created_at: string;
   updated_at: string;
   synced_at: string;
+  internal_meta?: IssueInternalMeta | null;
+}
+
+interface IssueInternalMeta {
+  workflow_status: "" | "todo" | "in_progress" | "done";
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at?: string | null;
 }
 
 interface IssueComment {

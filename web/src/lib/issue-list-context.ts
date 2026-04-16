@@ -4,6 +4,7 @@ export interface IssueListContext {
   label?: string;
   assignee?: string;
   milestone?: string;
+  workflowStatus?: string;
   sort?: string;
   page?: number;
 }
@@ -14,6 +15,7 @@ const ISSUE_DETAIL_SEARCH_PARAM_MAP = {
   label: "issue_label",
   assignee: "issue_assignee",
   milestone: "issue_milestone",
+  workflowStatus: "issue_workflow_status",
   sort: "issue_sort",
   page: "issue_page",
 } as const;
@@ -36,6 +38,9 @@ export function buildIssueDetailSearchParams(context: IssueListContext) {
   if (context.milestone && context.milestone !== "all") {
     params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.milestone, context.milestone);
   }
+  if (context.workflowStatus && context.workflowStatus !== "all") {
+    params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.workflowStatus, context.workflowStatus);
+  }
   if (context.sort) {
     params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.sort, context.sort);
   }
@@ -55,6 +60,8 @@ export function readIssueDetailContext(
     label: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.label) ?? "",
     assignee: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.assignee) ?? "",
     milestone: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.milestone) ?? "",
+    workflowStatus:
+      searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.workflowStatus) ?? "",
     sort: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.sort) ?? "updated_desc",
     page: Math.max(
       Number(searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.page) ?? "1") || 1,

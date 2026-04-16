@@ -18,6 +18,23 @@ const (
 	IssueSyncStatusCompleted IssueSyncStatus = "completed"
 )
 
+type IssueWorkflowStatus string
+
+const (
+	IssueWorkflowStatusTodo       IssueWorkflowStatus = "todo"
+	IssueWorkflowStatusInProgress IssueWorkflowStatus = "in_progress"
+	IssueWorkflowStatusDone       IssueWorkflowStatus = "done"
+)
+
+func IsValidIssueWorkflowStatus(status IssueWorkflowStatus) bool {
+	switch status {
+	case "", IssueWorkflowStatusTodo, IssueWorkflowStatusInProgress, IssueWorkflowStatusDone:
+		return true
+	default:
+		return false
+	}
+}
+
 type Issue struct {
 	ID                string     `gorm:"type:text;primaryKey" json:"id"`
 	ProjectID         string     `gorm:"type:text;not null;index" json:"project_id"`
@@ -109,4 +126,20 @@ type IssueSyncState struct {
 
 func (IssueSyncState) TableName() string {
 	return "issue_sync_states"
+}
+
+type IssueInternalMeta struct {
+	IssueID         string              `gorm:"type:text;primaryKey" json:"issue_id"`
+	WorkflowStatus  IssueWorkflowStatus `gorm:"type:text;not null;default:''" json:"workflow_status"`
+	StartedAt       *time.Time          `json:"started_at"`
+	CompletedAt     *time.Time          `json:"completed_at"`
+	UpdatedByUserID string              `gorm:"type:text" json:"updated_by_user_id"`
+	CreatedAt       time.Time           `gorm:"not null" json:"created_at"`
+	UpdatedAt       time.Time           `gorm:"not null" json:"updated_at"`
+
+	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (IssueInternalMeta) TableName() string {
+	return "issue_internal_meta"
 }
