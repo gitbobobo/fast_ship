@@ -26,10 +26,26 @@ const (
 	AuthTypeApiKey = "api_key"
 )
 
+type tokenExtractor func(*gin.Context) string
+
 // RequireAuth JWT 或 API Key 均可通过
 func RequireAuth(cfg *config.Config, apiKeyRepo *repository.ApiKeyRepository, authService *service.AuthService) gin.HandlerFunc {
+	return requireAuth(cfg, apiKeyRepo, authService, extractBearerToken)
+}
+
+// RequireAuthWithQueryToken 允许从 URL query 中读取 token，适合 img/video 等无法附带 Authorization 头的资源请求。
+func RequireAuthWithQueryToken(cfg *config.Config, apiKeyRepo *repository.ApiKeyRepository, authService *service.AuthService, queryParam string) gin.HandlerFunc {
+	return requireAuth(cfg, apiKeyRepo, authService, func(c *gin.Context) string {
+		if token := extractBearerToken(c); token != "" {
+			return token
+		}
+		return strings.TrimSpace(c.Query(queryParam))
+	})
+}
+
+func requireAuth(cfg *config.Config, apiKeyRepo *repository.ApiKeyRepository, authService *service.AuthService, extract tokenExtractor) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := extractToken(c)
+		token := extract(c)
 		if token == "" {
 			response.Unauthorized(c, errs.ErrTokenInvalid.Code, "未提供认证信息")
 			c.Abort()
@@ -48,7 +64,7 @@ func RequireAuth(cfg *config.Config, apiKeyRepo *repository.ApiKeyRepository, au
 // RequireJWT 仅允许 JWT 认证
 func RequireJWT(cfg *config.Config, authService *service.AuthService) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token := extractToken(c)
+		token := extractBearerToken(c)
 		if token == "" {
 			response.Unauthorized(c, errs.ErrTokenInvalid.Code, "未提供认证信息")
 			c.Abort()
@@ -65,7 +81,7 @@ func RequireJWT(cfg *config.Config, authService *service.AuthService) gin.Handle
 	}
 }
 
-func extractToken(c *gin.Context) string {
+func extractBearerToken(c *gin.Context) string {
 	auth := c.GetHeader("Authorization")
 	if auth == "" {
 		return ""

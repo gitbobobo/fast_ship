@@ -88,6 +88,28 @@ func TestRequireAuth_AllowsAPIKey(t *testing.T) {
 	}
 }
 
+func TestRequireAuthWithQueryToken_AllowsJWT(t *testing.T) {
+	env := setupAuthMiddlewareTest(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/query-token-protected?token="+env.jwtToken("user-1", "tester", "jti-query-jwt"), nil)
+
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var data map[string]string
+	decodeAuthEnvelope(t, rec, &data)
+	if data["user_id"] != "user-1" {
+		t.Fatalf("expected user_id user-1, got %q", data["user_id"])
+	}
+	if data["auth_type"] != AuthTypeJWT {
+		t.Fatalf("expected auth_type jwt, got %q", data["auth_type"])
+	}
+}
+
 func TestRequireJWT_RejectsAPIKey(t *testing.T) {
 	env := setupAuthMiddlewareTest(t)
 	rawKey := "RAWAPIKEY1234567890"
@@ -180,6 +202,14 @@ func setupAuthMiddlewareTest(t *testing.T) *authMiddlewareEnv {
 
 	router := gin.New()
 	router.GET("/protected", RequireAuth(cfg, apiKeyRepo, authService), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"user_id":      GetUserID(c),
+			"auth_type":    GetAuthType(c),
+			"username":     GetUserName(c),
+			"api_key_name": GetAPIKeyName(c),
+		})
+	})
+	router.GET("/query-token-protected", RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"user_id":      GetUserID(c),
 			"auth_type":    GetAuthType(c),
