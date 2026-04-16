@@ -6,6 +6,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,6 +36,8 @@ type routerEnvelope struct {
 	Message string          `json:"message"`
 	Data    json.RawMessage `json:"data"`
 }
+
+type routerConfigOption func(*config.Config)
 
 func TestRouterAuthRegisterLoginAndMe(t *testing.T) {
 	env := setupRouterTestEnv(t)
@@ -221,7 +224,71 @@ func TestRouterArtifactUploadAndDownloadWithAPIKey(t *testing.T) {
 	}
 }
 
-func setupRouterTestEnv(t *testing.T) *routerTestEnv {
+func TestRouterServesSPAFromWebDist(t *testing.T) {
+	webDistDir := t.TempDir()
+	indexHTML := []byte("<!doctype html><html><body><div id=\"root\"></div></body></html>")
+	assetJS := []byte("console.log('fast_ship')")
+
+	if err := os.MkdirAll(filepath.Join(webDistDir, "assets"), 0o755); err != nil {
+		t.Fatalf("mkdir assets: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDistDir, "index.html"), indexHTML, 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDistDir, "assets", "app.js"), assetJS, 0o644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	env := setupRouterTestEnv(t, func(cfg *config.Config) {
+		cfg.Server.WebDistDir = webDistDir
+	})
+
+	rootReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	rootRec := httptest.NewRecorder()
+	env.router.ServeHTTP(rootRec, rootReq)
+	if rootRec.Code != http.StatusOK {
+		t.Fatalf("expected root 200, got %d: %s", rootRec.Code, rootRec.Body.String())
+	}
+	if rootRec.Body.String() != string(indexHTML) {
+		t.Fatalf("expected index html, got %q", rootRec.Body.String())
+	}
+
+	spaReq := httptest.NewRequest(http.MethodGet, "/projects/123", nil)
+	spaRec := httptest.NewRecorder()
+	env.router.ServeHTTP(spaRec, spaReq)
+	if spaRec.Code != http.StatusOK {
+		t.Fatalf("expected SPA route 200, got %d: %s", spaRec.Code, spaRec.Body.String())
+	}
+	if spaRec.Body.String() != string(indexHTML) {
+		t.Fatalf("expected SPA fallback html, got %q", spaRec.Body.String())
+	}
+
+	assetReq := httptest.NewRequest(http.MethodGet, "/assets/app.js", nil)
+	assetRec := httptest.NewRecorder()
+	env.router.ServeHTTP(assetRec, assetReq)
+	if assetRec.Code != http.StatusOK {
+		t.Fatalf("expected asset 200, got %d: %s", assetRec.Code, assetRec.Body.String())
+	}
+	if assetRec.Body.String() != string(assetJS) {
+		t.Fatalf("expected asset body, got %q", assetRec.Body.String())
+	}
+
+	missingAssetReq := httptest.NewRequest(http.MethodGet, "/assets/missing.js", nil)
+	missingAssetRec := httptest.NewRecorder()
+	env.router.ServeHTTP(missingAssetRec, missingAssetReq)
+	if missingAssetRec.Code != http.StatusNotFound {
+		t.Fatalf("expected missing asset 404, got %d", missingAssetRec.Code)
+	}
+
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/unknown", nil)
+	apiRec := httptest.NewRecorder()
+	env.router.ServeHTTP(apiRec, apiReq)
+	if apiRec.Code != http.StatusNotFound {
+		t.Fatalf("expected API 404, got %d", apiRec.Code)
+	}
+}
+
+func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -255,6 +322,7 @@ func setupRouterTestEnv(t *testing.T) *routerTestEnv {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
 	cfg := &config.Config{
+		Server: config.ServerConfig{},
 		JWT: config.JWTConfig{
 			Secret:      "test-secret",
 			ExpireHours: 24,
@@ -262,6 +330,9 @@ func setupRouterTestEnv(t *testing.T) *routerTestEnv {
 		Encryption: config.EncryptionConfig{
 			Key: "12345678901234567890123456789012",
 		},
+	}
+	for _, opt := range opts {
+		opt(cfg)
 	}
 
 	fileStorage := storage.NewLocalStorage(filepath.Join(t.TempDir(), "uploads"))

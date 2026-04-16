@@ -16,8 +16,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port int    `mapstructure:"port"`
-	Mode string `mapstructure:"mode"`
+	Port       int    `mapstructure:"port"`
+	Mode       string `mapstructure:"mode"`
+	WebDistDir string `mapstructure:"web_dist_dir"`
 }
 
 type DatabaseConfig struct {
@@ -55,6 +56,7 @@ func Load(path string) (*Config, error) {
 	// 绑定关键环境变量
 	_ = viper.BindEnv("jwt.secret", "JWT_SECRET")
 	_ = viper.BindEnv("encryption.key", "ENCRYPTION_KEY")
+	_ = viper.BindEnv("server.web_dist_dir", "FAST_SHIP_WEB_DIST_DIR")
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, err

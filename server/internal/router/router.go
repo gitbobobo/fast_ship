@@ -95,4 +95,6 @@ func Setup(
 		api.DELETE("/artifacts/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Delete)
 		api.GET("/artifacts/:aid/download", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Download)
 	}
+
+	setupWebRoutes(r, cfg.Server.WebDistDir)
 }

@@ -1,6 +1,7 @@
 server:
   port: 4888
   mode: debug  # debug / release
+  web_dist_dir: ""  # 可选：前端构建产物目录，设置后由后端托管 SPA 静态资源
 
 database:
   path: ./data/fast_ship.db
