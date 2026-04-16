@@ -31,6 +31,16 @@ interface GitHubContentProps {
   className?: string;
 }
 
+function shouldPreferMarkdown(html?: string | null, markdown?: string | null) {
+  if (!html?.trim() || !markdown?.trim()) {
+    return false;
+  }
+
+  // GitHub can render private attachments to short-lived signed URLs in body_html.
+  // The original markdown usually still contains the stable user-attachments URL.
+  return html.includes("private-user-images.githubusercontent.com");
+}
+
 export function GitHubContent({
   html,
   markdown,
@@ -38,8 +48,9 @@ export function GitHubContent({
 }: GitHubContentProps) {
   const token = useAuthStore((state) => state.token);
   const rewrittenHtml = rewriteGitHubMediaHtml(html, token);
+  const useMarkdown = shouldPreferMarkdown(html, markdown);
 
-  if (html?.trim()) {
+  if (!useMarkdown && html?.trim()) {
     return (
       <div
         className={className}
