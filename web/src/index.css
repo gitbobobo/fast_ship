@@ -2,6 +2,12 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "github-markdown-css/github-markdown-light.css";
+@import "./styles/github-markdown-dark-scoped.css";
+
+.markdown-body {
+  background-color: transparent !important;
+}
 
 @custom-variant dark (&:is(.dark *));
 

@@ -19,6 +19,13 @@ interface Project {
     status: "pending" | "shipped";
     created_at: string;
   } | null;
+  issue_sync?: {
+    status: "idle" | "running" | "failed" | "completed";
+    last_issue_updated_at?: string | null;
+    last_synced_at?: string | null;
+    last_successful_sync_at?: string | null;
+    last_error: string;
+  } | null;
   created_at: string;
   updated_at: string;
 }
@@ -75,6 +82,107 @@ interface ApiKey {
   key_prefix: string;
   last_used_at: string | null;
   created_at: string;
+}
+
+interface IssueActor {
+  login: string;
+  avatar_url: string;
+}
+
+interface IssueLabel {
+  name: string;
+  color: string;
+  description: string;
+}
+
+interface IssueMilestone {
+  number: number;
+  title: string;
+  state: string;
+  description: string;
+}
+
+interface IssueReactions {
+  total_count: number;
+  "+1": number;
+  "-1": number;
+  laugh: number;
+  hooray: number;
+  confused: number;
+  heart: number;
+  rocket: number;
+  eyes: number;
+}
+
+interface Issue {
+  id: string;
+  project_id: string;
+  github_issue_id: number;
+  github_node_id: string;
+  number: number;
+  state: "open" | "closed";
+  state_reason: string;
+  title: string;
+  body: string;
+  body_html: string;
+  html_url: string;
+  author: IssueActor;
+  author_association: string;
+  assignees: IssueActor[];
+  labels: IssueLabel[];
+  milestone?: IssueMilestone | null;
+  reactions: IssueReactions;
+  comments_count: number;
+  locked: boolean;
+  active_lock_reason: string;
+  closed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  synced_at: string;
+}
+
+interface IssueComment {
+  id: string;
+  issue_id: string;
+  github_comment_id: number;
+  github_node_id: string;
+  body: string;
+  body_html: string;
+  html_url: string;
+  author: IssueActor;
+  author_association: string;
+  reactions: IssueReactions;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssueTimelineEvent {
+  id: string;
+  issue_id: string;
+  event_key: string;
+  event_type: string;
+  github_event_id: number;
+  actor: IssueActor;
+  body: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+interface IssueSyncResult {
+  project_id: string;
+  synced_issue_count: number;
+  synced_comment_count: number;
+  synced_timeline_count: number;
+  started_at: string;
+  completed_at: string;
+  last_issue_updated_at?: string | null;
+}
+
+interface IssueFilterOptions {
+  labels: string[];
+  assignees: string[];
+  milestones: string[];
 }
 
 interface ApiResponse<T> {

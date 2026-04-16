@@ -6,12 +6,13 @@ import {
   Rocket,
   Menu,
   Tags,
+  Bug,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
-import { Separator } from "@/components/ui/separator";
 
 const navItems = [
   { to: "/projects", label: "项目", icon: Package },
+  { to: "/issues", label: "问题", icon: Bug },
   { to: "/versions", label: "版本", icon: Tags },
 ];
 
@@ -20,11 +21,10 @@ const bottomNavItems = [{ to: "/settings", label: "设置", icon: Settings }];
 function NavContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-14 items-center gap-2 px-4">
+      <div className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
         <Rocket className="h-5 w-5 text-primary" />
         <span className="text-lg font-semibold tracking-tight">Fast Ship</span>
       </div>
-      <Separator />
       <nav className="flex-1 space-y-1 p-3">
         {navItems.map((item) => (
           <NavLink
@@ -81,7 +81,8 @@ export function MobileNav() {
   const location = useLocation();
 
   useEffect(() => {
-    setOpen(false);
+    const id = setTimeout(() => setOpen(false), 0);
+    return () => clearTimeout(id);
   }, [location.pathname]);
 
   return (

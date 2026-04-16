@@ -1,0 +1,57 @@
+import { api } from "./client";
+
+interface IssueListParams {
+  state?: string;
+  q?: string;
+  label?: string;
+  assignee?: string;
+  milestone?: string;
+  sort?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export const issueApi = {
+  list: (projectId: string, params: IssueListParams = {}) =>
+    api
+      .get(`projects/${projectId}/issues`, {
+        searchParams: {
+          page: params.page ?? 1,
+          page_size: params.page_size ?? 20,
+          ...(params.state ? { state: params.state } : {}),
+          ...(params.q ? { q: params.q } : {}),
+          ...(params.label ? { label: params.label } : {}),
+          ...(params.assignee ? { assignee: params.assignee } : {}),
+          ...(params.milestone ? { milestone: params.milestone } : {}),
+          ...(params.sort ? { sort: params.sort } : {}),
+        },
+      })
+      .json<ApiResponse<PaginatedData<Issue>>>(),
+
+  filterOptions: (projectId: string) =>
+    api
+      .get(`projects/${projectId}/issues/filter-options`)
+      .json<ApiResponse<IssueFilterOptions>>(),
+
+  get: (issueId: string) =>
+    api.get(`issues/${issueId}`).json<ApiResponse<Issue>>(),
+
+  comments: (issueId: string, page = 1, pageSize = 20) =>
+    api
+      .get(`issues/${issueId}/comments`, {
+        searchParams: { page, page_size: pageSize },
+      })
+      .json<ApiResponse<PaginatedData<IssueComment>>>(),
+
+  timeline: (issueId: string, page = 1, pageSize = 20) =>
+    api
+      .get(`issues/${issueId}/timeline`, {
+        searchParams: { page, page_size: pageSize },
+      })
+      .json<ApiResponse<PaginatedData<IssueTimelineEvent>>>(),
+
+  sync: (projectId: string) =>
+    api
+      .post(`projects/${projectId}/issues/sync`)
+      .json<ApiResponse<IssueSyncResult>>(),
+};

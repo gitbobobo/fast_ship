@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useParams, useNavigate } from "react-router";
-import { Plus, Pencil, Trash2, GitFork, Package } from "lucide-react";
+import { Plus, Pencil, Trash2, GitFork, Package, Bug, RefreshCw } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useProject, useDeleteProject } from "@/lib/hooks/use-projects";
 import { useVersions } from "@/lib/hooks/use-versions";
+import { useSyncProjectIssues } from "@/lib/hooks/use-issues";
 import { formatRelativeTime, formatDate } from "@/lib/utils/format";
 import { toast } from "sonner";
 
@@ -45,8 +46,10 @@ export default function ProjectDetailPage() {
     statusFilter === "all" ? undefined : statusFilter,
   );
   const deleteProject = useDeleteProject();
+  const syncIssues = useSyncProjectIssues(id!);
 
   const versions = versionsData?.items ?? [];
+  const issueSync = project?.issue_sync;
 
   const handleDelete = async () => {
     try {
@@ -55,6 +58,17 @@ export default function ProjectDetailPage() {
       navigate("/projects", { replace: true });
     } catch {
       toast.error("删除失败");
+    }
+  };
+
+  const handleSyncIssues = async () => {
+    try {
+      const res = await syncIssues.mutateAsync();
+      toast.success(
+        `同步完成：${res.data.synced_issue_count} 个问题，${res.data.synced_comment_count} 条评论`,
+      );
+    } catch {
+      toast.error("同步失败，请检查 GitHub 仓库配置和 Token");
     }
   };
 
@@ -136,6 +150,36 @@ export default function ProjectDetailPage() {
             <p className="mt-2 text-xs text-muted-foreground">
               创建于 {formatDate(project.created_at)}
             </p>
+            {issueSync && (
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span>Issues 同步状态</span>
+                <Badge
+                  variant={
+                    issueSync.status === "failed"
+                      ? "destructive"
+                      : issueSync.status === "completed"
+                        ? "default"
+                        : "secondary"
+                  }
+                >
+                  {issueSync.status === "running"
+                    ? "同步中"
+                    : issueSync.status === "failed"
+                      ? "同步失败"
+                      : issueSync.status === "completed"
+                        ? "同步完成"
+                        : "未同步"}
+                </Badge>
+                {issueSync.last_synced_at && (
+                  <span>最近同步 {formatRelativeTime(issueSync.last_synced_at)}</span>
+                )}
+                {issueSync.last_error && (
+                  <span className="text-destructive">
+                    最近错误：{issueSync.last_error}
+                  </span>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -218,6 +262,30 @@ export default function ProjectDetailPage() {
               ))}
             </div>
           )}
+        </div>
+
+        {/* 问题入口 */}
+        <div>
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">问题</h2>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" render={<Link to={`/issues?project=${id}`} />}>
+                查看全部问题
+              </Button>
+              <Button size="sm" onClick={handleSyncIssues} disabled={syncIssues.isPending}>
+                <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${syncIssues.isPending ? "animate-spin" : ""}`} />
+                {syncIssues.isPending ? "同步中..." : "同步 GitHub Issues"}
+              </Button>
+            </div>
+          </div>
+          <Card>
+            <CardContent className="flex flex-col items-center py-10">
+              <Bug className="mb-3 h-10 w-10 text-muted-foreground/50" />
+              <p className="text-sm text-muted-foreground">
+                在问题列表页查看和管理所有 GitHub Issues
+              </p>
+            </CardContent>
+          </Card>
         </div>
       </div>
     </>
