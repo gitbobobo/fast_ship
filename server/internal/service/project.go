@@ -14,23 +14,26 @@ import (
 )
 
 type ProjectService struct {
-	projectRepo *repository.ProjectRepository
-	versionRepo *repository.VersionRepository
-	storage     storage.Storage
-	cfg         *config.Config
+	projectRepo   *repository.ProjectRepository
+	versionRepo   *repository.VersionRepository
+	syncStateRepo *repository.IssueSyncStateRepository
+	storage       storage.Storage
+	cfg           *config.Config
 }
 
 func NewProjectService(
 	projectRepo *repository.ProjectRepository,
 	versionRepo *repository.VersionRepository,
+	syncStateRepo *repository.IssueSyncStateRepository,
 	storage storage.Storage,
 	cfg *config.Config,
 ) *ProjectService {
 	return &ProjectService{
-		projectRepo: projectRepo,
-		versionRepo: versionRepo,
-		storage:     storage,
-		cfg:         cfg,
+		projectRepo:   projectRepo,
+		versionRepo:   versionRepo,
+		syncStateRepo: syncStateRepo,
+		storage:       storage,
+		cfg:           cfg,
 	}
 }
 
@@ -51,14 +54,23 @@ type UpdateProjectRequest struct {
 }
 
 type ProjectResponse struct {
-	ID            string                 `json:"id"`
-	Name          string                 `json:"name"`
-	Description   string                 `json:"description"`
-	GithubOwner   string                 `json:"github_owner"`
-	GithubRepo    string                 `json:"github_repo"`
-	LatestVersion *LatestVersionResponse `json:"latest_version,omitempty"`
-	CreatedAt     string                 `json:"created_at"`
-	UpdatedAt     string                 `json:"updated_at"`
+	ID            string                         `json:"id"`
+	Name          string                         `json:"name"`
+	Description   string                         `json:"description"`
+	GithubOwner   string                         `json:"github_owner"`
+	GithubRepo    string                         `json:"github_repo"`
+	LatestVersion *LatestVersionResponse         `json:"latest_version,omitempty"`
+	IssueSync     *serviceIssueSyncStateResponse `json:"issue_sync,omitempty"`
+	CreatedAt     string                         `json:"created_at"`
+	UpdatedAt     string                         `json:"updated_at"`
+}
+
+type serviceIssueSyncStateResponse struct {
+	Status               model.IssueSyncStatus `json:"status"`
+	LastIssueUpdatedAt   *string               `json:"last_issue_updated_at,omitempty"`
+	LastSyncedAt         *string               `json:"last_synced_at,omitempty"`
+	LastSuccessfulSyncAt *string               `json:"last_successful_sync_at,omitempty"`
+	LastError            string                `json:"last_error"`
 }
 
 type LatestVersionResponse struct {
@@ -197,7 +209,7 @@ func (s *ProjectService) Delete(id, userID string) error {
 }
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
-	return &ProjectResponse{
+	resp := &ProjectResponse{
 		ID:          p.ID,
 		Name:        p.Name,
 		Description: p.Description,
@@ -206,4 +218,27 @@ func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 		CreatedAt:   p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:   p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+
+	if s.syncStateRepo != nil {
+		if state, err := s.syncStateRepo.GetOrCreate(p.ID); err == nil {
+			resp.IssueSync = &serviceIssueSyncStateResponse{
+				Status:    state.Status,
+				LastError: state.LastError,
+			}
+			if state.LastIssueUpdatedAt != nil {
+				value := state.LastIssueUpdatedAt.UTC().Format("2006-01-02T15:04:05Z")
+				resp.IssueSync.LastIssueUpdatedAt = &value
+			}
+			if state.LastSyncedAt != nil {
+				value := state.LastSyncedAt.UTC().Format("2006-01-02T15:04:05Z")
+				resp.IssueSync.LastSyncedAt = &value
+			}
+			if state.LastSuccessfulSyncAt != nil {
+				value := state.LastSuccessfulSyncAt.UTC().Format("2006-01-02T15:04:05Z")
+				resp.IssueSync.LastSuccessfulSyncAt = &value
+			}
+		}
+	}
+
+	return resp
 }

@@ -236,6 +236,10 @@ func setupRouterTestEnv(t *testing.T) *routerTestEnv {
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
+		&model.Issue{},
+		&model.IssueComment{},
+		&model.IssueTimelineEvent{},
+		&model.IssueSyncState{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -244,6 +248,10 @@ func setupRouterTestEnv(t *testing.T) *routerTestEnv {
 
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_number ON issues(project_id, number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_github_issue ON issues(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
 	cfg := &config.Config{
 		JWT: config.JWTConfig{
@@ -261,13 +269,18 @@ func setupRouterTestEnv(t *testing.T) *routerTestEnv {
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
+	issueRepo := repository.NewIssueRepository(db)
+	issueCommentRepo := repository.NewIssueCommentRepository(db)
+	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
+	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
-	projectService := service.NewProjectService(projectRepo, versionRepo, fileStorage, cfg)
+	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
+	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueSyncStateRepo, projectRepo, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 
@@ -275,10 +288,11 @@ func setupRouterTestEnv(t *testing.T) *routerTestEnv {
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
+	issueHandler := handler.NewIssueHandler(issueService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, artifactHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,

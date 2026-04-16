@@ -24,7 +24,12 @@ type testServices struct {
 	cfg             *config.Config
 	projectRepo     *repository.ProjectRepository
 	versionRepo     *repository.VersionRepository
+	issueRepo       *repository.IssueRepository
+	commentRepo     *repository.IssueCommentRepository
+	timelineRepo    *repository.IssueTimelineRepository
+	syncStateRepo   *repository.IssueSyncStateRepository
 	artifactRepo    *repository.ArtifactRepository
+	issueService    *IssueService
 	versionService  *VersionService
 	artifactService *ArtifactService
 	shipService     *ShipService
@@ -44,6 +49,10 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
+		&model.Issue{},
+		&model.IssueComment{},
+		&model.IssueTimelineEvent{},
+		&model.IssueSyncState{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -52,12 +61,20 @@ func setupTestServices(t *testing.T) *testServices {
 
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_number ON issues(project_id, number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_github_issue ON issues(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
 	tempDir := t.TempDir()
 	fileStorage := storage.NewLocalStorage(filepath.Join(tempDir, "uploads"))
 
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
+	issueRepo := repository.NewIssueRepository(db)
+	commentRepo := repository.NewIssueCommentRepository(db)
+	timelineRepo := repository.NewIssueTimelineRepository(db)
+	syncStateRepo := repository.NewIssueSyncStateRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 
 	cfg := &config.Config{
@@ -72,7 +89,12 @@ func setupTestServices(t *testing.T) *testServices {
 		cfg:             cfg,
 		projectRepo:     projectRepo,
 		versionRepo:     versionRepo,
+		issueRepo:       issueRepo,
+		commentRepo:     commentRepo,
+		timelineRepo:    timelineRepo,
+		syncStateRepo:   syncStateRepo,
 		artifactRepo:    artifactRepo,
+		issueService:    NewIssueService(issueRepo, commentRepo, timelineRepo, syncStateRepo, projectRepo, cfg, zap.NewNop()),
 		versionService:  NewVersionService(versionRepo, projectRepo, fileStorage),
 		artifactService: NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		shipService:     NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),

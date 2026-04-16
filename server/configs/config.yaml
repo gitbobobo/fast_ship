@@ -15,3 +15,8 @@ upload:
 
 encryption:
   key: "change-me-32-bytes-in-production"  # 32 字节 AES 密钥
+
+issues:
+  auto_sync_enabled: true
+  auto_sync_on_startup: true
+  auto_sync_interval_minutes: 15

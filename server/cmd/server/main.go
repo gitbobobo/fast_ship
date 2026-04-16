@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -68,6 +69,10 @@ func main() {
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
+		&model.Issue{},
+		&model.IssueComment{},
+		&model.IssueTimelineEvent{},
+		&model.IssueSyncState{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -77,6 +82,10 @@ func main() {
 	// 创建唯一索引
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_number ON issues(project_id, number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_github_issue ON issues(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
 	// 初始化存储
 	fileStorage := storage.NewLocalStorage(cfg.Upload.StoragePath)
@@ -86,14 +95,19 @@ func main() {
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
+	issueRepo := repository.NewIssueRepository(db)
+	issueCommentRepo := repository.NewIssueCommentRepository(db)
+	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
+	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
-	projectService := service.NewProjectService(projectRepo, versionRepo, fileStorage, cfg)
+	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
+	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueSyncStateRepo, projectRepo, cfg, zapLogger)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
 
@@ -102,6 +116,7 @@ func main() {
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
+	issueHandler := handler.NewIssueHandler(issueService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 
 	// 启动 JWT 黑名单清理任务
@@ -115,6 +130,30 @@ func main() {
 		}
 	}()
 
+	if cfg.Issues.AutoSyncEnabled {
+		interval := time.Duration(cfg.Issues.AutoSyncIntervalMinutes) * time.Minute
+		if interval <= 0 {
+			interval = 15 * time.Minute
+		}
+
+		zapLogger.Info("issue auto sync enabled",
+			zap.Duration("interval", interval),
+			zap.Bool("run_on_startup", cfg.Issues.AutoSyncOnStartup),
+		)
+
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+
+			if cfg.Issues.AutoSyncOnStartup {
+				issueService.SyncAllProjectsIncremental(context.Background())
+			}
+			for range ticker.C {
+				issueService.SyncAllProjectsIncremental(context.Background())
+			}
+		}()
+	}
+
 	// 设置 Gin
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
@@ -123,7 +162,7 @@ func main() {
 	r.MaxMultipartMemory = cfg.Upload.MaxFileSize
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, artifactHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

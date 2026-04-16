@@ -12,6 +12,7 @@ type Config struct {
 	JWT        JWTConfig        `mapstructure:"jwt"`
 	Upload     UploadConfig     `mapstructure:"upload"`
 	Encryption EncryptionConfig `mapstructure:"encryption"`
+	Issues     IssuesConfig     `mapstructure:"issues"`
 }
 
 type ServerConfig struct {
@@ -35,6 +36,12 @@ type UploadConfig struct {
 
 type EncryptionConfig struct {
 	Key string `mapstructure:"key"`
+}
+
+type IssuesConfig struct {
+	AutoSyncEnabled         bool `mapstructure:"auto_sync_enabled"`
+	AutoSyncOnStartup       bool `mapstructure:"auto_sync_on_startup"`
+	AutoSyncIntervalMinutes int  `mapstructure:"auto_sync_interval_minutes"`
 }
 
 func Load(path string) (*Config, error) {

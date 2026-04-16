@@ -26,6 +26,7 @@ type handlerTestEnv struct {
 	db              *gorm.DB
 	authHandler     *AuthHandler
 	versionHandler  *VersionHandler
+	issueHandler    *IssueHandler
 	artifactHandler *ArtifactHandler
 }
 
@@ -50,6 +51,10 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
+		&model.Issue{},
+		&model.IssueComment{},
+		&model.IssueTimelineEvent{},
+		&model.IssueSyncState{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -58,6 +63,10 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_number ON issues(project_id, number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_github_issue ON issues(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
 	cfg := &config.Config{
 		JWT: config.JWTConfig{
@@ -74,11 +83,16 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	userRepo := repository.NewUserRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
+	issueRepo := repository.NewIssueRepository(db)
+	issueCommentRepo := repository.NewIssueCommentRepository(db)
+	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
+	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
+	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueSyncStateRepo, projectRepo, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 
@@ -86,6 +100,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		db:              db,
 		authHandler:     NewAuthHandler(authService),
 		versionHandler:  NewVersionHandler(versionService, shipService),
+		issueHandler:    NewIssueHandler(issueService),
 		artifactHandler: NewArtifactHandler(artifactService),
 	}
 }

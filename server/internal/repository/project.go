@@ -59,3 +59,18 @@ func (r *ProjectRepository) ExistsByNameExcludeID(userID, name, excludeID string
 		Count(&count).Error
 	return count > 0, err
 }
+
+func (r *ProjectRepository) ListAll() ([]model.Project, error) {
+	var projects []model.Project
+	err := r.db.Order("created_at DESC").Find(&projects).Error
+	return projects, err
+}
+
+func (r *ProjectRepository) FindByIDAnyOwner(id string) (*model.Project, error) {
+	var project model.Project
+	err := r.db.Where("id = ?", id).First(&project).Error
+	if err != nil {
+		return nil, err
+	}
+	return &project, nil
+}

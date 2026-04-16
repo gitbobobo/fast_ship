@@ -16,6 +16,7 @@ func Setup(
 	apiKeyHandler *handler.ApiKeyHandler,
 	projectHandler *handler.ProjectHandler,
 	versionHandler *handler.VersionHandler,
+	issueHandler *handler.IssueHandler,
 	artifactHandler *handler.ArtifactHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
@@ -67,6 +68,11 @@ func Setup(
 			versionWrite.POST("", versionHandler.Create)
 		}
 
+		issueWrite := api.Group("/projects/:id/issues", middleware.RequireJWT(cfg, authService))
+		{
+			issueWrite.POST("/sync", issueHandler.Sync)
+		}
+
 		// JWT 必须 — 版本删除和发货
 		api.DELETE("/versions/:vid", middleware.RequireJWT(cfg, authService), versionHandler.Delete)
 		api.GET("/versions/:vid/ship-check", middleware.RequireJWT(cfg, authService), versionHandler.ShipCheck)
@@ -76,6 +82,12 @@ func Setup(
 		api.GET("/projects/:id/versions", middleware.RequireAuth(cfg, apiKeyRepo, authService), versionHandler.List)
 		api.GET("/versions/:vid", middleware.RequireAuth(cfg, apiKeyRepo, authService), versionHandler.Get)
 		api.PUT("/versions/:vid", middleware.RequireAuth(cfg, apiKeyRepo, authService), versionHandler.Update)
+
+		api.GET("/projects/:id/issues", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.List)
+		api.GET("/projects/:id/issues/filter-options", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.FilterOptions)
+		api.GET("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Get)
+		api.GET("/issues/:iid/comments", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListComments)
+		api.GET("/issues/:iid/timeline", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListTimeline)
 
 		// JWT / API Key 均可 — 安装包操作
 		api.POST("/versions/:vid/artifacts", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Upload)
