@@ -95,3 +95,17 @@ fast_ship/
 - 后端仍可在 `server/` 下使用 `make dev`、`make build` 等命令。
 - 前端仍可在 `web/` 下使用 `pnpm dev`、`pnpm test`、`pnpm lint` 等命令。
 - 需求和设计文档位于 [docs](/Users/godbobo/work/projects/fast_ship/docs)。
+
+## Docker 镜像发布
+
+- 当前仓库的整站 Docker 镜像构建使用 [Dockerfile](/Users/godbobo/work/projects/fast_ship/Dockerfile)。
+- 镜像会同时构建 `web/` 前端并编译 `server/` 后端，启动后由 Go 服务直接托管前端静态资源。
+- 推送形如 `v1.0.0` 的 Git tag 后，GitHub Actions 会自动构建并推送镜像到 `ghcr.io/<owner>/<repo>`。
+- 推送后的镜像会同时带上对应 tag 和 `latest` 标签。
+
+示例：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
