@@ -27,7 +27,7 @@ type gitHubIssueClient interface {
 	ValidateRepository(ctx context.Context) error
 	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*ghclient.Issue, *gh.Response, error)
 	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.IssueComment, *gh.Response, error)
-	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*gh.Timeline, *gh.Response, error)
+	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.TimelineEvent, *gh.Response, error)
 }
 
 type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
@@ -867,7 +867,7 @@ func mapReactions(r *gh.Reactions) IssueReactionSummaryResponse {
 	}
 }
 
-func summarizeTimeline(item *gh.Timeline) string {
+func summarizeTimeline(item *ghclient.TimelineEvent) string {
 	eventType := item.GetEvent()
 	switch eventType {
 	case "labeled":
@@ -909,6 +909,16 @@ func summarizeTimeline(item *gh.Timeline) string {
 		return "订阅了此问题"
 	case "unsubscribed":
 		return "取消订阅此问题"
+	case "added_type", "issue_type_added":
+		if item.GetIssueType() != nil {
+			return fmt.Sprintf("添加了问题类型 %s", item.GetIssueType().GetName())
+		}
+		return "添加了问题类型"
+	case "removed_type", "issue_type_removed":
+		if item.GetIssueType() != nil {
+			return fmt.Sprintf("移除了问题类型 %s", item.GetIssueType().GetName())
+		}
+		return "移除了问题类型"
 	default:
 		if eventType == "" {
 			return "发生了更新"
@@ -917,7 +927,7 @@ func summarizeTimeline(item *gh.Timeline) string {
 	}
 }
 
-func buildTimelineEventKey(item *gh.Timeline) string {
+func buildTimelineEventKey(item *ghclient.TimelineEvent) string {
 	if item.GetID() != 0 {
 		return fmt.Sprintf("gh:%d", item.GetID())
 	}

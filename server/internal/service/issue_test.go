@@ -58,14 +58,16 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 				},
 			},
 		},
-		timeline: map[int][]*gh.Timeline{
+		timeline: map[int][]*ghclient.TimelineEvent{
 			42: {
 				{
-					ID:        int64Ptr(701),
-					Event:     stringPtr("labeled"),
-					Actor:     &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
-					Label:     &gh.Label{Name: stringPtr("bug")},
-					CreatedAt: &gh.Timestamp{Time: now.Add(-20 * time.Minute)},
+					Timeline: gh.Timeline{
+						ID:        int64Ptr(701),
+						Event:     stringPtr("labeled"),
+						Actor:     &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
+						Label:     &gh.Label{Name: stringPtr("bug")},
+						CreatedAt: &gh.Timestamp{Time: now.Add(-20 * time.Minute)},
+					},
 				},
 			},
 		},
@@ -127,7 +129,7 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 type fakeIssueGitHubClient struct {
 	issues   []*ghclient.Issue
 	comments map[int][]*ghclient.IssueComment
-	timeline map[int][]*gh.Timeline
+	timeline map[int][]*ghclient.TimelineEvent
 }
 
 func (f *fakeIssueGitHubClient) ValidateRepository(context.Context) error {
@@ -142,7 +144,7 @@ func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber
 	return f.comments[issueNumber], &gh.Response{NextPage: 0}, nil
 }
 
-func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber, _, _ int) ([]*gh.Timeline, *gh.Response, error) {
+func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber, _, _ int) ([]*ghclient.TimelineEvent, *gh.Response, error) {
 	return f.timeline[issueNumber], &gh.Response{NextPage: 0}, nil
 }
 

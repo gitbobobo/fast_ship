@@ -119,9 +119,48 @@ func (c *Client) ListIssueComments(ctx context.Context, issueNumber, page, perPa
 	return comments, resp, nil
 }
 
-func (c *Client) ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*gh.Timeline, *gh.Response, error) {
-	opts := &gh.ListOptions{Page: page, PerPage: perPage}
-	return c.client.Issues.ListIssueTimeline(ctx, c.owner, c.repo, issueNumber, opts)
+type TimelineIssueType struct {
+	ID    int64  `json:"id,omitempty"`
+	NodeID string `json:"node_id,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Color string `json:"color,omitempty"`
+}
+
+func (t *TimelineIssueType) GetName() string  { if t == nil { return "" }; return t.Name }
+func (t *TimelineIssueType) GetColor() string { if t == nil { return "" }; return t.Color }
+
+type TimelineEvent struct {
+	gh.Timeline
+	IssueType *TimelineIssueType `json:"issue_type,omitempty"`
+}
+
+func (t *TimelineEvent) GetIssueType() *TimelineIssueType {
+	if t == nil {
+		return nil
+	}
+	return t.IssueType
+}
+
+func (c *Client) ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, *gh.Response, error) {
+	query := url.Values{}
+	if page > 0 {
+		query.Set("page", fmt.Sprintf("%d", page))
+	}
+	if perPage > 0 {
+		query.Set("per_page", fmt.Sprintf("%d", perPage))
+	}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/timeline?%s", c.owner, c.repo, issueNumber, query.Encode())
+	req, err := c.client.NewRequest("GET", path, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var events []*TimelineEvent
+	resp, err := c.client.Do(ctx, req, &events)
+	if err != nil {
+		return nil, resp, err
+	}
+	return events, resp, nil
 }
 
 // CreateTag 创建 Git Tag（如果不存在）
