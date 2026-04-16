@@ -663,12 +663,13 @@ export default function IssuesPage() {
                         </div>
                       </div>
 
-                      {/* Right side: updated time */}
-                      <div className="shrink-0 text-right">
-                        <p className="text-xs text-muted-foreground">
-                          更新于 {formatRelativeTime(issue.updated_at)}
-                        </p>
-                      </div>
+                    </div>
+
+                    {/* Bottom-right: updated time */}
+                    <div className="absolute bottom-4 right-3 text-right">
+                      <p className="text-xs text-muted-foreground">
+                        更新于 {formatRelativeTime(issue.updated_at)}
+                      </p>
                     </div>
                   </CardContent>
                 </Card>
