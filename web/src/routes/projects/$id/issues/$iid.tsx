@@ -60,6 +60,8 @@ import {
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
+import { useAuthStore } from "@/lib/store/auth-store";
+import { toGitHubMediaProxyUrl } from "@/lib/utils/github-media-proxy";
 import { cn } from "@/lib/utils";
 import { formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
@@ -304,6 +306,7 @@ type TimelineItem =
   | { type: "event"; data: IssueTimelineEvent; created_at: string };
 
 export default function IssueDetailPage() {
+  const token = useAuthStore((state) => state.token);
   const { id, iid } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -817,7 +820,7 @@ export default function IssueDetailPage() {
                 <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
                   <div className="flex items-center gap-2">
                     <Avatar size="sm">
-                      <AvatarImage src={issue.author.avatar_url} alt={issue.author.login} />
+                      <AvatarImage src={toGitHubMediaProxyUrl(issue.author.avatar_url, token)} alt={issue.author.login} />
                       <AvatarFallback>{getInitials(issue.author.login)}</AvatarFallback>
                     </Avatar>
                     <span className="font-medium text-foreground">@{issue.author.login}</span>
@@ -879,7 +882,7 @@ export default function IssueDetailPage() {
                           <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-3 md:px-5">
                             <div className="flex items-center gap-3">
                               <Avatar size="sm">
-                                <AvatarImage src={item.data.author.avatar_url} alt={item.data.author.login} />
+                                <AvatarImage src={toGitHubMediaProxyUrl(item.data.author.avatar_url, token)} alt={item.data.author.login} />
                                 <AvatarFallback>{getInitials(item.data.author.login)}</AvatarFallback>
                               </Avatar>
                               <div className="flex flex-col">
@@ -1020,7 +1023,7 @@ export default function IssueDetailPage() {
                 {/* 创建者 */}
                 <div className="flex items-center gap-3">
                   <Avatar size="lg" className="h-12 w-12">
-                    <AvatarImage src={issue.author.avatar_url} alt={issue.author.login} />
+                    <AvatarImage src={toGitHubMediaProxyUrl(issue.author.avatar_url, token)} alt={issue.author.login} />
                     <AvatarFallback>{getInitials(issue.author.login)}</AvatarFallback>
                   </Avatar>
                   <div className="min-w-0">
@@ -1042,7 +1045,7 @@ export default function IssueDetailPage() {
                               className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm"
                             >
                               <Avatar size="sm">
-                                <AvatarImage src={assignee.avatar_url} alt={assignee.login} />
+                                <AvatarImage src={toGitHubMediaProxyUrl(assignee.avatar_url, token)} alt={assignee.login} />
                                 <AvatarFallback>{getInitials(assignee.login)}</AvatarFallback>
                               </Avatar>
                               <span className="font-medium">@{assignee.login}</span>

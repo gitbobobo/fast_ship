@@ -16,6 +16,7 @@ import {
   useSyncProjectIssues,
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
+import { useAuthStore } from "@/lib/store/auth-store";
 import { toast } from "sonner";
 
 function hasExactTextContent(text: string) {
@@ -49,6 +50,10 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useInfiniteIssueTimeline: vi.fn(),
   useSyncProjectIssues: vi.fn(),
   useUpdateIssueInternalMeta: vi.fn(),
+}));
+
+vi.mock("@/lib/store/auth-store", () => ({
+  useAuthStore: vi.fn(),
 }));
 
 function mockIssueDetailData() {
@@ -290,8 +295,18 @@ function mockIssueDetailData() {
 describe("Issue pages", () => {
   const writeText = vi.fn();
   const openWindow = vi.fn();
+  const authState = {
+    token: "jwt-token" as string | null,
+    user: null as User | null,
+    setAuth: vi.fn(),
+    setUser: vi.fn(),
+    logout: vi.fn(),
+  };
 
   beforeEach(() => {
+    authState.token = "jwt-token";
+    vi.mocked(useAuthStore).mockImplementation(((selector?: (state: typeof authState) => unknown) =>
+      selector ? selector(authState) : authState) as typeof useAuthStore);
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
     writeText.mockResolvedValue(undefined);
     openWindow.mockReset();
@@ -719,8 +734,60 @@ describe("Issue pages", () => {
 
     expect(screen.getByRole("img", { name: "Image" })).toHaveAttribute(
       "src",
-      "https://github.com/user-attachments/assets/demo",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
     );
     expect(document.querySelector("script")).toBeNull();
+  });
+
+  it("appends the auth token to proxy urls in rendered html", async () => {
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: {
+        id: "issue-1",
+        project_id: "proj-1",
+        github_issue_id: 1001,
+        github_node_id: "I_kw",
+        number: 42,
+        state: "open",
+        state_reason: "",
+        title: "Crash on launch",
+        body: "fallback",
+        body_html:
+          '<p><img alt="Rendered image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo" /></p>',
+        html_url: "https://github.com/acme/alpha/issues/42",
+        author: { login: "alice", avatar_url: "" },
+        author_association: "MEMBER",
+        assignees: [],
+        labels: [],
+        reactions: {
+          total_count: 0,
+          "+1": 0,
+          "-1": 0,
+          laugh: 0,
+          hooray: 0,
+          confused: 0,
+          heart: 0,
+          rocket: 0,
+          eyes: 0,
+        },
+        comments_count: 0,
+        locked: false,
+        active_lock_reason: "",
+        created_at: "2026-04-10T10:00:00Z",
+        updated_at: "2026-04-12T10:00:00Z",
+        synced_at: "2026-04-12T10:05:00Z",
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(screen.getByRole("img", { name: "Rendered image" })).toHaveAttribute(
+      "src",
+      "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+    );
   });
 });
