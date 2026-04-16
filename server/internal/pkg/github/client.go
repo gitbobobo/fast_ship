@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"time"
 
 	gh "github.com/google/go-github/v62/github"
 	"golang.org/x/oauth2"
@@ -16,6 +18,32 @@ type Client struct {
 	client *gh.Client
 	owner  string
 	repo   string
+}
+
+const mediaTypeFullJSON = "application/vnd.github.full+json"
+
+type Issue struct {
+	gh.Issue
+	BodyHTML *string `json:"body_html,omitempty"`
+}
+
+func (i *Issue) GetBodyHTML() string {
+	if i == nil || i.BodyHTML == nil {
+		return ""
+	}
+	return *i.BodyHTML
+}
+
+type IssueComment struct {
+	gh.IssueComment
+	BodyHTML *string `json:"body_html,omitempty"`
+}
+
+func (c *IssueComment) GetBodyHTML() string {
+	if c == nil || c.BodyHTML == nil {
+		return ""
+	}
+	return *c.BodyHTML
 }
 
 func NewClient(token, owner, repo string) *Client {
@@ -31,6 +59,69 @@ func NewClient(token, owner, repo string) *Client {
 func (c *Client) ValidateRepository(ctx context.Context) error {
 	_, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
 	return err
+}
+
+func (c *Client) ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error) {
+	query := url.Values{}
+	if state != "" {
+		query.Set("state", state)
+	}
+	query.Set("sort", "updated")
+	query.Set("direction", "asc")
+	if page > 0 {
+		query.Set("page", fmt.Sprintf("%d", page))
+	}
+	if perPage > 0 {
+		query.Set("per_page", fmt.Sprintf("%d", perPage))
+	}
+	if since != nil {
+		query.Set("since", since.UTC().Format(time.RFC3339))
+	}
+
+	path := fmt.Sprintf("repos/%s/%s/issues?%s", c.owner, c.repo, query.Encode())
+	req, err := c.client.NewRequest("GET", path, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Accept", mediaTypeFullJSON)
+
+	var issues []*Issue
+	resp, err := c.client.Do(ctx, req, &issues)
+	if err != nil {
+		return nil, resp, err
+	}
+	return issues, resp, nil
+}
+
+func (c *Client) ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, *gh.Response, error) {
+	query := url.Values{}
+	query.Set("sort", "created")
+	query.Set("direction", "asc")
+	if page > 0 {
+		query.Set("page", fmt.Sprintf("%d", page))
+	}
+	if perPage > 0 {
+		query.Set("per_page", fmt.Sprintf("%d", perPage))
+	}
+
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?%s", c.owner, c.repo, issueNumber, query.Encode())
+	req, err := c.client.NewRequest("GET", path, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Accept", mediaTypeFullJSON)
+
+	var comments []*IssueComment
+	resp, err := c.client.Do(ctx, req, &comments)
+	if err != nil {
+		return nil, resp, err
+	}
+	return comments, resp, nil
+}
+
+func (c *Client) ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*gh.Timeline, *gh.Response, error) {
+	opts := &gh.ListOptions{Page: page, PerPage: perPage}
+	return c.client.Issues.ListIssueTimeline(ctx, c.owner, c.repo, issueNumber, opts)
 }
 
 // CreateTag 创建 Git Tag（如果不存在）

@@ -1,0 +1,112 @@
+package model
+
+import "time"
+
+type IssueState string
+
+const (
+	IssueStateOpen   IssueState = "open"
+	IssueStateClosed IssueState = "closed"
+)
+
+type IssueSyncStatus string
+
+const (
+	IssueSyncStatusIdle      IssueSyncStatus = "idle"
+	IssueSyncStatusRunning   IssueSyncStatus = "running"
+	IssueSyncStatusFailed    IssueSyncStatus = "failed"
+	IssueSyncStatusCompleted IssueSyncStatus = "completed"
+)
+
+type Issue struct {
+	ID                string     `gorm:"type:text;primaryKey" json:"id"`
+	ProjectID         string     `gorm:"type:text;not null;index" json:"project_id"`
+	GitHubIssueID     int64      `gorm:"column:github_issue_id;not null;index" json:"github_issue_id"`
+	GitHubNodeID      string     `gorm:"column:github_node_id;type:text" json:"github_node_id"`
+	Number            int        `gorm:"not null;index" json:"number"`
+	State             IssueState `gorm:"type:text;not null;index" json:"state"`
+	StateReason       string     `gorm:"type:text" json:"state_reason"`
+	Title             string     `gorm:"type:text;not null" json:"title"`
+	Body              string     `gorm:"type:text" json:"body"`
+	BodyHTML          string     `gorm:"column:body_html;type:text" json:"body_html"`
+	HTMLURL           string     `gorm:"type:text" json:"html_url"`
+	AuthorLogin       string     `gorm:"type:text" json:"author_login"`
+	AuthorAvatarURL   string     `gorm:"type:text" json:"author_avatar_url"`
+	AuthorAssociation string     `gorm:"type:text" json:"author_association"`
+	AssigneesJSON     string     `gorm:"type:text" json:"-"`
+	LabelsJSON        string     `gorm:"type:text" json:"-"`
+	MilestoneJSON     string     `gorm:"type:text" json:"-"`
+	ReactionsJSON     string     `gorm:"type:text" json:"-"`
+	CommentsCount     int        `gorm:"not null;default:0" json:"comments_count"`
+	Locked            bool       `gorm:"not null;default:false" json:"locked"`
+	ActiveLockReason  string     `gorm:"type:text" json:"active_lock_reason"`
+	ClosedAt          *time.Time `json:"closed_at"`
+	GitHubCreatedAt   time.Time  `gorm:"column:created_at;not null;index" json:"created_at"`
+	GitHubUpdatedAt   time.Time  `gorm:"column:updated_at;not null;index" json:"updated_at"`
+	SyncedAt          time.Time  `gorm:"not null;index" json:"synced_at"`
+	RawJSON           string     `gorm:"type:text" json:"-"`
+
+	Project        Project              `gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE" json:"-"`
+	Comments       []IssueComment       `gorm:"foreignKey:IssueID" json:"-"`
+	TimelineEvents []IssueTimelineEvent `gorm:"foreignKey:IssueID" json:"-"`
+}
+
+func (Issue) TableName() string {
+	return "issues"
+}
+
+type IssueComment struct {
+	ID                string    `gorm:"type:text;primaryKey" json:"id"`
+	IssueID           string    `gorm:"type:text;not null;index" json:"issue_id"`
+	GitHubCommentID   int64     `gorm:"column:github_comment_id;not null;index" json:"github_comment_id"`
+	GitHubNodeID      string    `gorm:"column:github_node_id;type:text" json:"github_node_id"`
+	Body              string    `gorm:"type:text" json:"body"`
+	BodyHTML          string    `gorm:"column:body_html;type:text" json:"body_html"`
+	HTMLURL           string    `gorm:"type:text" json:"html_url"`
+	AuthorLogin       string    `gorm:"type:text" json:"author_login"`
+	AuthorAvatarURL   string    `gorm:"type:text" json:"author_avatar_url"`
+	AuthorAssociation string    `gorm:"type:text" json:"author_association"`
+	ReactionsJSON     string    `gorm:"type:text" json:"-"`
+	GitHubCreatedAt   time.Time `gorm:"column:created_at;not null;index" json:"created_at"`
+	GitHubUpdatedAt   time.Time `gorm:"column:updated_at;not null;index" json:"updated_at"`
+	RawJSON           string    `gorm:"type:text" json:"-"`
+
+	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (IssueComment) TableName() string {
+	return "issue_comments"
+}
+
+type IssueTimelineEvent struct {
+	ID              string    `gorm:"type:text;primaryKey" json:"id"`
+	IssueID         string    `gorm:"type:text;not null;index" json:"issue_id"`
+	EventKey        string    `gorm:"type:text;not null;index" json:"event_key"`
+	GitHubEventID   int64     `gorm:"column:github_event_id;not null;default:0;index" json:"github_event_id"`
+	EventType       string    `gorm:"type:text;not null;index" json:"event_type"`
+	ActorLogin      string    `gorm:"type:text" json:"actor_login"`
+	ActorAvatarURL  string    `gorm:"type:text" json:"actor_avatar_url"`
+	Body            string    `gorm:"type:text" json:"body"`
+	Summary         string    `gorm:"type:text" json:"summary"`
+	PayloadJSON     string    `gorm:"type:text" json:"-"`
+	GitHubCreatedAt time.Time `gorm:"column:created_at;not null;index" json:"created_at"`
+
+	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (IssueTimelineEvent) TableName() string {
+	return "issue_timeline_events"
+}
+
+type IssueSyncState struct {
+	ProjectID            string          `gorm:"type:text;primaryKey" json:"project_id"`
+	Status               IssueSyncStatus `gorm:"type:text;not null;default:idle" json:"status"`
+	LastIssueUpdatedAt   *time.Time      `json:"last_issue_updated_at"`
+	LastSyncedAt         *time.Time      `json:"last_synced_at"`
+	LastSuccessfulSyncAt *time.Time      `json:"last_successful_sync_at"`
+	LastError            string          `gorm:"type:text" json:"last_error"`
+}
+
+func (IssueSyncState) TableName() string {
+	return "issue_sync_states"
+}

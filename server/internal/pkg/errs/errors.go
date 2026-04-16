@@ -44,6 +44,7 @@ var (
 	ErrVersionNotFound  = New(40402, "版本不存在")
 	ErrArtifactNotFound = New(40403, "安装包不存在")
 	ErrApiKeyNotFound   = New(40404, "API Key 不存在")
+	ErrIssueNotFound    = New(40405, "问题不存在")
 )
 
 // 业务冲突 40900-40999
@@ -55,6 +56,7 @@ var (
 	ErrVersionNotPending   = New(40904, "版本不是待发货状态，无法执行此操作")
 	ErrVersionShipped      = New(40905, "版本已发货，无法修改")
 	ErrShipPreCheckFailed  = New(40906, "发货前置校验未通过")
+	ErrIssueSyncRunning    = New(40907, "问题同步正在进行中")
 )
 
 // 服务器内部错误 50000-50099
