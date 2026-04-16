@@ -1,24 +1,38 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import {
   ArrowLeft,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
-  ExternalLink,
-  Link2,
-  MessageSquare,
-  RefreshCw,
-  CheckCircle2,
   Circle,
-  Clock,
+  CircleDot,
   Copy,
   Ellipsis,
+  ExternalLink,
+  Eye,
+  Flag,
+  GitBranch,
+  GitCommit,
+  GitMerge,
+  Link2,
+  Lock,
+  MessageSquare,
+  Pencil,
+  RefreshCw,
+  Tag,
+  Unlock,
+  User,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+} from "@/components/ui/dialog";
 
 import {
   DropdownMenu,
@@ -28,7 +42,6 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -45,6 +58,138 @@ import { toast } from "sonner";
 
 function getInitials(login: string) {
   return login.slice(0, 2).toUpperCase();
+}
+
+function getEventIcon(eventType: string) {
+  switch (eventType) {
+    case "labeled":
+    case "unlabeled":
+      return Tag;
+    case "milestoned":
+    case "demilestoned":
+      return Flag;
+    case "assigned":
+    case "unassigned":
+      return User;
+    case "closed":
+      return CheckCircle2;
+    case "reopened":
+      return Circle;
+    case "renamed":
+      return Pencil;
+    case "locked":
+      return Lock;
+    case "unlocked":
+      return Unlock;
+    case "referenced":
+    case "cross-referenced":
+      return GitCommit;
+    case "merged":
+      return GitMerge;
+    case "head_ref_deleted":
+    case "head_ref_restored":
+      return GitBranch;
+    case "review_requested":
+    case "review_request_removed":
+      return Eye;
+    case "issue_type_added":
+    case "issue_type_removed":
+    case "added_type":
+    case "removed_type":
+      return CircleDot;
+    default:
+      return Circle;
+  }
+}
+
+function getLabelFromPayload(payload: Record<string, unknown>) {
+  if (!payload || typeof payload !== "object") return null;
+  const label = payload.label as Record<string, unknown> | undefined;
+  if (!label || typeof label !== "object") return null;
+  return {
+    name: String(label.name || ""),
+    color: String(label.color || ""),
+  };
+}
+
+function getIssueTypeFromPayload(payload: Record<string, unknown>) {
+  if (!payload || typeof payload !== "object") return null;
+  const issueType = payload.issue_type as Record<string, unknown> | undefined;
+  if (!issueType || typeof issueType !== "object") return null;
+  return {
+    name: String(issueType.name || ""),
+    color: String(issueType.color || ""),
+  };
+}
+
+function ColoredPill({ name, color }: { name: string; color: string }) {
+  const bg = color ? `#${color}20` : "var(--muted)";
+  const text = color ? `#${color}` : "var(--muted-foreground)";
+  return (
+    <span
+      className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium"
+      style={{ backgroundColor: bg, borderColor: `${text}40`, color: text }}
+    >
+      {name}
+    </span>
+  );
+}
+
+function renderEventSummary(event: IssueTimelineEvent) {
+  switch (event.event_type) {
+    case "labeled": {
+      const label = getLabelFromPayload(event.payload);
+      if (label?.name) {
+        return (
+          <>
+            添加了标签 <ColoredPill name={label.name} color={label.color} />
+          </>
+        );
+      }
+      if (event.summary && event.summary !== event.event_type) return event.summary;
+      return "添加了标签";
+    }
+    case "unlabeled": {
+      const label = getLabelFromPayload(event.payload);
+      if (label?.name) {
+        return (
+          <>
+            移除了标签 <ColoredPill name={label.name} color={label.color} />
+          </>
+        );
+      }
+      if (event.summary && event.summary !== event.event_type) return event.summary;
+      return "移除了标签";
+    }
+    case "issue_type_added":
+    case "added_type": {
+      const type = getIssueTypeFromPayload(event.payload);
+      if (type?.name) {
+        return (
+          <>
+            添加了问题类型 <ColoredPill name={type.name} color={type.color} />
+          </>
+        );
+      }
+      if (event.summary && event.summary !== event.event_type) return event.summary;
+      return "添加了问题类型";
+    }
+    case "issue_type_removed":
+    case "removed_type": {
+      const type = getIssueTypeFromPayload(event.payload);
+      if (type?.name) {
+        return (
+          <>
+            移除了问题类型 <ColoredPill name={type.name} color={type.color} />
+          </>
+        );
+      }
+      if (event.summary && event.summary !== event.event_type) return event.summary;
+      return "移除了问题类型";
+    }
+    default:
+      return event.summary || event.event_type;
+  }
 }
 
 function getCommentAnchorId(commentId: number) {
@@ -112,6 +257,10 @@ function EmptyState({ message }: { message: string }) {
   );
 }
 
+type TimelineItem =
+  | { type: "comment"; data: IssueComment; created_at: string }
+  | { type: "event"; data: IssueTimelineEvent; created_at: string };
+
 export default function IssueDetailPage() {
   const { id, iid } = useParams();
   const location = useLocation();
@@ -120,22 +269,24 @@ export default function IssueDetailPage() {
   const issueContext = readIssueDetailContext(searchParams);
   const commentsPage = Math.max(Number(searchParams.get("comments_page") ?? "1") || 1, 1);
   const timelinePage = Math.max(Number(searchParams.get("timeline_page") ?? "1") || 1, 1);
-  const tabParam = searchParams.get("issue_tab");
-  const isTimelineHash = location.hash === "#timeline";
-  const isCommentsHash = location.hash === "#comments";
   const isCommentAnchorHash = location.hash.startsWith("#issuecomment-");
   const isTimelineAnchorHash = location.hash.startsWith("#issueevent-");
   const [flashHighlightId, setFlashHighlightId] = useState<string | null>(
     isCommentAnchorHash || isTimelineAnchorHash ? location.hash.slice(1) : null
   );
-  const activeTab =
-    isTimelineHash || isTimelineAnchorHash || (tabParam === "timeline" && !isCommentsHash && !isCommentAnchorHash)
-      ? "timeline"
-      : "comments";
-  const commentsSentinelRef = useRef<HTMLDivElement | null>(null);
-  const timelineSentinelRef = useRef<HTMLDivElement | null>(null);
-  const commentsSectionRef = useRef<HTMLDivElement | null>(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const timelineSectionRef = useRef<HTMLDivElement | null>(null);
+
+  const handleImageClick = useCallback((e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === "IMG") {
+      const img = target as HTMLImageElement;
+      setLightboxImage({ src: img.src, alt: img.alt });
+      setLightboxOpen(true);
+    }
+  }, []);
 
   const { data: issue, isLoading } = useIssue(iid!);
   const { data: issueListData } = useIssues(id!, {
@@ -206,14 +357,29 @@ export default function IssueDetailPage() {
   const timelineTotal = infiniteTimelineData?.pages[0]?.total ?? 0;
   const loadedCommentsPages = infiniteCommentsData?.pages.length ?? 1;
   const loadedTimelinePages = infiniteTimelineData?.pages.length ?? 1;
-  const targetCommentAnchorId = activeTab === "comments" && isCommentAnchorHash ? location.hash.slice(1) : null;
-  const targetTimelineAnchorId = activeTab === "timeline" && isTimelineAnchorHash ? location.hash.slice(1) : null;
+  const targetCommentAnchorId = isCommentAnchorHash ? location.hash.slice(1) : null;
+  const targetTimelineAnchorId = isTimelineAnchorHash ? location.hash.slice(1) : null;
   const activeComment = targetCommentAnchorId
     ? comments.find((comment) => getCommentAnchorId(comment.github_comment_id) === targetCommentAnchorId)
     : null;
   const activeTimelineEvent = targetTimelineAnchorId
     ? timeline.find((event) => getTimelineAnchorId(event.github_event_id) === targetTimelineAnchorId)
     : null;
+
+  const timelineItems: TimelineItem[] = useMemo(() => {
+    const items: TimelineItem[] = [
+      ...comments.map((c) => ({ type: "comment" as const, data: c, created_at: c.created_at })),
+      ...timeline.map((e) => ({ type: "event" as const, data: e, created_at: e.created_at })),
+    ];
+    items.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    return items;
+  }, [comments, timeline]);
+
+  const totalLoaded = comments.length + timeline.length;
+  const totalItems = commentsTotal + timelineTotal;
+  const hasMore = hasNextCommentsPage || hasNextTimelinePage;
+  const isLoadingMore = isFetchingNextCommentsPage || isFetchingNextTimelinePage;
+  const isLoadingTimeline = commentsLoading || timelineLoading;
 
   const updateSearchParam = useCallback(
     (key: string, value: number) => {
@@ -228,20 +394,12 @@ export default function IssueDetailPage() {
     [searchParams, setSearchParams]
   );
 
-  const setTabAndAnchor = (tab: "comments" | "timeline", hash?: string) => {
-    const next = new URLSearchParams(searchParams);
-    if (tab === "comments") {
-      next.delete("issue_tab");
-    } else {
-      next.set("issue_tab", tab);
-    }
-    const nextSearch = next.toString();
-
+  const setAnchor = (hash: string) => {
     navigate(
       {
         pathname: location.pathname,
-        search: nextSearch ? `?${nextSearch}` : "",
-        hash: hash ?? (tab === "comments" ? "#comments" : "#timeline"),
+        search: location.search,
+        hash,
       },
       { replace: true }
     );
@@ -306,7 +464,7 @@ export default function IssueDetailPage() {
   ]);
 
   useEffect(() => {
-    if (activeTab !== "comments" || !commentsSentinelRef.current) {
+    if (!sentinelRef.current) {
       return;
     }
     if (typeof IntersectionObserver === "undefined") {
@@ -316,38 +474,28 @@ export default function IssueDetailPage() {
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry?.isIntersecting && hasNextCommentsPage && !isFetchingNextCommentsPage) {
-          void fetchNextCommentsPage();
+        if (entry?.isIntersecting) {
+          if (hasNextCommentsPage && !isFetchingNextCommentsPage) {
+            void fetchNextCommentsPage();
+          }
+          if (hasNextTimelinePage && !isFetchingNextTimelinePage) {
+            void fetchNextTimelinePage();
+          }
         }
       },
       { rootMargin: "200px" }
     );
 
-    observer.observe(commentsSentinelRef.current);
+    observer.observe(sentinelRef.current);
     return () => observer.disconnect();
-  }, [activeTab, fetchNextCommentsPage, hasNextCommentsPage, isFetchingNextCommentsPage]);
-
-  useEffect(() => {
-    if (activeTab !== "timeline" || !timelineSentinelRef.current) {
-      return;
-    }
-    if (typeof IntersectionObserver === "undefined") {
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (entry?.isIntersecting && hasNextTimelinePage && !isFetchingNextTimelinePage) {
-          void fetchNextTimelinePage();
-        }
-      },
-      { rootMargin: "200px" }
-    );
-
-    observer.observe(timelineSentinelRef.current);
-    return () => observer.disconnect();
-  }, [activeTab, fetchNextTimelinePage, hasNextTimelinePage, isFetchingNextTimelinePage]);
+  }, [
+    fetchNextCommentsPage,
+    fetchNextTimelinePage,
+    hasNextCommentsPage,
+    hasNextTimelinePage,
+    isFetchingNextCommentsPage,
+    isFetchingNextTimelinePage,
+  ]);
 
   useEffect(() => {
     if (!location.hash) {
@@ -362,11 +510,9 @@ export default function IssueDetailPage() {
     const targetElement =
       location.hash === "#timeline"
         ? timelineSectionRef.current
-        : location.hash === "#comments"
-          ? commentsSectionRef.current
-          : location.hash.startsWith("#issuecomment-") || location.hash.startsWith("#issueevent-")
-            ? document.getElementById(location.hash.slice(1))
-            : null;
+        : location.hash.startsWith("#issuecomment-") || location.hash.startsWith("#issueevent-")
+          ? document.getElementById(location.hash.slice(1))
+          : null;
     if (!targetElement) {
       return;
     }
@@ -435,12 +581,20 @@ export default function IssueDetailPage() {
   };
 
   const handleCopyGitHubLink = async () => {
-    const timelineHtmlUrl = activeTimelineEvent ? findPayloadHtmlUrl(activeTimelineEvent.payload) : null;
-    const targetUrl = activeComment?.html_url || timelineHtmlUrl || issue?.html_url;
-    const successMessage =
-      activeTimelineEvent && !timelineHtmlUrl
-        ? "当前动态没有精确 GitHub 链接，已复制问题链接"
-        : "已复制 GitHub 深链接";
+    const hash = location.hash;
+    let targetUrl = issue?.html_url;
+    let successMessage = "已复制 GitHub 深链接";
+
+    if (hash.startsWith("#issuecomment-")) {
+      const comment = comments.find((c) => getCommentAnchorId(c.github_comment_id) === hash.slice(1));
+      targetUrl = comment?.html_url || issue?.html_url;
+    } else if (hash.startsWith("#issueevent-")) {
+      const event = timeline.find((e) => getTimelineAnchorId(e.github_event_id) === hash.slice(1));
+      const eventHtmlUrl = event ? findPayloadHtmlUrl(event.payload) : null;
+      targetUrl = eventHtmlUrl || issue?.html_url;
+      successMessage = eventHtmlUrl ? "已复制 GitHub 深链接" : "当前动态没有精确 GitHub 链接，已复制问题链接";
+    }
+
     await copyGitHubUrl(targetUrl, successMessage);
   };
 
@@ -577,7 +731,7 @@ export default function IssueDetailPage() {
 
         <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
           {/* Main Content */}
-          <div className="min-w-0 space-y-6">
+          <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
             {/* Issue Header Card */}
             <div className="overflow-hidden rounded-2xl border bg-card shadow-sm transition-shadow hover:shadow-md">
               <div className="p-5 md:p-6">
@@ -632,179 +786,56 @@ export default function IssueDetailPage() {
               </div>
             </div>
 
-            {/* Comments / Timeline Tabs */}
-            <Tabs
-              value={activeTab}
-              onValueChange={(value) => setTabAndAnchor(value === "timeline" ? "timeline" : "comments")}
-            >
-              <div className="flex items-center justify-between">
-                <TabsList className="h-9">
-                  <TabsTrigger value="comments" className="gap-1.5 text-xs">
-                    <MessageSquare className="h-3.5 w-3.5" />
-                    评论
-                    <span aria-hidden className="ml-1 rounded-full bg-muted px-1.5 py-0 text-[10px] text-muted-foreground">
-                      {issue.comments_count}
-                    </span>
-                  </TabsTrigger>
-                  <TabsTrigger value="timeline" className="gap-1.5 text-xs">
-                    <Clock className="h-3.5 w-3.5" />
-                    动态
-                  </TabsTrigger>
-                </TabsList>
-              </div>
+            {/* Unified Timeline */}
+            <div className="-mt-6">
+              <div id="timeline" ref={timelineSectionRef} className="scroll-mt-20" />
 
-              <TabsContent value="comments" className="mt-4">
-                <div id="comments" ref={commentsSectionRef} className="scroll-mt-20" />
+              {isLoadingTimeline ? (
+                <div className="relative space-y-6 pt-6">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <Skeleton key={i} className="h-24 rounded-2xl" />
+                  ))}
+                </div>
+              ) : timelineItems.length === 0 ? (
+                <div className="pt-6">
+                  <EmptyState message="暂无评论和动态" />
+                </div>
+              ) : (
+                <div className="relative space-y-0 pt-4">
+                  {/* Timeline connector line */}
+                  <div className="absolute bottom-0 left-4 top-0 w-px bg-border" />
 
-                {commentsLoading ? (
-                  <div className="space-y-4">
-                    {Array.from({ length: 3 }).map((_, i) => (
-                      <Skeleton key={i} className="h-32 rounded-2xl" />
-                    ))}
-                  </div>
-                ) : comments.length === 0 ? (
-                  <EmptyState message="暂无评论" />
-                ) : (
-                  <div className="space-y-4">
-                    {comments.map((comment) => (
+                  {timelineItems.map((item) =>
+                    item.type === "comment" ? (
                       <div
-                        key={comment.id}
-                        id={getCommentAnchorId(comment.github_comment_id)}
+                        key={`comment-${item.data.id}`}
+                        id={getCommentAnchorId(item.data.github_comment_id)}
                         className={cn(
-                          "group relative scroll-mt-20 overflow-hidden rounded-2xl border bg-card transition-all",
-                          flashHighlightId === getCommentAnchorId(comment.github_comment_id)
-                            ? "ring-2 ring-primary/30"
-                            : "hover:border-foreground/15 hover:shadow-sm"
-                        )}
-
-                      >
-                        <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-3 md:px-5">
-                          <div className="flex items-center gap-3">
-                            <Avatar size="sm">
-                              <AvatarImage src={comment.author.avatar_url} alt={comment.author.login} />
-                              <AvatarFallback>{getInitials(comment.author.login)}</AvatarFallback>
-                            </Avatar>
-                            <div className="flex flex-col">
-                              <span className="text-sm font-medium">@{comment.author.login}</span>
-                              <span className="text-xs text-muted-foreground">{formatDate(comment.created_at)}</span>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label={`定位到评论 ${comment.github_comment_id}`}
-                              onClick={() =>
-                                setTabAndAnchor("comments", `#${getCommentAnchorId(comment.github_comment_id)}`)
-                              }
-                            >
-                              <Link2 className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label={`复制评论 ${comment.github_comment_id} 的 GitHub 深链接`}
-                              onClick={() => void handleCopyCommentGitHubLink(comment)}
-                            >
-                              <ExternalLink className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                        <div className="px-4 py-4 md:px-5 md:py-5">
-                          <GitHubContent
-                            className="markdown-body"
-                            html={comment.body_html}
-                            markdown={comment.body || "_空评论_"}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {comments.length > 0 && (
-                  <div className="mt-6 space-y-3">
-                    <p className="text-center text-xs text-muted-foreground">
-                      已加载 {Math.min(comments.length, commentsTotal)} / {commentsTotal} 条评论
-                    </p>
-                    <div ref={commentsSentinelRef} className="h-1 w-full" />
-                    {hasNextCommentsPage ? (
-                      <div className="flex items-center justify-center">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="min-w-[140px]"
-                          onClick={() => void fetchNextCommentsPage()}
-                          disabled={isFetchingNextCommentsPage}
-                        >
-                          {isFetchingNextCommentsPage ? "加载中..." : "加载更多评论"}
-                        </Button>
-                      </div>
-                    ) : (
-                      <p className="text-center text-xs text-muted-foreground">评论已全部加载</p>
-                    )}
-                  </div>
-                )}
-              </TabsContent>
-
-              <TabsContent value="timeline" className="mt-4">
-                <div id="timeline" ref={timelineSectionRef} className="scroll-mt-20" />
-
-                {timelineLoading ? (
-                  <div className="space-y-4">
-                    {Array.from({ length: 3 }).map((_, i) => (
-                      <Skeleton key={i} className="h-24 rounded-2xl" />
-                    ))}
-                  </div>
-                ) : timeline.length === 0 ? (
-                  <EmptyState message="暂无动态" />
-                ) : (
-                  <div className="relative space-y-0 pl-3 md:pl-4">
-                    {/* Timeline connector line */}
-                    <div className="absolute inset-y-0 left-[19px] w-px bg-border md:left-[23px]" />
-
-                    {timeline.map((event) => (
-                      <div
-                        key={event.id}
-                        id={getTimelineAnchorId(event.github_event_id)}
-                        className={cn(
-                          "group relative scroll-mt-20 py-3 transition-all",
-                          flashHighlightId === getTimelineAnchorId(event.github_event_id)
-                            ? "ring-2 ring-primary/40"
+                          "relative pb-6 scroll-mt-20 transition-all",
+                          flashHighlightId === getCommentAnchorId(item.data.github_comment_id)
+                            ? "ring-2 ring-primary/30 rounded-2xl"
                             : ""
                         )}
                       >
-                        <div className="flex items-start gap-4 md:gap-5">
-                          {/* Timeline node */}
-                          <div className="relative z-10 flex shrink-0">
-                            <Avatar size="sm" className="ring-2 ring-background">
-                              <AvatarImage src={event.actor.avatar_url} alt={event.actor.login || "GH"} />
-                              <AvatarFallback>{getInitials(event.actor.login || "GH")}</AvatarFallback>
-                            </Avatar>
-                          </div>
-
-                          <div className="min-w-0 flex-1 pt-0.5">
-                            <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
-                              <p className="text-sm">
-                                <span className="font-medium text-foreground">
-                                  {event.actor.login ? `@${event.actor.login}` : "GitHub"}
-                                </span>
-                                <span className="ml-2 text-muted-foreground">{event.summary}</span>
-                              </p>
-                              <span className="shrink-0 text-xs text-muted-foreground">{formatDate(event.created_at)}</span>
+                        <div className="group overflow-hidden rounded-2xl border bg-card transition-all hover:border-foreground/15 hover:shadow-sm">
+                          <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-3 md:px-5">
+                            <div className="flex items-center gap-3">
+                              <Avatar size="sm">
+                                <AvatarImage src={item.data.author.avatar_url} alt={item.data.author.login} />
+                                <AvatarFallback>{getInitials(item.data.author.login)}</AvatarFallback>
+                              </Avatar>
+                              <div className="flex flex-col">
+                                <span className="text-sm font-medium">@{item.data.author.login}</span>
+                                <span className="text-xs text-muted-foreground">{formatDate(item.data.created_at)}</span>
+                              </div>
                             </div>
-
-                            {event.body && (
-                              <p className="mt-1 text-sm text-muted-foreground line-clamp-3">{event.body}</p>
-                            )}
-
-                            <div className="mt-2 flex items-center gap-2 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
+                            <div className="flex items-center gap-1 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
                               <Button
                                 variant="ghost"
                                 size="icon-xs"
-                                aria-label={`定位到动态 ${event.github_event_id}`}
+                                aria-label={`定位到评论 ${item.data.github_comment_id}`}
                                 onClick={() =>
-                                  setTabAndAnchor("timeline", `#${getTimelineAnchorId(event.github_event_id)}`)
+                                  setAnchor(`#${getCommentAnchorId(item.data.github_comment_id)}`)
                                 }
                               >
                                 <Link2 className="h-3.5 w-3.5" />
@@ -812,44 +843,116 @@ export default function IssueDetailPage() {
                               <Button
                                 variant="ghost"
                                 size="icon-xs"
-                                aria-label={`复制动态 ${event.github_event_id} 的 GitHub 深链接`}
-                                onClick={() => void handleCopyTimelineGitHubLink(event)}
+                                aria-label={`复制评论 ${item.data.github_comment_id} 的 GitHub 深链接`}
+                                onClick={() => void handleCopyCommentGitHubLink(item.data)}
                               >
                                 <ExternalLink className="h-3.5 w-3.5" />
                               </Button>
                             </div>
                           </div>
+                          <div className="px-4 py-4 md:px-5 md:py-5">
+                            <GitHubContent
+                              className="markdown-body"
+                              html={item.data.body_html}
+                              markdown={item.data.body || "_空评论_"}
+                            />
+                          </div>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
-
-                {timeline.length > 0 && (
-                  <div className="mt-6 space-y-3">
-                    <p className="text-center text-xs text-muted-foreground">
-                      已加载 {Math.min(timeline.length, timelineTotal)} / {timelineTotal} 条动态
-                    </p>
-                    <div ref={timelineSentinelRef} className="h-1 w-full" />
-                    {hasNextTimelinePage ? (
-                      <div className="flex items-center justify-center">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="min-w-[140px]"
-                          onClick={() => void fetchNextTimelinePage()}
-                          disabled={isFetchingNextTimelinePage}
-                        >
-                          {isFetchingNextTimelinePage ? "加载中..." : "加载更多动态"}
-                        </Button>
-                      </div>
                     ) : (
-                      <p className="text-center text-xs text-muted-foreground">动态已全部加载</p>
-                    )}
-                  </div>
-                )}
-              </TabsContent>
-            </Tabs>
+                      <div
+                        key={`event-${item.data.id}`}
+                        id={getTimelineAnchorId(item.data.github_event_id)}
+                        className={cn(
+                          "group relative flex items-start gap-3 pb-4 scroll-mt-20 md:gap-4",
+                          flashHighlightId === getTimelineAnchorId(item.data.github_event_id)
+                            ? "rounded-lg bg-primary/5 py-1"
+                            : ""
+                        )}
+                      >
+                        {/* Timeline badge - centered on the vertical line */}
+                        <div className="absolute left-4 top-0 flex shrink-0 -translate-x-1/2">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-full border bg-background shadow-sm">
+                            {(() => {
+                              const Icon = getEventIcon(item.data.event_type);
+                              return <Icon className="h-3.5 w-3.5 text-muted-foreground" />;
+                            })()}
+                          </div>
+                        </div>
+
+                        <div className="min-w-0 flex-1 pl-8 pt-1.5">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            <span className="text-sm font-semibold text-foreground">
+                              {item.data.actor.login || "GitHub"}
+                            </span>
+                            <span className="text-sm text-muted-foreground">{renderEventSummary(item.data)}</span>
+                            <span className="text-xs text-muted-foreground/80">
+                              {formatRelativeTime(item.data.created_at)}
+                            </span>
+                          </div>
+
+                          {item.data.body && (
+                            <p className="mt-1 text-sm text-muted-foreground line-clamp-3">{item.data.body}</p>
+                          )}
+
+                          <div className="mt-1 flex items-center gap-2 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              aria-label={`定位到动态 ${item.data.github_event_id}`}
+                              onClick={() =>
+                                setAnchor(`#${getTimelineAnchorId(item.data.github_event_id)}`)
+                              }
+                            >
+                              <Link2 className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              aria-label={`复制动态 ${item.data.github_event_id} 的 GitHub 深链接`}
+                              onClick={() => void handleCopyTimelineGitHubLink(item.data)}
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+
+              {timelineItems.length > 0 && (
+                <div className="mt-6 space-y-3">
+                  <p className="text-center text-xs text-muted-foreground">
+                    已加载 {Math.min(totalLoaded, totalItems)} / {totalItems} 条活动
+                  </p>
+                  <div ref={sentinelRef} className="h-1 w-full" />
+                  {hasMore ? (
+                    <div className="flex items-center justify-center">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="min-w-[140px]"
+                        onClick={() => {
+                          if (hasNextCommentsPage && !isFetchingNextCommentsPage) {
+                            void fetchNextCommentsPage();
+                          }
+                          if (hasNextTimelinePage && !isFetchingNextTimelinePage) {
+                            void fetchNextTimelinePage();
+                          }
+                        }}
+                        disabled={isLoadingMore}
+                      >
+                        {isLoadingMore ? "加载中..." : "加载更多"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-center text-xs text-muted-foreground">活动已全部加载</p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Sidebar */}
@@ -941,6 +1044,24 @@ export default function IssueDetailPage() {
           </aside>
         </div>
       </div>
+
+      {/* Image Lightbox */}
+      <Dialog open={lightboxOpen} onOpenChange={setLightboxOpen} dismissible>
+        <DialogContent
+          className="max-w-[90vw] place-items-center border-none bg-transparent p-0 shadow-none ring-0 sm:max-w-[90vw]"
+          overlayClassName="bg-black/80 supports-backdrop-filter:backdrop-blur-sm"
+          showCloseButton={false}
+          onClick={() => setLightboxOpen(false)}
+        >
+          {lightboxImage && (
+            <img
+              src={lightboxImage.src}
+              alt={lightboxImage.alt}
+              className="max-h-[85vh] max-w-full rounded-lg object-contain"
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

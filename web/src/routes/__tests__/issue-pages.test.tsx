@@ -467,12 +467,12 @@ describe("Issue pages", () => {
     );
   });
 
-  it("renders issue details with anchor-driven tabs and remembers current tab", async () => {
+  it("renders issue details with unified timeline", async () => {
     mockIssueDetailData();
 
     renderWithRoute(<IssueDetailPage />, {
       path: "/projects/:id/issues/:iid",
-      initialEntry: "/projects/proj-1/issues/issue-1?issue_tab=timeline#timeline",
+      initialEntry: "/projects/proj-1/issues/issue-1#timeline",
     });
 
     expect(screen.getByText("#42 Crash on launch")).toBeInTheDocument();
@@ -480,14 +480,15 @@ describe("Issue pages", () => {
     expect(screen.getByText("上一条")).toBeInTheDocument();
     expect(screen.getByText("下一条")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "动态" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("关闭了问题")).toBeInTheDocument();
+    expect(screen.getByText(hasExactTextContent("Looks good"))).toBeInTheDocument();
+    expect(screen.getByText(hasExactTextContent("Open the app"))).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "复制链接" }));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        `${window.location.origin}/projects/proj-1/issues/issue-1?issue_tab=timeline#timeline`,
+        `${window.location.origin}/projects/proj-1/issues/issue-1#timeline`,
       ),
     );
     expect(toast.success).toHaveBeenCalledWith("已复制当前问题视图链接");
@@ -498,23 +499,16 @@ describe("Issue pages", () => {
       expect(writeText).toHaveBeenCalledWith("https://github.com/acme/alpha/issues/42"),
     );
     expect(toast.success).toHaveBeenCalledWith("已复制 GitHub 深链接");
-
-    fireEvent.click(screen.getByRole("tab", { name: "评论" }));
-
-    expect(screen.getByRole("tab", { name: "评论" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText(hasExactTextContent("Looks good"))).toBeInTheDocument();
-    expect(screen.getByText(hasExactTextContent("Open the app"))).toBeInTheDocument();
   });
 
-  it("supports direct comment anchors and lets comments override timeline tab state", async () => {
+  it("supports direct comment anchors in unified timeline", async () => {
     mockIssueDetailData();
 
     renderWithRoute(<IssueDetailPage />, {
       path: "/projects/:id/issues/:iid",
-      initialEntry: "/projects/proj-1/issues/issue-1?issue_tab=timeline#issuecomment-5001",
+      initialEntry: "/projects/proj-1/issues/issue-1#issuecomment-5001",
     });
 
-    expect(screen.getByRole("tab", { name: "评论" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText(hasExactTextContent("Looks good"))).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "定位到评论 5001" })).toBeInTheDocument();
     expect(document.getElementById("issuecomment-5001")).toHaveClass("ring-2");
@@ -536,7 +530,7 @@ describe("Issue pages", () => {
     );
   });
 
-  it("supports direct timeline anchors and lets timeline override comment tab state", async () => {
+  it("supports direct timeline anchors in unified timeline", async () => {
     mockIssueDetailData();
 
     renderWithRoute(<IssueDetailPage />, {
@@ -544,10 +538,9 @@ describe("Issue pages", () => {
       initialEntry: "/projects/proj-1/issues/issue-1#issueevent-1",
     });
 
-    expect(screen.getByRole("tab", { name: "动态" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("关闭了问题")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "定位到动态 1" })).toBeInTheDocument();
-    expect(document.getElementById("issueevent-1")).toHaveClass("ring-2");
+    expect(document.getElementById("issueevent-1")).toHaveClass("bg-primary/5");
 
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "复制 GitHub 深链接" }));
