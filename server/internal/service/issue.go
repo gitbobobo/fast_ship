@@ -16,6 +16,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
@@ -808,9 +809,9 @@ func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResp
 		StateReason:       issue.StateReason,
 		Title:             issue.Title,
 		Body:              issue.Body,
-		BodyHTML:          issue.BodyHTML,
+		BodyHTML:          githubmedia.RewriteHTMLMediaSources(issue.BodyHTML),
 		HTMLURL:           issue.HTMLURL,
-		Author:            IssueActorResponse{Login: issue.AuthorLogin, AvatarURL: issue.AuthorAvatarURL},
+		Author:            IssueActorResponse{Login: issue.AuthorLogin, AvatarURL: githubmedia.RewriteMediaURL(issue.AuthorAvatarURL)},
 		AuthorAssociation: issue.AuthorAssociation,
 		Assignees:         make([]IssueActorResponse, 0, len(assignees)),
 		Labels:            make([]IssueLabelResponse, 0, len(labels)),
@@ -824,7 +825,7 @@ func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResp
 		InternalMeta:      toIssueInternalMetaResponse(meta),
 	}
 	for _, assignee := range assignees {
-		resp.Assignees = append(resp.Assignees, IssueActorResponse{Login: assignee.Login, AvatarURL: assignee.AvatarURL})
+		resp.Assignees = append(resp.Assignees, IssueActorResponse{Login: assignee.Login, AvatarURL: githubmedia.RewriteMediaURL(assignee.AvatarURL)})
 	}
 	for _, label := range labels {
 		resp.Labels = append(resp.Labels, IssueLabelResponse{Name: label.Name, Color: label.Color, Description: label.Description})
@@ -918,9 +919,9 @@ func toIssueCommentResponse(comment model.IssueComment) IssueCommentResponse {
 		GitHubCommentID:   comment.GitHubCommentID,
 		GitHubNodeID:      comment.GitHubNodeID,
 		Body:              comment.Body,
-		BodyHTML:          comment.BodyHTML,
+		BodyHTML:          githubmedia.RewriteHTMLMediaSources(comment.BodyHTML),
 		HTMLURL:           comment.HTMLURL,
-		Author:            IssueActorResponse{Login: comment.AuthorLogin, AvatarURL: comment.AuthorAvatarURL},
+		Author:            IssueActorResponse{Login: comment.AuthorLogin, AvatarURL: githubmedia.RewriteMediaURL(comment.AuthorAvatarURL)},
 		AuthorAssociation: comment.AuthorAssociation,
 		Reactions:         reactions,
 		CreatedAt:         formatTime(comment.GitHubCreatedAt),
@@ -935,7 +936,7 @@ func toIssueTimelineResponse(event model.IssueTimelineEvent) IssueTimelineEventR
 		EventKey:      event.EventKey,
 		EventType:     event.EventType,
 		GitHubEventID: event.GitHubEventID,
-		Actor:         IssueActorResponse{Login: event.ActorLogin, AvatarURL: event.ActorAvatarURL},
+		Actor:         IssueActorResponse{Login: event.ActorLogin, AvatarURL: githubmedia.RewriteMediaURL(event.ActorAvatarURL)},
 		Body:          event.Body,
 		Summary:       event.Summary,
 		Payload:       parseJSON[map[string]any](event.PayloadJSON),

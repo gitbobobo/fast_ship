@@ -14,6 +14,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/router"
@@ -112,6 +113,7 @@ func main() {
 	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, cfg, zapLogger)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
+	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
 
 	// 初始化 Handler
 	authHandler := handler.NewAuthHandler(authService)
@@ -120,6 +122,7 @@ func main() {
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
+	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	// 启动 JWT 黑名单清理任务
 	go func() {
@@ -164,7 +167,7 @@ func main() {
 	r.MaxMultipartMemory = cfg.Upload.MaxFileSize
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

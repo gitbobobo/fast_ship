@@ -17,6 +17,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/service"
@@ -356,6 +357,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
+	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
 
 	authHandler := handler.NewAuthHandler(authService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
@@ -363,9 +365,10 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
+	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
@@ -445,6 +448,31 @@ func decodeRouterEnvelope(t *testing.T, rec *httptest.ResponseRecorder, target a
 		if err := json.Unmarshal(env.Data, target); err != nil {
 			t.Fatalf("decode envelope data: %v", err)
 		}
+	}
+}
+
+func TestMediaProxyRequiresAuth(t *testing.T) {
+	env := setupRouterTestEnv(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/github/media-proxy?url=bad", nil)
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMediaProxyAllowsQueryToken(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "media-user", "media@example.com", "Password123")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/github/media-proxy?url=bad&token="+auth.Token, nil)
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 after passing auth, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

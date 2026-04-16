@@ -18,11 +18,15 @@ func Setup(
 	versionHandler *handler.VersionHandler,
 	issueHandler *handler.IssueHandler,
 	artifactHandler *handler.ArtifactHandler,
+	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
 	api := r.Group("/api")
 	{
+		api.GET("/github/media-proxy", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), mediaProxyHandler.Proxy)
+		api.HEAD("/github/media-proxy", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), mediaProxyHandler.Proxy)
+
 		// 公开接口
 		auth := api.Group("/auth")
 		{

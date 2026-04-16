@@ -54,6 +54,7 @@ func Load(path string) (*Config, error) {
 	viper.AutomaticEnv()
 
 	// 绑定关键环境变量
+	_ = viper.BindEnv("server.mode", "FAST_SHIP_SERVER_MODE")
 	_ = viper.BindEnv("jwt.secret", "JWT_SECRET")
 	_ = viper.BindEnv("encryption.key", "ENCRYPTION_KEY")
 	_ = viper.BindEnv("server.web_dist_dir", "FAST_SHIP_WEB_DIST_DIR")
