@@ -31,6 +31,7 @@ const WORKFLOW_STATUS_LABELS: Record<InternalIssueFormInput["workflow_status"], 
 interface InternalIssueFormProps {
   defaultValues?: Partial<InternalIssueFormInput>;
   isSubmitting?: boolean;
+  onPasteImage?: (file: File) => Promise<string>;
   onCancel: () => void;
   onSubmit: (values: InternalIssueFormInput) => Promise<void> | void;
   showWorkflowStatus?: boolean;
@@ -40,6 +41,7 @@ interface InternalIssueFormProps {
 export function InternalIssueForm({
   defaultValues,
   isSubmitting = false,
+  onPasteImage,
   onCancel,
   onSubmit,
   showWorkflowStatus = false,
@@ -116,6 +118,7 @@ export function InternalIssueForm({
               id="issue-body"
               value={field.value}
               onChange={field.onChange}
+              onPasteImage={onPasteImage}
               placeholder="支持 Markdown，可写复现步骤、验收标准、上下文或补充链接。"
               rows={16}
             />

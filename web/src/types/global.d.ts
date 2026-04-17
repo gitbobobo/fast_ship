@@ -156,6 +156,17 @@ interface IssueInternalMeta {
   updated_at?: string | null;
 }
 
+interface IssueAsset {
+  id: string;
+  issue_id: string;
+  file_name: string;
+  mime_type: string;
+  file_size: number;
+  content_url: string;
+  markdown: string;
+  created_at: string;
+}
+
 interface IssueComment {
   id: string;
   issue_id: string;

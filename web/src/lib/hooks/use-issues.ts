@@ -169,6 +169,16 @@ export function useUpdateIssue(issueId: string, projectId?: string) {
   });
 }
 
+export function useUploadIssueAsset(issueId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (formData: FormData) => issueApi.uploadAsset(issueId, formData),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+    },
+  });
+}
+
 export function useCreateIssueComment(issueId: string, projectId?: string) {
   const queryClient = useQueryClient();
   return useMutation({

@@ -64,6 +64,9 @@ export const issueApi = {
   update: (issueId: string, data: UpdateInternalIssueRequest) =>
     api.put(`issues/${issueId}`, { json: data }).json<ApiResponse<Issue>>(),
 
+  uploadAsset: (issueId: string, formData: FormData) =>
+    api.post(`issues/${issueId}/assets`, { body: formData }).json<ApiResponse<IssueAsset>>(),
+
   comments: (issueId: string, page = 1, pageSize = 20) =>
     api
       .get(`issues/${issueId}/comments`, {

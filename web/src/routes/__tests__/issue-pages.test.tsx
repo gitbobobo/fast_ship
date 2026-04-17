@@ -20,6 +20,7 @@ import {
   useSyncProjectIssues,
   useUpdateIssue,
   useUpdateIssueInternalMeta,
+  useUploadIssueAsset,
 } from "@/lib/hooks/use-issues";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toast } from "sonner";
@@ -130,6 +131,7 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useSyncProjectIssues: vi.fn(),
   useUpdateIssue: vi.fn(),
   useUpdateIssueInternalMeta: vi.fn(),
+  useUploadIssueAsset: vi.fn(),
 }));
 
 vi.mock("@/lib/store/auth-store", () => ({
@@ -380,6 +382,10 @@ describe("Issue pages", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useUpdateIssue>);
+    vi.mocked(useUploadIssueAsset).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUploadIssueAsset>);
 
     vi.mocked(useUpdateIssueInternalMeta).mockReturnValue({
       mutateAsync: vi.fn(),
@@ -763,6 +769,18 @@ describe("Issue pages", () => {
         body: "更新后的描述",
       }),
     });
+    const uploadMutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        id: "asset-1",
+        issue_id: "internal-issue-1",
+        file_name: "clip.png",
+        mime_type: "image/png",
+        file_size: 3,
+        content_url: "/api/issues/assets/asset-1/content",
+        markdown: "![clip](/api/issues/assets/asset-1/content)",
+        created_at: "2026-04-12T10:00:00Z",
+      },
+    });
     vi.mocked(useIssue).mockReturnValue({
       data: buildInternalIssue(),
       isLoading: false,
@@ -771,6 +789,10 @@ describe("Issue pages", () => {
       mutateAsync,
       isPending: false,
     } as unknown as ReturnType<typeof useUpdateIssue>);
+    vi.mocked(useUploadIssueAsset).mockReturnValue({
+      mutateAsync: uploadMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUploadIssueAsset>);
 
     renderWithRoute(<EditInternalIssuePage />, {
       path: "/projects/:id/issues/:iid/edit",
@@ -778,18 +800,39 @@ describe("Issue pages", () => {
     });
 
     const titleInput = screen.getByLabelText("标题");
-    const bodyInput = screen.getByLabelText("描述");
+    const bodyInput = screen.getByLabelText("描述") as HTMLTextAreaElement;
 
     await user.clear(titleInput);
     await user.type(titleInput, "补充回归通知");
     await user.clear(bodyInput);
     await user.type(bodyInput, "更新后的描述");
+    bodyInput.setSelectionRange(bodyInput.value.length, bodyInput.value.length);
+
+    const imageFile = new File(["img"], "clip.png", { type: "image/png" });
+    fireEvent.paste(bodyInput, {
+      clipboardData: {
+        items: [
+          {
+            type: imageFile.type,
+            getAsFile: () => imageFile,
+          },
+        ],
+      },
+    });
+
+    await waitFor(() => expect(uploadMutateAsync).toHaveBeenCalledTimes(1));
+    const formData = uploadMutateAsync.mock.calls[0][0] as FormData;
+    expect(formData.get("file")).toStrictEqual(imageFile);
+
+    await waitFor(() =>
+      expect(bodyInput).toHaveValue("更新后的描述![clip](/api/issues/assets/asset-1/content)\n"),
+    );
     await user.click(screen.getByRole("button", { name: "保存修改" }));
 
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({
         title: "补充回归通知",
-        body: "更新后的描述",
+        body: "更新后的描述![clip](/api/issues/assets/asset-1/content)\n",
       }),
     );
     expect(toast.success).toHaveBeenCalledWith("内部问题已更新");

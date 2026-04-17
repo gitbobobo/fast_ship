@@ -11,7 +11,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useIssue, useUpdateIssue } from "@/lib/hooks/use-issues";
+import { useIssue, useUpdateIssue, useUploadIssueAsset } from "@/lib/hooks/use-issues";
 import { toast } from "sonner";
 
 export default function EditInternalIssuePage() {
@@ -20,6 +20,7 @@ export default function EditInternalIssuePage() {
   const [searchParams] = useSearchParams();
   const { data: issue, isLoading } = useIssue(iid!);
   const updateIssue = useUpdateIssue(iid!, id);
+  const uploadIssueAsset = useUploadIssueAsset(iid!);
   const issueDetailSearch = searchParams.toString();
 
   const backToDetail = () => {
@@ -39,6 +40,19 @@ export default function EditInternalIssuePage() {
       backToDetail();
     } catch {
       toast.error("更新内部问题失败");
+    }
+  };
+
+  const handlePasteImage = async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file, file.name || "image.png");
+
+    try {
+      const res = await uploadIssueAsset.mutateAsync(formData);
+      return res.data.markdown;
+    } catch {
+      toast.error("上传图片失败");
+      throw new Error("upload failed");
     }
   };
 
@@ -148,9 +162,10 @@ export default function EditInternalIssuePage() {
                 defaultValues={{
                   title: issue.title,
                   body: issue.body,
-                  workflow_status: issue.internal_meta?.workflow_status ?? "todo",
+                  workflow_status: issue.internal_meta?.workflow_status || "todo",
                 }}
                 isSubmitting={updateIssue.isPending}
+                onPasteImage={handlePasteImage}
                 onCancel={backToDetail}
                 onSubmit={handleSubmit}
                 submitLabel="保存修改"
