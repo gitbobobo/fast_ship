@@ -151,9 +151,21 @@ interface IssueGitHubMeta {
 
 interface IssueInternalMeta {
   workflow_status: "" | "todo" | "in_progress" | "done";
+  progress_percent?: number | null;
+  checklist_total: number;
+  checklist_done: number;
   started_at?: string | null;
   completed_at?: string | null;
+  checklist_updated_at?: string | null;
   updated_at?: string | null;
+  checklist?: IssueChecklistItem[];
+}
+
+interface IssueChecklistItem {
+  id: string;
+  title: string;
+  is_completed: boolean;
+  sort_order: number;
 }
 
 interface IssueAsset {

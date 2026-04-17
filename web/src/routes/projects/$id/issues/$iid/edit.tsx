@@ -152,7 +152,7 @@ export default function EditInternalIssuePage() {
                 <div>
                   <CardTitle>编辑内部问题</CardTitle>
                   <CardDescription>
-                    更新标题或描述。评论、关闭状态和内部状态仍然在详情页处理。
+                    更新标题或描述。评论、关闭状态和进度 checklist 仍然在详情页处理。
                   </CardDescription>
                 </div>
               </div>
@@ -185,7 +185,7 @@ export default function EditInternalIssuePage() {
                 标题适合写成一句可以单独转发的结论，描述里再补过程和背景。
               </div>
               <div className="rounded-2xl border bg-background p-4">
-                如果只是切换内部状态或关闭问题，直接在详情页操作会更快。
+                如果只是更新进度 checklist 或关闭问题，直接在详情页操作会更快。
               </div>
             </CardContent>
           </Card>

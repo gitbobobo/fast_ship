@@ -16,6 +16,14 @@ interface UpdateIssueInternalMetaRequest {
   workflow_status: "" | "todo" | "in_progress" | "done";
 }
 
+interface ReplaceIssueChecklistRequest {
+  items: Array<{
+    id?: string;
+    title: string;
+    is_completed: boolean;
+  }>;
+}
+
 interface CreateInternalIssueRequest {
   title: string;
   body: string;
@@ -92,5 +100,10 @@ export const issueApi = {
   updateInternalMeta: (issueId: string, data: UpdateIssueInternalMetaRequest) =>
     api
       .put(`issues/${issueId}/internal-meta`, { json: data })
+      .json<ApiResponse<IssueInternalMeta | null>>(),
+
+  replaceChecklist: (issueId: string, data: ReplaceIssueChecklistRequest) =>
+    api
+      .put(`issues/${issueId}/checklist`, { json: data })
       .json<ApiResponse<IssueInternalMeta | null>>(),
 };

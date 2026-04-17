@@ -29,6 +29,7 @@ type testServices struct {
 	commentRepo      *repository.IssueCommentRepository
 	timelineRepo     *repository.IssueTimelineRepository
 	internalMetaRepo *repository.IssueInternalMetaRepository
+	checklistRepo    *repository.IssueChecklistRepository
 	syncStateRepo    *repository.IssueSyncStateRepository
 	issueAssetRepo   *repository.IssueAssetRepository
 	artifactRepo     *repository.ArtifactRepository
@@ -57,6 +58,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
+		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
 		&model.IssueAsset{},
 		&model.Artifact{},
@@ -84,6 +86,7 @@ func setupTestServices(t *testing.T) *testServices {
 	commentRepo := repository.NewIssueCommentRepository(db)
 	timelineRepo := repository.NewIssueTimelineRepository(db)
 	internalMetaRepo := repository.NewIssueInternalMetaRepository(db)
+	checklistRepo := repository.NewIssueChecklistRepository(db)
 	syncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
@@ -105,10 +108,11 @@ func setupTestServices(t *testing.T) *testServices {
 		commentRepo:      commentRepo,
 		timelineRepo:     timelineRepo,
 		internalMetaRepo: internalMetaRepo,
+		checklistRepo:    checklistRepo,
 		syncStateRepo:    syncStateRepo,
 		issueAssetRepo:   issueAssetRepo,
 		artifactRepo:     artifactRepo,
-		issueService:     NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, syncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
+		issueService:     NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
 		versionService:   NewVersionService(versionRepo, projectRepo, fileStorage),
 		artifactService:  NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		shipService:      NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),

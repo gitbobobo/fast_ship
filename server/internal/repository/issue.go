@@ -293,14 +293,53 @@ func (r *IssueInternalMetaRepository) ListByIssueIDs(issueIDs []string) (map[str
 }
 
 func (r *IssueInternalMetaRepository) Upsert(meta *model.IssueInternalMeta) error {
-	return r.db.Clauses(clause.OnConflict{
+	return r.UpsertTx(r.db, meta)
+}
+
+func (r *IssueInternalMetaRepository) UpsertTx(tx *gorm.DB, meta *model.IssueInternalMeta) error {
+	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "issue_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"workflow_status",
+			"progress_percent",
+			"checklist_total",
+			"checklist_done",
 			"started_at",
 			"completed_at",
+			"checklist_updated_at",
 			"updated_by_user_id",
 			"updated_at",
 		}),
 	}).Create(meta).Error
+}
+
+type IssueChecklistRepository struct {
+	db *gorm.DB
+}
+
+func NewIssueChecklistRepository(db *gorm.DB) *IssueChecklistRepository {
+	return &IssueChecklistRepository{db: db}
+}
+
+func (r *IssueChecklistRepository) ListByIssueID(issueID string) ([]model.IssueChecklistItem, error) {
+	var items []model.IssueChecklistItem
+	err := r.db.
+		Where("issue_id = ?", issueID).
+		Order("sort_order ASC, created_at ASC, id ASC").
+		Find(&items).Error
+	return items, err
+}
+
+func (r *IssueChecklistRepository) Transaction(fc func(tx *gorm.DB) error) error {
+	return r.db.Transaction(fc)
+}
+
+func (r *IssueChecklistRepository) ReplaceForIssueTx(tx *gorm.DB, issueID string, items []model.IssueChecklistItem) error {
+	if err := tx.Where("issue_id = ?", issueID).Delete(&model.IssueChecklistItem{}).Error; err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return tx.Create(&items).Error
 }

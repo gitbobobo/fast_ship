@@ -264,3 +264,43 @@ func TestIssueHandlerUpdateInternalMeta_RejectsMissingWorkflowStatus(t *testing.
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestIssueHandlerReplaceChecklist_UpdatesProgress(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-1")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issue := createHandlerTestIssue(t, env.db, project.ID)
+
+	body := []byte(`{"items":[{"title":"梳理复现路径","is_completed":true},{"title":"修复崩溃","is_completed":false}]}`)
+	ctx, rec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/checklist", body)
+	ctx.Params = ginParams("iid", issue.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.ReplaceChecklist(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result struct {
+		WorkflowStatus  string `json:"workflow_status"`
+		ProgressPercent *int   `json:"progress_percent"`
+		ChecklistTotal  int    `json:"checklist_total"`
+		ChecklistDone   int    `json:"checklist_done"`
+		Checklist       []struct {
+			Title       string `json:"title"`
+			IsCompleted bool   `json:"is_completed"`
+		} `json:"checklist"`
+	}
+	decodeEnvelope(t, rec, &result)
+	if result.ProgressPercent == nil || *result.ProgressPercent != 50 {
+		t.Fatalf("expected progress 50, got %+v", result)
+	}
+	if result.WorkflowStatus != string(model.IssueWorkflowStatusInProgress) {
+		t.Fatalf("expected in_progress workflow status, got %+v", result)
+	}
+	if result.ChecklistTotal != 2 || result.ChecklistDone != 1 || len(result.Checklist) != 2 {
+		t.Fatalf("unexpected checklist payload: %+v", result)
+	}
+}

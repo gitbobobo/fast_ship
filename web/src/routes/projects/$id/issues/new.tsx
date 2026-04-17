@@ -77,7 +77,6 @@ export default function NewInternalIssuePage() {
         </div>
 
         <InternalIssueForm
-          showWorkflowStatus
           isSubmitting={createIssue.isPending}
           onCancel={handleCancel}
           onSubmit={handleSubmit}

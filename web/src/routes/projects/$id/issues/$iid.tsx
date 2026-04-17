@@ -19,14 +19,17 @@ import {
   Lock,
   MessageSquare,
   Pencil,
+  Plus,
   RefreshCw,
   Tag,
+  Trash2,
   Unlock,
   User,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 import { Card, CardContent } from "@/components/ui/card";
@@ -46,13 +49,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   useIssue,
   useCreateIssueComment,
   useInfiniteIssueComments,
@@ -60,7 +56,7 @@ import {
   useIssues,
   useSyncProjectIssues,
   useUpdateIssue,
-  useUpdateIssueInternalMeta,
+  useReplaceIssueChecklist,
 } from "@/lib/hooks/use-issues";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -259,27 +255,24 @@ function StateBadge({ state }: { state: "open" | "closed" }) {
   );
 }
 
-const ISSUE_WORKFLOW_STATUS_LABELS = {
-  todo: "待处理",
-  in_progress: "开发中",
-  done: "已完成",
-} as const;
+type ChecklistDraftItem = {
+  localId: string;
+  id?: string;
+  title: string;
+  isCompleted: boolean;
+};
 
-function WorkflowStatusBadge({
-  status,
-}: {
-  status?: "" | "todo" | "in_progress" | "done";
-}) {
-  if (!status) {
+function ProgressBadge({ progress }: { progress?: number | null }) {
+  if (progress == null) {
     return null;
   }
 
-  const className = {
-    todo: "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-300",
-    in_progress:
-      "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-    done: "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-  }[status];
+  const className =
+    progress >= 100
+      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      : progress > 0
+        ? "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+        : "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-300";
 
   return (
     <span
@@ -288,9 +281,25 @@ function WorkflowStatusBadge({
         className,
       )}
     >
-      {ISSUE_WORKFLOW_STATUS_LABELS[status]}
+      进度 {progress}%
     </span>
   );
+}
+
+function normalizeChecklistDraft(items: ChecklistDraftItem[]) {
+  return items.map((item) => ({
+    id: item.id ?? "",
+    title: item.title.trim(),
+    is_completed: item.isCompleted,
+  }));
+}
+
+function calculateChecklistProgress(items: Array<{ isCompleted: boolean }>) {
+  if (items.length === 0) {
+    return null;
+  }
+  const completed = items.filter((item) => item.isCompleted).length;
+  return Math.round((completed * 100) / items.length);
 }
 
 function EmptyState({ message }: { message: string }) {
@@ -325,8 +334,11 @@ export default function IssueDetailPage() {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
   const [commentDraft, setCommentDraft] = useState("");
+  const [isChecklistEditing, setIsChecklistEditing] = useState(false);
+  const [checklistDraft, setChecklistDraft] = useState<ChecklistDraftItem[]>([]);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const timelineSectionRef = useRef<HTMLDivElement | null>(null);
+  const isChecklistEditingRef = useRef(false);
 
   const handleImageClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -341,7 +353,7 @@ export default function IssueDetailPage() {
   const isInternalIssue = issue?.source === "internal";
   const updateIssue = useUpdateIssue(iid!, id);
   const createComment = useCreateIssueComment(iid!, id);
-  const updateInternalMeta = useUpdateIssueInternalMeta(iid!, id);
+  const replaceChecklist = useReplaceIssueChecklist(iid!, id);
   const { data: issueListData } = useIssues(id!, {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
     q: issueContext.q || undefined,
@@ -399,6 +411,39 @@ export default function IssueDetailPage() {
     isLoading: timelineLoading,
   } = useInfiniteIssueTimeline(iid!, 20);
   const syncIssues = useSyncProjectIssues(id!);
+  const persistedChecklist = useMemo(
+    () =>
+      (issue?.internal_meta?.checklist ?? []).map((item) => ({
+        localId: item.id,
+        id: item.id,
+        title: item.title,
+        isCompleted: item.is_completed,
+      })),
+    [issue?.internal_meta?.checklist],
+  );
+  const draftProgress = useMemo(
+    () => calculateChecklistProgress(checklistDraft),
+    [checklistDraft],
+  );
+  const completedChecklistCount = useMemo(
+    () => checklistDraft.filter((item) => item.isCompleted).length,
+    [checklistDraft],
+  );
+  const isChecklistDirty = useMemo(() => {
+    return JSON.stringify(normalizeChecklistDraft(checklistDraft)) !==
+      JSON.stringify(normalizeChecklistDraft(persistedChecklist));
+  }, [checklistDraft, persistedChecklist]);
+
+  useEffect(() => {
+    isChecklistEditingRef.current = isChecklistEditing;
+  }, [isChecklistEditing]);
+
+  useEffect(() => {
+    if (isChecklistEditingRef.current) {
+      return;
+    }
+    setChecklistDraft(persistedChecklist);
+  }, [persistedChecklist]);
 
   const pageIssues = issueListData?.items ?? [];
   const issueIndex = pageIssues.findIndex((item) => item.id === iid);
@@ -416,8 +461,14 @@ export default function IssueDetailPage() {
         ? (nextPageData?.items ?? [])[0] ?? null
         : null;
 
-  const comments = infiniteCommentsData?.pages.flatMap((page) => page.items) ?? [];
-  const timeline = infiniteTimelineData?.pages.flatMap((page) => page.items) ?? [];
+  const comments = useMemo(
+    () => infiniteCommentsData?.pages.flatMap((page) => page.items) ?? [],
+    [infiniteCommentsData?.pages],
+  );
+  const timeline = useMemo(
+    () => infiniteTimelineData?.pages.flatMap((page) => page.items) ?? [],
+    [infiniteTimelineData?.pages],
+  );
   const commentsTotal = infiniteCommentsData?.pages[0]?.total ?? 0;
   const timelineTotal = infiniteTimelineData?.pages[0]?.total ?? 0;
   const loadedCommentsPages = infiniteCommentsData?.pages.length ?? 1;
@@ -667,13 +718,83 @@ export default function IssueDetailPage() {
     await copyGitHubUrl(targetUrl, successMessage);
   };
 
-  const handleWorkflowStatusChange = async (value: "" | "todo" | "in_progress" | "done") => {
-    try {
-      await updateInternalMeta.mutateAsync({ workflow_status: value });
-      toast.success(value ? "已更新内部状态" : "已清除内部状态");
-    } catch {
-      toast.error("更新内部状态失败");
+  const handleChecklistAdd = () => {
+    setChecklistDraft((current) => [
+      ...current,
+      {
+        localId: globalThis.crypto?.randomUUID?.() ?? `draft-${Date.now()}`,
+        title: "",
+        isCompleted: false,
+      },
+    ]);
+  };
+
+  const handleChecklistChange = (
+    localId: string,
+    updates: Partial<Pick<ChecklistDraftItem, "title" | "isCompleted">>,
+  ) => {
+    setChecklistDraft((current) =>
+      current.map((item) =>
+        item.localId === localId ? { ...item, ...updates } : item,
+      ),
+    );
+  };
+
+  const handleChecklistRemove = (localId: string) => {
+    setChecklistDraft((current) => current.filter((item) => item.localId !== localId));
+  };
+
+  const persistChecklist = async (
+    nextDraft: ChecklistDraftItem[],
+    options?: { successMessage?: string; rollbackDraft?: ChecklistDraftItem[]; exitEditMode?: boolean },
+  ) => {
+    const normalized = nextDraft.map((item) => ({
+      id: item.id,
+      title: item.title.trim(),
+      is_completed: item.isCompleted,
+    }));
+    if (normalized.some((item) => !item.title)) {
+      toast.error("请先填写所有 checklist 标题");
+      return false;
     }
+
+    try {
+      await replaceChecklist.mutateAsync({ items: normalized });
+      if (options?.successMessage) {
+        toast.success(options.successMessage);
+      }
+      if (options?.exitEditMode) {
+        setIsChecklistEditing(false);
+      }
+      return true;
+    } catch {
+      if (options?.rollbackDraft) {
+        setChecklistDraft(options.rollbackDraft);
+      }
+      toast.error("保存 checklist 失败");
+      return false;
+    }
+  };
+
+  const handleChecklistSave = async () => {
+    await persistChecklist(checklistDraft, {
+      successMessage: "Checklist 已保存",
+      exitEditMode: true,
+    });
+  };
+
+  const handleChecklistToggleCompleted = async (localId: string) => {
+    const rollbackDraft = checklistDraft;
+    const nextDraft = checklistDraft.map((item) =>
+      item.localId === localId ? { ...item, isCompleted: !item.isCompleted } : item,
+    );
+    setChecklistDraft(nextDraft);
+    await persistChecklist(nextDraft, { rollbackDraft });
+  };
+
+  const handleChecklistCancelEdit = () => {
+    setChecklistDraft(persistedChecklist);
+    setIsChecklistEditing(false);
   };
 
   const handleToggleInternalIssueState = async () => {
@@ -841,7 +962,7 @@ export default function IssueDetailPage() {
                   <span className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold">
                     {issue.source === "github" ? "GitHub" : "内部"}
                   </span>
-                  <WorkflowStatusBadge status={issue.internal_meta?.workflow_status} />
+                  <ProgressBadge progress={issue.internal_meta?.progress_percent} />
                   {(issue.github?.labels ?? []).map((label) => (
                     <span
                       key={label.name}
@@ -1093,172 +1214,272 @@ export default function IssueDetailPage() {
 
           {/* Sidebar */}
           <aside className="space-y-4 lg:sticky lg:top-20 lg:self-start">
+            {/* 创建者与元信息 */}
             <Card>
-              <CardContent className="space-y-5 p-5">
+              <CardContent className="space-y-4 p-4">
                 {/* 创建者 */}
                 <div className="flex items-center gap-3">
-                  <Avatar size="lg" className="h-12 w-12">
+                  <Avatar className="h-10 w-10">
                     <AvatarImage src={toGitHubMediaProxyUrl(issue.author.avatar_url, token)} alt={issue.author.login} />
                     <AvatarFallback>{getInitials(issue.author.login)}</AvatarFallback>
                   </Avatar>
                   <div className="min-w-0">
-                    <p className="text-sm font-medium text-muted-foreground">创建者</p>
-                    <p className="truncate text-base font-semibold">@{issue.author.login}</p>
+                    <p className="text-xs text-muted-foreground">创建者</p>
+                    <p className="truncate text-sm font-semibold">@{issue.author.login}</p>
                   </div>
                 </div>
 
-                {/* 负责人 & 里程碑 */}
-                {((issue.github?.assignees?.length ?? 0) > 0 || issue.github?.milestone) && (
-                  <div className="space-y-3">
-                    {(issue.github?.assignees?.length ?? 0) > 0 && (
-                      <div>
-                        <p className="mb-1.5 text-xs font-medium text-muted-foreground">负责人</p>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {issue.github?.assignees.map((assignee) => (
-                            <div
-                              key={assignee.login}
-                              className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm"
-                            >
-                              <Avatar size="sm">
-                                <AvatarImage src={toGitHubMediaProxyUrl(assignee.avatar_url, token)} alt={assignee.login} />
-                                <AvatarFallback>{getInitials(assignee.login)}</AvatarFallback>
-                              </Avatar>
-                              <span className="font-medium">@{assignee.login}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {issue.github?.milestone && (
-                      <div>
-                        <p className="mb-1 text-xs font-medium text-muted-foreground">里程碑</p>
-                        <p className="text-sm font-semibold">{issue.github.milestone.title}</p>
-                      </div>
-                    )}
-                  </div>
-                )}
+                <Separator />
 
                 {/* 时间 */}
-                <div className="space-y-2">
+                <div className="space-y-1.5 text-sm">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs text-muted-foreground">创建于</span>
-                    <span className="text-sm font-medium">{formatDate(issue.created_at)}</span>
+                    <span className="text-muted-foreground">创建于</span>
+                    <span className="font-medium">{formatDate(issue.created_at)}</span>
                   </div>
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs text-muted-foreground">更新于</span>
-                    <span className="text-sm font-medium">{formatRelativeTime(issue.updated_at)}</span>
+                    <span className="text-muted-foreground">更新于</span>
+                    <span className="font-medium">{formatRelativeTime(issue.updated_at)}</span>
                   </div>
                   {issue.github?.synced_at && (
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-muted-foreground">同步于</span>
-                      <span className="text-sm font-medium">{formatRelativeTime(issue.github.synced_at)}</span>
+                      <span className="text-muted-foreground">同步于</span>
+                      <span className="font-medium">{formatRelativeTime(issue.github.synced_at)}</span>
                     </div>
                   )}
                 </div>
 
-                {/* 标签 */}
-                {(issue.github?.labels?.length ?? 0) > 0 && (
-                  <div>
-                    <p className="mb-2 text-xs font-medium text-muted-foreground">标签</p>
-                    <div className="flex flex-wrap gap-2">
-                      {issue.github?.labels.map((label) => (
-                        <span
-                          key={label.name}
-                          className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium"
-                          style={{
-                            backgroundColor: `#${label.color}20`,
-                            color: `#${label.color}`,
-                          }}
-                        >
-                          {label.name}
-                        </span>
-                      ))}
+                {/* 负责人 & 里程碑 & 标签 */}
+                {((issue.github?.assignees?.length ?? 0) > 0 || issue.github?.milestone || (issue.github?.labels?.length ?? 0) > 0) && (
+                  <>
+                    <Separator />
+                    <div className="space-y-3">
+                      {(issue.github?.assignees?.length ?? 0) > 0 && (
+                        <div>
+                          <p className="mb-1.5 text-xs font-medium text-muted-foreground">负责人</p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {issue.github?.assignees.map((assignee) => (
+                              <div
+                                key={assignee.login}
+                                className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm"
+                              >
+                                <Avatar className="h-5 w-5">
+                                  <AvatarImage src={toGitHubMediaProxyUrl(assignee.avatar_url, token)} alt={assignee.login} />
+                                  <AvatarFallback className="text-[10px]">{getInitials(assignee.login)}</AvatarFallback>
+                                </Avatar>
+                                <span className="font-medium">@{assignee.login}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {issue.github?.milestone && (
+                        <div>
+                          <p className="mb-1 text-xs font-medium text-muted-foreground">里程碑</p>
+                          <p className="text-sm font-semibold">{issue.github.milestone.title}</p>
+                        </div>
+                      )}
+                      {(issue.github?.labels?.length ?? 0) > 0 && (
+                        <div>
+                          <p className="mb-2 text-xs font-medium text-muted-foreground">标签</p>
+                          <div className="flex flex-wrap gap-2">
+                            {issue.github?.labels.map((label) => (
+                              <span
+                                key={label.name}
+                                className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium"
+                                style={{
+                                  backgroundColor: `#${label.color}20`,
+                                  color: `#${label.color}`,
+                                }}
+                              >
+                                {label.name}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  </div>
+                  </>
                 )}
+              </CardContent>
+            </Card>
 
-                {isInternalIssue && (
+            {/* Checklist */}
+            <Card>
+              <CardContent className="space-y-4 p-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold">Checklist</h3>
+                  {isChecklistEditing ? (
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleChecklistCancelEdit}
+                        disabled={replaceChecklist.isPending}
+                      >
+                        取消
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => void handleChecklistSave()}
+                        disabled={!isChecklistDirty || replaceChecklist.isPending}
+                      >
+                        {replaceChecklist.isPending ? "保存中..." : "保存"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button variant="ghost" size="sm" onClick={() => setIsChecklistEditing(true)}>
+                      <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                      编辑
+                    </Button>
+                  )}
+                </div>
+
+                {checklistDraft.length > 0 && (
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground">内部操作</p>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          navigate({
-                            pathname: `/projects/${id}/issues/${iid}/edit`,
-                            search: location.search,
-                          })
-                        }
-                      >
-                        编辑问题
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => void handleToggleInternalIssueState()}
-                        disabled={updateIssue.isPending}
-                      >
-                        {issue.state === "open" ? "关闭问题" : "重新打开"}
-                      </Button>
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-semibold">{draftProgress ?? 0}%</span>
+                      <span className="text-xs text-muted-foreground">
+                        {completedChecklistCount}/{checklistDraft.length} 项完成
+                        {issue.internal_meta?.checklist_updated_at && (
+                          <span className="ml-1">· 更新于 {formatRelativeTime(issue.internal_meta.checklist_updated_at)}</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className={cn(
+                          "h-full rounded-full transition-all",
+                          (draftProgress ?? 0) >= 100 ? "bg-emerald-500" : "bg-amber-500",
+                        )}
+                        style={{ width: `${draftProgress ?? 0}%` }}
+                      />
                     </div>
                   </div>
                 )}
 
-                {/* 内部状态 */}
-                <div className="-mx-5 -mb-5 border-t bg-muted/30 px-5 py-4">
-                  <p className="mb-2 text-xs font-medium text-muted-foreground">内部状态</p>
-                  <Select
-                    value={issue.internal_meta?.workflow_status ?? "unset"}
-                    onValueChange={(value) =>
-                      void handleWorkflowStatusChange(
-                        (value === "unset" ? "" : value) as
-                          | ""
-                          | "todo"
-                          | "in_progress"
-                          | "done",
-                      )
-                    }
-                    disabled={updateInternalMeta.isPending}
-                  >
-                    <SelectTrigger className="w-full bg-card hover:bg-accent/50 transition-colors">
-                      <SelectValue placeholder="未设置">
-                        {issue.internal_meta?.workflow_status
-                          ? ISSUE_WORKFLOW_STATUS_LABELS[issue.internal_meta.workflow_status]
-                          : "未设置"}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="unset">
-                        <span className="inline-flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-slate-400" />
-                          未设置
-                        </span>
-                      </SelectItem>
-                      <SelectItem value="todo">
-                        <span className="inline-flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-slate-500" />
-                          待处理
-                        </span>
-                      </SelectItem>
-                      <SelectItem value="in_progress">
-                        <span className="inline-flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-amber-500" />
-                          开发中
-                        </span>
-                      </SelectItem>
-                      <SelectItem value="done">
-                        <span className="inline-flex items-center gap-2">
-                          <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                          已完成
-                        </span>
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div className="space-y-2">
+                  {checklistDraft.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">
+                      还没有 checklist。添加任务后，问题进度会按已完成项占比自动计算。
+                    </div>
+                  ) : (
+                    checklistDraft.map((item, index) => (
+                      <div
+                        key={item.localId}
+                        className={cn(
+                          "group flex items-center gap-3 rounded-lg border p-2.5 transition-colors",
+                          isChecklistEditing ? "bg-card" : "bg-card hover:bg-muted/50",
+                        )}
+                      >
+                        {isChecklistEditing ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleChecklistChange(item.localId, { isCompleted: !item.isCompleted })}
+                              className={cn(
+                                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors",
+                                item.isCompleted
+                                  ? "border-emerald-500 bg-emerald-500 text-white"
+                                  : "border-input bg-background text-transparent hover:border-muted-foreground",
+                              )}
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            </button>
+                            <Input
+                              value={item.title}
+                              onChange={(event) =>
+                                handleChecklistChange(item.localId, { title: event.target.value })
+                              }
+                              placeholder={`任务 ${index + 1}`}
+                              className={cn("h-8 flex-1", item.isCompleted && "text-muted-foreground line-through")}
+                            />
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 shrink-0"
+                              aria-label={`删除 checklist ${index + 1}`}
+                              onClick={() => handleChecklistRemove(item.localId)}
+                            >
+                              <Trash2 className="h-4 w-4 text-muted-foreground" />
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              disabled={replaceChecklist.isPending}
+                              onClick={() => void handleChecklistToggleCompleted(item.localId)}
+                              aria-label={
+                                item.isCompleted
+                                  ? `取消完成 checklist ${index + 1}`
+                                  : `标记完成 checklist ${index + 1}`
+                              }
+                              className={cn(
+                                "inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded border transition-colors",
+                                item.isCompleted
+                                  ? "border-emerald-500 bg-emerald-500 text-white"
+                                  : "border-input bg-background text-transparent hover:border-muted-foreground",
+                              )}
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            </button>
+                            <p
+                              className={cn(
+                                "min-w-0 flex-1 text-sm",
+                                item.isCompleted && "text-muted-foreground line-through",
+                              )}
+                            >
+                              {item.title}
+                            </p>
+                          </>
+                        )}
+                      </div>
+                    ))
+                  )}
+
+                  {isChecklistEditing && (
+                    <Button variant="outline" className="w-full" onClick={handleChecklistAdd}>
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />
+                      {checklistDraft.length === 0 ? "添加第一项" : "添加项"}
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             </Card>
 
+            {/* 内部操作 */}
+            {isInternalIssue && (
+              <Card>
+                <CardContent className="space-y-3 p-4">
+                  <p className="text-xs font-medium text-muted-foreground">内部操作</p>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() =>
+                        navigate({
+                          pathname: `/projects/${id}/issues/${iid}/edit`,
+                          search: location.search,
+                        })
+                      }
+                    >
+                      编辑问题
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1"
+                      onClick={() => void handleToggleInternalIssueState()}
+                      disabled={updateIssue.isPending}
+                    >
+                      {issue.state === "open" ? "关闭问题" : "重新打开"}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </aside>
         </div>
       </div>

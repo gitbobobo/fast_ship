@@ -36,32 +36,30 @@ import {
   useIssues,
   useSyncProjectIssues,
 } from "@/lib/hooks/use-issues";
+import {
+  ISSUE_WORKFLOW_STATUS_LABELS,
+  ISSUE_WORKFLOW_STATUS_OPTIONS,
+} from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 
-const ISSUE_WORKFLOW_STATUS_LABELS = {
-  todo: "待处理",
-  in_progress: "开发中",
-  done: "已完成",
-} as const;
-
-function IssueWorkflowBadge({
-  status,
+function IssueProgressBadge({
+  progress,
 }: {
-  status?: "" | "todo" | "in_progress" | "done";
+  progress?: number | null;
 }) {
-  if (!status) {
+  if (progress == null) {
     return null;
   }
 
-  const className = {
-    todo: "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-300",
-    in_progress:
-      "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-    done: "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-  }[status];
+  const className =
+    progress >= 100
+      ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      : progress > 0
+        ? "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+        : "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-300";
 
   return (
     <span
@@ -70,7 +68,7 @@ function IssueWorkflowBadge({
         className,
       )}
     >
-      {ISSUE_WORKFLOW_STATUS_LABELS[status]}
+      进度 {progress}%
     </span>
   );
 }
@@ -495,15 +493,17 @@ export default function IssuesPage() {
                       ? "未设置"
                       : ISSUE_WORKFLOW_STATUS_LABELS[
                           issueWorkflowFilter as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
-                        ]}
+                        ] ?? issueWorkflowFilter}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">全部内部状态</SelectItem>
                 <SelectItem value="unset">未设置</SelectItem>
-                <SelectItem value="todo">待处理</SelectItem>
-                <SelectItem value="in_progress">开发中</SelectItem>
-                <SelectItem value="done">已完成</SelectItem>
+                {ISSUE_WORKFLOW_STATUS_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
             <Select
@@ -637,8 +637,8 @@ export default function IssuesPage() {
                           >
                             {issue.state === "open" ? "Open" : "Closed"}
                           </Badge>
-                          <IssueWorkflowBadge
-                            status={issue.internal_meta?.workflow_status}
+                          <IssueProgressBadge
+                            progress={issue.internal_meta?.progress_percent}
                           />
                           {(issue.github?.labels ?? []).slice(0, 4).map((label) => (
                             <span

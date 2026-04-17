@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	neturl "net/url"
@@ -54,6 +55,7 @@ type IssueService struct {
 	commentRepo      *repository.IssueCommentRepository
 	timelineRepo     *repository.IssueTimelineRepository
 	internalMetaRepo *repository.IssueInternalMetaRepository
+	checklistRepo    *repository.IssueChecklistRepository
 	syncStateRepo    *repository.IssueSyncStateRepository
 	assetRepo        *repository.IssueAssetRepository
 	projectRepo      *repository.ProjectRepository
@@ -211,10 +213,32 @@ type IssueSyncStateResponse struct {
 }
 
 type IssueInternalMetaResponse struct {
-	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
-	StartedAt      *string                   `json:"started_at,omitempty"`
-	CompletedAt    *string                   `json:"completed_at,omitempty"`
-	UpdatedAt      *string                   `json:"updated_at,omitempty"`
+	WorkflowStatus     model.IssueWorkflowStatus    `json:"workflow_status"`
+	ProgressPercent    *int                         `json:"progress_percent"`
+	ChecklistTotal     int                          `json:"checklist_total"`
+	ChecklistDone      int                          `json:"checklist_done"`
+	StartedAt          *string                      `json:"started_at,omitempty"`
+	CompletedAt        *string                      `json:"completed_at,omitempty"`
+	ChecklistUpdatedAt *string                      `json:"checklist_updated_at,omitempty"`
+	UpdatedAt          *string                      `json:"updated_at,omitempty"`
+	Checklist          []IssueChecklistItemResponse `json:"checklist,omitempty"`
+}
+
+type IssueChecklistItemResponse struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	IsCompleted bool   `json:"is_completed"`
+	SortOrder   int    `json:"sort_order"`
+}
+
+type ReplaceIssueChecklistRequest struct {
+	Items []IssueChecklistItemInput `json:"items"`
+}
+
+type IssueChecklistItemInput struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	IsCompleted bool   `json:"is_completed"`
 }
 
 type IssueAssetResponse struct {
@@ -252,6 +276,7 @@ func NewIssueService(
 	commentRepo *repository.IssueCommentRepository,
 	timelineRepo *repository.IssueTimelineRepository,
 	internalMetaRepo *repository.IssueInternalMetaRepository,
+	checklistRepo *repository.IssueChecklistRepository,
 	syncStateRepo *repository.IssueSyncStateRepository,
 	assetRepo *repository.IssueAssetRepository,
 	projectRepo *repository.ProjectRepository,
@@ -266,6 +291,7 @@ func NewIssueService(
 		commentRepo:      commentRepo,
 		timelineRepo:     timelineRepo,
 		internalMetaRepo: internalMetaRepo,
+		checklistRepo:    checklistRepo,
 		syncStateRepo:    syncStateRepo,
 		assetRepo:        assetRepo,
 		projectRepo:      projectRepo,
@@ -364,7 +390,7 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		return nil, err
 	}
 
-	resp := toIssueResponse(*stored, meta)
+	resp := toIssueResponse(*stored, meta, nil)
 	return &resp, nil
 }
 
@@ -428,7 +454,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	if err != nil {
 		return nil, err
 	}
-	resp := toIssueResponse(*issue, meta)
+	resp := toIssueResponse(*issue, meta, nil)
 	return &resp, nil
 }
 
@@ -583,7 +609,7 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 
 	resp := make([]IssueResponse, 0, end-start)
 	for _, issue := range filtered[start:end] {
-		resp = append(resp, toIssueResponse(issue, metaByIssueID[issue.ID]))
+		resp = append(resp, toIssueResponse(issue, metaByIssueID[issue.ID], nil))
 	}
 	return resp, total, nil
 }
@@ -668,9 +694,74 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	checklist, err := s.loadChecklist(issue.ID)
+	if err != nil {
+		return nil, err
+	}
 
-	resp := toIssueResponse(*issue, meta)
+	resp := toIssueResponse(*issue, meta, checklist)
 	return &resp, nil
+}
+
+func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssueChecklistRequest) (*IssueInternalMetaResponse, error) {
+	issue, err := s.issueRepo.FindByID(issueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrIssueNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	if _, err := s.projectRepo.FindByID(issue.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrNotOwner
+	}
+
+	items, snapshot, err := buildChecklistSnapshot(issueID, userID, req.Items)
+	if err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+
+	now := time.Now().UTC()
+	meta, err := s.internalMetaRepo.Get(issue.ID)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrInternal
+		}
+		meta = &model.IssueInternalMeta{
+			IssueID:   issue.ID,
+			CreatedAt: now,
+		}
+	}
+
+	meta.ProgressPercent = snapshot.ProgressPercent
+	meta.ChecklistTotal = snapshot.Total
+	meta.ChecklistDone = snapshot.Done
+	meta.UpdatedByUserID = userID
+	meta.UpdatedAt = now
+	if len(items) == 0 {
+		meta.ChecklistUpdatedAt = nil
+	} else {
+		value := now
+		meta.ChecklistUpdatedAt = &value
+	}
+	applyWorkflowSnapshot(meta, snapshot, now)
+
+	if err := s.checklistRepo.Transaction(func(tx *gorm.DB) error {
+		if err := s.checklistRepo.ReplaceForIssueTx(tx, issue.ID, items); err != nil {
+			return err
+		}
+		if err := s.internalMetaRepo.UpsertTx(tx, meta); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	return toIssueInternalMetaResponse(meta, items), nil
 }
 
 func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus model.IssueWorkflowStatus) (*IssueInternalMetaResponse, error) {
@@ -732,7 +823,7 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 		return nil, errs.ErrInternal
 	}
 
-	return toIssueInternalMetaResponse(meta), nil
+	return toIssueInternalMetaResponse(meta, nil), nil
 }
 
 func (s *IssueService) ListComments(issueID, userID string, page, pageSize int) ([]IssueCommentResponse, int64, error) {
@@ -1232,7 +1323,15 @@ func (s *IssueService) loadInternalMeta(issueID string) (*model.IssueInternalMet
 	return meta, nil
 }
 
-func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResponse {
+func (s *IssueService) loadChecklist(issueID string) ([]model.IssueChecklistItem, error) {
+	items, err := s.checklistRepo.ListByIssueID(issueID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	return items, nil
+}
+
+func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem) IssueResponse {
 	resp := IssueResponse{
 		ID:             issue.ID,
 		ProjectID:      issue.ProjectID,
@@ -1250,7 +1349,7 @@ func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResp
 		},
 		CreatedAt:    formatTime(issue.CreatedAt),
 		UpdatedAt:    formatTime(issue.UpdatedAt),
-		InternalMeta: toIssueInternalMetaResponse(meta),
+		InternalMeta: toIssueInternalMetaResponse(meta, checklist),
 	}
 	if issue.ClosedAt != nil {
 		value := formatTime(issue.ClosedAt.UTC())
@@ -1310,25 +1409,44 @@ func toIssueGitHubResponse(meta *model.IssueGitHubMeta) *IssueGitHubResponse {
 	return resp
 }
 
-func toIssueInternalMetaResponse(meta *model.IssueInternalMeta) *IssueInternalMetaResponse {
-	if meta == nil || meta.WorkflowStatus == "" {
+func toIssueInternalMetaResponse(meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem) *IssueInternalMetaResponse {
+	if meta == nil && len(checklist) == 0 {
 		return nil
 	}
 
-	resp := &IssueInternalMetaResponse{
-		WorkflowStatus: meta.WorkflowStatus,
+	resp := &IssueInternalMetaResponse{}
+	if meta != nil {
+		resp.WorkflowStatus = meta.WorkflowStatus
+		resp.ProgressPercent = meta.ProgressPercent
+		resp.ChecklistTotal = meta.ChecklistTotal
+		resp.ChecklistDone = meta.ChecklistDone
+		if meta.StartedAt != nil {
+			value := formatTime(meta.StartedAt.UTC())
+			resp.StartedAt = &value
+		}
+		if meta.CompletedAt != nil {
+			value := formatTime(meta.CompletedAt.UTC())
+			resp.CompletedAt = &value
+		}
+		if meta.ChecklistUpdatedAt != nil {
+			value := formatTime(meta.ChecklistUpdatedAt.UTC())
+			resp.ChecklistUpdatedAt = &value
+		}
+		if !meta.UpdatedAt.IsZero() {
+			value := formatTime(meta.UpdatedAt.UTC())
+			resp.UpdatedAt = &value
+		}
 	}
-	if meta.StartedAt != nil {
-		value := formatTime(meta.StartedAt.UTC())
-		resp.StartedAt = &value
-	}
-	if meta.CompletedAt != nil {
-		value := formatTime(meta.CompletedAt.UTC())
-		resp.CompletedAt = &value
-	}
-	if !meta.UpdatedAt.IsZero() {
-		value := formatTime(meta.UpdatedAt.UTC())
-		resp.UpdatedAt = &value
+	if len(checklist) > 0 {
+		resp.Checklist = make([]IssueChecklistItemResponse, 0, len(checklist))
+		for _, item := range checklist {
+			resp.Checklist = append(resp.Checklist, IssueChecklistItemResponse{
+				ID:          item.ID,
+				Title:       item.Title,
+				IsCompleted: item.IsCompleted,
+				SortOrder:   item.SortOrder,
+			})
+		}
 	}
 	return resp
 }
@@ -1720,6 +1838,82 @@ func parseJSON[T any](raw string) T {
 	}
 	_ = json.Unmarshal([]byte(raw), &target)
 	return target
+}
+
+type checklistSnapshot struct {
+	ProgressPercent *int
+	Total           int
+	Done            int
+}
+
+func buildChecklistSnapshot(issueID, userID string, items []IssueChecklistItemInput) ([]model.IssueChecklistItem, checklistSnapshot, error) {
+	now := time.Now().UTC()
+	result := make([]model.IssueChecklistItem, 0, len(items))
+	done := 0
+
+	for index, item := range items {
+		title := strings.TrimSpace(item.Title)
+		if title == "" {
+			return nil, checklistSnapshot{}, errs.ErrInvalidParams
+		}
+
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			id = uuid.NewString()
+		}
+
+		result = append(result, model.IssueChecklistItem{
+			ID:              id,
+			IssueID:         issueID,
+			Title:           title,
+			IsCompleted:     item.IsCompleted,
+			SortOrder:       index,
+			CreatedByUserID: userID,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		})
+		if item.IsCompleted {
+			done++
+		}
+	}
+
+	snapshot := checklistSnapshot{
+		Total: len(result),
+		Done:  done,
+	}
+	if len(result) > 0 {
+		value := int(math.Round(float64(done*100) / float64(len(result))))
+		snapshot.ProgressPercent = &value
+	}
+	return result, snapshot, nil
+}
+
+func applyWorkflowSnapshot(meta *model.IssueInternalMeta, snapshot checklistSnapshot, now time.Time) {
+	switch {
+	case snapshot.ProgressPercent == nil:
+		meta.WorkflowStatus = ""
+		meta.StartedAt = nil
+		meta.CompletedAt = nil
+	case *snapshot.ProgressPercent <= 0:
+		meta.WorkflowStatus = model.IssueWorkflowStatusTodo
+		meta.StartedAt = nil
+		meta.CompletedAt = nil
+	case *snapshot.ProgressPercent >= 100:
+		meta.WorkflowStatus = model.IssueWorkflowStatusDone
+		if meta.StartedAt == nil {
+			value := now
+			meta.StartedAt = &value
+		}
+		value := now
+		meta.CompletedAt = &value
+	default:
+		meta.WorkflowStatus = model.IssueWorkflowStatusInProgress
+		if meta.StartedAt == nil {
+			value := now
+			meta.StartedAt = &value
+		}
+		meta.CompletedAt = nil
+	}
 }
 
 func formatTime(t time.Time) string {

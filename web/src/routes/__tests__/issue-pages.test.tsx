@@ -1,5 +1,6 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { vi } from "vitest";
 import ProjectDetailPage from "@/routes/projects/$id/index";
 import EditInternalIssuePage from "@/routes/projects/$id/issues/$iid/edit";
@@ -19,7 +20,7 @@ import {
   useCreateIssueComment,
   useSyncProjectIssues,
   useUpdateIssue,
-  useUpdateIssueInternalMeta,
+  useReplaceIssueChecklist,
   useUploadIssueAsset,
 } from "@/lib/hooks/use-issues";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -96,6 +97,9 @@ function buildInternalIssue(overrides: Partial<Issue> = {}): Issue {
     updated_at: "2026-04-12T10:00:00Z",
     internal_meta: {
       workflow_status: "todo",
+      progress_percent: 0,
+      checklist_total: 0,
+      checklist_done: 0,
       updated_at: "2026-04-12T10:00:00Z",
     },
     github: null,
@@ -130,7 +134,7 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useCreateIssueComment: vi.fn(),
   useSyncProjectIssues: vi.fn(),
   useUpdateIssue: vi.fn(),
-  useUpdateIssueInternalMeta: vi.fn(),
+  useReplaceIssueChecklist: vi.fn(),
   useUploadIssueAsset: vi.fn(),
 }));
 
@@ -164,6 +168,9 @@ function mockIssueDetailData() {
             reference: "GH-42",
             internal_meta: {
               workflow_status: "in_progress",
+              progress_percent: 50,
+              checklist_total: 2,
+              checklist_done: 1,
               started_at: "2026-04-12T09:00:00Z",
               updated_at: "2026-04-12T09:00:00Z",
             },
@@ -206,8 +213,16 @@ function mockIssueDetailData() {
         body_html: "<h2>Steps</h2><p>Open the <strong>app</strong></p>",
         internal_meta: {
           workflow_status: "in_progress",
+          progress_percent: 50,
+          checklist_total: 2,
+          checklist_done: 1,
           started_at: "2026-04-12T09:00:00Z",
+          checklist_updated_at: "2026-04-12T09:00:00Z",
           updated_at: "2026-04-12T09:00:00Z",
+          checklist: [
+            { id: "chk-1", title: "复现问题", is_completed: true, sort_order: 0 },
+            { id: "chk-2", title: "修复崩溃", is_completed: false, sort_order: 1 },
+          ],
         },
       },
       {
@@ -387,10 +402,10 @@ describe("Issue pages", () => {
       isPending: false,
     } as unknown as ReturnType<typeof useUploadIssueAsset>);
 
-    vi.mocked(useUpdateIssueInternalMeta).mockReturnValue({
+    vi.mocked(useReplaceIssueChecklist).mockReturnValue({
       mutateAsync: vi.fn(),
       isPending: false,
-    } as unknown as ReturnType<typeof useUpdateIssueInternalMeta>);
+    } as unknown as ReturnType<typeof useReplaceIssueChecklist>);
 
     vi.mocked(useIssueFilterOptions).mockReturnValue({
       data: {
@@ -476,6 +491,9 @@ describe("Issue pages", () => {
               body: "App crashes",
               internal_meta: {
                 workflow_status: "done",
+                progress_percent: 100,
+                checklist_total: 2,
+                checklist_done: 2,
                 started_at: "2026-04-11T10:00:00Z",
                 completed_at: "2026-04-12T09:30:00Z",
                 updated_at: "2026-04-12T09:30:00Z",
@@ -521,7 +539,8 @@ describe("Issue pages", () => {
 
     expect(screen.getByText("GH-42 Crash on launch")).toBeInTheDocument();
     expect(screen.getByText("负责人")).toBeInTheDocument();
-    expect(screen.getAllByText("开发中").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("进度 50%").length).toBeGreaterThan(0);
+    expect(screen.getByText("1/2 项完成")).toBeInTheDocument();
     expect(screen.getByText("上一条")).toBeInTheDocument();
     expect(screen.getByText("下一条")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
@@ -600,34 +619,79 @@ describe("Issue pages", () => {
     );
   });
 
-  it("updates internal workflow status from the issue detail page", async () => {
+  it("saves checklist from the issue detail page", async () => {
     mockIssueDetailData();
     const user = userEvent.setup();
     const mutateAsync = vi.fn().mockResolvedValue({
       data: {
-        workflow_status: "done",
-        started_at: "2026-04-12T09:00:00Z",
-        completed_at: "2026-04-12T10:00:00Z",
+        workflow_status: "in_progress",
+        progress_percent: 100,
+        checklist_total: 2,
+        checklist_done: 2,
         updated_at: "2026-04-12T10:00:00Z",
       },
     });
-    vi.mocked(useUpdateIssueInternalMeta).mockReturnValue({
+    vi.mocked(useReplaceIssueChecklist).mockReturnValue({
       mutateAsync,
       isPending: false,
-    } as unknown as ReturnType<typeof useUpdateIssueInternalMeta>);
+    } as unknown as ReturnType<typeof useReplaceIssueChecklist>);
 
     renderWithRoute(<IssueDetailPage />, {
       path: "/projects/:id/issues/:iid",
       initialEntry: "/projects/proj-1/issues/issue-1",
     });
 
-    await user.click(screen.getByRole("combobox"));
-    await user.click(await screen.findByRole("option", { name: "已完成" }));
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    const titleInput = screen.getByDisplayValue("修复崩溃");
+    await user.clear(titleInput);
+    await user.type(titleInput, "修复崩溃并回归");
+    expect(screen.queryByRole("button", { name: "标记完成 checklist 2" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
-      expect(mutateAsync).toHaveBeenCalledWith({ workflow_status: "done" }),
+      expect(mutateAsync).toHaveBeenCalledWith({
+        items: [
+          { id: "chk-1", title: "复现问题", is_completed: true },
+          { id: "chk-2", title: "修复崩溃并回归", is_completed: false },
+        ],
+      }),
     );
-    expect(toast.success).toHaveBeenCalledWith("已更新内部状态");
+    expect(toast.success).toHaveBeenCalledWith("Checklist 已保存");
+  });
+
+  it("toggles checklist completion in browse mode", async () => {
+    mockIssueDetailData();
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        workflow_status: "done",
+        progress_percent: 100,
+        checklist_total: 2,
+        checklist_done: 2,
+        updated_at: "2026-04-12T10:00:00Z",
+      },
+    });
+    vi.mocked(useReplaceIssueChecklist).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useReplaceIssueChecklist>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(screen.queryByDisplayValue("修复崩溃")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "标记完成 checklist 2" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        items: [
+          { id: "chk-1", title: "复现问题", is_completed: true },
+          { id: "chk-2", title: "修复崩溃", is_completed: true },
+        ],
+      }),
+    );
   });
 
   it("preserves list filters when linking from the issues page to detail", async () => {
@@ -664,6 +728,144 @@ describe("Issue pages", () => {
         "/projects/proj-1/issues/issue-1?issue_state=open&issue_q=crash&issue_label=bug&issue_assignee=bob&issue_milestone=1.0.1&issue_sort=updated_desc&issue_page=2",
       ),
     );
+  });
+
+  it("renders the selected workflow status label in the issues filter", async () => {
+    vi.mocked(useIssues).mockReturnValue({
+      data: {
+        items: [
+          buildGitHubIssue({
+            id: "issue-1",
+            body: "App crashes",
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssues>);
+
+    renderWithRoute(<IssuesPage />, {
+      path: "/issues",
+      initialEntry: "/issues?project=proj-1&workflow_status=in_progress",
+    });
+
+    expect(screen.getByText("开发中")).toBeInTheDocument();
+  });
+
+  it("preserves unsaved checklist edits when the issue refetches", async () => {
+    mockIssueDetailData();
+    const user = userEvent.setup();
+    const issueState = {
+      current: buildGitHubIssue(
+        {
+          id: "issue-1",
+          title: "Crash on launch",
+          reference: "GH-42",
+          body: "## Steps\n\nOpen the app",
+          body_html: "<h2>Steps</h2><p>Open the <strong>app</strong></p>",
+          internal_meta: {
+            workflow_status: "in_progress",
+            progress_percent: 50,
+            checklist_total: 2,
+            checklist_done: 1,
+            started_at: "2026-04-12T09:00:00Z",
+            checklist_updated_at: "2026-04-12T09:00:00Z",
+            updated_at: "2026-04-12T09:00:00Z",
+            checklist: [
+              { id: "chk-1", title: "复现问题", is_completed: true, sort_order: 0 },
+              { id: "chk-2", title: "修复崩溃", is_completed: false, sort_order: 1 },
+            ],
+          },
+        },
+        {
+          assignees: [{ login: "bob", avatar_url: "" }],
+          labels: [{ name: "bug", color: "d73a4a", description: "" }],
+          milestone: { number: 1, title: "1.0.1", state: "open", description: "" },
+          reactions: {
+            total_count: 1,
+            "+1": 1,
+            "-1": 0,
+            laugh: 0,
+            hooray: 0,
+            confused: 0,
+            heart: 0,
+            rocket: 0,
+            eyes: 0,
+          },
+          comments_count: 1,
+        },
+      ),
+    };
+    vi.mocked(useIssue).mockImplementation(
+      () =>
+        ({
+          data: issueState.current,
+          isLoading: false,
+        }) as unknown as ReturnType<typeof useIssue>,
+    );
+
+    const view = renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    const titleInput = screen.getByDisplayValue("修复崩溃");
+    await user.clear(titleInput);
+    await user.type(titleInput, "修复崩溃并补充测试");
+
+    issueState.current = buildGitHubIssue(
+      {
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        body: "## Steps\n\nOpen the app",
+        body_html: "<h2>Steps</h2><p>Open the <strong>app</strong></p>",
+        updated_at: "2026-04-12T10:30:00Z",
+        internal_meta: {
+          workflow_status: "in_progress",
+          progress_percent: 50,
+          checklist_total: 2,
+          checklist_done: 1,
+          started_at: "2026-04-12T09:00:00Z",
+          checklist_updated_at: "2026-04-12T10:30:00Z",
+          updated_at: "2026-04-12T10:30:00Z",
+          checklist: [
+            { id: "chk-1", title: "复现问题", is_completed: true, sort_order: 0 },
+            { id: "chk-2", title: "修复崩溃", is_completed: false, sort_order: 1 },
+          ],
+        },
+      },
+      {
+        assignees: [{ login: "bob", avatar_url: "" }],
+        labels: [{ name: "bug", color: "d73a4a", description: "" }],
+        milestone: { number: 1, title: "1.0.1", state: "open", description: "" },
+        reactions: {
+          total_count: 1,
+          "+1": 1,
+          "-1": 0,
+          laugh: 0,
+          hooray: 0,
+          confused: 0,
+          heart: 0,
+          rocket: 0,
+          eyes: 0,
+        },
+        comments_count: 1,
+      },
+    );
+
+    view.rerender(
+      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-1"]}>
+        <Routes>
+          <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByDisplayValue("修复崩溃并补充测试")).toBeInTheDocument();
   });
 
   it("renders sanitized raw html fallback when body_html is missing", async () => {
@@ -747,15 +949,13 @@ describe("Issue pages", () => {
 
     await user.type(screen.getByLabelText("标题"), "需要补充交付通知");
     await user.type(screen.getByLabelText("描述"), "## 验收\n\n完成后通知 QA");
-    await user.click(screen.getByRole("combobox"));
-    await user.click(await screen.findByRole("option", { name: "开发中" }));
     await user.click(screen.getByRole("button", { name: "创建问题" }));
 
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({
         title: "需要补充交付通知",
         body: "## 验收\n\n完成后通知 QA",
-        workflow_status: "in_progress",
+        workflow_status: "todo",
       }),
     );
     expect(toast.success).toHaveBeenCalledWith("内部问题已创建");

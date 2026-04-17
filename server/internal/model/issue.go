@@ -153,17 +153,38 @@ func (IssueSyncState) TableName() string {
 }
 
 type IssueInternalMeta struct {
-	IssueID         string              `gorm:"type:text;primaryKey" json:"issue_id"`
-	WorkflowStatus  IssueWorkflowStatus `gorm:"type:text;not null;default:''" json:"workflow_status"`
-	StartedAt       *time.Time          `json:"started_at"`
-	CompletedAt     *time.Time          `json:"completed_at"`
-	UpdatedByUserID string              `gorm:"type:text" json:"updated_by_user_id"`
-	CreatedAt       time.Time           `gorm:"not null" json:"created_at"`
-	UpdatedAt       time.Time           `gorm:"not null" json:"updated_at"`
+	IssueID            string              `gorm:"type:text;primaryKey" json:"issue_id"`
+	WorkflowStatus     IssueWorkflowStatus `gorm:"type:text;not null;default:''" json:"workflow_status"`
+	ProgressPercent    *int                `gorm:"type:integer" json:"progress_percent"`
+	ChecklistTotal     int                 `gorm:"not null;default:0" json:"checklist_total"`
+	ChecklistDone      int                 `gorm:"not null;default:0" json:"checklist_done"`
+	StartedAt          *time.Time          `json:"started_at"`
+	CompletedAt        *time.Time          `json:"completed_at"`
+	ChecklistUpdatedAt *time.Time          `json:"checklist_updated_at"`
+	UpdatedByUserID    string              `gorm:"type:text" json:"updated_by_user_id"`
+	CreatedAt          time.Time           `gorm:"not null" json:"created_at"`
+	UpdatedAt          time.Time           `gorm:"not null" json:"updated_at"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 func (IssueInternalMeta) TableName() string {
 	return "issue_internal_meta"
+}
+
+type IssueChecklistItem struct {
+	ID              string    `gorm:"type:text;primaryKey" json:"id"`
+	IssueID         string    `gorm:"type:text;not null;index" json:"issue_id"`
+	Title           string    `gorm:"type:text;not null" json:"title"`
+	IsCompleted     bool      `gorm:"not null;default:false" json:"is_completed"`
+	SortOrder       int       `gorm:"not null;default:0;index" json:"sort_order"`
+	CreatedByUserID string    `gorm:"type:text" json:"created_by_user_id"`
+	CreatedAt       time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt       time.Time `gorm:"not null" json:"updated_at"`
+
+	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (IssueChecklistItem) TableName() string {
+	return "issue_checklist_items"
 }

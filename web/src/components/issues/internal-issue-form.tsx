@@ -13,6 +13,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  ISSUE_WORKFLOW_STATUS_LABELS,
+  ISSUE_WORKFLOW_STATUS_OPTIONS,
+} from "@/lib/issue-workflow-status";
 
 export const internalIssueFormSchema = z.object({
   title: z.string().trim().min(1, "请输入标题"),
@@ -21,12 +25,6 @@ export const internalIssueFormSchema = z.object({
 });
 
 export type InternalIssueFormInput = z.infer<typeof internalIssueFormSchema>;
-
-const WORKFLOW_STATUS_LABELS: Record<InternalIssueFormInput["workflow_status"], string> = {
-  todo: "待处理",
-  in_progress: "开发中",
-  done: "已完成",
-};
 
 interface InternalIssueFormProps {
   defaultValues?: Partial<InternalIssueFormInput>;
@@ -94,12 +92,14 @@ export function InternalIssueForm({
               render={({ field }) => (
                 <Select value={field.value} onValueChange={field.onChange}>
                   <SelectTrigger id="issue-workflow-status" className="w-full">
-                    <SelectValue>{WORKFLOW_STATUS_LABELS[field.value]}</SelectValue>
+                    <SelectValue>{ISSUE_WORKFLOW_STATUS_LABELS[field.value]}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="todo">待处理</SelectItem>
-                    <SelectItem value="in_progress">开发中</SelectItem>
-                    <SelectItem value="done">已完成</SelectItem>
+                    {ISSUE_WORKFLOW_STATUS_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               )}

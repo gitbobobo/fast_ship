@@ -83,6 +83,7 @@ func Setup(
 		api.POST("/issues/:iid/assets", middleware.RequireJWT(cfg, authService), issueHandler.UploadAsset)
 		api.POST("/issues/:iid/comments", middleware.RequireJWT(cfg, authService), issueHandler.CreateComment)
 		api.PUT("/issues/:iid/internal-meta", middleware.RequireJWT(cfg, authService), issueHandler.UpdateInternalMeta)
+		api.PUT("/issues/:iid/checklist", middleware.RequireJWT(cfg, authService), issueHandler.ReplaceChecklist)
 
 		// JWT 必须 — 版本删除和发货
 		api.DELETE("/versions/:vid", middleware.RequireJWT(cfg, authService), versionHandler.Delete)

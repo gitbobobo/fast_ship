@@ -207,3 +207,17 @@ export function useUpdateIssueInternalMeta(issueId: string, projectId?: string) 
     },
   });
 }
+
+export function useReplaceIssueChecklist(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof issueApi.replaceChecklist>[1]) =>
+      issueApi.replaceChecklist(issueId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+      }
+    },
+  });
+}

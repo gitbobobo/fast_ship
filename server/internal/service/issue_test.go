@@ -240,6 +240,43 @@ func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
 	}
 }
 
+func TestIssueServiceReplaceChecklist_UpdatesProgressSnapshot(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	meta, err := svc.issueService.ReplaceChecklist(issue.ID, user.ID, ReplaceIssueChecklistRequest{
+		Items: []IssueChecklistItemInput{
+			{Title: "定位问题", IsCompleted: true},
+			{Title: "修复问题", IsCompleted: false},
+		},
+	})
+	if err != nil {
+		t.Fatalf("replace checklist: %v", err)
+	}
+	if meta == nil || meta.ProgressPercent == nil || *meta.ProgressPercent != 50 {
+		t.Fatalf("expected progress 50, got %+v", meta)
+	}
+	if meta.ChecklistTotal != 2 || meta.ChecklistDone != 1 {
+		t.Fatalf("unexpected checklist counters: %+v", meta)
+	}
+	if meta.WorkflowStatus != model.IssueWorkflowStatusInProgress {
+		t.Fatalf("expected in_progress workflow status, got %+v", meta)
+	}
+
+	got, err := svc.issueService.Get(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if got.InternalMeta == nil || got.InternalMeta.ProgressPercent == nil || *got.InternalMeta.ProgressPercent != 50 {
+		t.Fatalf("expected stored progress on get, got %+v", got.InternalMeta)
+	}
+	if len(got.InternalMeta.Checklist) != 2 {
+		t.Fatalf("expected checklist items on get, got %+v", got.InternalMeta)
+	}
+}
+
 func TestIssueServiceCreateInternalIssue_CreatesLocalIssue(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")

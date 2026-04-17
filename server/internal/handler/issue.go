@@ -36,6 +36,10 @@ type updateIssueInternalMetaRequest struct {
 	WorkflowStatus *model.IssueWorkflowStatus `json:"workflow_status"`
 }
 
+type replaceIssueChecklistRequest struct {
+	Items []service.IssueChecklistItemInput `json:"items"`
+}
+
 func NewIssueHandler(issueService *service.IssueService) *IssueHandler {
 	return &IssueHandler{issueService: issueService}
 }
@@ -232,6 +236,27 @@ func (h *IssueHandler) UpdateInternalMeta(c *gin.Context) {
 	}
 
 	result, err := h.issueService.UpdateInternalMeta(issueID, userID, *req.WorkflowStatus)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+func (h *IssueHandler) ReplaceChecklist(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	var req replaceIssueChecklistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.issueService.ReplaceChecklist(issueID, userID, service.ReplaceIssueChecklistRequest{
+		Items: req.Items,
+	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
