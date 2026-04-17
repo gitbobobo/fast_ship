@@ -1,5 +1,6 @@
 const MEDIA_PROXY_PATH = "/api/github/media-proxy";
 const MEDIA_PROXY_TOKEN_PARAM = "token";
+const ISSUE_ASSET_CONTENT_PATH = /^\/api\/issues\/assets\/[^/]+\/content$/;
 
 function isGitHubMediaUrl(value: string) {
   try {
@@ -42,6 +43,25 @@ function isSameOriginMediaProxyUrl(value: string) {
   }
 }
 
+function isIssueAssetUrl(value: string) {
+  try {
+    const parsed = new URL(value, window.location.origin);
+    return parsed.origin === window.location.origin && ISSUE_ASSET_CONTENT_PATH.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function toIssueAssetUrl(value?: string | null, token?: string | null): string | undefined {
+  if (!value || !isIssueAssetUrl(value)) {
+    return undefined;
+  }
+
+  const assetURL = new URL(value, window.location.origin);
+  attachMediaProxyToken(assetURL, token);
+  return buildRelativeUrl(assetURL);
+}
+
 export function toGitHubMediaProxyUrl(value?: string | null, token?: string | null): string | undefined {
   if (!value) {
     return undefined;
@@ -63,6 +83,10 @@ export function toGitHubMediaProxyUrl(value?: string | null, token?: string | nu
   return buildRelativeUrl(proxyURL);
 }
 
+export function toProtectedMediaUrl(value?: string | null, token?: string | null): string | undefined {
+  return toIssueAssetUrl(value, token) ?? toGitHubMediaProxyUrl(value, token);
+}
+
 export function rewriteGitHubMediaHtml(html?: string | null, token?: string | null): string | undefined {
   if (!html) {
     return undefined;
@@ -78,7 +102,7 @@ export function rewriteGitHubMediaHtml(html?: string | null, token?: string | nu
   const rewriteAttr = (selector: string, attr: string) => {
     doc.body.querySelectorAll<HTMLElement>(selector).forEach((element) => {
       const current = element.getAttribute(attr);
-      const next = toGitHubMediaProxyUrl(current, token);
+      const next = toProtectedMediaUrl(current, token);
       if (!current || !next || next === current) {
         return;
       }

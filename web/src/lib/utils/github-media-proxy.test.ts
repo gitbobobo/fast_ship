@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { rewriteGitHubMediaHtml, toGitHubMediaProxyUrl } from "@/lib/utils/github-media-proxy";
+import {
+  rewriteGitHubMediaHtml,
+  toGitHubMediaProxyUrl,
+  toProtectedMediaUrl,
+} from "@/lib/utils/github-media-proxy";
 
 describe("github media proxy utils", () => {
   it("returns undefined for nullish inputs", () => {
@@ -22,6 +26,12 @@ describe("github media proxy utils", () => {
 
     expect(doc.querySelector("img")?.getAttribute("src")).toBe(
       "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+    );
+  });
+
+  it("adds the auth token to internal issue asset urls", () => {
+    expect(toProtectedMediaUrl("/api/issues/assets/asset-1/content", "jwt-token")).toBe(
+      "/api/issues/assets/asset-1/content?token=jwt-token",
     );
   });
 });

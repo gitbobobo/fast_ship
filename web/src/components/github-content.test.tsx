@@ -55,4 +55,15 @@ describe("GitHubContent", () => {
       "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
     );
   });
+
+  it("adds auth token to internal issue asset markdown images", () => {
+    authState.token = "jwt-token";
+
+    render(<GitHubContent markdown="![Image](/api/issues/assets/asset-1/content)" />);
+
+    expect(screen.getByRole("img", { name: "Image" })).toHaveAttribute(
+      "src",
+      "/api/issues/assets/asset-1/content?token=jwt-token",
+    );
+  });
 });

@@ -2,7 +2,10 @@ import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { useAuthStore } from "@/lib/store/auth-store";
-import { rewriteGitHubMediaHtml, toGitHubMediaProxyUrl } from "@/lib/utils/github-media-proxy";
+import {
+  rewriteGitHubMediaHtml,
+  toProtectedMediaUrl,
+} from "@/lib/utils/github-media-proxy";
 
 const sanitizeSchema = {
   ...defaultSchema,
@@ -65,16 +68,16 @@ export function GitHubContent({
       <div className={className}>
         <ReactMarkdown
           components={{
-            img: ({ src, ...props }) => <img {...props} src={toGitHubMediaProxyUrl(src, token)} />,
+            img: ({ src, ...props }) => <img {...props} src={toProtectedMediaUrl(src, token)} />,
             video: ({ src, poster, ...props }) => (
               <video
                 {...props}
-                poster={toGitHubMediaProxyUrl(typeof poster === "string" ? poster : undefined, token)}
-                src={toGitHubMediaProxyUrl(typeof src === "string" ? src : undefined, token)}
+                poster={toProtectedMediaUrl(typeof poster === "string" ? poster : undefined, token)}
+                src={toProtectedMediaUrl(typeof src === "string" ? src : undefined, token)}
               />
             ),
             source: ({ src, ...props }) => (
-              <source {...props} src={toGitHubMediaProxyUrl(typeof src === "string" ? src : undefined, token)} />
+              <source {...props} src={toProtectedMediaUrl(typeof src === "string" ? src : undefined, token)} />
             ),
           }}
           rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
