@@ -219,74 +219,88 @@ func main() {
 
 func backfillIssueSourceModel(db *gorm.DB) error {
 	hasIssuesGitHubID, err := hasSQLiteColumn(db, "issues", "github_issue_id")
-	if err != nil || !hasIssuesGitHubID {
+	if err != nil {
 		return err
 	}
 
+	if hasIssuesGitHubID {
+		if err := db.Exec(`
+			UPDATE issues
+			SET source = 'github'
+			WHERE github_issue_id IS NOT NULL
+			  AND github_issue_id > 0
+		`).Error; err != nil {
+			return err
+		}
+
+		if err := db.Exec(`
+			UPDATE issues
+			SET sequence_number = number
+			WHERE (sequence_number IS NULL OR sequence_number = 0)
+			  AND number IS NOT NULL
+			  AND number > 0
+		`).Error; err != nil {
+			return err
+		}
+
+		if err := db.Exec(`
+			INSERT INTO issue_github_meta (
+				issue_id,
+				project_id,
+				github_issue_id,
+				github_node_id,
+				number,
+				html_url,
+				author_association,
+				assignees_json,
+				labels_json,
+				milestone_json,
+				reactions_json,
+				comments_count,
+				locked,
+				active_lock_reason,
+				synced_at,
+				raw_json
+			)
+			SELECT
+				issues.id,
+				issues.project_id,
+				issues.github_issue_id,
+				issues.github_node_id,
+				issues.number,
+				issues.html_url,
+				issues.author_association,
+				issues.assignees_json,
+				issues.labels_json,
+				issues.milestone_json,
+				issues.reactions_json,
+				issues.comments_count,
+				issues.locked,
+				issues.active_lock_reason,
+				issues.synced_at,
+				issues.raw_json
+			FROM issues
+			WHERE issues.github_issue_id IS NOT NULL
+			  AND issues.github_issue_id > 0
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM issue_github_meta meta
+				WHERE meta.issue_id = issues.id
+			  )
+		`).Error; err != nil {
+			return err
+		}
+	}
+
+	// 对已经迁移过、但 source 被旧默认值写成 internal 的记录做幂等修复。
 	if err := db.Exec(`
 		UPDATE issues
 		SET source = 'github'
-		WHERE (source IS NULL OR source = '')
-		  AND github_issue_id IS NOT NULL
-		  AND github_issue_id > 0
-	`).Error; err != nil {
-		return err
-	}
-
-	if err := db.Exec(`
-		UPDATE issues
-		SET sequence_number = number
-		WHERE (sequence_number IS NULL OR sequence_number = 0)
-		  AND number IS NOT NULL
-		  AND number > 0
-	`).Error; err != nil {
-		return err
-	}
-
-	if err := db.Exec(`
-		INSERT INTO issue_github_meta (
-			issue_id,
-			project_id,
-			github_issue_id,
-			github_node_id,
-			number,
-			html_url,
-			author_association,
-			assignees_json,
-			labels_json,
-			milestone_json,
-			reactions_json,
-			comments_count,
-			locked,
-			active_lock_reason,
-			synced_at,
-			raw_json
-		)
-		SELECT
-			issues.id,
-			issues.project_id,
-			issues.github_issue_id,
-			issues.github_node_id,
-			issues.number,
-			issues.html_url,
-			issues.author_association,
-			issues.assignees_json,
-			issues.labels_json,
-			issues.milestone_json,
-			issues.reactions_json,
-			issues.comments_count,
-			issues.locked,
-			issues.active_lock_reason,
-			issues.synced_at,
-			issues.raw_json
-		FROM issues
-		WHERE issues.github_issue_id IS NOT NULL
-		  AND issues.github_issue_id > 0
-		  AND NOT EXISTS (
+		WHERE EXISTS (
 			SELECT 1
 			FROM issue_github_meta meta
 			WHERE meta.issue_id = issues.id
-		  )
+		)
 	`).Error; err != nil {
 		return err
 	}

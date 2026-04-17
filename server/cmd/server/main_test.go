@@ -103,7 +103,7 @@ func TestBackfillIssueSourceModel_RemovesLegacyIssueColumns(t *testing.T) {
 	`,
 		"issue-github-1",
 		project.ID,
-		"",
+		"internal",
 		42,
 		"open",
 		"",
@@ -154,6 +154,14 @@ func TestBackfillIssueSourceModel_RemovesLegacyIssueColumns(t *testing.T) {
 		t.Fatalf("unexpected migrated github meta: %+v", meta)
 	}
 
+	var migratedIssue model.Issue
+	if err := db.Where("id = ?", "issue-github-1").First(&migratedIssue).Error; err != nil {
+		t.Fatalf("load migrated issue: %v", err)
+	}
+	if migratedIssue.Source != model.IssueSourceGitHub {
+		t.Fatalf("expected migrated issue source to be github, got %q", migratedIssue.Source)
+	}
+
 	internalIssue := &model.Issue{
 		ID:              "issue-internal-1",
 		ProjectID:       project.ID,
@@ -170,5 +178,90 @@ func TestBackfillIssueSourceModel_RemovesLegacyIssueColumns(t *testing.T) {
 	}
 	if err := db.Create(internalIssue).Error; err != nil {
 		t.Fatalf("create internal issue after migration: %v", err)
+	}
+}
+
+func TestBackfillIssueSourceModel_RepairsMigratedIssueSourceFromGitHubMeta(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+
+	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.Issue{}, &model.IssueGitHubMeta{}); err != nil {
+		t.Fatalf("migrate tables: %v", err)
+	}
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_project_github_issue ON issue_github_meta(project_id, github_issue_id)").Error; err != nil {
+		t.Fatalf("create github meta unique index: %v", err)
+	}
+
+	now := time.Now().UTC()
+	user := &model.User{
+		ID:           "user-1",
+		Username:     "shipbobo",
+		Email:        "shipbobo@example.com",
+		PasswordHash: "hashed",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := db.Create(user).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	project := &model.Project{
+		ID:                   "project-1",
+		UserID:               user.ID,
+		Name:                 "demo",
+		Description:          "demo",
+		GithubOwner:          "owner",
+		GithubRepo:           "repo",
+		GithubTokenEncrypted: []byte("token"),
+		CreatedAt:            now,
+		UpdatedAt:            now,
+	}
+	if err := db.Create(project).Error; err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	issue := &model.Issue{
+		ID:              "issue-github-1",
+		ProjectID:       project.ID,
+		Source:          model.IssueSourceInternal,
+		SequenceNumber:  42,
+		State:           model.IssueStateOpen,
+		Title:           "migrated github issue",
+		Body:            "body",
+		AuthorLogin:     "octocat",
+		AuthorAvatarURL: "",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := db.Create(issue).Error; err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	meta := &model.IssueGitHubMeta{
+		IssueID:       issue.ID,
+		ProjectID:     project.ID,
+		GitHubIssueID: 1001,
+		GitHubNodeID:  "I_kw_test",
+		Number:        42,
+		HTMLURL:       "https://github.com/owner/repo/issues/42",
+		SyncedAt:      now,
+	}
+	if err := db.Create(meta).Error; err != nil {
+		t.Fatalf("create github meta: %v", err)
+	}
+
+	if err := backfillIssueSourceModel(db); err != nil {
+		t.Fatalf("backfill issue source model: %v", err)
+	}
+
+	var repaired model.Issue
+	if err := db.Where("id = ?", issue.ID).First(&repaired).Error; err != nil {
+		t.Fatalf("load repaired issue: %v", err)
+	}
+	if repaired.Source != model.IssueSourceGitHub {
+		t.Fatalf("expected repaired issue source to be github, got %q", repaired.Source)
 	}
 }
