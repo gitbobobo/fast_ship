@@ -1,10 +1,36 @@
-import { type ClipboardEvent, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import MDEditor from "@uiw/react-md-editor";
 import "@uiw/react-md-editor/markdown-editor.css";
 import { useThemeStore } from "@/lib/store/theme-store";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toProtectedMediaUrl } from "@/lib/utils/github-media-proxy";
 import { cn } from "@/lib/utils";
+
+async function readClipboardImageFiles() {
+  if (typeof navigator === "undefined" || typeof navigator.clipboard?.read !== "function") {
+    return [];
+  }
+
+  try {
+    const items = await navigator.clipboard.read();
+    const files: File[] = [];
+
+    for (const item of items) {
+      const imageType = item.types.find((type) => type.startsWith("image/"));
+      if (!imageType) {
+        continue;
+      }
+
+      const blob = await item.getType(imageType);
+      const extension = imageType.split("/")[1] || "png";
+      files.push(new File([blob], `pasted-image.${extension}`, { type: imageType }));
+    }
+
+    return files;
+  } catch {
+    return [];
+  }
+}
 
 interface MarkdownEditorProps {
   id?: string;
@@ -28,41 +54,81 @@ export function MarkdownEditor({
   const { resolvedTheme } = useThemeStore();
   const token = useAuthStore((state) => state.token);
   const height = useMemo(() => `${rows * 24 + 64}px`, [rows]);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  const onPasteImageRef = useRef(onPasteImage);
   const [isUploadingImage, setIsUploadingImage] = useState(false);
 
-  const handlePaste = async (event: ClipboardEvent<HTMLTextAreaElement>) => {
-    if (!onPasteImage) {
+  valueRef.current = value;
+  onChangeRef.current = onChange;
+  onPasteImageRef.current = onPasteImage;
+
+  const findEditorTextarea = (target: EventTarget | null) => {
+    if (target instanceof HTMLTextAreaElement) {
+      return target;
+    }
+
+    const root = rootRef.current;
+    if (!root) {
+      return null;
+    }
+
+    const activeElement = root.ownerDocument.activeElement;
+    if (activeElement instanceof HTMLTextAreaElement && root.contains(activeElement)) {
+      return activeElement;
+    }
+
+    return root.querySelector("textarea");
+  };
+
+  const handlePaste = async (event: ClipboardEvent | globalThis.ClipboardEvent) => {
+    if (!onPasteImageRef.current) {
       return;
     }
 
-    const files = Array.from(event.clipboardData?.items ?? [])
+    const itemFiles = Array.from(event.clipboardData?.items ?? [])
       .filter((item) => item.type.startsWith("image/"))
       .map((item) => item.getAsFile())
       .filter((file): file is File => file instanceof File);
+    const directFiles = Array.from(event.clipboardData?.files ?? []).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    const files = itemFiles.length > 0
+      ? itemFiles
+      : directFiles.length > 0
+        ? directFiles
+        : await readClipboardImageFiles();
     if (files.length === 0) {
       return;
     }
 
+    const target = findEditorTextarea(event.target);
+    if (!target) {
+      return;
+    }
+
     event.preventDefault();
-    const target = event.currentTarget;
-    let nextValue = value;
+    let nextValue = valueRef.current;
     let selectionStart = target.selectionStart ?? nextValue.length;
     let selectionEnd = target.selectionEnd ?? selectionStart;
 
     setIsUploadingImage(true);
     try {
       for (const file of files) {
-        const markdown = await onPasteImage(file);
+        const markdown = await onPasteImageRef.current(file);
         const insertion = `${markdown}\n`;
         nextValue = `${nextValue.slice(0, selectionStart)}${insertion}${nextValue.slice(selectionEnd)}`;
         selectionStart += insertion.length;
         selectionEnd = selectionStart;
-        onChange?.(nextValue);
+        valueRef.current = nextValue;
+        onChangeRef.current?.(nextValue);
       }
 
       requestAnimationFrame(() => {
-        target.focus();
-        target.setSelectionRange(selectionStart, selectionStart);
+        const textarea = findEditorTextarea(target) ?? target;
+        textarea.focus();
+        textarea.setSelectionRange(selectionStart, selectionStart);
       });
     } catch {
       return;
@@ -71,8 +137,30 @@ export function MarkdownEditor({
     }
   };
 
+  useEffect(() => {
+    const handleDocumentPaste = (event: globalThis.ClipboardEvent) => {
+      const root = rootRef.current;
+      if (!root) {
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      if (!(activeElement instanceof HTMLElement) || !root.contains(activeElement)) {
+        return;
+      }
+
+      void handlePaste(event);
+    };
+
+    document.addEventListener("paste", handleDocumentPaste, true);
+    return () => {
+      document.removeEventListener("paste", handleDocumentPaste, true);
+    };
+  }, []);
+
   return (
     <div
+      ref={rootRef}
       className={cn("wmde-markdown-var", className)}
       data-color-mode={resolvedTheme}
     >
@@ -93,9 +181,6 @@ export function MarkdownEditor({
         textareaProps={{
           id,
           placeholder,
-          onPaste: (event) => {
-            void handlePaste(event);
-          },
         }}
       />
       {isUploadingImage ? (
