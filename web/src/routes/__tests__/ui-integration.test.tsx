@@ -9,6 +9,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { UserNav } from "@/components/user-nav";
 import SettingsLayout from "@/routes/settings/layout";
+import AISettingsPage from "@/routes/settings/ai";
 import ProfilePage from "@/routes/settings/profile";
 import PasswordPage from "@/routes/settings/password";
 
@@ -39,6 +40,22 @@ vi.mock("@/lib/hooks/use-api-keys", () => ({
   useApiKeys: vi.fn(() => ({ data: [], isLoading: false })),
   useCreateApiKey: vi.fn(() => ({ mutateAsync: vi.fn() })),
   useDeleteApiKey: vi.fn(() => ({ mutateAsync: vi.fn() })),
+}));
+
+vi.mock("@/lib/hooks/use-ai", () => ({
+  useAISettings: vi.fn(() => ({
+    data: {
+      api_host: "https://api.minimaxi.com",
+      model: "MiniMax-M2.5",
+      configured: false,
+      updated_at: null,
+    },
+    isLoading: false,
+  })),
+  useUpdateAISettings: vi.fn(() => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  })),
 }));
 
 const mockUser = {
@@ -174,6 +191,7 @@ describe("UI Integration Tests", () => {
       renderWithProviders(
         <Routes>
           <Route path="/settings" element={<SettingsLayout />}>
+            <Route path="ai" element={<AISettingsPage />} />
             <Route path="profile" element={<ProfilePage />} />
             <Route path="password" element={<PasswordPage />} />
           </Route>
@@ -186,6 +204,7 @@ describe("UI Integration Tests", () => {
       expect(screen.getAllByText("通用").length).toBeGreaterThan(0);
       expect(screen.getAllByText("个人信息").length).toBeGreaterThan(0);
       expect(screen.getAllByText("修改密码").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("AI 配置").length).toBeGreaterThan(0);
       expect(screen.getAllByText("API Keys").length).toBeGreaterThan(0);
     });
 
@@ -193,6 +212,7 @@ describe("UI Integration Tests", () => {
       renderWithProviders(
         <Routes>
           <Route path="/settings" element={<SettingsLayout />}>
+            <Route path="ai" element={<AISettingsPage />} />
             <Route path="general" element={<ProfilePage />} />
           </Route>
         </Routes>,
@@ -206,6 +226,7 @@ describe("UI Integration Tests", () => {
       renderWithProviders(
         <Routes>
           <Route path="/settings" element={<SettingsLayout />}>
+            <Route path="ai" element={<AISettingsPage />} />
             <Route path="profile" element={<ProfilePage />} />
             <Route path="password" element={<PasswordPage />} />
           </Route>
@@ -246,6 +267,7 @@ describe("UI Integration Tests", () => {
             <Header title="项目" />
             <Routes>
               <Route path="/settings/*" element={<SettingsLayout />}>
+                <Route path="ai" element={<AISettingsPage />} />
                 <Route path="profile" element={<ProfilePage />} />
                 <Route path="password" element={<PasswordPage />} />
               </Route>
@@ -304,6 +326,7 @@ describe("UI Integration Tests", () => {
       renderWithProviders(
         <Routes>
           <Route path="/settings/*" element={<SettingsLayout />}>
+            <Route path="ai" element={<AISettingsPage />} />
             <Route path="profile" element={<ProfilePage />} />
           </Route>
         </Routes>,

@@ -19,24 +19,26 @@ import (
 )
 
 type testServices struct {
-	db               *gorm.DB
-	storage          storage.Storage
-	cfg              *config.Config
-	projectRepo      *repository.ProjectRepository
-	versionRepo      *repository.VersionRepository
-	issueRepo        *repository.IssueRepository
-	gitHubMetaRepo   *repository.IssueGitHubMetaRepository
-	commentRepo      *repository.IssueCommentRepository
-	timelineRepo     *repository.IssueTimelineRepository
-	internalMetaRepo *repository.IssueInternalMetaRepository
-	checklistRepo    *repository.IssueChecklistRepository
-	syncStateRepo    *repository.IssueSyncStateRepository
-	issueAssetRepo   *repository.IssueAssetRepository
-	artifactRepo     *repository.ArtifactRepository
-	issueService     *IssueService
-	versionService   *VersionService
-	artifactService  *ArtifactService
-	shipService      *ShipService
+	db                *gorm.DB
+	storage           storage.Storage
+	cfg               *config.Config
+	userAISettingRepo *repository.UserAISettingRepository
+	projectRepo       *repository.ProjectRepository
+	versionRepo       *repository.VersionRepository
+	issueRepo         *repository.IssueRepository
+	gitHubMetaRepo    *repository.IssueGitHubMetaRepository
+	commentRepo       *repository.IssueCommentRepository
+	timelineRepo      *repository.IssueTimelineRepository
+	internalMetaRepo  *repository.IssueInternalMetaRepository
+	checklistRepo     *repository.IssueChecklistRepository
+	syncStateRepo     *repository.IssueSyncStateRepository
+	issueAssetRepo    *repository.IssueAssetRepository
+	artifactRepo      *repository.ArtifactRepository
+	issueService      *IssueService
+	aiService         *AIService
+	versionService    *VersionService
+	artifactService   *ArtifactService
+	shipService       *ShipService
 }
 
 func setupTestServices(t *testing.T) *testServices {
@@ -50,6 +52,7 @@ func setupTestServices(t *testing.T) *testServices {
 
 	if err := db.AutoMigrate(
 		&model.User{},
+		&model.UserAISetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -79,6 +82,7 @@ func setupTestServices(t *testing.T) *testServices {
 	fileStorage := storage.NewLocalStorage(filepath.Join(tempDir, "uploads"))
 
 	userRepo := repository.NewUserRepository(db)
+	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
@@ -98,24 +102,26 @@ func setupTestServices(t *testing.T) *testServices {
 	}
 
 	return &testServices{
-		db:               db,
-		storage:          fileStorage,
-		cfg:              cfg,
-		projectRepo:      projectRepo,
-		versionRepo:      versionRepo,
-		issueRepo:        issueRepo,
-		gitHubMetaRepo:   gitHubMetaRepo,
-		commentRepo:      commentRepo,
-		timelineRepo:     timelineRepo,
-		internalMetaRepo: internalMetaRepo,
-		checklistRepo:    checklistRepo,
-		syncStateRepo:    syncStateRepo,
-		issueAssetRepo:   issueAssetRepo,
-		artifactRepo:     artifactRepo,
-		issueService:     NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
-		versionService:   NewVersionService(versionRepo, projectRepo, fileStorage),
-		artifactService:  NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
-		shipService:      NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
+		db:                db,
+		storage:           fileStorage,
+		cfg:               cfg,
+		userAISettingRepo: userAISettingRepo,
+		projectRepo:       projectRepo,
+		versionRepo:       versionRepo,
+		issueRepo:         issueRepo,
+		gitHubMetaRepo:    gitHubMetaRepo,
+		commentRepo:       commentRepo,
+		timelineRepo:      timelineRepo,
+		internalMetaRepo:  internalMetaRepo,
+		checklistRepo:     checklistRepo,
+		syncStateRepo:     syncStateRepo,
+		issueAssetRepo:    issueAssetRepo,
+		artifactRepo:      artifactRepo,
+		issueService:      NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
+		aiService:         NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg),
+		versionService:    NewVersionService(versionRepo, projectRepo, fileStorage),
+		artifactService:   NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
+		shipService:       NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
 	}
 }
 

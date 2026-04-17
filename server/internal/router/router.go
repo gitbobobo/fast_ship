@@ -13,6 +13,7 @@ func Setup(
 	r *gin.Engine,
 	cfg *config.Config,
 	authHandler *handler.AuthHandler,
+	aiHandler *handler.AIHandler,
 	apiKeyHandler *handler.ApiKeyHandler,
 	projectHandler *handler.ProjectHandler,
 	versionHandler *handler.VersionHandler,
@@ -43,6 +44,12 @@ func Setup(
 			authed.GET("/auth/me", authHandler.GetMe)
 			authed.PUT("/auth/me", authHandler.UpdateMe)
 			authed.PUT("/auth/password", authHandler.UpdatePassword)
+		}
+
+		ai := api.Group("/ai", middleware.RequireJWT(cfg, authService))
+		{
+			ai.GET("/settings", aiHandler.GetSettings)
+			ai.PUT("/settings", aiHandler.UpdateSettings)
 		}
 
 		// JWT 必须 — API Key 管理
@@ -84,6 +91,7 @@ func Setup(
 		api.POST("/issues/:iid/comments", middleware.RequireJWT(cfg, authService), issueHandler.CreateComment)
 		api.PUT("/issues/:iid/internal-meta", middleware.RequireJWT(cfg, authService), issueHandler.UpdateInternalMeta)
 		api.PUT("/issues/:iid/checklist", middleware.RequireJWT(cfg, authService), issueHandler.ReplaceChecklist)
+		api.POST("/issues/:iid/checklist-suggestions", middleware.RequireJWT(cfg, authService), aiHandler.SuggestIssueChecklist)
 
 		// JWT 必须 — 版本删除和发货
 		api.DELETE("/versions/:vid", middleware.RequireJWT(cfg, authService), versionHandler.Delete)

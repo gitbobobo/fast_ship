@@ -28,6 +28,7 @@ const EditInternalIssuePage = lazy(
 const SettingsGeneralPage = lazy(() => import("@/routes/settings/general"));
 const SettingsProfilePage = lazy(() => import("@/routes/settings/profile"));
 const SettingsPasswordPage = lazy(() => import("@/routes/settings/password"));
+const SettingsAIPage = lazy(() => import("@/routes/settings/ai"));
 const ApiKeysPage = lazy(() => import("@/routes/settings/api-keys"));
 
 const queryClient = new QueryClient({
@@ -113,6 +114,10 @@ export default function App() {
                 <Route
                   path="password"
                   element={<LazyPage render={<SettingsPasswordPage />} />}
+                />
+                <Route
+                  path="ai"
+                  element={<LazyPage render={<SettingsAIPage />} />}
                 />
                 <Route
                   path="api-keys"

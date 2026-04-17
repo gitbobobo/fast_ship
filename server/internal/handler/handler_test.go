@@ -25,6 +25,7 @@ import (
 type handlerTestEnv struct {
 	db              *gorm.DB
 	authHandler     *AuthHandler
+	aiHandler       *AIHandler
 	versionHandler  *VersionHandler
 	issueHandler    *IssueHandler
 	artifactHandler *ArtifactHandler
@@ -48,6 +49,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	if err := db.AutoMigrate(
 		&model.User{},
+		&model.UserAISetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -86,6 +88,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	fileStorage := storage.NewLocalStorage(filepath.Join(t.TempDir(), "uploads"))
 
 	userRepo := repository.NewUserRepository(db)
+	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
@@ -100,6 +103,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
+	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
@@ -108,6 +112,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	return &handlerTestEnv{
 		db:              db,
 		authHandler:     NewAuthHandler(authService),
+		aiHandler:       NewAIHandler(aiService),
 		versionHandler:  NewVersionHandler(versionService, shipService),
 		issueHandler:    NewIssueHandler(issueService),
 		artifactHandler: NewArtifactHandler(artifactService),

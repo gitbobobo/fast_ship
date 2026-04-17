@@ -23,6 +23,7 @@ import {
   useReplaceIssueChecklist,
   useUploadIssueAsset,
 } from "@/lib/hooks/use-issues";
+import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toast } from "sonner";
 
@@ -136,6 +137,10 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useUpdateIssue: vi.fn(),
   useReplaceIssueChecklist: vi.fn(),
   useUploadIssueAsset: vi.fn(),
+}));
+
+vi.mock("@/lib/hooks/use-ai", () => ({
+  useIssueChecklistSuggestions: vi.fn(),
 }));
 
 vi.mock("@/lib/store/auth-store", () => ({
@@ -406,6 +411,12 @@ describe("Issue pages", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useReplaceIssueChecklist>);
+    vi.mocked(useIssueChecklistSuggestions).mockReturnValue({
+      mutateAsync: vi.fn().mockResolvedValue({
+        items: [{ title: "补充复现路径" }, { title: "确认影响版本" }],
+      }),
+      isPending: false,
+    } as unknown as ReturnType<typeof useIssueChecklistSuggestions>);
 
     vi.mocked(useIssueFilterOptions).mockReturnValue({
       data: {
@@ -645,7 +656,7 @@ describe("Issue pages", () => {
     const titleInput = screen.getByDisplayValue("修复崩溃");
     await user.clear(titleInput);
     await user.type(titleInput, "修复崩溃并回归");
-    expect(screen.queryByRole("button", { name: "标记完成 checklist 2" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "标记完成任务清单 2" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
@@ -656,7 +667,7 @@ describe("Issue pages", () => {
         ],
       }),
     );
-    expect(toast.success).toHaveBeenCalledWith("Checklist 已保存");
+    expect(toast.success).toHaveBeenCalledWith("任务清单已保存");
   });
 
   it("toggles checklist completion in browse mode", async () => {
@@ -682,7 +693,7 @@ describe("Issue pages", () => {
     });
 
     expect(screen.queryByDisplayValue("修复崩溃")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "标记完成 checklist 2" }));
+    await user.click(screen.getByRole("button", { name: "标记完成任务清单 2" }));
 
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({
@@ -929,6 +940,51 @@ describe("Issue pages", () => {
     expect(screen.getByRole("img", { name: "Rendered image" })).toHaveAttribute(
       "src",
       "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
+    );
+  });
+
+  it("appends selected ai suggestions into checklist", async () => {
+    const user = userEvent.setup();
+    mockIssueDetailData();
+
+    const replaceChecklistMutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        workflow_status: "in_progress",
+        progress_percent: 25,
+        checklist_total: 4,
+        checklist_done: 1,
+        checklist: [],
+      },
+    });
+
+    vi.mocked(useReplaceIssueChecklist).mockReturnValue({
+      mutateAsync: replaceChecklistMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useReplaceIssueChecklist>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "智能识别任务清单建议" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("清单建议")).toBeInTheDocument();
+      expect(screen.getByText("补充复现路径")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "追加到任务清单" }));
+
+    await waitFor(() =>
+      expect(replaceChecklistMutateAsync).toHaveBeenCalledWith({
+        items: [
+          { id: "chk-1", title: "复现问题", is_completed: true },
+          { id: "chk-2", title: "修复崩溃", is_completed: false },
+          { id: undefined, title: "补充复现路径", is_completed: false },
+          { id: undefined, title: "确认影响版本", is_completed: false },
+        ],
+      }),
     );
   });
 

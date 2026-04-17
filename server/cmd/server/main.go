@@ -77,6 +77,7 @@ func main() {
 	// 自动迁移
 	if err := db.AutoMigrate(
 		&model.User{},
+		&model.UserAISetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -114,6 +115,7 @@ func main() {
 
 	// 初始化 Repository
 	userRepo := repository.NewUserRepository(db)
+	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
@@ -130,6 +132,7 @@ func main() {
 
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
+	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
@@ -140,6 +143,7 @@ func main() {
 
 	// 初始化 Handler
 	authHandler := handler.NewAuthHandler(authService)
+	aiHandler := handler.NewAIHandler(aiService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
@@ -203,7 +207,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

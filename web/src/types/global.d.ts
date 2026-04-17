@@ -84,6 +84,21 @@ interface ApiKey {
   created_at: string;
 }
 
+interface AISettings {
+  api_host: string;
+  model: string;
+  configured: boolean;
+  updated_at?: string | null;
+}
+
+interface IssueChecklistSuggestion {
+  title: string;
+}
+
+interface IssueChecklistSuggestions {
+  items: IssueChecklistSuggestion[];
+}
+
 interface IssueActor {
   login: string;
   avatar_url: string;

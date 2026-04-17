@@ -161,6 +161,15 @@ func (r *IssueCommentRepository) List(issueID string, page, pageSize int) ([]mod
 	return comments, total, err
 }
 
+func (r *IssueCommentRepository) ListAllByIssueID(issueID string) ([]model.IssueComment, error) {
+	var comments []model.IssueComment
+	err := r.db.
+		Where("issue_id = ?", issueID).
+		Order("created_at ASC, id ASC").
+		Find(&comments).Error
+	return comments, err
+}
+
 func (r *IssueCommentRepository) NextSyntheticCommentID(issueID string) (int64, error) {
 	var currentMin *int64
 	if err := r.db.Model(&model.IssueComment{}).

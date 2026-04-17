@@ -46,6 +46,7 @@ var (
 	ErrApiKeyNotFound     = New(40404, "API Key 不存在")
 	ErrIssueNotFound      = New(40405, "问题不存在")
 	ErrIssueAssetNotFound = New(40406, "问题图片不存在")
+	ErrAISettingsNotFound = New(40407, "请先在设置中配置 MiniMax API Key")
 )
 
 // 业务冲突 40900-40999
@@ -68,5 +69,6 @@ var (
 
 // GitHub API 错误 50200-50299
 var (
-	ErrGitHubAPI = New(50200, "GitHub API 调用失败")
+	ErrGitHubAPI  = New(50200, "GitHub API 调用失败")
+	ErrAIProvider = New(50201, "AI 服务调用失败")
 )

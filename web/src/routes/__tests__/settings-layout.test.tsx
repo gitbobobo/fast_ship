@@ -3,6 +3,7 @@ import { screen, waitFor, fireEvent, render } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import SettingsLayout from "@/routes/settings/layout";
 import GeneralPage from "@/routes/settings/general";
+import AISettingsPage from "@/routes/settings/ai";
 import ProfilePage from "@/routes/settings/profile";
 import PasswordPage from "@/routes/settings/password";
 import ApiKeysPage from "@/routes/settings/api-keys";
@@ -35,6 +36,22 @@ vi.mock("@/lib/hooks/use-api-keys", () => ({
   useDeleteApiKey: vi.fn(() => ({ mutateAsync: vi.fn() })),
 }));
 
+vi.mock("@/lib/hooks/use-ai", () => ({
+  useAISettings: vi.fn(() => ({
+    data: {
+      api_host: "https://api.minimaxi.com",
+      model: "MiniMax-M2.5",
+      configured: false,
+      updated_at: null,
+    },
+    isLoading: false,
+  })),
+  useUpdateAISettings: vi.fn(() => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  })),
+}));
+
 const mockUser = {
   id: "user-1",
   username: "testuser",
@@ -60,6 +77,7 @@ function renderWithProviders(ui: React.ReactElement, { initialEntry = "/settings
             <Route path="general" element={<GeneralPage />} />
             <Route path="profile" element={<ProfilePage />} />
             <Route path="password" element={<PasswordPage />} />
+            <Route path="ai" element={<AISettingsPage />} />
             <Route path="api-keys" element={<ApiKeysPage />} />
           </Route>
         </Routes>
@@ -88,6 +106,7 @@ describe("Settings Layout", () => {
     expect(screen.getAllByText("通用").length).toBeGreaterThan(0);
     expect(screen.getAllByText("个人信息").length).toBeGreaterThan(0);
     expect(screen.getAllByText("修改密码").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("AI 配置").length).toBeGreaterThan(0);
     expect(screen.getAllByText("API Keys").length).toBeGreaterThan(0);
   });
 
@@ -169,6 +188,22 @@ describe("Settings Layout", () => {
     });
   });
 
+  it("navigates to ai settings page when ai link is clicked", async () => {
+    renderWithProviders(<SettingsLayout />, { initialEntry: "/settings/general" });
+
+    await waitFor(() => {
+      expect(screen.getByText("管理应用的基本设置")).toBeInTheDocument();
+    });
+
+    const links = screen.getAllByRole("link", { name: /AI 配置/i });
+    expect(links.length).toBeGreaterThan(0);
+    fireEvent.click(links[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText("配置 MiniMax 接口，用于问题详情页的智能识别建议。")).toBeInTheDocument();
+    });
+  });
+
   it("highlights active navigation item", async () => {
     renderWithProviders(<SettingsLayout />, { initialEntry: "/settings/general" });
 
@@ -243,6 +278,17 @@ describe("Settings Pages Content", () => {
     await waitFor(() => {
       expect(screen.getByText("API Key 管理")).toBeInTheDocument();
       expect(screen.getByText("API Key 用于 CI/CD 等自动化场景，仅拥有受限权限")).toBeInTheDocument();
+    });
+  });
+
+  it("ai page displays minimax settings form", async () => {
+    renderWithProviders(<SettingsLayout />, { initialEntry: "/settings/ai" });
+
+    await waitFor(() => {
+      expect(screen.getByText("配置 MiniMax 接口，用于问题详情页的智能识别建议。")).toBeInTheDocument();
+      expect(screen.getByLabelText("API Host")).toBeInTheDocument();
+      expect(screen.getByLabelText("模型")).toBeInTheDocument();
+      expect(screen.getByLabelText("API Key")).toBeInTheDocument();
     });
   });
 });

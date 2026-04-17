@@ -364,6 +364,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 
 	if err := db.AutoMigrate(
 		&model.User{},
+		&model.UserAISetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -406,6 +407,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	fileStorage := storage.NewLocalStorage(filepath.Join(t.TempDir(), "uploads"))
 
 	userRepo := repository.NewUserRepository(db)
+	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
@@ -421,6 +423,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
+	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
@@ -430,6 +433,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
 
 	authHandler := handler.NewAuthHandler(authService)
+	aiHandler := handler.NewAIHandler(aiService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
@@ -438,7 +442,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,

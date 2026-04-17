@@ -15,16 +15,22 @@ import {
   GitBranch,
   GitCommit,
   GitMerge,
+  Inbox,
+  Lightbulb,
   Link2,
+  ListChecks,
+  Loader2,
   Lock,
   MessageSquare,
   Pencil,
   Plus,
   RefreshCw,
+  Sparkles,
   Tag,
   Trash2,
   Unlock,
   User,
+  Wand2,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { Header } from "@/components/layout/header";
@@ -36,6 +42,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
 } from "@/components/ui/dialog";
 
 import {
@@ -58,6 +68,7 @@ import {
   useUpdateIssue,
   useReplaceIssueChecklist,
 } from "@/lib/hooks/use-issues";
+import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toGitHubMediaProxyUrl } from "@/lib/utils/github-media-proxy";
@@ -262,6 +273,12 @@ type ChecklistDraftItem = {
   isCompleted: boolean;
 };
 
+type SuggestedChecklistDraftItem = {
+  id: string;
+  title: string;
+  selected: boolean;
+};
+
 function ProgressBadge({ progress }: { progress?: number | null }) {
   if (progress == null) {
     return null;
@@ -336,6 +353,13 @@ export default function IssueDetailPage() {
   const [commentDraft, setCommentDraft] = useState("");
   const [isChecklistEditing, setIsChecklistEditing] = useState(false);
   const [checklistDraft, setChecklistDraft] = useState<ChecklistDraftItem[]>([]);
+  const [isSuggestionDialogOpen, setIsSuggestionDialogOpen] = useState(false);
+  const [suggestionState, setSuggestionState] = useState<
+    "idle" | "loading" | "ready" | "missing-settings" | "error"
+  >("idle");
+  const [suggestedChecklistItems, setSuggestedChecklistItems] = useState<
+    SuggestedChecklistDraftItem[]
+  >([]);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const timelineSectionRef = useRef<HTMLDivElement | null>(null);
   const isChecklistEditingRef = useRef(false);
@@ -354,6 +378,7 @@ export default function IssueDetailPage() {
   const updateIssue = useUpdateIssue(iid!, id);
   const createComment = useCreateIssueComment(iid!, id);
   const replaceChecklist = useReplaceIssueChecklist(iid!, id);
+  const suggestChecklist = useIssueChecklistSuggestions(iid!);
   const { data: issueListData } = useIssues(id!, {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
     q: issueContext.q || undefined,
@@ -754,7 +779,7 @@ export default function IssueDetailPage() {
       is_completed: item.isCompleted,
     }));
     if (normalized.some((item) => !item.title)) {
-      toast.error("请先填写所有 checklist 标题");
+      toast.error("请先填写所有任务清单标题");
       return false;
     }
 
@@ -771,14 +796,14 @@ export default function IssueDetailPage() {
       if (options?.rollbackDraft) {
         setChecklistDraft(options.rollbackDraft);
       }
-      toast.error("保存 checklist 失败");
+      toast.error("保存任务清单失败");
       return false;
     }
   };
 
   const handleChecklistSave = async () => {
     await persistChecklist(checklistDraft, {
-      successMessage: "Checklist 已保存",
+      successMessage: "任务清单已保存",
       exitEditMode: true,
     });
   };
@@ -795,6 +820,62 @@ export default function IssueDetailPage() {
   const handleChecklistCancelEdit = () => {
     setChecklistDraft(persistedChecklist);
     setIsChecklistEditing(false);
+  };
+
+  const handleOpenSuggestionDialog = async () => {
+    setIsSuggestionDialogOpen(true);
+    setSuggestionState("loading");
+    setSuggestedChecklistItems([]);
+
+    try {
+      const result = await suggestChecklist.mutateAsync();
+      setSuggestedChecklistItems(
+        result.items.map((item, index) => ({
+          id: `${index}-${item.title}`,
+          title: item.title,
+          selected: true,
+        })),
+      );
+      setSuggestionState("ready");
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      setSuggestionState(status === 404 ? "missing-settings" : "error");
+    }
+  };
+
+  const handleSuggestionToggle = (id: string) => {
+    setSuggestedChecklistItems((current) =>
+      current.map((item) =>
+        item.id === id ? { ...item, selected: !item.selected } : item,
+      ),
+    );
+  };
+
+  const handleAppendSuggestions = async () => {
+    const selectedItems = suggestedChecklistItems.filter((item) => item.selected);
+    if (selectedItems.length === 0) {
+      toast.error("请至少选择一项");
+      return;
+    }
+
+    const rollbackDraft = checklistDraft;
+    const nextDraft = [
+      ...checklistDraft,
+      ...selectedItems.map((item) => ({
+        localId: globalThis.crypto?.randomUUID?.() ?? `draft-${Date.now()}-${item.id}`,
+        title: item.title,
+        isCompleted: false,
+      })),
+    ];
+    setChecklistDraft(nextDraft);
+
+    const success = await persistChecklist(nextDraft, {
+      rollbackDraft,
+      successMessage: "已补充到任务清单",
+    });
+    if (success) {
+      setIsSuggestionDialogOpen(false);
+    }
   };
 
   const handleToggleInternalIssueState = async () => {
@@ -1304,11 +1385,11 @@ export default function IssueDetailPage() {
               </CardContent>
             </Card>
 
-            {/* Checklist */}
+            {/* 任务清单 */}
             <Card>
               <CardContent className="space-y-4 p-4">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">Checklist</h3>
+                  <h3 className="text-sm font-semibold">任务清单</h3>
                   {isChecklistEditing ? (
                     <div className="flex items-center gap-2">
                       <Button
@@ -1328,10 +1409,20 @@ export default function IssueDetailPage() {
                       </Button>
                     </div>
                   ) : (
-                    <Button variant="ghost" size="sm" onClick={() => setIsChecklistEditing(true)}>
-                      <Pencil className="mr-1.5 h-3.5 w-3.5" />
-                      编辑
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="智能识别任务清单建议"
+                        onClick={() => void handleOpenSuggestionDialog()}
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setIsChecklistEditing(true)}>
+                        <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                        编辑
+                      </Button>
+                    </div>
                   )}
                 </div>
 
@@ -1361,7 +1452,7 @@ export default function IssueDetailPage() {
                 <div className="space-y-2">
                   {checklistDraft.length === 0 ? (
                     <div className="text-sm text-muted-foreground">
-                      还没有 checklist。添加任务后，问题进度会按已完成项占比自动计算。
+                      还没有任务清单。
                     </div>
                   ) : (
                     checklistDraft.map((item, index) => (
@@ -1398,7 +1489,7 @@ export default function IssueDetailPage() {
                               variant="ghost"
                               size="icon"
                               className="h-8 w-8 shrink-0"
-                              aria-label={`删除 checklist ${index + 1}`}
+                              aria-label={`删除任务清单 ${index + 1}`}
                               onClick={() => handleChecklistRemove(item.localId)}
                             >
                               <Trash2 className="h-4 w-4 text-muted-foreground" />
@@ -1412,8 +1503,8 @@ export default function IssueDetailPage() {
                               onClick={() => void handleChecklistToggleCompleted(item.localId)}
                               aria-label={
                                 item.isCompleted
-                                  ? `取消完成 checklist ${index + 1}`
-                                  : `标记完成 checklist ${index + 1}`
+                                  ? `取消完成任务清单 ${index + 1}`
+                                  : `标记完成任务清单 ${index + 1}`
                               }
                               className={cn(
                                 "inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded border transition-colors",
@@ -1447,6 +1538,258 @@ export default function IssueDetailPage() {
                 </div>
               </CardContent>
             </Card>
+
+            <Dialog open={isSuggestionDialogOpen} onOpenChange={setIsSuggestionDialogOpen}>
+              <DialogContent className="flex w-[90vw] max-w-[calc(100%-2rem)] flex-col overflow-hidden p-0 max-h-[90vh] sm:max-w-[1100px]">
+                {/* Header */}
+                <DialogHeader className="shrink-0 border-b bg-muted/30 px-6 pt-5 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <Wand2 className="h-4.5 w-4.5" />
+                    </div>
+                    <div className="flex-1">
+                      <DialogTitle className="text-base">清单建议</DialogTitle>
+                      <DialogDescription className="mt-0.5 text-xs">
+                        基于问题内容智能识别可补充的任务清单项
+                      </DialogDescription>
+                    </div>
+                  </div>
+                </DialogHeader>
+
+                {/* Body */}
+                <div className="grid flex-1 gap-0 overflow-hidden md:grid-cols-[3fr_2fr]">
+                  {/* Left: AI Suggestions */}
+                  <div className="flex flex-col gap-3 overflow-hidden border-r px-6 py-5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Lightbulb className="h-4 w-4 text-amber-500" />
+                        <span className="text-sm font-semibold">AI 建议</span>
+                        {suggestionState === "ready" && suggestedChecklistItems.length > 0 && (
+                          <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
+                            {suggestedChecklistItems.filter((i) => i.selected).length}/
+                            {suggestedChecklistItems.length} 已选
+                          </span>
+                        )}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 gap-1.5 text-xs"
+                        onClick={() => void handleOpenSuggestionDialog()}
+                        disabled={suggestionState === "loading"}
+                      >
+                        {suggestionState === "loading" ? (
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            识别中...
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            重新识别
+                          </>
+                        )}
+                      </Button>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto rounded-xl border bg-muted/20 p-3">
+                      {suggestionState === "loading" ? (
+                        <div className="space-y-3">
+                          {[...Array(4)].map((_, i) => (
+                            <div
+                              key={i}
+                              className="flex items-start gap-3 rounded-lg border border-dashed border-border/60 bg-background/50 p-3"
+                            >
+                              <Skeleton className="mt-0.5 h-5 w-5 shrink-0 rounded" />
+                              <div className="flex-1 space-y-2">
+                                <Skeleton className="h-4 w-3/4 rounded" />
+                                <Skeleton className="h-3 w-1/4 rounded" />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : suggestionState === "missing-settings" ? (
+                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+                            <Sparkles className="h-5 w-5 text-muted-foreground" />
+                          </div>
+                          <p className="mt-4 text-sm font-medium">尚未配置 AI</p>
+                          <p className="mt-1 max-w-[240px] text-xs text-muted-foreground leading-relaxed">
+                            先在设置中保存 API Host、模型和 API Key，再回来使用智能识别。
+                          </p>
+                          <Button
+                            className="mt-5 h-8 text-xs"
+                            size="sm"
+                            onClick={() => navigate("/settings/ai")}
+                          >
+                            前往 AI 配置
+                          </Button>
+                        </div>
+                      ) : suggestionState === "error" ? (
+                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10">
+                            <RefreshCw className="h-5 w-5 text-destructive" />
+                          </div>
+                          <p className="mt-4 text-sm font-medium">识别失败</p>
+                          <p className="mt-1 max-w-[240px] text-xs text-muted-foreground leading-relaxed">
+                            当前无法获取 AI 建议，请稍后重试。
+                          </p>
+                        </div>
+                      ) : suggestedChecklistItems.length === 0 ? (
+                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+                            <Lightbulb className="h-5 w-5 text-muted-foreground" />
+                          </div>
+                          <p className="mt-4 text-sm font-medium">暂无建议项</p>
+                          <p className="mt-1 max-w-[240px] text-xs text-muted-foreground leading-relaxed">
+                            当前内容不足以生成建议，可以在补充评论后再试一次。
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {suggestedChecklistItems.map((item, index) => (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => handleSuggestionToggle(item.id)}
+                              className={cn(
+                                "group flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-all duration-150",
+                                item.selected
+                                  ? "border-primary/20 bg-background shadow-sm"
+                                  : "border-border/60 bg-background/60 opacity-70 hover:opacity-100",
+                              )}
+                            >
+                              <span
+                                className={cn(
+                                  "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-all duration-150",
+                                  item.selected
+                                    ? "border-emerald-500 bg-emerald-500 text-white shadow-sm"
+                                    : "border-input bg-background text-transparent group-hover:border-emerald-500/50",
+                                )}
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium leading-5">{item.title}</p>
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                  建议项 {index + 1}
+                                </p>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right: Current Checklist Preview */}
+                  <div className="flex flex-col gap-3 overflow-hidden bg-muted/10 px-6 py-5">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ListChecks className="h-4 w-4 text-emerald-500" />
+                        <span className="text-sm font-semibold">任务清单</span>
+                        {checklistDraft.length > 0 && (
+                          <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+                            {checklistDraft.filter((i) => i.isCompleted).length}/
+                            {checklistDraft.length} 完成
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex-1 overflow-y-auto rounded-xl border bg-muted/20 p-3">
+                      {checklistDraft.length === 0 ? (
+                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+                            <Inbox className="h-5 w-5 text-muted-foreground" />
+                          </div>
+                          <p className="mt-4 text-sm font-medium">当前还没有任务清单项</p>
+                          <p className="mt-1 max-w-[200px] text-xs text-muted-foreground leading-relaxed">
+                            从左侧选择建议项，追加到这里。
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {checklistDraft.map((item, index) => (
+                            <div
+                              key={item.localId}
+                              className="flex items-start gap-3 rounded-lg border bg-background p-3"
+                            >
+                              <span
+                                className={cn(
+                                  "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border",
+                                  item.isCompleted
+                                    ? "border-emerald-500 bg-emerald-500 text-white"
+                                    : "border-input bg-background text-transparent",
+                                )}
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <p
+                                  className={cn(
+                                    "text-sm leading-5",
+                                    item.isCompleted && "text-muted-foreground line-through",
+                                  )}
+                                >
+                                  {item.title || `任务 ${index + 1}`}
+                                </p>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <DialogFooter className="shrink-0 border-t bg-muted/30 px-6 py-4 sm:justify-between">
+                  <div className="hidden items-center gap-2 text-xs text-muted-foreground sm:flex">
+                    {suggestionState === "ready" && suggestedChecklistItems.length > 0 ? (
+                      <>
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                        已选择 {suggestedChecklistItems.filter((i) => i.selected).length} 项建议
+                      </>
+                    ) : suggestionState === "loading" ? null : (
+                      <>
+                        <Lightbulb className="h-3.5 w-3.5" />
+                        点击建议项即可选中或取消
+                      </>
+                    )}
+                  </div>
+                  <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 text-xs"
+                      onClick={() => setIsSuggestionDialogOpen(false)}
+                    >
+                      关闭
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-8 gap-1.5 text-xs"
+                      onClick={() => void handleAppendSuggestions()}
+                      disabled={
+                        suggestionState !== "ready" ||
+                        suggestedChecklistItems.every((item) => !item.selected) ||
+                        replaceChecklist.isPending
+                      }
+                    >
+                      {replaceChecklist.isPending && (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      )}
+                      {replaceChecklist.isPending
+                        ? "追加中..."
+                        : `追加到任务清单 (${suggestedChecklistItems.filter((i) => i.selected).length})`}
+                    </Button>
+                  </div>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
 
             {/* 内部操作 */}
             {isInternalIssue && (
