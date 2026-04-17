@@ -20,7 +20,11 @@ const NewVersionPage = lazy(() => import("@/routes/projects/$id/versions/new"));
 const VersionDetailPage = lazy(
   () => import("@/routes/projects/$id/versions/$vid"),
 );
+const NewInternalIssuePage = lazy(() => import("@/routes/projects/$id/issues/new"));
 const IssueDetailPage = lazy(() => import("@/routes/projects/$id/issues/$iid"));
+const EditInternalIssuePage = lazy(
+  () => import("@/routes/projects/$id/issues/$iid/edit"),
+);
 const SettingsGeneralPage = lazy(() => import("@/routes/settings/general"));
 const SettingsProfilePage = lazy(() => import("@/routes/settings/profile"));
 const SettingsPasswordPage = lazy(() => import("@/routes/settings/password"));
@@ -85,8 +89,16 @@ export default function App() {
                 element={<LazyPage render={<VersionDetailPage />} />}
               />
               <Route
+                path="/projects/:id/issues/new"
+                element={<LazyPage render={<NewInternalIssuePage />} />}
+              />
+              <Route
                 path="/projects/:id/issues/:iid"
                 element={<LazyPage render={<IssueDetailPage />} />}
+              />
+              <Route
+                path="/projects/:id/issues/:iid/edit"
+                element={<LazyPage render={<EditInternalIssuePage />} />}
               />
               {/* 设置页面嵌套路由 */}
               <Route path="/settings" element={<LazyPage render={<SettingsLayout />} />}>

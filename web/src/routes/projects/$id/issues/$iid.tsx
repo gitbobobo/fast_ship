@@ -27,6 +27,7 @@ import {
 import { GitHubContent } from "@/components/github-content";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -53,10 +54,12 @@ import {
 } from "@/components/ui/select";
 import {
   useIssue,
+  useCreateIssueComment,
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
   useIssues,
   useSyncProjectIssues,
+  useUpdateIssue,
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
@@ -321,6 +324,7 @@ export default function IssueDetailPage() {
   );
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
+  const [commentDraft, setCommentDraft] = useState("");
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const timelineSectionRef = useRef<HTMLDivElement | null>(null);
 
@@ -334,6 +338,9 @@ export default function IssueDetailPage() {
   }, []);
 
   const { data: issue, isLoading } = useIssue(iid!);
+  const isInternalIssue = issue?.source === "internal";
+  const updateIssue = useUpdateIssue(iid!, id);
+  const createComment = useCreateIssueComment(iid!, id);
   const updateInternalMeta = useUpdateIssueInternalMeta(iid!, id);
   const { data: issueListData } = useIssues(id!, {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
@@ -633,16 +640,16 @@ export default function IssueDetailPage() {
 
   const handleCopyGitHubLink = async () => {
     const hash = location.hash;
-    let targetUrl = issue?.html_url;
+    let targetUrl = issue?.github?.html_url;
     let successMessage = "已复制 GitHub 深链接";
 
     if (hash.startsWith("#issuecomment-")) {
       const comment = comments.find((c) => getCommentAnchorId(c.github_comment_id) === hash.slice(1));
-      targetUrl = comment?.html_url || issue?.html_url;
+      targetUrl = comment?.html_url || issue?.github?.html_url;
     } else if (hash.startsWith("#issueevent-")) {
       const event = timeline.find((e) => getTimelineAnchorId(e.github_event_id) === hash.slice(1));
       const eventHtmlUrl = event ? findPayloadHtmlUrl(event.payload) : null;
-      targetUrl = eventHtmlUrl || issue?.html_url;
+      targetUrl = eventHtmlUrl || issue?.github?.html_url;
       successMessage = eventHtmlUrl ? "已复制 GitHub 深链接" : "当前动态没有精确 GitHub 链接，已复制问题链接";
     }
 
@@ -655,7 +662,7 @@ export default function IssueDetailPage() {
 
   const handleCopyTimelineGitHubLink = async (event: IssueTimelineEvent) => {
     const eventHtmlUrl = findPayloadHtmlUrl(event.payload);
-    const targetUrl = eventHtmlUrl || issue?.html_url;
+    const targetUrl = eventHtmlUrl || issue?.github?.html_url;
     const successMessage = eventHtmlUrl ? "已复制 GitHub 深链接" : "当前动态没有精确 GitHub 链接，已复制问题链接";
     await copyGitHubUrl(targetUrl, successMessage);
   };
@@ -666,6 +673,34 @@ export default function IssueDetailPage() {
       toast.success(value ? "已更新内部状态" : "已清除内部状态");
     } catch {
       toast.error("更新内部状态失败");
+    }
+  };
+
+  const handleToggleInternalIssueState = async () => {
+    if (!issue) {
+      return;
+    }
+    try {
+      await updateIssue.mutateAsync({
+        state: issue.state === "open" ? "closed" : "open",
+      });
+      toast.success(issue.state === "open" ? "问题已关闭" : "问题已重新打开");
+    } catch {
+      toast.error(issue.state === "open" ? "关闭问题失败" : "重新打开问题失败");
+    }
+  };
+
+  const handleCreateInternalComment = async () => {
+    if (!commentDraft.trim()) {
+      toast.error("请输入评论内容");
+      return;
+    }
+    try {
+      await createComment.mutateAsync({ body: commentDraft });
+      setCommentDraft("");
+      toast.success("评论已发布");
+    } catch {
+      toast.error("发布评论失败");
     }
   };
 
@@ -708,7 +743,7 @@ export default function IssueDetailPage() {
 
   return (
     <>
-      <Header title={`#${issue.number}`} />
+      <Header title={issue.reference} />
       <div className="mx-auto max-w-7xl p-4 md:p-6">
         {/* Top Navigation Bar */}
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -729,7 +764,7 @@ export default function IssueDetailPage() {
                 size="sm"
                 disabled={!previousIssue}
                 onClick={() => previousIssue && navigateToIssue(previousIssue.id)}
-                title={previousIssue ? `#${previousIssue.number}` : "没有上一条"}
+                title={previousIssue ? previousIssue.reference : "没有上一条"}
               >
                 <ChevronLeft className="mr-1.5 h-3.5 w-3.5" />
                 上一条
@@ -739,7 +774,7 @@ export default function IssueDetailPage() {
                 size="sm"
                 disabled={!nextIssue}
                 onClick={() => nextIssue && navigateToIssue(nextIssue.id)}
-                title={nextIssue ? `#${nextIssue.number}` : "没有下一条"}
+                title={nextIssue ? nextIssue.reference : "没有下一条"}
               >
                 下一条
                 <ChevronRight className="ml-1.5 h-3.5 w-3.5" />
@@ -759,10 +794,12 @@ export default function IssueDetailPage() {
                   <Copy className="h-4 w-4" />
                   复制链接
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={() => void handleCopyGitHubLink()}>
-                  <Link2 className="h-4 w-4" />
-                  复制 GitHub 深链接
-                </DropdownMenuItem>
+                {issue.github?.html_url && (
+                  <DropdownMenuItem onClick={() => void handleCopyGitHubLink()}>
+                    <Link2 className="h-4 w-4" />
+                    复制 GitHub 深链接
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={handleSync}
@@ -771,19 +808,23 @@ export default function IssueDetailPage() {
                   <RefreshCw className={cn("h-4 w-4", syncIssues.isPending && "animate-spin")} />
                   {syncIssues.isPending ? "同步中..." : "重新同步"}
                 </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  render={
-                    <a
-                      href={issue.html_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    />
-                  }
-                >
-                  <ExternalLink className="h-4 w-4" />
-                  在 GitHub 查看
-                </DropdownMenuItem>
+                {issue.github?.html_url && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      render={
+                        <a
+                          href={issue.github.html_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        />
+                      }
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                      在 GitHub 查看
+                    </DropdownMenuItem>
+                  </>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -797,8 +838,11 @@ export default function IssueDetailPage() {
               <div className="p-5 md:p-6">
                 <div className="flex flex-wrap items-start gap-3">
                   <StateBadge state={issue.state} />
+                  <span className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold">
+                    {issue.source === "github" ? "GitHub" : "内部"}
+                  </span>
                   <WorkflowStatusBadge status={issue.internal_meta?.workflow_status} />
-                  {issue.labels.map((label) => (
+                  {(issue.github?.labels ?? []).map((label) => (
                     <span
                       key={label.name}
                       className="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium"
@@ -814,7 +858,7 @@ export default function IssueDetailPage() {
                 </div>
 
                 <h1 className="mt-4 text-xl font-semibold leading-snug text-foreground md:text-2xl">
-                  #{issue.number} {issue.title}
+                  {issue.reference} {issue.title}
                 </h1>
 
                 <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
@@ -846,6 +890,35 @@ export default function IssueDetailPage() {
                 )}
               </div>
             </div>
+
+            {isInternalIssue && (
+              <Card>
+                <CardContent className="space-y-4 p-5 md:p-6">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <h2 className="text-sm font-semibold">内部评论</h2>
+                      <p className="text-sm text-muted-foreground">评论仅保存在 Fast Ship 内部。</p>
+                    </div>
+                  </div>
+                  <div className="space-y-3">
+                    <Textarea
+                      value={commentDraft}
+                      onChange={(event) => setCommentDraft(event.target.value)}
+                      rows={5}
+                      placeholder="使用 Markdown 输入评论内容"
+                    />
+                    <div className="flex justify-end">
+                      <Button
+                        onClick={() => void handleCreateInternalComment()}
+                        disabled={createComment.isPending}
+                      >
+                        {createComment.isPending ? "发布中..." : "发布评论"}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Unified Timeline */}
             <div className="-mt-6">
@@ -901,14 +974,16 @@ export default function IssueDetailPage() {
                               >
                                 <Link2 className="h-3.5 w-3.5" />
                               </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon-xs"
-                                aria-label={`复制评论 ${item.data.github_comment_id} 的 GitHub 深链接`}
-                                onClick={() => void handleCopyCommentGitHubLink(item.data)}
-                              >
-                                <ExternalLink className="h-3.5 w-3.5" />
-                              </Button>
+                              {item.data.source === "github" && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  aria-label={`复制评论 ${item.data.github_comment_id} 的 GitHub 深链接`}
+                                  onClick={() => void handleCopyCommentGitHubLink(item.data)}
+                                >
+                                  <ExternalLink className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                             </div>
                           </div>
                           <div className="px-4 py-4 md:px-5 md:py-5">
@@ -1033,13 +1108,13 @@ export default function IssueDetailPage() {
                 </div>
 
                 {/* 负责人 & 里程碑 */}
-                {(issue.assignees.length > 0 || issue.milestone) && (
+                {((issue.github?.assignees?.length ?? 0) > 0 || issue.github?.milestone) && (
                   <div className="space-y-3">
-                    {issue.assignees.length > 0 && (
+                    {(issue.github?.assignees?.length ?? 0) > 0 && (
                       <div>
                         <p className="mb-1.5 text-xs font-medium text-muted-foreground">负责人</p>
                         <div className="flex flex-wrap items-center gap-2">
-                          {issue.assignees.map((assignee) => (
+                          {issue.github?.assignees.map((assignee) => (
                             <div
                               key={assignee.login}
                               className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm"
@@ -1054,10 +1129,10 @@ export default function IssueDetailPage() {
                         </div>
                       </div>
                     )}
-                    {issue.milestone && (
+                    {issue.github?.milestone && (
                       <div>
                         <p className="mb-1 text-xs font-medium text-muted-foreground">里程碑</p>
-                        <p className="text-sm font-semibold">{issue.milestone.title}</p>
+                        <p className="text-sm font-semibold">{issue.github.milestone.title}</p>
                       </div>
                     )}
                   </div>
@@ -1073,18 +1148,20 @@ export default function IssueDetailPage() {
                     <span className="text-xs text-muted-foreground">更新于</span>
                     <span className="text-sm font-medium">{formatRelativeTime(issue.updated_at)}</span>
                   </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs text-muted-foreground">同步于</span>
-                    <span className="text-sm font-medium">{formatRelativeTime(issue.synced_at)}</span>
-                  </div>
+                  {issue.github?.synced_at && (
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs text-muted-foreground">同步于</span>
+                      <span className="text-sm font-medium">{formatRelativeTime(issue.github.synced_at)}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* 标签 */}
-                {issue.labels.length > 0 && (
+                {(issue.github?.labels?.length ?? 0) > 0 && (
                   <div>
                     <p className="mb-2 text-xs font-medium text-muted-foreground">标签</p>
                     <div className="flex flex-wrap gap-2">
-                      {issue.labels.map((label) => (
+                      {issue.github?.labels.map((label) => (
                         <span
                           key={label.name}
                           className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium"
@@ -1096,6 +1173,34 @@ export default function IssueDetailPage() {
                           {label.name}
                         </span>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {isInternalIssue && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-muted-foreground">内部操作</p>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          navigate({
+                            pathname: `/projects/${id}/issues/${iid}/edit`,
+                            search: location.search,
+                          })
+                        }
+                      >
+                        编辑问题
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void handleToggleInternalIssueState()}
+                        disabled={updateIssue.isPending}
+                      >
+                        {issue.state === "open" ? "关闭问题" : "重新打开"}
+                      </Button>
                     </div>
                   </div>
                 )}

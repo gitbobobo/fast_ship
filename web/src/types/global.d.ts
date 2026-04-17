@@ -117,16 +117,27 @@ interface IssueReactions {
 interface Issue {
   id: string;
   project_id: string;
-  github_issue_id: number;
-  github_node_id: string;
-  number: number;
+  source: "github" | "internal";
+  sequence_number: number;
+  reference: string;
   state: "open" | "closed";
   state_reason: string;
   title: string;
   body: string;
   body_html: string;
-  html_url: string;
   author: IssueActor;
+  closed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  internal_meta?: IssueInternalMeta | null;
+  github?: IssueGitHubMeta | null;
+}
+
+interface IssueGitHubMeta {
+  github_issue_id: number;
+  github_node_id: string;
+  number: number;
+  html_url: string;
   author_association: string;
   assignees: IssueActor[];
   labels: IssueLabel[];
@@ -135,11 +146,7 @@ interface Issue {
   comments_count: number;
   locked: boolean;
   active_lock_reason: string;
-  closed_at?: string | null;
-  created_at: string;
-  updated_at: string;
   synced_at: string;
-  internal_meta?: IssueInternalMeta | null;
 }
 
 interface IssueInternalMeta {
@@ -152,6 +159,7 @@ interface IssueInternalMeta {
 interface IssueComment {
   id: string;
   issue_id: string;
+  source: "github" | "internal";
   github_comment_id: number;
   github_node_id: string;
   body: string;

@@ -8,6 +8,7 @@ import {
   Link2,
   MessageSquare,
   Package,
+  Plus,
   RefreshCw,
   Search,
   Clock,
@@ -330,6 +331,23 @@ export default function IssuesPage() {
               <Button
                 variant="outline"
                 size="sm"
+                render={
+                  <Link
+                    to={{
+                      pathname: `/projects/${activeProjectId}/issues/new`,
+                      search: searchParams.toString()
+                        ? `?${searchParams.toString()}`
+                        : "",
+                    }}
+                  />
+                }
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                新建内部问题
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => void handleCopyIssueListLink()}
               >
                 <Link2 className="mr-1.5 h-3.5 w-3.5" />
@@ -555,7 +573,7 @@ export default function IssuesPage() {
               <p className="mt-1 text-sm text-muted-foreground">
                 {hasActiveFilters
                   ? "调整筛选条件后再试"
-                  : "点击右上角按钮从 GitHub 拉取问题数据"}
+                  : "可以新建内部问题，或从 GitHub 拉取问题数据"}
               </p>
             </CardContent>
           </Card>
@@ -577,7 +595,7 @@ export default function IssuesPage() {
                       <Button
                         variant="ghost"
                         size="icon-xs"
-                        aria-label={`复制问题 ${issue.number} 的应用链接`}
+                        aria-label={`复制问题 ${issue.reference} 的应用链接`}
                         onClick={(event) => {
                           event.preventDefault();
                           event.stopPropagation();
@@ -586,18 +604,20 @@ export default function IssuesPage() {
                       >
                         <Link2 className="h-3.5 w-3.5" />
                       </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`在 GitHub 打开问题 ${issue.number}`}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          handleOpenIssueInGitHub(issue.html_url);
-                        }}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                      </Button>
+                      {issue.github?.html_url && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`在 GitHub 打开问题 ${issue.reference}`}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            handleOpenIssueInGitHub(issue.github?.html_url ?? "");
+                          }}
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                     </div>
 
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -605,8 +625,11 @@ export default function IssuesPage() {
                         {/* Title + badges */}
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-medium">
-                            #{issue.number} {issue.title}
+                            {issue.reference} {issue.title}
                           </span>
+                          <Badge variant="outline">
+                            {issue.source === "github" ? "GitHub" : "内部"}
+                          </Badge>
                           <Badge
                             variant={
                               issue.state === "open" ? "default" : "secondary"
@@ -617,7 +640,7 @@ export default function IssuesPage() {
                           <IssueWorkflowBadge
                             status={issue.internal_meta?.workflow_status}
                           />
-                          {issue.labels.slice(0, 4).map((label) => (
+                          {(issue.github?.labels ?? []).slice(0, 4).map((label) => (
                             <span
                               key={label.name}
                               className="rounded-full px-2 py-0.5 text-xs"
@@ -629,9 +652,9 @@ export default function IssuesPage() {
                               {label.name}
                             </span>
                           ))}
-                          {issue.labels.length > 4 && (
+                          {(issue.github?.labels?.length ?? 0) > 4 && (
                             <span className="text-xs text-muted-foreground">
-                              +{issue.labels.length - 4}
+                              +{(issue.github?.labels?.length ?? 0) - 4}
                             </span>
                           )}
                         </div>
@@ -644,22 +667,24 @@ export default function IssuesPage() {
                             </span>
                             创建于 {formatRelativeTime(issue.created_at)}
                           </span>
-                          {issue.assignees.length > 0 && (
+                          {(issue.github?.assignees?.length ?? 0) > 0 && (
                             <span className="inline-flex items-center gap-1">
                               <CheckCircle2 className="h-3 w-3" />
-                              指派给 {issue.assignees.map((a) => a.login).join(", ")}
+                              指派给 {issue.github?.assignees.map((a) => a.login).join(", ")}
                             </span>
                           )}
-                          {issue.milestone && (
+                          {issue.github?.milestone && (
                             <span className="inline-flex items-center gap-1">
                               <Clock className="h-3 w-3" />
-                              {issue.milestone.title}
+                              {issue.github.milestone.title}
                             </span>
                           )}
-                          <span className="inline-flex items-center gap-1">
-                            <MessageSquare className="h-3 w-3" />
-                            {issue.comments_count} 条评论
-                          </span>
+                          {issue.github && (
+                            <span className="inline-flex items-center gap-1">
+                              <MessageSquare className="h-3 w-3" />
+                              {issue.github.comments_count} 条评论
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -722,6 +747,7 @@ export default function IssuesPage() {
           </div>
         )}
       </div>
+
     </>
   );
 }

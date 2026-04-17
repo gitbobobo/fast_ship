@@ -2,7 +2,9 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import ProjectDetailPage from "@/routes/projects/$id/index";
+import EditInternalIssuePage from "@/routes/projects/$id/issues/$iid/edit";
 import IssueDetailPage from "@/routes/projects/$id/issues/$iid";
+import NewInternalIssuePage from "@/routes/projects/$id/issues/new";
 import IssuesPage from "@/routes/issues/index";
 import { renderWithRoute } from "@/test/render";
 import { useDeleteProject, useProject, useProjects } from "@/lib/hooks/use-projects";
@@ -13,7 +15,10 @@ import {
   useIssueFilterOptions,
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
+  useCreateIssue,
+  useCreateIssueComment,
   useSyncProjectIssues,
+  useUpdateIssue,
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -23,6 +28,78 @@ function hasExactTextContent(text: string) {
   return (_: string, element: Element | null) =>
     element?.textContent === text &&
     Array.from(element.children).every((child) => child.textContent !== text);
+}
+
+function buildGitHubIssue(
+  overrides: Partial<Issue> = {},
+  githubOverrides: Partial<IssueGitHubMeta> = {},
+): Issue {
+  return {
+    id: "issue-1",
+    project_id: "proj-1",
+    source: "github",
+    sequence_number: 1,
+    reference: `GH-${githubOverrides.number ?? 42}`,
+    state: "open",
+    state_reason: "",
+    title: "Crash on launch",
+    body: "",
+    body_html: "",
+    author: { login: "alice", avatar_url: "" },
+    created_at: "2026-04-10T10:00:00Z",
+    updated_at: "2026-04-12T10:00:00Z",
+    internal_meta: null,
+    github: {
+      github_issue_id: 1001,
+      github_node_id: "I_kw",
+      number: 42,
+      html_url: "https://github.com/acme/alpha/issues/42",
+      author_association: "MEMBER",
+      assignees: [],
+      labels: [],
+      reactions: {
+        total_count: 0,
+        "+1": 0,
+        "-1": 0,
+        laugh: 0,
+        hooray: 0,
+        confused: 0,
+        heart: 0,
+        rocket: 0,
+        eyes: 0,
+      },
+      comments_count: 0,
+      locked: false,
+      active_lock_reason: "",
+      synced_at: "2026-04-12T10:05:00Z",
+      ...githubOverrides,
+    },
+    ...overrides,
+  };
+}
+
+function buildInternalIssue(overrides: Partial<Issue> = {}): Issue {
+  return {
+    id: "internal-issue-1",
+    project_id: "proj-1",
+    source: "internal",
+    sequence_number: 7,
+    reference: "INT-7",
+    state: "open",
+    state_reason: "",
+    title: "补充站内发布提醒",
+    body: "## 背景\n\n需要在版本发布后提醒测试同学。",
+    body_html: "",
+    author: { login: "alice", avatar_url: "" },
+    created_at: "2026-04-10T10:00:00Z",
+    updated_at: "2026-04-12T10:00:00Z",
+    internal_meta: {
+      workflow_status: "todo",
+      updated_at: "2026-04-12T10:00:00Z",
+    },
+    github: null,
+    ...overrides,
+  };
 }
 
 vi.mock("sonner", () => ({
@@ -48,7 +125,10 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useIssueFilterOptions: vi.fn(),
   useInfiniteIssueComments: vi.fn(),
   useInfiniteIssueTimeline: vi.fn(),
+  useCreateIssue: vi.fn(),
+  useCreateIssueComment: vi.fn(),
   useSyncProjectIssues: vi.fn(),
+  useUpdateIssue: vi.fn(),
   useUpdateIssueInternalMeta: vi.fn(),
 }));
 
@@ -60,113 +140,52 @@ function mockIssueDetailData() {
   vi.mocked(useIssues).mockReturnValue({
     data: {
       items: [
-        {
-          id: "issue-0",
-          project_id: "proj-1",
-          github_issue_id: 1000,
-          github_node_id: "I_kw0",
-          number: 41,
-          state: "open",
-          state_reason: "",
-          title: "Previous issue",
-          body: "",
-          body_html: "",
-          html_url: "https://github.com/acme/alpha/issues/41",
-          author: { login: "alice", avatar_url: "" },
-          author_association: "MEMBER",
-          assignees: [],
-          labels: [],
-          reactions: {
-            total_count: 0,
-            "+1": 0,
-            "-1": 0,
-            laugh: 0,
-            hooray: 0,
-            confused: 0,
-            heart: 0,
-            rocket: 0,
-            eyes: 0,
+        buildGitHubIssue(
+          {
+            id: "issue-0",
+            title: "Previous issue",
+            reference: "GH-41",
+            created_at: "2026-04-09T10:00:00Z",
+            updated_at: "2026-04-09T10:00:00Z",
           },
-          comments_count: 0,
-          locked: false,
-          active_lock_reason: "",
-          created_at: "2026-04-09T10:00:00Z",
-          updated_at: "2026-04-09T10:00:00Z",
-          synced_at: "2026-04-12T10:05:00Z",
-        },
-        {
-          id: "issue-1",
-          project_id: "proj-1",
-          github_issue_id: 1001,
-          github_node_id: "I_kw",
-          number: 42,
-          state: "open",
-          state_reason: "",
-          title: "Crash on launch",
-          body: "",
-          body_html: "",
-          html_url: "https://github.com/acme/alpha/issues/42",
-          author: { login: "alice", avatar_url: "" },
-          author_association: "MEMBER",
-          assignees: [],
-          labels: [],
-          reactions: {
-            total_count: 0,
-            "+1": 0,
-            "-1": 0,
-            laugh: 0,
-            hooray: 0,
-            confused: 0,
-            heart: 0,
-            rocket: 0,
-            eyes: 0,
+          {
+            github_issue_id: 1000,
+            github_node_id: "I_kw0",
+            number: 41,
+            html_url: "https://github.com/acme/alpha/issues/41",
           },
-          comments_count: 1,
-          locked: false,
-          active_lock_reason: "",
-          created_at: "2026-04-10T10:00:00Z",
-          updated_at: "2026-04-12T10:00:00Z",
-          synced_at: "2026-04-12T10:05:00Z",
-          internal_meta: {
-            workflow_status: "in_progress",
-            started_at: "2026-04-12T09:00:00Z",
-            updated_at: "2026-04-12T09:00:00Z",
+        ),
+        buildGitHubIssue(
+          {
+            id: "issue-1",
+            title: "Crash on launch",
+            reference: "GH-42",
+            internal_meta: {
+              workflow_status: "in_progress",
+              started_at: "2026-04-12T09:00:00Z",
+              updated_at: "2026-04-12T09:00:00Z",
+            },
           },
-        },
-        {
-          id: "issue-2",
-          project_id: "proj-1",
-          github_issue_id: 1002,
-          github_node_id: "I_kw2",
-          number: 43,
-          state: "open",
-          state_reason: "",
-          title: "Next issue",
-          body: "",
-          body_html: "",
-          html_url: "https://github.com/acme/alpha/issues/43",
-          author: { login: "alice", avatar_url: "" },
-          author_association: "MEMBER",
-          assignees: [],
-          labels: [],
-          reactions: {
-            total_count: 0,
-            "+1": 0,
-            "-1": 0,
-            laugh: 0,
-            hooray: 0,
-            confused: 0,
-            heart: 0,
-            rocket: 0,
-            eyes: 0,
+          {
+            comments_count: 1,
           },
-          comments_count: 0,
-          locked: false,
-          active_lock_reason: "",
-          created_at: "2026-04-13T10:00:00Z",
-          updated_at: "2026-04-13T10:00:00Z",
-          synced_at: "2026-04-13T10:05:00Z",
-        },
+        ),
+        buildGitHubIssue(
+          {
+            id: "issue-2",
+            title: "Next issue",
+            reference: "GH-43",
+            created_at: "2026-04-13T10:00:00Z",
+            updated_at: "2026-04-13T10:00:00Z",
+          },
+          {
+            github_issue_id: 1002,
+            github_node_id: "I_kw2",
+            number: 43,
+            html_url: "https://github.com/acme/alpha/issues/43",
+            synced_at: "2026-04-13T10:05:00Z",
+          },
+        ),
       ],
       total: 3,
       page: 1,
@@ -176,46 +195,37 @@ function mockIssueDetailData() {
   } as unknown as ReturnType<typeof useIssues>);
 
   vi.mocked(useIssue).mockReturnValue({
-    data: {
-      id: "issue-1",
-      project_id: "proj-1",
-      github_issue_id: 1001,
-      github_node_id: "I_kw",
-      number: 42,
-      state: "open",
-      state_reason: "",
-      title: "Crash on launch",
-      body: "## Steps\n\nOpen the app",
-      body_html: "<h2>Steps</h2><p>Open the <strong>app</strong></p>",
-      html_url: "https://github.com/acme/alpha/issues/42",
-      author: { login: "alice", avatar_url: "" },
-      author_association: "MEMBER",
-      assignees: [{ login: "bob", avatar_url: "" }],
-      labels: [{ name: "bug", color: "d73a4a", description: "" }],
-      milestone: { number: 1, title: "1.0.1", state: "open", description: "" },
-      reactions: {
-        total_count: 1,
-        "+1": 1,
-        "-1": 0,
-        laugh: 0,
-        hooray: 0,
-        confused: 0,
-        heart: 0,
-        rocket: 0,
-        eyes: 0,
+    data: buildGitHubIssue(
+      {
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        body: "## Steps\n\nOpen the app",
+        body_html: "<h2>Steps</h2><p>Open the <strong>app</strong></p>",
+        internal_meta: {
+          workflow_status: "in_progress",
+          started_at: "2026-04-12T09:00:00Z",
+          updated_at: "2026-04-12T09:00:00Z",
+        },
       },
-      comments_count: 1,
-      locked: false,
-      active_lock_reason: "",
-      created_at: "2026-04-10T10:00:00Z",
-      updated_at: "2026-04-12T10:00:00Z",
-      synced_at: "2026-04-12T10:05:00Z",
-      internal_meta: {
-        workflow_status: "in_progress",
-        started_at: "2026-04-12T09:00:00Z",
-        updated_at: "2026-04-12T09:00:00Z",
+      {
+        assignees: [{ login: "bob", avatar_url: "" }],
+        labels: [{ name: "bug", color: "d73a4a", description: "" }],
+        milestone: { number: 1, title: "1.0.1", state: "open", description: "" },
+        reactions: {
+          total_count: 1,
+          "+1": 1,
+          "-1": 0,
+          laugh: 0,
+          hooray: 0,
+          confused: 0,
+          heart: 0,
+          rocket: 0,
+          eyes: 0,
+        },
+        comments_count: 1,
       },
-    },
+    ),
     isLoading: false,
   } as unknown as ReturnType<typeof useIssue>);
 
@@ -227,6 +237,7 @@ function mockIssueDetailData() {
             {
               id: "comment-1",
               issue_id: "issue-1",
+              source: "github",
               github_comment_id: 5001,
               github_node_id: "IC_kw",
               body: "Looks good",
@@ -357,6 +368,18 @@ describe("Issue pages", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useSyncProjectIssues>);
+    vi.mocked(useCreateIssue).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useCreateIssue>);
+    vi.mocked(useCreateIssueComment).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useCreateIssueComment>);
+    vi.mocked(useUpdateIssue).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssue>);
 
     vi.mocked(useUpdateIssueInternalMeta).mockReturnValue({
       mutateAsync: vi.fn(),
@@ -441,46 +464,22 @@ describe("Issue pages", () => {
     vi.mocked(useIssues).mockReturnValue({
       data: {
         items: [
-          {
-            id: "issue-1",
-            project_id: "proj-1",
-            github_issue_id: 1001,
-            github_node_id: "I_kw",
-            number: 42,
-            state: "open",
-            state_reason: "",
-            title: "Crash on launch",
-            body: "App crashes",
-            body_html: "",
-            html_url: "https://github.com/acme/alpha/issues/42",
-            author: { login: "alice", avatar_url: "" },
-            author_association: "MEMBER",
-            assignees: [],
-            labels: [{ name: "bug", color: "d73a4a", description: "" }],
-            reactions: {
-              total_count: 0,
-              "+1": 0,
-              "-1": 0,
-              laugh: 0,
-              hooray: 0,
-              confused: 0,
-              heart: 0,
-              rocket: 0,
-              eyes: 0,
+          buildGitHubIssue(
+            {
+              id: "issue-1",
+              body: "App crashes",
+              internal_meta: {
+                workflow_status: "done",
+                started_at: "2026-04-11T10:00:00Z",
+                completed_at: "2026-04-12T09:30:00Z",
+                updated_at: "2026-04-12T09:30:00Z",
+              },
             },
-            comments_count: 3,
-            locked: false,
-            active_lock_reason: "",
-            created_at: "2026-04-10T10:00:00Z",
-            updated_at: "2026-04-12T10:00:00Z",
-            synced_at: "2026-04-12T10:05:00Z",
-            internal_meta: {
-              workflow_status: "done",
-              started_at: "2026-04-11T10:00:00Z",
-              completed_at: "2026-04-12T09:30:00Z",
-              updated_at: "2026-04-12T09:30:00Z",
+            {
+              labels: [{ name: "bug", color: "d73a4a", description: "" }],
+              comments_count: 3,
             },
-          },
+          ),
         ],
         total: 1,
         page: 1,
@@ -514,7 +513,7 @@ describe("Issue pages", () => {
       initialEntry: "/projects/proj-1/issues/issue-1#timeline",
     });
 
-    expect(screen.getByText("#42 Crash on launch")).toBeInTheDocument();
+    expect(screen.getByText("GH-42 Crash on launch")).toBeInTheDocument();
     expect(screen.getByText("负责人")).toBeInTheDocument();
     expect(screen.getAllByText("开发中").length).toBeGreaterThan(0);
     expect(screen.getByText("上一条")).toBeInTheDocument();
@@ -629,40 +628,16 @@ describe("Issue pages", () => {
     vi.mocked(useIssues).mockReturnValue({
       data: {
         items: [
-          {
-            id: "issue-1",
-            project_id: "proj-1",
-            github_issue_id: 1001,
-            github_node_id: "I_kw",
-            number: 42,
-            state: "open",
-            state_reason: "",
-            title: "Crash on launch",
-            body: "App crashes",
-            body_html: "",
-            html_url: "https://github.com/acme/alpha/issues/42",
-            author: { login: "alice", avatar_url: "" },
-            author_association: "MEMBER",
-            assignees: [],
-            labels: [{ name: "bug", color: "d73a4a", description: "" }],
-            reactions: {
-              total_count: 0,
-              "+1": 0,
-              "-1": 0,
-              laugh: 0,
-              hooray: 0,
-              confused: 0,
-              heart: 0,
-              rocket: 0,
-              eyes: 0,
+          buildGitHubIssue(
+            {
+              id: "issue-1",
+              body: "App crashes",
             },
-            comments_count: 3,
-            locked: false,
-            active_lock_reason: "",
-            created_at: "2026-04-10T10:00:00Z",
-            updated_at: "2026-04-12T10:00:00Z",
-            synced_at: "2026-04-12T10:05:00Z",
-          },
+            {
+              labels: [{ name: "bug", color: "d73a4a", description: "" }],
+              comments_count: 3,
+            },
+          ),
         ],
         total: 30,
         page: 2,
@@ -678,7 +653,7 @@ describe("Issue pages", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByRole("link", { name: /#42 Crash on launch/i })).toHaveAttribute(
+      expect(screen.getByRole("link", { name: /GH-42 Crash on launch/i })).toHaveAttribute(
         "href",
         "/projects/proj-1/issues/issue-1?issue_state=open&issue_q=crash&issue_label=bug&issue_assignee=bob&issue_milestone=1.0.1&issue_sort=updated_desc&issue_page=2",
       ),
@@ -689,41 +664,29 @@ describe("Issue pages", () => {
     mockIssueDetailData();
 
     vi.mocked(useIssue).mockReturnValue({
-      data: {
-        id: "issue-1",
-        project_id: "proj-1",
-        github_issue_id: 1001,
-        github_node_id: "I_kw",
-        number: 42,
-        state: "open",
-        state_reason: "",
-        title: "Crash on launch",
-        body: '<img width="1000" height="700" alt="Image" src="https://github.com/user-attachments/assets/demo" /><script>alert(1)</script>',
-        body_html: "",
-        html_url: "https://github.com/acme/alpha/issues/42",
-        author: { login: "alice", avatar_url: "" },
-        author_association: "MEMBER",
-        assignees: [{ login: "bob", avatar_url: "" }],
-        labels: [{ name: "bug", color: "d73a4a", description: "" }],
-        milestone: { number: 1, title: "1.0.1", state: "open", description: "" },
-        reactions: {
-          total_count: 1,
-          "+1": 1,
-          "-1": 0,
-          laugh: 0,
-          hooray: 0,
-          confused: 0,
-          heart: 0,
-          rocket: 0,
-          eyes: 0,
+      data: buildGitHubIssue(
+        {
+          body: '<img width="1000" height="700" alt="Image" src="https://github.com/user-attachments/assets/demo" /><script>alert(1)</script>',
+          body_html: "",
         },
-        comments_count: 1,
-        locked: false,
-        active_lock_reason: "",
-        created_at: "2026-04-10T10:00:00Z",
-        updated_at: "2026-04-12T10:00:00Z",
-        synced_at: "2026-04-12T10:05:00Z",
-      },
+        {
+          assignees: [{ login: "bob", avatar_url: "" }],
+          labels: [{ name: "bug", color: "d73a4a", description: "" }],
+          milestone: { number: 1, title: "1.0.1", state: "open", description: "" },
+          reactions: {
+            total_count: 1,
+            "+1": 1,
+            "-1": 0,
+            laugh: 0,
+            hooray: 0,
+            confused: 0,
+            heart: 0,
+            rocket: 0,
+            eyes: 0,
+          },
+          comments_count: 1,
+        },
+      ),
       isLoading: false,
     } as unknown as ReturnType<typeof useIssue>);
 
@@ -742,41 +705,11 @@ describe("Issue pages", () => {
   it("appends the auth token to proxy urls in rendered html", async () => {
     mockIssueDetailData();
     vi.mocked(useIssue).mockReturnValue({
-      data: {
-        id: "issue-1",
-        project_id: "proj-1",
-        github_issue_id: 1001,
-        github_node_id: "I_kw",
-        number: 42,
-        state: "open",
-        state_reason: "",
-        title: "Crash on launch",
+      data: buildGitHubIssue({
         body: "fallback",
         body_html:
           '<p><img alt="Rendered image" src="/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo" /></p>',
-        html_url: "https://github.com/acme/alpha/issues/42",
-        author: { login: "alice", avatar_url: "" },
-        author_association: "MEMBER",
-        assignees: [],
-        labels: [],
-        reactions: {
-          total_count: 0,
-          "+1": 0,
-          "-1": 0,
-          laugh: 0,
-          hooray: 0,
-          confused: 0,
-          heart: 0,
-          rocket: 0,
-          eyes: 0,
-        },
-        comments_count: 0,
-        locked: false,
-        active_lock_reason: "",
-        created_at: "2026-04-10T10:00:00Z",
-        updated_at: "2026-04-12T10:00:00Z",
-        synced_at: "2026-04-12T10:05:00Z",
-      },
+      }),
       isLoading: false,
     } as unknown as ReturnType<typeof useIssue>);
 
@@ -789,5 +722,76 @@ describe("Issue pages", () => {
       "src",
       "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
     );
+  });
+
+  it("creates an internal issue from a dedicated page", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      data: buildInternalIssue(),
+    });
+    vi.mocked(useCreateIssue).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useCreateIssue>);
+
+    renderWithRoute(<NewInternalIssuePage />, {
+      path: "/projects/:id/issues/new",
+      initialEntry: "/projects/proj-1/issues/new?project=proj-1&state=open&q=ship",
+    });
+
+    await user.type(screen.getByLabelText("标题"), "需要补充交付通知");
+    await user.type(screen.getByLabelText("描述"), "## 验收\n\n完成后通知 QA");
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: "开发中" }));
+    await user.click(screen.getByRole("button", { name: "创建问题" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        title: "需要补充交付通知",
+        body: "## 验收\n\n完成后通知 QA",
+        workflow_status: "in_progress",
+      }),
+    );
+    expect(toast.success).toHaveBeenCalledWith("内部问题已创建");
+  });
+
+  it("edits an internal issue from a dedicated page", async () => {
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      data: buildInternalIssue({
+        title: "补充回归通知",
+        body: "更新后的描述",
+      }),
+    });
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildInternalIssue(),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+    vi.mocked(useUpdateIssue).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssue>);
+
+    renderWithRoute(<EditInternalIssuePage />, {
+      path: "/projects/:id/issues/:iid/edit",
+      initialEntry: "/projects/proj-1/issues/internal-issue-1/edit?issue_state=open",
+    });
+
+    const titleInput = screen.getByLabelText("标题");
+    const bodyInput = screen.getByLabelText("描述");
+
+    await user.clear(titleInput);
+    await user.type(titleInput, "补充回归通知");
+    await user.clear(bodyInput);
+    await user.type(bodyInput, "更新后的描述");
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({
+        title: "补充回归通知",
+        body: "更新后的描述",
+      }),
+    );
+    expect(toast.success).toHaveBeenCalledWith("内部问题已更新");
   });
 });

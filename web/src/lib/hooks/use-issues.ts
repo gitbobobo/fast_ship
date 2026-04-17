@@ -140,6 +140,50 @@ export function useSyncProjectIssues(projectId: string) {
   });
 }
 
+export function useCreateIssue(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof issueApi.create>[1]) =>
+      issueApi.create(projectId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+      queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "issues", "filter-options"],
+      });
+      queryClient.invalidateQueries({ queryKey: ["issues"] });
+    },
+  });
+}
+
+export function useUpdateIssue(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof issueApi.update>[1]) =>
+      issueApi.update(issueId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+      }
+    },
+  });
+}
+
+export function useCreateIssueComment(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof issueApi.createComment>[1]) =>
+      issueApi.createComment(issueId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId, "comments"] });
+      if (projectId) {
+        queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+      }
+    },
+  });
+}
+
 export function useUpdateIssueInternalMeta(issueId: string, projectId?: string) {
   const queryClient = useQueryClient();
   return useMutation({

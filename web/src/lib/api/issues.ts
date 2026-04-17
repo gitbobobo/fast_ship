@@ -16,7 +16,26 @@ interface UpdateIssueInternalMetaRequest {
   workflow_status: "" | "todo" | "in_progress" | "done";
 }
 
+interface CreateInternalIssueRequest {
+  title: string;
+  body: string;
+  workflow_status?: "" | "todo" | "in_progress" | "done";
+}
+
+interface UpdateInternalIssueRequest {
+  title?: string;
+  body?: string;
+  state?: "open" | "closed";
+}
+
+interface CreateInternalIssueCommentRequest {
+  body: string;
+}
+
 export const issueApi = {
+  create: (projectId: string, data: CreateInternalIssueRequest) =>
+    api.post(`projects/${projectId}/issues`, { json: data }).json<ApiResponse<Issue>>(),
+
   list: (projectId: string, params: IssueListParams = {}) =>
     api
       .get(`projects/${projectId}/issues`, {
@@ -42,12 +61,18 @@ export const issueApi = {
   get: (issueId: string) =>
     api.get(`issues/${issueId}`).json<ApiResponse<Issue>>(),
 
+  update: (issueId: string, data: UpdateInternalIssueRequest) =>
+    api.put(`issues/${issueId}`, { json: data }).json<ApiResponse<Issue>>(),
+
   comments: (issueId: string, page = 1, pageSize = 20) =>
     api
       .get(`issues/${issueId}/comments`, {
         searchParams: { page, page_size: pageSize },
       })
       .json<ApiResponse<PaginatedData<IssueComment>>>(),
+
+  createComment: (issueId: string, data: CreateInternalIssueCommentRequest) =>
+    api.post(`issues/${issueId}/comments`, { json: data }).json<ApiResponse<IssueComment>>(),
 
   timeline: (issueId: string, page = 1, pageSize = 20) =>
     api
