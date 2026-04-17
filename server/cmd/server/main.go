@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +24,15 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+type sqliteColumnInfo struct {
+	Name string `gorm:"column:name"`
+}
+
+type sqliteIndexInfo struct {
+	Name   string `gorm:"column:name"`
+	Origin string `gorm:"column:origin"`
+}
 
 func main() {
 	// 加载配置
@@ -71,6 +81,7 @@ func main() {
 		&model.Project{},
 		&model.Version{},
 		&model.Issue{},
+		&model.IssueGitHubMeta{},
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
@@ -84,10 +95,14 @@ func main() {
 	// 创建唯一索引
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_number ON issues(project_id, number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_github_issue ON issues(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_sequence ON issues(project_id, sequence_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_project_github_issue ON issue_github_meta(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
+	if err := backfillIssueSourceModel(db); err != nil {
+		log.Fatalf("问题数据迁移失败: %v", err)
+	}
 
 	// 初始化存储
 	fileStorage := storage.NewLocalStorage(cfg.Upload.StoragePath)
@@ -98,6 +113,7 @@ func main() {
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
+	issueGitHubMetaRepo := repository.NewIssueGitHubMetaRepository(db)
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
@@ -110,7 +126,7 @@ func main() {
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, userRepo, cfg, zapLogger)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
@@ -175,4 +191,184 @@ func main() {
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("服务启动失败: %v", err)
 	}
+}
+
+func backfillIssueSourceModel(db *gorm.DB) error {
+	hasIssuesGitHubID, err := hasSQLiteColumn(db, "issues", "github_issue_id")
+	if err != nil || !hasIssuesGitHubID {
+		return err
+	}
+
+	if err := db.Exec(`
+		UPDATE issues
+		SET source = 'github'
+		WHERE (source IS NULL OR source = '')
+		  AND github_issue_id IS NOT NULL
+		  AND github_issue_id > 0
+	`).Error; err != nil {
+		return err
+	}
+
+	if err := db.Exec(`
+		UPDATE issues
+		SET sequence_number = number
+		WHERE (sequence_number IS NULL OR sequence_number = 0)
+		  AND number IS NOT NULL
+		  AND number > 0
+	`).Error; err != nil {
+		return err
+	}
+
+	if err := db.Exec(`
+		INSERT INTO issue_github_meta (
+			issue_id,
+			project_id,
+			github_issue_id,
+			github_node_id,
+			number,
+			html_url,
+			author_association,
+			assignees_json,
+			labels_json,
+			milestone_json,
+			reactions_json,
+			comments_count,
+			locked,
+			active_lock_reason,
+			synced_at,
+			raw_json
+		)
+		SELECT
+			issues.id,
+			issues.project_id,
+			issues.github_issue_id,
+			issues.github_node_id,
+			issues.number,
+			issues.html_url,
+			issues.author_association,
+			issues.assignees_json,
+			issues.labels_json,
+			issues.milestone_json,
+			issues.reactions_json,
+			issues.comments_count,
+			issues.locked,
+			issues.active_lock_reason,
+			issues.synced_at,
+			issues.raw_json
+		FROM issues
+		WHERE issues.github_issue_id IS NOT NULL
+		  AND issues.github_issue_id > 0
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM issue_github_meta meta
+			WHERE meta.issue_id = issues.id
+		  )
+	`).Error; err != nil {
+		return err
+	}
+
+	if hasCommentSource, err := hasSQLiteColumn(db, "issue_comments", "source"); err != nil {
+		return err
+	} else if hasCommentSource {
+		if err := db.Exec(`
+			UPDATE issue_comments
+			SET source = 'github'
+			WHERE source IS NULL OR source = ''
+		`).Error; err != nil {
+			return err
+		}
+	}
+
+	if err := dropLegacyIssueColumns(db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func dropLegacyIssueColumns(db *gorm.DB) error {
+	// 旧版本把 GitHub issue 元数据直接放在 issues 表里。
+	// 当前模型已经拆到 issue_github_meta，需要删除遗留列，避免旧的 NOT NULL 约束继续影响内部 issue 创建。
+	legacyColumns := []string{
+		"github_issue_id",
+		"github_node_id",
+		"number",
+		"html_url",
+		"author_association",
+		"assignees_json",
+		"labels_json",
+		"milestone_json",
+		"reactions_json",
+		"comments_count",
+		"locked",
+		"active_lock_reason",
+		"synced_at",
+		"raw_json",
+	}
+
+	for _, column := range legacyColumns {
+		hasColumn, err := hasSQLiteColumn(db, "issues", column)
+		if err != nil {
+			return err
+		}
+		if !hasColumn {
+			continue
+		}
+		if err := dropSQLiteIndexesByColumn(db, "issues", column); err != nil {
+			return err
+		}
+		if err := db.Exec(fmt.Sprintf("ALTER TABLE %q DROP COLUMN %q", "issues", column)).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func dropSQLiteIndexesByColumn(db *gorm.DB, tableName, columnName string) error {
+	var indexes []sqliteIndexInfo
+	if err := db.Raw(fmt.Sprintf("PRAGMA index_list(%q)", tableName)).Scan(&indexes).Error; err != nil {
+		return err
+	}
+
+	for _, index := range indexes {
+		if index.Name == "" || strings.HasPrefix(index.Name, "sqlite_autoindex") {
+			continue
+		}
+
+		var columns []sqliteColumnInfo
+		if err := db.Raw(fmt.Sprintf("PRAGMA index_info(%q)", index.Name)).Scan(&columns).Error; err != nil {
+			return err
+		}
+
+		matchesColumn := false
+		for _, column := range columns {
+			if column.Name == columnName {
+				matchesColumn = true
+				break
+			}
+		}
+		if !matchesColumn {
+			continue
+		}
+
+		if err := db.Exec(fmt.Sprintf("DROP INDEX IF EXISTS %q", index.Name)).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func hasSQLiteColumn(db *gorm.DB, tableName, columnName string) (bool, error) {
+	var columns []sqliteColumnInfo
+	if err := db.Raw(fmt.Sprintf("PRAGMA table_info(%s)", tableName)).Scan(&columns).Error; err != nil {
+		return false, err
+	}
+	for _, column := range columns {
+		if column.Name == columnName {
+			return true, nil
+		}
+	}
+	return false, nil
 }

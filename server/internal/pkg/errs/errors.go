@@ -57,6 +57,7 @@ var (
 	ErrVersionShipped      = New(40905, "版本已发货，无法修改")
 	ErrShipPreCheckFailed  = New(40906, "发货前置校验未通过")
 	ErrIssueSyncRunning    = New(40907, "问题同步正在进行中")
+	ErrIssueReadOnly       = New(40908, "该问题为只读问题")
 )
 
 // 服务器内部错误 50000-50099

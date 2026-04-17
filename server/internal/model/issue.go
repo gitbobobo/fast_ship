@@ -2,6 +2,13 @@ package model
 
 import "time"
 
+type IssueSource string
+
+const (
+	IssueSourceGitHub   IssueSource = "github"
+	IssueSourceInternal IssueSource = "internal"
+)
+
 type IssueState string
 
 const (
@@ -36,34 +43,24 @@ func IsValidIssueWorkflowStatus(status IssueWorkflowStatus) bool {
 }
 
 type Issue struct {
-	ID                string     `gorm:"type:text;primaryKey" json:"id"`
-	ProjectID         string     `gorm:"type:text;not null;index" json:"project_id"`
-	GitHubIssueID     int64      `gorm:"column:github_issue_id;not null;index" json:"github_issue_id"`
-	GitHubNodeID      string     `gorm:"column:github_node_id;type:text" json:"github_node_id"`
-	Number            int        `gorm:"not null;index" json:"number"`
-	State             IssueState `gorm:"type:text;not null;index" json:"state"`
-	StateReason       string     `gorm:"type:text" json:"state_reason"`
-	Title             string     `gorm:"type:text;not null" json:"title"`
-	Body              string     `gorm:"type:text" json:"body"`
-	BodyHTML          string     `gorm:"column:body_html;type:text" json:"body_html"`
-	HTMLURL           string     `gorm:"type:text" json:"html_url"`
-	AuthorLogin       string     `gorm:"type:text" json:"author_login"`
-	AuthorAvatarURL   string     `gorm:"type:text" json:"author_avatar_url"`
-	AuthorAssociation string     `gorm:"type:text" json:"author_association"`
-	AssigneesJSON     string     `gorm:"type:text" json:"-"`
-	LabelsJSON        string     `gorm:"type:text" json:"-"`
-	MilestoneJSON     string     `gorm:"type:text" json:"-"`
-	ReactionsJSON     string     `gorm:"type:text" json:"-"`
-	CommentsCount     int        `gorm:"not null;default:0" json:"comments_count"`
-	Locked            bool       `gorm:"not null;default:false" json:"locked"`
-	ActiveLockReason  string     `gorm:"type:text" json:"active_lock_reason"`
-	ClosedAt          *time.Time `json:"closed_at"`
-	GitHubCreatedAt   time.Time  `gorm:"column:created_at;not null;index" json:"created_at"`
-	GitHubUpdatedAt   time.Time  `gorm:"column:updated_at;not null;index" json:"updated_at"`
-	SyncedAt          time.Time  `gorm:"not null;index" json:"synced_at"`
-	RawJSON           string     `gorm:"type:text" json:"-"`
+	ID              string      `gorm:"type:text;primaryKey" json:"id"`
+	ProjectID       string      `gorm:"type:text;not null;index" json:"project_id"`
+	Source          IssueSource `gorm:"type:text;not null;default:internal;index" json:"source"`
+	SequenceNumber  int         `gorm:"not null;default:0;index" json:"sequence_number"`
+	State           IssueState  `gorm:"type:text;not null;index" json:"state"`
+	StateReason     string      `gorm:"type:text" json:"state_reason"`
+	Title           string      `gorm:"type:text;not null" json:"title"`
+	Body            string      `gorm:"type:text" json:"body"`
+	BodyHTML        string      `gorm:"column:body_html;type:text" json:"body_html"`
+	AuthorUserID    string      `gorm:"type:text;index" json:"author_user_id"`
+	AuthorLogin     string      `gorm:"type:text" json:"author_login"`
+	AuthorAvatarURL string      `gorm:"type:text" json:"author_avatar_url"`
+	ClosedAt        *time.Time  `json:"closed_at"`
+	CreatedAt       time.Time   `gorm:"not null;index" json:"created_at"`
+	UpdatedAt       time.Time   `gorm:"not null;index" json:"updated_at"`
 
 	Project        Project              `gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE" json:"-"`
+	GitHubMeta     *IssueGitHubMeta     `gorm:"foreignKey:IssueID" json:"-"`
 	Comments       []IssueComment       `gorm:"foreignKey:IssueID" json:"-"`
 	TimelineEvents []IssueTimelineEvent `gorm:"foreignKey:IssueID" json:"-"`
 }
@@ -72,21 +69,48 @@ func (Issue) TableName() string {
 	return "issues"
 }
 
-type IssueComment struct {
-	ID                string    `gorm:"type:text;primaryKey" json:"id"`
-	IssueID           string    `gorm:"type:text;not null;index" json:"issue_id"`
-	GitHubCommentID   int64     `gorm:"column:github_comment_id;not null;index" json:"github_comment_id"`
+type IssueGitHubMeta struct {
+	IssueID           string    `gorm:"type:text;primaryKey" json:"issue_id"`
+	ProjectID         string    `gorm:"type:text;not null;index" json:"project_id"`
+	GitHubIssueID     int64     `gorm:"column:github_issue_id;not null;index" json:"github_issue_id"`
 	GitHubNodeID      string    `gorm:"column:github_node_id;type:text" json:"github_node_id"`
-	Body              string    `gorm:"type:text" json:"body"`
-	BodyHTML          string    `gorm:"column:body_html;type:text" json:"body_html"`
+	Number            int       `gorm:"not null;index" json:"number"`
 	HTMLURL           string    `gorm:"type:text" json:"html_url"`
-	AuthorLogin       string    `gorm:"type:text" json:"author_login"`
-	AuthorAvatarURL   string    `gorm:"type:text" json:"author_avatar_url"`
 	AuthorAssociation string    `gorm:"type:text" json:"author_association"`
+	AssigneesJSON     string    `gorm:"type:text" json:"-"`
+	LabelsJSON        string    `gorm:"type:text" json:"-"`
+	MilestoneJSON     string    `gorm:"type:text" json:"-"`
 	ReactionsJSON     string    `gorm:"type:text" json:"-"`
-	GitHubCreatedAt   time.Time `gorm:"column:created_at;not null;index" json:"created_at"`
-	GitHubUpdatedAt   time.Time `gorm:"column:updated_at;not null;index" json:"updated_at"`
+	CommentsCount     int       `gorm:"not null;default:0" json:"comments_count"`
+	Locked            bool      `gorm:"not null;default:false" json:"locked"`
+	ActiveLockReason  string    `gorm:"type:text" json:"active_lock_reason"`
+	SyncedAt          time.Time `gorm:"not null;index" json:"synced_at"`
 	RawJSON           string    `gorm:"type:text" json:"-"`
+
+	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (IssueGitHubMeta) TableName() string {
+	return "issue_github_meta"
+}
+
+type IssueComment struct {
+	ID                string      `gorm:"type:text;primaryKey" json:"id"`
+	IssueID           string      `gorm:"type:text;not null;index" json:"issue_id"`
+	Source            IssueSource `gorm:"type:text;not null;default:github;index" json:"source"`
+	AuthorUserID      string      `gorm:"type:text;index" json:"author_user_id"`
+	GitHubCommentID   int64       `gorm:"column:github_comment_id;not null;index" json:"github_comment_id"`
+	GitHubNodeID      string      `gorm:"column:github_node_id;type:text" json:"github_node_id"`
+	Body              string      `gorm:"type:text" json:"body"`
+	BodyHTML          string      `gorm:"column:body_html;type:text" json:"body_html"`
+	HTMLURL           string      `gorm:"type:text" json:"html_url"`
+	AuthorLogin       string      `gorm:"type:text" json:"author_login"`
+	AuthorAvatarURL   string      `gorm:"type:text" json:"author_avatar_url"`
+	AuthorAssociation string      `gorm:"type:text" json:"author_association"`
+	ReactionsJSON     string      `gorm:"type:text" json:"-"`
+	GitHubCreatedAt   time.Time   `gorm:"column:created_at;not null;index" json:"created_at"`
+	GitHubUpdatedAt   time.Time   `gorm:"column:updated_at;not null;index" json:"updated_at"`
+	RawJSON           string      `gorm:"type:text" json:"-"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }
