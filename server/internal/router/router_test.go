@@ -40,6 +40,11 @@ type routerEnvelope struct {
 
 type routerConfigOption func(*config.Config)
 
+var routerTestPNGBytes = []byte{
+	0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+	0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R',
+}
+
 func TestRouterAuthRegisterLoginAndMe(t *testing.T) {
 	env := setupRouterTestEnv(t)
 
@@ -225,6 +230,64 @@ func TestRouterArtifactUploadAndDownloadWithAPIKey(t *testing.T) {
 	}
 }
 
+func TestRouterIssueAssetUploadAndContentWithQueryToken(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "issueasset", "issueasset@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+
+	createReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/projects/"+project.ID+"/issues",
+		bytes.NewReader([]byte(`{"title":"补充发布检查","body":"old body"}`)),
+	)
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("Authorization", "Bearer "+auth.Token)
+	createRec := httptest.NewRecorder()
+	env.router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("expected create issue 200, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+
+	var issue struct {
+		ID string `json:"id"`
+	}
+	decodeRouterEnvelope(t, createRec, &issue)
+
+	uploadReq := newRouterMultipartRequest(
+		t,
+		"/api/issues/"+issue.ID+"/assets",
+		"file",
+		"clip.png",
+		routerTestPNGBytes,
+		nil,
+	)
+	uploadReq.Header.Set("Authorization", "Bearer "+auth.Token)
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("expected upload 200, got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var asset struct {
+		ID         string `json:"id"`
+		ContentURL string `json:"content_url"`
+	}
+	decodeRouterEnvelope(t, uploadRec, &asset)
+	if asset.ID == "" || asset.ContentURL == "" {
+		t.Fatalf("unexpected issue asset payload: %+v", asset)
+	}
+
+	contentReq := httptest.NewRequest(http.MethodGet, asset.ContentURL+"?token="+auth.Token, nil)
+	contentRec := httptest.NewRecorder()
+	env.router.ServeHTTP(contentRec, contentReq)
+	if contentRec.Code != http.StatusOK {
+		t.Fatalf("expected issue asset content 200, got %d: %s", contentRec.Code, contentRec.Body.String())
+	}
+	if string(contentRec.Body.Bytes()) != string(routerTestPNGBytes) {
+		t.Fatalf("unexpected issue asset content length: %d", contentRec.Body.Len())
+	}
+}
+
 func TestRouterServesSPAFromWebDist(t *testing.T) {
 	webDistDir := t.TempDir()
 	indexHTML := []byte("<!doctype html><html><body><div id=\"root\"></div></body></html>")
@@ -310,6 +373,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
 		&model.IssueSyncState{},
+		&model.IssueAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -350,6 +414,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
+	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
@@ -357,7 +422,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, userRepo, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))

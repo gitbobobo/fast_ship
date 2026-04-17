@@ -26,6 +26,8 @@ func Setup(
 	{
 		api.GET("/github/media-proxy", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), mediaProxyHandler.Proxy)
 		api.HEAD("/github/media-proxy", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), mediaProxyHandler.Proxy)
+		api.GET("/issues/assets/:aid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), issueHandler.AssetContent)
+		api.HEAD("/issues/assets/:aid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), issueHandler.AssetContent)
 
 		// 公开接口
 		auth := api.Group("/auth")
@@ -78,6 +80,7 @@ func Setup(
 			issueWrite.POST("/sync", issueHandler.Sync)
 		}
 		api.PUT("/issues/:iid", middleware.RequireJWT(cfg, authService), issueHandler.Update)
+		api.POST("/issues/:iid/assets", middleware.RequireJWT(cfg, authService), issueHandler.UploadAsset)
 		api.POST("/issues/:iid/comments", middleware.RequireJWT(cfg, authService), issueHandler.CreateComment)
 		api.PUT("/issues/:iid/internal-meta", middleware.RequireJWT(cfg, authService), issueHandler.UpdateInternalMeta)
 

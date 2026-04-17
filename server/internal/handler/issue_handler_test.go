@@ -2,11 +2,18 @@ package handler
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 )
+
+var handlerTestPNGBytes = []byte{
+	0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+	0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R',
+}
 
 func TestIssueHandlerCreate_CreatesInternalIssue(t *testing.T) {
 	env := setupHandlerTestEnv(t)
@@ -127,6 +134,77 @@ func TestIssueHandlerCreateComment_CreatesInternalComment(t *testing.T) {
 	decodeEnvelope(t, rec, &result)
 	if result.Source != string(model.IssueSourceInternal) || result.Body != "第一条内部评论" {
 		t.Fatalf("unexpected comment payload: %+v", result)
+	}
+}
+
+func TestIssueHandlerUploadAssetAndReadContent(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-1")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	createBody := []byte(`{"title":"补充发布检查","body":"old body"}`)
+	createCtx, createRec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", createBody)
+	createCtx.Params = ginParams("id", project.ID)
+	createCtx.Set(middleware.ContextKeyUserID, user.ID)
+	createCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.issueHandler.Create(createCtx)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create issue failed: %d %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeEnvelope(t, createRec, &created)
+
+	req, _ := newMultipartUploadRequest(
+		t,
+		"/api/issues/"+created.ID+"/assets",
+		"file",
+		"clip.png",
+		handlerTestPNGBytes,
+		nil,
+	)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+	ctx.Params = ginParams("iid", created.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.UploadAsset(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected upload 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var uploaded struct {
+		ID         string `json:"id"`
+		MimeType   string `json:"mime_type"`
+		ContentURL string `json:"content_url"`
+		Markdown   string `json:"markdown"`
+	}
+	decodeEnvelope(t, rec, &uploaded)
+	if uploaded.ID == "" || uploaded.ContentURL == "" || uploaded.Markdown == "" {
+		t.Fatalf("unexpected upload payload: %+v", uploaded)
+	}
+
+	contentRec := httptest.NewRecorder()
+	contentCtx, _ := gin.CreateTestContext(contentRec)
+	contentCtx.Request = httptest.NewRequest(http.MethodGet, uploaded.ContentURL, nil)
+	contentCtx.Params = ginParams("aid", uploaded.ID)
+	contentCtx.Set(middleware.ContextKeyUserID, user.ID)
+	contentCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.AssetContent(contentCtx)
+
+	if contentRec.Code != http.StatusOK {
+		t.Fatalf("expected content 200, got %d: %s", contentRec.Code, contentRec.Body.String())
+	}
+	if contentRec.Header().Get("Content-Type") != uploaded.MimeType {
+		t.Fatalf("expected content type %q, got %q", uploaded.MimeType, contentRec.Header().Get("Content-Type"))
+	}
+	if body := contentRec.Body.Bytes(); string(body) != string(handlerTestPNGBytes) {
+		t.Fatalf("unexpected asset body length: %d", len(body))
 	}
 }
 

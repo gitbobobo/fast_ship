@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"path/filepath"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
@@ -237,4 +238,47 @@ func (h *IssueHandler) UpdateInternalMeta(c *gin.Context) {
 	}
 
 	response.Success(c, result)
+}
+
+func (h *IssueHandler) UploadAsset(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		response.BadRequest(c, 40001, "未找到上传文件")
+		return
+	}
+	defer file.Close()
+
+	fileName := header.Filename
+	if filepath.Base(fileName) == "." || filepath.Base(fileName) == string(filepath.Separator) {
+		fileName = ""
+	}
+
+	result, err := h.issueService.UploadInternalIssueAsset(issueID, userID, fileName, header.Size, file)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+func (h *IssueHandler) AssetContent(c *gin.Context) {
+	assetID := c.Param("aid")
+	userID := middleware.GetUserID(c)
+
+	reader, mimeType, fileSize, err := h.issueService.GetIssueAssetContent(assetID, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	defer reader.Close()
+
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	c.Header("Cache-Control", "private, max-age=300")
+	c.DataFromReader(200, fileSize, mimeType, reader, nil)
 }

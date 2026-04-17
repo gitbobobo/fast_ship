@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -10,6 +12,11 @@ import (
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
 )
+
+var testPNGBytes = []byte{
+	0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+	0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R',
+}
 
 func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testing.T) {
 	svc := setupTestServices(t)
@@ -302,6 +309,235 @@ func TestIssueServiceUpdateInternalIssue_UpdatesBodyAndState(t *testing.T) {
 	}
 	if updated.ClosedAt == nil {
 		t.Fatalf("expected closed_at to be set")
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_RemovesDetachedAssets(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  "初始内容",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	asset, err := svc.issueService.UploadInternalIssueAsset(
+		created.ID,
+		user.ID,
+		"clip.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload issue asset: %v", err)
+	}
+
+	bodyWithAsset := fmt.Sprintf("保留正文\n\n%s", asset.Markdown)
+	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+		Body: &bodyWithAsset,
+	}); err != nil {
+		t.Fatalf("attach asset markdown: %v", err)
+	}
+
+	newBody := "不再引用图片"
+	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+		Body: &newBody,
+	}); err != nil {
+		t.Fatalf("remove asset markdown: %v", err)
+	}
+
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	if err != nil {
+		t.Fatalf("list issue assets: %v", err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("expected issue assets to be deleted, got %d", len(assets))
+	}
+
+	exists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, asset.ID))
+	if err != nil {
+		t.Fatalf("stat uploaded issue asset: %v", err)
+	}
+	if exists {
+		t.Fatalf("expected uploaded issue asset file to be deleted")
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_AttachesReferencedPendingAsset(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  "初始内容",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	asset, err := svc.issueService.UploadInternalIssueAsset(
+		created.ID,
+		user.ID,
+		"clip.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload issue asset: %v", err)
+	}
+
+	bodyWithAsset := fmt.Sprintf("保留正文\n\n%s", asset.Markdown)
+	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+		Body: &bodyWithAsset,
+	}); err != nil {
+		t.Fatalf("attach asset markdown: %v", err)
+	}
+
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	if err != nil {
+		t.Fatalf("list issue assets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 issue asset, got %d", len(assets))
+	}
+	if assets[0].Status != model.IssueAssetStatusAttached {
+		t.Fatalf("expected asset status attached, got %q", assets[0].Status)
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_RemovesUnreferencedPendingAssets(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  "初始内容",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	asset, err := svc.issueService.UploadInternalIssueAsset(
+		created.ID,
+		user.ID,
+		"clip.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload issue asset: %v", err)
+	}
+
+	body := "保留正文但不再引用图片"
+	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+		Body: &body,
+	}); err != nil {
+		t.Fatalf("update internal issue: %v", err)
+	}
+
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	if err != nil {
+		t.Fatalf("list issue assets: %v", err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("expected pending issue asset to be deleted, got %d", len(assets))
+	}
+
+	exists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, asset.ID))
+	if err != nil {
+		t.Fatalf("stat uploaded issue asset: %v", err)
+	}
+	if exists {
+		t.Fatalf("expected pending issue asset file to be deleted")
+	}
+}
+
+func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  "初始内容",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	expiredPending, err := svc.issueService.UploadInternalIssueAsset(
+		created.ID,
+		user.ID,
+		"expired.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload expired pending asset: %v", err)
+	}
+	attached, err := svc.issueService.UploadInternalIssueAsset(
+		created.ID,
+		user.ID,
+		"keep.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload attached asset: %v", err)
+	}
+	if err := svc.db.Model(&model.IssueAsset{}).
+		Where("id = ?", attached.ID).
+		Update("status", model.IssueAssetStatusAttached).
+		Error; err != nil {
+		t.Fatalf("mark asset attached: %v", err)
+	}
+
+	expiredAt := time.Now().UTC().Add(-issueAssetPendingTTL - time.Hour)
+	if err := svc.db.Model(&model.IssueAsset{}).
+		Where("id = ?", expiredPending.ID).
+		Update("created_at", expiredAt).
+		Error; err != nil {
+		t.Fatalf("age pending asset: %v", err)
+	}
+
+	if err := svc.issueService.CleanupExpiredPendingIssueAssets(); err != nil {
+		t.Fatalf("cleanup expired pending issue assets: %v", err)
+	}
+
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	if err != nil {
+		t.Fatalf("list issue assets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 remaining issue asset, got %d", len(assets))
+	}
+	if assets[0].ID != attached.ID {
+		t.Fatalf("expected attached asset %q to remain, got %q", attached.ID, assets[0].ID)
+	}
+	if assets[0].Status != model.IssueAssetStatusAttached {
+		t.Fatalf("expected remaining asset to stay attached, got %q", assets[0].Status)
+	}
+
+	expiredExists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, expiredPending.ID))
+	if err != nil {
+		t.Fatalf("stat expired pending asset: %v", err)
+	}
+	if expiredExists {
+		t.Fatalf("expected expired pending asset file to be deleted")
+	}
+
+	attachedExists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, attached.ID))
+	if err != nil {
+		t.Fatalf("stat attached asset: %v", err)
+	}
+	if !attachedExists {
+		t.Fatalf("expected attached asset file to remain")
 	}
 }
 

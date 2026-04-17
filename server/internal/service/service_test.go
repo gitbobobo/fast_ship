@@ -30,6 +30,7 @@ type testServices struct {
 	timelineRepo     *repository.IssueTimelineRepository
 	internalMetaRepo *repository.IssueInternalMetaRepository
 	syncStateRepo    *repository.IssueSyncStateRepository
+	issueAssetRepo   *repository.IssueAssetRepository
 	artifactRepo     *repository.ArtifactRepository
 	issueService     *IssueService
 	versionService   *VersionService
@@ -57,6 +58,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
 		&model.IssueSyncState{},
+		&model.IssueAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -83,6 +85,7 @@ func setupTestServices(t *testing.T) *testServices {
 	timelineRepo := repository.NewIssueTimelineRepository(db)
 	internalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	syncStateRepo := repository.NewIssueSyncStateRepository(db)
+	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 
 	cfg := &config.Config{
@@ -103,8 +106,9 @@ func setupTestServices(t *testing.T) *testServices {
 		timelineRepo:     timelineRepo,
 		internalMetaRepo: internalMetaRepo,
 		syncStateRepo:    syncStateRepo,
+		issueAssetRepo:   issueAssetRepo,
 		artifactRepo:     artifactRepo,
-		issueService:     NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, syncStateRepo, projectRepo, userRepo, cfg, zap.NewNop()),
+		issueService:     NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, syncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
 		versionService:   NewVersionService(versionRepo, projectRepo, fileStorage),
 		artifactService:  NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		shipService:      NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),

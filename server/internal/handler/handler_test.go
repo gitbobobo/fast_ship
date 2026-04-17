@@ -57,6 +57,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
 		&model.IssueSyncState{},
+		&model.IssueAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -92,12 +93,13 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
+	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, userRepo, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 

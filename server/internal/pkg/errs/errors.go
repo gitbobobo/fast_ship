@@ -39,12 +39,13 @@ var (
 
 // 资源不存在 40400-40499
 var (
-	ErrUserNotFound     = New(40400, "用户不存在")
-	ErrProjectNotFound  = New(40401, "项目不存在")
-	ErrVersionNotFound  = New(40402, "版本不存在")
-	ErrArtifactNotFound = New(40403, "安装包不存在")
-	ErrApiKeyNotFound   = New(40404, "API Key 不存在")
-	ErrIssueNotFound    = New(40405, "问题不存在")
+	ErrUserNotFound       = New(40400, "用户不存在")
+	ErrProjectNotFound    = New(40401, "项目不存在")
+	ErrVersionNotFound    = New(40402, "版本不存在")
+	ErrArtifactNotFound   = New(40403, "安装包不存在")
+	ErrApiKeyNotFound     = New(40404, "API Key 不存在")
+	ErrIssueNotFound      = New(40405, "问题不存在")
+	ErrIssueAssetNotFound = New(40406, "问题图片不存在")
 )
 
 // 业务冲突 40900-40999

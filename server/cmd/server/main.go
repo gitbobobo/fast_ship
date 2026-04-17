@@ -86,6 +86,7 @@ func main() {
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
 		&model.IssueSyncState{},
+		&model.IssueAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -103,6 +104,9 @@ func main() {
 	if err := backfillIssueSourceModel(db); err != nil {
 		log.Fatalf("问题数据迁移失败: %v", err)
 	}
+	if err := backfillIssueAssetStatusModel(db); err != nil {
+		log.Fatalf("问题资源数据迁移失败: %v", err)
+	}
 
 	// 初始化存储
 	fileStorage := storage.NewLocalStorage(cfg.Upload.StoragePath)
@@ -118,6 +122,7 @@ func main() {
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
+	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
@@ -126,7 +131,7 @@ func main() {
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, userRepo, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zapLogger)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
@@ -147,6 +152,19 @@ func main() {
 		for range ticker.C {
 			if err := jwtBlacklistRepo.CleanExpired(); err != nil {
 				zapLogger.Error("清理 JWT 黑名单失败", zap.Error(err))
+			}
+		}
+	}()
+
+	if err := issueService.CleanupExpiredPendingIssueAssets(); err != nil {
+		zapLogger.Warn("清理过期问题图片失败", zap.Error(err))
+	}
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := issueService.CleanupExpiredPendingIssueAssets(); err != nil {
+				zapLogger.Warn("清理过期问题图片失败", zap.Error(err))
 			}
 		}
 	}()
@@ -180,7 +198,7 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(middleware.CORS())
-	r.MaxMultipartMemory = cfg.Upload.MaxFileSize
+	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
 	router.Setup(r, cfg, authHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
@@ -284,6 +302,27 @@ func backfillIssueSourceModel(db *gorm.DB) error {
 	}
 
 	return nil
+}
+
+func backfillIssueAssetStatusModel(db *gorm.DB) error {
+	hasStatus, err := hasSQLiteColumn(db, "issue_assets", "status")
+	if err != nil || !hasStatus {
+		return err
+	}
+
+	return db.Exec(`
+		UPDATE issue_assets
+		SET status = 'attached'
+		WHERE status IS NULL OR status = ''
+	`).Error
+}
+
+func uploadMultipartMemoryLimit(maxFileSize int64) int64 {
+	const defaultLimit = int64(32 << 20)
+	if maxFileSize <= 0 || maxFileSize > defaultLimit {
+		return defaultLimit
+	}
+	return maxFileSize
 }
 
 func dropLegacyIssueColumns(db *gorm.DB) error {

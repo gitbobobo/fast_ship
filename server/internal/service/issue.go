@@ -1,10 +1,17 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	neturl "net/url"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,11 +24,19 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
+	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+)
+
+var issueAssetContentPattern = regexp.MustCompile(`(?:https?://[^/\s"')]+)?/api/issues/assets/([0-9a-fA-F-]+)/content(?:\?[^)\s"']*)?`)
+
+const (
+	issueAssetSniffBytes = 512
+	issueAssetPendingTTL = 24 * time.Hour
 )
 
 type gitHubIssueClient interface {
@@ -40,8 +55,10 @@ type IssueService struct {
 	timelineRepo     *repository.IssueTimelineRepository
 	internalMetaRepo *repository.IssueInternalMetaRepository
 	syncStateRepo    *repository.IssueSyncStateRepository
+	assetRepo        *repository.IssueAssetRepository
 	projectRepo      *repository.ProjectRepository
 	userRepo         *repository.UserRepository
+	storage          storage.Storage
 	cfg              *config.Config
 	logger           *zap.Logger
 	newClient        gitHubIssueClientFactory
@@ -200,6 +217,17 @@ type IssueInternalMetaResponse struct {
 	UpdatedAt      *string                   `json:"updated_at,omitempty"`
 }
 
+type IssueAssetResponse struct {
+	ID         string `json:"id"`
+	IssueID    string `json:"issue_id"`
+	FileName   string `json:"file_name"`
+	MimeType   string `json:"mime_type"`
+	FileSize   int64  `json:"file_size"`
+	ContentURL string `json:"content_url"`
+	Markdown   string `json:"markdown"`
+	CreatedAt  string `json:"created_at"`
+}
+
 type issueUserPayload struct {
 	Login     string `json:"login"`
 	AvatarURL string `json:"avatar_url"`
@@ -225,8 +253,10 @@ func NewIssueService(
 	timelineRepo *repository.IssueTimelineRepository,
 	internalMetaRepo *repository.IssueInternalMetaRepository,
 	syncStateRepo *repository.IssueSyncStateRepository,
+	assetRepo *repository.IssueAssetRepository,
 	projectRepo *repository.ProjectRepository,
 	userRepo *repository.UserRepository,
+	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
 ) *IssueService {
@@ -237,8 +267,10 @@ func NewIssueService(
 		timelineRepo:     timelineRepo,
 		internalMetaRepo: internalMetaRepo,
 		syncStateRepo:    syncStateRepo,
+		assetRepo:        assetRepo,
 		projectRepo:      projectRepo,
 		userRepo:         userRepo,
+		storage:          storage,
 		cfg:              cfg,
 		logger:           logger,
 		newClient: func(token, owner, repo string) gitHubIssueClient {
@@ -246,6 +278,29 @@ func NewIssueService(
 		},
 		syncingProjectID: make(map[string]struct{}),
 	}
+}
+
+func (s *IssueService) CleanupExpiredPendingIssueAssets() error {
+	cutoff := time.Now().UTC().Add(-issueAssetPendingTTL)
+	assets, err := s.assetRepo.ListPendingCreatedBefore(cutoff)
+	if err != nil {
+		return err
+	}
+	if len(assets) == 0 {
+		return nil
+	}
+
+	idsByIssue := make(map[string][]string)
+	for _, asset := range assets {
+		idsByIssue[asset.IssueID] = append(idsByIssue[asset.IssueID], asset.ID)
+	}
+
+	for issueID, ids := range idsByIssue {
+		if err := s.deleteIssueAssets(issueID, ids); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateInternalIssueRequest) (*IssueResponse, error) {
@@ -363,6 +418,11 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	if err := s.issueRepo.Save(issue); err != nil {
 		return nil, errs.ErrInternal
 	}
+	if req.Body != nil {
+		if err := s.reconcileIssueAssets(issue.ID, *req.Body); err != nil {
+			s.logger.Warn("reconcile issue assets failed", zap.String("issue_id", issue.ID), zap.Error(err))
+		}
+	}
 
 	meta, err := s.loadInternalMeta(issue.ID)
 	if err != nil {
@@ -370,6 +430,114 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	}
 	resp := toIssueResponse(*issue, meta)
 	return &resp, nil
+}
+
+func (s *IssueService) UploadInternalIssueAsset(issueID, userID, fileName string, fileSize int64, reader io.Reader) (*IssueAssetResponse, error) {
+	_ = fileSize
+
+	issue, err := s.issueRepo.FindByID(issueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrIssueNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if _, err := s.projectRepo.FindByID(issue.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrNotOwner
+	}
+	if issue.Source != model.IssueSourceInternal {
+		return nil, errs.ErrIssueReadOnly
+	}
+
+	readFrom := reader
+	if s.cfg.Upload.MaxFileSize > 0 {
+		readFrom = io.LimitReader(reader, s.cfg.Upload.MaxFileSize+1)
+	}
+
+	head := make([]byte, issueAssetSniffBytes)
+	headSize, err := io.ReadFull(readFrom, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, errs.ErrInternal
+	}
+	head = head[:headSize]
+	if len(head) == 0 {
+		return nil, errs.ErrInvalidParams
+	}
+
+	mimeType := http.DetectContentType(head)
+	if !strings.HasPrefix(mimeType, "image/") {
+		return nil, errs.ErrInvalidParams
+	}
+
+	assetID := uuid.NewString()
+	storagePath := buildIssueAssetStoragePath(issue.ProjectID, issue.ID, assetID, fileName, mimeType)
+	uploadReader := io.MultiReader(bytes.NewReader(head), readFrom)
+	countedReader := &countingReader{reader: uploadReader}
+	if err := s.storage.Save(storagePath, countedReader); err != nil {
+		_ = s.storage.Delete(storagePath)
+		return nil, errs.ErrInternal
+	}
+	if s.cfg.Upload.MaxFileSize > 0 && countedReader.n > s.cfg.Upload.MaxFileSize {
+		_ = s.storage.Delete(storagePath)
+		return nil, errs.ErrInvalidParams
+	}
+
+	asset := &model.IssueAsset{
+		ID:              assetID,
+		IssueID:         issue.ID,
+		FileName:        normalizeIssueAssetFileName(fileName, mimeType),
+		FilePath:        storagePath,
+		MimeType:        mimeType,
+		FileSize:        countedReader.n,
+		Status:          model.IssueAssetStatusPending,
+		CreatedByUserID: userID,
+		CreatedAt:       time.Now().UTC(),
+	}
+
+	if err := s.assetRepo.Create(asset); err != nil {
+		_ = s.storage.Delete(storagePath)
+		return nil, errs.ErrInternal
+	}
+
+	resp := toIssueAssetResponse(*asset)
+	return &resp, nil
+}
+
+func (s *IssueService) GetIssueAssetContent(assetID, userID string) (io.ReadCloser, string, int64, error) {
+	asset, err := s.assetRepo.FindByID(assetID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", 0, errs.ErrIssueAssetNotFound
+		}
+		return nil, "", 0, errs.ErrInternal
+	}
+
+	issue, err := s.issueRepo.FindByID(asset.IssueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", 0, errs.ErrIssueNotFound
+		}
+		return nil, "", 0, errs.ErrInternal
+	}
+	if _, err := s.projectRepo.FindByID(issue.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", 0, errs.ErrProjectNotFound
+		}
+		return nil, "", 0, errs.ErrNotOwner
+	}
+
+	reader, err := s.storage.Get(asset.FilePath)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", 0, errs.ErrIssueAssetNotFound
+		}
+		return nil, "", 0, errs.ErrInternal
+	}
+
+	return reader, asset.MimeType, asset.FileSize, nil
 }
 
 func (s *IssueService) List(projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
@@ -1163,6 +1331,156 @@ func toIssueInternalMetaResponse(meta *model.IssueInternalMeta) *IssueInternalMe
 		resp.UpdatedAt = &value
 	}
 	return resp
+}
+
+func toIssueAssetResponse(asset model.IssueAsset) IssueAssetResponse {
+	contentURL := buildIssueAssetContentURL(asset.ID)
+	return IssueAssetResponse{
+		ID:         asset.ID,
+		IssueID:    asset.IssueID,
+		FileName:   asset.FileName,
+		MimeType:   asset.MimeType,
+		FileSize:   asset.FileSize,
+		ContentURL: contentURL,
+		Markdown:   fmt.Sprintf("![%s](%s)", issueAssetAltText(asset.FileName), contentURL),
+		CreatedAt:  asset.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+}
+
+func buildIssueAssetContentURL(assetID string) string {
+	return fmt.Sprintf("/api/issues/assets/%s/content", assetID)
+}
+
+func issueAssetAltText(fileName string) string {
+	trimmed := strings.TrimSpace(strings.TrimSuffix(fileName, filepath.Ext(fileName)))
+	if trimmed == "" {
+		return "image"
+	}
+	return trimmed
+}
+
+func normalizeIssueAssetFileName(fileName, mimeType string) string {
+	name := strings.TrimSpace(fileName)
+	if name == "" {
+		name = "image"
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext != "" {
+		return name
+	}
+	if exts, err := mime.ExtensionsByType(mimeType); err == nil && len(exts) > 0 {
+		return name + exts[0]
+	}
+	return name
+}
+
+func buildIssueAssetStoragePath(projectID, issueID, assetID, fileName, mimeType string) string {
+	name := normalizeIssueAssetFileName(fileName, mimeType)
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == "" {
+		ext = ".bin"
+	}
+	return fmt.Sprintf("%s/issues/%s/assets/%s%s", projectID, issueID, assetID, ext)
+}
+
+func extractIssueAssetIDs(body string) map[string]struct{} {
+	matches := issueAssetContentPattern.FindAllStringSubmatch(body, -1)
+	result := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		id := strings.TrimSpace(match[1])
+		if id == "" {
+			continue
+		}
+		result[id] = struct{}{}
+	}
+	return result
+}
+
+func (s *IssueService) reconcileIssueAssets(issueID, body string) error {
+	assets, err := s.assetRepo.ListByIssueID(issueID)
+	if err != nil {
+		return err
+	}
+
+	referencedIDs := extractIssueAssetIDs(body)
+	if len(assets) == 0 {
+		return nil
+	}
+
+	idsToAttach := make([]string, 0)
+	idsToDelete := make([]string, 0)
+	for _, asset := range assets {
+		if _, ok := referencedIDs[asset.ID]; ok {
+			if asset.Status != model.IssueAssetStatusAttached {
+				idsToAttach = append(idsToAttach, asset.ID)
+			}
+			continue
+		}
+		idsToDelete = append(idsToDelete, asset.ID)
+	}
+
+	if err := s.assetRepo.UpdateStatusByIssueIDAndIDs(issueID, idsToAttach, model.IssueAssetStatusAttached); err != nil {
+		return err
+	}
+	if err := s.deleteIssueAssets(issueID, idsToDelete); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *IssueService) deleteIssueAssets(issueID string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	assets, err := s.assetRepo.ListByIssueID(issueID)
+	if err != nil {
+		return err
+	}
+
+	pathByID := make(map[string]string, len(assets))
+	for _, asset := range assets {
+		pathByID[asset.ID] = asset.FilePath
+	}
+
+	if err := s.assetRepo.DeleteByIssueIDAndIDs(issueID, ids); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if path := pathByID[id]; path != "" {
+			_ = s.storage.Delete(path)
+		}
+	}
+	return nil
+}
+
+func resolveIssueAssetIDFromURL(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	parsed, err := neturl.Parse(value)
+	if err == nil {
+		value = parsed.Path
+	}
+	match := issueAssetContentPattern.FindStringSubmatch(value)
+	if len(match) < 2 {
+		return ""
+	}
+	return match[1]
+}
+
+type countingReader struct {
+	reader io.Reader
+	n      int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.n += int64(n)
+	return n, err
 }
 
 func (s *IssueService) internalMetaByIssueIDs(issues []model.Issue) (map[string]*model.IssueInternalMeta, error) {
