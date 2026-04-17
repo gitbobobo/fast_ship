@@ -52,6 +52,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.Project{},
 		&model.Version{},
 		&model.Issue{},
+		&model.IssueGitHubMeta{},
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
@@ -64,8 +65,9 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_number ON issues(project_id, number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_github_issue ON issues(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_sequence ON issues(project_id, sequence_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_project_github_issue ON issue_github_meta(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
@@ -85,6 +87,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
+	issueGitHubMetaRepo := repository.NewIssueGitHubMetaRepository(db)
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
@@ -94,7 +97,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, userRepo, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 
@@ -181,19 +184,16 @@ func createHandlerTestIssue(t *testing.T, db *gorm.DB, projectID string, opts ..
 
 	now := time.Now().UTC()
 	issue := &model.Issue{
-		ID:              uuid.NewString(),
-		ProjectID:       projectID,
-		GitHubIssueID:   1001,
-		GitHubNodeID:    "I_kw_handler",
-		Number:          42,
-		State:           model.IssueStateOpen,
-		Title:           "Crash on launch",
-		Body:            "App crashes",
-		HTMLURL:         "https://github.com/owner/repo/issues/42",
-		AuthorLogin:     "alice",
-		GitHubCreatedAt: now.Add(-2 * time.Hour),
-		GitHubUpdatedAt: now.Add(-1 * time.Hour),
-		SyncedAt:        now,
+		ID:             uuid.NewString(),
+		ProjectID:      projectID,
+		Source:         model.IssueSourceGitHub,
+		SequenceNumber: 1,
+		State:          model.IssueStateOpen,
+		Title:          "Crash on launch",
+		Body:           "App crashes",
+		AuthorLogin:    "alice",
+		CreatedAt:      now.Add(-2 * time.Hour),
+		UpdatedAt:      now.Add(-1 * time.Hour),
 	}
 
 	for _, opt := range opts {
@@ -202,6 +202,18 @@ func createHandlerTestIssue(t *testing.T, db *gorm.DB, projectID string, opts ..
 
 	if err := db.Create(issue).Error; err != nil {
 		t.Fatalf("create issue: %v", err)
+	}
+	meta := &model.IssueGitHubMeta{
+		IssueID:       issue.ID,
+		ProjectID:     projectID,
+		GitHubIssueID: 1001,
+		GitHubNodeID:  "I_kw_handler",
+		Number:        42,
+		HTMLURL:       "https://github.com/owner/repo/issues/42",
+		SyncedAt:      now,
+	}
+	if err := db.Create(meta).Error; err != nil {
+		t.Fatalf("create issue github meta: %v", err)
 	}
 
 	return issue

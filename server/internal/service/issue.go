@@ -35,11 +35,13 @@ type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
 
 type IssueService struct {
 	issueRepo        *repository.IssueRepository
+	gitHubMetaRepo   *repository.IssueGitHubMetaRepository
 	commentRepo      *repository.IssueCommentRepository
 	timelineRepo     *repository.IssueTimelineRepository
 	internalMetaRepo *repository.IssueInternalMetaRepository
 	syncStateRepo    *repository.IssueSyncStateRepository
 	projectRepo      *repository.ProjectRepository
+	userRepo         *repository.UserRepository
 	cfg              *config.Config
 	logger           *zap.Logger
 	newClient        gitHubIssueClientFactory
@@ -55,6 +57,22 @@ type IssueListFilters struct {
 	Milestone string
 	Workflow  string
 	Sort      string
+}
+
+type CreateInternalIssueRequest struct {
+	Title          string                    `json:"title"`
+	Body           string                    `json:"body"`
+	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
+}
+
+type UpdateInternalIssueRequest struct {
+	Title *string           `json:"title"`
+	Body  *string           `json:"body"`
+	State *model.IssueState `json:"state"`
+}
+
+type CreateInternalIssueCommentRequest struct {
+	Body string `json:"body"`
 }
 
 type IssueActorResponse struct {
@@ -87,19 +105,11 @@ type IssueReactionSummaryResponse struct {
 	Eyes       int `json:"eyes"`
 }
 
-type IssueResponse struct {
-	ID                string                       `json:"id"`
-	ProjectID         string                       `json:"project_id"`
+type IssueGitHubResponse struct {
 	GitHubIssueID     int64                        `json:"github_issue_id"`
 	GitHubNodeID      string                       `json:"github_node_id"`
 	Number            int                          `json:"number"`
-	State             model.IssueState             `json:"state"`
-	StateReason       string                       `json:"state_reason"`
-	Title             string                       `json:"title"`
-	Body              string                       `json:"body"`
-	BodyHTML          string                       `json:"body_html"`
 	HTMLURL           string                       `json:"html_url"`
-	Author            IssueActorResponse           `json:"author"`
 	AuthorAssociation string                       `json:"author_association"`
 	Assignees         []IssueActorResponse         `json:"assignees"`
 	Labels            []IssueLabelResponse         `json:"labels"`
@@ -108,16 +118,32 @@ type IssueResponse struct {
 	CommentsCount     int                          `json:"comments_count"`
 	Locked            bool                         `json:"locked"`
 	ActiveLockReason  string                       `json:"active_lock_reason"`
-	ClosedAt          *string                      `json:"closed_at"`
-	CreatedAt         string                       `json:"created_at"`
-	UpdatedAt         string                       `json:"updated_at"`
 	SyncedAt          string                       `json:"synced_at"`
-	InternalMeta      *IssueInternalMetaResponse   `json:"internal_meta,omitempty"`
+}
+
+type IssueResponse struct {
+	ID             string                     `json:"id"`
+	ProjectID      string                     `json:"project_id"`
+	Source         model.IssueSource          `json:"source"`
+	SequenceNumber int                        `json:"sequence_number"`
+	Reference      string                     `json:"reference"`
+	State          model.IssueState           `json:"state"`
+	StateReason    string                     `json:"state_reason"`
+	Title          string                     `json:"title"`
+	Body           string                     `json:"body"`
+	BodyHTML       string                     `json:"body_html"`
+	Author         IssueActorResponse         `json:"author"`
+	CreatedAt      string                     `json:"created_at"`
+	UpdatedAt      string                     `json:"updated_at"`
+	ClosedAt       *string                    `json:"closed_at"`
+	InternalMeta   *IssueInternalMetaResponse `json:"internal_meta,omitempty"`
+	GitHub         *IssueGitHubResponse       `json:"github,omitempty"`
 }
 
 type IssueCommentResponse struct {
 	ID                string                       `json:"id"`
 	IssueID           string                       `json:"issue_id"`
+	Source            model.IssueSource            `json:"source"`
 	GitHubCommentID   int64                        `json:"github_comment_id"`
 	GitHubNodeID      string                       `json:"github_node_id"`
 	Body              string                       `json:"body"`
@@ -194,21 +220,25 @@ type issueMilestonePayload struct {
 
 func NewIssueService(
 	issueRepo *repository.IssueRepository,
+	gitHubMetaRepo *repository.IssueGitHubMetaRepository,
 	commentRepo *repository.IssueCommentRepository,
 	timelineRepo *repository.IssueTimelineRepository,
 	internalMetaRepo *repository.IssueInternalMetaRepository,
 	syncStateRepo *repository.IssueSyncStateRepository,
 	projectRepo *repository.ProjectRepository,
+	userRepo *repository.UserRepository,
 	cfg *config.Config,
 	logger *zap.Logger,
 ) *IssueService {
 	return &IssueService{
 		issueRepo:        issueRepo,
+		gitHubMetaRepo:   gitHubMetaRepo,
 		commentRepo:      commentRepo,
 		timelineRepo:     timelineRepo,
 		internalMetaRepo: internalMetaRepo,
 		syncStateRepo:    syncStateRepo,
 		projectRepo:      projectRepo,
+		userRepo:         userRepo,
 		cfg:              cfg,
 		logger:           logger,
 		newClient: func(token, owner, repo string) gitHubIssueClient {
@@ -216,6 +246,130 @@ func NewIssueService(
 		},
 		syncingProjectID: make(map[string]struct{}),
 	}
+}
+
+func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateInternalIssueRequest) (*IssueResponse, error) {
+	title := strings.TrimSpace(req.Title)
+	if title == "" || !model.IsValidIssueWorkflowStatus(req.WorkflowStatus) {
+		return nil, errs.ErrInvalidParams
+	}
+
+	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrUserNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	sequenceNumber, err := s.issueRepo.NextSequenceNumber(projectID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	now := time.Now().UTC()
+	issue := &model.Issue{
+		ID:              uuid.NewString(),
+		ProjectID:       projectID,
+		Source:          model.IssueSourceInternal,
+		SequenceNumber:  sequenceNumber,
+		State:           model.IssueStateOpen,
+		Title:           title,
+		Body:            req.Body,
+		AuthorUserID:    user.ID,
+		AuthorLogin:     user.Username,
+		AuthorAvatarURL: "",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	if err := s.issueRepo.Create(issue); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	if req.WorkflowStatus != "" {
+		if _, err := s.UpdateInternalMeta(issue.ID, userID, req.WorkflowStatus); err != nil {
+			return nil, err
+		}
+	}
+
+	stored, err := s.issueRepo.FindByID(issue.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	meta, err := s.loadInternalMeta(stored.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := toIssueResponse(*stored, meta)
+	return &resp, nil
+}
+
+func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error) {
+	if req.Title == nil && req.Body == nil && req.State == nil {
+		return nil, errs.ErrInvalidParams
+	}
+
+	issue, err := s.issueRepo.FindByID(issueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrIssueNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if _, err := s.projectRepo.FindByID(issue.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrNotOwner
+	}
+	if issue.Source != model.IssueSourceInternal {
+		return nil, errs.ErrIssueReadOnly
+	}
+
+	if req.Title != nil {
+		title := strings.TrimSpace(*req.Title)
+		if title == "" {
+			return nil, errs.ErrInvalidParams
+		}
+		issue.Title = title
+	}
+	if req.Body != nil {
+		issue.Body = *req.Body
+		issue.BodyHTML = ""
+	}
+	if req.State != nil {
+		if !isValidIssueState(*req.State) {
+			return nil, errs.ErrInvalidParams
+		}
+		issue.State = *req.State
+		if *req.State == model.IssueStateClosed {
+			now := time.Now().UTC()
+			issue.ClosedAt = &now
+		} else {
+			issue.ClosedAt = nil
+		}
+	}
+	issue.UpdatedAt = time.Now().UTC()
+
+	if err := s.issueRepo.Save(issue); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	meta, err := s.loadInternalMeta(issue.ID)
+	if err != nil {
+		return nil, err
+	}
+	resp := toIssueResponse(*issue, meta)
+	return &resp, nil
 }
 
 func (s *IssueService) List(projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
@@ -242,7 +396,7 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 		if current, ok := metaByIssueID[issue.ID]; ok {
 			meta = current
 		}
-		if !matchesIssueFilters(issue, meta, filters) {
+		if !matchesIssueFilters(issue, issue.GitHubMeta, meta, filters) {
 			continue
 		}
 		filtered = append(filtered, issue)
@@ -284,17 +438,21 @@ func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterO
 	milestoneSet := make(map[string]struct{})
 
 	for _, issue := range issues {
-		for _, label := range parseJSON[[]issueLabelPayload](issue.LabelsJSON) {
+		meta := issue.GitHubMeta
+		if meta == nil {
+			continue
+		}
+		for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
 			if label.Name != "" {
 				labelSet[label.Name] = struct{}{}
 			}
 		}
-		for _, assignee := range parseJSON[[]issueUserPayload](issue.AssigneesJSON) {
+		for _, assignee := range parseJSON[[]issueUserPayload](meta.AssigneesJSON) {
 			if assignee.Login != "" {
 				assigneeSet[assignee.Login] = struct{}{}
 			}
 		}
-		if milestone := parseJSON[*issueMilestonePayload](issue.MilestoneJSON); milestone != nil && milestone.Title != "" {
+		if milestone := parseJSON[*issueMilestonePayload](meta.MilestoneJSON); milestone != nil && milestone.Title != "" {
 			milestoneSet[milestone.Title] = struct{}{}
 		}
 	}
@@ -338,9 +496,9 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 		return nil, errs.ErrNotOwner
 	}
 
-	meta, err := s.internalMetaRepo.Get(issue.ID)
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, errs.ErrInternal
+	meta, err := s.loadInternalMeta(issue.ID)
+	if err != nil {
+		return nil, err
 	}
 
 	resp := toIssueResponse(*issue, meta)
@@ -384,10 +542,7 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 	meta.UpdatedAt = now
 
 	switch workflowStatus {
-	case "":
-		meta.StartedAt = nil
-		meta.CompletedAt = nil
-	case model.IssueWorkflowStatusTodo:
+	case "", model.IssueWorkflowStatusTodo:
 		meta.StartedAt = nil
 		meta.CompletedAt = nil
 	case model.IssueWorkflowStatusInProgress:
@@ -426,7 +581,6 @@ func (s *IssueService) ListComments(issueID, userID string, page, pageSize int) 
 		}
 		return nil, 0, errs.ErrNotOwner
 	}
-
 	comments, total, err := s.commentRepo.List(issueID, page, pageSize)
 	if err != nil {
 		return nil, 0, errs.ErrInternal
@@ -437,6 +591,69 @@ func (s *IssueService) ListComments(issueID, userID string, page, pageSize int) 
 		resp = append(resp, toIssueCommentResponse(comment))
 	}
 	return resp, total, nil
+}
+
+func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateInternalIssueCommentRequest) (*IssueCommentResponse, error) {
+	body := strings.TrimSpace(req.Body)
+	if body == "" {
+		return nil, errs.ErrInvalidParams
+	}
+
+	issue, err := s.issueRepo.FindByID(issueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrIssueNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if _, err := s.projectRepo.FindByID(issue.ProjectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrNotOwner
+	}
+	if issue.Source != model.IssueSourceInternal {
+		return nil, errs.ErrIssueReadOnly
+	}
+
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrUserNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	commentID, err := s.commentRepo.NextSyntheticCommentID(issueID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	now := time.Now().UTC()
+	comment := &model.IssueComment{
+		ID:              uuid.NewString(),
+		IssueID:         issueID,
+		Source:          model.IssueSourceInternal,
+		AuthorUserID:    userID,
+		GitHubCommentID: commentID,
+		Body:            req.Body,
+		BodyHTML:        "",
+		AuthorLogin:     user.Username,
+		AuthorAvatarURL: "",
+		GitHubCreatedAt: now,
+		GitHubUpdatedAt: now,
+	}
+
+	if err := s.commentRepo.Create(comment); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	issue.UpdatedAt = now
+	if err := s.issueRepo.Save(issue); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	resp := toIssueCommentResponse(*comment)
+	return &resp, nil
 }
 
 func (s *IssueService) ListTimeline(issueID, userID string, page, pageSize int) ([]IssueTimelineEventResponse, int64, error) {
@@ -452,6 +669,9 @@ func (s *IssueService) ListTimeline(issueID, userID string, page, pageSize int) 
 			return nil, 0, errs.ErrProjectNotFound
 		}
 		return nil, 0, errs.ErrNotOwner
+	}
+	if issue.Source != model.IssueSourceGitHub || issue.GitHubMeta == nil {
+		return []IssueTimelineEventResponse{}, 0, nil
 	}
 
 	events, total, err := s.timelineRepo.List(issueID, false, page, pageSize)
@@ -563,7 +783,7 @@ func (s *IssueService) syncProject(ctx context.Context, project *model.Project) 
 				continue
 			}
 
-			issue, syncErr := s.upsertIssue(project.ID, item)
+			issue, syncErr := s.upsertGitHubIssue(project.ID, item)
 			if syncErr != nil {
 				return failSync(syncErr)
 			}
@@ -620,22 +840,70 @@ func (s *IssueService) syncProject(ctx context.Context, project *model.Project) 
 	return resp, nil
 }
 
-func (s *IssueService) upsertIssue(projectID string, item *ghclient.Issue) (*model.Issue, error) {
+func (s *IssueService) upsertGitHubIssue(projectID string, item *ghclient.Issue) (*model.Issue, error) {
 	now := time.Now().UTC()
-	issue := &model.Issue{
-		ID:                uuid.NewString(),
+
+	var issue *model.Issue
+	meta, err := s.gitHubMetaRepo.FindByProjectAndGitHubID(projectID, item.GetID())
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errs.ErrInternal
+	}
+
+	if meta != nil {
+		issue, err = s.issueRepo.FindByID(meta.IssueID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrInternal
+		}
+	}
+
+	if issue == nil {
+		sequenceNumber, err := s.issueRepo.NextSequenceNumber(projectID)
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		issue = &model.Issue{
+			ID:             uuid.NewString(),
+			ProjectID:      projectID,
+			Source:         model.IssueSourceGitHub,
+			SequenceNumber: sequenceNumber,
+		}
+	}
+
+	issue.Source = model.IssueSourceGitHub
+	issue.State = model.IssueState(item.GetState())
+	issue.StateReason = item.GetStateReason()
+	issue.Title = item.GetTitle()
+	issue.Body = item.GetBody()
+	issue.BodyHTML = item.GetBodyHTML()
+	issue.AuthorUserID = ""
+	issue.AuthorLogin = item.GetUser().GetLogin()
+	issue.AuthorAvatarURL = item.GetUser().GetAvatarURL()
+	issue.CreatedAt = item.GetCreatedAt().UTC()
+	issue.UpdatedAt = item.GetUpdatedAt().UTC()
+	if closedAt := item.GetClosedAt(); !closedAt.IsZero() {
+		value := closedAt.UTC()
+		issue.ClosedAt = &value
+	} else {
+		issue.ClosedAt = nil
+	}
+
+	if meta == nil {
+		if err := s.issueRepo.Create(issue); err != nil {
+			return nil, errs.ErrInternal
+		}
+	} else {
+		if err := s.issueRepo.Save(issue); err != nil {
+			return nil, errs.ErrInternal
+		}
+	}
+
+	gitHubMeta := &model.IssueGitHubMeta{
+		IssueID:           issue.ID,
 		ProjectID:         projectID,
 		GitHubIssueID:     item.GetID(),
 		GitHubNodeID:      item.GetNodeID(),
 		Number:            item.GetNumber(),
-		State:             model.IssueState(item.GetState()),
-		StateReason:       item.GetStateReason(),
-		Title:             item.GetTitle(),
-		Body:              item.GetBody(),
-		BodyHTML:          item.GetBodyHTML(),
 		HTMLURL:           item.GetHTMLURL(),
-		AuthorLogin:       item.GetUser().GetLogin(),
-		AuthorAvatarURL:   item.GetUser().GetAvatarURL(),
 		AuthorAssociation: item.GetAuthorAssociation(),
 		AssigneesJSON:     toJSONString(mapUsers(item.Assignees)),
 		LabelsJSON:        toJSONString(mapLabels(item.Labels)),
@@ -648,20 +916,11 @@ func (s *IssueService) upsertIssue(projectID string, item *ghclient.Issue) (*mod
 		RawJSON:           toJSONString(item),
 	}
 
-	createdAt := item.GetCreatedAt().UTC()
-	updatedAt := item.GetUpdatedAt().UTC()
-	issue.GitHubCreatedAt = createdAt
-	issue.GitHubUpdatedAt = updatedAt
-	if closedAt := item.GetClosedAt(); !closedAt.IsZero() {
-		value := closedAt.UTC()
-		issue.ClosedAt = &value
-	}
-
-	if err := s.issueRepo.Upsert(issue); err != nil {
+	if err := s.gitHubMetaRepo.Upsert(gitHubMeta); err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	stored, err := s.issueRepo.FindByProjectAndGitHubID(projectID, item.GetID())
+	stored, err := s.issueRepo.FindByID(issue.ID)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -687,6 +946,7 @@ func (s *IssueService) syncComments(ctx context.Context, client gitHubIssueClien
 			comment := &model.IssueComment{
 				ID:                uuid.NewString(),
 				IssueID:           issue.ID,
+				Source:            model.IssueSourceGitHub,
 				GitHubCommentID:   item.GetID(),
 				GitHubNodeID:      item.GetNodeID(),
 				Body:              item.GetBody(),
@@ -793,42 +1053,83 @@ func (s *IssueService) endSync(projectID string) {
 	delete(s.syncingProjectID, projectID)
 }
 
-func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResponse {
-	assignees := parseJSON[[]issueUserPayload](issue.AssigneesJSON)
-	labels := parseJSON[[]issueLabelPayload](issue.LabelsJSON)
-	milestone := parseJSON[*issueMilestonePayload](issue.MilestoneJSON)
-	reactions := parseJSON[IssueReactionSummaryResponse](issue.ReactionsJSON)
+func (s *IssueService) loadInternalMeta(issueID string) (*model.IssueInternalMeta, error) {
+	meta, err := s.internalMetaRepo.Get(issueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, errs.ErrInternal
+	}
+	return meta, nil
+}
 
+func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResponse {
 	resp := IssueResponse{
-		ID:                issue.ID,
-		ProjectID:         issue.ProjectID,
-		GitHubIssueID:     issue.GitHubIssueID,
-		GitHubNodeID:      issue.GitHubNodeID,
-		Number:            issue.Number,
-		State:             issue.State,
-		StateReason:       issue.StateReason,
-		Title:             issue.Title,
-		Body:              issue.Body,
-		BodyHTML:          githubmedia.RewriteHTMLMediaSources(issue.BodyHTML),
-		HTMLURL:           issue.HTMLURL,
-		Author:            IssueActorResponse{Login: issue.AuthorLogin, AvatarURL: githubmedia.RewriteMediaURL(issue.AuthorAvatarURL)},
-		AuthorAssociation: issue.AuthorAssociation,
+		ID:             issue.ID,
+		ProjectID:      issue.ProjectID,
+		Source:         issue.Source,
+		SequenceNumber: issue.SequenceNumber,
+		Reference:      buildIssueReference(issue),
+		State:          issue.State,
+		StateReason:    issue.StateReason,
+		Title:          issue.Title,
+		Body:           issue.Body,
+		BodyHTML:       githubmedia.RewriteHTMLMediaSources(issue.BodyHTML),
+		Author: IssueActorResponse{
+			Login:     issue.AuthorLogin,
+			AvatarURL: githubmedia.RewriteMediaURL(issue.AuthorAvatarURL),
+		},
+		CreatedAt:    formatTime(issue.CreatedAt),
+		UpdatedAt:    formatTime(issue.UpdatedAt),
+		InternalMeta: toIssueInternalMetaResponse(meta),
+	}
+	if issue.ClosedAt != nil {
+		value := formatTime(issue.ClosedAt.UTC())
+		resp.ClosedAt = &value
+	}
+	if issue.GitHubMeta != nil {
+		resp.GitHub = toIssueGitHubResponse(issue.GitHubMeta)
+	}
+	return resp
+}
+
+func toIssueGitHubResponse(meta *model.IssueGitHubMeta) *IssueGitHubResponse {
+	if meta == nil {
+		return nil
+	}
+
+	assignees := parseJSON[[]issueUserPayload](meta.AssigneesJSON)
+	labels := parseJSON[[]issueLabelPayload](meta.LabelsJSON)
+	milestone := parseJSON[*issueMilestonePayload](meta.MilestoneJSON)
+	reactions := parseJSON[IssueReactionSummaryResponse](meta.ReactionsJSON)
+
+	resp := &IssueGitHubResponse{
+		GitHubIssueID:     meta.GitHubIssueID,
+		GitHubNodeID:      meta.GitHubNodeID,
+		Number:            meta.Number,
+		HTMLURL:           meta.HTMLURL,
+		AuthorAssociation: meta.AuthorAssociation,
 		Assignees:         make([]IssueActorResponse, 0, len(assignees)),
 		Labels:            make([]IssueLabelResponse, 0, len(labels)),
 		Reactions:         reactions,
-		CommentsCount:     issue.CommentsCount,
-		Locked:            issue.Locked,
-		ActiveLockReason:  issue.ActiveLockReason,
-		CreatedAt:         formatTime(issue.GitHubCreatedAt),
-		UpdatedAt:         formatTime(issue.GitHubUpdatedAt),
-		SyncedAt:          formatTime(issue.SyncedAt),
-		InternalMeta:      toIssueInternalMetaResponse(meta),
+		CommentsCount:     meta.CommentsCount,
+		Locked:            meta.Locked,
+		ActiveLockReason:  meta.ActiveLockReason,
+		SyncedAt:          formatTime(meta.SyncedAt),
 	}
 	for _, assignee := range assignees {
-		resp.Assignees = append(resp.Assignees, IssueActorResponse{Login: assignee.Login, AvatarURL: githubmedia.RewriteMediaURL(assignee.AvatarURL)})
+		resp.Assignees = append(resp.Assignees, IssueActorResponse{
+			Login:     assignee.Login,
+			AvatarURL: githubmedia.RewriteMediaURL(assignee.AvatarURL),
+		})
 	}
 	for _, label := range labels {
-		resp.Labels = append(resp.Labels, IssueLabelResponse{Name: label.Name, Color: label.Color, Description: label.Description})
+		resp.Labels = append(resp.Labels, IssueLabelResponse{
+			Name:        label.Name,
+			Color:       label.Color,
+			Description: label.Description,
+		})
 	}
 	if milestone != nil {
 		resp.Milestone = &IssueMilestoneResponse{
@@ -837,10 +1138,6 @@ func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta) IssueResp
 			State:       milestone.State,
 			Description: milestone.Description,
 		}
-	}
-	if issue.ClosedAt != nil {
-		value := formatTime(issue.ClosedAt.UTC())
-		resp.ClosedAt = &value
 	}
 	return resp
 }
@@ -916,6 +1213,7 @@ func toIssueCommentResponse(comment model.IssueComment) IssueCommentResponse {
 	return IssueCommentResponse{
 		ID:                comment.ID,
 		IssueID:           comment.IssueID,
+		Source:            comment.Source,
 		GitHubCommentID:   comment.GitHubCommentID,
 		GitHubNodeID:      comment.GitHubNodeID,
 		Body:              comment.Body,
@@ -1079,6 +1377,13 @@ func buildTimelineEventKey(item *ghclient.TimelineEvent) string {
 	return "fallback:" + strings.Join(parts, "|")
 }
 
+func buildIssueReference(issue model.Issue) string {
+	if issue.Source == model.IssueSourceGitHub && issue.GitHubMeta != nil {
+		return fmt.Sprintf("GH-%d", issue.GitHubMeta.Number)
+	}
+	return fmt.Sprintf("INT-%d", issue.SequenceNumber)
+}
+
 func toJSONString(v any) string {
 	if v == nil {
 		return ""
@@ -1127,6 +1432,15 @@ func parseIssueNumberQuery(query string) (int, bool) {
 	return num, err == nil
 }
 
+func isValidIssueState(state model.IssueState) bool {
+	switch state {
+	case model.IssueStateOpen, model.IssueStateClosed:
+		return true
+	default:
+		return false
+	}
+}
+
 func sortedKeys(values map[string]struct{}) []string {
 	items := make([]string, 0, len(values))
 	for value := range values {
@@ -1136,54 +1450,68 @@ func sortedKeys(values map[string]struct{}) []string {
 	return items
 }
 
+func issueCommentCount(issue model.Issue) int {
+	if issue.GitHubMeta == nil {
+		return 0
+	}
+	return issue.GitHubMeta.CommentsCount
+}
+
+func issueSortNumber(issue model.Issue) int {
+	if issue.Source == model.IssueSourceGitHub && issue.GitHubMeta != nil {
+		return issue.GitHubMeta.Number
+	}
+	return issue.SequenceNumber
+}
+
 func sortIssues(items []model.Issue, sortKey string) {
 	switch sortKey {
 	case "updated_asc":
 		sort.Slice(items, func(i, j int) bool {
-			if items[i].GitHubUpdatedAt.Equal(items[j].GitHubUpdatedAt) {
-				return items[i].Number < items[j].Number
+			if items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
+				return issueSortNumber(items[i]) < issueSortNumber(items[j])
 			}
-			return items[i].GitHubUpdatedAt.Before(items[j].GitHubUpdatedAt)
+			return items[i].UpdatedAt.Before(items[j].UpdatedAt)
 		})
 	case "created_desc":
 		sort.Slice(items, func(i, j int) bool {
-			if items[i].GitHubCreatedAt.Equal(items[j].GitHubCreatedAt) {
-				return items[i].Number > items[j].Number
+			if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+				return issueSortNumber(items[i]) > issueSortNumber(items[j])
 			}
-			return items[i].GitHubCreatedAt.After(items[j].GitHubCreatedAt)
+			return items[i].CreatedAt.After(items[j].CreatedAt)
 		})
 	case "created_asc":
 		sort.Slice(items, func(i, j int) bool {
-			if items[i].GitHubCreatedAt.Equal(items[j].GitHubCreatedAt) {
-				return items[i].Number < items[j].Number
+			if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+				return issueSortNumber(items[i]) < issueSortNumber(items[j])
 			}
-			return items[i].GitHubCreatedAt.Before(items[j].GitHubCreatedAt)
+			return items[i].CreatedAt.Before(items[j].CreatedAt)
 		})
 	case "comments_desc":
 		sort.Slice(items, func(i, j int) bool {
-			if items[i].CommentsCount == items[j].CommentsCount {
-				return items[i].GitHubUpdatedAt.After(items[j].GitHubUpdatedAt)
+			if issueCommentCount(items[i]) == issueCommentCount(items[j]) {
+				return items[i].UpdatedAt.After(items[j].UpdatedAt)
 			}
-			return items[i].CommentsCount > items[j].CommentsCount
+			return issueCommentCount(items[i]) > issueCommentCount(items[j])
 		})
 	case "comments_asc":
 		sort.Slice(items, func(i, j int) bool {
-			if items[i].CommentsCount == items[j].CommentsCount {
-				return items[i].GitHubUpdatedAt.Before(items[j].GitHubUpdatedAt)
+			if issueCommentCount(items[i]) == issueCommentCount(items[j]) {
+				return items[i].UpdatedAt.Before(items[j].UpdatedAt)
 			}
-			return items[i].CommentsCount < items[j].CommentsCount
+			return issueCommentCount(items[i]) < issueCommentCount(items[j])
 		})
 	default:
 		sort.Slice(items, func(i, j int) bool {
-			if items[i].GitHubUpdatedAt.Equal(items[j].GitHubUpdatedAt) {
-				return items[i].Number > items[j].Number
+			if items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
+				return issueSortNumber(items[i]) > issueSortNumber(items[j])
 			}
-			return items[i].GitHubUpdatedAt.After(items[j].GitHubUpdatedAt)
+			return items[i].UpdatedAt.After(items[j].UpdatedAt)
 		})
 	}
 }
 
-func matchesIssueFilters(issue model.Issue, meta *model.IssueInternalMeta, filters IssueListFilters) bool {
+func matchesIssueFilters(issue model.Issue, gitHubMeta *model.IssueGitHubMeta, meta *model.IssueInternalMeta, filters IssueListFilters) bool {
 	if filters.State != "" && string(issue.State) != filters.State {
 		return false
 	}
@@ -1205,9 +1533,15 @@ func matchesIssueFilters(issue model.Issue, meta *model.IssueInternalMeta, filte
 		queryLower := strings.ToLower(query)
 		matches := strings.Contains(strings.ToLower(issue.Title), queryLower) ||
 			strings.Contains(strings.ToLower(issue.Body), queryLower) ||
-			strings.Contains(strings.ToLower(issue.AuthorLogin), queryLower)
-		if num, ok := parseIssueNumberQuery(query); ok && issue.Number == num {
-			matches = true
+			strings.Contains(strings.ToLower(issue.AuthorLogin), queryLower) ||
+			strings.Contains(strings.ToLower(buildIssueReference(issue)), queryLower)
+		if num, ok := parseIssueNumberQuery(query); ok {
+			if issue.SequenceNumber == num {
+				matches = true
+			}
+			if gitHubMeta != nil && gitHubMeta.Number == num {
+				matches = true
+			}
 		}
 		if !matches {
 			return false
@@ -1215,8 +1549,11 @@ func matchesIssueFilters(issue model.Issue, meta *model.IssueInternalMeta, filte
 	}
 
 	if filters.Label != "" {
+		if gitHubMeta == nil {
+			return false
+		}
 		matched := false
-		for _, label := range parseJSON[[]issueLabelPayload](issue.LabelsJSON) {
+		for _, label := range parseJSON[[]issueLabelPayload](gitHubMeta.LabelsJSON) {
 			if strings.EqualFold(label.Name, filters.Label) {
 				matched = true
 				break
@@ -1228,8 +1565,11 @@ func matchesIssueFilters(issue model.Issue, meta *model.IssueInternalMeta, filte
 	}
 
 	if filters.Assignee != "" {
+		if gitHubMeta == nil {
+			return false
+		}
 		matched := false
-		for _, assignee := range parseJSON[[]issueUserPayload](issue.AssigneesJSON) {
+		for _, assignee := range parseJSON[[]issueUserPayload](gitHubMeta.AssigneesJSON) {
 			if strings.EqualFold(assignee.Login, filters.Assignee) {
 				matched = true
 				break
@@ -1241,7 +1581,10 @@ func matchesIssueFilters(issue model.Issue, meta *model.IssueInternalMeta, filte
 	}
 
 	if filters.Milestone != "" {
-		milestone := parseJSON[*issueMilestonePayload](issue.MilestoneJSON)
+		if gitHubMeta == nil {
+			return false
+		}
+		milestone := parseJSON[*issueMilestonePayload](gitHubMeta.MilestoneJSON)
 		if milestone == nil || !strings.EqualFold(milestone.Title, filters.Milestone) {
 			return false
 		}

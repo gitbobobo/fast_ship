@@ -305,6 +305,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.Project{},
 		&model.Version{},
 		&model.Issue{},
+		&model.IssueGitHubMeta{},
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
@@ -317,8 +318,9 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_number ON issues(project_id, number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_github_issue ON issues(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_sequence ON issues(project_id, sequence_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_project_github_issue ON issue_github_meta(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
@@ -343,6 +345,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
+	issueGitHubMetaRepo := repository.NewIssueGitHubMetaRepository(db)
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
@@ -354,7 +357,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
-	issueService := service.NewIssueService(issueRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueSyncStateRepo, projectRepo, userRepo, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))

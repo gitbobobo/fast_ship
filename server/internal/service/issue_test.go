@@ -96,7 +96,7 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 	if total != 1 || len(issues) != 1 {
 		t.Fatalf("expected 1 synced issue, got total=%d len=%d", total, len(issues))
 	}
-	if issues[0].Title != "Crash on launch" || issues[0].Labels[0].Name != "bug" {
+	if issues[0].Title != "Crash on launch" || issues[0].GitHub == nil || issues[0].GitHub.Labels[0].Name != "bug" {
 		t.Fatalf("unexpected issue payload: %+v", issues[0])
 	}
 	if issues[0].BodyHTML != "<p>App crashes on <strong>startup</strong></p>" {
@@ -230,5 +230,113 @@ func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
 	}
 	if total != 0 || len(items) != 0 {
 		t.Fatalf("expected no unset issues, got total=%d len=%d", total, len(items))
+	}
+}
+
+func TestIssueServiceCreateInternalIssue_CreatesLocalIssue(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title:          "补充发布检查",
+		Body:           "## 检查项\n\n- 校验版本说明",
+		WorkflowStatus: model.IssueWorkflowStatusTodo,
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	if created.Source != model.IssueSourceInternal {
+		t.Fatalf("expected internal source, got %+v", created)
+	}
+	if created.Reference != "INT-1" {
+		t.Fatalf("expected INT-1 reference, got %+v", created)
+	}
+	if created.GitHub != nil {
+		t.Fatalf("expected no github payload, got %+v", created.GitHub)
+	}
+	if created.InternalMeta == nil || created.InternalMeta.WorkflowStatus != model.IssueWorkflowStatusTodo {
+		t.Fatalf("expected todo workflow meta, got %+v", created.InternalMeta)
+	}
+
+	items, total, err := svc.issueService.List(project.ID, user.ID, IssueListFilters{}, 1, 20)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("expected one issue after create, got total=%d len=%d", total, len(items))
+	}
+	if items[0].Author.Login != user.Username {
+		t.Fatalf("expected author to use username, got %+v", items[0].Author)
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_UpdatesBodyAndState(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  "old body",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	title := "更新后的标题"
+	body := "new body"
+	state := model.IssueStateClosed
+	updated, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+		Title: &title,
+		Body:  &body,
+		State: &state,
+	})
+	if err != nil {
+		t.Fatalf("update internal issue: %v", err)
+	}
+
+	if updated.Title != title || updated.Body != body || updated.State != model.IssueStateClosed {
+		t.Fatalf("unexpected updated issue: %+v", updated)
+	}
+	if updated.ClosedAt == nil {
+		t.Fatalf("expected closed_at to be set")
+	}
+}
+
+func TestIssueServiceCreateInternalComment_AddsCommentToInternalIssue(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  "issue body",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	comment, err := svc.issueService.CreateInternalComment(created.ID, user.ID, CreateInternalIssueCommentRequest{
+		Body: "第一条内部评论",
+	})
+	if err != nil {
+		t.Fatalf("create internal comment: %v", err)
+	}
+
+	if comment.Source != model.IssueSourceInternal || comment.Author.Login != user.Username {
+		t.Fatalf("unexpected created comment: %+v", comment)
+	}
+
+	comments, total, err := svc.issueService.ListComments(created.ID, user.ID, 1, 20)
+	if err != nil {
+		t.Fatalf("list comments: %v", err)
+	}
+	if total != 1 || len(comments) != 1 {
+		t.Fatalf("expected one internal comment, got total=%d len=%d", total, len(comments))
+	}
+	if comments[0].Body != "第一条内部评论" {
+		t.Fatalf("unexpected internal comment payload: %+v", comments[0])
 	}
 }

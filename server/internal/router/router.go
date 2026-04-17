@@ -74,8 +74,11 @@ func Setup(
 
 		issueWrite := api.Group("/projects/:id/issues", middleware.RequireJWT(cfg, authService))
 		{
+			issueWrite.POST("", issueHandler.Create)
 			issueWrite.POST("/sync", issueHandler.Sync)
 		}
+		api.PUT("/issues/:iid", middleware.RequireJWT(cfg, authService), issueHandler.Update)
+		api.POST("/issues/:iid/comments", middleware.RequireJWT(cfg, authService), issueHandler.CreateComment)
 		api.PUT("/issues/:iid/internal-meta", middleware.RequireJWT(cfg, authService), issueHandler.UpdateInternalMeta)
 
 		// JWT 必须 — 版本删除和发货

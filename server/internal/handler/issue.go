@@ -15,12 +15,74 @@ type IssueHandler struct {
 	issueService *service.IssueService
 }
 
+type createInternalIssueRequest struct {
+	Title          string                    `json:"title"`
+	Body           string                    `json:"body"`
+	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
+}
+
+type updateInternalIssueRequest struct {
+	Title *string           `json:"title"`
+	Body  *string           `json:"body"`
+	State *model.IssueState `json:"state"`
+}
+
+type createInternalIssueCommentRequest struct {
+	Body string `json:"body"`
+}
+
 type updateIssueInternalMetaRequest struct {
 	WorkflowStatus *model.IssueWorkflowStatus `json:"workflow_status"`
 }
 
 func NewIssueHandler(issueService *service.IssueService) *IssueHandler {
 	return &IssueHandler{issueService: issueService}
+}
+
+func (h *IssueHandler) Create(c *gin.Context) {
+	projectID := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	var req createInternalIssueRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.issueService.CreateInternalIssue(projectID, userID, service.CreateInternalIssueRequest{
+		Title:          req.Title,
+		Body:           req.Body,
+		WorkflowStatus: req.WorkflowStatus,
+	})
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+func (h *IssueHandler) Update(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	var req updateInternalIssueRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.issueService.UpdateInternalIssue(issueID, userID, service.UpdateInternalIssueRequest{
+		Title: req.Title,
+		Body:  req.Body,
+		State: req.State,
+	})
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
 }
 
 func (h *IssueHandler) List(c *gin.Context) {
@@ -100,6 +162,27 @@ func (h *IssueHandler) ListComments(c *gin.Context) {
 	}
 
 	response.SuccessPaginated(c, items, total, page, pageSize)
+}
+
+func (h *IssueHandler) CreateComment(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	var req createInternalIssueCommentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.issueService.CreateInternalComment(issueID, userID, service.CreateInternalIssueCommentRequest{
+		Body: req.Body,
+	})
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
 }
 
 func (h *IssueHandler) ListTimeline(c *gin.Context) {
