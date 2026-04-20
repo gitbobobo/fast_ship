@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import remarkGfm from "remark-gfm";
 import { useAuthStore } from "@/lib/store/auth-store";
 import {
   rewriteGitHubMediaHtml,
@@ -80,6 +81,7 @@ export function GitHubContent({
               <source {...props} src={toProtectedMediaUrl(typeof src === "string" ? src : undefined, token)} />
             ),
           }}
+          remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
         >
           {markdown}
