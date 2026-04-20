@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import {
   ArrowLeft,
+  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -31,6 +32,7 @@ import {
   Unlock,
   User,
   Wand2,
+  X,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { Header } from "@/components/layout/header";
@@ -1002,14 +1004,18 @@ export default function IssueDetailPage() {
                     复制 GitHub 深链接
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={handleSync}
-                  disabled={syncIssues.isPending}
-                >
-                  <RefreshCw className={cn("h-4 w-4", syncIssues.isPending && "animate-spin")} />
-                  {syncIssues.isPending ? "同步中..." : "重新同步"}
-                </DropdownMenuItem>
+                {issue.source === "github" && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onClick={handleSync}
+                      disabled={syncIssues.isPending}
+                    >
+                      <RefreshCw className={cn("h-4 w-4", syncIssues.isPending && "animate-spin")} />
+                      {syncIssues.isPending ? "同步中..." : "重新同步"}
+                    </DropdownMenuItem>
+                  </>
+                )}
                 {issue.github?.html_url && (
                   <>
                     <DropdownMenuSeparator />
@@ -1391,21 +1397,27 @@ export default function IssueDetailPage() {
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold">任务清单</h3>
                   {isChecklistEditing ? (
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1">
                       <Button
                         variant="ghost"
-                        size="sm"
+                        size="icon-sm"
+                        aria-label="取消编辑"
                         onClick={handleChecklistCancelEdit}
                         disabled={replaceChecklist.isPending}
                       >
-                        取消
+                        <X className="h-3.5 w-3.5" />
                       </Button>
                       <Button
-                        size="sm"
+                        size="icon-sm"
+                        aria-label="保存任务清单"
                         onClick={() => void handleChecklistSave()}
                         disabled={!isChecklistDirty || replaceChecklist.isPending}
                       >
-                        {replaceChecklist.isPending ? "保存中..." : "保存"}
+                        {replaceChecklist.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Check className="h-3.5 w-3.5" />
+                        )}
                       </Button>
                     </div>
                   ) : (
@@ -1418,9 +1430,13 @@ export default function IssueDetailPage() {
                       >
                         <Sparkles className="h-3.5 w-3.5" />
                       </Button>
-                      <Button variant="ghost" size="sm" onClick={() => setIsChecklistEditing(true)}>
-                        <Pencil className="mr-1.5 h-3.5 w-3.5" />
-                        编辑
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="编辑任务清单"
+                        onClick={() => setIsChecklistEditing(true)}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
                       </Button>
                     </div>
                   )}
