@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
 )
@@ -134,9 +135,24 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 }
 
 type fakeIssueGitHubClient struct {
-	issues   []*ghclient.Issue
-	comments map[int][]*ghclient.IssueComment
-	timeline map[int][]*ghclient.TimelineEvent
+	issues             []*ghclient.Issue
+	comments           map[int][]*ghclient.IssueComment
+	timeline           map[int][]*ghclient.TimelineEvent
+	createdComment     *ghclient.IssueComment
+	updatedIssue       *ghclient.Issue
+	createCommentCalls []fakeCreateCommentCall
+	updateIssueCalls   []fakeUpdateIssueCall
+}
+
+type fakeCreateCommentCall struct {
+	IssueNumber int
+	Body        string
+}
+
+type fakeUpdateIssueCall struct {
+	IssueNumber int
+	State       string
+	StateReason string
 }
 
 func (f *fakeIssueGitHubClient) ValidateRepository(context.Context) error {
@@ -153,6 +169,26 @@ func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber
 
 func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber, _, _ int) ([]*ghclient.TimelineEvent, *gh.Response, error) {
 	return f.timeline[issueNumber], &gh.Response{NextPage: 0}, nil
+}
+
+func (f *fakeIssueGitHubClient) CreateIssueComment(_ context.Context, issueNumber int, body string) (*ghclient.IssueComment, error) {
+	f.createCommentCalls = append(f.createCommentCalls, fakeCreateCommentCall{
+		IssueNumber: issueNumber,
+		Body:        body,
+	})
+	return f.createdComment, nil
+}
+
+func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error) {
+	call := fakeUpdateIssueCall{IssueNumber: issueNumber}
+	if req.State != nil {
+		call.State = *req.State
+	}
+	if req.StateReason != nil {
+		call.StateReason = *req.StateReason
+	}
+	f.updateIssueCalls = append(f.updateIssueCalls, call)
+	return f.updatedIssue, nil
 }
 
 func intPtr(v int) *int {
@@ -611,5 +647,174 @@ func TestIssueServiceCreateInternalComment_AddsCommentToInternalIssue(t *testing
 	}
 	if comments[0].Body != "第一条内部评论" {
 		t.Fatalf("unexpected internal comment payload: %+v", comments[0])
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	closedAt := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	fake := &fakeIssueGitHubClient{
+		updatedIssue: &ghclient.Issue{
+			Issue: gh.Issue{
+				ID:          int64Ptr(1001),
+				NodeID:      stringPtr("I_kw_test"),
+				Number:      intPtr(42),
+				State:       stringPtr("closed"),
+				StateReason: stringPtr("completed"),
+				Title:       stringPtr("Crash on launch"),
+				Body:        stringPtr("App crashes"),
+				HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
+				User: &gh.User{
+					Login:     stringPtr("alice"),
+					AvatarURL: stringPtr("https://avatars.example/alice.png"),
+				},
+				CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+				UpdatedAt: &gh.Timestamp{Time: closedAt},
+				ClosedAt:  &gh.Timestamp{Time: closedAt},
+			},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {
+				{
+					Timeline: gh.Timeline{
+						ID:        int64Ptr(701),
+						Event:     stringPtr("closed"),
+						Actor:     &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")},
+						CreatedAt: &gh.Timestamp{Time: closedAt},
+					},
+				},
+			},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	state := model.IssueStateClosed
+	reason := "completed"
+	updated, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		State:       &state,
+		StateReason: &reason,
+	})
+	if err != nil {
+		t.Fatalf("update github issue: %v", err)
+	}
+
+	if len(fake.updateIssueCalls) != 1 {
+		t.Fatalf("expected one github update call, got %d", len(fake.updateIssueCalls))
+	}
+	if fake.updateIssueCalls[0].IssueNumber != 42 || fake.updateIssueCalls[0].State != "closed" || fake.updateIssueCalls[0].StateReason != "completed" {
+		t.Fatalf("unexpected update call: %+v", fake.updateIssueCalls[0])
+	}
+	if updated.State != model.IssueStateClosed || updated.StateReason != "completed" || updated.ClosedAt == nil {
+		t.Fatalf("unexpected updated issue payload: %+v", updated)
+	}
+
+	events, total, err := svc.issueService.ListTimeline(issue.ID, user.ID, 1, 20)
+	if err != nil {
+		t.Fatalf("list timeline after github state update: %v", err)
+	}
+	if total != 1 || len(events) != 1 {
+		t.Fatalf("expected one synced timeline event, got total=%d len=%d", total, len(events))
+	}
+	if events[0].EventType != "closed" || events[0].Summary != "关闭了问题" {
+		t.Fatalf("unexpected timeline event payload: %+v", events[0])
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubState(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	fake := &fakeIssueGitHubClient{}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	state := model.IssueState("archived")
+	if _, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		State: &state,
+	}); err == nil {
+		t.Fatalf("expected invalid params error, got nil")
+	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("expected invalid params error, got %v", err)
+	}
+	if len(fake.updateIssueCalls) != 0 {
+		t.Fatalf("expected github update to be skipped, got %d calls", len(fake.updateIssueCalls))
+	}
+}
+
+func TestIssueServiceCreateInternalComment_WritesGitHubCommentBack(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	commentTime := time.Date(2026, 4, 20, 11, 0, 0, 0, time.UTC)
+	fake := &fakeIssueGitHubClient{
+		createdComment: &ghclient.IssueComment{
+			IssueComment: gh.IssueComment{
+				ID:      int64Ptr(501),
+				NodeID:  stringPtr("IC_kw_test"),
+				Body:    stringPtr("已在 GitHub 回复"),
+				HTMLURL: stringPtr("https://github.com/owner/repo/issues/42#issuecomment-501"),
+				User: &gh.User{
+					Login:     stringPtr("alice"),
+					AvatarURL: stringPtr("https://avatars.example/alice.png"),
+				},
+				CreatedAt: &gh.Timestamp{Time: commentTime},
+				UpdatedAt: &gh.Timestamp{Time: commentTime},
+			},
+			BodyHTML: stringPtr("<p>已在 <strong>GitHub</strong> 回复</p>"),
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	comment, err := svc.issueService.CreateInternalComment(issue.ID, user.ID, CreateInternalIssueCommentRequest{
+		Body: "已在 GitHub 回复",
+	})
+	if err != nil {
+		t.Fatalf("create github comment: %v", err)
+	}
+
+	if len(fake.createCommentCalls) != 1 {
+		t.Fatalf("expected one github comment call, got %d", len(fake.createCommentCalls))
+	}
+	if fake.createCommentCalls[0].IssueNumber != 42 || fake.createCommentCalls[0].Body != "已在 GitHub 回复" {
+		t.Fatalf("unexpected github comment call: %+v", fake.createCommentCalls[0])
+	}
+	if comment.Source != model.IssueSourceGitHub || comment.GitHubCommentID != 501 || comment.BodyHTML != "<p>已在 <strong>GitHub</strong> 回复</p>" {
+		t.Fatalf("unexpected created comment: %+v", comment)
+	}
+
+	comments, total, err := svc.issueService.ListComments(issue.ID, user.ID, 1, 20)
+	if err != nil {
+		t.Fatalf("list comments: %v", err)
+	}
+	if total != 1 || len(comments) != 1 {
+		t.Fatalf("expected one github comment, got total=%d len=%d", total, len(comments))
 	}
 }

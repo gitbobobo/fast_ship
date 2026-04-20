@@ -46,6 +46,11 @@ func (c *IssueComment) GetBodyHTML() string {
 	return *c.BodyHTML
 }
 
+type UpdateIssueRequest struct {
+	State       *string `json:"state,omitempty"`
+	StateReason *string `json:"state_reason,omitempty"`
+}
+
 func NewClient(token, owner, repo string) *Client {
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	tc := oauth2.NewClient(context.Background(), ts)
@@ -120,14 +125,24 @@ func (c *Client) ListIssueComments(ctx context.Context, issueNumber, page, perPa
 }
 
 type TimelineIssueType struct {
-	ID    int64  `json:"id,omitempty"`
+	ID     int64  `json:"id,omitempty"`
 	NodeID string `json:"node_id,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Color string `json:"color,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Color  string `json:"color,omitempty"`
 }
 
-func (t *TimelineIssueType) GetName() string  { if t == nil { return "" }; return t.Name }
-func (t *TimelineIssueType) GetColor() string { if t == nil { return "" }; return t.Color }
+func (t *TimelineIssueType) GetName() string {
+	if t == nil {
+		return ""
+	}
+	return t.Name
+}
+func (t *TimelineIssueType) GetColor() string {
+	if t == nil {
+		return ""
+	}
+	return t.Color
+}
 
 type TimelineEvent struct {
 	gh.Timeline
@@ -161,6 +176,37 @@ func (c *Client) ListIssueTimeline(ctx context.Context, issueNumber, page, perPa
 		return nil, resp, err
 	}
 	return events, resp, nil
+}
+
+func (c *Client) CreateIssueComment(ctx context.Context, issueNumber int, body string) (*IssueComment, error) {
+	payload := map[string]string{"body": body}
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments", c.owner, c.repo, issueNumber)
+	req, err := c.client.NewRequest("POST", path, payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", mediaTypeFullJSON)
+
+	var comment IssueComment
+	if _, err := c.client.Do(ctx, req, &comment); err != nil {
+		return nil, err
+	}
+	return &comment, nil
+}
+
+func (c *Client) UpdateIssue(ctx context.Context, issueNumber int, payload UpdateIssueRequest) (*Issue, error) {
+	path := fmt.Sprintf("repos/%s/%s/issues/%d", c.owner, c.repo, issueNumber)
+	req, err := c.client.NewRequest("PATCH", path, payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", mediaTypeFullJSON)
+
+	var issue Issue
+	if _, err := c.client.Do(ctx, req, &issue); err != nil {
+		return nil, err
+	}
+	return &issue, nil
 }
 
 // CreateTag 创建 Git Tag（如果不存在）

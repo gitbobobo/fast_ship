@@ -576,6 +576,84 @@ describe("Issue pages", () => {
     expect(toast.success).toHaveBeenCalledWith("已复制 GitHub 深链接");
   });
 
+  it("writes GitHub comments from the issue detail page", async () => {
+    mockIssueDetailData();
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        id: "comment-2",
+      },
+    });
+    vi.mocked(useCreateIssueComment).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useCreateIssueComment>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.type(screen.getByPlaceholderText("使用 Markdown 输入评论内容"), "需要补充日志");
+    await user.click(screen.getByRole("button", { name: "发布评论" }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({ body: "需要补充日志" }));
+    expect(toast.success).toHaveBeenCalledWith("评论已发布");
+  });
+
+  it("moves internal issue actions into the more menu", async () => {
+    const internalIssue = buildInternalIssue();
+    vi.mocked(useIssues).mockReturnValue({
+      data: {
+        items: [internalIssue],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssues>);
+    vi.mocked(useIssue).mockReturnValue({
+      data: internalIssue,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/internal-issue-1",
+    });
+
+    expect(screen.queryByRole("button", { name: "编辑问题" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "关闭问题" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    expect(screen.getByRole("menuitem", { name: "编辑问题" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "关闭问题" })).toBeInTheDocument();
+  });
+
+  it("closes a GitHub issue from the more menu", async () => {
+    mockIssueDetailData();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        ...buildGitHubIssue({ state: "closed" }),
+      },
+    });
+    vi.mocked(useUpdateIssue).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "关闭问题" }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({ state: "closed" }));
+    expect(toast.success).toHaveBeenCalledWith("问题已关闭");
+  });
+
   it("supports direct comment anchors in unified timeline", async () => {
     mockIssueDetailData();
 

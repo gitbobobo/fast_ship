@@ -34,6 +34,7 @@ interface UpdateInternalIssueRequest {
   title?: string;
   body?: string;
   state?: "open" | "closed";
+  state_reason?: "completed" | "not_planned" | "reopened";
 }
 
 interface CreateInternalIssueCommentRequest {

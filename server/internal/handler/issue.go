@@ -23,9 +23,10 @@ type createInternalIssueRequest struct {
 }
 
 type updateInternalIssueRequest struct {
-	Title *string           `json:"title"`
-	Body  *string           `json:"body"`
-	State *model.IssueState `json:"state"`
+	Title       *string           `json:"title"`
+	Body        *string           `json:"body"`
+	State       *model.IssueState `json:"state"`
+	StateReason *string           `json:"state_reason"`
 }
 
 type createInternalIssueCommentRequest struct {
@@ -78,9 +79,10 @@ func (h *IssueHandler) Update(c *gin.Context) {
 	}
 
 	result, err := h.issueService.UpdateInternalIssue(issueID, userID, service.UpdateInternalIssueRequest{
-		Title: req.Title,
-		Body:  req.Body,
-		State: req.State,
+		Title:       req.Title,
+		Body:        req.Body,
+		State:       req.State,
+		StateReason: req.StateReason,
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)

@@ -880,7 +880,7 @@ export default function IssueDetailPage() {
     }
   };
 
-  const handleToggleInternalIssueState = async () => {
+  const handleToggleIssueState = async () => {
     if (!issue) {
       return;
     }
@@ -894,7 +894,7 @@ export default function IssueDetailPage() {
     }
   };
 
-  const handleCreateInternalComment = async () => {
+  const handleCreateComment = async () => {
     if (!commentDraft.trim()) {
       toast.error("请输入评论内容");
       return;
@@ -994,6 +994,27 @@ export default function IssueDetailPage() {
                 }
               />
               <DropdownMenuContent align="end" className="w-44">
+                {isInternalIssue && (
+                  <DropdownMenuItem
+                    onClick={() =>
+                      navigate({
+                        pathname: `/projects/${id}/issues/${iid}/edit`,
+                        search: location.search,
+                      })
+                    }
+                  >
+                    <Pencil className="h-4 w-4" />
+                    编辑问题
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  onClick={() => void handleToggleIssueState()}
+                  disabled={updateIssue.isPending}
+                >
+                  {issue.state === "open" ? <CheckCircle2 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}
+                  {issue.state === "open" ? "关闭问题" : "重新打开"}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => void handleCopyCurrentViewLink()}>
                   <Copy className="h-4 w-4" />
                   复制链接
@@ -1099,34 +1120,34 @@ export default function IssueDetailPage() {
               </div>
             </div>
 
-            {isInternalIssue && (
-              <Card>
-                <CardContent className="space-y-4 p-5 md:p-6">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-sm font-semibold">内部评论</h2>
-                      <p className="text-sm text-muted-foreground">评论仅保存在 Fast Ship 内部。</p>
-                    </div>
+            <Card>
+              <CardContent className="space-y-4 p-5 md:p-6">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">{isInternalIssue ? "内部评论" : "添加评论"}</h2>
+                    <p className="text-sm text-muted-foreground">
+                      {isInternalIssue ? "评论仅保存在 Fast Ship 内部。" : "评论会直接发布到 GitHub Issue。"}
+                    </p>
                   </div>
-                  <div className="space-y-3">
-                    <Textarea
-                      value={commentDraft}
-                      onChange={(event) => setCommentDraft(event.target.value)}
-                      rows={5}
-                      placeholder="使用 Markdown 输入评论内容"
-                    />
-                    <div className="flex justify-end">
-                      <Button
-                        onClick={() => void handleCreateInternalComment()}
-                        disabled={createComment.isPending}
-                      >
-                        {createComment.isPending ? "发布中..." : "发布评论"}
-                      </Button>
-                    </div>
+                </div>
+                <div className="space-y-3">
+                  <Textarea
+                    value={commentDraft}
+                    onChange={(event) => setCommentDraft(event.target.value)}
+                    rows={5}
+                    placeholder="使用 Markdown 输入评论内容"
+                  />
+                  <div className="flex justify-end">
+                    <Button
+                      onClick={() => void handleCreateComment()}
+                      disabled={createComment.isPending}
+                    >
+                      {createComment.isPending ? "发布中..." : "发布评论"}
+                    </Button>
                   </div>
-                </CardContent>
-              </Card>
-            )}
+                </div>
+              </CardContent>
+            </Card>
 
             {/* Unified Timeline */}
             <div className="-mt-6">
@@ -1409,7 +1430,8 @@ export default function IssueDetailPage() {
                       </Button>
                       <Button
                         size="icon-sm"
-                        aria-label="保存任务清单"
+                        aria-label="保存"
+                        title="保存任务清单"
                         onClick={() => void handleChecklistSave()}
                         disabled={!isChecklistDirty || replaceChecklist.isPending}
                       >
@@ -1433,7 +1455,8 @@ export default function IssueDetailPage() {
                       <Button
                         variant="ghost"
                         size="icon-sm"
-                        aria-label="编辑任务清单"
+                        aria-label="编辑"
+                        title="编辑任务清单"
                         onClick={() => setIsChecklistEditing(true)}
                       >
                         <Pencil className="h-3.5 w-3.5" />
@@ -1788,6 +1811,7 @@ export default function IssueDetailPage() {
                       type="button"
                       size="sm"
                       className="h-8 gap-1.5 text-xs"
+                      aria-label="追加到任务清单"
                       onClick={() => void handleAppendSuggestions()}
                       disabled={
                         suggestionState !== "ready" ||
@@ -1807,38 +1831,6 @@ export default function IssueDetailPage() {
               </DialogContent>
             </Dialog>
 
-            {/* 内部操作 */}
-            {isInternalIssue && (
-              <Card>
-                <CardContent className="space-y-3 p-4">
-                  <p className="text-xs font-medium text-muted-foreground">内部操作</p>
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1"
-                      onClick={() =>
-                        navigate({
-                          pathname: `/projects/${id}/issues/${iid}/edit`,
-                          search: location.search,
-                        })
-                      }
-                    >
-                      编辑问题
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => void handleToggleInternalIssueState()}
-                      disabled={updateIssue.isPending}
-                    >
-                      {issue.state === "open" ? "关闭问题" : "重新打开"}
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
           </aside>
         </div>
       </div>

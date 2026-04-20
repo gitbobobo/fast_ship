@@ -203,6 +203,79 @@ func TestClientUploadAsset_ReturnsErrorWhenListingAssetsFails(t *testing.T) {
 	}
 }
 
+func TestClientCreateIssueComment_UsesFullMediaType(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/repos/owner/repo/issues/42/comments" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Accept"); got != mediaTypeFullJSON {
+			t.Fatalf("expected Accept %q, got %q", mediaTypeFullJSON, got)
+		}
+		writeJSON(t, w, http.StatusCreated, map[string]any{
+			"id":        501,
+			"node_id":   "IC_kw_test",
+			"body":      "Looks good",
+			"body_html": "<p>Looks <strong>good</strong></p>",
+			"html_url":  "https://github.com/owner/repo/issues/42#issuecomment-501",
+			"user": map[string]any{
+				"login":      "alice",
+				"avatar_url": "https://avatars.example/alice.png",
+			},
+			"created_at": "2026-04-20T10:00:00Z",
+			"updated_at": "2026-04-20T10:00:00Z",
+		})
+	}))
+
+	comment, err := client.CreateIssueComment(context.Background(), 42, "Looks good")
+	if err != nil {
+		t.Fatalf("CreateIssueComment: %v", err)
+	}
+	if comment.GetID() != 501 || comment.GetBodyHTML() != "<p>Looks <strong>good</strong></p>" {
+		t.Fatalf("unexpected comment payload: %+v", comment)
+	}
+}
+
+func TestClientUpdateIssue_UsesFullMediaType(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/repos/owner/repo/issues/42" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		if got := r.Header.Get("Accept"); got != mediaTypeFullJSON {
+			t.Fatalf("expected Accept %q, got %q", mediaTypeFullJSON, got)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":           1001,
+			"node_id":      "I_kw_test",
+			"number":       42,
+			"state":        "closed",
+			"state_reason": "completed",
+			"title":        "Crash on launch",
+			"body":         "App crashes on startup",
+			"html_url":     "https://github.com/owner/repo/issues/42",
+			"user": map[string]any{
+				"login":      "alice",
+				"avatar_url": "https://avatars.example/alice.png",
+			},
+			"created_at": "2026-04-19T10:00:00Z",
+			"updated_at": "2026-04-20T10:00:00Z",
+			"closed_at":  "2026-04-20T10:00:00Z",
+		})
+	}))
+
+	state := "closed"
+	reason := "completed"
+	issue, err := client.UpdateIssue(context.Background(), 42, UpdateIssueRequest{
+		State:       &state,
+		StateReason: &reason,
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if issue.GetState() != "closed" || issue.GetStateReason() != "completed" {
+		t.Fatalf("unexpected issue payload: %+v", issue)
+	}
+}
+
 func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 

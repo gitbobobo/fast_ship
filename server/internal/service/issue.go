@@ -45,6 +45,8 @@ type gitHubIssueClient interface {
 	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*ghclient.Issue, *gh.Response, error)
 	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.IssueComment, *gh.Response, error)
 	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.TimelineEvent, *gh.Response, error)
+	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*ghclient.IssueComment, error)
+	UpdateIssue(ctx context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error)
 }
 
 type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
@@ -85,9 +87,10 @@ type CreateInternalIssueRequest struct {
 }
 
 type UpdateInternalIssueRequest struct {
-	Title *string           `json:"title"`
-	Body  *string           `json:"body"`
-	State *model.IssueState `json:"state"`
+	Title       *string           `json:"title"`
+	Body        *string           `json:"body"`
+	State       *model.IssueState `json:"state"`
+	StateReason *string           `json:"state_reason"`
 }
 
 type CreateInternalIssueCommentRequest struct {
@@ -395,7 +398,10 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 }
 
 func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error) {
-	if req.Title == nil && req.Body == nil && req.State == nil {
+	if req.Title == nil && req.Body == nil && req.State == nil && req.StateReason == nil {
+		return nil, errs.ErrInvalidParams
+	}
+	if req.State == nil && req.StateReason != nil {
 		return nil, errs.ErrInvalidParams
 	}
 
@@ -411,6 +417,59 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			return nil, errs.ErrProjectNotFound
 		}
 		return nil, errs.ErrNotOwner
+	}
+	if issue.Source == model.IssueSourceGitHub {
+		if req.Title != nil || req.Body != nil {
+			return nil, errs.ErrIssueReadOnly
+		}
+		if req.State == nil || issue.GitHubMeta == nil {
+			return nil, errs.ErrIssueReadOnly
+		}
+		if !isValidIssueState(*req.State) {
+			return nil, errs.ErrInvalidParams
+		}
+
+		stateReason, appErr := normalizeIssueStateReason(req.State, req.StateReason)
+		if appErr != nil {
+			return nil, appErr
+		}
+
+		project, err := s.projectRepo.FindByID(issue.ProjectID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrProjectNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+		tokenBytes, appErr := s.decryptGitHubToken(project)
+		if appErr != nil {
+			return nil, appErr
+		}
+
+		client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+		state := string(*req.State)
+		updateReq := ghclient.UpdateIssueRequest{State: &state}
+		if stateReason != "" {
+			updateReq.StateReason = &stateReason
+		}
+		updatedIssue, err := client.UpdateIssue(context.Background(), issue.GitHubMeta.Number, updateReq)
+		if err != nil {
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败: %v", err))
+		}
+
+		stored, err := s.upsertGitHubIssue(project.ID, updatedIssue)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.syncTimeline(context.Background(), client, stored, issue.GitHubMeta.Number); err != nil {
+			return nil, err
+		}
+		meta, err := s.loadInternalMeta(stored.ID)
+		if err != nil {
+			return nil, err
+		}
+		resp := toIssueResponse(*stored, meta, nil)
+		return &resp, nil
 	}
 	if issue.Source != model.IssueSourceInternal {
 		return nil, errs.ErrIssueReadOnly
@@ -431,7 +490,12 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if !isValidIssueState(*req.State) {
 			return nil, errs.ErrInvalidParams
 		}
+		stateReason, appErr := normalizeIssueStateReason(req.State, req.StateReason)
+		if appErr != nil {
+			return nil, appErr
+		}
 		issue.State = *req.State
+		issue.StateReason = stateReason
 		if *req.State == model.IssueStateClosed {
 			now := time.Now().UTC()
 			issue.ClosedAt = &now
@@ -870,6 +934,54 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 			return nil, errs.ErrProjectNotFound
 		}
 		return nil, errs.ErrNotOwner
+	}
+	if issue.Source == model.IssueSourceGitHub {
+		if issue.GitHubMeta == nil {
+			return nil, errs.ErrInternal
+		}
+
+		project, err := s.projectRepo.FindByID(issue.ProjectID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrProjectNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+		tokenBytes, appErr := s.decryptGitHubToken(project)
+		if appErr != nil {
+			return nil, appErr
+		}
+
+		client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+		createdComment, err := client.CreateIssueComment(context.Background(), issue.GitHubMeta.Number, body)
+		if err != nil {
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("创建 GitHub Issue 评论失败: %v", err))
+		}
+
+		comment := buildGitHubIssueCommentModel(issue.ID, createdComment)
+		if err := s.commentRepo.Upsert(comment); err != nil {
+			return nil, errs.ErrInternal
+		}
+
+		now := time.Now().UTC()
+		updatedAt := comment.GitHubUpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = now
+		}
+		issue.UpdatedAt = updatedAt
+		if err := s.issueRepo.Save(issue); err != nil {
+			return nil, errs.ErrInternal
+		}
+
+		meta := issue.GitHubMeta
+		meta.CommentsCount++
+		meta.SyncedAt = now
+		if err := s.gitHubMetaRepo.Upsert(meta); err != nil {
+			return nil, errs.ErrInternal
+		}
+
+		resp := toIssueCommentResponse(*comment)
+		return &resp, nil
 	}
 	if issue.Source != model.IssueSourceInternal {
 		return nil, errs.ErrIssueReadOnly
@@ -1663,6 +1775,37 @@ func toIssueCommentResponse(comment model.IssueComment) IssueCommentResponse {
 	}
 }
 
+func buildGitHubIssueCommentModel(issueID string, item *ghclient.IssueComment) *model.IssueComment {
+	comment := &model.IssueComment{
+		ID:                uuid.NewString(),
+		IssueID:           issueID,
+		Source:            model.IssueSourceGitHub,
+		GitHubCommentID:   item.GetID(),
+		GitHubNodeID:      item.GetNodeID(),
+		Body:              item.GetBody(),
+		BodyHTML:          item.GetBodyHTML(),
+		HTMLURL:           item.GetHTMLURL(),
+		AuthorLogin:       item.GetUser().GetLogin(),
+		AuthorAvatarURL:   item.GetUser().GetAvatarURL(),
+		AuthorAssociation: item.GetAuthorAssociation(),
+		ReactionsJSON:     toJSONString(mapReactions(item.Reactions)),
+		RawJSON:           toJSONString(item),
+	}
+	if createdAt := item.GetCreatedAt(); !createdAt.IsZero() {
+		comment.GitHubCreatedAt = createdAt.UTC()
+	}
+	if updatedAt := item.GetUpdatedAt(); !updatedAt.IsZero() {
+		comment.GitHubUpdatedAt = updatedAt.UTC()
+	}
+	if comment.GitHubCreatedAt.IsZero() {
+		comment.GitHubCreatedAt = time.Now().UTC()
+	}
+	if comment.GitHubUpdatedAt.IsZero() {
+		comment.GitHubUpdatedAt = comment.GitHubCreatedAt
+	}
+	return comment
+}
+
 func toIssueTimelineResponse(event model.IssueTimelineEvent) IssueTimelineEventResponse {
 	return IssueTimelineEventResponse{
 		ID:            event.ID,
@@ -1951,6 +2094,32 @@ func isValidIssueState(state model.IssueState) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeIssueStateReason(state *model.IssueState, reason *string) (string, *errs.AppError) {
+	if state == nil {
+		return "", nil
+	}
+
+	value := ""
+	if reason != nil {
+		value = strings.TrimSpace(*reason)
+	}
+	if value == "" {
+		return "", nil
+	}
+
+	switch *state {
+	case model.IssueStateClosed:
+		if value == "completed" || value == "not_planned" {
+			return value, nil
+		}
+	case model.IssueStateOpen:
+		if value == "reopened" {
+			return value, nil
+		}
+	}
+	return "", errs.ErrInvalidParams
 }
 
 func sortedKeys(values map[string]struct{}) []string {
