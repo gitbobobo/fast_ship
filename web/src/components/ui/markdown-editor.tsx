@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import MDEditor from "@uiw/react-md-editor";
 import "@uiw/react-md-editor/markdown-editor.css";
 import { useThemeStore } from "@/lib/store/theme-store";
@@ -82,7 +82,7 @@ export function MarkdownEditor({
     return root.querySelector("textarea");
   };
 
-  const handlePaste = async (event: ClipboardEvent | globalThis.ClipboardEvent) => {
+  const handlePaste = useEffectEvent(async (event: ClipboardEvent | globalThis.ClipboardEvent) => {
     if (!onPasteImageRef.current) {
       return;
     }
@@ -135,7 +135,7 @@ export function MarkdownEditor({
     } finally {
       setIsUploadingImage(false);
     }
-  };
+  });
 
   useEffect(() => {
     const handleDocumentPaste = (event: globalThis.ClipboardEvent) => {

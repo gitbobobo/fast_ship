@@ -22,7 +22,7 @@ help:
 	@printf "  make test-web     Run web tests\n"
 	@printf "  make lint         Run server and web lint checks\n"
 	@printf "  make lint-server  Check Go formatting and run go vet\n"
-	@printf "  make lint-web     Run ESLint for the web app\n"
+	@printf "  make lint-web     Run web ESLint and type checks\n"
 	@printf "  make tidy         Tidy server dependencies\n"
 	@printf "  make clean        Clean build artifacts\n"
 
@@ -62,7 +62,7 @@ lint-server:
 	@cd server && go vet ./...
 
 lint-web:
-	@pnpm --dir web lint
+	@pnpm --dir web check
 
 tidy: tidy-server
 

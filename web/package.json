@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "pnpm typecheck && vite build",
+    "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
+    "check": "pnpm lint && pnpm typecheck",
     "test": "vitest run",
     "preview": "vite preview"
   },

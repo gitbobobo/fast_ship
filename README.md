@@ -59,7 +59,7 @@ make clean
 - `make dev-web`：只启动前端
 - `make build`：构建后端二进制和前端产物
 - `make test`：运行后端和前端测试
-- `make lint`：运行 Go 格式/静态检查与前端 ESLint
+- `make lint`：运行 Go 格式/静态检查与前端 ESLint + TypeScript 校验
 - `make tidy`：整理后端 Go 依赖
 - `make clean`：清理后端构建产物和前端 `dist`
 
@@ -93,7 +93,7 @@ fast_ship/
 
 - 根目录命令只是统一入口，不会替代子项目自己的原生命令。
 - 后端仍可在 `server/` 下使用 `make dev`、`make build` 等命令。
-- 前端仍可在 `web/` 下使用 `pnpm dev`、`pnpm test`、`pnpm lint` 等命令。
+- 前端仍可在 `web/` 下使用 `pnpm dev`、`pnpm lint`、`pnpm typecheck`、`pnpm check`、`pnpm test` 等命令。
 - 需求和设计文档位于 [docs](/Users/godbobo/work/projects/fast_ship/docs)。
 
 ## Docker 镜像发布
