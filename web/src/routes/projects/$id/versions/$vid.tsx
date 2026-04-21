@@ -9,6 +9,17 @@ import {
   ArrowLeft,
   Pencil,
   Eye,
+  FileArchive,
+  CheckCircle2,
+  Circle,
+  XCircle,
+  Loader2,
+  AlertTriangle,
+  Copy,
+  Clock,
+  GitBranch,
+  Tag,
+  Package,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Header } from "@/components/layout/header";
@@ -21,17 +32,12 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
+  CardDescription,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Separator } from "@/components/ui/separator";
+
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -73,6 +79,24 @@ interface UploadProgressState {
   failedFiles: number;
   percent: number;
   status: "uploading" | "completed" | "failed";
+}
+
+function PlatformIcon({ platform }: { platform: string | null }) {
+  if (!platform) return <FileArchive className="h-5 w-5 text-muted-foreground" />;
+  const p = platform.toLowerCase();
+  if (p.includes("android")) return <span className="text-lg">🤖</span>;
+  if (p.includes("ios")) return <span className="text-lg">🍎</span>;
+  if (p.includes("mac")) return <span className="text-lg">🖥️</span>;
+  if (p.includes("win")) return <span className="text-lg">🪟</span>;
+  if (p.includes("linux")) return <span className="text-lg">🐧</span>;
+  return <FileArchive className="h-5 w-5 text-muted-foreground" />;
+}
+
+function ShipStepIcon({ state }: { state: "done" | "doing" | "failed" | "todo" }) {
+  if (state === "done") return <CheckCircle2 className="h-5 w-5 text-emerald-600" />;
+  if (state === "doing") return <Loader2 className="h-5 w-5 animate-spin text-amber-600" />;
+  if (state === "failed") return <XCircle className="h-5 w-5 text-destructive" />;
+  return <Circle className="h-5 w-5 text-muted-foreground" />;
 }
 
 export default function VersionDetailPage() {
@@ -311,9 +335,11 @@ export default function VersionDetailPage() {
       <>
         <Header title="版本详情" />
         <div className="p-4 md:p-6 space-y-4">
-          <Skeleton className="h-20 rounded-lg" />
-          <Skeleton className="h-48 rounded-lg" />
-          <Skeleton className="h-32 rounded-lg" />
+          <Skeleton className="h-28 rounded-xl" />
+          <div className="grid gap-4 lg:grid-cols-3">
+            <Skeleton className="h-64 rounded-xl lg:col-span-2" />
+            <Skeleton className="h-64 rounded-xl" />
+          </div>
         </div>
       </>
     );
@@ -334,420 +360,386 @@ export default function VersionDetailPage() {
     <>
       <Header title={`版本 ${version.version_number}`} />
       <div className="p-4 md:p-6 space-y-6">
-        {/* 顶栏 */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" render={<Link to={`/projects/${id}`} />}>
-                <ArrowLeft className="mr-1 h-4 w-4" />
-                返回
-            </Button>
-            <span className="font-mono text-lg font-bold">
-              {version.version_number}
-            </span>
-            <Badge
-              variant={version.status === "shipped" ? "default" : "secondary"}
-            >
-              {version.status === "shipped" ? "已发货" : "待发货"}
-            </Badge>
-          </div>
-          <div className="flex gap-2">
-            {isEditable && (
-              <AlertDialog>
-                <AlertDialogTrigger render={<Button variant="outline" size="sm" />}>
-                    <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-                    删除
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>确认删除版本?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      删除后相关安装包也将一并清除，且不可恢复。
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>取消</AlertDialogCancel>
-                    <AlertDialogAction onClick={handleDeleteVersion}>
-                      确认删除
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
-            )}
-            {version.github_release_url && (
-              <Button variant="outline" size="sm" render={
-                <a
-                  href={version.github_release_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                />
-              }>
-                  <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
-                  GitHub Release
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* 基本信息 */}
+        {/* 顶部 Hero */}
         <Card>
-          <CardHeader>
-            <CardTitle className="text-base">基本信息</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
-            <div>
-              <span className="text-muted-foreground">版本号：</span>
-              {editingVersionNumber ? (
-                <span className="inline-flex items-center gap-2">
-                  <Input
-                    className="h-7 w-40 text-sm"
-                    value={versionNumber}
-                    onChange={(e) => setVersionNumber(e.target.value)}
-                  />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7"
-                    onClick={handleSaveVersionNumber}
-                  >
-                    保存
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7"
-                    onClick={() => setEditingVersionNumber(false)}
-                  >
-                    取消
-                  </Button>
-                </span>
-              ) : (
-                <span>
-                  {version.version_number}
-                  {isEditable && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-2 h-6 px-2"
-                      onClick={() => {
-                        setVersionNumber(version.version_number);
-                        setEditingVersionNumber(true);
-                      }}
+          <CardContent className="pt-5 pb-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mt-0.5 shrink-0"
+                  render={<Link to={`/projects/${id}`} />}
+                >
+                  <ArrowLeft className="mr-1 h-4 w-4" />
+                  返回
+                </Button>
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2.5 flex-wrap">
+                    <h1 className="font-mono text-2xl font-bold tracking-tight">
+                      {version.version_number}
+                    </h1>
+                    <Badge
+                      variant={version.status === "shipped" ? "default" : "secondary"}
+                      className="text-xs"
                     >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                  )}
-                </span>
-              )}
-            </div>
-            <div>
-              <span className="text-muted-foreground">状态：</span>
-              {version.status === "shipped" ? "已发货" : "待发货"}
-            </div>
-            <div>
-              <span className="text-muted-foreground">目标分支：</span>
-              {editingCommitish ? (
-                <span className="inline-flex items-center gap-2">
-                  <Input
-                    className="h-7 w-48 text-sm"
-                    value={commitish}
-                    onChange={(e) => setCommitish(e.target.value)}
-                  />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7"
-                    onClick={handleSaveCommitish}
-                  >
-                    保存
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-7"
-                    onClick={() => setEditingCommitish(false)}
-                  >
-                    取消
-                  </Button>
-                </span>
-              ) : (
-                <span>
-                  {version.target_commitish || "未设置"}
-                  {isEditable && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="ml-2 h-6 px-2"
-                      onClick={() => {
-                        setCommitish(version.target_commitish || "");
-                        setEditingCommitish(true);
-                      }}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                  )}
-                </span>
-              )}
-            </div>
-            <div>
-              <span className="text-muted-foreground">创建时间：</span>
-              {formatDate(version.created_at)}
-            </div>
-            {version.shipped_at && (
-              <div>
-                <span className="text-muted-foreground">发货时间：</span>
-                {formatDate(version.shipped_at)}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Release 说明 */}
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base">Release 说明</CardTitle>
-            {isEditable && !editingNotes && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setNotes(version.release_notes || "");
-                  setEditingNotes(true);
-                }}
-              >
-                <Pencil className="mr-1.5 h-3.5 w-3.5" />
-                编辑
-              </Button>
-            )}
-          </CardHeader>
-          <CardContent>
-            {editingNotes ? (
-              <Tabs defaultValue="edit">
-                <TabsList>
-                  <TabsTrigger value="edit">
-                    <Pencil className="mr-1 h-3.5 w-3.5" />
-                    编辑
-                  </TabsTrigger>
-                  <TabsTrigger value="preview">
-                    <Eye className="mr-1 h-3.5 w-3.5" />
-                    预览
-                  </TabsTrigger>
-                </TabsList>
-                <TabsContent value="edit">
-                  <Textarea
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    rows={10}
-                    placeholder="支持 Markdown 格式"
-                  />
-                </TabsContent>
-                <TabsContent value="preview">
-                  <div className="prose prose-sm dark:prose-invert max-w-none rounded-md border p-4">
-                    {notes ? (
-                      <ReactMarkdown>{notes}</ReactMarkdown>
-                    ) : (
-                      <p className="text-muted-foreground">暂无内容</p>
+                      {version.status === "shipped" ? "已发货" : "待发货"}
+                    </Badge>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span className="inline-flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      创建于 {formatDate(version.created_at)}
+                    </span>
+                    {version.shipped_at && (
+                      <span className="inline-flex items-center gap-1">
+                        <Rocket className="h-3 w-3" />
+                        发货于 {formatDate(version.shipped_at)}
+                      </span>
+                    )}
+                    {version.target_commitish && (
+                      <span className="inline-flex items-center gap-1">
+                        <GitBranch className="h-3 w-3" />
+                        {version.target_commitish}
+                      </span>
                     )}
                   </div>
-                </TabsContent>
-                <div className="mt-3 flex gap-2">
-                  <Button size="sm" onClick={handleSaveNotes}>
-                    保存
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                {version.github_release_url && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    render={
+                      <a
+                        href={version.github_release_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      />
+                    }
+                  >
+                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                    GitHub Release
                   </Button>
+                )}
+                {isEditable && (
+                  <AlertDialog>
+                    <AlertDialogTrigger
+                      render={<Button variant="outline" size="sm" />}
+                    >
+                      <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                      删除
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>确认删除版本?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          删除后相关安装包也将一并清除，且不可恢复。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>取消</AlertDialogCancel>
+                        <AlertDialogAction onClick={handleDeleteVersion}>
+                          确认删除
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                )}
+                {isPending && (
                   <Button
                     size="sm"
-                    variant="outline"
-                    onClick={() => setEditingNotes(false)}
+                    onClick={() => setShipDialogOpen(true)}
+                    disabled={isShipping}
                   >
-                    取消
+                    <Rocket className="mr-1.5 h-3.5 w-3.5" />
+                    {isShipping ? "发货中..." : "发货到 GitHub"}
                   </Button>
-                </div>
-              </Tabs>
-            ) : version.release_notes ? (
-              <div className="prose prose-sm dark:prose-invert max-w-none">
-                <ReactMarkdown>{version.release_notes}</ReactMarkdown>
+                )}
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                暂无 Release 说明
-              </p>
-            )}
+            </div>
           </CardContent>
         </Card>
 
-        {/* 安装包 */}
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-base">
-              安装包
-              {artifacts.length > 0 && (
-                <span className="ml-2 text-sm text-muted-foreground font-normal">
-                  ({artifacts.length})
-                </span>
-              )}
-            </CardTitle>
-            {isEditable && (
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isUploading}
-                >
-                  <Upload className="mr-1.5 h-3.5 w-3.5" />
-                  {isUploading ? "上传中..." : "上传文件"}
-                </Button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={handleUpload}
-                  disabled={isUploading}
-                />
-              </>
-            )}
-          </CardHeader>
-          <CardContent>
-            {isEditable && (
-              <div className="mb-4 space-y-4">
-                <div className="flex flex-col gap-2 sm:max-w-xs">
-                <span className="text-sm text-muted-foreground">
-                  平台标识（可选）
-                </span>
-                <Input
-                  value={uploadPlatform}
-                  onChange={(e) => setUploadPlatform(e.target.value)}
-                  placeholder="如 android / ios / macos"
-                />
-                <p className="text-xs text-muted-foreground">
-                  同名文件会按替换处理，并更新平台与大小信息
-                </p>
-                </div>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  className={cn(
-                    "rounded-lg border border-dashed px-4 py-8 text-center transition-colors",
-                    isUploading
-                      ? "cursor-not-allowed border-muted-foreground/30 bg-muted/40"
-                      : isDragOver
-                        ? "border-primary bg-primary/5"
-                        : "border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/30",
-                  )}
-                  onClick={() => {
-                    if (isUploading) return;
-                    fileInputRef.current?.click();
-                  }}
-                  onKeyDown={(e) => {
-                    if (isUploading) return;
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      fileInputRef.current?.click();
-                    }
-                  }}
-                  onDragEnter={(e) => {
-                    e.preventDefault();
-                    if (!isUploading) setIsDragOver(true);
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    if (!isUploading) setIsDragOver(true);
-                  }}
-                  onDragLeave={(e) => {
-                    e.preventDefault();
-                    const nextTarget = e.relatedTarget;
-                    if (!e.currentTarget.contains(nextTarget as Node | null)) {
-                      setIsDragOver(false);
-                    }
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setIsDragOver(false);
-                    if (isUploading) return;
-                    const droppedFiles = Array.from(e.dataTransfer.files || []);
-                    void handleUploadFiles(droppedFiles);
-                  }}
-                >
-                  <Upload className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
-                  <p className="text-sm font-medium">
-                    拖拽文件到这里，或点击选择安装包
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    支持多文件上传，上传期间会禁止重复提交
-                  </p>
-                </div>
-                {uploadProgress && (
-                  <div className="rounded-lg border px-4 py-3">
-                    <div className="mb-2 flex items-center justify-between gap-3 text-sm">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium">
-                          {uploadProgress.currentFileName}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {uploadProgress.status === "uploading"
-                            ? `正在上传第 ${uploadProgress.currentFileIndex}/${uploadProgress.totalFiles} 个文件`
-                            : uploadProgress.status === "completed"
-                              ? `上传完成，共 ${uploadProgress.completedFiles} 个文件`
-                              : `上传结束，成功 ${uploadProgress.completedFiles} 个，失败 ${uploadProgress.failedFiles} 个`}
-                        </p>
-                      </div>
-                      <span className="shrink-0 text-sm font-medium">
-                        {uploadProgress.percent}%
-                      </span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className={cn(
-                          "h-full transition-all",
-                          uploadProgress.status === "failed"
-                            ? "bg-destructive"
-                            : "bg-primary",
-                        )}
-                        style={{ width: `${uploadProgress.percent}%` }}
+        {/* 主体两栏 */}
+        <div className="grid gap-6 lg:grid-cols-3">
+          {/* 左侧：主要内容 */}
+          <div className="space-y-6 lg:col-span-2">
+            {/* Release 说明 */}
+            <Card>
+              <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
+                <CardTitle className="text-base">Release 说明</CardTitle>
+                {isEditable && !editingNotes && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setNotes(version.release_notes || "");
+                      setEditingNotes(true);
+                    }}
+                  >
+                    <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                    编辑
+                  </Button>
+                )}
+              </CardHeader>
+              <CardContent>
+                {editingNotes ? (
+                  <Tabs defaultValue="edit">
+                    <TabsList>
+                      <TabsTrigger value="edit">
+                        <Pencil className="mr-1 h-3.5 w-3.5" />
+                        编辑
+                      </TabsTrigger>
+                      <TabsTrigger value="preview">
+                        <Eye className="mr-1 h-3.5 w-3.5" />
+                        预览
+                      </TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="edit">
+                      <Textarea
+                        value={notes}
+                        onChange={(e) => setNotes(e.target.value)}
+                        rows={10}
+                        placeholder="支持 Markdown 格式"
                       />
+                    </TabsContent>
+                    <TabsContent value="preview">
+                      <div className="prose prose-sm dark:prose-invert max-w-none rounded-md border p-4">
+                        {notes ? (
+                          <ReactMarkdown>{notes}</ReactMarkdown>
+                        ) : (
+                          <p className="text-muted-foreground">暂无内容</p>
+                        )}
+                      </div>
+                    </TabsContent>
+                    <div className="mt-3 flex gap-2">
+                      <Button size="sm" onClick={handleSaveNotes}>
+                        保存
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setEditingNotes(false)}
+                      >
+                        取消
+                      </Button>
                     </div>
+                  </Tabs>
+                ) : version.release_notes ? (
+                  <div className="prose prose-sm dark:prose-invert max-w-none">
+                    <ReactMarkdown>{version.release_notes}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-10 text-center">
+                    <Tag className="mb-2 h-8 w-8 text-muted-foreground/40" />
+                    <p className="text-sm text-muted-foreground">
+                      暂无 Release 说明
+                    </p>
+                    {isEditable && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        点击右上角编辑按钮添加说明
+                      </p>
+                    )}
                   </div>
                 )}
-              </div>
-            )}
-            {artifacts.length === 0 ? (
-              <p className="text-sm text-muted-foreground">暂无安装包</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                    <TableRow>
-                      <TableHead>文件名</TableHead>
-                      <TableHead>大小</TableHead>
-                      <TableHead>上传者</TableHead>
-                      <TableHead>平台</TableHead>
-                      <TableHead>上传时间</TableHead>
-                      <TableHead className="text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {artifacts.map((artifact) => (
-                    <TableRow key={artifact.id}>
-                      <TableCell className="font-mono text-sm">
-                        {artifact.file_name}
-                      </TableCell>
-                      <TableCell>{formatFileSize(artifact.file_size)}</TableCell>
-                      <TableCell>{artifact.uploaded_by || "-"}</TableCell>
-                      <TableCell>{artifact.platform || "-"}</TableCell>
-                      <TableCell>{formatDate(artifact.uploaded_at)}</TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-1">
-                          <Button variant="ghost" size="sm" render={
-                            <a
-                              href={artifactApi.downloadUrl(artifact.id)}
-                              download
-                            />
-                          }>
-                              <Download className="h-4 w-4" />
+              </CardContent>
+            </Card>
+
+            {/* 安装包 */}
+            <Card>
+              <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-base">安装包</CardTitle>
+                  {artifacts.length > 0 && (
+                    <Badge variant="secondary" className="text-xs font-normal">
+                      {artifacts.length}
+                    </Badge>
+                  )}
+                </div>
+                {isEditable && (
+                  <>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                    >
+                      <Upload className="mr-1.5 h-3.5 w-3.5" />
+                      {isUploading ? "上传中..." : "上传文件"}
+                    </Button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={handleUpload}
+                      disabled={isUploading}
+                    />
+                  </>
+                )}
+              </CardHeader>
+              <CardContent>
+                {isEditable && (
+                  <div className="mb-5 space-y-4">
+                    <div className="flex flex-col gap-2 sm:max-w-xs">
+                      <span className="text-sm text-muted-foreground">
+                        平台标识（可选）
+                      </span>
+                      <Input
+                        value={uploadPlatform}
+                        onChange={(e) => setUploadPlatform(e.target.value)}
+                        placeholder="如 android / ios / macos"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        同名文件会按替换处理，并更新平台与大小信息
+                      </p>
+                    </div>
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      className={cn(
+                        "rounded-lg border border-dashed px-4 py-8 text-center transition-colors",
+                        isUploading
+                          ? "cursor-not-allowed border-muted-foreground/30 bg-muted/40"
+                          : isDragOver
+                            ? "border-primary bg-primary/5"
+                            : "border-muted-foreground/30 hover:border-primary/50 hover:bg-muted/30",
+                      )}
+                      onClick={() => {
+                        if (isUploading) return;
+                        fileInputRef.current?.click();
+                      }}
+                      onKeyDown={(e) => {
+                        if (isUploading) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          fileInputRef.current?.click();
+                        }
+                      }}
+                      onDragEnter={(e) => {
+                        e.preventDefault();
+                        if (!isUploading) setIsDragOver(true);
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        if (!isUploading) setIsDragOver(true);
+                      }}
+                      onDragLeave={(e) => {
+                        e.preventDefault();
+                        const nextTarget = e.relatedTarget;
+                        if (!e.currentTarget.contains(nextTarget as Node | null)) {
+                          setIsDragOver(false);
+                        }
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setIsDragOver(false);
+                        if (isUploading) return;
+                        const droppedFiles = Array.from(e.dataTransfer.files || []);
+                        void handleUploadFiles(droppedFiles);
+                      }}
+                    >
+                      <Upload className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
+                      <p className="text-sm font-medium">
+                        拖拽文件到这里，或点击选择安装包
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        支持多文件上传，上传期间会禁止重复提交
+                      </p>
+                    </div>
+                    {uploadProgress && (
+                      <div className="rounded-lg border px-4 py-3">
+                        <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                          <div className="min-w-0">
+                            <p className="truncate font-medium">
+                              {uploadProgress.currentFileName}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {uploadProgress.status === "uploading"
+                                ? `正在上传第 ${uploadProgress.currentFileIndex}/${uploadProgress.totalFiles} 个文件`
+                                : uploadProgress.status === "completed"
+                                  ? `上传完成，共 ${uploadProgress.completedFiles} 个文件`
+                                  : `上传结束，成功 ${uploadProgress.completedFiles} 个，失败 ${uploadProgress.failedFiles} 个`}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-sm font-medium">
+                            {uploadProgress.percent}%
+                          </span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-muted">
+                          <div
+                            className={cn(
+                              "h-full transition-all",
+                              uploadProgress.status === "failed"
+                                ? "bg-destructive"
+                                : "bg-primary",
+                            )}
+                            style={{ width: `${uploadProgress.percent}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {artifacts.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-10 text-center">
+                    <Package className="mb-2 h-8 w-8 text-muted-foreground/40" />
+                    <p className="text-sm text-muted-foreground">暂无安装包</p>
+                    {isEditable && (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        使用上方上传区域添加安装包
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {artifacts.map((artifact) => (
+                      <div
+                        key={artifact.id}
+                        className="flex items-center gap-4 rounded-lg border p-3 transition-colors hover:bg-muted/30"
+                      >
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                          <PlatformIcon platform={artifact.platform} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium font-mono">
+                            {artifact.file_name}
+                          </p>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
+                            <span>{formatFileSize(artifact.file_size)}</span>
+                            {artifact.platform && (
+                              <Badge variant="outline" className="text-[10px] font-normal h-4 px-1">
+                                {artifact.platform}
+                              </Badge>
+                            )}
+                            <span>{artifact.uploaded_by || "-"}</span>
+                            <span>{formatDate(artifact.uploaded_at)}</span>
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            render={
+                              <a
+                                href={artifactApi.downloadUrl(artifact.id)}
+                                download
+                              />
+                            }
+                          >
+                            <Download className="h-3.5 w-3.5" />
                           </Button>
                           {isEditable && (
                             <AlertDialog>
-                              <AlertDialogTrigger render={<Button variant="ghost" size="sm" />}>
-                                  <Trash2 className="h-4 w-4" />
+                              <AlertDialogTrigger
+                                render={
+                                  <Button variant="ghost" size="icon-xs" />
+                                }
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-destructive" />
                               </AlertDialogTrigger>
                               <AlertDialogContent>
                                 <AlertDialogHeader>
@@ -775,93 +767,263 @@ export default function VersionDetailPage() {
                             </AlertDialog>
                           )}
                         </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* 发货进度 */}
-        {isPending &&
-          (isShipping ||
-            version.ship_status === "failed" ||
-            version.ship_status === "completed") && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">发货进度</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {shipSteps.map((step, index) => {
-                  const state = getShipStepState(index);
-                  return (
-                    <div
-                      key={step.key}
-                      className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
-                    >
-                      <span>{step.label}</span>
-                      <span
-                        className={
-                          state === "done"
-                            ? "text-emerald-600"
-                            : state === "doing"
-                              ? "text-amber-600"
-                              : state === "failed"
-                                ? "text-destructive"
-                                : "text-muted-foreground"
-                        }
-                      >
-                        {state === "done"
-                          ? "已完成"
-                          : state === "doing"
-                            ? "进行中"
-                            : state === "failed"
-                              ? "失败"
-                              : "等待中"}
-                      </span>
-                    </div>
-                  );
-                })}
-                {version.ship_message && (
-                  <p className="text-sm text-muted-foreground">
-                    {version.ship_message}
-                  </p>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </CardContent>
             </Card>
-          )}
-
-        {/* 错误日志 */}
-        {version.error_log && (
-          <Card className="border-destructive/50">
-            <CardHeader>
-              <CardTitle className="text-base text-destructive">
-                错误日志
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <pre className="whitespace-pre-wrap text-sm text-destructive">
-                {version.error_log}
-              </pre>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* 发货按钮 */}
-        {isPending && (
-          <div className="flex justify-center pt-2">
-            <Button
-              size="lg"
-              onClick={() => setShipDialogOpen(true)}
-              disabled={isShipping}
-            >
-              <Rocket className="mr-2 h-4 w-4" />
-              {isShipping ? "发货中..." : "发货到 GitHub"}
-            </Button>
           </div>
-        )}
+
+          {/* 右侧：侧边栏 */}
+          <div className="space-y-6">
+            {/* 基本信息 */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">基本信息</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* 版本号 */}
+                <div className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    版本号
+                  </span>
+                  {editingVersionNumber ? (
+                    <div className="space-y-2">
+                      <Input
+                        className="h-8 text-sm"
+                        value={versionNumber}
+                        onChange={(e) => setVersionNumber(e.target.value)}
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 text-xs"
+                          onClick={handleSaveVersionNumber}
+                        >
+                          保存
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 text-xs"
+                          onClick={() => setEditingVersionNumber(false)}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-sm">
+                        {version.version_number}
+                      </span>
+                      {isEditable && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => {
+                            setVersionNumber(version.version_number);
+                            setEditingVersionNumber(true);
+                          }}
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <Separator />
+                {/* 状态 */}
+                <div className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    状态
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={cn(
+                        "inline-block h-2 w-2 rounded-full",
+                        version.status === "shipped"
+                          ? "bg-emerald-500"
+                          : "bg-amber-500",
+                      )}
+                    />
+                    <span className="text-sm">
+                      {version.status === "shipped" ? "已发货" : "待发货"}
+                    </span>
+                  </div>
+                </div>
+                <Separator />
+                {/* 目标分支 */}
+                <div className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    目标分支
+                  </span>
+                  {editingCommitish ? (
+                    <div className="space-y-2">
+                      <Input
+                        className="h-8 text-sm"
+                        value={commitish}
+                        onChange={(e) => setCommitish(e.target.value)}
+                      />
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 text-xs"
+                          onClick={handleSaveCommitish}
+                        >
+                          保存
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 text-xs"
+                          onClick={() => setEditingCommitish(false)}
+                        >
+                          取消
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm">
+                        {version.target_commitish || (
+                          <span className="text-muted-foreground">未设置</span>
+                        )}
+                      </span>
+                      {isEditable && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => {
+                            setCommitish(version.target_commitish || "");
+                            setEditingCommitish(true);
+                          }}
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <Separator />
+                {/* 创建时间 */}
+                <div className="space-y-1.5">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    创建时间
+                  </span>
+                  <p className="text-sm">{formatDate(version.created_at)}</p>
+                </div>
+                {version.shipped_at && (
+                  <>
+                    <Separator />
+                    <div className="space-y-1.5">
+                      <span className="text-xs font-medium text-muted-foreground">
+                        发货时间
+                      </span>
+                      <p className="text-sm">{formatDate(version.shipped_at)}</p>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 发货进度 */}
+            {isPending &&
+              (isShipping ||
+                version.ship_status === "failed" ||
+                version.ship_status === "completed") && (
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-base">发货进度</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="relative space-y-0">
+                      {shipSteps.map((step, index) => {
+                        const state = getShipStepState(index);
+                        const isLast = index === shipSteps.length - 1;
+                        return (
+                          <div key={step.key} className="flex gap-3">
+                            <div className="flex flex-col items-center">
+                              <ShipStepIcon state={state} />
+                              {!isLast && (
+                                <div
+                                  className={cn(
+                                    "my-1 h-full w-px min-h-[20px]",
+                                    state === "done"
+                                      ? "bg-emerald-600/40"
+                                      : "bg-border",
+                                  )}
+                                />
+                              )}
+                            </div>
+                            <div className="pb-5">
+                              <p
+                                className={cn(
+                                  "text-sm font-medium",
+                                  state === "failed" && "text-destructive",
+                                  state === "doing" && "text-amber-600",
+                                  state === "todo" && "text-muted-foreground",
+                                )}
+                              >
+                                {step.label}
+                              </p>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {state === "done"
+                                  ? "已完成"
+                                  : state === "doing"
+                                    ? "进行中"
+                                    : state === "failed"
+                                      ? "失败"
+                                      : "等待中"}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {version.ship_message && (
+                      <div className="mt-2 rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+                        {version.ship_message}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+            {/* 错误日志 */}
+            {version.error_log && (
+              <Card className="border-destructive/40">
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center gap-2 text-sm text-destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    错误日志
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="relative">
+                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-md bg-destructive/5 p-3 text-xs text-destructive">
+                      {version.error_log}
+                    </pre>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="absolute top-1.5 right-1.5 bg-destructive/5 hover:bg-destructive/10"
+                      onClick={() => {
+                        navigator.clipboard.writeText(version.error_log || "");
+                        toast.success("已复制到剪贴板");
+                      }}
+                    >
+                      <Copy className="h-3 w-3 text-destructive" />
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        </div>
 
         {/* 发货确认对话框 */}
         <Dialog open={shipDialogOpen} onOpenChange={setShipDialogOpen}>

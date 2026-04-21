@@ -134,13 +134,13 @@ describe("VersionDetailPage", () => {
     expect(screen.getByRole("button", { name: "发货中..." })).toBeDisabled();
   });
 
-  it("renders uploaded_by in artifacts table", () => {
+  it("renders uploaded_by in artifacts list", () => {
     renderWithRoute(<VersionDetailPage />, {
       path: "/projects/:id/versions/:vid",
       initialEntry: "/projects/proj-1/versions/ver-1",
     });
 
-    expect(screen.getByText("上传者")).toBeInTheDocument();
+    expect(screen.getByText("安装包")).toBeInTheDocument();
     expect(screen.getByText("API Key: CI-Upload")).toBeInTheDocument();
   });
 
@@ -160,9 +160,12 @@ describe("VersionDetailPage", () => {
       initialEntry: "/projects/proj-1/versions/ver-1",
     });
 
-    const versionRow = screen.getByText("版本号：").closest("div");
-    expect(versionRow).not.toBeNull();
-    fireEvent.click(within(versionRow as HTMLElement).getByRole("button"));
+    const versionLabel = screen.getByText("版本号");
+    expect(versionLabel).toBeInTheDocument();
+    // Find the edit button in the same card as the version label
+    const infoCard = versionLabel.closest('[data-slot="card"]');
+    expect(infoCard).not.toBeNull();
+    fireEvent.click(within(infoCard as HTMLElement).getAllByRole("button")[0]);
 
     const input = screen.getByDisplayValue("v1.2.0");
     fireEvent.change(input, { target: { value: "v1.3.0" } });
