@@ -57,6 +57,13 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
@@ -69,8 +76,14 @@ import {
   useSyncProjectIssues,
   useUpdateIssue,
   useReplaceIssueChecklist,
+  useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
+import {
+  ISSUE_WORKFLOW_STATUS_LABELS,
+  ISSUE_WORKFLOW_STATUS_OPTIONS,
+  type IssueWorkflowStatus,
+} from "@/lib/issue-workflow-status";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toGitHubMediaProxyUrl } from "@/lib/utils/github-media-proxy";
@@ -305,6 +318,35 @@ function ProgressBadge({ progress }: { progress?: number | null }) {
   );
 }
 
+function WorkflowStatusBadge({ status }: { status?: string | null }) {
+  if (!status) {
+    return null;
+  }
+
+  const label = ISSUE_WORKFLOW_STATUS_LABELS[status as IssueWorkflowStatus];
+  if (!label) {
+    return null;
+  }
+
+  const className =
+    status === "todo"
+      ? "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400"
+      : status === "in_progress"
+        ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+        : "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
+        className,
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
 function normalizeChecklistDraft(items: ChecklistDraftItem[]) {
   return items.map((item) => ({
     id: item.id ?? "",
@@ -378,6 +420,7 @@ export default function IssueDetailPage() {
   const { data: issue, isLoading } = useIssue(iid!);
   const isInternalIssue = issue?.source === "internal";
   const updateIssue = useUpdateIssue(iid!, id);
+  const updateInternalMeta = useUpdateIssueInternalMeta(iid!, id);
   const createComment = useCreateIssueComment(iid!, id);
   const replaceChecklist = useReplaceIssueChecklist(iid!, id);
   const suggestChecklist = useIssueChecklistSuggestions(iid!);
@@ -894,6 +937,18 @@ export default function IssueDetailPage() {
     }
   };
 
+  const handleWorkflowStatusChange = async (value: string) => {
+    const status = value === "unset" ? "" : (value as IssueWorkflowStatus);
+    try {
+      await updateInternalMeta.mutateAsync({
+        workflow_status: status,
+      });
+      toast.success("内部状态已更新");
+    } catch {
+      toast.error("更新内部状态失败");
+    }
+  };
+
   const handleCreateComment = async () => {
     if (!commentDraft.trim()) {
       toast.error("请输入评论内容");
@@ -1071,6 +1126,7 @@ export default function IssueDetailPage() {
                     {issue.source === "github" ? "GitHub" : "内部"}
                   </span>
                   <ProgressBadge progress={issue.internal_meta?.progress_percent} />
+                  <WorkflowStatusBadge status={issue.internal_meta?.workflow_status} />
                   {(issue.github?.labels ?? []).map((label) => (
                     <span
                       key={label.name}
@@ -1355,6 +1411,34 @@ export default function IssueDetailPage() {
                       <span className="font-medium">{formatRelativeTime(issue.github.synced_at)}</span>
                     </div>
                   )}
+                </div>
+
+                <Separator />
+
+                {/* 内部状态 */}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-muted-foreground">内部状态</span>
+                  <Select
+                    value={issue.internal_meta?.workflow_status || "unset"}
+                    onValueChange={(value) => void handleWorkflowStatusChange(value ?? "unset")}
+                    disabled={updateInternalMeta.isPending}
+                  >
+                    <SelectTrigger className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs hover:bg-muted data-[state=open]:bg-muted">
+                      <SelectValue placeholder="未设置">
+                        {issue.internal_meta?.workflow_status
+                          ? ISSUE_WORKFLOW_STATUS_LABELS[issue.internal_meta.workflow_status as IssueWorkflowStatus]
+                          : "未设置"}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="unset">未设置</SelectItem>
+                      {ISSUE_WORKFLOW_STATUS_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 {/* 负责人 & 里程碑 & 标签 */}

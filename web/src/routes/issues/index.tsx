@@ -39,6 +39,7 @@ import {
 import {
   ISSUE_WORKFLOW_STATUS_LABELS,
   ISSUE_WORKFLOW_STATUS_OPTIONS,
+  type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { cn } from "@/lib/utils";
@@ -69,6 +70,39 @@ function IssueProgressBadge({
       )}
     >
       进度 {progress}%
+    </span>
+  );
+}
+
+function IssueWorkflowStatusBadge({
+  status,
+}: {
+  status?: string | null;
+}) {
+  if (!status) {
+    return null;
+  }
+
+  const label = ISSUE_WORKFLOW_STATUS_LABELS[status as IssueWorkflowStatus];
+  if (!label) {
+    return null;
+  }
+
+  const className =
+    status === "todo"
+      ? "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400"
+      : status === "in_progress"
+        ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+        : "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+        className,
+      )}
+    >
+      {label}
     </span>
   );
 }
@@ -639,6 +673,9 @@ export default function IssuesPage() {
                           </Badge>
                           <IssueProgressBadge
                             progress={issue.internal_meta?.progress_percent}
+                          />
+                          <IssueWorkflowStatusBadge
+                            status={issue.internal_meta?.workflow_status}
                           />
                           {(issue.github?.labels ?? []).slice(0, 4).map((label) => (
                             <span
