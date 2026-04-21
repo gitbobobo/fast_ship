@@ -230,6 +230,41 @@ func TestRouterArtifactUploadAndDownloadWithAPIKey(t *testing.T) {
 	}
 }
 
+func TestRouterArtifactDownloadWithQueryToken(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "artifactquery", "artifactquery@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	version := createRouterTestVersion(t, env.db, project.ID)
+
+	uploadReq := newRouterMultipartRequest(t, "/api/versions/"+version.ID+"/artifacts", "file", "app.apk", []byte("artifact-query-token"), map[string]string{
+		"platform": "android",
+	})
+	uploadReq.Header.Set("Authorization", "Bearer "+auth.Token)
+
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("expected upload 200, got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var artifact struct {
+		ID string `json:"id"`
+	}
+	decodeRouterEnvelope(t, uploadRec, &artifact)
+
+	downloadReq := httptest.NewRequest(http.MethodGet, "/api/artifacts/"+artifact.ID+"/download?token="+auth.Token, nil)
+	downloadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(downloadRec, downloadReq)
+
+	if downloadRec.Code != http.StatusOK {
+		t.Fatalf("expected download 200, got %d: %s", downloadRec.Code, downloadRec.Body.String())
+	}
+	if downloadRec.Body.String() != "artifact-query-token" {
+		t.Fatalf("unexpected download body %q", downloadRec.Body.String())
+	}
+}
+
 func TestRouterIssueAssetUploadAndContentWithQueryToken(t *testing.T) {
 	env := setupRouterTestEnv(t)
 	auth := registerAndLoginRouterUser(t, env.router, "issueasset", "issueasset@example.com", "Password123")

@@ -57,5 +57,14 @@ export const artifactApi = {
   delete: (aid: string) =>
     api.delete(`artifacts/${aid}`).json<ApiResponse<null>>(),
 
-  downloadUrl: (aid: string) => `/api/artifacts/${aid}/download`,
+  downloadUrl: (aid: string) => {
+    const token = useAuthStore.getState().token;
+    const url = new URL(`/api/artifacts/${aid}/download`, window.location.origin);
+
+    if (token) {
+      url.searchParams.set("token", token);
+    }
+
+    return `${url.pathname}${url.search}`;
+  },
 };

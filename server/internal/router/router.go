@@ -112,7 +112,7 @@ func Setup(
 		// JWT / API Key 均可 — 安装包操作
 		api.POST("/versions/:vid/artifacts", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Upload)
 		api.DELETE("/artifacts/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Delete)
-		api.GET("/artifacts/:aid/download", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Download)
+		api.GET("/artifacts/:aid/download", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), artifactHandler.Download)
 	}
 
 	setupWebRoutes(r, cfg.Server.WebDistDir)
