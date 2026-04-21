@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	gh "github.com/google/go-github/v62/github"
@@ -211,6 +212,11 @@ func (c *Client) UpdateIssue(ctx context.Context, issueNumber int, payload Updat
 
 // CreateTag 创建 Git Tag（如果不存在）
 func (c *Client) CreateTag(ctx context.Context, tag, commitish string) error {
+	commitish = strings.TrimSpace(commitish)
+	if commitish == "" {
+		return errors.New("target commitish is empty")
+	}
+
 	// 检查 tag 是否已存在
 	_, _, err := c.client.Git.GetRef(ctx, c.owner, c.repo, "tags/"+tag)
 	if err == nil {
@@ -220,9 +226,14 @@ func (c *Client) CreateTag(ctx context.Context, tag, commitish string) error {
 		return err
 	}
 
+	sha, err := c.resolveCommitish(ctx, commitish)
+	if err != nil {
+		return fmt.Errorf("resolve target %q to commit SHA failed: %w", commitish, err)
+	}
+
 	ref := &gh.Reference{
 		Ref:    ptr("refs/tags/" + tag),
-		Object: &gh.GitObject{SHA: ptr(commitish)},
+		Object: &gh.GitObject{SHA: ptr(sha)},
 	}
 	_, _, err = c.client.Git.CreateRef(ctx, c.owner, c.repo, ref)
 	return err
@@ -275,4 +286,16 @@ func (c *Client) UploadAsset(ctx context.Context, releaseID int64, filename stri
 func isNotFound(err error) bool {
 	var errResp *gh.ErrorResponse
 	return errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == 404
+}
+
+func (c *Client) resolveCommitish(ctx context.Context, commitish string) (string, error) {
+	sha, _, err := c.client.Repositories.GetCommitSHA1(ctx, c.owner, c.repo, commitish, "")
+	if err != nil {
+		return "", err
+	}
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return "", fmt.Errorf("commit %q returned empty SHA", commitish)
+	}
+	return sha, nil
 }

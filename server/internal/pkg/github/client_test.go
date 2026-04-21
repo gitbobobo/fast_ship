@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	gh "github.com/google/go-github/v62/github"
@@ -68,6 +69,141 @@ func TestClientCreateTag_ReturnsErrorWhenLookupFails(t *testing.T) {
 	}
 	if createRefCalls != 0 {
 		t.Fatalf("expected CreateRef not to be called, got %d", createRefCalls)
+	}
+}
+
+func TestClientCreateTag_ResolvesBranchToCommitSHABeforeCreateRef(t *testing.T) {
+	const fullSHA = "0123456789abcdef0123456789abcdef01234567"
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/git/ref/tags/v1.0.0":
+			writeJSON(t, w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/commits/main":
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte(fullSHA)); err != nil {
+				t.Fatalf("write sha response: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/refs":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			if got := payload["ref"]; got != "refs/tags/v1.0.0" {
+				t.Fatalf("expected ref refs/tags/v1.0.0, got %#v", got)
+			}
+			if got := payload["sha"]; got != fullSHA {
+				t.Fatalf("expected full branch SHA %q, got %#v", fullSHA, got)
+			}
+			writeJSON(t, w, http.StatusCreated, map[string]any{
+				"ref": "refs/tags/v1.0.0",
+				"object": map[string]any{
+					"sha": fullSHA,
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+
+	if err := client.CreateTag(context.Background(), "v1.0.0", "main"); err != nil {
+		t.Fatalf("CreateTag: %v", err)
+	}
+}
+
+func TestClientCreateTag_ResolvesShortCommitishBeforeCreateRef(t *testing.T) {
+	const fullSHA = "89abcdef0123456789abcdef0123456789abcdef"
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/git/ref/tags/v1.0.0":
+			writeJSON(t, w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/commits/abc1234":
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte(fullSHA)); err != nil {
+				t.Fatalf("write sha response: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/refs":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			if got := payload["sha"]; got != fullSHA {
+				t.Fatalf("expected resolved commit SHA %q, got %#v", fullSHA, got)
+			}
+			writeJSON(t, w, http.StatusCreated, map[string]any{
+				"ref": "refs/tags/v1.0.0",
+				"object": map[string]any{
+					"sha": fullSHA,
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+
+	if err := client.CreateTag(context.Background(), "v1.0.0", "abc1234"); err != nil {
+		t.Fatalf("CreateTag: %v", err)
+	}
+}
+
+func TestClientCreateTag_ResolvesRefWithReservedURLCharactersBeforeCreateRef(t *testing.T) {
+	const (
+		branchRef = "feature#123"
+		fullSHA   = "fedcba9876543210fedcba9876543210fedcba98"
+	)
+
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/git/ref/tags/v1.0.0":
+			writeJSON(t, w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/commits/"+branchRef:
+			if got := r.RequestURI; got != "/repos/owner/repo/commits/feature%23123" {
+				t.Fatalf("expected escaped commitish request URI, got %q", got)
+			}
+			if got := r.Header.Get("Accept"); got != "application/vnd.github.v3.sha" {
+				t.Fatalf("expected SHA Accept header, got %q", got)
+			}
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte(fullSHA)); err != nil {
+				t.Fatalf("write sha response: %v", err)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/refs":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode payload: %v", err)
+			}
+			if got := payload["sha"]; got != fullSHA {
+				t.Fatalf("expected resolved commit SHA %q, got %#v", fullSHA, got)
+			}
+			writeJSON(t, w, http.StatusCreated, map[string]any{
+				"ref": "refs/tags/v1.0.0",
+				"object": map[string]any{
+					"sha": fullSHA,
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+
+	if err := client.CreateTag(context.Background(), "v1.0.0", branchRef); err != nil {
+		t.Fatalf("CreateTag: %v", err)
+	}
+}
+
+func TestClientCreateTag_ReturnsErrorWhenCommitishIsEmpty(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		return
+	}))
+
+	err := client.CreateTag(context.Background(), "v1.0.0", "   ")
+	if err == nil {
+		t.Fatalf("expected CreateTag to fail")
+	}
+	if !strings.Contains(err.Error(), "target commitish is empty") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
