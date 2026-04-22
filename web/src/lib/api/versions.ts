@@ -44,5 +44,7 @@ export const versionApi = {
     api.delete(`versions/${vid}`).json<ApiResponse<null>>(),
 
   ship: (vid: string) =>
-    api.post(`versions/${vid}/ship`).json<ApiResponse<Version>>(),
+    api
+      .post(`versions/${vid}/ship`, { timeout: false })
+      .json<ApiResponse<Version>>(),
 };

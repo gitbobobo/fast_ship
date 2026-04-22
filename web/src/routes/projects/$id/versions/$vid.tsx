@@ -21,8 +21,8 @@ import {
   Tag,
   Package,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
 import { Header } from "@/components/layout/header";
+import { GitHubContent } from "@/components/github-content";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -288,9 +288,24 @@ export default function VersionDetailPage() {
       await refetchVersion();
     } catch {
       const result = await refetchVersion();
+      const latestVersion = result.data;
+
+      if (
+        latestVersion?.status === "shipped" ||
+        latestVersion?.ship_status === "completed"
+      ) {
+        toast.success("发货成功！");
+        return;
+      }
+
+      if (latestVersion?.ship_status === "in_progress") {
+        toast.success("发货已开始，正在同步最新进度");
+        return;
+      }
+
       const failureMessage =
-        result.data?.error_log ||
-        result.data?.ship_message ||
+        latestVersion?.error_log ||
+        latestVersion?.ship_message ||
         "发货失败，请修复后重试";
       setShipFailureMessage(failureMessage);
       setShipFailureDialogOpen(true);
@@ -505,9 +520,12 @@ export default function VersionDetailPage() {
                       />
                     </TabsContent>
                     <TabsContent value="preview">
-                      <div className="prose prose-sm dark:prose-invert max-w-none rounded-md border p-4">
+                      <div className="rounded-md border p-4">
                         {notes ? (
-                          <ReactMarkdown>{notes}</ReactMarkdown>
+                          <GitHubContent
+                            markdown={notes}
+                            className="markdown-body text-sm"
+                          />
                         ) : (
                           <p className="text-muted-foreground">暂无内容</p>
                         )}
@@ -527,9 +545,10 @@ export default function VersionDetailPage() {
                     </div>
                   </Tabs>
                 ) : version.release_notes ? (
-                  <div className="prose prose-sm dark:prose-invert max-w-none">
-                    <ReactMarkdown>{version.release_notes}</ReactMarkdown>
-                  </div>
+                  <GitHubContent
+                    markdown={version.release_notes}
+                    className="markdown-body text-sm"
+                  />
                 ) : (
                   <div className="flex flex-col items-center justify-center py-10 text-center">
                     <Tag className="mb-2 h-8 w-8 text-muted-foreground/40" />

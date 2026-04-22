@@ -1,5 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { vi } from "vitest";
+import { toast } from "sonner";
 import VersionDetailPage from "@/routes/projects/$id/versions/$vid";
 import { renderWithRoute } from "@/test/render";
 import {
@@ -313,5 +314,44 @@ describe("VersionDetailPage", () => {
     expect(
       screen.getByText("GitHub 发货流程未完成，版本状态保持为待发货。"),
     ).toBeInTheDocument();
+  });
+
+  it("does not show failure dialog when ship request errors but backend is still running", async () => {
+    const refetchVersion = vi.fn().mockResolvedValue({
+      data: makeVersion({
+        ship_status: "in_progress",
+        ship_stage: "upload_assets",
+        ship_message: "正在上传安装包",
+        error_log: null,
+      }),
+    });
+
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: refetchVersion,
+    } as unknown as ReturnType<typeof useVersion>);
+
+    shipVersionMutateAsync.mockRejectedValueOnce(new Error("request timeout"));
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "发货到 GitHub" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认发货" }));
+
+    await waitFor(() =>
+      expect(refetchVersion).toHaveBeenCalled(),
+    );
+    expect(
+      screen.queryByRole("heading", { name: "发货失败" }),
+    ).not.toBeInTheDocument();
+    expect(toast.success).toHaveBeenCalledWith("发货已开始，正在同步最新进度");
   });
 });

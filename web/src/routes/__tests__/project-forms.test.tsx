@@ -146,6 +146,35 @@ describe("ProjectAndVersionForms", () => {
     expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-1");
   });
 
+  it("shows owner-aware github token guidance for fine-grained tokens", async () => {
+    const user = userEvent.setup();
+
+    renderWithRoute(<EditProjectPage />, {
+      path: "/projects/:id/edit",
+      initialEntry: "/projects/proj-1/edit",
+    });
+
+    await user.click(screen.getByRole("button", { name: "如何获取？" }));
+
+    expect(screen.getAllByText(/Resource owner/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/old-owner\/old-repo/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Resource not accessible by personal access token/),
+    ).toBeInTheDocument();
+
+    const fineGrainedLink = screen.getByRole("link", {
+      name: "按当前 Owner 预填 Fine-grained Token",
+    });
+    expect(fineGrainedLink).toHaveAttribute(
+      "href",
+      expect.stringContaining("target_name=old-owner"),
+    );
+    expect(fineGrainedLink).toHaveAttribute(
+      "href",
+      expect.stringContaining("contents=write"),
+    );
+  });
+
   it("submits create version form and navigates to version detail", async () => {
     createVersionMutateAsync.mockResolvedValue({
       data: { id: "ver-99" },
