@@ -34,6 +34,7 @@ interface InternalIssueFormProps {
   onSubmit: (values: InternalIssueFormInput) => Promise<void> | void;
   showWorkflowStatus?: boolean;
   submitLabel: string;
+  editorRows?: number;
 }
 
 export function InternalIssueForm({
@@ -44,6 +45,7 @@ export function InternalIssueForm({
   onSubmit,
   showWorkflowStatus = false,
   submitLabel,
+  editorRows = 24,
 }: InternalIssueFormProps) {
   const {
     control,
@@ -196,7 +198,7 @@ export function InternalIssueForm({
               onChange={field.onChange}
               onPasteImage={handlePasteImage}
               placeholder="支持 Markdown，可写复现步骤、验收标准、上下文或补充链接。"
-              rows={16}
+              rows={editorRows}
             />
           )}
         />
