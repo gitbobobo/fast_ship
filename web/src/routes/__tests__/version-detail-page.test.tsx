@@ -145,6 +145,27 @@ describe("VersionDetailPage", () => {
     expect(screen.getByText("API Key: CI-Upload")).toBeInTheDocument();
   });
 
+  it("renders release notes with markdown semantics", () => {
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        release_notes: "# What's New\n\n- Plex OAuth\n- Genre 浏览",
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "What's New" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Plex OAuth")).toBeInTheDocument();
+    expect(screen.getByText("Genre 浏览")).toBeInTheDocument();
+  });
+
   it("allows editing version number when version is editable", () => {
     vi.mocked(useVersion).mockReturnValue({
       data: makeVersion({
