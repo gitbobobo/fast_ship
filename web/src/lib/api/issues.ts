@@ -76,6 +76,9 @@ export const issueApi = {
   uploadAsset: (issueId: string, formData: FormData) =>
     api.post(`issues/${issueId}/assets`, { body: formData }).json<ApiResponse<IssueAsset>>(),
 
+  uploadDraftAsset: (projectId: string, formData: FormData) =>
+    api.post(`projects/${projectId}/issues/assets`, { body: formData }).json<ApiResponse<IssueAsset>>(),
+
   comments: (issueId: string, page = 1, pageSize = 20) =>
     api
       .get(`issues/${issueId}/comments`, {

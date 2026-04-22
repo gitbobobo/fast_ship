@@ -179,6 +179,12 @@ export function useUploadIssueAsset(issueId: string) {
   });
 }
 
+export function useUploadDraftIssueAsset(projectId: string) {
+  return useMutation({
+    mutationFn: (formData: FormData) => issueApi.uploadDraftAsset(projectId, formData),
+  });
+}
+
 export function useCreateIssueComment(issueId: string, projectId?: string) {
   const queryClient = useQueryClient();
   return useMutation({

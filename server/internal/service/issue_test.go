@@ -352,6 +352,150 @@ func TestIssueServiceCreateInternalIssue_CreatesLocalIssue(t *testing.T) {
 	}
 }
 
+func TestIssueServiceCreateInternalIssue_AttachesReferencedDraftAssets(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
+		project.ID,
+		user.ID,
+		"clip.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload draft issue asset: %v", err)
+	}
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  fmt.Sprintf("创建时直接引用图片\n\n%s", draftAsset.Markdown),
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	if err != nil {
+		t.Fatalf("list issue assets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected 1 attached issue asset, got %d", len(assets))
+	}
+	if assets[0].ID != draftAsset.ID {
+		t.Fatalf("expected draft asset %q to be attached, got %q", draftAsset.ID, assets[0].ID)
+	}
+	if assets[0].Status != model.IssueAssetStatusAttached {
+		t.Fatalf("expected asset status attached, got %q", assets[0].Status)
+	}
+
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	if err != nil {
+		t.Fatalf("list draft assets: %v", err)
+	}
+	if len(draftAssets) != 0 {
+		t.Fatalf("expected referenced draft asset to be removed after attach, got %d", len(draftAssets))
+	}
+
+	reader, mimeType, fileSize, err := svc.issueService.GetIssueAssetContent(draftAsset.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get issue asset content: %v", err)
+	}
+	defer reader.Close()
+	if mimeType != "image/png" {
+		t.Fatalf("expected image/png mime type, got %q", mimeType)
+	}
+	if fileSize <= 0 {
+		t.Fatalf("expected persisted file size, got %d", fileSize)
+	}
+}
+
+func TestIssueServiceCreateInternalIssue_RollsBackWhenAttachingDraftAssetsFails(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
+		project.ID,
+		user.ID,
+		"clip.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload draft issue asset: %v", err)
+	}
+
+	existingIssue := createTestIssue(t, svc.db, project.ID, func(issue *model.Issue) {
+		issue.Source = model.IssueSourceInternal
+		issue.SequenceNumber = 1
+		issue.AuthorUserID = user.ID
+		issue.AuthorLogin = user.Username
+	})
+	if err := svc.db.Create(&model.IssueAsset{
+		ID:              draftAsset.ID,
+		IssueID:         existingIssue.ID,
+		FileName:        "existing.png",
+		FilePath:        "existing/path.png",
+		MimeType:        "image/png",
+		FileSize:        int64(len(testPNGBytes)),
+		Status:          model.IssueAssetStatusAttached,
+		CreatedByUserID: user.ID,
+		CreatedAt:       time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed conflicting issue asset: %v", err)
+	}
+
+	_, err = svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  fmt.Sprintf("创建时直接引用图片\n\n%s", draftAsset.Markdown),
+	})
+	if err != errs.ErrInternal {
+		t.Fatalf("expected internal error, got %v", err)
+	}
+
+	var issueCount int64
+	if err := svc.db.Model(&model.Issue{}).
+		Where("project_id = ? AND title = ?", project.ID, "补充发布检查").
+		Count(&issueCount).Error; err != nil {
+		t.Fatalf("count rolled back issues: %v", err)
+	}
+	if issueCount != 0 {
+		t.Fatalf("expected create to roll back inserted issue, got %d rows", issueCount)
+	}
+
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	if err != nil {
+		t.Fatalf("list draft assets: %v", err)
+	}
+	if len(draftAssets) != 1 {
+		t.Fatalf("expected draft asset to remain after rollback, got %d", len(draftAssets))
+	}
+}
+
+func TestIssueServiceCreateInternalIssue_RejectsMissingReferencedDraftAssets(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	_, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "补充发布检查",
+		Body:  "引用了不存在的图片 ![missing](/api/issues/assets/11111111-1111-1111-1111-111111111111/content)",
+	})
+	if err != errs.ErrInvalidParams {
+		t.Fatalf("expected invalid params, got %v", err)
+	}
+
+	var issueCount int64
+	if err := svc.db.Model(&model.Issue{}).Where("project_id = ?", project.ID).Count(&issueCount).Error; err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if issueCount != 0 {
+		t.Fatalf("expected no issues to be created, got %d", issueCount)
+	}
+}
+
 func TestIssueServiceUpdateInternalIssue_UpdatesBodyAndState(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")

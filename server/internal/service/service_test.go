@@ -19,26 +19,27 @@ import (
 )
 
 type testServices struct {
-	db                *gorm.DB
-	storage           storage.Storage
-	cfg               *config.Config
-	userAISettingRepo *repository.UserAISettingRepository
-	projectRepo       *repository.ProjectRepository
-	versionRepo       *repository.VersionRepository
-	issueRepo         *repository.IssueRepository
-	gitHubMetaRepo    *repository.IssueGitHubMetaRepository
-	commentRepo       *repository.IssueCommentRepository
-	timelineRepo      *repository.IssueTimelineRepository
-	internalMetaRepo  *repository.IssueInternalMetaRepository
-	checklistRepo     *repository.IssueChecklistRepository
-	syncStateRepo     *repository.IssueSyncStateRepository
-	issueAssetRepo    *repository.IssueAssetRepository
-	artifactRepo      *repository.ArtifactRepository
-	issueService      *IssueService
-	aiService         *AIService
-	versionService    *VersionService
-	artifactService   *ArtifactService
-	shipService       *ShipService
+	db                  *gorm.DB
+	storage             storage.Storage
+	cfg                 *config.Config
+	userAISettingRepo   *repository.UserAISettingRepository
+	projectRepo         *repository.ProjectRepository
+	versionRepo         *repository.VersionRepository
+	issueRepo           *repository.IssueRepository
+	gitHubMetaRepo      *repository.IssueGitHubMetaRepository
+	commentRepo         *repository.IssueCommentRepository
+	timelineRepo        *repository.IssueTimelineRepository
+	internalMetaRepo    *repository.IssueInternalMetaRepository
+	checklistRepo       *repository.IssueChecklistRepository
+	syncStateRepo       *repository.IssueSyncStateRepository
+	issueAssetRepo      *repository.IssueAssetRepository
+	issueDraftAssetRepo *repository.IssueDraftAssetRepository
+	artifactRepo        *repository.ArtifactRepository
+	issueService        *IssueService
+	aiService           *AIService
+	versionService      *VersionService
+	artifactService     *ArtifactService
+	shipService         *ShipService
 }
 
 func setupTestServices(t *testing.T) *testServices {
@@ -64,6 +65,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
 		&model.IssueAsset{},
+		&model.IssueDraftAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 	); err != nil {
@@ -93,6 +95,7 @@ func setupTestServices(t *testing.T) *testServices {
 	checklistRepo := repository.NewIssueChecklistRepository(db)
 	syncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
+	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 
 	cfg := &config.Config{
@@ -102,26 +105,27 @@ func setupTestServices(t *testing.T) *testServices {
 	}
 
 	return &testServices{
-		db:                db,
-		storage:           fileStorage,
-		cfg:               cfg,
-		userAISettingRepo: userAISettingRepo,
-		projectRepo:       projectRepo,
-		versionRepo:       versionRepo,
-		issueRepo:         issueRepo,
-		gitHubMetaRepo:    gitHubMetaRepo,
-		commentRepo:       commentRepo,
-		timelineRepo:      timelineRepo,
-		internalMetaRepo:  internalMetaRepo,
-		checklistRepo:     checklistRepo,
-		syncStateRepo:     syncStateRepo,
-		issueAssetRepo:    issueAssetRepo,
-		artifactRepo:      artifactRepo,
-		issueService:      NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
-		aiService:         NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg),
-		versionService:    NewVersionService(versionRepo, projectRepo, fileStorage),
-		artifactService:   NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
-		shipService:       NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
+		db:                  db,
+		storage:             fileStorage,
+		cfg:                 cfg,
+		userAISettingRepo:   userAISettingRepo,
+		projectRepo:         projectRepo,
+		versionRepo:         versionRepo,
+		issueRepo:           issueRepo,
+		gitHubMetaRepo:      gitHubMetaRepo,
+		commentRepo:         commentRepo,
+		timelineRepo:        timelineRepo,
+		internalMetaRepo:    internalMetaRepo,
+		checklistRepo:       checklistRepo,
+		syncStateRepo:       syncStateRepo,
+		issueAssetRepo:      issueAssetRepo,
+		issueDraftAssetRepo: issueDraftAssetRepo,
+		artifactRepo:        artifactRepo,
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
+		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg),
+		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage),
+		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
+		shipService:         NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
 	}
 }
 

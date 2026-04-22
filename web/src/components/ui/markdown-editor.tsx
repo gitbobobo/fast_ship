@@ -58,7 +58,7 @@ export function MarkdownEditor({
   const valueRef = useRef(value);
   const onChangeRef = useRef(onChange);
   const onPasteImageRef = useRef(onPasteImage);
-  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [uploadingImageCount, setUploadingImageCount] = useState(0);
 
   valueRef.current = value;
   onChangeRef.current = onChange;
@@ -113,7 +113,7 @@ export function MarkdownEditor({
     let selectionStart = target.selectionStart ?? nextValue.length;
     let selectionEnd = target.selectionEnd ?? selectionStart;
 
-    setIsUploadingImage(true);
+    setUploadingImageCount((count) => count + 1);
     try {
       for (const file of files) {
         const markdown = await onPasteImageRef.current(file);
@@ -133,7 +133,7 @@ export function MarkdownEditor({
     } catch {
       return;
     } finally {
-      setIsUploadingImage(false);
+      setUploadingImageCount((count) => Math.max(0, count - 1));
     }
   });
 
@@ -183,7 +183,7 @@ export function MarkdownEditor({
           placeholder,
         }}
       />
-      {isUploadingImage ? (
+      {uploadingImageCount > 0 ? (
         <p className="mt-2 text-xs text-muted-foreground">正在上传图片并插入 Markdown...</p>
       ) : null}
     </div>

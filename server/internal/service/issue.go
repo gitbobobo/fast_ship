@@ -60,6 +60,7 @@ type IssueService struct {
 	checklistRepo    *repository.IssueChecklistRepository
 	syncStateRepo    *repository.IssueSyncStateRepository
 	assetRepo        *repository.IssueAssetRepository
+	draftAssetRepo   *repository.IssueDraftAssetRepository
 	projectRepo      *repository.ProjectRepository
 	userRepo         *repository.UserRepository
 	storage          storage.Storage
@@ -282,6 +283,7 @@ func NewIssueService(
 	checklistRepo *repository.IssueChecklistRepository,
 	syncStateRepo *repository.IssueSyncStateRepository,
 	assetRepo *repository.IssueAssetRepository,
+	draftAssetRepo *repository.IssueDraftAssetRepository,
 	projectRepo *repository.ProjectRepository,
 	userRepo *repository.UserRepository,
 	storage storage.Storage,
@@ -297,6 +299,7 @@ func NewIssueService(
 		checklistRepo:    checklistRepo,
 		syncStateRepo:    syncStateRepo,
 		assetRepo:        assetRepo,
+		draftAssetRepo:   draftAssetRepo,
 		projectRepo:      projectRepo,
 		userRepo:         userRepo,
 		storage:          storage,
@@ -326,6 +329,25 @@ func (s *IssueService) CleanupExpiredPendingIssueAssets() error {
 
 	for issueID, ids := range idsByIssue {
 		if err := s.deleteIssueAssets(issueID, ids); err != nil {
+			return err
+		}
+	}
+
+	draftAssets, err := s.draftAssetRepo.ListCreatedBefore(cutoff)
+	if err != nil {
+		return err
+	}
+	if len(draftAssets) == 0 {
+		return nil
+	}
+
+	idsByProject := make(map[string][]string)
+	for _, asset := range draftAssets {
+		idsByProject[asset.ProjectID] = append(idsByProject[asset.ProjectID], asset.ID)
+	}
+
+	for projectID, ids := range idsByProject {
+		if err := s.deleteDraftIssueAssets(projectID, ids); err != nil {
 			return err
 		}
 	}
@@ -374,21 +396,37 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		UpdatedAt:       now,
 	}
 
-	if err := s.issueRepo.Create(issue); err != nil {
-		return nil, errs.ErrInternal
+	var meta *model.IssueInternalMeta
+	if req.WorkflowStatus != "" {
+		meta = buildInternalIssueMeta(issue.ID, userID, req.WorkflowStatus, now)
 	}
 
-	if req.WorkflowStatus != "" {
-		if _, err := s.UpdateInternalMeta(issue.ID, userID, req.WorkflowStatus); err != nil {
-			return nil, err
+	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := s.issueRepo.CreateTx(tx, issue); err != nil {
+			return err
 		}
+		if err := s.attachDraftAssetsToIssueTx(tx, projectID, issue.ID, req.Body); err != nil {
+			return err
+		}
+		if meta != nil {
+			if err := s.internalMetaRepo.UpsertTx(tx, meta); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		var appErr *errs.AppError
+		if errors.As(err, &appErr) {
+			return nil, appErr
+		}
+		return nil, errs.ErrInternal
 	}
 
 	stored, err := s.issueRepo.FindByID(issue.ID)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	meta, err := s.loadInternalMeta(stored.ID)
+	meta, err = s.loadInternalMeta(stored.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -596,13 +634,49 @@ func (s *IssueService) UploadInternalIssueAsset(issueID, userID, fileName string
 	return &resp, nil
 }
 
+func (s *IssueService) UploadDraftInternalIssueAsset(projectID, userID, fileName string, fileSize int64, reader io.Reader) (*IssueAssetResponse, error) {
+	_ = fileSize
+
+	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	asset, err := s.storeDraftIssueAsset(projectID, userID, fileName, reader)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := toDraftIssueAssetResponse(*asset)
+	return &resp, nil
+}
+
 func (s *IssueService) GetIssueAssetContent(assetID, userID string) (io.ReadCloser, string, int64, error) {
 	asset, err := s.assetRepo.FindByID(assetID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", 0, errs.ErrInternal
+		}
+		draftAsset, draftErr := s.draftAssetRepo.FindByID(assetID)
+		if draftErr != nil {
+			if errors.Is(draftErr, gorm.ErrRecordNotFound) {
+				return nil, "", 0, errs.ErrIssueAssetNotFound
+			}
+			return nil, "", 0, errs.ErrInternal
+		}
+		if _, err := s.projectRepo.FindByID(draftAsset.ProjectID, userID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, "", 0, errs.ErrProjectNotFound
+			}
+			return nil, "", 0, errs.ErrNotOwner
+		}
+		reader, err := s.storage.Get(draftAsset.FilePath)
+		if err != nil {
 			return nil, "", 0, errs.ErrIssueAssetNotFound
 		}
-		return nil, "", 0, errs.ErrInternal
+		return reader, draftAsset.MimeType, draftAsset.FileSize, nil
 	}
 
 	issue, err := s.issueRepo.FindByID(asset.IssueID)
@@ -863,25 +937,7 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 	meta.WorkflowStatus = workflowStatus
 	meta.UpdatedByUserID = userID
 	meta.UpdatedAt = now
-
-	switch workflowStatus {
-	case "", model.IssueWorkflowStatusTodo:
-		meta.StartedAt = nil
-		meta.CompletedAt = nil
-	case model.IssueWorkflowStatusInProgress:
-		if meta.StartedAt == nil {
-			value := now
-			meta.StartedAt = &value
-		}
-		meta.CompletedAt = nil
-	case model.IssueWorkflowStatusDone:
-		if meta.StartedAt == nil {
-			value := now
-			meta.StartedAt = &value
-		}
-		value := now
-		meta.CompletedAt = &value
-	}
+	applyExplicitWorkflowStatus(meta, workflowStatus, now)
 
 	if err := s.internalMetaRepo.Upsert(meta); err != nil {
 		return nil, errs.ErrInternal
@@ -1577,6 +1633,20 @@ func toIssueAssetResponse(asset model.IssueAsset) IssueAssetResponse {
 	}
 }
 
+func toDraftIssueAssetResponse(asset model.IssueDraftAsset) IssueAssetResponse {
+	contentURL := buildIssueAssetContentURL(asset.ID)
+	return IssueAssetResponse{
+		ID:         asset.ID,
+		IssueID:    "",
+		FileName:   asset.FileName,
+		MimeType:   asset.MimeType,
+		FileSize:   asset.FileSize,
+		ContentURL: contentURL,
+		Markdown:   fmt.Sprintf("![%s](%s)", issueAssetAltText(asset.FileName), contentURL),
+		CreatedAt:  asset.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
+}
+
 func buildIssueAssetContentURL(assetID string) string {
 	return fmt.Sprintf("/api/issues/assets/%s/content", assetID)
 }
@@ -1611,6 +1681,15 @@ func buildIssueAssetStoragePath(projectID, issueID, assetID, fileName, mimeType 
 		ext = ".bin"
 	}
 	return fmt.Sprintf("%s/issues/%s/assets/%s%s", projectID, issueID, assetID, ext)
+}
+
+func buildIssueDraftAssetStoragePath(projectID, assetID, fileName, mimeType string) string {
+	name := normalizeIssueAssetFileName(fileName, mimeType)
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == "" {
+		ext = ".bin"
+	}
+	return fmt.Sprintf("%s/issues/drafts/assets/%s%s", projectID, assetID, ext)
 }
 
 func extractIssueAssetIDs(body string) map[string]struct{} {
@@ -1687,6 +1766,85 @@ func (s *IssueService) deleteIssueAssets(issueID string, ids []string) error {
 	return nil
 }
 
+func (s *IssueService) deleteDraftIssueAssets(projectID string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	assets, err := s.draftAssetRepo.ListByProjectIDAndIDs(projectID, ids)
+	if err != nil {
+		return err
+	}
+
+	pathByID := make(map[string]string, len(assets))
+	for _, asset := range assets {
+		pathByID[asset.ID] = asset.FilePath
+	}
+
+	if err := s.draftAssetRepo.DeleteByProjectIDAndIDs(projectID, ids); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if path := pathByID[id]; path != "" {
+			_ = s.storage.Delete(path)
+		}
+	}
+	return nil
+}
+
+func (s *IssueService) attachDraftAssetsToIssue(projectID, issueID, body string) error {
+	return s.attachDraftAssetsToIssueTx(nil, projectID, issueID, body)
+}
+
+func (s *IssueService) attachDraftAssetsToIssueTx(tx *gorm.DB, projectID, issueID, body string) error {
+	referencedIDs := extractIssueAssetIDs(body)
+	if len(referencedIDs) == 0 {
+		return nil
+	}
+
+	ids := make([]string, 0, len(referencedIDs))
+	for id := range referencedIDs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	if tx == nil {
+		tx = s.issueRepo.DB()
+	}
+
+	draftAssets, err := s.draftAssetRepo.ListByProjectIDAndIDsTx(tx, projectID, ids)
+	if err != nil {
+		return err
+	}
+	if len(draftAssets) == 0 {
+		return errs.ErrInvalidParams
+	}
+	if len(draftAssets) != len(ids) {
+		return errs.ErrInvalidParams
+	}
+
+	attachedIDs := make([]string, 0, len(draftAssets))
+	for _, asset := range draftAssets {
+		issueAsset := &model.IssueAsset{
+			ID:              asset.ID,
+			IssueID:         issueID,
+			FileName:        asset.FileName,
+			FilePath:        asset.FilePath,
+			MimeType:        asset.MimeType,
+			FileSize:        asset.FileSize,
+			Status:          model.IssueAssetStatusAttached,
+			CreatedByUserID: asset.CreatedByUserID,
+			CreatedAt:       asset.CreatedAt,
+		}
+		if err := s.assetRepo.CreateTx(tx, issueAsset); err != nil {
+			return err
+		}
+		attachedIDs = append(attachedIDs, asset.ID)
+	}
+
+	return s.draftAssetRepo.DeleteByProjectIDAndIDsTx(tx, projectID, attachedIDs)
+}
+
 func resolveIssueAssetIDFromURL(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return ""
@@ -1711,6 +1869,70 @@ func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	r.n += int64(n)
 	return n, err
+}
+
+func (s *IssueService) storeDraftIssueAsset(projectID, userID, fileName string, reader io.Reader) (*model.IssueDraftAsset, error) {
+	readFrom := reader
+	if s.cfg.Upload.MaxFileSize > 0 {
+		readFrom = io.LimitReader(reader, s.cfg.Upload.MaxFileSize+1)
+	}
+
+	head := make([]byte, issueAssetSniffBytes)
+	headSize, err := io.ReadFull(readFrom, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, errs.ErrInternal
+	}
+	head = head[:headSize]
+	if len(head) == 0 {
+		return nil, errs.ErrInvalidParams
+	}
+
+	mimeType := http.DetectContentType(head)
+	if !strings.HasPrefix(mimeType, "image/") {
+		return nil, errs.ErrInvalidParams
+	}
+
+	assetID := uuid.NewString()
+	storagePath := buildIssueDraftAssetStoragePath(projectID, assetID, fileName, mimeType)
+	uploadReader := io.MultiReader(bytes.NewReader(head), readFrom)
+	countedReader := &countingReader{reader: uploadReader}
+	if err := s.storage.Save(storagePath, countedReader); err != nil {
+		_ = s.storage.Delete(storagePath)
+		return nil, errs.ErrInternal
+	}
+	if s.cfg.Upload.MaxFileSize > 0 && countedReader.n > s.cfg.Upload.MaxFileSize {
+		_ = s.storage.Delete(storagePath)
+		return nil, errs.ErrInvalidParams
+	}
+
+	asset := &model.IssueDraftAsset{
+		ID:              assetID,
+		ProjectID:       projectID,
+		FileName:        normalizeIssueAssetFileName(fileName, mimeType),
+		FilePath:        storagePath,
+		MimeType:        mimeType,
+		FileSize:        countedReader.n,
+		CreatedByUserID: userID,
+		CreatedAt:       time.Now().UTC(),
+	}
+
+	if err := s.draftAssetRepo.Create(asset); err != nil {
+		_ = s.storage.Delete(storagePath)
+		return nil, errs.ErrInternal
+	}
+
+	return asset, nil
+}
+
+func buildInternalIssueMeta(issueID, userID string, workflowStatus model.IssueWorkflowStatus, now time.Time) *model.IssueInternalMeta {
+	meta := &model.IssueInternalMeta{
+		IssueID:         issueID,
+		UpdatedByUserID: userID,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	applyExplicitWorkflowStatus(meta, workflowStatus, now)
+	return meta
 }
 
 func (s *IssueService) internalMetaByIssueIDs(issues []model.Issue) (map[string]*model.IssueInternalMeta, error) {
@@ -2056,6 +2278,29 @@ func applyWorkflowSnapshot(meta *model.IssueInternalMeta, snapshot checklistSnap
 			meta.StartedAt = &value
 		}
 		meta.CompletedAt = nil
+	}
+}
+
+func applyExplicitWorkflowStatus(meta *model.IssueInternalMeta, workflowStatus model.IssueWorkflowStatus, now time.Time) {
+	meta.WorkflowStatus = workflowStatus
+
+	switch workflowStatus {
+	case "", model.IssueWorkflowStatusTodo:
+		meta.StartedAt = nil
+		meta.CompletedAt = nil
+	case model.IssueWorkflowStatusInProgress:
+		if meta.StartedAt == nil {
+			value := now
+			meta.StartedAt = &value
+		}
+		meta.CompletedAt = nil
+	case model.IssueWorkflowStatusDone:
+		if meta.StartedAt == nil {
+			value := now
+			meta.StartedAt = &value
+		}
+		value := now
+		meta.CompletedAt = &value
 	}
 }
 

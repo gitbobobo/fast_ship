@@ -5,7 +5,7 @@ import { Header } from "@/components/layout/header";
 import { InternalIssueForm, type InternalIssueFormInput } from "@/components/issues/internal-issue-form";
 import { Button } from "@/components/ui/button";
 
-import { useCreateIssue } from "@/lib/hooks/use-issues";
+import { useCreateIssue, useUploadDraftIssueAsset } from "@/lib/hooks/use-issues";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { toast } from "sonner";
 
@@ -27,6 +27,7 @@ export default function NewInternalIssuePage() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
   const createIssue = useCreateIssue(id!);
+  const uploadDraftIssueAsset = useUploadDraftIssueAsset(id!);
 
   const issuesSearch = useMemo(() => {
     const next = new URLSearchParams(searchParams);
@@ -61,6 +62,19 @@ export default function NewInternalIssuePage() {
     }
   };
 
+  const handlePasteImage = async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file, file.name || "image.png");
+
+    try {
+      const res = await uploadDraftIssueAsset.mutateAsync(formData);
+      return res.data.markdown;
+    } catch {
+      toast.error("上传图片失败");
+      throw new Error("upload failed");
+    }
+  };
+
   return (
     <>
       <Header title="新建内部问题" />
@@ -79,6 +93,7 @@ export default function NewInternalIssuePage() {
         <InternalIssueForm
           isSubmitting={createIssue.isPending}
           onCancel={handleCancel}
+          onPasteImage={handlePasteImage}
           onSubmit={handleSubmit}
           submitLabel="创建问题"
         />

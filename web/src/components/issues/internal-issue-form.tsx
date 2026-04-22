@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -49,6 +49,7 @@ export function InternalIssueForm({
     control,
     register,
     handleSubmit,
+    getValues,
     reset,
     formState: { errors },
   } = useForm<InternalIssueFormInput>({
@@ -68,8 +69,43 @@ export function InternalIssueForm({
     });
   }, [defaultValues?.body, defaultValues?.title, defaultValues?.workflow_status, reset]);
 
+  const pendingUploadPromisesRef = useRef(new Set<Promise<string>>());
+  const [pendingUploadCount, setPendingUploadCount] = useState(0);
+  const isBusy = isSubmitting || pendingUploadCount > 0;
+
+  const handlePasteImage = onPasteImage
+    ? (file: File) => {
+        const uploadPromise = onPasteImage(file);
+        pendingUploadPromisesRef.current.add(uploadPromise);
+        setPendingUploadCount((count) => count + 1);
+
+        void uploadPromise.finally(() => {
+          pendingUploadPromisesRef.current.delete(uploadPromise);
+          setPendingUploadCount((count) => Math.max(0, count - 1));
+        });
+
+        return uploadPromise;
+      }
+    : undefined;
+
+  const waitForPendingUploads = async () => {
+    while (pendingUploadPromisesRef.current.size > 0) {
+      await Promise.all(Array.from(pendingUploadPromisesRef.current));
+    }
+  };
+
   return (
-    <form className="space-y-6" onSubmit={handleSubmit(async (values) => onSubmit(values))}>
+    <form
+      className="space-y-6"
+      onSubmit={handleSubmit(async () => {
+        try {
+          await waitForPendingUploads();
+        } catch {
+          return;
+        }
+        await onSubmit(getValues());
+      })}
+    >
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_180px]">
         <div className="space-y-2">
           <Label htmlFor="issue-title">标题</Label>
@@ -118,7 +154,7 @@ export function InternalIssueForm({
               id="issue-body"
               value={field.value}
               onChange={field.onChange}
-              onPasteImage={onPasteImage}
+              onPasteImage={handlePasteImage}
               placeholder="支持 Markdown，可写复现步骤、验收标准、上下文或补充链接。"
               rows={16}
             />
@@ -130,8 +166,8 @@ export function InternalIssueForm({
         <Button type="button" variant="outline" onClick={onCancel}>
           取消
         </Button>
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? "保存中..." : submitLabel}
+        <Button type="submit" disabled={isBusy}>
+          {isBusy ? "保存中..." : submitLabel}
         </Button>
       </div>
     </form>

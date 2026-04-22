@@ -292,6 +292,31 @@ func (h *IssueHandler) UploadAsset(c *gin.Context) {
 	response.Success(c, result)
 }
 
+func (h *IssueHandler) UploadDraftAsset(c *gin.Context) {
+	projectID := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		response.BadRequest(c, 40001, "未找到上传文件")
+		return
+	}
+	defer file.Close()
+
+	fileName := header.Filename
+	if filepath.Base(fileName) == "." || filepath.Base(fileName) == string(filepath.Separator) {
+		fileName = ""
+	}
+
+	result, err := h.issueService.UploadDraftInternalIssueAsset(projectID, userID, fileName, header.Size, file)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
 func (h *IssueHandler) AssetContent(c *gin.Context) {
 	assetID := c.Param("aid")
 	userID := middleware.GetUserID(c)

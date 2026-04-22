@@ -84,6 +84,7 @@ func Setup(
 		issueWrite := api.Group("/projects/:id/issues", middleware.RequireJWT(cfg, authService))
 		{
 			issueWrite.POST("", issueHandler.Create)
+			issueWrite.POST("/assets", issueHandler.UploadDraftAsset)
 			issueWrite.POST("/sync", issueHandler.Sync)
 		}
 		api.PUT("/issues/:iid", middleware.RequireJWT(cfg, authService), issueHandler.Update)

@@ -18,8 +18,10 @@ import {
   useInfiniteIssueTimeline,
   useCreateIssue,
   useCreateIssueComment,
+  useUploadDraftIssueAsset,
   useSyncProjectIssues,
   useUpdateIssue,
+  useUpdateIssueInternalMeta,
   useReplaceIssueChecklist,
   useUploadIssueAsset,
 } from "@/lib/hooks/use-issues";
@@ -133,8 +135,10 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useInfiniteIssueTimeline: vi.fn(),
   useCreateIssue: vi.fn(),
   useCreateIssueComment: vi.fn(),
+  useUploadDraftIssueAsset: vi.fn(),
   useSyncProjectIssues: vi.fn(),
   useUpdateIssue: vi.fn(),
+  useUpdateIssueInternalMeta: vi.fn(),
   useReplaceIssueChecklist: vi.fn(),
   useUploadIssueAsset: vi.fn(),
 }));
@@ -398,10 +402,18 @@ describe("Issue pages", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useCreateIssueComment>);
+    vi.mocked(useUploadDraftIssueAsset).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUploadDraftIssueAsset>);
     vi.mocked(useUpdateIssue).mockReturnValue({
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useUpdateIssue>);
+    vi.mocked(useUpdateIssueInternalMeta).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssueInternalMeta>);
     vi.mocked(useUploadIssueAsset).mockReturnValue({
       mutateAsync: vi.fn(),
       isPending: false,
@@ -1071,24 +1083,62 @@ describe("Issue pages", () => {
     const mutateAsync = vi.fn().mockResolvedValue({
       data: buildInternalIssue(),
     });
+    const uploadMutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        id: "draft-asset-1",
+        issue_id: "",
+        file_name: "clip.png",
+        mime_type: "image/png",
+        file_size: 3,
+        content_url: "/api/issues/assets/draft-asset-1/content",
+        markdown: "![clip](/api/issues/assets/draft-asset-1/content)",
+        created_at: "2026-04-12T10:00:00Z",
+      },
+    });
     vi.mocked(useCreateIssue).mockReturnValue({
       mutateAsync,
       isPending: false,
     } as unknown as ReturnType<typeof useCreateIssue>);
+    vi.mocked(useUploadDraftIssueAsset).mockReturnValue({
+      mutateAsync: uploadMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUploadDraftIssueAsset>);
 
     renderWithRoute(<NewInternalIssuePage />, {
       path: "/projects/:id/issues/new",
       initialEntry: "/projects/proj-1/issues/new?project=proj-1&state=open&q=ship",
     });
 
+    const bodyInput = screen.getByLabelText("描述") as HTMLTextAreaElement;
+
     await user.type(screen.getByLabelText("标题"), "需要补充交付通知");
-    await user.type(screen.getByLabelText("描述"), "## 验收\n\n完成后通知 QA");
+    await user.type(bodyInput, "## 验收\n\n完成后通知 QA");
+    bodyInput.setSelectionRange(bodyInput.value.length, bodyInput.value.length);
+
+    const imageFile = new File(["img"], "clip.png", { type: "image/png" });
+    fireEvent.paste(bodyInput, {
+      clipboardData: {
+        items: [
+          {
+            type: imageFile.type,
+            getAsFile: () => imageFile,
+          },
+        ],
+      },
+    });
+
+    await waitFor(() => expect(uploadMutateAsync).toHaveBeenCalledTimes(1));
+    const formData = uploadMutateAsync.mock.calls[0][0] as FormData;
+    expect(formData.get("file")).toStrictEqual(imageFile);
+    await waitFor(() =>
+      expect(bodyInput).toHaveValue("## 验收\n\n完成后通知 QA![clip](/api/issues/assets/draft-asset-1/content)\n"),
+    );
     await user.click(screen.getByRole("button", { name: "创建问题" }));
 
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({
         title: "需要补充交付通知",
-        body: "## 验收\n\n完成后通知 QA",
+        body: "## 验收\n\n完成后通知 QA![clip](/api/issues/assets/draft-asset-1/content)\n",
         workflow_status: "todo",
       }),
     );

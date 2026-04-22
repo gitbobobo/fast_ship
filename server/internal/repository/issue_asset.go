@@ -18,6 +18,10 @@ func (r *IssueAssetRepository) Create(asset *model.IssueAsset) error {
 	return r.db.Create(asset).Error
 }
 
+func (r *IssueAssetRepository) CreateTx(tx *gorm.DB, asset *model.IssueAsset) error {
+	return tx.Create(asset).Error
+}
+
 func (r *IssueAssetRepository) FindByID(id string) (*model.IssueAsset, error) {
 	var asset model.IssueAsset
 	if err := r.db.Where("id = ?", id).First(&asset).Error; err != nil {
