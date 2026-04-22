@@ -63,7 +63,7 @@ func main() {
 
 	// 初始化数据库
 	gormLogger := logger.Default.LogMode(logger.Silent)
-	if cfg.Server.Mode == "debug" {
+	if cfg.Database.LogSQL {
 		gormLogger = logger.Default.LogMode(logger.Info)
 	}
 

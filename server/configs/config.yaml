@@ -5,6 +5,7 @@ server:
 
 database:
   path: ./data/fast_ship.db
+  log_sql: false  # 是否打印 SQL 日志
 
 jwt:
   secret: "change-me-in-production"

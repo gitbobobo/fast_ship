@@ -22,7 +22,8 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Path string `mapstructure:"path"`
+	Path   string `mapstructure:"path"`
+	LogSQL bool   `mapstructure:"log_sql"`
 }
 
 type JWTConfig struct {
@@ -55,6 +56,7 @@ func Load(path string) (*Config, error) {
 
 	// 绑定关键环境变量
 	_ = viper.BindEnv("server.mode", "FAST_SHIP_SERVER_MODE")
+	_ = viper.BindEnv("database.log_sql", "FAST_SHIP_DATABASE_LOG_SQL")
 	_ = viper.BindEnv("jwt.secret", "JWT_SECRET")
 	_ = viper.BindEnv("encryption.key", "ENCRYPTION_KEY")
 	_ = viper.BindEnv("server.web_dist_dir", "FAST_SHIP_WEB_DIST_DIR")
