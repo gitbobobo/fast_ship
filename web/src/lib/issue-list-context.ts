@@ -2,8 +2,7 @@ export interface IssueListContext {
   state?: string;
   q?: string;
   label?: string;
-  assignee?: string;
-  milestone?: string;
+  source?: string;
   workflowStatus?: string;
   sort?: string;
   page?: number;
@@ -13,8 +12,7 @@ const ISSUE_DETAIL_SEARCH_PARAM_MAP = {
   state: "issue_state",
   q: "issue_q",
   label: "issue_label",
-  assignee: "issue_assignee",
-  milestone: "issue_milestone",
+  source: "issue_source",
   workflowStatus: "issue_workflow_status",
   sort: "issue_sort",
   page: "issue_page",
@@ -32,11 +30,8 @@ export function buildIssueDetailSearchParams(context: IssueListContext) {
   if (context.label && context.label !== "all") {
     params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.label, context.label);
   }
-  if (context.assignee && context.assignee !== "all") {
-    params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.assignee, context.assignee);
-  }
-  if (context.milestone && context.milestone !== "all") {
-    params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.milestone, context.milestone);
+  if (context.source && context.source !== "all") {
+    params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.source, context.source);
   }
   if (context.workflowStatus && context.workflowStatus !== "all") {
     params.set(ISSUE_DETAIL_SEARCH_PARAM_MAP.workflowStatus, context.workflowStatus);
@@ -58,8 +53,7 @@ export function readIssueDetailContext(
     state: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.state) ?? "",
     q: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.q) ?? "",
     label: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.label) ?? "",
-    assignee: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.assignee) ?? "",
-    milestone: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.milestone) ?? "",
+    source: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.source) ?? "",
     workflowStatus:
       searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.workflowStatus) ?? "",
     sort: searchParams.get(ISSUE_DETAIL_SEARCH_PARAM_MAP.sort) ?? "updated_desc",

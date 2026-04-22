@@ -96,6 +96,54 @@ func TestIssueHandlerUpdate_UpdatesInternalIssue(t *testing.T) {
 	}
 }
 
+func TestIssueHandlerList_FiltersBySource(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-1")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	createBody := []byte(`{"title":"补充发布检查","body":"仅内部跟进"}`)
+	createCtx, createRec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", createBody)
+	createCtx.Params = ginParams("id", project.ID)
+	createCtx.Set(middleware.ContextKeyUserID, user.ID)
+	createCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.issueHandler.Create(createCtx)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create internal issue failed: %d %s", createRec.Code, createRec.Body.String())
+	}
+
+	createHandlerTestIssue(t, env.db, project.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 2
+	})
+
+	ctx, rec := newJSONContext(http.MethodGet, "/api/projects/"+project.ID+"/issues?source=internal", nil)
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.List(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result struct {
+		Items []struct {
+			ID     string `json:"id"`
+			Source string `json:"source"`
+			Title  string `json:"title"`
+		} `json:"items"`
+		Total int `json:"total"`
+	}
+	decodeEnvelope(t, rec, &result)
+
+	if result.Total != 1 || len(result.Items) != 1 {
+		t.Fatalf("expected one filtered issue, got %+v", result)
+	}
+	if result.Items[0].Source != string(model.IssueSourceInternal) || result.Items[0].Title != "补充发布检查" {
+		t.Fatalf("unexpected filtered issue payload: %+v", result.Items[0])
+	}
+}
+
 func TestIssueHandlerCreateComment_CreatesInternalComment(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-1")

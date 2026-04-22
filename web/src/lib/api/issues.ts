@@ -4,8 +4,7 @@ interface IssueListParams {
   state?: string;
   q?: string;
   label?: string;
-  assignee?: string;
-  milestone?: string;
+  source?: string;
   workflow_status?: string;
   sort?: string;
   page?: number;
@@ -54,8 +53,7 @@ export const issueApi = {
           ...(params.state ? { state: params.state } : {}),
           ...(params.q ? { q: params.q } : {}),
           ...(params.label ? { label: params.label } : {}),
-          ...(params.assignee ? { assignee: params.assignee } : {}),
-          ...(params.milestone ? { milestone: params.milestone } : {}),
+          ...(params.source ? { source: params.source } : {}),
           ...(params.workflow_status ? { workflow_status: params.workflow_status } : {}),
           ...(params.sort ? { sort: params.sort } : {}),
         },

@@ -99,6 +99,7 @@ func (h *IssueHandler) List(c *gin.Context) {
 		State:     c.Query("state"),
 		Query:     c.Query("q"),
 		Label:     c.Query("label"),
+		Source:    c.Query("source"),
 		Assignee:  c.Query("assignee"),
 		Milestone: c.Query("milestone"),
 		Workflow:  c.Query("workflow_status"),

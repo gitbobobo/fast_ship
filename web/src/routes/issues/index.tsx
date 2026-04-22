@@ -160,8 +160,7 @@ export default function IssuesPage() {
   const issueStateFilter = searchParams.get("state") ?? "open";
   const issueQuery = searchParams.get("q") ?? "";
   const issueLabelFilter = searchParams.get("label") ?? "all";
-  const issueAssigneeFilter = searchParams.get("assignee") ?? "all";
-  const issueMilestoneFilter = searchParams.get("milestone") ?? "all";
+  const issueSourceFilter = searchParams.get("source") ?? "all";
   const issueWorkflowFilter = searchParams.get("workflow_status") ?? "all";
   const issueSort = searchParams.get("sort") ?? "updated_desc";
   const issuePage = Math.max(
@@ -176,10 +175,7 @@ export default function IssuesPage() {
       state: issueStateFilter === "all" ? undefined : issueStateFilter,
       q: deferredIssueQuery || undefined,
       label: issueLabelFilter === "all" ? undefined : issueLabelFilter,
-      assignee:
-        issueAssigneeFilter === "all" ? undefined : issueAssigneeFilter,
-      milestone:
-        issueMilestoneFilter === "all" ? undefined : issueMilestoneFilter,
+      source: issueSourceFilter === "all" ? undefined : issueSourceFilter,
       workflow_status:
         issueWorkflowFilter === "all" ? undefined : issueWorkflowFilter,
       sort: issueSort,
@@ -199,8 +195,6 @@ export default function IssuesPage() {
   const issueTotalPages = Math.max(Math.ceil(issueTotal / issuePageSize), 1);
 
   const labels = filterOptionsData?.labels ?? [];
-  const assignees = filterOptionsData?.assignees ?? [];
-  const milestones = filterOptionsData?.milestones ?? [];
   const issueSync = activeProject?.issue_sync;
 
   const updateSearchParams = (
@@ -265,8 +259,7 @@ export default function IssuesPage() {
         state: issueStateFilter,
         q: issueQuery,
         label: issueLabelFilter,
-        assignee: issueAssigneeFilter,
-        milestone: issueMilestoneFilter,
+        source: issueSourceFilter,
         workflowStatus: issueWorkflowFilter,
         sort: issueSort,
         page: issuePage,
@@ -288,16 +281,14 @@ export default function IssuesPage() {
   const hasActiveFilters =
     issueStateFilter !== "all" ||
     issueLabelFilter !== "all" ||
-    issueAssigneeFilter !== "all" ||
-    issueMilestoneFilter !== "all" ||
+    issueSourceFilter !== "all" ||
     issueWorkflowFilter !== "all" ||
     deferredIssueQuery.length > 0;
   const issueDetailSearch = buildIssueDetailSearchParams({
     state: issueStateFilter,
     q: issueQuery,
     label: issueLabelFilter,
-    assignee: issueAssigneeFilter,
-    milestone: issueMilestoneFilter,
+    source: issueSourceFilter,
     workflowStatus: issueWorkflowFilter,
     sort: issueSort,
     page: issuePage,
@@ -468,49 +459,24 @@ export default function IssuesPage() {
               </SelectContent>
             </Select>
             <Select
-              value={issueAssigneeFilter}
+              value={issueSourceFilter}
               onValueChange={(value) =>
-                updateSearchParams({ assignee: value ?? null }, true)
+                updateSearchParams({ source: value ?? null }, true)
               }
-              disabled={filtersLoading || assignees.length === 0}
             >
               <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="全部负责人">
-                  {issueAssigneeFilter === "all"
-                    ? "负责人"
-                    : issueAssigneeFilter}
+                <SelectValue placeholder="全部来源">
+                  {issueSourceFilter === "all"
+                    ? "来源"
+                    : issueSourceFilter === "github"
+                      ? "GitHub"
+                      : "内部"}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">全部负责人</SelectItem>
-                {assignees.map((assignee) => (
-                  <SelectItem key={assignee} value={assignee}>
-                    {assignee}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              value={issueMilestoneFilter}
-              onValueChange={(value) =>
-                updateSearchParams({ milestone: value ?? null }, true)
-              }
-              disabled={filtersLoading || milestones.length === 0}
-            >
-              <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="全部里程碑">
-                  {issueMilestoneFilter === "all"
-                    ? "里程碑"
-                    : issueMilestoneFilter}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部里程碑</SelectItem>
-                {milestones.map((milestone) => (
-                  <SelectItem key={milestone} value={milestone}>
-                    {milestone}
-                  </SelectItem>
-                ))}
+                <SelectItem value="all">全部来源</SelectItem>
+                <SelectItem value="internal">内部</SelectItem>
+                <SelectItem value="github">GitHub</SelectItem>
               </SelectContent>
             </Select>
             <Select

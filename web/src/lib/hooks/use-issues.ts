@@ -10,8 +10,7 @@ interface UseIssuesFilters {
   state?: string;
   q?: string;
   label?: string;
-  assignee?: string;
-  milestone?: string;
+  source?: string;
   workflow_status?: string;
   sort?: string;
   page?: number;
@@ -27,8 +26,7 @@ export function useIssues(projectId: string, filters: UseIssuesFilters = {}) {
       filters.state ?? "all",
       filters.q ?? "",
       filters.label ?? "",
-      filters.assignee ?? "",
-      filters.milestone ?? "",
+      filters.source ?? "",
       filters.workflow_status ?? "",
       filters.sort ?? "updated_desc",
       filters.page ?? 1,

@@ -1,5 +1,6 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import * as ReactRouter from "react-router";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { vi } from "vitest";
 import ProjectDetailPage from "@/routes/projects/$id/index";
@@ -570,6 +571,12 @@ describe("Issue pages", () => {
     expect(screen.getByText("关闭了问题")).toBeInTheDocument();
     expect(screen.getByText(hasExactTextContent("Looks good"))).toBeInTheDocument();
     expect(screen.getByText(hasExactTextContent("Open the app"))).toBeInTheDocument();
+    const latestTimelineContent = screen.getByText(hasExactTextContent("Looks good"));
+    const commentComposerHeading = screen.getByText("添加评论");
+    expect(
+      latestTimelineContent.compareDocumentPosition(commentComposerHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "复制链接" }));
@@ -820,13 +827,13 @@ describe("Issue pages", () => {
     renderWithRoute(<IssuesPage />, {
       path: "/issues",
       initialEntry:
-        "/issues?project=proj-1&state=open&q=crash&label=bug&assignee=bob&milestone=1.0.1&sort=updated_desc&page=2",
+        "/issues?project=proj-1&state=open&q=crash&label=bug&source=github&sort=updated_desc&page=2",
     });
 
     await waitFor(() =>
       expect(screen.getByRole("link", { name: /GH-42 Crash on launch/i })).toHaveAttribute(
         "href",
-        "/projects/proj-1/issues/issue-1?issue_state=open&issue_q=crash&issue_label=bug&issue_assignee=bob&issue_milestone=1.0.1&issue_sort=updated_desc&issue_page=2",
+        "/projects/proj-1/issues/issue-1?issue_state=open&issue_q=crash&issue_label=bug&issue_source=github&issue_sort=updated_desc&issue_page=2",
       ),
     );
   });
@@ -1080,6 +1087,8 @@ describe("Issue pages", () => {
 
   it("creates an internal issue from a dedicated page", async () => {
     const user = userEvent.setup();
+    const navigate = vi.fn();
+    const useNavigateSpy = vi.spyOn(ReactRouter, "useNavigate").mockReturnValue(navigate);
     const mutateAsync = vi.fn().mockResolvedValue({
       data: buildInternalIssue(),
     });
@@ -1106,7 +1115,8 @@ describe("Issue pages", () => {
 
     renderWithRoute(<NewInternalIssuePage />, {
       path: "/projects/:id/issues/new",
-      initialEntry: "/projects/proj-1/issues/new?project=proj-1&state=open&q=ship",
+      initialEntry:
+        "/projects/proj-1/issues/new?project=proj-1&state=closed&q=ship&label=bug&source=github&workflow_status=done&sort=updated_asc&page=2",
     });
 
     const bodyInput = screen.getByLabelText("描述") as HTMLTextAreaElement;
@@ -1143,10 +1153,21 @@ describe("Issue pages", () => {
       }),
     );
     expect(toast.success).toHaveBeenCalledWith("内部问题已创建");
+    expect(navigate).toHaveBeenCalledWith(
+      {
+        pathname: "/projects/proj-1/issues/internal-issue-1",
+        search:
+          "?issue_state=open&issue_source=internal&issue_workflow_status=todo&issue_sort=updated_desc",
+      },
+      { replace: true },
+    );
+    useNavigateSpy.mockRestore();
   });
 
   it("edits an internal issue from a dedicated page", async () => {
     const user = userEvent.setup();
+    const navigate = vi.fn();
+    const useNavigateSpy = vi.spyOn(ReactRouter, "useNavigate").mockReturnValue(navigate);
     const mutateAsync = vi.fn().mockResolvedValue({
       data: buildInternalIssue({
         title: "补充回归通知",
@@ -1220,5 +1241,33 @@ describe("Issue pages", () => {
       }),
     );
     expect(toast.success).toHaveBeenCalledWith("内部问题已更新");
+    expect(navigate).toHaveBeenCalledWith(
+      {
+        pathname: "/projects/proj-1/issues/internal-issue-1",
+        search: "?issue_state=open",
+      },
+      { replace: true },
+    );
+    useNavigateSpy.mockRestore();
+  });
+
+  it("does not rewrite search params while typing a comment draft", async () => {
+    mockIssueDetailData();
+    const user = userEvent.setup();
+    const setSearchParams = vi.fn();
+    const useSearchParamsSpy = vi.spyOn(ReactRouter, "useSearchParams").mockReturnValue([
+      new URLSearchParams("issue_state=open"),
+      setSearchParams,
+    ]);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.type(screen.getByPlaceholderText("使用 Markdown 输入评论内容"), "12 已修复");
+
+    expect(setSearchParams).not.toHaveBeenCalled();
+    useSearchParamsSpy.mockRestore();
   });
 });

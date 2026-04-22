@@ -75,6 +75,7 @@ type IssueListFilters struct {
 	State     string
 	Query     string
 	Label     string
+	Source    string
 	Assignee  string
 	Milestone string
 	Workflow  string
@@ -2488,6 +2489,10 @@ func matchesIssueFilters(issue model.Issue, gitHubMeta *model.IssueGitHubMeta, m
 		if !matched {
 			return false
 		}
+	}
+
+	if filters.Source != "" && string(issue.Source) != filters.Source {
+		return false
 	}
 
 	if filters.Assignee != "" {
