@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,8 +129,9 @@ func (s *ShipService) Ship(versionID, userID string) error {
 	_ = s.updateShipState(version, model.ShipStatusInProgress, model.ShipStageCreateTag, "正在创建 Git Tag")
 	s.logger.Info("creating tag", zap.String("tag", version.VersionNumber))
 	if err := gh.CreateTag(ctx, version.VersionNumber, version.TargetCommitish); err != nil {
-		s.recordFailure(version, model.ShipStageCreateTag, fmt.Sprintf("创建 Tag 失败: %v", err))
-		return errs.New(50200, fmt.Sprintf("创建 Tag 失败: %v", err))
+		message := fmt.Sprintf("创建 Tag 失败: %s", s.describeGitHubOperationError(project, err))
+		s.recordFailure(version, model.ShipStageCreateTag, message)
+		return errs.New(50200, message)
 	}
 
 	// 创建 Release
@@ -137,8 +139,9 @@ func (s *ShipService) Ship(versionID, userID string) error {
 	s.logger.Info("creating release", zap.String("tag", version.VersionNumber))
 	release, err := gh.CreateRelease(ctx, version.VersionNumber, version.VersionNumber, version.ReleaseNotes)
 	if err != nil {
-		s.recordFailure(version, model.ShipStageCreateRelease, fmt.Sprintf("创建 Release 失败: %v", err))
-		return errs.New(50201, fmt.Sprintf("创建 Release 失败: %v", err))
+		message := fmt.Sprintf("创建 Release 失败: %s", s.describeGitHubOperationError(project, err))
+		s.recordFailure(version, model.ShipStageCreateRelease, message)
+		return errs.New(50201, message)
 	}
 
 	// 并行上传安装包
@@ -183,7 +186,7 @@ func (s *ShipService) Ship(versionID, userID string) error {
 			}
 
 			if err := gh.UploadAsset(ctx, release.GetID(), a.FileName, tmpFile); err != nil {
-				uploadErrors[idx] = err
+				uploadErrors[idx] = fmt.Errorf("%s: %s", a.FileName, s.describeGitHubOperationError(project, err))
 			}
 		}(i, artifact)
 	}
@@ -282,7 +285,7 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 			gh := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 			if err := gh.ValidateRepository(ctx); err != nil {
 				githubItem.OK = false
-				githubItem.Detail = "无法访问 GitHub 仓库或 Token 无效"
+				githubItem.Detail = s.describeGitHubRepositoryAccessError(project, err)
 			}
 		}
 	}
@@ -327,4 +330,55 @@ func (s *ShipService) recordFailure(version *model.Version, stage model.ShipStag
 	version.ShipStage = stage
 	version.ShipMessage = errMsg
 	_ = s.versionRepo.Update(version)
+}
+
+func (s *ShipService) describeGitHubRepositoryAccessError(project *model.Project, err error) string {
+	switch {
+	case isGitHubPATAccessError(err):
+		return fmt.Sprintf(
+			"当前 GitHub Token 无权访问仓库 %s/%s。Fine-grained Token 请确认 Resource owner 为 %s、Repository access 包含该仓库，并授予 Contents: Read and write；Classic Token 请确认包含 repo scope。",
+			project.GithubOwner,
+			project.GithubRepo,
+			project.GithubOwner,
+		)
+	case isGitHubStatus(err, 401):
+		return "GitHub Token 无效或已过期"
+	case isGitHubStatus(err, 404):
+		return fmt.Sprintf("无法访问仓库 %s/%s，请检查 Owner、Repo 和 Token 授权范围是否正确", project.GithubOwner, project.GithubRepo)
+	default:
+		return "无法访问 GitHub 仓库或 Token 无效"
+	}
+}
+
+func (s *ShipService) describeGitHubOperationError(project *model.Project, err error) string {
+	if isGitHubPATAccessError(err) {
+		return fmt.Sprintf(
+			"GitHub Token 无权操作仓库 %s/%s。Fine-grained Token 请确认 Resource owner 为 %s、Repository access 包含该仓库，并授予 Contents: Read and write；Classic Token 请确认包含 repo scope。",
+			project.GithubOwner,
+			project.GithubRepo,
+			project.GithubOwner,
+		)
+	}
+
+	if isGitHubStatus(err, 401) {
+		return "GitHub Token 无效或已过期"
+	}
+
+	return err.Error()
+}
+
+func isGitHubPATAccessError(err error) bool {
+	var errResp *gh.ErrorResponse
+	if errors.As(err, &errResp) {
+		if errResp.Response != nil && errResp.Response.StatusCode == 403 {
+			return strings.Contains(strings.ToLower(errResp.Message), "resource not accessible by personal access token")
+		}
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "resource not accessible by personal access token")
+}
+
+func isGitHubStatus(err error, statusCode int) bool {
+	var errResp *gh.ErrorResponse
+	return errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == statusCode
 }

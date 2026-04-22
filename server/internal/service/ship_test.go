@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -188,6 +189,58 @@ func TestShipServiceShip_CreateReleaseFailureRecordsFailureState(t *testing.T) {
 	}
 	if updated.GithubReleaseURL != "" {
 		t.Fatalf("expected empty release url after failure, got %q", updated.GithubReleaseURL)
+	}
+}
+
+func TestShipServiceShip_CreateTagPermissionFailureUsesActionableMessage(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
+		p.GithubOwner = "liuyincs"
+		p.GithubRepo = "musiver"
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	version := createTestVersion(t, svc.db, project.ID)
+
+	if _, err := svc.artifactService.Upload(
+		version.ID,
+		project.UserID,
+		"app.apk",
+		10,
+		"android",
+		"Web 用户",
+		bytes.NewBufferString("apk-data"),
+	); err != nil {
+		t.Fatalf("upload artifact: %v", err)
+	}
+
+	fake := &fakeGitHubClient{
+		createTagErr: &gh.ErrorResponse{
+			Response: &http.Response{StatusCode: http.StatusForbidden},
+			Message:  "Resource not accessible by personal access token",
+		},
+	}
+	svc.shipService.newClient = func(token, owner, repo string) gitHubClient {
+		return fake
+	}
+
+	err := svc.shipService.Ship(version.ID, project.UserID)
+	if err == nil {
+		t.Fatalf("expected ship to fail")
+	}
+	if !strings.Contains(err.Error(), "GitHub Token 无权操作仓库 liuyincs/musiver") {
+		t.Fatalf("expected actionable permission error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "Contents: Read and write") {
+		t.Fatalf("expected permission hint in error, got %v", err)
+	}
+
+	updated, reloadErr := svc.versionRepo.FindByID(version.ID)
+	if reloadErr != nil {
+		t.Fatalf("reload version: %v", reloadErr)
+	}
+	if !strings.Contains(updated.ErrorLog, "Resource owner 为 liuyincs") {
+		t.Fatalf("expected stored error log to contain owner guidance, got %q", updated.ErrorLog)
 	}
 }
 
