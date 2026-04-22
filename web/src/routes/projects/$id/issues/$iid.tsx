@@ -428,8 +428,7 @@ export default function IssueDetailPage() {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
     q: issueContext.q || undefined,
     label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
-    assignee: issueContext.assignee === "all" ? undefined : issueContext.assignee || undefined,
-    milestone: issueContext.milestone === "all" ? undefined : issueContext.milestone || undefined,
+    source: issueContext.source === "all" ? undefined : issueContext.source || undefined,
     workflow_status:
       issueContext.workflowStatus === "all"
         ? undefined
@@ -442,8 +441,7 @@ export default function IssueDetailPage() {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
     q: issueContext.q || undefined,
     label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
-    assignee: issueContext.assignee === "all" ? undefined : issueContext.assignee || undefined,
-    milestone: issueContext.milestone === "all" ? undefined : issueContext.milestone || undefined,
+    source: issueContext.source === "all" ? undefined : issueContext.source || undefined,
     workflow_status:
       issueContext.workflowStatus === "all"
         ? undefined
@@ -456,8 +454,7 @@ export default function IssueDetailPage() {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
     q: issueContext.q || undefined,
     label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
-    assignee: issueContext.assignee === "all" ? undefined : issueContext.assignee || undefined,
-    milestone: issueContext.milestone === "all" ? undefined : issueContext.milestone || undefined,
+    source: issueContext.source === "all" ? undefined : issueContext.source || undefined,
     workflow_status:
       issueContext.workflowStatus === "all"
         ? undefined
@@ -562,15 +559,17 @@ export default function IssueDetailPage() {
 
   const updateSearchParam = useCallback(
     (key: string, value: number) => {
-      const next = new URLSearchParams(searchParams);
-      if (value <= 1) {
-        next.delete(key);
-      } else {
-        next.set(key, String(value));
-      }
-      setSearchParams(next, { replace: true });
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current);
+        if (value <= 1) {
+          next.delete(key);
+        } else {
+          next.set(key, String(value));
+        }
+        return next.toString() === current.toString() ? current : next;
+      }, { replace: true });
     },
-    [searchParams, setSearchParams]
+    [setSearchParams]
   );
 
   const setAnchor = (hash: string) => {
@@ -1176,35 +1175,6 @@ export default function IssueDetailPage() {
               </div>
             </div>
 
-            <Card>
-              <CardContent className="space-y-4 p-5 md:p-6">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-sm font-semibold">{isInternalIssue ? "内部评论" : "添加评论"}</h2>
-                    <p className="text-sm text-muted-foreground">
-                      {isInternalIssue ? "评论仅保存在 Fast Ship 内部。" : "评论会直接发布到 GitHub Issue。"}
-                    </p>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  <Textarea
-                    value={commentDraft}
-                    onChange={(event) => setCommentDraft(event.target.value)}
-                    rows={5}
-                    placeholder="使用 Markdown 输入评论内容"
-                  />
-                  <div className="flex justify-end">
-                    <Button
-                      onClick={() => void handleCreateComment()}
-                      disabled={createComment.isPending}
-                    >
-                      {createComment.isPending ? "发布中..." : "发布评论"}
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
             {/* Unified Timeline */}
             <div className="-mt-6">
               <div id="timeline" ref={timelineSectionRef} className="scroll-mt-20" />
@@ -1374,6 +1344,35 @@ export default function IssueDetailPage() {
                 </div>
               )}
             </div>
+
+            <Card>
+              <CardContent className="space-y-4 p-5 md:p-6">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">{isInternalIssue ? "内部评论" : "添加评论"}</h2>
+                    <p className="text-sm text-muted-foreground">
+                      {isInternalIssue ? "评论仅保存在 Fast Ship 内部。" : "评论会直接发布到 GitHub Issue。"}
+                    </p>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <Textarea
+                    value={commentDraft}
+                    onChange={(event) => setCommentDraft(event.target.value)}
+                    rows={5}
+                    placeholder="使用 Markdown 输入评论内容"
+                  />
+                  <div className="flex justify-end">
+                    <Button
+                      onClick={() => void handleCreateComment()}
+                      disabled={createComment.isPending}
+                    >
+                      {createComment.isPending ? "发布中..." : "发布评论"}
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* Sidebar */}

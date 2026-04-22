@@ -9,16 +9,13 @@ import { useCreateIssue, useUploadDraftIssueAsset } from "@/lib/hooks/use-issues
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { toast } from "sonner";
 
-function buildIssueDetailSearch(searchParams: URLSearchParams) {
+function buildCreatedIssueDetailSearch(issue: Issue) {
   return buildIssueDetailSearchParams({
-    state: searchParams.get("state") ?? "",
-    q: searchParams.get("q") ?? "",
-    label: searchParams.get("label") ?? "",
-    assignee: searchParams.get("assignee") ?? "",
-    milestone: searchParams.get("milestone") ?? "",
-    workflowStatus: searchParams.get("workflow_status") ?? "",
-    sort: searchParams.get("sort") ?? "updated_desc",
-    page: Math.max(Number(searchParams.get("page") ?? "1") || 1, 1),
+    state: issue.state,
+    source: issue.source,
+    workflowStatus: issue.internal_meta?.workflow_status ?? "",
+    sort: "updated_desc",
+    page: 1,
   }).toString();
 }
 
@@ -37,11 +34,6 @@ export default function NewInternalIssuePage() {
     return next.toString();
   }, [id, searchParams]);
 
-  const issueDetailSearch = useMemo(
-    () => buildIssueDetailSearch(searchParams),
-    [searchParams],
-  );
-
   const handleCancel = () => {
     navigate({
       pathname: "/issues",
@@ -52,11 +44,15 @@ export default function NewInternalIssuePage() {
   const handleSubmit = async (values: InternalIssueFormInput) => {
     try {
       const res = await createIssue.mutateAsync(values);
+      const issueDetailSearch = buildCreatedIssueDetailSearch(res.data);
       toast.success("内部问题已创建");
-      navigate({
-        pathname: `/projects/${id}/issues/${res.data.id}`,
-        search: issueDetailSearch ? `?${issueDetailSearch}` : "",
-      });
+      navigate(
+        {
+          pathname: `/projects/${id}/issues/${res.data.id}`,
+          search: issueDetailSearch ? `?${issueDetailSearch}` : "",
+        },
+        { replace: true },
+      );
     } catch {
       toast.error("创建内部问题失败");
     }
