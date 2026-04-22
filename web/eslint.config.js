@@ -31,6 +31,8 @@ export default defineConfig([
           ignoreRestSiblings: true,
         },
       ],
+      'react-hooks/incompatible-library': 'error',
+      'react-hooks/refs': 'error',
       'react-hooks/set-state-in-effect': 'off',
       'react-refresh/only-export-components': 'off',
     },

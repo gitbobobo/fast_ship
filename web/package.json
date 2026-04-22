@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "pnpm typecheck && vite build",
     "typecheck": "tsc -b --pretty false",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "check": "pnpm lint && pnpm typecheck",
     "test": "vitest run",
     "preview": "vite preview"

@@ -1,5 +1,5 @@
 import { useParams, useNavigate } from "react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Header } from "@/components/layout/header";
 import { GitHubTokenHelpDialog } from "@/components/projects/github-token-help-dialog";
@@ -21,14 +21,16 @@ export default function EditProjectPage() {
   const updateProject = useUpdateProject(id!);
 
   const {
+    control,
     register,
     handleSubmit,
     reset,
-    watch,
     formState: { errors, isSubmitting },
   } = useForm<ProjectEditInput>({ resolver: zodResolver(projectEditSchema) });
-  const githubOwner = watch("github_owner");
-  const githubRepo = watch("github_repo");
+  const [githubOwner = "", githubRepo = ""] = useWatch({
+    control,
+    name: ["github_owner", "github_repo"],
+  });
 
   useEffect(() => {
     if (project) {

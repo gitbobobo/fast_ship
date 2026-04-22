@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Header } from "@/components/layout/header";
 import { GitHubTokenHelpDialog } from "@/components/projects/github-token-help-dialog";
@@ -17,13 +17,15 @@ export default function NewProjectPage() {
   const createProject = useCreateProject();
 
   const {
+    control,
     register,
     handleSubmit,
-    watch,
     formState: { errors, isSubmitting },
   } = useForm<ProjectInput>({ resolver: zodResolver(projectSchema) });
-  const githubOwner = watch("github_owner");
-  const githubRepo = watch("github_repo");
+  const [githubOwner = "", githubRepo = ""] = useWatch({
+    control,
+    name: ["github_owner", "github_repo"],
+  });
 
   const onSubmit = async (data: ProjectInput) => {
     try {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -71,6 +71,10 @@ export function InternalIssueForm({
 
   const pendingUploadPromisesRef = useRef(new Set<Promise<string>>());
   const [pendingUploadCount, setPendingUploadCount] = useState(0);
+  const [uploadErrorCount, setUploadErrorCount] = useState(0);
+  const [submitRequested, setSubmitRequested] = useState<{
+    uploadErrorCount: number;
+  } | null>(null);
   const isBusy = isSubmitting || pendingUploadCount > 0;
 
   const handlePasteImage = onPasteImage
@@ -78,6 +82,10 @@ export function InternalIssueForm({
         const uploadPromise = onPasteImage(file);
         pendingUploadPromisesRef.current.add(uploadPromise);
         setPendingUploadCount((count) => count + 1);
+
+        void uploadPromise.catch(() => {
+          setUploadErrorCount((count) => count + 1);
+        });
 
         void uploadPromise.finally(() => {
           pendingUploadPromisesRef.current.delete(uploadPromise);
@@ -94,18 +102,50 @@ export function InternalIssueForm({
     }
   };
 
+  const submitLatestValues = useEffectEvent(async () => {
+    await onSubmit(getValues());
+  });
+
+  const handleFormSubmit = handleSubmit(() => {
+    setSubmitRequested({ uploadErrorCount });
+  });
+
+  useEffect(() => {
+    if (!submitRequested || pendingUploadCount > 0) {
+      return;
+    }
+
+    if (uploadErrorCount > submitRequested.uploadErrorCount) {
+      setSubmitRequested(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        await waitForPendingUploads();
+      } catch {
+        return;
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      await submitLatestValues();
+      if (!cancelled) {
+        setSubmitRequested(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingUploadCount, submitRequested, uploadErrorCount]);
+
   return (
-    <form
-      className="space-y-6"
-      onSubmit={handleSubmit(async () => {
-        try {
-          await waitForPendingUploads();
-        } catch {
-          return;
-        }
-        await onSubmit(getValues());
-      })}
-    >
+    <form className="space-y-6" onSubmit={handleFormSubmit}>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_180px]">
         <div className="space-y-2">
           <Label htmlFor="issue-title">标题</Label>
