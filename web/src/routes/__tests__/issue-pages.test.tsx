@@ -15,6 +15,7 @@ import {
   useIssues,
   useIssue,
   useIssueFilterOptions,
+  useIssueRepoLabels,
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
   useCreateIssue,
@@ -34,6 +35,17 @@ function hasExactTextContent(text: string) {
   return (_: string, element: Element | null) =>
     element?.textContent === text &&
     Array.from(element.children).every((child) => child.textContent !== text);
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return { promise, resolve, reject };
 }
 
 function buildGitHubIssue(
@@ -132,6 +144,7 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useIssues: vi.fn(),
   useIssue: vi.fn(),
   useIssueFilterOptions: vi.fn(),
+  useIssueRepoLabels: vi.fn(),
   useInfiniteIssueComments: vi.fn(),
   useInfiniteIssueTimeline: vi.fn(),
   useCreateIssue: vi.fn(),
@@ -439,6 +452,10 @@ describe("Issue pages", () => {
       },
       isLoading: false,
     } as unknown as ReturnType<typeof useIssueFilterOptions>);
+    vi.mocked(useIssueRepoLabels).mockReturnValue({
+      data: [{ name: "bug", color: "d73a4a", description: "" }],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssueRepoLabels>);
 
     vi.mocked(useInfiniteIssueComments).mockReturnValue({
       data: {
@@ -671,6 +688,101 @@ describe("Issue pages", () => {
 
     await waitFor(() => expect(mutateAsync).toHaveBeenCalledWith({ state: "closed" }));
     expect(toast.success).toHaveBeenCalledWith("问题已关闭");
+  });
+
+  it("updates GitHub labels from the issue detail page", async () => {
+    mockIssueDetailData();
+    const user = userEvent.setup();
+    const mutateAsync = vi.fn().mockResolvedValue({
+      data: buildGitHubIssue(),
+    });
+    vi.mocked(useIssueRepoLabels).mockReturnValue({
+      data: [
+        { name: "bug", color: "d73a4a", description: "" },
+        { name: "ios", color: "0969da", description: "" },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssueRepoLabels>);
+    vi.mocked(useUpdateIssue).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "bug" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "ios" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({ labels: ["bug", "ios"] }),
+    );
+    expect(toast.success).toHaveBeenCalledWith("GitHub 标签已更新");
+  });
+
+  it("queues rapid GitHub label changes against the latest draft", async () => {
+    mockIssueDetailData();
+    const user = userEvent.setup();
+    const firstUpdate = createDeferred<{ data: Issue }>();
+    const mutateAsync = vi
+      .fn()
+      .mockImplementationOnce(() => firstUpdate.promise)
+      .mockResolvedValue({ data: buildGitHubIssue() });
+
+    vi.mocked(useIssueRepoLabels).mockReturnValue({
+      data: [
+        { name: "bug", color: "d73a4a", description: "" },
+        { name: "ios", color: "0969da", description: "" },
+        { name: "android", color: "2ea44f", description: "" },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssueRepoLabels>);
+    vi.mocked(useUpdateIssue).mockReturnValue({
+      mutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "bug" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "ios" }));
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenCalledWith({ labels: ["bug", "ios"] }),
+    );
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
+
+    if (!screen.queryByRole("menuitemcheckbox", { name: "android" })) {
+      await user.click(await screen.findByRole("button", { name: "bug, ios" }));
+    }
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "android" }));
+
+    expect(mutateAsync).toHaveBeenCalledTimes(1);
+
+    firstUpdate.resolve({
+      data: buildGitHubIssue(
+        {},
+        {
+          labels: [
+            { name: "bug", color: "d73a4a", description: "" },
+            { name: "ios", color: "0969da", description: "" },
+          ],
+        },
+      ),
+    });
+
+    await waitFor(() =>
+      expect(mutateAsync).toHaveBeenLastCalledWith({
+        labels: ["bug", "ios", "android"],
+      }),
+    );
+    expect(mutateAsync).toHaveBeenCalledTimes(2);
+    expect(toast.success).toHaveBeenCalledWith("GitHub 标签已更新");
   });
 
   it("supports direct comment anchors in unified timeline", async () => {

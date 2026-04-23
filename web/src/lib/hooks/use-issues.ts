@@ -51,6 +51,17 @@ export function useIssueFilterOptions(projectId: string) {
   });
 }
 
+export function useIssueRepoLabels(projectId: string) {
+  return useQuery({
+    queryKey: ["projects", projectId, "issues", "repo-labels"],
+    queryFn: async () => {
+      const res = await issueApi.repoLabels(projectId);
+      return res.data;
+    },
+    enabled: !!projectId,
+  });
+}
+
 export function useIssue(issueId: string) {
   return useQuery({
     queryKey: ["issues", issueId],
@@ -130,6 +141,9 @@ export function useSyncProjectIssues(projectId: string) {
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
       queryClient.invalidateQueries({
         queryKey: ["projects", projectId, "issues", "filter-options"],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "issues", "repo-labels"],
       });
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       queryClient.invalidateQueries({ queryKey: ["projects", projectId] });

@@ -134,8 +134,71 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 	}
 }
 
+func TestIssueServiceGetRepositoryLabels_ReturnsSortedLabels(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	fake := &fakeIssueGitHubClient{
+		repoLabels: []*gh.Label{
+			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("Something isn't working")},
+			{Name: stringPtr("IOS"), Color: stringPtr("0969da"), Description: stringPtr("iOS platform")},
+			{Name: stringPtr("Bug"), Color: stringPtr("f00"), Description: stringPtr("duplicate should be ignored")},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	labels, err := svc.issueService.GetRepositoryLabels(project.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get repository labels: %v", err)
+	}
+
+	if len(labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d", len(labels))
+	}
+	if labels[0].Name != "bug" || labels[1].Name != "IOS" {
+		t.Fatalf("unexpected sorted labels: %+v", labels)
+	}
+	if labels[0].Color != "d73a4a" || labels[1].Color != "0969da" {
+		t.Fatalf("unexpected label colors: %+v", labels)
+	}
+}
+
+func TestIssueServiceGetRepositoryLabels_ReturnsGitHubError(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	fake := &fakeIssueGitHubClient{
+		repoLabelsErr: fmt.Errorf("github unavailable"),
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	if _, err := svc.issueService.GetRepositoryLabels(project.ID, user.ID); err == nil {
+		t.Fatalf("expected github api error, got nil")
+	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrGitHubAPI.Code {
+		t.Fatalf("expected github api error, got %v", err)
+	}
+}
+
 type fakeIssueGitHubClient struct {
 	issues             []*ghclient.Issue
+	repoLabels         []*gh.Label
+	repoLabelsErr      error
 	comments           map[int][]*ghclient.IssueComment
 	timeline           map[int][]*ghclient.TimelineEvent
 	createdComment     *ghclient.IssueComment
@@ -153,6 +216,7 @@ type fakeUpdateIssueCall struct {
 	IssueNumber int
 	State       string
 	StateReason string
+	Labels      []string
 }
 
 func (f *fakeIssueGitHubClient) ValidateRepository(context.Context) error {
@@ -161,6 +225,10 @@ func (f *fakeIssueGitHubClient) ValidateRepository(context.Context) error {
 
 func (f *fakeIssueGitHubClient) ListIssues(context.Context, string, *time.Time, int, int) ([]*ghclient.Issue, *gh.Response, error) {
 	return f.issues, &gh.Response{NextPage: 0}, nil
+}
+
+func (f *fakeIssueGitHubClient) ListRepositoryLabels(context.Context, int, int) ([]*gh.Label, *gh.Response, error) {
+	return f.repoLabels, &gh.Response{NextPage: 0}, f.repoLabelsErr
 }
 
 func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber, _, _ int) ([]*ghclient.IssueComment, *gh.Response, error) {
@@ -186,6 +254,9 @@ func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, 
 	}
 	if req.StateReason != nil {
 		call.StateReason = *req.StateReason
+	}
+	if req.Labels != nil {
+		call.Labels = append([]string(nil), (*req.Labels)...)
 	}
 	f.updateIssueCalls = append(f.updateIssueCalls, call)
 	return f.updatedIssue, nil
@@ -875,6 +946,66 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 	}
 }
 
+func TestIssueServiceUpdateInternalIssue_WritesGitHubLabelsBack(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	updatedAt := time.Date(2026, 4, 20, 11, 0, 0, 0, time.UTC)
+	fake := &fakeIssueGitHubClient{
+		updatedIssue: &ghclient.Issue{
+			Issue: gh.Issue{
+				ID:        int64Ptr(1001),
+				NodeID:    stringPtr("I_kw_test"),
+				Number:    intPtr(42),
+				State:     stringPtr("open"),
+				Title:     stringPtr("Crash on launch"),
+				Body:      stringPtr("App crashes"),
+				HTMLURL:   stringPtr("https://github.com/owner/repo/issues/42"),
+				User:      &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")},
+				Labels:    []*gh.Label{{Name: stringPtr("bug"), Color: stringPtr("d73a4a")}, {Name: stringPtr("ios"), Color: stringPtr("0969da")}},
+				CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+				UpdatedAt: &gh.Timestamp{Time: updatedAt},
+				Reactions: &gh.Reactions{},
+			},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	labels := []string{"bug", "ios"}
+	updated, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		Labels: &labels,
+	})
+	if err != nil {
+		t.Fatalf("update github issue labels: %v", err)
+	}
+
+	if len(fake.updateIssueCalls) != 1 {
+		t.Fatalf("expected one github update call, got %d", len(fake.updateIssueCalls))
+	}
+	call := fake.updateIssueCalls[0]
+	if call.IssueNumber != 42 {
+		t.Fatalf("unexpected github issue number: %+v", call)
+	}
+	if len(call.Labels) != 2 || call.Labels[0] != "bug" || call.Labels[1] != "ios" {
+		t.Fatalf("unexpected github labels call: %+v", call)
+	}
+	if updated.GitHub == nil || len(updated.GitHub.Labels) != 2 {
+		t.Fatalf("expected two github labels on updated issue, got %+v", updated.GitHub)
+	}
+	if updated.GitHub.Labels[0].Name != "bug" || updated.GitHub.Labels[1].Name != "ios" {
+		t.Fatalf("unexpected github labels in response: %+v", updated.GitHub.Labels)
+	}
+}
+
 func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubState(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -894,6 +1025,35 @@ func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubState(t *testing.T)
 	state := model.IssueState("archived")
 	if _, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
 		State: &state,
+	}); err == nil {
+		t.Fatalf("expected invalid params error, got nil")
+	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("expected invalid params error, got %v", err)
+	}
+	if len(fake.updateIssueCalls) != 0 {
+		t.Fatalf("expected github update to be skipped, got %d calls", len(fake.updateIssueCalls))
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubLabels(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	fake := &fakeIssueGitHubClient{}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	labels := []string{"bug", " "}
+	if _, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		Labels: &labels,
 	}); err == nil {
 		t.Fatalf("expected invalid params error, got nil")
 	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {

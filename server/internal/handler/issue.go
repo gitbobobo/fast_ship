@@ -27,6 +27,7 @@ type updateInternalIssueRequest struct {
 	Body        *string           `json:"body"`
 	State       *model.IssueState `json:"state"`
 	StateReason *string           `json:"state_reason"`
+	Labels      *[]string         `json:"labels"`
 }
 
 type createInternalIssueCommentRequest struct {
@@ -83,6 +84,7 @@ func (h *IssueHandler) Update(c *gin.Context) {
 		Body:        req.Body,
 		State:       req.State,
 		StateReason: req.StateReason,
+		Labels:      req.Labels,
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
@@ -142,6 +144,19 @@ func (h *IssueHandler) FilterOptions(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 
 	result, err := h.issueService.GetFilterOptions(projectID, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+func (h *IssueHandler) RepoLabels(c *gin.Context) {
+	projectID := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	result, err := h.issueService.GetRepositoryLabels(projectID, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

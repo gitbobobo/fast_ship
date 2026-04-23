@@ -34,6 +34,7 @@ interface UpdateInternalIssueRequest {
   body?: string;
   state?: "open" | "closed";
   state_reason?: "completed" | "not_planned" | "reopened";
+  labels?: string[];
 }
 
 interface CreateInternalIssueCommentRequest {
@@ -64,6 +65,11 @@ export const issueApi = {
     api
       .get(`projects/${projectId}/issues/filter-options`)
       .json<ApiResponse<IssueFilterOptions>>(),
+
+  repoLabels: (projectId: string) =>
+    api
+      .get(`projects/${projectId}/issues/repo-labels`)
+      .json<ApiResponse<IssueLabel[]>>(),
 
   get: (issueId: string) =>
     api.get(`issues/${issueId}`).json<ApiResponse<Issue>>(),

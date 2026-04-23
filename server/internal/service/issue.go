@@ -43,6 +43,7 @@ const (
 type gitHubIssueClient interface {
 	ValidateRepository(ctx context.Context) error
 	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*ghclient.Issue, *gh.Response, error)
+	ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error)
 	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.IssueComment, *gh.Response, error)
 	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.TimelineEvent, *gh.Response, error)
 	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*ghclient.IssueComment, error)
@@ -93,6 +94,7 @@ type UpdateInternalIssueRequest struct {
 	Body        *string           `json:"body"`
 	State       *model.IssueState `json:"state"`
 	StateReason *string           `json:"state_reason"`
+	Labels      *[]string         `json:"labels"`
 }
 
 type CreateInternalIssueCommentRequest struct {
@@ -437,7 +439,7 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 }
 
 func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error) {
-	if req.Title == nil && req.Body == nil && req.State == nil && req.StateReason == nil {
+	if req.Title == nil && req.Body == nil && req.State == nil && req.StateReason == nil && req.Labels == nil {
 		return nil, errs.ErrInvalidParams
 	}
 	if req.State == nil && req.StateReason != nil {
@@ -461,16 +463,32 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if req.Title != nil || req.Body != nil {
 			return nil, errs.ErrIssueReadOnly
 		}
-		if req.State == nil || issue.GitHubMeta == nil {
+		if req.State == nil && req.Labels == nil {
 			return nil, errs.ErrIssueReadOnly
 		}
-		if !isValidIssueState(*req.State) {
+		if issue.GitHubMeta == nil {
+			return nil, errs.ErrIssueReadOnly
+		}
+		if req.State != nil && !isValidIssueState(*req.State) {
 			return nil, errs.ErrInvalidParams
 		}
 
-		stateReason, appErr := normalizeIssueStateReason(req.State, req.StateReason)
-		if appErr != nil {
-			return nil, appErr
+		stateReason := ""
+		if req.State != nil {
+			var appErr *errs.AppError
+			stateReason, appErr = normalizeIssueStateReason(req.State, req.StateReason)
+			if appErr != nil {
+				return nil, appErr
+			}
+		}
+
+		var labelsToUpdate *[]string
+		if req.Labels != nil {
+			normalizedLabels, appErr := normalizeGitHubLabels(*req.Labels)
+			if appErr != nil {
+				return nil, appErr
+			}
+			labelsToUpdate = &normalizedLabels
 		}
 
 		project, err := s.projectRepo.FindByID(issue.ProjectID, userID)
@@ -486,10 +504,16 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		}
 
 		client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
-		state := string(*req.State)
-		updateReq := ghclient.UpdateIssueRequest{State: &state}
-		if stateReason != "" {
-			updateReq.StateReason = &stateReason
+		updateReq := ghclient.UpdateIssueRequest{}
+		if req.State != nil {
+			state := string(*req.State)
+			updateReq.State = &state
+			if stateReason != "" {
+				updateReq.StateReason = &stateReason
+			}
+		}
+		if labelsToUpdate != nil {
+			updateReq.Labels = labelsToUpdate
 		}
 		updatedIssue, err := client.UpdateIssue(context.Background(), issue.GitHubMeta.Number, updateReq)
 		if err != nil {
@@ -512,6 +536,9 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	}
 	if issue.Source != model.IssueSourceInternal {
 		return nil, errs.ErrIssueReadOnly
+	}
+	if req.Labels != nil {
+		return nil, errs.ErrInvalidParams
 	}
 
 	if req.Title != nil {
@@ -795,6 +822,66 @@ func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterO
 		Assignees:  sortedKeys(assigneeSet),
 		Milestones: sortedKeys(milestoneSet),
 	}, nil
+}
+
+func (s *IssueService) GetRepositoryLabels(projectID, userID string) ([]IssueLabelResponse, error) {
+	project, err := s.projectRepo.FindByID(projectID, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	tokenBytes, appErr := s.decryptGitHubToken(project)
+	if appErr != nil {
+		return nil, appErr
+	}
+
+	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+	const perPage = 100
+	page := 1
+	labelsByKey := make(map[string]IssueLabelResponse)
+
+	for {
+		items, resp, err := client.ListRepositoryLabels(context.Background(), page, perPage)
+		if err != nil {
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub 标签失败: %v", err))
+		}
+
+		for _, item := range items {
+			if item == nil {
+				continue
+			}
+			name := strings.TrimSpace(item.GetName())
+			if name == "" {
+				continue
+			}
+			key := strings.ToLower(name)
+			if _, ok := labelsByKey[key]; ok {
+				continue
+			}
+			labelsByKey[key] = IssueLabelResponse{
+				Name:        name,
+				Color:       item.GetColor(),
+				Description: item.GetDescription(),
+			}
+		}
+
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		page = resp.NextPage
+	}
+
+	labels := make([]IssueLabelResponse, 0, len(labelsByKey))
+	for _, item := range labelsByKey {
+		labels = append(labels, item)
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		return strings.ToLower(labels[i].Name) < strings.ToLower(labels[j].Name)
+	})
+	return labels, nil
 }
 
 func (s *IssueService) GetSyncState(projectID, userID string) (*IssueSyncStateResponse, error) {
@@ -2366,6 +2453,26 @@ func normalizeIssueStateReason(state *model.IssueState, reason *string) (string,
 		}
 	}
 	return "", errs.ErrInvalidParams
+}
+
+func normalizeGitHubLabels(labels []string) ([]string, *errs.AppError) {
+	normalized := make([]string, 0, len(labels))
+	seen := make(map[string]struct{}, len(labels))
+
+	for _, label := range labels {
+		value := strings.TrimSpace(label)
+		if value == "" {
+			return nil, errs.ErrInvalidParams
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, value)
+	}
+
+	return normalized, nil
 }
 
 func sortedKeys(values map[string]struct{}) []string {

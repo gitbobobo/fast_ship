@@ -48,8 +48,14 @@ func (c *IssueComment) GetBodyHTML() string {
 }
 
 type UpdateIssueRequest struct {
-	State       *string `json:"state,omitempty"`
-	StateReason *string `json:"state_reason,omitempty"`
+	State       *string   `json:"state,omitempty"`
+	StateReason *string   `json:"state_reason,omitempty"`
+	Labels      *[]string `json:"labels,omitempty"`
+}
+
+func (c *Client) ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error) {
+	opts := &gh.ListOptions{Page: page, PerPage: perPage}
+	return c.client.Issues.ListLabels(ctx, c.owner, c.repo, opts)
 }
 
 func NewClient(token, owner, repo string) *Client {

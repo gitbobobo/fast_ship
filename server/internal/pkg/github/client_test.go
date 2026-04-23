@@ -412,6 +412,77 @@ func TestClientUpdateIssue_UsesFullMediaType(t *testing.T) {
 	}
 }
 
+func TestClientUpdateIssue_SendsLabels(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/repos/owner/repo/issues/42" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		rawLabels, ok := payload["labels"].([]any)
+		if !ok {
+			t.Fatalf("expected labels array in payload, got %#v", payload["labels"])
+		}
+		if len(rawLabels) != 2 || rawLabels[0] != "bug" || rawLabels[1] != "ios" {
+			t.Fatalf("unexpected labels payload: %#v", rawLabels)
+		}
+
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id":         1001,
+			"node_id":    "I_kw_test",
+			"number":     42,
+			"state":      "open",
+			"title":      "Crash on launch",
+			"body":       "App crashes on startup",
+			"html_url":   "https://github.com/owner/repo/issues/42",
+			"labels":     []map[string]any{{"name": "bug"}, {"name": "ios"}},
+			"created_at": "2026-04-19T10:00:00Z",
+			"updated_at": "2026-04-20T10:00:00Z",
+		})
+	}))
+
+	labels := []string{"bug", "ios"}
+	issue, err := client.UpdateIssue(context.Background(), 42, UpdateIssueRequest{
+		Labels: &labels,
+	})
+	if err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if got := len(issue.Labels); got != 2 {
+		t.Fatalf("expected 2 labels, got %d", got)
+	}
+}
+
+func TestClientListRepositoryLabels(t *testing.T) {
+	client := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/owner/repo/labels" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+		if got := r.URL.Query().Get("page"); got != "2" {
+			t.Fatalf("expected page=2, got %q", got)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "50" {
+			t.Fatalf("expected per_page=50, got %q", got)
+		}
+
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{"name": "bug", "color": "d73a4a", "description": "Something isn't working"},
+			{"name": "ios", "color": "0969da", "description": "iOS platform"},
+		})
+	}))
+
+	labels, _, err := client.ListRepositoryLabels(context.Background(), 2, 50)
+	if err != nil {
+		t.Fatalf("ListRepositoryLabels: %v", err)
+	}
+	if len(labels) != 2 || labels[0].GetName() != "bug" || labels[1].GetName() != "ios" {
+		t.Fatalf("unexpected labels payload: %+v", labels)
+	}
+}
+
 func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 

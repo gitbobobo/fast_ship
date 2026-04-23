@@ -52,6 +52,7 @@ import {
 
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
@@ -69,6 +70,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import {
   useIssue,
+  useIssueRepoLabels,
   useCreateIssueComment,
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
@@ -363,6 +365,41 @@ function calculateChecklistProgress(items: Array<{ isCompleted: boolean }>) {
   return Math.round((completed * 100) / items.length);
 }
 
+function normalizeGitHubLabelNames(labels: string[]) {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const label of labels) {
+    const value = label.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function haveSameGitHubLabelNames(left: string[], right: string[]) {
+  const leftNames = normalizeGitHubLabelNames(left);
+  const rightKeys = new Set(
+    normalizeGitHubLabelNames(right).map((label) => label.toLowerCase()),
+  );
+
+  return (
+    leftNames.length === rightKeys.size &&
+    leftNames.every((label) => rightKeys.has(label.toLowerCase()))
+  );
+}
+
+function toggleGitHubLabelName(labels: string[], labelName: string) {
+  const key = labelName.toLowerCase();
+  const exists = labels.some((label) => label.toLowerCase() === key);
+
+  return exists
+    ? labels.filter((label) => label.toLowerCase() !== key)
+    : [...labels, labelName];
+}
+
 function EmptyState({ message }: { message: string }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-14 text-center">
@@ -397,6 +434,7 @@ export default function IssueDetailPage() {
   const [commentDraft, setCommentDraft] = useState("");
   const [isChecklistEditing, setIsChecklistEditing] = useState(false);
   const [checklistDraft, setChecklistDraft] = useState<ChecklistDraftItem[]>([]);
+  const [githubLabelDraft, setGithubLabelDraft] = useState<string[] | null>(null);
   const [isSuggestionDialogOpen, setIsSuggestionDialogOpen] = useState(false);
   const [suggestionState, setSuggestionState] = useState<
     "idle" | "loading" | "ready" | "missing-settings" | "error"
@@ -407,6 +445,10 @@ export default function IssueDetailPage() {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const timelineSectionRef = useRef<HTMLDivElement | null>(null);
   const isChecklistEditingRef = useRef(false);
+  const githubLabelDraftRef = useRef<string[] | null>(null);
+  const githubLabelPersistedRef = useRef<string[]>([]);
+  const githubLabelCommitInFlightRef = useRef(false);
+  const githubLabelQueuedRef = useRef(false);
 
   const handleImageClick = useCallback((e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -418,6 +460,7 @@ export default function IssueDetailPage() {
   }, []);
 
   const { data: issue, isLoading } = useIssue(iid!);
+  const { data: repoLabels } = useIssueRepoLabels(id!);
   const isInternalIssue = issue?.source === "internal";
   const updateIssue = useUpdateIssue(iid!, id);
   const updateInternalMeta = useUpdateIssueInternalMeta(iid!, id);
@@ -500,6 +543,33 @@ export default function IssueDetailPage() {
     return JSON.stringify(normalizeChecklistDraft(checklistDraft)) !==
       JSON.stringify(normalizeChecklistDraft(persistedChecklist));
   }, [checklistDraft, persistedChecklist]);
+  const issueGitHubLabelNames = useMemo(
+    () =>
+      normalizeGitHubLabelNames(
+        (issue?.github?.labels ?? []).map((label) => label.name),
+      ),
+    [issue?.github?.labels],
+  );
+  const visibleGitHubLabelNames = githubLabelDraft ?? issueGitHubLabelNames;
+  const githubLabelOptions = useMemo(() => {
+    const options = new Set<string>();
+    for (const name of visibleGitHubLabelNames) {
+      options.add(name);
+    }
+    for (const item of repoLabels ?? []) {
+      const value = item.name.trim();
+      if (value) {
+        options.add(value);
+      }
+    }
+    return Array.from(options).sort((a, b) => a.localeCompare(b));
+  }, [repoLabels, visibleGitHubLabelNames]);
+
+  const setGitHubLabelDraftState = useCallback((labels: string[] | null) => {
+    const normalized = labels ? normalizeGitHubLabelNames(labels) : null;
+    githubLabelDraftRef.current = normalized;
+    setGithubLabelDraft(normalized);
+  }, []);
 
   useEffect(() => {
     isChecklistEditingRef.current = isChecklistEditing;
@@ -511,6 +581,14 @@ export default function IssueDetailPage() {
     }
     setChecklistDraft(persistedChecklist);
   }, [persistedChecklist]);
+
+  useEffect(() => {
+    if (githubLabelCommitInFlightRef.current || githubLabelQueuedRef.current) {
+      return;
+    }
+    githubLabelPersistedRef.current = issueGitHubLabelNames;
+    setGitHubLabelDraftState(null);
+  }, [issueGitHubLabelNames, setGitHubLabelDraftState]);
 
   const pageIssues = issueListData?.items ?? [];
   const issueIndex = pageIssues.findIndex((item) => item.id === iid);
@@ -946,6 +1024,60 @@ export default function IssueDetailPage() {
     } catch {
       toast.error("更新内部状态失败");
     }
+  };
+
+  const commitGitHubLabelDraft = useCallback(async () => {
+    if (githubLabelCommitInFlightRef.current) {
+      githubLabelQueuedRef.current = true;
+      return;
+    }
+
+    githubLabelCommitInFlightRef.current = true;
+    let persistedAny = false;
+
+    try {
+      while (true) {
+        githubLabelQueuedRef.current = false;
+        const labelsToPersist =
+          githubLabelDraftRef.current ?? githubLabelPersistedRef.current;
+
+        await updateIssue.mutateAsync({
+          labels: labelsToPersist,
+        });
+        persistedAny = true;
+        githubLabelPersistedRef.current = labelsToPersist;
+
+        const latestDraft =
+          githubLabelDraftRef.current ?? githubLabelPersistedRef.current;
+        if (
+          !githubLabelQueuedRef.current ||
+          haveSameGitHubLabelNames(latestDraft, labelsToPersist)
+        ) {
+          break;
+        }
+      }
+
+      if (persistedAny) {
+        toast.success("GitHub 标签已更新");
+      }
+    } catch {
+      githubLabelQueuedRef.current = false;
+      setGitHubLabelDraftState(githubLabelPersistedRef.current);
+      toast.error("更新 GitHub 标签失败");
+    } finally {
+      githubLabelCommitInFlightRef.current = false;
+    }
+  }, [setGitHubLabelDraftState, updateIssue]);
+
+  const handleToggleGitHubLabel = async (labelName: string) => {
+    if (issue?.source !== "github") {
+      return;
+    }
+    const currentLabels = githubLabelDraftRef.current ?? issueGitHubLabelNames;
+    const nextLabels = toggleGitHubLabelName(currentLabels, labelName);
+
+    setGitHubLabelDraftState(nextLabels);
+    await commitGitHubLabelDraft();
   };
 
   const handleCreateComment = async () => {
@@ -1441,7 +1573,10 @@ export default function IssueDetailPage() {
                 </div>
 
                 {/* 负责人 & 里程碑 & 标签 */}
-                {((issue.github?.assignees?.length ?? 0) > 0 || issue.github?.milestone || (issue.github?.labels?.length ?? 0) > 0) && (
+                {(issue.source === "github" ||
+                  (issue.github?.assignees?.length ?? 0) > 0 ||
+                  issue.github?.milestone ||
+                  (issue.github?.labels?.length ?? 0) > 0) && (
                   <>
                     <Separator />
                     <div className="space-y-3">
@@ -1470,23 +1605,44 @@ export default function IssueDetailPage() {
                           <p className="text-sm font-semibold">{issue.github.milestone.title}</p>
                         </div>
                       )}
-                      {(issue.github?.labels?.length ?? 0) > 0 && (
-                        <div>
-                          <p className="mb-2 text-xs font-medium text-muted-foreground">标签</p>
-                          <div className="flex flex-wrap gap-2">
-                            {issue.github?.labels.map((label) => (
-                              <span
-                                key={label.name}
-                                className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium"
-                                style={{
-                                  backgroundColor: `#${label.color}20`,
-                                  color: `#${label.color}`,
-                                }}
-                              >
-                                {label.name}
-                              </span>
-                            ))}
-                          </div>
+                      {issue.source === "github" && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm text-muted-foreground">标签</span>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger
+                              render={
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs hover:bg-muted data-[state=open]:bg-muted"
+                                >
+                                  {visibleGitHubLabelNames.length === 0
+                                    ? "未设置"
+                                    : visibleGitHubLabelNames.join(", ")}
+                                </Button>
+                              }
+                            />
+                            <DropdownMenuContent align="end" className="min-w-[180px] max-w-[260px]">
+                              {githubLabelOptions.length === 0 ? (
+                                <DropdownMenuItem disabled>暂无可选标签</DropdownMenuItem>
+                              ) : (
+                                githubLabelOptions.map((labelName) => (
+                                  <DropdownMenuCheckboxItem
+                                    key={labelName}
+                                    checked={visibleGitHubLabelNames.some(
+                                      (label) =>
+                                        label.toLowerCase() === labelName.toLowerCase(),
+                                    )}
+                                    onCheckedChange={() =>
+                                      void handleToggleGitHubLabel(labelName)
+                                    }
+                                  >
+                                    {labelName}
+                                  </DropdownMenuCheckboxItem>
+                                ))
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
                         </div>
                       )}
                     </div>
