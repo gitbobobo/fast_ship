@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import {
-  ArrowLeft,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -614,8 +613,6 @@ export default function IssueDetailPage() {
     () => infiniteTimelineData?.pages.flatMap((page) => page.items) ?? [],
     [infiniteTimelineData?.pages],
   );
-  const commentsTotal = infiniteCommentsData?.pages[0]?.total ?? 0;
-  const timelineTotal = infiniteTimelineData?.pages[0]?.total ?? 0;
   const loadedCommentsPages = infiniteCommentsData?.pages.length ?? 1;
   const loadedTimelinePages = infiniteTimelineData?.pages.length ?? 1;
   const targetCommentAnchorId = isCommentAnchorHash ? location.hash.slice(1) : null;
@@ -629,10 +626,7 @@ export default function IssueDetailPage() {
     return items;
   }, [comments, timeline]);
 
-  const totalLoaded = comments.length + timeline.length;
-  const totalItems = commentsTotal + timelineTotal;
   const hasMore = hasNextCommentsPage || hasNextTimelinePage;
-  const isLoadingMore = isFetchingNextCommentsPage || isFetchingNextTimelinePage;
   const isLoadingTimeline = commentsLoading || timelineLoading;
 
   const updateSearchParam = useCallback(
@@ -1136,17 +1130,7 @@ export default function IssueDetailPage() {
       <Header title={issue.reference} />
       <div className="mx-auto max-w-7xl p-4 md:p-6">
         {/* Top Navigation Bar */}
-        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-fit"
-            onClick={() => navigate(-1)}
-          >
-            <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
-            返回
-          </Button>
-
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
           <div className="flex flex-wrap items-center gap-2">
             <div className="mr-2 flex items-center gap-1">
               <Button

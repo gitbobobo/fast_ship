@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { screen, waitFor, fireEvent, render } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // Components
@@ -137,6 +137,24 @@ describe("UI Integration Tests", () => {
       // Buttons (theme toggle and user nav)
       const allButtons = screen.getAllByRole("button");
       expect(allButtons.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("falls back to projects when browser history is not available", () => {
+      function LocationProbe() {
+        return <div data-testid="location-path">{useLocation().pathname}</div>;
+      }
+
+      renderWithProviders(
+        <>
+          <Header title="测试" />
+          <LocationProbe />
+        </>,
+        { initialEntry: "/projects/proj-1" },
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+      expect(screen.getByTestId("location-path")).toHaveTextContent("/projects");
     });
   });
 

@@ -132,7 +132,7 @@ describe("VersionDetailPage", () => {
     expect(screen.getByText("上传安装包")).toBeInTheDocument();
     expect(screen.getByText("进行中")).toBeInTheDocument();
     expect(screen.getByText("正在上传安装包")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "发货中..." })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "发货中" })).toBeDisabled();
   });
 
   it("renders uploaded_by in artifacts list", () => {
@@ -182,12 +182,15 @@ describe("VersionDetailPage", () => {
       initialEntry: "/projects/proj-1/versions/ver-1",
     });
 
-    const versionLabel = screen.getByText("版本号");
-    expect(versionLabel).toBeInTheDocument();
-    // Find the edit button in the same card as the version label
-    const infoCard = versionLabel.closest('[data-slot="card"]');
-    expect(infoCard).not.toBeNull();
-    fireEvent.click(within(infoCard as HTMLElement).getAllByRole("button")[0]);
+    const basicInfoCard = screen.getByText("基本信息").closest('[data-slot="card"]');
+    expect(basicInfoCard).toBeTruthy();
+
+    const versionSection = within(basicInfoCard as HTMLElement).getByText("版本号");
+    const versionBlock = versionSection.closest(".space-y-1");
+    expect(versionBlock).not.toBeNull();
+
+    const versionEditButton = within(versionBlock as HTMLElement).getByRole("button");
+    fireEvent.click(versionEditButton);
 
     const input = screen.getByDisplayValue("v1.2.0");
     fireEvent.change(input, { target: { value: "v1.3.0" } });
@@ -234,7 +237,7 @@ describe("VersionDetailPage", () => {
       initialEntry: "/projects/proj-1/versions/ver-1",
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "发货到 GitHub" }));
+    fireEvent.click(screen.getByRole("button", { name: "发货" }));
 
     const dialogHeading = screen.getByRole("heading", { name: "确认发货" });
     const dialog = dialogHeading.closest('[data-slot="dialog-content"]');
@@ -323,7 +326,7 @@ describe("VersionDetailPage", () => {
       initialEntry: "/projects/proj-1/versions/ver-1",
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "发货到 GitHub" }));
+    fireEvent.click(screen.getByRole("button", { name: "发货" }));
     fireEvent.click(screen.getByRole("button", { name: "确认发货" }));
 
     await waitFor(() =>
@@ -364,7 +367,7 @@ describe("VersionDetailPage", () => {
       initialEntry: "/projects/proj-1/versions/ver-1",
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "发货到 GitHub" }));
+    fireEvent.click(screen.getByRole("button", { name: "发货" }));
     fireEvent.click(screen.getByRole("button", { name: "确认发货" }));
 
     await waitFor(() =>
