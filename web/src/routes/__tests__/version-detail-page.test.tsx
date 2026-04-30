@@ -1,4 +1,5 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { toast } from "sonner";
 import VersionDetailPage from "@/routes/projects/$id/versions/$vid";
@@ -10,6 +11,7 @@ import {
   useUpdateVersion,
   useVersion,
 } from "@/lib/hooks/use-versions";
+import { useProjectBranches } from "@/lib/hooks/use-projects";
 import { useDeleteArtifact, useUploadArtifact } from "@/lib/hooks/use-artifacts";
 
 vi.mock("sonner", () => ({
@@ -30,6 +32,10 @@ vi.mock("@/lib/hooks/use-versions", () => ({
 vi.mock("@/lib/hooks/use-artifacts", () => ({
   useUploadArtifact: vi.fn(),
   useDeleteArtifact: vi.fn(),
+}));
+
+vi.mock("@/lib/hooks/use-projects", () => ({
+  useProjectBranches: vi.fn(),
 }));
 
 function makeVersion(overrides: Partial<Version> = {}): Version {
@@ -107,6 +113,19 @@ describe("VersionDetailPage", () => {
       refetch: shipCheckRefetch,
     } as unknown as ReturnType<typeof useShipCheck>);
 
+    vi.mocked(useProjectBranches).mockReturnValue({
+      data: {
+        branches: [
+          { name: "main", sha: "abc123", default: true },
+          { name: "release/1.0", sha: "def456", default: false },
+        ],
+        default_branch: "main",
+      },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProjectBranches>);
+
     vi.mocked(useUploadArtifact).mockReturnValue({
       mutateAsync: uploadMutateAsync,
       isPending: false,
@@ -166,7 +185,9 @@ describe("VersionDetailPage", () => {
     expect(screen.getByText("Genre 浏览")).toBeInTheDocument();
   });
 
-  it("allows editing version number when version is editable", () => {
+  it("allows editing version number when version is editable", async () => {
+    const user = userEvent.setup();
+
     vi.mocked(useVersion).mockReturnValue({
       data: makeVersion({
         ship_status: "",
@@ -190,11 +211,12 @@ describe("VersionDetailPage", () => {
     expect(versionBlock).not.toBeNull();
 
     const versionEditButton = within(versionBlock as HTMLElement).getByRole("button");
-    fireEvent.click(versionEditButton);
+    await user.click(versionEditButton);
 
     const input = screen.getByDisplayValue("v1.2.0");
-    fireEvent.change(input, { target: { value: "v1.3.0" } });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await user.clear(input);
+    await user.type(input, "v1.3.0");
+    await user.click(screen.getByRole("button", { name: "保存" }));
 
     expect(updateMutateAsync).toHaveBeenCalledWith({ version_number: "v1.3.0" });
   });

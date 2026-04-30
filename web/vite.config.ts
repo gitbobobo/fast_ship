@@ -22,6 +22,7 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
+    execArgv: ["--no-webstorage"],
     globals: true,
     setupFiles: "./src/test/setup.ts",
   },

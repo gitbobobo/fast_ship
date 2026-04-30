@@ -8,6 +8,7 @@ import { renderWithRoute } from "@/test/render";
 import {
   useCreateProject,
   useProject,
+  useProjectBranches,
   useUpdateProject,
 } from "@/lib/hooks/use-projects";
 import { useCreateVersion } from "@/lib/hooks/use-versions";
@@ -34,6 +35,7 @@ vi.mock("sonner", () => ({
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProject: vi.fn(),
   useCreateProject: vi.fn(),
+  useProjectBranches: vi.fn(),
   useUpdateProject: vi.fn(),
 }));
 
@@ -68,6 +70,19 @@ describe("ProjectAndVersionForms", () => {
     vi.mocked(useUpdateProject).mockReturnValue({
       mutateAsync: updateProjectMutateAsync,
     } as unknown as ReturnType<typeof useUpdateProject>);
+
+    vi.mocked(useProjectBranches).mockReturnValue({
+      data: {
+        branches: [
+          { name: "main", sha: "abc123", default: true },
+          { name: "release/1.0", sha: "def456", default: false },
+        ],
+        default_branch: "main",
+      },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useProjectBranches>);
 
     vi.mocked(useCreateVersion).mockReturnValue({
       mutateAsync: createVersionMutateAsync,
@@ -188,7 +203,6 @@ describe("ProjectAndVersionForms", () => {
     });
 
     await user.type(screen.getByLabelText("版本号"), "v1.2.3");
-    await user.type(screen.getByLabelText("目标分支 / Commit（可选）"), "main");
     await user.type(screen.getByLabelText("Release 说明（可选）"), "release notes");
     await user.click(screen.getByRole("button", { name: "创建版本" }));
 
