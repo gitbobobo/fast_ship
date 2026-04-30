@@ -106,7 +106,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
-	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage)
+	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop())
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())

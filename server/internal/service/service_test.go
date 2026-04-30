@@ -123,7 +123,7 @@ func setupTestServices(t *testing.T) *testServices {
 		artifactRepo:        artifactRepo,
 		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg),
-		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage),
+		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		shipService:         NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
 	}

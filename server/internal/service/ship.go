@@ -257,7 +257,7 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 		},
 		{
 			Key:    "target_commitish",
-			Label:  "目标分支 / Commit",
+			Label:  "目标分支",
 			OK:     version.TargetCommitish != "",
 			Detail: "用于创建 Git Tag",
 		},
