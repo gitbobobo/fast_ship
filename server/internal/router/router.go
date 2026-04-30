@@ -73,6 +73,7 @@ func Setup(
 		{
 			projectRead.GET("", projectHandler.List)
 			projectRead.GET("/:id", projectHandler.Get)
+			projectRead.GET("/:id/branches", projectHandler.GetBranches)
 		}
 
 		// JWT 必须 — 版本写操作（创建）

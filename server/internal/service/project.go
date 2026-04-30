@@ -1,12 +1,15 @@
 package service
 
 import (
+	"context"
 	"errors"
+	"fmt"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
@@ -14,12 +17,19 @@ import (
 )
 
 type ProjectService struct {
-	projectRepo   *repository.ProjectRepository
-	versionRepo   *repository.VersionRepository
-	syncStateRepo *repository.IssueSyncStateRepository
-	storage       storage.Storage
-	cfg           *config.Config
+	projectRepo     *repository.ProjectRepository
+	versionRepo     *repository.VersionRepository
+	syncStateRepo   *repository.IssueSyncStateRepository
+	storage         storage.Storage
+	cfg             *config.Config
+	newBranchClient gitHubBranchClientFactory
 }
+
+type gitHubBranchClient interface {
+	ListBranches(ctx context.Context) ([]*ghclient.Branch, string, error)
+}
+
+type gitHubBranchClientFactory func(token, owner, repo string) gitHubBranchClient
 
 func NewProjectService(
 	projectRepo *repository.ProjectRepository,
@@ -34,6 +44,9 @@ func NewProjectService(
 		syncStateRepo: syncStateRepo,
 		storage:       storage,
 		cfg:           cfg,
+		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
+			return ghclient.NewClient(token, owner, repo)
+		},
 	}
 }
 
@@ -78,6 +91,12 @@ type LatestVersionResponse struct {
 	VersionNumber string              `json:"version_number"`
 	Status        model.VersionStatus `json:"status"`
 	CreatedAt     string              `json:"created_at"`
+}
+
+type BranchResponse struct {
+	Name    string `json:"name"`
+	SHA     string `json:"sha"`
+	Default bool   `json:"default"`
 }
 
 func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*ProjectResponse, error) {
@@ -206,6 +225,42 @@ func (s *ProjectService) Delete(id, userID string) error {
 
 	_ = s.storage.DeletePrefix(project.ID)
 	return nil
+}
+
+// GetBranches fetches all branches from the project's GitHub repository.
+func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]BranchResponse, string, error) {
+	project, err := s.projectRepo.FindByID(id, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", errs.ErrProjectNotFound
+		}
+		return nil, "", errs.ErrInternal
+	}
+
+	// Decrypt GitHub token
+	tokenBytes, err := crypto.Decrypt(project.GithubTokenEncrypted, []byte(s.cfg.Encryption.Key))
+	if err != nil {
+		return nil, "", errs.ErrInternal
+	}
+
+	// Create GitHub client and fetch branches.
+	ghClient := s.newBranchClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+	branches, defaultBranch, err := ghClient.ListBranches(ctx)
+	if err != nil {
+		return nil, "", errs.New(50200, fmt.Sprintf("Failed to fetch branches: %v", err))
+	}
+
+	// Convert to response format
+	resp := make([]BranchResponse, len(branches))
+	for i, b := range branches {
+		resp[i] = BranchResponse{
+			Name:    b.Name,
+			SHA:     b.SHA,
+			Default: b.Default,
+		}
+	}
+
+	return resp, defaultBranch, nil
 }
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {

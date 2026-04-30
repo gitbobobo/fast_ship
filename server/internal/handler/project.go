@@ -97,3 +97,19 @@ func (h *ProjectHandler) Delete(c *gin.Context) {
 
 	response.Success(c, nil)
 }
+
+func (h *ProjectHandler) GetBranches(c *gin.Context) {
+	id := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	branches, defaultBranch, err := h.projectService.GetBranches(c.Request.Context(), id, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{
+		"branches":       branches,
+		"default_branch": defaultBranch,
+	})
+}

@@ -30,7 +30,7 @@ func (h *VersionHandler) Create(c *gin.Context) {
 	}
 
 	userID := middleware.GetUserID(c)
-	result, err := h.versionService.Create(projectID, userID, &req)
+	result, err := h.versionService.Create(c.Request.Context(), projectID, userID, &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -83,7 +83,7 @@ func (h *VersionHandler) Update(c *gin.Context) {
 	}
 
 	userID := middleware.GetUserID(c)
-	result, err := h.versionService.Update(vid, userID, middleware.IsJWTAuth(c), &req)
+	result, err := h.versionService.Update(c.Request.Context(), vid, userID, middleware.IsJWTAuth(c), &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
