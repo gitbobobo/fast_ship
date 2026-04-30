@@ -53,6 +53,13 @@ type UpdateIssueRequest struct {
 	Labels      *[]string `json:"labels,omitempty"`
 }
 
+// Branch represents a GitHub branch
+type Branch struct {
+	Name    string `json:"name"`
+	SHA     string `json:"sha"`
+	Default bool   `json:"default"`
+}
+
 func (c *Client) ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error) {
 	opts := &gh.ListOptions{Page: page, PerPage: perPage}
 	return c.client.Issues.ListLabels(ctx, c.owner, c.repo, opts)
@@ -304,4 +311,40 @@ func (c *Client) resolveCommitish(ctx context.Context, commitish string) (string
 		return "", fmt.Errorf("commit %q returned empty SHA", commitish)
 	}
 	return sha, nil
+}
+
+// ListBranches fetches all branches from the repository
+func (c *Client) ListBranches(ctx context.Context) ([]*Branch, string, error) {
+	// Get repository info to find default branch
+	repo, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to get repository: %w", err)
+	}
+	defaultBranch := repo.GetDefaultBranch()
+
+	// List all branches
+	opts := &gh.BranchListOptions{ListOptions: gh.ListOptions{PerPage: 100}}
+	var allBranches []*Branch
+
+	for {
+		branches, resp, err := c.client.Repositories.ListBranches(ctx, c.owner, c.repo, opts)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to list branches: %w", err)
+		}
+
+		for _, branch := range branches {
+			allBranches = append(allBranches, &Branch{
+				Name:    branch.GetName(),
+				SHA:     branch.GetCommit().GetSHA(),
+				Default: branch.GetName() == defaultBranch,
+			})
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.ListOptions.Page = resp.NextPage
+	}
+
+	return allBranches, defaultBranch, nil
 }
