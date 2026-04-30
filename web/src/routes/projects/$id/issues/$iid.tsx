@@ -1247,7 +1247,7 @@ export default function IssueDetailPage() {
 
         <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
           {/* Main Content */}
-          <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
+          <div className="min-w-[800px] space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
             {/* Issue Header Card */}
             <div className="overflow-hidden rounded-2xl border bg-card shadow-sm transition-shadow hover:shadow-md">
               <div className="p-5 md:p-6">
@@ -1307,8 +1307,9 @@ export default function IssueDetailPage() {
               </div>
             </div>
 
-            {/* Unified Timeline */}
+            {/* Timeline and Comment Section */}
             <div className="-mt-6">
+              {/* Unified Timeline */}
               <div id="timeline" ref={timelineSectionRef} className="scroll-mt-20" />
 
               {isLoadingTimeline ? (
@@ -1445,37 +1446,9 @@ export default function IssueDetailPage() {
                 </div>
               )}
 
-              {timelineItems.length > 0 && (
-                <div className="mt-6 space-y-3">
-                  <p className="text-center text-xs text-muted-foreground">
-                    已加载 {Math.min(totalLoaded, totalItems)} / {totalItems} 条活动
-                  </p>
-                  <div ref={sentinelRef} className="h-1 w-full" />
-                  {hasMore ? (
-                    <div className="flex items-center justify-center">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="min-w-[140px]"
-                        onClick={() => {
-                          if (hasNextCommentsPage && !isFetchingNextCommentsPage) {
-                            void fetchNextCommentsPage();
-                          }
-                          if (hasNextTimelinePage && !isFetchingNextTimelinePage) {
-                            void fetchNextTimelinePage();
-                          }
-                        }}
-                        disabled={isLoadingMore}
-                      >
-                        {isLoadingMore ? "加载中..." : "加载更多"}
-                      </Button>
-                    </div>
-                  ) : (
-                    <p className="text-center text-xs text-muted-foreground">活动已全部加载</p>
-                  )}
-                </div>
+              {timelineItems.length > 0 && hasMore && (
+                <div ref={sentinelRef} className="h-1 w-full" />
               )}
-            </div>
 
             <Card>
               <CardContent className="space-y-4 p-5 md:p-6">
@@ -1505,6 +1478,7 @@ export default function IssueDetailPage() {
                 </div>
               </CardContent>
             </Card>
+            </div>
           </div>
 
           {/* Sidebar */}
