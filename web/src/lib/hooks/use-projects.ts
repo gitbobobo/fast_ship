@@ -53,3 +53,16 @@ export function useDeleteProject() {
     },
   });
 }
+
+export function useProjectBranches(projectId: string, enabled = true) {
+  return useQuery({
+    queryKey: ["projects", projectId, "branches"],
+    queryFn: async () => {
+      const res = await projectApi.getBranches(projectId);
+      return res.data;
+    },
+    enabled: !!projectId && enabled,
+    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+    gcTime: 10 * 60 * 1000,   // Keep in cache for 10 minutes
+  });
+}

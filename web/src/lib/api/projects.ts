@@ -33,4 +33,7 @@ export const projectApi = {
 
   delete: (id: string) =>
     api.delete(`projects/${id}`).json<ApiResponse<null>>(),
+
+  getBranches: (id: string) =>
+    api.get(`projects/${id}/branches`).json<ApiResponse<ProjectBranchesResponse>>(),
 };

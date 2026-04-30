@@ -53,6 +53,17 @@ interface Version {
   artifacts?: Artifact[];
 }
 
+interface GitHubBranch {
+  name: string;
+  sha: string;
+  default: boolean;
+}
+
+interface ProjectBranchesResponse {
+  branches: GitHubBranch[];
+  default_branch: string;
+}
+
 interface ShipCheckItem {
   key: string;
   label: string;

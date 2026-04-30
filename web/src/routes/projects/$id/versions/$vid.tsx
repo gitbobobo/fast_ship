@@ -25,6 +25,13 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Card,
   CardAction,
   CardContent,
@@ -60,6 +67,7 @@ import {
   useShipCheck,
   useShipVersion,
 } from "@/lib/hooks/use-versions";
+import { useProjectBranches } from "@/lib/hooks/use-projects";
 import { useUploadArtifact, useDeleteArtifact } from "@/lib/hooks/use-artifacts";
 import { artifactApi } from "@/lib/api/artifacts";
 import { formatDate, formatFileSize } from "@/lib/utils/format";
@@ -121,8 +129,6 @@ export default function VersionDetailPage() {
   const [notes, setNotes] = useState("");
   const [editingVersionNumber, setEditingVersionNumber] = useState(false);
   const [versionNumber, setVersionNumber] = useState("");
-  const [editingCommitish, setEditingCommitish] = useState(false);
-  const [commitish, setCommitish] = useState("");
   const [uploadPlatform, setUploadPlatform] = useState("");
   const [isDragOver, setIsDragOver] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgressState | null>(
@@ -137,6 +143,16 @@ export default function VersionDetailPage() {
   const isUploading = uploadProgress?.status === "uploading";
   const isEditable = isPending && !isShipping;
   const artifacts = version?.artifacts ?? [];
+  const {
+    data: branchesData,
+    isLoading: branchesLoading,
+    isError: branchesError,
+    refetch: refetchBranches,
+  } = useProjectBranches(id!, isEditable);
+  const branchOptions = branchesData?.branches ?? [];
+  const targetBranchExists =
+    !version?.target_commitish ||
+    branchOptions.some((branch) => branch.name === version.target_commitish);
 
   useEffect(() => {
     if (!shouldPollShip || !vid) return;
@@ -171,16 +187,6 @@ export default function VersionDetailPage() {
       toast.success("版本号已更新");
     } catch {
       toast.error("更新失败，版本号可能已存在");
-    }
-  };
-
-  const handleSaveCommitish = async () => {
-    try {
-      await updateVersion.mutateAsync({ target_commitish: commitish });
-      setEditingCommitish(false);
-      toast.success("目标分支已更新");
-    } catch {
-      toast.error("更新失败");
     }
   };
 
@@ -845,52 +851,83 @@ export default function VersionDetailPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     目标分支
                   </span>
-                  {editingCommitish ? (
+                  {isEditable ? (
                     <div className="space-y-2">
-                      <Input
-                        className="h-8 text-sm"
-                        value={commitish}
-                        onChange={(e) => setCommitish(e.target.value)}
-                      />
-                      <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 text-xs"
-                          onClick={handleSaveCommitish}
-                        >
-                          保存
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 text-xs"
-                          onClick={() => setEditingCommitish(false)}
-                        >
-                          取消
-                        </Button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm">
-                        {version.target_commitish || (
-                          <span className="text-muted-foreground">未设置</span>
-                        )}
-                      </span>
-                      {isEditable && (
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          onClick={() => {
-                            setCommitish(version.target_commitish || "");
-                            setEditingCommitish(true);
-                          }}
-                        >
-                          <Pencil className="h-3 w-3" />
-                        </Button>
+                      <Select
+                        value={
+                          targetBranchExists
+                            ? (version.target_commitish ?? "")
+                            : ""
+                        }
+                        onValueChange={async (value) => {
+                          try {
+                            await updateVersion.mutateAsync({ target_commitish: value ?? "" });
+                            toast.success("目标分支已更新");
+                          } catch {
+                            toast.error("更新失败");
+                          }
+                        }}
+                        disabled={
+                          branchesLoading || branchesError || updateVersion.isPending
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-full">
+                          {branchesLoading || updateVersion.isPending ? (
+                            <span className="text-sm text-muted-foreground">
+                              {updateVersion.isPending ? "保存中..." : "加载分支中..."}
+                            </span>
+                          ) : (
+                            <SelectValue placeholder="选择分支" />
+                          )}
+                        </SelectTrigger>
+                        <SelectContent>
+                          {branchOptions.map((branch) => (
+                            <SelectItem key={branch.name} value={branch.name}>
+                              <div className="flex items-center gap-2">
+                                <span>{branch.name}</span>
+                                {branch.default && (
+                                  <Badge variant="outline" className="text-[10px] h-4 px-1">
+                                    默认
+                                  </Badge>
+                                )}
+                              </div>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {branchesError && (
+                        <div className="flex items-center justify-between gap-2 rounded-md border border-destructive/30 px-2 py-1.5">
+                          <span className="text-xs text-destructive">
+                            分支加载失败
+                          </span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 px-2 text-xs"
+                            onClick={() => void refetchBranches()}
+                          >
+                            重试
+                          </Button>
+                        </div>
+                      )}
+                      {!branchesLoading && !branchesError && !targetBranchExists && (
+                        <p className="text-xs text-destructive">
+                          当前目标分支 {version.target_commitish} 不存在，请重新选择
+                        </p>
+                      )}
+                      {!branchesLoading && !branchesError && branchOptions.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          当前仓库没有可选分支
+                        </p>
                       )}
                     </div>
+                  ) : (
+                    <span className="text-sm">
+                      {version.target_commitish || (
+                        <span className="text-muted-foreground">未设置</span>
+                      )}
+                    </span>
                   )}
                 </div>
                 {/* 创建时间 */}

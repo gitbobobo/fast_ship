@@ -1,5 +1,6 @@
 import { useParams, useNavigate } from "react-router";
-import { useForm } from "react-hook-form";
+import { useEffect } from "react";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
@@ -7,7 +8,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { versionSchema, type VersionInput } from "@/lib/utils/validators";
+import { useProjectBranches } from "@/lib/hooks/use-projects";
 import { useCreateVersion } from "@/lib/hooks/use-versions";
 import { toast } from "sonner";
 
@@ -15,12 +24,33 @@ export default function NewVersionPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const createVersion = useCreateVersion(id!);
+  const {
+    data: branchesData,
+    isLoading: branchesLoading,
+    isError: branchesError,
+    refetch: refetchBranches,
+  } = useProjectBranches(id!);
 
   const {
     register,
     handleSubmit,
+    setValue,
+    control,
     formState: { errors, isSubmitting },
-  } = useForm<VersionInput>({ resolver: zodResolver(versionSchema) });
+  } = useForm<VersionInput>({
+    resolver: zodResolver(versionSchema),
+    defaultValues: { target_commitish: branchesData?.default_branch ?? "" },
+  });
+  const targetBranch = useWatch({ control, name: "target_commitish" });
+
+  useEffect(() => {
+    if (!targetBranch && branchesData?.default_branch) {
+      setValue("target_commitish", branchesData.default_branch, {
+        shouldDirty: false,
+        shouldValidate: true,
+      });
+    }
+  }, [branchesData?.default_branch, setValue, targetBranch]);
 
   const onSubmit = async (data: VersionInput) => {
     try {
@@ -57,14 +87,47 @@ export default function NewVersionPage() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="target_commitish">
-                  目标分支 / Commit（可选）
-                </Label>
-                <Input
-                  id="target_commitish"
-                  placeholder="main 或 commit SHA"
-                  {...register("target_commitish")}
-                />
+                <Label htmlFor="target_commitish">目标分支（可选）</Label>
+                <Select
+                  value={targetBranch ?? ""}
+                  onValueChange={(value) =>
+                    setValue("target_commitish", value ?? undefined, {
+                      shouldDirty: true,
+                      shouldValidate: true,
+                    })
+                  }
+                  disabled={branchesLoading || branchesError}
+                >
+                  <SelectTrigger id="target_commitish" className="w-full">
+                    <SelectValue
+                      placeholder={
+                        branchesLoading ? "加载分支中..." : "选择目标分支"
+                      }
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {branchesData?.branches.map((branch) => (
+                      <SelectItem key={branch.name} value={branch.name}>
+                        {branch.default ? `${branch.name}（默认）` : branch.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {branchesError && (
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/30 px-3 py-2">
+                    <p className="text-xs text-destructive">
+                      分支加载失败，可稍后在版本详情中补充
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void refetchBranches()}
+                    >
+                      重试
+                    </Button>
+                  </div>
+                )}
                 <p className="text-xs text-muted-foreground">
                   用于在 GitHub 上创建 Tag，可稍后补充
                 </p>
@@ -81,8 +144,12 @@ export default function NewVersionPage() {
               </div>
 
               <div className="flex gap-3 pt-2">
-                <Button type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? "创建中..." : "创建版本"}
+                <Button type="submit" disabled={isSubmitting || branchesLoading}>
+                  {isSubmitting
+                    ? "创建中..."
+                    : branchesLoading
+                      ? "加载分支中..."
+                      : "创建版本"}
                 </Button>
                 <Button
                   type="button"
