@@ -132,7 +132,7 @@ API Key **仅允许**以下操作：
 - 填写版本号（必填，如 `v1.0.0`，项目内唯一）
 - 以下信息**创建时可选**，发货前必须补全：
   - Release 说明（Markdown 格式）
-  - 目标分支或 Commit SHA（用于 GitHub 创建 Tag）
+  - 目标分支（用于 GitHub 创建 Tag）
 - **仅允许通过 Web 界面操作**，API Key 无此权限
 
 #### 4.4.2 版本详情
@@ -186,7 +186,7 @@ API Key **仅允许**以下操作：
 |--------|------|
 | Release 说明 | 不能为空 |
 | 安装包 | 至少上传一个安装包 |
-| 目标分支 / Commit | 用于在 GitHub 上创建 Tag |
+| 目标分支 | 用于在 GitHub 上创建 Tag |
 | GitHub 配置 | 项目已关联有效的仓库和 Token |
 
 校验不通过时，提示用户缺失的具体项目，阻止发货操作。
@@ -282,7 +282,7 @@ API Key **仅允许**以下操作：
 | version_number | String | 是 | 版本号（如 v1.0.0） |
 | status | Enum | 是 | pending / shipped |
 | release_notes | Text | 否 | Release 说明（Markdown） |
-| target_commitish | String | 否 | 分支名或 Commit SHA |
+| target_commitish | String | 否 | 分支名 |
 | github_release_url | String | 否 | 发货后的 GitHub Release 链接 |
 | created_at | DateTime | 是 | 创建时间 |
 | shipped_at | DateTime | 否 | 发货时间 |
