@@ -1303,7 +1303,7 @@ export default function IssueDetailPage() {
                   ))}
                 </div>
               ) : timelineItems.length === 0 ? (
-                <div className="pt-6">
+                <div className="py-6">
                   <EmptyState message="暂无评论和动态" />
                 </div>
               ) : (
