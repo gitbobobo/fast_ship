@@ -345,8 +345,8 @@ func TestIssueHandlerReplaceChecklist_UpdatesProgress(t *testing.T) {
 	if result.ProgressPercent == nil || *result.ProgressPercent != 50 {
 		t.Fatalf("expected progress 50, got %+v", result)
 	}
-	if result.WorkflowStatus != string(model.IssueWorkflowStatusInProgress) {
-		t.Fatalf("expected in_progress workflow status, got %+v", result)
+	if result.WorkflowStatus != "" {
+		t.Fatalf("expected empty workflow status (checklist should not auto-set it), got %+v", result)
 	}
 	if result.ChecklistTotal != 2 || result.ChecklistDone != 1 || len(result.Checklist) != 2 {
 		t.Fatalf("unexpected checklist payload: %+v", result)

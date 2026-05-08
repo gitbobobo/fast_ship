@@ -368,8 +368,8 @@ func TestIssueServiceReplaceChecklist_UpdatesProgressSnapshot(t *testing.T) {
 	if meta.ChecklistTotal != 2 || meta.ChecklistDone != 1 {
 		t.Fatalf("unexpected checklist counters: %+v", meta)
 	}
-	if meta.WorkflowStatus != model.IssueWorkflowStatusInProgress {
-		t.Fatalf("expected in_progress workflow status, got %+v", meta)
+	if meta.WorkflowStatus != "" {
+		t.Fatalf("expected empty workflow status (checklist should not auto-set it), got %+v", meta)
 	}
 
 	got, err := svc.issueService.Get(issue.ID, user.ID)

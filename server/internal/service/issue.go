@@ -973,7 +973,6 @@ func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssue
 		value := now
 		meta.ChecklistUpdatedAt = &value
 	}
-	applyWorkflowSnapshot(meta, snapshot, now)
 
 	if err := s.checklistRepo.Transaction(func(tx *gorm.DB) error {
 		if err := s.checklistRepo.ReplaceForIssueTx(tx, issue.ID, items); err != nil {
@@ -2339,34 +2338,6 @@ func buildChecklistSnapshot(issueID, userID string, items []IssueChecklistItemIn
 		snapshot.ProgressPercent = &value
 	}
 	return result, snapshot, nil
-}
-
-func applyWorkflowSnapshot(meta *model.IssueInternalMeta, snapshot checklistSnapshot, now time.Time) {
-	switch {
-	case snapshot.ProgressPercent == nil:
-		meta.WorkflowStatus = ""
-		meta.StartedAt = nil
-		meta.CompletedAt = nil
-	case *snapshot.ProgressPercent <= 0:
-		meta.WorkflowStatus = model.IssueWorkflowStatusTodo
-		meta.StartedAt = nil
-		meta.CompletedAt = nil
-	case *snapshot.ProgressPercent >= 100:
-		meta.WorkflowStatus = model.IssueWorkflowStatusDone
-		if meta.StartedAt == nil {
-			value := now
-			meta.StartedAt = &value
-		}
-		value := now
-		meta.CompletedAt = &value
-	default:
-		meta.WorkflowStatus = model.IssueWorkflowStatusInProgress
-		if meta.StartedAt == nil {
-			value := now
-			meta.StartedAt = &value
-		}
-		meta.CompletedAt = nil
-	}
 }
 
 func applyExplicitWorkflowStatus(meta *model.IssueInternalMeta, workflowStatus model.IssueWorkflowStatus, now time.Time) {
