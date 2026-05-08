@@ -10,6 +10,7 @@ import {
   Package,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Clock,
   CheckCircle2,
@@ -224,6 +225,23 @@ export default function IssuesPage() {
     }
     setSearchParams(next, { replace: true });
   };
+
+  const handleResetFilters = () => {
+    const next = new URLSearchParams();
+    if (activeProjectId) {
+      next.set("project", activeProjectId);
+    }
+    setSearchParams(next, { replace: true });
+  };
+
+  const canResetFilters =
+    issueQuery.trim().length > 0 ||
+    issueLabelFilter !== "all" ||
+    issueSourceFilter !== "all" ||
+    issueWorkflowFilter !== "all" ||
+    issueSort !== "updated_desc" ||
+    issueStateFilter !== "open" ||
+    issuePage > 1;
 
   const handleSync = async () => {
     try {
@@ -533,6 +551,16 @@ export default function IssuesPage() {
                 <SelectItem value="comments_asc">评论最少</SelectItem>
               </SelectContent>
             </Select>
+            <Button
+              variant={canResetFilters ? "outline" : "ghost"}
+              size="sm"
+              onClick={handleResetFilters}
+              disabled={!canResetFilters}
+              className="h-8 px-2"
+            >
+              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              重置
+            </Button>
           </div>
         )}
 
