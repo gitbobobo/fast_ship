@@ -173,6 +173,7 @@ export function MarkdownEditor({
         className="w-full"
         previewOptions={{
           components: {
+            a: ({ href, children, ...props }) => <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
             img: ({ src, ...props }) => (
               <img {...props} src={toProtectedMediaUrl(typeof src === "string" ? src : undefined, token)} />
             ),

@@ -69,6 +69,7 @@ export function GitHubContent({
       <div className={className}>
         <ReactMarkdown
           components={{
+            a: ({ href, children, ...props }) => <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
             img: ({ src, ...props }) => <img {...props} src={toProtectedMediaUrl(src, token)} />,
             video: ({ src, poster, ...props }) => (
               <video
