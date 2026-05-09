@@ -176,6 +176,7 @@ export function useUpdateIssue(issueId: string, projectId?: string) {
       queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
       if (projectId) {
         queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+        queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues", "filter-options"] });
       }
     },
   });

@@ -1122,3 +1122,276 @@ func TestIssueServiceCreateInternalComment_WritesGitHubCommentBack(t *testing.T)
 		t.Fatalf("expected one github comment, got total=%d len=%d", total, len(comments))
 	}
 }
+
+func TestResolveInternalLabels_ResolvesValidLabels(t *testing.T) {
+	repoLabels := []IssueLabelResponse{
+		{Name: "bug", Color: "d73a4a", Description: "Something isn't working"},
+		{Name: "ios", Color: "0969da", Description: "iOS platform"},
+		{Name: "enhancement", Color: "a2eeef", Description: "New feature"},
+	}
+
+	result, appErr := resolveInternalLabels([]string{"bug", "ios"}, repoLabels)
+	if appErr != nil {
+		t.Fatalf("unexpected error: %v", appErr)
+	}
+	if len(result) != 2 {
+		t.Fatalf("expected 2 labels, got %d", len(result))
+	}
+	if result[0].Name != "bug" || result[0].Color != "d73a4a" {
+		t.Fatalf("unexpected first label: %+v", result[0])
+	}
+	if result[1].Name != "ios" || result[1].Color != "0969da" {
+		t.Fatalf("unexpected second label: %+v", result[1])
+	}
+}
+
+func TestResolveInternalLabels_DeduplicatesCaseInsensitive(t *testing.T) {
+	repoLabels := []IssueLabelResponse{
+		{Name: "Bug", Color: "d73a4a", Description: "Something isn't working"},
+	}
+
+	result, appErr := resolveInternalLabels([]string{"Bug", "bug", "BUG"}, repoLabels)
+	if appErr != nil {
+		t.Fatalf("unexpected error: %v", appErr)
+	}
+	if len(result) != 1 {
+		t.Fatalf("expected 1 deduplicated label, got %d", len(result))
+	}
+	if result[0].Name != "Bug" {
+		t.Fatalf("expected original casing, got %q", result[0].Name)
+	}
+}
+
+func TestResolveInternalLabels_RejectsEmptyNames(t *testing.T) {
+	repoLabels := []IssueLabelResponse{
+		{Name: "bug", Color: "d73a4a", Description: ""},
+	}
+
+	if _, appErr := resolveInternalLabels([]string{"", "bug"}, repoLabels); appErr == nil {
+		t.Fatalf("expected error for empty label name, got nil")
+	}
+}
+
+func TestResolveInternalLabels_RejectsUnknownLabels(t *testing.T) {
+	repoLabels := []IssueLabelResponse{
+		{Name: "bug", Color: "d73a4a", Description: ""},
+	}
+
+	_, appErr := resolveInternalLabels([]string{"bug", "nonexistent"}, repoLabels)
+	if appErr == nil {
+		t.Fatalf("expected error for unknown label, got nil")
+	}
+	if appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("expected ErrInvalidParams, got %v", appErr)
+	}
+}
+
+func TestResolveInternalLabels_AcceptsEmptyInput(t *testing.T) {
+	repoLabels := []IssueLabelResponse{
+		{Name: "bug", Color: "d73a4a", Description: ""},
+	}
+
+	result, appErr := resolveInternalLabels([]string{}, repoLabels)
+	if appErr != nil {
+		t.Fatalf("unexpected error: %v", appErr)
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected 0 labels, got %d", len(result))
+	}
+}
+
+func TestResolveInternalLabels_TrimsWhitespace(t *testing.T) {
+	repoLabels := []IssueLabelResponse{
+		{Name: "bug", Color: "d73a4a", Description: ""},
+	}
+
+	result, appErr := resolveInternalLabels([]string{"  bug  "}, repoLabels)
+	if appErr != nil {
+		t.Fatalf("unexpected error: %v", appErr)
+	}
+	if len(result) != 1 || result[0].Name != "bug" {
+		t.Fatalf("expected trimmed label, got %+v", result)
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_SetsInternalLabels(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "内部问题",
+		Body:  "测试标签功能",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		repoLabels: []*gh.Label{
+			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("Something isn't working")},
+			{Name: stringPtr("ios"), Color: stringPtr("0969da"), Description: stringPtr("iOS platform")},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	labels := []string{"bug", "ios"}
+	updated, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+		Labels: &labels,
+	})
+	if err != nil {
+		t.Fatalf("update internal issue labels: %v", err)
+	}
+
+	if updated.InternalMeta == nil || len(updated.InternalMeta.Labels) != 2 {
+		t.Fatalf("expected 2 internal labels, got %+v", updated.InternalMeta)
+	}
+	if updated.InternalMeta.Labels[0].Name != "bug" || updated.InternalMeta.Labels[0].Color != "d73a4a" {
+		t.Fatalf("unexpected first label: %+v", updated.InternalMeta.Labels[0])
+	}
+	if updated.InternalMeta.Labels[1].Name != "ios" || updated.InternalMeta.Labels[1].Color != "0969da" {
+		t.Fatalf("unexpected second label: %+v", updated.InternalMeta.Labels[1])
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_RejectsUnknownInternalLabels(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "内部问题",
+		Body:  "测试标签功能",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		repoLabels: []*gh.Label{
+			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("")},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	labels := []string{"bug", "nonexistent"}
+	_, err = svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+		Labels: &labels,
+	})
+	if err == nil {
+		t.Fatalf("expected error for unknown label, got nil")
+	}
+	if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestIssueServiceList_FiltersByInternalLabels(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	issue1, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "问题 1",
+		Body:  "有 bug 标签",
+	})
+	if err != nil {
+		t.Fatalf("create issue 1: %v", err)
+	}
+
+	_, err = svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "问题 2",
+		Body:  "没有标签",
+	})
+	if err != nil {
+		t.Fatalf("create issue 2: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		repoLabels: []*gh.Label{
+			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("")},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	labels := []string{"bug"}
+	_, err = svc.issueService.UpdateInternalIssue(issue1.ID, user.ID, UpdateInternalIssueRequest{
+		Labels: &labels,
+	})
+	if err != nil {
+		t.Fatalf("update issue 1 labels: %v", err)
+	}
+
+	items, total, err := svc.issueService.List(project.ID, user.ID, IssueListFilters{Label: "bug"}, 1, 20)
+	if err != nil {
+		t.Fatalf("list issues by label: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("expected 1 filtered issue, got total=%d len=%d", total, len(items))
+	}
+	if items[0].Title != "问题 1" {
+		t.Fatalf("expected issue 1, got %q", items[0].Title)
+	}
+}
+
+func TestIssueServiceGetFilterOptions_IncludesInternalLabels(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	issue, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "内部问题",
+		Body:  "测试标签",
+	})
+	if err != nil {
+		t.Fatalf("create internal issue: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		repoLabels: []*gh.Label{
+			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("")},
+			{Name: stringPtr("enhancement"), Color: stringPtr("a2eeef"), Description: stringPtr("")},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	labels := []string{"bug"}
+	_, err = svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		Labels: &labels,
+	})
+	if err != nil {
+		t.Fatalf("update internal issue labels: %v", err)
+	}
+
+	opts, err := svc.issueService.GetFilterOptions(project.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get filter options: %v", err)
+	}
+
+	found := false
+	for _, l := range opts.Labels {
+		if l == "bug" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected 'bug' in filter options labels, got %+v", opts.Labels)
+	}
+}

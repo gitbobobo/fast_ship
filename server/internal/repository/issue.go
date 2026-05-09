@@ -36,6 +36,10 @@ func (r *IssueRepository) Save(issue *model.Issue) error {
 	return r.db.Save(issue).Error
 }
 
+func (r *IssueRepository) SaveTx(tx *gorm.DB, issue *model.Issue) error {
+	return tx.Save(issue).Error
+}
+
 func (r *IssueRepository) FindByID(id string) (*model.Issue, error) {
 	var issue model.Issue
 	if err := r.db.Preload("GitHubMeta").Where("id = ?", id).First(&issue).Error; err != nil {
@@ -328,6 +332,7 @@ func (r *IssueInternalMetaRepository) UpsertTx(tx *gorm.DB, meta *model.IssueInt
 			"started_at",
 			"completed_at",
 			"checklist_updated_at",
+			"labels_json",
 			"updated_by_user_id",
 			"updated_at",
 		}),

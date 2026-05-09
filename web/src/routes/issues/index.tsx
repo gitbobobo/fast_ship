@@ -671,7 +671,10 @@ export default function IssuesPage() {
                           <IssueWorkflowStatusBadge
                             status={issue.internal_meta?.workflow_status}
                           />
-                          {(issue.github?.labels ?? []).slice(0, 4).map((label) => (
+                          {(issue.source === "github"
+                            ? issue.github?.labels ?? []
+                            : issue.internal_meta?.labels ?? []
+                          ).slice(0, 4).map((label) => (
                             <span
                               key={label.name}
                               className="rounded-full px-2 py-0.5 text-xs"
@@ -683,9 +686,15 @@ export default function IssuesPage() {
                               {label.name}
                             </span>
                           ))}
-                          {(issue.github?.labels?.length ?? 0) > 4 && (
+                          {(issue.source === "github"
+                            ? (issue.github?.labels?.length ?? 0)
+                            : (issue.internal_meta?.labels?.length ?? 0)
+                          ) > 4 && (
                             <span className="text-xs text-muted-foreground">
-                              +{(issue.github?.labels?.length ?? 0) - 4}
+                              +{(issue.source === "github"
+                                ? (issue.github?.labels?.length ?? 0)
+                                : (issue.internal_meta?.labels?.length ?? 0)
+                              ) - 4}
                             </span>
                           )}
                         </div>

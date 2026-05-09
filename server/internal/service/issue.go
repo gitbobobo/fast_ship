@@ -229,6 +229,7 @@ type IssueInternalMetaResponse struct {
 	ChecklistUpdatedAt *string                      `json:"checklist_updated_at,omitempty"`
 	UpdatedAt          *string                      `json:"updated_at,omitempty"`
 	Checklist          []IssueChecklistItemResponse `json:"checklist,omitempty"`
+	Labels             []IssueLabelResponse         `json:"labels,omitempty"`
 }
 
 type IssueChecklistItemResponse struct {
@@ -537,8 +538,38 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	if issue.Source != model.IssueSourceInternal {
 		return nil, errs.ErrIssueReadOnly
 	}
+	var internalMeta *model.IssueInternalMeta
 	if req.Labels != nil {
-		return nil, errs.ErrInvalidParams
+		project, err := s.projectRepo.FindByID(issue.ProjectID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrProjectNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+		repoLabels, err := s.GetRepositoryLabels(project.ID, userID)
+		if err != nil {
+			return nil, err
+		}
+		resolvedLabels, appErr := resolveInternalLabels(*req.Labels, repoLabels)
+		if appErr != nil {
+			return nil, appErr
+		}
+		meta, err := s.loadInternalMeta(issue.ID)
+		if err != nil {
+			return nil, err
+		}
+		now := time.Now().UTC()
+		if meta == nil {
+			meta = &model.IssueInternalMeta{
+				IssueID:   issue.ID,
+				CreatedAt: now,
+			}
+		}
+		meta.LabelsJSON = toJSONString(resolvedLabels)
+		meta.UpdatedByUserID = userID
+		meta.UpdatedAt = now
+		internalMeta = meta
 	}
 
 	if req.Title != nil {
@@ -571,7 +602,17 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	}
 	issue.UpdatedAt = time.Now().UTC()
 
-	if err := s.issueRepo.Save(issue); err != nil {
+	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := s.issueRepo.SaveTx(tx, issue); err != nil {
+			return err
+		}
+		if req.Labels != nil && internalMeta != nil {
+			if err := s.internalMetaRepo.UpsertTx(tx, internalMeta); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return nil, errs.ErrInternal
 	}
 	if req.Body != nil {
@@ -793,27 +834,38 @@ func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterO
 		return nil, errs.ErrInternal
 	}
 
+	internalMetaByIssueID, err := s.internalMetaByIssueIDs(issues)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
 	labelSet := make(map[string]struct{})
 	assigneeSet := make(map[string]struct{})
 	milestoneSet := make(map[string]struct{})
 
 	for _, issue := range issues {
 		meta := issue.GitHubMeta
-		if meta == nil {
-			continue
-		}
-		for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
-			if label.Name != "" {
-				labelSet[label.Name] = struct{}{}
+		if meta != nil {
+			for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
+				if label.Name != "" {
+					labelSet[label.Name] = struct{}{}
+				}
+			}
+			for _, assignee := range parseJSON[[]issueUserPayload](meta.AssigneesJSON) {
+				if assignee.Login != "" {
+					assigneeSet[assignee.Login] = struct{}{}
+				}
+			}
+			if milestone := parseJSON[*issueMilestonePayload](meta.MilestoneJSON); milestone != nil && milestone.Title != "" {
+				milestoneSet[milestone.Title] = struct{}{}
 			}
 		}
-		for _, assignee := range parseJSON[[]issueUserPayload](meta.AssigneesJSON) {
-			if assignee.Login != "" {
-				assigneeSet[assignee.Login] = struct{}{}
+		if iMeta, ok := internalMetaByIssueID[issue.ID]; ok && iMeta.LabelsJSON != "" {
+			for _, label := range parseJSON[[]issueLabelPayload](iMeta.LabelsJSON) {
+				if label.Name != "" {
+					labelSet[label.Name] = struct{}{}
+				}
 			}
-		}
-		if milestone := parseJSON[*issueMilestonePayload](meta.MilestoneJSON); milestone != nil && milestone.Title != "" {
-			milestoneSet[milestone.Title] = struct{}{}
 		}
 	}
 
@@ -1691,6 +1743,15 @@ func toIssueInternalMetaResponse(meta *model.IssueInternalMeta, checklist []mode
 			value := formatTime(meta.UpdatedAt.UTC())
 			resp.UpdatedAt = &value
 		}
+		if meta.LabelsJSON != "" {
+			for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
+				resp.Labels = append(resp.Labels, IssueLabelResponse{
+					Name:        label.Name,
+					Color:       label.Color,
+					Description: label.Description,
+				})
+			}
+		}
 	}
 	if len(checklist) > 0 {
 		resp.Checklist = make([]IssueChecklistItemResponse, 0, len(checklist))
@@ -2446,6 +2507,36 @@ func normalizeGitHubLabels(labels []string) ([]string, *errs.AppError) {
 	return normalized, nil
 }
 
+func resolveInternalLabels(names []string, repoLabels []IssueLabelResponse) ([]issueLabelPayload, *errs.AppError) {
+	labelMap := make(map[string]IssueLabelResponse, len(repoLabels))
+	for _, l := range repoLabels {
+		labelMap[strings.ToLower(l.Name)] = l
+	}
+	result := make([]issueLabelPayload, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		value := strings.TrimSpace(name)
+		if value == "" {
+			return nil, errs.ErrInvalidParams
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		l, ok := labelMap[key]
+		if !ok {
+			return nil, errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf("标签不存在: %s", value))
+		}
+		seen[key] = struct{}{}
+		result = append(result, issueLabelPayload{
+			Name:        l.Name,
+			Color:       l.Color,
+			Description: l.Description,
+		})
+	}
+	return result, nil
+}
+
 func sortedKeys(values map[string]struct{}) []string {
 	items := make([]string, 0, len(values))
 	for value := range values {
@@ -2554,14 +2645,21 @@ func matchesIssueFilters(issue model.Issue, gitHubMeta *model.IssueGitHubMeta, m
 	}
 
 	if filters.Label != "" {
-		if gitHubMeta == nil {
-			return false
-		}
 		matched := false
-		for _, label := range parseJSON[[]issueLabelPayload](gitHubMeta.LabelsJSON) {
-			if strings.EqualFold(label.Name, filters.Label) {
-				matched = true
-				break
+		if gitHubMeta != nil {
+			for _, label := range parseJSON[[]issueLabelPayload](gitHubMeta.LabelsJSON) {
+				if strings.EqualFold(label.Name, filters.Label) {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched && meta != nil && meta.LabelsJSON != "" {
+			for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
+				if strings.EqualFold(label.Name, filters.Label) {
+					matched = true
+					break
+				}
 			}
 		}
 		if !matched {

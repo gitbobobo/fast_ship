@@ -185,6 +185,7 @@ interface IssueInternalMeta {
   checklist_updated_at?: string | null;
   updated_at?: string | null;
   checklist?: IssueChecklistItem[];
+  labels?: IssueLabel[];
 }
 
 interface IssueChecklistItem {

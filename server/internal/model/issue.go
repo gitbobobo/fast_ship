@@ -161,6 +161,7 @@ type IssueInternalMeta struct {
 	StartedAt          *time.Time          `json:"started_at"`
 	CompletedAt        *time.Time          `json:"completed_at"`
 	ChecklistUpdatedAt *time.Time          `json:"checklist_updated_at"`
+	LabelsJSON         string              `gorm:"type:text" json:"-"`
 	UpdatedByUserID    string              `gorm:"type:text" json:"updated_by_user_id"`
 	CreatedAt          time.Time           `gorm:"not null" json:"created_at"`
 	UpdatedAt          time.Time           `gorm:"not null" json:"updated_at"`
