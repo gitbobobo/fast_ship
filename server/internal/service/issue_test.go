@@ -1137,11 +1137,11 @@ func TestResolveInternalLabels_ResolvesValidLabels(t *testing.T) {
 	if len(result) != 2 {
 		t.Fatalf("expected 2 labels, got %d", len(result))
 	}
-	if result[0].Name != "bug" || result[0].Color != "d73a4a" {
-		t.Fatalf("unexpected first label: %+v", result[0])
+	if result[0] != "bug" {
+		t.Fatalf("unexpected first label: %q", result[0])
 	}
-	if result[1].Name != "ios" || result[1].Color != "0969da" {
-		t.Fatalf("unexpected second label: %+v", result[1])
+	if result[1] != "ios" {
+		t.Fatalf("unexpected second label: %q", result[1])
 	}
 }
 
@@ -1157,8 +1157,8 @@ func TestResolveInternalLabels_DeduplicatesCaseInsensitive(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("expected 1 deduplicated label, got %d", len(result))
 	}
-	if result[0].Name != "Bug" {
-		t.Fatalf("expected original casing, got %q", result[0].Name)
+	if result[0] != "Bug" {
+		t.Fatalf("expected original casing, got %q", result[0])
 	}
 }
 
@@ -1209,7 +1209,7 @@ func TestResolveInternalLabels_TrimsWhitespace(t *testing.T) {
 	if appErr != nil {
 		t.Fatalf("unexpected error: %v", appErr)
 	}
-	if len(result) != 1 || result[0].Name != "bug" {
+	if len(result) != 1 || result[0] != "bug" {
 		t.Fatalf("expected trimmed label, got %+v", result)
 	}
 }

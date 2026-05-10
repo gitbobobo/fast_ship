@@ -53,23 +53,24 @@ type gitHubIssueClient interface {
 type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
 
 type IssueService struct {
-	issueRepo        *repository.IssueRepository
-	gitHubMetaRepo   *repository.IssueGitHubMetaRepository
-	commentRepo      *repository.IssueCommentRepository
-	timelineRepo     *repository.IssueTimelineRepository
-	internalMetaRepo *repository.IssueInternalMetaRepository
-	checklistRepo    *repository.IssueChecklistRepository
-	syncStateRepo    *repository.IssueSyncStateRepository
-	assetRepo        *repository.IssueAssetRepository
-	draftAssetRepo   *repository.IssueDraftAssetRepository
-	projectRepo      *repository.ProjectRepository
-	userRepo         *repository.UserRepository
-	storage          storage.Storage
-	cfg              *config.Config
-	logger           *zap.Logger
-	newClient        gitHubIssueClientFactory
-	syncMu           sync.Mutex
-	syncingProjectID map[string]struct{}
+	issueRepo           *repository.IssueRepository
+	gitHubMetaRepo      *repository.IssueGitHubMetaRepository
+	commentRepo         *repository.IssueCommentRepository
+	timelineRepo        *repository.IssueTimelineRepository
+	internalMetaRepo    *repository.IssueInternalMetaRepository
+	checklistRepo       *repository.IssueChecklistRepository
+	syncStateRepo       *repository.IssueSyncStateRepository
+	assetRepo           *repository.IssueAssetRepository
+	draftAssetRepo      *repository.IssueDraftAssetRepository
+	projectRepo         *repository.ProjectRepository
+	userRepo            *repository.UserRepository
+	githubRepoLabelRepo *repository.GitHubRepoLabelRepository
+	storage             storage.Storage
+	cfg                 *config.Config
+	logger              *zap.Logger
+	newClient           gitHubIssueClientFactory
+	syncMu              sync.Mutex
+	syncingProjectID    map[string]struct{}
 }
 
 type IssueListFilters struct {
@@ -290,25 +291,27 @@ func NewIssueService(
 	draftAssetRepo *repository.IssueDraftAssetRepository,
 	projectRepo *repository.ProjectRepository,
 	userRepo *repository.UserRepository,
+	githubRepoLabelRepo *repository.GitHubRepoLabelRepository,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
 ) *IssueService {
 	return &IssueService{
-		issueRepo:        issueRepo,
-		gitHubMetaRepo:   gitHubMetaRepo,
-		commentRepo:      commentRepo,
-		timelineRepo:     timelineRepo,
-		internalMetaRepo: internalMetaRepo,
-		checklistRepo:    checklistRepo,
-		syncStateRepo:    syncStateRepo,
-		assetRepo:        assetRepo,
-		draftAssetRepo:   draftAssetRepo,
-		projectRepo:      projectRepo,
-		userRepo:         userRepo,
-		storage:          storage,
-		cfg:              cfg,
-		logger:           logger,
+		issueRepo:           issueRepo,
+		gitHubMetaRepo:      gitHubMetaRepo,
+		commentRepo:         commentRepo,
+		timelineRepo:        timelineRepo,
+		internalMetaRepo:    internalMetaRepo,
+		checklistRepo:       checklistRepo,
+		syncStateRepo:       syncStateRepo,
+		assetRepo:           assetRepo,
+		draftAssetRepo:      draftAssetRepo,
+		projectRepo:         projectRepo,
+		userRepo:            userRepo,
+		githubRepoLabelRepo: githubRepoLabelRepo,
+		storage:             storage,
+		cfg:                 cfg,
+		logger:              logger,
 		newClient: func(token, owner, repo string) gitHubIssueClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -435,7 +438,7 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		return nil, err
 	}
 
-	resp := toIssueResponse(*stored, meta, nil)
+	resp := s.toIssueResponse(*stored, meta, nil, nil)
 	return &resp, nil
 }
 
@@ -532,7 +535,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if err != nil {
 			return nil, err
 		}
-		resp := toIssueResponse(*stored, meta, nil)
+		resp := s.toIssueResponse(*stored, meta, nil, nil)
 		return &resp, nil
 	}
 	if issue.Source != model.IssueSourceInternal {
@@ -625,7 +628,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	if err != nil {
 		return nil, err
 	}
-	resp := toIssueResponse(*issue, meta, nil)
+	resp := s.toIssueResponse(*issue, meta, nil, nil)
 	return &resp, nil
 }
 
@@ -814,9 +817,11 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 		end = len(filtered)
 	}
 
+	labelMap := s.buildLabelMap(projectID)
+
 	resp := make([]IssueResponse, 0, end-start)
 	for _, issue := range filtered[start:end] {
-		resp = append(resp, toIssueResponse(issue, metaByIssueID[issue.ID], nil))
+		resp = append(resp, s.toIssueResponse(issue, metaByIssueID[issue.ID], nil, labelMap))
 	}
 	return resp, total, nil
 }
@@ -846,9 +851,9 @@ func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterO
 	for _, issue := range issues {
 		meta := issue.GitHubMeta
 		if meta != nil {
-			for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
-				if label.Name != "" {
-					labelSet[label.Name] = struct{}{}
+			for _, name := range extractLabelNames(meta.LabelsJSON) {
+				if name != "" {
+					labelSet[name] = struct{}{}
 				}
 			}
 			for _, assignee := range parseJSON[[]issueUserPayload](meta.AssigneesJSON) {
@@ -861,9 +866,9 @@ func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterO
 			}
 		}
 		if iMeta, ok := internalMetaByIssueID[issue.ID]; ok && iMeta.LabelsJSON != "" {
-			for _, label := range parseJSON[[]issueLabelPayload](iMeta.LabelsJSON) {
-				if label.Name != "" {
-					labelSet[label.Name] = struct{}{}
+			for _, name := range extractLabelNames(iMeta.LabelsJSON) {
+				if name != "" {
+					labelSet[name] = struct{}{}
 				}
 			}
 		}
@@ -888,6 +893,19 @@ func (s *IssueService) GetRepositoryLabels(projectID, userID string) ([]IssueLab
 	tokenBytes, appErr := s.decryptGitHubToken(project)
 	if appErr != nil {
 		return nil, appErr
+	}
+
+	cached, err := s.githubRepoLabelRepo.ListByProject(projectID)
+	if err == nil && len(cached) > 0 {
+		labels := make([]IssueLabelResponse, 0, len(cached))
+		for _, item := range cached {
+			labels = append(labels, IssueLabelResponse{
+				Name:        item.Name,
+				Color:       item.Color,
+				Description: item.Description,
+			})
+		}
+		return labels, nil
 	}
 
 	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
@@ -933,6 +951,20 @@ func (s *IssueService) GetRepositoryLabels(projectID, userID string) ([]IssueLab
 	sort.Slice(labels, func(i, j int) bool {
 		return strings.ToLower(labels[i].Name) < strings.ToLower(labels[j].Name)
 	})
+
+	now := time.Now().UTC()
+	for _, item := range labels {
+		if err := s.githubRepoLabelRepo.Save(&model.GitHubRepoLabel{
+			ProjectID:   projectID,
+			Name:        item.Name,
+			Color:       item.Color,
+			Description: item.Description,
+			SyncedAt:    now,
+		}); err != nil {
+			s.logger.Warn("缓存仓库标签失败", zap.String("project_id", projectID), zap.String("label", item.Name), zap.Error(err))
+		}
+	}
+
 	return labels, nil
 }
 
@@ -977,7 +1009,7 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 		return nil, err
 	}
 
-	resp := toIssueResponse(*issue, meta, checklist)
+	resp := s.toIssueResponse(*issue, meta, checklist, nil)
 	return &resp, nil
 }
 
@@ -1038,7 +1070,7 @@ func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssue
 		return nil, errs.ErrInternal
 	}
 
-	return toIssueInternalMetaResponse(meta, items), nil
+	return s.toIssueInternalMetaResponse(issue.ProjectID, meta, items, nil), nil
 }
 
 func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus model.IssueWorkflowStatus) (*IssueInternalMetaResponse, error) {
@@ -1082,7 +1114,7 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 		return nil, errs.ErrInternal
 	}
 
-	return toIssueInternalMetaResponse(meta, nil), nil
+	return s.toIssueInternalMetaResponse(issue.ProjectID, meta, nil, nil), nil
 }
 
 func (s *IssueService) ListComments(issueID, userID string, page, pageSize int) ([]IssueCommentResponse, int64, error) {
@@ -1323,6 +1355,10 @@ func (s *IssueService) syncProject(ctx context.Context, project *model.Project) 
 		return failSync(errs.New(errs.ErrGitHubAPI.Code, "无法访问 GitHub 仓库或 Token 无效"))
 	}
 
+	if err := s.syncRepositoryLabels(ctx, client, project.ID); err != nil {
+		s.logger.Warn("同步仓库标签失败", zap.String("project_id", project.ID), zap.Error(err))
+	}
+
 	var since *time.Time
 	if state.LastIssueUpdatedAt != nil {
 		t := state.LastIssueUpdatedAt.Add(-1 * time.Second)
@@ -1406,6 +1442,47 @@ func (s *IssueService) syncProject(ctx context.Context, project *model.Project) 
 	return resp, nil
 }
 
+func (s *IssueService) syncRepositoryLabels(ctx context.Context, client gitHubIssueClient, projectID string) error {
+	const perPage = 100
+	page := 1
+	now := time.Now().UTC()
+	var allLabels []model.GitHubRepoLabel
+
+	for {
+		items, resp, err := client.ListRepositoryLabels(ctx, page, perPage)
+		if err != nil {
+			return err
+		}
+
+		for _, item := range items {
+			if item == nil {
+				continue
+			}
+			name := strings.TrimSpace(item.GetName())
+			if name == "" {
+				continue
+			}
+			allLabels = append(allLabels, model.GitHubRepoLabel{
+				ProjectID:   projectID,
+				Name:        name,
+				Color:       item.GetColor(),
+				Description: item.GetDescription(),
+				SyncedAt:    now,
+			})
+		}
+
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+		page = resp.NextPage
+	}
+
+	if err := s.githubRepoLabelRepo.ReplaceAllForProject(projectID, allLabels); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *IssueService) upsertGitHubIssue(projectID string, item *ghclient.Issue) (*model.Issue, error) {
 	now := time.Now().UTC()
 
@@ -1472,7 +1549,7 @@ func (s *IssueService) upsertGitHubIssue(projectID string, item *ghclient.Issue)
 		HTMLURL:           item.GetHTMLURL(),
 		AuthorAssociation: item.GetAuthorAssociation(),
 		AssigneesJSON:     toJSONString(mapUsers(item.Assignees)),
-		LabelsJSON:        toJSONString(mapLabels(item.Labels)),
+		LabelsJSON:        toJSONString(mapLabelNames(item.Labels)),
 		MilestoneJSON:     toJSONString(mapMilestone(item.Milestone)),
 		ReactionsJSON:     toJSONString(mapReactions(item.Reactions)),
 		CommentsCount:     item.GetComments(),
@@ -1638,7 +1715,7 @@ func (s *IssueService) loadChecklist(issueID string) ([]model.IssueChecklistItem
 	return items, nil
 }
 
-func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem) IssueResponse {
+func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem, labelMap map[string]model.GitHubRepoLabel) IssueResponse {
 	resp := IssueResponse{
 		ID:             issue.ID,
 		ProjectID:      issue.ProjectID,
@@ -1656,25 +1733,25 @@ func toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist
 		},
 		CreatedAt:    formatTime(issue.CreatedAt),
 		UpdatedAt:    formatTime(issue.UpdatedAt),
-		InternalMeta: toIssueInternalMetaResponse(meta, checklist),
+		InternalMeta: s.toIssueInternalMetaResponse(issue.ProjectID, meta, checklist, labelMap),
 	}
 	if issue.ClosedAt != nil {
 		value := formatTime(issue.ClosedAt.UTC())
 		resp.ClosedAt = &value
 	}
 	if issue.GitHubMeta != nil {
-		resp.GitHub = toIssueGitHubResponse(issue.GitHubMeta)
+		resp.GitHub = s.toIssueGitHubResponse(issue.ProjectID, issue.GitHubMeta, labelMap)
 	}
 	return resp
 }
 
-func toIssueGitHubResponse(meta *model.IssueGitHubMeta) *IssueGitHubResponse {
+func (s *IssueService) toIssueGitHubResponse(projectID string, meta *model.IssueGitHubMeta, labelMap map[string]model.GitHubRepoLabel) *IssueGitHubResponse {
 	if meta == nil {
 		return nil
 	}
 
 	assignees := parseJSON[[]issueUserPayload](meta.AssigneesJSON)
-	labels := parseJSON[[]issueLabelPayload](meta.LabelsJSON)
+	labelNames := extractLabelNames(meta.LabelsJSON)
 	milestone := parseJSON[*issueMilestonePayload](meta.MilestoneJSON)
 	reactions := parseJSON[IssueReactionSummaryResponse](meta.ReactionsJSON)
 
@@ -1685,7 +1762,7 @@ func toIssueGitHubResponse(meta *model.IssueGitHubMeta) *IssueGitHubResponse {
 		HTMLURL:           meta.HTMLURL,
 		AuthorAssociation: meta.AuthorAssociation,
 		Assignees:         make([]IssueActorResponse, 0, len(assignees)),
-		Labels:            make([]IssueLabelResponse, 0, len(labels)),
+		Labels:            s.resolveLabels(projectID, labelNames, labelMap),
 		Reactions:         reactions,
 		CommentsCount:     meta.CommentsCount,
 		Locked:            meta.Locked,
@@ -1696,13 +1773,6 @@ func toIssueGitHubResponse(meta *model.IssueGitHubMeta) *IssueGitHubResponse {
 		resp.Assignees = append(resp.Assignees, IssueActorResponse{
 			Login:     assignee.Login,
 			AvatarURL: githubmedia.RewriteMediaURL(assignee.AvatarURL),
-		})
-	}
-	for _, label := range labels {
-		resp.Labels = append(resp.Labels, IssueLabelResponse{
-			Name:        label.Name,
-			Color:       label.Color,
-			Description: label.Description,
 		})
 	}
 	if milestone != nil {
@@ -1716,7 +1786,7 @@ func toIssueGitHubResponse(meta *model.IssueGitHubMeta) *IssueGitHubResponse {
 	return resp
 }
 
-func toIssueInternalMetaResponse(meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem) *IssueInternalMetaResponse {
+func (s *IssueService) toIssueInternalMetaResponse(projectID string, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem, labelMap map[string]model.GitHubRepoLabel) *IssueInternalMetaResponse {
 	if meta == nil && len(checklist) == 0 {
 		return nil
 	}
@@ -1743,15 +1813,7 @@ func toIssueInternalMetaResponse(meta *model.IssueInternalMeta, checklist []mode
 			value := formatTime(meta.UpdatedAt.UTC())
 			resp.UpdatedAt = &value
 		}
-		if meta.LabelsJSON != "" {
-			for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
-				resp.Labels = append(resp.Labels, IssueLabelResponse{
-					Name:        label.Name,
-					Color:       label.Color,
-					Description: label.Description,
-				})
-			}
-		}
+		resp.Labels = s.resolveLabels(projectID, extractLabelNames(meta.LabelsJSON), labelMap)
 	}
 	if len(checklist) > 0 {
 		resp.Checklist = make([]IssueChecklistItemResponse, 0, len(checklist))
@@ -2205,19 +2267,86 @@ func mapUsers(users []*gh.User) []issueUserPayload {
 	return out
 }
 
-func mapLabels(labels []*gh.Label) []issueLabelPayload {
-	out := make([]issueLabelPayload, 0, len(labels))
+func mapLabelNames(labels []*gh.Label) []string {
+	out := make([]string, 0, len(labels))
 	for _, label := range labels {
-		if label == nil || label.GetName() == "" {
+		if label == nil {
 			continue
 		}
-		out = append(out, issueLabelPayload{
-			Name:        label.GetName(),
-			Color:       label.GetColor(),
-			Description: label.GetDescription(),
-		})
+		name := strings.TrimSpace(label.GetName())
+		if name != "" {
+			out = append(out, name)
+		}
 	}
 	return out
+}
+
+func extractLabelNames(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	var names []string
+	if err := json.Unmarshal([]byte(raw), &names); err == nil {
+		return names
+	}
+
+	var payloads []issueLabelPayload
+	if err := json.Unmarshal([]byte(raw), &payloads); err == nil {
+		result := make([]string, 0, len(payloads))
+		for _, p := range payloads {
+			if p.Name != "" {
+				result = append(result, p.Name)
+			}
+		}
+		return result
+	}
+
+	return nil
+}
+
+func (s *IssueService) resolveLabels(projectID string, labelNames []string, labelMap map[string]model.GitHubRepoLabel) []IssueLabelResponse {
+	if len(labelNames) == 0 {
+		return nil
+	}
+	if labelMap == nil {
+		allLabels, err := s.githubRepoLabelRepo.ListByProject(projectID)
+		if err == nil {
+			labelMap = make(map[string]model.GitHubRepoLabel, len(allLabels))
+			for _, l := range allLabels {
+				labelMap[l.Name] = l
+			}
+		}
+	}
+	result := make([]IssueLabelResponse, 0, len(labelNames))
+	for _, name := range labelNames {
+		if repoLabel, ok := labelMap[name]; ok {
+			result = append(result, IssueLabelResponse{
+				Name:        repoLabel.Name,
+				Color:       repoLabel.Color,
+				Description: repoLabel.Description,
+			})
+		} else {
+			result = append(result, IssueLabelResponse{
+				Name:  name,
+				Color: "999999",
+			})
+		}
+	}
+	return result
+}
+
+func (s *IssueService) buildLabelMap(projectID string) map[string]model.GitHubRepoLabel {
+	allLabels, err := s.githubRepoLabelRepo.ListByProject(projectID)
+	if err != nil {
+		return nil
+	}
+	m := make(map[string]model.GitHubRepoLabel, len(allLabels))
+	for _, l := range allLabels {
+		m[l.Name] = l
+	}
+	return m
 }
 
 func mapMilestone(m *gh.Milestone) *issueMilestonePayload {
@@ -2507,12 +2636,12 @@ func normalizeGitHubLabels(labels []string) ([]string, *errs.AppError) {
 	return normalized, nil
 }
 
-func resolveInternalLabels(names []string, repoLabels []IssueLabelResponse) ([]issueLabelPayload, *errs.AppError) {
+func resolveInternalLabels(names []string, repoLabels []IssueLabelResponse) ([]string, *errs.AppError) {
 	labelMap := make(map[string]IssueLabelResponse, len(repoLabels))
 	for _, l := range repoLabels {
 		labelMap[strings.ToLower(l.Name)] = l
 	}
-	result := make([]issueLabelPayload, 0, len(names))
+	result := make([]string, 0, len(names))
 	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		value := strings.TrimSpace(name)
@@ -2523,16 +2652,11 @@ func resolveInternalLabels(names []string, repoLabels []IssueLabelResponse) ([]i
 		if _, ok := seen[key]; ok {
 			continue
 		}
-		l, ok := labelMap[key]
-		if !ok {
+		if _, ok := labelMap[key]; !ok {
 			return nil, errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf("标签不存在: %s", value))
 		}
 		seen[key] = struct{}{}
-		result = append(result, issueLabelPayload{
-			Name:        l.Name,
-			Color:       l.Color,
-			Description: l.Description,
-		})
+		result = append(result, value)
 	}
 	return result, nil
 }
@@ -2647,16 +2771,16 @@ func matchesIssueFilters(issue model.Issue, gitHubMeta *model.IssueGitHubMeta, m
 	if filters.Label != "" {
 		matched := false
 		if gitHubMeta != nil {
-			for _, label := range parseJSON[[]issueLabelPayload](gitHubMeta.LabelsJSON) {
-				if strings.EqualFold(label.Name, filters.Label) {
+			for _, name := range extractLabelNames(gitHubMeta.LabelsJSON) {
+				if strings.EqualFold(name, filters.Label) {
 					matched = true
 					break
 				}
 			}
 		}
 		if !matched && meta != nil && meta.LabelsJSON != "" {
-			for _, label := range parseJSON[[]issueLabelPayload](meta.LabelsJSON) {
-				if strings.EqualFold(label.Name, filters.Label) {
+			for _, name := range extractLabelNames(meta.LabelsJSON) {
+				if strings.EqualFold(name, filters.Label) {
 					matched = true
 					break
 				}

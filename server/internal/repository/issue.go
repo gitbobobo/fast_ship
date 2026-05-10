@@ -369,3 +369,45 @@ func (r *IssueChecklistRepository) ReplaceForIssueTx(tx *gorm.DB, issueID string
 	}
 	return tx.Create(&items).Error
 }
+
+type GitHubRepoLabelRepository struct {
+	db *gorm.DB
+}
+
+func NewGitHubRepoLabelRepository(db *gorm.DB) *GitHubRepoLabelRepository {
+	return &GitHubRepoLabelRepository{db: db}
+}
+
+func (r *GitHubRepoLabelRepository) DeleteByProject(projectID string) error {
+	return r.db.Where("project_id = ?", projectID).Delete(&model.GitHubRepoLabel{}).Error
+}
+
+func (r *GitHubRepoLabelRepository) Save(label *model.GitHubRepoLabel) error {
+	return r.db.Save(label).Error
+}
+
+func (r *GitHubRepoLabelRepository) Find(projectID, name string) (*model.GitHubRepoLabel, error) {
+	var label model.GitHubRepoLabel
+	if err := r.db.Where("project_id = ? AND name = ?", projectID, name).First(&label).Error; err != nil {
+		return nil, err
+	}
+	return &label, nil
+}
+
+func (r *GitHubRepoLabelRepository) ListByProject(projectID string) ([]model.GitHubRepoLabel, error) {
+	var labels []model.GitHubRepoLabel
+	err := r.db.Where("project_id = ?", projectID).Order("name ASC").Find(&labels).Error
+	return labels, err
+}
+
+func (r *GitHubRepoLabelRepository) ReplaceAllForProject(projectID string, labels []model.GitHubRepoLabel) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("project_id = ?", projectID).Delete(&model.GitHubRepoLabel{}).Error; err != nil {
+			return err
+		}
+		if len(labels) == 0 {
+			return nil
+		}
+		return tx.Create(&labels).Error
+	})
+}

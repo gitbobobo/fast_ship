@@ -68,6 +68,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
+		&model.GitHubRepoLabel{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -121,7 +122,7 @@ func setupTestServices(t *testing.T) *testServices {
 		issueAssetRepo:      issueAssetRepo,
 		issueDraftAssetRepo: issueDraftAssetRepo,
 		artifactRepo:        artifactRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, fileStorage, cfg, zap.NewNop()),
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg),
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),

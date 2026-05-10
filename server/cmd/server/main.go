@@ -92,6 +92,7 @@ func main() {
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
+		&model.GitHubRepoLabel{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %v", err)
 	}
@@ -129,6 +130,7 @@ func main() {
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
+	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 
@@ -138,7 +140,7 @@ func main() {
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, fileStorage, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zapLogger)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)

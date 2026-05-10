@@ -189,3 +189,15 @@ type IssueChecklistItem struct {
 func (IssueChecklistItem) TableName() string {
 	return "issue_checklist_items"
 }
+
+type GitHubRepoLabel struct {
+	ProjectID   string    `gorm:"type:text;not null;primaryKey" json:"project_id"`
+	Name        string    `gorm:"type:text;not null;primaryKey" json:"name"`
+	Color       string    `gorm:"type:text" json:"color"`
+	Description string    `gorm:"type:text" json:"description"`
+	SyncedAt    time.Time `gorm:"not null" json:"synced_at"`
+}
+
+func (GitHubRepoLabel) TableName() string {
+	return "github_repo_labels"
+}
