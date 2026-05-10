@@ -1,0 +1,295 @@
+{
+  "version": "1.1",
+  "project_name": "fast_ship",
+  "output_dir": "docs/",
+  "generated_at": "2026-05-10T22:50:00Z",
+  "last_updated": "2026-05-10T22:50:00Z",
+  "last_global_sha": "000a45caf99b6ceb5b328349f4abbf465ccd86b8",
+  "update_count": 0,
+  "output_files": {
+    "overview": "OVERVIEW.md",
+    "getting_started": "GETTING_STARTED.md",
+    "index": "INDEX.md"
+  },
+  "tech_stack": {
+    "primary_language": "Go + TypeScript",
+    "framework": "Gin + React 19",
+    "build_tool": "Makefile + Vite",
+    "test_framework": "Go testing + Vitest",
+    "package_manager": "Go Modules + pnpm",
+    "database": "SQLite (GORM)",
+    "state_management": "Zustand + TanStack Query"
+  },
+  "coverage": {
+    "total_source_files": 130,
+    "documented_source_files": 126,
+    "percentage": 97
+  },
+  "modules": [
+    {
+      "name": "server-app",
+      "source_path": "server/cmd/server/",
+      "doc_path": "modules/server-app.md",
+      "description": "Application entry point and configuration management",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 2,
+      "primary_language": "Go",
+      "sub_modules": []
+    },
+    {
+      "name": "server-router",
+      "source_path": "server/internal/router/",
+      "doc_path": "modules/server-router.md",
+      "description": "API route registration and SPA static file serving",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 2,
+      "primary_language": "Go",
+      "sub_modules": []
+    },
+    {
+      "name": "server-handler",
+      "source_path": "server/internal/handler/",
+      "doc_path": "modules/server-handler.md",
+      "description": "HTTP request handlers layer",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 8,
+      "primary_language": "Go",
+      "sub_modules": []
+    },
+    {
+      "name": "server-service",
+      "source_path": "server/internal/service/",
+      "doc_path": "modules/server-service.md",
+      "description": "Business logic layer",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 8,
+      "primary_language": "Go",
+      "sub_modules": []
+    },
+    {
+      "name": "server-repository",
+      "source_path": "server/internal/repository/",
+      "doc_path": "modules/server-repository.md",
+      "description": "GORM data access layer",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 11,
+      "primary_language": "Go",
+      "sub_modules": []
+    },
+    {
+      "name": "server-model",
+      "source_path": "server/internal/model/",
+      "doc_path": "modules/server-model.md",
+      "description": "Data model and GORM definitions",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 11,
+      "primary_language": "Go",
+      "sub_modules": []
+    },
+    {
+      "name": "server-middleware",
+      "source_path": "server/internal/middleware/",
+      "doc_path": "modules/server-middleware.md",
+      "description": "JWT/API Key authentication and CORS middleware",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 2,
+      "primary_language": "Go",
+      "sub_modules": []
+    },
+    {
+      "name": "server-pkg",
+      "source_path": "server/internal/pkg/",
+      "doc_path": "modules/server-pkg.md",
+      "description": "Shared utility packages",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 7,
+      "primary_language": "Go",
+      "sub_modules": [
+        {
+          "name": "server-pkg/crypto",
+          "source_path": "server/internal/pkg/crypto/",
+          "doc_path": "modules/server-pkg/crypto.md",
+          "description": "AES encryption utilities",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 1
+        },
+        {
+          "name": "server-pkg/errs",
+          "source_path": "server/internal/pkg/errs/",
+          "doc_path": "modules/server-pkg/errs.md",
+          "description": "Unified error code definitions",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 1
+        },
+        {
+          "name": "server-pkg/response",
+          "source_path": "server/internal/pkg/response/",
+          "doc_path": "modules/server-pkg/response.md",
+          "description": "HTTP response formatting",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 1
+        },
+        {
+          "name": "server-pkg/storage",
+          "source_path": "server/internal/pkg/storage/",
+          "doc_path": "modules/server-pkg/storage.md",
+          "description": "File storage abstraction",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 2
+        },
+        {
+          "name": "server-pkg/github",
+          "source_path": "server/internal/pkg/github/",
+          "doc_path": "modules/server-pkg/github.md",
+          "description": "GitHub API client wrapper",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 1
+        },
+        {
+          "name": "server-pkg/githubmedia",
+          "source_path": "server/internal/pkg/githubmedia/",
+          "doc_path": "modules/server-pkg/githubmedia.md",
+          "description": "GitHub media resource proxy",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 1
+        }
+      ]
+    },
+    {
+      "name": "web-app",
+      "source_path": "web/src/",
+      "doc_path": "modules/web-app.md",
+      "description": "Frontend application entry, root component, and global styles",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 3,
+      "primary_language": "TypeScript",
+      "sub_modules": []
+    },
+    {
+      "name": "web-routes",
+      "source_path": "web/src/routes/",
+      "doc_path": "modules/web-routes.md",
+      "description": "Page components and route definitions",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 22,
+      "primary_language": "TypeScript",
+      "sub_modules": []
+    },
+    {
+      "name": "web-components",
+      "source_path": "web/src/components/",
+      "doc_path": "modules/web-components.md",
+      "description": "UI component library",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 27,
+      "primary_language": "TypeScript",
+      "sub_modules": [
+        {
+          "name": "web-components/ui",
+          "source_path": "web/src/components/ui/",
+          "doc_path": "modules/web-components/ui.md",
+          "description": "shadcn/ui base components",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 20
+        },
+        {
+          "name": "web-components/features",
+          "source_path": "web/src/components/",
+          "doc_path": "modules/web-components/features.md",
+          "description": "Application feature components",
+          "last_sha": "000a45c",
+          "last_updated": "2026-05-10T22:50:00Z",
+          "file_count": 7
+        }
+      ]
+    },
+    {
+      "name": "web-api",
+      "source_path": "web/src/lib/api/",
+      "doc_path": "modules/web-api.md",
+      "description": "HTTP client and API modules",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 8,
+      "primary_language": "TypeScript",
+      "sub_modules": []
+    },
+    {
+      "name": "web-hooks",
+      "source_path": "web/src/lib/hooks/",
+      "doc_path": "modules/web-hooks.md",
+      "description": "TanStack Query hooks",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 7,
+      "primary_language": "TypeScript",
+      "sub_modules": []
+    },
+    {
+      "name": "web-state",
+      "source_path": "web/src/lib/store/",
+      "doc_path": "modules/web-state.md",
+      "description": "Zustand state management and contexts",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 4,
+      "primary_language": "TypeScript",
+      "sub_modules": []
+    },
+    {
+      "name": "web-utils",
+      "source_path": "web/src/lib/utils/",
+      "doc_path": "modules/web-utils.md",
+      "description": "Utility functions, validators, and formatters",
+      "last_sha": "000a45c",
+      "last_updated": "2026-05-10T22:50:00Z",
+      "file_count": 4,
+      "primary_language": "TypeScript",
+      "sub_modules": []
+    }
+  ],
+  "patterns": [
+    {
+      "name": "authentication",
+      "doc_path": "patterns/authentication.md",
+      "description": "JWT + Refresh Token + API Key authentication across frontend and backend",
+      "appears_in": ["server-middleware", "server-handler", "server-service", "server-repository", "server-model", "web-state", "web-api"]
+    },
+    {
+      "name": "api-conventions",
+      "doc_path": "patterns/api-conventions.md",
+      "description": "RESTful API design conventions across backend and frontend",
+      "appears_in": ["server-handler", "server-pkg", "web-api", "web-hooks"]
+    },
+    {
+      "name": "testing-strategy",
+      "doc_path": "patterns/testing-strategy.md",
+      "description": "Testing patterns for Go backend and React frontend",
+      "appears_in": ["server-handler", "server-service", "server-router", "web-routes", "web-components", "web-api"]
+    }
+  ],
+  "config": {
+    "ignore_paths": ["node_modules", "dist", "build", ".git", "coverage", ".next", ".playwright-mcp", "data"],
+    "min_module_files": 2,
+    "include_test_files": false,
+    "max_sub_module_depth": 1
+  }
+}
