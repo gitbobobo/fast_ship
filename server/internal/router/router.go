@@ -35,6 +35,7 @@ func Setup(
 		{
 			auth.POST("/register", authHandler.Register)
 			auth.POST("/login", authHandler.Login)
+			auth.POST("/refresh", authHandler.Refresh)
 		}
 
 		// JWT 必须 — 用户信息

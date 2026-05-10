@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
@@ -22,13 +23,15 @@ import (
 type AuthService struct {
 	userRepo         *repository.UserRepository
 	jwtBlacklistRepo *repository.JWTBlacklistRepository
+	refreshTokenRepo *repository.RefreshTokenRepository
 	cfg              *config.Config
 }
 
-func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repository.JWTBlacklistRepository, cfg *config.Config) *AuthService {
+func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repository.JWTBlacklistRepository, refreshTokenRepo *repository.RefreshTokenRepository, cfg *config.Config) *AuthService {
 	return &AuthService{
 		userRepo:         userRepo,
 		jwtBlacklistRepo: jwtBlacklistRepo,
+		refreshTokenRepo: refreshTokenRepo,
 		cfg:              cfg,
 	}
 }
@@ -55,8 +58,18 @@ type UpdatePasswordRequest struct {
 }
 
 type AuthResponse struct {
-	Token string       `json:"token"`
-	User  UserResponse `json:"user"`
+	Token        string       `json:"token"`
+	RefreshToken string       `json:"refresh_token"`
+	User         UserResponse `json:"user"`
+}
+
+type RefreshResponse struct {
+	Token        string `json:"token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+type RefreshRequest struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
 }
 
 type UserResponse struct {
@@ -105,9 +118,15 @@ func (s *AuthService) Register(req *RegisterRequest) (*AuthResponse, error) {
 		return nil, errs.ErrInternal
 	}
 
+	refreshToken, err := s.generateRefreshToken(user.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
 	return &AuthResponse{
-		Token: token,
-		User:  s.toUserResponse(user),
+		Token:        token,
+		RefreshToken: refreshToken,
+		User:         s.toUserResponse(user),
 	}, nil
 }
 
@@ -129,14 +148,63 @@ func (s *AuthService) Login(req *LoginRequest) (*AuthResponse, error) {
 		return nil, errs.ErrInternal
 	}
 
+	refreshToken, err := s.generateRefreshToken(user.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
 	return &AuthResponse{
-		Token: token,
-		User:  s.toUserResponse(user),
+		Token:        token,
+		RefreshToken: refreshToken,
+		User:         s.toUserResponse(user),
 	}, nil
 }
 
-func (s *AuthService) Logout(jti string, exp time.Time) error {
-	return s.jwtBlacklistRepo.Add(jti, exp)
+func (s *AuthService) Logout(jti string, exp time.Time, refreshToken string) error {
+	if err := s.jwtBlacklistRepo.Add(jti, exp); err != nil {
+		return err
+	}
+
+	if refreshToken != "" {
+		raw := strings.TrimPrefix(refreshToken, "fsr_")
+		tokenHash := HashApiKey(raw)
+		rt, err := s.refreshTokenRepo.FindByHash(tokenHash)
+		if err == nil {
+			_ = s.refreshTokenRepo.Revoke(rt.ID)
+		}
+	}
+
+	return nil
+}
+
+func (s *AuthService) RefreshAccessToken(refreshToken string) (*RefreshResponse, error) {
+	raw := strings.TrimPrefix(refreshToken, "fsr_")
+	tokenHash := HashApiKey(raw)
+
+	rt, err := s.refreshTokenRepo.FindByHash(tokenHash)
+	if err != nil {
+		return nil, errs.ErrRefreshTokenInvalid
+	}
+
+	user, err := s.userRepo.FindByID(rt.UserID)
+	if err != nil {
+		return nil, errs.ErrUserNotFound
+	}
+
+	token, err := s.generateToken(user.ID, user.Username)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	newRefreshToken, err := s.rotateRefreshToken(rt)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	return &RefreshResponse{
+		Token:        token,
+		RefreshToken: newRefreshToken,
+	}, nil
 }
 
 func (s *AuthService) GetMe(userID string) (*UserResponse, error) {
@@ -254,4 +322,53 @@ func HashApiKey(key string) string {
 // FormatApiKey 添加前缀
 func FormatApiKey(raw string) string {
 	return fmt.Sprintf("fsk_%s", raw)
+}
+
+func (s *AuthService) generateRefreshToken(userID string) (string, error) {
+	raw, refreshToken, err := s.buildRefreshToken(userID)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.refreshTokenRepo.Create(refreshToken); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("fsr_%s", raw), nil
+}
+
+func (s *AuthService) rotateRefreshToken(current *model.RefreshToken) (string, error) {
+	raw, next, err := s.buildRefreshToken(current.UserID)
+	if err != nil {
+		return "", err
+	}
+
+	if err := s.refreshTokenRepo.Rotate(current.ID, next); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("fsr_%s", raw), nil
+}
+
+func (s *AuthService) buildRefreshToken(userID string) (string, *model.RefreshToken, error) {
+	raw, err := GenerateApiKeyRaw()
+	if err != nil {
+		return "", nil, err
+	}
+
+	tokenHash := HashApiKey(raw)
+	hours := s.cfg.JWT.RefreshExpireHours
+	if hours <= 0 {
+		hours = 168 // default 7 days
+	}
+
+	rt := &model.RefreshToken{
+		ID:        uuid.New().String(),
+		UserID:    userID,
+		TokenHash: tokenHash,
+		ExpiresAt: time.Now().Add(time.Duration(hours) * time.Hour),
+		CreatedAt: time.Now(),
+	}
+
+	return raw, rt, nil
 }

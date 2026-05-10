@@ -24,11 +24,12 @@ var (
 
 // 认证错误 40100-40199
 var (
-	ErrTokenInvalid   = New(40100, "Token 无效或已过期")
-	ErrTokenExpired   = New(40101, "Token 已过期")
-	ErrApiKeyInvalid  = New(40102, "API Key 无效")
-	ErrLoginFailed    = New(40103, "用户名/邮箱或密码错误")
-	ErrTokenBlacklist = New(40104, "Token 已被注销")
+	ErrTokenInvalid        = New(40100, "Token 无效或已过期")
+	ErrTokenExpired        = New(40101, "Token 已过期")
+	ErrApiKeyInvalid       = New(40102, "API Key 无效")
+	ErrLoginFailed         = New(40103, "用户名/邮箱或密码错误")
+	ErrTokenBlacklist      = New(40104, "Token 已被注销")
+	ErrRefreshTokenInvalid = New(40105, "Refresh Token 无效或已过期")
 )
 
 // 权限错误 40300-40399

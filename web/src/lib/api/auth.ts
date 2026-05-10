@@ -13,6 +13,7 @@ interface RegisterRequest {
 
 interface AuthResponse {
   token: string;
+  refresh_token: string;
   user: User;
 }
 
@@ -21,9 +22,14 @@ export const authApi = {
     api.post("auth/login", { json: data }).json<ApiResponse<AuthResponse>>(),
 
   register: (data: RegisterRequest) =>
-    api.post("auth/register", { json: data }).json<ApiResponse<AuthResponse>>(),
+    api
+      .post("auth/register", { json: data })
+      .json<ApiResponse<AuthResponse>>(),
 
-  logout: () => api.post("auth/logout").json<ApiResponse<null>>(),
+  logout: (refreshToken?: string) =>
+    api
+      .post("auth/logout", { json: { refresh_token: refreshToken ?? "" } })
+      .json<ApiResponse<null>>(),
 
   me: () => api.get("auth/me").json<ApiResponse<User>>(),
 

@@ -10,6 +10,7 @@ database:
 jwt:
   secret: "change-me-in-production"
   expire_hours: 24
+  refresh_expire_hours: 168  # 7 days
 
 upload:
   max_file_size: 524288000  # 500MB

@@ -54,12 +54,33 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	expFloat, _ := c.Get(middleware.ContextKeyExp)
 	exp := time.Unix(int64(expFloat.(float64)), 0)
 
-	if err := h.authService.Logout(jti, exp); err != nil {
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	if err := h.authService.Logout(jti, exp, body.RefreshToken); err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
 
 	response.Success(c, nil)
+}
+
+func (h *AuthHandler) Refresh(c *gin.Context) {
+	var req service.RefreshRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
+		return
+	}
+
+	result, err := h.authService.RefreshAccessToken(req.RefreshToken)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
 }
 
 func (h *AuthHandler) GetMe(c *gin.Context) {

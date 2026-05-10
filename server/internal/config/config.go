@@ -27,8 +27,9 @@ type DatabaseConfig struct {
 }
 
 type JWTConfig struct {
-	Secret      string `mapstructure:"secret"`
-	ExpireHours int    `mapstructure:"expire_hours"`
+	Secret             string `mapstructure:"secret"`
+	ExpireHours        int    `mapstructure:"expire_hours"`
+	RefreshExpireHours int    `mapstructure:"refresh_expire_hours"`
 }
 
 type UploadConfig struct {

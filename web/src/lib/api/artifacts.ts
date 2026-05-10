@@ -1,65 +1,112 @@
 import { useAuthStore } from "@/lib/store/auth-store";
-import { api } from "./client";
+import { api, tryRefreshToken } from "./client";
 
-function handleUnauthorizedUpload() {
-  useAuthStore.getState().logout();
-  window.location.href = "/login";
+interface UploadResult {
+  status: number;
+  response: ApiResponse<Artifact> | null;
+}
+
+function parseUploadResponse(xhr: XMLHttpRequest) {
+  if (!xhr.responseText) {
+    return null;
+  }
+
+  return JSON.parse(xhr.responseText) as ApiResponse<Artifact>;
+}
+
+function createUploadXhr(
+  vid: string,
+  token: string | null,
+  onProgress?: (percent: number) => void,
+) {
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", `/api/versions/${vid}/artifacts`);
+
+  if (token) {
+    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+  }
+
+  xhr.upload.addEventListener("progress", (event) => {
+    if (!event.lengthComputable || !onProgress) return;
+    const percent = Math.round((event.loaded / event.total) * 100);
+    onProgress(percent);
+  });
+
+  return xhr;
+}
+
+function sendUploadRequest(
+  vid: string,
+  formData: FormData,
+  token: string | null,
+  onProgress?: (percent: number) => void,
+) {
+  return new Promise<UploadResult>((resolve, reject) => {
+    const xhr = createUploadXhr(vid, token, onProgress);
+
+    xhr.addEventListener("load", () => {
+      resolve({
+        status: xhr.status,
+        response: parseUploadResponse(xhr),
+      });
+    });
+
+    xhr.addEventListener("error", () => {
+      reject(new Error("上传失败"));
+    });
+
+    xhr.send(formData);
+  });
+}
+
+function requireUploadSuccess(result: UploadResult) {
+  if (result.status >= 200 && result.status < 300 && result.response) {
+    return result.response;
+  }
+
+  throw new Error(result.response?.message || "上传失败");
 }
 
 export const artifactApi = {
-  upload: (
+  upload: async (
     vid: string,
     formData: FormData,
     onProgress?: (percent: number) => void,
-  ) =>
-    new Promise<ApiResponse<Artifact>>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", `/api/versions/${vid}/artifacts`);
+  ) => {
+    const token = useAuthStore.getState().token;
+    const result = await sendUploadRequest(vid, formData, token, onProgress);
 
-      const token = useAuthStore.getState().token;
-      if (token) {
-        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-      }
+    if (result.status !== 401) {
+      return requireUploadSuccess(result);
+    }
 
-      xhr.upload.addEventListener("progress", (event) => {
-        if (!event.lengthComputable || !onProgress) return;
-        const percent = Math.round((event.loaded / event.total) * 100);
-        onProgress(percent);
-      });
+    let newToken: string;
+    try {
+      newToken = await tryRefreshToken();
+    } catch {
+      useAuthStore.getState().logout();
+      window.location.href = "/login";
+      throw new Error("Unauthorized");
+    }
 
-      xhr.addEventListener("load", () => {
-        if (xhr.status === 401) {
-          handleUnauthorizedUpload();
-          reject(new Error("Unauthorized"));
-          return;
-        }
-
-        let response: ApiResponse<Artifact> | null = null;
-        if (xhr.responseText) {
-          response = JSON.parse(xhr.responseText) as ApiResponse<Artifact>;
-        }
-
-        if (xhr.status >= 200 && xhr.status < 300 && response) {
-          resolve(response);
-          return;
-        }
-
-        reject(new Error(response?.message || "上传失败"));
-      });
-
-      xhr.addEventListener("error", () => {
-        reject(new Error("上传失败"));
-      });
-
-      xhr.send(formData);
-    }),
+    const retryResult = await sendUploadRequest(
+      vid,
+      formData,
+      newToken,
+      onProgress,
+    );
+    return requireUploadSuccess(retryResult);
+  },
 
   delete: (aid: string) =>
     api.delete(`artifacts/${aid}`).json<ApiResponse<null>>(),
 
   downloadUrl: (aid: string) => {
     const token = useAuthStore.getState().token;
-    const url = new URL(`/api/artifacts/${aid}/download`, window.location.origin);
+    const url = new URL(
+      `/api/artifacts/${aid}/download`,
+      window.location.origin,
+    );
 
     if (token) {
       url.searchParams.set("token", token);

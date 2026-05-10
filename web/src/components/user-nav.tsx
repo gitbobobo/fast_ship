@@ -13,12 +13,12 @@ import { useAuthStore } from "@/lib/store/auth-store";
 import { authApi } from "@/lib/api/auth";
 
 export function UserNav() {
-  const { user, logout } = useAuthStore();
+  const { user, refreshToken, logout } = useAuthStore();
   const navigate = useNavigate();
 
   const handleLogout = async () => {
     try {
-      await authApi.logout();
+      await authApi.logout(refreshToken ?? undefined);
     } finally {
       logout();
       navigate("/login");

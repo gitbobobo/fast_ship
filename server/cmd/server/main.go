@@ -92,6 +92,7 @@ func main() {
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
+		&model.RefreshToken{},
 		&model.GitHubRepoLabel{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %v", err)
@@ -133,9 +134,10 @@ func main() {
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
+	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
 	// 初始化 Service
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
@@ -155,14 +157,20 @@ func main() {
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
-	// 启动 JWT 黑名单清理任务
+	cleanAuthArtifacts := func() {
+		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
+			zapLogger.Error("清理 JWT 黑名单失败", zap.Error(err))
+		}
+		if err := refreshTokenRepo.CleanExpired(); err != nil {
+			zapLogger.Error("清理 Refresh Token 失败", zap.Error(err))
+		}
+	}
+	cleanAuthArtifacts()
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			if err := jwtBlacklistRepo.CleanExpired(); err != nil {
-				zapLogger.Error("清理 JWT 黑名单失败", zap.Error(err))
-			}
+			cleanAuthArtifacts()
 		}
 	}()
 

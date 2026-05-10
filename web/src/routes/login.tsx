@@ -26,7 +26,7 @@ export default function LoginPage() {
     setError("");
     try {
       const res = await authApi.login(data);
-      setAuth(res.data.token, res.data.user);
+      setAuth(res.data.token, res.data.refresh_token, res.data.user);
       navigate("/projects", { replace: true });
     } catch {
       setError("用户名/邮箱或密码错误");
