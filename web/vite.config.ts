@@ -22,7 +22,7 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
-    execArgv: ["--no-webstorage"],
+    pool: "forks",
     globals: true,
     setupFiles: "./src/test/setup.ts",
   },

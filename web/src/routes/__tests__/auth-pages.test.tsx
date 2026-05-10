@@ -61,6 +61,7 @@ describe("AuthPages", () => {
     vi.mocked(authApi.login).mockResolvedValue({
       data: {
         token: "jwt-token",
+        refresh_token: "refresh-token",
         user: fakeUser,
       },
     } as Awaited<ReturnType<typeof authApi.login>>);
@@ -82,7 +83,7 @@ describe("AuthPages", () => {
         password: "Password123",
       }),
     );
-    expect(setAuth).toHaveBeenCalledWith("jwt-token", fakeUser);
+    expect(setAuth).toHaveBeenCalledWith("jwt-token", "refresh-token", fakeUser);
     expect(mockNavigate).toHaveBeenCalledWith("/projects", { replace: true });
   });
 
@@ -112,6 +113,7 @@ describe("AuthPages", () => {
     vi.mocked(authApi.register).mockResolvedValue({
       data: {
         token: "jwt-token",
+        refresh_token: "refresh-token",
         user: fakeUser,
       },
     } as Awaited<ReturnType<typeof authApi.register>>);
@@ -135,7 +137,7 @@ describe("AuthPages", () => {
         password: "Password123",
       }),
     );
-    expect(setAuth).toHaveBeenCalledWith("jwt-token", fakeUser);
+    expect(setAuth).toHaveBeenCalledWith("jwt-token", "refresh-token", fakeUser);
     expect(mockNavigate).toHaveBeenCalledWith("/projects", { replace: true });
   });
 

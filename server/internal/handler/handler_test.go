@@ -64,6 +64,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
+		&model.RefreshToken{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -103,8 +104,9 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
+	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)

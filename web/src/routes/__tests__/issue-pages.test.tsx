@@ -719,7 +719,7 @@ describe("Issue pages", () => {
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({ labels: ["bug", "ios"] }),
     );
-    expect(toast.success).toHaveBeenCalledWith("GitHub 标签已更新");
+    expect(toast.success).toHaveBeenCalledWith("标签已更新");
   });
 
   it("queues rapid GitHub label changes against the latest draft", async () => {
@@ -782,7 +782,7 @@ describe("Issue pages", () => {
       }),
     );
     expect(mutateAsync).toHaveBeenCalledTimes(2);
-    expect(toast.success).toHaveBeenCalledWith("GitHub 标签已更新");
+    expect(toast.success).toHaveBeenCalledWith("标签已更新");
   });
 
   it("supports direct comment anchors in unified timeline", async () => {

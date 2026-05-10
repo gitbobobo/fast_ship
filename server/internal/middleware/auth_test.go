@@ -172,7 +172,7 @@ func setupAuthMiddlewareTest(t *testing.T) *authMiddlewareEnv {
 		t.Fatalf("open test db: %v", err)
 	}
 
-	if err := db.AutoMigrate(&model.User{}, &model.ApiKey{}, &model.JWTBlacklist{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.ApiKey{}, &model.JWTBlacklist{}, &model.RefreshToken{}); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
 
@@ -197,7 +197,8 @@ func setupAuthMiddlewareTest(t *testing.T) *authMiddlewareEnv {
 
 	userRepo := repository.NewUserRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
+	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 
 	router := gin.New()

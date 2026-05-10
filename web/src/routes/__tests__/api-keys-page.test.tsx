@@ -54,6 +54,17 @@ describe("ApiKeysPage", () => {
     vi.clearAllMocks();
   });
 
+  it("renders the empty api key state", () => {
+    renderWithRoute(<ApiKeysPage />, {
+      path: "/settings/api-keys",
+      initialEntry: "/settings/api-keys",
+    });
+
+    expect(screen.getByText("API Key 管理")).toBeInTheDocument();
+    expect(screen.getByText("暂无 API Key")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "创建 API Key" })).toBeInTheDocument();
+  });
+
   it("creates an api key and copies the full key", async () => {
     createMutateAsync.mockResolvedValue({
       data: { key: "fsk_secret_key_123" },

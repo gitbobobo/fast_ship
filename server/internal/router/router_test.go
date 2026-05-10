@@ -414,6 +414,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
+		&model.RefreshToken{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -458,8 +459,9 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
+	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, cfg)
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
