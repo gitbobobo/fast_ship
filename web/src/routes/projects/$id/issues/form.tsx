@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
-import { ArrowLeft, FilePenLine, LockKeyhole, MessageSquare } from "lucide-react";
+import { ArrowLeft, LockKeyhole, MessageSquare } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { InternalIssueForm, type InternalIssueFormInput } from "@/components/issues/internal-issue-form";
 import { Button } from "@/components/ui/button";
@@ -91,9 +91,17 @@ export default function IssueFormPage() {
       }
     } else {
       try {
-        const res = await createIssue.mutateAsync(values);
+        const payload: Parameters<typeof createIssue.mutateAsync>[0] = {
+          title: values.title,
+          body: values.body,
+          source: values.source,
+        };
+        if (values.source === "internal") {
+          payload.workflow_status = values.workflow_status;
+        }
+        const res = await createIssue.mutateAsync(payload);
         const nextIssueDetailSearch = buildCreatedIssueDetailSearch(res.data);
-        toast.success("内部问题已创建");
+        toast.success(values.source === "github" ? "GitHub 问题已创建" : "内部问题已创建");
         navigate(
           {
             pathname: `/projects/${id}/issues/${res.data.id}`,
@@ -102,7 +110,7 @@ export default function IssueFormPage() {
           { replace: true },
         );
       } catch {
-        toast.error("创建内部问题失败");
+        toast.error(values.source === "github" ? "创建 GitHub 问题失败" : "创建内部问题失败");
       }
     }
   };
@@ -198,7 +206,7 @@ export default function IssueFormPage() {
     );
   }
 
-  const pageTitle = isEdit ? `编辑 ${issue?.reference}` : "新建内部问题";
+  const pageTitle = isEdit ? `编辑 ${issue?.reference}` : "新建问题";
   const submitLabel = isEdit ? "保存修改" : "创建问题";
   const backLabel = isEdit ? "返回详情" : "返回";
 
@@ -206,33 +214,19 @@ export default function IssueFormPage() {
     <>
       <Header title={pageTitle} />
       <div className="w-full px-4 py-4 md:px-6 md:py-6">
-        <div className="mb-4 flex flex-wrap items-center gap-3">
-          <Button variant="outline" size="sm" onClick={handleCancel}>
-            <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
-            {backLabel}
-          </Button>
-          {isEdit && issue && (
-            <span className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground">
-              {issue.reference}
-            </span>
-          )}
-        </div>
-
-        <div className="mb-6 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-            <FilePenLine className="h-5 w-5" />
+        {isEdit && (
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <Button variant="outline" size="sm" onClick={handleCancel}>
+              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+              {backLabel}
+            </Button>
+            {issue && (
+              <span className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                {issue.reference}
+              </span>
+            )}
           </div>
-          <div>
-            <h2 className="text-base font-semibold">
-              {isEdit ? "编辑内部问题" : "新建内部问题"}
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              {isEdit
-                ? "更新标题或描述。评论、关闭状态和进度任务清单仍然在详情页处理。"
-                : "填写标题和描述来创建一个新的内部问题。"}
-            </p>
-          </div>
-        </div>
+        )}
 
         <InternalIssueForm
           defaultValues={
@@ -241,13 +235,17 @@ export default function IssueFormPage() {
                   title: issue.title,
                   body: issue.body,
                   workflow_status: issue.internal_meta?.workflow_status || "todo",
+                  source: "internal",
                 }
-              : undefined
+              : {
+                  source: "internal",
+                }
           }
           isSubmitting={isEdit ? updateIssue.isPending : createIssue.isPending}
           onPasteImage={handlePasteImage}
           onCancel={handleCancel}
           onSubmit={handleSubmit}
+          showSourceSelector={!isEdit}
           submitLabel={submitLabel}
         />
       </div>

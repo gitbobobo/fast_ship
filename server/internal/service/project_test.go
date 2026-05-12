@@ -1,6 +1,9 @@
 package service
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseRepositoryURL(t *testing.T) {
 	tests := []struct {
@@ -132,7 +135,7 @@ func TestParseRepositoryURL(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.errContains)
 				}
-				if tt.errContains != "" && !containsStr(err.Error(), tt.errContains) {
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
 					t.Fatalf("expected error containing %q, got %q", tt.errContains, err.Error())
 				}
 				return
@@ -150,15 +153,3 @@ func TestParseRepositoryURL(t *testing.T) {
 	}
 }
 
-func containsStr(s, substr string) bool {
-	return len(substr) <= len(s) && (s == substr || len(s) > 0 && containsStrHelper(s, substr))
-}
-
-func containsStrHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

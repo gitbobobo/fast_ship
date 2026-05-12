@@ -223,6 +223,22 @@ func (c *Client) UpdateIssue(ctx context.Context, issueNumber int, payload Updat
 	return &issue, nil
 }
 
+func (c *Client) CreateIssue(ctx context.Context, title, body string) (*Issue, error) {
+	payload := map[string]string{"title": title, "body": body}
+	path := fmt.Sprintf("repos/%s/%s/issues", c.owner, c.repo)
+	req, err := c.client.NewRequest("POST", path, payload)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", mediaTypeFullJSON)
+
+	var issue Issue
+	if _, err := c.client.Do(ctx, req, &issue); err != nil {
+		return nil, err
+	}
+	return &issue, nil
+}
+
 // CreateTag 创建 Git Tag（如果不存在）
 func (c *Client) CreateTag(ctx context.Context, tag, commitish string) error {
 	commitish = strings.TrimSpace(commitish)

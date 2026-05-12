@@ -384,7 +384,7 @@ export default function IssuesPage() {
                 }
               >
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
-                新建内部问题
+                新建问题
               </Button>
               <Button
                 variant="outline"

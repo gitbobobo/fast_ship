@@ -23,10 +23,11 @@ interface ReplaceIssueChecklistRequest {
   }>;
 }
 
-interface CreateInternalIssueRequest {
+interface CreateIssueRequest {
   title: string;
   body: string;
   workflow_status?: "" | "todo" | "in_progress" | "done";
+  source?: "internal" | "github";
 }
 
 interface UpdateInternalIssueRequest {
@@ -42,7 +43,7 @@ interface CreateInternalIssueCommentRequest {
 }
 
 export const issueApi = {
-  create: (projectId: string, data: CreateInternalIssueRequest) =>
+  create: (projectId: string, data: CreateIssueRequest) =>
     api.post(`projects/${projectId}/issues`, { json: data }).json<ApiResponse<Issue>>(),
 
   list: (projectId: string, params: IssueListParams = {}) =>

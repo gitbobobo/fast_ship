@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { InternalIssueForm } from "@/components/issues/internal-issue-form";
 
@@ -58,6 +59,7 @@ describe("InternalIssueForm", () => {
           title: "补充发布检查",
           body: "已有描述\n",
           workflow_status: "todo",
+          source: "internal",
         }}
         onCancel={vi.fn()}
         onPasteImage={onPasteImage}
@@ -87,6 +89,86 @@ describe("InternalIssueForm", () => {
         title: "补充发布检查",
         body: "已有描述\n![clip](/api/issues/assets/asset-1/content)\n",
         workflow_status: "todo",
+        source: "internal",
+      }),
+    );
+  });
+
+  it("renders source selector when showSourceSelector is true", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "",
+          workflow_status: "todo",
+          source: "internal",
+        }}
+        showSourceSelector
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    expect(screen.getByRole("radio", { name: "内部问题" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "GitHub 问题" })).toBeInTheDocument();
+  });
+
+  it("hides workflow status when github source is selected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "",
+          workflow_status: "todo",
+          source: "internal",
+        }}
+        showSourceSelector
+        showWorkflowStatus
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    expect(screen.getByText("内部状态")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: "GitHub 问题" }));
+
+    expect(screen.queryByText("内部状态")).not.toBeInTheDocument();
+  });
+
+  it("submits with correct source value", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "",
+          workflow_status: "todo",
+          source: "internal",
+        }}
+        showSourceSelector
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    await user.type(screen.getByPlaceholderText("例如：设置页在切换主题后闪退"), "GitHub 问题标题");
+    await user.click(screen.getByRole("radio", { name: "GitHub 问题" }));
+    await user.click(screen.getByRole("button", { name: "创建问题" }));
+
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith({
+        title: "GitHub 问题标题",
+        body: "",
+        workflow_status: "todo",
+        source: "github",
       }),
     );
   });

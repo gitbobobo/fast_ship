@@ -16,10 +16,11 @@ type IssueHandler struct {
 	issueService *service.IssueService
 }
 
-type createInternalIssueRequest struct {
+type createIssueRequest struct {
 	Title          string                    `json:"title"`
 	Body           string                    `json:"body"`
 	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
+	Source         model.IssueSource         `json:"source"`
 }
 
 type updateInternalIssueRequest struct {
@@ -50,17 +51,26 @@ func (h *IssueHandler) Create(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	var req createInternalIssueRequest
+	var req createIssueRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.issueService.CreateInternalIssue(projectID, userID, service.CreateInternalIssueRequest{
-		Title:          req.Title,
-		Body:           req.Body,
-		WorkflowStatus: req.WorkflowStatus,
-	})
+	var result *service.IssueResponse
+	var err error
+	if req.Source == model.IssueSourceGitHub {
+		result, err = h.issueService.CreateGitHubIssue(projectID, userID, service.CreateInternalIssueRequest{
+			Title: req.Title,
+			Body:  req.Body,
+		})
+	} else {
+		result, err = h.issueService.CreateInternalIssue(projectID, userID, service.CreateInternalIssueRequest{
+			Title:          req.Title,
+			Body:           req.Body,
+			WorkflowStatus: req.WorkflowStatus,
+		})
+	}
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

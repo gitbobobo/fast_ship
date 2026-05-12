@@ -1262,6 +1262,7 @@ describe("Issue pages", () => {
         title: "需要补充交付通知",
         body: "## 验收\n\n完成后通知 QA![clip](/api/issues/assets/draft-asset-1/content)\n",
         workflow_status: "todo",
+        source: "internal",
       }),
     );
     expect(toast.success).toHaveBeenCalledWith("内部问题已创建");

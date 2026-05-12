@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MarkdownEditor } from "@/components/ui/markdown-editor";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -22,6 +23,7 @@ export const internalIssueFormSchema = z.object({
   title: z.string().trim().min(1, "请输入标题"),
   body: z.string(),
   workflow_status: z.enum(["todo", "in_progress", "done"]),
+  source: z.enum(["internal", "github"]),
 });
 
 export type InternalIssueFormInput = z.infer<typeof internalIssueFormSchema>;
@@ -33,6 +35,7 @@ interface InternalIssueFormProps {
   onCancel: () => void;
   onSubmit: (values: InternalIssueFormInput) => Promise<void> | void;
   showWorkflowStatus?: boolean;
+  showSourceSelector?: boolean;
   submitLabel: string;
   editorRows?: number;
 }
@@ -44,6 +47,7 @@ export function InternalIssueForm({
   onCancel,
   onSubmit,
   showWorkflowStatus = false,
+  showSourceSelector = false,
   submitLabel,
   editorRows = 24,
 }: InternalIssueFormProps) {
@@ -53,6 +57,7 @@ export function InternalIssueForm({
     handleSubmit,
     getValues,
     reset,
+    watch,
     formState: { errors },
   } = useForm<InternalIssueFormInput>({
     resolver: zodResolver(internalIssueFormSchema),
@@ -60,16 +65,20 @@ export function InternalIssueForm({
       title: defaultValues?.title ?? "",
       body: defaultValues?.body ?? "",
       workflow_status: defaultValues?.workflow_status ?? "todo",
+      source: defaultValues?.source ?? "internal",
     },
   });
+
+  const source = watch("source");
 
   useEffect(() => {
     reset({
       title: defaultValues?.title ?? "",
       body: defaultValues?.body ?? "",
       workflow_status: defaultValues?.workflow_status ?? "todo",
+      source: defaultValues?.source ?? "internal",
     });
-  }, [defaultValues?.body, defaultValues?.title, defaultValues?.workflow_status, reset]);
+  }, [defaultValues?.body, defaultValues?.title, defaultValues?.workflow_status, defaultValues?.source, reset]);
 
   const pendingUploadPromisesRef = useRef(new Set<Promise<string>>());
   const [pendingUploadCount, setPendingUploadCount] = useState(0);
@@ -161,7 +170,7 @@ export function InternalIssueForm({
           )}
         </div>
 
-        {showWorkflowStatus && (
+        {showWorkflowStatus && source === "internal" && (
           <div className="space-y-2">
             <Label htmlFor="issue-workflow-status">内部状态</Label>
             <Controller
@@ -185,6 +194,26 @@ export function InternalIssueForm({
           </div>
         )}
       </div>
+
+      {showSourceSelector && (
+        <div className="space-y-2">
+          <Label>来源</Label>
+          <Controller
+            control={control}
+            name="source"
+            render={({ field }) => (
+              <RadioGroup
+                value={field.value}
+                onValueChange={(value) => field.onChange(value as "internal" | "github")}
+                className="flex-row gap-4"
+              >
+                <RadioGroupItem value="internal">内部问题</RadioGroupItem>
+                <RadioGroupItem value="github">GitHub 问题</RadioGroupItem>
+              </RadioGroup>
+            )}
+          />
+        </div>
+      )}
 
       <div className="space-y-2">
         <Label htmlFor="issue-body">描述</Label>

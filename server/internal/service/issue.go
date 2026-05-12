@@ -48,6 +48,7 @@ type gitHubIssueClient interface {
 	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.TimelineEvent, *gh.Response, error)
 	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*ghclient.IssueComment, error)
 	UpdateIssue(ctx context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error)
+	CreateIssue(ctx context.Context, title, body string) (*ghclient.Issue, error)
 }
 
 type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
@@ -434,6 +435,49 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		return nil, errs.ErrInternal
 	}
 	meta, err = s.loadInternalMeta(stored.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := s.toIssueResponse(*stored, meta, nil, nil)
+	return &resp, nil
+}
+
+func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInternalIssueRequest) (*IssueResponse, error) {
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		return nil, errs.ErrInvalidParams
+	}
+
+	project, err := s.projectRepo.FindByID(projectID, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	tokenBytes, appErr := s.decryptGitHubToken(project)
+	if appErr != nil {
+		return nil, appErr
+	}
+
+	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+	createdIssue, err := client.CreateIssue(context.Background(), title, req.Body)
+	if err != nil {
+		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("创建 GitHub Issue 失败: %v", err))
+	}
+
+	stored, err := s.upsertGitHubIssue(projectID, createdIssue)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.syncTimeline(context.Background(), client, stored, createdIssue.GetNumber()); err != nil {
+		s.logger.Warn("sync timeline after creating github issue failed", zap.String("issue_id", stored.ID), zap.Error(err))
+	}
+
+	meta, err := s.loadInternalMeta(stored.ID)
 	if err != nil {
 		return nil, err
 	}

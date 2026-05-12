@@ -203,8 +203,16 @@ type fakeIssueGitHubClient struct {
 	timeline           map[int][]*ghclient.TimelineEvent
 	createdComment     *ghclient.IssueComment
 	updatedIssue       *ghclient.Issue
+	createdIssue       *ghclient.Issue
+	createIssueErr     error
+	createIssueCalls   []fakeCreateIssueCall
 	createCommentCalls []fakeCreateCommentCall
 	updateIssueCalls   []fakeUpdateIssueCall
+}
+
+type fakeCreateIssueCall struct {
+	Title string
+	Body  string
 }
 
 type fakeCreateCommentCall struct {
@@ -260,6 +268,14 @@ func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, 
 	}
 	f.updateIssueCalls = append(f.updateIssueCalls, call)
 	return f.updatedIssue, nil
+}
+
+func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body string) (*ghclient.Issue, error) {
+	f.createIssueCalls = append(f.createIssueCalls, fakeCreateIssueCall{
+		Title: title,
+		Body:  body,
+	})
+	return f.createdIssue, f.createIssueErr
 }
 
 func intPtr(v int) *int {
@@ -1393,5 +1409,120 @@ func TestIssueServiceGetFilterOptions_IncludesInternalLabels(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected 'bug' in filter options labels, got %+v", opts.Labels)
+	}
+}
+
+
+func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	now := time.Now().UTC()
+	fake := &fakeIssueGitHubClient{
+		createdIssue: &ghclient.Issue{
+			Issue: gh.Issue{
+				ID:                int64Ptr(201),
+				NodeID:            stringPtr("I_kw456"),
+				Number:            intPtr(88),
+				State:             stringPtr("open"),
+				Title:             stringPtr("GitHub 新建问题"),
+				Body:              stringPtr("GitHub 问题描述"),
+				HTMLURL:           stringPtr("https://github.com/owner/repo/issues/88"),
+				User:              &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://example.com/alice.png")},
+				AuthorAssociation: stringPtr("MEMBER"),
+				Labels:            []*gh.Label{},
+				Comments:          intPtr(0),
+				CreatedAt:         &gh.Timestamp{Time: now},
+				UpdatedAt:         &gh.Timestamp{Time: now},
+			},
+			BodyHTML: stringPtr("<p>GitHub 问题描述</p>"),
+		},
+	}
+
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" {
+			t.Fatalf("unexpected token: %q", token)
+		}
+		return fake
+	}
+
+	created, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "GitHub 新建问题",
+		Body:  "GitHub 问题描述",
+	})
+	if err != nil {
+		t.Fatalf("create github issue: %v", err)
+	}
+
+	if created.Source != model.IssueSourceGitHub {
+		t.Fatalf("expected github source, got %+v", created.Source)
+	}
+	if created.Title != "GitHub 新建问题" {
+		t.Fatalf("expected title 'GitHub 新建问题', got %+v", created.Title)
+	}
+	if created.GitHub == nil || created.GitHub.Number != 88 {
+		t.Fatalf("expected github meta with number 88, got %+v", created.GitHub)
+	}
+	if len(fake.createIssueCalls) != 1 {
+		t.Fatalf("expected one create issue call, got %d", len(fake.createIssueCalls))
+	}
+	if fake.createIssueCalls[0].Title != "GitHub 新建问题" || fake.createIssueCalls[0].Body != "GitHub 问题描述" {
+		t.Fatalf("unexpected create issue call payload: %+v", fake.createIssueCalls[0])
+	}
+}
+
+func TestIssueServiceCreateGitHubIssue_RejectsEmptyTitle(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	_, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "   ",
+		Body:  "desc",
+	})
+	if err == nil {
+		t.Fatal("expected error for empty title, got nil")
+	}
+}
+
+func TestIssueServiceCreateGitHubIssue_ProjectNotFound(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+
+	_, err := svc.issueService.CreateGitHubIssue("non-existent-project", user.ID, CreateInternalIssueRequest{
+		Title: "title",
+		Body:  "desc",
+	})
+	if err == nil {
+		t.Fatal("expected error for non-existent project, got nil")
+	}
+}
+
+func TestIssueServiceCreateGitHubIssue_GitHubAPIFailure(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	fake := &fakeIssueGitHubClient{
+		createIssueErr: fmt.Errorf("github api error"),
+	}
+
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	_, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "title",
+		Body:  "desc",
+	})
+	if err == nil {
+		t.Fatal("expected error when github api fails, got nil")
 	}
 }
