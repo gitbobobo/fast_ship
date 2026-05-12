@@ -1,5 +1,5 @@
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-import { Controller, useForm } from "react-hook-form";
+import { Controller, useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
@@ -57,7 +57,6 @@ export function InternalIssueForm({
     handleSubmit,
     getValues,
     reset,
-    watch,
     formState: { errors },
   } = useForm<InternalIssueFormInput>({
     resolver: zodResolver(internalIssueFormSchema),
@@ -69,7 +68,7 @@ export function InternalIssueForm({
     },
   });
 
-  const source = watch("source");
+  const source = useWatch({ control, name: "source" });
 
   useEffect(() => {
     reset({
