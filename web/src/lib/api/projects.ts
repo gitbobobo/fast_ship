@@ -3,17 +3,17 @@ import { api } from "./client";
 interface CreateProjectRequest {
   name: string;
   description?: string;
-  github_owner: string;
-  github_repo: string;
-  github_token: string;
+  repository_url: string;
+  github_token?: string;
+  source_project_id?: string;
 }
 
 interface UpdateProjectRequest {
   name?: string;
   description?: string;
-  github_owner?: string;
-  github_repo?: string;
+  repository_url?: string;
   github_token?: string;
+  source_project_id?: string;
 }
 
 export const projectApi = {

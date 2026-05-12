@@ -7,29 +7,59 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { projectSchema, type ProjectInput } from "@/lib/utils/validators";
-import { useCreateProject } from "@/lib/hooks/use-projects";
+import { useCreateProject, useProjects } from "@/lib/hooks/use-projects";
+import { useTokenSource } from "@/lib/hooks/use-token-source";
+import { parseRepoUrl } from "@/lib/utils/github";
 import { toast } from "sonner";
 
 export default function NewProjectPage() {
   const navigate = useNavigate();
   const createProject = useCreateProject();
+  const { data: existingProjects } = useProjects();
 
   const {
     control,
     register,
     handleSubmit,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<ProjectInput>({ resolver: zodResolver(projectSchema) });
-  const [githubOwner = "", githubRepo = ""] = useWatch({
-    control,
-    name: ["github_owner", "github_repo"],
-  });
+
+  const repositoryUrl = useWatch({ control, name: "repository_url" }) || "";
+  const { owner, repo } = parseRepoUrl(repositoryUrl);
+
+  const { tokenSource, handleTokenSourceChange } = useTokenSource(setValue);
 
   const onSubmit = async (data: ProjectInput) => {
     try {
-      const res = await createProject.mutateAsync(data);
+      const payload: {
+        name: string;
+        description?: string;
+        repository_url: string;
+        github_token?: string;
+        source_project_id?: string;
+      } = {
+        name: data.name,
+        repository_url: data.repository_url,
+      };
+      if (data.description) {
+        payload.description = data.description;
+      }
+      if (data.source_project_id) {
+        payload.source_project_id = data.source_project_id;
+      } else if (data.github_token) {
+        payload.github_token = data.github_token;
+      }
+      const res = await createProject.mutateAsync(payload);
       toast.success("项目创建成功");
       navigate(`/projects/${res.data.id}`);
     } catch {
@@ -37,15 +67,18 @@ export default function NewProjectPage() {
     }
   };
 
+  const hasExistingProjects =
+    existingProjects && existingProjects.items.length > 0;
+
   return (
     <>
       <Header title="创建项目" />
       <div className="p-4 md:p-6">
         <Card className="mx-auto max-w-xl">
-          <CardHeader>
+          <CardHeader className="pt-4 pb-2">
             <CardTitle>新建项目</CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="pt-2">
             <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
               <div className="space-y-2">
                 <Label htmlFor="name">项目名称</Label>
@@ -66,58 +99,68 @@ export default function NewProjectPage() {
                 />
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="github_owner">GitHub Owner</Label>
-                  <Input
-                    id="github_owner"
-                    placeholder="owner"
-                    {...register("github_owner")}
-                  />
-                  {errors.github_owner && (
-                    <p className="text-xs text-destructive">
-                      {errors.github_owner.message}
-                    </p>
-                  )}
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="github_repo">GitHub Repo</Label>
-                  <Input
-                    id="github_repo"
-                    placeholder="repo"
-                    {...register("github_repo")}
-                  />
-                  {errors.github_repo && (
-                    <p className="text-xs text-destructive">
-                      {errors.github_repo.message}
-                    </p>
-                  )}
-                </div>
+              <div className="space-y-2">
+                <Label htmlFor="repository_url">仓库链接</Label>
+                <Input
+                  id="repository_url"
+                  placeholder="https://github.com/owner/repo 或 owner/repo"
+                  {...register("repository_url")}
+                />
+                {errors.repository_url && (
+                  <p className="text-xs text-destructive">
+                    {errors.repository_url.message}
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <Label htmlFor="github_token">GitHub Access Token</Label>
-                  <GitHubTokenHelpDialog
-                    owner={githubOwner}
-                    repo={githubRepo}
-                  />
+                  <GitHubTokenHelpDialog owner={owner} repo={repo} />
                 </div>
-                <Input
-                  id="github_token"
-                  type="password"
-                  placeholder="github_pat_xxx 或 ghp_xxx"
-                  {...register("github_token")}
-                />
-                {errors.github_token && (
-                  <p className="text-xs text-destructive">
-                    {errors.github_token.message}
-                  </p>
+
+                {hasExistingProjects && (
+                  <Select
+                    value={tokenSource}
+                    onValueChange={handleTokenSourceChange}
+                  >
+                    <SelectTrigger className="w-full" size="default">
+                      <SelectValue>
+                        {tokenSource === ""
+                          ? "输入新 Token"
+                          : existingProjects?.items.find((p) => p.id === tokenSource)?.name ?? "选择 Token 来源"}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">输入新 Token</SelectItem>
+                      {existingProjects.items.map((proj) => (
+                        <SelectItem key={proj.id} value={proj.id}>
+                          {proj.name} ({proj.github_owner}/{proj.github_repo})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 )}
-                <p className="text-xs text-muted-foreground">
-                  推荐 Fine-grained Token（前缀 github_pat_），并确保选中目标仓库且具备
-                  Contents 写权限
-                </p>
+
+                {(!hasExistingProjects || tokenSource === "") && (
+                  <>
+                    <Input
+                      id="github_token"
+                      type="password"
+                      placeholder="github_pat_xxx 或 ghp_xxx"
+                      {...register("github_token")}
+                    />
+                    {errors.github_token && (
+                      <p className="text-xs text-destructive">
+                        {errors.github_token.message}
+                      </p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      推荐 Fine-grained Token（前缀 github_pat_），并确保选中目标仓库且具备
+                      Contents 写权限
+                    </p>
+                  </>
+                )}
               </div>
 
               <div className="flex gap-3 pt-2">

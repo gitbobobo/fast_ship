@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -15,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+var repoNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 type ProjectService struct {
 	projectRepo     *repository.ProjectRepository
@@ -51,19 +55,19 @@ func NewProjectService(
 }
 
 type CreateProjectRequest struct {
-	Name        string `json:"name" binding:"required,min=1,max=100"`
-	Description string `json:"description"`
-	GithubOwner string `json:"github_owner" binding:"required"`
-	GithubRepo  string `json:"github_repo" binding:"required"`
-	GithubToken string `json:"github_token" binding:"required"`
+	Name            string `json:"name" binding:"required,min=1,max=100"`
+	Description     string `json:"description"`
+	RepositoryURL   string `json:"repository_url" binding:"required"`
+	GithubToken     string `json:"github_token"`
+	SourceProjectID string `json:"source_project_id"`
 }
 
 type UpdateProjectRequest struct {
-	Name        string `json:"name" binding:"omitempty,min=1,max=100"`
-	Description string `json:"description"`
-	GithubOwner string `json:"github_owner"`
-	GithubRepo  string `json:"github_repo"`
-	GithubToken string `json:"github_token"`
+	Name            string `json:"name" binding:"omitempty,min=1,max=100"`
+	Description     string `json:"description"`
+	RepositoryURL   string `json:"repository_url"`
+	GithubToken     string `json:"github_token"`
+	SourceProjectID string `json:"source_project_id"`
 }
 
 type ProjectResponse struct {
@@ -108,9 +112,28 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		return nil, errs.ErrProjectNameExists
 	}
 
-	encryptedToken, err := crypto.Encrypt([]byte(req.GithubToken), []byte(s.cfg.Encryption.Key))
+	owner, repo, err := parseRepositoryURL(req.RepositoryURL)
 	if err != nil {
-		return nil, errs.ErrInternal
+		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+	}
+
+	var encryptedToken []byte
+	if req.SourceProjectID != "" {
+		sourceProject, err := s.projectRepo.FindByID(req.SourceProjectID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrProjectNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+		encryptedToken = sourceProject.GithubTokenEncrypted
+	} else if req.GithubToken != "" {
+		encryptedToken, err = crypto.Encrypt([]byte(req.GithubToken), []byte(s.cfg.Encryption.Key))
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+	} else {
+		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
 	}
 
 	project := &model.Project{
@@ -118,8 +141,8 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		UserID:               userID,
 		Name:                 req.Name,
 		Description:          req.Description,
-		GithubOwner:          req.GithubOwner,
-		GithubRepo:           req.GithubRepo,
+		GithubOwner:          owner,
+		GithubRepo:           repo,
 		GithubTokenEncrypted: encryptedToken,
 	}
 
@@ -187,15 +210,25 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		project.Name = req.Name
 	}
 
-	project.Description = req.Description
+	if req.RepositoryURL != "" {
+		owner, repo, err := parseRepositoryURL(req.RepositoryURL)
+		if err != nil {
+			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
+		}
+		project.GithubOwner = owner
+		project.GithubRepo = repo
+	}
 
-	if req.GithubOwner != "" {
-		project.GithubOwner = req.GithubOwner
-	}
-	if req.GithubRepo != "" {
-		project.GithubRepo = req.GithubRepo
-	}
-	if req.GithubToken != "" {
+	if req.SourceProjectID != "" {
+		sourceProject, err := s.projectRepo.FindByID(req.SourceProjectID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrProjectNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+		project.GithubTokenEncrypted = sourceProject.GithubTokenEncrypted
+	} else if req.GithubToken != "" {
 		encryptedToken, err := crypto.Encrypt([]byte(req.GithubToken), []byte(s.cfg.Encryption.Key))
 		if err != nil {
 			return nil, errs.ErrInternal
@@ -261,6 +294,43 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 	}
 
 	return resp, defaultBranch, nil
+}
+
+func parseRepositoryURL(raw string) (owner, repo string, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", errors.New("仓库链接不能为空")
+	}
+
+	if idx := strings.Index(s, "://"); idx != -1 {
+		s = s[idx+3:]
+	}
+
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "github.com/") {
+		s = s[11:]
+	}
+
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
+
+	parts := strings.SplitN(s, "/", 3)
+	if len(parts) < 2 {
+		return "", "", errors.New("仓库链接格式无效，应为 owner/repo 或 https://github.com/owner/repo")
+	}
+
+	owner = strings.TrimSpace(parts[0])
+	repo = strings.TrimSpace(parts[1])
+
+	if owner == "" || repo == "" {
+		return "", "", errors.New("仓库链接格式无效，owner 和 repo 不能为空")
+	}
+
+	if !repoNameRegex.MatchString(owner) || !repoNameRegex.MatchString(repo) {
+		return "", "", errors.New("仓库链接包含非法字符")
+	}
+
+	return owner, repo, nil
 }
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {

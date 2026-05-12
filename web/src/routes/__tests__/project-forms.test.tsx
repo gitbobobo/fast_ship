@@ -10,6 +10,7 @@ import {
   useProject,
   useProjectBranches,
   useUpdateProject,
+  useProjects,
 } from "@/lib/hooks/use-projects";
 import { useCreateVersion } from "@/lib/hooks/use-versions";
 
@@ -37,6 +38,7 @@ vi.mock("@/lib/hooks/use-projects", () => ({
   useCreateProject: vi.fn(),
   useProjectBranches: vi.fn(),
   useUpdateProject: vi.fn(),
+  useProjects: vi.fn(),
 }));
 
 vi.mock("@/lib/hooks/use-versions", () => ({
@@ -70,6 +72,16 @@ describe("ProjectAndVersionForms", () => {
     vi.mocked(useUpdateProject).mockReturnValue({
       mutateAsync: updateProjectMutateAsync,
     } as unknown as ReturnType<typeof useUpdateProject>);
+
+    vi.mocked(useProjects).mockReturnValue({
+      data: {
+        items: [],
+        total: 0,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProjects>);
 
     vi.mocked(useProjectBranches).mockReturnValue({
       data: {
@@ -106,25 +118,77 @@ describe("ProjectAndVersionForms", () => {
     });
 
     await user.type(screen.getByLabelText("项目名称"), "fast-ship");
-    await user.type(screen.getByLabelText("项目描述（可选）"), "release manager");
-    await user.type(screen.getByLabelText("GitHub Owner"), "godbobo");
-    await user.type(screen.getByLabelText("GitHub Repo"), "fast_ship");
+    await user.type(
+      screen.getByLabelText("仓库链接"),
+      "https://github.com/godbobo/fast_ship",
+    );
     await user.type(screen.getByLabelText("GitHub Access Token"), "ghp_secret");
     await user.click(screen.getByRole("button", { name: "创建项目" }));
 
     await waitFor(() =>
       expect(createProjectMutateAsync).toHaveBeenCalledWith({
         name: "fast-ship",
-        description: "release manager",
-        github_owner: "godbobo",
-        github_repo: "fast_ship",
+        repository_url: "https://github.com/godbobo/fast_ship",
         github_token: "ghp_secret",
       }),
     );
     expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-99");
   });
 
-  it("submits edit project form without sending github token when left empty", async () => {
+  it("submits create project form with existing project token", async () => {
+    vi.mocked(useProjects).mockReturnValue({
+      data: {
+        items: [
+          {
+            id: "proj-existing",
+            name: "existing-project",
+            github_owner: "existing-owner",
+            github_repo: "existing-repo",
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProjects>);
+
+    createProjectMutateAsync.mockResolvedValue({
+      data: { id: "proj-99" },
+    });
+
+    const user = userEvent.setup();
+
+    renderWithRoute(<NewProjectPage />, {
+      path: "/projects/new",
+      initialEntry: "/projects/new",
+    });
+
+    await user.type(screen.getByLabelText("项目名称"), "fast-ship");
+    await user.type(
+      screen.getByLabelText("仓库链接"),
+      "godbobo/fast_ship",
+    );
+
+    // Open token source select and choose existing project
+    await user.click(screen.getByRole("combobox"));
+    await user.click(
+      screen.getByRole("option", { name: /existing-project/ }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    await waitFor(() =>
+      expect(createProjectMutateAsync).toHaveBeenCalledWith({
+        name: "fast-ship",
+        repository_url: "godbobo/fast_ship",
+        source_project_id: "proj-existing",
+      }),
+    );
+    expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-99");
+  });
+
+  it("submits edit project form without sending token when left empty", async () => {
     const user = userEvent.setup();
 
     renderWithRoute(<EditProjectPage />, {
@@ -133,29 +197,22 @@ describe("ProjectAndVersionForms", () => {
     });
 
     const nameInput = screen.getByLabelText("项目名称");
-    const descriptionInput = screen.getByLabelText("项目描述（可选）");
-    const ownerInput = screen.getByLabelText("GitHub Owner");
-    const repoInput = screen.getByLabelText("GitHub Repo");
+    const repositoryUrlInput = screen.getByLabelText("仓库链接");
 
     expect(nameInput).toHaveValue("fast-ship");
-    expect(descriptionInput).toHaveValue("old desc");
-    expect(ownerInput).toHaveValue("old-owner");
-    expect(repoInput).toHaveValue("old-repo");
+    expect(repositoryUrlInput).toHaveValue(
+      "https://github.com/old-owner/old-repo",
+    );
 
-    await user.clear(descriptionInput);
-    await user.type(descriptionInput, "new desc");
-    await user.clear(ownerInput);
-    await user.type(ownerInput, "new-owner");
-    await user.clear(repoInput);
-    await user.type(repoInput, "new-repo");
+    await user.clear(repositoryUrlInput);
+    await user.type(repositoryUrlInput, "new-owner/new-repo");
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
       expect(updateProjectMutateAsync).toHaveBeenCalledWith({
         name: "fast-ship",
-        description: "new desc",
-        github_owner: "new-owner",
-        github_repo: "new-repo",
+        description: "old desc",
+        repository_url: "new-owner/new-repo",
       }),
     );
     expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-1");
