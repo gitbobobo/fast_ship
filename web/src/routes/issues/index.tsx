@@ -145,8 +145,13 @@ export default function IssuesPage() {
 
   // Sync URL when active project changes from non-URL sources (e.g. first load)
   // Also ensure default state filter is "open" when not specified
+  // Skip when user manually changes project (selectedProjectId matches activeProjectId)
   useEffect(() => {
-    if (activeProjectId && activeProjectId !== urlProjectId) {
+    if (
+      activeProjectId &&
+      activeProjectId !== urlProjectId &&
+      selectedProjectId !== activeProjectId
+    ) {
       const next = new URLSearchParams(searchParams);
       next.set("project", activeProjectId);
       next.delete("page");
@@ -155,7 +160,7 @@ export default function IssuesPage() {
       }
       setSearchParams(next, { replace: true });
     }
-  }, [activeProjectId, urlProjectId, searchParams, setSearchParams]);
+  }, [activeProjectId, urlProjectId, searchParams, setSearchParams, selectedProjectId]);
 
   // Filters from URL
   const issueStateFilter = searchParams.get("state") ?? "open";
