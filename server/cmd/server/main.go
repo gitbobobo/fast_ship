@@ -120,6 +120,7 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
+	dashboardRepo := repository.NewDashboardRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
@@ -140,6 +141,7 @@ func main() {
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
+	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zapLogger)
@@ -151,6 +153,7 @@ func main() {
 	authHandler := handler.NewAuthHandler(authService)
 	aiHandler := handler.NewAIHandler(aiService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
+	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService)
@@ -219,7 +222,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

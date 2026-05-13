@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { screen, waitFor, fireEvent, render } from "@testing-library/react";
+import { screen, waitFor, fireEvent, render, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -198,6 +198,17 @@ describe("UI Integration Tests", () => {
   });
 
   describe("Settings Page Integration", () => {
+    it("renders dashboard as the first sidebar item and keeps it active on /dashboard", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/dashboard" });
+
+      const nav = screen.getByRole("navigation");
+      const links = within(nav).getAllByRole("link");
+
+      expect(links[0]).toHaveAttribute("href", "/dashboard");
+      expect(links[0]).toHaveTextContent(/仪表盘|dashboard/i);
+      expect(links[0]).toHaveAttribute("aria-current", "page");
+    });
+
     it("keeps the settings sidebar item active on nested settings routes", () => {
       renderWithProviders(<Sidebar />, { initialEntry: "/settings/profile" });
 

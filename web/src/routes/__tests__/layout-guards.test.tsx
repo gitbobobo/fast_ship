@@ -68,12 +68,13 @@ describe("LayoutGuards", () => {
           <Route element={<AuthLayout />}>
             <Route path="/login" element={<div>登录表单</div>} />
           </Route>
+          <Route path="/dashboard" element={<div>仪表盘页</div>} />
           <Route path="/projects" element={<div>项目页</div>} />
         </Routes>
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("项目页")).toBeInTheDocument();
+    expect(await screen.findByText("仪表盘页")).toBeInTheDocument();
     expect(screen.queryByText("登录表单")).not.toBeInTheDocument();
   });
 

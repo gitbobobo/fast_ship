@@ -84,7 +84,7 @@ describe("AuthPages", () => {
       }),
     );
     expect(setAuth).toHaveBeenCalledWith("jwt-token", "refresh-token", fakeUser);
-    expect(mockNavigate).toHaveBeenCalledWith("/projects", { replace: true });
+    expect(mockNavigate).toHaveBeenCalledWith("/dashboard", { replace: true });
   });
 
   it("shows login error when credentials are invalid", async () => {
@@ -138,7 +138,7 @@ describe("AuthPages", () => {
       }),
     );
     expect(setAuth).toHaveBeenCalledWith("jwt-token", "refresh-token", fakeUser);
-    expect(mockNavigate).toHaveBeenCalledWith("/projects", { replace: true });
+    expect(mockNavigate).toHaveBeenCalledWith("/dashboard", { replace: true });
   });
 
   it("shows register error when backend rejects the request", async () => {

@@ -15,6 +15,7 @@ func Setup(
 	authHandler *handler.AuthHandler,
 	aiHandler *handler.AIHandler,
 	apiKeyHandler *handler.ApiKeyHandler,
+	dashboardHandler *handler.DashboardHandler,
 	projectHandler *handler.ProjectHandler,
 	versionHandler *handler.VersionHandler,
 	issueHandler *handler.IssueHandler,
@@ -76,6 +77,8 @@ func Setup(
 			projectRead.GET("/:id", projectHandler.Get)
 			projectRead.GET("/:id/branches", projectHandler.GetBranches)
 		}
+
+		api.GET("/dashboard/overview", middleware.RequireAuth(cfg, apiKeyRepo, authService), dashboardHandler.Overview)
 
 		// JWT 必须 — 版本写操作（创建）
 		versionWrite := api.Group("/projects/:id/versions", middleware.RequireJWT(cfg, authService))

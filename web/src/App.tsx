@@ -10,6 +10,7 @@ import SettingsLayout from "@/routes/settings/layout";
 
 const LoginPage = lazy(() => import("@/routes/login"));
 const RegisterPage = lazy(() => import("@/routes/register"));
+const DashboardPage = lazy(() => import("@/routes/dashboard/index"));
 const ProjectsPage = lazy(() => import("@/routes/projects/index"));
 const VersionsPage = lazy(() => import("@/routes/versions/index"));
 const IssuesPage = lazy(() => import("@/routes/issues/index"));
@@ -57,6 +58,10 @@ export default function App() {
 
             {/* 已登录路由 */}
             <Route element={<AppLayout />}>
+              <Route
+                path="/dashboard"
+                element={<LazyPage render={<DashboardPage />} />}
+              />
               <Route
                 path="/projects"
                 element={<LazyPage render={<ProjectsPage />} />}
@@ -127,7 +132,7 @@ export default function App() {
             </Route>
 
             {/* 默认重定向 */}
-            <Route path="*" element={<Navigate to="/projects" replace />} />
+            <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
         </BrowserRouter>
         <Toaster position="top-center" richColors />

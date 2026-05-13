@@ -323,6 +323,228 @@ func TestRouterIssueAssetUploadAndContentWithQueryToken(t *testing.T) {
 	}
 }
 
+func TestRouterDashboardOverview_ReturnsOpenIssueCountsByProject(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "dashboard-user", "dashboard@example.com", "Password123")
+
+	projectA := createRouterTestProject(t, env.db, auth.UserID, func(project *model.Project) {
+		project.Name = "iOS App"
+	})
+	projectB := createRouterTestProject(t, env.db, auth.UserID, func(project *model.Project) {
+		project.Name = "Android App"
+	})
+	otherUser := createRouterTestUser(t, env.db, "other-user", "other-user", "other@example.com")
+	otherProject := createRouterTestProject(t, env.db, otherUser.ID, func(project *model.Project) {
+		project.Name = "Hidden Project"
+	})
+
+	createRouterTestIssue(t, env.db, projectA.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 1
+		issue.State = model.IssueStateOpen
+	})
+	issueA2 := createRouterTestIssue(t, env.db, projectA.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 2
+		issue.State = model.IssueStateOpen
+	})
+	createRouterTestInternalMeta(t, env.db, issueA2.ID, func(meta *model.IssueInternalMeta) {
+		meta.WorkflowStatus = model.IssueWorkflowStatusInProgress
+	})
+	issueA3 := createRouterTestIssue(t, env.db, projectA.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 3
+		issue.State = model.IssueStateOpen
+	})
+	createRouterTestInternalMeta(t, env.db, issueA3.ID, func(meta *model.IssueInternalMeta) {
+		completedAt := time.Now().UTC().Add(-24 * time.Hour)
+		meta.WorkflowStatus = model.IssueWorkflowStatusDone
+		meta.CompletedAt = &completedAt
+	})
+	createRouterTestIssue(t, env.db, projectA.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 4
+		issue.State = model.IssueStateClosed
+	})
+
+	createRouterTestIssue(t, env.db, projectB.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 1
+		issue.State = model.IssueStateOpen
+	})
+
+	createRouterTestIssue(t, env.db, otherProject.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 1
+		issue.State = model.IssueStateOpen
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+auth.Token)
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard overview 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp dashboardOverviewResponse
+	decodeRouterEnvelope(t, rec, &resp)
+
+	got := make(map[string]int, len(resp.OpenIssuesByProject))
+	for _, item := range resp.OpenIssuesByProject {
+		got[item.ProjectID] = item.OpenIssueCount
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected two visible projects in dashboard overview, got %+v", resp.OpenIssuesByProject)
+	}
+	if got[projectA.ID] != 2 {
+		t.Fatalf("expected project %q to have 2 open issues, got %+v", projectA.Name, resp.OpenIssuesByProject)
+	}
+	if got[projectB.ID] != 1 {
+		t.Fatalf("expected project %q to have 1 open issue, got %+v", projectB.Name, resp.OpenIssuesByProject)
+	}
+	if _, ok := got[otherProject.ID]; ok {
+		t.Fatalf("expected dashboard overview to exclude other users' projects, got %+v", resp.OpenIssuesByProject)
+	}
+}
+
+func TestRouterDashboardOverview_ReturnsDailyResolvedSeriesWithZeroFilledDates(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "dashboard-series", "dashboard-series@example.com", "Password123")
+
+	projectA := createRouterTestProject(t, env.db, auth.UserID, func(project *model.Project) {
+		project.Name = "iOS App"
+	})
+	projectB := createRouterTestProject(t, env.db, auth.UserID, func(project *model.Project) {
+		project.Name = "Android App"
+	})
+	otherUser := createRouterTestUser(t, env.db, "series-other-user", "series-other-user", "series-other@example.com")
+	otherProject := createRouterTestProject(t, env.db, otherUser.ID)
+
+	dayStart := time.Now().UTC().Truncate(24 * time.Hour)
+	twoDaysAgo := dayStart.AddDate(0, 0, -2).Add(12 * time.Hour)
+	fiveDaysAgo := dayStart.AddDate(0, 0, -5).Add(9 * time.Hour)
+	oldCompleted := dayStart.AddDate(0, 0, -35).Add(8 * time.Hour)
+
+	issueA1 := createRouterTestIssue(t, env.db, projectA.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 1
+		issue.State = model.IssueStateClosed
+	})
+	createRouterTestInternalMeta(t, env.db, issueA1.ID, func(meta *model.IssueInternalMeta) {
+		meta.WorkflowStatus = model.IssueWorkflowStatusDone
+		meta.CompletedAt = &twoDaysAgo
+	})
+
+	issueA2 := createRouterTestIssue(t, env.db, projectA.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 2
+		issue.State = model.IssueStateClosed
+	})
+	createRouterTestInternalMeta(t, env.db, issueA2.ID, func(meta *model.IssueInternalMeta) {
+		meta.WorkflowStatus = model.IssueWorkflowStatusDone
+		meta.CompletedAt = &fiveDaysAgo
+	})
+
+	issueB1 := createRouterTestIssue(t, env.db, projectB.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 1
+		issue.State = model.IssueStateClosed
+	})
+	createRouterTestInternalMeta(t, env.db, issueB1.ID, func(meta *model.IssueInternalMeta) {
+		meta.WorkflowStatus = model.IssueWorkflowStatusDone
+		meta.CompletedAt = &twoDaysAgo
+	})
+
+	issueOld := createRouterTestIssue(t, env.db, projectA.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 3
+		issue.State = model.IssueStateClosed
+	})
+	createRouterTestInternalMeta(t, env.db, issueOld.ID, func(meta *model.IssueInternalMeta) {
+		meta.WorkflowStatus = model.IssueWorkflowStatusDone
+		meta.CompletedAt = &oldCompleted
+	})
+
+	issueHidden := createRouterTestIssue(t, env.db, otherProject.ID, func(issue *model.Issue) {
+		issue.SequenceNumber = 1
+		issue.State = model.IssueStateClosed
+	})
+	createRouterTestInternalMeta(t, env.db, issueHidden.ID, func(meta *model.IssueInternalMeta) {
+		meta.WorkflowStatus = model.IssueWorkflowStatusDone
+		meta.CompletedAt = &twoDaysAgo
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+auth.Token)
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard overview 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp dashboardOverviewResponse
+	decodeRouterEnvelope(t, rec, &resp)
+
+	if len(resp.DailyResolved) != 30 {
+		t.Fatalf("expected 30 daily resolved points, got %d", len(resp.DailyResolved))
+	}
+
+	wantCounts := map[string]int{
+		dayStart.AddDate(0, 0, -5).Format("2006-01-02"): 1,
+		dayStart.AddDate(0, 0, -2).Format("2006-01-02"): 2,
+	}
+	wantProjectCounts := map[string]map[string]int{
+		dayStart.AddDate(0, 0, -5).Format("2006-01-02"): {projectA.ID: 1},
+		dayStart.AddDate(0, 0, -2).Format("2006-01-02"): {projectA.ID: 1, projectB.ID: 1},
+	}
+	for index, point := range resp.DailyResolved {
+		wantDate := dayStart.AddDate(0, 0, -(29 - index)).Format("2006-01-02")
+		if point.Date != wantDate {
+			t.Fatalf("expected daily resolved date %q at index %d, got %+v", wantDate, index, point)
+		}
+		wantCount := wantCounts[wantDate]
+		if point.ResolvedCount != wantCount {
+			t.Fatalf("expected resolved count %d for %s, got %+v", wantCount, wantDate, point)
+		}
+		wantProjects := wantProjectCounts[wantDate]
+		gotProjects := make(map[string]int, len(point.Projects))
+		for _, p := range point.Projects {
+			gotProjects[p.ProjectID] = p.Count
+		}
+		for pid, wantCnt := range wantProjects {
+			if gotProjects[pid] != wantCnt {
+				t.Fatalf("expected project %s resolved count %d for %s, got %+v", pid, wantCnt, wantDate, point.Projects)
+			}
+		}
+	}
+}
+
+func TestRouterDashboardOverview_ReturnsEmptyStateWhenUserHasNoProjects(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "dashboard-empty", "dashboard-empty@example.com", "Password123")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/overview", nil)
+	req.Header.Set("Authorization", "Bearer "+auth.Token)
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected dashboard overview 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp dashboardOverviewResponse
+	decodeRouterEnvelope(t, rec, &resp)
+
+	if len(resp.OpenIssuesByProject) != 0 {
+		t.Fatalf("expected empty project aggregation, got %+v", resp.OpenIssuesByProject)
+	}
+	if len(resp.DailyResolved) != 30 {
+		t.Fatalf("expected empty state to still return 30 daily resolved points, got %d", len(resp.DailyResolved))
+	}
+
+	dayStart := time.Now().UTC().Truncate(24 * time.Hour)
+	for index, point := range resp.DailyResolved {
+		wantDate := dayStart.AddDate(0, 0, -(29 - index)).Format("2006-01-02")
+		if point.Date != wantDate || point.ResolvedCount != 0 {
+			t.Fatalf("expected zero-filled empty state point %q=0 at index %d, got %+v", wantDate, index, point)
+		}
+	}
+}
+
 func TestRouterServesSPAFromWebDist(t *testing.T) {
 	webDistDir := t.TempDir()
 	indexHTML := []byte("<!doctype html><html><body><div id=\"root\"></div></body></html>")
@@ -446,6 +668,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
+	dashboardRepo := repository.NewDashboardRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
@@ -464,6 +687,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
+	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
@@ -475,6 +699,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	authHandler := handler.NewAuthHandler(authService)
 	aiHandler := handler.NewAIHandler(aiService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
+	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService)
@@ -482,7 +707,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
@@ -595,6 +820,29 @@ type routerAuthResult struct {
 	Token  string
 }
 
+type dashboardOverviewResponse struct {
+	OpenIssuesByProject []dashboardProjectOpenIssuePoint `json:"open_issues_by_project"`
+	DailyResolved       []dashboardDailyResolvedPoint    `json:"daily_resolved"`
+}
+
+type dashboardProjectOpenIssuePoint struct {
+	ProjectID      string `json:"project_id"`
+	ProjectName    string `json:"project_name"`
+	OpenIssueCount int    `json:"open_issue_count"`
+}
+
+type dashboardDailyResolvedProjectPoint struct {
+	ProjectID   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+	Count       int    `json:"count"`
+}
+
+type dashboardDailyResolvedPoint struct {
+	Date          string                             `json:"date"`
+	ResolvedCount int                                `json:"resolved_count"`
+	Projects      []dashboardDailyResolvedProjectPoint `json:"projects"`
+}
+
 func registerAndLoginRouterUser(t *testing.T, r *gin.Engine, username, email, password string) routerAuthResult {
 	t.Helper()
 
@@ -631,6 +879,51 @@ func registerAndLoginRouterUser(t *testing.T, r *gin.Engine, username, email, pa
 		UserID: registerResp.User.ID,
 		Token:  resp.Token,
 	}
+}
+
+func createRouterTestIssue(t *testing.T, db *gorm.DB, projectID string, opts ...func(*model.Issue)) *model.Issue {
+	t.Helper()
+
+	now := time.Now().UTC()
+	issue := &model.Issue{
+		ID:             uuid.NewString(),
+		ProjectID:      projectID,
+		Source:         model.IssueSourceGitHub,
+		SequenceNumber: 1,
+		State:          model.IssueStateOpen,
+		Title:          "Crash on launch",
+		Body:           "App crashes",
+		AuthorLogin:    "alice",
+		CreatedAt:      now.Add(-2 * time.Hour),
+		UpdatedAt:      now.Add(-1 * time.Hour),
+	}
+	for _, opt := range opts {
+		opt(issue)
+	}
+	if err := db.Create(issue).Error; err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	return issue
+}
+
+func createRouterTestInternalMeta(t *testing.T, db *gorm.DB, issueID string, opts ...func(*model.IssueInternalMeta)) *model.IssueInternalMeta {
+	t.Helper()
+
+	now := time.Now().UTC()
+	meta := &model.IssueInternalMeta{
+		IssueID:         issueID,
+		WorkflowStatus:  model.IssueWorkflowStatusTodo,
+		UpdatedByUserID: "test-user",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	for _, opt := range opts {
+		opt(meta)
+	}
+	if err := db.Create(meta).Error; err != nil {
+		t.Fatalf("create internal meta: %v", err)
+	}
+	return meta
 }
 
 func newRouterMultipartRequest(t *testing.T, target, fieldName, fileName string, content []byte, extra map[string]string) *http.Request {

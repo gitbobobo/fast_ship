@@ -251,6 +251,29 @@ interface IssueFilterOptions {
   milestones: string[];
 }
 
+interface DashboardOverview {
+  open_issues_by_project: DashboardProjectOpenIssuePoint[];
+  daily_resolved: DashboardDailyResolvedPoint[];
+}
+
+interface DashboardProjectOpenIssuePoint {
+  project_id: string;
+  project_name: string;
+  open_issue_count: number;
+}
+
+interface DashboardDailyResolvedProjectPoint {
+  project_id: string;
+  project_name: string;
+  count: number;
+}
+
+interface DashboardDailyResolvedPoint {
+  date: string;
+  resolved_count: number;
+  projects: DashboardDailyResolvedProjectPoint[];
+}
+
 interface ApiResponse<T> {
   code: number;
   message: string;

@@ -6,7 +6,7 @@ export default function AuthLayout() {
   const token = useAuthStore((s) => s.token);
 
   if (token) {
-    return <Navigate to="/projects" replace />;
+    return <Navigate to="/dashboard" replace />;
   }
 
   return (

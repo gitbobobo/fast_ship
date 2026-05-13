@@ -26,7 +26,7 @@ export default function RegisterPage() {
     try {
       const res = await authApi.register(data);
       setAuth(res.data.token, res.data.refresh_token, res.data.user);
-      navigate("/projects", { replace: true });
+      navigate("/dashboard", { replace: true });
     } catch {
       setError("注册失败，用户名或邮箱可能已存在");
     }
