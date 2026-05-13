@@ -9,6 +9,16 @@
   background-color: transparent !important;
 }
 
+/* Tailwind Preflight 将 ul/ol 的 list-style 重置为 none，
+   而 github-markdown-css 没有恢复它，导致列表圆点/编号缺失 */
+.markdown-body ul {
+  list-style-type: disc;
+}
+
+.markdown-body ol {
+  list-style-type: decimal;
+}
+
 /* 让 react-md-editor 编辑区域占满可用高度，点击任意位置均可聚焦输入 */
 .w-md-editor-area {
   min-height: 100% !important;
