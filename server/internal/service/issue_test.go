@@ -392,6 +392,57 @@ func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
 	}
 }
 
+func TestIssueServiceUpdateInternalMeta_KeepsFirstCompletedAtAcrossReopen(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	firstDone, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusDone)
+	if err != nil {
+		t.Fatalf("mark issue done the first time: %v", err)
+	}
+	if firstDone == nil || firstDone.CompletedAt == nil {
+		t.Fatalf("expected first completion timestamp, got %+v", firstDone)
+	}
+	firstCompletedAt := *firstDone.CompletedAt
+
+	reopened, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusInProgress)
+	if err != nil {
+		t.Fatalf("reopen issue after done: %v", err)
+	}
+	if reopened == nil || reopened.CompletedAt == nil {
+		t.Fatalf("expected reopening to preserve first completion timestamp, got %+v", reopened)
+	}
+	if got := *reopened.CompletedAt; got != firstCompletedAt {
+		t.Fatalf("expected reopening to preserve first completion timestamp %q, got %q", firstCompletedAt, got)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	doneAgain, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusDone)
+	if err != nil {
+		t.Fatalf("mark issue done the second time: %v", err)
+	}
+	if doneAgain == nil || doneAgain.CompletedAt == nil {
+		t.Fatalf("expected second done to keep completion timestamp, got %+v", doneAgain)
+	}
+	if got := *doneAgain.CompletedAt; got != firstCompletedAt {
+		t.Fatalf("expected second done to keep original completion timestamp %q, got %q", firstCompletedAt, got)
+	}
+
+	var stored model.IssueInternalMeta
+	if err := svc.db.Where("issue_id = ?", issue.ID).First(&stored).Error; err != nil {
+		t.Fatalf("load stored internal meta: %v", err)
+	}
+	if stored.CompletedAt == nil {
+		t.Fatalf("expected stored completion timestamp to remain set")
+	}
+	if got := stored.CompletedAt.UTC().Format(time.RFC3339); got != firstCompletedAt {
+		t.Fatalf("expected stored completion timestamp %q, got %q", firstCompletedAt, got)
+	}
+}
+
 func TestIssueServiceReplaceChecklist_UpdatesProgressSnapshot(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -1003,13 +1054,13 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubTitleBack(t *testing.T) {
 	fake := &fakeIssueGitHubClient{
 		updatedIssue: &ghclient.Issue{
 			Issue: gh.Issue{
-				ID:          int64Ptr(1001),
-				NodeID:      stringPtr("I_kw_test"),
-				Number:      intPtr(42),
-				State:       stringPtr("open"),
-				Title:       stringPtr("修复崩溃并补充测试"),
-				Body:        stringPtr("App crashes"),
-				HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
+				ID:      int64Ptr(1001),
+				NodeID:  stringPtr("I_kw_test"),
+				Number:  intPtr(42),
+				State:   stringPtr("open"),
+				Title:   stringPtr("修复崩溃并补充测试"),
+				Body:    stringPtr("App crashes"),
+				HTMLURL: stringPtr("https://github.com/owner/repo/issues/42"),
 				User: &gh.User{
 					Login:     stringPtr("alice"),
 					AvatarURL: stringPtr("https://avatars.example/alice.png"),
@@ -1084,13 +1135,13 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubBodyBack(t *testing.T) {
 	fake := &fakeIssueGitHubClient{
 		updatedIssue: &ghclient.Issue{
 			Issue: gh.Issue{
-				ID:          int64Ptr(1001),
-				NodeID:      stringPtr("I_kw_test"),
-				Number:      intPtr(42),
-				State:       stringPtr("open"),
-				Title:       stringPtr("Test Issue"),
-				Body:        stringPtr("new body content"),
-				HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
+				ID:      int64Ptr(1001),
+				NodeID:  stringPtr("I_kw_test"),
+				Number:  intPtr(42),
+				State:   stringPtr("open"),
+				Title:   stringPtr("Test Issue"),
+				Body:    stringPtr("new body content"),
+				HTMLURL: stringPtr("https://github.com/owner/repo/issues/42"),
 				User: &gh.User{
 					Login:     stringPtr("alice"),
 					AvatarURL: stringPtr("https://avatars.example/alice.png"),
@@ -1579,7 +1630,6 @@ func TestIssueServiceGetFilterOptions_IncludesInternalLabels(t *testing.T) {
 		t.Fatalf("expected 'bug' in filter options labels, got %+v", opts.Labels)
 	}
 }
-
 
 func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *testing.T) {
 	svc := setupTestServices(t)

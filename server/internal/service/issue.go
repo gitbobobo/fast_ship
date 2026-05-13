@@ -2655,21 +2655,23 @@ func applyExplicitWorkflowStatus(meta *model.IssueInternalMeta, workflowStatus m
 
 	switch workflowStatus {
 	case "", model.IssueWorkflowStatusTodo:
-		meta.StartedAt = nil
-		meta.CompletedAt = nil
+		if meta.CompletedAt == nil {
+			meta.StartedAt = nil
+		}
 	case model.IssueWorkflowStatusInProgress:
 		if meta.StartedAt == nil {
 			value := now
 			meta.StartedAt = &value
 		}
-		meta.CompletedAt = nil
 	case model.IssueWorkflowStatusDone:
 		if meta.StartedAt == nil {
 			value := now
 			meta.StartedAt = &value
 		}
-		value := now
-		meta.CompletedAt = &value
+		if meta.CompletedAt == nil {
+			value := now
+			meta.CompletedAt = &value
+		}
 	}
 }
 
