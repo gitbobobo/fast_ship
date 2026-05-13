@@ -1557,43 +1557,8 @@ export default function IssueDetailPage() {
 
           {/* Sidebar */}
           <aside className="space-y-4 lg:sticky lg:top-20 lg:self-start">
-            {/* 创建者与元信息 */}
             <Card>
               <CardContent className="space-y-4 p-4">
-                {/* 创建者 */}
-                <div className="flex items-center gap-3">
-                  <Avatar className="h-10 w-10">
-                    <AvatarImage src={toGitHubMediaProxyUrl(issue.author.avatar_url, token)} alt={issue.author.login} />
-                    <AvatarFallback>{getInitials(issue.author.login)}</AvatarFallback>
-                  </Avatar>
-                  <div className="min-w-0">
-                    <p className="text-xs text-muted-foreground">创建者</p>
-                    <p className="truncate text-sm font-semibold">@{issue.author.login}</p>
-                  </div>
-                </div>
-
-                <Separator />
-
-                {/* 时间 */}
-                <div className="space-y-1.5 text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-muted-foreground">创建于</span>
-                    <span className="font-medium">{formatDate(issue.created_at)}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-muted-foreground">更新于</span>
-                    <span className="font-medium">{formatRelativeTime(issue.updated_at)}</span>
-                  </div>
-                  {issue.github?.synced_at && (
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-muted-foreground">同步于</span>
-                      <span className="font-medium">{formatRelativeTime(issue.github.synced_at)}</span>
-                    </div>
-                  )}
-                </div>
-
-                <Separator />
-
                 {/* 内部状态 */}
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm text-muted-foreground">内部状态</span>
