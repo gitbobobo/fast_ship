@@ -226,6 +226,8 @@ type fakeCreateCommentCall struct {
 
 type fakeUpdateIssueCall struct {
 	IssueNumber int
+	Title       string
+	Body        string
 	State       string
 	StateReason string
 	Labels      []string
@@ -261,6 +263,12 @@ func (f *fakeIssueGitHubClient) CreateIssueComment(_ context.Context, issueNumbe
 
 func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error) {
 	call := fakeUpdateIssueCall{IssueNumber: issueNumber}
+	if req.Title != nil {
+		call.Title = *req.Title
+	}
+	if req.Body != nil {
+		call.Body = *req.Body
+	}
 	if req.State != nil {
 		call.State = *req.State
 	}
@@ -980,6 +988,145 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 	}
 	if events[0].EventType != "closed" || events[0].Summary != "关闭了问题" {
 		t.Fatalf("unexpected timeline event payload: %+v", events[0])
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_WritesGitHubTitleBack(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	updatedAt := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	fake := &fakeIssueGitHubClient{
+		updatedIssue: &ghclient.Issue{
+			Issue: gh.Issue{
+				ID:          int64Ptr(1001),
+				NodeID:      stringPtr("I_kw_test"),
+				Number:      intPtr(42),
+				State:       stringPtr("open"),
+				Title:       stringPtr("修复崩溃并补充测试"),
+				Body:        stringPtr("App crashes"),
+				HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
+				User: &gh.User{
+					Login:     stringPtr("alice"),
+					AvatarURL: stringPtr("https://avatars.example/alice.png"),
+				},
+				CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+				UpdatedAt: &gh.Timestamp{Time: updatedAt},
+			},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	title := "修复崩溃并补充测试"
+	updated, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		Title: &title,
+	})
+	if err != nil {
+		t.Fatalf("update github issue title: %v", err)
+	}
+
+	if len(fake.updateIssueCalls) != 1 {
+		t.Fatalf("expected one github update call, got %d", len(fake.updateIssueCalls))
+	}
+	call := fake.updateIssueCalls[0]
+	if call.IssueNumber != 42 || call.Title != "修复崩溃并补充测试" {
+		t.Fatalf("unexpected update call: %+v", call)
+	}
+	if updated.Title != "修复崩溃并补充测试" {
+		t.Fatalf("unexpected updated issue title: %q", updated.Title)
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_RejectsEmptyTitle(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	for _, title := range []string{"", "   "} {
+		t.Run(fmt.Sprintf("title=%q", title), func(t *testing.T) {
+			_, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+				Title: &title,
+			})
+			if err == nil {
+				t.Fatal("expected error for empty title, got nil")
+			}
+			if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
+				t.Fatalf("expected ErrInvalidParams, got %v", err)
+			}
+		})
+	}
+}
+
+func TestIssueServiceUpdateInternalIssue_WritesGitHubBodyBack(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	updatedAt := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	fake := &fakeIssueGitHubClient{
+		updatedIssue: &ghclient.Issue{
+			Issue: gh.Issue{
+				ID:          int64Ptr(1001),
+				NodeID:      stringPtr("I_kw_test"),
+				Number:      intPtr(42),
+				State:       stringPtr("open"),
+				Title:       stringPtr("Test Issue"),
+				Body:        stringPtr("new body content"),
+				HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
+				User: &gh.User{
+					Login:     stringPtr("alice"),
+					AvatarURL: stringPtr("https://avatars.example/alice.png"),
+				},
+				CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+				UpdatedAt: &gh.Timestamp{Time: updatedAt},
+			},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" || owner != "owner" || repo != "repo" {
+			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
+		}
+		return fake
+	}
+
+	body := "new body content"
+	updated, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		Body: &body,
+	})
+	if err != nil {
+		t.Fatalf("update github issue body: %v", err)
+	}
+
+	if len(fake.updateIssueCalls) != 1 {
+		t.Fatalf("expected one github update call, got %d", len(fake.updateIssueCalls))
+	}
+	call := fake.updateIssueCalls[0]
+	if call.IssueNumber != 42 || call.Body != "new body content" {
+		t.Fatalf("unexpected update call: %+v", call)
+	}
+	if updated.Body != "new body content" {
+		t.Fatalf("unexpected updated issue body: %q", updated.Body)
 	}
 }
 

@@ -49,6 +49,8 @@ func (c *IssueComment) GetBodyHTML() string {
 }
 
 type UpdateIssueRequest struct {
+	Title       *string   `json:"title,omitempty"`
+	Body        *string   `json:"body,omitempty"`
 	State       *string   `json:"state,omitempty"`
 	StateReason *string   `json:"state_reason,omitempty"`
 	Labels      *[]string `json:"labels,omitempty"`

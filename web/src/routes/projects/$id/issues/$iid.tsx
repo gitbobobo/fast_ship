@@ -432,6 +432,8 @@ export default function IssueDetailPage() {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
   const [commentDraft, setCommentDraft] = useState("");
+  const [isTitleEditing, setIsTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
   const [isChecklistEditing, setIsChecklistEditing] = useState(false);
   const [checklistDraft, setChecklistDraft] = useState<ChecklistDraftItem[]>([]);
   const [labelDraft, setLabelDraft] = useState<string[] | null>(null);
@@ -1013,6 +1015,36 @@ export default function IssueDetailPage() {
     }
   };
 
+  const handleStartTitleEdit = () => {
+    setTitleDraft(issue?.title ?? "");
+    setIsTitleEditing(true);
+  };
+
+  const handleCancelTitleEdit = () => {
+    setIsTitleEditing(false);
+    setTitleDraft("");
+  };
+
+  const handleSaveTitle = async () => {
+    if (!issue) return;
+    const trimmed = titleDraft.trim();
+    if (!trimmed) {
+      toast.error("标题不能为空");
+      return;
+    }
+    if (trimmed === issue.title) {
+      setIsTitleEditing(false);
+      return;
+    }
+    try {
+      await updateIssue.mutateAsync({ title: trimmed });
+      toast.success("标题已更新");
+      setIsTitleEditing(false);
+    } catch {
+      toast.error("更新标题失败");
+    }
+  };
+
   const handleWorkflowStatusChange = async (value: string) => {
     const status = value === "unset" ? "" : (value as IssueWorkflowStatus);
     try {
@@ -1262,9 +1294,62 @@ export default function IssueDetailPage() {
                   ))}
                 </div>
 
-                <h1 className="mt-4 text-xl font-semibold leading-snug text-foreground md:text-2xl">
-                  {issue.reference} {issue.title}
-                </h1>
+                <div className="mt-4 flex items-start gap-3">
+                  {isTitleEditing ? (
+                    <>
+                      <Input
+                        value={titleDraft}
+                        onChange={(e) => setTitleDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void handleSaveTitle();
+                          } else if (e.key === "Escape") {
+                            handleCancelTitleEdit();
+                          }
+                        }}
+                        className="flex-1 text-base font-semibold md:text-lg"
+                        autoFocus
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleCancelTitleEdit}
+                          disabled={updateIssue.isPending}
+                        >
+                          取消
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={() => void handleSaveTitle()}
+                          disabled={updateIssue.isPending}
+                        >
+                          {updateIssue.isPending ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : null}
+                          保存
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <h1 className="flex-1 text-xl font-semibold leading-snug text-foreground md:text-2xl">
+                        {issue.reference} {issue.title}
+                      </h1>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={handleStartTitleEdit}
+                        aria-label="编辑标题"
+                      >
+                        <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                        编辑
+                      </Button>
+                    </>
+                  )}
+                </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
                   <div className="flex items-center gap-2">

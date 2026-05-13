@@ -577,10 +577,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		return nil, errs.ErrNotOwner
 	}
 	if issue.Source == model.IssueSourceGitHub {
-		if req.Title != nil || req.Body != nil {
-			return nil, errs.ErrIssueReadOnly
-		}
-		if req.State == nil && req.Labels == nil {
+		if req.Title == nil && req.Body == nil && req.State == nil && req.Labels == nil {
 			return nil, errs.ErrIssueReadOnly
 		}
 		if issue.GitHubMeta == nil {
@@ -622,6 +619,16 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 
 		client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 		updateReq := ghclient.UpdateIssueRequest{}
+		if req.Title != nil {
+			title := strings.TrimSpace(*req.Title)
+			if title == "" {
+				return nil, errs.ErrInvalidParams
+			}
+			updateReq.Title = &title
+		}
+		if req.Body != nil {
+			updateReq.Body = req.Body
+		}
 		if req.State != nil {
 			state := string(*req.State)
 			updateReq.State = &state
