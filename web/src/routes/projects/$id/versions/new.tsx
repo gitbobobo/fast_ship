@@ -154,7 +154,7 @@ export default function NewVersionPage() {
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => navigate(`/projects/${id}`)}
+                  onClick={() => navigate("/projects")}
                 >
                   取消
                 </Button>

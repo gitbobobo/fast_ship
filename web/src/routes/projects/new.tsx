@@ -61,7 +61,7 @@ export default function NewProjectPage() {
       }
       const res = await createProject.mutateAsync(payload);
       toast.success("项目创建成功");
-      navigate(`/projects/${res.data.id}`);
+      navigate(`/issues?project=${res.data.id}`);
     } catch {
       toast.error("创建失败，请检查输入");
     }

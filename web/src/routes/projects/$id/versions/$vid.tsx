@@ -271,7 +271,7 @@ export default function VersionDetailPage() {
     try {
       await deleteVersion.mutateAsync(vid!);
       toast.success("版本已删除");
-      navigate(`/projects/${id}`, { replace: true });
+      navigate("/projects", { replace: true });
     } catch {
       toast.error("删除失败");
     }

@@ -68,7 +68,7 @@ export default function EditProjectPage() {
       }
       await updateProject.mutateAsync(payload);
       toast.success("项目已更新");
-      navigate(`/projects/${id}`);
+      navigate("/projects");
     } catch {
       toast.error("更新失败，请检查输入");
     }
@@ -191,7 +191,7 @@ export default function EditProjectPage() {
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => navigate(`/projects/${id}`)}
+                  onClick={() => navigate("/projects")}
                 >
                   取消
                 </Button>
