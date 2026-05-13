@@ -100,7 +100,6 @@ function HorizontalBarChart({
   const maxValue = Math.max(...points.map((p) => p.value), 0);
   const chartMax = Math.max(maxValue, 1);
   const barHeight = 24;
-  const gap = 14;
   const labelWidth = 96;
   const maxBarWidth = 360;
   const isEmpty = points.length === 0 || maxValue === 0;
@@ -109,7 +108,6 @@ function HorizontalBarChart({
     <div className="space-y-1">
       {points.map((point, index) => {
         const ratio = point.value / chartMax;
-        const barWidth = Math.max(ratio * maxBarWidth, 4);
         const isHovered = hoveredIndex === index;
         const isBarEmpty = chartMax <= 1 && point.value === 0;
 
@@ -338,7 +336,7 @@ function StackedAreaChart({
         onMouseLeave={handleMouseLeave}
       >
         <defs>
-          {seriesMeta.map((meta, i) => (
+          {seriesMeta.map((meta) => (
             <linearGradient
               key={meta.id}
               id={`grad-${meta.id}`}
