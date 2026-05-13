@@ -49,6 +49,8 @@ type gitHubIssueClient interface {
 	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*ghclient.IssueComment, error)
 	UpdateIssue(ctx context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error)
 	CreateIssue(ctx context.Context, title, body string) (*ghclient.Issue, error)
+	GetDefaultBranch(ctx context.Context) (string, error)
+	UploadRepositoryFile(ctx context.Context, filePath string, content []byte, branch string) (string, error)
 }
 
 type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
@@ -463,9 +465,23 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 	}
 
 	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
-	createdIssue, err := client.CreateIssue(context.Background(), title, req.Body)
+
+	ctx := context.Background()
+	body, referencedAssetIDs, err := s.replaceIssueAssetURLsWithGitHubRawURLs(ctx, client, projectID, req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	createdIssue, err := client.CreateIssue(ctx, title, body)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("创建 GitHub Issue 失败: %v", err))
+	}
+
+	// 清理已上传到 GitHub 的 draft assets
+	if len(referencedAssetIDs) > 0 {
+		if err := s.deleteDraftIssueAssets(projectID, referencedAssetIDs); err != nil {
+			s.logger.Warn("delete draft assets after github issue creation failed", zap.Error(err))
+		}
 	}
 
 	stored, err := s.upsertGitHubIssue(projectID, createdIssue)
@@ -473,7 +489,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 		return nil, err
 	}
 
-	if _, err := s.syncTimeline(context.Background(), client, stored, createdIssue.GetNumber()); err != nil {
+	if _, err := s.syncTimeline(ctx, client, stored, createdIssue.GetNumber()); err != nil {
 		s.logger.Warn("sync timeline after creating github issue failed", zap.String("issue_id", stored.ID), zap.Error(err))
 	}
 
@@ -484,6 +500,59 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 
 	resp := s.toIssueResponse(*stored, meta, nil, nil)
 	return &resp, nil
+}
+
+func (s *IssueService) replaceIssueAssetURLsWithGitHubRawURLs(ctx context.Context, client gitHubIssueClient, projectID, body string) (string, []string, error) {
+	referencedIDs := extractIssueAssetIDs(body)
+	if len(referencedIDs) == 0 {
+		return body, nil, nil
+	}
+
+	branch, err := client.GetDefaultBranch(ctx)
+	if err != nil {
+		return "", nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取仓库默认分支失败: %v", err))
+	}
+
+	replacements := make(map[string]string)
+	for assetID := range referencedIDs {
+		draftAsset, err := s.draftAssetRepo.FindByID(assetID)
+		if err != nil {
+			return "", nil, errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf("引用的图片资源 %s 不存在", assetID))
+		}
+
+		reader, err := s.storage.Get(draftAsset.FilePath)
+		if err != nil {
+			return "", nil, errs.New(errs.ErrInternal.Code, fmt.Sprintf("读取图片资源 %s 失败", assetID))
+		}
+		content, err := io.ReadAll(reader)
+		_ = reader.Close()
+		if err != nil {
+			return "", nil, errs.New(errs.ErrInternal.Code, fmt.Sprintf("读取图片资源 %s 失败", assetID))
+		}
+
+		safeFileName := filepath.Base(draftAsset.FileName)
+		filePath := fmt.Sprintf(".fast-ship/issue-assets/%s/%s", assetID, safeFileName)
+		rawURL, err := client.UploadRepositoryFile(ctx, filePath, content, branch)
+		if err != nil {
+			return "", nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("上传图片到 GitHub 失败: %v", err))
+		}
+
+		replacements[assetID] = rawURL
+	}
+
+	result := issueAssetContentPattern.ReplaceAllStringFunc(body, func(match string) string {
+		id := resolveIssueAssetIDFromURL(match)
+		if rawURL, ok := replacements[id]; ok {
+			return rawURL
+		}
+		return match
+	})
+
+	ids := make([]string, 0, len(replacements))
+	for id := range replacements {
+		ids = append(ids, id)
+	}
+	return result, ids, nil
 }
 
 func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error) {

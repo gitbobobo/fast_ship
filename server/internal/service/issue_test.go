@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -208,6 +209,9 @@ type fakeIssueGitHubClient struct {
 	createIssueCalls   []fakeCreateIssueCall
 	createCommentCalls []fakeCreateCommentCall
 	updateIssueCalls   []fakeUpdateIssueCall
+	defaultBranch      string
+	defaultBranchErr   error
+	uploadFileErr      error
 }
 
 type fakeCreateIssueCall struct {
@@ -276,6 +280,23 @@ func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body strin
 		Body:  body,
 	})
 	return f.createdIssue, f.createIssueErr
+}
+
+func (f *fakeIssueGitHubClient) GetDefaultBranch(context.Context) (string, error) {
+	if f.defaultBranchErr != nil {
+		return "", f.defaultBranchErr
+	}
+	if f.defaultBranch != "" {
+		return f.defaultBranch, nil
+	}
+	return "main", nil
+}
+
+func (f *fakeIssueGitHubClient) UploadRepositoryFile(_ context.Context, filePath string, content []byte, branch string) (string, error) {
+	if f.uploadFileErr != nil {
+		return "", f.uploadFileErr
+	}
+	return fmt.Sprintf("https://raw.githubusercontent.com/owner/repo/%s/%s", branch, filePath), nil
 }
 
 func intPtr(v int) *int {
@@ -1471,6 +1492,212 @@ func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *test
 	}
 	if fake.createIssueCalls[0].Title != "GitHub 新建问题" || fake.createIssueCalls[0].Body != "GitHub 问题描述" {
 		t.Fatalf("unexpected create issue call payload: %+v", fake.createIssueCalls[0])
+	}
+}
+
+func TestIssueServiceCreateGitHubIssue_ReplacesDraftAssetURLsWithGitHubRawURLs(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
+		project.ID,
+		user.ID,
+		"screenshot.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload draft issue asset: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		createdIssue: &ghclient.Issue{
+			Issue: gh.Issue{
+				ID:        gh.Int64(999),
+				Number:    intPtr(88),
+				Title:     gh.String("GitHub 带图片的问题"),
+				Body:      gh.String("描述"),
+				HTMLURL:   gh.String("https://github.com/owner/repo/issues/88"),
+				State:     gh.String("open"),
+				CreatedAt: &gh.Timestamp{Time: time.Now().UTC()},
+				UpdatedAt: &gh.Timestamp{Time: time.Now().UTC()},
+				User: &gh.User{
+					Login:     gh.String("author"),
+					AvatarURL: gh.String("https://avatars.githubusercontent.com/u/1"),
+				},
+				Reactions: &gh.Reactions{},
+			},
+			BodyHTML: stringPtr("<p>描述</p>"),
+		},
+	}
+
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "gh-token" {
+			t.Fatalf("unexpected token: %q", token)
+		}
+		return fake
+	}
+
+	bodyWithAsset := fmt.Sprintf("问题描述\n\n%s", draftAsset.Markdown)
+	created, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "GitHub 带图片的问题",
+		Body:  bodyWithAsset,
+	})
+	if err != nil {
+		t.Fatalf("create github issue: %v", err)
+	}
+
+	if created.Title != "GitHub 带图片的问题" {
+		t.Fatalf("expected title 'GitHub 带图片的问题', got %+v", created.Title)
+	}
+	if len(fake.createIssueCalls) != 1 {
+		t.Fatalf("expected one create issue call, got %d", len(fake.createIssueCalls))
+	}
+
+	// 验证 body 中的本地 URL 已被替换为 GitHub raw URL
+	callBody := fake.createIssueCalls[0].Body
+	if strings.Contains(callBody, "/api/issues/assets/") {
+		t.Fatalf("expected local asset URL to be replaced, got body: %s", callBody)
+	}
+	expectedRawURL := fmt.Sprintf("https://raw.githubusercontent.com/owner/repo/main/.fast-ship/issue-assets/%s/screenshot.png", draftAsset.ID)
+	if !strings.Contains(callBody, expectedRawURL) {
+		t.Fatalf("expected body to contain raw URL %q, got body: %s", expectedRawURL, callBody)
+	}
+
+	// 验证 draft asset 已被删除
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	if err != nil {
+		t.Fatalf("list draft assets: %v", err)
+	}
+	if len(draftAssets) != 0 {
+		t.Fatalf("expected referenced draft asset to be removed after github issue creation, got %d", len(draftAssets))
+	}
+}
+
+func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenGetDefaultBranchFails(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
+		project.ID,
+		user.ID,
+		"screenshot.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload draft issue asset: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		defaultBranchErr: fmt.Errorf("branch not found"),
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	bodyWithAsset := fmt.Sprintf("问题描述\n\n%s", draftAsset.Markdown)
+	_, err = svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "GitHub 带图片的问题",
+		Body:  bodyWithAsset,
+	})
+	if err == nil {
+		t.Fatal("expected error when get default branch fails, got nil")
+	}
+	if len(fake.createIssueCalls) != 0 {
+		t.Fatalf("expected no create issue call, got %d", len(fake.createIssueCalls))
+	}
+
+	// 验证 draft asset 未被删除（因为 Issue 创建失败）
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	if err != nil {
+		t.Fatalf("list draft assets: %v", err)
+	}
+	if len(draftAssets) != 1 {
+		t.Fatalf("expected draft asset to remain after failure, got %d", len(draftAssets))
+	}
+}
+
+func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenUploadRepositoryFileFails(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
+		project.ID,
+		user.ID,
+		"screenshot.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload draft issue asset: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		uploadFileErr: fmt.Errorf("upload rejected"),
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	bodyWithAsset := fmt.Sprintf("问题描述\n\n%s", draftAsset.Markdown)
+	_, err = svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "GitHub 带图片的问题",
+		Body:  bodyWithAsset,
+	})
+	if err == nil {
+		t.Fatal("expected error when upload repository file fails, got nil")
+	}
+	if len(fake.createIssueCalls) != 0 {
+		t.Fatalf("expected no create issue call, got %d", len(fake.createIssueCalls))
+	}
+
+	// 验证 draft asset 未被删除
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	if err != nil {
+		t.Fatalf("list draft assets: %v", err)
+	}
+	if len(draftAssets) != 1 {
+		t.Fatalf("expected draft asset to remain after failure, got %d", len(draftAssets))
+	}
+}
+
+func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenReferencedDraftAssetNotFound(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+
+	fake := &fakeIssueGitHubClient{}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	// body 中引用了一个不存在的 draft asset（使用符合 UUID 格式的假 ID，否则正则无法提取）
+	bodyWithMissingAsset := "问题描述\n\n![image](/api/issues/assets/00000000-0000-0000-0000-000000000000/content)"
+	_, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
+		Title: "GitHub 带图片的问题",
+		Body:  bodyWithMissingAsset,
+	})
+	if err == nil {
+		t.Fatal("expected error when referenced draft asset not found, got nil")
+	}
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("expected ErrInvalidParams, got %v", err)
+	}
+	if len(fake.createIssueCalls) != 0 {
+		t.Fatalf("expected no create issue call, got %d", len(fake.createIssueCalls))
 	}
 }
 
