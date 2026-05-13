@@ -79,6 +79,7 @@ import {
   useReplaceIssueChecklist,
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
+import { useProject } from "@/lib/hooks/use-projects";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import {
   ISSUE_WORKFLOW_STATUS_LABELS,
@@ -459,6 +460,7 @@ export default function IssueDetailPage() {
   }, []);
 
   const { data: issue, isLoading } = useIssue(iid!);
+  const { data: project } = useProject(id!);
   const { data: repoLabels } = useIssueRepoLabels(id!);
   const isInternalIssue = issue?.source === "internal";
   const updateIssue = useUpdateIssue(iid!, id);
@@ -1127,7 +1129,7 @@ export default function IssueDetailPage() {
 
   return (
     <>
-      <Header title={issue.reference} />
+      <Header title={`${project?.name ?? ""}${project ? "·" : ""}${issue.reference}`} />
       <div className="mx-auto max-w-7xl p-4 md:p-6">
         {/* Top Navigation Bar */}
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
