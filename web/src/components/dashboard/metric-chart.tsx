@@ -192,7 +192,7 @@ function StackedAreaChart({
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number; containerWidth: number } | null>(null);
 
   // Extract all unique series IDs and names
   const seriesMeta = useMemo(() => {
@@ -314,7 +314,7 @@ function StackedAreaChart({
     }
 
     setHoveredIndex(nearestIndex);
-    setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    setTooltipPos({ x: e.clientX - rect.left, y: e.clientY - rect.top, containerWidth: rect.width });
   };
 
   const handleMouseLeave = () => {
@@ -429,7 +429,7 @@ function StackedAreaChart({
         <div
           className="pointer-events-none absolute z-50 min-w-[160px] rounded-lg border bg-popover px-3 py-2 shadow-lg"
           style={{
-            left: Math.min(tooltipPos.x + 16, (svgRef.current?.clientWidth ?? 400) - 170),
+            left: Math.min(tooltipPos.x + 16, (tooltipPos.containerWidth ?? 400) - 170),
             top: Math.max(tooltipPos.y - 10, 0),
           }}
         >
