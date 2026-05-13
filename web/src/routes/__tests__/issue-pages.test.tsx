@@ -3,14 +3,12 @@ import userEvent from "@testing-library/user-event";
 import * as ReactRouter from "react-router";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { vi } from "vitest";
-import ProjectDetailPage from "@/routes/projects/$id/index";
 import EditInternalIssuePage from "@/routes/projects/$id/issues/$iid/edit";
 import IssueDetailPage from "@/routes/projects/$id/issues/$iid";
 import NewInternalIssuePage from "@/routes/projects/$id/issues/new";
 import IssuesPage from "@/routes/issues/index";
 import { renderWithRoute } from "@/test/render";
-import { useDeleteProject, useProject, useProjects } from "@/lib/hooks/use-projects";
-import { useVersions } from "@/lib/hooks/use-versions";
+import { useProject, useProjects } from "@/lib/hooks/use-projects";
 import {
   useIssues,
   useIssue,
@@ -133,11 +131,6 @@ vi.mock("sonner", () => ({
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProjects: vi.fn(),
   useProject: vi.fn(),
-  useDeleteProject: vi.fn(),
-}));
-
-vi.mock("@/lib/hooks/use-versions", () => ({
-  useVersions: vi.fn(),
 }));
 
 vi.mock("@/lib/hooks/use-issues", () => ({
@@ -372,9 +365,26 @@ describe("Issue pages", () => {
       value: openWindow,
     });
 
-    vi.mocked(useDeleteProject).mockReturnValue({
-      mutateAsync: vi.fn(),
-    } as unknown as ReturnType<typeof useDeleteProject>);
+    vi.mocked(useProject).mockReturnValue({
+      data: {
+        id: "proj-1",
+        user_id: "user-1",
+        name: "Alpha App",
+        description: "Release automation",
+        github_owner: "acme",
+        github_repo: "alpha",
+        issue_sync: {
+          status: "completed",
+          last_synced_at: "2026-04-12T10:05:00Z",
+          last_successful_sync_at: "2026-04-12T10:05:00Z",
+          last_issue_updated_at: "2026-04-12T10:00:00Z",
+          last_error: "",
+        },
+        created_at: "2026-04-10T10:00:00Z",
+        updated_at: "2026-04-10T10:00:00Z",
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProject>);
 
     vi.mocked(useProjects).mockReturnValue({
       data: {
@@ -494,80 +504,6 @@ describe("Issue pages", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
-  });
-
-  it("renders issues in the project detail page", async () => {
-    vi.mocked(useProject).mockReturnValue({
-      data: {
-        id: "proj-1",
-        user_id: "user-1",
-        name: "Alpha App",
-        description: "Release automation",
-        github_owner: "acme",
-        github_repo: "alpha",
-        issue_sync: {
-          status: "completed",
-          last_synced_at: "2026-04-12T10:05:00Z",
-          last_successful_sync_at: "2026-04-12T10:05:00Z",
-          last_issue_updated_at: "2026-04-12T10:00:00Z",
-          last_error: "",
-        },
-        created_at: "2026-04-10T10:00:00Z",
-        updated_at: "2026-04-10T10:00:00Z",
-      },
-      isLoading: false,
-    } as unknown as ReturnType<typeof useProject>);
-
-    vi.mocked(useVersions).mockReturnValue({
-      data: { items: [], total: 0, page: 1, page_size: 20 },
-      isLoading: false,
-    } as unknown as ReturnType<typeof useVersions>);
-
-    vi.mocked(useIssues).mockReturnValue({
-      data: {
-        items: [
-          buildGitHubIssue(
-            {
-              id: "issue-1",
-              body: "App crashes",
-              internal_meta: {
-                workflow_status: "done",
-                progress_percent: 100,
-                checklist_total: 2,
-                checklist_done: 2,
-                started_at: "2026-04-11T10:00:00Z",
-                completed_at: "2026-04-12T09:30:00Z",
-                updated_at: "2026-04-12T09:30:00Z",
-              },
-            },
-            {
-              labels: [{ name: "bug", color: "d73a4a", description: "" }],
-              comments_count: 3,
-            },
-          ),
-        ],
-        total: 1,
-        page: 1,
-        page_size: 20,
-      },
-      isLoading: false,
-    } as unknown as ReturnType<typeof useIssues>);
-
-    renderWithRoute(<ProjectDetailPage />, {
-      path: "/projects/:id",
-      initialEntry: "/projects/proj-1",
-    });
-
-    expect(screen.getByText("问题")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "查看全部问题" })).toHaveAttribute(
-      "href",
-      "/issues?project=proj-1",
-    );
-    fireEvent.click(screen.getByRole("button", { name: "同步 GitHub Issues" }));
-    expect(screen.getByText("同步完成")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(writeText).not.toHaveBeenCalled(),
-    );
   });
 
   it("renders issue details with unified timeline", async () => {

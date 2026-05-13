@@ -1,14 +1,28 @@
 import { fireEvent, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import ProjectsPage from "@/routes/projects/index";
 import { renderWithRoute } from "@/test/render";
-import { useProjects } from "@/lib/hooks/use-projects";
+import { useProjects, useDeleteProject } from "@/lib/hooks/use-projects";
+
+const { mockNavigate } = vi.hoisted(() => ({
+  mockNavigate: vi.fn(),
+}));
+
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+  };
+});
 
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProjects: vi.fn(),
+  useDeleteProject: vi.fn(),
 }));
 
-describe('ProjectsPage', () => {
+describe("ProjectsPage", () => {
   beforeEach(() => {
     vi.mocked(useProjects).mockReturnValue({
       data: {
@@ -47,6 +61,10 @@ describe('ProjectsPage', () => {
       },
       isLoading: false,
     } as unknown as ReturnType<typeof useProjects>);
+
+    vi.mocked(useDeleteProject).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as unknown as ReturnType<typeof useDeleteProject>);
   });
 
   afterEach(() => {
@@ -71,5 +89,52 @@ describe('ProjectsPage', () => {
 
     expect(screen.getByText("Beta Console")).toBeInTheDocument();
     expect(screen.queryByText("Alpha App")).not.toBeInTheDocument();
+  });
+
+  it("navigates to issue list when clicking a project card", async () => {
+    renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+    const card = screen.getByText("Alpha App").closest("[class*='cursor-pointer']") as HTMLElement;
+    expect(card).toBeTruthy();
+    card.click();
+
+    expect(mockNavigate).toHaveBeenCalledWith("/issues?project=p1");
+  });
+
+  it("opens dropdown menu and navigates to edit", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+    const menuButtons = screen.getAllByLabelText("更多操作");
+    expect(menuButtons.length).toBe(2);
+
+    await user.click(menuButtons[0]);
+
+    const editItem = screen.getByRole("menuitem", { name: /编辑/ });
+    expect(editItem).toBeInTheDocument();
+
+    await user.click(editItem);
+    expect(mockNavigate).toHaveBeenCalledWith("/projects/p1/edit");
+  });
+
+  it("opens delete confirmation and deletes project", async () => {
+    const user = userEvent.setup();
+    const deleteMutateAsync = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(useDeleteProject).mockReturnValue({
+      mutateAsync: deleteMutateAsync,
+    } as unknown as ReturnType<typeof useDeleteProject>);
+
+    renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+    const menuButtons = screen.getAllByLabelText("更多操作");
+    await user.click(menuButtons[0]);
+
+    const deleteItem = screen.getByRole("menuitem", { name: /删除/ });
+    await user.click(deleteItem);
+
+    expect(screen.getByText("确认删除项目?")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    expect(deleteMutateAsync).toHaveBeenCalledWith("p1");
   });
 });

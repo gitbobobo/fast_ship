@@ -132,7 +132,7 @@ describe("ProjectAndVersionForms", () => {
         github_token: "ghp_secret",
       }),
     );
-    expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-99");
+    expect(mockNavigate).toHaveBeenCalledWith("/issues?project=proj-99");
   });
 
   it("submits create project form with existing project token", async () => {
@@ -185,7 +185,7 @@ describe("ProjectAndVersionForms", () => {
         source_project_id: "proj-existing",
       }),
     );
-    expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-99");
+    expect(mockNavigate).toHaveBeenCalledWith("/issues?project=proj-99");
   });
 
   it("submits edit project form without sending token when left empty", async () => {
@@ -215,7 +215,7 @@ describe("ProjectAndVersionForms", () => {
         repository_url: "new-owner/new-repo",
       }),
     );
-    expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-1");
+    expect(mockNavigate).toHaveBeenCalledWith("/projects");
   });
 
   it("shows owner-aware github token guidance for fine-grained tokens", async () => {
