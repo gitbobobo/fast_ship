@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router";
 import { Plus, Package } from "lucide-react";
+import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -23,10 +24,27 @@ import { formatRelativeTime } from "@/lib/utils/format";
 export default function VersionsPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
   const projects = projectsData?.items ?? [];
-  const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  const { lastSelectedProjectId, setLastSelectedProjectId } =
+    useProjectPreferenceStore();
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(
+    () => lastSelectedProjectId ?? "",
+  );
   const activeProjectId = projects.some((project) => project.id === selectedProjectId)
     ? selectedProjectId
     : (projects[0]?.id ?? "");
+
+  // 当 activeProjectId 回退到第一个项目时（如存储的项目被删除），同步 state 和 store
+  useEffect(() => {
+    if (!projectsLoading && activeProjectId !== selectedProjectId) {
+      setSelectedProjectId(activeProjectId);
+      setLastSelectedProjectId(activeProjectId || null);
+    }
+  }, [
+    projectsLoading,
+    activeProjectId,
+    selectedProjectId,
+    setLastSelectedProjectId,
+  ]);
 
   const { data: versionsData, isLoading: versionsLoading } = useVersions(
     activeProjectId,
@@ -48,7 +66,11 @@ export default function VersionsPage() {
               ) : (
                 <Select
                   value={activeProjectId}
-                  onValueChange={(value) => setSelectedProjectId(value ?? "")}
+                  onValueChange={(value) => {
+                    const nextValue = value ?? "";
+                    setSelectedProjectId(nextValue);
+                    setLastSelectedProjectId(nextValue || null);
+                  }}
                 >
                   <SelectTrigger className="w-64">
                     <SelectValue placeholder="请选择项目">

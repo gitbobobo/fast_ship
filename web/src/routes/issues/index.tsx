@@ -1,5 +1,6 @@
 import { useDeferredValue, useMemo, useState, useEffect } from "react";
 import { Link, useSearchParams } from "react-router";
+import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import {
   Bug,
   ChevronLeft,
@@ -128,9 +129,11 @@ export default function IssuesPage() {
 
   const [searchParams, setSearchParams] = useSearchParams();
   const urlProjectId = searchParams.get("project");
+  const { lastSelectedProjectId, setLastSelectedProjectId } =
+    useProjectPreferenceStore();
 
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => urlProjectId ?? "",
+    () => urlProjectId ?? lastSelectedProjectId ?? "",
   );
 
   const activeProjectId = useMemo(
@@ -142,6 +145,19 @@ export default function IssuesPage() {
     () => projects.find((p) => p.id === activeProjectId),
     [projects, activeProjectId],
   );
+
+  // 当 activeProjectId 回退时（如存储的项目被删除），同步 state 和 store
+  useEffect(() => {
+    if (!projectsLoading && activeProjectId !== selectedProjectId) {
+      setSelectedProjectId(activeProjectId);
+      setLastSelectedProjectId(activeProjectId || null);
+    }
+  }, [
+    projectsLoading,
+    activeProjectId,
+    selectedProjectId,
+    setLastSelectedProjectId,
+  ]);
 
   // Sync URL when active project changes from non-URL sources (e.g. first load)
   // Also ensure default state filter is "open" when not specified
@@ -224,6 +240,7 @@ export default function IssuesPage() {
   const handleProjectChange = (value: string | null) => {
     const nextValue = value ?? "";
     setSelectedProjectId(nextValue);
+    setLastSelectedProjectId(nextValue || null);
     const next = new URLSearchParams();
     if (nextValue) {
       next.set("project", nextValue);
