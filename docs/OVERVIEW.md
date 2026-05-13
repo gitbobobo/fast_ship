@@ -47,6 +47,7 @@ fast_ship/
 │   │   ├── main.tsx                 # 应用入口
 │   │   ├── App.tsx                  # 路由定义 (lazy loading)
 │   │   ├── routes/                  # 页面组件
+│   │   │   ├── dashboard/           # 仪表盘首页（问题统计图表）
 │   │   │   ├── projects/            # 项目列表/新建/详情/编辑
 │   │   │   ├── versions/            # 版本列表
 │   │   │   ├── issues/              # Issue 列表
@@ -80,6 +81,8 @@ Fast Ship 采用经典的三层架构（Handler → Service → Repository），
 **Ship 发布流程**：核心业务流程 — 创建版本后，关联 Issue 和构建产物（Artifact），执行 Ship Check 验证，然后一键发布到 GitHub（创建 Tag/Release、上传产物、同步 Issue 状态到 GitHub）。
 
 **Issue 同步**：支持双向同步 — 可从 GitHub 仓库导入 Issues，也可创建内部 Issue（不关联 GitHub）。内部 Issue 支持工作流状态管理和 Checklist。
+
+**仪表盘**：登录后的默认首页。前端通过 `/api/dashboard/overview` 聚合所有已配置项目的剩余开启问题，以及最近 30 天首次标记为已完成的问题趋势，同一问题只统计一次。
 
 **媒体代理**：通过后端代理访问 GitHub 媒体资源（Issue 中的图片等），解决私有仓库资源无法直接在浏览器中展示的问题。
 
