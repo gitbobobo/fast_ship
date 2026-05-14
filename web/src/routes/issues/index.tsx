@@ -1,14 +1,18 @@
 import { useDeferredValue, useMemo, useState, useEffect } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import {
   Bug,
   ChevronLeft,
   ChevronRight,
+  Copy,
+  Ellipsis,
   ExternalLink,
+  Inbox,
   Link2,
   MessageSquare,
   Package,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -31,12 +35,20 @@ import {
   Card,
   CardContent,
 } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  DropdownMenuSeparator,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
 import {
   useIssueFilterOptions,
   useIssues,
   useSyncProjectIssues,
+  useUpdateIssue,
 } from "@/lib/hooks/use-issues";
 import {
   ISSUE_WORKFLOW_STATUS_LABELS,
@@ -121,6 +133,173 @@ function getActiveProjectId(
     return urlId;
   }
   return projects[0]?.id ?? "";
+}
+
+function IssueCardActions({
+  issue,
+  issueDetailSearch,
+  syncIssues,
+}: {
+  issue: Issue;
+  issueDetailSearch: string;
+  syncIssues: ReturnType<typeof useSyncProjectIssues>;
+}) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const updateIssue = useUpdateIssue(issue.id, issue.project_id);
+
+  const handleToggleIssueState = async () => {
+    try {
+      await updateIssue.mutateAsync({
+        state: issue.state === "open" ? "closed" : "open",
+      });
+      toast.success(issue.state === "open" ? "问题已关闭" : "问题已重新打开");
+    } catch {
+      toast.error(issue.state === "open" ? "关闭问题失败" : "重新打开问题失败");
+    }
+  };
+
+  const handleCopyIssueLink = async () => {
+    try {
+      const url = new URL(
+        `/projects/${issue.project_id}/issues/${issue.id}`,
+        window.location.origin,
+      );
+      if (issueDetailSearch) {
+        url.search = issueDetailSearch;
+      }
+      await navigator.clipboard.writeText(url.toString());
+      toast.success("已复制当前问题链接");
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  const handleCopyGitHubLink = async () => {
+    if (!issue.github?.html_url) {
+      toast.error("复制失败");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(issue.github.html_url);
+      toast.success("已复制 GitHub 深链接");
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  const handleSync = async () => {
+    try {
+      const res = await syncIssues.mutateAsync();
+      toast.success(
+        `已触发项目同步：${res.data.synced_issue_count} 个问题，${res.data.synced_comment_count} 条评论`,
+      );
+    } catch {
+      toast.error("同步失败，请检查 GitHub 仓库配置和 Token");
+    }
+  };
+
+  const isInternalIssue = issue.source === "internal";
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+        aria-label="更多操作"
+      >
+        <Ellipsis className="h-3.5 w-3.5" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-44">
+        {isInternalIssue && (
+          <DropdownMenuItem
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              navigate({
+                pathname: `/projects/${issue.project_id}/issues/${issue.id}/edit`,
+                search: location.search,
+              });
+            }}
+          >
+            <Pencil className="h-4 w-4" />
+            编辑问题
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void handleToggleIssueState();
+          }}
+          disabled={updateIssue.isPending}
+        >
+          {issue.state === "open" ? <CheckCircle2 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}
+          {issue.state === "open" ? "关闭问题" : "重新打开"}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void handleCopyIssueLink();
+          }}
+        >
+          <Copy className="h-4 w-4" />
+          复制链接
+        </DropdownMenuItem>
+        {issue.github?.html_url && (
+          <DropdownMenuItem
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void handleCopyGitHubLink();
+            }}
+          >
+            <Link2 className="h-4 w-4" />
+            复制 GitHub 深链接
+          </DropdownMenuItem>
+        )}
+        {issue.source === "github" && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void handleSync();
+              }}
+              disabled={syncIssues.isPending}
+            >
+              <RefreshCw className={cn("h-4 w-4", syncIssues.isPending && "animate-spin")} />
+              {syncIssues.isPending ? "同步中..." : "重新同步"}
+            </DropdownMenuItem>
+          </>
+        )}
+        {issue.github?.html_url && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              render={
+                <a
+                  href={issue.github.html_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(event) => event.stopPropagation()}
+                />
+              }
+            >
+              <ExternalLink className="h-4 w-4" />
+              在 GitHub 查看
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 export default function IssuesPage() {
@@ -287,35 +466,6 @@ export default function IssuesPage() {
     } catch {
       toast.error("复制失败");
     }
-  };
-
-  const handleCopyIssueDetailLink = async (issueId: string) => {
-    try {
-      const url = new URL(
-        `/projects/${activeProjectId}/issues/${issueId}`,
-        window.location.origin,
-      );
-      const issueDetailSearch = buildIssueDetailSearchParams({
-        state: issueStateFilter,
-        q: issueQuery,
-        label: issueLabelFilter,
-        source: issueSourceFilter,
-        workflowStatus: issueWorkflowFilter,
-        sort: issueSort,
-        page: issuePage,
-      }).toString();
-      if (issueDetailSearch) {
-        url.search = issueDetailSearch;
-      }
-      await navigator.clipboard.writeText(url.toString());
-      toast.success("已复制当前问题链接");
-    } catch {
-      toast.error("复制失败");
-    }
-  };
-
-  const handleOpenIssueInGitHub = (url: string) => {
-    window.open(url, "_blank", "noopener,noreferrer");
   };
 
   const hasActiveFilters =
@@ -642,32 +792,11 @@ export default function IssuesPage() {
                   <CardContent className="relative py-4 pr-16 md:pr-20">
                     {/* Hover actions */}
                     <div className="absolute top-3 right-3 flex items-center gap-1 md:opacity-0 md:transition-opacity md:group-hover:opacity-100">
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`复制问题 ${issue.reference} 的应用链接`}
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          void handleCopyIssueDetailLink(issue.id);
-                        }}
-                      >
-                        <Link2 className="h-3.5 w-3.5" />
-                      </Button>
-                      {issue.github?.html_url && (
-                        <Button
-                          variant="ghost"
-                          size="icon-xs"
-                          aria-label={`在 GitHub 打开问题 ${issue.reference}`}
-                          onClick={(event) => {
-                            event.preventDefault();
-                            event.stopPropagation();
-                            handleOpenIssueInGitHub(issue.github?.html_url ?? "");
-                          }}
-                        >
-                          <ExternalLink className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
+                      <IssueCardActions
+                        issue={issue}
+                        issueDetailSearch={issueDetailSearch}
+                        syncIssues={syncIssues}
+                      />
                     </div>
 
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
