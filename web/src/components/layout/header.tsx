@@ -2,7 +2,6 @@ import { useNavigate } from "react-router";
 import { MobileNav } from "./sidebar";
 import { UserNav } from "@/components/user-nav";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
-import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft } from "lucide-react";
 import { useNavigationHistory } from "@/lib/hooks/use-navigation-history";
@@ -47,7 +46,6 @@ export function Header({
       {!title && <div className="flex-1" />}
       <div className="flex items-center gap-2">
         <ThemeToggle />
-        <Separator orientation="vertical" className="h-6" />
         <UserNav />
       </div>
     </header>
