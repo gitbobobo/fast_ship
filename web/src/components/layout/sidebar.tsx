@@ -8,6 +8,7 @@ import {
   Menu,
   Tags,
   Bug,
+  Kanban,
 } from "lucide-react";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 
@@ -15,6 +16,7 @@ const navItems = [
   { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard },
   { to: "/projects", label: "项目", icon: Package },
   { to: "/issues", label: "问题", icon: Bug },
+  { to: "/board", label: "看板", icon: Kanban },
   { to: "/versions", label: "版本", icon: Tags },
 ];
 

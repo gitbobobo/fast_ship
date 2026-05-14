@@ -1,5 +1,5 @@
 import { useDeferredValue, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { useNavigate } from "react-router";
 import {
   Plus,
   GitFork,

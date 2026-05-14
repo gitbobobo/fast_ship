@@ -240,3 +240,50 @@ export function useReplaceIssueChecklist(issueId: string, projectId?: string) {
     },
   });
 }
+
+export function useUpdateIssueWorkflowStatus() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      issueId,
+      workflow_status,
+    }: {
+      issueId: string;
+      projectId: string;
+      workflow_status: "" | "todo" | "in_progress" | "done";
+    }) => {
+      return issueApi.updateInternalMeta(issueId, { workflow_status });
+    },
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["projects", variables.projectId, "issues"],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["issues", variables.issueId],
+      });
+    },
+  });
+}
+
+export function useCloseIssuesBatch(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (issueIds: string[]) => {
+      const results = await Promise.allSettled(
+        issueIds.map((id) =>
+          issueApi.update(id, { state: "closed", state_reason: "completed" }),
+        ),
+      );
+      const succeeded = results.filter((r) => r.status === "fulfilled").length;
+      const failed = results.length - succeeded;
+      return { succeeded, failed, total: issueIds.length };
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+      queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "issues", "filter-options"],
+      });
+      queryClient.invalidateQueries({ queryKey: ["issues"] });
+    },
+  });
+}
