@@ -49,8 +49,6 @@ type gitHubIssueClient interface {
 	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*ghclient.IssueComment, error)
 	UpdateIssue(ctx context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error)
 	CreateIssue(ctx context.Context, title, body string) (*ghclient.Issue, error)
-	GetDefaultBranch(ctx context.Context) (string, error)
-	UploadRepositoryFile(ctx context.Context, filePath string, content []byte, branch string) (string, error)
 }
 
 type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
@@ -467,27 +465,28 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 
 	ctx := context.Background()
-	body, referencedAssetIDs, err := s.replaceIssueAssetURLsWithGitHubRawURLs(ctx, client, projectID, req.Body)
-	if err != nil {
+	if err := s.validateIssueAssetReferences(projectID, "", req.Body); err != nil {
 		return nil, err
 	}
 
-	createdIssue, err := client.CreateIssue(ctx, title, body)
+	createdIssue, err := client.CreateIssue(ctx, title, req.Body)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("创建 GitHub Issue 失败: %v", err))
-	}
-
-	// 清理已上传到 GitHub 的 draft assets
-	if len(referencedAssetIDs) > 0 {
-		if err := s.deleteDraftIssueAssets(projectID, referencedAssetIDs); err != nil {
-			s.logger.Warn("delete draft assets after github issue creation failed", zap.Error(err))
-		}
 	}
 
 	stored, err := s.upsertGitHubIssue(projectID, createdIssue)
 	if err != nil {
 		return nil, err
 	}
+	var assetPathsToDelete []string
+	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
+		var err error
+		assetPathsToDelete, err = s.syncIssueAssetsTx(tx, projectID, stored.ID, req.Body)
+		return err
+	}); err != nil {
+		return nil, mapIssueAssetReferenceError(err)
+	}
+	s.deleteIssueAssetFiles(assetPathsToDelete)
 
 	if _, err := s.syncTimeline(ctx, client, stored, createdIssue.GetNumber()); err != nil {
 		s.logger.Warn("sync timeline after creating github issue failed", zap.String("issue_id", stored.ID), zap.Error(err))
@@ -500,59 +499,6 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 
 	resp := s.toIssueResponse(*stored, meta, nil, nil)
 	return &resp, nil
-}
-
-func (s *IssueService) replaceIssueAssetURLsWithGitHubRawURLs(ctx context.Context, client gitHubIssueClient, projectID, body string) (string, []string, error) {
-	referencedIDs := extractIssueAssetIDs(body)
-	if len(referencedIDs) == 0 {
-		return body, nil, nil
-	}
-
-	branch, err := client.GetDefaultBranch(ctx)
-	if err != nil {
-		return "", nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取仓库默认分支失败: %v", err))
-	}
-
-	replacements := make(map[string]string)
-	for assetID := range referencedIDs {
-		draftAsset, err := s.draftAssetRepo.FindByID(assetID)
-		if err != nil {
-			return "", nil, errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf("引用的图片资源 %s 不存在", assetID))
-		}
-
-		reader, err := s.storage.Get(draftAsset.FilePath)
-		if err != nil {
-			return "", nil, errs.New(errs.ErrInternal.Code, fmt.Sprintf("读取图片资源 %s 失败", assetID))
-		}
-		content, err := io.ReadAll(reader)
-		_ = reader.Close()
-		if err != nil {
-			return "", nil, errs.New(errs.ErrInternal.Code, fmt.Sprintf("读取图片资源 %s 失败", assetID))
-		}
-
-		safeFileName := filepath.Base(draftAsset.FileName)
-		filePath := fmt.Sprintf(".fast-ship/issue-assets/%s/%s", assetID, safeFileName)
-		rawURL, err := client.UploadRepositoryFile(ctx, filePath, content, branch)
-		if err != nil {
-			return "", nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("上传图片到 GitHub 失败: %v", err))
-		}
-
-		replacements[assetID] = rawURL
-	}
-
-	result := issueAssetContentPattern.ReplaceAllStringFunc(body, func(match string) string {
-		id := resolveIssueAssetIDFromURL(match)
-		if rawURL, ok := replacements[id]; ok {
-			return rawURL
-		}
-		return match
-	})
-
-	ids := make([]string, 0, len(replacements))
-	for id := range replacements {
-		ids = append(ids, id)
-	}
-	return result, ids, nil
 }
 
 func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error) {
@@ -627,6 +573,9 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			updateReq.Title = &title
 		}
 		if req.Body != nil {
+			if err := s.validateIssueAssetReferences(project.ID, issue.ID, *req.Body); err != nil {
+				return nil, err
+			}
 			updateReq.Body = req.Body
 		}
 		if req.State != nil {
@@ -647,6 +596,17 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		stored, err := s.upsertGitHubIssue(project.ID, updatedIssue)
 		if err != nil {
 			return nil, err
+		}
+		if req.Body != nil {
+			var assetPathsToDelete []string
+			if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
+				var err error
+				assetPathsToDelete, err = s.syncIssueAssetsTx(tx, project.ID, stored.ID, *req.Body)
+				return err
+			}); err != nil {
+				return nil, mapIssueAssetReferenceError(err)
+			}
+			s.deleteIssueAssetFiles(assetPathsToDelete)
 		}
 		if _, err := s.syncTimeline(context.Background(), client, stored, issue.GitHubMeta.Number); err != nil {
 			return nil, err
@@ -2039,14 +1999,27 @@ func extractIssueAssetIDs(body string) map[string]struct{} {
 }
 
 func (s *IssueService) reconcileIssueAssets(issueID, body string) error {
-	assets, err := s.assetRepo.ListByIssueID(issueID)
+	pathsToDelete, err := s.reconcileIssueAssetsTx(nil, issueID, body)
 	if err != nil {
 		return err
+	}
+	s.deleteIssueAssetFiles(pathsToDelete)
+	return nil
+}
+
+func (s *IssueService) reconcileIssueAssetsTx(tx *gorm.DB, issueID, body string) ([]string, error) {
+	if tx == nil {
+		tx = s.issueRepo.DB()
+	}
+
+	assets, err := s.assetRepo.ListByIssueIDTx(tx, issueID)
+	if err != nil {
+		return nil, err
 	}
 
 	referencedIDs := extractIssueAssetIDs(body)
 	if len(assets) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	idsToAttach := make([]string, 0)
@@ -2061,39 +2034,64 @@ func (s *IssueService) reconcileIssueAssets(issueID, body string) error {
 		idsToDelete = append(idsToDelete, asset.ID)
 	}
 
-	if err := s.assetRepo.UpdateStatusByIssueIDAndIDs(issueID, idsToAttach, model.IssueAssetStatusAttached); err != nil {
-		return err
+	if err := s.assetRepo.UpdateStatusByIssueIDAndIDsTx(tx, issueID, idsToAttach, model.IssueAssetStatusAttached); err != nil {
+		return nil, err
 	}
-	if err := s.deleteIssueAssets(issueID, idsToDelete); err != nil {
-		return err
+	pathsToDelete, err := s.deleteIssueAssetsTx(tx, issueID, idsToDelete)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return pathsToDelete, nil
 }
 
 func (s *IssueService) deleteIssueAssets(issueID string, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-
-	assets, err := s.assetRepo.ListByIssueID(issueID)
+	pathsToDelete, err := s.deleteIssueAssetsTx(nil, issueID, ids)
 	if err != nil {
 		return err
 	}
+	s.deleteIssueAssetFiles(pathsToDelete)
+	return nil
+}
 
+func (s *IssueService) deleteIssueAssetsTx(tx *gorm.DB, issueID string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	if tx == nil {
+		tx = s.issueRepo.DB()
+	}
+
+	assets, err := s.assetRepo.ListByIssueIDTx(tx, issueID)
+	if err != nil {
+		return nil, err
+	}
+
+	pathsToDelete := make([]string, 0, len(ids))
 	pathByID := make(map[string]string, len(assets))
 	for _, asset := range assets {
 		pathByID[asset.ID] = asset.FilePath
 	}
 
-	if err := s.assetRepo.DeleteByIssueIDAndIDs(issueID, ids); err != nil {
-		return err
-	}
 	for _, id := range ids {
 		if path := pathByID[id]; path != "" {
-			_ = s.storage.Delete(path)
+			pathsToDelete = append(pathsToDelete, path)
 		}
 	}
-	return nil
+
+	if err := s.assetRepo.DeleteByIssueIDAndIDsTx(tx, issueID, ids); err != nil {
+		return nil, err
+	}
+	return pathsToDelete, nil
+}
+
+func (s *IssueService) deleteIssueAssetFiles(paths []string) {
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		_ = s.storage.Delete(path)
+	}
 }
 
 func (s *IssueService) deleteDraftIssueAssets(projectID string, ids []string) error {
@@ -2122,8 +2120,14 @@ func (s *IssueService) deleteDraftIssueAssets(projectID string, ids []string) er
 	return nil
 }
 
-func (s *IssueService) attachDraftAssetsToIssue(projectID, issueID, body string) error {
-	return s.attachDraftAssetsToIssueTx(nil, projectID, issueID, body)
+func (s *IssueService) syncIssueAssetsTx(tx *gorm.DB, projectID, issueID, body string) ([]string, error) {
+	if err := s.validateIssueAssetReferencesTx(tx, projectID, issueID, body); err != nil {
+		return nil, err
+	}
+	if err := s.attachDraftAssetsToIssueTx(tx, projectID, issueID, body); err != nil {
+		return nil, err
+	}
+	return s.reconcileIssueAssetsTx(tx, issueID, body)
 }
 
 func (s *IssueService) attachDraftAssetsToIssueTx(tx *gorm.DB, projectID, issueID, body string) error {
@@ -2142,14 +2146,32 @@ func (s *IssueService) attachDraftAssetsToIssueTx(tx *gorm.DB, projectID, issueI
 		tx = s.issueRepo.DB()
 	}
 
-	draftAssets, err := s.draftAssetRepo.ListByProjectIDAndIDsTx(tx, projectID, ids)
+	existingAssets, err := s.assetRepo.ListByIssueIDTx(tx, issueID)
 	if err != nil {
 		return err
 	}
-	if len(draftAssets) == 0 {
-		return errs.ErrInvalidParams
+
+	existingIDs := make(map[string]struct{}, len(existingAssets))
+	for _, asset := range existingAssets {
+		existingIDs[asset.ID] = struct{}{}
 	}
-	if len(draftAssets) != len(ids) {
+
+	draftIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := existingIDs[id]; ok {
+			continue
+		}
+		draftIDs = append(draftIDs, id)
+	}
+	if len(draftIDs) == 0 {
+		return nil
+	}
+
+	draftAssets, err := s.draftAssetRepo.ListByProjectIDAndIDsTx(tx, projectID, draftIDs)
+	if err != nil {
+		return err
+	}
+	if len(draftAssets) != len(draftIDs) {
 		return errs.ErrInvalidParams
 	}
 
@@ -2173,6 +2195,65 @@ func (s *IssueService) attachDraftAssetsToIssueTx(tx *gorm.DB, projectID, issueI
 	}
 
 	return s.draftAssetRepo.DeleteByProjectIDAndIDsTx(tx, projectID, attachedIDs)
+}
+
+func (s *IssueService) validateIssueAssetReferences(projectID, issueID, body string) error {
+	return s.validateIssueAssetReferencesTx(nil, projectID, issueID, body)
+}
+
+func (s *IssueService) validateIssueAssetReferencesTx(tx *gorm.DB, projectID, issueID, body string) error {
+	referencedIDs := extractIssueAssetIDs(body)
+	if len(referencedIDs) == 0 {
+		return nil
+	}
+
+	if tx == nil {
+		tx = s.issueRepo.DB()
+	}
+
+	existingIDs := make(map[string]struct{}, len(referencedIDs))
+	if strings.TrimSpace(issueID) != "" {
+		issueAssets, err := s.assetRepo.ListByIssueIDTx(tx, issueID)
+		if err != nil {
+			return err
+		}
+		for _, asset := range issueAssets {
+			existingIDs[asset.ID] = struct{}{}
+		}
+	}
+
+	draftIDs := make([]string, 0, len(referencedIDs))
+	for id := range referencedIDs {
+		if _, ok := existingIDs[id]; ok {
+			continue
+		}
+		draftIDs = append(draftIDs, id)
+	}
+	if len(draftIDs) == 0 {
+		return nil
+	}
+
+	sort.Strings(draftIDs)
+	draftAssets, err := s.draftAssetRepo.ListByProjectIDAndIDsTx(tx, projectID, draftIDs)
+	if err != nil {
+		return err
+	}
+	if len(draftAssets) != len(draftIDs) {
+		return errs.ErrInvalidParams
+	}
+	return nil
+}
+
+func mapIssueAssetReferenceError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var appErr *errs.AppError
+	if errors.As(err, &appErr) {
+		return appErr
+	}
+	return errs.ErrInternal
 }
 
 func resolveIssueAssetIDFromURL(value string) string {

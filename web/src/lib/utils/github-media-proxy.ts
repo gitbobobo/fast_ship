@@ -1,6 +1,11 @@
 const MEDIA_PROXY_PATH = "/api/github/media-proxy";
 const MEDIA_PROXY_TOKEN_PARAM = "token";
 const ISSUE_ASSET_CONTENT_PATH = /^\/api\/issues\/assets\/[^/]+\/content$/;
+const ISSUE_ASSET_CONTENT_REFERENCE =
+  /(?:https?:\/\/[^/\s"')]+)?\/api\/issues\/assets\/[^/\s"')]+\/content(?:\?[^)\s"']*)?/;
+
+export const GITHUB_LOCAL_ASSET_NOTICE =
+  "由于 GitHub 接口限制，部分附件仅支持在本项目显示。";
 
 function isGitHubMediaUrl(value: string) {
   try {
@@ -50,6 +55,10 @@ function isIssueAssetUrl(value: string) {
   } catch {
     return false;
   }
+}
+
+export function containsLocalIssueAssetReference(value?: string | null) {
+  return Boolean(value && ISSUE_ASSET_CONTENT_REFERENCE.test(value));
 }
 
 function toIssueAssetUrl(value?: string | null, token?: string | null): string | undefined {

@@ -66,4 +66,20 @@ describe("GitHubContent", () => {
       "/api/issues/assets/asset-1/content?token=jwt-token",
     );
   });
+
+  it("prefers markdown when markdown contains local issue asset urls", () => {
+    authState.token = "jwt-token";
+
+    render(
+      <GitHubContent
+        markdown="![Image](/api/issues/assets/asset-1/content)"
+        html={'<p><img alt="Rendered image" src="https://github.com/acme/alpha/api/issues/assets/asset-1/content" /></p>'}
+      />,
+    );
+
+    expect(screen.getByRole("img", { name: "Image" })).toHaveAttribute(
+      "src",
+      "/api/issues/assets/asset-1/content?token=jwt-token",
+    );
+  });
 });

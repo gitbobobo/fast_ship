@@ -27,6 +27,7 @@ import {
 } from "@/lib/hooks/use-issues";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import { useAuthStore } from "@/lib/store/auth-store";
+import { GITHUB_LOCAL_ASSET_NOTICE } from "@/lib/utils/github-media-proxy";
 import { toast } from "sonner";
 
 function hasExactTextContent(text: string) {
@@ -1086,6 +1087,92 @@ describe("Issue pages", () => {
       "src",
       "/api/github/media-proxy?url=https%3A%2F%2Fgithub.com%2Fuser-attachments%2Fassets%2Fdemo&token=jwt-token",
     );
+  });
+
+  it("shows a notice when a github issue body references local issue assets", async () => {
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        body: "问题描述\n\n![clip](/api/issues/assets/asset-1/content)",
+        body_html: '<p><img alt="Rendered image" src="https://github.com/acme/alpha/api/issues/assets/asset-1/content" /></p>',
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(
+      screen.getByText(GITHUB_LOCAL_ASSET_NOTICE),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "clip" })).toHaveAttribute(
+      "src",
+      "/api/issues/assets/asset-1/content?token=jwt-token",
+    );
+  });
+
+  it("does not show the notice when only comments reference local issue assets", async () => {
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        body: "普通正文",
+        body_html: "<p>普通正文</p>",
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+    vi.mocked(useInfiniteIssueComments).mockReturnValue({
+      data: {
+        pages: [
+          {
+            items: [
+              {
+                id: "comment-1",
+                issue_id: "issue-1",
+                source: "github",
+                github_comment_id: 5001,
+                github_node_id: "IC_kw",
+                body: "![clip](/api/issues/assets/comment-asset-1/content)",
+                body_html: "<p>comment html</p>",
+                html_url: "https://github.com/acme/alpha/issues/42#issuecomment-1",
+                author: { login: "charlie", avatar_url: "" },
+                author_association: "CONTRIBUTOR",
+                reactions: {
+                  total_count: 0,
+                  "+1": 0,
+                  "-1": 0,
+                  laugh: 0,
+                  hooray: 0,
+                  confused: 0,
+                  heart: 0,
+                  rocket: 0,
+                  eyes: 0,
+                },
+                created_at: "2026-04-11T10:00:00Z",
+                updated_at: "2026-04-11T10:00:00Z",
+              },
+            ],
+            total: 1,
+            page: 1,
+            page_size: 20,
+          },
+        ],
+      },
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useInfiniteIssueComments>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(
+      screen.queryByText(GITHUB_LOCAL_ASSET_NOTICE),
+    ).not.toBeInTheDocument();
   });
 
   it("appends selected ai suggestions into checklist", async () => {

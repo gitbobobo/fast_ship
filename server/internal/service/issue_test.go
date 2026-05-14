@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -209,9 +208,6 @@ type fakeIssueGitHubClient struct {
 	createIssueCalls   []fakeCreateIssueCall
 	createCommentCalls []fakeCreateCommentCall
 	updateIssueCalls   []fakeUpdateIssueCall
-	defaultBranch      string
-	defaultBranchErr   error
-	uploadFileErr      error
 }
 
 type fakeCreateIssueCall struct {
@@ -288,23 +284,6 @@ func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body strin
 		Body:  body,
 	})
 	return f.createdIssue, f.createIssueErr
-}
-
-func (f *fakeIssueGitHubClient) GetDefaultBranch(context.Context) (string, error) {
-	if f.defaultBranchErr != nil {
-		return "", f.defaultBranchErr
-	}
-	if f.defaultBranch != "" {
-		return f.defaultBranch, nil
-	}
-	return "main", nil
-}
-
-func (f *fakeIssueGitHubClient) UploadRepositoryFile(_ context.Context, filePath string, content []byte, branch string) (string, error) {
-	if f.uploadFileErr != nil {
-		return "", f.uploadFileErr
-	}
-	return fmt.Sprintf("https://raw.githubusercontent.com/owner/repo/%s/%s", branch, filePath), nil
 }
 
 func intPtr(v int) *int {
@@ -1181,6 +1160,104 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubBodyBack(t *testing.T) {
 	}
 }
 
+func TestIssueServiceUpdateInternalIssue_GitHubBodyReconcilesLocalAssets(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
+		project.ID,
+		user.ID,
+		"clip.png",
+		int64(len(testPNGBytes)),
+		bytes.NewReader(testPNGBytes),
+	)
+	if err != nil {
+		t.Fatalf("upload draft issue asset: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		updatedIssue: &ghclient.Issue{
+			Issue: gh.Issue{
+				ID:        int64Ptr(1001),
+				NodeID:    stringPtr("I_kw_test"),
+				Number:    intPtr(42),
+				State:     stringPtr("open"),
+				Title:     stringPtr("Test Issue"),
+				Body:      stringPtr("body with asset"),
+				HTMLURL:   stringPtr("https://github.com/owner/repo/issues/42"),
+				User:      &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")},
+				CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+				UpdatedAt: &gh.Timestamp{Time: time.Now().UTC()},
+			},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{42: {}},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	bodyWithAsset := fmt.Sprintf("正文引用图片\n\n%s", draftAsset.Markdown)
+	if _, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		Body: &bodyWithAsset,
+	}); err != nil {
+		t.Fatalf("update github issue body with asset: %v", err)
+	}
+
+	assets, err := svc.issueAssetRepo.ListByIssueID(issue.ID)
+	if err != nil {
+		t.Fatalf("list issue assets: %v", err)
+	}
+	if len(assets) != 1 {
+		t.Fatalf("expected one attached issue asset, got %d", len(assets))
+	}
+	if assets[0].ID != draftAsset.ID || assets[0].Status != model.IssueAssetStatusAttached {
+		t.Fatalf("unexpected issue asset after attach: %+v", assets[0])
+	}
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	if err != nil {
+		t.Fatalf("list draft assets: %v", err)
+	}
+	if len(draftAssets) != 0 {
+		t.Fatalf("expected draft asset to be promoted after github body update, got %d", len(draftAssets))
+	}
+	if got := fake.updateIssueCalls[len(fake.updateIssueCalls)-1].Body; got != bodyWithAsset {
+		t.Fatalf("expected github update body to keep local asset reference, got %q", got)
+	}
+
+	bodyWithoutAsset := "正文不再引用图片"
+	fake.updatedIssue = &ghclient.Issue{
+		Issue: gh.Issue{
+			ID:        int64Ptr(1001),
+			NodeID:    stringPtr("I_kw_test"),
+			Number:    intPtr(42),
+			State:     stringPtr("open"),
+			Title:     stringPtr("Test Issue"),
+			Body:      stringPtr(bodyWithoutAsset),
+			HTMLURL:   stringPtr("https://github.com/owner/repo/issues/42"),
+			User:      &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")},
+			CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+			UpdatedAt: &gh.Timestamp{Time: time.Now().UTC()},
+		},
+	}
+	if _, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+		Body: &bodyWithoutAsset,
+	}); err != nil {
+		t.Fatalf("update github issue body without asset: %v", err)
+	}
+
+	assets, err = svc.issueAssetRepo.ListByIssueID(issue.ID)
+	if err != nil {
+		t.Fatalf("list issue assets after removal: %v", err)
+	}
+	if len(assets) != 0 {
+		t.Fatalf("expected issue assets to be reconciled away, got %d", len(assets))
+	}
+}
+
 func TestIssueServiceUpdateInternalIssue_WritesGitHubLabelsBack(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -1692,7 +1769,7 @@ func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *test
 	}
 }
 
-func TestIssueServiceCreateGitHubIssue_ReplacesDraftAssetURLsWithGitHubRawURLs(t *testing.T) {
+func TestIssueServiceCreateGitHubIssue_AttachesReferencedDraftAssets(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
@@ -1753,118 +1830,28 @@ func TestIssueServiceCreateGitHubIssue_ReplacesDraftAssetURLsWithGitHubRawURLs(t
 	if len(fake.createIssueCalls) != 1 {
 		t.Fatalf("expected one create issue call, got %d", len(fake.createIssueCalls))
 	}
-
-	// 验证 body 中的本地 URL 已被替换为 GitHub raw URL
 	callBody := fake.createIssueCalls[0].Body
-	if strings.Contains(callBody, "/api/issues/assets/") {
-		t.Fatalf("expected local asset URL to be replaced, got body: %s", callBody)
-	}
-	expectedRawURL := fmt.Sprintf("https://raw.githubusercontent.com/owner/repo/main/.fast-ship/issue-assets/%s/screenshot.png", draftAsset.ID)
-	if !strings.Contains(callBody, expectedRawURL) {
-		t.Fatalf("expected body to contain raw URL %q, got body: %s", expectedRawURL, callBody)
+	if callBody != bodyWithAsset {
+		t.Fatalf("expected create issue body to keep local asset reference, got %q", callBody)
 	}
 
-	// 验证 draft asset 已被删除
+	issueAssets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	if err != nil {
+		t.Fatalf("list issue assets: %v", err)
+	}
+	if len(issueAssets) != 1 {
+		t.Fatalf("expected one attached issue asset, got %d", len(issueAssets))
+	}
+	if issueAssets[0].ID != draftAsset.ID || issueAssets[0].Status != model.IssueAssetStatusAttached {
+		t.Fatalf("unexpected attached issue asset: %+v", issueAssets[0])
+	}
+
 	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
 	if err != nil {
 		t.Fatalf("list draft assets: %v", err)
 	}
 	if len(draftAssets) != 0 {
 		t.Fatalf("expected referenced draft asset to be removed after github issue creation, got %d", len(draftAssets))
-	}
-}
-
-func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenGetDefaultBranchFails(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-1")
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-	})
-
-	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
-		project.ID,
-		user.ID,
-		"screenshot.png",
-		int64(len(testPNGBytes)),
-		bytes.NewReader(testPNGBytes),
-	)
-	if err != nil {
-		t.Fatalf("upload draft issue asset: %v", err)
-	}
-
-	fake := &fakeIssueGitHubClient{
-		defaultBranchErr: fmt.Errorf("branch not found"),
-	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
-		return fake
-	}
-
-	bodyWithAsset := fmt.Sprintf("问题描述\n\n%s", draftAsset.Markdown)
-	_, err = svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
-		Title: "GitHub 带图片的问题",
-		Body:  bodyWithAsset,
-	})
-	if err == nil {
-		t.Fatal("expected error when get default branch fails, got nil")
-	}
-	if len(fake.createIssueCalls) != 0 {
-		t.Fatalf("expected no create issue call, got %d", len(fake.createIssueCalls))
-	}
-
-	// 验证 draft asset 未被删除（因为 Issue 创建失败）
-	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
-	if err != nil {
-		t.Fatalf("list draft assets: %v", err)
-	}
-	if len(draftAssets) != 1 {
-		t.Fatalf("expected draft asset to remain after failure, got %d", len(draftAssets))
-	}
-}
-
-func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenUploadRepositoryFileFails(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-1")
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-	})
-
-	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
-		project.ID,
-		user.ID,
-		"screenshot.png",
-		int64(len(testPNGBytes)),
-		bytes.NewReader(testPNGBytes),
-	)
-	if err != nil {
-		t.Fatalf("upload draft issue asset: %v", err)
-	}
-
-	fake := &fakeIssueGitHubClient{
-		uploadFileErr: fmt.Errorf("upload rejected"),
-	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
-		return fake
-	}
-
-	bodyWithAsset := fmt.Sprintf("问题描述\n\n%s", draftAsset.Markdown)
-	_, err = svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
-		Title: "GitHub 带图片的问题",
-		Body:  bodyWithAsset,
-	})
-	if err == nil {
-		t.Fatal("expected error when upload repository file fails, got nil")
-	}
-	if len(fake.createIssueCalls) != 0 {
-		t.Fatalf("expected no create issue call, got %d", len(fake.createIssueCalls))
-	}
-
-	// 验证 draft asset 未被删除
-	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
-	if err != nil {
-		t.Fatalf("list draft assets: %v", err)
-	}
-	if len(draftAssets) != 1 {
-		t.Fatalf("expected draft asset to remain after failure, got %d", len(draftAssets))
 	}
 }
 

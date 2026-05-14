@@ -31,25 +31,37 @@ func (r *IssueAssetRepository) FindByID(id string) (*model.IssueAsset, error) {
 }
 
 func (r *IssueAssetRepository) ListByIssueID(issueID string) ([]model.IssueAsset, error) {
+	return r.ListByIssueIDTx(r.db, issueID)
+}
+
+func (r *IssueAssetRepository) ListByIssueIDTx(tx *gorm.DB, issueID string) ([]model.IssueAsset, error) {
 	var assets []model.IssueAsset
-	if err := r.db.Where("issue_id = ?", issueID).Order("created_at ASC").Find(&assets).Error; err != nil {
+	if err := tx.Where("issue_id = ?", issueID).Order("created_at ASC").Find(&assets).Error; err != nil {
 		return nil, err
 	}
 	return assets, nil
 }
 
 func (r *IssueAssetRepository) DeleteByIssueIDAndIDs(issueID string, ids []string) error {
+	return r.DeleteByIssueIDAndIDsTx(r.db, issueID, ids)
+}
+
+func (r *IssueAssetRepository) DeleteByIssueIDAndIDsTx(tx *gorm.DB, issueID string, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Where("issue_id = ? AND id IN ?", issueID, ids).Delete(&model.IssueAsset{}).Error
+	return tx.Where("issue_id = ? AND id IN ?", issueID, ids).Delete(&model.IssueAsset{}).Error
 }
 
 func (r *IssueAssetRepository) UpdateStatusByIssueIDAndIDs(issueID string, ids []string, status model.IssueAssetStatus) error {
+	return r.UpdateStatusByIssueIDAndIDsTx(r.db, issueID, ids, status)
+}
+
+func (r *IssueAssetRepository) UpdateStatusByIssueIDAndIDsTx(tx *gorm.DB, issueID string, ids []string, status model.IssueAssetStatus) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return r.db.Model(&model.IssueAsset{}).
+	return tx.Model(&model.IssueAsset{}).
 		Where("issue_id = ? AND id IN ?", issueID, ids).
 		Update("status", status).
 		Error

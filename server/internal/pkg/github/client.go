@@ -2,7 +2,6 @@ package github
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -240,37 +239,6 @@ func (c *Client) CreateIssue(ctx context.Context, title, body string) (*Issue, e
 		return nil, err
 	}
 	return &issue, nil
-}
-
-func (c *Client) GetDefaultBranch(ctx context.Context) (string, error) {
-	repo, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
-	if err != nil {
-		return "", err
-	}
-	return repo.GetDefaultBranch(), nil
-}
-
-func (c *Client) UploadRepositoryFile(ctx context.Context, filePath string, content []byte, branch string) (string, error) {
-	encoded := []byte(base64.StdEncoding.EncodeToString(content))
-
-	opts := &gh.RepositoryContentFileOptions{
-		Message: ptr("Upload image for Fast Ship issue"),
-		Content: encoded,
-		Branch:  ptr(branch),
-	}
-
-	// 如果文件已存在，需要 SHA 来更新
-	fileContent, _, _, err := c.client.Repositories.GetContents(ctx, c.owner, c.repo, filePath, &gh.RepositoryContentGetOptions{Ref: branch})
-	if err == nil && fileContent != nil {
-		opts.SHA = ptr(fileContent.GetSHA())
-	}
-
-	_, _, err = c.client.Repositories.CreateFile(ctx, c.owner, c.repo, filePath, opts)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", c.owner, c.repo, branch, filePath), nil
 }
 
 // CreateTag 创建 Git Tag（如果不存在）

@@ -88,7 +88,11 @@ import {
 } from "@/lib/issue-workflow-status";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { useAuthStore } from "@/lib/store/auth-store";
-import { toGitHubMediaProxyUrl } from "@/lib/utils/github-media-proxy";
+import {
+  containsLocalIssueAssetReference,
+  GITHUB_LOCAL_ASSET_NOTICE,
+  toGitHubMediaProxyUrl,
+} from "@/lib/utils/github-media-proxy";
 import { cn } from "@/lib/utils";
 import { formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
@@ -465,6 +469,8 @@ export default function IssueDetailPage() {
   const { data: project } = useProject(id!);
   const { data: repoLabels } = useIssueRepoLabels(id!);
   const isInternalIssue = issue?.source === "internal";
+  const shouldShowLocalAssetNotice =
+    issue?.source === "github" && containsLocalIssueAssetReference(issue.body);
   const updateIssue = useUpdateIssue(iid!, id);
   const updateInternalMeta = useUpdateIssueInternalMeta(iid!, id);
   const createComment = useCreateIssueComment(iid!, id);
@@ -1369,9 +1375,17 @@ export default function IssueDetailPage() {
 
               <div className="p-5 md:p-6">
                 {issue.body || issue.body_html ? (
-                  <div className="markdown-body">
-                    <GitHubContent html={issue.body_html} markdown={issue.body} />
-                  </div>
+                  <>
+                    {shouldShowLocalAssetNotice ? (
+                        <div className="mb-4 flex items-start gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+                          <Lightbulb className="mt-0.5 h-4 w-4 shrink-0" />
+                          <p>{GITHUB_LOCAL_ASSET_NOTICE}</p>
+                        </div>
+                    ) : null}
+                    <div className="markdown-body">
+                      <GitHubContent html={issue.body_html} markdown={issue.body} />
+                    </div>
+                  </>
                 ) : (
                   <div className="flex items-center gap-2 text-sm italic text-muted-foreground">
                     <MessageSquare className="h-4 w-4" />

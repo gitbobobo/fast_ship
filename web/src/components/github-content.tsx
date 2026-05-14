@@ -4,6 +4,7 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { useAuthStore } from "@/lib/store/auth-store";
 import {
+  containsLocalIssueAssetReference,
   rewriteGitHubMediaHtml,
   toProtectedMediaUrl,
 } from "@/lib/utils/github-media-proxy";
@@ -36,6 +37,10 @@ interface GitHubContentProps {
 }
 
 function shouldPreferMarkdown(html?: string | null, markdown?: string | null) {
+  if (containsLocalIssueAssetReference(markdown)) {
+    return true;
+  }
+
   if (!html?.trim() || !markdown?.trim()) {
     return false;
   }
