@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import ProjectsPage from "@/routes/projects/index";
 import { renderWithRoute } from "@/test/render";
-import { useProjects, useDeleteProject } from "@/lib/hooks/use-projects";
+import { useProjects, useDeleteProject, useCreateProject, useUpdateProject, useProject } from "@/lib/hooks/use-projects";
 
 const { mockNavigate } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
@@ -20,6 +20,9 @@ vi.mock("react-router", async (importOriginal) => {
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProjects: vi.fn(),
   useDeleteProject: vi.fn(),
+  useCreateProject: vi.fn(),
+  useUpdateProject: vi.fn(),
+  useProject: vi.fn(),
 }));
 
 describe("ProjectsPage", () => {
@@ -65,6 +68,19 @@ describe("ProjectsPage", () => {
     vi.mocked(useDeleteProject).mockReturnValue({
       mutateAsync: vi.fn(),
     } as unknown as ReturnType<typeof useDeleteProject>);
+
+    vi.mocked(useCreateProject).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as unknown as ReturnType<typeof useCreateProject>);
+
+    vi.mocked(useUpdateProject).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as unknown as ReturnType<typeof useUpdateProject>);
+
+    vi.mocked(useProject).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProject>);
   });
 
   afterEach(() => {
@@ -101,7 +117,7 @@ describe("ProjectsPage", () => {
     expect(mockNavigate).toHaveBeenCalledWith("/issues?project=p1");
   });
 
-  it("opens dropdown menu and navigates to edit", async () => {
+  it("opens dropdown menu and opens edit dialog", async () => {
     const user = userEvent.setup();
     renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
 
@@ -114,7 +130,7 @@ describe("ProjectsPage", () => {
     expect(editItem).toBeInTheDocument();
 
     await user.click(editItem);
-    expect(mockNavigate).toHaveBeenCalledWith("/projects/p1/edit");
+    expect(screen.getByRole("dialog", { name: "编辑项目" })).toBeInTheDocument();
   });
 
   it("opens delete confirmation and deletes project", async () => {

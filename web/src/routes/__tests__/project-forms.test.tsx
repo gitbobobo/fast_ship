@@ -1,8 +1,7 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import NewProjectPage from "@/routes/projects/new";
-import EditProjectPage from "@/routes/projects/$id/edit";
+import { ProjectFormDialog } from "@/components/projects/project-form-dialog";
 import NewVersionPage from "@/routes/projects/$id/versions/new";
 import { renderWithRoute } from "@/test/render";
 import {
@@ -111,11 +110,12 @@ describe("ProjectAndVersionForms", () => {
     });
 
     const user = userEvent.setup();
+    const onOpenChange = vi.fn();
 
-    renderWithRoute(<NewProjectPage />, {
-      path: "/projects/new",
-      initialEntry: "/projects/new",
-    });
+    renderWithRoute(
+      <ProjectFormDialog open={true} onOpenChange={onOpenChange} mode="create" />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
 
     await user.type(screen.getByLabelText("项目名称"), "fast-ship");
     await user.type(
@@ -158,11 +158,12 @@ describe("ProjectAndVersionForms", () => {
     });
 
     const user = userEvent.setup();
+    const onOpenChange = vi.fn();
 
-    renderWithRoute(<NewProjectPage />, {
-      path: "/projects/new",
-      initialEntry: "/projects/new",
-    });
+    renderWithRoute(
+      <ProjectFormDialog open={true} onOpenChange={onOpenChange} mode="create" />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
 
     await user.type(screen.getByLabelText("项目名称"), "fast-ship");
     await user.type(
@@ -190,11 +191,17 @@ describe("ProjectAndVersionForms", () => {
 
   it("submits edit project form without sending token when left empty", async () => {
     const user = userEvent.setup();
+    const onOpenChange = vi.fn();
 
-    renderWithRoute(<EditProjectPage />, {
-      path: "/projects/:id/edit",
-      initialEntry: "/projects/proj-1/edit",
-    });
+    renderWithRoute(
+      <ProjectFormDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        mode="edit"
+        projectId="proj-1"
+      />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
 
     const nameInput = screen.getByLabelText("项目名称");
     const repositoryUrlInput = screen.getByLabelText("仓库链接");
@@ -215,16 +222,22 @@ describe("ProjectAndVersionForms", () => {
         repository_url: "new-owner/new-repo",
       }),
     );
-    expect(mockNavigate).toHaveBeenCalledWith("/projects");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("shows owner-aware github token guidance for fine-grained tokens", async () => {
     const user = userEvent.setup();
+    const onOpenChange = vi.fn();
 
-    renderWithRoute(<EditProjectPage />, {
-      path: "/projects/:id/edit",
-      initialEntry: "/projects/proj-1/edit",
-    });
+    renderWithRoute(
+      <ProjectFormDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        mode="edit"
+        projectId="proj-1"
+      />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
 
     await user.click(screen.getByRole("button", { name: "如何获取？" }));
 

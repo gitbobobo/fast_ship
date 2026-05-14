@@ -9,6 +9,7 @@ import {
   Pencil,
   Trash2,
 } from "lucide-react";
+import { ProjectFormDialog } from "@/components/projects/project-form-dialog";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,6 +45,10 @@ export default function ProjectsPage() {
 
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
   const deleteProject = useDeleteProject();
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogMode, setDialogMode] = useState<"create" | "edit">("create");
+  const [editingProjectId, setEditingProjectId] = useState<string | undefined>();
 
   const filteredProjects = projects.filter((project) => {
     const matchesSearch =
@@ -83,7 +88,13 @@ export default function ProjectsPage() {
               placeholder="搜索项目名、描述或仓库"
             />
           </div>
-          <Button render={<Link to="/projects/new" />}>
+          <Button
+            onClick={() => {
+              setDialogMode("create");
+              setEditingProjectId(undefined);
+              setDialogOpen(true);
+            }}
+          >
             <Plus className="mr-2 h-4 w-4" />
             创建项目
           </Button>
@@ -102,7 +113,14 @@ export default function ProjectsPage() {
             <p className="mt-1 text-sm text-muted-foreground">
               创建你的第一个项目来开始管理版本发布
             </p>
-            <Button className="mt-4" render={<Link to="/projects/new" />}>
+            <Button
+              className="mt-4"
+              onClick={() => {
+                setDialogMode("create");
+                setEditingProjectId(undefined);
+                setDialogOpen(true);
+              }}
+            >
               <Plus className="mr-2 h-4 w-4" />
               创建项目
             </Button>
@@ -146,7 +164,9 @@ export default function ProjectsPage() {
                       <DropdownMenuItem
                         onClick={(e) => {
                           e.stopPropagation();
-                          navigate(`/projects/${project.id}/edit`);
+                          setDialogMode("edit");
+                          setEditingProjectId(project.id);
+                          setDialogOpen(true);
                         }}
                       >
                         <Pencil className="mr-2 h-4 w-4" />
@@ -204,6 +224,13 @@ export default function ProjectsPage() {
           </div>
         )}
       </div>
+
+      <ProjectFormDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        mode={dialogMode}
+        projectId={editingProjectId}
+      />
 
       <AlertDialog
         open={!!deleteTarget}
