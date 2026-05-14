@@ -236,7 +236,7 @@ export default function IssueFormPage() {
               ? {
                   title: issue.title,
                   body: issue.body,
-                  workflow_status: issue.internal_meta?.workflow_status || "todo",
+                  workflow_status: issue.internal_meta?.workflow_status ?? "",
                   source: "internal",
                 }
               : {

@@ -1,4 +1,5 @@
 export const ISSUE_WORKFLOW_STATUS_LABELS = {
+  "": "未设置",
   todo: "待处理",
   in_progress: "开发中",
   done: "已完成",

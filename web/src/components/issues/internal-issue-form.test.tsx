@@ -58,7 +58,7 @@ describe("InternalIssueForm", () => {
         defaultValues={{
           title: "补充发布检查",
           body: "已有描述\n",
-          workflow_status: "todo",
+          workflow_status: "",
           source: "internal",
         }}
         onCancel={vi.fn()}
@@ -88,7 +88,7 @@ describe("InternalIssueForm", () => {
       expect(onSubmit).toHaveBeenCalledWith({
         title: "补充发布检查",
         body: "已有描述\n![clip](/api/issues/assets/asset-1/content)\n",
-        workflow_status: "todo",
+        workflow_status: "",
         source: "internal",
       }),
     );
@@ -101,7 +101,7 @@ describe("InternalIssueForm", () => {
         defaultValues={{
           title: "",
           body: "",
-          workflow_status: "todo",
+          workflow_status: "",
           source: "internal",
         }}
         showSourceSelector
@@ -123,7 +123,7 @@ describe("InternalIssueForm", () => {
         defaultValues={{
           title: "",
           body: "",
-          workflow_status: "todo",
+          workflow_status: "",
           source: "internal",
         }}
         showSourceSelector
@@ -149,7 +149,7 @@ describe("InternalIssueForm", () => {
         defaultValues={{
           title: "",
           body: "",
-          workflow_status: "todo",
+          workflow_status: "",
           source: "internal",
         }}
         showSourceSelector
@@ -167,7 +167,7 @@ describe("InternalIssueForm", () => {
       expect(onSubmit).toHaveBeenCalledWith({
         title: "GitHub 问题标题",
         body: "",
-        workflow_status: "todo",
+        workflow_status: "",
         source: "github",
       }),
     );

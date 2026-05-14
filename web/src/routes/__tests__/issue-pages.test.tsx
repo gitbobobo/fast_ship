@@ -1225,7 +1225,7 @@ describe("Issue pages", () => {
     const navigate = vi.fn();
     const useNavigateSpy = vi.spyOn(ReactRouter, "useNavigate").mockReturnValue(navigate);
     const mutateAsync = vi.fn().mockResolvedValue({
-      data: buildInternalIssue(),
+      data: buildInternalIssue({ internal_meta: null }),
     });
     const uploadMutateAsync = vi.fn().mockResolvedValue({
       data: {
@@ -1284,7 +1284,7 @@ describe("Issue pages", () => {
       expect(mutateAsync).toHaveBeenCalledWith({
         title: "需要补充交付通知",
         body: "## 验收\n\n完成后通知 QA![clip](/api/issues/assets/draft-asset-1/content)\n",
-        workflow_status: "todo",
+        workflow_status: "",
         source: "internal",
       }),
     );
@@ -1292,8 +1292,7 @@ describe("Issue pages", () => {
     expect(navigate).toHaveBeenCalledWith(
       {
         pathname: "/projects/proj-1/issues/internal-issue-1",
-        search:
-          "?issue_state=open&issue_source=internal&issue_workflow_status=todo&issue_sort=updated_desc",
+        search: "?issue_state=open&issue_source=internal&issue_sort=updated_desc",
       },
       { replace: true },
     );

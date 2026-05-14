@@ -22,7 +22,7 @@ import {
 export const internalIssueFormSchema = z.object({
   title: z.string().trim().min(1, "请输入标题"),
   body: z.string(),
-  workflow_status: z.enum(["todo", "in_progress", "done"]),
+  workflow_status: z.enum(["", "todo", "in_progress", "done"]),
   source: z.enum(["internal", "github"]),
 });
 
@@ -65,7 +65,7 @@ export function InternalIssueForm({
     defaultValues: {
       title: defaultValues?.title ?? "",
       body: defaultValues?.body ?? "",
-      workflow_status: defaultValues?.workflow_status ?? "todo",
+      workflow_status: defaultValues?.workflow_status ?? "",
       source: defaultValues?.source ?? "internal",
     },
   });
@@ -76,7 +76,7 @@ export function InternalIssueForm({
     reset({
       title: defaultValues?.title ?? "",
       body: defaultValues?.body ?? "",
-      workflow_status: defaultValues?.workflow_status ?? "todo",
+      workflow_status: defaultValues?.workflow_status ?? "",
       source: defaultValues?.source ?? "internal",
     });
   }, [defaultValues?.body, defaultValues?.title, defaultValues?.workflow_status, defaultValues?.source, reset]);
