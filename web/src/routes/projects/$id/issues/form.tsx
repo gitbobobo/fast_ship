@@ -19,6 +19,7 @@ import {
   useUploadDraftIssueAsset,
   useUploadIssueAsset,
 } from "@/lib/hooks/use-issues";
+import { useProject } from "@/lib/hooks/use-projects";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { toast } from "sonner";
 
@@ -39,6 +40,7 @@ export default function IssueFormPage() {
   const isEdit = Boolean(iid);
 
   const { data: issue, isLoading } = useIssue(iid ?? "");
+  const { data: project } = useProject(id!);
   const updateIssue = useUpdateIssue(iid ?? "", id);
   const uploadIssueAsset = useUploadIssueAsset(iid ?? "");
   const createIssue = useCreateIssue(id!);
@@ -247,6 +249,7 @@ export default function IssueFormPage() {
           onSubmit={handleSubmit}
           showSourceSelector={!isEdit}
           submitLabel={submitLabel}
+          projectName={project?.name}
         />
       </div>
     </>

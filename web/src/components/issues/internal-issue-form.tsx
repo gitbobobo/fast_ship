@@ -38,6 +38,7 @@ interface InternalIssueFormProps {
   showSourceSelector?: boolean;
   submitLabel: string;
   editorRows?: number;
+  projectName?: string;
 }
 
 export function InternalIssueForm({
@@ -50,6 +51,7 @@ export function InternalIssueForm({
   showSourceSelector = false,
   submitLabel,
   editorRows = 24,
+  projectName,
 }: InternalIssueFormProps) {
   const {
     control,
@@ -156,6 +158,19 @@ export function InternalIssueForm({
 
   return (
     <form className="space-y-6" onSubmit={handleFormSubmit}>
+      {projectName && (
+        <div className="space-y-2">
+          <Label htmlFor="issue-project-name">项目</Label>
+          <Input
+            id="issue-project-name"
+            value={projectName}
+            readOnly
+            disabled
+            className="bg-muted"
+          />
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_180px]">
         <div className="space-y-2">
           <Label htmlFor="issue-title">标题</Label>
