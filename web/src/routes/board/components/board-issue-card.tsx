@@ -20,6 +20,7 @@ function BoardIssueCardContent({ issue }: { issue: Issue }) {
         <Link
           to={`/projects/${issue.project_id}/issues/${issue.id}`}
           className="min-w-0 flex-1 text-sm font-medium leading-snug hover:text-primary"
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
         >
           <span className="line-clamp-2">{issue.title}</span>

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -138,5 +138,44 @@ describe("BoardIssueCard", () => {
     expect(screen.getByText("Open")).toBeInTheDocument();
     expect(screen.getByText("开发中")).toBeInTheDocument();
     expect(screen.getByText("@gitbobobo")).toBeInTheDocument();
+  });
+
+  it("attaches draggable attributes to the whole card", () => {
+    mockUseDraggable.mockReturnValue({
+      attributes: {
+        tabIndex: 0,
+        "aria-roledescription": "draggable",
+      },
+      listeners: {},
+      setNodeRef: vi.fn(),
+      transform: null,
+      isDragging: false,
+    });
+
+    renderInRouter(<BoardIssueCard issue={issue} />);
+
+    const card = getCardElement();
+
+    expect(card).toHaveAttribute("tabindex", "0");
+    expect(card).toHaveAttribute("aria-roledescription", "draggable");
+  });
+
+  it("does not start dragging when pressing the issue link", () => {
+    const onPointerDown = vi.fn();
+    mockUseDraggable.mockReturnValue({
+      attributes: {},
+      listeners: {
+        onPointerDown,
+      },
+      setNodeRef: vi.fn(),
+      transform: null,
+      isDragging: false,
+    });
+
+    renderInRouter(<BoardIssueCard issue={issue} />);
+
+    fireEvent.pointerDown(screen.getByRole("link", { name: issue.title }));
+
+    expect(onPointerDown).not.toHaveBeenCalled();
   });
 });
