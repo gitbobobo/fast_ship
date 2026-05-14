@@ -39,7 +39,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -1167,7 +1167,7 @@ export default function IssueDetailPage() {
 
   return (
     <>
-      <Header title={`${project?.name ?? ""}${project ? "·" : ""}${issue.reference}`} />
+      <Header title="问题详情" />
       <div className="mx-auto max-w-7xl p-4 md:p-6">
         {/* Top Navigation Bar */}
         <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
@@ -1572,16 +1572,25 @@ export default function IssueDetailPage() {
           {/* Sidebar */}
           <aside className="space-y-4 lg:sticky lg:top-20 lg:self-start">
             <Card>
-              <CardContent className="space-y-4 p-4">
+              <CardHeader className="pb-0 pt-4">
+                <CardTitle className="text-sm">元数据</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 p-4 pt-3">
+                {/* 项目 */}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm">项目</span>
+                  <span className="text-sm text-muted-foreground">{project?.name ?? "-"}</span>
+                </div>
+
                 {/* 内部状态 */}
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm text-muted-foreground">内部状态</span>
+                  <span className="text-sm">内部状态</span>
                   <Select
                     value={issue.internal_meta?.workflow_status || "unset"}
                     onValueChange={(value) => void handleWorkflowStatusChange(value ?? "unset")}
                     disabled={updateInternalMeta.isPending}
                   >
-                    <SelectTrigger className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs hover:bg-muted data-[state=open]:bg-muted">
+                    <SelectTrigger className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted">
                       <SelectValue placeholder="未设置">
                         {issue.internal_meta?.workflow_status
                           ? ISSUE_WORKFLOW_STATUS_LABELS[issue.internal_meta.workflow_status as IssueWorkflowStatus]
@@ -1605,76 +1614,73 @@ export default function IssueDetailPage() {
                   (issue.github?.assignees?.length ?? 0) > 0 ||
                   issue.github?.milestone ||
                   (issue.github?.labels?.length ?? 0) > 0) && (
-                  <>
-                    <Separator />
-                    <div className="space-y-3">
-                      {(issue.github?.assignees?.length ?? 0) > 0 && (
-                        <div>
-                          <p className="mb-1.5 text-xs font-medium text-muted-foreground">负责人</p>
-                          <div className="flex flex-wrap items-center gap-2">
-                            {issue.github?.assignees.map((assignee) => (
-                              <div
-                                key={assignee.login}
-                                className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm"
+                  <div className="space-y-3">
+                    {(issue.github?.assignees?.length ?? 0) > 0 && (
+                      <div>
+                        <p className="mb-1.5 text-xs font-medium">负责人</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {issue.github?.assignees.map((assignee) => (
+                            <div
+                              key={assignee.login}
+                              className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm text-muted-foreground"
+                            >
+                              <Avatar className="h-5 w-5">
+                                <AvatarImage src={toGitHubMediaProxyUrl(assignee.avatar_url, token)} alt={assignee.login} />
+                                <AvatarFallback className="text-[10px]">{getInitials(assignee.login)}</AvatarFallback>
+                              </Avatar>
+                              <span>@{assignee.login}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {issue.github?.milestone && (
+                      <div>
+                        <p className="mb-1 text-xs font-medium">里程碑</p>
+                        <p className="text-sm text-muted-foreground">{issue.github.milestone.title}</p>
+                      </div>
+                    )}
+                    {(issue.source === "github" || issue.source === "internal") && (
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm">标签</span>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger
+                            render={
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted"
                               >
-                                <Avatar className="h-5 w-5">
-                                  <AvatarImage src={toGitHubMediaProxyUrl(assignee.avatar_url, token)} alt={assignee.login} />
-                                  <AvatarFallback className="text-[10px]">{getInitials(assignee.login)}</AvatarFallback>
-                                </Avatar>
-                                <span className="font-medium">@{assignee.login}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {issue.github?.milestone && (
-                        <div>
-                          <p className="mb-1 text-xs font-medium text-muted-foreground">里程碑</p>
-                          <p className="text-sm font-semibold">{issue.github.milestone.title}</p>
-                        </div>
-                      )}
-                      {(issue.source === "github" || issue.source === "internal") && (
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-sm text-muted-foreground">标签</span>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger
-                              render={
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs hover:bg-muted data-[state=open]:bg-muted"
+                                {visibleLabelNames.length === 0
+                                  ? "未设置"
+                                  : visibleLabelNames.join(", ")}
+                              </Button>
+                            }
+                          />
+                          <DropdownMenuContent align="end" className="min-w-[180px] max-w-[260px]">
+                            {labelOptions.length === 0 ? (
+                              <DropdownMenuItem disabled>暂无可选标签</DropdownMenuItem>
+                            ) : (
+                              labelOptions.map((labelName) => (
+                                <DropdownMenuCheckboxItem
+                                  key={labelName}
+                                  checked={visibleLabelNames.some(
+                                    (label) =>
+                                      label.toLowerCase() === labelName.toLowerCase(),
+                                  )}
+                                  onCheckedChange={() =>
+                                    void handleToggleLabel(labelName)
+                                  }
                                 >
-                                  {visibleLabelNames.length === 0
-                                    ? "未设置"
-                                    : visibleLabelNames.join(", ")}
-                                </Button>
-                              }
-                            />
-                            <DropdownMenuContent align="end" className="min-w-[180px] max-w-[260px]">
-                              {labelOptions.length === 0 ? (
-                                <DropdownMenuItem disabled>暂无可选标签</DropdownMenuItem>
-                              ) : (
-                                labelOptions.map((labelName) => (
-                                  <DropdownMenuCheckboxItem
-                                    key={labelName}
-                                    checked={visibleLabelNames.some(
-                                      (label) =>
-                                        label.toLowerCase() === labelName.toLowerCase(),
-                                    )}
-                                    onCheckedChange={() =>
-                                      void handleToggleLabel(labelName)
-                                    }
-                                  >
-                                    {labelName}
-                                  </DropdownMenuCheckboxItem>
-                                ))
-                              )}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
-                      )}
-                    </div>
-                  </>
+                                  {labelName}
+                                </DropdownMenuCheckboxItem>
+                              ))
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    )}
+                  </div>
                 )}
               </CardContent>
             </Card>
