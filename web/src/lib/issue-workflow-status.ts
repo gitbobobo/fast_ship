@@ -13,3 +13,7 @@ export const ISSUE_WORKFLOW_STATUS_OPTIONS = Object.entries(
   value: value as IssueWorkflowStatus,
   label,
 }));
+
+export const ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS = ISSUE_WORKFLOW_STATUS_OPTIONS.filter(
+  (option) => option.value !== "",
+);

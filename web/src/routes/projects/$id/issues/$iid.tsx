@@ -83,7 +83,7 @@ import { useProject } from "@/lib/hooks/use-projects";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import {
   ISSUE_WORKFLOW_STATUS_LABELS,
-  ISSUE_WORKFLOW_STATUS_OPTIONS,
+  ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
@@ -1599,7 +1599,7 @@ export default function IssueDetailPage() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="unset">未设置</SelectItem>
-                      {ISSUE_WORKFLOW_STATUS_OPTIONS.map((option) => (
+                      {ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS.map((option) => (
                         <SelectItem key={option.value} value={option.value}>
                           {option.label}
                         </SelectItem>
