@@ -13,7 +13,7 @@ function renderWithRouter(initialEntry = "/settings") {
       <Routes>
         <Route path="/settings" element={<SettingsLayout />}>
           <Route path="general" element={<div>管理应用的基本设置</div>} />
-          <Route path="profile" element={<div>修改你的用户名和邮箱</div>} />
+          <Route path="profile" element={<div>修改你的头像、用户名和邮箱</div>} />
           <Route path="password" element={<div>设置新的登录密码</div>} />
           <Route
             path="ai"
@@ -50,7 +50,7 @@ describe("Settings Layout", () => {
     renderWithRouter("/settings/profile");
 
     await waitFor(() => {
-      expect(screen.getByText("修改你的用户名和邮箱")).toBeInTheDocument();
+      expect(screen.getByText("修改你的头像、用户名和邮箱")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getAllByRole("link", { name: /通用/i })[0]);
@@ -70,7 +70,7 @@ describe("Settings Layout", () => {
     fireEvent.click(screen.getAllByRole("link", { name: /个人信息/i })[0]);
 
     await waitFor(() => {
-      expect(screen.getByText("修改你的用户名和邮箱")).toBeInTheDocument();
+      expect(screen.getByText("修改你的头像、用户名和邮箱")).toBeInTheDocument();
     });
   });
 

@@ -76,6 +76,7 @@ type UserResponse struct {
 	ID        string    `json:"id"`
 	Username  string    `json:"username"`
 	Email     string    `json:"email"`
+	AvatarURL string    `json:"avatar_url"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -252,6 +253,24 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 	return &resp, nil
 }
 
+func (s *AuthService) UpdateAvatar(userID string, avatarURL string) (*UserResponse, error) {
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return nil, errs.ErrUserNotFound
+	}
+
+	if avatarURL != user.AvatarURL {
+		user.AvatarURL = avatarURL
+	}
+
+	if err := s.userRepo.Update(user); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	resp := s.toUserResponse(user)
+	return &resp, nil
+}
+
 func (s *AuthService) UpdatePassword(userID string, req *UpdatePasswordRequest) error {
 	user, err := s.userRepo.FindByID(userID)
 	if err != nil {
@@ -294,6 +313,7 @@ func (s *AuthService) toUserResponse(user *model.User) UserResponse {
 		ID:        user.ID,
 		Username:  user.Username,
 		Email:     user.Email,
+		AvatarURL: user.AvatarURL,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 	}

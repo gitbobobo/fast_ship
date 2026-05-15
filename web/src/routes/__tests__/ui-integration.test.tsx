@@ -265,7 +265,7 @@ describe("UI Integration Tests", () => {
 
       // Initially on profile page
       await waitFor(() => {
-        expect(screen.getByText("修改你的用户名和邮箱")).toBeInTheDocument();
+        expect(screen.getByText("修改你的头像、用户名和邮箱")).toBeInTheDocument();
       });
 
       // Navigate to password page via link
@@ -283,7 +283,7 @@ describe("UI Integration Tests", () => {
       fireEvent.click(profileLinks[0]);
 
       await waitFor(() => {
-        expect(screen.getByText("修改你的用户名和邮箱")).toBeInTheDocument();
+        expect(screen.getByText("修改你的头像、用户名和邮箱")).toBeInTheDocument();
       });
     });
   });

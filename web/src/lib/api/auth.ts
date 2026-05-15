@@ -36,6 +36,9 @@ export const authApi = {
   updateMe: (data: { username?: string; email?: string }) =>
     api.put("auth/me", { json: data }).json<ApiResponse<User>>(),
 
+  uploadAvatar: (formData: FormData) =>
+    api.post("auth/avatar", { body: formData }).json<ApiResponse<User>>(),
+
   updatePassword: (data: { old_password: string; new_password: string }) =>
     api.put("auth/password", { json: data }).json<ApiResponse<null>>(),
 };

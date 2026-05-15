@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router";
 import { User, LogOut } from "lucide-react";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -13,7 +13,7 @@ import { useAuthStore } from "@/lib/store/auth-store";
 import { authApi } from "@/lib/api/auth";
 
 export function UserNav() {
-  const { user, refreshToken, logout } = useAuthStore();
+  const { user, token, refreshToken, logout } = useAuthStore();
   const navigate = useNavigate();
 
   const handleLogout = async () => {
@@ -29,12 +29,19 @@ export function UserNav() {
   const rawInitial = user?.username?.charAt(0).toUpperCase();
   const initial = rawInitial || "U";
 
+  const avatarSrc = user?.avatar_url && token
+    ? `${user.avatar_url}?token=${token}`
+    : undefined;
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         render={
           <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full">
             <Avatar className="h-8 w-8">
+              {avatarSrc && (
+                <AvatarImage src={avatarSrc} alt={user?.username} />
+              )}
               <AvatarFallback className="bg-primary text-primary-foreground text-sm font-medium">
                 {initial}
               </AvatarFallback>

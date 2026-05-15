@@ -46,7 +46,11 @@ func Setup(
 			authed.GET("/auth/me", authHandler.GetMe)
 			authed.PUT("/auth/me", authHandler.UpdateMe)
 			authed.PUT("/auth/password", authHandler.UpdatePassword)
+			authed.POST("/auth/avatar", authHandler.UploadAvatar)
 		}
+
+		// 头像访问（支持 query token 和公开访问）
+		api.GET("/avatars/:uid/:filename", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), authHandler.GetAvatar)
 
 		ai := api.Group("/ai", middleware.RequireJWT(cfg, authService))
 		{

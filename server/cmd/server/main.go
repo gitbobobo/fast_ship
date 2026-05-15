@@ -150,7 +150,7 @@ func main() {
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
 
 	// 初始化 Handler
-	authHandler := handler.NewAuthHandler(authService)
+	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
 	aiHandler := handler.NewAIHandler(aiService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)

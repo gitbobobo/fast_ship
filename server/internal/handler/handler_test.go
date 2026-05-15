@@ -116,7 +116,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	return &handlerTestEnv{
 		db:              db,
-		authHandler:     NewAuthHandler(authService),
+		authHandler:     NewAuthHandler(authService, fileStorage, cfg),
 		aiHandler:       NewAIHandler(aiService),
 		versionHandler:  NewVersionHandler(versionService, shipService),
 		issueHandler:    NewIssueHandler(issueService),
