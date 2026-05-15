@@ -40,6 +40,41 @@ export function useIssues(projectId: string, filters: UseIssuesFilters = {}) {
   });
 }
 
+export function useInfiniteBoardIssues(
+  projectId: string,
+  workflowStatus: "" | "todo" | "in_progress" | "done",
+  pageSize = 20,
+) {
+  return useInfiniteQuery({
+    queryKey: [
+      "projects",
+      projectId,
+      "issues",
+      "board",
+      workflowStatus,
+      pageSize,
+    ],
+    initialPageParam: 1,
+    queryFn: async ({ pageParam }) => {
+      const res = await issueApi.list(projectId, {
+        state: "open",
+        workflow_status: workflowStatus || "unset",
+        page: pageParam,
+        page_size: pageSize,
+      });
+      return res.data;
+    },
+    getNextPageParam: (lastPage) => {
+      const totalPages = Math.max(
+        Math.ceil(lastPage.total / lastPage.page_size),
+        1,
+      );
+      return lastPage.page < totalPages ? lastPage.page + 1 : undefined;
+    },
+    enabled: !!projectId,
+  });
+}
+
 export function useIssueFilterOptions(projectId: string) {
   return useQuery({
     queryKey: ["projects", projectId, "issues", "filter-options"],

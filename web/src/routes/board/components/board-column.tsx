@@ -1,15 +1,18 @@
+import { useEffect, useMemo, useRef } from "react";
 import { useDroppable } from "@dnd-kit/core";
+import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useInfiniteBoardIssues } from "@/lib/hooks/use-issues";
 import { COLUMNS, type ColumnId } from "@/routes/board/lib/utils";
 import { BoardIssueCard } from "./board-issue-card";
 import { CloseAllDoneButton } from "./close-all-done-button";
 
 export function BoardColumn({
   columnId,
-  issues,
+  projectId,
 }: {
   columnId: ColumnId;
-  issues: Issue[];
+  projectId: string;
 }) {
   const column = COLUMNS.find((c) => c.id === columnId)!;
 
@@ -17,6 +20,40 @@ export function BoardColumn({
     id: column.id,
     data: { type: "column", column },
   });
+
+  const {
+    data,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    isLoading,
+  } = useInfiniteBoardIssues(projectId, column.statusValue);
+
+  const issues = useMemo(
+    () => data?.pages.flatMap((page) => page.items) ?? [],
+    [data],
+  );
+
+  const total = data?.pages[0]?.total ?? 0;
+
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!hasNextPage) return;
+    const el = sentinelRef.current;
+    if (!el) return;
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          fetchNextPage();
+        }
+      },
+      { rootMargin: "100px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   return (
     <div
@@ -30,7 +67,7 @@ export function BoardColumn({
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-semibold">{column.label}</h3>
           <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1.5 text-xs font-medium text-muted-foreground">
-            {issues.length}
+            {total}
           </span>
         </div>
         {column.id === "done" && issues.length > 0 && (
@@ -39,12 +76,30 @@ export function BoardColumn({
       </div>
 
       <div className="flex-1 space-y-2 overflow-y-auto p-2.5">
-        {issues.length === 0 ? (
+        {isLoading ? (
+          Array.from({ length: 3 }).map((_, i) => (
+            <div
+              key={i}
+              className="h-24 animate-pulse rounded-md border bg-muted/50"
+            />
+          ))
+        ) : issues.length === 0 ? (
           <div className="flex h-24 items-center justify-center rounded-md border border-dashed text-xs text-muted-foreground">
             暂无问题
           </div>
         ) : (
-          issues.map((issue) => <BoardIssueCard key={issue.id} issue={issue} />)
+          <>
+            {issues.map((issue) => (
+              <BoardIssueCard key={issue.id} issue={issue} />
+            ))}
+            {hasNextPage && (
+              <div ref={sentinelRef} className="flex justify-center py-2">
+                {isFetchingNextPage && (
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

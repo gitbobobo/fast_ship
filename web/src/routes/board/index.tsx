@@ -7,7 +7,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { Kanban, Package } from "lucide-react";
+import { Package } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -19,16 +19,12 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
-import {
-  useIssues,
-  useUpdateIssueWorkflowStatus,
-} from "@/lib/hooks/use-issues";
+import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { toast } from "sonner";
 import {
   COLUMNS,
   type ColumnId,
-  getColumnIdByStatus,
   getColumnStatusValue,
   getActiveProjectId,
 } from "@/routes/board/lib/utils";
@@ -82,67 +78,32 @@ export default function BoardPage() {
     }
   }, [activeProjectId, urlProjectId, searchParams, setSearchParams]);
 
-  const { data: issuesData, isLoading: issuesLoading } = useIssues(
-    activeProjectId,
-    {
-      state: "open",
-      // 看板需要展示所有未关闭问题以支持跨列拖拽。
-      // 500 为上限，超出时后续可接入虚拟滚动或分页加载。
-      page_size: 500,
-    },
-  );
-
-  const issues = useMemo(() => issuesData?.items ?? [], [issuesData]);
-  const hasMoreIssues = (issuesData?.total ?? 0) > 500;
-
-  const groupedIssues = useMemo(() => {
-    const groups: Record<ColumnId, Issue[]> = {
-      unset: [],
-      todo: [],
-      in_progress: [],
-      done: [],
-    };
-    for (const issue of issues) {
-      const status = issue.internal_meta?.workflow_status ?? "";
-      const columnId = getColumnIdByStatus(status);
-      groups[columnId].push(issue);
-    }
-    return groups;
-  }, [issues]);
-
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const activeIssue = useMemo(
-    () => (activeId ? issues.find((i) => i.id === activeId) : null),
-    [activeId, issues],
-  );
+  const [activeIssue, setActiveIssue] = useState<Issue | null>(null);
 
   const updateWorkflowStatus = useUpdateIssueWorkflowStatus();
 
   const handleDragStart = useCallback((event: DragStartEvent) => {
-    setActiveId(event.active.id as string);
+    setActiveIssue(event.active.data.current?.issue ?? null);
   }, []);
 
   const handleDragEnd = useCallback(
     async (event: DragEndEvent) => {
-      setActiveId(null);
-      const { active, over } = event;
-      if (!over) return;
-
-      const issueId = active.id as string;
-      if (over.data.current?.type !== "column") return;
-      const columnId = over.id as string;
-
-      const issue = issues.find((i) => i.id === issueId);
+      const { over } = event;
+      const issue = event.active.data.current?.issue;
+      setActiveIssue(null);
       if (!issue) return;
+      if (!over) return;
+      if (over.data.current?.type !== "column") return;
 
+      const columnId = over.id as ColumnId;
       const currentStatus = issue.internal_meta?.workflow_status ?? "";
-      const targetStatus = getColumnStatusValue(columnId as ColumnId);
+      const targetStatus = getColumnStatusValue(columnId);
 
       if (currentStatus === targetStatus) return;
 
       try {
         await updateWorkflowStatus.mutateAsync({
-          issueId,
+          issueId: issue.id,
           projectId: issue.project_id,
           workflow_status: targetStatus,
         });
@@ -151,7 +112,7 @@ export default function BoardPage() {
         toast.error("状态更新失败");
       }
     },
-    [issues, updateWorkflowStatus],
+    [updateWorkflowStatus],
   );
 
   const handleProjectChange = (value: string | null) => {
@@ -197,15 +158,10 @@ export default function BoardPage() {
               </SelectContent>
             </Select>
           )}
-          {hasMoreIssues && (
-            <p className="text-xs text-amber-600 dark:text-amber-400">
-              问题数量超过 500，看板仅展示前 500 条
-            </p>
-          )}
         </div>
 
         {/* Board */}
-        {projectsLoading || issuesLoading ? (
+        {projectsLoading ? (
           <div className="flex flex-1 gap-4 overflow-hidden">
             {COLUMNS.map((col) => (
               <div
@@ -243,16 +199,6 @@ export default function BoardPage() {
               </p>
             </CardContent>
           </Card>
-        ) : issues.length === 0 ? (
-          <Card className="flex-1">
-            <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-              <Kanban className="mb-4 h-12 w-12 text-muted-foreground/50" />
-              <h3 className="text-lg font-medium">暂无问题</h3>
-              <p className="mt-1 text-sm text-muted-foreground">
-                该项目下没有未关闭的问题
-              </p>
-            </CardContent>
-          </Card>
         ) : (
           <DndContext
             collisionDetection={pointerWithin}
@@ -265,7 +211,7 @@ export default function BoardPage() {
                 <BoardColumn
                   key={column.id}
                   columnId={column.id}
-                  issues={groupedIssues[column.id]}
+                  projectId={activeProjectId}
                 />
               ))}
             </div>
