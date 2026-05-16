@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MarkdownEditor } from "@/components/ui/markdown-editor";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { useThemeStore } from "@/lib/store/theme-store";
@@ -107,5 +107,59 @@ describe("MarkdownEditor", () => {
     await waitFor(() =>
       expect(textarea).toHaveValue("更新后的描述![clip](/api/issues/assets/asset-1/content)\n"),
     );
+  });
+
+  describe("mobile viewport", () => {
+    const originalMatchMedia = window.matchMedia;
+
+    function mockMobileViewport(mobile: boolean) {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        writable: true,
+        value: vi.fn().mockImplementation((query: string) => ({
+          matches: mobile && query.includes("767"),
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        })),
+      });
+    }
+
+    afterEach(() => {
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        writable: true,
+        value: originalMatchMedia,
+      });
+    });
+
+    it("uses edit mode on mobile and hides live preview button", () => {
+      mockMobileViewport(true);
+      render(<MarkdownEditor value="hello" onChange={vi.fn()} />);
+
+      // edit 模式下不应渲染预览面板
+      const previewPane = document.querySelector(".w-md-editor-preview");
+      expect(previewPane).toBeNull();
+
+      // 额外命令栏不应包含 live 按钮（aria-label 包含 "Live"）
+      const extraButtons = document.querySelectorAll("[data-testid=\"w-md-editor-toolbar-extra\"] button");
+      const liveButton = Array.from(extraButtons).find(
+        (btn) => btn.getAttribute("aria-label")?.includes("Live"),
+      );
+      expect(liveButton).toBeUndefined();
+    });
+
+    it("shows live preview on desktop", () => {
+      mockMobileViewport(false);
+      render(<MarkdownEditor value="hello" onChange={vi.fn()} />);
+
+      // live 模式下应渲染预览面板
+      const previewPane = document.querySelector(".w-md-editor-preview");
+      expect(previewPane).toBeInTheDocument();
+    });
   });
 });

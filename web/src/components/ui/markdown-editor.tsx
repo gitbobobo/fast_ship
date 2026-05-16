@@ -5,6 +5,7 @@ import { ImageIcon, Loader2 } from "lucide-react";
 import { useThemeStore } from "@/lib/store/theme-store";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toProtectedMediaUrl } from "@/lib/utils/github-media-proxy";
+import { useIsMobile } from "@/lib/hooks/use-is-mobile";
 import { cn } from "@/lib/utils";
 
 async function readClipboardImageFiles() {
@@ -103,7 +104,7 @@ function useImageUploadCommand(
     name: "upload-image",
     keyCommand: "upload-image",
     buttonProps: { "aria-label": "上传图片", title: "上传图片" },
-    icon: (uploading ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : <ImageIcon className="h-[14px] w-[14px]" />) as ReactElement,
+    icon: uploading ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : <ImageIcon className="h-[14px] w-[14px]" />,
     execute: () => {
       const input = document.createElement("input");
       input.type = "file";
@@ -137,6 +138,7 @@ export function MarkdownEditor({
 }: MarkdownEditorProps) {
   const { resolvedTheme } = useThemeStore();
   const token = useAuthStore((state) => state.token);
+  const isMobile = useIsMobile();
   const height = useMemo(() => `${rows * 24 + 64}px`, [rows]);
   const rootRef = useRef<HTMLDivElement>(null);
   const valueRef = useRef(value);
@@ -164,6 +166,14 @@ export function MarkdownEditor({
     result.splice(insertAt, 0, uploadImageCommand);
     return result;
   }, [uploadImageCommand]);
+
+  const editorExtraCommands = useMemo(() => {
+    const defaults = commands.getExtraCommands();
+    if (isMobile) {
+      return defaults.filter((c) => c.name !== "live");
+    }
+    return defaults;
+  }, [isMobile]);
 
   const handlePaste = useEffectEvent(async (event: ClipboardEvent | globalThis.ClipboardEvent) => {
     if (!onPasteImageRef.current) {
@@ -251,8 +261,9 @@ export function MarkdownEditor({
         value={value}
         onChange={(val) => onChange?.(val ?? "")}
         height={height}
-        preview="live"
+        preview={isMobile ? "edit" : "live"}
         commands={editorCommands}
+        extraCommands={editorExtraCommands}
         className="w-full"
         previewOptions={{
           components: {
