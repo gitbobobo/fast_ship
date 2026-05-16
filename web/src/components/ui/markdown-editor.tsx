@@ -1,6 +1,7 @@
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import MDEditor from "@uiw/react-md-editor";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState, type ReactElement } from "react";
+import MDEditor, { commands, type ICommand } from "@uiw/react-md-editor";
 import "@uiw/react-md-editor/markdown-editor.css";
+import { ImageIcon, Loader2 } from "lucide-react";
 import { useThemeStore } from "@/lib/store/theme-store";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toProtectedMediaUrl } from "@/lib/utils/github-media-proxy";
@@ -42,6 +43,89 @@ interface MarkdownEditorProps {
   className?: string;
 }
 
+function findTextarea(root: HTMLElement | null, target?: EventTarget | null): HTMLTextAreaElement | null {
+  if (target instanceof HTMLTextAreaElement) {
+    return target;
+  }
+  if (!root) return null;
+  const activeElement = root.ownerDocument.activeElement;
+  if (activeElement instanceof HTMLTextAreaElement && root.contains(activeElement)) {
+    return activeElement;
+  }
+  return root.querySelector("textarea");
+}
+
+function useImageUploadCommand(
+  rootRef: React.RefObject<HTMLDivElement | null>,
+  valueRef: React.MutableRefObject<string>,
+  onChangeRef: React.MutableRefObject<((value: string) => void) | undefined>,
+  onPasteImageRef: React.MutableRefObject<((file: File) => Promise<string>) | undefined>,
+  setUploadingImageCount: React.Dispatch<React.SetStateAction<number>>,
+) {
+  const [uploading, setUploading] = useState(false);
+
+  const uploadFiles = useCallback(async (files: File[]) => {
+    if (!onPasteImageRef.current || files.length === 0) return;
+
+    const textarea = findTextarea(rootRef.current);
+    if (!textarea) return;
+
+    let nextValue = valueRef.current;
+    let selectionStart = textarea.selectionStart ?? nextValue.length;
+    let selectionEnd = textarea.selectionEnd ?? selectionStart;
+
+    setUploadingImageCount((c) => c + 1);
+    setUploading(true);
+    try {
+      for (const file of files) {
+        const markdown = await onPasteImageRef.current(file);
+        const insertion = `${markdown}\n`;
+        nextValue = `${nextValue.slice(0, selectionStart)}${insertion}${nextValue.slice(selectionEnd)}`;
+        selectionStart += insertion.length;
+        selectionEnd = selectionStart;
+        valueRef.current = nextValue;
+        onChangeRef.current?.(nextValue);
+      }
+      requestAnimationFrame(() => {
+        const ta = findTextarea(rootRef.current) ?? textarea;
+        ta.focus();
+        ta.setSelectionRange(selectionStart, selectionStart);
+      });
+    } catch {
+      return;
+    } finally {
+      setUploadingImageCount((c) => Math.max(0, c - 1));
+      setUploading(false);
+    }
+  }, [rootRef, onPasteImageRef, setUploadingImageCount, valueRef, onChangeRef]);
+
+  const command = useMemo<ICommand>(() => ({
+    name: "upload-image",
+    keyCommand: "upload-image",
+    buttonProps: { "aria-label": "上传图片", title: "上传图片" },
+    icon: (uploading ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : <ImageIcon className="h-[14px] w-[14px]" />) as ReactElement,
+    execute: () => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/*";
+      input.multiple = true;
+      input.style.display = "none";
+      input.onchange = () => {
+        const files = Array.from(input.files ?? []).filter((f) => f.type.startsWith("image/"));
+        void uploadFiles(files);
+        input.remove();
+      };
+      const cleanup = () => { if (input.parentNode) input.remove(); };
+      input.addEventListener("cancel", cleanup);
+      document.body.appendChild(input);
+      input.click();
+      setTimeout(cleanup, 300_000);
+    },
+  }), [uploading, uploadFiles]);
+
+  return command;
+}
+
 export function MarkdownEditor({
   id,
   value = "",
@@ -64,23 +148,22 @@ export function MarkdownEditor({
   onChangeRef.current = onChange;
   onPasteImageRef.current = onPasteImage;
 
-  const findEditorTextarea = (target: EventTarget | null) => {
-    if (target instanceof HTMLTextAreaElement) {
-      return target;
-    }
+  const uploadImageCommand = useImageUploadCommand(
+    rootRef,
+    valueRef,
+    onChangeRef,
+    onPasteImageRef,
+    setUploadingImageCount,
+  );
 
-    const root = rootRef.current;
-    if (!root) {
-      return null;
-    }
-
-    const activeElement = root.ownerDocument.activeElement;
-    if (activeElement instanceof HTMLTextAreaElement && root.contains(activeElement)) {
-      return activeElement;
-    }
-
-    return root.querySelector("textarea");
-  };
+  const editorCommands = useMemo(() => {
+    const defaultCommands = commands.getCommands();
+    const linkIdx = defaultCommands.findIndex((c) => c.name === "link");
+    const insertAt = linkIdx >= 0 ? linkIdx + 1 : defaultCommands.length;
+    const result = [...defaultCommands];
+    result.splice(insertAt, 0, uploadImageCommand);
+    return result;
+  }, [uploadImageCommand]);
 
   const handlePaste = useEffectEvent(async (event: ClipboardEvent | globalThis.ClipboardEvent) => {
     if (!onPasteImageRef.current) {
@@ -103,7 +186,7 @@ export function MarkdownEditor({
       return;
     }
 
-    const target = findEditorTextarea(event.target);
+    const target = findTextarea(rootRef.current, event.target);
     if (!target) {
       return;
     }
@@ -126,7 +209,7 @@ export function MarkdownEditor({
       }
 
       requestAnimationFrame(() => {
-        const textarea = findEditorTextarea(target) ?? target;
+        const textarea = findTextarea(rootRef.current, target) ?? target;
         textarea.focus();
         textarea.setSelectionRange(selectionStart, selectionStart);
       });
@@ -169,7 +252,7 @@ export function MarkdownEditor({
         onChange={(val) => onChange?.(val ?? "")}
         height={height}
         preview="live"
-        hideToolbar={false}
+        commands={editorCommands}
         className="w-full"
         previewOptions={{
           components: {
