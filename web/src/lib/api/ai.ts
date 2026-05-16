@@ -16,4 +16,9 @@ export const aiApi = {
     api
       .post(`issues/${issueId}/checklist-suggestions`)
       .json<ApiResponse<IssueChecklistSuggestions>>(),
+
+  generateTitle: (body: string) =>
+    api
+      .post("ai/generate-title", { json: { body } })
+      .json<ApiResponse<GenerateTitleResponse>>(),
 };

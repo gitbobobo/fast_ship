@@ -111,6 +111,10 @@ interface IssueChecklistSuggestions {
   items: IssueChecklistSuggestion[];
 }
 
+interface GenerateTitleResponse {
+  title: string;
+}
+
 interface IssueActor {
   login: string;
   avatar_url: string;

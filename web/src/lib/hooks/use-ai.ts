@@ -30,3 +30,12 @@ export function useIssueChecklistSuggestions(issueId: string) {
     },
   });
 }
+
+export function useGenerateTitle() {
+  return useMutation({
+    mutationFn: async (body: string) => {
+      const res = await aiApi.generateTitle(body);
+      return res.data;
+    },
+  });
+}

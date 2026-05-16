@@ -1,7 +1,23 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import { InternalIssueForm } from "@/components/issues/internal-issue-form";
+import { useAISettings, useGenerateTitle } from "@/lib/hooks/use-ai";
+
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn() },
+}));
+
+vi.mock("@/lib/hooks/use-ai", () => ({
+  useAISettings: vi.fn(() => ({
+    data: { configured: true, api_host: "https://api.minimaxi.com", model: "MiniMax-M2.5" },
+  })),
+  useGenerateTitle: vi.fn(() => ({
+    mutate: vi.fn(),
+    isPending: false,
+  })),
+}));
 
 vi.mock("@/components/ui/markdown-editor", () => ({
   MarkdownEditor: ({
@@ -171,5 +187,153 @@ describe("InternalIssueForm", () => {
         source: "github",
       }),
     );
+  });
+
+  it("disables generate title button when body is less than 10 characters", () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{ title: "", body: "短内容", workflow_status: "", source: "internal" }}
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "请先填写正文内容（至少 10 个字符）" })).toBeDisabled();
+  });
+
+  it("enables generate title button when body has 10+ characters", () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "这是一段足够长的正文内容描述",
+          workflow_status: "",
+          source: "internal",
+        }}
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "AI 生成标题" })).toBeEnabled();
+  });
+
+  it("disables generate title button when AI is not configured", () => {
+    vi.mocked(useAISettings).mockImplementation(() => ({
+      data: { configured: false, api_host: "", model: "" },
+    } as ReturnType<typeof useAISettings>));
+
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "这是一段足够长的正文内容描述",
+          workflow_status: "",
+          source: "internal",
+        }}
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "请先在设置中配置 AI" })).toBeDisabled();
+
+    vi.mocked(useAISettings).mockRestore();
+  });
+
+  it("calls generate title mutation on click and sets title on success", async () => {
+    const user = userEvent.setup();
+    const mockMutate = vi.fn((_body: string, options?: { onSuccess?: (data: { title: string }) => void }) => {
+      options?.onSuccess?.({ title: "修复登录白屏问题" });
+    });
+    vi.mocked(useGenerateTitle).mockImplementation(() => ({
+      mutate: mockMutate,
+      isPending: false,
+    } as ReturnType<typeof useGenerateTitle>));
+
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "这是一段足够长的正文内容描述",
+          workflow_status: "",
+          source: "internal",
+        }}
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "AI 生成标题" }));
+    expect(mockMutate).toHaveBeenCalledWith("这是一段足够长的正文内容描述", expect.any(Object));
+    expect(screen.getByPlaceholderText("例如：设置页在切换主题后闪退")).toHaveValue("修复登录白屏问题");
+
+    vi.mocked(useGenerateTitle).mockRestore();
+  });
+
+  it("shows loading spinner when mutation is pending", () => {
+    vi.mocked(useGenerateTitle).mockImplementation(() => ({
+      mutate: vi.fn(),
+      isPending: true,
+    } as ReturnType<typeof useGenerateTitle>));
+
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "这是一段足够长的正文内容描述",
+          workflow_status: "",
+          source: "internal",
+        }}
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "AI 生成标题" });
+    expect(button.querySelector(".animate-spin")).toBeInTheDocument();
+
+    vi.mocked(useGenerateTitle).mockRestore();
+  });
+
+  it("shows toast error when mutation fails", async () => {
+    const user = userEvent.setup();
+    const mockMutate = vi.fn((_body: string, options?: { onError?: () => void }) => {
+      options?.onError?.();
+    });
+    vi.mocked(useGenerateTitle).mockImplementation(() => ({
+      mutate: mockMutate,
+      isPending: false,
+    } as ReturnType<typeof useGenerateTitle>));
+
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "这是一段足够长的正文内容描述",
+          workflow_status: "",
+          source: "internal",
+        }}
+        onCancel={vi.fn()}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "AI 生成标题" }));
+    expect(toast.error).toHaveBeenCalledWith("生成标题失败，请稍后重试");
+
+    vi.mocked(useGenerateTitle).mockRestore();
   });
 });

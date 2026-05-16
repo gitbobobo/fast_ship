@@ -2,6 +2,8 @@ import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { Controller, useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { Loader2, Sparkles } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +20,7 @@ import {
   ISSUE_WORKFLOW_STATUS_LABELS,
   ISSUE_WORKFLOW_STATUS_OPTIONS,
 } from "@/lib/issue-workflow-status";
+import { useAISettings, useGenerateTitle } from "@/lib/hooks/use-ai";
 
 export const internalIssueFormSchema = z.object({
   title: z.string().trim().min(1, "请输入标题"),
@@ -58,6 +61,7 @@ export function InternalIssueForm({
     register,
     handleSubmit,
     getValues,
+    setValue,
     reset,
     formState: { errors },
   } = useForm<InternalIssueFormInput>({
@@ -71,6 +75,29 @@ export function InternalIssueForm({
   });
 
   const source = useWatch({ control, name: "source" });
+  const body = useWatch({ control, name: "body" });
+
+  const { data: aiSettings } = useAISettings();
+  const generateTitleMutation = useGenerateTitle();
+  const canGenerateTitle = aiSettings?.configured && [...(body ?? "")].length >= 10;
+
+  const generateTitleTooltip = !aiSettings?.configured
+    ? "请先在设置中配置 AI"
+    : !canGenerateTitle
+      ? "请先填写正文内容（至少 10 个字符）"
+      : "AI 生成标题";
+
+  const handleGenerateTitle = () => {
+    const currentBody = getValues("body");
+    generateTitleMutation.mutate(currentBody, {
+      onSuccess: (data) => {
+        setValue("title", data.title, { shouldDirty: true });
+      },
+      onError: () => {
+        toast.error("生成标题失败，请稍后重试");
+      },
+    });
+  };
 
   useEffect(() => {
     reset({
@@ -174,11 +201,30 @@ export function InternalIssueForm({
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[1fr_180px]">
         <div className="space-y-2">
           <Label htmlFor="issue-title">标题</Label>
-          <Input
-            id="issue-title"
-            placeholder="例如：设置页在切换主题后闪退"
-            {...register("title")}
-          />
+          <div className="flex gap-2">
+            <Input
+              id="issue-title"
+              placeholder="例如：设置页在切换主题后闪退"
+              className="flex-1"
+              {...register("title")}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-30"
+              disabled={!canGenerateTitle || generateTitleMutation.isPending}
+              title={generateTitleTooltip}
+              aria-label={generateTitleTooltip}
+              onClick={handleGenerateTitle}
+            >
+              {generateTitleMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
           {errors.title && (
             <p className="text-xs text-destructive">{errors.title.message}</p>
           )}

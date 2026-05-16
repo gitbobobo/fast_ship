@@ -152,6 +152,8 @@ vi.mock("@/lib/hooks/use-issues", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-ai", () => ({
+  useAISettings: vi.fn(() => ({ data: { configured: false } })),
+  useGenerateTitle: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
   useIssueChecklistSuggestions: vi.fn(),
 }));
 
