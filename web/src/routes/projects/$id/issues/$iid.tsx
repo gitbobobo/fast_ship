@@ -847,10 +847,11 @@ export default function IssueDetailPage() {
   };
 
   const buildIssuePrompt = (comments?: IssueComment[]) => {
+    if (!issue) return "";
     const commentsXml = comments
       ? "\n" + comments.map((c) => `<comment>${c.body || ""}</comment>`).join("\n")
       : "";
-    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue!.id}</id>\n<title>${issue!.title}</title>\n<body>${issue!.body || ""}</body>${commentsXml}`;
+    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>\n<body>${issue.body || ""}</body>${commentsXml}`;
   };
 
   const handleCopyIssuePrompt = async () => {
@@ -867,7 +868,7 @@ export default function IssueDetailPage() {
       const commentsBefore = timelineItems
         .slice(0, commentIndex + 1)
         .filter((t) => t.type === "comment")
-        .map((t) => t.data as IssueComment);
+        .map((t) => t.data);
       await copyToClipboard(buildIssuePrompt(commentsBefore));
       toast.success("已复制提示词");
     } catch {
@@ -1199,285 +1200,277 @@ export default function IssueDetailPage() {
 
   const sidebarCards = (
     <>
-            <Card>
-              <CardHeader className="pb-0 pt-4">
-                <CardTitle className="text-sm">元数据</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 p-4 pt-3">
-                {/* 项目 */}
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm">项目</span>
-                  <span className="text-sm text-muted-foreground">{project?.name ?? "-"}</span>
-                </div>
+      <Card>
+        <CardHeader className="pb-0 pt-4">
+          <CardTitle className="text-sm">元数据</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 p-4 pt-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm">项目</span>
+            <span className="text-sm text-muted-foreground">{project?.name ?? "-"}</span>
+          </div>
 
-                {/* 内部状态 */}
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm">内部状态</span>
-                  <Select
-                    value={issue.internal_meta?.workflow_status || "unset"}
-                    onValueChange={(value) => void handleWorkflowStatusChange(value ?? "unset")}
-                    disabled={updateInternalMeta.isPending}
-                  >
-                    <SelectTrigger className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted">
-                      <SelectValue placeholder="未设置">
-                        {issue.internal_meta?.workflow_status
-                          ? ISSUE_WORKFLOW_STATUS_LABELS[issue.internal_meta.workflow_status as IssueWorkflowStatus]
-                          : "未设置"}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="unset">未设置</SelectItem>
-                      {ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm">内部状态</span>
+            <Select
+              value={issue.internal_meta?.workflow_status || "unset"}
+              onValueChange={(value) => void handleWorkflowStatusChange(value ?? "unset")}
+              disabled={updateInternalMeta.isPending}
+            >
+              <SelectTrigger className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted">
+                <SelectValue placeholder="未设置">
+                  {issue.internal_meta?.workflow_status
+                    ? ISSUE_WORKFLOW_STATUS_LABELS[issue.internal_meta.workflow_status as IssueWorkflowStatus]
+                    : "未设置"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="unset">未设置</SelectItem>
+                {ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
 
-                {/* 负责人 & 里程碑 & 标签 */}
-                {(issue.source === "github" ||
-                  issue.source === "internal" ||
-                  (issue.github?.assignees?.length ?? 0) > 0 ||
-                  issue.github?.milestone ||
-                  (issue.github?.labels?.length ?? 0) > 0) && (
-                  <div className="space-y-3">
-                    {(issue.github?.assignees?.length ?? 0) > 0 && (
-                      <div>
-                        <p className="mb-1.5 text-xs font-medium">负责人</p>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {issue.github?.assignees.map((assignee) => (
-                            <div
-                              key={assignee.login}
-                              className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm text-muted-foreground"
-                            >
-                              <Avatar className="h-5 w-5">
-                                <AvatarImage src={toGitHubMediaProxyUrl(assignee.avatar_url, token)} alt={assignee.login} />
-                                <AvatarFallback className="text-[10px]">{getInitials(assignee.login)}</AvatarFallback>
-                              </Avatar>
-                              <span>@{assignee.login}</span>
-                            </div>
-                          ))}
-                        </div>
+          {((issue.github?.assignees?.length ?? 0) > 0 ||
+            issue.github?.milestone ||
+            (issue.github?.labels?.length ?? 0) > 0) && (
+            <div className="space-y-3">
+              {(issue.github?.assignees?.length ?? 0) > 0 && (
+                <div>
+                  <p className="mb-1.5 text-xs font-medium">负责人</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {issue.github?.assignees.map((assignee) => (
+                      <div
+                        key={assignee.login}
+                        className="inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-sm text-muted-foreground"
+                      >
+                        <Avatar className="h-5 w-5">
+                          <AvatarImage src={toGitHubMediaProxyUrl(assignee.avatar_url, token)} alt={assignee.login} />
+                          <AvatarFallback className="text-[10px]">{getInitials(assignee.login)}</AvatarFallback>
+                        </Avatar>
+                        <span>@{assignee.login}</span>
                       </div>
-                    )}
-                    {issue.github?.milestone && (
-                      <div>
-                        <p className="mb-1 text-xs font-medium">里程碑</p>
-                        <p className="text-sm text-muted-foreground">{issue.github.milestone.title}</p>
-                      </div>
-                    )}
-                    {(issue.source === "github" || issue.source === "internal") && (
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm">标签</span>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger
-                            render={
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted"
-                              >
-                                {visibleLabelNames.length === 0
-                                  ? "未设置"
-                                  : visibleLabelNames.join(", ")}
-                              </Button>
-                            }
-                          />
-                          <DropdownMenuContent align="end" className="min-w-[180px] max-w-[260px]">
-                            {labelOptions.length === 0 ? (
-                              <DropdownMenuItem disabled>暂无可选标签</DropdownMenuItem>
-                            ) : (
-                              labelOptions.map((labelName) => (
-                                <DropdownMenuCheckboxItem
-                                  key={labelName}
-                                  checked={visibleLabelNames.some(
-                                    (label) =>
-                                      label.toLowerCase() === labelName.toLowerCase(),
-                                  )}
-                                  onCheckedChange={() =>
-                                    void handleToggleLabel(labelName)
-                                  }
-                                >
-                                  {labelName}
-                                </DropdownMenuCheckboxItem>
-                              ))
-                            )}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                    )}
+                    ))}
                   </div>
-                )}
-              </CardContent>
-            </Card>
+                </div>
+              )}
+              {issue.github?.milestone && (
+                <div>
+                  <p className="mb-1 text-xs font-medium">里程碑</p>
+                  <p className="text-sm text-muted-foreground">{issue.github.milestone.title}</p>
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm">标签</span>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted"
+                      >
+                        {visibleLabelNames.length === 0
+                          ? "未设置"
+                          : visibleLabelNames.join(", ")}
+                      </Button>
+                    }
+                  />
+                  <DropdownMenuContent align="end" className="min-w-[180px] max-w-[260px]">
+                    {labelOptions.length === 0 ? (
+                      <DropdownMenuItem disabled>暂无可选标签</DropdownMenuItem>
+                    ) : (
+                      labelOptions.map((labelName) => (
+                        <DropdownMenuCheckboxItem
+                          key={labelName}
+                          checked={visibleLabelNames.some(
+                            (label) =>
+                              label.toLowerCase() === labelName.toLowerCase(),
+                          )}
+                          onCheckedChange={() =>
+                            void handleToggleLabel(labelName)
+                          }
+                        >
+                          {labelName}
+                        </DropdownMenuCheckboxItem>
+                      ))
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
-            {/* 任务清单 */}
-            <Card>
-              <CardContent className="space-y-4 p-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">任务清单</h3>
+      <Card>
+        <CardContent className="space-y-4 p-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold">任务清单</h3>
+            {isChecklistEditing ? (
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="取消编辑"
+                  onClick={handleChecklistCancelEdit}
+                  disabled={replaceChecklist.isPending}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  size="icon-sm"
+                  aria-label="保存"
+                  title="保存任务清单"
+                  onClick={() => void handleChecklistSave()}
+                  disabled={!isChecklistDirty || replaceChecklist.isPending}
+                >
+                  {replaceChecklist.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Check className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="智能识别任务清单建议"
+                  onClick={() => void handleOpenSuggestionDialog()}
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="编辑"
+                  title="编辑任务清单"
+                  onClick={() => setIsChecklistEditing(true)}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {checklistDraft.length > 0 && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-sm">
+                <span className="font-semibold">{draftProgress ?? 0}%</span>
+                <span className="text-xs text-muted-foreground">
+                  {completedChecklistCount}/{checklistDraft.length} 项完成
+                  {issue.internal_meta?.checklist_updated_at && (
+                    <span className="ml-1">· 更新于 {formatRelativeTime(issue.internal_meta.checklist_updated_at)}</span>
+                  )}
+                </span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-muted">
+                <div
+                  className={cn(
+                    "h-full rounded-full transition-all",
+                    (draftProgress ?? 0) >= 100 ? "bg-emerald-500" : "bg-amber-500",
+                  )}
+                  style={{ width: `${draftProgress ?? 0}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            {checklistDraft.length === 0 ? (
+              <div className="text-sm text-muted-foreground">
+                还没有任务清单。
+              </div>
+            ) : (
+              checklistDraft.map((item, index) => (
+                <div
+                  key={item.localId}
+                  className={cn(
+                    "group flex items-center gap-3 rounded-lg border p-2.5 transition-colors",
+                    isChecklistEditing ? "bg-card" : "bg-card hover:bg-muted/50",
+                  )}
+                >
                   {isChecklistEditing ? (
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="取消编辑"
-                        onClick={handleChecklistCancelEdit}
-                        disabled={replaceChecklist.isPending}
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="icon-sm"
-                        aria-label="保存"
-                        title="保存任务清单"
-                        onClick={() => void handleChecklistSave()}
-                        disabled={!isChecklistDirty || replaceChecklist.isPending}
-                      >
-                        {replaceChecklist.isPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Check className="h-3.5 w-3.5" />
-                        )}
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="智能识别任务清单建议"
-                        onClick={() => void handleOpenSuggestionDialog()}
-                      >
-                        <Sparkles className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="编辑"
-                        title="编辑任务清单"
-                        onClick={() => setIsChecklistEditing(true)}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-
-                {checklistDraft.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-semibold">{draftProgress ?? 0}%</span>
-                      <span className="text-xs text-muted-foreground">
-                        {completedChecklistCount}/{checklistDraft.length} 项完成
-                        {issue.internal_meta?.checklist_updated_at && (
-                          <span className="ml-1">· 更新于 {formatRelativeTime(issue.internal_meta.checklist_updated_at)}</span>
-                        )}
-                      </span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-muted">
-                      <div
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleChecklistChange(item.localId, { isCompleted: !item.isCompleted })}
                         className={cn(
-                          "h-full rounded-full transition-all",
-                          (draftProgress ?? 0) >= 100 ? "bg-emerald-500" : "bg-amber-500",
+                          "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors",
+                          item.isCompleted
+                            ? "border-emerald-500 bg-emerald-500 text-white"
+                            : "border-input bg-background text-transparent hover:border-muted-foreground",
                         )}
-                        style={{ width: `${draftProgress ?? 0}%` }}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                      </button>
+                      <Input
+                        value={item.title}
+                        onChange={(event) =>
+                          handleChecklistChange(item.localId, { title: event.target.value })
+                        }
+                        placeholder={`任务 ${index + 1}`}
+                        className={cn("h-8 flex-1", item.isCompleted && "text-muted-foreground line-through")}
                       />
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  {checklistDraft.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">
-                      还没有任务清单。
-                    </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 shrink-0"
+                        aria-label={`删除任务清单 ${index + 1}`}
+                        onClick={() => handleChecklistRemove(item.localId)}
+                      >
+                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    </>
                   ) : (
-                    checklistDraft.map((item, index) => (
-                      <div
-                        key={item.localId}
+                    <>
+                      <button
+                        type="button"
+                        disabled={replaceChecklist.isPending}
+                        onClick={() => void handleChecklistToggleCompleted(item.localId)}
+                        aria-label={
+                          item.isCompleted
+                            ? `取消完成任务清单 ${index + 1}`
+                            : `标记完成任务清单 ${index + 1}`
+                        }
                         className={cn(
-                          "group flex items-center gap-3 rounded-lg border p-2.5 transition-colors",
-                          isChecklistEditing ? "bg-card" : "bg-card hover:bg-muted/50",
+                          "inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded border transition-colors",
+                          item.isCompleted
+                            ? "border-emerald-500 bg-emerald-500 text-white"
+                            : "border-input bg-background text-transparent hover:border-muted-foreground",
                         )}
                       >
-                        {isChecklistEditing ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => handleChecklistChange(item.localId, { isCompleted: !item.isCompleted })}
-                              className={cn(
-                                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors",
-                                item.isCompleted
-                                  ? "border-emerald-500 bg-emerald-500 text-white"
-                                  : "border-input bg-background text-transparent hover:border-muted-foreground",
-                              )}
-                            >
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                            </button>
-                            <Input
-                              value={item.title}
-                              onChange={(event) =>
-                                handleChecklistChange(item.localId, { title: event.target.value })
-                              }
-                              placeholder={`任务 ${index + 1}`}
-                              className={cn("h-8 flex-1", item.isCompleted && "text-muted-foreground line-through")}
-                            />
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 shrink-0"
-                              aria-label={`删除任务清单 ${index + 1}`}
-                              onClick={() => handleChecklistRemove(item.localId)}
-                            >
-                              <Trash2 className="h-4 w-4 text-muted-foreground" />
-                            </Button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              disabled={replaceChecklist.isPending}
-                              onClick={() => void handleChecklistToggleCompleted(item.localId)}
-                              aria-label={
-                                item.isCompleted
-                                  ? `取消完成任务清单 ${index + 1}`
-                                  : `标记完成任务清单 ${index + 1}`
-                              }
-                              className={cn(
-                                "inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded border transition-colors",
-                                item.isCompleted
-                                  ? "border-emerald-500 bg-emerald-500 text-white"
-                                  : "border-input bg-background text-transparent hover:border-muted-foreground",
-                              )}
-                            >
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                            </button>
-                            <p
-                              className={cn(
-                                "min-w-0 flex-1 text-sm",
-                                item.isCompleted && "text-muted-foreground line-through",
-                              )}
-                            >
-                              {item.title}
-                            </p>
-                          </>
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                      </button>
+                      <p
+                        className={cn(
+                          "min-w-0 flex-1 text-sm",
+                          item.isCompleted && "text-muted-foreground line-through",
                         )}
-                      </div>
-                    ))
-                  )}
-
-                  {isChecklistEditing && (
-                    <Button variant="outline" className="w-full" onClick={handleChecklistAdd}>
-                      <Plus className="mr-1.5 h-3.5 w-3.5" />
-                      {checklistDraft.length === 0 ? "添加第一项" : "添加项"}
-                    </Button>
+                      >
+                        {item.title}
+                      </p>
+                    </>
                   )}
                 </div>
-              </CardContent>
-            </Card>
+              ))
+            )}
+
+            {isChecklistEditing && (
+              <Button variant="outline" className="w-full" onClick={handleChecklistAdd}>
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                {checklistDraft.length === 0 ? "添加第一项" : "添加项"}
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
     </>
   );
 
@@ -1722,9 +1715,7 @@ export default function IssueDetailPage() {
               </div>
             </div>
 
-            {/* Timeline and Comment Section */}
             <div className="-mt-6">
-              {/* Unified Timeline */}
               <div id="timeline" ref={timelineSectionRef} className="scroll-mt-20" />
 
               {isLoadingTimeline ? (
@@ -1739,7 +1730,6 @@ export default function IssueDetailPage() {
                 </div>
               ) : (
                 <div className="relative space-y-0 pt-4">
-                  {/* Timeline connector line */}
                   <div className="absolute bottom-0 left-4 top-0 w-px bg-border" />
 
                   {timelineItems.map((item, index) =>
@@ -1936,7 +1926,6 @@ export default function IssueDetailPage() {
 
             <Dialog open={isSuggestionDialogOpen} onOpenChange={setIsSuggestionDialogOpen}>
               <DialogContent className="flex w-[90vw] max-w-[calc(100%-2rem)] flex-col overflow-hidden p-0 max-h-[90vh] sm:max-w-[1100px]">
-                {/* Header */}
                 <DialogHeader className="shrink-0 border-b bg-muted/30 px-6 pt-5 pb-4">
                   <div className="flex items-center gap-3">
                     <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -1951,9 +1940,7 @@ export default function IssueDetailPage() {
                   </div>
                 </DialogHeader>
 
-                {/* Body */}
                 <div className="grid flex-1 gap-0 overflow-hidden md:grid-cols-[3fr_2fr]">
-                  {/* Left: AI Suggestions */}
                   <div className="flex flex-col gap-3 overflow-hidden border-r px-6 py-5">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -2077,7 +2064,6 @@ export default function IssueDetailPage() {
                     </div>
                   </div>
 
-                  {/* Right: Current Checklist Preview */}
                   <div className="flex flex-col gap-3 overflow-hidden bg-muted/10 px-6 py-5">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -2138,7 +2124,6 @@ export default function IssueDetailPage() {
                   </div>
                 </div>
 
-                {/* Footer */}
                 <DialogFooter className="shrink-0 border-t bg-muted/30 px-6 py-4 sm:justify-between">
                   <div className="hidden items-center gap-2 text-xs text-muted-foreground sm:flex">
                     {suggestionState === "ready" && suggestedChecklistItems.length > 0 ? (
