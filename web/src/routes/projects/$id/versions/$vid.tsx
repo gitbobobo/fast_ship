@@ -71,7 +71,7 @@ import { useProjectBranches } from "@/lib/hooks/use-projects";
 import { useUploadArtifact, useDeleteArtifact } from "@/lib/hooks/use-artifacts";
 import { artifactApi } from "@/lib/api/artifacts";
 import { formatDate, formatFileSize } from "@/lib/utils/format";
-import { cn } from "@/lib/utils";
+import { cn, copyToClipboard } from "@/lib/utils";
 import { versionSchema } from "@/lib/utils/validators";
 import { toast } from "sonner";
 
@@ -1037,7 +1037,7 @@ export default function VersionDetailPage() {
                       size="icon-xs"
                       className="absolute top-1.5 right-1.5 bg-destructive/5 hover:bg-destructive/10"
                       onClick={() => {
-                        navigator.clipboard.writeText(version.error_log || "");
+                        void copyToClipboard(version.error_log || "");
                         toast.success("已复制到剪贴板");
                       }}
                     >

@@ -56,7 +56,7 @@ import {
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
-import { cn } from "@/lib/utils";
+import { cn, copyToClipboard } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 
@@ -168,7 +168,7 @@ function IssueCardActions({
       if (issueDetailSearch) {
         url.search = issueDetailSearch;
       }
-      await navigator.clipboard.writeText(url.toString());
+      await copyToClipboard(url.toString());
       toast.success("已复制当前问题链接");
     } catch {
       toast.error("复制失败");
@@ -181,7 +181,7 @@ function IssueCardActions({
       return;
     }
     try {
-      await navigator.clipboard.writeText(issue.github.html_url);
+      await copyToClipboard(issue.github.html_url);
       toast.success("已复制 GitHub 深链接");
     } catch {
       toast.error("复制失败");
@@ -455,19 +455,6 @@ export default function IssuesPage() {
     }
   };
 
-  const handleCopyIssueListLink = async () => {
-    try {
-      const currentUrl = new URL(
-        `${window.location.pathname}${window.location.search}`,
-        window.location.origin,
-      ).toString();
-      await navigator.clipboard.writeText(currentUrl);
-      toast.success("已复制问题列表链接");
-    } catch {
-      toast.error("复制失败");
-    }
-  };
-
   const hasActiveFilters =
     issueStateFilter !== "all" ||
     issueLabelFilter !== "all" ||
@@ -561,13 +548,6 @@ export default function IssuesPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => void handleCopyIssueListLink()}
-              >
-                <Link2 className="mr-1.5 h-3.5 w-3.5" />
-                复制链接
-              </Button>
-              <Button
-                size="sm"
                 onClick={handleSync}
                 disabled={syncIssues.isPending}
               >
@@ -585,6 +565,21 @@ export default function IssuesPage() {
                 )}
                 {syncIssues.isPending ? "同步中..." : "同步"}
               </Button>
+              {activeProject?.github_owner && activeProject?.github_repo && (
+                <Button
+                  variant="outline"
+                  size="icon-sm"
+                  render={
+                    <a
+                      href={`https://github.com/${activeProject.github_owner}/${activeProject.github_repo}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    />
+                  }
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </Button>
+              )}
             </div>
           )}
         </div>

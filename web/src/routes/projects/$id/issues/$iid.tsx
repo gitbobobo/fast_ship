@@ -93,7 +93,7 @@ import {
   GITHUB_LOCAL_ASSET_NOTICE,
   toGitHubMediaProxyUrl,
 } from "@/lib/utils/github-media-proxy";
-import { cn } from "@/lib/utils";
+import { cn, copyToClipboard } from "@/lib/utils";
 import { formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 
@@ -823,7 +823,7 @@ export default function IssueDetailPage() {
   const handleCopyCurrentViewLink = async () => {
     try {
       const currentUrl = new URL(`${location.pathname}${location.search}${location.hash}`, window.location.origin).toString();
-      await navigator.clipboard.writeText(currentUrl);
+      await copyToClipboard(currentUrl);
       toast.success("已复制当前问题视图链接");
     } catch {
       toast.error("复制失败");
@@ -836,7 +836,7 @@ export default function IssueDetailPage() {
       return;
     }
     try {
-      await navigator.clipboard.writeText(url);
+      await copyToClipboard(url);
       toast.success(successMessage);
     } catch {
       toast.error("复制失败");
