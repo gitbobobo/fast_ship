@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"strings"
+	"unicode/utf8"
+
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -61,6 +64,33 @@ func (h *AIHandler) SuggestIssueChecklist(c *gin.Context) {
 	issueID := c.Param("iid")
 
 	result, err := h.aiService.SuggestIssueChecklist(c.Request.Context(), issueID, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+type generateTitleRequest struct {
+	Body string `json:"body"`
+}
+
+func (h *AIHandler) GenerateTitle(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+
+	var req generateTitleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	if utf8.RuneCountInString(strings.TrimSpace(req.Body)) < 10 {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.aiService.GenerateTitle(c.Request.Context(), req.Body, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

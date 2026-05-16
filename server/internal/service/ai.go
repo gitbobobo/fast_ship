@@ -29,7 +29,13 @@ const (
 	issueSuggestionMaxChars           = 24000
 	issueSuggestionTitleMaxChars      = 2000
 	issueSuggestionBodyMaxChars       = 14000
+	generateTitleMaxCompletionToken   = 4096
+	generateTitleBodyMaxChars         = 10000
 )
+
+type GenerateTitleResponse struct {
+	Title string `json:"title"`
+}
 
 type AIService struct {
 	settingsRepo *repository.UserAISettingRepository
@@ -208,20 +214,9 @@ func (s *AIService) SuggestIssueChecklist(ctx context.Context, issueID, userID s
 		return nil, errs.ErrNotOwner
 	}
 
-	setting, err := s.settingsRepo.Get(userID)
+	setting, apiKey, err := s.getDecryptedSetting(userID)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrAISettingsNotFound
-		}
-		return nil, errs.ErrInternal
-	}
-	if len(setting.APIKeyEncrypted) == 0 {
-		return nil, errs.ErrAISettingsNotFound
-	}
-
-	apiKey, err := crypto.Decrypt(setting.APIKeyEncrypted, []byte(s.cfg.Encryption.Key))
-	if err != nil {
-		return nil, errs.ErrInternal
+		return nil, err
 	}
 
 	comments, err := s.commentRepo.ListAllByIssueID(issue.ID)
@@ -245,12 +240,78 @@ func (s *AIService) SuggestIssueChecklist(ctx context.Context, issueID, userID s
 		MaxCompletionTokens: issueSuggestionMaxCompletionToken,
 	}
 
-	result, err := s.callMiniMax(ctx, strings.TrimRight(setting.APIHost, "/"), string(apiKey), requestPayload)
+	result, err := s.callMiniMax(ctx, strings.TrimRight(setting.APIHost, "/"), apiKey, requestPayload)
 	if err != nil {
 		return nil, err
 	}
 
 	return &IssueChecklistSuggestionsResponse{Items: result}, nil
+}
+
+func (s *AIService) GenerateTitle(ctx context.Context, body, userID string) (*GenerateTitleResponse, error) {
+	setting, apiKey, err := s.getDecryptedSetting(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmedBody := truncateAndTrimBody(body, generateTitleBodyMaxChars)
+
+	payload := minimaxChatRequest{
+		Model: setting.Model,
+		Messages: []minimaxMessage{
+			{
+				Role:    "system",
+				Content: "你是一个资深产品与研发协作助手。你需要根据问题的正文内容，生成一个简洁准确的中文标题。标题不超过 50 个字，不要使用引号，不要输出任何额外说明，只输出标题文本。",
+			},
+			{
+				Role:    "user",
+				Content: "请根据以下问题正文，生成一个简短的标题：\n\n" + trimmedBody,
+			},
+		},
+		Temperature:         0.3,
+		MaxCompletionTokens: generateTitleMaxCompletionToken,
+	}
+
+	content, err := s.callMiniMaxRaw(ctx, strings.TrimRight(setting.APIHost, "/"), apiKey, payload)
+	if err != nil {
+		return nil, err
+	}
+
+	title := strings.TrimSpace(content)
+	title = strings.Trim(title, "\"'")
+	if title == "" {
+		return nil, errs.ErrAIProvider
+	}
+
+	return &GenerateTitleResponse{Title: title}, nil
+}
+
+func (s *AIService) getDecryptedSetting(userID string) (*model.UserAISetting, string, error) {
+	setting, err := s.settingsRepo.Get(userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", errs.ErrAISettingsNotFound
+		}
+		return nil, "", errs.ErrInternal
+	}
+	if len(setting.APIKeyEncrypted) == 0 {
+		return nil, "", errs.ErrAISettingsNotFound
+	}
+
+	apiKey, err := crypto.Decrypt(setting.APIKeyEncrypted, []byte(s.cfg.Encryption.Key))
+	if err != nil {
+		return nil, "", errs.ErrInternal
+	}
+
+	return setting, string(apiKey), nil
+}
+
+func truncateAndTrimBody(body string, maxChars int) string {
+	runes := []rune(body)
+	if len(runes) > maxChars {
+		runes = runes[:maxChars]
+	}
+	return strings.TrimSpace(string(runes))
 }
 
 func (s *AIService) callMiniMax(
@@ -259,46 +320,9 @@ func (s *AIService) callMiniMax(
 	apiKey string,
 	payload minimaxChatRequest,
 ) ([]IssueChecklistSuggestionItem, error) {
-	body, err := json.Marshal(payload)
+	content, err := s.callMiniMaxRaw(ctx, apiHost, apiKey, payload)
 	if err != nil {
-		return nil, errs.ErrInternal
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiHost+"/v1/text/chatcompletion_v2", bytes.NewReader(body))
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, errs.ErrAIProvider
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errs.ErrAIProvider
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, errs.ErrAIProvider
-	}
-
-	var decoded minimaxChatResponse
-	if err := json.Unmarshal(respBody, &decoded); err != nil {
-		return nil, errs.ErrAIProvider
-	}
-	if decoded.BaseResp != nil && decoded.BaseResp.StatusCode != 0 {
-		return nil, errs.ErrAIProvider
-	}
-	if len(decoded.Choices) == 0 {
-		return nil, errs.ErrAIProvider
-	}
-
-	content := strings.TrimSpace(decoded.Choices[0].Message.Content)
-	if content == "" {
-		return nil, errs.ErrAIProvider
+		return nil, err
 	}
 
 	var raw rawIssueChecklistSuggestions
@@ -318,6 +342,57 @@ func (s *AIService) callMiniMax(
 		}
 	}
 	return items, nil
+}
+
+func (s *AIService) callMiniMaxRaw(
+	ctx context.Context,
+	apiHost string,
+	apiKey string,
+	payload minimaxChatRequest,
+) (string, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiHost+"/v1/text/chatcompletion_v2", bytes.NewReader(body))
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return "", errs.ErrAIProvider
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", errs.ErrAIProvider
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", errs.ErrAIProvider
+	}
+
+	var decoded minimaxChatResponse
+	if err := json.Unmarshal(respBody, &decoded); err != nil {
+		return "", errs.ErrAIProvider
+	}
+	if decoded.BaseResp != nil && decoded.BaseResp.StatusCode != 0 {
+		return "", errs.ErrAIProvider
+	}
+	if len(decoded.Choices) == 0 {
+		return "", errs.ErrAIProvider
+	}
+
+	content := strings.TrimSpace(decoded.Choices[0].Message.Content)
+	if content == "" {
+		return "", errs.ErrAIProvider
+	}
+
+	return content, nil
 }
 
 func buildIssueSuggestionPrompt(issue *model.Issue, comments []model.IssueComment) string {

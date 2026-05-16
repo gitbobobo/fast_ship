@@ -56,6 +56,7 @@ func Setup(
 		{
 			ai.GET("/settings", aiHandler.GetSettings)
 			ai.PUT("/settings", aiHandler.UpdateSettings)
+			ai.POST("/generate-title", aiHandler.GenerateTitle)
 		}
 
 		// JWT 必须 — API Key 管理

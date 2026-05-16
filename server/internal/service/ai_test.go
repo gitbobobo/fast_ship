@@ -109,6 +109,186 @@ func TestAIServiceSuggestIssueChecklist(t *testing.T) {
 	}
 }
 
+func TestAIServiceGenerateTitle(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-ai-gen-title")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"base_resp": { "status_code": 0, "status_msg": "success" },
+			"choices": [
+				{ "message": { "role": "assistant", "content": "修复登录页面白屏问题" } }
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	services.aiService.httpClient = server.Client()
+	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
+		APIHost: server.URL,
+		APIKey:  "sk-api-test",
+		Model:   "MiniMax-M2.5",
+	}); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+
+	result, err := services.aiService.GenerateTitle(context.Background(), "打开应用后登录页面白屏，输入账号密码后无法跳转", user.ID)
+	if err != nil {
+		t.Fatalf("generate title: %v", err)
+	}
+	if result.Title != "修复登录页面白屏问题" {
+		t.Fatalf("unexpected title: %q", result.Title)
+	}
+}
+
+func TestAIServiceGenerateTitleSettingsNotFound(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-ai-no-settings")
+
+	_, err := services.aiService.GenerateTitle(context.Background(), "这是一段正文内容用于测试", user.ID)
+	if err == nil {
+		t.Fatalf("expected error for missing settings")
+	}
+}
+
+func TestAIServiceGenerateTitleAPIError(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-ai-gen-title-err")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "internal"}`))
+	}))
+	defer server.Close()
+
+	services.aiService.httpClient = server.Client()
+	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
+		APIHost: server.URL,
+		APIKey:  "sk-api-test",
+		Model:   "MiniMax-M2.5",
+	}); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+
+	_, err := services.aiService.GenerateTitle(context.Background(), "这是一段足够长的正文内容用于测试标题生成功能", user.ID)
+	if err == nil {
+		t.Fatalf("expected error for API failure")
+	}
+}
+
+func TestAIServiceGenerateTitleEmptyContent(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-ai-gen-title-empty")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"base_resp": { "status_code": 0, "status_msg": "success" },
+			"choices": [
+				{ "message": { "role": "assistant", "content": "" } }
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	services.aiService.httpClient = server.Client()
+	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
+		APIHost: server.URL,
+		APIKey:  "sk-api-test",
+		Model:   "MiniMax-M2.5",
+	}); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+
+	_, err := services.aiService.GenerateTitle(context.Background(), "这是一段足够长的正文内容用于测试空内容返回", user.ID)
+	if err == nil {
+		t.Fatalf("expected error for empty content")
+	}
+}
+
+func TestAIServiceGenerateTitleOnlyQuotes(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-ai-gen-title-quotes")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"base_resp": { "status_code": 0, "status_msg": "success" },
+			"choices": [
+				{ "message": { "role": "assistant", "content": "\"\"\"\"\"\"" } }
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	services.aiService.httpClient = server.Client()
+	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
+		APIHost: server.URL,
+		APIKey:  "sk-api-test",
+		Model:   "MiniMax-M2.5",
+	}); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+
+	_, err := services.aiService.GenerateTitle(context.Background(), "这是一段足够长的正文内容用于测试纯引号返回", user.ID)
+	if err == nil {
+		t.Fatalf("expected error for quotes-only content")
+	}
+}
+
+func TestAIServiceGenerateTitleQuotedTitle(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-ai-gen-title-quoted-svc")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"base_resp": { "status_code": 0, "status_msg": "success" },
+			"choices": [
+				{ "message": { "role": "assistant", "content": "\"修复登录白屏问题\"" } }
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	services.aiService.httpClient = server.Client()
+	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
+		APIHost: server.URL,
+		APIKey:  "sk-api-test",
+		Model:   "MiniMax-M2.5",
+	}); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+
+	result, err := services.aiService.GenerateTitle(context.Background(), "这是一段足够长的正文内容用于测试引号标题", user.ID)
+	if err != nil {
+		t.Fatalf("generate title: %v", err)
+	}
+	if result.Title != "修复登录白屏问题" {
+		t.Fatalf("expected quotes stripped, got: %q", result.Title)
+	}
+}
+
+func TestTruncateAndTrimBody(t *testing.T) {
+	short := "hello world"
+	if got := truncateAndTrimBody(short, 100); got != short {
+		t.Fatalf("expected %q, got %q", short, got)
+	}
+
+	long := strings.Repeat("甲", generateTitleBodyMaxChars+500)
+	got := truncateAndTrimBody(long, generateTitleBodyMaxChars)
+	if utf8.RuneCountInString(got) != generateTitleBodyMaxChars {
+		t.Fatalf("expected %d chars, got %d", generateTitleBodyMaxChars, utf8.RuneCountInString(got))
+	}
+
+	withSpaces := "  " + strings.Repeat("甲", 10) + "  "
+	if got := truncateAndTrimBody(withSpaces, 100); got != strings.Repeat("甲", 10) {
+		t.Fatalf("expected trimmed output, got %q", got)
+	}
+}
+
 func TestBuildIssueSuggestionPromptLimitsIssueContentByRunes(t *testing.T) {
 	issue := &model.Issue{
 		Title: strings.Repeat("甲", issueSuggestionTitleMaxChars+500),
