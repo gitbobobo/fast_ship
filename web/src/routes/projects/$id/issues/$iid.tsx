@@ -843,6 +843,35 @@ export default function IssueDetailPage() {
     }
   };
 
+  const buildIssuePrompt = (comments?: IssueComment[]) => {
+    const commentsXml = comments
+      ? "\n" + comments.map((c) => `<comment>${c.body || ""}</comment>`).join("\n")
+      : "";
+    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue!.id}</id>\n<title>${issue!.title}</title>\n<body>${issue!.body || ""}</body>${commentsXml}`;
+  };
+
+  const handleCopyIssuePrompt = async () => {
+    try {
+      await copyToClipboard(buildIssuePrompt());
+      toast.success("已复制提示词");
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
+  const handleCopyCommentPrompt = async (commentIndex: number) => {
+    try {
+      const commentsBefore = timelineItems
+        .slice(0, commentIndex + 1)
+        .filter((t) => t.type === "comment")
+        .map((t) => t.data as IssueComment);
+      await copyToClipboard(buildIssuePrompt(commentsBefore));
+      toast.success("已复制提示词");
+    } catch {
+      toast.error("复制失败");
+    }
+  };
+
   const handleCopyGitHubLink = async () => {
     const hash = location.hash;
     let targetUrl = issue?.github?.html_url;
@@ -1385,6 +1414,17 @@ export default function IssueDetailPage() {
                     <div className="markdown-body">
                       <GitHubContent html={issue.body_html} markdown={issue.body} />
                     </div>
+                    <div className="mt-3 flex justify-end">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                        onClick={() => void handleCopyIssuePrompt()}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        复制提示词
+                      </Button>
+                    </div>
                   </>
                 ) : (
                   <div className="flex items-center gap-2 text-sm italic text-muted-foreground">
@@ -1415,7 +1455,7 @@ export default function IssueDetailPage() {
                   {/* Timeline connector line */}
                   <div className="absolute bottom-0 left-4 top-0 w-px bg-border" />
 
-                  {timelineItems.map((item) =>
+                  {timelineItems.map((item, index) =>
                     item.type === "comment" ? (
                       <div
                         key={`comment-${item.data.id}`}
@@ -1449,6 +1489,14 @@ export default function IssueDetailPage() {
                                 }
                               >
                                 <Link2 className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-xs"
+                                aria-label="复制提示词"
+                                onClick={() => void handleCopyCommentPrompt(index)}
+                              >
+                                <Copy className="h-3.5 w-3.5" />
                               </Button>
                               {item.data.source === "github" && (
                                 <Button
