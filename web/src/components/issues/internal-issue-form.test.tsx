@@ -255,7 +255,7 @@ describe("InternalIssueForm", () => {
     vi.mocked(useGenerateTitle).mockImplementation(() => ({
       mutate: mockMutate,
       isPending: false,
-    } as ReturnType<typeof useGenerateTitle>));
+    } as unknown as ReturnType<typeof useGenerateTitle>));
 
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(
@@ -283,7 +283,7 @@ describe("InternalIssueForm", () => {
     vi.mocked(useGenerateTitle).mockImplementation(() => ({
       mutate: vi.fn(),
       isPending: true,
-    } as ReturnType<typeof useGenerateTitle>));
+    } as unknown as ReturnType<typeof useGenerateTitle>));
 
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(
@@ -314,7 +314,7 @@ describe("InternalIssueForm", () => {
     vi.mocked(useGenerateTitle).mockImplementation(() => ({
       mutate: mockMutate,
       isPending: false,
-    } as ReturnType<typeof useGenerateTitle>));
+    } as unknown as ReturnType<typeof useGenerateTitle>));
 
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(
