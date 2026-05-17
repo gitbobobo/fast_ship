@@ -159,7 +159,7 @@ function IssueCardActions({
     }
   };
 
-  const handleCopyIssueLink = async () => {
+  const handleCopyIssueLink = () => {
     try {
       const url = new URL(
         `/projects/${issue.project_id}/issues/${issue.id}`,
@@ -168,20 +168,20 @@ function IssueCardActions({
       if (issueDetailSearch) {
         url.search = issueDetailSearch;
       }
-      await copyToClipboard(url.toString());
+      copyToClipboard(url.toString());
       toast.success("已复制当前问题链接");
     } catch {
       toast.error("复制失败");
     }
   };
 
-  const handleCopyGitHubLink = async () => {
+  const handleCopyGitHubLink = () => {
     if (!issue.github?.html_url) {
       toast.error("复制失败");
       return;
     }
     try {
-      await copyToClipboard(issue.github.html_url);
+      copyToClipboard(issue.github.html_url);
       toast.success("已复制 GitHub 深链接");
     } catch {
       toast.error("复制失败");

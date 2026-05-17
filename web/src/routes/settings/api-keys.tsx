@@ -70,8 +70,8 @@ export default function ApiKeysPage() {
     }
   };
 
-  const handleCopy = async (key: string) => {
-    await copyToClipboard(key);
+  const handleCopy = (key: string) => {
+    copyToClipboard(key);
     toast.success("已复制到剪贴板");
   };
 

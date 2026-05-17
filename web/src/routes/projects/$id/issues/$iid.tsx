@@ -823,23 +823,23 @@ export default function IssueDetailPage() {
     }
   };
 
-  const handleCopyCurrentViewLink = async () => {
+  const handleCopyCurrentViewLink = () => {
     try {
       const currentUrl = new URL(`${location.pathname}${location.search}${location.hash}`, window.location.origin).toString();
-      await copyToClipboard(currentUrl);
+      copyToClipboard(currentUrl);
       toast.success("已复制当前问题视图链接");
     } catch {
       toast.error("复制失败");
     }
   };
 
-  const copyGitHubUrl = async (url: string | null | undefined, successMessage: string) => {
+  const copyGitHubUrl = (url: string | null | undefined, successMessage: string) => {
     if (!url) {
       toast.error("复制失败");
       return;
     }
     try {
-      await copyToClipboard(url);
+      copyToClipboard(url);
       toast.success(successMessage);
     } catch {
       toast.error("复制失败");
@@ -854,22 +854,22 @@ export default function IssueDetailPage() {
     return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>\n<body>${issue.body || ""}</body>${commentsXml}`;
   };
 
-  const handleCopyIssuePrompt = async () => {
+  const handleCopyIssuePrompt = () => {
     try {
-      await copyToClipboard(buildIssuePrompt());
+      copyToClipboard(buildIssuePrompt());
       toast.success("已复制提示词");
     } catch {
       toast.error("复制失败");
     }
   };
 
-  const handleCopyCommentPrompt = async (commentIndex: number) => {
+  const handleCopyCommentPrompt = (commentIndex: number) => {
     try {
       const commentsBefore = timelineItems
         .slice(0, commentIndex + 1)
         .filter((t) => t.type === "comment")
         .map((t) => t.data);
-      await copyToClipboard(buildIssuePrompt(commentsBefore));
+      copyToClipboard(buildIssuePrompt(commentsBefore));
       toast.success("已复制提示词");
     } catch {
       toast.error("复制失败");
