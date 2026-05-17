@@ -96,7 +96,9 @@ export default function ApiKeysPage() {
         <div>
           <h2 className="text-lg font-medium">API Key 管理</h2>
           <p className="text-sm text-muted-foreground">
-            API Key 用于 CI/CD 等自动化场景，仅拥有受限权限
+            API Key 适用于 CI/CD 等自动化场景。
+            <br />
+            支持：读取项目/问题/版本、上传构建产物、创建和更新 Issue。
           </p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
