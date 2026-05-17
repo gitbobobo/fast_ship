@@ -60,6 +60,10 @@ func (h *IssueHandler) Create(c *gin.Context) {
 	var result *service.IssueResponse
 	var err error
 	if req.Source == model.IssueSourceGitHub {
+		if !middleware.IsJWTAuth(c) {
+			middleware.HandleAppError(c, errs.ErrApiKeyForbidden)
+			return
+		}
 		result, err = h.issueService.CreateGitHubIssue(projectID, userID, service.CreateInternalIssueRequest{
 			Title: req.Title,
 			Body:  req.Body,

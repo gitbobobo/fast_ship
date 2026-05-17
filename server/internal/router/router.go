@@ -93,11 +93,11 @@ func Setup(
 
 		issueWrite := api.Group("/projects/:id/issues", middleware.RequireJWT(cfg, authService))
 		{
-			issueWrite.POST("", issueHandler.Create)
 			issueWrite.POST("/assets", issueHandler.UploadDraftAsset)
 			issueWrite.POST("/sync", issueHandler.Sync)
 		}
-		api.PUT("/issues/:iid", middleware.RequireJWT(cfg, authService), issueHandler.Update)
+		api.POST("/projects/:id/issues", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Create)
+		api.PUT("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Update)
 		api.POST("/issues/:iid/assets", middleware.RequireJWT(cfg, authService), issueHandler.UploadAsset)
 		api.POST("/issues/:iid/comments", middleware.RequireJWT(cfg, authService), issueHandler.CreateComment)
 		api.PUT("/issues/:iid/internal-meta", middleware.RequireJWT(cfg, authService), issueHandler.UpdateInternalMeta)

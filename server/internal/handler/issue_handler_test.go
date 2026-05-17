@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 )
 
 var handlerTestPNGBytes = []byte{
@@ -350,5 +351,113 @@ func TestIssueHandlerReplaceChecklist_UpdatesProgress(t *testing.T) {
 	}
 	if result.ChecklistTotal != 2 || result.ChecklistDone != 1 || len(result.Checklist) != 2 {
 		t.Fatalf("unexpected checklist payload: %+v", result)
+	}
+}
+
+func TestIssueHandlerCreate_WithApiKey(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	body := []byte(`{"title":"API Key 创建的问题","body":"通过 API Key 创建","workflow_status":"todo"}`)
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", body)
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	ctx.Set(middleware.ContextKeyAPIKey, "ci-key")
+
+	env.issueHandler.Create(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result struct {
+		Source       string `json:"source"`
+		Reference    string `json:"reference"`
+		Title        string `json:"title"`
+		ProjectID    string `json:"project_id"`
+		InternalMeta struct {
+			WorkflowStatus string `json:"workflow_status"`
+		} `json:"internal_meta"`
+	}
+	decodeEnvelope(t, rec, &result)
+
+	if result.Source != string(model.IssueSourceInternal) || result.Reference != "INT-1" {
+		t.Fatalf("unexpected created issue payload: %+v", result)
+	}
+	if result.Title != "API Key 创建的问题" || result.ProjectID != project.ID {
+		t.Fatalf("unexpected created issue payload: %+v", result)
+	}
+	if result.InternalMeta.WorkflowStatus != string(model.IssueWorkflowStatusTodo) {
+		t.Fatalf("expected todo workflow status, got %+v", result)
+	}
+}
+
+func TestIssueHandlerUpdate_WithApiKey(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	createBody := []byte(`{"title":"原始标题","body":"old body"}`)
+	createCtx, createRec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", createBody)
+	createCtx.Params = ginParams("id", project.ID)
+	createCtx.Set(middleware.ContextKeyUserID, user.ID)
+	createCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	createCtx.Set(middleware.ContextKeyAPIKey, "ci-key")
+	env.issueHandler.Create(createCtx)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create issue failed: %d %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeEnvelope(t, createRec, &created)
+
+	updateBody := []byte(`{"title":"API Key 更新后的标题","body":"new body","state":"closed"}`)
+	updateCtx, updateRec := newJSONContext(http.MethodPut, "/api/issues/"+created.ID, updateBody)
+	updateCtx.Params = ginParams("iid", created.ID)
+	updateCtx.Set(middleware.ContextKeyUserID, user.ID)
+	updateCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	updateCtx.Set(middleware.ContextKeyAPIKey, "ci-key")
+
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+
+	var result struct {
+		Title    string  `json:"title"`
+		State    string  `json:"state"`
+		ClosedAt *string `json:"closed_at"`
+	}
+	decodeEnvelope(t, updateRec, &result)
+	if result.Title != "API Key 更新后的标题" || result.State != string(model.IssueStateClosed) || result.ClosedAt == nil {
+		t.Fatalf("unexpected update payload: %+v", result)
+	}
+}
+
+func TestIssueHandlerCreate_WithApiKey_RejectsGitHubSource(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey-gh")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	body := []byte(`{"title":"API Key 尝试创建 GitHub Issue","body":"test","source":"github"}`)
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", body)
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	ctx.Set(middleware.ContextKeyAPIKey, "ci-key")
+
+	env.issueHandler.Create(ctx)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	envelope := decodeEnvelope(t, rec, nil)
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
 	}
 }
