@@ -1236,8 +1236,7 @@ export default function IssueDetailPage() {
           </div>
 
           {((issue.github?.assignees?.length ?? 0) > 0 ||
-            issue.github?.milestone ||
-            (issue.github?.labels?.length ?? 0) > 0) && (
+            issue.github?.milestone) && (
             <div className="space-y-3">
               {(issue.github?.assignees?.length ?? 0) > 0 && (
                 <div>
@@ -1264,46 +1263,46 @@ export default function IssueDetailPage() {
                   <p className="text-sm text-muted-foreground">{issue.github.milestone.title}</p>
                 </div>
               )}
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm">标签</span>
-                <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted"
-                      >
-                        {visibleLabelNames.length === 0
-                          ? "未设置"
-                          : visibleLabelNames.join(", ")}
-                      </Button>
-                    }
-                  />
-                  <DropdownMenuContent align="end" className="min-w-[180px] max-w-[260px]">
-                    {labelOptions.length === 0 ? (
-                      <DropdownMenuItem disabled>暂无可选标签</DropdownMenuItem>
-                    ) : (
-                      labelOptions.map((labelName) => (
-                        <DropdownMenuCheckboxItem
-                          key={labelName}
-                          checked={visibleLabelNames.some(
-                            (label) =>
-                              label.toLowerCase() === labelName.toLowerCase(),
-                          )}
-                          onCheckedChange={() =>
-                            void handleToggleLabel(labelName)
-                          }
-                        >
-                          {labelName}
-                        </DropdownMenuCheckboxItem>
-                      ))
-                    )}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
             </div>
           )}
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-sm">标签</span>
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted"
+                  >
+                    {visibleLabelNames.length === 0
+                      ? "未设置"
+                      : visibleLabelNames.join(", ")}
+                  </Button>
+                }
+              />
+              <DropdownMenuContent align="end" className="min-w-[180px] max-w-[260px]">
+                {labelOptions.length === 0 ? (
+                  <DropdownMenuItem disabled>暂无可选标签</DropdownMenuItem>
+                ) : (
+                  labelOptions.map((labelName) => (
+                    <DropdownMenuCheckboxItem
+                      key={labelName}
+                      checked={visibleLabelNames.some(
+                        (label) =>
+                          label.toLowerCase() === labelName.toLowerCase(),
+                      )}
+                      onCheckedChange={() =>
+                        void handleToggleLabel(labelName)
+                      }
+                    >
+                      {labelName}
+                    </DropdownMenuCheckboxItem>
+                  ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </CardContent>
       </Card>
 
