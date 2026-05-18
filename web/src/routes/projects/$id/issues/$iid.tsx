@@ -851,7 +851,10 @@ export default function IssueDetailPage() {
     const commentsXml = comments
       ? "\n" + comments.map((c) => `<comment>${c.body || ""}</comment>`).join("\n")
       : "";
-    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>\n<body>${issue.body || ""}</body>${commentsXml}`;
+    const labelsXml = issueLabelNames.length
+      ? `\n<labels>${issueLabelNames.join(", ")}</labels>`
+      : "";
+    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>${labelsXml}\n<body>${issue.body || ""}</body>${commentsXml}`;
   };
 
   const handleCopyIssuePrompt = () => {
