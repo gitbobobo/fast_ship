@@ -249,8 +249,8 @@ describe("InternalIssueForm", () => {
 
   it("calls generate title mutation on click and sets title on success", async () => {
     const user = userEvent.setup();
-    const mockMutate = vi.fn((_body: string, options?: { onSuccess?: (data: { title: string }) => void }) => {
-      options?.onSuccess?.({ title: "修复登录白屏问题" });
+    const mockMutate = vi.fn((_body: string, options?: { onSuccess?: (data: { titles: string[] }) => void }) => {
+      options?.onSuccess?.({ titles: ["修复登录白屏问题", "登录白屏修复", "解决登录页空白"] });
     });
     vi.mocked(useGenerateTitle).mockImplementation(() => ({
       mutate: mockMutate,

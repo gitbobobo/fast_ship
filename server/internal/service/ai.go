@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,8 +34,10 @@ const (
 	generateTitleBodyMaxChars         = 10000
 )
 
+var listPrefixRe = regexp.MustCompile(`^\s*\d+[\.)]\s*|^\s*[-*•]\s*`)
+
 type GenerateTitleResponse struct {
-	Title string `json:"title"`
+	Titles []string `json:"titles"`
 }
 
 type AIService struct {
@@ -261,14 +264,14 @@ func (s *AIService) GenerateTitle(ctx context.Context, body, userID string) (*Ge
 		Messages: []minimaxMessage{
 			{
 				Role:    "system",
-				Content: "你是一个资深产品与研发协作助手。你需要根据问题的正文内容，生成一个简洁准确的中文标题。标题不超过 50 个字，不要使用引号，不要输出任何额外说明，只输出标题文本。",
+				Content: "你是一个资深产品与研发协作助手。你需要根据问题的正文内容，生成 3 个不同风格的中文标题供用户选择。每个标题不超过 50 个字，不要使用引号，不要输出任何额外说明，每行一个标题，只输出标题文本。",
 			},
 			{
 				Role:    "user",
-				Content: "请根据以下问题正文，生成一个简短的标题：\n\n" + trimmedBody,
+				Content: "请根据以下问题正文，生成 3 个简短的标题：\n\n" + trimmedBody,
 			},
 		},
-		Temperature:         0.3,
+		Temperature:         0.7,
 		MaxCompletionTokens: generateTitleMaxCompletionToken,
 	}
 
@@ -277,13 +280,21 @@ func (s *AIService) GenerateTitle(ctx context.Context, body, userID string) (*Ge
 		return nil, err
 	}
 
-	title := strings.TrimSpace(content)
-	title = strings.Trim(title, "\"'")
-	if title == "" {
+	var titles []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.Trim(line, "\"'")
+		line = listPrefixRe.ReplaceAllString(line, "")
+		if line != "" {
+			titles = append(titles, line)
+		}
+	}
+
+	if len(titles) == 0 {
 		return nil, errs.ErrAIProvider
 	}
 
-	return &GenerateTitleResponse{Title: title}, nil
+	return &GenerateTitleResponse{Titles: titles}, nil
 }
 
 func (s *AIService) getDecryptedSetting(userID string) (*model.UserAISetting, string, error) {

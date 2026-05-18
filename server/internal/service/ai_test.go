@@ -118,7 +118,7 @@ func TestAIServiceGenerateTitle(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"base_resp": { "status_code": 0, "status_msg": "success" },
 			"choices": [
-				{ "message": { "role": "assistant", "content": "修复登录页面白屏问题" } }
+				{ "message": { "role": "assistant", "content": "修复登录页面白屏问题\n登录后无法跳转\n登录页面显示异常" } }
 			]
 		}`))
 	}))
@@ -137,8 +137,11 @@ func TestAIServiceGenerateTitle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate title: %v", err)
 	}
-	if result.Title != "修复登录页面白屏问题" {
-		t.Fatalf("unexpected title: %q", result.Title)
+	if len(result.Titles) != 3 {
+		t.Fatalf("expected 3 titles, got %d", len(result.Titles))
+	}
+	if result.Titles[0] != "修复登录页面白屏问题" {
+		t.Fatalf("unexpected first title: %q", result.Titles[0])
 	}
 }
 
@@ -266,8 +269,11 @@ func TestAIServiceGenerateTitleQuotedTitle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate title: %v", err)
 	}
-	if result.Title != "修复登录白屏问题" {
-		t.Fatalf("expected quotes stripped, got: %q", result.Title)
+	if len(result.Titles) != 1 {
+		t.Fatalf("expected 1 title, got %d", len(result.Titles))
+	}
+	if result.Titles[0] != "修复登录白屏问题" {
+		t.Fatalf("expected quotes stripped, got: %q", result.Titles[0])
 	}
 }
 

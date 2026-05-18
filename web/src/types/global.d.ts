@@ -112,7 +112,7 @@ interface IssueChecklistSuggestions {
 }
 
 interface GenerateTitleResponse {
-  title: string;
+  titles: string[];
 }
 
 interface IssueActor {

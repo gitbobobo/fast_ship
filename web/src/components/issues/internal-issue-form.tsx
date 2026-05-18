@@ -80,6 +80,7 @@ export function InternalIssueForm({
   const { data: aiSettings } = useAISettings();
   const generateTitleMutation = useGenerateTitle();
   const canGenerateTitle = aiSettings?.configured && [...(body ?? "")].length >= 10;
+  const [suggestedTitles, setSuggestedTitles] = useState<string[]>([]);
 
   const generateTitleTooltip = !aiSettings?.configured
     ? "请先在设置中配置 AI"
@@ -91,7 +92,8 @@ export function InternalIssueForm({
     const currentBody = getValues("body");
     generateTitleMutation.mutate(currentBody, {
       onSuccess: (data) => {
-        setValue("title", data.title, { shouldDirty: true });
+        setValue("title", data.titles[0], { shouldDirty: true });
+        setSuggestedTitles(data.titles);
       },
       onError: () => {
         toast.error("生成标题失败，请稍后重试");
@@ -225,6 +227,22 @@ export function InternalIssueForm({
               )}
             </Button>
           </div>
+          {suggestedTitles.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Sparkles className="h-3 w-3 shrink-0 text-muted-foreground" />
+              <span className="shrink-0 text-xs text-muted-foreground">AI 推荐</span>
+              {suggestedTitles.map((suggestedTitle) => (
+                <button
+                  key={suggestedTitle}
+                  type="button"
+                  className="inline-flex items-center rounded-full border border-border bg-background px-2.5 py-0.5 text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                  onClick={() => setValue("title", suggestedTitle, { shouldDirty: true })}
+                >
+                  {suggestedTitle}
+                </button>
+              ))}
+            </div>
+          )}
           {errors.title && (
             <p className="text-xs text-destructive">{errors.title.message}</p>
           )}

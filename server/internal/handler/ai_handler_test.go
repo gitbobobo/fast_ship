@@ -21,7 +21,7 @@ func TestAIHandler_GenerateTitle_E2E(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"base_resp": { "status_code": 0, "status_msg": "success" },
 			"choices": [
-				{ "message": { "role": "assistant", "content": "修复登录页面白屏问题" } }
+				{ "message": { "role": "assistant", "content": "修复登录页面白屏问题\n登录后无法跳转" } }
 			]
 		}`))
 	}))
@@ -43,11 +43,14 @@ func TestAIHandler_GenerateTitle_E2E(t *testing.T) {
 	}
 
 	var data struct {
-		Title string `json:"title"`
+		Titles []string `json:"titles"`
 	}
 	decodeEnvelope(t, rec, &data)
-	if data.Title != "修复登录页面白屏问题" {
-		t.Fatalf("unexpected title: %q", data.Title)
+	if len(data.Titles) != 2 {
+		t.Fatalf("expected 2 titles, got %d", len(data.Titles))
+	}
+	if data.Titles[0] != "修复登录页面白屏问题" {
+		t.Fatalf("unexpected first title: %q", data.Titles[0])
 	}
 }
 
@@ -109,11 +112,14 @@ func TestAIHandler_GenerateTitle_AIReturnsQuotedTitle(t *testing.T) {
 	}
 
 	var data struct {
-		Title string `json:"title"`
+		Titles []string `json:"titles"`
 	}
 	decodeEnvelope(t, rec, &data)
-	if data.Title != "修复登录白屏" {
-		t.Fatalf("expected quotes stripped, got: %q", data.Title)
+	if len(data.Titles) != 1 {
+		t.Fatalf("expected 1 title, got %d", len(data.Titles))
+	}
+	if data.Titles[0] != "修复登录白屏" {
+		t.Fatalf("expected quotes stripped, got: %q", data.Titles[0])
 	}
 }
 
