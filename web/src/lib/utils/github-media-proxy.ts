@@ -61,6 +61,51 @@ export function containsLocalIssueAssetReference(value?: string | null) {
   return Boolean(value && ISSUE_ASSET_CONTENT_REFERENCE.test(value));
 }
 
+function toAbsoluteAccessibleUrl(value: string, token?: string | null): string {
+  try {
+    const parsed = new URL(value, window.location.origin);
+
+    if (parsed.origin !== window.location.origin) {
+      return value;
+    }
+
+    if (parsed.pathname === MEDIA_PROXY_PATH && parsed.searchParams.has("url")) {
+      const inner = parsed.searchParams.get("url")!;
+      try {
+        return new URL(inner, window.location.origin).toString();
+      } catch {
+        return inner;
+      }
+    }
+
+    if (ISSUE_ASSET_CONTENT_PATH.test(parsed.pathname)) {
+      attachMediaProxyToken(parsed, token);
+      return parsed.toString();
+    }
+
+    return value;
+  } catch {
+    return value;
+  }
+}
+
+export function convertMediaUrlsToAbsolute(text: string, token?: string | null): string {
+  if (!text) return text;
+
+  text = text.replace(/(!\[[^\]]*\]\()([^)]+)(\))/g, (_, prefix, url, suffix) => {
+    return `${prefix}${toAbsoluteAccessibleUrl(url, token)}${suffix}`;
+  });
+
+  text = text.replace(
+    /(<(?:img|video|source)\s[^>]*)(src|poster)="([^"]+)"([^>]*>)/gi,
+    (_, before, attr, url, after) => {
+      return `${before}${attr}="${toAbsoluteAccessibleUrl(url, token)}"${after}`;
+    },
+  );
+
+  return text;
+}
+
 function toIssueAssetUrl(value?: string | null, token?: string | null): string | undefined {
   if (!value || !isIssueAssetUrl(value)) {
     return undefined;

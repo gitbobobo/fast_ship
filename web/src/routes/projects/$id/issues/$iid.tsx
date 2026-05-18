@@ -92,6 +92,7 @@ import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { useAuthStore } from "@/lib/store/auth-store";
 import {
   containsLocalIssueAssetReference,
+  convertMediaUrlsToAbsolute,
   GITHUB_LOCAL_ASSET_NOTICE,
   toGitHubMediaProxyUrl,
 } from "@/lib/utils/github-media-proxy";
@@ -848,13 +849,14 @@ export default function IssueDetailPage() {
 
   const buildIssuePrompt = (comments?: IssueComment[]) => {
     if (!issue) return "";
+    const body = convertMediaUrlsToAbsolute(issue.body || "", token);
     const commentsXml = comments
-      ? "\n" + comments.map((c) => `<comment>${c.body || ""}</comment>`).join("\n")
+      ? "\n" + comments.map((c) => `<comment>${convertMediaUrlsToAbsolute(c.body || "", token)}</comment>`).join("\n")
       : "";
     const labelsXml = issueLabelNames.length
       ? `\n<labels>${issueLabelNames.join(", ")}</labels>`
       : "";
-    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>${labelsXml}\n<body>${issue.body || ""}</body>${commentsXml}`;
+    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>${labelsXml}\n<body>${body}</body>${commentsXml}`;
   };
 
   const handleCopyIssuePrompt = () => {
