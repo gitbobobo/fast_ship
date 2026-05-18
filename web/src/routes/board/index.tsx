@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect, useCallback } from "react";
-import { useSearchParams } from "react-router";
+import { useSearchParams, Link } from "react-router";
 import {
   DndContext,
   DragOverlay,
@@ -7,8 +7,9 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { Package } from "lucide-react";
+import { Package, Plus } from "lucide-react";
 import { Header } from "@/components/layout/header";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Select,
@@ -140,23 +141,41 @@ export default function BoardPage() {
           ) : isEmptyProject ? (
             <p className="text-sm text-muted-foreground">暂无项目</p>
           ) : (
-            <Select
-              value={activeProjectId}
-              onValueChange={handleProjectChange}
-            >
-              <SelectTrigger className="w-auto min-w-32">
-                <SelectValue placeholder="请选择项目">
-                  {activeProject?.name}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {projects.map((project) => (
-                  <SelectItem key={project.id} value={project.id}>
-                    {project.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <>
+              <Select
+                value={activeProjectId}
+                onValueChange={handleProjectChange}
+              >
+                <SelectTrigger className="w-auto min-w-32">
+                  <SelectValue placeholder="请选择项目">
+                    {activeProject?.name}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {projects.map((project) => (
+                    <SelectItem key={project.id} value={project.id}>
+                      {project.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {activeProjectId && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  render={
+                    <Link
+                      to={{
+                        pathname: `/projects/${activeProjectId}/issues/new`,
+                      }}
+                    />
+                  }
+                >
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  新建问题
+                </Button>
+              )}
+            </>
           )}
         </div>
 
