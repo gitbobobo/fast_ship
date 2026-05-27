@@ -856,7 +856,7 @@ export default function IssueDetailPage() {
     const labelsXml = issueLabelNames.length
       ? `\n<labels>${issueLabelNames.join(", ")}</labels>`
       : "";
-    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>${labelsXml}\n<body>${body}</body>${commentsXml}`;
+    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\nIMPORTANT RULES:\n- Do NOT modify the issue status (open/closed) without explicit user permission.\n- Do NOT commit or push code without explicit user permission.\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>${labelsXml}\n<body>${body}</body>${commentsXml}`;
   };
 
   const handleCopyIssuePrompt = () => {
