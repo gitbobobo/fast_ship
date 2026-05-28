@@ -847,11 +847,14 @@ export default function IssueDetailPage() {
     }
   };
 
-  const buildIssuePrompt = (comments?: IssueComment[]) => {
+  const buildIssuePrompt = () => {
     if (!issue) return "";
     const body = convertMediaUrlsToAbsolute(issue.body || "", token);
-    const commentsXml = comments
-      ? "\n" + comments.map((c) => `<comment>${convertMediaUrlsToAbsolute(c.body || "", token)}</comment>`).join("\n")
+    const allComments = timelineItems
+      .filter((t) => t.type === "comment")
+      .map((t) => t.data as IssueComment);
+    const commentsXml = allComments.length
+      ? "\n<comments>\n" + allComments.map((c) => `<comment author="${c.author?.login || "unknown"}">${convertMediaUrlsToAbsolute(c.body || "", token)}</comment>`).join("\n") + "\n</comments>"
       : "";
     const labelsXml = issueLabelNames.length
       ? `\n<labels>${issueLabelNames.join(", ")}</labels>`
@@ -862,19 +865,6 @@ export default function IssueDetailPage() {
   const handleCopyIssuePrompt = () => {
     try {
       copyToClipboard(buildIssuePrompt());
-      toast.success("已复制提示词");
-    } catch {
-      toast.error("复制失败");
-    }
-  };
-
-  const handleCopyCommentPrompt = (commentIndex: number) => {
-    try {
-      const commentsBefore = timelineItems
-        .slice(0, commentIndex + 1)
-        .filter((t) => t.type === "comment")
-        .map((t) => t.data);
-      copyToClipboard(buildIssuePrompt(commentsBefore));
       toast.success("已复制提示词");
     } catch {
       toast.error("复制失败");
@@ -1770,14 +1760,6 @@ export default function IssueDetailPage() {
                                 }
                               >
                                 <Link2 className="h-3.5 w-3.5" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="icon-xs"
-                                aria-label="复制提示词"
-                                onClick={() => void handleCopyCommentPrompt(index)}
-                              >
-                                <Copy className="h-3.5 w-3.5" />
                               </Button>
                               {item.data.source === "github" && (
                                 <Button
