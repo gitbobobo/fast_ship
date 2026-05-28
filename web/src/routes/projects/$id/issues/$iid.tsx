@@ -1726,7 +1726,7 @@ export default function IssueDetailPage() {
                 <div className="relative space-y-0 pt-4">
                   <div className="absolute bottom-0 left-4 top-0 w-px bg-border" />
 
-                  {timelineItems.map((item, index) =>
+                  {timelineItems.map((item) =>
                     item.type === "comment" ? (
                       <div
                         key={`comment-${item.data.id}`}
