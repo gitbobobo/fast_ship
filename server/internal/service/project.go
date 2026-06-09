@@ -57,7 +57,7 @@ func NewProjectService(
 type CreateProjectRequest struct {
 	Name            string `json:"name" binding:"required,min=1,max=100"`
 	Description     string `json:"description"`
-	RepositoryURL   string `json:"repository_url" binding:"required"`
+	RepositoryURL   string `json:"repository_url"`
 	GithubToken     string `json:"github_token"`
 	SourceProjectID string `json:"source_project_id"`
 }
@@ -112,28 +112,18 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		return nil, errs.ErrProjectNameExists
 	}
 
-	owner, repo, err := parseRepositoryURL(req.RepositoryURL)
-	if err != nil {
-		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
-	}
-
+	var owner, repo string
 	var encryptedToken []byte
-	if req.SourceProjectID != "" {
-		sourceProject, err := s.projectRepo.FindByID(req.SourceProjectID, userID)
+
+	if req.RepositoryURL != "" {
+		owner, repo, err = parseRepositoryURL(req.RepositoryURL)
 		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errs.ErrProjectNotFound
-			}
-			return nil, errs.ErrInternal
+			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 		}
-		encryptedToken = sourceProject.GithubTokenEncrypted
-	} else if req.GithubToken != "" {
-		encryptedToken, err = crypto.Encrypt([]byte(req.GithubToken), []byte(s.cfg.Encryption.Key))
+		encryptedToken, err = s.resolveGitHubToken(userID, req.GithubToken, req.SourceProjectID)
 		if err != nil {
-			return nil, errs.ErrInternal
+			return nil, err
 		}
-	} else {
-		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
 	}
 
 	project := &model.Project{
@@ -215,23 +205,20 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		if err != nil {
 			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 		}
+
+		willHaveToken := req.GithubToken != "" || req.SourceProjectID != "" || len(project.GithubTokenEncrypted) > 0
+		if !willHaveToken {
+			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
+		}
+
 		project.GithubOwner = owner
 		project.GithubRepo = repo
 	}
 
-	if req.SourceProjectID != "" {
-		sourceProject, err := s.projectRepo.FindByID(req.SourceProjectID, userID)
+	if req.SourceProjectID != "" || req.GithubToken != "" {
+		encryptedToken, err := s.resolveGitHubToken(userID, req.GithubToken, req.SourceProjectID)
 		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errs.ErrProjectNotFound
-			}
-			return nil, errs.ErrInternal
-		}
-		project.GithubTokenEncrypted = sourceProject.GithubTokenEncrypted
-	} else if req.GithubToken != "" {
-		encryptedToken, err := crypto.Encrypt([]byte(req.GithubToken), []byte(s.cfg.Encryption.Key))
-		if err != nil {
-			return nil, errs.ErrInternal
+			return nil, err
 		}
 		project.GithubTokenEncrypted = encryptedToken
 	}
@@ -268,6 +255,10 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 			return nil, "", errs.ErrProjectNotFound
 		}
 		return nil, "", errs.ErrInternal
+	}
+
+	if !project.IsGitHubConfigured() {
+		return nil, "", errs.ErrProjectGitHubNotConfigured
 	}
 
 	// Decrypt GitHub token
@@ -331,6 +322,28 @@ func parseRepositoryURL(raw string) (owner, repo string, err error) {
 	}
 
 	return owner, repo, nil
+}
+
+// resolveGitHubToken 从 Token 字符串或源项目解析加密后的 Token，优先使用 sourceProjectID。
+func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID string) ([]byte, error) {
+	if sourceProjectID != "" {
+		sourceProject, err := s.projectRepo.FindByID(sourceProjectID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrProjectNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+		return sourceProject.GithubTokenEncrypted, nil
+	}
+	if githubToken != "" {
+		encryptedToken, err := crypto.Encrypt([]byte(githubToken), []byte(s.cfg.Encryption.Key))
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		return encryptedToken, nil
+	}
+	return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
 }
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {

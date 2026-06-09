@@ -1937,3 +1937,25 @@ func TestIssueServiceCreateGitHubIssue_GitHubAPIFailure(t *testing.T) {
 		t.Fatal("expected error when github api fails, got nil")
 	}
 }
+
+func TestIssueServiceSyncProjectIssues_RejectsNotGitHubConfigured(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-nogit")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+		p.GithubTokenEncrypted = nil
+	})
+
+	_, err := svc.issueService.SyncProjectIssues(project.ID, user.ID)
+	if err == nil {
+		t.Fatal("expected error for project without GitHub config, got nil")
+	}
+	appErr, ok := err.(*errs.AppError)
+	if !ok {
+		t.Fatalf("expected *errs.AppError, got %T", err)
+	}
+	if appErr.Code != errs.ErrProjectGitHubNotConfigured.Code {
+		t.Errorf("expected code %d, got %d", errs.ErrProjectGitHubNotConfigured.Code, appErr.Code)
+	}
+}

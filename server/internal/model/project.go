@@ -7,9 +7,9 @@ type Project struct {
 	UserID               string    `gorm:"type:text;not null;index" json:"user_id"`
 	Name                 string    `gorm:"type:text;not null" json:"name"`
 	Description          string    `gorm:"type:text" json:"description"`
-	GithubOwner          string    `gorm:"type:text;not null" json:"github_owner"`
-	GithubRepo           string    `gorm:"type:text;not null" json:"github_repo"`
-	GithubTokenEncrypted []byte    `gorm:"type:blob;not null" json:"-"`
+	GithubOwner          string    `gorm:"type:text" json:"github_owner"`
+	GithubRepo           string    `gorm:"type:text" json:"github_repo"`
+	GithubTokenEncrypted []byte    `gorm:"type:blob" json:"-"`
 	CreatedAt            time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt            time.Time `gorm:"not null" json:"updated_at"`
 
@@ -18,6 +18,11 @@ type Project struct {
 
 func (Project) TableName() string {
 	return "projects"
+}
+
+// IsGitHubConfigured 检查项目是否已关联 GitHub 仓库（owner、repo、token 三者均非空）
+func (p *Project) IsGitHubConfigured() bool {
+	return p.GithubOwner != "" && p.GithubRepo != "" && len(p.GithubTokenEncrypted) > 0
 }
 
 // UniqueIndex: user_id + name

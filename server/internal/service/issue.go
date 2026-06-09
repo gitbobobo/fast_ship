@@ -1373,6 +1373,10 @@ func (s *IssueService) SyncProjectIssues(projectID, userID string) (*IssueSyncRe
 		return nil, errs.ErrInternal
 	}
 
+	if !project.IsGitHubConfigured() {
+		return nil, errs.ErrProjectGitHubNotConfigured
+	}
+
 	return s.syncProject(context.Background(), project)
 }
 
@@ -1388,7 +1392,7 @@ func (s *IssueService) SyncAllProjectsIncremental(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if project.GithubOwner == "" || project.GithubRepo == "" || len(project.GithubTokenEncrypted) == 0 {
+		if !project.IsGitHubConfigured() {
 			continue
 		}
 		if _, err := s.syncProject(ctx, &project); err != nil {

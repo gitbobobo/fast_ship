@@ -18,8 +18,9 @@ func New(code int, message string) *AppError {
 
 // 参数校验错误 40001-40099
 var (
-	ErrInvalidParams        = New(40001, "请求参数无效")
-	ErrTargetBranchNotFound = New(40002, "目标分支不存在")
+	ErrInvalidParams                = New(40001, "请求参数无效")
+	ErrTargetBranchNotFound         = New(40002, "目标分支不存在")
+	ErrProjectGitHubNotConfigured   = New(40003, "该项目尚未关联 GitHub 仓库")
 )
 
 // 认证错误 40100-40199

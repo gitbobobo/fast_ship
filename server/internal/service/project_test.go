@@ -3,6 +3,8 @@ package service
 import (
 	"strings"
 	"testing"
+
+	"github.com/godbobo/fast_ship/server/internal/model"
 )
 
 func TestParseRepositoryURL(t *testing.T) {
@@ -153,3 +155,77 @@ func TestParseRepositoryURL(t *testing.T) {
 	}
 }
 
+func TestProjectServiceCreate_WithoutGitHub(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-no-github")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+
+	// 创建不带 GitHub 仓库的项目应该成功
+	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:        "no-github-project",
+		Description: "A project without GitHub",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if project.GithubOwner != "" {
+		t.Errorf("expected empty GithubOwner, got %q", project.GithubOwner)
+	}
+	if project.GithubRepo != "" {
+		t.Errorf("expected empty GithubRepo, got %q", project.GithubRepo)
+	}
+}
+
+func TestProjectServiceCreate_WithGitHub(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-with-github")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+
+	// 创建带 GitHub 仓库的项目，提供 token 应该成功
+	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:          "github-project",
+		Description:   "A project with GitHub",
+		RepositoryURL: "https://github.com/owner/repo",
+		GithubToken:   "ghp_test123",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if project.GithubOwner != "owner" {
+		t.Errorf("expected GithubOwner=owner, got %q", project.GithubOwner)
+	}
+	if project.GithubRepo != "repo" {
+		t.Errorf("expected GithubRepo=repo, got %q", project.GithubRepo)
+	}
+}
+
+func TestProjectServiceCreate_WithRepoURLButNoToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-no-token")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+
+	// 提供了仓库地址但没有 token 应该失败
+	_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:          "no-token-project",
+		RepositoryURL: "https://github.com/owner/repo",
+	})
+	if err == nil {
+		t.Fatal("expected error when repo URL provided without token, got nil")
+	}
+}
+
+func TestProjectServiceGetBranches_NotGitHubConfigured(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-branches")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+		p.GithubTokenEncrypted = nil
+	})
+
+	_, _, err := projectSvc.GetBranches(t.Context(), project.ID, user.ID)
+	if err == nil {
+		t.Fatal("expected error for project without GitHub config, got nil")
+	}
+}
