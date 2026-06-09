@@ -3,7 +3,7 @@ import { api } from "./client";
 interface CreateProjectRequest {
   name: string;
   description?: string;
-  repository_url: string;
+  repository_url?: string;
   github_token?: string;
   source_project_id?: string;
 }

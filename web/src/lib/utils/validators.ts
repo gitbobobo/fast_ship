@@ -23,11 +23,14 @@ export const registerSchema = z.object({
 export const projectSchema = z.object({
   name: z.string().min(1, "请输入项目名称").max(100),
   description: z.string().optional(),
-  repository_url: z.string().min(1, "请输入仓库链接"),
+  repository_url: z.string().optional(),
   github_token: z.string().optional(),
   source_project_id: z.string().optional(),
 }).refine(
-  (data) => !!(data.github_token || data.source_project_id),
+  (data) => {
+    if (!data.repository_url) return true;
+    return !!(data.github_token || data.source_project_id);
+  },
   { message: "请输入 GitHub Token 或选择复用已有项目的 Token", path: ["github_token"] }
 );
 

@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useProjects, useDeleteProject } from "@/lib/hooks/use-projects";
 import { formatRelativeTime } from "@/lib/utils/format";
+import { hasGitHubRepo, repoSlug } from "@/lib/utils/github";
 import { toast } from "sonner";
 
 export default function ProjectsPage() {
@@ -51,13 +52,12 @@ export default function ProjectsPage() {
   const [editingProjectId, setEditingProjectId] = useState<string | undefined>();
 
   const filteredProjects = projects.filter((project) => {
+    const slug = repoSlug(project);
     const matchesSearch =
       deferredSearch.length === 0 ||
       project.name.toLowerCase().includes(deferredSearch) ||
       project.description?.toLowerCase().includes(deferredSearch) ||
-      `${project.github_owner}/${project.github_repo}`
-        .toLowerCase()
-        .includes(deferredSearch);
+      slug.toLowerCase().includes(deferredSearch);
 
     return matchesSearch;
   });
@@ -190,7 +190,7 @@ export default function ProjectsPage() {
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <GitFork className="h-3.5 w-3.5" />
                     <span className="truncate">
-                      {project.github_owner}/{project.github_repo}
+                      {hasGitHubRepo(project) ? repoSlug(project) : "未关联 GitHub"}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">

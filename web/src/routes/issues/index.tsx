@@ -57,6 +57,7 @@ import {
 } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { cn, copyToClipboard } from "@/lib/utils";
+import { ensureGitHubLinked, hasGitHubRepo } from "@/lib/utils/github";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 
@@ -548,7 +549,9 @@ export default function IssuesPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={handleSync}
+                onClick={() => {
+                  if (ensureGitHubLinked(activeProject, "同步 Issue")) handleSync();
+                }}
                 disabled={syncIssues.isPending}
               >
                 {syncIssues.isPending ? (
@@ -565,13 +568,13 @@ export default function IssuesPage() {
                 )}
                 {syncIssues.isPending ? "同步中..." : "同步"}
               </Button>
-              {activeProject?.github_owner && activeProject?.github_repo && (
+              {hasGitHubRepo(activeProject) && (
                 <Button
                   variant="outline"
                   size="icon-sm"
                   render={
                     <a
-                      href={`https://github.com/${activeProject.github_owner}/${activeProject.github_repo}`}
+                      href={`https://github.com/${activeProject!.github_owner}/${activeProject!.github_repo}`}
                       target="_blank"
                       rel="noopener noreferrer"
                     />

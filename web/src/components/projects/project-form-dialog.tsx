@@ -34,7 +34,7 @@ import {
   useProjects,
 } from "@/lib/hooks/use-projects";
 import { useTokenSource } from "@/lib/hooks/use-token-source";
-import { parseRepoUrl } from "@/lib/utils/github";
+import { parseRepoUrl, hasGitHubRepo, repoSlug } from "@/lib/utils/github";
 import { toast } from "sonner";
 
 interface ProjectFormDialogProps {
@@ -81,7 +81,9 @@ export function ProjectFormDialog({
       reset({
         name: project.name,
         description: project.description || "",
-        repository_url: `https://github.com/${project.github_owner}/${project.github_repo}`,
+        repository_url: hasGitHubRepo(project)
+          ? `https://github.com/${project.github_owner}/${project.github_repo}`
+          : "",
         github_token: "",
         source_project_id: undefined,
       });
@@ -118,15 +120,17 @@ export function ProjectFormDialog({
         const payload: {
           name: string;
           description?: string;
-          repository_url: string;
+          repository_url?: string;
           github_token?: string;
           source_project_id?: string;
         } = {
           name: createData.name,
-          repository_url: createData.repository_url,
         };
         if (createData.description) {
           payload.description = createData.description;
+        }
+        if (createData.repository_url) {
+          payload.repository_url = createData.repository_url;
         }
         if (createData.source_project_id) {
           payload.source_project_id = createData.source_project_id;
@@ -186,7 +190,7 @@ export function ProjectFormDialog({
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="project-repository_url">仓库链接</Label>
+              <Label htmlFor="project-repository_url">仓库链接（可选）</Label>
               <Input
                 id="project-repository_url"
                 placeholder="https://github.com/owner/repo 或 owner/repo"
@@ -201,14 +205,15 @@ export function ProjectFormDialog({
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label htmlFor="project-github_token">GitHub Access Token</Label>
-                <GitHubTokenHelpDialog owner={owner} repo={repo} />
+                <Label htmlFor="project-github_token">GitHub Access Token{!repositoryUrl && "（请先填写仓库链接）"}</Label>
+                {repositoryUrl && <GitHubTokenHelpDialog owner={owner} repo={repo} />}
               </div>
 
               {hasExistingProjects && (
                 <Select
                   value={tokenSource}
                   onValueChange={handleTokenSourceChange}
+                  disabled={!repositoryUrl}
                 >
                   <SelectTrigger className="w-full" size="default">
                     <SelectValue>
@@ -227,7 +232,7 @@ export function ProjectFormDialog({
                       .filter((p) => !isEdit || p.id !== projectId)
                       .map((proj) => (
                         <SelectItem key={proj.id} value={proj.id}>
-                          {proj.name} ({proj.github_owner}/{proj.github_repo})
+                          {proj.name}{hasGitHubRepo(proj) ? ` (${repoSlug(proj)})` : ""}
                         </SelectItem>
                       ))}
                   </SelectContent>
@@ -240,6 +245,7 @@ export function ProjectFormDialog({
                     id="project-github_token"
                     type="password"
                     placeholder={isEdit ? "留空则不修改" : "github_pat_xxx 或 ghp_xxx"}
+                    disabled={!repositoryUrl}
                     {...register("github_token")}
                   />
                   {errors.github_token && (
