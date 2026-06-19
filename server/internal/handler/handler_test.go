@@ -28,6 +28,7 @@ type handlerTestEnv struct {
 	aiHandler       *AIHandler
 	versionHandler  *VersionHandler
 	issueHandler    *IssueHandler
+	collabHandler   *IssueCollabHandler
 	artifactHandler *ArtifactHandler
 }
 
@@ -65,6 +66,9 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
+		&model.IssueCollabNote{},
+		&model.IssueCollabQuestion{},
+		&model.IssueCollabSummary{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -111,6 +115,8 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
+	collabRepo := repository.NewIssueCollabRepository(db)
+	collabService := service.NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 
@@ -120,6 +126,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		aiHandler:       NewAIHandler(aiService),
 		versionHandler:  NewVersionHandler(versionService, shipService),
 		issueHandler:    NewIssueHandler(issueService),
+		collabHandler:   NewIssueCollabHandler(collabService),
 		artifactHandler: NewArtifactHandler(artifactService),
 	}
 }

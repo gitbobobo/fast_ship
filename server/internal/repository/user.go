@@ -26,6 +26,22 @@ func (r *UserRepository) FindByID(id string) (*model.User, error) {
 	return &user, nil
 }
 
+// ListByIDs 一次查询多个用户，返回 id -> User 映射，用于协作区批量解析作者信息。
+func (r *UserRepository) ListByIDs(ids []string) (map[string]model.User, error) {
+	result := make(map[string]model.User, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	var users []model.User
+	if err := r.db.Where("id IN ?", ids).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	for _, user := range users {
+		result[user.ID] = user
+	}
+	return result, nil
+}
+
 func (r *UserRepository) FindByUsername(username string) (*model.User, error) {
 	var user model.User
 	err := r.db.Where("username = ?", username).First(&user).Error

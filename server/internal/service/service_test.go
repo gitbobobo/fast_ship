@@ -35,7 +35,9 @@ type testServices struct {
 	issueAssetRepo      *repository.IssueAssetRepository
 	issueDraftAssetRepo *repository.IssueDraftAssetRepository
 	artifactRepo        *repository.ArtifactRepository
+	collabRepo          *repository.IssueCollabRepository
 	issueService        *IssueService
+	collabService       *IssueCollabService
 	aiService           *AIService
 	versionService      *VersionService
 	artifactService     *ArtifactService
@@ -69,6 +71,9 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.GitHubRepoLabel{},
+		&model.IssueCollabNote{},
+		&model.IssueCollabQuestion{},
+		&model.IssueCollabSummary{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -98,6 +103,7 @@ func setupTestServices(t *testing.T) *testServices {
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
+	collabRepo := repository.NewIssueCollabRepository(db)
 
 	cfg := &config.Config{
 		Encryption: config.EncryptionConfig{
@@ -122,7 +128,9 @@ func setupTestServices(t *testing.T) *testServices {
 		issueAssetRepo:      issueAssetRepo,
 		issueDraftAssetRepo: issueDraftAssetRepo,
 		artifactRepo:        artifactRepo,
+		collabRepo:          collabRepo,
 		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
+		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg),
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),

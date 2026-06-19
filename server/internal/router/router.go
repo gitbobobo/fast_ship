@@ -19,6 +19,7 @@ func Setup(
 	projectHandler *handler.ProjectHandler,
 	versionHandler *handler.VersionHandler,
 	issueHandler *handler.IssueHandler,
+	issueCollabHandler *handler.IssueCollabHandler,
 	artifactHandler *handler.ArtifactHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	authService *service.AuthService,
@@ -120,6 +121,19 @@ func Setup(
 		api.GET("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Get)
 		api.GET("/issues/:iid/comments", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListComments)
 		api.GET("/issues/:iid/timeline", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListTimeline)
+
+		// 人机协作区 —— JWT 或 API Key 均可（代理用 API Key 写入提问/总结，用户用 JWT 作答/补背景）
+		issueCollab := api.Group("/issues/:iid/collab", middleware.RequireAuth(cfg, apiKeyRepo, authService))
+		{
+			issueCollab.GET("", issueCollabHandler.GetArea)
+			issueCollab.POST("/notes", issueCollabHandler.CreateNote)
+			issueCollab.PUT("/notes/:nid", issueCollabHandler.UpdateNote)
+			issueCollab.DELETE("/notes/:nid", issueCollabHandler.DeleteNote)
+			issueCollab.POST("/questions", issueCollabHandler.CreateQuestions)
+			issueCollab.PUT("/questions/:qid/answer", issueCollabHandler.AnswerQuestion)
+			issueCollab.DELETE("/questions/:qid", issueCollabHandler.DeleteQuestion)
+			issueCollab.PUT("/summary", issueCollabHandler.UpsertSummary)
+		}
 
 		// JWT / API Key 均可 — 安装包操作
 		api.POST("/versions/:vid/artifacts", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Upload)

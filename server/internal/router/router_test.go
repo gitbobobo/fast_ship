@@ -637,6 +637,9 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
+		&model.IssueCollabNote{},
+		&model.IssueCollabQuestion{},
+		&model.IssueCollabSummary{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -692,6 +695,8 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
+	issueCollabRepo := repository.NewIssueCollabRepository(db)
+	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
@@ -703,11 +708,12 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService)
+	issueCollabHandler := handler.NewIssueCollabHandler(issueCollabService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
@@ -838,8 +844,8 @@ type dashboardDailyResolvedProjectPoint struct {
 }
 
 type dashboardDailyResolvedPoint struct {
-	Date          string                             `json:"date"`
-	ResolvedCount int                                `json:"resolved_count"`
+	Date          string                               `json:"date"`
+	ResolvedCount int                                  `json:"resolved_count"`
 	Projects      []dashboardDailyResolvedProjectPoint `json:"projects"`
 }
 
