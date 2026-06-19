@@ -149,7 +149,7 @@ export function VersionShipSection({
                 size="icon-xs"
                 className="absolute top-1.5 right-1.5 bg-destructive/5 hover:bg-destructive/10"
                 onClick={() => {
-                  void copyToClipboard(version.error_log || "");
+                  void copyToClipboard(version.error_log || "").catch(() => {});
                   toast.success("已复制到剪贴板");
                 }}
               >
