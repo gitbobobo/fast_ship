@@ -42,6 +42,23 @@ interface CreateInternalIssueCommentRequest {
   body: string;
 }
 
+interface CreateIssueCollabNoteRequest {
+  body: string;
+}
+
+interface CreateIssueCollabQuestionsRequest {
+  items: Array<{ body: string; options?: string[] }>;
+}
+
+interface AnswerIssueCollabQuestionRequest {
+  answer: string;
+}
+
+interface UpsertIssueCollabSummaryRequest {
+  body: string;
+  commit_ids: string[];
+}
+
 export const issueApi = {
   create: (projectId: string, data: CreateIssueRequest) =>
     api.post(`projects/${projectId}/issues`, { json: data }).json<ApiResponse<Issue>>(),
@@ -115,4 +132,38 @@ export const issueApi = {
     api
       .put(`issues/${issueId}/checklist`, { json: data })
       .json<ApiResponse<IssueInternalMeta | null>>(),
+
+  getCollab: (issueId: string) =>
+    api.get(`issues/${issueId}/collab`).json<ApiResponse<IssueCollabArea>>(),
+
+  createCollabNote: (issueId: string, data: CreateIssueCollabNoteRequest) =>
+    api
+      .post(`issues/${issueId}/collab/notes`, { json: data })
+      .json<ApiResponse<IssueCollabNote>>(),
+
+  updateCollabNote: (issueId: string, noteId: string, body: string) =>
+    api
+      .put(`issues/${issueId}/collab/notes/${noteId}`, { json: { body } })
+      .json<ApiResponse<IssueCollabNote>>(),
+
+  deleteCollabNote: (issueId: string, noteId: string) =>
+    api.delete(`issues/${issueId}/collab/notes/${noteId}`).json<ApiResponse<null>>(),
+
+  createCollabQuestions: (issueId: string, data: CreateIssueCollabQuestionsRequest) =>
+    api
+      .post(`issues/${issueId}/collab/questions`, { json: data })
+      .json<ApiResponse<IssueCollabQuestion[]>>(),
+
+  answerCollabQuestion: (issueId: string, questionId: string, data: AnswerIssueCollabQuestionRequest) =>
+    api
+      .put(`issues/${issueId}/collab/questions/${questionId}/answer`, { json: data })
+      .json<ApiResponse<IssueCollabQuestion>>(),
+
+  deleteCollabQuestion: (issueId: string, questionId: string) =>
+    api.delete(`issues/${issueId}/collab/questions/${questionId}`).json<ApiResponse<null>>(),
+
+  upsertCollabSummary: (issueId: string, data: UpsertIssueCollabSummaryRequest) =>
+    api
+      .put(`issues/${issueId}/collab/summary`, { json: data })
+      .json<ApiResponse<IssueCollabSummary>>(),
 };

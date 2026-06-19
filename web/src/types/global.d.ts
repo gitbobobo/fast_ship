@@ -256,6 +256,54 @@ interface IssueFilterOptions {
   milestones: string[];
 }
 
+interface IssueCollabActor {
+  kind: "user" | "agent";
+  login: string;
+  avatar_url?: string;
+}
+
+interface IssueCollabNote {
+  id: string;
+  issue_id: string;
+  body: string;
+  author: IssueCollabActor;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssueCollabQuestionAnswer {
+  value: string;
+  author: IssueCollabActor;
+  answered_at: string;
+}
+
+interface IssueCollabQuestion {
+  id: string;
+  issue_id: string;
+  body: string;
+  options: string[];
+  sort_order: number;
+  author: IssueCollabActor;
+  answer: IssueCollabQuestionAnswer | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssueCollabSummary {
+  issue_id: string;
+  body: string;
+  commit_ids: string[];
+  author: IssueCollabActor;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssueCollabArea {
+  notes: IssueCollabNote[];
+  questions: IssueCollabQuestion[];
+  summary: IssueCollabSummary | null;
+}
+
 interface DashboardOverview {
   open_issues_by_project: DashboardProjectOpenIssuePoint[];
   daily_resolved: DashboardDailyResolvedPoint[];

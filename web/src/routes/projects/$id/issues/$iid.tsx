@@ -35,6 +35,7 @@ import {
   X,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
+import { CollaborationArea } from "@/components/issues/collaboration-area";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -96,15 +97,12 @@ import {
   GITHUB_LOCAL_ASSET_NOTICE,
   toGitHubMediaProxyUrl,
 } from "@/lib/utils/github-media-proxy";
-import { cn } from "@/lib/utils";
+import { cn, getInitials } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
 import { formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 import { buildIssuePrompt } from "./issue-prompt";
 
-function getInitials(login: string) {
-  return login.slice(0, 2).toUpperCase();
-}
 
 function getEventIcon(eventType: string) {
   switch (eventType) {
@@ -1689,6 +1687,11 @@ export default function IssueDetailPage() {
                     暂无描述
                   </div>
                 )}
+              </div>
+
+              <Separator />
+              <div className="p-5 md:p-6">
+                <CollaborationArea issueId={iid!} project={project} />
               </div>
             </div>
 
