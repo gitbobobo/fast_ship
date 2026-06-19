@@ -195,6 +195,28 @@ func TestIssueServiceGetRepositoryLabels_ReturnsGitHubError(t *testing.T) {
 	}
 }
 
+func TestIssueServiceGetRepositoryLabels_RejectsNotGitHubConfigured(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-nogit")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+		p.GithubTokenEncrypted = nil
+	})
+
+	_, err := svc.issueService.GetRepositoryLabels(project.ID, user.ID)
+	if err == nil {
+		t.Fatal("expected error for project without GitHub config, got nil")
+	}
+	appErr, ok := err.(*errs.AppError)
+	if !ok {
+		t.Fatalf("expected *errs.AppError, got %T", err)
+	}
+	if appErr.Code != errs.ErrProjectGitHubNotConfigured.Code {
+		t.Errorf("expected code %d, got %d", errs.ErrProjectGitHubNotConfigured.Code, appErr.Code)
+	}
+}
+
 type fakeIssueGitHubClient struct {
 	issues             []*ghclient.Issue
 	repoLabels         []*gh.Label

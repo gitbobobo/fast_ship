@@ -1755,6 +1755,9 @@ func (s *IssueService) syncTimeline(ctx context.Context, client gitHubIssueClien
 }
 
 func (s *IssueService) decryptGitHubToken(project *model.Project) ([]byte, *errs.AppError) {
+	if !project.IsGitHubConfigured() {
+		return nil, errs.ErrProjectGitHubNotConfigured
+	}
 	tokenBytes, err := crypto.Decrypt(project.GithubTokenEncrypted, []byte(s.cfg.Encryption.Key))
 	if err != nil {
 		s.logger.Error("decrypt github token failed for issue sync", zap.Error(err))
