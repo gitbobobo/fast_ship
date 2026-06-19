@@ -119,7 +119,7 @@ describe("ProjectAndVersionForms", () => {
 
     await user.type(screen.getByLabelText("项目名称"), "fast-ship");
     await user.type(
-      screen.getByLabelText("仓库链接"),
+      screen.getByLabelText("仓库链接（可选）"),
       "https://github.com/godbobo/fast_ship",
     );
     await user.type(screen.getByLabelText("GitHub Access Token"), "ghp_secret");
@@ -167,7 +167,7 @@ describe("ProjectAndVersionForms", () => {
 
     await user.type(screen.getByLabelText("项目名称"), "fast-ship");
     await user.type(
-      screen.getByLabelText("仓库链接"),
+      screen.getByLabelText("仓库链接（可选）"),
       "godbobo/fast_ship",
     );
 
@@ -204,7 +204,7 @@ describe("ProjectAndVersionForms", () => {
     );
 
     const nameInput = screen.getByLabelText("项目名称");
-    const repositoryUrlInput = screen.getByLabelText("仓库链接");
+    const repositoryUrlInput = screen.getByLabelText("仓库链接（可选）");
 
     expect(nameInput).toHaveValue("fast-ship");
     expect(repositoryUrlInput).toHaveValue(

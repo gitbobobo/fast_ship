@@ -11,7 +11,7 @@ import {
   useUpdateVersion,
   useVersion,
 } from "@/lib/hooks/use-versions";
-import { useProjectBranches } from "@/lib/hooks/use-projects";
+import { useProject, useProjectBranches } from "@/lib/hooks/use-projects";
 import { useDeleteArtifact, useUploadArtifact } from "@/lib/hooks/use-artifacts";
 
 vi.mock("sonner", () => ({
@@ -35,6 +35,7 @@ vi.mock("@/lib/hooks/use-artifacts", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-projects", () => ({
+  useProject: vi.fn(),
   useProjectBranches: vi.fn(),
 }));
 
@@ -125,6 +126,20 @@ describe("VersionDetailPage", () => {
       isError: false,
       refetch: vi.fn(),
     } as unknown as ReturnType<typeof useProjectBranches>);
+
+    vi.mocked(useProject).mockReturnValue({
+      data: {
+        id: "proj-1",
+        user_id: "user-1",
+        name: "Alpha App",
+        description: "Release automation",
+        github_owner: "acme",
+        github_repo: "alpha",
+        created_at: "2026-04-06T09:00:00Z",
+        updated_at: "2026-04-06T09:00:00Z",
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProject>);
 
     vi.mocked(useUploadArtifact).mockReturnValue({
       mutateAsync: uploadMutateAsync,
