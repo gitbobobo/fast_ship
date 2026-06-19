@@ -207,8 +207,156 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | Issue 工作流状态更新 | ✅ | ❌ |
 | Issue Checklist | ✅ | ❌ |
 | Issue 附件上传 | ✅ | ❌ |
+| 人机协作区（背景/问题/总结） | ✅ | 部分 |
 | Ship 发布 | ❌ | ❌ |
 | AI 辅助功能 | ❌ | ❌ |
+
+> 注意：人机协作区按角色分工做了**写权限切分**——
+> - 代理（API Key）：可创建/删除问题、写完成总结（`POST /questions`、`DELETE /questions/:id`、`PUT /summary`）。
+> - 用户（网页登录 JWT）：作答、补充/编辑/删除背景信息（`PUT /questions/:id/answer`、`notes` 增删改）。
+> - 即：API Key 调用作答或背景接口会返回 `403`（40301）；JWT 调用提问/总结接口仍允许（无破坏性）。
+> - 读取（`GET /collab`）JWT 与 API Key 均可。
+
+## 人机协作区（Issue Collaboration Area）
+
+人机协作区挂在每个 Issue 之下，用于"人（用户）↔ 代理"的结构化协作：代理提出带选项的澄清问题、用户作答、代理完成后写非技术摘要 + 提交 ID 供人工审核。协作区数据保存在 Fast Ship 内部，不回写 GitHub；内部 Issue 与 GitHub Issue 均支持。
+
+### 接口总览
+
+所有接口路径前缀 `/api/issues/:issue_id/collab`，均需 `Authorization: Bearer fsk_...`。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/collab` | 获取整个协作区（背景/问题/总结） |
+| POST | `/collab/notes` | 补充一条背景信息（用户） |
+| PUT | `/collab/notes/:note_id` | 编辑背景信息 |
+| DELETE | `/collab/notes/:note_id` | 删除背景信息 |
+| POST | `/collab/questions` | 批量创建问题（代理，可带选项） |
+| PUT | `/collab/questions/:question_id/answer` | 作答/改答（用户） |
+| DELETE | `/collab/questions/:question_id` | 删除问题（代理） |
+| PUT | `/collab/summary` | 写入/覆盖完成总结（代理） |
+
+### GET 获取协作区
+
+```http
+GET /api/issues/:issue_id/collab
+```
+
+响应示例：
+
+```json
+{
+  "code": 0,
+  "data": {
+    "notes": [
+      {
+        "id": "note-uuid",
+        "issue_id": "issue-uuid",
+        "body": "这个按钮主要给运营用",
+        "author": { "kind": "user", "login": "alice", "avatar_url": "/api/avatars/..." },
+        "created_at": "2026-06-19T10:00:00Z",
+        "updated_at": "2026-06-19T10:00:00Z"
+      }
+    ],
+    "questions": [
+      {
+        "id": "q-uuid",
+        "issue_id": "issue-uuid",
+        "body": "按钮放哪里？",
+        "options": ["顶部", "侧边"],
+        "sort_order": 0,
+        "author": { "kind": "agent", "login": "代理" },
+        "answer": null,
+        "created_at": "2026-06-19T10:00:00Z",
+        "updated_at": "2026-06-19T10:00:00Z"
+      }
+    ],
+    "summary": null
+  }
+}
+```
+
+`author.kind` 为 `user` 或 `agent`：API Key 写入的内容显示为 `agent`（`login` 固定为"代理"），用户写入的显示为 `user`（`login` 为用户名）。`questions[].answer` 为 `null` 表示尚未作答；作答后为 `{ "value": "...", "author": {...}, "answered_at": "..." }`。
+
+### POST 批量创建问题（代理）
+
+```http
+POST /api/issues/:issue_id/collab/questions
+```
+
+请求体：
+
+```json
+{
+  "items": [
+    { "body": "按钮放哪里？", "options": ["顶部", "侧边"] },
+    { "body": "还需要支持什么？", "options": [] }
+  ]
+}
+```
+
+字段与限制：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `items` | array | 是 | 一次最多 20 条 |
+| `items[].body` | string | 是 | 问题正文，1..1000 字符（按字符计） |
+| `items[].options` | string[] | 否 | 选项，0..8 个，每个 1..100 字符；为空表示纯自由文本问题 |
+
+`sort_order` 由服务端按创建顺序自动分配。问题正文与选项**创建后不可修改**，只能删除后重建。
+
+### PUT 作答（用户）
+
+```http
+PUT /api/issues/:issue_id/collab/questions/:question_id/answer
+```
+
+```json
+{ "answer": "顶部" }
+```
+
+`answer` 为单一值：可直接填某个选项原文，也可填自由文本（1..1000 字符）。重复调用为**改答**，覆盖旧值。
+
+### PUT 写完成总结（代理）
+
+```http
+PUT /api/issues/:issue_id/collab/summary
+```
+
+```json
+{
+  "body": "已新增顶部按钮，运营可在设置中开关。",
+  "commit_ids": ["abc1234", "0123456789abcdef0123456789abcdef01234567"]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `body` | string | 是 | 非技术性摘要，1..8000 字符，支持 Markdown |
+| `commit_ids` | string[] | 否 | 提交 ID，0..20 个；**仅接受 git SHA（十六进制 7..64 位）**，不接受分支名/标签 |
+
+每个 Issue 只有一条总结，重复 PUT 为覆盖更新（upsert）。
+
+### 背景信息（notes）
+
+```http
+POST /api/issues/:issue_id/collab/notes        # { "body": "..." }
+PUT /api/issues/:issue_id/collab/notes/:note_id # { "body": "..." }
+DELETE /api/issues/:issue_id/collab/notes/:note_id
+```
+
+`body` 为 1..4000 字符的纯文本，由用户主动补充供代理参考。
+
+### 推荐工作流（幂等）
+
+外部代理无状态、易中断，建议按以下流程，避免重复创建：
+
+1. **先读后写**：处理 Issue 前 `GET /collab`，确认是否已有未回答的问题或已有总结，避免重复创建。
+2. **创建问题**：用 `POST /collab/questions` 一次提出本批需要澄清的非技术问题；本地记录返回的 `question_id`。
+3. **轮询作答**：周期性 `GET /collab`，检查 `questions[].answer` 是否齐全（已由用户作答）。
+4. **据答处理**：所有问题作答后再继续；**不要删除已作答的问题**（会让轮询误判用户未答）。
+5. **写总结**：完成后 `PUT /collab/summary`（upsert），附非技术摘要与提交 SHA。
+6. 重申规则：未经用户许可**不要**修改 Issue 的 open/closed 状态，也**不要**提交/推送代码。
 
 ## 错误处理
 
@@ -216,10 +364,12 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 
 | HTTP 状态 | Code | 含义 |
 |---|---|---|
+| 400 | 40001 | 请求参数无效（超长、选项过多、commit_id 非 SHA 等） |
 | 401 | 40100 | 认证信息无效或缺失 |
 | 403 | 40300 | API Key 权限不足（尝试访问未开放的写操作） |
-| 404 | 40400 | 项目或 Issue 不存在 |
-| 400 | 40000 | 请求参数错误 |
+| 404 | 40401 | 项目不存在 |
+| 404 | 40405 | Issue 不存在 |
+| 404 | 40408 | 协作区内容（note/question）不存在 |
 
 如果收到 401，检查：
 1. `Authorization` 头是否正确携带 `Bearer fsk_...`
