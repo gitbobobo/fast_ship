@@ -5,8 +5,13 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(...inputs))
 }
 
-// Fallback for contexts where navigator.clipboard is unavailable
-export function copyToClipboard(text: string): void {
+export async function copyToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  // Fallback for contexts where navigator.clipboard is unavailable
   const textarea = document.createElement("textarea")
   textarea.value = text
   textarea.style.cssText = "position:fixed;opacity:0"

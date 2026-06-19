@@ -56,7 +56,8 @@ import {
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
-import { cn, copyToClipboard } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { copyWithToast } from "@/lib/copy";
 import { ensureGitHubLinked, hasGitHubRepo } from "@/lib/utils/github";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
@@ -160,33 +161,23 @@ function IssueCardActions({
     }
   };
 
-  const handleCopyIssueLink = () => {
-    try {
-      const url = new URL(
-        `/projects/${issue.project_id}/issues/${issue.id}`,
-        window.location.origin,
-      );
-      if (issueDetailSearch) {
-        url.search = issueDetailSearch;
-      }
-      copyToClipboard(url.toString());
-      toast.success("已复制当前问题链接");
-    } catch {
-      toast.error("复制失败");
+  const handleCopyIssueLink = async () => {
+    const url = new URL(
+      `/projects/${issue.project_id}/issues/${issue.id}`,
+      window.location.origin,
+    );
+    if (issueDetailSearch) {
+      url.search = issueDetailSearch;
     }
+    await copyWithToast(url.toString(), "已复制当前问题链接");
   };
 
-  const handleCopyGitHubLink = () => {
+  const handleCopyGitHubLink = async () => {
     if (!issue.github?.html_url) {
       toast.error("复制失败");
       return;
     }
-    try {
-      copyToClipboard(issue.github.html_url);
-      toast.success("已复制 GitHub 深链接");
-    } catch {
-      toast.error("复制失败");
-    }
+    await copyWithToast(issue.github.html_url, "已复制 GitHub 深链接");
   };
 
   const handleSync = async () => {

@@ -96,9 +96,11 @@ import {
   GITHUB_LOCAL_ASSET_NOTICE,
   toGitHubMediaProxyUrl,
 } from "@/lib/utils/github-media-proxy";
-import { cn, copyToClipboard } from "@/lib/utils";
+import { cn } from "@/lib/utils";
+import { copyWithToast } from "@/lib/copy";
 import { formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
+import { buildIssuePrompt } from "./issue-prompt";
 
 function getInitials(login: string) {
   return login.slice(0, 2).toUpperCase();
@@ -824,51 +826,32 @@ export default function IssueDetailPage() {
     }
   };
 
-  const handleCopyCurrentViewLink = () => {
-    try {
-      const currentUrl = new URL(`${location.pathname}${location.search}${location.hash}`, window.location.origin).toString();
-      copyToClipboard(currentUrl);
-      toast.success("已复制当前问题视图链接");
-    } catch {
-      toast.error("复制失败");
-    }
+  const handleCopyCurrentViewLink = async () => {
+    const currentUrl = new URL(`${location.pathname}${location.search}${location.hash}`, window.location.origin).toString();
+    await copyWithToast(currentUrl, "已复制当前问题视图链接");
   };
 
-  const copyGitHubUrl = (url: string | null | undefined, successMessage: string) => {
+  const copyGitHubUrl = async (url: string | null | undefined, successMessage: string) => {
     if (!url) {
       toast.error("复制失败");
       return;
     }
-    try {
-      copyToClipboard(url);
-      toast.success(successMessage);
-    } catch {
-      toast.error("复制失败");
-    }
+    await copyWithToast(url, successMessage);
   };
 
-  const buildIssuePrompt = () => {
-    if (!issue) return "";
+  const handleCopyIssuePrompt = async () => {
+    if (!issue) return;
     const body = convertMediaUrlsToAbsolute(issue.body || "", token);
-    const allComments = timelineItems
-      .filter((t) => t.type === "comment")
-      .map((t) => t.data as IssueComment);
-    const commentsXml = allComments.length
-      ? "\n<comments>\n" + allComments.map((c) => `<comment author="${c.author?.login || "unknown"}">${convertMediaUrlsToAbsolute(c.body || "", token)}</comment>`).join("\n") + "\n</comments>"
-      : "";
-    const labelsXml = issueLabelNames.length
-      ? `\n<labels>${issueLabelNames.join(", ")}</labels>`
-      : "";
-    return `There is a project issue on the \`Fast Ship\` platform that needs to be resolved:\n\nIMPORTANT RULES:\n- Do NOT modify the issue status (open/closed) without explicit user permission.\n- Do NOT commit or push code without explicit user permission.\n\n<id>${issue.id}</id>\n<title>${issue.title}</title>${labelsXml}\n<body>${body}</body>${commentsXml}`;
-  };
-
-  const handleCopyIssuePrompt = () => {
-    try {
-      copyToClipboard(buildIssuePrompt());
-      toast.success("已复制提示词");
-    } catch {
-      toast.error("复制失败");
-    }
+    const comments = timelineItems
+      .filter((item): item is { type: "comment"; data: IssueComment; created_at: string } => item.type === "comment")
+      .map((item) => ({
+        author: item.data.author?.login || "unknown",
+        body: convertMediaUrlsToAbsolute(item.data.body || "", token),
+      }));
+    await copyWithToast(
+      buildIssuePrompt({ id: issue.id, title: issue.title, body, labels: issueLabelNames, comments }),
+      "已复制提示词",
+    );
   };
 
   const handleCopyGitHubLink = async () => {

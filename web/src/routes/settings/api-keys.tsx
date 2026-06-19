@@ -42,7 +42,7 @@ import {
   useDeleteApiKey,
 } from "@/lib/hooks/use-api-keys";
 import { formatDate } from "@/lib/utils/format";
-import { copyToClipboard } from "@/lib/utils";
+import { copyWithToast } from "@/lib/copy";
 import { toast } from "sonner";
 
 export default function ApiKeysPage() {
@@ -70,10 +70,7 @@ export default function ApiKeysPage() {
     }
   };
 
-  const handleCopy = (key: string) => {
-    copyToClipboard(key);
-    toast.success("已复制到剪贴板");
-  };
+  const handleCopy = (key: string) => copyWithToast(key, "已复制到剪贴板");
 
   const handleDelete = async (id: string) => {
     try {
