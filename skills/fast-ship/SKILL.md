@@ -168,6 +168,26 @@ PUT /api/issues/:issue_id
 | `state_reason` | string | 否 | 关闭原因 |
 | `labels` | string[] | 否 | 标签名称列表 |
 
+### 修改工作流状态（internal-meta）
+
+修改内部 Issue 的工作流状态（API Key 已支持，便于 Agent 推进状态机）：
+
+```http
+PUT /api/issues/:issue_id/internal-meta
+```
+
+```json
+{
+  "workflow_status": "in_progress"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `workflow_status` | string | 是 | `todo` / `in_progress` / `done`（空串可重置为未开始） |
+
+> Issue 评论（`POST /issues/:iid/comments`）、Checklist（`PUT /issues/:iid/checklist`）、附件上传（`POST /issues/:iid/assets`）也已对 API Key 开放，请求体字段与网页端一致。
+
 ### 步骤 6：查询 Issue
 
 ```http
@@ -203,13 +223,15 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | Issue 列表/详情/过滤选项/标签 | ✅ | ✅ |
 | 版本列表/详情 | ✅ | ✅ |
 | 构建产物上传/下载 | ✅ | ✅ |
-| Issue 评论 | ✅ | ❌ |
-| Issue 工作流状态更新 | ✅ | ❌ |
-| Issue Checklist | ✅ | ❌ |
-| Issue 附件上传 | ✅ | ❌ |
+| Issue 评论 | ✅ | ✅ |
+| Issue 工作流状态更新（internal-meta） | ✅ | ✅ |
+| Issue Checklist | ✅ | ✅ |
+| Issue 附件上传 | ✅ | ✅ |
 | 人机协作区（背景/问题/总结） | ✅ | 部分 |
 | Ship 发布 | ❌ | ❌ |
-| AI 辅助功能 | ❌ | ❌ |
+| AI 辅助功能 | ❌ | 部分 |
+
+> Issue 的编辑类写操作（评论、工作流状态、Checklist、附件上传、AI 清单建议）均已对 API Key 开放，与通用编辑 `PUT /issues/:iid` 行为一致，便于自动化/Agent 场景。AI 端点中仅 `checklist-suggestions` 对 API Key 开放；`generate-title` 与 `/ai/settings` 仍限 JWT，API Key 调用会返回 `403`（40301）。
 
 > 注意：人机协作区按角色分工做了**写权限切分**——
 > - 代理（API Key）：可创建/删除问题、写完成总结（`POST /questions`、`DELETE /questions/:id`、`PUT /summary`）。
