@@ -131,7 +131,7 @@ func setupTestServices(t *testing.T) *testServices {
 		collabRepo:          collabRepo,
 		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
-		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg),
+		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		shipService:         NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),

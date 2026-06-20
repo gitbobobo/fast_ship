@@ -213,7 +213,7 @@ func (h *IssueHandler) CreateComment(c *gin.Context) {
 
 	result, err := h.issueService.CreateInternalComment(issueID, userID, service.CreateInternalIssueCommentRequest{
 		Body: req.Body,
-	})
+	}, middleware.ActorLabel(c))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -267,7 +267,7 @@ func (h *IssueHandler) UpdateInternalMeta(c *gin.Context) {
 		return
 	}
 
-	result, err := h.issueService.UpdateInternalMeta(issueID, userID, *req.WorkflowStatus)
+	result, err := h.issueService.UpdateInternalMeta(issueID, userID, *req.WorkflowStatus, middleware.ActorLabel(c))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -288,7 +288,7 @@ func (h *IssueHandler) ReplaceChecklist(c *gin.Context) {
 
 	result, err := h.issueService.ReplaceChecklist(issueID, userID, service.ReplaceIssueChecklistRequest{
 		Items: req.Items,
-	})
+	}, middleware.ActorLabel(c))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -313,7 +313,7 @@ func (h *IssueHandler) UploadAsset(c *gin.Context) {
 		fileName = ""
 	}
 
-	result, err := h.issueService.UploadInternalIssueAsset(issueID, userID, fileName, header.Size, file)
+	result, err := h.issueService.UploadInternalIssueAsset(issueID, userID, fileName, header.Size, file, middleware.ActorLabel(c))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

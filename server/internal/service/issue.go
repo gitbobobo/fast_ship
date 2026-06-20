@@ -712,7 +712,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	return &resp, nil
 }
 
-func (s *IssueService) UploadInternalIssueAsset(issueID, userID, fileName string, fileSize int64, reader io.Reader) (*IssueAssetResponse, error) {
+func (s *IssueService) UploadInternalIssueAsset(issueID, userID, fileName string, fileSize int64, reader io.Reader, actor string) (*IssueAssetResponse, error) {
 	_ = fileSize
 
 	issue, err := s.issueRepo.FindByID(issueID)
@@ -782,6 +782,12 @@ func (s *IssueService) UploadInternalIssueAsset(issueID, userID, fileName string
 		return nil, errs.ErrInternal
 	}
 
+	s.logger.Info("issue asset uploaded",
+		zap.String("action", "upload_issue_asset"),
+		zap.String("issue_id", issueID),
+		zap.String("user_id", userID),
+		zap.String("actor", actor),
+	)
 	resp := toIssueAssetResponse(*asset)
 	return &resp, nil
 }
@@ -1093,7 +1099,7 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 	return &resp, nil
 }
 
-func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssueChecklistRequest) (*IssueInternalMetaResponse, error) {
+func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssueChecklistRequest, actor string) (*IssueInternalMetaResponse, error) {
 	issue, err := s.issueRepo.FindByID(issueID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1150,10 +1156,16 @@ func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssue
 		return nil, errs.ErrInternal
 	}
 
+	s.logger.Info("issue checklist replaced",
+		zap.String("action", "replace_checklist"),
+		zap.String("issue_id", issueID),
+		zap.String("user_id", userID),
+		zap.String("actor", actor),
+	)
 	return s.toIssueInternalMetaResponse(issue.ProjectID, meta, items, nil), nil
 }
 
-func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus model.IssueWorkflowStatus) (*IssueInternalMetaResponse, error) {
+func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus model.IssueWorkflowStatus, actor string) (*IssueInternalMetaResponse, error) {
 	if !model.IsValidIssueWorkflowStatus(workflowStatus) {
 		return nil, errs.ErrInvalidParams
 	}
@@ -1194,6 +1206,13 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 		return nil, errs.ErrInternal
 	}
 
+	s.logger.Info("issue internal meta updated",
+		zap.String("action", "update_internal_meta"),
+		zap.String("issue_id", issueID),
+		zap.String("user_id", userID),
+		zap.String("actor", actor),
+		zap.String("workflow_status", string(workflowStatus)),
+	)
 	return s.toIssueInternalMetaResponse(issue.ProjectID, meta, nil, nil), nil
 }
 
@@ -1223,7 +1242,7 @@ func (s *IssueService) ListComments(issueID, userID string, page, pageSize int) 
 	return resp, total, nil
 }
 
-func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateInternalIssueCommentRequest) (*IssueCommentResponse, error) {
+func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateInternalIssueCommentRequest, actor string) (*IssueCommentResponse, error) {
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		return nil, errs.ErrInvalidParams
@@ -1287,6 +1306,13 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 			return nil, errs.ErrInternal
 		}
 
+		s.logger.Info("issue comment created",
+			zap.String("action", "create_comment"),
+			zap.String("issue_id", issueID),
+			zap.String("user_id", userID),
+			zap.String("actor", actor),
+			zap.String("source", "github"),
+		)
 		resp := toIssueCommentResponse(*comment)
 		return &resp, nil
 	}
@@ -1330,6 +1356,13 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 		return nil, errs.ErrInternal
 	}
 
+	s.logger.Info("issue comment created",
+		zap.String("action", "create_comment"),
+		zap.String("issue_id", issueID),
+		zap.String("user_id", userID),
+		zap.String("actor", actor),
+		zap.String("source", "internal"),
+	)
 	resp := toIssueCommentResponse(*comment)
 	return &resp, nil
 }

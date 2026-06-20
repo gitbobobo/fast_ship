@@ -18,6 +18,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -47,6 +48,7 @@ type AIService struct {
 	projectRepo  *repository.ProjectRepository
 	cfg          *config.Config
 	httpClient   *http.Client
+	logger       *zap.Logger
 }
 
 type AISettingsResponse struct {
@@ -102,6 +104,7 @@ func NewAIService(
 	commentRepo *repository.IssueCommentRepository,
 	projectRepo *repository.ProjectRepository,
 	cfg *config.Config,
+	logger *zap.Logger,
 ) *AIService {
 	return &AIService{
 		settingsRepo: settingsRepo,
@@ -109,6 +112,7 @@ func NewAIService(
 		commentRepo:  commentRepo,
 		projectRepo:  projectRepo,
 		cfg:          cfg,
+		logger:       logger,
 		httpClient: &http.Client{
 			Timeout: issueSuggestionRequestTimeout,
 		},
@@ -201,7 +205,7 @@ func (s *AIService) UpdateSettings(userID string, req UpdateAISettingsRequest) (
 	}, nil
 }
 
-func (s *AIService) SuggestIssueChecklist(ctx context.Context, issueID, userID string) (*IssueChecklistSuggestionsResponse, error) {
+func (s *AIService) SuggestIssueChecklist(ctx context.Context, issueID, userID, actor string) (*IssueChecklistSuggestionsResponse, error) {
 	issue, err := s.issueRepo.FindByID(issueID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -248,6 +252,13 @@ func (s *AIService) SuggestIssueChecklist(ctx context.Context, issueID, userID s
 		return nil, err
 	}
 
+	s.logger.Info("issue checklist suggestions generated",
+		zap.String("action", "suggest_checklist"),
+		zap.String("issue_id", issueID),
+		zap.String("user_id", userID),
+		zap.String("actor", actor),
+		zap.Int("items", len(result)),
+	)
 	return &IssueChecklistSuggestionsResponse{Items: result}, nil
 }
 

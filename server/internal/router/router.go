@@ -99,11 +99,13 @@ func Setup(
 		}
 		api.POST("/projects/:id/issues", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Create)
 		api.PUT("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Update)
-		api.POST("/issues/:iid/assets", middleware.RequireJWT(cfg, authService), issueHandler.UploadAsset)
-		api.POST("/issues/:iid/comments", middleware.RequireJWT(cfg, authService), issueHandler.CreateComment)
-		api.PUT("/issues/:iid/internal-meta", middleware.RequireJWT(cfg, authService), issueHandler.UpdateInternalMeta)
-		api.PUT("/issues/:iid/checklist", middleware.RequireJWT(cfg, authService), issueHandler.ReplaceChecklist)
-		api.POST("/issues/:iid/checklist-suggestions", middleware.RequireJWT(cfg, authService), aiHandler.SuggestIssueChecklist)
+		// Issue 编辑类写操作 —— JWT 或 API Key 均可（API Key 用于自动化/Agent 场景）
+		api.POST("/issues/:iid/assets", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.UploadAsset)
+		api.POST("/issues/:iid/comments", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.CreateComment)
+		api.PUT("/issues/:iid/internal-meta", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.UpdateInternalMeta)
+		api.PUT("/issues/:iid/checklist", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ReplaceChecklist)
+		// checklist-suggestions 对 API Key 开放：供 Agent 自动化生成清单建议；其余 AI 端点（generate-title / settings）仍限 JWT。
+		api.POST("/issues/:iid/checklist-suggestions", middleware.RequireAuth(cfg, apiKeyRepo, authService), aiHandler.SuggestIssueChecklist)
 
 		// JWT 必须 — 版本删除和发货
 		api.DELETE("/versions/:vid", middleware.RequireJWT(cfg, authService), versionHandler.Delete)

@@ -181,6 +181,23 @@ func GetAPIKeyName(c *gin.Context) string {
 	return c.GetString(ContextKeyAPIKey)
 }
 
+// ActorLabel 返回请求者的可读标识用于审计：JWT 返回用户名，API Key 返回 "API Key: <name>"，未知返回 "未知"。
+func ActorLabel(c *gin.Context) string {
+	if IsJWTAuth(c) {
+		if name := GetUserName(c); name != "" {
+			return name
+		}
+		return "Web 用户"
+	}
+	if GetAuthType(c) == AuthTypeApiKey {
+		if name := GetAPIKeyName(c); name != "" {
+			return "API Key: " + name
+		}
+		return "API Key"
+	}
+	return "未知"
+}
+
 // HandleAppError 将 AppError 转换为 HTTP 响应
 func HandleAppError(c *gin.Context, err error) {
 	var appErr *errs.AppError

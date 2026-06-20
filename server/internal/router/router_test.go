@@ -688,7 +688,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
-	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg)
+	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
@@ -930,6 +930,120 @@ func createRouterTestInternalMeta(t *testing.T, db *gorm.DB, issueID string, opt
 		t.Fatalf("create internal meta: %v", err)
 	}
 	return meta
+}
+
+func TestRouterIssueWritesAcceptAPIKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	user := createRouterTestUser(t, env.db, "user-issue-write", "issuewriter", "issuewriter@example.com")
+	project := createRouterTestProject(t, env.db, user.ID)
+	issue := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+		i.Title = "API Key 编辑问题"
+	})
+
+	rawKey := "ISSUEWRITEKEY1234567890"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		Name:      "CI-Writer",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	authHeader := "Bearer " + service.FormatApiKey(rawKey)
+
+	doJSON := func(method, path string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. internal-meta (workflow_status)
+	rec := doJSON(http.MethodPut, "/api/issues/"+issue.ID+"/internal-meta", []byte(`{"workflow_status":"in_progress"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("internal-meta: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var metaResp struct {
+		WorkflowStatus string `json:"workflow_status"`
+	}
+	decodeRouterEnvelope(t, rec, &metaResp)
+	if metaResp.WorkflowStatus != "in_progress" {
+		t.Fatalf("internal-meta: expected workflow_status=in_progress, got %q", metaResp.WorkflowStatus)
+	}
+
+	// 2. checklist
+	rec = doJSON(http.MethodPut, "/api/issues/"+issue.ID+"/checklist", []byte(`{"items":[{"title":"步骤一","is_completed":false},{"title":"步骤二","is_completed":false}]}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("checklist: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 3. comments
+	rec = doJSON(http.MethodPost, "/api/issues/"+issue.ID+"/comments", []byte(`{"body":"通过 API Key 评论"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("comments: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. assets
+	uploadReq := newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/assets", "file", "clip.png", routerTestPNGBytes, nil)
+	uploadReq.Header.Set("Authorization", authHeader)
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("assets: expected 200, got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+}
+
+func TestRouterIssueWriteRejectsCrossUserAPIKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	owner := createRouterTestUser(t, env.db, "user-issue-owner", "issueowner", "issueowner@example.com")
+	intruder := createRouterTestUser(t, env.db, "user-issue-intruder", "issueintruder", "issueintruder@example.com")
+	ownerProject := createRouterTestProject(t, env.db, owner.ID)
+	issue := createRouterTestIssue(t, env.db, ownerProject.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	rawKey := "INTRUDERKEY1234567890123"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    intruder.ID,
+		Name:      "CI-Intruder",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	authHeader := "Bearer " + service.FormatApiKey(rawKey)
+
+	cases := []struct {
+		name string
+		req  *http.Request
+	}{
+		{"internal-meta", httptest.NewRequest(http.MethodPut, "/api/issues/"+issue.ID+"/internal-meta", bytes.NewReader([]byte(`{"workflow_status":"done"}`)))},
+		{"checklist", httptest.NewRequest(http.MethodPut, "/api/issues/"+issue.ID+"/checklist", bytes.NewReader([]byte(`{"items":[]}`)))},
+		{"comments", httptest.NewRequest(http.MethodPost, "/api/issues/"+issue.ID+"/comments", bytes.NewReader([]byte(`{"body":"x"}`)))},
+		{"assets", newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/assets", "file", "clip.png", routerTestPNGBytes, nil)},
+		{"checklist-suggestions", httptest.NewRequest(http.MethodPost, "/api/issues/"+issue.ID+"/checklist-suggestions", nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.req.Header.Set("Authorization", authHeader)
+			if tc.req.Header.Get("Content-Type") == "" {
+				tc.req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, tc.req)
+			// 跨用户访问他人 Issue -> projectRepo 按 user_id 过滤 NotFound -> 404；若 middleware 退回 RequireJWT 则会是 403。
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s: expected 404 for cross-user API key, got %d: %s", tc.name, rec.Code, rec.Body.String())
+			}
+		})
+	}
 }
 
 func newRouterMultipartRequest(t *testing.T, target, fieldName, fileName string, content []byte, extra map[string]string) *http.Request {

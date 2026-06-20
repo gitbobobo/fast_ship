@@ -63,7 +63,7 @@ func (h *AIHandler) SuggestIssueChecklist(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	issueID := c.Param("iid")
 
-	result, err := h.aiService.SuggestIssueChecklist(c.Request.Context(), issueID, userID)
+	result, err := h.aiService.SuggestIssueChecklist(c.Request.Context(), issueID, userID, middleware.ActorLabel(c))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

@@ -215,6 +215,46 @@ func TestAIHandler_GenerateTitle_NoAISettings(t *testing.T) {
 	}
 }
 
+func TestAIHandler_SuggestIssueChecklist_APIKeyAuth(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-suggest-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issue := createHandlerTestIssue(t, env.db, project.ID)
+
+	aiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"base_resp": { "status_code": 0, "status_msg": "success" },
+			"choices": [
+				{ "message": { "role": "assistant", "content": "{\"items\":[\"复现问题\",\"修复验证\"]}" } }
+			]
+		}`))
+	}))
+	defer aiServer.Close()
+	setupAIForUser(t, env, user.ID, aiServer.URL)
+
+	ctx, rec := newJSONContext(http.MethodPost, "/api/issues/"+issue.ID+"/checklist-suggestions", nil)
+	ctx.Params = ginParams("iid", issue.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	ctx.Set(middleware.ContextKeyAPIKey, "CI-Bot")
+	env.aiHandler.SuggestIssueChecklist(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var data struct {
+		Items []struct {
+			Title string `json:"title"`
+		} `json:"items"`
+	}
+	decodeEnvelope(t, rec, &data)
+	if len(data.Items) != 2 {
+		t.Fatalf("expected 2 suggestions, got %d", len(data.Items))
+	}
+}
+
 func setupAIForUser(t *testing.T, env *handlerTestEnv, userID, aiServerURL string) {
 	t.Helper()
 	ctx, rec := newJSONContext(http.MethodPut, "/ai/settings", marshalJSON(t, updateAISettingsRequest{

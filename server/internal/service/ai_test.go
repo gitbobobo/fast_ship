@@ -94,7 +94,7 @@ func TestAIServiceSuggestIssueChecklist(t *testing.T) {
 		t.Fatalf("update settings: %v", err)
 	}
 
-	result, err := services.aiService.SuggestIssueChecklist(context.Background(), issue.ID, user.ID)
+	result, err := services.aiService.SuggestIssueChecklist(context.Background(), issue.ID, user.ID, "test")
 	if err != nil {
 		t.Fatalf("suggest checklist: %v", err)
 	}

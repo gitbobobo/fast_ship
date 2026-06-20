@@ -357,7 +357,7 @@ func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
 	project := createTestProject(t, svc.db, "user-1")
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	meta, err := svc.issueService.UpdateInternalMeta(issue.ID, project.UserID, model.IssueWorkflowStatusInProgress)
+	meta, err := svc.issueService.UpdateInternalMeta(issue.ID, project.UserID, model.IssueWorkflowStatusInProgress, "test")
 	if err != nil {
 		t.Fatalf("update internal meta: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestIssueServiceUpdateInternalMeta_KeepsFirstCompletedAtAcrossReopen(t *tes
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	firstDone, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusDone)
+	firstDone, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusDone, "test")
 	if err != nil {
 		t.Fatalf("mark issue done the first time: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestIssueServiceUpdateInternalMeta_KeepsFirstCompletedAtAcrossReopen(t *tes
 	}
 	firstCompletedAt := *firstDone.CompletedAt
 
-	reopened, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusInProgress)
+	reopened, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusInProgress, "test")
 	if err != nil {
 		t.Fatalf("reopen issue after done: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestIssueServiceUpdateInternalMeta_KeepsFirstCompletedAtAcrossReopen(t *tes
 
 	time.Sleep(50 * time.Millisecond)
 
-	doneAgain, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusDone)
+	doneAgain, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, model.IssueWorkflowStatusDone, "test")
 	if err != nil {
 		t.Fatalf("mark issue done the second time: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestIssueServiceReplaceChecklist_UpdatesProgressSnapshot(t *testing.T) {
 			{Title: "定位问题", IsCompleted: true},
 			{Title: "修复问题", IsCompleted: false},
 		},
-	})
+	}, "test")
 	if err != nil {
 		t.Fatalf("replace checklist: %v", err)
 	}
@@ -716,6 +716,7 @@ func TestIssueServiceUpdateInternalIssue_RemovesDetachedAssets(t *testing.T) {
 		"clip.png",
 		int64(len(testPNGBytes)),
 		bytes.NewReader(testPNGBytes),
+		"test",
 	)
 	if err != nil {
 		t.Fatalf("upload issue asset: %v", err)
@@ -771,6 +772,7 @@ func TestIssueServiceUpdateInternalIssue_AttachesReferencedPendingAsset(t *testi
 		"clip.png",
 		int64(len(testPNGBytes)),
 		bytes.NewReader(testPNGBytes),
+		"test",
 	)
 	if err != nil {
 		t.Fatalf("upload issue asset: %v", err)
@@ -814,6 +816,7 @@ func TestIssueServiceUpdateInternalIssue_RemovesUnreferencedPendingAssets(t *tes
 		"clip.png",
 		int64(len(testPNGBytes)),
 		bytes.NewReader(testPNGBytes),
+		"test",
 	)
 	if err != nil {
 		t.Fatalf("upload issue asset: %v", err)
@@ -862,6 +865,7 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 		"expired.png",
 		int64(len(testPNGBytes)),
 		bytes.NewReader(testPNGBytes),
+		"test",
 	)
 	if err != nil {
 		t.Fatalf("upload expired pending asset: %v", err)
@@ -872,6 +876,7 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 		"keep.png",
 		int64(len(testPNGBytes)),
 		bytes.NewReader(testPNGBytes),
+		"test",
 	)
 	if err != nil {
 		t.Fatalf("upload attached asset: %v", err)
@@ -941,7 +946,7 @@ func TestIssueServiceCreateInternalComment_AddsCommentToInternalIssue(t *testing
 
 	comment, err := svc.issueService.CreateInternalComment(created.ID, user.ID, CreateInternalIssueCommentRequest{
 		Body: "第一条内部评论",
-	})
+	}, "test")
 	if err != nil {
 		t.Fatalf("create internal comment: %v", err)
 	}
@@ -1433,7 +1438,7 @@ func TestIssueServiceCreateInternalComment_WritesGitHubCommentBack(t *testing.T)
 
 	comment, err := svc.issueService.CreateInternalComment(issue.ID, user.ID, CreateInternalIssueCommentRequest{
 		Body: "已在 GitHub 回复",
-	})
+	}, "test")
 	if err != nil {
 		t.Fatalf("create github comment: %v", err)
 	}
