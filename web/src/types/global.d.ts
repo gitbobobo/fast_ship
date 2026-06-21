@@ -262,8 +262,17 @@ interface IssueCollabActor {
   avatar_url?: string;
 }
 
-interface IssueCollabNote {
+interface IssueCollabSuggestion {
   id: string;
+  issue_id: string;
+  body: string;
+  sort_order: number;
+  author: IssueCollabActor;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssueCollabPlan {
   issue_id: string;
   body: string;
   author: IssueCollabActor;
@@ -271,20 +280,10 @@ interface IssueCollabNote {
   updated_at: string;
 }
 
-interface IssueCollabQuestionAnswer {
-  value: string;
-  author: IssueCollabActor;
-  answered_at: string;
-}
-
-interface IssueCollabQuestion {
-  id: string;
+interface IssueCollabReview {
   issue_id: string;
   body: string;
-  options: string[];
-  sort_order: number;
   author: IssueCollabActor;
-  answer: IssueCollabQuestionAnswer | null;
   created_at: string;
   updated_at: string;
 }
@@ -299,8 +298,9 @@ interface IssueCollabSummary {
 }
 
 interface IssueCollabArea {
-  notes: IssueCollabNote[];
-  questions: IssueCollabQuestion[];
+  suggestions: IssueCollabSuggestion[];
+  plan: IssueCollabPlan | null;
+  review: IssueCollabReview | null;
   summary: IssueCollabSummary | null;
 }
 

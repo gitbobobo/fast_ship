@@ -1,35 +1,18 @@
-import { useState } from "react";
 import {
   Check,
   GitCommit,
   HelpCircle,
   Lightbulb,
-  Loader2,
-  Pencil,
-  Plus,
+  ListChecks,
+  ShieldCheck,
   Sparkles,
-  Trash2,
-  X,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Skeleton } from "@/components/ui/skeleton";
 import { GitHubContent } from "@/components/github-content";
-import {
-  useAnswerCollabQuestion,
-  useCreateCollabNote,
-  useDeleteCollabNote,
-  useIssueCollab,
-  useUpdateCollabNote,
-} from "@/lib/hooks/use-issue-collab";
+import { useIssueCollab } from "@/lib/hooks/use-issue-collab";
 import { getInitials } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
-import { toast } from "sonner";
-
-const CUSTOM_VALUE = "__collab_custom__";
 
 interface CollaborationAreaProps {
   issueId: string;
@@ -63,275 +46,73 @@ function CollabActorBadge({ actor }: { actor: IssueCollabActor }) {
   );
 }
 
-function BackgroundSection({ issueId }: { issueId: string }) {
-  const { data } = useIssueCollab(issueId);
-  const createNote = useCreateCollabNote(issueId);
-  const updateNote = useUpdateCollabNote(issueId);
-  const deleteNote = useDeleteCollabNote(issueId);
-  const [draft, setDraft] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
-
-  const notes = data?.notes ?? [];
-
-  const handleCreate = async () => {
-    const body = draft.trim();
-    if (!body) {
-      toast.error("请输入背景信息");
-      return;
-    }
-    try {
-      await createNote.mutateAsync(body);
-      setDraft("");
-      toast.success("已补充背景信息");
-    } catch {
-      toast.error("补充失败");
-    }
-  };
-
-  const handleStartEdit = (note: IssueCollabNote) => {
-    setEditingId(note.id);
-    setEditDraft(note.body);
-  };
-
-  const handleSaveEdit = async (noteId: string) => {
-    const body = editDraft.trim();
-    if (!body) {
-      toast.error("请输入背景信息");
-      return;
-    }
-    try {
-      await updateNote.mutateAsync({ noteId, body });
-      setEditingId(null);
-      toast.success("已更新");
-    } catch {
-      toast.error("更新失败");
-    }
-  };
-
-  const handleDelete = async (noteId: string) => {
-    try {
-      await deleteNote.mutateAsync(noteId);
-      toast.success("已删除");
-    } catch {
-      toast.error("删除失败");
-    }
-  };
-
+function SuggestionsSection({ suggestions }: { suggestions: IssueCollabSuggestion[] }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 text-sm font-semibold">
         <Lightbulb className="h-4 w-4 text-amber-500" />
-        背景信息
+        实施建议（{suggestions.length}）
       </div>
-
-      {notes.length === 0 ? (
-        <p className="text-sm text-muted-foreground">暂无背景，可补充供代理参考的上下文。</p>
-      ) : (
-        <div className="space-y-2">
-          {notes.map((note) => (
-            <div key={note.id} className="rounded-lg border bg-card p-3">
-              <div className="mb-1.5 flex items-center justify-between gap-2">
-                <CollabActorBadge actor={note.author} />
-                <div className="flex items-center gap-1">
-                  {editingId === note.id ? (
-                    <>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="取消"
-                        onClick={() => setEditingId(null)}
-                        disabled={updateNote.isPending}
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="icon-sm"
-                        aria-label="保存"
-                        onClick={() => void handleSaveEdit(note.id)}
-                        disabled={updateNote.isPending}
-                      >
-                        {updateNote.isPending ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Check className="h-3.5 w-3.5" />
-                        )}
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="编辑背景"
-                        onClick={() => handleStartEdit(note)}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="删除背景"
-                        onClick={() => void handleDelete(note.id)}
-                        disabled={deleteNote.isPending}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
-                      </Button>
-                    </>
-                  )}
-                </div>
+      <div className="space-y-2">
+        {suggestions.map((suggestion, index) => (
+          <div key={suggestion.id} className="rounded-lg border bg-card p-3">
+            <div className="mb-1.5 flex items-start gap-2">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-xs font-medium text-amber-600 dark:text-amber-400">
+                {index + 1}
+              </span>
+              <div className="markdown-body min-w-0 flex-1 text-sm">
+                <GitHubContent markdown={suggestion.body} />
               </div>
-              {editingId === note.id ? (
-                <Textarea
-                  value={editDraft}
-                  onChange={(e) => setEditDraft(e.target.value)}
-                  rows={3}
-                  autoFocus
-                />
-              ) : (
-                <p className="whitespace-pre-wrap break-words text-sm">{note.body}</p>
-              )}
-              <p className="mt-1.5 text-xs text-muted-foreground">
-                {formatRelativeTime(note.created_at)}
-                {note.updated_at !== note.created_at ? " · 已编辑" : ""}
-              </p>
             </div>
-          ))}
-        </div>
-      )}
-
-      <Textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        rows={2}
-        placeholder="补充背景信息（代理处理时会参考）"
-      />
-      <div className="flex justify-end">
-        <Button size="sm" onClick={() => void handleCreate()} disabled={createNote.isPending}>
-          {createNote.isPending ? (
-            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Plus className="mr-1.5 h-3.5 w-3.5" />
-          )}
-          补充背景
-        </Button>
+            <div className="flex items-center justify-between gap-2">
+              <CollabActorBadge actor={suggestion.author} />
+              <span className="text-xs text-muted-foreground">
+                {formatRelativeTime(suggestion.created_at)}
+              </span>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-function QuestionItem({ issueId, question }: { issueId: string; question: IssueCollabQuestion }) {
-  const answerQuestion = useAnswerCollabQuestion(issueId);
-  const [editing, setEditing] = useState(question.answer === null);
-  const currentAnswer = question.answer?.value ?? "";
-  const isCustomAnswer =
-    currentAnswer !== "" && !question.options.includes(currentAnswer);
-
-  const [selected, setSelected] = useState<string>(
-    question.answer
-      ? isCustomAnswer
-        ? CUSTOM_VALUE
-        : currentAnswer
-      : "",
-  );
-  const [customText, setCustomText] = useState(isCustomAnswer ? currentAnswer : "");
-
-  const handleStartEdit = () => {
-    setSelected(isCustomAnswer ? CUSTOM_VALUE : currentAnswer);
-    setCustomText(isCustomAnswer ? currentAnswer : "");
-    setEditing(true);
-  };
-
-  const canSubmit =
-    selected !== "" && (selected !== CUSTOM_VALUE || customText.trim() !== "");
-
-  const handleSubmit = async () => {
-    let answer = "";
-    if (selected === CUSTOM_VALUE) {
-      answer = customText.trim();
-    } else if (selected !== "") {
-      answer = selected;
-    }
-    if (!answer) {
-      toast.error("请选择或输入答案");
-      return;
-    }
-    try {
-      await answerQuestion.mutateAsync({ questionId: question.id, answer });
-      setEditing(false);
-      toast.success("已提交回答");
-    } catch {
-      toast.error("提交失败");
-    }
-  };
-
+function PlanSection({ plan }: { plan: IssueCollabPlan }) {
   return (
-    <div className="rounded-lg border bg-card p-3">
-      <div className="mb-2 flex items-start justify-between gap-2">
-        <p className="text-sm font-medium">{question.body}</p>
-        <CollabActorBadge actor={question.author} />
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <ListChecks className="h-4 w-4 text-sky-500" />
+          计划
+        </div>
+        <CollabActorBadge actor={plan.author} />
       </div>
+      <div className="rounded-lg border bg-card p-3">
+        <div className="markdown-body text-sm">
+          <GitHubContent markdown={plan.body} />
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">更新于 {formatRelativeTime(plan.updated_at)}</p>
+      </div>
+    </div>
+  );
+}
 
-      {editing ? (
-        <div className="space-y-2">
-          {question.options.length > 0 ? (
-            <RadioGroup value={selected} onValueChange={(value) => setSelected((value as string) ?? "")}>
-              {question.options.map((option) => (
-                <RadioGroupItem key={option} value={option}>
-                  {option}
-                </RadioGroupItem>
-              ))}
-              <RadioGroupItem value={CUSTOM_VALUE}>
-                <span className="text-muted-foreground">其他（自填）</span>
-              </RadioGroupItem>
-            </RadioGroup>
-          ) : null}
-          {(selected === CUSTOM_VALUE || question.options.length === 0) && (
-            <Input
-              value={customText}
-              onChange={(e) => {
-                setCustomText(e.target.value);
-                setSelected(CUSTOM_VALUE);
-              }}
-              placeholder="输入你的答案"
-              autoFocus={question.options.length === 0}
-            />
-          )}
-          <div className="flex justify-end gap-2">
-            {question.answer && (
-              <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>
-                取消
-              </Button>
-            )}
-            <Button
-              size="sm"
-              onClick={() => void handleSubmit()}
-              disabled={!canSubmit || answerQuestion.isPending}
-            >
-              {answerQuestion.isPending ? (
-                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              ) : null}
-              提交回答
-            </Button>
-          </div>
+function ReviewSection({ review }: { review: IssueCollabReview }) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <ShieldCheck className="h-4 w-4 text-emerald-500" />
+          审查结果
         </div>
-      ) : (
-        <div className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-3 py-2">
-          <div className="min-w-0 text-sm">
-            <span className="text-muted-foreground">回答：</span>
-            <span className="font-medium">{currentAnswer}</span>
-            {question.answer && (
-              <span className="ml-2 text-xs text-muted-foreground">
-                · {question.answer.author.login} · {formatRelativeTime(question.answer.answered_at)}
-              </span>
-            )}
-          </div>
-          <Button variant="ghost" size="sm" onClick={handleStartEdit}>
-            <Pencil className="mr-1.5 h-3.5 w-3.5" />
-            改
-          </Button>
+        <CollabActorBadge actor={review.author} />
+      </div>
+      <div className="rounded-lg border bg-card p-3">
+        <div className="markdown-body text-sm">
+          <GitHubContent markdown={review.body} />
         </div>
-      )}
+        <p className="mt-2 text-xs text-muted-foreground">更新于 {formatRelativeTime(review.updated_at)}</p>
+      </div>
     </div>
   );
 }
@@ -394,7 +175,9 @@ function SummarySection({
 
 export function CollaborationArea({ issueId, project }: CollaborationAreaProps) {
   const { data, isLoading } = useIssueCollab(issueId);
-  const questions = data?.questions ?? [];
+  const suggestions = data?.suggestions ?? [];
+  const plan = data?.plan ?? null;
+  const review = data?.review ?? null;
   const summary = data?.summary ?? null;
 
   return (
@@ -411,22 +194,9 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
         </div>
       ) : (
         <>
-          <BackgroundSection issueId={issueId} />
-
-          {questions.length > 0 && (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 text-sm font-semibold">
-                <HelpCircle className="h-4 w-4 text-primary" />
-                问题（{questions.length}）
-              </div>
-              <div className="space-y-2">
-                {questions.map((question) => (
-                  <QuestionItem key={question.id} issueId={issueId} question={question} />
-                ))}
-              </div>
-            </div>
-          )}
-
+          {suggestions.length > 0 && <SuggestionsSection suggestions={suggestions} />}
+          {plan && <PlanSection plan={plan} />}
+          {review && <ReviewSection review={review} />}
           {summary && <SummarySection project={project} summary={summary} />}
         </>
       )}

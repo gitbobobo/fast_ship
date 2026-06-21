@@ -159,14 +159,9 @@ vi.mock("@/lib/hooks/use-ai", () => ({
 
 vi.mock("@/lib/hooks/use-issue-collab", () => ({
   useIssueCollab: vi.fn(() => ({
-    data: { notes: [], questions: [], summary: null },
+    data: { suggestions: [], plan: null, review: null, summary: null },
     isLoading: false,
   })),
-  useCreateCollabNote: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
-  useUpdateCollabNote: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
-  useDeleteCollabNote: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
-  useAnswerCollabQuestion: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
-  useUpsertCollabSummary: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
 }));
 
 vi.mock("@/lib/store/auth-store", () => ({
