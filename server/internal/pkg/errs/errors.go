@@ -38,6 +38,7 @@ var (
 	ErrPermissionDenied = New(40300, "权限不足")
 	ErrApiKeyForbidden  = New(40301, "API Key 无此操作权限")
 	ErrNotOwner         = New(40302, "非资源所有者")
+	ErrApiKeyRequired   = New(40303, "该操作仅限 API Key 调用")
 )
 
 // 资源不存在 40400-40499

@@ -16,29 +16,25 @@ func NewIssueCollabHandler(collabService *service.IssueCollabService) *IssueColl
 	return &IssueCollabHandler{collabService: collabService}
 }
 
-// requireJWT 限定作答/背景等"人"的专属操作仅网页登录可用，API Key 调用返回 403。
-func (h *IssueCollabHandler) requireJWT(c *gin.Context) bool {
-	if !middleware.IsJWTAuth(c) {
-		middleware.HandleAppError(c, errs.ErrApiKeyForbidden)
+// requireApiKey 限定协作区写操作仅 API Key（Agent）可用；JWT 调用返回 403(40303)。
+func (h *IssueCollabHandler) requireApiKey(c *gin.Context) bool {
+	if middleware.IsJWTAuth(c) {
+		middleware.HandleAppError(c, errs.ErrApiKeyRequired)
 		return false
 	}
 	return true
 }
 
-type createIssueCollabNoteRequest struct {
+type replaceIssueCollabSuggestionsRequest struct {
+	Items []service.IssueCollabSuggestionInput `json:"items"`
+}
+
+type upsertIssueCollabPlanRequest struct {
 	Body string `json:"body"`
 }
 
-type updateIssueCollabNoteRequest struct {
+type upsertIssueCollabReviewRequest struct {
 	Body string `json:"body"`
-}
-
-type createIssueCollabQuestionsRequest struct {
-	Items []service.IssueCollabQuestionInput `json:"items"`
-}
-
-type answerIssueCollabQuestionRequest struct {
-	Answer string `json:"answer"`
 }
 
 type upsertIssueCollabSummaryRequest struct {
@@ -58,21 +54,21 @@ func (h *IssueCollabHandler) GetArea(c *gin.Context) {
 	response.Success(c, result)
 }
 
-func (h *IssueCollabHandler) CreateNote(c *gin.Context) {
-	if !h.requireJWT(c) {
+func (h *IssueCollabHandler) ReplaceSuggestions(c *gin.Context) {
+	if !h.requireApiKey(c) {
 		return
 	}
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 	authorKind := service.CollabAuthorKindFromAuth(middleware.IsJWTAuth(c))
 
-	var req createIssueCollabNoteRequest
+	var req replaceIssueCollabSuggestionsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.collabService.CreateNote(issueID, userID, authorKind, service.CreateIssueCollabNoteRequest{Body: req.Body})
+	result, err := h.collabService.ReplaceSuggestions(issueID, userID, authorKind, service.ReplaceIssueCollabSuggestionsRequest{Items: req.Items})
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -80,55 +76,21 @@ func (h *IssueCollabHandler) CreateNote(c *gin.Context) {
 	response.Success(c, result)
 }
 
-func (h *IssueCollabHandler) UpdateNote(c *gin.Context) {
-	if !h.requireJWT(c) {
+func (h *IssueCollabHandler) UpsertPlan(c *gin.Context) {
+	if !h.requireApiKey(c) {
 		return
 	}
-	issueID := c.Param("iid")
-	noteID := c.Param("nid")
-	userID := middleware.GetUserID(c)
-
-	var req updateIssueCollabNoteRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		middleware.HandleAppError(c, errs.ErrInvalidParams)
-		return
-	}
-
-	result, err := h.collabService.UpdateNote(issueID, noteID, userID, service.UpdateIssueCollabNoteRequest{Body: req.Body})
-	if err != nil {
-		middleware.HandleAppError(c, err)
-		return
-	}
-	response.Success(c, result)
-}
-
-func (h *IssueCollabHandler) DeleteNote(c *gin.Context) {
-	if !h.requireJWT(c) {
-		return
-	}
-	issueID := c.Param("iid")
-	noteID := c.Param("nid")
-	userID := middleware.GetUserID(c)
-
-	if err := h.collabService.DeleteNote(issueID, noteID, userID); err != nil {
-		middleware.HandleAppError(c, err)
-		return
-	}
-	response.Success(c, nil)
-}
-
-func (h *IssueCollabHandler) CreateQuestions(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 	authorKind := service.CollabAuthorKindFromAuth(middleware.IsJWTAuth(c))
 
-	var req createIssueCollabQuestionsRequest
+	var req upsertIssueCollabPlanRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.collabService.CreateQuestions(issueID, userID, authorKind, service.CreateIssueCollabQuestionsRequest{Items: req.Items})
+	result, err := h.collabService.UpsertPlan(issueID, userID, authorKind, service.UpsertIssueCollabPlanRequest{Body: req.Body})
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -136,42 +98,32 @@ func (h *IssueCollabHandler) CreateQuestions(c *gin.Context) {
 	response.Success(c, result)
 }
 
-func (h *IssueCollabHandler) AnswerQuestion(c *gin.Context) {
-	if !h.requireJWT(c) {
+func (h *IssueCollabHandler) UpsertReview(c *gin.Context) {
+	if !h.requireApiKey(c) {
 		return
 	}
 	issueID := c.Param("iid")
-	questionID := c.Param("qid")
 	userID := middleware.GetUserID(c)
 	authorKind := service.CollabAuthorKindFromAuth(middleware.IsJWTAuth(c))
 
-	var req answerIssueCollabQuestionRequest
+	var req upsertIssueCollabReviewRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.collabService.AnswerQuestion(issueID, questionID, userID, authorKind, service.AnswerIssueCollabQuestionRequest{Answer: req.Answer})
+	result, err := h.collabService.UpsertReview(issueID, userID, authorKind, service.UpsertIssueCollabReviewRequest{Body: req.Body})
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
 	response.Success(c, result)
-}
-
-func (h *IssueCollabHandler) DeleteQuestion(c *gin.Context) {
-	issueID := c.Param("iid")
-	questionID := c.Param("qid")
-	userID := middleware.GetUserID(c)
-
-	if err := h.collabService.DeleteQuestion(issueID, questionID, userID); err != nil {
-		middleware.HandleAppError(c, err)
-		return
-	}
-	response.Success(c, nil)
 }
 
 func (h *IssueCollabHandler) UpsertSummary(c *gin.Context) {
+	if !h.requireApiKey(c) {
+		return
+	}
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 	authorKind := service.CollabAuthorKindFromAuth(middleware.IsJWTAuth(c))

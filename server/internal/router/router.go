@@ -124,16 +124,13 @@ func Setup(
 		api.GET("/issues/:iid/comments", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListComments)
 		api.GET("/issues/:iid/timeline", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListTimeline)
 
-		// 人机协作区 —— JWT 或 API Key 均可（代理用 API Key 写入提问/总结，用户用 JWT 作答/补背景）
+		// 人机协作区 —— GET 两类凭证均可；写端点仅 API Key（Agent），JWT 调用在 handler 内返回 403(40303)。
 		issueCollab := api.Group("/issues/:iid/collab", middleware.RequireAuth(cfg, apiKeyRepo, authService))
 		{
 			issueCollab.GET("", issueCollabHandler.GetArea)
-			issueCollab.POST("/notes", issueCollabHandler.CreateNote)
-			issueCollab.PUT("/notes/:nid", issueCollabHandler.UpdateNote)
-			issueCollab.DELETE("/notes/:nid", issueCollabHandler.DeleteNote)
-			issueCollab.POST("/questions", issueCollabHandler.CreateQuestions)
-			issueCollab.PUT("/questions/:qid/answer", issueCollabHandler.AnswerQuestion)
-			issueCollab.DELETE("/questions/:qid", issueCollabHandler.DeleteQuestion)
+			issueCollab.PUT("/suggestions", issueCollabHandler.ReplaceSuggestions)
+			issueCollab.PUT("/plan", issueCollabHandler.UpsertPlan)
+			issueCollab.PUT("/review", issueCollabHandler.UpsertReview)
 			issueCollab.PUT("/summary", issueCollabHandler.UpsertSummary)
 		}
 

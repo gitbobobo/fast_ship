@@ -12,31 +12,28 @@ func collabParams(pairs ...gin.Param) gin.Params {
 	return gin.Params(pairs)
 }
 
-type collabQuestionJSON struct {
-	ID     string `json:"id"`
-	Body   string `json:"body"`
-	Author struct {
-		Kind  string `json:"kind"`
-		Login string `json:"login"`
-	} `json:"author"`
-	Answer *struct {
-		Value  string `json:"value"`
-		Author struct {
-			Kind string `json:"kind"`
-		} `json:"author"`
-	} `json:"answer"`
-}
-
 type collabAreaJSON struct {
-	Notes []struct {
-		Body   string `json:"body"`
-		Author struct {
+	Suggestions []struct {
+		Body      string `json:"body"`
+		SortOrder int    `json:"sort_order"`
+		Author    struct {
 			Kind  string `json:"kind"`
 			Login string `json:"login"`
 		} `json:"author"`
-	} `json:"notes"`
-	Questions []collabQuestionJSON `json:"questions"`
-	Summary   *struct {
+	} `json:"suggestions"`
+	Plan *struct {
+		Body   string `json:"body"`
+		Author struct {
+			Kind string `json:"kind"`
+		} `json:"author"`
+	} `json:"plan"`
+	Review *struct {
+		Body   string `json:"body"`
+		Author struct {
+			Kind string `json:"kind"`
+		} `json:"author"`
+	} `json:"review"`
+	Summary *struct {
 		Body      string   `json:"body"`
 		CommitIDs []string `json:"commit_ids"`
 		Author    struct {
@@ -51,66 +48,48 @@ func TestIssueCollabHandler_FullFlow(t *testing.T) {
 	project := createHandlerTestProject(t, env.db, user.ID)
 	issue := createHandlerTestIssue(t, env.db, project.ID)
 
-	// 代理（API Key）批量创建问题
-	createBody := []byte(`{"items":[{"body":"按钮放哪里？","options":["顶部","侧边"]},{"body":"补充说明？"}]}`)
-	ctx, rec := newJSONContext(http.MethodPost, "/api/issues/"+issue.ID+"/collab/questions", createBody)
-	ctx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	ctx.Set(middleware.ContextKeyUserID, user.ID)
-	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
-	env.collabHandler.CreateQuestions(ctx)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("create questions expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var created []collabQuestionJSON
-	decodeEnvelope(t, rec, &created)
-	if len(created) != 2 {
-		t.Fatalf("expected 2 questions, got %d", len(created))
-	}
-	if created[0].Author.Kind != "agent" || created[0].Author.Login != "代理" {
-		t.Fatalf("expected agent actor, got %+v", created[0].Author)
-	}
-	firstQuestionID := created[0].ID
-
-	// 用户（JWT）作答
-	answerCtx, answerRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/questions/"+firstQuestionID+"/answer", []byte(`{"answer":"顶部"}`))
-	answerCtx.Params = collabParams(
-		gin.Param{Key: "iid", Value: issue.ID},
-		gin.Param{Key: "qid", Value: firstQuestionID},
-	)
-	answerCtx.Set(middleware.ContextKeyUserID, user.ID)
-	answerCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
-	env.collabHandler.AnswerQuestion(answerCtx)
-	if answerRec.Code != http.StatusOK {
-		t.Fatalf("answer expected 200, got %d: %s", answerRec.Code, answerRec.Body.String())
-	}
-	var answered collabQuestionJSON
-	decodeEnvelope(t, answerRec, &answered)
-	if answered.Answer == nil || answered.Answer.Value != "顶部" || answered.Answer.Author.Kind != "user" {
-		t.Fatalf("unexpected answer: %+v", answered.Answer)
+	asApiKey := func(c *gin.Context) {
+		c.Set(middleware.ContextKeyUserID, user.ID)
+		c.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
 	}
 
-	// 用户（JWT）补充背景
-	noteCtx, noteRec := newJSONContext(http.MethodPost, "/api/issues/"+issue.ID+"/collab/notes", []byte(`{"body":"这个按钮主要给运营用"}`))
-	noteCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	noteCtx.Set(middleware.ContextKeyUserID, user.ID)
-	noteCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
-	env.collabHandler.CreateNote(noteCtx)
-	if noteRec.Code != http.StatusOK {
-		t.Fatalf("create note expected 200, got %d: %s", noteRec.Code, noteRec.Body.String())
+	// 代理（API Key）写实施建议
+	sugCtx, sugRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/suggestions", []byte(`{"items":[{"body":"建议一"},{"body":"建议二"}]}`))
+	sugCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	asApiKey(sugCtx)
+	env.collabHandler.ReplaceSuggestions(sugCtx)
+	if sugRec.Code != http.StatusOK {
+		t.Fatalf("replace suggestions expected 200, got %d: %s", sugRec.Code, sugRec.Body.String())
+	}
+
+	// 代理（API Key）写计划
+	planCtx, planRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/plan", []byte(`{"body":"详细执行计划"}`))
+	planCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	asApiKey(planCtx)
+	env.collabHandler.UpsertPlan(planCtx)
+	if planRec.Code != http.StatusOK {
+		t.Fatalf("upsert plan expected 200, got %d: %s", planRec.Code, planRec.Body.String())
+	}
+
+	// 代理（API Key）写审查结果
+	reviewCtx, reviewRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/review", []byte(`{"body":"审查通过"}`))
+	reviewCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	asApiKey(reviewCtx)
+	env.collabHandler.UpsertReview(reviewCtx)
+	if reviewRec.Code != http.StatusOK {
+		t.Fatalf("upsert review expected 200, got %d: %s", reviewRec.Code, reviewRec.Body.String())
 	}
 
 	// 代理（API Key）写完成总结
-	summaryBody := []byte(`{"body":"已新增顶部按钮","commit_ids":["abc1234"]}`)
-	summaryCtx, summaryRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/summary", summaryBody)
+	summaryCtx, summaryRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/summary", []byte(`{"body":"已新增顶部按钮","commit_ids":["abc1234"]}`))
 	summaryCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	summaryCtx.Set(middleware.ContextKeyUserID, user.ID)
-	summaryCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	asApiKey(summaryCtx)
 	env.collabHandler.UpsertSummary(summaryCtx)
 	if summaryRec.Code != http.StatusOK {
 		t.Fatalf("upsert summary expected 200, got %d: %s", summaryRec.Code, summaryRec.Body.String())
 	}
 
-	// GET 区域：三块齐全
+	// GET 区域（JWT 可读）：四块齐全
 	getCtx, getRec := newJSONContext(http.MethodGet, "/api/issues/"+issue.ID+"/collab", nil)
 	getCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 	getCtx.Set(middleware.ContextKeyUserID, user.ID)
@@ -121,11 +100,14 @@ func TestIssueCollabHandler_FullFlow(t *testing.T) {
 	}
 	var area collabAreaJSON
 	decodeEnvelope(t, getRec, &area)
-	if len(area.Notes) != 1 || area.Notes[0].Author.Kind != "user" {
-		t.Fatalf("unexpected notes: %+v", area.Notes)
+	if len(area.Suggestions) != 2 || area.Suggestions[0].Author.Kind != "agent" {
+		t.Fatalf("unexpected suggestions: %+v", area.Suggestions)
 	}
-	if len(area.Questions) != 2 || area.Questions[0].Answer == nil {
-		t.Fatalf("unexpected questions: %+v", area.Questions)
+	if area.Plan == nil || area.Plan.Body != "详细执行计划" {
+		t.Fatalf("unexpected plan: %+v", area.Plan)
+	}
+	if area.Review == nil || area.Review.Body != "审查通过" {
+		t.Fatalf("unexpected review: %+v", area.Review)
 	}
 	if area.Summary == nil || len(area.Summary.CommitIDs) != 1 || area.Summary.Author.Kind != "agent" {
 		t.Fatalf("unexpected summary: %+v", area.Summary)
@@ -138,30 +120,17 @@ func TestIssueCollabHandler_ErrorMapping(t *testing.T) {
 	project := createHandlerTestProject(t, env.db, user.ID)
 	issue := createHandlerTestIssue(t, env.db, project.ID)
 
-	// 非法 body → 400
-	ctx, rec := newJSONContext(http.MethodPost, "/api/issues/"+issue.ID+"/collab/notes", []byte(`{"body":"   "}`))
+	// 代理写空 body 计划 → 400
+	ctx, rec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/plan", []byte(`{"body":"   "}`))
 	ctx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 	ctx.Set(middleware.ContextKeyUserID, user.ID)
-	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
-	env.collabHandler.CreateNote(ctx)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	env.collabHandler.UpsertPlan(ctx)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for empty body, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 不存在的 note → 404
-	updCtx, updRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/notes/missing", []byte(`{"body":"x"}`))
-	updCtx.Params = collabParams(
-		gin.Param{Key: "iid", Value: issue.ID},
-		gin.Param{Key: "nid", Value: "missing"},
-	)
-	updCtx.Set(middleware.ContextKeyUserID, user.ID)
-	updCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
-	env.collabHandler.UpdateNote(updCtx)
-	if updRec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for missing note, got %d: %s", updRec.Code, updRec.Body.String())
-	}
-
-	// 不存在的问题 → 404
+	// 不存在的 issue → 404
 	missCtx, missRec := newJSONContext(http.MethodGet, "/api/issues/does-not-exist/collab", nil)
 	missCtx.Params = collabParams(gin.Param{Key: "iid", Value: "does-not-exist"})
 	missCtx.Set(middleware.ContextKeyUserID, user.ID)
@@ -172,45 +141,45 @@ func TestIssueCollabHandler_ErrorMapping(t *testing.T) {
 	}
 }
 
-func TestIssueCollabHandler_UserActionsRequireJWT(t *testing.T) {
+// JWT 调用四个写端点均 403(40303)；API Key 调用均 200。
+func TestIssueCollabHandler_WritesRequireApiKey(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "collab-user-3")
 	project := createHandlerTestProject(t, env.db, user.ID)
 	issue := createHandlerTestIssue(t, env.db, project.ID)
 
-	// 代理（API Key）创建一个问题
-	createCtx, createRec := newJSONContext(http.MethodPost, "/api/issues/"+issue.ID+"/collab/questions", []byte(`{"items":[{"body":"Q","options":[]}]}`))
-	createCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	createCtx.Set(middleware.ContextKeyUserID, user.ID)
-	createCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
-	env.collabHandler.CreateQuestions(createCtx)
-	if createRec.Code != http.StatusOK {
-		t.Fatalf("create questions expected 200, got %d: %s", createRec.Code, createRec.Body.String())
+	cases := []struct {
+		name string
+		path string
+		body []byte
+		call func(*gin.Context)
+	}{
+		{"suggestions", "/api/issues/" + issue.ID + "/collab/suggestions", []byte(`{"items":[]}`), env.collabHandler.ReplaceSuggestions},
+		{"plan", "/api/issues/" + issue.ID + "/collab/plan", []byte(`{"body":"x"}`), env.collabHandler.UpsertPlan},
+		{"review", "/api/issues/" + issue.ID + "/collab/review", []byte(`{"body":"x"}`), env.collabHandler.UpsertReview},
+		{"summary", "/api/issues/" + issue.ID + "/collab/summary", []byte(`{"body":"x","commit_ids":[]}`), env.collabHandler.UpsertSummary},
 	}
-	var created []collabQuestionJSON
-	decodeEnvelope(t, createRec, &created)
-	questionID := created[0].ID
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// JWT 调用 → 403
+			jwtCtx, jwtRec := newJSONContext(http.MethodPut, tc.path, tc.body)
+			jwtCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+			jwtCtx.Set(middleware.ContextKeyUserID, user.ID)
+			jwtCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+			tc.call(jwtCtx)
+			if jwtRec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403 for JWT write %s, got %d: %s", tc.name, jwtRec.Code, jwtRec.Body.String())
+			}
 
-	// 代理（API Key）作答 → 403（作答仅限用户/JWT）
-	answerCtx, answerRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/questions/"+questionID+"/answer", []byte(`{"answer":"x"}`))
-	answerCtx.Params = collabParams(
-		gin.Param{Key: "iid", Value: issue.ID},
-		gin.Param{Key: "qid", Value: questionID},
-	)
-	answerCtx.Set(middleware.ContextKeyUserID, user.ID)
-	answerCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
-	env.collabHandler.AnswerQuestion(answerCtx)
-	if answerRec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 when API key answers, got %d: %s", answerRec.Code, answerRec.Body.String())
-	}
-
-	// 代理（API Key）补背景 → 403
-	noteCtx, noteRec := newJSONContext(http.MethodPost, "/api/issues/"+issue.ID+"/collab/notes", []byte(`{"body":"背景"}`))
-	noteCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	noteCtx.Set(middleware.ContextKeyUserID, user.ID)
-	noteCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
-	env.collabHandler.CreateNote(noteCtx)
-	if noteRec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 when API key creates note, got %d: %s", noteRec.Code, noteRec.Body.String())
+			// API Key 调用 → 200
+			apiCtx, apiRec := newJSONContext(http.MethodPut, tc.path, tc.body)
+			apiCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+			apiCtx.Set(middleware.ContextKeyUserID, user.ID)
+			apiCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+			tc.call(apiCtx)
+			if apiRec.Code != http.StatusOK {
+				t.Fatalf("expected 200 for API key write %s, got %d: %s", tc.name, apiRec.Code, apiRec.Body.String())
+			}
+		})
 	}
 }

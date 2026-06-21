@@ -15,16 +15,13 @@ import (
 )
 
 const (
-	collabNoteBodyMaxRunes            = 4000
-	collabQuestionBodyMaxRunes        = 1000
-	collabOptionMaxRunes              = 100
-	collabMaxOptions                  = 8
-	collabMaxQuestionsPerBatch        = 20
-	collabAnswerMaxRunes              = 1000
-	collabSummaryBodyMaxRunes         = 8000
-	collabMaxCommitIDs                = 20
-	collabAgentLogin           string = "代理"
-	CollabCustomOptionSentinel        = "__collab_custom__"
+	collabSuggestionBodyMaxRunes = 4000 // 单条建议正文上限：宽松值，容纳带 Markdown 的说明
+	collabMaxSuggestions         = 30   // 单次替换的建议条数上限：宽松值，覆盖大型 issue 的拆解
+	collabPlanBodyMaxRunes       = 8000 // 计划正文上限：与 summary 对齐
+	collabReviewBodyMaxRunes     = 8000 // 审查正文上限：与 summary 对齐
+	collabSummaryBodyMaxRunes    = 8000
+	collabMaxCommitIDs           = 20
+	collabAgentLogin     string  = "代理"
 )
 
 var collabCommitIDRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
@@ -56,8 +53,17 @@ type IssueCollabActorResponse struct {
 	AvatarURL string `json:"avatar_url"`
 }
 
-type IssueCollabNoteResponse struct {
+type IssueCollabSuggestionResponse struct {
 	ID        string                   `json:"id"`
+	IssueID   string                   `json:"issue_id"`
+	Body      string                   `json:"body"`
+	SortOrder int                      `json:"sort_order"`
+	Author    IssueCollabActorResponse `json:"author"`
+	CreatedAt string                   `json:"created_at"`
+	UpdatedAt string                   `json:"updated_at"`
+}
+
+type IssueCollabPlanResponse struct {
 	IssueID   string                   `json:"issue_id"`
 	Body      string                   `json:"body"`
 	Author    IssueCollabActorResponse `json:"author"`
@@ -65,22 +71,12 @@ type IssueCollabNoteResponse struct {
 	UpdatedAt string                   `json:"updated_at"`
 }
 
-type IssueCollabQuestionAnswerResponse struct {
-	Value      string                   `json:"value"`
-	Author     IssueCollabActorResponse `json:"author"`
-	AnsweredAt string                   `json:"answered_at"`
-}
-
-type IssueCollabQuestionResponse struct {
-	ID        string                             `json:"id"`
-	IssueID   string                             `json:"issue_id"`
-	Body      string                             `json:"body"`
-	Options   []string                           `json:"options"`
-	SortOrder int                                `json:"sort_order"`
-	Author    IssueCollabActorResponse           `json:"author"`
-	Answer    *IssueCollabQuestionAnswerResponse `json:"answer"`
-	CreatedAt string                             `json:"created_at"`
-	UpdatedAt string                             `json:"updated_at"`
+type IssueCollabReviewResponse struct {
+	IssueID   string                   `json:"issue_id"`
+	Body      string                   `json:"body"`
+	Author    IssueCollabActorResponse `json:"author"`
+	CreatedAt string                   `json:"created_at"`
+	UpdatedAt string                   `json:"updated_at"`
 }
 
 type IssueCollabSummaryResponse struct {
@@ -93,30 +89,26 @@ type IssueCollabSummaryResponse struct {
 }
 
 type IssueCollabAreaResponse struct {
-	Notes     []IssueCollabNoteResponse     `json:"notes"`
-	Questions []IssueCollabQuestionResponse `json:"questions"`
-	Summary   *IssueCollabSummaryResponse   `json:"summary"`
+	Suggestions []IssueCollabSuggestionResponse `json:"suggestions"`
+	Plan        *IssueCollabPlanResponse        `json:"plan"`
+	Review      *IssueCollabReviewResponse      `json:"review"`
+	Summary     *IssueCollabSummaryResponse     `json:"summary"`
 }
 
-type CreateIssueCollabNoteRequest struct {
+type IssueCollabSuggestionInput struct {
 	Body string `json:"body"`
 }
 
-type UpdateIssueCollabNoteRequest struct {
+type ReplaceIssueCollabSuggestionsRequest struct {
+	Items []IssueCollabSuggestionInput `json:"items"`
+}
+
+type UpsertIssueCollabPlanRequest struct {
 	Body string `json:"body"`
 }
 
-type IssueCollabQuestionInput struct {
-	Body    string   `json:"body"`
-	Options []string `json:"options"`
-}
-
-type CreateIssueCollabQuestionsRequest struct {
-	Items []IssueCollabQuestionInput `json:"items"`
-}
-
-type AnswerIssueCollabQuestionRequest struct {
-	Answer string `json:"answer"`
+type UpsertIssueCollabReviewRequest struct {
+	Body string `json:"body"`
 }
 
 type UpsertIssueCollabSummaryRequest struct {
@@ -129,12 +121,18 @@ func (s *IssueCollabService) GetArea(issueID, userID string) (*IssueCollabAreaRe
 		return nil, err
 	}
 
-	notes, err := s.collabRepo.ListNotesByIssueID(issueID)
+	suggestions, err := s.collabRepo.ListSuggestionsByIssueID(issueID)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	questions, err := s.collabRepo.ListQuestionsByIssueID(issueID)
-	if err != nil {
+
+	// plan/review/summary 绝大多数 issue 任意时刻都不存在，必须对 ErrRecordNotFound 兜底为 nil，否则 GET /collab 会高频 500。
+	plan, err := s.collabRepo.GetPlan(issueID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, errs.ErrInternal
+	}
+	review, err := s.collabRepo.GetReview(issueID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, errs.ErrInternal
 	}
 	summary, err := s.collabRepo.GetSummary(issueID)
@@ -142,147 +140,77 @@ func (s *IssueCollabService) GetArea(issueID, userID string) (*IssueCollabAreaRe
 		return nil, errs.ErrInternal
 	}
 
-	userMap, err := s.resolveActors(notes, questions, summary)
+	var sources []collabActorSource
+	for _, sug := range suggestions {
+		sources = append(sources, collabActorSource{UserID: sug.AuthorUserID, Kind: sug.AuthorKind})
+	}
+	if plan != nil {
+		sources = append(sources, collabActorSource{UserID: plan.AuthorUserID, Kind: plan.AuthorKind})
+	}
+	if review != nil {
+		sources = append(sources, collabActorSource{UserID: review.AuthorUserID, Kind: review.AuthorKind})
+	}
+	if summary != nil {
+		sources = append(sources, collabActorSource{UserID: summary.AuthorUserID, Kind: summary.AuthorKind})
+	}
+	userMap, err := s.resolveActors(sources)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	noteResponses := make([]IssueCollabNoteResponse, 0, len(notes))
-	for _, note := range notes {
-		noteResponses = append(noteResponses, s.toNoteResponse(note, userMap))
+	suggestionResponses := make([]IssueCollabSuggestionResponse, 0, len(suggestions))
+	for _, sug := range suggestions {
+		suggestionResponses = append(suggestionResponses, s.toSuggestionResponse(sug, userMap))
 	}
 
-	questionResponses := make([]IssueCollabQuestionResponse, 0, len(questions))
-	for _, question := range questions {
-		questionResponses = append(questionResponses, s.toQuestionResponse(question, userMap))
+	var planResponse *IssueCollabPlanResponse
+	if plan != nil {
+		resp := s.toPlanResponse(*plan, userMap)
+		planResponse = &resp
 	}
-
+	var reviewResponse *IssueCollabReviewResponse
+	if review != nil {
+		resp := s.toReviewResponse(*review, userMap)
+		reviewResponse = &resp
+	}
 	var summaryResponse *IssueCollabSummaryResponse
 	if summary != nil {
-		summaryResp := s.toSummaryResponse(*summary, userMap)
-		summaryResponse = &summaryResp
+		resp := s.toSummaryResponse(*summary, userMap)
+		summaryResponse = &resp
 	}
 
 	return &IssueCollabAreaResponse{
-		Notes:     noteResponses,
-		Questions: questionResponses,
-		Summary:   summaryResponse,
+		Suggestions: suggestionResponses,
+		Plan:        planResponse,
+		Review:      reviewResponse,
+		Summary:     summaryResponse,
 	}, nil
 }
 
-func (s *IssueCollabService) CreateNote(issueID, userID string, authorKind model.CollabAuthorKind, req CreateIssueCollabNoteRequest) (*IssueCollabNoteResponse, error) {
+func (s *IssueCollabService) ReplaceSuggestions(issueID, userID string, authorKind model.CollabAuthorKind, req ReplaceIssueCollabSuggestionsRequest) ([]IssueCollabSuggestionResponse, error) {
 	if _, err := s.ensureAccess(issueID, userID); err != nil {
 		return nil, err
 	}
-	body := strings.TrimSpace(req.Body)
-	if err := validateCollabText(body, 1, collabNoteBodyMaxRunes); err != nil {
-		return nil, err
-	}
-
-	now := time.Now().UTC()
-	note := &model.IssueCollabNote{
-		ID:           uuid.NewString(),
-		IssueID:      issueID,
-		Body:         body,
-		AuthorUserID: userID,
-		AuthorKind:   authorKind,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := s.collabRepo.CreateNote(note); err != nil {
-		return nil, errs.ErrInternal
-	}
-
-	userMap, err := s.userRepo.ListByIDs([]string{userID})
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	resp := s.toNoteResponse(*note, userMap)
-	return &resp, nil
-}
-
-func (s *IssueCollabService) UpdateNote(issueID, noteID, userID string, req UpdateIssueCollabNoteRequest) (*IssueCollabNoteResponse, error) {
-	if _, err := s.ensureAccess(issueID, userID); err != nil {
-		return nil, err
-	}
-	note, err := s.collabRepo.GetNote(noteID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrIssueCollabNotFound
-		}
-		return nil, errs.ErrInternal
-	}
-	if note.IssueID != issueID {
-		return nil, errs.ErrIssueCollabNotFound
-	}
-
-	body := strings.TrimSpace(req.Body)
-	if err := validateCollabText(body, 1, collabNoteBodyMaxRunes); err != nil {
-		return nil, err
-	}
-	if err := s.collabRepo.UpdateNote(noteID, body); err != nil {
-		return nil, errs.ErrInternal
-	}
-
-	updated, err := s.collabRepo.GetNote(noteID)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	userMap, err := s.userRepo.ListByIDs([]string{userID})
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	resp := s.toNoteResponse(*updated, userMap)
-	return &resp, nil
-}
-
-func (s *IssueCollabService) DeleteNote(issueID, noteID, userID string) error {
-	if _, err := s.ensureAccess(issueID, userID); err != nil {
-		return err
-	}
-	note, err := s.collabRepo.GetNote(noteID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrIssueCollabNotFound
-		}
-		return errs.ErrInternal
-	}
-	if note.IssueID != issueID {
-		return errs.ErrIssueCollabNotFound
-	}
-	if err := s.collabRepo.DeleteNote(noteID); err != nil {
-		return errs.ErrInternal
-	}
-	return nil
-}
-
-func (s *IssueCollabService) CreateQuestions(issueID, userID string, authorKind model.CollabAuthorKind, req CreateIssueCollabQuestionsRequest) ([]IssueCollabQuestionResponse, error) {
-	if _, err := s.ensureAccess(issueID, userID); err != nil {
-		return nil, err
-	}
-	if len(req.Items) == 0 {
+	// items == nil（如 "items":null）视为非法，防止误清空；空数组 [] 才允许清空全部建议。
+	if req.Items == nil {
 		return nil, errs.ErrInvalidParams
 	}
-	if len(req.Items) > collabMaxQuestionsPerBatch {
+	if len(req.Items) > collabMaxSuggestions {
 		return nil, errs.ErrInvalidParams
 	}
 
 	now := time.Now().UTC()
-	questions := make([]model.IssueCollabQuestion, 0, len(req.Items))
-	for _, item := range req.Items {
+	suggestions := make([]model.IssueCollabSuggestion, 0, len(req.Items))
+	for index, item := range req.Items {
 		body := strings.TrimSpace(item.Body)
-		if err := validateCollabText(body, 1, collabQuestionBodyMaxRunes); err != nil {
+		if err := validateCollabText(body, 1, collabSuggestionBodyMaxRunes); err != nil {
 			return nil, err
 		}
-		options, err := normalizeCollabOptions(item.Options)
-		if err != nil {
-			return nil, err
-		}
-		questions = append(questions, model.IssueCollabQuestion{
+		suggestions = append(suggestions, model.IssueCollabSuggestion{
 			ID:           uuid.NewString(),
 			IssueID:      issueID,
 			Body:         body,
-			OptionsJSON:  toJSONString(options),
+			SortOrder:    index,
 			AuthorUserID: userID,
 			AuthorKind:   authorKind,
 			CreatedAt:    now,
@@ -291,7 +219,7 @@ func (s *IssueCollabService) CreateQuestions(issueID, userID string, authorKind 
 	}
 
 	if err := s.collabRepo.Transaction(func(tx *gorm.DB) error {
-		return s.collabRepo.CreateQuestionsTx(tx, issueID, questions)
+		return s.collabRepo.ReplaceSuggestionsTx(tx, issueID, suggestions)
 	}); err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -300,68 +228,96 @@ func (s *IssueCollabService) CreateQuestions(issueID, userID string, authorKind 
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	responses := make([]IssueCollabQuestionResponse, 0, len(questions))
-	for _, question := range questions {
-		responses = append(responses, s.toQuestionResponse(question, userMap))
+	responses := make([]IssueCollabSuggestionResponse, 0, len(suggestions))
+	for _, sug := range suggestions {
+		responses = append(responses, s.toSuggestionResponse(sug, userMap))
 	}
 	return responses, nil
 }
 
-func (s *IssueCollabService) AnswerQuestion(issueID, questionID, userID string, authorKind model.CollabAuthorKind, req AnswerIssueCollabQuestionRequest) (*IssueCollabQuestionResponse, error) {
+// prepareCollabDoc 抽出 plan/review 共同的 upsert 前置流程：鉴权 → 校验 body → 决定 CreatedAt（存在则保留旧值，否则用 now）。
+// 返回 trim 后的 body 与应使用的 CreatedAt。
+func (s *IssueCollabService) prepareCollabDoc(issueID, userID, body string, maxRunes int, getExisting func(issueID string) (time.Time, error)) (string, time.Time, error) {
 	if _, err := s.ensureAccess(issueID, userID); err != nil {
-		return nil, err
+		return "", time.Time{}, err
 	}
-	question, err := s.collabRepo.GetQuestion(questionID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrIssueCollabNotFound
-		}
-		return nil, errs.ErrInternal
+	trimmed := strings.TrimSpace(body)
+	if err := validateCollabText(trimmed, 1, maxRunes); err != nil {
+		return "", time.Time{}, err
 	}
-	if question.IssueID != issueID {
-		return nil, errs.ErrIssueCollabNotFound
-	}
-
-	answer := strings.TrimSpace(req.Answer)
-	if err := validateCollabText(answer, 1, collabAnswerMaxRunes); err != nil {
-		return nil, err
-	}
-
 	now := time.Now().UTC()
-	if err := s.collabRepo.UpdateAnswer(questionID, answer, userID, authorKind, now); err != nil {
+	existing, err := getExisting(issueID)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", time.Time{}, errs.ErrInternal
+		}
+		return trimmed, now, nil
+	}
+	return trimmed, existing, nil
+}
+
+func (s *IssueCollabService) UpsertPlan(issueID, userID string, authorKind model.CollabAuthorKind, req UpsertIssueCollabPlanRequest) (*IssueCollabPlanResponse, error) {
+	body, createdAt, err := s.prepareCollabDoc(issueID, userID, req.Body, collabPlanBodyMaxRunes, func(id string) (time.Time, error) {
+		existing, err := s.collabRepo.GetPlan(id)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return existing.CreatedAt, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	plan := &model.IssueCollabPlan{
+		IssueID:      issueID,
+		Body:         body,
+		AuthorUserID: userID,
+		AuthorKind:   authorKind,
+		CreatedAt:    createdAt,
+		UpdatedAt:    time.Now().UTC(),
+	}
+	if err := s.collabRepo.UpsertPlan(plan); err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	updated, err := s.collabRepo.GetQuestion(questionID)
+	userMap, err := s.userRepo.ListByIDs([]string{userID})
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	userMap, err := s.resolveActors(nil, []model.IssueCollabQuestion{*updated}, nil)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	resp := s.toQuestionResponse(*updated, userMap)
+	resp := s.toPlanResponse(*plan, userMap)
 	return &resp, nil
 }
 
-func (s *IssueCollabService) DeleteQuestion(issueID, questionID, userID string) error {
-	if _, err := s.ensureAccess(issueID, userID); err != nil {
-		return err
-	}
-	question, err := s.collabRepo.GetQuestion(questionID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrIssueCollabNotFound
+func (s *IssueCollabService) UpsertReview(issueID, userID string, authorKind model.CollabAuthorKind, req UpsertIssueCollabReviewRequest) (*IssueCollabReviewResponse, error) {
+	body, createdAt, err := s.prepareCollabDoc(issueID, userID, req.Body, collabReviewBodyMaxRunes, func(id string) (time.Time, error) {
+		existing, err := s.collabRepo.GetReview(id)
+		if err != nil {
+			return time.Time{}, err
 		}
-		return errs.ErrInternal
+		return existing.CreatedAt, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	if question.IssueID != issueID {
-		return errs.ErrIssueCollabNotFound
+
+	review := &model.IssueCollabReview{
+		IssueID:      issueID,
+		Body:         body,
+		AuthorUserID: userID,
+		AuthorKind:   authorKind,
+		CreatedAt:    createdAt,
+		UpdatedAt:    time.Now().UTC(),
 	}
-	if err := s.collabRepo.DeleteQuestion(questionID); err != nil {
-		return errs.ErrInternal
+	if err := s.collabRepo.UpsertReview(review); err != nil {
+		return nil, errs.ErrInternal
 	}
-	return nil
+
+	userMap, err := s.userRepo.ListByIDs([]string{userID})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := s.toReviewResponse(*review, userMap)
+	return &resp, nil
 }
 
 func (s *IssueCollabService) UpsertSummary(issueID, userID string, authorKind model.CollabAuthorKind, req UpsertIssueCollabSummaryRequest) (*IssueCollabSummaryResponse, error) {
@@ -424,26 +380,18 @@ func (s *IssueCollabService) ensureAccess(issueID, userID string) (*model.Issue,
 	return issue, nil
 }
 
-func (s *IssueCollabService) resolveActors(notes []model.IssueCollabNote, questions []model.IssueCollabQuestion, summary *model.IssueCollabSummary) (map[string]model.User, error) {
-	idSet := make(map[string]struct{})
-	collect := func(id string, kind model.CollabAuthorKind) {
-		if kind == model.CollabAuthorUser && id != "" {
-			idSet[id] = struct{}{}
-		}
-	}
-	for _, note := range notes {
-		collect(note.AuthorUserID, note.AuthorKind)
-	}
-	for _, question := range questions {
-		collect(question.AuthorUserID, question.AuthorKind)
-		if question.AnsweredAt != nil {
-			collect(question.AnswerAuthorUserID, question.AnswerAuthorKind)
-		}
-	}
-	if summary != nil {
-		collect(summary.AuthorUserID, summary.AuthorKind)
-	}
+type collabActorSource struct {
+	UserID string
+	Kind   model.CollabAuthorKind
+}
 
+func (s *IssueCollabService) resolveActors(sources []collabActorSource) (map[string]model.User, error) {
+	idSet := make(map[string]struct{})
+	for _, src := range sources {
+		if src.Kind == model.CollabAuthorUser && src.UserID != "" {
+			idSet[src.UserID] = struct{}{}
+		}
+	}
 	ids := make([]string, 0, len(idSet))
 	for id := range idSet {
 		ids = append(ids, id)
@@ -466,42 +414,35 @@ func (s *IssueCollabService) buildActor(userID string, kind model.CollabAuthorKi
 	}
 }
 
-func (s *IssueCollabService) toNoteResponse(note model.IssueCollabNote, userMap map[string]model.User) IssueCollabNoteResponse {
-	return IssueCollabNoteResponse{
-		ID:        note.ID,
-		IssueID:   note.IssueID,
-		Body:      note.Body,
-		Author:    s.buildActor(note.AuthorUserID, note.AuthorKind, userMap),
-		CreatedAt: formatTime(note.CreatedAt),
-		UpdatedAt: formatTime(note.UpdatedAt),
+func (s *IssueCollabService) toSuggestionResponse(sug model.IssueCollabSuggestion, userMap map[string]model.User) IssueCollabSuggestionResponse {
+	return IssueCollabSuggestionResponse{
+		ID:        sug.ID,
+		IssueID:   sug.IssueID,
+		Body:      sug.Body,
+		SortOrder: sug.SortOrder,
+		Author:    s.buildActor(sug.AuthorUserID, sug.AuthorKind, userMap),
+		CreatedAt: formatTime(sug.CreatedAt),
+		UpdatedAt: formatTime(sug.UpdatedAt),
 	}
 }
 
-func (s *IssueCollabService) toQuestionResponse(question model.IssueCollabQuestion, userMap map[string]model.User) IssueCollabQuestionResponse {
-	options := parseJSON[[]string](question.OptionsJSON)
-	if options == nil {
-		options = []string{}
+func (s *IssueCollabService) toPlanResponse(plan model.IssueCollabPlan, userMap map[string]model.User) IssueCollabPlanResponse {
+	return IssueCollabPlanResponse{
+		IssueID:   plan.IssueID,
+		Body:      plan.Body,
+		Author:    s.buildActor(plan.AuthorUserID, plan.AuthorKind, userMap),
+		CreatedAt: formatTime(plan.CreatedAt),
+		UpdatedAt: formatTime(plan.UpdatedAt),
 	}
+}
 
-	var answer *IssueCollabQuestionAnswerResponse
-	if question.AnsweredAt != nil && question.AnswerValue != "" {
-		answer = &IssueCollabQuestionAnswerResponse{
-			Value:      question.AnswerValue,
-			Author:     s.buildActor(question.AnswerAuthorUserID, question.AnswerAuthorKind, userMap),
-			AnsweredAt: formatTime(*question.AnsweredAt),
-		}
-	}
-
-	return IssueCollabQuestionResponse{
-		ID:        question.ID,
-		IssueID:   question.IssueID,
-		Body:      question.Body,
-		Options:   options,
-		SortOrder: question.SortOrder,
-		Author:    s.buildActor(question.AuthorUserID, question.AuthorKind, userMap),
-		Answer:    answer,
-		CreatedAt: formatTime(question.CreatedAt),
-		UpdatedAt: formatTime(question.UpdatedAt),
+func (s *IssueCollabService) toReviewResponse(review model.IssueCollabReview, userMap map[string]model.User) IssueCollabReviewResponse {
+	return IssueCollabReviewResponse{
+		IssueID:   review.IssueID,
+		Body:      review.Body,
+		Author:    s.buildActor(review.AuthorUserID, review.AuthorKind, userMap),
+		CreatedAt: formatTime(review.CreatedAt),
+		UpdatedAt: formatTime(review.UpdatedAt),
 	}
 }
 
@@ -526,30 +467,6 @@ func validateCollabText(value string, minRunes, maxRunes int) error {
 		return errs.ErrInvalidParams
 	}
 	return nil
-}
-
-func normalizeCollabOptions(raw []string) ([]string, error) {
-	seen := make(map[string]struct{}, len(raw))
-	options := make([]string, 0, len(raw))
-	for _, option := range raw {
-		trimmed := strings.TrimSpace(option)
-		// 拒绝前端"其他(自填)"哨兵，避免与单选项 value 冲突导致无法作答
-		if trimmed == "" || trimmed == CollabCustomOptionSentinel {
-			return nil, errs.ErrInvalidParams
-		}
-		if utf8.RuneCountInString(trimmed) > collabOptionMaxRunes {
-			return nil, errs.ErrInvalidParams
-		}
-		if _, ok := seen[trimmed]; ok {
-			return nil, errs.ErrInvalidParams
-		}
-		seen[trimmed] = struct{}{}
-		options = append(options, trimmed)
-	}
-	if len(options) > collabMaxOptions {
-		return nil, errs.ErrInvalidParams
-	}
-	return options, nil
 }
 
 func normalizeCollabCommitIDs(raw []string) ([]string, error) {

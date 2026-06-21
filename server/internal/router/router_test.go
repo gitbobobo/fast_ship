@@ -637,8 +637,9 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
-		&model.IssueCollabNote{},
-		&model.IssueCollabQuestion{},
+		&model.IssueCollabSuggestion{},
+		&model.IssueCollabPlan{},
+		&model.IssueCollabReview{},
 		&model.IssueCollabSummary{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
@@ -1043,6 +1044,72 @@ func TestRouterIssueWriteRejectsCrossUserAPIKey(t *testing.T) {
 				t.Fatalf("%s: expected 404 for cross-user API key, got %d: %s", tc.name, rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestRouterCollabWritesRequireApiKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "collab-jwt", "collabjwt@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	issue := createRouterTestIssue(t, env.db, project.ID)
+
+	rawKey := "COLLABROUTERKEY12345678"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    auth.UserID,
+		Name:      "CI-Collab",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	apiKeyAuth := "Bearer " + service.FormatApiKey(rawKey)
+	jwtAuth := "Bearer " + auth.Token
+
+	doReq := func(method, authHeader, path string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	sugPath := "/api/issues/" + issue.ID + "/collab/suggestions"
+
+	// JWT 写 → 403（仅限 API Key）
+	if rec := doReq(http.MethodPut, jwtAuth, sugPath, []byte(`{"items":[{"body":"x"}]}`)); rec.Code != http.StatusForbidden {
+		t.Fatalf("JWT write suggestions expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// API Key 写 → 200
+	rec := doReq(http.MethodPut, apiKeyAuth, sugPath, []byte(`{"items":[{"body":"建议一"},{"body":"建议二"}]}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("API key write suggestions expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// GET 两类凭证均可
+	getRec := doReq(http.MethodGet, jwtAuth, "/api/issues/"+issue.ID+"/collab", nil)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET collab expected 200, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+	var area struct {
+		Suggestions []struct {
+			Body string `json:"body"`
+		} `json:"suggestions"`
+	}
+	decodeRouterEnvelope(t, getRec, &area)
+	if len(area.Suggestions) != 2 {
+		t.Fatalf("expected 2 suggestions after write, got %d", len(area.Suggestions))
+	}
+
+	// 旧路由已移除 → 404
+	if rec := doReq(http.MethodPost, apiKeyAuth, "/api/issues/"+issue.ID+"/collab/notes", []byte(`{"body":"x"}`)); rec.Code != http.StatusNotFound {
+		t.Fatalf("legacy notes route expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(http.MethodPost, apiKeyAuth, "/api/issues/"+issue.ID+"/collab/questions", []byte(`{"items":[]}`)); rec.Code != http.StatusNotFound {
+		t.Fatalf("legacy questions route expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

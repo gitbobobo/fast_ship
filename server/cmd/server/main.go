@@ -94,8 +94,9 @@ func main() {
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
 		&model.GitHubRepoLabel{},
-		&model.IssueCollabNote{},
-		&model.IssueCollabQuestion{},
+		&model.IssueCollabSuggestion{},
+		&model.IssueCollabPlan{},
+		&model.IssueCollabReview{},
 		&model.IssueCollabSummary{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %v", err)
@@ -109,6 +110,9 @@ func main() {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
+
+	dropLegacyCollabTables(db, zapLogger)
+
 	if err := backfillIssueSourceModel(db); err != nil {
 		log.Fatalf("问题数据迁移失败: %v", err)
 	}
@@ -356,6 +360,17 @@ func backfillIssueAssetStatusModel(db *gorm.DB) error {
 		SET status = 'attached'
 		WHERE status IS NULL OR status = ''
 	`).Error
+}
+
+func dropLegacyCollabTables(db *gorm.DB, logger *zap.Logger) {
+	// 旧版协作区使用 notes/questions 两张表，重构后改为 suggestions/plans/reviews；
+	// 模型已移出 AutoMigrate（GORM 不会自动删表），这里显式幂等清理。
+	tables := []string{"issue_collab_notes", "issue_collab_questions"}
+	for _, table := range tables {
+		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", table)).Error; err != nil {
+			logger.Warn("删除遗留协作区表失败", zap.String("table", table), zap.Error(err))
+		}
+	}
 }
 
 func uploadMultipartMemoryLimit(maxFileSize int64) int64 {

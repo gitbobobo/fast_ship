@@ -66,8 +66,9 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
-		&model.IssueCollabNote{},
-		&model.IssueCollabQuestion{},
+		&model.IssueCollabSuggestion{},
+		&model.IssueCollabPlan{},
+		&model.IssueCollabReview{},
 		&model.IssueCollabSummary{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)

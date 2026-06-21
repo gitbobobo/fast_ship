@@ -13,42 +13,51 @@ func (k CollabAuthorKind) Valid() bool {
 	return k == CollabAuthorUser || k == CollabAuthorAgent
 }
 
-type IssueCollabNote struct {
+type IssueCollabSuggestion struct {
 	ID           string           `gorm:"type:text;primaryKey" json:"id"`
-	IssueID      string           `gorm:"type:text;not null;index" json:"issue_id"`
+	IssueID      string           `gorm:"type:text;not null;index:idx_collab_suggestions_issue_sort,priority:1" json:"issue_id"`
 	Body         string           `gorm:"type:text;not null" json:"body"`
+	SortOrder    int              `gorm:"not null;default:0;index:idx_collab_suggestions_issue_sort,priority:2" json:"sort_order"`
 	AuthorUserID string           `gorm:"type:text;not null" json:"author_user_id"`
-	AuthorKind   CollabAuthorKind `gorm:"type:text;not null;default:user" json:"author_kind"`
+	AuthorKind   CollabAuthorKind `gorm:"type:text;not null;default:agent" json:"author_kind"`
 	CreatedAt    time.Time        `gorm:"not null" json:"created_at"`
 	UpdatedAt    time.Time        `gorm:"not null" json:"updated_at"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
-func (IssueCollabNote) TableName() string {
-	return "issue_collab_notes"
+func (IssueCollabSuggestion) TableName() string {
+	return "issue_collab_suggestions"
 }
 
-type IssueCollabQuestion struct {
-	ID                 string           `gorm:"type:text;primaryKey" json:"id"`
-	IssueID            string           `gorm:"type:text;not null;index" json:"issue_id"`
-	Body               string           `gorm:"type:text;not null" json:"body"`
-	OptionsJSON        string           `gorm:"type:text" json:"-"`
-	SortOrder          int              `gorm:"not null;default:0;index" json:"sort_order"`
-	AuthorUserID       string           `gorm:"type:text;not null" json:"author_user_id"`
-	AuthorKind         CollabAuthorKind `gorm:"type:text;not null;default:agent" json:"author_kind"`
-	AnswerValue        string           `gorm:"type:text" json:"answer_value"`
-	AnswerAuthorUserID string           `gorm:"type:text" json:"answer_author_user_id"`
-	AnswerAuthorKind   CollabAuthorKind `gorm:"type:text" json:"answer_author_kind"`
-	AnsweredAt         *time.Time       `json:"answered_at"`
-	CreatedAt          time.Time        `gorm:"not null" json:"created_at"`
-	UpdatedAt          time.Time        `gorm:"not null" json:"updated_at"`
+type IssueCollabPlan struct {
+	IssueID      string           `gorm:"type:text;primaryKey" json:"issue_id"`
+	Body         string           `gorm:"type:text;not null" json:"body"`
+	AuthorUserID string           `gorm:"type:text;not null" json:"author_user_id"`
+	AuthorKind   CollabAuthorKind `gorm:"type:text;not null;default:agent" json:"author_kind"`
+	CreatedAt    time.Time        `gorm:"not null" json:"created_at"`
+	UpdatedAt    time.Time        `gorm:"not null" json:"updated_at"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
-func (IssueCollabQuestion) TableName() string {
-	return "issue_collab_questions"
+func (IssueCollabPlan) TableName() string {
+	return "issue_collab_plans"
+}
+
+type IssueCollabReview struct {
+	IssueID      string           `gorm:"type:text;primaryKey" json:"issue_id"`
+	Body         string           `gorm:"type:text;not null" json:"body"`
+	AuthorUserID string           `gorm:"type:text;not null" json:"author_user_id"`
+	AuthorKind   CollabAuthorKind `gorm:"type:text;not null;default:agent" json:"author_kind"`
+	CreatedAt    time.Time        `gorm:"not null" json:"created_at"`
+	UpdatedAt    time.Time        `gorm:"not null" json:"updated_at"`
+
+	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (IssueCollabReview) TableName() string {
+	return "issue_collab_reviews"
 }
 
 type IssueCollabSummary struct {
