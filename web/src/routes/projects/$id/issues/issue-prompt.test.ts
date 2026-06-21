@@ -28,6 +28,7 @@ describe("buildIssuePrompt", () => {
     expect(prompt).toContain("记录问题根因");
     expect(prompt).toContain("删除添加的临时测试");
     expect(prompt).toContain("最后将所有共识决策写入协作区的实施建议列表中，无需创建计划。");
+    expect(prompt).toContain("实施建议应为方向性的设计决策，而非细致的修改建议。");
   });
 
   it("embeds the project id and issue id", () => {
