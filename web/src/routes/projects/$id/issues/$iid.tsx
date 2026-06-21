@@ -93,7 +93,6 @@ import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { useAuthStore } from "@/lib/store/auth-store";
 import {
   containsLocalIssueAssetReference,
-  convertMediaUrlsToAbsolute,
   GITHUB_LOCAL_ASSET_NOTICE,
   toGitHubMediaProxyUrl,
 } from "@/lib/utils/github-media-proxy";
@@ -838,16 +837,9 @@ export default function IssueDetailPage() {
   };
 
   const handleCopyIssuePrompt = async () => {
-    if (!issue) return;
-    const body = convertMediaUrlsToAbsolute(issue.body || "", token);
-    const comments = timelineItems
-      .filter((item): item is { type: "comment"; data: IssueComment; created_at: string } => item.type === "comment")
-      .map((item) => ({
-        author: item.data.author?.login || "unknown",
-        body: convertMediaUrlsToAbsolute(item.data.body || "", token),
-      }));
+    if (!issue || !id) return;
     await copyWithToast(
-      buildIssuePrompt({ id: issue.id, title: issue.title, body, labels: issueLabelNames, comments }),
+      buildIssuePrompt({ projectId: id, issueId: issue.id }),
       "已复制提示词",
     );
   };
