@@ -9,10 +9,15 @@ import {
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GitHubContent } from "@/components/github-content";
 import { useIssueCollab } from "@/lib/hooks/use-issue-collab";
-import { getInitials } from "@/lib/utils";
+import { cn, getInitials } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
+
+type TabValue = "suggestions" | "plan" | "review" | "summary";
+
+const TAB_ORDER: TabValue[] = ["suggestions", "plan", "review", "summary"];
 
 interface CollaborationAreaProps {
   issueId: string;
@@ -173,12 +178,31 @@ function SummarySection({
   );
 }
 
+function EmptyTabPanel() {
+  return (
+    <div className="flex min-h-[88px] items-center justify-center py-8">
+      <p className="text-muted-foreground" role="status">
+        暂无内容
+      </p>
+    </div>
+  );
+}
+
 export function CollaborationArea({ issueId, project }: CollaborationAreaProps) {
   const { data, isLoading } = useIssueCollab(issueId);
   const suggestions = data?.suggestions ?? [];
   const plan = data?.plan ?? null;
   const review = data?.review ?? null;
   const summary = data?.summary ?? null;
+
+  const hasContent: Record<TabValue, boolean> = {
+    suggestions: suggestions.length > 0,
+    plan: plan !== null,
+    review: review !== null,
+    summary: summary !== null,
+  };
+
+  const defaultTab = TAB_ORDER.find((tab) => hasContent[tab]) ?? null;
 
   return (
     <div className="space-y-6">
@@ -189,17 +213,84 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
 
       {isLoading ? (
         <div className="space-y-3">
+          <p className="sr-only">正在加载人机协作区</p>
           <Skeleton className="h-20 rounded-lg" />
           <Skeleton className="h-20 rounded-lg" />
         </div>
-      ) : (
-        <>
-          {suggestions.length > 0 && <SuggestionsSection suggestions={suggestions} />}
-          {plan && <PlanSection plan={plan} />}
-          {review && <ReviewSection review={review} />}
-          {summary && <SummarySection project={project} summary={summary} />}
-        </>
-      )}
+      ) : defaultTab ? (
+        <Tabs defaultValue={defaultTab} className="flex flex-col gap-4">
+          <TabsList aria-label="人机协作区内容" className="w-full justify-start overflow-x-auto">
+            <TabsTrigger
+              value="suggestions"
+              aria-label={
+                hasContent.suggestions
+                  ? `实施建议，${suggestions.length} 条`
+                  : "实施建议，暂无内容"
+              }
+              className={cn("shrink-0", !hasContent.suggestions && "text-muted-foreground")}
+            >
+              <Lightbulb className="h-3.5 w-3.5" aria-hidden="true" />
+              {hasContent.suggestions
+                ? `实施建议（${suggestions.length}）`
+                : "实施建议"}
+            </TabsTrigger>
+            <TabsTrigger
+              value="plan"
+              aria-label={hasContent.plan ? "计划，有内容" : "计划，暂无内容"}
+              className={cn("shrink-0", !hasContent.plan && "text-muted-foreground")}
+            >
+              <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
+              计划
+              {hasContent.plan ? (
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+              ) : null}
+            </TabsTrigger>
+            <TabsTrigger
+              value="review"
+              aria-label={hasContent.review ? "审查结果，有内容" : "审查结果，暂无内容"}
+              className={cn("shrink-0", !hasContent.review && "text-muted-foreground")}
+            >
+              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+              审查结果
+              {hasContent.review ? (
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+              ) : null}
+            </TabsTrigger>
+            <TabsTrigger
+              value="summary"
+              aria-label={hasContent.summary ? "完成总结，有内容" : "完成总结，暂无内容"}
+              className={cn("shrink-0", !hasContent.summary && "text-muted-foreground")}
+            >
+              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+              完成总结
+              {hasContent.summary ? (
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+              ) : null}
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="suggestions">
+            {hasContent.suggestions ? (
+              <SuggestionsSection suggestions={suggestions} />
+            ) : (
+              <EmptyTabPanel />
+            )}
+          </TabsContent>
+          <TabsContent value="plan">
+            {plan ? <PlanSection plan={plan} /> : <EmptyTabPanel />}
+          </TabsContent>
+          <TabsContent value="review">
+            {review ? <ReviewSection review={review} /> : <EmptyTabPanel />}
+          </TabsContent>
+          <TabsContent value="summary">
+            {summary ? (
+              <SummarySection project={project} summary={summary} />
+            ) : (
+              <EmptyTabPanel />
+            )}
+          </TabsContent>
+        </Tabs>
+      ) : null}
     </div>
   );
 }
