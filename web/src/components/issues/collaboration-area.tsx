@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Check,
   GitCommit,
@@ -114,17 +114,19 @@ function DeleteCollabButton({
 
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
-      <AlertDialogTrigger asChild>
-        <Button
-          type="button"
-          variant={variant}
-          size="icon-sm"
-          aria-label={ariaLabel}
-          disabled={deleteSection.isPending}
-          className={className}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
+      <AlertDialogTrigger
+        render={
+          <Button
+            type="button"
+            variant={variant}
+            size="icon-sm"
+            aria-label={ariaLabel}
+            disabled={deleteSection.isPending}
+            className={className}
+          />
+        }
+      >
+        <Trash2 className="h-4 w-4" />
       </AlertDialogTrigger>
       <AlertDialogContent>
         <AlertDialogHeader>
@@ -341,12 +343,15 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
   const review = data?.review ?? null;
   const summary = data?.summary ?? null;
 
-  const hasContent: Record<TabValue, boolean> = {
-    suggestions: suggestions.length > 0,
-    plan: plan !== null,
-    review: review !== null,
-    summary: summary !== null,
-  };
+  const hasContent = useMemo<Record<TabValue, boolean>>(
+    () => ({
+      suggestions: suggestions.length > 0,
+      plan: plan !== null,
+      review: review !== null,
+      summary: summary !== null,
+    }),
+    [suggestions.length, plan, review, summary],
+  );
 
   const defaultTab = TAB_ORDER.find((tab) => hasContent[tab]) ?? null;
   const hasAnyContent = defaultTab !== null;
@@ -368,15 +373,7 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
       }
       return current;
     });
-  }, [
-    issueId,
-    defaultTab,
-    hasAnyContent,
-    hasContent.suggestions,
-    hasContent.plan,
-    hasContent.review,
-    hasContent.summary,
-  ]);
+  }, [issueId, defaultTab, hasAnyContent, hasContent]);
 
   return (
     <div className="space-y-6">
