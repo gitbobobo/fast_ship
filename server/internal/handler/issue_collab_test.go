@@ -112,6 +112,56 @@ func TestIssueCollabHandler_FullFlow(t *testing.T) {
 	if area.Summary == nil || len(area.Summary.CommitIDs) != 1 || area.Summary.Author.Kind != "agent" {
 		t.Fatalf("unexpected summary: %+v", area.Summary)
 	}
+
+	// 分块删除 plan
+	delPlanCtx, delPlanRec := newJSONContext(http.MethodDelete, "/api/issues/"+issue.ID+"/collab/plan", nil)
+	delPlanCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	delPlanCtx.Set(middleware.ContextKeyUserID, user.ID)
+	delPlanCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.collabHandler.DeletePlan(delPlanCtx)
+	if delPlanRec.Code != http.StatusOK {
+		t.Fatalf("delete plan expected 200, got %d: %s", delPlanRec.Code, delPlanRec.Body.String())
+	}
+
+	getAfterPlanCtx, getAfterPlanRec := newJSONContext(http.MethodGet, "/api/issues/"+issue.ID+"/collab", nil)
+	getAfterPlanCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	getAfterPlanCtx.Set(middleware.ContextKeyUserID, user.ID)
+	getAfterPlanCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.collabHandler.GetArea(getAfterPlanCtx)
+	if getAfterPlanRec.Code != http.StatusOK {
+		t.Fatalf("get area after delete plan expected 200, got %d: %s", getAfterPlanRec.Code, getAfterPlanRec.Body.String())
+	}
+	var afterPlanArea collabAreaJSON
+	decodeEnvelope(t, getAfterPlanRec, &afterPlanArea)
+	if afterPlanArea.Plan != nil {
+		t.Fatalf("expected plan removed, got %+v", afterPlanArea.Plan)
+	}
+	if len(afterPlanArea.Suggestions) != 2 || afterPlanArea.Review == nil || afterPlanArea.Summary == nil {
+		t.Fatalf("expected other sections intact after plan delete, got %+v", afterPlanArea)
+	}
+
+	// 一键清空
+	clearCtx, clearRec := newJSONContext(http.MethodDelete, "/api/issues/"+issue.ID+"/collab", nil)
+	clearCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	asApiKey(clearCtx)
+	env.collabHandler.ClearArea(clearCtx)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("clear area expected 200, got %d: %s", clearRec.Code, clearRec.Body.String())
+	}
+
+	getAfterCtx, getAfterRec := newJSONContext(http.MethodGet, "/api/issues/"+issue.ID+"/collab", nil)
+	getAfterCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	getAfterCtx.Set(middleware.ContextKeyUserID, user.ID)
+	getAfterCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.collabHandler.GetArea(getAfterCtx)
+	if getAfterRec.Code != http.StatusOK {
+		t.Fatalf("get area after clear expected 200, got %d: %s", getAfterRec.Code, getAfterRec.Body.String())
+	}
+	var emptyArea collabAreaJSON
+	decodeEnvelope(t, getAfterRec, &emptyArea)
+	if len(emptyArea.Suggestions) != 0 || emptyArea.Plan != nil || emptyArea.Review != nil || emptyArea.Summary != nil {
+		t.Fatalf("expected empty area after clear, got %+v", emptyArea)
+	}
 }
 
 func TestIssueCollabHandler_ErrorMapping(t *testing.T) {
@@ -141,8 +191,8 @@ func TestIssueCollabHandler_ErrorMapping(t *testing.T) {
 	}
 }
 
-// JWT 调用四个写端点均 403(40303)；API Key 调用均 200。
-func TestIssueCollabHandler_WritesRequireApiKey(t *testing.T) {
+// JWT 调用四个 PUT 写端点均 403(40303)；API Key 调用均 200。
+func TestIssueCollabHandler_PutWritesRequireApiKey(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "collab-user-3")
 	project := createHandlerTestProject(t, env.db, user.ID)
@@ -179,6 +229,54 @@ func TestIssueCollabHandler_WritesRequireApiKey(t *testing.T) {
 			tc.call(apiCtx)
 			if apiRec.Code != http.StatusOK {
 				t.Fatalf("expected 200 for API key write %s, got %d: %s", tc.name, apiRec.Code, apiRec.Body.String())
+			}
+		})
+	}
+}
+
+func TestIssueCollabHandler_DeletesAllowJWT(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "collab-user-4")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issue := createHandlerTestIssue(t, env.db, project.ID)
+
+	asJWT := func(c *gin.Context) {
+		c.Set(middleware.ContextKeyUserID, user.ID)
+		c.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	}
+	asApiKey := func(c *gin.Context) {
+		c.Set(middleware.ContextKeyUserID, user.ID)
+		c.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
+	}
+
+	cases := []struct {
+		name string
+		path string
+		call func(*gin.Context)
+	}{
+		{"area", "/api/issues/" + issue.ID + "/collab", env.collabHandler.ClearArea},
+		{"suggestions", "/api/issues/" + issue.ID + "/collab/suggestions", env.collabHandler.ClearSuggestions},
+		{"plan", "/api/issues/" + issue.ID + "/collab/plan", env.collabHandler.DeletePlan},
+		{"review", "/api/issues/" + issue.ID + "/collab/review", env.collabHandler.DeleteReview},
+		{"summary", "/api/issues/" + issue.ID + "/collab/summary", env.collabHandler.DeleteSummary},
+	}
+	for _, tc := range cases {
+		t.Run("jwt_"+tc.name, func(t *testing.T) {
+			ctx, rec := newJSONContext(http.MethodDelete, tc.path, nil)
+			ctx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+			asJWT(ctx)
+			tc.call(ctx)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200 for JWT delete %s, got %d: %s", tc.name, rec.Code, rec.Body.String())
+			}
+		})
+		t.Run("apikey_"+tc.name, func(t *testing.T) {
+			ctx, rec := newJSONContext(http.MethodDelete, tc.path, nil)
+			ctx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+			asApiKey(ctx)
+			tc.call(ctx)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200 for API key delete %s, got %d: %s", tc.name, rec.Code, rec.Body.String())
 			}
 		})
 	}

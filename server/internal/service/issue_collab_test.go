@@ -215,3 +215,105 @@ func TestIssueCollab_AccessControl(t *testing.T) {
 		t.Fatalf("expected ErrProjectNotFound for non-owner write, got %v", err)
 	}
 }
+
+func seedFullCollabArea(t *testing.T, ts *testServices, issueID, ownerID string) {
+	t.Helper()
+	if _, err := ts.collabService.ReplaceSuggestions(issueID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{
+		Items: []IssueCollabSuggestionInput{{Body: "建议一"}},
+	}); err != nil {
+		t.Fatalf("seed suggestions: %v", err)
+	}
+	if _, err := ts.collabService.UpsertPlan(issueID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabPlanRequest{Body: "计划"}); err != nil {
+		t.Fatalf("seed plan: %v", err)
+	}
+	if _, err := ts.collabService.UpsertReview(issueID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabReviewRequest{Body: "审查"}); err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	if _, err := ts.collabService.UpsertSummary(issueID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabSummaryRequest{
+		Body: "总结", CommitIDs: []string{"abc1234"},
+	}); err != nil {
+		t.Fatalf("seed summary: %v", err)
+	}
+}
+
+func TestIssueCollab_ClearArea(t *testing.T) {
+	ts, issue, ownerID := setupCollabIssue(t)
+	seedFullCollabArea(t, ts, issue.ID, ownerID)
+
+	if err := ts.collabService.ClearArea(issue.ID, ownerID); err != nil {
+		t.Fatalf("clear area: %v", err)
+	}
+	area, err := ts.collabService.GetArea(issue.ID, ownerID)
+	if err != nil {
+		t.Fatalf("get area: %v", err)
+	}
+	if len(area.Suggestions) != 0 || area.Plan != nil || area.Review != nil || area.Summary != nil {
+		t.Fatalf("expected empty area after clear, got %+v", area)
+	}
+}
+
+func TestIssueCollab_DeleteSections(t *testing.T) {
+	ts, issue, ownerID := setupCollabIssue(t)
+	seedFullCollabArea(t, ts, issue.ID, ownerID)
+
+	if err := ts.collabService.DeletePlan(issue.ID, ownerID); err != nil {
+		t.Fatalf("delete plan: %v", err)
+	}
+	area, _ := ts.collabService.GetArea(issue.ID, ownerID)
+	if area.Plan != nil || len(area.Suggestions) != 1 || area.Review == nil || area.Summary == nil {
+		t.Fatalf("expected plan removed only, got %+v", area)
+	}
+
+	if err := ts.collabService.ClearSuggestions(issue.ID, ownerID); err != nil {
+		t.Fatalf("clear suggestions: %v", err)
+	}
+	area, _ = ts.collabService.GetArea(issue.ID, ownerID)
+	if len(area.Suggestions) != 0 {
+		t.Fatalf("expected suggestions cleared, got %d", len(area.Suggestions))
+	}
+}
+
+func TestIssueCollab_DeleteIdempotent(t *testing.T) {
+	ts, issue, ownerID := setupCollabIssue(t)
+
+	if err := ts.collabService.DeletePlan(issue.ID, ownerID); err != nil {
+		t.Fatalf("delete missing plan: %v", err)
+	}
+	if err := ts.collabService.ClearArea(issue.ID, ownerID); err != nil {
+		t.Fatalf("clear empty area: %v", err)
+	}
+	if err := ts.collabService.DeleteReview(issue.ID, ownerID); err != nil {
+		t.Fatalf("delete missing review: %v", err)
+	}
+	if err := ts.collabService.DeleteSummary(issue.ID, ownerID); err != nil {
+		t.Fatalf("delete missing summary: %v", err)
+	}
+	if err := ts.collabService.ClearSuggestions(issue.ID, ownerID); err != nil {
+		t.Fatalf("clear missing suggestions: %v", err)
+	}
+}
+
+func TestIssueCollab_DeleteAccessControl(t *testing.T) {
+	ts, issue, ownerID := setupCollabIssue(t)
+	otherID := uuid.NewString()
+	createTestUser(t, ts.db, otherID)
+
+	if err := ts.collabService.DeletePlan(issue.ID, otherID); err != errs.ErrProjectNotFound {
+		t.Fatalf("expected ErrProjectNotFound for non-owner delete, got %v", err)
+	}
+	if err := ts.collabService.ClearSuggestions(issue.ID, otherID); err != errs.ErrProjectNotFound {
+		t.Fatalf("expected ErrProjectNotFound for non-owner clear suggestions, got %v", err)
+	}
+	if err := ts.collabService.DeleteReview(issue.ID, otherID); err != errs.ErrProjectNotFound {
+		t.Fatalf("expected ErrProjectNotFound for non-owner delete review, got %v", err)
+	}
+	if err := ts.collabService.DeleteSummary(issue.ID, otherID); err != errs.ErrProjectNotFound {
+		t.Fatalf("expected ErrProjectNotFound for non-owner delete summary, got %v", err)
+	}
+	if err := ts.collabService.ClearArea(issue.ID, otherID); err != errs.ErrProjectNotFound {
+		t.Fatalf("expected ErrProjectNotFound for non-owner clear area, got %v", err)
+	}
+	if err := ts.collabService.ClearArea(uuid.NewString(), ownerID); err != errs.ErrIssueNotFound {
+		t.Fatalf("expected ErrIssueNotFound for missing issue delete, got %v", err)
+	}
+}

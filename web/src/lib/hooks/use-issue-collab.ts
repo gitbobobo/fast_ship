@@ -1,7 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { issueApi } from "@/lib/api/issues";
 
-const collabKey = (issueId: string) => ["issues", issueId, "collab"] as const;
+export type CollabDeleteSection = "all" | "suggestions" | "plan" | "review" | "summary";
+
+export const collabKey = (issueId: string) => ["issues", issueId, "collab"] as const;
 
 export function useIssueCollab(issueId: string) {
   return useQuery({
@@ -11,5 +13,15 @@ export function useIssueCollab(issueId: string) {
       return res.data;
     },
     enabled: !!issueId,
+  });
+}
+
+export function useDeleteCollabSection(issueId: string, section: CollabDeleteSection) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => issueApi.deleteCollabSection(issueId, section),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: collabKey(issueId) });
+    },
   });
 }

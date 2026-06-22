@@ -363,6 +363,42 @@ func (s *IssueCollabService) UpsertSummary(issueID, userID string, authorKind mo
 	return &resp, nil
 }
 
+func (s *IssueCollabService) ClearArea(issueID, userID string) error {
+	if _, err := s.ensureAccess(issueID, userID); err != nil {
+		return err
+	}
+	if err := s.collabRepo.DeleteAllByIssueID(issueID); err != nil {
+		return errs.ErrInternal
+	}
+	return nil
+}
+
+func (s *IssueCollabService) deleteCollabSection(issueID, userID string, deleteFn func(string) error) error {
+	if _, err := s.ensureAccess(issueID, userID); err != nil {
+		return err
+	}
+	if err := deleteFn(issueID); err != nil {
+		return errs.ErrInternal
+	}
+	return nil
+}
+
+func (s *IssueCollabService) ClearSuggestions(issueID, userID string) error {
+	return s.deleteCollabSection(issueID, userID, s.collabRepo.DeleteSuggestionsByIssueID)
+}
+
+func (s *IssueCollabService) DeletePlan(issueID, userID string) error {
+	return s.deleteCollabSection(issueID, userID, s.collabRepo.DeletePlanByIssueID)
+}
+
+func (s *IssueCollabService) DeleteReview(issueID, userID string) error {
+	return s.deleteCollabSection(issueID, userID, s.collabRepo.DeleteReviewByIssueID)
+}
+
+func (s *IssueCollabService) DeleteSummary(issueID, userID string) error {
+	return s.deleteCollabSection(issueID, userID, s.collabRepo.DeleteSummaryByIssueID)
+}
+
 func (s *IssueCollabService) ensureAccess(issueID, userID string) (*model.Issue, error) {
 	issue, err := s.issueRepo.FindByID(issueID)
 	if err != nil {

@@ -245,28 +245,35 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 
 > Issue 的评论、工作流状态（internal-meta）、Checklist、附件上传、AI 清单建议等编辑类写操作已对 API Key 开放；但通用编辑 `PUT /issues/:iid` 中的 `state` / `state_reason` 仅限 JWT 用户，API Key 调用会返回 403（40301）。AI 端点中仅 `checklist-suggestions` 对 API Key 开放；`generate-title` 与 `/ai/settings` 仍限 JWT，API Key 调用会返回 `403`（40301）。
 
-> 注意：人机协作区为**纯观看**模式——内容全部由代理（API Key）产出，用户（网页登录 JWT）只读浏览。
-> - 代理（API Key）：写实施建议 / 计划 / 审查结果 / 完成总结（`PUT /suggestions`、`PUT /plan`、`PUT /review`、`PUT /summary`）。
-> - 用户（JWT）：仅可 `GET /collab` 只读；调用任一写端点返回 `403`（40303）。
+> 注意：人机协作区 JWT 用户可**读取与删除**，不可 PUT 写入；代理（API Key）可 PUT 写入与 DELETE 删除。
+> - 代理（API Key）：写实施建议 / 计划 / 审查结果 / 完成总结（`PUT /suggestions`、`PUT /plan`、`PUT /review`、`PUT /summary`）；亦可 DELETE 清空或分块删除。
+> - 用户（JWT）：可 `GET /collab` 只读浏览；可 DELETE 清空或分块删除；调用 PUT 写端点返回 `403`（40303）。
 > - 读取（`GET /collab`）JWT 与 API Key 均可。
 
 ## 人机协作区（Issue Collaboration Area）
 
-人机协作区挂在每个 Issue 之下，采用**纯观看**模式：代理（API Key）产出全部内容（实施建议、计划、审查结果、完成总结），用户（网页登录）只读浏览，不再有作答/补背景等双向交互。协作区数据保存在 Fast Ship 内部，不回写 GitHub；内部 Issue 与 GitHub Issue 均支持。
+人机协作区挂在每个 Issue 之下：代理（API Key）产出全部内容（实施建议、计划、审查结果、完成总结），用户（网页登录 JWT）可只读浏览并删除不满意的内容，不可 PUT 写入。协作区数据保存在 Fast Ship 内部，不回写 GitHub；内部 Issue 与 GitHub Issue 均支持。
 
 > **Breaking Change（相对旧版）**：旧的「背景 notes」「问题 questions」区块及端点（`POST/PUT/DELETE /collab/notes`、`POST/PUT/DELETE /collab/questions`）已**移除**；`GET /collab` 响应字段由 `notes/questions/summary` 改为 `suggestions/plan/review/summary`。已无「作答/补背景」概念。
 
 ### 接口总览
 
-所有接口路径前缀 `/api/issues/:issue_id/collab`。`GET` 两类凭证（JWT / API Key）均可；**写端点仅限 API Key**（代理），JWT 调用返回 `403`（40303）。
+所有接口路径前缀 `/api/issues/:issue_id/collab`。`GET` 与 `DELETE` 两类凭证（JWT / API Key）均可；**PUT 写端点仅限 API Key**（代理），JWT 调用 PUT 返回 `403`（40303）。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/collab` | 获取整个协作区（建议/计划/审查/总结），JWT 或 API Key 均可 |
+| DELETE | `/collab` | 一键清空协作区全部四块（JWT 或 API Key 均可，幂等 200） |
 | PUT | `/collab/suggestions` | 全量替换实施建议列表（API Key） |
+| DELETE | `/collab/suggestions` | 清空全部实施建议（JWT 或 API Key 均可，幂等 200） |
 | PUT | `/collab/plan` | 写入/覆盖计划（API Key） |
+| DELETE | `/collab/plan` | 删除计划（JWT 或 API Key 均可，幂等 200） |
 | PUT | `/collab/review` | 写入/覆盖审查结果（API Key） |
+| DELETE | `/collab/review` | 删除审查结果（JWT 或 API Key 均可，幂等 200） |
 | PUT | `/collab/summary` | 写入/覆盖完成总结（API Key） |
+| DELETE | `/collab/summary` | 删除完成总结（JWT 或 API Key 均可，幂等 200） |
+
+> DELETE 幂等语义：Issue 存在且有访问权时，目标块不存在或协作区为空仍返回 200（与 artifact DELETE 对不存在资源返 404 不同）。对外清空建议请走 DELETE `/collab/suggestions`，勿用 PUT `items:[]`。清空后 GET 响应为 `null` / `[]`，与从未创建无法区分；Agent 重新 PUT 在技术上合法，但应先 GET 并尊重用户已清空的状态。
 
 ### GET 获取协作区
 
@@ -325,7 +332,7 @@ PUT /api/issues/:issue_id/collab/suggestions
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `items` | array | 是 | 一次最多 30 条；`null` 返回 400，**空数组 `[]` 表示清空全部建议** |
+| `items` | array | 是 | 一次最多 30 条；`null` 返回 400，**空数组 `[]` 表示清空全部建议（后端兼容保留，对外请走 DELETE `/collab/suggestions`）** |
 | `items[].body` | string | 是 | 单条建议正文，1..4000 字符，支持 Markdown |
 
 每次 PUT 为**全量替换**：服务端先删除该 Issue 全部旧建议，再按 `items` 顺序批量创建（`sort_order` 由服务端按数组下标分配）。**建议 id 每次替换都会重建，不要缓存 id**；变更请 GET 后整包重新 PUT。
@@ -386,7 +393,7 @@ PUT /api/issues/:issue_id/collab/summary
 
 外部代理无状态、易中断，建议按以下顺序产出：
 
-1. **先读后写**：处理 Issue 前 `GET /collab`，确认是否已有建议/计划/审查/总结，避免重复覆盖。
+1. **先读后写**：处理 Issue 前 `GET /collab`，确认是否已有建议/计划/审查/总结，避免重复覆盖；若用户已清空某块，尊重其意图勿直接重新生成。
 2. **实施建议**：分析后 `PUT /collab/suggestions`（全量替换），列出该做的要点清单。
 3. **计划**：`PUT /collab/plan`，给出落地执行计划（覆盖更新）。
 4. **据计划实施**：执行代码改动（在用户许可范围内）。
@@ -403,10 +410,10 @@ PUT /api/issues/:issue_id/collab/summary
 | 400 | 40001 | 请求参数无效（超长、`items` 为 null、commit_id 非 SHA 等） |
 | 401 | 40100 | 认证信息无效或缺失 |
 | 403 | 40300 | API Key 权限不足（尝试访问未开放的写操作） |
-| 403 | 40303 | 该操作仅限 API Key 调用（协作区写端点拒绝 JWT） |
+| 403 | 40303 | 该操作仅限 API Key 调用（协作区 **PUT** 写端点拒绝 JWT） |
 | 404 | 40401 | 项目不存在 |
 | 404 | 40405 | Issue 不存在 |
-| 404 | 40408 | 协作区内容不存在 |
+| 404 | 40408 | 协作区内容不存在（预留错误码，当前 GET/DELETE 端点均不产生） |
 
 如果收到 401，检查：
 1. `Authorization` 头是否正确携带 `Bearer fsk_...`

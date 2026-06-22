@@ -1111,6 +1111,22 @@ func TestRouterCollabWritesRequireApiKey(t *testing.T) {
 	if rec := doReq(http.MethodPost, apiKeyAuth, "/api/issues/"+issue.ID+"/collab/questions", []byte(`{"items":[]}`)); rec.Code != http.StatusNotFound {
 		t.Fatalf("legacy questions route expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
+
+	// JWT DELETE plan → 200（幂等，即使 plan 不存在）
+	planPath := "/api/issues/" + issue.ID + "/collab/plan"
+	if rec := doReq(http.MethodDelete, jwtAuth, planPath, nil); rec.Code != http.StatusOK {
+		t.Fatalf("JWT delete plan expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, path := range []string{
+		"/api/issues/" + issue.ID + "/collab",
+		"/api/issues/" + issue.ID + "/collab/suggestions",
+		"/api/issues/" + issue.ID + "/collab/review",
+		"/api/issues/" + issue.ID + "/collab/summary",
+	} {
+		if rec := doReq(http.MethodDelete, apiKeyAuth, path, nil); rec.Code != http.StatusOK {
+			t.Fatalf("API key DELETE %s expected 200, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func newRouterMultipartRequest(t *testing.T, target, fieldName, fileName string, content []byte, extra map[string]string) *http.Request {

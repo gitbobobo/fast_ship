@@ -98,3 +98,34 @@ func (r *IssueCollabRepository) UpsertSummary(summary *model.IssueCollabSummary)
 		}),
 	}).Create(summary).Error
 }
+
+func (r *IssueCollabRepository) DeleteSuggestionsByIssueID(issueID string) error {
+	return r.db.Where("issue_id = ?", issueID).Delete(&model.IssueCollabSuggestion{}).Error
+}
+
+func (r *IssueCollabRepository) DeletePlanByIssueID(issueID string) error {
+	return r.db.Where("issue_id = ?", issueID).Delete(&model.IssueCollabPlan{}).Error
+}
+
+func (r *IssueCollabRepository) DeleteReviewByIssueID(issueID string) error {
+	return r.db.Where("issue_id = ?", issueID).Delete(&model.IssueCollabReview{}).Error
+}
+
+func (r *IssueCollabRepository) DeleteSummaryByIssueID(issueID string) error {
+	return r.db.Where("issue_id = ?", issueID).Delete(&model.IssueCollabSummary{}).Error
+}
+
+func (r *IssueCollabRepository) DeleteAllByIssueID(issueID string) error {
+	return r.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("issue_id = ?", issueID).Delete(&model.IssueCollabSuggestion{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("issue_id = ?", issueID).Delete(&model.IssueCollabPlan{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("issue_id = ?", issueID).Delete(&model.IssueCollabReview{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("issue_id = ?", issueID).Delete(&model.IssueCollabSummary{}).Error
+	})
+}

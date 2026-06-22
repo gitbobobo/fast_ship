@@ -1,23 +1,51 @@
+import { useEffect, useState } from "react";
 import {
   Check,
   GitCommit,
   HelpCircle,
   Lightbulb,
   ListChecks,
+  Loader2,
   ShieldCheck,
   Sparkles,
+  Trash2,
 } from "lucide-react";
+import { toast } from "sonner";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { GitHubContent } from "@/components/github-content";
-import { useIssueCollab } from "@/lib/hooks/use-issue-collab";
+import {
+  type CollabDeleteSection,
+  useDeleteCollabSection,
+  useIssueCollab,
+} from "@/lib/hooks/use-issue-collab";
 import { cn, getInitials } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 
 type TabValue = "suggestions" | "plan" | "review" | "summary";
 
 const TAB_ORDER: TabValue[] = ["suggestions", "plan", "review", "summary"];
+
+const SECTION_SUCCESS_TOAST: Record<CollabDeleteSection, string> = {
+  all: "协作区已清空",
+  suggestions: "已清空全部建议",
+  plan: "计划已删除",
+  review: "审查结果已删除",
+  summary: "完成总结已删除",
+};
 
 interface CollaborationAreaProps {
   issueId: string;
@@ -51,12 +79,101 @@ function CollabActorBadge({ actor }: { actor: IssueCollabActor }) {
   );
 }
 
-function SuggestionsSection({ suggestions }: { suggestions: IssueCollabSuggestion[] }) {
+interface DeleteCollabButtonProps {
+  issueId: string;
+  section: CollabDeleteSection;
+  ariaLabel: string;
+  title: string;
+  description: string;
+  variant?: "destructive" | "ghost";
+  className?: string;
+}
+
+function DeleteCollabButton({
+  issueId,
+  section,
+  ariaLabel,
+  title,
+  description,
+  variant = "ghost",
+  className,
+}: DeleteCollabButtonProps) {
+  const [open, setOpen] = useState(false);
+  const deleteSection = useDeleteCollabSection(issueId, section);
+
+  const handleConfirm = async (event: React.MouseEvent) => {
+    event.preventDefault();
+    try {
+      await deleteSection.mutateAsync();
+      toast.success(SECTION_SUCCESS_TOAST[section]);
+      setOpen(false);
+    } catch {
+      toast.error("删除失败，请稍后重试");
+    }
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialogTrigger asChild>
+        <Button
+          type="button"
+          variant={variant}
+          size="icon-sm"
+          aria-label={ariaLabel}
+          disabled={deleteSection.isPending}
+          className={className}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleteSection.isPending}>取消</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(event) => void handleConfirm(event)}
+            disabled={deleteSection.isPending}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {deleteSection.isPending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                删除中…
+              </>
+            ) : (
+              "确认删除"
+            )}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+function SuggestionsSection({
+  issueId,
+  suggestions,
+}: {
+  issueId: string;
+  suggestions: IssueCollabSuggestion[];
+}) {
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm font-semibold">
-        <Lightbulb className="h-4 w-4 text-amber-500" />
-        实施建议（{suggestions.length}）
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <Lightbulb className="h-4 w-4 text-amber-500" />
+          实施建议（{suggestions.length}）
+        </div>
+        <DeleteCollabButton
+          issueId={issueId}
+          section="suggestions"
+          ariaLabel="清空全部建议"
+          title="清空全部建议？"
+          description="将删除该问题的全部实施建议，不可恢复。"
+        />
       </div>
       <div className="space-y-2">
         {suggestions.map((suggestion, index) => (
@@ -82,7 +199,7 @@ function SuggestionsSection({ suggestions }: { suggestions: IssueCollabSuggestio
   );
 }
 
-function PlanSection({ plan }: { plan: IssueCollabPlan }) {
+function PlanSection({ issueId, plan }: { issueId: string; plan: IssueCollabPlan }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
@@ -90,7 +207,16 @@ function PlanSection({ plan }: { plan: IssueCollabPlan }) {
           <ListChecks className="h-4 w-4 text-sky-500" />
           计划
         </div>
-        <CollabActorBadge actor={plan.author} />
+        <div className="flex items-center gap-2">
+          <DeleteCollabButton
+            issueId={issueId}
+            section="plan"
+            ariaLabel="删除计划"
+            title="删除计划？"
+            description="将删除该问题的计划内容，不可恢复。"
+          />
+          <CollabActorBadge actor={plan.author} />
+        </div>
       </div>
       <div className="rounded-lg border bg-card p-3">
         <div className="markdown-body text-sm">
@@ -102,7 +228,7 @@ function PlanSection({ plan }: { plan: IssueCollabPlan }) {
   );
 }
 
-function ReviewSection({ review }: { review: IssueCollabReview }) {
+function ReviewSection({ issueId, review }: { issueId: string; review: IssueCollabReview }) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
@@ -110,7 +236,16 @@ function ReviewSection({ review }: { review: IssueCollabReview }) {
           <ShieldCheck className="h-4 w-4 text-emerald-500" />
           审查结果
         </div>
-        <CollabActorBadge actor={review.author} />
+        <div className="flex items-center gap-2">
+          <DeleteCollabButton
+            issueId={issueId}
+            section="review"
+            ariaLabel="删除审查结果"
+            title="删除审查结果？"
+            description="将删除该问题的审查结果，不可恢复。"
+          />
+          <CollabActorBadge actor={review.author} />
+        </div>
       </div>
       <div className="rounded-lg border bg-card p-3">
         <div className="markdown-body text-sm">
@@ -123,9 +258,11 @@ function ReviewSection({ review }: { review: IssueCollabReview }) {
 }
 
 function SummarySection({
+  issueId,
   project,
   summary,
 }: {
+  issueId: string;
   project: Project | null | undefined;
   summary: IssueCollabSummary;
 }) {
@@ -136,7 +273,16 @@ function SummarySection({
           <Check className="h-4 w-4 text-emerald-500" />
           完成总结
         </div>
-        <CollabActorBadge actor={summary.author} />
+        <div className="flex items-center gap-2">
+          <DeleteCollabButton
+            issueId={issueId}
+            section="summary"
+            ariaLabel="删除完成总结"
+            title="删除完成总结？"
+            description="将删除该问题的完成总结，不可恢复。"
+          />
+          <CollabActorBadge actor={summary.author} />
+        </div>
       </div>
       <div className="rounded-lg border bg-card p-3">
         <div className="markdown-body text-sm">
@@ -203,12 +349,52 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
   };
 
   const defaultTab = TAB_ORDER.find((tab) => hasContent[tab]) ?? null;
+  const hasAnyContent = defaultTab !== null;
+  const [activeTab, setActiveTab] = useState<TabValue | null>(null);
+  const resolvedTab = activeTab ?? defaultTab;
+
+  useEffect(() => {
+    setActiveTab(null);
+  }, [issueId]);
+
+  useEffect(() => {
+    if (!hasAnyContent) {
+      setActiveTab(null);
+      return;
+    }
+    setActiveTab((current) => {
+      if (current === null || !hasContent[current]) {
+        return defaultTab;
+      }
+      return current;
+    });
+  }, [
+    issueId,
+    defaultTab,
+    hasAnyContent,
+    hasContent.suggestions,
+    hasContent.plan,
+    hasContent.review,
+    hasContent.summary,
+  ]);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-2">
-        <HelpCircle className="h-4 w-4 text-primary" />
-        <h2 className="text-sm font-semibold">人机协作区</h2>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <HelpCircle className="h-4 w-4 text-primary" />
+          <h2 className="text-sm font-semibold">人机协作区</h2>
+        </div>
+        {hasAnyContent ? (
+          <DeleteCollabButton
+            issueId={issueId}
+            section="all"
+            ariaLabel="清空协作区"
+            title="清空协作区？"
+            description="将删除全部建议、计划、审查与总结，不可恢复。"
+            variant="destructive"
+          />
+        ) : null}
       </div>
 
       {isLoading ? (
@@ -217,8 +403,8 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
           <Skeleton className="h-20 rounded-lg" />
           <Skeleton className="h-20 rounded-lg" />
         </div>
-      ) : defaultTab ? (
-        <Tabs defaultValue={defaultTab} className="flex flex-col gap-4">
+      ) : hasAnyContent && resolvedTab ? (
+        <Tabs value={resolvedTab} onValueChange={(value) => setActiveTab(value as TabValue)} className="flex flex-col gap-4">
           <TabsList aria-label="人机协作区内容" className="w-full justify-start overflow-x-auto">
             <TabsTrigger
               value="suggestions"
@@ -271,20 +457,20 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
 
           <TabsContent value="suggestions">
             {hasContent.suggestions ? (
-              <SuggestionsSection suggestions={suggestions} />
+              <SuggestionsSection issueId={issueId} suggestions={suggestions} />
             ) : (
               <EmptyTabPanel />
             )}
           </TabsContent>
           <TabsContent value="plan">
-            {plan ? <PlanSection plan={plan} /> : <EmptyTabPanel />}
+            {plan ? <PlanSection issueId={issueId} plan={plan} /> : <EmptyTabPanel />}
           </TabsContent>
           <TabsContent value="review">
-            {review ? <ReviewSection review={review} /> : <EmptyTabPanel />}
+            {review ? <ReviewSection issueId={issueId} review={review} /> : <EmptyTabPanel />}
           </TabsContent>
           <TabsContent value="summary">
             {summary ? (
-              <SummarySection project={project} summary={summary} />
+              <SummarySection issueId={issueId} project={project} summary={summary} />
             ) : (
               <EmptyTabPanel />
             )}

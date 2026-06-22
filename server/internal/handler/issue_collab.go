@@ -16,7 +16,7 @@ func NewIssueCollabHandler(collabService *service.IssueCollabService) *IssueColl
 	return &IssueCollabHandler{collabService: collabService}
 }
 
-// requireApiKey 限定协作区写操作仅 API Key（Agent）可用；JWT 调用返回 403(40303)。
+// requireApiKey 限定协作区 PUT 写操作仅 API Key；DELETE 不经此守卫。
 func (h *IssueCollabHandler) requireApiKey(c *gin.Context) bool {
 	if middleware.IsJWTAuth(c) {
 		middleware.HandleAppError(c, errs.ErrApiKeyRequired)
@@ -140,4 +140,54 @@ func (h *IssueCollabHandler) UpsertSummary(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+func (h *IssueCollabHandler) ClearArea(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+	if err := h.collabService.ClearArea(issueID, userID); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, nil)
+}
+
+func (h *IssueCollabHandler) ClearSuggestions(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+	if err := h.collabService.ClearSuggestions(issueID, userID); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, nil)
+}
+
+func (h *IssueCollabHandler) DeletePlan(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+	if err := h.collabService.DeletePlan(issueID, userID); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, nil)
+}
+
+func (h *IssueCollabHandler) DeleteReview(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+	if err := h.collabService.DeleteReview(issueID, userID); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, nil)
+}
+
+func (h *IssueCollabHandler) DeleteSummary(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+	if err := h.collabService.DeleteSummary(issueID, userID); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, nil)
 }

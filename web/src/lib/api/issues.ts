@@ -118,4 +118,15 @@ export const issueApi = {
 
   getCollab: (issueId: string) =>
     api.get(`issues/${issueId}/collab`).json<ApiResponse<IssueCollabArea>>(),
+
+  deleteCollabSection: (
+    issueId: string,
+    section: "all" | "suggestions" | "plan" | "review" | "summary",
+  ) => {
+    const path =
+      section === "all"
+        ? `issues/${issueId}/collab`
+        : `issues/${issueId}/collab/${section}`;
+    return api.delete(path).json<ApiResponse<null>>();
+  },
 };

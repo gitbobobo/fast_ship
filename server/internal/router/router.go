@@ -124,14 +124,19 @@ func Setup(
 		api.GET("/issues/:iid/comments", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListComments)
 		api.GET("/issues/:iid/timeline", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListTimeline)
 
-		// 人机协作区 —— GET 两类凭证均可；写端点仅 API Key（Agent），JWT 调用在 handler 内返回 403(40303)。
+		// 人机协作区 —— GET/DELETE 两类凭证均可；PUT 写端点仅 API Key（Agent），JWT 调用在 handler 内返回 403(40303)。
 		issueCollab := api.Group("/issues/:iid/collab", middleware.RequireAuth(cfg, apiKeyRepo, authService))
 		{
 			issueCollab.GET("", issueCollabHandler.GetArea)
+			issueCollab.DELETE("", issueCollabHandler.ClearArea)
 			issueCollab.PUT("/suggestions", issueCollabHandler.ReplaceSuggestions)
+			issueCollab.DELETE("/suggestions", issueCollabHandler.ClearSuggestions)
 			issueCollab.PUT("/plan", issueCollabHandler.UpsertPlan)
+			issueCollab.DELETE("/plan", issueCollabHandler.DeletePlan)
 			issueCollab.PUT("/review", issueCollabHandler.UpsertReview)
+			issueCollab.DELETE("/review", issueCollabHandler.DeleteReview)
 			issueCollab.PUT("/summary", issueCollabHandler.UpsertSummary)
+			issueCollab.DELETE("/summary", issueCollabHandler.DeleteSummary)
 		}
 
 		// JWT / API Key 均可 — 安装包操作
