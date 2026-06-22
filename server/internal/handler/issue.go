@@ -93,6 +93,11 @@ func (h *IssueHandler) Update(c *gin.Context) {
 		return
 	}
 
+	if !middleware.IsJWTAuth(c) && (req.State != nil || req.StateReason != nil) {
+		middleware.HandleAppError(c, errs.ErrApiKeyForbidden)
+		return
+	}
+
 	result, err := h.issueService.UpdateInternalIssue(issueID, userID, service.UpdateInternalIssueRequest{
 		Title:       req.Title,
 		Body:        req.Body,

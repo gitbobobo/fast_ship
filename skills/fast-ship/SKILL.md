@@ -33,6 +33,8 @@ api_key: "fsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 > 注意：`~/.config` 目录在 macOS/Linux 上通常已存在；如果不存在，请先创建目录。
 
+> **Breaking Change**：API Key **不再**可通过 `PUT /api/issues/:issue_id` 修改 `state` / `state_reason`（open/close）。Agent 应改用 `PUT /api/issues/:issue_id/internal-meta` 的 `workflow_status` 标记完成；Issue 的 open/close 由 JWT 用户在 Web 端操作。
+
 ### 后续使用
 
 直接读取 `~/.config/fast-ship/config.yaml` 中的 `base_url` 和 `api_key`，**不再询问用户**。
@@ -146,7 +148,7 @@ POST /api/projects/:project_id/issues
 PUT /api/issues/:issue_id
 ```
 
-请求体：
+请求体（JWT 用户示例，含 open/close）：
 
 ```json
 {
@@ -158,14 +160,24 @@ PUT /api/issues/:issue_id
 }
 ```
 
+API Key 示例（仅允许 title/body/labels，**勿**携带 state/state_reason）：
+
+```json
+{
+  "title": "更新后的标题",
+  "body": "更新后的正文",
+  "labels": ["bug"]
+}
+```
+
 字段说明：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `title` | string | 否 | 新标题 |
 | `body` | string | 否 | 新正文 |
-| `state` | string | 否 | `open` 或 `closed` |
-| `state_reason` | string | 否 | 关闭原因 |
+| `state` | string | 否 | `open` 或 `closed`；**仅 JWT**，API Key 传此字段返回 403（40301） |
+| `state_reason` | string | 否 | 关闭原因；**仅 JWT**，API Key 传此字段返回 403（40301） |
 | `labels` | string[] | 否 | 标签名称列表 |
 
 ### 修改工作流状态（internal-meta）
@@ -186,7 +198,7 @@ PUT /api/issues/:issue_id/internal-meta
 |---|---|---|---|
 | `workflow_status` | string | 是 | `todo` / `in_progress` / `done`（空串可重置为未开始） |
 
-> Issue 评论（`POST /issues/:iid/comments`）、Checklist（`PUT /issues/:iid/checklist`）、附件上传（`POST /issues/:iid/assets`）也已对 API Key 开放，请求体字段与网页端一致。
+> Issue 评论（`POST /issues/:iid/comments`）、Checklist（`PUT /issues/:iid/checklist`）、附件上传（`POST /issues/:iid/assets`）也已对 API Key 开放，除 `state` / `state_reason` 外，请求体字段与网页端一致。
 
 ### 步骤 6：查询 Issue
 
@@ -205,7 +217,7 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | 参数 | 说明 |
 |---|---|
 | `q` | 标题/正文关键词搜索 |
-| `state` | `open` / `closed` |
+| `state` | `open` / `closed`（**查询过滤**，非写操作） |
 | `source` | `internal` / `github` |
 | `workflow_status` | `todo` / `in_progress` / `done` |
 | `label` | 标签过滤 |
@@ -220,7 +232,7 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | 资源 | 读 | 写 |
 |---|---|---|
 | 项目列表/详情 | ✅ | ❌ |
-| Issue 列表/详情/过滤选项/标签 | ✅ | ✅ |
+| Issue 列表/详情/过滤选项/标签 | ✅ | ✅（PUT 允许 title/body/labels，禁止 state/state_reason） |
 | 版本列表/详情 | ✅ | ✅ |
 | 构建产物上传/下载 | ✅ | ✅ |
 | Issue 评论 | ✅ | ✅ |
@@ -231,7 +243,7 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | Ship 发布 | ❌ | ❌ |
 | AI 辅助功能 | ❌ | 部分 |
 
-> Issue 的编辑类写操作（评论、工作流状态、Checklist、附件上传、AI 清单建议）均已对 API Key 开放，与通用编辑 `PUT /issues/:iid` 行为一致，便于自动化/Agent 场景。AI 端点中仅 `checklist-suggestions` 对 API Key 开放；`generate-title` 与 `/ai/settings` 仍限 JWT，API Key 调用会返回 `403`（40301）。
+> Issue 的评论、工作流状态（internal-meta）、Checklist、附件上传、AI 清单建议等编辑类写操作已对 API Key 开放；但通用编辑 `PUT /issues/:iid` 中的 `state` / `state_reason` 仅限 JWT 用户，API Key 调用会返回 403（40301）。AI 端点中仅 `checklist-suggestions` 对 API Key 开放；`generate-title` 与 `/ai/settings` 仍限 JWT，API Key 调用会返回 `403`（40301）。
 
 > 注意：人机协作区为**纯观看**模式——内容全部由代理（API Key）产出，用户（网页登录 JWT）只读浏览。
 > - 代理（API Key）：写实施建议 / 计划 / 审查结果 / 完成总结（`PUT /suggestions`、`PUT /plan`、`PUT /review`、`PUT /summary`）。

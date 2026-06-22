@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -394,15 +395,167 @@ func TestIssueHandlerCreate_WithApiKey(t *testing.T) {
 	}
 }
 
-func TestIssueHandlerUpdate_WithApiKey(t *testing.T) {
+func TestIssueHandlerUpdate_WithApiKey_RejectsStateChange(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-apikey")
 	project := createHandlerTestProject(t, env.db, user.ID)
+	issueID := createInternalIssueViaAPIKey(t, env, user.ID, project.ID, "原始标题")
 
-	createBody := []byte(`{"title":"原始标题","body":"old body"}`)
-	createCtx, createRec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", createBody)
-	createCtx.Params = ginParams("id", project.ID)
-	createCtx.Set(middleware.ContextKeyUserID, user.ID)
+	updateCtx, updateRec := apiKeyUpdateContext(t, issueID, user.ID, `{"title":"API Key 更新后的标题","body":"new body","state":"closed"}`)
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+	envelope := decodeEnvelope(t, updateRec, nil)
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
+
+	var stored model.Issue
+	if err := env.db.Where("id = ?", issueID).First(&stored).Error; err != nil {
+		t.Fatalf("load stored issue: %v", err)
+	}
+	if stored.Title != "原始标题" || stored.State != model.IssueStateOpen {
+		t.Fatalf("issue should remain unchanged after forbidden update: %+v", stored)
+	}
+}
+
+func TestIssueHandlerUpdate_WithApiKey_AllowsTitleAndBody(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issueID := createInternalIssueViaAPIKey(t, env, user.ID, project.ID, "原始标题")
+
+	updateCtx, updateRec := apiKeyUpdateContext(t, issueID, user.ID, `{"title":"API Key 更新后的标题","body":"new body"}`)
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+
+	var result struct {
+		Title string `json:"title"`
+		State string `json:"state"`
+	}
+	decodeEnvelope(t, updateRec, &result)
+	if result.Title != "API Key 更新后的标题" || result.State != string(model.IssueStateOpen) {
+		t.Fatalf("unexpected update payload: %+v", result)
+	}
+}
+
+func TestIssueHandlerUpdate_WithApiKey_RejectsWhenStateMixedWithAllowedFields(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issueID := createInternalIssueViaAPIKey(t, env, user.ID, project.ID, "原始标题")
+
+	updateCtx, updateRec := apiKeyUpdateContext(t, issueID, user.ID, `{"title":"被拒应不入库","state":"closed"}`)
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+	envelope := decodeEnvelope(t, updateRec, nil)
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
+
+	var stored model.Issue
+	if err := env.db.Where("id = ?", issueID).First(&stored).Error; err != nil {
+		t.Fatalf("load stored issue: %v", err)
+	}
+	if stored.Title != "原始标题" {
+		t.Fatalf("title must not be partially applied, got %q", stored.Title)
+	}
+}
+
+func TestIssueHandlerUpdate_WithApiKey_RejectsStateReasonOnly(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issueID := createInternalIssueViaAPIKey(t, env, user.ID, project.ID, "原始标题")
+
+	updateCtx, updateRec := apiKeyUpdateContext(t, issueID, user.ID, `{"state_reason":"completed"}`)
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+	envelope := decodeEnvelope(t, updateRec, nil)
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
+
+	var stored model.Issue
+	if err := env.db.Where("id = ?", issueID).First(&stored).Error; err != nil {
+		t.Fatalf("load stored issue: %v", err)
+	}
+	if stored.StateReason != "" {
+		t.Fatalf("state_reason must not be written, got %q", stored.StateReason)
+	}
+}
+
+func TestIssueHandlerUpdate_WithApiKey_RejectsStateOpenOnly(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issueID := createInternalIssueViaAPIKey(t, env, user.ID, project.ID, "原始标题")
+
+	updateCtx, updateRec := apiKeyUpdateContext(t, issueID, user.ID, `{"state":"open"}`)
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+	envelope := decodeEnvelope(t, updateRec, nil)
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
+}
+
+func TestIssueHandlerUpdate_WithApiKey_RejectsEmptyPayload(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issueID := createInternalIssueViaAPIKey(t, env, user.ID, project.ID, "原始标题")
+
+	updateCtx, updateRec := apiKeyUpdateContext(t, issueID, user.ID, `{}`)
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+}
+
+func TestIssueHandlerUpdate_WithApiKey_RejectsStateChangeOnGithubSource(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-apikey-gh-update")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	issue := createHandlerTestIssue(t, env.db, project.ID)
+
+	updateCtx, updateRec := apiKeyUpdateContext(t, issue.ID, user.ID, `{"state":"closed"}`)
+	env.issueHandler.Update(updateCtx)
+
+	if updateRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+	envelope := decodeEnvelope(t, updateRec, nil)
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
+}
+
+func createInternalIssueViaAPIKey(t *testing.T, env *handlerTestEnv, userID, projectID, title string) string {
+	t.Helper()
+
+	createBody, _ := json.Marshal(map[string]string{
+		"title": title,
+		"body":  "old body",
+	})
+	createCtx, createRec := newJSONContext(http.MethodPost, "/api/projects/"+projectID+"/issues", createBody)
+	createCtx.Params = ginParams("id", projectID)
+	createCtx.Set(middleware.ContextKeyUserID, userID)
 	createCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
 	createCtx.Set(middleware.ContextKeyAPIKey, "ci-key")
 	env.issueHandler.Create(createCtx)
@@ -413,29 +566,18 @@ func TestIssueHandlerUpdate_WithApiKey(t *testing.T) {
 		ID string `json:"id"`
 	}
 	decodeEnvelope(t, createRec, &created)
+	return created.ID
+}
 
-	updateBody := []byte(`{"title":"API Key 更新后的标题","body":"new body","state":"closed"}`)
-	updateCtx, updateRec := newJSONContext(http.MethodPut, "/api/issues/"+created.ID, updateBody)
-	updateCtx.Params = ginParams("iid", created.ID)
-	updateCtx.Set(middleware.ContextKeyUserID, user.ID)
+func apiKeyUpdateContext(t *testing.T, issueID, userID, body string) (*gin.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+
+	updateCtx, updateRec := newJSONContext(http.MethodPut, "/api/issues/"+issueID, []byte(body))
+	updateCtx.Params = ginParams("iid", issueID)
+	updateCtx.Set(middleware.ContextKeyUserID, userID)
 	updateCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
 	updateCtx.Set(middleware.ContextKeyAPIKey, "ci-key")
-
-	env.issueHandler.Update(updateCtx)
-
-	if updateRec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", updateRec.Code, updateRec.Body.String())
-	}
-
-	var result struct {
-		Title    string  `json:"title"`
-		State    string  `json:"state"`
-		ClosedAt *string `json:"closed_at"`
-	}
-	decodeEnvelope(t, updateRec, &result)
-	if result.Title != "API Key 更新后的标题" || result.State != string(model.IssueStateClosed) || result.ClosedAt == nil {
-		t.Fatalf("unexpected update payload: %+v", result)
-	}
+	return updateCtx, updateRec
 }
 
 func TestIssueHandlerCreate_WithApiKey_RejectsGitHubSource(t *testing.T) {
