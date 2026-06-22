@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { ArrowLeft, LockKeyhole, MessageSquare } from "lucide-react";
 import { Header } from "@/components/layout/header";
@@ -48,30 +47,8 @@ export default function IssueFormPage() {
 
   const issueDetailSearch = searchParams.toString();
 
-  const issuesSearch = useMemo(() => {
-    const next = new URLSearchParams(searchParams);
-    if (id && !next.has("project")) {
-      next.set("project", id);
-    }
-    return next.toString();
-  }, [id, searchParams]);
-
-  const handleCancel = () => {
-    if (isEdit) {
-      navigate(
-        {
-          pathname: `/projects/${id}/issues/${iid}`,
-          search: issueDetailSearch ? `?${issueDetailSearch}` : "",
-        },
-        { replace: true },
-      );
-    } else {
-      navigate({
-        pathname: "/issues",
-        search: issuesSearch ? `?${issuesSearch}` : "",
-      });
-    }
-  };
+  const issueDetailPath = id && iid ? `/projects/${id}/issues/${iid}` : null;
+  const headerBackFallback = issueDetailPath ?? (id ? `/issues?project=${id}` : "/issues");
 
   const handleSubmit = async (values: InternalIssueFormInput) => {
     if (isEdit) {
@@ -135,9 +112,8 @@ export default function IssueFormPage() {
   if (isEdit && isLoading) {
     return (
       <>
-        <Header title="编辑问题" />
+        <Header title="编辑问题" backFallback={headerBackFallback} />
         <div className="w-full px-4 py-4 md:px-6 md:py-6">
-          <Skeleton className="mb-6 h-8 w-28 rounded-lg" />
           <Skeleton className="h-[calc(100vh-220px)] rounded-2xl" />
         </div>
       </>
@@ -147,7 +123,7 @@ export default function IssueFormPage() {
   if (isEdit && !issue) {
     return (
       <>
-        <Header title="编辑问题" />
+        <Header title="编辑问题" backFallback={headerBackFallback} />
         <div className="w-full px-4 py-4 md:px-6 md:py-6">
           <Card>
             <CardContent className="space-y-4 p-6 text-center">
@@ -180,7 +156,7 @@ export default function IssueFormPage() {
   if (isEdit && issue && issue.source !== "internal") {
     return (
       <>
-        <Header title="编辑问题" />
+        <Header title="编辑问题" backFallback={headerBackFallback} />
         <div className="w-full px-4 py-4 md:px-6 md:py-6">
           <Card className="border-amber-500/20 bg-amber-500/5">
             <CardHeader className="space-y-3 border-b py-5">
@@ -197,7 +173,18 @@ export default function IssueFormPage() {
               </div>
             </CardHeader>
             <CardContent className="p-5">
-              <Button variant="outline" onClick={handleCancel}>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  navigate(
+                    {
+                      pathname: `/projects/${id}/issues/${iid}`,
+                      search: issueDetailSearch ? `?${issueDetailSearch}` : "",
+                    },
+                    { replace: true },
+                  );
+                }}
+              >
                 <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
                 返回问题详情
               </Button>
@@ -210,26 +197,11 @@ export default function IssueFormPage() {
 
   const pageTitle = isEdit ? `编辑 ${issue?.reference}` : "新建问题";
   const submitLabel = isEdit ? "保存修改" : "创建问题";
-  const backLabel = isEdit ? "返回详情" : "返回";
 
   return (
     <>
-      <Header title={pageTitle} />
+      <Header title={pageTitle} backFallback={headerBackFallback} />
       <div className="w-full px-4 py-4 md:px-6 md:py-6">
-        {isEdit && (
-          <div className="mb-4 flex flex-wrap items-center gap-3">
-            <Button variant="outline" size="sm" onClick={handleCancel}>
-              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
-              {backLabel}
-            </Button>
-            {issue && (
-              <span className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                {issue.reference}
-              </span>
-            )}
-          </div>
-        )}
-
         <InternalIssueForm
           defaultValues={
             isEdit && issue
@@ -245,7 +217,6 @@ export default function IssueFormPage() {
           }
           isSubmitting={isEdit ? updateIssue.isPending : createIssue.isPending}
           onPasteImage={handlePasteImage}
-          onCancel={handleCancel}
           onSubmit={handleSubmit}
           showSourceSelector={!isEdit}
           submitLabel={submitLabel}

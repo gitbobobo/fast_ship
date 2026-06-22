@@ -60,6 +60,30 @@ vi.mock("@/components/ui/markdown-editor", () => ({
 }));
 
 describe("InternalIssueForm", () => {
+  it("places submit button at the top without a cancel button", () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const { container } = render(
+      <InternalIssueForm
+        defaultValues={{
+          title: "",
+          body: "",
+          workflow_status: "",
+          source: "internal",
+        }}
+        onSubmit={onSubmit}
+        submitLabel="创建问题"
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument();
+
+    const submitButton = screen.getByTestId("issue-form-submit");
+    expect(submitButton).toHaveAttribute("type", "submit");
+
+    const form = container.querySelector("form");
+    expect(form?.firstElementChild).toBe(submitButton.parentElement);
+  });
+
   it("waits for pasted image uploads before submitting the latest body", async () => {
     let resolveUpload: ((markdown: string) => void) | undefined;
     const onPasteImage = vi.fn(
@@ -77,7 +101,6 @@ describe("InternalIssueForm", () => {
           workflow_status: "",
           source: "internal",
         }}
-        onCancel={vi.fn()}
         onPasteImage={onPasteImage}
         onSubmit={onSubmit}
         submitLabel="创建问题"
@@ -121,7 +144,6 @@ describe("InternalIssueForm", () => {
           source: "internal",
         }}
         showSourceSelector
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -144,7 +166,6 @@ describe("InternalIssueForm", () => {
         }}
         showSourceSelector
         showWorkflowStatus
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -169,7 +190,6 @@ describe("InternalIssueForm", () => {
           source: "internal",
         }}
         showSourceSelector
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -194,7 +214,6 @@ describe("InternalIssueForm", () => {
     render(
       <InternalIssueForm
         defaultValues={{ title: "", body: "短内容", workflow_status: "", source: "internal" }}
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -213,7 +232,6 @@ describe("InternalIssueForm", () => {
           workflow_status: "",
           source: "internal",
         }}
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -236,7 +254,6 @@ describe("InternalIssueForm", () => {
           workflow_status: "",
           source: "internal",
         }}
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -266,7 +283,6 @@ describe("InternalIssueForm", () => {
           workflow_status: "",
           source: "internal",
         }}
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -294,7 +310,6 @@ describe("InternalIssueForm", () => {
           workflow_status: "",
           source: "internal",
         }}
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,
@@ -325,7 +340,6 @@ describe("InternalIssueForm", () => {
           workflow_status: "",
           source: "internal",
         }}
-        onCancel={vi.fn()}
         onSubmit={onSubmit}
         submitLabel="创建问题"
       />,

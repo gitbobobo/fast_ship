@@ -35,7 +35,6 @@ interface InternalIssueFormProps {
   defaultValues?: Partial<InternalIssueFormInput>;
   isSubmitting?: boolean;
   onPasteImage?: (file: File) => Promise<string>;
-  onCancel: () => void;
   onSubmit: (values: InternalIssueFormInput) => Promise<void> | void;
   showWorkflowStatus?: boolean;
   showSourceSelector?: boolean;
@@ -48,7 +47,6 @@ export function InternalIssueForm({
   defaultValues,
   isSubmitting = false,
   onPasteImage,
-  onCancel,
   onSubmit,
   showWorkflowStatus = false,
   showSourceSelector = false,
@@ -187,6 +185,12 @@ export function InternalIssueForm({
 
   return (
     <form className="space-y-6" onSubmit={handleFormSubmit}>
+      <div className="flex items-center justify-end">
+        <Button type="submit" disabled={isBusy} data-testid="issue-form-submit">
+          {isBusy ? "保存中..." : submitLabel}
+        </Button>
+      </div>
+
       {projectName && (
         <div className="space-y-2">
           <Label htmlFor="issue-project-name">项目</Label>
@@ -309,15 +313,6 @@ export function InternalIssueForm({
             />
           )}
         />
-      </div>
-
-      <div className="flex items-center justify-end gap-3 pt-2">
-        <Button type="button" variant="outline" onClick={onCancel}>
-          取消
-        </Button>
-        <Button type="submit" disabled={isBusy}>
-          {isBusy ? "保存中..." : submitLabel}
-        </Button>
       </div>
     </form>
   );
