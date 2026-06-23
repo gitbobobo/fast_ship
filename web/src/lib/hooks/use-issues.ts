@@ -300,18 +300,44 @@ export function useUpdateIssueWorkflowStatus() {
   });
 }
 
+export function useBatchClosePreviewCount(
+  projectId: string,
+  source: "all" | "internal" | "github",
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: [
+      "projects",
+      projectId,
+      "issues",
+      "batch-close-preview",
+      source,
+    ],
+    queryFn: async () => {
+      const res = await issueApi.count(projectId, {
+        state: "open",
+        workflow_status: "done",
+        ...(source !== "all" ? { source } : {}),
+      });
+      return res.data.count;
+    },
+    enabled: !!projectId && enabled,
+  });
+}
+
 export function useCloseIssuesBatch(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (issueIds: string[]) => {
-      const results = await Promise.allSettled(
-        issueIds.map((id) =>
-          issueApi.update(id, { state: "closed", state_reason: "completed" }),
-        ),
+    mutationFn: async ({
+      source,
+    }: {
+      source?: "all" | "internal" | "github";
+    }) => {
+      const res = await issueApi.batchCloseDone(
+        projectId,
+        source && source !== "all" ? { source } : {},
       );
-      const succeeded = results.filter((r) => r.status === "fulfilled").length;
-      const failed = results.length - succeeded;
-      return { succeeded, failed, total: issueIds.length };
+      return res.data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });

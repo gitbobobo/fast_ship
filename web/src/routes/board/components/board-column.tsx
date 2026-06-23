@@ -70,8 +70,8 @@ export function BoardColumn({
             {total}
           </span>
         </div>
-        {column.id === "done" && issues.length > 0 && (
-          <CloseAllDoneButton issues={issues} />
+        {column.id === "done" && !isLoading && total > 0 && (
+          <CloseAllDoneButton projectId={projectId} />
         )}
       </div>
 

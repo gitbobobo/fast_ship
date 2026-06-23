@@ -38,6 +38,22 @@ interface UpdateInternalIssueRequest {
   labels?: string[];
 }
 
+interface BatchCloseDoneRequest {
+  source?: "internal" | "github";
+}
+
+interface BatchCloseDoneResponse {
+  total: number;
+  succeeded: number;
+  failed: number;
+  failures: Array<{
+    id: string;
+    reference?: string;
+    error: string;
+  }>;
+  elapsed_ms: number;
+}
+
 interface CreateInternalIssueCommentRequest {
   body: string;
 }
@@ -61,6 +77,24 @@ export const issueApi = {
         },
       })
       .json<ApiResponse<PaginatedData<Issue>>>(),
+
+  count: (projectId: string, params: IssueListParams = {}) =>
+    api
+      .get(`projects/${projectId}/issues/count`, {
+        searchParams: {
+          ...(params.state ? { state: params.state } : {}),
+          ...(params.q ? { q: params.q } : {}),
+          ...(params.label ? { label: params.label } : {}),
+          ...(params.source ? { source: params.source } : {}),
+          ...(params.workflow_status ? { workflow_status: params.workflow_status } : {}),
+        },
+      })
+      .json<ApiResponse<{ count: number }>>(),
+
+  batchCloseDone: (projectId: string, data: BatchCloseDoneRequest = {}) =>
+    api
+      .post(`projects/${projectId}/issues/batch-close`, { json: data })
+      .json<ApiResponse<BatchCloseDoneResponse>>(),
 
   filterOptions: (projectId: string) =>
     api
