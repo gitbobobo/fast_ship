@@ -212,6 +212,8 @@ func HandleAppError(c *gin.Context, err error) {
 			httpStatus = http.StatusNotFound
 		case appErr.Code >= 40900 && appErr.Code < 41000:
 			httpStatus = http.StatusConflict
+		case appErr.Code >= 41200 && appErr.Code < 41300:
+			httpStatus = http.StatusPreconditionFailed
 		case appErr.Code >= 50000:
 			httpStatus = http.StatusInternalServerError
 		}

@@ -67,6 +67,11 @@ var (
 	ErrIssueReadOnly       = New(40908, "该问题为只读问题")
 )
 
+// 前置条件未满足 41200-41299
+var (
+	ErrBatchCloseTooMany = New(41201, "匹配问题数量过多，请缩小关闭范围后重试")
+)
+
 // 服务器内部错误 50000-50099
 var (
 	ErrInternal = New(50000, "服务器内部错误")

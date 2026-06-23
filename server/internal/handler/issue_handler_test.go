@@ -603,3 +603,154 @@ func TestIssueHandlerCreate_WithApiKey_RejectsGitHubSource(t *testing.T) {
 		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
 	}
 }
+
+func createHandlerTestInternalIssueDone(t *testing.T, env *handlerTestEnv, projectID, userID string, title string) string {
+	t.Helper()
+
+	createBody, err := json.Marshal(map[string]string{
+		"title":            title,
+		"body":             "done issue",
+		"workflow_status":  "done",
+	})
+	if err != nil {
+		t.Fatalf("marshal create body: %v", err)
+	}
+	createCtx, createRec := newJSONContext(http.MethodPost, "/api/projects/"+projectID+"/issues", createBody)
+	createCtx.Params = ginParams("id", projectID)
+	createCtx.Set(middleware.ContextKeyUserID, userID)
+	createCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.issueHandler.Create(createCtx)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create internal issue failed: %d %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeEnvelope(t, createRec, &created)
+	return created.ID
+}
+
+func TestIssueHandlerBatchCloseDone_ClosesMatchingInternalIssues(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-batch-close")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	createHandlerTestInternalIssueDone(t, env, project.ID, user.ID, "done issue 1")
+	createHandlerTestInternalIssueDone(t, env, project.ID, user.ID, "done issue 2")
+
+	createBody := []byte(`{"title":"todo issue","body":"not done"}`)
+	createCtx, createRec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", createBody)
+	createCtx.Params = ginParams("id", project.ID)
+	createCtx.Set(middleware.ContextKeyUserID, user.ID)
+	createCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.issueHandler.Create(createCtx)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create todo issue failed: %d %s", createRec.Code, createRec.Body.String())
+	}
+
+	body := []byte(`{"source":"internal"}`)
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues/batch-close", body)
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.BatchCloseDone(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result struct {
+		Total     int64 `json:"total"`
+		Succeeded int   `json:"succeeded"`
+		Failed    int   `json:"failed"`
+	}
+	decodeEnvelope(t, rec, &result)
+	if result.Total != 2 || result.Succeeded != 2 || result.Failed != 0 {
+		t.Fatalf("unexpected batch close result: %+v", result)
+	}
+
+	listCtx, listRec := newJSONContext(http.MethodGet, "/api/projects/"+project.ID+"/issues?state=open&workflow_status=done&source=internal", nil)
+	listCtx.Params = ginParams("id", project.ID)
+	listCtx.Set(middleware.ContextKeyUserID, user.ID)
+	listCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.issueHandler.List(listCtx)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list failed: %d %s", listRec.Code, listRec.Body.String())
+	}
+	var listResult struct {
+		Total int64 `json:"total"`
+	}
+	decodeEnvelope(t, listRec, &listResult)
+	if listResult.Total != 0 {
+		t.Fatalf("expected no open done internal issues, got total=%d", listResult.Total)
+	}
+}
+
+func TestIssueHandlerBatchCloseDone_EmptyResult(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-batch-empty")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues/batch-close", nil)
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.BatchCloseDone(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Total int64 `json:"total"`
+	}
+	decodeEnvelope(t, rec, &result)
+	if result.Total != 0 {
+		t.Fatalf("expected total 0, got %d", result.Total)
+	}
+}
+
+func TestIssueHandlerBatchCloseDone_RejectsInvalidSource(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-batch-invalid")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	body := []byte(`{"source":"invalid"}`)
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues/batch-close", body)
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.BatchCloseDone(ctx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestIssueHandlerCount_ReturnsFilteredCount(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-count")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	createHandlerTestInternalIssueDone(t, env, project.ID, user.ID, "count me")
+
+	ctx, rec := newJSONContext(http.MethodGet, "/api/projects/"+project.ID+"/issues/count?state=open&workflow_status=done&source=internal", nil)
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+
+	env.issueHandler.Count(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Count int64 `json:"count"`
+	}
+	decodeEnvelope(t, rec, &result)
+	if result.Count != 1 {
+		t.Fatalf("expected count 1, got %d", result.Count)
+	}
+}

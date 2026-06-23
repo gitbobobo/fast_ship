@@ -17,6 +17,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -1151,4 +1152,38 @@ func newRouterMultipartRequest(t *testing.T, target, fieldName, fileName string,
 	req := httptest.NewRequest(http.MethodPost, target, &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
+}
+
+func TestRouterBatchCloseRejectsAPIKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	user := createRouterTestUser(t, env.db, "user-batch-close", "batchclose", "batchclose@example.com")
+	project := createRouterTestProject(t, env.db, user.ID)
+
+	rawKey := "BATCHCLOSEKEY1234567890"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		Name:      "CI-Batch",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/issues/batch-close", nil)
+	req.Header.Set("Authorization", "Bearer "+service.FormatApiKey(rawKey))
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for API Key batch-close, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope routerEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
 }

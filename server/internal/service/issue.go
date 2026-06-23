@@ -36,8 +36,10 @@ import (
 var issueAssetContentPattern = regexp.MustCompile(`(?:https?://[^/\s"')]+)?/api/issues/assets/([0-9a-fA-F-]+)/content(?:\?[^)\s"']*)?`)
 
 const (
-	issueAssetSniffBytes = 512
-	issueAssetPendingTTL = 24 * time.Hour
+	issueAssetSniffBytes      = 512
+	issueAssetPendingTTL      = 24 * time.Hour
+	batchCloseDoneMaxIssues   = 200
+	batchCloseDoneMaxFailures = 50
 )
 
 type gitHubIssueClient interface {
@@ -97,6 +99,20 @@ type UpdateInternalIssueRequest struct {
 	State       *model.IssueState `json:"state"`
 	StateReason *string           `json:"state_reason"`
 	Labels      *[]string         `json:"labels"`
+}
+
+type BatchCloseDoneIssueFailure struct {
+	ID        string `json:"id"`
+	Reference string `json:"reference,omitempty"`
+	Error     string `json:"error"`
+}
+
+type BatchCloseDoneIssuesResponse struct {
+	Total     int64                        `json:"total"`
+	Succeeded int                          `json:"succeeded"`
+	Failed    int                          `json:"failed"`
+	Failures  []BatchCloseDoneIssueFailure `json:"failures"`
+	ElapsedMs int64                        `json:"elapsed_ms"`
 }
 
 type CreateInternalIssueCommentRequest struct {
@@ -862,22 +878,15 @@ func (s *IssueService) GetIssueAssetContent(assetID, userID string) (io.ReadClos
 	return reader, asset.MimeType, asset.FileSize, nil
 }
 
-func (s *IssueService) List(projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
-	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, 0, errs.ErrProjectNotFound
-		}
-		return nil, 0, errs.ErrInternal
-	}
-
+func (s *IssueService) loadFilteredIssues(projectID string, filters IssueListFilters) ([]model.Issue, map[string]*model.IssueInternalMeta, error) {
 	issues, err := s.issueRepo.ListByProject(projectID)
 	if err != nil {
-		return nil, 0, errs.ErrInternal
+		return nil, nil, errs.ErrInternal
 	}
 
 	metaByIssueID, err := s.internalMetaByIssueIDs(issues)
 	if err != nil {
-		return nil, 0, errs.ErrInternal
+		return nil, nil, errs.ErrInternal
 	}
 
 	filtered := make([]model.Issue, 0, len(issues))
@@ -890,6 +899,21 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 			continue
 		}
 		filtered = append(filtered, issue)
+	}
+	return filtered, metaByIssueID, nil
+}
+
+func (s *IssueService) List(projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
+	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, 0, errs.ErrProjectNotFound
+		}
+		return nil, 0, errs.ErrInternal
+	}
+
+	filtered, metaByIssueID, err := s.loadFilteredIssues(projectID, filters)
+	if err != nil {
+		return nil, 0, err
 	}
 	sortIssues(filtered, filters.Sort)
 
@@ -910,6 +934,90 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 		resp = append(resp, s.toIssueResponse(issue, metaByIssueID[issue.ID], nil, labelMap))
 	}
 	return resp, total, nil
+}
+
+func (s *IssueService) CountIssues(projectID, userID string, filters IssueListFilters) (int64, error) {
+	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 0, errs.ErrProjectNotFound
+		}
+		return 0, errs.ErrInternal
+	}
+
+	filtered, _, err := s.loadFilteredIssues(projectID, filters)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(filtered)), nil
+}
+
+func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter string) (*BatchCloseDoneIssuesResponse, error) {
+	start := time.Now()
+	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	filters := IssueListFilters{
+		State:    string(model.IssueStateOpen),
+		Workflow: string(model.IssueWorkflowStatusDone),
+		Source:   sourceFilter,
+	}
+	filtered, _, err := s.loadFilteredIssues(projectID, filters)
+	if err != nil {
+		return nil, err
+	}
+
+	total := len(filtered)
+	if total > batchCloseDoneMaxIssues {
+		return nil, errs.ErrBatchCloseTooMany
+	}
+
+	closedState := model.IssueStateClosed
+	stateReason := "completed"
+	resp := &BatchCloseDoneIssuesResponse{
+		Total:    int64(total),
+		Failures: make([]BatchCloseDoneIssueFailure, 0),
+	}
+
+	for _, issue := range filtered {
+		_, updateErr := s.UpdateInternalIssue(issue.ID, userID, UpdateInternalIssueRequest{
+			State:       &closedState,
+			StateReason: &stateReason,
+		})
+
+		if updateErr != nil {
+			resp.Failed++
+			if len(resp.Failures) < batchCloseDoneMaxFailures {
+				msg := updateErr.Error()
+				var appErr *errs.AppError
+				if errors.As(updateErr, &appErr) {
+					msg = appErr.Message
+				}
+				resp.Failures = append(resp.Failures, BatchCloseDoneIssueFailure{
+					ID:        issue.ID,
+					Reference: buildIssueReference(issue),
+					Error:     msg,
+				})
+			}
+			continue
+		}
+		resp.Succeeded++
+	}
+
+	resp.ElapsedMs = time.Since(start).Milliseconds()
+	s.logger.Info("batch close done issues",
+		zap.String("project_id", projectID),
+		zap.String("user_id", userID),
+		zap.String("source_filter", sourceFilter),
+		zap.Int64("total", resp.Total),
+		zap.Int("succeeded", resp.Succeeded),
+		zap.Int("failed", resp.Failed),
+		zap.Int64("elapsed_ms", resp.ElapsedMs),
+	)
+	return resp, nil
 }
 
 func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterOptionsResponse, error) {

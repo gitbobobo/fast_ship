@@ -43,6 +43,10 @@ type replaceIssueChecklistRequest struct {
 	Items []service.IssueChecklistItemInput `json:"items"`
 }
 
+type batchCloseDoneRequest struct {
+	Source string `json:"source"`
+}
+
 func NewIssueHandler(issueService *service.IssueService) *IssueHandler {
 	return &IssueHandler{issueService: issueService}
 }
@@ -116,16 +120,7 @@ func (h *IssueHandler) Update(c *gin.Context) {
 func (h *IssueHandler) List(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
-	filters := service.IssueListFilters{
-		State:     c.Query("state"),
-		Query:     c.Query("q"),
-		Label:     c.Query("label"),
-		Source:    c.Query("source"),
-		Assignee:  c.Query("assignee"),
-		Milestone: c.Query("milestone"),
-		Workflow:  c.Query("workflow_status"),
-		Sort:      c.DefaultQuery("sort", "updated_desc"),
-	}
+	filters := parseIssueListFilters(c)
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 
@@ -143,6 +138,53 @@ func (h *IssueHandler) List(c *gin.Context) {
 	}
 
 	response.SuccessPaginated(c, items, total, page, pageSize)
+}
+
+func parseIssueListFilters(c *gin.Context) service.IssueListFilters {
+	return service.IssueListFilters{
+		State:     c.Query("state"),
+		Query:     c.Query("q"),
+		Label:     c.Query("label"),
+		Source:    c.Query("source"),
+		Assignee:  c.Query("assignee"),
+		Milestone: c.Query("milestone"),
+		Workflow:  c.Query("workflow_status"),
+		Sort:      c.DefaultQuery("sort", "updated_desc"),
+	}
+}
+
+func (h *IssueHandler) Count(c *gin.Context) {
+	projectID := c.Param("id")
+	userID := middleware.GetUserID(c)
+	filters := parseIssueListFilters(c)
+
+	count, err := h.issueService.CountIssues(projectID, userID, filters)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{"count": count})
+}
+
+func (h *IssueHandler) BatchCloseDone(c *gin.Context) {
+	projectID := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	var req batchCloseDoneRequest
+	_ = c.ShouldBindJSON(&req)
+	if req.Source != "" && req.Source != string(model.IssueSourceInternal) && req.Source != string(model.IssueSourceGitHub) {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.issueService.BatchCloseDoneIssues(projectID, userID, req.Source)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
 }
 
 func (h *IssueHandler) Get(c *gin.Context) {

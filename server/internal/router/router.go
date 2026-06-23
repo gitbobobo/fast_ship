@@ -96,6 +96,7 @@ func Setup(
 		{
 			issueWrite.POST("/assets", issueHandler.UploadDraftAsset)
 			issueWrite.POST("/sync", issueHandler.Sync)
+			issueWrite.POST("/batch-close", issueHandler.BatchCloseDone)
 		}
 		api.POST("/projects/:id/issues", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Create)
 		api.PUT("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Update)
@@ -118,6 +119,7 @@ func Setup(
 		api.PUT("/versions/:vid", middleware.RequireAuth(cfg, apiKeyRepo, authService), versionHandler.Update)
 
 		api.GET("/projects/:id/issues", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.List)
+		api.GET("/projects/:id/issues/count", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Count)
 		api.GET("/projects/:id/issues/filter-options", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.FilterOptions)
 		api.GET("/projects/:id/issues/repo-labels", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.RepoLabels)
 		api.GET("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Get)
