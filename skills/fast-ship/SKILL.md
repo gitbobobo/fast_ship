@@ -420,6 +420,25 @@ PUT /api/issues/:issue_id/collab/summary
 2. `base_url` 是否指向正确的 Fast Ship 实例
 3. API Key 是否已被删除
 
+## 请求编码
+
+所有请求统一使用 **UTF-8 without BOM** 编码，请求头必须声明：
+
+```
+Content-Type: application/json; charset=utf-8
+```
+
+建议将 JSON 请求体写入临时文件后发送，避免 shell/终端编码转换导致服务端保存乱码（Windows CMD/PowerShell 下尤为常见）：
+
+```bash
+curl -X POST "$BASE_URL/api/projects/$PROJECT_ID/issues" \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json; charset=utf-8" \
+  --data-binary @request.json
+```
+
+> 避免在命令行参数中直接拼接 `curl -d '{"title":"中文"}' ...`。
+
 ## 注意事项
 
 - Issue 创建后，`reference` 字段是短编号（如 `INT-1`），`id` 是 UUID。更新操作使用 `id`。
