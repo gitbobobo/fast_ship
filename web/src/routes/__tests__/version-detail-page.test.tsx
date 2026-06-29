@@ -13,12 +13,19 @@ import {
 } from "@/lib/hooks/use-versions";
 import { useProject, useProjectBranches } from "@/lib/hooks/use-projects";
 import { useDeleteArtifact, useUploadArtifact } from "@/lib/hooks/use-artifacts";
+import { artifactApi } from "@/lib/api/artifacts";
+import { downloadAllArtifacts } from "@/lib/utils/download-artifacts";
 
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
     error: vi.fn(),
+    info: vi.fn(),
   },
+}));
+
+vi.mock("@/lib/utils/download-artifacts", () => ({
+  downloadAllArtifacts: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@/lib/hooks/use-versions", () => ({
@@ -414,5 +421,242 @@ describe("VersionDetailPage", () => {
       screen.queryByRole("heading", { name: "发货失败" }),
     ).not.toBeInTheDocument();
     expect(toast.success).toHaveBeenCalledWith("发货已开始，正在同步最新进度");
+  });
+
+  it("shows download all button when artifacts exist", () => {
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    expect(
+      screen.getByRole("button", { name: "下载全部 1 个安装包" }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides download all button when there are no artifacts", () => {
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        artifacts: [],
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /下载全部 \d+ 个安装包/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows download all button for shipped read-only versions", () => {
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        status: "shipped",
+        ship_status: "completed",
+        ship_stage: "",
+        ship_message: null,
+        shipped_at: "2026-04-06T12:00:00Z",
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    expect(
+      screen.getByRole("button", { name: "下载全部 1 个安装包" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "上传文件" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("disables download all while uploading", async () => {
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    vi.mocked(useUploadArtifact).mockReturnValue({
+      mutateAsync: vi.fn(() => new Promise(() => {})),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUploadArtifact>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    const uploadInput = document.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    const file = new File(["apk"], "android.apk", {
+      type: "application/vnd.android.package-archive",
+    });
+
+    fireEvent.change(uploadInput, { target: { files: [file] } });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "上传中..." })).toBeDisabled(),
+    );
+    expect(
+      screen.getByRole("button", { name: "下载全部 1 个安装包" }),
+    ).toBeDisabled();
+  });
+
+  it("disables download all while bulk download is in progress", async () => {
+    const user = userEvent.setup();
+    let resolveDownload: (() => void) | undefined;
+
+    vi.mocked(downloadAllArtifacts).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDownload = resolve;
+        }),
+    );
+
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "下载全部 1 个安装包" }),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "下载全部 1 个安装包" }),
+    ).toBeDisabled();
+
+    resolveDownload?.();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "下载全部 1 个安装包" }),
+      ).not.toBeDisabled(),
+    );
+  });
+
+  it("aborts in-flight download when unmounted", async () => {
+    const user = userEvent.setup();
+    let capturedSignal: AbortSignal | undefined;
+
+    vi.mocked(downloadAllArtifacts).mockImplementation((_urls, options) => {
+      capturedSignal = options?.signal;
+      return new Promise(() => {});
+    });
+
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    const { unmount } = renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "下载全部 1 个安装包" }),
+    );
+    unmount();
+
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it("starts download all for every artifact when clicked", async () => {
+    const user = userEvent.setup();
+
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+        artifacts: [
+          {
+            id: "artifact-1",
+            version_id: "ver-1",
+            file_name: "app.apk",
+            file_size: 1024,
+            file_path: "proj-1/ver-1/app.apk",
+            platform: "android",
+            uploaded_by: "API Key: CI-Upload",
+            uploaded_at: "2026-04-06T10:10:00Z",
+          },
+          {
+            id: "artifact-2",
+            version_id: "ver-1",
+            file_name: "app.ipa",
+            file_size: 2048,
+            file_path: "proj-1/ver-1/app.ipa",
+            platform: "ios",
+            uploaded_by: "shipbobo",
+            uploaded_at: "2026-04-06T10:11:00Z",
+          },
+        ],
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "下载全部 2 个安装包" }),
+    );
+
+    expect(toast.info).toHaveBeenCalledWith(
+      "正在依次下载全部 2 个安装包。若浏览器提示拦截多文件下载，请点击允许；被拦截时可再次点击补发。",
+    );
+    expect(downloadAllArtifacts).toHaveBeenCalledWith(
+      [
+        artifactApi.downloadUrl("artifact-1"),
+        artifactApi.downloadUrl("artifact-2"),
+      ],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 });

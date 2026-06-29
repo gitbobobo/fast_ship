@@ -1,4 +1,5 @@
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Upload, Trash2, Download, Package } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +23,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { artifactApi } from "@/lib/api/artifacts";
+import { downloadAllArtifacts } from "@/lib/utils/download-artifacts";
 import { formatFileSize, formatDate } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 import { PlatformIcon } from "./version-shared";
@@ -64,6 +66,36 @@ export function VersionArtifactsCard({
   onDeleteArtifact,
 }: VersionArtifactsCardProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const downloadAbortRef = useRef<AbortController | null>(null);
+  const [isDownloadingAll, setIsDownloadingAll] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      downloadAbortRef.current?.abort();
+    };
+  }, []);
+
+  const handleDownloadAll = async () => {
+    const urls = artifacts.map((artifact) => artifactApi.downloadUrl(artifact.id));
+
+    downloadAbortRef.current?.abort();
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    setIsDownloadingAll(true);
+
+    toast.info(
+      `正在依次下载全部 ${artifacts.length} 个安装包。若浏览器提示拦截多文件下载，请点击允许；被拦截时可再次点击补发。`,
+    );
+
+    try {
+      await downloadAllArtifacts(urls, { signal: controller.signal });
+    } finally {
+      if (downloadAbortRef.current === controller) {
+        downloadAbortRef.current = null;
+        setIsDownloadingAll(false);
+      }
+    }
+  };
 
   return (
     <Card className="shadow-md hover:shadow-lg transition-shadow">
@@ -79,26 +111,43 @@ export function VersionArtifactsCard({
             </Badge>
           )}
         </div>
-        {isEditable && (
+        {(isEditable || artifacts.length > 0) && (
           <CardAction>
-            <Button
-              variant="outline"
-              size="sm"
-              className="shadow-sm"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading}
-            >
-              <Upload className="mr-1.5 h-3.5 w-3.5" />
-              {isUploading ? "上传中..." : "上传文件"}
-            </Button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={onUpload}
-              disabled={isUploading}
-            />
+            {artifacts.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="shadow-sm"
+                aria-label={`下载全部 ${artifacts.length} 个安装包`}
+                disabled={isDownloadingAll || isUploading}
+                onClick={() => void handleDownloadAll()}
+              >
+                <Download className="mr-1.5 h-3.5 w-3.5" />
+                下载全部
+              </Button>
+            )}
+            {isEditable && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="shadow-sm"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploading}
+                >
+                  <Upload className="mr-1.5 h-3.5 w-3.5" />
+                  {isUploading ? "上传中..." : "上传文件"}
+                </Button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={onUpload}
+                  disabled={isUploading}
+                />
+              </>
+            )}
           </CardAction>
         )}
       </CardHeader>
