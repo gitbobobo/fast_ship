@@ -642,6 +642,8 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueCollabPlan{},
 		&model.IssueCollabReview{},
 		&model.IssueCollabSummary{},
+		&model.LogBatch{},
+		&model.LogEntry{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -653,6 +655,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_log_batches_project_run ON log_batches(project_id, run_id)")
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
@@ -698,7 +701,9 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
+	logRepo := repository.NewLogRepository(db)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
+	logService := service.NewLogService(logRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
@@ -711,11 +716,12 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService)
 	issueCollabHandler := handler.NewIssueCollabHandler(issueCollabService)
+	logHandler := handler.NewLogHandler(logService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
@@ -1185,5 +1191,112 @@ func TestRouterBatchCloseRejectsAPIKey(t *testing.T) {
 	}
 	if envelope.Code != errs.ErrApiKeyForbidden.Code {
 		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
+}
+
+func TestRouterLogWritesRequireApiKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "log-jwt", "logjwt@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+
+	rawKey := "LOGROUTERKEY1234567890"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    auth.UserID,
+		Name:      "CI-Logs",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	apiKeyAuth := "Bearer " + service.FormatApiKey(rawKey)
+	jwtAuth := "Bearer " + auth.Token
+
+	uploadBody := []byte(`{"run_id":"run-1","source":"smux","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"hello"}]}`)
+	uploadPath := "/api/projects/" + project.ID + "/logs"
+
+	doReq := func(method, authHeader, path string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := doReq(http.MethodPost, jwtAuth, uploadPath, uploadBody)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("JWT upload expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var forbidden routerEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &forbidden); err != nil {
+		t.Fatalf("decode forbidden: %v", err)
+	}
+	if forbidden.Code != errs.ErrApiKeyRequired.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyRequired.Code, forbidden.Code)
+	}
+
+	if rec = doReq(http.MethodPost, apiKeyAuth, uploadPath, uploadBody); rec.Code != http.StatusOK {
+		t.Fatalf("API key upload expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	listPath := "/api/projects/" + project.ID + "/logs"
+	if rec := doReq(http.MethodGet, jwtAuth, listPath, nil); rec.Code != http.StatusOK {
+		t.Fatalf("JWT list expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(http.MethodGet, apiKeyAuth, listPath, nil); rec.Code != http.StatusOK {
+		t.Fatalf("API key list expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var uploadResult struct {
+		ID string `json:"id"`
+	}
+	decodeRouterEnvelope(t, rec, &uploadResult)
+
+	delRec := doReq(http.MethodDelete, apiKeyAuth, "/api/log-batches/"+uploadResult.ID, nil)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("API key delete batch expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+
+	clearRec := doReq(http.MethodPost, apiKeyAuth, uploadPath, uploadBody)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("re-upload expected 200, got %d: %s", clearRec.Code, clearRec.Body.String())
+	}
+	decodeRouterEnvelope(t, clearRec, &uploadResult)
+
+	projectClearRec := doReq(http.MethodDelete, jwtAuth, "/api/projects/"+project.ID+"/logs", nil)
+	if projectClearRec.Code != http.StatusOK {
+		t.Fatalf("JWT clear project logs expected 200, got %d: %s", projectClearRec.Code, projectClearRec.Body.String())
+	}
+}
+
+func TestRouterLogUploadRejectsCrossUserAPIKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	owner := createRouterTestUser(t, env.db, "user-log-owner", "logowner", "logowner@example.com")
+	intruder := createRouterTestUser(t, env.db, "user-log-intruder", "logintruder", "logintruder@example.com")
+	project := createRouterTestProject(t, env.db, owner.ID)
+
+	rawKey := "LOGINTRUDERKEY123456789"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    intruder.ID,
+		Name:      "CI-Log-Intruder",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	body := []byte(`{"run_id":"run-x","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"x"}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/logs", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+service.FormatApiKey(rawKey))
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-user upload, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

@@ -9,6 +9,7 @@ import {
   Bug,
   Kanban,
   Menu,
+  ScrollText,
 } from "lucide-react";
 import {
   Tooltip,
@@ -24,6 +25,7 @@ const navItems = [
   { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard, end: true },
   { to: "/projects", label: "项目", icon: Package, end: true },
   { to: "/issues", label: "问题", icon: Bug, end: true },
+  { to: "/logs", label: "日志", icon: ScrollText, end: true },
   { to: "/board", label: "看板", icon: Kanban, end: true },
   { to: "/versions", label: "版本", icon: Tags, end: true },
 ];

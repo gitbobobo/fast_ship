@@ -401,6 +401,68 @@ PUT /api/issues/:issue_id/collab/summary
 6. **完成总结**：`PUT /collab/summary`，附非技术摘要与提交 SHA。
 7. 重申规则：未经用户许可**不要**修改 Issue 的 open/closed 状态，也**不要**提交/推送代码。
 
+## 项目日志（INT-49）
+
+受管项目可通过 API Key 批量上传结构化日志；JWT 用户与 API Key 均可读取与删除。**上传不去重**，网络重试可能导致重复条目，调用方应自行避免重发。
+
+### 上传日志（仅 API Key）
+
+```http
+POST /api/projects/:project_id/logs
+```
+
+```json
+{
+  "run_id": "2f086286-1112-45dd-a8fa-824df6d5949c",
+  "source": "smux",
+  "entries": [
+    {
+      "timestamp": "2026-06-29T14:30:00Z",
+      "level": "info",
+      "source": "phase-1",
+      "message": "阶段完成",
+      "metadata": { "phase": 1 }
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `run_id` | 必填，1..128 字符，`^[A-Za-z0-9_-]+$`；同项目同 run_id 多次上传合并到同一批次 |
+| `source` | 可选批次来源标签 |
+| `entries` | 必填，1..500 条/次；body 总大小 ≤ 4 MB（超出返回 HTTP 413） |
+| `entries[].level` | `debug` / `info` / `warn` / `error` / `fatal`，非法值整批拒绝 |
+| `entries[].message` | 1..4000 字节 |
+| `entries[].metadata` | 可选 JSON，序列化后 ≤ 4 KB |
+
+JWT 调用上传返回 `403`（40303）。
+
+### 查询日志条目（JWT + API Key）
+
+```http
+GET /api/projects/:project_id/logs
+```
+
+查询参数：`batch_id`、`run_id`、`level`、`entry_source`、`batch_source`、`q`（message 关键词）、`from`/`to`（ISO 8601）、`page`/`page_size`（默认 1/50，最大 100）、`sort`（默认 `timestamp_desc`）。
+
+### 查询批次列表（JWT + API Key）
+
+```http
+GET /api/projects/:project_id/log-batches
+```
+
+查询参数：`run_id`、`batch_source`、`from`/`to`（按 last_entry_at）、`page`/`page_size`。
+
+### 删除（JWT + API Key）
+
+```http
+DELETE /api/log-batches/:batch_id
+DELETE /api/projects/:project_id/logs
+```
+
+前者删除整批（级联删条目）；后者清空该项目全部日志。
+
 ## 错误处理
 
 常见错误码：
@@ -414,6 +476,8 @@ PUT /api/issues/:issue_id/collab/summary
 | 404 | 40401 | 项目不存在 |
 | 404 | 40405 | Issue 不存在 |
 | 404 | 40408 | 协作区内容不存在（预留错误码，当前 GET/DELETE 端点均不产生） |
+| 404 | 40409 | 日志批次不存在 |
+| 413 | — | 请求体超出 4 MB（日志上传） |
 
 如果收到 401，检查：
 1. `Authorization` 头是否正确携带 `Bearer fsk_...`

@@ -209,6 +209,14 @@ describe("UI Integration Tests", () => {
       expect(links[0]).toHaveAttribute("aria-current", "page");
     });
 
+    it("renders logs sidebar item and keeps it active on /logs", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/logs" });
+
+      const logLink = document.querySelector('a[href="/logs"]');
+      expect(logLink).toHaveTextContent(/日志/);
+      expect(logLink).toHaveAttribute("aria-current", "page");
+    });
+
     it("keeps the settings sidebar item active on nested settings routes", () => {
       renderWithProviders(<Sidebar />, { initialEntry: "/settings/profile" });
 

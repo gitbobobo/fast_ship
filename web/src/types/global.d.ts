@@ -304,6 +304,32 @@ interface IssueCollabArea {
   summary: IssueCollabSummary | null;
 }
 
+interface LogEntry {
+  id: string;
+  batch_id: string;
+  run_id: string;
+  batch_source: string;
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error" | "fatal";
+  source: string;
+  message: string;
+  metadata?: string;
+  created_at: string;
+}
+
+interface LogBatch {
+  id: string;
+  project_id: string;
+  run_id: string;
+  source: string;
+  entry_count: number;
+  first_entry_at: string | null;
+  last_entry_at: string | null;
+  created_at: string;
+  updated_at: string;
+  uploader_api_key_id?: string | null;
+}
+
 interface DashboardOverview {
   open_issues_by_project: DashboardProjectOpenIssuePoint[];
   daily_resolved: DashboardDailyResolvedPoint[];

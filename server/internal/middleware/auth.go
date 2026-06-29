@@ -21,6 +21,7 @@ const (
 	ContextKeyExp      = "exp"
 	ContextKeyUserName = "username"
 	ContextKeyAPIKey   = "api_key_name"
+	ContextKeyAPIKeyID = "api_key_id"
 
 	AuthTypeJWT    = "jwt"
 	AuthTypeApiKey = "api_key"
@@ -155,6 +156,7 @@ func handleApiKeyAuth(c *gin.Context, token string, apiKeyRepo *repository.ApiKe
 	c.Set(ContextKeyUserID, apiKey.UserID)
 	c.Set(ContextKeyAuthType, AuthTypeApiKey)
 	c.Set(ContextKeyAPIKey, apiKey.Name)
+	c.Set(ContextKeyAPIKeyID, apiKey.ID)
 	c.Next()
 }
 
@@ -179,6 +181,10 @@ func GetUserName(c *gin.Context) string {
 
 func GetAPIKeyName(c *gin.Context) string {
 	return c.GetString(ContextKeyAPIKey)
+}
+
+func GetAPIKeyID(c *gin.Context) string {
+	return c.GetString(ContextKeyAPIKeyID)
 }
 
 // ActorLabel 返回请求者的可读标识用于审计：JWT 返回用户名，API Key 返回 "API Key: <name>"，未知返回 "未知"。

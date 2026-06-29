@@ -52,6 +52,7 @@ var (
 	ErrIssueAssetNotFound  = New(40406, "问题图片不存在")
 	ErrAISettingsNotFound  = New(40407, "请先在设置中配置 MiniMax API Key")
 	ErrIssueCollabNotFound = New(40408, "协作区内容不存在")
+	ErrLogBatchNotFound    = New(40409, "日志批次不存在")
 )
 
 // 业务冲突 40900-40999

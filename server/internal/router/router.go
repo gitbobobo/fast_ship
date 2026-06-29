@@ -20,6 +20,7 @@ func Setup(
 	versionHandler *handler.VersionHandler,
 	issueHandler *handler.IssueHandler,
 	issueCollabHandler *handler.IssueCollabHandler,
+	logHandler *handler.LogHandler,
 	artifactHandler *handler.ArtifactHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	authService *service.AuthService,
@@ -145,6 +146,13 @@ func Setup(
 		api.POST("/versions/:vid/artifacts", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Upload)
 		api.DELETE("/artifacts/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Delete)
 		api.GET("/artifacts/:aid/download", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), artifactHandler.Download)
+
+		// JWT / API Key 均可 — 日志
+		api.POST("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.Upload)
+		api.GET("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.ListEntries)
+		api.GET("/projects/:id/log-batches", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.ListBatches)
+		api.DELETE("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteByProject)
+		api.DELETE("/log-batches/:batch_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteBatch)
 	}
 
 	setupWebRoutes(r, cfg.Server.WebDistDir)
