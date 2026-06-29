@@ -1,5 +1,5 @@
 import { Suspense, lazy, type ReactNode } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router";
+import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -16,7 +16,6 @@ const VersionsPage = lazy(() => import("@/routes/versions/index"));
 const IssuesPage = lazy(() => import("@/routes/issues/index"));
 const LogsPage = lazy(() => import("@/routes/logs/index"));
 const BoardPage = lazy(() => import("@/routes/board/index"));
-const NewVersionPage = lazy(() => import("@/routes/projects/$id/versions/new"));
 const VersionDetailPage = lazy(
   () => import("@/routes/projects/$id/versions/$vid"),
 );
@@ -84,7 +83,7 @@ export default function App() {
 
               <Route
                 path="/projects/:id/versions/new"
-                element={<LazyPage render={<NewVersionPage />} />}
+                element={<LegacyNewVersionRedirect />}
               />
               <Route
                 path="/projects/:id/versions/:vid"
@@ -135,6 +134,14 @@ export default function App() {
       </TooltipProvider>
     </QueryClientProvider>
   );
+}
+
+function LegacyNewVersionRedirect() {
+  const { id } = useParams();
+  const to = id
+    ? `/versions?project=${encodeURIComponent(id)}&create=1`
+    : "/versions?create=1";
+  return <Navigate to={to} replace />;
 }
 
 function LazyPage({ render }: { render: ReactNode }) {

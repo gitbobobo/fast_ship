@@ -2,7 +2,7 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { ProjectFormDialog } from "@/components/projects/project-form-dialog";
-import NewVersionPage from "@/routes/projects/$id/versions/new";
+import { VersionFormDialog } from "@/components/versions/version-form-dialog";
 import { renderWithRoute } from "@/test/render";
 import {
   useCreateProject,
@@ -12,6 +12,7 @@ import {
   useProjects,
 } from "@/lib/hooks/use-projects";
 import { useCreateVersion } from "@/lib/hooks/use-versions";
+import { toast } from "sonner";
 
 const { mockNavigate } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
@@ -266,11 +267,16 @@ describe("ProjectAndVersionForms", () => {
     });
 
     const user = userEvent.setup();
+    const onOpenChange = vi.fn();
 
-    renderWithRoute(<NewVersionPage />, {
-      path: "/projects/:id/versions/new",
-      initialEntry: "/projects/proj-1/versions/new",
-    });
+    renderWithRoute(
+      <VersionFormDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        projectId="proj-1"
+      />,
+      { path: "/versions", initialEntry: "/versions" },
+    );
 
     await user.type(screen.getByLabelText("版本号"), "v1.2.3");
     await user.type(screen.getByLabelText("Release 说明（可选）"), "release notes");
@@ -283,6 +289,53 @@ describe("ProjectAndVersionForms", () => {
         release_notes: "release notes",
       }),
     );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(mockNavigate).toHaveBeenCalledWith("/projects/proj-1/versions/ver-99");
+  });
+
+  it("keeps dialog open when create version fails", async () => {
+    createVersionMutateAsync.mockRejectedValue(new Error("conflict"));
+
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+
+    renderWithRoute(
+      <VersionFormDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        projectId="proj-1"
+      />,
+      { path: "/versions", initialEntry: "/versions" },
+    );
+
+    await user.type(screen.getByLabelText("版本号"), "v1.2.3");
+    await user.click(screen.getByRole("button", { name: "创建版本" }));
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("创建失败，版本号可能已存在"),
+    );
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("closes dialog on cancel without submitting", async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+
+    renderWithRoute(
+      <VersionFormDialog
+        open={true}
+        onOpenChange={onOpenChange}
+        projectId="proj-1"
+      />,
+      { path: "/versions", initialEntry: "/versions" },
+    );
+
+    await user.type(screen.getByLabelText("版本号"), "v1.2.3");
+    await user.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(createVersionMutateAsync).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });

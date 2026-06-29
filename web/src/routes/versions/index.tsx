@@ -1,6 +1,8 @@
-import { useState, useEffect } from "react";
-import { Link } from "react-router";
+import { useState, useEffect, useMemo } from "react";
+import { Link, useSearchParams } from "react-router";
 import { Plus, Package } from "lucide-react";
+import { VersionFormDialog } from "@/components/versions/version-form-dialog";
+import { getActiveProjectId } from "@/routes/board/lib/utils";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { Header } from "@/components/layout/header";
 import { Button } from "@/components/ui/button";
@@ -24,14 +26,18 @@ import { formatRelativeTime } from "@/lib/utils/format";
 export default function VersionsPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
   const projects = projectsData?.items ?? [];
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlProjectId = searchParams.get("project");
   const { lastSelectedProjectId, setLastSelectedProjectId } =
     useProjectPreferenceStore();
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
-    () => lastSelectedProjectId ?? "",
+    () => urlProjectId ?? lastSelectedProjectId ?? "",
   );
-  const activeProjectId = projects.some((project) => project.id === selectedProjectId)
-    ? selectedProjectId
-    : (projects[0]?.id ?? "");
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const activeProjectId = useMemo(
+    () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
+    [projects, selectedProjectId, urlProjectId],
+  );
 
   // 当 activeProjectId 回退到第一个项目时（如存储的项目被删除），同步 state 和 store
   useEffect(() => {
@@ -45,6 +51,19 @@ export default function VersionsPage() {
     selectedProjectId,
     setLastSelectedProjectId,
   ]);
+
+  useEffect(() => {
+    if (
+      !projectsLoading &&
+      searchParams.get("create") === "1" &&
+      activeProjectId
+    ) {
+      setCreateDialogOpen(true);
+      const next = new URLSearchParams(searchParams);
+      next.delete("create");
+      setSearchParams(next, { replace: true });
+    }
+  }, [projectsLoading, searchParams, activeProjectId, setSearchParams]);
 
   const { data: versionsData, isLoading: versionsLoading } = useVersions(
     activeProjectId,
@@ -88,7 +107,7 @@ export default function VersionsPage() {
               )}
             </div>
             {activeProjectId && (
-              <Button size="sm" render={<Link to={`/projects/${activeProjectId}/versions/new`} />}>
+              <Button size="sm" onClick={() => setCreateDialogOpen(true)}>
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
                 创建版本
               </Button>
@@ -164,6 +183,12 @@ export default function VersionsPage() {
           )}
         </div>
       </div>
+
+      <VersionFormDialog
+        open={createDialogOpen}
+        onOpenChange={setCreateDialogOpen}
+        projectId={activeProjectId}
+      />
     </>
   );
 }
