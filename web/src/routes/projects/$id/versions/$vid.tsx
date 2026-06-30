@@ -435,10 +435,9 @@ export default function VersionDetailPage() {
           />
         </div>
 
-        {/* 发货相关 UI */}
+        {/* 发货相关 UI：错误日志与对话框保留在页面级，进度卡片已移至 VersionSidebar */}
         <VersionShipSection
           version={version}
-          isPending={isPending}
           isShipping={isShipping}
           shipChecks={shipChecks}
           canShip={canShip}

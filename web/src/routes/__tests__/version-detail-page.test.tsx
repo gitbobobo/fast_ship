@@ -162,18 +162,48 @@ describe("VersionDetailPage", () => {
     vi.clearAllMocks();
   });
 
-  it("shows shipping progress and disables ship action while in progress", () => {
+  it("shows shipping progress in sidebar and disables ship action while in progress", () => {
     renderWithRoute(<VersionDetailPage />, {
       path: "/projects/:id/versions/:vid",
       initialEntry: "/projects/proj-1/versions/ver-1",
     });
 
-    expect(screen.getByText("发货进度")).toBeInTheDocument();
-    expect(screen.getByText("创建 Git Tag")).toBeInTheDocument();
-    expect(screen.getByText("上传安装包")).toBeInTheDocument();
-    expect(screen.getByText("进行中")).toBeInTheDocument();
-    expect(screen.getByText("正在上传安装包")).toBeInTheDocument();
+    const sidebar = screen.getByTestId("version-sidebar");
+    expect(sidebar).toBeInTheDocument();
+
+    const progressCard = within(sidebar).getByTestId("ship-progress-card");
+    expect(progressCard).toBeInTheDocument();
+    expect(within(progressCard).getByText("发货进度")).toBeInTheDocument();
+    expect(within(progressCard).getByText("创建 Git Tag")).toBeInTheDocument();
+    expect(within(progressCard).getByText("上传安装包")).toBeInTheDocument();
+    expect(within(progressCard).getByText("进行中")).toBeInTheDocument();
+    expect(within(progressCard).getByText("正在上传安装包")).toBeInTheDocument();
+    expect(screen.getAllByText("发货进度")).toHaveLength(1);
+
     expect(screen.getByRole("button", { name: "发货中" })).toBeDisabled();
+  });
+
+  it("does not show shipping progress card when version is not shipping", () => {
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    const sidebar = screen.getByTestId("version-sidebar");
+    expect(
+      within(sidebar).queryByTestId("ship-progress-card"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("发货进度")).not.toBeInTheDocument();
   });
 
   it("renders uploaded_by in artifacts list", () => {

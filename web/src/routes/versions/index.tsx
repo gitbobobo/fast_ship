@@ -25,7 +25,10 @@ import { formatRelativeTime } from "@/lib/utils/format";
 
 export default function VersionsPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
-  const projects = projectsData?.items ?? [];
+  const projects = useMemo(
+    () => projectsData?.items ?? [],
+    [projectsData?.items],
+  );
   const [searchParams, setSearchParams] = useSearchParams();
   const urlProjectId = searchParams.get("project");
   const { lastSelectedProjectId, setLastSelectedProjectId } =

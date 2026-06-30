@@ -6,7 +6,7 @@ import { renderWithRoute } from "@/test/render";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useVersions } from "@/lib/hooks/use-versions";
 
-const mockVersionFormDialog = vi.fn(() => null);
+const mockVersionFormDialog = vi.fn((_props: unknown) => null);
 
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProjects: vi.fn(),

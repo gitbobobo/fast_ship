@@ -34,6 +34,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { formatDate } from "@/lib/utils/format";
+import { VersionShipProgressCard } from "./version-ship-progress-card";
 
 interface VersionSidebarProps {
   version: Version;
@@ -80,7 +81,7 @@ export function VersionSidebar({
     branchOptions.some((branch) => branch.name === targetCommitish);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="version-sidebar">
       {/* 基本信息 */}
       <Card className="shadow-md">
         <CardHeader className="items-center gap-3 space-y-0 border-b px-5 pb-4 pt-5">
@@ -293,6 +294,12 @@ export function VersionSidebar({
           )}
         </CardContent>
       </Card>
+
+      <VersionShipProgressCard
+        version={version}
+        isPending={isPending}
+        isShipping={isShipping}
+      />
     </div>
   );
 }
