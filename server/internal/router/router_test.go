@@ -1213,7 +1213,7 @@ func TestRouterLogWritesRequireApiKey(t *testing.T) {
 	apiKeyAuth := "Bearer " + service.FormatApiKey(rawKey)
 	jwtAuth := "Bearer " + auth.Token
 
-	uploadBody := []byte(`{"run_id":"run-1","source":"smux","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"hello"}]}`)
+	uploadBody := []byte(`{"run_id":"run-1","source":"smux","description":"batch note","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"hello"}]}`)
 	uploadPath := "/api/projects/" + project.ID + "/logs"
 
 	doReq := func(method, authHeader, path string, body []byte) *httptest.ResponseRecorder {
@@ -1241,6 +1241,37 @@ func TestRouterLogWritesRequireApiKey(t *testing.T) {
 		t.Fatalf("API key upload expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	var uploadResult struct {
+		ID          string `json:"id"`
+		Description string `json:"description"`
+	}
+	decodeRouterEnvelope(t, rec, &uploadResult)
+	if uploadResult.Description != "batch note" {
+		t.Fatalf("expected description in upload response, got %q", uploadResult.Description)
+	}
+
+	getRec := doReq(http.MethodGet, jwtAuth, "/api/log-batches/"+uploadResult.ID, nil)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("JWT get batch expected 200, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+	var batchDetail struct {
+		ID          string `json:"id"`
+		Description string `json:"description"`
+	}
+	decodeRouterEnvelope(t, getRec, &batchDetail)
+	if batchDetail.Description != "batch note" {
+		t.Fatalf("expected description in get batch, got %q", batchDetail.Description)
+	}
+
+	apiKeyGetRec := doReq(http.MethodGet, apiKeyAuth, "/api/log-batches/"+uploadResult.ID, nil)
+	if apiKeyGetRec.Code != http.StatusOK {
+		t.Fatalf("API key get batch expected 200, got %d: %s", apiKeyGetRec.Code, apiKeyGetRec.Body.String())
+	}
+
+	if rec := doReq(http.MethodGet, apiKeyAuth, "/api/log-batches/"+uuid.NewString(), nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing batch expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
 	listPath := "/api/projects/" + project.ID + "/logs"
 	if rec := doReq(http.MethodGet, jwtAuth, listPath, nil); rec.Code != http.StatusOK {
 		t.Fatalf("JWT list expected 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1248,11 +1279,6 @@ func TestRouterLogWritesRequireApiKey(t *testing.T) {
 	if rec := doReq(http.MethodGet, apiKeyAuth, listPath, nil); rec.Code != http.StatusOK {
 		t.Fatalf("API key list expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-
-	var uploadResult struct {
-		ID string `json:"id"`
-	}
-	decodeRouterEnvelope(t, rec, &uploadResult)
 
 	delRec := doReq(http.MethodDelete, apiKeyAuth, "/api/log-batches/"+uploadResult.ID, nil)
 	if delRec.Code != http.StatusOK {

@@ -401,9 +401,11 @@ PUT /api/issues/:issue_id/collab/summary
 6. **完成总结**：`PUT /collab/summary`，附非技术摘要与提交 SHA。
 7. 重申规则：未经用户许可**不要**修改 Issue 的 open/closed 状态，也**不要**提交/推送代码。
 
-## 项目日志（INT-49）
+## 项目日志（INT-49 / INT-51）
 
 受管项目可通过 API Key 批量上传结构化日志；JWT 用户与 API Key 均可读取与删除。**上传不去重**，网络重试可能导致重复条目，调用方应自行避免重发。
+
+Web：`/logs` 仅展示批次列表；进入 `/logs/:batchId` 查看单批详情，条目按 `batch_id` 过滤并以时间正序触底加载。
 
 ### 上传日志（仅 API Key）
 
@@ -415,6 +417,7 @@ POST /api/projects/:project_id/logs
 {
   "run_id": "2f086286-1112-45dd-a8fa-824df6d5949c",
   "source": "smux",
+  "description": "可选批次说明",
   "entries": [
     {
       "timestamp": "2026-06-29T14:30:00Z",
@@ -431,12 +434,13 @@ POST /api/projects/:project_id/logs
 |---|---|
 | `run_id` | 必填，1..128 字符，`^[A-Za-z0-9_-]+$`；同项目同 run_id 多次上传合并到同一批次 |
 | `source` | 可选批次来源标签 |
+| `description` | 可选，0..500 字节；不 trim；**仅创建批次时写入**；同 run_id 追加（含并发创建回退）一律不改写已有说明 |
 | `entries` | 必填，1..500 条/次；body 总大小 ≤ 4 MB（超出返回 HTTP 413） |
 | `entries[].level` | `debug` / `info` / `warn` / `error` / `fatal`，非法值整批拒绝 |
 | `entries[].message` | 1..4000 字节 |
 | `entries[].metadata` | 可选 JSON，序列化后 ≤ 4 KB |
 
-JWT 调用上传返回 `403`（40303）。
+上传响应含批次 `id`、`run_id`、`source`、`description`、`entry_count`、`accepted_count` 等。JWT 调用上传返回 `403`（40303）。
 
 ### 查询日志条目（JWT + API Key）
 
@@ -444,7 +448,9 @@ JWT 调用上传返回 `403`（40303）。
 GET /api/projects/:project_id/logs
 ```
 
-查询参数：`batch_id`、`run_id`、`level`、`entry_source`、`batch_source`、`q`（message 关键词）、`from`/`to`（ISO 8601）、`page`/`page_size`（默认 1/50，最大 100）、`sort`（默认 `timestamp_desc`）。
+查询参数：`batch_id`、`run_id`、`level`、`entry_source`、`batch_source`、`q`（message 关键词）、`from`/`to`（ISO 8601）、`page`/`page_size`（默认 1/50，最大 100）、`sort`（默认 `timestamp_desc`，可选 `timestamp_asc`）。
+
+详情页按 `batch_id` + `sort=timestamp_asc` 拉取条目。
 
 ### 查询批次列表（JWT + API Key）
 
@@ -452,7 +458,15 @@ GET /api/projects/:project_id/logs
 GET /api/projects/:project_id/log-batches
 ```
 
-查询参数：`run_id`、`batch_source`、`from`/`to`（按 last_entry_at）、`page`/`page_size`。
+查询参数：`run_id`、`batch_source`、`from`/`to`（按 last_entry_at）、`page`/`page_size`。响应项含 `description`。
+
+### 查询单批详情（JWT + API Key）
+
+```http
+GET /api/log-batches/:batch_id
+```
+
+响应字段与批次列表单项同构（含 `project_id`、`description` 等）。不存在或无项目访问权返回 `404`（40409）。
 
 ### 删除（JWT + API Key）
 

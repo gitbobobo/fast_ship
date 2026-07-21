@@ -152,6 +152,7 @@ func Setup(
 		api.GET("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.ListEntries)
 		api.GET("/projects/:id/log-batches", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.ListBatches)
 		api.DELETE("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteByProject)
+		api.GET("/log-batches/:batch_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.GetBatch)
 		api.DELETE("/log-batches/:batch_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteBatch)
 	}
 

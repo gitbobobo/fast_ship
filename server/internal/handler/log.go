@@ -32,9 +32,10 @@ func (h *LogHandler) requireApiKey(c *gin.Context) bool {
 }
 
 type uploadLogsRequest struct {
-	RunID   string                  `json:"run_id"`
-	Source  string                  `json:"source"`
-	Entries []service.LogEntryInput `json:"entries"`
+	RunID       string                  `json:"run_id"`
+	Source      string                  `json:"source"`
+	Description string                  `json:"description"`
+	Entries     []service.LogEntryInput `json:"entries"`
 }
 
 func (h *LogHandler) Upload(c *gin.Context) {
@@ -64,9 +65,10 @@ func (h *LogHandler) Upload(c *gin.Context) {
 	}
 
 	result, err := h.logService.UploadLogs(projectID, userID, uploaderAPIKeyID, &service.UploadLogsRequest{
-		RunID:   req.RunID,
-		Source:  req.Source,
-		Entries: req.Entries,
+		RunID:       req.RunID,
+		Source:      req.Source,
+		Description: req.Description,
+		Entries:     req.Entries,
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
@@ -148,6 +150,19 @@ func (h *LogHandler) ListBatches(c *gin.Context) {
 	}
 
 	response.SuccessPaginated(c, items, total, page, pageSize)
+}
+
+func (h *LogHandler) GetBatch(c *gin.Context) {
+	batchID := c.Param("batch_id")
+	userID := middleware.GetUserID(c)
+
+	item, err := h.logService.GetBatch(batchID, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, item)
 }
 
 func (h *LogHandler) DeleteBatch(c *gin.Context) {

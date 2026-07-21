@@ -15,7 +15,7 @@ import (
 func setupLogServiceTest(t *testing.T) (*LogService, *gorm.DB, string, string) {
 	t.Helper()
 
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -165,8 +165,8 @@ func TestLogService_DeleteBatch_CrossUserDenied(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 
-	if err := svc.DeleteBatch(res.ID, otherID); err != errs.ErrProjectNotFound {
-		t.Fatalf("expected project not found, got %v", err)
+	if err := svc.DeleteBatch(res.ID, otherID); err != errs.ErrLogBatchNotFound {
+		t.Fatalf("expected log batch not found, got %v", err)
 	}
 }
 
@@ -185,3 +185,147 @@ func TestLogService_InvalidSourceRejected(t *testing.T) {
 		t.Fatalf("expected invalid params for batch source, got %v", err)
 	}
 }
+
+func TestLogService_DescriptionCreateAndPreserve(t *testing.T) {
+	svc, _, userID, projectID := setupLogServiceTest(t)
+	ts := time.Now().UTC()
+
+	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:       "run-desc",
+		Description: "first note",
+		Entries: []LogEntryInput{
+			{Timestamp: ts, Level: "info", Message: "a"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if res.Description != "first note" {
+		t.Fatalf("expected description first note, got %q", res.Description)
+	}
+
+	res2, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:       "run-desc",
+		Description: "should not overwrite",
+		Entries: []LogEntryInput{
+			{Timestamp: ts.Add(time.Second), Level: "info", Message: "b"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("second upload: %v", err)
+	}
+	if res2.EntryCount != 2 {
+		t.Fatalf("expected entry count 2, got %d", res2.EntryCount)
+	}
+	if res2.Description != "first note" {
+		t.Fatalf("description overwritten: %q", res2.Description)
+	}
+
+	batch, err := svc.GetBatch(res.ID, userID)
+	if err != nil {
+		t.Fatalf("get batch: %v", err)
+	}
+	if batch.Description != "first note" {
+		t.Fatalf("get batch description: %q", batch.Description)
+	}
+
+	items, total, err := svc.ListBatches(projectID, userID, ListLogBatchesRequest{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("list batches: %v", err)
+	}
+	if total != 1 || len(items) != 1 || items[0].Description != "first note" {
+		t.Fatalf("list batches unexpected: total=%d items=%+v", total, items)
+	}
+}
+
+func TestLogService_DescriptionTooLongRejected(t *testing.T) {
+	svc, _, userID, projectID := setupLogServiceTest(t)
+	longDesc := string(make([]byte, maxLogDescriptionBytes+1))
+
+	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:       "run-long-desc",
+		Description: longDesc,
+		Entries: []LogEntryInput{
+			{Timestamp: time.Now(), Level: "info", Message: "x"},
+		},
+	})
+	if err != errs.ErrInvalidParams {
+		t.Fatalf("expected invalid params, got %v", err)
+	}
+}
+
+func TestLogService_GetBatch_NotFoundAndCrossUser(t *testing.T) {
+	svc, db, userID, projectID := setupLogServiceTest(t)
+	otherID := uuid.NewString()
+	now := time.Now()
+	if err := db.Create(&model.User{ID: otherID, Username: "other3", Email: "other3@example.com", PasswordHash: "x", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+
+	if _, err := svc.GetBatch(uuid.NewString(), userID); err != errs.ErrLogBatchNotFound {
+		t.Fatalf("expected not found, got %v", err)
+	}
+
+	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID: "run-get-x",
+		Entries: []LogEntryInput{
+			{Timestamp: time.Now(), Level: "info", Message: "x"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	if _, err := svc.GetBatch(res.ID, otherID); err != errs.ErrLogBatchNotFound {
+		t.Fatalf("expected log batch not found for cross user, got %v", err)
+	}
+}
+
+func TestLogService_DescriptionConcurrentCreate(t *testing.T) {
+	svc, _, userID, projectID := setupLogServiceTest(t)
+	ts := time.Now().UTC()
+
+	type result struct {
+		res *UploadLogsResult
+		err error
+	}
+	ch := make(chan result, 2)
+	for i, desc := range []string{"desc-a", "desc-b"} {
+		go func(i int, desc string) {
+			res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+				RunID:       "run-concurrent",
+				Description: desc,
+				Entries: []LogEntryInput{
+					{Timestamp: ts.Add(time.Duration(i) * time.Second), Level: "info", Message: desc},
+				},
+			})
+			ch <- result{res: res, err: err}
+		}(i, desc)
+	}
+
+	var results []result
+	for i := 0; i < 2; i++ {
+		results = append(results, <-ch)
+	}
+	for _, r := range results {
+		if r.err != nil {
+			t.Fatalf("concurrent upload failed: %v", r.err)
+		}
+	}
+
+	batch, err := svc.GetBatch(results[0].res.ID, userID)
+	if err != nil {
+		t.Fatalf("get batch: %v", err)
+	}
+	if batch.Description != "desc-a" && batch.Description != "desc-b" {
+		t.Fatalf("unexpected description %q", batch.Description)
+	}
+	if results[0].res.Description != batch.Description || results[1].res.Description != batch.Description {
+		t.Fatalf("response descriptions drifted: %q %q final=%q",
+			results[0].res.Description, results[1].res.Description, batch.Description)
+	}
+	if batch.EntryCount != 2 {
+		t.Fatalf("expected 2 entries after concurrent upload, got %d", batch.EntryCount)
+	}
+}
+

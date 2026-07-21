@@ -322,6 +322,7 @@ interface LogBatch {
   project_id: string;
   run_id: string;
   source: string;
+  description: string;
   entry_count: number;
   first_entry_at: string | null;
   last_entry_at: string | null;

@@ -4,3 +4,5 @@ server/data/
 web/TEST_REPORT.md
 .playwright-mcp/
 issue-detail-*.png
+
+.claude/

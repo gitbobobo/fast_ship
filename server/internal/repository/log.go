@@ -51,7 +51,7 @@ func (r *LogRepository) FindBatchByID(id string) (*model.LogBatch, error) {
 }
 
 func (r *LogRepository) UploadBatchTx(
-	projectID, runID, source string,
+	projectID, runID, source, description string,
 	uploaderAPIKeyID *string,
 	entries []model.LogEntry,
 ) (*model.LogBatch, error) {
@@ -65,14 +65,18 @@ func (r *LogRepository) UploadBatchTx(
 				ProjectID:        projectID,
 				RunID:            runID,
 				Source:           source,
+				Description:      description,
 				UploaderAPIKeyID: uploaderAPIKeyID,
 				CreatedAt:        now,
 				UpdatedAt:        now,
 			}
 			if createErr := tx.Create(&batch).Error; createErr != nil {
-				if findErr := tx.Where("project_id = ? AND run_id = ?", projectID, runID).First(&batch).Error; findErr != nil {
-					return createErr
+				// First into a fresh struct: dest with PK set would AND on that id.
+				var existing model.LogBatch
+				if findErr := tx.Where("project_id = ? AND run_id = ?", projectID, runID).First(&existing).Error; findErr != nil {
+					return errors.Join(createErr, findErr)
 				}
+				batch = existing
 			}
 		} else if err != nil {
 			return err

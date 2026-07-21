@@ -67,7 +67,7 @@ func main() {
 		gormLogger = logger.Default.LogMode(logger.Info)
 	}
 
-	db, err := gorm.Open(sqlite.Open(cfg.Database.Path+"?_pragma=foreign_keys(1)"), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(cfg.Database.Path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"), &gorm.Config{
 		Logger: gormLogger,
 	})
 	if err != nil {
@@ -123,6 +123,9 @@ func main() {
 	}
 	if err := backfillIssueAssetStatusModel(db); err != nil {
 		log.Fatalf("问题资源数据迁移失败: %v", err)
+	}
+	if err := backfillLogBatchDescription(db); err != nil {
+		log.Fatalf("日志批次说明迁移失败: %v", err)
 	}
 
 	// 初始化存储
@@ -367,6 +370,19 @@ func backfillIssueAssetStatusModel(db *gorm.DB) error {
 		UPDATE issue_assets
 		SET status = 'attached'
 		WHERE status IS NULL OR status = ''
+	`).Error
+}
+
+func backfillLogBatchDescription(db *gorm.DB) error {
+	hasDescription, err := hasSQLiteColumn(db, "log_batches", "description")
+	if err != nil || !hasDescription {
+		return err
+	}
+
+	return db.Exec(`
+		UPDATE log_batches
+		SET description = ''
+		WHERE description IS NULL
 	`).Error
 }
 

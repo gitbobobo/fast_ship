@@ -26,6 +26,7 @@ type LogBatch struct {
 	ProjectID        string     `gorm:"type:text;not null;index" json:"project_id"`
 	RunID            string     `gorm:"type:text;not null" json:"run_id"`
 	Source           string     `gorm:"type:text;not null;default:''" json:"source"`
+	Description      string     `gorm:"type:text;not null;default:''" json:"description"`
 	EntryCount       int        `gorm:"not null;default:0" json:"entry_count"`
 	FirstEntryAt     *time.Time `json:"first_entry_at"`
 	LastEntryAt      *time.Time `json:"last_entry_at"`

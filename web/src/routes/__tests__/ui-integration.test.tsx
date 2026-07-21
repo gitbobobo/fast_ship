@@ -208,6 +208,15 @@ describe("UI Integration Tests", () => {
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 
+    it("keeps logs sidebar item active on /logs/:batchId", () => {
+      renderWithProviders(<Sidebar />, {
+        initialEntry: "/logs/batch-123",
+      });
+
+      const logLink = document.querySelector('a[href="/logs"]');
+      expect(logLink).toHaveAttribute("aria-current", "page");
+    });
+
     it("renders settings layout with all navigation items", () => {
       renderWithProviders(
         <Routes>
