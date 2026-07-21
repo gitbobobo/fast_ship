@@ -368,7 +368,10 @@ export default function LogBatchDetailPage() {
             }
           >
             <SelectTrigger>
-              <SelectValue />
+              <SelectValue>
+                {LOG_LEVELS.find((item) => item.value === levelFilter)?.label ??
+                  levelFilter}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {LOG_LEVELS.map((item) => (

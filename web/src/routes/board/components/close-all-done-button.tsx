@@ -104,7 +104,10 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
             onValueChange={(v) => setSourceFilter(v as SourceFilter)}
           >
             <SelectTrigger className="h-8 w-auto">
-              <SelectValue />
+              <SelectValue>
+                {SOURCE_OPTIONS.find((opt) => opt.value === sourceFilter)
+                  ?.label ?? sourceFilter}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
               {SOURCE_OPTIONS.map((opt) => (
