@@ -1,7 +1,6 @@
+import type { ReactNode } from "react";
 import { useNavigate } from "react-router";
 import { MobileNav } from "./sidebar";
-import { UserNav } from "@/components/user-nav";
-import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -16,9 +15,11 @@ import { useSidebarStore } from "@/lib/store/sidebar-store";
 export function Header({
   title,
   backFallback = "/projects",
+  actions,
 }: {
   title?: string;
   backFallback?: string;
+  actions?: ReactNode;
 }) {
   const navigate = useNavigate();
   const { canGoBack, canUseBrowserHistory } = useNavigationHistory();
@@ -72,13 +73,10 @@ export function Header({
         <ChevronLeft className="h-4 w-4" />
       </Button>
       {title && (
-        <h1 className="text-base font-semibold truncate flex-1">{title}</h1>
+        <h1 className="text-base font-semibold truncate flex-1 min-w-0">{title}</h1>
       )}
-      {!title && <div className="flex-1" />}
-      <div className="flex items-center gap-2">
-        <ThemeToggle />
-        <UserNav />
-      </div>
+      {!title && <div className="flex-1 min-w-0" />}
+      {actions}
     </header>
   );
 }

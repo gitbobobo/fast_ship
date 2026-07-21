@@ -5,6 +5,7 @@ import { VersionFormDialog } from "@/components/versions/version-form-dialog";
 import { getActiveProjectId } from "@/routes/board/lib/utils";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -75,7 +76,21 @@ export default function VersionsPage() {
 
   return (
     <>
-      <Header title="版本" />
+      <Header
+        title="版本"
+        actions={
+          activeProjectId ? (
+            <HeaderActions
+              primary={
+                <Button size="sm" onClick={() => setCreateDialogOpen(true)}>
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  创建版本
+                </Button>
+              }
+            />
+          ) : undefined
+        }
+      />
       <div className="p-4 md:p-6 space-y-6">
         {/* 版本列表 */}
         <div>
@@ -109,12 +124,6 @@ export default function VersionsPage() {
                 </Select>
               )}
             </div>
-            {activeProjectId && (
-              <Button size="sm" onClick={() => setCreateDialogOpen(true)}>
-                <Plus className="mr-1.5 h-3.5 w-3.5" />
-                创建版本
-              </Button>
-            )}
           </div>
 
           {projectsLoading ? (

@@ -21,7 +21,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   AlertDialog,
@@ -35,6 +34,8 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import { HeaderActions } from "@/components/layout/header-actions";
+import { SettingsPageShell } from "@/routes/settings/layout";
 import { apiKeySchema, type ApiKeyInput } from "@/lib/utils/validators";
 import {
   useApiKeys,
@@ -88,8 +89,19 @@ export default function ApiKeysPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
+    <SettingsPageShell
+      actions={
+        <HeaderActions
+          primary={
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              创建 API Key
+            </Button>
+          }
+        />
+      }
+    >
+      <div className="space-y-6">
         <div>
           <h2 className="text-lg font-medium">API Key 管理</h2>
           <p className="text-sm text-muted-foreground">
@@ -98,11 +110,8 @@ export default function ApiKeysPage() {
             支持：读取项目/问题/版本、上传构建产物、创建和更新 Issue。
           </p>
         </div>
+
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger render={<Button size="sm" />}>
-            <Plus className="mr-1.5 h-3.5 w-3.5" />
-            创建 API Key
-          </DialogTrigger>
           <DialogContent>
             {createdKey ? (
               <>
@@ -166,83 +175,84 @@ export default function ApiKeysPage() {
             )}
           </DialogContent>
         </Dialog>
-      </div>
 
-      {isLoading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 rounded" />
-          ))}
-        </div>
-      ) : !apiKeys?.length ? (
-        <div className="rounded-lg border bg-muted/40 py-12 text-center">
-          <p className="text-sm text-muted-foreground">暂无 API Key</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            点击右上角按钮创建第一个 API Key
-          </p>
-        </div>
-      ) : (
-        <div className="rounded-lg border overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>名称</TableHead>
-                <TableHead>Key 前缀</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead>最后使用</TableHead>
-                <TableHead className="text-right">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {apiKeys.map((key) => (
-                <TableRow key={key.id}>
-                  <TableCell className="font-medium">{key.name}</TableCell>
-                  <TableCell className="font-mono text-sm">
-                    {key.key_prefix}••••••••
-                  </TableCell>
-                  <TableCell>{formatDate(key.created_at)}</TableCell>
-                  <TableCell>
-                    {key.last_used_at
-                      ? formatDate(key.last_used_at)
-                      : "从未使用"}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <AlertDialog>
-                      <AlertDialogTrigger
-                        render={
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            aria-label={`删除 API Key ${key.name}`}
-                          />
-                        }
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>删除 API Key?</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            删除后使用此 Key 的 CI/CD 流水线将立即失效。
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>取消</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => handleDelete(key.id)}
-                          >
-                            确认删除
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
-                  </TableCell>
+        {isLoading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-10 rounded" />
+            ))}
+          </div>
+        ) : !apiKeys?.length ? (
+          <div className="rounded-lg border bg-muted/40 py-12 text-center">
+            <p className="text-sm text-muted-foreground">暂无 API Key</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              点击右上角按钮创建第一个 API Key
+            </p>
+          </div>
+        ) : (
+          <div className="rounded-lg border overflow-hidden">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>名称</TableHead>
+                  <TableHead>Key 前缀</TableHead>
+                  <TableHead>创建时间</TableHead>
+                  <TableHead>最后使用</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
-    </div>
+              </TableHeader>
+              <TableBody>
+                {apiKeys.map((key) => (
+                  <TableRow key={key.id}>
+                    <TableCell className="font-medium">{key.name}</TableCell>
+                    <TableCell className="font-mono text-sm">
+                      {key.key_prefix}••••••••
+                    </TableCell>
+                    <TableCell>{formatDate(key.created_at)}</TableCell>
+                    <TableCell>
+                      {key.last_used_at
+                        ? formatDate(key.last_used_at)
+                        : "从未使用"}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <AlertDialog>
+                        <AlertDialogTrigger
+                          render={
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              aria-label={`删除 API Key ${key.name}`}
+                            />
+                          }
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>删除 API Key?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              删除后使用此 Key 的 CI/CD 流水线将立即失效。
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={() => handleDelete(key.id)}
+                            >
+                              确认删除
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </div>
+    </SettingsPageShell>
   );
 }
+

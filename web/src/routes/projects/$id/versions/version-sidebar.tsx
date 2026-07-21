@@ -1,5 +1,4 @@
 import {
-  Rocket,
   ExternalLink,
   Trash2,
   Pencil,
@@ -53,7 +52,6 @@ interface VersionSidebarProps {
   targetCommitish: string | null;
   onUpdateTargetCommitish: (branch: string) => void;
   onDeleteVersion: () => void;
-  onShipDialogOpen: () => void;
 }
 
 export function VersionSidebar({
@@ -73,7 +71,6 @@ export function VersionSidebar({
   targetCommitish,
   onUpdateTargetCommitish,
   onDeleteVersion,
-  onShipDialogOpen,
 }: VersionSidebarProps) {
   const branchOptions = branchesData?.branches ?? [];
   const targetBranchExists =
@@ -91,7 +88,7 @@ export function VersionSidebar({
             </div>
             <CardTitle className="text-base">基本信息</CardTitle>
           </div>
-          {(version.github_release_url || isEditable || isPending) && (
+          {(version.github_release_url || isEditable) && (
           <CardAction className="flex flex-wrap items-center justify-end gap-2">
             {version.github_release_url && (
               <Button
@@ -133,17 +130,6 @@ export function VersionSidebar({
                   </AlertDialogFooter>
                 </AlertDialogContent>
               </AlertDialog>
-            )}
-            {isPending && (
-              <Button
-                size="sm"
-                className="h-7 px-2 text-xs shadow-xs bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70"
-                onClick={onShipDialogOpen}
-                disabled={isShipping}
-              >
-                <Rocket className="mr-1 h-3 w-3" />
-                {isShipping ? "发货中" : "发货"}
-              </Button>
             )}
           </CardAction>
           )}

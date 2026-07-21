@@ -10,6 +10,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -224,7 +225,44 @@ export default function LogsPage() {
 
   return (
     <>
-      <Header title="日志" />
+      <Header
+        title="日志"
+        actions={
+          activeProjectId ? (
+            <HeaderActions
+              primary={
+                <AlertDialog>
+                  <AlertDialogTrigger
+                    render={
+                      <Button variant="outline" size="sm" className="text-destructive">
+                        <Trash2 className="h-4 w-4" />
+                        清空项目日志
+                      </Button>
+                    }
+                  />
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>清空项目日志？</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        将删除「{activeProject?.name}」下的全部日志批次与条目，此操作不可撤销。
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>取消</AlertDialogCancel>
+                      <AlertDialogAction
+                        onClick={() => void handleClearProject()}
+                        disabled={clearProjectLogs.isPending}
+                      >
+                        确认清空
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              }
+            />
+          ) : undefined
+        }
+      />
       <div className="p-4 md:p-6 space-y-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -252,36 +290,6 @@ export default function LogsPage() {
               </Select>
             )}
           </div>
-
-          {activeProjectId && (
-            <AlertDialog>
-              <AlertDialogTrigger
-                render={
-                  <Button variant="outline" size="sm" className="text-destructive">
-                    <Trash2 className="h-4 w-4" />
-                    清空项目日志
-                  </Button>
-                }
-              />
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>清空项目日志？</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    将删除「{activeProject?.name}」下的全部日志批次与条目，此操作不可撤销。
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>取消</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => void handleClearProject()}
-                    disabled={clearProjectLogs.isPending}
-                  >
-                    确认清空
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          )}
         </div>
 
         {!activeProjectId ? (

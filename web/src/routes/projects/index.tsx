@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { ProjectFormDialog } from "@/components/projects/project-form-dialog";
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -74,9 +75,27 @@ export default function ProjectsPage() {
     }
   };
 
+  const openCreateDialog = () => {
+    setDialogMode("create");
+    setEditingProjectId(undefined);
+    setDialogOpen(true);
+  };
+
   return (
     <>
-      <Header title="项目" />
+      <Header
+        title="项目"
+        actions={
+          <HeaderActions
+            primary={
+              <Button size="sm" onClick={openCreateDialog}>
+                <Plus className="mr-2 h-4 w-4" />
+                创建项目
+              </Button>
+            }
+          />
+        }
+      />
       <div className="p-4 md:p-6">
         <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="relative w-full sm:w-72">
@@ -88,16 +107,6 @@ export default function ProjectsPage() {
               placeholder="搜索项目名、描述或仓库"
             />
           </div>
-          <Button
-            onClick={() => {
-              setDialogMode("create");
-              setEditingProjectId(undefined);
-              setDialogOpen(true);
-            }}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            创建项目
-          </Button>
         </div>
 
         {isLoading ? (
@@ -113,17 +122,6 @@ export default function ProjectsPage() {
             <p className="mt-1 text-sm text-muted-foreground">
               创建你的第一个项目来开始管理版本发布
             </p>
-            <Button
-              className="mt-4"
-              onClick={() => {
-                setDialogMode("create");
-                setEditingProjectId(undefined);
-                setDialogOpen(true);
-              }}
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              创建项目
-            </Button>
           </div>
         ) : filteredProjects.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16 text-center">

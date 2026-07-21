@@ -9,6 +9,7 @@ import {
 } from "@dnd-kit/core";
 import { Package, Plus } from "lucide-react";
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -20,7 +21,10 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
-import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
+import {
+  useInfiniteBoardIssues,
+  useUpdateIssueWorkflowStatus,
+} from "@/lib/hooks/use-issues";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { toast } from "sonner";
 import {
@@ -33,6 +37,7 @@ import { BoardColumn } from "@/routes/board/components/board-column";
 import {
   BoardIssueCardOverlay,
 } from "@/routes/board/components/board-issue-card";
+import { CloseAllDoneButton } from "@/routes/board/components/close-all-done-button";
 
 export default function BoardPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
@@ -130,9 +135,45 @@ export default function BoardPage() {
   const isEmptyProject = !projectsLoading && projects.length === 0;
   const noProjectSelected = !projectsLoading && !activeProjectId;
 
+  const {
+    data: doneColumnData,
+    isLoading: doneColumnLoading,
+  } = useInfiniteBoardIssues(activeProjectId, "done");
+  const doneTotal = doneColumnData?.pages[0]?.total ?? 0;
+  const showCloseAll = !doneColumnLoading && doneTotal > 0;
+
   return (
     <div className="flex h-full flex-col">
-      <Header title="看板" />
+      <Header
+        title="看板"
+        actions={
+          activeProjectId ? (
+            <HeaderActions
+              primary={
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    render={
+                      <Link
+                        to={{
+                          pathname: `/projects/${activeProjectId}/issues/new`,
+                        }}
+                      />
+                    }
+                  >
+                    <Plus className="mr-1.5 h-3.5 w-3.5" />
+                    新建问题
+                  </Button>
+                  {showCloseAll && (
+                    <CloseAllDoneButton projectId={activeProjectId} />
+                  )}
+                </div>
+              }
+            />
+          ) : undefined
+        }
+      />
       <div className="flex flex-1 flex-col overflow-hidden p-4 md:p-6">
         {/* Project selector */}
         <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -141,41 +182,23 @@ export default function BoardPage() {
           ) : isEmptyProject ? (
             <p className="text-sm text-muted-foreground">暂无项目</p>
           ) : (
-            <>
-              <Select
-                value={activeProjectId}
-                onValueChange={handleProjectChange}
-              >
-                <SelectTrigger className="w-auto min-w-32">
-                  <SelectValue placeholder="请选择项目">
-                    {activeProject?.name}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {activeProjectId && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  render={
-                    <Link
-                      to={{
-                        pathname: `/projects/${activeProjectId}/issues/new`,
-                      }}
-                    />
-                  }
-                >
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  新建问题
-                </Button>
-              )}
-            </>
+            <Select
+              value={activeProjectId}
+              onValueChange={handleProjectChange}
+            >
+              <SelectTrigger className="w-auto min-w-32">
+                <SelectValue placeholder="请选择项目">
+                  {activeProject?.name}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {projects.map((project) => (
+                  <SelectItem key={project.id} value={project.id}>
+                    {project.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
         </div>
 

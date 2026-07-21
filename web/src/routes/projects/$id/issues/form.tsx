@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import { ArrowLeft, LockKeyhole, MessageSquare } from "lucide-react";
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { InternalIssueForm, type InternalIssueFormInput } from "@/components/issues/internal-issue-form";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +39,7 @@ export default function IssueFormPage() {
   const { id, iid } = useParams();
   const [searchParams] = useSearchParams();
   const isEdit = Boolean(iid);
+  const [formBusy, setFormBusy] = useState(false);
 
   const { data: issue, isLoading } = useIssue(iid ?? "");
   const { data: project } = useProject(id!);
@@ -49,6 +52,7 @@ export default function IssueFormPage() {
 
   const issueDetailPath = id && iid ? `/projects/${id}/issues/${iid}` : null;
   const headerBackFallback = issueDetailPath ?? (id ? `/issues?project=${id}` : "/issues");
+  const formId = isEdit ? "issue-form-edit" : "issue-form-new";
 
   const handleSubmit = async (values: InternalIssueFormInput) => {
     if (isEdit) {
@@ -200,9 +204,29 @@ export default function IssueFormPage() {
 
   return (
     <>
-      <Header title={pageTitle} backFallback={headerBackFallback} />
+      <Header
+        title={pageTitle}
+        backFallback={headerBackFallback}
+        actions={
+          <HeaderActions
+            primary={
+              <Button
+                type="submit"
+                form={formId}
+                size="sm"
+                disabled={formBusy}
+                data-testid="issue-form-submit"
+              >
+                {formBusy ? "保存中..." : submitLabel}
+              </Button>
+            }
+          />
+        }
+      />
       <div className="w-full px-4 py-4 md:px-6 md:py-6">
         <InternalIssueForm
+          formId={formId}
+          hideSubmitButton
           defaultValues={
             isEdit && issue
               ? {
@@ -216,6 +240,7 @@ export default function IssueFormPage() {
                 }
           }
           isSubmitting={isEdit ? updateIssue.isPending : createIssue.isPending}
+          onBusyChange={setFormBusy}
           onPasteImage={handlePasteImage}
           onSubmit={handleSubmit}
           showSourceSelector={!isEdit}

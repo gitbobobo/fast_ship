@@ -5,9 +5,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // Components
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { Sidebar } from "@/components/layout/sidebar";
-import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { UserNav } from "@/components/user-nav";
+import { Button } from "@/components/ui/button";
 import SettingsLayout from "@/routes/settings/layout";
 import AISettingsPage from "@/routes/settings/ai";
 import ProfilePage from "@/routes/settings/profile";
@@ -102,41 +103,35 @@ describe("UI Integration Tests", () => {
       expect(screen.getByRole("heading", { name: "测试标题" })).toBeInTheDocument();
     });
 
-    it("renders theme toggle in header", () => {
+    it("does not render theme toggle or user nav in header", () => {
       renderWithProviders(<Header title="测试" />);
 
-      const buttons = screen.getAllByRole("button");
-      const themeButtons = buttons.filter(btn => 
-        btn.getAttribute("aria-haspopup") === "menu"
+      const header = screen.getByRole("banner");
+      expect(within(header).queryByRole("button", { name: "切换主题" })).not.toBeInTheDocument();
+      expect(within(header).queryByRole("button", { name: /testuser/ })).not.toBeInTheDocument();
+    });
+
+    it("renders actions in header when provided", () => {
+      renderWithProviders(
+        <Header
+          title="测试"
+          actions={
+            <HeaderActions
+              primary={<Button size="sm">创建项目</Button>}
+            />
+          }
+        />,
       );
-      expect(themeButtons.length).toBeGreaterThan(0);
+
+      const header = screen.getByRole("banner");
+      expect(within(header).getByRole("button", { name: "创建项目" })).toBeInTheDocument();
     });
 
-    it("renders user nav in header", () => {
-      renderWithProviders(<Header title="测试" />);
-
-      // UserNav should be present (avatar button with aria-haspopup="menu")
-      const avatarButton = screen.getAllByRole("button").find(
-        btn => btn.getAttribute("aria-haspopup") === "menu"
-      );
-      expect(avatarButton).toBeInTheDocument();
-    });
-
-    it("displays user initial in header", () => {
-      renderWithProviders(<Header title="测试" />);
-
-      expect(screen.getByText("T")).toBeInTheDocument();
-    });
-
-    it("header layout includes all expected elements", () => {
+    it("header layout includes title and back control", () => {
       renderWithProviders(<Header title="测试标题" />);
 
-      // All key elements should be present
       expect(screen.getByRole("heading", { name: "测试标题" })).toBeInTheDocument();
-      
-      // Buttons (theme toggle and user nav)
-      const allButtons = screen.getAllByRole("button");
-      expect(allButtons.length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
     });
 
     it("falls back to projects when browser history is not available", () => {
@@ -158,42 +153,38 @@ describe("UI Integration Tests", () => {
     });
   });
 
-  describe("Theme and User Navigation Integration", () => {
-    it("theme toggle works alongside user nav", async () => {
-      renderWithProviders(
-        <>
-          <Header title="测试" />
-        </>,
-      );
+  describe("Sidebar bottom controls", () => {
+    it("renders user avatar row with username in sidebar bottom", () => {
+      renderWithProviders(<Sidebar />);
 
-      // Both components should be present
-      const buttons = screen.getAllByRole("button");
-      const popupButtons = buttons.filter(btn => 
-        btn.getAttribute("aria-haspopup") === "menu"
-      );
-
-      expect(popupButtons.length).toBeGreaterThanOrEqual(2);
+      const bottom = screen.getByTestId("sidebar-bottom");
+      expect(
+        within(bottom).getByRole("button", { name: /testuser/ }),
+      ).toBeInTheDocument();
     });
 
-    it("user nav dropdown can be opened independently of theme toggle", async () => {
-      renderWithProviders(
-        <>
-          <Header title="测试" />
-        </>,
-      );
+    it("merges settings and theme controls into the user menu", async () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/dashboard" });
 
-      const buttons = screen.getAllByRole("button");
-      const avatarButton = buttons.find(btn => 
-        btn.getAttribute("aria-haspopup") === "menu" && btn.textContent?.includes("T")
-      );
+      const bottom = screen.getByTestId("sidebar-bottom");
+      expect(within(bottom).queryByRole("link")).not.toBeInTheDocument();
 
-      if (avatarButton) {
-        fireEvent.click(avatarButton);
+      fireEvent.click(within(bottom).getByRole("button", { name: /testuser/ }));
 
-        await waitFor(() => {
-          expect(screen.getByText("testuser")).toBeInTheDocument();
-        });
-      }
+      await waitFor(() => {
+        expect(screen.getByRole("menuitem", { name: /设置/ })).toBeInTheDocument();
+        expect(screen.getByRole("menuitem", { name: /主题/ })).toBeInTheDocument();
+      });
+    });
+
+    it("user nav dropdown can be opened from sidebar", async () => {
+      renderWithProviders(<Sidebar />);
+
+      fireEvent.click(screen.getByRole("button", { name: /testuser/ }));
+
+      await waitFor(() => {
+        expect(screen.getByText("test@example.com")).toBeInTheDocument();
+      });
     });
   });
 
@@ -217,13 +208,6 @@ describe("UI Integration Tests", () => {
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 
-    it("keeps the settings sidebar item active on nested settings routes", () => {
-      renderWithProviders(<Sidebar />, { initialEntry: "/settings/profile" });
-
-      const settingsLink = document.querySelector('a[href="/settings"]');
-      expect(settingsLink).toHaveAttribute("aria-current", "page");
-    });
-
     it("renders settings layout with all navigation items", () => {
       renderWithProviders(
         <Routes>
@@ -236,8 +220,7 @@ describe("UI Integration Tests", () => {
         { initialEntry: "/settings/profile" },
       );
 
-      // 侧边栏中有 "设置" 标题
-      expect(screen.getByText("设置")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
       expect(screen.getAllByText("通用").length).toBeGreaterThan(0);
       expect(screen.getAllByText("个人信息").length).toBeGreaterThan(0);
       expect(screen.getAllByText("修改密码").length).toBeGreaterThan(0);
@@ -271,12 +254,10 @@ describe("UI Integration Tests", () => {
         { initialEntry: "/settings/profile" },
       );
 
-      // Initially on profile page
       await waitFor(() => {
         expect(screen.getByText("修改你的头像、用户名和邮箱")).toBeInTheDocument();
       });
 
-      // Navigate to password page via link
       const passwordLinks = screen.getAllByRole("link", { name: /修改密码/i });
       expect(passwordLinks.length).toBeGreaterThan(0);
       fireEvent.click(passwordLinks[0]);
@@ -285,7 +266,6 @@ describe("UI Integration Tests", () => {
         expect(screen.getByText("设置新的登录密码")).toBeInTheDocument();
       });
 
-      // Navigate back to profile
       const profileLinks = screen.getAllByRole("link", { name: /个人信息/i });
       expect(profileLinks.length).toBeGreaterThan(0);
       fireEvent.click(profileLinks[0]);
@@ -300,61 +280,49 @@ describe("UI Integration Tests", () => {
     it("complete user journey: header elements are present", async () => {
       renderWithProviders(
         <Routes>
-          <Route path="/*" element={<>
-            <Header title="项目" />
-            <Routes>
-              <Route path="/settings/*" element={<SettingsLayout />}>
-                <Route path="ai" element={<AISettingsPage />} />
-                <Route path="profile" element={<ProfilePage />} />
-                <Route path="password" element={<PasswordPage />} />
-              </Route>
-            </Routes>
-          </>} />
+          <Route
+            path="/*"
+            element={
+              <>
+                <Header title="项目" />
+                <Routes>
+                  <Route path="/settings/*" element={<SettingsLayout />}>
+                    <Route path="ai" element={<AISettingsPage />} />
+                    <Route path="profile" element={<ProfilePage />} />
+                    <Route path="password" element={<PasswordPage />} />
+                  </Route>
+                </Routes>
+              </>
+            }
+          />
         </Routes>,
         { initialEntry: "/settings/profile" },
       );
 
-      // 1. Verify header is present with user nav and theme toggle
       expect(screen.getByRole("heading", { name: "项目" })).toBeInTheDocument();
-      
-      // 2. Verify buttons exist
-      const buttons = screen.getAllByRole("button");
-      expect(buttons.length).toBeGreaterThanOrEqual(2);
 
-      // 3. Verify settings navigation works
+      const buttons = screen.getAllByRole("button");
+      expect(buttons.length).toBeGreaterThanOrEqual(1);
+
       const links = screen.getAllByRole("link");
       expect(links.length).toBeGreaterThan(0);
     });
   });
 
   describe("Responsive Design Verification", () => {
-    it("header maintains structure with all interactive elements", () => {
+    it("header maintains structure with interactive elements", () => {
       renderWithProviders(<Header title="响应式测试" />);
 
-      // All key elements should be present
       expect(screen.getByRole("heading", { name: "响应式测试" })).toBeInTheDocument();
-      
-      // Buttons
-      const allButtons = screen.getAllByRole("button");
-      expect(allButtons.length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
     });
   });
 
   describe("Accessibility Checks", () => {
-    it("theme toggle has accessible label", () => {
-      renderWithProviders(<ThemeToggle />);
-
-      const buttons = screen.getAllByRole("button");
-      const themeButton = buttons.find(btn => 
-        btn.querySelector("svg") && btn.getAttribute("aria-haspopup") === "menu"
-      );
-      expect(themeButton).toBeInTheDocument();
-    });
-
     it("user nav avatar is accessible", () => {
       renderWithProviders(<UserNav />);
 
-      const avatarButton = screen.getByRole("button", { name: "T" });
+      const avatarButton = screen.getByRole("button", { name: /testuser/ });
       expect(avatarButton).toBeInTheDocument();
       expect(avatarButton).toHaveAttribute("aria-haspopup", "menu");
     });
@@ -370,11 +338,10 @@ describe("UI Integration Tests", () => {
         { initialEntry: "/settings/profile" },
       );
 
-      // Navigation items should be links (keyboard accessible)
       const links = screen.getAllByRole("link");
       expect(links.length).toBeGreaterThan(0);
-      
-      links.forEach(link => {
+
+      links.forEach((link) => {
         expect(link).toHaveAttribute("href");
       });
     });

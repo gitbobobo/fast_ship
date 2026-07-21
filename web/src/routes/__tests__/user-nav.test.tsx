@@ -3,11 +3,16 @@ import { screen, fireEvent, waitFor, render } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { UserNav } from "@/components/user-nav";
 import { useAuthStore } from "@/lib/store/auth-store";
+import { useThemeStore } from "@/lib/store/theme-store";
 import { authApi } from "@/lib/api/auth";
 
 // Mock modules
 vi.mock("@/lib/store/auth-store", () => ({
   useAuthStore: vi.fn(),
+}));
+
+vi.mock("@/lib/store/theme-store", () => ({
+  useThemeStore: vi.fn(),
 }));
 
 vi.mock("@/lib/api/auth", () => ({
@@ -23,6 +28,7 @@ function LocationDisplay() {
 }
 
 const mockLogout = vi.fn();
+const mockSetTheme = vi.fn();
 
 describe("UserNav Component", () => {
   const mockUser = {
@@ -38,6 +44,10 @@ describe("UserNav Component", () => {
       user: mockUser,
       logout: mockLogout,
     } as unknown as ReturnType<typeof useAuthStore>);
+    vi.mocked(useThemeStore).mockReturnValue({
+      theme: "system",
+      setTheme: mockSetTheme,
+    } as unknown as ReturnType<typeof useThemeStore>);
     vi.mocked(authApi.logout).mockResolvedValue({} as never);
   });
 
@@ -45,15 +55,15 @@ describe("UserNav Component", () => {
     vi.clearAllMocks();
   });
 
-  it("renders avatar button with user initial", () => {
+  it("renders avatar row with user initial and username", () => {
     render(
       <MemoryRouter>
         <UserNav />
       </MemoryRouter>,
     );
 
-    // Avatar button should have aria-haspopup="menu" and contain the initial
-    const avatarButton = screen.getByRole("button", { name: "J" });
+    // Avatar row button should have aria-haspopup="menu" and show the username
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
     expect(avatarButton).toBeInTheDocument();
     expect(avatarButton).toHaveAttribute("aria-haspopup", "menu");
     expect(screen.getByText("J")).toBeInTheDocument(); // 首字符大写
@@ -96,13 +106,14 @@ describe("UserNav Component", () => {
       </MemoryRouter>,
     );
 
-    const avatarButton = screen.getByRole("button", { name: "J" });
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
     fireEvent.click(avatarButton);
 
     await waitFor(() => {
-      expect(screen.getByText("john_doe")).toBeInTheDocument();
       expect(screen.getByText("john@example.com")).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: /个人信息/i })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: /设置/i })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: /主题/i })).toBeInTheDocument();
       expect(screen.getByRole("menuitem", { name: /登出/i })).toBeInTheDocument();
     });
   });
@@ -119,7 +130,7 @@ describe("UserNav Component", () => {
       </MemoryRouter>,
     );
 
-    const avatarButton = screen.getByRole("button", { name: "J" });
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
     fireEvent.click(avatarButton);
 
     await waitFor(() => {
@@ -131,6 +142,57 @@ describe("UserNav Component", () => {
     await waitFor(() => {
       expect(screen.getByTestId("location").textContent).toBe("/settings/profile");
     });
+  });
+
+  it("navigates to settings page when 设置 is clicked", async () => {
+    render(
+      <MemoryRouter initialEntries={["/projects"]}>
+        <Routes>
+          <Route path="/*" element={<>
+            <UserNav />
+            <LocationDisplay />
+          </>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
+    fireEvent.click(avatarButton);
+
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /设置/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /设置/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("location").textContent).toBe("/settings");
+    });
+  });
+
+  it("switches theme from the 主题 submenu", async () => {
+    render(
+      <MemoryRouter>
+        <UserNav />
+      </MemoryRouter>,
+    );
+
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
+    fireEvent.click(avatarButton);
+
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /主题/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /主题/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /深色/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /深色/i }));
+
+    expect(mockSetTheme).toHaveBeenCalledWith("dark");
   });
 
   it("calls logout and navigates to login when 登出 is clicked", async () => {
@@ -146,7 +208,7 @@ describe("UserNav Component", () => {
       </MemoryRouter>,
     );
 
-    const avatarButton = screen.getByRole("button", { name: "J" });
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
     fireEvent.click(avatarButton);
 
     await waitFor(() => {
@@ -172,11 +234,11 @@ describe("UserNav Component", () => {
       </MemoryRouter>,
     );
 
-    const avatarButton = screen.getByRole("button", { name: "J" });
+    const avatarButton = screen.getByRole("button", { name: /john_doe/ });
     fireEvent.click(avatarButton);
 
     await waitFor(() => {
-      expect(screen.getByText("john_doe")).toBeInTheDocument();
+      expect(screen.getAllByText("john_doe").length).toBeGreaterThan(0);
       expect(screen.getByText("john@example.com")).toBeInTheDocument();
     });
   });
@@ -196,6 +258,10 @@ describe("Header Integration", () => {
       user: mockUser,
       logout: mockLogout,
     } as unknown as ReturnType<typeof useAuthStore>);
+    vi.mocked(useThemeStore).mockReturnValue({
+      theme: "system",
+      setTheme: mockSetTheme,
+    } as unknown as ReturnType<typeof useThemeStore>);
   });
 
   afterEach(() => {

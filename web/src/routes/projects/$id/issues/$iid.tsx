@@ -37,6 +37,7 @@ import {
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -1443,108 +1444,112 @@ export default function IssueDetailPage() {
 
   return (
     <>
-      <Header title="问题详情" />
-      <div className="mx-auto w-full max-w-7xl p-4 md:p-6">
-        {/* Top Navigation Bar */}
-        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="mr-2 flex items-center gap-1">
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!previousIssue}
-                onClick={() => previousIssue && navigateToIssue(previousIssue.id)}
-                title={previousIssue ? previousIssue.reference : "没有上一条"}
-              >
-                <ChevronLeft className="mr-1.5 h-3.5 w-3.5" />
-                上一条
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!nextIssue}
-                onClick={() => nextIssue && navigateToIssue(nextIssue.id)}
-                title={nextIssue ? nextIssue.reference : "没有下一条"}
-              >
-                下一条
-                <ChevronRight className="ml-1.5 h-3.5 w-3.5" />
-              </Button>
-            </div>
-
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <Button variant="outline" size="icon-sm" aria-label="更多">
-                    <Ellipsis className="h-4 w-4" />
-                  </Button>
-                }
-              />
-              <DropdownMenuContent align="end" className="w-44">
-                {isInternalIssue && (
-                  <DropdownMenuItem
-                    onClick={() =>
-                      navigate({
-                        pathname: `/projects/${id}/issues/${iid}/edit`,
-                        search: location.search,
-                      })
-                    }
+      <Header
+        title="问题详情"
+        actions={
+          <HeaderActions
+            primary={
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="mr-2 flex items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!previousIssue}
+                    onClick={() => previousIssue && navigateToIssue(previousIssue.id)}
+                    title={previousIssue ? previousIssue.reference : "没有上一条"}
                   >
-                    <Pencil className="h-4 w-4" />
-                    编辑问题
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
-                  onClick={() => void handleToggleIssueState()}
-                  disabled={updateIssue.isPending}
-                >
-                  {issue.state === "open" ? <CheckCircle2 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}
-                  {issue.state === "open" ? "关闭问题" : "重新打开"}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => void handleCopyCurrentViewLink()}>
-                  <Copy className="h-4 w-4" />
-                  复制链接
-                </DropdownMenuItem>
-                {issue.github?.html_url && (
-                  <DropdownMenuItem onClick={() => void handleCopyGitHubLink()}>
-                    <Link2 className="h-4 w-4" />
-                    复制 GitHub 深链接
-                  </DropdownMenuItem>
-                )}
-                {issue.source === "github" && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      onClick={handleSync}
-                      disabled={syncIssues.isPending}
-                    >
-                      <RefreshCw className={cn("h-4 w-4", syncIssues.isPending && "animate-spin")} />
-                      {syncIssues.isPending ? "同步中..." : "重新同步"}
-                    </DropdownMenuItem>
-                  </>
-                )}
-                {issue.github?.html_url && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      render={
-                        <a
-                          href={issue.github.html_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        />
-                      }
-                    >
-                      <ExternalLink className="h-4 w-4" />
-                      在 GitHub 查看
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
+                    <ChevronLeft className="mr-1.5 h-3.5 w-3.5" />
+                    上一条
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={!nextIssue}
+                    onClick={() => nextIssue && navigateToIssue(nextIssue.id)}
+                    title={nextIssue ? nextIssue.reference : "没有下一条"}
+                  >
+                    下一条
+                    <ChevronRight className="ml-1.5 h-3.5 w-3.5" />
+                  </Button>
+                </div>
 
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <Button variant="outline" size="icon-sm" aria-label="更多">
+                        <Ellipsis className="h-4 w-4" />
+                      </Button>
+                    }
+                  />
+                  <DropdownMenuContent align="end" className="w-44">
+                    {isInternalIssue && (
+                      <DropdownMenuItem
+                        onClick={() =>
+                          navigate({
+                            pathname: `/projects/${id}/issues/${iid}/edit`,
+                            search: location.search,
+                          })
+                        }
+                      >
+                        <Pencil className="h-4 w-4" />
+                        编辑问题
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuItem
+                      onClick={() => void handleToggleIssueState()}
+                      disabled={updateIssue.isPending}
+                    >
+                      {issue.state === "open" ? <CheckCircle2 className="h-4 w-4" /> : <Inbox className="h-4 w-4" />}
+                      {issue.state === "open" ? "关闭问题" : "重新打开"}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => void handleCopyCurrentViewLink()}>
+                      <Copy className="h-4 w-4" />
+                      复制链接
+                    </DropdownMenuItem>
+                    {issue.github?.html_url && (
+                      <DropdownMenuItem onClick={() => void handleCopyGitHubLink()}>
+                        <Link2 className="h-4 w-4" />
+                        复制 GitHub 深链接
+                      </DropdownMenuItem>
+                    )}
+                    {issue.source === "github" && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onClick={handleSync}
+                          disabled={syncIssues.isPending}
+                        >
+                          <RefreshCw className={cn("h-4 w-4", syncIssues.isPending && "animate-spin")} />
+                          {syncIssues.isPending ? "同步中..." : "重新同步"}
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                    {issue.github?.html_url && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          render={
+                            <a
+                              href={issue.github.html_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            />
+                          }
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          在 GitHub 查看
+                        </DropdownMenuItem>
+                      </>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            }
+          />
+        }
+      />
+      <div className="mx-auto w-full max-w-7xl p-4 md:p-6">
         <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
           {/* Main Content */}
           <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>

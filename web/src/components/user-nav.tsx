@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import { User, LogOut } from "lucide-react";
+import { User, LogOut, Settings, Sun, Moon, Monitor } from "lucide-react";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -7,13 +7,31 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useAuthStore } from "@/lib/store/auth-store";
+import { useThemeStore, type Theme } from "@/lib/store/theme-store";
 import { authApi } from "@/lib/api/auth";
+import { cn } from "@/lib/utils";
 
-export function UserNav() {
+const themes: { value: Theme; label: string; icon: typeof Sun }[] = [
+  { value: "light", label: "浅色", icon: Sun },
+  { value: "dark", label: "深色", icon: Moon },
+  { value: "system", label: "跟随系统", icon: Monitor },
+];
+
+export function UserNav({
+  menuSide = "bottom",
+  collapsed = false,
+}: {
+  menuSide?: "top" | "right" | "bottom" | "left";
+  collapsed?: boolean;
+}) {
   const { user, token, refreshToken, logout } = useAuthStore();
+  const { theme, setTheme } = useThemeStore();
   const navigate = useNavigate();
 
   const handleLogout = async () => {
@@ -33,12 +51,20 @@ export function UserNav() {
     ? `${user.avatar_url}?token=${token}`
     : undefined;
 
+  const ThemeIcon = themes.find((t) => t.value === theme)?.icon ?? Sun;
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
         render={
-          <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full">
-            <Avatar className="h-8 w-8">
+          <Button
+            variant="ghost"
+            className={cn(
+              "h-auto w-full rounded-none py-1.5",
+              collapsed ? "justify-center px-2" : "justify-start gap-3 px-3"
+            )}
+          >
+            <Avatar className="h-7 w-7 shrink-0">
               {avatarSrc && (
                 <AvatarImage src={avatarSrc} alt={user?.username} />
               )}
@@ -46,10 +72,18 @@ export function UserNav() {
                 {initial}
               </AvatarFallback>
             </Avatar>
+            <span
+              className={cn(
+                "truncate text-sm font-medium transition-all duration-200 overflow-hidden whitespace-nowrap",
+                collapsed ? "max-w-0 opacity-0" : "max-w-[120px] opacity-100"
+              )}
+            >
+              {user?.username}
+            </span>
           </Button>
         }
       />
-      <DropdownMenuContent align="end" className="w-40">
+      <DropdownMenuContent align="end" side={menuSide} className="w-40">
         <div className="flex items-center gap-2 px-2 py-1.5">
           <div className="flex flex-col space-y-0.5">
             <p className="text-sm font-medium leading-none">{user?.username}</p>
@@ -62,6 +96,10 @@ export function UserNav() {
         <DropdownMenuItem onClick={() => navigate("/settings/profile")}>
           <User className="mr-2 h-4 w-4" />
           个人信息
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => navigate("/settings")}>
+          <Settings className="mr-2 h-4 w-4" />
+          设置
         </DropdownMenuItem>
         <DropdownMenuItem
           onClick={() =>
@@ -82,6 +120,25 @@ export function UserNav() {
           </svg>
           Github 仓库
         </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <ThemeIcon className="mr-2 h-4 w-4" />
+            主题
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            {themes.map((t) => (
+              <DropdownMenuItem
+                key={t.value}
+                onClick={() => setTheme(t.value)}
+                className={theme === t.value ? "bg-accent" : ""}
+              >
+                <t.icon className="mr-2 h-4 w-4" />
+                {t.label}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={handleLogout}>
           <LogOut className="mr-2 h-4 w-4" />

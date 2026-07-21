@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router";
-import { Tag, Pencil, Eye } from "lucide-react";
+import { Tag, Pencil, Eye, Rocket } from "lucide-react";
 import { Header } from "@/components/layout/header";
+import { HeaderActions } from "@/components/layout/header-actions";
 import { GitHubContent } from "@/components/github-content";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -294,7 +295,27 @@ export default function VersionDetailPage() {
 
   return (
     <>
-      <Header title={`版本 ${version.version_number}`} />
+      <Header
+        title={`版本 ${version.version_number}`}
+        actions={
+          isPending ? (
+            <HeaderActions
+              primary={
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    if (ensureGitHubLinked(currentProject, "发货")) setShipDialogOpen(true);
+                  }}
+                  disabled={isShipping}
+                >
+                  <Rocket className="mr-1.5 h-3.5 w-3.5" />
+                  {isShipping ? "发货中" : "发货"}
+                </Button>
+              }
+            />
+          ) : undefined
+        }
+      />
       <div className="mx-auto max-w-7xl p-4 md:p-6">
 
         {/* 主体两栏 */}
@@ -429,9 +450,6 @@ export default function VersionDetailPage() {
             targetCommitish={version.target_commitish}
             onUpdateTargetCommitish={handleUpdateTargetCommitish}
             onDeleteVersion={handleDeleteVersion}
-            onShipDialogOpen={() => {
-              if (ensureGitHubLinked(currentProject, "发货")) setShipDialogOpen(true);
-            }}
           />
         </div>
 

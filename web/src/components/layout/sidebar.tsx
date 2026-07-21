@@ -1,9 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router";
 import {
   LayoutDashboard,
   Package,
-  Settings,
   Rocket,
   Tags,
   Bug,
@@ -18,6 +17,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { UserNav } from "@/components/user-nav";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
 import { cn } from "@/lib/utils";
 
@@ -29,8 +29,6 @@ const navItems = [
   { to: "/board", label: "看板", icon: Kanban, end: true },
   { to: "/versions", label: "版本", icon: Tags, end: true },
 ];
-
-const bottomNavItems = [{ to: "/settings", label: "设置", icon: Settings }];
 
 function SidebarNavItem({
   item,
@@ -85,6 +83,44 @@ function SidebarNavItem({
   return link;
 }
 
+function SidebarControl({
+  collapsed,
+  label,
+  children,
+}: {
+  collapsed: boolean;
+  label: string;
+  children: ReactNode;
+}) {
+  if (!collapsed) {
+    return <>{children}</>;
+  }
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={<div className="flex justify-center">{children}</div>}
+      />
+      <TooltipContent side="right">{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function SidebarBottom({ collapsed }: { collapsed: boolean }) {
+  const menuSide = collapsed ? "right" : "top";
+
+  return (
+    <div
+      data-testid="sidebar-bottom"
+      className="border-t transition-all duration-200"
+    >
+      <SidebarControl collapsed={collapsed} label="用户菜单">
+        <UserNav menuSide={menuSide} collapsed={collapsed} />
+      </SidebarControl>
+    </div>
+  );
+}
+
 function NavContent({
   collapsed,
   onNavigate,
@@ -122,21 +158,7 @@ function NavContent({
           />
         ))}
       </nav>
-      <div
-        className={cn(
-          "space-y-1 transition-all duration-200",
-          collapsed ? "p-2" : "p-3"
-        )}
-      >
-        {bottomNavItems.map((item) => (
-          <SidebarNavItem
-            key={item.to}
-            item={item}
-            collapsed={!!collapsed}
-            onNavigate={onNavigate}
-          />
-        ))}
-      </div>
+      <SidebarBottom collapsed={!!collapsed} />
     </div>
   );
 }

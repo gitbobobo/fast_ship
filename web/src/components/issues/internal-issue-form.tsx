@@ -33,7 +33,10 @@ export type InternalIssueFormInput = z.infer<typeof internalIssueFormSchema>;
 
 interface InternalIssueFormProps {
   defaultValues?: Partial<InternalIssueFormInput>;
+  formId?: string;
+  hideSubmitButton?: boolean;
   isSubmitting?: boolean;
+  onBusyChange?: (busy: boolean) => void;
   onPasteImage?: (file: File) => Promise<string>;
   onSubmit: (values: InternalIssueFormInput) => Promise<void> | void;
   showWorkflowStatus?: boolean;
@@ -45,7 +48,10 @@ interface InternalIssueFormProps {
 
 export function InternalIssueForm({
   defaultValues,
+  formId,
+  hideSubmitButton = false,
   isSubmitting = false,
+  onBusyChange,
   onPasteImage,
   onSubmit,
   showWorkflowStatus = false,
@@ -116,6 +122,14 @@ export function InternalIssueForm({
   } | null>(null);
   const isBusy = isSubmitting || pendingUploadCount > 0;
 
+  const notifyBusyChange = useEffectEvent((busy: boolean) => {
+    onBusyChange?.(busy);
+  });
+
+  useEffect(() => {
+    notifyBusyChange(isBusy);
+  }, [isBusy]);
+
   const handlePasteImage = onPasteImage
     ? (file: File) => {
         const uploadPromise = onPasteImage(file);
@@ -184,12 +198,14 @@ export function InternalIssueForm({
   }, [pendingUploadCount, submitRequested, uploadErrorCount]);
 
   return (
-    <form className="space-y-6" onSubmit={handleFormSubmit}>
-      <div className="flex items-center justify-end">
-        <Button type="submit" disabled={isBusy} data-testid="issue-form-submit">
-          {isBusy ? "保存中..." : submitLabel}
-        </Button>
-      </div>
+    <form id={formId} className="space-y-6" onSubmit={handleFormSubmit}>
+      {!hideSubmitButton && (
+        <div className="flex items-center justify-end">
+          <Button type="submit" disabled={isBusy} data-testid="issue-form-submit">
+            {isBusy ? "保存中..." : submitLabel}
+          </Button>
+        </div>
+      )}
 
       {projectName && (
         <div className="space-y-2">

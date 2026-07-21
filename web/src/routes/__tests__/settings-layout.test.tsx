@@ -1,25 +1,29 @@
 import { describe, it, expect, vi } from "vitest";
 import { screen, waitFor, fireEvent, render } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
-import SettingsLayout from "@/routes/settings/layout";
+import SettingsLayout, { SettingsPageShell } from "@/routes/settings/layout";
 
 vi.mock("@/components/layout/header", () => ({
   Header: ({ title }: { title?: string }) => <header>{title}</header>,
 }));
+
+function Page({ children }: { children: React.ReactNode }) {
+  return <SettingsPageShell>{children}</SettingsPageShell>;
+}
 
 function renderWithRouter(initialEntry = "/settings") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route path="/settings" element={<SettingsLayout />}>
-          <Route path="general" element={<div>管理应用的基本设置</div>} />
-          <Route path="profile" element={<div>修改你的头像、用户名和邮箱</div>} />
-          <Route path="password" element={<div>设置新的登录密码</div>} />
+          <Route path="general" element={<Page>管理应用的基本设置</Page>} />
+          <Route path="profile" element={<Page>修改你的头像、用户名和邮箱</Page>} />
+          <Route path="password" element={<Page>设置新的登录密码</Page>} />
           <Route
             path="ai"
-            element={<div>配置 MiniMax 接口，用于问题详情页的智能识别建议。</div>}
+            element={<Page>配置 MiniMax 接口，用于问题详情页的智能识别建议。</Page>}
           />
-          <Route path="api-keys" element={<div>API Key 管理</div>} />
+          <Route path="api-keys" element={<Page>API Key 管理</Page>} />
         </Route>
       </Routes>
     </MemoryRouter>,

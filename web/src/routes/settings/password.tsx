@@ -4,6 +4,8 @@ import { z } from "zod/v4";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { HeaderActions } from "@/components/layout/header-actions";
+import { SettingsPageShell } from "@/routes/settings/layout";
 import { authApi } from "@/lib/api/auth";
 import { toast } from "sonner";
 
@@ -49,56 +51,65 @@ export default function PasswordPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-medium">修改密码</h2>
-        <p className="text-sm text-muted-foreground">设置新的登录密码</p>
-      </div>
+    <SettingsPageShell
+      actions={
+        <HeaderActions
+          primary={
+            <Button type="submit" form="password-form" size="sm" disabled={isSubmitting}>
+              {isSubmitting ? "修改中..." : "修改密码"}
+            </Button>
+          }
+        />
+      }
+    >
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-lg font-medium">修改密码</h2>
+          <p className="text-sm text-muted-foreground">设置新的登录密码</p>
+        </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 max-w-xl">
-        <div className="space-y-2">
-          <Label htmlFor="old_password">当前密码</Label>
-          <Input
-            id="old_password"
-            type="password"
-            {...register("old_password")}
-          />
-          {errors.old_password && (
-            <p className="text-xs text-destructive">
-              {errors.old_password.message}
-            </p>
-          )}
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="new_password">新密码</Label>
-          <Input
-            id="new_password"
-            type="password"
-            {...register("new_password")}
-          />
-          {errors.new_password && (
-            <p className="text-xs text-destructive">
-              {errors.new_password.message}
-            </p>
-          )}
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="confirm_password">确认新密码</Label>
-          <Input
-            id="confirm_password"
-            type="password"
-            {...register("confirm_password")}
-          />
-          {errors.confirm_password && (
-            <p className="text-xs text-destructive">
-              {errors.confirm_password.message}
-            </p>
-          )}
-        </div>
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? "修改中..." : "修改密码"}
-        </Button>
-      </form>
-    </div>
+        <form id="password-form" onSubmit={handleSubmit(onSubmit)} className="space-y-4 max-w-xl">
+          <div className="space-y-2">
+            <Label htmlFor="old_password">当前密码</Label>
+            <Input
+              id="old_password"
+              type="password"
+              {...register("old_password")}
+            />
+            {errors.old_password && (
+              <p className="text-xs text-destructive">
+                {errors.old_password.message}
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="new_password">新密码</Label>
+            <Input
+              id="new_password"
+              type="password"
+              {...register("new_password")}
+            />
+            {errors.new_password && (
+              <p className="text-xs text-destructive">
+                {errors.new_password.message}
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="confirm_password">确认新密码</Label>
+            <Input
+              id="confirm_password"
+              type="password"
+              {...register("confirm_password")}
+            />
+            {errors.confirm_password && (
+              <p className="text-xs text-destructive">
+                {errors.confirm_password.message}
+              </p>
+            )}
+          </div>
+        </form>
+      </div>
+    </SettingsPageShell>
   );
 }

@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { HeaderActions } from "@/components/layout/header-actions";
+import { SettingsPageShell } from "@/routes/settings/layout";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { authApi } from "@/lib/api/auth";
 import { toast } from "sonner";
@@ -95,67 +97,76 @@ export default function ProfilePage() {
   const initial = user?.username?.charAt(0).toUpperCase() || "U";
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-medium">个人信息</h2>
-        <p className="text-sm text-muted-foreground">修改你的头像、用户名和邮箱</p>
-      </div>
-
-      <div className="flex flex-col items-start gap-4">
-        <div className="relative">
-          <Avatar
-            className="h-20 w-20 cursor-pointer"
-            onClick={handleAvatarClick}
-          >
-            {avatarSrc && <AvatarImage src={avatarSrc} alt={user?.username} />}
-            <AvatarFallback className="bg-primary text-primary-foreground text-2xl font-medium">
-              {initial}
-            </AvatarFallback>
-          </Avatar>
-          <button
-            type="button"
-            onClick={handleAvatarClick}
-            disabled={uploading}
-            className="absolute -right-1 -bottom-1 flex h-7 w-7 items-center justify-center rounded-full bg-background border shadow-sm hover:bg-accent disabled:opacity-50"
-          >
-            <Camera className="h-3.5 w-3.5" />
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/jpeg,image/png,image/gif,image/webp"
-            className="hidden"
-            onChange={handleAvatarChange}
-          />
+    <SettingsPageShell
+      actions={
+        <HeaderActions
+          primary={
+            <Button type="submit" form="profile-form" size="sm" disabled={isSubmitting}>
+              {isSubmitting ? "保存中..." : "保存"}
+            </Button>
+          }
+        />
+      }
+    >
+      <div className="space-y-6">
+        <div>
+          <h2 className="text-lg font-medium">个人信息</h2>
+          <p className="text-sm text-muted-foreground">修改你的头像、用户名和邮箱</p>
         </div>
-        {uploading && (
-          <p className="text-xs text-muted-foreground">上传中...</p>
-        )}
-      </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 max-w-xl">
-        <div className="space-y-2">
-          <Label htmlFor="username">用户名</Label>
-          <Input id="username" {...register("username")} />
-          {errors.username && (
-            <p className="text-xs text-destructive">
-              {errors.username.message}
-            </p>
+        <div className="flex flex-col items-start gap-4">
+          <div className="relative">
+            <Avatar
+              className="h-20 w-20 cursor-pointer"
+              onClick={handleAvatarClick}
+            >
+              {avatarSrc && <AvatarImage src={avatarSrc} alt={user?.username} />}
+              <AvatarFallback className="bg-primary text-primary-foreground text-2xl font-medium">
+                {initial}
+              </AvatarFallback>
+            </Avatar>
+            <button
+              type="button"
+              onClick={handleAvatarClick}
+              disabled={uploading}
+              className="absolute -right-1 -bottom-1 flex h-7 w-7 items-center justify-center rounded-full bg-background border shadow-sm hover:bg-accent disabled:opacity-50"
+            >
+              <Camera className="h-3.5 w-3.5" />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp"
+              className="hidden"
+              onChange={handleAvatarChange}
+            />
+          </div>
+          {uploading && (
+            <p className="text-xs text-muted-foreground">上传中...</p>
           )}
         </div>
-        <div className="space-y-2">
-          <Label htmlFor="email">邮箱</Label>
-          <Input id="email" type="email" {...register("email")} />
-          {errors.email && (
-            <p className="text-xs text-destructive">
-              {errors.email.message}
-            </p>
-          )}
-        </div>
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? "保存中..." : "保存"}
-        </Button>
-      </form>
-    </div>
+
+        <form id="profile-form" onSubmit={handleSubmit(onSubmit)} className="space-y-4 max-w-xl">
+          <div className="space-y-2">
+            <Label htmlFor="username">用户名</Label>
+            <Input id="username" {...register("username")} />
+            {errors.username && (
+              <p className="text-xs text-destructive">
+                {errors.username.message}
+              </p>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="email">邮箱</Label>
+            <Input id="email" type="email" {...register("email")} />
+            {errors.email && (
+              <p className="text-xs text-destructive">
+                {errors.email.message}
+              </p>
+            )}
+          </div>
+        </form>
+      </div>
+    </SettingsPageShell>
   );
 }
