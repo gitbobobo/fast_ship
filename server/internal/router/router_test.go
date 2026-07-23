@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -644,6 +645,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueCollabSummary{},
 		&model.LogBatch{},
 		&model.LogEntry{},
+		&model.Document{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -656,6 +658,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_log_batches_project_run ON log_batches(project_id, run_id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
@@ -702,8 +705,10 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
+	documentRepo := repository.NewDocumentRepository(db)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
+	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
@@ -717,11 +722,12 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueHandler := handler.NewIssueHandler(issueService)
 	issueCollabHandler := handler.NewIssueCollabHandler(issueCollabService)
 	logHandler := handler.NewLogHandler(logService)
+	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
@@ -1324,5 +1330,135 @@ func TestRouterLogUploadRejectsCrossUserAPIKey(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for cross-user upload, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRouterDocumentCRUDJWTAndAPIKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "doc-user", "docuser@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+
+	rawKey := "DOCROUTERKEY1234567890"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    auth.UserID,
+		Name:      "CI-Docs",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	apiKeyAuth := "Bearer " + service.FormatApiKey(rawKey)
+	jwtAuth := "Bearer " + auth.Token
+
+	doReq := func(method, authHeader, path string, body []byte) *httptest.ResponseRecorder {
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, reader)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Authorization", authHeader)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := doReq(http.MethodGet, "", "/api/projects/"+project.ID+"/documents", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth list expected 401, got %d", rec.Code)
+	}
+
+	createBody := []byte(`{"title":"Root Doc","body":"md body"}`)
+	rec := doReq(http.MethodPost, jwtAuth, "/api/projects/"+project.ID+"/documents", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("JWT create expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var root struct {
+		ID       string  `json:"id"`
+		Title    string  `json:"title"`
+		Body     string  `json:"body"`
+		ParentID *string `json:"parent_id"`
+	}
+	decodeRouterEnvelope(t, rec, &root)
+	if root.Title != "Root Doc" || root.Body != "md body" || root.ParentID != nil {
+		t.Fatalf("unexpected root: %+v", root)
+	}
+
+	childBody := []byte(`{"title":"Child","parent_id":"` + root.ID + `"}`)
+	rec = doReq(http.MethodPost, apiKeyAuth, "/api/projects/"+project.ID+"/documents", childBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("API key create child expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var child struct {
+		ID       string  `json:"id"`
+		ParentID *string `json:"parent_id"`
+	}
+	decodeRouterEnvelope(t, rec, &child)
+	if child.ParentID == nil || *child.ParentID != root.ID {
+		t.Fatalf("unexpected child: %+v", child)
+	}
+
+	listRec := doReq(http.MethodGet, apiKeyAuth, "/api/projects/"+project.ID+"/documents", nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list expected 200, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+	if strings.Contains(listRec.Body.String(), `"body"`) {
+		t.Fatalf("list response should not include body key: %s", listRec.Body.String())
+	}
+
+	getRec := doReq(http.MethodGet, jwtAuth, "/api/documents/"+root.ID, nil)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get expected 200, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+
+	updateBody := []byte(`{"title":"Root Updated","body":"","parent_id":null}`)
+	moveBody := []byte(`{"parent_id":null}`)
+	moveRec := doReq(http.MethodPut, apiKeyAuth, "/api/documents/"+child.ID, moveBody)
+	if moveRec.Code != http.StatusOK {
+		t.Fatalf("move to root expected 200, got %d: %s", moveRec.Code, moveRec.Body.String())
+	}
+	var moved struct {
+		ParentID *string `json:"parent_id"`
+	}
+	decodeRouterEnvelope(t, moveRec, &moved)
+	if moved.ParentID != nil {
+		t.Fatalf("expected null parent, got %+v", moved.ParentID)
+	}
+
+	updateRec := doReq(http.MethodPut, jwtAuth, "/api/documents/"+root.ID, updateBody)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update expected 200, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+
+	reattach := []byte(`{"parent_id":"` + root.ID + `"}`)
+	if rec := doReq(http.MethodPut, jwtAuth, "/api/documents/"+child.ID, reattach); rec.Code != http.StatusOK {
+		t.Fatalf("reattach expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	delRec := doReq(http.MethodDelete, apiKeyAuth, "/api/documents/"+root.ID, nil)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("delete expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+	if rec := doReq(http.MethodGet, jwtAuth, "/api/documents/"+child.ID, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("cascaded child expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRouterDocumentRejectsOversizedBody(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "doc-big", "docbig@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+
+	body := []byte(`{"title":"big","body":"` + strings.Repeat("a", 1<<20) + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/documents", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+auth.Token)
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

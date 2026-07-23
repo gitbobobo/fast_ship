@@ -21,6 +21,7 @@ func Setup(
 	issueHandler *handler.IssueHandler,
 	issueCollabHandler *handler.IssueCollabHandler,
 	logHandler *handler.LogHandler,
+	documentHandler *handler.DocumentHandler,
 	artifactHandler *handler.ArtifactHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	authService *service.AuthService,
@@ -154,6 +155,13 @@ func Setup(
 		api.DELETE("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteByProject)
 		api.GET("/log-batches/:batch_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.GetBatch)
 		api.DELETE("/log-batches/:batch_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteBatch)
+
+		// JWT / API Key 均可 — 文档
+		api.GET("/projects/:id/documents", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.List)
+		api.POST("/projects/:id/documents", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Create)
+		api.GET("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Get)
+		api.PUT("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Update)
+		api.DELETE("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Delete)
 	}
 
 	setupWebRoutes(r, cfg.Server.WebDistDir)

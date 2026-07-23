@@ -331,6 +331,30 @@ interface LogBatch {
   uploader_api_key_id?: string | null;
 }
 
+interface DocumentListItem {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DocumentDetail {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  title: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DocumentListData {
+  items: DocumentListItem[];
+  total: number;
+}
+
 interface DashboardOverview {
   open_issues_by_project: DashboardProjectOpenIssuePoint[];
   daily_resolved: DashboardDailyResolvedPoint[];

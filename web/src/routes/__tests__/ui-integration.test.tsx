@@ -208,6 +208,23 @@ describe("UI Integration Tests", () => {
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 
+    it("renders documents sidebar item and keeps it active on /documents", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/documents" });
+
+      const docsLink = document.querySelector('a[href="/documents"]');
+      expect(docsLink).toHaveTextContent(/文档/);
+      expect(docsLink).toHaveAttribute("aria-current", "page");
+    });
+
+    it("keeps documents sidebar item active with query params", () => {
+      renderWithProviders(<Sidebar />, {
+        initialEntry: "/documents?project=p1&doc=d1",
+      });
+
+      const docsLink = document.querySelector('a[href="/documents"]');
+      expect(docsLink).toHaveAttribute("aria-current", "page");
+    });
+
     it("keeps logs sidebar item active on /logs/:batchId", () => {
       renderWithProviders(<Sidebar />, {
         initialEntry: "/logs/batch-123",

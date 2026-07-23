@@ -100,6 +100,7 @@ func main() {
 		&model.IssueCollabSummary{},
 		&model.LogBatch{},
 		&model.LogEntry{},
+		&model.Document{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %v", err)
 	}
@@ -115,6 +116,7 @@ func main() {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_log_batches_project_run ON log_batches(project_id, run_id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_batches_project_last_entry ON log_batches(project_id, last_entry_at DESC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_batch_timestamp ON log_entries(batch_id, timestamp ASC)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 
 	dropLegacyCollabTables(db, zapLogger)
 
@@ -150,6 +152,7 @@ func main() {
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
+	documentRepo := repository.NewDocumentRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
@@ -164,6 +167,7 @@ func main() {
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zapLogger)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
+	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
@@ -178,6 +182,7 @@ func main() {
 	issueHandler := handler.NewIssueHandler(issueService)
 	issueCollabHandler := handler.NewIssueCollabHandler(issueCollabService)
 	logHandler := handler.NewLogHandler(logService)
+	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
@@ -243,7 +248,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

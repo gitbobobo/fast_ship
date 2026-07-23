@@ -48,4 +48,14 @@ describe("App routing defaults", () => {
       "/dashboard",
     );
   });
+
+  it("registers the documents route", async () => {
+    browserEntries.splice(0, browserEntries.length, "/documents");
+
+    render(<App />);
+
+    expect(await screen.findByTestId("navigate-target")).toHaveTextContent(
+      "/login",
+    );
+  });
 });
