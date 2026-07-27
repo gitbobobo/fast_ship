@@ -393,6 +393,60 @@ func TestIssueServiceUpdateInternalMeta_ReflectsInGetAndList(t *testing.T) {
 	}
 }
 
+func TestIssueServiceUpdateInternalMeta_UpdatesIssueTimestamp(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, "user-1")
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	resp, err := svc.issueService.UpdateInternalMeta(issue.ID, project.UserID, model.IssueWorkflowStatusInProgress, "test")
+	if err != nil {
+		t.Fatalf("update internal meta: %v", err)
+	}
+
+	updated, err := svc.issueRepo.FindByID(issue.ID)
+	if err != nil {
+		t.Fatalf("reload issue: %v", err)
+	}
+
+	// (a) 主表 updated_at 推进。
+	if !updated.UpdatedAt.After(issue.UpdatedAt) {
+		t.Fatalf("expected issue updated_at to advance past %v, got %v", issue.UpdatedAt, updated.UpdatedAt)
+	}
+
+	// (b) 主表业务字段未被定向 UPDATE 改动。
+	if updated.Title != issue.Title {
+		t.Fatalf("expected title unchanged %q, got %q", issue.Title, updated.Title)
+	}
+	if updated.Body != issue.Body {
+		t.Fatalf("expected body unchanged %q, got %q", issue.Body, updated.Body)
+	}
+	if updated.State != issue.State {
+		t.Fatalf("expected state unchanged %q, got %q", issue.State, updated.State)
+	}
+	if updated.Source != issue.Source {
+		t.Fatalf("expected source unchanged %q, got %q", issue.Source, updated.Source)
+	}
+	if updated.AuthorLogin != issue.AuthorLogin {
+		t.Fatalf("expected author_login unchanged %q, got %q", issue.AuthorLogin, updated.AuthorLogin)
+	}
+	if updated.SequenceNumber != issue.SequenceNumber {
+		t.Fatalf("expected sequence_number unchanged %d, got %d", issue.SequenceNumber, updated.SequenceNumber)
+	}
+
+	// (c) 主表 updated_at 与响应中的 meta updated_at 一致（均来自同一次 now）。
+	if resp.UpdatedAt == nil {
+		t.Fatalf("expected response updated_at to be set")
+	}
+	respUpdatedAt, err := time.Parse(time.RFC3339, *resp.UpdatedAt)
+	if err != nil {
+		t.Fatalf("parse response updated_at %q: %v", *resp.UpdatedAt, err)
+	}
+	if !respUpdatedAt.Equal(updated.UpdatedAt.Truncate(time.Second)) {
+		t.Fatalf("expected response updated_at %v to equal issue updated_at %v", respUpdatedAt, updated.UpdatedAt)
+	}
+}
+
 func TestIssueServiceUpdateInternalMeta_KeepsFirstCompletedAtAcrossReopen(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")

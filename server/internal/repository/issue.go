@@ -40,6 +40,11 @@ func (r *IssueRepository) SaveTx(tx *gorm.DB, issue *model.Issue) error {
 	return tx.Save(issue).Error
 }
 
+// TouchUpdatedAt 仅刷新某个 issue 的 updated_at，用于在不改动主表业务字段时反映状态变更。
+func (r *IssueRepository) TouchUpdatedAt(tx *gorm.DB, id string, at time.Time) error {
+	return tx.Model(&model.Issue{}).Where("id = ?", id).Update("updated_at", at).Error
+}
+
 func (r *IssueRepository) FindByID(id string) (*model.Issue, error) {
 	var issue model.Issue
 	if err := r.db.Preload("GitHubMeta").Where("id = ?", id).First(&issue).Error; err != nil {

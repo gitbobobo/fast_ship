@@ -1310,7 +1310,16 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 	meta.UpdatedAt = now
 	applyExplicitWorkflowStatus(meta, workflowStatus, now)
 
-	if err := s.internalMetaRepo.Upsert(meta); err != nil {
+	// 同步刷新 issues 主表的 updated_at（仅此一列），使看板按 updated_at DESC 排序时能反映状态变更。
+	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := s.internalMetaRepo.UpsertTx(tx, meta); err != nil {
+			return err
+		}
+		if err := s.issueRepo.TouchUpdatedAt(tx, issue.ID, now); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
 		return nil, errs.ErrInternal
 	}
 
