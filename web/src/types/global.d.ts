@@ -390,3 +390,13 @@ interface PaginatedData<T> {
   page: number;
   page_size: number;
 }
+
+interface IssuePrompt {
+  id: string;
+  name: string;
+  content: string;
+}
+
+interface IssuePromptSettings {
+  prompts: IssuePrompt[] | null;
+}

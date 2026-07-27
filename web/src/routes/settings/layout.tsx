@@ -2,13 +2,21 @@ import { createContext, useContext, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { NavLink, Outlet, Navigate, useLocation } from "react-router";
 import { Header } from "@/components/layout/header";
-import { User, KeyRound, Key, SlidersHorizontal, Sparkles } from "lucide-react";
+import {
+  User,
+  KeyRound,
+  Key,
+  SlidersHorizontal,
+  Sparkles,
+  Copy,
+} from "lucide-react";
 
 const settingsNavItems = [
   { to: "/settings/general", label: "通用", icon: SlidersHorizontal },
   { to: "/settings/profile", label: "个人信息", icon: User },
   { to: "/settings/password", label: "修改密码", icon: KeyRound },
   { to: "/settings/ai", label: "AI 配置", icon: Sparkles },
+  { to: "/settings/issue-prompts", label: "问题提示词", icon: Copy },
   { to: "/settings/api-keys", label: "API Keys", icon: Key },
 ];
 

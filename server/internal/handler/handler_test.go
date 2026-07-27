@@ -23,13 +23,14 @@ import (
 )
 
 type handlerTestEnv struct {
-	db              *gorm.DB
-	authHandler     *AuthHandler
-	aiHandler       *AIHandler
-	versionHandler  *VersionHandler
-	issueHandler    *IssueHandler
-	collabHandler   *IssueCollabHandler
-	artifactHandler *ArtifactHandler
+	db                 *gorm.DB
+	authHandler        *AuthHandler
+	aiHandler          *AIHandler
+	issuePromptHandler *IssuePromptHandler
+	versionHandler     *VersionHandler
+	issueHandler       *IssueHandler
+	collabHandler      *IssueCollabHandler
+	artifactHandler    *ArtifactHandler
 }
 
 type apiEnvelope struct {
@@ -51,6 +52,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	if err := db.AutoMigrate(
 		&model.User{},
 		&model.UserAISetting{},
+		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -96,6 +98,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
+	userIssuePromptRepo := repository.NewUserIssuePromptSettingRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
@@ -113,6 +116,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
+	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
@@ -122,13 +126,14 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
 
 	return &handlerTestEnv{
-		db:              db,
-		authHandler:     NewAuthHandler(authService, fileStorage, cfg),
-		aiHandler:       NewAIHandler(aiService),
-		versionHandler:  NewVersionHandler(versionService, shipService),
-		issueHandler:    NewIssueHandler(issueService),
-		collabHandler:   NewIssueCollabHandler(collabService),
-		artifactHandler: NewArtifactHandler(artifactService),
+		db:                 db,
+		authHandler:        NewAuthHandler(authService, fileStorage, cfg),
+		aiHandler:          NewAIHandler(aiService),
+		issuePromptHandler: NewIssuePromptHandler(issuePromptService),
+		versionHandler:     NewVersionHandler(versionService, shipService),
+		issueHandler:       NewIssueHandler(issueService),
+		collabHandler:      NewIssueCollabHandler(collabService),
+		artifactHandler:    NewArtifactHandler(artifactService),
 	}
 }
 

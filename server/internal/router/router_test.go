@@ -624,6 +624,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	if err := db.AutoMigrate(
 		&model.User{},
 		&model.UserAISetting{},
+		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -678,6 +679,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
+	userIssuePromptRepo := repository.NewUserIssuePromptSettingRepository(db)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	dashboardRepo := repository.NewDashboardRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
@@ -697,6 +699,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
+	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
@@ -715,6 +718,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
 	aiHandler := handler.NewAIHandler(aiService)
+	issuePromptHandler := handler.NewIssuePromptHandler(issuePromptService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -727,7 +731,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,

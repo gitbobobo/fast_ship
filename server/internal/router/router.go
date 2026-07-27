@@ -14,6 +14,7 @@ func Setup(
 	cfg *config.Config,
 	authHandler *handler.AuthHandler,
 	aiHandler *handler.AIHandler,
+	issuePromptHandler *handler.IssuePromptHandler,
 	apiKeyHandler *handler.ApiKeyHandler,
 	dashboardHandler *handler.DashboardHandler,
 	projectHandler *handler.ProjectHandler,
@@ -60,6 +61,13 @@ func Setup(
 			ai.GET("/settings", aiHandler.GetSettings)
 			ai.PUT("/settings", aiHandler.UpdateSettings)
 			ai.POST("/generate-title", aiHandler.GenerateTitle)
+		}
+
+		// JWT 必须 — 全局问题提示词配置
+		issuePrompts := api.Group("/issue-prompts", middleware.RequireJWT(cfg, authService))
+		{
+			issuePrompts.GET("", issuePromptHandler.GetPrompts)
+			issuePrompts.PUT("", issuePromptHandler.UpdatePrompts)
 		}
 
 		// JWT 必须 — API Key 管理

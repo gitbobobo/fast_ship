@@ -78,6 +78,7 @@ func main() {
 	if err := db.AutoMigrate(
 		&model.User{},
 		&model.UserAISetting{},
+		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -136,6 +137,7 @@ func main() {
 	// 初始化 Repository
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
+	userIssuePromptRepo := repository.NewUserIssuePromptSettingRepository(db)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	dashboardRepo := repository.NewDashboardRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
@@ -160,6 +162,7 @@ func main() {
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zapLogger)
+	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
@@ -175,6 +178,7 @@ func main() {
 	// 初始化 Handler
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
 	aiHandler := handler.NewAIHandler(aiService)
+	issuePromptHandler := handler.NewIssuePromptHandler(issuePromptService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	projectHandler := handler.NewProjectHandler(projectService)
@@ -248,7 +252,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

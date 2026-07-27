@@ -23,6 +23,7 @@ type testServices struct {
 	storage             storage.Storage
 	cfg                 *config.Config
 	userAISettingRepo   *repository.UserAISettingRepository
+	userIssuePromptRepo *repository.UserIssuePromptSettingRepository
 	projectRepo         *repository.ProjectRepository
 	versionRepo         *repository.VersionRepository
 	issueRepo           *repository.IssueRepository
@@ -39,6 +40,7 @@ type testServices struct {
 	issueService        *IssueService
 	collabService       *IssueCollabService
 	aiService           *AIService
+	issuePromptService  *IssuePromptService
 	versionService      *VersionService
 	artifactService     *ArtifactService
 	shipService         *ShipService
@@ -56,6 +58,7 @@ func setupTestServices(t *testing.T) *testServices {
 	if err := db.AutoMigrate(
 		&model.User{},
 		&model.UserAISetting{},
+		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
 		&model.Project{},
 		&model.Version{},
@@ -92,6 +95,7 @@ func setupTestServices(t *testing.T) *testServices {
 
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
+	userIssuePromptRepo := repository.NewUserIssuePromptSettingRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
@@ -117,6 +121,7 @@ func setupTestServices(t *testing.T) *testServices {
 		storage:             fileStorage,
 		cfg:                 cfg,
 		userAISettingRepo:   userAISettingRepo,
+		userIssuePromptRepo: userIssuePromptRepo,
 		projectRepo:         projectRepo,
 		versionRepo:         versionRepo,
 		issueRepo:           issueRepo,
@@ -133,6 +138,7 @@ func setupTestServices(t *testing.T) *testServices {
 		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
+		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		shipService:         NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),

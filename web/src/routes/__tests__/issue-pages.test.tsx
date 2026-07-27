@@ -164,6 +164,14 @@ vi.mock("@/lib/hooks/use-issue-collab", () => ({
   })),
 }));
 
+vi.mock("@/lib/hooks/use-issue-prompt", () => ({
+  useIssuePrompts: vi.fn(),
+  useIssuePromptList: vi.fn(() => [
+    { id: "default", name: "默认", content: "请处理此问题" },
+  ]),
+  useUpdateIssuePrompts: vi.fn(),
+}));
+
 vi.mock("@/lib/store/auth-store", () => ({
   useAuthStore: vi.fn(),
 }));
@@ -1287,7 +1295,7 @@ describe("Issue pages", () => {
     await waitFor(() =>
       expect(bodyInput).toHaveValue("## 验收\n\n完成后通知 QA![clip](/api/issues/assets/draft-asset-1/content)\n"),
     );
-    await user.click(screen.getByRole("button", { name: "创建问题" }));
+    await user.click(await screen.findByRole("button", { name: "创建问题" }));
 
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({
@@ -1376,7 +1384,7 @@ describe("Issue pages", () => {
     await waitFor(() =>
       expect(bodyInput).toHaveValue("更新后的描述![clip](/api/issues/assets/asset-1/content)\n"),
     );
-    await user.click(screen.getByRole("button", { name: "保存修改" }));
+    await user.click(await screen.findByRole("button", { name: "保存修改" }));
 
     await waitFor(() =>
       expect(mutateAsync).toHaveBeenCalledWith({

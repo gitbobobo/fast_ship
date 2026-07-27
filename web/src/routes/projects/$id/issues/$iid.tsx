@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
+import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -101,7 +102,6 @@ import { cn, getInitials } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
 import { formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
-import { buildIssuePrompt } from "./issue-prompt";
 
 
 function getEventIcon(eventType: string) {
@@ -835,14 +835,6 @@ export default function IssueDetailPage() {
       return;
     }
     await copyWithToast(url, successMessage);
-  };
-
-  const handleCopyIssuePrompt = async () => {
-    if (!issue || !id) return;
-    await copyWithToast(
-      buildIssuePrompt({ projectId: id, issueId: issue.id }),
-      "已复制提示词",
-    );
   };
 
   const handleCopyGitHubLink = async () => {
@@ -1667,15 +1659,7 @@ export default function IssueDetailPage() {
                       <GitHubContent html={issue.body_html} markdown={issue.body} />
                     </div>
                     <div className="mt-3 flex justify-end">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                        onClick={() => void handleCopyIssuePrompt()}
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                        复制提示词
-                      </Button>
+                      <CopyIssuePromptButton projectId={id!} issueId={issue.id} />
                     </div>
                   </>
                 ) : (
