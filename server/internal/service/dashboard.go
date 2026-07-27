@@ -31,8 +31,8 @@ type DashboardDailyResolvedProjectPoint struct {
 }
 
 type DashboardDailyResolvedPoint struct {
-	Date          string                             `json:"date"`
-	ResolvedCount int                                `json:"resolved_count"`
+	Date          string                               `json:"date"`
+	ResolvedCount int                                  `json:"resolved_count"`
 	Projects      []DashboardDailyResolvedProjectPoint `json:"projects"`
 }
 

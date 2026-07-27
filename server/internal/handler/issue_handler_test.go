@@ -608,9 +608,9 @@ func createHandlerTestInternalIssueDone(t *testing.T, env *handlerTestEnv, proje
 	t.Helper()
 
 	createBody, err := json.Marshal(map[string]string{
-		"title":            title,
-		"body":             "done issue",
-		"workflow_status":  "done",
+		"title":           title,
+		"body":            "done issue",
+		"workflow_status": "done",
 	})
 	if err != nil {
 		t.Fatalf("marshal create body: %v", err)

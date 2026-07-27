@@ -15,13 +15,13 @@ import (
 )
 
 const (
-	collabSuggestionBodyMaxRunes = 4000 // 单条建议正文上限：宽松值，容纳带 Markdown 的说明
-	collabMaxSuggestions         = 30   // 单次替换的建议条数上限：宽松值，覆盖大型 issue 的拆解
-	collabPlanBodyMaxRunes       = 8000 // 计划正文上限：与 summary 对齐
-	collabReviewBodyMaxRunes     = 8000 // 审查正文上限：与 summary 对齐
-	collabSummaryBodyMaxRunes    = 8000
-	collabMaxCommitIDs           = 20
-	collabAgentLogin     string  = "代理"
+	collabSuggestionBodyMaxRunes        = 4000 // 单条建议正文上限：宽松值，容纳带 Markdown 的说明
+	collabMaxSuggestions                = 30   // 单次替换的建议条数上限：宽松值，覆盖大型 issue 的拆解
+	collabPlanBodyMaxRunes              = 8000 // 计划正文上限：与 summary 对齐
+	collabReviewBodyMaxRunes            = 8000 // 审查正文上限：与 summary 对齐
+	collabSummaryBodyMaxRunes           = 8000
+	collabMaxCommitIDs                  = 20
+	collabAgentLogin             string = "代理"
 )
 
 var collabCommitIDRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)

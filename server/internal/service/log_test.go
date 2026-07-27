@@ -328,4 +328,3 @@ func TestLogService_DescriptionConcurrentCreate(t *testing.T) {
 		t.Fatalf("expected 2 entries after concurrent upload, got %d", batch.EntryCount)
 	}
 }
-

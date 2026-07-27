@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	maxLogEntriesPerUpload     = 500
-	maxLogMessageBytes         = 4000
-	maxLogMetadataBytes        = 4096
-	maxLogSourceBytes          = 128
-	maxLogDescriptionBytes     = 500
+	maxLogEntriesPerUpload = 500
+	maxLogMessageBytes     = 4000
+	maxLogMetadataBytes    = 4096
+	maxLogSourceBytes      = 128
+	maxLogDescriptionBytes = 500
 )
 
 var logRunIDRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
