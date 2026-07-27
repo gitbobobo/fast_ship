@@ -22,22 +22,18 @@ import {
   useBatchClosePreviewCount,
   useCloseIssuesBatch,
 } from "@/lib/hooks/use-issues";
+import {
+  type IssueSourceFilter,
+  ISSUE_SOURCE_FILTER_OPTIONS,
+} from "@/lib/issue-source";
 import { HTTPError } from "ky";
 import { toast } from "sonner";
 
-type SourceFilter = "all" | "internal" | "github";
-
 const BATCH_CLOSE_MAX = 200;
-
-const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
-  { value: "all", label: "全部" },
-  { value: "internal", label: "内部问题" },
-  { value: "github", label: "GitHub 问题" },
-];
 
 export function CloseAllDoneButton({ projectId }: { projectId: string }) {
   const [open, setOpen] = useState(false);
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("internal");
+  const [sourceFilter, setSourceFilter] = useState<IssueSourceFilter>("internal");
   const closeBatch = useCloseIssuesBatch(projectId);
   const { data: previewCount, isLoading: isPreviewLoading } =
     useBatchClosePreviewCount(projectId, sourceFilter, open);
@@ -101,16 +97,17 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
           </span>
           <Select
             value={sourceFilter}
-            onValueChange={(v) => setSourceFilter(v as SourceFilter)}
+            onValueChange={(v) => setSourceFilter(v as IssueSourceFilter)}
           >
             <SelectTrigger className="h-8 w-auto">
               <SelectValue>
-                {SOURCE_OPTIONS.find((opt) => opt.value === sourceFilter)
-                  ?.label ?? sourceFilter}
+                {ISSUE_SOURCE_FILTER_OPTIONS.find(
+                  (opt) => opt.value === sourceFilter,
+                )?.label ?? sourceFilter}
               </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              {SOURCE_OPTIONS.map((opt) => (
+              {ISSUE_SOURCE_FILTER_OPTIONS.map((opt) => (
                 <SelectItem key={opt.value} value={opt.value}>
                   {opt.label}
                 </SelectItem>

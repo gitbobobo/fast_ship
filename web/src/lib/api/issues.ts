@@ -1,6 +1,6 @@
 import { api } from "./client";
 
-interface IssueListParams {
+export interface IssueListParams {
   state?: string;
   q?: string;
   label?: string;

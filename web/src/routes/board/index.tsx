@@ -21,10 +21,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
-import {
-  useInfiniteBoardIssues,
-  useUpdateIssueWorkflowStatus,
-} from "@/lib/hooks/use-issues";
+import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { toast } from "sonner";
 import {
@@ -37,7 +34,6 @@ import { BoardColumn } from "@/routes/board/components/board-column";
 import {
   BoardIssueCardOverlay,
 } from "@/routes/board/components/board-issue-card";
-import { CloseAllDoneButton } from "@/routes/board/components/close-all-done-button";
 
 export default function BoardPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
@@ -135,13 +131,6 @@ export default function BoardPage() {
   const isEmptyProject = !projectsLoading && projects.length === 0;
   const noProjectSelected = !projectsLoading && !activeProjectId;
 
-  const {
-    data: doneColumnData,
-    isLoading: doneColumnLoading,
-  } = useInfiniteBoardIssues(activeProjectId, "done");
-  const doneTotal = doneColumnData?.pages[0]?.total ?? 0;
-  const showCloseAll = !doneColumnLoading && doneTotal > 0;
-
   return (
     <div className="flex h-full flex-col">
       <Header
@@ -150,25 +139,20 @@ export default function BoardPage() {
           activeProjectId ? (
             <HeaderActions
               primary={
-                <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    render={
-                      <Link
-                        to={{
-                          pathname: `/projects/${activeProjectId}/issues/new`,
-                        }}
-                      />
-                    }
-                  >
-                    <Plus className="mr-1.5 h-3.5 w-3.5" />
-                    新建问题
-                  </Button>
-                  {showCloseAll && (
-                    <CloseAllDoneButton projectId={activeProjectId} />
-                  )}
-                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  render={
+                    <Link
+                      to={{
+                        pathname: `/projects/${activeProjectId}/issues/new`,
+                      }}
+                    />
+                  }
+                >
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  新建问题
+                </Button>
               }
             />
           ) : undefined

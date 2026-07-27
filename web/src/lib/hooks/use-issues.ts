@@ -4,7 +4,8 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { issueApi } from "@/lib/api/issues";
+import { issueApi, type IssueListParams } from "@/lib/api/issues";
+import { type IssueSourceFilter } from "@/lib/issue-source";
 
 interface UseIssuesFilters {
   state?: string;
@@ -43,6 +44,7 @@ export function useIssues(projectId: string, filters: UseIssuesFilters = {}) {
 export function useInfiniteBoardIssues(
   projectId: string,
   workflowStatus: "" | "todo" | "in_progress" | "done",
+  filters?: Pick<IssueListParams, "label" | "source">,
   pageSize = 20,
 ) {
   return useInfiniteQuery({
@@ -53,6 +55,8 @@ export function useInfiniteBoardIssues(
       "board",
       workflowStatus,
       pageSize,
+      filters?.label ?? "",
+      filters?.source ?? "",
     ],
     initialPageParam: 1,
     queryFn: async ({ pageParam }) => {
@@ -61,6 +65,8 @@ export function useInfiniteBoardIssues(
         workflow_status: workflowStatus || "unset",
         page: pageParam,
         page_size: pageSize,
+        ...(filters?.label ? { label: filters.label } : {}),
+        ...(filters?.source ? { source: filters.source } : {}),
       });
       return res.data;
     },
@@ -302,7 +308,7 @@ export function useUpdateIssueWorkflowStatus() {
 
 export function useBatchClosePreviewCount(
   projectId: string,
-  source: "all" | "internal" | "github",
+  source: IssueSourceFilter,
   enabled: boolean,
 ) {
   return useQuery({
@@ -331,7 +337,7 @@ export function useCloseIssuesBatch(projectId: string) {
     mutationFn: async ({
       source,
     }: {
-      source?: "all" | "internal" | "github";
+      source?: IssueSourceFilter;
     }) => {
       const res = await issueApi.batchCloseDone(
         projectId,

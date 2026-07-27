@@ -1,10 +1,19 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useInfiniteBoardIssues } from "@/lib/hooks/use-issues";
+import {
+  useInfiniteBoardIssues,
+  useIssueFilterOptions,
+} from "@/lib/hooks/use-issues";
 import { COLUMNS, type ColumnId } from "@/routes/board/lib/utils";
 import { BoardIssueCard } from "./board-issue-card";
+import {
+  BoardColumnFilter,
+  type BoardColumnFilterValue,
+  DEFAULT_BOARD_COLUMN_FILTER,
+} from "./board-column-filter";
+import { CloseAllDoneButton } from "./close-all-done-button";
 
 export function BoardColumn({
   columnId,
@@ -14,6 +23,17 @@ export function BoardColumn({
   projectId: string;
 }) {
   const column = COLUMNS.find((c) => c.id === columnId)!;
+
+  const [filter, setFilter] = useState<BoardColumnFilterValue>(
+    DEFAULT_BOARD_COLUMN_FILTER,
+  );
+
+  useEffect(() => {
+    setFilter(DEFAULT_BOARD_COLUMN_FILTER);
+  }, [projectId]);
+
+  const { data: filterOptionsData } = useIssueFilterOptions(projectId);
+  const labels = filterOptionsData?.labels ?? [];
 
   const { setNodeRef, isOver } = useDroppable({
     id: column.id,
@@ -26,7 +46,10 @@ export function BoardColumn({
     hasNextPage,
     isFetchingNextPage,
     isLoading,
-  } = useInfiniteBoardIssues(projectId, column.statusValue);
+  } = useInfiniteBoardIssues(projectId, column.statusValue, {
+    label: filter.label || undefined,
+    source: filter.source === "all" ? undefined : filter.source,
+  });
 
   const issues = useMemo(
     () => data?.pages.flatMap((page) => page.items) ?? [],
@@ -62,11 +85,23 @@ export function BoardColumn({
         isOver && "bg-muted/50 ring-2 ring-primary/20",
       )}
     >
-      <div className="flex items-center gap-2 border-b px-3 py-2.5">
-        <h3 className="text-sm font-semibold">{column.label}</h3>
-        <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1.5 text-xs font-medium text-muted-foreground">
-          {total}
-        </span>
+      <div className="flex items-center justify-between border-b px-3 py-2.5">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold">{column.label}</h3>
+          <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-muted px-1.5 text-xs font-medium text-muted-foreground">
+            {total}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          <BoardColumnFilter
+            labels={labels}
+            value={filter}
+            onChange={setFilter}
+          />
+          {column.id === "done" && !isLoading && total > 0 && (
+            <CloseAllDoneButton projectId={projectId} />
+          )}
+        </div>
       </div>
 
       <div className="flex-1 space-y-2 overflow-y-auto p-2.5">
