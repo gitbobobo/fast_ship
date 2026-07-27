@@ -92,6 +92,7 @@ import {
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
+import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { useAuthStore } from "@/lib/store/auth-store";
 import {
   containsLocalIssueAssetReference,
@@ -1551,7 +1552,7 @@ export default function IssueDetailPage() {
                 <div className="flex flex-wrap items-start gap-3">
                   <StateBadge state={issue.state} />
                   <span className="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold">
-                    {issue.source === "github" ? "GitHub" : "内部"}
+                    {ISSUE_SOURCE_LABELS[issue.source]}
                   </span>
                   <ProgressBadge progress={issue.internal_meta?.progress_percent} />
                   <WorkflowStatusBadge status={issue.internal_meta?.workflow_status} />

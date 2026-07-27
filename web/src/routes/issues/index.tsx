@@ -57,6 +57,7 @@ import {
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
+import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { cn } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
 import { ensureGitHubLinked, hasGitHubRepo } from "@/lib/utils/github";
@@ -809,7 +810,7 @@ export default function IssuesPage() {
                             {issue.reference} {issue.title}
                           </span>
                           <Badge variant="outline">
-                            {issue.source === "github" ? "GitHub" : "内部"}
+                            {ISSUE_SOURCE_LABELS[issue.source]}
                           </Badge>
                           <Badge
                             variant={

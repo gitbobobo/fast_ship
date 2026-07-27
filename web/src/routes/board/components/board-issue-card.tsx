@@ -4,6 +4,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { GripVertical } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
+import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 
@@ -29,7 +30,7 @@ function BoardIssueCardContent({ issue }: { issue: Issue }) {
 
       <div className="flex flex-wrap items-center gap-1.5 pl-5">
         <Badge variant="outline" className="text-[10px]">
-          {issue.source === "github" ? "GitHub" : "内部"}
+          {ISSUE_SOURCE_LABELS[issue.source]}
         </Badge>
         <Badge
           variant={issue.state === "open" ? "default" : "secondary"}
