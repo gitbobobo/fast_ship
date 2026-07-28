@@ -1000,13 +1000,7 @@ func TestRouterIssueWritesAcceptAPIKey(t *testing.T) {
 		t.Fatalf("checklist: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 3. comments
-	rec = doJSON(http.MethodPost, "/api/issues/"+issue.ID+"/comments", []byte(`{"body":"通过 API Key 评论"}`))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("comments: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// 4. assets
+	// 3. assets
 	uploadReq := newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/assets", "file", "clip.png", routerTestPNGBytes, nil)
 	uploadReq.Header.Set("Authorization", authHeader)
 	uploadRec := httptest.NewRecorder()
@@ -1044,7 +1038,6 @@ func TestRouterIssueWriteRejectsCrossUserAPIKey(t *testing.T) {
 	}{
 		{"internal-meta", httptest.NewRequest(http.MethodPut, "/api/issues/"+issue.ID+"/internal-meta", bytes.NewReader([]byte(`{"workflow_status":"done"}`)))},
 		{"checklist", httptest.NewRequest(http.MethodPut, "/api/issues/"+issue.ID+"/checklist", bytes.NewReader([]byte(`{"items":[]}`)))},
-		{"comments", httptest.NewRequest(http.MethodPost, "/api/issues/"+issue.ID+"/comments", bytes.NewReader([]byte(`{"body":"x"}`)))},
 		{"assets", newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/assets", "file", "clip.png", routerTestPNGBytes, nil)},
 		{"checklist-suggestions", httptest.NewRequest(http.MethodPost, "/api/issues/"+issue.ID+"/checklist-suggestions", nil)},
 	}
@@ -1168,6 +1161,44 @@ func newRouterMultipartRequest(t *testing.T, target, fieldName, fileName string,
 	req := httptest.NewRequest(http.MethodPost, target, &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
+}
+
+func TestRouterIssueCreateCommentRejectsAPIKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	user := createRouterTestUser(t, env.db, "user-comment", "commenter", "commenter@example.com")
+	project := createRouterTestProject(t, env.db, user.ID)
+	issue := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	rawKey := "COMMENTKEY1234567890123"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		Name:      "CI-Comment",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/issues/"+issue.ID+"/comments", bytes.NewReader([]byte(`{"body":"通过 API Key 评论"}`)))
+	req.Header.Set("Authorization", "Bearer "+service.FormatApiKey(rawKey))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for API Key comment, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope routerEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if envelope.Code != errs.ErrApiKeyForbidden.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+	}
 }
 
 func TestRouterBatchCloseRejectsAPIKey(t *testing.T) {

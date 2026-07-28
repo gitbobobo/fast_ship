@@ -34,7 +34,10 @@ API 路由注册和前端 SPA 静态文件服务。`router.go` 定义所有 API 
 - `DELETE /api/versions/:vid` — 删除版本
 - `GET /api/versions/:vid/ship-check` — Ship 前检查
 - `POST /api/versions/:vid/ship` — 执行 Ship
-- Issue 写操作（创建/更新/同步/评论/资产上传等）
+- `POST /api/projects/:id/issues/assets` — 上传 Issue 草稿资产
+- `POST /api/projects/:id/issues/sync` — 同步 Issue
+- `POST /api/projects/:id/issues/batch-close` — 批量关闭已完成 Issue
+- `POST /api/issues/:iid/comments` — 创建 Issue 评论
 
 ### JWT 或 API Key 认证接口
 - `GET /api/projects` — 项目列表
@@ -42,7 +45,19 @@ API 路由注册和前端 SPA 静态文件服务。`router.go` 定义所有 API 
 - `GET /api/projects/:id/branches` — 分支列表
 - `GET /api/projects/:id/versions` — 版本列表
 - `GET/PUT /api/versions/:vid` — 版本详情/更新
-- Issue 读操作（列表/详情/评论/时间线）
+- `POST /api/projects/:id/issues` — 创建 Issue
+- `PUT /api/issues/:iid` — 更新 Issue
+- `POST /api/issues/:iid/assets` — 上传 Issue 资产
+- `PUT /api/issues/:iid/internal-meta` — 更新 Issue 内部元数据
+- `PUT /api/issues/:iid/checklist` — 替换 Issue 清单
+- `POST /api/issues/:iid/checklist-suggestions` — 生成清单建议（Agent）
+- `GET /api/projects/:id/issues` — Issue 列表
+- `GET /api/projects/:id/issues/count` — Issue 数量
+- `GET /api/projects/:id/issues/filter-options` — Issue 筛选选项
+- `GET /api/projects/:id/issues/repo-labels` — 仓库标签
+- `GET /api/issues/:iid` — Issue 详情
+- `GET /api/issues/:iid/comments` — Issue 评论列表
+- `GET /api/issues/:iid/timeline` — Issue 时间线
 - Artifact 操作（上传/删除/下载）
 
 ### Query Token 认证（用于浏览器下载）

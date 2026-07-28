@@ -360,7 +360,7 @@ func TestIssueHandlerCreate_WithApiKey(t *testing.T) {
 	user := createHandlerTestUser(t, env.db, "user-apikey")
 	project := createHandlerTestProject(t, env.db, user.ID)
 
-	body := []byte(`{"title":"API Key 创建的问题","body":"通过 API Key 创建","workflow_status":"todo"}`)
+	body := []byte(`{"title":"API Key 创建的问题","body":"通过 API Key 创建"}`)
 	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues", body)
 	ctx.Params = ginParams("id", project.ID)
 	ctx.Set(middleware.ContextKeyUserID, user.ID)
@@ -374,13 +374,11 @@ func TestIssueHandlerCreate_WithApiKey(t *testing.T) {
 	}
 
 	var result struct {
-		Source       string `json:"source"`
-		Reference    string `json:"reference"`
-		Title        string `json:"title"`
-		ProjectID    string `json:"project_id"`
-		InternalMeta struct {
-			WorkflowStatus string `json:"workflow_status"`
-		} `json:"internal_meta"`
+		Source       string          `json:"source"`
+		Reference    string          `json:"reference"`
+		Title        string          `json:"title"`
+		ProjectID    string          `json:"project_id"`
+		InternalMeta json.RawMessage `json:"internal_meta"`
 	}
 	decodeEnvelope(t, rec, &result)
 
@@ -390,8 +388,8 @@ func TestIssueHandlerCreate_WithApiKey(t *testing.T) {
 	if result.Title != "API Key 创建的问题" || result.ProjectID != project.ID {
 		t.Fatalf("unexpected created issue payload: %+v", result)
 	}
-	if result.InternalMeta.WorkflowStatus != string(model.IssueWorkflowStatusTodo) {
-		t.Fatalf("expected todo workflow status, got %+v", result)
+	if len(result.InternalMeta) > 0 && string(result.InternalMeta) != "null" {
+		t.Fatalf("expected unset workflow status (no internal_meta), got %s", string(result.InternalMeta))
 	}
 }
 
