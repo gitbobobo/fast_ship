@@ -2,6 +2,7 @@ FROM node:22-bookworm-slim AS web-builder
 
 WORKDIR /app/web
 
+COPY VERSION /app/VERSION
 COPY web/package.json web/pnpm-lock.yaml ./
 
 RUN corepack enable && pnpm install --frozen-lockfile --ignore-scripts

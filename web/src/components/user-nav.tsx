@@ -72,14 +72,19 @@ export function UserNav({
                 {initial}
               </AvatarFallback>
             </Avatar>
-            <span
+            <div
               className={cn(
-                "truncate text-sm font-medium transition-all duration-200 overflow-hidden whitespace-nowrap",
+                "flex min-w-0 flex-col items-start overflow-hidden transition-all duration-200",
                 collapsed ? "max-w-0 opacity-0" : "max-w-[120px] opacity-100"
               )}
             >
-              {user?.username}
-            </span>
+              <span className="truncate text-sm font-medium">
+                {user?.username}
+              </span>
+              <span className="truncate text-xs text-muted-foreground">
+                v{__APP_VERSION__}
+              </span>
+            </div>
           </Button>
         }
       />

@@ -161,6 +161,7 @@ describe("UI Integration Tests", () => {
       expect(
         within(bottom).getByRole("button", { name: /testuser/ }),
       ).toBeInTheDocument();
+      expect(within(bottom).getByText(`v${__APP_VERSION__}`)).toBeInTheDocument();
     });
 
     it("merges settings and theme controls into the user menu", async () => {
