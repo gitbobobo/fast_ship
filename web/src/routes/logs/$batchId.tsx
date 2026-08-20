@@ -1,12 +1,10 @@
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import {
-  Link,
   useNavigate,
   useParams,
   useSearchParams,
 } from "react-router";
 import {
-  ArrowLeft,
   Copy,
   Inbox,
   RotateCcw,
@@ -230,14 +228,6 @@ export default function LogBatchDetailPage() {
               <p className="text-sm">
                 {notFound ? "批次不存在" : "加载批次失败，请稍后重试"}
               </p>
-              <Button
-                render={<Link to="/logs" />}
-                variant="outline"
-                size="sm"
-              >
-                <ArrowLeft className="h-4 w-4" />
-                返回列表
-              </Button>
             </CardContent>
           </Card>
         </div>
@@ -286,34 +276,22 @@ export default function LogBatchDetailPage() {
         }
       />
       <div className="p-4 md:p-6 space-y-6">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2">
-            <Button
-              render={<Link to={`/logs?project=${projectId}`} />}
-              variant="ghost"
-              size="sm"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              返回列表
-            </Button>
-            {projects.length > 0 && (
-              <Select value={projectId} onValueChange={handleProjectChange}>
-                <SelectTrigger className="w-auto min-w-32">
-                  <SelectValue placeholder="请选择项目">
-                    {activeProject?.name}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-          </div>
-        </div>
+        {projects.length > 0 && (
+          <Select value={projectId} onValueChange={handleProjectChange}>
+            <SelectTrigger className="w-auto min-w-32">
+              <SelectValue placeholder="请选择项目">
+                {activeProject?.name}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((project) => (
+                <SelectItem key={project.id} value={project.id}>
+                  {project.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
 
         <Card>
           <CardContent className="p-4 space-y-3">

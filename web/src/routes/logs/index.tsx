@@ -185,8 +185,8 @@ export default function LogsPage() {
     }
   };
 
-  const handleCopyBatchId = (batchId: string) => {
-    void copyWithToast(batchId, "已复制批次 ID");
+  const handleCopyRunId = (runId: string) => {
+    void copyWithToast(runId, "已复制运行 ID");
   };
 
   return (
@@ -329,54 +329,66 @@ export default function LogsPage() {
             ) : (
               <div className="space-y-3" data-testid="log-batch-list">
                 {batches.map((batch) => (
-                  <Card key={batch.id}>
-                    <CardContent className="p-4 space-y-3">
-                      <div className="flex flex-wrap items-start gap-3">
-                        <Link
-                          to={`/logs/${batch.id}?project=${activeProjectId}`}
-                          className="min-w-0 flex-1 space-y-1 hover:opacity-90"
-                        >
-                          <p className="whitespace-pre-wrap text-sm font-medium">
-                            {batch.description || "（无说明）"}
-                          </p>
-                          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                            <span>{batch.entry_count} 条</span>
-                            <span className="font-mono">run:{batch.run_id}</span>
-                            {batch.source && <span>src:{batch.source}</span>}
-                            <span>最近 {formatTime(batch.last_entry_at)}</span>
+                  <Link
+                    key={batch.id}
+                    to={`/logs/${batch.id}?project=${activeProjectId}`}
+                    className="group block"
+                  >
+                    <Card className="cursor-pointer transition-all hover:border-primary/50 hover:shadow-sm">
+                      <CardContent className="p-4 space-y-3">
+                        <div className="flex flex-wrap items-start gap-3">
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <p className="whitespace-pre-wrap text-sm font-medium group-hover:text-primary">
+                              {batch.description || "（无说明）"}
+                            </p>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                              <span>{batch.entry_count} 条</span>
+                              <span className="font-mono">run:{batch.run_id}</span>
+                              {batch.source && <span>src:{batch.source}</span>}
+                              <span>最近 {formatTime(batch.last_entry_at)}</span>
+                            </div>
                           </div>
-                        </Link>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7"
-                            title={batch.id}
-                            onClick={() => handleCopyBatchId(batch.id)}
+                          <div
+                            className="flex items-center gap-1"
+                            onClick={(e) => e.preventDefault()}
                           >
-                            <Copy className="h-3.5 w-3.5" />
-                            复制批次 ID
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-7 text-destructive"
-                            disabled={deleteBatch.isPending}
-                            onClick={() => setPendingDeleteBatchId(batch.id)}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            删除
-                          </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7"
+                              title={batch.run_id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCopyRunId(batch.run_id);
+                              }}
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                              复制运行 ID
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-destructive"
+                              disabled={deleteBatch.isPending}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setPendingDeleteBatchId(batch.id);
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              删除
+                            </Button>
+                          </div>
                         </div>
-                      </div>
-                      <p
-                        className="truncate font-mono text-xs text-muted-foreground"
-                        title={batch.id}
-                      >
-                        批次 ID：{batch.id}
-                      </p>
-                    </CardContent>
-                  </Card>
+                        <p
+                          className="truncate font-mono text-xs text-muted-foreground"
+                          title={batch.id}
+                        >
+                          批次 ID：{batch.id}
+                        </p>
+                      </CardContent>
+                    </Card>
+                  </Link>
                 ))}
               </div>
             )}

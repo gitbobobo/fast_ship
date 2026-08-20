@@ -84,7 +84,7 @@ describe("LogsPage batch list", () => {
       expect(screen.getByTestId("log-batch-list")).toBeInTheDocument();
     });
     expect(screen.getByText("阶段说明")).toBeInTheDocument();
-    expect(screen.getByText("复制批次 ID")).toBeInTheDocument();
+    expect(screen.getByText("复制运行 ID")).toBeInTheDocument();
     expect(screen.queryByPlaceholderText("搜索消息内容")).not.toBeInTheDocument();
   });
 });
