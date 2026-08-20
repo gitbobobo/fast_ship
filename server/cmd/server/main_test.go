@@ -7,6 +7,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -263,5 +264,155 @@ func TestBackfillIssueSourceModel_RepairsMigratedIssueSourceFromGitHubMeta(t *te
 	}
 	if repaired.Source != model.IssueSourceGitHub {
 		t.Fatalf("expected repaired issue source to be github, got %q", repaired.Source)
+	}
+}
+
+func openLogMigrationTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	return db
+}
+
+func tableExists(t *testing.T, db *gorm.DB, tableName string) bool {
+	t.Helper()
+	var name string
+	err := db.Raw(`
+		SELECT name FROM sqlite_master
+		WHERE type = 'table' AND name = ?
+	`, tableName).Scan(&name).Error
+	if err != nil {
+		t.Fatalf("check table %s: %v", tableName, err)
+	}
+	return name == tableName
+}
+
+func TestDropLegacyLogTables_RemovesOldBatchSchema(t *testing.T) {
+	db := openLogMigrationTestDB(t)
+
+	if err := db.Exec(`
+		CREATE TABLE log_batches (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			run_id TEXT NOT NULL
+		)
+	`).Error; err != nil {
+		t.Fatalf("create legacy log_batches: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TABLE log_entries (
+			id TEXT PRIMARY KEY,
+			batch_id TEXT NOT NULL,
+			timestamp DATETIME NOT NULL,
+			level TEXT NOT NULL,
+			message TEXT NOT NULL
+		)
+	`).Error; err != nil {
+		t.Fatalf("create legacy log_entries: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO log_batches (id, project_id, run_id) VALUES ('batch-1', 'project-1', 'run-1')`).Error; err != nil {
+		t.Fatalf("insert legacy batch: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO log_entries (id, batch_id, timestamp, level, message)
+		VALUES ('entry-1', 'batch-1', '2026-06-29T12:00:00Z', 'info', 'legacy')
+	`).Error; err != nil {
+		t.Fatalf("insert legacy entry: %v", err)
+	}
+
+	dropLegacyLogTables(db, zap.NewNop())
+
+	if tableExists(t, db, "log_entries") {
+		t.Fatalf("expected legacy log_entries to be dropped")
+	}
+	if tableExists(t, db, "log_batches") {
+		t.Fatalf("expected legacy log_batches to be dropped")
+	}
+}
+
+func TestDropLegacyLogTables_PreservesNewRunSchemaAcrossRestart(t *testing.T) {
+	db := openLogMigrationTestDB(t)
+	now := time.Now().UTC()
+
+	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.LogRun{}, &model.LogRunChunk{}, &model.LogEntry{}); err != nil {
+		t.Fatalf("migrate new log tables: %v", err)
+	}
+	if err := db.Create(&model.User{
+		ID:           "user-1",
+		Username:     "loguser",
+		Email:        "log@example.com",
+		PasswordHash: "x",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := db.Create(&model.Project{
+		ID:        "project-1",
+		UserID:    "user-1",
+		Name:      "demo",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+
+	run := &model.LogRun{
+		ID:        "run-internal-1",
+		ProjectID: "project-1",
+		RunID:     "client-run-1",
+		Source:    "smux",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Create(run).Error; err != nil {
+		t.Fatalf("create log run: %v", err)
+	}
+	entry := &model.LogEntry{
+		ID:        "entry-1",
+		LogRunID:  run.ID,
+		Timestamp: now,
+		Level:     "info",
+		Message:   "persist me",
+		CreatedAt: now,
+	}
+	if err := db.Create(entry).Error; err != nil {
+		t.Fatalf("create log entry: %v", err)
+	}
+
+	dropLegacyLogTables(db, zap.NewNop())
+	dropLegacyLogTables(db, zap.NewNop())
+
+	if !tableExists(t, db, "log_runs") {
+		t.Fatalf("expected log_runs to remain after cleanup")
+	}
+	if !tableExists(t, db, "log_entries") {
+		t.Fatalf("expected new log_entries to remain after cleanup")
+	}
+
+	hasBatchID, err := hasSQLiteColumn(db, "log_entries", "batch_id")
+	if err != nil {
+		t.Fatalf("check batch_id column: %v", err)
+	}
+	if hasBatchID {
+		t.Fatalf("expected new log_entries without batch_id column")
+	}
+	hasLogRunID, err := hasSQLiteColumn(db, "log_entries", "log_run_id")
+	if err != nil {
+		t.Fatalf("check log_run_id column: %v", err)
+	}
+	if !hasLogRunID {
+		t.Fatalf("expected log_entries to keep log_run_id column")
+	}
+
+	var persisted model.LogEntry
+	if err := db.Where("id = ?", entry.ID).First(&persisted).Error; err != nil {
+		t.Fatalf("load persisted entry after cleanup: %v", err)
+	}
+	if persisted.Message != "persist me" {
+		t.Fatalf("unexpected entry message: %q", persisted.Message)
 	}
 }

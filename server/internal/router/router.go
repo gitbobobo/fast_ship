@@ -161,10 +161,10 @@ func Setup(
 		// JWT / API Key 均可 — 日志
 		api.POST("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.Upload)
 		api.GET("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.ListEntries)
-		api.GET("/projects/:id/log-batches", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.ListBatches)
+		api.GET("/projects/:id/log-runs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.ListRuns)
+		api.GET("/projects/:id/log-runs/:run_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.GetRun)
+		api.DELETE("/projects/:id/log-runs/:run_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteRun)
 		api.DELETE("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteByProject)
-		api.GET("/log-batches/:batch_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.GetBatch)
-		api.DELETE("/log-batches/:batch_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.DeleteBatch)
 
 		// JWT / API Key 均可 — 文档
 		api.GET("/projects/:id/documents", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.List)

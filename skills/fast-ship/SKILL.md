@@ -287,9 +287,9 @@ PUT /api/issues/:issue_id/collab/summary
 
 ## 项目日志
 
-API Key 上传；JWT / API Key 均可查询与删除。**上传不去重**，重试可能导致重复条目。
+API Key 上传；JWT / API Key 均可查询与删除。对外只认一次运行（run），没有批次。`run_id` 由客户端生成，项目内唯一。分片用必填 `chunk_id` 做幂等；用 `chunk_id` 挡重试，**不要**复用 `chunk_id` 传不同内容。
 
-Web：`/logs` 展示批次列表；`/logs/:batchId` 按 `batch_id` 查看条目。
+Web：`/logs` 运行列表；`/logs/:runId` 按 `run_id` 看条目（URL 需带 project）。
 
 ### 上传（仅 API Key）
 
@@ -300,8 +300,9 @@ POST /api/projects/:project_id/logs
 ```json
 {
   "run_id": "2f086286-1112-45dd-a8fa-824df6d5949c",
+  "chunk_id": "0",
   "source": "smux",
-  "description": "可选批次说明",
+  "description": "可选运行说明",
   "entries": [
     {
       "timestamp": "2026-06-29T14:30:00Z",
@@ -316,22 +317,25 @@ POST /api/projects/:project_id/logs
 
 | 字段 | 说明 |
 |---|---|
-| `run_id` | 必填，1..128 字符，`^[A-Za-z0-9_-]+$`；同项目同 run_id 合并到同一批次 |
-| `description` | 可选，0..500 字节；**仅创建批次时写入** |
-| `entries` | 必填，1..500 条/次；body 总大小 ≤ 4 MB（超出 HTTP 413） |
+| `run_id` | 必填，1..128 字符，`^[A-Za-z0-9_-]+$`；同项目同 run_id 合并为一次运行 |
+| `chunk_id` | 必填，规则同 run_id；同一项目 `(run_id, chunk_id)` 重复提交返回 200，`duplicate: true`，`accepted_count: 0`，不插入 |
+| `description` / `source` | 可选；**仅创建这次运行时写入**（先到先得） |
+| `entries` | 必填，1..500 条/次；body 总大小 ≤ 4 MB（超出 HTTP 413）；一次运行最多 50,000 条，超出该分片整包拒绝（40909） |
 | `entries[].level` | `debug` / `info` / `warn` / `error` / `fatal` |
 | `entries[].message` | 1..4000 字节 |
 | `entries[].metadata` | 可选 JSON，≤ 4 KB |
+
+上传响应主键为 `run_id`，含 `accepted_count`、`duplicate`；没有批次 `id`。
 
 ### 查询与删除
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/projects/:project_id/logs` | 条目列表；参数：`batch_id`、`run_id`、`level`、`q`、`from`/`to`、`page`/`page_size`（默认 50，最大 100）、`sort` |
-| GET | `/api/projects/:project_id/log-batches` | 批次列表 |
-| GET | `/api/log-batches/:batch_id` | 单批详情；不存在返回 404（40409） |
-| DELETE | `/api/log-batches/:batch_id` | 删除整批 |
+| GET | `/api/projects/:project_id/logs` | 条目；参数：`run_id`、`level`、`entry_source`、`q`、`from`/`to`、`page`/`page_size`（默认 50，最大 100）、`sort` |
 | DELETE | `/api/projects/:project_id/logs` | 清空项目全部日志 |
+| GET | `/api/projects/:project_id/log-runs` | 运行列表；参数：`run_id`、`source`、`from`/`to` |
+| GET | `/api/projects/:project_id/log-runs/:run_id` | 单次运行；不存在 404（40409） |
+| DELETE | `/api/projects/:project_id/log-runs/:run_id` | 删除该次运行 |
 
 ## 错误处理
 
@@ -343,7 +347,8 @@ POST /api/projects/:project_id/logs
 | 403 | 40303 | 该操作仅限 API Key（如协作区 PUT 拒绝 JWT） |
 | 404 | 40401 | 项目不存在 |
 | 404 | 40405 | Issue 不存在 |
-| 404 | 40409 | 日志批次不存在 |
+| 404 | 40409 | 日志运行不存在 |
+| 409 | 40909 | 该运行日志条数已达上限 |
 | 413 | — | 请求体超出 4 MB |
 
 收到 401 时检查：`Authorization: Bearer fsk_...`、`base_url`、Key 是否已删除。

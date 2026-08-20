@@ -4,8 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { vi } from "vitest";
 import LogsPage from "@/routes/logs/index";
 
-const { listBatchesMock, copyWithToastMock } = vi.hoisted(() => ({
-  listBatchesMock: vi.fn(),
+const { listRunsMock, copyWithToastMock } = vi.hoisted(() => ({
+  listRunsMock: vi.fn(),
   copyWithToastMock: vi.fn(),
 }));
 
@@ -17,11 +17,10 @@ vi.mock("@/lib/hooks/use-projects", () => ({
 }));
 
 vi.mock("@/lib/hooks/use-logs", () => ({
-  useLogBatches: () => ({
+  useLogRuns: () => ({
     data: {
       items: [
         {
-          id: "batch-1",
           project_id: "proj-1",
           run_id: "run-1",
           source: "smux",
@@ -40,13 +39,13 @@ vi.mock("@/lib/hooks/use-logs", () => ({
     isLoading: false,
     isError: false,
   }),
-  useDeleteLogBatch: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDeleteLogRun: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useClearProjectLogs: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 
 vi.mock("@/lib/api/logs", () => ({
   logApi: {
-    listBatches: (...args: unknown[]) => listBatchesMock(...args),
+    listRuns: (...args: unknown[]) => listRunsMock(...args),
   },
 }));
 
@@ -76,12 +75,12 @@ function renderLogs() {
   );
 }
 
-describe("LogsPage batch list", () => {
-  it("renders batch list instead of cross-batch entry stream", async () => {
+describe("LogsPage run list", () => {
+  it("renders run list instead of cross-run entry stream", async () => {
     renderLogs();
 
     await waitFor(() => {
-      expect(screen.getByTestId("log-batch-list")).toBeInTheDocument();
+      expect(screen.getByTestId("log-run-list")).toBeInTheDocument();
     });
     expect(screen.getByText("阶段说明")).toBeInTheDocument();
     expect(screen.getByText("复制运行 ID")).toBeInTheDocument();

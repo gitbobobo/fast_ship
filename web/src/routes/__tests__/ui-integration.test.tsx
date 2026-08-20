@@ -226,9 +226,9 @@ describe("UI Integration Tests", () => {
       expect(docsLink).toHaveAttribute("aria-current", "page");
     });
 
-    it("keeps logs sidebar item active on /logs/:batchId", () => {
+    it("keeps logs sidebar item active on /logs/:runId", () => {
       renderWithProviders(<Sidebar />, {
-        initialEntry: "/logs/batch-123",
+        initialEntry: "/logs/run-123",
       });
 
       const logLink = document.querySelector('a[href="/logs"]');

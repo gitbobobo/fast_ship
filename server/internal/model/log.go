@@ -21,30 +21,41 @@ func IsValidLogLevel(level string) bool {
 	}
 }
 
-type LogBatch struct {
-	ID               string     `gorm:"type:text;primaryKey" json:"id"`
-	ProjectID        string     `gorm:"type:text;not null;index" json:"project_id"`
-	RunID            string     `gorm:"type:text;not null" json:"run_id"`
+type LogRun struct {
+	ID               string     `gorm:"type:text;primaryKey" json:"-"`
+	ProjectID        string     `gorm:"type:text;not null;index;uniqueIndex:idx_log_runs_project_run" json:"project_id"`
+	RunID            string     `gorm:"type:text;not null;uniqueIndex:idx_log_runs_project_run" json:"run_id"`
 	Source           string     `gorm:"type:text;not null;default:''" json:"source"`
 	Description      string     `gorm:"type:text;not null;default:''" json:"description"`
 	EntryCount       int        `gorm:"not null;default:0" json:"entry_count"`
 	FirstEntryAt     *time.Time `json:"first_entry_at"`
 	LastEntryAt      *time.Time `json:"last_entry_at"`
 	UploaderAPIKeyID *string    `gorm:"type:text" json:"uploader_api_key_id,omitempty"`
-	RetentionDays    *int       `json:"retention_days,omitempty"`
 	CreatedAt        time.Time  `gorm:"not null" json:"created_at"`
 	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
 
 	Project Project `gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
-func (LogBatch) TableName() string {
-	return "log_batches"
+func (LogRun) TableName() string {
+	return "log_runs"
+}
+
+type LogRunChunk struct {
+	LogRunID  string    `gorm:"type:text;primaryKey" json:"-"`
+	ChunkID   string    `gorm:"type:text;primaryKey" json:"-"`
+	CreatedAt time.Time `gorm:"not null" json:"-"`
+
+	LogRun LogRun `gorm:"foreignKey:LogRunID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (LogRunChunk) TableName() string {
+	return "log_run_chunks"
 }
 
 type LogEntry struct {
 	ID        string    `gorm:"type:text;primaryKey" json:"id"`
-	BatchID   string    `gorm:"type:text;not null;index" json:"batch_id"`
+	LogRunID  string    `gorm:"type:text;not null;index" json:"-"`
 	Timestamp time.Time `gorm:"not null;index" json:"timestamp"`
 	Level     string    `gorm:"type:text;not null" json:"level"`
 	Source    string    `gorm:"type:text;not null;default:''" json:"source"`
@@ -52,7 +63,7 @@ type LogEntry struct {
 	Metadata  string    `gorm:"type:text;not null;default:''" json:"metadata"`
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 
-	Batch LogBatch `gorm:"foreignKey:BatchID;constraint:OnDelete:CASCADE" json:"-"`
+	LogRun LogRun `gorm:"foreignKey:LogRunID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 func (LogEntry) TableName() string {

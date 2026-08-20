@@ -1,11 +1,9 @@
 import { api } from "./client";
 
 interface LogEntryListParams {
-  batch_id?: string;
   run_id?: string;
   level?: string;
   entry_source?: string;
-  batch_source?: string;
   q?: string;
   from?: string;
   to?: string;
@@ -14,9 +12,9 @@ interface LogEntryListParams {
   sort?: string;
 }
 
-interface LogBatchListParams {
+interface LogRunListParams {
   run_id?: string;
-  batch_source?: string;
+  source?: string;
   from?: string;
   to?: string;
   page?: number;
@@ -31,11 +29,9 @@ export const logApi = {
           page: params.page ?? 1,
           page_size: params.page_size ?? 50,
           sort: params.sort ?? "timestamp_desc",
-          ...(params.batch_id ? { batch_id: params.batch_id } : {}),
           ...(params.run_id ? { run_id: params.run_id } : {}),
           ...(params.level ? { level: params.level } : {}),
           ...(params.entry_source ? { entry_source: params.entry_source } : {}),
-          ...(params.batch_source ? { batch_source: params.batch_source } : {}),
           ...(params.q ? { q: params.q } : {}),
           ...(params.from ? { from: params.from } : {}),
           ...(params.to ? { to: params.to } : {}),
@@ -43,25 +39,29 @@ export const logApi = {
       })
       .json<ApiResponse<PaginatedData<LogEntry>>>(),
 
-  listBatches: (projectId: string, params: LogBatchListParams = {}) =>
+  listRuns: (projectId: string, params: LogRunListParams = {}) =>
     api
-      .get(`projects/${projectId}/log-batches`, {
+      .get(`projects/${projectId}/log-runs`, {
         searchParams: {
           page: params.page ?? 1,
           page_size: params.page_size ?? 50,
           ...(params.run_id ? { run_id: params.run_id } : {}),
-          ...(params.batch_source ? { batch_source: params.batch_source } : {}),
+          ...(params.source ? { source: params.source } : {}),
           ...(params.from ? { from: params.from } : {}),
           ...(params.to ? { to: params.to } : {}),
         },
       })
-      .json<ApiResponse<PaginatedData<LogBatch>>>(),
+      .json<ApiResponse<PaginatedData<LogRun>>>(),
 
-  getBatch: (batchId: string) =>
-    api.get(`log-batches/${batchId}`).json<ApiResponse<LogBatch>>(),
+  getRun: (projectId: string, runId: string) =>
+    api
+      .get(`projects/${projectId}/log-runs/${runId}`)
+      .json<ApiResponse<LogRun>>(),
 
-  deleteBatch: (batchId: string) =>
-    api.delete(`log-batches/${batchId}`).json<ApiResponse<null>>(),
+  deleteRun: (projectId: string, runId: string) =>
+    api
+      .delete(`projects/${projectId}/log-runs/${runId}`)
+      .json<ApiResponse<null>>(),
 
   deleteByProject: (projectId: string) =>
     api.delete(`projects/${projectId}/logs`).json<ApiResponse<null>>(),

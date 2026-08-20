@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -12,6 +13,11 @@ import (
 	"gorm.io/gorm"
 )
 
+func migrateLogTestSchema(db *gorm.DB) {
+	db.AutoMigrate(&model.User{}, &model.Project{}, &model.LogRun{}, &model.LogRunChunk{}, &model.LogEntry{})
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
+}
+
 func setupLogServiceTest(t *testing.T) (*LogService, *gorm.DB, string, string) {
 	t.Helper()
 
@@ -21,10 +27,7 @@ func setupLogServiceTest(t *testing.T) (*LogService, *gorm.DB, string, string) {
 		t.Fatalf("open db: %v", err)
 	}
 
-	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.LogBatch{}, &model.LogEntry{}); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_log_batches_project_run ON log_batches(project_id, run_id)")
+	migrateLogTestSchema(db)
 
 	userID := uuid.NewString()
 	projectID := uuid.NewString()
@@ -47,8 +50,9 @@ func TestLogService_UploadAndList(t *testing.T) {
 
 	ts := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	res, err := svc.UploadLogs(projectID, userID, &keyID, &UploadLogsRequest{
-		RunID:  "run-1",
-		Source: "smux",
+		RunID:   "run-1",
+		ChunkID: "chunk-1",
+		Source:  "smux",
 		Entries: []LogEntryInput{
 			{Timestamp: ts, Level: "info", Source: "phase-1", Message: "hello"},
 		},
@@ -61,8 +65,9 @@ func TestLogService_UploadAndList(t *testing.T) {
 	}
 
 	res2, err := svc.UploadLogs(projectID, userID, &keyID, &UploadLogsRequest{
-		RunID:  "run-1",
-		Source: "smux",
+		RunID:   "run-1",
+		ChunkID: "chunk-2",
+		Source:  "smux",
 		Entries: []LogEntryInput{
 			{Timestamp: ts.Add(time.Minute), Level: "error", Message: "fail"},
 		},
@@ -87,13 +92,102 @@ func TestLogService_InvalidLevelRejected(t *testing.T) {
 	svc, _, userID, projectID := setupLogServiceTest(t)
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID: "run-1",
+		RunID:   "run-1",
+		ChunkID: "chunk-1",
 		Entries: []LogEntryInput{
 			{Timestamp: time.Now(), Level: "trace", Message: "x"},
 		},
 	})
 	if err != errs.ErrInvalidParams {
 		t.Fatalf("expected invalid params, got %v", err)
+	}
+}
+
+func TestLogService_MissingChunkIDRejected(t *testing.T) {
+	svc, _, userID, projectID := setupLogServiceTest(t)
+
+	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID: "run-1",
+		Entries: []LogEntryInput{
+			{Timestamp: time.Now(), Level: "info", Message: "x"},
+		},
+	})
+	if err != errs.ErrInvalidParams {
+		t.Fatalf("expected invalid params for missing chunk_id, got %v", err)
+	}
+}
+
+func TestLogService_DuplicateChunk(t *testing.T) {
+	svc, _, userID, projectID := setupLogServiceTest(t)
+	ts := time.Now().UTC()
+
+	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:   "run-dup",
+		ChunkID: "chunk-a",
+		Entries: []LogEntryInput{
+			{Timestamp: ts, Level: "info", Message: "first"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("first upload: %v", err)
+	}
+
+	dup, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:   "run-dup",
+		ChunkID: "chunk-a",
+		Entries: []LogEntryInput{
+			{Timestamp: ts.Add(time.Second), Level: "info", Message: "retry"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("duplicate upload: %v", err)
+	}
+	if !dup.Duplicate || dup.AcceptedCount != 0 {
+		t.Fatalf("expected duplicate=true accepted_count=0, got duplicate=%v accepted=%d", dup.Duplicate, dup.AcceptedCount)
+	}
+	if dup.EntryCount != res.EntryCount {
+		t.Fatalf("entry count changed on duplicate: before=%d after=%d", res.EntryCount, dup.EntryCount)
+	}
+}
+
+func TestLogService_RunEntryLimitExceeded(t *testing.T) {
+	svc, db, userID, projectID := setupLogServiceTest(t)
+	ts := time.Now().UTC()
+
+	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:   "run-limit",
+		ChunkID: "chunk-1",
+		Entries: []LogEntryInput{
+			{Timestamp: ts, Level: "info", Message: "seed"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("seed upload: %v", err)
+	}
+
+	if err := db.Model(&model.LogRun{}).Where("run_id = ?", "run-limit").
+		Update("entry_count", repository.MaxLogEntriesPerRun-1).Error; err != nil {
+		t.Fatalf("set entry_count: %v", err)
+	}
+
+	_, err = svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:   "run-limit",
+		ChunkID: "chunk-2",
+		Entries: []LogEntryInput{
+			{Timestamp: ts.Add(time.Second), Level: "info", Message: "a"},
+			{Timestamp: ts.Add(2 * time.Second), Level: "info", Message: "b"},
+		},
+	})
+	if err != errs.ErrLogRunEntryLimitExceeded {
+		t.Fatalf("expected entry limit error, got %v", err)
+	}
+
+	var run model.LogRun
+	if err := db.Where("run_id = ?", "run-limit").First(&run).Error; err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+	if run.EntryCount != repository.MaxLogEntriesPerRun-1 {
+		t.Fatalf("entry_count should rollback to %d, got %d", repository.MaxLogEntriesPerRun-1, run.EntryCount)
 	}
 }
 
@@ -111,7 +205,8 @@ func TestLogService_CrossUserDenied(t *testing.T) {
 	}
 
 	_, err = svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID: "run-x",
+		RunID:   "run-x",
+		ChunkID: "chunk-1",
 		Entries: []LogEntryInput{
 			{Timestamp: time.Now(), Level: "info", Message: "owned"},
 		},
@@ -121,11 +216,12 @@ func TestLogService_CrossUserDenied(t *testing.T) {
 	}
 }
 
-func TestLogService_DeleteBatch(t *testing.T) {
+func TestLogService_DeleteRun(t *testing.T) {
 	svc, _, userID, projectID := setupLogServiceTest(t)
 
-	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID: "run-del",
+	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:   "run-del",
+		ChunkID: "chunk-1",
 		Entries: []LogEntryInput{
 			{Timestamp: time.Now(), Level: "info", Message: "to delete"},
 		},
@@ -134,8 +230,8 @@ func TestLogService_DeleteBatch(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 
-	if err := svc.DeleteBatch(res.ID, userID); err != nil {
-		t.Fatalf("delete batch: %v", err)
+	if err := svc.DeleteRun(projectID, "run-del", userID); err != nil {
+		t.Fatalf("delete run: %v", err)
 	}
 
 	_, total, err := svc.ListEntries(projectID, userID, ListLogEntriesRequest{Page: 1, PageSize: 10})
@@ -147,7 +243,7 @@ func TestLogService_DeleteBatch(t *testing.T) {
 	}
 }
 
-func TestLogService_DeleteBatch_CrossUserDenied(t *testing.T) {
+func TestLogService_DeleteRun_CrossUserDenied(t *testing.T) {
 	svc, db, userID, projectID := setupLogServiceTest(t)
 	otherID := uuid.NewString()
 	now := time.Now()
@@ -155,8 +251,9 @@ func TestLogService_DeleteBatch_CrossUserDenied(t *testing.T) {
 		t.Fatalf("create other user: %v", err)
 	}
 
-	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID: "run-del-x",
+	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:   "run-del-x",
+		ChunkID: "chunk-1",
 		Entries: []LogEntryInput{
 			{Timestamp: time.Now(), Level: "info", Message: "protected"},
 		},
@@ -165,8 +262,8 @@ func TestLogService_DeleteBatch_CrossUserDenied(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 
-	if err := svc.DeleteBatch(res.ID, otherID); err != errs.ErrLogBatchNotFound {
-		t.Fatalf("expected log batch not found, got %v", err)
+	if err := svc.DeleteRun(projectID, "run-del-x", otherID); err != errs.ErrLogRunNotFound {
+		t.Fatalf("expected log run not found, got %v", err)
 	}
 }
 
@@ -175,14 +272,15 @@ func TestLogService_InvalidSourceRejected(t *testing.T) {
 	longSource := string(make([]byte, maxLogSourceBytes+1))
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:  "run-1",
-		Source: longSource,
+		RunID:   "run-1",
+		ChunkID: "chunk-1",
+		Source:  longSource,
 		Entries: []LogEntryInput{
 			{Timestamp: time.Now(), Level: "info", Message: "x"},
 		},
 	})
 	if err != errs.ErrInvalidParams {
-		t.Fatalf("expected invalid params for batch source, got %v", err)
+		t.Fatalf("expected invalid params for run source, got %v", err)
 	}
 }
 
@@ -192,6 +290,7 @@ func TestLogService_DescriptionCreateAndPreserve(t *testing.T) {
 
 	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
 		RunID:       "run-desc",
+		ChunkID:     "chunk-1",
 		Description: "first note",
 		Entries: []LogEntryInput{
 			{Timestamp: ts, Level: "info", Message: "a"},
@@ -206,6 +305,7 @@ func TestLogService_DescriptionCreateAndPreserve(t *testing.T) {
 
 	res2, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
 		RunID:       "run-desc",
+		ChunkID:     "chunk-2",
 		Description: "should not overwrite",
 		Entries: []LogEntryInput{
 			{Timestamp: ts.Add(time.Second), Level: "info", Message: "b"},
@@ -221,20 +321,20 @@ func TestLogService_DescriptionCreateAndPreserve(t *testing.T) {
 		t.Fatalf("description overwritten: %q", res2.Description)
 	}
 
-	batch, err := svc.GetBatch(res.ID, userID)
+	run, err := svc.GetRun(projectID, "run-desc", userID)
 	if err != nil {
-		t.Fatalf("get batch: %v", err)
+		t.Fatalf("get run: %v", err)
 	}
-	if batch.Description != "first note" {
-		t.Fatalf("get batch description: %q", batch.Description)
+	if run.Description != "first note" {
+		t.Fatalf("get run description: %q", run.Description)
 	}
 
-	items, total, err := svc.ListBatches(projectID, userID, ListLogBatchesRequest{Page: 1, PageSize: 10})
+	items, total, err := svc.ListRuns(projectID, userID, ListLogRunsRequest{Page: 1, PageSize: 10})
 	if err != nil {
-		t.Fatalf("list batches: %v", err)
+		t.Fatalf("list runs: %v", err)
 	}
 	if total != 1 || len(items) != 1 || items[0].Description != "first note" {
-		t.Fatalf("list batches unexpected: total=%d items=%+v", total, items)
+		t.Fatalf("list runs unexpected: total=%d items=%+v", total, items)
 	}
 }
 
@@ -244,6 +344,7 @@ func TestLogService_DescriptionTooLongRejected(t *testing.T) {
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
 		RunID:       "run-long-desc",
+		ChunkID:     "chunk-1",
 		Description: longDesc,
 		Entries: []LogEntryInput{
 			{Timestamp: time.Now(), Level: "info", Message: "x"},
@@ -254,7 +355,7 @@ func TestLogService_DescriptionTooLongRejected(t *testing.T) {
 	}
 }
 
-func TestLogService_GetBatch_NotFoundAndCrossUser(t *testing.T) {
+func TestLogService_GetRun_NotFoundAndCrossUser(t *testing.T) {
 	svc, db, userID, projectID := setupLogServiceTest(t)
 	otherID := uuid.NewString()
 	now := time.Now()
@@ -262,12 +363,13 @@ func TestLogService_GetBatch_NotFoundAndCrossUser(t *testing.T) {
 		t.Fatalf("create other user: %v", err)
 	}
 
-	if _, err := svc.GetBatch(uuid.NewString(), userID); err != errs.ErrLogBatchNotFound {
+	if _, err := svc.GetRun(projectID, "missing-run", userID); err != errs.ErrLogRunNotFound {
 		t.Fatalf("expected not found, got %v", err)
 	}
 
-	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID: "run-get-x",
+	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
+		RunID:   "run-get-x",
+		ChunkID: "chunk-1",
 		Entries: []LogEntryInput{
 			{Timestamp: time.Now(), Level: "info", Message: "x"},
 		},
@@ -276,8 +378,8 @@ func TestLogService_GetBatch_NotFoundAndCrossUser(t *testing.T) {
 		t.Fatalf("upload: %v", err)
 	}
 
-	if _, err := svc.GetBatch(res.ID, otherID); err != errs.ErrLogBatchNotFound {
-		t.Fatalf("expected log batch not found for cross user, got %v", err)
+	if _, err := svc.GetRun(projectID, "run-get-x", otherID); err != errs.ErrLogRunNotFound {
+		t.Fatalf("expected log run not found for cross user, got %v", err)
 	}
 }
 
@@ -294,6 +396,7 @@ func TestLogService_DescriptionConcurrentCreate(t *testing.T) {
 		go func(i int, desc string) {
 			res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
 				RunID:       "run-concurrent",
+				ChunkID:     fmt.Sprintf("chunk-%d", i),
 				Description: desc,
 				Entries: []LogEntryInput{
 					{Timestamp: ts.Add(time.Duration(i) * time.Second), Level: "info", Message: desc},
@@ -313,18 +416,26 @@ func TestLogService_DescriptionConcurrentCreate(t *testing.T) {
 		}
 	}
 
-	batch, err := svc.GetBatch(results[0].res.ID, userID)
+	run, err := svc.GetRun(projectID, "run-concurrent", userID)
 	if err != nil {
-		t.Fatalf("get batch: %v", err)
+		t.Fatalf("get run: %v", err)
 	}
-	if batch.Description != "desc-a" && batch.Description != "desc-b" {
-		t.Fatalf("unexpected description %q", batch.Description)
+	if run.Description != "desc-a" && run.Description != "desc-b" {
+		t.Fatalf("unexpected description %q", run.Description)
 	}
-	if results[0].res.Description != batch.Description || results[1].res.Description != batch.Description {
+	if results[0].res.Description != run.Description || results[1].res.Description != run.Description {
 		t.Fatalf("response descriptions drifted: %q %q final=%q",
-			results[0].res.Description, results[1].res.Description, batch.Description)
+			results[0].res.Description, results[1].res.Description, run.Description)
 	}
-	if batch.EntryCount != 2 {
-		t.Fatalf("expected 2 entries after concurrent upload, got %d", batch.EntryCount)
+	if run.EntryCount != 2 {
+		t.Fatalf("expected 2 entries after concurrent upload, got %d", run.EntryCount)
+	}
+
+	items, total, err := svc.ListRuns(projectID, userID, ListLogRunsRequest{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if total != 1 || len(items) != 1 {
+		t.Fatalf("expected exactly one run after concurrent create, got total=%d len=%d", total, len(items))
 	}
 }

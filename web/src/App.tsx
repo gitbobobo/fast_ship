@@ -15,7 +15,7 @@ const ProjectsPage = lazy(() => import("@/routes/projects/index"));
 const VersionsPage = lazy(() => import("@/routes/versions/index"));
 const IssuesPage = lazy(() => import("@/routes/issues/index"));
 const LogsPage = lazy(() => import("@/routes/logs/index"));
-const LogBatchDetailPage = lazy(() => import("@/routes/logs/$batchId"));
+const LogRunDetailPage = lazy(() => import("@/routes/logs/$runId"));
 const DocumentsPage = lazy(() => import("@/routes/documents/index"));
 const BoardPage = lazy(() => import("@/routes/board/index"));
 const VersionDetailPage = lazy(
@@ -82,8 +82,8 @@ export default function App() {
                 element={<LazyPage render={<LogsPage />} />}
               />
               <Route
-                path="/logs/:batchId"
-                element={<LazyPage render={<LogBatchDetailPage />} />}
+                path="/logs/:runId"
+                element={<LazyPage render={<LogRunDetailPage />} />}
               />
               <Route
                 path="/documents"

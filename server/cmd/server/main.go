@@ -74,6 +74,8 @@ func main() {
 		log.Fatalf("连接数据库失败: %v", err)
 	}
 
+	dropLegacyLogTables(db, zapLogger)
+
 	// 自动迁移
 	if err := db.AutoMigrate(
 		&model.User{},
@@ -99,7 +101,8 @@ func main() {
 		&model.IssueCollabPlan{},
 		&model.IssueCollabReview{},
 		&model.IssueCollabSummary{},
-		&model.LogBatch{},
+		&model.LogRun{},
+		&model.LogRunChunk{},
 		&model.LogEntry{},
 		&model.Document{},
 	); err != nil {
@@ -114,9 +117,8 @@ func main() {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_log_batches_project_run ON log_batches(project_id, run_id)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_batches_project_last_entry ON log_batches(project_id, last_entry_at DESC)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_batch_timestamp ON log_entries(batch_id, timestamp ASC)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_runs_project_last_entry ON log_runs(project_id, last_entry_at DESC)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 
 	dropLegacyCollabTables(db, zapLogger)
@@ -126,9 +128,6 @@ func main() {
 	}
 	if err := backfillIssueAssetStatusModel(db); err != nil {
 		log.Fatalf("问题资源数据迁移失败: %v", err)
-	}
-	if err := backfillLogBatchDescription(db); err != nil {
-		log.Fatalf("日志批次说明迁移失败: %v", err)
 	}
 
 	// 初始化存储
@@ -382,17 +381,21 @@ func backfillIssueAssetStatusModel(db *gorm.DB) error {
 	`).Error
 }
 
-func backfillLogBatchDescription(db *gorm.DB) error {
-	hasDescription, err := hasSQLiteColumn(db, "log_batches", "description")
-	if err != nil || !hasDescription {
-		return err
+func dropLegacyLogTables(db *gorm.DB, logger *zap.Logger) {
+	hasBatchID, err := hasSQLiteColumn(db, "log_entries", "batch_id")
+	if err != nil {
+		logger.Warn("检查遗留日志表失败", zap.Error(err))
+		return
+	}
+	if hasBatchID {
+		if err := db.Exec("DROP TABLE IF EXISTS log_entries").Error; err != nil {
+			logger.Warn("删除遗留日志表失败", zap.String("table", "log_entries"), zap.Error(err))
+		}
 	}
 
-	return db.Exec(`
-		UPDATE log_batches
-		SET description = ''
-		WHERE description IS NULL
-	`).Error
+	if err := db.Exec("DROP TABLE IF EXISTS log_batches").Error; err != nil {
+		logger.Warn("删除遗留日志表失败", zap.String("table", "log_batches"), zap.Error(err))
+	}
 }
 
 func dropLegacyCollabTables(db *gorm.DB, logger *zap.Logger) {

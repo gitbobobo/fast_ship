@@ -644,7 +644,8 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueCollabPlan{},
 		&model.IssueCollabReview{},
 		&model.IssueCollabSummary{},
-		&model.LogBatch{},
+		&model.LogRun{},
+		&model.LogRunChunk{},
 		&model.LogEntry{},
 		&model.Document{},
 	); err != nil {
@@ -658,7 +659,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_log_batches_project_run ON log_batches(project_id, run_id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 
 	cfg := &config.Config{
@@ -1254,7 +1255,7 @@ func TestRouterLogWritesRequireApiKey(t *testing.T) {
 	apiKeyAuth := "Bearer " + service.FormatApiKey(rawKey)
 	jwtAuth := "Bearer " + auth.Token
 
-	uploadBody := []byte(`{"run_id":"run-1","source":"smux","description":"batch note","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"hello"}]}`)
+	uploadBody := []byte(`{"run_id":"run-1","chunk_id":"chunk-1","source":"smux","description":"run note","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"hello"}]}`)
 	uploadPath := "/api/projects/" + project.ID + "/logs"
 
 	doReq := func(method, authHeader, path string, body []byte) *httptest.ResponseRecorder {
@@ -1283,34 +1284,42 @@ func TestRouterLogWritesRequireApiKey(t *testing.T) {
 	}
 
 	var uploadResult struct {
-		ID          string `json:"id"`
+		RunID       string `json:"run_id"`
 		Description string `json:"description"`
 	}
 	decodeRouterEnvelope(t, rec, &uploadResult)
-	if uploadResult.Description != "batch note" {
+	if uploadResult.Description != "run note" {
 		t.Fatalf("expected description in upload response, got %q", uploadResult.Description)
 	}
 
-	getRec := doReq(http.MethodGet, jwtAuth, "/api/log-batches/"+uploadResult.ID, nil)
+	runPath := "/api/projects/" + project.ID + "/log-runs/" + uploadResult.RunID
+	getRec := doReq(http.MethodGet, jwtAuth, runPath, nil)
 	if getRec.Code != http.StatusOK {
-		t.Fatalf("JWT get batch expected 200, got %d: %s", getRec.Code, getRec.Body.String())
+		t.Fatalf("JWT get run expected 200, got %d: %s", getRec.Code, getRec.Body.String())
 	}
-	var batchDetail struct {
-		ID          string `json:"id"`
+	var runDetail struct {
+		RunID       string `json:"run_id"`
 		Description string `json:"description"`
 	}
-	decodeRouterEnvelope(t, getRec, &batchDetail)
-	if batchDetail.Description != "batch note" {
-		t.Fatalf("expected description in get batch, got %q", batchDetail.Description)
+	decodeRouterEnvelope(t, getRec, &runDetail)
+	if runDetail.Description != "run note" {
+		t.Fatalf("expected description in get run, got %q", runDetail.Description)
 	}
 
-	apiKeyGetRec := doReq(http.MethodGet, apiKeyAuth, "/api/log-batches/"+uploadResult.ID, nil)
+	apiKeyGetRec := doReq(http.MethodGet, apiKeyAuth, runPath, nil)
 	if apiKeyGetRec.Code != http.StatusOK {
-		t.Fatalf("API key get batch expected 200, got %d: %s", apiKeyGetRec.Code, apiKeyGetRec.Body.String())
+		t.Fatalf("API key get run expected 200, got %d: %s", apiKeyGetRec.Code, apiKeyGetRec.Body.String())
 	}
 
-	if rec := doReq(http.MethodGet, apiKeyAuth, "/api/log-batches/"+uuid.NewString(), nil); rec.Code != http.StatusNotFound {
-		t.Fatalf("missing batch expected 404, got %d: %s", rec.Code, rec.Body.String())
+	if rec := doReq(http.MethodGet, apiKeyAuth, "/api/projects/"+project.ID+"/log-runs/missing-run", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("missing run expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := doReq(http.MethodGet, apiKeyAuth, "/api/log-batches/legacy", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("legacy log-batches route expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(http.MethodGet, apiKeyAuth, "/api/projects/"+project.ID+"/log-batches", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("legacy project log-batches route expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	listPath := "/api/projects/" + project.ID + "/logs"
@@ -1321,12 +1330,13 @@ func TestRouterLogWritesRequireApiKey(t *testing.T) {
 		t.Fatalf("API key list expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	delRec := doReq(http.MethodDelete, apiKeyAuth, "/api/log-batches/"+uploadResult.ID, nil)
+	delRec := doReq(http.MethodDelete, apiKeyAuth, runPath, nil)
 	if delRec.Code != http.StatusOK {
-		t.Fatalf("API key delete batch expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+		t.Fatalf("API key delete run expected 200, got %d: %s", delRec.Code, delRec.Body.String())
 	}
 
-	clearRec := doReq(http.MethodPost, apiKeyAuth, uploadPath, uploadBody)
+	reuploadBody := []byte(`{"run_id":"run-1","chunk_id":"chunk-2","source":"smux","description":"run note","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"hello"}]}`)
+	clearRec := doReq(http.MethodPost, apiKeyAuth, uploadPath, reuploadBody)
 	if clearRec.Code != http.StatusOK {
 		t.Fatalf("re-upload expected 200, got %d: %s", clearRec.Code, clearRec.Body.String())
 	}
@@ -1356,7 +1366,7 @@ func TestRouterLogUploadRejectsCrossUserAPIKey(t *testing.T) {
 		t.Fatalf("create api key: %v", err)
 	}
 
-	body := []byte(`{"run_id":"run-x","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"x"}]}`)
+	body := []byte(`{"run_id":"run-x","chunk_id":"chunk-1","entries":[{"timestamp":"2026-06-29T12:00:00Z","level":"info","message":"x"}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/"+project.ID+"/logs", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+service.FormatApiKey(rawKey))

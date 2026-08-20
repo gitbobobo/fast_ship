@@ -44,13 +44,13 @@ type LogEntryInput struct {
 
 type UploadLogsRequest struct {
 	RunID       string          `json:"run_id"`
+	ChunkID     string          `json:"chunk_id"`
 	Source      string          `json:"source"`
 	Description string          `json:"description"`
 	Entries     []LogEntryInput `json:"entries"`
 }
 
 type UploadLogsResult struct {
-	ID            string     `json:"id"`
 	RunID         string     `json:"run_id"`
 	Source        string     `json:"source"`
 	Description   string     `json:"description"`
@@ -58,23 +58,21 @@ type UploadLogsResult struct {
 	FirstEntryAt  *time.Time `json:"first_entry_at"`
 	LastEntryAt   *time.Time `json:"last_entry_at"`
 	AcceptedCount int        `json:"accepted_count"`
+	Duplicate     bool       `json:"duplicate"`
 }
 
 type LogEntryItem struct {
-	ID          string    `json:"id"`
-	BatchID     string    `json:"batch_id"`
-	RunID       string    `json:"run_id"`
-	BatchSource string    `json:"batch_source"`
-	Timestamp   time.Time `json:"timestamp"`
-	Level       string    `json:"level"`
-	Source      string    `json:"source"`
-	Message     string    `json:"message"`
-	Metadata    string    `json:"metadata,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID        string    `json:"id"`
+	RunID     string    `json:"run_id"`
+	Timestamp time.Time `json:"timestamp"`
+	Level     string    `json:"level"`
+	Source    string    `json:"source"`
+	Message   string    `json:"message"`
+	Metadata  string    `json:"metadata,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
-type LogBatchItem struct {
-	ID               string     `json:"id"`
+type LogRunItem struct {
 	ProjectID        string     `json:"project_id"`
 	RunID            string     `json:"run_id"`
 	Source           string     `json:"source"`
@@ -88,11 +86,9 @@ type LogBatchItem struct {
 }
 
 type ListLogEntriesRequest struct {
-	BatchID     string
 	RunID       string
 	Level       string
 	EntrySource string
-	BatchSource string
 	Query       string
 	From        *time.Time
 	To          *time.Time
@@ -101,13 +97,13 @@ type ListLogEntriesRequest struct {
 	Sort        string
 }
 
-type ListLogBatchesRequest struct {
-	RunID       string
-	BatchSource string
-	From        *time.Time
-	To          *time.Time
-	Page        int
-	PageSize    int
+type ListLogRunsRequest struct {
+	RunID    string
+	Source   string
+	From     *time.Time
+	To       *time.Time
+	Page     int
+	PageSize int
 }
 
 func (s *LogService) ensureProjectAccess(projectID, userID string) error {
@@ -125,7 +121,7 @@ func (s *LogService) UploadLogs(projectID, userID string, uploaderAPIKeyID *stri
 		return nil, err
 	}
 
-	if !logRunIDRegex.MatchString(req.RunID) {
+	if !logRunIDRegex.MatchString(req.RunID) || !logRunIDRegex.MatchString(req.ChunkID) {
 		return nil, errs.ErrInvalidParams
 	}
 	if len(req.Entries) == 0 || len(req.Entries) > maxLogEntriesPerUpload {
@@ -173,20 +169,24 @@ func (s *LogService) UploadLogs(projectID, userID string, uploaderAPIKeyID *stri
 		})
 	}
 
-	batch, err := s.logRepo.UploadBatchTx(projectID, req.RunID, req.Source, req.Description, uploaderAPIKeyID, entries)
+	txResult, err := s.logRepo.UploadRunTx(projectID, req.RunID, req.ChunkID, req.Source, req.Description, uploaderAPIKeyID, entries)
 	if err != nil {
+		if errors.Is(err, repository.ErrLogRunEntryLimitExceeded) {
+			return nil, errs.ErrLogRunEntryLimitExceeded
+		}
 		return nil, errs.ErrInternal
 	}
 
+	run := txResult.Run
 	return &UploadLogsResult{
-		ID:            batch.ID,
-		RunID:         batch.RunID,
-		Source:        batch.Source,
-		Description:   batch.Description,
-		EntryCount:    batch.EntryCount,
-		FirstEntryAt:  batch.FirstEntryAt,
-		LastEntryAt:   batch.LastEntryAt,
-		AcceptedCount: len(entries),
+		RunID:         run.RunID,
+		Source:        run.Source,
+		Description:   run.Description,
+		EntryCount:    run.EntryCount,
+		FirstEntryAt:  run.FirstEntryAt,
+		LastEntryAt:   run.LastEntryAt,
+		AcceptedCount: txResult.AcceptedCount,
+		Duplicate:     txResult.Duplicate,
 	}, nil
 }
 
@@ -197,11 +197,9 @@ func (s *LogService) ListEntries(projectID, userID string, req ListLogEntriesReq
 
 	entries, total, err := s.logRepo.ListEntries(repository.LogEntryFilter{
 		ProjectID:   projectID,
-		BatchID:     req.BatchID,
 		RunID:       req.RunID,
 		Level:       req.Level,
 		EntrySource: req.EntrySource,
-		BatchSource: req.BatchSource,
 		Query:       req.Query,
 		From:        req.From,
 		To:          req.To,
@@ -216,101 +214,90 @@ func (s *LogService) ListEntries(projectID, userID string, req ListLogEntriesReq
 	items := make([]LogEntryItem, 0, len(entries))
 	for _, entry := range entries {
 		items = append(items, LogEntryItem{
-			ID:          entry.ID,
-			BatchID:     entry.BatchID,
-			RunID:       entry.Batch.RunID,
-			BatchSource: entry.Batch.Source,
-			Timestamp:   entry.Timestamp,
-			Level:       entry.Level,
-			Source:      entry.Source,
-			Message:     entry.Message,
-			Metadata:    entry.Metadata,
-			CreatedAt:   entry.CreatedAt,
+			ID:        entry.ID,
+			RunID:     entry.LogRun.RunID,
+			Timestamp: entry.Timestamp,
+			Level:     entry.Level,
+			Source:    entry.Source,
+			Message:   entry.Message,
+			Metadata:  entry.Metadata,
+			CreatedAt: entry.CreatedAt,
 		})
 	}
 	return items, total, nil
 }
 
-func (s *LogService) ListBatches(projectID, userID string, req ListLogBatchesRequest) ([]LogBatchItem, int64, error) {
+func (s *LogService) ListRuns(projectID, userID string, req ListLogRunsRequest) ([]LogRunItem, int64, error) {
 	if err := s.ensureProjectAccess(projectID, userID); err != nil {
 		return nil, 0, err
 	}
 
-	batches, total, err := s.logRepo.ListBatches(repository.LogBatchFilter{
-		ProjectID:   projectID,
-		RunID:       req.RunID,
-		BatchSource: req.BatchSource,
-		From:        req.From,
-		To:          req.To,
-		Page:        req.Page,
-		PageSize:    req.PageSize,
+	runs, total, err := s.logRepo.ListRuns(repository.LogRunFilter{
+		ProjectID: projectID,
+		RunID:     req.RunID,
+		Source:    req.Source,
+		From:      req.From,
+		To:        req.To,
+		Page:      req.Page,
+		PageSize:  req.PageSize,
 	})
 	if err != nil {
 		return nil, 0, errs.ErrInternal
 	}
 
-	items := make([]LogBatchItem, 0, len(batches))
-	for _, batch := range batches {
-		items = append(items, toLogBatchItem(batch))
+	items := make([]LogRunItem, 0, len(runs))
+	for _, run := range runs {
+		items = append(items, toLogRunItem(run))
 	}
 	return items, total, nil
 }
 
-func (s *LogService) GetBatch(batchID, userID string) (*LogBatchItem, error) {
-	batch, err := s.logRepo.FindBatchByID(batchID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrLogBatchNotFound
-		}
-		return nil, errs.ErrInternal
-	}
-
-	if err := s.ensureProjectAccess(batch.ProjectID, userID); err != nil {
+func (s *LogService) GetRun(projectID, runID, userID string) (*LogRunItem, error) {
+	if err := s.ensureProjectAccess(projectID, userID); err != nil {
 		if errors.Is(err, errs.ErrProjectNotFound) {
-			return nil, errs.ErrLogBatchNotFound
+			return nil, errs.ErrLogRunNotFound
 		}
 		return nil, err
 	}
 
-	item := toLogBatchItem(*batch)
+	run, err := s.logRepo.FindRunByProjectAndRunID(projectID, runID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrLogRunNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+
+	item := toLogRunItem(*run)
 	return &item, nil
 }
 
-func toLogBatchItem(batch model.LogBatch) LogBatchItem {
-	return LogBatchItem{
-		ID:               batch.ID,
-		ProjectID:        batch.ProjectID,
-		RunID:            batch.RunID,
-		Source:           batch.Source,
-		Description:      batch.Description,
-		EntryCount:       batch.EntryCount,
-		FirstEntryAt:     batch.FirstEntryAt,
-		LastEntryAt:      batch.LastEntryAt,
-		UploaderAPIKeyID: batch.UploaderAPIKeyID,
-		CreatedAt:        batch.CreatedAt,
-		UpdatedAt:        batch.UpdatedAt,
+func toLogRunItem(run model.LogRun) LogRunItem {
+	return LogRunItem{
+		ProjectID:        run.ProjectID,
+		RunID:            run.RunID,
+		Source:           run.Source,
+		Description:      run.Description,
+		EntryCount:       run.EntryCount,
+		FirstEntryAt:     run.FirstEntryAt,
+		LastEntryAt:      run.LastEntryAt,
+		UploaderAPIKeyID: run.UploaderAPIKeyID,
+		CreatedAt:        run.CreatedAt,
+		UpdatedAt:        run.UpdatedAt,
 	}
 }
 
-func (s *LogService) DeleteBatch(batchID, userID string) error {
-	batch, err := s.logRepo.FindBatchByID(batchID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrLogBatchNotFound
-		}
-		return errs.ErrInternal
-	}
-
-	if err := s.ensureProjectAccess(batch.ProjectID, userID); err != nil {
+func (s *LogService) DeleteRun(projectID, runID, userID string) error {
+	if err := s.ensureProjectAccess(projectID, userID); err != nil {
 		if errors.Is(err, errs.ErrProjectNotFound) {
-			return errs.ErrLogBatchNotFound
+			return errs.ErrLogRunNotFound
 		}
 		return err
 	}
 
-	if err := s.logRepo.DeleteBatch(batchID); err != nil {
+	if err := s.logRepo.DeleteRun(projectID, runID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrLogBatchNotFound
+			return errs.ErrLogRunNotFound
 		}
 		return errs.ErrInternal
 	}

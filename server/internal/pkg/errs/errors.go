@@ -52,21 +52,22 @@ var (
 	ErrIssueAssetNotFound  = New(40406, "问题图片不存在")
 	ErrAISettingsNotFound  = New(40407, "请先在设置中配置 MiniMax API Key")
 	ErrIssueCollabNotFound = New(40408, "协作区内容不存在")
-	ErrLogBatchNotFound    = New(40409, "日志批次不存在")
+	ErrLogRunNotFound      = New(40409, "日志运行不存在")
 	ErrDocumentNotFound    = New(40410, "文档不存在")
 )
 
 // 业务冲突 40900-40999
 var (
-	ErrUsernameExists      = New(40900, "用户名已存在")
-	ErrEmailExists         = New(40901, "邮箱已存在")
-	ErrProjectNameExists   = New(40902, "项目名称在当前用户下已存在")
-	ErrVersionNumberExists = New(40903, "版本号在该项目下已存在")
-	ErrVersionNotPending   = New(40904, "版本不是待发货状态，无法执行此操作")
-	ErrVersionShipped      = New(40905, "版本已发货，无法修改")
-	ErrShipPreCheckFailed  = New(40906, "发货前置校验未通过")
-	ErrIssueSyncRunning    = New(40907, "问题同步正在进行中")
-	ErrIssueReadOnly       = New(40908, "该问题为只读问题")
+	ErrUsernameExists           = New(40900, "用户名已存在")
+	ErrEmailExists              = New(40901, "邮箱已存在")
+	ErrProjectNameExists        = New(40902, "项目名称在当前用户下已存在")
+	ErrVersionNumberExists      = New(40903, "版本号在该项目下已存在")
+	ErrVersionNotPending        = New(40904, "版本不是待发货状态，无法执行此操作")
+	ErrVersionShipped           = New(40905, "版本已发货，无法修改")
+	ErrShipPreCheckFailed       = New(40906, "发货前置校验未通过")
+	ErrIssueSyncRunning         = New(40907, "问题同步正在进行中")
+	ErrIssueReadOnly            = New(40908, "该问题为只读问题")
+	ErrLogRunEntryLimitExceeded = New(40909, "该运行日志条数已达上限")
 )
 
 // 前置条件未满足 41200-41299

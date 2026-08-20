@@ -36,8 +36,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
 import {
   useClearProjectLogs,
-  useDeleteLogBatch,
-  useLogBatches,
+  useDeleteLogRun,
+  useLogRuns,
 } from "@/lib/hooks/use-logs";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { getActiveProjectId } from "@/routes/board/lib/utils";
@@ -92,34 +92,34 @@ export default function LogsPage() {
   ]);
 
   const runIdFilter = searchParams.get("run_id") ?? "";
-  const batchSourceFilter = searchParams.get("batch_source") ?? "";
+  const sourceFilter = searchParams.get("source") ?? "";
   const fromFilter = searchParams.get("from_local") ?? "";
   const toFilter = searchParams.get("to_local") ?? "";
   const page = Math.max(Number(searchParams.get("page") ?? "1") || 1, 1);
 
   const {
-    data: batchesData,
-    isLoading: batchesLoading,
-    isError: batchesError,
-  } = useLogBatches(activeProjectId, {
+    data: runsData,
+    isLoading: runsLoading,
+    isError: runsError,
+  } = useLogRuns(activeProjectId, {
     run_id: runIdFilter || undefined,
-    batch_source: batchSourceFilter || undefined,
+    source: sourceFilter || undefined,
     from: datetimeLocalToISO(fromFilter),
     to: datetimeLocalToISO(toFilter),
     page,
     page_size: 50,
   });
 
-  const [pendingDeleteBatchId, setPendingDeleteBatchId] = useState<string | null>(
+  const [pendingDeleteRunId, setPendingDeleteRunId] = useState<string | null>(
     null,
   );
 
-  const deleteBatch = useDeleteLogBatch(activeProjectId);
+  const deleteRun = useDeleteLogRun(activeProjectId);
   const clearProjectLogs = useClearProjectLogs(activeProjectId);
 
-  const batches = batchesData?.items ?? [];
-  const total = batchesData?.total ?? 0;
-  const pageSize = batchesData?.page_size ?? 50;
+  const runs = runsData?.items ?? [];
+  const total = runsData?.total ?? 0;
+  const pageSize = runsData?.page_size ?? 50;
   const totalPages = Math.max(Math.ceil(total / pageSize), 1);
 
   const updateSearchParams = (
@@ -161,16 +161,16 @@ export default function LogsPage() {
 
   const canResetFilters =
     runIdFilter.length > 0 ||
-    batchSourceFilter.length > 0 ||
+    sourceFilter.length > 0 ||
     fromFilter.length > 0 ||
     toFilter.length > 0 ||
     page > 1;
 
-  const handleDeleteBatch = async (batchId: string) => {
+  const handleDeleteRun = async (runId: string) => {
     try {
-      await deleteBatch.mutateAsync(batchId);
-      toast.success("已删除该批次日志");
-      setPendingDeleteBatchId(null);
+      await deleteRun.mutateAsync(runId);
+      toast.success("已删除该运行日志");
+      setPendingDeleteRunId(null);
     } catch {
       toast.error("删除失败，请稍后重试");
     }
@@ -210,7 +210,7 @@ export default function LogsPage() {
                     <AlertDialogHeader>
                       <AlertDialogTitle>清空项目日志？</AlertDialogTitle>
                       <AlertDialogDescription>
-                        将删除「{activeProject?.name}」下的全部日志批次与条目，此操作不可撤销。
+                        将删除「{activeProject?.name}」下的全部日志运行与条目，此操作不可撤销。
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
@@ -262,7 +262,7 @@ export default function LogsPage() {
           <Card>
             <CardContent className="flex flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
               <ScrollText className="h-10 w-10 opacity-40" />
-              <p className="text-sm">请先选择项目以查看日志批次</p>
+              <p className="text-sm">请先选择项目以查看日志运行</p>
             </CardContent>
           </Card>
         ) : (
@@ -276,13 +276,10 @@ export default function LogsPage() {
                 }
               />
               <Input
-                placeholder="批次 source"
-                value={batchSourceFilter}
+                placeholder="运行 source"
+                value={sourceFilter}
                 onChange={(e) =>
-                  updateSearchParams(
-                    { batch_source: e.target.value || null },
-                    true,
-                  )
+                  updateSearchParams({ source: e.target.value || null }, true)
                 }
               />
               <Input
@@ -307,31 +304,31 @@ export default function LogsPage() {
               )}
             </div>
 
-            {batchesLoading ? (
+            {runsLoading ? (
               <div className="space-y-3">
                 {Array.from({ length: 5 }).map((_, i) => (
                   <Skeleton key={i} className="h-24 w-full rounded-lg" />
                 ))}
               </div>
-            ) : batchesError ? (
+            ) : runsError ? (
               <Card>
                 <CardContent className="flex flex-col items-center justify-center gap-2 py-16 text-destructive">
-                  <p className="text-sm">加载批次失败，请稍后重试</p>
+                  <p className="text-sm">加载运行失败，请稍后重试</p>
                 </CardContent>
               </Card>
-            ) : batches.length === 0 ? (
+            ) : runs.length === 0 ? (
               <Card>
                 <CardContent className="flex flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
                   <Inbox className="h-10 w-10 opacity-40" />
-                  <p className="text-sm">暂无匹配的日志批次</p>
+                  <p className="text-sm">暂无匹配的日志运行</p>
                 </CardContent>
               </Card>
             ) : (
-              <div className="space-y-3" data-testid="log-batch-list">
-                {batches.map((batch) => (
+              <div className="space-y-3" data-testid="log-run-list">
+                {runs.map((run) => (
                   <Link
-                    key={batch.id}
-                    to={`/logs/${batch.id}?project=${activeProjectId}`}
+                    key={run.run_id}
+                    to={`/logs/${run.run_id}?project=${activeProjectId}`}
                     className="group block"
                   >
                     <Card className="cursor-pointer transition-all hover:border-primary/50 hover:shadow-sm">
@@ -339,13 +336,13 @@ export default function LogsPage() {
                         <div className="flex flex-wrap items-start gap-3">
                           <div className="min-w-0 flex-1 space-y-1">
                             <p className="whitespace-pre-wrap text-sm font-medium group-hover:text-primary">
-                              {batch.description || "（无说明）"}
+                              {run.description || "（无说明）"}
                             </p>
                             <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                              <span>{batch.entry_count} 条</span>
-                              <span className="font-mono">run:{batch.run_id}</span>
-                              {batch.source && <span>src:{batch.source}</span>}
-                              <span>最近 {formatTime(batch.last_entry_at)}</span>
+                              <span>{run.entry_count} 条</span>
+                              <span className="font-mono">run:{run.run_id}</span>
+                              {run.source && <span>src:{run.source}</span>}
+                              <span>最近 {formatTime(run.last_entry_at)}</span>
                             </div>
                           </div>
                           <div
@@ -356,10 +353,10 @@ export default function LogsPage() {
                               variant="ghost"
                               size="sm"
                               className="h-7"
-                              title={batch.run_id}
+                              title={run.run_id}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleCopyRunId(batch.run_id);
+                                handleCopyRunId(run.run_id);
                               }}
                             >
                               <Copy className="h-3.5 w-3.5" />
@@ -369,10 +366,10 @@ export default function LogsPage() {
                               variant="ghost"
                               size="sm"
                               className="h-7 text-destructive"
-                              disabled={deleteBatch.isPending}
+                              disabled={deleteRun.isPending}
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setPendingDeleteBatchId(batch.id);
+                                setPendingDeleteRunId(run.run_id);
                               }}
                             >
                               <Trash2 className="h-3.5 w-3.5" />
@@ -380,12 +377,6 @@ export default function LogsPage() {
                             </Button>
                           </div>
                         </div>
-                        <p
-                          className="truncate font-mono text-xs text-muted-foreground"
-                          title={batch.id}
-                        >
-                          批次 ID：{batch.id}
-                        </p>
                       </CardContent>
                     </Card>
                   </Link>
@@ -396,7 +387,7 @@ export default function LogsPage() {
             {totalPages > 1 && (
               <div className="flex items-center justify-between">
                 <p className="text-sm text-muted-foreground">
-                  共 {total} 批，第 {page} / {totalPages} 页
+                  共 {total} 次运行，第 {page} / {totalPages} 页
                 </p>
                 <div className="flex items-center gap-2">
                   <Button
@@ -429,23 +420,23 @@ export default function LogsPage() {
       </div>
 
       <AlertDialog
-        open={pendingDeleteBatchId != null}
+        open={pendingDeleteRunId != null}
         onOpenChange={(open) => {
-          if (!open) setPendingDeleteBatchId(null);
+          if (!open) setPendingDeleteRunId(null);
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>删除该批次日志？</AlertDialogTitle>
+            <AlertDialogTitle>删除该运行日志？</AlertDialogTitle>
             <AlertDialogDescription>
-              将删除该批次及其全部日志条目，此操作不可撤销。
+              将删除该运行及其全部日志条目，此操作不可撤销。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => void handleDeleteBatch(pendingDeleteBatchId!)}
-              disabled={deleteBatch.isPending || pendingDeleteBatchId == null}
+              onClick={() => void handleDeleteRun(pendingDeleteRunId!)}
+              disabled={deleteRun.isPending || pendingDeleteRunId == null}
             >
               确认删除
             </AlertDialogAction>

@@ -7,7 +7,12 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+const MaxLogEntriesPerRun = 50000
+
+var ErrLogRunEntryLimitExceeded = errors.New("log run entry limit exceeded")
 
 type LogRepository struct {
 	db *gorm.DB
@@ -19,11 +24,9 @@ func NewLogRepository(db *gorm.DB) *LogRepository {
 
 type LogEntryFilter struct {
 	ProjectID   string
-	BatchID     string
 	RunID       string
 	Level       string
 	EntrySource string
-	BatchSource string
 	Query       string
 	From        *time.Time
 	To          *time.Time
@@ -32,61 +35,62 @@ type LogEntryFilter struct {
 	Sort        string
 }
 
-type LogBatchFilter struct {
-	ProjectID   string
-	RunID       string
-	BatchSource string
-	From        *time.Time
-	To          *time.Time
-	Page        int
-	PageSize    int
+type LogRunFilter struct {
+	ProjectID string
+	RunID     string
+	Source    string
+	From      *time.Time
+	To        *time.Time
+	Page      int
+	PageSize  int
 }
 
-func (r *LogRepository) FindBatchByID(id string) (*model.LogBatch, error) {
-	var batch model.LogBatch
-	if err := r.db.Where("id = ?", id).First(&batch).Error; err != nil {
+type UploadRunTxResult struct {
+	Run           *model.LogRun
+	Duplicate     bool
+	AcceptedCount int
+}
+
+func (r *LogRepository) FindRunByProjectAndRunID(projectID, runID string) (*model.LogRun, error) {
+	var run model.LogRun
+	if err := r.db.Where("project_id = ? AND run_id = ?", projectID, runID).First(&run).Error; err != nil {
 		return nil, err
 	}
-	return &batch, nil
+	return &run, nil
 }
 
-func (r *LogRepository) UploadBatchTx(
-	projectID, runID, source, description string,
+func (r *LogRepository) UploadRunTx(
+	projectID, runID, chunkID, source, description string,
 	uploaderAPIKeyID *string,
 	entries []model.LogEntry,
-) (*model.LogBatch, error) {
-	var batch model.LogBatch
+) (*UploadRunTxResult, error) {
+	result := &UploadRunTxResult{}
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		err := tx.Where("project_id = ? AND run_id = ?", projectID, runID).First(&batch).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			now := time.Now()
-			batch = model.LogBatch{
-				ID:               uuid.New().String(),
-				ProjectID:        projectID,
-				RunID:            runID,
-				Source:           source,
-				Description:      description,
-				UploaderAPIKeyID: uploaderAPIKeyID,
-				CreatedAt:        now,
-				UpdatedAt:        now,
-			}
-			if createErr := tx.Create(&batch).Error; createErr != nil {
-				// First into a fresh struct: dest with PK set would AND on that id.
-				var existing model.LogBatch
-				if findErr := tx.Where("project_id = ? AND run_id = ?", projectID, runID).First(&existing).Error; findErr != nil {
-					return errors.Join(createErr, findErr)
-				}
-				batch = existing
-			}
-		} else if err != nil {
+		run, err := getOrCreateLogRun(tx, projectID, runID, source, description, uploaderAPIKeyID)
+		if err != nil {
 			return err
+		}
+
+		chunk := model.LogRunChunk{
+			LogRunID:  run.ID,
+			ChunkID:   chunkID,
+			CreatedAt: time.Now(),
+		}
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&chunk)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			result.Duplicate = true
+			result.Run = run
+			return nil
 		}
 
 		minTs := entries[0].Timestamp
 		maxTs := entries[0].Timestamp
 		for i := range entries {
 			entries[i].ID = uuid.New().String()
-			entries[i].BatchID = batch.ID
+			entries[i].LogRunID = run.ID
 			if entries[i].Timestamp.Before(minTs) {
 				minTs = entries[i].Timestamp
 			}
@@ -99,41 +103,81 @@ func (r *LogRepository) UploadBatchTx(
 			return err
 		}
 
-		return tx.Model(&model.LogBatch{}).Where("id = ?", batch.ID).Updates(map[string]interface{}{
-			"entry_count":    gorm.Expr("entry_count + ?", len(entries)),
-			"first_entry_at": gorm.Expr("CASE WHEN first_entry_at IS NULL OR first_entry_at > ? THEN ? ELSE first_entry_at END", minTs, minTs),
-			"last_entry_at":  gorm.Expr("CASE WHEN last_entry_at IS NULL OR last_entry_at < ? THEN ? ELSE last_entry_at END", maxTs, maxTs),
-			"updated_at":     time.Now(),
-		}).Error
+		n := len(entries)
+		updateResult := tx.Model(&model.LogRun{}).
+			Where("id = ? AND entry_count + ? <= ?", run.ID, n, MaxLogEntriesPerRun).
+			Updates(map[string]interface{}{
+				"entry_count":    gorm.Expr("entry_count + ?", n),
+				"first_entry_at": gorm.Expr("CASE WHEN first_entry_at IS NULL OR first_entry_at > ? THEN ? ELSE first_entry_at END", minTs, minTs),
+				"last_entry_at":  gorm.Expr("CASE WHEN last_entry_at IS NULL OR last_entry_at < ? THEN ? ELSE last_entry_at END", maxTs, maxTs),
+				"updated_at":     time.Now(),
+			})
+		if updateResult.Error != nil {
+			return updateResult.Error
+		}
+		if updateResult.RowsAffected == 0 {
+			return ErrLogRunEntryLimitExceeded
+		}
+
+		if err := tx.Where("id = ?", run.ID).First(run).Error; err != nil {
+			return err
+		}
+		result.Run = run
+		result.AcceptedCount = n
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	return result, nil
+}
 
-	if err := r.db.Where("id = ?", batch.ID).First(&batch).Error; err != nil {
+func getOrCreateLogRun(
+	tx *gorm.DB,
+	projectID, runID, source, description string,
+	uploaderAPIKeyID *string,
+) (*model.LogRun, error) {
+	var run model.LogRun
+	err := tx.Where("project_id = ? AND run_id = ?", projectID, runID).First(&run).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		now := time.Now()
+		run = model.LogRun{
+			ID:               uuid.New().String(),
+			ProjectID:        projectID,
+			RunID:            runID,
+			Source:           source,
+			Description:      description,
+			UploaderAPIKeyID: uploaderAPIKeyID,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		}
+		if createErr := tx.Create(&run).Error; createErr != nil {
+			var existing model.LogRun
+			if findErr := tx.Where("project_id = ? AND run_id = ?", projectID, runID).First(&existing).Error; findErr != nil {
+				return nil, errors.Join(createErr, findErr)
+			}
+			run = existing
+		}
+		return &run, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	return &batch, nil
+	return &run, nil
 }
 
 func (r *LogRepository) applyEntryFilter(query *gorm.DB, filter LogEntryFilter) *gorm.DB {
-	query = query.Joins("JOIN log_batches ON log_batches.id = log_entries.batch_id").
-		Where("log_batches.project_id = ?", filter.ProjectID)
+	query = query.Joins("JOIN log_runs ON log_runs.id = log_entries.log_run_id").
+		Where("log_runs.project_id = ?", filter.ProjectID)
 
-	if filter.BatchID != "" {
-		query = query.Where("log_entries.batch_id = ?", filter.BatchID)
-	}
 	if filter.RunID != "" {
-		query = query.Where("log_batches.run_id = ?", filter.RunID)
+		query = query.Where("log_runs.run_id = ?", filter.RunID)
 	}
 	if filter.Level != "" {
 		query = query.Where("log_entries.level = ?", filter.Level)
 	}
 	if filter.EntrySource != "" {
 		query = query.Where("log_entries.source = ?", filter.EntrySource)
-	}
-	if filter.BatchSource != "" {
-		query = query.Where("log_batches.source = ?", filter.BatchSource)
 	}
 	if filter.Query != "" {
 		query = query.Where("log_entries.message LIKE ?", "%"+filter.Query+"%")
@@ -163,7 +207,7 @@ func (r *LogRepository) ListEntries(filter LogEntryFilter) ([]model.LogEntry, in
 
 	offset := (filter.Page - 1) * filter.PageSize
 	var entries []model.LogEntry
-	err := base.Preload("Batch").
+	err := base.Preload("LogRun").
 		Order(order).
 		Offset(offset).
 		Limit(filter.PageSize).
@@ -171,13 +215,13 @@ func (r *LogRepository) ListEntries(filter LogEntryFilter) ([]model.LogEntry, in
 	return entries, total, err
 }
 
-func (r *LogRepository) ListBatches(filter LogBatchFilter) ([]model.LogBatch, int64, error) {
-	query := r.db.Model(&model.LogBatch{}).Where("project_id = ?", filter.ProjectID)
+func (r *LogRepository) ListRuns(filter LogRunFilter) ([]model.LogRun, int64, error) {
+	query := r.db.Model(&model.LogRun{}).Where("project_id = ?", filter.ProjectID)
 	if filter.RunID != "" {
 		query = query.Where("run_id = ?", filter.RunID)
 	}
-	if filter.BatchSource != "" {
-		query = query.Where("source = ?", filter.BatchSource)
+	if filter.Source != "" {
+		query = query.Where("source = ?", filter.Source)
 	}
 	if filter.From != nil {
 		query = query.Where("last_entry_at >= ?", *filter.From)
@@ -192,16 +236,16 @@ func (r *LogRepository) ListBatches(filter LogBatchFilter) ([]model.LogBatch, in
 	}
 
 	offset := (filter.Page - 1) * filter.PageSize
-	var batches []model.LogBatch
+	var runs []model.LogRun
 	err := query.Order("last_entry_at DESC, created_at DESC").
 		Offset(offset).
 		Limit(filter.PageSize).
-		Find(&batches).Error
-	return batches, total, err
+		Find(&runs).Error
+	return runs, total, err
 }
 
-func (r *LogRepository) DeleteBatch(id string) error {
-	result := r.db.Delete(&model.LogBatch{}, "id = ?", id)
+func (r *LogRepository) DeleteRun(projectID, runID string) error {
+	result := r.db.Delete(&model.LogRun{}, "project_id = ? AND run_id = ?", projectID, runID)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -212,5 +256,5 @@ func (r *LogRepository) DeleteBatch(id string) error {
 }
 
 func (r *LogRepository) DeleteByProject(projectID string) error {
-	return r.db.Where("project_id = ?", projectID).Delete(&model.LogBatch{}).Error
+	return r.db.Where("project_id = ?", projectID).Delete(&model.LogRun{}).Error
 }

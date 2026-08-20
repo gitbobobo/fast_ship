@@ -33,6 +33,7 @@ func (h *LogHandler) requireApiKey(c *gin.Context) bool {
 
 type uploadLogsRequest struct {
 	RunID       string                  `json:"run_id"`
+	ChunkID     string                  `json:"chunk_id"`
 	Source      string                  `json:"source"`
 	Description string                  `json:"description"`
 	Entries     []service.LogEntryInput `json:"entries"`
@@ -66,6 +67,7 @@ func (h *LogHandler) Upload(c *gin.Context) {
 
 	result, err := h.logService.UploadLogs(projectID, userID, uploaderAPIKeyID, &service.UploadLogsRequest{
 		RunID:       req.RunID,
+		ChunkID:     req.ChunkID,
 		Source:      req.Source,
 		Description: req.Description,
 		Entries:     req.Entries,
@@ -100,11 +102,9 @@ func (h *LogHandler) ListEntries(c *gin.Context) {
 	}
 
 	items, total, err := h.logService.ListEntries(projectID, userID, service.ListLogEntriesRequest{
-		BatchID:     c.Query("batch_id"),
 		RunID:       c.Query("run_id"),
 		Level:       c.Query("level"),
 		EntrySource: c.Query("entry_source"),
-		BatchSource: c.Query("batch_source"),
 		Query:       c.Query("q"),
 		From:        from,
 		To:          to,
@@ -120,7 +120,7 @@ func (h *LogHandler) ListEntries(c *gin.Context) {
 	response.SuccessPaginated(c, items, total, page, pageSize)
 }
 
-func (h *LogHandler) ListBatches(c *gin.Context) {
+func (h *LogHandler) ListRuns(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 	page, pageSize := parseLogPagination(c)
@@ -136,13 +136,13 @@ func (h *LogHandler) ListBatches(c *gin.Context) {
 		return
 	}
 
-	items, total, err := h.logService.ListBatches(projectID, userID, service.ListLogBatchesRequest{
-		RunID:       c.Query("run_id"),
-		BatchSource: c.Query("batch_source"),
-		From:        from,
-		To:          to,
-		Page:        page,
-		PageSize:    pageSize,
+	items, total, err := h.logService.ListRuns(projectID, userID, service.ListLogRunsRequest{
+		RunID:    c.Query("run_id"),
+		Source:   c.Query("source"),
+		From:     from,
+		To:       to,
+		Page:     page,
+		PageSize: pageSize,
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
@@ -152,11 +152,12 @@ func (h *LogHandler) ListBatches(c *gin.Context) {
 	response.SuccessPaginated(c, items, total, page, pageSize)
 }
 
-func (h *LogHandler) GetBatch(c *gin.Context) {
-	batchID := c.Param("batch_id")
+func (h *LogHandler) GetRun(c *gin.Context) {
+	projectID := c.Param("id")
+	runID := c.Param("run_id")
 	userID := middleware.GetUserID(c)
 
-	item, err := h.logService.GetBatch(batchID, userID)
+	item, err := h.logService.GetRun(projectID, runID, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -165,11 +166,12 @@ func (h *LogHandler) GetBatch(c *gin.Context) {
 	response.Success(c, item)
 }
 
-func (h *LogHandler) DeleteBatch(c *gin.Context) {
-	batchID := c.Param("batch_id")
+func (h *LogHandler) DeleteRun(c *gin.Context) {
+	projectID := c.Param("id")
+	runID := c.Param("run_id")
 	userID := middleware.GetUserID(c)
 
-	if err := h.logService.DeleteBatch(batchID, userID); err != nil {
+	if err := h.logService.DeleteRun(projectID, runID, userID); err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}

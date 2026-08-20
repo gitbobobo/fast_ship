@@ -308,9 +308,7 @@ interface IssueCollabArea {
 
 interface LogEntry {
   id: string;
-  batch_id: string;
   run_id: string;
-  batch_source: string;
   timestamp: string;
   level: "debug" | "info" | "warn" | "error" | "fatal";
   source: string;
@@ -319,8 +317,7 @@ interface LogEntry {
   created_at: string;
 }
 
-interface LogBatch {
-  id: string;
+interface LogRun {
   project_id: string;
   run_id: string;
   source: string;

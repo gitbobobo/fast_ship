@@ -6,9 +6,9 @@ import {
 } from "@tanstack/react-query";
 import { logApi } from "@/lib/api/logs";
 
-interface UseLogBatchesFilters {
+interface UseLogRunsFilters {
   run_id?: string;
-  batch_source?: string;
+  source?: string;
   from?: string;
   to?: string;
   page?: number;
@@ -16,44 +16,44 @@ interface UseLogBatchesFilters {
 }
 
 interface UseInfiniteLogEntriesFilters {
-  batch_id: string;
+  run_id: string;
   level?: string;
   q?: string;
   page_size?: number;
 }
 
-export function useLogBatches(
+export function useLogRuns(
   projectId: string,
-  filters: UseLogBatchesFilters = {},
+  filters: UseLogRunsFilters = {},
 ) {
   return useQuery({
     queryKey: [
       "logs",
-      "batches",
+      "runs",
       projectId,
       filters.run_id ?? "",
-      filters.batch_source ?? "",
+      filters.source ?? "",
       filters.from ?? "",
       filters.to ?? "",
       filters.page ?? 1,
       filters.page_size ?? 50,
     ],
     queryFn: async () => {
-      const res = await logApi.listBatches(projectId, filters);
+      const res = await logApi.listRuns(projectId, filters);
       return res.data;
     },
     enabled: !!projectId,
   });
 }
 
-export function useLogBatch(batchId: string) {
+export function useLogRun(projectId: string, runId: string) {
   return useQuery({
-    queryKey: ["logs", "batch", batchId],
+    queryKey: ["logs", "run", projectId, runId],
     queryFn: async () => {
-      const res = await logApi.getBatch(batchId);
+      const res = await logApi.getRun(projectId, runId);
       return res.data;
     },
-    enabled: !!batchId,
+    enabled: !!projectId && !!runId,
     retry: false,
   });
 }
@@ -69,7 +69,7 @@ export function useInfiniteLogEntries(
       "entries",
       "infinite",
       projectId,
-      filters.batch_id,
+      filters.run_id,
       filters.level ?? "",
       filters.q ?? "",
       pageSize,
@@ -77,7 +77,7 @@ export function useInfiniteLogEntries(
     initialPageParam: 1,
     queryFn: async ({ pageParam }) => {
       const res = await logApi.listEntries(projectId, {
-        batch_id: filters.batch_id,
+        run_id: filters.run_id,
         level: filters.level,
         q: filters.q,
         page: pageParam,
@@ -93,20 +93,20 @@ export function useInfiniteLogEntries(
       );
       return lastPage.page < totalPages ? lastPage.page + 1 : undefined;
     },
-    enabled: !!projectId && !!filters.batch_id,
+    enabled: !!projectId && !!filters.run_id,
   });
 }
 
-export function useDeleteLogBatch(projectId: string) {
+export function useDeleteLogRun(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (batchId: string) => logApi.deleteBatch(batchId),
-    onSuccess: (_data, batchId) => {
+    mutationFn: (runId: string) => logApi.deleteRun(projectId, runId),
+    onSuccess: (_data, runId) => {
       void queryClient.invalidateQueries({
-        queryKey: ["logs", "batches", projectId],
+        queryKey: ["logs", "runs", projectId],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["logs", "batch", batchId],
+        queryKey: ["logs", "run", projectId, runId],
       });
       void queryClient.invalidateQueries({ queryKey: ["logs", "entries"] });
     },
@@ -119,9 +119,9 @@ export function useClearProjectLogs(projectId: string) {
     mutationFn: () => logApi.deleteByProject(projectId),
     onSuccess: () => {
       void queryClient.invalidateQueries({
-        queryKey: ["logs", "batches", projectId],
+        queryKey: ["logs", "runs", projectId],
       });
-      void queryClient.invalidateQueries({ queryKey: ["logs", "batch"] });
+      void queryClient.invalidateQueries({ queryKey: ["logs", "run"] });
       void queryClient.invalidateQueries({ queryKey: ["logs", "entries"] });
     },
   });

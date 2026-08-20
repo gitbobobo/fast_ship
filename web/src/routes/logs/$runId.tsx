@@ -38,9 +38,9 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
 import {
-  useDeleteLogBatch,
+  useDeleteLogRun,
   useInfiniteLogEntries,
-  useLogBatch,
+  useLogRun,
 } from "@/lib/hooks/use-logs";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { copyWithToast } from "@/lib/copy";
@@ -91,37 +91,46 @@ function formatTime(value: string | null): string {
   return new Date(value).toLocaleString();
 }
 
-export default function LogBatchDetailPage() {
-  const { batchId = "" } = useParams<{ batchId: string }>();
+export default function LogRunDetailPage() {
+  const { runId = "" } = useParams<{ runId: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { setLastSelectedProjectId } = useProjectPreferenceStore();
+  const { lastSelectedProjectId, setLastSelectedProjectId } =
+    useProjectPreferenceStore();
   const { data: projectsData } = useProjects();
   const projects = useMemo(() => projectsData?.items ?? [], [projectsData]);
 
-  const {
-    data: batch,
-    isLoading: batchLoading,
-    isError: batchError,
-    error: batchQueryError,
-  } = useLogBatch(batchId);
+  const urlProjectId = searchParams.get("project");
+  const projectId = urlProjectId ?? lastSelectedProjectId ?? "";
 
-  const projectId = batch?.project_id ?? "";
+  useEffect(() => {
+    if (projectId) {
+      setLastSelectedProjectId(projectId);
+    }
+    if (urlProjectId !== projectId && projectId) {
+      const next = new URLSearchParams(searchParams);
+      next.set("project", projectId);
+      setSearchParams(next, { replace: true });
+    }
+  }, [
+    projectId,
+    urlProjectId,
+    searchParams,
+    setSearchParams,
+    setLastSelectedProjectId,
+  ]);
+
+  const {
+    data: run,
+    isLoading: runLoading,
+    isError: runError,
+    error: runQueryError,
+  } = useLogRun(projectId, runId);
+
   const activeProject = useMemo(
     () => projects.find((p) => p.id === projectId),
     [projects, projectId],
   );
-
-  useEffect(() => {
-    if (!batch) return;
-    setLastSelectedProjectId(batch.project_id);
-    const urlProject = searchParams.get("project");
-    if (urlProject !== batch.project_id) {
-      const next = new URLSearchParams(searchParams);
-      next.set("project", batch.project_id);
-      setSearchParams(next, { replace: true });
-    }
-  }, [batch, searchParams, setSearchParams, setLastSelectedProjectId]);
 
   const levelFilter = searchParams.get("level") ?? "all";
   const queryFilter = searchParams.get("q") ?? "";
@@ -135,7 +144,7 @@ export default function LogBatchDetailPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteLogEntries(projectId, {
-    batch_id: batchId,
+    run_id: runId,
     level: levelFilter === "all" ? undefined : levelFilter,
     q: deferredQuery || undefined,
   });
@@ -164,7 +173,7 @@ export default function LogBatchDetailPage() {
     return () => observer.disconnect();
   }, [loadMoreRef, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  const deleteBatch = useDeleteLogBatch(projectId);
+  const deleteRun = useDeleteLogRun(projectId);
 
   const updateSearchParams = (updates: Record<string, string | null>) => {
     const next = new URLSearchParams(searchParams);
@@ -190,10 +199,10 @@ export default function LogBatchDetailPage() {
     navigate(nextValue ? `/logs?project=${nextValue}` : "/logs");
   };
 
-  const handleDeleteBatch = async () => {
+  const handleDeleteRun = async () => {
     try {
-      await deleteBatch.mutateAsync(batchId);
-      toast.success("已删除该批次日志");
+      await deleteRun.mutateAsync(runId);
+      toast.success("已删除该运行日志");
       navigate(projectId ? `/logs?project=${projectId}` : "/logs");
     } catch {
       toast.error("删除失败，请稍后重试");
@@ -201,14 +210,57 @@ export default function LogBatchDetailPage() {
   };
 
   const notFound =
-    batchError &&
-    batchQueryError instanceof HTTPError &&
-    batchQueryError.response.status === 404;
+    runError &&
+    runQueryError instanceof HTTPError &&
+    runQueryError.response.status === 404;
 
-  if (batchLoading) {
+  if (!projectId) {
     return (
       <>
-        <Header title="日志批次" />
+        <Header title="日志运行" />
+        <div className="p-4 md:p-6">
+          <Card>
+            <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
+              <p className="text-sm">缺少项目 ID，请从日志列表进入或选择项目</p>
+              {projects.length > 0 && (
+                <Select
+                  value={projectId}
+                  onValueChange={(value) => {
+                    if (!value) return;
+                    setLastSelectedProjectId(value);
+                    navigate(`/logs/${runId}?project=${value}`);
+                  }}
+                >
+                  <SelectTrigger className="w-auto min-w-32">
+                    <SelectValue placeholder="请选择项目" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {projects.map((project) => (
+                      <SelectItem key={project.id} value={project.id}>
+                        {project.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate("/logs")}
+              >
+                返回日志列表
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      </>
+    );
+  }
+
+  if (runLoading) {
+    return (
+      <>
+        <Header title="日志运行" />
         <div className="p-4 md:p-6 space-y-4">
           <Skeleton className="h-10 w-64" />
           <Skeleton className="h-32 w-full" />
@@ -218,16 +270,48 @@ export default function LogBatchDetailPage() {
     );
   }
 
-  if (notFound || (!batchLoading && batchError)) {
+  if (notFound || (!runLoading && runError)) {
     return (
       <>
-        <Header title="日志批次" />
+        <Header title="日志运行" />
         <div className="p-4 md:p-6">
           <Card>
             <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
               <p className="text-sm">
-                {notFound ? "批次不存在" : "加载批次失败，请稍后重试"}
+                {notFound ? "运行不存在" : "加载运行失败，请稍后重试"}
               </p>
+              {projects.length > 0 && (
+                <Select
+                  value={projectId}
+                  onValueChange={(value) => {
+                    if (!value) return;
+                    setLastSelectedProjectId(value);
+                    navigate(`/logs/${runId}?project=${value}`);
+                  }}
+                >
+                  <SelectTrigger className="w-auto min-w-32">
+                    <SelectValue placeholder="请选择项目">
+                      {activeProject?.name}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {projects.map((project) => (
+                      <SelectItem key={project.id} value={project.id}>
+                        {project.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  navigate(projectId ? `/logs?project=${projectId}` : "/logs")
+                }
+              >
+                返回日志列表
+              </Button>
             </CardContent>
           </Card>
         </div>
@@ -235,12 +319,12 @@ export default function LogBatchDetailPage() {
     );
   }
 
-  if (!batch) return null;
+  if (!run) return null;
 
   return (
     <>
       <Header
-        title="日志批次"
+        title="日志运行"
         actions={
           <HeaderActions
             primary={
@@ -249,22 +333,22 @@ export default function LogBatchDetailPage() {
                   render={
                     <Button variant="outline" size="sm" className="text-destructive">
                       <Trash2 className="h-4 w-4" />
-                      删除批次
+                      删除运行
                     </Button>
                   }
                 />
                 <AlertDialogContent>
                   <AlertDialogHeader>
-                    <AlertDialogTitle>删除该批次日志？</AlertDialogTitle>
+                    <AlertDialogTitle>删除该运行日志？</AlertDialogTitle>
                     <AlertDialogDescription>
-                      将删除该批次及其全部日志条目，此操作不可撤销。
+                      将删除该运行及其全部日志条目，此操作不可撤销。
                     </AlertDialogDescription>
                   </AlertDialogHeader>
                   <AlertDialogFooter>
                     <AlertDialogCancel>取消</AlertDialogCancel>
                     <AlertDialogAction
-                      onClick={() => void handleDeleteBatch()}
-                      disabled={deleteBatch.isPending}
+                      onClick={() => void handleDeleteRun()}
+                      disabled={deleteRun.isPending}
                     >
                       确认删除
                     </AlertDialogAction>
@@ -296,30 +380,30 @@ export default function LogBatchDetailPage() {
         <Card>
           <CardContent className="p-4 space-y-3">
             <p className="whitespace-pre-wrap text-base font-medium">
-              {batch.description || "（无说明）"}
+              {run.description || "（无说明）"}
             </p>
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              <span>{batch.entry_count} 条</span>
-              <span className="font-mono">run:{batch.run_id}</span>
-              {batch.source && <span>src:{batch.source}</span>}
-              <span>首条 {formatTime(batch.first_entry_at)}</span>
-              <span>最近 {formatTime(batch.last_entry_at)}</span>
+              <span>{run.entry_count} 条</span>
+              <span className="font-mono">run:{run.run_id}</span>
+              {run.source && <span>src:{run.source}</span>}
+              <span>首条 {formatTime(run.first_entry_at)}</span>
+              <span>最近 {formatTime(run.last_entry_at)}</span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <p
                 className="truncate font-mono text-xs text-muted-foreground"
-                title={batch.id}
+                title={run.run_id}
               >
-                批次 ID：{batch.id}
+                运行 ID：{run.run_id}
               </p>
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-7"
-                onClick={() => void copyWithToast(batch.id, "已复制批次 ID")}
+                onClick={() => void copyWithToast(run.run_id, "已复制运行 ID")}
               >
                 <Copy className="h-3.5 w-3.5" />
-                复制批次 ID
+                复制运行 ID
               </Button>
             </div>
           </CardContent>
