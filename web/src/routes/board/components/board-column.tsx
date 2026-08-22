@@ -7,6 +7,8 @@ import {
   useIssueFilterOptions,
 } from "@/lib/hooks/use-issues";
 import { COLUMNS, type ColumnId } from "@/routes/board/lib/utils";
+import { getColumnScrollKey } from "@/routes/board/lib/board-scroll";
+import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { BoardIssueCard } from "./board-issue-card";
 import {
   BoardColumnFilter,
@@ -59,6 +61,10 @@ export function BoardColumn({
   const total = data?.pages[0]?.total ?? 0;
 
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const columnScrollKey = getColumnScrollKey(projectId, columnId, filter);
+  const listScrollRef = usePersistedScroll<HTMLDivElement>(columnScrollKey, {
+    ready: !isLoading,
+  });
 
   useEffect(() => {
     if (!hasNextPage) return;
@@ -104,7 +110,10 @@ export function BoardColumn({
         </div>
       </div>
 
-      <div className="flex-1 space-y-2 overflow-y-auto p-2.5">
+      <div
+        ref={listScrollRef}
+        className="flex-1 space-y-2 overflow-y-auto p-2.5"
+      >
         {isLoading ? (
           Array.from({ length: 3 }).map((_, i) => (
             <div

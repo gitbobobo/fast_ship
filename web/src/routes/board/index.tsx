@@ -30,6 +30,7 @@ import {
   getColumnStatusValue,
   getActiveProjectId,
 } from "@/routes/board/lib/utils";
+import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { BoardColumn } from "@/routes/board/components/board-column";
 import {
   BoardIssueCardOverlay,
@@ -130,6 +131,11 @@ export default function BoardPage() {
 
   const isEmptyProject = !projectsLoading && projects.length === 0;
   const noProjectSelected = !projectsLoading && !activeProjectId;
+  const boardReady = Boolean(activeProjectId) && !projectsLoading;
+  const boardScrollRef = usePersistedScroll<HTMLDivElement>(
+    `board-x:${activeProjectId}`,
+    { ready: boardReady, axis: "left" },
+  );
 
   return (
     <div className="flex h-full flex-col">
@@ -232,7 +238,10 @@ export default function BoardPage() {
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
-            <div className="flex flex-1 gap-4 overflow-x-auto py-1 pb-2">
+            <div
+              ref={boardScrollRef}
+              className="flex flex-1 gap-4 overflow-x-auto py-1 pb-2"
+            >
               {COLUMNS.map((column) => (
                 <BoardColumn
                   key={column.id}

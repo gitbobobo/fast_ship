@@ -43,6 +43,7 @@ import {
 } from "@/lib/hooks/use-documents";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { getActiveProjectId } from "@/routes/board/lib/utils";
+import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
@@ -194,6 +195,10 @@ export default function DocumentsPage() {
 
   const items = useMemo(() => listData?.items ?? [], [listData]);
   const tree = useMemo(() => buildTree(items), [items]);
+  const treeScrollRef = usePersistedScroll<HTMLDivElement>(
+    `documents:tree:${activeProjectId}`,
+    { ready: Boolean(activeProjectId) && !listLoading },
+  );
 
   const selectedDocId = urlDocId;
   const {
@@ -418,7 +423,7 @@ export default function DocumentsPage() {
               <FolderPlus className="h-4 w-4" />
             </Button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          <div ref={treeScrollRef} className="min-h-0 flex-1 overflow-y-auto p-2">
             {listLoading ? (
               <div className="space-y-2">
                 <Skeleton className="h-6 w-full" />
