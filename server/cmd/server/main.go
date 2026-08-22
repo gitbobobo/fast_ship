@@ -89,6 +89,7 @@ func main() {
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
+		&model.IssueShipHook{},
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
 		&model.IssueAsset{},
@@ -146,6 +147,7 @@ func main() {
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
+	issueShipHookRepo := repository.NewIssueShipHookRepository(db)
 	issueChecklistRepo := repository.NewIssueChecklistRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
@@ -166,12 +168,12 @@ func main() {
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zapLogger)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
-	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zapLogger)
+	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
 
 	// 初始化 Handler

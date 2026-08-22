@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { copyToClipboard } from "@/lib/utils";
+import { formatShipHookActionSummary } from "@/lib/issue-ship-hook";
 import { toast } from "sonner";
 
 interface ShipCheckItem {
@@ -28,6 +29,7 @@ interface VersionShipSectionProps {
   version: Version;
   isShipping: boolean;
   shipChecks: ShipCheckItem[];
+  pendingIssueHooks: PendingIssueHook[];
   canShip: boolean;
   shipCheckLoading: boolean;
   shipDialogOpen: boolean;
@@ -50,6 +52,7 @@ export function VersionShipSection({
   version,
   isShipping,
   shipChecks,
+  pendingIssueHooks,
   canShip,
   shipCheckLoading,
   shipDialogOpen,
@@ -126,6 +129,36 @@ export function VersionShipSection({
               ))
             )}
           </div>
+          {pendingIssueHooks.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">
+                将触发 {pendingIssueHooks.length} 个问题钩子
+              </p>
+              <div className="space-y-2">
+                {pendingIssueHooks.map((hook) => (
+                  <div
+                    key={hook.issue_id}
+                    className="rounded-md border px-3 py-2 text-sm"
+                  >
+                    <p className="font-medium">
+                      <span className="text-muted-foreground">
+                        {hook.reference}
+                      </span>
+                      <span className="ml-2 line-clamp-1">{hook.title}</span>
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {formatShipHookActionSummary({
+                        comment: hook.comment,
+                        close: hook.close,
+                        workflow_enabled: hook.workflow_enabled,
+                        workflow_status: hook.workflow_status,
+                      })}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {!canShip && (
             <p className="text-sm text-destructive">
               请补充上述缺失项后再发货

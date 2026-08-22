@@ -43,6 +43,12 @@ type replaceIssueChecklistRequest struct {
 	Items []service.IssueChecklistItemInput `json:"items"`
 }
 
+type upsertShipHookRequest struct {
+	CommentBody    *string                    `json:"comment_body"`
+	Close          bool                       `json:"close"`
+	WorkflowStatus *model.IssueWorkflowStatus `json:"workflow_status"`
+}
+
 type batchCloseDoneRequest struct {
 	Source string `json:"source"`
 }
@@ -392,6 +398,41 @@ func (h *IssueHandler) UploadDraftAsset(c *gin.Context) {
 	}
 
 	response.Success(c, result)
+}
+
+func (h *IssueHandler) UpsertShipHook(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	var req upsertShipHookRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.issueService.UpsertShipHook(issueID, userID, service.UpsertShipHookRequest{
+		CommentBody:    req.CommentBody,
+		Close:          req.Close,
+		WorkflowStatus: req.WorkflowStatus,
+	})
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+func (h *IssueHandler) DeleteShipHook(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	if err := h.issueService.DeleteShipHook(issueID, userID); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, nil)
 }
 
 func (h *IssueHandler) AssetContent(c *gin.Context) {

@@ -3,6 +3,7 @@ import { useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
 import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { cn } from "@/lib/utils";
@@ -53,6 +54,7 @@ function BoardIssueCardContent({ issue }: { issue: Issue }) {
             {ISSUE_WORKFLOW_STATUS_LABELS[status]}
           </span>
         )}
+        <IssueShipHookBadge hook={issue.ship_hook} className="text-[10px]" />
         {(issue.source === "github"
           ? issue.github?.labels ?? []
           : issue.internal_meta?.labels ?? []

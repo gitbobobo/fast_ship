@@ -88,6 +88,9 @@ export function useShipVersion(vid: string, projectId?: string) {
         queryClient.invalidateQueries({
           queryKey: ["projects", projectId, "versions"],
         });
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "issues"],
+        });
       }
       queryClient.invalidateQueries({ queryKey: ["projects"] });
     },

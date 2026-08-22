@@ -25,6 +25,7 @@ import {
 import { useProjectBranches, useProject } from "@/lib/hooks/use-projects";
 import { useUploadArtifact, useDeleteArtifact } from "@/lib/hooks/use-artifacts";
 import { ensureGitHubLinked } from "@/lib/utils/github";
+import { formatShipSuccessToast } from "@/lib/issue-ship-hook";
 import { versionSchema } from "@/lib/utils/validators";
 import { toast } from "sonner";
 import { VersionArtifactsCard } from "./version-artifacts-card";
@@ -223,8 +224,8 @@ export default function VersionDetailPage() {
 
     setShipDialogOpen(false);
     try {
-      await shipVersion.mutateAsync();
-      toast.success("发货成功！");
+      const response = await shipVersion.mutateAsync();
+      toast.success(formatShipSuccessToast(response.data));
       await refetchVersion();
     } catch {
       const result = await refetchVersion();
@@ -264,6 +265,7 @@ export default function VersionDetailPage() {
   };
 
   const shipChecks = shipCheck?.items ?? [];
+  const pendingIssueHooks = shipCheck?.pending_issue_hooks ?? [];
   const canShip = shipCheck?.can_ship ?? false;
 
   // ---- Render ----
@@ -458,6 +460,7 @@ export default function VersionDetailPage() {
           version={version}
           isShipping={isShipping}
           shipChecks={shipChecks}
+          pendingIssueHooks={pendingIssueHooks}
           canShip={canShip}
           shipCheckLoading={shipCheckLoading}
           shipDialogOpen={shipDialogOpen}

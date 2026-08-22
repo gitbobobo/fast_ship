@@ -24,6 +24,8 @@ import {
   useUpdateIssueInternalMeta,
   useReplaceIssueChecklist,
   useUploadIssueAsset,
+  useUpsertIssueShipHook,
+  useDeleteIssueShipHook,
 } from "@/lib/hooks/use-issues";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -149,6 +151,8 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useUpdateIssueInternalMeta: vi.fn(),
   useReplaceIssueChecklist: vi.fn(),
   useUploadIssueAsset: vi.fn(),
+  useUpsertIssueShipHook: vi.fn(),
+  useDeleteIssueShipHook: vi.fn(),
 }));
 
 vi.mock("@/lib/hooks/use-ai", () => ({
@@ -465,6 +469,14 @@ describe("Issue pages", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useReplaceIssueChecklist>);
+    vi.mocked(useUpsertIssueShipHook).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpsertIssueShipHook>);
+    vi.mocked(useDeleteIssueShipHook).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteIssueShipHook>);
     vi.mocked(useIssueChecklistSuggestions).mockReturnValue({
       mutateAsync: vi.fn().mockResolvedValue({
         items: [{ title: "补充复现路径" }, { title: "确认影响版本" }],
@@ -1421,5 +1433,179 @@ describe("Issue pages", () => {
 
     expect(setSearchParams).not.toHaveBeenCalled();
     useSearchParamsSpy.mockRestore();
+  });
+
+  it("shows ship hook section on issue detail page", () => {
+    mockIssueDetailData();
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(screen.getByText("下次发货后")).toBeInTheDocument();
+    expect(
+      screen.getByText("该项目下一次成功发货时执行"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument();
+
+    const metadataTitle = screen.getByText("元数据");
+    const shipHookTitle = screen.getByText("下次发货后");
+    expect(metadataTitle.closest("[data-slot='card']")).not.toContainElement(
+      shipHookTitle,
+    );
+    expect(
+      metadataTitle.compareDocumentPosition(shipHookTitle) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      shipHookTitle.compareDocumentPosition(screen.getAllByText("任务清单")[0]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("shows pending ship hook actions and saves configuration", async () => {
+    const user = userEvent.setup();
+    const upsertMutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        status: "pending",
+        comment_enabled: true,
+        comment_body: "已随 {version} 发出。",
+        close_enabled: true,
+        workflow_enabled: true,
+        workflow_status: "done",
+      },
+    });
+
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        ship_hook: {
+          status: "pending",
+          comment_enabled: true,
+          comment_body: "已随 {version} 发出。",
+          close_enabled: true,
+          workflow_enabled: true,
+          workflow_status: "done",
+        },
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+    vi.mocked(useUpsertIssueShipHook).mockReturnValue({
+      mutateAsync: upsertMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpsertIssueShipHook>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(
+      screen.getByText("发评论、关闭、内部状态=已完成"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("评论预览")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "修改" }));
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(upsertMutateAsync).toHaveBeenCalledWith({
+        comment_body: "已随 {version} 发出。",
+        close: true,
+        workflow_status: "done",
+      }),
+    );
+    expect(toast.success).toHaveBeenCalledWith("已保存下次发货后动作");
+  });
+
+  it("cancels pending ship hook from issue detail page", async () => {
+    const user = userEvent.setup();
+    const deleteMutateAsync = vi.fn().mockResolvedValue({ data: null });
+
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        ship_hook: {
+          status: "pending",
+          comment_enabled: false,
+          close_enabled: true,
+          workflow_enabled: false,
+          workflow_status: "",
+        },
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+    vi.mocked(useDeleteIssueShipHook).mockReturnValue({
+      mutateAsync: deleteMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteIssueShipHook>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+
+    await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalled());
+    expect(toast.success).toHaveBeenCalledWith("已取消");
+  });
+
+  it("shows pending and failed ship hook badges on issues list", async () => {
+    vi.mocked(useIssues).mockReturnValue({
+      data: {
+        items: [
+          buildGitHubIssue({
+            id: "issue-pending",
+            title: "Pending hook issue",
+            reference: "GH-10",
+            ship_hook: {
+              status: "pending",
+              comment_enabled: false,
+              close_enabled: true,
+              workflow_enabled: false,
+              workflow_status: "",
+            },
+          }),
+          buildGitHubIssue({
+            id: "issue-failed",
+            title: "Failed hook issue",
+            reference: "GH-11",
+            ship_hook: {
+              status: "fired",
+              comment_enabled: true,
+              close_enabled: false,
+              workflow_enabled: false,
+              workflow_status: "",
+              version_number: "1.0.0",
+              results: {
+                comment: { ok: false, error: "failed" },
+              },
+            },
+          }),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssues>);
+
+    renderWithRoute(<IssuesPage />, {
+      path: "/issues",
+      initialEntry: "/issues?project=proj-1",
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("发货后")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("钩子失败")).toBeInTheDocument();
   });
 });

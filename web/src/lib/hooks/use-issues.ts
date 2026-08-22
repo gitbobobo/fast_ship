@@ -354,3 +354,34 @@ export function useCloseIssuesBatch(projectId: string) {
     },
   });
 }
+
+export function useUpsertIssueShipHook(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: Parameters<typeof issueApi.upsertShipHook>[1]) =>
+      issueApi.upsertShipHook(issueId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "issues"],
+        });
+      }
+    },
+  });
+}
+
+export function useDeleteIssueShipHook(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => issueApi.deleteShipHook(issueId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "issues"],
+        });
+      }
+    },
+  });
+}

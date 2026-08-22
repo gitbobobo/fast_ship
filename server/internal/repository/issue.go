@@ -53,6 +53,22 @@ func (r *IssueRepository) FindByID(id string) (*model.Issue, error) {
 	return &issue, nil
 }
 
+func (r *IssueRepository) ListByIDs(ids []string) (map[string]model.Issue, error) {
+	result := make(map[string]model.Issue, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	var issues []model.Issue
+	if err := r.db.Preload("GitHubMeta").Where("id IN ?", ids).Find(&issues).Error; err != nil {
+		return nil, err
+	}
+	for _, issue := range issues {
+		result[issue.ID] = issue
+	}
+	return result, nil
+}
+
 func (r *IssueRepository) ListByProject(projectID string) ([]model.Issue, error) {
 	var issues []model.Issue
 	err := r.db.Preload("GitHubMeta").

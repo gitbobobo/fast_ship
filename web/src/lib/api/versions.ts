@@ -46,5 +46,5 @@ export const versionApi = {
   ship: (vid: string) =>
     api
       .post(`versions/${vid}/ship`, { timeout: false })
-      .json<ApiResponse<Version>>(),
+      .json<ApiResponse<ShipResult>>(),
 };

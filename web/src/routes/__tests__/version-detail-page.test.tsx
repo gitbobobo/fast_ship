@@ -90,6 +90,7 @@ describe("VersionDetailPage", () => {
       data: {
         can_ship: true,
         items: [],
+        pending_issue_hooks: [],
       },
     });
 
@@ -116,6 +117,7 @@ describe("VersionDetailPage", () => {
       data: {
         can_ship: true,
         items: [],
+        pending_issue_hooks: [],
       },
       isLoading: false,
       refetch: shipCheckRefetch,
@@ -301,6 +303,7 @@ describe("VersionDetailPage", () => {
             detail: "无法访问 GitHub 仓库或 Token 无效",
           },
         ],
+        pending_issue_hooks: [],
       },
       isLoading: false,
       refetch: shipCheckRefetch,
@@ -687,6 +690,90 @@ describe("VersionDetailPage", () => {
         artifactApi.downloadUrl("artifact-2"),
       ],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("lists pending issue hooks in ship confirmation dialog", () => {
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: vi.fn(),
+    } as unknown as ReturnType<typeof useVersion>);
+
+    vi.mocked(useShipCheck).mockReturnValue({
+      data: {
+        can_ship: true,
+        items: [],
+        pending_issue_hooks: [
+          {
+            issue_id: "issue-1",
+            reference: "INT-1",
+            title: "通知测试同学",
+            comment: true,
+            close: true,
+            workflow_enabled: true,
+            workflow_status: "done",
+          },
+        ],
+      },
+      isLoading: false,
+      refetch: shipCheckRefetch,
+    } as unknown as ReturnType<typeof useShipCheck>);
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "发货" }));
+
+    expect(screen.getByText("将触发 1 个问题钩子")).toBeInTheDocument();
+    expect(screen.getByText("INT-1")).toBeInTheDocument();
+    expect(screen.getByText("通知测试同学")).toBeInTheDocument();
+    expect(
+      screen.getByText("发评论、关闭、内部状态=已完成"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows hook counts in ship success toast", async () => {
+    const refetchVersion = vi.fn().mockResolvedValue({
+      data: makeVersion({
+        status: "shipped",
+        ship_status: "completed",
+        shipped_at: "2026-04-06T12:00:00Z",
+      }),
+    });
+
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({
+        ship_status: "",
+        ship_stage: "",
+        ship_message: null,
+      }),
+      isLoading: false,
+      refetch: refetchVersion,
+    } as unknown as ReturnType<typeof useVersion>);
+
+    shipVersionMutateAsync.mockResolvedValueOnce({
+      data: { hook_total: 2, hook_failed: 1 },
+    });
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "发货" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认发货" }));
+
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "已发货，并执行了 2 个问题钩子，其中 1 个有失败，请打开问题详情",
+      ),
     );
   });
 });

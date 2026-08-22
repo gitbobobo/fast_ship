@@ -31,6 +31,7 @@ type testServices struct {
 	commentRepo         *repository.IssueCommentRepository
 	timelineRepo        *repository.IssueTimelineRepository
 	internalMetaRepo    *repository.IssueInternalMetaRepository
+	shipHookRepo        *repository.IssueShipHookRepository
 	checklistRepo       *repository.IssueChecklistRepository
 	syncStateRepo       *repository.IssueSyncStateRepository
 	issueAssetRepo      *repository.IssueAssetRepository
@@ -67,6 +68,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
+		&model.IssueShipHook{},
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
 		&model.IssueAsset{},
@@ -103,6 +105,7 @@ func setupTestServices(t *testing.T) *testServices {
 	commentRepo := repository.NewIssueCommentRepository(db)
 	timelineRepo := repository.NewIssueTimelineRepository(db)
 	internalMetaRepo := repository.NewIssueInternalMetaRepository(db)
+	shipHookRepo := repository.NewIssueShipHookRepository(db)
 	checklistRepo := repository.NewIssueChecklistRepository(db)
 	syncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
@@ -116,7 +119,7 @@ func setupTestServices(t *testing.T) *testServices {
 		},
 	}
 
-	return &testServices{
+	svc := &testServices{
 		db:                  db,
 		storage:             fileStorage,
 		cfg:                 cfg,
@@ -129,20 +132,23 @@ func setupTestServices(t *testing.T) *testServices {
 		commentRepo:         commentRepo,
 		timelineRepo:        timelineRepo,
 		internalMetaRepo:    internalMetaRepo,
+		shipHookRepo:        shipHookRepo,
 		checklistRepo:       checklistRepo,
 		syncStateRepo:       syncStateRepo,
 		issueAssetRepo:      issueAssetRepo,
 		issueDraftAssetRepo: issueDraftAssetRepo,
 		artifactRepo:        artifactRepo,
 		collabRepo:          collabRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
 		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
-		shipService:         NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop()),
 	}
+	svc.shipService = NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, shipHookRepo, svc.issueService, fileStorage, cfg, zap.NewNop())
+
+	return svc
 }
 
 func createTestProject(t *testing.T, db *gorm.DB, userID string, opts ...func(*model.Project)) *model.Project {

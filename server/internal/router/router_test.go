@@ -633,6 +633,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
+		&model.IssueShipHook{},
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
 		&model.IssueAsset{},
@@ -690,6 +691,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
+	issueShipHookRepo := repository.NewIssueShipHookRepository(db)
 	issueChecklistRepo := repository.NewIssueChecklistRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
@@ -706,7 +708,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
@@ -714,7 +716,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
-	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
+	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
@@ -1505,5 +1507,133 @@ func TestRouterDocumentRejectsOversizedBody(t *testing.T) {
 	env.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRouterIssueShipHookJWTWritesAndAPIKeyReads(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "ship-hook-jwt", "shiphook@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	issue := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	jwtAuth := "Bearer " + auth.Token
+	putReq := httptest.NewRequest(http.MethodPut, "/api/issues/"+issue.ID+"/ship-hook", bytes.NewReader([]byte(`{"workflow_status":"done","close":true}`)))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq.Header.Set("Authorization", jwtAuth)
+	putRec := httptest.NewRecorder()
+	env.router.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("jwt put ship-hook: expected 200, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/issues/"+issue.ID+"/ship-hook", nil)
+	delReq.Header.Set("Authorization", jwtAuth)
+	delRec := httptest.NewRecorder()
+	env.router.ServeHTTP(delRec, delReq)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("jwt delete ship-hook: expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+
+	putReq2 := httptest.NewRequest(http.MethodPut, "/api/issues/"+issue.ID+"/ship-hook", bytes.NewReader([]byte(`{"workflow_status":"todo"}`)))
+	putReq2.Header.Set("Content-Type", "application/json")
+	putReq2.Header.Set("Authorization", jwtAuth)
+	putRec2 := httptest.NewRecorder()
+	env.router.ServeHTTP(putRec2, putReq2)
+	if putRec2.Code != http.StatusOK {
+		t.Fatalf("jwt put ship-hook seed: expected 200, got %d: %s", putRec2.Code, putRec2.Body.String())
+	}
+
+	rawKey := "SHIPHOOKREADKEY12345678"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    auth.UserID,
+		Name:      "CI-ShipHook",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/issues/"+issue.ID, nil)
+	getReq.Header.Set("Authorization", "Bearer "+service.FormatApiKey(rawKey))
+	getRec := httptest.NewRecorder()
+	env.router.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("api key get issue: expected 200, got %d: %s", getRec.Code, getRec.Body.String())
+	}
+	var issueResp struct {
+		ShipHook *struct {
+			Status          string `json:"status"`
+			CommentEnabled  bool   `json:"comment_enabled"`
+			CloseEnabled    bool   `json:"close_enabled"`
+			WorkflowEnabled bool   `json:"workflow_enabled"`
+			WorkflowStatus  string `json:"workflow_status"`
+		} `json:"ship_hook"`
+	}
+	decodeRouterEnvelope(t, getRec, &issueResp)
+	if issueResp.ShipHook == nil || issueResp.ShipHook.Status != "pending" || issueResp.ShipHook.WorkflowStatus != "todo" {
+		t.Fatalf("expected ship_hook on api key get, got %+v", issueResp.ShipHook)
+	}
+	if !issueResp.ShipHook.WorkflowEnabled || issueResp.ShipHook.CommentEnabled || issueResp.ShipHook.CloseEnabled {
+		t.Fatalf("expected only workflow enabled, got %+v", issueResp.ShipHook)
+	}
+}
+
+func TestRouterIssueShipHookRejectsAPIKeyWrites(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	user := createRouterTestUser(t, env.db, "ship-hook-owner", "shipowner", "shipowner@example.com")
+	project := createRouterTestProject(t, env.db, user.ID)
+	issue := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	rawKey := "SHIPHOOKWRITEKEY1234567"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		Name:      "CI-ShipHookWrite",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	authHeader := "Bearer " + service.FormatApiKey(rawKey)
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   []byte
+	}{
+		{"put", http.MethodPut, "/api/issues/" + issue.ID + "/ship-hook", []byte(`{"workflow_status":"done"}`)},
+		{"delete", http.MethodDelete, "/api/issues/" + issue.ID + "/ship-hook", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var req *http.Request
+			if tc.body != nil {
+				req = httptest.NewRequest(tc.method, tc.path, bytes.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+			} else {
+				req = httptest.NewRequest(tc.method, tc.path, http.NoBody)
+			}
+			req.Header.Set("Authorization", authHeader)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var envelope routerEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			if envelope.Code != errs.ErrApiKeyForbidden.Code {
+				t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
+			}
+		})
 	}
 }

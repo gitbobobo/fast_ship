@@ -224,6 +224,7 @@ type fakeIssueGitHubClient struct {
 	comments           map[int][]*ghclient.IssueComment
 	timeline           map[int][]*ghclient.TimelineEvent
 	createdComment     *ghclient.IssueComment
+	createCommentErr   error
 	updatedIssue       *ghclient.Issue
 	createdIssue       *ghclient.Issue
 	createIssueErr     error
@@ -276,6 +277,9 @@ func (f *fakeIssueGitHubClient) CreateIssueComment(_ context.Context, issueNumbe
 		IssueNumber: issueNumber,
 		Body:        body,
 	})
+	if f.createCommentErr != nil {
+		return nil, f.createCommentErr
+	}
 	return f.createdComment, nil
 }
 

@@ -140,6 +140,46 @@ describe("BoardIssueCard", () => {
     expect(screen.getByText("@gitbobobo")).toBeInTheDocument();
   });
 
+  it("renders pending ship hook badge", () => {
+    renderInRouter(
+      <BoardIssueCard
+        issue={{
+          ...issue,
+          ship_hook: {
+            status: "pending",
+            comment_enabled: false,
+            close_enabled: true,
+            workflow_enabled: false,
+            workflow_status: "",
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText("发货后")).toBeInTheDocument();
+  });
+
+  it("renders failed ship hook badge", () => {
+    renderInRouter(
+      <BoardIssueCard
+        issue={{
+          ...issue,
+          ship_hook: {
+            status: "fired",
+            comment_enabled: false,
+            close_enabled: true,
+            workflow_enabled: false,
+            workflow_status: "",
+            version_number: "1.0.0",
+            results: {
+              close: { ok: false, error: "already closed" },
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText("钩子失败")).toBeInTheDocument();
+  });
+
   it("attaches draggable attributes to the whole card", () => {
     mockUseDraggable.mockReturnValue({
       attributes: {

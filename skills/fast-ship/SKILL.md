@@ -37,6 +37,7 @@ api_key: "fsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 - API Key **不可**通过 `PUT /api/issues/:issue_id` 修改 `state` / `state_reason`（open/close）；Agent 应改用 `PUT /api/issues/:issue_id/internal-meta` 的 `workflow_status` 标记完成，open/close 由 JWT 用户在 Web 端操作。
 - API Key **不可**发表评论（`POST /api/issues/:issue_id/comments`）。
+- API Key **不可** `PUT`/`DELETE /api/issues/:issue_id/ship-hook`。`ship_hook` 仅出现在 Issue GET/列表中供只读。发货后关单/留言由 JWT 用户在 Web 配置，发货成功后由服务器执行。
 - 协作区旧端点 `POST/PUT/DELETE /collab/notes`、`/collab/questions` 已移除；`GET /collab` 响应字段为 `suggestions` / `plan` / `review` / `summary`。
 
 ### 后续使用
@@ -181,6 +182,27 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | `sort` | 默认 `updated_desc` |
 | `page` / `page_size` | 默认 1 / 20，最大 100 |
 
+### 发货后钩子（`ship_hook`，只读）
+
+`GET /api/issues/:issue_id` 及列表项可能带 `ship_hook`（无钩子时字段省略）。`PUT`/`DELETE /api/issues/:issue_id/ship-hook` **仅 JWT**；API Key 调用返回 403（40301）。**不要**用 API Key 发评论或改 `state` 来「代替」钩子；Agent 继续只用 `internal-meta.workflow_status` 标记进度。创建 Issue 时**不要**带钩子，**不要**设钩子。
+
+发货后钩子是 JWT 用户在 Web 上配置的一次性动作：该 Issue 所属项目下一次任意版本 **成功** 发货后执行。可选动作：发一条顶层评论、关闭问题（`state_reason=completed`）、改内部状态。
+
+`pending` 示例（`comment_enabled` / `close_enabled` / `workflow_enabled` 为显式布尔，**总是出现**，false 也输出；`workflow_status` 同样总是出现，`workflow_enabled=true` 且值为 `""` 表示「重置为未设置」；`comment_body` 仅在启用评论动作时出现）：
+
+```json
+{
+  "status": "pending",
+  "comment_enabled": true,
+  "comment_body": "已随 {version} 发出。",
+  "close_enabled": true,
+  "workflow_enabled": true,
+  "workflow_status": "done"
+}
+```
+
+`fired` 另有 `version_id`、`version_number`、`release_url`、`fired_at`、`results`（每步 `ok` / `skipped` / `error`）。占位符 `{version}`、`{release_url}` 在发货时替换，`comment_body` 随之变为渲染后正文。Agent 看到 `pending` 只表示用户已预约，**不要**自行再关单或留言。
+
 ## API Key 权限范围
 
 | 资源 | 读 | 写 |
@@ -191,11 +213,12 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | 构建产物上传/下载 | ✅ | ✅ |
 | Issue 评论 | ✅ | ❌ |
 | Issue 工作流（internal-meta）/ Checklist / 附件 | ✅ | ✅ |
+| Issue 发货后钩子（ship-hook） | ✅（随 Issue GET/列表只读） | ❌ |
 | 人机协作区 | ✅ | ✅（PUT 写；JWT 只读 + DELETE） |
 | Ship 发布 | ❌ | ❌ |
 | AI 辅助 | ❌ | 部分（仅 `checklist-suggestions`） |
 
-> **凭证分工**：仅 JWT — `state` / `state_reason`、发表评论、`generate-title`、`/ai/settings`；仅 API Key — 协作区 PUT、日志上传（AI 端点中仅 `checklist-suggestions` 对 API Key 开放）。越权返回 403（40301 或 40303）。
+> **凭证分工**：仅 JWT — `state` / `state_reason`、发表评论、`ship-hook` 写入、`generate-title`、`/ai/settings`；仅 API Key — 协作区 PUT、日志上传（AI 端点中仅 `checklist-suggestions` 对 API Key 开放）。越权返回 403（40301 或 40303）。
 
 ## 人机协作区
 

@@ -77,6 +77,48 @@ interface ShipCheckItem {
 interface ShipCheck {
   can_ship: boolean;
   items: ShipCheckItem[];
+  pending_issue_hooks: PendingIssueHook[];
+}
+
+interface PendingIssueHook {
+  issue_id: string;
+  reference: string;
+  title: string;
+  comment: boolean;
+  close: boolean;
+  workflow_enabled: boolean;
+  workflow_status: string;
+}
+
+interface ShipResult {
+  hook_total: number;
+  hook_failed: number;
+}
+
+interface IssueShipHookActionResult {
+  ok: boolean;
+  skipped?: boolean;
+  error?: string;
+}
+
+interface IssueShipHookResults {
+  comment?: IssueShipHookActionResult;
+  close?: IssueShipHookActionResult;
+  workflow_status?: IssueShipHookActionResult;
+}
+
+interface IssueShipHook {
+  status: "pending" | "fired";
+  comment_enabled: boolean;
+  comment_body?: string;
+  close_enabled: boolean;
+  workflow_enabled: boolean;
+  workflow_status: string;
+  version_id?: string;
+  version_number?: string;
+  release_url?: string;
+  fired_at?: string;
+  results?: IssueShipHookResults;
 }
 
 interface Artifact {
@@ -164,6 +206,7 @@ interface Issue {
   updated_at: string;
   internal_meta?: IssueInternalMeta | null;
   github?: IssueGitHubMeta | null;
+  ship_hook?: IssueShipHook | null;
 }
 
 interface IssueGitHubMeta {

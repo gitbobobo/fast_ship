@@ -58,6 +58,7 @@ import {
 } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
+import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
 import { cn } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
 import { ensureGitHubLinked, hasGitHubRepo } from "@/lib/utils/github";
@@ -825,6 +826,7 @@ export default function IssuesPage() {
                           <IssueWorkflowStatusBadge
                             status={issue.internal_meta?.workflow_status}
                           />
+                          <IssueShipHookBadge hook={issue.ship_hook} />
                           {(issue.source === "github"
                             ? issue.github?.labels ?? []
                             : issue.internal_meta?.labels ?? []

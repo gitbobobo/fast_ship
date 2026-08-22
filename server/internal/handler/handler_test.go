@@ -61,6 +61,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.IssueComment{},
 		&model.IssueTimelineEvent{},
 		&model.IssueInternalMeta{},
+		&model.IssueShipHook{},
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
 		&model.IssueAsset{},
@@ -106,6 +107,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
+	issueShipHookRepo := repository.NewIssueShipHookRepository(db)
 	issueChecklistRepo := repository.NewIssueChecklistRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
@@ -119,11 +121,11 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
 	collabRepo := repository.NewIssueCollabRepository(db)
 	collabService := service.NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
-	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, fileStorage, cfg, zap.NewNop())
+	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 
 	return &handlerTestEnv{
 		db:                 db,

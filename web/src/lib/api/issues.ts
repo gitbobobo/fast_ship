@@ -1,3 +1,4 @@
+import type { IssueWorkflowStatus } from "@/lib/issue-workflow-status";
 import { api } from "./client";
 
 export interface IssueListParams {
@@ -56,6 +57,12 @@ interface BatchCloseDoneResponse {
 
 interface CreateInternalIssueCommentRequest {
   body: string;
+}
+
+interface UpsertShipHookRequest {
+  comment_body?: string;
+  close?: boolean;
+  workflow_status?: IssueWorkflowStatus;
 }
 
 export const issueApi = {
@@ -163,4 +170,12 @@ export const issueApi = {
         : `issues/${issueId}/collab/${section}`;
     return api.delete(path).json<ApiResponse<null>>();
   },
+
+  upsertShipHook: (issueId: string, data: UpsertShipHookRequest) =>
+    api
+      .put(`issues/${issueId}/ship-hook`, { json: data })
+      .json<ApiResponse<IssueShipHook>>(),
+
+  deleteShipHook: (issueId: string) =>
+    api.delete(`issues/${issueId}/ship-hook`).json<ApiResponse<null>>(),
 };

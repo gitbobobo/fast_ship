@@ -115,6 +115,8 @@ func Setup(
 		api.POST("/issues/:iid/assets", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.UploadAsset)
 		api.PUT("/issues/:iid/internal-meta", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.UpdateInternalMeta)
 		api.PUT("/issues/:iid/checklist", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ReplaceChecklist)
+		api.PUT("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.UpsertShipHook)
+		api.DELETE("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.DeleteShipHook)
 		// checklist-suggestions 对 API Key 开放：供 Agent 自动化生成清单建议；其余 AI 端点（generate-title / settings）仍限 JWT。
 		api.POST("/issues/:iid/checklist-suggestions", middleware.RequireAuth(cfg, apiKeyRepo, authService), aiHandler.SuggestIssueChecklist)
 		// JWT 必须 — Issue 评论

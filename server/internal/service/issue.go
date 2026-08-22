@@ -61,6 +61,7 @@ type IssueService struct {
 	commentRepo         *repository.IssueCommentRepository
 	timelineRepo        *repository.IssueTimelineRepository
 	internalMetaRepo    *repository.IssueInternalMetaRepository
+	shipHookRepo        *repository.IssueShipHookRepository
 	checklistRepo       *repository.IssueChecklistRepository
 	syncStateRepo       *repository.IssueSyncStateRepository
 	assetRepo           *repository.IssueAssetRepository
@@ -181,6 +182,7 @@ type IssueResponse struct {
 	UpdatedAt      string                     `json:"updated_at"`
 	ClosedAt       *string                    `json:"closed_at"`
 	InternalMeta   *IssueInternalMetaResponse `json:"internal_meta,omitempty"`
+	ShipHook       *IssueShipHookResponse     `json:"ship_hook,omitempty"`
 	GitHub         *IssueGitHubResponse       `json:"github,omitempty"`
 }
 
@@ -302,6 +304,7 @@ func NewIssueService(
 	commentRepo *repository.IssueCommentRepository,
 	timelineRepo *repository.IssueTimelineRepository,
 	internalMetaRepo *repository.IssueInternalMetaRepository,
+	shipHookRepo *repository.IssueShipHookRepository,
 	checklistRepo *repository.IssueChecklistRepository,
 	syncStateRepo *repository.IssueSyncStateRepository,
 	assetRepo *repository.IssueAssetRepository,
@@ -319,6 +322,7 @@ func NewIssueService(
 		commentRepo:         commentRepo,
 		timelineRepo:        timelineRepo,
 		internalMetaRepo:    internalMetaRepo,
+		shipHookRepo:        shipHookRepo,
 		checklistRepo:       checklistRepo,
 		syncStateRepo:       syncStateRepo,
 		assetRepo:           assetRepo,
@@ -455,7 +459,7 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		return nil, err
 	}
 
-	resp := s.toIssueResponse(*stored, meta, nil, nil)
+	resp := s.toIssueResponse(*stored, meta, nil, nil, nil)
 	return &resp, nil
 }
 
@@ -513,7 +517,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 		return nil, err
 	}
 
-	resp := s.toIssueResponse(*stored, meta, nil, nil)
+	resp := s.toIssueResponse(*stored, meta, nil, nil, nil)
 	return &resp, nil
 }
 
@@ -631,7 +635,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if err != nil {
 			return nil, err
 		}
-		resp := s.toIssueResponse(*stored, meta, nil, nil)
+		resp := s.toIssueResponse(*stored, meta, nil, nil, nil)
 		return &resp, nil
 	}
 	if issue.Source != model.IssueSourceInternal {
@@ -724,7 +728,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	if err != nil {
 		return nil, err
 	}
-	resp := s.toIssueResponse(*issue, meta, nil, nil)
+	resp := s.toIssueResponse(*issue, meta, nil, nil, nil)
 	return &resp, nil
 }
 
@@ -929,9 +933,15 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 
 	labelMap := s.buildLabelMap(projectID)
 
-	resp := make([]IssueResponse, 0, end-start)
-	for _, issue := range filtered[start:end] {
-		resp = append(resp, s.toIssueResponse(issue, metaByIssueID[issue.ID], nil, labelMap))
+	pageIssues := filtered[start:end]
+	shipHooksByIssueID, err := s.shipHooksByIssueIDs(pageIssues)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	resp := make([]IssueResponse, 0, len(pageIssues))
+	for _, issue := range pageIssues {
+		resp = append(resp, s.toIssueResponse(issue, metaByIssueID[issue.ID], nil, labelMap, shipHooksByIssueID[issue.ID]))
 	}
 	return resp, total, nil
 }
@@ -1203,7 +1213,12 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 		return nil, err
 	}
 
-	resp := s.toIssueResponse(*issue, meta, checklist, nil)
+	shipHook, err := s.loadShipHook(issue.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := s.toIssueResponse(*issue, meta, checklist, nil, shipHook)
 	return &resp, nil
 }
 
@@ -1944,6 +1959,18 @@ func (s *IssueService) loadInternalMeta(issueID string) (*model.IssueInternalMet
 	return meta, nil
 }
 
+// InternalMetaWorkflowStatus 返回 Issue 当前内部工作流状态，无记录时返回 ""。
+func (s *IssueService) InternalMetaWorkflowStatus(issueID string) (model.IssueWorkflowStatus, error) {
+	meta, err := s.loadInternalMeta(issueID)
+	if err != nil {
+		return "", err
+	}
+	if meta == nil {
+		return "", nil
+	}
+	return meta.WorkflowStatus, nil
+}
+
 func (s *IssueService) loadChecklist(issueID string) ([]model.IssueChecklistItem, error) {
 	items, err := s.checklistRepo.ListByIssueID(issueID)
 	if err != nil {
@@ -1952,7 +1979,7 @@ func (s *IssueService) loadChecklist(issueID string) ([]model.IssueChecklistItem
 	return items, nil
 }
 
-func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem, labelMap map[string]model.GitHubRepoLabel) IssueResponse {
+func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem, labelMap map[string]model.GitHubRepoLabel, shipHook *model.IssueShipHook) IssueResponse {
 	resp := IssueResponse{
 		ID:             issue.ID,
 		ProjectID:      issue.ProjectID,
@@ -1971,6 +1998,7 @@ func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInter
 		CreatedAt:    formatTime(issue.CreatedAt),
 		UpdatedAt:    formatTime(issue.UpdatedAt),
 		InternalMeta: s.toIssueInternalMetaResponse(issue.ProjectID, meta, checklist, labelMap),
+		ShipHook:     s.toIssueShipHookResponse(shipHook),
 	}
 	if issue.ClosedAt != nil {
 		value := formatTime(issue.ClosedAt.UTC())

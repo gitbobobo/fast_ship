@@ -34,10 +34,18 @@ type ShipService struct {
 	versionRepo  *repository.VersionRepository
 	projectRepo  *repository.ProjectRepository
 	artifactRepo *repository.ArtifactRepository
+	issueRepo    *repository.IssueRepository
+	shipHookRepo *repository.IssueShipHookRepository
+	issueService *IssueService
 	storage      storage.Storage
 	cfg          *config.Config
 	logger       *zap.Logger
 	newClient    gitHubClientFactory
+}
+
+type ShipResult struct {
+	HookTotal  int `json:"hook_total"`
+	HookFailed int `json:"hook_failed"`
 }
 
 type ShipCheckItem struct {
@@ -48,14 +56,18 @@ type ShipCheckItem struct {
 }
 
 type ShipCheckResponse struct {
-	CanShip bool            `json:"can_ship"`
-	Items   []ShipCheckItem `json:"items"`
+	CanShip           bool               `json:"can_ship"`
+	Items             []ShipCheckItem    `json:"items"`
+	PendingIssueHooks []PendingIssueHook `json:"pending_issue_hooks"`
 }
 
 func NewShipService(
 	versionRepo *repository.VersionRepository,
 	projectRepo *repository.ProjectRepository,
 	artifactRepo *repository.ArtifactRepository,
+	issueRepo *repository.IssueRepository,
+	shipHookRepo *repository.IssueShipHookRepository,
+	issueService *IssueService,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -64,6 +76,9 @@ func NewShipService(
 		versionRepo:  versionRepo,
 		projectRepo:  projectRepo,
 		artifactRepo: artifactRepo,
+		issueRepo:    issueRepo,
+		shipHookRepo: shipHookRepo,
+		issueService: issueService,
 		storage:      storage,
 		cfg:          cfg,
 		logger:       logger,
@@ -87,21 +102,21 @@ func (s *ShipService) Check(versionID, userID string) (*ShipCheckResponse, error
 	return check, nil
 }
 
-func (s *ShipService) Ship(versionID, userID string) error {
+func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 	version, project, err := s.loadVersionAndProject(versionID, userID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 前置校验
 	if err := s.updateShipState(version, model.ShipStatusInProgress, model.ShipStagePreCheck, "正在校验发货条件"); err != nil {
-		return errs.ErrInternal
+		return nil, errs.ErrInternal
 	}
 
 	check, err := s.buildCheck(context.Background(), version, project)
 	if err != nil {
 		s.recordFailure(version, model.ShipStagePreCheck, err.Error())
-		return err
+		return nil, err
 	}
 	if !check.CanShip {
 		msg := errs.ErrShipPreCheckFailed.Message
@@ -112,14 +127,14 @@ func (s *ShipService) Ship(versionID, userID string) error {
 			}
 		}
 		s.recordFailure(version, model.ShipStagePreCheck, msg)
-		return errs.New(errs.ErrShipPreCheckFailed.Code, msg)
+		return nil, errs.New(errs.ErrShipPreCheckFailed.Code, msg)
 	}
 
 	// 解密 GitHub Token
 	tokenBytes, appErr := s.decryptGitHubToken(project)
 	if appErr != nil {
 		s.recordFailure(version, model.ShipStagePreCheck, appErr.Message)
-		return appErr
+		return nil, appErr
 	}
 
 	gh := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
@@ -131,7 +146,7 @@ func (s *ShipService) Ship(versionID, userID string) error {
 	if err := gh.CreateTag(ctx, version.VersionNumber, version.TargetCommitish); err != nil {
 		message := fmt.Sprintf("创建 Tag 失败: %s", s.describeGitHubOperationError(project, err))
 		s.recordFailure(version, model.ShipStageCreateTag, message)
-		return errs.New(50200, message)
+		return nil, errs.New(50200, message)
 	}
 
 	// 创建 Release
@@ -141,14 +156,14 @@ func (s *ShipService) Ship(versionID, userID string) error {
 	if err != nil {
 		message := fmt.Sprintf("创建 Release 失败: %s", s.describeGitHubOperationError(project, err))
 		s.recordFailure(version, model.ShipStageCreateRelease, message)
-		return errs.New(50201, message)
+		return nil, errs.New(50201, message)
 	}
 
 	// 并行上传安装包
 	_ = s.updateShipState(version, model.ShipStatusInProgress, model.ShipStageUploadAssets, "正在上传安装包")
 	artifacts, err := s.artifactRepo.ListByVersionID(versionID)
 	if err != nil {
-		return errs.ErrInternal
+		return nil, errs.ErrInternal
 	}
 
 	var wg sync.WaitGroup
@@ -197,7 +212,7 @@ func (s *ShipService) Ship(versionID, userID string) error {
 	for _, uerr := range uploadErrors {
 		if uerr != nil {
 			s.recordFailure(version, model.ShipStageUploadAssets, fmt.Sprintf("上传安装包失败: %v", uerr))
-			return errs.New(50202, fmt.Sprintf("上传安装包失败: %v", uerr))
+			return nil, errs.New(50202, fmt.Sprintf("上传安装包失败: %v", uerr))
 		}
 	}
 
@@ -213,11 +228,16 @@ func (s *ShipService) Ship(versionID, userID string) error {
 	version.ShipMessage = "已成功发货到 GitHub"
 
 	if err := s.versionRepo.Update(version); err != nil {
-		return errs.ErrInternal
+		return nil, errs.ErrInternal
 	}
 
 	s.logger.Info("version shipped successfully", zap.String("version", version.VersionNumber))
-	return nil
+
+	result, hookErr := s.ExecutePendingShipHooks(project.ID, userID, version)
+	if hookErr != nil {
+		s.logger.Error("execute pending ship hooks failed", zap.Error(hookErr))
+	}
+	return result, nil
 }
 
 func (s *ShipService) loadVersionAndProject(versionID, userID string) (*model.Version, *model.Project, error) {
@@ -299,9 +319,15 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 		}
 	}
 
+	pendingIssueHooks, err := s.ListPendingIssueHooksForCheck(project.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	return &ShipCheckResponse{
-		CanShip: canShip,
-		Items:   items,
+		CanShip:           canShip,
+		Items:             items,
+		PendingIssueHooks: pendingIssueHooks,
 	}, nil
 }
 
