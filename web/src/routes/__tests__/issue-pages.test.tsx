@@ -1558,6 +1558,35 @@ describe("Issue pages", () => {
     expect(toast.success).toHaveBeenCalledWith("已取消");
   });
 
+  it("shows running ship hook state without edit controls", () => {
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        ship_hook: {
+          status: "running",
+          comment_enabled: true,
+          comment_body: "已随 {version} 发出。",
+          close_enabled: false,
+          workflow_enabled: false,
+          workflow_status: "",
+        },
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(screen.getByText("正在执行发货后动作，请稍候")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument();
+  });
+
   it("shows pending and failed ship hook badges on issues list", async () => {
     vi.mocked(useIssues).mockReturnValue({
       data: {

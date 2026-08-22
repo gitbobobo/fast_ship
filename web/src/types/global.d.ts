@@ -51,6 +51,7 @@ interface Version {
     | "upload_assets"
     | "finalize";
   ship_message: string | null;
+  ship_hooks_status?: "pending" | "completed" | "failed" | "incomplete" | null;
   created_at: string;
   shipped_at: string | null;
   artifacts?: Artifact[];
@@ -93,6 +94,8 @@ interface PendingIssueHook {
 interface ShipResult {
   hook_total: number;
   hook_failed: number;
+  hook_status?: "completed" | "failed" | "incomplete";
+  hook_error?: string;
 }
 
 interface IssueShipHookActionResult {
@@ -108,7 +111,7 @@ interface IssueShipHookResults {
 }
 
 interface IssueShipHook {
-  status: "pending" | "fired";
+  status: "pending" | "running" | "fired";
   comment_enabled: boolean;
   comment_body?: string;
   close_enabled: boolean;

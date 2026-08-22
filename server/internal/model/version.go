@@ -40,6 +40,7 @@ type Version struct {
 	ShipStatus       ShipStatus    `gorm:"type:text" json:"ship_status"`
 	ShipStage        ShipStage     `gorm:"type:text" json:"ship_stage"`
 	ShipMessage      string        `gorm:"type:text" json:"ship_message"`
+	ShipHooksStatus  string        `gorm:"type:text;default:pending" json:"ship_hooks_status"`
 	CreatedAt        time.Time     `gorm:"not null" json:"created_at"`
 	ShippedAt        *time.Time    `json:"shipped_at"`
 

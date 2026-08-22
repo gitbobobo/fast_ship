@@ -19,7 +19,7 @@ func TestIssueServiceUpsertShipHook_PutPendingAndGet(t *testing.T) {
 
 	commentBody := "已随 {version} 发出。"
 	workflow := model.IssueWorkflowStatusDone
-	hook, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	hook, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody:    &commentBody,
 		Close:          true,
 		WorkflowStatus: &workflow,
@@ -77,7 +77,7 @@ func TestIssueServiceUpsertShipHook_OverwritesFiredToPending(t *testing.T) {
 	}
 
 	workflow := model.IssueWorkflowStatusTodo
-	hook, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	hook, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		WorkflowStatus: &workflow,
 	})
 	if err != nil {
@@ -105,7 +105,7 @@ func TestIssueServiceUpsertShipHook_RejectsNoActions(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	_, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{})
+	_, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{})
 	if err == nil {
 		t.Fatalf("expected error for empty actions")
 	}
@@ -121,7 +121,7 @@ func TestIssueServiceUpsertShipHook_RejectsBlankComment(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	blank := "   "
-	_, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	_, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody: &blank,
 	})
 	if err == nil {
@@ -136,7 +136,7 @@ func TestIssueServiceUpsertShipHook_RejectsCommentTooLong(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	longBody := strings.Repeat("a", maxShipHookCommentBodyLen+1)
-	_, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	_, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody: &longBody,
 	})
 	if err == nil {
@@ -144,7 +144,7 @@ func TestIssueServiceUpsertShipHook_RejectsCommentTooLong(t *testing.T) {
 	}
 
 	longRunes := strings.Repeat("汉", maxShipHookCommentBodyLen+1)
-	_, err = svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	_, err = svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody: &longRunes,
 	})
 	if err == nil {
@@ -159,7 +159,7 @@ func TestIssueServiceUpsertShipHook_Allows2000ChineseRunes(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	body := strings.Repeat("汉", 2000)
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody: &body,
 	}); err != nil {
 		t.Fatalf("expected 2000 runes to succeed, got %v", err)
@@ -173,7 +173,7 @@ func TestIssueServiceUpsertShipHook_AllowsEmptyWorkflowStatus(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	empty := model.IssueWorkflowStatus("")
-	hook, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	hook, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		WorkflowStatus: &empty,
 	})
 	if err != nil {
@@ -217,7 +217,7 @@ func TestIssueServiceUpsertShipHook_AllowsClosedIssue(t *testing.T) {
 	})
 
 	workflow := model.IssueWorkflowStatusDone
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		WorkflowStatus: &workflow,
 	}); err != nil {
 		t.Fatalf("upsert on closed issue: %v", err)
@@ -231,16 +231,16 @@ func TestIssueServiceDeleteShipHook_IsIdempotent(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	workflow := model.IssueWorkflowStatusDone
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		WorkflowStatus: &workflow,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
 	}
 
-	if err := svc.issueService.DeleteShipHook(issue.ID, user.ID); err != nil {
+	if err := svc.shipHookService.DeleteShipHook(issue.ID, user.ID); err != nil {
 		t.Fatalf("first delete: %v", err)
 	}
-	if err := svc.issueService.DeleteShipHook(issue.ID, user.ID); err != nil {
+	if err := svc.shipHookService.DeleteShipHook(issue.ID, user.ID); err != nil {
 		t.Fatalf("second delete should be idempotent: %v", err)
 	}
 
@@ -273,7 +273,7 @@ func TestIssueServiceList_IncludesShipHooksWithoutNPlusOne(t *testing.T) {
 
 	workflow := model.IssueWorkflowStatusDone
 	for _, issueID := range []string{issue1.ID, issue2.ID} {
-		if _, err := svc.issueService.UpsertShipHook(issueID, user.ID, UpsertShipHookRequest{
+		if _, err := svc.shipHookService.UpsertShipHook(issueID, user.ID, UpsertShipHookRequest{
 			WorkflowStatus: &workflow,
 		}); err != nil {
 			t.Fatalf("upsert ship hook for %s: %v", issueID, err)

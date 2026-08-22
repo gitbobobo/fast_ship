@@ -6,6 +6,9 @@ type IssueShipHookStatus string
 
 const (
 	IssueShipHookStatusPending IssueShipHookStatus = "pending"
+	// running means the hook has been claimed by a ship worker. It is kept
+	// recoverable so a process crash cannot turn a pending hook into a lost one.
+	IssueShipHookStatusRunning IssueShipHookStatus = "running"
 	IssueShipHookStatusFired   IssueShipHookStatus = "fired"
 )
 
@@ -26,6 +29,10 @@ type IssueShipHook struct {
 	FiredVersionNumber string     `gorm:"type:text" json:"fired_version_number"`
 	FiredReleaseURL    string     `gorm:"type:text" json:"fired_release_url"`
 	FiredAt            *time.Time `json:"fired_at"`
+	ExecutionToken     string     `gorm:"type:text;index" json:"-"`
+	LeaseToken         string     `gorm:"type:text;index" json:"-"`
+	LeaseExpiresAt     *time.Time `json:"-"`
+	RetryPending       bool       `gorm:"not null;default:false;index" json:"-"`
 
 	CommentOK           *bool  `json:"comment_ok"`
 	CommentSkipped      bool   `gorm:"not null;default:false" json:"comment_skipped"`

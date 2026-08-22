@@ -30,13 +30,23 @@ type gitHubClient interface {
 
 type gitHubClientFactory func(token, owner, repo string) gitHubClient
 
+// shipHookActions is deliberately narrower than IssueService. Shipping only
+// needs these issue side effects; depending on the whole issue application
+// service made this workflow needlessly coupled to unrelated issue features.
+type shipHookActions interface {
+	CreateInternalCommentIdempotent(issueID, userID string, req CreateInternalIssueCommentRequest, source, idempotencyKey string) (*IssueCommentResponse, error)
+	InternalMetaWorkflowStatus(issueID string) (model.IssueWorkflowStatus, error)
+	UpdateInternalMeta(issueID, userID string, status model.IssueWorkflowStatus, source string) (*IssueInternalMetaResponse, error)
+	UpdateInternalIssue(issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error)
+}
+
 type ShipService struct {
 	versionRepo  *repository.VersionRepository
 	projectRepo  *repository.ProjectRepository
 	artifactRepo *repository.ArtifactRepository
 	issueRepo    *repository.IssueRepository
 	shipHookRepo *repository.IssueShipHookRepository
-	issueService *IssueService
+	hookActions  shipHookActions
 	storage      storage.Storage
 	cfg          *config.Config
 	logger       *zap.Logger
@@ -44,8 +54,11 @@ type ShipService struct {
 }
 
 type ShipResult struct {
-	HookTotal  int `json:"hook_total"`
-	HookFailed int `json:"hook_failed"`
+	HookTotal           int      `json:"hook_total"`
+	HookFailed          int      `json:"hook_failed"`
+	HookStatus          string   `json:"hook_status"`
+	HookError           string   `json:"hook_error,omitempty"`
+	RecoveredVersionIDs []string `json:"-"`
 }
 
 type ShipCheckItem struct {
@@ -67,7 +80,7 @@ func NewShipService(
 	artifactRepo *repository.ArtifactRepository,
 	issueRepo *repository.IssueRepository,
 	shipHookRepo *repository.IssueShipHookRepository,
-	issueService *IssueService,
+	issueService shipHookActions,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -78,7 +91,7 @@ func NewShipService(
 		artifactRepo: artifactRepo,
 		issueRepo:    issueRepo,
 		shipHookRepo: shipHookRepo,
-		issueService: issueService,
+		hookActions:  issueService,
 		storage:      storage,
 		cfg:          cfg,
 		logger:       logger,
@@ -226,6 +239,7 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 	version.ShipStatus = model.ShipStatusCompleted
 	version.ShipStage = model.ShipStageFinalize
 	version.ShipMessage = "已成功发货到 GitHub"
+	version.ShipHooksStatus = "pending"
 
 	if err := s.versionRepo.Update(version); err != nil {
 		return nil, errs.ErrInternal
@@ -236,8 +250,66 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 	result, hookErr := s.ExecutePendingShipHooks(project.ID, userID, version)
 	if hookErr != nil {
 		s.logger.Error("execute pending ship hooks failed", zap.Error(hookErr))
+		version.ShipHooksStatus = "incomplete"
+		version.ShipMessage = "已成功发货到 GitHub，但问题钩子尚未完成，将在后续发货时重试"
+		version.ErrorLog = hookErr.Error()
+		s.markRecoveredHookVersions(result.RecoveredVersionIDs)
+		_ = s.versionRepo.Update(version)
+		return result, errs.ErrInternal
+	}
+	if result.HookFailed > 0 {
+		version.ShipHooksStatus = "failed"
+		version.ShipMessage = fmt.Sprintf("已成功发货到 GitHub，但有 %d 个问题钩子执行失败，将在后续发货时重试", result.HookFailed)
+	} else {
+		version.ShipHooksStatus = "completed"
+	}
+	s.markRecoveredHookVersions(result.RecoveredVersionIDs)
+	if err := s.versionRepo.Update(version); err != nil {
+		return result, errs.ErrInternal
 	}
 	return result, nil
+}
+
+func (s *ShipService) markRecoveredHookVersions(versionIDs []string) {
+	seen := make(map[string]struct{}, len(versionIDs))
+	for _, versionID := range versionIDs {
+		if versionID == "" {
+			continue
+		}
+		if _, ok := seen[versionID]; ok {
+			continue
+		}
+		seen[versionID] = struct{}{}
+		original, err := s.versionRepo.FindByID(versionID)
+		if err != nil {
+			continue
+		}
+
+		status := "completed"
+		if hooks, listErr := s.shipHookRepo.ListByFiredVersionIDs([]string{versionID}); listErr != nil {
+			status = "incomplete"
+		} else {
+			for _, hook := range hooks {
+				if hook.Status == model.IssueShipHookStatusRunning || hook.Status == model.IssueShipHookStatusPending {
+					status = "incomplete"
+					break
+				}
+				if hook.RetryPending || shipHookHasFailure(&hook) {
+					status = "failed"
+				}
+			}
+		}
+		original.ShipHooksStatus = status
+		if status == "completed" {
+			original.ErrorLog = ""
+			original.ShipMessage = "已成功发货到 GitHub，问题钩子已完成"
+		} else if status == "failed" {
+			original.ShipMessage = "已成功发货到 GitHub，但有问题钩子执行失败，将在后续发货时重试"
+		} else {
+			original.ShipMessage = "已成功发货到 GitHub，但问题钩子尚未完成，将在后续发货时重试"
+		}
+		_ = s.versionRepo.Update(original)
+	}
 }
 
 func (s *ShipService) loadVersionAndProject(versionID, userID string) (*model.Version, *model.Project, error) {

@@ -21,6 +21,7 @@ vi.mock("sonner", () => ({
     success: vi.fn(),
     error: vi.fn(),
     info: vi.fn(),
+    warning: vi.fn(),
   },
 }));
 
@@ -454,6 +455,37 @@ describe("VersionDetailPage", () => {
       screen.queryByRole("heading", { name: "发货失败" }),
     ).not.toBeInTheDocument();
     expect(toast.success).toHaveBeenCalledWith("发货已开始，正在同步最新进度");
+  });
+
+  it("warns when shipping succeeded but hook execution is incomplete", async () => {
+    const refetchVersion = vi.fn().mockResolvedValue({
+      data: makeVersion({
+        status: "shipped",
+        ship_status: "completed",
+        ship_hooks_status: "incomplete",
+        ship_message: "已成功发货到 GitHub，但问题钩子尚未完成，将在后续发货时重试",
+      }),
+    });
+    vi.mocked(useVersion).mockReturnValue({
+      data: makeVersion({ ship_status: "", ship_stage: "", ship_message: null }),
+      isLoading: false,
+      refetch: refetchVersion,
+    } as unknown as ReturnType<typeof useVersion>);
+    shipVersionMutateAsync.mockRejectedValueOnce(new Error("hook persistence failed"));
+
+    renderWithRoute(<VersionDetailPage />, {
+      path: "/projects/:id/versions/:vid",
+      initialEntry: "/projects/proj-1/versions/ver-1",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发货" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认发货" }));
+
+    await waitFor(() =>
+      expect(toast.warning).toHaveBeenCalledWith(
+        "已成功发货到 GitHub，但问题钩子尚未完成，将在后续发货时重试",
+      ),
+    );
+    expect(screen.queryByRole("heading", { name: "发货失败" })).not.toBeInTheDocument();
   });
 
   it("shows download all button when artifacts exist", () => {

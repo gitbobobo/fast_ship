@@ -60,6 +60,29 @@ func TestShipServiceCheck_ReturnsDetailedMissingItems(t *testing.T) {
 	assertCheckItem("github_config", false)
 }
 
+func TestShipServiceRecoveryMarksOriginalVersionWithoutCountingItForNewShip(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "recovery-user")
+	project := createTestProject(t, svc.db, "recovery-user")
+	original := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+		v.Status = model.VersionStatusShipped
+		v.ShipHooksStatus = "failed"
+	})
+	newVersion := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
+		v.VersionNumber = "v2.0.0"
+		v.ShipHooksStatus = "pending"
+	})
+	svc.shipService.markRecoveredHookVersions([]string{original.ID})
+	gotOriginal, err := svc.versionRepo.FindByID(original.ID)
+	if err != nil || gotOriginal.ShipHooksStatus != "completed" {
+		t.Fatalf("original version was not completed: err=%v version=%+v", err, gotOriginal)
+	}
+	gotNew, err := svc.versionRepo.FindByID(newVersion.ID)
+	if err != nil || gotNew.ShipHooksStatus != "pending" {
+		t.Fatalf("new version status was polluted by recovery: err=%v version=%+v", err, gotNew)
+	}
+}
+
 func TestShipServiceShip_SuccessUpdatesVersionAndUploadsAssets(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
@@ -401,7 +424,7 @@ func TestShipServiceShip_ExecutesInternalIssueShipHook(t *testing.T) {
 
 	commentBody := "已随 {version} 发出。{release_url}"
 	workflow := model.IssueWorkflowStatusDone
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody:    &commentBody,
 		Close:          true,
 		WorkflowStatus: &workflow,
@@ -469,7 +492,7 @@ func TestShipServiceShip_FailedShipDoesNotConsumeHook(t *testing.T) {
 
 	issue := createTestIssue(t, svc.db, project.ID)
 	workflow := model.IssueWorkflowStatusDone
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		WorkflowStatus: &workflow,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
@@ -517,7 +540,7 @@ func TestShipServiceShip_SkipsCloseOnClosedIssueStillComments(t *testing.T) {
 	}
 
 	commentBody := "closed issue comment"
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody: &commentBody,
 		Close:       true,
 	}); err != nil {
@@ -568,7 +591,7 @@ func TestShipServiceShip_SkipsWorkflowWhenAlreadyDone(t *testing.T) {
 	if _, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, done, "test"); err != nil {
 		t.Fatalf("set workflow done: %v", err)
 	}
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		WorkflowStatus: &done,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
@@ -608,7 +631,7 @@ func TestShipServiceShip_GitHubCommentFailureStillShips(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 	commentBody := "github comment"
 	workflow := model.IssueWorkflowStatusDone
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody:    &commentBody,
 		Close:          true,
 		WorkflowStatus: &workflow,
@@ -703,7 +726,7 @@ func TestShipServiceShip_ConsumesOnlySameProjectHooks(t *testing.T) {
 
 	workflow := model.IssueWorkflowStatusDone
 	for _, issueID := range []string{issueA1.ID, issueA2.ID, issueB.ID} {
-		if _, err := svc.issueService.UpsertShipHook(issueID, user.ID, UpsertShipHookRequest{
+		if _, err := svc.shipHookService.UpsertShipHook(issueID, user.ID, UpsertShipHookRequest{
 			WorkflowStatus: &workflow,
 		}); err != nil {
 			t.Fatalf("upsert hook for %s: %v", issueID, err)
@@ -777,7 +800,7 @@ func TestShipServiceShip_PreservesUnknownPlaceholders(t *testing.T) {
 	}
 
 	commentBody := "ver={version} url={release_url} unknown={unknown}"
-	if _, err := svc.issueService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody: &commentBody,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)

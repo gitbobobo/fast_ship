@@ -108,6 +108,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	issueShipHookRepo := repository.NewIssueShipHookRepository(db)
+	issueShipHookService := service.NewIssueShipHookService(issueRepo, projectRepo, issueShipHookRepo)
 	issueChecklistRepo := repository.NewIssueChecklistRepository(db)
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
@@ -121,7 +122,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookRepo, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
 	collabRepo := repository.NewIssueCollabRepository(db)
 	collabService := service.NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
@@ -133,7 +134,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		aiHandler:          NewAIHandler(aiService),
 		issuePromptHandler: NewIssuePromptHandler(issuePromptService),
 		versionHandler:     NewVersionHandler(versionService, shipService),
-		issueHandler:       NewIssueHandler(issueService),
+		issueHandler:       NewIssueHandler(issueService, issueShipHookService),
 		collabHandler:      NewIssueCollabHandler(collabService),
 		artifactHandler:    NewArtifactHandler(artifactService),
 	}

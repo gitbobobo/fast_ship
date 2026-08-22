@@ -12,6 +12,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
+	"github.com/google/uuid"
 )
 
 var testPNGBytes = []byte{
@@ -1022,6 +1023,67 @@ func TestIssueServiceCreateInternalComment_AddsCommentToInternalIssue(t *testing
 	}
 	if comments[0].Body != "第一条内部评论" {
 		t.Fatalf("unexpected internal comment payload: %+v", comments[0])
+	}
+}
+
+func TestIssueServiceCreateInternalCommentIdempotent_DoesNotDuplicateOnRetry(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-idempotent")
+	project := createTestProject(t, svc.db, user.ID)
+	issue, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{Title: "hook", Body: "body"})
+	if err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	req := CreateInternalIssueCommentRequest{Body: "release comment"}
+	results := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			_, callErr := svc.issueService.CreateInternalCommentIdempotent(issue.ID, user.ID, req, "ship-hook", "ship-hook-comment:attempt-1")
+			results <- callErr
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if callErr := <-results; callErr != nil {
+			t.Fatalf("concurrent idempotent comment: %v", callErr)
+		}
+	}
+	_, total, err := svc.issueService.ListComments(issue.ID, user.ID, 1, 20)
+	if err != nil {
+		t.Fatalf("list comments: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected idempotent retry to keep one comment, got %d", total)
+	}
+}
+
+func TestIssueCommentUpsertPersistsIdempotencyKeyForExistingGitHubComment(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-comment-upsert")
+	project := createTestProject(t, svc.db, user.ID)
+	issue := createTestIssue(t, svc.db, project.ID)
+	now := time.Now().UTC()
+	comment := &model.IssueComment{
+		ID:              uuid.NewString(),
+		IssueID:         issue.ID,
+		Source:          model.IssueSourceGitHub,
+		GitHubCommentID: 42,
+		Body:            "remote marker",
+		GitHubCreatedAt: now,
+		GitHubUpdatedAt: now,
+	}
+	if err := svc.commentRepo.Upsert(comment); err != nil {
+		t.Fatalf("seed github comment: %v", err)
+	}
+	comment.IdempotencyKey = "ship-hook-comment:attempt-1"
+	if err := svc.commentRepo.Upsert(comment); err != nil {
+		t.Fatalf("update github comment marker: %v", err)
+	}
+	stored, err := svc.commentRepo.FindByIdempotencyKey(issue.ID, comment.IdempotencyKey)
+	if err != nil {
+		t.Fatalf("find idempotency key: %v", err)
+	}
+	if stored.GitHubCommentID != comment.GitHubCommentID {
+		t.Fatalf("unexpected stored comment: %+v", stored)
 	}
 }
 

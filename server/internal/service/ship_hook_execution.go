@@ -7,6 +7,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -59,24 +60,25 @@ func (s *ShipService) ListPendingIssueHooksForCheck(projectID string) ([]Pending
 	return result, nil
 }
 
-// ExecutePendingShipHooks 消费项目下全部 pending 钩子并逐个执行动作；钩子失败不影响发货结果，只计入 HookFailed。
+// ExecutePendingShipHooks claims pending (or abandoned running) hooks, then
+// completes them with a compare-and-set update. A crash leaves a running row
+// that can be reclaimed later; a rescheduled/deleted row cannot be overwritten
+// by the old worker.
 func (s *ShipService) ExecutePendingShipHooks(projectID, userID string, version *model.Version) (*ShipResult, error) {
 	result := &ShipResult{}
+	result.HookStatus = "completed"
 	if version == nil {
 		return result, nil
 	}
 
-	firedAt := time.Now().UTC()
-	if version.ShippedAt != nil {
-		firedAt = version.ShippedAt.UTC()
-	}
-
-	consumed, err := s.shipHookRepo.ConsumePendingByProjectID(
+	claimedAt := time.Now().UTC()
+	consumed, err := s.shipHookRepo.ClaimPendingByProjectID(
 		projectID,
 		version.ID,
 		version.VersionNumber,
 		version.GithubReleaseURL,
-		firedAt,
+		claimedAt,
+		claimedAt.Add(-5*time.Minute),
 	)
 	if err != nil {
 		s.logger.Error("consume pending ship hooks failed",
@@ -84,24 +86,84 @@ func (s *ShipService) ExecutePendingShipHooks(projectID, userID string, version 
 			zap.String("version_id", version.ID),
 			zap.Error(err),
 		)
+		result.HookStatus = "incomplete"
+		result.HookError = err.Error()
 		return result, err
 	}
 
-	result.HookTotal = len(consumed)
 	for i := range consumed {
 		hook := &consumed[i]
-		s.executeConsumedShipHook(hook, userID, version)
-		if err := s.shipHookRepo.Upsert(hook); err != nil {
+		if hook.FiredVersionID != "" && hook.FiredVersionID != version.ID {
+			result.RecoveredVersionIDs = appendUniqueString(result.RecoveredVersionIDs, hook.FiredVersionID)
+		}
+		if hook.FiredVersionID == version.ID {
+			result.HookTotal++
+		}
+		resetShipHookAttemptResults(hook)
+		executionVersion := versionForShipHook(hook, version)
+		s.executeConsumedShipHook(hook, userID, executionVersion)
+		hook.RetryPending = shipHookHasFailure(hook)
+		if err := s.shipHookRepo.CompleteExecution(hook, time.Now().UTC()); err != nil {
 			s.logger.Error("persist ship hook execution result failed",
 				zap.String("issue_id", hook.IssueID),
 				zap.Error(err),
 			)
+			// A failed compare-and-set is important information to the caller:
+			// the worker did not durably finish this hook. Do not report a
+			// successful ship with a silently lost execution.
+			result.HookStatus = "incomplete"
+			result.HookError = err.Error()
+			return result, err
 		}
 		if shipHookHasFailure(hook) {
+			if hook.FiredVersionID != version.ID {
+				continue
+			}
 			result.HookFailed++
+			result.HookStatus = "failed"
+			continue
+		}
+		if hook.FiredVersionID != version.ID {
+			continue
 		}
 	}
 	return result, nil
+}
+
+func resetShipHookAttemptResults(hook *model.IssueShipHook) {
+	hook.CommentOK, hook.CommentError, hook.CommentRenderedBody = nil, "", ""
+	hook.CommentSkipped = false
+	hook.CloseOK, hook.CloseError = nil, ""
+	hook.CloseSkipped = false
+	hook.WorkflowOK, hook.WorkflowError = nil, ""
+	hook.WorkflowSkipped = false
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+// versionForShipHook freezes the release context at the first claim. A stale
+// worker recovered during a later release must never render the later version
+// into the earlier appointment.
+func versionForShipHook(hook *model.IssueShipHook, fallback *model.Version) *model.Version {
+	if hook.FiredVersionID == "" && hook.FiredVersionNumber == "" {
+		return fallback
+	}
+	version := *fallback
+	version.ID = hook.FiredVersionID
+	version.VersionNumber = hook.FiredVersionNumber
+	version.GithubReleaseURL = hook.FiredReleaseURL
+	if hook.FiredAt != nil {
+		firedAt := *hook.FiredAt
+		version.ShippedAt = &firedAt
+	}
+	return &version
 }
 
 func (s *ShipService) executeConsumedShipHook(hook *model.IssueShipHook, userID string, version *model.Version) {
@@ -116,20 +178,48 @@ func (s *ShipService) executeConsumedShipHook(hook *model.IssueShipHook, userID 
 	}
 
 	if hook.CommentEnabled {
+		if err := s.renewShipHookLease(hook); err != nil {
+			markShipHookActionsFailed(hook, err.Error())
+			return
+		}
 		s.executeShipHookComment(hook, userID, version)
 	}
 	if hook.WorkflowEnabled {
+		if err := s.renewShipHookLease(hook); err != nil {
+			markShipHookActionsFailed(hook, err.Error())
+			return
+		}
 		s.executeShipHookWorkflow(hook, userID)
 	}
 	if hook.CloseEnabled {
+		if err := s.renewShipHookLease(hook); err != nil {
+			markShipHookActionsFailed(hook, err.Error())
+			return
+		}
 		s.executeShipHookClose(hook, userID, issue)
 	}
+}
+
+func (s *ShipService) renewShipHookLease(hook *model.IssueShipHook) error {
+	if err := s.shipHookRepo.RenewLease(hook, time.Now().UTC()); err != nil {
+		if err == repository.ErrStaleIssueShipHook {
+			return err
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *ShipService) executeShipHookComment(hook *model.IssueShipHook, userID string, version *model.Version) {
 	rendered := renderShipHookCommentBody(hook.CommentBody, version.VersionNumber, version.GithubReleaseURL)
 	hook.CommentRenderedBody = rendered
-	_, err := s.issueService.CreateInternalComment(hook.IssueID, userID, CreateInternalIssueCommentRequest{Body: rendered}, "ship-hook")
+	_, err := s.hookActions.CreateInternalCommentIdempotent(
+		hook.IssueID,
+		userID,
+		CreateInternalIssueCommentRequest{Body: rendered},
+		"ship-hook",
+		"ship-hook-comment:"+hook.ExecutionToken,
+	)
 	if err != nil {
 		ok := false
 		hook.CommentOK = &ok
@@ -141,7 +231,7 @@ func (s *ShipService) executeShipHookComment(hook *model.IssueShipHook, userID s
 }
 
 func (s *ShipService) executeShipHookWorkflow(hook *model.IssueShipHook, userID string) {
-	current, err := s.issueService.InternalMetaWorkflowStatus(hook.IssueID)
+	current, err := s.hookActions.InternalMetaWorkflowStatus(hook.IssueID)
 	if err != nil {
 		ok := false
 		hook.WorkflowOK = &ok
@@ -155,7 +245,7 @@ func (s *ShipService) executeShipHookWorkflow(hook *model.IssueShipHook, userID 
 		return
 	}
 
-	if _, err := s.issueService.UpdateInternalMeta(hook.IssueID, userID, hook.WorkflowStatus, "ship-hook"); err != nil {
+	if _, err := s.hookActions.UpdateInternalMeta(hook.IssueID, userID, hook.WorkflowStatus, "ship-hook"); err != nil {
 		ok := false
 		hook.WorkflowOK = &ok
 		hook.WorkflowError = err.Error()
@@ -175,7 +265,7 @@ func (s *ShipService) executeShipHookClose(hook *model.IssueShipHook, userID str
 
 	closed := model.IssueStateClosed
 	reason := "completed"
-	_, err := s.issueService.UpdateInternalIssue(hook.IssueID, userID, UpdateInternalIssueRequest{
+	_, err := s.hookActions.UpdateInternalIssue(hook.IssueID, userID, UpdateInternalIssueRequest{
 		State:       &closed,
 		StateReason: &reason,
 	})

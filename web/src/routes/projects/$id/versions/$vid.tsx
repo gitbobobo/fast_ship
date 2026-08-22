@@ -235,7 +235,14 @@ export default function VersionDetailPage() {
         latestVersion?.status === "shipped" ||
         latestVersion?.ship_status === "completed"
       ) {
-        toast.success("发货成功！");
+        if (latestVersion.ship_hooks_status !== "completed") {
+          toast.warning(
+            latestVersion.ship_message ||
+              "发货已完成，但问题钩子尚未完成，将在后续发货时重试",
+          );
+        } else {
+          toast.success("发货成功！");
+        }
         return;
       }
 

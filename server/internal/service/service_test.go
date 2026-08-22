@@ -32,6 +32,7 @@ type testServices struct {
 	timelineRepo        *repository.IssueTimelineRepository
 	internalMetaRepo    *repository.IssueInternalMetaRepository
 	shipHookRepo        *repository.IssueShipHookRepository
+	shipHookService     *IssueShipHookService
 	checklistRepo       *repository.IssueChecklistRepository
 	syncStateRepo       *repository.IssueSyncStateRepository
 	issueAssetRepo      *repository.IssueAssetRepository
@@ -90,6 +91,7 @@ func setupTestServices(t *testing.T) *testServices {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_project_github_issue ON issue_github_meta(project_id, github_issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 
 	tempDir := t.TempDir()
@@ -106,6 +108,7 @@ func setupTestServices(t *testing.T) *testServices {
 	timelineRepo := repository.NewIssueTimelineRepository(db)
 	internalMetaRepo := repository.NewIssueInternalMetaRepository(db)
 	shipHookRepo := repository.NewIssueShipHookRepository(db)
+	shipHookService := NewIssueShipHookService(issueRepo, projectRepo, shipHookRepo)
 	checklistRepo := repository.NewIssueChecklistRepository(db)
 	syncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
@@ -133,13 +136,14 @@ func setupTestServices(t *testing.T) *testServices {
 		timelineRepo:        timelineRepo,
 		internalMetaRepo:    internalMetaRepo,
 		shipHookRepo:        shipHookRepo,
+		shipHookService:     shipHookService,
 		checklistRepo:       checklistRepo,
 		syncStateRepo:       syncStateRepo,
 		issueAssetRepo:      issueAssetRepo,
 		issueDraftAssetRepo: issueDraftAssetRepo,
 		artifactRepo:        artifactRepo,
 		collabRepo:          collabRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookRepo, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
 		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),

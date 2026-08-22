@@ -8,10 +8,24 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"gorm.io/gorm"
 )
 
 const maxShipHookCommentBodyLen = 4000
+
+// IssueShipHookService owns hook appointments, execution-state persistence
+// primitives, and the API response projection. ShipService owns the external
+// action runner and depends on its narrow action interface.
+type IssueShipHookService struct {
+	issueRepo    *repository.IssueRepository
+	projectRepo  *repository.ProjectRepository
+	shipHookRepo *repository.IssueShipHookRepository
+}
+
+func NewIssueShipHookService(issueRepo *repository.IssueRepository, projectRepo *repository.ProjectRepository, shipHookRepo *repository.IssueShipHookRepository) *IssueShipHookService {
+	return &IssueShipHookService{issueRepo: issueRepo, projectRepo: projectRepo, shipHookRepo: shipHookRepo}
+}
 
 type UpsertShipHookRequest struct {
 	CommentBody    *string
@@ -45,7 +59,7 @@ type IssueShipHookResponse struct {
 	Results         *IssueShipHookResultsResponse `json:"results,omitempty"`
 }
 
-func (s *IssueService) UpsertShipHook(issueID, userID string, req UpsertShipHookRequest) (*IssueShipHookResponse, error) {
+func (s *IssueShipHookService) UpsertShipHook(issueID, userID string, req UpsertShipHookRequest) (*IssueShipHookResponse, error) {
 	issue, err := s.issueRepo.FindByID(issueID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -115,7 +129,7 @@ func (s *IssueService) UpsertShipHook(issueID, userID string, req UpsertShipHook
 	return resp, nil
 }
 
-func (s *IssueService) DeleteShipHook(issueID, userID string) error {
+func (s *IssueShipHookService) DeleteShipHook(issueID, userID string) error {
 	issue, err := s.issueRepo.FindByID(issueID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -136,7 +150,7 @@ func (s *IssueService) DeleteShipHook(issueID, userID string) error {
 	return nil
 }
 
-func (s *IssueService) loadShipHook(issueID string) (*model.IssueShipHook, error) {
+func (s *IssueShipHookService) loadShipHook(issueID string) (*model.IssueShipHook, error) {
 	hook, err := s.shipHookRepo.GetByIssueID(issueID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -147,7 +161,7 @@ func (s *IssueService) loadShipHook(issueID string) (*model.IssueShipHook, error
 	return hook, nil
 }
 
-func (s *IssueService) shipHooksByIssueIDs(issues []model.Issue) (map[string]*model.IssueShipHook, error) {
+func (s *IssueShipHookService) shipHooksByIssueIDs(issues []model.Issue) (map[string]*model.IssueShipHook, error) {
 	issueIDs := make([]string, 0, len(issues))
 	for _, issue := range issues {
 		issueIDs = append(issueIDs, issue.ID)
@@ -165,7 +179,7 @@ func (s *IssueService) shipHooksByIssueIDs(issues []model.Issue) (map[string]*mo
 	return result, nil
 }
 
-func (s *IssueService) toIssueShipHookResponse(hook *model.IssueShipHook) *IssueShipHookResponse {
+func (s *IssueShipHookService) toIssueShipHookResponse(hook *model.IssueShipHook) *IssueShipHookResponse {
 	if hook == nil {
 		return nil
 	}

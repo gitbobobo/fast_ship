@@ -13,7 +13,8 @@ import (
 )
 
 type IssueHandler struct {
-	issueService *service.IssueService
+	issueService    *service.IssueService
+	shipHookService *service.IssueShipHookService
 }
 
 type createIssueRequest struct {
@@ -53,8 +54,8 @@ type batchCloseDoneRequest struct {
 	Source string `json:"source"`
 }
 
-func NewIssueHandler(issueService *service.IssueService) *IssueHandler {
-	return &IssueHandler{issueService: issueService}
+func NewIssueHandler(issueService *service.IssueService, shipHookService *service.IssueShipHookService) *IssueHandler {
+	return &IssueHandler{issueService: issueService, shipHookService: shipHookService}
 }
 
 func (h *IssueHandler) Create(c *gin.Context) {
@@ -410,7 +411,7 @@ func (h *IssueHandler) UpsertShipHook(c *gin.Context) {
 		return
 	}
 
-	result, err := h.issueService.UpsertShipHook(issueID, userID, service.UpsertShipHookRequest{
+	result, err := h.shipHookService.UpsertShipHook(issueID, userID, service.UpsertShipHookRequest{
 		CommentBody:    req.CommentBody,
 		Close:          req.Close,
 		WorkflowStatus: req.WorkflowStatus,
@@ -427,7 +428,7 @@ func (h *IssueHandler) DeleteShipHook(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	if err := h.issueService.DeleteShipHook(issueID, userID); err != nil {
+	if err := h.shipHookService.DeleteShipHook(issueID, userID); err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}

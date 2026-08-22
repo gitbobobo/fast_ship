@@ -203,6 +203,8 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 
 `fired` 另有 `version_id`、`version_number`、`release_url`、`fired_at`、`results`（每步 `ok` / `skipped` / `error`）。占位符 `{version}`、`{release_url}` 在发货时替换，`comment_body` 随之变为渲染后正文。Agent 看到 `pending` 只表示用户已预约，**不要**自行再关单或留言。
 
+`running` 表示服务器正在执行该预约；Agent 不应干预或代执行。`fired` 且带内部 `retry_pending` 表示上次动作未持久化完成，服务器会在后续成功发货时自动重试，仍归属于原触发版本；Agent 不应自行补执行。
+
 ## API Key 权限范围
 
 | 资源 | 读 | 写 |

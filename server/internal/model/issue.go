@@ -111,6 +111,7 @@ type IssueComment struct {
 	GitHubCreatedAt   time.Time   `gorm:"column:created_at;not null;index" json:"created_at"`
 	GitHubUpdatedAt   time.Time   `gorm:"column:updated_at;not null;index" json:"updated_at"`
 	RawJSON           string      `gorm:"type:text" json:"-"`
+	IdempotencyKey    string      `gorm:"type:text;index" json:"-"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }

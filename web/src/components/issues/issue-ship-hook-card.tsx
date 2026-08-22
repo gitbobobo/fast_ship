@@ -369,6 +369,7 @@ export function IssueShipHookCard({
           workflow_status: shipHook.workflow_status,
         })
       : "";
+  const isRunning = shipHook?.status === "running";
 
   return (
     <Card>
@@ -431,9 +432,11 @@ export function IssueShipHookCard({
             onCancel={() => setEditState(null)}
             onSave={(state) => void handleSave(state)}
           />
-        ) : shipHook?.status === "pending" ? (
+        ) : shipHook?.status === "pending" || isRunning ? (
           <div className="space-y-2">
-            <p className="text-sm text-muted-foreground">{pendingSummary}</p>
+            <p className="text-sm text-muted-foreground">
+              {isRunning ? "正在执行发货后动作，请稍候" : pendingSummary}
+            </p>
             {shipHook.comment_body && (
               <ShipHookCommentPreview body={shipHook.comment_body} />
             )}

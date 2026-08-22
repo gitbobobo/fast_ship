@@ -14,7 +14,7 @@ export function shipHookBadge(
     return null;
   }
 
-  if (hook.status === "pending") {
+  if (hook.status === "pending" || hook.status === "running") {
     return "pending";
   }
 
@@ -164,6 +164,9 @@ export function validateShipHookForm(form: {
 }
 
 export function formatShipSuccessToast(result: ShipResult): string {
+  if (result.hook_status === "failed" || result.hook_status === "incomplete") {
+    return `发货已完成，但问题钩子未全部完成（${result.hook_failed} 个失败），将在后续发货时重试`;
+  }
   const hookTotal = result.hook_total;
   const hookFailed = result.hook_failed;
 

@@ -167,12 +167,21 @@ func (r *IssueCommentRepository) Upsert(comment *model.IssueComment) error {
 			"created_at",
 			"updated_at",
 			"raw_json",
+			"idempotency_key",
 		}),
 	}).Create(comment).Error
 }
 
 func (r *IssueCommentRepository) Create(comment *model.IssueComment) error {
 	return r.db.Create(comment).Error
+}
+
+func (r *IssueCommentRepository) FindByIdempotencyKey(issueID, key string) (*model.IssueComment, error) {
+	var comment model.IssueComment
+	if err := r.db.Where("issue_id = ? AND idempotency_key = ?", issueID, key).First(&comment).Error; err != nil {
+		return nil, err
+	}
+	return &comment, nil
 }
 
 func (r *IssueCommentRepository) DeleteMissing(issueID string, gitHubCommentIDs []int64) error {
