@@ -19,7 +19,7 @@ const issue: Issue = {
   project_id: "project-1",
   source: "github",
   sequence_number: 1,
-  reference: "#1",
+  reference: "GH-1",
   state: "open",
   state_reason: "",
   title: "图片上传测试",
@@ -69,7 +69,7 @@ function renderInRouter(ui: React.ReactElement) {
 }
 
 function getCardElement() {
-  const link = screen.getByRole("link", { name: issue.title });
+  const link = screen.getByRole("link", { name: `${issue.reference} ${issue.title}` });
   return link.closest("div.group");
 }
 
@@ -130,14 +130,59 @@ describe("BoardIssueCard", () => {
     expect(card).not.toHaveClass("invisible");
   });
 
-  it("renders issue title, source badge, state badge and workflow status", () => {
+  it("renders issue title and author without status badges", () => {
     renderInRouter(<BoardIssueCard issue={issue} />);
 
-    expect(screen.getByRole("link", { name: issue.title })).toBeInTheDocument();
-    expect(screen.getByText("GitHub")).toBeInTheDocument();
-    expect(screen.getByText("Open")).toBeInTheDocument();
-    expect(screen.getByText("开发中")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` })).toBeInTheDocument();
+    expect(screen.getByText("GH-1")).toBeInTheDocument();
     expect(screen.getByText("@gitbobobo")).toBeInTheDocument();
+    expect(screen.queryByText("GitHub")).not.toBeInTheDocument();
+    expect(screen.queryByText("Open")).not.toBeInTheDocument();
+    expect(screen.queryByText("开发中")).not.toBeInTheDocument();
+  });
+
+  it("renders INT- reference for internal issues", () => {
+    renderInRouter(
+      <BoardIssueCard
+        issue={{
+          ...issue,
+          source: "internal",
+          reference: "INT-3",
+          github: undefined,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("INT-3")).toBeInTheDocument();
+  });
+
+  it("shows github icon next to the author for github issues", () => {
+    renderInRouter(<BoardIssueCard issue={issue} />);
+
+    const icon = screen.getByRole("img", { name: "GitHub" });
+    const author = screen.getByText("@gitbobobo");
+
+    // 图标渲染在作者左侧的同一行
+    expect(icon.parentElement).toBe(author.parentElement);
+    expect(icon.nextElementSibling).toBe(author);
+  });
+
+  it("does not show github icon for internal issues", () => {
+    renderInRouter(
+      <BoardIssueCard
+        issue={{
+          ...issue,
+          source: "internal",
+          github: undefined,
+          internal_meta: {
+            ...issue.internal_meta!,
+            labels: [],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.queryByRole("img", { name: "GitHub" })).not.toBeInTheDocument();
   });
 
   it("renders pending ship hook badge", () => {
@@ -214,7 +259,7 @@ describe("BoardIssueCard", () => {
 
     renderInRouter(<BoardIssueCard issue={issue} />);
 
-    fireEvent.pointerDown(screen.getByRole("link", { name: issue.title }));
+    fireEvent.pointerDown(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` }));
 
     expect(onPointerDown).not.toHaveBeenCalled();
   });
