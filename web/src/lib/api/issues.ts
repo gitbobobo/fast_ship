@@ -65,6 +65,8 @@ interface UpsertShipHookRequest {
   workflow_status?: IssueWorkflowStatus;
 }
 
+export type CollabDeleteSection = "all" | "consensus" | "summary";
+
 export const issueApi = {
   create: (projectId: string, data: CreateIssueRequest) =>
     api.post(`projects/${projectId}/issues`, { json: data }).json<ApiResponse<Issue>>(),
@@ -160,10 +162,7 @@ export const issueApi = {
   getCollab: (issueId: string) =>
     api.get(`issues/${issueId}/collab`).json<ApiResponse<IssueCollabArea>>(),
 
-  deleteCollabSection: (
-    issueId: string,
-    section: "all" | "suggestions" | "plan" | "review" | "summary",
-  ) => {
+  deleteCollabSection: (issueId: string, section: CollabDeleteSection) => {
     const path =
       section === "all"
         ? `issues/${issueId}/collab`

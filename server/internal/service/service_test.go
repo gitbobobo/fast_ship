@@ -77,10 +77,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.GitHubRepoLabel{},
-		&model.IssueCollabSuggestion{},
-		&model.IssueCollabPlan{},
-		&model.IssueCollabReview{},
-		&model.IssueCollabSummary{},
+		&model.IssueCollabDocument{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}

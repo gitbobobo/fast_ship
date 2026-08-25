@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { issueApi } from "@/lib/api/issues";
+import { issueApi, type CollabDeleteSection } from "@/lib/api/issues";
 
-export type CollabDeleteSection = "all" | "suggestions" | "plan" | "review" | "summary";
+export type { CollabDeleteSection };
 
 export const collabKey = (issueId: string) => ["issues", issueId, "collab"] as const;
 

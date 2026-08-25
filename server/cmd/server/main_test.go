@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -414,5 +415,219 @@ func TestDropLegacyLogTables_PreservesNewRunSchemaAcrossRestart(t *testing.T) {
 	}
 	if persisted.Message != "persist me" {
 		t.Fatalf("unexpected entry message: %q", persisted.Message)
+	}
+}
+
+func TestDropLegacyCollabTables_MigratesAndRemovesOldSchema(t *testing.T) {
+	db := openLogMigrationTestDB(t)
+	now := time.Now().UTC()
+
+	if err := db.AutoMigrate(&model.User{}, &model.Project{}, &model.Issue{}, &model.IssueCollabDocument{}); err != nil {
+		t.Fatalf("migrate documents table: %v", err)
+	}
+	if err := db.Create(&model.User{
+		ID:           "user-1",
+		Username:     "collab",
+		Email:        "collab@example.com",
+		PasswordHash: "x",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := db.Create(&model.Project{
+		ID:        "project-1",
+		UserID:    "user-1",
+		Name:      "demo",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if err := db.Create(&model.Issue{
+		ID:             "issue-1",
+		ProjectID:      "project-1",
+		Source:         model.IssueSourceInternal,
+		SequenceNumber: 1,
+		State:          model.IssueStateOpen,
+		Title:          "test",
+		Body:           "body",
+		AuthorUserID:   "user-1",
+		AuthorLogin:    "collab",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}).Error; err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	for _, table := range []string{
+		"issue_collab_notes",
+		"issue_collab_questions",
+		"issue_collab_suggestions",
+		"issue_collab_plans",
+		"issue_collab_reviews",
+	} {
+		if err := db.Exec(fmt.Sprintf("CREATE TABLE %s (id TEXT PRIMARY KEY)", table)).Error; err != nil {
+			t.Fatalf("create legacy table %s: %v", table, err)
+		}
+	}
+	if err := db.Exec(`
+		CREATE TABLE issue_collab_summaries (
+			issue_id TEXT PRIMARY KEY,
+			body TEXT NOT NULL,
+			commit_ids_json TEXT,
+			author_user_id TEXT NOT NULL,
+			author_kind TEXT NOT NULL DEFAULT 'agent',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)
+	`).Error; err != nil {
+		t.Fatalf("create legacy summaries: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TABLE issue_collab_consensus (
+			issue_id TEXT PRIMARY KEY,
+			body TEXT NOT NULL,
+			author_user_id TEXT NOT NULL,
+			author_kind TEXT NOT NULL DEFAULT 'agent',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)
+	`).Error; err != nil {
+		t.Fatalf("create legacy consensus: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO issue_collab_summaries (issue_id, body, commit_ids_json, author_user_id, author_kind, created_at, updated_at)
+		VALUES ('issue-1', '总结正文', '["abc"]', 'user-1', 'agent', ?, ?)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert legacy summary: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO issue_collab_consensus (issue_id, body, author_user_id, author_kind, created_at, updated_at)
+		VALUES ('issue-1', '共识正文', 'user-1', 'agent', ?, ?)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert legacy consensus: %v", err)
+	}
+
+	if err := dropLegacyCollabTables(db, zap.NewNop()); err != nil {
+		t.Fatalf("migrate collab tables: %v", err)
+	}
+	if err := dropLegacyCollabTables(db, zap.NewNop()); err != nil {
+		t.Fatalf("idempotent migrate collab tables: %v", err)
+	}
+
+	for _, table := range []string{
+		"issue_collab_notes",
+		"issue_collab_questions",
+		"issue_collab_suggestions",
+		"issue_collab_plans",
+		"issue_collab_reviews",
+		"issue_collab_consensus",
+		"issue_collab_summaries",
+	} {
+		if tableExists(t, db, table) {
+			t.Fatalf("expected legacy table %s to be dropped", table)
+		}
+	}
+	if !tableExists(t, db, "issue_collab_documents") {
+		t.Fatalf("expected issue_collab_documents to exist after migration")
+	}
+
+	var summaryDoc model.IssueCollabDocument
+	if err := db.Where("issue_id = ? AND kind = ?", "issue-1", model.CollabDocumentKindSummary).First(&summaryDoc).Error; err != nil {
+		t.Fatalf("load migrated summary: %v", err)
+	}
+	if summaryDoc.Body != "总结正文" {
+		t.Fatalf("unexpected migrated summary body: %q", summaryDoc.Body)
+	}
+
+	var consensusDoc model.IssueCollabDocument
+	if err := db.Where("issue_id = ? AND kind = ?", "issue-1", model.CollabDocumentKindConsensus).First(&consensusDoc).Error; err != nil {
+		t.Fatalf("load migrated consensus: %v", err)
+	}
+	if consensusDoc.Body != "共识正文" {
+		t.Fatalf("unexpected migrated consensus body: %q", consensusDoc.Body)
+	}
+
+	var docCount int64
+	if err := db.Model(&model.IssueCollabDocument{}).Count(&docCount).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if docCount != 2 {
+		t.Fatalf("expected 2 migrated documents after idempotent second run, got %d", docCount)
+	}
+}
+
+func TestDropLegacyCollabTables_CopyFailurePreservesLegacyTables(t *testing.T) {
+	db := openLogMigrationTestDB(t)
+	now := time.Now().UTC()
+
+	if err := db.AutoMigrate(&model.IssueCollabDocument{}); err != nil {
+		t.Fatalf("migrate documents table: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TABLE issue_collab_summaries (
+			issue_id TEXT PRIMARY KEY,
+			body TEXT NOT NULL,
+			author_user_id TEXT NOT NULL,
+			author_kind TEXT NOT NULL DEFAULT 'agent',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)
+	`).Error; err != nil {
+		t.Fatalf("create legacy summaries: %v", err)
+	}
+	// 孤儿 issue_id，触发 documents 表外键约束。
+	if err := db.Exec(`
+		INSERT INTO issue_collab_summaries (issue_id, body, author_user_id, author_kind, created_at, updated_at)
+		VALUES ('orphan-issue', '应保留', 'user-1', 'agent', ?, ?)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert orphan legacy summary: %v", err)
+	}
+
+	if err := dropLegacyCollabTables(db, zap.NewNop()); err == nil {
+		t.Fatalf("expected migration error for orphan issue_id")
+	}
+	if !tableExists(t, db, "issue_collab_summaries") {
+		t.Fatalf("expected issue_collab_summaries to remain after copy failure")
+	}
+
+	var count int64
+	if err := db.Model(&model.IssueCollabDocument{}).Count(&count).Error; err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no migrated documents after copy failure, got %d", count)
+	}
+}
+
+func TestDropLegacyCollabTables_CopyFailureWhenDocumentsTableMissing(t *testing.T) {
+	db := openLogMigrationTestDB(t)
+	now := time.Now().UTC()
+
+	if err := db.Exec(`
+		CREATE TABLE issue_collab_summaries (
+			issue_id TEXT PRIMARY KEY,
+			body TEXT NOT NULL,
+			author_user_id TEXT NOT NULL,
+			author_kind TEXT NOT NULL DEFAULT 'agent',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)
+	`).Error; err != nil {
+		t.Fatalf("create legacy summaries: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO issue_collab_summaries (issue_id, body, author_user_id, author_kind, created_at, updated_at)
+		VALUES ('issue-1', '应保留', 'user-1', 'agent', ?, ?)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert legacy summary: %v", err)
+	}
+
+	if err := dropLegacyCollabTables(db, zap.NewNop()); err == nil {
+		t.Fatalf("expected migration error when issue_collab_documents table is missing")
+	}
+	if !tableExists(t, db, "issue_collab_summaries") {
+		t.Fatalf("expected issue_collab_summaries to remain when documents table is missing")
 	}
 }

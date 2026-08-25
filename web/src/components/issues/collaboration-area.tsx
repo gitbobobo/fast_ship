@@ -1,12 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ComponentType } from "react";
 import {
   Check,
-  GitCommit,
   HelpCircle,
-  Lightbulb,
-  ListChecks,
   Loader2,
-  ShieldCheck,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -35,28 +31,50 @@ import {
 import { cn, getInitials } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 
-type TabValue = "suggestions" | "plan" | "review" | "summary";
+type TabValue = "consensus" | "summary";
 
-const TAB_ORDER: TabValue[] = ["suggestions", "plan", "review", "summary"];
+interface TabConfig {
+  value: TabValue;
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  iconClassName: string;
+  section: CollabDeleteSection;
+  deleteAriaLabel: string;
+  deleteTitle: string;
+  deleteDescription: string;
+}
+
+const COLLAB_TABS: TabConfig[] = [
+  {
+    value: "consensus",
+    label: "共识",
+    icon: Sparkles,
+    iconClassName: "text-violet-500",
+    section: "consensus",
+    deleteAriaLabel: "删除共识",
+    deleteTitle: "删除共识？",
+    deleteDescription: "将删除该问题的共识内容，不可恢复。",
+  },
+  {
+    value: "summary",
+    label: "完成总结",
+    icon: Check,
+    iconClassName: "text-emerald-500",
+    section: "summary",
+    deleteAriaLabel: "删除完成总结",
+    deleteTitle: "删除完成总结？",
+    deleteDescription: "将删除该问题的完成总结，不可恢复。",
+  },
+];
 
 const SECTION_SUCCESS_TOAST: Record<CollabDeleteSection, string> = {
   all: "协作区已清空",
-  suggestions: "已清空全部建议",
-  plan: "计划已删除",
-  review: "审查结果已删除",
+  consensus: "共识已删除",
   summary: "完成总结已删除",
 };
 
 interface CollaborationAreaProps {
   issueId: string;
-  project?: Project | null;
-}
-
-function buildCommitUrl(project: Project | null | undefined, sha: string): string | null {
-  if (project?.github_owner && project?.github_repo) {
-    return `https://github.com/${project.github_owner}/${project.github_repo}/commit/${sha}`;
-  }
-  return null;
 }
 
 function CollabActorBadge({ actor }: { actor: IssueCollabActor }) {
@@ -155,171 +173,40 @@ function DeleteCollabButton({
   );
 }
 
-function SuggestionsSection({
+function CollabDocSection({
   issueId,
-  suggestions,
+  tab,
+  doc,
 }: {
   issueId: string;
-  suggestions: IssueCollabSuggestion[];
+  tab: TabConfig;
+  doc: IssueCollabDoc;
 }) {
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <Lightbulb className="h-4 w-4 text-amber-500" />
-          实施建议（{suggestions.length}）
-        </div>
-        <DeleteCollabButton
-          issueId={issueId}
-          section="suggestions"
-          ariaLabel="清空全部建议"
-          title="清空全部建议？"
-          description="将删除该问题的全部实施建议，不可恢复。"
-        />
-      </div>
-      <div className="space-y-2">
-        {suggestions.map((suggestion, index) => (
-          <div key={suggestion.id} className="rounded-lg border bg-card p-3">
-            <div className="mb-1.5 flex items-start gap-2">
-              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-amber-500/10 text-xs font-medium text-amber-600 dark:text-amber-400">
-                {index + 1}
-              </span>
-              <div className="markdown-body min-w-0 flex-1 text-sm">
-                <GitHubContent markdown={suggestion.body} />
-              </div>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <CollabActorBadge actor={suggestion.author} />
-              <span className="text-xs text-muted-foreground">
-                {formatRelativeTime(suggestion.created_at)}
-              </span>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PlanSection({ issueId, plan }: { issueId: string; plan: IssueCollabPlan }) {
+  const Icon = tab.icon;
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-sm font-semibold">
-          <ListChecks className="h-4 w-4 text-sky-500" />
-          计划
+          <Icon className={cn("h-4 w-4", tab.iconClassName)} />
+          {tab.label}
         </div>
         <div className="flex items-center gap-2">
           <DeleteCollabButton
             issueId={issueId}
-            section="plan"
-            ariaLabel="删除计划"
-            title="删除计划？"
-            description="将删除该问题的计划内容，不可恢复。"
+            section={tab.section}
+            ariaLabel={tab.deleteAriaLabel}
+            title={tab.deleteTitle}
+            description={tab.deleteDescription}
           />
-          <CollabActorBadge actor={plan.author} />
+          <CollabActorBadge actor={doc.author} />
         </div>
       </div>
       <div className="rounded-lg border bg-card p-3">
         <div className="markdown-body text-sm">
-          <GitHubContent markdown={plan.body} />
+          <GitHubContent markdown={doc.body} />
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">更新于 {formatRelativeTime(plan.updated_at)}</p>
-      </div>
-    </div>
-  );
-}
-
-function ReviewSection({ issueId, review }: { issueId: string; review: IssueCollabReview }) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <ShieldCheck className="h-4 w-4 text-emerald-500" />
-          审查结果
-        </div>
-        <div className="flex items-center gap-2">
-          <DeleteCollabButton
-            issueId={issueId}
-            section="review"
-            ariaLabel="删除审查结果"
-            title="删除审查结果？"
-            description="将删除该问题的审查结果，不可恢复。"
-          />
-          <CollabActorBadge actor={review.author} />
-        </div>
-      </div>
-      <div className="rounded-lg border bg-card p-3">
-        <div className="markdown-body text-sm">
-          <GitHubContent markdown={review.body} />
-        </div>
-        <p className="mt-2 text-xs text-muted-foreground">更新于 {formatRelativeTime(review.updated_at)}</p>
-      </div>
-    </div>
-  );
-}
-
-function SummarySection({
-  issueId,
-  project,
-  summary,
-}: {
-  issueId: string;
-  project: Project | null | undefined;
-  summary: IssueCollabSummary;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-semibold">
-          <Check className="h-4 w-4 text-emerald-500" />
-          完成总结
-        </div>
-        <div className="flex items-center gap-2">
-          <DeleteCollabButton
-            issueId={issueId}
-            section="summary"
-            ariaLabel="删除完成总结"
-            title="删除完成总结？"
-            description="将删除该问题的完成总结，不可恢复。"
-          />
-          <CollabActorBadge actor={summary.author} />
-        </div>
-      </div>
-      <div className="rounded-lg border bg-card p-3">
-        <div className="markdown-body text-sm">
-          <GitHubContent markdown={summary.body} />
-        </div>
-        {summary.commit_ids.length > 0 && (
-          <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
-            <span className="text-xs text-muted-foreground">提交：</span>
-            {summary.commit_ids.map((sha) => {
-              const url = buildCommitUrl(project, sha);
-              return url ? (
-                <a
-                  key={sha}
-                  href={url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 font-mono text-xs hover:bg-muted"
-                >
-                  <GitCommit className="h-3 w-3" />
-                  {sha.slice(0, 7)}
-                </a>
-              ) : (
-                <span
-                  key={sha}
-                  className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 font-mono text-xs"
-                >
-                  <GitCommit className="h-3 w-3" />
-                  {sha.slice(0, 7)}
-                </span>
-              );
-            })}
-          </div>
-        )}
         <p className="mt-2 text-xs text-muted-foreground">
-          更新于 {formatRelativeTime(summary.updated_at)}
+          更新于 {formatRelativeTime(doc.updated_at)}
         </p>
       </div>
     </div>
@@ -336,24 +223,28 @@ function EmptyTabPanel() {
   );
 }
 
-export function CollaborationArea({ issueId, project }: CollaborationAreaProps) {
+export function CollaborationArea({ issueId }: CollaborationAreaProps) {
   const { data, isLoading } = useIssueCollab(issueId);
-  const suggestions = data?.suggestions ?? [];
-  const plan = data?.plan ?? null;
-  const review = data?.review ?? null;
+  const consensus = data?.consensus ?? null;
   const summary = data?.summary ?? null;
+
+  const docsByTab = useMemo<Record<TabValue, IssueCollabDoc | null>>(
+    () => ({
+      consensus,
+      summary,
+    }),
+    [consensus, summary],
+  );
 
   const hasContent = useMemo<Record<TabValue, boolean>>(
     () => ({
-      suggestions: suggestions.length > 0,
-      plan: plan !== null,
-      review: review !== null,
+      consensus: consensus !== null,
       summary: summary !== null,
     }),
-    [suggestions.length, plan, review, summary],
+    [consensus, summary],
   );
 
-  const defaultTab = TAB_ORDER.find((tab) => hasContent[tab]) ?? null;
+  const defaultTab = COLLAB_TABS.find((tab) => hasContent[tab.value])?.value ?? null;
   const hasAnyContent = defaultTab !== null;
   const [activeTab, setActiveTab] = useState<TabValue | null>(null);
   const resolvedTab = activeTab ?? defaultTab;
@@ -388,7 +279,7 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
             section="all"
             ariaLabel="清空协作区"
             title="清空协作区？"
-            description="将删除全部建议、计划、审查与总结，不可恢复。"
+            description="将删除共识与完成总结，不可恢复。"
             variant="destructive"
           />
         ) : null}
@@ -403,75 +294,34 @@ export function CollaborationArea({ issueId, project }: CollaborationAreaProps) 
       ) : hasAnyContent && resolvedTab ? (
         <Tabs value={resolvedTab} onValueChange={(value) => setActiveTab(value as TabValue)} className="flex flex-col gap-4">
           <TabsList aria-label="人机协作区内容" className="w-full justify-start overflow-x-auto">
-            <TabsTrigger
-              value="suggestions"
-              aria-label={
-                hasContent.suggestions
-                  ? `实施建议，${suggestions.length} 条`
-                  : "实施建议，暂无内容"
-              }
-              className={cn("shrink-0", !hasContent.suggestions && "text-muted-foreground")}
-            >
-              <Lightbulb className="h-3.5 w-3.5" aria-hidden="true" />
-              {hasContent.suggestions
-                ? `实施建议（${suggestions.length}）`
-                : "实施建议"}
-            </TabsTrigger>
-            <TabsTrigger
-              value="plan"
-              aria-label={hasContent.plan ? "计划，有内容" : "计划，暂无内容"}
-              className={cn("shrink-0", !hasContent.plan && "text-muted-foreground")}
-            >
-              <ListChecks className="h-3.5 w-3.5" aria-hidden="true" />
-              计划
-              {hasContent.plan ? (
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
-              ) : null}
-            </TabsTrigger>
-            <TabsTrigger
-              value="review"
-              aria-label={hasContent.review ? "审查结果，有内容" : "审查结果，暂无内容"}
-              className={cn("shrink-0", !hasContent.review && "text-muted-foreground")}
-            >
-              <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
-              审查结果
-              {hasContent.review ? (
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
-              ) : null}
-            </TabsTrigger>
-            <TabsTrigger
-              value="summary"
-              aria-label={hasContent.summary ? "完成总结，有内容" : "完成总结，暂无内容"}
-              className={cn("shrink-0", !hasContent.summary && "text-muted-foreground")}
-            >
-              <Check className="h-3.5 w-3.5" aria-hidden="true" />
-              完成总结
-              {hasContent.summary ? (
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
-              ) : null}
-            </TabsTrigger>
+            {COLLAB_TABS.map((tab) => {
+              const Icon = tab.icon;
+              const filled = hasContent[tab.value];
+              return (
+                <TabsTrigger
+                  key={tab.value}
+                  value={tab.value}
+                  aria-label={filled ? `${tab.label}，有内容` : `${tab.label}，暂无内容`}
+                  className={cn("shrink-0", !filled && "text-muted-foreground")}
+                >
+                  <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                  {tab.label}
+                  {filled ? (
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" aria-hidden="true" />
+                  ) : null}
+                </TabsTrigger>
+              );
+            })}
           </TabsList>
 
-          <TabsContent value="suggestions">
-            {hasContent.suggestions ? (
-              <SuggestionsSection issueId={issueId} suggestions={suggestions} />
-            ) : (
-              <EmptyTabPanel />
-            )}
-          </TabsContent>
-          <TabsContent value="plan">
-            {plan ? <PlanSection issueId={issueId} plan={plan} /> : <EmptyTabPanel />}
-          </TabsContent>
-          <TabsContent value="review">
-            {review ? <ReviewSection issueId={issueId} review={review} /> : <EmptyTabPanel />}
-          </TabsContent>
-          <TabsContent value="summary">
-            {summary ? (
-              <SummarySection issueId={issueId} project={project} summary={summary} />
-            ) : (
-              <EmptyTabPanel />
-            )}
-          </TabsContent>
+          {COLLAB_TABS.map((tab) => {
+            const doc = docsByTab[tab.value];
+            return (
+              <TabsContent key={tab.value} value={tab.value}>
+                {doc ? <CollabDocSection issueId={issueId} tab={tab} doc={doc} /> : <EmptyTabPanel />}
+              </TabsContent>
+            );
+          })}
         </Tabs>
       ) : null}
     </div>

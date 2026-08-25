@@ -25,128 +25,55 @@ func TestIssueCollab_GetAreaEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get area: %v", err)
 	}
-	if len(area.Suggestions) != 0 || area.Plan != nil || area.Review != nil || area.Summary != nil {
+	if area.Consensus != nil || area.Summary != nil {
 		t.Fatalf("expected empty area, got %+v", area)
 	}
 }
 
-func TestIssueCollab_ReplaceSuggestions(t *testing.T) {
+func TestIssueCollab_ConsensusUpsert(t *testing.T) {
 	ts, issue, ownerID := setupCollabIssue(t)
 
-	first, err := ts.collabService.ReplaceSuggestions(issue.ID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{
-		Items: []IssueCollabSuggestionInput{
-			{Body: "  建议一  "},
-			{Body: "建议二"},
-		},
-	})
+	consensus1, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindConsensus, UpsertIssueCollabRequest{Body: "  共识初版  "})
 	if err != nil {
-		t.Fatalf("replace suggestions: %v", err)
+		t.Fatalf("upsert consensus: %v", err)
 	}
-	if len(first) != 2 {
-		t.Fatalf("expected 2 suggestions, got %d", len(first))
-	}
-	if first[0].Body != "建议一" || first[0].SortOrder != 0 || first[1].SortOrder != 1 {
-		t.Fatalf("unexpected suggestions: %+v", first)
-	}
-	if first[0].Author.Kind != string(model.CollabAuthorAgent) || first[0].Author.Login != collabAgentLogin {
-		t.Fatalf("expected agent actor, got %+v", first[0].Author)
+	if consensus1.Body != "共识初版" || consensus1.Author.Kind != string(model.CollabAuthorAgent) {
+		t.Fatalf("unexpected consensus: %+v", consensus1)
 	}
 
-	// 全量替换：旧两条被清掉，换成三条
-	second, err := ts.collabService.ReplaceSuggestions(issue.ID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{
-		Items: []IssueCollabSuggestionInput{{Body: "新建议一"}, {Body: "新建议二"}, {Body: "新建议三"}},
-	})
+	consensus2, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindConsensus, UpsertIssueCollabRequest{Body: "共识更新"})
 	if err != nil {
-		t.Fatalf("replace again: %v", err)
+		t.Fatalf("upsert consensus again: %v", err)
 	}
-	if len(second) != 3 || second[0].Body != "新建议一" {
-		t.Fatalf("unexpected replaced suggestions: %+v", second)
+	if consensus2.Body != "共识更新" {
+		t.Fatalf("expected updated body, got %q", consensus2.Body)
 	}
-
-	// 清空：空数组允许（返回 []）
-	emptied, err := ts.collabService.ReplaceSuggestions(issue.ID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{
-		Items: []IssueCollabSuggestionInput{},
-	})
-	if err != nil {
-		t.Fatalf("clear suggestions: %v", err)
-	}
-	if len(emptied) != 0 {
-		t.Fatalf("expected empty slice after clear, got %d", len(emptied))
+	if consensus2.CreatedAt != consensus1.CreatedAt {
+		t.Fatalf("expected created_at preserved, got %s vs %s", consensus2.CreatedAt, consensus1.CreatedAt)
 	}
 
 	area, _ := ts.collabService.GetArea(issue.ID, ownerID)
-	if len(area.Suggestions) != 0 {
-		t.Fatalf("expected 0 suggestions in area, got %d", len(area.Suggestions))
-	}
-}
-
-func TestIssueCollab_UpsertPlanAndReview(t *testing.T) {
-	ts, issue, ownerID := setupCollabIssue(t)
-
-	plan1, err := ts.collabService.UpsertPlan(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabPlanRequest{Body: "  初版计划  "})
-	if err != nil {
-		t.Fatalf("upsert plan: %v", err)
-	}
-	if plan1.Body != "初版计划" || plan1.Author.Kind != string(model.CollabAuthorAgent) {
-		t.Fatalf("unexpected plan: %+v", plan1)
-	}
-
-	// 覆盖更新：CreatedAt 保持不变
-	plan2, err := ts.collabService.UpsertPlan(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabPlanRequest{Body: "更新后的计划"})
-	if err != nil {
-		t.Fatalf("upsert plan again: %v", err)
-	}
-	if plan2.Body != "更新后的计划" {
-		t.Fatalf("expected updated body, got %q", plan2.Body)
-	}
-	if plan2.CreatedAt != plan1.CreatedAt {
-		t.Fatalf("expected created_at preserved, got %s vs %s", plan2.CreatedAt, plan1.CreatedAt)
-	}
-
-	// Review 同构
-	review1, err := ts.collabService.UpsertReview(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabReviewRequest{Body: "审查通过"})
-	if err != nil {
-		t.Fatalf("upsert review: %v", err)
-	}
-	review2, err := ts.collabService.UpsertReview(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabReviewRequest{Body: "审查更新"})
-	if err != nil {
-		t.Fatalf("upsert review again: %v", err)
-	}
-	if review2.Body != "审查更新" || review2.CreatedAt != review1.CreatedAt {
-		t.Fatalf("unexpected review upsert: %+v", review2)
-	}
-
-	area, _ := ts.collabService.GetArea(issue.ID, ownerID)
-	if area.Plan == nil || area.Plan.Body != "更新后的计划" {
-		t.Fatalf("unexpected area plan: %+v", area.Plan)
-	}
-	if area.Review == nil || area.Review.Body != "审查更新" {
-		t.Fatalf("unexpected area review: %+v", area.Review)
+	if area.Consensus == nil || area.Consensus.Body != "共识更新" {
+		t.Fatalf("unexpected area consensus: %+v", area.Consensus)
 	}
 }
 
 func TestIssueCollab_SummaryUpsert(t *testing.T) {
 	ts, issue, ownerID := setupCollabIssue(t)
 
-	s1, err := ts.collabService.UpsertSummary(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabSummaryRequest{
-		Body:      "已完成",
-		CommitIDs: []string{"abc1234", "0123456789abcdef0123456789abcdef01234567"},
-	})
+	s1, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindSummary, UpsertIssueCollabRequest{Body: "  已完成  "})
 	if err != nil {
 		t.Fatalf("upsert summary: %v", err)
 	}
-	if len(s1.CommitIDs) != 2 {
-		t.Fatalf("expected 2 commit ids, got %d", len(s1.CommitIDs))
+	if s1.Body != "已完成" {
+		t.Fatalf("unexpected summary body: %q", s1.Body)
 	}
 
-	s2, err := ts.collabService.UpsertSummary(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabSummaryRequest{
-		Body:      "已更新",
-		CommitIDs: []string{"abcdef1"},
-	})
+	s2, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindSummary, UpsertIssueCollabRequest{Body: "已更新"})
 	if err != nil {
 		t.Fatalf("upsert summary again: %v", err)
 	}
-	if s2.Body != "已更新" || len(s2.CommitIDs) != 1 || s2.CreatedAt != s1.CreatedAt {
+	if s2.Body != "已更新" || s2.CreatedAt != s1.CreatedAt {
 		t.Fatalf("unexpected upsert result: %+v", s2)
 	}
 
@@ -156,40 +83,41 @@ func TestIssueCollab_SummaryUpsert(t *testing.T) {
 	}
 }
 
+func TestIssueCollab_InvalidKind(t *testing.T) {
+	ts, issue, ownerID := setupCollabIssue(t)
+
+	if _, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKind("invalid"), UpsertIssueCollabRequest{Body: "x"}); err != errs.ErrInvalidParams {
+		t.Fatalf("expected ErrInvalidParams for invalid kind upsert, got %v", err)
+	}
+	if err := ts.collabService.Delete(issue.ID, ownerID, model.CollabDocumentKind("invalid")); err != errs.ErrInvalidParams {
+		t.Fatalf("expected ErrInvalidParams for invalid kind delete, got %v", err)
+	}
+}
+
 func TestIssueCollab_Validation(t *testing.T) {
 	ts, issue, ownerID := setupCollabIssue(t)
 
-	// items == nil（如 "items":null）拒绝，防误清空
-	if _, err := ts.collabService.ReplaceSuggestions(issue.ID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{Items: nil}); err != errs.ErrInvalidParams {
-		t.Fatalf("expected ErrInvalidParams for nil items, got %v", err)
+	if _, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindConsensus, UpsertIssueCollabRequest{Body: "  "}); err != errs.ErrInvalidParams {
+		t.Fatalf("expected ErrInvalidParams for empty consensus body, got %v", err)
+	}
+	if _, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindSummary, UpsertIssueCollabRequest{Body: " "}); err != errs.ErrInvalidParams {
+		t.Fatalf("expected ErrInvalidParams for empty summary body, got %v", err)
+	}
+}
+
+func TestIssueCollab_AgentAuthoredGetArea(t *testing.T) {
+	ts, issue, ownerID := setupCollabIssue(t)
+
+	if _, err := ts.collabService.Upsert(issue.ID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindConsensus, UpsertIssueCollabRequest{Body: "代理共识"}); err != nil {
+		t.Fatalf("upsert consensus: %v", err)
 	}
 
-	// 空 body 拒绝
-	if _, err := ts.collabService.ReplaceSuggestions(issue.ID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{
-		Items: []IssueCollabSuggestionInput{{Body: "   "}},
-	}); err != errs.ErrInvalidParams {
-		t.Fatalf("expected ErrInvalidParams for empty body, got %v", err)
+	area, err := ts.collabService.GetArea(issue.ID, ownerID)
+	if err != nil {
+		t.Fatalf("get area: %v", err)
 	}
-
-	// 超限条数
-	tooMany := make([]IssueCollabSuggestionInput, collabMaxSuggestions+1)
-	for i := range tooMany {
-		tooMany[i] = IssueCollabSuggestionInput{Body: "x"}
-	}
-	if _, err := ts.collabService.ReplaceSuggestions(issue.ID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{Items: tooMany}); err != errs.ErrInvalidParams {
-		t.Fatalf("expected ErrInvalidParams for too many suggestions, got %v", err)
-	}
-
-	// plan 空 body
-	if _, err := ts.collabService.UpsertPlan(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabPlanRequest{Body: "  "}); err != errs.ErrInvalidParams {
-		t.Fatalf("expected ErrInvalidParams for empty plan body, got %v", err)
-	}
-
-	// summary bad commit id
-	if _, err := ts.collabService.UpsertSummary(issue.ID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabSummaryRequest{
-		Body: "s", CommitIDs: []string{"not-a-sha"},
-	}); err != errs.ErrInvalidParams {
-		t.Fatalf("expected ErrInvalidParams for bad commit id, got %v", err)
+	if area.Consensus == nil || area.Consensus.Author.Kind != string(model.CollabAuthorAgent) || area.Consensus.Author.Login != collabAgentLogin {
+		t.Fatalf("unexpected consensus actor: %+v", area.Consensus)
 	}
 }
 
@@ -198,40 +126,25 @@ func TestIssueCollab_AccessControl(t *testing.T) {
 	otherID := uuid.NewString()
 	createTestUser(t, ts.db, otherID)
 
-	// 非所有者无权访问
 	if _, err := ts.collabService.GetArea(issue.ID, otherID); err != errs.ErrProjectNotFound {
 		t.Fatalf("expected ErrProjectNotFound for non-owner, got %v", err)
 	}
 
-	// issue 不存在
 	if _, err := ts.collabService.GetArea(uuid.NewString(), ownerID); err != errs.ErrIssueNotFound {
 		t.Fatalf("expected ErrIssueNotFound for missing issue, got %v", err)
 	}
 
-	// 非所有者写
-	if _, err := ts.collabService.ReplaceSuggestions(issue.ID, otherID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{
-		Items: []IssueCollabSuggestionInput{{Body: "x"}},
-	}); err != errs.ErrProjectNotFound {
+	if _, err := ts.collabService.Upsert(issue.ID, otherID, model.CollabAuthorAgent, model.CollabDocumentKindConsensus, UpsertIssueCollabRequest{Body: "x"}); err != errs.ErrProjectNotFound {
 		t.Fatalf("expected ErrProjectNotFound for non-owner write, got %v", err)
 	}
 }
 
 func seedFullCollabArea(t *testing.T, ts *testServices, issueID, ownerID string) {
 	t.Helper()
-	if _, err := ts.collabService.ReplaceSuggestions(issueID, ownerID, model.CollabAuthorAgent, ReplaceIssueCollabSuggestionsRequest{
-		Items: []IssueCollabSuggestionInput{{Body: "建议一"}},
-	}); err != nil {
-		t.Fatalf("seed suggestions: %v", err)
+	if _, err := ts.collabService.Upsert(issueID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindConsensus, UpsertIssueCollabRequest{Body: "共识"}); err != nil {
+		t.Fatalf("seed consensus: %v", err)
 	}
-	if _, err := ts.collabService.UpsertPlan(issueID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabPlanRequest{Body: "计划"}); err != nil {
-		t.Fatalf("seed plan: %v", err)
-	}
-	if _, err := ts.collabService.UpsertReview(issueID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabReviewRequest{Body: "审查"}); err != nil {
-		t.Fatalf("seed review: %v", err)
-	}
-	if _, err := ts.collabService.UpsertSummary(issueID, ownerID, model.CollabAuthorAgent, UpsertIssueCollabSummaryRequest{
-		Body: "总结", CommitIDs: []string{"abc1234"},
-	}); err != nil {
+	if _, err := ts.collabService.Upsert(issueID, ownerID, model.CollabAuthorAgent, model.CollabDocumentKindSummary, UpsertIssueCollabRequest{Body: "总结"}); err != nil {
 		t.Fatalf("seed summary: %v", err)
 	}
 }
@@ -247,7 +160,7 @@ func TestIssueCollab_ClearArea(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get area: %v", err)
 	}
-	if len(area.Suggestions) != 0 || area.Plan != nil || area.Review != nil || area.Summary != nil {
+	if area.Consensus != nil || area.Summary != nil {
 		t.Fatalf("expected empty area after clear, got %+v", area)
 	}
 }
@@ -256,40 +169,26 @@ func TestIssueCollab_DeleteSections(t *testing.T) {
 	ts, issue, ownerID := setupCollabIssue(t)
 	seedFullCollabArea(t, ts, issue.ID, ownerID)
 
-	if err := ts.collabService.DeletePlan(issue.ID, ownerID); err != nil {
-		t.Fatalf("delete plan: %v", err)
+	if err := ts.collabService.Delete(issue.ID, ownerID, model.CollabDocumentKindConsensus); err != nil {
+		t.Fatalf("delete consensus: %v", err)
 	}
 	area, _ := ts.collabService.GetArea(issue.ID, ownerID)
-	if area.Plan != nil || len(area.Suggestions) != 1 || area.Review == nil || area.Summary == nil {
-		t.Fatalf("expected plan removed only, got %+v", area)
-	}
-
-	if err := ts.collabService.ClearSuggestions(issue.ID, ownerID); err != nil {
-		t.Fatalf("clear suggestions: %v", err)
-	}
-	area, _ = ts.collabService.GetArea(issue.ID, ownerID)
-	if len(area.Suggestions) != 0 {
-		t.Fatalf("expected suggestions cleared, got %d", len(area.Suggestions))
+	if area.Consensus != nil || area.Summary == nil {
+		t.Fatalf("expected consensus removed only, got %+v", area)
 	}
 }
 
 func TestIssueCollab_DeleteIdempotent(t *testing.T) {
 	ts, issue, ownerID := setupCollabIssue(t)
 
-	if err := ts.collabService.DeletePlan(issue.ID, ownerID); err != nil {
-		t.Fatalf("delete missing plan: %v", err)
+	if err := ts.collabService.Delete(issue.ID, ownerID, model.CollabDocumentKindConsensus); err != nil {
+		t.Fatalf("delete missing consensus: %v", err)
 	}
 	if err := ts.collabService.ClearArea(issue.ID, ownerID); err != nil {
 		t.Fatalf("clear empty area: %v", err)
 	}
-	if err := ts.collabService.DeleteReview(issue.ID, ownerID); err != nil {
-		t.Fatalf("delete missing review: %v", err)
-	}
-	if err := ts.collabService.DeleteSummary(issue.ID, ownerID); err != nil {
+	if err := ts.collabService.Delete(issue.ID, ownerID, model.CollabDocumentKindSummary); err != nil {
 		t.Fatalf("delete missing summary: %v", err)
-	}
-	if err := ts.collabService.ClearSuggestions(issue.ID, ownerID); err != nil {
-		t.Fatalf("clear missing suggestions: %v", err)
 	}
 }
 
@@ -298,16 +197,10 @@ func TestIssueCollab_DeleteAccessControl(t *testing.T) {
 	otherID := uuid.NewString()
 	createTestUser(t, ts.db, otherID)
 
-	if err := ts.collabService.DeletePlan(issue.ID, otherID); err != errs.ErrProjectNotFound {
-		t.Fatalf("expected ErrProjectNotFound for non-owner delete, got %v", err)
+	if err := ts.collabService.Delete(issue.ID, otherID, model.CollabDocumentKindConsensus); err != errs.ErrProjectNotFound {
+		t.Fatalf("expected ErrProjectNotFound for non-owner delete consensus, got %v", err)
 	}
-	if err := ts.collabService.ClearSuggestions(issue.ID, otherID); err != errs.ErrProjectNotFound {
-		t.Fatalf("expected ErrProjectNotFound for non-owner clear suggestions, got %v", err)
-	}
-	if err := ts.collabService.DeleteReview(issue.ID, otherID); err != errs.ErrProjectNotFound {
-		t.Fatalf("expected ErrProjectNotFound for non-owner delete review, got %v", err)
-	}
-	if err := ts.collabService.DeleteSummary(issue.ID, otherID); err != errs.ErrProjectNotFound {
+	if err := ts.collabService.Delete(issue.ID, otherID, model.CollabDocumentKindSummary); err != errs.ErrProjectNotFound {
 		t.Fatalf("expected ErrProjectNotFound for non-owner delete summary, got %v", err)
 	}
 	if err := ts.collabService.ClearArea(issue.ID, otherID); err != errs.ErrProjectNotFound {

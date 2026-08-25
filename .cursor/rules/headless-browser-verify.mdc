@@ -1,0 +1,12 @@
+---
+description: UI 验收用命令行无头浏览器，不用 t3code 内置预览
+alwaysApply: true
+---
+
+# UI 验收：命令行无头浏览器
+
+验证 Web 界面（布局、交互、路由）时：
+
+- 使用命令行无头浏览器（Playwright / Puppeteer / Chromium 等 CLI）
+- 不要使用 t3code 自带的协作预览 / MCP 浏览器工具（如 `preview_*`）
+- 没有预览宿主不能当作「无法在浏览器里验收」

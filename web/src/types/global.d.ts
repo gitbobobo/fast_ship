@@ -310,46 +310,17 @@ interface IssueCollabActor {
   avatar_url?: string;
 }
 
-interface IssueCollabSuggestion {
-  id: string;
+interface IssueCollabDoc {
   issue_id: string;
   body: string;
-  sort_order: number;
-  author: IssueCollabActor;
-  created_at: string;
-  updated_at: string;
-}
-
-interface IssueCollabPlan {
-  issue_id: string;
-  body: string;
-  author: IssueCollabActor;
-  created_at: string;
-  updated_at: string;
-}
-
-interface IssueCollabReview {
-  issue_id: string;
-  body: string;
-  author: IssueCollabActor;
-  created_at: string;
-  updated_at: string;
-}
-
-interface IssueCollabSummary {
-  issue_id: string;
-  body: string;
-  commit_ids: string[];
   author: IssueCollabActor;
   created_at: string;
   updated_at: string;
 }
 
 interface IssueCollabArea {
-  suggestions: IssueCollabSuggestion[];
-  plan: IssueCollabPlan | null;
-  review: IssueCollabReview | null;
-  summary: IssueCollabSummary | null;
+  consensus: IssueCollabDoc | null;
+  summary: IssueCollabDoc | null;
 }
 
 interface LogEntry {

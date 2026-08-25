@@ -1680,7 +1680,7 @@ export default function IssueDetailPage() {
 
               <Separator />
               <div className="p-5 md:p-6">
-                <CollaborationArea issueId={iid!} project={project} />
+                <CollaborationArea issueId={iid!} />
               </div>
             </div>
 

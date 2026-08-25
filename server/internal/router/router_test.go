@@ -641,10 +641,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
-		&model.IssueCollabSuggestion{},
-		&model.IssueCollabPlan{},
-		&model.IssueCollabReview{},
-		&model.IssueCollabSummary{},
+		&model.IssueCollabDocument{},
 		&model.LogRun{},
 		&model.LogRunChunk{},
 		&model.LogEntry{},
@@ -1090,51 +1087,57 @@ func TestRouterCollabWritesRequireApiKey(t *testing.T) {
 		return rec
 	}
 
-	sugPath := "/api/issues/" + issue.ID + "/collab/suggestions"
+	consensusPath := "/api/issues/" + issue.ID + "/collab/consensus"
 
 	// JWT 写 → 403（仅限 API Key）
-	if rec := doReq(http.MethodPut, jwtAuth, sugPath, []byte(`{"items":[{"body":"x"}]}`)); rec.Code != http.StatusForbidden {
-		t.Fatalf("JWT write suggestions expected 403, got %d: %s", rec.Code, rec.Body.String())
+	if rec := doReq(http.MethodPut, jwtAuth, consensusPath, []byte(`{"body":"共识"}`)); rec.Code != http.StatusForbidden {
+		t.Fatalf("JWT write consensus expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// API Key 写 → 200
-	rec := doReq(http.MethodPut, apiKeyAuth, sugPath, []byte(`{"items":[{"body":"建议一"},{"body":"建议二"}]}`))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("API key write suggestions expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec := doReq(http.MethodPut, apiKeyAuth, consensusPath, []byte(`{"body":"达成本阶段共识"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("API key write consensus expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// GET 两类凭证均可
+	// GET 两类凭证均可，结构为 {consensus, summary}
 	getRec := doReq(http.MethodGet, jwtAuth, "/api/issues/"+issue.ID+"/collab", nil)
 	if getRec.Code != http.StatusOK {
 		t.Fatalf("GET collab expected 200, got %d: %s", getRec.Code, getRec.Body.String())
 	}
 	var area struct {
-		Suggestions []struct {
+		Consensus *struct {
 			Body string `json:"body"`
-		} `json:"suggestions"`
+		} `json:"consensus"`
+		Summary *struct {
+			Body string `json:"body"`
+		} `json:"summary"`
 	}
 	decodeRouterEnvelope(t, getRec, &area)
-	if len(area.Suggestions) != 2 {
-		t.Fatalf("expected 2 suggestions after write, got %d", len(area.Suggestions))
+	if area.Consensus == nil || area.Consensus.Body != "达成本阶段共识" {
+		t.Fatalf("expected consensus after write, got %+v", area.Consensus)
+	}
+	if area.Summary != nil {
+		t.Fatalf("expected nil summary before write, got %+v", area.Summary)
 	}
 
-	// 旧路由已移除 → 404
-	if rec := doReq(http.MethodPost, apiKeyAuth, "/api/issues/"+issue.ID+"/collab/notes", []byte(`{"body":"x"}`)); rec.Code != http.StatusNotFound {
-		t.Fatalf("legacy notes route expected 404, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if rec := doReq(http.MethodPost, apiKeyAuth, "/api/issues/"+issue.ID+"/collab/questions", []byte(`{"items":[]}`)); rec.Code != http.StatusNotFound {
-		t.Fatalf("legacy questions route expected 404, got %d: %s", rec.Code, rec.Body.String())
+	// 旧路径 suggestions/plan/review 的 PUT 与 DELETE 均应 404
+	for _, path := range []string{
+		"/api/issues/" + issue.ID + "/collab/suggestions",
+		"/api/issues/" + issue.ID + "/collab/plan",
+		"/api/issues/" + issue.ID + "/collab/review",
+	} {
+		if rec := doReq(http.MethodPut, apiKeyAuth, path, []byte(`{"body":"x"}`)); rec.Code != http.StatusNotFound {
+			t.Fatalf("legacy PUT %s expected 404, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+		if rec := doReq(http.MethodDelete, apiKeyAuth, path, nil); rec.Code != http.StatusNotFound {
+			t.Fatalf("legacy DELETE %s expected 404, got %d: %s", path, rec.Code, rec.Body.String())
+		}
 	}
 
-	// JWT DELETE plan → 200（幂等，即使 plan 不存在）
-	planPath := "/api/issues/" + issue.ID + "/collab/plan"
-	if rec := doReq(http.MethodDelete, jwtAuth, planPath, nil); rec.Code != http.StatusOK {
-		t.Fatalf("JWT delete plan expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
+	// DELETE area / consensus / summary 幂等 200
 	for _, path := range []string{
 		"/api/issues/" + issue.ID + "/collab",
-		"/api/issues/" + issue.ID + "/collab/suggestions",
-		"/api/issues/" + issue.ID + "/collab/review",
+		"/api/issues/" + issue.ID + "/collab/consensus",
 		"/api/issues/" + issue.ID + "/collab/summary",
 	} {
 		if rec := doReq(http.MethodDelete, apiKeyAuth, path, nil); rec.Code != http.StatusOK {

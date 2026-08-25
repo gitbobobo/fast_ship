@@ -98,10 +98,7 @@ func main() {
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
 		&model.GitHubRepoLabel{},
-		&model.IssueCollabSuggestion{},
-		&model.IssueCollabPlan{},
-		&model.IssueCollabReview{},
-		&model.IssueCollabSummary{},
+		&model.IssueCollabDocument{},
 		&model.LogRun{},
 		&model.LogRunChunk{},
 		&model.LogEntry{},
@@ -123,7 +120,9 @@ func main() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 
-	dropLegacyCollabTables(db, zapLogger)
+	if err := dropLegacyCollabTables(db, zapLogger); err != nil {
+		log.Fatalf("协作区数据迁移失败: %v", err)
+	}
 
 	if err := backfillIssueSourceModel(db); err != nil {
 		log.Fatalf("问题数据迁移失败: %v", err)
@@ -402,15 +401,71 @@ func dropLegacyLogTables(db *gorm.DB, logger *zap.Logger) {
 	}
 }
 
-func dropLegacyCollabTables(db *gorm.DB, logger *zap.Logger) {
-	// 旧版协作区使用 notes/questions 两张表，重构后改为 suggestions/plans/reviews；
-	// 模型已移出 AutoMigrate（GORM 不会自动删表），这里显式幂等清理。
-	tables := []string{"issue_collab_notes", "issue_collab_questions"}
-	for _, table := range tables {
+func dropLegacyCollabTables(db *gorm.DB, logger *zap.Logger) error {
+	legacyTables := []string{
+		"issue_collab_notes",
+		"issue_collab_questions",
+		"issue_collab_suggestions",
+		"issue_collab_plans",
+		"issue_collab_reviews",
+	}
+	for _, table := range legacyTables {
 		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", table)).Error; err != nil {
 			logger.Warn("删除遗留协作区表失败", zap.String("table", table), zap.Error(err))
 		}
 	}
+
+	hasSummaries, err := sqliteTableExists(db, "issue_collab_summaries")
+	if err != nil {
+		return fmt.Errorf("检查 issue_collab_summaries 表: %w", err)
+	}
+	if hasSummaries {
+		if err := db.Exec(`
+			INSERT OR IGNORE INTO issue_collab_documents (
+				issue_id, kind, body, author_user_id, author_kind, created_at, updated_at
+			)
+			SELECT issue_id, 'summary', body, author_user_id, author_kind, created_at, updated_at
+			FROM issue_collab_summaries
+		`).Error; err != nil {
+			return fmt.Errorf("迁移 issue_collab_summaries 数据: %w", err)
+		}
+		if err := db.Exec("DROP TABLE IF EXISTS issue_collab_summaries").Error; err != nil {
+			return fmt.Errorf("删除 issue_collab_summaries 表: %w", err)
+		}
+	}
+
+	hasConsensus, err := sqliteTableExists(db, "issue_collab_consensus")
+	if err != nil {
+		return fmt.Errorf("检查 issue_collab_consensus 表: %w", err)
+	}
+	if hasConsensus {
+		if err := db.Exec(`
+			INSERT OR IGNORE INTO issue_collab_documents (
+				issue_id, kind, body, author_user_id, author_kind, created_at, updated_at
+			)
+			SELECT issue_id, 'consensus', body, author_user_id, author_kind, created_at, updated_at
+			FROM issue_collab_consensus
+		`).Error; err != nil {
+			return fmt.Errorf("迁移 issue_collab_consensus 数据: %w", err)
+		}
+		if err := db.Exec("DROP TABLE IF EXISTS issue_collab_consensus").Error; err != nil {
+			return fmt.Errorf("删除 issue_collab_consensus 表: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func sqliteTableExists(db *gorm.DB, tableName string) (bool, error) {
+	var name string
+	err := db.Raw(`
+		SELECT name FROM sqlite_master
+		WHERE type = 'table' AND name = ?
+	`, tableName).Scan(&name).Error
+	if err != nil {
+		return false, err
+	}
+	return name == tableName, nil
 }
 
 func uploadMultipartMemoryLimit(maxFileSize int64) int64 {

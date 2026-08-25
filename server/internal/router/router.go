@@ -5,6 +5,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
+	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
@@ -145,14 +146,10 @@ func Setup(
 		{
 			issueCollab.GET("", issueCollabHandler.GetArea)
 			issueCollab.DELETE("", issueCollabHandler.ClearArea)
-			issueCollab.PUT("/suggestions", issueCollabHandler.ReplaceSuggestions)
-			issueCollab.DELETE("/suggestions", issueCollabHandler.ClearSuggestions)
-			issueCollab.PUT("/plan", issueCollabHandler.UpsertPlan)
-			issueCollab.DELETE("/plan", issueCollabHandler.DeletePlan)
-			issueCollab.PUT("/review", issueCollabHandler.UpsertReview)
-			issueCollab.DELETE("/review", issueCollabHandler.DeleteReview)
-			issueCollab.PUT("/summary", issueCollabHandler.UpsertSummary)
-			issueCollab.DELETE("/summary", issueCollabHandler.DeleteSummary)
+			issueCollab.PUT("/consensus", issueCollabHandler.UpsertForKind(model.CollabDocumentKindConsensus))
+			issueCollab.DELETE("/consensus", issueCollabHandler.DeleteForKind(model.CollabDocumentKindConsensus))
+			issueCollab.PUT("/summary", issueCollabHandler.UpsertForKind(model.CollabDocumentKindSummary))
+			issueCollab.DELETE("/summary", issueCollabHandler.DeleteForKind(model.CollabDocumentKindSummary))
 		}
 
 		// JWT / API Key 均可 — 安装包操作

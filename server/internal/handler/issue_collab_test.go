@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
+	"github.com/godbobo/fast_ship/server/internal/model"
 )
 
 func collabParams(pairs ...gin.Param) gin.Params {
@@ -13,30 +14,15 @@ func collabParams(pairs ...gin.Param) gin.Params {
 }
 
 type collabAreaJSON struct {
-	Suggestions []struct {
-		Body      string `json:"body"`
-		SortOrder int    `json:"sort_order"`
-		Author    struct {
-			Kind  string `json:"kind"`
-			Login string `json:"login"`
-		} `json:"author"`
-	} `json:"suggestions"`
-	Plan *struct {
+	Consensus *struct {
 		Body   string `json:"body"`
 		Author struct {
 			Kind string `json:"kind"`
 		} `json:"author"`
-	} `json:"plan"`
-	Review *struct {
-		Body   string `json:"body"`
-		Author struct {
-			Kind string `json:"kind"`
-		} `json:"author"`
-	} `json:"review"`
+	} `json:"consensus"`
 	Summary *struct {
-		Body      string   `json:"body"`
-		CommitIDs []string `json:"commit_ids"`
-		Author    struct {
+		Body   string `json:"body"`
+		Author struct {
 			Kind string `json:"kind"`
 		} `json:"author"`
 	} `json:"summary"`
@@ -53,43 +39,22 @@ func TestIssueCollabHandler_FullFlow(t *testing.T) {
 		c.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
 	}
 
-	// 代理（API Key）写实施建议
-	sugCtx, sugRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/suggestions", []byte(`{"items":[{"body":"建议一"},{"body":"建议二"}]}`))
-	sugCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	asApiKey(sugCtx)
-	env.collabHandler.ReplaceSuggestions(sugCtx)
-	if sugRec.Code != http.StatusOK {
-		t.Fatalf("replace suggestions expected 200, got %d: %s", sugRec.Code, sugRec.Body.String())
+	consensusCtx, consensusRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/consensus", []byte(`{"body":"达成共识"}`))
+	consensusCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	asApiKey(consensusCtx)
+	env.collabHandler.UpsertForKind(model.CollabDocumentKindConsensus)(consensusCtx)
+	if consensusRec.Code != http.StatusOK {
+		t.Fatalf("upsert consensus expected 200, got %d: %s", consensusRec.Code, consensusRec.Body.String())
 	}
 
-	// 代理（API Key）写计划
-	planCtx, planRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/plan", []byte(`{"body":"详细执行计划"}`))
-	planCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	asApiKey(planCtx)
-	env.collabHandler.UpsertPlan(planCtx)
-	if planRec.Code != http.StatusOK {
-		t.Fatalf("upsert plan expected 200, got %d: %s", planRec.Code, planRec.Body.String())
-	}
-
-	// 代理（API Key）写审查结果
-	reviewCtx, reviewRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/review", []byte(`{"body":"审查通过"}`))
-	reviewCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	asApiKey(reviewCtx)
-	env.collabHandler.UpsertReview(reviewCtx)
-	if reviewRec.Code != http.StatusOK {
-		t.Fatalf("upsert review expected 200, got %d: %s", reviewRec.Code, reviewRec.Body.String())
-	}
-
-	// 代理（API Key）写完成总结
 	summaryCtx, summaryRec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/summary", []byte(`{"body":"已新增顶部按钮","commit_ids":["abc1234"]}`))
 	summaryCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 	asApiKey(summaryCtx)
-	env.collabHandler.UpsertSummary(summaryCtx)
+	env.collabHandler.UpsertForKind(model.CollabDocumentKindSummary)(summaryCtx)
 	if summaryRec.Code != http.StatusOK {
 		t.Fatalf("upsert summary expected 200, got %d: %s", summaryRec.Code, summaryRec.Body.String())
 	}
 
-	// GET 区域（JWT 可读）：四块齐全
 	getCtx, getRec := newJSONContext(http.MethodGet, "/api/issues/"+issue.ID+"/collab", nil)
 	getCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 	getCtx.Set(middleware.ContextKeyUserID, user.ID)
@@ -100,47 +65,39 @@ func TestIssueCollabHandler_FullFlow(t *testing.T) {
 	}
 	var area collabAreaJSON
 	decodeEnvelope(t, getRec, &area)
-	if len(area.Suggestions) != 2 || area.Suggestions[0].Author.Kind != "agent" {
-		t.Fatalf("unexpected suggestions: %+v", area.Suggestions)
+	if area.Consensus == nil || area.Consensus.Body != "达成共识" || area.Consensus.Author.Kind != "agent" {
+		t.Fatalf("unexpected consensus: %+v", area.Consensus)
 	}
-	if area.Plan == nil || area.Plan.Body != "详细执行计划" {
-		t.Fatalf("unexpected plan: %+v", area.Plan)
-	}
-	if area.Review == nil || area.Review.Body != "审查通过" {
-		t.Fatalf("unexpected review: %+v", area.Review)
-	}
-	if area.Summary == nil || len(area.Summary.CommitIDs) != 1 || area.Summary.Author.Kind != "agent" {
+	if area.Summary == nil || area.Summary.Body != "已新增顶部按钮" || area.Summary.Author.Kind != "agent" {
 		t.Fatalf("unexpected summary: %+v", area.Summary)
 	}
 
-	// 分块删除 plan
-	delPlanCtx, delPlanRec := newJSONContext(http.MethodDelete, "/api/issues/"+issue.ID+"/collab/plan", nil)
-	delPlanCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	delPlanCtx.Set(middleware.ContextKeyUserID, user.ID)
-	delPlanCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
-	env.collabHandler.DeletePlan(delPlanCtx)
-	if delPlanRec.Code != http.StatusOK {
-		t.Fatalf("delete plan expected 200, got %d: %s", delPlanRec.Code, delPlanRec.Body.String())
+	delConsensusCtx, delConsensusRec := newJSONContext(http.MethodDelete, "/api/issues/"+issue.ID+"/collab/consensus", nil)
+	delConsensusCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	delConsensusCtx.Set(middleware.ContextKeyUserID, user.ID)
+	delConsensusCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.collabHandler.DeleteForKind(model.CollabDocumentKindConsensus)(delConsensusCtx)
+	if delConsensusRec.Code != http.StatusOK {
+		t.Fatalf("delete consensus expected 200, got %d: %s", delConsensusRec.Code, delConsensusRec.Body.String())
 	}
 
-	getAfterPlanCtx, getAfterPlanRec := newJSONContext(http.MethodGet, "/api/issues/"+issue.ID+"/collab", nil)
-	getAfterPlanCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
-	getAfterPlanCtx.Set(middleware.ContextKeyUserID, user.ID)
-	getAfterPlanCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
-	env.collabHandler.GetArea(getAfterPlanCtx)
-	if getAfterPlanRec.Code != http.StatusOK {
-		t.Fatalf("get area after delete plan expected 200, got %d: %s", getAfterPlanRec.Code, getAfterPlanRec.Body.String())
+	getAfterConsensusCtx, getAfterConsensusRec := newJSONContext(http.MethodGet, "/api/issues/"+issue.ID+"/collab", nil)
+	getAfterConsensusCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
+	getAfterConsensusCtx.Set(middleware.ContextKeyUserID, user.ID)
+	getAfterConsensusCtx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeJWT)
+	env.collabHandler.GetArea(getAfterConsensusCtx)
+	if getAfterConsensusRec.Code != http.StatusOK {
+		t.Fatalf("get area after delete consensus expected 200, got %d: %s", getAfterConsensusRec.Code, getAfterConsensusRec.Body.String())
 	}
-	var afterPlanArea collabAreaJSON
-	decodeEnvelope(t, getAfterPlanRec, &afterPlanArea)
-	if afterPlanArea.Plan != nil {
-		t.Fatalf("expected plan removed, got %+v", afterPlanArea.Plan)
+	var afterConsensusArea collabAreaJSON
+	decodeEnvelope(t, getAfterConsensusRec, &afterConsensusArea)
+	if afterConsensusArea.Consensus != nil {
+		t.Fatalf("expected consensus removed, got %+v", afterConsensusArea.Consensus)
 	}
-	if len(afterPlanArea.Suggestions) != 2 || afterPlanArea.Review == nil || afterPlanArea.Summary == nil {
-		t.Fatalf("expected other sections intact after plan delete, got %+v", afterPlanArea)
+	if afterConsensusArea.Summary == nil {
+		t.Fatalf("expected summary intact after consensus delete, got %+v", afterConsensusArea)
 	}
 
-	// 一键清空
 	clearCtx, clearRec := newJSONContext(http.MethodDelete, "/api/issues/"+issue.ID+"/collab", nil)
 	clearCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 	asApiKey(clearCtx)
@@ -159,7 +116,7 @@ func TestIssueCollabHandler_FullFlow(t *testing.T) {
 	}
 	var emptyArea collabAreaJSON
 	decodeEnvelope(t, getAfterRec, &emptyArea)
-	if len(emptyArea.Suggestions) != 0 || emptyArea.Plan != nil || emptyArea.Review != nil || emptyArea.Summary != nil {
+	if emptyArea.Consensus != nil || emptyArea.Summary != nil {
 		t.Fatalf("expected empty area after clear, got %+v", emptyArea)
 	}
 }
@@ -170,17 +127,15 @@ func TestIssueCollabHandler_ErrorMapping(t *testing.T) {
 	project := createHandlerTestProject(t, env.db, user.ID)
 	issue := createHandlerTestIssue(t, env.db, project.ID)
 
-	// 代理写空 body 计划 → 400
-	ctx, rec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/plan", []byte(`{"body":"   "}`))
+	ctx, rec := newJSONContext(http.MethodPut, "/api/issues/"+issue.ID+"/collab/consensus", []byte(`{"body":"   "}`))
 	ctx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 	ctx.Set(middleware.ContextKeyUserID, user.ID)
 	ctx.Set(middleware.ContextKeyAuthType, middleware.AuthTypeApiKey)
-	env.collabHandler.UpsertPlan(ctx)
+	env.collabHandler.UpsertForKind(model.CollabDocumentKindConsensus)(ctx)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for empty body, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// 不存在的 issue → 404
 	missCtx, missRec := newJSONContext(http.MethodGet, "/api/issues/does-not-exist/collab", nil)
 	missCtx.Params = collabParams(gin.Param{Key: "iid", Value: "does-not-exist"})
 	missCtx.Set(middleware.ContextKeyUserID, user.ID)
@@ -191,7 +146,6 @@ func TestIssueCollabHandler_ErrorMapping(t *testing.T) {
 	}
 }
 
-// JWT 调用四个 PUT 写端点均 403(40303)；API Key 调用均 200。
 func TestIssueCollabHandler_PutWritesRequireApiKey(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "collab-user-3")
@@ -204,14 +158,11 @@ func TestIssueCollabHandler_PutWritesRequireApiKey(t *testing.T) {
 		body []byte
 		call func(*gin.Context)
 	}{
-		{"suggestions", "/api/issues/" + issue.ID + "/collab/suggestions", []byte(`{"items":[]}`), env.collabHandler.ReplaceSuggestions},
-		{"plan", "/api/issues/" + issue.ID + "/collab/plan", []byte(`{"body":"x"}`), env.collabHandler.UpsertPlan},
-		{"review", "/api/issues/" + issue.ID + "/collab/review", []byte(`{"body":"x"}`), env.collabHandler.UpsertReview},
-		{"summary", "/api/issues/" + issue.ID + "/collab/summary", []byte(`{"body":"x","commit_ids":[]}`), env.collabHandler.UpsertSummary},
+		{"consensus", "/api/issues/" + issue.ID + "/collab/consensus", []byte(`{"body":"x"}`), env.collabHandler.UpsertForKind(model.CollabDocumentKindConsensus)},
+		{"summary", "/api/issues/" + issue.ID + "/collab/summary", []byte(`{"body":"x"}`), env.collabHandler.UpsertForKind(model.CollabDocumentKindSummary)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// JWT 调用 → 403
 			jwtCtx, jwtRec := newJSONContext(http.MethodPut, tc.path, tc.body)
 			jwtCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 			jwtCtx.Set(middleware.ContextKeyUserID, user.ID)
@@ -221,7 +172,6 @@ func TestIssueCollabHandler_PutWritesRequireApiKey(t *testing.T) {
 				t.Fatalf("expected 403 for JWT write %s, got %d: %s", tc.name, jwtRec.Code, jwtRec.Body.String())
 			}
 
-			// API Key 调用 → 200
 			apiCtx, apiRec := newJSONContext(http.MethodPut, tc.path, tc.body)
 			apiCtx.Params = collabParams(gin.Param{Key: "iid", Value: issue.ID})
 			apiCtx.Set(middleware.ContextKeyUserID, user.ID)
@@ -255,10 +205,8 @@ func TestIssueCollabHandler_DeletesAllowJWT(t *testing.T) {
 		call func(*gin.Context)
 	}{
 		{"area", "/api/issues/" + issue.ID + "/collab", env.collabHandler.ClearArea},
-		{"suggestions", "/api/issues/" + issue.ID + "/collab/suggestions", env.collabHandler.ClearSuggestions},
-		{"plan", "/api/issues/" + issue.ID + "/collab/plan", env.collabHandler.DeletePlan},
-		{"review", "/api/issues/" + issue.ID + "/collab/review", env.collabHandler.DeleteReview},
-		{"summary", "/api/issues/" + issue.ID + "/collab/summary", env.collabHandler.DeleteSummary},
+		{"consensus", "/api/issues/" + issue.ID + "/collab/consensus", env.collabHandler.DeleteForKind(model.CollabDocumentKindConsensus)},
+		{"summary", "/api/issues/" + issue.ID + "/collab/summary", env.collabHandler.DeleteForKind(model.CollabDocumentKindSummary)},
 	}
 	for _, tc := range cases {
 		t.Run("jwt_"+tc.name, func(t *testing.T) {

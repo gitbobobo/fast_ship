@@ -163,7 +163,7 @@ vi.mock("@/lib/hooks/use-ai", () => ({
 
 vi.mock("@/lib/hooks/use-issue-collab", () => ({
   useIssueCollab: vi.fn(() => ({
-    data: { suggestions: [], plan: null, review: null, summary: null },
+    data: { consensus: null, summary: null },
     isLoading: false,
   })),
 }));
