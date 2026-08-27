@@ -1,6 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { createEvent, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { BoardSelectionProvider } from "@/routes/board/lib/board-selection-context";
 import {
   BoardIssueCard,
   BoardIssueCardOverlay,
@@ -68,9 +69,41 @@ function renderInRouter(ui: React.ReactElement) {
   return render(<MemoryRouter>{ui}</MemoryRouter>);
 }
 
+function renderWithSelection(
+  ui: React.ReactElement,
+  {
+    multiSelectMode = false,
+    selectedIssueIds = new Set<string>(),
+    selectIssue = vi.fn(),
+    selectPreview = false,
+  }: {
+    multiSelectMode?: boolean;
+    selectPreview?: boolean;
+    selectedIssueIds?: ReadonlySet<string>;
+    selectIssue?: (issue: Issue, modifiers: { shiftKey: boolean }) => void;
+  } = {},
+) {
+  return renderInRouter(
+    <BoardSelectionProvider
+      value={{
+        multiSelectMode,
+        selectPreview,
+        selectedIssueIds,
+        selectIssue,
+      }}
+    >
+      {ui}
+    </BoardSelectionProvider>,
+  );
+}
+
 function getCardElement() {
   const link = screen.getByRole("link", { name: `${issue.reference} ${issue.title}` });
   return link.closest("div.group");
+}
+
+function getCardElementByTitle() {
+  return screen.getByText(issue.title).closest("div.group");
 }
 
 describe("BoardIssueCard", () => {
@@ -262,5 +295,254 @@ describe("BoardIssueCard", () => {
     fireEvent.pointerDown(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` }));
 
     expect(onPointerDown).not.toHaveBeenCalled();
+  });
+
+  describe("multi-select mode", () => {
+    const selectIssue = vi.fn();
+
+    beforeEach(() => {
+      selectIssue.mockClear();
+    });
+
+    function renderMultiSelectCard(
+      props: Partial<{
+        selectedIssueIds: ReadonlySet<string>;
+      }> = {},
+    ) {
+      return renderWithSelection(<BoardIssueCard issue={issue} />, {
+        multiSelectMode: true,
+        selectedIssueIds: props.selectedIssueIds ?? new Set(),
+        selectIssue,
+      });
+    }
+
+    it("disables dragging through useDraggable while keeping attributes attached", () => {
+      const onPointerDown = vi.fn();
+      mockUseDraggable.mockReturnValue({
+        attributes: {
+          tabIndex: 0,
+          "aria-roledescription": "draggable",
+        },
+        listeners: {
+          onPointerDown,
+        },
+        setNodeRef: vi.fn(),
+        transform: null,
+        isDragging: false,
+      });
+
+      renderMultiSelectCard();
+
+      expect(mockUseDraggable).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: issue.id,
+          disabled: true,
+        }),
+      );
+
+      const card = getCardElementByTitle() as HTMLElement;
+      expect(card).toHaveAttribute("tabindex", "0");
+      expect(card).toHaveAttribute("aria-roledescription", "draggable");
+    });
+
+    it("renders the title as a non-link element", () => {
+      renderMultiSelectCard();
+
+      expect(screen.queryByRole("link")).not.toBeInTheDocument();
+      expect(screen.getByText(issue.title)).toBeInTheDocument();
+    });
+
+    it("calls selectIssue when clicking the card in the mode", () => {
+      renderMultiSelectCard();
+
+      const card = getCardElementByTitle() as HTMLElement;
+
+      fireEvent.click(card);
+      expect(selectIssue).toHaveBeenCalledTimes(1);
+      expect(selectIssue).toHaveBeenCalledWith(issue, { shiftKey: false });
+
+      fireEvent.click(card, { shiftKey: true });
+      expect(selectIssue).toHaveBeenLastCalledWith(issue, { shiftKey: true });
+    });
+
+    it("calls selectIssue when clicking the title in the mode", () => {
+      renderMultiSelectCard();
+
+      fireEvent.click(screen.getByText(issue.title));
+
+      expect(selectIssue).toHaveBeenCalledTimes(1);
+      expect(selectIssue).toHaveBeenCalledWith(issue, { shiftKey: false });
+    });
+
+    it("keeps Cmd/Ctrl clicks behaving like plain clicks in the mode", () => {
+      renderMultiSelectCard();
+
+      fireEvent.click(getCardElementByTitle() as HTMLElement, {
+        metaKey: true,
+      });
+
+      expect(selectIssue).toHaveBeenCalledTimes(1);
+      expect(selectIssue).toHaveBeenCalledWith(issue, { shiftKey: false });
+    });
+
+    it("renders a persistent checkbox reflecting the selected state", () => {
+      const { rerender } = renderMultiSelectCard({
+        selectedIssueIds: new Set(),
+      });
+
+      const checkbox = screen.getByRole("checkbox");
+      expect(checkbox).toHaveAttribute("aria-checked", "false");
+
+      rerender(
+        <MemoryRouter>
+          <BoardSelectionProvider
+            value={{
+              multiSelectMode: true,
+              selectPreview: false,
+              selectedIssueIds: new Set([issue.id]),
+              selectIssue,
+            }}
+          >
+            <BoardIssueCard issue={issue} />
+          </BoardSelectionProvider>
+        </MemoryRouter>,
+      );
+
+      expect(screen.getByRole("checkbox")).toHaveAttribute("aria-checked", "true");
+    });
+
+    it("does not render a checkbox outside multi-select mode", () => {
+      renderInRouter(<BoardIssueCard issue={issue} />);
+
+      expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("select preview while Ctrl/Cmd is held", () => {
+    it("shows a checkbox but keeps the title as a link", () => {
+      renderWithSelection(<BoardIssueCard issue={issue} />, {
+        selectPreview: true,
+      });
+
+      expect(screen.getByRole("checkbox")).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+      expect(
+        screen.getByRole("link", {
+          name: `${issue.reference} ${issue.title}`,
+        }),
+      ).toBeInTheDocument();
+    });
+
+    it("disables dragging while the preview is active", () => {
+      renderWithSelection(<BoardIssueCard issue={issue} />, {
+        selectPreview: true,
+      });
+
+      expect(mockUseDraggable).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: issue.id,
+          disabled: true,
+        }),
+      );
+    });
+  });
+
+  describe("selectIssue via Cmd/Ctrl outside the mode", () => {
+    const selectIssue = vi.fn();
+    const dragPointerDownMock = vi.fn();
+
+    beforeEach(() => {
+      selectIssue.mockClear();
+      dragPointerDownMock.mockClear();
+    });
+
+    function renderCardOutsideMode() {
+      mockUseDraggable.mockReturnValue({
+        attributes: {},
+        listeners: {
+          onPointerDown: dragPointerDownMock,
+        },
+        setNodeRef: vi.fn(),
+        transform: null,
+        isDragging: false,
+      });
+
+      return renderWithSelection(<BoardIssueCard issue={issue} />, {
+        multiSelectMode: false,
+        selectedIssueIds: new Set(),
+        selectIssue,
+      });
+    }
+
+    it("blocks the drag pointerdown and calls selectIssue on Cmd/Ctrl click", () => {
+      renderCardOutsideMode();
+
+      const card = getCardElement() as HTMLElement;
+
+      const pointerDownEvent = createEvent.pointerDown(card, {
+        metaKey: true,
+      });
+      fireEvent(card, pointerDownEvent);
+      expect(pointerDownEvent.defaultPrevented).toBe(true);
+      expect(dragPointerDownMock).not.toHaveBeenCalled();
+
+      const clickEvent = createEvent.click(card, { ctrlKey: true });
+      fireEvent(card, clickEvent);
+      expect(clickEvent.defaultPrevented).toBe(true);
+      expect(selectIssue).toHaveBeenCalledTimes(1);
+      expect(selectIssue).toHaveBeenCalledWith(issue, { shiftKey: false });
+    });
+
+    it("still forwards plain pointerdown to the drag listeners", () => {
+      renderCardOutsideMode();
+
+      const card = getCardElement() as HTMLElement;
+
+      fireEvent.pointerDown(card);
+
+      expect(dragPointerDownMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does nothing special on plain card clicks", () => {
+      renderCardOutsideMode();
+
+      fireEvent.click(getCardElement() as HTMLElement);
+
+      expect(selectIssue).not.toHaveBeenCalled();
+    });
+
+    it("prevents link navigation and calls selectIssue on Cmd/Ctrl title click", () => {
+      renderCardOutsideMode();
+
+      const link = screen.getByRole("link", {
+        name: `${issue.reference} ${issue.title}`,
+      });
+
+      const pointerDownEvent = createEvent.pointerDown(link, {
+        ctrlKey: true,
+      });
+      fireEvent(link, pointerDownEvent);
+      expect(dragPointerDownMock).not.toHaveBeenCalled();
+
+      const clickEvent = createEvent.click(link, { metaKey: true });
+      fireEvent(link, clickEvent);
+      expect(clickEvent.defaultPrevented).toBe(true);
+      expect(selectIssue).toHaveBeenCalledTimes(1);
+      expect(selectIssue).toHaveBeenCalledWith(issue, { shiftKey: false });
+    });
+
+    it("keeps plain title clicks navigating without calling selectIssue", () => {
+      renderCardOutsideMode();
+
+      const link = screen.getByRole("link", {
+        name: `${issue.reference} ${issue.title}`,
+      });
+      fireEvent.click(link);
+
+      // Link 自身会 preventDefault 并走路由导航，这里只断言不进入多选
+      expect(selectIssue).not.toHaveBeenCalled();
+    });
   });
 });

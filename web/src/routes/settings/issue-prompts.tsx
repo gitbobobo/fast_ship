@@ -28,6 +28,7 @@ const issuePromptSchema = z.object({
         id: z.string().min(1),
         name: z.string().min(1, "请输入名称"),
         content: z.string().min(1, "请输入正文"),
+        supports_batch: z.boolean(),
       }),
     )
     .min(1, "至少保留 1 条"),
@@ -171,6 +172,15 @@ export default function SettingsIssuePromptsPage() {
                   )}
                 </div>
 
+                <Label className="font-normal text-sm text-foreground">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 shrink-0 rounded border border-input accent-primary"
+                    {...register(`prompts.${i}.supports_batch`)}
+                  />
+                  支持批量复制
+                </Label>
+
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
                     type="button"
@@ -219,6 +229,7 @@ export default function SettingsIssuePromptsPage() {
                 id: newPromptId(),
                 name: "",
                 content: DEFAULT_ISSUE_PROMPT_CONTENT,
+                supports_batch: false,
               })
             }
           >

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildIssuePrompt,
+  buildIssuePromptBatch,
   DEFAULT_ISSUE_PROMPTS,
   normalizeIssuePrompts,
 } from "./issue-prompt";
@@ -55,6 +56,88 @@ describe("buildIssuePrompt", () => {
   });
 });
 
+describe("buildIssuePromptBatch", () => {
+  it("matches the legacy single-issue format byte-for-byte with default content", () => {
+    const prompt = buildIssuePromptBatch({
+      projectId: "p1",
+      content: "请处理此问题",
+      issueIds: ["i1"],
+    });
+
+    expect(prompt).toBe(`/fast-ship 请处理此问题
+---
+项目ID：p1
+问题ID：i1`);
+  });
+
+  it("matches the legacy single-issue format byte-for-byte with custom content", () => {
+    const prompt = buildIssuePromptBatch({
+      projectId: "proj-9",
+      content: "自定义指令",
+      issueIds: ["issue-9"],
+    });
+
+    expect(prompt).toBe(`/fast-ship 自定义指令
+---
+项目ID：proj-9
+问题ID：issue-9`);
+  });
+
+  it("returns the exact same output as buildIssuePrompt for a single issue id", () => {
+    const single = buildIssuePrompt({
+      projectId: "p1",
+      issueId: "i1",
+      content: "自定义指令",
+    });
+    const batch = buildIssuePromptBatch({
+      projectId: "p1",
+      content: "自定义指令",
+      issueIds: ["i1"],
+    });
+
+    expect(batch).toBe(single);
+  });
+
+  it("writes the project id exactly once and one issue id per line in order", () => {
+    const prompt = buildIssuePromptBatch({
+      projectId: "p1",
+      content: "请处理此问题",
+      issueIds: ["i3", "i1", "i2"],
+    });
+
+    expect(prompt).toBe(`/fast-ship 请处理此问题
+---
+项目ID：p1
+问题ID：i3
+问题ID：i1
+问题ID：i2`);
+    expect(prompt.split("项目ID：").length - 1).toBe(1);
+    expect(prompt.split("问题ID：").length - 1).toBe(3);
+  });
+
+  it("does not end with a trailing newline for multiple issue ids", () => {
+    const prompt = buildIssuePromptBatch({
+      projectId: "p1",
+      content: "请处理此问题",
+      issueIds: ["i1", "i2"],
+    });
+
+    expect(prompt.endsWith("\n")).toBe(false);
+  });
+
+  it("preserves surrounding whitespace in content without trimming", () => {
+    const prompt = buildIssuePromptBatch({
+      projectId: "p1",
+      content: "  保留前后空格  ",
+      issueIds: ["i1", "i2"],
+    });
+
+    expect(prompt).toBe(
+      "/fast-ship   保留前后空格  \n---\n项目ID：p1\n问题ID：i1\n问题ID：i2",
+    );
+  });
+});
+
 describe("normalizeIssuePrompts", () => {
   it("returns a single default entry for null", () => {
     const result = normalizeIssuePrompts(null);
@@ -62,6 +145,7 @@ describe("normalizeIssuePrompts", () => {
     expect(result[0].id).toBe("default");
     expect(result[0].name).toBe("默认");
     expect(result[0].content).toBe("请处理此问题");
+    expect(result[0].supports_batch).toBe(true);
   });
 
   it("returns a single default entry for undefined", () => {
@@ -87,8 +171,8 @@ describe("normalizeIssuePrompts", () => {
 
   it("returns non-empty arrays preserving order and content", () => {
     const input: IssuePrompt[] = [
-      { id: "a", name: "A", content: "内容A" },
-      { id: "b", name: "B", content: "内容B" },
+      { id: "a", name: "A", content: "内容A", supports_batch: true },
+      { id: "b", name: "B", content: "内容B", supports_batch: false },
     ];
     const result = normalizeIssuePrompts(input);
 
@@ -100,11 +184,37 @@ describe("normalizeIssuePrompts", () => {
 
   it("returns copies whose mutation does not affect the source array", () => {
     const input: IssuePrompt[] = [
-      { id: "a", name: "A", content: "内容A" },
+      { id: "a", name: "A", content: "内容A", supports_batch: true },
     ];
     const result = normalizeIssuePrompts(input);
     result[0].id = "changed";
 
     expect(input[0].id).toBe("a");
+  });
+
+  it("defaults the built-in prompt entry to supports_batch true", () => {
+    expect(DEFAULT_ISSUE_PROMPTS[0].supports_batch).toBe(true);
+    expect(normalizeIssuePrompts([])[0].supports_batch).toBe(true);
+  });
+
+  it("fills supports_batch with false for entries missing the field", () => {
+    const input = [
+      { id: "a", name: "A", content: "内容A" },
+    ] as IssuePrompt[];
+    const result = normalizeIssuePrompts(input);
+
+    expect(result[0].supports_batch).toBe(false);
+    expect(input[0].supports_batch).toBeUndefined();
+  });
+
+  it("preserves explicitly provided supports_batch values", () => {
+    const input: IssuePrompt[] = [
+      { id: "a", name: "A", content: "内容A", supports_batch: true },
+      { id: "b", name: "B", content: "内容B", supports_batch: false },
+    ];
+    const result = normalizeIssuePrompts(input);
+
+    expect(result[0].supports_batch).toBe(true);
+    expect(result[1].supports_batch).toBe(false);
   });
 });

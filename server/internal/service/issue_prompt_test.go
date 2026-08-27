@@ -56,6 +56,66 @@ func TestIssuePromptServiceUpdateAndGetRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIssuePromptServiceSupportsBatchRoundTrip(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-issue-prompt-batch-roundtrip")
+
+	input := []model.IssuePromptItem{
+		{ID: "id-1", Name: "批量", Content: "批量正文", SupportsBatch: true},
+		{ID: "id-2", Name: "单发", Content: "单发正文", SupportsBatch: false},
+	}
+	updated, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: input})
+	if err != nil {
+		t.Fatalf("update prompts: %v", err)
+	}
+	if len(updated.Prompts) != 2 {
+		t.Fatalf("expected 2 prompts returned, got %d", len(updated.Prompts))
+	}
+	if !updated.Prompts[0].SupportsBatch || updated.Prompts[1].SupportsBatch {
+		t.Fatalf("unexpected supports_batch in update response: %#v", updated.Prompts)
+	}
+
+	got, err := services.issuePromptService.GetPrompts(user.ID)
+	if err != nil {
+		t.Fatalf("get prompts: %v", err)
+	}
+	if len(got.Prompts) != 2 {
+		t.Fatalf("expected 2 prompts persisted, got %d", len(got.Prompts))
+	}
+	if !got.Prompts[0].SupportsBatch || got.Prompts[1].SupportsBatch {
+		t.Fatalf("unexpected supports_batch persisted: %#v", got.Prompts)
+	}
+}
+
+func TestIssuePromptServiceLegacyJSONWithoutSupportsBatch(t *testing.T) {
+	services := setupTestServices(t)
+	user := createTestUser(t, services.db, "user-issue-prompt-legacy")
+
+	// 旧格式 JSON：没有 supports_batch 字段，直接写入 prompts 文本列。
+	legacy := `[{"id":"legacy-1","name":"旧格式","content":"旧正文"},{"id":"legacy-2","name":"旧格式二","content":"旧正文二","supports_batch":true}]`
+	now := time.Now()
+	if err := services.db.Exec(
+		"INSERT INTO user_issue_prompt_settings (user_id, prompts, created_at, updated_at) VALUES (?, ?, ?, ?)",
+		user.ID, legacy, now, now,
+	).Error; err != nil {
+		t.Fatalf("seed legacy row: %v", err)
+	}
+
+	got, err := services.issuePromptService.GetPrompts(user.ID)
+	if err != nil {
+		t.Fatalf("get prompts: %v", err)
+	}
+	if len(got.Prompts) != 2 {
+		t.Fatalf("expected 2 prompts persisted, got %d: %#v", len(got.Prompts), got.Prompts)
+	}
+	if got.Prompts[0].SupportsBatch {
+		t.Fatalf("expected missing supports_batch to unmarshal as false, got: %#v", got.Prompts[0])
+	}
+	if !got.Prompts[1].SupportsBatch {
+		t.Fatalf("expected explicit supports_batch true to be preserved, got: %#v", got.Prompts[1])
+	}
+}
+
 func TestIssuePromptServiceUpdateIsReplaceNotAppend(t *testing.T) {
 	services := setupTestServices(t)
 	user := createTestUser(t, services.db, "user-issue-prompt-replace")

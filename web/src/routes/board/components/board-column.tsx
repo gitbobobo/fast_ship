@@ -20,9 +20,11 @@ import { CloseAllDoneButton } from "./close-all-done-button";
 export function BoardColumn({
   columnId,
   projectId,
+  onColumnIssuesChange,
 }: {
   columnId: ColumnId;
   projectId: string;
+  onColumnIssuesChange?: (columnId: ColumnId, issues: Issue[]) => void;
 }) {
   const column = COLUMNS.find((c) => c.id === columnId)!;
 
@@ -82,6 +84,16 @@ export function BoardColumn({
     observer.observe(el);
     return () => observer.disconnect();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  // issues 数组变化时（含筛选、翻页）上报给多选 hook，用于剪枝消失的勾选 id。
+  // isLoading 期间不上报：列筛选变化时 queryKey 变了，TanStack Query 会先把
+  // data 置为 undefined（issues 为空数组），此时上报会把该列勾选全部清掉，
+  // 等真实数据到达后再上报，剪枝就只作用于真正消失的 id。
+  // 翻页的 isFetchingNextPage 不影响 isLoading，无需在此处理。
+  useEffect(() => {
+    if (isLoading) return;
+    onColumnIssuesChange?.(columnId, issues);
+  }, [columnId, issues, onColumnIssuesChange, isLoading]);
 
   return (
     <div

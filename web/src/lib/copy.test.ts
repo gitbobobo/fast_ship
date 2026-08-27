@@ -23,8 +23,9 @@ describe("copyWithToast", () => {
   it("shows the success toast and copies the text when copy succeeds", async () => {
     copyToClipboardMock.mockResolvedValue(undefined);
 
-    await copyWithToast("hello", "已复制");
+    const result = await copyWithToast("hello", "已复制");
 
+    expect(result).toBe(true);
     expect(copyToClipboardMock).toHaveBeenCalledWith("hello");
     expect(toast.success).toHaveBeenCalledWith("已复制");
     expect(toast.error).not.toHaveBeenCalled();
@@ -33,8 +34,9 @@ describe("copyWithToast", () => {
   it("shows the default error toast when copy fails", async () => {
     copyToClipboardMock.mockRejectedValue(new Error("denied"));
 
-    await copyWithToast("hello", "已复制");
+    const result = await copyWithToast("hello", "已复制");
 
+    expect(result).toBe(false);
     expect(toast.error).toHaveBeenCalledWith("复制失败");
     expect(toast.success).not.toHaveBeenCalled();
   });

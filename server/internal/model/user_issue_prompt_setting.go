@@ -8,9 +8,10 @@ import (
 )
 
 type IssuePromptItem struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Content       string `json:"content"`
+	SupportsBatch bool   `json:"supports_batch"`
 }
 
 // IssuePromptItems 以 JSON 文本存取于 prompts 列。

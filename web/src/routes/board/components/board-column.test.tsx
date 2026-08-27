@@ -22,7 +22,9 @@ vi.mock("@/lib/hooks/use-issues", () => ({
 }));
 
 vi.mock("./board-issue-card", () => ({
-  BoardIssueCard: ({ issue }: { issue: Issue }) => <div>{issue.title}</div>,
+  BoardIssueCard: ({ issue }: { issue: Issue }) => (
+    <div data-issue-id={issue.id}>{issue.title}</div>
+  ),
 }));
 
 const scrollTopValues = new WeakMap<HTMLElement, number>();
@@ -81,6 +83,163 @@ function mockLoadedIssues() {
     isLoading: false,
   });
 }
+
+describe("BoardColumn multi-select wiring", () => {
+  beforeEach(() => {
+    resetScrollPositions();
+    mockUseInfiniteBoardIssues.mockReset();
+    mockLoadedIssues();
+    installScrollTopStub();
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    resetScrollPositions();
+    vi.unstubAllGlobals();
+  });
+
+  it("reports loaded issues through onColumnIssuesChange when issues change", () => {
+    const onColumnIssuesChange = vi.fn();
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          onColumnIssuesChange={onColumnIssuesChange}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(onColumnIssuesChange).toHaveBeenCalledTimes(1);
+    const [reportedColumn, reportedIssues] =
+      onColumnIssuesChange.mock.calls[0];
+    expect(reportedColumn).toBe("todo");
+    expect(reportedIssues.map((issue: Issue) => issue.id)).toEqual(
+      Array.from({ length: 8 }, (_, i) => `issue-${i}`),
+    );
+
+    const filteredIssues = [makeIssue("issue-0"), makeIssue("issue-3")];
+    mockUseInfiniteBoardIssues.mockReturnValue({
+      data: {
+        pages: [
+          {
+            items: filteredIssues,
+            total: 2,
+            page: 1,
+            page_size: 8,
+          },
+        ],
+      },
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      isLoading: false,
+    });
+
+    rerender(
+      <MemoryRouter>
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          onColumnIssuesChange={onColumnIssuesChange}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(onColumnIssuesChange).toHaveBeenCalledTimes(2);
+    expect(onColumnIssuesChange).toHaveBeenLastCalledWith(
+      "todo",
+      filteredIssues,
+    );
+  });
+
+  it("does not report an empty list while the column is loading a new filter", () => {
+    const onColumnIssuesChange = vi.fn();
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          onColumnIssuesChange={onColumnIssuesChange}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(onColumnIssuesChange).toHaveBeenCalledTimes(1);
+    expect(onColumnIssuesChange.mock.calls[0][1].length).toBe(8);
+
+    // 模拟切换筛选条件：queryKey 变化，TanStack Query 先把 data 置为 undefined
+    mockUseInfiniteBoardIssues.mockReturnValue({
+      data: undefined,
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      isLoading: true,
+    });
+
+    rerender(
+      <MemoryRouter>
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          onColumnIssuesChange={onColumnIssuesChange}
+        />
+      </MemoryRouter>,
+    );
+
+    // isLoading 期间不得上报空列表，否则会把该列勾选全部剪掉
+    expect(onColumnIssuesChange).toHaveBeenCalledTimes(1);
+    expect(
+      onColumnIssuesChange.mock.calls.some(
+        (call) => (call[1] as Issue[]).length === 0,
+      ),
+    ).toBe(false);
+
+    // 新数据到达后再上报真实列表
+    const filteredIssues = [makeIssue("issue-2")];
+    mockUseInfiniteBoardIssues.mockReturnValue({
+      data: {
+        pages: [
+          {
+            items: filteredIssues,
+            total: 1,
+            page: 1,
+            page_size: 8,
+          },
+        ],
+      },
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      isLoading: false,
+    });
+
+    rerender(
+      <MemoryRouter>
+        <BoardColumn
+          columnId="todo"
+          projectId="project-1"
+          onColumnIssuesChange={onColumnIssuesChange}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(onColumnIssuesChange).toHaveBeenCalledTimes(2);
+    expect(onColumnIssuesChange).toHaveBeenLastCalledWith(
+      "todo",
+      filteredIssues,
+    );
+  });
+});
 
 describe("BoardColumn scroll restoration", () => {
   beforeEach(() => {

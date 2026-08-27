@@ -411,6 +411,7 @@ interface IssuePrompt {
   id: string;
   name: string;
   content: string;
+  supports_batch: boolean;
 }
 
 interface IssuePromptSettings {
