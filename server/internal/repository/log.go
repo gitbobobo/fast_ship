@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -59,7 +60,40 @@ func (r *LogRepository) FindRunByProjectAndRunID(projectID, runID string) (*mode
 	return &run, nil
 }
 
+// UploadRunTx 在事务里完成 run 的 get-or-create、chunk 去重写入和条目聚合。
+// 并发上传同一个 run 时，后到的事务可能在与先到事务的锁竞争中失败
+// （文件库的 SQLITE_BUSY、共享缓存库的 SQLITE_LOCKED）。失败的事务已整体
+// 回滚，换一个新事务重试是安全的；有界退避后仍失败才把错误交回上层。
 func (r *LogRepository) UploadRunTx(
+	projectID, runID, chunkID, source, description string,
+	uploaderAPIKeyID *string,
+	entries []model.LogEntry,
+) (*UploadRunTxResult, error) {
+	const maxAttempts = 5
+	for attempt := 0; ; attempt++ {
+		result, err := r.uploadRunTxOnce(projectID, runID, chunkID, source, description, uploaderAPIKeyID, entries)
+		if err == nil {
+			return result, nil
+		}
+		if attempt >= maxAttempts-1 || !isSQLiteLockedError(err) {
+			return nil, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+	}
+}
+
+// 驱动对锁竞争只给出文本错误（如 "database is locked (5)"、
+// "database table is locked: database is deadlocked (6)"），按子串识别。
+func isSQLiteLockedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked")
+}
+
+func (r *LogRepository) uploadRunTxOnce(
 	projectID, runID, chunkID, source, description string,
 	uploaderAPIKeyID *string,
 	entries []model.LogEntry,

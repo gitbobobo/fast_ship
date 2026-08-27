@@ -51,7 +51,9 @@ type testServices struct {
 func setupTestServices(t *testing.T) *testServices {
 	t.Helper()
 
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	// 与生产 DSN 一致携带 busy_timeout，否则共享内存库上并发事务撞锁会立刻报
+	// database is locked，而不是像生产一样等待持锁事务提交（并发用例会偶发失败）。
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
