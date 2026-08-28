@@ -113,7 +113,7 @@ GET /api/projects/:project_id/issues/filter-options
 | `workflow_status` | string | 否 | `todo` / `in_progress` / `done`；建议不传，保持未设置 |
 | `source` | string | 否 | `internal`（默认）或 `github` |
 
-创建响应中的 `id`（UUID）用于后续更新；`reference` 为短编号（如 `INT-1`）。
+创建响应中的 `id`（UUID）用于后续更新；`reference` 为短编号（如 `INT-1`）。用户侧网页地址为 `{base_url}/projects/{project_id}/issues/{id}`（Web 前端与 API 同源，路由里的 `iid` 也只认 UUID）。
 
 **3b. 打标** — `PUT /api/issues/:issue_id`
 
