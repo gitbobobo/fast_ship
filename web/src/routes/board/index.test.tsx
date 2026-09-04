@@ -1,6 +1,12 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { copyWithToastMock } = vi.hoisted(() => ({
+  copyWithToastMock: vi.fn(),
+}));
+
+vi.mock("@/lib/copy", () => ({ copyWithToast: copyWithToastMock }));
 
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProjects: () => ({
@@ -129,5 +135,67 @@ describe("BoardPage select preview", () => {
     fireEvent.keyUp(window, { key: "Control", ctrlKey: false });
 
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+});
+
+describe("BoardPage batch copy", () => {
+  beforeEach(() => {
+    copyWithToastMock.mockReset();
+    copyWithToastMock.mockResolvedValue(true);
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe() {}
+        disconnect() {}
+        unobserve() {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function waitForCopySettled() {
+    await waitFor(() => expect(copyWithToastMock).toHaveBeenCalledTimes(1));
+    await copyWithToastMock.mock.results[0].value;
+  }
+
+  async function enterMultiSelectWithOneIssue() {
+    await renderBoardPage();
+    fireEvent.click(screen.getByRole("button", { name: "进入多选模式" }));
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
+    expect(
+      screen.getByRole("button", { name: "退出多选模式" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("已选 1")).toBeInTheDocument();
+  }
+
+  it("exits multi-select after a successful copy", async () => {
+    await enterMultiSelectWithOneIssue();
+
+    fireEvent.click(screen.getByRole("button", { name: /复制提示词/ }));
+    await waitForCopySettled();
+
+    expect(
+      screen.getByRole("button", { name: "进入多选模式" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("新建问题")).toBeInTheDocument();
+    expect(screen.queryByText("已选 1")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("stays in multi-select when copy fails", async () => {
+    copyWithToastMock.mockResolvedValue(false);
+    await enterMultiSelectWithOneIssue();
+
+    fireEvent.click(screen.getByRole("button", { name: /复制提示词/ }));
+    await waitForCopySettled();
+
+    expect(
+      screen.getByRole("button", { name: "退出多选模式" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("已选 1")).toBeInTheDocument();
+    expect(screen.getAllByRole("checkbox").length).toBeGreaterThan(0);
   });
 });

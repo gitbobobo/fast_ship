@@ -9,7 +9,7 @@ interface BoardBatchCopyButtonProps {
   projectId: string;
   selectedCount: number;
   getOrderedSelectedIssues: () => Issue[];
-  /** 复制成功后的回调（看板页传 clearSelection：清空勾选但留在多选模式）。 */
+  /** 选中集批量操作成功后的回调。看板页传 exit：退出多选并清空勾选。 */
   onCopied: () => void;
 }
 
@@ -17,7 +17,7 @@ interface BoardBatchCopyButtonProps {
  * 多选模式下的批量复制提示词按钮。
  *
  * 只列出 supports_batch 的模板；恰好一个时直接复制，多个时下拉选择。
- * 复制成功后清空勾选（onCopied），失败保持勾选。
+ * 复制成功后调用 onCopied，失败不调用（保持勾选和模式）。
  */
 export function BoardBatchCopyButton({
   projectId,

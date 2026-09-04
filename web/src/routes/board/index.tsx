@@ -94,7 +94,7 @@ export default function BoardPage() {
     toggleMode,
     selectIssue,
     handleColumnIssuesChange,
-    clearSelection,
+    exit,
     getOrderedSelectedIssues,
   } = useBoardMultiSelect(activeProjectId);
 
@@ -179,7 +179,7 @@ export default function BoardPage() {
                       projectId={activeProjectId}
                       selectedCount={selectedCount}
                       getOrderedSelectedIssues={getOrderedSelectedIssues}
-                      onCopied={clearSelection}
+                      onCopied={exit}
                     />
                   </>
                 ) : (

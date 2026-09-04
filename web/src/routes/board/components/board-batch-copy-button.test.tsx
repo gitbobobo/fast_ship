@@ -209,7 +209,7 @@ describe("BoardBatchCopyButton", () => {
     expect(onCopied).toHaveBeenCalledTimes(1);
   });
 
-  it("复制失败时不调用 onCopied（保持勾选）", async () => {
+  it("复制失败时不调用 onCopied（保持勾选和模式）", async () => {
     copyWithToastMock.mockResolvedValue(false);
     const { onCopied } = setup();
 
