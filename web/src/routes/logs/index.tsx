@@ -185,10 +185,6 @@ export default function LogsPage() {
     }
   };
 
-  const handleCopyRunId = (runId: string) => {
-    void copyWithToast(runId, "已复制运行 ID");
-  };
-
   return (
     <>
       <Header
@@ -326,60 +322,53 @@ export default function LogsPage() {
             ) : (
               <div className="space-y-3" data-testid="log-run-list">
                 {runs.map((run) => (
-                  <Link
+                  <Card
                     key={run.run_id}
-                    to={`/logs/${run.run_id}?project=${activeProjectId}`}
-                    className="group block"
+                    className="transition-all hover:border-primary/50 hover:shadow-sm"
                   >
-                    <Card className="cursor-pointer transition-all hover:border-primary/50 hover:shadow-sm">
-                      <CardContent className="p-4 space-y-3">
-                        <div className="flex flex-wrap items-start gap-3">
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <p className="whitespace-pre-wrap text-sm font-medium group-hover:text-primary">
-                              {run.description || "（无说明）"}
-                            </p>
-                            <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                              <span>{run.entry_count} 条</span>
-                              <span className="font-mono">run:{run.run_id}</span>
-                              {run.source && <span>src:{run.source}</span>}
-                              <span>最近 {formatTime(run.last_entry_at)}</span>
-                            </div>
+                    <CardContent className="p-4">
+                      <div className="flex flex-wrap items-start gap-3">
+                        <Link
+                          to={`/logs/${run.run_id}?project=${activeProjectId}`}
+                          className="group min-w-0 flex-1 space-y-1"
+                        >
+                          <p className="whitespace-pre-wrap text-sm font-medium group-hover:text-primary">
+                            {run.description || "（无说明）"}
+                          </p>
+                          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                            <span>{run.entry_count} 条</span>
+                            <span className="font-mono">run:{run.run_id}</span>
+                            {run.source && <span>src:{run.source}</span>}
+                            <span>最近 {formatTime(run.last_entry_at)}</span>
                           </div>
-                          <div
-                            className="flex items-center gap-1"
-                            onClick={(e) => e.preventDefault()}
+                        </Link>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7"
+                            title={run.run_id}
+                            onClick={() =>
+                              void copyWithToast(run.run_id, "已复制运行 ID")
+                            }
                           >
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7"
-                              title={run.run_id}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleCopyRunId(run.run_id);
-                              }}
-                            >
-                              <Copy className="h-3.5 w-3.5" />
-                              复制运行 ID
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 text-destructive"
-                              disabled={deleteRun.isPending}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setPendingDeleteRunId(run.run_id);
-                              }}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              删除
-                            </Button>
-                          </div>
+                            <Copy className="h-3.5 w-3.5" />
+                            复制运行 ID
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-destructive"
+                            disabled={deleteRun.isPending}
+                            onClick={() => setPendingDeleteRunId(run.run_id)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                            删除
+                          </Button>
                         </div>
-                      </CardContent>
-                    </Card>
-                  </Link>
+                      </div>
+                    </CardContent>
+                  </Card>
                 ))}
               </div>
             )}

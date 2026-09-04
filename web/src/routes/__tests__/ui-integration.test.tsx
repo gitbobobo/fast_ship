@@ -69,6 +69,16 @@ const mockUser = {
 
 const mockLogout = vi.fn();
 
+function withHistoryIdx(idx: number, run: () => void) {
+  const previousState = window.history.state;
+  window.history.replaceState({ idx }, "");
+  try {
+    run();
+  } finally {
+    window.history.replaceState(previousState, "");
+  }
+}
+
 function renderWithProviders(ui: React.ReactElement, { initialEntry = "/" } = {}) {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -134,22 +144,38 @@ describe("UI Integration Tests", () => {
       expect(screen.getByRole("button", { name: "返回" })).toBeInTheDocument();
     });
 
-    it("falls back to projects when browser history is not available", () => {
+    it("disables back when the browser history stack has no previous entry", () => {
+      // idx 只让 Header 认为「无上一页」；与 MemoryRouter 栈无关（BrowserRouter 私有字段）
+      withHistoryIdx(0, () => {
+        renderWithProviders(<Header title="测试" />, {
+          initialEntry: "/projects/proj-1",
+        });
+
+        expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+      });
+    });
+
+    it("goes back to the previous history entry", () => {
       function LocationProbe() {
         return <div data-testid="location-path">{useLocation().pathname}</div>;
       }
 
-      renderWithProviders(
-        <>
-          <Header title="测试" />
-          <LocationProbe />
-        </>,
-        { initialEntry: "/projects/proj-1" },
-      );
+      // idx 只让 Header 认为「有上一页」；实际后退走 MemoryRouter 的 initialEntries/initialIndex
+      withHistoryIdx(1, () => {
+        render(
+          <MemoryRouter
+            initialEntries={["/logs", "/logs/run-1"]}
+            initialIndex={1}
+          >
+            <Header title="测试" />
+            <LocationProbe />
+          </MemoryRouter>,
+        );
 
-      fireEvent.click(screen.getByRole("button", { name: "返回" }));
+        fireEvent.click(screen.getByRole("button", { name: "返回" }));
 
-      expect(screen.getByTestId("location-path")).toHaveTextContent("/projects");
+        expect(screen.getByTestId("location-path")).toHaveTextContent("/logs");
+      });
     });
   });
 

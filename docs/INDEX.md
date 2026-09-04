@@ -128,7 +128,6 @@ Quick lookup: find which module documents any file in this repo.
 | `web/src/lib/hooks/use-artifacts.ts` | web-hooks | `modules/web-hooks.md` |
 | `web/src/lib/hooks/use-ai.ts` | web-hooks | `modules/web-hooks.md` |
 | `web/src/lib/hooks/use-api-keys.ts` | web-hooks | `modules/web-hooks.md` |
-| `web/src/lib/hooks/use-navigation-history.ts` | web-hooks | `modules/web-hooks.md` |
 | `web/src/lib/store/auth-store.ts` | web-state | `modules/web-state.md` |
 | `web/src/lib/store/theme-store.ts` | web-state | `modules/web-state.md` |
 | `web/src/lib/issue-list-context.ts` | web-state | `modules/web-state.md` |

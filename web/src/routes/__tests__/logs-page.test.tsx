@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import LogsPage from "@/routes/logs/index";
 
 const { listRunsMock, copyWithToastMock } = vi.hoisted(() => ({
@@ -69,6 +69,10 @@ function renderLogs() {
       <MemoryRouter initialEntries={["/logs?project=proj-1"]}>
         <Routes>
           <Route path="/logs" element={<LogsPage />} />
+          <Route
+            path="/logs/:runId"
+            element={<div data-testid="log-detail">detail</div>}
+          />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -76,6 +80,10 @@ function renderLogs() {
 }
 
 describe("LogsPage run list", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("renders run list instead of cross-run entry stream", async () => {
     renderLogs();
 
@@ -85,5 +93,47 @@ describe("LogsPage run list", () => {
     expect(screen.getByText("阶段说明")).toBeInTheDocument();
     expect(screen.getByText("复制运行 ID")).toBeInTheDocument();
     expect(screen.queryByPlaceholderText("搜索消息内容")).not.toBeInTheDocument();
+  });
+
+  it("opens run detail when clicking the run description", async () => {
+    renderLogs();
+
+    await waitFor(() => {
+      expect(screen.getByText("阶段说明")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("阶段说明"));
+
+    expect(screen.getByTestId("log-detail")).toBeInTheDocument();
+  });
+
+  it("does not open run detail when copying the run id", async () => {
+    renderLogs();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "复制运行 ID" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "复制运行 ID" }));
+
+    expect(copyWithToastMock).toHaveBeenCalledWith("run-1", "已复制运行 ID");
+    expect(screen.queryByTestId("log-detail")).not.toBeInTheDocument();
+    expect(screen.getByTestId("log-run-list")).toBeInTheDocument();
+  });
+
+  it("does not open run detail when clicking delete", async () => {
+    renderLogs();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    expect(screen.queryByTestId("log-detail")).not.toBeInTheDocument();
+    expect(screen.getByTestId("log-run-list")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "删除该运行日志？" }),
+    ).toBeInTheDocument();
   });
 });

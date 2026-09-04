@@ -18,7 +18,6 @@ TanStack Query hooks。封装所有服务端数据获取逻辑，使用 React Qu
 | `useArtifacts` | `use-artifacts.ts` | 产物上传和下载 |
 | `useAISettings` | `use-ai.ts` | AI 设置 |
 | `useApiKeys` | `use-api-keys.ts` | API Key CRUD |
-| `useNavigationHistory` | `use-navigation-history.ts` | 导航历史记录管理 |
 
 ## Internal Structure
 
@@ -30,7 +29,6 @@ TanStack Query hooks。封装所有服务端数据获取逻辑，使用 React Qu
 | `web/src/lib/hooks/use-artifacts.ts` | 产物上传/下载 hooks |
 | `web/src/lib/hooks/use-ai.ts` | AI 设置和 Checklist 建议 |
 | `web/src/lib/hooks/use-api-keys.ts` | API Key 管理 hooks |
-| `web/src/lib/hooks/use-navigation-history.ts` | 浏览器导航历史工具 |
 
 ## Dependencies
 

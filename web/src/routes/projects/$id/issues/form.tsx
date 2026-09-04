@@ -50,8 +50,6 @@ export default function IssueFormPage() {
 
   const issueDetailSearch = searchParams.toString();
 
-  const issueDetailPath = id && iid ? `/projects/${id}/issues/${iid}` : null;
-  const headerBackFallback = issueDetailPath ?? (id ? `/issues?project=${id}` : "/issues");
   const formId = isEdit ? "issue-form-edit" : "issue-form-new";
 
   const handleSubmit = async (values: InternalIssueFormInput) => {
@@ -116,7 +114,7 @@ export default function IssueFormPage() {
   if (isEdit && isLoading) {
     return (
       <>
-        <Header title="编辑问题" backFallback={headerBackFallback} />
+        <Header title="编辑问题" />
         <div className="w-full px-4 py-4 md:px-6 md:py-6">
           <Skeleton className="h-[calc(100vh-220px)] rounded-2xl" />
         </div>
@@ -127,7 +125,7 @@ export default function IssueFormPage() {
   if (isEdit && !issue) {
     return (
       <>
-        <Header title="编辑问题" backFallback={headerBackFallback} />
+        <Header title="编辑问题" />
         <div className="w-full px-4 py-4 md:px-6 md:py-6">
           <Card>
             <CardContent className="space-y-4 p-6 text-center">
@@ -160,7 +158,7 @@ export default function IssueFormPage() {
   if (isEdit && issue && issue.source !== "internal") {
     return (
       <>
-        <Header title="编辑问题" backFallback={headerBackFallback} />
+        <Header title="编辑问题" />
         <div className="w-full px-4 py-4 md:px-6 md:py-6">
           <Card className="border-amber-500/20 bg-amber-500/5">
             <CardHeader className="space-y-3 border-b py-5">
@@ -206,7 +204,6 @@ export default function IssueFormPage() {
     <>
       <Header
         title={pageTitle}
-        backFallback={headerBackFallback}
         actions={
           <HeaderActions
             primary={

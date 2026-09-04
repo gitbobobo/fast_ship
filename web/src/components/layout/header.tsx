@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import { MobileNav } from "./sidebar";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,33 +9,28 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ChevronLeft, PanelLeftClose, PanelLeftOpen } from "lucide-react";
-import { useNavigationHistory } from "@/lib/hooks/use-navigation-history";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
+
+function hasPreviousRouterEntry(locationKey: string): boolean {
+  if (typeof locationKey !== "string") {
+    return false;
+  }
+  const idx = window.history.state?.idx;
+  return typeof idx === "number" && idx > 0;
+}
 
 export function Header({
   title,
-  backFallback = "/projects",
   actions,
 }: {
   title?: string;
-  backFallback?: string;
   actions?: ReactNode;
 }) {
   const navigate = useNavigate();
-  const { canGoBack, canUseBrowserHistory } = useNavigationHistory();
+  const location = useLocation();
+  const canGoBack = hasPreviousRouterEntry(location.key);
   const collapsed = useSidebarStore((s) => s.collapsed);
   const toggleSidebar = useSidebarStore((s) => s.toggle);
-
-  const handleGoBack = () => {
-    if (!canGoBack) return;
-
-    if (canUseBrowserHistory) {
-      navigate(-1);
-      return;
-    }
-
-    navigate(backFallback);
-  };
 
   return (
     <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b bg-background/80 px-4 backdrop-blur-sm md:px-6">
@@ -67,7 +62,7 @@ export function Header({
         size="icon"
         className="h-8 w-8"
         disabled={!canGoBack}
-        onClick={handleGoBack}
+        onClick={() => navigate(-1)}
         aria-label="返回"
       >
         <ChevronLeft className="h-4 w-4" />
