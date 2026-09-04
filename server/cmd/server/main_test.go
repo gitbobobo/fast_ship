@@ -631,3 +631,99 @@ func TestDropLegacyCollabTables_CopyFailureWhenDocumentsTableMissing(t *testing.
 		t.Fatalf("expected issue_collab_summaries to remain when documents table is missing")
 	}
 }
+
+func TestBackfillIssueReadStates_ScansSQLiteTextTimestamps(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.User{},
+		&model.Project{},
+		&model.Issue{},
+		&model.IssueComment{},
+		&model.IssueReadState{},
+		&model.IssueReadCatchup{},
+	); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if err := db.Create(&model.User{
+		ID: "user-1", Username: "u", Email: "u@example.com", PasswordHash: "x",
+		CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if err := db.Create(&model.Project{
+		ID: "proj-1", UserID: "user-1", Name: "demo", CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	// 存量库常见两种 TEXT 时间：空格分隔 + T 分隔。Raw Scan 进 time.Time 会炸。
+	if err := db.Exec(`
+		INSERT INTO issues (id, project_id, source, sequence_number, state, title, body, created_at, updated_at)
+		VALUES
+		  ('issue-space', 'proj-1', 'github', 1, 'open', 'a', '', '2026-09-03 08:00:00+00:00', '2026-09-03 08:00:00+00:00'),
+		  ('issue-t', 'proj-1', 'github', 2, 'open', 'b', '', '2026-09-03T09:00:00+00:00', '2026-09-03T09:00:00+00:00'),
+		  ('issue-internal', 'proj-1', 'internal', 3, 'open', 'c', '', '2026-09-03 08:00:00+00:00', '2026-09-03 08:00:00+00:00')
+	`).Error; err != nil {
+		t.Fatalf("seed issues: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO issue_comments (id, issue_id, source, github_comment_id, body, created_at, updated_at)
+		VALUES ('c1', 'issue-t', 'github', 1, '评论', '2026-09-03T11:00:00+00:00', '2026-09-03T11:00:00+00:00')
+	`).Error; err != nil {
+		t.Fatalf("seed comment: %v", err)
+	}
+
+	if err := backfillIssueReadStates(db, zap.NewNop()); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if err := backfillIssueReadStates(db, zap.NewNop()); err != nil {
+		t.Fatalf("idempotent backfill: %v", err)
+	}
+
+	assertReadAt := func(issueID, wantRFC3339 string) {
+		t.Helper()
+		var state model.IssueReadState
+		if err := db.Where("user_id = ? AND issue_id = ?", "user-1", issueID).First(&state).Error; err != nil {
+			t.Fatalf("load read state %s: %v", issueID, err)
+		}
+		got := state.LastReadAt.UTC().Format(time.RFC3339)
+		if got != wantRFC3339 {
+			t.Fatalf("issue %s last_read_at = %s, want %s", issueID, got, wantRFC3339)
+		}
+	}
+	assertReadAt("issue-space", "2026-09-03T08:00:00Z")
+	assertReadAt("issue-t", "2026-09-03T11:00:00Z")
+
+	var internalCount int64
+	if err := db.Model(&model.IssueReadState{}).Where("issue_id = ?", "issue-internal").Count(&internalCount).Error; err != nil {
+		t.Fatalf("count internal: %v", err)
+	}
+	if internalCount != 0 {
+		t.Fatalf("internal issue should not get a read watermark, got %d", internalCount)
+	}
+}
+
+func TestParseSQLiteTimestamp(t *testing.T) {
+	cases := []string{
+		"2026-09-03T10:00:00Z",
+		"2026-09-03T10:00:00+00:00",
+		"2026-09-03 10:00:00+00:00",
+		"2026-09-03 10:00:00",
+	}
+	want := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	for _, raw := range cases {
+		got, err := parseSQLiteTimestamp(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if !got.Equal(want) {
+			t.Fatalf("parse %q = %s, want %s", raw, got, want)
+		}
+	}
+}

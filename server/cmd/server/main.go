@@ -405,7 +405,7 @@ func backfillIssueReadStates(db *gorm.DB, logger *zap.Logger) error {
 		var rows []struct {
 			UserID    string
 			IssueID   string
-			Watermark time.Time
+			Watermark string
 		}
 		if err := tx.Raw(`
 			SELECT p.user_id AS user_id,
@@ -423,7 +423,11 @@ func backfillIssueReadStates(db *gorm.DB, logger *zap.Logger) error {
 
 		txReadRepo := repository.NewIssueReadStateRepository(tx)
 		for _, row := range rows {
-			if err := txReadRepo.Advance(row.UserID, row.IssueID, row.Watermark.UTC()); err != nil {
+			watermark, err := parseSQLiteTimestamp(row.Watermark)
+			if err != nil {
+				return fmt.Errorf("parse watermark for issue %s: %w", row.IssueID, err)
+			}
+			if err := txReadRepo.Advance(row.UserID, row.IssueID, watermark); err != nil {
 				return err
 			}
 		}
@@ -614,4 +618,30 @@ func hasSQLiteColumn(db *gorm.DB, tableName, columnName string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// SQLite 把 DATETIME 存成 TEXT。Raw Scan 进 time.Time 会被 glebarez 拒绝。
+func parseSQLiteTimestamp(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("empty timestamp")
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04:05",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unparsed timestamp %q", raw)
 }
