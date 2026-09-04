@@ -3,9 +3,12 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
+  type Query,
 } from "@tanstack/react-query";
 import { issueApi, type IssueListParams } from "@/lib/api/issues";
 import { type IssueSourceFilter } from "@/lib/issue-source";
+import { useEffect, useRef } from "react";
 
 interface UseIssuesFilters {
   state?: string;
@@ -252,6 +255,102 @@ export function useCreateIssueComment(issueId: string, projectId?: string) {
       }
     },
   });
+}
+
+/** 列表分页查询与看板无限滚动查询共用的缓存形态 */
+type IssueListCache = PaginatedData<Issue> | InfiniteData<PaginatedData<Issue>>;
+
+function isIssueListOrBoardQuery(query: Query): boolean {
+  const key = query.queryKey;
+  if (!Array.isArray(key) || key.length < 4) {
+    return false;
+  }
+  if (key[0] !== "projects" || key[2] !== "issues") {
+    return false;
+  }
+  if (key[3] === "board") {
+    return true;
+  }
+  if (
+    key[3] === "filter-options" ||
+    key[3] === "repo-labels" ||
+    key[3] === "batch-close-preview"
+  ) {
+    return false;
+  }
+  return key.length >= 11;
+}
+
+function issueListBoardCacheFilter(projectId: string) {
+  return {
+    predicate: (query: Query) =>
+      isIssueListOrBoardQuery(query) && query.queryKey[1] === projectId,
+  };
+}
+
+function clearUnreadInListCache(data: IssueListCache, issueId: string): IssueListCache {
+  if ("pages" in data) {
+    return {
+      ...data,
+      pages: data.pages.map((page) => ({
+        ...page,
+        items: page.items.map((issue) =>
+          issue.id === issueId ? { ...issue, unread_comments_count: 0 } : issue,
+        ),
+      })),
+    };
+  }
+  return {
+    ...data,
+    items: data.items.map((issue) =>
+      issue.id === issueId ? { ...issue, unread_comments_count: 0 } : issue,
+    ),
+  };
+}
+
+export function useMarkIssueRead(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => issueApi.markRead(issueId),
+    onSuccess: () => {
+      if (!projectId) {
+        return;
+      }
+      // mark-read 成功后才动缓存，仅更新列表与看板查询
+      queryClient.setQueriesData<IssueListCache>(
+        issueListBoardCacheFilter(projectId),
+        (data) => (data ? clearUnreadInListCache(data, issueId) : data),
+      );
+    },
+  });
+}
+
+/** 详情页在 Issue 与评论都加载成功后标记已读；失败不推进 ref，便于重试 */
+export function useMarkIssueReadWhenLoaded(
+  issue: Issue | undefined,
+  commentsLoaded: boolean,
+  projectId?: string,
+) {
+  const markRead = useMarkIssueRead(issue?.id ?? "", projectId);
+  const markedReadIssueIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!issue || issue.source !== "github") {
+      return;
+    }
+    if (!commentsLoaded) {
+      return;
+    }
+    if (markedReadIssueIdRef.current === issue.id) {
+      return;
+    }
+    markedReadIssueIdRef.current = issue.id;
+    markRead.mutate(undefined, {
+      onError: () => {
+        markedReadIssueIdRef.current = null;
+      },
+    });
+  }, [issue, commentsLoaded, markRead]);
 }
 
 export function useUpdateIssueInternalMeta(issueId: string, projectId?: string) {

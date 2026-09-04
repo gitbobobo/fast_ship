@@ -43,7 +43,7 @@ func (s *IssueService) loadChecklist(issueID string) ([]model.IssueChecklistItem
 	return items, nil
 }
 
-func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem, labelMap map[string]model.GitHubRepoLabel, shipHook *model.IssueShipHook) IssueResponse {
+func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem, labelMap map[string]model.GitHubRepoLabel, shipHook *model.IssueShipHook, unreadCount int) IssueResponse {
 	resp := IssueResponse{
 		ID:             issue.ID,
 		ProjectID:      issue.ProjectID,
@@ -59,9 +59,10 @@ func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInter
 			Login:     issue.AuthorLogin,
 			AvatarURL: githubmedia.RewriteMediaURL(issue.AuthorAvatarURL),
 		},
-		CreatedAt:    formatTime(issue.CreatedAt),
-		UpdatedAt:    formatTime(issue.UpdatedAt),
-		InternalMeta: s.toIssueInternalMetaResponse(issue.ProjectID, meta, checklist, labelMap),
+		CreatedAt:           formatTime(issue.CreatedAt),
+		UpdatedAt:           formatTime(issue.UpdatedAt),
+		UnreadCommentsCount: unreadCount,
+		InternalMeta:        s.toIssueInternalMetaResponse(issue.ProjectID, meta, checklist, labelMap),
 		ShipHook:     s.shipHookService.toIssueShipHookResponse(shipHook),
 	}
 	if issue.ClosedAt != nil {

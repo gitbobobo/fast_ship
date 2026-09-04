@@ -636,6 +636,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueShipHook{},
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
+		&model.IssueReadState{},
 		&model.IssueAsset{},
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
@@ -706,7 +707,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), fileStorage, cfg, zap.NewNop())
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
@@ -1639,5 +1640,104 @@ func TestRouterIssueShipHookRejectsAPIKeyWrites(t *testing.T) {
 				t.Fatalf("expected code %d, got %d", errs.ErrApiKeyForbidden.Code, envelope.Code)
 			}
 		})
+	}
+}
+
+func TestRouterIssueMarkReadConsumesUnread(t *testing.T) {
+	env := setupRouterTestEnv(t)
+
+	registerBody := []byte(`{"username":"markreader","email":"markreader@example.com","password":"Password123"}`)
+	registerReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(registerBody))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerRec := httptest.NewRecorder()
+	env.router.ServeHTTP(registerRec, registerReq)
+	if registerRec.Code != http.StatusOK {
+		t.Fatalf("expected register 200, got %d: %s", registerRec.Code, registerRec.Body.String())
+	}
+	var registerResp struct {
+		Token string `json:"token"`
+		User  struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	decodeRouterEnvelope(t, registerRec, &registerResp)
+
+	project := createRouterTestProject(t, env.db, registerResp.User.ID)
+	issue := createRouterTestIssue(t, env.db, project.ID)
+	base := time.Now().UTC().Add(-24 * time.Hour)
+	seedComment := func(githubCommentID int64, body string, createdAt time.Time) {
+		if err := env.db.Create(&model.IssueComment{
+			ID:              uuid.NewString(),
+			IssueID:         issue.ID,
+			Source:          model.IssueSourceGitHub,
+			GitHubCommentID: githubCommentID,
+			Body:            body,
+			AuthorLogin:     "bob",
+			GitHubCreatedAt: createdAt,
+			GitHubUpdatedAt: createdAt,
+		}).Error; err != nil {
+			t.Fatalf("create comment: %v", err)
+		}
+	}
+	seedComment(1, "最早的一条", base)
+	seedComment(2, model.FastShipHookCommentMarker+"ship-1 -->", base.Add(time.Hour))
+	seedComment(3, "最新的一条", base.Add(2*time.Hour))
+
+	type listedIssue struct {
+		ID                  string `json:"id"`
+		UnreadCommentsCount int    `json:"unread_comments_count"`
+	}
+	listIssues := func() []listedIssue {
+		req := httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/issues", nil)
+		req.Header.Set("Authorization", "Bearer "+registerResp.Token)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected list 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var data struct {
+			Items []listedIssue `json:"items"`
+		}
+		decodeRouterEnvelope(t, rec, &data)
+		return data.Items
+	}
+
+	// 打开详情前：未读 = 2，发货钩子留言不计入
+	items := listIssues()
+	if len(items) != 1 || items[0].UnreadCommentsCount != 2 {
+		t.Fatalf("unexpected unread list: %+v", items)
+	}
+
+	// API Key 不消未读
+	rawKey := "MARKREADKEY1234567890123"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    registerResp.User.ID,
+		Name:      "CI-MarkRead",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	apiKeyReq := httptest.NewRequest(http.MethodPost, "/api/issues/"+issue.ID+"/read", nil)
+	apiKeyReq.Header.Set("Authorization", "Bearer "+service.FormatApiKey(rawKey))
+	apiKeyRec := httptest.NewRecorder()
+	env.router.ServeHTTP(apiKeyRec, apiKeyReq)
+	if apiKeyRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for API Key mark-read, got %d: %s", apiKeyRec.Code, apiKeyRec.Body.String())
+	}
+
+	// JWT mark-read 成功后未读清零
+	readReq := httptest.NewRequest(http.MethodPost, "/api/issues/"+issue.ID+"/read", nil)
+	readReq.Header.Set("Authorization", "Bearer "+registerResp.Token)
+	readRec := httptest.NewRecorder()
+	env.router.ServeHTTP(readRec, readReq)
+	if readRec.Code != http.StatusOK {
+		t.Fatalf("expected mark-read 200, got %d: %s", readRec.Code, readRec.Body.String())
+	}
+	items = listIssues()
+	if len(items) != 1 || items[0].UnreadCommentsCount != 0 {
+		t.Fatalf("unread should be consumed after mark-read: %+v", items)
 	}
 }

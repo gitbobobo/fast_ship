@@ -10,7 +10,6 @@ import {
   ExternalLink,
   Inbox,
   Link2,
-  MessageSquare,
   Package,
   Pencil,
   Plus,
@@ -59,6 +58,7 @@ import {
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
+import { IssueCommentCountMeta } from "@/components/issues/issue-comment-count-meta";
 import { cn } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
 import { ensureGitHubLinked, hasGitHubRepo } from "@/lib/utils/github";
@@ -876,10 +876,10 @@ export default function IssuesPage() {
                             </span>
                           )}
                           {issue.github && (
-                            <span className="inline-flex items-center gap-1">
-                              <MessageSquare className="h-3 w-3" />
-                              {issue.github.comments_count} 条评论
-                            </span>
+                            <IssueCommentCountMeta
+                              commentsCount={issue.github.comments_count}
+                              unreadCount={issue.unread_comments_count}
+                            />
                           )}
                         </div>
                       </div>

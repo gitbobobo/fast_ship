@@ -30,6 +30,7 @@ const issue: Issue = {
     login: "gitbobobo",
     avatar_url: "",
   },
+  unread_comments_count: 0,
   created_at: "2026-05-14T12:00:00Z",
   updated_at: "2026-05-14T12:00:00Z",
   internal_meta: {
@@ -295,6 +296,73 @@ describe("BoardIssueCard", () => {
     fireEvent.pointerDown(screen.getByRole("link", { name: `${issue.reference} ${issue.title}` }));
 
     expect(onPointerDown).not.toHaveBeenCalled();
+  });
+
+  describe("unread comments", () => {
+    it("outlines the card in github blue and names the unread state", () => {
+      renderInRouter(
+        <BoardIssueCard issue={{ ...issue, unread_comments_count: 3 }} />,
+      );
+
+      const card = getCardElement();
+
+      expect(card).toHaveClass("outline-github-accent");
+      expect(card).toHaveAttribute(
+        "aria-label",
+        `${issue.reference} ${issue.title}，有未读评论`,
+      );
+    });
+
+    it("keeps the default border once everything is read", () => {
+      renderInRouter(<BoardIssueCard issue={issue} />);
+
+      const card = getCardElement();
+
+      expect(card).not.toHaveClass("outline-github-accent");
+      expect(card).not.toHaveAttribute("aria-label");
+    });
+
+    it("ignores unread counts on internal issues", () => {
+      renderInRouter(
+        <BoardIssueCard
+          issue={{
+            ...issue,
+            source: "internal",
+            github: undefined,
+            unread_comments_count: 5,
+          }}
+        />,
+      );
+
+      const card = getCardElement();
+
+      expect(card).not.toHaveClass("outline-github-accent");
+      expect(card).not.toHaveAttribute("aria-label");
+    });
+
+    it("keeps the unread outline on the drag overlay", () => {
+      renderInRouter(
+        <BoardIssueCardOverlay issue={{ ...issue, unread_comments_count: 2 }} />,
+      );
+
+      expect(getCardElement()).toHaveClass("outline-github-accent");
+    });
+
+    it("shows unread outline and selected border together in multi-select", () => {
+      renderWithSelection(
+        <BoardIssueCard issue={{ ...issue, unread_comments_count: 2 }} />,
+        {
+          multiSelectMode: true,
+          selectedIssueIds: new Set([issue.id]),
+        },
+      );
+
+      const card = getCardElementByTitle();
+
+      expect(card).toHaveClass("outline-github-accent");
+      expect(card).toHaveClass("border-primary");
+      expect(card).toHaveClass("ring-primary/30");
+    });
   });
 
   describe("multi-select mode", () => {

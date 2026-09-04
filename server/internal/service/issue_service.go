@@ -50,6 +50,7 @@ type IssueService struct {
 	projectRepo         *repository.ProjectRepository
 	userRepo            *repository.UserRepository
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository
+	readStateRepo       *repository.IssueReadStateRepository
 	storage             storage.Storage
 	cfg                 *config.Config
 	logger              *zap.Logger
@@ -148,23 +149,24 @@ type IssueGitHubResponse struct {
 }
 
 type IssueResponse struct {
-	ID             string                     `json:"id"`
-	ProjectID      string                     `json:"project_id"`
-	Source         model.IssueSource          `json:"source"`
-	SequenceNumber int                        `json:"sequence_number"`
-	Reference      string                     `json:"reference"`
-	State          model.IssueState           `json:"state"`
-	StateReason    string                     `json:"state_reason"`
-	Title          string                     `json:"title"`
-	Body           string                     `json:"body"`
-	BodyHTML       string                     `json:"body_html"`
-	Author         IssueActorResponse         `json:"author"`
-	CreatedAt      string                     `json:"created_at"`
-	UpdatedAt      string                     `json:"updated_at"`
-	ClosedAt       *string                    `json:"closed_at"`
-	InternalMeta   *IssueInternalMetaResponse `json:"internal_meta,omitempty"`
-	ShipHook       *IssueShipHookResponse     `json:"ship_hook,omitempty"`
-	GitHub         *IssueGitHubResponse       `json:"github,omitempty"`
+	ID                  string                     `json:"id"`
+	ProjectID           string                     `json:"project_id"`
+	Source              model.IssueSource          `json:"source"`
+	SequenceNumber      int                        `json:"sequence_number"`
+	Reference           string                     `json:"reference"`
+	State               model.IssueState           `json:"state"`
+	StateReason         string                     `json:"state_reason"`
+	Title               string                     `json:"title"`
+	Body                string                     `json:"body"`
+	BodyHTML            string                     `json:"body_html"`
+	Author              IssueActorResponse         `json:"author"`
+	CreatedAt           string                     `json:"created_at"`
+	UpdatedAt           string                     `json:"updated_at"`
+	ClosedAt            *string                    `json:"closed_at"`
+	UnreadCommentsCount int                        `json:"unread_comments_count"`
+	InternalMeta        *IssueInternalMetaResponse `json:"internal_meta,omitempty"`
+	ShipHook            *IssueShipHookResponse     `json:"ship_hook,omitempty"`
+	GitHub              *IssueGitHubResponse       `json:"github,omitempty"`
 }
 
 type IssueCommentResponse struct {
@@ -293,6 +295,7 @@ func NewIssueService(
 	projectRepo *repository.ProjectRepository,
 	userRepo *repository.UserRepository,
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository,
+	readStateRepo *repository.IssueReadStateRepository,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -311,6 +314,7 @@ func NewIssueService(
 		projectRepo:         projectRepo,
 		userRepo:            userRepo,
 		githubRepoLabelRepo: githubRepoLabelRepo,
+		readStateRepo:       readStateRepo,
 		storage:             storage,
 		cfg:                 cfg,
 		logger:              logger,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -92,6 +93,8 @@ func main() {
 		&model.IssueShipHook{},
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
+		&model.IssueReadState{},
+		&model.IssueReadCatchup{},
 		&model.IssueAsset{},
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
@@ -130,6 +133,9 @@ func main() {
 	if err := backfillIssueAssetStatusModel(db); err != nil {
 		log.Fatalf("问题资源数据迁移失败: %v", err)
 	}
+	if err := backfillIssueReadStates(db, zapLogger); err != nil {
+		log.Fatalf("已读水位数据迁移失败: %v", err)
+	}
 
 	// 初始化存储
 	fileStorage := storage.NewLocalStorage(cfg.Upload.StoragePath)
@@ -144,6 +150,7 @@ func main() {
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
 	issueGitHubMetaRepo := repository.NewIssueGitHubMetaRepository(db)
+	issueReadStateRepo := repository.NewIssueReadStateRepository(db)
 	issueCommentRepo := repository.NewIssueCommentRepository(db)
 	issueTimelineRepo := repository.NewIssueTimelineRepository(db)
 	issueInternalMetaRepo := repository.NewIssueInternalMetaRepository(db)
@@ -169,7 +176,7 @@ func main() {
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, fileStorage, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, fileStorage, cfg, zapLogger)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
@@ -382,6 +389,52 @@ func backfillIssueAssetStatusModel(db *gorm.DB) error {
 		SET status = 'attached'
 		WHERE status IS NULL OR status = ''
 	`).Error
+}
+
+func backfillIssueReadStates(db *gorm.DB, logger *zap.Logger) error {
+	var catchup model.IssueReadCatchup
+	if err := db.First(&catchup).Error; err == nil {
+		return nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	now := time.Now().UTC()
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		var rows []struct {
+			UserID    string
+			IssueID   string
+			Watermark time.Time
+		}
+		if err := tx.Raw(`
+			SELECT p.user_id AS user_id,
+			       i.id AS issue_id,
+			       COALESCE(
+			         (SELECT MAX(c.created_at) FROM issue_comments c WHERE c.issue_id = i.id),
+			         i.updated_at
+			       ) AS watermark
+			FROM issues i
+			JOIN projects p ON p.id = i.project_id
+			WHERE i.source = ?
+		`, string(model.IssueSourceGitHub)).Scan(&rows).Error; err != nil {
+			return err
+		}
+
+		txReadRepo := repository.NewIssueReadStateRepository(tx)
+		for _, row := range rows {
+			if err := txReadRepo.Advance(row.UserID, row.IssueID, row.Watermark.UTC()); err != nil {
+				return err
+			}
+		}
+
+		if err := tx.Create(&model.IssueReadCatchup{ID: 1, CompletedAt: now}).Error; err != nil {
+			return err
+		}
+
+		logger.Info("已为存量 GitHub Issue 写入已读水位")
+		return nil
+	})
 }
 
 func dropLegacyLogTables(db *gorm.DB, logger *zap.Logger) {

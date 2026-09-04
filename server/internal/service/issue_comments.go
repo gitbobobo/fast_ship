@@ -86,6 +86,8 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 		if err := s.commentRepo.Upsert(comment); err != nil {
 			return nil, errs.ErrInternal
 		}
+		// 用户自己发的评论把已读水位推到该评论时间，这条 Issue 顺带变已读
+		s.advanceReadWatermark(issueID, userID, comment.GitHubCreatedAt)
 
 		now := time.Now().UTC()
 		updatedAt := comment.GitHubUpdatedAt

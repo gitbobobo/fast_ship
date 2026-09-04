@@ -136,7 +136,7 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		return nil, err
 	}
 
-	resp := s.toIssueResponse(*stored, meta, nil, nil, nil)
+	resp := s.toIssueResponse(*stored, meta, nil, nil, nil, 0)
 	return &resp, nil
 }
 
@@ -194,7 +194,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 		return nil, err
 	}
 
-	resp := s.toIssueResponse(*stored, meta, nil, nil, nil)
+	resp := s.toIssueResponse(*stored, meta, nil, nil, nil, 0)
 	return &resp, nil
 }
 
@@ -312,7 +312,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if err != nil {
 			return nil, err
 		}
-		resp := s.toIssueResponse(*stored, meta, nil, nil, nil)
+		resp := s.toIssueResponse(*stored, meta, nil, nil, nil, 0)
 		return &resp, nil
 	}
 	if issue.Source != model.IssueSourceInternal {
@@ -405,7 +405,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	if err != nil {
 		return nil, err
 	}
-	resp := s.toIssueResponse(*issue, meta, nil, nil, nil)
+	resp := s.toIssueResponse(*issue, meta, nil, nil, nil, 0)
 	return &resp, nil
 }
 

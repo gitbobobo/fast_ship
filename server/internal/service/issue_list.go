@@ -70,9 +70,21 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 		return nil, 0, err
 	}
 
+	unread, err := s.unreadCountsByIssueIDs(userID, pageIssues)
+	if err != nil {
+		return nil, 0, errs.ErrInternal
+	}
+
 	resp := make([]IssueResponse, 0, len(pageIssues))
 	for _, issue := range pageIssues {
-		resp = append(resp, s.toIssueResponse(issue, metaByIssueID[issue.ID], nil, labelMap, shipHooksByIssueID[issue.ID]))
+		resp = append(resp, s.toIssueResponse(
+			issue,
+			metaByIssueID[issue.ID],
+			nil,
+			labelMap,
+			shipHooksByIssueID[issue.ID],
+			int(unread[issue.ID]),
+		))
 	}
 	return resp, total, nil
 }
@@ -349,6 +361,6 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 		return nil, err
 	}
 
-	resp := s.toIssueResponse(*issue, meta, checklist, nil, shipHook)
+	resp := s.toIssueResponse(*issue, meta, checklist, nil, shipHook, 0)
 	return &resp, nil
 }

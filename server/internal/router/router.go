@@ -122,6 +122,8 @@ func Setup(
 		api.POST("/issues/:iid/checklist-suggestions", middleware.RequireAuth(cfg, apiKeyRepo, authService), aiHandler.SuggestIssueChecklist)
 		// JWT 必须 — Issue 评论
 		api.POST("/issues/:iid/comments", middleware.RequireJWT(cfg, authService), issueHandler.CreateComment)
+		// JWT 必须 — 标记 Issue 评论已读（GET 与 API Key 不消未读）
+		api.POST("/issues/:iid/read", middleware.RequireJWT(cfg, authService), issueHandler.MarkRead)
 
 		// JWT 必须 — 版本删除和发货
 		api.DELETE("/versions/:vid", middleware.RequireJWT(cfg, authService), versionHandler.Delete)

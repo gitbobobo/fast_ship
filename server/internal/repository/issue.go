@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -214,6 +215,26 @@ func (r *IssueCommentRepository) ListAllByIssueID(issueID string) ([]model.Issue
 		Order("created_at ASC, id ASC").
 		Find(&comments).Error
 	return comments, err
+}
+
+// MaxCreatedAt 返回该 Issue 本地评论的最新 created_at，没有评论时返回 nil。
+// 已读水位对齐它，避免用服务器当前时间漏掉时钟偏差内刚同步的评论。
+func (r *IssueCommentRepository) MaxCreatedAt(issueID string) (*time.Time, error) {
+	var row struct {
+		CreatedAt time.Time `gorm:"column:created_at"`
+	}
+	err := r.db.Model(&model.IssueComment{}).
+		Select("created_at").
+		Where("issue_id = ?", issueID).
+		Order("created_at DESC").
+		First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &row.CreatedAt, nil
 }
 
 func (r *IssueCommentRepository) NextSyntheticCommentID(issueID string) (int64, error) {

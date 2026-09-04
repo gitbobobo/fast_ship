@@ -276,6 +276,19 @@ func (h *IssueHandler) CreateComment(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// MarkRead 记录当前用户已读到一个 Issue 的最新评论，仅 JWT 可调用。
+func (h *IssueHandler) MarkRead(c *gin.Context) {
+	issueID := c.Param("iid")
+	userID := middleware.GetUserID(c)
+
+	if err := h.issueService.MarkIssueRead(issueID, userID); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, nil)
+}
+
 func (h *IssueHandler) ListTimeline(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)

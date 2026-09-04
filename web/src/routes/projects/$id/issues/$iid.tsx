@@ -80,6 +80,7 @@ import {
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
   useIssues,
+  useMarkIssueReadWhenLoaded,
   useSyncProjectIssues,
   useUpdateIssue,
   useReplaceIssueChecklist,
@@ -528,6 +529,7 @@ export default function IssueDetailPage() {
     isFetchingNextPage: isFetchingNextCommentsPage,
     isLoading: commentsLoading,
   } = useInfiniteIssueComments(iid!, 20);
+  useMarkIssueReadWhenLoaded(issue, !!infiniteCommentsData, id);
   const {
     data: infiniteTimelineData,
     fetchNextPage: fetchNextTimelinePage,

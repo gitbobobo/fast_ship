@@ -16,6 +16,7 @@ import {
   useIssueRepoLabels,
   useInfiniteIssueComments,
   useInfiniteIssueTimeline,
+  useMarkIssueRead,
   useCreateIssue,
   useCreateIssueComment,
   useUploadDraftIssueAsset,
@@ -65,6 +66,7 @@ function buildGitHubIssue(
     body: "",
     body_html: "",
     author: { login: "alice", avatar_url: "" },
+    unread_comments_count: 0,
     created_at: "2026-04-10T10:00:00Z",
     updated_at: "2026-04-12T10:00:00Z",
     internal_meta: null,
@@ -110,6 +112,7 @@ function buildInternalIssue(overrides: Partial<Issue> = {}): Issue {
     body: "## 背景\n\n需要在版本发布后提醒测试同学。",
     body_html: "",
     author: { login: "alice", avatar_url: "" },
+    unread_comments_count: 0,
     created_at: "2026-04-10T10:00:00Z",
     updated_at: "2026-04-12T10:00:00Z",
     internal_meta: {
@@ -136,24 +139,56 @@ vi.mock("@/lib/hooks/use-projects", () => ({
   useProject: vi.fn(),
 }));
 
-vi.mock("@/lib/hooks/use-issues", () => ({
-  useIssues: vi.fn(),
-  useIssue: vi.fn(),
-  useIssueFilterOptions: vi.fn(),
-  useIssueRepoLabels: vi.fn(),
-  useInfiniteIssueComments: vi.fn(),
-  useInfiniteIssueTimeline: vi.fn(),
-  useCreateIssue: vi.fn(),
-  useCreateIssueComment: vi.fn(),
-  useUploadDraftIssueAsset: vi.fn(),
-  useSyncProjectIssues: vi.fn(),
-  useUpdateIssue: vi.fn(),
-  useUpdateIssueInternalMeta: vi.fn(),
-  useReplaceIssueChecklist: vi.fn(),
-  useUploadIssueAsset: vi.fn(),
-  useUpsertIssueShipHook: vi.fn(),
-  useDeleteIssueShipHook: vi.fn(),
-}));
+vi.mock("@/lib/hooks/use-issues", async (importOriginal) => {
+  const React = await import("react");
+  const actual = await importOriginal<typeof import("@/lib/hooks/use-issues")>();
+  const useMarkIssueRead = vi.fn();
+
+  const useMarkIssueReadWhenLoaded = (
+    issue: Issue | undefined,
+    commentsLoaded: boolean,
+    projectId?: string,
+  ) => {
+    const markRead = useMarkIssueRead(issue?.id ?? "", projectId);
+    const markedReadIssueIdRef = React.useRef<string | null>(null);
+    React.useEffect(() => {
+      if (!issue || issue.source !== "github" || !commentsLoaded) {
+        return;
+      }
+      if (markedReadIssueIdRef.current === issue.id) {
+        return;
+      }
+      markedReadIssueIdRef.current = issue.id;
+      markRead.mutate(undefined, {
+        onError: () => {
+          markedReadIssueIdRef.current = null;
+        },
+      });
+    }, [issue, commentsLoaded, markRead]);
+  };
+
+  return {
+    ...actual,
+    useIssues: vi.fn(),
+    useIssue: vi.fn(),
+    useIssueFilterOptions: vi.fn(),
+    useIssueRepoLabels: vi.fn(),
+    useInfiniteIssueComments: vi.fn(),
+    useInfiniteIssueTimeline: vi.fn(),
+    useMarkIssueRead,
+    useMarkIssueReadWhenLoaded,
+    useCreateIssue: vi.fn(),
+    useCreateIssueComment: vi.fn(),
+    useUploadDraftIssueAsset: vi.fn(),
+    useSyncProjectIssues: vi.fn(),
+    useUpdateIssue: vi.fn(),
+    useUpdateIssueInternalMeta: vi.fn(),
+    useReplaceIssueChecklist: vi.fn(),
+    useUploadIssueAsset: vi.fn(),
+    useUpsertIssueShipHook: vi.fn(),
+    useDeleteIssueShipHook: vi.fn(),
+  };
+});
 
 vi.mock("@/lib/hooks/use-ai", () => ({
   useAISettings: vi.fn(() => ({ data: { configured: false } })),
@@ -530,6 +565,10 @@ describe("Issue pages", () => {
       isFetchingNextPage: false,
       isLoading: false,
     } as unknown as ReturnType<typeof useInfiniteIssueTimeline>);
+
+    vi.mocked(useMarkIssueRead).mockReturnValue({
+      mutate: vi.fn(),
+    } as unknown as ReturnType<typeof useMarkIssueRead>);
   });
 
   afterEach(() => {
@@ -1636,5 +1675,116 @@ describe("Issue pages", () => {
       expect(screen.getByText("发货后")).toBeInTheDocument(),
     );
     expect(screen.getByText("钩子失败")).toBeInTheDocument();
+  });
+
+  it("shows unread comment counts next to the comment count on the list", async () => {
+    vi.mocked(useIssues).mockReturnValue({
+      data: {
+        items: [
+          buildGitHubIssue(
+            {
+              id: "issue-unread",
+              title: "Unread issue",
+              reference: "GH-20",
+              unread_comments_count: 3,
+            },
+            { comments_count: 12 },
+          ),
+          buildGitHubIssue(
+            {
+              id: "issue-read",
+              title: "Read issue",
+              reference: "GH-21",
+              unread_comments_count: 0,
+            },
+            { comments_count: 4 },
+          ),
+        ],
+        total: 2,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssues>);
+
+    renderWithRoute(<IssuesPage />, {
+      path: "/issues",
+      initialEntry: "/issues?project=proj-1",
+    });
+
+    const unreadCount = await screen.findByText("3 条新");
+    // 「N 条新」用 GitHub 强调蓝，浅色 #0969da / 深色 #4493f8
+    expect(unreadCount).toHaveClass("text-github-accent");
+    expect(screen.getByText("12 条评论")).toBeInTheDocument();
+    expect(screen.getByText("4 条评论")).toBeInTheDocument();
+    expect(screen.queryByText(/条新/)).toBe(unreadCount);
+  });
+
+  it("marks a github issue read after issue and comments load", async () => {
+    const markReadMutate = vi.fn();
+    vi.mocked(useMarkIssueRead).mockReturnValue({
+      mutate: markReadMutate,
+    } as unknown as ReturnType<typeof useMarkIssueRead>);
+
+    mockIssueDetailData();
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("GH-42 Crash on launch")).toBeInTheDocument(),
+    );
+    expect(markReadMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mark an internal issue read", async () => {
+    const markReadMutate = vi.fn();
+    vi.mocked(useMarkIssueRead).mockReturnValue({
+      mutate: markReadMutate,
+    } as unknown as ReturnType<typeof useMarkIssueRead>);
+
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildInternalIssue({ id: "issue-1" }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("INT-7 补充站内发布提醒")).toBeInTheDocument(),
+    );
+    expect(markReadMutate).not.toHaveBeenCalled();
+  });
+
+  it("does not mark read while comments are still loading", async () => {
+    const markReadMutate = vi.fn();
+    vi.mocked(useMarkIssueRead).mockReturnValue({
+      mutate: markReadMutate,
+    } as unknown as ReturnType<typeof useMarkIssueRead>);
+
+    mockIssueDetailData();
+    vi.mocked(useInfiniteIssueComments).mockReturnValue({
+      data: undefined,
+      fetchNextPage: vi.fn(),
+      hasNextPage: false,
+      isFetchingNextPage: false,
+      isLoading: true,
+    } as unknown as ReturnType<typeof useInfiniteIssueComments>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("GH-42 Crash on launch")).toBeInTheDocument(),
+    );
+    expect(markReadMutate).not.toHaveBeenCalled();
   });
 });

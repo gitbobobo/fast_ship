@@ -207,6 +207,8 @@ interface Issue {
   closed_at?: string | null;
   created_at: string;
   updated_at: string;
+  /** 未读 GitHub 评论数（排除发货钩子留言）。内部 Issue 恒为 0。 */
+  unread_comments_count: number;
   internal_meta?: IssueInternalMeta | null;
   github?: IssueGitHubMeta | null;
   ship_hook?: IssueShipHook | null;

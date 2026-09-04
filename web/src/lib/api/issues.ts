@@ -137,6 +137,10 @@ export const issueApi = {
   createComment: (issueId: string, data: CreateInternalIssueCommentRequest) =>
     api.post(`issues/${issueId}/comments`, { json: data }).json<ApiResponse<IssueComment>>(),
 
+  /** 打开详情即算读过；仅 JWT 有效，GET 与 API Key 不会消未读 */
+  markRead: (issueId: string) =>
+    api.post(`issues/${issueId}/read`).json<ApiResponse<null>>(),
+
   timeline: (issueId: string, page = 1, pageSize = 20) =>
     api
       .get(`issues/${issueId}/timeline`, {

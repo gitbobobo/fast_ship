@@ -39,6 +39,7 @@ type testServices struct {
 	issueDraftAssetRepo *repository.IssueDraftAssetRepository
 	artifactRepo        *repository.ArtifactRepository
 	collabRepo          *repository.IssueCollabRepository
+	readStateRepo       *repository.IssueReadStateRepository
 	issueService        *IssueService
 	collabService       *IssueCollabService
 	aiService           *AIService
@@ -74,6 +75,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueShipHook{},
 		&model.IssueChecklistItem{},
 		&model.IssueSyncState{},
+		&model.IssueReadState{},
 		&model.IssueAsset{},
 		&model.IssueDraftAsset{},
 		&model.Artifact{},
@@ -114,6 +116,7 @@ func setupTestServices(t *testing.T) *testServices {
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	collabRepo := repository.NewIssueCollabRepository(db)
+	readStateRepo := repository.NewIssueReadStateRepository(db)
 
 	cfg := &config.Config{
 		Encryption: config.EncryptionConfig{
@@ -142,7 +145,8 @@ func setupTestServices(t *testing.T) *testServices {
 		issueDraftAssetRepo: issueDraftAssetRepo,
 		artifactRepo:        artifactRepo,
 		collabRepo:          collabRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), fileStorage, cfg, zap.NewNop()),
+		readStateRepo:       readStateRepo,
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
 		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),

@@ -12,6 +12,18 @@ import { useBoardSelection } from "@/routes/board/lib/board-selection-context";
 const boardIssueCardClassName =
   "group rounded-md border bg-card p-3 shadow-xs";
 
+// 未读评论用 GitHub 强调蓝 outline，不与选中态 border-primary 抢样式
+const unreadOutlineClassName =
+  "outline outline-2 outline-github-accent -outline-offset-1";
+
+function hasUnreadComments(issue: Issue) {
+  return issue.source === "github" && issue.unread_comments_count > 0;
+}
+
+function unreadAriaLabel(issue: Issue) {
+  return `${issue.reference} ${issue.title}，有未读评论`;
+}
+
 function hasMultiSelectModifier(event: {
   metaKey: boolean;
   ctrlKey: boolean;
@@ -185,10 +197,12 @@ export function BoardIssueCard({ issue }: { issue: Issue }) {
         showSelectAffordance
           ? "cursor-pointer transition-shadow hover:shadow-sm"
           : "cursor-grab touch-none transition-shadow hover:shadow-sm active:cursor-grabbing",
+        hasUnreadComments(issue) && unreadOutlineClassName,
         multiSelectMode && selected && "border-primary ring-1 ring-primary/30",
         selectPreview && "ring-1 ring-primary/20",
         isDragging && "invisible",
       )}
+      aria-label={hasUnreadComments(issue) ? unreadAriaLabel(issue) : undefined}
     >
       <BoardIssueCardContent
         issue={issue}
@@ -206,8 +220,10 @@ export function BoardIssueCardOverlay({ issue }: { issue: Issue }) {
     <div
       className={cn(
         boardIssueCardClassName,
+        hasUnreadComments(issue) && unreadOutlineClassName,
         "pointer-events-none cursor-grabbing",
       )}
+      aria-label={hasUnreadComments(issue) ? unreadAriaLabel(issue) : undefined}
     >
       <BoardIssueCardContent
         issue={issue}
