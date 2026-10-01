@@ -76,13 +76,15 @@ func main() {
 	}
 
 	// SQLite 文件锁是连接级竞争：单连接串行化避免跨连接 BUSY；
-	// 空闲超时让毒化连接（如 COMMIT BUSY 后悬空的事务）被关闭回滚，避免永久持锁。
+	// 空闲超时让毒化连接（如 COMMIT BUSY 后悬空的事务）被关闭回滚，避免永久持锁；
+	// 持续流量下空闲计时会被反复重置，再用生命周期兜底强制回收。
 	sqlDB, err := db.DB()
 	if err != nil {
 		log.Fatalf("获取数据库连接失败: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 
 	dropLegacyLogTables(db, zapLogger)
 
