@@ -68,12 +68,21 @@ func main() {
 		gormLogger = logger.Default.LogMode(logger.Info)
 	}
 
-	db, err := gorm.Open(sqlite.Open(cfg.Database.Path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"), &gorm.Config{
+	db, err := gorm.Open(sqlite.Open(cfg.Database.Path+"?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(30000)"), &gorm.Config{
 		Logger: gormLogger,
 	})
 	if err != nil {
 		log.Fatalf("连接数据库失败: %v", err)
 	}
+
+	// SQLite 文件锁是连接级竞争：单连接串行化避免跨连接 BUSY；
+	// 空闲超时让毒化连接（如 COMMIT BUSY 后悬空的事务）被关闭回滚，避免永久持锁。
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("获取数据库连接失败: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 
 	dropLegacyLogTables(db, zapLogger)
 
