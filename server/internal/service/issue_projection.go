@@ -63,7 +63,7 @@ func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInter
 		UpdatedAt:           formatTime(issue.UpdatedAt),
 		UnreadCommentsCount: unreadCount,
 		InternalMeta:        s.toIssueInternalMetaResponse(issue.ProjectID, meta, checklist, labelMap),
-		ShipHook:     s.shipHookService.toIssueShipHookResponse(shipHook),
+		ShipHook:            s.shipHookService.toIssueShipHookResponse(shipHook),
 	}
 	if issue.ClosedAt != nil {
 		value := formatTime(issue.ClosedAt.UTC())
