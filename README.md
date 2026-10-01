@@ -1,116 +1,126 @@
-# fast_ship
+# Fast Ship
 
-`fast_ship` 是一个前后端分离项目：
+自托管的项目交付管理工具：把多个项目的 Issue、版本发布、安装包产物和运行日志收进同一个面板，并为 CI 与 Agent 自动化提供 REST API。
 
-- `server/`：Go + Gin 后端
-- `web/`：React + Vite 前端
+## 界面
 
-现在推荐直接通过根目录统一命令启动和管理开发流程。
+| 仪表盘 | 看板 |
+| --- | --- |
+| ![仪表盘](docs/screenshots/dashboard.png) | ![看板](docs/screenshots/board.png) |
 
-## 环境要求
+| 问题列表 | 问题详情 |
+| --- | --- |
+| ![问题列表](docs/screenshots/issues.png) | ![问题详情](docs/screenshots/issue-detail.png) |
 
-- Go `1.25.x`
-- Node.js
-- `pnpm`
+| 版本与发货 | 项目文档 |
+| --- | --- |
+| ![版本与发货](docs/screenshots/version.png) | ![项目文档](docs/screenshots/documents.png) |
 
-首次启动前请先安装前端依赖：
+| 运行日志 | |
+| --- | --- |
+| ![运行日志](docs/screenshots/logs.png) | |
 
-```bash
-cd web
-pnpm install
-```
+## 功能
+
+- **项目**：每个项目可关联一个 GitHub 仓库（owner/repo + token），定时增量同步 Issue；不关联也可作为纯内部项目使用
+- **问题**：列表与看板两种视图，统一展示内部和 GitHub 来源的 Issue，新建 Issue 可一键发布到 GitHub；内部工作流状态（待处理 / 开发中 / 已完成）、任务清单、评论、未读提醒、标签过滤
+- **版本**：维护 Release Notes、上传安装包产物，一键发货自动完成打 tag、建 GitHub Release、上传产物；Ship Hook 可在发货成功后自动评论、关闭或流转关联 Issue
+- **仪表盘**：各项目未解决 Issue 分布、近 30 天每日解决趋势
+- **日志**：通过 API Key 上传运行日志，按 run 聚合、检索与清理
+- **文档**：项目内 Markdown 文档，支持树状组织
+- **AI 辅助**：配置自有模型接口后，可生成 Issue 标题与任务清单建议
+- **Agent 集成**：`fsk_` 开头的 API Key 可访问大部分 REST 端点，人机协作区（共识 / 完成总结）供 Agent 回写工作记录，详见 [skills/fast-ship/SKILL.md](skills/fast-ship/SKILL.md)
+
+## 技术栈
+
+- `server/`：Go 1.25 + Gin + GORM + SQLite（WAL）
+- `web/`：React 19 + Vite + Tailwind CSS 4 + React Router + TanStack Query + Zustand
 
 ## 快速开始
 
-在仓库根目录执行：
+环境要求：Go 1.25、Node.js 22+、pnpm。
 
 ```bash
+pnpm --dir web install
 make dev
 ```
 
-这会同时启动：
+同时启动：
 
-- 后端开发服务：`http://localhost:8080`
-- 前端开发服务：`http://localhost:5173`
+- 后端 API：`http://localhost:4888`
+- 前端开发服务：`http://localhost:4999`（`/api` 经 Vite 代理转发到后端）
 
-开发时前端通过 Vite 代理将 `/api` 请求转发到 `http://localhost:8080`。
+打开 `http://localhost:4999/register` 注册首个账号后进入仪表盘。按 `Ctrl+C` 同时停止前后端。
 
-登录后默认首页为 `/dashboard` 仪表盘，侧边栏第一个入口也是仪表盘。当前仪表盘提供两张统计图：
+### 常用命令
 
-- 已配置项目的剩余开启问题数量（按项目汇总）
-- 最近 30 天每天已解决问题数量（以首次标记为已完成的时间统计，同一问题只计一次）
+| 命令 | 说明 |
+| --- | --- |
+| `make dev` / `dev-server` / `dev-web` | 同时或单独启动前后端开发服务 |
+| `make build` | 构建后端二进制与前端产物 |
+| `make test` | 运行后端与前端测试 |
+| `make lint` | Go 格式检查 + `go vet`，前端 ESLint + TypeScript 校验 |
+| `make tidy` / `make clean` | 整理 Go 依赖 / 清理构建产物 |
 
-按 `Ctrl+C` 会同时停止前后端进程。
+## 配置
 
-## 常用命令
-
-```bash
-make
-make help
-make dev
-make dev-server
-make dev-web
-make build
-make test
-make lint
-make tidy
-make clean
-```
-
-命令说明：
-
-- `make dev`：同时启动前后端开发服务
-- `make dev-server`：只启动后端
-- `make dev-web`：只启动前端
-- `make build`：构建后端二进制和前端产物
-- `make test`：运行后端和前端测试
-- `make lint`：运行 Go 格式/静态检查与前端 ESLint + TypeScript 校验
-- `make tidy`：整理后端 Go 依赖
-- `make clean`：清理后端构建产物和前端 `dist`
-
-## 配置说明
-
-后端默认配置文件是 [server/configs/config.yaml](/Users/godbobo/work/projects/fast_ship/server/configs/config.yaml)。
-
-默认配置包括：
-
-- 服务端口：`8080`
-- SQLite 数据库：`server/data/fast_ship.db`
-- 上传目录：`server/data/uploads`
-
-如果需要使用其他配置文件，可以在启动后端前设置：
+后端默认读取 `server/configs/config.yaml`，可用 `CONFIG_PATH` 指定其他文件：
 
 ```bash
-CONFIG_PATH=/your/config.yaml make dev-server
+CONFIG_PATH=/path/to/config.yaml make dev-server
 ```
 
-## 项目结构
+主要配置项：
 
-```text
-fast_ship/
-├── server/     # Go 后端
-├── web/        # React 前端
-├── scripts/    # 根目录脚本
-└── Makefile    # 根目录统一入口
+| 配置 | 默认值 | 说明 |
+| --- | --- | --- |
+| `server.port` | `4888` | API 监听端口 |
+| `server.web_dist_dir` | 空 | 设置后由后端直接托管前端 SPA（生产模式） |
+| `database.path` | `./data/fast_ship.db` | SQLite 数据库文件 |
+| `jwt.secret` / `jwt.expire_hours` | — / `24` | JWT 签名密钥与有效期 |
+| `encryption.key` | — | 32 字节 AES 密钥，用于加密存储 GitHub Token |
+| `upload.max_file_size` / `storage_path` | `500MB` / `./data/uploads` | 产物与附件上传 |
+| `issues.auto_sync_*` | 开启，每 15 分钟 | GitHub Issue 自动同步 |
+
+环境变量可覆盖配置：`FAST_SHIP_` 前缀（如 `FAST_SHIP_SERVER_MODE=release`），以及专门的 `JWT_SECRET`、`ENCRYPTION_KEY`、`FAST_SHIP_WEB_DIST_DIR`。
+
+## 部署
+
+根目录 [Dockerfile](Dockerfile) 构建整站镜像：编译前端产物与后端二进制，运行时由 Go 直接托管 SPA，数据落在 `/app/data`（SQLite + 上传文件）。
+
+```bash
+docker build -t fast_ship .
+docker run -d -p 4888:4888 \
+  -e JWT_SECRET=change-me \
+  -e ENCRYPTION_KEY=change-me-32-bytes-in-production \
+  -v fast-ship-data:/app/data \
+  fast_ship
 ```
 
-## 补充说明
-
-- 根目录命令只是统一入口，不会替代子项目自己的原生命令。
-- 后端仍可在 `server/` 下使用 `make dev`、`make build` 等命令。
-- 前端仍可在 `web/` 下使用 `pnpm dev`、`pnpm lint`、`pnpm typecheck`、`pnpm check`、`pnpm test` 等命令。
-- 需求和设计文档位于 [docs](/Users/godbobo/work/projects/fast_ship/docs)。
-
-## Docker 镜像发布
-
-- 当前仓库的整站 Docker 镜像构建使用 [Dockerfile](/Users/godbobo/work/projects/fast_ship/Dockerfile)。
-- 镜像会同时构建 `web/` 前端并编译 `server/` 后端，启动后由 Go 服务直接托管前端静态资源。
-- 推送形如 `v1.0.0` 的 Git tag 后，GitHub Actions 会自动构建并推送镜像到 `ghcr.io/<owner>/<repo>`。
-- 推送后的镜像会同时带上对应 tag 和 `latest` 标签。
-
-示例：
+推送 `v*` 格式的 Git tag 会触发 GitHub Actions 构建并推送多架构镜像到 `ghcr.io/<owner>/<repo>`，同时打上对应 tag 与 `latest`：
 
 ```bash
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+`server/docker-compose.yml` 提供仅后端的编排示例。
+
+不使用 Docker 时，也可以 `make build` 后设置 `FAST_SHIP_WEB_DIST_DIR=web/dist` 直接运行单个二进制。
+
+## 项目结构
+
+```text
+fast_ship/
+├── server/               # Go 后端（cmd/server 入口，internal/ 分层）
+├── web/                  # React 前端（src/routes 页面，src/lib 请求与状态）
+├── scripts/dev.sh        # 开发服务编排
+├── skills/               # Agent 技能文档（API 用法、发版流程）
+├── docs/screenshots/     # 界面截图
+├── Dockerfile            # 整站镜像
+└── Makefile              # 统一命令入口
+```
+
+## License
+
+[MIT](LICENSE)
