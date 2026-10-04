@@ -16,6 +16,19 @@ description: 通过 Fast Ship REST API 完成 Issue 的创建、更新与查询�
 
 Fast Ship 使用 **API Key** 进行程序化认证。Key 格式为 `fsk_` 开头的随机字符串。
 
+### 请求方式（硬性规则）
+
+- **禁止**把 API Key 读出来写进命令、参数、环境变量赋值或任何输出——`curl -H "Authorization: Bearer fsk_..."` 这类写法会把 Key 留在会话记录和进程列表里。
+- 所有请求一律走技能自带脚本。脚本自行读取 config 并附加认证头，Key 不出现在命令行：
+
+```bash
+node <技能目录>/scripts/fast-ship-api.mjs <METHOD> <path> [body.json] [--verify [读回路径]]
+```
+
+- 需要请求体时，把 JSON 写成 UTF-8 文件，以 `body.json` 位置参数传入。
+- `--verify [读回路径]`：写请求成功（2xx）后再发一次 GET，输出 `{ "response": …, "verify": … }`，用于写后读回校验。缺省对同一路径 GET；没有对应 GET 路由的写端点（如 `internal-meta`、`recommendation`、`collab` 的 PUT）必须显式给出读回路径（如对 Issue 本身 `GET /api/issues/:iid`）。对 DELETE，读回 404 视为确认删除。
+- 脚本不可用时的兜底：把 `Authorization: Bearer <api_key>` 整行写入临时头文件，用 `curl -H @<header文件>` 引用，用完**立即删除**该文件。
+
 ### 首次使用（配置持久化）
 
 如果 `~/.config/fast-ship/config.yaml` 不存在，**必须**向用户询问以下信息：
@@ -42,15 +55,15 @@ api_key: "fsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 ### 后续使用
 
-直接读取 `~/.config/fast-ship/config.yaml` 中的 `base_url` 和 `api_key`，**不再询问用户**。
+脚本会自行读取 `~/.config/fast-ship/config.yaml` 中的 `base_url` 和 `api_key`，**不再询问用户**。Agent **不要**把 Key 读出来写进命令或输出。
 
 ### 请求头
 
-所有 API 请求必须携带：
+脚本自动为所有请求携带以下请求头（无需手工添加）：
 
 ```
 Authorization: Bearer <api_key>
-Content-Type: application/json
+Content-Type: application/json; charset=utf-8
 ```
 
 ## 核心工作流：创建/更新 Issue
@@ -458,7 +471,7 @@ POST /api/projects/:project_id/logs
 
 ## 请求编码
 
-使用 **UTF-8**，请求头声明 `Content-Type: application/json; charset=utf-8`。建议 `--data-binary @request.json`，避免 shell 拼接中文乱码。
+使用 **UTF-8**，脚本自动声明 `Content-Type: application/json; charset=utf-8`。需要请求体时，把 JSON 写成 UTF-8 文件，作为 `body.json` 参数传给脚本，避免 shell 引号和编码差异导致中文乱码。
 
 ## 注意事项
 
