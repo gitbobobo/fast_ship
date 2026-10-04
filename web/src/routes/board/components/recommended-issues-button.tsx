@@ -43,11 +43,11 @@ export function RecommendedIssuesButton({
   const [open, setOpen] = useState(false);
   const [pendingRemove, setPendingRemove] =
     useState<IssueRecommendation | null>(null);
-  const { data, isLoading, isError } = useRecommendations(projectId);
+  const { data, isLoading } = useRecommendations(projectId);
   const removeRecommendation = useRemoveRecommendation();
   const items = data?.items ?? [];
 
-  if (isLoading || isError || items.length === 0) {
+  if (items.length === 0) {
     return null;
   }
 
