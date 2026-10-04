@@ -265,21 +265,25 @@ func (s *IssueService) upsertGitHubIssue(projectID string, item *ghclient.Issue)
 		issue.ClosedAt = nil
 	}
 
-	if meta == nil {
-		if err := s.issueRepo.Create(issue); err != nil {
-			return nil, errs.ErrInternal
+	persistIssue := func(tx *gorm.DB) error {
+		if meta == nil {
+			return s.issueRepo.CreateTx(tx, issue)
 		}
-	} else {
-		if err := s.issueRepo.Save(issue); err != nil {
-			return nil, errs.ErrInternal
-		}
+		return s.issueRepo.SaveTx(tx, issue)
 	}
 
-	// GitHub 上已关闭的 issue 不可再被推荐
 	if issue.State == model.IssueStateClosed {
-		if err := s.recRepo.Delete(issue.ID); err != nil {
+		// GitHub 上已关闭的 issue 不可再被推荐；落库与删推荐同一事务，Delete 失败时回滚避免残留
+		if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
+			if err := persistIssue(tx); err != nil {
+				return err
+			}
+			return s.recRepo.DeleteTx(tx, issue.ID)
+		}); err != nil {
 			return nil, errs.ErrInternal
 		}
+	} else if err := persistIssue(s.issueRepo.DB()); err != nil {
+		return nil, errs.ErrInternal
 	}
 
 	gitHubMeta := &model.IssueGitHubMeta{

@@ -153,7 +153,16 @@ func (s *IssueRecommendationService) Upsert(issueID, userID, createdBy string, r
 		if err := s.recRepo.UpsertTx(tx, &rec); err != nil {
 			return err
 		}
-		return s.recRepo.ReplaceDependenciesTx(tx, issue.ID, deps)
+		if err := s.recRepo.ReplaceDependenciesTx(tx, issue.ID, deps); err != nil {
+			return err
+		}
+		// OnConflict 保留原 created_at，回读拿到库里的真实行再组响应
+		stored, err := s.recRepo.GetTx(tx, issue.ID)
+		if err != nil {
+			return err
+		}
+		rec = *stored
+		return nil
 	})
 	if err != nil {
 		var appErr *errs.AppError

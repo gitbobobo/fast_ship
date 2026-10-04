@@ -19,8 +19,12 @@ func (r *IssueRecommendationRepository) Transaction(fc func(tx *gorm.DB) error) 
 }
 
 func (r *IssueRecommendationRepository) Get(issueID string) (*model.IssueRecommendation, error) {
+	return r.GetTx(r.db, issueID)
+}
+
+func (r *IssueRecommendationRepository) GetTx(tx *gorm.DB, issueID string) (*model.IssueRecommendation, error) {
 	var rec model.IssueRecommendation
-	if err := r.db.Where("issue_id = ?", issueID).First(&rec).Error; err != nil {
+	if err := tx.Where("issue_id = ?", issueID).First(&rec).Error; err != nil {
 		return nil, err
 	}
 	return &rec, nil

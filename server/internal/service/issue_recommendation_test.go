@@ -334,6 +334,34 @@ func TestIssueRecommendation_RemovedOnInternalClose(t *testing.T) {
 	}
 }
 
+func TestIssueRecommendation_UpsertResponseCreatedAt(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("seed upsert: %v", err)
+	}
+
+	// 把库里的 created_at 改成一个固定旧时间，覆盖写后响应必须返回该值而非本次写入时间
+	fixed := time.Date(2020, 5, 4, 3, 2, 1, 0, time.UTC)
+	if err := ts.db.Model(&model.IssueRecommendation{}).Where("issue_id = ?", issue.ID).Update("created_at", fixed).Error; err != nil {
+		t.Fatalf("backdate created_at: %v", err)
+	}
+
+	resp, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "覆盖"})
+	if err != nil {
+		t.Fatalf("overwrite upsert: %v", err)
+	}
+	stored, err := ts.recRepo.Get(issue.ID)
+	if err != nil {
+		t.Fatalf("get rec: %v", err)
+	}
+	if stored.CreatedAt.Year() != 2020 {
+		t.Fatalf("expected db created_at preserved, got %v", stored.CreatedAt)
+	}
+	if resp.CreatedAt != formatTime(stored.CreatedAt) {
+		t.Fatalf("expected response created_at %s, got %s", formatTime(stored.CreatedAt), resp.CreatedAt)
+	}
+}
+
 func TestIssueRecommendation_RemovedOnGitHubSyncClose(t *testing.T) {
 	ts, issue, ownerID := setupRecommendationIssue(t)
 	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
@@ -357,5 +385,33 @@ func TestIssueRecommendation_RemovedOnGitHubSyncClose(t *testing.T) {
 	}
 	if _, err := ts.recRepo.Get(issue.ID); err == nil {
 		t.Fatalf("expected recommendation removed after github sync close")
+	}
+}
+
+// 已关闭的新 issue 走 create 分支，推荐删除在同一事务内（此时为 no-op）且不报错。
+func TestIssueRecommendation_GitHubSyncClosedCreate(t *testing.T) {
+	ts, issue, _ := setupRecommendationIssue(t)
+
+	item := &ghclient.Issue{
+		Issue: gh.Issue{
+			ID:        gh.Int64(2002),
+			Number:    gh.Int(43),
+			State:     gh.String("closed"),
+			Title:     gh.String("已关闭的新 issue"),
+			CreatedAt: &gh.Timestamp{Time: time.Now().UTC().Add(-time.Hour)},
+			UpdatedAt: &gh.Timestamp{Time: time.Now().UTC()},
+			ClosedAt:  &gh.Timestamp{Time: time.Now().UTC()},
+			User:      &gh.User{Login: gh.String("bob")},
+		},
+	}
+	stored, err := ts.issueService.upsertGitHubIssue(issue.ProjectID, item)
+	if err != nil {
+		t.Fatalf("upsert github issue: %v", err)
+	}
+	if stored.State != model.IssueStateClosed {
+		t.Fatalf("expected closed issue persisted, got %s", stored.State)
+	}
+	if _, err := ts.recRepo.Get(stored.ID); err == nil {
+		t.Fatalf("expected no recommendation for newly closed issue")
 	}
 }
