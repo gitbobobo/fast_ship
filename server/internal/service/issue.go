@@ -386,6 +386,11 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if err := s.issueRepo.SaveTx(tx, issue); err != nil {
 			return err
 		}
+		if issue.State == model.IssueStateClosed {
+			if err := s.recRepo.DeleteTx(tx, issue.ID); err != nil {
+				return err
+			}
+		}
 		if req.Labels != nil && internalMeta != nil {
 			if err := s.internalMetaRepo.UpsertTx(tx, internalMeta); err != nil {
 				return err

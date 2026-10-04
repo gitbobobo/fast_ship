@@ -18,8 +18,12 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 }
 
 func (r *ProjectRepository) FindByID(id, userID string) (*model.Project, error) {
+	return r.FindByIDTx(r.db, id, userID)
+}
+
+func (r *ProjectRepository) FindByIDTx(tx *gorm.DB, id, userID string) (*model.Project, error) {
 	var project model.Project
-	err := r.db.Where("id = ? AND user_id = ?", id, userID).First(&project).Error
+	err := tx.Where("id = ? AND user_id = ?", id, userID).First(&project).Error
 	if err != nil {
 		return nil, err
 	}
@@ -58,6 +62,12 @@ func (r *ProjectRepository) ExistsByNameExcludeID(userID, name, excludeID string
 		Where("user_id = ? AND name = ? AND id != ?", userID, name, excludeID).
 		Count(&count).Error
 	return count > 0, err
+}
+
+func (r *ProjectRepository) ListByUser(userID string) ([]model.Project, error) {
+	var projects []model.Project
+	err := r.db.Where("user_id = ?", userID).Order("created_at DESC").Find(&projects).Error
+	return projects, err
 }
 
 func (r *ProjectRepository) ListAll() ([]model.Project, error) {

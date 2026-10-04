@@ -71,6 +71,8 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
 		&model.IssueCollabDocument{},
+		&model.IssueRecommendation{},
+		&model.RecommendationDependency{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -120,7 +122,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), repository.NewIssueRecommendationRepository(db), fileStorage, cfg, zap.NewNop())
 	collabRepo := repository.NewIssueCollabRepository(db)
 	collabService := service.NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)

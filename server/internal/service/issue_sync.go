@@ -275,6 +275,13 @@ func (s *IssueService) upsertGitHubIssue(projectID string, item *ghclient.Issue)
 		}
 	}
 
+	// GitHub 上已关闭的 issue 不可再被推荐
+	if issue.State == model.IssueStateClosed {
+		if err := s.recRepo.Delete(issue.ID); err != nil {
+			return nil, errs.ErrInternal
+		}
+	}
+
 	gitHubMeta := &model.IssueGitHubMeta{
 		IssueID:           issue.ID,
 		ProjectID:         projectID,

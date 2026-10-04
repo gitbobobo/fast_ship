@@ -643,6 +643,8 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
 		&model.IssueCollabDocument{},
+		&model.IssueRecommendation{},
+		&model.RecommendationDependency{},
 		&model.LogRun{},
 		&model.LogRunChunk{},
 		&model.LogEntry{},
@@ -707,11 +709,13 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), fileStorage, cfg, zap.NewNop())
+	recommendationRepo := repository.NewIssueRecommendationRepository(db)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), recommendationRepo, fileStorage, cfg, zap.NewNop())
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
+	recommendationService := service.NewIssueRecommendationService(recommendationRepo, issueRepo, issueInternalMetaRepo, projectRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
@@ -727,13 +731,14 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService, issueShipHookService)
 	issueCollabHandler := handler.NewIssueCollabHandler(issueCollabService)
+	recommendationHandler := handler.NewIssueRecommendationHandler(recommendationService)
 	logHandler := handler.NewLogHandler(logService)
 	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
@@ -1739,5 +1744,110 @@ func TestRouterIssueMarkReadConsumesUnread(t *testing.T) {
 	items = listIssues()
 	if len(items) != 1 || items[0].UnreadCommentsCount != 0 {
 		t.Fatalf("unread should be consumed after mark-read: %+v", items)
+	}
+}
+
+func TestRouterIssueRecommendationEndpoints(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "rec-user", "rec@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	issue := createRouterTestIssue(t, env.db, project.ID)
+	dep := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.SequenceNumber = 2
+	})
+
+	rawKey := "RECROUTERKEY123456789"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    auth.UserID,
+		Name:      "CI-Rec",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	apiKeyAuth := "Bearer " + service.FormatApiKey(rawKey)
+	jwtAuth := "Bearer " + auth.Token
+	recPath := "/api/issues/" + issue.ID + "/recommendation"
+
+	doReq := func(method, authHeader, path string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// JWT 写推荐被拒：40303
+	jwtRec := doReq(http.MethodPut, jwtAuth, recPath, []byte(`{"reason":"先做这个"}`))
+	if jwtRec.Code != http.StatusForbidden {
+		t.Fatalf("JWT upsert expected 403, got %d: %s", jwtRec.Code, jwtRec.Body.String())
+	}
+	var forbidden routerEnvelope
+	if err := json.Unmarshal(jwtRec.Body.Bytes(), &forbidden); err != nil {
+		t.Fatalf("decode forbidden: %v", err)
+	}
+	if forbidden.Code != errs.ErrApiKeyRequired.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrApiKeyRequired.Code, forbidden.Code)
+	}
+
+	// API Key 写入 + 依赖
+	upsertRec := doReq(http.MethodPut, apiKeyAuth, recPath, []byte(`{"reason":"先做这个","priority":"high","dependencies":["`+dep.ID+`"]}`))
+	if upsertRec.Code != http.StatusOK {
+		t.Fatalf("API key upsert expected 200, got %d: %s", upsertRec.Code, upsertRec.Body.String())
+	}
+	var upsertResult struct {
+		Reason    string `json:"reason"`
+		Priority  string `json:"priority"`
+		CreatedBy string `json:"created_by"`
+		Issue     struct {
+			ID string `json:"id"`
+		} `json:"issue"`
+		Dependencies []struct {
+			IssueID string `json:"issue_id"`
+		} `json:"dependencies"`
+	}
+	decodeRouterEnvelope(t, upsertRec, &upsertResult)
+	if upsertResult.Priority != "high" || upsertResult.CreatedBy != "CI-Rec" || len(upsertResult.Dependencies) != 1 || upsertResult.Dependencies[0].IssueID != dep.ID {
+		t.Fatalf("unexpected upsert response: %+v", upsertResult)
+	}
+
+	// JWT 与 API Key 均可读取列表
+	var listResult struct {
+		Items []struct {
+			Issue struct {
+				ID string `json:"id"`
+			} `json:"issue"`
+		} `json:"items"`
+	}
+	listRec := doReq(http.MethodGet, jwtAuth, "/api/recommendations?project_id="+project.ID, nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("JWT list expected 200, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+	decodeRouterEnvelope(t, listRec, &listResult)
+	if len(listResult.Items) != 1 || listResult.Items[0].Issue.ID != issue.ID {
+		t.Fatalf("unexpected list items: %+v", listResult.Items)
+	}
+	apiKeyListRec := doReq(http.MethodGet, apiKeyAuth, "/api/recommendations", nil)
+	if apiKeyListRec.Code != http.StatusOK {
+		t.Fatalf("API key list expected 200, got %d: %s", apiKeyListRec.Code, apiKeyListRec.Body.String())
+	}
+
+	// 删除后再删返回 40411
+	if rec := doReq(http.MethodDelete, jwtAuth, recPath, nil); rec.Code != http.StatusOK {
+		t.Fatalf("JWT delete expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	againRec := doReq(http.MethodDelete, apiKeyAuth, recPath, nil)
+	if againRec.Code != http.StatusNotFound {
+		t.Fatalf("repeat delete expected 404, got %d: %s", againRec.Code, againRec.Body.String())
+	}
+	var notFound routerEnvelope
+	if err := json.Unmarshal(againRec.Body.Bytes(), &notFound); err != nil {
+		t.Fatalf("decode not found: %v", err)
+	}
+	if notFound.Code != errs.ErrRecommendationNotFound.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrRecommendationNotFound.Code, notFound.Code)
 	}
 }

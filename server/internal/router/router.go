@@ -22,6 +22,7 @@ func Setup(
 	versionHandler *handler.VersionHandler,
 	issueHandler *handler.IssueHandler,
 	issueCollabHandler *handler.IssueCollabHandler,
+	recommendationHandler *handler.IssueRecommendationHandler,
 	logHandler *handler.LogHandler,
 	documentHandler *handler.DocumentHandler,
 	artifactHandler *handler.ArtifactHandler,
@@ -118,6 +119,9 @@ func Setup(
 		api.PUT("/issues/:iid/checklist", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ReplaceChecklist)
 		api.PUT("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.UpsertShipHook)
 		api.DELETE("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.DeleteShipHook)
+		// 推荐任务 —— PUT 仅 API Key（Agent），JWT 调用在 handler 内返回 403(40303)；DELETE 两类凭证均可。
+		api.PUT("/issues/:iid/recommendation", middleware.RequireAuth(cfg, apiKeyRepo, authService), recommendationHandler.Upsert)
+		api.DELETE("/issues/:iid/recommendation", middleware.RequireAuth(cfg, apiKeyRepo, authService), recommendationHandler.Delete)
 		// checklist-suggestions 对 API Key 开放：供 Agent 自动化生成清单建议；其余 AI 端点（generate-title / settings）仍限 JWT。
 		api.POST("/issues/:iid/checklist-suggestions", middleware.RequireAuth(cfg, apiKeyRepo, authService), aiHandler.SuggestIssueChecklist)
 		// JWT 必须 — Issue 评论
@@ -142,6 +146,8 @@ func Setup(
 		api.GET("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Get)
 		api.GET("/issues/:iid/comments", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListComments)
 		api.GET("/issues/:iid/timeline", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListTimeline)
+		// 推荐任务列表 —— 供 Agent 与看板「推荐」弹框拉取；project_id 为空时返回当前用户全部项目。
+		api.GET("/recommendations", middleware.RequireAuth(cfg, apiKeyRepo, authService), recommendationHandler.List)
 
 		// 人机协作区 —— GET/DELETE 两类凭证均可；PUT 写端点仅 API Key（Agent），JWT 调用在 handler 内返回 403(40303)。
 		issueCollab := api.Group("/issues/:iid/collab", middleware.RequireAuth(cfg, apiKeyRepo, authService))

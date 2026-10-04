@@ -117,6 +117,11 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 		if err := s.internalMetaRepo.UpsertTx(tx, meta); err != nil {
 			return err
 		}
+		if workflowStatus == model.IssueWorkflowStatusInProgress || workflowStatus == model.IssueWorkflowStatusDone {
+			if err := s.recRepo.DeleteTx(tx, issue.ID); err != nil {
+				return err
+			}
+		}
 		if err := s.issueRepo.TouchUpdatedAt(tx, issue.ID, now); err != nil {
 			return err
 		}

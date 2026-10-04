@@ -40,8 +40,10 @@ type testServices struct {
 	artifactRepo        *repository.ArtifactRepository
 	collabRepo          *repository.IssueCollabRepository
 	readStateRepo       *repository.IssueReadStateRepository
+	recRepo             *repository.IssueRecommendationRepository
 	issueService        *IssueService
 	collabService       *IssueCollabService
+	recService          *IssueRecommendationService
 	aiService           *AIService
 	issuePromptService  *IssuePromptService
 	versionService      *VersionService
@@ -82,6 +84,8 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.JWTBlacklist{},
 		&model.GitHubRepoLabel{},
 		&model.IssueCollabDocument{},
+		&model.IssueRecommendation{},
+		&model.RecommendationDependency{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -117,6 +121,7 @@ func setupTestServices(t *testing.T) *testServices {
 	artifactRepo := repository.NewArtifactRepository(db)
 	collabRepo := repository.NewIssueCollabRepository(db)
 	readStateRepo := repository.NewIssueReadStateRepository(db)
+	recRepo := repository.NewIssueRecommendationRepository(db)
 
 	cfg := &config.Config{
 		Encryption: config.EncryptionConfig{
@@ -146,8 +151,10 @@ func setupTestServices(t *testing.T) *testServices {
 		artifactRepo:        artifactRepo,
 		collabRepo:          collabRepo,
 		readStateRepo:       readStateRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, fileStorage, cfg, zap.NewNop()),
+		recRepo:             recRepo,
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
+		recService:          NewIssueRecommendationService(recRepo, issueRepo, internalMetaRepo, projectRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
 		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
