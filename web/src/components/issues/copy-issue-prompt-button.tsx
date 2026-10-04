@@ -5,18 +5,21 @@ import { buildIssuePrompt } from "@/lib/issue-prompt";
 import { useIssuePromptList } from "@/lib/hooks/use-issue-prompt";
 import { IssuePromptPicker } from "@/components/issues/issue-prompt-picker";
 
+/** 复制单个问题的提示词；传入 reason 时把推荐理由一并写进提示词。 */
 export function CopyIssuePromptButton({
   projectId,
   issueId,
+  reason,
 }: {
   projectId: string;
   issueId: string;
+  reason?: string;
 }) {
   const issuePrompts = useIssuePromptList();
 
   const handleCopyIssuePrompt = async (content: string) => {
     await copyWithToast(
-      buildIssuePrompt({ projectId, issueId, content }),
+      buildIssuePrompt({ projectId, issueId, content, reason }),
       "已复制提示词",
     );
   };

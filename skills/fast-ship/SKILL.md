@@ -349,6 +349,7 @@ Upsert 语义：同一 Issue 重复 PUT 整体覆盖 `reason` / `priority` / `de
           "project_name": "MyApp",
           "source": "internal",
           "sequence_number": 12,
+          "reference": "INT-12",
           "title": "登录接口限流",
           "state": "open",
           "workflow_status": "todo"
@@ -365,7 +366,8 @@ Upsert 语义：同一 Issue 重复 PUT 整体覆盖 `reason` / `priority` / `de
             "state": "closed",
             "workflow_status": "done",
             "project_id": "proj-uuid",
-            "sequence_number": 7
+            "sequence_number": 7,
+            "reference": "INT-7"
           }
         ]
       }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,9 @@ func TestIssueRecommendation_Upsert(t *testing.T) {
 	}
 	if len(first.Dependencies) != 1 || first.Dependencies[0].IssueID != dep.ID || first.Dependencies[0].Title != dep.Title {
 		t.Fatalf("unexpected dependencies: %+v", first.Dependencies)
+	}
+	if first.Issue.Reference != "GH-42" || first.Dependencies[0].Reference != fmt.Sprintf("INT-%d", dep.SequenceNumber) {
+		t.Fatalf("unexpected references: issue=%q dep=%q", first.Issue.Reference, first.Dependencies[0].Reference)
 	}
 
 	second, err := ts.recService.Upsert(issue.ID, ownerID, "another-key", UpsertIssueRecommendationRequest{

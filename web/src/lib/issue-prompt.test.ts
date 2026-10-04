@@ -54,6 +54,33 @@ describe("buildIssuePrompt", () => {
 
     expect(prompt).toContain("/fast-ship   保留前后空格  \n---\n");
   });
+
+  it("appends the recommendation reason after the issue id", () => {
+    const prompt = buildIssuePrompt({
+      projectId: "p1",
+      issueId: "i1",
+      content: "请处理此问题",
+      reason: "先做能解锁后续工作\n第二行",
+    });
+
+    expect(prompt).toBe(`/fast-ship 请处理此问题
+---
+项目ID：p1
+问题ID：i1
+推荐理由：先做能解锁后续工作
+第二行`);
+  });
+
+  it("omits the reason line when the reason is blank", () => {
+    const prompt = buildIssuePrompt({
+      projectId: "p1",
+      issueId: "i1",
+      content: "请处理此问题",
+      reason: "   ",
+    });
+
+    expect(prompt).not.toContain("推荐理由");
+  });
 });
 
 describe("buildIssuePromptBatch", () => {

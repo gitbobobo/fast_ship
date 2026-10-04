@@ -331,6 +331,7 @@ interface RecommendationIssueSummary {
   project_name: string;
   source: "github" | "internal";
   sequence_number: number;
+  reference: string;
   title: string;
   state: "open" | "closed";
   workflow_status: "" | "todo" | "in_progress" | "done";
@@ -343,6 +344,7 @@ interface RecommendationDependency {
   workflow_status: "" | "todo" | "in_progress" | "done";
   project_id: string;
   sequence_number: number;
+  reference: string;
 }
 
 interface IssueRecommendation {
