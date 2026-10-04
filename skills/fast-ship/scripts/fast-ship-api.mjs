@@ -149,6 +149,16 @@ async function main() {
   const verifyRes = await request('GET', url, apiKey, undefined);
   const verifyText = await verifyRes.text();
   stdout.write(`${JSON.stringify({ response: parseJson(text), verify: parseJson(verifyText) }, null, 2)}\n`);
+  if (method.toUpperCase() === 'DELETE') {
+    // After a delete, a 404 read-back is the expected confirmation.
+    if (verifyRes.ok) {
+      fail('verify GET still returns the resource after DELETE');
+    }
+    if (verifyRes.status !== 404) {
+      fail(`verify GET returned status ${verifyRes.status}`);
+    }
+    return;
+  }
   if (!verifyRes.ok) {
     fail(`verify GET returned status ${verifyRes.status}`);
   }

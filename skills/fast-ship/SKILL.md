@@ -26,7 +26,7 @@ node <技能目录>/scripts/fast-ship-api.mjs <METHOD> <path> [body.json] [--ver
 ```
 
 - 需要请求体时，把 JSON 写成 UTF-8 文件，以 `body.json` 位置参数传入。
-- `--verify`：写请求成功（2xx）后对同一路径再发一次 GET，输出 `{ "response": …, "verify": … }`，用于写后读回校验。
+- `--verify`：写请求成功（2xx）后对同一路径再发一次 GET，输出 `{ "response": …, "verify": … }`，用于写后读回校验；对 DELETE，GET 返回 404 视为确认删除。
 - 脚本不可用时的兜底：把 `Authorization: Bearer <api_key>` 整行写入临时头文件，用 `curl -H @<header文件>` 引用，用完**立即删除**该文件。
 
 ### 首次使用（配置持久化）
