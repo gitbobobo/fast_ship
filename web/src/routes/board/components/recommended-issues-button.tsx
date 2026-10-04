@@ -175,7 +175,7 @@ function RecommendationRow({
       <Link
         to={`/projects/${issue.project_id}/issues/${issue.id}`}
         onClick={onNavigate}
-        className="line-clamp-2 text-sm leading-snug font-medium hover:text-primary"
+        className="text-sm leading-snug font-medium hover:text-primary"
       >
         <span className="mr-1.5 font-mono text-xs font-normal text-muted-foreground">
           {issue.reference}
