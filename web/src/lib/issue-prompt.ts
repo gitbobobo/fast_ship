@@ -2,6 +2,8 @@ export interface IssuePromptInput {
   projectId: string;
   issueId: string;
   content: string;
+  /** 推荐理由；非空时追加在问题ID之后，供 Agent 了解为什么推荐先做。 */
+  reason?: string;
 }
 
 export const DEFAULT_ISSUE_PROMPT_CONTENT = "请处理此问题";
@@ -39,9 +41,11 @@ ${issueIdLines.join("\n")}`;
 }
 
 export function buildIssuePrompt(input: IssuePromptInput): string {
-  return buildIssuePromptBatch({
+  const prompt = buildIssuePromptBatch({
     projectId: input.projectId,
     content: input.content,
     issueIds: [input.issueId],
   });
+  const reason = input.reason?.trim();
+  return reason ? `${prompt}\n推荐理由：${reason}` : prompt;
 }

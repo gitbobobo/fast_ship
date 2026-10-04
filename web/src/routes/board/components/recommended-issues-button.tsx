@@ -2,11 +2,11 @@ import { useState } from "react";
 import { Link } from "react-router";
 import { Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -20,7 +20,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Skeleton } from "@/components/ui/skeleton";
+import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
 import {
   useRecommendations,
   useRemoveRecommendation,
@@ -29,12 +29,19 @@ import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 
-const PRIORITY_LABELS = {
-  high: "高",
-  medium: "中",
-  low: "低",
-} as const;
+type Priority = IssueRecommendation["priority"];
 
+const PRIORITY_GROUPS: { priority: Priority; label: string; dot: string }[] = [
+  { priority: "high", label: "高优先级", dot: "bg-destructive" },
+  { priority: "medium", label: "中优先级", dot: "bg-amber-500" },
+  { priority: "low", label: "低优先级", dot: "bg-muted-foreground/50" },
+];
+
+/**
+ * 看板筛选行的「推荐」按钮与推荐弹框。
+ * 列表为空（含加载中、加载失败）时整体不渲染；弹框按优先级分组展示，每条可复制提示词或移除。
+ * 传入 projectId 时列表只含该项目，不再逐条显示项目名。
+ */
 export function RecommendedIssuesButton({
   projectId,
 }: {
@@ -43,7 +50,7 @@ export function RecommendedIssuesButton({
   const [open, setOpen] = useState(false);
   const [pendingRemove, setPendingRemove] =
     useState<IssueRecommendation | null>(null);
-  const { data, isLoading } = useRecommendations(projectId);
+  const { data } = useRecommendations(projectId);
   const removeRecommendation = useRemoveRecommendation();
   const items = data?.items ?? [];
 
@@ -79,29 +86,45 @@ export function RecommendedIssuesButton({
       </Button>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>推荐任务</DialogTitle>
+        <DialogContent className="gap-0 overflow-hidden p-0 sm:max-w-2xl">
+          <DialogHeader className="gap-1.5 border-b px-5 pt-4 pb-3">
+            <DialogTitle>
+              推荐任务
+              <span className="ml-2 text-sm font-normal text-muted-foreground tabular-nums">
+                {items.length}
+              </span>
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              按优先级排列，开始开发或关闭后自动移出。
+            </DialogDescription>
           </DialogHeader>
-          <div className="grid max-h-[70vh] grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2">
-            {isLoading ? (
-              Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-24 rounded-md" />
-              ))
-            ) : items.length === 0 ? (
-              <p className="py-10 text-center text-sm text-muted-foreground">
-                暂无推荐任务
-              </p>
-            ) : (
-              items.map((item) => (
-                <RecommendationCard
-                  key={item.issue.id}
-                  item={item}
-                  onClose={() => setOpen(false)}
-                  onRemove={() => setPendingRemove(item)}
-                />
-              ))
-            )}
+          <div className="max-h-[70vh] overflow-y-auto pb-2">
+            {PRIORITY_GROUPS.map((group) => {
+              const groupItems = items.filter(
+                (item) => item.priority === group.priority,
+              );
+              if (groupItems.length === 0) return null;
+              return (
+                <section key={group.priority} aria-label={group.label}>
+                  <h3 className="sticky top-0 z-10 flex items-center gap-2 bg-popover px-5 pt-3 pb-1.5 text-xs font-medium text-muted-foreground">
+                    <span className={cn("h-1.5 w-1.5 rounded-full", group.dot)} />
+                    {group.label}
+                    <span className="tabular-nums">{groupItems.length}</span>
+                  </h3>
+                  <ul className="divide-y divide-border/60">
+                    {groupItems.map((item) => (
+                      <RecommendationRow
+                        key={item.issue.id}
+                        item={item}
+                        showProject={!projectId}
+                        onNavigate={() => setOpen(false)}
+                        onRemove={() => setPendingRemove(item)}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              );
+            })}
           </div>
         </DialogContent>
       </Dialog>
@@ -135,72 +158,92 @@ export function RecommendedIssuesButton({
   );
 }
 
-function RecommendationCard({
+function RecommendationRow({
   item,
-  onClose,
+  showProject,
+  onNavigate,
   onRemove,
 }: {
   item: IssueRecommendation;
-  onClose: () => void;
+  showProject: boolean;
+  onNavigate: () => void;
   onRemove: () => void;
 }) {
   const { issue } = item;
   return (
-    <div className="rounded-md border bg-card p-2.5 shadow-xs">
-      <div className="flex items-center gap-1.5">
-        <Link
-          to={`/projects/${issue.project_id}/issues/${issue.id}`}
-          onClick={onClose}
-          className="min-w-0 truncate text-sm font-medium hover:underline"
-        >
-          {issue.title}
-        </Link>
-        {issue.project_name && (
-          <Badge variant="secondary" className="shrink-0">
-            {issue.project_name}
-          </Badge>
-        )}
-        <PriorityBadge priority={item.priority} />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="移除推荐"
-          onClick={onRemove}
-          className="ml-auto -my-1 shrink-0"
-        >
-          <Trash2 className="h-3.5 w-3.5" />
-        </Button>
-      </div>
+    <li className="px-5 py-3">
+      <Link
+        to={`/projects/${issue.project_id}/issues/${issue.id}`}
+        onClick={onNavigate}
+        className="text-sm leading-snug font-medium hover:text-primary"
+      >
+        <span className="mr-1.5 font-mono text-xs font-normal text-muted-foreground">
+          {issue.reference}
+        </span>
+        <span>{issue.title}</span>
+      </Link>
 
-      <p className="mt-1.5 whitespace-pre-wrap text-sm leading-snug">
+      <p className="mt-1.5 text-[13px] leading-relaxed whitespace-pre-wrap text-foreground/80">
         {item.reason}
       </p>
 
       {item.dependencies.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          <span className="text-xs text-muted-foreground">前置</span>
-          {item.dependencies.map((dep) => (
-            <DependencyChip key={dep.issue_id} dep={dep} />
-          ))}
+        <div className="mt-2 flex items-start gap-2">
+          <span className="shrink-0 border border-transparent py-0.5 text-xs text-muted-foreground">
+            前置
+          </span>
+          <div className="flex min-w-0 flex-wrap gap-1.5">
+            {item.dependencies.map((dep) => (
+              <DependencyChip
+                key={dep.issue_id}
+                dep={dep}
+                onNavigate={onNavigate}
+              />
+            ))}
+          </div>
         </div>
       )}
 
-      <div className="mt-1.5 text-[11px] text-muted-foreground">
-        {formatRelativeTime(item.updated_at)}
-        {item.created_by && <> · {item.created_by}</>}
+      <div className="mt-1.5 flex items-center gap-2">
+        <p className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+          {showProject && issue.project_name && <>{issue.project_name} · </>}
+          {formatRelativeTime(item.updated_at)}
+          {item.created_by && <> · {item.created_by}</>}
+        </p>
+        <div className="-mr-2 flex shrink-0 items-center">
+          <CopyIssuePromptButton
+            projectId={issue.project_id}
+            issueId={issue.id}
+            reason={item.reason}
+          />
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="移除推荐"
+            title="移除推荐"
+            onClick={onRemove}
+            className="text-muted-foreground hover:text-destructive"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
-    </div>
+    </li>
   );
 }
 
-function DependencyChip({ dep }: { dep: RecommendationDependency }) {
+function DependencyChip({
+  dep,
+  onNavigate,
+}: {
+  dep: RecommendationDependency;
+  onNavigate: () => void;
+}) {
   const closed = dep.state === "closed";
   const done = closed || dep.workflow_status === "done";
   const label = closed
     ? "已关闭"
-    : ISSUE_WORKFLOW_STATUS_LABELS[
-        dep.workflow_status as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
-      ];
+    : ISSUE_WORKFLOW_STATUS_LABELS[dep.workflow_status];
 
   const statusClass = done
     ? "text-muted-foreground"
@@ -209,7 +252,14 @@ function DependencyChip({ dep }: { dep: RecommendationDependency }) {
       : "text-slate-600 dark:text-slate-400";
 
   return (
-    <span className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/40 px-1.5 py-0.5 text-xs">
+    <Link
+      to={`/projects/${dep.project_id}/issues/${dep.issue_id}`}
+      onClick={onNavigate}
+      className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-muted/40 px-1.5 py-0.5 text-xs hover:bg-muted"
+    >
+      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+        {dep.reference}
+      </span>
       <span
         className={cn(
           "min-w-0 truncate",
@@ -218,34 +268,7 @@ function DependencyChip({ dep }: { dep: RecommendationDependency }) {
       >
         {dep.title}
       </span>
-      {label && (
-        <span className={cn("shrink-0", statusClass)}>{label}</span>
-      )}
-    </span>
-  );
-}
-
-function PriorityBadge({
-  priority,
-}: {
-  priority: IssueRecommendation["priority"];
-}) {
-  if (priority === "high") {
-    return <Badge variant="destructive">{PRIORITY_LABELS.high}</Badge>;
-  }
-  if (priority === "medium") {
-    return (
-      <Badge
-        variant="outline"
-        className="border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-      >
-        {PRIORITY_LABELS.medium}
-      </Badge>
-    );
-  }
-  return (
-    <Badge className="bg-muted text-muted-foreground">
-      {PRIORITY_LABELS.low}
-    </Badge>
+      <span className={cn("shrink-0", statusClass)}>{label}</span>
+    </Link>
   );
 }

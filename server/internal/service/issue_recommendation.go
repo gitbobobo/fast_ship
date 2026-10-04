@@ -50,6 +50,7 @@ type RecommendationIssueSummary struct {
 	ProjectName    string                    `json:"project_name"`
 	Source         model.IssueSource         `json:"source"`
 	SequenceNumber int                       `json:"sequence_number"`
+	Reference      string                    `json:"reference"`
 	Title          string                    `json:"title"`
 	State          model.IssueState          `json:"state"`
 	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
@@ -62,6 +63,7 @@ type RecommendationDependencyResponse struct {
 	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
 	ProjectID      string                    `json:"project_id"`
 	SequenceNumber int                       `json:"sequence_number"`
+	Reference      string                    `json:"reference"`
 }
 
 type IssueRecommendationResponse struct {
@@ -339,6 +341,7 @@ func toRecommendationResponse(
 			ProjectName:    projectName,
 			Source:         issue.Source,
 			SequenceNumber: issue.SequenceNumber,
+			Reference:      buildIssueReference(issue),
 			Title:          issue.Title,
 			State:          issue.State,
 			WorkflowStatus: workflowStatusOf(meta),
@@ -366,6 +369,7 @@ func buildDependencyResponses(deps []model.RecommendationDependency, depIssues m
 			WorkflowStatus: workflowStatusOf(internalMetaOrNil(depMetas, dep.DepIssueID)),
 			ProjectID:      issue.ProjectID,
 			SequenceNumber: issue.SequenceNumber,
+			Reference:      buildIssueReference(issue),
 		})
 	}
 	return items

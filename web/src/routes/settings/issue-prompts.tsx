@@ -128,7 +128,7 @@ export default function SettingsIssuePromptsPage() {
         <div>
           <h2 className="text-lg font-medium">问题提示词</h2>
           <p className="text-sm text-muted-foreground">
-            配置问题详情页「复制提示词」按钮使用的正文模板，可维护多条供切换。
+            配置问题详情页、推荐任务弹框中「复制提示词」按钮使用的正文模板，可维护多条供切换。
           </p>
         </div>
 

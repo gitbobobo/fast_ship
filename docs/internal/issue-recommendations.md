@@ -44,7 +44,7 @@ PUT 校验：目标 Issue 须 `state=open` 且 `workflow_status` ∈ {未设置,
 
 Upsert 把「读 issue、读 meta、可推荐性校验、依赖校验（含归属）、推荐 upsert、依赖替换」全部放进 `recRepo.Transaction` 同一事务，读写经 `*Tx` 变体（`FindByIDTx` / `ListByIDsTx` / `GetTx` / `ListByIssueIDsTx`，非 Tx 方法委托 Tx 版本走 `r.db`）。SQLite 单写者语义下保证校验时看到的状态与提交时一致，任一校验失败整体回滚不留半写状态。
 
-GET 响应为 `{items: [...]}`，单条含 `issue` 摘要（id / project_id / project_name / source / sequence_number / title / state / workflow_status）、`reason`、`priority`、`created_by`、时间戳与 `dependencies`（含 dep 标题/状态摘要）。排序：`priority` 降序（high > medium > low，`CASE` 表达式）→ `updated_at` 降序。一次全量，无分页。
+GET 响应为 `{items: [...]}`，单条含 `issue` 摘要（id / project_id / project_name / source / sequence_number / reference / title / state / workflow_status）、`reason`、`priority`、`created_by`、时间戳与 `dependencies`（含 dep 的 reference / 标题 / 状态摘要）。`reference` 与 Issue 列表同源（`buildIssueReference`：GitHub 为 `GH-<number>`，内部为 `INT-<sequence_number>`），推荐理由里常以它互相引用，前端直接展示。排序：`priority` 降序（high > medium > low，`CASE` 表达式）→ `updated_at` 降序。一次全量，无分页。
 
 错误码：`ErrRecommendationNotFound`（40411）、`ErrIssueNotRecommendable`（40910），均在 `errs` 对应区间 var 块。
 
@@ -62,7 +62,8 @@ GET 响应为 `{items: [...]}`，单条含 `issue` 摘要（id / project_id / pr
 
 - `web/src/lib/api/recommendations.ts`：`recommendationApi.list(projectId?)` / `remove(issueId)`。
 - `web/src/lib/hooks/use-recommendations.ts`：`useRecommendations(projectId?)`（queryKey `['recommendations', projectId ?? 'all']`，`refetchInterval: 60000`，`refetchOnWindowFocus: true`）+ `useRemoveRecommendation()`（成功后 invalidate `['recommendations']`）。
-- `web/src/routes/board/components/recommended-issues-button.tsx`：按钮 + 受控 Dialog + AlertDialog 确认删除，全部同文件。
+- `web/src/routes/board/components/recommended-issues-button.tsx`：按钮 + 受控 Dialog + AlertDialog 确认删除，全部同文件。弹框单列列表，按 high / medium / low 分组（组标题吸顶，组内保持服务端的 `updated_at` 降序），不再逐条显示优先级徽标；传入 `projectId` 时不显示项目名。
+- 每条推荐带「复制提示词」：复用 `CopyIssuePromptButton`（传 `reason`），模板来自用户设置的提示词列表；`buildIssuePrompt` 在 `问题ID` 行之后追加 `推荐理由：<reason>`，让 Agent 拿到为什么先做这条。
 - 挂载：`board/index.tsx` 筛选行多选 toggle 之后，`activeProjectId || undefined` 传入（看板无「全部项目」态，空串等同全量）。
 
 ## 刷新策略
