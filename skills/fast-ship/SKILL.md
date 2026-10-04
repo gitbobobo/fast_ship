@@ -22,11 +22,11 @@ Fast Ship 使用 **API Key** 进行程序化认证。Key 格式为 `fsk_` 开头
 - 所有请求一律走技能自带脚本。脚本自行读取 config 并附加认证头，Key 不出现在命令行：
 
 ```bash
-node <技能目录>/scripts/fast-ship-api.mjs <METHOD> <path> [body.json] [--verify]
+node <技能目录>/scripts/fast-ship-api.mjs <METHOD> <path> [body.json] [--verify [读回路径]]
 ```
 
 - 需要请求体时，把 JSON 写成 UTF-8 文件，以 `body.json` 位置参数传入。
-- `--verify`：写请求成功（2xx）后对同一路径再发一次 GET，输出 `{ "response": …, "verify": … }`，用于写后读回校验；对 DELETE，GET 返回 404 视为确认删除。
+- `--verify [读回路径]`：写请求成功（2xx）后再发一次 GET，输出 `{ "response": …, "verify": … }`，用于写后读回校验。缺省对同一路径 GET；没有对应 GET 路由的写端点（如 `internal-meta`、`recommendation`、`collab` 的 PUT）必须显式给出读回路径（如对 Issue 本身 `GET /api/issues/:iid`）。对 DELETE，读回 404 视为确认删除。
 - 脚本不可用时的兜底：把 `Authorization: Bearer <api_key>` 整行写入临时头文件，用 `curl -H @<header文件>` 引用，用完**立即删除**该文件。
 
 ### 首次使用（配置持久化）

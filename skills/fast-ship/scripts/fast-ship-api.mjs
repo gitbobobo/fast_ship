@@ -3,7 +3,7 @@
 // itself, so the API key never appears on the command line, in env vars,
 // or in output. Prints only the response body to stdout.
 //
-// Usage: node fast-ship-api.mjs <METHOD> <path> [body.json] [--verify]
+// Usage: node fast-ship-api.mjs <METHOD> <path> [body.json] [--verify [get-path]]
 
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -18,8 +18,10 @@ const USAGE = `Usage: node fast-ship-api.mjs <METHOD> <path> [body.json] [--veri
   METHOD      HTTP method, e.g. GET / POST / PUT / DELETE
   path        API path appended to base_url; may include a query string
   body.json   UTF-8 JSON file sent as the request body (write requests)
-  --verify    after a 2xx response, GET the same path and print the
-              read-back result as { "response": ..., "verify": ... }
+  --verify    after a 2xx response, issue a GET and print the read-back
+              as { "response": ..., "verify": ... }; GETs the same path
+              unless get-path is given (use it for write-only endpoints
+              that have no GET route); after DELETE a 404 confirms removal
 
 Credentials come from ~/.config/fast-ship/config.yaml (base_url, api_key).`;
 
@@ -111,9 +113,19 @@ async function main() {
 
   const positional = [];
   let verify = false;
-  for (const arg of args) {
-    if (arg === '--verify') verify = true;
-    else positional.push(arg);
+  let verifyPath;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--verify') {
+      verify = true;
+      const next = args[i + 1];
+      if (next && !next.startsWith('-')) {
+        verifyPath = next;
+        i++;
+      }
+    } else {
+      positional.push(arg);
+    }
   }
   const [method, path, bodyFile] = positional;
   if (!method || !path) {
@@ -146,7 +158,8 @@ async function main() {
     return;
   }
 
-  const verifyRes = await request('GET', url, apiKey, undefined);
+  const verifyUrl = `${baseUrl.replace(/\/+$/, '')}/${(verifyPath ?? path).replace(/^\/+/, '')}`;
+  const verifyRes = await request('GET', verifyUrl, apiKey, undefined);
   const verifyText = await verifyRes.text();
   stdout.write(`${JSON.stringify({ response: parseJson(text), verify: parseJson(verifyText) }, null, 2)}\n`);
   if (method.toUpperCase() === 'DELETE') {
