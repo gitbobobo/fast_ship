@@ -68,7 +68,7 @@ export function RecommendedIssuesButton({
       <Button
         variant="outline"
         size="sm"
-        className="h-7 text-xs"
+        className="ml-auto h-7 text-xs"
         onClick={() => setOpen(true)}
       >
         <Sparkles className="mr-1 h-3 w-3" />
@@ -83,10 +83,10 @@ export function RecommendedIssuesButton({
           <DialogHeader>
             <DialogTitle>推荐任务</DialogTitle>
           </DialogHeader>
-          <div className="flex max-h-[70vh] flex-col gap-3 overflow-y-auto">
+          <div className="grid max-h-[70vh] grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2">
             {isLoading ? (
-              Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className="h-28 rounded-md" />
+              Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-24 rounded-md" />
               ))
             ) : items.length === 0 ? (
               <p className="py-10 text-center text-sm text-muted-foreground">
@@ -146,42 +146,46 @@ function RecommendationCard({
 }) {
   const { issue } = item;
   return (
-    <div className="rounded-md border bg-card p-3 shadow-xs">
-      <div className="flex items-start gap-2">
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-          <Link
-            to={`/projects/${issue.project_id}/issues/${issue.id}`}
-            onClick={onClose}
-            className="truncate text-sm font-medium hover:underline"
-          >
-            {issue.title}
-          </Link>
-          {issue.project_name && (
-            <Badge variant="secondary">{issue.project_name}</Badge>
-          )}
-          <PriorityBadge priority={item.priority} />
-        </div>
+    <div className="rounded-md border bg-card p-2.5 shadow-xs">
+      <div className="flex items-center gap-1.5">
+        <Link
+          to={`/projects/${issue.project_id}/issues/${issue.id}`}
+          onClick={onClose}
+          className="min-w-0 truncate text-sm font-medium hover:underline"
+        >
+          {issue.title}
+        </Link>
+        {issue.project_name && (
+          <Badge variant="secondary" className="shrink-0">
+            {issue.project_name}
+          </Badge>
+        )}
+        <PriorityBadge priority={item.priority} />
         <Button
           variant="ghost"
           size="icon-sm"
           aria-label="移除推荐"
           onClick={onRemove}
+          className="ml-auto -my-1 shrink-0"
         >
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
       </div>
 
-      <p className="mt-2 whitespace-pre-wrap text-sm">{item.reason}</p>
+      <p className="mt-1.5 whitespace-pre-wrap text-sm leading-snug">
+        {item.reason}
+      </p>
 
       {item.dependencies.length > 0 && (
-        <ul className="mt-2 space-y-1">
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          <span className="text-xs text-muted-foreground">前置</span>
           {item.dependencies.map((dep) => (
-            <DependencyRow key={dep.issue_id} dep={dep} />
+            <DependencyChip key={dep.issue_id} dep={dep} />
           ))}
-        </ul>
+        </div>
       )}
 
-      <div className="mt-2 text-xs text-muted-foreground">
+      <div className="mt-1.5 text-[11px] text-muted-foreground">
         {formatRelativeTime(item.updated_at)}
         {item.created_by && <> · {item.created_by}</>}
       </div>
@@ -189,48 +193,34 @@ function RecommendationCard({
   );
 }
 
-function DependencyRow({ dep }: { dep: RecommendationDependency }) {
-  const done = dep.state === "closed" || dep.workflow_status === "done";
-  return (
-    <li
-      className={cn(
-        "flex items-center gap-2 text-xs",
-        done && "text-muted-foreground",
-      )}
-    >
-      <span className={cn("truncate", done && "line-through")}>
-        {dep.title}
-      </span>
-      <DependencyStatusBadge dep={dep} />
-    </li>
-  );
-}
-
-function DependencyStatusBadge({ dep }: { dep: RecommendationDependency }) {
+function DependencyChip({ dep }: { dep: RecommendationDependency }) {
   const closed = dep.state === "closed";
-  const status = closed ? "done" : dep.workflow_status;
+  const done = closed || dep.workflow_status === "done";
   const label = closed
     ? "已关闭"
     : ISSUE_WORKFLOW_STATUS_LABELS[
-        status as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
+        dep.workflow_status as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
       ];
-  if (!status || !label) return null;
 
-  const className =
-    status === "todo"
-      ? "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400"
-      : status === "in_progress"
-        ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-        : "border-muted bg-muted text-muted-foreground";
+  const statusClass = done
+    ? "text-muted-foreground"
+    : dep.workflow_status === "in_progress"
+      ? "text-amber-600 dark:text-amber-400"
+      : "text-slate-600 dark:text-slate-400";
 
   return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-        className,
+    <span className="inline-flex max-w-full items-center gap-1 rounded-full border bg-muted/40 px-1.5 py-0.5 text-xs">
+      <span
+        className={cn(
+          "min-w-0 truncate",
+          done && "text-muted-foreground line-through",
+        )}
+      >
+        {dep.title}
+      </span>
+      {label && (
+        <span className={cn("shrink-0", statusClass)}>{label}</span>
       )}
-    >
-      {label}
     </span>
   );
 }
