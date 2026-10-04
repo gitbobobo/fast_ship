@@ -51,6 +51,7 @@ type IssueService struct {
 	userRepo            *repository.UserRepository
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository
 	readStateRepo       *repository.IssueReadStateRepository
+	recRepo             *repository.IssueRecommendationRepository
 	storage             storage.Storage
 	cfg                 *config.Config
 	logger              *zap.Logger
@@ -296,6 +297,7 @@ func NewIssueService(
 	userRepo *repository.UserRepository,
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository,
 	readStateRepo *repository.IssueReadStateRepository,
+	recRepo *repository.IssueRecommendationRepository,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -315,6 +317,7 @@ func NewIssueService(
 		userRepo:            userRepo,
 		githubRepoLabelRepo: githubRepoLabelRepo,
 		readStateRepo:       readStateRepo,
+		recRepo:             recRepo,
 		storage:             storage,
 		cfg:                 cfg,
 		logger:              logger,

@@ -66,6 +66,15 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useUpdateIssueWorkflowStatus: () => ({ mutateAsync: vi.fn() }),
 }));
 
+vi.mock("@/lib/hooks/use-recommendations", () => ({
+  useRecommendations: () => ({
+    data: { items: [] },
+    isLoading: false,
+    isError: false,
+  }),
+  useRemoveRecommendation: () => ({ mutateAsync: vi.fn(), isPending: false }),
+}));
+
 vi.mock("@/lib/hooks/use-issue-prompt", () => ({
   useIssuePromptList: () => [
     {

@@ -43,17 +43,18 @@ var (
 
 // 资源不存在 40400-40499
 var (
-	ErrUserNotFound        = New(40400, "用户不存在")
-	ErrProjectNotFound     = New(40401, "项目不存在")
-	ErrVersionNotFound     = New(40402, "版本不存在")
-	ErrArtifactNotFound    = New(40403, "安装包不存在")
-	ErrApiKeyNotFound      = New(40404, "API Key 不存在")
-	ErrIssueNotFound       = New(40405, "问题不存在")
-	ErrIssueAssetNotFound  = New(40406, "问题图片不存在")
-	ErrAISettingsNotFound  = New(40407, "请先在设置中配置 MiniMax API Key")
-	ErrIssueCollabNotFound = New(40408, "协作区内容不存在")
-	ErrLogRunNotFound      = New(40409, "日志运行不存在")
-	ErrDocumentNotFound    = New(40410, "文档不存在")
+	ErrUserNotFound           = New(40400, "用户不存在")
+	ErrProjectNotFound        = New(40401, "项目不存在")
+	ErrVersionNotFound        = New(40402, "版本不存在")
+	ErrArtifactNotFound       = New(40403, "安装包不存在")
+	ErrApiKeyNotFound         = New(40404, "API Key 不存在")
+	ErrIssueNotFound          = New(40405, "问题不存在")
+	ErrIssueAssetNotFound     = New(40406, "问题图片不存在")
+	ErrAISettingsNotFound     = New(40407, "请先在设置中配置 MiniMax API Key")
+	ErrIssueCollabNotFound    = New(40408, "协作区内容不存在")
+	ErrLogRunNotFound         = New(40409, "日志运行不存在")
+	ErrDocumentNotFound       = New(40410, "文档不存在")
+	ErrRecommendationNotFound = New(40411, "推荐不存在")
 )
 
 // 业务冲突 40900-40999
@@ -68,6 +69,7 @@ var (
 	ErrIssueSyncRunning         = New(40907, "问题同步正在进行中")
 	ErrIssueReadOnly            = New(40908, "该问题为只读问题")
 	ErrLogRunEntryLimitExceeded = New(40909, "该运行日志条数已达上限")
+	ErrIssueNotRecommendable    = New(40910, "该 issue 当前状态不可被推荐")
 )
 
 // 前置条件未满足 41200-41299

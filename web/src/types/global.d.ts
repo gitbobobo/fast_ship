@@ -325,6 +325,40 @@ interface IssueCollabArea {
   summary: IssueCollabDoc | null;
 }
 
+interface RecommendationIssueSummary {
+  id: string;
+  project_id: string;
+  project_name: string;
+  source: "github" | "internal";
+  sequence_number: number;
+  title: string;
+  state: "open" | "closed";
+  workflow_status: "" | "todo" | "in_progress" | "done";
+}
+
+interface RecommendationDependency {
+  issue_id: string;
+  title: string;
+  state: "open" | "closed";
+  workflow_status: "" | "todo" | "in_progress" | "done";
+  project_id: string;
+  sequence_number: number;
+}
+
+interface IssueRecommendation {
+  issue: RecommendationIssueSummary;
+  reason: string;
+  priority: "high" | "medium" | "low";
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  dependencies: RecommendationDependency[];
+}
+
+interface IssueRecommendationListData {
+  items: IssueRecommendation[];
+}
+
 interface LogEntry {
   id: string;
   run_id: string;

@@ -217,10 +217,11 @@ GET /api/projects/:project_id/issues?q=关键词&state=open&source=internal&work
 | Issue 工作流（internal-meta）/ Checklist / 附件 | ✅ | ✅ |
 | Issue 发货后钩子（ship-hook） | ✅（随 Issue GET/列表只读） | ❌ |
 | 人机协作区 | ✅ | ✅（PUT 写；JWT 只读 + DELETE） |
+| Issue 推荐 | ✅ | ✅（PUT 仅 API Key；JWT 可 GET + DELETE） |
 | Ship 发布 | ❌ | ❌ |
 | AI 辅助 | ❌ | 部分（仅 `checklist-suggestions`） |
 
-> **凭证分工**：仅 JWT — `state` / `state_reason`、发表评论、`ship-hook` 写入、`generate-title`、`/ai/settings`；仅 API Key — 协作区 PUT、日志上传（AI 端点中仅 `checklist-suggestions` 对 API Key 开放）。越权返回 403（40301 或 40303）。
+> **凭证分工**：仅 JWT — `state` / `state_reason`、发表评论、`ship-hook` 写入、`generate-title`、`/ai/settings`；仅 API Key — 协作区 PUT、推荐 PUT、日志上传（AI 端点中仅 `checklist-suggestions` 对 API Key 开放）。越权返回 403（40301 或 40303）。
 
 ## 人机协作区
 
@@ -298,6 +299,91 @@ PUT /api/issues/:issue_id/collab/summary
 
 用户 DELETE 清空后，本轮**不要**自动写回，除非用户又一起拍了新板；共识允许反复 PUT 覆盖，不留历史。
 
+## 推荐任务
+
+Agent（API Key）把某个 Issue 标记为「推荐做」，附推荐理由与前置依赖 Issue；用户在 Web 看板「推荐」弹框中查看并可移除。推荐会随 Issue 状态自动消失：`workflow_status` 进入 `in_progress` / `done`，或 `state` 变为 `closed`（含 GitHub 同步关闭）时，该推荐被硬删，不恢复。
+
+**PUT 写入**：仅 API Key（JWT 返回 40303）。**GET / DELETE**：JWT 或 API Key 均可。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| PUT | `/api/issues/:issue_id/recommendation` | 写入/覆盖推荐（API Key） |
+| DELETE | `/api/issues/:issue_id/recommendation` | 移除推荐（不存在返回 40411） |
+| GET | `/api/recommendations?project_id=` | 推荐列表；`project_id` 为空返回当前用户全部项目 |
+
+### PUT 写入（覆盖 upsert）
+
+```http
+PUT /api/issues/:issue_id/recommendation
+```
+
+```json
+{
+  "reason": "阻塞了两个后续任务，建议优先做",
+  "priority": "high",
+  "dependencies": ["dep-issue-uuid-1", "dep-issue-uuid-2"]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `reason` | string | 是 | 推荐理由，1–500 字符（空白会 trim 后判空） |
+| `priority` | string | 否 | `high` / `medium` / `low`，缺省 `medium` |
+| `dependencies` | string[] | 否 | 前置依赖的 Issue UUID 数组，≤20 个，不含自身；重复 PUT 会整组替换 |
+
+Upsert 语义：同一 Issue 重复 PUT 整体覆盖 `reason` / `priority` / `dependencies` / `created_by`，保留原 `created_at`。`created_by` 由服务端记录为 API Key 名称，不需要传。
+
+校验：目标 Issue 不存在返回 404（40405）；依赖 Issue 不存在或属于其他用户的项目同样 40405（不区分两者）；同一账号下跨项目依赖允许。目标 Issue 须 `state=open` 且 `workflow_status` 为未设置或 `todo`，否则返回 409（40910）——已被推荐过的 Issue 开始开发后无法再写推荐。
+
+### GET 响应示例
+
+```json
+{
+  "code": 0,
+  "data": {
+    "items": [
+      {
+        "issue": {
+          "id": "issue-uuid",
+          "project_id": "proj-uuid",
+          "project_name": "MyApp",
+          "source": "internal",
+          "sequence_number": 12,
+          "title": "登录接口限流",
+          "state": "open",
+          "workflow_status": "todo"
+        },
+        "reason": "阻塞了两个后续任务，建议优先做",
+        "priority": "high",
+        "created_by": "CI-Rec",
+        "created_at": "2026-10-04T08:00:00Z",
+        "updated_at": "2026-10-04T08:00:00Z",
+        "dependencies": [
+          {
+            "issue_id": "dep-uuid",
+            "title": "接入限流组件",
+            "state": "closed",
+            "workflow_status": "done",
+            "project_id": "proj-uuid",
+            "sequence_number": 7
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+排序：`priority` 降序（high > medium > low）后按 `updated_at` 降序。一次全量返回，无分页。
+
+### DELETE 移除
+
+```http
+DELETE /api/issues/:issue_id/recommendation
+```
+
+推荐不存在返回 404（40411）。用户在 Web 端移除后，如需继续推荐必须重新 PUT（目标 Issue 此时须仍满足可推荐状态）。
+
 ## 项目日志
 
 API Key 上传；JWT / API Key 均可查询与删除。对外只认一次运行（run），没有批次。`run_id` 由客户端生成，项目内唯一。分片用必填 `chunk_id` 做幂等；用 `chunk_id` 挡重试，**不要**复用 `chunk_id` 传不同内容。
@@ -361,7 +447,9 @@ POST /api/projects/:project_id/logs
 | 404 | 40401 | 项目不存在 |
 | 404 | 40405 | Issue 不存在 |
 | 404 | 40409 | 日志运行不存在 |
+| 404 | 40411 | 推荐不存在 |
 | 409 | 40909 | 该运行日志条数已达上限 |
+| 409 | 40910 | 该 issue 当前状态不可被推荐 |
 | 413 | — | 请求体超出 4 MB |
 
 收到 401 时检查：`Authorization: Bearer fsk_...`、`base_url`、Key 是否已删除。

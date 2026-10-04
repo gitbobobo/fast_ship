@@ -35,6 +35,7 @@ import { useBoardMultiSelect } from "@/routes/board/lib/use-board-multi-select";
 import { BoardSelectionProvider } from "@/routes/board/lib/board-selection-context";
 import { BoardColumn } from "@/routes/board/components/board-column";
 import { BoardBatchCopyButton } from "@/routes/board/components/board-batch-copy-button";
+import { RecommendedIssuesButton } from "@/routes/board/components/recommended-issues-button";
 import {
   BoardIssueCardOverlay,
 } from "@/routes/board/components/board-issue-card";
@@ -245,6 +246,11 @@ export default function BoardPage() {
             >
               <ListChecks className="h-4 w-4" />
             </Button>
+          )}
+          {!projectsLoading && !isEmptyProject && (
+            <RecommendedIssuesButton
+              projectId={activeProjectId || undefined}
+            />
           )}
         </div>
 

@@ -47,21 +47,29 @@ func (r *IssueRepository) TouchUpdatedAt(tx *gorm.DB, id string, at time.Time) e
 }
 
 func (r *IssueRepository) FindByID(id string) (*model.Issue, error) {
+	return r.FindByIDTx(r.db, id)
+}
+
+func (r *IssueRepository) FindByIDTx(tx *gorm.DB, id string) (*model.Issue, error) {
 	var issue model.Issue
-	if err := r.db.Preload("GitHubMeta").Where("id = ?", id).First(&issue).Error; err != nil {
+	if err := tx.Preload("GitHubMeta").Where("id = ?", id).First(&issue).Error; err != nil {
 		return nil, err
 	}
 	return &issue, nil
 }
 
 func (r *IssueRepository) ListByIDs(ids []string) (map[string]model.Issue, error) {
+	return r.ListByIDsTx(r.db, ids)
+}
+
+func (r *IssueRepository) ListByIDsTx(tx *gorm.DB, ids []string) (map[string]model.Issue, error) {
 	result := make(map[string]model.Issue, len(ids))
 	if len(ids) == 0 {
 		return result, nil
 	}
 
 	var issues []model.Issue
-	if err := r.db.Preload("GitHubMeta").Where("id IN ?", ids).Find(&issues).Error; err != nil {
+	if err := tx.Preload("GitHubMeta").Where("id IN ?", ids).Find(&issues).Error; err != nil {
 		return nil, err
 	}
 	for _, issue := range issues {
@@ -344,21 +352,29 @@ func NewIssueInternalMetaRepository(db *gorm.DB) *IssueInternalMetaRepository {
 }
 
 func (r *IssueInternalMetaRepository) Get(issueID string) (*model.IssueInternalMeta, error) {
+	return r.GetTx(r.db, issueID)
+}
+
+func (r *IssueInternalMetaRepository) GetTx(tx *gorm.DB, issueID string) (*model.IssueInternalMeta, error) {
 	var meta model.IssueInternalMeta
-	if err := r.db.Where("issue_id = ?", issueID).First(&meta).Error; err != nil {
+	if err := tx.Where("issue_id = ?", issueID).First(&meta).Error; err != nil {
 		return nil, err
 	}
 	return &meta, nil
 }
 
 func (r *IssueInternalMetaRepository) ListByIssueIDs(issueIDs []string) (map[string]model.IssueInternalMeta, error) {
+	return r.ListByIssueIDsTx(r.db, issueIDs)
+}
+
+func (r *IssueInternalMetaRepository) ListByIssueIDsTx(tx *gorm.DB, issueIDs []string) (map[string]model.IssueInternalMeta, error) {
 	result := make(map[string]model.IssueInternalMeta, len(issueIDs))
 	if len(issueIDs) == 0 {
 		return result, nil
 	}
 
 	var metas []model.IssueInternalMeta
-	if err := r.db.Where("issue_id IN ?", issueIDs).Find(&metas).Error; err != nil {
+	if err := tx.Where("issue_id IN ?", issueIDs).Find(&metas).Error; err != nil {
 		return nil, err
 	}
 

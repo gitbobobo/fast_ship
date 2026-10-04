@@ -113,6 +113,8 @@ func main() {
 		&model.RefreshToken{},
 		&model.GitHubRepoLabel{},
 		&model.IssueCollabDocument{},
+		&model.IssueRecommendation{},
+		&model.RecommendationDependency{},
 		&model.LogRun{},
 		&model.LogRunChunk{},
 		&model.LogEntry{},
@@ -173,6 +175,7 @@ func main() {
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
+	recommendationRepo := repository.NewIssueRecommendationRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
@@ -187,8 +190,9 @@ func main() {
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, fileStorage, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, fileStorage, cfg, zapLogger)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
+	recommendationService := service.NewIssueRecommendationService(recommendationRepo, issueRepo, issueInternalMetaRepo, projectRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
@@ -205,6 +209,7 @@ func main() {
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
 	issueHandler := handler.NewIssueHandler(issueService, issueShipHookService)
 	issueCollabHandler := handler.NewIssueCollabHandler(issueCollabService)
+	recommendationHandler := handler.NewIssueRecommendationHandler(recommendationService)
 	logHandler := handler.NewLogHandler(logService)
 	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
@@ -272,7 +277,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
