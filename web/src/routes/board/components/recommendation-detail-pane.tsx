@@ -187,6 +187,8 @@ interface RecommendationDetailPaneProps {
   onRemove: () => void;
   /** Enter 键复制入口，转发给当前展示的复制按钮。 */
   copyHandleRef: Ref<CopyIssuePromptButtonHandle>;
+  /** 跨项目（全量推荐）时在标题行补项目名。 */
+  showProject?: boolean;
 }
 
 /**
@@ -199,10 +201,11 @@ export function RecommendationDetailPane({
   item,
   onRemove,
   copyHandleRef,
+  showProject = false,
 }: RecommendationDetailPaneProps) {
-  const [peekIssueId, setPeekIssueId] = useState<string | null>(null);
-  const peeking = peekIssueId !== null;
-  const displayIssueId = peekIssueId ?? item.issue.id;
+  const [peekDep, setPeekDep] = useState<RecommendationDependency | null>(null);
+  const peeking = peekDep !== null;
+  const displayIssueId = peekDep?.issue_id ?? item.issue.id;
 
   const { data: issue, isLoading, isError, refetch } = useIssue(displayIssueId);
   const { data: collab } = useIssueCollab(displayIssueId);
@@ -214,7 +217,7 @@ export function RecommendationDetailPane({
         <div className="border-b px-5 py-2">
           <button
             type="button"
-            onClick={() => setPeekIssueId(null)}
+            onClick={() => setPeekDep(null)}
             className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
           >
             <ArrowLeft className="h-3 w-3" />
@@ -258,6 +261,11 @@ export function RecommendationDetailPane({
               <h2 className="mt-1.5 text-base font-semibold leading-snug">
                 {issue.title}
               </h2>
+              {showProject && !peeking && item.issue.project_name ? (
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {item.issue.project_name}
+                </p>
+              ) : null}
             </div>
 
             {!peeking && (
@@ -282,7 +290,7 @@ export function RecommendationDetailPane({
                     <DependencyChip
                       key={dep.issue_id}
                       dep={dep}
-                      onPeek={() => setPeekIssueId(dep.issue_id)}
+                      onPeek={() => setPeekDep(dep)}
                     />
                   ))}
                 </div>
@@ -307,37 +315,34 @@ export function RecommendationDetailPane({
       </div>
 
       <div className="flex items-center gap-1 border-t px-5 py-2.5">
-        {issue ? (
-          <>
-            <CopyIssuePromptButton
-              projectId={issue.project_id}
-              issueId={issue.id}
-              reason={peeking ? undefined : item.reason}
-              handleRef={copyHandleRef}
-            />
-            {!peeking && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-destructive"
-                onClick={onRemove}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                移除推荐
-              </Button>
-            )}
-            <Link
-              to={`/projects/${issue.project_id}/issues/${issue.id}`}
-              className={cn(
-                buttonVariants({ variant: "ghost", size: "sm" }),
-                "ml-auto h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-              打开完整详情页
-            </Link>
-          </>
-        ) : null}
+        {/* 详情拉取失败/加载中也保留逃生口：推荐条目与依赖摘要自带 id 与 project_id */}
+        <CopyIssuePromptButton
+          projectId={issue?.project_id ?? peekDep?.project_id ?? item.issue.project_id}
+          issueId={issue?.id ?? displayIssueId}
+          reason={peeking ? undefined : item.reason}
+          handleRef={copyHandleRef}
+        />
+        {!peeking && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-destructive"
+            onClick={onRemove}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            移除推荐
+          </Button>
+        )}
+        <Link
+          to={`/projects/${issue?.project_id ?? peekDep?.project_id ?? item.issue.project_id}/issues/${issue?.id ?? displayIssueId}`}
+          className={cn(
+            buttonVariants({ variant: "ghost", size: "sm" }),
+            "ml-auto h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          打开完整详情页
+        </Link>
       </div>
     </div>
   );

@@ -135,6 +135,8 @@ export function RecommendedIssuesButton({
     if (!open) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || pendingRemove) return;
+      // 修饰键组合让位浏览器/系统快捷键（如 Cmd+K）
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       if (
         target instanceof HTMLElement &&
@@ -216,6 +218,7 @@ export function RecommendedIssuesButton({
               selectedIssueId={selectedIssueId}
               onSelect={setSelectedIssueId}
               listRef={listPaneRef}
+              showProject={!projectId}
             />
             {selectedItem ? (
               <RecommendationDetailPane
@@ -223,6 +226,7 @@ export function RecommendedIssuesButton({
                 item={selectedItem}
                 onRemove={() => setPendingRemove(selectedItem)}
                 copyHandleRef={copyHandleRef}
+                showProject={!projectId}
               />
             ) : (
               <div className="hidden sm:block" />

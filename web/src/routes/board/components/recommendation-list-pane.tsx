@@ -21,6 +21,8 @@ interface RecommendationListPaneProps {
   onSelect: (issueId: string) => void;
   /** 滚动容器 ref，供键盘选中后 scrollIntoView。 */
   listRef?: Ref<HTMLDivElement>;
+  /** 跨项目（全量推荐）时在行尾补项目名。 */
+  showProject?: boolean;
 }
 
 /**
@@ -32,6 +34,7 @@ export function RecommendationListPane({
   selectedIssueId,
   onSelect,
   listRef,
+  showProject = false,
 }: RecommendationListPaneProps) {
   return (
     <div
@@ -60,6 +63,7 @@ export function RecommendationListPane({
                       data-issue-id={item.issue.id}
                       aria-current={selected ? "true" : undefined}
                       title={item.issue.title}
+                      onMouseDown={(event) => event.preventDefault()}
                       onClick={() => onSelect(item.issue.id)}
                       className={cn(
                         "flex w-full items-center gap-2 px-5 py-2 text-left text-sm transition-colors",
@@ -74,6 +78,11 @@ export function RecommendationListPane({
                       <span className="min-w-0 flex-1 truncate">
                         {item.issue.title}
                       </span>
+                      {showProject && item.issue.project_name ? (
+                        <span className="shrink-0 text-[11px] text-muted-foreground">
+                          {item.issue.project_name}
+                        </span>
+                      ) : null}
                     </button>
                   </li>
                 );
