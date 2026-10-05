@@ -52,5 +52,5 @@ func (h *ApiKeyHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }

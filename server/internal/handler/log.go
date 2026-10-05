@@ -31,14 +31,6 @@ func (h *LogHandler) requireApiKey(c *gin.Context) bool {
 	return true
 }
 
-type uploadLogsRequest struct {
-	RunID       string                  `json:"run_id"`
-	ChunkID     string                  `json:"chunk_id"`
-	Source      string                  `json:"source"`
-	Description string                  `json:"description"`
-	Entries     []service.LogEntryInput `json:"entries"`
-}
-
 func (h *LogHandler) Upload(c *gin.Context) {
 	if !h.requireApiKey(c) {
 		return
@@ -49,7 +41,7 @@ func (h *LogHandler) Upload(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	var req uploadLogsRequest
+	var req service.UploadLogsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
@@ -65,13 +57,7 @@ func (h *LogHandler) Upload(c *gin.Context) {
 		uploaderAPIKeyID = &id
 	}
 
-	result, err := h.logService.UploadLogs(projectID, userID, uploaderAPIKeyID, &service.UploadLogsRequest{
-		RunID:       req.RunID,
-		ChunkID:     req.ChunkID,
-		Source:      req.Source,
-		Description: req.Description,
-		Entries:     req.Entries,
-	})
+	result, err := h.logService.UploadLogs(projectID, userID, uploaderAPIKeyID, &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -176,7 +162,7 @@ func (h *LogHandler) DeleteRun(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *LogHandler) DeleteByProject(c *gin.Context) {
@@ -188,7 +174,7 @@ func (h *LogHandler) DeleteByProject(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func parseLogPagination(c *gin.Context) (page, pageSize int) {

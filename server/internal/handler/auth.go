@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
@@ -66,17 +67,15 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	expFloat, _ := c.Get(middleware.ContextKeyExp)
 	exp := time.Unix(int64(expFloat.(float64)), 0)
 
-	var body struct {
-		RefreshToken string `json:"refresh_token"`
-	}
+	var body api.LogoutJSONBody
 	_ = c.ShouldBindJSON(&body)
 
-	if err := h.authService.Logout(jti, exp, body.RefreshToken); err != nil {
+	if err := h.authService.Logout(jti, exp, api.Deref(body.RefreshToken)); err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *AuthHandler) Refresh(c *gin.Context) {
@@ -106,15 +105,27 @@ func (h *AuthHandler) GetMe(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// updateMeInput 保留基线的 string+omitempty 绑定语义：生成类型字段是
+// *string，{"username":""} 会绑定成非 nil 指针触发 min/email 校验返回 400，
+// 而基线里显式空串被 omitempty 跳过（200 且字段不变）。NonEmpty 把 "" 折回
+// nil，与 service 的 "空串即不提供" 判定等价。
+type updateMeInput struct {
+	Username string `json:"username" binding:"omitempty,min=2,max=50"`
+	Email    string `json:"email" binding:"omitempty,email"`
+}
+
 func (h *AuthHandler) UpdateMe(c *gin.Context) {
-	var req service.UpdateProfileRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var input updateMeInput
+	if err := c.ShouldBindJSON(&input); err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
 		return
 	}
 
 	userID := middleware.GetUserID(c)
-	result, err := h.authService.UpdateProfile(userID, &req)
+	result, err := h.authService.UpdateProfile(userID, &service.UpdateProfileRequest{
+		Username: api.NonEmpty(input.Username),
+		Email:    api.NonEmpty(input.Email),
+	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -136,7 +147,7 @@ func (h *AuthHandler) UpdatePassword(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 var allowedAvatarExts = map[string]bool{
@@ -184,8 +195,8 @@ func (h *AuthHandler) UploadAvatar(c *gin.Context) {
 
 	// 删除旧头像
 	user, err := h.authService.GetMe(userID)
-	if err == nil && user.AvatarURL != "" {
-		oldPath := strings.TrimPrefix(user.AvatarURL, "/api/avatars/")
+	if err == nil && user.AvatarUrl != "" {
+		oldPath := strings.TrimPrefix(user.AvatarUrl, "/api/avatars/")
 		_ = h.storage.Delete(oldPath)
 	}
 

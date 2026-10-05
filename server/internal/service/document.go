@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -32,36 +33,8 @@ func NewDocumentService(docRepo *repository.DocumentRepository, projectRepo *rep
 	}
 }
 
-type DocumentListItem struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	ParentID  *string   `json:"parent_id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-type DocumentDetail struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	ParentID  *string   `json:"parent_id"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-type DocumentListData struct {
-	Items []DocumentListItem `json:"items"`
-	Total int64              `json:"total"`
-}
-
-type CreateDocumentRequest struct {
-	Title    string
-	Body     string
-	ParentID *string
-}
-
+// UpdateDocumentRequest 是 handler 完成 parent_id 三态解析后的 service 入参；
+// **string 表达 省略/置空/改值，生成类型放不下这层语义，保留手写。
 type UpdateDocumentRequest struct {
 	Title    *string
 	Body     *string
@@ -157,24 +130,24 @@ func ensureNoCycle(txRepo *repository.DocumentRepository, docID, newParentID str
 
 func toDocumentListItem(doc model.Document) DocumentListItem {
 	return DocumentListItem{
-		ID:        doc.ID,
-		ProjectID: doc.ProjectID,
-		ParentID:  doc.ParentID,
+		Id:        doc.ID,
+		ProjectId: doc.ProjectID,
+		ParentId:  doc.ParentID,
 		Title:     doc.Title,
-		CreatedAt: doc.CreatedAt,
-		UpdatedAt: doc.UpdatedAt,
+		CreatedAt: api.JSONTime(doc.CreatedAt),
+		UpdatedAt: api.JSONTime(doc.UpdatedAt),
 	}
 }
 
 func toDocumentDetail(doc model.Document) DocumentDetail {
 	return DocumentDetail{
-		ID:        doc.ID,
-		ProjectID: doc.ProjectID,
-		ParentID:  doc.ParentID,
+		Id:        doc.ID,
+		ProjectId: doc.ProjectID,
+		ParentId:  doc.ParentID,
 		Title:     doc.Title,
 		Body:      doc.Body,
-		CreatedAt: doc.CreatedAt,
-		UpdatedAt: doc.UpdatedAt,
+		CreatedAt: api.JSONTime(doc.CreatedAt),
+		UpdatedAt: api.JSONTime(doc.UpdatedAt),
 	}
 }
 
@@ -210,7 +183,8 @@ func (s *DocumentService) Create(projectID, userID string, req *CreateDocumentRe
 	if err := validateDocumentTitle(title); err != nil {
 		return nil, err
 	}
-	if err := validateDocumentBody(req.Body); err != nil {
+	body := api.Deref(req.Body)
+	if err := validateDocumentBody(body); err != nil {
 		return nil, err
 	}
 
@@ -225,11 +199,11 @@ func (s *DocumentService) Create(projectID, userID string, req *CreateDocumentRe
 		}
 
 		var parentID *string
-		if req.ParentID != nil && *req.ParentID != "" {
-			if err := s.validateParentInTx(txRepo, projectID, "", *req.ParentID); err != nil {
+		if req.ParentId != nil && *req.ParentId != "" {
+			if err := s.validateParentInTx(txRepo, projectID, "", *req.ParentId); err != nil {
 				return err
 			}
-			id := *req.ParentID
+			id := *req.ParentId
 			parentID = &id
 		}
 
@@ -239,7 +213,7 @@ func (s *DocumentService) Create(projectID, userID string, req *CreateDocumentRe
 			ProjectID: projectID,
 			ParentID:  parentID,
 			Title:     title,
-			Body:      req.Body,
+			Body:      body,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}

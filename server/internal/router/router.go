@@ -116,6 +116,8 @@ func Setup(
 		api.PUT("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Update)
 		api.POST("/issues/:iid/assets", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.UploadAsset)
 		api.PUT("/issues/:iid/internal-meta", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.UpdateInternalMeta)
+		// 批量工作流更新 —— 全局路径，代理持跨项目 issue UUID 一次写入多条；静态段优先于 :iid 匹配。
+		api.PUT("/issues/internal-meta", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.BatchUpdateInternalMeta)
 		api.PUT("/issues/:iid/checklist", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ReplaceChecklist)
 		api.PUT("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.UpsertShipHook)
 		api.DELETE("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.DeleteShipHook)

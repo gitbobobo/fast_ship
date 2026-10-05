@@ -13,29 +13,6 @@ type DashboardService struct {
 	dashboardRepo *repository.DashboardRepository
 }
 
-type DashboardOverviewResponse struct {
-	OpenIssuesByProject []DashboardProjectOpenIssuePoint `json:"open_issues_by_project"`
-	DailyResolved       []DashboardDailyResolvedPoint    `json:"daily_resolved"`
-}
-
-type DashboardProjectOpenIssuePoint struct {
-	ProjectID      string `json:"project_id"`
-	ProjectName    string `json:"project_name"`
-	OpenIssueCount int    `json:"open_issue_count"`
-}
-
-type DashboardDailyResolvedProjectPoint struct {
-	ProjectID   string `json:"project_id"`
-	ProjectName string `json:"project_name"`
-	Count       int    `json:"count"`
-}
-
-type DashboardDailyResolvedPoint struct {
-	Date          string                               `json:"date"`
-	ResolvedCount int                                  `json:"resolved_count"`
-	Projects      []DashboardDailyResolvedProjectPoint `json:"projects"`
-}
-
 func NewDashboardService(dashboardRepo *repository.DashboardRepository) *DashboardService {
 	return &DashboardService{dashboardRepo: dashboardRepo}
 }
@@ -68,7 +45,7 @@ func (s *DashboardService) GetOverview(userID string) (*DashboardOverviewRespons
 	projectsByDate := make(map[string][]DashboardDailyResolvedProjectPoint, len(resolvedCounts))
 	for _, row := range resolvedByProject {
 		projectsByDate[row.Date] = append(projectsByDate[row.Date], DashboardDailyResolvedProjectPoint{
-			ProjectID:   row.ProjectID,
+			ProjectId:   row.ProjectID,
 			ProjectName: row.ProjectName,
 			Count:       row.ResolvedCount,
 		})
@@ -81,7 +58,7 @@ func (s *DashboardService) GetOverview(userID string) (*DashboardOverviewRespons
 
 	for _, row := range openCounts {
 		resp.OpenIssuesByProject = append(resp.OpenIssuesByProject, DashboardProjectOpenIssuePoint{
-			ProjectID:      row.ProjectID,
+			ProjectId:      row.ProjectID,
 			ProjectName:    row.ProjectName,
 			OpenIssueCount: row.OpenIssueCount,
 		})

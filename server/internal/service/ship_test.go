@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
@@ -45,8 +46,8 @@ func TestShipServiceCheck_ReturnsDetailedMissingItems(t *testing.T) {
 		t.Helper()
 		for _, item := range check.Items {
 			if item.Key == key {
-				if item.OK != ok {
-					t.Fatalf("expected %s ok=%v, got %v", key, ok, item.OK)
+				if item.Ok != ok {
+					t.Fatalf("expected %s ok=%v, got %v", key, ok, item.Ok)
 				}
 				return
 			}
@@ -424,9 +425,9 @@ func TestShipServiceShip_ExecutesInternalIssueShipHook(t *testing.T) {
 
 	commentBody := "已随 {version} 发出。{release_url}"
 	workflow := model.IssueWorkflowStatusDone
-	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.Id, user.ID, UpsertShipHookRequest{
 		CommentBody:    &commentBody,
-		Close:          true,
+		Close:          api.Ptr(true),
 		WorkflowStatus: &workflow,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
@@ -439,7 +440,7 @@ func TestShipServiceShip_ExecutesInternalIssueShipHook(t *testing.T) {
 	if len(check.PendingIssueHooks) != 1 {
 		t.Fatalf("expected 1 pending hook before ship, got %+v", check.PendingIssueHooks)
 	}
-	if check.PendingIssueHooks[0].IssueID != issue.ID || !check.PendingIssueHooks[0].Comment || !check.PendingIssueHooks[0].Close {
+	if check.PendingIssueHooks[0].IssueId != issue.Id || !check.PendingIssueHooks[0].Comment || !check.PendingIssueHooks[0].Close {
 		t.Fatalf("unexpected pending hook: %+v", check.PendingIssueHooks[0])
 	}
 
@@ -454,7 +455,7 @@ func TestShipServiceShip_ExecutesInternalIssueShipHook(t *testing.T) {
 		t.Fatalf("unexpected ship result: %+v", result)
 	}
 
-	got, err := svc.issueService.Get(issue.ID, user.ID)
+	got, err := svc.issueService.Get(issue.Id, user.ID)
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
@@ -464,15 +465,15 @@ func TestShipServiceShip_ExecutesInternalIssueShipHook(t *testing.T) {
 	if got.InternalMeta == nil || got.InternalMeta.WorkflowStatus != model.IssueWorkflowStatusDone {
 		t.Fatalf("expected workflow done, got %+v", got.InternalMeta)
 	}
-	if got.ShipHook == nil || got.ShipHook.Status != string(model.IssueShipHookStatusFired) {
+	if got.ShipHook == nil || got.ShipHook.Status != model.IssueShipHookStatusFired {
 		t.Fatalf("expected fired ship hook, got %+v", got.ShipHook)
 	}
 	wantComment := "已随 v1.0.0 发出。" + releaseURL
-	if got.ShipHook.CommentBody != wantComment {
-		t.Fatalf("expected rendered comment %q, got %q", wantComment, got.ShipHook.CommentBody)
+	if api.Deref(got.ShipHook.CommentBody) != wantComment {
+		t.Fatalf("expected rendered comment %q, got %q", wantComment, api.Deref(got.ShipHook.CommentBody))
 	}
 
-	comments, _, err := svc.issueService.ListComments(issue.ID, user.ID, 1, 20)
+	comments, _, err := svc.issueService.ListComments(issue.Id, user.ID, 1, 20)
 	if err != nil {
 		t.Fatalf("list comments: %v", err)
 	}
@@ -510,7 +511,7 @@ func TestShipServiceShip_FailedShipDoesNotConsumeHook(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if got.ShipHook == nil || got.ShipHook.Status != string(model.IssueShipHookStatusPending) {
+	if got.ShipHook == nil || got.ShipHook.Status != model.IssueShipHookStatusPending {
 		t.Fatalf("expected pending hook after failed ship, got %+v", got.ShipHook)
 	}
 }
@@ -531,8 +532,8 @@ func TestShipServiceShip_SkipsCloseOnClosedIssueStillComments(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 	closed := model.IssueStateClosed
-	reason := "completed"
-	if _, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
+	reason := api.UpdateIssueRequestStateReasonCompleted
+	if _, err := svc.issueService.UpdateInternalIssue(issue.Id, user.ID, UpdateInternalIssueRequest{
 		State:       &closed,
 		StateReason: &reason,
 	}); err != nil {
@@ -540,9 +541,9 @@ func TestShipServiceShip_SkipsCloseOnClosedIssueStillComments(t *testing.T) {
 	}
 
 	commentBody := "closed issue comment"
-	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.Id, user.ID, UpsertShipHookRequest{
 		CommentBody: &commentBody,
-		Close:       true,
+		Close:       api.Ptr(true),
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
 	}
@@ -557,17 +558,17 @@ func TestShipServiceShip_SkipsCloseOnClosedIssueStillComments(t *testing.T) {
 		t.Fatalf("expected no hook failures, got %+v", result)
 	}
 
-	got, err := svc.issueService.Get(issue.ID, user.ID)
+	got, err := svc.issueService.Get(issue.Id, user.ID)
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
 	if got.ShipHook == nil || got.ShipHook.Results == nil || got.ShipHook.Results.Close == nil {
 		t.Fatalf("expected close result, got %+v", got.ShipHook)
 	}
-	if !got.ShipHook.Results.Close.OK || !got.ShipHook.Results.Close.Skipped {
+	if !got.ShipHook.Results.Close.Ok || !api.Deref(got.ShipHook.Results.Close.Skipped) {
 		t.Fatalf("expected close skipped with ok=true, got %+v", got.ShipHook.Results.Close)
 	}
-	if got.ShipHook.Results.Comment == nil || !got.ShipHook.Results.Comment.OK {
+	if got.ShipHook.Results.Comment == nil || !got.ShipHook.Results.Comment.Ok {
 		t.Fatalf("expected comment ok, got %+v", got.ShipHook.Results.Comment)
 	}
 }
@@ -588,10 +589,10 @@ func TestShipServiceShip_SkipsWorkflowWhenAlreadyDone(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 	done := model.IssueWorkflowStatusDone
-	if _, err := svc.issueService.UpdateInternalMeta(issue.ID, user.ID, done, "test"); err != nil {
+	if _, err := svc.issueService.UpdateInternalMeta(issue.Id, user.ID, done, "test"); err != nil {
 		t.Fatalf("set workflow done: %v", err)
 	}
-	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.Id, user.ID, UpsertShipHookRequest{
 		WorkflowStatus: &done,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
@@ -607,14 +608,14 @@ func TestShipServiceShip_SkipsWorkflowWhenAlreadyDone(t *testing.T) {
 		t.Fatalf("expected no hook failures, got %+v", result)
 	}
 
-	got, err := svc.issueService.Get(issue.ID, user.ID)
+	got, err := svc.issueService.Get(issue.Id, user.ID)
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
 	if got.ShipHook == nil || got.ShipHook.Results == nil || got.ShipHook.Results.WorkflowStatus == nil {
 		t.Fatalf("expected workflow result, got %+v", got.ShipHook)
 	}
-	if !got.ShipHook.Results.WorkflowStatus.OK || !got.ShipHook.Results.WorkflowStatus.Skipped {
+	if !got.ShipHook.Results.WorkflowStatus.Ok || !api.Deref(got.ShipHook.Results.WorkflowStatus.Skipped) {
 		t.Fatalf("expected workflow skipped with ok=true, got %+v", got.ShipHook.Results.WorkflowStatus)
 	}
 }
@@ -633,7 +634,7 @@ func TestShipServiceShip_GitHubCommentFailureStillShips(t *testing.T) {
 	workflow := model.IssueWorkflowStatusDone
 	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody:    &commentBody,
-		Close:          true,
+		Close:          api.Ptr(true),
 		WorkflowStatus: &workflow,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
@@ -685,16 +686,16 @@ func TestShipServiceShip_GitHubCommentFailureStillShips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if got.ShipHook == nil || got.ShipHook.Status != string(model.IssueShipHookStatusFired) {
+	if got.ShipHook == nil || got.ShipHook.Status != model.IssueShipHookStatusFired {
 		t.Fatalf("expected fired hook, got %+v", got.ShipHook)
 	}
-	if got.ShipHook.Results == nil || got.ShipHook.Results.Comment == nil || got.ShipHook.Results.Comment.OK {
+	if got.ShipHook.Results == nil || got.ShipHook.Results.Comment == nil || got.ShipHook.Results.Comment.Ok {
 		t.Fatalf("expected comment failure, got %+v", got.ShipHook.Results)
 	}
-	if got.ShipHook.Results.WorkflowStatus == nil || !got.ShipHook.Results.WorkflowStatus.OK {
+	if got.ShipHook.Results.WorkflowStatus == nil || !got.ShipHook.Results.WorkflowStatus.Ok {
 		t.Fatalf("expected workflow to continue after comment failure, got %+v", got.ShipHook.Results)
 	}
-	if got.ShipHook.Results.Close == nil || !got.ShipHook.Results.Close.OK {
+	if got.ShipHook.Results.Close == nil || !got.ShipHook.Results.Close.Ok {
 		t.Fatalf("expected close to continue after comment failure, got %+v", got.ShipHook.Results)
 	}
 	if len(fakeIssueGH.updateIssueCalls) == 0 {
@@ -725,7 +726,7 @@ func TestShipServiceShip_ConsumesOnlySameProjectHooks(t *testing.T) {
 	issueB := createTestIssue(t, svc.db, projectB.ID)
 
 	workflow := model.IssueWorkflowStatusDone
-	for _, issueID := range []string{issueA1.ID, issueA2.ID, issueB.ID} {
+	for _, issueID := range []string{issueA1.Id, issueA2.Id, issueB.ID} {
 		if _, err := svc.shipHookService.UpsertShipHook(issueID, user.ID, UpsertShipHookRequest{
 			WorkflowStatus: &workflow,
 		}); err != nil {
@@ -743,12 +744,12 @@ func TestShipServiceShip_ConsumesOnlySameProjectHooks(t *testing.T) {
 		t.Fatalf("expected 2 consumed hooks, got %+v", result)
 	}
 
-	for _, issueID := range []string{issueA1.ID, issueA2.ID} {
+	for _, issueID := range []string{issueA1.Id, issueA2.Id} {
 		got, err := svc.issueService.Get(issueID, user.ID)
 		if err != nil {
 			t.Fatalf("get issue %s: %v", issueID, err)
 		}
-		if got.ShipHook == nil || got.ShipHook.Status != string(model.IssueShipHookStatusFired) {
+		if got.ShipHook == nil || got.ShipHook.Status != model.IssueShipHookStatusFired {
 			t.Fatalf("expected fired hook for %s, got %+v", issueID, got.ShipHook)
 		}
 	}
@@ -757,7 +758,7 @@ func TestShipServiceShip_ConsumesOnlySameProjectHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get other project issue: %v", err)
 	}
-	if gotB.ShipHook == nil || gotB.ShipHook.Status != string(model.IssueShipHookStatusPending) {
+	if gotB.ShipHook == nil || gotB.ShipHook.Status != model.IssueShipHookStatusPending {
 		t.Fatalf("expected other project hook to remain pending, got %+v", gotB.ShipHook)
 	}
 }
@@ -800,7 +801,7 @@ func TestShipServiceShip_PreservesUnknownPlaceholders(t *testing.T) {
 	}
 
 	commentBody := "ver={version} url={release_url} unknown={unknown}"
-	if _, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
+	if _, err := svc.shipHookService.UpsertShipHook(issue.Id, user.ID, UpsertShipHookRequest{
 		CommentBody: &commentBody,
 	}); err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
@@ -814,11 +815,11 @@ func TestShipServiceShip_PreservesUnknownPlaceholders(t *testing.T) {
 	}
 
 	want := "ver=v1.0.0 url=" + releaseURL + " unknown={unknown}"
-	got, err := svc.issueService.Get(issue.ID, user.ID)
+	got, err := svc.issueService.Get(issue.Id, user.ID)
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if got.ShipHook == nil || got.ShipHook.CommentBody != want {
+	if got.ShipHook == nil || api.Deref(got.ShipHook.CommentBody) != want {
 		t.Fatalf("expected rendered comment %q, got %+v", want, got.ShipHook)
 	}
 }

@@ -37,7 +37,7 @@ func TestIssueCollab_ConsensusUpsert(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert consensus: %v", err)
 	}
-	if consensus1.Body != "共识初版" || consensus1.Author.Kind != string(model.CollabAuthorAgent) {
+	if consensus1.Body != "共识初版" || consensus1.Author.Kind != model.CollabAuthorAgent {
 		t.Fatalf("unexpected consensus: %+v", consensus1)
 	}
 
@@ -116,7 +116,7 @@ func TestIssueCollab_AgentAuthoredGetArea(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get area: %v", err)
 	}
-	if area.Consensus == nil || area.Consensus.Author.Kind != string(model.CollabAuthorAgent) || area.Consensus.Author.Login != collabAgentLogin {
+	if area.Consensus == nil || area.Consensus.Author.Kind != model.CollabAuthorAgent || area.Consensus.Author.Login != collabAgentLogin {
 		t.Fatalf("unexpected consensus actor: %+v", area.Consensus)
 	}
 }

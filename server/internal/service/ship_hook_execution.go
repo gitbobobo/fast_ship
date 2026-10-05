@@ -5,23 +5,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
-
-// PendingIssueHook 是 ship check 响应中待执行钩子的展示项，字段全部非 omitempty。
-type PendingIssueHook struct {
-	IssueID         string `json:"issue_id"`
-	Reference       string `json:"reference"`
-	Title           string `json:"title"`
-	Comment         bool   `json:"comment"`
-	Close           bool   `json:"close"`
-	WorkflowEnabled bool   `json:"workflow_enabled"`
-	WorkflowStatus  string `json:"workflow_status"`
-}
 
 func (s *ShipService) ListPendingIssueHooksForCheck(projectID string) ([]PendingIssueHook, error) {
 	hooks, err := s.shipHookRepo.ListPendingByProjectID(projectID)
@@ -48,7 +38,7 @@ func (s *ShipService) ListPendingIssueHooksForCheck(projectID string) ([]Pending
 			continue
 		}
 		result = append(result, PendingIssueHook{
-			IssueID:         hook.IssueID,
+			IssueId:         hook.IssueID,
 			Reference:       buildIssueReference(issue),
 			Title:           issue.Title,
 			Comment:         hook.CommentEnabled,
@@ -87,7 +77,7 @@ func (s *ShipService) ExecutePendingShipHooks(projectID, userID string, version 
 			zap.Error(err),
 		)
 		result.HookStatus = "incomplete"
-		result.HookError = err.Error()
+		result.HookError = api.Ptr(err.Error())
 		return result, err
 	}
 
@@ -112,7 +102,7 @@ func (s *ShipService) ExecutePendingShipHooks(projectID, userID string, version 
 			// the worker did not durably finish this hook. Do not report a
 			// successful ship with a silently lost execution.
 			result.HookStatus = "incomplete"
-			result.HookError = err.Error()
+			result.HookError = api.Ptr(err.Error())
 			return result, err
 		}
 		if shipHookHasFailure(hook) {
@@ -264,7 +254,7 @@ func (s *ShipService) executeShipHookClose(hook *model.IssueShipHook, userID str
 	}
 
 	closed := model.IssueStateClosed
-	reason := "completed"
+	reason := api.UpdateIssueRequestStateReasonCompleted
 	_, err := s.hookActions.UpdateInternalIssue(hook.IssueID, userID, UpdateInternalIssueRequest{
 		State:       &closed,
 		StateReason: &reason,

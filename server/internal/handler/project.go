@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/service"
@@ -68,16 +69,32 @@ func (h *ProjectHandler) List(c *gin.Context) {
 	response.SuccessPaginated(c, projects, total, page, pageSize)
 }
 
+// updateProjectInput 保留基线的 string+omitempty 绑定语义，原因同
+// updateMeInput：生成类型 *string 无法对显式空串走 omitempty 跳过。
+type updateProjectInput struct {
+	Name            string `json:"name" binding:"omitempty,min=1,max=100"`
+	Description     string `json:"description"`
+	RepositoryURL   string `json:"repository_url"`
+	GithubToken     string `json:"github_token"`
+	SourceProjectID string `json:"source_project_id"`
+}
+
 func (h *ProjectHandler) Update(c *gin.Context) {
 	id := c.Param("id")
-	var req service.UpdateProjectRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	var input updateProjectInput
+	if err := c.ShouldBindJSON(&input); err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
 		return
 	}
 
 	userID := middleware.GetUserID(c)
-	result, err := h.projectService.Update(id, userID, &req)
+	result, err := h.projectService.Update(id, userID, &service.UpdateProjectRequest{
+		Name:            api.NonEmpty(input.Name),
+		Description:     api.NonEmpty(input.Description),
+		RepositoryUrl:   api.NonEmpty(input.RepositoryURL),
+		GithubToken:     api.NonEmpty(input.GithubToken),
+		SourceProjectId: api.NonEmpty(input.SourceProjectID),
+	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -95,7 +112,7 @@ func (h *ProjectHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *ProjectHandler) GetBranches(c *gin.Context) {
@@ -108,8 +125,8 @@ func (h *ProjectHandler) GetBranches(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, gin.H{
-		"branches":       branches,
-		"default_branch": defaultBranch,
+	response.Success(c, api.GetProjectBranches200JSONResponseBody_Data{
+		Branches:      branches,
+		DefaultBranch: defaultBranch,
 	})
 }

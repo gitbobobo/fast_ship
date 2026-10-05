@@ -3,8 +3,10 @@ package handler
 import (
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -15,54 +17,18 @@ import (
 type IssueHandler struct {
 	issueService    *service.IssueService
 	shipHookService *service.IssueShipHookService
+	collabService   *service.IssueCollabService
 }
 
-type createIssueRequest struct {
-	Title          string                    `json:"title"`
-	Body           string                    `json:"body"`
-	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
-	Source         model.IssueSource         `json:"source"`
-}
-
-type updateInternalIssueRequest struct {
-	Title       *string           `json:"title"`
-	Body        *string           `json:"body"`
-	State       *model.IssueState `json:"state"`
-	StateReason *string           `json:"state_reason"`
-	Labels      *[]string         `json:"labels"`
-}
-
-type createInternalIssueCommentRequest struct {
-	Body string `json:"body"`
-}
-
-type updateIssueInternalMetaRequest struct {
-	WorkflowStatus *model.IssueWorkflowStatus `json:"workflow_status"`
-}
-
-type replaceIssueChecklistRequest struct {
-	Items []service.IssueChecklistItemInput `json:"items"`
-}
-
-type upsertShipHookRequest struct {
-	CommentBody    *string                    `json:"comment_body"`
-	Close          bool                       `json:"close"`
-	WorkflowStatus *model.IssueWorkflowStatus `json:"workflow_status"`
-}
-
-type batchCloseDoneRequest struct {
-	Source string `json:"source"`
-}
-
-func NewIssueHandler(issueService *service.IssueService, shipHookService *service.IssueShipHookService) *IssueHandler {
-	return &IssueHandler{issueService: issueService, shipHookService: shipHookService}
+func NewIssueHandler(issueService *service.IssueService, shipHookService *service.IssueShipHookService, collabService *service.IssueCollabService) *IssueHandler {
+	return &IssueHandler{issueService: issueService, shipHookService: shipHookService, collabService: collabService}
 }
 
 func (h *IssueHandler) Create(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	var req createIssueRequest
+	var req service.CreateInternalIssueRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
@@ -70,21 +36,14 @@ func (h *IssueHandler) Create(c *gin.Context) {
 
 	var result *service.IssueResponse
 	var err error
-	if req.Source == model.IssueSourceGitHub {
+	if api.Deref(req.Source) == model.IssueSourceGitHub {
 		if !middleware.IsJWTAuth(c) {
 			middleware.HandleAppError(c, errs.ErrApiKeyForbidden)
 			return
 		}
-		result, err = h.issueService.CreateGitHubIssue(projectID, userID, service.CreateInternalIssueRequest{
-			Title: req.Title,
-			Body:  req.Body,
-		})
+		result, err = h.issueService.CreateGitHubIssue(projectID, userID, req)
 	} else {
-		result, err = h.issueService.CreateInternalIssue(projectID, userID, service.CreateInternalIssueRequest{
-			Title:          req.Title,
-			Body:           req.Body,
-			WorkflowStatus: req.WorkflowStatus,
-		})
+		result, err = h.issueService.CreateInternalIssue(projectID, userID, req)
 	}
 	if err != nil {
 		middleware.HandleAppError(c, err)
@@ -98,7 +57,7 @@ func (h *IssueHandler) Update(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	var req updateInternalIssueRequest
+	var req service.UpdateInternalIssueRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
@@ -109,13 +68,7 @@ func (h *IssueHandler) Update(c *gin.Context) {
 		return
 	}
 
-	result, err := h.issueService.UpdateInternalIssue(issueID, userID, service.UpdateInternalIssueRequest{
-		Title:       req.Title,
-		Body:        req.Body,
-		State:       req.State,
-		StateReason: req.StateReason,
-		Labels:      req.Labels,
-	})
+	result, err := h.issueService.UpdateInternalIssue(issueID, userID, req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -171,21 +124,21 @@ func (h *IssueHandler) Count(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, gin.H{"count": count})
+	response.Success(c, api.CountIssues200JSONResponseBody_Data{Count: count})
 }
 
 func (h *IssueHandler) BatchCloseDone(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	var req batchCloseDoneRequest
+	var req api.BatchCloseDoneIssuesJSONBody
 	_ = c.ShouldBindJSON(&req)
-	if req.Source != "" && req.Source != string(model.IssueSourceInternal) && req.Source != string(model.IssueSourceGitHub) {
+	if req.Source != nil && *req.Source != model.IssueSourceInternal && *req.Source != model.IssueSourceGitHub {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.issueService.BatchCloseDoneIssues(projectID, userID, req.Source)
+	result, err := h.issueService.BatchCloseDoneIssues(projectID, userID, string(api.Deref(req.Source)))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -203,6 +156,13 @@ func (h *IssueHandler) Get(c *gin.Context) {
 		middleware.HandleAppError(c, err)
 		return
 	}
+
+	collab, err := h.collabService.GetArea(issueID, userID)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	item.Collab = collab
 
 	response.Success(c, item)
 }
@@ -259,15 +219,13 @@ func (h *IssueHandler) CreateComment(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	var req createInternalIssueCommentRequest
+	var req service.CreateInternalIssueCommentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.issueService.CreateInternalComment(issueID, userID, service.CreateInternalIssueCommentRequest{
-		Body: req.Body,
-	}, middleware.ActorLabel(c))
+	result, err := h.issueService.CreateInternalComment(issueID, userID, req, middleware.ActorLabel(c))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -286,7 +244,7 @@ func (h *IssueHandler) MarkRead(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *IssueHandler) ListTimeline(c *gin.Context) {
@@ -328,7 +286,7 @@ func (h *IssueHandler) UpdateInternalMeta(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	var req updateIssueInternalMetaRequest
+	var req api.UpdateIssueInternalMetaJSONBody
 	if err := c.ShouldBindJSON(&req); err != nil || req.WorkflowStatus == nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
@@ -343,19 +301,42 @@ func (h *IssueHandler) UpdateInternalMeta(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// BatchUpdateInternalMeta 批量更新 Issue 的 workflow_status，全局路径，item 以 issue_id 定位。
+func (h *IssueHandler) BatchUpdateInternalMeta(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+
+	var req api.BatchUpdateIssueInternalMetaJSONBody
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.Items) == 0 {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+	for _, item := range req.Items {
+		if strings.TrimSpace(item.IssueId) == "" {
+			middleware.HandleAppError(c, errs.ErrInvalidParams)
+			return
+		}
+	}
+
+	result, err := h.issueService.BatchUpdateInternalMeta(userID, req.Items, middleware.ActorLabel(c))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
 func (h *IssueHandler) ReplaceChecklist(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	var req replaceIssueChecklistRequest
+	var req service.ReplaceIssueChecklistRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.issueService.ReplaceChecklist(issueID, userID, service.ReplaceIssueChecklistRequest{
-		Items: req.Items,
-	}, middleware.ActorLabel(c))
+	result, err := h.issueService.ReplaceChecklist(issueID, userID, req, middleware.ActorLabel(c))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -418,17 +399,13 @@ func (h *IssueHandler) UpsertShipHook(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	var req upsertShipHookRequest
+	var req service.UpsertShipHookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.shipHookService.UpsertShipHook(issueID, userID, service.UpsertShipHookRequest{
-		CommentBody:    req.CommentBody,
-		Close:          req.Close,
-		WorkflowStatus: req.WorkflowStatus,
-	})
+	result, err := h.shipHookService.UpsertShipHook(issueID, userID, req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -446,7 +423,7 @@ func (h *IssueHandler) DeleteShipHook(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *IssueHandler) AssetContent(c *gin.Context) {

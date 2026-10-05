@@ -38,29 +38,6 @@ func NewIssueCollabService(
 	}
 }
 
-type IssueCollabActorResponse struct {
-	Kind      string `json:"kind"`
-	Login     string `json:"login"`
-	AvatarURL string `json:"avatar_url"`
-}
-
-type IssueCollabDocResponse struct {
-	IssueID   string                   `json:"issue_id"`
-	Body      string                   `json:"body"`
-	Author    IssueCollabActorResponse `json:"author"`
-	CreatedAt string                   `json:"created_at"`
-	UpdatedAt string                   `json:"updated_at"`
-}
-
-type IssueCollabAreaResponse struct {
-	Consensus *IssueCollabDocResponse `json:"consensus"`
-	Summary   *IssueCollabDocResponse `json:"summary"`
-}
-
-type UpsertIssueCollabRequest struct {
-	Body string `json:"body"`
-}
-
 func (s *IssueCollabService) GetArea(issueID, userID string) (*IssueCollabAreaResponse, error) {
 	if _, err := s.ensureAccess(issueID, userID); err != nil {
 		return nil, err
@@ -205,22 +182,22 @@ func (s *IssueCollabService) resolveActors(sources []collabActorSource) (map[str
 
 func (s *IssueCollabService) buildActor(userID string, kind model.CollabAuthorKind, userMap map[string]model.User) IssueCollabActorResponse {
 	if kind == model.CollabAuthorAgent {
-		return IssueCollabActorResponse{Kind: string(model.CollabAuthorAgent), Login: collabAgentLogin}
+		return IssueCollabActorResponse{Kind: model.CollabAuthorAgent, Login: collabAgentLogin}
 	}
 	user, ok := userMap[userID]
 	if !ok {
-		return IssueCollabActorResponse{Kind: string(model.CollabAuthorUser), Login: "未知用户"}
+		return IssueCollabActorResponse{Kind: model.CollabAuthorUser, Login: "未知用户"}
 	}
 	return IssueCollabActorResponse{
-		Kind:      string(model.CollabAuthorUser),
+		Kind:      model.CollabAuthorUser,
 		Login:     user.Username,
-		AvatarURL: user.AvatarURL,
+		AvatarUrl: user.AvatarURL,
 	}
 }
 
 func (s *IssueCollabService) toDocResponse(doc model.IssueCollabDocument, userMap map[string]model.User) IssueCollabDocResponse {
 	return IssueCollabDocResponse{
-		IssueID:   doc.IssueID,
+		IssueId:   doc.IssueID,
 		Body:      doc.Body,
 		Author:    s.buildActor(doc.AuthorUserID, doc.AuthorKind, userMap),
 		CreatedAt: formatTime(doc.CreatedAt),

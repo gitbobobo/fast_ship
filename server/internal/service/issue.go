@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
@@ -61,7 +62,9 @@ func (s *IssueService) CleanupExpiredPendingIssueAssets() error {
 
 func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateInternalIssueRequest) (*IssueResponse, error) {
 	title := strings.TrimSpace(req.Title)
-	if title == "" || !model.IsValidIssueWorkflowStatus(req.WorkflowStatus) {
+	body := api.Deref(req.Body)
+	workflowStatus := api.Deref(req.WorkflowStatus)
+	if title == "" || !model.IsValidIssueWorkflowStatus(workflowStatus) {
 		return nil, errs.ErrInvalidParams
 	}
 
@@ -93,7 +96,7 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		SequenceNumber:  sequenceNumber,
 		State:           model.IssueStateOpen,
 		Title:           title,
-		Body:            req.Body,
+		Body:            body,
 		AuthorUserID:    user.ID,
 		AuthorLogin:     user.Username,
 		AuthorAvatarURL: "",
@@ -102,15 +105,15 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 	}
 
 	var meta *model.IssueInternalMeta
-	if req.WorkflowStatus != "" {
-		meta = buildInternalIssueMeta(issue.ID, userID, req.WorkflowStatus, now)
+	if workflowStatus != "" {
+		meta = buildInternalIssueMeta(issue.ID, userID, workflowStatus, now)
 	}
 
 	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
 		if err := s.issueRepo.CreateTx(tx, issue); err != nil {
 			return err
 		}
-		if err := s.attachDraftAssetsToIssueTx(tx, projectID, issue.ID, req.Body); err != nil {
+		if err := s.attachDraftAssetsToIssueTx(tx, projectID, issue.ID, body); err != nil {
 			return err
 		}
 		if meta != nil {
@@ -142,6 +145,7 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 
 func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInternalIssueRequest) (*IssueResponse, error) {
 	title := strings.TrimSpace(req.Title)
+	body := api.Deref(req.Body)
 	if title == "" {
 		return nil, errs.ErrInvalidParams
 	}
@@ -162,11 +166,11 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 
 	ctx := context.Background()
-	if err := s.validateIssueAssetReferences(projectID, "", req.Body); err != nil {
+	if err := s.validateIssueAssetReferences(projectID, "", body); err != nil {
 		return nil, err
 	}
 
-	createdIssue, err := client.CreateIssue(ctx, title, req.Body)
+	createdIssue, err := client.CreateIssue(ctx, title, body)
 	if err != nil {
 		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("创建 GitHub Issue 失败: %v", err))
 	}
@@ -178,7 +182,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 	var assetPathsToDelete []string
 	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
 		var err error
-		assetPathsToDelete, err = s.syncIssueAssetsTx(tx, projectID, stored.ID, req.Body)
+		assetPathsToDelete, err = s.syncIssueAssetsTx(tx, projectID, stored.ID, body)
 		return err
 	}); err != nil {
 		return nil, mapIssueAssetReferenceError(err)
@@ -233,7 +237,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		stateReason := ""
 		if req.State != nil {
 			var appErr *errs.AppError
-			stateReason, appErr = normalizeIssueStateReason(req.State, req.StateReason)
+			stateReason, appErr = normalizeIssueStateReason(req.State, (*string)(req.StateReason))
 			if appErr != nil {
 				return nil, appErr
 			}
@@ -241,7 +245,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 
 		var labelsToUpdate *[]string
 		if req.Labels != nil {
-			normalizedLabels, appErr := normalizeGitHubLabels(*req.Labels)
+			normalizedLabels, appErr := normalizeGitHubLabels(req.Labels)
 			if appErr != nil {
 				return nil, appErr
 			}
@@ -331,7 +335,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if err != nil {
 			return nil, err
 		}
-		resolvedLabels, appErr := resolveInternalLabels(*req.Labels, repoLabels)
+		resolvedLabels, appErr := resolveInternalLabels(req.Labels, repoLabels)
 		if appErr != nil {
 			return nil, appErr
 		}
@@ -367,7 +371,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if !isValidIssueState(*req.State) {
 			return nil, errs.ErrInvalidParams
 		}
-		stateReason, appErr := normalizeIssueStateReason(req.State, req.StateReason)
+		stateReason, appErr := normalizeIssueStateReason(req.State, (*string)(req.StateReason))
 		if appErr != nil {
 			return nil, appErr
 		}

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
@@ -21,16 +22,16 @@ func TestIssueServiceUpsertShipHook_PutPendingAndGet(t *testing.T) {
 	workflow := model.IssueWorkflowStatusDone
 	hook, err := svc.shipHookService.UpsertShipHook(issue.ID, user.ID, UpsertShipHookRequest{
 		CommentBody:    &commentBody,
-		Close:          true,
+		Close:          api.Ptr(true),
 		WorkflowStatus: &workflow,
 	})
 	if err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
 	}
-	if hook.Status != string(model.IssueShipHookStatusPending) {
+	if hook.Status != model.IssueShipHookStatusPending {
 		t.Fatalf("expected pending status, got %q", hook.Status)
 	}
-	if hook.CommentBody != commentBody || !hook.CloseEnabled || !hook.WorkflowEnabled || hook.WorkflowStatus != string(workflow) {
+	if api.Deref(hook.CommentBody) != commentBody || !hook.CloseEnabled || !hook.WorkflowEnabled || hook.WorkflowStatus != string(workflow) {
 		t.Fatalf("unexpected hook payload: %+v", hook)
 	}
 
@@ -41,7 +42,7 @@ func TestIssueServiceUpsertShipHook_PutPendingAndGet(t *testing.T) {
 	if got.ShipHook == nil {
 		t.Fatalf("expected ship_hook on issue")
 	}
-	if got.ShipHook.Status != string(model.IssueShipHookStatusPending) {
+	if got.ShipHook.Status != model.IssueShipHookStatusPending {
 		t.Fatalf("expected pending ship_hook, got %+v", got.ShipHook)
 	}
 }
@@ -83,7 +84,7 @@ func TestIssueServiceUpsertShipHook_OverwritesFiredToPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert ship hook: %v", err)
 	}
-	if hook.Status != string(model.IssueShipHookStatusPending) {
+	if hook.Status != model.IssueShipHookStatusPending {
 		t.Fatalf("expected pending after overwrite, got %q", hook.Status)
 	}
 
@@ -272,7 +273,7 @@ func TestIssueServiceList_IncludesShipHooksWithoutNPlusOne(t *testing.T) {
 	}
 
 	workflow := model.IssueWorkflowStatusDone
-	for _, issueID := range []string{issue1.ID, issue2.ID} {
+	for _, issueID := range []string{issue1.Id, issue2.Id} {
 		if _, err := svc.shipHookService.UpsertShipHook(issueID, user.ID, UpsertShipHookRequest{
 			WorkflowStatus: &workflow,
 		}); err != nil {
@@ -290,7 +291,7 @@ func TestIssueServiceList_IncludesShipHooksWithoutNPlusOne(t *testing.T) {
 
 	found := 0
 	for _, item := range items {
-		if item.ShipHook == nil || item.ShipHook.Status != string(model.IssueShipHookStatusPending) {
+		if item.ShipHook == nil || item.ShipHook.Status != model.IssueShipHookStatusPending {
 			continue
 		}
 		found++

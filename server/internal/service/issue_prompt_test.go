@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 )
@@ -29,9 +30,9 @@ func TestIssuePromptServiceUpdateAndGetRoundTrip(t *testing.T) {
 	services := setupTestServices(t)
 	user := createTestUser(t, services.db, "user-issue-prompt-roundtrip")
 
-	input := []model.IssuePromptItem{
-		{ID: "id-1", Name: "默认", Content: "请处理此问题"},
-		{ID: "id-2", Name: "详细", Content: "请仔细分析并修复此问题"},
+	input := []api.IssuePromptItem{
+		{Id: "id-1", Name: "默认", Content: "请处理此问题"},
+		{Id: "id-2", Name: "详细", Content: "请仔细分析并修复此问题"},
 	}
 	updated, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: input})
 	if err != nil {
@@ -40,7 +41,7 @@ func TestIssuePromptServiceUpdateAndGetRoundTrip(t *testing.T) {
 	if len(updated.Prompts) != 2 {
 		t.Fatalf("expected 2 prompts returned, got %d", len(updated.Prompts))
 	}
-	if updated.Prompts[0].ID != "id-1" || updated.Prompts[1].Content != "请仔细分析并修复此问题" {
+	if updated.Prompts[0].Id != "id-1" || updated.Prompts[1].Content != "请仔细分析并修复此问题" {
 		t.Fatalf("unexpected prompts payload: %#v", updated.Prompts)
 	}
 
@@ -51,7 +52,7 @@ func TestIssuePromptServiceUpdateAndGetRoundTrip(t *testing.T) {
 	if len(got.Prompts) != 2 {
 		t.Fatalf("expected 2 prompts persisted, got %d", len(got.Prompts))
 	}
-	if got.Prompts[0].Name != "默认" || got.Prompts[1].ID != "id-2" {
+	if got.Prompts[0].Name != "默认" || got.Prompts[1].Id != "id-2" {
 		t.Fatalf("unexpected persisted prompts: %#v", got.Prompts)
 	}
 }
@@ -60,9 +61,9 @@ func TestIssuePromptServiceSupportsBatchRoundTrip(t *testing.T) {
 	services := setupTestServices(t)
 	user := createTestUser(t, services.db, "user-issue-prompt-batch-roundtrip")
 
-	input := []model.IssuePromptItem{
-		{ID: "id-1", Name: "批量", Content: "批量正文", SupportsBatch: true},
-		{ID: "id-2", Name: "单发", Content: "单发正文", SupportsBatch: false},
+	input := []api.IssuePromptItem{
+		{Id: "id-1", Name: "批量", Content: "批量正文", SupportsBatch: api.Ptr(true)},
+		{Id: "id-2", Name: "单发", Content: "单发正文", SupportsBatch: api.Ptr(false)},
 	}
 	updated, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: input})
 	if err != nil {
@@ -71,7 +72,7 @@ func TestIssuePromptServiceSupportsBatchRoundTrip(t *testing.T) {
 	if len(updated.Prompts) != 2 {
 		t.Fatalf("expected 2 prompts returned, got %d", len(updated.Prompts))
 	}
-	if !updated.Prompts[0].SupportsBatch || updated.Prompts[1].SupportsBatch {
+	if !api.Deref(updated.Prompts[0].SupportsBatch) || api.Deref(updated.Prompts[1].SupportsBatch) {
 		t.Fatalf("unexpected supports_batch in update response: %#v", updated.Prompts)
 	}
 
@@ -82,7 +83,7 @@ func TestIssuePromptServiceSupportsBatchRoundTrip(t *testing.T) {
 	if len(got.Prompts) != 2 {
 		t.Fatalf("expected 2 prompts persisted, got %d", len(got.Prompts))
 	}
-	if !got.Prompts[0].SupportsBatch || got.Prompts[1].SupportsBatch {
+	if !api.Deref(got.Prompts[0].SupportsBatch) || api.Deref(got.Prompts[1].SupportsBatch) {
 		t.Fatalf("unexpected supports_batch persisted: %#v", got.Prompts)
 	}
 }
@@ -108,10 +109,10 @@ func TestIssuePromptServiceLegacyJSONWithoutSupportsBatch(t *testing.T) {
 	if len(got.Prompts) != 2 {
 		t.Fatalf("expected 2 prompts persisted, got %d: %#v", len(got.Prompts), got.Prompts)
 	}
-	if got.Prompts[0].SupportsBatch {
+	if api.Deref(got.Prompts[0].SupportsBatch) {
 		t.Fatalf("expected missing supports_batch to unmarshal as false, got: %#v", got.Prompts[0])
 	}
-	if !got.Prompts[1].SupportsBatch {
+	if !api.Deref(got.Prompts[1].SupportsBatch) {
 		t.Fatalf("expected explicit supports_batch true to be preserved, got: %#v", got.Prompts[1])
 	}
 }
@@ -120,17 +121,17 @@ func TestIssuePromptServiceUpdateIsReplaceNotAppend(t *testing.T) {
 	services := setupTestServices(t)
 	user := createTestUser(t, services.db, "user-issue-prompt-replace")
 
-	first := []model.IssuePromptItem{
-		{ID: "a", Name: "A", Content: "正文 A"},
-		{ID: "b", Name: "B", Content: "正文 B"},
-		{ID: "c", Name: "C", Content: "正文 C"},
+	first := []api.IssuePromptItem{
+		{Id: "a", Name: "A", Content: "正文 A"},
+		{Id: "b", Name: "B", Content: "正文 B"},
+		{Id: "c", Name: "C", Content: "正文 C"},
 	}
 	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: first}); err != nil {
 		t.Fatalf("first update: %v", err)
 	}
 
-	second := []model.IssuePromptItem{
-		{ID: "x", Name: "X", Content: "正文 X"},
+	second := []api.IssuePromptItem{
+		{Id: "x", Name: "X", Content: "正文 X"},
 	}
 	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: second}); err != nil {
 		t.Fatalf("second update: %v", err)
@@ -143,8 +144,8 @@ func TestIssuePromptServiceUpdateIsReplaceNotAppend(t *testing.T) {
 	if len(got.Prompts) != 1 {
 		t.Fatalf("expected replace to 1 item, got %d: %#v", len(got.Prompts), got.Prompts)
 	}
-	if got.Prompts[0].ID != "x" {
-		t.Fatalf("expected replaced item id x, got %q", got.Prompts[0].ID)
+	if got.Prompts[0].Id != "x" {
+		t.Fatalf("expected replaced item id x, got %q", got.Prompts[0].Id)
 	}
 }
 
@@ -155,7 +156,7 @@ func TestIssuePromptServiceUpdateRejectsEmptyList(t *testing.T) {
 	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: nil}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("expected ErrInvalidParams for nil prompts, got: %v", err)
 	}
-	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: []model.IssuePromptItem{}}); !errors.Is(err, errs.ErrInvalidParams) {
+	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: []api.IssuePromptItem{}}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("expected ErrInvalidParams for empty prompts, got: %v", err)
 	}
 }
@@ -166,19 +167,19 @@ func TestIssuePromptServiceUpdateRejectsBlankFields(t *testing.T) {
 
 	cases := []struct {
 		name  string
-		items []model.IssuePromptItem
+		items []api.IssuePromptItem
 	}{
 		{
 			name:  "blank id",
-			items: []model.IssuePromptItem{{ID: "  ", Name: "默认", Content: "正文"}},
+			items: []api.IssuePromptItem{{Id: "  ", Name: "默认", Content: "正文"}},
 		},
 		{
 			name:  "blank name",
-			items: []model.IssuePromptItem{{ID: "id", Name: "  ", Content: "正文"}},
+			items: []api.IssuePromptItem{{Id: "id", Name: "  ", Content: "正文"}},
 		},
 		{
 			name:  "blank content",
-			items: []model.IssuePromptItem{{ID: "id", Name: "默认", Content: "  "}},
+			items: []api.IssuePromptItem{{Id: "id", Name: "默认", Content: "  "}},
 		},
 	}
 	for _, tc := range cases {
@@ -191,7 +192,7 @@ func TestIssuePromptServiceUpdateRejectsBlankFields(t *testing.T) {
 	}
 
 	// 校验仅用于判空、原值照存：包含前后空白的合法值应写入成功且原样保留。
-	kept := []model.IssuePromptItem{{ID: " id ", Name: " 名称 ", Content: " 正文 "}}
+	kept := []api.IssuePromptItem{{Id: " id ", Name: " 名称 ", Content: " 正文 "}}
 	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: kept}); err != nil {
 		t.Fatalf("expected trim-only validation to accept whitespace-bearing values: %v", err)
 	}
@@ -199,7 +200,7 @@ func TestIssuePromptServiceUpdateRejectsBlankFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get prompts: %v", err)
 	}
-	if got.Prompts[0].ID != " id " || got.Prompts[0].Name != " 名称 " || got.Prompts[0].Content != " 正文 " {
+	if got.Prompts[0].Id != " id " || got.Prompts[0].Name != " 名称 " || got.Prompts[0].Content != " 正文 " {
 		t.Fatalf("expected values preserved verbatim, got: %#v", got.Prompts[0])
 	}
 }
@@ -208,7 +209,7 @@ func TestIssuePromptServiceCreatedAtStableAcrossUpdates(t *testing.T) {
 	services := setupTestServices(t)
 	user := createTestUser(t, services.db, "user-issue-prompt-createdat")
 
-	first := []model.IssuePromptItem{{ID: "a", Name: "A", Content: "正文 A"}}
+	first := []api.IssuePromptItem{{Id: "a", Name: "A", Content: "正文 A"}}
 	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: first}); err != nil {
 		t.Fatalf("first update: %v", err)
 	}
@@ -226,7 +227,7 @@ func TestIssuePromptServiceCreatedAtStableAcrossUpdates(t *testing.T) {
 	// 等待时钟推进，确保 updated_at 可区分。
 	time.Sleep(10 * time.Millisecond)
 
-	second := []model.IssuePromptItem{{ID: "b", Name: "B", Content: "正文 B"}}
+	second := []api.IssuePromptItem{{Id: "b", Name: "B", Content: "正文 B"}}
 	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{Prompts: second}); err != nil {
 		t.Fatalf("second update: %v", err)
 	}
@@ -249,7 +250,7 @@ func TestIssuePromptServiceGetPromptsRepoError(t *testing.T) {
 	user := createTestUser(t, services.db, "user-issue-prompt-repo-err")
 
 	if _, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{
-		Prompts: []model.IssuePromptItem{{ID: "a", Name: "A", Content: "正文 A"}},
+		Prompts: []api.IssuePromptItem{{Id: "a", Name: "A", Content: "正文 A"}},
 	}); err != nil {
 		t.Fatalf("seed setting: %v", err)
 	}
@@ -278,7 +279,7 @@ func TestIssuePromptServiceUpdatePromptsExistingReadError(t *testing.T) {
 	}
 
 	_, err := services.issuePromptService.UpdatePrompts(user.ID, UpdateIssuePromptsRequest{
-		Prompts: []model.IssuePromptItem{{ID: "a", Name: "A", Content: "正文 A"}},
+		Prompts: []api.IssuePromptItem{{Id: "a", Name: "A", Content: "正文 A"}},
 	})
 	if !errors.Is(err, errs.ErrInternal) {
 		t.Fatalf("expected ErrInternal on existing-read error, got: %v", err)

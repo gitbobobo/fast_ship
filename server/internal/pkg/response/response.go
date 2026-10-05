@@ -4,34 +4,44 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/api"
 )
 
-type Response struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data"`
+// Response 是全部 API 路由的统一 JSON 信封 {code, message, data}；
+// data 带静态类型，约束序列化出去的负载与 spec 中的类型一致。
+type Response[T any] struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    T      `json:"data"`
 }
 
-type PaginatedData struct {
-	Items    interface{} `json:"items"`
-	Total    int64       `json:"total"`
-	Page     int         `json:"page"`
-	PageSize int         `json:"page_size"`
+// PaginatedData 是分页响应的 data 形状。
+type PaginatedData[T any] struct {
+	Items    []T   `json:"items"`
+	Total    int64 `json:"total"`
+	Page     int   `json:"page"`
+	PageSize int   `json:"page_size"`
 }
 
-func Success(c *gin.Context, data interface{}) {
-	c.JSON(http.StatusOK, Response{
+func Success[T any](c *gin.Context, data T) {
+	c.JSON(http.StatusOK, Response[T]{
 		Code:    0,
 		Message: "success",
 		Data:    data,
 	})
 }
 
-func SuccessPaginated(c *gin.Context, items interface{}, total int64, page, pageSize int) {
-	c.JSON(http.StatusOK, Response{
+// SuccessEmpty 发出 {"code":0,"message":"success","data":null}；
+// 独立函数是因为泛型无法从 nil 实参推导 T。
+func SuccessEmpty(c *gin.Context) {
+	Success[any](c, nil)
+}
+
+func SuccessPaginated[T any](c *gin.Context, items []T, total int64, page, pageSize int) {
+	c.JSON(http.StatusOK, Response[PaginatedData[T]]{
 		Code:    0,
 		Message: "success",
-		Data: PaginatedData{
+		Data: PaginatedData[T]{
 			Items:    items,
 			Total:    total,
 			Page:     page,
@@ -41,7 +51,7 @@ func SuccessPaginated(c *gin.Context, items interface{}, total int64, page, page
 }
 
 func Error(c *gin.Context, httpStatus int, code int, message string) {
-	c.JSON(httpStatus, Response{
+	c.JSON(httpStatus, api.ErrorEnvelope{
 		Code:    code,
 		Message: message,
 		Data:    nil,

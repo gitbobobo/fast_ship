@@ -66,7 +66,7 @@ func TestListCountsUnreadGitHubComments(t *testing.T) {
 
 	unread := make(map[string]int, len(items))
 	for _, item := range items {
-		unread[item.ID] = item.UnreadCommentsCount
+		unread[item.Id] = item.UnreadCommentsCount
 	}
 	if unread[githubIssue.ID] != 2 {
 		t.Fatalf("github issue unread = %d, want 2（发货钩子评论不计入）", unread[githubIssue.ID])

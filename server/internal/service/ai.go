@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
@@ -37,10 +38,6 @@ const (
 
 var listPrefixRe = regexp.MustCompile(`^\s*\d+[\.)]\s*|^\s*[-*•]\s*`)
 
-type GenerateTitleResponse struct {
-	Titles []string `json:"titles"`
-}
-
 type AIService struct {
 	settingsRepo *repository.UserAISettingRepository
 	issueRepo    *repository.IssueRepository
@@ -49,27 +46,6 @@ type AIService struct {
 	cfg          *config.Config
 	httpClient   *http.Client
 	logger       *zap.Logger
-}
-
-type AISettingsResponse struct {
-	APIHost    string  `json:"api_host"`
-	Model      string  `json:"model"`
-	Configured bool    `json:"configured"`
-	UpdatedAt  *string `json:"updated_at,omitempty"`
-}
-
-type UpdateAISettingsRequest struct {
-	APIHost string `json:"api_host"`
-	APIKey  string `json:"api_key"`
-	Model   string `json:"model"`
-}
-
-type IssueChecklistSuggestionsResponse struct {
-	Items []IssueChecklistSuggestionItem `json:"items"`
-}
-
-type IssueChecklistSuggestionItem struct {
-	Title string `json:"title"`
 }
 
 type minimaxChatRequest struct {
@@ -124,7 +100,7 @@ func (s *AIService) GetSettings(userID string) (*AISettingsResponse, error) {
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return &AISettingsResponse{
-				APIHost:    defaultMiniMaxAPIHost,
+				ApiHost:    defaultMiniMaxAPIHost,
 				Model:      defaultMiniMaxModel,
 				Configured: false,
 			}, nil
@@ -133,7 +109,7 @@ func (s *AIService) GetSettings(userID string) (*AISettingsResponse, error) {
 	}
 
 	resp := &AISettingsResponse{
-		APIHost:    setting.APIHost,
+		ApiHost:    setting.APIHost,
 		Model:      setting.Model,
 		Configured: len(setting.APIKeyEncrypted) > 0,
 	}
@@ -145,7 +121,7 @@ func (s *AIService) GetSettings(userID string) (*AISettingsResponse, error) {
 }
 
 func (s *AIService) UpdateSettings(userID string, req UpdateAISettingsRequest) (*AISettingsResponse, error) {
-	apiHost := strings.TrimSpace(req.APIHost)
+	apiHost := strings.TrimSpace(api.Deref(req.ApiHost))
 	if apiHost == "" {
 		apiHost = defaultMiniMaxAPIHost
 	}
@@ -153,7 +129,7 @@ func (s *AIService) UpdateSettings(userID string, req UpdateAISettingsRequest) (
 		return nil, errs.ErrInvalidParams
 	}
 
-	modelName := strings.TrimSpace(req.Model)
+	modelName := strings.TrimSpace(api.Deref(req.Model))
 	if modelName == "" {
 		modelName = defaultMiniMaxModel
 	}
@@ -164,7 +140,7 @@ func (s *AIService) UpdateSettings(userID string, req UpdateAISettingsRequest) (
 		return nil, errs.ErrInternal
 	}
 
-	apiKeyPlain := strings.TrimSpace(req.APIKey)
+	apiKeyPlain := strings.TrimSpace(api.Deref(req.ApiKey))
 	var encrypted []byte
 	switch {
 	case apiKeyPlain != "":
@@ -198,7 +174,7 @@ func (s *AIService) UpdateSettings(userID string, req UpdateAISettingsRequest) (
 
 	value := formatTime(now)
 	return &AISettingsResponse{
-		APIHost:    setting.APIHost,
+		ApiHost:    setting.APIHost,
 		Model:      setting.Model,
 		Configured: true,
 		UpdatedAt:  &value,

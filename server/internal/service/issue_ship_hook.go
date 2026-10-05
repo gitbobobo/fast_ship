@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -25,38 +26,6 @@ type IssueShipHookService struct {
 
 func NewIssueShipHookService(issueRepo *repository.IssueRepository, projectRepo *repository.ProjectRepository, shipHookRepo *repository.IssueShipHookRepository) *IssueShipHookService {
 	return &IssueShipHookService{issueRepo: issueRepo, projectRepo: projectRepo, shipHookRepo: shipHookRepo}
-}
-
-type UpsertShipHookRequest struct {
-	CommentBody    *string
-	Close          bool
-	WorkflowStatus *model.IssueWorkflowStatus
-}
-
-type IssueShipHookActionResult struct {
-	OK      bool   `json:"ok"`
-	Skipped bool   `json:"skipped,omitempty"`
-	Error   string `json:"error,omitempty"`
-}
-
-type IssueShipHookResultsResponse struct {
-	Comment        *IssueShipHookActionResult `json:"comment,omitempty"`
-	Close          *IssueShipHookActionResult `json:"close,omitempty"`
-	WorkflowStatus *IssueShipHookActionResult `json:"workflow_status,omitempty"`
-}
-
-type IssueShipHookResponse struct {
-	Status          string                        `json:"status"`
-	CommentEnabled  bool                          `json:"comment_enabled"`
-	CommentBody     string                        `json:"comment_body,omitempty"`
-	CloseEnabled    bool                          `json:"close_enabled"`
-	WorkflowEnabled bool                          `json:"workflow_enabled"`
-	WorkflowStatus  string                        `json:"workflow_status"`
-	VersionID       string                        `json:"version_id,omitempty"`
-	VersionNumber   string                        `json:"version_number,omitempty"`
-	ReleaseURL      string                        `json:"release_url,omitempty"`
-	FiredAt         string                        `json:"fired_at,omitempty"`
-	Results         *IssueShipHookResultsResponse `json:"results,omitempty"`
 }
 
 func (s *IssueShipHookService) UpsertShipHook(issueID, userID string, req UpsertShipHookRequest) (*IssueShipHookResponse, error) {
@@ -88,7 +57,7 @@ func (s *IssueShipHookService) UpsertShipHook(issueID, userID string, req Upsert
 		commentBody = trimmed
 	}
 
-	closeEnabled := req.Close
+	closeEnabled := api.Deref(req.Close)
 
 	workflowEnabled := false
 	var workflowStatus model.IssueWorkflowStatus
@@ -185,20 +154,20 @@ func (s *IssueShipHookService) toIssueShipHookResponse(hook *model.IssueShipHook
 	}
 
 	resp := &IssueShipHookResponse{
-		Status:          string(hook.Status),
+		Status:          hook.Status,
 		CommentEnabled:  hook.CommentEnabled,
-		CommentBody:     hook.CommentBody,
+		CommentBody:     api.NonEmpty(hook.CommentBody),
 		CloseEnabled:    hook.CloseEnabled,
 		WorkflowEnabled: hook.WorkflowEnabled,
 		WorkflowStatus:  string(hook.WorkflowStatus),
 	}
 
 	if hook.Status == model.IssueShipHookStatusFired {
-		resp.VersionID = hook.FiredVersionID
-		resp.VersionNumber = hook.FiredVersionNumber
-		resp.ReleaseURL = hook.FiredReleaseURL
+		resp.VersionId = api.NonEmpty(hook.FiredVersionID)
+		resp.VersionNumber = api.NonEmpty(hook.FiredVersionNumber)
+		resp.ReleaseUrl = api.NonEmpty(hook.FiredReleaseURL)
 		if hook.FiredAt != nil {
-			resp.FiredAt = formatTime(hook.FiredAt.UTC())
+			resp.FiredAt = api.Ptr(formatTime(hook.FiredAt.UTC()))
 		}
 		if hook.CommentEnabled || hook.CloseEnabled || hook.WorkflowEnabled {
 			results := &IssueShipHookResultsResponse{}
@@ -214,7 +183,7 @@ func (s *IssueShipHookService) toIssueShipHookResponse(hook *model.IssueShipHook
 			resp.Results = results
 		}
 		if hook.CommentRenderedBody != "" {
-			resp.CommentBody = hook.CommentRenderedBody
+			resp.CommentBody = api.Ptr(hook.CommentRenderedBody)
 		}
 	}
 
@@ -223,14 +192,14 @@ func (s *IssueShipHookService) toIssueShipHookResponse(hook *model.IssueShipHook
 
 func shipHookActionResult(ok *bool, skipped bool, errMsg string) *IssueShipHookActionResult {
 	if ok == nil {
-		return &IssueShipHookActionResult{OK: false, Error: errMsg}
+		return &IssueShipHookActionResult{Ok: false, Error: api.NonEmpty(errMsg)}
 	}
 	result := &IssueShipHookActionResult{
-		OK:      *ok,
-		Skipped: skipped,
+		Ok:      *ok,
+		Skipped: api.True(skipped),
 	}
 	if errMsg != "" {
-		result.Error = errMsg
+		result.Error = &errMsg
 	}
 	return result
 }

@@ -163,7 +163,7 @@ func (s *IssueService) syncProject(ctx context.Context, project *model.Project) 
 	}
 
 	resp := &IssueSyncResponse{
-		ProjectID:           project.ID,
+		ProjectId:           project.ID,
 		SyncedIssueCount:    syncedIssues,
 		SyncedCommentCount:  syncedComments,
 		SyncedTimelineCount: syncedTimeline,

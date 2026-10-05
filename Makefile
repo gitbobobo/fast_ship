@@ -7,6 +7,7 @@
 	test test-server test-web \
 	lint lint-server lint-web \
 	tidy tidy-server \
+	api-types api-docs \
 	clean clean-server clean-web \
 	release
 
@@ -25,6 +26,8 @@ help:
 	@printf "  make lint-server  Check Go formatting and run go vet\n"
 	@printf "  make lint-web     Run web ESLint and type checks\n"
 	@printf "  make tidy         Tidy server dependencies\n"
+	@printf "  make api-types    Regenerate Go types from api/openapi.yaml\n"
+	@printf "  make api-docs     Regenerate skills/fast-ship API reference docs\n"
 	@printf "  make clean        Clean build artifacts\n"
 	@printf "  make release      Create a release commit, tag, and push\n"
 
@@ -70,6 +73,12 @@ tidy: tidy-server
 
 tidy-server:
 	@$(MAKE) -C server tidy
+
+api-types:
+	@$(MAKE) -C server api-types
+
+api-docs:
+	@$(MAKE) -C server api-docs
 
 clean: clean-server clean-web
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -15,13 +16,18 @@ func NewApiKeyService(apiKeyRepo *repository.ApiKeyRepository) *ApiKeyService {
 	return &ApiKeyService{apiKeyRepo: apiKeyRepo}
 }
 
-type CreateApiKeyRequest struct {
-	Name string `json:"name" binding:"required,min=1,max=100"`
-}
-
-type ApiKeyResponse struct {
-	model.ApiKey
-	Key string `json:"key,omitempty"`
+// toApiKeyResponse 把存储模型投影为契约类型；ApiKeyCreated 仅在创建响应中
+// 额外携带一次性的明文 key。
+func toApiKeyResponse(key model.ApiKey) api.ApiKey {
+	return api.ApiKey{
+		Id:         key.ID,
+		UserId:     key.UserID,
+		Name:       key.Name,
+		KeyPrefix:  key.KeyPrefix,
+		KeyHash:    key.KeyHash,
+		LastUsedAt: api.JSONTimePtr(key.LastUsedAt),
+		CreatedAt:  api.JSONTime(key.CreatedAt),
+	}
 }
 
 func (s *ApiKeyService) Create(userID string, req *CreateApiKeyRequest) (*ApiKeyResponse, error) {
@@ -46,14 +52,29 @@ func (s *ApiKeyService) Create(userID string, req *CreateApiKeyRequest) (*ApiKey
 		return nil, errs.ErrInternal
 	}
 
-	return &ApiKeyResponse{
-		ApiKey: *apiKey,
-		Key:    fullKey,
-	}, nil
+	resp := api.ApiKeyCreated{
+		Id:         apiKey.ID,
+		UserId:     apiKey.UserID,
+		Name:       apiKey.Name,
+		KeyPrefix:  apiKey.KeyPrefix,
+		KeyHash:    apiKey.KeyHash,
+		LastUsedAt: api.JSONTimePtr(apiKey.LastUsedAt),
+		CreatedAt:  api.JSONTime(apiKey.CreatedAt),
+		Key:        api.Ptr(fullKey),
+	}
+	return &resp, nil
 }
 
-func (s *ApiKeyService) List(userID string) ([]model.ApiKey, error) {
-	return s.apiKeyRepo.ListByUserID(userID)
+func (s *ApiKeyService) List(userID string) ([]api.ApiKey, error) {
+	keys, err := s.apiKeyRepo.ListByUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]api.ApiKey, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, toApiKeyResponse(key))
+	}
+	return result, nil
 }
 
 func (s *ApiKeyService) Delete(id, userID string) error {

@@ -33,15 +33,13 @@ func (h *IssueCollabHandler) UpsertForKind(kind model.CollabDocumentKind) gin.Ha
 		issueID := c.Param("iid")
 		userID := middleware.GetUserID(c)
 
-		var req struct {
-			Body string `json:"body"`
-		}
+		var req service.UpsertIssueCollabRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			middleware.HandleAppError(c, errs.ErrInvalidParams)
 			return
 		}
 
-		result, err := h.collabService.Upsert(issueID, userID, model.CollabAuthorAgent, kind, service.UpsertIssueCollabRequest{Body: req.Body})
+		result, err := h.collabService.Upsert(issueID, userID, model.CollabAuthorAgent, kind, req)
 		if err != nil {
 			middleware.HandleAppError(c, err)
 			return
@@ -58,7 +56,7 @@ func (h *IssueCollabHandler) DeleteForKind(kind model.CollabDocumentKind) gin.Ha
 			middleware.HandleAppError(c, err)
 			return
 		}
-		response.Success(c, nil)
+		response.SuccessEmpty(c)
 	}
 }
 
@@ -81,5 +79,5 @@ func (h *IssueCollabHandler) ClearArea(c *gin.Context) {
 		middleware.HandleAppError(c, err)
 		return
 	}
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }

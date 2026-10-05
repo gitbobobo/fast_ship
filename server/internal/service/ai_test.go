@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/google/uuid"
 )
@@ -18,9 +19,9 @@ func TestAIServiceUpdateAndGetSettings(t *testing.T) {
 	user := createTestUser(t, services.db, "user-ai-settings")
 
 	updated, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
-		APIHost: "https://api.minimaxi.com",
-		APIKey:  "sk-api-test",
-		Model:   "MiniMax-M2.5",
+		ApiHost: api.Ptr("https://api.minimaxi.com"),
+		ApiKey:  api.Ptr("sk-api-test"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	})
 	if err != nil {
 		t.Fatalf("update settings: %v", err)
@@ -33,8 +34,8 @@ func TestAIServiceUpdateAndGetSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get settings: %v", err)
 	}
-	if current.APIHost != "https://api.minimaxi.com" {
-		t.Fatalf("unexpected api_host: %q", current.APIHost)
+	if current.ApiHost != "https://api.minimaxi.com" {
+		t.Fatalf("unexpected api_host: %q", current.ApiHost)
 	}
 	if current.Model != "MiniMax-M2.5" {
 		t.Fatalf("unexpected model: %q", current.Model)
@@ -87,9 +88,9 @@ func TestAIServiceSuggestIssueChecklist(t *testing.T) {
 
 	services.aiService.httpClient = server.Client()
 	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
-		APIHost: server.URL,
-		APIKey:  "sk-api-test",
-		Model:   "MiniMax-M2.5",
+		ApiHost: api.Ptr(server.URL),
+		ApiKey:  api.Ptr("sk-api-test"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	}); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
@@ -126,9 +127,9 @@ func TestAIServiceGenerateTitle(t *testing.T) {
 
 	services.aiService.httpClient = server.Client()
 	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
-		APIHost: server.URL,
-		APIKey:  "sk-api-test",
-		Model:   "MiniMax-M2.5",
+		ApiHost: api.Ptr(server.URL),
+		ApiKey:  api.Ptr("sk-api-test"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	}); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
@@ -168,9 +169,9 @@ func TestAIServiceGenerateTitleAPIError(t *testing.T) {
 
 	services.aiService.httpClient = server.Client()
 	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
-		APIHost: server.URL,
-		APIKey:  "sk-api-test",
-		Model:   "MiniMax-M2.5",
+		ApiHost: api.Ptr(server.URL),
+		ApiKey:  api.Ptr("sk-api-test"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	}); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
@@ -198,9 +199,9 @@ func TestAIServiceGenerateTitleEmptyContent(t *testing.T) {
 
 	services.aiService.httpClient = server.Client()
 	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
-		APIHost: server.URL,
-		APIKey:  "sk-api-test",
-		Model:   "MiniMax-M2.5",
+		ApiHost: api.Ptr(server.URL),
+		ApiKey:  api.Ptr("sk-api-test"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	}); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
@@ -228,9 +229,9 @@ func TestAIServiceGenerateTitleOnlyQuotes(t *testing.T) {
 
 	services.aiService.httpClient = server.Client()
 	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
-		APIHost: server.URL,
-		APIKey:  "sk-api-test",
-		Model:   "MiniMax-M2.5",
+		ApiHost: api.Ptr(server.URL),
+		ApiKey:  api.Ptr("sk-api-test"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	}); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}
@@ -258,9 +259,9 @@ func TestAIServiceGenerateTitleQuotedTitle(t *testing.T) {
 
 	services.aiService.httpClient = server.Client()
 	if _, err := services.aiService.UpdateSettings(user.ID, UpdateAISettingsRequest{
-		APIHost: server.URL,
-		APIKey:  "sk-api-test",
-		Model:   "MiniMax-M2.5",
+		ApiHost: api.Ptr(server.URL),
+		ApiKey:  api.Ptr("sk-api-test"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	}); err != nil {
 		t.Fatalf("update settings: %v", err)
 	}

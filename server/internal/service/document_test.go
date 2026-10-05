@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -47,22 +48,22 @@ func setupDocumentServiceTest(t *testing.T) (*DocumentService, *gorm.DB, string,
 func TestDocumentService_CreateListGetUpdateMoveDelete(t *testing.T) {
 	svc, _, userID, projectID := setupDocumentServiceTest(t)
 
-	root, err := svc.Create(projectID, userID, &CreateDocumentRequest{Title: " Root ", Body: "hello"})
+	root, err := svc.Create(projectID, userID, &CreateDocumentRequest{Title: " Root ", Body: api.Ptr("hello")})
 	if err != nil {
 		t.Fatalf("create root: %v", err)
 	}
-	if root.Title != "Root" || root.Body != "hello" || root.ParentID != nil {
+	if root.Title != "Root" || root.Body != "hello" || root.ParentId != nil {
 		t.Fatalf("unexpected root: %+v", root)
 	}
 
 	child, err := svc.Create(projectID, userID, &CreateDocumentRequest{
 		Title:    "Child",
-		ParentID: &root.ID,
+		ParentId: &root.Id,
 	})
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
-	if child.ParentID == nil || *child.ParentID != root.ID {
+	if child.ParentId == nil || *child.ParentId != root.Id {
 		t.Fatalf("unexpected child parent: %+v", child)
 	}
 
@@ -81,7 +82,7 @@ func TestDocumentService_CreateListGetUpdateMoveDelete(t *testing.T) {
 		t.Fatalf("list item should not contain body key: %s", raw)
 	}
 
-	detail, err := svc.Get(root.ID, userID)
+	detail, err := svc.Get(root.Id, userID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -90,7 +91,7 @@ func TestDocumentService_CreateListGetUpdateMoveDelete(t *testing.T) {
 	}
 
 	empty := ""
-	updated, err := svc.Update(root.ID, userID, &UpdateDocumentRequest{Body: &empty, Title: strPtr("Root2")})
+	updated, err := svc.Update(root.Id, userID, &UpdateDocumentRequest{Body: &empty, Title: strPtr("Root2")})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -101,42 +102,42 @@ func TestDocumentService_CreateListGetUpdateMoveDelete(t *testing.T) {
 	var rootParent **string
 	nilParent := (*string)(nil)
 	rootParent = &nilParent
-	moved, err := svc.Update(child.ID, userID, &UpdateDocumentRequest{ParentID: rootParent})
+	moved, err := svc.Update(child.Id, userID, &UpdateDocumentRequest{ParentID: rootParent})
 	if err != nil {
 		t.Fatalf("move to root: %v", err)
 	}
-	if moved.ParentID != nil {
-		t.Fatalf("expected nil parent after move to root, got %+v", moved.ParentID)
+	if moved.ParentId != nil {
+		t.Fatalf("expected nil parent after move to root, got %+v", moved.ParentId)
 	}
 
-	parentRef := &root.ID
+	parentRef := &root.Id
 	parentPtr := &parentRef
-	if _, err := svc.Update(child.ID, userID, &UpdateDocumentRequest{ParentID: parentPtr}); err != nil {
+	if _, err := svc.Update(child.Id, userID, &UpdateDocumentRequest{ParentID: parentPtr}); err != nil {
 		t.Fatalf("move under root: %v", err)
 	}
 	emptyParent := ""
 	emptyPtr := &emptyParent
 	emptyOuter := &emptyPtr
-	movedEmpty, err := svc.Update(child.ID, userID, &UpdateDocumentRequest{ParentID: emptyOuter})
+	movedEmpty, err := svc.Update(child.Id, userID, &UpdateDocumentRequest{ParentID: emptyOuter})
 	if err != nil {
 		t.Fatalf("empty parent as root: %v", err)
 	}
-	if movedEmpty.ParentID != nil {
-		t.Fatalf("expected nil parent for empty string, got %+v", movedEmpty.ParentID)
+	if movedEmpty.ParentId != nil {
+		t.Fatalf("expected nil parent for empty string, got %+v", movedEmpty.ParentId)
 	}
 
 	parentPtr2 := &parentRef
-	if _, err := svc.Update(child.ID, userID, &UpdateDocumentRequest{ParentID: parentPtr2}); err != nil {
+	if _, err := svc.Update(child.Id, userID, &UpdateDocumentRequest{ParentID: parentPtr2}); err != nil {
 		t.Fatalf("reattach under root: %v", err)
 	}
 
-	if err := svc.Delete(root.ID, userID); err != nil {
+	if err := svc.Delete(root.Id, userID); err != nil {
 		t.Fatalf("delete root: %v", err)
 	}
-	if _, err := svc.Get(child.ID, userID); !errors.Is(err, errs.ErrDocumentNotFound) {
+	if _, err := svc.Get(child.Id, userID); !errors.Is(err, errs.ErrDocumentNotFound) {
 		t.Fatalf("expected child cascade not found, got %v", err)
 	}
-	if _, err := svc.Get(root.ID, userID); !errors.Is(err, errs.ErrDocumentNotFound) {
+	if _, err := svc.Get(root.Id, userID); !errors.Is(err, errs.ErrDocumentNotFound) {
 		t.Fatalf("expected root not found, got %v", err)
 	}
 }
@@ -150,7 +151,7 @@ func TestDocumentService_ValidationAndAccess(t *testing.T) {
 	if _, err := svc.Create(projectID, userID, &CreateDocumentRequest{Title: strings.Repeat("甲", 201)}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("long title: %v", err)
 	}
-	if _, err := svc.Create(projectID, userID, &CreateDocumentRequest{Title: "ok", Body: strings.Repeat("乙", 200_001)}); !errors.Is(err, errs.ErrInvalidParams) {
+	if _, err := svc.Create(projectID, userID, &CreateDocumentRequest{Title: "ok", Body: api.Ptr(strings.Repeat("乙", 200_001))}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("long body: %v", err)
 	}
 	if _, err := svc.Update(uuid.NewString(), userID, &UpdateDocumentRequest{}); !errors.Is(err, errs.ErrInvalidParams) {
@@ -161,20 +162,20 @@ func TestDocumentService_ValidationAndAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root: %v", err)
 	}
-	child, err := svc.Create(projectID, userID, &CreateDocumentRequest{Title: "Child", ParentID: &root.ID})
+	child, err := svc.Create(projectID, userID, &CreateDocumentRequest{Title: "Child", ParentId: &root.Id})
 	if err != nil {
 		t.Fatalf("create child: %v", err)
 	}
 
-	childRef := &child.ID
+	childRef := &child.Id
 	childPtr := &childRef
-	if _, err := svc.Update(root.ID, userID, &UpdateDocumentRequest{ParentID: childPtr}); !errors.Is(err, errs.ErrInvalidParams) {
+	if _, err := svc.Update(root.Id, userID, &UpdateDocumentRequest{ParentID: childPtr}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("cycle should fail: %v", err)
 	}
 
-	selfRef := &root.ID
+	selfRef := &root.Id
 	selfPtr := &selfRef
-	if _, err := svc.Update(root.ID, userID, &UpdateDocumentRequest{ParentID: selfPtr}); !errors.Is(err, errs.ErrInvalidParams) {
+	if _, err := svc.Update(root.Id, userID, &UpdateDocumentRequest{ParentID: selfPtr}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("self parent should fail: %v", err)
 	}
 
@@ -187,15 +188,15 @@ func TestDocumentService_ValidationAndAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create other doc: %v", err)
 	}
-	otherRef := &otherDoc.ID
+	otherRef := &otherDoc.Id
 	otherPtr := &otherRef
-	if _, err := svc.Update(root.ID, userID, &UpdateDocumentRequest{ParentID: otherPtr}); !errors.Is(err, errs.ErrInvalidParams) {
+	if _, err := svc.Update(root.Id, userID, &UpdateDocumentRequest{ParentID: otherPtr}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("cross project parent should fail: %v", err)
 	}
 	missing := uuid.NewString()
 	missingRef := &missing
 	missingPtr := &missingRef
-	if _, err := svc.Update(root.ID, userID, &UpdateDocumentRequest{ParentID: missingPtr}); !errors.Is(err, errs.ErrInvalidParams) {
+	if _, err := svc.Update(root.Id, userID, &UpdateDocumentRequest{ParentID: missingPtr}); !errors.Is(err, errs.ErrInvalidParams) {
 		t.Fatalf("missing parent should fail: %v", err)
 	}
 
@@ -203,17 +204,17 @@ func TestDocumentService_ValidationAndAccess(t *testing.T) {
 	if _, err := svc.List(projectID, otherUser); !errors.Is(err, errs.ErrProjectNotFound) {
 		t.Fatalf("list other user: %v", err)
 	}
-	if _, err := svc.Get(root.ID, otherUser); !errors.Is(err, errs.ErrDocumentNotFound) {
+	if _, err := svc.Get(root.Id, otherUser); !errors.Is(err, errs.ErrDocumentNotFound) {
 		t.Fatalf("get other user: %v", err)
 	}
 	if _, err := svc.Get(uuid.NewString(), userID); !errors.Is(err, errs.ErrDocumentNotFound) {
 		t.Fatalf("get missing: %v", err)
 	}
 	title := "x"
-	if _, err := svc.Update(root.ID, otherUser, &UpdateDocumentRequest{Title: &title}); !errors.Is(err, errs.ErrDocumentNotFound) {
+	if _, err := svc.Update(root.Id, otherUser, &UpdateDocumentRequest{Title: &title}); !errors.Is(err, errs.ErrDocumentNotFound) {
 		t.Fatalf("update other user: %v", err)
 	}
-	if err := svc.Delete(root.ID, otherUser); !errors.Is(err, errs.ErrDocumentNotFound) {
+	if err := svc.Delete(root.Id, otherUser); !errors.Is(err, errs.ErrDocumentNotFound) {
 		t.Fatalf("delete other user: %v", err)
 	}
 }

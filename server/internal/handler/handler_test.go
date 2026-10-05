@@ -31,6 +31,7 @@ type handlerTestEnv struct {
 	issueHandler       *IssueHandler
 	collabHandler      *IssueCollabHandler
 	artifactHandler    *ArtifactHandler
+	projectHandler     *ProjectHandler
 }
 
 type apiEnvelope struct {
@@ -134,9 +135,10 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		aiHandler:          NewAIHandler(aiService),
 		issuePromptHandler: NewIssuePromptHandler(issuePromptService),
 		versionHandler:     NewVersionHandler(versionService, shipService),
-		issueHandler:       NewIssueHandler(issueService, issueShipHookService),
+		issueHandler:       NewIssueHandler(issueService, issueShipHookService, collabService),
 		collabHandler:      NewIssueCollabHandler(collabService),
 		artifactHandler:    NewArtifactHandler(artifactService),
+		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)),
 	}
 }
 

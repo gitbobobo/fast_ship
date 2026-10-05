@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 )
 
@@ -257,10 +258,10 @@ func TestAIHandler_SuggestIssueChecklist_APIKeyAuth(t *testing.T) {
 
 func setupAIForUser(t *testing.T, env *handlerTestEnv, userID, aiServerURL string) {
 	t.Helper()
-	ctx, rec := newJSONContext(http.MethodPut, "/ai/settings", marshalJSON(t, updateAISettingsRequest{
-		APIHost: aiServerURL,
-		APIKey:  "sk-test-key",
-		Model:   "MiniMax-M2.5",
+	ctx, rec := newJSONContext(http.MethodPut, "/ai/settings", marshalJSON(t, api.UpdateAISettingsRequest{
+		ApiHost: api.Ptr(aiServerURL),
+		ApiKey:  api.Ptr("sk-test-key"),
+		Model:   api.Ptr("MiniMax-M2.5"),
 	}))
 	ctx.Set(middleware.ContextKeyUserID, userID)
 	env.aiHandler.UpdateSettings(ctx)

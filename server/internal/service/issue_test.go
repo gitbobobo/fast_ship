@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
@@ -105,25 +106,25 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 	if total != 1 || len(issues) != 1 {
 		t.Fatalf("expected 1 synced issue, got total=%d len=%d", total, len(issues))
 	}
-	if issues[0].Title != "Crash on launch" || issues[0].GitHub == nil || issues[0].GitHub.Labels[0].Name != "bug" {
+	if issues[0].Title != "Crash on launch" || issues[0].Github == nil || issues[0].Github.Labels[0].Name != "bug" {
 		t.Fatalf("unexpected issue payload: %+v", issues[0])
 	}
-	if issues[0].BodyHTML != "<p>App crashes on <strong>startup</strong></p>" {
+	if issues[0].BodyHtml != "<p>App crashes on <strong>startup</strong></p>" {
 		t.Fatalf("expected issue html body to be persisted, got %+v", issues[0])
 	}
 
-	comments, total, err := svc.issueService.ListComments(issues[0].ID, project.UserID, 1, 20)
+	comments, total, err := svc.issueService.ListComments(issues[0].Id, project.UserID, 1, 20)
 	if err != nil {
 		t.Fatalf("list comments: %v", err)
 	}
 	if total != 1 || len(comments) != 1 || comments[0].Author.Login != "bob" {
 		t.Fatalf("unexpected comments payload: %+v", comments)
 	}
-	if comments[0].BodyHTML == "" {
+	if comments[0].BodyHtml == "" {
 		t.Fatalf("expected comment html body to be persisted, got %+v", comments[0])
 	}
 
-	events, total, err := svc.issueService.ListTimeline(issues[0].ID, project.UserID, 1, 20)
+	events, total, err := svc.issueService.ListTimeline(issues[0].Id, project.UserID, 1, 20)
 	if err != nil {
 		t.Fatalf("list timeline: %v", err)
 	}
@@ -511,8 +512,8 @@ func TestIssueServiceReplaceChecklist_UpdatesProgressSnapshot(t *testing.T) {
 
 	meta, err := svc.issueService.ReplaceChecklist(issue.ID, user.ID, ReplaceIssueChecklistRequest{
 		Items: []IssueChecklistItemInput{
-			{Title: "定位问题", IsCompleted: true},
-			{Title: "修复问题", IsCompleted: false},
+			{Title: "定位问题", IsCompleted: api.Ptr(true)},
+			{Title: "修复问题", IsCompleted: api.Ptr(false)},
 		},
 	}, "test")
 	if err != nil {
@@ -547,8 +548,8 @@ func TestIssueServiceCreateInternalIssue_CreatesLocalIssue(t *testing.T) {
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title:          "补充发布检查",
-		Body:           "## 检查项\n\n- 校验版本说明",
-		WorkflowStatus: model.IssueWorkflowStatusTodo,
+		Body:           api.Ptr("## 检查项\n\n- 校验版本说明"),
+		WorkflowStatus: api.Ptr(model.IssueWorkflowStatusTodo),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
@@ -560,8 +561,8 @@ func TestIssueServiceCreateInternalIssue_CreatesLocalIssue(t *testing.T) {
 	if created.Reference != "INT-1" {
 		t.Fatalf("expected INT-1 reference, got %+v", created)
 	}
-	if created.GitHub != nil {
-		t.Fatalf("expected no github payload, got %+v", created.GitHub)
+	if created.Github != nil {
+		t.Fatalf("expected no github payload, got %+v", created.Github)
 	}
 	if created.InternalMeta == nil || created.InternalMeta.WorkflowStatus != model.IssueWorkflowStatusTodo {
 		t.Fatalf("expected todo workflow meta, got %+v", created.InternalMeta)
@@ -597,27 +598,27 @@ func TestIssueServiceCreateInternalIssue_AttachesReferencedDraftAssets(t *testin
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  fmt.Sprintf("创建时直接引用图片\n\n%s", draftAsset.Markdown),
+		Body:  api.Ptr(fmt.Sprintf("创建时直接引用图片\n\n%s", draftAsset.Markdown)),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
 	}
 
-	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.Id)
 	if err != nil {
 		t.Fatalf("list issue assets: %v", err)
 	}
 	if len(assets) != 1 {
 		t.Fatalf("expected 1 attached issue asset, got %d", len(assets))
 	}
-	if assets[0].ID != draftAsset.ID {
-		t.Fatalf("expected draft asset %q to be attached, got %q", draftAsset.ID, assets[0].ID)
+	if assets[0].ID != draftAsset.Id {
+		t.Fatalf("expected draft asset %q to be attached, got %q", draftAsset.Id, assets[0].ID)
 	}
 	if assets[0].Status != model.IssueAssetStatusAttached {
 		t.Fatalf("expected asset status attached, got %q", assets[0].Status)
 	}
 
-	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.Id})
 	if err != nil {
 		t.Fatalf("list draft assets: %v", err)
 	}
@@ -625,7 +626,7 @@ func TestIssueServiceCreateInternalIssue_AttachesReferencedDraftAssets(t *testin
 		t.Fatalf("expected referenced draft asset to be removed after attach, got %d", len(draftAssets))
 	}
 
-	reader, mimeType, fileSize, err := svc.issueService.GetIssueAssetContent(draftAsset.ID, user.ID)
+	reader, mimeType, fileSize, err := svc.issueService.GetIssueAssetContent(draftAsset.Id, user.ID)
 	if err != nil {
 		t.Fatalf("get issue asset content: %v", err)
 	}
@@ -661,7 +662,7 @@ func TestIssueServiceCreateInternalIssue_RollsBackWhenAttachingDraftAssetsFails(
 		issue.AuthorLogin = user.Username
 	})
 	if err := svc.db.Create(&model.IssueAsset{
-		ID:              draftAsset.ID,
+		ID:              draftAsset.Id,
 		IssueID:         existingIssue.ID,
 		FileName:        "existing.png",
 		FilePath:        "existing/path.png",
@@ -676,7 +677,7 @@ func TestIssueServiceCreateInternalIssue_RollsBackWhenAttachingDraftAssetsFails(
 
 	_, err = svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  fmt.Sprintf("创建时直接引用图片\n\n%s", draftAsset.Markdown),
+		Body:  api.Ptr(fmt.Sprintf("创建时直接引用图片\n\n%s", draftAsset.Markdown)),
 	})
 	if err != errs.ErrInternal {
 		t.Fatalf("expected internal error, got %v", err)
@@ -692,7 +693,7 @@ func TestIssueServiceCreateInternalIssue_RollsBackWhenAttachingDraftAssetsFails(
 		t.Fatalf("expected create to roll back inserted issue, got %d rows", issueCount)
 	}
 
-	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.Id})
 	if err != nil {
 		t.Fatalf("list draft assets: %v", err)
 	}
@@ -708,7 +709,7 @@ func TestIssueServiceCreateInternalIssue_RejectsMissingReferencedDraftAssets(t *
 
 	_, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  "引用了不存在的图片 ![missing](/api/issues/assets/11111111-1111-1111-1111-111111111111/content)",
+		Body:  api.Ptr("引用了不存在的图片 ![missing](/api/issues/assets/11111111-1111-1111-1111-111111111111/content)"),
 	})
 	if err != errs.ErrInvalidParams {
 		t.Fatalf("expected invalid params, got %v", err)
@@ -730,7 +731,7 @@ func TestIssueServiceUpdateInternalIssue_UpdatesBodyAndState(t *testing.T) {
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  "old body",
+		Body:  api.Ptr("old body"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
@@ -739,7 +740,7 @@ func TestIssueServiceUpdateInternalIssue_UpdatesBodyAndState(t *testing.T) {
 	title := "更新后的标题"
 	body := "new body"
 	state := model.IssueStateClosed
-	updated, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+	updated, err := svc.issueService.UpdateInternalIssue(created.Id, user.ID, UpdateInternalIssueRequest{
 		Title: &title,
 		Body:  &body,
 		State: &state,
@@ -763,14 +764,14 @@ func TestIssueServiceUpdateInternalIssue_RemovesDetachedAssets(t *testing.T) {
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  "初始内容",
+		Body:  api.Ptr("初始内容"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
 	}
 
 	asset, err := svc.issueService.UploadInternalIssueAsset(
-		created.ID,
+		created.Id,
 		user.ID,
 		"clip.png",
 		int64(len(testPNGBytes)),
@@ -782,20 +783,20 @@ func TestIssueServiceUpdateInternalIssue_RemovesDetachedAssets(t *testing.T) {
 	}
 
 	bodyWithAsset := fmt.Sprintf("保留正文\n\n%s", asset.Markdown)
-	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+	if _, err := svc.issueService.UpdateInternalIssue(created.Id, user.ID, UpdateInternalIssueRequest{
 		Body: &bodyWithAsset,
 	}); err != nil {
 		t.Fatalf("attach asset markdown: %v", err)
 	}
 
 	newBody := "不再引用图片"
-	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+	if _, err := svc.issueService.UpdateInternalIssue(created.Id, user.ID, UpdateInternalIssueRequest{
 		Body: &newBody,
 	}); err != nil {
 		t.Fatalf("remove asset markdown: %v", err)
 	}
 
-	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.Id)
 	if err != nil {
 		t.Fatalf("list issue assets: %v", err)
 	}
@@ -803,7 +804,7 @@ func TestIssueServiceUpdateInternalIssue_RemovesDetachedAssets(t *testing.T) {
 		t.Fatalf("expected issue assets to be deleted, got %d", len(assets))
 	}
 
-	exists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, asset.ID))
+	exists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.Id, asset.Id))
 	if err != nil {
 		t.Fatalf("stat uploaded issue asset: %v", err)
 	}
@@ -819,14 +820,14 @@ func TestIssueServiceUpdateInternalIssue_AttachesReferencedPendingAsset(t *testi
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  "初始内容",
+		Body:  api.Ptr("初始内容"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
 	}
 
 	asset, err := svc.issueService.UploadInternalIssueAsset(
-		created.ID,
+		created.Id,
 		user.ID,
 		"clip.png",
 		int64(len(testPNGBytes)),
@@ -838,13 +839,13 @@ func TestIssueServiceUpdateInternalIssue_AttachesReferencedPendingAsset(t *testi
 	}
 
 	bodyWithAsset := fmt.Sprintf("保留正文\n\n%s", asset.Markdown)
-	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+	if _, err := svc.issueService.UpdateInternalIssue(created.Id, user.ID, UpdateInternalIssueRequest{
 		Body: &bodyWithAsset,
 	}); err != nil {
 		t.Fatalf("attach asset markdown: %v", err)
 	}
 
-	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.Id)
 	if err != nil {
 		t.Fatalf("list issue assets: %v", err)
 	}
@@ -863,14 +864,14 @@ func TestIssueServiceUpdateInternalIssue_RemovesUnreferencedPendingAssets(t *tes
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  "初始内容",
+		Body:  api.Ptr("初始内容"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
 	}
 
 	asset, err := svc.issueService.UploadInternalIssueAsset(
-		created.ID,
+		created.Id,
 		user.ID,
 		"clip.png",
 		int64(len(testPNGBytes)),
@@ -882,13 +883,13 @@ func TestIssueServiceUpdateInternalIssue_RemovesUnreferencedPendingAssets(t *tes
 	}
 
 	body := "保留正文但不再引用图片"
-	if _, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
+	if _, err := svc.issueService.UpdateInternalIssue(created.Id, user.ID, UpdateInternalIssueRequest{
 		Body: &body,
 	}); err != nil {
 		t.Fatalf("update internal issue: %v", err)
 	}
 
-	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.Id)
 	if err != nil {
 		t.Fatalf("list issue assets: %v", err)
 	}
@@ -896,7 +897,7 @@ func TestIssueServiceUpdateInternalIssue_RemovesUnreferencedPendingAssets(t *tes
 		t.Fatalf("expected pending issue asset to be deleted, got %d", len(assets))
 	}
 
-	exists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, asset.ID))
+	exists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.Id, asset.Id))
 	if err != nil {
 		t.Fatalf("stat uploaded issue asset: %v", err)
 	}
@@ -912,14 +913,14 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  "初始内容",
+		Body:  api.Ptr("初始内容"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
 	}
 
 	expiredPending, err := svc.issueService.UploadInternalIssueAsset(
-		created.ID,
+		created.Id,
 		user.ID,
 		"expired.png",
 		int64(len(testPNGBytes)),
@@ -930,7 +931,7 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 		t.Fatalf("upload expired pending asset: %v", err)
 	}
 	attached, err := svc.issueService.UploadInternalIssueAsset(
-		created.ID,
+		created.Id,
 		user.ID,
 		"keep.png",
 		int64(len(testPNGBytes)),
@@ -941,7 +942,7 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 		t.Fatalf("upload attached asset: %v", err)
 	}
 	if err := svc.db.Model(&model.IssueAsset{}).
-		Where("id = ?", attached.ID).
+		Where("id = ?", attached.Id).
 		Update("status", model.IssueAssetStatusAttached).
 		Error; err != nil {
 		t.Fatalf("mark asset attached: %v", err)
@@ -949,7 +950,7 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 
 	expiredAt := time.Now().UTC().Add(-issueAssetPendingTTL - time.Hour)
 	if err := svc.db.Model(&model.IssueAsset{}).
-		Where("id = ?", expiredPending.ID).
+		Where("id = ?", expiredPending.Id).
 		Update("created_at", expiredAt).
 		Error; err != nil {
 		t.Fatalf("age pending asset: %v", err)
@@ -959,21 +960,21 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 		t.Fatalf("cleanup expired pending issue assets: %v", err)
 	}
 
-	assets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	assets, err := svc.issueAssetRepo.ListByIssueID(created.Id)
 	if err != nil {
 		t.Fatalf("list issue assets: %v", err)
 	}
 	if len(assets) != 1 {
 		t.Fatalf("expected 1 remaining issue asset, got %d", len(assets))
 	}
-	if assets[0].ID != attached.ID {
-		t.Fatalf("expected attached asset %q to remain, got %q", attached.ID, assets[0].ID)
+	if assets[0].ID != attached.Id {
+		t.Fatalf("expected attached asset %q to remain, got %q", attached.Id, assets[0].ID)
 	}
 	if assets[0].Status != model.IssueAssetStatusAttached {
 		t.Fatalf("expected remaining asset to stay attached, got %q", assets[0].Status)
 	}
 
-	expiredExists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, expiredPending.ID))
+	expiredExists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.Id, expiredPending.Id))
 	if err != nil {
 		t.Fatalf("stat expired pending asset: %v", err)
 	}
@@ -981,7 +982,7 @@ func TestIssueServiceCleanupExpiredPendingIssueAssets_RemovesOnlyExpiredPending(
 		t.Fatalf("expected expired pending asset file to be deleted")
 	}
 
-	attachedExists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.ID, attached.ID))
+	attachedExists, err := svc.storage.Exists(fmt.Sprintf("%s/issues/%s/assets/%s.png", project.ID, created.Id, attached.Id))
 	if err != nil {
 		t.Fatalf("stat attached asset: %v", err)
 	}
@@ -997,13 +998,13 @@ func TestIssueServiceCreateInternalComment_AddsCommentToInternalIssue(t *testing
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "补充发布检查",
-		Body:  "issue body",
+		Body:  api.Ptr("issue body"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
 	}
 
-	comment, err := svc.issueService.CreateInternalComment(created.ID, user.ID, CreateInternalIssueCommentRequest{
+	comment, err := svc.issueService.CreateInternalComment(created.Id, user.ID, CreateInternalIssueCommentRequest{
 		Body: "第一条内部评论",
 	}, "test")
 	if err != nil {
@@ -1014,7 +1015,7 @@ func TestIssueServiceCreateInternalComment_AddsCommentToInternalIssue(t *testing
 		t.Fatalf("unexpected created comment: %+v", comment)
 	}
 
-	comments, total, err := svc.issueService.ListComments(created.ID, user.ID, 1, 20)
+	comments, total, err := svc.issueService.ListComments(created.Id, user.ID, 1, 20)
 	if err != nil {
 		t.Fatalf("list comments: %v", err)
 	}
@@ -1030,7 +1031,7 @@ func TestIssueServiceCreateInternalCommentIdempotent_DoesNotDuplicateOnRetry(t *
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-idempotent")
 	project := createTestProject(t, svc.db, user.ID)
-	issue, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{Title: "hook", Body: "body"})
+	issue, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{Title: "hook", Body: api.Ptr("body")})
 	if err != nil {
 		t.Fatalf("create issue: %v", err)
 	}
@@ -1038,7 +1039,7 @@ func TestIssueServiceCreateInternalCommentIdempotent_DoesNotDuplicateOnRetry(t *
 	results := make(chan error, 8)
 	for i := 0; i < 8; i++ {
 		go func() {
-			_, callErr := svc.issueService.CreateInternalCommentIdempotent(issue.ID, user.ID, req, "ship-hook", "ship-hook-comment:attempt-1")
+			_, callErr := svc.issueService.CreateInternalCommentIdempotent(issue.Id, user.ID, req, "ship-hook", "ship-hook-comment:attempt-1")
 			results <- callErr
 		}()
 	}
@@ -1047,7 +1048,7 @@ func TestIssueServiceCreateInternalCommentIdempotent_DoesNotDuplicateOnRetry(t *
 			t.Fatalf("concurrent idempotent comment: %v", callErr)
 		}
 	}
-	_, total, err := svc.issueService.ListComments(issue.ID, user.ID, 1, 20)
+	_, total, err := svc.issueService.ListComments(issue.Id, user.ID, 1, 20)
 	if err != nil {
 		t.Fatalf("list comments: %v", err)
 	}
@@ -1137,7 +1138,7 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 	}
 
 	state := model.IssueStateClosed
-	reason := "completed"
+	reason := api.UpdateIssueRequestStateReasonCompleted
 	updated, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
 		State:       &state,
 		StateReason: &reason,
@@ -1361,10 +1362,10 @@ func TestIssueServiceUpdateInternalIssue_GitHubBodyReconcilesLocalAssets(t *test
 	if len(assets) != 1 {
 		t.Fatalf("expected one attached issue asset, got %d", len(assets))
 	}
-	if assets[0].ID != draftAsset.ID || assets[0].Status != model.IssueAssetStatusAttached {
+	if assets[0].ID != draftAsset.Id || assets[0].Status != model.IssueAssetStatusAttached {
 		t.Fatalf("unexpected issue asset after attach: %+v", assets[0])
 	}
-	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.Id})
 	if err != nil {
 		t.Fatalf("list draft assets: %v", err)
 	}
@@ -1441,7 +1442,7 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubLabelsBack(t *testing.T) {
 
 	labels := []string{"bug", "ios"}
 	updated, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
-		Labels: &labels,
+		Labels: labels,
 	})
 	if err != nil {
 		t.Fatalf("update github issue labels: %v", err)
@@ -1457,11 +1458,11 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubLabelsBack(t *testing.T) {
 	if len(call.Labels) != 2 || call.Labels[0] != "bug" || call.Labels[1] != "ios" {
 		t.Fatalf("unexpected github labels call: %+v", call)
 	}
-	if updated.GitHub == nil || len(updated.GitHub.Labels) != 2 {
-		t.Fatalf("expected two github labels on updated issue, got %+v", updated.GitHub)
+	if updated.Github == nil || len(updated.Github.Labels) != 2 {
+		t.Fatalf("expected two github labels on updated issue, got %+v", updated.Github)
 	}
-	if updated.GitHub.Labels[0].Name != "bug" || updated.GitHub.Labels[1].Name != "ios" {
-		t.Fatalf("unexpected github labels in response: %+v", updated.GitHub.Labels)
+	if updated.Github.Labels[0].Name != "bug" || updated.Github.Labels[1].Name != "ios" {
+		t.Fatalf("unexpected github labels in response: %+v", updated.Github.Labels)
 	}
 }
 
@@ -1512,7 +1513,7 @@ func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubLabels(t *testing.T
 
 	labels := []string{"bug", " "}
 	if _, err := svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
-		Labels: &labels,
+		Labels: labels,
 	}); err == nil {
 		t.Fatalf("expected invalid params error, got nil")
 	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
@@ -1569,7 +1570,7 @@ func TestIssueServiceCreateInternalComment_WritesGitHubCommentBack(t *testing.T)
 	if fake.createCommentCalls[0].IssueNumber != 42 || fake.createCommentCalls[0].Body != "已在 GitHub 回复" {
 		t.Fatalf("unexpected github comment call: %+v", fake.createCommentCalls[0])
 	}
-	if comment.Source != model.IssueSourceGitHub || comment.GitHubCommentID != 501 || comment.BodyHTML != "<p>已在 <strong>GitHub</strong> 回复</p>" {
+	if comment.Source != model.IssueSourceGitHub || comment.GithubCommentId != 501 || comment.BodyHtml != "<p>已在 <strong>GitHub</strong> 回复</p>" {
 		t.Fatalf("unexpected created comment: %+v", comment)
 	}
 
@@ -1682,7 +1683,7 @@ func TestIssueServiceUpdateInternalIssue_SetsInternalLabels(t *testing.T) {
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "内部问题",
-		Body:  "测试标签功能",
+		Body:  api.Ptr("测试标签功能"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
@@ -1699,8 +1700,8 @@ func TestIssueServiceUpdateInternalIssue_SetsInternalLabels(t *testing.T) {
 	}
 
 	labels := []string{"bug", "ios"}
-	updated, err := svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
-		Labels: &labels,
+	updated, err := svc.issueService.UpdateInternalIssue(created.Id, user.ID, UpdateInternalIssueRequest{
+		Labels: labels,
 	})
 	if err != nil {
 		t.Fatalf("update internal issue labels: %v", err)
@@ -1726,7 +1727,7 @@ func TestIssueServiceUpdateInternalIssue_RejectsUnknownInternalLabels(t *testing
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "内部问题",
-		Body:  "测试标签功能",
+		Body:  api.Ptr("测试标签功能"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
@@ -1742,8 +1743,8 @@ func TestIssueServiceUpdateInternalIssue_RejectsUnknownInternalLabels(t *testing
 	}
 
 	labels := []string{"bug", "nonexistent"}
-	_, err = svc.issueService.UpdateInternalIssue(created.ID, user.ID, UpdateInternalIssueRequest{
-		Labels: &labels,
+	_, err = svc.issueService.UpdateInternalIssue(created.Id, user.ID, UpdateInternalIssueRequest{
+		Labels: labels,
 	})
 	if err == nil {
 		t.Fatalf("expected error for unknown label, got nil")
@@ -1762,7 +1763,7 @@ func TestIssueServiceList_FiltersByInternalLabels(t *testing.T) {
 
 	issue1, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "问题 1",
-		Body:  "有 bug 标签",
+		Body:  api.Ptr("有 bug 标签"),
 	})
 	if err != nil {
 		t.Fatalf("create issue 1: %v", err)
@@ -1770,7 +1771,7 @@ func TestIssueServiceList_FiltersByInternalLabels(t *testing.T) {
 
 	_, err = svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "问题 2",
-		Body:  "没有标签",
+		Body:  api.Ptr("没有标签"),
 	})
 	if err != nil {
 		t.Fatalf("create issue 2: %v", err)
@@ -1786,8 +1787,8 @@ func TestIssueServiceList_FiltersByInternalLabels(t *testing.T) {
 	}
 
 	labels := []string{"bug"}
-	_, err = svc.issueService.UpdateInternalIssue(issue1.ID, user.ID, UpdateInternalIssueRequest{
-		Labels: &labels,
+	_, err = svc.issueService.UpdateInternalIssue(issue1.Id, user.ID, UpdateInternalIssueRequest{
+		Labels: labels,
 	})
 	if err != nil {
 		t.Fatalf("update issue 1 labels: %v", err)
@@ -1814,7 +1815,7 @@ func TestIssueServiceGetFilterOptions_IncludesInternalLabels(t *testing.T) {
 
 	issue, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "内部问题",
-		Body:  "测试标签",
+		Body:  api.Ptr("测试标签"),
 	})
 	if err != nil {
 		t.Fatalf("create internal issue: %v", err)
@@ -1831,8 +1832,8 @@ func TestIssueServiceGetFilterOptions_IncludesInternalLabels(t *testing.T) {
 	}
 
 	labels := []string{"bug"}
-	_, err = svc.issueService.UpdateInternalIssue(issue.ID, user.ID, UpdateInternalIssueRequest{
-		Labels: &labels,
+	_, err = svc.issueService.UpdateInternalIssue(issue.Id, user.ID, UpdateInternalIssueRequest{
+		Labels: labels,
 	})
 	if err != nil {
 		t.Fatalf("update internal issue labels: %v", err)
@@ -1893,7 +1894,7 @@ func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *test
 
 	created, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "GitHub 新建问题",
-		Body:  "GitHub 问题描述",
+		Body:  api.Ptr("GitHub 问题描述"),
 	})
 	if err != nil {
 		t.Fatalf("create github issue: %v", err)
@@ -1905,8 +1906,8 @@ func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *test
 	if created.Title != "GitHub 新建问题" {
 		t.Fatalf("expected title 'GitHub 新建问题', got %+v", created.Title)
 	}
-	if created.GitHub == nil || created.GitHub.Number != 88 {
-		t.Fatalf("expected github meta with number 88, got %+v", created.GitHub)
+	if created.Github == nil || created.Github.Number != 88 {
+		t.Fatalf("expected github meta with number 88, got %+v", created.Github)
 	}
 	if len(fake.createIssueCalls) != 1 {
 		t.Fatalf("expected one create issue call, got %d", len(fake.createIssueCalls))
@@ -1965,7 +1966,7 @@ func TestIssueServiceCreateGitHubIssue_AttachesReferencedDraftAssets(t *testing.
 	bodyWithAsset := fmt.Sprintf("问题描述\n\n%s", draftAsset.Markdown)
 	created, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "GitHub 带图片的问题",
-		Body:  bodyWithAsset,
+		Body:  api.Ptr(bodyWithAsset),
 	})
 	if err != nil {
 		t.Fatalf("create github issue: %v", err)
@@ -1982,18 +1983,18 @@ func TestIssueServiceCreateGitHubIssue_AttachesReferencedDraftAssets(t *testing.
 		t.Fatalf("expected create issue body to keep local asset reference, got %q", callBody)
 	}
 
-	issueAssets, err := svc.issueAssetRepo.ListByIssueID(created.ID)
+	issueAssets, err := svc.issueAssetRepo.ListByIssueID(created.Id)
 	if err != nil {
 		t.Fatalf("list issue assets: %v", err)
 	}
 	if len(issueAssets) != 1 {
 		t.Fatalf("expected one attached issue asset, got %d", len(issueAssets))
 	}
-	if issueAssets[0].ID != draftAsset.ID || issueAssets[0].Status != model.IssueAssetStatusAttached {
+	if issueAssets[0].ID != draftAsset.Id || issueAssets[0].Status != model.IssueAssetStatusAttached {
 		t.Fatalf("unexpected attached issue asset: %+v", issueAssets[0])
 	}
 
-	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.ID})
+	draftAssets, err := svc.issueDraftAssetRepo.ListByProjectIDAndIDs(project.ID, []string{draftAsset.Id})
 	if err != nil {
 		t.Fatalf("list draft assets: %v", err)
 	}
@@ -2018,7 +2019,7 @@ func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenReferencedDraftAssetNotFo
 	bodyWithMissingAsset := "问题描述\n\n![image](/api/issues/assets/00000000-0000-0000-0000-000000000000/content)"
 	_, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "GitHub 带图片的问题",
-		Body:  bodyWithMissingAsset,
+		Body:  api.Ptr(bodyWithMissingAsset),
 	})
 	if err == nil {
 		t.Fatal("expected error when referenced draft asset not found, got nil")
@@ -2041,7 +2042,7 @@ func TestIssueServiceCreateGitHubIssue_RejectsEmptyTitle(t *testing.T) {
 
 	_, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "   ",
-		Body:  "desc",
+		Body:  api.Ptr("desc"),
 	})
 	if err == nil {
 		t.Fatal("expected error for empty title, got nil")
@@ -2054,7 +2055,7 @@ func TestIssueServiceCreateGitHubIssue_ProjectNotFound(t *testing.T) {
 
 	_, err := svc.issueService.CreateGitHubIssue("non-existent-project", user.ID, CreateInternalIssueRequest{
 		Title: "title",
-		Body:  "desc",
+		Body:  api.Ptr("desc"),
 	})
 	if err == nil {
 		t.Fatal("expected error for non-existent project, got nil")
@@ -2078,7 +2079,7 @@ func TestIssueServiceCreateGitHubIssue_GitHubAPIFailure(t *testing.T) {
 
 	_, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
 		Title: "title",
-		Body:  "desc",
+		Body:  api.Ptr("desc"),
 	})
 	if err == nil {
 		t.Fatal("expected error when github api fails, got nil")

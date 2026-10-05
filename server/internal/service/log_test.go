@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -50,11 +51,11 @@ func TestLogService_UploadAndList(t *testing.T) {
 
 	ts := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	res, err := svc.UploadLogs(projectID, userID, &keyID, &UploadLogsRequest{
-		RunID:   "run-1",
-		ChunkID: "chunk-1",
-		Source:  "smux",
+		RunId:   "run-1",
+		ChunkId: "chunk-1",
+		Source:  api.Ptr("smux"),
 		Entries: []LogEntryInput{
-			{Timestamp: ts, Level: "info", Source: "phase-1", Message: "hello"},
+			{Timestamp: api.JSONTime(ts), Level: "info", Source: api.Ptr("phase-1"), Message: "hello"},
 		},
 	})
 	if err != nil {
@@ -65,11 +66,11 @@ func TestLogService_UploadAndList(t *testing.T) {
 	}
 
 	res2, err := svc.UploadLogs(projectID, userID, &keyID, &UploadLogsRequest{
-		RunID:   "run-1",
-		ChunkID: "chunk-2",
-		Source:  "smux",
+		RunId:   "run-1",
+		ChunkId: "chunk-2",
+		Source:  api.Ptr("smux"),
 		Entries: []LogEntryInput{
-			{Timestamp: ts.Add(time.Minute), Level: "error", Message: "fail"},
+			{Timestamp: api.JSONTime(ts.Add(time.Minute)), Level: "error", Message: "fail"},
 		},
 	})
 	if err != nil {
@@ -92,10 +93,10 @@ func TestLogService_InvalidLevelRejected(t *testing.T) {
 	svc, _, userID, projectID := setupLogServiceTest(t)
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-1",
-		ChunkID: "chunk-1",
+		RunId:   "run-1",
+		ChunkId: "chunk-1",
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "trace", Message: "x"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "trace", Message: "x"},
 		},
 	})
 	if err != errs.ErrInvalidParams {
@@ -107,9 +108,9 @@ func TestLogService_MissingChunkIDRejected(t *testing.T) {
 	svc, _, userID, projectID := setupLogServiceTest(t)
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID: "run-1",
+		RunId: "run-1",
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "info", Message: "x"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "info", Message: "x"},
 		},
 	})
 	if err != errs.ErrInvalidParams {
@@ -122,10 +123,10 @@ func TestLogService_DuplicateChunk(t *testing.T) {
 	ts := time.Now().UTC()
 
 	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-dup",
-		ChunkID: "chunk-a",
+		RunId:   "run-dup",
+		ChunkId: "chunk-a",
 		Entries: []LogEntryInput{
-			{Timestamp: ts, Level: "info", Message: "first"},
+			{Timestamp: api.JSONTime(ts), Level: "info", Message: "first"},
 		},
 	})
 	if err != nil {
@@ -133,10 +134,10 @@ func TestLogService_DuplicateChunk(t *testing.T) {
 	}
 
 	dup, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-dup",
-		ChunkID: "chunk-a",
+		RunId:   "run-dup",
+		ChunkId: "chunk-a",
 		Entries: []LogEntryInput{
-			{Timestamp: ts.Add(time.Second), Level: "info", Message: "retry"},
+			{Timestamp: api.JSONTime(ts.Add(time.Second)), Level: "info", Message: "retry"},
 		},
 	})
 	if err != nil {
@@ -155,10 +156,10 @@ func TestLogService_RunEntryLimitExceeded(t *testing.T) {
 	ts := time.Now().UTC()
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-limit",
-		ChunkID: "chunk-1",
+		RunId:   "run-limit",
+		ChunkId: "chunk-1",
 		Entries: []LogEntryInput{
-			{Timestamp: ts, Level: "info", Message: "seed"},
+			{Timestamp: api.JSONTime(ts), Level: "info", Message: "seed"},
 		},
 	})
 	if err != nil {
@@ -171,11 +172,11 @@ func TestLogService_RunEntryLimitExceeded(t *testing.T) {
 	}
 
 	_, err = svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-limit",
-		ChunkID: "chunk-2",
+		RunId:   "run-limit",
+		ChunkId: "chunk-2",
 		Entries: []LogEntryInput{
-			{Timestamp: ts.Add(time.Second), Level: "info", Message: "a"},
-			{Timestamp: ts.Add(2 * time.Second), Level: "info", Message: "b"},
+			{Timestamp: api.JSONTime(ts.Add(time.Second)), Level: "info", Message: "a"},
+			{Timestamp: api.JSONTime(ts.Add(2 * time.Second)), Level: "info", Message: "b"},
 		},
 	})
 	if err != errs.ErrLogRunEntryLimitExceeded {
@@ -205,10 +206,10 @@ func TestLogService_CrossUserDenied(t *testing.T) {
 	}
 
 	_, err = svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-x",
-		ChunkID: "chunk-1",
+		RunId:   "run-x",
+		ChunkId: "chunk-1",
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "info", Message: "owned"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "info", Message: "owned"},
 		},
 	})
 	if err != nil {
@@ -220,10 +221,10 @@ func TestLogService_DeleteRun(t *testing.T) {
 	svc, _, userID, projectID := setupLogServiceTest(t)
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-del",
-		ChunkID: "chunk-1",
+		RunId:   "run-del",
+		ChunkId: "chunk-1",
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "info", Message: "to delete"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "info", Message: "to delete"},
 		},
 	})
 	if err != nil {
@@ -252,10 +253,10 @@ func TestLogService_DeleteRun_CrossUserDenied(t *testing.T) {
 	}
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-del-x",
-		ChunkID: "chunk-1",
+		RunId:   "run-del-x",
+		ChunkId: "chunk-1",
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "info", Message: "protected"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "info", Message: "protected"},
 		},
 	})
 	if err != nil {
@@ -272,11 +273,11 @@ func TestLogService_InvalidSourceRejected(t *testing.T) {
 	longSource := string(make([]byte, maxLogSourceBytes+1))
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-1",
-		ChunkID: "chunk-1",
-		Source:  longSource,
+		RunId:   "run-1",
+		ChunkId: "chunk-1",
+		Source:  api.Ptr(longSource),
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "info", Message: "x"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "info", Message: "x"},
 		},
 	})
 	if err != errs.ErrInvalidParams {
@@ -289,11 +290,11 @@ func TestLogService_DescriptionCreateAndPreserve(t *testing.T) {
 	ts := time.Now().UTC()
 
 	res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:       "run-desc",
-		ChunkID:     "chunk-1",
-		Description: "first note",
+		RunId:       "run-desc",
+		ChunkId:     "chunk-1",
+		Description: api.Ptr("first note"),
 		Entries: []LogEntryInput{
-			{Timestamp: ts, Level: "info", Message: "a"},
+			{Timestamp: api.JSONTime(ts), Level: "info", Message: "a"},
 		},
 	})
 	if err != nil {
@@ -304,11 +305,11 @@ func TestLogService_DescriptionCreateAndPreserve(t *testing.T) {
 	}
 
 	res2, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:       "run-desc",
-		ChunkID:     "chunk-2",
-		Description: "should not overwrite",
+		RunId:       "run-desc",
+		ChunkId:     "chunk-2",
+		Description: api.Ptr("should not overwrite"),
 		Entries: []LogEntryInput{
-			{Timestamp: ts.Add(time.Second), Level: "info", Message: "b"},
+			{Timestamp: api.JSONTime(ts.Add(time.Second)), Level: "info", Message: "b"},
 		},
 	})
 	if err != nil {
@@ -343,11 +344,11 @@ func TestLogService_DescriptionTooLongRejected(t *testing.T) {
 	longDesc := string(make([]byte, maxLogDescriptionBytes+1))
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:       "run-long-desc",
-		ChunkID:     "chunk-1",
-		Description: longDesc,
+		RunId:       "run-long-desc",
+		ChunkId:     "chunk-1",
+		Description: api.Ptr(longDesc),
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "info", Message: "x"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "info", Message: "x"},
 		},
 	})
 	if err != errs.ErrInvalidParams {
@@ -368,10 +369,10 @@ func TestLogService_GetRun_NotFoundAndCrossUser(t *testing.T) {
 	}
 
 	_, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-		RunID:   "run-get-x",
-		ChunkID: "chunk-1",
+		RunId:   "run-get-x",
+		ChunkId: "chunk-1",
 		Entries: []LogEntryInput{
-			{Timestamp: time.Now(), Level: "info", Message: "x"},
+			{Timestamp: api.JSONTime(time.Now()), Level: "info", Message: "x"},
 		},
 	})
 	if err != nil {
@@ -395,11 +396,11 @@ func TestLogService_DescriptionConcurrentCreate(t *testing.T) {
 	for i, desc := range []string{"desc-a", "desc-b"} {
 		go func(i int, desc string) {
 			res, err := svc.UploadLogs(projectID, userID, nil, &UploadLogsRequest{
-				RunID:       "run-concurrent",
-				ChunkID:     fmt.Sprintf("chunk-%d", i),
-				Description: desc,
+				RunId:       "run-concurrent",
+				ChunkId:     fmt.Sprintf("chunk-%d", i),
+				Description: api.Ptr(desc),
 				Entries: []LogEntryInput{
-					{Timestamp: ts.Add(time.Duration(i) * time.Second), Level: "info", Message: desc},
+					{Timestamp: api.JSONTime(ts.Add(time.Duration(i) * time.Second)), Level: "info", Message: desc},
 				},
 			})
 			ch <- result{res: res, err: err}

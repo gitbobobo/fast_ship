@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
@@ -53,25 +54,11 @@ type ShipService struct {
 	newClient    gitHubClientFactory
 }
 
+// ShipResult 内嵌契约类型保持序列化形状一致；RecoveredVersionIDs 是内部
+// 执行状态（json:"-"），不进 API 载荷。
 type ShipResult struct {
-	HookTotal           int      `json:"hook_total"`
-	HookFailed          int      `json:"hook_failed"`
-	HookStatus          string   `json:"hook_status"`
-	HookError           string   `json:"hook_error,omitempty"`
+	api.ShipResult
 	RecoveredVersionIDs []string `json:"-"`
-}
-
-type ShipCheckItem struct {
-	Key    string `json:"key"`
-	Label  string `json:"label"`
-	OK     bool   `json:"ok"`
-	Detail string `json:"detail,omitempty"`
-}
-
-type ShipCheckResponse struct {
-	CanShip           bool               `json:"can_ship"`
-	Items             []ShipCheckItem    `json:"items"`
-	PendingIssueHooks []PendingIssueHook `json:"pending_issue_hooks"`
 }
 
 func NewShipService(
@@ -134,8 +121,8 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 	if !check.CanShip {
 		msg := errs.ErrShipPreCheckFailed.Message
 		for _, item := range check.Items {
-			if !item.OK && item.Detail != "" {
-				msg = fmt.Sprintf("%s: %s", item.Label, item.Detail)
+			if !item.Ok && api.Deref(item.Detail) != "" {
+				msg = fmt.Sprintf("%s: %s", item.Label, api.Deref(item.Detail))
 				break
 			}
 		}
@@ -338,46 +325,46 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 		{
 			Key:    "release_notes",
 			Label:  "Release 说明",
-			OK:     version.ReleaseNotes != "",
-			Detail: "不能为空",
+			Ok:     version.ReleaseNotes != "",
+			Detail: api.Ptr("不能为空"),
 		},
 		{
 			Key:    "artifacts",
 			Label:  "安装包",
-			OK:     len(version.Artifacts) > 0,
-			Detail: "至少上传一个安装包",
+			Ok:     len(version.Artifacts) > 0,
+			Detail: api.Ptr("至少上传一个安装包"),
 		},
 		{
 			Key:    "target_commitish",
 			Label:  "目标分支",
-			OK:     version.TargetCommitish != "",
-			Detail: "用于创建 Git Tag",
+			Ok:     version.TargetCommitish != "",
+			Detail: api.Ptr("用于创建 Git Tag"),
 		},
 	}
 
 	githubItem := ShipCheckItem{
 		Key:   "github_config",
 		Label: "GitHub 配置",
-		OK:    true,
+		Ok:    true,
 	}
 
 	switch {
 	case project.GithubOwner == "" || project.GithubRepo == "":
-		githubItem.OK = false
-		githubItem.Detail = "缺少 GitHub 仓库配置"
+		githubItem.Ok = false
+		githubItem.Detail = api.Ptr("缺少 GitHub 仓库配置")
 	case len(project.GithubTokenEncrypted) == 0:
-		githubItem.OK = false
-		githubItem.Detail = "缺少 GitHub Token"
+		githubItem.Ok = false
+		githubItem.Detail = api.Ptr("缺少 GitHub Token")
 	default:
 		tokenBytes, err := s.decryptGitHubToken(project)
 		if err != nil {
-			githubItem.OK = false
-			githubItem.Detail = err.Message
+			githubItem.Ok = false
+			githubItem.Detail = api.Ptr(err.Message)
 		} else {
 			gh := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 			if err := gh.ValidateRepository(ctx); err != nil {
-				githubItem.OK = false
-				githubItem.Detail = s.describeGitHubRepositoryAccessError(project, err)
+				githubItem.Ok = false
+				githubItem.Detail = api.Ptr(s.describeGitHubRepositoryAccessError(project, err))
 			}
 		}
 	}
@@ -385,7 +372,7 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 
 	canShip := true
 	for _, item := range items {
-		if !item.OK {
+		if !item.Ok {
 			canShip = false
 			break
 		}

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
@@ -54,55 +55,6 @@ func NewProjectService(
 	}
 }
 
-type CreateProjectRequest struct {
-	Name            string `json:"name" binding:"required,min=1,max=100"`
-	Description     string `json:"description"`
-	RepositoryURL   string `json:"repository_url"`
-	GithubToken     string `json:"github_token"`
-	SourceProjectID string `json:"source_project_id"`
-}
-
-type UpdateProjectRequest struct {
-	Name            string `json:"name" binding:"omitempty,min=1,max=100"`
-	Description     string `json:"description"`
-	RepositoryURL   string `json:"repository_url"`
-	GithubToken     string `json:"github_token"`
-	SourceProjectID string `json:"source_project_id"`
-}
-
-type ProjectResponse struct {
-	ID            string                         `json:"id"`
-	Name          string                         `json:"name"`
-	Description   string                         `json:"description"`
-	GithubOwner   string                         `json:"github_owner"`
-	GithubRepo    string                         `json:"github_repo"`
-	LatestVersion *LatestVersionResponse         `json:"latest_version,omitempty"`
-	IssueSync     *serviceIssueSyncStateResponse `json:"issue_sync,omitempty"`
-	CreatedAt     string                         `json:"created_at"`
-	UpdatedAt     string                         `json:"updated_at"`
-}
-
-type serviceIssueSyncStateResponse struct {
-	Status               model.IssueSyncStatus `json:"status"`
-	LastIssueUpdatedAt   *string               `json:"last_issue_updated_at,omitempty"`
-	LastSyncedAt         *string               `json:"last_synced_at,omitempty"`
-	LastSuccessfulSyncAt *string               `json:"last_successful_sync_at,omitempty"`
-	LastError            string                `json:"last_error"`
-}
-
-type LatestVersionResponse struct {
-	ID            string              `json:"id"`
-	VersionNumber string              `json:"version_number"`
-	Status        model.VersionStatus `json:"status"`
-	CreatedAt     string              `json:"created_at"`
-}
-
-type BranchResponse struct {
-	Name    string `json:"name"`
-	SHA     string `json:"sha"`
-	Default bool   `json:"default"`
-}
-
 func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*ProjectResponse, error) {
 	exists, err := s.projectRepo.ExistsByName(userID, req.Name)
 	if err != nil {
@@ -115,12 +67,12 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	var owner, repo string
 	var encryptedToken []byte
 
-	if req.RepositoryURL != "" {
-		owner, repo, err = parseRepositoryURL(req.RepositoryURL)
+	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
+		owner, repo, err = parseRepositoryURL(repositoryURL)
 		if err != nil {
 			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 		}
-		encryptedToken, err = s.resolveGitHubToken(userID, req.GithubToken, req.SourceProjectID)
+		encryptedToken, err = s.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
 		if err != nil {
 			return nil, err
 		}
@@ -130,7 +82,7 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		ID:                   uuid.New().String(),
 		UserID:               userID,
 		Name:                 req.Name,
-		Description:          req.Description,
+		Description:          api.Deref(req.Description),
 		GithubOwner:          owner,
 		GithubRepo:           repo,
 		GithubTokenEncrypted: encryptedToken,
@@ -169,7 +121,7 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 		}
 		if err == nil {
 			projectResp.LatestVersion = &LatestVersionResponse{
-				ID:            latest.ID,
+				Id:            latest.ID,
 				VersionNumber: latest.VersionNumber,
 				Status:        latest.Status,
 				CreatedAt:     latest.CreatedAt.Format("2006-01-02T15:04:05Z"),
@@ -189,24 +141,24 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		return nil, errs.ErrInternal
 	}
 
-	if req.Name != "" && req.Name != project.Name {
-		exists, err := s.projectRepo.ExistsByNameExcludeID(userID, req.Name, id)
+	if name := api.Deref(req.Name); name != "" && name != project.Name {
+		exists, err := s.projectRepo.ExistsByNameExcludeID(userID, name, id)
 		if err != nil {
 			return nil, errs.ErrInternal
 		}
 		if exists {
 			return nil, errs.ErrProjectNameExists
 		}
-		project.Name = req.Name
+		project.Name = name
 	}
 
-	if req.RepositoryURL != "" {
-		owner, repo, err := parseRepositoryURL(req.RepositoryURL)
+	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
+		owner, repo, err := parseRepositoryURL(repositoryURL)
 		if err != nil {
 			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 		}
 
-		willHaveToken := req.GithubToken != "" || req.SourceProjectID != "" || len(project.GithubTokenEncrypted) > 0
+		willHaveToken := api.Deref(req.GithubToken) != "" || api.Deref(req.SourceProjectId) != "" || len(project.GithubTokenEncrypted) > 0
 		if !willHaveToken {
 			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
 		}
@@ -215,8 +167,8 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		project.GithubRepo = repo
 	}
 
-	if req.SourceProjectID != "" || req.GithubToken != "" {
-		encryptedToken, err := s.resolveGitHubToken(userID, req.GithubToken, req.SourceProjectID)
+	if api.Deref(req.SourceProjectId) != "" || api.Deref(req.GithubToken) != "" {
+		encryptedToken, err := s.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
 		if err != nil {
 			return nil, err
 		}
@@ -279,7 +231,7 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 	for i, b := range branches {
 		resp[i] = BranchResponse{
 			Name:    b.Name,
-			SHA:     b.SHA,
+			Sha:     b.SHA,
 			Default: b.Default,
 		}
 	}
@@ -348,7 +300,7 @@ func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 	resp := &ProjectResponse{
-		ID:          p.ID,
+		Id:          p.ID,
 		Name:        p.Name,
 		Description: p.Description,
 		GithubOwner: p.GithubOwner,
@@ -359,7 +311,7 @@ func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 
 	if s.syncStateRepo != nil {
 		if state, err := s.syncStateRepo.GetOrCreate(p.ID); err == nil {
-			resp.IssueSync = &serviceIssueSyncStateResponse{
+			resp.IssueSync = &api.IssueSyncState{
 				Status:    state.Status,
 				LastError: state.LastError,
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"go.uber.org/zap"
@@ -129,7 +130,7 @@ func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter stri
 	}
 
 	closedState := model.IssueStateClosed
-	stateReason := "completed"
+	stateReason := api.UpdateIssueRequestStateReasonCompleted
 	resp := &BatchCloseDoneIssuesResponse{
 		Total:    int64(total),
 		Failures: make([]BatchCloseDoneIssueFailure, 0),
@@ -150,8 +151,8 @@ func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter stri
 					msg = appErr.Message
 				}
 				resp.Failures = append(resp.Failures, BatchCloseDoneIssueFailure{
-					ID:        issue.ID,
-					Reference: buildIssueReference(issue),
+					Id:        issue.ID,
+					Reference: api.Ptr(buildIssueReference(issue)),
 					Error:     msg,
 				})
 			}
