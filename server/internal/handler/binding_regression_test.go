@@ -66,6 +66,22 @@ func TestProjectUpdate_EmptyNameIsIgnored(t *testing.T) {
 	}
 }
 
+// BatchCloseDone 的 source 是可选枚举：显式 "" 与缺省等价（关全部来源），不能因指针化变成 400。
+func TestBatchCloseDone_EmptySourceIsDefault(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-batch-close-empty")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/issues/batch-close", []byte(`{"source":""}`))
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	env.issueHandler.BatchCloseDone(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for explicit empty source, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ReplaceIssueChecklist 的 items 是 required：缺 key 返回 400；显式空数组合法（清空清单）。
 func TestReplaceChecklist_ItemsKeyRequired(t *testing.T) {
 	env := setupHandlerTestEnv(t)

@@ -12,6 +12,10 @@ import (
 // TestGeneratedTypesUpToDate 重新生成 types.gen.go 并逐字节比对，
 // 防止改了 api/openapi.yaml 或生成配置后忘了跑 make api-types。
 func TestGeneratedTypesUpToDate(t *testing.T) {
+	// exec `go tool` 需要编译 oapi-codegen 及其依赖，-short 模式下跳过（离线/无模块缓存环境）。
+	if testing.Short() {
+		t.Skip("skipping codegen regen check in -short mode")
+	}
 	dir := t.TempDir()
 	out := filepath.Join(dir, "types.gen.go")
 

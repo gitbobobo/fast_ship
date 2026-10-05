@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -133,12 +134,13 @@ func (h *IssueHandler) BatchCloseDone(c *gin.Context) {
 
 	var req api.BatchCloseDoneIssuesJSONBody
 	_ = c.ShouldBindJSON(&req)
-	if req.Source != nil && *req.Source != model.IssueSourceInternal && *req.Source != model.IssueSourceGitHub {
+	source := api.Deref(req.Source)
+	if source != "" && source != model.IssueSourceInternal && source != model.IssueSourceGitHub {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.issueService.BatchCloseDoneIssues(projectID, userID, string(api.Deref(req.Source)))
+	result, err := h.issueService.BatchCloseDoneIssues(projectID, userID, string(source))
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -157,12 +159,13 @@ func (h *IssueHandler) Get(c *gin.Context) {
 		return
 	}
 
+	// collab 读取失败降级为不带该字段，不拖垮详情响应。
 	collab, err := h.collabService.GetArea(issueID, userID)
 	if err != nil {
-		middleware.HandleAppError(c, err)
-		return
+		log.Printf("issue %s: 读取协作区失败: %v", issueID, err)
+	} else {
+		item.Collab = collab
 	}
-	item.Collab = collab
 
 	response.Success(c, item)
 }

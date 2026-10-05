@@ -12,7 +12,7 @@
 
 `make api-types` 用 oapi-codegen 写出 `server/internal/api/types.gen.go`。配置在 `server/api/oapi-codegen.yaml`，版本由 `server/go.mod` 的 `tool` 指令钉死（当前是 `github.com/oapi-codegen/oapi-codegen/v2 v2.8.0`）。生成文件提交进 git。`go test` 会再跑一次生成，并断言结果和已提交文件逐字节一致。
 
-`make api-docs` 运行 `server/cmd/apidocgen`（在 `server` 目录下 `go run ./cmd/apidocgen`），写出 `skills/fast-ship/references/api.md`。同一份 yaml 两次运行，markdown 逐字节相同。文件头注明请勿手改。
+`make api-docs` 运行 `server/cmd/apidocgen`（在 `server` 目录下 `go run ./cmd/apidocgen`），写出 `skills/fast-ship/references/api.md`。同一份 yaml 两次运行，markdown 逐字节相同；`go test` 断言已提交文件与重新渲染结果一致。文件头注明请勿手改。
 
 直接调 codegen 的命令写在 `server/api/oapi-codegen.yaml` 顶部：`cd server && go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml`。
 
