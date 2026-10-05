@@ -53,6 +53,7 @@ if [[ -n "${1:-}" ]]; then
 else
   IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "${CURRENT}"
   VERSION="${V_MAJOR}.${V_MINOR}.$((V_PATCH + 1))"
+  [[ "${VERSION}" =~ ${SEMVER_RE} ]] || err "自动递增后的版本号 ${VERSION} 超出位数限制，请显式指定版本"
 fi
 TAG_NAME="v${VERSION}"
 
@@ -88,7 +89,8 @@ printf '发版：%s -> %s\n' "${CURRENT}" "${VERSION}"
 
 # 写 VERSION 到推送之间任一失败或中断自动回滚本地改动（远程由 --atomic 保证无半成品）
 trap release_rollback ERR
-trap 'release_rollback; exit 130' INT TERM
+trap 'release_rollback; exit 130' INT
+trap 'release_rollback; exit 143' TERM
 printf '%s\n' "${VERSION}" > "${VERSION_FILE}"
 git add VERSION
 git commit -m "chore: bump version to ${VERSION}"
