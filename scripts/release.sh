@@ -13,6 +13,25 @@ err() {
   exit 1
 }
 
+# 发版步骤失败时回滚本地改动：删本地 tag、重置到发版前 HEAD（VERSION 一并恢复）。
+# 不调 exit，由 set -e 用原命令退出码结束；内部命令一律 || true 防二次触发 ERR。
+release_rollback() {
+  printf '错误：发版中断，已自动回滚本地改动，修复原因后可重跑\n' >&2
+  git tag -d "${TAG_NAME}" >/dev/null 2>&1 || true
+  git reset --hard "${PREV_HEAD}" >/dev/null 2>&1 || true
+}
+
+# 版本比较：$1 严格高于 $2 时返回 0。调用前两侧均已过 SEMVER_RE（无前导零），(( )) 十进制安全
+version_gt() {
+  local a1 a2 a3 b1 b2 b3
+  IFS='.' read -r a1 a2 a3 <<< "$1"
+  IFS='.' read -r b1 b2 b3 <<< "$2"
+  (( a1 > b1 )) && return 0
+  (( a1 == b1 && a2 > b2 )) && return 0
+  (( a1 == b1 && a2 == b2 && a3 > b3 )) && return 0
+  return 1
+}
+
 [[ $# -le 1 ]] || err "用法：$0 [version]，例如 $0 0.2.0"
 
 # 前置检查：本地检查在前，网络检查在后
@@ -30,8 +49,7 @@ CURRENT="$(cat "${VERSION_FILE}")"
 if [[ -n "${1:-}" ]]; then
   VERSION="${1#v}"
   [[ "${VERSION}" =~ ${SEMVER_RE} ]] || err "无效的版本号：$1（应为 X.Y.Z）"
-  [[ "$(printf '%s\n%s\n' "${CURRENT}" "${VERSION}" | sort -V | head -n1)" == "${CURRENT}" && "${VERSION}" != "${CURRENT}" ]] \
-    || err "目标版本 ${VERSION} 不高于当前版本 ${CURRENT}"
+  version_gt "${VERSION}" "${CURRENT}" || err "目标版本 ${VERSION} 不高于当前版本 ${CURRENT}"
 else
   IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "${CURRENT}"
   VERSION="${V_MAJOR}.${V_MINOR}.$((V_PATCH + 1))"
@@ -52,13 +70,30 @@ fi
 REMOTE_TAG="$(git ls-remote --tags "${PUSH_URL}" "refs/tags/${TAG_NAME}")" || err "无法查询远程 tag，请检查网络与 origin 配置"
 [[ -z "${REMOTE_TAG}" ]] || err "tag ${TAG_NAME} 远程已存在"
 
+# 目标版本必须高于远程现有最高 v* tag，防 latest 镜像回退；非 semver tag 不计入
+ALL_TAGS="$(git ls-remote --tags "${PUSH_URL}")" || err "无法查询远程 tag 列表，请检查网络与 origin 配置"
+LATEST_TAG=""
+while IFS= read -r TAG_VER; do
+  if [[ -z "${LATEST_TAG}" ]] || version_gt "${TAG_VER}" "${LATEST_TAG}"; then
+    LATEST_TAG="${TAG_VER}"
+  fi
+done <<< "$(printf '%s\n' "${ALL_TAGS}" | grep -v '\^{}' | cut -f2 | sed 's|^refs/tags/||; s|^v||' | grep -E "${SEMVER_RE}" || true)"
+
+if [[ -n "${LATEST_TAG}" ]]; then
+  version_gt "${VERSION}" "${LATEST_TAG}" || err "目标版本 ${VERSION} 不高于现有最高 tag v${LATEST_TAG}"
+fi
+
+PREV_HEAD="$(git rev-parse HEAD)"
 printf '发版：%s -> %s\n' "${CURRENT}" "${VERSION}"
 
+# 写 VERSION 到推送之间任一失败自动回滚本地改动（远程由 --atomic 保证无半成品）
+trap release_rollback ERR
 printf '%s\n' "${VERSION}" > "${VERSION_FILE}"
 git add VERSION
 git commit -m "chore: bump version to ${VERSION}"
 git tag "${TAG_NAME}"
 git push --atomic origin main "refs/tags/${TAG_NAME}"
+trap - ERR
 
 printf '已推送 main 与 tag %s\n' "${TAG_NAME}"
 

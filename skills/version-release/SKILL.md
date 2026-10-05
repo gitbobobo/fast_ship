@@ -33,6 +33,6 @@ make release VERSION=x.y.z  # 指定版本
 
 ## 失败处理
 
-- **前置检查报错**（分支、工作区、远程同步、tag 冲突）：按提示修复后重跑 `make release`，守卫失败零副作用。
+- **前置检查报错或发版中途失败**：守卫失败零副作用；写 VERSION 到推送之间失败会自动回滚本地提交与 tag。按报错修复原因后重跑 `make release`。
 - **Docker 构建失败**：`gh run view --log-failed` 排查。需要代码修复就合入后用新版本号重跑 `make release`；仅需重试构建时在 Actions 页面 rerun。
 - **禁止**使用 `git push --force` 覆盖已发布的 tag，除非用户明确要求。
