@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import {
   Check,
   CheckCircle2,
@@ -87,6 +87,7 @@ import {
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { useProject } from "@/lib/hooks/use-projects";
+import { useRecommendations } from "@/lib/hooks/use-recommendations";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import {
   ISSUE_WORKFLOW_STATUS_LABELS,
@@ -421,6 +422,107 @@ function EmptyState({ message }: { message: string }) {
   );
 }
 
+const RECOMMENDATION_PRIORITY_META: Record<
+  IssueRecommendation["priority"],
+  { label: string; className: string }
+> = {
+  high: {
+    label: "高优先级",
+    className: "border-destructive/30 bg-destructive/10 text-destructive",
+  },
+  medium: {
+    label: "中优先级",
+    className:
+      "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  },
+  low: {
+    label: "低优先级",
+    className:
+      "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400",
+  },
+};
+
+function RecommendationDependencyLink({
+  dep,
+}: {
+  dep: RecommendationDependency;
+}) {
+  const closed = dep.state === "closed";
+  const done = closed || dep.workflow_status === "done";
+  const label = closed
+    ? "已关闭"
+    : ISSUE_WORKFLOW_STATUS_LABELS[dep.workflow_status];
+
+  const statusClass = done
+    ? "text-muted-foreground"
+    : dep.workflow_status === "in_progress"
+      ? "text-amber-600 dark:text-amber-400"
+      : "text-slate-600 dark:text-slate-400";
+
+  return (
+    <Link
+      to={`/projects/${dep.project_id}/issues/${dep.issue_id}`}
+      className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-background px-1.5 py-0.5 text-xs hover:bg-muted"
+    >
+      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+        {dep.reference}
+      </span>
+      <span
+        className={cn(
+          "min-w-0 truncate",
+          done && "text-muted-foreground line-through",
+        )}
+      >
+        {dep.title}
+      </span>
+      <span className={cn("shrink-0", statusClass)}>{label}</span>
+    </Link>
+  );
+}
+
+/** 推荐横幅：被推荐的问题进入详情页时显示在正文卡片上方，与正文同级呈现「为什么现在做这条」。 */
+function RecommendationBanner({
+  recommendation,
+}: {
+  recommendation: IssueRecommendation;
+}) {
+  const priority = RECOMMENDATION_PRIORITY_META[recommendation.priority];
+  return (
+    <section
+      aria-label="推荐"
+      className="rounded-2xl border border-violet-500/25 bg-violet-500/5 px-4 py-3.5"
+    >
+      <div className="flex items-center gap-2">
+        <Sparkles className="h-4 w-4 text-violet-500" />
+        <span className="text-sm font-semibold">推荐任务</span>
+        <span
+          className={cn(
+            "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+            priority.className,
+          )}
+        >
+          {priority.label}
+        </span>
+      </div>
+      <p className="mt-2 text-sm leading-relaxed whitespace-pre-wrap text-foreground/90">
+        {recommendation.reason}
+      </p>
+      {recommendation.dependencies.length > 0 && (
+        <div className="mt-2.5 flex items-start gap-2">
+          <span className="shrink-0 py-0.5 text-xs text-muted-foreground">
+            前置
+          </span>
+          <div className="flex min-w-0 flex-wrap gap-1.5">
+            {recommendation.dependencies.map((dep) => (
+              <RecommendationDependencyLink key={dep.issue_id} dep={dep} />
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 type TimelineItem =
   | { type: "comment"; data: IssueComment; created_at: string }
   | { type: "event"; data: IssueTimelineEvent; created_at: string };
@@ -475,6 +577,14 @@ export default function IssueDetailPage() {
   const { data: issue, isLoading } = useIssue(iid!);
   const { data: project } = useProject(id!);
   const { data: repoLabels } = useIssueRepoLabels(id!);
+  // 命中推荐时在正文卡片上方展示横幅；queryKey 与看板弹框同源，命中缓存
+  const { data: recommendationsData } = useRecommendations(id);
+  const recommendation = useMemo(
+    () =>
+      recommendationsData?.items.find((entry) => entry.issue.id === iid) ??
+      null,
+    [recommendationsData, iid],
+  );
   const isInternalIssue = issue?.source === "internal";
   const shouldShowLocalAssetNotice =
     issue?.source === "github" && containsLocalIssueAssetReference(issue.body);
@@ -1555,6 +1665,9 @@ export default function IssueDetailPage() {
         <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
           {/* Main Content */}
           <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
+            {recommendation ? (
+              <RecommendationBanner recommendation={recommendation} />
+            ) : null}
             {/* Issue Header Card */}
             <div className="overflow-hidden rounded-2xl border bg-card shadow-sm transition-shadow hover:shadow-md">
               <div className="p-5 md:p-6">
@@ -1669,7 +1782,11 @@ export default function IssueDetailPage() {
                       <GitHubContent html={issue.body_html} markdown={issue.body} />
                     </div>
                     <div className="mt-3 flex justify-end">
-                      <CopyIssuePromptButton projectId={id!} issueId={issue.id} />
+                      <CopyIssuePromptButton
+                        projectId={id!}
+                        issueId={issue.id}
+                        reason={recommendation?.reason}
+                      />
                     </div>
                   </>
                 ) : (
