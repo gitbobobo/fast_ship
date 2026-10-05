@@ -7,7 +7,8 @@
 	test test-server test-web \
 	lint lint-server lint-web \
 	tidy tidy-server \
-	clean clean-server clean-web
+	clean clean-server clean-web \
+	release
 
 help:
 	@printf "Available commands:\n"
@@ -25,6 +26,7 @@ help:
 	@printf "  make lint-web     Run web ESLint and type checks\n"
 	@printf "  make tidy         Tidy server dependencies\n"
 	@printf "  make clean        Clean build artifacts\n"
+	@printf "  make release      Create a release commit, tag, and push\n"
 
 dev:
 	@./scripts/dev.sh all
@@ -76,3 +78,6 @@ clean-server:
 
 clean-web:
 	@rm -rf web/dist
+
+release:
+	@./scripts/release.sh "$(VERSION)"
