@@ -346,6 +346,56 @@ describe("RecommendedIssuesButton", () => {
     );
   });
 
+  it("copies the prompt on Enter even when a list row holds focus", async () => {
+    // 回归：Dialog 打开时 base-ui 自动聚焦首行；行被排除在 Enter 让位名单外，
+    // 焦点落在行上按 Enter 仍是复制，不会变成激活该行
+    mockRecommendations(ALL_ITEMS);
+    renderButton();
+    await openDialog();
+    const firstRow = await screen.findByRole("button", { name: /INT-1.*高优任务/ });
+    firstRow.focus();
+
+    fireEvent.keyDown(firstRow, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(copyWithToastMock).toHaveBeenCalledWith(
+        expect.stringContaining("推荐理由：先做这个能解锁后续工作"),
+        "已复制提示词",
+      ),
+    );
+    // 焦点行未被 Enter 激活成「重选」，选中项维持
+    expect(firstRow).toHaveAttribute("aria-current", "true");
+  });
+
+  it("lets Enter activate the dependency chip instead of copying", async () => {
+    mockRecommendations(ALL_ITEMS);
+    renderButton();
+    await openDialog();
+    await screen.findByRole("heading", { name: "高优任务" });
+    const depChip = screen.getByRole("button", { name: /INT-0.*前置任务/ });
+    depChip.focus();
+
+    fireEvent.keyDown(depChip, { key: "Enter" });
+
+    // Enter 让位原生激活，不触发复制（happy-dom 不会合成 click，验证的是不复制）
+    await waitFor(() => expect(copyWithToastMock).not.toHaveBeenCalled());
+  });
+
+  it("ignores navigation keys combined with modifier keys", async () => {
+    mockRecommendations(ALL_ITEMS);
+    renderButton();
+    await openDialog();
+    await screen.findByRole("heading", { name: "高优任务" });
+
+    fireEvent.keyDown(window, { key: "j", metaKey: true });
+    fireEvent.keyDown(window, { key: "ArrowDown", ctrlKey: true });
+
+    // 选中项仍是第一条
+    expect(
+      screen.getByRole("button", { name: /INT-1.*高优任务/ }),
+    ).toHaveAttribute("aria-current", "true");
+  });
+
   it("opens the prompt picker on Enter when multiple prompts exist", async () => {
     promptList.current = [
       { id: "a", name: "默认", content: "请处理此问题", supports_batch: true },

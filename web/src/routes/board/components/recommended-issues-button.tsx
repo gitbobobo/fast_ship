@@ -151,9 +151,12 @@ export function RecommendedIssuesButton({
         event.preventDefault();
         moveSelection(-1);
       } else if (event.key === "Enter") {
-        // 焦点在可交互控件上时让位原生激活（dep chip、返回、链接、按钮），其余位置 Enter = 复制提示词
+        // 焦点在可交互控件上时让位原生激活（dep chip、返回、链接、移除/复制按钮），
+        // 左栏行（[data-issue-id]）除外：行的选中交给方向键/点击，Enter 恒定 = 复制提示词。
+        // 否则 Dialog 打开时 base-ui 自动聚焦首行会把 Enter 吞成行激活。
         if (
           target instanceof HTMLElement &&
+          !target.closest("[data-issue-id]") &&
           target.closest(
             'button, a[href], input, textarea, select, [role="button"], [role="link"], [contenteditable="true"]',
           )
