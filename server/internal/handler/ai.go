@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
@@ -13,12 +14,6 @@ import (
 
 type AIHandler struct {
 	aiService *service.AIService
-}
-
-type updateAISettingsRequest struct {
-	APIHost string `json:"api_host"`
-	APIKey  string `json:"api_key"`
-	Model   string `json:"model"`
 }
 
 func NewAIHandler(aiService *service.AIService) *AIHandler {
@@ -40,17 +35,13 @@ func (h *AIHandler) GetSettings(c *gin.Context) {
 func (h *AIHandler) UpdateSettings(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 
-	var req updateAISettingsRequest
+	var req service.UpdateAISettingsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.aiService.UpdateSettings(userID, service.UpdateAISettingsRequest{
-		APIHost: req.APIHost,
-		APIKey:  req.APIKey,
-		Model:   req.Model,
-	})
+	result, err := h.aiService.UpdateSettings(userID, req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -72,14 +63,10 @@ func (h *AIHandler) SuggestIssueChecklist(c *gin.Context) {
 	response.Success(c, result)
 }
 
-type generateTitleRequest struct {
-	Body string `json:"body"`
-}
-
 func (h *AIHandler) GenerateTitle(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 
-	var req generateTitleRequest
+	var req api.GenerateIssueTitleJSONBody
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return

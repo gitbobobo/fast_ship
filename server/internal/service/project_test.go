@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 )
 
@@ -163,7 +164,7 @@ func TestProjectServiceCreate_WithoutGitHub(t *testing.T) {
 	// 创建不带 GitHub 仓库的项目应该成功
 	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
 		Name:        "no-github-project",
-		Description: "A project without GitHub",
+		Description: api.Ptr("A project without GitHub"),
 	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -184,9 +185,9 @@ func TestProjectServiceCreate_WithGitHub(t *testing.T) {
 	// 创建带 GitHub 仓库的项目，提供 token 应该成功
 	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
 		Name:          "github-project",
-		Description:   "A project with GitHub",
-		RepositoryURL: "https://github.com/owner/repo",
-		GithubToken:   "ghp_test123",
+		Description:   api.Ptr("A project with GitHub"),
+		RepositoryUrl: api.Ptr("https://github.com/owner/repo"),
+		GithubToken:   api.Ptr("ghp_test123"),
 	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -207,7 +208,7 @@ func TestProjectServiceCreate_WithRepoURLButNoToken(t *testing.T) {
 	// 提供了仓库地址但没有 token 应该失败
 	_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
 		Name:          "no-token-project",
-		RepositoryURL: "https://github.com/owner/repo",
+		RepositoryUrl: api.Ptr("https://github.com/owner/repo"),
 	})
 	if err == nil {
 		t.Fatal("expected error when repo URL provided without token, got nil")

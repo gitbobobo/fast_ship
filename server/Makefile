@@ -1,4 +1,4 @@
-.PHONY: build run dev clean tidy
+.PHONY: build run dev clean tidy api-types api-docs
 
 # 构建
 build:
@@ -20,6 +20,14 @@ clean:
 # 整理依赖
 tidy:
 	go mod tidy
+
+# 从 api/openapi.yaml 重新生成 internal/api/types.gen.go
+api-types:
+	go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
+
+# 从 api/openapi.yaml 重新生成 skills/fast-ship/references/api.md
+api-docs:
+	go run ./cmd/apidocgen
 
 # Docker 构建
 docker-build:

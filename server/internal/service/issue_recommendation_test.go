@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
@@ -80,7 +81,7 @@ func TestIssueRecommendation_Upsert(t *testing.T) {
 	if first.Reason != "值得先做" || first.Priority != model.IssueRecommendationPriorityMedium || first.CreatedBy != "bot-key" {
 		t.Fatalf("unexpected recommendation: %+v", first)
 	}
-	if len(first.Dependencies) != 1 || first.Dependencies[0].IssueID != dep.ID || first.Dependencies[0].Title != dep.Title {
+	if len(first.Dependencies) != 1 || first.Dependencies[0].IssueId != dep.ID || first.Dependencies[0].Title != dep.Title {
 		t.Fatalf("unexpected dependencies: %+v", first.Dependencies)
 	}
 	if first.Issue.Reference != "GH-42" || first.Dependencies[0].Reference != fmt.Sprintf("INT-%d", dep.SequenceNumber) {
@@ -89,7 +90,7 @@ func TestIssueRecommendation_Upsert(t *testing.T) {
 
 	second, err := ts.recService.Upsert(issue.ID, ownerID, "another-key", UpsertIssueRecommendationRequest{
 		Reason:   "改优先级",
-		Priority: model.IssueRecommendationPriorityHigh,
+		Priority: api.Ptr(model.IssueRecommendationPriorityHigh),
 	})
 	if err != nil {
 		t.Fatalf("upsert again: %v", err)
@@ -119,7 +120,7 @@ func TestIssueRecommendation_UpsertValidation(t *testing.T) {
 	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: strings.Repeat("长", 501)}); err != errs.ErrInvalidParams {
 		t.Fatalf("expected ErrInvalidParams for too-long reason, got %v", err)
 	}
-	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok", Priority: "urgent"}); err != errs.ErrInvalidParams {
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok", Priority: api.Ptr(model.IssueRecommendationPriority("urgent"))}); err != errs.ErrInvalidParams {
 		t.Fatalf("expected ErrInvalidParams for invalid priority, got %v", err)
 	}
 	deps := make([]string, 21)
@@ -172,7 +173,7 @@ func TestIssueRecommendation_DependencyOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert with same-owner cross-project dep: %v", err)
 	}
-	if len(resp.Dependencies) != 1 || resp.Dependencies[0].IssueID != siblingDep.ID {
+	if len(resp.Dependencies) != 1 || resp.Dependencies[0].IssueId != siblingDep.ID {
 		t.Fatalf("unexpected dependencies: %+v", resp.Dependencies)
 	}
 }
@@ -251,9 +252,9 @@ func TestIssueRecommendation_List(t *testing.T) {
 			t.Fatalf("seed upsert: %v", err)
 		}
 	}
-	seed(lowIssue.ID, UpsertIssueRecommendationRequest{Reason: "low", Priority: model.IssueRecommendationPriorityLow})
-	seed(midIssue.ID, UpsertIssueRecommendationRequest{Reason: "mid", Priority: model.IssueRecommendationPriorityMedium})
-	seed(issue.ID, UpsertIssueRecommendationRequest{Reason: "high", Priority: model.IssueRecommendationPriorityHigh})
+	seed(lowIssue.ID, UpsertIssueRecommendationRequest{Reason: "low", Priority: api.Ptr(model.IssueRecommendationPriorityLow)})
+	seed(midIssue.ID, UpsertIssueRecommendationRequest{Reason: "mid", Priority: api.Ptr(model.IssueRecommendationPriorityMedium)})
+	seed(issue.ID, UpsertIssueRecommendationRequest{Reason: "high", Priority: api.Ptr(model.IssueRecommendationPriorityHigh)})
 
 	all, err := ts.recService.List(ownerID, "")
 	if err != nil {
@@ -262,7 +263,7 @@ func TestIssueRecommendation_List(t *testing.T) {
 	if len(all.Items) != 3 {
 		t.Fatalf("expected 3 items, got %d", len(all.Items))
 	}
-	if all.Items[0].Issue.ID != issue.ID || all.Items[1].Issue.ID != midIssue.ID || all.Items[2].Issue.ID != lowIssue.ID {
+	if all.Items[0].Issue.Id != issue.ID || all.Items[1].Issue.Id != midIssue.ID || all.Items[2].Issue.Id != lowIssue.ID {
 		t.Fatalf("unexpected ordering: %+v", all.Items)
 	}
 	if all.Items[1].Issue.ProjectName != otherProject.Name {
@@ -273,7 +274,7 @@ func TestIssueRecommendation_List(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list scoped: %v", err)
 	}
-	if len(scoped.Items) != 1 || scoped.Items[0].Issue.ID != midIssue.ID {
+	if len(scoped.Items) != 1 || scoped.Items[0].Issue.Id != midIssue.ID {
 		t.Fatalf("unexpected scoped items: %+v", scoped.Items)
 	}
 }

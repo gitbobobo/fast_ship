@@ -1,0 +1,24 @@
+# oapi-codegen 生成配置：只生成 Go 类型，不生成路由/服务端接口。
+# 路由注册与参数绑定是 router.go 权限模型的真相源，不交给生成代码。
+# 用法：cd server && go tool oapi-codegen -config api/oapi-codegen.yaml api/openapi.yaml
+package: api
+output: internal/api/types.gen.go
+generate:
+  models: true
+output-options:
+  # 生成全部组件 schema，包括尚未被路径引用的类型（供 service 直接复用契约类型）
+  skip-prune: true
+  # 可选数组/对象字段生成 []T 而非 *[]T，与既有 service 结构的 omitempty 语义一致
+  prefer-skip-optional-pointer-on-container-types: true
+  # 为匿名内联 schema 生成具名类型（如 IssueCollabDoc.author），便于 service 直接构造
+  generate-types-for-anonymous-schemas: true
+  type-mapping:
+    string:
+      formats:
+        # 既有响应把时间序列化为 RFC3339 字符串；保持 string 类型避免改变 JSON 输出
+        date-time:
+          type: string
+        uuid:
+          type: string
+        email:
+          type: string

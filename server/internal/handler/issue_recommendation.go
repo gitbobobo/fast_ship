@@ -3,7 +3,6 @@ package handler
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
-	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/service"
@@ -33,21 +32,13 @@ func (h *IssueRecommendationHandler) Upsert(c *gin.Context) {
 	issueID := c.Param("iid")
 	userID := middleware.GetUserID(c)
 
-	var req struct {
-		Reason       string   `json:"reason"`
-		Priority     string   `json:"priority"`
-		Dependencies []string `json:"dependencies"`
-	}
+	var req service.UpsertIssueRecommendationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		middleware.HandleAppError(c, errs.ErrInvalidParams)
 		return
 	}
 
-	result, err := h.recService.Upsert(issueID, userID, middleware.GetAPIKeyName(c), service.UpsertIssueRecommendationRequest{
-		Reason:       req.Reason,
-		Priority:     model.IssueRecommendationPriority(req.Priority),
-		Dependencies: req.Dependencies,
-	})
+	result, err := h.recService.Upsert(issueID, userID, middleware.GetAPIKeyName(c), req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -62,7 +53,7 @@ func (h *IssueRecommendationHandler) Delete(c *gin.Context) {
 		middleware.HandleAppError(c, err)
 		return
 	}
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *IssueRecommendationHandler) List(c *gin.Context) {

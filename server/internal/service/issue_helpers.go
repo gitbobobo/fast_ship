@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
@@ -73,15 +74,15 @@ func toIssueSyncStateResponse(state *model.IssueSyncState) *IssueSyncStateRespon
 func toIssueCommentResponse(comment model.IssueComment) IssueCommentResponse {
 	reactions := parseJSON[IssueReactionSummaryResponse](comment.ReactionsJSON)
 	return IssueCommentResponse{
-		ID:                comment.ID,
-		IssueID:           comment.IssueID,
+		Id:                comment.ID,
+		IssueId:           comment.IssueID,
 		Source:            comment.Source,
-		GitHubCommentID:   comment.GitHubCommentID,
-		GitHubNodeID:      comment.GitHubNodeID,
+		GithubCommentId:   comment.GitHubCommentID,
+		GithubNodeId:      comment.GitHubNodeID,
 		Body:              comment.Body,
-		BodyHTML:          githubmedia.RewriteHTMLMediaSources(comment.BodyHTML),
-		HTMLURL:           comment.HTMLURL,
-		Author:            IssueActorResponse{Login: comment.AuthorLogin, AvatarURL: githubmedia.RewriteMediaURL(comment.AuthorAvatarURL)},
+		BodyHtml:          githubmedia.RewriteHTMLMediaSources(comment.BodyHTML),
+		HtmlUrl:           comment.HTMLURL,
+		Author:            IssueActorResponse{Login: comment.AuthorLogin, AvatarUrl: githubmedia.RewriteMediaURL(comment.AuthorAvatarURL)},
 		AuthorAssociation: comment.AuthorAssociation,
 		Reactions:         reactions,
 		CreatedAt:         formatTime(comment.GitHubCreatedAt),
@@ -122,12 +123,12 @@ func buildGitHubIssueCommentModel(issueID string, item *ghclient.IssueComment) *
 
 func toIssueTimelineResponse(event model.IssueTimelineEvent) IssueTimelineEventResponse {
 	return IssueTimelineEventResponse{
-		ID:            event.ID,
-		IssueID:       event.IssueID,
+		Id:            event.ID,
+		IssueId:       event.IssueID,
 		EventKey:      event.EventKey,
 		EventType:     event.EventType,
-		GitHubEventID: event.GitHubEventID,
-		Actor:         IssueActorResponse{Login: event.ActorLogin, AvatarURL: githubmedia.RewriteMediaURL(event.ActorAvatarURL)},
+		GithubEventId: event.GitHubEventID,
+		Actor:         IssueActorResponse{Login: event.ActorLogin, AvatarUrl: githubmedia.RewriteMediaURL(event.ActorAvatarURL)},
 		Body:          event.Body,
 		Summary:       event.Summary,
 		Payload:       parseJSON[map[string]any](event.PayloadJSON),
@@ -249,8 +250,8 @@ func mapReactions(r *gh.Reactions) IssueReactionSummaryResponse {
 	}
 	return IssueReactionSummaryResponse{
 		TotalCount: r.GetTotalCount(),
-		PlusOne:    r.GetPlusOne(),
-		MinusOne:   r.GetMinusOne(),
+		Plus1:      r.GetPlusOne(),
+		Minus1:     r.GetMinusOne(),
 		Laugh:      r.GetLaugh(),
 		Hooray:     r.GetHooray(),
 		Confused:   r.GetConfused(),
@@ -381,7 +382,7 @@ func buildChecklistSnapshot(issueID, userID string, items []IssueChecklistItemIn
 			return nil, checklistSnapshot{}, errs.ErrInvalidParams
 		}
 
-		id := strings.TrimSpace(item.ID)
+		id := strings.TrimSpace(api.Deref(item.Id))
 		if id == "" {
 			id = uuid.NewString()
 		}
@@ -390,13 +391,13 @@ func buildChecklistSnapshot(issueID, userID string, items []IssueChecklistItemIn
 			ID:              id,
 			IssueID:         issueID,
 			Title:           title,
-			IsCompleted:     item.IsCompleted,
+			IsCompleted:     api.Deref(item.IsCompleted),
 			SortOrder:       index,
 			CreatedByUserID: userID,
 			CreatedAt:       now,
 			UpdatedAt:       now,
 		})
-		if item.IsCompleted {
+		if api.Deref(item.IsCompleted) {
 			done++
 		}
 	}

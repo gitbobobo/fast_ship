@@ -729,7 +729,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
-	issueHandler := handler.NewIssueHandler(issueService, issueShipHookService)
+	issueHandler := handler.NewIssueHandler(issueService, issueShipHookService, issueCollabService)
 	issueCollabHandler := handler.NewIssueCollabHandler(issueCollabService)
 	recommendationHandler := handler.NewIssueRecommendationHandler(recommendationService)
 	logHandler := handler.NewLogHandler(logService)

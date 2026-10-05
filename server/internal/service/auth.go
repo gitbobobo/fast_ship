@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -34,51 +35,6 @@ func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repos
 		refreshTokenRepo: refreshTokenRepo,
 		cfg:              cfg,
 	}
-}
-
-type RegisterRequest struct {
-	Username string `json:"username" binding:"required,min=2,max=50"`
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required,min=8"`
-}
-
-type LoginRequest struct {
-	Login    string `json:"login" binding:"required"`
-	Password string `json:"password" binding:"required"`
-}
-
-type UpdateProfileRequest struct {
-	Username string `json:"username" binding:"omitempty,min=2,max=50"`
-	Email    string `json:"email" binding:"omitempty,email"`
-}
-
-type UpdatePasswordRequest struct {
-	OldPassword string `json:"old_password" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=8"`
-}
-
-type AuthResponse struct {
-	Token        string       `json:"token"`
-	RefreshToken string       `json:"refresh_token"`
-	User         UserResponse `json:"user"`
-}
-
-type RefreshResponse struct {
-	Token        string `json:"token"`
-	RefreshToken string `json:"refresh_token"`
-}
-
-type RefreshRequest struct {
-	RefreshToken string `json:"refresh_token" binding:"required"`
-}
-
-type UserResponse struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Email     string    `json:"email"`
-	AvatarURL string    `json:"avatar_url"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func (s *AuthService) Register(req *RegisterRequest) (*AuthResponse, error) {
@@ -223,26 +179,26 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 		return nil, errs.ErrUserNotFound
 	}
 
-	if req.Username != "" && req.Username != user.Username {
-		exists, err := s.userRepo.ExistsByUsername(req.Username)
+	if username := api.Deref(req.Username); username != "" && username != user.Username {
+		exists, err := s.userRepo.ExistsByUsername(username)
 		if err != nil {
 			return nil, errs.ErrInternal
 		}
 		if exists {
 			return nil, errs.ErrUsernameExists
 		}
-		user.Username = req.Username
+		user.Username = username
 	}
 
-	if req.Email != "" && req.Email != user.Email {
-		exists, err := s.userRepo.ExistsByEmail(req.Email)
+	if email := api.Deref(req.Email); email != "" && email != user.Email {
+		exists, err := s.userRepo.ExistsByEmail(email)
 		if err != nil {
 			return nil, errs.ErrInternal
 		}
 		if exists {
 			return nil, errs.ErrEmailExists
 		}
-		user.Email = req.Email
+		user.Email = email
 	}
 
 	if err := s.userRepo.Update(user); err != nil {
@@ -310,12 +266,12 @@ func (s *AuthService) generateToken(userID, username string) (string, error) {
 
 func (s *AuthService) toUserResponse(user *model.User) UserResponse {
 	return UserResponse{
-		ID:        user.ID,
+		Id:        user.ID,
 		Username:  user.Username,
 		Email:     user.Email,
-		AvatarURL: user.AvatarURL,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
+		AvatarUrl: user.AvatarURL,
+		CreatedAt: api.JSONTime(user.CreatedAt),
+		UpdatedAt: api.JSONTime(user.UpdatedAt),
 	}
 }
 

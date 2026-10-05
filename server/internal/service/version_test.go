@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
@@ -91,7 +92,7 @@ func TestVersionServiceCreate_ValidatesTargetBranch(t *testing.T) {
 
 	version, err := svc.versionService.Create(context.Background(), project.ID, project.UserID, &CreateVersionRequest{
 		VersionNumber:   "v1.0.0",
-		TargetCommitish: "release/1.0",
+		TargetCommitish: api.Ptr("release/1.0"),
 	})
 	if err != nil {
 		t.Fatalf("create version: %v", err)

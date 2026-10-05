@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
@@ -22,15 +23,10 @@ func NewDocumentHandler(documentService *service.DocumentService) *DocumentHandl
 	return &DocumentHandler{documentService: documentService}
 }
 
-type createDocumentRequest struct {
-	Title    string  `json:"title"`
-	Body     string  `json:"body"`
-	ParentID *string `json:"parent_id"`
-}
-
+// updateDocumentRequest 内嵌契约类型承接 title/body，parent_id 需要
+// 省略/null/字符串 三态（生成类型放不下），以 RawMessage 旁路捕获。
 type updateDocumentRequest struct {
-	Title    *string         `json:"title"`
-	Body     *string         `json:"body"`
+	api.UpdateDocumentRequest
 	ParentID json.RawMessage `json:"parent_id"`
 }
 
@@ -71,7 +67,7 @@ func (h *DocumentHandler) Create(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	var req createDocumentRequest
+	var req api.CreateDocumentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
@@ -82,11 +78,7 @@ func (h *DocumentHandler) Create(c *gin.Context) {
 		return
 	}
 
-	result, err := h.documentService.Create(projectID, userID, &service.CreateDocumentRequest{
-		Title:    req.Title,
-		Body:     req.Body,
-		ParentID: req.ParentID,
-	})
+	result, err := h.documentService.Create(projectID, userID, &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -134,6 +126,7 @@ func (h *DocumentHandler) Update(c *gin.Context) {
 		Body:     req.Body,
 		ParentID: parentID,
 	})
+
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -149,5 +142,5 @@ func (h *DocumentHandler) Delete(c *gin.Context) {
 		middleware.HandleAppError(c, err)
 		return
 	}
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }

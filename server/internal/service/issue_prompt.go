@@ -5,19 +5,45 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"gorm.io/gorm"
 )
 
-type IssuePromptsResponse struct {
-	// Prompts 为 nil 时序列化为 JSON null，前端据此兜底为默认提示词。
-	Prompts []model.IssuePromptItem `json:"prompts"`
+// IssuePromptItem ↔ api.IssuePromptItem：存储用 model 形态（gorm valuer/scanner），
+// 出入参用生成类型；supports_batch 始终回显以兼容旧输出。
+func toIssuePromptItems(items model.IssuePromptItems) []api.IssuePromptItem {
+	if items == nil {
+		return nil
+	}
+	out := make([]api.IssuePromptItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, api.IssuePromptItem{
+			Id:            item.ID,
+			Name:          item.Name,
+			Content:       item.Content,
+			SupportsBatch: api.Ptr(item.SupportsBatch),
+		})
+	}
+	return out
 }
 
-type UpdateIssuePromptsRequest struct {
-	Prompts []model.IssuePromptItem `json:"prompts"`
+func fromIssuePromptItems(items []api.IssuePromptItem) model.IssuePromptItems {
+	if items == nil {
+		return nil
+	}
+	out := make(model.IssuePromptItems, 0, len(items))
+	for _, item := range items {
+		out = append(out, model.IssuePromptItem{
+			ID:            item.Id,
+			Name:          item.Name,
+			Content:       item.Content,
+			SupportsBatch: api.Deref(item.SupportsBatch),
+		})
+	}
+	return out
 }
 
 type IssuePromptService struct {
@@ -36,7 +62,7 @@ func (s *IssuePromptService) GetPrompts(userID string) (*IssuePromptsResponse, e
 		}
 		return nil, errs.ErrInternal
 	}
-	return &IssuePromptsResponse{Prompts: setting.Prompts}, nil
+	return &IssuePromptsResponse{Prompts: toIssuePromptItems(setting.Prompts)}, nil
 }
 
 func (s *IssuePromptService) UpdatePrompts(userID string, req UpdateIssuePromptsRequest) (*IssuePromptsResponse, error) {
@@ -44,7 +70,7 @@ func (s *IssuePromptService) UpdatePrompts(userID string, req UpdateIssuePrompts
 		return nil, errs.ErrInvalidParams
 	}
 	for _, item := range req.Prompts {
-		if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Content) == "" {
+		if strings.TrimSpace(item.Id) == "" || strings.TrimSpace(item.Name) == "" || strings.TrimSpace(item.Content) == "" {
 			return nil, errs.ErrInvalidParams
 		}
 	}
@@ -53,7 +79,7 @@ func (s *IssuePromptService) UpdatePrompts(userID string, req UpdateIssuePrompts
 	now := time.Now().UTC()
 	setting := &model.UserIssuePromptSetting{
 		UserID:    userID,
-		Prompts:   req.Prompts,
+		Prompts:   fromIssuePromptItems(req.Prompts),
 		UpdatedAt: now,
 	}
 

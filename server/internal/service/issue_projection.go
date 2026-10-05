@@ -45,8 +45,8 @@ func (s *IssueService) loadChecklist(issueID string) ([]model.IssueChecklistItem
 
 func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInternalMeta, checklist []model.IssueChecklistItem, labelMap map[string]model.GitHubRepoLabel, shipHook *model.IssueShipHook, unreadCount int) IssueResponse {
 	resp := IssueResponse{
-		ID:             issue.ID,
-		ProjectID:      issue.ProjectID,
+		Id:             issue.ID,
+		ProjectId:      issue.ProjectID,
 		Source:         issue.Source,
 		SequenceNumber: issue.SequenceNumber,
 		Reference:      buildIssueReference(issue),
@@ -54,10 +54,10 @@ func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInter
 		StateReason:    issue.StateReason,
 		Title:          issue.Title,
 		Body:           issue.Body,
-		BodyHTML:       githubmedia.RewriteHTMLMediaSources(issue.BodyHTML),
+		BodyHtml:       githubmedia.RewriteHTMLMediaSources(issue.BodyHTML),
 		Author: IssueActorResponse{
 			Login:     issue.AuthorLogin,
-			AvatarURL: githubmedia.RewriteMediaURL(issue.AuthorAvatarURL),
+			AvatarUrl: githubmedia.RewriteMediaURL(issue.AuthorAvatarURL),
 		},
 		CreatedAt:           formatTime(issue.CreatedAt),
 		UpdatedAt:           formatTime(issue.UpdatedAt),
@@ -70,7 +70,7 @@ func (s *IssueService) toIssueResponse(issue model.Issue, meta *model.IssueInter
 		resp.ClosedAt = &value
 	}
 	if issue.GitHubMeta != nil {
-		resp.GitHub = s.toIssueGitHubResponse(issue.ProjectID, issue.GitHubMeta, labelMap)
+		resp.Github = s.toIssueGitHubResponse(issue.ProjectID, issue.GitHubMeta, labelMap)
 	}
 	return resp
 }
@@ -86,10 +86,10 @@ func (s *IssueService) toIssueGitHubResponse(projectID string, meta *model.Issue
 	reactions := parseJSON[IssueReactionSummaryResponse](meta.ReactionsJSON)
 
 	resp := &IssueGitHubResponse{
-		GitHubIssueID:     meta.GitHubIssueID,
-		GitHubNodeID:      meta.GitHubNodeID,
+		GithubIssueId:     meta.GitHubIssueID,
+		GithubNodeId:      meta.GitHubNodeID,
 		Number:            meta.Number,
-		HTMLURL:           meta.HTMLURL,
+		HtmlUrl:           meta.HTMLURL,
 		AuthorAssociation: meta.AuthorAssociation,
 		Assignees:         make([]IssueActorResponse, 0, len(assignees)),
 		Labels:            s.resolveLabels(projectID, labelNames, labelMap),
@@ -102,7 +102,7 @@ func (s *IssueService) toIssueGitHubResponse(projectID string, meta *model.Issue
 	for _, assignee := range assignees {
 		resp.Assignees = append(resp.Assignees, IssueActorResponse{
 			Login:     assignee.Login,
-			AvatarURL: githubmedia.RewriteMediaURL(assignee.AvatarURL),
+			AvatarUrl: githubmedia.RewriteMediaURL(assignee.AvatarURL),
 		})
 	}
 	if milestone != nil {
@@ -149,7 +149,7 @@ func (s *IssueService) toIssueInternalMetaResponse(projectID string, meta *model
 		resp.Checklist = make([]IssueChecklistItemResponse, 0, len(checklist))
 		for _, item := range checklist {
 			resp.Checklist = append(resp.Checklist, IssueChecklistItemResponse{
-				ID:          item.ID,
+				Id:          item.ID,
 				Title:       item.Title,
 				IsCompleted: item.IsCompleted,
 				SortOrder:   item.SortOrder,
@@ -162,12 +162,12 @@ func (s *IssueService) toIssueInternalMetaResponse(projectID string, meta *model
 func toIssueAssetResponse(asset model.IssueAsset) IssueAssetResponse {
 	contentURL := buildIssueAssetContentURL(asset.ID)
 	return IssueAssetResponse{
-		ID:         asset.ID,
-		IssueID:    asset.IssueID,
+		Id:         asset.ID,
+		IssueId:    asset.IssueID,
 		FileName:   asset.FileName,
 		MimeType:   asset.MimeType,
 		FileSize:   asset.FileSize,
-		ContentURL: contentURL,
+		ContentUrl: contentURL,
 		Markdown:   fmt.Sprintf("![%s](%s)", issueAssetAltText(asset.FileName), contentURL),
 		CreatedAt:  asset.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
@@ -176,12 +176,12 @@ func toIssueAssetResponse(asset model.IssueAsset) IssueAssetResponse {
 func toDraftIssueAssetResponse(asset model.IssueDraftAsset) IssueAssetResponse {
 	contentURL := buildIssueAssetContentURL(asset.ID)
 	return IssueAssetResponse{
-		ID:         asset.ID,
-		IssueID:    "",
+		Id:         asset.ID,
+		IssueId:    "",
 		FileName:   asset.FileName,
 		MimeType:   asset.MimeType,
 		FileSize:   asset.FileSize,
-		ContentURL: contentURL,
+		ContentUrl: contentURL,
 		Markdown:   fmt.Sprintf("![%s](%s)", issueAssetAltText(asset.FileName), contentURL),
 		CreatedAt:  asset.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}

@@ -1,0 +1,4663 @@
+openapi: "3.0.3"
+info:
+  title: "Fast Ship API"
+  version: "0.1.42"
+  license:
+    name: MIT
+  description: |
+    Fast Ship 项目管理工具的 HTTP API。覆盖 `server/internal/router/router.go` 注册的全部 /api 路由；
+    SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
+
+    约定：
+    - 所有 JSON 响应统一信封 `{code, message, data}`：`code=0` 成功；非 0 为业务错误码，`data` 为 null。
+    - 认证方式为 `Authorization: Bearer <token>`；token 为 JWT（登录/注册签发）或 `fsk_` 开头的 API Key，服务端按前缀区分。
+    - 部分二进制资源端点（头像、Issue 图片、安装包下载、GitHub 媒体代理）额外接受 `?token=<token>` query 凭证。
+    - 除特别注明外，字段级权限写在各字段 description 中：「仅 JWT」表示 API Key 携带该字段会返回 403（40301）；「仅 API Key」表示 JWT 调用返回 403（40303）。
+servers:
+  - url: /
+    description: 与后端服务同源
+tags:
+  - name: auth
+    description: 注册、登录、Token 与当前用户
+  - name: users
+    description: 用户资源（头像等）
+  - name: ai
+    description: AI 设置、标题/清单生成与全局提示词
+  - name: api-keys
+    description: API Key 管理（仅 JWT）
+  - name: projects
+    description: 项目 CRUD 与 GitHub 分支
+  - name: versions
+    description: 版本 CRUD、前置校验与发货
+  - name: issues
+    description: Issue CRUD、过滤、同步、清单、发货钩子与图片附件
+  - name: collab
+    description: Issue 人机协作区（consensus / summary）
+  - name: recommendations
+    description: Agent 推荐任务队列
+  - name: artifacts
+    description: 版本安装包上传、下载与删除
+  - name: logs
+    description: 日志分片上传与查询
+  - name: documents
+    description: 项目文档
+  - name: dashboard
+    description: 看板概览
+  - name: media
+    description: GitHub 媒体代理
+
+paths:
+  /api/auth/register:
+    post:
+      tags: [auth]
+      operationId: register
+      summary: 注册新用户
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          description: 注册成功，返回 token 与用户信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: 登录（用户名或邮箱）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登录成功，返回 token 与用户信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 用户名/邮箱或密码错误（40103）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshToken
+      summary: 刷新 access token（轮换 refresh token）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: 返回新的 token 与新的 refresh token（旧 refresh token 被轮换）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RefreshResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Refresh Token 无效或已过期（40105）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 登出（将当前 JWT 加入黑名单，可选同时吊销 refresh token）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+                  description: 可选，fsr_ 开头的 refresh token，传入则一并吊销
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: 获取当前用户信息
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: 当前用户信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [auth]
+      operationId: updateMe
+      summary: 更新当前用户资料（用户名/邮箱）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: 更新后的用户信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/password:
+    put:
+      tags: [auth]
+      operationId: updatePassword
+      summary: 修改密码
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePasswordRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 旧密码错误（40103）或凭证无效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/avatar:
+    post:
+      tags: [auth]
+      operationId: uploadAvatar
+      summary: 上传头像（multipart/form-data，字段名 file；≤5MB，jpg/png/gif/webp，会嗅探内容必须为图片）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 图片文件，≤5MB，扩展名限 jpg/jpeg/png/gif/webp 且内容须为图片
+      responses:
+        '200':
+          description: 更新后的用户信息（avatar_url 指向 /api/avatars/:uid/:filename）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/avatars/{uid}/{filename}:
+    get:
+      tags: [users]
+      operationId: getAvatar
+      summary: 获取用户头像图片
+      description: "返回头像二进制内容（image/*），带 `Cache-Control: private, max-age=3600`。支持 Authorization 头或 `?token=` query 凭证。"
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 用户 ID（不得包含 `..` 或 `/`）
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 头像文件名（不得包含 `..` 或 `/`）
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 头像图片二进制内容
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/gif:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/github/media-proxy:
+    get:
+      tags: [media]
+      operationId: githubMediaProxy
+      summary: GitHub 媒体代理（图片/视频）
+      description: |
+        代理拉取并缓存 GitHub 附件/图片等媒体 URL，支持 `Range` 头与缓存命中直出。
+        错误响应为 `text/plain`（非 JSON 信封）：400 invalid url、415 unsupported media type、
+        其他上游错误按状态码透传或 502。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 要代理的媒体 URL（会做 HTML unescape 与多至两次 URL decode）
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 上游媒体内容（透传 Content-Type 与缓存控制头）
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Range 请求的部分内容
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: 无效的媒体 URL（text/plain）
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 缓存文件不存在（text/plain）
+          content:
+            text/plain:
+              schema:
+                type: string
+        '413':
+          description: 上游资源超过缓存大小上限时改为透传（text/plain）
+          content:
+            text/plain:
+              schema:
+                type: string
+        '415':
+          description: 不支持的媒体类型（text/plain）
+          content:
+            text/plain:
+              schema:
+                type: string
+        '502':
+          description: 拉取上游媒体失败（text/plain）
+          content:
+            text/plain:
+              schema:
+                type: string
+    head:
+      tags: [media]
+      operationId: githubMediaProxyHead
+      summary: GitHub 媒体代理（HEAD，仅头信息）
+      description: 与 GET 语义相同但不返回 body，用于探测 Content-Length/Type。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 要代理的媒体 URL
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 仅响应头
+        '400':
+          description: 无效的媒体 URL（text/plain）
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '502':
+          description: 拉取上游媒体失败（text/plain）
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/issues/assets/{aid}/content:
+    get:
+      tags: [issues]
+      operationId: getIssueAssetContent
+      summary: 获取 Issue 图片附件内容
+      description: "返回附件二进制内容（实际 mime type，带 `Cache-Control: private, max-age=300`）。草稿附件与已挂载附件均可。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。"
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: aid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 附件 ID（IssueAsset 或 IssueDraftAsset 的 UUID）
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 附件二进制内容
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    head:
+      tags: [issues]
+      operationId: getIssueAssetContentHead
+      summary: 获取 Issue 图片附件头信息（HEAD）
+      description: 与 GET 语义相同但不返回 body。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: aid
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 仅响应头
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ai/settings:
+    get:
+      tags: [ai]
+      operationId: getAISettings
+      summary: 获取 AI 设置
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: AI 设置（api_key 永不回显，configured 表示是否已配置）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AISettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [ai]
+      operationId: updateAISettings
+      summary: 更新 AI 设置
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAISettingsRequest'
+      responses:
+        '200':
+          description: 更新后的 AI 设置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AISettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/ai/generate-title:
+    post:
+      tags: [ai]
+      operationId: generateIssueTitle
+      summary: 根据正文生成 3 个候选标题
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body:
+                  type: string
+                  description: 正文内容；trim 后须 ≥10 个字符（rune），服务端截断至 10000 rune
+      responses:
+        '200':
+          description: 候选标题列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GenerateTitleResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 未配置 AI 设置（40407）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: AI 服务调用失败（50201）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/issue-prompts:
+    get:
+      tags: [ai]
+      operationId: getIssuePrompts
+      summary: 获取全局问题提示词配置
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 提示词列表；未配置时 prompts 为 null（前端兜底默认提示词）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssuePrompts'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [ai]
+      operationId: updateIssuePrompts
+      summary: 更新全局问题提示词配置（整体覆盖）
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompts]
+              properties:
+                prompts:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: '#/components/schemas/IssuePromptItem'
+      responses:
+        '200':
+          description: 更新后的提示词列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssuePrompts'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/api-keys:
+    get:
+      tags: [api-keys]
+      operationId: listApiKeys
+      summary: 列出当前用户的 API Key
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: API Key 列表（key 字段不回显）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ApiKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [api-keys]
+      operationId: createApiKey
+      summary: 创建 API Key
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '200':
+          description: 创建成功；完整 API Key（fsk_ 前缀）仅在本次响应的 key 字段中出现一次
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ApiKeyCreated'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/api-keys/{id}:
+    delete:
+      tags: [api-keys]
+      operationId: deleteApiKey
+      summary: 删除 API Key
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/dashboard/overview:
+    get:
+      tags: [dashboard]
+      operationId: dashboardOverview
+      summary: 看板概览（各项目 open issue 数 + 近 30 天每日解决数）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: 概览数据
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DashboardOverview'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: 分页列出当前用户的项目
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize20'
+      responses:
+        '200':
+          description: 项目分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PaginatedData'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [projects]
+      operationId: createProject
+      summary: 创建项目（仅 JWT）
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProjectRequest'
+      responses:
+        '200':
+          description: 创建的项目
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}:
+    get:
+      tags: [projects]
+      operationId: getProject
+      summary: 获取项目详情
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 项目详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Project'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [projects]
+      operationId: updateProject
+      summary: 更新项目（仅 JWT）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectRequest'
+      responses:
+        '200':
+          description: 更新后的项目
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [projects]
+      operationId: deleteProject
+      summary: 删除项目（仅 JWT；级联删除版本、Issue、文档、日志等子资源）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/branches:
+    get:
+      tags: [projects]
+      operationId: getProjectBranches
+      summary: 列出项目关联 GitHub 仓库的分支
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 分支列表与默认分支
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [branches, default_branch]
+                        properties:
+                          branches:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Branch'
+                          default_branch:
+                            type: string
+        '400':
+          description: 项目未关联 GitHub 仓库（40003）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/projects/{id}/versions:
+    get:
+      tags: [versions]
+      operationId: listVersions
+      summary: 分页列出项目版本
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/VersionStatus'
+          description: 按版本状态过滤
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize20'
+      responses:
+        '200':
+          description: 版本分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PaginatedData'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/Version'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [versions]
+      operationId: createVersion
+      summary: 创建版本（仅 JWT）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVersionRequest'
+      responses:
+        '200':
+          description: 创建的版本
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Version'
+        '400':
+          description: 参数无效（40001）或目标分支不存在（40002）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本号已存在（40903）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/versions/{vid}:
+    get:
+      tags: [versions]
+      operationId: getVersion
+      summary: 获取版本详情
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '200':
+          description: 版本详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Version'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [versions]
+      operationId: updateVersion
+      summary: 更新版本（仅 pending 状态可改）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateVersionRequest'
+      responses:
+        '200':
+          description: 更新后的版本
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Version'
+        '400':
+          description: 参数无效（40001）或目标分支不存在（40002）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: API Key 修改 version_number（40301）或非资源所有者（40302）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本非 pending 状态（40904）或版本号冲突（40903）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags: [versions]
+      operationId: deleteVersion
+      summary: 删除版本（仅 JWT；仅 pending 状态可删）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本非 pending 状态（40904）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/versions/{vid}/ship-check:
+    get:
+      tags: [versions]
+      operationId: shipCheck
+      summary: 发货前置校验（仅 JWT）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '200':
+          description: 校验项结果与待执行 issue 钩子
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ShipCheck'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本非 pending 状态（40904）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/versions/{vid}/ship:
+    post:
+      tags: [versions]
+      operationId: shipVersion
+      summary: 执行发货（仅 JWT；创建 tag、release、上传安装包并触发 issue 钩子）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      responses:
+        '200':
+          description: 发货钩子执行汇总
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ShipResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本非 pending 状态（40904）或前置校验未通过（40906）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub 操作失败（50200-50202）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/projects/{id}/issues:
+    get:
+      tags: [issues]
+      operationId: listIssues
+      summary: 分页列出项目 Issue（服务端内存全量过滤后分页）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IssueState'
+          description: 按 open/closed 过滤
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 关键词过滤（内存全量匹配）：匹配标题、正文、作者 login、`INT-123`/`GH-123` 编号，纯数字时还会匹配 sequence_number 或 GitHub number
+        - name: label
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按标签名过滤（不区分大小写；GitHub 标签与 internal-meta 标签均匹配）
+        - name: source
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IssueSource'
+          description: 按来源过滤
+        - name: assignee
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按 GitHub 指派人 login 过滤（不区分大小写）
+        - name: milestone
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按 GitHub 里程碑标题过滤（不区分大小写）
+        - name: workflow_status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [todo, in_progress, done, unset]
+          description: 按工作流状态过滤；`unset` 表示未设置（无 meta 或为空串）
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [updated_desc, updated_asc, created_desc, created_asc, comments_desc, comments_asc]
+            default: updated_desc
+          description: 排序；未知值按 updated_desc 处理
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize20'
+      responses:
+        '200':
+          description: Issue 分页列表（列表项不含 collab 字段）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PaginatedData'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/Issue'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [issues]
+      operationId: createIssue
+      summary: 创建 Issue
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateIssueRequest'
+      responses:
+        '200':
+          description: 创建的 Issue
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Issue'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: API Key 创建 github 来源 Issue（40301）或项目未配 GitHub（40003）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/projects/{id}/issues/count:
+    get:
+      tags: [issues]
+      operationId: countIssues
+      summary: 按过滤条件统计 Issue 数
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IssueState'
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 同 listIssues 的 q：标题/正文/作者/编号/纯数字序号
+        - name: label
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: source
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/IssueSource'
+        - name: assignee
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: milestone
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: workflow_status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [todo, in_progress, done, unset]
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 接受但忽略（计数不排序）
+      responses:
+        '200':
+          description: 匹配数量
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [count]
+                        properties:
+                          count:
+                            type: integer
+                            format: int64
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/issues/filter-options:
+    get:
+      tags: [issues]
+      operationId: issueFilterOptions
+      summary: 获取 Issue 过滤器可选值（标签/指派人/里程碑）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 可过滤的取值集合
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueFilterOptions'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/issues/repo-labels:
+    get:
+      tags: [issues]
+      operationId: issueRepoLabels
+      summary: 获取 GitHub 仓库标签（带本地缓存，失败时回落到 GitHub API 并回写缓存）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 仓库标签列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/IssueLabel'
+        '400':
+          description: 项目未关联 GitHub 仓库（40003）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/projects/{id}/issues/assets:
+    post:
+      tags: [issues]
+      operationId: uploadDraftIssueAsset
+      summary: 上传 Issue 草稿图片（仅 JWT；multipart/form-data，字段名 file）
+      description: 上传后得到附件 ID 与 `/api/issues/assets/{aid}/content` 链接，写正文时以该链接引用，创建 Issue 时服务端自动挂载并清理草稿。仅接受 image/*（内容嗅探）；大小受服务端 upload.max_file_size 限制（默认 500MB）。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 图片文件；内容须为 image/*
+      responses:
+        '200':
+          description: 上传的草稿附件（issue_id 为空）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueAsset'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/issues/sync:
+    post:
+      tags: [issues]
+      operationId: syncIssues
+      summary: 手动触发 GitHub Issue 同步（仅 JWT；项目须已配 GitHub）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 本次同步统计
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueSyncResult'
+        '400':
+          description: 项目未关联 GitHub 仓库（40003）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 同步正在进行中（40907）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/projects/{id}/issues/batch-close:
+    post:
+      tags: [issues]
+      operationId: batchCloseDoneIssues
+      summary: 批量关闭 workflow_status=done 的 open Issue（仅 JWT；超过 200 条返回 41201）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source:
+                  $ref: '#/components/schemas/IssueSource'
+                  description: 可选，限定仅关闭 internal 或 github 来源；缺省全部
+      responses:
+        '200':
+          description: 批量关闭结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueBatchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          description: 匹配问题数量超过 200（41201）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}:
+    get:
+      tags: [issues]
+      operationId: getIssue
+      summary: 获取 Issue 详情
+      description: 与列表项结构相同，另带可选 `collab` 字段（与 GET /collab 的 data 同形；仅详情填充，列表不返回）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: Issue 详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Issue'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [issues]
+      operationId: updateIssue
+      summary: 更新 Issue（至少传一个字段）
+      description: |
+        更新标题、正文、状态或标签。`state`/`state_reason` 仅 JWT：API Key 携带任一即返回 403（40301）。
+        `state_reason` 须随 `state` 同传且值与状态匹配（closed→completed|not_planned，open→reopened；open 且 reason 为空即清空）。
+        `labels`：internal issue 须解析为已存在的仓库标签名，否则 40001；github issue 仅做非空/去重校验。
+        github 来源 Issue 的更改写回 GitHub 远端，internal 仅写本地；`state=closed` 会写入 closed_at，`open` 则清空。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateIssueRequest'
+      responses:
+        '200':
+          description: 更新后的 Issue
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Issue'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: API Key 传 state/state_reason（40301）或非资源所有者（40302）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub API 调用失败（50200；github 来源 Issue 的更改写回远端时）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/issues/{iid}/assets:
+    post:
+      tags: [issues]
+      operationId: uploadIssueAsset
+      summary: 上传 Issue 图片附件（multipart/form-data，字段名 file）
+      description: 仅 internal 来源 Issue；仅接受 image/*（内容嗅探）；大小受服务端 upload.max_file_size 限制（默认 500MB）。返回附件 ID 与 content_url/markdown，把 markdown 或链接写进正文即完成挂载。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 图片文件；内容须为 image/*
+      responses:
+        '200':
+          description: 上传的附件（status 为 pending，正文引用后转 attached）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueAsset'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 非 internal 来源 Issue 不可上传（40908）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/internal-meta:
+    put:
+      tags: [issues]
+      operationId: updateIssueInternalMeta
+      summary: 更新 Issue 内部工作流状态
+      description: workflow_status 必填；`""` 表示重置为未设置。置为 in_progress/done 会顺带删除该 Issue 的推荐（如有）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workflow_status:
+                  $ref: '#/components/schemas/IssueWorkflowStatus'
+                  description: 服务端按必填校验；缺省或 null 返回 400
+      responses:
+        '200':
+          description: 更新后的 internal meta
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueInternalMeta'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/internal-meta:
+    put:
+      tags: [issues]
+      operationId: batchUpdateIssueInternalMeta
+      summary: 批量更新 Issue 内部工作流状态
+      description: 批量把多个 Issue 的 workflow_status 设为指定值；逐项处理，单项失败计入 failures 不中断整批。items 为空或 >200 整体 400；某项 issue_id 为空整体 400；某项 workflow_status 为 null 计入该项失败。JWT 与 API Key 均可调用。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 200
+                  items:
+                    type: object
+                    required: [issue_id]
+                    properties:
+                      issue_id:
+                        type: string
+                        format: uuid
+                        description: Issue ID（UUID）
+                      workflow_status:
+                        $ref: '#/components/schemas/IssueWorkflowStatus'
+                        description: 缺省或为 null 时该项计入 failures
+      responses:
+        '200':
+          description: 批量更新结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueBatchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/checklist:
+    put:
+      tags: [issues]
+      operationId: replaceIssueChecklist
+      summary: 整组替换 Issue checklist
+      description: 全量覆盖语义：提交的 items 即最终清单，未包含的旧条目会被删除。item.id 缺省时服务端生成；title trim 后须非空。items=[] 合法，清空清单并把 progress_percent、checklist_updated_at 重置为 null。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  # binding required 让 {} 返回 400；{"items":[]} 合法（清空清单）
+                  x-oapi-codegen-extra-tags:
+                    binding: required
+                  items:
+                    $ref: '#/components/schemas/IssueChecklistItemInput'
+      responses:
+        '200':
+          description: 更新后的 internal meta（含 checklist 与进度快照）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueInternalMeta'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/ship-hook:
+    put:
+      tags: [issues]
+      operationId: upsertShipHook
+      summary: 预约发货后钩子（仅 JWT；整体覆盖）
+      description: 配置该 Issue 所属项目下一次任意版本成功发货后执行的一次性动作；三类动作至少启用一个。comment_body 中 `{version}`、`{release_url}` 占位符在发货时替换。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertShipHookRequest'
+      responses:
+        '200':
+          description: 更新后的钩子
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueShipHook'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [issues]
+      operationId: deleteShipHook
+      summary: 删除发货后钩子（仅 JWT）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/comments:
+    get:
+      tags: [issues]
+      operationId: listIssueComments
+      summary: 分页列出 Issue 评论
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize50'
+      responses:
+        '200':
+          description: 评论分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PaginatedData'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/IssueComment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [issues]
+      operationId: createIssueComment
+      summary: 发表评论（仅 JWT；GitHub issue 同步发到远端，internal issue 存本地）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body:
+                  type: string
+                  description: 评论正文；trim 后须非空
+      responses:
+        '200':
+          description: 创建的评论
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueComment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/issues/{iid}/read:
+    post:
+      tags: [issues]
+      operationId: markIssueRead
+      summary: 标记 Issue 评论已读（仅 JWT；internal Issue 无未读概念，恒成功）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/timeline:
+    get:
+      tags: [issues]
+      operationId: listIssueTimeline
+      summary: 分页列出 Issue 动态（仅 GitHub 来源有数据，internal 返回空）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize50'
+      responses:
+        '200':
+          description: 动态分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PaginatedData'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/IssueTimelineEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/checklist-suggestions:
+    post:
+      tags: [issues, ai]
+      operationId: suggestIssueChecklist
+      summary: AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: 建议事项列表（≤12 条）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueChecklistSuggestions'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Issue 不存在（40405）、项目不存在（40401）或未配置 AI（40407）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: AI 服务调用失败（50201）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/recommendations:
+    get:
+      tags: [recommendations]
+      operationId: listIssueRecommendations
+      summary: 推荐任务列表（一次全量，无分页；按 priority 降序再按 updated_at 降序）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 项目 ID；缺省返回当前用户全部项目的推荐
+      responses:
+        '200':
+          description: 推荐列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/IssueRecommendation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/recommendation:
+    put:
+      tags: [recommendations]
+      operationId: upsertIssueRecommendation
+      summary: 写入/覆盖推荐（仅 API Key；JWT 返回 40303）
+      description: 覆盖 upsert：同一 Issue 重复 PUT 整体替换 reason/priority/dependencies/created_by，保留原 created_at。目标须 state=open 且 workflow_status 为未设置或 todo，否则 40910。dependencies 整组替换，≤20 个 Issue UUID，不含自身；依赖须属当前用户的项目，不存在或越权统一 40405。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertIssueRecommendationRequest'
+      responses:
+        '200':
+          description: 写入后的推荐
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueRecommendation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: JWT 调用仅限 API Key 的端点（40303）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 目标或依赖 Issue 不存在（40405）、项目不存在（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Issue 当前状态不可被推荐（40910）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [recommendations]
+      operationId: deleteIssueRecommendation
+      summary: 移除推荐（JWT 与 API Key 均可）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 推荐不存在（40411）或项目不存在（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/issues/{iid}/collab:
+    get:
+      tags: [collab]
+      operationId: getIssueCollabArea
+      summary: 获取人机协作区（consensus 与 summary 两块，未产出为 null）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: 协作区内容
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueCollabArea'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [collab]
+      operationId: clearIssueCollabArea
+      summary: 清空协作区两块内容（幂等）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/collab/consensus:
+    put:
+      tags: [collab]
+      operationId: upsertCollabConsensus
+      summary: 写入/覆盖共识（仅 API Key；JWT 返回 40303）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertIssueCollabRequest'
+      responses:
+        '200':
+          description: 写入后的共识文档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueCollabDoc'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: JWT 调用仅限 API Key 的端点（40303）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [collab]
+      operationId: deleteCollabConsensus
+      summary: 删除共识（幂等，不存在也返回 200）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/collab/summary:
+    put:
+      tags: [collab]
+      operationId: upsertCollabSummary
+      summary: 写入/覆盖完成总结（仅 API Key；JWT 返回 40303）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertIssueCollabRequest'
+      responses:
+        '200':
+          description: 写入后的总结文档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueCollabDoc'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: JWT 调用仅限 API Key 的端点（40303）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [collab]
+      operationId: deleteCollabSummary
+      summary: 删除完成总结（幂等，不存在也返回 200）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/versions/{vid}/artifacts:
+    post:
+      tags: [artifacts]
+      operationId: uploadArtifact
+      summary: 上传版本安装包（multipart/form-data，字段名 file；同名覆盖）
+      description: 仅 pending 状态版本可上传。`platform` 为可选表单字段（如 darwin-arm64）；`uploaded_by` 由服务端按凭证自动记录。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/VersionId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 安装包文件
+                platform:
+                  type: string
+                  description: 可选平台标识，如 darwin-arm64、linux-amd64
+      responses:
+        '200':
+          description: 上传的安装包记录
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Artifact'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本非 pending 状态（40904）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/artifacts/{aid}:
+    delete:
+      tags: [artifacts]
+      operationId: deleteArtifact
+      summary: 删除安装包（所属版本须 pending）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: aid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 安装包 ID（UUID）
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本非 pending 状态（40904）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/artifacts/{aid}/download:
+    get:
+      tags: [artifacts]
+      operationId: downloadArtifact
+      summary: 下载安装包
+      description: "返回 `application/octet-stream` 与 `Content-Disposition: attachment`。支持 Authorization 头或 `?token=` query 凭证（供浏览器直链下载）。"
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: aid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 安装包 ID（UUID）
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 安装包二进制内容
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{id}/logs:
+    post:
+      tags: [logs]
+      operationId: uploadLogs
+      summary: 上传日志分片（仅 API Key；JWT 返回 40303）
+      description: |
+        同一项目同 `run_id` 合并为一次运行；`(run_id, chunk_id)` 幂等，重复 chunk 返回 200 且 `duplicate: true`、`accepted_count: 0`，不插入。
+        `source`/`description` 仅创建该运行时写入（先到先得）。body 总大小 ≤4MB（超出裸 413）；一次运行累计 ≤50000 条，超出整包拒绝（40909）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UploadLogsRequest'
+      responses:
+        '200':
+          description: 上传结果（含 accepted_count 与 duplicate）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UploadLogsResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: JWT 调用仅限 API Key 的端点（40303）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 该运行日志条数已达上限（40909）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [logs]
+      operationId: listLogEntries
+      summary: 分页查询日志条目
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按运行 ID 过滤
+        - name: level
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/LogLevel'
+          description: 按日志级别过滤
+        - name: entry_source
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按条目 source 过滤
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按 message 内容过滤
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: 起始时间（RFC3339），按条目 timestamp 过滤
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: 结束时间（RFC3339）
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [timestamp_desc, timestamp_asc]
+            default: timestamp_desc
+          description: 排序；非法值返回 40001
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize50'
+      responses:
+        '200':
+          description: 日志条目分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PaginatedData'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/LogEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [logs]
+      operationId: deleteProjectLogs
+      summary: 清空项目全部日志
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/log-runs:
+    get:
+      tags: [logs]
+      operationId: listLogRuns
+      summary: 分页查询日志运行列表
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: run_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按运行 ID 过滤
+        - name: source
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 按运行 source 过滤
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: 起始时间（RFC3339），按运行创建时间过滤
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: 结束时间（RFC3339）
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize50'
+      responses:
+        '200':
+          description: 运行分页列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: '#/components/schemas/PaginatedData'
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: '#/components/schemas/LogRun'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/projects/{id}/log-runs/{run_id}:
+    get:
+      tags: [logs]
+      operationId: getLogRun
+      summary: 获取单次运行详情
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: 运行详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/LogRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 运行不存在或项目不存在（40409）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [logs]
+      operationId: deleteLogRun
+      summary: 删除单次运行及其条目
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 运行不存在或项目不存在（40409）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/projects/{id}/documents:
+    get:
+      tags: [documents]
+      operationId: listDocuments
+      summary: 列出项目全部文档（不分页）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 文档列表（data 为 {items, total}，非分页信封）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items, total]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/DocumentListItem'
+                          total:
+                            type: integer
+                            format: int64
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [documents]
+      operationId: createDocument
+      summary: 创建文档（body 上限 200000 rune；请求体 ≤1MB，超出裸 413）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDocumentRequest'
+      responses:
+        '200':
+          description: 创建的文档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Document'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/documents/{doc_id}:
+    get:
+      tags: [documents]
+      operationId: getDocument
+      summary: 获取文档详情
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DocId'
+      responses:
+        '200':
+          description: 文档详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Document'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [documents]
+      operationId: updateDocument
+      summary: 更新文档（至少传一个字段；请求体 ≤1MB，超出裸 413）
+      description: parent_id 三态：不传=不变，null=清除父级，字符串=设为父文档（须同项目且不形成环，深度 ≤64）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DocId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDocumentRequest'
+      responses:
+        '200':
+          description: 更新后的文档
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Document'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [documents]
+      operationId: deleteDocument
+      summary: 删除文档
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DocId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token，由 POST /api/auth/register、login 或 refresh 签发。仅 JWT 的端点对 `fsk_` API Key 返回 403（40301）。
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      description: "API Key，以 `fsk_` 开头（Web「设置 → API Key」创建）。与 jwtAuth 共用 `Authorization: Bearer` 头，服务端按 `fsk_` 前缀区分凭证类型。"
+
+  parameters:
+    ProjectId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 项目 ID（UUID）
+    ProjectOrKeyId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: API Key ID
+    IssueId:
+      name: iid
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Issue ID（UUID，非 INT-123/GH-123 短编号）
+    VersionId:
+      name: vid
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 版本 ID（UUID）
+    DocId:
+      name: doc_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 文档 ID（UUID）
+    RunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 日志运行 ID（客户端生成，项目内唯一）
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+      description: 页码，<1 按 1 处理
+    PageSize20:
+      name: page_size
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+      description: 每页条数；越界（<1 或 >100）回落为 20
+    PageSize50:
+      name: page_size
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 50
+        minimum: 1
+        maximum: 100
+      description: 每页条数；越界（<1 或 >100）回落为 50
+    QueryToken:
+      name: token
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
+
+  responses:
+    EmptySuccess:
+      description: 操作成功（data 为 null）
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/Envelope'
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    nullable: true
+    BadRequest:
+      description: 请求参数无效（40001-40099）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: 未提供或提供无效凭证（40100-40199）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: 资源不存在（40400-40499）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: 业务冲突（40900-40999）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    InternalError:
+      description: 服务器内部错误（50000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RequestEntityTooLarge:
+      description: 请求体超过大小限制（裸 413，无 JSON body）
+
+  schemas:
+    Envelope:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 业务错误码；0 表示成功
+        message:
+          type: string
+          description: 人类可读信息；成功时为 "success"
+        data:
+          description: 响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+      description: 统一 JSON 信封 {code, message, data}
+    ErrorEnvelope:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          description: 业务错误码（4xxxx 按区间映射 HTTP 状态：401xx→401，403xx→403，404xx→404，409xx→409，412xx→412，50xxx→500；502xx→502）
+        message:
+          type: string
+        data:
+          type: object
+          nullable: true
+          description: 恒为 null
+      description: 错误响应信封
+    PaginatedData:
+      type: object
+      required: [items, total, page, page_size]
+      properties:
+        items:
+          type: array
+          items: {}
+          description: 当前页条目（元素类型由组合 schema 收窄）
+        total:
+          type: integer
+          format: int64
+          description: 符合条件的总条数
+        page:
+          type: integer
+        page_size:
+          type: integer
+      description: 分页响应 data 形状；与 Envelope allOf 组合后 items 由兄弟 schema 收窄为具体类型
+
+    # ---- 枚举（x-go-type 指回 model 包类型；oapi-codegen 生成时复用现有类型） ----
+    IssueState:
+      type: string
+      enum: [open, closed]
+      x-go-type: model.IssueState
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    IssueSource:
+      type: string
+      enum: [github, internal]
+      x-go-type: model.IssueSource
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    IssueWorkflowStatus:
+      type: string
+      enum: ["", todo, in_progress, done]
+      description: 空串表示未设置（重置语义）
+      x-go-type: model.IssueWorkflowStatus
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    IssueSyncStatus:
+      type: string
+      enum: [idle, running, failed, completed]
+      x-go-type: model.IssueSyncStatus
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    IssueRecommendationPriority:
+      type: string
+      enum: [high, medium, low]
+      x-go-type: model.IssueRecommendationPriority
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    CollabAuthorKind:
+      type: string
+      enum: [user, agent]
+      x-go-type: model.CollabAuthorKind
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    LogLevel:
+      type: string
+      enum: [debug, info, warn, error, fatal]
+      x-go-type: model.LogLevel
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    VersionStatus:
+      type: string
+      enum: [pending, shipped]
+      x-go-type: model.VersionStatus
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    ShipStatus:
+      type: string
+      enum: ["", in_progress, failed, completed]
+      description: 空串表示尚未发货（idle）
+      x-go-type: model.ShipStatus
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    ShipStage:
+      type: string
+      enum: ["", precheck, create_tag, create_release, upload_assets, finalize]
+      description: 空串表示未进入发货流程
+      x-go-type: model.ShipStage
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    IssueShipHookStatus:
+      type: string
+      enum: [pending, running, fired]
+      x-go-type: model.IssueShipHookStatus
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+
+    # ---- auth ----
+    RegisterRequest:
+      type: object
+      required: [username, email, password]
+      properties:
+        username:
+          type: string
+          minLength: 2
+          maxLength: 50
+          description: 用户名，2-50 字符，全局唯一
+          x-oapi-codegen-extra-tags:
+            binding: required,min=2,max=50
+        email:
+          type: string
+          format: email
+          description: 邮箱，全局唯一
+          x-oapi-codegen-extra-tags:
+            binding: required,email
+        password:
+          type: string
+          minLength: 8
+          description: 密码，≥8 字符
+          x-oapi-codegen-extra-tags:
+            binding: required,min=8
+    LoginRequest:
+      type: object
+      required: [login, password]
+      properties:
+        login:
+          type: string
+          description: 用户名或邮箱
+          x-oapi-codegen-extra-tags:
+            binding: required
+        password:
+          type: string
+          x-oapi-codegen-extra-tags:
+            binding: required
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: fsr_ 开头的 refresh token
+          x-oapi-codegen-extra-tags:
+            binding: required
+    UpdateProfileRequest:
+      type: object
+      # 不带 binding tag：handler 用手写 updateMeInput 绑定（字段指针化后
+      # omitempty 对显式空串的跳过语义不等价），见 handler/auth.go。
+      properties:
+        username:
+          type: string
+          minLength: 2
+          maxLength: 50
+          description: 新用户名；与现值相同或省略则不变
+        email:
+          type: string
+          format: email
+          description: 新邮箱
+    UpdatePasswordRequest:
+      type: object
+      required: [old_password, new_password]
+      properties:
+        old_password:
+          type: string
+          x-oapi-codegen-extra-tags:
+            binding: required
+        new_password:
+          type: string
+          minLength: 8
+          x-oapi-codegen-extra-tags:
+            binding: required,min=8
+    AuthResponse:
+      type: object
+      required: [token, refresh_token, user]
+      properties:
+        token:
+          type: string
+          description: JWT access token（HS256，有效期见服务端 jwt.expire_hours，默认 24h）
+        refresh_token:
+          type: string
+          description: fsr_ 开头，有效期默认 7 天
+        user:
+          $ref: '#/components/schemas/User'
+    RefreshResponse:
+      type: object
+      required: [token, refresh_token]
+      properties:
+        token:
+          type: string
+        refresh_token:
+          type: string
+    User:
+      type: object
+      required: [id, username, email, avatar_url, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        avatar_url:
+          type: string
+          description: 形如 /api/avatars/:uid/:filename，未设置为空串
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ---- ai ----
+    AISettings:
+      type: object
+      required: [api_host, model, configured]
+      properties:
+        api_host:
+          type: string
+          description: 默认 https://api.minimaxi.com
+        model:
+          type: string
+          description: 默认 MiniMax-M2.5
+        configured:
+          type: boolean
+          description: 是否已配置 API Key（Key 本身永不回显）
+        updated_at:
+          type: string
+          format: date-time
+          description: omitempty，未配置时缺省
+    UpdateAISettingsRequest:
+      type: object
+      properties:
+        api_host:
+          type: string
+          description: 缺省回退默认 host；须为合法 URL
+        api_key:
+          type: string
+          description: 明文 Key（加密存储，不回显）；首次配置必填，已有配置时空串保留旧值
+        model:
+          type: string
+          description: 缺省回退默认模型
+    GenerateTitleResponse:
+      type: object
+      required: [titles]
+      properties:
+        titles:
+          type: array
+          items:
+            type: string
+          description: 候选标题（通常 3 个）
+    IssueChecklistSuggestions:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 12
+          items:
+            type: object
+            required: [title]
+            properties:
+              title:
+                type: string
+    IssuePromptItem:
+      type: object
+      required: [id, name, content]
+      properties:
+        id:
+          type: string
+          description: trim 后非空
+        name:
+          type: string
+          description: trim 后非空
+        content:
+          type: string
+          description: 提示词正文；trim 后非空
+        supports_batch:
+          type: boolean
+          description: 是否支持批量场景
+    IssuePrompts:
+      type: object
+      required: [prompts]
+      properties:
+        prompts:
+          type: array
+          nullable: true
+          items:
+            $ref: '#/components/schemas/IssuePromptItem'
+          description: 未配置时为 null，前端兜底默认提示词
+
+    # ---- api keys ----
+    CreateApiKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          x-oapi-codegen-extra-tags:
+            binding: required,min=1,max=100
+    ApiKey:
+      type: object
+      required: [id, user_id, name, key_prefix, key_hash, last_used_at, created_at]
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        name:
+          type: string
+        key_prefix:
+          type: string
+          description: Key 原文前 8 字符（不含 fsk_ 前缀），用于列表辨识
+        key_hash:
+          type: string
+          description: Key 的 SHA-256 哈希
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+    ApiKeyCreated:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          properties:
+            key:
+              type: string
+              description: 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文
+
+    # ---- projects ----
+    CreateProjectRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 项目名，当前用户下唯一
+          x-oapi-codegen-extra-tags:
+            binding: required,min=1,max=100
+        description:
+          type: string
+        repository_url:
+          type: string
+          description: GitHub 仓库链接（owner/repo 或完整 URL）；设置时须同时提供 github_token 或 source_project_id
+        github_token:
+          type: string
+          description: GitHub PAT（加密存储，不回显）
+        source_project_id:
+          type: string
+          description: 复用另一项目的 GitHub Token；优先于 github_token
+    UpdateProjectRequest:
+      type: object
+      # 不带 binding tag：handler 用手写 updateProjectInput 绑定，原因同
+      # UpdateProfileRequest（见 handler/project.go）。
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+        repository_url:
+          type: string
+          description: 同创建；变更仓库且项目无 token 时须提供 token
+        github_token:
+          type: string
+        source_project_id:
+          type: string
+    Project:
+      type: object
+      required: [id, name, description, github_owner, github_repo, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        github_owner:
+          type: string
+        github_repo:
+          type: string
+        latest_version:
+          $ref: '#/components/schemas/LatestVersion'
+        issue_sync:
+          $ref: '#/components/schemas/IssueSyncState'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    LatestVersion:
+      type: object
+      required: [id, version_number, status, created_at]
+      properties:
+        id:
+          type: string
+        version_number:
+          type: string
+        status:
+          $ref: '#/components/schemas/VersionStatus'
+        created_at:
+          type: string
+          format: date-time
+      description: omitempty，仅在列表项中出现
+    IssueSyncState:
+      type: object
+      required: [status, last_error]
+      properties:
+        status:
+          $ref: '#/components/schemas/IssueSyncStatus'
+        last_issue_updated_at:
+          type: string
+          format: date-time
+          description: omitempty
+        last_synced_at:
+          type: string
+          format: date-time
+          description: omitempty
+        last_successful_sync_at:
+          type: string
+          format: date-time
+          description: omitempty
+        last_error:
+          type: string
+      description: omitempty，项目 GitHub 同步状态
+    Branch:
+      type: object
+      required: [name, sha, default]
+      properties:
+        name:
+          type: string
+        sha:
+          type: string
+        default:
+          type: boolean
+
+    # ---- versions & ship ----
+    CreateVersionRequest:
+      type: object
+      required: [version_number]
+      properties:
+        version_number:
+          type: string
+          description: 版本号（同 tag 名），项目内唯一
+          x-oapi-codegen-extra-tags:
+            binding: required
+        release_notes:
+          type: string
+          description: Release 说明；发货前必填
+        target_commitish:
+          type: string
+          description: 目标分支；非空时校验为仓库已存在分支
+    UpdateVersionRequest:
+      type: object
+      properties:
+        version_number:
+          type: string
+          description: 仅 JWT 可改；API Key 携带返回 40301。非空且项目内唯一
+        release_notes:
+          type: string
+        target_commitish:
+          type: string
+          description: 非空时校验为仓库已存在分支；空串清除
+    Version:
+      type: object
+      required: [id, project_id, version_number, status, release_notes, target_commitish, github_release_url, error_log, ship_status, ship_stage, ship_message, ship_hooks_status, created_at, shipped_at]
+      properties:
+        id:
+          type: string
+        project_id:
+          type: string
+        version_number:
+          type: string
+        status:
+          $ref: '#/components/schemas/VersionStatus'
+        release_notes:
+          type: string
+        target_commitish:
+          type: string
+        github_release_url:
+          type: string
+          description: 发货成功后写入
+        error_log:
+          type: string
+        ship_status:
+          $ref: '#/components/schemas/ShipStatus'
+        ship_stage:
+          $ref: '#/components/schemas/ShipStage'
+        ship_message:
+          type: string
+        ship_hooks_status:
+          type: string
+          enum: [pending, completed, failed, incomplete]
+          description: 该次发货触发的 issue 钩子执行汇总状态
+        created_at:
+          type: string
+          format: date-time
+        shipped_at:
+          type: string
+          format: date-time
+          nullable: true
+        artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+          description: omitempty，无安装包时缺省
+    ShipCheckItem:
+      type: object
+      required: [key, label, ok]
+      properties:
+        key:
+          type: string
+          description: release_notes / artifacts / target_commitish / github_config
+        label:
+          type: string
+        ok:
+          type: boolean
+        detail:
+          type: string
+          description: omitempty
+    PendingIssueHook:
+      type: object
+      required: [issue_id, reference, title, comment, close, workflow_enabled, workflow_status]
+      properties:
+        issue_id:
+          type: string
+        reference:
+          type: string
+          description: INT-n 或 GH-n
+        title:
+          type: string
+        comment:
+          type: boolean
+        close:
+          type: boolean
+        workflow_enabled:
+          type: boolean
+        workflow_status:
+          type: string
+          description: 目标工作流状态，可能为 ""（重置）
+    ShipCheck:
+      type: object
+      required: [can_ship, items, pending_issue_hooks]
+      properties:
+        can_ship:
+          type: boolean
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShipCheckItem'
+        pending_issue_hooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/PendingIssueHook'
+    ShipResult:
+      type: object
+      required: [hook_total, hook_failed, hook_status]
+      properties:
+        hook_total:
+          type: integer
+        hook_failed:
+          type: integer
+        hook_status:
+          type: string
+          description: completed / failed / incomplete
+        hook_error:
+          type: string
+          description: omitempty
+
+    # ---- artifacts ----
+    Artifact:
+      type: object
+      required: [id, version_id, file_name, file_size, platform, uploaded_by, uploaded_at]
+      properties:
+        id:
+          type: string
+        version_id:
+          type: string
+        file_name:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        platform:
+          type: string
+        uploaded_by:
+          type: string
+          description: '用户名或 "API Key: <name>"'
+        uploaded_at:
+          type: string
+          format: date-time
+
+    # ---- issues ----
+    CreateIssueRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          description: trim 后须非空
+        body:
+          type: string
+          description: Markdown；引用 /api/issues/assets/{aid}/content 链接会在创建时挂载草稿附件
+        workflow_status:
+          $ref: '#/components/schemas/IssueWorkflowStatus'
+        source:
+          $ref: '#/components/schemas/IssueSource'
+          description: 默认 internal；github 仅 JWT 可用，API Key 传 github 返回 40301；其他值按 internal 处理
+    UpdateIssueRequest:
+      type: object
+      description: 至少传一个字段；state_reason 必须随 state 同传
+      properties:
+        title:
+          type: string
+          description: trim 后须非空
+        body:
+          type: string
+        state:
+          $ref: '#/components/schemas/IssueState'
+          description: 仅 JWT；API Key 携带返回 40301
+        state_reason:
+          type: string
+          enum: [completed, not_planned, reopened]
+          description: 仅 JWT；closed→completed|not_planned，open→reopened；置 open 且 reason 为空会清空
+        labels:
+          type: array
+          items:
+            type: string
+          description: 标签名数组；internal issue 须为已存在仓库标签，GitHub issue 仅做非空/去重校验
+    IssueChecklistItemInput:
+      type: object
+      required: [title]
+      properties:
+        id:
+          type: string
+          description: 缺省时服务端生成；传旧 id 复用条目
+        title:
+          type: string
+          description: trim 后须非空
+        is_completed:
+          type: boolean
+    UpsertShipHookRequest:
+      type: object
+      description: 三类动作至少启用一个，否则 40001
+      properties:
+        comment_body:
+          type: string
+          description: 传入即启用评论动作；trim 后 1-4000 rune；支持 {version}、{release_url} 占位符
+        close:
+          type: boolean
+          description: true 时发货后关闭 Issue（state_reason=completed）
+        workflow_status:
+          $ref: '#/components/schemas/IssueWorkflowStatus'
+          description: 传入即启用工作流动作（含 "" 重置）
+    UpsertIssueRecommendationRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: 推荐理由，trim 后 1-500 rune
+        priority:
+          $ref: '#/components/schemas/IssueRecommendationPriority'
+        dependencies:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            format: uuid
+          description: 前置依赖 Issue UUID 数组，整组替换，不含自身；重复自动去重（保序）
+    UpsertIssueCollabRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          description: Markdown；trim 后 1-8000 rune；重复 PUT 覆盖
+    IssueBatchFailure:
+      type: object
+      required: [id, error]
+      properties:
+        id:
+          type: string
+          description: Issue ID
+        reference:
+          type: string
+          description: omitempty；INT-n 或 GH-n
+        error:
+          type: string
+    IssueBatchResult:
+      type: object
+      required: [total, succeeded, failed, failures, elapsed_ms]
+      properties:
+        total:
+          type: integer
+          format: int64
+        succeeded:
+          type: integer
+        failed:
+          type: integer
+        failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssueBatchFailure'
+          description: 最多返回前 50 条失败明细
+        elapsed_ms:
+          type: integer
+          format: int64
+      description: 批量操作结果，与 service.BatchCloseDoneIssuesResponse 同形；batch-close 与批量 internal-meta 共用
+    IssueActor:
+      type: object
+      required: [login, avatar_url]
+      properties:
+        login:
+          type: string
+        avatar_url:
+          type: string
+          description: GitHub 头像经媒体代理改写；internal 用户为空串
+    IssueLabel:
+      type: object
+      required: [name, color, description]
+      properties:
+        name:
+          type: string
+        color:
+          type: string
+          description: "十六进制颜色（不带 # 前缀）"
+        description:
+          type: string
+    IssueMilestone:
+      type: object
+      required: [number, title, state, description]
+      properties:
+        number:
+          type: integer
+        title:
+          type: string
+        state:
+          type: string
+        description:
+          type: string
+    IssueReactionSummary:
+      type: object
+      required: [total_count, "+1", "-1", laugh, hooray, confused, heart, rocket, eyes]
+      properties:
+        total_count:
+          type: integer
+        "+1":
+          type: integer
+        "-1":
+          type: integer
+        laugh:
+          type: integer
+        hooray:
+          type: integer
+        confused:
+          type: integer
+        heart:
+          type: integer
+        rocket:
+          type: integer
+        eyes:
+          type: integer
+    IssueGitHubMeta:
+      type: object
+      required: [github_issue_id, github_node_id, number, html_url, author_association, assignees, labels, reactions, comments_count, locked, active_lock_reason, synced_at]
+      properties:
+        github_issue_id:
+          type: integer
+          format: int64
+        github_node_id:
+          type: string
+        number:
+          type: integer
+          description: GitHub issue 编号（reference 的 GH-n 来源）
+        html_url:
+          type: string
+        author_association:
+          type: string
+        assignees:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssueActor'
+        labels:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssueLabel'
+        milestone:
+          $ref: '#/components/schemas/IssueMilestone'
+        reactions:
+          $ref: '#/components/schemas/IssueReactionSummary'
+        comments_count:
+          type: integer
+        locked:
+          type: boolean
+        active_lock_reason:
+          type: string
+        synced_at:
+          type: string
+          format: date-time
+      description: omitempty，仅 github 来源 Issue 出现
+    IssueChecklistItem:
+      type: object
+      required: [id, title, is_completed, sort_order]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        is_completed:
+          type: boolean
+        sort_order:
+          type: integer
+    IssueInternalMeta:
+      type: object
+      required: [workflow_status, progress_percent, checklist_total, checklist_done]
+      properties:
+        workflow_status:
+          $ref: '#/components/schemas/IssueWorkflowStatus'
+        progress_percent:
+          type: integer
+          nullable: true
+          description: checklist 完成度 0-100；无 checklist 时为 null
+        checklist_total:
+          type: integer
+        checklist_done:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+          description: omitempty；首次进入 in_progress/done 时写入
+        completed_at:
+          type: string
+          format: date-time
+          description: omitempty；首次进入 done 时写入
+        checklist_updated_at:
+          type: string
+          format: date-time
+          description: omitempty；checklist 非空时的最近替换时间
+        updated_at:
+          type: string
+          format: date-time
+          description: omitempty
+        checklist:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssueChecklistItem'
+          description: omitempty；仅 Issue 详情/PUT checklist 响应携带
+        labels:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssueLabel'
+          description: omitempty；internal issue 的标签
+      description: omitempty；无 meta 且无 checklist 时整个字段缺省
+    IssueShipHookActionResult:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        skipped:
+          type: boolean
+          description: omitempty
+        error:
+          type: string
+          description: omitempty
+    IssueShipHookResults:
+      type: object
+      properties:
+        comment:
+          $ref: '#/components/schemas/IssueShipHookActionResult'
+        close:
+          $ref: '#/components/schemas/IssueShipHookActionResult'
+        workflow_status:
+          $ref: '#/components/schemas/IssueShipHookActionResult'
+      description: omitempty；fired 后按启用的动作出现
+    IssueShipHook:
+      type: object
+      required: [status, comment_enabled, close_enabled, workflow_enabled, workflow_status]
+      properties:
+        status:
+          $ref: '#/components/schemas/IssueShipHookStatus'
+        comment_enabled:
+          type: boolean
+        comment_body:
+          type: string
+          description: omitempty；fired 后为渲染后正文
+        close_enabled:
+          type: boolean
+        workflow_enabled:
+          type: boolean
+        workflow_status:
+          type: string
+          description: 目标工作流状态；workflow_enabled=true 且为 "" 表示重置
+        version_id:
+          type: string
+          description: omitempty；fired 时的触发版本
+        version_number:
+          type: string
+          description: omitempty
+        release_url:
+          type: string
+          description: omitempty
+        fired_at:
+          type: string
+          format: date-time
+          description: omitempty
+        results:
+          $ref: '#/components/schemas/IssueShipHookResults'
+      description: omitempty；仅 Issue 详情/列表项中出现，未预约时缺省
+    IssueCollabDoc:
+      type: object
+      required: [issue_id, body, author, created_at, updated_at]
+      properties:
+        issue_id:
+          type: string
+        body:
+          type: string
+        author:
+          type: object
+          required: [kind, login, avatar_url]
+          properties:
+            kind:
+              $ref: '#/components/schemas/CollabAuthorKind'
+            login:
+              type: string
+              description: agent 时为 "代理"；用户不存在时为 "未知用户"
+            avatar_url:
+              type: string
+              description: 仅 user 作者可能有值，否则空串
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    IssueCollabArea:
+      type: object
+      required: [consensus, summary]
+      properties:
+        consensus:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/IssueCollabDoc'
+          description: 未产出为 null
+        summary:
+          type: object
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/IssueCollabDoc'
+          description: 未产出为 null
+    Issue:
+      type: object
+      required: [id, project_id, source, sequence_number, reference, state, state_reason, title, body, body_html, author, created_at, updated_at, closed_at, unread_comments_count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        project_id:
+          type: string
+        source:
+          $ref: '#/components/schemas/IssueSource'
+        sequence_number:
+          type: integer
+          description: 项目内自增序号（reference 的 INT-n 来源）
+        reference:
+          type: string
+          description: 短编号；github 为 GH-<number>，internal 为 INT-<sequence_number>
+        state:
+          $ref: '#/components/schemas/IssueState'
+        state_reason:
+          type: string
+          description: completed / not_planned / reopened 或空串
+        title:
+          type: string
+        body:
+          type: string
+        body_html:
+          type: string
+          description: github 来源为远端渲染 HTML（媒体链接经代理改写）；internal 为空串
+        author:
+          $ref: '#/components/schemas/IssueActor'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+        unread_comments_count:
+          type: integer
+          description: 未读评论数；仅列表响应填充（internal issue 恒为 0），详情响应恒为 0
+        internal_meta:
+          $ref: '#/components/schemas/IssueInternalMeta'
+        ship_hook:
+          $ref: '#/components/schemas/IssueShipHook'
+        github:
+          $ref: '#/components/schemas/IssueGitHubMeta'
+        collab:
+          $ref: '#/components/schemas/IssueCollabArea'
+          description: omitempty；仅 Issue 详情响应携带，与 GET /collab 的 data 同形；列表项不出现
+    IssueComment:
+      type: object
+      required: [id, issue_id, source, github_comment_id, github_node_id, body, body_html, html_url, author, author_association, reactions, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        issue_id:
+          type: string
+        source:
+          $ref: '#/components/schemas/IssueSource'
+        github_comment_id:
+          type: integer
+          format: int64
+          description: internal 评论为本地合成的负值序号
+        github_node_id:
+          type: string
+        body:
+          type: string
+        body_html:
+          type: string
+        html_url:
+          type: string
+        author:
+          $ref: '#/components/schemas/IssueActor'
+        author_association:
+          type: string
+        reactions:
+          $ref: '#/components/schemas/IssueReactionSummary'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    IssueTimelineEvent:
+      type: object
+      required: [id, issue_id, event_key, event_type, github_event_id, actor, body, summary, payload, created_at]
+      properties:
+        id:
+          type: string
+        issue_id:
+          type: string
+        event_key:
+          type: string
+        event_type:
+          type: string
+          description: GitHub 事件类型（labeled/assigned/closed/...）
+        github_event_id:
+          type: integer
+          format: int64
+        actor:
+          $ref: '#/components/schemas/IssueActor'
+        body:
+          type: string
+        summary:
+          type: string
+          description: 中文化摘要
+        payload:
+          type: object
+          description: 原始事件 JSON
+        created_at:
+          type: string
+          format: date-time
+    IssueSyncResult:
+      type: object
+      required: [project_id, synced_issue_count, synced_comment_count, synced_timeline_count, started_at, completed_at]
+      properties:
+        project_id:
+          type: string
+        synced_issue_count:
+          type: integer
+        synced_comment_count:
+          type: integer
+        synced_timeline_count:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        last_issue_updated_at:
+          type: string
+          format: date-time
+          description: omitempty；本次增量水位
+    IssueFilterOptions:
+      type: object
+      required: [labels, assignees, milestones]
+      properties:
+        labels:
+          type: array
+          items:
+            type: string
+        assignees:
+          type: array
+          items:
+            type: string
+        milestones:
+          type: array
+          items:
+            type: string
+    IssueAsset:
+      type: object
+      required: [id, issue_id, file_name, mime_type, file_size, content_url, markdown, created_at]
+      properties:
+        id:
+          type: string
+        issue_id:
+          type: string
+          description: 草稿附件为空串
+        file_name:
+          type: string
+        mime_type:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        content_url:
+          type: string
+          description: /api/issues/assets/{aid}/content
+        markdown:
+          type: string
+          description: 可直接粘贴的 ![alt](content_url) 片段
+        created_at:
+          type: string
+          format: date-time
+
+    # ---- recommendations ----
+    RecommendationIssueSummary:
+      type: object
+      required: [id, project_id, project_name, source, sequence_number, reference, title, state, workflow_status]
+      properties:
+        id:
+          type: string
+        project_id:
+          type: string
+        project_name:
+          type: string
+        source:
+          $ref: '#/components/schemas/IssueSource'
+        sequence_number:
+          type: integer
+        reference:
+          type: string
+        title:
+          type: string
+        state:
+          $ref: '#/components/schemas/IssueState'
+        workflow_status:
+          $ref: '#/components/schemas/IssueWorkflowStatus'
+    RecommendationDependency:
+      type: object
+      required: [issue_id, title, state, workflow_status, project_id, sequence_number, reference]
+      properties:
+        issue_id:
+          type: string
+        title:
+          type: string
+        state:
+          $ref: '#/components/schemas/IssueState'
+        workflow_status:
+          $ref: '#/components/schemas/IssueWorkflowStatus'
+        project_id:
+          type: string
+        sequence_number:
+          type: integer
+        reference:
+          type: string
+    IssueRecommendation:
+      type: object
+      required: [issue, reason, priority, created_by, created_at, updated_at, dependencies]
+      properties:
+        issue:
+          $ref: '#/components/schemas/RecommendationIssueSummary'
+        reason:
+          type: string
+        priority:
+          $ref: '#/components/schemas/IssueRecommendationPriority'
+        created_by:
+          type: string
+          description: 提交者 API Key 名称
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        dependencies:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecommendationDependency'
+
+    # ---- dashboard ----
+    DashboardProjectOpenIssuePoint:
+      type: object
+      required: [project_id, project_name, open_issue_count]
+      properties:
+        project_id:
+          type: string
+        project_name:
+          type: string
+        open_issue_count:
+          type: integer
+    DashboardDailyResolvedProjectPoint:
+      type: object
+      required: [project_id, project_name, count]
+      properties:
+        project_id:
+          type: string
+        project_name:
+          type: string
+        count:
+          type: integer
+    DashboardDailyResolvedPoint:
+      type: object
+      required: [date, resolved_count, projects]
+      properties:
+        date:
+          type: string
+          description: YYYY-MM-DD
+        resolved_count:
+          type: integer
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardDailyResolvedProjectPoint'
+          description: 当日无数据的项目不出现（可为 null/空）
+    DashboardOverview:
+      type: object
+      required: [open_issues_by_project, daily_resolved]
+      properties:
+        open_issues_by_project:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardProjectOpenIssuePoint'
+        daily_resolved:
+          type: array
+          items:
+            $ref: '#/components/schemas/DashboardDailyResolvedPoint'
+          description: 固定近 30 天（含今天），逐日排列
+
+    # ---- logs ----
+    LogEntryInput:
+      type: object
+      required: [timestamp, level, message]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          description: 必填，不能为零值时间
+        level:
+          $ref: '#/components/schemas/LogLevel'
+        source:
+          type: string
+          maxLength: 128
+          description: ≤128 字节
+        message:
+          type: string
+          description: 1-4000 字节
+        metadata:
+          type: object
+          description: 可选 JSON 对象，序列化后 ≤4KB
+    UploadLogsRequest:
+      type: object
+      required: [run_id, chunk_id, entries]
+      properties:
+        run_id:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,128}$'
+          description: 客户端生成的运行 ID，项目内唯一
+        chunk_id:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,128}$'
+          description: 分片 ID；同 (run_id, chunk_id) 重试幂等，不要复用 chunk_id 传不同内容
+        source:
+          type: string
+          maxLength: 128
+          description: ≤128 字节；仅首次创建运行时写入
+        description:
+          type: string
+          maxLength: 500
+          description: ≤500 字节；仅首次创建运行时写入
+        entries:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/LogEntryInput'
+    UploadLogsResult:
+      type: object
+      required: [run_id, source, description, entry_count, first_entry_at, last_entry_at, accepted_count, duplicate]
+      properties:
+        run_id:
+          type: string
+        source:
+          type: string
+        description:
+          type: string
+        entry_count:
+          type: integer
+          description: 该运行累计条目数
+        first_entry_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_entry_at:
+          type: string
+          format: date-time
+          nullable: true
+        accepted_count:
+          type: integer
+          description: 本次实际写入条数；重复 chunk 为 0
+        duplicate:
+          type: boolean
+          description: (run_id, chunk_id) 重复时为 true，本次不插入
+    LogEntry:
+      type: object
+      required: [id, run_id, timestamp, level, source, message, created_at]
+      properties:
+        id:
+          type: string
+        run_id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        level:
+          $ref: '#/components/schemas/LogLevel'
+        source:
+          type: string
+        message:
+          type: string
+        metadata:
+          type: string
+          description: omitempty；JSON 文本（非对象）
+        created_at:
+          type: string
+          format: date-time
+    LogRun:
+      type: object
+      required: [project_id, run_id, source, description, entry_count, first_entry_at, last_entry_at, created_at, updated_at]
+      properties:
+        project_id:
+          type: string
+        run_id:
+          type: string
+        source:
+          type: string
+        description:
+          type: string
+        entry_count:
+          type: integer
+        first_entry_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_entry_at:
+          type: string
+          format: date-time
+          nullable: true
+        uploader_api_key_id:
+          type: string
+          description: omitempty
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ---- documents ----
+    CreateDocumentRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+          description: trim 后 1-200 rune
+        body:
+          type: string
+          description: ≤200000 rune
+        parent_id:
+          type: string
+          description: 父文档 ID；须同项目，深度 ≤64
+    UpdateDocumentRequest:
+      type: object
+      description: title/body/parent_id 至少传一个
+      properties:
+        title:
+          type: string
+          description: trim 后 1-200 rune
+        body:
+          type: string
+          description: ≤200000 rune
+        parent_id:
+          type: string
+          nullable: true
+          description: 三态：不传=不变；null=清除父级；字符串=设为父文档（须同项目且无环）
+    DocumentListItem:
+      type: object
+      required: [id, project_id, parent_id, title, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        project_id:
+          type: string
+        parent_id:
+          type: string
+          nullable: true
+        title:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Document:
+      allOf:
+        - $ref: '#/components/schemas/DocumentListItem'
+        - type: object
+          required: [body]
+          properties:
+            body:
+              type: string

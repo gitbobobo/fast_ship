@@ -101,7 +101,7 @@ func (h *VersionHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *VersionHandler) Ship(c *gin.Context) {

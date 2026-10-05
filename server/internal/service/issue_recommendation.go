@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -38,48 +39,6 @@ func NewIssueRecommendationService(
 	}
 }
 
-type UpsertIssueRecommendationRequest struct {
-	Reason       string
-	Priority     model.IssueRecommendationPriority
-	Dependencies []string
-}
-
-type RecommendationIssueSummary struct {
-	ID             string                    `json:"id"`
-	ProjectID      string                    `json:"project_id"`
-	ProjectName    string                    `json:"project_name"`
-	Source         model.IssueSource         `json:"source"`
-	SequenceNumber int                       `json:"sequence_number"`
-	Reference      string                    `json:"reference"`
-	Title          string                    `json:"title"`
-	State          model.IssueState          `json:"state"`
-	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
-}
-
-type RecommendationDependencyResponse struct {
-	IssueID        string                    `json:"issue_id"`
-	Title          string                    `json:"title"`
-	State          model.IssueState          `json:"state"`
-	WorkflowStatus model.IssueWorkflowStatus `json:"workflow_status"`
-	ProjectID      string                    `json:"project_id"`
-	SequenceNumber int                       `json:"sequence_number"`
-	Reference      string                    `json:"reference"`
-}
-
-type IssueRecommendationResponse struct {
-	Issue        RecommendationIssueSummary         `json:"issue"`
-	Reason       string                             `json:"reason"`
-	Priority     model.IssueRecommendationPriority  `json:"priority"`
-	CreatedBy    string                             `json:"created_by"`
-	CreatedAt    string                             `json:"created_at"`
-	UpdatedAt    string                             `json:"updated_at"`
-	Dependencies []RecommendationDependencyResponse `json:"dependencies"`
-}
-
-type IssueRecommendationListResponse struct {
-	Items []IssueRecommendationResponse `json:"items"`
-}
-
 // Upsert 写入或整体覆盖一个 issue 的推荐（reason/priority/dependencies/created_by），保留原 created_at。
 func (s *IssueRecommendationService) Upsert(issueID, userID, createdBy string, req UpsertIssueRecommendationRequest) (*IssueRecommendationResponse, error) {
 	reason := strings.TrimSpace(req.Reason)
@@ -87,7 +46,7 @@ func (s *IssueRecommendationService) Upsert(issueID, userID, createdBy string, r
 		return nil, errs.ErrInvalidParams
 	}
 
-	priority := req.Priority
+	priority := api.Deref(req.Priority)
 	if priority == "" {
 		priority = model.IssueRecommendationPriorityMedium
 	} else if !model.IsValidIssueRecommendationPriority(priority) {
@@ -336,8 +295,8 @@ func toRecommendationResponse(
 ) IssueRecommendationResponse {
 	return IssueRecommendationResponse{
 		Issue: RecommendationIssueSummary{
-			ID:             issue.ID,
-			ProjectID:      issue.ProjectID,
+			Id:             issue.ID,
+			ProjectId:      issue.ProjectID,
 			ProjectName:    projectName,
 			Source:         issue.Source,
 			SequenceNumber: issue.SequenceNumber,
@@ -363,11 +322,11 @@ func buildDependencyResponses(deps []model.RecommendationDependency, depIssues m
 			continue
 		}
 		items = append(items, RecommendationDependencyResponse{
-			IssueID:        dep.DepIssueID,
+			IssueId:        dep.DepIssueID,
 			Title:          issue.Title,
 			State:          issue.State,
 			WorkflowStatus: workflowStatusOf(internalMetaOrNil(depMetas, dep.DepIssueID)),
-			ProjectID:      issue.ProjectID,
+			ProjectId:      issue.ProjectID,
 			SequenceNumber: issue.SequenceNumber,
 			Reference:      buildIssueReference(issue),
 		})

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
@@ -36,18 +37,6 @@ func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *r
 	}
 }
 
-type CreateVersionRequest struct {
-	VersionNumber   string `json:"version_number" binding:"required"`
-	ReleaseNotes    string `json:"release_notes"`
-	TargetCommitish string `json:"target_commitish"`
-}
-
-type UpdateVersionRequest struct {
-	VersionNumber   *string `json:"version_number"`
-	ReleaseNotes    *string `json:"release_notes"`
-	TargetCommitish *string `json:"target_commitish"`
-}
-
 func (s *VersionService) Create(ctx context.Context, projectID, userID string, req *CreateVersionRequest) (*model.Version, error) {
 	// 校验项目归属
 	project, err := s.projectRepo.FindByID(projectID, userID)
@@ -65,8 +54,9 @@ func (s *VersionService) Create(ctx context.Context, projectID, userID string, r
 	if exists {
 		return nil, errs.ErrVersionNumberExists
 	}
-	if req.TargetCommitish != "" {
-		if err := s.ensureTargetBranchExists(ctx, project, req.TargetCommitish); err != nil {
+	targetCommitish := api.Deref(req.TargetCommitish)
+	if targetCommitish != "" {
+		if err := s.ensureTargetBranchExists(ctx, project, targetCommitish); err != nil {
 			return nil, err
 		}
 	}
@@ -76,8 +66,8 @@ func (s *VersionService) Create(ctx context.Context, projectID, userID string, r
 		ProjectID:       projectID,
 		VersionNumber:   req.VersionNumber,
 		Status:          model.VersionStatusPending,
-		ReleaseNotes:    req.ReleaseNotes,
-		TargetCommitish: req.TargetCommitish,
+		ReleaseNotes:    api.Deref(req.ReleaseNotes),
+		TargetCommitish: targetCommitish,
 	}
 
 	if err := s.versionRepo.Create(version); err != nil {

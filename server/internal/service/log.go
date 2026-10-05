@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -34,57 +35,8 @@ func NewLogService(logRepo *repository.LogRepository, projectRepo *repository.Pr
 	}
 }
 
-type LogEntryInput struct {
-	Timestamp time.Time              `json:"timestamp"`
-	Level     string                 `json:"level"`
-	Source    string                 `json:"source"`
-	Message   string                 `json:"message"`
-	Metadata  map[string]interface{} `json:"metadata"`
-}
-
-type UploadLogsRequest struct {
-	RunID       string          `json:"run_id"`
-	ChunkID     string          `json:"chunk_id"`
-	Source      string          `json:"source"`
-	Description string          `json:"description"`
-	Entries     []LogEntryInput `json:"entries"`
-}
-
-type UploadLogsResult struct {
-	RunID         string     `json:"run_id"`
-	Source        string     `json:"source"`
-	Description   string     `json:"description"`
-	EntryCount    int        `json:"entry_count"`
-	FirstEntryAt  *time.Time `json:"first_entry_at"`
-	LastEntryAt   *time.Time `json:"last_entry_at"`
-	AcceptedCount int        `json:"accepted_count"`
-	Duplicate     bool       `json:"duplicate"`
-}
-
-type LogEntryItem struct {
-	ID        string    `json:"id"`
-	RunID     string    `json:"run_id"`
-	Timestamp time.Time `json:"timestamp"`
-	Level     string    `json:"level"`
-	Source    string    `json:"source"`
-	Message   string    `json:"message"`
-	Metadata  string    `json:"metadata,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type LogRunItem struct {
-	ProjectID        string     `json:"project_id"`
-	RunID            string     `json:"run_id"`
-	Source           string     `json:"source"`
-	Description      string     `json:"description"`
-	EntryCount       int        `json:"entry_count"`
-	FirstEntryAt     *time.Time `json:"first_entry_at"`
-	LastEntryAt      *time.Time `json:"last_entry_at"`
-	UploaderAPIKeyID *string    `json:"uploader_api_key_id,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-}
-
+// ListLogEntriesRequest/ListLogRunsRequest 是 handler 解析 query 后的内部过滤条件，
+// 不是 API 载荷类型，保留手写。
 type ListLogEntriesRequest struct {
 	RunID       string
 	Level       string
@@ -121,32 +73,36 @@ func (s *LogService) UploadLogs(projectID, userID string, uploaderAPIKeyID *stri
 		return nil, err
 	}
 
-	if !logRunIDRegex.MatchString(req.RunID) || !logRunIDRegex.MatchString(req.ChunkID) {
+	source := api.Deref(req.Source)
+	description := api.Deref(req.Description)
+	if !logRunIDRegex.MatchString(req.RunId) || !logRunIDRegex.MatchString(req.ChunkId) {
 		return nil, errs.ErrInvalidParams
 	}
 	if len(req.Entries) == 0 || len(req.Entries) > maxLogEntriesPerUpload {
 		return nil, errs.ErrInvalidParams
 	}
-	if len(req.Source) > maxLogSourceBytes {
+	if len(source) > maxLogSourceBytes {
 		return nil, errs.ErrInvalidParams
 	}
-	if len(req.Description) > maxLogDescriptionBytes {
+	if len(description) > maxLogDescriptionBytes {
 		return nil, errs.ErrInvalidParams
 	}
 
 	entries := make([]model.LogEntry, 0, len(req.Entries))
 	now := time.Now()
 	for _, item := range req.Entries {
-		if !model.IsValidLogLevel(item.Level) {
+		if !model.IsValidLogLevel(string(item.Level)) {
 			return nil, errs.ErrInvalidParams
 		}
 		if item.Message == "" || len(item.Message) > maxLogMessageBytes {
 			return nil, errs.ErrInvalidParams
 		}
-		if len(item.Source) > maxLogSourceBytes {
+		if len(api.Deref(item.Source)) > maxLogSourceBytes {
 			return nil, errs.ErrInvalidParams
 		}
-		if item.Timestamp.IsZero() {
+		// 生成类型以 string 承载 timestamp，此处按旧绑定语义解析 RFC3339
+		ts, perr := time.Parse(time.RFC3339Nano, item.Timestamp)
+		if perr != nil || ts.IsZero() {
 			return nil, errs.ErrInvalidParams
 		}
 
@@ -160,16 +116,16 @@ func (s *LogService) UploadLogs(projectID, userID string, uploaderAPIKeyID *stri
 		}
 
 		entries = append(entries, model.LogEntry{
-			Timestamp: item.Timestamp,
-			Level:     item.Level,
-			Source:    item.Source,
+			Timestamp: ts,
+			Level:     string(item.Level),
+			Source:    api.Deref(item.Source),
 			Message:   item.Message,
 			Metadata:  metadata,
 			CreatedAt: now,
 		})
 	}
 
-	txResult, err := s.logRepo.UploadRunTx(projectID, req.RunID, req.ChunkID, req.Source, req.Description, uploaderAPIKeyID, entries)
+	txResult, err := s.logRepo.UploadRunTx(projectID, req.RunId, req.ChunkId, source, description, uploaderAPIKeyID, entries)
 	if err != nil {
 		if errors.Is(err, repository.ErrLogRunEntryLimitExceeded) {
 			return nil, errs.ErrLogRunEntryLimitExceeded
@@ -179,12 +135,12 @@ func (s *LogService) UploadLogs(projectID, userID string, uploaderAPIKeyID *stri
 
 	run := txResult.Run
 	return &UploadLogsResult{
-		RunID:         run.RunID,
+		RunId:         run.RunID,
 		Source:        run.Source,
 		Description:   run.Description,
 		EntryCount:    run.EntryCount,
-		FirstEntryAt:  run.FirstEntryAt,
-		LastEntryAt:   run.LastEntryAt,
+		FirstEntryAt:  api.JSONTimePtr(run.FirstEntryAt),
+		LastEntryAt:   api.JSONTimePtr(run.LastEntryAt),
 		AcceptedCount: txResult.AcceptedCount,
 		Duplicate:     txResult.Duplicate,
 	}, nil
@@ -214,14 +170,14 @@ func (s *LogService) ListEntries(projectID, userID string, req ListLogEntriesReq
 	items := make([]LogEntryItem, 0, len(entries))
 	for _, entry := range entries {
 		items = append(items, LogEntryItem{
-			ID:        entry.ID,
-			RunID:     entry.LogRun.RunID,
-			Timestamp: entry.Timestamp,
-			Level:     entry.Level,
+			Id:        entry.ID,
+			RunId:     entry.LogRun.RunID,
+			Timestamp: api.JSONTime(entry.Timestamp),
+			Level:     model.LogLevel(entry.Level),
 			Source:    entry.Source,
 			Message:   entry.Message,
-			Metadata:  entry.Metadata,
-			CreatedAt: entry.CreatedAt,
+			Metadata:  api.NonEmpty(entry.Metadata),
+			CreatedAt: api.JSONTime(entry.CreatedAt),
 		})
 	}
 	return items, total, nil
@@ -274,16 +230,16 @@ func (s *LogService) GetRun(projectID, runID, userID string) (*LogRunItem, error
 
 func toLogRunItem(run model.LogRun) LogRunItem {
 	return LogRunItem{
-		ProjectID:        run.ProjectID,
-		RunID:            run.RunID,
+		ProjectId:        run.ProjectID,
+		RunId:            run.RunID,
 		Source:           run.Source,
 		Description:      run.Description,
 		EntryCount:       run.EntryCount,
-		FirstEntryAt:     run.FirstEntryAt,
-		LastEntryAt:      run.LastEntryAt,
-		UploaderAPIKeyID: run.UploaderAPIKeyID,
-		CreatedAt:        run.CreatedAt,
-		UpdatedAt:        run.UpdatedAt,
+		FirstEntryAt:     api.JSONTimePtr(run.FirstEntryAt),
+		LastEntryAt:      api.JSONTimePtr(run.LastEntryAt),
+		UploaderApiKeyId: run.UploaderAPIKeyID,
+		CreatedAt:        api.JSONTime(run.CreatedAt),
+		UpdatedAt:        api.JSONTime(run.UpdatedAt),
 	}
 }
 

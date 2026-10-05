@@ -58,7 +58,7 @@ func (h *ArtifactHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	response.Success(c, nil)
+	response.SuccessEmpty(c)
 }
 
 func (h *ArtifactHandler) Download(c *gin.Context) {
