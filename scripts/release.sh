@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
 VERSION_FILE="${ROOT_DIR}/VERSION"
-SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+SEMVER_RE='^(0|[1-9][0-9]{0,9})\.(0|[1-9][0-9]{0,9})\.(0|[1-9][0-9]{0,9})$'
 
 err() {
   printf '错误：%s\n' "$1" >&2
@@ -77,7 +77,7 @@ while IFS= read -r TAG_VER; do
   if [[ -z "${LATEST_TAG}" ]] || version_gt "${TAG_VER}" "${LATEST_TAG}"; then
     LATEST_TAG="${TAG_VER}"
   fi
-done <<< "$(printf '%s\n' "${ALL_TAGS}" | grep -v '\^{}' | cut -f2 | sed 's|^refs/tags/||; s|^v||' | grep -E "${SEMVER_RE}" || true)"
+done <<< "$(printf '%s\n' "${ALL_TAGS}" | grep -v '\^{}' | cut -f2 | sed -n 's|^refs/tags/v\(.*\)$|\1|p' | grep -E "${SEMVER_RE}" || true)"
 
 if [[ -n "${LATEST_TAG}" ]]; then
   version_gt "${VERSION}" "${LATEST_TAG}" || err "目标版本 ${VERSION} 不高于现有最高 tag v${LATEST_TAG}"
@@ -86,14 +86,15 @@ fi
 PREV_HEAD="$(git rev-parse HEAD)"
 printf '发版：%s -> %s\n' "${CURRENT}" "${VERSION}"
 
-# 写 VERSION 到推送之间任一失败自动回滚本地改动（远程由 --atomic 保证无半成品）
+# 写 VERSION 到推送之间任一失败或中断自动回滚本地改动（远程由 --atomic 保证无半成品）
 trap release_rollback ERR
+trap 'release_rollback; exit 130' INT TERM
 printf '%s\n' "${VERSION}" > "${VERSION_FILE}"
 git add VERSION
 git commit -m "chore: bump version to ${VERSION}"
 git tag "${TAG_NAME}"
 git push --atomic origin main "refs/tags/${TAG_NAME}"
-trap - ERR
+trap - ERR INT TERM
 
 printf '已推送 main 与 tag %s\n' "${TAG_NAME}"
 
