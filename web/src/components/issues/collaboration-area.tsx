@@ -75,6 +75,8 @@ const SECTION_SUCCESS_TOAST: Record<CollabDeleteSection, string> = {
 
 interface CollaborationAreaProps {
   issueId: string;
+  /** 只读时隐藏全部删除入口（含「清空协作区」与各节删除按钮），用于推荐弹框等不能再弹确认框的场景。 */
+  readOnly?: boolean;
 }
 
 function CollabActorBadge({ actor }: { actor: IssueCollabActor }) {
@@ -177,10 +179,12 @@ function CollabDocSection({
   issueId,
   tab,
   doc,
+  readOnly,
 }: {
   issueId: string;
   tab: TabConfig;
   doc: IssueCollabDoc;
+  readOnly: boolean;
 }) {
   const Icon = tab.icon;
   return (
@@ -191,13 +195,15 @@ function CollabDocSection({
           {tab.label}
         </div>
         <div className="flex items-center gap-2">
-          <DeleteCollabButton
-            issueId={issueId}
-            section={tab.section}
-            ariaLabel={tab.deleteAriaLabel}
-            title={tab.deleteTitle}
-            description={tab.deleteDescription}
-          />
+          {readOnly ? null : (
+            <DeleteCollabButton
+              issueId={issueId}
+              section={tab.section}
+              ariaLabel={tab.deleteAriaLabel}
+              title={tab.deleteTitle}
+              description={tab.deleteDescription}
+            />
+          )}
           <CollabActorBadge actor={doc.author} />
         </div>
       </div>
@@ -223,7 +229,7 @@ function EmptyTabPanel() {
   );
 }
 
-export function CollaborationArea({ issueId }: CollaborationAreaProps) {
+export function CollaborationArea({ issueId, readOnly = false }: CollaborationAreaProps) {
   const { data, isLoading } = useIssueCollab(issueId);
   const consensus = data?.consensus ?? null;
   const summary = data?.summary ?? null;
@@ -273,7 +279,7 @@ export function CollaborationArea({ issueId }: CollaborationAreaProps) {
           <HelpCircle className="h-4 w-4 text-primary" />
           <h2 className="text-sm font-semibold">人机协作区</h2>
         </div>
-        {hasAnyContent ? (
+        {hasAnyContent && !readOnly ? (
           <DeleteCollabButton
             issueId={issueId}
             section="all"
@@ -318,7 +324,7 @@ export function CollaborationArea({ issueId }: CollaborationAreaProps) {
             const doc = docsByTab[tab.value];
             return (
               <TabsContent key={tab.value} value={tab.value}>
-                {doc ? <CollabDocSection issueId={issueId} tab={tab} doc={doc} /> : <EmptyTabPanel />}
+                {doc ? <CollabDocSection issueId={issueId} tab={tab} doc={doc} readOnly={readOnly} /> : <EmptyTabPanel />}
               </TabsContent>
             );
           })}

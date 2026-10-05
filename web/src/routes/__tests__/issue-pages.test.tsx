@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as ReactRouter from "react-router";
 import { MemoryRouter, Route, Routes } from "react-router";
@@ -29,6 +29,7 @@ import {
   useDeleteIssueShipHook,
 } from "@/lib/hooks/use-issues";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
+import { useRecommendations } from "@/lib/hooks/use-recommendations";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { GITHUB_LOCAL_ASSET_NOTICE } from "@/lib/utils/github-media-proxy";
 import { toast } from "sonner";
@@ -209,6 +210,14 @@ vi.mock("@/lib/hooks/use-issue-prompt", () => ({
     { id: "default", name: "默认", content: "请处理此问题" },
   ]),
   useUpdateIssuePrompts: vi.fn(),
+}));
+
+vi.mock("@/lib/hooks/use-recommendations", () => ({
+  useRecommendations: vi.fn(() => ({ data: undefined })),
+  useRemoveRecommendation: vi.fn(() => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  })),
 }));
 
 vi.mock("@/lib/store/auth-store", () => ({
@@ -569,6 +578,11 @@ describe("Issue pages", () => {
     vi.mocked(useMarkIssueRead).mockReturnValue({
       mutate: vi.fn(),
     } as unknown as ReturnType<typeof useMarkIssueRead>);
+
+    vi.mocked(useRecommendations).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useRecommendations>);
   });
 
   afterEach(() => {
@@ -1786,5 +1800,129 @@ describe("Issue pages", () => {
       expect(screen.getByText("GH-42 Crash on launch")).toBeInTheDocument(),
     );
     expect(markReadMutate).not.toHaveBeenCalled();
+  });
+
+  it("shows a recommendation banner above the body card for a recommended issue", async () => {
+    mockIssueDetailData();
+    vi.mocked(useRecommendations).mockReturnValue({
+      data: {
+        items: [
+          {
+            issue: {
+              id: "issue-1",
+              project_id: "proj-1",
+              project_name: "Alpha App",
+              source: "github",
+              sequence_number: 42,
+              reference: "GH-42",
+              title: "Crash on launch",
+              state: "open",
+              workflow_status: "todo",
+            },
+            reason: "先做这个能解锁后续工作",
+            priority: "high",
+            created_by: "ci-bot",
+            created_at: "2026-08-22T00:00:00Z",
+            updated_at: "2026-08-22T00:00:00Z",
+            dependencies: [
+              {
+                issue_id: "dep-1",
+                title: "前置任务",
+                state: "closed",
+                workflow_status: "done",
+                project_id: "proj-1",
+                sequence_number: 1,
+                reference: "GH-41",
+              },
+            ],
+          },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useRecommendations>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    const banner = await screen.findByRole("region", { name: "推荐" });
+    expect(within(banner).getByText("高优先级")).toBeInTheDocument();
+    expect(
+      within(banner).getByText("先做这个能解锁后续工作"),
+    ).toBeInTheDocument();
+    expect(
+      within(banner).getByRole("link", { name: /GH-41/ }),
+    ).toHaveAttribute("href", "/projects/proj-1/issues/dep-1");
+
+    // 横幅位于正文卡片之前，而不是右侧元信息栏
+    const title = screen.getByText("GH-42 Crash on launch");
+    expect(
+      banner.compareDocumentPosition(title) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("includes the recommendation reason when copying the prompt from the detail page", async () => {
+    mockIssueDetailData();
+    vi.mocked(useRecommendations).mockReturnValue({
+      data: {
+        items: [
+          {
+            issue: {
+              id: "issue-1",
+              project_id: "proj-1",
+              project_name: "Alpha App",
+              source: "github",
+              sequence_number: 42,
+              reference: "GH-42",
+              title: "Crash on launch",
+              state: "open",
+              workflow_status: "todo",
+            },
+            reason: "先做这个能解锁后续工作",
+            priority: "high",
+            created_by: "ci-bot",
+            created_at: "2026-08-22T00:00:00Z",
+            updated_at: "2026-08-22T00:00:00Z",
+            dependencies: [],
+          },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useRecommendations>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /复制提示词/ }),
+    );
+
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(
+        `/fast-ship 请处理此问题
+---
+项目ID：proj-1
+问题ID：issue-1
+推荐理由：先做这个能解锁后续工作`,
+      ),
+    );
+  });
+
+  it("does not show the recommendation banner for a non-recommended issue", async () => {
+    mockIssueDetailData();
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await screen.findByText("GH-42 Crash on launch");
+    expect(
+      screen.queryByRole("region", { name: "推荐" }),
+    ).not.toBeInTheDocument();
   });
 });
