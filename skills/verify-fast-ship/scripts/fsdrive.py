@@ -95,6 +95,10 @@ def main() -> int:
                 pass  # best effort: capture even if requests are still settling
             page.screenshot(path=str(evidence / f"{name}.png"), full_page=True)
             aria = page.locator("body").aria_snapshot()
+            # aria_snapshot() echoes input values, including type=password — mask them.
+            for v in page.eval_on_selector_all("input[type=password]", "els => els.map(e => e.value)"):
+                if v:
+                    aria = aria.replace(v, "•••")
             (evidence / f"{name}.aria.txt").write_text(aria, encoding="utf-8")
 
         def settle_dashboard() -> None:

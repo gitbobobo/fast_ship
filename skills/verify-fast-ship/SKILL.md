@@ -74,17 +74,20 @@ One process, one port. Teardown is in Cleanup.
 
 ## Doctor
 
-Run this block before driving and whenever anything looks off. It is a gate, not a report — every check asserts, and the block exits non-zero on the first failure. Stop and fix before driving; do not `|| true` past it:
+Run this block before driving and whenever anything looks off. It is a gate, not a report — every check asserts, and the block exits non-zero on the first failure. The whole block runs inside `( … )` so a failure exits the subshell, not the session you pasted it into. Stop and fix before driving; do not `|| true` past it:
 
 ```bash
+(
 fail() { echo "DOCTOR FAIL: $*" >&2; exit 1; }
 
 PID="$(cat "$V/scratch/server.pid" 2>/dev/null)" || fail "no server.pid for this run"
 [ -n "$PID" ] || fail "server.pid is empty"
 
 # The recorded PID must be our binary — same pid could now be a recycled,
-# unrelated process or (worse) another worktree's instance.
-[ "$(ps -p "$PID" -o comm= 2>/dev/null | xargs)" = "$V/scratch/fast_ship" ] \
+# unrelated process or (worse) another worktree's instance. `ps -o args=`
+# field 1 is the invoked path on both macOS and Linux (`comm` is the full
+# path only on macOS; on Linux it is just the truncated process name).
+[ "$(ps -p "$PID" -o args= 2>/dev/null | awk '{print $1}')" = "$V/scratch/fast_ship" ] \
   || fail "pid $PID is not $V/scratch/fast_ship (server died or pid was recycled)"
 
 [ "$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t | head -1)" = "$PID" ] \
@@ -103,6 +106,7 @@ dist="$(grep -oE 'assets/index-[^"]+\.js' "$REPO/web/dist/index.html" | head -1)
 grep -q '服务启动' "$V/server.log" || fail "no 服务启动 in server.log — check tail for panic/migration errors"
 tail -20 "$V/server.log"
 echo "DOCTOR OK pid=$PID port=$PORT bundle=$served"
+)
 ```
 
 Failure readings: process dead → `server.log` tail has the panic/migration error; port owned by a different PID → you are looking at someone else's instance, do not drive it; `000`/timeout on the probe → server hung or port wrong; bundle mismatch → rebuild `web/dist`.
@@ -180,7 +184,7 @@ Kill only the PID you recorded, and only after confirming it still is your serve
 
 ```bash
 PID="$(cat "$V/scratch/server.pid" 2>/dev/null || true)"
-if [ -n "$PID" ] && [ "$(ps -p "$PID" -o comm= 2>/dev/null | xargs)" = "$V/scratch/fast_ship" ]; then
+if [ -n "$PID" ] && [ "$(ps -p "$PID" -o args= 2>/dev/null | awk '{print $1}')" = "$V/scratch/fast_ship" ]; then
   kill "$PID"
 else
   echo "recorded pid ${PID:-none} is not our server binary — leaving it alone" >&2
