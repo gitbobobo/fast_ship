@@ -1,5 +1,6 @@
 server/server
 server/data/
+__pycache__/
 .DS_Store
 web/TEST_REPORT.md
 .playwright-mcp/
