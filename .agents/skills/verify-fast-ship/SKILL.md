@@ -118,7 +118,7 @@ Login-state check is part of Doctor only after a session exists: drive `shot /da
 Harness: headless Chromium via Python Playwright (`import playwright` must work; one-time setup `python3 -m playwright install chromium`, installs to `~/Library/Caches`, not the repo; if the bundled browser executable is absent, fsdrive falls back to the system Google Chrome — still headless). All interaction goes through `scripts/fsdrive.py`:
 
 ```bash
-DRV="python3 $REPO/skills/verify-fast-ship/scripts/fsdrive.py --base http://127.0.0.1:$PORT --evidence $V/evidence --state $V/scratch/state.json"
+DRV="python3 $REPO/.agents/skills/verify-fast-ship/scripts/fsdrive.py --base http://127.0.0.1:$PORT --evidence $V/evidence --state $V/scratch/state.json"
 
 $DRV register verifybot verifybot@example.com VerifyPass1   # fills the real /register form, lands on /dashboard, saves session
 $DRV login verifybot VerifyPass1                            # same through /login

@@ -24,7 +24,7 @@ Preconditions:
 - Fast Ship healthy at `http://127.0.0.1:$PORT`; the SKILL.md Doctor block printed `DOCTOR OK`.
 - No account named `verifybot` exists (fresh database satisfies this).
 - `$DRV` is set per SKILL.md. For steps that must run **without** a session, use a second driver with no `--state`:
-  `DRV_NOAUTH="python3 $REPO/skills/verify-fast-ship/scripts/fsdrive.py --base http://127.0.0.1:$PORT --evidence $V/evidence"`
+  `DRV_NOAUTH="python3 $REPO/.agents/skills/verify-fast-ship/scripts/fsdrive.py --base http://127.0.0.1:$PORT --evidence $V/evidence"`
 
 - **Register.** Run `$DRV register verifybot verifybot@example.com VerifyPass1`. `register-form.png` shows the filled form before submit; `register-dashboard.png` shows `/dashboard` with sidebar links `仪表盘`/`项目`/`问题` and the user-menu button containing `verifybot` and `v<VERSION>`.
 
