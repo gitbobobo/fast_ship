@@ -115,7 +115,8 @@ fast_ship/
 ├── server/               # Go 后端（cmd/server 入口，internal/ 分层）
 ├── web/                  # React 前端（src/routes 页面，src/lib 请求与状态）
 ├── scripts/dev.sh        # 开发服务编排
-├── skills/               # Agent 技能文档（API 用法、发版流程）
+├── skills/               # 对外分发的 Agent 技能（API 用法）
+├── .agents/skills/       # 仓库内部 Agent 技能（发版流程、端到端验证）
 ├── docs/screenshots/     # 界面截图
 ├── Dockerfile            # 整站镜像
 └── Makefile              # 统一命令入口
