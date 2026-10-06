@@ -1,6 +1,6 @@
 ---
 name: verify-fast-ship
-description: Launch and drive the Fast Ship web UI end to end (Go server + React SPA) to prove user-visible behavior with screenshot and database evidence. Use when a change needs real UI verification — auth, projects, issues, versions, documents, logs, settings — on an isolated port and database that never touches other running fast_ship instances or the shared dev ports 4888/4999.
+description: Launch and drive the Fast Ship web UI end to end (Go server + React SPA) to prove user-visible behavior with screenshot and database evidence. Use when a change needs real UI verification on the mapped surfaces — auth, projects, issues, API keys — on an isolated port and database that never touches other running fast_ship instances or the shared dev ports 4888/4999.
 ---
 
 # Verify Fast Ship
