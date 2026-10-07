@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,6 +230,14 @@ func TestIssueServiceAttachPullRequest_RejectsBadURL(t *testing.T) {
 		"https://github.com/owner/repo/pull/abc",
 		"https://github.com/owner/repo/pull/0",
 		"ftp://github.com/owner/repo/pull/7",
+		// 点段会被 HTTP 客户端路径归一化，导致请求落到非预期路径
+		"https://github.com/./repo/pull/7",
+		"https://github.com/../repo/pull/7",
+		"https://github.com/owner/../pull/7",
+		"https://github.com/owner/./pull/7",
+		"https://github.com/.owner/repo/pull/7",
+		"https://github.com/owner./repo/pull/7",
+		"https://github.com/owner/repo./pull/7",
 	}
 	for _, raw := range badURLs {
 		_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{Url: raw})
@@ -378,18 +387,18 @@ func TestIssueServiceSyncPullRequests_RefreshesToMerged(t *testing.T) {
 	mergedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
 	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "closed", mergedAt)
 
-	items, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected one refreshed link, got %+v", items)
+	if len(result.Items) != 1 || len(result.Failures) != 0 {
+		t.Fatalf("expected one refreshed link and no failures, got %+v", result)
 	}
-	if items[0].State != model.IssuePullRequestStateMerged {
-		t.Fatalf("expected merged state, got %+v", items[0])
+	if result.Items[0].State != model.IssuePullRequestStateMerged {
+		t.Fatalf("expected merged state, got %+v", result.Items[0])
 	}
-	if items[0].MergedAt == nil || items[0].ClosedAt == nil {
-		t.Fatalf("expected merged_at/closed_at set, got %+v", items[0])
+	if result.Items[0].MergedAt == nil || result.Items[0].ClosedAt == nil {
+		t.Fatalf("expected merged_at/closed_at set, got %+v", result.Items[0])
 	}
 
 	var stored model.IssuePullRequest
@@ -404,36 +413,156 @@ func TestIssueServiceSyncPullRequests_RefreshesToMerged(t *testing.T) {
 	}
 }
 
-// sync 中途拉取失败：已刷新的行保留，整体返回 50200。
-func TestIssueServiceSyncPullRequests_PropagatesGitHubError(t *testing.T) {
+// 单行失败是独立失败域：记入 failures 不中断，失败行旧数据保留，整体仍返回结果。
+func TestIssueServiceSyncPullRequests_PartialFailureRecorded(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
 	issue := createTestIssue(t, svc.db, project.ID)
 
+	now := time.Now().UTC()
+	staleSyncedAt := now.Add(-time.Hour)
+	for _, link := range []*model.IssuePullRequest{
+		{ID: "link-ok", IssueID: issue.ID, ProjectID: project.ID, Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo", Number: 7, Title: "ok pr", State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual, SyncedAt: staleSyncedAt, CreatedAt: staleSyncedAt, UpdatedAt: staleSyncedAt},
+		{ID: "link-gone", IssueID: issue.ID, ProjectID: project.ID, Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "gone/repo", Number: 9, Title: "stale pr", State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual, SyncedAt: staleSyncedAt, CreatedAt: staleSyncedAt, UpdatedAt: staleSyncedAt},
+	} {
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+	}
+
+	clients := map[string]*fakeIssueGitHubClient{
+		"owner/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)}},
+		"gone/repo":  {pullRequestErr: errors.New("404 not found")},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		fake, ok := clients[owner+"/"+repo]
+		if !ok {
+			t.Fatalf("unexpected client repo: %s/%s", owner, repo)
+		}
+		return fake
+	}
+
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync should not return error on per-row failure, got %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Id != "link-ok" {
+		t.Fatalf("expected link-ok in items, got %+v", result.Items)
+	}
+	if len(result.Failures) != 1 || result.Failures[0].Id != "link-gone" {
+		t.Fatalf("expected link-gone in failures, got %+v", result.Failures)
+	}
+	if !strings.Contains(result.Failures[0].Error, "gone/repo#9") {
+		t.Fatalf("expected failure error to carry repo#number, got %q", result.Failures[0].Error)
+	}
+
+	// 失败行保留旧数据
+	var stored model.IssuePullRequest
+	if err := svc.db.First(&stored, "id = ?", "link-gone").Error; err != nil {
+		t.Fatalf("reload failed link: %v", err)
+	}
+	if stored.Title != "stale pr" || !stored.SyncedAt.Equal(staleSyncedAt) {
+		t.Fatalf("expected failed row untouched, got %+v", stored)
+	}
+	// 成功行被刷新
+	var okStored model.IssuePullRequest
+	if err := svc.db.First(&okStored, "id = ?", "link-ok").Error; err != nil {
+		t.Fatalf("reload ok link: %v", err)
+	}
+	if !okStored.SyncedAt.After(staleSyncedAt) {
+		t.Fatalf("expected ok row synced_at advanced, got %v", okStored.SyncedAt)
+	}
+}
+
+// 全部行失败也返回正常结果：items 为空，failures 逐行记录。
+func TestIssueServiceSyncPullRequests_AllFailStillReturns(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	for i, id := range []string{"link-a", "link-b"} {
+		link := &model.IssuePullRequest{
+			ID: id, IssueID: issue.ID, ProjectID: project.ID,
+			Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+			Number: 10 + i, State: model.IssuePullRequestStateOpen,
+			LinkOrigin: model.IssuePullRequestLinkOriginManual,
+			SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+	}
+
 	fake := &fakeIssueGitHubClient{pullRequestErr: errors.New("github down")}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
-	if err := svc.db.Create(&model.IssuePullRequest{
-		ID:           "link-1",
-		IssueID:      issue.ID,
-		ProjectID:    project.ID,
-		Provider:     model.IssuePullRequestProviderGitHub,
-		RepoFullName: "owner/repo",
-		Number:       7,
-		State:        model.IssuePullRequestStateOpen,
-		LinkOrigin:   model.IssuePullRequestLinkOriginManual,
-		SyncedAt:     time.Now().UTC(),
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
-	}).Error; err != nil {
-		t.Fatalf("seed link: %v", err)
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync should not return error, got %v", err)
+	}
+	if len(result.Items) != 0 || len(result.Failures) != 2 {
+		t.Fatalf("expected 0 items and 2 failures, got %+v", result)
+	}
+}
+
+// 仓库改名：旧行 sync 归一化后撞上既有行唯一键 → 该行记 failure，不删不合并。
+func TestIssueServiceSyncPullRequests_RenamedRepoCollisionRecorded(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	// link-old：仓库旧名关联的 PR#7；link-new：改名后新名重新 attach 的同一 PR
+	for _, link := range []*model.IssuePullRequest{
+		{ID: "link-old", IssueID: issue.ID, ProjectID: project.ID, Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "old-org/repo", Number: 7, Title: "old", State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual, SyncedAt: now, CreatedAt: now, UpdatedAt: now},
+		{ID: "link-new", IssueID: issue.ID, ProjectID: project.ID, Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "new-org/repo", Number: 7, Title: "new", State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual, SyncedAt: now, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
 	}
 
-	if _, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID); err == nil {
-		t.Fatal("expected github api error, got nil")
-	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrGitHubAPI.Code {
-		t.Fatalf("expected 50200, got %v", err)
+	clients := map[string]*fakeIssueGitHubClient{
+		// 旧名 repo 的 PR 返回新 canonical 名 new-org/repo → 与 link-new 撞唯一键
+		"old-org/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("new-org/repo", 7, "open", nil)}},
+		"new-org/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("new-org/repo", 7, "open", nil)}},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		fake, ok := clients[owner+"/"+repo]
+		if !ok {
+			t.Fatalf("unexpected client repo: %s/%s", owner, repo)
+		}
+		return fake
+	}
+
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync should not return error, got %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Id != "link-new" {
+		t.Fatalf("expected link-new refreshed, got %+v", result)
+	}
+	if len(result.Failures) != 1 || result.Failures[0].Id != "link-old" {
+		t.Fatalf("expected link-old failure, got %+v", result.Failures)
+	}
+	if !strings.Contains(result.Failures[0].Error, "冲突") && !strings.Contains(result.Failures[0].Error, "detach") {
+		t.Fatalf("expected conflict hint in failure error, got %q", result.Failures[0].Error)
+	}
+
+	// 旧行保留，没有被删除或合并
+	var stored model.IssuePullRequest
+	if err := svc.db.First(&stored, "id = ?", "link-old").Error; err != nil {
+		t.Fatalf("reload link-old: %v", err)
+	}
+	if stored.RepoFullName != "old-org/repo" {
+		t.Fatalf("expected stale row kept with old name, got %+v", stored)
+	}
+	if count := countPullRequestRows(t, svc, issue.ID); count != 2 {
+		t.Fatalf("expected both rows to remain, got %d", count)
 	}
 }
 
@@ -605,15 +734,15 @@ func TestIssueServiceSyncPullRequests_ReopenClearsMergeFields(t *testing.T) {
 	}
 
 	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "open", nil)
-	items, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if len(items) != 1 || items[0].State != model.IssuePullRequestStateOpen {
-		t.Fatalf("expected reopened open state, got %+v", items)
+	if len(result.Items) != 1 || result.Items[0].State != model.IssuePullRequestStateOpen {
+		t.Fatalf("expected reopened open state, got %+v", result)
 	}
-	if items[0].MergedAt != nil || items[0].ClosedAt != nil {
-		t.Fatalf("expected merged_at/closed_at cleared, got %+v", items[0])
+	if result.Items[0].MergedAt != nil || result.Items[0].ClosedAt != nil {
+		t.Fatalf("expected merged_at/closed_at cleared, got %+v", result.Items[0])
 	}
 }
 

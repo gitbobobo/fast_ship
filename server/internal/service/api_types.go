@@ -74,9 +74,10 @@ type (
 	UpsertIssueCollabRequest = api.UpsertIssueCollabRequest
 
 	// issue pull requests
-	AttachIssuePullRequestRequest   = api.AttachIssuePullRequestRequest
-	IssuePullRequestResponse        = api.IssuePullRequest
-	IssuePullRequestSummaryResponse = api.IssuePullRequestSummary
+	AttachIssuePullRequestRequest      = api.AttachIssuePullRequestRequest
+	IssuePullRequestResponse           = api.IssuePullRequest
+	IssuePullRequestSummaryResponse    = api.IssuePullRequestSummary
+	IssuePullRequestSyncResultResponse = api.IssuePullRequestSyncResult
 
 	// issue recommendations
 	UpsertIssueRecommendationRequest = api.UpsertIssueRecommendationRequest

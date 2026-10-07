@@ -2265,7 +2265,7 @@ paths:
       tags: [issues]
       operationId: syncIssuePullRequests
       summary: 刷新该 Issue 下全部已关联 PR 的状态
-      description: 逐条重新拉取 GitHub PR 信息并更新 state/merged_at/closed_at 等字段，返回刷新后的数组。只更新既有行，不新增、不删除；任一条拉取失败即整体返回 50200。
+      description: 逐条重新拉取 GitHub PR 信息并更新 state/merged_at/closed_at 等字段。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。
       security:
         - jwtAuth: []
         - apiKeyAuth: []
@@ -2273,7 +2273,7 @@ paths:
         - $ref: '#/components/parameters/IssueId'
       responses:
         '200':
-          description: 刷新后的关联数组（无关联时为空数组）
+          description: 刷新结果：items 为刷新成功的关联行，failures 为逐行失败明细
           content:
             application/json:
               schema:
@@ -2282,21 +2282,13 @@ paths:
                   - type: object
                     properties:
                       data:
-                        type: array
-                        items:
-                          $ref: '#/components/schemas/IssuePullRequest'
+                        $ref: '#/components/schemas/IssuePullRequestSyncResult'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
-        '502':
-          description: GitHub API 调用失败（50200）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
   /api/issues/{iid}/pull-requests/{id}:
     delete:
       tags: [issues]
@@ -4389,6 +4381,21 @@ components:
           type: integer
           description: state=merged 计数
       description: Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged
+    IssuePullRequestSyncResult:
+      type: object
+      required: [items, failures]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssuePullRequest'
+          description: 本轮刷新成功的关联行（无关联或无成功时为空数组）
+        failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssueBatchFailure'
+          description: 逐行失败明细——id 为关联行 id，error 前缀带 repo_full_name#number 与原因；失败行保留旧数据
+      description: syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
     Issue:
       type: object
       required: [id, project_id, source, sequence_number, reference, state, state_reason, title, body, body_html, author, created_at, updated_at, closed_at, unread_comments_count]

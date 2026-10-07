@@ -683,6 +683,15 @@ type IssuePullRequestSummary struct {
 	Total int `json:"total"`
 }
 
+// IssuePullRequestSyncResult syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
+type IssuePullRequestSyncResult struct {
+	// Failures 逐行失败明细——id 为关联行 id，error 前缀带 repo_full_name#number 与原因；失败行保留旧数据
+	Failures []IssueBatchFailure `json:"failures"`
+
+	// Items 本轮刷新成功的关联行（无关联或无成功时为空数组）
+	Items []IssuePullRequest `json:"items"`
+}
+
 // IssueReactionSummary defines model for IssueReactionSummary.
 type IssueReactionSummary struct {
 	Plus1      int `json:"+1"`
@@ -1682,8 +1691,10 @@ type AttachIssuePullRequest200JSONResponseBody struct {
 // SyncIssuePullRequests200JSONResponseBody defines parameters for SyncIssuePullRequests.
 type SyncIssuePullRequests200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
-	Code int                `json:"code"`
-	Data []IssuePullRequest `json:"data,omitempty"`
+	Code int `json:"code"`
+
+	// Data syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
+	Data *IssuePullRequestSyncResult `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`

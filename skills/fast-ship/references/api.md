@@ -3018,7 +3018,7 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 刷新该 Issue 下全部已关联 PR 的状态
 
-逐条重新拉取 GitHub PR 信息并更新 state/merged_at/closed_at 等字段，返回刷新后的数组。只更新既有行，不新增、不删除；任一条拉取失败即整体返回 50200。
+逐条重新拉取 GitHub PR 信息并更新 state/merged_at/closed_at 等字段。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。
 
 **鉴权**：JWT+API Key
 
@@ -3030,30 +3030,37 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 
 **成功响应**
 
-**200** 刷新后的关联数组（无关联时为空数组）
+**200** 刷新结果：items 为刷新成功的关联行，failures 为逐行失败明细
 
-`data` 为数组。
+`data`：
+
+syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string（uuid） | 是 |  |
-| `issue_id` | string | 是 |  |
-| `provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
-| `repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
-| `number` | integer | 是 |  |
-| `html_url` | string | 是 |  |
-| `title` | string | 是 |  |
-| `state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
-| `is_draft` | boolean | 是 |  |
-| `author_login` | string | 是 |  |
-| `head_ref` | string | 是 |  |
-| `base_ref` | string | 是 |  |
-| `merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
-| `closed_at` | string（date-time，可空） | 是 |  |
-| `link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
-| `synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
-| `created_at` | string（date-time） | 是 |  |
-| `updated_at` | string（date-time） | 是 |  |
+| `items` | object[] | 是 | 本轮刷新成功的关联行（无关联或无成功时为空数组） |
+| `items[].id` | string（uuid） | 是 |  |
+| `items[].issue_id` | string | 是 |  |
+| `items[].provider` | string | 是 | 当前恒为 github；字段预留 gitlab |
+| `items[].repo_full_name` | string | 是 | owner/repo；允许与项目配置的仓库不同（跨仓库 attach） |
+| `items[].number` | integer | 是 |  |
+| `items[].html_url` | string | 是 |  |
+| `items[].title` | string | 是 |  |
+| `items[].state` | string（enum: open \| closed \| merged） | 是 | merged = GitHub 上 closed 且 merged_at 非空 |
+| `items[].is_draft` | boolean | 是 |  |
+| `items[].author_login` | string | 是 |  |
+| `items[].head_ref` | string | 是 |  |
+| `items[].base_ref` | string | 是 |  |
+| `items[].merged_at` | string（date-time，可空） | 是 | state=merged 时有值 |
+| `items[].closed_at` | string（date-time，可空） | 是 |  |
+| `items[].link_origin` | string（enum: manual \| synced） | 是 | manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced） |
+| `items[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+| `failures` | object[] | 是 | 逐行失败明细——id 为关联行 id，error 前缀带 repo_full_name#number 与原因；失败行保留旧数据 |
+| `failures[].id` | string | 是 | Issue ID |
+| `failures[].reference` | string | 否 | omitempty；INT-n 或 GH-n |
+| `failures[].error` | string | 是 |  |
 
 **错误**
 
@@ -3062,7 +3069,6 @@ AI 生成 checklist 建议（需已配置 AI 设置；JWT 与 API Key 均可）
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
-| 502 | GitHub API 调用失败（50200） |
 
 ### DELETE `/api/issues/{iid}/pull-requests/{id}`
 
