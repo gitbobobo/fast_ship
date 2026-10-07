@@ -239,6 +239,9 @@ export function IssuePullRequestsCard({
   };
 
   const handleSync = async () => {
+    // 新一轮刷新发起即作废旧失败列表：无论成功（返回新 failures）
+    // 还是整体失败（toast），都不应继续展示上一轮的逐行错误
+    setSyncFailures([]);
     try {
       const res = await sync.mutateAsync();
       const failures = res.data.failures ?? [];
