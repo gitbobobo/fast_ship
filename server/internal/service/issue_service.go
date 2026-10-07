@@ -31,6 +31,7 @@ type gitHubIssueClient interface {
 	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*ghclient.IssueComment, error)
 	UpdateIssue(ctx context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error)
 	CreateIssue(ctx context.Context, title, body string) (*ghclient.Issue, error)
+	GetPullRequest(ctx context.Context, number int) (*gh.PullRequest, error)
 }
 
 type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
@@ -51,6 +52,7 @@ type IssueService struct {
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository
 	readStateRepo       *repository.IssueReadStateRepository
 	recRepo             *repository.IssueRecommendationRepository
+	pullRequestRepo     *repository.IssuePullRequestRepository
 	storage             storage.Storage
 	cfg                 *config.Config
 	logger              *zap.Logger
@@ -104,6 +106,7 @@ func NewIssueService(
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository,
 	readStateRepo *repository.IssueReadStateRepository,
 	recRepo *repository.IssueRecommendationRepository,
+	pullRequestRepo *repository.IssuePullRequestRepository,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -124,6 +127,7 @@ func NewIssueService(
 		githubRepoLabelRepo: githubRepoLabelRepo,
 		readStateRepo:       readStateRepo,
 		recRepo:             recRepo,
+		pullRequestRepo:     pullRequestRepo,
 		storage:             storage,
 		cfg:                 cfg,
 		logger:              logger,

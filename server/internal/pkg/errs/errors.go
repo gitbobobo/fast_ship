@@ -55,6 +55,7 @@ var (
 	ErrLogRunNotFound         = New(40409, "日志运行不存在")
 	ErrDocumentNotFound       = New(40410, "文档不存在")
 	ErrRecommendationNotFound = New(40411, "推荐不存在")
+	ErrPullRequestNotFound    = New(40412, "PR 关联不存在")
 )
 
 // 业务冲突 40900-40999

@@ -73,6 +73,13 @@ type (
 	IssueCollabAreaResponse  = api.IssueCollabArea
 	UpsertIssueCollabRequest = api.UpsertIssueCollabRequest
 
+	// issue pull requests
+	AttachIssuePullRequestRequest      = api.AttachIssuePullRequestRequest
+	IssuePullRequestResponse           = api.IssuePullRequest
+	IssuePullRequestSummaryResponse    = api.IssuePullRequestSummary
+	IssuePullRequestSyncResultResponse = api.IssuePullRequestSyncResult
+	IssuePullRequestSyncFailureItem    = api.IssuePullRequestSyncFailure
+
 	// issue recommendations
 	UpsertIssueRecommendationRequest = api.UpsertIssueRecommendationRequest
 	DeferIssueRecommendationRequest  = api.DeferIssueRecommendationRequest

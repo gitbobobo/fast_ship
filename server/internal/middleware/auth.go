@@ -220,6 +220,8 @@ func HandleAppError(c *gin.Context, err error) {
 			httpStatus = http.StatusConflict
 		case appErr.Code >= 41200 && appErr.Code < 41300:
 			httpStatus = http.StatusPreconditionFailed
+		case appErr.Code >= 50200 && appErr.Code < 50300:
+			httpStatus = http.StatusBadGateway
 		case appErr.Code >= 50000:
 			httpStatus = http.StatusInternalServerError
 		}

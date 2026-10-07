@@ -151,6 +151,10 @@ func Setup(
 		api.GET("/issues/:iid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.Get)
 		api.GET("/issues/:iid/comments", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListComments)
 		api.GET("/issues/:iid/timeline", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ListTimeline)
+		// Issue ↔ PR 关联 —— JWT / API Key 均可；attach 输入为 PR URL，PR 元信息由服务端拉取。
+		api.POST("/issues/:iid/pull-requests", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.AttachPullRequest)
+		api.POST("/issues/:iid/pull-requests/sync", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.SyncPullRequests)
+		api.DELETE("/issues/:iid/pull-requests/:id", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.DetachPullRequest)
 		// 推荐任务列表 —— 供 Agent 与看板「推荐」弹框拉取；project_id 为空时返回当前用户全部项目。
 		api.GET("/recommendations", middleware.RequireAuth(cfg, apiKeyRepo, authService), recommendationHandler.List)
 

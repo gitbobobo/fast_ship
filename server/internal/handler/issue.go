@@ -167,6 +167,14 @@ func (h *IssueHandler) Get(c *gin.Context) {
 		item.Collab = collab
 	}
 
+	// PR 关联同样仅详情填充，读取失败降级为不带该字段。
+	pullRequests, err := h.issueService.ListIssuePullRequests(issueID)
+	if err != nil {
+		log.Printf("issue %s: 读取 PR 关联失败: %v", issueID, err)
+	} else {
+		item.PullRequests = pullRequests
+	}
+
 	response.Success(c, item)
 }
 

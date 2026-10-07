@@ -228,6 +228,12 @@ type Artifact struct {
 	VersionId  string `json:"version_id"`
 }
 
+// AttachIssuePullRequestRequest defines model for AttachIssuePullRequestRequest.
+type AttachIssuePullRequestRequest struct {
+	// Url GitHub PR 链接，形如 https://github.com/<owner>/<repo>/pull/<number>（允许 http、www 前缀与尾部 /files、query、fragment 等）；其他字段由服务端从 GitHub 拉取
+	Url string `json:"url"`
+}
+
 // AuthResponse defines model for AuthResponse.
 type AuthResponse struct {
 	// RefreshToken fsr_ 开头，有效期默认 7 天
@@ -411,6 +417,12 @@ type Issue struct {
 	// InternalMeta omitempty；无 meta 且无 checklist 时整个字段缺省
 	InternalMeta *IssueInternalMeta `json:"internal_meta,omitempty"`
 	ProjectId    string             `json:"project_id"`
+
+	// PullRequestSummary Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged
+	PullRequestSummary *IssuePullRequestSummary `json:"pull_request_summary,omitempty"`
+
+	// PullRequests omitempty；仅 Issue 详情响应携带（读取失败或无关联时缺省）；列表项不出现
+	PullRequests []IssuePullRequest `json:"pull_requests,omitempty"`
 
 	// Reference 短编号；github 为 GH-<number>，internal 为 INT-<sequence_number>
 	Reference string `json:"reference"`
@@ -643,6 +655,74 @@ type IssuePromptItem struct {
 type IssuePrompts struct {
 	// Prompts 未配置时为 null，前端兜底默认提示词
 	Prompts []IssuePromptItem `json:"prompts"`
+}
+
+// IssuePullRequest defines model for IssuePullRequest.
+type IssuePullRequest struct {
+	AuthorLogin string  `json:"author_login"`
+	BaseRef     string  `json:"base_ref"`
+	ClosedAt    *string `json:"closed_at"`
+	CreatedAt   string  `json:"created_at"`
+	HeadRef     string  `json:"head_ref"`
+	HtmlUrl     string  `json:"html_url"`
+	Id          string  `json:"id"`
+	IsDraft     bool    `json:"is_draft"`
+	IssueId     string  `json:"issue_id"`
+
+	// LinkOrigin manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced）
+	LinkOrigin IssuePullRequestLinkOrigin `json:"link_origin"`
+
+	// MergedAt state=merged 时有值
+	MergedAt *string `json:"merged_at"`
+	Number   int     `json:"number"`
+
+	// Provider 当前恒为 github；字段预留 gitlab
+	Provider string `json:"provider"`
+
+	// RepoFullName owner/repo；允许与项目配置的仓库不同（跨仓库 attach）
+	RepoFullName string `json:"repo_full_name"`
+
+	// State merged = GitHub 上 closed 且 merged_at 非空
+	State IssuePullRequestState `json:"state"`
+
+	// SyncedAt 最近一次从 GitHub 刷新成功的时间
+	SyncedAt  string `json:"synced_at"`
+	Title     string `json:"title"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// IssuePullRequestLinkOrigin manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced）
+type IssuePullRequestLinkOrigin = model.IssuePullRequestLinkOrigin
+
+// IssuePullRequestState merged = GitHub 上 closed 且 merged_at 非空
+type IssuePullRequestState = model.IssuePullRequestState
+
+// IssuePullRequestSummary Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged
+type IssuePullRequestSummary struct {
+	// Merged state=merged 计数
+	Merged int `json:"merged"`
+
+	// Open state=open 计数
+	Open  int `json:"open"`
+	Total int `json:"total"`
+}
+
+// IssuePullRequestSyncFailure PR 关联刷新失败明细；失败行保留旧数据
+type IssuePullRequestSyncFailure struct {
+	// Error 失败原因，前缀带 repo_full_name#number 便于定位
+	Error string `json:"error"`
+
+	// Id 关联行 id（issue_pull_requests.id，detach 时用此 id）
+	Id string `json:"id"`
+}
+
+// IssuePullRequestSyncResult syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
+type IssuePullRequestSyncResult struct {
+	// Failures 逐行失败明细
+	Failures []IssuePullRequestSyncFailure `json:"failures"`
+
+	// Items 本轮刷新成功的关联行（无关联或无成功时为空数组）
+	Items []IssuePullRequest `json:"items"`
 }
 
 // IssueReactionSummary defines model for IssueReactionSummary.
@@ -1196,6 +1276,9 @@ type ProjectId = string
 // ProjectOrKeyId defines model for ProjectOrKeyId.
 type ProjectOrKeyId = string
 
+// PullRequestLinkId defines model for PullRequestLinkId.
+type PullRequestLinkId = string
+
 // QueryToken defines model for QueryToken.
 type QueryToken = string
 
@@ -1635,6 +1718,28 @@ type UpdateIssueInternalMeta200JSONResponseBody struct {
 
 	// Data omitempty；无 meta 且无 checklist 时整个字段缺省
 	Data *IssueInternalMeta `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// AttachIssuePullRequest200JSONResponseBody defines parameters for AttachIssuePullRequest.
+type AttachIssuePullRequest200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int               `json:"code"`
+	Data *IssuePullRequest `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SyncIssuePullRequests200JSONResponseBody defines parameters for SyncIssuePullRequests.
+type SyncIssuePullRequests200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
+	Data *IssuePullRequestSyncResult `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -2273,6 +2378,9 @@ type CreateIssueCommentJSONRequestBody CreateIssueCommentJSONBody
 
 // UpdateIssueInternalMetaJSONRequestBody defines body for UpdateIssueInternalMeta for application/json ContentType.
 type UpdateIssueInternalMetaJSONRequestBody UpdateIssueInternalMetaJSONBody
+
+// AttachIssuePullRequestJSONRequestBody defines body for AttachIssuePullRequest for application/json ContentType.
+type AttachIssuePullRequestJSONRequestBody = AttachIssuePullRequestRequest
 
 // UpsertIssueRecommendationJSONRequestBody defines body for UpsertIssueRecommendation for application/json ContentType.
 type UpsertIssueRecommendationJSONRequestBody = UpsertIssueRecommendationRequest

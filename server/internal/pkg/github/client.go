@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -67,11 +68,18 @@ func (c *Client) ListRepositoryLabels(ctx context.Context, page, perPage int) ([
 	return c.client.Issues.ListLabels(ctx, c.owner, c.repo, opts)
 }
 
+// NewClient 创建绑定单个 owner/repo 的 GitHub 客户端。
+// token 为空时走未认证请求：空 AccessToken 的 oauth2 客户端仍会发出
+// "Authorization: Bearer " 头导致 401，而未认证请求可访问公共仓库
+// （未配 GitHub 的项目 attach 公共仓库 PR 依赖这一行为）。
 func NewClient(token, owner, repo string) *Client {
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	tc := oauth2.NewClient(context.Background(), ts)
+	httpClient := &http.Client{}
+	if token != "" {
+		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+		httpClient = oauth2.NewClient(context.Background(), ts)
+	}
 	return &Client{
-		client: gh.NewClient(tc),
+		client: gh.NewClient(httpClient),
 		owner:  owner,
 		repo:   repo,
 	}
@@ -80,6 +88,12 @@ func NewClient(token, owner, repo string) *Client {
 func (c *Client) ValidateRepository(ctx context.Context) error {
 	_, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
 	return err
+}
+
+// GetPullRequest 拉取单个 PR 的详情（含 title/state/draft/merged_at/head/base 等）。
+func (c *Client) GetPullRequest(ctx context.Context, number int) (*gh.PullRequest, error) {
+	pr, _, err := c.client.PullRequests.Get(ctx, c.owner, c.repo, number)
+	return pr, err
 }
 
 func (c *Client) ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error) {

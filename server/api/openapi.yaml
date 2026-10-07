@@ -1337,7 +1337,7 @@ paths:
         - $ref: '#/components/parameters/PageSize20'
       responses:
         '200':
-          description: Issue 分页列表（列表项不含 collab 字段）
+          description: Issue 分页列表（列表项不含 collab / pull_requests 字段；带 pull_request_summary 聚合计数）
           content:
             application/json:
               schema:
@@ -1696,7 +1696,7 @@ paths:
       tags: [issues]
       operationId: getIssue
       summary: 获取 Issue 详情
-      description: 与列表项结构相同，另带可选 `collab` 字段（与 GET /collab 的 data 同形；仅详情填充，列表不返回）。
+      description: 与列表项结构相同，另带可选 `collab` 字段（与 GET /collab 的 data 同形；仅详情填充，列表不返回）与 `pull_requests` 数组（关联 PR 全量；读取失败或无关联时缺省）。
       security:
         - jwtAuth: []
         - apiKeyAuth: []
@@ -2210,6 +2210,109 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
+  /api/issues/{iid}/pull-requests:
+    post:
+      tags: [issues]
+      operationId: attachIssuePullRequest
+      summary: 关联一个 GitHub PR 到 Issue（幂等）
+      description: |
+        请求体只传 PR URL（`https://github.com/<owner>/<repo>/pull/<number>`），服务端解析 owner/repo/number 后立即从 GitHub 拉取 title/state/is_draft/author/head/base/merged_at 等字段入库；拉取失败返回错误，不落记录。
+        允许跨仓库：URL 可以是任意 GitHub 仓库的 PR，不要求等于项目配置的仓库，不做跨仓库鉴权。项目未配 GitHub token 时以未认证方式拉取，仅支持公共仓库。
+        重复 attach 同一 PR（唯一键 issue_id+provider+repo_full_name+number）幂等返回既有记录并顺带刷新状态。attach 产生的行 `link_origin=manual`；PR 状态与 Issue workflow_status 不联动。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttachIssuePullRequestRequest'
+      responses:
+        '200':
+          description: 关联记录（重复 attach 返回既有行并刷新状态）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssuePullRequest'
+        '400':
+          description: 非 GitHub 或无法解析的 PR URL（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          description: GitHub API 调用失败（50200；含 PR 不存在或无权访问）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /api/issues/{iid}/pull-requests/sync:
+    post:
+      tags: [issues]
+      operationId: syncIssuePullRequests
+      summary: 刷新该 Issue 下全部已关联 PR 的状态
+      description: 逐条重新拉取 GitHub PR 信息并更新 state/merged_at/closed_at 等字段。只更新既有行，不新增、不删除；每条关联是独立失败域——单行拉取或保存失败记入 failures 不中断其余行（失败行保留旧数据），整体恒返回 200。仅 Issue/项目不存在返回 404，读取关联列表失败返回 500。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: 刷新结果：items 为刷新成功的关联行，failures 为逐行失败明细
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssuePullRequestSyncResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/issues/{iid}/pull-requests/{id}:
+    delete:
+      tags: [issues]
+      operationId: detachIssuePullRequest
+      summary: 解除 Issue 与一个 PR 的关联（按关联行 id）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+        - $ref: '#/components/parameters/PullRequestLinkId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Issue 不存在（40405）或 PR 关联不存在（40412）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /api/recommendations:
     get:
@@ -3183,6 +3286,13 @@ components:
       schema:
         type: string
       description: Issue ID（UUID，非 INT-123/GH-123 短编号）
+    PullRequestLinkId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: PR 关联行 ID（UUID）
     VersionId:
       name: vid
       in: path
@@ -3366,6 +3476,22 @@ components:
       type: string
       enum: [idle, running, failed, completed]
       x-go-type: model.IssueSyncStatus
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    IssuePullRequestState:
+      type: string
+      enum: [open, closed, merged]
+      description: merged = GitHub 上 closed 且 merged_at 非空
+      x-go-type: model.IssuePullRequestState
+      x-go-type-import:
+        name: model
+        path: github.com/godbobo/fast_ship/server/internal/model
+    IssuePullRequestLinkOrigin:
+      type: string
+      enum: [manual, synced]
+      description: manual=用户显式 attach；synced=远端同步投影产生（清理逻辑只作用于 synced）
+      x-go-type: model.IssuePullRequestLinkOrigin
       x-go-type-import:
         name: model
         path: github.com/godbobo/fast_ship/server/internal/model
@@ -4015,6 +4141,13 @@ components:
         body:
           type: string
           description: Markdown；trim 后 1-8000 rune；重复 PUT 覆盖
+    AttachIssuePullRequestRequest:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: GitHub PR 链接，形如 https://github.com/<owner>/<repo>/pull/<number>（允许 http、www 前缀与尾部 /files、query、fragment 等）；其他字段由服务端从 GitHub 拉取
     IssueBatchFailure:
       type: object
       required: [id, error]
@@ -4290,6 +4423,97 @@ components:
           allOf:
             - $ref: '#/components/schemas/IssueCollabDoc'
           description: 未产出为 null
+    IssuePullRequest:
+      type: object
+      required: [id, issue_id, provider, repo_full_name, number, html_url, title, state, is_draft, author_login, head_ref, base_ref, merged_at, closed_at, link_origin, synced_at, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        issue_id:
+          type: string
+        provider:
+          type: string
+          description: 当前恒为 github；字段预留 gitlab
+        repo_full_name:
+          type: string
+          description: owner/repo；允许与项目配置的仓库不同（跨仓库 attach）
+        number:
+          type: integer
+        html_url:
+          type: string
+        title:
+          type: string
+        state:
+          $ref: '#/components/schemas/IssuePullRequestState'
+        is_draft:
+          type: boolean
+        author_login:
+          type: string
+        head_ref:
+          type: string
+        base_ref:
+          type: string
+        merged_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: state=merged 时有值
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+        link_origin:
+          $ref: '#/components/schemas/IssuePullRequestLinkOrigin'
+        synced_at:
+          type: string
+          format: date-time
+          description: 最近一次从 GitHub 刷新成功的时间
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    IssuePullRequestSummary:
+      type: object
+      required: [total, open, merged]
+      properties:
+        total:
+          type: integer
+        open:
+          type: integer
+          description: state=open 计数
+        merged:
+          type: integer
+          description: state=merged 计数
+      description: Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged
+    IssuePullRequestSyncFailure:
+      type: object
+      required: [id, error]
+      properties:
+        id:
+          type: string
+          description: 关联行 id（issue_pull_requests.id，detach 时用此 id）
+        error:
+          type: string
+          description: 失败原因，前缀带 repo_full_name#number 便于定位
+      description: PR 关联刷新失败明细；失败行保留旧数据
+    IssuePullRequestSyncResult:
+      type: object
+      required: [items, failures]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssuePullRequest'
+          description: 本轮刷新成功的关联行（无关联或无成功时为空数组）
+        failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssuePullRequestSyncFailure'
+          description: 逐行失败明细
+      description: syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
     Issue:
       type: object
       required: [id, project_id, source, sequence_number, reference, state, state_reason, title, body, body_html, author, created_at, updated_at, closed_at, unread_comments_count]
@@ -4343,6 +4567,14 @@ components:
         collab:
           $ref: '#/components/schemas/IssueCollabArea'
           description: omitempty；仅 Issue 详情响应携带，与 GET /collab 的 data 同形；列表项不出现
+        pull_requests:
+          type: array
+          items:
+            $ref: '#/components/schemas/IssuePullRequest'
+          description: omitempty；仅 Issue 详情响应携带（读取失败或无关联时缺省）；列表项不出现
+        pull_request_summary:
+          $ref: '#/components/schemas/IssuePullRequestSummary'
+          description: omitempty；仅 Issue 列表项携带的 PR 聚合计数；详情项不出现
     IssueComment:
       type: object
       required: [id, issue_id, source, github_comment_id, github_node_id, body, body_html, html_url, author, author_association, reactions, created_at, updated_at]

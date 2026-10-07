@@ -11,6 +11,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/service"
 	"github.com/golang-jwt/jwt/v5"
@@ -244,6 +245,38 @@ func (e *authMiddlewareEnv) jwtToken(userID, username, jti string) string {
 		panic(err)
 	}
 	return signed
+}
+
+// 错误码 → HTTP 状态映射必须遵守 OpenAPI 约定：502xx 是上游网关错误（502），
+// 其余 50xxx 才是内部错误（500）。
+func TestHandleAppError_MapsStatusByCodeRange(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct {
+		code       int
+		wantStatus int
+	}{
+		{40001, http.StatusBadRequest},
+		{40101, http.StatusUnauthorized},
+		{40301, http.StatusForbidden},
+		{40401, http.StatusNotFound},
+		{40901, http.StatusConflict},
+		{41201, http.StatusPreconditionFailed},
+		{50000, http.StatusInternalServerError},
+		{50200, http.StatusBadGateway},
+		{50201, http.StatusBadGateway},
+	}
+
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+		HandleAppError(c, errs.New(tc.code, "boom"))
+		if rec.Code != tc.wantStatus {
+			t.Fatalf("code %d: expected HTTP %d, got %d", tc.code, tc.wantStatus, rec.Code)
+		}
+	}
 }
 
 func decodeAuthEnvelope(t *testing.T, rec *httptest.ResponseRecorder, target any) {
