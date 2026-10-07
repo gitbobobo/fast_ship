@@ -88,7 +88,7 @@ Content-Type: application/json; charset=utf-8
 - attach：body 只传 `{"url":"https://github.com/<owner>/<repo>/pull/<n>"}`，支持 `/files`、query 等后缀。服务端自行去 GitHub 拉标题/状态/作者，拉取失败不落记录（502）。重复 attach 幂等，不产生第二行。
 - 读：详情 `GET /api/issues/{iid}` 的 `pull_requests[]` 是全量列表；列表项带 `pull_request_summary {total, open, merged}`（closed = total - open - merged）。
 - sync：返回 `{items, failures}`，每条 PR 是独立失败域——某条拉不到（404/限流）只进 `failures[]`，其余照常刷新；`failures[].id` 是关联行 id。
-- detach：`DELETE /api/issues/{iid}/pull-requests/{id}`，幂等。
+- detach：`DELETE /api/issues/{iid}/pull-requests/{id}`；不存在的关联返回 40412（非幂等，重复调用会报错）。
 - PR 状态与 `workflow_status` 无耦合：PR 全合并不等于需求完成，`internal-meta` 仍要自己推。
 - `link_origin=manual` 的关联永不被 GitHub 同步投影的清理逻辑误删。
 
