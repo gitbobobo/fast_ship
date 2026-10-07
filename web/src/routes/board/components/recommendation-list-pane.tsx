@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 
 type Priority = IssueRecommendation["priority"];
 
-/** 优先级分组顺序；组内条目保持服务端返回的 updated_at 降序。 */
+/** 优先级分组顺序；组内条目顺序由调用方排好（推荐中按 updated_at、已延后按 deferred_at，均降序）。 */
 export const RECOMMENDATION_PRIORITY_GROUPS: {
   priority: Priority;
   label: string;

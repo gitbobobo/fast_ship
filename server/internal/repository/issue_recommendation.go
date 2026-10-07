@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -55,12 +57,6 @@ func (r *IssueRecommendationRepository) ReplaceDependenciesTx(tx *gorm.DB, issue
 	return tx.Create(&deps).Error
 }
 
-func (r *IssueRecommendationRepository) Delete(issueID string) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		return r.DeleteTx(tx, issueID)
-	})
-}
-
 // DeleteTx 删除推荐行及其依赖行（依赖行外键指向 issues，不随推荐行级联，需显式删）。
 func (r *IssueRecommendationRepository) DeleteTx(tx *gorm.DB, issueID string) error {
 	if err := tx.Where("issue_id = ?", issueID).Delete(&model.RecommendationDependency{}).Error; err != nil {
@@ -69,7 +65,30 @@ func (r *IssueRecommendationRepository) DeleteTx(tx *gorm.DB, issueID string) er
 	return tx.Where("issue_id = ?", issueID).Delete(&model.IssueRecommendation{}).Error
 }
 
-// ListByProjectIDs 返回指定项目的推荐，按 priority 降序（high>medium>low）、updated_at 降序排序。
+// DeferTx 把推荐行置为延后态：写 deferred_at/defer_note 并刷新 updated_at；重复调用覆盖备注。
+func (r *IssueRecommendationRepository) DeferTx(tx *gorm.DB, issueID, note string, at time.Time) error {
+	return tx.Model(&model.IssueRecommendation{}).
+		Where("issue_id = ?", issueID).
+		Updates(map[string]any{
+			"deferred_at": at,
+			"defer_note":  note,
+			"updated_at":  at,
+		}).Error
+}
+
+// RestoreTx 撤销延后：清空 deferred_at/defer_note 并刷新 updated_at。
+func (r *IssueRecommendationRepository) RestoreTx(tx *gorm.DB, issueID string, at time.Time) error {
+	return tx.Model(&model.IssueRecommendation{}).
+		Where("issue_id = ?", issueID).
+		Updates(map[string]any{
+			"deferred_at": nil,
+			"defer_note":  "",
+			"updated_at":  at,
+		}).Error
+}
+
+// ListByProjectIDs 返回指定项目的推荐：active（未延后）在前、延后项在后；组内按 priority
+// 降序（high>medium>low），active 组再按 updated_at 降序、延后组按 deferred_at 降序，issue_id 兜底稳定序。
 func (r *IssueRecommendationRepository) ListByProjectIDs(projectIDs []string) ([]model.IssueRecommendation, error) {
 	recs := make([]model.IssueRecommendation, 0)
 	if len(projectIDs) == 0 {
@@ -77,7 +96,10 @@ func (r *IssueRecommendationRepository) ListByProjectIDs(projectIDs []string) ([
 	}
 	err := r.db.
 		Where("project_id IN ?", projectIDs).
-		Order("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, updated_at DESC, issue_id ASC").
+		Order("CASE WHEN deferred_at IS NULL THEN 0 ELSE 1 END ASC").
+		Order("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END ASC").
+		Order("CASE WHEN deferred_at IS NULL THEN updated_at ELSE deferred_at END DESC").
+		Order("issue_id ASC").
 		Find(&recs).Error
 	return recs, err
 }

@@ -8,6 +8,24 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for IssueRecommendationStatus.
+const (
+	Active   IssueRecommendationStatus = "active"
+	Deferred IssueRecommendationStatus = "deferred"
+)
+
+// Valid indicates whether the value is a known member of the IssueRecommendationStatus enum.
+func (e IssueRecommendationStatus) Valid() bool {
+	switch e {
+	case Active:
+		return true
+	case Deferred:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UpdateIssueRequestStateReason.
 const (
 	UpdateIssueRequestStateReasonCompleted  UpdateIssueRequestStateReason = "completed"
@@ -318,6 +336,12 @@ type DashboardProjectOpenIssuePoint struct {
 	OpenIssueCount int    `json:"open_issue_count"`
 	ProjectId      string `json:"project_id"`
 	ProjectName    string `json:"project_name"`
+}
+
+// DeferIssueRecommendationRequest defines model for DeferIssueRecommendationRequest.
+type DeferIssueRecommendationRequest struct {
+	// Note 延后备注，trim 后 ≤500 rune；缺省或空串表示无备注
+	Note *string `json:"note,omitempty"`
 }
 
 // Document defines model for Document.
@@ -639,13 +663,25 @@ type IssueRecommendation struct {
 	CreatedAt string `json:"created_at"`
 
 	// CreatedBy 提交者 API Key 名称
-	CreatedBy    string                      `json:"created_by"`
+	CreatedBy string `json:"created_by"`
+
+	// DeferNote 延后备注；无备注时为 null
+	DeferNote *string `json:"defer_note"`
+
+	// DeferredAt 延后时间；status=active 时为 null
+	DeferredAt   *string                     `json:"deferred_at"`
 	Dependencies []RecommendationDependency  `json:"dependencies"`
 	Issue        RecommendationIssueSummary  `json:"issue"`
 	Priority     IssueRecommendationPriority `json:"priority"`
 	Reason       string                      `json:"reason"`
-	UpdatedAt    string                      `json:"updated_at"`
+
+	// Status deferred 表示被用户延后；延后项对 Agent 不可再推荐（PUT 返回 40911）
+	Status    IssueRecommendationStatus `json:"status"`
+	UpdatedAt string                    `json:"updated_at"`
 }
+
+// IssueRecommendationStatus deferred 表示被用户延后；延后项对 Agent 不可再推荐（PUT 返回 40911）
+type IssueRecommendationStatus string
 
 // IssueRecommendationPriority defines model for IssueRecommendationPriority.
 type IssueRecommendationPriority = model.IssueRecommendationPriority
@@ -1614,6 +1650,26 @@ type UpsertIssueRecommendation200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// RestoreIssueRecommendation200JSONResponseBody defines parameters for RestoreIssueRecommendation.
+type RestoreIssueRecommendation200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                  `json:"code"`
+	Data *IssueRecommendation `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// DeferIssueRecommendation200JSONResponseBody defines parameters for DeferIssueRecommendation.
+type DeferIssueRecommendation200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                  `json:"code"`
+	Data *IssueRecommendation `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // UpsertShipHook200JSONResponseBody defines parameters for UpsertShipHook.
 type UpsertShipHook200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -2220,6 +2276,9 @@ type UpdateIssueInternalMetaJSONRequestBody UpdateIssueInternalMetaJSONBody
 
 // UpsertIssueRecommendationJSONRequestBody defines body for UpsertIssueRecommendation for application/json ContentType.
 type UpsertIssueRecommendationJSONRequestBody = UpsertIssueRecommendationRequest
+
+// DeferIssueRecommendationJSONRequestBody defines body for DeferIssueRecommendation for application/json ContentType.
+type DeferIssueRecommendationJSONRequestBody = DeferIssueRecommendationRequest
 
 // UpsertShipHookJSONRequestBody defines body for UpsertShipHook for application/json ContentType.
 type UpsertShipHookJSONRequestBody = UpsertShipHookRequest

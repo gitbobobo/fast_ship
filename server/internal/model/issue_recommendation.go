@@ -25,8 +25,12 @@ type IssueRecommendation struct {
 	Reason    string                      `gorm:"type:text" json:"reason"`
 	Priority  IssueRecommendationPriority `gorm:"type:text;not null;default:medium" json:"priority"`
 	CreatedBy string                      `gorm:"type:text" json:"created_by"`
-	CreatedAt time.Time                   `gorm:"not null" json:"created_at"`
-	UpdatedAt time.Time                   `gorm:"not null" json:"updated_at"`
+	// DeferredAt 非 NULL 即延后态：整条推荐冻结保留，Agent 不可再推荐
+	DeferredAt *time.Time `gorm:"type:timestamp" json:"deferred_at"`
+	// DeferNote 延后备注，空串表示无备注（列非空，存量行迁移后默认 ''）
+	DeferNote string    `gorm:"type:text;not null;default:''" json:"defer_note"`
+	CreatedAt time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }

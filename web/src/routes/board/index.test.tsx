@@ -72,6 +72,8 @@ vi.mock("@/lib/hooks/use-recommendations", () => ({
     isLoading: false,
     isError: false,
   }),
+  useDeferRecommendation: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useRestoreRecommendation: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useRemoveRecommendation: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 

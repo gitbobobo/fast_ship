@@ -29,7 +29,10 @@ import {
   useDeleteIssueShipHook,
 } from "@/lib/hooks/use-issues";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
-import { useRecommendations } from "@/lib/hooks/use-recommendations";
+import {
+  useRecommendations,
+  useRestoreRecommendation,
+} from "@/lib/hooks/use-recommendations";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { GITHUB_LOCAL_ASSET_NOTICE } from "@/lib/utils/github-media-proxy";
 import { toast } from "sonner";
@@ -214,6 +217,14 @@ vi.mock("@/lib/hooks/use-issue-prompt", () => ({
 
 vi.mock("@/lib/hooks/use-recommendations", () => ({
   useRecommendations: vi.fn(() => ({ data: undefined })),
+  useDeferRecommendation: vi.fn(() => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  })),
+  useRestoreRecommendation: vi.fn(() => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  })),
   useRemoveRecommendation: vi.fn(() => ({
     mutateAsync: vi.fn(),
     isPending: false,
@@ -1821,6 +1832,9 @@ describe("Issue pages", () => {
             },
             reason: "先做这个能解锁后续工作",
             priority: "high",
+            status: "active",
+            deferred_at: null,
+            defer_note: null,
             created_by: "ci-bot",
             created_at: "2026-08-22T00:00:00Z",
             updated_at: "2026-08-22T00:00:00Z",
@@ -1882,6 +1896,9 @@ describe("Issue pages", () => {
             },
             reason: "先做这个能解锁后续工作",
             priority: "high",
+            status: "active",
+            deferred_at: null,
+            defer_note: null,
             created_by: "ci-bot",
             created_at: "2026-08-22T00:00:00Z",
             updated_at: "2026-08-22T00:00:00Z",
@@ -1924,5 +1941,67 @@ describe("Issue pages", () => {
     expect(
       screen.queryByRole("region", { name: "推荐" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows a muted deferred banner for a deferred recommendation and restores it", async () => {
+    mockIssueDetailData();
+    const restoreMutateAsync = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(useRestoreRecommendation).mockReturnValue({
+      mutateAsync: restoreMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useRestoreRecommendation>);
+    vi.mocked(useRecommendations).mockReturnValue({
+      data: {
+        items: [
+          {
+            issue: {
+              id: "issue-1",
+              project_id: "proj-1",
+              project_name: "Alpha App",
+              source: "github",
+              sequence_number: 42,
+              reference: "GH-42",
+              title: "Crash on launch",
+              state: "open",
+              workflow_status: "todo",
+            },
+            reason: "先做这个能解锁后续工作",
+            priority: "high",
+            status: "deferred",
+            deferred_at: "2026-08-20T00:00:00Z",
+            defer_note: "等上游接口定稿",
+            created_by: "ci-bot",
+            created_at: "2026-08-22T00:00:00Z",
+            updated_at: "2026-08-22T00:00:00Z",
+            dependencies: [],
+          },
+        ],
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useRecommendations>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    // 延后态展示灰色横幅（延后时间 + 备注），而不是紫色推荐横幅
+    const banner = await screen.findByRole("region", { name: "已延后推荐" });
+    expect(within(banner).getByText(/已延后 · /)).toBeInTheDocument();
+    expect(within(banner).getByText("等上游接口定稿")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "推荐" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      within(banner).getByRole("button", { name: "移回推荐" }),
+    );
+
+    await waitFor(() =>
+      expect(restoreMutateAsync).toHaveBeenCalledWith("issue-1"),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("已移回推荐"),
+    );
   });
 });

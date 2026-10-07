@@ -3100,7 +3100,7 @@ Agent 推荐任务队列
 
 <!-- operationId: listIssueRecommendations -->
 
-推荐任务列表（一次全量，无分页；按 priority 降序再按 updated_at 降序）
+推荐任务列表（一次全量，无分页；active 在前 deferred 在后，组内按 priority 降序）
 
 **鉴权**：JWT+API Key
 
@@ -3132,6 +3132,9 @@ Agent 推荐任务队列
 | `items[].reason` | string | 是 |  |
 | `items[].priority` | string（enum: high \| medium \| low） | 是 |  |
 | `items[].created_by` | string | 是 | 提交者 API Key 名称 |
+| `items[].status` | string（enum: active \| deferred） | 是 | deferred 表示被用户延后；延后项对 Agent 不可再推荐（PUT 返回 40911） |
+| `items[].deferred_at` | string（date-time，可空） | 是 | 延后时间；status=active 时为 null |
+| `items[].defer_note` | string（可空） | 是 | 延后备注；无备注时为 null |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 | `items[].dependencies` | object[] | 是 |  |
@@ -3157,7 +3160,7 @@ Agent 推荐任务队列
 
 写入/覆盖推荐（仅 API Key；JWT 返回 40303）
 
-覆盖 upsert：同一 Issue 重复 PUT 整体替换 reason/priority/dependencies/created_by，保留原 created_at。目标须 state=open 且 workflow_status 为未设置或 todo，否则 40910。dependencies 整组替换，≤20 个 Issue UUID，不含自身；依赖须属当前用户的项目，不存在或越权统一 40405。
+覆盖 upsert：同一 Issue 重复 PUT 整体替换 reason/priority/dependencies/created_by，保留原 created_at。目标须 state=open 且 workflow_status 为未设置或 todo，否则 40910。dependencies 整组替换，≤20 个 Issue UUID，不含自身；依赖须属当前用户的项目，不存在或越权统一 40405。已被用户延后的推荐不可再写入（40911）。
 
 **鉴权**：JWT+API Key
 
@@ -3198,6 +3201,9 @@ Agent 推荐任务队列
 | `reason` | string | 是 |  |
 | `priority` | string（enum: high \| medium \| low） | 是 |  |
 | `created_by` | string | 是 | 提交者 API Key 名称 |
+| `status` | string（enum: active \| deferred） | 是 | deferred 表示被用户延后；延后项对 Agent 不可再推荐（PUT 返回 40911） |
+| `deferred_at` | string（date-time，可空） | 是 | 延后时间；status=active 时为 null |
+| `defer_note` | string（可空） | 是 | 延后备注；无备注时为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 | `dependencies` | object[] | 是 |  |
@@ -3217,14 +3223,14 @@ Agent 推荐任务队列
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | JWT 调用仅限 API Key 的端点（40303） |
 | 404 | 目标或依赖 Issue 不存在（40405）、项目不存在（40401） |
-| 409 | Issue 当前状态不可被推荐（40910） |
+| 409 | Issue 当前状态不可被推荐（40910）或推荐已被延后（40911） |
 | 500 | 服务器内部错误（50000） |
 
 ### DELETE `/api/issues/{iid}/recommendation`
 
 <!-- operationId: deleteIssueRecommendation -->
 
-移除推荐（JWT 与 API Key 均可）
+移除推荐（JWT 与 API Key 均可；删除=遗忘可再推荐，延后项仅 JWT 可删）
 
 **鉴权**：JWT+API Key
 
@@ -3246,6 +3252,137 @@ Agent 推荐任务队列
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 推荐不存在（40411）或项目不存在（40401） |
+| 409 | API Key 尝试删除延后态推荐（40911）；延后项须 JWT 删除 |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/issues/{iid}/recommendation/defer`
+
+<!-- operationId: deferIssueRecommendation -->
+
+延后推荐（仅 JWT）
+
+冻结整条推荐（reason/priority/dependencies/created_by 原样保留），从推荐列表的 active 组消失且 Agent 不可再推荐（PUT recommendation 返回 40911）。仅作用于已存在的推荐行；重复调用覆盖 note 并刷新 deferred_at。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `iid` | string | 是 | Issue ID（UUID，非 INT-123/GH-123 短编号） |
+
+**请求体**
+
+`application/json`，可选。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `note` | string（长度 ≤500） | 否 | 延后备注，trim 后 ≤500 rune；缺省或空串表示无备注 |
+
+**成功响应**
+
+**200** 延后后的推荐
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `issue` | object | 是 |  |
+| `issue.id` | string | 是 |  |
+| `issue.project_id` | string | 是 |  |
+| `issue.project_name` | string | 是 |  |
+| `issue.source` | string（enum: github \| internal） | 是 |  |
+| `issue.sequence_number` | integer | 是 |  |
+| `issue.reference` | string | 是 |  |
+| `issue.title` | string | 是 |  |
+| `issue.state` | string（enum: open \| closed） | 是 |  |
+| `issue.workflow_status` | string（enum: "" \| todo \| in_progress \| done） | 是 | 空串表示未设置（重置语义） |
+| `reason` | string | 是 |  |
+| `priority` | string（enum: high \| medium \| low） | 是 |  |
+| `created_by` | string | 是 | 提交者 API Key 名称 |
+| `status` | string（enum: active \| deferred） | 是 | deferred 表示被用户延后；延后项对 Agent 不可再推荐（PUT 返回 40911） |
+| `deferred_at` | string（date-time，可空） | 是 | 延后时间；status=active 时为 null |
+| `defer_note` | string（可空） | 是 | 延后备注；无备注时为 null |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+| `dependencies` | object[] | 是 |  |
+| `dependencies[].issue_id` | string | 是 |  |
+| `dependencies[].title` | string | 是 |  |
+| `dependencies[].state` | string（enum: open \| closed） | 是 |  |
+| `dependencies[].workflow_status` | string（enum: "" \| todo \| in_progress \| done） | 是 | 空串表示未设置（重置语义） |
+| `dependencies[].project_id` | string | 是 |  |
+| `dependencies[].sequence_number` | integer | 是 |  |
+| `dependencies[].reference` | string | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | note 超长（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | API Key 调用仅限 JWT 的端点（40301） |
+| 404 | 推荐不存在（40411）或项目不存在（40401） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/issues/{iid}/recommendation/defer`
+
+<!-- operationId: restoreIssueRecommendation -->
+
+恢复已延后的推荐（仅 JWT）
+
+清空 deferred_at/defer_note 并把推荐移回 active 组，updated_at 刷新；未延后时调用为幂等成功。Issue 非 open 时返回 40910。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `iid` | string | 是 | Issue ID（UUID，非 INT-123/GH-123 短编号） |
+
+**成功响应**
+
+**200** 恢复后的推荐
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `issue` | object | 是 |  |
+| `issue.id` | string | 是 |  |
+| `issue.project_id` | string | 是 |  |
+| `issue.project_name` | string | 是 |  |
+| `issue.source` | string（enum: github \| internal） | 是 |  |
+| `issue.sequence_number` | integer | 是 |  |
+| `issue.reference` | string | 是 |  |
+| `issue.title` | string | 是 |  |
+| `issue.state` | string（enum: open \| closed） | 是 |  |
+| `issue.workflow_status` | string（enum: "" \| todo \| in_progress \| done） | 是 | 空串表示未设置（重置语义） |
+| `reason` | string | 是 |  |
+| `priority` | string（enum: high \| medium \| low） | 是 |  |
+| `created_by` | string | 是 | 提交者 API Key 名称 |
+| `status` | string（enum: active \| deferred） | 是 | deferred 表示被用户延后；延后项对 Agent 不可再推荐（PUT 返回 40911） |
+| `deferred_at` | string（date-time，可空） | 是 | 延后时间；status=active 时为 null |
+| `defer_note` | string（可空） | 是 | 延后备注；无备注时为 null |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+| `dependencies` | object[] | 是 |  |
+| `dependencies[].issue_id` | string | 是 |  |
+| `dependencies[].title` | string | 是 |  |
+| `dependencies[].state` | string（enum: open \| closed） | 是 |  |
+| `dependencies[].workflow_status` | string（enum: "" \| todo \| in_progress \| done） | 是 | 空串表示未设置（重置语义） |
+| `dependencies[].project_id` | string | 是 |  |
+| `dependencies[].sequence_number` | integer | 是 |  |
+| `dependencies[].reference` | string | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | API Key 调用仅限 JWT 的端点（40301） |
+| 404 | 推荐不存在（40411）或项目不存在（40401） |
+| 409 | Issue 当前状态不可被推荐（40910，如已关闭） |
 | 500 | 服务器内部错误（50000） |
 
 ## artifacts

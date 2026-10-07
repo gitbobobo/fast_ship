@@ -1851,3 +1851,119 @@ func TestRouterIssueRecommendationEndpoints(t *testing.T) {
 		t.Fatalf("expected code %d, got %d", errs.ErrRecommendationNotFound.Code, notFound.Code)
 	}
 }
+
+func TestRouterIssueRecommendationDefer(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "defer-user", "defer@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	issue := createRouterTestIssue(t, env.db, project.ID)
+
+	rawKey := "RECDeferKEY1234567890"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    auth.UserID,
+		Name:      "CI-Defer",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	apiKeyAuth := "Bearer " + service.FormatApiKey(rawKey)
+	jwtAuth := "Bearer " + auth.Token
+	recPath := "/api/issues/" + issue.ID + "/recommendation"
+	deferPath := recPath + "/defer"
+
+	doReq := func(method, authHeader, path string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", authHeader)
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+		return rec
+	}
+	expectErrCode := func(rec *httptest.ResponseRecorder, wantHTTP, wantCode int, label string) {
+		t.Helper()
+		if rec.Code != wantHTTP {
+			t.Fatalf("%s: expected %d, got %d: %s", label, wantHTTP, rec.Code, rec.Body.String())
+		}
+		var env routerEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("%s: decode envelope: %v", label, err)
+		}
+		if env.Code != wantCode {
+			t.Fatalf("%s: expected code %d, got %d", label, wantCode, env.Code)
+		}
+	}
+
+	// 推荐不存在时 defer → 40411
+	expectErrCode(doReq(http.MethodPut, jwtAuth, deferPath, nil), http.StatusNotFound, errs.ErrRecommendationNotFound.Code, "defer missing rec")
+
+	// API Key 调 defer/restore 被 RequireJWT 拒绝 → 40301
+	expectErrCode(doReq(http.MethodPut, apiKeyAuth, deferPath, nil), http.StatusForbidden, errs.ErrApiKeyForbidden.Code, "api-key defer")
+	expectErrCode(doReq(http.MethodDelete, apiKeyAuth, deferPath, nil), http.StatusForbidden, errs.ErrApiKeyForbidden.Code, "api-key restore")
+
+	if rec := doReq(http.MethodPut, apiKeyAuth, recPath, []byte(`{"reason":"先做这个","priority":"high"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("seed upsert expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	type recItem struct {
+		Status     string  `json:"status"`
+		DeferredAt *string `json:"deferred_at"`
+		DeferNote  *string `json:"defer_note"`
+		Reason     string  `json:"reason"`
+	}
+
+	// JWT defer 带 note → 200，响应含 status/deferred_at/defer_note
+	deferRec := doReq(http.MethodPut, jwtAuth, deferPath, []byte(`{"note":"下周再看"}`))
+	if deferRec.Code != http.StatusOK {
+		t.Fatalf("defer expected 200, got %d: %s", deferRec.Code, deferRec.Body.String())
+	}
+	var deferred recItem
+	decodeRouterEnvelope(t, deferRec, &deferred)
+	if deferred.Status != "deferred" || deferred.DeferredAt == nil || deferred.DeferNote == nil || *deferred.DeferNote != "下周再看" || deferred.Reason != "先做这个" {
+		t.Fatalf("unexpected defer response: %+v", deferred)
+	}
+
+	// 延后项：API Key 再 PUT → 40911
+	expectErrCode(doReq(http.MethodPut, apiKeyAuth, recPath, []byte(`{"reason":"再推荐"}`)), http.StatusConflict, errs.ErrRecommendationDeferred.Code, "api-key upsert deferred")
+
+	// 延后项：API Key DELETE → 40911；JWT DELETE → 200（彻底移除）
+	expectErrCode(doReq(http.MethodDelete, apiKeyAuth, recPath, nil), http.StatusConflict, errs.ErrRecommendationDeferred.Code, "api-key delete deferred")
+
+	// GET 列表中延后项仍返回且带三字段
+	listRec := doReq(http.MethodGet, jwtAuth, "/api/recommendations?project_id="+project.ID, nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list expected 200, got %d: %s", listRec.Code, listRec.Body.String())
+	}
+	var listResult struct {
+		Items []recItem `json:"items"`
+	}
+	decodeRouterEnvelope(t, listRec, &listResult)
+	if len(listResult.Items) != 1 || listResult.Items[0].Status != "deferred" {
+		t.Fatalf("expected deferred item in list, got %+v", listResult.Items)
+	}
+
+	// JWT restore（DELETE defer，无 body）→ 200，移回 active
+	restoreRec := doReq(http.MethodDelete, jwtAuth, deferPath, nil)
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("restore expected 200, got %d: %s", restoreRec.Code, restoreRec.Body.String())
+	}
+	var restored recItem
+	decodeRouterEnvelope(t, restoreRec, &restored)
+	if restored.Status != "active" || restored.DeferredAt != nil || restored.DeferNote != nil {
+		t.Fatalf("unexpected restore response: %+v", restored)
+	}
+
+	// 恢复后可再推荐；空 body defer 也容忍
+	if rec := doReq(http.MethodPut, apiKeyAuth, recPath, []byte(`{"reason":"再推荐"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("re-upsert expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(http.MethodPut, jwtAuth, deferPath, nil); rec.Code != http.StatusOK {
+		t.Fatalf("empty-body defer expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// JWT DELETE 延后项 = 彻底移除
+	if rec := doReq(http.MethodDelete, jwtAuth, recPath, nil); rec.Code != http.StatusOK {
+		t.Fatalf("jwt delete deferred expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

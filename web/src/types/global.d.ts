@@ -351,6 +351,9 @@ interface IssueRecommendation {
   issue: RecommendationIssueSummary;
   reason: string;
   priority: "high" | "medium" | "low";
+  status: "active" | "deferred";
+  deferred_at: string | null;
+  defer_note: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
