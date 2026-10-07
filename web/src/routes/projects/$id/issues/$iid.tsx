@@ -38,6 +38,7 @@ import {
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
 import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
+import { IssuePullRequestsCard } from "@/components/issues/issue-pull-requests-card";
 import { IssueShipHookCard } from "@/components/issues/issue-ship-hook-card";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
@@ -1438,6 +1439,12 @@ export default function IssueDetailPage() {
         issueId={issue.id}
         projectId={issue.project_id}
         shipHook={issue.ship_hook}
+      />
+
+      <IssuePullRequestsCard
+        issueId={issue.id}
+        projectId={issue.project_id}
+        pullRequests={issue.pull_requests}
       />
 
       <Card>

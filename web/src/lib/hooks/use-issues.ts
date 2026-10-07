@@ -484,3 +484,48 @@ export function useDeleteIssueShipHook(issueId: string, projectId?: string) {
     },
   });
 }
+
+export function useAttachIssuePullRequest(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (url: string) => issueApi.attachPullRequest(issueId, url),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "issues"],
+        });
+      }
+    },
+  });
+}
+
+export function useDetachIssuePullRequest(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (linkId: string) => issueApi.detachPullRequest(issueId, linkId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "issues"],
+        });
+      }
+    },
+  });
+}
+
+export function useSyncIssuePullRequests(issueId: string, projectId?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => issueApi.syncPullRequests(issueId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+      if (projectId) {
+        queryClient.invalidateQueries({
+          queryKey: ["projects", projectId, "issues"],
+        });
+      }
+    },
+  });
+}

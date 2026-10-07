@@ -57,6 +57,7 @@ import {
 } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
+import { IssuePullRequestBadge } from "@/components/issues/issue-pull-request-badge";
 import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
 import { IssueCommentCountMeta } from "@/components/issues/issue-comment-count-meta";
 import { cn } from "@/lib/utils";
@@ -827,6 +828,9 @@ export default function IssuesPage() {
                             status={issue.internal_meta?.workflow_status}
                           />
                           <IssueShipHookBadge hook={issue.ship_hook} />
+                          <IssuePullRequestBadge
+                            summary={issue.pull_request_summary}
+                          />
                           {(issue.source === "github"
                             ? issue.github?.labels ?? []
                             : issue.internal_meta?.labels ?? []

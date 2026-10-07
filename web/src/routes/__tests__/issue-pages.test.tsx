@@ -27,6 +27,9 @@ import {
   useUploadIssueAsset,
   useUpsertIssueShipHook,
   useDeleteIssueShipHook,
+  useAttachIssuePullRequest,
+  useDetachIssuePullRequest,
+  useSyncIssuePullRequests,
 } from "@/lib/hooks/use-issues";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import {
@@ -131,6 +134,33 @@ function buildInternalIssue(overrides: Partial<Issue> = {}): Issue {
   };
 }
 
+function buildIssuePullRequest(
+  overrides: Partial<IssuePullRequest> = {},
+): IssuePullRequest {
+  return {
+    id: "link-1",
+    issue_id: "issue-1",
+    project_id: "proj-1",
+    provider: "github",
+    repo_full_name: "acme/alpha",
+    number: 123,
+    html_url: "https://github.com/acme/alpha/pull/123",
+    title: "Fix crash on launch",
+    state: "open",
+    is_draft: false,
+    author_login: "bob",
+    head_ref: "fix/crash",
+    base_ref: "main",
+    merged_at: null,
+    closed_at: null,
+    link_origin: "manual",
+    synced_at: "2026-04-12T10:00:00Z",
+    created_at: "2026-04-12T10:00:00Z",
+    updated_at: "2026-04-12T10:00:00Z",
+    ...overrides,
+  };
+}
+
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),
@@ -191,6 +221,9 @@ vi.mock("@/lib/hooks/use-issues", async (importOriginal) => {
     useUploadIssueAsset: vi.fn(),
     useUpsertIssueShipHook: vi.fn(),
     useDeleteIssueShipHook: vi.fn(),
+    useAttachIssuePullRequest: vi.fn(),
+    useDetachIssuePullRequest: vi.fn(),
+    useSyncIssuePullRequests: vi.fn(),
   };
 });
 
@@ -532,6 +565,18 @@ describe("Issue pages", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useDeleteIssueShipHook>);
+    vi.mocked(useAttachIssuePullRequest).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useAttachIssuePullRequest>);
+    vi.mocked(useDetachIssuePullRequest).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDetachIssuePullRequest>);
+    vi.mocked(useSyncIssuePullRequests).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useSyncIssuePullRequests>);
     vi.mocked(useIssueChecklistSuggestions).mockReturnValue({
       mutateAsync: vi.fn().mockResolvedValue({
         items: [{ title: "补充复现路径" }, { title: "确认影响版本" }],
@@ -1649,6 +1694,196 @@ describe("Issue pages", () => {
     expect(screen.getByText("正在执行发货后动作，请稍候")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "修改" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument();
+  });
+
+  it("shows linked pull requests with state badges on issue detail page", () => {
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        pull_requests: [
+          buildIssuePullRequest({ is_draft: true }),
+          buildIssuePullRequest({
+            id: "link-2",
+            number: 124,
+            html_url: "https://github.com/acme/alpha/pull/124",
+            title: "Refactor uploader",
+            state: "merged",
+            is_draft: false,
+            author_login: "carol",
+            head_ref: "refactor/uploader",
+            merged_at: "2026-04-12T11:00:00Z",
+          }),
+        ],
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(screen.getByText("实现 PR")).toBeInTheDocument();
+    const link = screen.getByRole("link", {
+      name: "acme/alpha#123 Fix crash on launch",
+    });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://github.com/acme/alpha/pull/123",
+    );
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(screen.getByText("Draft")).toBeInTheDocument();
+    expect(screen.getByText("Merged")).toBeInTheDocument();
+    expect(screen.getByText("@bob · fix/crash → main")).toBeInTheDocument();
+  });
+
+  it("shows pull request empty state with attach input", () => {
+    mockIssueDetailData();
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(screen.getByText("实现 PR")).toBeInTheDocument();
+    expect(screen.getByText("暂无关联的 PR")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("粘贴 PR 链接")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "刷新 PR 状态" }),
+    ).toBeDisabled();
+  });
+
+  it("attaches a pull request url from the issue detail page", async () => {
+    const user = userEvent.setup();
+    const attachMutateAsync = vi.fn().mockResolvedValue({
+      data: buildIssuePullRequest(),
+    });
+    mockIssueDetailData();
+    vi.mocked(useAttachIssuePullRequest).mockReturnValue({
+      mutateAsync: attachMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useAttachIssuePullRequest>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.type(
+      screen.getByPlaceholderText("粘贴 PR 链接"),
+      "  https://github.com/acme/alpha/pull/123  ",
+    );
+    await user.click(screen.getByRole("button", { name: "添加" }));
+
+    await waitFor(() =>
+      expect(attachMutateAsync).toHaveBeenCalledWith(
+        "https://github.com/acme/alpha/pull/123",
+      ),
+    );
+    expect(toast.success).toHaveBeenCalledWith("已关联 PR");
+  });
+
+  it("detaches a pull request after confirmation", async () => {
+    const user = userEvent.setup();
+    const detachMutateAsync = vi.fn().mockResolvedValue({ data: null });
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        pull_requests: [buildIssuePullRequest()],
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+    vi.mocked(useDetachIssuePullRequest).mockReturnValue({
+      mutateAsync: detachMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useDetachIssuePullRequest>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "移除 acme/alpha#123" }),
+    );
+    expect(screen.getByText("移除 PR 关联？")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认移除" }));
+
+    await waitFor(() =>
+      expect(detachMutateAsync).toHaveBeenCalledWith("link-1"),
+    );
+    expect(toast.success).toHaveBeenCalledWith("已移除关联");
+  });
+
+  it("syncs pull requests and lists per-row failures", async () => {
+    const user = userEvent.setup();
+    const syncMutateAsync = vi.fn().mockResolvedValue({
+      data: {
+        items: [],
+        failures: [{ id: "link-1", error: "acme/alpha#123 拉取失败" }],
+      },
+    });
+    mockIssueDetailData();
+    vi.mocked(useIssue).mockReturnValue({
+      data: buildGitHubIssue({
+        id: "issue-1",
+        title: "Crash on launch",
+        reference: "GH-42",
+        pull_requests: [buildIssuePullRequest()],
+      }),
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+    vi.mocked(useSyncIssuePullRequests).mockReturnValue({
+      mutateAsync: syncMutateAsync,
+      isPending: false,
+    } as unknown as ReturnType<typeof useSyncIssuePullRequests>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "刷新 PR 状态" }));
+
+    await waitFor(() => expect(syncMutateAsync).toHaveBeenCalled());
+    expect(
+      await screen.findByText("acme/alpha#123 拉取失败"),
+    ).toBeInTheDocument();
+    expect(toast.error).toHaveBeenCalledWith("1 个 PR 刷新失败");
+  });
+
+  it("shows pull request merged count on issues list", async () => {
+    vi.mocked(useIssues).mockReturnValue({
+      data: {
+        items: [
+          buildGitHubIssue({
+            id: "issue-prs",
+            title: "Issue with PRs",
+            reference: "GH-20",
+            pull_request_summary: { total: 3, open: 1, merged: 2 },
+          }),
+        ],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssues>);
+
+    renderWithRoute(<IssuesPage />, {
+      path: "/issues",
+      initialEntry: "/issues?project=proj-1",
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("2/3 已合并")).toBeInTheDocument(),
+    );
   });
 
   it("shows pending and failed ship hook badges on issues list", async () => {
