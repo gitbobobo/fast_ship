@@ -63,6 +63,7 @@ type Issue struct {
 	GitHubMeta     *IssueGitHubMeta     `gorm:"foreignKey:IssueID" json:"-"`
 	Comments       []IssueComment       `gorm:"foreignKey:IssueID" json:"-"`
 	TimelineEvents []IssueTimelineEvent `gorm:"foreignKey:IssueID" json:"-"`
+	PullRequests   []IssuePullRequest   `gorm:"foreignKey:IssueID" json:"-"`
 }
 
 func (Issue) TableName() string {

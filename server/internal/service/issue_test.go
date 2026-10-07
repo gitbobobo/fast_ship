@@ -233,6 +233,8 @@ type fakeIssueGitHubClient struct {
 	createIssueCalls   []fakeCreateIssueCall
 	createCommentCalls []fakeCreateCommentCall
 	updateIssueCalls   []fakeUpdateIssueCall
+	pullRequests       map[int]*gh.PullRequest
+	pullRequestErr     error
 }
 
 type fakeCreateIssueCall struct {
@@ -312,6 +314,17 @@ func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body strin
 		Body:  body,
 	})
 	return f.createdIssue, f.createIssueErr
+}
+
+func (f *fakeIssueGitHubClient) GetPullRequest(_ context.Context, number int) (*gh.PullRequest, error) {
+	if f.pullRequestErr != nil {
+		return nil, f.pullRequestErr
+	}
+	pr, ok := f.pullRequests[number]
+	if !ok {
+		return nil, fmt.Errorf("pull request %d not found", number)
+	}
+	return pr, nil
 }
 
 func intPtr(v int) *int {

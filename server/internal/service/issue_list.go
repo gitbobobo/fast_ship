@@ -76,16 +76,28 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 		return nil, 0, errs.ErrInternal
 	}
 
+	pullRequestSummaries, err := s.pullRequestSummariesByIssueIDs(pageIssues)
+	if err != nil {
+		return nil, 0, errs.ErrInternal
+	}
+
 	resp := make([]IssueResponse, 0, len(pageIssues))
 	for _, issue := range pageIssues {
-		resp = append(resp, s.toIssueResponse(
+		item := s.toIssueResponse(
 			issue,
 			metaByIssueID[issue.ID],
 			nil,
 			labelMap,
 			shipHooksByIssueID[issue.ID],
 			int(unread[issue.ID]),
-		))
+		)
+		summary := pullRequestSummaries[issue.ID]
+		item.PullRequestSummary = &IssuePullRequestSummaryResponse{
+			Total:  summary.Total,
+			Open:   summary.Open,
+			Merged: summary.Merged,
+		}
+		resp = append(resp, item)
 	}
 	return resp, total, nil
 }

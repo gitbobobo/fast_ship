@@ -84,6 +84,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.JWTBlacklist{},
 		&model.GitHubRepoLabel{},
 		&model.IssueCollabDocument{},
+		&model.IssuePullRequest{},
 		&model.IssueRecommendation{},
 		&model.RecommendationDependency{},
 	); err != nil {
@@ -98,6 +99,7 @@ func setupTestServices(t *testing.T) *testServices {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
 
 	tempDir := t.TempDir()
 	fileStorage := storage.NewLocalStorage(filepath.Join(tempDir, "uploads"))
@@ -152,7 +154,7 @@ func setupTestServices(t *testing.T) *testServices {
 		collabRepo:          collabRepo,
 		readStateRepo:       readStateRepo,
 		recRepo:             recRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, fileStorage, cfg, zap.NewNop()),
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, repository.NewIssuePullRequestRepository(db), fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		recService:          NewIssueRecommendationService(recRepo, issueRepo, internalMetaRepo, projectRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
