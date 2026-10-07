@@ -13,16 +13,19 @@ import (
 	"gorm.io/gorm"
 )
 
-func testPullRequest(number int, state string, mergedAt *gh.Timestamp) *gh.PullRequest {
+func testPullRequest(repoFullName string, number int, state string, mergedAt *gh.Timestamp) *gh.PullRequest {
 	pr := &gh.PullRequest{
 		Number:  intPtr(number),
 		State:   gh.String(state),
 		Title:   gh.String(fmt.Sprintf("Fix crash #%d", number)),
-		HTMLURL: gh.String(fmt.Sprintf("https://github.com/owner/repo/pull/%d", number)),
+		HTMLURL: gh.String(fmt.Sprintf("https://github.com/%s/pull/%d", repoFullName, number)),
 		Draft:   gh.Bool(false),
 		User:    &gh.User{Login: gh.String("bob")},
 		Head:    &gh.PullRequestBranch{Ref: gh.String("fix-crash")},
-		Base:    &gh.PullRequestBranch{Ref: gh.String("main")},
+		Base: &gh.PullRequestBranch{
+			Ref:  gh.String("main"),
+			Repo: &gh.Repository{FullName: gh.String(repoFullName)},
+		},
 	}
 	if mergedAt != nil {
 		pr.MergedAt = mergedAt
@@ -90,7 +93,7 @@ func TestIssueServiceAttachPullRequest_InternalIssueSucceeds(t *testing.T) {
 
 	var gotOwner, gotRepo string
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest(7, "open", nil)},
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
 	}
 	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
 		if token != "" {
@@ -141,7 +144,7 @@ func TestIssueServiceAttachPullRequest_Idempotent(t *testing.T) {
 
 	mergedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest(7, "open", nil)},
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -152,7 +155,7 @@ func TestIssueServiceAttachPullRequest_Idempotent(t *testing.T) {
 		t.Fatalf("first attach: %v", err)
 	}
 
-	fake.pullRequests[7] = testPullRequest(7, "closed", mergedAt)
+	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "closed", mergedAt)
 	second, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
 		Url: "https://github.com/owner/repo/pull/7",
 	})
@@ -182,7 +185,7 @@ func TestIssueServiceAttachPullRequest_CrossRepoURL(t *testing.T) {
 
 	var gotOwner, gotRepo string
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{42: testPullRequest(42, "open", nil)},
+		pullRequests: map[int]*gh.PullRequest{42: testPullRequest("other-org/other-repo", 42, "open", nil)},
 	}
 	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
 		if token != "gh-token" {
@@ -250,7 +253,7 @@ func TestIssueServiceAttachPullRequest_AcceptsURLVariants(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest(7, "open", nil)},
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -301,7 +304,7 @@ func TestIssueServiceDetachPullRequest(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest(7, "open", nil)},
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -361,7 +364,7 @@ func TestIssueServiceSyncPullRequests_RefreshesToMerged(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest(7, "open", nil)},
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -373,7 +376,7 @@ func TestIssueServiceSyncPullRequests_RefreshesToMerged(t *testing.T) {
 	firstSyncedAt := time.Now().UTC()
 
 	mergedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
-	fake.pullRequests[7] = testPullRequest(7, "closed", mergedAt)
+	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "closed", mergedAt)
 
 	items, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
 	if err != nil {
@@ -495,7 +498,7 @@ func TestIssueServiceListIssuePullRequests_ReturnsRows(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest(7, "open", nil)},
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -511,5 +514,182 @@ func TestIssueServiceListIssuePullRequests_ReturnsRows(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Number != 7 || items[0].RepoFullName != "owner/repo" {
 		t.Fatalf("unexpected pull request list: %+v", items)
+	}
+}
+
+// repo_full_name 归一到 GitHub 返回的 canonical 名：大小写变体 URL 落到同一行。
+func TestIssueServiceAttachPullRequest_CaseVariantURLSameRow(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	first, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/Owner/Repo/pull/7",
+	})
+	if err != nil {
+		t.Fatalf("attach case-variant url: %v", err)
+	}
+	second, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	if err != nil {
+		t.Fatalf("attach canonical url: %v", err)
+	}
+
+	if first.Id != second.Id {
+		t.Fatalf("expected same link row, got %q vs %q", first.Id, second.Id)
+	}
+	if first.RepoFullName != "owner/repo" {
+		t.Fatalf("expected canonical repo name, got %q", first.RepoFullName)
+	}
+	if count := countPullRequestRows(t, svc, issue.ID); count != 1 {
+		t.Fatalf("expected one row for case variants, got %d", count)
+	}
+}
+
+// GitHub closed 但 merged_at 为空 → state=closed 且 merged_at 为空。
+func TestIssueServiceAttachPullRequest_ClosedNotMerged(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	closedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
+	pr := testPullRequest("owner/repo", 7, "closed", nil)
+	pr.ClosedAt = closedAt
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[int]*gh.PullRequest{7: pr},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	resp, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if resp.State != model.IssuePullRequestStateClosed {
+		t.Fatalf("expected closed state, got %+v", resp)
+	}
+	if resp.MergedAt != nil {
+		t.Fatalf("expected merged_at empty for unmerged close, got %+v", resp.MergedAt)
+	}
+	if resp.ClosedAt == nil {
+		t.Fatalf("expected closed_at set, got %+v", resp)
+	}
+}
+
+// merged 的 PR 被 reopen（open）后 sync：merged_at/closed_at 一并清空。
+func TestIssueServiceSyncPullRequests_ReopenClearsMergeFields(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	mergedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "closed", mergedAt)},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	}); err != nil {
+		t.Fatalf("attach merged pr: %v", err)
+	}
+
+	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "open", nil)
+	items, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(items) != 1 || items[0].State != model.IssuePullRequestStateOpen {
+		t.Fatalf("expected reopened open state, got %+v", items)
+	}
+	if items[0].MergedAt != nil || items[0].ClosedAt != nil {
+		t.Fatalf("expected merged_at/closed_at cleared, got %+v", items[0])
+	}
+}
+
+// attach 与 sync 都不动 Issue 的 workflow_status。
+func TestIssueServicePullRequests_DoNotTouchWorkflowStatus(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	if err := svc.db.Create(&model.IssueInternalMeta{
+		IssueID:        issue.ID,
+		WorkflowStatus: model.IssueWorkflowStatusDone,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}).Error; err != nil {
+		t.Fatalf("seed internal meta: %v", err)
+	}
+
+	mergedAt := &gh.Timestamp{Time: now.Add(-time.Hour)}
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "closed", mergedAt)},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if _, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	var meta model.IssueInternalMeta
+	if err := svc.db.Where("issue_id = ?", issue.ID).First(&meta).Error; err != nil {
+		t.Fatalf("reload internal meta: %v", err)
+	}
+	if meta.WorkflowStatus != model.IssueWorkflowStatusDone {
+		t.Fatalf("workflow_status mutated: %q", meta.WorkflowStatus)
+	}
+
+	var storedIssue model.Issue
+	if err := svc.db.First(&storedIssue, "id = ?", issue.ID).Error; err != nil {
+		t.Fatalf("reload issue: %v", err)
+	}
+	if storedIssue.State != model.IssueStateOpen {
+		t.Fatalf("issue state mutated: %q", storedIssue.State)
+	}
+}
+
+// 别的用户的 Issue：attach 不可见，返回项目不存在。
+func TestIssueServiceAttachPullRequest_CrossUserRejected(t *testing.T) {
+	svc := setupTestServices(t)
+	owner := createTestUser(t, svc.db, "user-1")
+	stranger := createTestUser(t, svc.db, "user-2")
+	project := createTestProject(t, svc.db, owner.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, stranger.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	if err == nil {
+		t.Fatal("expected error for foreign issue, got nil")
+	}
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrProjectNotFound.Code {
+		t.Fatalf("expected 40401, got %v", err)
+	}
+	if count := countPullRequestRows(t, svc, issue.ID); count != 0 {
+		t.Fatalf("expected no link rows, got %d", count)
 	}
 }

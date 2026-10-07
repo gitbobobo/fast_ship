@@ -3,6 +3,7 @@ package repository
 import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type IssuePullRequestRepository struct {
@@ -15,6 +16,23 @@ func NewIssuePullRequestRepository(db *gorm.DB) *IssuePullRequestRepository {
 
 func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error {
 	return r.db.Create(link).Error
+}
+
+// Upsert 以业务唯一键 (issue_id, provider, repo_full_name, number) 原子插入或刷新：
+// 冲突时更新同步字段但不动主键与 link_origin（重复 attach 不产生第二行，也不改变关联来源）。
+func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
+	return r.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "issue_id"},
+			{Name: "provider"},
+			{Name: "repo_full_name"},
+			{Name: "number"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"html_url", "title", "state", "is_draft", "author_login",
+			"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
+		}),
+	}).Create(link).Error
 }
 
 func (r *IssuePullRequestRepository) Save(link *model.IssuePullRequest) error {

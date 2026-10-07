@@ -53,35 +53,30 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败: %v", err))
 	}
 
-	repoFullName := owner + "/" + repo
-	link, err := s.pullRequestRepo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, repoFullName, number)
-	switch {
-	case err == nil:
-		applyPullRequestData(link, pr, time.Now().UTC())
-		if err := s.pullRequestRepo.Save(link); err != nil {
-			return nil, errs.ErrInternal
-		}
-	case errors.Is(err, gorm.ErrRecordNotFound):
-		now := time.Now().UTC()
-		link = &model.IssuePullRequest{
-			ID:           uuid.NewString(),
-			IssueID:      issue.ID,
-			ProjectID:    issue.ProjectID,
-			Provider:     model.IssuePullRequestProviderGitHub,
-			RepoFullName: repoFullName,
-			Number:       number,
-			LinkOrigin:   model.IssuePullRequestLinkOriginManual,
-			CreatedAt:    now,
-		}
-		applyPullRequestData(link, pr, now)
-		if err := s.pullRequestRepo.Create(link); err != nil {
-			return nil, errs.ErrInternal
-		}
-	default:
+	now := time.Now().UTC()
+	link := &model.IssuePullRequest{
+		ID:           uuid.NewString(),
+		IssueID:      issue.ID,
+		ProjectID:    issue.ProjectID,
+		Provider:     model.IssuePullRequestProviderGitHub,
+		RepoFullName: owner + "/" + repo,
+		Number:       number,
+		LinkOrigin:   model.IssuePullRequestLinkOriginManual,
+		CreatedAt:    now,
+	}
+	applyPullRequestData(link, pr, now)
+
+	// 原子 upsert：并发/重复 attach 撞唯一键时由冲突路径刷新既有行，不返回 500。
+	if err := s.pullRequestRepo.Upsert(link); err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	resp := toIssuePullRequestResponse(*link)
+	// 冲突路径下 link.ID 是新建值而非既有行主键，重新按唯一键读回规范行。
+	stored, err := s.pullRequestRepo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, link.RepoFullName, number)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := toIssuePullRequestResponse(*stored)
 	return &resp, nil
 }
 
@@ -218,7 +213,12 @@ func parsePullRequestURL(raw string) (owner, repo string, number int, ok bool) {
 }
 
 // applyPullRequestData 把 GitHub PR 详情刷进关联行（状态与合并时间一并重置，closed→open 复活也能纠正回来）。
+// repo_full_name 归一到 GitHub 返回的 canonical 名——GitHub 仓库名不区分大小写，
+// 但唯一索引区分，直接用 URL 原文会让 Owner/Repo 与 owner/repo 落成两行。
 func applyPullRequestData(link *model.IssuePullRequest, pr *gh.PullRequest, now time.Time) {
+	if fullName := pr.GetBase().GetRepo().GetFullName(); fullName != "" {
+		link.RepoFullName = fullName
+	}
 	link.Title = pr.GetTitle()
 	if htmlURL := pr.GetHTMLURL(); htmlURL != "" {
 		link.HTMLURL = htmlURL

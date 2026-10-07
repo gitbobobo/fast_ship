@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -146,5 +147,91 @@ func TestIssuePullRequestUniqueKeyEnforced(t *testing.T) {
 	dup.Number = 7
 	if err := repo.Create(dup); err == nil {
 		t.Fatal("expected unique constraint violation, got nil")
+	}
+}
+
+// issue_pull_requests 的外键必须真的带 ON DELETE CASCADE——has-many 与 belongs-to
+// 双侧声明时 GORM 取 has-many 的 constraint，缺了就会在删 Issue/项目时撞 NO ACTION。
+func TestIssuePullRequestCascadeInDDLAndDelete(t *testing.T) {
+	db, _ := setupIssuePullRequestTestDB(t)
+
+	var ddl string
+	db.Raw("SELECT sql FROM sqlite_master WHERE name = 'issue_pull_requests'").Scan(&ddl)
+	if !strings.Contains(ddl, "ON DELETE CASCADE") {
+		t.Fatalf("issue_pull_requests FK missing ON DELETE CASCADE: %s", ddl)
+	}
+	type fkRow struct {
+		OnDelete string `gorm:"column:on_delete"`
+	}
+	var fks []fkRow
+	db.Raw("PRAGMA foreign_key_list(issue_pull_requests)").Scan(&fks)
+	foundCascade := false
+	for _, fk := range fks {
+		if fk.OnDelete == "CASCADE" {
+			foundCascade = true
+		}
+	}
+	if !foundCascade {
+		t.Fatalf("PRAGMA foreign_key_list shows no CASCADE: %+v", fks)
+	}
+
+	issue := createIssuePullRequestTestIssue(t, db, "project-1")
+	seedIssuePullRequest(t, db, issue.ID, 1, model.IssuePullRequestLinkOriginManual)
+	seedIssuePullRequest(t, db, issue.ID, 2, model.IssuePullRequestLinkOriginSynced)
+
+	if err := db.Delete(&model.Issue{}, "id = ?", issue.ID).Error; err != nil {
+		t.Fatalf("delete issue: %v", err)
+	}
+	var count int64
+	if err := db.Model(&model.IssuePullRequest{}).Where("issue_id = ?", issue.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count links: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected links cascaded with issue, got %d", count)
+	}
+}
+
+// 同一唯一键重复 Upsert：不产生第二行，同步字段被刷新，link_origin 保持首行值。
+func TestIssuePullRequestUpsert_ConflictKeepsSingleRow(t *testing.T) {
+	db, repo := setupIssuePullRequestTestDB(t)
+	issue := createIssuePullRequestTestIssue(t, db, "project-1")
+
+	first := seedIssuePullRequest(t, db, issue.ID, 7, model.IssuePullRequestLinkOriginManual)
+
+	now := time.Now().UTC()
+	second := &model.IssuePullRequest{
+		ID:           uuid.NewString(),
+		IssueID:      issue.ID,
+		ProjectID:    issue.ProjectID,
+		Provider:     model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo",
+		Number:       7,
+		Title:        "updated title",
+		State:        model.IssuePullRequestStateMerged,
+		LinkOrigin:   model.IssuePullRequestLinkOriginManual,
+		SyncedAt:     now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := repo.Upsert(second); err != nil {
+		t.Fatalf("upsert duplicate: %v", err)
+	}
+
+	links, err := repo.ListByIssueID(issue.ID)
+	if err != nil {
+		t.Fatalf("list links: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("expected single row after conflicting upsert, got %d", len(links))
+	}
+	stored := links[0]
+	if stored.ID != first.ID {
+		t.Fatalf("expected existing row id %q to survive, got %q", first.ID, stored.ID)
+	}
+	if stored.Title != "updated title" || stored.State != model.IssuePullRequestStateMerged {
+		t.Fatalf("expected synced fields refreshed, got %+v", stored)
+	}
+	if stored.LinkOrigin != model.IssuePullRequestLinkOriginManual {
+		t.Fatalf("expected link_origin preserved, got %q", stored.LinkOrigin)
 	}
 }
