@@ -13,10 +13,13 @@ description: 通过 Fast Ship REST API 完成 Issue 的创建、更新与查询�
 | 开始做了 | `PUT /api/issues/:iid/internal-meta` 置 `in_progress` |
 | 记录共识/决策 | `PUT /api/issues/:iid/collab/consensus` |
 | 按 `INT-xxx` 找 issue | `GET /api/projects/:pid/issues?q=INT-56` 换 UUID（路径参数只认 UUID） |
+| 把 PR 挂到 issue | `POST /api/issues/:iid/pull-requests`，body `{"url":"<PR链接>"}` |
+| 刷新 PR 状态 | `POST /api/issues/:iid/pull-requests/sync`（合并后调，逐行失败看 `failures[]`） |
+| 摘掉某个 PR | `DELETE /api/issues/:iid/pull-requests/:lid`（`:lid` 是关联行 id，即 api.md 里的 `{id}`） |
 
 **调用任何写接口前先读 `references/api.md` 对应小节，不要凭记忆构造请求体。**
 
-上表的 `:pid` 在 api.md 里是 `{id}`，`:iid` 是 `{iid}`。
+上表的 `:pid` 在 api.md 里是 `{id}`，`:iid` 是 `{iid}`；`:lid` 是 PR 关联行 id（api.md 里 `pull-requests` 路径下的 `{id}`）。
 
 ## 认证配置
 
@@ -77,6 +80,17 @@ Content-Type: application/json; charset=utf-8
 4. 要打标就 `PUT /api/issues/{iid}`，标签名必须已经存在。不要靠创建请求里的 `workflow_status` 推进进度。
 5. 推进用 `PUT /api/issues/{iid}/internal-meta`，值为 `todo`、`in_progress` 或 `done`。
 6. 查一条用 `GET /api/issues/{iid}`。列表用 `GET /api/projects/{id}/issues`。
+
+## Issue 关联 PR
+
+一个 Issue 可挂多个 PR（跨仓库也可以）。**时机**：建完 PR 立刻 attach，让 Issue 页能看到实现进度；PR 合并后调一次 sync 刷新状态。
+
+- attach：body 只传 `{"url":"https://github.com/<owner>/<repo>/pull/<n>"}`，支持 `/files`、query 等后缀。服务端自行去 GitHub 拉标题/状态/作者，拉取失败不落记录（502）。重复 attach 幂等，不产生第二行。
+- 读：详情 `GET /api/issues/:iid` 的 `pull_requests[]` 是全量列表；列表项带 `pull_request_summary {total, open, merged}`（closed = total - open - merged）。
+- sync：返回 `{items, failures}`，每条 PR 是独立失败域——某条拉不到（404/限流）只进 `failures[]`，其余照常刷新；`failures[].id` 是关联行 id。
+- detach：`DELETE /api/issues/:iid/pull-requests/:lid`；不存在的关联返回 40412（非幂等，重复调用会报错）。
+- PR 状态与 `workflow_status` 无耦合：PR 全合并不等于需求完成，`internal-meta` 仍要自己推。
+- `link_origin=manual` 的关联永不被 GitHub 同步投影的清理逻辑误删。
 
 ## 语义陷阱与权限分工
 
