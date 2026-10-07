@@ -115,7 +115,7 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 
 	result := &IssuePullRequestSyncResultResponse{
 		Items:    make([]IssuePullRequestResponse, 0, len(links)),
-		Failures: make([]BatchCloseDoneIssueFailure, 0),
+		Failures: make([]IssuePullRequestSyncFailureItem, 0),
 	}
 	if len(links) == 0 {
 		return result, nil
@@ -143,10 +143,14 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 		}
 
 		applyPullRequestData(link, pr, now)
-		if err := s.pullRequestRepo.Save(link); err != nil {
+		if err := s.pullRequestRepo.SaveSyncedFields(link); err != nil {
 			msg := "保存失败"
-			// 仓库改名后归一化撞上既有关联行的唯一键——保留旧行让调用方显式处理。
-			if isUniqueConstraintError(err) {
+			switch {
+			case errors.Is(err, gorm.ErrRecordNotFound):
+				// sync 窗口内被并发 detach——不插回，记一条失败说明。
+				msg = "关联已解除"
+			case isUniqueConstraintError(err):
+				// 仓库改名后归一化撞上既有关联行的唯一键——保留旧行让调用方显式处理。
 				msg = "仓库已改名或与既有关联行冲突，请 detach 陈旧行"
 			}
 			result.Failures = append(result.Failures, pullRequestSyncFailure(link, msg))
@@ -183,8 +187,8 @@ func pullRequestSyncClient(s *IssueService, clients map[string]gitHubIssueClient
 }
 
 // pullRequestSyncFailure 组装单条失败明细：id 为关联行 id，error 前缀带 repo#number 便于定位。
-func pullRequestSyncFailure(link *model.IssuePullRequest, reason string) BatchCloseDoneIssueFailure {
-	return BatchCloseDoneIssueFailure{
+func pullRequestSyncFailure(link *model.IssuePullRequest, reason string) IssuePullRequestSyncFailureItem {
+	return IssuePullRequestSyncFailureItem{
 		Id:    link.ID,
 		Error: fmt.Sprintf("%s#%d: %s", link.RepoFullName, link.Number, reason),
 	}

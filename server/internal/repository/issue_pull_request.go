@@ -31,12 +31,39 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 		DoUpdates: clause.AssignmentColumns([]string{
 			"html_url", "title", "state", "is_draft", "author_login",
 			"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
+			// 用户手动 attach 已 synced 的行时升级为 manual——手动关联永不被同步清理误删。
+			"link_origin",
 		}),
 	}).Create(link).Error
 }
 
-func (r *IssuePullRequestRepository) Save(link *model.IssuePullRequest) error {
-	return r.db.Save(link).Error
+// SaveSyncedFields 按 (id, issue_id) 更新既有行的同步字段。不用 gorm Save：
+// UPDATE 影响 0 行时它会退化 INSERT，把 sync 期间被并发 detach 的行原样插回。
+// 行不存在时返回 gorm.ErrRecordNotFound 让调用方记失败。
+func (r *IssuePullRequestRepository) SaveSyncedFields(link *model.IssuePullRequest) error {
+	res := r.db.Model(&model.IssuePullRequest{}).
+		Where("id = ? AND issue_id = ?", link.ID, link.IssueID).
+		Updates(map[string]any{
+			"repo_full_name": link.RepoFullName,
+			"html_url":       link.HTMLURL,
+			"title":          link.Title,
+			"state":          link.State,
+			"is_draft":       link.IsDraft,
+			"author_login":   link.AuthorLogin,
+			"head_ref":       link.HeadRef,
+			"base_ref":       link.BaseRef,
+			"merged_at":      link.MergedAt,
+			"closed_at":      link.ClosedAt,
+			"synced_at":      link.SyncedAt,
+			"updated_at":     link.UpdatedAt,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // FindByID 按行 ID 取关联，同时校验归属 issue_id。

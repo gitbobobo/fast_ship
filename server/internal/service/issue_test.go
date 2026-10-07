@@ -235,6 +235,7 @@ type fakeIssueGitHubClient struct {
 	updateIssueCalls   []fakeUpdateIssueCall
 	pullRequests       map[int]*gh.PullRequest
 	pullRequestErr     error
+	onGetPullRequest   func(number int)
 }
 
 type fakeCreateIssueCall struct {
@@ -317,6 +318,9 @@ func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body strin
 }
 
 func (f *fakeIssueGitHubClient) GetPullRequest(_ context.Context, number int) (*gh.PullRequest, error) {
+	if f.onGetPullRequest != nil {
+		f.onGetPullRequest(number)
+	}
 	if f.pullRequestErr != nil {
 		return nil, f.pullRequestErr
 	}

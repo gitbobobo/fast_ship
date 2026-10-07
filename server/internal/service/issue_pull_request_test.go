@@ -822,3 +822,106 @@ func TestIssueServiceAttachPullRequest_CrossUserRejected(t *testing.T) {
 		t.Fatalf("expected no link rows, got %d", count)
 	}
 }
+
+// sync 窗口内行被并发 detach：保存路径不能把行插回去，记一条「关联已解除」failure。
+func TestIssueServiceSyncPullRequests_DetachedRowNotResurrected(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	if err := svc.db.Create(&model.IssuePullRequest{
+		ID:           "link-doomed",
+		IssueID:      issue.ID,
+		ProjectID:    project.ID,
+		Provider:     model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo",
+		Number:       7,
+		Title:        "doomed",
+		State:        model.IssuePullRequestStateOpen,
+		LinkOrigin:   model.IssuePullRequestLinkOriginManual,
+		SyncedAt:     now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed link: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+	}
+	// 拉取成功后、保存前删掉关联行，模拟并发 detach
+	fake.onGetPullRequest = func(_ int) {
+		if err := svc.db.Where("id = ?", "link-doomed").Delete(&model.IssuePullRequest{}).Error; err != nil {
+			t.Errorf("delete during fetch: %v", err)
+		}
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync should not return error, got %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no items for detached row, got %+v", result.Items)
+	}
+	if len(result.Failures) != 1 || result.Failures[0].Id != "link-doomed" {
+		t.Fatalf("expected detached row in failures, got %+v", result.Failures)
+	}
+	if !strings.Contains(result.Failures[0].Error, "已解除") {
+		t.Fatalf("expected detach hint in failure error, got %q", result.Failures[0].Error)
+	}
+
+	var count int64
+	if err := svc.db.Model(&model.IssuePullRequest{}).Where("id = ?", "link-doomed").Count(&count).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("detached row was resurrected")
+	}
+}
+
+// 手动 attach 撞 synced 行：仍是一行，link_origin 升级为 manual。
+func TestIssueServiceAttachPullRequest_UpgradesSyncedOrigin(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	if err := svc.db.Create(&model.IssuePullRequest{
+		ID:           "link-synced",
+		IssueID:      issue.ID,
+		ProjectID:    project.ID,
+		Provider:     model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo",
+		Number:       7,
+		Title:        "synced pr",
+		State:        model.IssuePullRequestStateOpen,
+		LinkOrigin:   model.IssuePullRequestLinkOriginSynced,
+		SyncedAt:     now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}).Error; err != nil {
+		t.Fatalf("seed synced link: %v", err)
+	}
+
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+	}
+	stubPullRequestClient(t, svc, fake, "gh-token")
+
+	resp, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	if err != nil {
+		t.Fatalf("attach over synced row: %v", err)
+	}
+	if resp.Id != "link-synced" || resp.LinkOrigin != model.IssuePullRequestLinkOriginManual {
+		t.Fatalf("expected synced row upgraded to manual, got %+v", resp)
+	}
+	if count := countPullRequestRows(t, svc, issue.ID); count != 1 {
+		t.Fatalf("expected single row, got %d", count)
+	}
+}

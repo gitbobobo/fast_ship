@@ -4381,6 +4381,17 @@ components:
           type: integer
           description: state=merged 计数
       description: Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged
+    IssuePullRequestSyncFailure:
+      type: object
+      required: [id, error]
+      properties:
+        id:
+          type: string
+          description: 关联行 id（issue_pull_requests.id，detach 时用此 id）
+        error:
+          type: string
+          description: 失败原因，前缀带 repo_full_name#number 便于定位
+      description: PR 关联刷新失败明细；失败行保留旧数据
     IssuePullRequestSyncResult:
       type: object
       required: [items, failures]
@@ -4393,8 +4404,8 @@ components:
         failures:
           type: array
           items:
-            $ref: '#/components/schemas/IssueBatchFailure'
-          description: 逐行失败明细——id 为关联行 id，error 前缀带 repo_full_name#number 与原因；失败行保留旧数据
+            $ref: '#/components/schemas/IssuePullRequestSyncFailure'
+          description: 逐行失败明细
       description: syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
     Issue:
       type: object

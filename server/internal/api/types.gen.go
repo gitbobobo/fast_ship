@@ -683,10 +683,19 @@ type IssuePullRequestSummary struct {
 	Total int `json:"total"`
 }
 
+// IssuePullRequestSyncFailure PR 关联刷新失败明细；失败行保留旧数据
+type IssuePullRequestSyncFailure struct {
+	// Error 失败原因，前缀带 repo_full_name#number 便于定位
+	Error string `json:"error"`
+
+	// Id 关联行 id（issue_pull_requests.id，detach 时用此 id）
+	Id string `json:"id"`
+}
+
 // IssuePullRequestSyncResult syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, failures} 约定一致
 type IssuePullRequestSyncResult struct {
-	// Failures 逐行失败明细——id 为关联行 id，error 前缀带 repo_full_name#number 与原因；失败行保留旧数据
-	Failures []IssueBatchFailure `json:"failures"`
+	// Failures 逐行失败明细
+	Failures []IssuePullRequestSyncFailure `json:"failures"`
 
 	// Items 本轮刷新成功的关联行（无关联或无成功时为空数组）
 	Items []IssuePullRequest `json:"items"`

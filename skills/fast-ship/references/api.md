@@ -3057,10 +3057,9 @@ syncIssuePullRequests 的响应形状，与批量 internal-meta 的 {items, fail
 | `items[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
-| `failures` | object[] | 是 | 逐行失败明细——id 为关联行 id，error 前缀带 repo_full_name#number 与原因；失败行保留旧数据 |
-| `failures[].id` | string | 是 | Issue ID |
-| `failures[].reference` | string | 否 | omitempty；INT-n 或 GH-n |
-| `failures[].error` | string | 是 |  |
+| `failures` | object[] | 是 | 逐行失败明细 |
+| `failures[].id` | string | 是 | 关联行 id（issue_pull_requests.id，detach 时用此 id） |
+| `failures[].error` | string | 是 | 失败原因，前缀带 repo_full_name#number 便于定位 |
 
 **错误**
 

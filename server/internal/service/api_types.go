@@ -78,6 +78,7 @@ type (
 	IssuePullRequestResponse           = api.IssuePullRequest
 	IssuePullRequestSummaryResponse    = api.IssuePullRequestSummary
 	IssuePullRequestSyncResultResponse = api.IssuePullRequestSyncResult
+	IssuePullRequestSyncFailureItem    = api.IssuePullRequestSyncFailure
 
 	// issue recommendations
 	UpsertIssueRecommendationRequest = api.UpsertIssueRecommendationRequest
