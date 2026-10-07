@@ -181,4 +181,19 @@ export const issueApi = {
 
   deleteShipHook: (issueId: string) =>
     api.delete(`issues/${issueId}/ship-hook`).json<ApiResponse<null>>(),
+
+  attachPullRequest: (issueId: string, url: string) =>
+    api
+      .post(`issues/${issueId}/pull-requests`, { json: { url } })
+      .json<ApiResponse<IssuePullRequest>>(),
+
+  syncPullRequests: (issueId: string) =>
+    api
+      .post(`issues/${issueId}/pull-requests/sync`)
+      .json<ApiResponse<IssuePullRequestSyncResult>>(),
+
+  detachPullRequest: (issueId: string, linkId: string) =>
+    api
+      .delete(`issues/${issueId}/pull-requests/${linkId}`)
+      .json<ApiResponse<null>>(),
 };

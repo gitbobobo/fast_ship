@@ -259,6 +259,32 @@ describe("BoardIssueCard", () => {
     expect(screen.getByText("钩子失败")).toBeInTheDocument();
   });
 
+  it("renders merged count badge when pull request summary exists", () => {
+    renderInRouter(
+      <BoardIssueCard
+        issue={{
+          ...issue,
+          pull_request_summary: { total: 3, open: 1, merged: 2 },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("2/3 已合并")).toBeInTheDocument();
+  });
+
+  it("hides the merged count badge without linked pull requests", () => {
+    renderInRouter(
+      <BoardIssueCard
+        issue={{
+          ...issue,
+          pull_request_summary: { total: 0, open: 0, merged: 0 },
+        }}
+      />,
+    );
+
+    expect(screen.queryByText(/已合并/)).not.toBeInTheDocument();
+  });
+
   it("attaches draggable attributes to the whole card", () => {
     mockUseDraggable.mockReturnValue({
       attributes: {

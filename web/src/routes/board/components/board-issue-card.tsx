@@ -4,6 +4,7 @@ import { useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { Check, GripVertical } from "lucide-react";
 import { GithubIcon } from "@/components/ui/github-icon";
+import { IssuePullRequestBadge } from "@/components/issues/issue-pull-request-badge";
 import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
@@ -108,6 +109,10 @@ function BoardIssueCardContent({
 
       <div className="flex flex-wrap items-center gap-1.5 pl-5">
         <IssueShipHookBadge hook={issue.ship_hook} className="text-[10px]" />
+        <IssuePullRequestBadge
+          summary={issue.pull_request_summary}
+          className="text-[10px]"
+        />
         {(issue.source === "github"
           ? issue.github?.labels ?? []
           : issue.internal_meta?.labels ?? []

@@ -212,6 +212,52 @@ interface Issue {
   internal_meta?: IssueInternalMeta | null;
   github?: IssueGitHubMeta | null;
   ship_hook?: IssueShipHook | null;
+  /** 关联的实现 PR 明细；仅 Issue 详情响应携带，列表项不出现 */
+  pull_requests?: IssuePullRequest[];
+  /** 关联 PR 的聚合计数；仅列表项携带 */
+  pull_request_summary?: IssuePullRequestSummary;
+}
+
+/** Issue 关联的实现 PR。PR 状态与 Issue workflow_status 不联动 */
+interface IssuePullRequest {
+  id: string;
+  issue_id: string;
+  project_id: string;
+  /** 当前恒为 github；字段预留 gitlab */
+  provider: string;
+  /** owner/repo；允许与项目配置的仓库不同（跨仓库 attach） */
+  repo_full_name: string;
+  number: number;
+  html_url: string;
+  title: string;
+  /** merged = GitHub 上 closed 且 merged_at 非空 */
+  state: "open" | "closed" | "merged";
+  is_draft: boolean;
+  author_login: string;
+  head_ref: string;
+  base_ref: string;
+  /** state=merged 时有值 */
+  merged_at?: string | null;
+  closed_at?: string | null;
+  /** manual=用户显式 attach；synced=远端同步投影产生 */
+  link_origin: "manual" | "synced";
+  /** 最近一次从 GitHub 刷新成功的时间 */
+  synced_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged */
+interface IssuePullRequestSummary {
+  total: number;
+  open: number;
+  merged: number;
+}
+
+/** sync 端点响应形状：逐行失败域，失败行保留旧数据 */
+interface IssuePullRequestSyncResult {
+  items: IssuePullRequest[];
+  failures: Array<{ id: string; error: string }>;
 }
 
 interface IssueGitHubMeta {
