@@ -1442,6 +1442,7 @@ export default function IssueDetailPage() {
       />
 
       <IssuePullRequestsCard
+        key={issue.id}
         issueId={issue.id}
         projectId={issue.project_id}
         pullRequests={issue.pull_requests}

@@ -81,10 +81,12 @@ function DetachPullRequestButton({
   issueId,
   projectId,
   pr,
+  onDetached,
 }: {
   issueId: string;
   projectId: string;
   pr: IssuePullRequest;
+  onDetached: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const detach = useDetachIssuePullRequest(issueId, projectId);
@@ -93,6 +95,7 @@ function DetachPullRequestButton({
     event.preventDefault();
     try {
       await detach.mutateAsync(pr.id);
+      onDetached(pr.id);
       toast.success("已移除关联");
       setOpen(false);
     } catch {
@@ -148,10 +151,12 @@ function PullRequestRow({
   issueId,
   projectId,
   pr,
+  onDetached,
 }: {
   issueId: string;
   projectId: string;
   pr: IssuePullRequest;
+  onDetached: (id: string) => void;
 }) {
   return (
     <div className="flex items-start gap-1.5 rounded-lg border p-2.5">
@@ -175,7 +180,12 @@ function PullRequestRow({
           @{pr.author_login} · {pr.head_ref} → {pr.base_ref}
         </p>
       </div>
-      <DetachPullRequestButton issueId={issueId} projectId={projectId} pr={pr} />
+      <DetachPullRequestButton
+        issueId={issueId}
+        projectId={projectId}
+        pr={pr}
+        onDetached={onDetached}
+      />
     </div>
   );
 }
@@ -196,6 +206,11 @@ export function IssuePullRequestsCard({
   const attach = useAttachIssuePullRequest(issueId, projectId);
   const sync = useSyncIssuePullRequests(issueId, projectId);
   const items = pullRequests ?? [];
+
+  // 移除成功后同步清掉该行残留的刷新失败提示
+  const handleDetached = (id: string) => {
+    setSyncFailures((prev) => prev.filter((failure) => failure.id !== id));
+  };
 
   const handleAttach = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -260,6 +275,7 @@ export function IssuePullRequestsCard({
             type="submit"
             size="sm"
             className="h-8 shrink-0"
+            aria-label="添加 PR"
             disabled={!url.trim() || attach.isPending}
           >
             {attach.isPending ? (
@@ -280,6 +296,7 @@ export function IssuePullRequestsCard({
                 issueId={issueId}
                 projectId={projectId}
                 pr={pr}
+                onDetached={handleDetached}
               />
             ))}
           </div>

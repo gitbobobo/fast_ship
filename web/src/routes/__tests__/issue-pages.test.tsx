@@ -1776,7 +1776,7 @@ describe("Issue pages", () => {
       screen.getByPlaceholderText("粘贴 PR 链接"),
       "  https://github.com/acme/alpha/pull/123  ",
     );
-    await user.click(screen.getByRole("button", { name: "添加" }));
+    await user.click(screen.getByRole("button", { name: "添加 PR" }));
 
     await waitFor(() =>
       expect(attachMutateAsync).toHaveBeenCalledWith(
