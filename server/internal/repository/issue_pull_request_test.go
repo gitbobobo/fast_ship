@@ -191,7 +191,7 @@ func TestIssuePullRequestCascadeInDDLAndDelete(t *testing.T) {
 	}
 }
 
-// 同一唯一键重复 Upsert：不产生第二行，同步字段被刷新，link_origin 保持首行值。
+// 同一唯一键重复 Upsert：不产生第二行，同步字段被刷新；link_origin 只升不降。
 func TestIssuePullRequestUpsert_ConflictKeepsSingleRow(t *testing.T) {
 	db, repo := setupIssuePullRequestTestDB(t)
 	issue := createIssuePullRequestTestIssue(t, db, "project-1")
@@ -233,5 +233,35 @@ func TestIssuePullRequestUpsert_ConflictKeepsSingleRow(t *testing.T) {
 	}
 	if stored.LinkOrigin != model.IssuePullRequestLinkOriginManual {
 		t.Fatalf("expected link_origin preserved, got %q", stored.LinkOrigin)
+	}
+
+	// link_origin 只升不降：synced 写入撞到 manual 行时不得降级，
+	// 否则该行会被 DeleteMissingSynced 当成同步投影残留清掉。
+	third := &model.IssuePullRequest{
+		ID:           uuid.NewString(),
+		IssueID:      issue.ID,
+		ProjectID:    issue.ProjectID,
+		Provider:     model.IssuePullRequestProviderGitHub,
+		RepoFullName: "owner/repo",
+		Number:       7,
+		Title:        "synced write",
+		State:        model.IssuePullRequestStateOpen,
+		LinkOrigin:   model.IssuePullRequestLinkOriginSynced,
+		SyncedAt:     now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := repo.Upsert(third); err != nil {
+		t.Fatalf("upsert synced over manual: %v", err)
+	}
+	stored2, err := repo.FindByUnique(issue.ID, model.IssuePullRequestProviderGitHub, "owner/repo", 7)
+	if err != nil {
+		t.Fatalf("find by unique: %v", err)
+	}
+	if stored2.LinkOrigin != model.IssuePullRequestLinkOriginManual {
+		t.Fatalf("manual row must not be downgraded to %q", stored2.LinkOrigin)
+	}
+	if stored2.Title != "synced write" || stored2.State != model.IssuePullRequestStateOpen {
+		t.Fatalf("expected synced fields refreshed by synced upsert, got %+v", stored2)
 	}
 }

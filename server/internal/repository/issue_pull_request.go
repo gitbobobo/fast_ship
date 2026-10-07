@@ -19,8 +19,18 @@ func (r *IssuePullRequestRepository) Create(link *model.IssuePullRequest) error 
 }
 
 // Upsert 以业务唯一键 (issue_id, provider, repo_full_name, number) 原子插入或刷新：
-// 冲突时更新同步字段但不动主键与 link_origin（重复 attach 不产生第二行，也不改变关联来源）。
+// 冲突时更新同步字段并保留既有主键；link_origin 只升不降——手动 attach 可把
+// synced 行升级为 manual，反向不允许（避免同步投影把手动关联降级、继而被
+// DeleteMissingSynced 清掉）。
 func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error {
+	set := clause.AssignmentColumns([]string{
+		"html_url", "title", "state", "is_draft", "author_login",
+		"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
+	})
+	set = append(set, clause.Assignment{
+		Column: clause.Column{Name: "link_origin"},
+		Value:  gorm.Expr("CASE WHEN excluded.link_origin = 'manual' THEN 'manual' ELSE issue_pull_requests.link_origin END"),
+	})
 	return r.db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "issue_id"},
@@ -28,12 +38,7 @@ func (r *IssuePullRequestRepository) Upsert(link *model.IssuePullRequest) error 
 			{Name: "repo_full_name"},
 			{Name: "number"},
 		},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"html_url", "title", "state", "is_draft", "author_login",
-			"head_ref", "base_ref", "merged_at", "closed_at", "synced_at", "updated_at",
-			// 用户手动 attach 已 synced 的行时升级为 manual——手动关联永不被同步清理误删。
-			"link_origin",
-		}),
+		DoUpdates: set,
 	}).Create(link).Error
 }
 
