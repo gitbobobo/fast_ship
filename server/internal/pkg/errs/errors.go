@@ -70,6 +70,7 @@ var (
 	ErrIssueReadOnly            = New(40908, "该问题为只读问题")
 	ErrLogRunEntryLimitExceeded = New(40909, "该运行日志条数已达上限")
 	ErrIssueNotRecommendable    = New(40910, "该 issue 当前状态不可被推荐")
+	ErrRecommendationDeferred   = New(40911, "该推荐已被用户延后处理，请勿再次推荐")
 )
 
 // 前置条件未满足 41200-41299

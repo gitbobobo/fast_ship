@@ -75,6 +75,7 @@ type (
 
 	// issue recommendations
 	UpsertIssueRecommendationRequest = api.UpsertIssueRecommendationRequest
+	DeferIssueRecommendationRequest  = api.DeferIssueRecommendationRequest
 	RecommendationIssueSummary       = api.RecommendationIssueSummary
 	RecommendationDependencyResponse = api.RecommendationDependency
 	IssueRecommendationResponse      = api.IssueRecommendation

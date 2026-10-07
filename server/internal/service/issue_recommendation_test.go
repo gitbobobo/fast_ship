@@ -291,11 +291,11 @@ func TestIssueRecommendation_Delete(t *testing.T) {
 
 	otherID := uuid.NewString()
 	createTestUser(t, ts.db, otherID)
-	if err := ts.recService.Delete(issue.ID, otherID); err != errs.ErrProjectNotFound {
+	if err := ts.recService.Delete(issue.ID, otherID, true); err != errs.ErrProjectNotFound {
 		t.Fatalf("expected ErrProjectNotFound for non-owner delete, got %v", err)
 	}
 
-	if err := ts.recService.Delete(issue.ID, ownerID); err != nil {
+	if err := ts.recService.Delete(issue.ID, ownerID, true); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	var depCount int64
@@ -305,8 +305,347 @@ func TestIssueRecommendation_Delete(t *testing.T) {
 	if depCount != 0 {
 		t.Fatalf("expected dependency rows removed, got %d", depCount)
 	}
-	if err := ts.recService.Delete(issue.ID, ownerID); err != errs.ErrRecommendationNotFound {
+	if err := ts.recService.Delete(issue.ID, ownerID, true); err != errs.ErrRecommendationNotFound {
 		t.Fatalf("expected ErrRecommendationNotFound for repeated delete, got %v", err)
+	}
+}
+
+func TestIssueRecommendation_Defer(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	dep := createRecTestIssue(t, ts, issue.ProjectID)
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{
+		Reason:       "  先做这个  ",
+		Dependencies: []string{dep.ID},
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// 不带 note 延后：冻结整条推荐，reason/priority/依赖原样保留
+	resp, err := ts.recService.Defer(issue.ID, ownerID, "  ")
+	if err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if resp.Status != api.Deferred || resp.DeferredAt == nil || resp.DeferNote != nil {
+		t.Fatalf("expected deferred status with nil note, got %+v", resp)
+	}
+	if resp.Reason != "先做这个" || len(resp.Dependencies) != 1 || resp.Dependencies[0].IssueId != dep.ID {
+		t.Fatalf("expected frozen recommendation data, got %+v", resp)
+	}
+
+	// 重复延后：覆盖 note 并刷新 deferred_at（幂等 upsert）
+	firstDeferredAt := *resp.DeferredAt
+	time.Sleep(1100 * time.Millisecond) // SQLite timestamp 精度到秒，隔开确保 deferred_at 可观测地刷新
+	resp, err = ts.recService.Defer(issue.ID, ownerID, "等等再看")
+	if err != nil {
+		t.Fatalf("re-defer: %v", err)
+	}
+	if resp.DeferNote == nil || *resp.DeferNote != "等等再看" {
+		t.Fatalf("expected note overwritten, got %+v", resp.DeferNote)
+	}
+	if *resp.DeferredAt <= firstDeferredAt {
+		t.Fatalf("expected deferred_at refreshed, got %s vs %s", *resp.DeferredAt, firstDeferredAt)
+	}
+
+	// 库里行与响应一致
+	stored, err := ts.recRepo.Get(issue.ID)
+	if err != nil {
+		t.Fatalf("get rec: %v", err)
+	}
+	if stored.DeferredAt == nil || stored.DeferNote != "等等再看" || stored.Reason != "先做这个" {
+		t.Fatalf("unexpected stored rec: %+v", stored)
+	}
+}
+
+func TestIssueRecommendation_DeferValidation(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+
+	// 推荐不存在 → 40411
+	if _, err := ts.recService.Defer(issue.ID, ownerID, ""); err != errs.ErrRecommendationNotFound {
+		t.Fatalf("expected ErrRecommendationNotFound, got %v", err)
+	}
+
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// note 超 500 rune → 40001
+	if _, err := ts.recService.Defer(issue.ID, ownerID, strings.Repeat("长", 501)); err != errs.ErrInvalidParams {
+		t.Fatalf("expected ErrInvalidParams for too-long note, got %v", err)
+	}
+
+	// 非项目属主 → 40401
+	otherID := uuid.NewString()
+	createTestUser(t, ts.db, otherID)
+	if _, err := ts.recService.Defer(issue.ID, otherID, ""); err != errs.ErrProjectNotFound {
+		t.Fatalf("expected ErrProjectNotFound for non-owner defer, got %v", err)
+	}
+}
+
+func TestIssueRecommendation_DeferredBlocksUpsert(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if _, err := ts.recService.Defer(issue.ID, ownerID, ""); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	// 延后项再 PUT → 40911，且整行未被覆盖
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k2", UpsertIssueRecommendationRequest{Reason: "重新推荐"}); err != errs.ErrRecommendationDeferred {
+		t.Fatalf("expected ErrRecommendationDeferred, got %v", err)
+	}
+	stored, err := ts.recRepo.Get(issue.ID)
+	if err != nil {
+		t.Fatalf("get rec: %v", err)
+	}
+	if stored.Reason != "ok" || stored.CreatedBy != "k" || stored.DeferredAt == nil {
+		t.Fatalf("expected deferred row untouched, got %+v", stored)
+	}
+}
+
+// Delete 的读+延后检查+删在同一事务：defer 先提交、delete 后执行时，事务内必读到延后态。
+func TestIssueRecommendation_DeleteDeferred(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	// API Key 删 active 项照旧放行
+	if err := ts.recService.Delete(issue.ID, ownerID, false); err != nil {
+		t.Fatalf("api-key delete active: %v", err)
+	}
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("re-upsert: %v", err)
+	}
+	if _, err := ts.recService.Defer(issue.ID, ownerID, ""); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	// defer 已提交后再删：API Key 40911 且行仍在（事务内读到 committed 延后态）
+	if err := ts.recService.Delete(issue.ID, ownerID, false); err != errs.ErrRecommendationDeferred {
+		t.Fatalf("expected ErrRecommendationDeferred for api-key delete, got %v", err)
+	}
+	stored, err := ts.recRepo.Get(issue.ID)
+	if err != nil {
+		t.Fatalf("expected deferred row preserved after rejected delete: %v", err)
+	}
+	if stored.DeferredAt == nil {
+		t.Fatalf("expected row still deferred, got %+v", stored)
+	}
+
+	// JWT 删延后项 → 彻底移除
+	if err := ts.recService.Delete(issue.ID, ownerID, true); err != nil {
+		t.Fatalf("jwt delete deferred: %v", err)
+	}
+	if _, err := ts.recRepo.Get(issue.ID); err == nil {
+		t.Fatalf("expected recommendation hard-deleted")
+	}
+	// 删除=遗忘：可再被推荐
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "再来"}); err != nil {
+		t.Fatalf("re-upsert after delete: %v", err)
+	}
+}
+
+func TestIssueRecommendation_Restore(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	// 未延后时调用：幂等成功返回当前项
+	resp, err := ts.recService.Restore(issue.ID, ownerID)
+	if err != nil {
+		t.Fatalf("restore active rec: %v", err)
+	}
+	if resp.Status != api.Active || resp.DeferredAt != nil {
+		t.Fatalf("expected active item, got %+v", resp)
+	}
+
+	if _, err := ts.recService.Defer(issue.ID, ownerID, "稍后"); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	deferred, err := ts.recRepo.Get(issue.ID)
+	if err != nil {
+		t.Fatalf("get deferred rec: %v", err)
+	}
+	beforeUpdatedAt := deferred.UpdatedAt
+	time.Sleep(1100 * time.Millisecond)
+
+	resp, err = ts.recService.Restore(issue.ID, ownerID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if resp.Status != api.Active || resp.DeferredAt != nil || resp.DeferNote != nil {
+		t.Fatalf("expected restored active item, got %+v", resp)
+	}
+	stored, err := ts.recRepo.Get(issue.ID)
+	if err != nil {
+		t.Fatalf("get rec: %v", err)
+	}
+	if stored.DeferredAt != nil || stored.DeferNote != "" {
+		t.Fatalf("expected defer fields cleared, got %+v", stored)
+	}
+	if !stored.UpdatedAt.After(beforeUpdatedAt) {
+		t.Fatalf("expected updated_at refreshed, got %v vs %v", stored.UpdatedAt, beforeUpdatedAt)
+	}
+	// 恢复后 Agent 可再推荐
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "再推荐"}); err != nil {
+		t.Fatalf("upsert after restore: %v", err)
+	}
+}
+
+func TestIssueRecommendation_RestoreClosedIssue(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	internal := createInternalIssue(t, ts, issue.ProjectID, model.IssueStateOpen)
+	if _, err := ts.recService.Upsert(internal.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if _, err := ts.recService.Defer(internal.ID, ownerID, ""); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	// 直接把 issues 表 state 改成 closed（绕过自动移除挂钩），restore 防御校验应拒绝
+	if err := ts.db.Model(&model.Issue{}).Where("id = ?", internal.ID).Update("state", model.IssueStateClosed).Error; err != nil {
+		t.Fatalf("close issue: %v", err)
+	}
+	if _, err := ts.recService.Restore(internal.ID, ownerID); err != errs.ErrIssueNotRecommendable {
+		t.Fatalf("expected ErrIssueNotRecommendable, got %v", err)
+	}
+	// 推荐行仍保持延后态
+	stored, err := ts.recRepo.Get(internal.ID)
+	if err != nil {
+		t.Fatalf("get rec: %v", err)
+	}
+	if stored.DeferredAt == nil {
+		t.Fatalf("expected rec still deferred after failed restore")
+	}
+}
+
+func TestIssueRecommendation_ListIncludesDeferred(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	lowIssue := createRecTestIssue(t, ts, issue.ProjectID)
+	deferredIssue := createRecTestIssue(t, ts, issue.ProjectID)
+
+	seed := func(issueID string, req UpsertIssueRecommendationRequest) {
+		t.Helper()
+		if _, err := ts.recService.Upsert(issueID, ownerID, "k", req); err != nil {
+			t.Fatalf("seed upsert: %v", err)
+		}
+	}
+	seed(deferredIssue.ID, UpsertIssueRecommendationRequest{Reason: "deferred-high", Priority: api.Ptr(model.IssueRecommendationPriorityHigh)})
+	seed(lowIssue.ID, UpsertIssueRecommendationRequest{Reason: "low", Priority: api.Ptr(model.IssueRecommendationPriorityLow)})
+	seed(issue.ID, UpsertIssueRecommendationRequest{Reason: "mid", Priority: api.Ptr(model.IssueRecommendationPriorityMedium)})
+	if _, err := ts.recService.Defer(deferredIssue.ID, ownerID, "下周再看"); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+
+	all, err := ts.recService.List(ownerID, "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(all.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(all.Items))
+	}
+	// active 在前：mid > low；延后项排最后（尽管 priority=high）
+	if all.Items[0].Issue.Id != issue.ID || all.Items[1].Issue.Id != lowIssue.ID || all.Items[2].Issue.Id != deferredIssue.ID {
+		t.Fatalf("unexpected ordering: %+v", all.Items)
+	}
+	deferredItem := all.Items[2]
+	if deferredItem.Status != api.Deferred || deferredItem.DeferredAt == nil || deferredItem.DeferNote == nil || *deferredItem.DeferNote != "下周再看" {
+		t.Fatalf("unexpected deferred item: %+v", deferredItem)
+	}
+	if all.Items[0].Status != api.Active || all.Items[0].DeferredAt != nil || all.Items[0].DeferNote != nil {
+		t.Fatalf("unexpected active item fields: %+v", all.Items[0])
+	}
+}
+
+// 排序细则：active 组内同优先级按 updated_at 降序，deferred 组内同优先级按 deferred_at 降序，
+// deferred 无论优先级多高都排在全部 active 之后。直接回写时间戳保证顺序可观测、不依赖时序。
+func TestIssueRecommendation_ListDeferredOrdering(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	aOld := createRecTestIssue(t, ts, issue.ProjectID)
+	aNew := createRecTestIssue(t, ts, issue.ProjectID)
+	dOld := createRecTestIssue(t, ts, issue.ProjectID)
+	dNew := createRecTestIssue(t, ts, issue.ProjectID)
+
+	seed := func(issueID string, req UpsertIssueRecommendationRequest) {
+		t.Helper()
+		if _, err := ts.recService.Upsert(issueID, ownerID, "k", req); err != nil {
+			t.Fatalf("seed upsert: %v", err)
+		}
+	}
+	high := api.Ptr(model.IssueRecommendationPriorityHigh)
+	medium := api.Ptr(model.IssueRecommendationPriorityMedium)
+	seed(issue.ID, UpsertIssueRecommendationRequest{Reason: "a-high", Priority: high})
+	seed(aOld.ID, UpsertIssueRecommendationRequest{Reason: "a-mid-old", Priority: medium})
+	seed(aNew.ID, UpsertIssueRecommendationRequest{Reason: "a-mid-new", Priority: medium})
+	seed(dOld.ID, UpsertIssueRecommendationRequest{Reason: "d-old", Priority: high})
+	seed(dNew.ID, UpsertIssueRecommendationRequest{Reason: "d-new", Priority: high})
+	if _, err := ts.recService.Defer(dOld.ID, ownerID, ""); err != nil {
+		t.Fatalf("defer old: %v", err)
+	}
+	if _, err := ts.recService.Defer(dNew.ID, ownerID, ""); err != nil {
+		t.Fatalf("defer new: %v", err)
+	}
+
+	now := time.Now().UTC()
+	// UpdateColumn 跳过 updated_at 自动回写，保证排序时间戳确定
+	setTS := func(issueID, col string, v time.Time) {
+		t.Helper()
+		if err := ts.db.Model(&model.IssueRecommendation{}).Where("issue_id = ?", issueID).UpdateColumn(col, v).Error; err != nil {
+			t.Fatalf("set %s: %v", col, err)
+		}
+	}
+	setTS(issue.ID, "updated_at", now.Add(-2*time.Hour))
+	setTS(aOld.ID, "updated_at", now.Add(-3*time.Hour))
+	setTS(aNew.ID, "updated_at", now.Add(-time.Hour))
+	setTS(dOld.ID, "deferred_at", now.Add(-2*time.Hour))
+	setTS(dNew.ID, "deferred_at", now.Add(-30*time.Minute))
+
+	all, err := ts.recService.List(ownerID, "")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	want := []string{issue.ID, aNew.ID, aOld.ID, dNew.ID, dOld.ID}
+	if len(all.Items) != len(want) {
+		t.Fatalf("expected %d items, got %d", len(want), len(all.Items))
+	}
+	for i, id := range want {
+		if all.Items[i].Issue.Id != id {
+			t.Fatalf("unexpected order at %d: want %s got %s (full: %+v)", i, id, all.Items[i].Issue.Id, all.Items)
+		}
+	}
+	if all.Items[3].Status != api.Deferred || all.Items[4].Status != api.Deferred {
+		t.Fatalf("expected tail items deferred")
+	}
+}
+
+// 自动移除挂钩对延后行照常硬删：workflow_status 前移与 state=closed 两条路径都不区分 active/deferred。
+func TestIssueRecommendation_DeferredRemovedByHooks(t *testing.T) {
+	ts, issue, ownerID := setupRecommendationIssue(t)
+	if _, err := ts.recService.Upsert(issue.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if _, err := ts.recService.Defer(issue.ID, ownerID, ""); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	if _, err := ts.issueService.UpdateInternalMeta(issue.ID, ownerID, model.IssueWorkflowStatusInProgress, "tester"); err != nil {
+		t.Fatalf("update meta: %v", err)
+	}
+	if _, err := ts.recRepo.Get(issue.ID); err == nil {
+		t.Fatalf("expected deferred recommendation removed after in_progress")
+	}
+
+	internal := createInternalIssue(t, ts, issue.ProjectID, model.IssueStateOpen)
+	if _, err := ts.recService.Upsert(internal.ID, ownerID, "k", UpsertIssueRecommendationRequest{Reason: "ok"}); err != nil {
+		t.Fatalf("upsert internal: %v", err)
+	}
+	if _, err := ts.recService.Defer(internal.ID, ownerID, ""); err != nil {
+		t.Fatalf("defer internal: %v", err)
+	}
+	closed := model.IssueStateClosed
+	if _, err := ts.issueService.UpdateInternalIssue(internal.ID, ownerID, UpdateInternalIssueRequest{State: &closed}); err != nil {
+		t.Fatalf("close internal: %v", err)
+	}
+	if _, err := ts.recRepo.Get(internal.ID); err == nil {
+		t.Fatalf("expected deferred recommendation removed after close")
 	}
 }
 

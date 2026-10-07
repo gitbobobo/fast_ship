@@ -121,9 +121,12 @@ func Setup(
 		api.PUT("/issues/:iid/checklist", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueHandler.ReplaceChecklist)
 		api.PUT("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.UpsertShipHook)
 		api.DELETE("/issues/:iid/ship-hook", middleware.RequireJWT(cfg, authService), issueHandler.DeleteShipHook)
-		// 推荐任务 —— PUT 仅 API Key（Agent），JWT 调用在 handler 内返回 403(40303)；DELETE 两类凭证均可。
+		// 推荐任务 —— PUT 仅 API Key（Agent），JWT 调用在 handler 内返回 403(40303)；DELETE 两类凭证均可（延后项仅 JWT 可删，API Key 返回 40911）。
 		api.PUT("/issues/:iid/recommendation", middleware.RequireAuth(cfg, apiKeyRepo, authService), recommendationHandler.Upsert)
 		api.DELETE("/issues/:iid/recommendation", middleware.RequireAuth(cfg, apiKeyRepo, authService), recommendationHandler.Delete)
+		// 延后/恢复推荐 —— 仅 JWT（Web 看板操作，仿 ship-hook 挂法）
+		api.PUT("/issues/:iid/recommendation/defer", middleware.RequireJWT(cfg, authService), recommendationHandler.Defer)
+		api.DELETE("/issues/:iid/recommendation/defer", middleware.RequireJWT(cfg, authService), recommendationHandler.Restore)
 		// checklist-suggestions 对 API Key 开放：供 Agent 自动化生成清单建议；其余 AI 端点（generate-title / settings）仍限 JWT。
 		api.POST("/issues/:iid/checklist-suggestions", middleware.RequireAuth(cfg, apiKeyRepo, authService), aiHandler.SuggestIssueChecklist)
 		// JWT 必须 — Issue 评论

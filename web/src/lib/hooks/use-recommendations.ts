@@ -13,6 +13,36 @@ export function useRecommendations(projectId: string | undefined) {
   });
 }
 
+export function useDeferRecommendation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      issueId,
+      note,
+    }: {
+      issueId: string;
+      note?: string;
+    }) => {
+      await recommendationApi.defer(issueId, note);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recommendations"] });
+    },
+  });
+}
+
+export function useRestoreRecommendation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (issueId: string) => {
+      await recommendationApi.restore(issueId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recommendations"] });
+    },
+  });
+}
+
 export function useRemoveRecommendation() {
   const queryClient = useQueryClient();
   return useMutation({

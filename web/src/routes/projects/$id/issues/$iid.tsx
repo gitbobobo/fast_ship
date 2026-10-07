@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Circle,
   CircleDot,
+  Clock,
   Copy,
   Ellipsis,
   ExternalLink,
@@ -87,7 +88,10 @@ import {
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { useProject } from "@/lib/hooks/use-projects";
-import { useRecommendations } from "@/lib/hooks/use-recommendations";
+import {
+  useRecommendations,
+  useRestoreRecommendation,
+} from "@/lib/hooks/use-recommendations";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import {
   ISSUE_WORKFLOW_STATUS_LABELS,
@@ -519,6 +523,55 @@ function RecommendationBanner({
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+/** 已延后推荐横幅：低调灰底，展示延后时间与备注，可一键移回推荐。 */
+function DeferredRecommendationBanner({
+  recommendation,
+}: {
+  recommendation: IssueRecommendation;
+}) {
+  const restoreRecommendation = useRestoreRecommendation();
+
+  const handleRestore = async () => {
+    try {
+      await restoreRecommendation.mutateAsync(recommendation.issue.id);
+      toast.success("已移回推荐");
+    } catch {
+      toast.error("移回推荐失败");
+    }
+  };
+
+  return (
+    <section
+      aria-label="已延后推荐"
+      className="rounded-2xl border bg-muted/40 px-4 py-3.5"
+    >
+      <div className="flex items-center gap-2">
+        <Clock className="h-4 w-4 text-muted-foreground" />
+        <span className="text-sm font-medium text-muted-foreground">
+          已延后
+          {recommendation.deferred_at
+            ? ` · ${formatRelativeTime(recommendation.deferred_at)}`
+            : ""}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="ml-auto h-7 text-xs"
+          onClick={() => void handleRestore()}
+          disabled={restoreRecommendation.isPending}
+        >
+          {restoreRecommendation.isPending ? "移回中..." : "移回推荐"}
+        </Button>
+      </div>
+      {recommendation.defer_note ? (
+        <p className="mt-1.5 text-sm leading-relaxed whitespace-pre-wrap text-foreground/80">
+          {recommendation.defer_note}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -1666,7 +1719,11 @@ export default function IssueDetailPage() {
           {/* Main Content */}
           <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
             {recommendation ? (
-              <RecommendationBanner recommendation={recommendation} />
+              recommendation.status === "deferred" ? (
+                <DeferredRecommendationBanner recommendation={recommendation} />
+              ) : (
+                <RecommendationBanner recommendation={recommendation} />
+              )
             ) : null}
             {/* Issue Header Card */}
             <div className="overflow-hidden rounded-2xl border bg-card shadow-sm transition-shadow hover:shadow-md">

@@ -2215,7 +2215,7 @@ paths:
     get:
       tags: [recommendations]
       operationId: listIssueRecommendations
-      summary: 推荐任务列表（一次全量，无分页；按 priority 降序再按 updated_at 降序）
+      summary: 推荐任务列表（一次全量，无分页；active 在前 deferred 在后，组内按 priority 降序）
       security:
         - jwtAuth: []
         - apiKeyAuth: []
@@ -2255,7 +2255,7 @@ paths:
       tags: [recommendations]
       operationId: upsertIssueRecommendation
       summary: 写入/覆盖推荐（仅 API Key；JWT 返回 40303）
-      description: 覆盖 upsert：同一 Issue 重复 PUT 整体替换 reason/priority/dependencies/created_by，保留原 created_at。目标须 state=open 且 workflow_status 为未设置或 todo，否则 40910。dependencies 整组替换，≤20 个 Issue UUID，不含自身；依赖须属当前用户的项目，不存在或越权统一 40405。
+      description: 覆盖 upsert：同一 Issue 重复 PUT 整体替换 reason/priority/dependencies/created_by，保留原 created_at。目标须 state=open 且 workflow_status 为未设置或 todo，否则 40910。dependencies 整组替换，≤20 个 Issue UUID，不含自身；依赖须属当前用户的项目，不存在或越权统一 40405。已被用户延后的推荐不可再写入（40911）。
       security:
         - jwtAuth: []
         - apiKeyAuth: []
@@ -2296,7 +2296,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          description: Issue 当前状态不可被推荐（40910）
+          description: Issue 当前状态不可被推荐（40910）或推荐已被延后（40911）
           content:
             application/json:
               schema:
@@ -2306,7 +2306,7 @@ paths:
     delete:
       tags: [recommendations]
       operationId: deleteIssueRecommendation
-      summary: 移除推荐（JWT 与 API Key 均可）
+      summary: 移除推荐（JWT 与 API Key 均可；删除=遗忘可再推荐，延后项仅 JWT 可删）
       security:
         - jwtAuth: []
         - apiKeyAuth: []
@@ -2319,6 +2319,106 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           description: 推荐不存在（40411）或项目不存在（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: API Key 尝试删除延后态推荐（40911）；延后项须 JWT 删除
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/issues/{iid}/recommendation/defer:
+    put:
+      tags: [recommendations]
+      operationId: deferIssueRecommendation
+      summary: 延后推荐（仅 JWT）
+      description: 冻结整条推荐（reason/priority/dependencies/created_by 原样保留），从推荐列表的 active 组消失且 Agent 不可再推荐（PUT recommendation 返回 40911）。仅作用于已存在的推荐行；重复调用覆盖 note 并刷新 deferred_at。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeferIssueRecommendationRequest'
+      responses:
+        '200':
+          description: 延后后的推荐
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueRecommendation'
+        '400':
+          description: note 超长（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: API Key 调用仅限 JWT 的端点（40301）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 推荐不存在（40411）或项目不存在（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [recommendations]
+      operationId: restoreIssueRecommendation
+      summary: 恢复已延后的推荐（仅 JWT）
+      description: 清空 deferred_at/defer_note 并把推荐移回 active 组，updated_at 刷新；未延后时调用为幂等成功。Issue 非 open 时返回 40910。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: 恢复后的推荐
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/IssueRecommendation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: API Key 调用仅限 JWT 的端点（40301）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 推荐不存在（40411）或项目不存在（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Issue 当前状态不可被推荐（40910，如已关闭）
           content:
             application/json:
               schema:
@@ -3901,6 +4001,13 @@ components:
             type: string
             format: uuid
           description: 前置依赖 Issue UUID 数组，整组替换，不含自身；重复自动去重（保序）
+    DeferIssueRecommendationRequest:
+      type: object
+      properties:
+        note:
+          type: string
+          maxLength: 500
+          description: 延后备注，trim 后 ≤500 rune；缺省或空串表示无备注
     UpsertIssueCollabRequest:
       type: object
       required: [body]
@@ -4406,7 +4513,7 @@ components:
           type: string
     IssueRecommendation:
       type: object
-      required: [issue, reason, priority, created_by, created_at, updated_at, dependencies]
+      required: [issue, reason, priority, created_by, status, deferred_at, defer_note, created_at, updated_at, dependencies]
       properties:
         issue:
           $ref: '#/components/schemas/RecommendationIssueSummary'
@@ -4417,6 +4524,19 @@ components:
         created_by:
           type: string
           description: 提交者 API Key 名称
+        status:
+          type: string
+          enum: [active, deferred]
+          description: deferred 表示被用户延后；延后项对 Agent 不可再推荐（PUT 返回 40911）
+        deferred_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 延后时间；status=active 时为 null
+        defer_note:
+          type: string
+          nullable: true
+          description: 延后备注；无备注时为 null
         created_at:
           type: string
           format: date-time

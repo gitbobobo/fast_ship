@@ -15,6 +15,7 @@ import (
 
 const (
 	recommendationReasonMaxRunes = 500
+	recommendationNoteMaxRunes   = 500
 	recommendationMaxDeps        = 20
 )
 
@@ -82,6 +83,14 @@ func (s *IssueRecommendationService) Upsert(issueID, userID, createdBy string, r
 			}
 			return err
 		}
+		// 延后态推荐对 Agent 封闭：整行冻结保留但不允许覆盖写入
+		if existing, err := s.recRepo.GetTx(tx, issue.ID); err == nil {
+			if existing.DeferredAt != nil {
+				return errs.ErrRecommendationDeferred
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
 		if meta, err = s.ensureRecommendable(tx, issue); err != nil {
 			return err
 		}
@@ -137,24 +146,170 @@ func (s *IssueRecommendationService) Upsert(issueID, userID, createdBy string, r
 	return &item, nil
 }
 
-func (s *IssueRecommendationService) Delete(issueID, userID string) error {
-	rec, err := s.recRepo.Get(issueID)
+// Delete 硬删推荐行（删除=遗忘，可再被推荐）。isJWT 标识调用方凭证：
+// API Key 删延后项返回 40911（延后=压制，不允许 Agent 抹掉），JWT 删延后项即彻底移除。
+// 读、归属校验、延后检查、删除全部在同一事务：SQLite 单写者下事务内读到的是最新
+// committed 状态，杜绝「读到 active 后被延后，仍按旧态删除」的交错。
+func (s *IssueRecommendationService) Delete(issueID, userID string, isJWT bool) error {
+	err := s.recRepo.Transaction(func(tx *gorm.DB) error {
+		rec, err := s.recRepo.GetTx(tx, issueID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrRecommendationNotFound
+			}
+			return err
+		}
+		if _, err := s.projectRepo.FindByIDTx(tx, rec.ProjectID, userID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrProjectNotFound
+			}
+			return err
+		}
+		if rec.DeferredAt != nil && !isJWT {
+			return errs.ErrRecommendationDeferred
+		}
+		return s.recRepo.DeleteTx(tx, issueID)
+	})
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrRecommendationNotFound
+		var appErr *errs.AppError
+		if errors.As(err, &appErr) {
+			return appErr
 		}
-		return errs.ErrInternal
-	}
-	if _, err := s.projectRepo.FindByID(rec.ProjectID, userID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrProjectNotFound
-		}
-		return errs.ErrInternal
-	}
-	if err := s.recRepo.Delete(issueID); err != nil {
 		return errs.ErrInternal
 	}
 	return nil
+}
+
+// Defer 把已存在的推荐置为延后态（仅 JWT 用户调用；路由层已挡 API Key）。
+// 冻结保留整行数据；重复调用覆盖 note 并刷新 deferred_at，是幂等 upsert。
+func (s *IssueRecommendationService) Defer(issueID, userID, note string) (*IssueRecommendationResponse, error) {
+	note = strings.TrimSpace(note)
+	if utf8.RuneCountInString(note) > recommendationNoteMaxRunes {
+		return nil, errs.ErrInvalidParams
+	}
+
+	var (
+		rec     *model.IssueRecommendation
+		project *model.Project
+	)
+	err := s.recRepo.Transaction(func(tx *gorm.DB) error {
+		var err error
+		rec, err = s.recRepo.GetTx(tx, issueID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrRecommendationNotFound
+			}
+			return err
+		}
+		if project, err = s.projectRepo.FindByIDTx(tx, rec.ProjectID, userID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrProjectNotFound
+			}
+			return err
+		}
+		if err := s.recRepo.DeferTx(tx, issueID, note, time.Now().UTC()); err != nil {
+			return err
+		}
+		// 回读库里的真实行再组响应
+		rec, err = s.recRepo.GetTx(tx, issueID)
+		return err
+	})
+	if err != nil {
+		var appErr *errs.AppError
+		if errors.As(err, &appErr) {
+			return nil, appErr
+		}
+		return nil, errs.ErrInternal
+	}
+	return s.recommendationResponse(rec, project.Name)
+}
+
+// Restore 撤销延后把推荐移回 active 组：清 deferred_at/defer_note 并刷新 updated_at。
+// 防御性校验 issue 仍为 open（否则 40910）；未延后时调用视为幂等成功，返回当前项。
+func (s *IssueRecommendationService) Restore(issueID, userID string) (*IssueRecommendationResponse, error) {
+	var (
+		rec     *model.IssueRecommendation
+		project *model.Project
+	)
+	err := s.recRepo.Transaction(func(tx *gorm.DB) error {
+		var err error
+		rec, err = s.recRepo.GetTx(tx, issueID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrRecommendationNotFound
+			}
+			return err
+		}
+		if project, err = s.projectRepo.FindByIDTx(tx, rec.ProjectID, userID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrProjectNotFound
+			}
+			return err
+		}
+		issue, err := s.issueRepo.FindByIDTx(tx, issueID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrIssueNotFound
+			}
+			return err
+		}
+		if issue.State != model.IssueStateOpen {
+			return errs.ErrIssueNotRecommendable
+		}
+		if rec.DeferredAt == nil {
+			return nil
+		}
+		if err := s.recRepo.RestoreTx(tx, issueID, time.Now().UTC()); err != nil {
+			return err
+		}
+		rec, err = s.recRepo.GetTx(tx, issueID)
+		return err
+	})
+	if err != nil {
+		var appErr *errs.AppError
+		if errors.As(err, &appErr) {
+			return nil, appErr
+		}
+		return nil, errs.ErrInternal
+	}
+	return s.recommendationResponse(rec, project.Name)
+}
+
+// recommendationResponse 为已提交的推荐行组装单条响应（Defer/Restore 写后回读共用）。
+func (s *IssueRecommendationService) recommendationResponse(rec *model.IssueRecommendation, projectName string) (*IssueRecommendationResponse, error) {
+	issue, err := s.issueRepo.FindByID(rec.IssueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrIssueNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	meta, err := s.internalMetaRepo.Get(rec.IssueID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			meta = nil
+		} else {
+			return nil, errs.ErrInternal
+		}
+	}
+	deps, err := s.recRepo.ListDependencies([]string{rec.IssueID})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	depIDs := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		depIDs = append(depIDs, dep.DepIssueID)
+	}
+	depIssues, err := s.issueRepo.ListByIDs(depIDs)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	depMetas, err := s.internalMetaRepo.ListByIssueIDs(depIDs)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	item := toRecommendationResponse(*rec, *issue, meta, projectName, deps, depIssues, depMetas)
+	return &item, nil
 }
 
 // List 一次全量返回推荐列表；projectID 为空时覆盖当前用户全部项目。
@@ -308,10 +463,36 @@ func toRecommendationResponse(
 		Reason:       rec.Reason,
 		Priority:     rec.Priority,
 		CreatedBy:    rec.CreatedBy,
+		Status:       recommendationStatusOf(rec),
+		DeferredAt:   formatTimePtr(rec.DeferredAt),
+		DeferNote:    deferNoteOf(rec),
 		CreatedAt:    formatTime(rec.CreatedAt),
 		UpdatedAt:    formatTime(rec.UpdatedAt),
 		Dependencies: buildDependencyResponses(deps, depIssues, depMetas),
 	}
+}
+
+// recommendationStatusOf 由 deferred_at 派生契约层的 active/deferred 状态。
+func recommendationStatusOf(rec model.IssueRecommendation) api.IssueRecommendationStatus {
+	if rec.DeferredAt != nil {
+		return api.Deferred
+	}
+	return api.Active
+}
+
+func formatTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	return api.Ptr(formatTime(*t))
+}
+
+// deferNoteOf 空串映射为 nil，契约层 defer_note 用 null 表达「无备注」。
+func deferNoteOf(rec model.IssueRecommendation) *string {
+	if rec.DeferNote == "" {
+		return nil
+	}
+	return api.Ptr(rec.DeferNote)
 }
 
 func buildDependencyResponses(deps []model.RecommendationDependency, depIssues map[string]model.Issue, depMetas map[string]model.IssueInternalMeta) []RecommendationDependencyResponse {

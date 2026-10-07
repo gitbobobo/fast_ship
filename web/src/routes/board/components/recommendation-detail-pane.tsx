@@ -3,10 +3,12 @@ import { Link } from "react-router";
 import {
   ArrowLeft,
   CheckCircle2,
+  Clock,
   ExternalLink,
   ListChecks,
   Sparkles,
   Trash2,
+  Undo2,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
@@ -20,6 +22,7 @@ import { useIssue } from "@/lib/hooks/use-issues";
 import { useIssueCollab } from "@/lib/hooks/use-issue-collab";
 import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
 import { cn } from "@/lib/utils";
+import { formatRelativeTime } from "@/lib/utils/format";
 
 function StatePill({ state }: { state: Issue["state"] }) {
   const open = state === "open";
@@ -184,7 +187,14 @@ function IssueLabels({ issue }: { issue: Issue }) {
 interface RecommendationDetailPaneProps {
   /** 当前选中的推荐条目。 */
   item: IssueRecommendation;
+  /** 推荐中条目：打开延后对话框。 */
+  onDefer: () => void;
+  /** 已延后条目：移回推荐。 */
+  onRestore: () => void;
+  /** 已延后条目：彻底移除（不可逆，由父组件弹确认框）。 */
   onRemove: () => void;
+  /** 移回推荐请求进行中。 */
+  restorePending?: boolean;
   /** Enter 键复制入口，转发给当前展示的复制按钮。 */
   copyHandleRef: Ref<CopyIssuePromptButtonHandle>;
   /** 跨项目（全量推荐）时在标题行补项目名。 */
@@ -194,12 +204,15 @@ interface RecommendationDetailPaneProps {
 /**
  * 推荐弹框右栏：选中条目的只读详情（无评论/时间线）。
  * 前置依赖 chip 点击切到该依赖的「看一眼」视图（可为推荐列表外的 issue），
- * 顶部「← 返回 <reference>」回链回到选中条目；peek 下隐藏推荐理由与移除入口。
+ * 顶部「← 返回 <reference>」回链回到选中条目；peek 下隐藏推荐理由与操作入口。
  * 切换选中项时由父组件以 key 重挂载本组件，peek 状态随之重置。
  */
 export function RecommendationDetailPane({
   item,
+  onDefer,
+  onRestore,
   onRemove,
+  restorePending = false,
   copyHandleRef,
   showProject = false,
 }: RecommendationDetailPaneProps) {
@@ -268,6 +281,23 @@ export function RecommendationDetailPane({
               ) : null}
             </div>
 
+            {!peeking && item.status === "deferred" && (
+              <div className="rounded-lg border bg-muted/40 px-3 py-2.5">
+                <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                  <Clock className="h-3 w-3" />
+                  已延后
+                  {item.deferred_at
+                    ? ` · ${formatRelativeTime(item.deferred_at)}`
+                    : ""}
+                </p>
+                {item.defer_note ? (
+                  <p className="mt-1 text-sm leading-relaxed whitespace-pre-wrap text-foreground/90">
+                    {item.defer_note}
+                  </p>
+                ) : null}
+              </div>
+            )}
+
             {!peeking && (
               <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2.5">
                 <p className="flex items-center gap-1.5 text-xs font-medium text-violet-600 dark:text-violet-400">
@@ -322,17 +352,40 @@ export function RecommendationDetailPane({
           reason={peeking ? undefined : item.reason}
           handleRef={copyHandleRef}
         />
-        {!peeking && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-destructive"
-            onClick={onRemove}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            移除推荐
-          </Button>
-        )}
+        {!peeking &&
+          (item.status === "deferred" ? (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 text-xs"
+                onClick={onRestore}
+                disabled={restorePending}
+              >
+                <Undo2 className="h-3.5 w-3.5" />
+                {restorePending ? "移回中..." : "移回推荐"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-destructive"
+                onClick={onRemove}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                彻底移除
+              </Button>
+            </>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+              onClick={onDefer}
+            >
+              <Clock className="h-3.5 w-3.5" />
+              延后处理
+            </Button>
+          ))}
         <Link
           to={`/projects/${issue?.project_id ?? peekDep?.project_id ?? item.issue.project_id}/issues/${issue?.id ?? displayIssueId}`}
           className={cn(

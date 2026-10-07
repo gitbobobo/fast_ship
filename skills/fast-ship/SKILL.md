@@ -95,6 +95,7 @@ spec 的 security 经常同时写 JWT 和 API Key，真正的拒绝在 handler �
 
 - API Key 不能传 `state` / `state_reason`，不能 `POST /api/issues/{iid}/comments`，不能 `PUT` 或 `DELETE /api/issues/{iid}/ship-hook`。做了就是 403（40301）。`ship_hook` 只出现在 Issue 的 GET 和列表里，只读。
 - `PUT /api/issues/{iid}/collab/consensus`、`PUT /api/issues/{iid}/collab/summary`、`PUT /api/issues/{iid}/recommendation` 只接受 API Key。JWT 调用返回 403（40303）。
+- 推荐被用户延后后，`PUT recommendation` 返回 409（40911）——不要重试再推荐，也不要试图 DELETE（同样 40911）。`PUT`/`DELETE /api/issues/{iid}/recommendation/defer` 是延后/恢复，仅 JWT（API Key 40301）。彻底移除延后项只能由 JWT 用户做。
 - `POST /api/projects/{id}/logs` 只接受 API Key。JWT 调用返回 403（40303）。
 
 ### checklist 是整组替换
