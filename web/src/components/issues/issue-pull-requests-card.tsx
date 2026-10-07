@@ -82,11 +82,13 @@ function DetachPullRequestButton({
   projectId,
   pr,
   onDetached,
+  syncPending,
 }: {
   issueId: string;
   projectId: string;
   pr: IssuePullRequest;
   onDetached: (id: string) => void;
+  syncPending: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const detach = useDetachIssuePullRequest(issueId, projectId);
@@ -112,7 +114,7 @@ function DetachPullRequestButton({
             variant="ghost"
             size="icon-sm"
             aria-label={`移除 ${pr.repo_full_name}#${pr.number}`}
-            disabled={detach.isPending}
+            disabled={detach.isPending || syncPending}
           />
         }
       >
@@ -152,11 +154,13 @@ function PullRequestRow({
   projectId,
   pr,
   onDetached,
+  syncPending,
 }: {
   issueId: string;
   projectId: string;
   pr: IssuePullRequest;
   onDetached: (id: string) => void;
+  syncPending: boolean;
 }) {
   return (
     <div className="flex items-start gap-1.5 rounded-lg border p-2.5">
@@ -185,6 +189,7 @@ function PullRequestRow({
         projectId={projectId}
         pr={pr}
         onDetached={onDetached}
+        syncPending={syncPending}
       />
     </div>
   );
@@ -211,6 +216,12 @@ export function IssuePullRequestsCard({
   const handleDetached = (id: string) => {
     setSyncFailures((prev) => prev.filter((failure) => failure.id !== id));
   };
+
+  // sync 期间并发 detach（本页或其他客户端）会让失败列表残留已解除的行；
+  // 渲染时只展示仍存在于当前关联列表中的失败项
+  const visibleFailures = syncFailures.filter((failure) =>
+    items.some((pr) => pr.id === failure.id),
+  );
 
   const handleAttach = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -297,14 +308,15 @@ export function IssuePullRequestsCard({
                 projectId={projectId}
                 pr={pr}
                 onDetached={handleDetached}
+                syncPending={sync.isPending}
               />
             ))}
           </div>
         )}
 
-        {syncFailures.length > 0 && (
+        {visibleFailures.length > 0 && (
           <div className="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-2">
-            {syncFailures.map((failure) => (
+            {visibleFailures.map((failure) => (
               <p key={failure.id} className="text-xs text-destructive">
                 {failure.error}
               </p>
