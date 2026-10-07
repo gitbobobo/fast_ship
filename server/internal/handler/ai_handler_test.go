@@ -77,8 +77,8 @@ func TestAIHandler_GenerateTitle_AIProviderReturnsHTTP500(t *testing.T) {
 
 	t.Logf("Response: status=%d body=%s", rec.Code, rec.Body.String())
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 when AI provider returns error, got %d", rec.Code)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 when AI provider returns error, got %d", rec.Code)
 	}
 }
 
@@ -150,8 +150,8 @@ func TestAIHandler_GenerateTitle_AIReturnsEmptyContent(t *testing.T) {
 
 	t.Logf("Response: status=%d body=%s", rec.Code, rec.Body.String())
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for empty AI content, got %d", rec.Code)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for empty AI content, got %d", rec.Code)
 	}
 }
 
@@ -179,8 +179,8 @@ func TestAIHandler_GenerateTitle_AIReturnsBaseRespError(t *testing.T) {
 
 	t.Logf("Response: status=%d body=%s", rec.Code, rec.Body.String())
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for base_resp error, got %d", rec.Code)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for base_resp error, got %d", rec.Code)
 	}
 }
 
