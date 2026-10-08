@@ -251,6 +251,22 @@ func decryptProjectPRToken(t *testing.T, svc *testServices, projectID string) st
 	return string(plain)
 }
 
+func decryptProjectToken(t *testing.T, svc *testServices, projectID string) string {
+	t.Helper()
+	var stored model.Project
+	if err := svc.db.First(&stored, "id = ?", projectID).Error; err != nil {
+		t.Fatalf("reload project: %v", err)
+	}
+	if len(stored.GithubTokenEncrypted) == 0 {
+		return ""
+	}
+	plain, err := crypto.Decrypt(stored.GithubTokenEncrypted, []byte(svc.cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("decrypt stored token: %v", err)
+	}
+	return string(plain)
+}
+
 // 创建时可不带反馈仓库直接配 PR Token；响应只暴露 has_github_pr_token，
 // 明文与密文都不出现在响应 JSON 里。
 func TestProjectServiceCreate_WithPRToken(t *testing.T) {
@@ -779,5 +795,38 @@ func TestProjectServiceUpdate_ClearFalseIsNoop(t *testing.T) {
 	}
 	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
 		t.Fatalf("expected pr-token-v1 unchanged, got %q", got)
+	}
+}
+
+// source_project_id 指向未配置 Access Token 的项目：Create 直接 40001，
+// Update 也 40001 且不抹掉项目现有 Token（不再静默写空密文）。
+func TestProjectService_GitHubTokenSourceWithoutToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-access-src-empty")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = nil
+	})
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "access-token-v1")
+	})
+
+	_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:            "from-empty-source",
+		RepositoryUrl:   api.Ptr("https://github.com/acme/demo"),
+		SourceProjectId: api.Ptr(source.ID),
+	})
+	if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("create: expected 40001, got %v", err)
+	}
+
+	_, err = projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		SourceProjectId: api.Ptr(source.ID),
+	})
+	if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("update: expected 40001, got %v", err)
+	}
+	if got := decryptProjectToken(t, svc, project.ID); got != "access-token-v1" {
+		t.Fatalf("expected access-token-v1 unchanged, got %q", got)
 	}
 }

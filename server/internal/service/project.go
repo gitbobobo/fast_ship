@@ -336,6 +336,8 @@ func parseRepositoryURL(raw string) (owner, repo string, err error) {
 }
 
 // resolveGitHubToken 从 Token 字符串或源项目解析加密后的 Token，优先使用 sourceProjectID。
+// 源项目不存在返回 ErrProjectNotFound；源项目未配置 Access Token 返回 40001——
+// 与 resolvePRTokenFromSource 一致，不允许静默写入空密文。
 func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID string) ([]byte, error) {
 	if sourceProjectID != "" {
 		sourceProject, err := s.projectRepo.FindByID(sourceProjectID, userID)
@@ -344,6 +346,9 @@ func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID
 				return nil, errs.ErrProjectNotFound
 			}
 			return nil, errs.ErrInternal
+		}
+		if len(sourceProject.GithubTokenEncrypted) == 0 {
+			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 GitHub Access Token")
 		}
 		return sourceProject.GithubTokenEncrypted, nil
 	}
