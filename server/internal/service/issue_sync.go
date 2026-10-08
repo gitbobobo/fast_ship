@@ -316,44 +316,24 @@ func (s *IssueService) upsertGitHubIssue(projectID string, item *ghclient.Issue)
 	return stored, nil
 }
 
+// syncComments 先拉完该 Issue 的全部评论分页并映射成 model，再由 ReplaceSynced
+// 单事务写入；任一分页失败时本地集合保持同步前数据，一个字也不写。
 func (s *IssueService) syncComments(ctx context.Context, client gitHubIssueClient, issue *model.Issue, issueNumber int) (int, error) {
 	const perPage = 100
 	page := 1
-	commentIDs := make([]int64, 0)
-	synced := 0
+	var comments []*model.IssueComment
 
 	for {
 		items, resp, err := client.ListIssueComments(ctx, issueNumber, page, perPage)
 		if err != nil {
-			return synced, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 评论失败: %v", err))
+			return 0, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 评论失败: %v", err))
 		}
 
 		for _, item := range items {
 			if item == nil || item.GetID() == 0 {
 				continue
 			}
-			comment := &model.IssueComment{
-				ID:                uuid.NewString(),
-				IssueID:           issue.ID,
-				Source:            model.IssueSourceGitHub,
-				GitHubCommentID:   item.GetID(),
-				GitHubNodeID:      item.GetNodeID(),
-				Body:              item.GetBody(),
-				BodyHTML:          item.GetBodyHTML(),
-				HTMLURL:           item.GetHTMLURL(),
-				AuthorLogin:       item.GetUser().GetLogin(),
-				AuthorAvatarURL:   item.GetUser().GetAvatarURL(),
-				AuthorAssociation: item.GetAuthorAssociation(),
-				ReactionsJSON:     toJSONString(mapReactions(item.Reactions)),
-				GitHubCreatedAt:   item.GetCreatedAt().UTC(),
-				GitHubUpdatedAt:   item.GetUpdatedAt().UTC(),
-				RawJSON:           toJSONString(item),
-			}
-			if err := s.commentRepo.Upsert(comment); err != nil {
-				return synced, errs.ErrInternal
-			}
-			commentIDs = append(commentIDs, item.GetID())
-			synced++
+			comments = append(comments, buildGitHubIssueCommentModel(issue.ID, item))
 		}
 
 		if resp == nil || resp.NextPage == 0 {
@@ -362,29 +342,30 @@ func (s *IssueService) syncComments(ctx context.Context, client gitHubIssueClien
 		page = resp.NextPage
 	}
 
-	if err := s.commentRepo.DeleteMissing(issue.ID, commentIDs); err != nil {
-		return synced, errs.ErrInternal
+	if err := s.commentRepo.ReplaceSynced(issue.ID, comments); err != nil {
+		return 0, errs.ErrInternal
 	}
-	return synced, nil
+	return len(comments), nil
 }
 
+// syncTimeline 先拉完该 Issue 的全部时间线分页并映射成 model，再由 ReplaceSynced
+// 单事务写入；任一分页失败时本地集合保持同步前数据，一个字也不写。
 func (s *IssueService) syncTimeline(ctx context.Context, client gitHubIssueClient, issue *model.Issue, issueNumber int) (int, error) {
 	const perPage = 100
 	page := 1
-	eventKeys := make([]string, 0)
-	synced := 0
+	var events []*model.IssueTimelineEvent
 
 	for {
 		items, resp, err := client.ListIssueTimeline(ctx, issueNumber, page, perPage)
 		if err != nil {
-			return synced, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 动态失败: %v", err))
+			return 0, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 动态失败: %v", err))
 		}
 
 		for _, item := range items {
 			if item == nil {
 				continue
 			}
-			event := &model.IssueTimelineEvent{
+			events = append(events, &model.IssueTimelineEvent{
 				ID:              uuid.NewString(),
 				IssueID:         issue.ID,
 				EventKey:        buildTimelineEventKey(item),
@@ -396,12 +377,7 @@ func (s *IssueService) syncTimeline(ctx context.Context, client gitHubIssueClien
 				Summary:         summarizeTimeline(item),
 				PayloadJSON:     toJSONString(item),
 				GitHubCreatedAt: item.GetCreatedAt().UTC(),
-			}
-			if err := s.timelineRepo.Upsert(event); err != nil {
-				return synced, errs.ErrInternal
-			}
-			eventKeys = append(eventKeys, event.EventKey)
-			synced++
+			})
 		}
 
 		if resp == nil || resp.NextPage == 0 {
@@ -410,10 +386,10 @@ func (s *IssueService) syncTimeline(ctx context.Context, client gitHubIssueClien
 		page = resp.NextPage
 	}
 
-	if err := s.timelineRepo.DeleteMissing(issue.ID, eventKeys); err != nil {
-		return synced, errs.ErrInternal
+	if err := s.timelineRepo.ReplaceSynced(issue.ID, events); err != nil {
+		return 0, errs.ErrInternal
 	}
-	return synced, nil
+	return len(events), nil
 }
 
 func (s *IssueService) decryptGitHubToken(project *model.Project) ([]byte, *errs.AppError) {
