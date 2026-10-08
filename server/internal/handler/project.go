@@ -72,17 +72,18 @@ func (h *ProjectHandler) List(c *gin.Context) {
 
 // updateProjectInput 保留基线的 string+omitempty 绑定语义，原因同
 // updateMeInput：生成类型 *string 无法对显式空串走 omitempty 跳过。
-// GithubPRToken/ClearGithubPRToken 用 RawMessage 旁路捕获：互斥校验依赖
-// 「字段是否显式提供」，显式 null 也算提供——*string/*bool 会把 null 折成
-// nil，与缺省不可区分。模式同 updateDocumentRequest 的 parent_id。
+// GithubPRToken/ClearGithubPRToken/PRTokenSourceProjectID 用 RawMessage 旁路
+// 捕获：互斥校验依赖「字段是否显式提供」，显式 null 也算提供——*string/*bool
+// 会把 null 折成 nil，与缺省不可区分。模式同 updateDocumentRequest 的 parent_id。
 type updateProjectInput struct {
-	Name               string          `json:"name" binding:"omitempty,min=1,max=100"`
-	Description        string          `json:"description"`
-	RepositoryURL      string          `json:"repository_url"`
-	GithubToken        string          `json:"github_token"`
-	GithubPRToken      json.RawMessage `json:"github_pr_token"`
-	ClearGithubPRToken json.RawMessage `json:"clear_github_pr_token"`
-	SourceProjectID    string          `json:"source_project_id"`
+	Name                   string          `json:"name" binding:"omitempty,min=1,max=100"`
+	Description            string          `json:"description"`
+	RepositoryURL          string          `json:"repository_url"`
+	GithubToken            string          `json:"github_token"`
+	GithubPRToken          json.RawMessage `json:"github_pr_token"`
+	ClearGithubPRToken     json.RawMessage `json:"clear_github_pr_token"`
+	PRTokenSourceProjectID json.RawMessage `json:"pr_token_source_project_id"`
+	SourceProjectID        string          `json:"source_project_id"`
 }
 
 // optionalJSONField 把 RawMessage 解成指针：缺省与显式 null 都得到 nil（即不动作），
@@ -107,8 +108,8 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 	}
 
 	// 互斥按「字段是否显式提供」判定，显式 null 同样算提供。
-	if len(input.GithubPRToken) > 0 && len(input.ClearGithubPRToken) > 0 {
-		response.BadRequest(c, 40001, "请求参数无效: clear_github_pr_token 与 github_pr_token 不能同时提供")
+	if len(input.ClearGithubPRToken) > 0 && (len(input.GithubPRToken) > 0 || len(input.PRTokenSourceProjectID) > 0) {
+		response.BadRequest(c, 40001, "请求参数无效: clear_github_pr_token 与 github_pr_token 或 pr_token_source_project_id 不能同时提供")
 		return
 	}
 	prToken, err := optionalJSONField[string](input.GithubPRToken)
@@ -121,16 +122,22 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 		response.BadRequest(c, 40001, "请求参数无效: clear_github_pr_token 类型无效")
 		return
 	}
+	prTokenSource, err := optionalJSONField[string](input.PRTokenSourceProjectID)
+	if err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: pr_token_source_project_id 类型无效")
+		return
+	}
 
 	userID := middleware.GetUserID(c)
 	result, err := h.projectService.Update(id, userID, &service.UpdateProjectRequest{
-		Name:               api.NonEmpty(input.Name),
-		Description:        api.NonEmpty(input.Description),
-		RepositoryUrl:      api.NonEmpty(input.RepositoryURL),
-		GithubToken:        api.NonEmpty(input.GithubToken),
-		GithubPrToken:      prToken,
-		ClearGithubPrToken: clearPRToken,
-		SourceProjectId:    api.NonEmpty(input.SourceProjectID),
+		Name:                   api.NonEmpty(input.Name),
+		Description:            api.NonEmpty(input.Description),
+		RepositoryUrl:          api.NonEmpty(input.RepositoryURL),
+		GithubToken:            api.NonEmpty(input.GithubToken),
+		GithubPrToken:          prToken,
+		ClearGithubPrToken:     clearPRToken,
+		PrTokenSourceProjectId: prTokenSource,
+		SourceProjectId:        api.NonEmpty(input.SourceProjectID),
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)

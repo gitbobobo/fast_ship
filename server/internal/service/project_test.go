@@ -281,6 +281,71 @@ func TestProjectServiceCreate_WithPRToken(t *testing.T) {
 	}
 }
 
+// pr_token_source_project_id 复制源项目的 PR Token 密文，解密后与源 Token 相同；
+// 与 github_pr_token 同传时 source 优先（与 source_project_id 语义一致）。
+func TestProjectServiceCreate_PRTokenFromSource(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-source")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-shared")
+	})
+
+	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:                   "pr-source-project",
+		PrTokenSourceProjectId: api.Ptr(source.ID),
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !project.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token=true")
+	}
+	if got := decryptProjectPRToken(t, svc, project.Id); got != "pr-token-shared" {
+		t.Fatalf("expected copied pr-token-shared, got %q", got)
+	}
+
+	project2, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:                   "pr-source-wins",
+		GithubPrToken:          api.Ptr("pr-token-other"),
+		PrTokenSourceProjectId: api.Ptr(source.ID),
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if got := decryptProjectPRToken(t, svc, project2.Id); got != "pr-token-shared" {
+		t.Fatalf("expected source to win with pr-token-shared, got %q", got)
+	}
+}
+
+// source 项目不存在返回 40401；存在但未配 PR Token 返回 40001。
+func TestProjectServiceCreate_PRTokenSourceErrors(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-source-err")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	noPRToken := createTestProject(t, svc.db, user.ID)
+
+	for _, tc := range []struct {
+		name     string
+		sourceID string
+		wantCode int
+	}{
+		{"source missing", "nonexistent-project-id", errs.ErrProjectNotFound.Code},
+		{"source has no pr token", noPRToken.ID, errs.ErrInvalidParams.Code},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+				Name:                   "pr-source-err-" + tc.name,
+				PrTokenSourceProjectId: api.Ptr(tc.sourceID),
+			})
+			appErr, ok := err.(*errs.AppError)
+			if !ok || appErr.Code != tc.wantCode {
+				t.Fatalf("expected code %d, got %v", tc.wantCode, err)
+			}
+		})
+	}
+}
+
 // 未传任何 PR Token 字段时更新保留现值。
 func TestProjectServiceUpdate_PreservesPRToken(t *testing.T) {
 	svc := setupTestServices(t)
@@ -360,6 +425,81 @@ func TestProjectServiceUpdate_ClearsPRToken(t *testing.T) {
 	}
 }
 
+// 更新时经 pr_token_source_project_id 复制源项目密文；与 github_pr_token
+// 同传时 source 优先。
+func TestProjectServiceUpdate_PRTokenFromSource(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-upd-source")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-shared")
+	})
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+	})
+
+	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		PrTokenSourceProjectId: api.Ptr(source.ID),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !resp.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token after copy")
+	}
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-shared" {
+		t.Fatalf("expected copied pr-token-shared, got %q", got)
+	}
+
+	resp, err = projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		GithubPrToken:          api.Ptr("pr-token-v2"),
+		PrTokenSourceProjectId: api.Ptr(source.ID),
+	})
+	if err != nil {
+		t.Fatalf("update with token+source: %v", err)
+	}
+	if !resp.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token after token+source")
+	}
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-shared" {
+		t.Fatalf("expected source to win with pr-token-shared, got %q", got)
+	}
+}
+
+// 更新时 source 项目不存在返回 40401；未配 PR Token 返回 40001。
+func TestProjectServiceUpdate_PRTokenSourceErrors(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-upd-source-err")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	noPRToken := createTestProject(t, svc.db, user.ID)
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+	})
+
+	for _, tc := range []struct {
+		name     string
+		sourceID string
+		wantCode int
+	}{
+		{"source missing", "nonexistent-project-id", errs.ErrProjectNotFound.Code},
+		{"source has no pr token", noPRToken.ID, errs.ErrInvalidParams.Code},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+				PrTokenSourceProjectId: api.Ptr(tc.sourceID),
+			})
+			appErr, ok := err.(*errs.AppError)
+			if !ok || appErr.Code != tc.wantCode {
+				t.Fatalf("expected code %d, got %v", tc.wantCode, err)
+			}
+		})
+	}
+	// 失败请求不得改动现值
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
+		t.Fatalf("expected pr-token-v1 unchanged, got %q", got)
+	}
+}
+
 // clear 标志与 github_pr_token 同时显式提供即冲突（不论取值——false/空串
 // 也算提供），返回 40001；这是按指针非 nil 判定，不是按解引用后的值。
 func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
@@ -374,6 +514,8 @@ func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
 		{GithubPrToken: api.Ptr("pr-token-v2"), ClearGithubPrToken: api.Ptr(true)},
 		{GithubPrToken: api.Ptr("pr-token-v2"), ClearGithubPrToken: api.Ptr(false)},
 		{GithubPrToken: api.Ptr(""), ClearGithubPrToken: api.Ptr(true)},
+		{PrTokenSourceProjectId: api.Ptr("src"), ClearGithubPrToken: api.Ptr(true)},
+		{PrTokenSourceProjectId: api.Ptr(""), ClearGithubPrToken: api.Ptr(true)},
 	} {
 		_, err := projectSvc.Update(project.ID, user.ID, req)
 		appErr, ok := err.(*errs.AppError)

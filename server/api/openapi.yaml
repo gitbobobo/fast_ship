@@ -4079,6 +4079,9 @@ components:
         source_project_id:
           type: string
           description: 复用另一项目的 GitHub Token；优先于 github_token
+        pr_token_source_project_id:
+          type: string
+          description: 复用另一项目的 PR 访问 Token；优先于 github_pr_token
     UpdateProjectRequest:
       type: object
       # 不带 binding tag：handler 用手写 updateProjectInput 绑定，原因同
@@ -4100,9 +4103,12 @@ components:
           description: PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显
         clear_github_pr_token:
           type: boolean
-          description: 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 互斥，同时提供（无论取值）返回 40001
+          description: 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 或 pr_token_source_project_id 同时显式提供（无论取值，含 null）返回 40001
         source_project_id:
           type: string
+        pr_token_source_project_id:
+          type: string
+          description: 复用另一项目的 PR 访问 Token；优先于 github_pr_token
     Project:
       type: object
       required: [id, name, description, github_owner, github_repo, has_github_pr_token, created_at, updated_at]

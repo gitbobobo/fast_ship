@@ -76,7 +76,19 @@ export function ProjectFormDialog({
   const clearPRToken = useWatch({ control, name: "clear_github_pr_token" });
   const { owner, repo } = parseRepoUrl(repositoryUrl);
 
-  const { tokenSource, handleTokenSourceChange } = useTokenSource(setValue);
+  const { tokenSource, handleTokenSourceChange } = useTokenSource(
+    setValue,
+    "github_token",
+    "source_project_id",
+  );
+  const {
+    tokenSource: prTokenSource,
+    handleTokenSourceChange: handlePRTokenSourceChange,
+  } = useTokenSource(
+    setValue,
+    "github_pr_token",
+    "pr_token_source_project_id",
+  );
 
   useEffect(() => {
     if (isEdit && project) {
@@ -90,6 +102,7 @@ export function ProjectFormDialog({
         github_pr_token: "",
         clear_github_pr_token: false,
         source_project_id: undefined,
+        pr_token_source_project_id: undefined,
       });
     } else if (!isEdit && open) {
       reset({
@@ -100,6 +113,7 @@ export function ProjectFormDialog({
         github_pr_token: "",
         clear_github_pr_token: false,
         source_project_id: undefined,
+        pr_token_source_project_id: undefined,
       });
     }
   }, [isEdit, project, open, reset]);
@@ -122,6 +136,8 @@ export function ProjectFormDialog({
         }
         if (editData.clear_github_pr_token) {
           payload.clear_github_pr_token = true;
+        } else if (editData.pr_token_source_project_id) {
+          payload.pr_token_source_project_id = editData.pr_token_source_project_id;
         } else if (editData.github_pr_token) {
           payload.github_pr_token = editData.github_pr_token;
         }
@@ -137,6 +153,7 @@ export function ProjectFormDialog({
           github_token?: string;
           github_pr_token?: string;
           source_project_id?: string;
+          pr_token_source_project_id?: string;
         } = {
           name: createData.name,
         };
@@ -151,7 +168,9 @@ export function ProjectFormDialog({
         } else if (createData.github_token) {
           payload.github_token = createData.github_token;
         }
-        if (createData.github_pr_token) {
+        if (createData.pr_token_source_project_id) {
+          payload.pr_token_source_project_id = createData.pr_token_source_project_id;
+        } else if (createData.github_pr_token) {
           payload.github_pr_token = createData.github_pr_token;
         }
         const res = await createProject.mutateAsync(payload);
@@ -166,6 +185,12 @@ export function ProjectFormDialog({
 
   const hasExistingProjects =
     existingProjects && existingProjects.items.length > 0;
+
+  const prTokenSourceProjects = existingProjects?.items.filter(
+    (p) => p.has_github_pr_token && (!isEdit || p.id !== projectId),
+  );
+  const hasPRTokenSources =
+    prTokenSourceProjects && prTokenSourceProjects.length > 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -286,17 +311,46 @@ export function ProjectFormDialog({
                   <span className="text-xs text-muted-foreground">已配置</span>
                 )}
               </div>
-              <Input
-                id="project-github_pr_token"
-                type="password"
-                placeholder={
-                  isEdit && project?.has_github_pr_token
-                    ? "留空则不修改，输入新值则替换"
-                    : "github_pat_xxx 或 ghp_xxx"
-                }
-                disabled={isEdit && !!clearPRToken}
-                {...register("github_pr_token")}
-              />
+              {hasPRTokenSources && (
+                <Select
+                  value={prTokenSource}
+                  onValueChange={handlePRTokenSourceChange}
+                  disabled={isEdit && !!clearPRToken}
+                >
+                  <SelectTrigger className="w-full" size="default">
+                    <SelectValue>
+                      {prTokenSource === ""
+                        ? isEdit
+                          ? "不修改 / 输入新 Token"
+                          : "输入新 Token"
+                        : prTokenSourceProjects?.find((p) => p.id === prTokenSource)?.name ?? "选择 Token 来源"}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">
+                      {isEdit ? "不修改 / 输入新 Token" : "输入新 Token"}
+                    </SelectItem>
+                    {prTokenSourceProjects.map((proj) => (
+                      <SelectItem key={proj.id} value={proj.id}>
+                        {proj.name}{hasGitHubRepo(proj) ? ` (${repoSlug(proj)})` : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {(!hasPRTokenSources || prTokenSource === "") && (
+                <Input
+                  id="project-github_pr_token"
+                  type="password"
+                  placeholder={
+                    isEdit && project?.has_github_pr_token
+                      ? "留空则不修改，输入新值则替换"
+                      : "github_pat_xxx 或 ghp_xxx"
+                  }
+                  disabled={isEdit && !!clearPRToken}
+                  {...register("github_pr_token")}
+                />
+              )}
               {isEdit && project?.has_github_pr_token && (
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <input type="checkbox" {...register("clear_github_pr_token")} />

@@ -297,6 +297,9 @@ type CreateProjectRequest struct {
 	// Name 项目名，当前用户下唯一
 	Name string `binding:"required,min=1,max=100" json:"name"`
 
+	// PrTokenSourceProjectId 复用另一项目的 PR 访问 Token；优先于 github_pr_token
+	PrTokenSourceProjectId *string `json:"pr_token_source_project_id,omitempty"`
+
 	// RepositoryUrl GitHub 仓库链接（owner/repo 或完整 URL）；设置时须同时提供 github_token 或 source_project_id
 	RepositoryUrl *string `json:"repository_url,omitempty"`
 
@@ -1231,7 +1234,7 @@ type UpdateProfileRequest struct {
 
 // UpdateProjectRequest defines model for UpdateProjectRequest.
 type UpdateProjectRequest struct {
-	// ClearGithubPrToken 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 互斥，同时提供（无论取值）返回 40001
+	// ClearGithubPrToken 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 或 pr_token_source_project_id 同时显式提供（无论取值，含 null）返回 40001
 	ClearGithubPrToken *bool   `json:"clear_github_pr_token,omitempty"`
 	Description        *string `json:"description,omitempty"`
 
@@ -1239,6 +1242,9 @@ type UpdateProjectRequest struct {
 	GithubPrToken *string `json:"github_pr_token,omitempty"`
 	GithubToken   *string `json:"github_token,omitempty"`
 	Name          *string `json:"name,omitempty"`
+
+	// PrTokenSourceProjectId 复用另一项目的 PR 访问 Token；优先于 github_pr_token
+	PrTokenSourceProjectId *string `json:"pr_token_source_project_id,omitempty"`
 
 	// RepositoryUrl 同创建；变更仓库且项目无 token 时须提供 token
 	RepositoryUrl   *string `json:"repository_url,omitempty"`

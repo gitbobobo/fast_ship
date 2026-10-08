@@ -1,7 +1,15 @@
 import { useState } from "react";
 
+type TokenField = "github_token" | "github_pr_token";
+type SourceField = "source_project_id" | "pr_token_source_project_id";
+
 export function useTokenSource(
-  setValue: (name: "github_token" | "source_project_id", value: string | undefined) => void,
+  setValue: (
+    name: TokenField | SourceField,
+    value: string | undefined,
+  ) => void,
+  tokenField: TokenField,
+  sourceField: SourceField,
 ) {
   const [tokenSource, setTokenSource] = useState<string>("");
 
@@ -9,11 +17,11 @@ export function useTokenSource(
     const v = value ?? "";
     setTokenSource(v);
     if (v === "") {
-      setValue("github_token", "");
-      setValue("source_project_id", undefined);
+      setValue(tokenField, "");
+      setValue(sourceField, undefined);
     } else {
-      setValue("github_token", undefined);
-      setValue("source_project_id", v);
+      setValue(tokenField, undefined);
+      setValue(sourceField, v);
     }
   };
 
