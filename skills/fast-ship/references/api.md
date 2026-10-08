@@ -682,6 +682,7 @@ API Key 管理（仅 JWT）
 | `items[].github_owner` | string | 是 |  |
 | `items[].github_repo` | string | 是 |  |
 | `items[].has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
+| `items[].has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
 | `items[].latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `items[].latest_version.id` | string | 是 |  |
 | `items[].latest_version.version_number` | string | 是 |  |
@@ -727,7 +728,8 @@ API Key 管理（仅 JWT）
 | `github_token` | string | 否 | GitHub PAT（加密存储，不回显） |
 | `github_pr_token` | string | 否 | PR 访问 Token，仅用于读取关联 PR（可为其他仓库）；加密存储，不回显 |
 | `source_project_id` | string | 否 | 复用另一项目的 GitHub Token；优先于 github_token |
-| `pr_token_source_project_id` | string | 否 | 复用另一项目的 PR 访问 Token；优先于 github_pr_token |
+| `pr_token_source_project_id` | string | 否 | 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类 |
+| `pr_token_source_kind` | string（enum: access \| pr） | 否 | 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001。access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token |
 
 **成功响应**
 
@@ -743,6 +745,7 @@ API Key 管理（仅 JWT）
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
 | `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
+| `has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -797,6 +800,7 @@ API Key 管理（仅 JWT）
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
 | `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
+| `has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -847,7 +851,8 @@ API Key 管理（仅 JWT）
 | `github_pr_token` | string | 否 | PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显 |
 | `clear_github_pr_token` | boolean | 否 | 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 或 pr_token_source_project_id 同时显式提供（无论取值，含 null）返回 40001 |
 | `source_project_id` | string | 否 |  |
-| `pr_token_source_project_id` | string | 否 | 复用另一项目的 PR 访问 Token；优先于 github_pr_token |
+| `pr_token_source_project_id` | string | 否 | 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类 |
+| `pr_token_source_kind` | string（enum: access \| pr） | 否 | 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001。access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token |
 
 **成功响应**
 
@@ -863,6 +868,7 @@ API Key 管理（仅 JWT）
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
 | `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
+| `has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |

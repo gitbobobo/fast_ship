@@ -35,6 +35,10 @@ import {
 } from "@/lib/hooks/use-projects";
 import { projectApi } from "@/lib/api/projects";
 import { useTokenSource } from "@/lib/hooks/use-token-source";
+import {
+  accessTokenSourceProjects,
+  prTokenSourceOptions,
+} from "@/lib/utils/token-source";
 import { parseRepoUrl, hasGitHubRepo, repoSlug } from "@/lib/utils/github";
 import { toast } from "sonner";
 
@@ -90,6 +94,7 @@ export function ProjectFormDialog({
     setValue,
     "github_pr_token",
     "pr_token_source_project_id",
+    "pr_token_source_kind",
   );
 
   useEffect(() => {
@@ -105,6 +110,7 @@ export function ProjectFormDialog({
         clear_github_pr_token: false,
         source_project_id: undefined,
         pr_token_source_project_id: undefined,
+        pr_token_source_kind: undefined,
       });
     } else if (!isEdit && open) {
       reset({
@@ -116,6 +122,7 @@ export function ProjectFormDialog({
         clear_github_pr_token: false,
         source_project_id: undefined,
         pr_token_source_project_id: undefined,
+        pr_token_source_kind: undefined,
       });
     }
   }, [isEdit, project, open, reset]);
@@ -140,6 +147,9 @@ export function ProjectFormDialog({
           payload.clear_github_pr_token = true;
         } else if (editData.pr_token_source_project_id) {
           payload.pr_token_source_project_id = editData.pr_token_source_project_id;
+          if (editData.pr_token_source_kind) {
+            payload.pr_token_source_kind = editData.pr_token_source_kind;
+          }
         } else if (editData.github_pr_token) {
           payload.github_pr_token = editData.github_pr_token;
         }
@@ -156,6 +166,7 @@ export function ProjectFormDialog({
           github_pr_token?: string;
           source_project_id?: string;
           pr_token_source_project_id?: string;
+          pr_token_source_kind?: "access" | "pr";
         } = {
           name: createData.name,
         };
@@ -172,6 +183,9 @@ export function ProjectFormDialog({
         }
         if (createData.pr_token_source_project_id) {
           payload.pr_token_source_project_id = createData.pr_token_source_project_id;
+          if (createData.pr_token_source_kind) {
+            payload.pr_token_source_kind = createData.pr_token_source_kind;
+          }
         } else if (createData.github_pr_token) {
           payload.github_pr_token = createData.github_pr_token;
         }
@@ -185,14 +199,16 @@ export function ProjectFormDialog({
     }
   };
 
-  const hasExistingProjects =
-    existingProjects && existingProjects.items.length > 0;
-
-  const prTokenSourceProjects = existingProjects?.items.filter(
-    (p) => p.has_github_pr_token && (!isEdit || p.id !== projectId),
+  const accessTokenSources = accessTokenSourceProjects(
+    existingProjects?.items ?? [],
+    isEdit ? projectId : undefined,
   );
-  const hasPRTokenSources =
-    prTokenSourceProjects && prTokenSourceProjects.length > 0;
+  const hasAccessTokenSources = accessTokenSources.length > 0;
+  const prTokenOptions = prTokenSourceOptions(
+    existingProjects?.items ?? [],
+    isEdit ? projectId : undefined,
+  );
+  const hasPRTokenSources = prTokenOptions.length > 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -253,7 +269,7 @@ export function ProjectFormDialog({
                 {repositoryUrl && <GitHubTokenHelpDialog owner={owner} repo={repo} />}
               </div>
 
-              {hasExistingProjects && (
+              {hasAccessTokenSources && (
                 <Select
                   value={tokenSource}
                   onValueChange={handleTokenSourceChange}
@@ -265,25 +281,23 @@ export function ProjectFormDialog({
                         ? isEdit
                           ? "不修改 / 输入新 Token"
                           : "输入新 Token"
-                        : existingProjects?.items.find((p) => p.id === tokenSource)?.name ?? "选择 Token 来源"}
+                        : accessTokenSources.find((p) => p.id === tokenSource)?.name ?? "选择 Token 来源"}
                     </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="">
                       {isEdit ? "不修改 / 输入新 Token" : "输入新 Token"}
                     </SelectItem>
-                    {existingProjects.items
-                      .filter((p) => !isEdit || p.id !== projectId)
-                      .map((proj) => (
-                        <SelectItem key={proj.id} value={proj.id}>
-                          {proj.name}{hasGitHubRepo(proj) ? ` (${repoSlug(proj)})` : ""}
-                        </SelectItem>
-                      ))}
+                    {accessTokenSources.map((proj) => (
+                      <SelectItem key={proj.id} value={proj.id}>
+                        {proj.name}{hasGitHubRepo(proj) ? ` (${repoSlug(proj)})` : ""}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               )}
 
-              {(!hasExistingProjects || tokenSource === "") && (
+              {(!hasAccessTokenSources || tokenSource === "") && (
                 <>
                   <Input
                     id="project-github_token"
@@ -325,16 +339,16 @@ export function ProjectFormDialog({
                         ? isEdit
                           ? "不修改 / 输入新 Token"
                           : "输入新 Token"
-                        : prTokenSourceProjects?.find((p) => p.id === prTokenSource)?.name ?? "选择 Token 来源"}
+                        : prTokenOptions.find((o) => o.value === prTokenSource)?.label ?? "选择 Token 来源"}
                     </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="">
                       {isEdit ? "不修改 / 输入新 Token" : "输入新 Token"}
                     </SelectItem>
-                    {prTokenSourceProjects.map((proj) => (
-                      <SelectItem key={proj.id} value={proj.id}>
-                        {proj.name}{hasGitHubRepo(proj) ? ` (${repoSlug(proj)})` : ""}
+                    {prTokenOptions.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
                       </SelectItem>
                     ))}
                   </SelectContent>

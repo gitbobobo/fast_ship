@@ -99,6 +99,68 @@ func TestProjectUpdate_PrTokenMutexByPresence(t *testing.T) {
 	}
 }
 
+// pr_token_source_kind 按 presence 语义判定：JSON key 出现即算提供，
+// 提供则必须为 access/pr——显式 null、空串、其他值、类型错误均 40001；
+// 且须与 pr_token_source_project_id 搭配（单独提供 40001）。
+// kind 不参与既有互斥判定：clear+kind（无 source）落在 kind-alone/取值校验，
+// clear+kind+source 由互斥命中。
+func TestProjectCreate_PRTokenSourceKindValidation(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-create-pr-kind")
+
+	for _, body := range []string{
+		`{"name":"x","pr_token_source_kind":null}`,
+		`{"name":"x","pr_token_source_kind":"access"}`,
+		`{"name":"x","pr_token_source_kind":"bogus"}`,
+		`{"name":"x","pr_token_source_kind":5}`,
+		`{"name":"x","pr_token_source_kind":"","pr_token_source_project_id":"x"}`,
+	} {
+		ctx, rec := newJSONContext(http.MethodPost, "/api/projects", []byte(body))
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Create(ctx)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+		envelope := decodeEnvelope(t, rec, nil)
+		if envelope.Code != 40001 {
+			t.Fatalf("expected code 40001 for %s, got %d", body, envelope.Code)
+		}
+	}
+}
+
+func TestProjectUpdate_PRTokenSourceKindValidation(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-pr-kind")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	for _, body := range []string{
+		`{"pr_token_source_kind":null}`,
+		`{"pr_token_source_kind":null,"pr_token_source_project_id":"x"}`,
+		`{"pr_token_source_kind":"access"}`,
+		`{"pr_token_source_kind":"pr"}`,
+		`{"pr_token_source_kind":"bogus"}`,
+		`{"pr_token_source_kind":5}`,
+		`{"pr_token_source_kind":"","pr_token_source_project_id":"x"}`,
+		`{"clear_github_pr_token":true,"pr_token_source_kind":null}`,
+		`{"clear_github_pr_token":true,"pr_token_source_kind":"access"}`,
+		`{"clear_github_pr_token":true,"pr_token_source_kind":"access","pr_token_source_project_id":"x"}`,
+	} {
+		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
+		ctx.Params = ginParams("id", project.ID)
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Update(ctx)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+		envelope := decodeEnvelope(t, rec, nil)
+		if envelope.Code != 40001 {
+			t.Fatalf("expected code 40001 for %s, got %d", body, envelope.Code)
+		}
+	}
+}
+
 // clear_github_pr_token=false 或显式 null 单独提供是合法无操作，不得误报 400。
 func TestProjectUpdate_ClearPRTokenFalseAloneIsOK(t *testing.T) {
 	env := setupHandlerTestEnv(t)
