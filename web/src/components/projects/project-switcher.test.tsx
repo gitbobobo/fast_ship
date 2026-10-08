@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ProjectSwitcher } from "./project-switcher";
@@ -133,6 +133,18 @@ describe("ProjectSwitcher", () => {
     await user.keyboard("{Enter}");
     expect(onValueChange).toHaveBeenCalledExactlyOnceWith("notes");
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("输入法组合中按回车不选中项目", async () => {
+    const user = userEvent.setup();
+    const { onValueChange } = renderSwitcher();
+
+    await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
+    const input = screen.getByRole("textbox", { name: "搜索项目" });
+    await user.type(input, "notes");
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "切换项目" })).toBeInTheDocument();
   });
 
   it("过滤无结果显示无匹配项目", async () => {

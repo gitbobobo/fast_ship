@@ -29,7 +29,7 @@ export function ProjectSwitcher({
   const activeProject = projects.find((project) => project.id === value);
   const search = query.trim().toLowerCase();
   const filteredProjects = projects.filter((project) => {
-    const fields = [project.name, project.description];
+    const fields = [project.name, project.description ?? ""];
     if (project.github_owner && project.github_repo) {
       fields.push(`${project.github_owner}/${project.github_repo}`);
     }
@@ -87,7 +87,13 @@ export function ProjectSwitcher({
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && filteredProjects.length > 0) {
+                const composing =
+                  event.nativeEvent.isComposing || event.keyCode === 229;
+                if (
+                  event.key === "Enter" &&
+                  !composing &&
+                  filteredProjects.length > 0
+                ) {
                   event.preventDefault();
                   handleSelect(filteredProjects[0]);
                 }
