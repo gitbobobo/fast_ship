@@ -67,6 +67,8 @@
 
 `version_count` / `last_uploaded_at` 在同一事务内由 `COUNT(*)` 与本次 `uploaded_at` 重算。
 
+并发首传同一新 `screen_key` 时，两边都会错过 `FindScreenByKey` 并在 `CreateScreen` 撞唯一索引（多连接下还可能撞 SQLITE_LOCKED/SQLITE_BUSY_SNAPSHOT 锁错误）。上传事务按 `LogRepository.UploadRunTx` 的惯例做有界重试（最多 5 次、线性退避 20ms）：失败事务已整体回滚，重跑时 `FindScreenByKey` 命中对方已提交的行即归并追加版本。重试上限内仍失败才返回 ErrInternal 并删除已落盘文件。
+
 ## 校验
 
 mime 以内容嗅探为准：先读 512 字节 `http.DetectContentType`，仅收 `image/png` / `image/jpeg` / `image/webp` / `image/gif`，不信任文件名与客户端声明。大小沿用 `cfg.Upload.MaxFileSize`：`LimitReader(max+1)` + 计数 reader，超限文件写完后删除并返回 40001（与 `service/issue_assets.go` 同模式）。非法类型/大小/参数均 40001。

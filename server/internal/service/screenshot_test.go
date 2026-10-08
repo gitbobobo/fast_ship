@@ -2,6 +2,8 @@ package service
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"gorm.io/gorm"
 )
 
 var testJPEGBytes = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
@@ -445,6 +448,87 @@ func TestScreenshotServiceGetVersionContent_ReturnsStoredBytes(t *testing.T) {
 	}
 	if !bytes.Equal(got, testPNGBytes) {
 		t.Fatalf("content bytes mismatch")
+	}
+}
+
+// 并发首传同一新 screen_key：失败方撞唯一索引后整体重试，应归并追加版本。
+// 测试库为多连接共享内存库，能否真正交错取决于连接池时序；竞态未触发时
+// 本用例退化为重复归并路径（与 MergesIntoExistingScreen 同一路径）仍有效。
+func TestScreenshotServiceUpload_ConcurrentFirstUploadMerges(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	const n = 6
+	start := make(chan struct{})
+	results := make(chan *ScreenshotUploadResult, n)
+	errsCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			<-start
+			input := newScreenshotUploadInput(project.ID, user.ID, "Concurrent")
+			input.Note = fmt.Sprintf("v%d", i)
+			result, err := svc.screenshotService.Upload(input)
+			if err != nil {
+				errsCh <- err
+				return
+			}
+			results <- result
+		}(i)
+	}
+	close(start)
+
+	var screenIDs map[string]bool
+	for i := 0; i < n; i++ {
+		select {
+		case err := <-errsCh:
+			t.Fatalf("concurrent upload %d failed: %v", i, err)
+		case result := <-results:
+			if screenIDs == nil {
+				screenIDs = map[string]bool{}
+			}
+			screenIDs[result.Screen.Id] = true
+		}
+	}
+	if len(screenIDs) != 1 {
+		t.Fatalf("expected all uploads merged into one screen, got %d", len(screenIDs))
+	}
+	var versionCount int64
+	for id := range screenIDs {
+		if err := svc.db.Model(&model.ScreenshotVersion{}).Where("screen_id = ?", id).Count(&versionCount).Error; err != nil {
+			t.Fatalf("count versions: %v", err)
+		}
+	}
+	if versionCount != n {
+		t.Fatalf("expected %d versions, got %d", n, versionCount)
+	}
+	screen, err := svc.screenshotRepo.FindScreenByKey(project.ID, "concurrent")
+	if err != nil {
+		t.Fatalf("find merged screen: %v", err)
+	}
+	if screen.VersionCount != n {
+		t.Fatalf("expected denormalized version_count %d, got %d", n, screen.VersionCount)
+	}
+}
+
+func TestIsRetryableScreenshotTxError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"unique violation", errors.New("UNIQUE constraint failed: screenshot_screens.project_id, screenshot_screens.screen_key (2067)"), true},
+		{"busy", errors.New("database is locked (5)"), true},
+		{"table locked", errors.New("database table is locked: database is deadlocked (6)"), true},
+		{"gorm dup key", gorm.ErrDuplicatedKey, true},
+		{"record not found", gorm.ErrRecordNotFound, false},
+		{"app error", errs.ErrInvalidParams, false},
+	}
+	for _, tc := range cases {
+		if got := isRetryableScreenshotTxError(tc.err); got != tc.want {
+			t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, got)
+		}
 	}
 }
 

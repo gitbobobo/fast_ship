@@ -84,8 +84,8 @@ export function UploadScreenshotsDialog({
       const result = await upload.mutateAsync({
         files,
         meta: {
-          // 空串合法：显式表示未分组
-          group: group.trim(),
+          // 留空不传该字段，保留界面原分组；置为未分组走编辑对话框
+          group: group.trim() || undefined,
           screenKey: screenKey.trim() || undefined,
           title: title.trim() || undefined,
           note: note.trim() || undefined,
@@ -177,7 +177,7 @@ export function UploadScreenshotsDialog({
               id="screenshot-group"
               value={group}
               onChange={(e) => setGroup(e.target.value)}
-              placeholder="留空为未分组；多文件时本批共用"
+              placeholder="留空保持原分组；多文件时本批共用"
               disabled={upload.isPending}
             />
           </div>

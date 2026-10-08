@@ -24,6 +24,9 @@ import (
 // screen_key 规范化（ToLower+TrimSpace）后的长度上限（字符数）
 const maxScreenshotScreenKeyRunes = 100
 
+// 上传事务在唯一索引冲突/锁竞争下的最大重试次数（与 LogRepository.UploadRunTx 一致）
+const maxUploadTxAttempts = 5
+
 // 截图库只收位图格式；mime 以内容嗅探（http.DetectContentType）为准，不信任客户端声明
 var screenshotAllowedMimeTypes = map[string]struct{}{
 	"image/png":  {},
@@ -219,13 +222,57 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 		return nil, err
 	}
 
+	// 并发首传同一新 screen_key 时两边都会错过 FindScreenByKey 并撞唯一索引；
+	// 多连接下整个事务还可能撞 SQLITE_LOCKED 死锁。失败的事务已整体回滚，
+	// 按 UploadRunTx 的惯例做有界重试：对方提交后重查即命中已存在的 screen 归并。
+	var screen *model.ScreenshotScreen
+	var version *model.ScreenshotVersion
+	var txErr error
+	for attempt := 0; attempt < maxUploadTxAttempts; attempt++ {
+		screen, version, txErr = s.uploadScreenshotTx(input, screenKey, versionID, mimeType, storagePath, fileSize)
+		if txErr == nil || !isRetryableScreenshotTxError(txErr) || attempt == maxUploadTxAttempts-1 {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+	}
+	if txErr != nil {
+		_ = s.storage.Delete(storagePath)
+		return nil, errs.ErrInternal
+	}
+
+	return &ScreenshotUploadResult{
+		Screen:  toScreenshotScreenResponse(screen),
+		Version: toScreenshotVersionResponse(version),
+	}, nil
+}
+
+// isRetryableScreenshotTxError 识别值得整体重试的并发冲突：唯一索引违例
+// （glebarez 的约束错误文本为 "UNIQUE constraint failed: ..."）与锁竞争
+// （沿用 repository.isSQLiteLockedError 覆盖的 "database is locked" 系文本）。
+func isRetryableScreenshotTxError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "constraint failed") ||
+		strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked")
+}
+
+// uploadScreenshotTx 在一个事务里完成 screen 的 find-or-create、版本行写入与冗余统计重算。
+// 内部直接透传驱动错误，由 Upload 判定是否重试；文件已在事务外落盘，重试复用同一路径。
+func (s *ScreenshotService) uploadScreenshotTx(input *ScreenshotUploadInput, screenKey, versionID, mimeType, storagePath string, fileSize int64) (*model.ScreenshotScreen, *model.ScreenshotVersion, error) {
 	var screen *model.ScreenshotScreen
 	var version *model.ScreenshotVersion
 	txErr := s.screenshotRepo.Transaction(func(txRepo *repository.ScreenshotRepository) error {
 		now := time.Now().UTC()
 		existing, findErr := txRepo.FindScreenByKey(input.ProjectID, screenKey)
 		if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
-			return errs.ErrInternal
+			return findErr
 		}
 		if errors.Is(findErr, gorm.ErrRecordNotFound) {
 			screen = &model.ScreenshotScreen{
@@ -236,7 +283,7 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 				CreatedAt:      now,
 			}
 			if err := txRepo.CreateScreen(screen); err != nil {
-				return errs.ErrInternal
+				return err
 			}
 		} else {
 			screen = existing
@@ -254,12 +301,12 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 			UploadedAt: now,
 		}
 		if err := txRepo.CreateVersion(version); err != nil {
-			return errs.ErrInternal
+			return err
 		}
 
 		count, err := txRepo.CountVersionsByScreenID(screen.ID)
 		if err != nil {
-			return errs.ErrInternal
+			return err
 		}
 		fields := map[string]interface{}{
 			"version_count":    count,
@@ -272,7 +319,7 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 			fields["title"] = input.Title
 		}
 		if err := txRepo.UpdateScreenByMap(screen.ID, fields); err != nil {
-			return errs.ErrInternal
+			return err
 		}
 
 		screen.VersionCount = int(count)
@@ -286,14 +333,9 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 		return nil
 	})
 	if txErr != nil {
-		_ = s.storage.Delete(storagePath)
-		return nil, txErr
+		return nil, nil, txErr
 	}
-
-	return &ScreenshotUploadResult{
-		Screen:  toScreenshotScreenResponse(screen),
-		Version: toScreenshotVersionResponse(version),
-	}, nil
+	return screen, version, nil
 }
 
 // List 返回项目全部 screen（last_uploaded_at 倒序），每项携带最新版本。
