@@ -1,23 +1,40 @@
 package handler
 
 import (
+	"errors"
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
 
+// multipart 头部与其他表单字段的体积余量，确保恰好等于 MaxFileSize 的文件能通过
+const screenshotMultipartOverheadBytes = 1 << 20
+
 type ScreenshotHandler struct {
 	screenshotService *service.ScreenshotService
+	maxUploadBytes    int64
 }
 
-func NewScreenshotHandler(screenshotService *service.ScreenshotService) *ScreenshotHandler {
-	return &ScreenshotHandler{screenshotService: screenshotService}
+func NewScreenshotHandler(screenshotService *service.ScreenshotService, cfg *config.Config) *ScreenshotHandler {
+	return &ScreenshotHandler{
+		screenshotService: screenshotService,
+		maxUploadBytes:    cfg.Upload.MaxFileSize,
+	}
 }
 
 func (h *ScreenshotHandler) Upload(c *gin.Context) {
+	// 先限制整个请求体再碰表单：FormFile/GetPostForm 会把 multipart 全部读入内存或临时文件，
+	// 只靠 service 层的 LimitReader 挡不住超限 body 落临时盘
+	if h.maxUploadBytes > 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxUploadBytes+screenshotMultipartOverheadBytes)
+	}
+
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 	uploadedBy := middleware.GetUserName(c)
@@ -34,17 +51,22 @@ func (h *ScreenshotHandler) Upload(c *gin.Context) {
 		}
 	}
 
-	var group *string
-	if value, ok := c.GetPostForm("group"); ok {
-		group = &value
-	}
-
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.AbortWithStatus(http.StatusRequestEntityTooLarge)
+			return
+		}
 		response.BadRequest(c, 40001, "未找到上传文件")
 		return
 	}
 	defer file.Close()
+
+	var group *string
+	if value, ok := c.GetPostForm("group"); ok {
+		group = &value
+	}
 
 	result, err := h.screenshotService.Upload(&service.ScreenshotUploadInput{
 		ProjectID:  projectID,

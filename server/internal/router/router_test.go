@@ -742,7 +742,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	logHandler := handler.NewLogHandler(logService)
 	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
-	screenshotHandler := handler.NewScreenshotHandler(screenshotService)
+	screenshotHandler := handler.NewScreenshotHandler(screenshotService, cfg)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()

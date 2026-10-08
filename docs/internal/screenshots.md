@@ -71,7 +71,7 @@
 
 ## 校验
 
-mime 以内容嗅探为准：先读 512 字节 `http.DetectContentType`，仅收 `image/png` / `image/jpeg` / `image/webp` / `image/gif`，不信任文件名与客户端声明。大小沿用 `cfg.Upload.MaxFileSize`：`LimitReader(max+1)` + 计数 reader，超限文件写完后删除并返回 40001（与 `service/issue_assets.go` 同模式）。非法类型/大小/参数均 40001。
+mime 以内容嗅探为准：先读 512 字节 `http.DetectContentType`，仅收 `image/png` / `image/jpeg` / `image/webp` / `image/gif`，不信任文件名与客户端声明。大小沿用 `cfg.Upload.MaxFileSize`：handler 先 `http.MaxBytesReader(max + 1MB 余量)` 限制整个 multipart 体（超限 413，防止超大 body 全部落临时盘），service 再 `LimitReader(max+1)` + 计数 reader，超限文件写完后删除并返回 40001（与 `service/issue_assets.go` 同模式）。非法类型/大小/参数均 40001。
 
 ## PATCH 语义
 

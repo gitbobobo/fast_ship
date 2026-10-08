@@ -146,7 +146,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		issueHandler:       NewIssueHandler(issueService, issueShipHookService, collabService),
 		collabHandler:      NewIssueCollabHandler(collabService),
 		artifactHandler:    NewArtifactHandler(artifactService),
-		screenshotHandler:  NewScreenshotHandler(screenshotService),
+		screenshotHandler:  NewScreenshotHandler(screenshotService, cfg),
 		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zap.NewNop())),
 	}
 }

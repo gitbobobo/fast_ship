@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 )
 
@@ -250,5 +252,24 @@ func TestScreenshotHandlerContent_ServesStoredImage(t *testing.T) {
 	}
 	if contentRec.Body.String() != string(handlerTestPNGBytes) {
 		t.Fatalf("unexpected content body (%d bytes)", contentRec.Body.Len())
+	}
+}
+
+func TestScreenshotHandlerUpload_RejectsOversizedBody(t *testing.T) {
+	// 请求体超限时应在 multipart 解析阶段返回 413，而不是先落临时盘再被 service 拒
+	h := NewScreenshotHandler(nil, &config.Config{
+		Upload: config.UploadConfig{MaxFileSize: 1 << 10},
+	})
+	rec := httptest.NewRecorder()
+	big := bytes.Repeat(handlerTestPNGBytes, 70000)
+	ctx := newScreenshotUploadContext(t, rec, "proj-1", "big.png", big, map[string]string{
+		"screen_key": "home",
+	})
+	setScreenshotJWTContext(ctx, "user-1", "user-1")
+
+	h.Upload(ctx)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
