@@ -8,17 +8,11 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import { ListChecks, Package, Plus } from "lucide-react";
+import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useUpdateIssueWorkflowStatus } from "@/lib/hooks/use-issues";
@@ -56,11 +50,6 @@ export default function BoardPage() {
   const activeProjectId = useMemo(
     () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
     [projects, selectedProjectId, urlProjectId],
-  );
-
-  const activeProject = useMemo(
-    () => projects.find((p) => p.id === activeProjectId),
-    [projects, activeProjectId],
   );
 
   // 当 activeProjectId 回退时（如存储的项目被删除），同步 state 和 store
@@ -212,23 +201,13 @@ export default function BoardPage() {
           ) : isEmptyProject ? (
             <p className="text-sm text-muted-foreground">暂无项目</p>
           ) : (
-            <Select
+            <ProjectSwitcher
               value={activeProjectId}
               onValueChange={handleProjectChange}
-            >
-              <SelectTrigger className="w-auto min-w-32">
-                <SelectValue placeholder="请选择项目">
-                  {activeProject?.name}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {projects.map((project) => (
-                  <SelectItem key={project.id} value={project.id}>
-                    {project.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              projects={projects}
+              placeholder="请选择项目"
+              className="w-auto min-w-32"
+            />
           )}
           {!projectsLoading && !isEmptyProject && (
             <Button

@@ -9,17 +9,11 @@ import {
   ScrollText,
   Trash2,
 } from "lucide-react";
+import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   AlertDialog,
@@ -233,23 +227,13 @@ export default function LogsPage() {
             ) : projects.length === 0 ? (
               <p className="text-sm text-muted-foreground">暂无项目</p>
             ) : (
-              <Select
+              <ProjectSwitcher
                 value={activeProjectId}
                 onValueChange={handleProjectChange}
-              >
-                <SelectTrigger className="w-auto min-w-32">
-                  <SelectValue placeholder="请选择项目">
-                    {activeProject?.name}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                projects={projects}
+                placeholder="请选择项目"
+                className="w-auto min-w-32"
+              />
             )}
           </div>
         </div>

@@ -4,17 +4,11 @@ import { Plus, Package } from "lucide-react";
 import { VersionFormDialog } from "@/components/versions/version-form-dialog";
 import { getActiveProjectId } from "@/routes/board/lib/utils";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
+import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -101,27 +95,17 @@ export default function VersionsPage() {
               ) : projects.length === 0 ? (
                 <p className="text-sm text-muted-foreground">暂无项目</p>
               ) : (
-                <Select
+                <ProjectSwitcher
                   value={activeProjectId}
                   onValueChange={(value) => {
                     const nextValue = value ?? "";
                     setSelectedProjectId(nextValue);
                     setLastSelectedProjectId(nextValue || null);
                   }}
-                >
-                  <SelectTrigger className="w-64">
-                    <SelectValue placeholder="请选择项目">
-                      {projects.find((p) => p.id === activeProjectId)?.name}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {projects.map((project) => (
-                      <SelectItem key={project.id} value={project.id}>
-                        {project.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  projects={projects}
+                  placeholder="请选择项目"
+                  className="w-64"
+                />
               )}
             </div>
           </div>

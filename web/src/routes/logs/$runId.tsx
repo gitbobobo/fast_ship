@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { HTTPError } from "ky";
+import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -127,11 +128,6 @@ export default function LogRunDetailPage() {
     error: runQueryError,
   } = useLogRun(projectId, runId);
 
-  const activeProject = useMemo(
-    () => projects.find((p) => p.id === projectId),
-    [projects, projectId],
-  );
-
   const levelFilter = searchParams.get("level") ?? "all";
   const queryFilter = searchParams.get("q") ?? "";
   const deferredQuery = useDeferredValue(queryFilter.trim());
@@ -223,25 +219,17 @@ export default function LogRunDetailPage() {
             <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
               <p className="text-sm">缺少项目 ID，请从日志列表进入或选择项目</p>
               {projects.length > 0 && (
-                <Select
+                <ProjectSwitcher
                   value={projectId}
                   onValueChange={(value) => {
                     if (!value) return;
                     setLastSelectedProjectId(value);
                     navigate(`/logs/${runId}?project=${value}`);
                   }}
-                >
-                  <SelectTrigger className="w-auto min-w-32">
-                    <SelectValue placeholder="请选择项目" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {projects.map((project) => (
-                      <SelectItem key={project.id} value={project.id}>
-                        {project.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  projects={projects}
+                  placeholder="请选择项目"
+                  className="w-auto min-w-32"
+                />
               )}
               <Button
                 variant="outline"
@@ -281,27 +269,17 @@ export default function LogRunDetailPage() {
                 {notFound ? "运行不存在" : "加载运行失败，请稍后重试"}
               </p>
               {projects.length > 0 && (
-                <Select
+                <ProjectSwitcher
                   value={projectId}
                   onValueChange={(value) => {
                     if (!value) return;
                     setLastSelectedProjectId(value);
                     navigate(`/logs/${runId}?project=${value}`);
                   }}
-                >
-                  <SelectTrigger className="w-auto min-w-32">
-                    <SelectValue placeholder="请选择项目">
-                      {activeProject?.name}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {projects.map((project) => (
-                      <SelectItem key={project.id} value={project.id}>
-                        {project.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  projects={projects}
+                  placeholder="请选择项目"
+                  className="w-auto min-w-32"
+                />
               )}
               <Button
                 variant="outline"
@@ -361,20 +339,13 @@ export default function LogRunDetailPage() {
       />
       <div className="p-4 md:p-6 space-y-6">
         {projects.length > 0 && (
-          <Select value={projectId} onValueChange={handleProjectChange}>
-            <SelectTrigger className="w-auto min-w-32">
-              <SelectValue placeholder="请选择项目">
-                {activeProject?.name}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {projects.map((project) => (
-                <SelectItem key={project.id} value={project.id}>
-                  {project.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <ProjectSwitcher
+            value={projectId}
+            onValueChange={handleProjectChange}
+            projects={projects}
+            placeholder="请选择项目"
+            className="w-auto min-w-32"
+          />
         )}
 
         <Card>
