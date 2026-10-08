@@ -8,12 +8,12 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -22,15 +22,17 @@ type VersionService struct {
 	projectRepo     *repository.ProjectRepository
 	storage         storage.Storage
 	cfg             *config.Config
+	logger          *zap.Logger
 	newBranchClient gitHubBranchClientFactory
 }
 
-func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *repository.ProjectRepository, storage storage.Storage, cfg *config.Config) *VersionService {
+func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *repository.ProjectRepository, storage storage.Storage, cfg *config.Config, logger *zap.Logger) *VersionService {
 	return &VersionService{
 		versionRepo: versionRepo,
 		projectRepo: projectRepo,
 		storage:     storage,
 		cfg:         cfg,
+		logger:      logger,
 		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -168,9 +170,9 @@ func (s *VersionService) Update(ctx context.Context, id, userID string, allowVer
 }
 
 func (s *VersionService) ensureTargetBranchExists(ctx context.Context, project *model.Project, branchName string) error {
-	tokenBytes, err := crypto.Decrypt(project.GithubTokenEncrypted, []byte(s.cfg.Encryption.Key))
-	if err != nil {
-		return errs.ErrInternal
+	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
+	if appErr != nil {
+		return appErr
 	}
 
 	branches, _, err := s.newBranchClient(string(tokenBytes), project.GithubOwner, project.GithubRepo).ListBranches(ctx)

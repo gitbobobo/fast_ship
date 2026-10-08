@@ -13,7 +13,7 @@
 
 body 只传 `{"url": "<PR链接>"}`。服务端解析 owner/repo/number（支持 `http(s)`、可选 `www`、`/files` 等后缀、query/fragment），路径段以 `.` 开头/结尾或是 `.`/`..` 的直接拒绝——HTTP 客户端的路径归一化可能把请求改到别的仓库。解析通过后先调 GitHub 拉元数据，失败不落记录（50200）。
 
-允许跨仓库：`repo_full_name` 以 PR 链接为准，可以是项目配置仓库之外的仓库。token 选择按仓库走项目配置，项目无 token 时退化为未认证客户端访问公共仓库（受 60/hr 限流）。
+允许跨仓库：`repo_full_name` 以 PR 链接为准，可以是项目配置仓库之外的仓库。token 凭证要求见 [github-credentials.md](github-credentials.md)——PR 关联是唯一允许匿名访问（未配置项目用未认证客户端）的调用方。
 
 ## sync 契约
 

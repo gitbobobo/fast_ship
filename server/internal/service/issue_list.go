@@ -250,7 +250,7 @@ func (s *IssueService) GetRepositoryLabels(projectID, userID string) ([]IssueLab
 		return nil, errs.ErrInternal
 	}
 
-	tokenBytes, appErr := s.decryptGitHubToken(project)
+	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
 	if appErr != nil {
 		return nil, appErr
 	}

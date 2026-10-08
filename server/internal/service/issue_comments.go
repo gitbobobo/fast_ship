@@ -71,7 +71,7 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 			}
 			return nil, errs.ErrInternal
 		}
-		tokenBytes, appErr := s.decryptGitHubToken(project)
+		tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
 		if appErr != nil {
 			return nil, appErr
 		}
@@ -208,7 +208,7 @@ func (s *IssueService) CreateInternalCommentIdempotent(issueID, userID string, r
 			}
 			return nil, errs.ErrInternal
 		}
-		tokenBytes, appErr := s.decryptGitHubToken(project)
+		tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
 		if appErr != nil {
 			return nil, appErr
 		}

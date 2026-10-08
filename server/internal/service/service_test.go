@@ -159,7 +159,7 @@ func setupTestServices(t *testing.T) *testServices {
 		recService:          NewIssueRecommendationService(recRepo, issueRepo, internalMetaRepo, projectRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
 		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),
-		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg),
+		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop()),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 	}
 	svc.shipService = NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, shipHookRepo, svc.issueService, fileStorage, cfg, zap.NewNop())

@@ -6,6 +6,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"go.uber.org/zap"
 )
 
 func TestParseRepositoryURL(t *testing.T) {
@@ -159,7 +160,7 @@ func TestParseRepositoryURL(t *testing.T) {
 func TestProjectServiceCreate_WithoutGitHub(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-no-github")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
 
 	// 创建不带 GitHub 仓库的项目应该成功
 	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
@@ -180,7 +181,7 @@ func TestProjectServiceCreate_WithoutGitHub(t *testing.T) {
 func TestProjectServiceCreate_WithGitHub(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-with-github")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
 
 	// 创建带 GitHub 仓库的项目，提供 token 应该成功
 	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
@@ -203,7 +204,7 @@ func TestProjectServiceCreate_WithGitHub(t *testing.T) {
 func TestProjectServiceCreate_WithRepoURLButNoToken(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-no-token")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
 
 	// 提供了仓库地址但没有 token 应该失败
 	_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
@@ -218,7 +219,7 @@ func TestProjectServiceCreate_WithRepoURLButNoToken(t *testing.T) {
 func TestProjectServiceGetBranches_NotGitHubConfigured(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-branches")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg)
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""

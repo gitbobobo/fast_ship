@@ -12,7 +12,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
@@ -131,7 +130,7 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 	}
 
 	// 解密 GitHub Token
-	tokenBytes, appErr := s.decryptGitHubToken(project)
+	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
 	if appErr != nil {
 		s.recordFailure(version, model.ShipStagePreCheck, appErr.Message)
 		return nil, appErr
@@ -356,7 +355,7 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 		githubItem.Ok = false
 		githubItem.Detail = api.Ptr("缺少 GitHub Token")
 	default:
-		tokenBytes, err := s.decryptGitHubToken(project)
+		tokenBytes, err := requiredProjectGitHubToken(project, s.cfg, s.logger)
 		if err != nil {
 			githubItem.Ok = false
 			githubItem.Detail = api.Ptr(err.Message)
@@ -388,18 +387,6 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 		Items:             items,
 		PendingIssueHooks: pendingIssueHooks,
 	}, nil
-}
-
-func (s *ShipService) decryptGitHubToken(project *model.Project) ([]byte, *errs.AppError) {
-	if !project.IsGitHubConfigured() {
-		return nil, errs.ErrProjectGitHubNotConfigured
-	}
-	tokenBytes, err := crypto.Decrypt(project.GithubTokenEncrypted, []byte(s.cfg.Encryption.Key))
-	if err != nil {
-		s.logger.Error("decrypt github token failed", zap.Error(err))
-		return nil, errs.ErrInternal
-	}
-	return tokenBytes, nil
 }
 
 func (s *ShipService) updateShipState(version *model.Version, status model.ShipStatus, stage model.ShipStage, message string) error {

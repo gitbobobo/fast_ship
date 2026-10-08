@@ -16,6 +16,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -27,6 +28,7 @@ type ProjectService struct {
 	syncStateRepo   *repository.IssueSyncStateRepository
 	storage         storage.Storage
 	cfg             *config.Config
+	logger          *zap.Logger
 	newBranchClient gitHubBranchClientFactory
 }
 
@@ -42,6 +44,7 @@ func NewProjectService(
 	syncStateRepo *repository.IssueSyncStateRepository,
 	storage storage.Storage,
 	cfg *config.Config,
+	logger *zap.Logger,
 ) *ProjectService {
 	return &ProjectService{
 		projectRepo:   projectRepo,
@@ -49,6 +52,7 @@ func NewProjectService(
 		syncStateRepo: syncStateRepo,
 		storage:       storage,
 		cfg:           cfg,
+		logger:        logger,
 		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -209,14 +213,9 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 		return nil, "", errs.ErrInternal
 	}
 
-	if !project.IsGitHubConfigured() {
-		return nil, "", errs.ErrProjectGitHubNotConfigured
-	}
-
-	// Decrypt GitHub token
-	tokenBytes, err := crypto.Decrypt(project.GithubTokenEncrypted, []byte(s.cfg.Encryption.Key))
-	if err != nil {
-		return nil, "", errs.ErrInternal
+	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
+	if appErr != nil {
+		return nil, "", appErr
 	}
 
 	// Create GitHub client and fetch branches.

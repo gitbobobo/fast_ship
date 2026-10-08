@@ -102,6 +102,30 @@ func TestVersionServiceCreate_ValidatesTargetBranch(t *testing.T) {
 	}
 }
 
+// 未配置 GitHub 的项目传 target_commitish 明确报 40003，
+// 而不是旧实现里解密空密文失败得到的 50000。
+func TestVersionServiceCreate_UnconfiguredProjectTargetCommitish(t *testing.T) {
+	svc := setupTestServices(t)
+	createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+		p.GithubTokenEncrypted = nil
+	})
+
+	if err := svc.versionService.ensureTargetBranchExists(context.Background(), project, "main"); !errors.Is(err, errs.ErrProjectGitHubNotConfigured) {
+		t.Fatalf("expected ErrProjectGitHubNotConfigured, got %v", err)
+	}
+
+	_, err := svc.versionService.Create(context.Background(), project.ID, project.UserID, &CreateVersionRequest{
+		VersionNumber:   "v1.0.0",
+		TargetCommitish: api.Ptr("main"),
+	})
+	if !errors.Is(err, errs.ErrProjectGitHubNotConfigured) {
+		t.Fatalf("expected ErrProjectGitHubNotConfigured, got %v", err)
+	}
+}
+
 func TestVersionServiceUpdate_RejectsUnknownTargetBranch(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
