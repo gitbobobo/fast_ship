@@ -42,6 +42,32 @@ func (r *ProjectRepository) List(userID string, page, pageSize int) ([]model.Pro
 	return projects, total, err
 }
 
+// GetIssueCounts 统计给定项目的 Issue 总数（不区分状态），供项目列表填充
+// issue_count；空切片直接返回空 map 不查库，无 Issue 的项目不出现在结果中。
+func (r *ProjectRepository) GetIssueCounts(projectIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(projectIDs))
+	if len(projectIDs) == 0 {
+		return counts, nil
+	}
+
+	var rows []struct {
+		ProjectID string `gorm:"column:project_id"`
+		Count     int    `gorm:"column:count"`
+	}
+	err := r.db.Model(&model.Issue{}).
+		Select("project_id, COUNT(*) AS count").
+		Where("project_id IN ?", projectIDs).
+		Group("project_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		counts[row.ProjectID] = row.Count
+	}
+	return counts, nil
+}
+
 func (r *ProjectRepository) Update(project *model.Project) error {
 	return r.db.Save(project).Error
 }

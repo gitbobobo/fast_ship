@@ -983,6 +983,9 @@ type Project struct {
 	HasGithubPrToken bool   `json:"has_github_pr_token"`
 	Id               string `json:"id"`
 
+	// IssueCount omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态）
+	IssueCount *int `json:"issue_count,omitempty"`
+
 	// IssueSync omitempty，项目 GitHub 同步状态
 	IssueSync *IssueSyncState `json:"issue_sync,omitempty"`
 

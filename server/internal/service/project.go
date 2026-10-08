@@ -132,9 +132,22 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 		return nil, 0, errs.ErrInternal
 	}
 
+	// 列表项附带 issue_count（Issue 总数，不分状态）；无 Issue 的项目保持缺省
+	projectIDs := make([]string, len(projects))
+	for i, p := range projects {
+		projectIDs[i] = p.ID
+	}
+	issueCounts, err := s.projectRepo.GetIssueCounts(projectIDs)
+	if err != nil {
+		return nil, 0, errs.ErrInternal
+	}
+
 	resp := make([]ProjectResponse, len(projects))
 	for i, p := range projects {
 		projectResp := s.toResponse(&p)
+		if count, ok := issueCounts[p.ID]; ok {
+			projectResp.IssueCount = &count
+		}
 		latest, err := s.versionRepo.GetLatestByProjectID(p.ID)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, 0, errs.ErrInternal

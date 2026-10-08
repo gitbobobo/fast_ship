@@ -23,6 +23,8 @@ interface Project {
     status: "pending" | "shipped";
     created_at: string;
   } | null;
+  /** 项目 Issue 总数（不区分状态）；仅项目列表响应携带 */
+  issue_count?: number;
   issue_sync?: {
     status: "idle" | "running" | "failed" | "completed";
     last_issue_updated_at?: string | null;

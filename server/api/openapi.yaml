@@ -4128,6 +4128,9 @@ components:
           description: 是否已配置独立 PR 访问 Token
         latest_version:
           $ref: '#/components/schemas/LatestVersion'
+        issue_count:
+          type: integer
+          description: omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态）
         issue_sync:
           $ref: '#/components/schemas/IssueSyncState'
         created_at:

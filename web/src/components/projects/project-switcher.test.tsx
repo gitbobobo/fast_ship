@@ -87,6 +87,57 @@ describe("ProjectSwitcher", () => {
     await waitFor(() => expect(screen.getByRole("textbox", { name: "搜索项目" })).toHaveFocus());
   });
 
+  it("按 Issue 总数降序排列卡片，缺省按 0 且同计数保持传入顺序", async () => {
+    const user = userEvent.setup();
+    const unsorted: Project[] = [
+      { ...projects[0], id: "few", name: "Few", issue_count: 3 },
+      { ...projects[1], id: "none", name: "No Count" },
+      { ...projects[0], id: "many", name: "Many", issue_count: 42 },
+      { ...projects[1], id: "zero", name: "Zero", issue_count: 0 },
+    ];
+    render(
+      <ProjectSwitcher projects={unsorted} value="" onValueChange={vi.fn()} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "切换项目：请选择项目" }));
+    const popup = await screen.findByRole("dialog", { name: "切换项目" });
+    expect(within(popup).getAllByRole("button").map((card) => card.textContent)).toEqual([
+      expect.stringContaining("Many"),
+      expect.stringContaining("Few"),
+      expect.stringContaining("No Count"),
+      expect.stringContaining("Zero"),
+    ]);
+    // 排序不得原地修改 props 数组
+    expect(unsorted.map((p) => p.id)).toEqual(["few", "none", "many", "zero"]);
+  });
+
+  it("搜索命中多个项目时回车选中计数最高者", async () => {
+    const user = userEvent.setup();
+    const onValueChange = vi.fn();
+    const matched: Project[] = [
+      { ...projects[0], id: "low", name: "Match Low", issue_count: 1 },
+      { ...projects[1], id: "high", name: "Match High", issue_count: 9 },
+    ];
+    render(<ProjectSwitcher projects={matched} value="" onValueChange={onValueChange} />);
+
+    await user.click(screen.getByRole("button", { name: "切换项目：请选择项目" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目" }), "match");
+    await user.keyboard("{Enter}");
+    expect(onValueChange).toHaveBeenCalledExactlyOnceWith("high");
+  });
+
+  it("issue_count 全部缺省时维持传入顺序", async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+
+    await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
+    const popup = await screen.findByRole("dialog", { name: "切换项目" });
+    expect(within(popup).getAllByRole("button").map((card) => card.textContent)).toEqual([
+      expect.stringContaining("Fast Ship"),
+      expect.stringContaining("Notes"),
+    ]);
+  });
+
   it.each([
     ["nOtEs", /Notes/, /Fast Ship/],
     ["知识", /Notes/, /Fast Ship/],
