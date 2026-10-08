@@ -83,6 +83,7 @@ function mockProjects(items: Project[] = [
     description: "",
     github_owner: "acme",
     github_repo: "alpha",
+    has_github_pr_token: false,
     latest_version: null,
     created_at: "2026-04-06T09:00:00Z",
     updated_at: "2026-04-06T09:00:00Z",

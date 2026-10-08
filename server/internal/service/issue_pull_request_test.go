@@ -1007,8 +1007,8 @@ func TestIssueServiceAttachPullRequest_CorruptPRTokenNoFallback(t *testing.T) {
 	}
 }
 
-// 限流错误（go-github 的 RateLimitError/AbuseRateLimitError，HTTP 403）同样
-// 附权限排查提示——它们不走 *gh.ErrorResponse 分支。
+// 限流错误（go-github 的 RateLimitError/AbuseRateLimitError，HTTP 403）附限流
+// 提示而非权限排查——限流时 PR 与凭证都正常，权限提示会把用户引向查权限。
 // 注意两者的 Error() 会解引用 Response.Request，构造时必须带非空 Request。
 func TestIssueServiceAttachPullRequest_RateLimitHint(t *testing.T) {
 	svc := setupTestServices(t)
@@ -1034,8 +1034,11 @@ func TestIssueServiceAttachPullRequest_RateLimitHint(t *testing.T) {
 		if !ok || appErr.Code != errs.ErrGitHubAPI.Code {
 			t.Fatalf("expected 50200, got %v", err)
 		}
-		if !strings.Contains(appErr.Message, "Pull requests 读权限") {
-			t.Fatalf("expected permission hint for rate limit error %T, got %q", rateErr, appErr.Message)
+		if !strings.Contains(appErr.Message, "限流") {
+			t.Fatalf("expected rate limit hint for %T, got %q", rateErr, appErr.Message)
+		}
+		if strings.Contains(appErr.Message, "Pull requests 读权限") {
+			t.Fatalf("rate limit error %T must not carry permission hint, got %q", rateErr, appErr.Message)
 		}
 	}
 }

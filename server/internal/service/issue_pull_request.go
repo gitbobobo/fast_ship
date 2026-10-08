@@ -250,14 +250,16 @@ func (s *IssueService) pullRequestClient(project *model.Project, owner, repo str
 
 // pullRequestAccessHint 对 GitHub 的权限类错误、404 与限流追加排查提示。
 // GitHub 对「PR 不存在」和「凭证无权访问该仓库」都返回 404，文案必须同时保留两种可能；
-// 限流错误（HTTP 403）是 *gh.RateLimitError/*gh.AbuseRateLimitError，不走 *gh.ErrorResponse。
+// 限流错误（HTTP 403）是 *gh.RateLimitError/*gh.AbuseRateLimitError，不走 *gh.ErrorResponse，
+// 且限流时 PR 与凭证都正常，必须给不同的提示，不能把用户引向查权限。
 const pullRequestAccessHintText = "；PR 不存在或当前凭证无权访问该仓库，请确认仓库访问范围与 Pull requests 读权限"
+const pullRequestRateLimitHintText = "；GitHub API 限流，请稍后重试（匿名访问限 60 次/小时，配置 Token 可提高限额）"
 
 func pullRequestAccessHint(err error) string {
 	var rateLimitErr *gh.RateLimitError
 	var abuseErr *gh.AbuseRateLimitError
 	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseErr) {
-		return pullRequestAccessHintText
+		return pullRequestRateLimitHintText
 	}
 	var errResp *gh.ErrorResponse
 	if !errors.As(err, &errResp) || errResp.Response == nil {
