@@ -67,8 +67,8 @@ func TestProjectUpdate_EmptyNameIsIgnored(t *testing.T) {
 }
 
 // github_pr_token 与 clear_github_pr_token 互斥按「字段是否显式提供」判定：
-// false/空串也算提供。若 handler 退回 string+omitempty 绑定，这两种组合会被
-// NonEmpty/True 吞掉一个字段，变成静默替换/清除。
+// false/空串/null 都算提供。若 handler 退回 string+omitempty 或指针绑定，
+// 这些组合会被 NonEmpty/True/nil 吞掉一个字段，变成静默替换/清除。
 func TestProjectUpdate_PrTokenMutexByPresence(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-pr-mutex")
@@ -77,6 +77,8 @@ func TestProjectUpdate_PrTokenMutexByPresence(t *testing.T) {
 	for _, body := range []string{
 		`{"clear_github_pr_token":false,"github_pr_token":"v2"}`,
 		`{"clear_github_pr_token":true,"github_pr_token":""}`,
+		`{"clear_github_pr_token":true,"github_pr_token":null}`,
+		`{"clear_github_pr_token":null,"github_pr_token":"v2"}`,
 	} {
 		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
 		ctx.Params = ginParams("id", project.ID)
@@ -93,19 +95,25 @@ func TestProjectUpdate_PrTokenMutexByPresence(t *testing.T) {
 	}
 }
 
-// clear_github_pr_token=false 单独提供是合法无操作，不得误报 400。
+// clear_github_pr_token=false 或显式 null 单独提供是合法无操作，不得误报 400。
 func TestProjectUpdate_ClearPRTokenFalseAloneIsOK(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-pr-clear-false")
 	project := createHandlerTestProject(t, env.db, user.ID)
 
-	ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(`{"clear_github_pr_token":false}`))
-	ctx.Params = ginParams("id", project.ID)
-	ctx.Set(middleware.ContextKeyUserID, user.ID)
-	env.projectHandler.Update(ctx)
+	for _, body := range []string{
+		`{"clear_github_pr_token":false}`,
+		`{"clear_github_pr_token":null}`,
+		`{"github_pr_token":null}`,
+	} {
+		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
+		ctx.Params = ginParams("id", project.ID)
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Update(ctx)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 for clear=false alone, got %d: %s", rec.Code, rec.Body.String())
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
 	}
 }
 
