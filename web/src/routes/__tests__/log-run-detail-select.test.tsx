@@ -73,7 +73,7 @@ async function renderRunDetail(search = "") {
 }
 
 function levelSelectTrigger() {
-  return screen.getAllByRole("combobox")[1];
+  return screen.getByRole("combobox");
 }
 
 describe("LogRunDetailPage level select label", () => {

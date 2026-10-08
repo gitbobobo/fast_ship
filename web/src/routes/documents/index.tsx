@@ -9,6 +9,7 @@ import {
   Save,
   Trash2,
 } from "lucide-react";
+import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -168,11 +169,6 @@ export default function DocumentsPage() {
   const activeProjectId = useMemo(
     () => getActiveProjectId(projects, selectedProjectId, urlProjectId),
     [projects, selectedProjectId, urlProjectId],
-  );
-
-  const activeProject = useMemo(
-    () => projects.find((p) => p.id === activeProjectId),
-    [projects, activeProjectId],
   );
 
   useEffect(() => {
@@ -557,27 +553,15 @@ export default function DocumentsPage() {
         actions={
           <HeaderActions
             primary={
-              <Select
-                value={activeProjectId || undefined}
+              <ProjectSwitcher
+                value={activeProjectId}
                 onValueChange={handleProjectChange}
                 disabled={projectsLoading || projects.length === 0}
-              >
-                <SelectTrigger
-                  className="w-48"
-                  data-testid="documents-project-select"
-                >
-                  <SelectValue placeholder="选择项目">
-                    {activeProject?.name}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                projects={projects}
+                placeholder="选择项目"
+                className="w-48"
+                data-testid="documents-project-select"
+              />
             }
           />
         }
