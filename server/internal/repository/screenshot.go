@@ -99,17 +99,19 @@ func (r *ScreenshotRepository) LatestVersionsByScreenIDs(screenIDs []string) (ma
 		return latest, nil
 	}
 
+	// 版本全量保留且只增不减，rowid 最大者即最新插入的版本；
+	// 直接在 SQL 里按 screen 取最新一行，避免把全量历史拉回内存排序
+	sub := r.db.Model(&model.ScreenshotVersion{}).
+		Select("MAX(rowid)").
+		Where("screen_id IN ?", screenIDs).
+		Group("screen_id")
 	var versions []model.ScreenshotVersion
-	err := r.db.Where("screen_id IN ?", screenIDs).
-		Order("uploaded_at DESC, id DESC").
-		Find(&versions).Error
+	err := r.db.Where("rowid IN (?)", sub).Find(&versions).Error
 	if err != nil {
 		return nil, err
 	}
 	for _, version := range versions {
-		if _, ok := latest[version.ScreenID]; !ok {
-			latest[version.ScreenID] = version
-		}
+		latest[version.ScreenID] = version
 	}
 	return latest, nil
 }

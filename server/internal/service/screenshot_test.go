@@ -540,3 +540,44 @@ func mustScreenshotVersionPath(t *testing.T, svc *testServices, versionID string
 	}
 	return version.FilePath
 }
+
+func TestScreenshotServiceUpload_RejectsOversizedFields(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	longGroup := strings.Repeat("g", maxScreenshotGroupRunes+1)
+	cases := []struct {
+		name   string
+		mutate func(*ScreenshotUploadInput)
+	}{
+		{"group over limit", func(i *ScreenshotUploadInput) { i.Group = &longGroup }},
+		{"title over limit", func(i *ScreenshotUploadInput) { i.Title = strings.Repeat("t", maxScreenshotTitleRunes+1) }},
+		{"note over limit", func(i *ScreenshotUploadInput) { i.Note = strings.Repeat("n", maxScreenshotNoteRunes+1) }},
+	}
+	for _, tc := range cases {
+		input := newScreenshotUploadInput(project.ID, user.ID, "home")
+		tc.mutate(input)
+		if _, err := svc.screenshotService.Upload(input); err != errs.ErrInvalidParams {
+			t.Fatalf("%s: expected ErrInvalidParams, got %v", tc.name, err)
+		}
+	}
+}
+
+func TestScreenshotServiceUpdate_RejectsOversizedFields(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	uploaded := uploadTestScreenshot(t, svc, newScreenshotUploadInput(project.ID, user.ID, "home"))
+
+	longGroup := strings.Repeat("g", maxScreenshotGroupRunes+1)
+	longTitle := strings.Repeat("t", maxScreenshotTitleRunes+1)
+	for _, req := range []*UpdateScreenshotScreenRequest{
+		{Group: &longGroup},
+		{Title: &longTitle},
+	} {
+		if _, err := svc.screenshotService.Update(uploaded.Screen.Id, user.ID, req); err != errs.ErrInvalidParams {
+			t.Fatalf("expected ErrInvalidParams, got %v (req %+v)", err, req)
+		}
+	}
+}
