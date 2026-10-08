@@ -20,5 +20,6 @@ keep 集合由本轮拉取的行推导：评论按 `github_comment_id`，时间�
 
 ## 冲突键
 
-- 评论：`(issue_id, github_comment_id)`；时间线：`(issue_id, event_key)`。重复同步幂等，不产生重复行；既有行保留主键、只刷同步字段。
+- 评论：`(issue_id, github_comment_id)`；时间线：`(issue_id, event_key)`。重复同步幂等，不产生重复行；既有行保留主键、刷新全部镜像字段。
+- 注意：评论 upsert 的更新列包含 `author_user_id` 与 `idempotency_key`，而同步映射不带这两个字段——应用内发到 GitHub 的评论被同步覆盖时幂等键会被清空；防重发兜底靠评论正文里的 `fast-ship-hook:` marker（见 `service/issue_comments.go`）。
 - 时间线 `event_key`：`gh:<event_id>`；无事件 ID 时用 `fallback:` + 事件类型/时间/actor 等字段拼接的兜底键。
