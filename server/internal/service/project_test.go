@@ -529,6 +529,61 @@ func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
 	}
 }
 
+// List 的 issue_count 统计项目 Issue 总数（open、closed 都计入）；无 Issue
+// 的项目字段缺省（nil）；Get 等详情响应不携带该字段。
+func TestProjectServiceList_IssueCount(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-issue-count")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+
+	busy := createTestProject(t, svc.db, user.ID)
+	quiet := createTestProject(t, svc.db, user.ID)
+	empty := createTestProject(t, svc.db, user.ID)
+
+	createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
+	// 第二个 Issue 共用项目时避开 (project_id, github_issue_id) 唯一索引
+	if err := svc.db.Model(&model.IssueGitHubMeta{}).
+		Where("project_id = ?", busy.ID).
+		Update("github_issue_id", 1002).Error; err != nil {
+		t.Fatalf("bump github_issue_id: %v", err)
+	}
+	createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) {
+		i.SequenceNumber = 2
+		i.State = model.IssueStateClosed
+	})
+	createTestIssue(t, svc.db, quiet.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
+
+	resp, total, err := projectSvc.List(user.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("list projects: %v", err)
+	}
+	if total != 3 || len(resp) != 3 {
+		t.Fatalf("expected 3 projects, got total=%d len=%d", total, len(resp))
+	}
+
+	counts := make(map[string]*int, len(resp))
+	for _, p := range resp {
+		counts[p.Id] = p.IssueCount
+	}
+	if got := counts[busy.ID]; got == nil || *got != 2 {
+		t.Fatalf("busy issue_count = %v, want 2（closed 也计入）", got)
+	}
+	if got := counts[quiet.ID]; got == nil || *got != 1 {
+		t.Fatalf("quiet issue_count = %v, want 1", got)
+	}
+	if got := counts[empty.ID]; got != nil {
+		t.Fatalf("empty issue_count = %v, want nil", *got)
+	}
+
+	detail, err := projectSvc.Get(busy.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get project: %v", err)
+	}
+	if detail.IssueCount != nil {
+		t.Fatalf("get issue_count = %v, want nil（详情不携带）", *detail.IssueCount)
+	}
+}
+
 // clear_github_pr_token=false 单独传按未提供处理：不报错也不改动现值。
 func TestProjectServiceUpdate_ClearFalseIsNoop(t *testing.T) {
 	svc := setupTestServices(t)

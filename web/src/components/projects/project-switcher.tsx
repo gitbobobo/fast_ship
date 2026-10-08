@@ -28,13 +28,16 @@ export function ProjectSwitcher({
   const inputRef = useRef<HTMLInputElement>(null);
   const activeProject = projects.find((project) => project.id === value);
   const search = query.trim().toLowerCase();
-  const filteredProjects = projects.filter((project) => {
-    const fields = [project.name, project.description ?? ""];
-    if (project.github_owner && project.github_repo) {
-      fields.push(`${project.github_owner}/${project.github_repo}`);
-    }
-    return fields.some((field) => field.toLowerCase().includes(search));
-  });
+  // 按 Issue 总数降序展示；计数缺失按 0，同计数靠稳定排序保持服务端顺序
+  const filteredProjects = projects
+    .filter((project) => {
+      const fields = [project.name, project.description ?? ""];
+      if (project.github_owner && project.github_repo) {
+        fields.push(`${project.github_owner}/${project.github_repo}`);
+      }
+      return fields.some((field) => field.toLowerCase().includes(search));
+    })
+    .sort((a, b) => (b.issue_count ?? 0) - (a.issue_count ?? 0));
 
   // 已选中项只关闭面板，不重复回调
   const handleSelect = (project: Project) => {
