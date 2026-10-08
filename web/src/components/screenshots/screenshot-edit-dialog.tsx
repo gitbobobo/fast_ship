@@ -66,6 +66,7 @@ export function ScreenshotEditDialog({
               id="edit-screenshot-title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
+              maxLength={200}
               placeholder="留空时显示界面标识"
             />
           </div>
@@ -75,6 +76,7 @@ export function ScreenshotEditDialog({
               id="edit-screenshot-group"
               value={group}
               onChange={(e) => setGroup(e.target.value)}
+              maxLength={100}
               placeholder="留空为未分组"
             />
           </div>

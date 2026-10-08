@@ -177,6 +177,7 @@ export function UploadScreenshotsDialog({
               id="screenshot-group"
               value={group}
               onChange={(e) => setGroup(e.target.value)}
+              maxLength={100}
               placeholder="留空保持原分组；多文件时本批共用"
               disabled={upload.isPending}
             />
@@ -193,6 +194,7 @@ export function UploadScreenshotsDialog({
                     setScreenKey(e.target.value);
                     setScreenKeyEdited(true);
                   }}
+                  maxLength={100}
                   placeholder="screen_key，如 home / settings"
                   disabled={upload.isPending}
                 />
@@ -211,6 +213,7 @@ export function UploadScreenshotsDialog({
                   id="screenshot-title"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
+                  maxLength={200}
                   placeholder="留空时显示界面标识"
                   disabled={upload.isPending}
                 />
@@ -222,6 +225,7 @@ export function UploadScreenshotsDialog({
                   id="screenshot-note"
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
+                  maxLength={1000}
                   placeholder="如「改版前」「v2.0 新布局」"
                   disabled={upload.isPending}
                 />

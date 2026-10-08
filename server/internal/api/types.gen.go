@@ -1236,10 +1236,10 @@ type UpdateProjectRequest struct {
 
 // UpdateScreenshotScreenRequest 两字段均可选，出现才更新；都不传返回 40001
 type UpdateScreenshotScreenRequest struct {
-	// Group 分组名；允许空串置为未分组
+	// Group 分组名（≤100 字符）；允许空串置为未分组
 	Group *string `json:"group,omitempty"`
 
-	// Title 界面标题
+	// Title 界面标题（≤200 字符）；空串回退显示 screen_key
 	Title *string `json:"title,omitempty"`
 }
 
@@ -2328,16 +2328,16 @@ type UploadScreenshotMultipartBody struct {
 	// File 截图文件；内容须为 image/png、image/jpeg、image/webp、image/gif
 	File openapi_types.File `json:"file"`
 
-	// Group 分组名；字段出现即更新（空串置为未分组），不出现则保持原值
+	// Group 分组名（≤100 字符）；字段出现即更新（空串置为未分组），不出现则保持原值
 	Group *string `json:"group,omitempty"`
 
-	// Note 本次上传版本的备注
+	// Note 本次上传版本的备注（≤1000 字符）
 	Note *string `json:"note,omitempty"`
 
 	// ScreenKey 界面标识；规范化后 1~100 字符
 	ScreenKey string `json:"screen_key"`
 
-	// Title 界面标题；非空才更新
+	// Title 界面标题（≤200 字符）；非空才更新
 	Title *string `json:"title,omitempty"`
 }
 

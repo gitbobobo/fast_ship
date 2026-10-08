@@ -36,6 +36,13 @@ describe("normalizeScreenKey", () => {
     expect(normalizeScreenKey(".png")).toBe("screenshot");
     expect(normalizeScreenKey("  spaced  .webp")).toBe("spaced");
   });
+
+  it("truncates long names to the 100-char server limit", () => {
+    const long = "a".repeat(80) + "-tail-" + "b".repeat(60) + ".png";
+    const key = normalizeScreenKey(long);
+    expect([...key].length).toBeLessThanOrEqual(100);
+    expect(key.startsWith("a".repeat(80))).toBe(true);
+  });
 });
 
 describe("uploadScreenshotBatch", () => {

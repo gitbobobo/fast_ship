@@ -3288,13 +3288,16 @@ paths:
                   description: 界面标识；规范化后 1~100 字符
                 group:
                   type: string
-                  description: 分组名；字段出现即更新（空串置为未分组），不出现则保持原值
+                  maxLength: 100
+                  description: 分组名（≤100 字符）；字段出现即更新（空串置为未分组），不出现则保持原值
                 title:
                   type: string
-                  description: 界面标题；非空才更新
+                  maxLength: 200
+                  description: 界面标题（≤200 字符）；非空才更新
                 note:
                   type: string
-                  description: 本次上传版本的备注
+                  maxLength: 1000
+                  description: 本次上传版本的备注（≤1000 字符）
       responses:
         '200':
           description: 上传结果（screen 为归并后的界面，version 为新建版本）
@@ -3313,6 +3316,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/RequestEntityTooLarge'
         '500':
           $ref: '#/components/responses/InternalError'
     get:
@@ -5372,7 +5377,9 @@ components:
       properties:
         group:
           type: string
-          description: 分组名；允许空串置为未分组
+          maxLength: 100
+          description: 分组名（≤100 字符）；允许空串置为未分组
         title:
           type: string
-          description: 界面标题
+          maxLength: 200
+          description: 界面标题（≤200 字符）；空串回退显示 screen_key

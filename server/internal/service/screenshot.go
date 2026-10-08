@@ -24,6 +24,13 @@ import (
 // screen_key 规范化（ToLower+TrimSpace）后的长度上限（字符数）
 const maxScreenshotScreenKeyRunes = 100
 
+// 上传/编辑可写字段的长度上限（字符数），防止 API Key 写入超长元数据
+const (
+	maxScreenshotGroupRunes = 100
+	maxScreenshotTitleRunes = 200
+	maxScreenshotNoteRunes  = 1000
+)
+
 // 上传事务在唯一索引冲突/锁竞争下的最大重试次数（与 LogRepository.UploadRunTx 一致）
 const maxUploadTxAttempts = 5
 
@@ -212,6 +219,13 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 	if n := utf8.RuneCountInString(screenKey); n < 1 || n > maxScreenshotScreenKeyRunes {
 		return nil, errs.ErrInvalidParams
 	}
+	if input.Group != nil && utf8.RuneCountInString(*input.Group) > maxScreenshotGroupRunes {
+		return nil, errs.ErrInvalidParams
+	}
+	if utf8.RuneCountInString(input.Title) > maxScreenshotTitleRunes ||
+		utf8.RuneCountInString(input.Note) > maxScreenshotNoteRunes {
+		return nil, errs.ErrInvalidParams
+	}
 	if err := s.ensureProjectAccess(input.ProjectID, input.UserID); err != nil {
 		return nil, err
 	}
@@ -258,7 +272,6 @@ func isRetryableScreenshotTxError(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE constraint failed") ||
-		strings.Contains(msg, "constraint failed") ||
 		strings.Contains(msg, "database is locked") ||
 		strings.Contains(msg, "database table is locked")
 }
@@ -417,6 +430,12 @@ func (s *ScreenshotService) buildScreenDetail(screen *model.ScreenshotScreen) (*
 // 两者都不传按参数无效处理。
 func (s *ScreenshotService) Update(screenID, userID string, req *UpdateScreenshotScreenRequest) (*ScreenshotScreenDetail, error) {
 	if req.Group == nil && req.Title == nil {
+		return nil, errs.ErrInvalidParams
+	}
+	if req.Group != nil && utf8.RuneCountInString(*req.Group) > maxScreenshotGroupRunes {
+		return nil, errs.ErrInvalidParams
+	}
+	if req.Title != nil && utf8.RuneCountInString(*req.Title) > maxScreenshotTitleRunes {
 		return nil, errs.ErrInvalidParams
 	}
 	screen, err := s.loadAccessibleScreen(screenID, userID)
