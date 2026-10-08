@@ -45,7 +45,7 @@
 |---|---|---|---|
 | POST | `/api/projects/:pid/screenshots` | JWT / API Key | multipart 上传：`file`、`screen_key` 必填，`group`/`title`/`note` 可选 |
 | GET | `/api/projects/:pid/screenshots` | JWT / API Key | `{items: [...]}`，screen 字段 + `version_count` + `latest_version`（可 null），按 `last_uploaded_at` 倒序 |
-| GET | `/api/screenshot-screens/:sid` | JWT / API Key | screen 字段 + `versions`（`uploaded_at` 倒序全量） |
+| GET | `/api/screenshot-screens/:sid` | JWT / API Key | screen 字段 + `versions`（按落库先后倒序，即 rowid DESC 全量） |
 | PATCH | `/api/screenshot-screens/:sid` | **仅 JWT** | `{"group": ..., "title": ...}` 指针语义，返回 detail 形状 |
 | DELETE | `/api/screenshot-screens/:sid` | **仅 JWT** | 删 screen + 全部版本行 + 磁盘文件 |
 | DELETE | `/api/screenshot-versions/:vid` | **仅 JWT** | 删单版本 + 文件；删到最后一个版本时连带删 screen |
@@ -76,6 +76,8 @@ mime 以内容嗅探为准：先读 512 字节 `http.DetectContentType`，仅收
 ## PATCH 语义
 
 `UpdateScreenshotScreenRequest` 两个字段均为指针：出现才更新，未出现保持原值；`group` 显式空串 = 未分组，`title` 显式空串 = 清空回退显示 `screen_key`。两字段都不传返回 40001。成功后返回与 GET detail 相同的形状（screen + `versions` 倒序数组）。
+
+「最新版本」统一按 rowid（插入顺序）判定：列表缩略图、详情首版本、删版本后重算 `last_uploaded_at` 共用同一口径；`uploaded_at` 取自事务开始时间，不用于排序。
 
 ## 删除语义
 

@@ -72,10 +72,12 @@ func (r *ScreenshotRepository) FindVersionByID(id string) (*model.ScreenshotVers
 	return &version, nil
 }
 
+// 「最新版本」统一按 rowid（插入顺序）判定：uploaded_at 取自事务开始时间，
+// 写锁等待或时钟回拨下可能与提交顺序不一致；rowid 才是真实的落库先后。
 func (r *ScreenshotRepository) ListVersionsByScreenID(screenID string) ([]model.ScreenshotVersion, error) {
 	var versions []model.ScreenshotVersion
 	err := r.db.Where("screen_id = ?", screenID).
-		Order("uploaded_at DESC, id DESC").
+		Order("rowid DESC").
 		Find(&versions).Error
 	return versions, err
 }
@@ -83,7 +85,7 @@ func (r *ScreenshotRepository) ListVersionsByScreenID(screenID string) ([]model.
 func (r *ScreenshotRepository) FindLatestVersionByScreenID(screenID string) (*model.ScreenshotVersion, error) {
 	var version model.ScreenshotVersion
 	err := r.db.Where("screen_id = ?", screenID).
-		Order("uploaded_at DESC, id DESC").
+		Order("rowid DESC").
 		First(&version).Error
 	if err != nil {
 		return nil, err
@@ -91,7 +93,7 @@ func (r *ScreenshotRepository) FindLatestVersionByScreenID(screenID string) (*mo
 	return &version, nil
 }
 
-// LatestVersionsByScreenIDs 一次查询取回多个 screen 各自最新版本（uploaded_at 最大者），
+// LatestVersionsByScreenIDs 一次查询取回多个 screen 各自最新版本（rowid 最大者），
 // 返回 screen_id → version 的映射；无版本的 screen 不在结果中。
 func (r *ScreenshotRepository) LatestVersionsByScreenIDs(screenIDs []string) (map[string]model.ScreenshotVersion, error) {
 	latest := make(map[string]model.ScreenshotVersion, len(screenIDs))
@@ -99,7 +101,7 @@ func (r *ScreenshotRepository) LatestVersionsByScreenIDs(screenIDs []string) (ma
 		return latest, nil
 	}
 
-	// 版本全量保留且只增不减，rowid 最大者即最新插入的版本；
+	// 版本全量保留，rowid 最大者即最新插入的版本；
 	// 直接在 SQL 里按 screen 取最新一行，避免把全量历史拉回内存排序
 	sub := r.db.Model(&model.ScreenshotVersion{}).
 		Select("MAX(rowid)").
