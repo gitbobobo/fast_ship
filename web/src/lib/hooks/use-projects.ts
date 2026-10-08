@@ -5,8 +5,17 @@ export function useProjects() {
   return useQuery({
     queryKey: ["projects"],
     queryFn: async () => {
-      const res = await projectApi.list(1, 100);
-      return res.data;
+      // 语义是全量列表（调用方在内存里过滤/排序），按 total 拉完剩余分页，
+      // 防止超过 pageSize 的老项目被静默截断
+      const pageSize = 100;
+      const first = await projectApi.list(1, pageSize);
+      const items = [...first.data.items];
+      for (let page = 2; items.length < first.data.total; page++) {
+        const res = await projectApi.list(page, pageSize);
+        items.push(...res.data.items);
+        if (res.data.items.length < pageSize) break;
+      }
+      return { ...first.data, items };
     },
   });
 }
