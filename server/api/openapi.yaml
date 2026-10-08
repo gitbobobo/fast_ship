@@ -3802,6 +3802,9 @@ components:
         github_token:
           type: string
           description: GitHub PAT（加密存储，不回显）
+        github_pr_token:
+          type: string
+          description: PR 访问 Token，仅用于读取关联 PR（可为其他仓库）；加密存储，不回显
         source_project_id:
           type: string
           description: 复用另一项目的 GitHub Token；优先于 github_token
@@ -3821,11 +3824,17 @@ components:
           description: 同创建；变更仓库且项目无 token 时须提供 token
         github_token:
           type: string
+        github_pr_token:
+          type: string
+          description: PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显
+        clear_github_pr_token:
+          type: boolean
+          description: 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 互斥，同传返回 40001
         source_project_id:
           type: string
     Project:
       type: object
-      required: [id, name, description, github_owner, github_repo, created_at, updated_at]
+      required: [id, name, description, github_owner, github_repo, has_github_pr_token, created_at, updated_at]
       properties:
         id:
           type: string
@@ -3837,6 +3846,9 @@ components:
           type: string
         github_repo:
           type: string
+        has_github_pr_token:
+          type: boolean
+          description: 是否已配置独立 PR 访问 Token
         latest_version:
           $ref: '#/components/schemas/LatestVersion'
         issue_sync:

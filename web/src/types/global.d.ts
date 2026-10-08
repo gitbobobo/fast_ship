@@ -16,6 +16,7 @@ interface Project {
   description: string;
   github_owner: string;
   github_repo: string;
+  has_github_pr_token: boolean;
   latest_version?: {
     id: string;
     version_number: string;

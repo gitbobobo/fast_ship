@@ -33,6 +33,7 @@ import {
   useUpdateProject,
   useProjects,
 } from "@/lib/hooks/use-projects";
+import { projectApi } from "@/lib/api/projects";
 import { useTokenSource } from "@/lib/hooks/use-token-source";
 import { parseRepoUrl, hasGitHubRepo, repoSlug } from "@/lib/utils/github";
 import { toast } from "sonner";
@@ -72,6 +73,7 @@ export function ProjectFormDialog({
   });
 
   const repositoryUrl = useWatch({ control, name: "repository_url" }) || "";
+  const clearPRToken = useWatch({ control, name: "clear_github_pr_token" });
   const { owner, repo } = parseRepoUrl(repositoryUrl);
 
   const { tokenSource, handleTokenSourceChange } = useTokenSource(setValue);
@@ -85,6 +87,8 @@ export function ProjectFormDialog({
           ? `https://github.com/${project.github_owner}/${project.github_repo}`
           : "",
         github_token: "",
+        github_pr_token: "",
+        clear_github_pr_token: false,
         source_project_id: undefined,
       });
     } else if (!isEdit && open) {
@@ -93,6 +97,8 @@ export function ProjectFormDialog({
         description: "",
         repository_url: "",
         github_token: "",
+        github_pr_token: "",
+        clear_github_pr_token: false,
         source_project_id: undefined,
       });
     }
@@ -101,7 +107,9 @@ export function ProjectFormDialog({
   const onSubmit = async (data: FormData) => {
     try {
       if (isEdit) {
-        const payload: Record<string, string> = { name: data.name };
+        const payload: Parameters<typeof projectApi.update>[1] = {
+          name: data.name,
+        };
         if (data.description !== undefined) {
           payload.description = data.description;
         }
@@ -111,6 +119,11 @@ export function ProjectFormDialog({
           payload.source_project_id = editData.source_project_id;
         } else if (editData.github_token) {
           payload.github_token = editData.github_token;
+        }
+        if (editData.clear_github_pr_token) {
+          payload.clear_github_pr_token = true;
+        } else if (editData.github_pr_token) {
+          payload.github_pr_token = editData.github_pr_token;
         }
         await updateProject.mutateAsync(payload);
         toast.success("项目已更新");
@@ -122,6 +135,7 @@ export function ProjectFormDialog({
           description?: string;
           repository_url?: string;
           github_token?: string;
+          github_pr_token?: string;
           source_project_id?: string;
         } = {
           name: createData.name,
@@ -136,6 +150,9 @@ export function ProjectFormDialog({
           payload.source_project_id = createData.source_project_id;
         } else if (createData.github_token) {
           payload.github_token = createData.github_token;
+        }
+        if (createData.github_pr_token) {
+          payload.github_pr_token = createData.github_pr_token;
         }
         const res = await createProject.mutateAsync(payload);
         toast.success("项目创建成功");
@@ -260,6 +277,35 @@ export function ProjectFormDialog({
                   </p>
                 </>
               )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label htmlFor="project-github_pr_token">PR 访问 Token（可选）</Label>
+                {isEdit && project?.has_github_pr_token && (
+                  <span className="text-xs text-muted-foreground">已配置</span>
+                )}
+              </div>
+              <Input
+                id="project-github_pr_token"
+                type="password"
+                placeholder={
+                  isEdit && project?.has_github_pr_token
+                    ? "留空则不修改，输入新值则替换"
+                    : "github_pat_xxx 或 ghp_xxx"
+                }
+                disabled={isEdit && !!clearPRToken}
+                {...register("github_pr_token")}
+              />
+              {isEdit && project?.has_github_pr_token && (
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input type="checkbox" {...register("clear_github_pr_token")} />
+                  清除已配置的 PR 访问 Token（恢复沿用项目 Token）
+                </label>
+              )}
+              <p className="text-xs text-muted-foreground">
+                用于访问其他仓库的 PR；留空时使用项目 Token
+              </p>
             </div>
 
             <div className="flex gap-3 pt-2">

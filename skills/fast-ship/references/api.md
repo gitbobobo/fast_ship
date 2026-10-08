@@ -681,6 +681,7 @@ API Key 管理（仅 JWT）
 | `items[].description` | string | 是 |  |
 | `items[].github_owner` | string | 是 |  |
 | `items[].github_repo` | string | 是 |  |
+| `items[].has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
 | `items[].latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `items[].latest_version.id` | string | 是 |  |
 | `items[].latest_version.version_number` | string | 是 |  |
@@ -723,6 +724,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 否 |  |
 | `repository_url` | string | 否 | GitHub 仓库链接（owner/repo 或完整 URL）；设置时须同时提供 github_token 或 source_project_id |
 | `github_token` | string | 否 | GitHub PAT（加密存储，不回显） |
+| `github_pr_token` | string | 否 | PR 访问 Token，仅用于读取关联 PR（可为其他仓库）；加密存储，不回显 |
 | `source_project_id` | string | 否 | 复用另一项目的 GitHub Token；优先于 github_token |
 
 **成功响应**
@@ -738,6 +740,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -790,6 +793,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -836,6 +840,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 否 |  |
 | `repository_url` | string | 否 | 同创建；变更仓库且项目无 token 时须提供 token |
 | `github_token` | string | 否 |  |
+| `github_pr_token` | string | 否 | PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显 |
+| `clear_github_pr_token` | boolean | 否 | 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 互斥，同传返回 40001 |
 | `source_project_id` | string | 否 |  |
 
 **成功响应**
@@ -851,6 +857,7 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |

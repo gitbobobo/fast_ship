@@ -25,6 +25,8 @@ export const projectSchema = z.object({
   description: z.string().optional(),
   repository_url: z.string().optional(),
   github_token: z.string().optional(),
+  github_pr_token: z.string().optional(),
+  clear_github_pr_token: z.boolean().optional(),
   source_project_id: z.string().optional(),
 }).refine(
   (data) => {
@@ -39,6 +41,8 @@ export const projectEditSchema = z.object({
   description: z.string().optional(),
   repository_url: z.string().optional(),
   github_token: z.string().optional(),
+  github_pr_token: z.string().optional(),
+  clear_github_pr_token: z.boolean().optional(),
   source_project_id: z.string().optional(),
 });
 

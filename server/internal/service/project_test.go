@@ -1,11 +1,14 @@
 package service
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"go.uber.org/zap"
 )
 
@@ -229,5 +232,153 @@ func TestProjectServiceGetBranches_NotGitHubConfigured(t *testing.T) {
 	_, _, err := projectSvc.GetBranches(t.Context(), project.ID, user.ID)
 	if err == nil {
 		t.Fatal("expected error for project without GitHub config, got nil")
+	}
+}
+
+func decryptProjectPRToken(t *testing.T, svc *testServices, projectID string) string {
+	t.Helper()
+	var stored model.Project
+	if err := svc.db.First(&stored, "id = ?", projectID).Error; err != nil {
+		t.Fatalf("reload project: %v", err)
+	}
+	if len(stored.GithubPRTokenEncrypted) == 0 {
+		return ""
+	}
+	plain, err := crypto.Decrypt(stored.GithubPRTokenEncrypted, []byte(svc.cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("decrypt stored pr token: %v", err)
+	}
+	return string(plain)
+}
+
+// 创建时可不带反馈仓库直接配 PR Token；响应只暴露 has_github_pr_token，
+// 明文与密文都不出现在响应 JSON 里。
+func TestProjectServiceCreate_WithPRToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-token")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+
+	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:          "pr-token-project",
+		GithubPrToken: api.Ptr("pr-token-v1"),
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !project.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token=true")
+	}
+	if got := decryptProjectPRToken(t, svc, project.Id); got != "pr-token-v1" {
+		t.Fatalf("expected stored pr-token-v1, got %q", got)
+	}
+
+	body, err := json.Marshal(project)
+	if err != nil {
+		t.Fatalf("marshal response: %v", err)
+	}
+	if strings.Contains(string(body), "pr-token-v1") || strings.Contains(string(body), `"github_pr_token"`) {
+		t.Fatalf("response leaks pr token material: %s", body)
+	}
+}
+
+// 未传任何 PR Token 字段时更新保留现值。
+func TestProjectServiceUpdate_PreservesPRToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-preserve")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+	})
+
+	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		Description: api.Ptr("renamed"),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !resp.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token preserved")
+	}
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
+		t.Fatalf("expected pr-token-v1 preserved, got %q", got)
+	}
+}
+
+// 传非空 github_pr_token 替换现值；显式空串视为不修改。
+func TestProjectServiceUpdate_ReplacesPRToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-replace")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+	})
+
+	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		GithubPrToken: api.Ptr("pr-token-v2"),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !resp.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token after replace")
+	}
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v2" {
+		t.Fatalf("expected pr-token-v2, got %q", got)
+	}
+
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		GithubPrToken: api.Ptr(""),
+	}); err != nil {
+		t.Fatalf("update with empty token: %v", err)
+	}
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v2" {
+		t.Fatalf("expected empty string to keep pr-token-v2, got %q", got)
+	}
+}
+
+// clear_github_pr_token=true 显式清除：字段置空、has_github_pr_token=false、
+// 后续 PR 读取恢复沿用项目 Token；清除不删除既有的 PR 关联行。
+func TestProjectServiceUpdate_ClearsPRToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-clear")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+	})
+
+	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		ClearGithubPrToken: api.Ptr(true),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if resp.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token=false after clear")
+	}
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "" {
+		t.Fatalf("expected stored pr token cleared, got %q", got)
+	}
+}
+
+// clear 标志与非空 github_pr_token 同传是参数冲突，返回 40001。
+func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-conflict")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+	})
+
+	_, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		GithubPrToken:      api.Ptr("pr-token-v2"),
+		ClearGithubPrToken: api.Ptr(true),
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("expected 40001, got %v", err)
+	}
+	// 冲突请求不得改动现值
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
+		t.Fatalf("expected pr-token-v1 unchanged after conflict, got %q", got)
 	}
 }

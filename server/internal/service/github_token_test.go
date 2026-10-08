@@ -106,6 +106,109 @@ func TestAttachPullRequest_CorruptTokenDoesNotFallBackToAnonymous(t *testing.T) 
 	}
 }
 
+// 已配 PR 访问 Token 时优先且只使用它——即便项目 Token 同样有效也选 PR Token；
+// internal 项目（未配反馈仓库）只配 PR Token 也要生效。
+func TestResolvePullRequestCredential_PRTokenPreferred(t *testing.T) {
+	svc := setupTestServices(t)
+
+	withBoth := &model.Project{
+		ID:                     "p-both",
+		GithubOwner:            "owner",
+		GithubRepo:             "repo",
+		GithubTokenEncrypted:   encryptTestToken(t, svc.cfg, "gh-token"),
+		GithubPRTokenEncrypted: encryptTestToken(t, svc.cfg, "pr-token"),
+	}
+	token, kind, appErr := resolvePullRequestCredential(withBoth, svc.cfg, zap.NewNop())
+	if appErr != nil || kind != pullRequestCredentialPR || string(token) != "pr-token" {
+		t.Fatalf("expected pr token, got token=%q kind=%q err=%v", token, kind, appErr)
+	}
+
+	internalOnly := &model.Project{
+		ID:                     "p-internal",
+		GithubPRTokenEncrypted: encryptTestToken(t, svc.cfg, "pr-token"),
+	}
+	token, kind, appErr = resolvePullRequestCredential(internalOnly, svc.cfg, zap.NewNop())
+	if appErr != nil || kind != pullRequestCredentialPR || string(token) != "pr-token" {
+		t.Fatalf("expected pr token on internal project, got token=%q kind=%q err=%v", token, kind, appErr)
+	}
+}
+
+// 未配 PR Token 时回退现状：已配项目 Token 用项目 Token，未配置走匿名。
+func TestResolvePullRequestCredential_Fallbacks(t *testing.T) {
+	svc := setupTestServices(t)
+
+	configured := &model.Project{
+		ID:                   "p-project",
+		GithubOwner:          "owner",
+		GithubRepo:           "repo",
+		GithubTokenEncrypted: encryptTestToken(t, svc.cfg, "gh-token"),
+	}
+	token, kind, appErr := resolvePullRequestCredential(configured, svc.cfg, zap.NewNop())
+	if appErr != nil || kind != pullRequestCredentialProject || string(token) != "gh-token" {
+		t.Fatalf("expected project token, got token=%q kind=%q err=%v", token, kind, appErr)
+	}
+
+	anonymous := &model.Project{ID: "p-anon"}
+	token, kind, appErr = resolvePullRequestCredential(anonymous, svc.cfg, zap.NewNop())
+	if appErr != nil || kind != pullRequestCredentialAnonymous || token != nil {
+		t.Fatalf("expected anonymous, got token=%v kind=%q err=%v", token, kind, appErr)
+	}
+}
+
+// PR Token 密文损坏必须报 50000 且不回退：项目 Token 有效也不能顶上来，
+// 否则用户以为 PR Token 在用、实际走的却是另一个凭证。
+func TestResolvePullRequestCredential_CorruptPRTokenNoFallback(t *testing.T) {
+	svc := setupTestServices(t)
+	project := &model.Project{
+		ID:                     "p-bad-pr",
+		GithubOwner:            "owner",
+		GithubRepo:             "repo",
+		GithubTokenEncrypted:   encryptTestToken(t, svc.cfg, "gh-token"),
+		GithubPRTokenEncrypted: []byte("corrupt-ciphertext"),
+	}
+
+	token, kind, appErr := resolvePullRequestCredential(project, svc.cfg, zap.NewNop())
+	if token != nil || kind != pullRequestCredentialPR || !errors.Is(appErr, errs.ErrInternal) {
+		t.Fatalf("expected ErrInternal with pr kind, got token=%v kind=%q err=%v", token, kind, appErr)
+	}
+}
+
+// PR Token 解密失败的日志同样只准带 project_id 与底层错误，明文与密文不外泄。
+func TestResolvePullRequestCredential_FailureLogContainsNoSecrets(t *testing.T) {
+	svc := setupTestServices(t)
+	ciphertext := encryptTestToken(t, svc.cfg, "pr-token")
+	project := &model.Project{
+		ID:                     "p-pr-log",
+		GithubPRTokenEncrypted: ciphertext,
+	}
+	wrongKeyCfg := &config.Config{Encryption: config.EncryptionConfig{Key: "abcdefghijklmnopqrstuvwxyz123456"}}
+
+	core, observed := observer.New(zap.ErrorLevel)
+	token, _, appErr := resolvePullRequestCredential(project, wrongKeyCfg, zap.New(core))
+	if token != nil || !errors.Is(appErr, errs.ErrInternal) {
+		t.Fatalf("expected ErrInternal for wrong key, got token=%v err=%v", token, appErr)
+	}
+
+	entries := observed.All()
+	if len(entries) != 1 {
+		t.Fatalf("expected one log entry, got %d", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if fields["project_id"] != "p-pr-log" || fields["error"] == nil {
+		t.Fatalf("expected project_id and error fields, got %v", fields)
+	}
+	for _, leaked := range []string{"pr-token", string(ciphertext)} {
+		if strings.Contains(entries[0].Message, leaked) {
+			t.Fatalf("log message leaks secret %q: %s", leaked, entries[0].Message)
+		}
+		for _, v := range fields {
+			if s, ok := v.(string); ok && strings.Contains(s, leaked) {
+				t.Fatalf("log fields leak secret %q: %v", leaked, fields)
+			}
+		}
+	}
+}
+
 // 密钥不匹配（等价于密文损坏）走同一解密失败路径；日志只准带 project_id 与底层错误，
 // 明文 token 与密文都不得出现在日志里。
 func TestProjectGitHubToken_FailureLogContainsNoSecrets(t *testing.T) {

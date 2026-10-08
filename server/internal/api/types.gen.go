@@ -288,6 +288,9 @@ type CreateIssueRequest struct {
 type CreateProjectRequest struct {
 	Description *string `json:"description,omitempty"`
 
+	// GithubPrToken PR 访问 Token，仅用于读取关联 PR（可为其他仓库）；加密存储，不回显
+	GithubPrToken *string `json:"github_pr_token,omitempty"`
+
 	// GithubToken GitHub PAT（加密存储，不回显）
 	GithubToken *string `json:"github_token,omitempty"`
 
@@ -972,7 +975,10 @@ type Project struct {
 	Description string `json:"description"`
 	GithubOwner string `json:"github_owner"`
 	GithubRepo  string `json:"github_repo"`
-	Id          string `json:"id"`
+
+	// HasGithubPrToken 是否已配置独立 PR 访问 Token
+	HasGithubPrToken bool   `json:"has_github_pr_token"`
+	Id               string `json:"id"`
 
 	// IssueSync omitempty，项目 GitHub 同步状态
 	IssueSync *IssueSyncState `json:"issue_sync,omitempty"`
@@ -1129,9 +1135,14 @@ type UpdateProfileRequest struct {
 
 // UpdateProjectRequest defines model for UpdateProjectRequest.
 type UpdateProjectRequest struct {
-	Description *string `json:"description,omitempty"`
-	GithubToken *string `json:"github_token,omitempty"`
-	Name        *string `json:"name,omitempty"`
+	// ClearGithubPrToken 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 互斥，同传返回 40001
+	ClearGithubPrToken *bool   `json:"clear_github_pr_token,omitempty"`
+	Description        *string `json:"description,omitempty"`
+
+	// GithubPrToken PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显
+	GithubPrToken *string `json:"github_pr_token,omitempty"`
+	GithubToken   *string `json:"github_token,omitempty"`
+	Name          *string `json:"name,omitempty"`
 
 	// RepositoryUrl 同创建；变更仓库且项目无 token 时须提供 token
 	RepositoryUrl   *string `json:"repository_url,omitempty"`

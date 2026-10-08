@@ -209,6 +209,19 @@ export function GitHubTokenHelpDialog({
             </ol>
           </div>
 
+          <div className="rounded-lg border border-border p-3 text-muted-foreground">
+            <p className="text-xs">
+              <strong>两种 Token 的区别：</strong>项目 Token 用于 Issue
+              同步、评论、关闭与发货，需要 Issues、Contents
+              等写权限（能读取公开仓库不等于拥有这些权限）。PR 访问 Token
+              只用于读取关联的 PR（可以是与反馈仓库不同的另一个仓库），只需要目标仓库的{" "}
+              <code className="rounded bg-muted px-1 py-0.5 font-mono">
+                Pull requests: Read
+              </code>
+              （及默认的 Metadata 读权限）。
+            </p>
+          </div>
+
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-400">
             <p className="text-xs">
               如果发货时报 <code>Resource not accessible by personal access token</code>

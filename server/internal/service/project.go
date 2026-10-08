@@ -82,14 +82,24 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		}
 	}
 
+	// PR 访问 Token 独立于反馈仓库配置：internal 项目也可以只配 PR Token。
+	var encryptedPRToken []byte
+	if prToken := api.Deref(req.GithubPrToken); prToken != "" {
+		encryptedPRToken, err = crypto.Encrypt([]byte(prToken), []byte(s.cfg.Encryption.Key))
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+	}
+
 	project := &model.Project{
-		ID:                   uuid.New().String(),
-		UserID:               userID,
-		Name:                 req.Name,
-		Description:          api.Deref(req.Description),
-		GithubOwner:          owner,
-		GithubRepo:           repo,
-		GithubTokenEncrypted: encryptedToken,
+		ID:                     uuid.New().String(),
+		UserID:                 userID,
+		Name:                   req.Name,
+		Description:            api.Deref(req.Description),
+		GithubOwner:            owner,
+		GithubRepo:             repo,
+		GithubTokenEncrypted:   encryptedToken,
+		GithubPRTokenEncrypted: encryptedPRToken,
 	}
 
 	if err := s.projectRepo.Create(project); err != nil {
@@ -177,6 +187,20 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 			return nil, err
 		}
 		project.GithubTokenEncrypted = encryptedToken
+	}
+
+	// PR 访问 Token 三态：clear 标志显式清除（恢复沿用项目 Token）、非空值替换、都不传保留现值。
+	if api.Deref(req.ClearGithubPrToken) && api.Deref(req.GithubPrToken) != "" {
+		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": clear_github_pr_token 与 github_pr_token 不能同时提供")
+	}
+	if api.Deref(req.ClearGithubPrToken) {
+		project.GithubPRTokenEncrypted = nil
+	} else if prToken := api.Deref(req.GithubPrToken); prToken != "" {
+		encryptedPRToken, err := crypto.Encrypt([]byte(prToken), []byte(s.cfg.Encryption.Key))
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		project.GithubPRTokenEncrypted = encryptedPRToken
 	}
 
 	if err := s.projectRepo.Update(project); err != nil {
@@ -299,13 +323,14 @@ func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 	resp := &ProjectResponse{
-		Id:          p.ID,
-		Name:        p.Name,
-		Description: p.Description,
-		GithubOwner: p.GithubOwner,
-		GithubRepo:  p.GithubRepo,
-		CreatedAt:   p.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:   p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		Id:               p.ID,
+		Name:             p.Name,
+		Description:      p.Description,
+		GithubOwner:      p.GithubOwner,
+		GithubRepo:       p.GithubRepo,
+		HasGithubPrToken: len(p.GithubPRTokenEncrypted) > 0,
+		CreatedAt:        p.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:        p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 
 	if s.syncStateRepo != nil {

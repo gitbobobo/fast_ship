@@ -5,6 +5,7 @@ interface CreateProjectRequest {
   description?: string;
   repository_url?: string;
   github_token?: string;
+  github_pr_token?: string;
   source_project_id?: string;
 }
 
@@ -13,6 +14,8 @@ interface UpdateProjectRequest {
   description?: string;
   repository_url?: string;
   github_token?: string;
+  github_pr_token?: string;
+  clear_github_pr_token?: boolean;
   source_project_id?: string;
 }
 
