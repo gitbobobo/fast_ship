@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -998,8 +999,44 @@ func TestIssueServiceAttachPullRequest_CorruptPRTokenNoFallback(t *testing.T) {
 	if !ok || appErr.Code != errs.ErrInternal.Code {
 		t.Fatalf("expected ErrInternal, got %v", err)
 	}
+	if !strings.Contains(appErr.Message, "PR 访问 Token") {
+		t.Fatalf("expected credential name in message, got %q", appErr.Message)
+	}
 	if count := countPullRequestRows(t, svc, issue.ID); count != 0 {
 		t.Fatalf("expected no link row on decrypt failure, got %d", count)
+	}
+}
+
+// 限流错误（go-github 的 RateLimitError/AbuseRateLimitError，HTTP 403）同样
+// 附权限排查提示——它们不走 *gh.ErrorResponse 分支。
+// 注意两者的 Error() 会解引用 Response.Request，构造时必须带非空 Request。
+func TestIssueServiceAttachPullRequest_RateLimitHint(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Request:    &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/repos/owner/repo/pulls/7"}},
+	}
+	for _, rateErr := range []error{
+		&gh.RateLimitError{Response: resp},
+		&gh.AbuseRateLimitError{Response: resp},
+	} {
+		fake := &fakeIssueGitHubClient{pullRequestErr: rateErr}
+		stubPullRequestClient(t, svc, fake, "gh-token")
+
+		_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+			Url: "https://github.com/owner/repo/pull/7",
+		})
+		appErr, ok := err.(*errs.AppError)
+		if !ok || appErr.Code != errs.ErrGitHubAPI.Code {
+			t.Fatalf("expected 50200, got %v", err)
+		}
+		if !strings.Contains(appErr.Message, "Pull requests 读权限") {
+			t.Fatalf("expected permission hint for rate limit error %T, got %q", rateErr, appErr.Message)
+		}
 	}
 }
 

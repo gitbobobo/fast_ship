@@ -360,7 +360,8 @@ func TestProjectServiceUpdate_ClearsPRToken(t *testing.T) {
 	}
 }
 
-// clear 标志与非空 github_pr_token 同传是参数冲突，返回 40001。
+// clear 标志与 github_pr_token 同时显式提供即冲突（不论取值——false/空串
+// 也算提供），返回 40001；这是按指针非 nil 判定，不是按解引用后的值。
 func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-pr-conflict")
@@ -369,16 +370,42 @@ func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
 		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
 	})
 
-	_, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		GithubPrToken:      api.Ptr("pr-token-v2"),
-		ClearGithubPrToken: api.Ptr(true),
-	})
-	appErr, ok := err.(*errs.AppError)
-	if !ok || appErr.Code != errs.ErrInvalidParams.Code {
-		t.Fatalf("expected 40001, got %v", err)
+	for _, req := range []*UpdateProjectRequest{
+		{GithubPrToken: api.Ptr("pr-token-v2"), ClearGithubPrToken: api.Ptr(true)},
+		{GithubPrToken: api.Ptr("pr-token-v2"), ClearGithubPrToken: api.Ptr(false)},
+		{GithubPrToken: api.Ptr(""), ClearGithubPrToken: api.Ptr(true)},
+	} {
+		_, err := projectSvc.Update(project.ID, user.ID, req)
+		appErr, ok := err.(*errs.AppError)
+		if !ok || appErr.Code != errs.ErrInvalidParams.Code {
+			t.Fatalf("expected 40001 for %+v, got %v", req, err)
+		}
 	}
 	// 冲突请求不得改动现值
 	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
 		t.Fatalf("expected pr-token-v1 unchanged after conflict, got %q", got)
+	}
+}
+
+// clear_github_pr_token=false 单独传按未提供处理：不报错也不改动现值。
+func TestProjectServiceUpdate_ClearFalseIsNoop(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-pr-clear-false")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+	})
+
+	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		ClearGithubPrToken: api.Ptr(false),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !resp.HasGithubPrToken {
+		t.Fatal("expected has_github_pr_token unchanged")
+	}
+	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
+		t.Fatalf("expected pr-token-v1 unchanged, got %q", got)
 	}
 }

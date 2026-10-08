@@ -189,8 +189,9 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		project.GithubTokenEncrypted = encryptedToken
 	}
 
-	// PR 访问 Token 三态：clear 标志显式清除（恢复沿用项目 Token）、非空值替换、都不传保留现值。
-	if api.Deref(req.ClearGithubPrToken) && api.Deref(req.GithubPrToken) != "" {
+	// PR 访问 Token 三态：clear 标志与 token 字段同时显式提供即冲突（不论取值），
+	// clear=true 显式清除（恢复沿用项目 Token）、非空 token 替换、其余情况保留现值。
+	if req.ClearGithubPrToken != nil && req.GithubPrToken != nil {
 		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": clear_github_pr_token 与 github_pr_token 不能同时提供")
 	}
 	if api.Deref(req.ClearGithubPrToken) {

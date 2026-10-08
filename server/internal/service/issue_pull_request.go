@@ -131,11 +131,7 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 
 		client, credKind, err := pullRequestSyncClient(s, clients, clientKinds, clientErrs, project, link)
 		if err != nil {
-			reason := err.Error()
-			if credKind != "" {
-				reason = fmt.Sprintf("%s 读取失败: %s", credKind.name(), reason)
-			}
-			result.Failures = append(result.Failures, pullRequestSyncFailure(link, reason))
+			result.Failures = append(result.Failures, pullRequestSyncFailure(link, err.Error()))
 			continue
 		}
 
@@ -252,16 +248,24 @@ func (s *IssueService) pullRequestClient(project *model.Project, owner, repo str
 	return s.newClient(string(tokenBytes), owner, repo), kind, nil
 }
 
-// pullRequestAccessHint 对 GitHub 的权限类错误与 404 追加排查提示。
-// GitHub 对「PR 不存在」和「凭证无权访问该仓库」都返回 404，文案必须同时保留两种可能。
+// pullRequestAccessHint 对 GitHub 的权限类错误、404 与限流追加排查提示。
+// GitHub 对「PR 不存在」和「凭证无权访问该仓库」都返回 404，文案必须同时保留两种可能；
+// 限流错误（HTTP 403）是 *gh.RateLimitError/*gh.AbuseRateLimitError，不走 *gh.ErrorResponse。
+const pullRequestAccessHintText = "；PR 不存在或当前凭证无权访问该仓库，请确认仓库访问范围与 Pull requests 读权限"
+
 func pullRequestAccessHint(err error) string {
+	var rateLimitErr *gh.RateLimitError
+	var abuseErr *gh.AbuseRateLimitError
+	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseErr) {
+		return pullRequestAccessHintText
+	}
 	var errResp *gh.ErrorResponse
 	if !errors.As(err, &errResp) || errResp.Response == nil {
 		return ""
 	}
 	switch errResp.Response.StatusCode {
 	case 401, 403, 404:
-		return "；PR 不存在或当前凭证无权访问该仓库，请确认仓库访问范围与 Pull requests 读权限"
+		return pullRequestAccessHintText
 	default:
 		return ""
 	}

@@ -156,7 +156,8 @@ func TestResolvePullRequestCredential_Fallbacks(t *testing.T) {
 }
 
 // PR Token 密文损坏必须报 50000 且不回退：项目 Token 有效也不能顶上来，
-// 否则用户以为 PR Token 在用、实际走的却是另一个凭证。
+// 否则用户以为 PR Token 在用、实际走的却是另一个凭证。错误文案须点名
+// 「PR 访问 Token」——否则用户不知道该去检查哪个凭证。
 func TestResolvePullRequestCredential_CorruptPRTokenNoFallback(t *testing.T) {
 	svc := setupTestServices(t)
 	project := &model.Project{
@@ -168,8 +169,30 @@ func TestResolvePullRequestCredential_CorruptPRTokenNoFallback(t *testing.T) {
 	}
 
 	token, kind, appErr := resolvePullRequestCredential(project, svc.cfg, zap.NewNop())
-	if token != nil || kind != pullRequestCredentialPR || !errors.Is(appErr, errs.ErrInternal) {
-		t.Fatalf("expected ErrInternal with pr kind, got token=%v kind=%q err=%v", token, kind, appErr)
+	if token != nil || kind != pullRequestCredentialPR || appErr == nil || appErr.Code != errs.ErrInternal.Code {
+		t.Fatalf("expected 50000 with pr kind, got token=%v kind=%q err=%v", token, kind, appErr)
+	}
+	if !strings.Contains(appErr.Message, "PR 访问 Token") {
+		t.Fatalf("expected credential name in message, got %q", appErr.Message)
+	}
+}
+
+// 项目 Token 密文损坏同样点名「项目 Token」。
+func TestResolvePullRequestCredential_CorruptProjectTokenNamed(t *testing.T) {
+	svc := setupTestServices(t)
+	project := &model.Project{
+		ID:                   "p-bad-proj",
+		GithubOwner:          "owner",
+		GithubRepo:           "repo",
+		GithubTokenEncrypted: []byte("corrupt-ciphertext"),
+	}
+
+	token, kind, appErr := resolvePullRequestCredential(project, svc.cfg, zap.NewNop())
+	if token != nil || kind != pullRequestCredentialProject || appErr == nil || appErr.Code != errs.ErrInternal.Code {
+		t.Fatalf("expected 50000 with project kind, got token=%v kind=%q err=%v", token, kind, appErr)
+	}
+	if !strings.Contains(appErr.Message, "项目 Token") {
+		t.Fatalf("expected credential name in message, got %q", appErr.Message)
 	}
 }
 
@@ -185,8 +208,8 @@ func TestResolvePullRequestCredential_FailureLogContainsNoSecrets(t *testing.T) 
 
 	core, observed := observer.New(zap.ErrorLevel)
 	token, _, appErr := resolvePullRequestCredential(project, wrongKeyCfg, zap.New(core))
-	if token != nil || !errors.Is(appErr, errs.ErrInternal) {
-		t.Fatalf("expected ErrInternal for wrong key, got token=%v err=%v", token, appErr)
+	if token != nil || appErr == nil || appErr.Code != errs.ErrInternal.Code {
+		t.Fatalf("expected 50000 for wrong key, got token=%v err=%v", token, appErr)
 	}
 
 	entries := observed.All()

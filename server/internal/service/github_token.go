@@ -74,23 +74,24 @@ func (k pullRequestCredentialKind) usage() string {
 }
 
 // resolvePullRequestCredential 决定一次 PR 读取（attach/sync）使用的凭证并解密。
-// 项目已配独立 PR Token 时优先且只使用它：解密失败记日志返回 ErrInternal，
-// 不静默回退项目 Token 或匿名；未配 PR Token 时回退 optional 项目 Token 语义
-// （已配项目 Token 用之，未配置则匿名）。PR Token 是否可用不依赖项目是否配置了
-// 反馈仓库。返回的 kind 标识本次凭证来源；解密失败时 kind 同样返回，便于失败
-// 文案仍指明来源。日志只带 project_id 与解密错误，绝不包含 token 明文或密文。
+// 项目已配独立 PR Token 时优先且只使用它：解密失败记日志返回 50000 且不静默回退
+// 项目 Token 或匿名；未配 PR Token 时回退 optional 项目 Token 语义（已配项目 Token
+// 用之，未配置则匿名）。PR Token 是否可用不依赖项目是否配置了反馈仓库。
+// 解密失败的错误文案写明是哪种凭证——否则用户不知道该去检查哪个 Token；
+// 日志只带 project_id 与解密错误，绝不包含 token 明文或密文。
+// 返回的 kind 标识本次凭证来源，供调用方在错误文案里标明。
 func resolvePullRequestCredential(project *model.Project, cfg *config.Config, logger *zap.Logger) ([]byte, pullRequestCredentialKind, *errs.AppError) {
 	if len(project.GithubPRTokenEncrypted) > 0 {
 		tokenBytes, err := crypto.Decrypt(project.GithubPRTokenEncrypted, []byte(cfg.Encryption.Key))
 		if err != nil {
 			logger.Error("decrypt github pr token failed", zap.String("project_id", project.ID), zap.Error(err))
-			return nil, pullRequestCredentialPR, errs.ErrInternal
+			return nil, pullRequestCredentialPR, errs.New(errs.ErrInternal.Code, "PR 访问 Token 解密失败，请在项目设置中重新配置")
 		}
 		return tokenBytes, pullRequestCredentialPR, nil
 	}
 	tokenBytes, appErr := optionalProjectGitHubToken(project, cfg, logger)
 	if appErr != nil {
-		return nil, pullRequestCredentialProject, appErr
+		return nil, pullRequestCredentialProject, errs.New(errs.ErrInternal.Code, "项目 Token 解密失败，请在项目设置中重新配置")
 	}
 	if tokenBytes == nil {
 		return nil, pullRequestCredentialAnonymous, nil

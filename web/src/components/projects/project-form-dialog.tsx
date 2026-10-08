@@ -304,7 +304,9 @@ export function ProjectFormDialog({
                 </label>
               )}
               <p className="text-xs text-muted-foreground">
-                用于访问其他仓库的 PR；留空时使用项目 Token
+                {isEdit && project?.has_github_pr_token
+                  ? "用于访问其他仓库的 PR；留空则继续使用已配置的 PR 访问 Token"
+                  : "用于访问其他仓库的 PR；留空时使用项目 Token"}
               </p>
             </div>
 

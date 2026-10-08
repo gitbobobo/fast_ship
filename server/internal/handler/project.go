@@ -71,14 +71,17 @@ func (h *ProjectHandler) List(c *gin.Context) {
 
 // updateProjectInput 保留基线的 string+omitempty 绑定语义，原因同
 // updateMeInput：生成类型 *string 无法对显式空串走 omitempty 跳过。
+// GithubPRToken/ClearGithubPRToken 用指针绑定：互斥校验依赖「字段是否显式提供」，
+// string+omitempty 折回会丢失这个信息（false/空串与缺省不可区分）。两者没有
+// binding 校验标签，不受 string+omitempty 例外约束。
 type updateProjectInput struct {
-	Name               string `json:"name" binding:"omitempty,min=1,max=100"`
-	Description        string `json:"description"`
-	RepositoryURL      string `json:"repository_url"`
-	GithubToken        string `json:"github_token"`
-	GithubPRToken      string `json:"github_pr_token"`
-	ClearGithubPRToken bool   `json:"clear_github_pr_token"`
-	SourceProjectID    string `json:"source_project_id"`
+	Name               string  `json:"name" binding:"omitempty,min=1,max=100"`
+	Description        string  `json:"description"`
+	RepositoryURL      string  `json:"repository_url"`
+	GithubToken        string  `json:"github_token"`
+	GithubPRToken      *string `json:"github_pr_token"`
+	ClearGithubPRToken *bool   `json:"clear_github_pr_token"`
+	SourceProjectID    string  `json:"source_project_id"`
 }
 
 func (h *ProjectHandler) Update(c *gin.Context) {
@@ -95,8 +98,8 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 		Description:        api.NonEmpty(input.Description),
 		RepositoryUrl:      api.NonEmpty(input.RepositoryURL),
 		GithubToken:        api.NonEmpty(input.GithubToken),
-		GithubPrToken:      api.NonEmpty(input.GithubPRToken),
-		ClearGithubPrToken: api.True(input.ClearGithubPRToken),
+		GithubPrToken:      input.GithubPRToken,
+		ClearGithubPrToken: input.ClearGithubPRToken,
 		SourceProjectId:    api.NonEmpty(input.SourceProjectID),
 	})
 	if err != nil {
