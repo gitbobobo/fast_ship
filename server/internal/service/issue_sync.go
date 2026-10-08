@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/google/uuid"
@@ -80,7 +79,7 @@ func (s *IssueService) syncProject(ctx context.Context, project *model.Project) 
 		return nil, syncErr
 	}
 
-	tokenBytes, appErr := s.decryptGitHubToken(project)
+	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
 	if appErr != nil {
 		return failSync(appErr)
 	}
@@ -390,18 +389,6 @@ func (s *IssueService) syncTimeline(ctx context.Context, client gitHubIssueClien
 		return 0, errs.ErrInternal
 	}
 	return len(events), nil
-}
-
-func (s *IssueService) decryptGitHubToken(project *model.Project) ([]byte, *errs.AppError) {
-	if !project.IsGitHubConfigured() {
-		return nil, errs.ErrProjectGitHubNotConfigured
-	}
-	tokenBytes, err := crypto.Decrypt(project.GithubTokenEncrypted, []byte(s.cfg.Encryption.Key))
-	if err != nil {
-		s.logger.Error("decrypt github token failed for issue sync", zap.Error(err))
-		return nil, errs.ErrInternal
-	}
-	return tokenBytes, nil
 }
 
 func (s *IssueService) beginSync(projectID string) bool {

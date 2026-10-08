@@ -10,12 +10,10 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
@@ -236,18 +234,13 @@ func (s *IssueService) loadIssueAndProject(issueID, userID string) (*model.Issue
 }
 
 // pullRequestClient 为任意 owner/repo 构造 GitHub 客户端：项目已配 token 用项目 token，
-// 未配置（internal 项目）时以未认证客户端访问公共仓库。
+// 未配置（internal 项目）时以未认证客户端访问公共仓库；已配置但解密失败报错，不退回匿名。
 func (s *IssueService) pullRequestClient(project *model.Project, owner, repo string) (gitHubIssueClient, error) {
-	var token string
-	if project.IsGitHubConfigured() {
-		tokenBytes, err := crypto.Decrypt(project.GithubTokenEncrypted, []byte(s.cfg.Encryption.Key))
-		if err != nil {
-			s.logger.Error("decrypt github token failed for pull request fetch", zap.Error(err))
-			return nil, errs.ErrInternal
-		}
-		token = string(tokenBytes)
+	tokenBytes, appErr := optionalProjectGitHubToken(project, s.cfg, s.logger)
+	if appErr != nil {
+		return nil, appErr
 	}
-	return s.newClient(token, owner, repo), nil
+	return s.newClient(string(tokenBytes), owner, repo), nil
 }
 
 // parsePullRequestURL 解析 GitHub PR 链接，容忍 http、www 前缀与 /files、query、fragment 等尾部。

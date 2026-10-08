@@ -123,7 +123,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
-	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg)
+	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), repository.NewIssueRecommendationRepository(db), repository.NewIssuePullRequestRepository(db), fileStorage, cfg, zap.NewNop())
 	collabRepo := repository.NewIssueCollabRepository(db)
@@ -140,7 +140,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		issueHandler:       NewIssueHandler(issueService, issueShipHookService, collabService),
 		collabHandler:      NewIssueCollabHandler(collabService),
 		artifactHandler:    NewArtifactHandler(artifactService),
-		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg)),
+		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zap.NewNop())),
 	}
 }
 
