@@ -120,4 +120,13 @@ type (
 	UploadLogsResult  = api.UploadLogsResult
 	LogEntryItem      = api.LogEntry
 	LogRunItem        = api.LogRun
+
+	// screenshots
+	UpdateScreenshotScreenRequest = api.UpdateScreenshotScreenRequest
+	ScreenshotScreenResponse      = api.ScreenshotScreen
+	ScreenshotVersionResponse     = api.ScreenshotVersion
+	ScreenshotScreenListItem      = api.ScreenshotScreenListItem
+	ScreenshotScreenDetail        = api.ScreenshotScreenDetail
+	ScreenshotUploadResult        = api.ScreenshotUploadResult
+	ScreenshotScreenListData      = api.ListScreenshotScreens200JSONResponseBody_Data
 )

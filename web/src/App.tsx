@@ -13,6 +13,7 @@ const RegisterPage = lazy(() => import("@/routes/register"));
 const DashboardPage = lazy(() => import("@/routes/dashboard/index"));
 const ProjectsPage = lazy(() => import("@/routes/projects/index"));
 const VersionsPage = lazy(() => import("@/routes/versions/index"));
+const ScreenshotsPage = lazy(() => import("@/routes/screenshots/index"));
 const IssuesPage = lazy(() => import("@/routes/issues/index"));
 const LogsPage = lazy(() => import("@/routes/logs/index"));
 const LogRunDetailPage = lazy(() => import("@/routes/logs/$runId"));
@@ -72,6 +73,10 @@ export default function App() {
               <Route
                 path="/versions"
                 element={<LazyPage render={<VersionsPage />} />}
+              />
+              <Route
+                path="/screenshots"
+                element={<LazyPage render={<ScreenshotsPage />} />}
               />
               <Route
                 path="/issues"

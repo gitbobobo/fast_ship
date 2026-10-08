@@ -4365,3 +4365,373 @@ GitHub 媒体代理（HEAD，仅头信息）
 | 400 | 无效的媒体 URL（text/plain） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 502 | 拉取上游媒体失败（text/plain） |
+
+## screenshots
+
+项目截图库（按界面聚合，版本全量保留）
+
+### GET `/api/projects/{id}/screenshots`
+
+<!-- operationId: listScreenshotScreens -->
+
+列出项目全部界面（last_uploaded_at 倒序）
+
+每项为界面字段 + version_count + latest_version（最新一个版本，无版本时为 null，实际不会发生）。
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+
+**成功响应**
+
+**200** 界面列表（data 为 {items}，非分页信封）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].project_id` | string | 是 |  |
+| `items[].screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
+| `items[].title` | string | 是 | 可为空串，客户端回退显示 screen_key |
+| `items[].group` | string | 是 | 自由文本分组；空串表示未分组 |
+| `items[].version_count` | integer | 是 | 该界面累计保留的版本数 |
+| `items[].last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].latest_version` | object（可空） | 是 | 最新一个版本；无版本时为 null |
+| `items[].latest_version.id` | string | 是 |  |
+| `items[].latest_version.screen_id` | string | 是 |  |
+| `items[].latest_version.note` | string | 是 |  |
+| `items[].latest_version.file_name` | string | 是 |  |
+| `items[].latest_version.file_size` | integer（int64） | 是 |  |
+| `items[].latest_version.mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
+| `items[].latest_version.uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
+| `items[].latest_version.uploaded_at` | string（date-time） | 是 |  |
+| `items[].latest_version.content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/projects/{id}/screenshots`
+
+<!-- operationId: uploadScreenshot -->
+
+上传界面截图（multipart/form-data，字段名 file + screen_key）
+
+multipart 字段：`file`（必填；内容嗅探须为 image/png、image/jpeg、image/webp、image/gif，大小受服务端 upload.max_file_size 限制）、
+`screen_key`（必填；服务端按 ToLower+TrimSpace 规范化，规范化后须 1~100 字符，否则 40001）、
+`group`/`title`/`note`（可选）。
+同 project 下 screen_key 唯一对应一个界面：首次出现自动建界面，重复上传归并为新版本（版本全量保留，不去重、不清理）。
+表单含 `group` 字段（允许空串=未分组）即更新界面分组；`title` 非空即更新界面标题；`note` 记在该版本上。
+`uploaded_by` 由服务端按凭证自动记录（用户名，或 "API Key: <name>"）。
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+
+**请求体**
+
+`multipart/form-data`，必填。表单字段，不是 JSON。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `file` | binary | 是 | 截图文件；内容须为 image/png、image/jpeg、image/webp、image/gif |
+| `screen_key` | string | 是 | 界面标识；规范化后 1~100 字符 |
+| `group` | string（长度 ≤100） | 否 | 分组名（≤100 字符）；字段出现即更新（空串置为未分组），不出现则保持原值 |
+| `title` | string（长度 ≤200） | 否 | 界面标题（≤200 字符）；非空才更新 |
+| `note` | string（长度 ≤1000） | 否 | 本次上传版本的备注（≤1000 字符） |
+
+**成功响应**
+
+**200** 上传结果（screen 为归并后的界面，version 为新建版本）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `screen` | object | 是 |  |
+| `screen.id` | string | 是 |  |
+| `screen.project_id` | string | 是 |  |
+| `screen.screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
+| `screen.title` | string | 是 | 可为空串，客户端回退显示 screen_key |
+| `screen.group` | string | 是 | 自由文本分组；空串表示未分组 |
+| `screen.version_count` | integer | 是 | 该界面累计保留的版本数 |
+| `screen.last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
+| `screen.created_at` | string（date-time） | 是 |  |
+| `version` | object | 是 |  |
+| `version.id` | string | 是 |  |
+| `version.screen_id` | string | 是 |  |
+| `version.note` | string | 是 |  |
+| `version.file_name` | string | 是 |  |
+| `version.file_size` | integer（int64） | 是 |  |
+| `version.mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
+| `version.uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
+| `version.uploaded_at` | string（date-time） | 是 |  |
+| `version.content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 413 | 请求体超过大小限制（裸 413，无 JSON body） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/screenshot-screens/{sid}`
+
+<!-- operationId: getScreenshotScreen -->
+
+获取界面详情（含全部版本，uploaded_at 倒序）
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sid` | string | 是 | 截图界面 ID（UUID） |
+
+**成功响应**
+
+**200** 界面详情
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `project_id` | string | 是 |  |
+| `screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
+| `title` | string | 是 | 可为空串，客户端回退显示 screen_key |
+| `group` | string | 是 | 自由文本分组；空串表示未分组 |
+| `version_count` | integer | 是 | 该界面累计保留的版本数 |
+| `last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
+| `created_at` | string（date-time） | 是 |  |
+| `versions` | object[] | 是 | 全部历史版本，uploaded_at 倒序 |
+| `versions[].id` | string | 是 |  |
+| `versions[].screen_id` | string | 是 |  |
+| `versions[].note` | string | 是 |  |
+| `versions[].file_name` | string | 是 |  |
+| `versions[].file_size` | integer（int64） | 是 |  |
+| `versions[].mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
+| `versions[].uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
+| `versions[].uploaded_at` | string（date-time） | 是 |  |
+| `versions[].content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### PATCH `/api/screenshot-screens/{sid}`
+
+<!-- operationId: updateScreenshotScreen -->
+
+更新界面分组/标题（仅 JWT）
+
+group 与 title 均为可选指针字段：字段出现才更新（group 允许空串置为未分组），都不传返回 40001。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sid` | string | 是 | 截图界面 ID（UUID） |
+
+**请求体**
+
+`application/json`，必填。
+
+两字段均可选，出现才更新；都不传返回 40001
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `group` | string（长度 ≤100） | 否 | 分组名（≤100 字符）；允许空串置为未分组 |
+| `title` | string（长度 ≤200） | 否 | 界面标题（≤200 字符）；空串回退显示 screen_key |
+
+**成功响应**
+
+**200** 更新后的界面详情（含全部版本）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `project_id` | string | 是 |  |
+| `screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
+| `title` | string | 是 | 可为空串，客户端回退显示 screen_key |
+| `group` | string | 是 | 自由文本分组；空串表示未分组 |
+| `version_count` | integer | 是 | 该界面累计保留的版本数 |
+| `last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
+| `created_at` | string（date-time） | 是 |  |
+| `versions` | object[] | 是 | 全部历史版本，uploaded_at 倒序 |
+| `versions[].id` | string | 是 |  |
+| `versions[].screen_id` | string | 是 |  |
+| `versions[].note` | string | 是 |  |
+| `versions[].file_name` | string | 是 |  |
+| `versions[].file_size` | integer（int64） | 是 |  |
+| `versions[].mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
+| `versions[].uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
+| `versions[].uploaded_at` | string（date-time） | 是 |  |
+| `versions[].content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/screenshot-screens/{sid}`
+
+<!-- operationId: deleteScreenshotScreen -->
+
+删除界面及其全部版本与磁盘文件（仅 JWT）
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sid` | string | 是 | 截图界面 ID（UUID） |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/screenshot-versions/{vid}`
+
+<!-- operationId: deleteScreenshotVersion -->
+
+删除单个截图版本与文件（仅 JWT）
+
+若删除的是该界面最后一个版本，连带删除界面本身。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `vid` | string | 是 | 截图版本 ID（UUID） |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/screenshot-versions/{vid}/content`
+
+<!-- operationId: getScreenshotVersionContent -->
+
+获取截图版本图片内容
+
+返回图片二进制内容（存储时嗅探的 mime type，`Content-Disposition: inline`，`Cache-Control: private, max-age=300`）。支持 Authorization 头或 `?token=` query 凭证（供 `<img>` 直链）。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。
+
+**鉴权**：JWT+API Key，支持 ?token=
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `vid` | string | 是 | 截图版本 ID（UUID） |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `token` | string | 否 | 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。 |
+
+**成功响应**
+
+**200** 图片二进制内容
+
+二进制内容（application/octet-stream），无 JSON 信封。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### HEAD `/api/screenshot-versions/{vid}/content`
+
+<!-- operationId: getScreenshotVersionContentHead -->
+
+获取截图版本图片头信息（HEAD）
+
+与 GET 语义相同但不返回 body。
+
+**鉴权**：JWT+API Key，支持 ?token=
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `vid` | string | 是 | 截图版本 ID（UUID） |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `token` | string | 否 | 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。 |
+
+**成功响应**
+
+**200** 仅响应头
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |

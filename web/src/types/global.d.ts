@@ -482,6 +482,52 @@ interface DashboardDailyResolvedPoint {
   projects: DashboardDailyResolvedProjectPoint[];
 }
 
+/** 截图库：一个「界面」（screen_key 标识）聚合全部历史版本截图 */
+interface ScreenshotScreen {
+  id: string;
+  project_id: string;
+  screen_key: string;
+  /** 显示名；为空时回退展示 screen_key */
+  title: string;
+  /** 分组名；空串表示未分组 */
+  group: string;
+  version_count: number;
+  last_uploaded_at: string;
+  created_at: string;
+}
+
+interface ScreenshotVersion {
+  id: string;
+  screen_id: string;
+  note: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  /** 用户名或 "API Key: <name>" */
+  uploaded_by: string;
+  uploaded_at: string;
+  /** 图片内容路径，需附带 ?token= 访问 */
+  content_url: string;
+}
+
+interface ScreenshotScreenListItem extends ScreenshotScreen {
+  latest_version: ScreenshotVersion | null;
+}
+
+interface ScreenshotScreenDetail extends ScreenshotScreen {
+  /** uploaded_at 倒序 */
+  versions: ScreenshotVersion[];
+}
+
+interface ScreenshotScreenListData {
+  items: ScreenshotScreenListItem[];
+}
+
+interface ScreenshotUploadResult {
+  screen: ScreenshotScreen;
+  version: ScreenshotVersion;
+}
+
 interface ApiResponse<T> {
   code: number;
   message: string;
