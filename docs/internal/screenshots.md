@@ -79,6 +79,8 @@ mime 以内容嗅探为准：先读 512 字节 `http.DetectContentType`，仅收
 
 「最新版本」统一按 rowid（插入顺序）判定：列表缩略图、详情首版本、删版本后重算 `last_uploaded_at` 共用同一口径；`uploaded_at` 取自事务开始时间，不用于排序。
 
+注意：rowid 是 SQLite 隐式列，`screenshot_versions` 主键为 text，没有 `INTEGER PRIMARY KEY`——VACUUM、dump 导入等重建表的操作会重排 rowid。代码路径里不做这类操作；若未来需要跨运维操作保持版本顺序，应改为显式自增序号列。
+
 ## 删除语义
 
 - 删版本：DB 行删除后删磁盘文件；删到 screen 最后一个版本时同事务连带删除 screen（空壳界面不留）。
