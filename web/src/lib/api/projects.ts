@@ -8,6 +8,7 @@ interface CreateProjectRequest {
   github_pr_token?: string;
   source_project_id?: string;
   pr_token_source_project_id?: string;
+  pr_token_source_kind?: "access" | "pr";
 }
 
 interface UpdateProjectRequest {
@@ -19,6 +20,7 @@ interface UpdateProjectRequest {
   clear_github_pr_token?: boolean;
   source_project_id?: string;
   pr_token_source_project_id?: string;
+  pr_token_source_kind?: "access" | "pr";
 }
 
 export const projectApi = {

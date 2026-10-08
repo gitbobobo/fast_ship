@@ -4054,6 +4054,10 @@ components:
               description: 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文
 
     # ---- projects ----
+    PrTokenSourceKind:
+      type: string
+      enum: [access, pr]
+      description: access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
     CreateProjectRequest:
       type: object
       required: [name]
@@ -4081,7 +4085,10 @@ components:
           description: 复用另一项目的 GitHub Token；优先于 github_token
         pr_token_source_project_id:
           type: string
-          description: 复用另一项目的 PR 访问 Token；优先于 github_pr_token
+          description: 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
+        pr_token_source_kind:
+          $ref: '#/components/schemas/PrTokenSourceKind'
+          description: 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001
     UpdateProjectRequest:
       type: object
       # 不带 binding tag：handler 用手写 updateProjectInput 绑定，原因同
@@ -4108,10 +4115,13 @@ components:
           type: string
         pr_token_source_project_id:
           type: string
-          description: 复用另一项目的 PR 访问 Token；优先于 github_pr_token
+          description: 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
+        pr_token_source_kind:
+          $ref: '#/components/schemas/PrTokenSourceKind'
+          description: 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001
     Project:
       type: object
-      required: [id, name, description, github_owner, github_repo, has_github_pr_token, created_at, updated_at]
+      required: [id, name, description, github_owner, github_repo, has_github_pr_token, has_github_token, created_at, updated_at]
       properties:
         id:
           type: string
@@ -4126,6 +4136,9 @@ components:
         has_github_pr_token:
           type: boolean
           description: 是否已配置独立 PR 访问 Token
+        has_github_token:
+          type: boolean
+          description: 是否已配置 GitHub Access Token
         latest_version:
           $ref: '#/components/schemas/LatestVersion'
         issue_count:

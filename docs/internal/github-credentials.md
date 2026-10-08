@@ -19,7 +19,7 @@
 - 未配 PR Token → 沿用 optional 项目 Token 语义（已配项目 Token 用之，未配置走匿名）。
 - PR Token 的可用性不依赖项目是否配置了反馈仓库——internal 项目只配 PR Token 也生效。
 
-PR Token 可以经 `pr_token_source_project_id` 从另一项目复用：与 `source_project_id` 一样直接复制源项目的密文 blob（同一加密密钥，不解密重加密），优先于同传的 `github_pr_token`；源项目未配置 PR Token 时写入接口返回 40001。`clear_github_pr_token` 与 `github_pr_token` 或 `pr_token_source_project_id` 同时显式提供（含 null）返回 40001。
+PR Token 可以经 `pr_token_source_project_id` 从另一项目复用：与 `source_project_id` 一样直接复制源项目的密文 blob（同一加密密钥，不解密重加密），优先于同传的 `github_pr_token`。`pr_token_source_kind` 与 source 搭配选择复制的凭证种类：`access` 复制源项目的 GitHub Access Token，缺省 `pr` 复制源项目的 PR Token；kind 单独提供（不带 source）或取值非法返回 40001，源项目未配置所选凭证时同样返回 40001。`clear_github_pr_token` 与 `github_pr_token` 或 `pr_token_source_project_id` 同时显式提供（含 null）返回 40001。
 
 来源标记供错误文案使用：attach 与 sync 的失败消息会写明「使用 PR 访问 Token」「使用项目 Token」或「匿名访问」。GitHub 对「PR 不存在」与「凭证无权访问」都返回 404，401/403/404 会追加「确认仓库访问范围与 Pull requests 读权限」的排查提示，文案不断言单一原因。
 

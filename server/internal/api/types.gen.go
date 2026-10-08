@@ -26,6 +26,24 @@ func (e IssueRecommendationStatus) Valid() bool {
 	}
 }
 
+// Defines values for PrTokenSourceKind.
+const (
+	Access PrTokenSourceKind = "access"
+	Pr     PrTokenSourceKind = "pr"
+)
+
+// Valid indicates whether the value is a known member of the PrTokenSourceKind enum.
+func (e PrTokenSourceKind) Valid() bool {
+	switch e {
+	case Access:
+		return true
+	case Pr:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UpdateIssueRequestStateReason.
 const (
 	UpdateIssueRequestStateReasonCompleted  UpdateIssueRequestStateReason = "completed"
@@ -297,7 +315,10 @@ type CreateProjectRequest struct {
 	// Name 项目名，当前用户下唯一
 	Name string `binding:"required,min=1,max=100" json:"name"`
 
-	// PrTokenSourceProjectId 复用另一项目的 PR 访问 Token；优先于 github_pr_token
+	// PrTokenSourceKind access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
+	PrTokenSourceKind *PrTokenSourceKind `json:"pr_token_source_kind,omitempty"`
+
+	// PrTokenSourceProjectId 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
 	PrTokenSourceProjectId *string `json:"pr_token_source_project_id,omitempty"`
 
 	// RepositoryUrl GitHub 仓库链接（owner/repo 或完整 URL）；设置时须同时提供 github_token 或 source_project_id
@@ -972,6 +993,9 @@ type PendingIssueHook struct {
 	WorkflowStatus string `json:"workflow_status"`
 }
 
+// PrTokenSourceKind access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
+type PrTokenSourceKind string
+
 // Project defines model for Project.
 type Project struct {
 	CreatedAt   string `json:"created_at"`
@@ -980,8 +1004,11 @@ type Project struct {
 	GithubRepo  string `json:"github_repo"`
 
 	// HasGithubPrToken 是否已配置独立 PR 访问 Token
-	HasGithubPrToken bool   `json:"has_github_pr_token"`
-	Id               string `json:"id"`
+	HasGithubPrToken bool `json:"has_github_pr_token"`
+
+	// HasGithubToken 是否已配置 GitHub Access Token
+	HasGithubToken bool   `json:"has_github_token"`
+	Id             string `json:"id"`
 
 	// IssueCount omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态）
 	IssueCount *int `json:"issue_count,omitempty"`
@@ -1246,7 +1273,10 @@ type UpdateProjectRequest struct {
 	GithubToken   *string `json:"github_token,omitempty"`
 	Name          *string `json:"name,omitempty"`
 
-	// PrTokenSourceProjectId 复用另一项目的 PR 访问 Token；优先于 github_pr_token
+	// PrTokenSourceKind access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
+	PrTokenSourceKind *PrTokenSourceKind `json:"pr_token_source_kind,omitempty"`
+
+	// PrTokenSourceProjectId 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
 	PrTokenSourceProjectId *string `json:"pr_token_source_project_id,omitempty"`
 
 	// RepositoryUrl 同创建；变更仓库且项目无 token 时须提供 token

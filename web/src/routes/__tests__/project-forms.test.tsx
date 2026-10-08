@@ -145,6 +145,7 @@ describe("ProjectAndVersionForms", () => {
             name: "existing-project",
             github_owner: "existing-owner",
             github_repo: "existing-repo",
+            has_github_token: true,
           },
         ],
         total: 1,
@@ -173,7 +174,8 @@ describe("ProjectAndVersionForms", () => {
     );
 
     // Open token source select and choose existing project
-    await user.click(screen.getByRole("combobox"));
+    // Access Token 下拉在前，PR 访问 Token 下拉在后
+    await user.click(screen.getAllByRole("combobox")[0]);
     await user.click(
       screen.getByRole("option", { name: /existing-project/ }),
     );

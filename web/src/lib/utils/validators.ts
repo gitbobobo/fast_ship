@@ -29,6 +29,7 @@ export const projectSchema = z.object({
   clear_github_pr_token: z.boolean().optional(),
   source_project_id: z.string().optional(),
   pr_token_source_project_id: z.string().optional(),
+  pr_token_source_kind: z.enum(["access", "pr"]).optional(),
 }).refine(
   (data) => {
     if (!data.repository_url) return true;
@@ -46,6 +47,7 @@ export const projectEditSchema = z.object({
   clear_github_pr_token: z.boolean().optional(),
   source_project_id: z.string().optional(),
   pr_token_source_project_id: z.string().optional(),
+  pr_token_source_kind: z.enum(["access", "pr"]).optional(),
 });
 
 export const versionSchema = z.object({

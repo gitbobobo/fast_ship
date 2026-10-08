@@ -83,10 +83,15 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	}
 
 	// PR 访问 Token 独立于反馈仓库配置：internal 项目也可以只配 PR Token。
-	// pr_token_source_project_id 优先于 github_pr_token（与 source_project_id 语义一致）。
+	// pr_token_source_project_id 优先于 github_pr_token（与 source_project_id 语义一致），
+	// pr_token_source_kind 选择复制源项目的哪种凭证（缺省 pr），须与 source 搭配提供。
+	prTokenKind, err := validatePRTokenSourceKind(req.PrTokenSourceKind, api.Deref(req.PrTokenSourceProjectId))
+	if err != nil {
+		return nil, err
+	}
 	var encryptedPRToken []byte
 	if prSourceID := api.Deref(req.PrTokenSourceProjectId); prSourceID != "" {
-		encryptedPRToken, err = s.resolvePRTokenFromSource(userID, prSourceID)
+		encryptedPRToken, err = s.resolvePRTokenFromSource(userID, prSourceID, prTokenKind)
 		if err != nil {
 			return nil, err
 		}
@@ -210,14 +215,18 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 
 	// PR 访问 Token：clear 标志与 token/source 字段同时显式提供即冲突（不论取值），
 	// clear=true 显式清除（恢复沿用项目 Token）、source 复制源项目密文、
-	// 非空 token 替换、其余情况保留现值。
+	// 非空 token 替换、其余情况保留现值。kind 不参与互斥判定，但须与 source 搭配。
 	if req.ClearGithubPrToken != nil && (req.GithubPrToken != nil || req.PrTokenSourceProjectId != nil) {
 		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": clear_github_pr_token 与 github_pr_token 或 pr_token_source_project_id 不能同时提供")
+	}
+	prTokenKind, err := validatePRTokenSourceKind(req.PrTokenSourceKind, api.Deref(req.PrTokenSourceProjectId))
+	if err != nil {
+		return nil, err
 	}
 	if api.Deref(req.ClearGithubPrToken) {
 		project.GithubPRTokenEncrypted = nil
 	} else if prSourceID := api.Deref(req.PrTokenSourceProjectId); prSourceID != "" {
-		encryptedPRToken, err := s.resolvePRTokenFromSource(userID, prSourceID)
+		encryptedPRToken, err := s.resolvePRTokenFromSource(userID, prSourceID, prTokenKind)
 		if err != nil {
 			return nil, err
 		}
@@ -327,6 +336,8 @@ func parseRepositoryURL(raw string) (owner, repo string, err error) {
 }
 
 // resolveGitHubToken 从 Token 字符串或源项目解析加密后的 Token，优先使用 sourceProjectID。
+// 源项目不存在返回 ErrProjectNotFound；源项目未配置 Access Token 返回 40001——
+// 与 resolvePRTokenFromSource 一致，不允许静默写入空密文。
 func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID string) ([]byte, error) {
 	if sourceProjectID != "" {
 		sourceProject, err := s.projectRepo.FindByID(sourceProjectID, userID)
@@ -335,6 +346,9 @@ func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID
 				return nil, errs.ErrProjectNotFound
 			}
 			return nil, errs.ErrInternal
+		}
+		if len(sourceProject.GithubTokenEncrypted) == 0 {
+			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 GitHub Access Token")
 		}
 		return sourceProject.GithubTokenEncrypted, nil
 	}
@@ -348,16 +362,39 @@ func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID
 	return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
 }
 
-// resolvePRTokenFromSource 复制源项目的 PR 访问 Token 密文（与 resolveGitHubToken
-// 的 source 分支一致，密文直接复用不解密重加密）。源项目不存在返回
-// ErrProjectNotFound；源项目未配置 PR 访问 Token 返回 40001。
-func (s *ProjectService) resolvePRTokenFromSource(userID, sourceProjectID string) ([]byte, error) {
+// validatePRTokenSourceKind 归一化 pr_token_source_kind：未提供返回缺省
+// api.Pr；单独提供（不带 pr_token_source_project_id）或取值不在 access/pr
+// 内均返回 40001。互斥判定（与 clear_github_pr_token）不经过此函数。
+func validatePRTokenSourceKind(kind *api.PrTokenSourceKind, sourceProjectID string) (api.PrTokenSourceKind, error) {
+	if kind == nil {
+		return api.Pr, nil
+	}
+	if sourceProjectID == "" {
+		return "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": pr_token_source_kind 需与 pr_token_source_project_id 搭配提供")
+	}
+	if !kind.Valid() {
+		return "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": pr_token_source_kind 取值无效（可选 access、pr）")
+	}
+	return *kind, nil
+}
+
+// resolvePRTokenFromSource 复制源项目的凭证密文作为本项目的 PR 访问 Token（与
+// resolveGitHubToken 的 source 分支一致，密文直接复用不解密重加密）。
+// kind=access 复制源项目的 GitHub Access Token，kind=pr（缺省）复制 PR 访问
+// Token。源项目不存在返回 ErrProjectNotFound；未配置对应凭证返回 40001。
+func (s *ProjectService) resolvePRTokenFromSource(userID, sourceProjectID string, kind api.PrTokenSourceKind) ([]byte, error) {
 	sourceProject, err := s.projectRepo.FindByID(sourceProjectID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrProjectNotFound
 		}
 		return nil, errs.ErrInternal
+	}
+	if kind == api.Access {
+		if len(sourceProject.GithubTokenEncrypted) == 0 {
+			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 GitHub Access Token")
+		}
+		return sourceProject.GithubTokenEncrypted, nil
 	}
 	if len(sourceProject.GithubPRTokenEncrypted) == 0 {
 		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 PR 访问 Token")
@@ -373,6 +410,7 @@ func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 		GithubOwner:      p.GithubOwner,
 		GithubRepo:       p.GithubRepo,
 		HasGithubPrToken: len(p.GithubPRTokenEncrypted) > 0,
+		HasGithubToken:   len(p.GithubTokenEncrypted) > 0,
 		CreatedAt:        p.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:        p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
