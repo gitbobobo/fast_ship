@@ -92,6 +92,7 @@ export function ProjectSwitcher({
                 if (
                   event.key === "Enter" &&
                   !composing &&
+                  search !== "" &&
                   filteredProjects.length > 0
                 ) {
                   event.preventDefault();

@@ -135,6 +135,16 @@ describe("ProjectSwitcher", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("搜索框为空时按回车不切换项目", async () => {
+    const user = userEvent.setup();
+    const { onValueChange } = renderSwitcher();
+
+    await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
+    await user.keyboard("{Enter}");
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "切换项目" })).toBeInTheDocument();
+  });
+
   it("输入法组合中按回车不选中项目", async () => {
     const user = userEvent.setup();
     const { onValueChange } = renderSwitcher();
