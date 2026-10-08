@@ -48,7 +48,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 	defer cancel()
 	pr, err := client.GetPullRequest(ctx, number)
 	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err)))
+		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind)))
 	}
 
 	now := time.Now().UTC()
@@ -137,7 +137,7 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 
 		pr, err := client.GetPullRequest(ctx, link.Number)
 		if err != nil {
-			result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("拉取失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err))))
+			result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("拉取失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind))))
 			continue
 		}
 
@@ -253,12 +253,17 @@ func (s *IssueService) pullRequestClient(project *model.Project, owner, repo str
 // 限流错误（HTTP 403）是 *gh.RateLimitError/*gh.AbuseRateLimitError，不走 *gh.ErrorResponse，
 // 且限流时 PR 与凭证都正常，必须给不同的提示，不能把用户引向查权限。
 const pullRequestAccessHintText = "；PR 不存在或当前凭证无权访问该仓库，请确认仓库访问范围与 Pull requests 读权限"
-const pullRequestRateLimitHintText = "；GitHub API 限流，请稍后重试（匿名访问限 60 次/小时，配置 Token 可提高限额）"
+const pullRequestRateLimitHintText = "；GitHub API 限流，请稍后重试"
+const pullRequestRateLimitAnonymousHintText = "（匿名访问限 60 次/小时，配置 Token 可提高限额）"
 
-func pullRequestAccessHint(err error) string {
+func pullRequestAccessHint(err error, kind pullRequestCredentialKind) string {
 	var rateLimitErr *gh.RateLimitError
 	var abuseErr *gh.AbuseRateLimitError
 	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseErr) {
+		// 次级限流对已配置 Token 的请求同样触发，限额说明只在匿名时适用。
+		if kind == pullRequestCredentialAnonymous {
+			return pullRequestRateLimitHintText + pullRequestRateLimitAnonymousHintText
+		}
 		return pullRequestRateLimitHintText
 	}
 	var errResp *gh.ErrorResponse

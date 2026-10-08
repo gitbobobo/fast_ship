@@ -1009,6 +1009,7 @@ func TestIssueServiceAttachPullRequest_CorruptPRTokenNoFallback(t *testing.T) {
 
 // 限流错误（go-github 的 RateLimitError/AbuseRateLimitError，HTTP 403）附限流
 // 提示而非权限排查——限流时 PR 与凭证都正常，权限提示会把用户引向查权限。
+// 限额说明只在匿名访问时给出：带 Token 的请求同样会撞次级限流。
 // 注意两者的 Error() 会解引用 Response.Request，构造时必须带非空 Request。
 func TestIssueServiceAttachPullRequest_RateLimitHint(t *testing.T) {
 	svc := setupTestServices(t)
@@ -1040,6 +1041,39 @@ func TestIssueServiceAttachPullRequest_RateLimitHint(t *testing.T) {
 		if strings.Contains(appErr.Message, "Pull requests 读权限") {
 			t.Fatalf("rate limit error %T must not carry permission hint, got %q", rateErr, appErr.Message)
 		}
+		if strings.Contains(appErr.Message, "匿名访问限 60") {
+			t.Fatalf("authenticated request must not cite anonymous quota, got %q", appErr.Message)
+		}
+	}
+}
+
+// 匿名访问撞限流时才提示 60 次/小时限额与配置 Token 的出路。
+func TestIssueServiceAttachPullRequest_RateLimitHintAnonymous(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+		p.GithubTokenEncrypted = nil
+	})
+	issue := createInternalTestIssue(t, svc.db, project.ID)
+
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Request:    &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/repos/owner/repo/pulls/7"}},
+	}
+	fake := &fakeIssueGitHubClient{pullRequestErr: &gh.RateLimitError{Response: resp}}
+	stubPullRequestClient(t, svc, fake, "")
+
+	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrGitHubAPI.Code {
+		t.Fatalf("expected 50200, got %v", err)
+	}
+	if !strings.Contains(appErr.Message, "匿名访问限 60 次/小时") {
+		t.Fatalf("expected anonymous quota hint, got %q", appErr.Message)
 	}
 }
 
