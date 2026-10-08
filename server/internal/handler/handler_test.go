@@ -31,6 +31,7 @@ type handlerTestEnv struct {
 	issueHandler       *IssueHandler
 	collabHandler      *IssueCollabHandler
 	artifactHandler    *ArtifactHandler
+	screenshotHandler  *ScreenshotHandler
 	projectHandler     *ProjectHandler
 }
 
@@ -75,6 +76,8 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.IssuePullRequest{},
 		&model.IssueRecommendation{},
 		&model.RecommendationDependency{},
+		&model.ScreenshotScreen{},
+		&model.ScreenshotVersion{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -87,6 +90,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
 
 	cfg := &config.Config{
 		JWT: config.JWTConfig{
@@ -117,6 +121,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
+	screenshotRepo := repository.NewScreenshotRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
@@ -129,6 +134,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	collabRepo := repository.NewIssueCollabRepository(db)
 	collabService := service.NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
+	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 
 	return &handlerTestEnv{
@@ -140,6 +146,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		issueHandler:       NewIssueHandler(issueService, issueShipHookService, collabService),
 		collabHandler:      NewIssueCollabHandler(collabService),
 		artifactHandler:    NewArtifactHandler(artifactService),
+		screenshotHandler:  NewScreenshotHandler(screenshotService),
 		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zap.NewNop())),
 	}
 }

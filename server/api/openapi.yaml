@@ -45,6 +45,8 @@ tags:
     description: 看板概览
   - name: media
     description: GitHub 媒体代理
+  - name: screenshots
+    description: 项目截图库（按界面聚合，版本全量保留）
 
 paths:
   /api/auth/register:
@@ -3252,6 +3254,256 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/projects/{id}/screenshots:
+    post:
+      tags: [screenshots]
+      operationId: uploadScreenshot
+      summary: 上传界面截图（multipart/form-data，字段名 file + screen_key）
+      description: |
+        multipart 字段：`file`（必填；内容嗅探须为 image/png、image/jpeg、image/webp、image/gif，大小受服务端 upload.max_file_size 限制）、
+        `screen_key`（必填；服务端按 ToLower+TrimSpace 规范化，规范化后须 1~100 字符，否则 40001）、
+        `group`/`title`/`note`（可选）。
+        同 project 下 screen_key 唯一对应一个界面：首次出现自动建界面，重复上传归并为新版本（版本全量保留，不去重、不清理）。
+        表单含 `group` 字段（允许空串=未分组）即更新界面分组；`title` 非空即更新界面标题；`note` 记在该版本上。
+        `uploaded_by` 由服务端按凭证自动记录（用户名，或 "API Key: <name>"）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, screen_key]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 截图文件；内容须为 image/png、image/jpeg、image/webp、image/gif
+                screen_key:
+                  type: string
+                  description: 界面标识；规范化后 1~100 字符
+                group:
+                  type: string
+                  description: 分组名；字段出现即更新（空串置为未分组），不出现则保持原值
+                title:
+                  type: string
+                  description: 界面标题；非空才更新
+                note:
+                  type: string
+                  description: 本次上传版本的备注
+      responses:
+        '200':
+          description: 上传结果（screen 为归并后的界面，version 为新建版本）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScreenshotUploadResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      tags: [screenshots]
+      operationId: listScreenshotScreens
+      summary: 列出项目全部界面（last_uploaded_at 倒序）
+      description: 每项为界面字段 + version_count + latest_version（最新一个版本，无版本时为 null，实际不会发生）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 界面列表（data 为 {items}，非分页信封）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/ScreenshotScreenListItem'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/screenshot-screens/{sid}:
+    get:
+      tags: [screenshots]
+      operationId: getScreenshotScreen
+      summary: 获取界面详情（含全部版本，uploaded_at 倒序）
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotScreenId'
+      responses:
+        '200':
+          description: 界面详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScreenshotScreenDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags: [screenshots]
+      operationId: updateScreenshotScreen
+      summary: 更新界面分组/标题（仅 JWT）
+      description: group 与 title 均为可选指针字段：字段出现才更新（group 允许空串置为未分组），都不传返回 40001。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotScreenId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateScreenshotScreenRequest'
+      responses:
+        '200':
+          description: 更新后的界面详情（含全部版本）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScreenshotScreenDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [screenshots]
+      operationId: deleteScreenshotScreen
+      summary: 删除界面及其全部版本与磁盘文件（仅 JWT）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotScreenId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/screenshot-versions/{vid}:
+    delete:
+      tags: [screenshots]
+      operationId: deleteScreenshotVersion
+      summary: 删除单个截图版本与文件（仅 JWT）
+      description: 若删除的是该界面最后一个版本，连带删除界面本身。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotVersionId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/screenshot-versions/{vid}/content:
+    get:
+      tags: [screenshots]
+      operationId: getScreenshotVersionContent
+      summary: 获取截图版本图片内容
+      description: "返回图片二进制内容（存储时嗅探的 mime type，`Content-Disposition: inline`，`Cache-Control: private, max-age=300`）。支持 Authorization 头或 `?token=` query 凭证（供 `<img>` 直链）。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。"
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotVersionId'
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 图片二进制内容
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    head:
+      tags: [screenshots]
+      operationId: getScreenshotVersionContentHead
+      summary: 获取截图版本图片头信息（HEAD）
+      description: 与 GET 语义相同但不返回 body。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotVersionId'
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 仅响应头
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     jwtAuth:
@@ -3300,6 +3552,20 @@ components:
       schema:
         type: string
       description: 版本 ID（UUID）
+    ScreenshotScreenId:
+      name: sid
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 截图界面 ID（UUID）
+    ScreenshotVersionId:
+      name: vid
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 截图版本 ID（UUID）
     DocId:
       name: doc_id
       in: path
@@ -5013,3 +5279,100 @@ components:
           properties:
             body:
               type: string
+
+    # ---- screenshots ----
+    ScreenshotScreen:
+      type: object
+      required: [id, project_id, screen_key, title, group, version_count, last_uploaded_at, created_at]
+      properties:
+        id:
+          type: string
+        project_id:
+          type: string
+        screen_key:
+          type: string
+          description: 服务端规范化（ToLower+TrimSpace）后的界面标识
+        title:
+          type: string
+          description: 可为空串，客户端回退显示 screen_key
+        group:
+          type: string
+          description: 自由文本分组；空串表示未分组
+        version_count:
+          type: integer
+          description: 该界面累计保留的版本数
+        last_uploaded_at:
+          type: string
+          format: date-time
+          description: 最近一次上传时间，列表按它倒序
+        created_at:
+          type: string
+          format: date-time
+    ScreenshotVersion:
+      type: object
+      required: [id, screen_id, note, file_name, file_size, mime_type, uploaded_by, uploaded_at, content_url]
+      properties:
+        id:
+          type: string
+        screen_id:
+          type: string
+        note:
+          type: string
+        file_name:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        mime_type:
+          type: string
+          description: 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一）
+        uploaded_by:
+          type: string
+          description: '用户名或 "API Key: <name>"'
+        uploaded_at:
+          type: string
+          format: date-time
+        content_url:
+          type: string
+          description: /api/screenshot-versions/{vid}/content；前端自行追加 ?token=
+    ScreenshotScreenListItem:
+      allOf:
+        - $ref: '#/components/schemas/ScreenshotScreen'
+        - type: object
+          required: [latest_version]
+          properties:
+            latest_version:
+              type: object
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/ScreenshotVersion'
+              description: 最新一个版本；无版本时为 null
+    ScreenshotScreenDetail:
+      allOf:
+        - $ref: '#/components/schemas/ScreenshotScreen'
+        - type: object
+          required: [versions]
+          properties:
+            versions:
+              type: array
+              items:
+                $ref: '#/components/schemas/ScreenshotVersion'
+              description: 全部历史版本，uploaded_at 倒序
+    ScreenshotUploadResult:
+      type: object
+      required: [screen, version]
+      properties:
+        screen:
+          $ref: '#/components/schemas/ScreenshotScreen'
+        version:
+          $ref: '#/components/schemas/ScreenshotVersion'
+    UpdateScreenshotScreenRequest:
+      type: object
+      description: 两字段均可选，出现才更新；都不传返回 40001
+      properties:
+        group:
+          type: string
+          description: 分组名；允许空串置为未分组
+        title:
+          type: string
+          description: 界面标题
