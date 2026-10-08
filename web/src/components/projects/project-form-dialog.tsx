@@ -77,6 +77,7 @@ export function ProjectFormDialog({
   const { owner, repo } = parseRepoUrl(repositoryUrl);
 
   const { tokenSource, handleTokenSourceChange } = useTokenSource(
+    control,
     setValue,
     "github_token",
     "source_project_id",
@@ -85,6 +86,7 @@ export function ProjectFormDialog({
     tokenSource: prTokenSource,
     handleTokenSourceChange: handlePRTokenSourceChange,
   } = useTokenSource(
+    control,
     setValue,
     "github_pr_token",
     "pr_token_source_project_id",
