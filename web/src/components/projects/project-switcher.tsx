@@ -36,6 +36,13 @@ export function ProjectSwitcher({
     return fields.some((field) => field.toLowerCase().includes(search));
   });
 
+  // 已选中项只关闭面板，不重复回调
+  const handleSelect = (project: Project) => {
+    if (project.id !== value) onValueChange(project.id);
+    setOpen(false);
+    setQuery("");
+  };
+
   return (
     <Popover.Root
       open={open}
@@ -79,6 +86,12 @@ export function ProjectSwitcher({
               placeholder="搜索项目名称、描述或仓库"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && filteredProjects.length > 0) {
+                  event.preventDefault();
+                  handleSelect(filteredProjects[0]);
+                }
+              }}
               className="shrink-0"
             />
             <div className="grid min-h-0 max-h-80 grid-cols-2 gap-2 overflow-y-auto p-1">
@@ -99,11 +112,7 @@ export function ProjectSwitcher({
                       key={project.id}
                       type="button"
                       aria-current={selected || undefined}
-                      onClick={() => {
-                        if (!selected) onValueChange(project.id);
-                        setOpen(false);
-                        setQuery("");
-                      }}
+                      onClick={() => handleSelect(project)}
                       className={cn(
                         "min-w-0 rounded-lg border border-border p-3 text-left text-sm transition-colors outline-none hover:bg-accent focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50",
                         selected && "border-primary bg-primary/5 ring-1 ring-primary",

@@ -124,6 +124,17 @@ describe("ProjectSwitcher", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("搜索后按回车选中首个匹配项", async () => {
+    const user = userEvent.setup();
+    const { onValueChange } = renderSwitcher();
+
+    await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
+    await user.type(screen.getByRole("textbox", { name: "搜索项目" }), "notes");
+    await user.keyboard("{Enter}");
+    expect(onValueChange).toHaveBeenCalledExactlyOnceWith("notes");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
   it("过滤无结果显示无匹配项目", async () => {
     const user = userEvent.setup();
     renderSwitcher();
