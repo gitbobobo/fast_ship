@@ -82,14 +82,30 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		}
 	}
 
+	// PR 访问 Token 独立于反馈仓库配置：internal 项目也可以只配 PR Token。
+	// pr_token_source_project_id 优先于 github_pr_token（与 source_project_id 语义一致）。
+	var encryptedPRToken []byte
+	if prSourceID := api.Deref(req.PrTokenSourceProjectId); prSourceID != "" {
+		encryptedPRToken, err = s.resolvePRTokenFromSource(userID, prSourceID)
+		if err != nil {
+			return nil, err
+		}
+	} else if prToken := api.Deref(req.GithubPrToken); prToken != "" {
+		encryptedPRToken, err = crypto.Encrypt([]byte(prToken), []byte(s.cfg.Encryption.Key))
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+	}
+
 	project := &model.Project{
-		ID:                   uuid.New().String(),
-		UserID:               userID,
-		Name:                 req.Name,
-		Description:          api.Deref(req.Description),
-		GithubOwner:          owner,
-		GithubRepo:           repo,
-		GithubTokenEncrypted: encryptedToken,
+		ID:                     uuid.New().String(),
+		UserID:                 userID,
+		Name:                   req.Name,
+		Description:            api.Deref(req.Description),
+		GithubOwner:            owner,
+		GithubRepo:             repo,
+		GithubTokenEncrypted:   encryptedToken,
+		GithubPRTokenEncrypted: encryptedPRToken,
 	}
 
 	if err := s.projectRepo.Create(project); err != nil {
@@ -177,6 +193,28 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 			return nil, err
 		}
 		project.GithubTokenEncrypted = encryptedToken
+	}
+
+	// PR 访问 Token：clear 标志与 token/source 字段同时显式提供即冲突（不论取值），
+	// clear=true 显式清除（恢复沿用项目 Token）、source 复制源项目密文、
+	// 非空 token 替换、其余情况保留现值。
+	if req.ClearGithubPrToken != nil && (req.GithubPrToken != nil || req.PrTokenSourceProjectId != nil) {
+		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": clear_github_pr_token 与 github_pr_token 或 pr_token_source_project_id 不能同时提供")
+	}
+	if api.Deref(req.ClearGithubPrToken) {
+		project.GithubPRTokenEncrypted = nil
+	} else if prSourceID := api.Deref(req.PrTokenSourceProjectId); prSourceID != "" {
+		encryptedPRToken, err := s.resolvePRTokenFromSource(userID, prSourceID)
+		if err != nil {
+			return nil, err
+		}
+		project.GithubPRTokenEncrypted = encryptedPRToken
+	} else if prToken := api.Deref(req.GithubPrToken); prToken != "" {
+		encryptedPRToken, err := crypto.Encrypt([]byte(prToken), []byte(s.cfg.Encryption.Key))
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		project.GithubPRTokenEncrypted = encryptedPRToken
 	}
 
 	if err := s.projectRepo.Update(project); err != nil {
@@ -297,15 +335,33 @@ func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID
 	return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
 }
 
+// resolvePRTokenFromSource 复制源项目的 PR 访问 Token 密文（与 resolveGitHubToken
+// 的 source 分支一致，密文直接复用不解密重加密）。源项目不存在返回
+// ErrProjectNotFound；源项目未配置 PR 访问 Token 返回 40001。
+func (s *ProjectService) resolvePRTokenFromSource(userID, sourceProjectID string) ([]byte, error) {
+	sourceProject, err := s.projectRepo.FindByID(sourceProjectID, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if len(sourceProject.GithubPRTokenEncrypted) == 0 {
+		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 PR 访问 Token")
+	}
+	return sourceProject.GithubPRTokenEncrypted, nil
+}
+
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 	resp := &ProjectResponse{
-		Id:          p.ID,
-		Name:        p.Name,
-		Description: p.Description,
-		GithubOwner: p.GithubOwner,
-		GithubRepo:  p.GithubRepo,
-		CreatedAt:   p.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:   p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		Id:               p.ID,
+		Name:             p.Name,
+		Description:      p.Description,
+		GithubOwner:      p.GithubOwner,
+		GithubRepo:       p.GithubRepo,
+		HasGithubPrToken: len(p.GithubPRTokenEncrypted) > 0,
+		CreatedAt:        p.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:        p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 
 	if s.syncStateRepo != nil {

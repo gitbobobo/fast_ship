@@ -3,6 +3,8 @@ package service
 import (
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -923,5 +925,332 @@ func TestIssueServiceAttachPullRequest_UpgradesSyncedOrigin(t *testing.T) {
 	}
 	if count := countPullRequestRows(t, svc, issue.ID); count != 1 {
 		t.Fatalf("expected single row, got %d", count)
+	}
+}
+
+// 已配 PR 访问 Token 的项目 attach 只用 PR Token：client factory 收到的必须是
+// pr-token 而非项目 Token。internal 项目（未配反馈仓库）只配 PR Token 同样生效。
+func TestIssueServiceAttachPullRequest_UsesPRToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+
+	for _, tc := range []struct {
+		name    string
+		mutate  func(*model.Project)
+		wantTok string
+	}{
+		{
+			name: "pr token preferred over project token",
+			mutate: func(p *model.Project) {
+				p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+				p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+			},
+			wantTok: "pr-token",
+		},
+		{
+			name: "internal project with only pr token",
+			mutate: func(p *model.Project) {
+				p.GithubOwner = ""
+				p.GithubRepo = ""
+				p.GithubTokenEncrypted = nil
+				p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+			},
+			wantTok: "pr-token",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project := createTestProject(t, svc.db, user.ID, tc.mutate)
+			issue := createInternalTestIssue(t, svc.db, project.ID)
+
+			fake := &fakeIssueGitHubClient{
+				pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+			}
+			stubPullRequestClient(t, svc, fake, tc.wantTok)
+
+			if _, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+				Url: "https://github.com/owner/repo/pull/7",
+			}); err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+		})
+	}
+}
+
+// PR Token 密文损坏：attach 报 50000、不落关联行、client factory 不被调用——
+// 不静默回退到有效的项目 Token。
+func TestIssueServiceAttachPullRequest_CorruptPRTokenNoFallback(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.GithubPRTokenEncrypted = []byte("corrupt-ciphertext")
+	})
+	issue := createInternalTestIssue(t, svc.db, project.ID)
+
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		t.Fatalf("github client must not be built when pr token decryption fails")
+		return nil
+	}
+
+	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInternal.Code {
+		t.Fatalf("expected ErrInternal, got %v", err)
+	}
+	if !strings.Contains(appErr.Message, "PR 访问 Token") {
+		t.Fatalf("expected credential name in message, got %q", appErr.Message)
+	}
+	if count := countPullRequestRows(t, svc, issue.ID); count != 0 {
+		t.Fatalf("expected no link row on decrypt failure, got %d", count)
+	}
+}
+
+// 限流错误（go-github 的 RateLimitError/AbuseRateLimitError，HTTP 403）附限流
+// 提示而非权限排查——限流时 PR 与凭证都正常，权限提示会把用户引向查权限。
+// 限额说明只在匿名访问时给出：带 Token 的请求同样会撞次级限流。
+// 注意两者的 Error() 会解引用 Response.Request，构造时必须带非空 Request。
+func TestIssueServiceAttachPullRequest_RateLimitHint(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Request:    &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/repos/owner/repo/pulls/7"}},
+	}
+	for _, rateErr := range []error{
+		&gh.RateLimitError{Response: resp},
+		&gh.AbuseRateLimitError{Response: resp},
+	} {
+		fake := &fakeIssueGitHubClient{pullRequestErr: rateErr}
+		stubPullRequestClient(t, svc, fake, "gh-token")
+
+		_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+			Url: "https://github.com/owner/repo/pull/7",
+		})
+		appErr, ok := err.(*errs.AppError)
+		if !ok || appErr.Code != errs.ErrGitHubAPI.Code {
+			t.Fatalf("expected 50200, got %v", err)
+		}
+		if !strings.Contains(appErr.Message, "限流") {
+			t.Fatalf("expected rate limit hint for %T, got %q", rateErr, appErr.Message)
+		}
+		if strings.Contains(appErr.Message, "Pull requests 读权限") {
+			t.Fatalf("rate limit error %T must not carry permission hint, got %q", rateErr, appErr.Message)
+		}
+		if strings.Contains(appErr.Message, "匿名访问限 60") {
+			t.Fatalf("authenticated request must not cite anonymous quota, got %q", appErr.Message)
+		}
+	}
+}
+
+// 匿名访问撞限流时才提示 60 次/小时限额与配置 Token 的出路。
+func TestIssueServiceAttachPullRequest_RateLimitHintAnonymous(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+		p.GithubTokenEncrypted = nil
+	})
+	issue := createInternalTestIssue(t, svc.db, project.ID)
+
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Request:    &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/repos/owner/repo/pulls/7"}},
+	}
+	fake := &fakeIssueGitHubClient{pullRequestErr: &gh.RateLimitError{Response: resp}}
+	stubPullRequestClient(t, svc, fake, "")
+
+	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrGitHubAPI.Code {
+		t.Fatalf("expected 50200, got %v", err)
+	}
+	if !strings.Contains(appErr.Message, "匿名访问限 60 次/小时") {
+		t.Fatalf("expected anonymous quota hint, got %q", appErr.Message)
+	}
+}
+
+// attach 拉取失败的文案要标明本次用的凭证来源；404 还要附权限排查提示，
+// 不能断言 PR 一定不存在（无权限的仓库 GitHub 同样回 404）。
+func TestIssueServiceAttachPullRequest_ErrorNamesCredentialSource(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+
+	for _, tc := range []struct {
+		name        string
+		mutate      func(*model.Project)
+		wantTok     string
+		wantMessage string
+	}{
+		{
+			name: "pr token",
+			mutate: func(p *model.Project) {
+				p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+			},
+			wantTok:     "pr-token",
+			wantMessage: "使用 PR 访问 Token",
+		},
+		{
+			name:        "project token",
+			mutate:      withTestGitHubToken(t, svc),
+			wantTok:     "gh-token",
+			wantMessage: "使用项目 Token",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project := createTestProject(t, svc.db, user.ID, tc.mutate)
+			issue := createInternalTestIssue(t, svc.db, project.ID)
+
+			notFound := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
+			fake := &fakeIssueGitHubClient{pullRequestErr: notFound}
+			stubPullRequestClient(t, svc, fake, tc.wantTok)
+
+			_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+				Url: "https://github.com/owner/repo/pull/7",
+			})
+			appErr, ok := err.(*errs.AppError)
+			if !ok || appErr.Code != errs.ErrGitHubAPI.Code {
+				t.Fatalf("expected 50200, got %v", err)
+			}
+			if !strings.Contains(appErr.Message, tc.wantMessage) {
+				t.Fatalf("expected credential source %q in message, got %q", tc.wantMessage, appErr.Message)
+			}
+			if !strings.Contains(appErr.Message, "Pull requests 读权限") {
+				t.Fatalf("expected permission hint in message, got %q", appErr.Message)
+			}
+		})
+	}
+}
+
+// 匿名访问（项目未配 GitHub）拉取失败同样要写明没有凭证可用。
+func TestIssueServiceAttachPullRequest_AnonymousErrorMessage(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = ""
+		p.GithubRepo = ""
+		p.GithubTokenEncrypted = nil
+	})
+	issue := createInternalTestIssue(t, svc.db, project.ID)
+
+	fake := &fakeIssueGitHubClient{pullRequestErr: errors.New("github down")}
+	stubPullRequestClient(t, svc, fake, "")
+
+	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
+		Url: "https://github.com/owner/repo/pull/7",
+	})
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrGitHubAPI.Code {
+		t.Fatalf("expected 50200, got %v", err)
+	}
+	if !strings.Contains(appErr.Message, "匿名访问") {
+		t.Fatalf("expected anonymous source in message, got %q", appErr.Message)
+	}
+}
+
+// sync 用 PR Token 刷新；单行拉取失败的文案同样带凭证来源。
+func TestIssueServiceSyncPullRequests_UsesPRTokenAndNamesIt(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	for _, link := range []*model.IssuePullRequest{
+		{ID: "link-ok", IssueID: issue.ID, ProjectID: project.ID, Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo", Number: 7, Title: "ok", State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual, SyncedAt: now, CreatedAt: now, UpdatedAt: now},
+		{ID: "link-bad", IssueID: issue.ID, ProjectID: project.ID, Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "gone/repo", Number: 9, Title: "bad", State: model.IssuePullRequestStateOpen, LinkOrigin: model.IssuePullRequestLinkOriginManual, SyncedAt: now, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := svc.db.Create(link).Error; err != nil {
+			t.Fatalf("seed link: %v", err)
+		}
+	}
+
+	clients := map[string]*fakeIssueGitHubClient{
+		"owner/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)}},
+		"gone/repo": {pullRequestErr: &gh.ErrorResponse{
+			Response: &http.Response{StatusCode: http.StatusNotFound},
+		}},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		if token != "pr-token" {
+			t.Fatalf("expected pr token, got %q", token)
+		}
+		fake, ok := clients[owner+"/"+repo]
+		if !ok {
+			t.Fatalf("unexpected client repo: %s/%s", owner, repo)
+		}
+		return fake
+	}
+
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(result.Items) != 1 || len(result.Failures) != 1 {
+		t.Fatalf("expected 1 item and 1 failure, got %+v", result)
+	}
+	failure := result.Failures[0]
+	if !strings.Contains(failure.Error, "使用 PR 访问 Token") {
+		t.Fatalf("expected pr token source in failure, got %q", failure.Error)
+	}
+	if !strings.Contains(failure.Error, "Pull requests 读权限") {
+		t.Fatalf("expected permission hint in failure, got %q", failure.Error)
+	}
+}
+
+// PR Token 密文损坏时 sync 的 client 构造失败：每行记入 failures 且措辞
+// 标明凭证来源，既有关联行数据保留不动。
+func TestIssueServiceSyncPullRequests_CorruptPRTokenRecorded(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.GithubPRTokenEncrypted = []byte("corrupt-ciphertext")
+	})
+	issue := createTestIssue(t, svc.db, project.ID)
+
+	now := time.Now().UTC()
+	if err := svc.db.Create(&model.IssuePullRequest{
+		ID: "link-1", IssueID: issue.ID, ProjectID: project.ID,
+		Provider: model.IssuePullRequestProviderGitHub, RepoFullName: "owner/repo",
+		Number: 7, Title: "stale", State: model.IssuePullRequestStateOpen,
+		LinkOrigin: model.IssuePullRequestLinkOriginManual,
+		SyncedAt:   now, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed link: %v", err)
+	}
+
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		t.Fatalf("github client must not be built when pr token decryption fails")
+		return nil
+	}
+
+	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
+	if err != nil {
+		t.Fatalf("sync should not return error, got %v", err)
+	}
+	if len(result.Items) != 0 || len(result.Failures) != 1 {
+		t.Fatalf("expected 0 items and 1 failure, got %+v", result)
+	}
+	if !strings.Contains(result.Failures[0].Error, "PR 访问 Token") {
+		t.Fatalf("expected pr token source in failure, got %q", result.Failures[0].Error)
+	}
+
+	var stored model.IssuePullRequest
+	if err := svc.db.First(&stored, "id = ?", "link-1").Error; err != nil {
+		t.Fatalf("reload link: %v", err)
+	}
+	if stored.Title != "stale" || !stored.SyncedAt.Equal(now) {
+		t.Fatalf("expected failed row untouched, got %+v", stored)
 	}
 }

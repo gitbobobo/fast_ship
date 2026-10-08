@@ -39,7 +39,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 		return nil, err
 	}
 
-	client, err := s.pullRequestClient(project, owner, repo)
+	client, credKind, err := s.pullRequestClient(project, owner, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func (s *IssueService) AttachIssuePullRequest(issueID, userID string, req Attach
 	defer cancel()
 	pr, err := client.GetPullRequest(ctx, number)
 	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败: %v", err))
+		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub PR 失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind)))
 	}
 
 	now := time.Now().UTC()
@@ -123,12 +123,13 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 	defer cancel()
 
 	clients := make(map[string]gitHubIssueClient)
+	clientKinds := make(map[string]pullRequestCredentialKind)
 	clientErrs := make(map[string]error)
 	now := time.Now().UTC()
 	for i := range links {
 		link := &links[i]
 
-		client, err := pullRequestSyncClient(s, clients, clientErrs, project, link)
+		client, credKind, err := pullRequestSyncClient(s, clients, clientKinds, clientErrs, project, link)
 		if err != nil {
 			result.Failures = append(result.Failures, pullRequestSyncFailure(link, err.Error()))
 			continue
@@ -136,7 +137,7 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 
 		pr, err := client.GetPullRequest(ctx, link.Number)
 		if err != nil {
-			result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("拉取失败: %v", err)))
+			result.Failures = append(result.Failures, pullRequestSyncFailure(link, fmt.Sprintf("拉取失败（%s）: %v%s", credKind.usage(), err, pullRequestAccessHint(err, credKind))))
 			continue
 		}
 
@@ -161,27 +162,30 @@ func (s *IssueService) SyncIssuePullRequests(issueID, userID string) (*IssuePull
 }
 
 // pullRequestSyncClient 按 repo 复用/缓存客户端；构造错误同样按 repo 缓存，
-// 让同 repo 的后续行各自记一条失败而不是重复构造。
-func pullRequestSyncClient(s *IssueService, clients map[string]gitHubIssueClient, clientErrs map[string]error, project *model.Project, link *model.IssuePullRequest) (gitHubIssueClient, error) {
+// 让同 repo 的后续行各自记一条失败而不是重复构造。凭证来源随客户端一并返回
+// 并缓存（构造失败时也缓存），供每行失败文案标明本次用的是哪种凭证。
+func pullRequestSyncClient(s *IssueService, clients map[string]gitHubIssueClient, clientKinds map[string]pullRequestCredentialKind, clientErrs map[string]error, project *model.Project, link *model.IssuePullRequest) (gitHubIssueClient, pullRequestCredentialKind, error) {
 	if client, ok := clients[link.RepoFullName]; ok {
-		return client, nil
+		return client, clientKinds[link.RepoFullName], nil
 	}
 	if err, failed := clientErrs[link.RepoFullName]; failed {
-		return nil, err
+		return nil, clientKinds[link.RepoFullName], err
 	}
 	parts := strings.SplitN(link.RepoFullName, "/", 2)
 	if len(parts) != 2 || link.Provider != model.IssuePullRequestProviderGitHub {
 		err := fmt.Errorf("无法为 %s 构造 GitHub 客户端", link.RepoFullName)
 		clientErrs[link.RepoFullName] = err
-		return nil, err
+		return nil, "", err
 	}
-	client, err := s.pullRequestClient(project, parts[0], parts[1])
+	client, kind, err := s.pullRequestClient(project, parts[0], parts[1])
 	if err != nil {
 		clientErrs[link.RepoFullName] = err
-		return nil, err
+		clientKinds[link.RepoFullName] = kind
+		return nil, kind, err
 	}
 	clients[link.RepoFullName] = client
-	return client, nil
+	clientKinds[link.RepoFullName] = kind
+	return client, kind, nil
 }
 
 // pullRequestSyncFailure 组装单条失败明细：id 为关联行 id，error 前缀带 repo#number 便于定位。
@@ -233,14 +237,45 @@ func (s *IssueService) loadIssueAndProject(issueID, userID string) (*model.Issue
 	return issue, project, nil
 }
 
-// pullRequestClient 为任意 owner/repo 构造 GitHub 客户端：项目已配 token 用项目 token，
-// 未配置（internal 项目）时以未认证客户端访问公共仓库；已配置但解密失败报错，不退回匿名。
-func (s *IssueService) pullRequestClient(project *model.Project, owner, repo string) (gitHubIssueClient, error) {
-	tokenBytes, appErr := optionalProjectGitHubToken(project, s.cfg, s.logger)
+// pullRequestClient 为任意 owner/repo 构造 GitHub 客户端，并返回本次使用的凭证来源。
+// 凭证选择集中在 resolvePullRequestCredential：已配 PR 访问 Token 只用 PR Token，
+// 未配则回退项目 Token，项目未配 GitHub 时匿名访问公共仓库；解密失败报错不降级。
+func (s *IssueService) pullRequestClient(project *model.Project, owner, repo string) (gitHubIssueClient, pullRequestCredentialKind, error) {
+	tokenBytes, kind, appErr := resolvePullRequestCredential(project, s.cfg, s.logger)
 	if appErr != nil {
-		return nil, appErr
+		return nil, kind, appErr
 	}
-	return s.newClient(string(tokenBytes), owner, repo), nil
+	return s.newClient(string(tokenBytes), owner, repo), kind, nil
+}
+
+// pullRequestAccessHint 对 GitHub 的权限类错误、404 与限流追加排查提示。
+// GitHub 对「PR 不存在」和「凭证无权访问该仓库」都返回 404，文案必须同时保留两种可能；
+// 限流错误（HTTP 403）是 *gh.RateLimitError/*gh.AbuseRateLimitError，不走 *gh.ErrorResponse，
+// 且限流时 PR 与凭证都正常，必须给不同的提示，不能把用户引向查权限。
+const pullRequestAccessHintText = "；PR 不存在或当前凭证无权访问该仓库，请确认仓库访问范围与 Pull requests 读权限"
+const pullRequestRateLimitHintText = "；GitHub API 限流，请稍后重试"
+const pullRequestRateLimitAnonymousHintText = "（匿名访问限 60 次/小时，配置 Token 可提高限额）"
+
+func pullRequestAccessHint(err error, kind pullRequestCredentialKind) string {
+	var rateLimitErr *gh.RateLimitError
+	var abuseErr *gh.AbuseRateLimitError
+	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseErr) {
+		// 次级限流对已配置 Token 的请求同样触发，限额说明只在匿名时适用。
+		if kind == pullRequestCredentialAnonymous {
+			return pullRequestRateLimitHintText + pullRequestRateLimitAnonymousHintText
+		}
+		return pullRequestRateLimitHintText
+	}
+	var errResp *gh.ErrorResponse
+	if !errors.As(err, &errResp) || errResp.Response == nil {
+		return ""
+	}
+	switch errResp.Response.StatusCode {
+	case 401, 403, 404:
+		return pullRequestAccessHintText
+	default:
+		return ""
+	}
 }
 
 // parsePullRequestURL 解析 GitHub PR 链接，容忍 http、www 前缀与 /files、query、fragment 等尾部。

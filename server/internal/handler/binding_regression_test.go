@@ -66,6 +66,62 @@ func TestProjectUpdate_EmptyNameIsIgnored(t *testing.T) {
 	}
 }
 
+// clear_github_pr_token 与 github_pr_token / pr_token_source_project_id 互斥
+// 按「字段是否显式提供」判定：false/空串/null 都算提供。若 handler 退回
+// string+omitempty 或指针绑定，这些组合会被 NonEmpty/True/nil 吞掉一个字段，
+// 变成静默替换/清除。
+func TestProjectUpdate_PrTokenMutexByPresence(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-pr-mutex")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	for _, body := range []string{
+		`{"clear_github_pr_token":false,"github_pr_token":"v2"}`,
+		`{"clear_github_pr_token":true,"github_pr_token":""}`,
+		`{"clear_github_pr_token":true,"github_pr_token":null}`,
+		`{"clear_github_pr_token":null,"github_pr_token":"v2"}`,
+		`{"clear_github_pr_token":true,"pr_token_source_project_id":"x"}`,
+		`{"clear_github_pr_token":true,"pr_token_source_project_id":null}`,
+		`{"clear_github_pr_token":null,"pr_token_source_project_id":"x"}`,
+	} {
+		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
+		ctx.Params = ginParams("id", project.ID)
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Update(ctx)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+		envelope := decodeEnvelope(t, rec, nil)
+		if envelope.Code != 40001 {
+			t.Fatalf("expected code 40001 for %s, got %d", body, envelope.Code)
+		}
+	}
+}
+
+// clear_github_pr_token=false 或显式 null 单独提供是合法无操作，不得误报 400。
+func TestProjectUpdate_ClearPRTokenFalseAloneIsOK(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-pr-clear-false")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	for _, body := range []string{
+		`{"clear_github_pr_token":false}`,
+		`{"clear_github_pr_token":null}`,
+		`{"github_pr_token":null}`,
+		`{"pr_token_source_project_id":null}`,
+	} {
+		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
+		ctx.Params = ginParams("id", project.ID)
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Update(ctx)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // BatchCloseDone 的 source 是可选枚举：显式 "" 与缺省等价（关全部来源），不能因指针化变成 400。
 func TestBatchCloseDone_EmptySourceIsDefault(t *testing.T) {
 	env := setupHandlerTestEnv(t)
