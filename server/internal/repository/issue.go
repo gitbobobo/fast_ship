@@ -160,7 +160,11 @@ func NewIssueCommentRepository(db *gorm.DB) *IssueCommentRepository {
 }
 
 func (r *IssueCommentRepository) Upsert(comment *model.IssueComment) error {
-	return r.db.Clauses(clause.OnConflict{
+	return r.UpsertTx(r.db, comment)
+}
+
+func (r *IssueCommentRepository) UpsertTx(tx *gorm.DB, comment *model.IssueComment) error {
+	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "issue_id"}, {Name: "github_comment_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"source",
@@ -181,6 +185,22 @@ func (r *IssueCommentRepository) Upsert(comment *model.IssueComment) error {
 	}).Create(comment).Error
 }
 
+// ReplaceSynced 在单个事务内把该 Issue 的 GitHub 评论镜像替换成本轮拉取的集合：
+// 逐条 upsert 后清掉不在集合内的镜像行，任一步失败整体回滚。
+// 远端分页必须由调用方拉完——事务内只执行数据库操作。
+func (r *IssueCommentRepository) ReplaceSynced(issueID string, comments []*model.IssueComment) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		keepIDs := make([]int64, 0, len(comments))
+		for _, comment := range comments {
+			if err := r.UpsertTx(tx, comment); err != nil {
+				return err
+			}
+			keepIDs = append(keepIDs, comment.GitHubCommentID)
+		}
+		return r.DeleteMissingTx(tx, issueID, keepIDs)
+	})
+}
+
 func (r *IssueCommentRepository) Create(comment *model.IssueComment) error {
 	return r.db.Create(comment).Error
 }
@@ -193,8 +213,14 @@ func (r *IssueCommentRepository) FindByIdempotencyKey(issueID, key string) (*mod
 	return &comment, nil
 }
 
+// DeleteMissing 删除该 Issue 下不在 gitHubCommentIDs 内的 GitHub 来源评论；
+// 空集表示清掉全部镜像行。source='internal' 的本地评论（负数合成 ID）不受清理影响。
 func (r *IssueCommentRepository) DeleteMissing(issueID string, gitHubCommentIDs []int64) error {
-	query := r.db.Where("issue_id = ?", issueID)
+	return r.DeleteMissingTx(r.db, issueID, gitHubCommentIDs)
+}
+
+func (r *IssueCommentRepository) DeleteMissingTx(tx *gorm.DB, issueID string, gitHubCommentIDs []int64) error {
+	query := tx.Where("issue_id = ? AND source = ?", issueID, model.IssueSourceGitHub)
 	if len(gitHubCommentIDs) > 0 {
 		query = query.Where("github_comment_id NOT IN ?", gitHubCommentIDs)
 	}
@@ -268,7 +294,11 @@ func NewIssueTimelineRepository(db *gorm.DB) *IssueTimelineRepository {
 }
 
 func (r *IssueTimelineRepository) Upsert(event *model.IssueTimelineEvent) error {
-	return r.db.Clauses(clause.OnConflict{
+	return r.UpsertTx(r.db, event)
+}
+
+func (r *IssueTimelineRepository) UpsertTx(tx *gorm.DB, event *model.IssueTimelineEvent) error {
+	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "issue_id"}, {Name: "event_key"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"github_event_id",
@@ -283,8 +313,28 @@ func (r *IssueTimelineRepository) Upsert(event *model.IssueTimelineEvent) error 
 	}).Create(event).Error
 }
 
+// ReplaceSynced 在单个事务内把该 Issue 的时间线镜像替换成本轮拉取的集合：
+// 逐条 upsert 后清掉 event_key 不在集合内的行，任一步失败整体回滚。
+// 远端分页必须由调用方拉完——事务内只执行数据库操作。
+func (r *IssueTimelineRepository) ReplaceSynced(issueID string, events []*model.IssueTimelineEvent) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		keepKeys := make([]string, 0, len(events))
+		for _, event := range events {
+			if err := r.UpsertTx(tx, event); err != nil {
+				return err
+			}
+			keepKeys = append(keepKeys, event.EventKey)
+		}
+		return r.DeleteMissingTx(tx, issueID, keepKeys)
+	})
+}
+
 func (r *IssueTimelineRepository) DeleteMissing(issueID string, eventKeys []string) error {
-	query := r.db.Where("issue_id = ?", issueID)
+	return r.DeleteMissingTx(r.db, issueID, eventKeys)
+}
+
+func (r *IssueTimelineRepository) DeleteMissingTx(tx *gorm.DB, issueID string, eventKeys []string) error {
+	query := tx.Where("issue_id = ?", issueID)
 	if len(eventKeys) > 0 {
 		query = query.Where("event_key NOT IN ?", eventKeys)
 	}
