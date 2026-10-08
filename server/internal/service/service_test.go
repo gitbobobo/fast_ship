@@ -38,6 +38,7 @@ type testServices struct {
 	issueAssetRepo      *repository.IssueAssetRepository
 	issueDraftAssetRepo *repository.IssueDraftAssetRepository
 	artifactRepo        *repository.ArtifactRepository
+	screenshotRepo      *repository.ScreenshotRepository
 	collabRepo          *repository.IssueCollabRepository
 	readStateRepo       *repository.IssueReadStateRepository
 	recRepo             *repository.IssueRecommendationRepository
@@ -48,6 +49,7 @@ type testServices struct {
 	issuePromptService  *IssuePromptService
 	versionService      *VersionService
 	artifactService     *ArtifactService
+	screenshotService   *ScreenshotService
 	shipService         *ShipService
 }
 
@@ -87,6 +89,8 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssuePullRequest{},
 		&model.IssueRecommendation{},
 		&model.RecommendationDependency{},
+		&model.ScreenshotScreen{},
+		&model.ScreenshotVersion{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -100,6 +104,7 @@ func setupTestServices(t *testing.T) *testServices {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
 
 	tempDir := t.TempDir()
 	fileStorage := storage.NewLocalStorage(filepath.Join(tempDir, "uploads"))
@@ -121,6 +126,7 @@ func setupTestServices(t *testing.T) *testServices {
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
+	screenshotRepo := repository.NewScreenshotRepository(db)
 	collabRepo := repository.NewIssueCollabRepository(db)
 	readStateRepo := repository.NewIssueReadStateRepository(db)
 	recRepo := repository.NewIssueRecommendationRepository(db)
@@ -151,6 +157,7 @@ func setupTestServices(t *testing.T) *testServices {
 		issueAssetRepo:      issueAssetRepo,
 		issueDraftAssetRepo: issueDraftAssetRepo,
 		artifactRepo:        artifactRepo,
+		screenshotRepo:      screenshotRepo,
 		collabRepo:          collabRepo,
 		readStateRepo:       readStateRepo,
 		recRepo:             recRepo,
@@ -161,6 +168,7 @@ func setupTestServices(t *testing.T) *testServices {
 		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop()),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
+		screenshotService:   NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg),
 	}
 	svc.shipService = NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, shipHookRepo, svc.issueService, fileStorage, cfg, zap.NewNop())
 

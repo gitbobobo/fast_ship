@@ -10,6 +10,7 @@ import {
   Menu,
   ScrollText,
   FileText,
+  Images,
 } from "lucide-react";
 import {
   Tooltip,
@@ -30,6 +31,7 @@ const navItems = [
   { to: "/documents", label: "文档", icon: FileText, end: true },
   { to: "/board", label: "看板", icon: Kanban, end: true },
   { to: "/versions", label: "版本", icon: Tags, end: true },
+  { to: "/screenshots", label: "截图", icon: Images, end: true },
 ];
 
 function SidebarNavItem({

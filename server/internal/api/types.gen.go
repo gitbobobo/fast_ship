@@ -1035,6 +1035,102 @@ type RegisterRequest struct {
 	Username string `binding:"required,min=2,max=50" json:"username"`
 }
 
+// ScreenshotScreen defines model for ScreenshotScreen.
+type ScreenshotScreen struct {
+	CreatedAt string `json:"created_at"`
+
+	// Group 自由文本分组；空串表示未分组
+	Group string `json:"group"`
+	Id    string `json:"id"`
+
+	// LastUploadedAt 最近一次上传时间，列表按它倒序
+	LastUploadedAt string `json:"last_uploaded_at"`
+	ProjectId      string `json:"project_id"`
+
+	// ScreenKey 服务端规范化（ToLower+TrimSpace）后的界面标识
+	ScreenKey string `json:"screen_key"`
+
+	// Title 可为空串，客户端回退显示 screen_key
+	Title string `json:"title"`
+
+	// VersionCount 该界面累计保留的版本数
+	VersionCount int `json:"version_count"`
+}
+
+// ScreenshotScreenDetail defines model for ScreenshotScreenDetail.
+type ScreenshotScreenDetail struct {
+	CreatedAt string `json:"created_at"`
+
+	// Group 自由文本分组；空串表示未分组
+	Group string `json:"group"`
+	Id    string `json:"id"`
+
+	// LastUploadedAt 最近一次上传时间，列表按它倒序
+	LastUploadedAt string `json:"last_uploaded_at"`
+	ProjectId      string `json:"project_id"`
+
+	// ScreenKey 服务端规范化（ToLower+TrimSpace）后的界面标识
+	ScreenKey string `json:"screen_key"`
+
+	// Title 可为空串，客户端回退显示 screen_key
+	Title string `json:"title"`
+
+	// VersionCount 该界面累计保留的版本数
+	VersionCount int `json:"version_count"`
+
+	// Versions 全部历史版本，uploaded_at 倒序
+	Versions []ScreenshotVersion `json:"versions"`
+}
+
+// ScreenshotScreenListItem defines model for ScreenshotScreenListItem.
+type ScreenshotScreenListItem struct {
+	CreatedAt string `json:"created_at"`
+
+	// Group 自由文本分组；空串表示未分组
+	Group string `json:"group"`
+	Id    string `json:"id"`
+
+	// LastUploadedAt 最近一次上传时间，列表按它倒序
+	LastUploadedAt string `json:"last_uploaded_at"`
+
+	// LatestVersion 最新一个版本；无版本时为 null
+	LatestVersion *ScreenshotVersion `json:"latest_version"`
+	ProjectId     string             `json:"project_id"`
+
+	// ScreenKey 服务端规范化（ToLower+TrimSpace）后的界面标识
+	ScreenKey string `json:"screen_key"`
+
+	// Title 可为空串，客户端回退显示 screen_key
+	Title string `json:"title"`
+
+	// VersionCount 该界面累计保留的版本数
+	VersionCount int `json:"version_count"`
+}
+
+// ScreenshotUploadResult defines model for ScreenshotUploadResult.
+type ScreenshotUploadResult struct {
+	Screen  ScreenshotScreen  `json:"screen"`
+	Version ScreenshotVersion `json:"version"`
+}
+
+// ScreenshotVersion defines model for ScreenshotVersion.
+type ScreenshotVersion struct {
+	// ContentUrl /api/screenshot-versions/{vid}/content；前端自行追加 ?token=
+	ContentUrl string `json:"content_url"`
+	FileName   string `json:"file_name"`
+	FileSize   int64  `json:"file_size"`
+	Id         string `json:"id"`
+
+	// MimeType 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一）
+	MimeType   string `json:"mime_type"`
+	Note       string `json:"note"`
+	ScreenId   string `json:"screen_id"`
+	UploadedAt string `json:"uploaded_at"`
+
+	// UploadedBy 用户名或 "API Key: <name>"
+	UploadedBy string `json:"uploaded_by"`
+}
+
 // ShipCheck defines model for ShipCheck.
 type ShipCheck struct {
 	CanShip           bool               `json:"can_ship"`
@@ -1136,6 +1232,15 @@ type UpdateProjectRequest struct {
 	// RepositoryUrl 同创建；变更仓库且项目无 token 时须提供 token
 	RepositoryUrl   *string `json:"repository_url,omitempty"`
 	SourceProjectId *string `json:"source_project_id,omitempty"`
+}
+
+// UpdateScreenshotScreenRequest 两字段均可选，出现才更新；都不传返回 40001
+type UpdateScreenshotScreenRequest struct {
+	// Group 分组名（≤100 字符）；允许空串置为未分组
+	Group *string `json:"group,omitempty"`
+
+	// Title 界面标题（≤200 字符）；空串回退显示 screen_key
+	Title *string `json:"title,omitempty"`
 }
 
 // UpdateVersionRequest defines model for UpdateVersionRequest.
@@ -1284,6 +1389,12 @@ type QueryToken = string
 
 // RunId defines model for RunId.
 type RunId = string
+
+// ScreenshotScreenId defines model for ScreenshotScreenId.
+type ScreenshotScreenId = string
+
+// ScreenshotVersionId defines model for ScreenshotVersionId.
+type ScreenshotVersionId = string
 
 // VersionId defines model for VersionId.
 type VersionId = string
@@ -2197,6 +2308,49 @@ type UploadLogs200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListScreenshotScreens200JSONResponseBody_Data defines parameters for ListScreenshotScreens.
+type ListScreenshotScreens200JSONResponseBody_Data struct {
+	Items []ScreenshotScreenListItem `json:"items"`
+}
+
+// ListScreenshotScreens200JSONResponseBody defines parameters for ListScreenshotScreens.
+type ListScreenshotScreens200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                            `json:"code"`
+	Data *ListScreenshotScreens200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UploadScreenshotMultipartBody defines parameters for UploadScreenshot.
+type UploadScreenshotMultipartBody struct {
+	// File 截图文件；内容须为 image/png、image/jpeg、image/webp、image/gif
+	File openapi_types.File `json:"file"`
+
+	// Group 分组名（≤100 字符）；字段出现即更新（空串置为未分组），不出现则保持原值
+	Group *string `json:"group,omitempty"`
+
+	// Note 本次上传版本的备注（≤1000 字符）
+	Note *string `json:"note,omitempty"`
+
+	// ScreenKey 界面标识；规范化后 1~100 字符
+	ScreenKey string `json:"screen_key"`
+
+	// Title 界面标题（≤200 字符）；非空才更新
+	Title *string `json:"title,omitempty"`
+}
+
+// UploadScreenshot200JSONResponseBody defines parameters for UploadScreenshot.
+type UploadScreenshot200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                     `json:"code"`
+	Data *ScreenshotUploadResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListVersionsParams defines parameters for ListVersions.
 type ListVersionsParams struct {
 	// Status 按版本状态过滤
@@ -2258,6 +2412,38 @@ type ListIssueRecommendations200JSONResponseBody struct {
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
+}
+
+// GetScreenshotScreen200JSONResponseBody defines parameters for GetScreenshotScreen.
+type GetScreenshotScreen200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                     `json:"code"`
+	Data *ScreenshotScreenDetail `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateScreenshotScreen200JSONResponseBody defines parameters for UpdateScreenshotScreen.
+type UpdateScreenshotScreen200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                     `json:"code"`
+	Data *ScreenshotScreenDetail `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetScreenshotVersionContentParams defines parameters for GetScreenshotVersionContent.
+type GetScreenshotVersionContentParams struct {
+	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
+	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
+}
+
+// GetScreenshotVersionContentHeadParams defines parameters for GetScreenshotVersionContentHead.
+type GetScreenshotVersionContentHeadParams struct {
+	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
+	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
 }
 
 // GetVersion200JSONResponseBody defines parameters for GetVersion.
@@ -2412,8 +2598,14 @@ type BatchCloseDoneIssuesJSONRequestBody BatchCloseDoneIssuesJSONBody
 // UploadLogsJSONRequestBody defines body for UploadLogs for application/json ContentType.
 type UploadLogsJSONRequestBody = UploadLogsRequest
 
+// UploadScreenshotMultipartRequestBody defines body for UploadScreenshot for multipart/form-data ContentType.
+type UploadScreenshotMultipartRequestBody UploadScreenshotMultipartBody
+
 // CreateVersionJSONRequestBody defines body for CreateVersion for application/json ContentType.
 type CreateVersionJSONRequestBody = CreateVersionRequest
+
+// UpdateScreenshotScreenJSONRequestBody defines body for UpdateScreenshotScreen for application/json ContentType.
+type UpdateScreenshotScreenJSONRequestBody = UpdateScreenshotScreenRequest
 
 // UpdateVersionJSONRequestBody defines body for UpdateVersion for application/json ContentType.
 type UpdateVersionJSONRequestBody = UpdateVersionRequest

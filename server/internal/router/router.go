@@ -26,6 +26,7 @@ func Setup(
 	logHandler *handler.LogHandler,
 	documentHandler *handler.DocumentHandler,
 	artifactHandler *handler.ArtifactHandler,
+	screenshotHandler *handler.ScreenshotHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
@@ -173,6 +174,16 @@ func Setup(
 		api.POST("/versions/:vid/artifacts", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Upload)
 		api.DELETE("/artifacts/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), artifactHandler.Delete)
 		api.GET("/artifacts/:aid/download", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), artifactHandler.Download)
+
+		// 截图库 —— 上传与读 JWT / API Key 均可；分组/标题修改与删除仅 JWT；content 支持 ?token= 供 <img> 直链
+		api.POST("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.Upload)
+		api.GET("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.List)
+		api.GET("/screenshot-screens/:sid", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.Get)
+		api.GET("/screenshot-versions/:vid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
+		api.HEAD("/screenshot-versions/:vid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
+		api.PATCH("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.Update)
+		api.DELETE("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteScreen)
+		api.DELETE("/screenshot-versions/:vid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteVersion)
 
 		// JWT / API Key 均可 — 日志
 		api.POST("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.Upload)
