@@ -154,12 +154,13 @@ export default function ScreenshotsPage() {
   );
 
   // 项目切换时回到「全部」并关闭预览；深链 annotation 只对当时的项目
-  // 生效——换项目后摘掉参数并重置已处理标记，避免指向旧项目的标注
+  // 生效——换项目后摘掉参数并重置已处理标记，避免指向旧项目的标注。
+  // 首个空值（项目列表未加载）到首个项目不算切换
   const prevProjectIdRef = useRef(activeProjectId);
   useEffect(() => {
-    const projectChanged = prevProjectIdRef.current !== activeProjectId;
+    const prev = prevProjectIdRef.current;
     prevProjectIdRef.current = activeProjectId;
-    if (!projectChanged) return;
+    if (!prev || prev === activeProjectId) return;
     setTab(SCREENSHOT_TAB_ALL);
     setSearch("");
     setOpenScreenId(null);
