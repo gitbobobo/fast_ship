@@ -428,8 +428,10 @@ type GenerateTitleResponse struct {
 
 // Issue defines model for Issue.
 type Issue struct {
-	Author IssueActor `json:"author"`
-	Body   string     `json:"body"`
+	// Attachments omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现
+	Attachments []IssueAttachment `json:"attachments,omitempty"`
+	Author      IssueActor        `json:"author"`
+	Body        string            `json:"body"`
 
 	// BodyHtml github 来源为远端渲染 HTML（媒体链接经代理改写）；internal 为空串
 	BodyHtml  string           `json:"body_html"`
@@ -493,6 +495,23 @@ type IssueAsset struct {
 	// Markdown 可直接粘贴的 ![alt](content_url) 片段
 	Markdown string `json:"markdown"`
 	MimeType string `json:"mime_type"`
+}
+
+// IssueAttachment defines model for IssueAttachment.
+type IssueAttachment struct {
+	CreatedAt string `json:"created_at"`
+
+	// DownloadUrl /api/attachments/{id}/download
+	DownloadUrl string `json:"download_url"`
+	FileName    string `json:"file_name"`
+	FileSize    int64  `json:"file_size"`
+	Id          string `json:"id"`
+
+	// MimeType 内容嗅探结果（http.DetectContentType），供 UI 图标使用
+	MimeType string `json:"mime_type"`
+
+	// Uploader 用户名或 "API Key: <name>"
+	Uploader string `json:"uploader"`
 }
 
 // IssueBatchFailure defines model for IssueBatchFailure.
@@ -1541,6 +1560,12 @@ type DownloadArtifactParams struct {
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
 }
 
+// DownloadIssueAttachmentParams defines parameters for DownloadIssueAttachment.
+type DownloadIssueAttachmentParams struct {
+	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
+	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
+}
+
 // UploadAvatarMultipartBody defines parameters for UploadAvatar.
 type UploadAvatarMultipartBody struct {
 	// File 图片文件，≤5MB，扩展名限 jpg/jpeg/png/gif/webp 且内容须为图片
@@ -1761,6 +1786,22 @@ type UploadIssueAsset200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int         `json:"code"`
 	Data *IssueAsset `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UploadIssueAttachmentMultipartBody defines parameters for UploadIssueAttachment.
+type UploadIssueAttachmentMultipartBody struct {
+	// File 附件文件，不限类型
+	File openapi_types.File `json:"file"`
+}
+
+// UploadIssueAttachment200JSONResponseBody defines parameters for UploadIssueAttachment.
+type UploadIssueAttachment200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *IssueAttachment `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -2601,6 +2642,9 @@ type UpdateIssueJSONRequestBody = UpdateIssueRequest
 
 // UploadIssueAssetMultipartRequestBody defines body for UploadIssueAsset for multipart/form-data ContentType.
 type UploadIssueAssetMultipartRequestBody UploadIssueAssetMultipartBody
+
+// UploadIssueAttachmentMultipartRequestBody defines body for UploadIssueAttachment for multipart/form-data ContentType.
+type UploadIssueAttachmentMultipartRequestBody UploadIssueAttachmentMultipartBody
 
 // ReplaceIssueChecklistJSONRequestBody defines body for ReplaceIssueChecklist for application/json ContentType.
 type ReplaceIssueChecklistJSONRequestBody ReplaceIssueChecklistJSONBody

@@ -374,6 +374,14 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 		return nil, err
 	}
 
+	attachments, err := s.attachmentRepo.ListByIssueID(issue.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
 	resp := s.toIssueResponse(*issue, meta, checklist, nil, shipHook, 0)
+	if len(attachments) > 0 {
+		resp.Attachments = toIssueAttachmentResponses(attachments)
+	}
 	return &resp, nil
 }

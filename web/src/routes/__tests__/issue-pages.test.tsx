@@ -25,6 +25,8 @@ import {
   useUpdateIssueInternalMeta,
   useReplaceIssueChecklist,
   useUploadIssueAsset,
+  useUploadIssueAttachment,
+  useDeleteIssueAttachment,
   useUpsertIssueShipHook,
   useDeleteIssueShipHook,
   useAttachIssuePullRequest,
@@ -219,6 +221,8 @@ vi.mock("@/lib/hooks/use-issues", async (importOriginal) => {
     useUpdateIssueInternalMeta: vi.fn(),
     useReplaceIssueChecklist: vi.fn(),
     useUploadIssueAsset: vi.fn(),
+    useUploadIssueAttachment: vi.fn(),
+    useDeleteIssueAttachment: vi.fn(),
     useUpsertIssueShipHook: vi.fn(),
     useDeleteIssueShipHook: vi.fn(),
     useAttachIssuePullRequest: vi.fn(),
@@ -461,6 +465,8 @@ describe("Issue pages", () => {
     authState.token = "jwt-token";
     vi.mocked(useAuthStore).mockImplementation(((selector?: (state: typeof authState) => unknown) =>
       selector ? selector(authState) : authState) as typeof useAuthStore);
+    // attachmentApi.downloadUrl 等直接读 store.getState 的工具函数依赖此方法
+    Object.assign(useAuthStore, { getState: () => authState });
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
     writeText.mockResolvedValue(undefined);
     openWindow.mockReset();
@@ -552,6 +558,14 @@ describe("Issue pages", () => {
       mutateAsync: vi.fn(),
       isPending: false,
     } as unknown as ReturnType<typeof useUploadIssueAsset>);
+    vi.mocked(useUploadIssueAttachment).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUploadIssueAttachment>);
+    vi.mocked(useDeleteIssueAttachment).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useDeleteIssueAttachment>);
 
     vi.mocked(useReplaceIssueChecklist).mockReturnValue({
       mutateAsync: vi.fn(),
@@ -739,6 +753,60 @@ describe("Issue pages", () => {
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
     expect(screen.getByRole("menuitem", { name: "编辑问题" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "关闭问题" })).toBeInTheDocument();
+  });
+
+  it("renders the attachments card for internal issues", () => {
+    const internalIssue = buildInternalIssue({
+      attachments: [
+        {
+          id: "att-1",
+          file_name: "复现视频.mp4",
+          file_size: 2048,
+          mime_type: "video/mp4",
+          created_at: "2026-04-12T10:00:00Z",
+          uploader: "alice",
+          download_url: "/api/attachments/att-1/download",
+        },
+      ],
+    });
+    vi.mocked(useIssues).mockReturnValue({
+      data: {
+        items: [internalIssue],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssues>);
+    vi.mocked(useIssue).mockReturnValue({
+      data: internalIssue,
+      isLoading: false,
+    } as unknown as ReturnType<typeof useIssue>);
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/internal-issue-1",
+    });
+
+    expect(screen.getByText("附件")).toBeInTheDocument();
+    expect(screen.getByText("复现视频.mp4")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "上传附件" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not render the attachments card for GitHub issues", () => {
+    mockIssueDetailData();
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    expect(screen.queryByText("附件")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "上传附件" }),
+    ).not.toBeInTheDocument();
   });
 
   it("closes a GitHub issue from the more menu", async () => {

@@ -37,12 +37,14 @@ type testServices struct {
 	syncStateRepo       *repository.IssueSyncStateRepository
 	issueAssetRepo      *repository.IssueAssetRepository
 	issueDraftAssetRepo *repository.IssueDraftAssetRepository
+	issueAttachmentRepo *repository.IssueAttachmentRepository
 	artifactRepo        *repository.ArtifactRepository
 	screenshotRepo      *repository.ScreenshotRepository
 	collabRepo          *repository.IssueCollabRepository
 	readStateRepo       *repository.IssueReadStateRepository
 	recRepo             *repository.IssueRecommendationRepository
 	issueService        *IssueService
+	attachmentService   *IssueAttachmentService
 	collabService       *IssueCollabService
 	recService          *IssueRecommendationService
 	aiService           *AIService
@@ -82,6 +84,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueReadState{},
 		&model.IssueAsset{},
 		&model.IssueDraftAsset{},
+		&model.IssueAttachment{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.GitHubRepoLabel{},
@@ -125,6 +128,7 @@ func setupTestServices(t *testing.T) *testServices {
 	syncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
+	issueAttachmentRepo := repository.NewIssueAttachmentRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	screenshotRepo := repository.NewScreenshotRepository(db)
 	collabRepo := repository.NewIssueCollabRepository(db)
@@ -156,12 +160,14 @@ func setupTestServices(t *testing.T) *testServices {
 		syncStateRepo:       syncStateRepo,
 		issueAssetRepo:      issueAssetRepo,
 		issueDraftAssetRepo: issueDraftAssetRepo,
+		issueAttachmentRepo: issueAttachmentRepo,
 		artifactRepo:        artifactRepo,
 		screenshotRepo:      screenshotRepo,
 		collabRepo:          collabRepo,
 		readStateRepo:       readStateRepo,
 		recRepo:             recRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, repository.NewIssuePullRequestRepository(db), fileStorage, cfg, zap.NewNop()),
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop()),
+		attachmentService:   NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		recService:          NewIssueRecommendationService(recRepo, issueRepo, internalMetaRepo, projectRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),

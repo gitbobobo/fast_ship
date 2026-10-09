@@ -1439,7 +1439,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 
 **成功响应**
 
-**200** Issue 分页列表（列表项不含 collab / pull_requests 字段；带 pull_request_summary 聚合计数）
+**200** Issue 分页列表（列表项不含 collab / pull_requests / attachments 字段；带 pull_request_summary 聚合计数）
 
 `data`：
 
@@ -1577,6 +1577,14 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `items[].pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
 | `items[].pull_requests[].created_at` | string（date-time） | 是 |  |
 | `items[].pull_requests[].updated_at` | string（date-time） | 是 |  |
+| `items[].attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
+| `items[].attachments[].id` | string | 是 |  |
+| `items[].attachments[].file_name` | string | 是 |  |
+| `items[].attachments[].file_size` | integer（int64） | 是 |  |
+| `items[].attachments[].mime_type` | string | 是 | 内容嗅探结果（http.DetectContentType），供 UI 图标使用 |
+| `items[].attachments[].uploader` | string | 是 | 用户名或 "API Key: <name>" |
+| `items[].attachments[].download_url` | string | 是 | /api/attachments/{id}/download |
+| `items[].attachments[].created_at` | string（date-time） | 是 |  |
 | `items[].pull_request_summary` | object | 否 | omitempty；仅 Issue 列表项携带的 PR 聚合计数；详情项不出现。Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged |
 | `items[].pull_request_summary.total` | integer | 是 |  |
 | `items[].pull_request_summary.open` | integer | 是 | state=open 计数 |
@@ -1755,6 +1763,14 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
 | `pull_requests[].created_at` | string（date-time） | 是 |  |
 | `pull_requests[].updated_at` | string（date-time） | 是 |  |
+| `attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
+| `attachments[].id` | string | 是 |  |
+| `attachments[].file_name` | string | 是 |  |
+| `attachments[].file_size` | integer（int64） | 是 |  |
+| `attachments[].mime_type` | string | 是 | 内容嗅探结果（http.DetectContentType），供 UI 图标使用 |
+| `attachments[].uploader` | string | 是 | 用户名或 "API Key: <name>" |
+| `attachments[].download_url` | string | 是 | /api/attachments/{id}/download |
+| `attachments[].created_at` | string（date-time） | 是 |  |
 | `pull_request_summary` | object | 否 | omitempty；仅 Issue 列表项携带的 PR 聚合计数；详情项不出现。Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged |
 | `pull_request_summary.total` | integer | 是 |  |
 | `pull_request_summary.open` | integer | 是 | state=open 计数 |
@@ -2037,7 +2053,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 
 获取 Issue 详情
 
-与列表项结构相同，另带可选 `collab` 字段（与 GET /collab 的 data 同形；仅详情填充，列表不返回）与 `pull_requests` 数组（关联 PR 全量；读取失败或无关联时缺省）。
+与列表项结构相同，另带可选 `collab` 字段（与 GET /collab 的 data 同形；仅详情填充，列表不返回）、`pull_requests` 数组（关联 PR 全量；读取失败或无关联时缺省）与 `attachments` 数组（文件附件全量；无附件时缺省）。
 
 **鉴权**：JWT+API Key
 
@@ -2184,6 +2200,14 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
 | `pull_requests[].created_at` | string（date-time） | 是 |  |
 | `pull_requests[].updated_at` | string（date-time） | 是 |  |
+| `attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
+| `attachments[].id` | string | 是 |  |
+| `attachments[].file_name` | string | 是 |  |
+| `attachments[].file_size` | integer（int64） | 是 |  |
+| `attachments[].mime_type` | string | 是 | 内容嗅探结果（http.DetectContentType），供 UI 图标使用 |
+| `attachments[].uploader` | string | 是 | 用户名或 "API Key: <name>" |
+| `attachments[].download_url` | string | 是 | /api/attachments/{id}/download |
+| `attachments[].created_at` | string（date-time） | 是 |  |
 | `pull_request_summary` | object | 否 | omitempty；仅 Issue 列表项携带的 PR 聚合计数；详情项不出现。Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged |
 | `pull_request_summary.total` | integer | 是 |  |
 | `pull_request_summary.open` | integer | 是 | state=open 计数 |
@@ -2368,6 +2392,14 @@ github 来源 Issue 的更改写回 GitHub 远端，internal 仅写本地；`sta
 | `pull_requests[].synced_at` | string（date-time） | 是 | 最近一次从 GitHub 刷新成功的时间 |
 | `pull_requests[].created_at` | string（date-time） | 是 |  |
 | `pull_requests[].updated_at` | string（date-time） | 是 |  |
+| `attachments` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现 |
+| `attachments[].id` | string | 是 |  |
+| `attachments[].file_name` | string | 是 |  |
+| `attachments[].file_size` | integer（int64） | 是 |  |
+| `attachments[].mime_type` | string | 是 | 内容嗅探结果（http.DetectContentType），供 UI 图标使用 |
+| `attachments[].uploader` | string | 是 | 用户名或 "API Key: <name>" |
+| `attachments[].download_url` | string | 是 | /api/attachments/{id}/download |
+| `attachments[].created_at` | string（date-time） | 是 |  |
 | `pull_request_summary` | object | 否 | omitempty；仅 Issue 列表项携带的 PR 聚合计数；详情项不出现。Issue 关联 PR 的聚合计数；closed 计数 = total - open - merged |
 | `pull_request_summary.total` | integer | 是 |  |
 | `pull_request_summary.open` | integer | 是 | state=open 计数 |
@@ -3756,6 +3788,129 @@ Agent 推荐任务队列
 **成功响应**
 
 **200** 安装包二进制内容
+
+二进制内容（application/octet-stream），无 JSON 信封。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+## attachments
+
+Issue 文件附件（独立于正文图片 assets）上传、下载与删除
+
+### POST `/api/issues/{iid}/attachments`
+
+<!-- operationId: uploadIssueAttachment -->
+
+上传 Issue 文件附件（multipart/form-data，字段名 file）
+
+仅 internal 来源 Issue（github 源返回 40908）。不限文件类型，`mime_type` 按内容嗅探存储供 UI 图标使用；大小受服务端 upload.max_file_size 限制（默认 500MB）；同名不去重，每次上传生成新记录。附件与正文图片 assets 相互独立，不随正文引用变化而回收；正文中引用 download_url 不被追踪，删除后成为 404 死链。
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `iid` | string | 是 | Issue ID（UUID，非 INT-123/GH-123 短编号） |
+
+**请求体**
+
+`multipart/form-data`，必填。表单字段，不是 JSON。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `file` | binary | 是 | 附件文件，不限类型 |
+
+**成功响应**
+
+**200** 上传的附件记录
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `file_name` | string | 是 |  |
+| `file_size` | integer（int64） | 是 |  |
+| `mime_type` | string | 是 | 内容嗅探结果（http.DetectContentType），供 UI 图标使用 |
+| `uploader` | string | 是 | 用户名或 "API Key: <name>" |
+| `download_url` | string | 是 | /api/attachments/{id}/download |
+| `created_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 非 internal 来源 Issue 不可上传（40908） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/attachments/{aid}`
+
+<!-- operationId: deleteIssueAttachment -->
+
+删除 Issue 附件
+
+校验项目归属（同 artifacts，不限上传者本人）。删除后 download_url 失效（404），正文中已引用的链接成为死链。
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `aid` | string | 是 | 附件 ID（UUID） |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/attachments/{aid}/download`
+
+<!-- operationId: downloadIssueAttachment -->
+
+下载 Issue 附件
+
+返回 `application/octet-stream` 与 `Content-Disposition: attachment`。支持 Authorization 头或 `?token=` query 凭证（供浏览器直链下载）。
+
+**鉴权**：JWT+API Key，支持 ?token=
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `aid` | string | 是 | 附件 ID（UUID） |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `token` | string | 否 | 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。 |
+
+**成功响应**
+
+**200** 附件二进制内容
 
 二进制内容（application/octet-stream），无 JSON 信封。
 

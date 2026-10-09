@@ -58,6 +58,7 @@ var (
 	ErrPullRequestNotFound       = New(40412, "PR 关联不存在")
 	ErrScreenshotScreenNotFound  = New(40413, "界面不存在")
 	ErrScreenshotVersionNotFound = New(40414, "截图版本不存在")
+	ErrIssueAttachmentNotFound   = New(40415, "问题附件不存在")
 )
 
 // 业务冲突 40900-40999

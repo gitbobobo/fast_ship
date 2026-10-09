@@ -58,6 +58,7 @@ type (
 	IssueInternalMetaResponse         = api.IssueInternalMeta
 	IssueChecklistItemResponse        = api.IssueChecklistItem
 	IssueAssetResponse                = api.IssueAsset
+	IssueAttachmentResponse           = api.IssueAttachment
 	BatchCloseDoneIssueFailure        = api.IssueBatchFailure
 	BatchCloseDoneIssuesResponse      = api.IssueBatchResult
 

@@ -220,6 +220,21 @@ interface Issue {
   pull_requests?: IssuePullRequest[];
   /** 关联 PR 的聚合计数；仅列表项携带 */
   pull_request_summary?: IssuePullRequestSummary;
+  /** 附件列表；仅 internal Issue 详情响应携带 */
+  attachments?: IssueAttachment[];
+}
+
+/** Issue 附件记录；github 源 Issue 恒为空 */
+interface IssueAttachment {
+  id: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string;
+  created_at: string;
+  /** 用户名或 "API Key: <name>" */
+  uploader: string;
+  /** 附件下载路径，浏览器访问需附带 ?token= */
+  download_url: string;
 }
 
 /** Issue 关联的实现 PR。PR 状态与 Issue workflow_status 不联动 */

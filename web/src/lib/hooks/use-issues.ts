@@ -6,6 +6,7 @@ import {
   type InfiniteData,
   type Query,
 } from "@tanstack/react-query";
+import { attachmentApi } from "@/lib/api/attachments";
 import { issueApi, type IssueListParams } from "@/lib/api/issues";
 import { type IssueSourceFilter } from "@/lib/issue-source";
 import { useEffect, useRef } from "react";
@@ -239,6 +240,32 @@ export function useUploadIssueAsset(issueId: string) {
 export function useUploadDraftIssueAsset(projectId: string) {
   return useMutation({
     mutationFn: (formData: FormData) => issueApi.uploadDraftAsset(projectId, formData),
+  });
+}
+
+interface UploadIssueAttachmentInput {
+  formData: FormData;
+  onProgress?: (percent: number) => void;
+}
+
+export function useUploadIssueAttachment(issueId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ formData, onProgress }: UploadIssueAttachmentInput) =>
+      attachmentApi.upload(issueId, formData, onProgress),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+    },
+  });
+}
+
+export function useDeleteIssueAttachment(issueId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (attachmentId: string) => attachmentApi.delete(attachmentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
+    },
   });
 }
 
