@@ -40,6 +40,7 @@ type testServices struct {
 	issueAttachmentRepo *repository.IssueAttachmentRepository
 	artifactRepo        *repository.ArtifactRepository
 	screenshotRepo      *repository.ScreenshotRepository
+	annotationRepo      *repository.ScreenshotAnnotationRepository
 	collabRepo          *repository.IssueCollabRepository
 	readStateRepo       *repository.IssueReadStateRepository
 	recRepo             *repository.IssueRecommendationRepository
@@ -52,6 +53,7 @@ type testServices struct {
 	versionService      *VersionService
 	artifactService     *ArtifactService
 	screenshotService   *ScreenshotService
+	annotationService   *ScreenshotAnnotationService
 	shipService         *ShipService
 }
 
@@ -94,6 +96,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.RecommendationDependency{},
 		&model.ScreenshotScreen{},
 		&model.ScreenshotVersion{},
+		&model.ScreenshotAnnotation{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -131,6 +134,7 @@ func setupTestServices(t *testing.T) *testServices {
 	issueAttachmentRepo := repository.NewIssueAttachmentRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	screenshotRepo := repository.NewScreenshotRepository(db)
+	annotationRepo := repository.NewScreenshotAnnotationRepository(db)
 	collabRepo := repository.NewIssueCollabRepository(db)
 	readStateRepo := repository.NewIssueReadStateRepository(db)
 	recRepo := repository.NewIssueRecommendationRepository(db)
@@ -163,10 +167,11 @@ func setupTestServices(t *testing.T) *testServices {
 		issueAttachmentRepo: issueAttachmentRepo,
 		artifactRepo:        artifactRepo,
 		screenshotRepo:      screenshotRepo,
+		annotationRepo:      annotationRepo,
 		collabRepo:          collabRepo,
 		readStateRepo:       readStateRepo,
 		recRepo:             recRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop()),
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), annotationRepo),
 		attachmentService:   NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		recService:          NewIssueRecommendationService(recRepo, issueRepo, internalMetaRepo, projectRepo),
@@ -175,6 +180,7 @@ func setupTestServices(t *testing.T) *testServices {
 		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop()),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		screenshotService:   NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg),
+		annotationService:   NewScreenshotAnnotationService(annotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage),
 	}
 	svc.shipService = NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, shipHookRepo, svc.issueService, fileStorage, cfg, zap.NewNop())
 

@@ -28,6 +28,7 @@ func Setup(
 	artifactHandler *handler.ArtifactHandler,
 	issueAttachmentHandler *handler.IssueAttachmentHandler,
 	screenshotHandler *handler.ScreenshotHandler,
+	screenshotAnnotationHandler *handler.ScreenshotAnnotationHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
@@ -190,6 +191,15 @@ func Setup(
 		api.PATCH("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.Update)
 		api.DELETE("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteScreen)
 		api.DELETE("/screenshot-versions/:vid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteVersion)
+
+		// 截图标注 —— 列表与裁剪图 JWT / API Key 均可；新建与删除仅 JWT；
+		// PUT 两类凭证均可，service 内再按凭证限制 API Key 只能置 resolved；crop 支持 ?token= 直链。
+		api.GET("/projects/:id/screenshot-annotations", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotAnnotationHandler.List)
+		api.POST("/screenshot-versions/:vid/annotations", middleware.RequireJWT(cfg, authService), screenshotAnnotationHandler.Create)
+		api.PUT("/screenshot-annotations/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotAnnotationHandler.Update)
+		api.DELETE("/screenshot-annotations/:aid", middleware.RequireJWT(cfg, authService), screenshotAnnotationHandler.Delete)
+		api.GET("/screenshot-annotations/:aid/crop", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotAnnotationHandler.Crop)
+		api.HEAD("/screenshot-annotations/:aid/crop", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotAnnotationHandler.Crop)
 
 		// JWT / API Key 均可 — 日志
 		api.POST("/projects/:id/logs", middleware.RequireAuth(cfg, apiKeyRepo, authService), logHandler.Upload)

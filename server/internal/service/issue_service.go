@@ -54,6 +54,7 @@ type IssueService struct {
 	recRepo             *repository.IssueRecommendationRepository
 	pullRequestRepo     *repository.IssuePullRequestRepository
 	attachmentRepo      *repository.IssueAttachmentRepository
+	annotationRepo      *repository.ScreenshotAnnotationRepository
 	storage             storage.Storage
 	cfg                 *config.Config
 	logger              *zap.Logger
@@ -112,6 +113,7 @@ func NewIssueService(
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
+	annotationRepo *repository.ScreenshotAnnotationRepository,
 ) *IssueService {
 	return &IssueService{
 		issueRepo:           issueRepo,
@@ -131,6 +133,7 @@ func NewIssueService(
 		recRepo:             recRepo,
 		pullRequestRepo:     pullRequestRepo,
 		attachmentRepo:      attachmentRepo,
+		annotationRepo:      annotationRepo,
 		storage:             storage,
 		cfg:                 cfg,
 		logger:              logger,

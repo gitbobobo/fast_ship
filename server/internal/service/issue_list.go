@@ -383,5 +383,23 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 	if len(attachments) > 0 {
 		resp.Attachments = toIssueAttachmentResponses(attachments)
 	}
+
+	annotations, err := s.annotationRepo.ListByIssueID(issue.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	if len(annotations) > 0 {
+		related, err := s.annotationRepo.LoadRelated(annotations)
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		resp.ScreenshotAnnotations = assembleScreenshotAnnotations(
+			annotations, related,
+			map[string]model.Issue{issue.ID: *issue},
+			func(version *model.ScreenshotVersion) (int, int) {
+				return resolveScreenshotVersionDims(s.storage, version)
+			},
+		)
+	}
 	return &resp, nil
 }

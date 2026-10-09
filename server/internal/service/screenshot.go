@@ -117,6 +117,8 @@ func toScreenshotVersionResponse(version *model.ScreenshotVersion) ScreenshotVer
 		MimeType:   version.MimeType,
 		UploadedBy: version.UploadedBy,
 		UploadedAt: api.JSONTime(version.UploadedAt),
+		Width:      version.Width,
+		Height:     version.Height,
 		ContentUrl: buildScreenshotContentURL(version.ID),
 	}
 }
@@ -212,6 +214,21 @@ func (s *ScreenshotService) storeScreenshotVersionFile(projectID, versionID, fil
 	return mimeType, countedReader.n, storagePath, nil
 }
 
+// probeScreenshotDims 重开已落盘文件解码头部取原图宽高（按嗅探出的 mime 分派解码器）；
+// 解码失败不阻塞上传，返回 0,0 表示未知（与存量行同语义）。
+func (s *ScreenshotService) probeScreenshotDims(storagePath, mimeType string) (int, int) {
+	reader, err := s.storage.Get(storagePath)
+	if err != nil {
+		return 0, 0
+	}
+	defer reader.Close()
+	cfg, err := decodeScreenshotImageConfig(reader, mimeType)
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
+}
+
 // Upload 归并到 (project_id, screen_key) 对应的 screen：不存在则自动建；
 // 版本全量追加，screen 上的 group/title 按表单语义顺带更新。
 func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUploadResult, error) {
@@ -235,6 +252,7 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 	if err != nil {
 		return nil, err
 	}
+	imgWidth, imgHeight := s.probeScreenshotDims(storagePath, mimeType)
 
 	// 并发首传同一新 screen_key 时两边都会错过 FindScreenByKey 并撞唯一索引；
 	// 多连接下整个事务还可能撞 SQLITE_LOCKED 死锁。失败的事务已整体回滚，
@@ -243,7 +261,7 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 	var version *model.ScreenshotVersion
 	var txErr error
 	for attempt := 0; attempt < maxUploadTxAttempts; attempt++ {
-		screen, version, txErr = s.uploadScreenshotTx(input, screenKey, versionID, mimeType, storagePath, fileSize)
+		screen, version, txErr = s.uploadScreenshotTx(input, screenKey, versionID, mimeType, storagePath, fileSize, imgWidth, imgHeight)
 		if txErr == nil || !isRetryableScreenshotTxError(txErr) || attempt == maxUploadTxAttempts-1 {
 			break
 		}
@@ -278,7 +296,7 @@ func isRetryableScreenshotTxError(err error) bool {
 
 // uploadScreenshotTx 在一个事务里完成 screen 的 find-or-create、版本行写入与冗余统计重算。
 // 内部直接透传驱动错误，由 Upload 判定是否重试；文件已在事务外落盘，重试复用同一路径。
-func (s *ScreenshotService) uploadScreenshotTx(input *ScreenshotUploadInput, screenKey, versionID, mimeType, storagePath string, fileSize int64) (*model.ScreenshotScreen, *model.ScreenshotVersion, error) {
+func (s *ScreenshotService) uploadScreenshotTx(input *ScreenshotUploadInput, screenKey, versionID, mimeType, storagePath string, fileSize int64, imgWidth, imgHeight int) (*model.ScreenshotScreen, *model.ScreenshotVersion, error) {
 	var screen *model.ScreenshotScreen
 	var version *model.ScreenshotVersion
 	txErr := s.screenshotRepo.Transaction(func(txRepo *repository.ScreenshotRepository) error {
@@ -312,6 +330,8 @@ func (s *ScreenshotService) uploadScreenshotTx(input *ScreenshotUploadInput, scr
 			Note:       input.Note,
 			UploadedBy: input.UploadedBy,
 			UploadedAt: now,
+			Width:      imgWidth,
+			Height:     imgHeight,
 		}
 		if err := txRepo.CreateVersion(version); err != nil {
 			return err

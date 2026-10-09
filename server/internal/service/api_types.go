@@ -130,4 +130,10 @@ type (
 	ScreenshotScreenDetail        = api.ScreenshotScreenDetail
 	ScreenshotUploadResult        = api.ScreenshotUploadResult
 	ScreenshotScreenListData      = api.ListScreenshotScreens200JSONResponseBody_Data
+
+	// screenshot annotations
+	CreateScreenshotAnnotationRequest = api.CreateScreenshotAnnotationRequest
+	UpdateScreenshotAnnotationRequest = api.UpdateScreenshotAnnotationRequest
+	ScreenshotAnnotationResponse      = api.ScreenshotAnnotation
+	ScreenshotAnnotationListData      = api.ListScreenshotAnnotations200JSONResponseBody_Data
 )

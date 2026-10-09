@@ -833,6 +833,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.Document{},
 		&model.ScreenshotScreen{},
 		&model.ScreenshotVersion{},
+		&model.ScreenshotAnnotation{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -886,6 +887,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueAttachmentRepo := repository.NewIssueAttachmentRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	screenshotRepo := repository.NewScreenshotRepository(db)
+	screenshotAnnotationRepo := repository.NewScreenshotAnnotationRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
@@ -898,7 +900,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	recommendationRepo := repository.NewIssueRecommendationRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), recommendationRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), recommendationRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), screenshotAnnotationRepo)
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
@@ -909,6 +911,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
+	screenshotAnnotationService := service.NewScreenshotAnnotationService(screenshotAnnotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
 
@@ -927,10 +930,11 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	artifactHandler := handler.NewArtifactHandler(artifactService)
 	issueAttachmentHandler := handler.NewIssueAttachmentHandler(issueAttachmentService, cfg)
 	screenshotHandler := handler.NewScreenshotHandler(screenshotService, cfg)
+	screenshotAnnotationHandler := handler.NewScreenshotAnnotationHandler(screenshotAnnotationService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
