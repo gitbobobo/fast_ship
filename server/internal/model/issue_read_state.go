@@ -13,6 +13,9 @@ type IssueReadState struct {
 	IssueID    string    `gorm:"type:text;primaryKey" json:"issue_id"`
 	LastReadAt time.Time `gorm:"not null" json:"last_read_at"`
 	UpdatedAt  time.Time `gorm:"not null" json:"updated_at"`
+
+	User  User  `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
+	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 func (IssueReadState) TableName() string {

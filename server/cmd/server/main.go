@@ -35,6 +35,43 @@ type sqliteIndexInfo struct {
 	Origin string `gorm:"column:origin"`
 }
 
+// autoMigrateModels 是启动时 AutoMigrate 的全量模型清单，测试也用它建全新库。
+var autoMigrateModels = []interface{}{
+	&model.User{},
+	&model.UserAISetting{},
+	&model.UserIssuePromptSetting{},
+	&model.ApiKey{},
+	&model.Project{},
+	&model.Version{},
+	&model.Issue{},
+	&model.IssueGitHubMeta{},
+	&model.IssueComment{},
+	&model.IssueTimelineEvent{},
+	&model.IssueInternalMeta{},
+	&model.IssueShipHook{},
+	&model.IssueChecklistItem{},
+	&model.IssueSyncState{},
+	&model.IssueReadState{},
+	&model.IssueReadCatchup{},
+	&model.IssueAsset{},
+	&model.IssueDraftAsset{},
+	&model.IssueAttachment{},
+	&model.Artifact{},
+	&model.JWTBlacklist{},
+	&model.RefreshToken{},
+	&model.GitHubRepoLabel{},
+	&model.IssueCollabDocument{},
+	&model.IssuePullRequest{},
+	&model.IssueRecommendation{},
+	&model.RecommendationDependency{},
+	&model.LogRun{},
+	&model.LogRunChunk{},
+	&model.LogEntry{},
+	&model.Document{},
+	&model.ScreenshotScreen{},
+	&model.ScreenshotVersion{},
+}
+
 func main() {
 	// 加载配置
 	cfgPath := "configs/config.yaml"
@@ -88,42 +125,14 @@ func main() {
 
 	dropLegacyLogTables(db, zapLogger)
 
+	// 修正存量库上与模型不符的外键。必须先于 AutoMigrate：
+	// 缺失外键交给 AutoMigrate 会隐式整表重建，悬空行还在就会直接失败。
+	if err := repairLegacyForeignKeys(db, zapLogger, foreignKeyBackupPath(cfg.Database.Path)); err != nil {
+		log.Fatalf("外键约束迁移失败: %v", err)
+	}
+
 	// 自动迁移
-	if err := db.AutoMigrate(
-		&model.User{},
-		&model.UserAISetting{},
-		&model.UserIssuePromptSetting{},
-		&model.ApiKey{},
-		&model.Project{},
-		&model.Version{},
-		&model.Issue{},
-		&model.IssueGitHubMeta{},
-		&model.IssueComment{},
-		&model.IssueTimelineEvent{},
-		&model.IssueInternalMeta{},
-		&model.IssueShipHook{},
-		&model.IssueChecklistItem{},
-		&model.IssueSyncState{},
-		&model.IssueReadState{},
-		&model.IssueReadCatchup{},
-		&model.IssueAsset{},
-		&model.IssueDraftAsset{},
-		&model.IssueAttachment{},
-		&model.Artifact{},
-		&model.JWTBlacklist{},
-		&model.RefreshToken{},
-		&model.GitHubRepoLabel{},
-		&model.IssueCollabDocument{},
-		&model.IssuePullRequest{},
-		&model.IssueRecommendation{},
-		&model.RecommendationDependency{},
-		&model.LogRun{},
-		&model.LogRunChunk{},
-		&model.LogEntry{},
-		&model.Document{},
-		&model.ScreenshotScreen{},
-		&model.ScreenshotVersion{},
-	); err != nil {
+	if err := db.AutoMigrate(autoMigrateModels...); err != nil {
 		log.Fatalf("数据库迁移失败: %v", err)
 	}
 
