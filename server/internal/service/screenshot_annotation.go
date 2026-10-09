@@ -50,6 +50,10 @@ const maxScreenshotDecodePixels = 64_000_000
 // 裁剪解码并发闸：预算内单张解码仍可能占用上百 MB，限制并发兜底
 var screenshotCropDecodeSem = make(chan struct{}, 4)
 
+// JPEG 尺寸/EXIF 探测只读文件前缀：SOF 与 APP1 都在头部，256KB 足以覆盖；
+// 配置与解码同扫这个窗口，前缀外缺失统一按「无方向」处理，两条路径结论一致。
+const jpegHeaderScanLimit = 256 * 1024
+
 // ScreenshotAnnotationListFilters 是项目级标注列表的可选过滤项，空值不参与过滤。
 type ScreenshotAnnotationListFilters struct {
 	Status   string
@@ -553,7 +557,11 @@ func decodeScreenshotImage(r io.Reader, mimeType string) (image.Image, error) {
 		if err != nil {
 			return nil, err
 		}
-		return applyJPEGExifOrientation(img, jpegExifOrientation(data)), nil
+		scan := data
+		if len(scan) > jpegHeaderScanLimit {
+			scan = scan[:jpegHeaderScanLimit]
+		}
+		return applyJPEGExifOrientation(img, jpegExifOrientation(scan)), nil
 	case "image/gif":
 		return decodeScreenshotGIF(r)
 	case "image/webp":
@@ -564,17 +572,22 @@ func decodeScreenshotImage(r io.Reader, mimeType string) (image.Image, error) {
 }
 
 // decodeScreenshotGIF 取 GIF 第一帧并合成到逻辑画布：帧的 Bounds 可能小于画布
-// 且带非零偏移，直接用帧尺寸做坐标换算会裁错位置。
+// 且带非零偏移，直接用帧尺寸做坐标换算会裁错位置。画布尺寸走 DecodeConfig、
+// 帧体只 Decode 第一帧——DecodeAll 会解码全部帧，多帧大图能绕过解码像素预算。
 func decodeScreenshotGIF(r io.Reader) (image.Image, error) {
-	g, err := gif.DecodeAll(r)
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return nil, err
 	}
-	if len(g.Image) == 0 {
-		return nil, fmt.Errorf("gif contains no frames")
+	cfg, err := gif.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
 	}
-	frame := g.Image[0]
-	canvasRect := image.Rect(0, 0, g.Config.Width, g.Config.Height)
+	frame, err := gif.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	canvasRect := image.Rect(0, 0, cfg.Width, cfg.Height)
 	if frame.Bounds().Eq(canvasRect) {
 		return frame, nil
 	}
@@ -590,7 +603,7 @@ func decodeScreenshotImageConfig(r io.Reader, mimeType string) (image.Config, er
 	case "image/png":
 		return png.DecodeConfig(r)
 	case "image/jpeg":
-		data, err := io.ReadAll(r)
+		data, err := io.ReadAll(io.LimitReader(r, jpegHeaderScanLimit))
 		if err != nil {
 			return image.Config{}, err
 		}
@@ -698,11 +711,11 @@ func applyJPEGExifOrientation(src image.Image, orientation int) image.Image {
 			case 4:
 				dx, dy = sx, h-1-sy
 			case 5:
-				dx, dy = h-1-sy, w-1-sx
+				dx, dy = sy, sx
 			case 6:
 				dx, dy = h-1-sy, sx
 			case 7:
-				dx, dy = sy, sx
+				dx, dy = h-1-sy, w-1-sx
 			default: // 8
 				dx, dy = sy, w-1-sx
 			}

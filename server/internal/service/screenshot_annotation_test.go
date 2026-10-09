@@ -791,3 +791,60 @@ func TestScreenshotAnnotationServiceCrop_JPEGExifOrientation(t *testing.T) {
 		t.Fatalf("expected red-dominant pixel at top, got r=%d b=%d", r>>8, b>>8)
 	}
 }
+
+// TestApplyJPEGExifOrientation 用 4×2 四象限图（TL 红 / TR 绿 / BL 蓝 / BR 白）
+// 逐方向核对落点：方向 5/7 一个转置一个反转置，曾经写反过。
+func TestApplyJPEGExifOrientation(t *testing.T) {
+	red := color.RGBA{255, 0, 0, 255}
+	green := color.RGBA{0, 200, 0, 255}
+	blue := color.RGBA{0, 0, 255, 255}
+	white := color.RGBA{255, 255, 255, 255}
+
+	src := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 4; x++ {
+			switch {
+			case x < 2 && y == 0:
+				src.Set(x, y, red)
+			case x >= 2 && y == 0:
+				src.Set(x, y, green)
+			case x < 2:
+				src.Set(x, y, blue)
+			default:
+				src.Set(x, y, white)
+			}
+		}
+	}
+
+	cases := []struct {
+		orientation    int
+		w, h           int
+		tl, tr, bl, br color.RGBA
+	}{
+		{1, 4, 2, red, green, blue, white},
+		{2, 4, 2, green, red, white, blue},
+		{3, 4, 2, white, blue, green, red},
+		{4, 4, 2, blue, white, red, green},
+		{5, 2, 4, red, blue, green, white},
+		{6, 2, 4, blue, red, white, green},
+		{7, 2, 4, white, green, blue, red},
+		{8, 2, 4, green, white, red, blue},
+	}
+	for _, tc := range cases {
+		got := applyJPEGExifOrientation(src, tc.orientation)
+		b := got.Bounds()
+		if b.Dx() != tc.w || b.Dy() != tc.h {
+			t.Fatalf("o%d: expected %dx%d, got %v", tc.orientation, tc.w, tc.h, b)
+		}
+		check := func(x, y int, want color.RGBA, name string) {
+			r, g, b2, a := got.At(x, y).RGBA()
+			if uint8(r>>8) != want.R || uint8(g>>8) != want.G || uint8(b2>>8) != want.B || uint8(a>>8) != want.A {
+				t.Fatalf("o%d %s: expected %+v, got (%d,%d,%d,%d)", tc.orientation, name, want, r>>8, g>>8, b2>>8, a>>8)
+			}
+		}
+		check(0, 0, tc.tl, "tl")
+		check(b.Dx()-1, 0, tc.tr, "tr")
+		check(0, b.Dy()-1, tc.bl, "bl")
+		check(b.Dx()-1, b.Dy()-1, tc.br, "br")
+	}
+}
