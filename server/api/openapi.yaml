@@ -5918,11 +5918,13 @@ components:
           maximum: 1
         width:
           type: number
-          exclusiveMinimum: 0
+          minimum: 0
+          exclusiveMinimum: true
           maximum: 1
         height:
           type: number
-          exclusiveMinimum: 0
+          minimum: 0
+          exclusiveMinimum: true
           maximum: 1
           description: x+width ≤ 1 且 y+height ≤ 1，否则 40001
         body:

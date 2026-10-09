@@ -21,6 +21,7 @@ var (
 	ErrInvalidParams              = New(40001, "请求参数无效")
 	ErrTargetBranchNotFound       = New(40002, "目标分支不存在")
 	ErrProjectGitHubNotConfigured = New(40003, "该项目尚未关联 GitHub 仓库")
+	ErrScreenshotImageTooLarge    = New(40004, "截图尺寸超出可处理范围")
 )
 
 // 认证错误 40100-40199

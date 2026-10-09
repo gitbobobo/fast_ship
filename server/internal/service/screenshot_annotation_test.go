@@ -2,6 +2,8 @@ package service
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/gif"
@@ -621,5 +623,171 @@ func TestIssueServiceGet_EmbedsScreenshotAnnotations(t *testing.T) {
 	}
 	if resp.ScreenshotAnnotations != nil {
 		t.Fatalf("expected screenshot_annotations omitted for unlinked issue, got %+v", resp.ScreenshotAnnotations)
+	}
+}
+
+// fakePNGWithDims 只含声明了尺寸的 IHDR 头（无像素数据）：DecodeConfig 能读出
+// 宽高，Decode 会失败——用来测解码前的像素预算，不需要真的分配 3.6GB。
+func fakePNGWithDims(w, h int) []byte {
+	sig := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], uint32(w))
+	binary.BigEndian.PutUint32(ihdr[4:8], uint32(h))
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 2 // truecolor
+	chunk := make([]byte, 4, 12+13)
+	copy(chunk, []byte("IHDR"))
+	chunk = append(chunk, ihdr...)
+	crc := crc32.ChecksumIEEE(chunk[0 : 4+13])
+	out := append(sig, []byte{0, 0, 0, 13}...)
+	out = append(out, chunk...)
+	return append(out, []byte{byte(crc >> 24), byte(crc >> 16), byte(crc >> 8), byte(crc)}...)
+}
+
+// makeOffsetGIF 造一张逻辑画布 100×100、首帧是 (40,40)-(60,60) 偏移子块的 GIF。
+func makeOffsetGIF(t *testing.T) []byte {
+	t.Helper()
+	palette := color.Palette{
+		color.RGBA{0, 0, 0, 255},
+		color.RGBA{200, 40, 40, 255},
+	}
+	frame := image.NewPaletted(image.Rect(40, 40, 60, 60), palette)
+	for i := range frame.Pix {
+		frame.Pix[i] = 1
+	}
+	var buf bytes.Buffer
+	err := gif.EncodeAll(&buf, &gif.GIF{
+		Image:  []*image.Paletted{frame},
+		Delay:  []int{0},
+		Config: image.Config{ColorModel: palette, Width: 100, Height: 100},
+	})
+	if err != nil {
+		t.Fatalf("encode offset gif: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestScreenshotAnnotationServiceCrop_RejectsOversizedImage(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	// 33 字节的头声明 30000×30000（~3.6GB 解码内存），预算外直接拒绝
+	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "big.png", fakePNGWithDims(30000, 30000))
+	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, validAnnotationRequest())
+	if _, err := svc.annotationService.Crop(annotation.Id, user.ID); err != errs.ErrScreenshotImageTooLarge {
+		t.Fatalf("expected ErrScreenshotImageTooLarge, got %v", err)
+	}
+}
+
+func TestScreenshotAnnotationServiceCrop_SubPixelRectKeepsPosition(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "shot.png", makeTestPNG(t, 100, 100))
+
+	// 0.8→0.801 取整后塌成空矩形：要保证至少 1px 且不丢位置
+	req := &CreateScreenshotAnnotationRequest{X: 0.8, Y: 0.8, Width: 0.001, Height: 0.001, Body: "细"}
+	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
+	if annotation.PixelRect == nil {
+		t.Fatalf("expected pixel_rect, got nil")
+	}
+	pr := annotation.PixelRect
+	if pr.X != 80 || pr.Y != 80 || pr.Width < 1 || pr.Height < 1 {
+		t.Fatalf("expected pixel_rect ~(80,80,≥1,≥1), got %+v", pr)
+	}
+	// 裁剪区域 (80,80,1,1)+外边距 8 → 原图 (72,72) 起的 17×17；
+	// encodeTestImage 在 (x,y) 写入 {20+2x, 20+2y, 128, 255}，用像素色验证位置
+	crop := readCropPNG(t, svc, annotation.Id, user.ID)
+	if got := crop.Bounds(); got.Dx() != 17 || got.Dy() != 17 {
+		t.Fatalf("expected 17x17 crop, got %v", got)
+	}
+	if r, g, b, _ := crop.At(0, 0).RGBA(); r>>8 != 164 || g>>8 != 164 || b>>8 != 128 {
+		t.Fatalf("expected crop origin pixel ~(164,164,128) from (72,72), got (%d,%d,%d)", r>>8, g>>8, b>>8)
+	}
+}
+
+func TestScreenshotAnnotationServiceCrop_GIFOffsetFrame(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "a.gif", makeOffsetGIF(t))
+	if uploaded.Version.Width != 100 || uploaded.Version.Height != 100 {
+		t.Fatalf("expected canvas dims 100x100, got %dx%d", uploaded.Version.Width, uploaded.Version.Height)
+	}
+
+	// 标注正好框住偏移帧 (40,40)-(60,60)：按画布坐标换算后裁剪必须成功
+	req := &CreateScreenshotAnnotationRequest{X: 0.4, Y: 0.4, Width: 0.2, Height: 0.2, Body: "帧"}
+	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
+	crop := readCropPNG(t, svc, annotation.Id, user.ID)
+	// 像素矩形 20×20 + 外边距 8 → 36×36（原图 (32,32) 起）；帧内是红色、帧外透明
+	if got := crop.Bounds(); got.Dx() != 36 || got.Dy() != 36 {
+		t.Fatalf("expected 36x36 crop, got %v", got)
+	}
+	if r, g, b, a := crop.At(8, 8).RGBA(); r>>8 != 200 || g>>8 != 40 || b>>8 != 40 || a>>8 != 255 {
+		t.Fatalf("expected frame pixel red at (8,8), got (%d,%d,%d,%d)", r>>8, g>>8, b>>8, a>>8)
+	}
+	if _, _, _, a := crop.At(0, 0).RGBA(); a != 0 {
+		t.Fatalf("expected transparent canvas pixel at (0,0), got alpha=%d", a>>8)
+	}
+}
+
+// makeJPEGWithOrientation 造一张带 EXIF Orientation 标记的 JPEG：左半红、右半蓝，
+// 用像素颜色验证展示方向是否被应用。
+func makeJPEGWithOrientation(t *testing.T, orientation, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			if x < w/2 {
+				img.Set(x, y, color.RGBA{255, 0, 0, 255})
+			} else {
+				img.Set(x, y, color.RGBA{0, 0, 255, 255})
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatalf("encode jpeg: %v", err)
+	}
+	data := buf.Bytes()
+
+	// TIFF（MM 大端）：magic 42，IFD0 偏移 8，一个条目 tag 0x0112 SHORT×1
+	tiff := []byte{
+		'M', 'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08,
+		0x00, 0x01,
+		0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
+		0x00, byte(orientation), 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+	}
+	payload := append([]byte("Exif\x00\x00"), tiff...)
+	segLen := len(payload) + 2
+	app1 := append([]byte{0xFF, 0xE1, byte(segLen >> 8), byte(segLen)}, payload...)
+
+	out := append([]byte{}, data[:2]...)
+	out = append(out, app1...)
+	return append(out, data[2:]...)
+}
+
+func TestScreenshotAnnotationServiceCrop_JPEGExifOrientation(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	// 存储像素 4×2（左红右蓝），方向 6 = 展示时顺时针 90°：展示图 2×4、上半红
+	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "a.jpg", makeJPEGWithOrientation(t, 6, 4, 2))
+	if uploaded.Version.Width != 2 || uploaded.Version.Height != 4 {
+		t.Fatalf("expected oriented dims 2x4, got %dx%d", uploaded.Version.Width, uploaded.Version.Height)
+	}
+
+	// 展示坐标系下框住上半（红色区）：裁剪出来的图顶部必须是红
+	req := &CreateScreenshotAnnotationRequest{X: 0, Y: 0, Width: 1, Height: 0.5, Body: "红"}
+	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
+	crop := readCropPNG(t, svc, annotation.Id, user.ID)
+	if got := crop.Bounds(); got.Dx() != 2 || got.Dy() != 4 {
+		t.Fatalf("expected 2x4 crop, got %v", got)
+	}
+	if r, _, b, _ := crop.At(0, 0).RGBA(); r>>8 <= b>>8 {
+		t.Fatalf("expected red-dominant pixel at top, got r=%d b=%d", r>>8, b>>8)
 	}
 }

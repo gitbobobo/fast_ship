@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
@@ -41,6 +42,13 @@ const (
 	annotationCropMarginRatio = 0.15
 	annotationCropMarginMinPx = 8
 )
+
+// 裁剪解码的像素上限（约 64MP，8K 截图约 33MP）：压缩体积上限管不住
+// 解码后内存，一张声明 30000×30000 的 PNG 解码要 ~3.6GB
+const maxScreenshotDecodePixels = 64_000_000
+
+// 裁剪解码并发闸：预算内单张解码仍可能占用上百 MB，限制并发兜底
+var screenshotCropDecodeSem = make(chan struct{}, 4)
 
 // ScreenshotAnnotationListFilters 是项目级标注列表的可选过滤项，空值不参与过滤。
 type ScreenshotAnnotationListFilters struct {
@@ -297,11 +305,23 @@ func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.
 		return nil, errs.ErrScreenshotAnnotationNotFound
 	}
 
+	// 解码前按文件头尺寸做像素预算校验；头部都读不出来时像素解码同样会失败
+	imgW, imgH := resolveScreenshotVersionDims(s.storage, version)
+	if imgW <= 0 || imgH <= 0 {
+		return nil, errs.ErrInternal
+	}
+	if int64(imgW)*int64(imgH) > maxScreenshotDecodePixels {
+		return nil, errs.ErrScreenshotImageTooLarge
+	}
+
 	reader, err := s.storage.Get(version.FilePath)
 	if err != nil {
 		return nil, errs.ErrScreenshotAnnotationNotFound
 	}
 	defer reader.Close()
+
+	screenshotCropDecodeSem <- struct{}{}
+	defer func() { <-screenshotCropDecodeSem }()
 
 	src, err := decodeScreenshotImage(reader, version.MimeType)
 	if err != nil {
@@ -480,13 +500,27 @@ func validAnnotationRect(x, y, w, h float64) bool {
 	return x+w <= 1+annotationCoordEpsilon && y+h <= 1+annotationCoordEpsilon
 }
 
-// annotationPixelRect 把比例矩形换算为原图坐标系像素矩形：
-// 矩形四角按比例换算后取整（先算右/下边缘再求差），保证结果始终落在图内。
+// annotationPixelRect 把比例矩形换算为原图坐标系像素矩形：四边缘四舍五入；
+// 亚像素矩形塌成空矩形时至少保留 1px 且不丢位置，最后收进图片边界。
 func annotationPixelRect(a *model.ScreenshotAnnotation, imgW, imgH int) image.Rectangle {
 	x1 := int(math.Round(a.X * float64(imgW)))
 	y1 := int(math.Round(a.Y * float64(imgH)))
 	x2 := int(math.Round((a.X + a.Width) * float64(imgW)))
 	y2 := int(math.Round((a.Y + a.Height) * float64(imgH)))
+	if x2 <= x1 {
+		x2 = x1 + 1
+	}
+	if y2 <= y1 {
+		y2 = y1 + 1
+	}
+	if x2 > imgW {
+		x2 = imgW
+		x1 = imgW - 1
+	}
+	if y2 > imgH {
+		y2 = imgH
+		y1 = imgH - 1
+	}
 	return image.Rect(x1, y1, x2, y2).Intersect(image.Rect(0, 0, imgW, imgH))
 }
 
@@ -503,16 +537,25 @@ func annotationCropMargin(rect image.Rectangle) int {
 	return margin
 }
 
-// decodeScreenshotImage 按存储 mime 解码原图：png/jpeg 走标准库，
-// gif 取第一帧（gif.Decode 即第一帧），webp 走 x/image。
+// decodeScreenshotImage 按存储 mime 解码原图：png/jpeg 走标准库，webp 走
+// x/image；gif 第一帧可能只是逻辑画布上的偏移子块，先合成到画布再返回；
+// jpeg 按 EXIF Orientation 转到展示方向，与浏览器渲染一致。
 func decodeScreenshotImage(r io.Reader, mimeType string) (image.Image, error) {
 	switch mimeType {
 	case "image/png":
 		return png.Decode(r)
 	case "image/jpeg":
-		return jpeg.Decode(r)
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return nil, err
+		}
+		img, err := jpeg.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		return applyJPEGExifOrientation(img, jpegExifOrientation(data)), nil
 	case "image/gif":
-		return gif.Decode(r)
+		return decodeScreenshotGIF(r)
 	case "image/webp":
 		return webp.Decode(r)
 	default:
@@ -520,13 +563,45 @@ func decodeScreenshotImage(r io.Reader, mimeType string) (image.Image, error) {
 	}
 }
 
+// decodeScreenshotGIF 取 GIF 第一帧并合成到逻辑画布：帧的 Bounds 可能小于画布
+// 且带非零偏移，直接用帧尺寸做坐标换算会裁错位置。
+func decodeScreenshotGIF(r io.Reader) (image.Image, error) {
+	g, err := gif.DecodeAll(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(g.Image) == 0 {
+		return nil, fmt.Errorf("gif contains no frames")
+	}
+	frame := g.Image[0]
+	canvasRect := image.Rect(0, 0, g.Config.Width, g.Config.Height)
+	if frame.Bounds().Eq(canvasRect) {
+		return frame, nil
+	}
+	canvas := image.NewRGBA(canvasRect)
+	draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
+	return canvas, nil
+}
+
 // decodeScreenshotImageConfig 与 decodeScreenshotImage 同分派，只取尺寸不解码像素。
+// jpeg 返回的是 EXIF 方向应用后的展示尺寸：方向 5-8 会交换宽高，与浏览器所见一致。
 func decodeScreenshotImageConfig(r io.Reader, mimeType string) (image.Config, error) {
 	switch mimeType {
 	case "image/png":
 		return png.DecodeConfig(r)
 	case "image/jpeg":
-		return jpeg.DecodeConfig(r)
+		data, err := io.ReadAll(r)
+		if err != nil {
+			return image.Config{}, err
+		}
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
+		if err != nil {
+			return image.Config{}, err
+		}
+		if o := jpegExifOrientation(data); o >= 5 && o <= 8 {
+			cfg.Width, cfg.Height = cfg.Height, cfg.Width
+		}
+		return cfg, nil
 	case "image/gif":
 		return gif.DecodeConfig(r)
 	case "image/webp":
@@ -534,6 +609,107 @@ func decodeScreenshotImageConfig(r io.Reader, mimeType string) (image.Config, er
 	default:
 		return image.Config{}, fmt.Errorf("unsupported screenshot mime type %q", mimeType)
 	}
+}
+
+// jpegExifOrientation 解析 JPEG 段中的 APP1/Exif Orientation 标记；缺失或格式
+// 不符返回 0（等价于不旋转）。扫描到 SOS 或数据耗尽为止。
+func jpegExifOrientation(data []byte) int {
+	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
+		return 0
+	}
+	pos := 2
+	for pos+4 <= len(data) {
+		if data[pos] != 0xff {
+			return 0
+		}
+		marker := data[pos+1]
+		if marker == 0x01 || marker == 0xd8 || (marker >= 0xd0 && marker <= 0xd9) {
+			pos += 2 // 无负载标记（TEM/SOI/RSTn/EOI）
+			continue
+		}
+		segLen := int(binary.BigEndian.Uint16(data[pos+2:]))
+		if segLen < 2 || pos+2+segLen > len(data) {
+			return 0
+		}
+		payload := data[pos+4 : pos+2+segLen]
+		if marker == 0xe1 && len(payload) >= 6 && string(payload[:6]) == "Exif\x00\x00" {
+			return parseExifOrientation(payload[6:])
+		}
+		pos += 2 + segLen
+	}
+	return 0
+}
+
+// parseExifOrientation 读 TIFF 头 IFD0 中的 Orientation(0x0112) SHORT 值。
+func parseExifOrientation(tiff []byte) int {
+	if len(tiff) < 8 {
+		return 0
+	}
+	var order binary.ByteOrder
+	switch string(tiff[:2]) {
+	case "II":
+		order = binary.LittleEndian
+	case "MM":
+		order = binary.BigEndian
+	default:
+		return 0
+	}
+	if order.Uint16(tiff[2:]) != 42 {
+		return 0
+	}
+	ifd := int(order.Uint32(tiff[4:]))
+	if ifd < 0 || ifd+2 > len(tiff) {
+		return 0
+	}
+	count := int(order.Uint16(tiff[ifd:]))
+	for i := 0; i < count; i++ {
+		entry := ifd + 2 + i*12
+		if entry+12 > len(tiff) {
+			return 0
+		}
+		if order.Uint16(tiff[entry:]) == 0x0112 {
+			return int(order.Uint16(tiff[entry+8:]))
+		}
+	}
+	return 0
+}
+
+// applyJPEGExifOrientation 按 EXIF Orientation(1-8) 把存储方向的像素重排成展示
+// 方向：2-4 为镜像/翻转，5-8 为含转置的旋转。0/1/越界值原样返回。
+func applyJPEGExifOrientation(src image.Image, orientation int) image.Image {
+	if orientation < 2 || orientation > 8 {
+		return src
+	}
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dw, dh := w, h
+	if orientation >= 5 {
+		dw, dh = h, w
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for sy := 0; sy < h; sy++ {
+		for sx := 0; sx < w; sx++ {
+			var dx, dy int
+			switch orientation {
+			case 2:
+				dx, dy = w-1-sx, sy
+			case 3:
+				dx, dy = w-1-sx, h-1-sy
+			case 4:
+				dx, dy = sx, h-1-sy
+			case 5:
+				dx, dy = h-1-sy, w-1-sx
+			case 6:
+				dx, dy = h-1-sy, sx
+			case 7:
+				dx, dy = sy, sx
+			default: // 8
+				dx, dy = sy, w-1-sx
+			}
+			dst.Set(dx, dy, src.At(b.Min.X+sx, b.Min.Y+sy))
+		}
+	}
+	return dst
 }
 
 // cropScreenshot 取图：解码结果均为带 SubImage 的具体类型；兜底 draw 拷贝以防未来格式不支持。
