@@ -44,6 +44,24 @@ func (e PrTokenSourceKind) Valid() bool {
 	}
 }
 
+// Defines values for ScreenshotAnnotationStatus.
+const (
+	Open     ScreenshotAnnotationStatus = "open"
+	Resolved ScreenshotAnnotationStatus = "resolved"
+)
+
+// Valid indicates whether the value is a known member of the ScreenshotAnnotationStatus enum.
+func (e ScreenshotAnnotationStatus) Valid() bool {
+	switch e {
+	case Open:
+		return true
+	case Resolved:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UpdateIssueRequestStateReason.
 const (
 	UpdateIssueRequestStateReasonCompleted  UpdateIssueRequestStateReason = "completed"
@@ -328,6 +346,21 @@ type CreateProjectRequest struct {
 	SourceProjectId *string `json:"source_project_id,omitempty"`
 }
 
+// CreateScreenshotAnnotationRequest defines model for CreateScreenshotAnnotationRequest.
+type CreateScreenshotAnnotationRequest struct {
+	// Body 标注文字（1~1000 字符）
+	Body string `json:"body"`
+
+	// Height x+width ≤ 1 且 y+height ≤ 1，否则 40001
+	Height float32 `json:"height"`
+
+	// IssueId 可选；关联本项目内 Issue，缺省或空串 = 不关联
+	IssueId *string `json:"issue_id,omitempty"`
+	Width   float32 `json:"width"`
+	X       float32 `json:"x"`
+	Y       float32 `json:"y"`
+}
+
 // CreateVersionRequest defines model for CreateVersionRequest.
 type CreateVersionRequest struct {
 	// ReleaseNotes Release 说明；发货前必填
@@ -455,6 +488,9 @@ type Issue struct {
 
 	// Reference 短编号；github 为 GH-<number>，internal 为 INT-<sequence_number>
 	Reference string `json:"reference"`
+
+	// ScreenshotAnnotations omitempty；仅 Issue 详情响应携带（无关联标注时缺省）；列表项不出现
+	ScreenshotAnnotations []ScreenshotAnnotation `json:"screenshot_annotations,omitempty"`
 
 	// SequenceNumber 项目内自增序号（reference 的 INT-n 来源）
 	SequenceNumber int `json:"sequence_number"`
@@ -1093,6 +1129,88 @@ type RegisterRequest struct {
 	Username string `binding:"required,min=2,max=50" json:"username"`
 }
 
+// ScreenshotAnnotation 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+type ScreenshotAnnotation struct {
+	// Body 标注文字
+	Body      string `json:"body"`
+	CreatedAt string `json:"created_at"`
+
+	// CreatedBy 用户名或 "API Key: <name>"
+	CreatedBy string `json:"created_by"`
+
+	// CropUrl /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token=
+	CropUrl string `json:"crop_url"`
+
+	// Height 框选矩形高 / 图高（0~1）
+	Height float32 `json:"height"`
+	Id     string  `json:"id"`
+
+	// ImageHeight 原图高像素；0 表示未知
+	ImageHeight int `json:"image_height"`
+
+	// ImageUrl 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img>
+	ImageUrl string `json:"image_url"`
+
+	// ImageWidth 原图宽像素；0 表示未知（存量版本未记录尺寸）
+	ImageWidth int `json:"image_width"`
+
+	// IsLatestVersion 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看）
+	IsLatestVersion bool `json:"is_latest_version"`
+
+	// IssueId 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注
+	IssueId *string `json:"issue_id"`
+
+	// IssueReference 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null
+	IssueReference *string `json:"issue_reference"`
+
+	// IssueTitle 关联 Issue 的标题；未关联为 null
+	IssueTitle *string `json:"issue_title"`
+
+	// PixelRect 由比例坐标 × 原图尺寸换算的像素矩形；原图尺寸未知时为 null
+	PixelRect *ScreenshotAnnotationRect `json:"pixel_rect"`
+	ProjectId string                    `json:"project_id"`
+
+	// ResolvedAt 最近一次标为已解决的时间；open 状态为 null
+	ResolvedAt *string `json:"resolved_at"`
+
+	// ScreenGroup 界面分组；空串表示未分组
+	ScreenGroup string `json:"screen_group"`
+
+	// ScreenId 所属界面 ID（由版本冗余带出，便于过滤）
+	ScreenId  string `json:"screen_id"`
+	ScreenKey string `json:"screen_key"`
+
+	// ScreenTitle 界面显示名；空串时客户端回退展示 screen_key
+	ScreenTitle string `json:"screen_title"`
+
+	// Status open=未解决，resolved=已解决
+	Status    ScreenshotAnnotationStatus `json:"status"`
+	UpdatedAt string                     `json:"updated_at"`
+
+	// VersionId 标注挂在该版本上；版本删除时标注级联删除
+	VersionId string `json:"version_id"`
+
+	// Width 框选矩形宽 / 图宽（0~1）
+	Width float32 `json:"width"`
+
+	// X 框选矩形左上角横坐标 / 图宽（0~1）
+	X float32 `json:"x"`
+
+	// Y 框选矩形左上角纵坐标 / 图高（0~1）
+	Y float32 `json:"y"`
+}
+
+// ScreenshotAnnotationRect 像素矩形（原图坐标系）
+type ScreenshotAnnotationRect struct {
+	Height int `json:"height"`
+	Width  int `json:"width"`
+	X      int `json:"x"`
+	Y      int `json:"y"`
+}
+
+// ScreenshotAnnotationStatus open=未解决，resolved=已解决
+type ScreenshotAnnotationStatus string
+
 // ScreenshotScreen defines model for ScreenshotScreen.
 type ScreenshotScreen struct {
 	CreatedAt string `json:"created_at"`
@@ -1177,7 +1295,10 @@ type ScreenshotVersion struct {
 	ContentUrl string `json:"content_url"`
 	FileName   string `json:"file_name"`
 	FileSize   int64  `json:"file_size"`
-	Id         string `json:"id"`
+
+	// Height 原图高像素；0 表示未知
+	Height int    `json:"height"`
+	Id     string `json:"id"`
 
 	// MimeType 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一）
 	MimeType   string `json:"mime_type"`
@@ -1187,6 +1308,9 @@ type ScreenshotVersion struct {
 
 	// UploadedBy 用户名或 "API Key: <name>"
 	UploadedBy string `json:"uploaded_by"`
+
+	// Width 原图宽像素；0 表示未知（历史存量版本未记录尺寸）
+	Width int `json:"width"`
 }
 
 // ShipCheck defines model for ShipCheck.
@@ -1303,6 +1427,19 @@ type UpdateProjectRequest struct {
 	// RepositoryUrl 同创建；变更仓库且项目无 token 时须提供 token
 	RepositoryUrl   *string `json:"repository_url,omitempty"`
 	SourceProjectId *string `json:"source_project_id,omitempty"`
+}
+
+// UpdateScreenshotAnnotationRequest 指针语义：字段出现才更新，都不传返回 40001。
+// JWT 可更新全部字段；API Key 只允许传 `{"status":"resolved"}`，其余字段或 status=open 返回 40301。
+type UpdateScreenshotAnnotationRequest struct {
+	// Body 标注文字（1~1000 字符）
+	Body *string `json:"body,omitempty"`
+
+	// IssueId 空串=解除关联；非空须为本项目内 Issue（否则 40001）；不传或传 null = 保持不变
+	IssueId *string `json:"issue_id,omitempty"`
+
+	// Status open=未解决，resolved=已解决
+	Status *ScreenshotAnnotationStatus `json:"status,omitempty"`
 }
 
 // UpdateScreenshotScreenRequest 两字段均可选，出现才更新；都不传返回 40001
@@ -1460,6 +1597,9 @@ type QueryToken = string
 
 // RunId defines model for RunId.
 type RunId = string
+
+// ScreenshotAnnotationId defines model for ScreenshotAnnotationId.
+type ScreenshotAnnotationId = string
 
 // ScreenshotScreenId defines model for ScreenshotScreenId.
 type ScreenshotScreenId = string
@@ -2401,6 +2541,33 @@ type UploadLogs200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListScreenshotAnnotationsParams defines parameters for ListScreenshotAnnotations.
+type ListScreenshotAnnotationsParams struct {
+	// Status 按状态过滤；缺省返回全部状态
+	Status *ScreenshotAnnotationStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// IssueId 只返回关联该 Issue 的标注（UUID）
+	IssueId *string `form:"issue_id,omitempty" json:"issue_id,omitempty"`
+
+	// ScreenId 只返回该界面（含全部历史版本）上的标注
+	ScreenId *string `form:"screen_id,omitempty" json:"screen_id,omitempty"`
+}
+
+// ListScreenshotAnnotations200JSONResponseBody_Data defines parameters for ListScreenshotAnnotations.
+type ListScreenshotAnnotations200JSONResponseBody_Data struct {
+	Items []ScreenshotAnnotation `json:"items"`
+}
+
+// ListScreenshotAnnotations200JSONResponseBody defines parameters for ListScreenshotAnnotations.
+type ListScreenshotAnnotations200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                                `json:"code"`
+	Data *ListScreenshotAnnotations200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListScreenshotScreens200JSONResponseBody_Data defines parameters for ListScreenshotScreens.
 type ListScreenshotScreens200JSONResponseBody_Data struct {
 	Items []ScreenshotScreenListItem `json:"items"`
@@ -2507,6 +2674,30 @@ type ListIssueRecommendations200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// UpdateScreenshotAnnotation200JSONResponseBody defines parameters for UpdateScreenshotAnnotation.
+type UpdateScreenshotAnnotation200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+	Data *ScreenshotAnnotation `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetScreenshotAnnotationCropParams defines parameters for GetScreenshotAnnotationCrop.
+type GetScreenshotAnnotationCropParams struct {
+	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
+	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
+}
+
+// GetScreenshotAnnotationCropHeadParams defines parameters for GetScreenshotAnnotationCropHead.
+type GetScreenshotAnnotationCropHeadParams struct {
+	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
+	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
+}
+
 // GetScreenshotScreen200JSONResponseBody defines parameters for GetScreenshotScreen.
 type GetScreenshotScreen200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -2522,6 +2713,18 @@ type UpdateScreenshotScreen200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                     `json:"code"`
 	Data *ScreenshotScreenDetail `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateScreenshotAnnotation200JSONResponseBody defines parameters for CreateScreenshotAnnotation.
+type CreateScreenshotAnnotation200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+	Data *ScreenshotAnnotation `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -2700,8 +2903,14 @@ type UploadScreenshotMultipartRequestBody UploadScreenshotMultipartBody
 // CreateVersionJSONRequestBody defines body for CreateVersion for application/json ContentType.
 type CreateVersionJSONRequestBody = CreateVersionRequest
 
+// UpdateScreenshotAnnotationJSONRequestBody defines body for UpdateScreenshotAnnotation for application/json ContentType.
+type UpdateScreenshotAnnotationJSONRequestBody = UpdateScreenshotAnnotationRequest
+
 // UpdateScreenshotScreenJSONRequestBody defines body for UpdateScreenshotScreen for application/json ContentType.
 type UpdateScreenshotScreenJSONRequestBody = UpdateScreenshotScreenRequest
+
+// CreateScreenshotAnnotationJSONRequestBody defines body for CreateScreenshotAnnotation for application/json ContentType.
+type CreateScreenshotAnnotationJSONRequestBody = CreateScreenshotAnnotationRequest
 
 // UpdateVersionJSONRequestBody defines body for UpdateVersion for application/json ContentType.
 type UpdateVersionJSONRequestBody = UpdateVersionRequest
