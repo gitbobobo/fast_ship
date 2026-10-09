@@ -83,7 +83,7 @@
 
 Issue 详情响应内嵌 `screenshot_annotations`（`IssueService.Get`，无关联时缺省）；项目级列表与 Issue 内嵌共用 `assembleScreenshotAnnotations` 组装：关联行（版本/界面/最新版本）经 `ScreenshotAnnotationRepository.LoadRelated` 批量取回，`issue_id → Issue` 批量查 `issueRepo.ListByIDs`（含 GitHubMeta 供 `issue_reference` 生成）。`image_width`/`image_height` 优先取版本落库值，存量行（0）惰性解码文件头，仍失败输出 0 且 `pixel_rect=null`。
 
-裁剪图（`Crop`）：解码前先按文件头尺寸做像素预算校验（`maxScreenshotDecodePixels` ≈ 64MP，超限 40004 `ErrScreenshotImageTooLarge`——压缩体积上限管不住解码后内存），且包级信号量限 4 并发解码；按存储 mime 分派解码——png/jpeg 标准库、gif 把第一帧按偏移合成到逻辑画布（`gif.DecodeAll`；首帧 Bounds 可能是画布上的偏移子块，直接用帧尺寸会裁错位置）、webp 走 `golang.org/x/image/webp`；`SubImage` 取样后统一 `png.Encode` 输出，不落盘不缓存。
+裁剪图（`Crop`）：解码前先按文件头尺寸做像素预算校验（`maxScreenshotDecodePixels` ≈ 64MP，超限 40004 `ErrScreenshotImageTooLarge`——压缩体积上限管不住解码后内存），且包级信号量限 4 并发解码；按存储 mime 分派解码——png/jpeg 标准库、gif 用 `gif.Decode` 只取第一帧再按偏移合成到逻辑画布（`DecodeAll` 会把全部帧解码进内存，多帧大图能绕过单帧预算；首帧 Bounds 可能是画布上的偏移子块，直接用帧尺寸会裁错位置）、webp 走 `golang.org/x/image/webp`；`SubImage` 取样后统一 `png.Encode` 输出，不落盘不缓存。JPEG 的尺寸/EXIF 探测走 `jpegScanHeader` 逐段跳到 SOF（跳过非目标段负载，容忍 0xFF 填充），不整文件入内存。
 
 ## 上传语义
 

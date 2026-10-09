@@ -50,10 +50,6 @@ const maxScreenshotDecodePixels = 64_000_000
 // 裁剪解码并发闸：预算内单张解码仍可能占用上百 MB，限制并发兜底
 var screenshotCropDecodeSem = make(chan struct{}, 4)
 
-// JPEG 尺寸/EXIF 探测只读文件前缀：SOF 与 APP1 都在头部，256KB 足以覆盖；
-// 配置与解码同扫这个窗口，前缀外缺失统一按「无方向」处理，两条路径结论一致。
-const jpegHeaderScanLimit = 256 * 1024
-
 // ScreenshotAnnotationListFilters 是项目级标注列表的可选过滤项，空值不参与过滤。
 type ScreenshotAnnotationListFilters struct {
 	Status   string
@@ -557,11 +553,7 @@ func decodeScreenshotImage(r io.Reader, mimeType string) (image.Image, error) {
 		if err != nil {
 			return nil, err
 		}
-		scan := data
-		if len(scan) > jpegHeaderScanLimit {
-			scan = scan[:jpegHeaderScanLimit]
-		}
-		return applyJPEGExifOrientation(img, jpegExifOrientation(scan)), nil
+		return applyJPEGExifOrientation(img, jpegExifOrientation(data)), nil
 	case "image/gif":
 		return decodeScreenshotGIF(r)
 	case "image/webp":
@@ -603,15 +595,11 @@ func decodeScreenshotImageConfig(r io.Reader, mimeType string) (image.Config, er
 	case "image/png":
 		return png.DecodeConfig(r)
 	case "image/jpeg":
-		data, err := io.ReadAll(io.LimitReader(r, jpegHeaderScanLimit))
+		cfg, orientation, err := jpegScanHeader(r)
 		if err != nil {
 			return image.Config{}, err
 		}
-		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
-		if err != nil {
-			return image.Config{}, err
-		}
-		if o := jpegExifOrientation(data); o >= 5 && o <= 8 {
+		if orientation >= 5 && orientation <= 8 {
 			cfg.Width, cfg.Height = cfg.Height, cfg.Width
 		}
 		return cfg, nil
@@ -624,33 +612,83 @@ func decodeScreenshotImageConfig(r io.Reader, mimeType string) (image.Config, er
 	}
 }
 
-// jpegExifOrientation 解析 JPEG 段中的 APP1/Exif Orientation 标记；缺失或格式
-// 不符返回 0（等价于不旋转）。扫描到 SOS 或数据耗尽为止。
+// jpegScanHeader 走 JPEG 段结构直到 SOF：返回 SOF 声明的宽高与途中遇到的
+// APP1/Exif Orientation。非目标段只跳负载不落内存（APP1 段长上限 64KB），
+// 段前缀允许 0xFF 填充字节；找不到 SOF 报错。探测与解码共用此扫描，结论一致。
+func jpegScanHeader(r io.Reader) (image.Config, int, error) {
+	var magic [2]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil || magic[0] != 0xff || magic[1] != 0xd8 {
+		return image.Config{}, 0, fmt.Errorf("not a jpeg stream")
+	}
+	orientation := 0
+	var one [1]byte
+	for {
+		// 段前缀 0xFF 前允许任意填充字节；标记本身也可能跟 0xFF 填充（FF FF E1 合法）
+		for {
+			if _, err := io.ReadFull(r, one[:]); err != nil {
+				return image.Config{}, 0, err
+			}
+			if one[0] == 0xff {
+				break
+			}
+		}
+		for {
+			if _, err := io.ReadFull(r, one[:]); err != nil {
+				return image.Config{}, 0, err
+			}
+			if one[0] != 0xff {
+				break
+			}
+		}
+		marker := one[0]
+		if marker == 0x01 || (marker >= 0xd0 && marker <= 0xd9) {
+			continue // TEM/RSTn/SOI/EOI 无负载
+		}
+		var lenBuf [2]byte
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return image.Config{}, 0, err
+		}
+		payloadLen := int(binary.BigEndian.Uint16(lenBuf[:])) - 2
+		if payloadLen < 0 {
+			return image.Config{}, 0, fmt.Errorf("invalid jpeg segment length")
+		}
+		switch {
+		// SOFn 帧标记（排除 DHT C4 / JPG C8 / DAC CC）：精度(1)+高(2)+宽(2)
+		case marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc:
+			head := make([]byte, 5)
+			if _, err := io.ReadFull(r, head); err != nil {
+				return image.Config{}, 0, err
+			}
+			return image.Config{
+				Height: int(binary.BigEndian.Uint16(head[1:])),
+				Width:  int(binary.BigEndian.Uint16(head[3:])),
+			}, orientation, nil
+		case marker == 0xe1 && orientation == 0:
+			payload := make([]byte, payloadLen)
+			if _, err := io.ReadFull(r, payload); err != nil {
+				return image.Config{}, 0, err
+			}
+			if len(payload) >= 6 && string(payload[:6]) == "Exif\x00\x00" {
+				orientation = parseExifOrientation(payload[6:])
+			}
+		case marker == 0xda:
+			return image.Config{}, 0, fmt.Errorf("jpeg SOF not found before SOS")
+		default:
+			if _, err := io.CopyN(io.Discard, r, int64(payloadLen)); err != nil {
+				return image.Config{}, 0, err
+			}
+		}
+	}
+}
+
+// jpegExifOrientation 返回 JPEG 展示方向的 EXIF 标记；缺失/非法返回 0。
+// 与 jpegScanHeader 同路径扫描（止于 SOF），保证探测与解码口径一致。
 func jpegExifOrientation(data []byte) int {
-	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 {
+	_, orientation, err := jpegScanHeader(bytes.NewReader(data))
+	if err != nil {
 		return 0
 	}
-	pos := 2
-	for pos+4 <= len(data) {
-		if data[pos] != 0xff {
-			return 0
-		}
-		marker := data[pos+1]
-		if marker == 0x01 || marker == 0xd8 || (marker >= 0xd0 && marker <= 0xd9) {
-			pos += 2 // 无负载标记（TEM/SOI/RSTn/EOI）
-			continue
-		}
-		segLen := int(binary.BigEndian.Uint16(data[pos+2:]))
-		if segLen < 2 || pos+2+segLen > len(data) {
-			return 0
-		}
-		payload := data[pos+4 : pos+2+segLen]
-		if marker == 0xe1 && len(payload) >= 6 && string(payload[:6]) == "Exif\x00\x00" {
-			return parseExifOrientation(payload[6:])
-		}
-		pos += 2 + segLen
-	}
-	return 0
+	return orientation
 }
 
 // parseExifOrientation 读 TIFF 头 IFD0 中的 Orientation(0x0112) SHORT 值。
