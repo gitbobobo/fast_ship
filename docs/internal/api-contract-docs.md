@@ -57,9 +57,17 @@
 仍保留手写的例外：
 
 - `service.UpdateDocumentRequest` 与 handler 的 `updateDocumentRequest`：`parent_id` 需要 省略/null/字符串 三态，生成类型的 `*string` 表达不了，handler 用 `json.RawMessage` 旁路捕获。
-- handler 的 `updateMeInput`/`updateProjectInput`（对应 `api.UpdateProfileRequest`/`api.UpdateProjectRequest`）：字段指针化后 `binding:"omitempty"` 不再跳过显式空串，`{"username":""}` 会误触发校验。手写 `string + binding:"omitempty,..."` 输入结构绑定，再经 `api.NonEmpty` 折回 nil。
+- handler 的 `updateMeInput`/`updateProjectInput`（对应 `api.UpdateProfileRequest`/`api.UpdateProjectRequest`）：字段指针化后 `binding:"omitempty"` 不再跳过显式空串，`{"username":""}` 会误触发校验。手写输入结构绑定，name 等仍 `string + binding:"omitempty,..."` 经 `api.NonEmpty` 折回 nil；`updateProjectInput` 里 description 和 token 类字段另有语义，见下节。
 - `service.ShipResult`：内嵌 `api.ShipResult` 加一个 `json:"-"` 的内部字段。
 - `ListLogEntriesRequest`/`ListLogRunsRequest`/`IssueListFilters`：query 参数过滤结构，不是 JSON 载荷。
 - `minimaxChatRequest`/`minimaxChatResponse`：出向 MiniMax 调用的载荷，不属于本 API 契约。
 
 新代码默认直接用 `api` 包的类型；仅当绑定/序列化语义与生成类型不等价时，按上面的例外模式手写并在注释里说明原因。
+
+## 更新请求的字段提供语义
+
+`PUT /projects/{id}` 的 `updateProjectInput` 一个结构里并存三种「是否提供」的判定：
+
+- **普通可选字段**（`repository_url`、`github_token`、`source_project_id`）：`string` 绑定 + `api.NonEmpty`，空串与缺省同义（不修改）。
+- **`description`**：`*string` 直传 service，三态——key 缺省或显式 `null` 都解为 nil，保留现值；显式 `""` 清空；非空替换。不能走 `api.NonEmpty`，否则空串被折成 nil，清空不可达（INT-67 的教训之一；另一教训是 service 漏写 `project.Description`，靠 handler→SQLite 全链路回归用例兜底）。
+- **token 类字段**（`github_pr_token`、`clear_github_pr_token`、`pr_token_source_project_id`、`pr_token_source_kind`）：`json.RawMessage` 旁路，按「JSON key 是否出现」判 presence，显式 `null` 也算提供——互斥校验（clear 与 token/source 同现即 40001）和 kind「提供即须合法」依赖这一区分。description 相反：它的显式 `null` 不算提供，因为 `*string` 本就区分不了，业务上也无需区分。

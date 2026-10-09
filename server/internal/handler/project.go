@@ -100,8 +100,11 @@ type createProjectInput struct {
 	PRTokenSourceKind      json.RawMessage `json:"pr_token_source_kind"`
 }
 
-// updateProjectInput 保留基线的 string+omitempty 绑定语义，原因同
-// updateMeInput：生成类型 *string 无法对显式空串走 omitempty 跳过。
+// updateProjectInput 保留手写绑定，各字段按所需语义选形态：
+// name 沿用 string+omitempty——生成类型 *string 无法对显式空串走 omitempty
+// 跳过校验（原因同 updateMeInput）；description 改为 *string 三态直传——
+// 缺省与显式 null 都是 nil（保留现值），显式 "" 清空，非空替换，不经
+// api.NonEmpty（它会把空串折成 nil，清空不可达）。
 // GithubPRToken/ClearGithubPRToken/PRTokenSourceProjectID 用 RawMessage 旁路
 // 捕获：互斥校验依赖「字段是否显式提供」，显式 null 也算提供——*string/*bool
 // 会把 null 折成 nil，与缺省不可区分。PRTokenSourceKind 同法捕获 presence，
@@ -109,7 +112,7 @@ type createProjectInput struct {
 // 模式同 updateDocumentRequest 的 parent_id。
 type updateProjectInput struct {
 	Name                   string          `json:"name" binding:"omitempty,min=1,max=100"`
-	Description            string          `json:"description"`
+	Description            *string         `json:"description"`
 	RepositoryURL          string          `json:"repository_url"`
 	GithubToken            string          `json:"github_token"`
 	GithubPRToken          json.RawMessage `json:"github_pr_token"`
@@ -187,7 +190,7 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 	userID := middleware.GetUserID(c)
 	result, err := h.projectService.Update(id, userID, &service.UpdateProjectRequest{
 		Name:                   api.NonEmpty(input.Name),
-		Description:            api.NonEmpty(input.Description),
+		Description:            input.Description,
 		RepositoryUrl:          api.NonEmpty(input.RepositoryURL),
 		GithubToken:            api.NonEmpty(input.GithubToken),
 		GithubPrToken:          prToken,

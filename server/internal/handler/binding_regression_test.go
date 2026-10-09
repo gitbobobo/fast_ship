@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 )
@@ -197,6 +198,93 @@ func TestBatchCloseDone_EmptySourceIsDefault(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for explicit empty source, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// description 三态（INT-67 回归）：缺省与显式 null 都保留现值，显式 ""
+// 清空，非空替换；响应体与库内读回一致。string+api.NonEmpty 会把空串折成
+// nil 使清空不可达，service 曾漏赋值则连非空替换都不生效。
+func TestProjectUpdate_DescriptionSemantics(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-proj-desc")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	put := func(t *testing.T, body string) (api.Project, model.Project) {
+		t.Helper()
+		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
+		ctx.Params = ginParams("id", project.ID)
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Update(ctx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+		var resp api.Project
+		decodeEnvelope(t, rec, &resp)
+		var stored model.Project
+		if err := env.db.Where("id = ?", project.ID).First(&stored).Error; err != nil {
+			t.Fatalf("reload project: %v", err)
+		}
+		return resp, stored
+	}
+
+	resp, stored := put(t, `{"description":"新描述"}`)
+	if resp.Description != "新描述" || stored.Description != "新描述" {
+		t.Fatalf("expected 新描述, got resp=%q stored=%q", resp.Description, stored.Description)
+	}
+
+	resp, stored = put(t, `{"description":""}`)
+	if resp.Description != "" || stored.Description != "" {
+		t.Fatalf("expected cleared description, got resp=%q stored=%q", resp.Description, stored.Description)
+	}
+
+	resp, stored = put(t, `{"description":"保留我"}`)
+	if stored.Description != "保留我" {
+		t.Fatalf("setup for preserve cases failed, stored=%q", stored.Description)
+	}
+
+	for _, body := range []string{
+		`{}`,
+		`{"description":null}`,
+	} {
+		resp, stored = put(t, body)
+		if resp.Description != "保留我" || stored.Description != "保留我" {
+			t.Fatalf("expected preserved 保留我 for %s, got resp=%q stored=%q", body, resp.Description, stored.Description)
+		}
+	}
+
+	// 只改 name 不动 description
+	resp, stored = put(t, `{"name":"renamed-proj"}`)
+	if stored.Name != "renamed-proj" || resp.Name != "renamed-proj" {
+		t.Fatalf("expected renamed name, got resp=%q stored=%q", resp.Name, stored.Name)
+	}
+	if resp.Description != "保留我" || stored.Description != "保留我" {
+		t.Fatalf("expected description untouched, got resp=%q stored=%q", resp.Description, stored.Description)
+	}
+}
+
+// 创建路径回归：新建时带描述，响应与库内读回一致（INT-67 中新建失效未复现，保留验证）。
+func TestProjectCreate_DescriptionRoundTrip(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-proj-create-desc")
+
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects", []byte(`{"name":"with-desc","description":"创建时的描述"}`))
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	env.projectHandler.Create(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp api.Project
+	decodeEnvelope(t, rec, &resp)
+	if resp.Description != "创建时的描述" {
+		t.Fatalf("expected response description 创建时的描述, got %q", resp.Description)
+	}
+	var stored model.Project
+	if err := env.db.Where("id = ?", resp.Id).First(&stored).Error; err != nil {
+		t.Fatalf("reload project: %v", err)
+	}
+	if stored.Description != "创建时的描述" {
+		t.Fatalf("expected stored description 创建时的描述, got %q", stored.Description)
 	}
 }
 

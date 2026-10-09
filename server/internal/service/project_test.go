@@ -747,6 +747,53 @@ func TestProjectServiceUpdate_PRTokenSourceKindErrors(t *testing.T) {
 	}
 }
 
+// description 按指针三态更新：nil 保留现值、指向空串清空、指向非空替换
+// （INT-67 回归：Update 曾从未给 project.Description 赋值，任何取值都静默无效）。
+func TestProjectServiceUpdate_Description(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-desc")
+	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.Description = "old desc"
+	})
+
+	storedDesc := func() string {
+		var stored model.Project
+		if err := svc.db.First(&stored, "id = ?", project.ID).Error; err != nil {
+			t.Fatalf("reload project: %v", err)
+		}
+		return stored.Description
+	}
+
+	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{})
+	if err != nil {
+		t.Fatalf("update nil description: %v", err)
+	}
+	if resp.Description != "old desc" || storedDesc() != "old desc" {
+		t.Fatalf("expected old desc preserved, got resp=%q stored=%q", resp.Description, storedDesc())
+	}
+
+	resp, err = projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		Description: api.Ptr("new desc"),
+	})
+	if err != nil {
+		t.Fatalf("update new desc: %v", err)
+	}
+	if resp.Description != "new desc" || storedDesc() != "new desc" {
+		t.Fatalf("expected new desc, got resp=%q stored=%q", resp.Description, storedDesc())
+	}
+
+	resp, err = projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		Description: api.Ptr(""),
+	})
+	if err != nil {
+		t.Fatalf("update empty desc: %v", err)
+	}
+	if resp.Description != "" || storedDesc() != "" {
+		t.Fatalf("expected cleared description, got resp=%q stored=%q", resp.Description, storedDesc())
+	}
+}
+
 // has_github_token 与 has_github_pr_token 同为布尔标记：
 // 按 GithubTokenEncrypted 是否非空填充。
 func TestProjectServiceResponse_HasGithubToken(t *testing.T) {
