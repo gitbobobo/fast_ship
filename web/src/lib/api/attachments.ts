@@ -11,7 +11,13 @@ function parseUploadResponse(xhr: XMLHttpRequest) {
     return null;
   }
 
-  return JSON.parse(xhr.responseText) as ApiResponse<IssueAttachment>;
+  // 反向代理的 413/502 等返回 HTML，解析失败按无响应体处理，
+  // 交给 requireUploadSuccess 用状态码报错，不能让 Promise 挂起。
+  try {
+    return JSON.parse(xhr.responseText) as ApiResponse<IssueAttachment>;
+  } catch {
+    return null;
+  }
 }
 
 function createUploadXhr(
@@ -53,6 +59,14 @@ function sendUploadRequest(
 
     xhr.addEventListener("error", () => {
       reject(new Error("上传失败"));
+    });
+
+    xhr.addEventListener("abort", () => {
+      reject(new Error("上传已取消"));
+    });
+
+    xhr.addEventListener("timeout", () => {
+      reject(new Error("上传超时"));
     });
 
     xhr.send(formData);
