@@ -58,7 +58,7 @@
 | `created_by` | TEXT | 同 `uploaded_by` 口径 |
 | `created_at`/`updated_at`/`resolved_at` | DATETIME | `resolved_at` 仅 resolved 时有值 |
 
-坐标语义：存比例不存像素，展示/裁剪时按原图尺寸换算（`annotationPixelRect`，四角换算后取整再与图边界相交）。`Update` 为指针语义：字段出现才更新，`issue_id` 空串 = 解除关联，都不传 40001。
+坐标语义：存比例不存像素，展示/裁剪时按原图尺寸换算（`annotationPixelRect`，四边缘取整；亚像素矩形塌成空矩形时保底 1px 且不丢位置，最后与图边界相交）。坐标系以**浏览器展示方向**为准：JPEG 带 EXIF Orientation 时，`probeScreenshotDims`/`decodeScreenshotImageConfig` 返回应用方向后的尺寸（5-8 交换宽高），裁剪解码同样先 `applyJPEGExifOrientation` 转正再换算，保证画布置框、落库尺寸与裁剪像素三者同源。`Update` 为指针语义：字段出现才更新，`issue_id` 空串 = 解除关联，都不传 40001。
 
 ## 端点与权限
 
@@ -75,7 +75,7 @@
 | POST | `/api/screenshot-versions/:vid/annotations` | **仅 JWT** | `{x,y,width,height,body,issue_id?}`；比例坐标校验 0≤x,y、0<w,h、x+w/y+h≤1 |
 | PUT | `/api/screenshot-annotations/:aid` | JWT / API Key | 指针语义更新 body/status/issue_id；**API Key 只允许整包 `{"status":"resolved"}`**（其他字段或重开 40301） |
 | DELETE | `/api/screenshot-annotations/:aid` | **仅 JWT** | 删标注行 |
-| GET / HEAD | `/api/screenshot-annotations/:aid/crop` | JWT / API Key / `?token=` | 输出框选区域裁剪图，统一 PNG，外边距 = 矩形短边 15%（最小 8px，不出图界） |
+| GET / HEAD | `/api/screenshot-annotations/:aid/crop` | JWT / API Key / `?token=` | 输出框选区域裁剪图，统一 PNG，外边距 = 矩形短边 15%（最小 8px，不出图界）；原图超过解码像素上限（约 64MP）返回 40004 |
 
 写操作 PATCH/DELETE 走 `RequireJWT` 分组（API Key 返回 40301），上传与读走 `RequireAuth`，content 与 crop 挂 `RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token")` 支持 `<img>` 直链。标注 PUT 两类凭证都进 service，由 service 按 `!middleware.IsJWTAuth(c)` 再收紧 API Key 只允许置 resolved——与 issue 内嵌写操作的惯例一致（路由放通、service 判凭证）。
 
@@ -83,7 +83,7 @@
 
 Issue 详情响应内嵌 `screenshot_annotations`（`IssueService.Get`，无关联时缺省）；项目级列表与 Issue 内嵌共用 `assembleScreenshotAnnotations` 组装：关联行（版本/界面/最新版本）经 `ScreenshotAnnotationRepository.LoadRelated` 批量取回，`issue_id → Issue` 批量查 `issueRepo.ListByIDs`（含 GitHubMeta 供 `issue_reference` 生成）。`image_width`/`image_height` 优先取版本落库值，存量行（0）惰性解码文件头，仍失败输出 0 且 `pixel_rect=null`。
 
-裁剪图（`Crop`）：按存储 mime 分派解码——png/jpeg 标准库、gif 取第一帧（`gif.Decode` 即第一帧）、webp 走 `golang.org/x/image/webp`；`SubImage` 取样后统一 `png.Encode` 输出，不落盘不缓存。
+裁剪图（`Crop`）：解码前先按文件头尺寸做像素预算校验（`maxScreenshotDecodePixels` ≈ 64MP，超限 40004 `ErrScreenshotImageTooLarge`——压缩体积上限管不住解码后内存），且包级信号量限 4 并发解码；按存储 mime 分派解码——png/jpeg 标准库、gif 把第一帧按偏移合成到逻辑画布（`gif.DecodeAll`；首帧 Bounds 可能是画布上的偏移子块，直接用帧尺寸会裁错位置）、webp 走 `golang.org/x/image/webp`；`SubImage` 取样后统一 `png.Encode` 输出，不落盘不缓存。
 
 ## 上传语义
 
@@ -139,8 +139,9 @@ Annotation = {id, project_id, screen_id, version_id, issue_id, issue_reference, 
 - **视口剔除**：只渲染与视口（外扩一屏）相交的卡片；卡片屏幕宽 <48px 时只画占位不加载 `<img>`。无缩略图，直接用 content 原图。
 - **框选标注**：工具栏或 `R` 键切框选态（十字光标），在卡片图片区拖出矩形即按比例换算（与画布缩放无关），松开弹出文字输入（`annotation-draft.tsx`）；过小的框（<1% 边长）视为误触忽略。只允许在最新版本上创建——画布本就只有最新版本。
 - **叠加层**：标注矩形按 `x/y/w/h` 百分比定位在图片盒内；画布上默认只显示 open，工具栏可切「显示已解决」；面板点选/悬停与画布矩形双向联动（hover 高亮、定位闪烁 2.4s）。
-- **右侧面板**（`annotation-panel.tsx`）：列当前画布范围内全部标注（含旧版本上的，带「旧版本」标），默认未解决 tab；支持编辑文字、解决/重开、删除（AlertDialog）、改 Issue 关联（Select 拉前 100 条 issue，当前关联不在前 100 时单独补项）。「定位」：最新版本标注 → 画布聚焦该卡片并闪烁；旧版本标注 → 打开预览弹窗直接选中该版本并高亮该标注。
-- **URL 定位**：`?view=canvas&annotation=<id>`；页面先把分组 tab 与搜索放宽到能看到目标界面，再交画布执行定位（等标注数据与容器尺寸就绪，nonce 去重）。
+- **右侧面板**（`annotation-panel.tsx`）：列当前画布范围内全部标注（含旧版本上的，带「旧版本」标），默认未解决 tab；支持编辑文字、解决/重开、删除（AlertDialog）、改 Issue 关联（Dialog 内嵌搜索框，走 `useIssues` 的 `q` 服务端过滤，不受前 100 条限制；当前关联不在结果里时单独补项）。「定位」：最新版本标注 → 画布聚焦该卡片并闪烁；旧版本标注 → 打开预览弹窗直接选中该版本并高亮该标注。
+- **URL 定位**：`?view=canvas&annotation=<id>`；页面先把分组 tab 与搜索放宽到能看到目标界面，再交画布执行定位（等标注数据**当次拉取落地**与容器尺寸就绪，nonce 去重；`isSuccess` 命中过期缓存时不判定存在性）。
+- **视口恢复**：搜索/数据刷新让全部卡片挪出视口时自动「适应全部」，避免整屏空白；只在布局对象变化时评估，手动平移到空白处不触发。标注草稿只认画上去的那个版本，界面换版或被过滤出画布时草稿自动取消。
 - **旧版本提示**：卡片元信息行显示「上一版有 N 条未解决」徽标（`countOpenOnOlderVersions`）。
 - **预览弹窗**：`AnnotationOverlay` 只读叠加（open/resolved 都显示，不可交互），量 img 实际显示盒贴上去；适配/放大/对比两侧都挂。`initialVersionId`/`focusAnnotationId` 支持从画布定位直接落在旧版本上。
 - **Issue 详情**：`issue-screenshot-annotations-card.tsx` 渲染 `issue.screenshot_annotations`（裁剪图缩略 + 文字 + 状态），点击跳 `?view=canvas&annotation=<id>`。

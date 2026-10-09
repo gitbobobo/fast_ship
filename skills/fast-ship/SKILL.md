@@ -90,6 +90,7 @@ Content-Type: application/json; charset=utf-8
 - 每条标注带：`image_url`（所在版本原图）、`crop_url`（框选区域裁剪图，PNG，四周带外边距）、比例坐标 `x/y/width/height`（0~1）、像素坐标 `pixel_rect`（尺寸未知时为 null）、`screen_key`/`screen_title`/`screen_group`、`is_latest_version`、`status`。
 - `crop_url`/`image_url` 是 `<img>` 直链路径：脚本调用带 Authorization 头即可，Web 端 `<img>` 才需要 `?token=<jwt>`。
 - 标已解决：`PUT /api/screenshot-annotations/{aid}`，body 整包只传 `{"status":"resolved"}`——带其他字段或 `open` 会被 40301。
+- 原图超过解码像素上限（约 64MP）时 crop 返回 40004（`尺寸超出可处理范围`），此时用 `image_url` 拉原图自行缩放。
 
 AI 评审闭环（字段细节见 api.md screenshots 章）：
 
