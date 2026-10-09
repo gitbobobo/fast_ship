@@ -190,6 +190,11 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		project.Name = name
 	}
 
+	// description 按指针三态：nil 保留现值、指向空串清空、指向非空替换。
+	if req.Description != nil {
+		project.Description = *req.Description
+	}
+
 	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
 		owner, repo, err := parseRepositoryURL(repositoryURL)
 		if err != nil {

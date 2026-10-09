@@ -4100,6 +4100,7 @@ components:
           maxLength: 100
         description:
           type: string
+          description: 缺省或 null 保留现值；显式空串清空；非空替换
         repository_url:
           type: string
           description: 同创建；变更仓库且项目无 token 时须提供 token
