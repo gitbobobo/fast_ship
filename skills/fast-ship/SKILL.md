@@ -81,6 +81,25 @@ Content-Type: application/json; charset=utf-8
 5. 推进用 `PUT /api/issues/{iid}/internal-meta`，值为 `todo`、`in_progress` 或 `done`。
 6. 查一条用 `GET /api/issues/{iid}`。列表用 `GET /api/projects/{id}/issues`。
 
+## 截图标注（AI 评审闭环）
+
+截图页画布上的矩形框选标注挂在**具体截图版本**上，供人/AI 交换评审意见。API Key 可读全部标注、拉裁剪图、标为已解决；不能创建/删除标注（40301），改文字/关联 Issue/重开也要 JWT。
+
+- 列表：`GET /api/projects/{id}/screenshot-annotations` → `{items:[...]}`，query 可按 `status`（open/resolved）、`issue_id`、`screen_id` 过滤。
+- Issue 维度：`GET /api/issues/{iid}` 的 `screenshot_annotations[]` 内嵌关联到该 Issue 的标注（无则缺省）。
+- 每条标注带：`image_url`（所在版本原图）、`crop_url`（框选区域裁剪图，PNG，四周带外边距）、比例坐标 `x/y/width/height`（0~1）、像素坐标 `pixel_rect`（尺寸未知时为 null）、`screen_key`/`screen_title`/`screen_group`、`is_latest_version`、`status`。
+- `crop_url`/`image_url` 是 `<img>` 直链路径：脚本调用带 Authorization 头即可，Web 端 `<img>` 才需要 `?token=<jwt>`。
+- 标已解决：`PUT /api/screenshot-annotations/{aid}`，body 整包只传 `{"status":"resolved"}`——带其他字段或 `open` 会被 40301。
+
+AI 评审闭环（字段细节见 api.md screenshots 章）：
+
+1. `GET /api/issues/{iid}` 读 `screenshot_annotations`，或按 `issue_id`/`status=open` 过滤项目标注。
+2. 按 `crop_url` 拉裁剪图，看用户框选了哪块区域、写了什么意见。
+3. 修改 UI 后，`POST /api/projects/{id}/screenshots` 以**同一 `screen_key`** 上传新截图（自动归入同一界面成为新版本；旧标注挂在旧版本上保留，`is_latest_version` 变 false）。
+4. 逐条 `PUT {"status":"resolved"}` 标已解决。
+
+删 Issue 只清空标注的 `issue_id`（标注保留）；删截图版本/界面会级联删标注。
+
 ## Issue 关联 PR
 
 一个 Issue 可挂多个 PR（跨仓库也可以）。**时机**：建完 PR 立刻 attach，让 Issue 页能看到实现进度；PR 合并后调一次 sync 刷新状态。
