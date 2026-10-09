@@ -101,8 +101,8 @@ Version = {id, screen_id, note, file_name, file_size, mime_type, uploaded_by, up
 预览弹窗 `web/src/components/screenshots/screenshot-lightbox.tsx`，由截图列表页以「过滤后的导航列表 + 当前 screenId」驱动；弹窗自身按 screenId 拉详情，导航只改 screenId。
 
 - **翻页区**：图片区左右各一条固定宽（w-16/sm:w-20）全高点击条，悬停整条高亮、居中箭头；到首尾时对应侧变暗禁用，不循环。两条始终渲染（含加载中、对比模式），不随内容分支卸载——这是翻页失灵的修复点：旧实现把按钮挂在「详情已加载」分支里，切到未缓存界面时骨架屏把它一起卸掉。
-- **加载中保留旧图**：记录上一份成功加载的 detail；新界面请求期间继续显示旧界面内容（含用户当时选中的版本/对比侧），顶部叠「加载中」角标（isFetching 驱动）；版本与对比选择在新详情到达时才重置。旧图回退仅限同一次打开期间的翻页——弹窗关闭即清空，重新打开未缓存界面时只显示骨架屏。只有从未加载过任何详情时才整块骨架屏。
-- **预取**：`prefetchQuery` 对 navIndex±1 的界面拉详情，queryKey/queryFn 与 `useScreenshotScreen` 相同（`["screenshots","detail",id]`）。
+- **加载中保留旧图**：记录上一份成功加载的 detail；新界面请求期间只保留旧图本体（含用户当时选中的版本/对比侧），旧版本的文件信息行与悬浮缩略图条不渲染，界面级操作（编辑/删除）在 detail 缺失时禁用，顶部叠「加载中」角标（isFetching 驱动）；版本与对比选择在新详情到达时才重置。旧图回退仅限同一次打开期间的翻页——弹窗关闭即清空，重新打开未缓存界面时只显示骨架屏；请求失败（isError）也不回退，显示空态并 toast+关弹窗。只有从未加载过任何详情时才整块骨架屏。
+- **预取**：`prefetchQuery` 对 navIndex±1 的界面拉详情，与 `useScreenshotScreen` 共用 `screenshotScreenDetailQueryOptions`（`["screenshots","detail",id]`，retry:false），避免两处查询配置静默失配。
 - **放大**（仅单图）：点击或 Enter/Space 在「适配 / 放大」两档间切换，无滚轮缩放/捏合/百分比。放大宽度 = `naturalWidth ÷ devicePixelRatio`，下限为适配宽度 2 倍；以点击点为中心（按点击处归一化坐标回算 scroll，图片未就绪时等 onLoad 补算；尺寸未知不进入放大）。放大态是 `overflow:auto` 容器 + 显式宽度 img，触控板/滚轮/Shift+滚轮横移走原生滚动；鼠标拖拽手动滚，按下点起累计位移 >4px 不算点击。切界面/版本、进出对比、关弹窗都重置回适配。
 - **键盘**：←/→ 始终翻页（含对比、放大态）；图片可聚焦（role=button），Enter/Space 以图中心放大，分支切换时焦点迁往新图。Esc 在放大态先退放大（document capture 阶段拦截，preventDefault+stopPropagation，避免 Dialog 同步收 Esc 关闭），再按才关弹窗。下拉/菜单/确认框打开或焦点在输入框时不响应——Base UI 关闭的浮层保留在 `[hidden]` 容器里，判定"浮层开着"只看未隐藏的节点。
 - **对比模式**：跨界面翻页保持对比，左默认最新、右默认次新，单版本时两侧同图；不支持放大，不显示版本缩略图条。两个 pane 顶部控件行 z-20 压在翻页区之上，底部各自保留文件信息。

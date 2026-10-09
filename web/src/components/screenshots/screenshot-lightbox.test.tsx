@@ -9,11 +9,17 @@ import {
   useScreenshotScreen,
 } from "@/lib/hooks/use-screenshots";
 
-vi.mock("@/lib/hooks/use-screenshots", () => ({
-  useScreenshotScreen: vi.fn(),
-  useDeleteScreenshotScreen: vi.fn(),
-  useDeleteScreenshotVersion: vi.fn(),
-}));
+// screenshotScreenDetailQueryOptions 是真函数（prefetch 要用），只 mock 三个 hook
+vi.mock("@/lib/hooks/use-screenshots", async (importOriginal) => {
+  const mod =
+    await importOriginal<typeof import("@/lib/hooks/use-screenshots")>();
+  return {
+    ...mod,
+    useScreenshotScreen: vi.fn(),
+    useDeleteScreenshotScreen: vi.fn(),
+    useDeleteScreenshotVersion: vi.fn(),
+  };
+});
 
 // 详情接口交给 QueryClient.prefetchQuery 触发的 queryFn 调用，挂起即可
 vi.mock("@/lib/api/screenshots", async (importOriginal) => {
@@ -296,6 +302,51 @@ describe("ScreenshotLightbox", () => {
 
     expect(mainImage().src).toContain("v-new");
     expect(await screen.findByText("加载中")).toBeInTheDocument();
+    // 旧图回退窗口不混搭旧数据：无文件信息行、无版本缩略图条
+    expect(screen.queryByText(/shot\.png/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /改版前/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /改版后/ })).toBeNull();
+  });
+
+  it("does not fall back to the previous screen when the request fails", async () => {
+    const { rerenderLightbox } = renderLightbox();
+    await screen.findByRole("button", { name: "shot.png" });
+
+    // 翻到 s2 请求失败：不回退旧图，显示空态（toast+关弹窗由组件 effect 处理）
+    mockScreenQuery({
+      data: undefined,
+      isLoading: false,
+      isFetching: false,
+      isError: true,
+    });
+    rerenderLightbox({ screenId: "s2" });
+
+    expect(document.querySelector("img[data-zoom]")).toBeNull();
+    expect(screen.getByText("暂无截图版本")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /改版前/ })).toBeNull();
+  });
+
+  it("disables screen-level destructive actions while detail is loading", async () => {
+    const user = userEvent.setup();
+    const { rerenderLightbox } = renderLightbox();
+    await screen.findByRole("button", { name: "shot.png" });
+
+    mockScreenQuery({
+      data: undefined,
+      isLoading: true,
+      isFetching: true,
+      isError: false,
+    });
+    rerenderLightbox({ screenId: "s2" });
+
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    const deleteItem = await screen.findByRole("menuitem", {
+      name: "删除界面",
+    });
+    expect(deleteItem).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("menuitem", { name: "删除当前版本" }),
+    ).toHaveAttribute("aria-disabled", "true");
   });
 
   it("dims and disables the nav zone at list ends", async () => {

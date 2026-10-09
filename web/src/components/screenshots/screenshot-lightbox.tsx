@@ -49,6 +49,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
+  screenshotScreenDetailQueryOptions,
   useDeleteScreenshotScreen,
   useDeleteScreenshotVersion,
   useScreenshotScreen,
@@ -434,9 +435,12 @@ export function ScreenshotLightbox({
   if (open && detail && detail !== lastDetail) {
     setLastDetail(detail);
   }
-  const shownDetail = detail ?? lastDetail;
+  // 请求失败不再回退旧图，显示空态（toast+关弹窗在下方 effect）
+  const shownDetail = detail ?? (isError ? null : lastDetail);
   const shownDetailId = shownDetail?.id ?? null;
   const versions = shownDetail?.versions ?? [];
+  // detail 未到达的旧图回退窗口：只保旧图本体，信息行/缩略图条不混搭旧数据
+  const staleView = !detail && shownDetail !== null;
 
   const listItem = screens.find((s) => s.id === screenId) ?? null;
   const screen = detail ?? listItem;
@@ -483,10 +487,9 @@ export function ScreenshotLightbox({
     for (const i of [navIndex - 1, navIndex + 1]) {
       const target = screens[i];
       if (!target) continue;
-      void queryClient.prefetchQuery({
-        queryKey: ["screenshots", "detail", target.id],
-        queryFn: async () => (await screenshotApi.get(target.id)).data,
-      });
+      void queryClient.prefetchQuery(
+        screenshotScreenDetailQueryOptions(target.id),
+      );
     }
   }, [open, navIndex, screens, queryClient]);
 
@@ -587,7 +590,7 @@ export function ScreenshotLightbox({
   // 标题栏第二行：screen_key（有 title 时）+ 当前版本文件信息
   const infoParts: Array<string | null | undefined> = [];
   if (screen?.title) infoParts.push(screen.screen_key);
-  if (!comparing && currentVersion) {
+  if (!comparing && currentVersion && !staleView) {
     infoParts.push(
       currentVersion.note,
       currentVersion.file_name,
@@ -674,6 +677,7 @@ export function ScreenshotLightbox({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   variant="destructive"
+                  disabled={!detail}
                   onClick={() => setConfirm("screen")}
                 >
                   <Trash2 className="mr-2 h-4 w-4" />
@@ -737,7 +741,7 @@ export function ScreenshotLightbox({
               </div>
             )}
 
-            {!comparing && versions.length > 1 && currentVersion && (
+            {!comparing && !staleView && versions.length > 1 && currentVersion && (
               // 两侧各留 5rem，不伸进全高翻页区（w-16/sm:w-20）
               <div className="absolute bottom-3 left-1/2 z-20 flex max-w-[calc(100%-10rem)] -translate-x-1/2 gap-2 overflow-x-auto rounded-lg bg-background/80 p-2 shadow-md backdrop-blur">
                 {versions.map((version) => (
