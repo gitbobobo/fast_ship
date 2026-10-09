@@ -845,7 +845,7 @@ API Key 管理（仅 JWT）
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string（长度 1..100） | 否 |  |
-| `description` | string | 否 |  |
+| `description` | string | 否 | 缺省或 null 保留现值；显式空串清空；非空替换 |
 | `repository_url` | string | 否 | 同创建；变更仓库且项目无 token 时须提供 token |
 | `github_token` | string | 否 |  |
 | `github_pr_token` | string | 否 | PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显 |

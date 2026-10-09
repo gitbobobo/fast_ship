@@ -1265,8 +1265,10 @@ type UpdateProfileRequest struct {
 // UpdateProjectRequest defines model for UpdateProjectRequest.
 type UpdateProjectRequest struct {
 	// ClearGithubPrToken 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 或 pr_token_source_project_id 同时显式提供（无论取值，含 null）返回 40001
-	ClearGithubPrToken *bool   `json:"clear_github_pr_token,omitempty"`
-	Description        *string `json:"description,omitempty"`
+	ClearGithubPrToken *bool `json:"clear_github_pr_token,omitempty"`
+
+	// Description 缺省或 null 保留现值；显式空串清空；非空替换
+	Description *string `json:"description,omitempty"`
 
 	// GithubPrToken PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显
 	GithubPrToken *string `json:"github_pr_token,omitempty"`
