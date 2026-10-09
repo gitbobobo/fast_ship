@@ -8,6 +8,7 @@ import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 
 const mockUploadDialog = vi.fn((_props: unknown) => null);
 const mockLightbox = vi.fn((_props: unknown) => null);
+const mockCanvas = vi.fn((_props: unknown) => <div data-testid="canvas-stub" />);
 
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProjects: vi.fn(),
@@ -17,8 +18,24 @@ vi.mock("@/lib/hooks/use-screenshots", () => ({
   useScreenshotScreens: vi.fn(),
 }));
 
+// 标注列表接口不是这些用例关心的内容，固定返回空
+vi.mock("@/lib/hooks/use-screenshot-annotations", async (importOriginal) => {
+  const mod =
+    await importOriginal<
+      typeof import("@/lib/hooks/use-screenshot-annotations")
+    >();
+  return {
+    ...mod,
+    useScreenshotAnnotations: vi.fn(() => ({ data: [], isSuccess: true })),
+  };
+});
+
 vi.mock("@/components/screenshots/upload-screenshots-dialog", () => ({
   UploadScreenshotsDialog: (props: unknown) => mockUploadDialog(props),
+}));
+
+vi.mock("@/components/screenshots/canvas/screenshot-canvas", () => ({
+  ScreenshotCanvas: (props: unknown) => mockCanvas(props),
 }));
 
 vi.mock("@/components/screenshots/screenshot-lightbox", () => ({
@@ -193,6 +210,47 @@ describe("ScreenshotsPage", () => {
       "s3",
       "s4",
     ]);
+  });
+
+  it("switches between list and canvas views via the view toggle", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+
+    expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /画布/ }));
+    expect(screen.getByTestId("canvas-stub")).toBeInTheDocument();
+    expect(screen.queryByTestId("screenshot-card-s1")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /列表/ }));
+    expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
+    expect(screen.getByTestId("screenshot-card-s1")).toBeInTheDocument();
+  });
+
+  it("scopes the canvas to the active tab and search query", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots?view=canvas",
+    });
+
+    const lastScreens = () =>
+      (mockCanvas.mock.calls.at(-1)?.[0] as {
+        screens: ScreenshotScreenListItem[];
+        resetKey: string;
+      }).screens.map((s) => s.id);
+
+    expect(lastScreens()).toEqual(["s1", "s2", "s3", "s4"]);
+    await user.click(screen.getByRole("tab", { name: "核心" }));
+    expect(lastScreens()).toEqual(["s1", "s2"]);
+    expect(
+      (mockCanvas.mock.calls.at(-1)?.[0] as { resetKey: string }).resetKey,
+    ).toContain("g:核心");
+
+    await user.type(screen.getByPlaceholderText("搜索名称或界面标识"), "set");
+    expect(lastScreens()).toEqual(["s2"]);
   });
 
   it("shows the empty-project state when there are no projects", () => {

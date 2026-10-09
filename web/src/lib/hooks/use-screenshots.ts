@@ -20,6 +20,10 @@ function invalidateScreenshotList(
   void queryClient.invalidateQueries({
     queryKey: ["screenshots", "list", projectId],
   });
+  // 上传新版本会改变标注的 is_latest_version，删除界面/版本会级联删标注
+  void queryClient.invalidateQueries({
+    queryKey: ["screenshot-annotations", "list", projectId],
+  });
 }
 
 export function useScreenshotScreens(projectId: string) {

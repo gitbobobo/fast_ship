@@ -1,6 +1,7 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { Images, Search, Upload } from "lucide-react";
+import { toast } from "sonner";
+import { Images, LayoutGrid, List, Search, Upload } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
@@ -18,9 +19,14 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { UploadScreenshotsDialog } from "@/components/screenshots/upload-screenshots-dialog";
 import { ScreenshotLightbox } from "@/components/screenshots/screenshot-lightbox";
+import {
+  ScreenshotCanvas,
+  type CanvasLocateRequest,
+} from "@/components/screenshots/canvas/screenshot-canvas";
 import { screenshotApi } from "@/lib/api/screenshots";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
+import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
 import {
   SCREENSHOT_TAB_ALL,
   SCREENSHOT_TAB_UNGROUPED,
@@ -35,14 +41,19 @@ import { getActiveProjectId } from "@/routes/board/lib/utils";
 import { useProjectPreferenceStore } from "@/lib/store/project-preference-store";
 import { formatRelativeTime } from "@/lib/utils/format";
 
+type ScreenshotsView = "list" | "canvas";
+
 export default function ScreenshotsPage() {
   const { data: projectsData, isLoading: projectsLoading } = useProjects();
   const projects = useMemo(
     () => projectsData?.items ?? [],
     [projectsData?.items],
   );
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const urlProjectId = searchParams.get("project");
+  const view: ScreenshotsView =
+    searchParams.get("view") === "canvas" ? "canvas" : "list";
+  const urlAnnotationId = searchParams.get("annotation");
   const { lastSelectedProjectId, setLastSelectedProjectId } =
     useProjectPreferenceStore();
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
@@ -75,6 +86,49 @@ export default function ScreenshotsPage() {
   const deferredSearch = useDeferredValue(search);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [openScreenId, setOpenScreenId] = useState<string | null>(null);
+  // 从画布定位到旧版本标注时，预览弹窗要直接选中该版本并高亮该标注
+  const [previewVersionId, setPreviewVersionId] = useState<string | null>(null);
+  const [previewAnnotationId, setPreviewAnnotationId] = useState<
+    string | null
+  >(null);
+  const [locateRequest, setLocateRequest] =
+    useState<CanvasLocateRequest | null>(null);
+  const handledUrlAnnotationRef = useRef<string | null>(null);
+
+  const { data: annotationsData, isSuccess: annotationsReady } =
+    useScreenshotAnnotations(activeProjectId, view === "canvas");
+  const annotations = useMemo(() => annotationsData ?? [], [annotationsData]);
+
+  const setView = (next: ScreenshotsView) => {
+    setSearchParams(
+      (prev) => {
+        const params = new URLSearchParams(prev);
+        if (next === "canvas") {
+          params.set("view", "canvas");
+        } else {
+          params.delete("view");
+          params.delete("annotation");
+        }
+        return params;
+      },
+      { replace: true },
+    );
+  };
+
+  const openPreview = (
+    screenId: string,
+    versionId?: string,
+    annotationId?: string,
+  ) => {
+    setOpenScreenId(screenId);
+    setPreviewVersionId(versionId ?? null);
+    setPreviewAnnotationId(annotationId ?? null);
+  };
+  const closePreview = () => {
+    setOpenScreenId(null);
+    setPreviewVersionId(null);
+    setPreviewAnnotationId(null);
+  };
 
   const groupTabs = useMemo(() => deriveGroupTabs(items), [items]);
   const ungrouped = useMemo(() => hasUngroupedScreens(items), [items]);
@@ -101,7 +155,35 @@ export default function ScreenshotsPage() {
     setTab(SCREENSHOT_TAB_ALL);
     setSearch("");
     setOpenScreenId(null);
+    setPreviewVersionId(null);
+    setPreviewAnnotationId(null);
   }, [activeProjectId]);
+
+  // ?view=canvas&annotation=<id>：数据就绪后把分组 tab 与搜索放宽到能看到
+  // 该标注所在界面，再交给画布执行定位；参数处理后保留在 URL 上
+  useEffect(() => {
+    if (view !== "canvas" || !urlAnnotationId) return;
+    if (handledUrlAnnotationRef.current === urlAnnotationId) return;
+    if (!annotationsReady || screensLoading) return;
+    handledUrlAnnotationRef.current = urlAnnotationId;
+    const target = annotations.find((a) => a.id === urlAnnotationId);
+    if (!target) {
+      toast.error("标注不存在或已被删除");
+      return;
+    }
+    if (!visibleScreens.some((s) => s.id === target.screen_id)) {
+      setTab(SCREENSHOT_TAB_ALL);
+      setSearch("");
+    }
+    setLocateRequest({ annotationId: target.id, nonce: Date.now() });
+  }, [
+    view,
+    urlAnnotationId,
+    annotationsReady,
+    screensLoading,
+    annotations,
+    visibleScreens,
+  ]);
 
   return (
     <>
@@ -152,14 +234,39 @@ export default function ScreenshotsPage() {
             )}
 
             {items.length > 0 && (
-              <div className="relative w-full sm:w-64">
-                <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="pl-8"
-                  placeholder="搜索名称或界面标识"
-                />
+              <div className="flex w-full items-center gap-2 sm:w-auto">
+                <div
+                  role="group"
+                  aria-label="视图切换"
+                  className="flex shrink-0 rounded-lg border p-0.5"
+                >
+                  {(
+                    [
+                      ["list", "列表", List],
+                      ["canvas", "画布", LayoutGrid],
+                    ] as const
+                  ).map(([value, label, Icon]) => (
+                    <Button
+                      key={value}
+                      size="sm"
+                      variant={view === value ? "secondary" : "ghost"}
+                      aria-pressed={view === value}
+                      onClick={() => setView(value)}
+                    >
+                      <Icon className="mr-1 h-3.5 w-3.5" />
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+                <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
+                  <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="pl-8"
+                    placeholder="搜索名称或界面标识"
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -219,13 +326,26 @@ export default function ScreenshotsPage() {
                 </p>
               </CardContent>
             </Card>
+          ) : view === "canvas" ? (
+            <div className="h-[calc(100dvh-16rem)] min-h-[420px]">
+              <ScreenshotCanvas
+                projectId={activeProjectId}
+                screens={visibleScreens}
+                annotations={annotations}
+                annotationsReady={annotationsReady}
+                resetKey={`${activeProjectId}|${activeTab}`}
+                controlsEnabled={openScreenId === null && !uploadOpen}
+                locateRequest={locateRequest}
+                onOpenPreview={openPreview}
+              />
+            </div>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {visibleScreens.map((screen) => (
                 <Card
                   key={screen.id}
                   className="cursor-pointer transition-colors hover:border-primary/50"
-                  onClick={() => setOpenScreenId(screen.id)}
+                  onClick={() => openPreview(screen.id)}
                   data-testid={`screenshot-card-${screen.id}`}
                 >
                   <div className="flex aspect-[4/3] items-center justify-center overflow-hidden bg-muted/30">
@@ -269,12 +389,14 @@ export default function ScreenshotsPage() {
       <ScreenshotLightbox
         open={openScreenId !== null}
         onOpenChange={(open) => {
-          if (!open) setOpenScreenId(null);
+          if (!open) closePreview();
         }}
         projectId={activeProjectId}
         screens={visibleScreens}
         screenId={openScreenId}
-        onNavigate={setOpenScreenId}
+        onNavigate={(screenId) => openPreview(screenId)}
+        initialVersionId={previewVersionId}
+        focusAnnotationId={previewAnnotationId}
       />
     </>
   );

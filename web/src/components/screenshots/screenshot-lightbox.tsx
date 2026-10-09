@@ -54,11 +54,16 @@ import {
   useDeleteScreenshotVersion,
   useScreenshotScreen,
 } from "@/lib/hooks/use-screenshots";
+import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
 import { screenshotApi } from "@/lib/api/screenshots";
+import { countOpenAnnotations } from "@/lib/screenshot-canvas";
 import { screenDisplayName } from "@/lib/screenshots";
 import { formatDate, formatFileSize, formatRelativeTime } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
+import { AnnotationOverlay } from "./annotation-overlay";
 import { ScreenshotEditDialog } from "./screenshot-edit-dialog";
+
+const EMPTY_ANNOTATIONS: ScreenshotAnnotation[] = [];
 
 interface ScreenshotLightboxProps {
   open: boolean;
@@ -68,6 +73,10 @@ interface ScreenshotLightboxProps {
   screens: ScreenshotScreenListItem[];
   screenId: string | null;
   onNavigate: (screenId: string) => void;
+  /** 打开时默认选中的版本；不在该界面的版本里则回退最新版本 */
+  initialVersionId?: string | null;
+  /** 在叠加层里高亮的标注 */
+  focusAnnotationId?: string | null;
 }
 
 /** 放大态：只有「适配 / 放大」两档，放大后按此宽度渲染 */
@@ -176,12 +185,17 @@ function ComparePane({
   versions,
   selectedId,
   onSelect,
+  annotations,
+  focusAnnotationId,
 }: {
   side: "left" | "right";
   versions: ScreenshotVersion[];
   selectedId: string;
   onSelect: (versionId: string) => void;
+  annotations: ScreenshotAnnotation[];
+  focusAnnotationId?: string | null;
 }) {
+  const imgRef = useRef<HTMLImageElement>(null);
   const version =
     versions.find((v) => v.id === selectedId) ?? versions[0] ?? null;
   return (
@@ -196,13 +210,23 @@ function ComparePane({
           className="w-full flex-1"
         />
       </div>
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/30">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/30">
         {version ? (
-          <img
-            src={screenshotApi.contentUrl(version)}
-            alt={version.file_name}
-            className="max-h-full max-w-full object-contain"
-          />
+          <>
+            <img
+              ref={imgRef}
+              src={screenshotApi.contentUrl(version)}
+              alt={version.file_name}
+              className="max-h-full max-w-full object-contain"
+            />
+            <AnnotationOverlay
+              imgRef={imgRef}
+              annotations={annotations.filter(
+                (a) => a.version_id === version.id,
+              )}
+              focusAnnotationId={focusAnnotationId}
+            />
+          </>
         ) : (
           <Images className="h-10 w-10 text-muted-foreground/40" />
         )}
@@ -225,10 +249,14 @@ function ZoomableImage({
   version,
   zoom,
   onZoomChange,
+  annotations,
+  focusAnnotationId,
 }: {
   version: ScreenshotVersion;
   zoom: ZoomState | null;
   onZoomChange: (zoom: ZoomState | null) => void;
+  annotations: ScreenshotAnnotation[];
+  focusAnnotationId?: string | null;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fitImgRef = useRef<HTMLImageElement>(null);
@@ -361,7 +389,7 @@ function ZoomableImage({
         onPointerLeave={endPointer}
       >
         {/* w-max+min-w-full：内容大于容器时撑出滚动区，小于容器时 m-auto 居中 */}
-        <div className="flex min-h-full w-max min-w-full">
+        <div className="relative flex min-h-full w-max min-w-full">
           <img
             ref={zoomImgRef}
             src={src}
@@ -376,13 +404,18 @@ function ZoomableImage({
             className="m-auto max-w-none cursor-zoom-out select-none"
             style={zoom.width > 0 ? { width: zoom.width } : undefined}
           />
+          <AnnotationOverlay
+            imgRef={zoomImgRef}
+            annotations={annotations}
+            focusAnnotationId={focusAnnotationId}
+          />
         </div>
       </div>
     );
   }
   return (
     <div
-      className="flex h-full items-center justify-center"
+      className="relative flex h-full items-center justify-center"
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={endPointer}
@@ -400,6 +433,11 @@ function ZoomableImage({
         data-zoom="fit"
         className="max-h-full max-w-full cursor-zoom-in select-none object-contain"
       />
+      <AnnotationOverlay
+        imgRef={fitImgRef}
+        annotations={annotations}
+        focusAnnotationId={focusAnnotationId}
+      />
     </div>
   );
 }
@@ -411,6 +449,8 @@ export function ScreenshotLightbox({
   screens,
   screenId,
   onNavigate,
+  initialVersionId = null,
+  focusAnnotationId = null,
 }: ScreenshotLightboxProps) {
   const {
     data: detail,
@@ -421,6 +461,8 @@ export function ScreenshotLightbox({
   const queryClient = useQueryClient();
   const deleteScreen = useDeleteScreenshotScreen(projectId);
   const deleteVersion = useDeleteScreenshotVersion(projectId);
+  const { data: annotationData } = useScreenshotAnnotations(projectId, open);
+  const annotations = annotationData ?? EMPTY_ANNOTATIONS;
 
   // 新界面加载期间继续展示上一份成功加载的详情，不整块切成骨架屏；
   // 旧图回退仅限同一次打开期间的翻页——关闭时清空， reopen 不残留
@@ -474,8 +516,12 @@ export function ScreenshotLightbox({
     setZoom(null);
   }
 
+  // 未手动选择时，优先落在 initialVersionId（从画布定位到旧版本标注）
   const currentVersion =
-    versions.find((v) => v.id === selectedVersionId) ?? versions[0] ?? null;
+    versions.find((v) => v.id === selectedVersionId) ??
+    versions.find((v) => v.id === initialVersionId) ??
+    versions[0] ??
+    null;
 
   const navIndex = screens.findIndex((s) => s.id === screenId);
   const canPrev = navIndex > 0;
@@ -607,6 +653,17 @@ export function ScreenshotLightbox({
   }
   const infoLine = infoParts.filter(Boolean).join(" · ");
 
+  const currentVersionAnnotations = annotations.filter(
+    (a) => a.version_id === currentVersion?.id,
+  );
+  // 删除会级联删掉挂在其上的标注，确认框里提示未解决的条数
+  const openOnVersion = currentVersion
+    ? countOpenAnnotations(annotations, { versionId: currentVersion.id })
+    : 0;
+  const openOnScreen = screenId
+    ? countOpenAnnotations(annotations, { screenId })
+    : 0;
+
   // 对比两侧：未选时左=最新、右=次新；只有一个版本时两侧同一张
   const leftCompareId = leftVersionId ?? versions[0]?.id ?? "";
   const rightCompareId =
@@ -702,12 +759,16 @@ export function ScreenshotLightbox({
                   versions={versions}
                   selectedId={leftCompareId}
                   onSelect={setLeftVersionId}
+                  annotations={annotations}
+                  focusAnnotationId={focusAnnotationId}
                 />
                 <ComparePane
                   side="right"
                   versions={versions}
                   selectedId={rightCompareId}
                   onSelect={setRightVersionId}
+                  annotations={annotations}
+                  focusAnnotationId={focusAnnotationId}
                 />
               </div>
             ) : !comparing && currentVersion ? (
@@ -715,6 +776,8 @@ export function ScreenshotLightbox({
                 version={currentVersion}
                 zoom={zoom}
                 onZoomChange={setZoom}
+                annotations={currentVersionAnnotations}
+                focusAnnotationId={focusAnnotationId}
               />
             ) : !shownDetail && isLoading ? (
               <Skeleton className="h-full w-full" />
@@ -800,6 +863,8 @@ export function ScreenshotLightbox({
               {versions.length <= 1
                 ? "这是该界面的最后一个版本，删除后界面将一并移除，不可恢复。"
                 : "删除后不可恢复。"}
+              {openOnVersion > 0 &&
+                `将同时删除 ${openOnVersion} 条未解决标注。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -827,6 +892,7 @@ export function ScreenshotLightbox({
             <AlertDialogTitle>删除界面？</AlertDialogTitle>
             <AlertDialogDescription>
               将删除「{displayName}」及其全部 {versions.length} 个版本，不可恢复。
+              {openOnScreen > 0 && `将同时删除 ${openOnScreen} 条未解决标注。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
