@@ -38,6 +38,7 @@ import {
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
 import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
+import { IssueAttachmentsCard } from "@/components/issues/issue-attachments-card";
 import { IssuePullRequestsCard } from "@/components/issues/issue-pull-requests-card";
 import { IssueShipHookCard } from "@/components/issues/issue-ship-hook-card";
 import { Header } from "@/components/layout/header";
@@ -1867,6 +1868,13 @@ export default function IssueDetailPage() {
                 <CollaborationArea issueId={iid!} />
               </div>
             </div>
+
+            {isInternalIssue && (
+              <IssueAttachmentsCard
+                issueId={issue.id}
+                attachments={issue.attachments}
+              />
+            )}
 
             <div className="-mt-6">
               <div id="timeline" ref={timelineSectionRef} className="scroll-mt-20" />

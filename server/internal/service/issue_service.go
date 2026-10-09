@@ -53,6 +53,7 @@ type IssueService struct {
 	readStateRepo       *repository.IssueReadStateRepository
 	recRepo             *repository.IssueRecommendationRepository
 	pullRequestRepo     *repository.IssuePullRequestRepository
+	attachmentRepo      *repository.IssueAttachmentRepository
 	storage             storage.Storage
 	cfg                 *config.Config
 	logger              *zap.Logger
@@ -107,6 +108,7 @@ func NewIssueService(
 	readStateRepo *repository.IssueReadStateRepository,
 	recRepo *repository.IssueRecommendationRepository,
 	pullRequestRepo *repository.IssuePullRequestRepository,
+	attachmentRepo *repository.IssueAttachmentRepository,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -128,6 +130,7 @@ func NewIssueService(
 		readStateRepo:       readStateRepo,
 		recRepo:             recRepo,
 		pullRequestRepo:     pullRequestRepo,
+		attachmentRepo:      attachmentRepo,
 		storage:             storage,
 		cfg:                 cfg,
 		logger:              logger,

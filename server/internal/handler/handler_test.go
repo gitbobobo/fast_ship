@@ -31,6 +31,7 @@ type handlerTestEnv struct {
 	issueHandler       *IssueHandler
 	collabHandler      *IssueCollabHandler
 	artifactHandler    *ArtifactHandler
+	attachmentHandler  *IssueAttachmentHandler
 	screenshotHandler  *ScreenshotHandler
 	projectHandler     *ProjectHandler
 }
@@ -69,6 +70,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.IssueReadState{},
 		&model.IssueAsset{},
 		&model.IssueDraftAsset{},
+		&model.IssueAttachment{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
@@ -120,6 +122,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
+	issueAttachmentRepo := repository.NewIssueAttachmentRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	screenshotRepo := repository.NewScreenshotRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
@@ -130,10 +133,11 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), repository.NewIssueRecommendationRepository(db), repository.NewIssuePullRequestRepository(db), fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), repository.NewIssueRecommendationRepository(db), repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop())
 	collabRepo := repository.NewIssueCollabRepository(db)
 	collabService := service.NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
+	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 
@@ -146,6 +150,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		issueHandler:       NewIssueHandler(issueService, issueShipHookService, collabService),
 		collabHandler:      NewIssueCollabHandler(collabService),
 		artifactHandler:    NewArtifactHandler(artifactService),
+		attachmentHandler:  NewIssueAttachmentHandler(issueAttachmentService),
 		screenshotHandler:  NewScreenshotHandler(screenshotService, cfg),
 		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zap.NewNop())),
 	}

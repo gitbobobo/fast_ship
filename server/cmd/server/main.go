@@ -108,6 +108,7 @@ func main() {
 		&model.IssueReadCatchup{},
 		&model.IssueAsset{},
 		&model.IssueDraftAsset{},
+		&model.IssueAttachment{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
@@ -181,6 +182,7 @@ func main() {
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	issuePullRequestRepo := repository.NewIssuePullRequestRepository(db)
+	issueAttachmentRepo := repository.NewIssueAttachmentRepository(db)
 	recommendationRepo := repository.NewIssueRecommendationRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
@@ -197,12 +199,13 @@ func main() {
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zapLogger)
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zapLogger)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, fileStorage, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, zapLogger)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	recommendationService := service.NewIssueRecommendationService(recommendationRepo, issueRepo, issueInternalMetaRepo, projectRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
+	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zapLogger)
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
@@ -221,6 +224,7 @@ func main() {
 	logHandler := handler.NewLogHandler(logService)
 	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
+	issueAttachmentHandler := handler.NewIssueAttachmentHandler(issueAttachmentService)
 	screenshotHandler := handler.NewScreenshotHandler(screenshotService, cfg)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
@@ -286,7 +290,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, screenshotHandler, mediaProxyHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

@@ -267,6 +267,186 @@ func TestRouterArtifactDownloadWithQueryToken(t *testing.T) {
 	}
 }
 
+func TestRouterIssueAttachmentLifecycleWithAPIKey(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	user := createRouterTestUser(t, env.db, "user-att", "attuser", "attuser@example.com")
+	project := createRouterTestProject(t, env.db, user.ID)
+	issue := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	rawKey := "ATTACHKEY0987654321"
+	if err := env.apiKeyRepo.Create(&model.ApiKey{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		Name:      "CI-Attach",
+		KeyPrefix: rawKey[:8],
+		KeyHash:   service.HashApiKey(rawKey),
+		CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	authHeader := "Bearer " + service.FormatApiKey(rawKey)
+
+	uploadReq := newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/attachments", "file", "spec.txt", []byte("attachment-binary"), nil)
+	uploadReq.Header.Set("Authorization", authHeader)
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("expected upload 200, got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var attachment struct {
+		ID          string `json:"id"`
+		FileName    string `json:"file_name"`
+		FileSize    int64  `json:"file_size"`
+		MimeType    string `json:"mime_type"`
+		Uploader    string `json:"uploader"`
+		DownloadURL string `json:"download_url"`
+	}
+	decodeRouterEnvelope(t, uploadRec, &attachment)
+	if attachment.Uploader != "API Key: CI-Attach" {
+		t.Fatalf("expected uploader from API key, got %q", attachment.Uploader)
+	}
+	if attachment.DownloadURL != "/api/attachments/"+attachment.ID+"/download" {
+		t.Fatalf("unexpected download_url %q", attachment.DownloadURL)
+	}
+
+	// Issue 详情内嵌 attachments 列表
+	detailReq := httptest.NewRequest(http.MethodGet, "/api/issues/"+issue.ID, nil)
+	detailReq.Header.Set("Authorization", authHeader)
+	detailRec := httptest.NewRecorder()
+	env.router.ServeHTTP(detailRec, detailReq)
+	if detailRec.Code != http.StatusOK {
+		t.Fatalf("expected detail 200, got %d: %s", detailRec.Code, detailRec.Body.String())
+	}
+	var detail struct {
+		Attachments []struct {
+			ID          string `json:"id"`
+			FileName    string `json:"file_name"`
+			DownloadURL string `json:"download_url"`
+		} `json:"attachments"`
+	}
+	decodeRouterEnvelope(t, detailRec, &detail)
+	if len(detail.Attachments) != 1 || detail.Attachments[0].ID != attachment.ID {
+		t.Fatalf("expected detail attachments to contain %q, got %+v", attachment.ID, detail.Attachments)
+	}
+
+	downloadReq := httptest.NewRequest(http.MethodGet, attachment.DownloadURL, nil)
+	downloadReq.Header.Set("Authorization", authHeader)
+	downloadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(downloadRec, downloadReq)
+	if downloadRec.Code != http.StatusOK {
+		t.Fatalf("expected download 200, got %d: %s", downloadRec.Code, downloadRec.Body.String())
+	}
+	if downloadRec.Body.String() != "attachment-binary" {
+		t.Fatalf("unexpected download body %q", downloadRec.Body.String())
+	}
+	if disposition := downloadRec.Header().Get("Content-Disposition"); !strings.Contains(disposition, "spec.txt") {
+		t.Fatalf("expected filename in content disposition, got %q", disposition)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/attachments/"+attachment.ID, nil)
+	deleteReq.Header.Set("Authorization", authHeader)
+	deleteRec := httptest.NewRecorder()
+	env.router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete 200, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	goneReq := httptest.NewRequest(http.MethodGet, attachment.DownloadURL, nil)
+	goneReq.Header.Set("Authorization", authHeader)
+	goneRec := httptest.NewRecorder()
+	env.router.ServeHTTP(goneRec, goneReq)
+	if goneRec.Code != http.StatusNotFound {
+		t.Fatalf("expected download 404 after delete, got %d: %s", goneRec.Code, goneRec.Body.String())
+	}
+}
+
+func TestRouterIssueAttachmentDownloadWithQueryToken(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "attachquery", "attachquery@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	issue := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	uploadReq := newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/attachments", "file", "spec.txt", []byte("attachment-query-token"), nil)
+	uploadReq.Header.Set("Authorization", "Bearer "+auth.Token)
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("expected upload 200, got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var attachment struct {
+		ID string `json:"id"`
+	}
+	decodeRouterEnvelope(t, uploadRec, &attachment)
+
+	downloadReq := httptest.NewRequest(http.MethodGet, "/api/attachments/"+attachment.ID+"/download?token="+auth.Token, nil)
+	downloadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(downloadRec, downloadReq)
+	if downloadRec.Code != http.StatusOK {
+		t.Fatalf("expected download 200, got %d: %s", downloadRec.Code, downloadRec.Body.String())
+	}
+	if downloadRec.Body.String() != "attachment-query-token" {
+		t.Fatalf("unexpected download body %q", downloadRec.Body.String())
+	}
+}
+
+func TestRouterIssueAttachmentUploadRejectsGitHubIssue(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "attachgh", "attachgh@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	issue := createRouterTestIssue(t, env.db, project.ID)
+
+	uploadReq := newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/attachments", "file", "spec.txt", []byte("x"), nil)
+	uploadReq.Header.Set("Authorization", "Bearer "+auth.Token)
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusConflict {
+		t.Fatalf("expected upload 409, got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var envResp routerEnvelope
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &envResp); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	if envResp.Code != errs.ErrIssueReadOnly.Code {
+		t.Fatalf("expected code %d, got %d", errs.ErrIssueReadOnly.Code, envResp.Code)
+	}
+}
+
+func TestRouterIssueAttachmentRequiresAuth(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	user := createRouterTestUser(t, env.db, "user-att-anon", "attanon", "attanon@example.com")
+	project := createRouterTestProject(t, env.db, user.ID)
+	issue := createRouterTestIssue(t, env.db, project.ID, func(i *model.Issue) {
+		i.Source = model.IssueSourceInternal
+	})
+
+	uploadReq := newRouterMultipartRequest(t, "/api/issues/"+issue.ID+"/attachments", "file", "spec.txt", []byte("x"), nil)
+	uploadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected upload 401, got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	downloadReq := httptest.NewRequest(http.MethodGet, "/api/attachments/"+uuid.NewString()+"/download", nil)
+	downloadRec := httptest.NewRecorder()
+	env.router.ServeHTTP(downloadRec, downloadReq)
+	if downloadRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected download 401, got %d: %s", downloadRec.Code, downloadRec.Body.String())
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/attachments/"+uuid.NewString(), nil)
+	deleteRec := httptest.NewRecorder()
+	env.router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected delete 401, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+}
+
 func TestRouterIssueAssetUploadAndContentWithQueryToken(t *testing.T) {
 	env := setupRouterTestEnv(t)
 	auth := registerAndLoginRouterUser(t, env.router, "issueasset", "issueasset@example.com", "Password123")
@@ -639,6 +819,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.IssueReadState{},
 		&model.IssueAsset{},
 		&model.IssueDraftAsset{},
+		&model.IssueAttachment{},
 		&model.Artifact{},
 		&model.JWTBlacklist{},
 		&model.RefreshToken{},
@@ -702,6 +883,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueSyncStateRepo := repository.NewIssueSyncStateRepository(db)
 	issueAssetRepo := repository.NewIssueAssetRepository(db)
 	issueDraftAssetRepo := repository.NewIssueDraftAssetRepository(db)
+	issueAttachmentRepo := repository.NewIssueAttachmentRepository(db)
 	artifactRepo := repository.NewArtifactRepository(db)
 	screenshotRepo := repository.NewScreenshotRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
@@ -716,7 +898,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	recommendationRepo := repository.NewIssueRecommendationRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), recommendationRepo, repository.NewIssuePullRequestRepository(db), fileStorage, cfg, zap.NewNop())
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), recommendationRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop())
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
@@ -725,6 +907,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
+	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
@@ -742,11 +925,12 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	logHandler := handler.NewLogHandler(logService)
 	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
+	issueAttachmentHandler := handler.NewIssueAttachmentHandler(issueAttachmentService)
 	screenshotHandler := handler.NewScreenshotHandler(screenshotService, cfg)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, screenshotHandler, mediaProxyHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, mediaProxyHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
