@@ -456,6 +456,13 @@ export function ScreenshotLightbox({
   const [editOpen, setEditOpen] = useState(false);
   const [confirm, setConfirm] = useState<"version" | "screen" | null>(null);
 
+  // 切界面即回到适配窗口：放大是查看状态，不等新详情到达才重置
+  const [prevNavScreenId, setPrevNavScreenId] = useState(screenId);
+  if (screenId !== prevNavScreenId) {
+    setPrevNavScreenId(screenId);
+    setZoom(null);
+  }
+
   // 在新界面详情真正到达时重置版本/对比选择与放大；加载期间保持旧界面的
   // 原选择（配合「继续显示上一张图」），对比模式翻页后回退「最新 / 次新」默认
   const [prevDetailId, setPrevDetailId] = useState(shownDetailId);
