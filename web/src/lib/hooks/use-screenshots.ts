@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  queryOptions,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   screenshotApi,
   type UpdateScreenshotScreenPayload,
@@ -28,15 +33,22 @@ export function useScreenshotScreens(projectId: string) {
   });
 }
 
-export function useScreenshotScreen(screenId: string) {
-  return useQuery({
+/** 详情查询配置共享给 useQuery 与 prefetchQuery，避免两处静默失配 */
+export function screenshotScreenDetailQueryOptions(screenId: string) {
+  return queryOptions({
     queryKey: ["screenshots", "detail", screenId],
     queryFn: async () => {
       const res = await screenshotApi.get(screenId);
       return res.data;
     },
-    enabled: !!screenId,
     retry: false,
+  });
+}
+
+export function useScreenshotScreen(screenId: string) {
+  return useQuery({
+    ...screenshotScreenDetailQueryOptions(screenId),
+    enabled: !!screenId,
   });
 }
 
