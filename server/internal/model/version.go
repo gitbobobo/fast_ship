@@ -45,7 +45,7 @@ type Version struct {
 	ShippedAt        *time.Time    `json:"shipped_at"`
 
 	Project   Project    `gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE" json:"-"`
-	Artifacts []Artifact `gorm:"foreignKey:VersionID" json:"artifacts,omitempty"`
+	Artifacts []Artifact `gorm:"foreignKey:VersionID;constraint:OnDelete:CASCADE" json:"artifacts,omitempty"`
 }
 
 func (Version) TableName() string {

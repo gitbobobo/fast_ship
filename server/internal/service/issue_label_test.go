@@ -64,7 +64,8 @@ func TestExtractLabelNames(t *testing.T) {
 
 func TestResolveLabels_WithCache(t *testing.T) {
 	svc := setupTestServices(t)
-	projectID := "test-project"
+	user := createTestUser(t, svc.db, "user-1")
+	projectID := createTestProject(t, svc.db, user.ID).ID
 
 	// Seed cache
 	now := time.Now().UTC()
@@ -120,7 +121,8 @@ func TestResolveLabels_EmptyInput(t *testing.T) {
 
 func TestSyncRepositoryLabels(t *testing.T) {
 	svc := setupTestServices(t)
-	projectID := "test-project"
+	user := createTestUser(t, svc.db, "user-1")
+	projectID := createTestProject(t, svc.db, user.ID).ID
 
 	fake := &fakeIssueGitHubClient{
 		repoLabels: []*gh.Label{
@@ -168,7 +170,8 @@ func TestSyncRepositoryLabels(t *testing.T) {
 func TestGitHubRepoLabelRepository(t *testing.T) {
 	svc := setupTestServices(t)
 	repo := svc.issueService.githubRepoLabelRepo
-	projectID := "proj-1"
+	user := createTestUser(t, svc.db, "user-1")
+	projectID := createTestProject(t, svc.db, user.ID).ID
 	now := time.Now().UTC()
 
 	l1 := &model.GitHubRepoLabel{ProjectID: projectID, Name: "bug", Color: "d73a4a", Description: "Bug", SyncedAt: now}

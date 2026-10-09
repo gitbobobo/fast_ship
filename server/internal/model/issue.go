@@ -59,10 +59,12 @@ type Issue struct {
 	CreatedAt       time.Time   `gorm:"not null;index" json:"created_at"`
 	UpdatedAt       time.Time   `gorm:"not null;index" json:"updated_at"`
 
+	// has-many/has-one 与 belongs-to 双侧声明时 GORM 取父侧 constraint，
+	// 两侧必须都写 OnDelete:CASCADE，否则生成的外键是 NO ACTION。
 	Project        Project              `gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE" json:"-"`
-	GitHubMeta     *IssueGitHubMeta     `gorm:"foreignKey:IssueID" json:"-"`
-	Comments       []IssueComment       `gorm:"foreignKey:IssueID" json:"-"`
-	TimelineEvents []IssueTimelineEvent `gorm:"foreignKey:IssueID" json:"-"`
+	GitHubMeta     *IssueGitHubMeta     `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+	Comments       []IssueComment       `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
+	TimelineEvents []IssueTimelineEvent `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 	PullRequests   []IssuePullRequest   `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
@@ -148,6 +150,8 @@ type IssueSyncState struct {
 	LastSyncedAt         *time.Time      `json:"last_synced_at"`
 	LastSuccessfulSyncAt *time.Time      `json:"last_successful_sync_at"`
 	LastError            string          `gorm:"type:text" json:"last_error"`
+
+	Project Project `gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 func (IssueSyncState) TableName() string {
@@ -198,6 +202,8 @@ type GitHubRepoLabel struct {
 	Color       string    `gorm:"type:text" json:"color"`
 	Description string    `gorm:"type:text" json:"description"`
 	SyncedAt    time.Time `gorm:"not null" json:"synced_at"`
+
+	Project Project `gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 func (GitHubRepoLabel) TableName() string {
