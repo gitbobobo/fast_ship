@@ -24,6 +24,16 @@ export function isTypingTarget(target: EventTarget | null): boolean {
   );
 }
 
+/** 空格平移要放过的目标：表单控件与可点元素（按钮的 Space 是激活键） */
+export function isInteractiveTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    !!target.closest(
+      "input, textarea, select, [contenteditable], button, a, [role='button'], [role='tab'], [role='switch'], [role='menuitem'], [role='option'], [role='link']",
+    )
+  );
+}
+
 type Gesture =
   | { kind: "pan"; startX: number; startY: number; lastX: number; lastY: number }
   | { kind: "pinch"; lastDist: number; lastMidX: number; lastMidY: number };
@@ -54,6 +64,8 @@ export function useCanvasViewport(
   const gestureRef = useRef<Gesture | null>(null);
   // 手势期间挂在 window 上的监听的统一摘除入口
   const detachRef = useRef<(() => void) | null>(null);
+  // 拖拽结束后吞掉紧随其后的 click 的一次性清理（pointerdown 先至则让行）
+  const suppressClickCleanupRef = useRef<(() => void) | null>(null);
 
   const commit = useCallback((next: Viewport, animated: boolean) => {
     viewportRef.current = next;
@@ -110,6 +122,8 @@ export function useCanvasViewport(
     const el = containerRef.current;
     if (!el || !enabled) return;
     const onWheel = (e: WheelEvent) => {
+      // 与指针平移同口径：data-no-pan 区域（工具栏、草稿输入框等）的滚轮原样放行
+      if ((e.target as HTMLElement | null)?.closest?.("[data-no-pan]")) return;
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const current = viewportRef.current;
@@ -140,7 +154,7 @@ export function useCanvasViewport(
       setSpaceHeld(value);
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.code !== "Space" || isTypingTarget(e.target)) return;
+      if (e.code !== "Space" || isInteractiveTarget(e.target)) return;
       e.preventDefault();
       if (!e.repeat) set(true);
     };
@@ -223,6 +237,25 @@ export function useCanvasViewport(
       const pointers = pointersRef.current;
       pointers.delete(e.pointerId);
       if (pointers.size === 0) {
+        // 拖拽的尾巴是一次 click：挂一次性 window 捕获吞掉它（落点可能在
+        // 容器外）；若先来了新的 pointerdown 则解除——那次点击属于新手势
+        if (movedRef.current) {
+          suppressClickCleanupRef.current?.();
+          const onClick = (ev: MouseEvent) => {
+            ev.stopPropagation();
+            cleanup();
+          };
+          const onDown = () => cleanup();
+          const cleanup = () => {
+            window.removeEventListener("click", onClick, true);
+            window.removeEventListener("pointerdown", onDown, true);
+            suppressClickCleanupRef.current = null;
+          };
+          window.addEventListener("click", onClick, true);
+          window.addEventListener("pointerdown", onDown, true);
+          suppressClickCleanupRef.current = cleanup;
+        }
+        movedRef.current = false;
         gestureRef.current = null;
         setPanning(false);
         detachRef.current?.();
@@ -241,7 +274,13 @@ export function useCanvasViewport(
     [],
   );
 
-  useEffect(() => () => detachRef.current?.(), []);
+  useEffect(
+    () => () => {
+      detachRef.current?.();
+      suppressClickCleanupRef.current?.();
+    },
+    [],
+  );
 
   const onPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLElement>) => {
@@ -291,14 +330,6 @@ export function useCanvasViewport(
     [enabled, onWindowMove, onWindowUp],
   );
 
-  // 拖拽结束后紧跟的 click 不应触发卡片/标注的点击
-  const onClickCapture = useCallback((e: React.MouseEvent) => {
-    if (movedRef.current) {
-      e.stopPropagation();
-      movedRef.current = false;
-    }
-  }, []);
-
   return {
     viewport,
     smooth,
@@ -308,6 +339,6 @@ export function useCanvasViewport(
     moveTo,
     jumpTo,
     zoomByFactor,
-    handlers: { onPointerDown, onClickCapture },
+    handlers: { onPointerDown },
   };
 }

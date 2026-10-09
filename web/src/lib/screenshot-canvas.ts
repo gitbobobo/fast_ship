@@ -359,6 +359,18 @@ export function countOpenOnOlderVersions(
   return counts;
 }
 
+/** 删除界面/版本时会被级联删除的标注数（不分状态） */
+export function countAnnotations(
+  annotations: ScreenshotAnnotation[],
+  scope: { screenId?: string; versionId?: string },
+): number {
+  return annotations.filter(
+    (a) =>
+      (scope.screenId === undefined || a.screen_id === scope.screenId) &&
+      (scope.versionId === undefined || a.version_id === scope.versionId),
+  ).length;
+}
+
 /** 删除界面/版本时会被级联删除的未解决标注数 */
 export function countOpenAnnotations(
   annotations: ScreenshotAnnotation[],

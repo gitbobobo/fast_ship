@@ -95,7 +95,9 @@ function renderCanvas(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const tree = (
+    nextProps: Partial<Parameters<typeof ScreenshotCanvas>[0]>,
+  ) => (
     <QueryClientProvider client={queryClient}>
       <ScreenshotCanvas
         projectId="p-1"
@@ -107,9 +109,16 @@ function renderCanvas(
         locateRequest={null}
         onOpenPreview={vi.fn()}
         {...props}
+        {...nextProps}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const utils = render(tree({}));
+  return {
+    ...utils,
+    rerenderWith: (nextProps: Partial<Parameters<typeof ScreenshotCanvas>[0]>) =>
+      utils.rerender(tree(nextProps)),
+  };
 }
 
 describe("ScreenshotCanvas", () => {
@@ -307,5 +316,107 @@ describe("ScreenshotCanvas", () => {
     fireEvent.pointerUp(window, { clientX: 42, clientY: 31, pointerId: 1 });
 
     expect(screen.queryByRole("textbox", { name: "标注内容" })).toBeNull();
+  });
+
+  it("switches the panel filter to all when locating a resolved annotation", async () => {
+    const utils = renderCanvas({
+      annotations: [
+        makeAnnotation({ id: "a-done", body: "已解决的", status: "resolved" }),
+      ],
+    });
+
+    const panel = screen.getByTestId("annotation-panel");
+    expect(within(panel).queryByText("已解决的")).toBeNull();
+
+    utils.rerenderWith({ locateRequest: { annotationId: "a-done", nonce: 1 } });
+    await waitFor(() =>
+      expect(within(panel).getByText("已解决的")).toBeInTheDocument(),
+    );
+  });
+
+  it("does not enter space-pan while a button has keyboard focus", () => {
+    renderCanvas();
+    const container = screen.getByTestId("screenshot-canvas")
+      .firstElementChild as HTMLElement;
+    const button = screen.getByRole("button", { name: /框选/ });
+
+    fireEvent.keyDown(button, { code: "Space" });
+    expect(container.style.cursor).not.toBe("grab");
+    fireEvent.keyUp(window, { code: "Space" });
+
+    fireEvent.keyDown(container, { code: "Space" });
+    expect(container.style.cursor).toBe("grab");
+    fireEvent.keyUp(window, { code: "Space" });
+  });
+
+  it("does not zoom on wheel over data-no-pan regions", () => {
+    renderCanvas();
+    const container = screen.getByTestId("screenshot-canvas")
+      .firstElementChild as HTMLElement;
+    const world = container.firstElementChild as HTMLElement;
+    const before = world.style.transform;
+
+    fireEvent.wheel(screen.getByTestId("canvas-toolbar"), { deltaY: 100 });
+    expect(world.style.transform).toBe(before);
+
+    fireEvent.wheel(container, { deltaY: 100 });
+    expect(world.style.transform).not.toBe(before);
+  });
+
+  it("swallows the click that ends a drag, but not a later one after a new pointerdown", () => {
+    const onOpenPreview = vi.fn();
+    renderCanvas({ onOpenPreview });
+    const container = screen.getByTestId("screenshot-canvas")
+      .firstElementChild as HTMLElement;
+    const previewButton = () =>
+      within(screen.getByTestId("canvas-card-s1")).getByRole("button", {
+        name: "打开预览",
+      });
+
+    // 在空白处拖拽后松手：随之而来的 click（没有新一轮 pointerdown）被吞掉
+    fireEvent.pointerDown(container, { button: 0, clientX: 10, clientY: 10, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 120, clientY: 120, pointerId: 1 });
+    fireEvent.pointerUp(window, { clientX: 120, clientY: 120, pointerId: 1 });
+    fireEvent.click(previewButton());
+    expect(onOpenPreview).not.toHaveBeenCalled();
+
+    // 下一次点击前先发生了新的 pointerdown：吞点击状态已解除
+    fireEvent.pointerDown(container, { button: 0, clientX: 10, clientY: 10, pointerId: 2 });
+    fireEvent.pointerMove(window, { clientX: 120, clientY: 120, pointerId: 2 });
+    fireEvent.pointerUp(window, { clientX: 120, clientY: 120, pointerId: 2 });
+    fireEvent.pointerDown(container, { button: 0, clientX: 10, clientY: 10, pointerId: 3 });
+    fireEvent.pointerUp(window, { clientX: 10, clientY: 10, pointerId: 3 });
+    fireEvent.click(previewButton());
+    expect(onOpenPreview).toHaveBeenCalledWith("s1");
+  });
+
+  it("cancels the pending draft when the screen's latest version changes", async () => {
+    vi.mocked(screenshotAnnotationApi.create).mockClear();
+    const utils = renderCanvas();
+    fireEvent.keyDown(window, { key: "r" });
+    const imageArea = screen
+      .getByTestId("canvas-card-s1")
+      .querySelector("img")!.parentElement!;
+    imageArea.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 400, height: 300 }) as DOMRect;
+    fireEvent.pointerDown(imageArea, { button: 0, clientX: 40, clientY: 30, pointerId: 1 });
+    fireEvent.pointerMove(window, { clientX: 200, clientY: 120, pointerId: 1 });
+    fireEvent.pointerUp(window, { clientX: 200, clientY: 120, pointerId: 1 });
+    await screen.findByRole("textbox", { name: "标注内容" });
+
+    // 数据刷新把 s1 的最新版本换成 v3：画在 v2 上的草稿必须作废
+    utils.rerenderWith({
+      screens: [
+        makeScreen("s1", { latest_version: makeVersion("s1-v3", "s1") }),
+        makeScreen("s2", { group: "设置" }),
+      ],
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("textbox", { name: "标注内容" }),
+      ).toBeNull(),
+    );
+    expect(screenshotAnnotationApi.create).not.toHaveBeenCalled();
   });
 });

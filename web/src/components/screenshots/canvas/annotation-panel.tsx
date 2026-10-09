@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Check,
+  ChevronDown,
   Crosshair,
   MessageSquareText,
   Pencil,
@@ -11,15 +12,15 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -40,9 +41,6 @@ import type { AnnotationStatusFilter } from "@/lib/screenshot-canvas";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { ANNOTATION_BODY_MAX } from "./annotation-draft";
-
-/** Select 不接受空串，用哨兵值表示「不关联」 */
-const NO_ISSUE = "__none__";
 
 interface AnnotationPanelProps {
   projectId: string;
@@ -79,22 +77,10 @@ export function AnnotationPanel({
   const [pendingDelete, setPendingDelete] =
     useState<ScreenshotAnnotation | null>(null);
 
-  const { data: issuesData } = useIssues(projectId, {
-    page_size: 100,
-    sort: "updated_desc",
-  });
-  const issueOptions = useMemo(
-    () => issuesData?.items ?? [],
-    [issuesData?.items],
-  );
-
-  const shown = useMemo(
-    () =>
-      statusFilter === "all"
-        ? annotations
-        : annotations.filter((a) => a.status === statusFilter),
-    [annotations, statusFilter],
-  );
+  const shown =
+    statusFilter === "all"
+      ? annotations
+      : annotations.filter((a) => a.status === statusFilter);
 
   // 画布上点选标注后，把面板里对应条目滚入视野
   useEffect(() => {
@@ -155,7 +141,6 @@ export function AnnotationPanel({
               key={annotation.id}
               projectId={projectId}
               annotation={annotation}
-              issueOptions={issueOptions}
               selected={annotation.id === selectedId}
               hovered={annotation.id === hoverId}
               onHover={onHover}
@@ -195,7 +180,6 @@ export function AnnotationPanel({
 function AnnotationItem({
   projectId,
   annotation,
-  issueOptions,
   selected,
   hovered,
   onHover,
@@ -205,7 +189,6 @@ function AnnotationItem({
 }: {
   projectId: string;
   annotation: ScreenshotAnnotation;
-  issueOptions: Issue[];
   selected: boolean;
   hovered: boolean;
   onHover: (annotationId: string | null) => void;
@@ -218,6 +201,20 @@ function AnnotationItem({
   const [draft, setDraft] = useState("");
   const resolved = annotation.status === "resolved";
   const screenName = annotation.screen_title || annotation.screen_key;
+
+  // Issue 选择器走服务端搜索，超过前 100 条的旧 Issue 也能关联上
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [issueSearch, setIssueSearch] = useState("");
+  const deferredIssueSearch = useDeferredValue(issueSearch);
+  const { data: issuesData, isFetching: issuesFetching } = useIssues(
+    projectId,
+    {
+      page_size: 100,
+      sort: "updated_desc",
+      q: deferredIssueSearch.trim() || undefined,
+    },
+  );
+  const issueOptions = issuesData?.items ?? [];
 
   const save = async (payload: UpdateScreenshotAnnotationPayload) => {
     try {
@@ -339,55 +336,81 @@ function AnnotationItem({
       </div>
 
       <div onClick={(e) => e.stopPropagation()} className="space-y-2">
-        <Select
-          value={annotation.issue_id ?? NO_ISSUE}
+        <button
+          type="button"
+          aria-label="关联 Issue"
           disabled={update.isPending}
-          onValueChange={(v) => {
-            if (!v) return;
-            void save({ issue_id: v === NO_ISSUE ? "" : v });
+          onClick={() => setPickerOpen(true)}
+          className="flex h-7 w-full items-center justify-between gap-1.5 rounded-lg border border-input bg-transparent py-1 pr-2 pl-2.5 text-sm outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30 dark:hover:bg-input/50 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+        >
+          <span className="min-w-0 flex-1 truncate text-left">
+            {(() => {
+              if (!annotation.issue_id) return "不关联 Issue";
+              const hit = issueOptions.find(
+                (i) => i.id === annotation.issue_id,
+              );
+              if (hit) return `${hit.reference} ${hit.title}`;
+              return annotation.issue_reference
+                ? `${annotation.issue_reference} ${annotation.issue_title ?? ""}`
+                : "已关联 Issue";
+            })()}
+          </span>
+          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+        </button>
+
+        <Dialog
+          open={pickerOpen}
+          onOpenChange={(open) => {
+            setPickerOpen(open);
+            if (!open) setIssueSearch("");
           }}
         >
-          <SelectTrigger
-            size="sm"
-            className="w-full"
-            aria-label="关联 Issue"
-          >
-            <SelectValue placeholder="不关联 Issue">
-              {(value) => {
-                if (!value || value === NO_ISSUE) return "不关联 Issue";
-                const hit = issueOptions.find((i) => i.id === value);
-                if (hit) return `${hit.reference} ${hit.title}`;
-                return annotation.issue_reference
-                  ? `${annotation.issue_reference} ${annotation.issue_title ?? ""}`
-                  : "已关联 Issue";
-              }}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={NO_ISSUE} label="不关联 Issue">
-              不关联 Issue
-            </SelectItem>
-            {linkedMissing && (
-              <SelectItem
-                value={annotation.issue_id!}
-                label={`${annotation.issue_reference ?? ""} ${annotation.issue_title ?? ""}`}
-              >
-                {annotation.issue_reference} {annotation.issue_title}
-              </SelectItem>
-            )}
-            {issueOptions.map((issue) => (
-              <SelectItem
-                key={issue.id}
-                value={issue.id}
-                label={`${issue.reference} ${issue.title}`}
-              >
-                <span className="truncate">
-                  {issue.reference} {issue.title}
-                </span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          <DialogContent className="sm:max-w-md" aria-label="关联 Issue">
+            <DialogHeader>
+              <DialogTitle>关联 Issue</DialogTitle>
+            </DialogHeader>
+            <Input
+              autoFocus
+              value={issueSearch}
+              onChange={(e) => setIssueSearch(e.target.value)}
+              placeholder="搜索标题或编号…"
+              aria-label="搜索 Issue"
+            />
+            <div className="max-h-72 space-y-0.5 overflow-y-auto">
+              <PickerRow
+                label="不关联 Issue"
+                selected={!annotation.issue_id}
+                onSelect={() => {
+                  void save({ issue_id: "" });
+                  setPickerOpen(false);
+                }}
+              />
+              {linkedMissing && (
+                <PickerRow
+                  label={`${annotation.issue_reference ?? ""} ${annotation.issue_title ?? ""}`}
+                  selected
+                  onSelect={() => setPickerOpen(false)}
+                />
+              )}
+              {issueOptions.map((issue) => (
+                <PickerRow
+                  key={issue.id}
+                  label={`${issue.reference} ${issue.title}`}
+                  selected={issue.id === annotation.issue_id}
+                  onSelect={() => {
+                    void save({ issue_id: issue.id });
+                    setPickerOpen(false);
+                  }}
+                />
+              ))}
+              {issueOptions.length === 0 && (
+                <p className="px-2 py-6 text-center text-sm text-muted-foreground">
+                  {issuesFetching ? "搜索中…" : "没有匹配的 Issue"}
+                </p>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
 
         <div className="flex items-center gap-1">
           <Button
@@ -442,5 +465,29 @@ function AnnotationItem({
         </div>
       </div>
     </li>
+  );
+}
+
+function PickerRow({
+  label,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent",
+        selected && "bg-accent/60",
+      )}
+    >
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {selected && <Check className="h-3.5 w-3.5 shrink-0" />}
+    </button>
   );
 }

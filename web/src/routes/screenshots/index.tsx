@@ -95,8 +95,11 @@ export default function ScreenshotsPage() {
     useState<CanvasLocateRequest | null>(null);
   const handledUrlAnnotationRef = useRef<string | null>(null);
 
-  const { data: annotationsData, isSuccess: annotationsReady } =
-    useScreenshotAnnotations(activeProjectId, view === "canvas");
+  const {
+    data: annotationsData,
+    isSuccess: annotationsReady,
+    isFetching: annotationsFetching,
+  } = useScreenshotAnnotations(activeProjectId, view === "canvas");
   const annotations = useMemo(() => annotationsData ?? [], [annotationsData]);
 
   const setView = (next: ScreenshotsView) => {
@@ -150,21 +153,39 @@ export default function ScreenshotsPage() {
     [tabScreens, deferredSearch],
   );
 
-  // 项目切换时回到「全部」并关闭预览
+  // 项目切换时回到「全部」并关闭预览；深链 annotation 只对当时的项目
+  // 生效——换项目后摘掉参数并重置已处理标记，避免指向旧项目的标注
+  const prevProjectIdRef = useRef(activeProjectId);
   useEffect(() => {
+    const projectChanged = prevProjectIdRef.current !== activeProjectId;
+    prevProjectIdRef.current = activeProjectId;
+    if (!projectChanged) return;
     setTab(SCREENSHOT_TAB_ALL);
     setSearch("");
     setOpenScreenId(null);
     setPreviewVersionId(null);
     setPreviewAnnotationId(null);
-  }, [activeProjectId]);
+    handledUrlAnnotationRef.current = null;
+    if (urlAnnotationId) {
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          params.delete("annotation");
+          return params;
+        },
+        { replace: true },
+      );
+    }
+  }, [activeProjectId, urlAnnotationId, setSearchParams]);
 
   // ?view=canvas&annotation=<id>：数据就绪后把分组 tab 与搜索放宽到能看到
   // 该标注所在界面，再交给画布执行定位；参数处理后保留在 URL 上
   useEffect(() => {
     if (view !== "canvas" || !urlAnnotationId) return;
     if (handledUrlAnnotationRef.current === urlAnnotationId) return;
-    if (!annotationsReady || screensLoading) return;
+    // isSuccess 可能命中的是过期缓存；等当次拉取落地后再判定存在性，
+    // 避免旧缓存把有效的定位参数消耗掉
+    if (!annotationsReady || annotationsFetching || screensLoading) return;
     handledUrlAnnotationRef.current = urlAnnotationId;
     const target = annotations.find((a) => a.id === urlAnnotationId);
     if (!target) {
@@ -180,6 +201,7 @@ export default function ScreenshotsPage() {
     view,
     urlAnnotationId,
     annotationsReady,
+    annotationsFetching,
     screensLoading,
     annotations,
     visibleScreens,

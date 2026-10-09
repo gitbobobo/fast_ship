@@ -296,7 +296,7 @@ describe("ScreenshotLightbox", () => {
     );
     // 当前为最新版本，只有 a-1 挂在其上
     expect(
-      await screen.findByText(/将同时删除 1 条未解决标注/),
+      await screen.findByText(/将同时删除 1 条标注，其中 1 条未解决/),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "取消" }));
 
@@ -304,9 +304,9 @@ describe("ScreenshotLightbox", () => {
     await user.click(
       await screen.findByRole("menuitem", { name: "删除界面" }),
     );
-    // 整个界面：a-1 + a-2 两条未解决
+    // 整个界面：a-1 + a-2 + a-3（含已解决）三条，其中两条未解决
     expect(
-      await screen.findByText(/将同时删除 2 条未解决标注/),
+      await screen.findByText(/将同时删除 3 条标注，其中 2 条未解决/),
     ).toBeInTheDocument();
   });
 

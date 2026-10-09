@@ -142,6 +142,29 @@ export function ScreenshotCanvas({
     jumpTo(fitViewport(layout.bounds, size));
   }, [resetKey, size, layout, jumpTo]);
 
+  // 搜索/数据变化把内容整体挪出视口时自动适应全部，避免整屏空白；
+  // 只在布局变化时评估，手动平移到空白处不会触发
+  const layoutRef = useRef(layout);
+  useEffect(() => {
+    if (layoutRef.current === layout) return;
+    layoutRef.current = layout;
+    if (size.width <= 0 || layout.cards.length === 0) return;
+    const view = visibleWorldRect(viewport, size, 0);
+    if (!layout.cards.some((card) => rectsIntersect(card.rect, view))) {
+      moveTo(fitViewport(layout.bounds, size));
+    }
+  }, [layout, size, viewport, moveTo]);
+
+  // 草稿只认它画上去的那个版本：界面换版或被过滤出画布时草稿作废
+  useEffect(() => {
+    if (!draft) return;
+    const screen = screenById.get(draft.screenId);
+    if (!screen || screen.latest_version?.id !== draft.versionId) {
+      setDraft(null);
+      toast.info("截图已更新，标注草稿已取消");
+    }
+  }, [draft, screenById]);
+
   // 画布只展示最新版本：标注按「挂在该界面最新版本」归到卡片上
   const annotationsByScreen = useMemo(() => {
     const map = new Map<string, ScreenshotAnnotation[]>();
@@ -210,7 +233,11 @@ export function ScreenshotCanvas({
         onOpenPreview(screen.id, annotation.version_id, annotation.id);
         return;
       }
-      if (annotation.status === "resolved") setShowResolved(true);
+      if (annotation.status === "resolved") {
+        setShowResolved(true);
+        // 面板滤镜切到「全部」，否则选中项不在列表里
+        setStatusFilter("all");
+      }
       setSelectedId(annotation.id);
       setDrawMode(false);
       focusCard(screen.id);
@@ -342,7 +369,6 @@ export function ScreenshotCanvas({
         )}
         style={cursor ? { cursor } : undefined}
         onPointerDown={handlers.onPointerDown}
-        onClickCapture={handlers.onClickCapture}
         onClick={(e) => {
           const target = e.target as HTMLElement;
           if (target.closest("[data-canvas-card], [data-no-pan]")) return;

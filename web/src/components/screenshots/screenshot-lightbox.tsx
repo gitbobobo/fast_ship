@@ -56,7 +56,10 @@ import {
 } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
 import { screenshotApi } from "@/lib/api/screenshots";
-import { countOpenAnnotations } from "@/lib/screenshot-canvas";
+import {
+  countAnnotations,
+  countOpenAnnotations,
+} from "@/lib/screenshot-canvas";
 import { screenDisplayName } from "@/lib/screenshots";
 import { formatDate, formatFileSize, formatRelativeTime } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
@@ -461,7 +464,8 @@ export function ScreenshotLightbox({
   const queryClient = useQueryClient();
   const deleteScreen = useDeleteScreenshotScreen(projectId);
   const deleteVersion = useDeleteScreenshotVersion(projectId);
-  const { data: annotationData } = useScreenshotAnnotations(projectId, open);
+  const { data: annotationData, isLoading: annotationsLoading } =
+    useScreenshotAnnotations(projectId, open);
   const annotations = annotationData ?? EMPTY_ANNOTATIONS;
 
   // 新界面加载期间继续展示上一份成功加载的详情，不整块切成骨架屏；
@@ -656,9 +660,15 @@ export function ScreenshotLightbox({
   const currentVersionAnnotations = annotations.filter(
     (a) => a.version_id === currentVersion?.id,
   );
-  // 删除会级联删掉挂在其上的标注，确认框里提示未解决的条数
+  // 删除会级联删掉挂在其上的全部标注（不分状态），确认框提示总数与其中未解决数
+  const totalOnVersion = currentVersion
+    ? countAnnotations(annotations, { versionId: currentVersion.id })
+    : 0;
   const openOnVersion = currentVersion
     ? countOpenAnnotations(annotations, { versionId: currentVersion.id })
+    : 0;
+  const totalOnScreen = screenId
+    ? countAnnotations(annotations, { screenId })
     : 0;
   const openOnScreen = screenId
     ? countOpenAnnotations(annotations, { screenId })
@@ -863,13 +873,16 @@ export function ScreenshotLightbox({
               {versions.length <= 1
                 ? "这是该界面的最后一个版本，删除后界面将一并移除，不可恢复。"
                 : "删除后不可恢复。"}
-              {openOnVersion > 0 &&
-                `将同时删除 ${openOnVersion} 条未解决标注。`}
+              {annotationsLoading && "正在读取关联标注…"}
+              {!annotationsLoading &&
+                totalOnVersion > 0 &&
+                `将同时删除 ${totalOnVersion} 条标注${openOnVersion > 0 ? `，其中 ${openOnVersion} 条未解决` : ""}。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
+              disabled={annotationsLoading}
               onClick={() => {
                 setConfirm(null);
                 void handleDeleteVersion();
@@ -892,12 +905,16 @@ export function ScreenshotLightbox({
             <AlertDialogTitle>删除界面？</AlertDialogTitle>
             <AlertDialogDescription>
               将删除「{displayName}」及其全部 {versions.length} 个版本，不可恢复。
-              {openOnScreen > 0 && `将同时删除 ${openOnScreen} 条未解决标注。`}
+              {annotationsLoading && "正在读取关联标注…"}
+              {!annotationsLoading &&
+                totalOnScreen > 0 &&
+                `将同时删除 ${totalOnScreen} 条标注${openOnScreen > 0 ? `，其中 ${openOnScreen} 条未解决` : ""}。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
+              disabled={annotationsLoading}
               onClick={() => {
                 setConfirm(null);
                 void handleDeleteScreen();

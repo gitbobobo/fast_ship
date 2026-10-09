@@ -1,10 +1,12 @@
-import { screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import ScreenshotsPage from "@/routes/screenshots/index";
 import { renderWithRoute } from "@/test/render";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
+import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
+import { MemoryRouter, Route, Routes } from "react-router";
 
 const mockUploadDialog = vi.fn((_props: unknown) => null);
 const mockLightbox = vi.fn((_props: unknown) => null);
@@ -26,7 +28,11 @@ vi.mock("@/lib/hooks/use-screenshot-annotations", async (importOriginal) => {
     >();
   return {
     ...mod,
-    useScreenshotAnnotations: vi.fn(() => ({ data: [], isSuccess: true })),
+    useScreenshotAnnotations: vi.fn(() => ({
+      data: [],
+      isSuccess: true,
+      isFetching: false,
+    })),
   };
 });
 
@@ -280,5 +286,62 @@ describe("ScreenshotsPage", () => {
       screen.getByText(/该项目暂无截图/),
     ).toBeInTheDocument();
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+  });
+
+  it("waits for the in-flight fetch before honoring ?annotation= deep links", async () => {
+    // 过期缓存：isSuccess=true 但数据不含目标，同时仍在拉取
+    const annotation = {
+      id: "a-1",
+      screen_id: "s1",
+      version_id: "s1-v1",
+      status: "open",
+    } as ScreenshotAnnotation;
+    const queryState = {
+      current: {
+        data: [] as ScreenshotAnnotation[],
+        isSuccess: true,
+        isFetching: true,
+      },
+    };
+    vi.mocked(useScreenshotAnnotations).mockImplementation(
+      () =>
+        queryState.current as unknown as ReturnType<
+          typeof useScreenshotAnnotations
+        >,
+    );
+
+    const lastLocate = () =>
+      (mockCanvas.mock.calls.at(-1)?.[0] as {
+        locateRequest: { annotationId: string } | null;
+      }).locateRequest;
+
+    const utils = render(
+      <MemoryRouter initialEntries={["/screenshots?view=canvas&annotation=a-1"]}>
+        <Routes>
+          <Route path="/screenshots" element={<ScreenshotsPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByTestId("canvas-stub")).toBeInTheDocument(),
+    );
+    // 拉取未落地时不判存在性、不发定位请求
+    expect(lastLocate()).toBeNull();
+
+    queryState.current = {
+      data: [annotation],
+      isSuccess: true,
+      isFetching: false,
+    };
+    utils.rerender(
+      <MemoryRouter initialEntries={["/screenshots?view=canvas&annotation=a-1"]}>
+        <Routes>
+          <Route path="/screenshots" element={<ScreenshotsPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(lastLocate()?.annotationId).toBe("a-1"));
   });
 });
