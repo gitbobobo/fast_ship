@@ -224,7 +224,7 @@ func main() {
 	logHandler := handler.NewLogHandler(logService)
 	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
-	issueAttachmentHandler := handler.NewIssueAttachmentHandler(issueAttachmentService)
+	issueAttachmentHandler := handler.NewIssueAttachmentHandler(issueAttachmentService, cfg)
 	screenshotHandler := handler.NewScreenshotHandler(screenshotService, cfg)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 

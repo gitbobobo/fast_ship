@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 )
@@ -190,6 +192,24 @@ func TestIssueAttachmentHandlerDownloadDispositionsNonASCII(t *testing.T) {
 	}
 	if !strings.Contains(disposition, "filename*=UTF-8''") || !strings.Contains(disposition, "%E6%8A%A5%E5%91%8A") {
 		t.Fatalf("expected RFC 5987 filename* for non-ASCII name, got %q", disposition)
+	}
+}
+
+func TestIssueAttachmentHandlerUploadRejectsOversizedBody(t *testing.T) {
+	// 请求体超限时应在 multipart 解析阶段返回 413，而不是先落临时盘再被 service 拒
+	h := NewIssueAttachmentHandler(nil, &config.Config{
+		Upload: config.UploadConfig{MaxFileSize: 1 << 10},
+	})
+	rec := httptest.NewRecorder()
+	req, _ := newMultipartUploadRequest(t, "/api/issues/i1/attachments", "file", "big.bin", bytes.Repeat([]byte("x"), 2<<20), nil)
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+	ctx.Params = ginParams("iid", "i1")
+
+	h.Upload(ctx)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

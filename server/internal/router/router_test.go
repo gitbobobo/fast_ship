@@ -925,7 +925,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	logHandler := handler.NewLogHandler(logService)
 	documentHandler := handler.NewDocumentHandler(documentService)
 	artifactHandler := handler.NewArtifactHandler(artifactService)
-	issueAttachmentHandler := handler.NewIssueAttachmentHandler(issueAttachmentService)
+	issueAttachmentHandler := handler.NewIssueAttachmentHandler(issueAttachmentService, cfg)
 	screenshotHandler := handler.NewScreenshotHandler(screenshotService, cfg)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 
