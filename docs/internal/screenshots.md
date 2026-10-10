@@ -83,7 +83,7 @@
 
 Issue 详情响应内嵌 `screenshot_annotations`（`IssueService.Get`，无关联时缺省）；项目级列表与 Issue 内嵌共用 `assembleScreenshotAnnotations` 组装：关联行（版本/界面/最新版本）经 `ScreenshotAnnotationRepository.LoadRelated` 批量取回，`issue_id → Issue` 批量查 `issueRepo.ListByIDs`（含 GitHubMeta 供 `issue_reference` 生成）。`image_width`/`image_height` 优先取版本落库值，存量行（0）惰性解码文件头，仍失败输出 0 且 `pixel_rect=null`。
 
-裁剪图（`Crop`）：解码前先按文件头尺寸做像素预算校验（`maxScreenshotDecodePixels` ≈ 64MP，超限 40004 `ErrScreenshotImageTooLarge`——压缩体积上限管不住解码后内存），且包级信号量限 4 并发（`Crop` 返回 release 闭包，handler 写完 PNG 响应后才释放——解码与已编码缓冲的驻留期都计入并发上限，慢客户端不会绕过限制堆积大响应体）；按存储 mime 分派解码——png/webp 流式单遍；jpeg/gif 各开两遍流（jpeg 先 `jpeg.Decode` 像素再重开扫 EXIF 头；gif 先 `gif.DecodeConfig` 取逻辑画布再重开 `gif.Decode` 只解第一帧并按偏移合成——`DecodeAll` 会把全部帧解码进内存，多帧大图能绕过单帧预算；首帧 Bounds 可能是画布上的偏移子块），不 `ReadAll` 整文件，大元数据段（GIF 注释、JPEG ICC）不驻留内存；`SubImage` 取样后统一 `png.Encode` 输出，不落盘不缓存。JPEG 的尺寸/EXIF 探测走 `jpegScanHeader` 逐段跳到 SOF（跳过非目标段负载，容忍 0xFF 填充），不整文件入内存。
+裁剪图（`Crop`）：解码前先按文件头尺寸做像素预算校验（`maxScreenshotDecodePixels` ≈ 64MP，超限 40004 `ErrScreenshotImageTooLarge`——压缩体积上限管不住解码后内存），且有双闸限并发：个数闸 4 并发 + 字节闸按像素加权（权=像素×8，RGBA 解码源与 PNG 输出各估一份，总量封顶 512MiB——小截图并行、64MP 大图独占排队，并发大裁剪不会叠出 ~2GiB）；`Crop` 返回 release 闭包，handler 写完 PNG 响应后才释放，解码与已编码缓冲的驻留期都计入上限，慢客户端不会绕过限制堆积大响应体；按存储 mime 分派解码——png/webp 流式单遍；jpeg/gif 各开两遍流（jpeg 先 `jpeg.Decode` 像素再重开扫 EXIF 头；gif 先 `gif.DecodeConfig` 取逻辑画布再重开 `gif.Decode` 只解第一帧并按偏移合成——`DecodeAll` 会把全部帧解码进内存，多帧大图能绕过单帧预算；首帧 Bounds 可能是画布上的偏移子块），不 `ReadAll` 整文件，大元数据段（GIF 注释、JPEG ICC）不驻留内存；`SubImage` 取样后统一 `png.Encode` 输出，不落盘不缓存。JPEG 的尺寸/EXIF 探测走 `jpegScanHeader` 逐段跳到 SOF（跳过非目标段负载，容忍 0xFF 填充），不整文件入内存。
 
 ## 上传语义
 

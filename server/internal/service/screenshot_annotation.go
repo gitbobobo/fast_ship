@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"golang.org/x/image/webp"
+	"golang.org/x/sync/semaphore"
 	"gorm.io/gorm"
 )
 
@@ -47,8 +49,13 @@ const (
 // 解码后内存，一张声明 30000×30000 的 PNG 解码要 ~3.6GB
 const maxScreenshotDecodePixels = 64_000_000
 
-// 裁剪解码并发闸：预算内单张解码仍可能占用上百 MB，限制并发兜底
-var screenshotCropDecodeSem = make(chan struct{}, 4)
+// 裁剪并发闸：个数上限 4，且按图像素数加权限总驻留内存——RGBA 解码源 +
+// PNG 输出缓冲各按 w*h*4 估算（权 = 像素×8），总量封顶 512MiB。小截图并行、
+// 单张 64MP 大图独占排队，4 个并发大裁剪不会叠出 ~2GiB。
+var (
+	screenshotCropDecodeSem = make(chan struct{}, 4)
+	screenshotCropBytesSem  = semaphore.NewWeighted(512 << 20)
+)
 
 // ScreenshotAnnotationListFilters 是项目级标注列表的可选过滤项，空值不参与过滤。
 type ScreenshotAnnotationListFilters struct {
@@ -322,8 +329,17 @@ func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.
 	}
 	defer reader.Close()
 
+	// 个数闸 + 字节闸都占住才算拿到裁剪权，字节权覆盖解码与输出缓冲驻留期
 	screenshotCropDecodeSem <- struct{}{}
-	release := func() { <-screenshotCropDecodeSem }
+	weight := int64(imgW) * int64(imgH) * 8
+	if err := screenshotCropBytesSem.Acquire(context.Background(), weight); err != nil {
+		<-screenshotCropDecodeSem
+		return nil, nil, errs.ErrInternal
+	}
+	release := func() {
+		screenshotCropBytesSem.Release(weight)
+		<-screenshotCropDecodeSem
+	}
 
 	src, err := s.decodeCropSource(reader, version)
 	if err != nil {
