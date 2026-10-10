@@ -215,6 +215,9 @@ export default function ProjectsPage() {
                     ) : (
                       <Badge variant="outline">未创建版本</Badge>
                     )}
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {project.issue_count ?? 0} 个问题
+                    </span>
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {formatRelativeTime(project.updated_at)}

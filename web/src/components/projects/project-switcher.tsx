@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
 import { Check, ChevronDown } from "lucide-react";
+import { GithubIcon } from "@/components/ui/github-icon";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
@@ -113,7 +114,7 @@ export function ProjectSwitcher({
                 filteredProjects.map((project) => {
                   const selected = project.id === value;
                   const secondary =
-                    project.description ||
+                    project.description?.trim() ||
                     (project.github_owner && project.github_repo
                       ? `${project.github_owner}/${project.github_repo}`
                       : undefined);
@@ -133,6 +134,12 @@ export function ProjectSwitcher({
                         <span className="min-w-0 flex-1 truncate font-medium">
                           {project.name}
                         </span>
+                        {project.github_owner && project.github_repo && (
+                          <GithubIcon
+                            aria-hidden="true"
+                            className="size-3.5 shrink-0 text-muted-foreground"
+                          />
+                        )}
                         {selected && (
                           <Check aria-hidden="true" className="size-4 shrink-0 text-primary" />
                         )}

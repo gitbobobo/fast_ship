@@ -118,6 +118,7 @@ describe("ProjectSwitcher", () => {
     const mixed: Project[] = [
       { ...projects[0], id: "with-desc", name: "With Desc", description: "有描述" },
       { ...projects[0], id: "repo-only", name: "Repo Only", description: "" },
+      { ...projects[0], id: "blank", name: "Blank", description: "   " },
       { ...projects[1], id: "empty", name: "Empty", description: "" },
     ];
     render(<ProjectSwitcher projects={mixed} value="" onValueChange={vi.fn()} />);
@@ -128,9 +129,12 @@ describe("ProjectSwitcher", () => {
     expect(
       within(popup).getByRole("button", { name: /With Desc 有描述/ }),
     ).toBeInTheDocument();
-    // 无描述但关联仓库时回退到仓库 slug
+    // 无描述或仅空白字符时回退到仓库 slug
     expect(
       within(popup).getByRole("button", { name: /Repo Only Bobo\/fast_ship/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(popup).getByRole("button", { name: /Blank Bobo\/fast_ship/ }),
     ).toBeInTheDocument();
   });
 

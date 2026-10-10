@@ -149,6 +149,10 @@ describe("ProjectsPage", () => {
       .getAllByRole("heading", { level: 3 })
       .map((heading) => heading.textContent);
     expect(names).toEqual(["Many Issues", "Few Issues", "No Count"]);
+    // 卡片显示问题数，让排序依据可见；计数缺失显示 0
+    expect(screen.getByText("30 个问题")).toBeInTheDocument();
+    expect(screen.getByText("2 个问题")).toBeInTheDocument();
+    expect(screen.getByText("0 个问题")).toBeInTheDocument();
   });
 
   it("filters projects by search input", () => {
