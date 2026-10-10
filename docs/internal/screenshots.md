@@ -4,7 +4,7 @@
 
 ## 数据模型
 
-两张表，GORM `AutoMigrate` 注册（`server/cmd/server/main.go`），无外置迁移工具。唯一索引 `(project_id, screen_key)` 由 main.go 手工索引段建立（`idx_screenshot_screens_project_key`）。
+三张表，GORM `AutoMigrate` 注册（`server/cmd/server/main.go`），无外置迁移工具。唯一索引 `(project_id, screen_key)` 由 main.go 手工索引段建立（`idx_screenshot_screens_project_key`）。
 
 ### `screenshot_screens`
 
