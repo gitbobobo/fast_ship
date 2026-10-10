@@ -21,8 +21,7 @@ type VersionService struct {
 	versionRepo     *repository.VersionRepository
 	projectRepo     *repository.ProjectRepository
 	storage         storage.Storage
-	cfg             *config.Config
-	logger          *zap.Logger
+	credentials     *ProjectCredentials
 	newBranchClient gitHubBranchClientFactory
 }
 
@@ -31,8 +30,7 @@ func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *r
 		versionRepo: versionRepo,
 		projectRepo: projectRepo,
 		storage:     storage,
-		cfg:         cfg,
-		logger:      logger,
+		credentials: newProjectCredentials(projectRepo, cfg, logger),
 		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -170,7 +168,7 @@ func (s *VersionService) Update(ctx context.Context, id, userID string, allowVer
 }
 
 func (s *VersionService) ensureTargetBranchExists(ctx context.Context, project *model.Project, branchName string) error {
-	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
+	tokenBytes, appErr := s.credentials.requiredGitHubToken(project)
 	if appErr != nil {
 		return appErr
 	}

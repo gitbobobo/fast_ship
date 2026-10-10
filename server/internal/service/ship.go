@@ -48,8 +48,8 @@ type ShipService struct {
 	shipHookRepo *repository.IssueShipHookRepository
 	hookActions  shipHookActions
 	storage      storage.Storage
-	cfg          *config.Config
 	logger       *zap.Logger
+	credentials  *ProjectCredentials
 	newClient    gitHubClientFactory
 }
 
@@ -79,8 +79,8 @@ func NewShipService(
 		shipHookRepo: shipHookRepo,
 		hookActions:  issueService,
 		storage:      storage,
-		cfg:          cfg,
 		logger:       logger,
+		credentials:  newProjectCredentials(projectRepo, cfg, logger),
 		newClient: func(token, owner, repo string) gitHubClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -130,7 +130,7 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 	}
 
 	// 解密 GitHub Token
-	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
+	tokenBytes, appErr := s.credentials.requiredGitHubToken(project)
 	if appErr != nil {
 		s.recordFailure(version, model.ShipStagePreCheck, appErr.Message)
 		return nil, appErr
@@ -355,7 +355,7 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 		githubItem.Ok = false
 		githubItem.Detail = api.Ptr("缺少 GitHub Token")
 	default:
-		tokenBytes, err := requiredProjectGitHubToken(project, s.cfg, s.logger)
+		tokenBytes, err := s.credentials.requiredGitHubToken(project)
 		if err != nil {
 			githubItem.Ok = false
 			githubItem.Detail = api.Ptr(err.Message)
