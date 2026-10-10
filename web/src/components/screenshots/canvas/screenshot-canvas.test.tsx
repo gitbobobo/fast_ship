@@ -188,6 +188,35 @@ describe("ScreenshotCanvas", () => {
         expect(card.querySelector("img")).not.toBeNull();
       }
     });
+
+    // 分组标题反向缩放：5% 时屏幕上仍保持可读字号而不是缩没
+    const titleWrap = screen
+      .getByRole("heading", { name: "未分组" })
+      .closest("div")!;
+    const counter = Number(
+      /scale\(([\d.]+)\)/.exec(titleWrap.style.transform)?.[1],
+    );
+    expect(counter).toBeGreaterThan(1);
+  });
+
+  it("keeps mounted images on a same-scope data refresh", async () => {
+    const many = (stamp: number) =>
+      Array.from({ length: 60 }, (_, i) =>
+        makeScreen(`a${i}`, {
+          last_uploaded_at: `2026-10-0${stamp}T00:00:${String(i).padStart(2, "0")}Z`,
+        }),
+      );
+    const { rerenderWith } = renderCanvas({ screens: many(5) });
+    // 等首批之后的批次把 <img> 全部放行
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll("[data-canvas-card] img").length,
+      ).toBe(60);
+    });
+
+    // 同范围重拉（新数组、同一批 id）不应重置：已加载的图不卸载
+    rerenderWith({ screens: many(6) });
+    expect(document.querySelectorAll("[data-canvas-card] img").length).toBe(60);
   });
 
   it("restarts batched image mounting when the scope changes", async () => {
@@ -206,7 +235,7 @@ describe("ScreenshotCanvas", () => {
     });
 
     // 换范围后额度重置：新范围首帧只挂首批 30 张，而不是一次性挂满
-    rerenderWith({ screens: many("b") });
+    rerenderWith({ screens: many("b"), resetKey: "p-1|g:设置" });
     expect(document.querySelectorAll("[data-canvas-card] img").length).toBe(30);
   });
 

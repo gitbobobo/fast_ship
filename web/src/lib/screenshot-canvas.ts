@@ -262,12 +262,13 @@ export function wheelZoomFactor(
 export function focusRect(
   rect: Rect,
   container: Size,
-  options: { padding?: number; maxScale?: number } = {},
+  options: { padding?: number; maxScale?: number; topInset?: number } = {},
 ): Viewport {
   const padding = options.padding ?? FIT_PADDING;
   const maxScale = options.maxScale ?? MAX_SCALE;
+  const topInset = options.topInset ?? 0;
   const availW = Math.max(container.width - padding * 2, 1);
-  const availH = Math.max(container.height - padding * 2, 1);
+  const availH = Math.max(container.height - padding * 2 - topInset, 1);
   const scale = Math.min(
     clampScale(Math.min(availW / Math.max(rect.width, 1), availH / Math.max(rect.height, 1))),
     maxScale,
@@ -275,20 +276,24 @@ export function focusRect(
   return {
     scale,
     x: container.width / 2 - (rect.x + rect.width / 2) * scale,
-    y: container.height / 2 - (rect.y + rect.height / 2) * scale,
+    y:
+      topInset +
+      (container.height - topInset) / 2 -
+      (rect.y + rect.height / 2) * scale,
   };
 }
 
-/** 适应全部：内容为空时回到原点 1 倍 */
+/** 适应全部：内容为空时回到原点 1 倍；topInset 避让浮动工具栏 */
 export function fitViewport(
   bounds: Rect,
   container: Size,
   padding = FIT_PADDING,
+  topInset = 0,
 ): Viewport {
   if (bounds.width <= 0 || bounds.height <= 0) {
     return { x: padding, y: padding, scale: 1 };
   }
-  return focusRect(bounds, container, { padding, maxScale: 1 });
+  return focusRect(bounds, container, { padding, maxScale: 1, topInset });
 }
 
 /** 当前视口覆盖的世界矩形，margin 为每侧额外外扩的屏幕像素 */

@@ -5,6 +5,7 @@ import { useCreateScreenshotAnnotation } from "@/lib/hooks/use-screenshot-annota
 import {
   aspectFromSize,
   countOpenOnOlderVersions,
+  FIT_PADDING,
   fitViewport,
   focusRect,
   layoutCanvas,
@@ -25,6 +26,10 @@ const EMPTY_ANNOTATIONS: ScreenshotAnnotation[] = [];
 /** 首帧直挂的 <img> 数与之后每批追加数/间隔，摊平深缩时的并发加载 */
 const IMAGE_MOUNT_BATCH = 30;
 const IMAGE_MOUNT_INTERVAL_MS = 80;
+/** 适应全部时顶部留给浮动工具栏的净空（top-3 + 工具栏高度 + 余量） */
+const FIT_TOP_INSET = 64;
+/** 分组标题在屏幕上保持的最小字号（px）；缩放再小就反向放大补齐 */
+const GROUP_TITLE_MIN_PX = 14;
 
 export interface CanvasLocateRequest {
   annotationId: string;
@@ -95,14 +100,15 @@ export function ScreenshotCanvas({
   // 接口未给尺寸的存量版本，用图片 onLoad 量到的宽高比校正排版
   const [measured, setMeasured] = useState<Record<string, number>>({});
   const flashTimerRef = useRef<number | null>(null);
-  // <img> 分批挂载额度，见下方 effect
-  const [imgBudget, setImgBudget] = useState(IMAGE_MOUNT_BATCH);
-  // 换项目/分组/搜索后从头分批：上个范围放行的额度若留给新范围，
-  // 大项目会在首帧一次性挂满所有原图
-  const [imgScope, setImgScope] = useState(screens);
-  if (screens !== imgScope) {
-    setImgScope(screens);
-    setImgBudget(IMAGE_MOUNT_BATCH);
+  // 已放行挂载 <img> 的界面集合，按 resetKey（项目|分组）归位：
+  // 同范围数据刷新不重置（已加载的图不卸载，避免闪烁与重复下载），
+  // 换范围时清空从头分批，不让上个范围的额度带进新范围
+  const [releasedImgs, setReleasedImgs] = useState<{
+    key: string;
+    ids: Set<string>;
+  }>(() => ({ key: resetKey, ids: new Set() }));
+  if (releasedImgs.key !== resetKey) {
+    setReleasedImgs({ key: resetKey, ids: new Set() });
   }
 
   // 切项目/分组：清掉选中、草稿、框选态（视图重置在下方 effect）
@@ -156,7 +162,7 @@ export function ScreenshotCanvas({
     if (fittedKeyRef.current === resetKey) return;
     if (size.width <= 0 || layout.cards.length === 0) return;
     fittedKeyRef.current = resetKey;
-    jumpTo(fitViewport(layout.bounds, size));
+    jumpTo(fitViewport(layout.bounds, size, FIT_PADDING, FIT_TOP_INSET));
   }, [resetKey, size, layout, jumpTo]);
 
   // 搜索/数据变化把内容整体挪出视口时自动适应全部，避免整屏空白；
@@ -168,7 +174,7 @@ export function ScreenshotCanvas({
     if (size.width <= 0 || layout.cards.length === 0) return;
     const view = visibleWorldRect(viewport, size, 0);
     if (!layout.cards.some((card) => rectsIntersect(card.rect, view))) {
-      moveTo(fitViewport(layout.bounds, size));
+      moveTo(fitViewport(layout.bounds, size, FIT_PADDING, FIT_TOP_INSET));
     }
   }, [layout, size, viewport, moveTo]);
 
@@ -366,26 +372,36 @@ export function ScreenshotCanvas({
     }
   };
 
-  const fitAll = () => moveTo(fitViewport(layout.bounds, size));
+  const fitAll = () =>
+    moveTo(fitViewport(layout.bounds, size, FIT_PADDING, FIT_TOP_INSET));
 
-  // 只渲染与视口（外扩一屏）相交的卡片
-  const margin = Math.max(size.width, size.height);
-  const visibleRect = visibleWorldRect(viewport, size, margin);
-  const visibleCards = layout.cards.filter((card) =>
-    rectsIntersect(card.rect, visibleRect),
-  );
+  // 只渲染与视口（外扩一屏）相交的卡片；memo 保证不相关渲染
+  // （选中/悬停）不会产生新数组、打断分批挂载计时器
+  const visibleCards = useMemo(() => {
+    const margin = Math.max(size.width, size.height);
+    const rect = visibleWorldRect(viewport, size, margin);
+    return layout.cards.filter((card) => rectsIntersect(card.rect, rect));
+  }, [layout.cards, viewport, size]);
 
   // 深缩/适应全部时几乎所有卡片都进视口，一次性挂几百张原图会瞬时打满
-  // 带宽与解码；按批推进 <img> 挂载摊平压力，最终仍全部渲染
+  // 带宽与解码；首批直接挂，之后每 80ms 放行 30 张，最终仍全部渲染
   useEffect(() => {
-    if (imgBudget >= visibleCards.length) return;
+    const pending = visibleCards.filter(
+      (c, i) => i >= IMAGE_MOUNT_BATCH && !releasedImgs.ids.has(c.screenId),
+    );
+    if (pending.length === 0) return;
     const timer = window.setTimeout(() => {
-      setImgBudget((n) =>
-        Math.min(n + IMAGE_MOUNT_BATCH, visibleCards.length),
-      );
+      setReleasedImgs((prev) => {
+        if (prev.key !== resetKey) return prev;
+        const ids = new Set(prev.ids);
+        for (const c of pending.slice(0, IMAGE_MOUNT_BATCH)) {
+          ids.add(c.screenId);
+        }
+        return { key: resetKey, ids };
+      });
     }, IMAGE_MOUNT_INTERVAL_MS);
     return () => window.clearTimeout(timer);
-  }, [imgBudget, visibleCards.length]);
+  }, [releasedImgs, visibleCards, resetKey]);
 
   const drawEnabled = drawMode && !spaceHeld;
 
@@ -418,6 +434,8 @@ export function ScreenshotCanvas({
           }}
         >
           {layout.groups.map((group) => (
+            // 深缩时标题跟着缩没，它是画布上唯一的导航线索；
+            // 反向缩放让屏幕上始终保持可读字号
             <div
               key={group.key}
               className="absolute flex items-end gap-3 pb-3"
@@ -426,6 +444,8 @@ export function ScreenshotCanvas({
                 top: group.titleRect.y,
                 width: group.titleRect.width,
                 height: group.titleRect.height,
+                transform: `scale(${Math.max(1, GROUP_TITLE_MIN_PX / (24 * viewport.scale))})`,
+                transformOrigin: "left bottom",
               }}
             >
               <h3 className="truncate text-2xl font-semibold">{group.title}</h3>
@@ -460,7 +480,10 @@ export function ScreenshotCanvas({
                 screen={screen}
                 rect={card.rect}
                 imageHeight={card.imageHeight}
-                imageEnabled={index < imgBudget}
+                imageEnabled={
+                  index < IMAGE_MOUNT_BATCH ||
+                  releasedImgs.ids.has(card.screenId)
+                }
                 aspectKnown={aspectOf(screen.id) !== null}
                 annotations={cardAnnotations}
                 annotationIndex={annotationIndex}

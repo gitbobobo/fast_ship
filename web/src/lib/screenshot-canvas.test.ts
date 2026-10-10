@@ -231,6 +231,19 @@ describe("viewport math", () => {
     expect(empty.scale).toBe(1);
   });
 
+  it("fit reserves top inset so content stays clear of the floating toolbar", () => {
+    const bounds = { x: 0, y: 0, width: 400, height: 200 };
+    const container = { width: 1000, height: 600 };
+    const plain = fitViewport(bounds, container, 48);
+    const inset = fitViewport(bounds, container, 48, 64);
+
+    // 内容整体上移避开工具栏：y 方向可用高度减少后缩放更小、顶部更高
+    expect(inset.scale).toBeLessThanOrEqual(plain.scale);
+    // 内容顶边在屏幕上不低于 topInset + padding
+    const topEdge = inset.y + bounds.y * inset.scale;
+    expect(topEdge).toBeGreaterThanOrEqual(64 + 48 - 1e-9);
+  });
+
   it("computes the visible world rect with margin", () => {
     const rect = visibleWorldRect(
       { x: -100, y: -50, scale: 2 },
