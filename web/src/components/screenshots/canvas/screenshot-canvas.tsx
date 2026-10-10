@@ -158,10 +158,15 @@ export function ScreenshotCanvas({
   );
 
   // 列数随容器宽高比重选，让世界形状贴近容器；只在列数变化时重排，
-  // 缩放窗口过程中列数不变就不会重算布局
+  // 缩放窗口过程中列数不变就不会重算布局。参与评估的容器高度扣掉
+  // 工具栏净空，与「适应全部」实际可用的区域一致
   const columns = useMemo(
-    () => pickCanvasColumns(screens, aspectOf, size),
-    [screens, aspectOf, size],
+    () =>
+      pickCanvasColumns(screens, aspectOf, {
+        width: size.width,
+        height: Math.max(size.height - toolbarH - TOOLBAR_GAP, 1),
+      }),
+    [screens, aspectOf, size, toolbarH],
   );
   const layout = useMemo(
     () => layoutCanvas(screens, aspectOf, columns),
