@@ -19,7 +19,7 @@ export function screenDisplayName(
 
 // 命名分组按「组内最近上传时间」倒序；空 group 归入「未分组」，不占命名分组位
 export function deriveGroupTabs(
-  items: ScreenshotScreenListItem[],
+  items: Pick<ScreenshotScreenListItem, "group" | "last_uploaded_at">[],
 ): string[] {
   const latestByGroup = new Map<string, string>();
   for (const item of items) {

@@ -38,7 +38,10 @@ func TestAutoMigrate_AllForeignKeysCascade(t *testing.T) {
 	}
 
 	// 有意不设例外的表不加入白名单；新增例外须注明理由。
-	allowedNonCascade := map[string]map[string]bool{}
+	allowedNonCascade := map[string]map[string]bool{
+		// 截图标注关联 Issue 是可选弱引用：删 Issue 只解除关联（SET NULL），标注本体保留。
+		"screenshot_annotations": {"issue_id": true},
+	}
 
 	for _, table := range tables {
 		fks, err := sqliteForeignKeys(db, table)

@@ -4,7 +4,7 @@
 
 ## 数据模型
 
-两张表，GORM `AutoMigrate` 注册（`server/cmd/server/main.go`），无外置迁移工具。唯一索引 `(project_id, screen_key)` 由 main.go 手工索引段建立（`idx_screenshot_screens_project_key`）。
+三张表，GORM `AutoMigrate` 注册（`server/cmd/server/main.go`），无外置迁移工具。唯一索引 `(project_id, screen_key)` 由 main.go 手工索引段建立（`idx_screenshot_screens_project_key`）。
 
 ### `screenshot_screens`
 
@@ -39,6 +39,27 @@
 
 文件落在 `storage.Storage` 下 `<project_id>/screenshots/<version_id>.<ext>`；扩展名由嗅探出的 mime 推导（`normalizeIssueAssetFileName` 与 issue assets 共用）。删版本删文件、删 screen 删全部文件；文件删除均在 DB 事务提交后做，事务回滚时也会清掉已落盘的新文件，不留孤儿。
 
+`screenshot_versions` 还带 `width` / `height`（INTEGER，默认 0）：上传落盘后用 `probeScreenshotDims` 重开文件解码图片头部回填，解码失败不阻塞上传，0 表示未知（存量版本同语义）。
+
+### `screenshot_annotations`
+
+「矩形框 + 文字」标注，挂在具体版本上（不是 screen 聚合）；供画布上的评审意见与 AI 闭环使用。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | TEXT | 主键 |
+| `version_id` | TEXT | FK → `screenshot_versions`，`OnDelete: CASCADE` |
+| `screen_id` | TEXT | FK → `screenshot_screens`，`OnDelete: CASCADE`；由版本冗余带出，便于按界面过滤 |
+| `project_id` | TEXT | FK → `projects`，`OnDelete: CASCADE`；同上冗余 |
+| `issue_id` | TEXT 可空 | FK → `issues`，`OnDelete: SET NULL`；删 Issue 只解除关联，标注保留 |
+| `x`/`y`/`width`/`height` | REAL | 框选矩形，**相对图片宽高的比例（0~1）**，与原图分辨率无关 |
+| `body` | TEXT | 标注文字，1–1000 字符（rune 计） |
+| `status` | TEXT | `open` / `resolved`，默认 `open` |
+| `created_by` | TEXT | 同 `uploaded_by` 口径 |
+| `created_at`/`updated_at`/`resolved_at` | DATETIME | `resolved_at` 仅 resolved 时有值 |
+
+坐标语义：存比例不存像素，展示/裁剪时按原图尺寸换算（`annotationPixelRect`，四边缘取整；亚像素矩形塌成空矩形时保底 1px 且不丢位置，最后与图边界相交）。坐标系以**浏览器展示方向**为准：JPEG 带 EXIF Orientation 时，`probeScreenshotDims`/`decodeScreenshotImageConfig` 返回应用方向后的尺寸（5-8 交换宽高），裁剪解码同样先 `applyJPEGExifOrientation` 转正再换算，保证画布置框、落库尺寸与裁剪像素三者同源。`Update` 为指针语义：字段出现才更新，`issue_id` 空串 = 解除关联，都不传 40001。
+
 ## 端点与权限
 
 | 方法 | 路径 | 凭证 | 说明 |
@@ -50,10 +71,19 @@
 | DELETE | `/api/screenshot-screens/:sid` | **仅 JWT** | 删 screen + 全部版本行 + 磁盘文件 |
 | DELETE | `/api/screenshot-versions/:vid` | **仅 JWT** | 删单版本 + 文件；删到最后一个版本时连带删 screen |
 | GET / HEAD | `/api/screenshot-versions/:vid/content` | JWT / API Key / `?token=` | 输出图片字节，`Content-Type` 用存储的 `mime_type`，`Content-Disposition: inline` |
+| GET | `/api/projects/:pid/screenshot-annotations` | JWT / API Key | `{items:[...]}`，query `status`/`issue_id`/`screen_id` 过滤；含旧版本上的标注 |
+| POST | `/api/screenshot-versions/:vid/annotations` | **仅 JWT** | `{x,y,width,height,body,issue_id?}`；比例坐标校验 0≤x,y、0<w,h、x+w/y+h≤1 |
+| PUT | `/api/screenshot-annotations/:aid` | JWT / API Key | 指针语义更新 body/status/issue_id；**API Key 只允许整包 `{"status":"resolved"}`**（其他字段或重开 40301） |
+| DELETE | `/api/screenshot-annotations/:aid` | **仅 JWT** | 删标注行 |
+| GET / HEAD | `/api/screenshot-annotations/:aid/crop` | JWT / API Key / `?token=` | 输出框选区域裁剪图，统一 PNG，外边距 = 矩形短边 15%（最小 8px，不出图界）；原图超过解码像素上限（约 64MP）返回 40004 |
 
-写操作 PATCH/DELETE 走 `RequireJWT` 分组（API Key 返回 40301），上传与读走 `RequireAuth`，content 挂 `RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token")` 支持 `<img>` 直链。
+写操作 PATCH/DELETE 走 `RequireJWT` 分组（API Key 返回 40301），上传与读走 `RequireAuth`，content 与 crop 挂 `RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token")` 支持 `<img>` 直链。标注 PUT 两类凭证都进 service，由 service 按 `!middleware.IsJWTAuth(c)` 再收紧 API Key 只允许置 resolved——与 issue 内嵌写操作的惯例一致（路由放通、service 判凭证）。
 
-归属校验沿 `screen → project → user_id` 链：项目不属于当前用户时 screen/version 一律按「不存在」返回，不区分「不存在」与「无权限」。错误码：`ErrScreenshotScreenNotFound`（40413）、`ErrScreenshotVersionNotFound`（40414）；参数/格式/大小非法用 `ErrInvalidParams`（40001）。
+归属校验沿 `screen → project → user_id` 链：项目不属于当前用户时 screen/version 一律按「不存在」返回，不区分「不存在」与「无权限」。错误码：`ErrScreenshotScreenNotFound`（40413）、`ErrScreenshotVersionNotFound`（40414）、`ErrScreenshotAnnotationNotFound`（40416）；参数/格式/大小非法用 `ErrInvalidParams`（40001）。
+
+Issue 详情响应内嵌 `screenshot_annotations`（`IssueService.Get`，无关联时缺省）；项目级列表与 Issue 内嵌共用 `assembleScreenshotAnnotations` 组装：关联行（版本/界面/最新版本）经 `ScreenshotAnnotationRepository.LoadRelated` 批量取回，`issue_id → Issue` 批量查 `issueRepo.ListByIDs`（含 GitHubMeta 供 `issue_reference` 生成）。`image_width`/`image_height` 优先取版本落库值，存量行（0）惰性解码文件头，仍失败输出 0 且 `pixel_rect=null`。
+
+裁剪图（`Crop`）：解码前先按文件头尺寸做像素预算校验（`maxScreenshotDecodePixels` ≈ 64MP，超限 40004 `ErrScreenshotImageTooLarge`——压缩体积上限管不住解码后内存），且有双闸限并发：个数闸 4 并发 + 字节闸按像素加权（png/webp 权=像素×8，jpeg/gif 权=像素×12——EXIF 重排与偏移帧合成都会在解码源存活期间再占一张全尺寸 RGBA；16 位 PNG 解码为 RGBA64 且输出同为 16 位，权=像素×16，由 `isPNG16Bit` 探文件头判定；总量封顶 1GiB——小截图并行、64MP 大图独占排队，并发大裁剪不会叠出 ~2GiB）；`Crop` 返回 release 闭包，handler 写完 PNG 响应后才释放，解码与已编码缓冲的驻留期都计入上限，慢客户端不会绕过限制堆积大响应体；按存储 mime 分派解码——png/webp 流式单遍；jpeg/gif 各开两遍流（jpeg 先 `jpeg.Decode` 像素再重开扫 EXIF 头；gif 先 `gif.DecodeConfig` 取逻辑画布再重开 `gif.Decode` 只解第一帧并按偏移合成——`DecodeAll` 会把全部帧解码进内存，多帧大图能绕过单帧预算；首帧 Bounds 可能是画布上的偏移子块），不 `ReadAll` 整文件，大元数据段（GIF 注释、JPEG ICC）不驻留内存；`SubImage` 取样后统一 `png.Encode` 输出，不落盘不缓存。JPEG 的尺寸/EXIF 探测走 `jpegScanHeader` 逐段跳到 SOF（跳过非目标段负载，容忍 0xFF 填充），不整文件入内存。
 
 ## 上传语义
 
@@ -83,18 +113,38 @@ mime 以内容嗅探为准：先读 512 字节 `http.DetectContentType`，仅收
 
 ## 删除语义
 
-- 删版本：DB 行删除后删磁盘文件；删到 screen 最后一个版本时同事务连带删除 screen（空壳界面不留）。
-- 删 screen：同一事务内先收集全部版本 `file_path`、再删版本行 + screen 行（事务内收集保证并发上传的新版本行要么被一并删掉文件，要么整个删除失败，不会留孤儿文件），提交后逐个删文件；FK `OnDelete: CASCADE` 兜底项目级联。
+- 删版本：DB 行删除后删磁盘文件；删到 screen 最后一个版本时同事务连带删除 screen（空壳界面不留）。挂在版本上的标注由 FK `OnDelete: CASCADE` 一并删除（前端确认框会提示「将同时删除 N 条未解决标注」）。
+- 删 screen：同一事务内先收集全部版本 `file_path`、再删版本行 + screen 行（事务内收集保证并发上传的新版本行要么被一并删掉文件，要么整个删除失败，不会留孤儿文件），提交后逐个删文件；FK `OnDelete: CASCADE` 兜底项目级联，标注同样级联。
+- 删 Issue：标注保留，仅 `issue_id` 置空（FK `OnDelete: SET NULL`）。
 - 版本删除后 `version_count` / `last_uploaded_at` 按剩余版本重算（`last_uploaded_at` 取最新剩余版本的 `uploaded_at`）。
 
 ## 响应形状
 
 ```
 Screen  = {id, project_id, screen_key, title, group, version_count, last_uploaded_at, created_at}
-Version = {id, screen_id, note, file_name, file_size, mime_type, uploaded_by, uploaded_at, content_url}
+Version = {id, screen_id, note, file_name, file_size, mime_type, uploaded_by, uploaded_at, width, height, content_url}
+Annotation = {id, project_id, screen_id, version_id, issue_id, issue_reference, issue_title,
+              screen_key, screen_title, screen_group, image_url, image_width, image_height,
+              is_latest_version, x, y, width, height, pixel_rect, body, status, crop_url,
+              created_by, created_at, updated_at, resolved_at}
 ```
 
-`content_url` = `/api/screenshot-versions/{id}/content`，前端自行追加 `?token=`。list 每项额外带 `latest_version`（Version 或 null）；detail / PATCH 响应的 screen 额外带 `versions` 数组。上传返回 `{screen, version}`。
+`content_url` = `/api/screenshot-versions/{id}/content`，`image_url` 同形（取标注所在版本），`crop_url` = `/api/screenshot-annotations/{id}/crop`；前端自行追加 `?token=`。list 每项额外带 `latest_version`（Version 或 null）；detail / PATCH 响应的 screen 额外带 `versions` 数组。上传返回 `{screen, version}`。
+
+## 前端画布与标注
+
+画布视图 `web/src/components/screenshots/canvas/`（`screenshot-canvas.tsx` 为入口）：自研 CSS transform 视口（`use-canvas-viewport.ts`），无 tldraw/Konva 依赖；排版为纯函数（`lib/screenshot-canvas.ts`，按分组分区、组内按 `last_uploaded_at` 倒序、固定 4 列网格，位置不持久化）。
+
+- **平移/缩放**：拖空白、Space+拖、中键、单指触摸平移；滚轮与 ctrl+滚轮（触控板捏合）以指针为锚缩放，双指捏合同理；缩放范围 0.05–4。平移手势位移 >4px 后吞掉随后的 click，避免拖拽误触卡片/标注。
+- **视口剔除**：只渲染与视口（外扩一屏）相交的卡片；卡片屏幕宽 <48px 时只画占位不加载 `<img>`。无缩略图，直接用 content 原图。
+- **框选标注**：工具栏或 `R` 键切框选态（十字光标），在卡片图片区拖出矩形即按比例换算（与画布缩放无关），松开弹出文字输入（`annotation-draft.tsx`）；过小的框（<1% 边长）视为误触忽略。只允许在最新版本上创建——画布本就只有最新版本。
+- **叠加层**：标注矩形按 `x/y/w/h` 百分比定位在图片盒内；画布上默认只显示 open，工具栏可切「显示已解决」；面板点选/悬停与画布矩形双向联动（hover 高亮、定位闪烁 2.4s）。
+- **右侧面板**（`annotation-panel.tsx`）：列当前画布范围内全部标注（含旧版本上的，带「旧版本」标），默认未解决 tab；支持编辑文字、解决/重开、删除（AlertDialog）、改 Issue 关联（Dialog 内嵌搜索框，走 `useIssues` 的 `q` 服务端过滤，不受前 100 条限制；当前关联不在结果里时单独补项）。「定位」：最新版本标注 → 画布聚焦该卡片并闪烁；旧版本标注 → 打开预览弹窗直接选中该版本并高亮该标注。
+- **URL 定位**：`?view=canvas&annotation=<id>`；页面先把分组 tab 与搜索放宽到能看到目标界面，再交画布执行定位（等标注数据**当次拉取落地**与容器尺寸就绪，nonce 去重；`isSuccess` 命中过期缓存时不判定存在性）。
+- **视口恢复**：搜索/数据刷新让全部卡片挪出视口时自动「适应全部」，避免整屏空白；只在布局对象变化时评估，手动平移到空白处不触发。标注草稿只认画上去的那个版本，界面换版或被过滤出画布时草稿自动取消。
+- **旧版本提示**：卡片元信息行显示「上一版有 N 条未解决」徽标（`countOpenOnOlderVersions`）。
+- **预览弹窗**：`AnnotationOverlay` 只读叠加（open/resolved 都显示，不可交互），量 img 实际显示盒贴上去；适配/放大/对比两侧都挂。`initialVersionId`/`focusAnnotationId` 支持从画布定位直接落在旧版本上。
+- **Issue 详情**：`issue-screenshot-annotations-card.tsx` 渲染 `issue.screenshot_annotations`（裁剪图缩略 + 文字 + 状态），点击跳 `?view=canvas&annotation=<id>`。
 
 ## 前端预览交互
 

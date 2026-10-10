@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ScreenshotLightbox } from "./screenshot-lightbox";
+import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
 import {
   useDeleteScreenshotScreen,
   useDeleteScreenshotVersion,
@@ -33,6 +34,18 @@ vi.mock("@/lib/api/screenshots", async (importOriginal) => {
   };
 });
 
+// 标注列表接口不是这些用例关心的内容，固定返回空
+vi.mock("@/lib/hooks/use-screenshot-annotations", async (importOriginal) => {
+  const mod =
+    await importOriginal<
+      typeof import("@/lib/hooks/use-screenshot-annotations")
+    >();
+  return {
+    ...mod,
+    useScreenshotAnnotations: vi.fn(() => ({ data: [], isSuccess: true })),
+  };
+});
+
 vi.mock("./screenshot-edit-dialog", () => ({
   ScreenshotEditDialog: () => null,
 }));
@@ -50,6 +63,42 @@ function makeVersion(
     uploaded_by: "bobo",
     uploaded_at: "2026-10-05T06:30:00Z",
     content_url: "/api/screenshot-versions/v-x/content",
+    width: 0,
+    height: 0,
+    ...overrides,
+  };
+}
+
+function makeAnnotation(
+  overrides: Partial<ScreenshotAnnotation>,
+): ScreenshotAnnotation {
+  return {
+    id: "a-x",
+    project_id: "p-1",
+    screen_id: "s1",
+    version_id: "v-new",
+    issue_id: null,
+    issue_reference: null,
+    issue_title: null,
+    screen_key: "home",
+    screen_title: "首页",
+    screen_group: "核心",
+    image_url: "",
+    image_width: 0,
+    image_height: 0,
+    is_latest_version: true,
+    x: 0.1,
+    y: 0.1,
+    width: 0.2,
+    height: 0.2,
+    pixel_rect: null,
+    body: "按钮对不齐",
+    status: "open",
+    crop_url: "",
+    created_by: "bobo",
+    created_at: "2026-10-05T06:30:00Z",
+    updated_at: "2026-10-05T06:30:00Z",
+    resolved_at: null,
     ...overrides,
   };
 }
@@ -208,6 +257,57 @@ describe("ScreenshotLightbox", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("selects initialVersionId when opened from an annotation on an older version", async () => {
+    renderLightbox({ initialVersionId: "v-old", focusAnnotationId: "a-1" });
+
+    const trigger = await screen.findByRole("combobox", {
+      name: "选择版本",
+    });
+    expect(trigger).toHaveTextContent("改版前");
+    expect(trigger).not.toHaveTextContent("最新 · 改版后");
+  });
+
+  it("falls back to the latest version when initialVersionId is unknown", async () => {
+    renderLightbox({ initialVersionId: "v-gone" });
+
+    const trigger = await screen.findByRole("combobox", {
+      name: "选择版本",
+    });
+    expect(trigger).toHaveTextContent("最新 · 改版后");
+  });
+
+  it("warns about open annotations that deleting a version or screen will remove", async () => {
+    vi.mocked(useScreenshotAnnotations).mockReturnValue({
+      data: [
+        makeAnnotation({ id: "a-1", version_id: "v-new" }),
+        makeAnnotation({ id: "a-2", version_id: "v-old" }),
+        makeAnnotation({ id: "a-3", version_id: "v-old", status: "resolved" }),
+      ],
+    } as unknown as ReturnType<typeof useScreenshotAnnotations>);
+    const user = userEvent.setup();
+    renderLightbox();
+    await screen.findByRole("button", { name: "shot.png" });
+
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "删除当前版本" }),
+    );
+    // 当前为最新版本，只有 a-1 挂在其上
+    expect(
+      await screen.findByText(/将同时删除 1 条标注，其中 1 条未解决/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "取消" }));
+
+    await user.click(screen.getByRole("button", { name: "更多操作" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "删除界面" }),
+    );
+    // 整个界面：a-1 + a-2 + a-3（含已解决）三条，其中两条未解决
+    expect(
+      await screen.findByText(/将同时删除 3 条标注，其中 2 条未解决/),
+    ).toBeInTheDocument();
   });
 
   it("version select trigger shows label text, not the uuid", async () => {

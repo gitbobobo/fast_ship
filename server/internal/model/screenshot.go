@@ -36,6 +36,9 @@ type ScreenshotVersion struct {
 	Note       string    `gorm:"type:text" json:"note"`
 	UploadedBy string    `gorm:"type:text" json:"uploaded_by"`
 	UploadedAt time.Time `gorm:"not null" json:"uploaded_at"`
+	// 原图像素宽高；存量行为 0（未记录），上传时解码文件头回填
+	Width  int `gorm:"not null;default:0" json:"width"`
+	Height int `gorm:"not null;default:0" json:"height"`
 
 	Screen ScreenshotScreen `gorm:"foreignKey:ScreenID;constraint:OnDelete:CASCADE" json:"-"`
 }

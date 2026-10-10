@@ -21,6 +21,7 @@ var (
 	ErrInvalidParams              = New(40001, "请求参数无效")
 	ErrTargetBranchNotFound       = New(40002, "目标分支不存在")
 	ErrProjectGitHubNotConfigured = New(40003, "该项目尚未关联 GitHub 仓库")
+	ErrScreenshotImageTooLarge    = New(40004, "截图尺寸超出可处理范围")
 )
 
 // 认证错误 40100-40199
@@ -43,22 +44,23 @@ var (
 
 // 资源不存在 40400-40499
 var (
-	ErrUserNotFound              = New(40400, "用户不存在")
-	ErrProjectNotFound           = New(40401, "项目不存在")
-	ErrVersionNotFound           = New(40402, "版本不存在")
-	ErrArtifactNotFound          = New(40403, "安装包不存在")
-	ErrApiKeyNotFound            = New(40404, "API Key 不存在")
-	ErrIssueNotFound             = New(40405, "问题不存在")
-	ErrIssueAssetNotFound        = New(40406, "问题图片不存在")
-	ErrAISettingsNotFound        = New(40407, "请先在设置中配置 MiniMax API Key")
-	ErrIssueCollabNotFound       = New(40408, "协作区内容不存在")
-	ErrLogRunNotFound            = New(40409, "日志运行不存在")
-	ErrDocumentNotFound          = New(40410, "文档不存在")
-	ErrRecommendationNotFound    = New(40411, "推荐不存在")
-	ErrPullRequestNotFound       = New(40412, "PR 关联不存在")
-	ErrScreenshotScreenNotFound  = New(40413, "界面不存在")
-	ErrScreenshotVersionNotFound = New(40414, "截图版本不存在")
-	ErrIssueAttachmentNotFound   = New(40415, "问题附件不存在")
+	ErrUserNotFound                 = New(40400, "用户不存在")
+	ErrProjectNotFound              = New(40401, "项目不存在")
+	ErrVersionNotFound              = New(40402, "版本不存在")
+	ErrArtifactNotFound             = New(40403, "安装包不存在")
+	ErrApiKeyNotFound               = New(40404, "API Key 不存在")
+	ErrIssueNotFound                = New(40405, "问题不存在")
+	ErrIssueAssetNotFound           = New(40406, "问题图片不存在")
+	ErrAISettingsNotFound           = New(40407, "请先在设置中配置 MiniMax API Key")
+	ErrIssueCollabNotFound          = New(40408, "协作区内容不存在")
+	ErrLogRunNotFound               = New(40409, "日志运行不存在")
+	ErrDocumentNotFound             = New(40410, "文档不存在")
+	ErrRecommendationNotFound       = New(40411, "推荐不存在")
+	ErrPullRequestNotFound          = New(40412, "PR 关联不存在")
+	ErrScreenshotScreenNotFound     = New(40413, "界面不存在")
+	ErrScreenshotVersionNotFound    = New(40414, "截图版本不存在")
+	ErrIssueAttachmentNotFound      = New(40415, "问题附件不存在")
+	ErrScreenshotAnnotationNotFound = New(40416, "截图标注不存在")
 )
 
 // 业务冲突 40900-40999

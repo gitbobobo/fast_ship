@@ -40,6 +40,7 @@ import { CollaborationArea } from "@/components/issues/collaboration-area";
 import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
 import { IssueAttachmentsCard } from "@/components/issues/issue-attachments-card";
 import { IssuePullRequestsCard } from "@/components/issues/issue-pull-requests-card";
+import { IssueScreenshotAnnotationsCard } from "@/components/issues/issue-screenshot-annotations-card";
 import { IssueShipHookCard } from "@/components/issues/issue-ship-hook-card";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
@@ -1447,6 +1448,11 @@ export default function IssueDetailPage() {
         issueId={issue.id}
         projectId={issue.project_id}
         pullRequests={issue.pull_requests}
+      />
+
+      <IssueScreenshotAnnotationsCard
+        projectId={issue.project_id}
+        annotations={issue.screenshot_annotations}
       />
 
       <Card>

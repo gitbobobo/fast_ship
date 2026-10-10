@@ -3622,6 +3622,225 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/projects/{id}/screenshot-annotations:
+    get:
+      tags: [screenshots]
+      operationId: listScreenshotAnnotations
+      summary: 列出项目全部截图标注（可按状态 / Issue / 界面过滤）
+      description: |
+        返回项目下全部截图标注（含挂在旧版本上的），按创建先后升序。
+        可选 query 过滤：`status`（open/resolved，缺省返回全部；非法值 40001）、`issue_id`、`screen_id`（精确匹配，可组合）。
+        每条标注返回：原图地址（image_url，即所在版本的 content_url）、比例坐标（x/y/width/height，0~1）、
+        像素坐标（pixel_rect；原图尺寸未知的存量版本为 null）、文字、所属画面（screen_key/screen_title/screen_group）、
+        关联 Issue（issue_id/issue_reference/issue_title，未关联均为 null）、是否挂在界面最新版本（is_latest_version）
+        与裁剪图地址（crop_url）。删除界面/版本会级联删除其上标注；删除 Issue 只解除关联不删标注。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ScreenshotAnnotationStatus'
+          description: 按状态过滤；缺省返回全部状态
+        - name: issue_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 只返回关联该 Issue 的标注（UUID）
+        - name: screen_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 只返回该界面（含全部历史版本）上的标注
+      responses:
+        '200':
+          description: 标注列表（data 为 {items}，非分页信封）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/ScreenshotAnnotation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/screenshot-versions/{vid}/annotations:
+    post:
+      tags: [screenshots]
+      operationId: createScreenshotAnnotation
+      summary: 在截图版本上新建矩形标注（仅 JWT）
+      description: |
+        在指定版本图片上创建「矩形框 + 文字」标注。坐标为图片宽高比例（0~1）：
+        x/y 为左上角，width/height 为尺寸；须满足 0 ≤ x,y、0 < width,height、x+width ≤ 1、y+height ≤ 1，否则 40001。
+        `issue_id` 可选：缺省或空串表示不关联；提供时须为同一项目内的 Issue（不存在或跨项目返回 40001）。
+        API Key 调用返回 403（40301）。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotVersionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateScreenshotAnnotationRequest'
+      responses:
+        '200':
+          description: 新建成功的标注
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScreenshotAnnotation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/screenshot-annotations/{aid}:
+    put:
+      tags: [screenshots]
+      operationId: updateScreenshotAnnotation
+      summary: 更新标注文字 / 状态 / 关联 Issue
+      description: |
+        指针语义：字段出现才更新，未出现保持原值；三个字段都不传返回 40001。
+        `issue_id` 传空串表示解除关联，非空须为同一项目内的 Issue（否则 40001）；JSON null 与未传同义（保持）。
+        权限分工：JWT 可更新全部字段；API Key 只允许传 `status: "resolved"`（把标注标为已解决），
+        携带 body/issue_id 或传 `status:"open"` 重开均返回 403（40301）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotAnnotationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateScreenshotAnnotationRequest'
+      responses:
+        '200':
+          description: 更新后的标注
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScreenshotAnnotation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [screenshots]
+      operationId: deleteScreenshotAnnotation
+      summary: 删除标注（仅 JWT）
+      description: 重复删除返回 404（40416），非幂等。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotAnnotationId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/screenshot-annotations/{aid}/crop:
+    get:
+      tags: [screenshots]
+      operationId: getScreenshotAnnotationCrop
+      summary: 获取标注框选区域裁剪图（统一 PNG）
+      description: |
+        按标注比例坐标换算像素矩形，向外扩约矩形短边 15% 的外边距（最小 8px，不超出图片边界），统一输出 PNG。
+        源图为 WebP 时服务端解码；GIF 取第一帧。典型用途：AI 拉取裁剪图比对修改，或前端缩略展示。
+        支持 Authorization 头或 `?token=` query 凭证（供 `<img>` 直链）。同一路径另注册 HEAD 变体。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotAnnotationId'
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: PNG 图片二进制内容
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    head:
+      tags: [screenshots]
+      operationId: getScreenshotAnnotationCropHead
+      summary: 获取标注裁剪图头信息（HEAD）
+      description: 与 GET 语义相同但不返回 body。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ScreenshotAnnotationId'
+        - $ref: '#/components/parameters/QueryToken'
+      responses:
+        '200':
+          description: 仅响应头
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     jwtAuth:
@@ -3684,6 +3903,13 @@ components:
       schema:
         type: string
       description: 截图版本 ID（UUID）
+    ScreenshotAnnotationId:
+      name: aid
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 截图标注 ID（UUID）
     DocId:
       name: doc_id
       in: path
@@ -4996,6 +5222,11 @@ components:
           items:
             $ref: '#/components/schemas/IssueAttachment'
           description: omitempty；仅 Issue 详情响应携带（无附件时缺省）；列表项不出现
+        screenshot_annotations:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScreenshotAnnotation'
+          description: omitempty；仅 Issue 详情响应携带（无关联标注时缺省）；列表项不出现
         pull_request_summary:
           $ref: '#/components/schemas/IssuePullRequestSummary'
           description: omitempty；仅 Issue 列表项携带的 PR 聚合计数；详情项不出现
@@ -5491,7 +5722,7 @@ components:
           format: date-time
     ScreenshotVersion:
       type: object
-      required: [id, screen_id, note, file_name, file_size, mime_type, uploaded_by, uploaded_at, content_url]
+      required: [id, screen_id, note, file_name, file_size, mime_type, uploaded_by, uploaded_at, width, height, content_url]
       properties:
         id:
           type: string
@@ -5513,6 +5744,12 @@ components:
         uploaded_at:
           type: string
           format: date-time
+        width:
+          type: integer
+          description: 原图宽像素；0 表示未知（历史存量版本未记录尺寸）
+        height:
+          type: integer
+          description: 原图高像素；0 表示未知
         content_url:
           type: string
           description: /api/screenshot-versions/{vid}/content；前端自行追加 ?token=
@@ -5559,3 +5796,165 @@ components:
           type: string
           maxLength: 200
           description: 界面标题（≤200 字符）；空串回退显示 screen_key
+
+    # ---- screenshot annotations ----
+    ScreenshotAnnotationStatus:
+      type: string
+      enum: [open, resolved]
+      description: open=未解决，resolved=已解决
+
+    ScreenshotAnnotationRect:
+      type: object
+      description: 像素矩形（原图坐标系）
+      required: [x, y, width, height]
+      properties:
+        x:
+          type: integer
+        y:
+          type: integer
+        width:
+          type: integer
+        height:
+          type: integer
+
+    ScreenshotAnnotation:
+      type: object
+      description: 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+      required: [id, project_id, screen_id, version_id, issue_id, issue_reference, issue_title, screen_key, screen_title, screen_group, image_url, image_width, image_height, is_latest_version, x, y, width, height, pixel_rect, body, status, crop_url, created_by, created_at, updated_at, resolved_at]
+      properties:
+        id:
+          type: string
+        project_id:
+          type: string
+        screen_id:
+          type: string
+          description: 所属界面 ID（由版本冗余带出，便于过滤）
+        version_id:
+          type: string
+          description: 标注挂在该版本上；版本删除时标注级联删除
+        issue_id:
+          type: string
+          nullable: true
+          description: 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注
+        issue_reference:
+          type: string
+          nullable: true
+          description: 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null
+        issue_title:
+          type: string
+          nullable: true
+          description: 关联 Issue 的标题；未关联为 null
+        screen_key:
+          type: string
+        screen_title:
+          type: string
+          description: 界面显示名；空串时客户端回退展示 screen_key
+        screen_group:
+          type: string
+          description: 界面分组；空串表示未分组
+        image_url:
+          type: string
+          description: 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img>
+        image_width:
+          type: integer
+          description: 原图宽像素；0 表示未知（存量版本未记录尺寸）
+        image_height:
+          type: integer
+          description: 原图高像素；0 表示未知
+        is_latest_version:
+          type: boolean
+          description: 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看）
+        x:
+          type: number
+          description: 框选矩形左上角横坐标 / 图宽（0~1）
+        y:
+          type: number
+          description: 框选矩形左上角纵坐标 / 图高（0~1）
+        width:
+          type: number
+          description: 框选矩形宽 / 图宽（0~1）
+        height:
+          type: number
+          description: 框选矩形高 / 图高（0~1）
+        pixel_rect:
+          allOf:
+            - $ref: '#/components/schemas/ScreenshotAnnotationRect'
+          nullable: true
+          description: 由比例坐标 × 原图尺寸换算的像素矩形；原图尺寸未知时为 null
+        body:
+          type: string
+          description: 标注文字
+        status:
+          $ref: '#/components/schemas/ScreenshotAnnotationStatus'
+        crop_url:
+          type: string
+          description: /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token=
+        created_by:
+          type: string
+          description: '用户名或 "API Key: <name>"'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 最近一次标为已解决的时间；open 状态为 null
+
+    CreateScreenshotAnnotationRequest:
+      type: object
+      required: [x, y, width, height, body]
+      description: x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为让服务端能区分缺省与显式 0）
+      properties:
+        x:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+        y:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1
+        width:
+          type: number
+          nullable: true
+          minimum: 0
+          exclusiveMinimum: true
+          maximum: 1
+        height:
+          type: number
+          nullable: true
+          minimum: 0
+          exclusiveMinimum: true
+          maximum: 1
+          description: x+width ≤ 1 且 y+height ≤ 1，否则 40001
+        body:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: 标注文字（1~1000 字符）
+        issue_id:
+          type: string
+          description: 可选；关联本项目内 Issue，缺省或空串 = 不关联
+
+    UpdateScreenshotAnnotationRequest:
+      type: object
+      description: |
+        指针语义：字段出现才更新，都不传返回 40001。
+        JWT 可更新全部字段；API Key 只允许传 `{"status":"resolved"}`，其余字段或 status=open 返回 40301。
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: 标注文字（1~1000 字符）
+        status:
+          $ref: '#/components/schemas/ScreenshotAnnotationStatus'
+          description: open=重开（仅 JWT），resolved=标为已解决
+        issue_id:
+          type: string
+          description: 空串=解除关联；非空须为本项目内 Issue（否则 40001）；不传或传 null = 保持不变

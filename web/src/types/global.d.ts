@@ -222,6 +222,8 @@ interface Issue {
   pull_request_summary?: IssuePullRequestSummary;
   /** 附件列表；仅 internal Issue 详情响应携带 */
   attachments?: IssueAttachment[];
+  /** 关联到该 Issue 的截图标注；仅 Issue 详情响应携带 */
+  screenshot_annotations?: ScreenshotAnnotation[];
 }
 
 /** Issue 附件记录；github 源 Issue 恒为空 */
@@ -526,6 +528,72 @@ interface ScreenshotVersion {
   uploaded_at: string;
   /** 图片内容路径，需附带 ?token= 访问 */
   content_url: string;
+  /** 原图宽像素；0 表示未知（存量版本未记录尺寸） */
+  width: number;
+  /** 原图高像素；0 表示未知 */
+  height: number;
+}
+
+type ScreenshotAnnotationStatus = "open" | "resolved";
+
+/** 像素矩形（原图坐标系） */
+interface ScreenshotAnnotationRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 挂在某个截图版本上的「矩形框 + 文字」标注；x/y/width/height 为图片宽高比例（0~1） */
+interface ScreenshotAnnotation {
+  id: string;
+  project_id: string;
+  screen_id: string;
+  version_id: string;
+  issue_id: string | null;
+  issue_reference: string | null;
+  issue_title: string | null;
+  screen_key: string;
+  /** 界面显示名；空串时回退展示 screen_key */
+  screen_title: string;
+  /** 界面分组；空串表示未分组 */
+  screen_group: string;
+  /** 所在版本的原图地址，需附带 ?token= 访问 */
+  image_url: string;
+  image_width: number;
+  image_height: number;
+  /** 是否挂在界面当前最新版本上 */
+  is_latest_version: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  pixel_rect: ScreenshotAnnotationRect | null;
+  body: string;
+  status: ScreenshotAnnotationStatus;
+  /** 裁剪图 PNG 路径，需附带 ?token= 访问 */
+  crop_url: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+}
+
+interface CreateScreenshotAnnotationPayload {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  body: string;
+  /** 缺省或空串 = 不关联 */
+  issue_id?: string;
+}
+
+/** 指针语义：出现才更新；issue_id 空串=解除关联 */
+interface UpdateScreenshotAnnotationPayload {
+  body?: string;
+  status?: ScreenshotAnnotationStatus;
+  issue_id?: string;
 }
 
 interface ScreenshotScreenListItem extends ScreenshotScreen {
