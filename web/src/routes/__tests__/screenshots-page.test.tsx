@@ -258,6 +258,25 @@ describe("ScreenshotsPage", () => {
     expect(screen.getByTestId("screenshots-scroll").scrollTop).toBe(500);
   });
 
+  it("restores the list scroll position after a canvas round-trip", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+    const scroller = screen.getByTestId("screenshots-scroll");
+    fireEvent.scroll(scroller, { target: { scrollTop: 500 } });
+
+    await user.click(screen.getByRole("button", { name: "画布" }));
+    // 真实浏览器里切到画布时内容塌缩会把 scrollTop 夹到 0；
+    // 手动补一个 scroll 事件，验证 ready 关闭时不会把 0 写回存储
+    fireEvent.scroll(scroller, { target: { scrollTop: 0 } });
+    expect(getSavedScroll("screenshots:proj-1")).toBe(500);
+
+    await user.click(screen.getByRole("button", { name: "列表" }));
+    expect(scroller.scrollTop).toBe(500);
+  });
+
   it("keeps the same shell and toolbar when switching views", async () => {
     const user = userEvent.setup();
     renderWithRoute(<ScreenshotsPage />, {
