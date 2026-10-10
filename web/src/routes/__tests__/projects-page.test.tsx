@@ -96,6 +96,65 @@ describe("ProjectsPage", () => {
     expect(screen.getByText("未创建版本")).toBeInTheDocument();
   });
 
+  it("sorts project cards by issue count descending, missing counts last", () => {
+    vi.mocked(useProjects).mockReturnValue({
+      data: {
+        items: [
+          {
+            id: "few",
+            user_id: "u1",
+            name: "Few Issues",
+            description: "",
+            github_owner: "",
+            github_repo: "",
+            latest_version: null,
+            issue_count: 2,
+            created_at: "2026-04-06T09:00:00Z",
+            updated_at: "2026-04-06T09:00:00Z",
+          },
+          {
+            id: "many",
+            user_id: "u1",
+            name: "Many Issues",
+            description: "",
+            github_owner: "",
+            github_repo: "",
+            latest_version: null,
+            issue_count: 30,
+            created_at: "2026-04-05T09:00:00Z",
+            updated_at: "2026-04-05T09:00:00Z",
+          },
+          {
+            id: "none",
+            user_id: "u1",
+            name: "No Count",
+            description: "",
+            github_owner: "",
+            github_repo: "",
+            latest_version: null,
+            created_at: "2026-04-07T09:00:00Z",
+            updated_at: "2026-04-07T09:00:00Z",
+          },
+        ],
+        total: 3,
+        page: 1,
+        page_size: 100,
+      },
+      isLoading: false,
+    } as unknown as ReturnType<typeof useProjects>);
+
+    renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
+
+    const names = screen
+      .getAllByRole("heading", { level: 3 })
+      .map((heading) => heading.textContent);
+    expect(names).toEqual(["Many Issues", "Few Issues", "No Count"]);
+    // 卡片显示问题数，让排序依据可见；计数缺失显示 0
+    expect(screen.getByText("30 个问题")).toBeInTheDocument();
+    expect(screen.getByText("2 个问题")).toBeInTheDocument();
+    expect(screen.getByText("0 个问题")).toBeInTheDocument();
+  });
+
   it("filters projects by search input", () => {
     renderWithRoute(<ProjectsPage />, { path: "/projects", initialEntry: "/projects" });
 

@@ -82,7 +82,7 @@ describe("ProjectSwitcher", () => {
     await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
     const popup = await screen.findByRole("dialog", { name: "切换项目" });
     expect(within(popup).getAllByRole("button")).toHaveLength(2);
-    expect(within(popup).getByRole("button", { name: /Fast Ship Bobo\/fast_ship/ }))
+    expect(within(popup).getByRole("button", { name: /Fast Ship 项目管理工具/ }))
       .toHaveAttribute("aria-current", "true");
     expect(within(popup).getByRole("button", { name: /Notes 团队知识库/ }))
       .not.toHaveAttribute("aria-current");
@@ -111,6 +111,31 @@ describe("ProjectSwitcher", () => {
     ]);
     // 排序不得原地修改 props 数组
     expect(unsorted.map((p) => p.id)).toEqual(["few", "none", "many", "zero"]);
+  });
+
+  it("二级文字优先显示描述，无描述时回退仓库地址", async () => {
+    const user = userEvent.setup();
+    const mixed: Project[] = [
+      { ...projects[0], id: "with-desc", name: "With Desc", description: "有描述" },
+      { ...projects[0], id: "repo-only", name: "Repo Only", description: "" },
+      { ...projects[0], id: "blank", name: "Blank", description: "   " },
+      { ...projects[1], id: "empty", name: "Empty", description: "" },
+    ];
+    render(<ProjectSwitcher projects={mixed} value="" onValueChange={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "切换项目：请选择项目" }));
+    const popup = await screen.findByRole("dialog", { name: "切换项目" });
+    // 有描述时即使关联了仓库也显示描述
+    expect(
+      within(popup).getByRole("button", { name: /With Desc 有描述/ }),
+    ).toBeInTheDocument();
+    // 无描述或仅空白字符时回退到仓库 slug
+    expect(
+      within(popup).getByRole("button", { name: /Repo Only Bobo\/fast_ship/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(popup).getByRole("button", { name: /Blank Bobo\/fast_ship/ }),
+    ).toBeInTheDocument();
   });
 
   it("搜索命中多个项目时回车选中计数最高者", async () => {
@@ -174,7 +199,7 @@ describe("ProjectSwitcher", () => {
     const { onValueChange } = renderSwitcher();
 
     await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
-    await user.click(screen.getByRole("button", { name: /Fast Ship Bobo\/fast_ship/ }));
+    await user.click(screen.getByRole("button", { name: /Fast Ship 项目管理工具/ }));
     expect(onValueChange).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
