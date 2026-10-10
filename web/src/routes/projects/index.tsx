@@ -52,16 +52,19 @@ export default function ProjectsPage() {
   const [dialogMode, setDialogMode] = useState<"create" | "edit">("create");
   const [editingProjectId, setEditingProjectId] = useState<string | undefined>();
 
-  const filteredProjects = projects.filter((project) => {
-    const slug = repoSlug(project);
-    const matchesSearch =
-      deferredSearch.length === 0 ||
-      project.name.toLowerCase().includes(deferredSearch) ||
-      project.description?.toLowerCase().includes(deferredSearch) ||
-      slug.toLowerCase().includes(deferredSearch);
+  // 按 Issue 总数降序展示；计数缺失按 0，同计数靠稳定排序保持服务端顺序
+  const filteredProjects = projects
+    .filter((project) => {
+      const slug = repoSlug(project);
+      const matchesSearch =
+        deferredSearch.length === 0 ||
+        project.name.toLowerCase().includes(deferredSearch) ||
+        project.description?.toLowerCase().includes(deferredSearch) ||
+        slug.toLowerCase().includes(deferredSearch);
 
-    return matchesSearch;
-  });
+      return matchesSearch;
+    })
+    .sort((a, b) => (b.issue_count ?? 0) - (a.issue_count ?? 0));
 
   const handleDelete = async () => {
     if (!deleteTarget) return;

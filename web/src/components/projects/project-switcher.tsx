@@ -113,9 +113,10 @@ export function ProjectSwitcher({
                 filteredProjects.map((project) => {
                   const selected = project.id === value;
                   const secondary =
-                    project.github_owner && project.github_repo
+                    project.description ||
+                    (project.github_owner && project.github_repo
                       ? `${project.github_owner}/${project.github_repo}`
-                      : project.description;
+                      : undefined);
 
                   return (
                     <button
