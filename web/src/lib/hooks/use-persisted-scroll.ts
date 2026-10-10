@@ -67,6 +67,14 @@ export function usePersistedScroll<T extends HTMLElement>(
     };
   }, [node, storageKey, axis]);
 
+  // ready 重新放开时把最近记录的位置重新挂回 pending——内部容器在
+  // ready 关闭期间可能被夹到 0（如列表↔画布往返），重开后要再恢复一次
+  useLayoutEffect(() => {
+    if (ready && pendingRef.current == null) {
+      pendingRef.current = lastKnownRef.current;
+    }
+  }, [ready]);
+
   useLayoutEffect(() => {
     if (!node || !ready) return;
 

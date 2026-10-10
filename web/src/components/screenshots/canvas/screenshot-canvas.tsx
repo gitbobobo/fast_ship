@@ -3,13 +3,14 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useCreateScreenshotAnnotation } from "@/lib/hooks/use-screenshot-annotations";
 import {
-  CARD_WIDTH,
   aspectFromSize,
   countOpenOnOlderVersions,
+  FIT_PADDING,
   fitViewport,
   focusRect,
   layoutCanvas,
   normalizeRatioRect,
+  pickCanvasColumns,
   rectsIntersect,
   visibleWorldRect,
   type AnnotationStatusFilter,
@@ -20,10 +21,17 @@ import { CanvasCard, type CanvasDraft } from "./canvas-card";
 import { CanvasToolbar } from "./canvas-toolbar";
 import { isTypingTarget, useCanvasViewport } from "./use-canvas-viewport";
 
-/** 卡片屏幕宽度低于此值（像素）时不再加载图片，只画占位 */
-const LOW_DETAIL_CARD_PX = 48;
 const FLASH_MS = 2400;
 const EMPTY_ANNOTATIONS: ScreenshotAnnotation[] = [];
+/** 首帧直挂的 <img> 数与之后每批追加数/间隔，摊平深缩时的并发加载 */
+const IMAGE_MOUNT_BATCH = 30;
+const IMAGE_MOUNT_INTERVAL_MS = 80;
+/** 适应全部时顶部留给浮动工具栏的净空（top-3 + 工具栏默认高度 + 余量） */
+const FIT_TOP_INSET = 64;
+/** 工具栏 top-3 偏移 + 内容间距，净空 = 实测高度 + 该值 */
+const TOOLBAR_GAP = 28;
+/** 分组标题在屏幕上保持的最小字号（px）；缩放再小就反向放大补齐 */
+const GROUP_TITLE_MIN_PX = 14;
 
 export interface CanvasLocateRequest {
   annotationId: string;
@@ -81,7 +89,7 @@ export function ScreenshotCanvas({
   const createAnnotation = useCreateScreenshotAnnotation(projectId);
 
   const [panelOpen, setPanelOpen] = useState(
-    () => typeof window === "undefined" || window.innerWidth >= 768,
+    () => typeof window === "undefined" || window.innerWidth >= 1024,
   );
   const [drawMode, setDrawMode] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
@@ -94,6 +102,30 @@ export function ScreenshotCanvas({
   // 接口未给尺寸的存量版本，用图片 onLoad 量到的宽高比校正排版
   const [measured, setMeasured] = useState<Record<string, number>>({});
   const flashTimerRef = useRef<number | null>(null);
+  // 已放行挂载 <img> 的界面集合，按 resetKey（项目|分组）归位：
+  // 同范围数据刷新不重置（已加载的图不卸载，避免闪烁与重复下载），
+  // 换范围时清空从头分批，不让上个范围的额度带进新范围
+  const [releasedImgs, setReleasedImgs] = useState<{
+    key: string;
+    ids: Set<string>;
+  }>(() => ({ key: resetKey, ids: new Set() }));
+  const imgTimerRef = useRef<number | null>(null);
+  // 浮动工具栏实测高度：适应全部的顶部净空按它算（窄屏折行变高时同步加大）
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [toolbarH, setToolbarH] = useState(FIT_TOP_INSET - 28);
+  useEffect(() => {
+    const el = toolbarRef.current;
+    if (!el) return;
+    const measure = () =>
+      setToolbarH(el.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  if (releasedImgs.key !== resetKey) {
+    setReleasedImgs({ key: resetKey, ids: new Set() });
+  }
 
   // 切项目/分组：清掉选中、草稿、框选态（视图重置在下方 effect）
   const [prevResetKey, setPrevResetKey] = useState(resetKey);
@@ -106,10 +138,15 @@ export function ScreenshotCanvas({
     setDrawMode(false);
   }
 
+  const screenById = useMemo(
+    () => new Map(screens.map((s) => [s.id, s])),
+    [screens],
+  );
+
+  // aspectOf 供 pickCanvasColumns/layoutCanvas 高频调用，必须 O(1)
   const aspectOf = useCallback(
     (screenId: string): number | null => {
-      const screen = screens.find((s) => s.id === screenId);
-      const version = screen?.latest_version;
+      const version = screenById.get(screenId)?.latest_version;
       if (!version) return null;
       return (
         aspectFromSize(version.width, version.height) ??
@@ -117,20 +154,27 @@ export function ScreenshotCanvas({
         null
       );
     },
-    [screens, measured],
+    [screenById, measured],
   );
 
+  // 列数随容器宽高比重选，让世界形状贴近容器；只在列数变化时重排，
+  // 缩放窗口过程中列数不变就不会重算布局。参与评估的容器高度扣掉
+  // 工具栏净空，与「适应全部」实际可用的区域一致
+  const columns = useMemo(
+    () =>
+      pickCanvasColumns(screens, aspectOf, {
+        width: size.width,
+        height: Math.max(size.height - toolbarH - TOOLBAR_GAP, 1),
+      }),
+    [screens, aspectOf, size, toolbarH],
+  );
   const layout = useMemo(
-    () => layoutCanvas(screens, aspectOf),
-    [screens, aspectOf],
+    () => layoutCanvas(screens, aspectOf, columns),
+    [screens, aspectOf, columns],
   );
   const cardRectById = useMemo(
     () => new Map(layout.cards.map((c) => [c.screenId, c])),
     [layout.cards],
-  );
-  const screenById = useMemo(
-    () => new Map(screens.map((s) => [s.id, s])),
-    [screens],
   );
 
   // 视图重置：新范围（项目/分组）第一次有卡片且量到容器尺寸时适应全部
@@ -139,8 +183,8 @@ export function ScreenshotCanvas({
     if (fittedKeyRef.current === resetKey) return;
     if (size.width <= 0 || layout.cards.length === 0) return;
     fittedKeyRef.current = resetKey;
-    jumpTo(fitViewport(layout.bounds, size));
-  }, [resetKey, size, layout, jumpTo]);
+    jumpTo(fitViewport(layout.bounds, size, FIT_PADDING, toolbarH + TOOLBAR_GAP));
+  }, [resetKey, size, layout, toolbarH, jumpTo]);
 
   // 搜索/数据变化把内容整体挪出视口时自动适应全部，避免整屏空白；
   // 只在布局变化时评估，手动平移到空白处不会触发
@@ -151,9 +195,11 @@ export function ScreenshotCanvas({
     if (size.width <= 0 || layout.cards.length === 0) return;
     const view = visibleWorldRect(viewport, size, 0);
     if (!layout.cards.some((card) => rectsIntersect(card.rect, view))) {
-      moveTo(fitViewport(layout.bounds, size));
+      moveTo(
+        fitViewport(layout.bounds, size, FIT_PADDING, toolbarH + TOOLBAR_GAP),
+      );
     }
-  }, [layout, size, viewport, moveTo]);
+  }, [layout, size, viewport, toolbarH, moveTo]);
 
   // 草稿只认它画上去的那个版本：界面换版或被过滤出画布时草稿作废
   useEffect(() => {
@@ -349,22 +395,79 @@ export function ScreenshotCanvas({
     }
   };
 
-  const fitAll = () => moveTo(fitViewport(layout.bounds, size));
+  const fitAll = () =>
+    moveTo(fitViewport(layout.bounds, size, FIT_PADDING, toolbarH + TOOLBAR_GAP));
 
-  // 只渲染与视口（外扩一屏）相交的卡片
-  const margin = Math.max(size.width, size.height);
-  const visibleRect = visibleWorldRect(viewport, size, margin);
-  const visibleCards = layout.cards.filter((card) =>
-    rectsIntersect(card.rect, visibleRect),
+  // 只渲染与视口（外扩一屏）相交的卡片；memo 保证不相关渲染
+  // （选中/悬停）不会产生新数组、打断分批挂载计时器
+  const visibleCards = useMemo(() => {
+    const margin = Math.max(size.width, size.height);
+    const rect = visibleWorldRect(viewport, size, margin);
+    return layout.cards.filter((card) => rectsIntersect(card.rect, rect));
+  }, [layout.cards, viewport, size]);
+
+  // 深缩/适应全部时几乎所有卡片都进视口，一次性挂几百张原图会瞬时打满
+  // 带宽与解码。每范围前 30 张即时放行，之后每 80ms 放行 30 张；
+  // 放行进集合后平移换位不会把 <img> 挤回占位。计时器不按帧清理——
+  // 手势进行中分批照常推进；回调用 ref 里的最新可见卡片，scope 变了
+  // 由 key 守卫兜住。卸载兜底在下方单独 effect
+  const visibleCardsRef = useRef(visibleCards);
+  useEffect(() => {
+    visibleCardsRef.current = visibleCards;
+  });
+  useEffect(() => {
+    const missing = visibleCards.filter(
+      (c) => !releasedImgs.ids.has(c.screenId),
+    );
+    if (missing.length === 0) return;
+    const room = IMAGE_MOUNT_BATCH - releasedImgs.ids.size;
+    if (room > 0) {
+      const seed = missing.slice(0, room).map((c) => c.screenId);
+      setReleasedImgs((prev) =>
+        prev.key !== resetKey
+          ? prev
+          : { key: resetKey, ids: new Set([...prev.ids, ...seed]) },
+      );
+      return;
+    }
+    if (imgTimerRef.current !== null) return;
+    imgTimerRef.current = window.setTimeout(() => {
+      imgTimerRef.current = null;
+      setReleasedImgs((prev) => {
+        if (prev.key !== resetKey) return prev;
+        const ids = new Set(prev.ids);
+        let added = 0;
+        for (const c of visibleCardsRef.current) {
+          if (ids.has(c.screenId)) continue;
+          ids.add(c.screenId);
+          if (++added >= IMAGE_MOUNT_BATCH) break;
+        }
+        return { key: resetKey, ids };
+      });
+    }, IMAGE_MOUNT_INTERVAL_MS);
+  }, [releasedImgs, visibleCards, resetKey]);
+  // 范围切换/卸载时清掉飞行中的批次计时器：它触发时 key 守卫只会跳过
+  // 更新，imgTimerRef 置空后没有渲染接力，新范围会停在首批不再放行
+  useEffect(
+    () => () => {
+      if (imgTimerRef.current !== null) {
+        window.clearTimeout(imgTimerRef.current);
+        imgTimerRef.current = null;
+      }
+    },
+    [resetKey],
   );
-  const lowDetail = CARD_WIDTH * viewport.scale < LOW_DETAIL_CARD_PX;
+
   const drawEnabled = drawMode && !spaceHeld;
+
+  // 深缩时标题跟着缩没；反向放大让屏幕上保持 ≥14px 可读字号
+  const titleScale = Math.max(1, GROUP_TITLE_MIN_PX / (24 * viewport.scale));
 
   const cursor = panning ? "grabbing" : spaceHeld ? "grab" : undefined;
 
   return (
     <div
-      className="relative flex h-full min-h-0 overflow-hidden rounded-lg border bg-muted/20"
+      className="relative flex h-full min-h-0 overflow-hidden bg-muted/20"
       data-testid="screenshot-canvas"
     >
       <div
@@ -388,24 +491,6 @@ export function ScreenshotCanvas({
             transition: smooth ? "transform 320ms ease" : undefined,
           }}
         >
-          {layout.groups.map((group) => (
-            <div
-              key={group.key}
-              className="absolute flex items-end gap-3 pb-3"
-              style={{
-                left: group.titleRect.x,
-                top: group.titleRect.y,
-                width: group.titleRect.width,
-                height: group.titleRect.height,
-              }}
-            >
-              <h3 className="truncate text-2xl font-semibold">{group.title}</h3>
-              <span className="pb-1 text-sm text-muted-foreground">
-                {group.count}
-              </span>
-            </div>
-          ))}
-
           {visibleCards.map((card) => {
             const screen = screenById.get(card.screenId);
             if (!screen) return null;
@@ -431,7 +516,7 @@ export function ScreenshotCanvas({
                 screen={screen}
                 rect={card.rect}
                 imageHeight={card.imageHeight}
-                lowDetail={lowDetail}
+                imageEnabled={releasedImgs.ids.has(card.screenId)}
                 aspectKnown={aspectOf(screen.id) !== null}
                 annotations={cardAnnotations}
                 annotationIndex={annotationIndex}
@@ -450,9 +535,41 @@ export function ScreenshotCanvas({
               />
             );
           })}
+
+          {/* 分组标题渲染在卡片之后：统一的悬浮标签样式，深缩时
+              反放大保持可读并放宽宽度不被 titleRect 截断。以左上为
+              原点反放大：标签落回本组首行，不再盖住上一组尾行 */}
+          {layout.groups.map((group) => (
+            <div
+              key={group.key}
+              className="pointer-events-none absolute flex items-end gap-3 pb-3"
+              style={{
+                left: group.titleRect.x,
+                top: group.titleRect.y,
+                width:
+                  titleScale > 1 ? "max-content" : group.titleRect.width,
+                height: group.titleRect.height,
+                transform: `scale(${titleScale})`,
+                transformOrigin: "left top",
+              }}
+            >
+              <h3
+                className={cn(
+                  "rounded bg-background/95 px-1.5 py-0.5 text-2xl font-semibold shadow-sm ring-1 ring-black/10",
+                  titleScale > 1 ? "whitespace-nowrap" : "truncate",
+                )}
+              >
+                {group.title}
+              </h3>
+              <span className="rounded bg-background/95 px-1 py-0.5 text-sm text-muted-foreground shadow-sm ring-1 ring-black/10">
+                {group.count}
+              </span>
+            </div>
+          ))}
         </div>
 
         <CanvasToolbar
+          ref={toolbarRef}
           scale={viewport.scale}
           drawMode={drawMode}
           showResolved={showResolved}

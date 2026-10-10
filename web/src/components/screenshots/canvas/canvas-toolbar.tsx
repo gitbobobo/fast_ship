@@ -16,6 +16,8 @@ interface CanvasToolbarProps {
   drawMode: boolean;
   showResolved: boolean;
   panelOpen: boolean;
+  /** 父级用 ResizeObserver 实测高度，给「适应全部」留顶部净空 */
+  ref?: React.Ref<HTMLDivElement>;
   onToggleDraw: () => void;
   onToggleResolved: () => void;
   onTogglePanel: () => void;
@@ -30,6 +32,7 @@ export function CanvasToolbar({
   drawMode,
   showResolved,
   panelOpen,
+  ref,
   onToggleDraw,
   onToggleResolved,
   onTogglePanel,
@@ -39,6 +42,7 @@ export function CanvasToolbar({
 }: CanvasToolbarProps) {
   return (
     <div
+      ref={ref}
       data-no-pan
       data-testid="canvas-toolbar"
       className="absolute top-3 left-3 z-20 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center gap-1 rounded-lg border bg-background/90 p-1 shadow-sm backdrop-blur"

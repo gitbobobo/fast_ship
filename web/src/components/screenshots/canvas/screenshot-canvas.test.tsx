@@ -159,6 +159,138 @@ describe("ScreenshotCanvas", () => {
     expect(screen.getByTestId("canvas-card-s2")).toBeInTheDocument();
   });
 
+  it("uses more than four columns and still renders images when zoomed far out", async () => {
+    const user = userEvent.setup();
+    const screens = Array.from({ length: 60 }, (_, i) =>
+      makeScreen(`m${i}`, {
+        last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+      }),
+    );
+    renderCanvas({ screens });
+
+    const cards = screen.getAllByTestId(/^canvas-card-/);
+    const firstTop = (cards[0] as HTMLElement).style.top;
+    const firstRow = cards.filter((c) => (c as HTMLElement).style.top === firstTop);
+    expect(firstRow.length).toBeGreaterThan(4);
+
+    // 一路缩到 MIN_SCALE=5%（卡片屏幕宽约 16px，远低于旧 48px 降级阈值），
+    // 仍要加载图片而不是只画占位
+    const zoomOut = screen.getByRole("button", { name: "缩小" });
+    const zoomPercent = () =>
+      screen.getByTestId("canvas-zoom-percent").textContent;
+    for (let i = 0; i < 30 && zoomPercent() !== "5%"; i++) {
+      await user.click(zoomOut);
+    }
+    expect(zoomPercent()).toBe("5%");
+    // <img> 分批挂载：深缩下也要等到全部放行，而不是退回占位
+    await waitFor(() => {
+      for (const card of screen.getAllByTestId(/^canvas-card-/)) {
+        expect(card.querySelector("img")).not.toBeNull();
+      }
+    });
+
+    // 分组标题反向缩放：5% 时屏幕上仍保持可读字号而不是缩没
+    const titleWrap = screen
+      .getByRole("heading", { name: "未分组" })
+      .closest("div")!;
+    const counter = Number(
+      /scale\(([\d.]+)\)/.exec(titleWrap.style.transform)?.[1],
+    );
+    expect(counter).toBeGreaterThan(1);
+  });
+
+  it("keeps mounted images on a same-scope data refresh", async () => {
+    const many = (stamp: number) =>
+      Array.from({ length: 60 }, (_, i) =>
+        makeScreen(`a${i}`, {
+          last_uploaded_at: `2026-10-0${stamp}T00:00:${String(i).padStart(2, "0")}Z`,
+        }),
+      );
+    const { rerenderWith } = renderCanvas({ screens: many(5) });
+    // 等首批之后的批次把 <img> 全部放行
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll("[data-canvas-card] img").length,
+      ).toBe(60);
+    });
+
+    // 同范围重拉（新数组、同一批 id）不应重置：已加载的图不卸载
+    rerenderWith({ screens: many(6) });
+    expect(document.querySelectorAll("[data-canvas-card] img").length).toBe(60);
+  });
+
+  it("restarts batched image mounting when the scope changes", async () => {
+    const many = (prefix: string) =>
+      Array.from({ length: 60 }, (_, i) =>
+        makeScreen(`${prefix}${i}`, {
+          last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+        }),
+      );
+    const { rerenderWith } = renderCanvas({ screens: many("a") });
+    // 等首批之后的批次把 <img> 全部放行
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll("[data-canvas-card] img").length,
+      ).toBe(60);
+    });
+
+    // 换范围后额度重置：新范围首帧只挂首批 30 张，而不是一次性挂满
+    rerenderWith({ screens: many("b"), resetKey: "p-1|g:设置" });
+    expect(document.querySelectorAll("[data-canvas-card] img").length).toBe(30);
+  });
+
+  it("keeps batching after a scope change while a release timer is pending", async () => {
+    const many = (prefix: string) =>
+      Array.from({ length: 60 }, (_, i) =>
+        makeScreen(`${prefix}${i}`, {
+          last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+        }),
+      );
+    const { rerenderWith } = renderCanvas({ screens: many("a") });
+    // 趁批次计时器在飞（80ms 窗口内）直接切范围：旧计时器作废后
+    // 新范围必须照常分批，不能停在首批
+    rerenderWith({ screens: many("b"), resetKey: "p-1|g:设置" });
+    expect(
+      document.querySelectorAll("[data-canvas-card] img").length,
+    ).toBeLessThanOrEqual(30);
+
+    // 新范围的批次照常推进，最终全部放行
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll("[data-canvas-card] img").length,
+      ).toBe(60);
+    });
+    expect(
+      screen.getByTestId("canvas-card-b59").querySelector("img"),
+    ).not.toBeNull();
+  });
+
+  it("swaps the placeholder for the image after load and resets on version change", () => {
+    const { rerenderWith } = renderCanvas();
+    const card = screen.getByTestId("canvas-card-s1");
+    expect(card.querySelector("svg.lucide-images")).not.toBeNull();
+
+    fireEvent.load(card.querySelector("img")!);
+    expect(card.querySelector("svg.lucide-images")).toBeNull();
+
+    rerenderWith({
+      screens: [
+        makeScreen("s1", { latest_version: makeVersion("s1-v3", "s1") }),
+        makeScreen("s2", { group: "设置" }),
+      ],
+    });
+    expect(
+      screen.getByTestId("canvas-card-s1").querySelector("svg.lucide-images"),
+    ).not.toBeNull();
+  });
+
+  it("has no outer border or radius so it can fill the available space", () => {
+    renderCanvas();
+    const root = screen.getByTestId("screenshot-canvas");
+    expect(root.className).not.toMatch(/\bborder\b/);
+    expect(root.className).not.toMatch(/rounded/);
+  });
+
   it("overlays open annotations on the latest version and hides resolved by default", async () => {
     const user = userEvent.setup();
     renderCanvas({

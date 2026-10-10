@@ -28,8 +28,14 @@ export const CARD_WIDTH = 320;
 export const CARD_META_HEIGHT = 56;
 export const CARD_GAP = 32;
 export const GROUP_TITLE_HEIGHT = 56;
-export const GROUP_GAP = 72;
+export const GROUP_GAP = 104;
+/** 容器尺寸未知时的默认列数 */
 export const GRID_COLUMNS = 4;
+/** 自动选列数的范围 */
+export const MIN_COLUMNS = 2;
+export const MAX_COLUMNS = 24;
+/** 「适应全部」与选列数共用的容器留白 */
+export const FIT_PADDING = 48;
 export const DEFAULT_ASPECT = 3 / 4;
 export const UNGROUPED_TITLE = "未分组";
 
@@ -68,15 +74,14 @@ export function clampScale(scale: number): number {
   return Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE);
 }
 
-/**
- * 按分组自动排版：命名组按组内最近上传倒序，未分组在最后；组内按
- * last_uploaded_at 倒序，固定列数网格，行高取该行最高卡片。
- * aspectOf 返回图片高/宽，未知时回退 4:3。
- */
-export function layoutCanvas(
-  screens: CanvasScreenInput[],
-  aspectOf: (screenId: string) => number | null | undefined,
-): CanvasLayout {
+interface CanvasSection {
+  key: string;
+  title: string;
+  items: CanvasScreenInput[];
+}
+
+/** 分组分区：命名组按组内最近上传倒序，未分组在最后；组内按 last_uploaded_at 倒序 */
+function buildSections(screens: CanvasScreenInput[]): CanvasSection[] {
   const groupOrder = deriveGroupTabs(screens).map(decodeGroupTab);
   const buckets = new Map<string, CanvasScreenInput[]>();
   for (const name of groupOrder) buckets.set(name, []);
@@ -86,11 +91,7 @@ export function layoutCanvas(
     else ungrouped.push(screen);
   }
 
-  const sections: Array<{
-    key: string;
-    title: string;
-    items: CanvasScreenInput[];
-  }> = groupOrder.map((name) => ({
+  const sections: CanvasSection[] = groupOrder.map((name) => ({
     key: `g:${name}`,
     title: name,
     items: buckets.get(name) ?? [],
@@ -98,22 +99,34 @@ export function layoutCanvas(
   if (ungrouped.length > 0) {
     sections.push({ key: "__ungrouped__", title: UNGROUPED_TITLE, items: ungrouped });
   }
+  return sections.map((section) => ({
+    ...section,
+    items: [...section.items].sort((a, b) =>
+      b.last_uploaded_at.localeCompare(a.last_uploaded_at),
+    ),
+  }));
+}
 
-  const groups: CanvasGroupLayout[] = [];
-  const cards: CanvasCardLayout[] = [];
+// emit 缺省时只算世界边界（选列数候选评估用），不分配卡片/组对象
+function layoutSections(
+  sections: CanvasSection[],
+  aspectOf: (screenId: string) => number | null | undefined,
+  gridColumns: number,
+  emit?: {
+    group: (group: CanvasGroupLayout) => void;
+    card: (card: CanvasCardLayout) => void;
+  },
+): Rect {
   let cursorY = 0;
   let maxRight = 0;
 
-  for (const section of sections) {
-    const items = [...section.items].sort((a, b) =>
-      b.last_uploaded_at.localeCompare(a.last_uploaded_at),
-    );
-    const columns = Math.min(GRID_COLUMNS, items.length);
+  for (const { key, title, items } of sections) {
+    const columns = Math.max(Math.min(gridColumns, items.length), 1);
     const sectionWidth =
       columns * CARD_WIDTH + Math.max(columns - 1, 0) * CARD_GAP;
-    groups.push({
-      key: section.key,
-      title: section.title,
+    emit?.group({
+      key,
+      title,
       count: items.length,
       titleRect: {
         x: 0,
@@ -125,36 +138,93 @@ export function layoutCanvas(
     cursorY += GROUP_TITLE_HEIGHT;
     maxRight = Math.max(maxRight, sectionWidth);
 
-    for (let rowStart = 0; rowStart < items.length; rowStart += GRID_COLUMNS) {
-      const row = items.slice(rowStart, rowStart + GRID_COLUMNS);
+    for (let rowStart = 0; rowStart < items.length; rowStart += columns) {
+      const row = items.slice(rowStart, rowStart + columns);
       const imageHeights = row.map((item) => {
         const aspect = aspectOf(item.id);
         return CARD_WIDTH * (aspect && aspect > 0 ? aspect : DEFAULT_ASPECT);
       });
       const rowHeight = Math.max(...imageHeights) + CARD_META_HEIGHT;
-      row.forEach((item, i) => {
-        cards.push({
-          screenId: item.id,
-          rect: {
-            x: i * (CARD_WIDTH + CARD_GAP),
-            y: cursorY,
-            width: CARD_WIDTH,
-            height: imageHeights[i] + CARD_META_HEIGHT,
-          },
-          imageHeight: imageHeights[i],
+      if (emit) {
+        row.forEach((item, i) => {
+          emit.card({
+            screenId: item.id,
+            rect: {
+              x: i * (CARD_WIDTH + CARD_GAP),
+              y: cursorY,
+              width: CARD_WIDTH,
+              height: imageHeights[i] + CARD_META_HEIGHT,
+            },
+            imageHeight: imageHeights[i],
+          });
         });
-      });
+      }
       cursorY += rowHeight + CARD_GAP;
     }
     cursorY += GROUP_GAP - CARD_GAP;
   }
 
-  const height = Math.max(cursorY - GROUP_GAP, 0);
   return {
-    groups,
-    cards,
-    bounds: { x: 0, y: 0, width: maxRight, height },
+    x: 0,
+    y: 0,
+    width: maxRight,
+    height: Math.max(cursorY - GROUP_GAP, 0),
   };
+}
+
+/**
+ * 按分组自动排版：命名组按组内最近上传倒序，未分组在最后；组内按
+ * last_uploaded_at 倒序，固定列数网格（默认 GRID_COLUMNS，每组不超过
+ * 组内数量），行高取该行最高卡片。aspectOf 返回图片高/宽，未知时回退 4:3。
+ */
+export function layoutCanvas(
+  screens: CanvasScreenInput[],
+  aspectOf: (screenId: string) => number | null | undefined,
+  columns = GRID_COLUMNS,
+): CanvasLayout {
+  const groups: CanvasGroupLayout[] = [];
+  const cards: CanvasCardLayout[] = [];
+  const bounds = layoutSections(buildSections(screens), aspectOf, columns, {
+    group: (group) => groups.push(group),
+    card: (card) => cards.push(card),
+  });
+  return { groups, cards, bounds };
+}
+
+/**
+ * 按容器尺寸选网格列数：在 [MIN_COLUMNS, MAX_COLUMNS] 内试排，取「适应全部」
+ * 缩放率最大的列数，使世界宽高比贴近容器；缩放率相同取更少的列。
+ * 容器未量到尺寸时回退 GRID_COLUMNS。
+ */
+export function pickCanvasColumns(
+  screens: CanvasScreenInput[],
+  aspectOf: (screenId: string) => number | null | undefined,
+  container: Size,
+  padding = FIT_PADDING,
+): number {
+  if (container.width <= 0 || container.height <= 0 || screens.length === 0) {
+    return GRID_COLUMNS;
+  }
+  const sections = buildSections(screens);
+  const widest = Math.max(...sections.map((s) => s.items.length));
+  const maxColumns = Math.max(Math.min(MAX_COLUMNS, widest), MIN_COLUMNS);
+  const availW = Math.max(container.width - padding * 2, 1);
+  const availH = Math.max(container.height - padding * 2, 1);
+
+  let best = MIN_COLUMNS;
+  let bestScale = -1;
+  for (let columns = MIN_COLUMNS; columns <= maxColumns; columns++) {
+    const bounds = layoutSections(sections, aspectOf, columns);
+    const scale = Math.min(
+      availW / Math.max(bounds.width, 1),
+      availH / Math.max(bounds.height, 1),
+    );
+    if (scale > bestScale + 1e-9) {
+      best = columns;
+      bestScale = scale;
+    }
+  }
+  return best;
 }
 
 export function worldToScreen(vp: Viewport, x: number, y: number) {
@@ -192,12 +262,13 @@ export function wheelZoomFactor(
 export function focusRect(
   rect: Rect,
   container: Size,
-  options: { padding?: number; maxScale?: number } = {},
+  options: { padding?: number; maxScale?: number; topInset?: number } = {},
 ): Viewport {
-  const padding = options.padding ?? 48;
+  const padding = options.padding ?? FIT_PADDING;
   const maxScale = options.maxScale ?? MAX_SCALE;
+  const topInset = options.topInset ?? 0;
   const availW = Math.max(container.width - padding * 2, 1);
-  const availH = Math.max(container.height - padding * 2, 1);
+  const availH = Math.max(container.height - padding * 2 - topInset, 1);
   const scale = Math.min(
     clampScale(Math.min(availW / Math.max(rect.width, 1), availH / Math.max(rect.height, 1))),
     maxScale,
@@ -205,20 +276,24 @@ export function focusRect(
   return {
     scale,
     x: container.width / 2 - (rect.x + rect.width / 2) * scale,
-    y: container.height / 2 - (rect.y + rect.height / 2) * scale,
+    y:
+      topInset +
+      (container.height - topInset) / 2 -
+      (rect.y + rect.height / 2) * scale,
   };
 }
 
-/** 适应全部：内容为空时回到原点 1 倍 */
+/** 适应全部：内容为空时回到原点 1 倍；topInset 避让浮动工具栏 */
 export function fitViewport(
   bounds: Rect,
   container: Size,
-  padding = 48,
+  padding = FIT_PADDING,
+  topInset = 0,
 ): Viewport {
   if (bounds.width <= 0 || bounds.height <= 0) {
     return { x: padding, y: padding, scale: 1 };
   }
-  return focusRect(bounds, container, { padding, maxScale: 1 });
+  return focusRect(bounds, container, { padding, maxScale: 1, topInset });
 }
 
 /** 当前视口覆盖的世界矩形，margin 为每侧额外外扩的屏幕像素 */

@@ -18,6 +18,7 @@ import {
   type CanvasLocateRequest,
 } from "@/components/screenshots/canvas/screenshot-canvas";
 import { screenshotApi } from "@/lib/api/screenshots";
+import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
@@ -74,6 +75,15 @@ export default function ScreenshotsPage() {
   const { data: screensData, isLoading: screensLoading } =
     useScreenshotScreens(activeProjectId);
   const items = useMemo(() => screensData?.items ?? [], [screensData]);
+
+  // 列表在内容区内部滚动，位置按项目持久化；画布视图下容器被夹到 0，
+  // ready 关闭既挡住把 0 写回存储，也让切回列表时重新恢复位置
+  const contentScrollRef = usePersistedScroll<HTMLDivElement>(
+    `screenshots:${activeProjectId}`,
+    {
+      ready: view === "list" && Boolean(activeProjectId) && !screensLoading,
+    },
+  );
 
   const [tab, setTab] = useState<string>(SCREENSHOT_TAB_ALL);
   const [search, setSearch] = useState("");
@@ -219,170 +229,142 @@ export default function ScreenshotsPage() {
           ) : undefined
         }
       />
-      <div
-        className={
-          view === "canvas"
-            ? "flex h-[calc(100dvh-3.5rem)] flex-col"
-            : "p-4 md:p-6 space-y-6"
-        }
-      >
-        <div
-          className={
-            view === "canvas" ? "flex min-h-0 flex-1 flex-col" : undefined
-          }
-        >
-          <div
-            className={
-              view === "canvas"
-                ? "flex flex-wrap items-center gap-2 border-b px-3 py-2"
-                : "mb-4 flex flex-wrap items-center justify-between gap-3"
-            }
-          >
-            <div className="flex items-center gap-2">
-              {view === "canvas" && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setView("list")}
-                >
-                  <List className="mr-1 h-3.5 w-3.5" />
-                  返回列表
-                </Button>
-              )}
-              {projectsLoading ? (
-                <Skeleton className="h-10 w-64 rounded-md" />
-              ) : projects.length === 0 ? (
-                <p className="text-sm text-muted-foreground">暂无项目</p>
-              ) : (
-                <ProjectSwitcher
-                  value={activeProjectId}
-                  onValueChange={(nextValue) => {
-                    setSelectedProjectId(nextValue);
-                    setLastSelectedProjectId(nextValue || null);
-                  }}
-                  projects={projects}
-                  placeholder="请选择项目"
-                  className="w-64"
-                />
-              )}
-            </div>
-
-            {items.length > 0 && (
-              <>
-                {view === "canvas" && (
-                  <Tabs
-                    value={activeTab}
-                    onValueChange={(value) => setTab(value)}
-                    className="min-w-0 flex-1"
-                  >
-                    <TabsList variant="line" className="overflow-x-auto">
-                      <TabsTrigger value={SCREENSHOT_TAB_ALL}>全部</TabsTrigger>
-                      {groupTabs.map((tabValue) => (
-                        <TabsTrigger key={tabValue} value={tabValue}>
-                          {decodeGroupTab(tabValue)}
-                        </TabsTrigger>
-                      ))}
-                      {ungrouped && (
-                        <TabsTrigger value={SCREENSHOT_TAB_UNGROUPED}>
-                          未分组
-                        </TabsTrigger>
-                      )}
-                    </TabsList>
-                  </Tabs>
-                )}
-                {view === "list" && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setView("canvas")}
-                  >
-                    <LayoutGrid className="mr-1 h-3.5 w-3.5" />
-                    画布
-                  </Button>
-                )}
-                <div className="relative min-w-0 sm:w-64">
-                  <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    className="pl-8"
-                    placeholder="搜索名称或界面标识"
-                  />
-                </div>
-              </>
+      {/* 两个视图共用固定外壳：工具行不动，列表在内容区内部滚动 */}
+      <div className="flex h-[calc(100dvh-3.5rem)] flex-col">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {projectsLoading ? (
+              <Skeleton className="h-10 w-64 rounded-md" />
+            ) : projects.length === 0 ? (
+              <p className="text-sm text-muted-foreground">暂无项目</p>
+            ) : (
+              <ProjectSwitcher
+                value={activeProjectId}
+                onValueChange={(nextValue) => {
+                  setSelectedProjectId(nextValue);
+                  setLastSelectedProjectId(nextValue || null);
+                }}
+                projects={projects}
+                placeholder="请选择项目"
+                className="w-64"
+              />
             )}
+            <div className="flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
+              <Button
+                size="sm"
+                variant={view === "list" ? "secondary" : "ghost"}
+                aria-pressed={view === "list"}
+                onClick={() => setView("list")}
+              >
+                <List className="mr-1 h-3.5 w-3.5" />
+                列表
+              </Button>
+              <Button
+                size="sm"
+                variant={view === "canvas" ? "secondary" : "ghost"}
+                aria-pressed={view === "canvas"}
+                onClick={() => setView("canvas")}
+              >
+                <LayoutGrid className="mr-1 h-3.5 w-3.5" />
+                画布
+              </Button>
+            </div>
           </div>
 
-          {view === "list" && items.length > 0 && (
-            <Tabs
-              value={activeTab}
-              onValueChange={(value) => setTab(value)}
-              className="mb-4"
-            >
-              <TabsList variant="line" className="overflow-x-auto">
-                <TabsTrigger value={SCREENSHOT_TAB_ALL}>全部</TabsTrigger>
-                {groupTabs.map((tabValue) => (
-                  <TabsTrigger key={tabValue} value={tabValue}>
-                    {decodeGroupTab(tabValue)}
-                  </TabsTrigger>
-                ))}
-                {ungrouped && (
-                  <TabsTrigger value={SCREENSHOT_TAB_UNGROUPED}>
-                    未分组
-                  </TabsTrigger>
-                )}
-              </TabsList>
-            </Tabs>
+          {items.length > 0 && (
+            <>
+              <Tabs
+                value={activeTab}
+                onValueChange={(value) => setTab(value)}
+                className="min-w-0 flex-1"
+              >
+                <TabsList
+                  variant="line"
+                  className="max-w-full overflow-x-auto"
+                >
+                  <TabsTrigger value={SCREENSHOT_TAB_ALL}>全部</TabsTrigger>
+                  {groupTabs.map((tabValue) => (
+                    <TabsTrigger key={tabValue} value={tabValue}>
+                      {decodeGroupTab(tabValue)}
+                    </TabsTrigger>
+                  ))}
+                  {ungrouped && (
+                    <TabsTrigger value={SCREENSHOT_TAB_UNGROUPED}>
+                      未分组
+                    </TabsTrigger>
+                  )}
+                </TabsList>
+              </Tabs>
+              <div className="relative w-full min-w-0 sm:w-64">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-8"
+                  placeholder="搜索名称或界面标识"
+                />
+              </div>
+            </>
           )}
+        </div>
 
+        <div
+          ref={contentScrollRef}
+          data-testid="screenshots-scroll"
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
           {projectsLoading || screensLoading ? (
-            <div className="grid gap-4 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            <div className="grid gap-4 p-4 sm:grid-cols-2 md:p-6 lg:grid-cols-3 xl:grid-cols-4">
               {Array.from({ length: 4 }).map((_, i) => (
                 <Skeleton key={i} className="h-48 rounded-lg" />
               ))}
             </div>
           ) : projects.length === 0 ? (
-            <Card className={view === "canvas" ? "m-3" : undefined}>
-              <CardContent className="flex flex-col items-center py-10">
-                <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
-                <p className="text-sm text-muted-foreground">暂无项目</p>
-              </CardContent>
-            </Card>
-          ) : items.length === 0 ? (
-            <Card className={view === "canvas" ? "m-3" : undefined}>
-              <CardContent className="flex flex-col items-center py-10">
-                <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
-                <p className="text-sm text-muted-foreground">
-                  该项目暂无截图，点击右上角「上传截图」开始
-                </p>
-              </CardContent>
-            </Card>
-          ) : visibleScreens.length === 0 ? (
-            <Card className={view === "canvas" ? "m-3" : undefined}>
-              <CardContent className="flex flex-col items-center py-10">
-                <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
-                <p className="text-sm text-muted-foreground">
-                  {deferredSearch.trim()
-                    ? "没有匹配的截图，调整搜索关键词后再试"
-                    : "该分组暂无截图"}
-                </p>
-              </CardContent>
-            </Card>
-          ) : view === "canvas" ? (
-            <div className="min-h-0 flex-1 p-3">
-              <ScreenshotCanvas
-                projectId={activeProjectId}
-                screens={visibleScreens}
-                annotations={annotations}
-                annotationsReady={annotationsReady}
-                resetKey={`${activeProjectId}|${activeTab}`}
-                controlsEnabled={openScreenId === null && !uploadOpen}
-                locateRequest={locateRequest}
-                onOpenPreview={openPreview}
-              />
+            <div className="p-4 md:p-6">
+              <Card>
+                <CardContent className="flex flex-col items-center py-10">
+                  <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
+                  <p className="text-sm text-muted-foreground">暂无项目</p>
+                </CardContent>
+              </Card>
             </div>
+          ) : items.length === 0 ? (
+            <div className="p-4 md:p-6">
+              <Card>
+                <CardContent className="flex flex-col items-center py-10">
+                  <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
+                  <p className="text-sm text-muted-foreground">
+                    该项目暂无截图，点击右上角「上传截图」开始
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+          ) : visibleScreens.length === 0 ? (
+            <div className="p-4 md:p-6">
+              <Card>
+                <CardContent className="flex flex-col items-center py-10">
+                  <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
+                  <p className="text-sm text-muted-foreground">
+                    {deferredSearch.trim()
+                      ? "没有匹配的截图，调整搜索关键词后再试"
+                      : "该分组暂无截图"}
+                  </p>
+                </CardContent>
+              </Card>
+            </div>
+          ) : view === "canvas" ? (
+            <ScreenshotCanvas
+              projectId={activeProjectId}
+              screens={visibleScreens}
+              annotations={annotations}
+              annotationsReady={annotationsReady}
+              resetKey={`${activeProjectId}|${activeTab}`}
+              controlsEnabled={openScreenId === null && !uploadOpen}
+              locateRequest={locateRequest}
+              onOpenPreview={openPreview}
+            />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            <div className="grid gap-4 p-4 sm:grid-cols-2 md:p-6 lg:grid-cols-3 xl:grid-cols-4">
               {visibleScreens.map((screen) => (
                 <Card
                   key={screen.id}

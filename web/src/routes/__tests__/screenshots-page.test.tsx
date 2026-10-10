@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import ScreenshotsPage from "@/routes/screenshots/index";
@@ -6,6 +6,10 @@ import { renderWithRoute } from "@/test/render";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
+import {
+  getSavedScroll,
+  resetScrollPositions,
+} from "@/lib/scroll-positions";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 const mockUploadDialog = vi.fn((_props: unknown) => null);
@@ -128,6 +132,7 @@ function mockScreens(items: ScreenshotScreenListItem[]) {
 
 describe("ScreenshotsPage", () => {
   beforeEach(() => {
+    resetScrollPositions();
     mockProjects();
     mockScreens(screensFixture);
   });
@@ -233,6 +238,71 @@ describe("ScreenshotsPage", () => {
     await user.click(screen.getByRole("button", { name: /列表/ }));
     expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
     expect(screen.getByTestId("screenshot-card-s1")).toBeInTheDocument();
+  });
+
+  it("persists the inner list scroll position across remounts", () => {
+    const first = renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+    fireEvent.scroll(screen.getByTestId("screenshots-scroll"), {
+      target: { scrollTop: 500 },
+    });
+    expect(getSavedScroll("screenshots:proj-1")).toBe(500);
+    first.unmount();
+
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+    expect(screen.getByTestId("screenshots-scroll").scrollTop).toBe(500);
+  });
+
+  it("restores the list scroll position after a canvas round-trip", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+    const scroller = screen.getByTestId("screenshots-scroll");
+    fireEvent.scroll(scroller, { target: { scrollTop: 500 } });
+
+    await user.click(screen.getByRole("button", { name: "画布" }));
+    // 真实浏览器里切到画布时内容塌缩会把 scrollTop 夹到 0；
+    // 手动补一个 scroll 事件，验证 ready 关闭时不会把 0 写回存储
+    fireEvent.scroll(scroller, { target: { scrollTop: 0 } });
+    expect(getSavedScroll("screenshots:proj-1")).toBe(500);
+
+    await user.click(screen.getByRole("button", { name: "列表" }));
+    expect(scroller.scrollTop).toBe(500);
+  });
+
+  it("keeps the same shell and toolbar when switching views", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+
+    const toolbarSignature = () => {
+      const search = screen.getByPlaceholderText("搜索名称或界面标识");
+      const toolbar = search.closest("div.border-b") as HTMLElement;
+      return {
+        shell: toolbar.parentElement?.className,
+        toolbar: toolbar.className,
+        tabs: screen.getAllByRole("tab").map((t) => t.textContent),
+        buttons: screen
+          .getAllByRole("button")
+          .filter((b) => b.hasAttribute("aria-pressed"))
+          .map((b) => b.textContent),
+      };
+    };
+
+    const listSignature = toolbarSignature();
+    expect(screen.getByRole("button", { name: "列表", pressed: true })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "画布" }));
+    expect(screen.getByRole("button", { name: "画布", pressed: true })).toBeInTheDocument();
+    expect(toolbarSignature()).toEqual(listSignature);
   });
 
   it("scopes the canvas to the active tab and search query", async () => {

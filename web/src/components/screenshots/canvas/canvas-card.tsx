@@ -29,8 +29,8 @@ interface CanvasCardProps {
   /** 卡片在世界坐标的位置与尺寸（含元信息行） */
   rect: Rect;
   imageHeight: number;
-  /** 缩得很小时不再加载图片，避免一屏几百张原图 */
-  lowDetail: boolean;
+  /** 本批放行挂载 <img>；未放行的卡片继续显示占位 */
+  imageEnabled: boolean;
   /** 图片宽高比已知（接口给了尺寸或 onLoad 量过）；未知时不叠加标注 */
   aspectKnown: boolean;
   annotations: ScreenshotAnnotation[];
@@ -55,7 +55,7 @@ function CanvasCardImpl({
   screen,
   rect,
   imageHeight,
-  lowDetail,
+  imageEnabled,
   aspectKnown,
   annotations,
   annotationIndex,
@@ -75,6 +75,9 @@ function CanvasCardImpl({
   const version = screen.latest_version;
   const imageAreaRef = useRef<HTMLDivElement>(null);
   const [drawRect, setDrawRect] = useState<Rect | null>(null);
+  // 图片加载完成前保留占位；按版本记录，换版后重新占位
+  const [loadedVersionId, setLoadedVersionId] = useState<string | null>(null);
+  const imageLoaded = !!version && loadedVersionId === version.id;
   const stopDrawRef = useRef<(() => void) | null>(null);
 
   useEffect(() => () => stopDrawRef.current?.(), []);
@@ -151,21 +154,27 @@ function CanvasCardImpl({
             )}
             onPointerDown={onImagePointerDown}
           >
-            {version && !lowDetail ? (
+            {!imageLoaded && (
+              <Images className="absolute h-8 w-8 text-muted-foreground/40" />
+            )}
+            {version && imageEnabled && (
               <img
                 src={screenshotApi.contentUrl(version)}
                 alt={name}
                 draggable={false}
+                loading="lazy"
+                decoding="async"
                 className="h-full w-full select-none object-contain"
                 onLoad={(e) => {
                   const img = e.currentTarget;
-                  if (img.naturalWidth > 0) {
+                  setLoadedVersionId(version.id);
+                  // 接口已给尺寸的版本不必再量，避免每次 onLoad 都触发重排
+                  const needsMeasure = !version.width || !version.height;
+                  if (needsMeasure && img.naturalWidth > 0) {
                     onImageSize(version.id, img.naturalWidth, img.naturalHeight);
                   }
                 }}
               />
-            ) : (
-              <Images className="h-8 w-8 text-muted-foreground/40" />
             )}
           </div>
 

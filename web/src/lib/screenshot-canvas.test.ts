@@ -5,7 +5,9 @@ import {
   CARD_WIDTH,
   GRID_COLUMNS,
   GROUP_TITLE_HEIGHT,
+  MAX_COLUMNS,
   MAX_SCALE,
+  MIN_COLUMNS,
   MIN_SCALE,
   aspectFromSize,
   clampScale,
@@ -19,6 +21,7 @@ import {
   isAnnotationRectTooSmall,
   layoutCanvas,
   normalizeRatioRect,
+  pickCanvasColumns,
   rectsIntersect,
   screenToWorld,
   visibleWorldRect,
@@ -101,6 +104,18 @@ describe("layoutCanvas", () => {
     );
   });
 
+  it("honors an explicit column count and caps it by group size", () => {
+    const screens = Array.from({ length: 10 }, (_, i) =>
+      screen(`s${i}`, "", `2026-10-${String(i + 10)}T00:00:00Z`),
+    );
+    const wide = layoutCanvas(screens, () => 1, 8);
+    expect(wide.cards.filter((c) => c.rect.y === wide.cards[0].rect.y)).toHaveLength(8);
+    expect(wide.bounds.width).toBe(8 * CARD_WIDTH + 7 * CARD_GAP);
+
+    const few = layoutCanvas(screens.slice(0, 3), () => 1, 8);
+    expect(few.bounds.width).toBe(3 * CARD_WIDTH + 2 * CARD_GAP);
+  });
+
   it("uses image aspect, falling back to 4:3 when unknown", () => {
     const layout = layoutCanvas(
       [
@@ -119,6 +134,49 @@ describe("layoutCanvas", () => {
     expect(layout.cards).toEqual([]);
     expect(layout.bounds.width).toBe(0);
     expect(layout.bounds.height).toBe(0);
+  });
+});
+
+describe("pickCanvasColumns", () => {
+  const many = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      screen(`s${i}`, "", `2026-10-01T00:00:${String(i % 60).padStart(2, "0")}Z`),
+    );
+  const fitScale = (n: number, columns: number, container: { width: number; height: number }) => {
+    const { bounds } = layoutCanvas(many(n), () => 2, columns);
+    return Math.min(
+      (container.width - 96) / bounds.width,
+      (container.height - 96) / bounds.height,
+    );
+  };
+
+  it("falls back to the default columns without a measured container", () => {
+    expect(pickCanvasColumns(many(30), () => 2, { width: 0, height: 0 })).toBe(
+      GRID_COLUMNS,
+    );
+  });
+
+  it("uses more than the default columns for many screenshots", () => {
+    const container = { width: 1400, height: 800 };
+    const columns = pickCanvasColumns(many(120), () => 2, container);
+    expect(columns).toBeGreaterThan(GRID_COLUMNS);
+    expect(columns).toBeLessThanOrEqual(MAX_COLUMNS);
+    expect(fitScale(120, columns, container)).toBeGreaterThan(
+      fitScale(120, GRID_COLUMNS, container),
+    );
+  });
+
+  it("uses fewer columns in a tall narrow container", () => {
+    const wide = pickCanvasColumns(many(40), () => 2, { width: 1600, height: 700 });
+    const narrow = pickCanvasColumns(many(40), () => 2, { width: 500, height: 900 });
+    expect(narrow).toBeLessThan(wide);
+    expect(narrow).toBeGreaterThanOrEqual(MIN_COLUMNS);
+  });
+
+  it("lays a handful of screenshots out in one row on a wide container", () => {
+    expect(
+      pickCanvasColumns(many(3), () => 0.75, { width: 1600, height: 700 }),
+    ).toBe(3);
   });
 });
 
@@ -171,6 +229,19 @@ describe("viewport math", () => {
       { width: 1000, height: 800 },
     );
     expect(empty.scale).toBe(1);
+  });
+
+  it("fit reserves top inset so content stays clear of the floating toolbar", () => {
+    const bounds = { x: 0, y: 0, width: 400, height: 200 };
+    const container = { width: 1000, height: 600 };
+    const plain = fitViewport(bounds, container, 48);
+    const inset = fitViewport(bounds, container, 48, 64);
+
+    // 内容整体上移避开工具栏：y 方向可用高度减少后缩放更小、顶部更高
+    expect(inset.scale).toBeLessThanOrEqual(plain.scale);
+    // 内容顶边在屏幕上不低于 topInset + padding
+    const topEdge = inset.y + bounds.y * inset.scale;
+    expect(topEdge).toBeGreaterThanOrEqual(64 + 48 - 1e-9);
   });
 
   it("computes the visible world rect with margin", () => {
