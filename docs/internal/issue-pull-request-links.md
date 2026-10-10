@@ -13,7 +13,7 @@
 
 body 只传 `{"url": "<PR链接>"}`。服务端解析 owner/repo/number（支持 `http(s)`、可选 `www`、`/files` 等后缀、query/fragment），路径段以 `.` 开头/结尾或是 `.`/`..` 的直接拒绝——HTTP 客户端的路径归一化可能把请求改到别的仓库。解析通过后先调 GitHub 拉元数据，失败不落记录（50200）。
 
-允许跨仓库：`repo_full_name` 以 PR 链接为准，可以是项目配置仓库之外的仓库。凭证按 `resolvePullRequestCredential` 三选一：项目已配独立 PR 访问 Token（`github_pr_token_encrypted`）则只用 PR Token；未配则沿用项目 Token；项目未配 GitHub 走匿名——PR 关联是唯一允许匿名访问的调用方。细节见 [github-credentials.md](github-credentials.md)。attach 与 sync 的失败文案会标明本次凭证来源；GitHub 对「PR 不存在」与「无权访问」都返回 404，权限类错误附「核查仓库访问范围与 Pull requests 读权限」的提示，不断言单一原因。
+允许跨仓库：`repo_full_name` 以 PR 链接为准，可以是项目配置仓库之外的仓库。凭证按 `ProjectCredentials.pullRequestCredential` 三选一：项目已配独立 PR 访问 Token（`github_pr_token_encrypted`）则只用 PR Token；未配则沿用项目 Token；项目未配 GitHub 走匿名——PR 关联是唯一允许匿名访问的调用方。细节见 [github-credentials.md](github-credentials.md)。attach 与 sync 的失败文案会标明本次凭证来源；GitHub 对「PR 不存在」与「无权访问」都返回 404，权限类错误附「核查仓库访问范围与 Pull requests 读权限」的提示，不断言单一原因。
 
 ## sync 契约
 

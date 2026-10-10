@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
@@ -47,8 +46,8 @@ type issueMirror struct {
 	syncStateRepo       *repository.IssueSyncStateRepository
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository
 	projectRepo         *repository.ProjectRepository
-	cfg                 *config.Config
 	logger              *zap.Logger
+	credentials         *ProjectCredentials
 	newClient           gitHubIssueClientFactory
 	mu                  sync.Mutex
 	syncing             map[string]struct{}
@@ -82,7 +81,7 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 		return nil, syncErr
 	}
 
-	tokenBytes, appErr := requiredProjectGitHubToken(project, m.cfg, m.logger)
+	tokenBytes, appErr := m.credentials.requiredGitHubToken(project)
 	if appErr != nil {
 		return failSync(appErr)
 	}

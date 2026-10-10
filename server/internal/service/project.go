@@ -10,7 +10,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
@@ -27,8 +26,7 @@ type ProjectService struct {
 	versionRepo     *repository.VersionRepository
 	syncStateRepo   *repository.IssueSyncStateRepository
 	storage         storage.Storage
-	cfg             *config.Config
-	logger          *zap.Logger
+	credentials     *ProjectCredentials
 	newBranchClient gitHubBranchClientFactory
 }
 
@@ -51,8 +49,7 @@ func NewProjectService(
 		versionRepo:   versionRepo,
 		syncStateRepo: syncStateRepo,
 		storage:       storage,
-		cfg:           cfg,
-		logger:        logger,
+		credentials:   newProjectCredentials(projectRepo, cfg, logger),
 		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -76,30 +73,22 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 		if err != nil {
 			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 		}
-		encryptedToken, err = s.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
+		encryptedToken, err = s.credentials.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	// PR 访问 Token 独立于反馈仓库配置：internal 项目也可以只配 PR Token。
-	// pr_token_source_project_id 优先于 github_pr_token（与 source_project_id 语义一致），
-	// pr_token_source_kind 选择复制源项目的哪种凭证（缺省 pr），须与 source 搭配提供。
-	prTokenKind, err := validatePRTokenSourceKind(req.PrTokenSourceKind, api.Deref(req.PrTokenSourceProjectId))
+	// 冲突/kind/clear/source 复制/明文加密的判定全部收进 credentials.resolvePRToken；
+	// create 没有现值可保留，currentCiphertext 传 nil。
+	encryptedPRToken, err := s.credentials.resolvePRToken(userID, nil, projectPRTokenInput{
+		plaintext:       req.GithubPrToken,
+		sourceProjectID: req.PrTokenSourceProjectId,
+		sourceKind:      req.PrTokenSourceKind,
+	})
 	if err != nil {
 		return nil, err
-	}
-	var encryptedPRToken []byte
-	if prSourceID := api.Deref(req.PrTokenSourceProjectId); prSourceID != "" {
-		encryptedPRToken, err = s.resolvePRTokenFromSource(userID, prSourceID, prTokenKind)
-		if err != nil {
-			return nil, err
-		}
-	} else if prToken := api.Deref(req.GithubPrToken); prToken != "" {
-		encryptedPRToken, err = crypto.Encrypt([]byte(prToken), []byte(s.cfg.Encryption.Key))
-		if err != nil {
-			return nil, errs.ErrInternal
-		}
 	}
 
 	project := &model.Project{
@@ -211,38 +200,25 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 	}
 
 	if api.Deref(req.SourceProjectId) != "" || api.Deref(req.GithubToken) != "" {
-		encryptedToken, err := s.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
+		encryptedToken, err := s.credentials.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
 		if err != nil {
 			return nil, err
 		}
 		project.GithubTokenEncrypted = encryptedToken
 	}
 
-	// PR 访问 Token：clear 标志与 token/source 字段同时显式提供即冲突（不论取值），
-	// clear=true 显式清除（恢复沿用项目 Token）、source 复制源项目密文、
-	// 非空 token 替换、其余情况保留现值。kind 不参与互斥判定，但须与 source 搭配。
-	if req.ClearGithubPrToken != nil && (req.GithubPrToken != nil || req.PrTokenSourceProjectId != nil) {
-		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": clear_github_pr_token 与 github_pr_token 或 pr_token_source_project_id 不能同时提供")
-	}
-	prTokenKind, err := validatePRTokenSourceKind(req.PrTokenSourceKind, api.Deref(req.PrTokenSourceProjectId))
+	// PR 访问 Token：冲突/kind 校验/clear 清除/source 复制/明文替换/保留现值
+	// 的判定全部收进 credentials.resolvePRToken，这里只把结果赋回字段。
+	encryptedPRToken, err := s.credentials.resolvePRToken(userID, project.GithubPRTokenEncrypted, projectPRTokenInput{
+		plaintext:       req.GithubPrToken,
+		sourceProjectID: req.PrTokenSourceProjectId,
+		sourceKind:      req.PrTokenSourceKind,
+		clear:           req.ClearGithubPrToken,
+	})
 	if err != nil {
 		return nil, err
 	}
-	if api.Deref(req.ClearGithubPrToken) {
-		project.GithubPRTokenEncrypted = nil
-	} else if prSourceID := api.Deref(req.PrTokenSourceProjectId); prSourceID != "" {
-		encryptedPRToken, err := s.resolvePRTokenFromSource(userID, prSourceID, prTokenKind)
-		if err != nil {
-			return nil, err
-		}
-		project.GithubPRTokenEncrypted = encryptedPRToken
-	} else if prToken := api.Deref(req.GithubPrToken); prToken != "" {
-		encryptedPRToken, err := crypto.Encrypt([]byte(prToken), []byte(s.cfg.Encryption.Key))
-		if err != nil {
-			return nil, errs.ErrInternal
-		}
-		project.GithubPRTokenEncrypted = encryptedPRToken
-	}
+	project.GithubPRTokenEncrypted = encryptedPRToken
 
 	if err := s.projectRepo.Update(project); err != nil {
 		return nil, errs.ErrInternal
@@ -278,7 +254,7 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 		return nil, "", errs.ErrInternal
 	}
 
-	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
+	tokenBytes, appErr := s.credentials.requiredGitHubToken(project)
 	if appErr != nil {
 		return nil, "", appErr
 	}
@@ -338,73 +314,6 @@ func parseRepositoryURL(raw string) (owner, repo string, err error) {
 	}
 
 	return owner, repo, nil
-}
-
-// resolveGitHubToken 从 Token 字符串或源项目解析加密后的 Token，优先使用 sourceProjectID。
-// 源项目不存在返回 ErrProjectNotFound；源项目未配置 Access Token 返回 40001——
-// 与 resolvePRTokenFromSource 一致，不允许静默写入空密文。
-func (s *ProjectService) resolveGitHubToken(userID, githubToken, sourceProjectID string) ([]byte, error) {
-	if sourceProjectID != "" {
-		sourceProject, err := s.projectRepo.FindByID(sourceProjectID, userID)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errs.ErrProjectNotFound
-			}
-			return nil, errs.ErrInternal
-		}
-		if len(sourceProject.GithubTokenEncrypted) == 0 {
-			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 GitHub Access Token")
-		}
-		return sourceProject.GithubTokenEncrypted, nil
-	}
-	if githubToken != "" {
-		encryptedToken, err := crypto.Encrypt([]byte(githubToken), []byte(s.cfg.Encryption.Key))
-		if err != nil {
-			return nil, errs.ErrInternal
-		}
-		return encryptedToken, nil
-	}
-	return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
-}
-
-// validatePRTokenSourceKind 归一化 pr_token_source_kind：未提供返回缺省
-// api.Pr；单独提供（不带 pr_token_source_project_id）或取值不在 access/pr
-// 内均返回 40001。互斥判定（与 clear_github_pr_token）不经过此函数。
-func validatePRTokenSourceKind(kind *api.PrTokenSourceKind, sourceProjectID string) (api.PrTokenSourceKind, error) {
-	if kind == nil {
-		return api.Pr, nil
-	}
-	if sourceProjectID == "" {
-		return "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": pr_token_source_kind 需与 pr_token_source_project_id 搭配提供")
-	}
-	if !kind.Valid() {
-		return "", errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": pr_token_source_kind 取值无效（可选 access、pr）")
-	}
-	return *kind, nil
-}
-
-// resolvePRTokenFromSource 复制源项目的凭证密文作为本项目的 PR 访问 Token（与
-// resolveGitHubToken 的 source 分支一致，密文直接复用不解密重加密）。
-// kind=access 复制源项目的 GitHub Access Token，kind=pr（缺省）复制 PR 访问
-// Token。源项目不存在返回 ErrProjectNotFound；未配置对应凭证返回 40001。
-func (s *ProjectService) resolvePRTokenFromSource(userID, sourceProjectID string, kind api.PrTokenSourceKind) ([]byte, error) {
-	sourceProject, err := s.projectRepo.FindByID(sourceProjectID, userID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrProjectNotFound
-		}
-		return nil, errs.ErrInternal
-	}
-	if kind == api.Access {
-		if len(sourceProject.GithubTokenEncrypted) == 0 {
-			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 GitHub Access Token")
-		}
-		return sourceProject.GithubTokenEncrypted, nil
-	}
-	if len(sourceProject.GithubPRTokenEncrypted) == 0 {
-		return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 所选项目未配置 PR 访问 Token")
-	}
-	return sourceProject.GithubPRTokenEncrypted, nil
 }
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {

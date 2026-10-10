@@ -158,7 +158,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 		return nil, errs.ErrInternal
 	}
 
-	tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
+	tokenBytes, appErr := s.credentials.requiredGitHubToken(project)
 	if appErr != nil {
 		return nil, appErr
 	}
@@ -259,7 +259,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			}
 			return nil, errs.ErrInternal
 		}
-		tokenBytes, appErr := requiredProjectGitHubToken(project, s.cfg, s.logger)
+		tokenBytes, appErr := s.credentials.requiredGitHubToken(project)
 		if appErr != nil {
 			return nil, appErr
 		}

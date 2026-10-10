@@ -238,10 +238,10 @@ func (s *IssueService) loadIssueAndProject(issueID, userID string) (*model.Issue
 }
 
 // pullRequestClient 为任意 owner/repo 构造 GitHub 客户端，并返回本次使用的凭证来源。
-// 凭证选择集中在 resolvePullRequestCredential：已配 PR 访问 Token 只用 PR Token，
+// 凭证选择集中在 credentials.pullRequestCredential：已配 PR 访问 Token 只用 PR Token，
 // 未配则回退项目 Token，项目未配 GitHub 时匿名访问公共仓库；解密失败报错不降级。
 func (s *IssueService) pullRequestClient(project *model.Project, owner, repo string) (gitHubIssueClient, pullRequestCredentialKind, error) {
-	tokenBytes, kind, appErr := resolvePullRequestCredential(project, s.cfg, s.logger)
+	tokenBytes, kind, appErr := s.credentials.pullRequestCredential(project)
 	if appErr != nil {
 		return nil, kind, appErr
 	}

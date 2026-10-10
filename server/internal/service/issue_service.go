@@ -57,6 +57,7 @@ type IssueService struct {
 	storage             storage.Storage
 	cfg                 *config.Config
 	logger              *zap.Logger
+	credentials         *ProjectCredentials
 	newClient           gitHubIssueClientFactory
 	mirror              *issueMirror
 }
@@ -123,11 +124,13 @@ func NewIssueService(
 		storage:             storage,
 		cfg:                 cfg,
 		logger:              logger,
+		credentials:         newProjectCredentials(projectRepo, cfg, logger),
 		newClient: func(token, owner, repo string) gitHubIssueClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
 	}
-	// 镜像的 client 工厂在调用时才读 s.newClient，测试替换对两条路径同时生效。
+	// 镜像的 client 工厂在调用时才读 s.newClient，测试替换对两条路径同时生效；
+	// 凭证模块与 IssueService 共用同一实例。
 	s.mirror = &issueMirror{
 		issueRepo:           issueRepo,
 		gitHubMetaRepo:      gitHubMetaRepo,
@@ -137,8 +140,8 @@ func NewIssueService(
 		syncStateRepo:       syncStateRepo,
 		githubRepoLabelRepo: githubRepoLabelRepo,
 		projectRepo:         projectRepo,
-		cfg:                 cfg,
 		logger:              logger,
+		credentials:         s.credentials,
 		newClient: func(token, owner, repo string) gitHubIssueClient {
 			return s.newClient(token, owner, repo)
 		},
