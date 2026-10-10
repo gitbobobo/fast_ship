@@ -4484,6 +4484,8 @@ components:
         issue_count:
           type: integer
           description: omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态）
+        issue_workflow_counts:
+          $ref: '#/components/schemas/IssueWorkflowCounts'
         issue_sync:
           $ref: '#/components/schemas/IssueSyncState'
         created_at:
@@ -4492,6 +4494,19 @@ components:
         updated_at:
           type: string
           format: date-time
+    IssueWorkflowCounts:
+      type: object
+      required: [unset, todo, in_progress, done]
+      properties:
+        unset:
+          type: integer
+          description: 未设置内部状态的 Issue 数（含无 internal meta 行的 Issue）
+        todo:
+          type: integer
+        in_progress:
+          type: integer
+        done:
+          type: integer
     LatestVersion:
       type: object
       required: [id, version_number, status, created_at]
