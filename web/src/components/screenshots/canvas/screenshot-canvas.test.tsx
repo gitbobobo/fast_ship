@@ -190,6 +190,26 @@ describe("ScreenshotCanvas", () => {
     });
   });
 
+  it("restarts batched image mounting when the scope changes", async () => {
+    const many = (prefix: string) =>
+      Array.from({ length: 60 }, (_, i) =>
+        makeScreen(`${prefix}${i}`, {
+          last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+        }),
+      );
+    const { rerenderWith } = renderCanvas({ screens: many("a") });
+    // 等首批之后的批次把 <img> 全部放行
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll("[data-canvas-card] img").length,
+      ).toBe(60);
+    });
+
+    // 换范围后额度重置：新范围首帧只挂首批 30 张，而不是一次性挂满
+    rerenderWith({ screens: many("b") });
+    expect(document.querySelectorAll("[data-canvas-card] img").length).toBe(30);
+  });
+
   it("swaps the placeholder for the image after load and resets on version change", () => {
     const { rerenderWith } = renderCanvas();
     const card = screen.getByTestId("canvas-card-s1");

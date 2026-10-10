@@ -95,6 +95,15 @@ export function ScreenshotCanvas({
   // 接口未给尺寸的存量版本，用图片 onLoad 量到的宽高比校正排版
   const [measured, setMeasured] = useState<Record<string, number>>({});
   const flashTimerRef = useRef<number | null>(null);
+  // <img> 分批挂载额度，见下方 effect
+  const [imgBudget, setImgBudget] = useState(IMAGE_MOUNT_BATCH);
+  // 换项目/分组/搜索后从头分批：上个范围放行的额度若留给新范围，
+  // 大项目会在首帧一次性挂满所有原图
+  const [imgScope, setImgScope] = useState(screens);
+  if (screens !== imgScope) {
+    setImgScope(screens);
+    setImgBudget(IMAGE_MOUNT_BATCH);
+  }
 
   // 切项目/分组：清掉选中、草稿、框选态（视图重置在下方 effect）
   const [prevResetKey, setPrevResetKey] = useState(resetKey);
@@ -368,7 +377,6 @@ export function ScreenshotCanvas({
 
   // 深缩/适应全部时几乎所有卡片都进视口，一次性挂几百张原图会瞬时打满
   // 带宽与解码；按批推进 <img> 挂载摊平压力，最终仍全部渲染
-  const [imgBudget, setImgBudget] = useState(IMAGE_MOUNT_BATCH);
   useEffect(() => {
     if (imgBudget >= visibleCards.length) return;
     const timer = window.setTimeout(() => {
