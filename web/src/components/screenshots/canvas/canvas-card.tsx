@@ -29,6 +29,8 @@ interface CanvasCardProps {
   /** 卡片在世界坐标的位置与尺寸（含元信息行） */
   rect: Rect;
   imageHeight: number;
+  /** 本批放行挂载 <img>；未放行的卡片继续显示占位 */
+  imageEnabled: boolean;
   /** 图片宽高比已知（接口给了尺寸或 onLoad 量过）；未知时不叠加标注 */
   aspectKnown: boolean;
   annotations: ScreenshotAnnotation[];
@@ -53,6 +55,7 @@ function CanvasCardImpl({
   screen,
   rect,
   imageHeight,
+  imageEnabled,
   aspectKnown,
   annotations,
   annotationIndex,
@@ -154,7 +157,7 @@ function CanvasCardImpl({
             {!imageLoaded && (
               <Images className="absolute h-8 w-8 text-muted-foreground/40" />
             )}
-            {version && (
+            {version && imageEnabled && (
               <img
                 src={screenshotApi.contentUrl(version)}
                 alt={name}

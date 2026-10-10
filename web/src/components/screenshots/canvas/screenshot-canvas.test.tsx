@@ -182,9 +182,12 @@ describe("ScreenshotCanvas", () => {
       await user.click(zoomOut);
     }
     expect(zoomPercent()).toBe("5%");
-    for (const card of screen.getAllByTestId(/^canvas-card-/)) {
-      expect(card.querySelector("img")).not.toBeNull();
-    }
+    // <img> 分批挂载：深缩下也要等到全部放行，而不是退回占位
+    await waitFor(() => {
+      for (const card of screen.getAllByTestId(/^canvas-card-/)) {
+        expect(card.querySelector("img")).not.toBeNull();
+      }
+    });
   });
 
   it("swaps the placeholder for the image after load and resets on version change", () => {

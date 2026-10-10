@@ -76,10 +76,13 @@ export default function ScreenshotsPage() {
     useScreenshotScreens(activeProjectId);
   const items = useMemo(() => screensData?.items ?? [], [screensData]);
 
-  // 列表在内容区内部滚动（画布视图下内容等高、不滚），位置按项目持久化
+  // 列表在内容区内部滚动，位置按项目持久化；画布视图下容器被夹到 0，
+  // ready 关闭既挡住把 0 写回存储，也让切回列表时重新恢复位置
   const contentScrollRef = usePersistedScroll<HTMLDivElement>(
     `screenshots:${activeProjectId}`,
-    { ready: Boolean(activeProjectId) && !screensLoading },
+    {
+      ready: view === "list" && Boolean(activeProjectId) && !screensLoading,
+    },
   );
 
   const [tab, setTab] = useState<string>(SCREENSHOT_TAB_ALL);

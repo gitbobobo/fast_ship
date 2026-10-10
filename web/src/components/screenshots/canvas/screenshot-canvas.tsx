@@ -22,6 +22,9 @@ import { isTypingTarget, useCanvasViewport } from "./use-canvas-viewport";
 
 const FLASH_MS = 2400;
 const EMPTY_ANNOTATIONS: ScreenshotAnnotation[] = [];
+/** 首帧直挂的 <img> 数与之后每批追加数/间隔，摊平深缩时的并发加载 */
+const IMAGE_MOUNT_BATCH = 30;
+const IMAGE_MOUNT_INTERVAL_MS = 80;
 
 export interface CanvasLocateRequest {
   annotationId: string;
@@ -362,6 +365,20 @@ export function ScreenshotCanvas({
   const visibleCards = layout.cards.filter((card) =>
     rectsIntersect(card.rect, visibleRect),
   );
+
+  // 深缩/适应全部时几乎所有卡片都进视口，一次性挂几百张原图会瞬时打满
+  // 带宽与解码；按批推进 <img> 挂载摊平压力，最终仍全部渲染
+  const [imgBudget, setImgBudget] = useState(IMAGE_MOUNT_BATCH);
+  useEffect(() => {
+    if (imgBudget >= visibleCards.length) return;
+    const timer = window.setTimeout(() => {
+      setImgBudget((n) =>
+        Math.min(n + IMAGE_MOUNT_BATCH, visibleCards.length),
+      );
+    }, IMAGE_MOUNT_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+  }, [imgBudget, visibleCards.length]);
+
   const drawEnabled = drawMode && !spaceHeld;
 
   const cursor = panning ? "grabbing" : spaceHeld ? "grab" : undefined;
@@ -410,7 +427,7 @@ export function ScreenshotCanvas({
             </div>
           ))}
 
-          {visibleCards.map((card) => {
+          {visibleCards.map((card, index) => {
             const screen = screenById.get(card.screenId);
             if (!screen) return null;
             const cardAnnotations =
@@ -435,6 +452,7 @@ export function ScreenshotCanvas({
                 screen={screen}
                 rect={card.rect}
                 imageHeight={card.imageHeight}
+                imageEnabled={index < imgBudget}
                 aspectKnown={aspectOf(screen.id) !== null}
                 annotations={cardAnnotations}
                 annotationIndex={annotationIndex}
