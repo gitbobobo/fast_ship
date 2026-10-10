@@ -262,7 +262,7 @@ export default function ScreenshotsPage() {
                   }}
                   projects={projects}
                   placeholder="请选择项目"
-                  className="w-auto min-w-32"
+                  className="w-64"
                 />
               )}
             </div>
