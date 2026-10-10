@@ -724,7 +724,7 @@ func TestIssueRecommendation_RemovedOnGitHubSyncClose(t *testing.T) {
 			User:      &gh.User{Login: gh.String("alice")},
 		},
 	}
-	if _, err := ts.issueService.upsertGitHubIssue(issue.ProjectID, item); err != nil {
+	if _, err := ts.issueService.mirror.upsertGitHubIssue(issue.ProjectID, item); err != nil {
 		t.Fatalf("upsert github issue: %v", err)
 	}
 	if _, err := ts.recRepo.Get(issue.ID); err == nil {
@@ -748,7 +748,7 @@ func TestIssueRecommendation_GitHubSyncClosedCreate(t *testing.T) {
 			User:      &gh.User{Login: gh.String("bob")},
 		},
 	}
-	stored, err := ts.issueService.upsertGitHubIssue(issue.ProjectID, item)
+	stored, err := ts.issueService.mirror.upsertGitHubIssue(issue.ProjectID, item)
 	if err != nil {
 		t.Fatalf("upsert github issue: %v", err)
 	}

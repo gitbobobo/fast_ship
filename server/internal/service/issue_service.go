@@ -9,7 +9,6 @@ import (
 	gh "github.com/google/go-github/v62/github"
 	"go.uber.org/zap"
 	"regexp"
-	"sync"
 	"time"
 )
 
@@ -59,8 +58,7 @@ type IssueService struct {
 	cfg                 *config.Config
 	logger              *zap.Logger
 	newClient           gitHubIssueClientFactory
-	syncMu              sync.Mutex
-	syncingProjectID    map[string]struct{}
+	mirror              *issueMirror
 }
 
 type IssueListFilters struct {
@@ -74,21 +72,9 @@ type IssueListFilters struct {
 	Sort      string
 }
 
-type issueUserPayload struct {
-	Login     string `json:"login"`
-	AvatarURL string `json:"avatar_url"`
-}
-
 type issueLabelPayload struct {
 	Name        string `json:"name"`
 	Color       string `json:"color"`
-	Description string `json:"description"`
-}
-
-type issueMilestonePayload struct {
-	Number      int    `json:"number"`
-	Title       string `json:"title"`
-	State       string `json:"state"`
 	Description string `json:"description"`
 }
 
@@ -115,7 +101,7 @@ func NewIssueService(
 	logger *zap.Logger,
 	annotationRepo *repository.ScreenshotAnnotationRepository,
 ) *IssueService {
-	return &IssueService{
+	s := &IssueService{
 		issueRepo:           issueRepo,
 		gitHubMetaRepo:      gitHubMetaRepo,
 		commentRepo:         commentRepo,
@@ -140,6 +126,23 @@ func NewIssueService(
 		newClient: func(token, owner, repo string) gitHubIssueClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
-		syncingProjectID: make(map[string]struct{}),
 	}
+	// 镜像的 client 工厂在调用时才读 s.newClient，测试替换对两条路径同时生效。
+	s.mirror = &issueMirror{
+		issueRepo:           issueRepo,
+		gitHubMetaRepo:      gitHubMetaRepo,
+		commentRepo:         commentRepo,
+		timelineRepo:        timelineRepo,
+		recRepo:             recRepo,
+		syncStateRepo:       syncStateRepo,
+		githubRepoLabelRepo: githubRepoLabelRepo,
+		projectRepo:         projectRepo,
+		cfg:                 cfg,
+		logger:              logger,
+		newClient: func(token, owner, repo string) gitHubIssueClient {
+			return s.newClient(token, owner, repo)
+		},
+		syncing: make(map[string]struct{}),
+	}
+	return s
 }

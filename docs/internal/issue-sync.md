@@ -1,6 +1,6 @@
 # Issue 同步（GitHub）
 
-`POST /api/projects/{id}/issues/sync` 与后台增量任务共用 `IssueService.syncProject`：分页拉取远端 Issues（`since` 增量），逐条 upsert `issues` 与 `issue_github_meta`，然后按 Issue 同步评论与时间线两个镜像集合。同一项目用内存锁防并发，失败经 `failSync` 落 `issue_sync_states.last_error`。
+`POST /api/projects/{id}/issues/sync` 与后台增量任务共用 `issueMirror.Sync`（`server/internal/service/issue_mirror.go`）：分页拉取远端 Issues（`since` 增量），逐条 upsert `issues` 与 `issue_github_meta`，然后按 Issue 同步评论与时间线两个镜像集合。同一项目用内存锁防并发，失败经 `failSync` 落 `issue_sync_states.last_error`。push 路径（创建/更新 Issue、发评论）经 `issueMirror.upsertGitHubIssue`/`syncTimeline`/`recordPushedComment` 把远端响应写回本地，不经同步锁。
 
 ## 事务边界
 

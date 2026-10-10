@@ -175,7 +175,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 		return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("创建 GitHub Issue 失败: %v", err))
 	}
 
-	stored, err := s.upsertGitHubIssue(projectID, createdIssue)
+	stored, err := s.mirror.upsertGitHubIssue(projectID, createdIssue)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 	}
 	s.deleteIssueAssetFiles(assetPathsToDelete)
 
-	if _, err := s.syncTimeline(ctx, client, stored, createdIssue.GetNumber()); err != nil {
+	if _, err := s.mirror.syncTimeline(ctx, client, stored, createdIssue.GetNumber()); err != nil {
 		s.logger.Warn("sync timeline after creating github issue failed", zap.String("issue_id", stored.ID), zap.Error(err))
 	}
 
@@ -294,7 +294,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败: %v", err))
 		}
 
-		stored, err := s.upsertGitHubIssue(project.ID, updatedIssue)
+		stored, err := s.mirror.upsertGitHubIssue(project.ID, updatedIssue)
 		if err != nil {
 			return nil, err
 		}
@@ -309,7 +309,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			}
 			s.deleteIssueAssetFiles(assetPathsToDelete)
 		}
-		if _, err := s.syncTimeline(context.Background(), client, stored, issue.GitHubMeta.Number); err != nil {
+		if _, err := s.mirror.syncTimeline(context.Background(), client, stored, issue.GitHubMeta.Number); err != nil {
 			return nil, err
 		}
 		meta, err := s.loadInternalMeta(stored.ID)
