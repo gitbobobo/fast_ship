@@ -5136,12 +5136,14 @@ API Key 调用返回 403（40301）。
 
 `application/json`，必填。
 
+x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为让服务端能区分缺省与显式 0）
+
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `x` | number（0..1） | 是 |  |
-| `y` | number（0..1） | 是 |  |
-| `width` | number（0..1） | 是 |  |
-| `height` | number（0..1） | 是 | x+width ≤ 1 且 y+height ≤ 1，否则 40001 |
+| `x` | number（0..1，可空） | 是 |  |
+| `y` | number（0..1，可空） | 是 |  |
+| `width` | number（0..1，可空） | 是 |  |
+| `height` | number（0..1，可空） | 是 | x+width ≤ 1 且 y+height ≤ 1，否则 40001 |
 | `body` | string（长度 1..1000） | 是 | 标注文字（1~1000 字符） |
 | `issue_id` | string | 否 | 可选；关联本项目内 Issue，缺省或空串 = 不关联 |
 

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"hash/crc32"
 	"image"
@@ -84,9 +85,11 @@ func createTestAnnotation(t *testing.T, svc *testServices, versionID, userID str
 	return resp
 }
 
+func f32(v float64) *float32 { return api.Ptr(float32(v)) }
+
 func validAnnotationRequest() *CreateScreenshotAnnotationRequest {
 	return &CreateScreenshotAnnotationRequest{
-		X: 0.1, Y: 0.2, Width: 0.4, Height: 0.4, Body: "按钮偏左",
+		X: f32(0.1), Y: f32(0.2), Width: f32(0.4), Height: f32(0.4), Body: "按钮偏左",
 	}
 }
 
@@ -191,13 +194,16 @@ func TestScreenshotAnnotationServiceCreate_Validation(t *testing.T) {
 	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "shot.png", makeTestPNG(t, 100, 50))
 
 	badRects := []*CreateScreenshotAnnotationRequest{
-		{X: -0.1, Y: 0.2, Width: 0.4, Height: 0.4, Body: "x"},
-		{X: 0.1, Y: -0.2, Width: 0.4, Height: 0.4, Body: "x"},
-		{X: 0.1, Y: 0.2, Width: 0, Height: 0.4, Body: "x"},
-		{X: 0.1, Y: 0.2, Width: 0.4, Height: -0.1, Body: "x"},
-		{X: 0.7, Y: 0.2, Width: 0.4, Height: 0.4, Body: "x"},
-		{X: 0.1, Y: 0.8, Width: 0.4, Height: 0.4, Body: "x"},
-		{X: 0.1, Y: 0.2, Width: 1.5, Height: 0.4, Body: "x"},
+		{X: f32(-0.1), Y: f32(0.2), Width: f32(0.4), Height: f32(0.4), Body: "x"},
+		{X: f32(0.1), Y: f32(-0.2), Width: f32(0.4), Height: f32(0.4), Body: "x"},
+		{X: f32(0.1), Y: f32(0.2), Width: f32(0), Height: f32(0.4), Body: "x"},
+		{X: f32(0.1), Y: f32(0.2), Width: f32(0.4), Height: f32(-0.1), Body: "x"},
+		{X: f32(0.7), Y: f32(0.2), Width: f32(0.4), Height: f32(0.4), Body: "x"},
+		{X: f32(0.1), Y: f32(0.8), Width: f32(0.4), Height: f32(0.4), Body: "x"},
+		{X: f32(0.1), Y: f32(0.2), Width: f32(1.5), Height: f32(0.4), Body: "x"},
+		// 坐标缺省（nil）按 40001 拒绝，不静默落成 0
+		{Y: f32(0.2), Width: f32(0.4), Height: f32(0.4), Body: "x"},
+		{X: f32(0.1), Width: f32(0.4), Height: f32(0.4), Body: "x"},
 	}
 	for i, req := range badRects {
 		if _, err := svc.annotationService.Create(uploaded.Version.Id, user.ID, "u", req); err != errs.ErrInvalidParams {
@@ -525,7 +531,7 @@ func TestScreenshotAnnotationServiceCrop_OutputsPNGWithMargin(t *testing.T) {
 	}
 
 	// 贴角标注外边距被图边界 clamp：{0,0,10,5} + 8 → {0,0,18,13}
-	req := &CreateScreenshotAnnotationRequest{X: 0, Y: 0, Width: 0.1, Height: 0.1, Body: "角"}
+	req := &CreateScreenshotAnnotationRequest{X: f32(0), Y: f32(0), Width: f32(0.1), Height: f32(0.1), Body: "角"}
 	corner := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
 	crop = readCropPNG(t, svc, corner.Id, user.ID)
 	if got := crop.Bounds(); got.Dx() != 18 || got.Dy() != 13 {
@@ -550,7 +556,7 @@ func TestScreenshotAnnotationServiceCrop_AllFormats(t *testing.T) {
 	}
 	for _, tc := range cases {
 		uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, tc.name, tc.fileName, tc.content)
-		req := &CreateScreenshotAnnotationRequest{X: 0.25, Y: 0.25, Width: 0.5, Height: 0.5, Body: tc.name}
+		req := &CreateScreenshotAnnotationRequest{X: f32(0.25), Y: f32(0.25), Width: f32(0.5), Height: f32(0.5), Body: tc.name}
 		annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
 		crop := readCropPNG(t, svc, annotation.Id, user.ID)
 		if crop.Bounds().Empty() {
@@ -567,10 +573,10 @@ func TestScreenshotAnnotationServiceCrop_ForeignOrMissing(t *testing.T) {
 	uploaded := uploadImageScreenshot(t, svc, project.ID, other.ID, "home", "shot.png", makeTestPNG(t, 100, 50))
 	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, other.ID, validAnnotationRequest())
 
-	if _, _, err := svc.annotationService.Crop(annotation.Id, user.ID); err != errs.ErrScreenshotAnnotationNotFound {
+	if _, _, err := svc.annotationService.Crop(context.Background(), annotation.Id, user.ID); err != errs.ErrScreenshotAnnotationNotFound {
 		t.Fatalf("foreign crop: expected 40416, got %v", err)
 	}
-	if _, _, err := svc.annotationService.Crop("missing", user.ID); err != errs.ErrScreenshotAnnotationNotFound {
+	if _, _, err := svc.annotationService.Crop(context.Background(), "missing", user.ID); err != errs.ErrScreenshotAnnotationNotFound {
 		t.Fatalf("missing crop: expected 40416, got %v", err)
 	}
 }
@@ -578,7 +584,7 @@ func TestScreenshotAnnotationServiceCrop_ForeignOrMissing(t *testing.T) {
 // readCropPNG 调 Crop 并解码头验证输出确实是 PNG，返回解码后的图。
 func readCropPNG(t *testing.T, svc *testServices, annotationID, userID string) image.Image {
 	t.Helper()
-	reader, release, err := svc.annotationService.Crop(annotationID, userID)
+	reader, release, err := svc.annotationService.Crop(context.Background(), annotationID, userID)
 	if err != nil {
 		t.Fatalf("crop: %v", err)
 	}
@@ -676,7 +682,7 @@ func TestScreenshotAnnotationServiceCrop_RejectsOversizedImage(t *testing.T) {
 	// 33 字节的头声明 30000×30000（~3.6GB 解码内存），预算外直接拒绝
 	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "big.png", fakePNGWithDims(30000, 30000))
 	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, validAnnotationRequest())
-	if _, _, err := svc.annotationService.Crop(annotation.Id, user.ID); err != errs.ErrScreenshotImageTooLarge {
+	if _, _, err := svc.annotationService.Crop(context.Background(), annotation.Id, user.ID); err != errs.ErrScreenshotImageTooLarge {
 		t.Fatalf("expected ErrScreenshotImageTooLarge, got %v", err)
 	}
 }
@@ -688,7 +694,7 @@ func TestScreenshotAnnotationServiceCrop_SubPixelRectKeepsPosition(t *testing.T)
 	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "shot.png", makeTestPNG(t, 100, 100))
 
 	// 0.8→0.801 取整后塌成空矩形：要保证至少 1px 且不丢位置
-	req := &CreateScreenshotAnnotationRequest{X: 0.8, Y: 0.8, Width: 0.001, Height: 0.001, Body: "细"}
+	req := &CreateScreenshotAnnotationRequest{X: f32(0.8), Y: f32(0.8), Width: f32(0.001), Height: f32(0.001), Body: "细"}
 	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
 	if annotation.PixelRect == nil {
 		t.Fatalf("expected pixel_rect, got nil")
@@ -718,7 +724,7 @@ func TestScreenshotAnnotationServiceCrop_GIFOffsetFrame(t *testing.T) {
 	}
 
 	// 标注正好框住偏移帧 (40,40)-(60,60)：按画布坐标换算后裁剪必须成功
-	req := &CreateScreenshotAnnotationRequest{X: 0.4, Y: 0.4, Width: 0.2, Height: 0.2, Body: "帧"}
+	req := &CreateScreenshotAnnotationRequest{X: f32(0.4), Y: f32(0.4), Width: f32(0.2), Height: f32(0.2), Body: "帧"}
 	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
 	crop := readCropPNG(t, svc, annotation.Id, user.ID)
 	// 像素矩形 20×20 + 外边距 8 → 36×36（原图 (32,32) 起）；帧内是红色、帧外透明
@@ -782,7 +788,7 @@ func TestScreenshotAnnotationServiceCrop_JPEGExifOrientation(t *testing.T) {
 	}
 
 	// 展示坐标系下框住上半（红色区）：裁剪出来的图顶部必须是红
-	req := &CreateScreenshotAnnotationRequest{X: 0, Y: 0, Width: 1, Height: 0.5, Body: "红"}
+	req := &CreateScreenshotAnnotationRequest{X: f32(0), Y: f32(0), Width: f32(1), Height: f32(0.5), Body: "红"}
 	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, req)
 	crop := readCropPNG(t, svc, annotation.Id, user.ID)
 	if got := crop.Bounds(); got.Dx() != 2 || got.Dy() != 4 {

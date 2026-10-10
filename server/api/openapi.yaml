@@ -5907,22 +5907,27 @@ components:
     CreateScreenshotAnnotationRequest:
       type: object
       required: [x, y, width, height, body]
+      description: x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为让服务端能区分缺省与显式 0）
       properties:
         x:
           type: number
+          nullable: true
           minimum: 0
           maximum: 1
         y:
           type: number
+          nullable: true
           minimum: 0
           maximum: 1
         width:
           type: number
+          nullable: true
           minimum: 0
           exclusiveMinimum: true
           maximum: 1
         height:
           type: number
+          nullable: true
           minimum: 0
           exclusiveMinimum: true
           maximum: 1

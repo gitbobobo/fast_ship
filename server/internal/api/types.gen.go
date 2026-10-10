@@ -346,19 +346,19 @@ type CreateProjectRequest struct {
 	SourceProjectId *string `json:"source_project_id,omitempty"`
 }
 
-// CreateScreenshotAnnotationRequest defines model for CreateScreenshotAnnotationRequest.
+// CreateScreenshotAnnotationRequest x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为让服务端能区分缺省与显式 0）
 type CreateScreenshotAnnotationRequest struct {
 	// Body 标注文字（1~1000 字符）
 	Body string `json:"body"`
 
 	// Height x+width ≤ 1 且 y+height ≤ 1，否则 40001
-	Height float32 `json:"height"`
+	Height *float32 `json:"height"`
 
 	// IssueId 可选；关联本项目内 Issue，缺省或空串 = 不关联
-	IssueId *string `json:"issue_id,omitempty"`
-	Width   float32 `json:"width"`
-	X       float32 `json:"x"`
-	Y       float32 `json:"y"`
+	IssueId *string  `json:"issue_id,omitempty"`
+	Width   *float32 `json:"width"`
+	X       *float32 `json:"x"`
+	Y       *float32 `json:"y"`
 }
 
 // CreateVersionRequest defines model for CreateVersionRequest.

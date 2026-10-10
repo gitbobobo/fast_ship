@@ -95,7 +95,7 @@ func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 	annotationID := c.Param("aid")
 	userID := middleware.GetUserID(c)
 
-	reader, release, err := h.annotationService.Crop(annotationID, userID)
+	reader, release, err := h.annotationService.Crop(c.Request.Context(), annotationID, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

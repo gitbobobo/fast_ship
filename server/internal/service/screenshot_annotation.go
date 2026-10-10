@@ -170,8 +170,10 @@ func (s *ScreenshotAnnotationService) List(projectID, userID string, filters Scr
 }
 
 // Create 在版本上创建标注；坐标为图片宽高比例，issue_id 缺省/空串 = 不关联。
+// 坐标字段是指针：缺省/null 与显式 0 区分开，缺省按 40001 拒绝而不是静默落左上角。
 func (s *ScreenshotAnnotationService) Create(versionID, userID, createdBy string, req *CreateScreenshotAnnotationRequest) (*ScreenshotAnnotationResponse, error) {
-	if !validAnnotationRect(float64(req.X), float64(req.Y), float64(req.Width), float64(req.Height)) {
+	if req.X == nil || req.Y == nil || req.Width == nil || req.Height == nil ||
+		!validAnnotationRect(float64(*req.X), float64(*req.Y), float64(*req.Width), float64(*req.Height)) {
 		return nil, errs.ErrInvalidParams
 	}
 	if n := utf8.RuneCountInString(req.Body); n < 1 || n > maxScreenshotAnnotationBodyRunes {
@@ -195,10 +197,10 @@ func (s *ScreenshotAnnotationService) Create(versionID, userID, createdBy string
 		ScreenID:  screen.ID,
 		ProjectID: screen.ProjectID,
 		IssueID:   issueID,
-		X:         float64(req.X),
-		Y:         float64(req.Y),
-		Width:     float64(req.Width),
-		Height:    float64(req.Height),
+		X:         float64(*req.X),
+		Y:         float64(*req.Y),
+		Width:     float64(*req.Width),
+		Height:    float64(*req.Height),
 		Body:      req.Body,
 		Status:    screenshotAnnotationStatusOpen,
 		CreatedBy: createdBy,
@@ -304,7 +306,7 @@ func (s *ScreenshotAnnotationService) Delete(annotationID, userID string) error 
 // 15%（最小 8px，不超出图片边界），统一输出 PNG。
 // 成功时返回的 release 必须在调用方把 PNG 写完响应后再调用——解码信号量同时
 // 覆盖已编码缓冲的驻留期，慢客户端不会绕过并发上限堆积大响应体。
-func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.Reader, func(), error) {
+func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, userID string) (*bytes.Reader, func(), error) {
 	annotation, err := s.loadAccessibleAnnotation(annotationID, userID)
 	if err != nil {
 		return nil, nil, err
@@ -329,10 +331,11 @@ func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.
 	}
 	defer reader.Close()
 
-	// 个数闸 + 字节闸都占住才算拿到裁剪权，字节权覆盖解码与输出缓冲驻留期
+	// 个数闸 + 字节闸都占住才算拿到裁剪权，字节权覆盖解码与输出缓冲驻留期；
+	// 排队随请求 ctx 取消，客户端断连不再等权重
 	screenshotCropDecodeSem <- struct{}{}
 	weight := int64(imgW) * int64(imgH) * 8
-	if err := screenshotCropBytesSem.Acquire(context.Background(), weight); err != nil {
+	if err := screenshotCropBytesSem.Acquire(ctx, weight); err != nil {
 		<-screenshotCropDecodeSem
 		return nil, nil, errs.ErrInternal
 	}
