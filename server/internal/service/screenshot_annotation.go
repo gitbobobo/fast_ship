@@ -325,7 +325,7 @@ func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.
 	screenshotCropDecodeSem <- struct{}{}
 	release := func() { <-screenshotCropDecodeSem }
 
-	src, err := decodeScreenshotImage(reader, version.MimeType)
+	src, err := s.decodeCropSource(reader, version)
 	if err != nil {
 		release()
 		return nil, nil, errs.ErrInternal
@@ -541,55 +541,63 @@ func annotationCropMargin(rect image.Rectangle) int {
 	return margin
 }
 
-// decodeScreenshotImage 按存储 mime 解码原图：png/jpeg 走标准库，webp 走
-// x/image；gif 第一帧可能只是逻辑画布上的偏移子块，先合成到画布再返回；
-// jpeg 按 EXIF Orientation 转到展示方向，与浏览器渲染一致。
+// decodeCropSource 解码截图像素。jpeg 直接流式解码后再重开一遍流扫 EXIF 头；
+// gif 先用 DecodeConfig 取逻辑画布、再重开流 Decode 第一帧——两遍都走流，不
+// ReadAll 整文件，大元数据（GIF 注释/应用扩展、JPEG ICC 段）不会驻留内存。
+func (s *ScreenshotAnnotationService) decodeCropSource(reader io.Reader, version *model.ScreenshotVersion) (image.Image, error) {
+	switch version.MimeType {
+	case "image/jpeg":
+		img, err := jpeg.Decode(reader)
+		if err != nil {
+			return nil, err
+		}
+		r2, err := s.storage.Get(version.FilePath)
+		if err != nil {
+			return nil, err
+		}
+		defer r2.Close()
+		_, orientation, err := jpegScanHeader(r2)
+		if err != nil {
+			orientation = 0
+		}
+		return applyJPEGExifOrientation(img, orientation), nil
+	case "image/gif":
+		cfg, err := gif.DecodeConfig(reader)
+		if err != nil {
+			return nil, err
+		}
+		r2, err := s.storage.Get(version.FilePath)
+		if err != nil {
+			return nil, err
+		}
+		defer r2.Close()
+		frame, err := gif.Decode(r2)
+		if err != nil {
+			return nil, err
+		}
+		canvasRect := image.Rect(0, 0, cfg.Width, cfg.Height)
+		if frame.Bounds().Eq(canvasRect) {
+			return frame, nil
+		}
+		canvas := image.NewRGBA(canvasRect)
+		draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
+		return canvas, nil
+	default:
+		return decodeScreenshotImage(reader, version.MimeType)
+	}
+}
+
+// decodeScreenshotImage 按存储 mime 流式解码原图：png 走标准库，webp 走
+// x/image；jpeg/gif 由 decodeCropSource 两遍流处理，不经此函数。
 func decodeScreenshotImage(r io.Reader, mimeType string) (image.Image, error) {
 	switch mimeType {
 	case "image/png":
 		return png.Decode(r)
-	case "image/jpeg":
-		data, err := io.ReadAll(r)
-		if err != nil {
-			return nil, err
-		}
-		img, err := jpeg.Decode(bytes.NewReader(data))
-		if err != nil {
-			return nil, err
-		}
-		return applyJPEGExifOrientation(img, jpegExifOrientation(data)), nil
-	case "image/gif":
-		return decodeScreenshotGIF(r)
 	case "image/webp":
 		return webp.Decode(r)
 	default:
 		return nil, fmt.Errorf("unsupported screenshot mime type %q", mimeType)
 	}
-}
-
-// decodeScreenshotGIF 取 GIF 第一帧并合成到逻辑画布：帧的 Bounds 可能小于画布
-// 且带非零偏移，直接用帧尺寸做坐标换算会裁错位置。画布尺寸走 DecodeConfig、
-// 帧体只 Decode 第一帧——DecodeAll 会解码全部帧，多帧大图能绕过解码像素预算。
-func decodeScreenshotGIF(r io.Reader) (image.Image, error) {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	cfg, err := gif.DecodeConfig(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	frame, err := gif.Decode(bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	canvasRect := image.Rect(0, 0, cfg.Width, cfg.Height)
-	if frame.Bounds().Eq(canvasRect) {
-		return frame, nil
-	}
-	canvas := image.NewRGBA(canvasRect)
-	draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
-	return canvas, nil
 }
 
 // decodeScreenshotImageConfig 与 decodeScreenshotImage 同分派，只取尺寸不解码像素。
@@ -683,16 +691,6 @@ func jpegScanHeader(r io.Reader) (image.Config, int, error) {
 			}
 		}
 	}
-}
-
-// jpegExifOrientation 返回 JPEG 展示方向的 EXIF 标记；缺失/非法返回 0。
-// 与 jpegScanHeader 同路径扫描（止于 SOF），保证探测与解码口径一致。
-func jpegExifOrientation(data []byte) int {
-	_, orientation, err := jpegScanHeader(bytes.NewReader(data))
-	if err != nil {
-		return 0
-	}
-	return orientation
 }
 
 // parseExifOrientation 读 TIFF 头 IFD0 中的 Orientation(0x0112) SHORT 值。
