@@ -325,14 +325,9 @@ func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, us
 		return nil, nil, errs.ErrScreenshotImageTooLarge
 	}
 
-	reader, err := s.storage.Get(version.FilePath)
-	if err != nil {
-		return nil, nil, errs.ErrScreenshotAnnotationNotFound
-	}
-	defer reader.Close()
-
 	// 个数闸 + 字节闸都占住才算拿到裁剪权，字节权覆盖解码与输出缓冲驻留期；
-	// 两道排队都随请求 ctx 取消，客户端断连不再占队
+	// 两道排队都随请求 ctx 取消，客户端断连不再占队。
+	// 闸在打开存储之前获取，排队请求不白占文件句柄
 	select {
 	case screenshotCropDecodeSem <- struct{}{}:
 	case <-ctx.Done():
@@ -347,6 +342,13 @@ func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, us
 		screenshotCropBytesSem.Release(weight)
 		<-screenshotCropDecodeSem
 	}
+
+	reader, err := s.storage.Get(version.FilePath)
+	if err != nil {
+		release()
+		return nil, nil, errs.ErrScreenshotAnnotationNotFound
+	}
+	defer reader.Close()
 
 	src, err := s.decodeCropSource(reader, version)
 	if err != nil {
