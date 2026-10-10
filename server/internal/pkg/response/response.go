@@ -74,10 +74,6 @@ func NotFound(c *gin.Context, code int, message string) {
 	Error(c, http.StatusNotFound, code, message)
 }
 
-func Conflict(c *gin.Context, code int, message string) {
-	Error(c, http.StatusConflict, code, message)
-}
-
 func InternalError(c *gin.Context, message string) {
 	Error(c, http.StatusInternalServerError, 50000, message)
 }

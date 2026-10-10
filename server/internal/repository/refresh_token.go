@@ -33,11 +33,6 @@ func (r *RefreshTokenRepository) Revoke(id string) error {
 	return r.db.Model(&model.RefreshToken{}).Where("id = ?", id).Update("revoked_at", &now).Error
 }
 
-func (r *RefreshTokenRepository) RevokeByUserID(userID string) error {
-	now := time.Now()
-	return r.db.Model(&model.RefreshToken{}).Where("user_id = ? AND revoked_at IS NULL", userID).Update("revoked_at", &now).Error
-}
-
 func (r *RefreshTokenRepository) Rotate(currentID string, next *model.RefreshToken) error {
 	now := time.Now()
 
