@@ -295,37 +295,40 @@ func (s *ScreenshotAnnotationService) Delete(annotationID, userID string) error 
 
 // Crop 按标注比例裁出图片区域：矩形 = 比例 × 原图像素，外边距为矩形短边
 // 15%（最小 8px，不超出图片边界），统一输出 PNG。
-func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.Reader, error) {
+// 成功时返回的 release 必须在调用方把 PNG 写完响应后再调用——解码信号量同时
+// 覆盖已编码缓冲的驻留期，慢客户端不会绕过并发上限堆积大响应体。
+func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.Reader, func(), error) {
 	annotation, err := s.loadAccessibleAnnotation(annotationID, userID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	version, err := s.screenshotRepo.FindVersionByID(annotation.VersionID)
 	if err != nil {
-		return nil, errs.ErrScreenshotAnnotationNotFound
+		return nil, nil, errs.ErrScreenshotAnnotationNotFound
 	}
 
 	// 解码前按文件头尺寸做像素预算校验；头部都读不出来时像素解码同样会失败
 	imgW, imgH := resolveScreenshotVersionDims(s.storage, version)
 	if imgW <= 0 || imgH <= 0 {
-		return nil, errs.ErrInternal
+		return nil, nil, errs.ErrInternal
 	}
 	if int64(imgW)*int64(imgH) > maxScreenshotDecodePixels {
-		return nil, errs.ErrScreenshotImageTooLarge
+		return nil, nil, errs.ErrScreenshotImageTooLarge
 	}
 
 	reader, err := s.storage.Get(version.FilePath)
 	if err != nil {
-		return nil, errs.ErrScreenshotAnnotationNotFound
+		return nil, nil, errs.ErrScreenshotAnnotationNotFound
 	}
 	defer reader.Close()
 
 	screenshotCropDecodeSem <- struct{}{}
-	defer func() { <-screenshotCropDecodeSem }()
+	release := func() { <-screenshotCropDecodeSem }
 
 	src, err := decodeScreenshotImage(reader, version.MimeType)
 	if err != nil {
-		return nil, errs.ErrInternal
+		release()
+		return nil, nil, errs.ErrInternal
 	}
 
 	bounds := src.Bounds()
@@ -339,9 +342,10 @@ func (s *ScreenshotAnnotationService) Crop(annotationID, userID string) (*bytes.
 	cropped := cropScreenshot(src, crop)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, cropped); err != nil {
-		return nil, errs.ErrInternal
+		release()
+		return nil, nil, errs.ErrInternal
 	}
-	return bytes.NewReader(buf.Bytes()), nil
+	return bytes.NewReader(buf.Bytes()), release, nil
 }
 
 // respondWithAnnotation 组装单条标注响应（Create/Update 的返回体）。

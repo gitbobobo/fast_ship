@@ -95,11 +95,12 @@ func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 	annotationID := c.Param("aid")
 	userID := middleware.GetUserID(c)
 
-	reader, err := h.annotationService.Crop(annotationID, userID)
+	reader, release, err := h.annotationService.Crop(annotationID, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
+	defer release()
 
 	c.Header("Content-Disposition", "inline")
 	c.Header("Cache-Control", "private, max-age=300")

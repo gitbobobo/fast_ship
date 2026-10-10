@@ -567,10 +567,10 @@ func TestScreenshotAnnotationServiceCrop_ForeignOrMissing(t *testing.T) {
 	uploaded := uploadImageScreenshot(t, svc, project.ID, other.ID, "home", "shot.png", makeTestPNG(t, 100, 50))
 	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, other.ID, validAnnotationRequest())
 
-	if _, err := svc.annotationService.Crop(annotation.Id, user.ID); err != errs.ErrScreenshotAnnotationNotFound {
+	if _, _, err := svc.annotationService.Crop(annotation.Id, user.ID); err != errs.ErrScreenshotAnnotationNotFound {
 		t.Fatalf("foreign crop: expected 40416, got %v", err)
 	}
-	if _, err := svc.annotationService.Crop("missing", user.ID); err != errs.ErrScreenshotAnnotationNotFound {
+	if _, _, err := svc.annotationService.Crop("missing", user.ID); err != errs.ErrScreenshotAnnotationNotFound {
 		t.Fatalf("missing crop: expected 40416, got %v", err)
 	}
 }
@@ -578,10 +578,11 @@ func TestScreenshotAnnotationServiceCrop_ForeignOrMissing(t *testing.T) {
 // readCropPNG 调 Crop 并解码头验证输出确实是 PNG，返回解码后的图。
 func readCropPNG(t *testing.T, svc *testServices, annotationID, userID string) image.Image {
 	t.Helper()
-	reader, err := svc.annotationService.Crop(annotationID, userID)
+	reader, release, err := svc.annotationService.Crop(annotationID, userID)
 	if err != nil {
 		t.Fatalf("crop: %v", err)
 	}
+	defer release()
 	img, err := png.Decode(reader)
 	if err != nil {
 		t.Fatalf("crop output is not PNG: %v", err)
@@ -675,7 +676,7 @@ func TestScreenshotAnnotationServiceCrop_RejectsOversizedImage(t *testing.T) {
 	// 33 字节的头声明 30000×30000（~3.6GB 解码内存），预算外直接拒绝
 	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "big.png", fakePNGWithDims(30000, 30000))
 	annotation := createTestAnnotation(t, svc, uploaded.Version.Id, user.ID, validAnnotationRequest())
-	if _, err := svc.annotationService.Crop(annotation.Id, user.ID); err != errs.ErrScreenshotImageTooLarge {
+	if _, _, err := svc.annotationService.Crop(annotation.Id, user.ID); err != errs.ErrScreenshotImageTooLarge {
 		t.Fatalf("expected ErrScreenshotImageTooLarge, got %v", err)
 	}
 }
