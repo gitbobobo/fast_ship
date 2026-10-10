@@ -332,8 +332,12 @@ func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, us
 	defer reader.Close()
 
 	// 个数闸 + 字节闸都占住才算拿到裁剪权，字节权覆盖解码与输出缓冲驻留期；
-	// 排队随请求 ctx 取消，客户端断连不再等权重
-	screenshotCropDecodeSem <- struct{}{}
+	// 两道排队都随请求 ctx 取消，客户端断连不再占队
+	select {
+	case screenshotCropDecodeSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, errs.ErrInternal
+	}
 	weight := int64(imgW) * int64(imgH) * 8
 	if err := screenshotCropBytesSem.Acquire(ctx, weight); err != nil {
 		<-screenshotCropDecodeSem
