@@ -107,13 +107,16 @@ function buildSections(screens: CanvasScreenInput[]): CanvasSection[] {
   }));
 }
 
+// emit 缺省时只算世界边界（选列数候选评估用），不分配卡片/组对象
 function layoutSections(
   sections: CanvasSection[],
   aspectOf: (screenId: string) => number | null | undefined,
   gridColumns: number,
-): CanvasLayout {
-  const groups: CanvasGroupLayout[] = [];
-  const cards: CanvasCardLayout[] = [];
+  emit?: {
+    group: (group: CanvasGroupLayout) => void;
+    card: (card: CanvasCardLayout) => void;
+  },
+): Rect {
   let cursorY = 0;
   let maxRight = 0;
 
@@ -121,7 +124,7 @@ function layoutSections(
     const columns = Math.max(Math.min(gridColumns, items.length), 1);
     const sectionWidth =
       columns * CARD_WIDTH + Math.max(columns - 1, 0) * CARD_GAP;
-    groups.push({
+    emit?.group({
       key,
       title,
       count: items.length,
@@ -142,28 +145,30 @@ function layoutSections(
         return CARD_WIDTH * (aspect && aspect > 0 ? aspect : DEFAULT_ASPECT);
       });
       const rowHeight = Math.max(...imageHeights) + CARD_META_HEIGHT;
-      row.forEach((item, i) => {
-        cards.push({
-          screenId: item.id,
-          rect: {
-            x: i * (CARD_WIDTH + CARD_GAP),
-            y: cursorY,
-            width: CARD_WIDTH,
-            height: imageHeights[i] + CARD_META_HEIGHT,
-          },
-          imageHeight: imageHeights[i],
+      if (emit) {
+        row.forEach((item, i) => {
+          emit.card({
+            screenId: item.id,
+            rect: {
+              x: i * (CARD_WIDTH + CARD_GAP),
+              y: cursorY,
+              width: CARD_WIDTH,
+              height: imageHeights[i] + CARD_META_HEIGHT,
+            },
+            imageHeight: imageHeights[i],
+          });
         });
-      });
+      }
       cursorY += rowHeight + CARD_GAP;
     }
     cursorY += GROUP_GAP - CARD_GAP;
   }
 
-  const height = Math.max(cursorY - GROUP_GAP, 0);
   return {
-    groups,
-    cards,
-    bounds: { x: 0, y: 0, width: maxRight, height },
+    x: 0,
+    y: 0,
+    width: maxRight,
+    height: Math.max(cursorY - GROUP_GAP, 0),
   };
 }
 
@@ -177,7 +182,13 @@ export function layoutCanvas(
   aspectOf: (screenId: string) => number | null | undefined,
   columns = GRID_COLUMNS,
 ): CanvasLayout {
-  return layoutSections(buildSections(screens), aspectOf, columns);
+  const groups: CanvasGroupLayout[] = [];
+  const cards: CanvasCardLayout[] = [];
+  const bounds = layoutSections(buildSections(screens), aspectOf, columns, {
+    group: (group) => groups.push(group),
+    card: (card) => cards.push(card),
+  });
+  return { groups, cards, bounds };
 }
 
 /**
@@ -203,7 +214,7 @@ export function pickCanvasColumns(
   let best = MIN_COLUMNS;
   let bestScale = -1;
   for (let columns = MIN_COLUMNS; columns <= maxColumns; columns++) {
-    const { bounds } = layoutSections(sections, aspectOf, columns);
+    const bounds = layoutSections(sections, aspectOf, columns);
     const scale = Math.min(
       availW / Math.max(bounds.width, 1),
       availH / Math.max(bounds.height, 1),

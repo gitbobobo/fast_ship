@@ -159,7 +159,8 @@ describe("ScreenshotCanvas", () => {
     expect(screen.getByTestId("canvas-card-s2")).toBeInTheDocument();
   });
 
-  it("uses more than four columns and still renders images when zoomed far out", () => {
+  it("uses more than four columns and still renders images when zoomed far out", async () => {
+    const user = userEvent.setup();
     const screens = Array.from({ length: 60 }, (_, i) =>
       makeScreen(`m${i}`, {
         last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
@@ -171,11 +172,38 @@ describe("ScreenshotCanvas", () => {
     const firstTop = (cards[0] as HTMLElement).style.top;
     const firstRow = cards.filter((c) => (c as HTMLElement).style.top === firstTop);
     expect(firstRow.length).toBeGreaterThan(4);
-    // 适应全部后卡片屏幕宽远小于 48px，仍要加载图片而不是只画占位
-    expect(screen.getByTestId("canvas-card-m0").querySelector("img")).not.toBeNull();
-    for (const card of cards) {
+
+    // 一路缩到 MIN_SCALE=5%（卡片屏幕宽约 16px，远低于旧 48px 降级阈值），
+    // 仍要加载图片而不是只画占位
+    const zoomOut = screen.getByRole("button", { name: "缩小" });
+    const zoomPercent = () =>
+      screen.getByTestId("canvas-zoom-percent").textContent;
+    for (let i = 0; i < 30 && zoomPercent() !== "5%"; i++) {
+      await user.click(zoomOut);
+    }
+    expect(zoomPercent()).toBe("5%");
+    for (const card of screen.getAllByTestId(/^canvas-card-/)) {
       expect(card.querySelector("img")).not.toBeNull();
     }
+  });
+
+  it("swaps the placeholder for the image after load and resets on version change", () => {
+    const { rerenderWith } = renderCanvas();
+    const card = screen.getByTestId("canvas-card-s1");
+    expect(card.querySelector("svg.lucide-images")).not.toBeNull();
+
+    fireEvent.load(card.querySelector("img")!);
+    expect(card.querySelector("svg.lucide-images")).toBeNull();
+
+    rerenderWith({
+      screens: [
+        makeScreen("s1", { latest_version: makeVersion("s1-v3", "s1") }),
+        makeScreen("s2", { group: "设置" }),
+      ],
+    });
+    expect(
+      screen.getByTestId("canvas-card-s1").querySelector("svg.lucide-images"),
+    ).not.toBeNull();
   });
 
   it("has no outer border or radius so it can fill the available space", () => {

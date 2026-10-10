@@ -104,10 +104,15 @@ export function ScreenshotCanvas({
     setDrawMode(false);
   }
 
+  const screenById = useMemo(
+    () => new Map(screens.map((s) => [s.id, s])),
+    [screens],
+  );
+
+  // aspectOf 供 pickCanvasColumns/layoutCanvas 高频调用，必须 O(1)
   const aspectOf = useCallback(
     (screenId: string): number | null => {
-      const screen = screens.find((s) => s.id === screenId);
-      const version = screen?.latest_version;
+      const version = screenById.get(screenId)?.latest_version;
       if (!version) return null;
       return (
         aspectFromSize(version.width, version.height) ??
@@ -115,7 +120,7 @@ export function ScreenshotCanvas({
         null
       );
     },
-    [screens, measured],
+    [screenById, measured],
   );
 
   // 列数随容器宽高比重选，让世界形状贴近容器；只在列数变化时重排，
@@ -131,10 +136,6 @@ export function ScreenshotCanvas({
   const cardRectById = useMemo(
     () => new Map(layout.cards.map((c) => [c.screenId, c])),
     [layout.cards],
-  );
-  const screenById = useMemo(
-    () => new Map(screens.map((s) => [s.id, s])),
-    [screens],
   );
 
   // 视图重置：新范围（项目/分组）第一次有卡片且量到容器尺寸时适应全部

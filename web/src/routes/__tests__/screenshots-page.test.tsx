@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import ScreenshotsPage from "@/routes/screenshots/index";
@@ -6,6 +6,10 @@ import { renderWithRoute } from "@/test/render";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
+import {
+  getSavedScroll,
+  resetScrollPositions,
+} from "@/lib/scroll-positions";
 import { MemoryRouter, Route, Routes } from "react-router";
 
 const mockUploadDialog = vi.fn((_props: unknown) => null);
@@ -128,6 +132,7 @@ function mockScreens(items: ScreenshotScreenListItem[]) {
 
 describe("ScreenshotsPage", () => {
   beforeEach(() => {
+    resetScrollPositions();
     mockProjects();
     mockScreens(screensFixture);
   });
@@ -233,6 +238,24 @@ describe("ScreenshotsPage", () => {
     await user.click(screen.getByRole("button", { name: /列表/ }));
     expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
     expect(screen.getByTestId("screenshot-card-s1")).toBeInTheDocument();
+  });
+
+  it("persists the inner list scroll position across remounts", () => {
+    const first = renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+    fireEvent.scroll(screen.getByTestId("screenshots-scroll"), {
+      target: { scrollTop: 500 },
+    });
+    expect(getSavedScroll("screenshots:proj-1")).toBe(500);
+    first.unmount();
+
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+    expect(screen.getByTestId("screenshots-scroll").scrollTop).toBe(500);
   });
 
   it("keeps the same shell and toolbar when switching views", async () => {

@@ -165,7 +165,9 @@ function CanvasCardImpl({
                 onLoad={(e) => {
                   const img = e.currentTarget;
                   setLoadedVersionId(version.id);
-                  if (img.naturalWidth > 0) {
+                  // 接口已给尺寸的版本不必再量，避免每次 onLoad 都触发重排
+                  const needsMeasure = !version.width || !version.height;
+                  if (needsMeasure && img.naturalWidth > 0) {
                     onImageSize(version.id, img.naturalWidth, img.naturalHeight);
                   }
                 }}

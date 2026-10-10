@@ -18,6 +18,7 @@ import {
   type CanvasLocateRequest,
 } from "@/components/screenshots/canvas/screenshot-canvas";
 import { screenshotApi } from "@/lib/api/screenshots";
+import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
@@ -74,6 +75,12 @@ export default function ScreenshotsPage() {
   const { data: screensData, isLoading: screensLoading } =
     useScreenshotScreens(activeProjectId);
   const items = useMemo(() => screensData?.items ?? [], [screensData]);
+
+  // 列表在内容区内部滚动（画布视图下内容等高、不滚），位置按项目持久化
+  const contentScrollRef = usePersistedScroll<HTMLDivElement>(
+    `screenshots:${activeProjectId}`,
+    { ready: Boolean(activeProjectId) && !screensLoading },
+  );
 
   const [tab, setTab] = useState<string>(SCREENSHOT_TAB_ALL);
   const [search, setSearch] = useState("");
@@ -295,7 +302,11 @@ export default function ScreenshotsPage() {
           )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          ref={contentScrollRef}
+          data-testid="screenshots-scroll"
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
           {projectsLoading || screensLoading ? (
             <div className="grid gap-4 p-4 sm:grid-cols-2 md:p-6 lg:grid-cols-3 xl:grid-cols-4">
               {Array.from({ length: 4 }).map((_, i) => (
