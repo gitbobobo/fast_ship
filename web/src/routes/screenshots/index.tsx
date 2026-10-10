@@ -7,16 +7,10 @@ import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { UploadScreenshotsDialog } from "@/components/screenshots/upload-screenshots-dialog";
 import { ScreenshotLightbox } from "@/components/screenshots/screenshot-lightbox";
 import {
@@ -260,27 +254,16 @@ export default function ScreenshotsPage() {
               ) : projects.length === 0 ? (
                 <p className="text-sm text-muted-foreground">暂无项目</p>
               ) : (
-                <Select
+                <ProjectSwitcher
                   value={activeProjectId}
-                  onValueChange={(value) => {
-                    const nextValue = value ?? "";
+                  onValueChange={(nextValue) => {
                     setSelectedProjectId(nextValue);
                     setLastSelectedProjectId(nextValue || null);
                   }}
-                >
-                  <SelectTrigger className="w-64">
-                    <SelectValue placeholder="请选择项目">
-                      {projects.find((p) => p.id === activeProjectId)?.name}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {projects.map((project) => (
-                      <SelectItem key={project.id} value={project.id}>
-                        {project.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  projects={projects}
+                  placeholder="请选择项目"
+                  className="w-64"
+                />
               )}
             </div>
 

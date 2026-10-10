@@ -185,6 +185,8 @@ export function useCreateIssue(projectId: string) {
       queryClient.invalidateQueries({
         queryKey: ["projects", projectId, "issues", "filter-options"],
       });
+      // 项目切换卡片展示的 issue_workflow_counts 来自项目列表
+      queryClient.invalidateQueries({ queryKey: ["projects"], exact: true });
       queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
@@ -367,6 +369,8 @@ export function useUpdateIssueInternalMeta(issueId: string, projectId?: string) 
       queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
       if (projectId) {
         queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
+        // 内部状态变化会改变切换卡片上的 issue_workflow_counts
+        queryClient.invalidateQueries({ queryKey: ["projects"], exact: true });
       }
     },
   });
@@ -403,6 +407,8 @@ export function useUpdateIssueWorkflowStatus() {
       queryClient.invalidateQueries({
         queryKey: ["projects", variables.projectId, "issues"],
       });
+      // 看板拖动改的是 workflow_status，同时刷新切换卡片上的计数
+      queryClient.invalidateQueries({ queryKey: ["projects"], exact: true });
       queryClient.invalidateQueries({
         queryKey: ["issues", variables.issueId],
       });

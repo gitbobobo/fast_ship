@@ -689,6 +689,11 @@ API Key 管理（仅 JWT）
 | `items[].latest_version.status` | string（enum: pending \| shipped） | 是 |  |
 | `items[].latest_version.created_at` | string（date-time） | 是 |  |
 | `items[].issue_count` | integer | 否 | omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态） |
+| `items[].issue_workflow_counts` | object | 否 |  |
+| `items[].issue_workflow_counts.unset` | integer | 是 | 未设置内部状态的 Issue 数（含无 internal meta 行的 Issue） |
+| `items[].issue_workflow_counts.todo` | integer | 是 |  |
+| `items[].issue_workflow_counts.in_progress` | integer | 是 |  |
+| `items[].issue_workflow_counts.done` | integer | 是 |  |
 | `items[].issue_sync` | object | 否 | omitempty，项目 GitHub 同步状态 |
 | `items[].issue_sync.status` | string（enum: idle \| running \| failed \| completed） | 是 |  |
 | `items[].issue_sync.last_issue_updated_at` | string（date-time） | 否 | omitempty |
@@ -752,6 +757,11 @@ API Key 管理（仅 JWT）
 | `latest_version.status` | string（enum: pending \| shipped） | 是 |  |
 | `latest_version.created_at` | string（date-time） | 是 |  |
 | `issue_count` | integer | 否 | omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态） |
+| `issue_workflow_counts` | object | 否 |  |
+| `issue_workflow_counts.unset` | integer | 是 | 未设置内部状态的 Issue 数（含无 internal meta 行的 Issue） |
+| `issue_workflow_counts.todo` | integer | 是 |  |
+| `issue_workflow_counts.in_progress` | integer | 是 |  |
+| `issue_workflow_counts.done` | integer | 是 |  |
 | `issue_sync` | object | 否 | omitempty，项目 GitHub 同步状态 |
 | `issue_sync.status` | string（enum: idle \| running \| failed \| completed） | 是 |  |
 | `issue_sync.last_issue_updated_at` | string（date-time） | 否 | omitempty |
@@ -807,6 +817,11 @@ API Key 管理（仅 JWT）
 | `latest_version.status` | string（enum: pending \| shipped） | 是 |  |
 | `latest_version.created_at` | string（date-time） | 是 |  |
 | `issue_count` | integer | 否 | omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态） |
+| `issue_workflow_counts` | object | 否 |  |
+| `issue_workflow_counts.unset` | integer | 是 | 未设置内部状态的 Issue 数（含无 internal meta 行的 Issue） |
+| `issue_workflow_counts.todo` | integer | 是 |  |
+| `issue_workflow_counts.in_progress` | integer | 是 |  |
+| `issue_workflow_counts.done` | integer | 是 |  |
 | `issue_sync` | object | 否 | omitempty，项目 GitHub 同步状态 |
 | `issue_sync.status` | string（enum: idle \| running \| failed \| completed） | 是 |  |
 | `issue_sync.last_issue_updated_at` | string（date-time） | 否 | omitempty |
@@ -875,6 +890,11 @@ API Key 管理（仅 JWT）
 | `latest_version.status` | string（enum: pending \| shipped） | 是 |  |
 | `latest_version.created_at` | string（date-time） | 是 |  |
 | `issue_count` | integer | 否 | omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态） |
+| `issue_workflow_counts` | object | 否 |  |
+| `issue_workflow_counts.unset` | integer | 是 | 未设置内部状态的 Issue 数（含无 internal meta 行的 Issue） |
+| `issue_workflow_counts.todo` | integer | 是 |  |
+| `issue_workflow_counts.in_progress` | integer | 是 |  |
+| `issue_workflow_counts.done` | integer | 是 |  |
 | `issue_sync` | object | 否 | omitempty，项目 GitHub 同步状态 |
 | `issue_sync.status` | string（enum: idle \| running \| failed \| completed） | 是 |  |
 | `issue_sync.last_issue_updated_at` | string（date-time） | 否 | omitempty |

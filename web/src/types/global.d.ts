@@ -26,6 +26,13 @@ interface Project {
   } | null;
   /** 项目 Issue 总数（不区分状态）；仅项目列表响应携带 */
   issue_count?: number;
+  /** 按内部状态（workflow_status）分组的 Issue 计数；仅项目列表响应携带，无 Issue 时缺省 */
+  issue_workflow_counts?: {
+    unset: number;
+    todo: number;
+    in_progress: number;
+    done: number;
+  };
   issue_sync?: {
     status: "idle" | "running" | "failed" | "completed";
     last_issue_updated_at?: string | null;

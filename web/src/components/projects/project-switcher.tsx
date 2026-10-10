@@ -1,9 +1,16 @@
 import { useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
-import { Check, ChevronDown } from "lucide-react";
-import { GithubIcon } from "@/components/ui/github-icon";
+import { ChevronDown } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+// 状态计数点：颜色与看板语义一致——未设置灰、待处理琥珀、开发中天蓝、已完成翠绿
+const WORKFLOW_COUNT_SEGMENTS = [
+  { key: "unset", label: "未设置", dot: "bg-slate-500" },
+  { key: "todo", label: "待处理", dot: "bg-amber-600" },
+  { key: "in_progress", label: "开发中", dot: "bg-sky-600" },
+  { key: "done", label: "已完成", dot: "bg-emerald-600" },
+] as const;
 
 interface ProjectSwitcherProps {
   projects: Project[];
@@ -118,6 +125,7 @@ export function ProjectSwitcher({
                     (project.github_owner && project.github_repo
                       ? `${project.github_owner}/${project.github_repo}`
                       : undefined);
+                  const counts = project.issue_workflow_counts;
 
                   return (
                     <button
@@ -130,22 +138,43 @@ export function ProjectSwitcher({
                         selected && "border-primary bg-primary/5 ring-1 ring-primary",
                       )}
                     >
-                      <span className="flex items-center gap-1.5">
-                        <span className="min-w-0 flex-1 truncate font-medium">
+                      <span className="flex min-w-0 items-baseline font-medium">
+                        <span className="max-w-[66%] truncate">
                           {project.name}
                         </span>
-                        {project.github_owner && project.github_repo && (
-                          <GithubIcon
-                            aria-hidden="true"
-                            className="size-3.5 shrink-0 text-muted-foreground"
-                          />
-                        )}
-                        {selected && (
-                          <Check aria-hidden="true" className="size-4 shrink-0 text-primary" />
+                        {secondary && (
+                          <span
+                            title={secondary}
+                            className="min-w-0 flex-1 truncate font-normal text-muted-foreground"
+                          >
+                            （{secondary}）
+                          </span>
                         )}
                       </span>
-                      <span className="mt-1 block min-h-4 truncate text-xs text-muted-foreground">
-                        {secondary}
+                      <span className="mt-1 flex min-h-4 items-center gap-2.5 text-xs text-muted-foreground">
+                        {counts &&
+                          WORKFLOW_COUNT_SEGMENTS.map((segment) => {
+                            const count = counts[segment.key];
+                            return (
+                              <span
+                                key={segment.key}
+                                title={`${segment.label} ${count}`}
+                                aria-label={`${segment.label} ${count}`}
+                                className={cn(
+                                  "inline-flex items-center gap-1",
+                                  count === 0 && "opacity-40",
+                                )}
+                              >
+                                <span
+                                  aria-hidden="true"
+                                  className={cn("size-1.5 rounded-full", segment.dot)}
+                                />
+                                <span className="text-foreground/70 tabular-nums">
+                                  {count}
+                                </span>
+                              </span>
+                            );
+                          })}
                       </span>
                     </button>
                   );

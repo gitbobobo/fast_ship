@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -545,8 +546,9 @@ func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
 	}
 }
 
-// List 的 issue_count 统计项目 Issue 总数（open、closed 都计入）；无 Issue
-// 的项目字段缺省（nil）；Get 等详情响应不携带该字段。
+// List 的 issue_count 统计项目 Issue 总数（open、closed 都计入），
+// issue_workflow_counts 按内部状态分组（无 internal meta 计入 unset）；无
+// Issue 的项目两字段都缺省（nil）；Get 等详情响应不携带这些字段。
 func TestProjectServiceList_IssueCount(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-issue-count")
@@ -563,11 +565,26 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 		Update("github_issue_id", 1002).Error; err != nil {
 		t.Fatalf("bump github_issue_id: %v", err)
 	}
-	createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) {
+	second := createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) {
 		i.SequenceNumber = 2
 		i.State = model.IssueStateClosed
 	})
-	createTestIssue(t, svc.db, quiet.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
+	third := createTestIssue(t, svc.db, quiet.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
+
+	// busy：1 条无 meta（unset）+ 1 条 done；quiet：1 条 in_progress
+	for issueID, status := range map[string]model.IssueWorkflowStatus{
+		second.ID: model.IssueWorkflowStatusDone,
+		third.ID:  model.IssueWorkflowStatusInProgress,
+	} {
+		if err := svc.db.Create(&model.IssueInternalMeta{
+			IssueID:        issueID,
+			WorkflowStatus: status,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}).Error; err != nil {
+			t.Fatalf("create internal meta: %v", err)
+		}
+	}
 
 	resp, total, err := projectSvc.List(user.ID, 1, 10)
 	if err != nil {
@@ -578,8 +595,10 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 	}
 
 	counts := make(map[string]*int, len(resp))
+	workflowCounts := make(map[string]*api.IssueWorkflowCounts, len(resp))
 	for _, p := range resp {
 		counts[p.Id] = p.IssueCount
+		workflowCounts[p.Id] = p.IssueWorkflowCounts
 	}
 	if got := counts[busy.ID]; got == nil || *got != 2 {
 		t.Fatalf("busy issue_count = %v, want 2（closed 也计入）", got)
@@ -591,12 +610,25 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 		t.Fatalf("empty issue_count = %v, want nil", *got)
 	}
 
+	if got := workflowCounts[busy.ID]; got == nil ||
+		got.Unset != 1 || got.Done != 1 || got.Todo != 0 || got.InProgress != 0 {
+		t.Fatalf("busy issue_workflow_counts = %+v, want {unset:1 done:1}", got)
+	}
+	if got := workflowCounts[quiet.ID]; got == nil ||
+		got.InProgress != 1 || got.Unset != 0 || got.Todo != 0 || got.Done != 0 {
+		t.Fatalf("quiet issue_workflow_counts = %+v, want {in_progress:1}", got)
+	}
+	if got := workflowCounts[empty.ID]; got != nil {
+		t.Fatalf("empty issue_workflow_counts = %+v, want nil", *got)
+	}
+
 	detail, err := projectSvc.Get(busy.ID, user.ID)
 	if err != nil {
 		t.Fatalf("get project: %v", err)
 	}
-	if detail.IssueCount != nil {
-		t.Fatalf("get issue_count = %v, want nil（详情不携带）", *detail.IssueCount)
+	if detail.IssueCount != nil || detail.IssueWorkflowCounts != nil {
+		t.Fatalf("get 详情不应携带计数: issue_count=%v issue_workflow_counts=%v",
+			detail.IssueCount, detail.IssueWorkflowCounts)
 	}
 }
 
