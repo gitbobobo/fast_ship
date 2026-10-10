@@ -3,13 +3,13 @@ import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useCreateScreenshotAnnotation } from "@/lib/hooks/use-screenshot-annotations";
 import {
-  CARD_WIDTH,
   aspectFromSize,
   countOpenOnOlderVersions,
   fitViewport,
   focusRect,
   layoutCanvas,
   normalizeRatioRect,
+  pickCanvasColumns,
   rectsIntersect,
   visibleWorldRect,
   type AnnotationStatusFilter,
@@ -20,8 +20,6 @@ import { CanvasCard, type CanvasDraft } from "./canvas-card";
 import { CanvasToolbar } from "./canvas-toolbar";
 import { isTypingTarget, useCanvasViewport } from "./use-canvas-viewport";
 
-/** 卡片屏幕宽度低于此值（像素）时不再加载图片，只画占位 */
-const LOW_DETAIL_CARD_PX = 48;
 const FLASH_MS = 2400;
 const EMPTY_ANNOTATIONS: ScreenshotAnnotation[] = [];
 
@@ -120,9 +118,15 @@ export function ScreenshotCanvas({
     [screens, measured],
   );
 
+  // 列数随容器宽高比重选，让世界形状贴近容器；只在列数变化时重排，
+  // 缩放窗口过程中列数不变就不会重算布局
+  const columns = useMemo(
+    () => pickCanvasColumns(screens, aspectOf, size),
+    [screens, aspectOf, size],
+  );
   const layout = useMemo(
-    () => layoutCanvas(screens, aspectOf),
-    [screens, aspectOf],
+    () => layoutCanvas(screens, aspectOf, columns),
+    [screens, aspectOf, columns],
   );
   const cardRectById = useMemo(
     () => new Map(layout.cards.map((c) => [c.screenId, c])),
@@ -357,14 +361,13 @@ export function ScreenshotCanvas({
   const visibleCards = layout.cards.filter((card) =>
     rectsIntersect(card.rect, visibleRect),
   );
-  const lowDetail = CARD_WIDTH * viewport.scale < LOW_DETAIL_CARD_PX;
   const drawEnabled = drawMode && !spaceHeld;
 
   const cursor = panning ? "grabbing" : spaceHeld ? "grab" : undefined;
 
   return (
     <div
-      className="relative flex h-full min-h-0 overflow-hidden rounded-lg border bg-muted/20"
+      className="relative flex h-full min-h-0 overflow-hidden bg-muted/20"
       data-testid="screenshot-canvas"
     >
       <div
@@ -431,7 +434,6 @@ export function ScreenshotCanvas({
                 screen={screen}
                 rect={card.rect}
                 imageHeight={card.imageHeight}
-                lowDetail={lowDetail}
                 aspectKnown={aspectOf(screen.id) !== null}
                 annotations={cardAnnotations}
                 annotationIndex={annotationIndex}

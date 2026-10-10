@@ -235,6 +235,34 @@ describe("ScreenshotsPage", () => {
     expect(screen.getByTestId("screenshot-card-s1")).toBeInTheDocument();
   });
 
+  it("keeps the same shell and toolbar when switching views", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<ScreenshotsPage />, {
+      path: "/screenshots",
+      initialEntry: "/screenshots",
+    });
+
+    const toolbarSignature = () => {
+      const search = screen.getByPlaceholderText("搜索名称或界面标识");
+      const toolbar = search.closest("div.border-b") as HTMLElement;
+      return {
+        shell: toolbar.parentElement?.className,
+        toolbar: toolbar.className,
+        tabs: screen.getAllByRole("tab").map((t) => t.textContent),
+        buttons: screen
+          .getAllByRole("button")
+          .filter((b) => b.hasAttribute("aria-pressed"))
+          .map((b) => b.textContent),
+      };
+    };
+
+    const listSignature = toolbarSignature();
+    expect(screen.getByRole("button", { name: "列表", pressed: true })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "画布" }));
+    expect(screen.getByRole("button", { name: "画布", pressed: true })).toBeInTheDocument();
+    expect(toolbarSignature()).toEqual(listSignature);
+  });
+
   it("scopes the canvas to the active tab and search query", async () => {
     const user = userEvent.setup();
     renderWithRoute(<ScreenshotsPage />, {

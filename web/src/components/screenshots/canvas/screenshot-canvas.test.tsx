@@ -159,6 +159,32 @@ describe("ScreenshotCanvas", () => {
     expect(screen.getByTestId("canvas-card-s2")).toBeInTheDocument();
   });
 
+  it("uses more than four columns and still renders images when zoomed far out", () => {
+    const screens = Array.from({ length: 60 }, (_, i) =>
+      makeScreen(`m${i}`, {
+        last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+      }),
+    );
+    renderCanvas({ screens });
+
+    const cards = screen.getAllByTestId(/^canvas-card-/);
+    const firstTop = (cards[0] as HTMLElement).style.top;
+    const firstRow = cards.filter((c) => (c as HTMLElement).style.top === firstTop);
+    expect(firstRow.length).toBeGreaterThan(4);
+    // 适应全部后卡片屏幕宽远小于 48px，仍要加载图片而不是只画占位
+    expect(screen.getByTestId("canvas-card-m0").querySelector("img")).not.toBeNull();
+    for (const card of cards) {
+      expect(card.querySelector("img")).not.toBeNull();
+    }
+  });
+
+  it("has no outer border or radius so it can fill the available space", () => {
+    renderCanvas();
+    const root = screen.getByTestId("screenshot-canvas");
+    expect(root.className).not.toMatch(/\bborder\b/);
+    expect(root.className).not.toMatch(/rounded/);
+  });
+
   it("overlays open annotations on the latest version and hides resolved by default", async () => {
     const user = userEvent.setup();
     renderCanvas({
