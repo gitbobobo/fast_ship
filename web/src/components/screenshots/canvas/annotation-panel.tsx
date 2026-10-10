@@ -56,6 +56,8 @@ interface AnnotationPanelProps {
   onStatusFilterChange: (filter: AnnotationStatusFilter) => void;
   selectedId: string | null;
   hoverId: string | null;
+  /** 定位后短暂闪烁的标注 id，画布矩形与面板条目同步提示 */
+  flashId?: string | null;
   onHover: (annotationId: string | null) => void;
   onSelect: (annotationId: string) => void;
   onLocate: (annotation: ScreenshotAnnotation) => void;
@@ -74,6 +76,7 @@ export function AnnotationPanel({
   onStatusFilterChange,
   selectedId,
   hoverId,
+  flashId,
   onHover,
   onSelect,
   onLocate,
@@ -156,6 +159,7 @@ export function AnnotationPanel({
               index={indexOf.get(annotation.id)}
               selected={annotation.id === selectedId}
               hovered={annotation.id === hoverId}
+              flashing={annotation.id === flashId}
               onHover={onHover}
               onSelect={onSelect}
               onLocate={onLocate}
@@ -196,6 +200,7 @@ function AnnotationItem({
   index,
   selected,
   hovered,
+  flashing,
   onHover,
   onSelect,
   onLocate,
@@ -206,6 +211,7 @@ function AnnotationItem({
   index: number | undefined;
   selected: boolean;
   hovered: boolean;
+  flashing: boolean;
   onHover: (annotationId: string | null) => void;
   onSelect: (annotationId: string) => void;
   onLocate: (annotation: ScreenshotAnnotation) => void;
@@ -262,6 +268,10 @@ function AnnotationItem({
         "space-y-2 px-3 py-3 transition-colors",
         (selected || hovered) && "bg-accent/60",
         selected && "ring-1 ring-primary ring-inset",
+        flashing &&
+          (resolved
+            ? "animate-pulse bg-emerald-500/15"
+            : "animate-pulse bg-red-500/15"),
       )}
       onPointerEnter={() => onHover(annotation.id)}
       onPointerLeave={() => onHover(null)}

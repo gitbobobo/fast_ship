@@ -81,6 +81,9 @@ export function AnnotationOverlay({
           selected={a.id === focusAnnotationId}
         />
       ))}
+      <span className="absolute -top-2 right-0 -translate-y-full rounded-full bg-foreground/80 px-2 py-0.5 text-[10px] leading-none text-background">
+        只读预览
+      </span>
     </div>
   );
 }

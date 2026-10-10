@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { screenshotAnnotationApi } from "@/lib/api/screenshot-annotations";
 import { cn } from "@/lib/utils";
-import { formatDate } from "@/lib/utils/format";
+import { formatRelativeTime } from "@/lib/utils/format";
 
 /**
  * Issue 详情里的「截图标注」：展示关联到该 Issue 的标注，点击跳到截图画布
@@ -67,7 +67,7 @@ export function IssueScreenshotAnnotationsCard({
                   <span className="max-w-48 truncate">
                     {annotation.screen_title || annotation.screen_key}
                   </span>
-                  <span>{formatDate(annotation.created_at)}</span>
+                  <span>{formatRelativeTime(annotation.created_at)}</span>
                   <Badge
                     variant={resolved ? "secondary" : "outline"}
                     className={cn(

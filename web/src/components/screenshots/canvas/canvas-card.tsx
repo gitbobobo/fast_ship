@@ -187,7 +187,7 @@ function CanvasCardImpl({
 
             {drawRect && (
               <div
-                className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10"
+                className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.85),0_0_0_1px_rgba(15,23,42,0.55)]"
                 style={{
                   left: `${drawRect.x * 100}%`,
                   top: `${drawRect.y * 100}%`,
@@ -200,7 +200,7 @@ function CanvasCardImpl({
             {draft && (
               <>
                 <div
-                  className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10"
+                  className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.85),0_0_0_1px_rgba(15,23,42,0.55)]"
                   style={{
                     left: `${draft.rect.x * 100}%`,
                     top: `${draft.rect.y * 100}%`,

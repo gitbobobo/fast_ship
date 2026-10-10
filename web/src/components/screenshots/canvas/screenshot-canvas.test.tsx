@@ -225,6 +225,10 @@ describe("ScreenshotCanvas", () => {
     expect(screen.getByTestId("annotation-item-a-open")).toHaveClass(
       "ring-1",
     );
+    // 定位后面板条目与画布矩形同步闪烁
+    expect(screen.getByTestId("annotation-item-a-open")).toHaveClass(
+      "animate-pulse",
+    );
     expect(screen.getByTestId("annotation-rect-a-open")).toHaveClass(
       "animate-pulse",
     );

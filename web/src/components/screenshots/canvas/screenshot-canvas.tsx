@@ -484,6 +484,7 @@ export function ScreenshotCanvas({
             onStatusFilterChange={setStatusFilter}
             selectedId={selectedId}
             hoverId={hoverId}
+            flashId={flashId}
             onHover={setHoverId}
             onSelect={setSelectedId}
             onLocate={locate}
