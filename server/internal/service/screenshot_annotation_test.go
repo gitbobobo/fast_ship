@@ -855,3 +855,43 @@ func TestApplyJPEGExifOrientation(t *testing.T) {
 		check(b.Dx()-1, b.Dy()-1, tc.br, "br")
 	}
 }
+
+// 位深预算：16 位 PNG 解码为 RGBA64（8B/px 源）且输出同为 16 位，权 16B/px；
+// jpeg/gif 存在第二张全尺寸副本权 12B/px；8 位 png/webp 权 8B/px
+func TestScreenshotAnnotationServiceCrop_BudgetsBitDepth(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	img64 := image.NewRGBA64(image.Rect(0, 0, 8, 8))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img64); err != nil {
+		t.Fatalf("encode 16-bit png: %v", err)
+	}
+	png16 := uploadImageScreenshot(t, svc, project.ID, user.ID, "p16", "p16.png", buf.Bytes())
+	v16, err := svc.screenshotRepo.FindVersionByID(png16.Version.Id)
+	if err != nil {
+		t.Fatalf("find p16 version: %v", err)
+	}
+	if got := svc.annotationService.cropBytesPerPixel(v16); got != 16 {
+		t.Fatalf("16-bit png: expected weight 16, got %d", got)
+	}
+
+	png8 := uploadImageScreenshot(t, svc, project.ID, user.ID, "p8", "p8.png", makeTestPNG(t, 8, 8))
+	v8, err := svc.screenshotRepo.FindVersionByID(png8.Version.Id)
+	if err != nil {
+		t.Fatalf("find p8 version: %v", err)
+	}
+	if got := svc.annotationService.cropBytesPerPixel(v8); got != 8 {
+		t.Fatalf("8-bit png: expected weight 8, got %d", got)
+	}
+
+	jpg := uploadImageScreenshot(t, svc, project.ID, user.ID, "j", "j.jpg", makeTestJPEG(t, 8, 8))
+	vj, err := svc.screenshotRepo.FindVersionByID(jpg.Version.Id)
+	if err != nil {
+		t.Fatalf("find jpg version: %v", err)
+	}
+	if got := svc.annotationService.cropBytesPerPixel(vj); got != 12 {
+		t.Fatalf("jpeg: expected weight 12, got %d", got)
+	}
+}

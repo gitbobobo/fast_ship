@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/gif"
 	"image/jpeg"
@@ -52,21 +53,45 @@ const maxScreenshotDecodePixels = 64_000_000
 // 裁剪并发闸：个数上限 4，且按图像素数加权限总驻留内存。PNG/WebP 权 =
 // 像素×8（解码源 + PNG 输出缓冲各按 w*h*4 估算）；JPEG/GIF 权 = 像素×12，
 // 多留一份副本预算——JPEG 方向 2-8 的 EXIF 重排与 GIF 偏移帧合成都要在解码源
-// 存活期间再分配一张全尺寸 RGBA。总量封顶 768MiB，单张 64MP JPEG 也能拿满。
+// 存活期间再分配一张全尺寸 RGBA；16 位 PNG 解码为 RGBA64（8B/px 源）且输出
+// 同为 16 位 PNG，权 = 像素×16。总量封顶 1GiB，单张 64MP 16 位 PNG 也能拿满。
 var (
 	screenshotCropDecodeSem = make(chan struct{}, 4)
-	screenshotCropBytesSem  = semaphore.NewWeighted(768 << 20)
+	screenshotCropBytesSem  = semaphore.NewWeighted(1024 << 20)
 )
 
-// screenshotCropBytesPerPixel 返回每像素驻留字节预算：jpeg/gif 解码过程存在
-// 第二张全尺寸位图副本，按 12B/px 预留；png/webp 按 8B/px。
-func screenshotCropBytesPerPixel(mimeType string) int64 {
-	switch mimeType {
+// cropBytesPerPixel 返回每像素驻留字节预算；16 位 PNG 需探文件头判 ColorModel，
+// 探测失败按最大档预留
+func (s *ScreenshotAnnotationService) cropBytesPerPixel(version *model.ScreenshotVersion) int64 {
+	switch version.MimeType {
 	case "image/jpeg", "image/gif":
 		return 12
+	case "image/png":
+		if s.isPNG16Bit(version) {
+			return 16
+		}
+		return 8
 	default:
 		return 8
 	}
+}
+
+// isPNG16Bit 读 PNG 头判位深：RGBA64/NRGBA64/Gray16/Alpha16 都是 16 位通道
+func (s *ScreenshotAnnotationService) isPNG16Bit(version *model.ScreenshotVersion) bool {
+	reader, err := s.storage.Get(version.FilePath)
+	if err != nil {
+		return true
+	}
+	defer reader.Close()
+	cfg, err := png.DecodeConfig(reader)
+	if err != nil {
+		return true
+	}
+	switch cfg.ColorModel {
+	case color.RGBA64Model, color.NRGBA64Model, color.Gray16Model, color.Alpha16Model:
+		return true
+	}
+	return false
 }
 
 // ScreenshotAnnotationListFilters 是项目级标注列表的可选过滤项，空值不参与过滤。
@@ -362,7 +387,7 @@ func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, us
 	case <-ctx.Done():
 		return nil, nil, errs.ErrInternal
 	}
-	weight := int64(imgW) * int64(imgH) * screenshotCropBytesPerPixel(version.MimeType)
+	weight := int64(imgW) * int64(imgH) * s.cropBytesPerPixel(version)
 	if err := screenshotCropBytesSem.Acquire(ctx, weight); err != nil {
 		<-screenshotCropDecodeSem
 		return nil, nil, errs.ErrInternal
