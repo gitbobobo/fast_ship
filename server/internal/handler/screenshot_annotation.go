@@ -91,9 +91,21 @@ func (h *ScreenshotAnnotationHandler) Delete(c *gin.Context) {
 }
 
 // Crop 输出标注框选区域的 PNG 裁剪图，响应头与版本 content 端点一致。
+// HEAD 变体只跑存在性/权限/像素预算校验，不解码、不生成 PNG
 func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 	annotationID := c.Param("aid")
 	userID := middleware.GetUserID(c)
+
+	if c.Request.Method == http.MethodHead {
+		if err := h.annotationService.CheckCrop(annotationID, userID); err != nil {
+			middleware.HandleAppError(c, err)
+			return
+		}
+		c.Header("Content-Disposition", "inline")
+		c.Header("Cache-Control", "private, max-age=300")
+		c.Data(http.StatusOK, "image/png", nil)
+		return
+	}
 
 	reader, release, err := h.annotationService.Crop(c.Request.Context(), annotationID, userID)
 	if err != nil {

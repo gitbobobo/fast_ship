@@ -302,27 +302,44 @@ func (s *ScreenshotAnnotationService) Delete(annotationID, userID string) error 
 	return nil
 }
 
-// Crop 按标注比例裁出图片区域：矩形 = 比例 × 原图像素，外边距为矩形短边
-// 15%（最小 8px，不超出图片边界），统一输出 PNG。
-// 成功时返回的 release 必须在调用方把 PNG 写完响应后再调用——解码信号量同时
-// 覆盖已编码缓冲的驻留期，慢客户端不会绕过并发上限堆积大响应体。
-func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, userID string) (*bytes.Reader, func(), error) {
+// resolveCropTarget 校验标注访问权限与裁剪目标，返回标注、版本与文件头尺寸；
+// HEAD 探测与真实裁剪共用同一份门禁，状态码语义保持一致
+func (s *ScreenshotAnnotationService) resolveCropTarget(annotationID, userID string) (*model.ScreenshotAnnotation, *model.ScreenshotVersion, int, int, error) {
 	annotation, err := s.loadAccessibleAnnotation(annotationID, userID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, 0, 0, err
 	}
 	version, err := s.screenshotRepo.FindVersionByID(annotation.VersionID)
 	if err != nil {
-		return nil, nil, errs.ErrScreenshotAnnotationNotFound
+		return nil, nil, 0, 0, errs.ErrScreenshotAnnotationNotFound
 	}
 
 	// 解码前按文件头尺寸做像素预算校验；头部都读不出来时像素解码同样会失败
 	imgW, imgH := resolveScreenshotVersionDims(s.storage, version)
 	if imgW <= 0 || imgH <= 0 {
-		return nil, nil, errs.ErrInternal
+		return nil, nil, 0, 0, errs.ErrInternal
 	}
 	if int64(imgW)*int64(imgH) > maxScreenshotDecodePixels {
-		return nil, nil, errs.ErrScreenshotImageTooLarge
+		return nil, nil, 0, 0, errs.ErrScreenshotImageTooLarge
+	}
+	return annotation, version, imgW, imgH, nil
+}
+
+// CheckCrop 供 HEAD 请求做轻量校验：走与 Crop 相同的存在性/权限/像素预算
+// 检查，但不打开图像、不占并发闸、不生成 PNG
+func (s *ScreenshotAnnotationService) CheckCrop(annotationID, userID string) error {
+	_, _, _, _, err := s.resolveCropTarget(annotationID, userID)
+	return err
+}
+
+// Crop 按标注比例裁出图片区域：矩形 = 比例 × 原图像素，外边距为矩形短边
+// 15%（最小 8px，不超出图片边界），统一输出 PNG。
+// 成功时返回的 release 必须在调用方把 PNG 写完响应后再调用——解码信号量同时
+// 覆盖已编码缓冲的驻留期，慢客户端不会绕过并发上限堆积大响应体。
+func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, userID string) (*bytes.Reader, func(), error) {
+	annotation, version, imgW, imgH, err := s.resolveCropTarget(annotationID, userID)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	// 个数闸 + 字节闸都占住才算拿到裁剪权，字节权覆盖解码与输出缓冲驻留期；
