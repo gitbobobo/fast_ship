@@ -278,7 +278,10 @@ export default function ScreenshotsPage() {
                 onValueChange={(value) => setTab(value)}
                 className="min-w-0 flex-1"
               >
-                <TabsList variant="line" className="overflow-x-auto">
+                <TabsList
+                  variant="line"
+                  className="max-w-full overflow-x-auto"
+                >
                   <TabsTrigger value={SCREENSHOT_TAB_ALL}>全部</TabsTrigger>
                   {groupTabs.map((tabValue) => (
                     <TabsTrigger key={tabValue} value={tabValue}>
@@ -292,7 +295,7 @@ export default function ScreenshotsPage() {
                   )}
                 </TabsList>
               </Tabs>
-              <div className="relative min-w-0 sm:w-64">
+              <div className="relative w-full min-w-0 sm:w-64">
                 <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={search}
