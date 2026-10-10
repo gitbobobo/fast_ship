@@ -49,13 +49,25 @@ const (
 // 解码后内存，一张声明 30000×30000 的 PNG 解码要 ~3.6GB
 const maxScreenshotDecodePixels = 64_000_000
 
-// 裁剪并发闸：个数上限 4，且按图像素数加权限总驻留内存——RGBA 解码源 +
-// PNG 输出缓冲各按 w*h*4 估算（权 = 像素×8），总量封顶 512MiB。小截图并行、
-// 单张 64MP 大图独占排队，4 个并发大裁剪不会叠出 ~2GiB。
+// 裁剪并发闸：个数上限 4，且按图像素数加权限总驻留内存。PNG/WebP 权 =
+// 像素×8（解码源 + PNG 输出缓冲各按 w*h*4 估算）；JPEG/GIF 权 = 像素×12，
+// 多留一份副本预算——JPEG 方向 2-8 的 EXIF 重排与 GIF 偏移帧合成都要在解码源
+// 存活期间再分配一张全尺寸 RGBA。总量封顶 768MiB，单张 64MP JPEG 也能拿满。
 var (
 	screenshotCropDecodeSem = make(chan struct{}, 4)
-	screenshotCropBytesSem  = semaphore.NewWeighted(512 << 20)
+	screenshotCropBytesSem  = semaphore.NewWeighted(768 << 20)
 )
+
+// screenshotCropBytesPerPixel 返回每像素驻留字节预算：jpeg/gif 解码过程存在
+// 第二张全尺寸位图副本，按 12B/px 预留；png/webp 按 8B/px。
+func screenshotCropBytesPerPixel(mimeType string) int64 {
+	switch mimeType {
+	case "image/jpeg", "image/gif":
+		return 12
+	default:
+		return 8
+	}
+}
 
 // ScreenshotAnnotationListFilters 是项目级标注列表的可选过滤项，空值不参与过滤。
 type ScreenshotAnnotationListFilters struct {
@@ -350,7 +362,7 @@ func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, us
 	case <-ctx.Done():
 		return nil, nil, errs.ErrInternal
 	}
-	weight := int64(imgW) * int64(imgH) * 8
+	weight := int64(imgW) * int64(imgH) * screenshotCropBytesPerPixel(version.MimeType)
 	if err := screenshotCropBytesSem.Acquire(ctx, weight); err != nil {
 		<-screenshotCropDecodeSem
 		return nil, nil, errs.ErrInternal
