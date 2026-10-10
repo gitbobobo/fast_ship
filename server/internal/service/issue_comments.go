@@ -83,28 +83,11 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 		}
 
 		comment := buildGitHubIssueCommentModel(issue.ID, createdComment)
-		if err := s.commentRepo.Upsert(comment); err != nil {
-			return nil, errs.ErrInternal
+		if err := s.mirror.recordPushedComment(issue, comment); err != nil {
+			return nil, err
 		}
 		// 用户自己发的评论把已读水位推到该评论时间，这条 Issue 顺带变已读
 		s.advanceReadWatermark(issueID, userID, comment.GitHubCreatedAt)
-
-		now := time.Now().UTC()
-		updatedAt := comment.GitHubUpdatedAt
-		if updatedAt.IsZero() {
-			updatedAt = now
-		}
-		issue.UpdatedAt = updatedAt
-		if err := s.issueRepo.Save(issue); err != nil {
-			return nil, errs.ErrInternal
-		}
-
-		meta := issue.GitHubMeta
-		meta.CommentsCount++
-		meta.SyncedAt = now
-		if err := s.gitHubMetaRepo.Upsert(meta); err != nil {
-			return nil, errs.ErrInternal
-		}
 
 		s.logger.Info("issue comment created",
 			zap.String("action", "create_comment"),
@@ -247,23 +230,8 @@ func (s *IssueService) CreateInternalCommentIdempotent(issueID, userID string, r
 		}
 		comment := buildGitHubIssueCommentModel(issue.ID, createdComment)
 		comment.IdempotencyKey = idempotencyKey
-		if err := s.commentRepo.Upsert(comment); err != nil {
-			return nil, errs.ErrInternal
-		}
-		now := time.Now().UTC()
-		updatedAt := comment.GitHubUpdatedAt
-		if updatedAt.IsZero() {
-			updatedAt = now
-		}
-		issue.UpdatedAt = updatedAt
-		if err := s.issueRepo.Save(issue); err != nil {
-			return nil, errs.ErrInternal
-		}
-		meta := issue.GitHubMeta
-		meta.CommentsCount++
-		meta.SyncedAt = now
-		if err := s.gitHubMetaRepo.Upsert(meta); err != nil {
-			return nil, errs.ErrInternal
+		if err := s.mirror.recordPushedComment(issue, comment); err != nil {
+			return nil, err
 		}
 		resp := toIssueCommentResponse(*comment)
 		return &resp, nil

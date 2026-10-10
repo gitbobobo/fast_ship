@@ -1,12 +1,10 @@
 package service
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
-	gh "github.com/google/go-github/v62/github"
 )
 
 func TestExtractLabelNames(t *testing.T) {
@@ -116,54 +114,6 @@ func TestResolveLabels_EmptyInput(t *testing.T) {
 	result := svc.issueService.resolveLabels("p", nil, nil)
 	if result != nil {
 		t.Fatalf("expected nil, got %+v", result)
-	}
-}
-
-func TestSyncRepositoryLabels(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-1")
-	projectID := createTestProject(t, svc.db, user.ID).ID
-
-	fake := &fakeIssueGitHubClient{
-		repoLabels: []*gh.Label{
-			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("Bug desc")},
-			{Name: stringPtr("feature"), Color: stringPtr("a2eeef"), Description: stringPtr("Feature desc")},
-		},
-	}
-
-	err := svc.issueService.syncRepositoryLabels(context.Background(), fake, projectID)
-	if err != nil {
-		t.Fatalf("sync repository labels: %v", err)
-	}
-
-	cached, err := svc.issueService.githubRepoLabelRepo.ListByProject(projectID)
-	if err != nil {
-		t.Fatalf("list cached labels: %v", err)
-	}
-	if len(cached) != 2 {
-		t.Fatalf("expected 2 cached labels, got %d", len(cached))
-	}
-
-	// Verify atomic replace: sync again with different labels
-	fake2 := &fakeIssueGitHubClient{
-		repoLabels: []*gh.Label{
-			{Name: stringPtr("docs"), Color: stringPtr("0075ca"), Description: stringPtr("Docs desc")},
-		},
-	}
-	err = svc.issueService.syncRepositoryLabels(context.Background(), fake2, projectID)
-	if err != nil {
-		t.Fatalf("second sync: %v", err)
-	}
-
-	cached, err = svc.issueService.githubRepoLabelRepo.ListByProject(projectID)
-	if err != nil {
-		t.Fatalf("list cached labels after second sync: %v", err)
-	}
-	if len(cached) != 1 {
-		t.Fatalf("expected 1 cached label after replace, got %d", len(cached))
-	}
-	if cached[0].Name != "docs" {
-		t.Fatalf("expected docs label, got %q", cached[0].Name)
 	}
 }
 

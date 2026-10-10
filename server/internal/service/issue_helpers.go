@@ -6,9 +6,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
-	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
-	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
 	"math"
 	"sort"
@@ -90,37 +88,6 @@ func toIssueCommentResponse(comment model.IssueComment) IssueCommentResponse {
 	}
 }
 
-func buildGitHubIssueCommentModel(issueID string, item *ghclient.IssueComment) *model.IssueComment {
-	comment := &model.IssueComment{
-		ID:                uuid.NewString(),
-		IssueID:           issueID,
-		Source:            model.IssueSourceGitHub,
-		GitHubCommentID:   item.GetID(),
-		GitHubNodeID:      item.GetNodeID(),
-		Body:              item.GetBody(),
-		BodyHTML:          item.GetBodyHTML(),
-		HTMLURL:           item.GetHTMLURL(),
-		AuthorLogin:       item.GetUser().GetLogin(),
-		AuthorAvatarURL:   item.GetUser().GetAvatarURL(),
-		AuthorAssociation: item.GetAuthorAssociation(),
-		ReactionsJSON:     toJSONString(mapReactions(item.Reactions)),
-		RawJSON:           toJSONString(item),
-	}
-	if createdAt := item.GetCreatedAt(); !createdAt.IsZero() {
-		comment.GitHubCreatedAt = createdAt.UTC()
-	}
-	if updatedAt := item.GetUpdatedAt(); !updatedAt.IsZero() {
-		comment.GitHubUpdatedAt = updatedAt.UTC()
-	}
-	if comment.GitHubCreatedAt.IsZero() {
-		comment.GitHubCreatedAt = time.Now().UTC()
-	}
-	if comment.GitHubUpdatedAt.IsZero() {
-		comment.GitHubUpdatedAt = comment.GitHubCreatedAt
-	}
-	return comment
-}
-
 func toIssueTimelineResponse(event model.IssueTimelineEvent) IssueTimelineEventResponse {
 	return IssueTimelineEventResponse{
 		Id:            event.ID,
@@ -134,34 +101,6 @@ func toIssueTimelineResponse(event model.IssueTimelineEvent) IssueTimelineEventR
 		Payload:       parseJSON[map[string]any](event.PayloadJSON),
 		CreatedAt:     formatTime(event.GitHubCreatedAt),
 	}
-}
-
-func mapUsers(users []*gh.User) []issueUserPayload {
-	out := make([]issueUserPayload, 0, len(users))
-	for _, user := range users {
-		if user == nil || user.GetLogin() == "" {
-			continue
-		}
-		out = append(out, issueUserPayload{
-			Login:     user.GetLogin(),
-			AvatarURL: user.GetAvatarURL(),
-		})
-	}
-	return out
-}
-
-func mapLabelNames(labels []*gh.Label) []string {
-	out := make([]string, 0, len(labels))
-	for _, label := range labels {
-		if label == nil {
-			continue
-		}
-		name := strings.TrimSpace(label.GetName())
-		if name != "" {
-			out = append(out, name)
-		}
-	}
-	return out
 }
 
 func extractLabelNames(raw string) []string {
@@ -230,112 +169,6 @@ func (s *IssueService) buildLabelMap(projectID string) map[string]model.GitHubRe
 		m[l.Name] = l
 	}
 	return m
-}
-
-func mapMilestone(m *gh.Milestone) *issueMilestonePayload {
-	if m == nil || m.GetTitle() == "" {
-		return nil
-	}
-	return &issueMilestonePayload{
-		Number:      m.GetNumber(),
-		Title:       m.GetTitle(),
-		State:       m.GetState(),
-		Description: m.GetDescription(),
-	}
-}
-
-func mapReactions(r *gh.Reactions) IssueReactionSummaryResponse {
-	if r == nil {
-		return IssueReactionSummaryResponse{}
-	}
-	return IssueReactionSummaryResponse{
-		TotalCount: r.GetTotalCount(),
-		Plus1:      r.GetPlusOne(),
-		Minus1:     r.GetMinusOne(),
-		Laugh:      r.GetLaugh(),
-		Hooray:     r.GetHooray(),
-		Confused:   r.GetConfused(),
-		Heart:      r.GetHeart(),
-		Rocket:     r.GetRocket(),
-		Eyes:       r.GetEyes(),
-	}
-}
-
-func summarizeTimeline(item *ghclient.TimelineEvent) string {
-	eventType := item.GetEvent()
-	switch eventType {
-	case "labeled":
-		return fmt.Sprintf("添加了标签 %s", item.GetLabel().GetName())
-	case "unlabeled":
-		return fmt.Sprintf("移除了标签 %s", item.GetLabel().GetName())
-	case "assigned":
-		return fmt.Sprintf("指派给 %s", item.GetAssignee().GetLogin())
-	case "unassigned":
-		return fmt.Sprintf("取消指派 %s", item.GetAssignee().GetLogin())
-	case "milestoned":
-		return fmt.Sprintf("加入里程碑 %s", item.GetMilestone().GetTitle())
-	case "demilestoned":
-		return fmt.Sprintf("移出里程碑 %s", item.GetMilestone().GetTitle())
-	case "renamed":
-		return fmt.Sprintf("标题从 %s 改为 %s", item.GetRename().GetFrom(), item.GetRename().GetTo())
-	case "closed":
-		return "关闭了问题"
-	case "reopened":
-		return "重新打开了问题"
-	case "locked":
-		return "锁定了讨论"
-	case "unlocked":
-		return "解锁了讨论"
-	case "cross-referenced":
-		source := item.GetSource()
-		if source != nil && source.Issue != nil {
-			return fmt.Sprintf("被 #%d 交叉引用", source.Issue.GetNumber())
-		}
-		return "发生了交叉引用"
-	case "referenced":
-		if item.GetCommitID() != "" {
-			return fmt.Sprintf("被提交 %s 引用", shortSHA(item.GetCommitID()))
-		}
-		return "被提交引用"
-	case "commented":
-		return "添加了评论"
-	case "subscribed":
-		return "订阅了此问题"
-	case "unsubscribed":
-		return "取消订阅此问题"
-	case "added_type", "issue_type_added":
-		if item.GetIssueType() != nil {
-			return fmt.Sprintf("添加了问题类型 %s", item.GetIssueType().GetName())
-		}
-		return "添加了问题类型"
-	case "removed_type", "issue_type_removed":
-		if item.GetIssueType() != nil {
-			return fmt.Sprintf("移除了问题类型 %s", item.GetIssueType().GetName())
-		}
-		return "移除了问题类型"
-	default:
-		if eventType == "" {
-			return "发生了更新"
-		}
-		return eventType
-	}
-}
-
-func buildTimelineEventKey(item *ghclient.TimelineEvent) string {
-	if item.GetID() != 0 {
-		return fmt.Sprintf("gh:%d", item.GetID())
-	}
-
-	parts := []string{
-		item.GetEvent(),
-		formatTime(item.GetCreatedAt().UTC()),
-		firstNonEmpty(item.GetActor().GetLogin(), item.GetUser().GetLogin()),
-		item.GetLabel().GetName(),
-		item.GetMilestone().GetTitle(),
-		item.GetCommitID(),
-		item.GetBody(),
-	}
-	return "fallback:" + strings.Join(parts, "|")
 }
 
 func buildIssueReference(issue model.Issue) string {
@@ -452,13 +285,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func shortSHA(sha string) string {
-	if len(sha) <= 7 {
-		return sha
-	}
-	return sha[:7]
 }
 
 func parseIssueNumberQuery(query string) (int, bool) {
