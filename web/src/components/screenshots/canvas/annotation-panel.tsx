@@ -1,4 +1,10 @@
-import { useDeferredValue, useEffect, useRef, useState } from "react";
+import {
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import {
   Check,
@@ -82,6 +88,12 @@ export function AnnotationPanel({
       ? annotations
       : annotations.filter((a) => a.status === statusFilter);
 
+  // 条目序号与画布矩形角标同序（按未过滤的全量列表编号，过滤后不跳变）
+  const indexOf = useMemo(
+    () => new Map(annotations.map((a, i) => [a.id, i + 1])),
+    [annotations],
+  );
+
   // 画布上点选标注后，把面板里对应条目滚入视野
   useEffect(() => {
     if (!selectedId) return;
@@ -141,6 +153,7 @@ export function AnnotationPanel({
               key={annotation.id}
               projectId={projectId}
               annotation={annotation}
+              index={indexOf.get(annotation.id)}
               selected={annotation.id === selectedId}
               hovered={annotation.id === hoverId}
               onHover={onHover}
@@ -180,6 +193,7 @@ export function AnnotationPanel({
 function AnnotationItem({
   projectId,
   annotation,
+  index,
   selected,
   hovered,
   onHover,
@@ -189,6 +203,7 @@ function AnnotationItem({
 }: {
   projectId: string;
   annotation: ScreenshotAnnotation;
+  index: number | undefined;
   selected: boolean;
   hovered: boolean;
   onHover: (annotationId: string | null) => void;
@@ -253,12 +268,24 @@ function AnnotationItem({
       onClick={() => onSelect(annotation.id)}
     >
       <div className="flex gap-2.5">
-        <img
-          src={screenshotAnnotationApi.cropUrl(annotation)}
-          alt=""
-          loading="lazy"
-          className="h-14 w-14 shrink-0 rounded-md border bg-muted/30 object-cover"
-        />
+        <div className="relative h-14 w-14 shrink-0">
+          <img
+            src={screenshotAnnotationApi.cropUrl(annotation)}
+            alt=""
+            loading="lazy"
+            className="h-14 w-14 rounded-md border bg-muted/30 object-cover"
+          />
+          {index !== undefined && (
+            <span
+              className={cn(
+                "absolute -top-1.5 -left-1.5 flex h-4 min-w-4 items-center justify-center rounded-sm px-0.5 text-[10px] leading-none font-semibold text-white shadow-sm",
+                resolved ? "bg-emerald-500" : "bg-red-500",
+              )}
+            >
+              {index}
+            </span>
+          )}
+        </div>
         <div className="min-w-0 flex-1 space-y-1">
           {editing ? (
             <div className="space-y-1.5" onClick={(e) => e.stopPropagation()}>

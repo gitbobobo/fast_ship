@@ -197,6 +197,12 @@ export function ScreenshotCanvas({
     [annotations, screenById],
   );
 
+  // 标注序号角标与面板条目同序，画布矩形与列表一眼对上
+  const annotationIndex = useMemo(
+    () => new Map(scopeAnnotations.map((a, i) => [a.id, i + 1])),
+    [scopeAnnotations],
+  );
+
   const flash = useCallback((annotationId: string) => {
     setFlashId(annotationId);
     if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
@@ -428,6 +434,7 @@ export function ScreenshotCanvas({
                 lowDetail={lowDetail}
                 aspectKnown={aspectOf(screen.id) !== null}
                 annotations={cardAnnotations}
+                annotationIndex={annotationIndex}
                 olderOpenCount={olderOpenCounts.get(screen.id) ?? 0}
                 selectedAnnotationId={owns(selectedId)}
                 hoverAnnotationId={owns(hoverId)}

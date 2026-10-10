@@ -225,63 +225,99 @@ export default function ScreenshotsPage() {
           ) : undefined
         }
       />
-      <div className="p-4 md:p-6 space-y-6">
-        <div>
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            {projectsLoading ? (
-              <Skeleton className="h-10 w-64 rounded-md" />
-            ) : projects.length === 0 ? (
-              <p className="text-sm text-muted-foreground">暂无项目</p>
-            ) : (
-              <Select
-                value={activeProjectId}
-                onValueChange={(value) => {
-                  const nextValue = value ?? "";
-                  setSelectedProjectId(nextValue);
-                  setLastSelectedProjectId(nextValue || null);
-                }}
-              >
-                <SelectTrigger className="w-64">
-                  <SelectValue placeholder="请选择项目">
-                    {projects.find((p) => p.id === activeProjectId)?.name}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
+      <div
+        className={
+          view === "canvas"
+            ? "flex h-[calc(100dvh-3.5rem)] flex-col"
+            : "p-4 md:p-6 space-y-6"
+        }
+      >
+        <div
+          className={
+            view === "canvas" ? "flex min-h-0 flex-1 flex-col" : undefined
+          }
+        >
+          <div
+            className={
+              view === "canvas"
+                ? "flex flex-wrap items-center gap-2 border-b px-3 py-2"
+                : "mb-4 flex flex-wrap items-center justify-between gap-3"
+            }
+          >
+            <div className="flex items-center gap-2">
+              {view === "canvas" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setView("list")}
+                >
+                  <List className="mr-1 h-3.5 w-3.5" />
+                  返回列表
+                </Button>
+              )}
+              {projectsLoading ? (
+                <Skeleton className="h-10 w-64 rounded-md" />
+              ) : projects.length === 0 ? (
+                <p className="text-sm text-muted-foreground">暂无项目</p>
+              ) : (
+                <Select
+                  value={activeProjectId}
+                  onValueChange={(value) => {
+                    const nextValue = value ?? "";
+                    setSelectedProjectId(nextValue);
+                    setLastSelectedProjectId(nextValue || null);
+                  }}
+                >
+                  <SelectTrigger className="w-64">
+                    <SelectValue placeholder="请选择项目">
+                      {projects.find((p) => p.id === activeProjectId)?.name}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {projects.map((project) => (
+                      <SelectItem key={project.id} value={project.id}>
+                        {project.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
 
             {items.length > 0 && (
-              <div className="flex w-full items-center gap-2 sm:w-auto">
-                <div
-                  role="group"
-                  aria-label="视图切换"
-                  className="flex shrink-0 rounded-lg border p-0.5"
-                >
-                  {(
-                    [
-                      ["list", "列表", List],
-                      ["canvas", "画布", LayoutGrid],
-                    ] as const
-                  ).map(([value, label, Icon]) => (
-                    <Button
-                      key={value}
-                      size="sm"
-                      variant={view === value ? "secondary" : "ghost"}
-                      aria-pressed={view === value}
-                      onClick={() => setView(value)}
-                    >
-                      <Icon className="mr-1 h-3.5 w-3.5" />
-                      {label}
-                    </Button>
-                  ))}
-                </div>
-                <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
+              <>
+                {view === "canvas" && (
+                  <Tabs
+                    value={activeTab}
+                    onValueChange={(value) => setTab(value)}
+                    className="min-w-0 flex-1"
+                  >
+                    <TabsList variant="line" className="overflow-x-auto">
+                      <TabsTrigger value={SCREENSHOT_TAB_ALL}>全部</TabsTrigger>
+                      {groupTabs.map((tabValue) => (
+                        <TabsTrigger key={tabValue} value={tabValue}>
+                          {decodeGroupTab(tabValue)}
+                        </TabsTrigger>
+                      ))}
+                      {ungrouped && (
+                        <TabsTrigger value={SCREENSHOT_TAB_UNGROUPED}>
+                          未分组
+                        </TabsTrigger>
+                      )}
+                    </TabsList>
+                  </Tabs>
+                )}
+                {view === "list" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setView("canvas")}
+                  >
+                    <LayoutGrid className="mr-1 h-3.5 w-3.5" />
+                    画布
+                  </Button>
+                )}
+                <div className="relative min-w-0 sm:w-64">
                   <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     value={search}
@@ -290,11 +326,11 @@ export default function ScreenshotsPage() {
                     placeholder="搜索名称或界面标识"
                   />
                 </div>
-              </div>
+              </>
             )}
           </div>
 
-          {items.length > 0 && (
+          {view === "list" && items.length > 0 && (
             <Tabs
               value={activeTab}
               onValueChange={(value) => setTab(value)}
@@ -317,20 +353,20 @@ export default function ScreenshotsPage() {
           )}
 
           {projectsLoading || screensLoading ? (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            <div className="grid gap-4 p-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {Array.from({ length: 4 }).map((_, i) => (
                 <Skeleton key={i} className="h-48 rounded-lg" />
               ))}
             </div>
           ) : projects.length === 0 ? (
-            <Card>
+            <Card className={view === "canvas" ? "m-3" : undefined}>
               <CardContent className="flex flex-col items-center py-10">
                 <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
                 <p className="text-sm text-muted-foreground">暂无项目</p>
               </CardContent>
             </Card>
           ) : items.length === 0 ? (
-            <Card>
+            <Card className={view === "canvas" ? "m-3" : undefined}>
               <CardContent className="flex flex-col items-center py-10">
                 <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
                 <p className="text-sm text-muted-foreground">
@@ -339,7 +375,7 @@ export default function ScreenshotsPage() {
               </CardContent>
             </Card>
           ) : visibleScreens.length === 0 ? (
-            <Card>
+            <Card className={view === "canvas" ? "m-3" : undefined}>
               <CardContent className="flex flex-col items-center py-10">
                 <Images className="mb-3 h-10 w-10 text-muted-foreground/50" />
                 <p className="text-sm text-muted-foreground">
@@ -350,7 +386,7 @@ export default function ScreenshotsPage() {
               </CardContent>
             </Card>
           ) : view === "canvas" ? (
-            <div className="h-[calc(100dvh-16rem)] min-h-[420px]">
+            <div className="min-h-0 flex-1 p-3">
               <ScreenshotCanvas
                 projectId={activeProjectId}
                 screens={visibleScreens}

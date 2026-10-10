@@ -34,6 +34,8 @@ interface CanvasCardProps {
   /** 图片宽高比已知（接口给了尺寸或 onLoad 量过）；未知时不叠加标注 */
   aspectKnown: boolean;
   annotations: ScreenshotAnnotation[];
+  /** 标注 → 面板同序序号（矩形角标） */
+  annotationIndex: Map<string, number>;
   olderOpenCount: number;
   selectedAnnotationId: string | null;
   hoverAnnotationId: string | null;
@@ -56,6 +58,7 @@ function CanvasCardImpl({
   lowDetail,
   aspectKnown,
   annotations,
+  annotationIndex,
   olderOpenCount,
   selectedAnnotationId,
   hoverAnnotationId,
@@ -129,8 +132,8 @@ function CanvasCardImpl({
     >
       <div
         className={cn(
-          "group relative flex h-full flex-col rounded-lg border bg-card shadow-sm transition-colors",
-          drawEnabled ? "cursor-crosshair" : "cursor-pointer hover:border-primary/50",
+          "group relative flex h-full flex-col",
+          drawEnabled ? "cursor-crosshair" : "cursor-pointer",
         )}
         onClick={(e) => {
           if (drawEnabled) return;
@@ -141,7 +144,11 @@ function CanvasCardImpl({
         <div className="relative shrink-0" style={{ height: imageHeight }}>
           <div
             ref={imageAreaRef}
-            className="absolute inset-0 flex items-center justify-center overflow-hidden rounded-t-lg bg-muted/30"
+            className={cn(
+              "absolute inset-0 flex items-center justify-center overflow-hidden rounded-sm bg-muted/30",
+              !drawEnabled &&
+                "transition-shadow group-hover:ring-2 group-hover:ring-primary/40",
+            )}
             onPointerDown={onImagePointerDown}
           >
             {version && !lowDetail ? (
@@ -168,6 +175,7 @@ function CanvasCardImpl({
                 <AnnotationRect
                   key={a.id}
                   annotation={a}
+                  index={annotationIndex.get(a.id)}
                   interactive={!drawEnabled}
                   selected={a.id === selectedAnnotationId}
                   hovered={a.id === hoverAnnotationId}
@@ -179,7 +187,7 @@ function CanvasCardImpl({
 
             {drawRect && (
               <div
-                className="absolute rounded-[2px] border-2 border-dashed border-primary bg-primary/10"
+                className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10"
                 style={{
                   left: `${drawRect.x * 100}%`,
                   top: `${drawRect.y * 100}%`,
@@ -192,7 +200,7 @@ function CanvasCardImpl({
             {draft && (
               <>
                 <div
-                  className="absolute rounded-[2px] border-2 border-dashed border-primary bg-primary/10"
+                  className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10"
                   style={{
                     left: `${draft.rect.x * 100}%`,
                     top: `${draft.rect.y * 100}%`,
@@ -238,24 +246,22 @@ function CanvasCardImpl({
         </div>
 
         <div
-          className="flex shrink-0 flex-col justify-center gap-1 px-3"
+          className="flex shrink-0 items-center gap-2"
           style={{ height: CARD_META_HEIGHT }}
         >
-          <p className="truncate text-sm font-medium">{name}</p>
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Badge variant="secondary">{screen.version_count} 个版本</Badge>
-            {olderOpenCount > 0 && (
-              <Badge
-                variant="outline"
-                className="border-amber-500/60 text-amber-600 dark:text-amber-400"
-              >
-                上一版有 {olderOpenCount} 条未解决
-              </Badge>
-            )}
-            <span className="ml-auto shrink-0">
-              {formatRelativeTime(screen.last_uploaded_at)}
-            </span>
-          </div>
+          <p className="min-w-0 truncate text-sm font-medium">{name}</p>
+          {olderOpenCount > 0 && (
+            <Badge
+              variant="outline"
+              className="shrink-0 border-amber-500/60 text-amber-600 dark:text-amber-400"
+            >
+              上一版有 {olderOpenCount} 条未解决
+            </Badge>
+          )}
+          <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+            {screen.version_count} 个版本 ·{" "}
+            {formatRelativeTime(screen.last_uploaded_at)}
+          </span>
         </div>
       </div>
     </div>
