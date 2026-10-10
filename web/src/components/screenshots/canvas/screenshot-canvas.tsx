@@ -384,26 +384,57 @@ export function ScreenshotCanvas({
   }, [layout.cards, viewport, size]);
 
   // 深缩/适应全部时几乎所有卡片都进视口，一次性挂几百张原图会瞬时打满
-  // 带宽与解码；首批直接挂，之后每 80ms 放行 30 张，最终仍全部渲染
+  // 带宽与解码。每范围前 30 张即时放行，之后每 80ms 放行 30 张；
+  // 放行进集合后平移换位不会把 <img> 挤回占位。计时器不按帧清理——
+  // 手势进行中分批照常推进；回调用 ref 里的最新可见卡片，scope 变了
+  // 由 key 守卫兜住。卸载兜底在下方单独 effect
+  const imgTimerRef = useRef<number | null>(null);
+  const visibleCardsRef = useRef(visibleCards);
   useEffect(() => {
-    const pending = visibleCards.filter(
-      (c, i) => i >= IMAGE_MOUNT_BATCH && !releasedImgs.ids.has(c.screenId),
+    visibleCardsRef.current = visibleCards;
+  });
+  useEffect(() => {
+    const missing = visibleCards.filter(
+      (c) => !releasedImgs.ids.has(c.screenId),
     );
-    if (pending.length === 0) return;
-    const timer = window.setTimeout(() => {
+    if (missing.length === 0) return;
+    const room = IMAGE_MOUNT_BATCH - releasedImgs.ids.size;
+    if (room > 0) {
+      const seed = missing.slice(0, room).map((c) => c.screenId);
+      setReleasedImgs((prev) =>
+        prev.key !== resetKey
+          ? prev
+          : { key: resetKey, ids: new Set([...prev.ids, ...seed]) },
+      );
+      return;
+    }
+    if (imgTimerRef.current !== null) return;
+    imgTimerRef.current = window.setTimeout(() => {
+      imgTimerRef.current = null;
       setReleasedImgs((prev) => {
         if (prev.key !== resetKey) return prev;
         const ids = new Set(prev.ids);
-        for (const c of pending.slice(0, IMAGE_MOUNT_BATCH)) {
+        let added = 0;
+        for (const c of visibleCardsRef.current) {
+          if (ids.has(c.screenId)) continue;
           ids.add(c.screenId);
+          if (++added >= IMAGE_MOUNT_BATCH) break;
         }
         return { key: resetKey, ids };
       });
     }, IMAGE_MOUNT_INTERVAL_MS);
-    return () => window.clearTimeout(timer);
   }, [releasedImgs, visibleCards, resetKey]);
+  useEffect(
+    () => () => {
+      if (imgTimerRef.current !== null) window.clearTimeout(imgTimerRef.current);
+    },
+    [],
+  );
 
   const drawEnabled = drawMode && !spaceHeld;
+
+  // 深缩时标题跟着缩没；反向放大让屏幕上保持 ≥14px 可读字号
+  const titleScale = Math.max(1, GROUP_TITLE_MIN_PX / (24 * viewport.scale));
 
   const cursor = panning ? "grabbing" : spaceHeld ? "grab" : undefined;
 
@@ -433,28 +464,6 @@ export function ScreenshotCanvas({
             transition: smooth ? "transform 320ms ease" : undefined,
           }}
         >
-          {layout.groups.map((group) => (
-            // 深缩时标题跟着缩没，它是画布上唯一的导航线索；
-            // 反向缩放让屏幕上始终保持可读字号
-            <div
-              key={group.key}
-              className="absolute flex items-end gap-3 pb-3"
-              style={{
-                left: group.titleRect.x,
-                top: group.titleRect.y,
-                width: group.titleRect.width,
-                height: group.titleRect.height,
-                transform: `scale(${Math.max(1, GROUP_TITLE_MIN_PX / (24 * viewport.scale))})`,
-                transformOrigin: "left bottom",
-              }}
-            >
-              <h3 className="truncate text-2xl font-semibold">{group.title}</h3>
-              <span className="pb-1 text-sm text-muted-foreground">
-                {group.count}
-              </span>
-            </div>
-          ))}
-
           {visibleCards.map((card, index) => {
             const screen = screenById.get(card.screenId);
             if (!screen) return null;
@@ -502,6 +511,39 @@ export function ScreenshotCanvas({
               />
             );
           })}
+
+          {/* 分组标题渲染在卡片之后：深缩反放大时作为悬浮标签压在卡片上方 */}
+          {layout.groups.map((group) => (
+            <div
+              key={group.key}
+              className="pointer-events-none absolute flex items-end gap-3 pb-3"
+              style={{
+                left: group.titleRect.x,
+                top: group.titleRect.y,
+                width: group.titleRect.width,
+                height: group.titleRect.height,
+                transform: `scale(${titleScale})`,
+                transformOrigin: "left bottom",
+              }}
+            >
+              <h3
+                className={cn(
+                  "truncate text-2xl font-semibold",
+                  titleScale > 1 && "rounded bg-background/90 px-1.5 py-0.5",
+                )}
+              >
+                {group.title}
+              </h3>
+              <span
+                className={cn(
+                  "pb-1 text-sm text-muted-foreground",
+                  titleScale > 1 && "rounded bg-background/90 px-1 py-0.5",
+                )}
+              >
+                {group.count}
+              </span>
+            </div>
+          ))}
         </div>
 
         <CanvasToolbar
