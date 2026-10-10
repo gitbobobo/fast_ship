@@ -13,6 +13,7 @@ const projects: Project[] = [
     github_repo: "fast_ship",
     has_github_token: false,
     has_github_pr_token: false,
+    issue_workflow_counts: { unset: 1, todo: 2, in_progress: 3, done: 4 },
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
   },
@@ -25,6 +26,7 @@ const projects: Project[] = [
     github_repo: "",
     has_github_token: false,
     has_github_pr_token: false,
+    issue_workflow_counts: { unset: 0, todo: 5, in_progress: 0, done: 1 },
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
   },
@@ -82,11 +84,33 @@ describe("ProjectSwitcher", () => {
     await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
     const popup = await screen.findByRole("dialog", { name: "切换项目" });
     expect(within(popup).getAllByRole("button")).toHaveLength(2);
-    expect(within(popup).getByRole("button", { name: /Fast Ship 项目管理工具/ }))
+    expect(within(popup).getByRole("button", { name: /Fast Ship （项目管理工具）/ }))
       .toHaveAttribute("aria-current", "true");
-    expect(within(popup).getByRole("button", { name: /Notes 团队知识库/ }))
+    expect(within(popup).getByRole("button", { name: /Notes （团队知识库）/ }))
       .not.toHaveAttribute("aria-current");
     await waitFor(() => expect(screen.getByRole("textbox", { name: "搜索项目" })).toHaveFocus());
+  });
+
+  it("卡片不再渲染 GitHub 与选中对勾图标，第二行按内部状态展示计数点", async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+
+    await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
+    const popup = await screen.findByRole("dialog", { name: "切换项目" });
+    const card = within(popup).getByRole("button", { name: /Fast Ship （项目管理工具）/ });
+
+    // 图标已移除：卡片内除文本外不再有 SVG
+    expect(card.querySelector("svg")).toBeNull();
+
+    for (const [label, count] of [
+      ["未设置", 1],
+      ["待处理", 2],
+      ["开发中", 3],
+      ["已完成", 4],
+    ] as const) {
+      const segment = within(card).getByTitle(`${label} ${count}`);
+      expect(segment).toHaveTextContent(String(count));
+    }
   });
 
   it("按 Issue 总数降序排列卡片，缺省按 0 且同计数保持传入顺序", async () => {
@@ -113,7 +137,7 @@ describe("ProjectSwitcher", () => {
     expect(unsorted.map((p) => p.id)).toEqual(["few", "none", "many", "zero"]);
   });
 
-  it("二级文字优先显示描述，无描述时回退仓库地址", async () => {
+  it("名称行括注优先显示描述，无描述时回退仓库地址", async () => {
     const user = userEvent.setup();
     const mixed: Project[] = [
       { ...projects[0], id: "with-desc", name: "With Desc", description: "有描述" },
@@ -127,14 +151,14 @@ describe("ProjectSwitcher", () => {
     const popup = await screen.findByRole("dialog", { name: "切换项目" });
     // 有描述时即使关联了仓库也显示描述
     expect(
-      within(popup).getByRole("button", { name: /With Desc 有描述/ }),
+      within(popup).getByRole("button", { name: /With Desc （有描述）/ }),
     ).toBeInTheDocument();
     // 无描述或仅空白字符时回退到仓库 slug
     expect(
-      within(popup).getByRole("button", { name: /Repo Only Bobo\/fast_ship/ }),
+      within(popup).getByRole("button", { name: /Repo Only （Bobo\/fast_ship）/ }),
     ).toBeInTheDocument();
     expect(
-      within(popup).getByRole("button", { name: /Blank Bobo\/fast_ship/ }),
+      within(popup).getByRole("button", { name: /Blank （Bobo\/fast_ship）/ }),
     ).toBeInTheDocument();
   });
 
@@ -199,7 +223,7 @@ describe("ProjectSwitcher", () => {
     const { onValueChange } = renderSwitcher();
 
     await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
-    await user.click(screen.getByRole("button", { name: /Fast Ship 项目管理工具/ }));
+    await user.click(screen.getByRole("button", { name: /Fast Ship （项目管理工具）/ }));
     expect(onValueChange).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
@@ -253,7 +277,7 @@ describe("ProjectSwitcher", () => {
     const trigger = screen.getByRole("button", { name: "切换项目：Fast Ship" });
 
     await user.click(trigger);
-    await user.click(screen.getByRole("button", { name: /Notes 团队知识库/ }));
+    await user.click(screen.getByRole("button", { name: /Notes （团队知识库）/ }));
     expect(onValueChange).toHaveBeenCalledExactlyOnceWith("notes");
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(trigger).toHaveAttribute("aria-expanded", "false");
