@@ -118,17 +118,6 @@ export function useIssue(issueId: string) {
   });
 }
 
-export function useIssueComments(issueId: string, page = 1, pageSize = 20) {
-  return useQuery({
-    queryKey: ["issues", issueId, "comments", page, pageSize],
-    queryFn: async () => {
-      const res = await issueApi.comments(issueId, page, pageSize);
-      return res.data;
-    },
-    enabled: !!issueId,
-  });
-}
-
 export function useInfiniteIssueComments(issueId: string, pageSize = 20) {
   return useInfiniteQuery({
     queryKey: ["issues", issueId, "comments", "infinite", pageSize],
@@ -143,17 +132,6 @@ export function useInfiniteIssueComments(issueId: string, pageSize = 20) {
         1,
       );
       return lastPage.page < totalPages ? lastPage.page + 1 : undefined;
-    },
-    enabled: !!issueId,
-  });
-}
-
-export function useIssueTimeline(issueId: string, page = 1, pageSize = 20) {
-  return useQuery({
-    queryKey: ["issues", issueId, "timeline", page, pageSize],
-    queryFn: async () => {
-      const res = await issueApi.timeline(issueId, page, pageSize);
-      return res.data;
     },
     enabled: !!issueId,
   });

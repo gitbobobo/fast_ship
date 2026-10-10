@@ -9,7 +9,6 @@ import (
 	"gorm.io/gorm"
 	"io"
 	"net/http"
-	neturl "net/url"
 	"sort"
 	"strings"
 	"time"
@@ -271,21 +270,6 @@ func mapIssueAssetReferenceError(err error) error {
 		return appErr
 	}
 	return errs.ErrInternal
-}
-
-func resolveIssueAssetIDFromURL(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return ""
-	}
-	parsed, err := neturl.Parse(value)
-	if err == nil {
-		value = parsed.Path
-	}
-	match := issueAssetContentPattern.FindStringSubmatch(value)
-	if len(match) < 2 {
-		return ""
-	}
-	return match[1]
 }
 
 type countingReader struct {

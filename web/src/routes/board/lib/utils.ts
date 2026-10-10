@@ -12,11 +12,6 @@ export function getColumnStatusValue(columnId: ColumnId): (typeof COLUMNS)[numbe
   return col ? col.statusValue : "";
 }
 
-export function getColumnIdByStatus(status: string): ColumnId {
-  const col = COLUMNS.find((c) => c.statusValue === status);
-  return col ? col.id : "unset";
-}
-
 export function getActiveProjectId(
   projects: Project[],
   selectedId: string,

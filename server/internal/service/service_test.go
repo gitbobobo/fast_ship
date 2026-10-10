@@ -1,7 +1,6 @@
 package service
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -305,11 +304,4 @@ func createTestIssue(t *testing.T, db *gorm.DB, projectID string, opts ...func(*
 	}
 
 	return issue
-}
-
-func artifactFileExists(t *testing.T, baseDir, relPath string) bool {
-	t.Helper()
-
-	_, err := os.Stat(filepath.Join(baseDir, relPath))
-	return err == nil
 }

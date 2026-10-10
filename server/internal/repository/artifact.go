@@ -48,7 +48,3 @@ func (r *ArtifactRepository) Update(artifact *model.Artifact) error {
 func (r *ArtifactRepository) Delete(id string) error {
 	return r.db.Where("id = ?", id).Delete(&model.Artifact{}).Error
 }
-
-func (r *ArtifactRepository) DeleteByVersionID(versionID string) error {
-	return r.db.Where("version_id = ?", versionID).Delete(&model.Artifact{}).Error
-}

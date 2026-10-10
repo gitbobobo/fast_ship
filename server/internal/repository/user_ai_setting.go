@@ -33,7 +33,3 @@ func (r *UserAISettingRepository) Upsert(setting *model.UserAISetting) error {
 		}),
 	}).Create(setting).Error
 }
-
-func (r *UserAISettingRepository) Delete(userID string) error {
-	return r.db.Where("user_id = ?", userID).Delete(&model.UserAISetting{}).Error
-}
