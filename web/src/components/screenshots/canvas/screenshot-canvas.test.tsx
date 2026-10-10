@@ -239,6 +239,32 @@ describe("ScreenshotCanvas", () => {
     expect(document.querySelectorAll("[data-canvas-card] img").length).toBe(30);
   });
 
+  it("keeps batching after a scope change while a release timer is pending", async () => {
+    const many = (prefix: string) =>
+      Array.from({ length: 60 }, (_, i) =>
+        makeScreen(`${prefix}${i}`, {
+          last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+        }),
+      );
+    const { rerenderWith } = renderCanvas({ screens: many("a") });
+    // 趁批次计时器在飞（80ms 窗口内）直接切范围：旧计时器作废后
+    // 新范围必须照常分批，不能停在首批
+    rerenderWith({ screens: many("b"), resetKey: "p-1|g:设置" });
+    expect(
+      document.querySelectorAll("[data-canvas-card] img").length,
+    ).toBeLessThanOrEqual(30);
+
+    // 新范围的批次照常推进，最终全部放行
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll("[data-canvas-card] img").length,
+      ).toBe(60);
+    });
+    expect(
+      screen.getByTestId("canvas-card-b59").querySelector("img"),
+    ).not.toBeNull();
+  });
+
   it("swaps the placeholder for the image after load and resets on version change", () => {
     const { rerenderWith } = renderCanvas();
     const card = screen.getByTestId("canvas-card-s1");

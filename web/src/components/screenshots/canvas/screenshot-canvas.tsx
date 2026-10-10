@@ -107,6 +107,7 @@ export function ScreenshotCanvas({
     key: string;
     ids: Set<string>;
   }>(() => ({ key: resetKey, ids: new Set() }));
+  const imgTimerRef = useRef<number | null>(null);
   if (releasedImgs.key !== resetKey) {
     setReleasedImgs({ key: resetKey, ids: new Set() });
   }
@@ -388,7 +389,6 @@ export function ScreenshotCanvas({
   // 放行进集合后平移换位不会把 <img> 挤回占位。计时器不按帧清理——
   // 手势进行中分批照常推进；回调用 ref 里的最新可见卡片，scope 变了
   // 由 key 守卫兜住。卸载兜底在下方单独 effect
-  const imgTimerRef = useRef<number | null>(null);
   const visibleCardsRef = useRef(visibleCards);
   useEffect(() => {
     visibleCardsRef.current = visibleCards;
@@ -424,11 +424,16 @@ export function ScreenshotCanvas({
       });
     }, IMAGE_MOUNT_INTERVAL_MS);
   }, [releasedImgs, visibleCards, resetKey]);
+  // 范围切换/卸载时清掉飞行中的批次计时器：它触发时 key 守卫只会跳过
+  // 更新，imgTimerRef 置空后没有渲染接力，新范围会停在首批不再放行
   useEffect(
     () => () => {
-      if (imgTimerRef.current !== null) window.clearTimeout(imgTimerRef.current);
+      if (imgTimerRef.current !== null) {
+        window.clearTimeout(imgTimerRef.current);
+        imgTimerRef.current = null;
+      }
     },
-    [],
+    [resetKey],
   );
 
   const drawEnabled = drawMode && !spaceHeld;
