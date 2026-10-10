@@ -537,7 +537,8 @@ export function ScreenshotCanvas({
           })}
 
           {/* 分组标题渲染在卡片之后：统一的悬浮标签样式，深缩时
-              反放大保持可读并放宽宽度不被 titleRect 截断 */}
+              反放大保持可读并放宽宽度不被 titleRect 截断。以左上为
+              原点反放大：标签落回本组首行，不再盖住上一组尾行 */}
           {layout.groups.map((group) => (
             <div
               key={group.key}
@@ -549,18 +550,18 @@ export function ScreenshotCanvas({
                   titleScale > 1 ? "max-content" : group.titleRect.width,
                 height: group.titleRect.height,
                 transform: `scale(${titleScale})`,
-                transformOrigin: "left bottom",
+                transformOrigin: "left top",
               }}
             >
               <h3
                 className={cn(
-                  "rounded bg-background/90 px-1.5 py-0.5 text-2xl font-semibold",
+                  "rounded bg-background/95 px-1.5 py-0.5 text-2xl font-semibold shadow-sm ring-1 ring-black/10",
                   titleScale > 1 ? "whitespace-nowrap" : "truncate",
                 )}
               >
                 {group.title}
               </h3>
-              <span className="rounded bg-background/90 px-1 py-0.5 text-sm text-muted-foreground">
+              <span className="rounded bg-background/95 px-1 py-0.5 text-sm text-muted-foreground shadow-sm ring-1 ring-black/10">
                 {group.count}
               </span>
             </div>

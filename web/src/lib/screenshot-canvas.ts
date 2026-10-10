@@ -28,7 +28,7 @@ export const CARD_WIDTH = 320;
 export const CARD_META_HEIGHT = 56;
 export const CARD_GAP = 32;
 export const GROUP_TITLE_HEIGHT = 56;
-export const GROUP_GAP = 72;
+export const GROUP_GAP = 104;
 /** 容器尺寸未知时的默认列数 */
 export const GRID_COLUMNS = 4;
 /** 自动选列数的范围 */
