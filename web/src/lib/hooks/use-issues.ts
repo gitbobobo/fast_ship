@@ -160,7 +160,8 @@ export function useSyncProjectIssues(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => issueApi.sync(projectId),
-    onSuccess: () => {
+    // 同步逐条落库，报错时可能已有部分提交，按 settled 刷新而不是只在成功时
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
       queryClient.invalidateQueries({
         queryKey: ["projects", projectId, "issues", "filter-options"],
@@ -197,11 +198,16 @@ export function useUpdateIssue(issueId: string, projectId?: string) {
   return useMutation({
     mutationFn: (data: Parameters<typeof issueApi.update>[1]) =>
       issueApi.update(issueId, data),
-    onSuccess: () => {
+    // GitHub Issue 更新先落库再拉远端时间线，部分提交后仍可能返回错误，按 settled 刷新
+    onSettled: (_data, _error, variables) => {
       queryClient.invalidateQueries({ queryKey: ["issues", issueId] });
       if (projectId) {
         queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
         queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues", "filter-options"] });
+      }
+      // state 开/关变化会改变切换卡片上仅统计 open 的 issue_workflow_counts，与是否带 projectId 无关
+      if (variables.state !== undefined) {
+        queryClient.invalidateQueries({ queryKey: ["projects"], exact: true });
       }
     },
   });
@@ -460,6 +466,8 @@ export function useCloseIssuesBatch(projectId: string) {
       queryClient.invalidateQueries({
         queryKey: ["projects", projectId, "issues", "filter-options"],
       });
+      // 批量关闭把 Issue 移出 open 口径，刷新切换卡片上的 issue_workflow_counts
+      queryClient.invalidateQueries({ queryKey: ["projects"], exact: true });
       queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });

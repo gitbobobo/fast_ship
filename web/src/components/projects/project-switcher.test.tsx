@@ -113,13 +113,21 @@ describe("ProjectSwitcher", () => {
     }
   });
 
-  it("按 Issue 总数降序排列卡片，缺省按 0 且同计数保持传入顺序", async () => {
+  it("按开启状态 Issue 数降序排列卡片，缺省按 0 且同计数保持传入顺序", async () => {
     const user = userEvent.setup();
+    const counts = (n: Partial<NonNullable<Project["issue_workflow_counts"]>>) => ({
+      unset: 0,
+      todo: 0,
+      in_progress: 0,
+      done: 0,
+      ...n,
+    });
+    // few 的 issue_count 总数虽高，但开启的只有 1 条——排序只看开启口径
     const unsorted: Project[] = [
-      { ...projects[0], id: "few", name: "Few", issue_count: 3 },
-      { ...projects[1], id: "none", name: "No Count" },
-      { ...projects[0], id: "many", name: "Many", issue_count: 42 },
-      { ...projects[1], id: "zero", name: "Zero", issue_count: 0 },
+      { ...projects[0], id: "few", name: "Few", issue_count: 99, issue_workflow_counts: counts({ unset: 1 }) },
+      { ...projects[1], id: "none", name: "No Count", issue_workflow_counts: undefined },
+      { ...projects[0], id: "many", name: "Many", issue_count: 7, issue_workflow_counts: counts({ todo: 3, in_progress: 4 }) },
+      { ...projects[1], id: "zero", name: "Zero", issue_workflow_counts: counts({}) },
     ];
     render(
       <ProjectSwitcher projects={unsorted} value="" onValueChange={vi.fn()} />,
@@ -166,8 +174,18 @@ describe("ProjectSwitcher", () => {
     const user = userEvent.setup();
     const onValueChange = vi.fn();
     const matched: Project[] = [
-      { ...projects[0], id: "low", name: "Match Low", issue_count: 1 },
-      { ...projects[1], id: "high", name: "Match High", issue_count: 9 },
+      {
+        ...projects[0],
+        id: "low",
+        name: "Match Low",
+        issue_workflow_counts: { unset: 1, todo: 0, in_progress: 0, done: 0 },
+      },
+      {
+        ...projects[1],
+        id: "high",
+        name: "Match High",
+        issue_workflow_counts: { unset: 0, todo: 4, in_progress: 0, done: 0 },
+      },
     ];
     render(<ProjectSwitcher projects={matched} value="" onValueChange={onValueChange} />);
 
@@ -177,9 +195,19 @@ describe("ProjectSwitcher", () => {
     expect(onValueChange).toHaveBeenCalledExactlyOnceWith("high");
   });
 
-  it("issue_count 全部缺省时维持传入顺序", async () => {
+  it("issue_workflow_counts 全部缺省时维持传入顺序", async () => {
     const user = userEvent.setup();
-    renderSwitcher();
+    const noCounts: Project[] = [
+      { ...projects[0], issue_workflow_counts: undefined },
+      { ...projects[1], issue_workflow_counts: undefined },
+    ];
+    render(
+      <ProjectSwitcher
+        projects={noCounts}
+        value="fast-ship"
+        onValueChange={vi.fn()}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "切换项目：Fast Ship" }));
     const popup = await screen.findByRole("dialog", { name: "切换项目" });

@@ -81,7 +81,8 @@ export function useShipVersion(vid: string, projectId?: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => versionApi.ship(vid),
-    onSuccess: () => {
+    // ship 会执行关单 hook，执行完 Issue 已关闭但落执行记录失败时仍返回错误，按 settled 刷新
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["versions", vid] });
       queryClient.invalidateQueries({ queryKey: ["versions", vid, "ship-check"] });
       if (projectId) {

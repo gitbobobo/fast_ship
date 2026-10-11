@@ -127,7 +127,7 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 	}
 
 	// 列表项附带 issue_count（Issue 总数，不分状态）与 issue_workflow_counts
-	// （按内部状态分组）；无 Issue 的项目两者都保持缺省
+	// （仅 state=open 的 Issue 按内部状态分组）；无 Issue 的项目两者都保持缺省
 	projectIDs := make([]string, len(projects))
 	for i, p := range projects {
 		projectIDs[i] = p.ID
