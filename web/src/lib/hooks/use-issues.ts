@@ -204,10 +204,10 @@ export function useUpdateIssue(issueId: string, projectId?: string) {
       if (projectId) {
         queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues"] });
         queryClient.invalidateQueries({ queryKey: ["projects", projectId, "issues", "filter-options"] });
-        // state 开/关变化会改变切换卡片上仅统计 open 的 issue_workflow_counts
-        if (variables.state !== undefined) {
-          queryClient.invalidateQueries({ queryKey: ["projects"], exact: true });
-        }
+      }
+      // state 开/关变化会改变切换卡片上仅统计 open 的 issue_workflow_counts，与是否带 projectId 无关
+      if (variables.state !== undefined) {
+        queryClient.invalidateQueries({ queryKey: ["projects"], exact: true });
       }
     },
   });
