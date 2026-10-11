@@ -4496,6 +4496,7 @@ components:
           format: date-time
     IssueWorkflowCounts:
       type: object
+      description: omitempty，仅在列表项中出现；仅统计 state=open 的 Issue，按内部状态分组
       required: [unset, todo, in_progress, done]
       properties:
         unset:

@@ -547,8 +547,9 @@ func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
 }
 
 // List 的 issue_count 统计项目 Issue 总数（open、closed 都计入），
-// issue_workflow_counts 按内部状态分组（无 internal meta 计入 unset）；无
-// Issue 的项目两字段都缺省（nil）；Get 等详情响应不携带这些字段。
+// issue_workflow_counts 只计 state=open 的 Issue 按内部状态分组（无 internal
+// meta 计入 unset，open+done 仍算入 done，closed 不进任何分段）；无 Issue 的
+// 项目两字段都缺省（nil）；Get 等详情响应不携带这些字段。
 func TestProjectServiceList_IssueCount(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-issue-count")
@@ -558,23 +559,38 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 	quiet := createTestProject(t, svc.db, user.ID)
 	empty := createTestProject(t, svc.db, user.ID)
 
-	createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
-	// 第二个 Issue 共用项目时避开 (project_id, github_issue_id) 唯一索引
-	if err := svc.db.Model(&model.IssueGitHubMeta{}).
-		Where("project_id = ?", busy.ID).
-		Update("github_issue_id", 1002).Error; err != nil {
-		t.Fatalf("bump github_issue_id: %v", err)
+	// 后续 Issue 共用项目时避开 (project_id, github_issue_id) 唯一索引；
+	// 只改刚写入的 1001 行，已 bump 过的旧行保持原值
+	bumpGitHubIssueID := func(projectID string, id int64) {
+		if err := svc.db.Model(&model.IssueGitHubMeta{}).
+			Where("project_id = ? AND github_issue_id = 1001", projectID).
+			Update("github_issue_id", id).Error; err != nil {
+			t.Fatalf("bump github_issue_id: %v", err)
+		}
 	}
+
+	createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
+	bumpGitHubIssueID(busy.ID, 1002)
 	second := createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) {
 		i.SequenceNumber = 2
 		i.State = model.IssueStateClosed
 	})
-	third := createTestIssue(t, svc.db, quiet.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
+	bumpGitHubIssueID(busy.ID, 1003)
+	third := createTestIssue(t, svc.db, busy.ID, func(i *model.Issue) { i.SequenceNumber = 3 })
+	fourth := createTestIssue(t, svc.db, quiet.ID, func(i *model.Issue) { i.SequenceNumber = 1 })
+	bumpGitHubIssueID(quiet.ID, 1002)
+	fifth := createTestIssue(t, svc.db, quiet.ID, func(i *model.Issue) {
+		i.SequenceNumber = 2
+		i.State = model.IssueStateClosed
+	})
 
-	// busy：1 条无 meta（unset）+ 1 条 done；quiet：1 条 in_progress
+	// busy：open 无 meta（unset）+ closed done + open done；
+	// quiet：open in_progress + closed todo
 	for issueID, status := range map[string]model.IssueWorkflowStatus{
 		second.ID: model.IssueWorkflowStatusDone,
-		third.ID:  model.IssueWorkflowStatusInProgress,
+		third.ID:  model.IssueWorkflowStatusDone,
+		fourth.ID: model.IssueWorkflowStatusInProgress,
+		fifth.ID:  model.IssueWorkflowStatusTodo,
 	} {
 		if err := svc.db.Create(&model.IssueInternalMeta{
 			IssueID:        issueID,
@@ -600,11 +616,11 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 		counts[p.Id] = p.IssueCount
 		workflowCounts[p.Id] = p.IssueWorkflowCounts
 	}
-	if got := counts[busy.ID]; got == nil || *got != 2 {
-		t.Fatalf("busy issue_count = %v, want 2（closed 也计入）", got)
+	if got := counts[busy.ID]; got == nil || *got != 3 {
+		t.Fatalf("busy issue_count = %v, want 3（closed 也计入）", got)
 	}
-	if got := counts[quiet.ID]; got == nil || *got != 1 {
-		t.Fatalf("quiet issue_count = %v, want 1", got)
+	if got := counts[quiet.ID]; got == nil || *got != 2 {
+		t.Fatalf("quiet issue_count = %v, want 2（closed 也计入）", got)
 	}
 	if got := counts[empty.ID]; got != nil {
 		t.Fatalf("empty issue_count = %v, want nil", *got)
@@ -612,11 +628,11 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 
 	if got := workflowCounts[busy.ID]; got == nil ||
 		got.Unset != 1 || got.Done != 1 || got.Todo != 0 || got.InProgress != 0 {
-		t.Fatalf("busy issue_workflow_counts = %+v, want {unset:1 done:1}", got)
+		t.Fatalf("busy issue_workflow_counts = %+v, want {unset:1 done:1}（closed done 不计）", got)
 	}
 	if got := workflowCounts[quiet.ID]; got == nil ||
 		got.InProgress != 1 || got.Unset != 0 || got.Todo != 0 || got.Done != 0 {
-		t.Fatalf("quiet issue_workflow_counts = %+v, want {in_progress:1}", got)
+		t.Fatalf("quiet issue_workflow_counts = %+v, want {in_progress:1}（closed todo 不计）", got)
 	}
 	if got := workflowCounts[empty.ID]; got != nil {
 		t.Fatalf("empty issue_workflow_counts = %+v, want nil", *got)

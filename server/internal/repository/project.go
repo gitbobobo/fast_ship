@@ -42,8 +42,9 @@ func (r *ProjectRepository) List(userID string, page, pageSize int) ([]model.Pro
 	return projects, total, err
 }
 
-// ProjectIssueCounts 是单项目的 Issue 计数：总数与按内部状态（workflow_status）
-// 分组的数量。Unset 含没有 internal meta 行的 Issue（LEFT JOIN 后为 NULL）。
+// ProjectIssueCounts 是单项目的 Issue 计数：Total 为不区分 open/closed 的总数；
+// Unset/Todo/InProgress/Done 仅统计 state=open 的 Issue（切换组件按待办口径展示）。
+// Unset 含没有 internal meta 行的 Issue（LEFT JOIN 后为 NULL）。
 type ProjectIssueCounts struct {
 	Total      int
 	Unset      int
@@ -52,8 +53,9 @@ type ProjectIssueCounts struct {
 	Done       int
 }
 
-// GetIssueCounts 统计给定项目的 Issue 总数与内部状态分布（不区分 open/closed），
-// 供项目列表填充 issue_count 与 issue_workflow_counts；空切片直接返回空 map
+// GetIssueCounts 统计给定项目的 Issue 总数与内部状态分布：总数不区分 open/closed，
+// 内部状态分布只计 state=open 的 Issue；供项目列表填充 issue_count 与
+// issue_workflow_counts；空切片直接返回空 map
 // 不查库，无 Issue 的项目不出现在结果中。
 func (r *ProjectRepository) GetIssueCounts(projectIDs []string) (map[string]ProjectIssueCounts, error) {
 	counts := make(map[string]ProjectIssueCounts, len(projectIDs))
@@ -71,11 +73,14 @@ func (r *ProjectRepository) GetIssueCounts(projectIDs []string) (map[string]Proj
 	}
 	err := r.db.Model(&model.Issue{}).
 		Select(`project_id, COUNT(*) AS total,
-			SUM(CASE WHEN m.workflow_status IS NULL OR m.workflow_status = '' THEN 1 ELSE 0 END) AS unset,
-			SUM(CASE WHEN m.workflow_status = ? THEN 1 ELSE 0 END) AS todo,
-			SUM(CASE WHEN m.workflow_status = ? THEN 1 ELSE 0 END) AS in_progress,
-			SUM(CASE WHEN m.workflow_status = ? THEN 1 ELSE 0 END) AS done`,
-			model.IssueWorkflowStatusTodo, model.IssueWorkflowStatusInProgress, model.IssueWorkflowStatusDone).
+			SUM(CASE WHEN issues.state = ? AND (m.workflow_status IS NULL OR m.workflow_status = '') THEN 1 ELSE 0 END) AS unset,
+			SUM(CASE WHEN issues.state = ? AND m.workflow_status = ? THEN 1 ELSE 0 END) AS todo,
+			SUM(CASE WHEN issues.state = ? AND m.workflow_status = ? THEN 1 ELSE 0 END) AS in_progress,
+			SUM(CASE WHEN issues.state = ? AND m.workflow_status = ? THEN 1 ELSE 0 END) AS done`,
+			model.IssueStateOpen,
+			model.IssueStateOpen, model.IssueWorkflowStatusTodo,
+			model.IssueStateOpen, model.IssueWorkflowStatusInProgress,
+			model.IssueStateOpen, model.IssueWorkflowStatusDone).
 		Joins("LEFT JOIN issue_internal_meta m ON m.issue_id = issues.id").
 		Where("project_id IN ?", projectIDs).
 		Group("project_id").

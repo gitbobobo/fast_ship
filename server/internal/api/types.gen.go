@@ -954,7 +954,7 @@ type IssueTimelineEvent struct {
 	Summary string `json:"summary"`
 }
 
-// IssueWorkflowCounts defines model for IssueWorkflowCounts.
+// IssueWorkflowCounts omitempty，仅在列表项中出现；仅统计 state=open 的 Issue，按内部状态分组
 type IssueWorkflowCounts struct {
 	Done       int `json:"done"`
 	InProgress int `json:"in_progress"`
@@ -1079,7 +1079,9 @@ type Project struct {
 	IssueCount *int `json:"issue_count,omitempty"`
 
 	// IssueSync omitempty，项目 GitHub 同步状态
-	IssueSync           *IssueSyncState      `json:"issue_sync,omitempty"`
+	IssueSync *IssueSyncState `json:"issue_sync,omitempty"`
+
+	// IssueWorkflowCounts omitempty，仅在列表项中出现；仅统计 state=open 的 Issue，按内部状态分组
 	IssueWorkflowCounts *IssueWorkflowCounts `json:"issue_workflow_counts,omitempty"`
 
 	// LatestVersion omitempty，仅在列表项中出现
