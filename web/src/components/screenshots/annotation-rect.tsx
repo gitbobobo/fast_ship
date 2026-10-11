@@ -1,5 +1,117 @@
+import type { CSSProperties } from "react";
 import { cn } from "@/lib/utils";
-import { ratioRectToPercentStyle } from "@/lib/screenshot-canvas";
+import {
+  CANVAS_ZOOM_VAR,
+  ratioRectToPercentStyle,
+  type Rect,
+} from "@/lib/screenshot-canvas";
+
+/**
+ * 标注「皮肤」像素换算：画布世界容器写了 --canvas-zoom = 当前缩放率
+ * （见 screenshot-canvas.tsx），皮肤的目标屏幕像素除以它得到世界坐标
+ * 尺寸，随世界 transform 渲染后刚好还原成 Npx。世界缩放本身也通过
+ * scale: var(--canvas-zoom) 渲染——渲染缩放与皮肤反算同源，动画期间或
+ * 过渡被打断重启都逐帧精确；画布外（预览弹窗等）变量未定义，
+ * 回退 1——那里的皮肤本来就是屏幕恒定尺寸。
+ */
+const ZOOM = `var(${CANVAS_ZOOM_VAR}, 1)`;
+const zsPx = (n: number) => `calc(${n}px / ${ZOOM})`;
+
+/**
+ * 光圈叠层（box-shadow 先列先画在上层）：选中为「1px 底色间隔 + 3px 红圈」，
+ * 闪烁为 4px 半透明光圈，都盖在外侧深色发丝圈之上；发丝圈让框体在深色
+ * 截图底色上保持可见。内侧白色发丝改由 SVG 描边内侧绘制（见 FrameStroke）。
+ */
+function frameShadow(state: {
+  selected?: boolean;
+  flashing?: boolean;
+  resolved?: boolean;
+}): string {
+  const ring = state.flashing
+    ? [
+        `0 0 0 ${zsPx(4)} color-mix(in oklab, ${
+          state.resolved
+            ? "var(--color-emerald-500)"
+            : "var(--color-red-500)"
+        } 70%, transparent)`,
+      ]
+    : state.selected
+      ? [
+          `0 0 0 ${zsPx(1)} var(--background)`,
+          `0 0 0 ${zsPx(3)} var(--color-red-500)`,
+        ]
+      : [];
+  return [...ring, `0 0 0 ${zsPx(1)} rgba(15,23,42,0.55)`].join(",");
+}
+
+/** 标注框体的比例定位 + 恒定皮肤（圆角、发丝阴影与光圈） */
+export function annotationFrameStyle(
+  rect: Rect,
+  state: { selected?: boolean; flashing?: boolean; resolved?: boolean } = {},
+): CSSProperties {
+  return {
+    ...ratioRectToPercentStyle(rect),
+    borderRadius: zsPx(2),
+    boxShadow: frameShadow(state),
+  };
+}
+
+/**
+ * 框体描边用 SVG 画而不用 CSS border：border 参与盒模型，深度缩小时
+ * 反算的世界边框宽度会超过比例矩形并把框撑大；且浏览器把 border-width
+ * 取整到设备像素，非整数宽度下描边粗细漂移。SVG 描边不参与布局、按
+ * 亚像素绘制，stroke-width 除以缩放率后屏幕上恒为 2px。主描边 rect 向内
+ * 缩进半个描边宽，让描边整段落在比例盒内（外侧深色发丝圈才不被盖住）；
+ * 内侧 1px 白色发丝是第二层 rect——原 inset 阴影画在 border 内侧，改 SVG
+ * 后父级阴影会被描边盖住，所以发丝也进 SVG。
+ * 缩进量用 min() 封顶到盒子的 25%：深度缩小（如 5%）时反算的缩进可能
+ * 超过窄标注的宽度，不封顶会让宽高算成负值而整条描边消失；封顶后描边
+ * 退化为盒子中段的一条，亚像素小框仍留有可见标记。
+ */
+function FrameStroke({ dashed, resolved }: { dashed?: boolean; resolved?: boolean }) {
+  return (
+    <svg
+      aria-hidden
+      className="pointer-events-none absolute inset-0 block h-full w-full overflow-visible"
+    >
+      <rect
+        fill="none"
+        style={{
+          x: `min(${zsPx(1)}, 25%)`,
+          y: `min(${zsPx(1)}, 25%)`,
+          width: `calc(100% - min(${zsPx(2)}, 50%))`,
+          height: `calc(100% - min(${zsPx(2)}, 50%))`,
+          rx: zsPx(1),
+          stroke: resolved
+            ? "var(--color-emerald-500)"
+            : "var(--color-red-500)",
+          strokeWidth: zsPx(2),
+          ...(dashed ? { strokeDasharray: `${zsPx(4)} ${zsPx(3)}` } : null),
+        }}
+      />
+      <rect
+        fill="none"
+        style={{
+          x: `min(${zsPx(2.5)}, 25%)`,
+          y: `min(${zsPx(2.5)}, 25%)`,
+          width: `calc(100% - min(${zsPx(5)}, 50%))`,
+          height: `calc(100% - min(${zsPx(5)}, 50%))`,
+          stroke: "rgba(255,255,255,0.85)",
+          strokeWidth: zsPx(1),
+        }}
+      />
+    </svg>
+  );
+}
+
+/** 框选进行中与待提交的虚线预览框：与标注矩形同款皮肤，不可交互 */
+export function AnnotationDraftRect({ rect }: { rect: Rect }) {
+  return (
+    <div className="absolute bg-red-500/10" style={annotationFrameStyle(rect)}>
+      <FrameStroke dashed />
+    </div>
+  );
+}
 
 interface AnnotationRectProps {
   annotation: ScreenshotAnnotation;
@@ -38,22 +150,16 @@ export function AnnotationRect({
       data-annotation-status={annotation.status}
       title={annotation.body}
       className={cn(
-        "absolute box-border rounded-[2px] border-2 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.85),0_0_0_1px_rgba(15,23,42,0.55)] transition-colors",
+        "absolute transition-colors",
         resolved
-          ? "border-dashed border-emerald-500 bg-emerald-500/10 opacity-60"
-          : "border-red-500 bg-red-500/15",
+          ? "bg-emerald-500/10 opacity-60"
+          : "bg-red-500/15",
         emphasized &&
           (resolved ? "bg-emerald-500/25 opacity-100" : "bg-red-500/30"),
-        selected &&
-          !flashing &&
-          "ring-2 ring-red-500 ring-offset-1 ring-offset-background",
-        flashing &&
-          (resolved
-            ? "animate-pulse ring-4 ring-emerald-500/70"
-            : "animate-pulse ring-4 ring-red-500/70"),
+        flashing && "animate-pulse",
         interactive ? "pointer-events-auto cursor-pointer" : "pointer-events-none",
       )}
-      style={ratioRectToPercentStyle(annotation)}
+      style={annotationFrameStyle(annotation, { selected, flashing, resolved })}
       onClick={
         interactive
           ? (e) => {
@@ -65,12 +171,20 @@ export function AnnotationRect({
       onPointerEnter={interactive ? () => onHover?.(annotation.id) : undefined}
       onPointerLeave={interactive ? () => onHover?.(null) : undefined}
     >
+      <FrameStroke dashed={resolved} resolved={resolved} />
       {index !== undefined && (
         <span
           className={cn(
-            "absolute top-0 left-0 flex h-4 min-w-4 items-center justify-center rounded-br-md px-0.5 text-[10px] leading-none font-semibold text-white",
+            "absolute top-0 left-0 flex items-center justify-center leading-none font-semibold text-white",
             resolved ? "bg-emerald-500" : "bg-red-500",
           )}
+          style={{
+            height: zsPx(16),
+            minWidth: zsPx(16),
+            paddingInline: zsPx(2),
+            fontSize: zsPx(10),
+            borderBottomRightRadius: zsPx(6),
+          }}
         >
           {index}
         </span>

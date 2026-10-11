@@ -42,6 +42,15 @@ export const UNGROUPED_TITLE = "未分组";
 /** 标注最小有效尺寸（占图宽/高的比例），更小的框视为误触 */
 export const MIN_ANNOTATION_RATIO = 0.01;
 
+/**
+ * 画布世界容器上的 CSS 变量名，值为当前缩放率。标注皮肤（描边、
+ * 角标、光圈、草稿输入框）的像素尺寸除以它得到世界坐标尺寸，渲染后
+ * 在屏幕上保持恒定大小；变量已注册为 <number> 并与 transform 同曲线
+ * 过渡，平滑缩放动画期间也逐帧精确。画布外未定义该变量，消费方用
+ * var(..., 1) 回退到原始尺寸。
+ */
+export const CANVAS_ZOOM_VAR = "--canvas-zoom";
+
 export interface CanvasScreenInput {
   id: string;
   group: string;
