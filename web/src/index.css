@@ -30,6 +30,16 @@
   min-height: 100% !important;
 }
 
+/* 截图画布世界容器写入的当前缩放率（screenshot-canvas.ts CANVAS_ZOOM_VAR）。
+   注册为 <number> 后该变量可随 transform 同曲线过渡，平滑缩放动画期间
+   标注皮肤按 calc(Npx / var(--canvas-zoom, 1)) 逐帧精确保持屏幕恒定尺寸；
+   画布外未定义，回退 1 后皮肤本来就是恒定尺寸。 */
+@property --canvas-zoom {
+  syntax: "<number>";
+  inherits: true;
+  initial-value: 1;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

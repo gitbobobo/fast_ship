@@ -1,10 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useCreateScreenshotAnnotation } from "@/lib/hooks/use-screenshot-annotations";
 import {
   aspectFromSize,
   countOpenOnOlderVersions,
+  CANVAS_ZOOM_VAR,
   FIT_PADDING,
   fitViewport,
   focusRect,
@@ -486,10 +494,20 @@ export function ScreenshotCanvas({
       >
         <div
           className="absolute top-0 left-0 origin-top-left will-change-transform"
-          style={{
-            transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-            transition: smooth ? "transform 320ms ease" : undefined,
-          }}
+          style={
+            {
+              // --canvas-zoom 是缩放率的唯一来源：scale 直接读它，标注皮肤
+              // 用 calc(Npx / var(--canvas-zoom)) 反算同一变量，缩放过渡被
+              // 新目标打断重启也不会与渲染缩放失配；平移走独立的 translate
+              // 过渡。皮肤尺寸全程不需要卡片重渲染
+              translate: `${viewport.x}px ${viewport.y}px`,
+              scale: `var(${CANVAS_ZOOM_VAR})`,
+              transition: smooth
+                ? `translate 320ms ease, ${CANVAS_ZOOM_VAR} 320ms ease`
+                : undefined,
+              [CANVAS_ZOOM_VAR]: String(viewport.scale),
+            } as CSSProperties
+          }
         >
           {visibleCards.map((card) => {
             const screen = screenById.get(card.screenId);
@@ -504,7 +522,6 @@ export function ScreenshotCanvas({
               draft && draft.screenId === screen.id
                 ? {
                     rect: draft.rect,
-                    counterScale: 1 / viewport.scale,
                     submitting: createAnnotation.isPending,
                     onSubmit: (body) => void submitDraft(body),
                     onCancel: () => setDraft(null),

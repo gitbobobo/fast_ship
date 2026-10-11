@@ -6,19 +6,18 @@ import { screenshotApi } from "@/lib/api/screenshots";
 import { screenDisplayName } from "@/lib/screenshots";
 import {
   CARD_META_HEIGHT,
+  CANVAS_ZOOM_VAR,
   dragToRatioRect,
   isAnnotationRectTooSmall,
   type Rect,
 } from "@/lib/screenshot-canvas";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
-import { AnnotationRect } from "../annotation-rect";
+import { AnnotationDraftRect, AnnotationRect } from "../annotation-rect";
 import { AnnotationDraft } from "./annotation-draft";
 
 export interface CanvasDraft {
   rect: Rect;
-  /** 抵消世界缩放，让输入框保持屏幕上的固定大小 */
-  counterScale: number;
   submitting: boolean;
   onSubmit: (body: string) => void;
   onCancel: () => void;
@@ -194,35 +193,19 @@ function CanvasCardImpl({
                 />
               ))}
 
-            {drawRect && (
-              <div
-                className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.85),0_0_0_1px_rgba(15,23,42,0.55)]"
-                style={{
-                  left: `${drawRect.x * 100}%`,
-                  top: `${drawRect.y * 100}%`,
-                  width: `${drawRect.width * 100}%`,
-                  height: `${drawRect.height * 100}%`,
-                }}
-              />
-            )}
+            {drawRect && <AnnotationDraftRect rect={drawRect} />}
 
             {draft && (
               <>
-                <div
-                  className="absolute rounded-[2px] border-2 border-dashed border-red-500 bg-red-500/10 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.85),0_0_0_1px_rgba(15,23,42,0.55)]"
-                  style={{
-                    left: `${draft.rect.x * 100}%`,
-                    top: `${draft.rect.y * 100}%`,
-                    width: `${draft.rect.width * 100}%`,
-                    height: `${draft.rect.height * 100}%`,
-                  }}
-                />
+                <AnnotationDraftRect rect={draft.rect} />
+                {/* 皮肤尺寸走 --canvas-zoom：输入框在屏幕上保持固定大小，
+                    缩放变化经 CSS 变量逐帧生效，不需要卡片重渲染 */}
                 <div
                   className="pointer-events-auto absolute z-10 origin-top-left"
                   style={{
                     left: `${draft.rect.x * 100}%`,
                     top: `${(draft.rect.y + draft.rect.height) * 100}%`,
-                    transform: `translateY(${8 * draft.counterScale}px) scale(${draft.counterScale})`,
+                    transform: `translateY(calc(8px / var(${CANVAS_ZOOM_VAR}, 1))) scale(calc(1 / var(${CANVAS_ZOOM_VAR}, 1)))`,
                   }}
                 >
                   <AnnotationDraft

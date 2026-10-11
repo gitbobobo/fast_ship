@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { vi } from "vitest";
 import { screenshotAnnotationApi } from "@/lib/api/screenshot-annotations";
+import { annotationFrameStyle } from "../annotation-rect";
 import { ScreenshotCanvas } from "./screenshot-canvas";
 
 vi.mock("@/lib/api/screenshot-annotations", async (importOriginal) => {
@@ -366,6 +367,37 @@ describe("ScreenshotCanvas", () => {
     );
   });
 
+  it("keeps annotation chrome at constant screen size while zooming", async () => {
+    const user = userEvent.setup();
+    renderCanvas({ annotations: [makeAnnotation({ id: "a-open" })] });
+
+    const world = screen.getByTestId("screenshot-canvas").firstElementChild!
+      .firstElementChild as HTMLElement;
+    const canvasZoom = () =>
+      Number(world.style.getPropertyValue("--canvas-zoom"));
+
+    // 皮肤尺寸以 calc(Npx / var(--canvas-zoom)) 表达：矩形几何按比例走，
+    // 描边/光圈/角标反算世界尺寸（happy-dom 解析不了 calc+var，直接断言样式产物）
+    const style = annotationFrameStyle(makeAnnotation({ id: "a" }));
+    expect(style.borderWidth).toBeUndefined();
+    expect(String(style.boxShadow)).toContain("var(--canvas-zoom");
+
+    // 描边走 SVG 描边（不占盒模型、不取整设备像素），同样按缩放率反算
+    const stroke = screen
+      .getByTestId("annotation-rect-a-open")
+      .querySelector("svg rect");
+    expect(stroke?.getAttribute("style")).toContain("--canvas-zoom");
+
+    // 世界容器写出当前缩放率并与 transform 同曲线过渡：放大后变量变大
+    const atFit = canvasZoom();
+    await user.click(screen.getByRole("button", { name: "放大" }));
+    expect(canvasZoom()).toBeGreaterThan(atFit);
+    // 程序化移动带过渡：--canvas-zoom 与 transform 同曲线，动画期间逐帧精确
+    expect(world.getAttribute("style")).toContain("--canvas-zoom 320ms");
+    await user.click(screen.getByRole("button", { name: "缩小" }));
+    expect(canvasZoom()).toBeCloseTo(atFit);
+  });
+
   it("toggles draw mode with the R shortcut but not while typing", async () => {
     const user = userEvent.setup();
     renderCanvas();
@@ -490,13 +522,13 @@ describe("ScreenshotCanvas", () => {
     const container = screen.getByTestId("screenshot-canvas")
       .firstElementChild as HTMLElement;
     const world = container.firstElementChild as HTMLElement;
-    const before = world.style.transform;
+    const before = world.getAttribute("style");
 
     fireEvent.wheel(screen.getByTestId("canvas-toolbar"), { deltaY: 100 });
-    expect(world.style.transform).toBe(before);
+    expect(world.getAttribute("style")).toBe(before);
 
     fireEvent.wheel(container, { deltaY: 100 });
-    expect(world.style.transform).not.toBe(before);
+    expect(world.getAttribute("style")).not.toBe(before);
   });
 
   it("swallows the click that ends a drag, but not a later one after a new pointerdown", () => {
