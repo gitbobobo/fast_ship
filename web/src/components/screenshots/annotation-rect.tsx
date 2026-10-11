@@ -64,6 +64,9 @@ export function annotationFrameStyle(
  * 缩进半个描边宽，让描边整段落在比例盒内（外侧深色发丝圈才不被盖住）；
  * 内侧 1px 白色发丝是第二层 rect——原 inset 阴影画在 border 内侧，改 SVG
  * 后父级阴影会被描边盖住，所以发丝也进 SVG。
+ * 缩进量用 min() 封顶到盒子的 25%：深度缩小（如 5%）时反算的缩进可能
+ * 超过窄标注的宽度，不封顶会让宽高算成负值而整条描边消失；封顶后描边
+ * 退化为盒子中段的一条，亚像素小框仍留有可见标记。
  */
 function FrameStroke({ dashed, resolved }: { dashed?: boolean; resolved?: boolean }) {
   return (
@@ -74,10 +77,10 @@ function FrameStroke({ dashed, resolved }: { dashed?: boolean; resolved?: boolea
       <rect
         fill="none"
         style={{
-          x: zsPx(1),
-          y: zsPx(1),
-          width: `calc(100% - 2px / ${ZOOM})`,
-          height: `calc(100% - 2px / ${ZOOM})`,
+          x: `min(${zsPx(1)}, 25%)`,
+          y: `min(${zsPx(1)}, 25%)`,
+          width: `calc(100% - min(${zsPx(2)}, 50%))`,
+          height: `calc(100% - min(${zsPx(2)}, 50%))`,
           rx: zsPx(1),
           stroke: resolved
             ? "var(--color-emerald-500)"
@@ -89,10 +92,10 @@ function FrameStroke({ dashed, resolved }: { dashed?: boolean; resolved?: boolea
       <rect
         fill="none"
         style={{
-          x: zsPx(2.5),
-          y: zsPx(2.5),
-          width: `calc(100% - 5px / ${ZOOM})`,
-          height: `calc(100% - 5px / ${ZOOM})`,
+          x: `min(${zsPx(2.5)}, 25%)`,
+          y: `min(${zsPx(2.5)}, 25%)`,
+          width: `calc(100% - min(${zsPx(5)}, 50%))`,
+          height: `calc(100% - min(${zsPx(5)}, 50%))`,
           stroke: "rgba(255,255,255,0.85)",
           strokeWidth: zsPx(1),
         }}
