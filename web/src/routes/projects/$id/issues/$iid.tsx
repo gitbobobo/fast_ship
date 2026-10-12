@@ -1234,7 +1234,6 @@ export default function IssueDetailPage() {
     }
 
     labelCommitInFlightRef.current = true;
-    let persistedAny = false;
 
     try {
       while (true) {
@@ -1245,7 +1244,6 @@ export default function IssueDetailPage() {
         await updateIssue.mutateAsync({
           labels: labelsToPersist,
         });
-        persistedAny = true;
         labelPersistedRef.current = labelsToPersist;
 
         const latestDraft =
@@ -1258,9 +1256,7 @@ export default function IssueDetailPage() {
         }
       }
 
-      if (persistedAny) {
-        toast.success("标签已更新");
-      }
+      toast.success("标签已更新");
     } catch {
       labelQueuedRef.current = false;
       setLabelDraftState(labelPersistedRef.current);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import MDEditor, { commands, type ICommand } from "@uiw/react-md-editor";
 import "@uiw/react-md-editor/markdown-editor.css";
 import { ImageIcon, Loader2 } from "lucide-react";
@@ -146,9 +146,12 @@ export function MarkdownEditor({
   const onPasteImageRef = useRef(onPasteImage);
   const [uploadingImageCount, setUploadingImageCount] = useState(0);
 
-  valueRef.current = value;
-  onChangeRef.current = onChange;
-  onPasteImageRef.current = onPasteImage;
+  // 同步最新 props 到 ref，供上传命令等事件回调在触发时读取
+  useLayoutEffect(() => {
+    valueRef.current = value;
+    onChangeRef.current = onChange;
+    onPasteImageRef.current = onPasteImage;
+  });
 
   const uploadImageCommand = useImageUploadCommand(
     rootRef,

@@ -11,7 +11,7 @@ COPY web/ .
 
 RUN pnpm build
 
-FROM golang:1.25-alpine AS server-builder
+FROM golang:1.27.2-alpine AS server-builder
 
 WORKDIR /app/server
 
@@ -25,7 +25,7 @@ COPY server/ .
 
 RUN CGO_ENABLED=1 GOOS=linux go build -o /out/fast_ship ./cmd/server
 
-FROM alpine:3.19
+FROM alpine:3.24
 
 WORKDIR /app
 
