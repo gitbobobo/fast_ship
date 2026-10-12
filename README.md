@@ -33,12 +33,12 @@
 
 ## 技术栈
 
-- `server/`：Go 1.25 + Gin + GORM + SQLite（WAL）
+- `server/`：Go 1.27 + Gin + GORM + SQLite（WAL）
 - `web/`：React 19 + Vite + Tailwind CSS 4 + React Router + TanStack Query + Zustand
 
 ## 快速开始
 
-环境要求：Go 1.25、Node.js 22+、pnpm。
+环境要求：Go 1.27、Node.js 22.13+、pnpm。
 
 ```bash
 pnpm --dir web install

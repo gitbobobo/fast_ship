@@ -5,7 +5,7 @@ import { defineConfig } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 
-const appVersion = fs.readFileSync(path.resolve(__dirname, "../VERSION"), "utf-8").trim()
+const appVersion = fs.readFileSync(path.resolve(import.meta.dirname, "../VERSION"), "utf-8").trim()
 
 export default defineConfig({
   define: {
@@ -14,7 +14,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   server: {
