@@ -69,6 +69,23 @@ export function useImageUploads(environmentId: string) {
     [environmentId],
   );
 
+  /** 当前输入框或停放草稿里都可能持有同一条；停放中不删上游。 */
+  const patchByKey = useCallback(
+    (key: string, patch: (image: ComposerImage) => ComposerImage) => {
+      const parked = parkedRef.current;
+      if (parked?.some((i) => i.key === key)) {
+        parkedRef.current = parked.map((i) => (i.key === key ? patch(i) : i));
+        return true;
+      }
+      if (ref.current.some((i) => i.key === key)) {
+        commit(ref.current.map((i) => (i.key === key ? patch(i) : i)));
+        return true;
+      }
+      return false;
+    },
+    [commit],
+  );
+
   const add = useCallback(
     (files: File[], tag?: string) => {
       const added = files.map((file): [File, ComposerImage] => {
@@ -90,34 +107,29 @@ export function useImageUploads(environmentId: string) {
         if (image.status === "error") continue;
         threadApi.uploadAttachment(environmentId, file).then(
           (attachment) => {
-            if (!ref.current.some((i) => i.key === image.key)) {
+            if (
+              !patchByKey(image.key, (i) => ({
+                ...i,
+                status: "done",
+                attachment,
+              }))
+            ) {
               void threadApi
                 .deleteAttachment(environmentId, attachment.id)
                 .catch(() => undefined);
-              return;
             }
-            commit(
-              ref.current.map((i) =>
-                i.key === image.key ? { ...i, status: "done", attachment } : i,
-              ),
-            );
           },
-          (err: unknown) =>
-            commit(
-              ref.current.map((i) =>
-                i.key === image.key
-                  ? {
-                      ...i,
-                      status: "error",
-                      error: err instanceof Error ? err.message : "上传失败",
-                    }
-                  : i,
-              ),
-            ),
+          (err: unknown) => {
+            patchByKey(image.key, (i) => ({
+              ...i,
+              status: "error",
+              error: err instanceof Error ? err.message : "上传失败",
+            }));
+          },
         );
       }
     },
-    [environmentId, commit],
+    [environmentId, commit, patchByKey],
   );
 
   const remove = useCallback(
@@ -163,12 +175,30 @@ export function useImageUploads(environmentId: string) {
     );
   }, [commit]);
 
-  /** 退出/保存排队编辑：把停着的草稿图片放回输入框。 */
-  const restoreParked = useCallback(() => {
-    const parked = parkedRef.current;
-    parkedRef.current = null;
-    commit(parked ?? []);
-  }, [commit]);
+  /**
+   * 退出/保存排队编辑：把停着的草稿图片放回输入框。
+   * 退出未保存时丢掉编辑中新上传的图；保存成功则保留（已写进排队消息）。
+   */
+  const restoreParked = useCallback(
+    (opts?: { discardUnsaved?: boolean }) => {
+      const parked = parkedRef.current;
+      const parkedKeys = new Set((parked ?? []).map((i) => i.key));
+      for (const image of ref.current) {
+        if (
+          opts?.discardUnsaved &&
+          !image.existing &&
+          !parkedKeys.has(image.key)
+        ) {
+          discard(image);
+        } else {
+          dispose(image);
+        }
+      }
+      parkedRef.current = null;
+      commit(parked ?? []);
+    },
+    [commit, discard],
+  );
 
   /** 消息已发出：附件已被引用，只丢本地引用，不删上游文件。 */
   const clear = useCallback(() => {

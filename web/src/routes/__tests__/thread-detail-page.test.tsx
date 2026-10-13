@@ -387,6 +387,93 @@ describe("ThreadDetailPage", () => {
       expect(api.deleteAttachment).not.toHaveBeenCalled();
     });
 
+    it("keeps a draft image that finishes uploading while queue-editing", async () => {
+      const user = userEvent.setup();
+      let finish!: (attachment: {
+        type: "image";
+        id: string;
+        name: string;
+        mime_type: string;
+        size_bytes: number;
+      }) => void;
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      api.uploadAttachment.mockReturnValue(
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      );
+      api.deleteAttachment.mockResolvedValue(null);
+      await renderPage();
+      const file = new File([new Uint8Array([1, 2, 3, 4])], "draft.png", { type: "image/png" });
+      await user.upload(screen.getByTestId("image-input"), file);
+      expect(await screen.findByLabelText("上传中")).toBeInTheDocument();
+      await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
+      await act(async () =>
+        finish({
+          type: "image",
+          id: "att-draft",
+          name: "draft.png",
+          mime_type: "image/png",
+          size_bytes: 4,
+        }),
+      );
+      expect(api.deleteAttachment).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "退出编辑" }));
+      expect(await screen.findByLabelText("移除图片 draft.png")).toBeInTheDocument();
+      expect(screen.queryByLabelText("上传中")).toBeNull();
+      expect(api.deleteAttachment).not.toHaveBeenCalled();
+    });
+
+    it("deletes images added during queue edit when exiting without saving", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      api.uploadAttachment
+        .mockResolvedValueOnce({
+          type: "image",
+          id: "att-draft",
+          name: "draft.png",
+          mime_type: "image/png",
+          size_bytes: 4,
+        })
+        .mockResolvedValueOnce({
+          type: "image",
+          id: "att-edit",
+          name: "edit.png",
+          mime_type: "image/png",
+          size_bytes: 4,
+        });
+      api.deleteAttachment.mockResolvedValue(null);
+      await renderPage();
+      await user.upload(
+        screen.getByTestId("image-input"),
+        new File([new Uint8Array([1, 2, 3, 4])], "draft.png", { type: "image/png" }),
+      );
+      expect(await screen.findByLabelText("移除图片 draft.png")).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByLabelText("上传中")).toBeNull());
+      await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
+      await user.upload(
+        screen.getByTestId("image-input"),
+        new File([new Uint8Array([5, 6, 7, 8])], "edit.png", { type: "image/png" }),
+      );
+      expect(await screen.findByLabelText("移除图片 edit.png")).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByLabelText("上传中")).toBeNull());
+      await user.click(screen.getByRole("button", { name: "退出编辑" }));
+      await waitFor(() => expect(api.deleteAttachment).toHaveBeenCalledWith("e1", "att-edit"));
+      expect(screen.getByLabelText("移除图片 draft.png")).toBeInTheDocument();
+      expect(screen.queryByLabelText("移除图片 edit.png")).toBeNull();
+      expect(api.deleteAttachment).not.toHaveBeenCalledWith("e1", "att-draft");
+    });
+
     it("shows a held queue and resumes it", async () => {
       const user = userEvent.setup();
       detail.mockResolvedValue(
