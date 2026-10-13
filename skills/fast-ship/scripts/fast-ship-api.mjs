@@ -8,7 +8,7 @@
 // (github-upstream-error)`), so the reason survives callers
 // piping stdout into tail/jq. Transport failures and 5xx get one
 // automatic retry, but only for calls the API documents as replay-safe
-// (GET, pull-requests attach/sync, collab consensus/summary writes and
+// (GET, pull-requests attach/sync, log-chunk uploads, collab writes and
 // deletes); a response whose body cannot be read is reported with its
 // status, never resent.
 //
@@ -113,19 +113,23 @@ function loadConfig() {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Only calls the API documents as replay-safe get resent automatically:
-// every GET, the pull-requests attach/sync POSTs (attach dedupes by
-// issue+PR, sync only refreshes rows), and collab consensus/summary PUT
-// and DELETE (repeat calls return success). Everything else — issue and
-// asset creates, password change, log clears, PR detach and other
-// non-idempotent deletes — is never resent: a lost or 5xx response does
-// not prove the server did not apply it.
+// every GET; the pull-requests attach/sync POSTs (attach dedupes by
+// issue+PR, sync only refreshes rows); log-chunk uploads (repeat
+// (run_id, chunk_id) returns duplicate:true without inserting); and
+// collab consensus/summary PUT plus the collab DELETEs (repeat calls
+// return success). Everything else — issue and asset creates, password
+// change, log clears, PR detach and other non-idempotent deletes — is
+// never resent: a lost or 5xx response does not prove the server did not
+// apply it.
 function retryable(method, path) {
   const p = path.split('?')[0];
   if (method === 'GET') return true;
-  if (method === 'POST') return /\/pull-requests(?:\/sync)?$/.test(p);
+  if (method === 'POST') {
+    return /\/pull-requests(?:\/sync)?$/.test(p) || /\/api\/projects\/[^/]+\/logs$/.test(p);
+  }
   return (
     (method === 'PUT' || method === 'DELETE') &&
-    /\/collab\/(?:consensus|summary)$/.test(p)
+    /\/collab(?:\/(?:consensus|summary))?$/.test(p)
   );
 }
 
