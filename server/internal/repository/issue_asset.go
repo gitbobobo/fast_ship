@@ -22,6 +22,11 @@ func (r *IssueAssetRepository) CreateTx(tx *gorm.DB, asset *model.IssueAsset) er
 	return tx.Create(asset).Error
 }
 
+// Transaction 在同一事务内执行 fc，供 service 层聚合多个资产操作原子提交。
+func (r *IssueAssetRepository) Transaction(fc func(tx *gorm.DB) error) error {
+	return r.db.Transaction(fc)
+}
+
 func (r *IssueAssetRepository) FindByID(id string) (*model.IssueAsset, error) {
 	var asset model.IssueAsset
 	if err := r.db.Where("id = ?", id).First(&asset).Error; err != nil {

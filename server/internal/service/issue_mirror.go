@@ -304,7 +304,11 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 		}); err != nil {
 			return nil, errs.ErrInternal
 		}
-	} else if err := persistIssue(m.issueRepo.DB()); err != nil {
+	} else if meta == nil {
+		if err := m.issueRepo.Create(issue); err != nil {
+			return nil, errs.ErrInternal
+		}
+	} else if err := m.issueRepo.Save(issue); err != nil {
 		return nil, errs.ErrInternal
 	}
 
