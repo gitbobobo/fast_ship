@@ -338,6 +338,10 @@ describe("NewThreadPage", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(api.create).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("textbox", { name: "消息内容" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "运行环境" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "项目" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "工作区" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "模型" })).toBeDisabled();
     fireEvent.paste(screen.getByRole("textbox", { name: "消息内容" }), {
       clipboardData: {
         files: [new File([new Uint8Array([1, 2, 3])], "x.png", { type: "image/png" })],
