@@ -5941,6 +5941,7 @@ ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` �
 | `activity.stopping` | boolean | 是 | 停止请求已下发且尚未落定：活动 run 的最近一条 run_interrupt_request 条目晚于同 run 的最近一条 run_interrupt_result |
 | `activity.has_pending_requests` | boolean | 是 | 有等待用户处理的运行时请求（审批/提问/代答 secret） |
 | `activity.pending_background_task_count` | integer | 是 | 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0） |
+| `access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
 
 **错误**
 

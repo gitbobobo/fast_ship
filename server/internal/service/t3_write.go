@@ -35,6 +35,12 @@ func (s *T3ThreadsService) t3WriteBudget(ctx context.Context) (context.Context, 
 	return context.WithTimeout(ctx, s.budgets.ThreadDetail)
 }
 
+// RequireOperate 给 handler 在解码 body 之前调用：只读 40300，环境不存在 40417。
+func (s *T3ThreadsService) RequireOperate(ctx context.Context, userID, envID string) error {
+	_, err := s.loadEnvForWrite(ctx, userID, envID)
+	return err
+}
+
 // loadEnvForWrite 解析环境并施加 operate 守卫（40300），凭证不可用时报
 // 「请重新配对」。
 func (s *T3ThreadsService) loadEnvForWrite(ctx context.Context, userID, envID string) (*model.T3Environment, error) {
@@ -297,11 +303,8 @@ func (s *T3ThreadsService) WorkspaceOptions(ctx context.Context, userID, envID, 
 	if cursor != nil {
 		listInput["cursor"] = *cursor
 	}
-	refsValue, err := session.call(ctx, "vcs.listRefs", listInput)
-	if err != nil {
-		return nil, s.upstreamError(err)
-	}
-	var refsResult struct {
+
+	type listRefsPage struct {
 		Refs []struct {
 			Name         string  `json:"name"`
 			IsRemote     *bool   `json:"isRemote"`
@@ -313,28 +316,56 @@ func (s *T3ThreadsService) WorkspaceOptions(ctx context.Context, userID, envID, 
 		NextCursor       *int  `json:"nextCursor"`
 		TotalCount       int   `json:"totalCount"`
 	}
+	collectPage := func(page listRefsPage) []api.T3WorkspaceRef {
+		refs := make([]api.T3WorkspaceRef, 0, len(page.Refs))
+		for _, ref := range page.Refs {
+			kind := "local"
+			if api.Deref(ref.IsRemote) {
+				kind = "remote"
+			}
+			item := api.T3WorkspaceRef{Name: ref.Name, Kind: kind}
+			if ref.IsDefault != nil {
+				item.IsDefault = api.Ptr(*ref.IsDefault)
+			}
+			if ref.WorktreePath != nil && *ref.WorktreePath != "" {
+				item.WorktreePath = api.Ptr(*ref.WorktreePath)
+			}
+			refs = append(refs, item)
+		}
+		return refs
+	}
+
+	refsValue, err := session.call(ctx, "vcs.listRefs", listInput)
+	if err != nil {
+		return nil, s.upstreamError(err)
+	}
+	var refsResult listRefsPage
 	if err := json.Unmarshal(refsValue, &refsResult); err != nil {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "引用列表解析失败: "+shortenT3Error(err))
 	}
-
-	refs := make([]api.T3WorkspaceRef, 0, len(refsResult.Refs))
-	for _, ref := range refsResult.Refs {
-		kind := "local"
-		if api.Deref(ref.IsRemote) {
-			kind = "remote"
-		}
-		item := api.T3WorkspaceRef{Name: ref.Name, Kind: kind}
-		if ref.IsDefault != nil {
-			item.IsDefault = api.Ptr(*ref.IsDefault)
-		}
-		if ref.WorktreePath != nil && *ref.WorktreePath != "" {
-			item.WorktreePath = api.Ptr(*ref.WorktreePath)
-		}
-		refs = append(refs, item)
-	}
-
+	refs := collectPage(refsResult)
 	nextCursor := refsResult.NextCursor
 	totalCount := refsResult.TotalCount
+
+	// 未指定 cursor 时自动跟页，避免新建线程下拉只看到第一页分支。
+	// 显式 cursor 仍只取该页（给还想自己分页的调用方）。
+	const maxRefPages = 8
+	for page := 1; cursor == nil && nextCursor != nil && page < maxRefPages; page++ {
+		listInput["cursor"] = *nextCursor
+		refsValue, err = session.call(ctx, "vcs.listRefs", listInput)
+		if err != nil {
+			return nil, s.upstreamError(err)
+		}
+		var more listRefsPage
+		if err := json.Unmarshal(refsValue, &more); err != nil {
+			return nil, errs.New(errs.ErrT3Upstream.Code, "引用列表解析失败: "+shortenT3Error(err))
+		}
+		refs = append(refs, collectPage(more)...)
+		nextCursor = more.NextCursor
+		if more.TotalCount > totalCount {
+			totalCount = more.TotalCount
+		}
+	}
 	return &T3WorkspaceOptions{
 		ProjectId:             projectID,
 		Cwd:                   workspaceRoot,

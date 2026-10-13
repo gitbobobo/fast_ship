@@ -138,6 +138,8 @@ export interface ThreadDetail {
   items: ThreadItem[];
   queue: ThreadQueue;
   activity: ThreadActivity;
+  /** 该环境会话能力，与环境列表 access 同口径；详情已带，不必等全量探测。 */
+  access: EnvironmentAccess;
 }
 
 export interface ModelOption {
@@ -315,20 +317,43 @@ export const threadApi = {
         .json<ApiResponse<ComposerOptions>>(),
     ),
 
-  workspaceOptions: (
+  workspaceOptions: async (
     environmentId: string,
     projectId: string,
     query: string,
     signal?: AbortSignal,
-  ) =>
-    decodeApiError(
-      api
-        .get(
-          `${envPath(environmentId)}/projects/${encodeURIComponent(projectId)}/workspace-options`,
-          { ...options(signal), searchParams: query ? { query } : undefined },
-        )
-        .json<ApiResponse<WorkspaceOptions>>(),
-    ),
+  ) => {
+    const collected: WorkspaceRef[] = [];
+    let cursor: number | undefined;
+    let last: ApiResponse<WorkspaceOptions> | undefined;
+    for (let page = 0; page < 8; page += 1) {
+      const searchParams: Record<string, string | number> = {};
+      if (query) searchParams.query = query;
+      if (cursor != null) searchParams.cursor = cursor;
+      const response = await decodeApiError(
+        api
+          .get(
+            `${envPath(environmentId)}/projects/${encodeURIComponent(projectId)}/workspace-options`,
+            {
+              ...options(signal),
+              searchParams:
+                Object.keys(searchParams).length > 0 ? searchParams : undefined,
+            },
+          )
+          .json<ApiResponse<WorkspaceOptions>>(),
+      );
+      last = response;
+      if (!response.data) break;
+      collected.push(...(response.data.refs ?? []));
+      if (response.data.next_cursor == null) break;
+      cursor = response.data.next_cursor;
+    }
+    if (!last?.data) return last as ApiResponse<WorkspaceOptions>;
+    return {
+      ...last,
+      data: { ...last.data, refs: collected, next_cursor: null },
+    };
+  },
 
   create: (environmentId: string, input: CreateThreadInput) =>
     write(

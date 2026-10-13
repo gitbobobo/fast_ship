@@ -32,6 +32,7 @@ function response(status: ThreadStatus, title = "T"): { data: ThreadDetail } {
       items: [],
       queue: makeQueue(),
       activity: makeActivity(),
+      access: "operate",
     },
   };
 }

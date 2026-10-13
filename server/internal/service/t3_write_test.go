@@ -968,6 +968,29 @@ func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 	if !sawCursor {
 		t.Fatalf("listRefs pagination params not forwarded")
 	}
+
+	e.fake.mu.Lock()
+	e.fake.vcsRefsPages = []json.RawMessage{
+		mustJSON(map[string]any{
+			"refs":       []any{map[string]any{"name": "main", "isRemote": false}},
+			"nextCursor": 4, "totalCount": 2,
+		}),
+		mustJSON(map[string]any{
+			"refs":       []any{map[string]any{"name": "feat", "isRemote": false}},
+			"nextCursor": nil, "totalCount": 2,
+		}),
+	}
+	e.fake.mu.Unlock()
+	followed, err := e.th.WorkspaceOptions(ctx, userID, envID, "p-1", "", nil)
+	if err != nil {
+		t.Fatalf("workspace follow: %v", err)
+	}
+	if len(followed.Refs) != 2 || followed.Refs[0].Name != "main" || followed.Refs[1].Name != "feat" {
+		t.Fatalf("followed refs = %+v", followed.Refs)
+	}
+	if followed.NextCursor != nil {
+		t.Fatalf("auto-follow should drain next_cursor, got %+v", followed.NextCursor)
+	}
 }
 
 // TestT3DetailQueueAndActivity 覆盖详情的 queue/activity 派生（对齐

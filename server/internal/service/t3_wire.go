@@ -360,11 +360,16 @@ func normalizeT3ThreadDetail(env *model.T3Environment, projection json.RawMessag
 		}
 	}
 	enrichT3RequestItems(items, parsed.RuntimeRequests)
+	access := T3EnvironmentAccessReadOnly
+	if t3HasOperateScope(env.BearerScope) {
+		access = T3EnvironmentAccessOperate
+	}
 	return &T3ThreadDetail{
 		Thread:   summary,
 		Items:    items,
 		Queue:    *deriveT3ThreadQueue(parsed),
 		Activity: *deriveT3ThreadActivity(parsed, shell),
+		Access:   access,
 	}, nil
 }
 

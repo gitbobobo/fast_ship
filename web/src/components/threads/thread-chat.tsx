@@ -39,15 +39,12 @@ export function ThreadChat({
   environmentId,
   threadId,
   canOperate,
-  environmentKnown,
   stale,
 }: {
   detail: ThreadDetail;
   environmentId: string;
   threadId: string;
   canOperate: boolean;
-  /** 环境列表已加载：未加载时不急着判定「只读」。 */
-  environmentKnown: boolean;
   stale: boolean;
 }) {
   const queue: ThreadQueue = detail.queue ?? {
@@ -83,14 +80,14 @@ export function ThreadChat({
       draft: editing ? editing.draft : text,
     });
     setText(item.text);
-    uploads.reset(item.attachments ?? []);
+    uploads.parkAndShowExisting(item.attachments ?? []);
     edit.reset();
   };
 
   const exitEdit = () => {
     if (!editing) return;
     setText(editing.draft);
-    uploads.reset([]);
+    uploads.restoreParked();
     setEditing(null);
     edit.reset();
   };
@@ -108,7 +105,7 @@ export function ThreadChat({
             : attachments,
         });
         setText(editing.draft);
-        uploads.clear();
+        uploads.restoreParked();
         setEditing(null);
         return;
       }
@@ -145,14 +142,12 @@ export function ThreadChat({
         onEdit={startEdit}
       />
       {!canOperate ? (
-        environmentKnown ? (
-          <p
-            role="note"
-            className="rounded-lg bg-muted/50 px-3 py-2 text-center text-sm text-muted-foreground"
-          >
-            {READ_ONLY_HINT}
-          </p>
-        ) : null
+        <p
+          role="note"
+          className="rounded-lg bg-muted/50 px-3 py-2 text-center text-sm text-muted-foreground"
+        >
+          {READ_ONLY_HINT}
+        </p>
       ) : archived ? (
         <p className="rounded-lg bg-muted/50 px-3 py-2 text-center text-sm text-muted-foreground">
           线程已归档，无法发送消息
