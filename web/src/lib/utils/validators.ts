@@ -52,7 +52,7 @@ export const apiKeySchema = z.object({
 
 export const githubTokenSchema = z.object({
   title: z.string().min(1, "请输入 Token 标题").max(100),
-  token: z.string().min(1, "请输入 GitHub Token"),
+  token: z.string().trim().min(1, "请输入 GitHub Token"),
 });
 
 export const githubTokenTitleSchema = z.object({

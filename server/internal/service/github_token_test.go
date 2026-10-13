@@ -12,6 +12,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 func newTestGitHubTokenService(svc *testServices, detect func(ctx context.Context, token string) ghclient.TokenDetection) *GitHubTokenService {
@@ -372,5 +373,95 @@ func TestGitHubTokenService_StaleDetectionDoesNotRestoreCiphertext(t *testing.T)
 	}
 	if after.DetectionDetail == "stale" {
 		t.Fatal("stale detection must not apply after fingerprint changed")
+	}
+}
+
+func TestGitHubTokenService_Create_TrimsPlaintext(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-token-trim")
+	service := newTestGitHubTokenService(svc, func(_ context.Context, token string) ghclient.TokenDetection {
+		if token != "ghp_padded" {
+			t.Fatalf("detect must see trimmed plaintext, got %q", token)
+		}
+		return detectOKClassic(context.Background(), token)
+	})
+
+	first, err := service.Create(user.ID, &CreateGitHubTokenRequest{Title: "padded", Token: "  ghp_padded  "})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	second, err := service.Create(user.ID, &CreateGitHubTokenRequest{Title: "again", Token: "ghp_padded"})
+	if err != nil {
+		t.Fatalf("dedupe: %v", err)
+	}
+	if second.Id != first.Id {
+		t.Fatalf("trimmed plaintext must share fingerprint, got %s vs %s", first.Id, second.Id)
+	}
+}
+
+func TestGitHubTokenService_Create_WhitespaceOnlyRejected(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-token-blank")
+	service := newTestGitHubTokenService(svc, detectOKClassic)
+	_, err := service.Create(user.ID, &CreateGitHubTokenRequest{Title: "blank", Token: "   "})
+	if !errors.Is(err, errs.ErrInvalidParams) {
+		t.Fatalf("expected ErrInvalidParams, got %v", err)
+	}
+}
+
+func TestGitHubTokenService_Update_ResetsDetectionBeforeDetect(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-token-reset-detect")
+	service := newTestGitHubTokenService(svc, detectOKClassic)
+	created, err := service.Create(user.ID, &CreateGitHubTokenRequest{Title: "live", Token: "ghp_old"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sawUnchecked := false
+	service.detect = func(_ context.Context, token string) ghclient.TokenDetection {
+		var row model.UserGitHubToken
+		if err := svc.db.First(&row, "id = ?", created.Id).Error; err != nil {
+			t.Fatalf("load during detect: %v", err)
+		}
+		if row.DetectionStatus == model.TokenDetectionUnchecked && row.DetectionLogin == "" && row.DetectedAt == nil {
+			sawUnchecked = true
+		}
+		if token != "ghp_new" {
+			t.Fatalf("detect must receive new plaintext, got %q", token)
+		}
+		return ghclient.TokenDetection{Status: ghclient.DetectStatusOK, TokenType: ghclient.DetectTypeUnknown, Login: "new-login"}
+	}
+	replaced, err := service.Update(user.ID, created.Id, &UpdateGitHubTokenRequest{Token: apiPtr(" ghp_new ")})
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if !sawUnchecked {
+		t.Fatal("replace must persist unchecked detection before running detect")
+	}
+	if replaced.DetectionLogin != "new-login" {
+		t.Fatalf("expected re-detection, got %+v", replaced)
+	}
+}
+
+func TestUserGitHubTokenRepository_UpdateDoesNotResurrect(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-token-no-upsert")
+	service := newTestGitHubTokenService(svc, detectOKClassic)
+	created, err := service.Create(user.ID, &CreateGitHubTokenRequest{Title: "gone", Token: "ghp_gone"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stored := storedTokenByTitle(t, svc, "gone")
+	if err := svc.db.Where("id = ?", created.Id).Delete(&model.UserGitHubToken{}).Error; err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	stored.Title = "resurrected"
+	if err := svc.tokenRepo.Update(stored); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected ErrRecordNotFound, got %v", err)
+	}
+	var count int64
+	svc.db.Model(&model.UserGitHubToken{}).Where("id = ?", created.Id).Count(&count)
+	if count != 0 {
+		t.Fatal("deleted token must not be inserted back")
 	}
 }

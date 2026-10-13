@@ -41,8 +41,8 @@ export function GithubTokenCreateDialog({
   } = useForm<GithubTokenInput>({ resolver: zodResolver(githubTokenSchema) });
 
   const handleClose = () => {
-    onOpenChange(false);
     reset();
+    onOpenChange(false);
   };
 
   const onSubmit = async (data: GithubTokenInput) => {
@@ -60,7 +60,7 @@ export function GithubTokenCreateDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => (next ? undefined : handleClose())}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>添加 GitHub Token</DialogTitle>

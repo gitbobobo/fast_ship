@@ -1,9 +1,16 @@
 package repository
 
 import (
+	"errors"
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 )
+
+// ErrGitHubTokenMissing 表示写入项目引用时，对应的用户 Token 行已经不在。
+// 与 CheckTokenReference 之后、项目行落库之前被删掉的竞态对应。
+var ErrGitHubTokenMissing = errors.New("referenced github token missing")
 
 type ProjectRepository struct {
 	db *gorm.DB
@@ -14,7 +21,48 @@ func NewProjectRepository(db *gorm.DB) *ProjectRepository {
 }
 
 func (r *ProjectRepository) Create(project *model.Project) error {
-	return r.db.Create(project).Error
+	now := time.Now().UTC()
+	if project.CreatedAt.IsZero() {
+		project.CreatedAt = now
+	}
+	if project.UpdatedAt.IsZero() {
+		project.UpdatedAt = now
+	}
+	pred, args := ownedTokenWritePredicate(project.UserID, project.PublicGitHubTokenID, project.CodeGitHubTokenID)
+	args = append([]interface{}{
+		project.ID,
+		project.UserID,
+		project.Name,
+		project.Description,
+		project.GithubOwner,
+		project.GithubRepo,
+		project.PublicGitHubTokenID,
+		project.CodeGitHubTokenID,
+		project.CreatedAt,
+		project.UpdatedAt,
+	}, args...)
+	res := r.db.Exec(`
+		INSERT INTO projects (
+			id, user_id, name, description, github_owner, github_repo,
+			public_github_token_id, code_github_token_id, created_at, updated_at
+		)
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		WHERE `+pred, args...)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrGitHubTokenMissing
+	}
+	return nil
+}
+
+// ownedTokenWritePredicate 把「空引用合法，非空必须仍属于该用户」写进同一条
+// INSERT/UPDATE，避免 CheckTokenReference 与项目行写入之间 Token 被删掉。
+func ownedTokenWritePredicate(userID, publicID, codeID string) (string, []interface{}) {
+	return `(? = '' OR EXISTS (SELECT 1 FROM user_github_tokens WHERE id = ? AND user_id = ?))
+		AND (? = '' OR EXISTS (SELECT 1 FROM user_github_tokens WHERE id = ? AND user_id = ?))`,
+		[]interface{}{publicID, publicID, userID, codeID, codeID, userID}
 }
 
 func (r *ProjectRepository) FindByID(id, userID string) (*model.Project, error) {
@@ -101,7 +149,33 @@ func (r *ProjectRepository) GetIssueCounts(projectIDs []string) (map[string]Proj
 }
 
 func (r *ProjectRepository) Update(project *model.Project) error {
-	return r.db.Save(project).Error
+	pred, args := ownedTokenWritePredicate(project.UserID, project.PublicGitHubTokenID, project.CodeGitHubTokenID)
+	res := r.db.Model(&model.Project{}).
+		Where("id = ? AND user_id = ?", project.ID, project.UserID).
+		Where(pred, args...).
+		Updates(map[string]interface{}{
+			"name":                   project.Name,
+			"description":            project.Description,
+			"github_owner":           project.GithubOwner,
+			"github_repo":            project.GithubRepo,
+			"public_github_token_id": project.PublicGitHubTokenID,
+			"code_github_token_id":   project.CodeGitHubTokenID,
+			"updated_at":             time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		return nil
+	}
+	var n int64
+	if err := r.db.Model(&model.Project{}).Where("id = ? AND user_id = ?", project.ID, project.UserID).Count(&n).Error; err != nil {
+		return err
+	}
+	if n == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return ErrGitHubTokenMissing
 }
 
 func (r *ProjectRepository) Delete(id, userID string) error {

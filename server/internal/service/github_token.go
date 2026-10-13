@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -53,6 +54,25 @@ func githubTokenPrefix(plaintext string) string {
 		return plaintext[:8]
 	}
 	return plaintext
+}
+
+// normalizeGitHubTokenPlaintext 去掉首尾空白；空白即视为未提供。
+// GitHub PAT 不含空格，粘贴带来的空格会让指纹对不上、检测 401。
+func normalizeGitHubTokenPlaintext(raw string) (string, *errs.AppError) {
+	token := strings.TrimSpace(raw)
+	if token == "" {
+		return "", errs.ErrInvalidParams
+	}
+	return token, nil
+}
+
+func resetDetection(token *model.UserGitHubToken) {
+	token.DetectionStatus = model.TokenDetectionUnchecked
+	token.DetectionType = model.TokenTypeUnknown
+	token.DetectionScopes = "[]"
+	token.DetectionLogin = ""
+	token.DetectionDetail = ""
+	token.DetectedAt = nil
 }
 
 // toGitHubTokenResponse 把存储模型投影为契约类型；检测 scopes 列存 JSON 数组字符串。
@@ -109,7 +129,11 @@ func (s *GitHubTokenService) List(userID string) ([]api.GitHubToken, error) {
 // 不修改其标题。新记录保存后同步做一次检测：检测失败（网络/5xx）或凭证无效
 // （401）都不回滚保存——HTTP 仍 200，状态落在 detection_status 里。
 func (s *GitHubTokenService) Create(userID string, req *CreateGitHubTokenRequest) (*api.GitHubToken, error) {
-	fingerprint := githubTokenFingerprint(req.Token)
+	plaintext, appErr := normalizeGitHubTokenPlaintext(req.Token)
+	if appErr != nil {
+		return nil, appErr
+	}
+	fingerprint := githubTokenFingerprint(plaintext)
 	if existing, err := s.tokenRepo.FindByFingerprint(userID, fingerprint); err == nil {
 		return s.respond(existing, false, userID)
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -122,13 +146,13 @@ func (s *GitHubTokenService) Create(userID string, req *CreateGitHubTokenRequest
 		UserID:           userID,
 		Title:            req.Title,
 		TokenFingerprint: fingerprint,
-		TokenPrefix:      githubTokenPrefix(req.Token),
+		TokenPrefix:      githubTokenPrefix(plaintext),
 		DetectionStatus:  model.TokenDetectionUnchecked,
 		DetectionType:    model.TokenTypeUnknown,
 		DetectionScopes:  "[]",
 	}
 	var err error
-	token.TokenEncrypted, err = crypto.Encrypt([]byte(req.Token), []byte(s.cfg.Encryption.Key))
+	token.TokenEncrypted, err = crypto.Encrypt([]byte(plaintext), []byte(s.cfg.Encryption.Key))
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -142,7 +166,7 @@ func (s *GitHubTokenService) Create(userID string, req *CreateGitHubTokenRequest
 		return nil, errs.ErrInternal
 	}
 
-	updated, appErr := s.runDetection(token, req.Token, now)
+	updated, appErr := s.runDetection(token, plaintext, now)
 	if appErr != nil {
 		// 检测通道故障（而非检测结果失败）不阻断保存：记录保持 unchecked。
 		s.logger.Warn("github token detection skipped", zap.String("token_id", token.ID), zap.String("error", appErr.Message))
@@ -164,8 +188,12 @@ func (s *GitHubTokenService) Update(userID, id string, req *UpdateGitHubTokenReq
 
 	newPlaintext := ""
 	replacing := false
-	if req.Token != nil && *req.Token != "" {
-		newPlaintext = *req.Token
+	if req.Token != nil {
+		normalized, appErr := normalizeGitHubTokenPlaintext(*req.Token)
+		if appErr != nil {
+			return nil, appErr
+		}
+		newPlaintext = normalized
 		replacing = true
 	}
 	if replacing {
@@ -186,11 +214,17 @@ func (s *GitHubTokenService) Update(userID, id string, req *UpdateGitHubTokenReq
 		token.TokenEncrypted = encrypted
 		token.TokenFingerprint = fingerprint
 		token.TokenPrefix = githubTokenPrefix(newPlaintext)
+		// 与新密文同一次写入把检测打回 unchecked，避免列表在检测完成前
+		// 用旧 login/status 搭配新 prefix。
+		resetDetection(token)
 	}
 	if req.Title != nil && *req.Title != "" {
 		token.Title = *req.Title
 	}
 	if err := s.tokenRepo.Update(token); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrGitHubTokenNotFound
+		}
 		if replacing && isUniqueConstraintError(err) {
 			existing, findErr := s.tokenRepo.FindByFingerprint(userID, token.TokenFingerprint)
 			if findErr == nil {

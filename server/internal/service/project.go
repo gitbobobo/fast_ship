@@ -96,6 +96,9 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	}
 
 	if err := s.projectRepo.Create(project); err != nil {
+		if errors.Is(err, repository.ErrGitHubTokenMissing) {
+			return nil, errs.ErrGitHubTokenNotFound
+		}
 		return nil, errs.ErrInternal
 	}
 
@@ -228,6 +231,12 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 	}
 
 	if err := s.projectRepo.Update(project); err != nil {
+		if errors.Is(err, repository.ErrGitHubTokenMissing) {
+			return nil, errs.ErrGitHubTokenNotFound
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
 		return nil, errs.ErrInternal
 	}
 

@@ -9,6 +9,8 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -257,6 +259,45 @@ func TestProjectServiceCreate_TokenReferenceValidation(t *testing.T) {
 				t.Fatalf("expected ErrGitHubTokenNotFound, got %v", err)
 			}
 		})
+	}
+}
+
+func TestProjectRepoCreate_RejectsMissingToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-repo-missing-token")
+	err := svc.projectRepo.Create(&model.Project{
+		ID:                  uuid.NewString(),
+		UserID:              user.ID,
+		Name:                "dangling-ref",
+		PublicGitHubTokenID: "gone-token-id",
+	})
+	if !errors.Is(err, repository.ErrGitHubTokenMissing) {
+		t.Fatalf("expected ErrGitHubTokenMissing, got %v", err)
+	}
+	err = svc.projectRepo.Create(&model.Project{
+		ID:     uuid.NewString(),
+		UserID: user.ID,
+		Name:   "no-tokens",
+	})
+	if err != nil {
+		t.Fatalf("empty token refs must be allowed, got %v", err)
+	}
+}
+
+func TestProjectRepoUpdate_RejectsDeletedToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-repo-update-gone")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "ghp_live")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = ""
+	})
+	if err := svc.db.Where("id = ?", token.ID).Delete(&model.UserGitHubToken{}).Error; err != nil {
+		t.Fatalf("delete token: %v", err)
+	}
+	project.Name = "renamed"
+	if err := svc.projectRepo.Update(project); !errors.Is(err, repository.ErrGitHubTokenMissing) {
+		t.Fatalf("expected ErrGitHubTokenMissing, got %v", err)
 	}
 }
 

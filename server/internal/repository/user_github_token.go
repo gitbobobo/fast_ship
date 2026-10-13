@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 )
@@ -45,7 +47,29 @@ func (r *UserGitHubTokenRepository) ListByUserID(userID string) ([]model.UserGit
 }
 
 func (r *UserGitHubTokenRepository) Update(token *model.UserGitHubToken) error {
-	return r.db.Save(token).Error
+	// 不用 Save：GORM 在主键非空且 UPDATE 0 行时会退化 INSERT，把刚删掉的行写回来。
+	res := r.db.Model(&model.UserGitHubToken{}).
+		Where("id = ? AND user_id = ?", token.ID, token.UserID).
+		Updates(map[string]interface{}{
+			"title":             token.Title,
+			"token_encrypted":   token.TokenEncrypted,
+			"token_fingerprint": token.TokenFingerprint,
+			"token_prefix":      token.TokenPrefix,
+			"detection_status":  token.DetectionStatus,
+			"detection_type":    token.DetectionType,
+			"detection_scopes":  token.DetectionScopes,
+			"detection_login":   token.DetectionLogin,
+			"detection_detail":  token.DetectionDetail,
+			"detected_at":       token.DetectedAt,
+			"updated_at":        time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 // UpdateDetection 只写检测列，并以加载时的指纹为条件：密钥已被替换或行已删除时
