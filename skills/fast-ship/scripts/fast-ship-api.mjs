@@ -7,9 +7,9 @@
 // message (`request returned status 502: 50200 GitHub API 调用失败
 // (github-upstream-error, retryable)`), so the reason survives callers
 // piping stdout into tail/jq. Transport failures and 5xx get one
-// automatic retry, but only where resending is provably safe (idempotent
-// methods and the documented-idempotent pull-requests POSTs); a response
-// whose body cannot be read is reported with its status, never resent.
+// automatic retry, but only for calls the API documents as replay-safe
+// (GET, PUT, pull-requests attach/sync, collab DELETE); a response whose
+// body cannot be read is reported with its status, never resent.
 //
 // Usage: node fast-ship-api.mjs <METHOD> <path> [body.json] [--verify [get-path]]
 
@@ -111,14 +111,19 @@ function loadConfig() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Only idempotent calls may be resent: GET/PUT/DELETE are upserts or
-// removals here, and POST is allowed solely on the pull-requests routes
-// the API documents as idempotent (attach dedupes by issue+PR, sync only
-// refreshes rows). Other POSTs create rows; a lost/5xx response does not
-// mean the server didn't apply them, so they are never auto-retried.
+// Only calls the API documents as replay-safe get retried: GET reads and
+// PUT upserts are idempotent across the board; POST is limited to the
+// pull-requests routes (attach dedupes by issue+PR, sync only refreshes
+// rows) and DELETE to collab blocks (200 even when already gone). Every
+// other write creates rows or is documented non-idempotent — PR detach
+// returns 40412 on replay — so it is never resent automatically: a lost
+// or 5xx response does not prove the server did not apply it.
 function retryable(method, path) {
-  if (method !== 'POST') return true;
-  return /\/pull-requests(?:\/sync)?$/.test(path.split('?')[0]);
+  const p = path.split('?')[0];
+  if (method === 'GET' || method === 'PUT') return true;
+  if (method === 'POST') return /\/pull-requests(?:\/sync)?$/.test(p);
+  if (method === 'DELETE') return /\/collab\/(?:consensus|summary)$/.test(p);
+  return false;
 }
 
 // Resolves to { status, ok, text, readError? }. Transient failures get
