@@ -45,7 +45,7 @@ function detailOf(
   status: ThreadDetail["thread"]["status"] = "idle",
   updatedAt = "2026-10-13T10:00:00Z",
   parentThreadId?: string,
-  extra: Partial<Pick<ThreadDetail, "queue" | "activity">> = {},
+  extra: Partial<Pick<ThreadDetail, "queue" | "activity" | "access">> = {},
 ) {
   return {
     data: {
@@ -67,6 +67,7 @@ function detailOf(
       items,
       queue: makeQueue(),
       activity: makeActivity(),
+      access: "operate",
       ...extra,
     },
   };
@@ -171,9 +172,7 @@ describe("ThreadDetailPage", () => {
   });
 
   it("is read only for read-only environments: no input, hint, no write actions", async () => {
-    envList.mockResolvedValue({
-      data: { items: [makeEnvironment({ access: "read-only", scopes: ["orchestration:read"] })] },
-    });
+    envList.mockImplementation(() => new Promise(() => undefined));
     detail.mockResolvedValue(
       detailOf(
         [item({ id: "1", type: "assistant_message", text: "hi" })],
@@ -181,6 +180,7 @@ describe("ThreadDetailPage", () => {
         undefined,
         undefined,
         {
+          access: "read-only",
           queue: makeQueue({
             items: [{ run_id: "r1", message_id: "m1", text: "排队中" }],
           }),
@@ -195,6 +195,14 @@ describe("ThreadDetailPage", () => {
     expect(screen.getByText("线程运行中，内容会自动更新。")).toBeInTheDocument();
     expect(screen.getByText("排队中")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "编辑" })).toBeNull();
+  });
+
+  it("shows the composer from detail access without waiting for the environment list", async () => {
+    envList.mockImplementation(() => new Promise(() => undefined));
+    mockDetail([]);
+    await renderPage();
+    expect(screen.getByRole("form", { name: "消息输入" })).toBeInTheDocument();
+    expect(screen.queryByText("该环境为只读会话，重新配对后可操作")).toBeNull();
   });
 
   describe("chat", () => {
@@ -349,6 +357,34 @@ describe("ThreadDetailPage", () => {
       await user.click(screen.getByRole("button", { name: "退出编辑" }));
       expect(box).toHaveValue("草稿");
       expect(api.editQueued).not.toHaveBeenCalled();
+    });
+
+    it("keeps unsent draft images when entering and leaving queue edit", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      api.uploadAttachment.mockResolvedValue({
+        type: "image",
+        id: "att-draft",
+        name: "draft.png",
+        mime_type: "image/png",
+        size_bytes: 4,
+      });
+      api.deleteAttachment.mockResolvedValue(null);
+      await renderPage();
+      const file = new File([new Uint8Array([1, 2, 3, 4])], "draft.png", { type: "image/png" });
+      await user.upload(screen.getByTestId("image-input"), file);
+      expect(await screen.findByLabelText("移除图片 draft.png")).toBeInTheDocument();
+      await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
+      expect(screen.queryByLabelText("移除图片 draft.png")).toBeNull();
+      expect(api.deleteAttachment).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "退出编辑" }));
+      expect(screen.getByLabelText("移除图片 draft.png")).toBeInTheDocument();
+      expect(api.deleteAttachment).not.toHaveBeenCalled();
     });
 
     it("shows a held queue and resumes it", async () => {

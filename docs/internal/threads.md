@@ -185,7 +185,8 @@ shell 快照解析（`projects[].workspaceRoot`），不接受前端任意 cwd�
   整体 deadline（25s < 前端 35s），**先读运行态、后读时间线**。运行态取 WS 快照
   面的可信 shell（活跃 + 归档，按线程 ID 找出，详情不过滤子代理）；时间线按
   HTTP 投影的 `visibleTurnItems` 归一化；审批/提问条目按投影 `runtimeRequests`
-  补齐 `request_status`/`response_capability`/`decision`；另派生 `queue`/`activity`。
+  补齐 `request_status`/`response_capability`/`decision`；另派生 `queue`/`activity`；
+  `access` 取该环境落库的 `orchestration:operate`（与环境列表同口径，不另探测）。
   上游 404 → 40418；凭证被拒 → 50202（带「请重新配对」指引）；shell 快照无此
   线程 → 50202（明确失败，不假 idle）。**归档面不可信时不下存在性结论**（G1）。
 - **条目正文**（GET .../items/:itemId）：先取可见时间线验证成员（40419），再从

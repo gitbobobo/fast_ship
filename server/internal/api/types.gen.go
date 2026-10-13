@@ -146,24 +146,6 @@ func (e T3ChatAttachmentType) Valid() bool {
 	}
 }
 
-// Defines values for T3EnvironmentAccess.
-const (
-	Operate  T3EnvironmentAccess = "operate"
-	ReadOnly T3EnvironmentAccess = "read-only"
-)
-
-// Valid indicates whether the value is a known member of the T3EnvironmentAccess enum.
-func (e T3EnvironmentAccess) Valid() bool {
-	switch e {
-	case Operate:
-		return true
-	case ReadOnly:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for T3EnvironmentStatus.
 const (
 	T3EnvironmentStatusDegraded    T3EnvironmentStatus = "degraded"
@@ -182,6 +164,24 @@ func (e T3EnvironmentStatus) Valid() bool {
 	case T3EnvironmentStatusRepair:
 		return true
 	case T3EnvironmentStatusUnreachable:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for T3EnvironmentAccess.
+const (
+	Operate  T3EnvironmentAccess = "operate"
+	ReadOnly T3EnvironmentAccess = "read-only"
+)
+
+// Valid indicates whether the value is a known member of the T3EnvironmentAccess enum.
+func (e T3EnvironmentAccess) Valid() bool {
+	switch e {
+	case Operate:
+		return true
+	case ReadOnly:
 		return true
 	default:
 		return false
@@ -1810,16 +1810,16 @@ type T3Environment struct {
 	UpdatedAt string              `json:"updated_at"`
 }
 
-// T3EnvironmentAccess 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
-// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
-// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
-type T3EnvironmentAccess string
-
 // T3EnvironmentStatus 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
 // repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
 // degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
 // 其余数据仍返回
 type T3EnvironmentStatus string
+
+// T3EnvironmentAccess 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
+// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
+// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+type T3EnvironmentAccess string
 
 // T3ModelOption T3 模型选项（canonical `{id,value}`；value 为 string 或 boolean）
 type T3ModelOption struct {
@@ -1862,6 +1862,11 @@ type T3ThreadActivity struct {
 
 // T3ThreadDetail defines model for T3ThreadDetail.
 type T3ThreadDetail struct {
+	// Access 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
+	// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
+	// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+	Access T3EnvironmentAccess `json:"access"`
+
 	// Activity 线程当前活动摘要（活动 run 来自投影 runs，与 queue 同一来源）
 	Activity T3ThreadActivity `json:"activity"`
 	Items    []T3ThreadItem   `json:"items"`

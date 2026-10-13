@@ -217,4 +217,22 @@ func TestRouterT3EndpointsReachHandlerWithJWT(t *testing.T) {
 			}
 		})
 	}
+
+	// 非法 JSON：先查环境（40417），不因 BindJSON 先返回 40001。
+	badJSON := httptest.NewRequest(http.MethodPost, "/api/environments/no-env/threads", bytes.NewReader([]byte(`{`)))
+	badJSON.Header.Set("Content-Type", "application/json")
+	badJSON.Header.Set("Authorization", jwtAuth)
+	badRec := httptest.NewRecorder()
+	env.router.ServeHTTP(badRec, badJSON)
+	if badRec.Code != http.StatusNotFound {
+		t.Fatalf("malformed JSON should still 404 env, got %d: %s", badRec.Code, badRec.Body.String())
+	}
+
+	negCursor := httptest.NewRequest(http.MethodGet, "/api/environments/no-env/projects/p-1/workspace-options?cursor=-1", nil)
+	negCursor.Header.Set("Authorization", jwtAuth)
+	negRec := httptest.NewRecorder()
+	env.router.ServeHTTP(negRec, negCursor)
+	if negRec.Code != http.StatusBadRequest {
+		t.Fatalf("cursor=-1 expected 400, got %d: %s", negRec.Code, negRec.Body.String())
+	}
 }

@@ -96,7 +96,29 @@ describe("T3 thread api requests", () => {
       workspace: { type: "root" },
     });
     await threadApi.composerOptions("e1");
-    await threadApi.workspaceOptions("e1", "p 1", "feat");
+    get.mockReturnValueOnce({
+      json: vi.fn().mockResolvedValue({
+        data: {
+          project_id: "p 1",
+          cwd: "/r",
+          refs: [{ name: "feat-a", kind: "local" }],
+          next_cursor: 3,
+        },
+      }),
+    } as never);
+    get.mockReturnValueOnce({
+      json: vi.fn().mockResolvedValue({
+        data: {
+          project_id: "p 1",
+          cwd: "/r",
+          refs: [{ name: "feat-b", kind: "local" }],
+          next_cursor: null,
+        },
+      }),
+    } as never);
+    const paged = await threadApi.workspaceOptions("e1", "p 1", "feat");
+    expect(paged.data.refs.map((r) => r.name)).toEqual(["feat-a", "feat-b"]);
+    expect(paged.data.next_cursor).toBeNull();
     await threadApi.workspaceOptions("e1", "p1", "");
     const file = new File([new Uint8Array([1])], "a.png", { type: "image/png" });
     await threadApi.uploadAttachment("e1", file);
@@ -109,11 +131,13 @@ describe("T3 thread api requests", () => {
     expect(get.mock.calls.map(([path]) => path)).toEqual([
       "environments/e1/composer-options",
       "environments/e1/projects/p%201/workspace-options",
+      "environments/e1/projects/p%201/workspace-options",
       "environments/e1/projects/p1/workspace-options",
       "environments/e1/attachments/a%2F1/content",
     ]);
     expect(calls(get)[1][1].searchParams).toEqual({ query: "feat" });
-    expect(calls(get)[2][1].searchParams).toBeUndefined();
+    expect(calls(get)[2][1].searchParams).toEqual({ query: "feat", cursor: 3 });
+    expect(calls(get)[3][1].searchParams).toBeUndefined();
 
     const [upload, utf8Upload] = calls(post).slice(1);
     expect(upload[0]).toBe("environments/e1/attachments");

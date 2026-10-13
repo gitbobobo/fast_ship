@@ -17,10 +17,23 @@ func parseOptionalCursorQuery(raw string) (*int, error) {
 		return nil, nil
 	}
 	parsed, err := strconv.Atoi(raw)
-	if err != nil || parsed < 0 {
+	if err != nil {
 		return nil, err
 	}
+	if parsed < 0 {
+		return nil, strconv.ErrRange
+	}
 	return &parsed, nil
+}
+
+// denyReadOnly 写入口在解码 body 之前先查会话能力：只读环境统一 40300，
+// 不因非法 JSON 先落到 40001。环境不存在仍是 40417。
+func (h *T3EnvironmentHandler) denyReadOnly(c *gin.Context) bool {
+	if err := h.threadsService.RequireOperate(c.Request.Context(), middleware.GetUserID(c), c.Param("id")); err != nil {
+		middleware.HandleAppError(c, err)
+		return true
+	}
+	return false
 }
 
 // T3EnvironmentHandler T3 环境连接与 T3 客户端端点（仅 JWT；INT-82/INT-85）。
@@ -148,6 +161,9 @@ func (h *T3EnvironmentHandler) GetWorkspaceOptions(c *gin.Context) {
 
 // CreateThread POST /api/environments/:id/threads
 func (h *T3EnvironmentHandler) CreateThread(c *gin.Context) {
+	if h.denyReadOnly(c) {
+		return
+	}
 	var req service.T3CreateThreadRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
@@ -164,6 +180,9 @@ func (h *T3EnvironmentHandler) CreateThread(c *gin.Context) {
 
 // SendMessage POST /api/environments/:id/threads/:threadId/messages
 func (h *T3EnvironmentHandler) SendMessage(c *gin.Context) {
+	if h.denyReadOnly(c) {
+		return
+	}
 	var req service.T3SendMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
@@ -225,6 +244,9 @@ func (h *T3EnvironmentHandler) CancelQueuedRun(c *gin.Context) {
 
 // EditQueuedRun PUT /api/environments/:id/threads/:threadId/queue/:runId
 func (h *T3EnvironmentHandler) EditQueuedRun(c *gin.Context) {
+	if h.denyReadOnly(c) {
+		return
+	}
 	// attachments 三态：字段缺省=保留原附件，[]=清空，非空=整组替换。
 	// 生成类型把可选数组建成为 []T，区分不了「缺省」与「空」，这里旁路捕获。
 	var raw struct {
@@ -259,6 +281,9 @@ func (h *T3EnvironmentHandler) EditQueuedRun(c *gin.Context) {
 
 // ReorderQueuedRun POST /api/environments/:id/threads/:threadId/queue/:runId/reorder
 func (h *T3EnvironmentHandler) ReorderQueuedRun(c *gin.Context) {
+	if h.denyReadOnly(c) {
+		return
+	}
 	var req service.T3ReorderQueuedRunRequst
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
@@ -275,6 +300,9 @@ func (h *T3EnvironmentHandler) ReorderQueuedRun(c *gin.Context) {
 
 // RespondToRequest POST /api/environments/:id/threads/:threadId/requests/:requestId/respond
 func (h *T3EnvironmentHandler) RespondToRequest(c *gin.Context) {
+	if h.denyReadOnly(c) {
+		return
+	}
 	var req service.T3RespondRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
@@ -302,6 +330,9 @@ func (h *T3EnvironmentHandler) DismissRequest(c *gin.Context) {
 
 // AnswerSecretRequest POST /api/environments/:id/threads/:threadId/items/:itemId/secret-answer
 func (h *T3EnvironmentHandler) AnswerSecretRequest(c *gin.Context) {
+	if h.denyReadOnly(c) {
+		return
+	}
 	var req service.T3AnswerSecretRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())

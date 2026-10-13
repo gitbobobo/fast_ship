@@ -59,7 +59,8 @@ type fakeT3Environment struct {
 	configValue    json.RawMessage   // server.getConfig 返回值
 	settingsValue  json.RawMessage   // server.getSettings 返回值
 	vcsStatus      json.RawMessage   // vcs.refreshStatus 返回值
-	vcsRefs        json.RawMessage   // vcs.listRefs 返回值
+	vcsRefs        json.RawMessage   // vcs.listRefs 返回值（单页）
+	vcsRefsPages   []json.RawMessage // 非空时按调用顺序弹出，用于跟页测试
 	uploaded       map[string][]byte // attachmentId -> 上传的字节（POST /api/attachments/upload/*）
 	assetContent   map[string][]byte // attachmentId -> 下载字节（GET /api/assets/<id>）
 	assetMissing   bool              // true 时 assets.createUrl 回 AssetAttachmentNotFoundError
@@ -419,6 +420,10 @@ func (f *fakeT3Environment) handleWS(w http.ResponseWriter, r *http.Request) {
 				case "vcs.listRefs":
 					f.mu.Lock()
 					value := f.vcsRefs
+					if len(f.vcsRefsPages) > 0 {
+						value = f.vcsRefsPages[0]
+						f.vcsRefsPages = f.vcsRefsPages[1:]
+					}
 					f.mu.Unlock()
 					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
 				case "attachments.createUploadUrl":
@@ -1229,6 +1234,9 @@ func TestT3ThreadDetailNormalization(t *testing.T) {
 	}
 	if detail.Thread.Id != "th-9" || detail.Thread.Status != "running" {
 		t.Fatalf("detail thread = %+v", detail.Thread)
+	}
+	if detail.Access != T3EnvironmentAccessOperate {
+		t.Fatalf("detail access = %v", detail.Access)
 	}
 	if detail.Thread.ProjectName != "P" || detail.Thread.Title != "详情" || detail.Thread.Model != "claude-sonnet-5-5" || detail.Thread.Provider != "claude-pro" || detail.Thread.Branch != "t3/threads" || detail.Thread.PullRequestCount != 2 {
 		t.Fatalf("detail thread metadata must come from trusted shell, got %+v", detail.Thread)

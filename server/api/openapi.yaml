@@ -7437,6 +7437,14 @@ components:
           type: string
           description: 空串=解除关联；非空须为本项目内 Issue（否则 40001）；不传或传 null = 保持不变
 
+    T3EnvironmentAccess:
+      type: string
+      enum: [read-only, operate]
+      description: |
+        会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
+        否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
+        `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+
     T3Environment:
       type: object
       description: 已配对的 T3 环境连接；不泄漏任何凭证字段
@@ -7463,12 +7471,7 @@ components:
             type: string
           description: 该环境会话实际授予的 T3 scope 列表（配对时服务端授予，原样落库）
         access:
-          type: string
-          enum: [read-only, operate]
-          description: |
-            会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
-            否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
-            `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+          $ref: '#/components/schemas/T3EnvironmentAccess'
         error:
           type: string
           description: 最近一次探测失败的说明；成功时省略
@@ -7794,7 +7797,7 @@ components:
 
     T3ThreadDetail:
       type: object
-      required: [thread, items, queue, activity]
+      required: [thread, items, queue, activity, access]
       properties:
         thread:
           $ref: '#/components/schemas/T3ThreadSummary'
@@ -7806,6 +7809,8 @@ components:
           $ref: '#/components/schemas/T3ThreadQueue'
         activity:
           $ref: '#/components/schemas/T3ThreadActivity'
+        access:
+          $ref: '#/components/schemas/T3EnvironmentAccess'
 
     T3ModelOption:
       type: object

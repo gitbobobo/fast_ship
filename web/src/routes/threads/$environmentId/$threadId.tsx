@@ -7,8 +7,7 @@ import { ThreadChat } from "@/components/threads/thread-chat";
 import { ThreadItemView } from "@/components/threads/thread-item-view";
 import { ThreadStatusBadge } from "@/components/threads/thread-status-badge";
 import { ApiRequestError } from "@/lib/api/client";
-import { useEnvironments, useThreadDetail } from "@/lib/hooks/use-threads";
-import { canOperate as environmentCanOperate } from "@/lib/threads-compose";
+import { useThreadDetail } from "@/lib/hooks/use-threads";
 import { formatRelativeTime } from "@/lib/utils/format";
 
 /** 按线程 key 渲染：切线程时输入框、编辑状态、密钥输入等局部状态一并销毁。 */
@@ -31,10 +30,7 @@ function ThreadDetailView({
   threadId: string;
 }) {
   const { data, error, isLoading, isError, isFetching, refetch } = useThreadDetail(environmentId, threadId);
-  const { data: environments } = useEnvironments();
-  const canOperate = environmentCanOperate(
-    environments?.find((e) => e.id === environmentId),
-  );
+  const canOperate = data?.access === "operate";
   const thread = data?.thread;
   const model = thread
     ? [thread.provider, thread.model].filter(Boolean).join(" / ")
@@ -188,7 +184,6 @@ function ThreadDetailView({
                 environmentId={environmentId}
                 threadId={threadId}
                 canOperate={canOperate}
-                environmentKnown={environments !== undefined}
                 stale={isError}
               />
             </div>

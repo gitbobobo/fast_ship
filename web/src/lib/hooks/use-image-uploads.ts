@@ -50,6 +50,7 @@ function dispose(image: ComposerImage) {
 export function useImageUploads(environmentId: string) {
   const [images, setImages] = useState<ComposerImage[]>([]);
   const ref = useRef<ComposerImage[]>([]);
+  const parkedRef = useRef<ComposerImage[] | null>(null);
 
   const commit = useCallback((next: ComposerImage[]) => {
     ref.current = next;
@@ -146,6 +147,29 @@ export function useImageUploads(environmentId: string) {
     [commit, discard],
   );
 
+  /** 进入排队编辑：把当前草稿图片停到一边，不删上游；展示该条排队消息的附件。 */
+  const parkAndShowExisting = useCallback((existing: ChatAttachment[] = []) => {
+    if (parkedRef.current == null) {
+      parkedRef.current = ref.current;
+    }
+    commit(
+      existing.map((attachment) => ({
+        key: nextKey(),
+        name: attachment.name,
+        status: "done" as const,
+        attachment,
+        existing: true,
+      })),
+    );
+  }, [commit]);
+
+  /** 退出/保存排队编辑：把停着的草稿图片放回输入框。 */
+  const restoreParked = useCallback(() => {
+    const parked = parkedRef.current;
+    parkedRef.current = null;
+    commit(parked ?? []);
+  }, [commit]);
+
   /** 消息已发出：附件已被引用，只丢本地引用，不删上游文件。 */
   const clear = useCallback(() => {
     for (const image of ref.current) dispose(image);
@@ -155,6 +179,10 @@ export function useImageUploads(environmentId: string) {
   useEffect(
     () => () => {
       for (const image of ref.current) discard(image);
+      if (parkedRef.current) {
+        for (const image of parkedRef.current) discard(image);
+        parkedRef.current = null;
+      }
       ref.current = [];
     },
     [discard],
@@ -166,7 +194,17 @@ export function useImageUploads(environmentId: string) {
       i.status === "done" && i.attachment && i.tag === tag ? [i.attachment] : [],
     );
 
-  return { images, add, remove, reset, clear, uploading, attachmentsOf };
+  return {
+    images,
+    add,
+    remove,
+    reset,
+    parkAndShowExisting,
+    restoreParked,
+    clear,
+    uploading,
+    attachmentsOf,
+  };
 }
 
 export type ImageUploads = ReturnType<typeof useImageUploads>;
