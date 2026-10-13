@@ -38,7 +38,7 @@ All commands below assume a signed-in scenario (`login_ui` already called or `--
 
 - Two buttons share the name `创建项目` (header opens, dialog submits) — scope to `get_by_role("dialog")` or use `.last`.
 - The card is a clickable surface, not a link — use `get_by_text(name).first.click()` or locate the card; `更多操作` already stops propagation, just click it.
-- `repository_url` + missing `github_token` triggers inline validation (`请输入 GitHub Token 或选择复用已有项目的 Token`) — leave both empty for a local-only project.
+- `repository_url` and tokens are independent: the create dialog has two optional selects (公开仓库 Token / 代码仓库 Token) fed by the token library — leave everything empty for a local-only project. See [GitHub tokens](./github-tokens.md) for the library itself.
 - Deleting a project deletes its versions and artifacts; confirm the AlertDialog, not just the menu item.
 - Search is client-side deferred (`useDeferredValue`) — wait for the grid to update, not a fixed sleep.
 - `get_by_label("项目描述")` substring-matches `项目描述（可选）`; use the full label or `exact=True` deliberately.

@@ -80,15 +80,14 @@ func TestBackfillIssueSourceModel_RemovesLegacyIssueColumns(t *testing.T) {
 	}
 
 	project := &model.Project{
-		ID:                   "project-1",
-		UserID:               user.ID,
-		Name:                 "demo",
-		Description:          "demo",
-		GithubOwner:          "owner",
-		GithubRepo:           "repo",
-		GithubTokenEncrypted: []byte("token"),
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:          "project-1",
+		UserID:      user.ID,
+		Name:        "demo",
+		Description: "demo",
+		GithubOwner: "owner",
+		GithubRepo:  "repo",
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	if err := db.Create(project).Error; err != nil {
 		t.Fatalf("create project: %v", err)
@@ -211,15 +210,14 @@ func TestBackfillIssueSourceModel_RepairsMigratedIssueSourceFromGitHubMeta(t *te
 	}
 
 	project := &model.Project{
-		ID:                   "project-1",
-		UserID:               user.ID,
-		Name:                 "demo",
-		Description:          "demo",
-		GithubOwner:          "owner",
-		GithubRepo:           "repo",
-		GithubTokenEncrypted: []byte("token"),
-		CreatedAt:            now,
-		UpdatedAt:            now,
+		ID:          "project-1",
+		UserID:      user.ID,
+		Name:        "demo",
+		Description: "demo",
+		GithubOwner: "owner",
+		GithubRepo:  "repo",
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	if err := db.Create(project).Error; err != nil {
 		t.Fatalf("create project: %v", err)

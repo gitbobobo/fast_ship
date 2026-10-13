@@ -6,11 +6,14 @@ SQLite（glebarez/modernc 驱动，纯 Go 无 CGO），单文件 `database.path`
 
 **所有外键都必须 `ON DELETE CASCADE`。** DSN 全局开启 `_pragma=foreign_keys(1)`，删除父行由数据库级联清理子行，业务代码不手动删子表。
 
+**唯一的例外：projects → user_github_tokens 的两个引用列（`public_github_token_id` / `code_github_token_id`）不建外键。** 原因有二：建 FK 会在删用户时与 users 的 CASCADE 冲突（同一 Token 被多项目引用时数据库无从级联）；且 CASCADE 删 Token 会连带删引用它的项目行。引用一致性由应用层保证——引用必须属于当前用户（40420），被引用禁止删除（40913），删项目不删 Token。
+
 GORM 的坑：同一关联在 has-many/has-one（父侧）与 belongs-to（子侧）双侧声明时，生成的外键只取**父侧**字段的 `constraint` tag，belongs-to 侧写了也不生效。因此：
 
 - 双侧声明：两侧都写 `constraint:OnDelete:CASCADE`（如 `Issue.Comments` + `IssueComment.Issue`）。
 - 只声明 belongs-to 一侧：约束即生效，无需在父模型声明 has-many。
 - 防回归靠 `TestAutoMigrate_AllForeignKeysCascade`（cmd/server）：新建库遍历 `PRAGMA foreign_key_list`，断言全库外键都是 CASCADE，例外须进白名单并注明理由。
+- GORM 默认命名策略会把 `PublicGitHubTokenID` 蛇形化成 `public_git_hub_token_id`；需要特定列名时在模型上显式写 `gorm:"column:..."`（projects 的两个引用列即如此）。
 
 ## 启动迁移顺序
 

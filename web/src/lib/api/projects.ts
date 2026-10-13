@@ -4,23 +4,19 @@ interface CreateProjectRequest {
   name: string;
   description?: string;
   repository_url?: string;
-  github_token?: string;
-  github_pr_token?: string;
-  source_project_id?: string;
-  pr_token_source_project_id?: string;
-  pr_token_source_kind?: "access" | "pr";
+  /** 公开仓库 Token（Token 库记录 id）；可空 */
+  public_github_token_id?: string;
+  /** 代码仓库 Token（Token 库记录 id）；可空 */
+  code_github_token_id?: string;
 }
 
+// 更新请求的 Token 引用字段是三态：缺省保留、null 或空串清空、非空替换。
 interface UpdateProjectRequest {
   name?: string;
   description?: string;
   repository_url?: string;
-  github_token?: string;
-  github_pr_token?: string;
-  clear_github_pr_token?: boolean;
-  source_project_id?: string;
-  pr_token_source_project_id?: string;
-  pr_token_source_kind?: "access" | "pr";
+  public_github_token_id?: string | null;
+  code_github_token_id?: string | null;
 }
 
 export const projectApi = {

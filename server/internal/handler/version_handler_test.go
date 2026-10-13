@@ -15,7 +15,8 @@ func TestVersionHandlerShipCheck_ReturnsValidationItems(t *testing.T) {
 	project := createHandlerTestProject(t, env.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = []byte{}
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 	version := createHandlerTestVersion(t, env.db, project.ID, func(v *model.Version) {
 		v.ReleaseNotes = ""

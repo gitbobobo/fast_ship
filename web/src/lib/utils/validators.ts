@@ -20,34 +20,21 @@ export const registerSchema = z.object({
     .regex(/[0-9]/, "需包含数字"),
 });
 
+// 仓库与 Token 相互独立：仓库链接可选，不再要求同时配置 Token。
 export const projectSchema = z.object({
   name: z.string().min(1, "请输入项目名称").max(100),
   description: z.string().optional(),
   repository_url: z.string().optional(),
-  github_token: z.string().optional(),
-  github_pr_token: z.string().optional(),
-  clear_github_pr_token: z.boolean().optional(),
-  source_project_id: z.string().optional(),
-  pr_token_source_project_id: z.string().optional(),
-  pr_token_source_kind: z.enum(["access", "pr"]).optional(),
-}).refine(
-  (data) => {
-    if (!data.repository_url) return true;
-    return !!(data.github_token || data.source_project_id);
-  },
-  { message: "请输入 GitHub Token 或选择复用已有项目的 Token", path: ["github_token"] }
-);
+  public_github_token_id: z.string().optional(),
+  code_github_token_id: z.string().optional(),
+});
 
 export const projectEditSchema = z.object({
   name: z.string().min(1, "请输入项目名称").max(100),
   description: z.string().optional(),
   repository_url: z.string().optional(),
-  github_token: z.string().optional(),
-  github_pr_token: z.string().optional(),
-  clear_github_pr_token: z.boolean().optional(),
-  source_project_id: z.string().optional(),
-  pr_token_source_project_id: z.string().optional(),
-  pr_token_source_kind: z.enum(["access", "pr"]).optional(),
+  public_github_token_id: z.string().optional(),
+  code_github_token_id: z.string().optional(),
 });
 
 export const versionSchema = z.object({
@@ -63,9 +50,20 @@ export const apiKeySchema = z.object({
   name: z.string().min(1, "请输入备注名称").max(100),
 });
 
+export const githubTokenSchema = z.object({
+  title: z.string().min(1, "请输入 Token 标题").max(100),
+  token: z.string().min(1, "请输入 GitHub Token"),
+});
+
+export const githubTokenTitleSchema = z.object({
+  title: z.string().min(1, "请输入 Token 标题").max(100),
+});
+
 export type LoginInput = z.infer<typeof loginSchema>;
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type ProjectInput = z.infer<typeof projectSchema>;
 export type ProjectEditInput = z.infer<typeof projectEditSchema>;
 export type VersionInput = z.infer<typeof versionSchema>;
 export type ApiKeyInput = z.infer<typeof apiKeySchema>;
+export type GithubTokenInput = z.infer<typeof githubTokenSchema>;
+export type GithubTokenTitleInput = z.infer<typeof githubTokenTitleSchema>;

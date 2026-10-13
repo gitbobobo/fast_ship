@@ -24,9 +24,16 @@ type (
 	CreateApiKeyRequest = api.CreateApiKeyRequest
 	ApiKeyResponse      = api.ApiKeyCreated
 
+	// github tokens
+	CreateGitHubTokenRequest  = api.CreateGitHubTokenRequest
+	UpdateGitHubTokenRequest  = api.UpdateGitHubTokenRequest
+	GitHubTokenResponse       = api.GitHubToken
+	GitHubTokenProjectRefItem = api.GitHubTokenProjectRef
+
 	// projects
+	// UpdateProjectRequest 不再别名到 api 类型：两个 Token 引用字段需三态
+	// （见 TokenRefUpdate），handler 手写输入解析后直传 service 结构体。
 	CreateProjectRequest  = api.CreateProjectRequest
-	UpdateProjectRequest  = api.UpdateProjectRequest
 	ProjectResponse       = api.Project
 	LatestVersionResponse = api.LatestVersion
 	BranchResponse        = api.Branch

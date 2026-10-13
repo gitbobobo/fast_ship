@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ type testServices struct {
 	userAISettingRepo   *repository.UserAISettingRepository
 	userIssuePromptRepo *repository.UserIssuePromptSettingRepository
 	projectRepo         *repository.ProjectRepository
+	tokenRepo           *repository.UserGitHubTokenRepository
 	versionRepo         *repository.VersionRepository
 	issueRepo           *repository.IssueRepository
 	gitHubMetaRepo      *repository.IssueGitHubMetaRepository
@@ -69,6 +71,7 @@ func setupTestServices(t *testing.T) *testServices {
 
 	if err := db.AutoMigrate(
 		&model.User{},
+		&model.UserGitHubToken{},
 		&model.UserAISetting{},
 		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
@@ -118,6 +121,7 @@ func setupTestServices(t *testing.T) *testServices {
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	userIssuePromptRepo := repository.NewUserIssuePromptSettingRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
+	tokenRepo := repository.NewUserGitHubTokenRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
 	gitHubMetaRepo := repository.NewIssueGitHubMetaRepository(db)
@@ -151,6 +155,7 @@ func setupTestServices(t *testing.T) *testServices {
 		userAISettingRepo:   userAISettingRepo,
 		userIssuePromptRepo: userIssuePromptRepo,
 		projectRepo:         projectRepo,
+		tokenRepo:           tokenRepo,
 		versionRepo:         versionRepo,
 		issueRepo:           issueRepo,
 		gitHubMetaRepo:      gitHubMetaRepo,
@@ -170,39 +175,59 @@ func setupTestServices(t *testing.T) *testServices {
 		collabRepo:          collabRepo,
 		readStateRepo:       readStateRepo,
 		recRepo:             recRepo,
-		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), annotationRepo),
+		issueService:        NewIssueService(issueRepo, gitHubMetaRepo, commentRepo, timelineRepo, internalMetaRepo, shipHookService, checklistRepo, syncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, tokenRepo, userRepo, repository.NewGitHubRepoLabelRepository(db), readStateRepo, recRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), annotationRepo),
 		attachmentService:   NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop()),
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		recService:          NewIssueRecommendationService(recRepo, issueRepo, internalMetaRepo, projectRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
 		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),
-		versionService:      NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop()),
+		versionService:      NewVersionService(versionRepo, projectRepo, tokenRepo, fileStorage, cfg, zap.NewNop()),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		screenshotService:   NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg),
 		annotationService:   NewScreenshotAnnotationService(annotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage),
 	}
-	svc.shipService = NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, shipHookRepo, svc.issueService, fileStorage, cfg, zap.NewNop())
+	svc.shipService = NewShipService(versionRepo, projectRepo, tokenRepo, artifactRepo, issueRepo, shipHookRepo, svc.issueService, fileStorage, cfg, zap.NewNop())
 
 	return svc
 }
+
+// autoTokenRef 是 createTestProject 里两个引用列的哨兵值：opts 未显式指定引用时，
+// 自动创建一条明文 "gh-token" 的 Token 库记录并引用到两个用途——对应旧实现里
+// 项目自带可用 Access Token 的默认行为；显式置 "" 表示不引用任何 Token。
+const autoTokenRef = "auto-token"
+
+// testEncryptionKey 与 setupTestServices 的 cfg.Encryption.Key 保持一致，
+// createTestProject 无 cfg 入参时用它加密默认 Token 行。
+const testEncryptionKey = "12345678901234567890123456789012"
 
 func createTestProject(t *testing.T, db *gorm.DB, userID string, opts ...func(*model.Project)) *model.Project {
 	t.Helper()
 
 	project := &model.Project{
-		ID:                   uuid.New().String(),
-		UserID:               userID,
-		Name:                 "proj-" + uuid.NewString(),
-		Description:          "test project",
-		GithubOwner:          "owner",
-		GithubRepo:           "repo",
-		GithubTokenEncrypted: []byte("token"),
-		CreatedAt:            time.Now(),
-		UpdatedAt:            time.Now(),
+		ID:                  uuid.New().String(),
+		UserID:              userID,
+		Name:                "proj-" + uuid.NewString(),
+		Description:         "test project",
+		GithubOwner:         "owner",
+		GithubRepo:          "repo",
+		PublicGitHubTokenID: autoTokenRef,
+		CodeGitHubTokenID:   autoTokenRef,
+		CreatedAt:           time.Now(),
+		UpdatedAt:           time.Now(),
 	}
 
 	for _, opt := range opts {
 		opt(project)
+	}
+
+	if project.PublicGitHubTokenID == autoTokenRef || project.CodeGitHubTokenID == autoTokenRef {
+		token := createTestToken(t, db, testEncryptionKey, userID, "gh-token")
+		if project.PublicGitHubTokenID == autoTokenRef {
+			project.PublicGitHubTokenID = token.ID
+		}
+		if project.CodeGitHubTokenID == autoTokenRef {
+			project.CodeGitHubTokenID = token.ID
+		}
 	}
 
 	if err := db.Create(project).Error; err != nil {
@@ -210,6 +235,67 @@ func createTestProject(t *testing.T, db *gorm.DB, userID string, opts ...func(*m
 	}
 
 	return project
+}
+
+// createTestToken 建一条 Token 库记录（明文加密存储），返回该行供测试断言。
+// 与产品语义一致：同一用户明文指纹重复时复用已有记录，不撞唯一索引。
+func createTestToken(t *testing.T, db *gorm.DB, encryptionKey, userID, plaintext string) *model.UserGitHubToken {
+	t.Helper()
+
+	fingerprint := githubTokenFingerprint(plaintext)
+	var existing model.UserGitHubToken
+	err := db.Where("user_id = ? AND token_fingerprint = ?", userID, fingerprint).First(&existing).Error
+	if err == nil {
+		return &existing
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("lookup github token: %v", err)
+	}
+
+	encrypted, err := crypto.Encrypt([]byte(plaintext), []byte(encryptionKey))
+	if err != nil {
+		t.Fatalf("encrypt github token: %v", err)
+	}
+	token := &model.UserGitHubToken{
+		ID:               uuid.New().String(),
+		UserID:           userID,
+		Title:            "token-" + plaintext,
+		TokenEncrypted:   encrypted,
+		TokenFingerprint: fingerprint,
+		TokenPrefix:      githubTokenPrefix(plaintext),
+		DetectionStatus:  model.TokenDetectionUnchecked,
+		DetectionType:    model.TokenTypeUnknown,
+		DetectionScopes:  "[]",
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+	}
+	if err := db.Create(token).Error; err != nil {
+		t.Fatalf("create github token: %v", err)
+	}
+	return token
+}
+
+// createCorruptTestToken 建一条密文损坏的 Token 库记录，用于解密失败路径。
+func createCorruptTestToken(t *testing.T, db *gorm.DB, userID string) *model.UserGitHubToken {
+	t.Helper()
+
+	token := &model.UserGitHubToken{
+		ID:               uuid.New().String(),
+		UserID:           userID,
+		Title:            "corrupt-token",
+		TokenEncrypted:   []byte("corrupt-ciphertext"),
+		TokenFingerprint: "fp-" + uuid.NewString(),
+		TokenPrefix:      "corrupt-",
+		DetectionStatus:  model.TokenDetectionUnchecked,
+		DetectionType:    model.TokenTypeUnknown,
+		DetectionScopes:  "[]",
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+	}
+	if err := db.Create(token).Error; err != nil {
+		t.Fatalf("create corrupt github token: %v", err)
+	}
+	return token
 }
 
 func encryptTestToken(t *testing.T, cfg *config.Config, plaintext string) []byte {

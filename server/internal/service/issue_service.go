@@ -91,6 +91,7 @@ func NewIssueService(
 	assetRepo *repository.IssueAssetRepository,
 	draftAssetRepo *repository.IssueDraftAssetRepository,
 	projectRepo *repository.ProjectRepository,
+	tokenRepo *repository.UserGitHubTokenRepository,
 	userRepo *repository.UserRepository,
 	githubRepoLabelRepo *repository.GitHubRepoLabelRepository,
 	readStateRepo *repository.IssueReadStateRepository,
@@ -124,7 +125,7 @@ func NewIssueService(
 		storage:             storage,
 		cfg:                 cfg,
 		logger:              logger,
-		credentials:         newProjectCredentials(projectRepo, cfg, logger),
+		credentials:         newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
 		newClient: func(token, owner, repo string) gitHubIssueClient {
 			return ghclient.NewClient(token, owner, repo)
 		},

@@ -45,12 +45,56 @@ vi.mock("@/lib/hooks/use-versions", () => ({
   useCreateVersion: vi.fn(),
 }));
 
+vi.mock("@/lib/hooks/use-github-tokens", () => ({
+  useGithubTokens: vi.fn(),
+  useCreateGithubToken: vi.fn(() => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  })),
+}));
+
+const { useGithubTokens } = await import("@/lib/hooks/use-github-tokens");
+
 describe("ProjectAndVersionForms", () => {
   const createProjectMutateAsync = vi.fn();
   const updateProjectMutateAsync = vi.fn();
   const createVersionMutateAsync = vi.fn();
 
   beforeEach(() => {
+    vi.mocked(useGithubTokens).mockReturnValue({
+      data: [
+        {
+          id: "tok-public",
+          title: "发布 Token",
+          token_prefix: "ghp_publ",
+          detection_status: "ok",
+          detection_token_type: "classic",
+          detection_scopes: ["repo"],
+          detection_login: "octocat",
+          detection_detail: "",
+          detected_at: "2026-04-06T10:00:00Z",
+          referenced_projects: [],
+          created_at: "2026-04-06T10:00:00Z",
+          updated_at: "2026-04-06T10:00:00Z",
+        },
+        {
+          id: "tok-code",
+          title: "代码仓库 Token",
+          token_prefix: "ghp_code",
+          detection_status: "unchecked",
+          detection_token_type: "unknown",
+          detection_scopes: [],
+          detection_login: "",
+          detection_detail: "",
+          detected_at: null,
+          referenced_projects: [],
+          created_at: "2026-04-06T10:00:00Z",
+          updated_at: "2026-04-06T10:00:00Z",
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useGithubTokens>);
+
     vi.mocked(useCreateProject).mockReturnValue({
       mutateAsync: createProjectMutateAsync,
     } as unknown as ReturnType<typeof useCreateProject>);
@@ -118,43 +162,24 @@ describe("ProjectAndVersionForms", () => {
       { path: "/projects", initialEntry: "/projects" },
     );
 
+    // 仓库与 Token 相互独立：只填仓库不选 Token 也能创建。
     await user.type(screen.getByLabelText("项目名称"), "fast-ship");
     await user.type(
       screen.getByLabelText("仓库链接（可选）"),
       "https://github.com/godbobo/fast_ship",
     );
-    await user.type(screen.getByLabelText("GitHub Access Token"), "ghp_secret");
     await user.click(screen.getByRole("button", { name: "创建项目" }));
 
     await waitFor(() =>
       expect(createProjectMutateAsync).toHaveBeenCalledWith({
         name: "fast-ship",
         repository_url: "https://github.com/godbobo/fast_ship",
-        github_token: "ghp_secret",
       }),
     );
     expect(mockNavigate).toHaveBeenCalledWith("/issues?project=proj-99");
   });
 
-  it("submits create project form with existing project token", async () => {
-    vi.mocked(useProjects).mockReturnValue({
-      data: {
-        items: [
-          {
-            id: "proj-existing",
-            name: "existing-project",
-            github_owner: "existing-owner",
-            github_repo: "existing-repo",
-            has_github_token: true,
-          },
-        ],
-        total: 1,
-        page: 1,
-        page_size: 20,
-      },
-      isLoading: false,
-    } as unknown as ReturnType<typeof useProjects>);
-
+  it("submits create project form with a token picked from the library", async () => {
     createProjectMutateAsync.mockResolvedValue({
       data: { id: "proj-99" },
     });
@@ -173,12 +198,9 @@ describe("ProjectAndVersionForms", () => {
       "godbobo/fast_ship",
     );
 
-    // Open token source select and choose existing project
-    // Access Token 下拉在前，PR 访问 Token 下拉在后
+    // 公开仓库 Token 下拉在前：选项来自 Token 库而非其他项目。
     await user.click(screen.getAllByRole("combobox")[0]);
-    await user.click(
-      screen.getByRole("option", { name: /existing-project/ }),
-    );
+    await user.click(screen.getByRole("option", { name: /发布 Token/ }));
 
     await user.click(screen.getByRole("button", { name: "创建项目" }));
 
@@ -186,7 +208,7 @@ describe("ProjectAndVersionForms", () => {
       expect(createProjectMutateAsync).toHaveBeenCalledWith({
         name: "fast-ship",
         repository_url: "godbobo/fast_ship",
-        source_project_id: "proj-existing",
+        public_github_token_id: "tok-public",
       }),
     );
     expect(mockNavigate).toHaveBeenCalledWith("/issues?project=proj-99");
@@ -225,6 +247,10 @@ describe("ProjectAndVersionForms", () => {
         repository_url: "new-owner/new-repo",
       }),
     );
+    // 未改动的引用字段不进 payload（三态缺省保留现值）
+    const payload = updateProjectMutateAsync.mock.calls[0][0];
+    expect(payload.public_github_token_id).toBeUndefined();
+    expect(payload.code_github_token_id).toBeUndefined();
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 

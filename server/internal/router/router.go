@@ -17,6 +17,7 @@ func Setup(
 	aiHandler *handler.AIHandler,
 	issuePromptHandler *handler.IssuePromptHandler,
 	apiKeyHandler *handler.ApiKeyHandler,
+	githubTokenHandler *handler.GitHubTokenHandler,
 	dashboardHandler *handler.DashboardHandler,
 	projectHandler *handler.ProjectHandler,
 	versionHandler *handler.VersionHandler,
@@ -82,6 +83,16 @@ func Setup(
 			apiKeys.GET("", apiKeyHandler.List)
 			apiKeys.POST("", apiKeyHandler.Create)
 			apiKeys.DELETE("/:id", apiKeyHandler.Delete)
+		}
+
+		// JWT 必须 — 用户级 GitHub Token 库
+		githubTokens := api.Group("/github-tokens", middleware.RequireJWT(cfg, authService))
+		{
+			githubTokens.GET("", githubTokenHandler.List)
+			githubTokens.POST("", githubTokenHandler.Create)
+			githubTokens.PUT("/:id", githubTokenHandler.Update)
+			githubTokens.DELETE("/:id", githubTokenHandler.Delete)
+			githubTokens.POST("/:id/detect", githubTokenHandler.Detect)
 		}
 
 		// JWT 必须 — 项目写操作

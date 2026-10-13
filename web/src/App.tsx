@@ -36,6 +36,9 @@ const SettingsIssuePromptsPage = lazy(
   () => import("@/routes/settings/issue-prompts"),
 );
 const ApiKeysPage = lazy(() => import("@/routes/settings/api-keys"));
+const GithubTokensPage = lazy(
+  () => import("@/routes/settings/github-tokens"),
+);
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
 const ThreadDetailPage = lazy(
@@ -160,6 +163,10 @@ export default function App() {
                 <Route
                   path="api-keys"
                   element={<LazyPage render={<ApiKeysPage />} />}
+                />
+                <Route
+                  path="github-tokens"
+                  element={<LazyPage render={<GithubTokensPage />} />}
                 />
                 <Route
                   path="environments"

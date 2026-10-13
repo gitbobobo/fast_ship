@@ -9,49 +9,39 @@ func TestIsGitHubConfigured(t *testing.T) {
 		want  bool
 	}{
 		{
-			name: "fully configured",
+			name: "owner and repo set",
 			input: Project{
-				GithubOwner:          "owner",
-				GithubRepo:           "repo",
-				GithubTokenEncrypted: []byte("encrypted-token"),
+				GithubOwner: "owner",
+				GithubRepo:  "repo",
 			},
 			want: true,
 		},
 		{
 			name: "empty owner",
 			input: Project{
-				GithubOwner:          "",
-				GithubRepo:           "repo",
-				GithubTokenEncrypted: []byte("token"),
+				GithubOwner: "",
+				GithubRepo:  "repo",
 			},
 			want: false,
 		},
 		{
 			name: "empty repo",
 			input: Project{
-				GithubOwner:          "owner",
-				GithubRepo:           "",
-				GithubTokenEncrypted: []byte("token"),
+				GithubOwner: "owner",
+				GithubRepo:  "",
 			},
 			want: false,
 		},
 		{
-			name: "nil token",
+			// Token 引用不再参与仓库关联判定：仓库已关联但未选公开仓库 Token
+			// 时，同步/写操作按单独的「缺公开仓库 Token」错误报出。
+			name: "repo without public token reference",
 			input: Project{
-				GithubOwner:          "owner",
-				GithubRepo:           "repo",
-				GithubTokenEncrypted: nil,
+				GithubOwner:         "owner",
+				GithubRepo:          "repo",
+				PublicGitHubTokenID: "",
 			},
-			want: false,
-		},
-		{
-			name: "empty token",
-			input: Project{
-				GithubOwner:          "owner",
-				GithubRepo:           "repo",
-				GithubTokenEncrypted: []byte{},
-			},
-			want: false,
+			want: true,
 		},
 		{
 			name:  "all empty",

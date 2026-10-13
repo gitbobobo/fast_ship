@@ -96,8 +96,10 @@ func storedTimelineByKey(t *testing.T, svc *testServices, issueID string) map[st
 func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, "user-1", "gh-token")
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC()
@@ -214,7 +216,6 @@ func TestIssueServiceSyncProjectIssues_RejectsNotGitHubConfigured(t *testing.T) 
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
 	})
 
 	_, err := svc.issueService.SyncProjectIssues(project.ID, user.ID)
@@ -234,8 +235,10 @@ func TestIssueServiceSyncProjectIssues_RejectsNotGitHubConfigured(t *testing.T) 
 func TestIssueServiceSyncProjectIssues_PagedCollectionsCommitAndResyncDedupes(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC()
@@ -297,8 +300,10 @@ func TestIssueServiceSyncProjectIssues_PagedCollectionsCommitAndResyncDedupes(t 
 func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC()
@@ -361,8 +366,10 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC()
@@ -426,8 +433,10 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 func TestIssueServiceSyncProjectIssues_EmptyRemoteCleansMirrorKeepsInternal(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC()
@@ -494,8 +503,10 @@ func TestIssueServiceSyncProjectIssues_EmptyRemoteCleansMirrorKeepsInternal(t *t
 func TestIssueServiceSyncProjectIssues_ConcurrentSyncRejected(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC()
@@ -563,8 +574,10 @@ func TestIssueServiceSyncProjectIssues_ConcurrentSyncRejected(t *testing.T) {
 func TestIssueServiceSyncProjectIssues_FailureReleasesLock(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC()
@@ -598,8 +611,10 @@ func TestIssueServiceSyncProjectIssues_FailureReleasesLock(t *testing.T) {
 func TestIssueServiceSyncProjectIssues_IncrementalSince(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
 
 	now := time.Now().UTC().Truncate(time.Second)
@@ -661,15 +676,18 @@ func TestIssueMirrorSyncAll_SkipsUnconfiguredAndContinuesAfterFailure(t *testing
 	unconfigured := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
 	})
+	healthyToken := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "tok-ok")
 	healthy := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "tok-ok")
+		p.PublicGitHubTokenID = healthyToken.ID
+		p.CodeGitHubTokenID = healthyToken.ID
 		p.CreatedAt = now.Add(-time.Minute)
 	})
 	// ListAll 按 created_at DESC，失败项目排最前先同步。
+	failingToken := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "tok-fail")
 	failing := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "tok-fail")
+		p.PublicGitHubTokenID = failingToken.ID
+		p.CodeGitHubTokenID = failingToken.ID
 		p.CreatedAt = now
 	})
 

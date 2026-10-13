@@ -16,8 +16,10 @@ interface Project {
   description: string;
   github_owner: string;
   github_repo: string;
-  has_github_token: boolean;
-  has_github_pr_token: boolean;
+  /** 公开仓库 Token 引用（Token 库记录 id）；未配置为空串 */
+  public_github_token_id: string;
+  /** 代码仓库 Token 引用；未配置为空串 */
+  code_github_token_id: string;
   latest_version?: {
     id: string;
     version_number: string;
@@ -152,6 +154,42 @@ interface ApiKey {
   key_prefix: string;
   last_used_at: string | null;
   created_at: string;
+}
+
+/** 检测状态：unchecked=未检测；ok=认证成功；invalid=凭证无效（401）；failed=检测失败（网络/5xx） */
+type GitHubTokenDetectionStatus = "unchecked" | "ok" | "invalid" | "failed";
+
+/** classic=有 OAuth scopes 的 PAT；fine_grained=github_pat_ 前缀；unknown=无法判断 */
+type GitHubTokenDetectionTokenType = "classic" | "fine_grained" | "unknown";
+
+/** 用户级 GitHub Token 库记录；明文与密文均不回显 */
+interface GitHubToken {
+  id: string;
+  title: string;
+  /** 明文前 8 个字符（如 ghp_Ab12），用于列表辨识 */
+  token_prefix: string;
+  detection_status: GitHubTokenDetectionStatus;
+  detection_token_type: GitHubTokenDetectionTokenType;
+  /** Classic PAT 的 OAuth scopes；fine-grained 恒为空数组 */
+  detection_scopes: string[];
+  /** 认证成功时的 GitHub login，否则空串 */
+  detection_login: string;
+  /** 补充说明（fine-grained 的「无法自动获取完整授权」、失败原因等） */
+  detection_detail: string;
+  detected_at: string | null;
+  /** 两个用途中任一引用了该 Token 的项目 */
+  referenced_projects: Array<{ id: string; name: string }>;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 项目表单的 Token 引用三态：缺省保留、空/null 清空、非空替换 */
+interface UpdateProjectPayload {
+  name?: string;
+  description?: string;
+  repository_url?: string;
+  public_github_token_id?: string | null;
+  code_github_token_id?: string | null;
 }
 
 interface AISettings {

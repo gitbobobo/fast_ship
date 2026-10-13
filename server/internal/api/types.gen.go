@@ -8,6 +8,51 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for GitHubTokenDetectionStatus.
+const (
+	GitHubTokenDetectionStatusFailed    GitHubTokenDetectionStatus = "failed"
+	GitHubTokenDetectionStatusInvalid   GitHubTokenDetectionStatus = "invalid"
+	GitHubTokenDetectionStatusOk        GitHubTokenDetectionStatus = "ok"
+	GitHubTokenDetectionStatusUnchecked GitHubTokenDetectionStatus = "unchecked"
+)
+
+// Valid indicates whether the value is a known member of the GitHubTokenDetectionStatus enum.
+func (e GitHubTokenDetectionStatus) Valid() bool {
+	switch e {
+	case GitHubTokenDetectionStatusFailed:
+		return true
+	case GitHubTokenDetectionStatusInvalid:
+		return true
+	case GitHubTokenDetectionStatusOk:
+		return true
+	case GitHubTokenDetectionStatusUnchecked:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubTokenDetectionTokenType.
+const (
+	Classic     GitHubTokenDetectionTokenType = "classic"
+	FineGrained GitHubTokenDetectionTokenType = "fine_grained"
+	Unknown     GitHubTokenDetectionTokenType = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the GitHubTokenDetectionTokenType enum.
+func (e GitHubTokenDetectionTokenType) Valid() bool {
+	switch e {
+	case Classic:
+		return true
+	case FineGrained:
+		return true
+	case Unknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for IssueRecommendationStatus.
 const (
 	Active   IssueRecommendationStatus = "active"
@@ -20,24 +65,6 @@ func (e IssueRecommendationStatus) Valid() bool {
 	case Active:
 		return true
 	case Deferred:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for PrTokenSourceKind.
-const (
-	Access PrTokenSourceKind = "access"
-	Pr     PrTokenSourceKind = "pr"
-)
-
-// Valid indicates whether the value is a known member of the PrTokenSourceKind enum.
-func (e PrTokenSourceKind) Valid() bool {
-	switch e {
-	case Access:
-		return true
-	case Pr:
 		return true
 	default:
 		return false
@@ -64,22 +91,22 @@ func (e ScreenshotAnnotationStatus) Valid() bool {
 
 // Defines values for T3EnvironmentStatus.
 const (
-	Degraded    T3EnvironmentStatus = "degraded"
-	Ok          T3EnvironmentStatus = "ok"
-	Repair      T3EnvironmentStatus = "repair"
-	Unreachable T3EnvironmentStatus = "unreachable"
+	T3EnvironmentStatusDegraded    T3EnvironmentStatus = "degraded"
+	T3EnvironmentStatusOk          T3EnvironmentStatus = "ok"
+	T3EnvironmentStatusRepair      T3EnvironmentStatus = "repair"
+	T3EnvironmentStatusUnreachable T3EnvironmentStatus = "unreachable"
 )
 
 // Valid indicates whether the value is a known member of the T3EnvironmentStatus enum.
 func (e T3EnvironmentStatus) Valid() bool {
 	switch e {
-	case Degraded:
+	case T3EnvironmentStatusDegraded:
 		return true
-	case Ok:
+	case T3EnvironmentStatusOk:
 		return true
-	case Repair:
+	case T3EnvironmentStatusRepair:
 		return true
-	case Unreachable:
+	case T3EnvironmentStatusUnreachable:
 		return true
 	default:
 		return false
@@ -391,6 +418,15 @@ type CreateDocumentRequest struct {
 	Title string `json:"title"`
 }
 
+// CreateGitHubTokenRequest defines model for CreateGitHubTokenRequest.
+type CreateGitHubTokenRequest struct {
+	// Title Token 标题（如「主仓库发布 Token」）
+	Title string `binding:"required,min=1,max=100" json:"title"`
+
+	// Token GitHub PAT 明文（加密存储，任何响应都不回显）
+	Token string `binding:"required,min=1" json:"token"`
+}
+
 // CreateIssueRequest defines model for CreateIssueRequest.
 type CreateIssueRequest struct {
 	// Body Markdown；引用 /api/issues/assets/{aid}/content 链接会在创建时挂载草稿附件
@@ -406,28 +442,18 @@ type CreateIssueRequest struct {
 
 // CreateProjectRequest defines model for CreateProjectRequest.
 type CreateProjectRequest struct {
-	Description *string `json:"description,omitempty"`
-
-	// GithubPrToken PR 访问 Token，仅用于读取关联 PR（可为其他仓库）；加密存储，不回显
-	GithubPrToken *string `json:"github_pr_token,omitempty"`
-
-	// GithubToken GitHub PAT（加密存储，不回显）
-	GithubToken *string `json:"github_token,omitempty"`
+	// CodeGithubTokenId 代码仓库 Token（Token 库记录 id）引用；仅用于读取关联 PR（含其他仓库）。可空；必须属于当前用户，否则 40420
+	CodeGithubTokenId *string `json:"code_github_token_id,omitempty"`
+	Description       *string `json:"description,omitempty"`
 
 	// Name 项目名，当前用户下唯一
 	Name string `binding:"required,min=1,max=100" json:"name"`
 
-	// PrTokenSourceKind access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
-	PrTokenSourceKind *PrTokenSourceKind `json:"pr_token_source_kind,omitempty"`
+	// PublicGithubTokenId 公开仓库 Token（Token 库记录 id）引用；用于 Issue 同步与 GitHub 写、分支查询、发货。可空；必须属于当前用户，否则 40420
+	PublicGithubTokenId *string `json:"public_github_token_id,omitempty"`
 
-	// PrTokenSourceProjectId 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
-	PrTokenSourceProjectId *string `json:"pr_token_source_project_id,omitempty"`
-
-	// RepositoryUrl GitHub 仓库链接（owner/repo 或完整 URL）；设置时须同时提供 github_token 或 source_project_id
+	// RepositoryUrl GitHub 仓库链接（owner/repo 或完整 URL）；不再要求同时提供 Token
 	RepositoryUrl *string `json:"repository_url,omitempty"`
-
-	// SourceProjectId 复用另一项目的 GitHub Token；优先于 github_token
-	SourceProjectId *string `json:"source_project_id,omitempty"`
 }
 
 // CreateScreenshotAnnotationRequest x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为让服务端能区分缺省与显式 0）
@@ -552,6 +578,50 @@ type ErrorEnvelope struct {
 type GenerateTitleResponse struct {
 	// Titles 候选标题（通常 3 个）
 	Titles []string `json:"titles"`
+}
+
+// GitHubToken defines model for GitHubToken.
+type GitHubToken struct {
+	CreatedAt string `json:"created_at"`
+
+	// DetectedAt 最近一次检测完成时间；未检测为 null
+	DetectedAt *string `json:"detected_at,omitempty"`
+
+	// DetectionDetail 给人看的补充说明（fine-grained 的「无法自动获取完整授权」、失败原因等），不含 token
+	DetectionDetail string `json:"detection_detail"`
+
+	// DetectionLogin 认证成功时的 GitHub login，否则为空串
+	DetectionLogin string `json:"detection_login"`
+
+	// DetectionScopes Classic PAT 的 OAuth scopes；fine-grained 恒为空数组
+	DetectionScopes []string `json:"detection_scopes"`
+
+	// DetectionStatus unchecked=未检测；ok=认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/GitHub 5xx，不是凭证无效）
+	DetectionStatus GitHubTokenDetectionStatus `json:"detection_status"`
+
+	// DetectionTokenType classic=有 OAuth scopes 的 Classic PAT；fine_grained=github_pat_ 前缀；unknown=无法判断（未检测时恒为 unknown）
+	DetectionTokenType GitHubTokenDetectionTokenType `json:"detection_token_type"`
+	Id                 string                        `json:"id"`
+
+	// ReferencedProjects 两个用途中任一引用了该 Token 的项目
+	ReferencedProjects []GitHubTokenProjectRef `json:"referenced_projects"`
+	Title              string                  `json:"title"`
+
+	// TokenPrefix Token 明文前 8 个字符（如 ghp_Ab12），用于列表辨识；其余不存
+	TokenPrefix string `json:"token_prefix"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+// GitHubTokenDetectionStatus unchecked=未检测；ok=认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/GitHub 5xx，不是凭证无效）
+type GitHubTokenDetectionStatus string
+
+// GitHubTokenDetectionTokenType classic=有 OAuth scopes 的 Classic PAT；fine_grained=github_pat_ 前缀；unknown=无法判断（未检测时恒为 unknown）
+type GitHubTokenDetectionTokenType string
+
+// GitHubTokenProjectRef defines model for GitHubTokenProjectRef.
+type GitHubTokenProjectRef struct {
+	Id   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // Issue defines model for Issue.
@@ -1153,22 +1223,15 @@ type PendingIssueHook struct {
 	WorkflowStatus string `json:"workflow_status"`
 }
 
-// PrTokenSourceKind access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
-type PrTokenSourceKind string
-
 // Project defines model for Project.
 type Project struct {
-	CreatedAt   string `json:"created_at"`
-	Description string `json:"description"`
-	GithubOwner string `json:"github_owner"`
-	GithubRepo  string `json:"github_repo"`
-
-	// HasGithubPrToken 是否已配置独立 PR 访问 Token
-	HasGithubPrToken bool `json:"has_github_pr_token"`
-
-	// HasGithubToken 是否已配置 GitHub Access Token
-	HasGithubToken bool   `json:"has_github_token"`
-	Id             string `json:"id"`
+	// CodeGithubTokenId 代码仓库 Token 引用；未配置为空串
+	CodeGithubTokenId string `json:"code_github_token_id"`
+	CreatedAt         string `json:"created_at"`
+	Description       string `json:"description"`
+	GithubOwner       string `json:"github_owner"`
+	GithubRepo        string `json:"github_repo"`
+	Id                string `json:"id"`
 
 	// IssueCount omitempty，仅在列表项中出现；项目 Issue 总数（不区分状态）
 	IssueCount *int `json:"issue_count,omitempty"`
@@ -1182,7 +1245,10 @@ type Project struct {
 	// LatestVersion omitempty，仅在列表项中出现
 	LatestVersion *LatestVersion `json:"latest_version,omitempty"`
 	Name          string         `json:"name"`
-	UpdatedAt     string         `json:"updated_at"`
+
+	// PublicGithubTokenId 公开仓库 Token 引用；未配置为空串
+	PublicGithubTokenId string `json:"public_github_token_id"`
+	UpdatedAt           string `json:"updated_at"`
 }
 
 // RecommendationDependency defines model for RecommendationDependency.
@@ -1593,6 +1659,15 @@ type UpdateDocumentRequest struct {
 	Title *string `json:"title,omitempty"`
 }
 
+// UpdateGitHubTokenRequest defines model for UpdateGitHubTokenRequest.
+type UpdateGitHubTokenRequest struct {
+	// Title 非空时替换标题；改标题不重新检测
+	Title *string `json:"title,omitempty"`
+
+	// Token 非空时替换密钥，对所有引用项目立即生效并重新检测；与同用户另一条记录明文重复时返回 40914
+	Token *string `json:"token,omitempty"`
+}
+
 // UpdateIssueRequest 至少传一个字段；state_reason 必须随 state 同传
 type UpdateIssueRequest struct {
 	Body *string `json:"body,omitempty"`
@@ -1628,26 +1703,18 @@ type UpdateProfileRequest struct {
 
 // UpdateProjectRequest defines model for UpdateProjectRequest.
 type UpdateProjectRequest struct {
-	// ClearGithubPrToken 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 或 pr_token_source_project_id 同时显式提供（无论取值，含 null）返回 40001
-	ClearGithubPrToken *bool `json:"clear_github_pr_token,omitempty"`
+	// CodeGithubTokenId 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
+	CodeGithubTokenId *string `json:"code_github_token_id,omitempty"`
 
 	// Description 缺省或 null 保留现值；显式空串清空；非空替换
 	Description *string `json:"description,omitempty"`
+	Name        *string `json:"name,omitempty"`
 
-	// GithubPrToken PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显
-	GithubPrToken *string `json:"github_pr_token,omitempty"`
-	GithubToken   *string `json:"github_token,omitempty"`
-	Name          *string `json:"name,omitempty"`
+	// PublicGithubTokenId 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
+	PublicGithubTokenId *string `json:"public_github_token_id,omitempty"`
 
-	// PrTokenSourceKind access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
-	PrTokenSourceKind *PrTokenSourceKind `json:"pr_token_source_kind,omitempty"`
-
-	// PrTokenSourceProjectId 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
-	PrTokenSourceProjectId *string `json:"pr_token_source_project_id,omitempty"`
-
-	// RepositoryUrl 同创建；变更仓库且项目无 token 时须提供 token
-	RepositoryUrl   *string `json:"repository_url,omitempty"`
-	SourceProjectId *string `json:"source_project_id,omitempty"`
+	// RepositoryUrl 同创建；不再要求项目已配 Token
+	RepositoryUrl *string `json:"repository_url,omitempty"`
 }
 
 // UpdateScreenshotAnnotationRequest 指针语义：字段出现才更新，都不传返回 40001。
@@ -2115,6 +2182,46 @@ type GetT3ThreadItem200JSONResponseBody struct {
 	// 结构性/交互性事件（checkpoint、approval_request、handoff、notification、
 	// system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外截断。
 	Data *T3ThreadItem `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListGithubTokens200JSONResponseBody defines parameters for ListGithubTokens.
+type ListGithubTokens200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int           `json:"code"`
+	Data []GitHubToken `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateGithubToken200JSONResponseBody defines parameters for CreateGithubToken.
+type CreateGithubToken200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int          `json:"code"`
+	Data *GitHubToken `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateGithubToken200JSONResponseBody defines parameters for UpdateGithubToken.
+type UpdateGithubToken200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int          `json:"code"`
+	Data *GitHubToken `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// DetectGithubToken200JSONResponseBody defines parameters for DetectGithubToken.
+type DetectGithubToken200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int          `json:"code"`
+	Data *GitHubToken `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -3161,6 +3268,12 @@ type CreateT3EnvironmentJSONRequestBody = CreateT3EnvironmentRequest
 
 // UpdateT3EnvironmentJSONRequestBody defines body for UpdateT3Environment for application/json ContentType.
 type UpdateT3EnvironmentJSONRequestBody = UpdateT3EnvironmentRequest
+
+// CreateGithubTokenJSONRequestBody defines body for CreateGithubToken for application/json ContentType.
+type CreateGithubTokenJSONRequestBody = CreateGitHubTokenRequest
+
+// UpdateGithubTokenJSONRequestBody defines body for UpdateGithubToken for application/json ContentType.
+type UpdateGithubTokenJSONRequestBody = UpdateGitHubTokenRequest
 
 // UpdateIssuePromptsJSONRequestBody defines body for UpdateIssuePrompts for application/json ContentType.
 type UpdateIssuePromptsJSONRequestBody UpdateIssuePromptsJSONBody

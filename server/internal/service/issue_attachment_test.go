@@ -181,7 +181,7 @@ func TestIssueAttachmentCascadeOnIssueAndProjectDelete(t *testing.T) {
 		t.Fatalf("delete seed github meta 2: %v", err)
 	}
 
-	projectService := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	projectService := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.tokenRepo, svc.storage, svc.cfg, zap.NewNop())
 	if err := projectService.Delete(project.ID, user.ID); err != nil {
 		t.Fatalf("delete project: %v", err)
 	}

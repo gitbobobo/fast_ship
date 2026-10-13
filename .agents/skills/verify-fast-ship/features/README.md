@@ -45,3 +45,4 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Issue list](./issues-list.md) covers the project selector, search, filters, sorting, and the new-issue entry point.
 - [Issue detail](./issue-detail.md) covers creating an internal issue, editing, comments, checklist, and the collaboration area.
 - [API keys](./api-keys.md) covers creating, copying, listing, and deleting API keys.
+- [GitHub tokens](./github-tokens.md) covers the token library, detection status, replacement with reference confirmation, delete guarding, and project-form token references.

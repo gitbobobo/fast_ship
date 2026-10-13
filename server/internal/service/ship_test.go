@@ -23,7 +23,8 @@ func TestShipServiceCheck_ReturnsDetailedMissingItems(t *testing.T) {
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = []byte{}
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 	version := createTestVersion(t, svc.db, project.ID, func(v *model.Version) {
 		v.ReleaseNotes = ""
@@ -88,7 +89,6 @@ func TestShipServiceShip_SuccessUpdatesVersionAndUploadsAssets(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 
@@ -165,7 +165,6 @@ func TestShipServiceShip_CreateReleaseFailureRecordsFailureState(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 
@@ -224,7 +223,6 @@ func TestShipServiceShip_CreateTagPermissionFailureUsesActionableMessage(t *test
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
 		p.GithubOwner = "liuyincs"
 		p.GithubRepo = "musiver"
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 
@@ -274,7 +272,6 @@ func TestShipServiceShip_UploadFailureRecordsFailureState(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 
@@ -411,7 +408,6 @@ func TestShipServiceShip_ExecutesInternalIssueShipHook(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)
@@ -486,7 +482,6 @@ func TestShipServiceShip_FailedShipDoesNotConsumeHook(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)
@@ -520,7 +515,6 @@ func TestShipServiceShip_SkipsCloseOnClosedIssueStillComments(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)
@@ -577,7 +571,6 @@ func TestShipServiceShip_SkipsWorkflowWhenAlreadyDone(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)
@@ -624,7 +617,6 @@ func TestShipServiceShip_GitHubCommentFailureStillShips(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)
@@ -707,10 +699,8 @@ func TestShipServiceShip_ConsumesOnlySameProjectHooks(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	projectA := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	projectB := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, projectA.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)
@@ -767,7 +757,6 @@ func TestShipServiceCheck_ReturnsEmptyPendingIssueHooks(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)
@@ -788,7 +777,6 @@ func TestShipServiceShip_PreservesUnknownPlaceholders(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	uploadShipTestArtifact(t, svc, version.ID, user.ID)

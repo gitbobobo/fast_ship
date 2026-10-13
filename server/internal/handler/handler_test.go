@@ -14,6 +14,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/service"
@@ -35,6 +36,7 @@ type handlerTestEnv struct {
 	screenshotHandler  *ScreenshotHandler
 	annotationHandler  *ScreenshotAnnotationHandler
 	projectHandler     *ProjectHandler
+	githubTokenHandler *GitHubTokenHandler
 }
 
 type apiEnvelope struct {
@@ -55,6 +57,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 
 	if err := db.AutoMigrate(
 		&model.User{},
+		&model.UserGitHubToken{},
 		&model.UserAISetting{},
 		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
@@ -112,6 +115,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	userIssuePromptRepo := repository.NewUserIssuePromptSettingRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
+	githubTokenRepo := repository.NewUserGitHubTokenRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
 	issueGitHubMetaRepo := repository.NewIssueGitHubMetaRepository(db)
@@ -134,16 +138,16 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
-	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop())
+	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), repository.NewIssueRecommendationRepository(db), repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), screenshotAnnotationRepo)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), repository.NewIssueRecommendationRepository(db), repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), screenshotAnnotationRepo)
 	collabRepo := repository.NewIssueCollabRepository(db)
 	collabService := service.NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
 	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	screenshotAnnotationService := service.NewScreenshotAnnotationService(screenshotAnnotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage)
-	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
+	shipService := service.NewShipService(versionRepo, projectRepo, githubTokenRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 
 	return &handlerTestEnv{
 		db:                 db,
@@ -157,7 +161,8 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		attachmentHandler:  NewIssueAttachmentHandler(issueAttachmentService, cfg),
 		screenshotHandler:  NewScreenshotHandler(screenshotService, cfg),
 		annotationHandler:  NewScreenshotAnnotationHandler(screenshotAnnotationService),
-		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zap.NewNop())),
+		projectHandler:     NewProjectHandler(service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())),
+		githubTokenHandler: NewGitHubTokenHandler(service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())),
 	}
 }
 
@@ -184,19 +189,43 @@ func createHandlerTestProject(t *testing.T, db *gorm.DB, userID string, opts ...
 	t.Helper()
 
 	project := &model.Project{
-		ID:                   uuid.NewString(),
-		UserID:               userID,
-		Name:                 "proj-" + uuid.NewString(),
-		Description:          "test project",
-		GithubOwner:          "owner",
-		GithubRepo:           "repo",
-		GithubTokenEncrypted: []byte("token"),
-		CreatedAt:            time.Now(),
-		UpdatedAt:            time.Now(),
+		ID:                  uuid.NewString(),
+		UserID:              userID,
+		Name:                "proj-" + uuid.NewString(),
+		Description:         "test project",
+		GithubOwner:         "owner",
+		GithubRepo:          "repo",
+		PublicGitHubTokenID: "auto-token",
+		CodeGitHubTokenID:   "auto-token",
+		CreatedAt:           time.Now(),
+		UpdatedAt:           time.Now(),
 	}
 
 	for _, opt := range opts {
 		opt(project)
+	}
+
+	if project.PublicGitHubTokenID == "auto-token" || project.CodeGitHubTokenID == "auto-token" {
+		token := &model.UserGitHubToken{
+			ID:               uuid.NewString(),
+			UserID:           userID,
+			Title:            "auto-token",
+			TokenEncrypted:   encryptHandlerTestToken(t, "12345678901234567890123456789012", "gh-token"),
+			TokenFingerprint: uuid.NewString(),
+			TokenPrefix:      "gh-token",
+			DetectionStatus:  model.TokenDetectionUnchecked,
+			DetectionType:    model.TokenTypeUnknown,
+			DetectionScopes:  "[]",
+		}
+		if err := db.Create(token).Error; err != nil {
+			t.Fatalf("create auto token: %v", err)
+		}
+		if project.PublicGitHubTokenID == "auto-token" {
+			project.PublicGitHubTokenID = token.ID
+		}
+		if project.CodeGitHubTokenID == "auto-token" {
+			project.CodeGitHubTokenID = token.ID
+		}
 	}
 
 	if err := db.Create(project).Error; err != nil {
@@ -204,6 +233,36 @@ func createHandlerTestProject(t *testing.T, db *gorm.DB, userID string, opts ...
 	}
 
 	return project
+}
+
+// createHandlerTestToken 建一条属于指定用户的 Token 库记录。
+func createHandlerTestToken(t *testing.T, env *handlerTestEnv, userID, plaintext string) *model.UserGitHubToken {
+	t.Helper()
+
+	token := &model.UserGitHubToken{
+		ID:               uuid.NewString(),
+		UserID:           userID,
+		Title:            "token-" + plaintext,
+		TokenEncrypted:   encryptHandlerTestToken(t, "12345678901234567890123456789012", plaintext),
+		TokenFingerprint: uuid.NewString(),
+		TokenPrefix:      plaintext[:8],
+		DetectionStatus:  model.TokenDetectionUnchecked,
+		DetectionType:    model.TokenTypeUnknown,
+		DetectionScopes:  "[]",
+	}
+	if err := env.db.Create(token).Error; err != nil {
+		t.Fatalf("create handler test token: %v", err)
+	}
+	return token
+}
+
+func encryptHandlerTestToken(t *testing.T, key, plaintext string) []byte {
+	t.Helper()
+	encrypted, err := crypto.Encrypt([]byte(plaintext), []byte(key))
+	if err != nil {
+		t.Fatalf("encrypt token: %v", err)
+	}
+	return encrypted
 }
 
 func createHandlerTestVersion(t *testing.T, db *gorm.DB, projectID string, opts ...func(*model.Version)) *model.Version {

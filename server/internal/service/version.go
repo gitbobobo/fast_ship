@@ -25,12 +25,12 @@ type VersionService struct {
 	newBranchClient gitHubBranchClientFactory
 }
 
-func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *repository.ProjectRepository, storage storage.Storage, cfg *config.Config, logger *zap.Logger) *VersionService {
+func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *repository.ProjectRepository, tokenRepo *repository.UserGitHubTokenRepository, storage storage.Storage, cfg *config.Config, logger *zap.Logger) *VersionService {
 	return &VersionService{
 		versionRepo: versionRepo,
 		projectRepo: projectRepo,
 		storage:     storage,
-		credentials: newProjectCredentials(projectRepo, cfg, logger),
+		credentials: newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
 		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
 			return ghclient.NewClient(token, owner, repo)
 		},

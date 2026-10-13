@@ -23,7 +23,6 @@ func TestIssueServiceGetRepositoryLabels_ReturnsSortedLabels(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	fake := &fakeIssueGitHubClient{
@@ -60,7 +59,6 @@ func TestIssueServiceGetRepositoryLabels_ReturnsGitHubError(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	fake := &fakeIssueGitHubClient{
@@ -86,7 +84,8 @@ func TestIssueServiceGetRepositoryLabels_RejectsNotGitHubConfigured(t *testing.T
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 
 	_, err := svc.issueService.GetRepositoryLabels(project.ID, user.ID)
@@ -841,7 +840,6 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -922,7 +920,6 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubTitleBack(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -980,7 +977,6 @@ func TestIssueServiceUpdateInternalIssue_RejectsEmptyTitle(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1003,7 +999,6 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubBodyBack(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1061,7 +1056,6 @@ func TestIssueServiceUpdateInternalIssue_GitHubBodyReconcilesLocalAssets(t *test
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1159,7 +1153,6 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubLabelsBack(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1219,7 +1212,6 @@ func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubState(t *testing.T)
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1248,7 +1240,6 @@ func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubLabels(t *testing.T
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1277,7 +1268,6 @@ func TestIssueServiceCreateInternalComment_WritesGitHubCommentBack(t *testing.T)
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1451,7 +1441,6 @@ func TestIssueServiceUpdateInternalIssue_SetsInternalLabels(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
@@ -1495,7 +1484,6 @@ func TestIssueServiceUpdateInternalIssue_RejectsUnknownInternalLabels(t *testing
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	created, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
@@ -1531,7 +1519,6 @@ func TestIssueServiceList_FiltersByInternalLabels(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	issue1, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
@@ -1583,7 +1570,6 @@ func TestIssueServiceGetFilterOptions_IncludesInternalLabels(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	issue, err := svc.issueService.CreateInternalIssue(project.ID, user.ID, CreateInternalIssueRequest{
@@ -1633,7 +1619,6 @@ func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *test
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	now := time.Now().UTC()
@@ -1694,7 +1679,6 @@ func TestIssueServiceCreateGitHubIssue_AttachesReferencedDraftAssets(t *testing.
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	draftAsset, err := svc.issueService.UploadDraftInternalIssueAsset(
@@ -1780,7 +1764,6 @@ func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenReferencedDraftAssetNotFo
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	fake := &fakeIssueGitHubClient{}
@@ -1810,7 +1793,6 @@ func TestIssueServiceCreateGitHubIssue_RejectsEmptyTitle(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	_, err := svc.issueService.CreateGitHubIssue(project.ID, user.ID, CreateInternalIssueRequest{
@@ -1839,7 +1821,6 @@ func TestIssueServiceCreateGitHubIssue_GitHubAPIFailure(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 
 	fake := &fakeIssueGitHubClient{

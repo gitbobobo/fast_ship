@@ -136,7 +136,7 @@ Omit `--state` (or point it at a nonexistent file) when you need an unauthentica
 
 Selector conventions (from this codebase, in preference order):
 
-- **Route paths** are stable: `/login`, `/register`, `/dashboard`, `/projects`, `/issues`, `/issues?project=<uuid>`, `/projects/<uuid>/issues/new`, `/projects/<pid>/issues/<iid>`, `/versions`, `/documents`, `/logs`, `/board`, `/settings/api-keys`.
+- **Route paths** are stable: `/login`, `/register`, `/dashboard`, `/projects`, `/issues`, `/issues?project=<uuid>`, `/projects/<uuid>/issues/new`, `/projects/<pid>/issues/<iid>`, `/versions`, `/documents`, `/logs`, `/board`, `/settings/api-keys`, `/settings/github-tokens`.
 - **Roles + accessible names**: sidebar `get_by_role("link", name="项目")`; primary buttons `get_by_role("button", name="创建项目" / "创建 API Key" / "发布评论")`; menu items `get_by_role("menuitem", name="登出")`; dialogs `get_by_role("dialog")`. On `/issues`, `新建问题` is a **link** (`render={<Link/>}`), not a button: `get_by_role("link", name="新建问题")`.
 - **Comboboxes** (Base UI `Select` triggers carry `role="combobox"` — a nameFrom:author role, so the displayed text is NOT an accessible name and `name=` never matches; select the trigger by its shown value with `filter(has_text=…)`): project selector `page.get_by_role("combobox").filter(has_text="验证项目")`; state filter `…has_text="开启"` (options `全部状态`/`开启`/`关闭`); source `…"来源"` (`全部来源`/`内部`/`GitHub`); internal status `…"内部状态"`; sort `…"最近更新"`. Options inside the open listbox DO take their name from content — pick with `page.get_by_role("option", name="关闭")`.
 - **Labels** (real `<Label htmlFor>` pairs): register `用户名`/`邮箱`/`密码`; login `用户名或邮箱`/`密码`; project dialog `项目名称`/`项目描述（可选）`; API key dialog `备注名称`; issue form `标题`/`描述`/`内部状态`.

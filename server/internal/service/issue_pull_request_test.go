@@ -57,10 +57,10 @@ func createInternalTestIssue(t *testing.T, db *gorm.DB, projectID string) *model
 	return issue
 }
 
+// withTestGitHubToken 表达「项目带可用 Token」：createTestProject 默认已建
+// 明文 "gh-token" 的 Token 库记录并引用到两个用途，这里保留调用点形状不变。
 func withTestGitHubToken(t *testing.T, svc *testServices) func(*model.Project) {
-	return func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-	}
+	return func(p *model.Project) {}
 }
 
 func stubPullRequestClient(t *testing.T, svc *testServices, fake *fakeIssueGitHubClient, wantToken string) {
@@ -90,7 +90,8 @@ func TestIssueServiceAttachPullRequest_InternalIssueSucceeds(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
@@ -181,9 +182,7 @@ func TestIssueServiceAttachPullRequest_Idempotent(t *testing.T) {
 func TestIssueServiceAttachPullRequest_CrossRepoURL(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-	})
+	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	var gotOwner, gotRepo string
@@ -928,9 +927,10 @@ func TestIssueServiceAttachPullRequest_UpgradesSyncedOrigin(t *testing.T) {
 	}
 }
 
-// 已配 PR 访问 Token 的项目 attach 只用 PR Token：client factory 收到的必须是
-// pr-token 而非项目 Token。internal 项目（未配反馈仓库）只配 PR Token 同样生效。
-func TestIssueServiceAttachPullRequest_UsesPRToken(t *testing.T) {
+// 已配代码仓库 Token 的项目 attach 只用它：client factory 收到的必须是
+// code-token 而非公开仓库 Token。internal 项目（未配反馈仓库）只配代码仓库
+// Token 同样生效。
+func TestIssueServiceAttachPullRequest_UsesCodeToken(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 
@@ -940,22 +940,23 @@ func TestIssueServiceAttachPullRequest_UsesPRToken(t *testing.T) {
 		wantTok string
 	}{
 		{
-			name: "pr token preferred over project token",
+			name: "code token preferred even with public token",
 			mutate: func(p *model.Project) {
-				p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-				p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+				codeToken := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "code-token")
+				p.CodeGitHubTokenID = codeToken.ID
 			},
-			wantTok: "pr-token",
+			wantTok: "code-token",
 		},
 		{
-			name: "internal project with only pr token",
+			name: "internal project with only code token",
 			mutate: func(p *model.Project) {
 				p.GithubOwner = ""
 				p.GithubRepo = ""
-				p.GithubTokenEncrypted = nil
-				p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+				p.PublicGitHubTokenID = ""
+				codeToken := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "code-token")
+				p.CodeGitHubTokenID = codeToken.ID
 			},
-			wantTok: "pr-token",
+			wantTok: "code-token",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -976,19 +977,19 @@ func TestIssueServiceAttachPullRequest_UsesPRToken(t *testing.T) {
 	}
 }
 
-// PR Token 密文损坏：attach 报 50000、不落关联行、client factory 不被调用——
-// 不静默回退到有效的项目 Token。
-func TestIssueServiceAttachPullRequest_CorruptPRTokenNoFallback(t *testing.T) {
+// 代码仓库 Token 密文损坏：attach 报 50000、不落关联行、client factory 不被调用——
+// 不静默回退到有效的公开仓库 Token，也不降级匿名。
+func TestIssueServiceAttachPullRequest_CorruptCodeTokenNoFallback(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	broken := createCorruptTestToken(t, svc.db, user.ID)
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-		p.GithubPRTokenEncrypted = []byte("corrupt-ciphertext")
+		p.CodeGitHubTokenID = broken.ID
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
 	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
-		t.Fatalf("github client must not be built when pr token decryption fails")
+		t.Fatalf("github client must not be built when code token decryption fails")
 		return nil
 	}
 
@@ -999,7 +1000,7 @@ func TestIssueServiceAttachPullRequest_CorruptPRTokenNoFallback(t *testing.T) {
 	if !ok || appErr.Code != errs.ErrInternal.Code {
 		t.Fatalf("expected ErrInternal, got %v", err)
 	}
-	if !strings.Contains(appErr.Message, "PR 访问 Token") {
+	if !strings.Contains(appErr.Message, "代码仓库 Token") {
 		t.Fatalf("expected credential name in message, got %q", appErr.Message)
 	}
 	if count := countPullRequestRows(t, svc, issue.ID); count != 0 {
@@ -1054,7 +1055,8 @@ func TestIssueServiceAttachPullRequest_RateLimitHintAnonymous(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
@@ -1090,18 +1092,19 @@ func TestIssueServiceAttachPullRequest_ErrorNamesCredentialSource(t *testing.T) 
 		wantMessage string
 	}{
 		{
-			name: "pr token",
+			name: "code token",
 			mutate: func(p *model.Project) {
-				p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+				codeToken := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "code-token")
+				p.CodeGitHubTokenID = codeToken.ID
 			},
-			wantTok:     "pr-token",
-			wantMessage: "使用 PR 访问 Token",
+			wantTok:     "code-token",
+			wantMessage: "使用代码仓库 Token",
 		},
 		{
-			name:        "project token",
+			name:        "default token referenced to both purposes",
 			mutate:      withTestGitHubToken(t, svc),
 			wantTok:     "gh-token",
-			wantMessage: "使用项目 Token",
+			wantMessage: "使用代码仓库 Token",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1136,7 +1139,8 @@ func TestIssueServiceAttachPullRequest_AnonymousErrorMessage(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
@@ -1155,13 +1159,13 @@ func TestIssueServiceAttachPullRequest_AnonymousErrorMessage(t *testing.T) {
 	}
 }
 
-// sync 用 PR Token 刷新；单行拉取失败的文案同样带凭证来源。
-func TestIssueServiceSyncPullRequests_UsesPRTokenAndNamesIt(t *testing.T) {
+// sync 用代码仓库 Token 刷新；单行拉取失败的文案同样带凭证来源。
+func TestIssueServiceSyncPullRequests_UsesCodeTokenAndNamesIt(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	codeToken := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "code-token")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token")
+		p.CodeGitHubTokenID = codeToken.ID
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1182,8 +1186,8 @@ func TestIssueServiceSyncPullRequests_UsesPRTokenAndNamesIt(t *testing.T) {
 		}},
 	}
 	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
-		if token != "pr-token" {
-			t.Fatalf("expected pr token, got %q", token)
+		if token != "code-token" {
+			t.Fatalf("expected code token, got %q", token)
 		}
 		fake, ok := clients[owner+"/"+repo]
 		if !ok {
@@ -1200,22 +1204,22 @@ func TestIssueServiceSyncPullRequests_UsesPRTokenAndNamesIt(t *testing.T) {
 		t.Fatalf("expected 1 item and 1 failure, got %+v", result)
 	}
 	failure := result.Failures[0]
-	if !strings.Contains(failure.Error, "使用 PR 访问 Token") {
-		t.Fatalf("expected pr token source in failure, got %q", failure.Error)
+	if !strings.Contains(failure.Error, "使用代码仓库 Token") {
+		t.Fatalf("expected code token source in failure, got %q", failure.Error)
 	}
 	if !strings.Contains(failure.Error, "Pull requests 读权限") {
 		t.Fatalf("expected permission hint in failure, got %q", failure.Error)
 	}
 }
 
-// PR Token 密文损坏时 sync 的 client 构造失败：每行记入 failures 且措辞
+// 代码仓库 Token 密文损坏时 sync 的 client 构造失败：每行记入 failures 且措辞
 // 标明凭证来源，既有关联行数据保留不动。
-func TestIssueServiceSyncPullRequests_CorruptPRTokenRecorded(t *testing.T) {
+func TestIssueServiceSyncPullRequests_CorruptCodeTokenRecorded(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
+	broken := createCorruptTestToken(t, svc.db, user.ID)
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
-		p.GithubPRTokenEncrypted = []byte("corrupt-ciphertext")
+		p.CodeGitHubTokenID = broken.ID
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
@@ -1242,8 +1246,8 @@ func TestIssueServiceSyncPullRequests_CorruptPRTokenRecorded(t *testing.T) {
 	if len(result.Items) != 0 || len(result.Failures) != 1 {
 		t.Fatalf("expected 0 items and 1 failure, got %+v", result)
 	}
-	if !strings.Contains(result.Failures[0].Error, "PR 访问 Token") {
-		t.Fatalf("expected pr token source in failure, got %q", result.Failures[0].Error)
+	if !strings.Contains(result.Failures[0].Error, "代码仓库 Token") {
+		t.Fatalf("expected code token source in failure, got %q", result.Failures[0].Error)
 	}
 
 	var stored model.IssuePullRequest

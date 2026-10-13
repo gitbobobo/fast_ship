@@ -63,7 +63,12 @@ import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
 import { IssueCommentCountMeta } from "@/components/issues/issue-comment-count-meta";
 import { cn } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
-import { ensureGitHubLinked, hasGitHubRepo } from "@/lib/utils/github";
+import {
+  ensureGitHubLinked,
+  ensureGitHubToken,
+  formatSyncError,
+  hasGitHubRepo,
+} from "@/lib/utils/github";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 
@@ -191,8 +196,8 @@ function IssueCardActions({
       toast.success(
         `已触发项目同步：${res.data.synced_issue_count} 个问题，${res.data.synced_comment_count} 条评论`,
       );
-    } catch {
-      toast.error("同步失败，请检查 GitHub 仓库配置和 Token");
+    } catch (error) {
+      toast.error(await formatSyncError(error, "同步失败，请检查 GitHub 仓库配置和 Token"));
     }
   };
 
@@ -447,8 +452,8 @@ export default function IssuesPage() {
       toast.success(
         `同步完成：${res.data.synced_issue_count} 个问题，${res.data.synced_comment_count} 条评论`,
       );
-    } catch {
-      toast.error("同步失败，请检查 GitHub 仓库配置和 Token");
+    } catch (error) {
+      toast.error(await formatSyncError(error, "同步失败，请检查 GitHub 仓库配置和 Token"));
     }
   };
 
@@ -500,7 +505,12 @@ export default function IssuesPage() {
                   variant="outline"
                   size="sm"
                   onClick={() => {
-                    if (ensureGitHubLinked(activeProject, "同步 Issue")) handleSync();
+                    if (
+                      ensureGitHubLinked(activeProject, "同步 Issue") &&
+                      ensureGitHubToken(activeProject, "同步 Issue")
+                    ) {
+                      handleSync();
+                    }
                   }}
                   disabled={syncIssues.isPending}
                 >

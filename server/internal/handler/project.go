@@ -26,22 +26,14 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
 		return
 	}
-	prTokenSourceKind, err := decodePRTokenSourceKind(input.PRTokenSourceKind)
-	if err != nil {
-		response.BadRequest(c, 40001, "请求参数无效: pr_token_source_kind "+err.Error())
-		return
-	}
 
 	userID := middleware.GetUserID(c)
 	result, err := h.projectService.Create(userID, &service.CreateProjectRequest{
-		Name:                   input.Name,
-		Description:            api.NonEmpty(input.Description),
-		RepositoryUrl:          api.NonEmpty(input.RepositoryURL),
-		GithubToken:            api.NonEmpty(input.GithubToken),
-		GithubPrToken:          api.NonEmpty(input.GithubPRToken),
-		SourceProjectId:        api.NonEmpty(input.SourceProjectID),
-		PrTokenSourceProjectId: api.NonEmpty(input.PRTokenSourceProjectID),
-		PrTokenSourceKind:      prTokenSourceKind,
+		Name:                input.Name,
+		Description:         api.NonEmpty(input.Description),
+		RepositoryUrl:       api.NonEmpty(input.RepositoryURL),
+		PublicGithubTokenId: api.NonEmpty(input.PublicGithubTokenID),
+		CodeGithubTokenId:   api.NonEmpty(input.CodeGithubTokenID),
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
@@ -85,72 +77,41 @@ func (h *ProjectHandler) List(c *gin.Context) {
 	response.SuccessPaginated(c, projects, total, page, pageSize)
 }
 
-// createProjectInput 与 updateProjectInput 同因手写绑定：PRTokenSourceKind 需
-// 按「JSON key 出现即算提供」的 presence 语义区分显式 null 与缺省（*string 会把
-// null 折成 nil）。其余可选字段沿用 string + api.NonEmpty 映射，service 端
-// api.Deref 语义不变；name 的 binding 校验照抄生成类型。
+// createProjectInput / updateProjectInput 保留手写绑定，原因同 updateMeInput：
+// 生成类型的指针字段把显式 null 折成 nil，而 Token 引用字段的三态语义
+// （key 缺省保留 / 显式 null 或空串清空 / 非空替换）依赖「JSON key 是否出现」的
+// presence 判定。create 无保留语义，引用字段仍可走 string + api.NonEmpty。
 type createProjectInput struct {
-	Name                   string          `json:"name" binding:"required,min=1,max=100"`
-	Description            string          `json:"description"`
-	RepositoryURL          string          `json:"repository_url"`
-	GithubToken            string          `json:"github_token"`
-	GithubPRToken          string          `json:"github_pr_token"`
-	SourceProjectID        string          `json:"source_project_id"`
-	PRTokenSourceProjectID string          `json:"pr_token_source_project_id"`
-	PRTokenSourceKind      json.RawMessage `json:"pr_token_source_kind"`
+	Name                string `json:"name" binding:"required,min=1,max=100"`
+	Description         string `json:"description"`
+	RepositoryURL       string `json:"repository_url"`
+	PublicGithubTokenID string `json:"public_github_token_id"`
+	CodeGithubTokenID   string `json:"code_github_token_id"`
 }
 
-// updateProjectInput 保留手写绑定，各字段按所需语义选形态：
-// name 沿用 string+omitempty——生成类型 *string 无法对显式空串走 omitempty
-// 跳过校验（原因同 updateMeInput）；description 改为 *string 三态直传——
-// 缺省与显式 null 都是 nil（保留现值），显式 "" 清空，非空替换，不经
-// api.NonEmpty（它会把空串折成 nil，清空不可达）。
-// GithubPRToken/ClearGithubPRToken/PRTokenSourceProjectID 用 RawMessage 旁路
-// 捕获：互斥校验依赖「字段是否显式提供」，显式 null 也算提供——*string/*bool
-// 会把 null 折成 nil，与缺省不可区分。PRTokenSourceKind 同法捕获 presence，
-// null/类型错误在此拦 40001，取值合法性与搭配校验在 service 层。
-// 模式同 updateDocumentRequest 的 parent_id。
 type updateProjectInput struct {
-	Name                   string          `json:"name" binding:"omitempty,min=1,max=100"`
-	Description            *string         `json:"description"`
-	RepositoryURL          string          `json:"repository_url"`
-	GithubToken            string          `json:"github_token"`
-	GithubPRToken          json.RawMessage `json:"github_pr_token"`
-	ClearGithubPRToken     json.RawMessage `json:"clear_github_pr_token"`
-	PRTokenSourceProjectID json.RawMessage `json:"pr_token_source_project_id"`
-	PRTokenSourceKind      json.RawMessage `json:"pr_token_source_kind"`
-	SourceProjectID        string          `json:"source_project_id"`
+	Name                string          `json:"name" binding:"omitempty,min=1,max=100"`
+	Description         *string         `json:"description"`
+	RepositoryURL       string          `json:"repository_url"`
+	PublicGithubTokenID json.RawMessage `json:"public_github_token_id"`
+	CodeGithubTokenID   json.RawMessage `json:"code_github_token_id"`
 }
 
-// optionalJSONField 把 RawMessage 解成指针：缺省与显式 null 都得到 nil（即不动作），
-// 其余按目标类型解码，类型不符返回错误。
-func optionalJSONField[T any](raw json.RawMessage) (*T, error) {
+// decodeTokenRefUpdate 按 presence 语义解析 Token 引用字段：
+// key 缺省 → Set=false（保留现值）；显式 null 或空串 → Set=true、空值（清空）；
+// 非空字符串 → Set=true（替换）。类型不符返回错误。
+func decodeTokenRefUpdate(raw json.RawMessage) (service.TokenRefUpdate, error) {
 	if len(raw) == 0 {
-		return nil, nil
+		return service.TokenRefUpdate{}, nil
 	}
-	var v *T
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil, err
+	var value *string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return service.TokenRefUpdate{}, errors.New("类型无效")
 	}
-	return v, nil
-}
-
-// decodePRTokenSourceKind 按 presence 语义解码 pr_token_source_kind：key 缺省
-// 返回 (nil, nil)；key 出现（含显式 null）则必须解出非空字符串——null 与非
-// 字符串都不满足「提供即须为 access/pr 合法值」。取值合法性由 service 校验。
-func decodePRTokenSourceKind(raw json.RawMessage) (*api.PrTokenSourceKind, error) {
-	if len(raw) == 0 {
-		return nil, nil
+	if value == nil {
+		return service.TokenRefUpdate{Set: true}, nil
 	}
-	s, err := optionalJSONField[string](raw)
-	if err != nil {
-		return nil, errors.New("类型无效")
-	}
-	if s == nil {
-		return nil, errors.New("取值无效")
-	}
-	kind := api.PrTokenSourceKind(*s)
-	return &kind, nil
+	return service.TokenRefUpdate{Set: true, Value: *value}, nil
 }
 
 func (h *ProjectHandler) Update(c *gin.Context) {
@@ -161,43 +122,24 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 		return
 	}
 
-	// 互斥按「字段是否显式提供」判定，显式 null 同样算提供。
-	if len(input.ClearGithubPRToken) > 0 && (len(input.GithubPRToken) > 0 || len(input.PRTokenSourceProjectID) > 0) {
-		response.BadRequest(c, 40001, "请求参数无效: clear_github_pr_token 与 github_pr_token 或 pr_token_source_project_id 不能同时提供")
+	publicTokenRef, err := decodeTokenRefUpdate(input.PublicGithubTokenID)
+	if err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: public_github_token_id 类型无效")
 		return
 	}
-	prToken, err := optionalJSONField[string](input.GithubPRToken)
+	codeTokenRef, err := decodeTokenRefUpdate(input.CodeGithubTokenID)
 	if err != nil {
-		response.BadRequest(c, 40001, "请求参数无效: github_pr_token 类型无效")
-		return
-	}
-	clearPRToken, err := optionalJSONField[bool](input.ClearGithubPRToken)
-	if err != nil {
-		response.BadRequest(c, 40001, "请求参数无效: clear_github_pr_token 类型无效")
-		return
-	}
-	prTokenSource, err := optionalJSONField[string](input.PRTokenSourceProjectID)
-	if err != nil {
-		response.BadRequest(c, 40001, "请求参数无效: pr_token_source_project_id 类型无效")
-		return
-	}
-	prTokenSourceKind, err := decodePRTokenSourceKind(input.PRTokenSourceKind)
-	if err != nil {
-		response.BadRequest(c, 40001, "请求参数无效: pr_token_source_kind "+err.Error())
+		response.BadRequest(c, 40001, "请求参数无效: code_github_token_id 类型无效")
 		return
 	}
 
 	userID := middleware.GetUserID(c)
 	result, err := h.projectService.Update(id, userID, &service.UpdateProjectRequest{
-		Name:                   api.NonEmpty(input.Name),
-		Description:            input.Description,
-		RepositoryUrl:          api.NonEmpty(input.RepositoryURL),
-		GithubToken:            api.NonEmpty(input.GithubToken),
-		GithubPrToken:          prToken,
-		ClearGithubPrToken:     clearPRToken,
-		PrTokenSourceProjectId: prTokenSource,
-		PrTokenSourceKind:      prTokenSourceKind,
-		SourceProjectId:        api.NonEmpty(input.SourceProjectID),
+		Name:                api.NonEmpty(input.Name),
+		Description:         input.Description,
+		RepositoryUrl:       api.NonEmpty(input.RepositoryURL),
+		PublicGithubTokenId: publicTokenRef,
+		CodeGithubTokenId:   codeTokenRef,
 	})
 	if err != nil {
 		middleware.HandleAppError(c, err)
