@@ -5,11 +5,12 @@
 //
 // On failure the stderr line carries the envelope's business code and
 // message (`request returned status 502: 50200 GitHub API 调用失败
-// (github-upstream-error, retryable)`), so the reason survives callers
+// (github-upstream-error)`), so the reason survives callers
 // piping stdout into tail/jq. Transport failures and 5xx get one
 // automatic retry, but only for calls the API documents as replay-safe
-// (GET, PUT, pull-requests attach/sync, collab DELETE); a response whose
-// body cannot be read is reported with its status, never resent.
+// (GET, pull-requests attach/sync, collab consensus/summary writes and
+// deletes); a response whose body cannot be read is reported with its
+// status, never resent.
 //
 // Usage: node fast-ship-api.mjs <METHOD> <path> [body.json] [--verify [get-path]]
 
@@ -44,8 +45,8 @@ const CODE_HINTS = {
   40911: 'recommendation-deferred',
   41201: 'too-many-issues-matched',
   50000: 'internal-error',
-  50200: 'github-upstream-error, retryable',
-  50201: 'ai-upstream-error, retryable',
+  50200: 'github-upstream-error',
+  50201: 'upstream-call-failed',
 };
 
 const USAGE = `Usage: node fast-ship-api.mjs <METHOD> <path> [body.json] [--verify]
@@ -111,19 +112,21 @@ function loadConfig() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Only calls the API documents as replay-safe get retried: GET reads and
-// PUT upserts are idempotent across the board; POST is limited to the
-// pull-requests routes (attach dedupes by issue+PR, sync only refreshes
-// rows) and DELETE to collab blocks (200 even when already gone). Every
-// other write creates rows or is documented non-idempotent — PR detach
-// returns 40412 on replay — so it is never resent automatically: a lost
-// or 5xx response does not prove the server did not apply it.
+// Only calls the API documents as replay-safe get resent automatically:
+// every GET, the pull-requests attach/sync POSTs (attach dedupes by
+// issue+PR, sync only refreshes rows), and collab consensus/summary PUT
+// and DELETE (repeat calls return success). Everything else — issue and
+// asset creates, password change, log clears, PR detach and other
+// non-idempotent deletes — is never resent: a lost or 5xx response does
+// not prove the server did not apply it.
 function retryable(method, path) {
   const p = path.split('?')[0];
-  if (method === 'GET' || method === 'PUT') return true;
+  if (method === 'GET') return true;
   if (method === 'POST') return /\/pull-requests(?:\/sync)?$/.test(p);
-  if (method === 'DELETE') return /\/collab\/(?:consensus|summary)$/.test(p);
-  return false;
+  return (
+    (method === 'PUT' || method === 'DELETE') &&
+    /\/collab\/(?:consensus|summary)$/.test(p)
+  );
 }
 
 // Resolves to { status, ok, text, readError? }. Transient failures get
