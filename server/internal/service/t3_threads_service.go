@@ -143,6 +143,13 @@ func (s *T3ThreadsService) Detail(ctx context.Context, userID, envID, threadID s
 	ctx, cancel := context.WithTimeout(ctx, s.budgets.ThreadDetail)
 	defer cancel()
 
+	// 与列表同一探测：Bearer 被吊销/过期时 WS 握手失败不区分状态码（见
+	// dialT3RPC 注释），先用 HTTP 会话探明，凭证失效直接回「请重新配对」，
+	// 而不是落到 WS 握手失败的一句笼统 50202。
+	if status, probeErr := s.http.probeSession(ctx, env.Address, token); status != T3EnvironmentStatusOK {
+		return nil, errs.New(errs.ErrT3Upstream.Code, probeErr)
+	}
+
 	snaps, err := s.fetchShellSnapshots(ctx, env, token)
 	if err != nil {
 		return nil, s.upstreamError(err)
@@ -326,6 +333,7 @@ func (s *T3ThreadsService) fetchShellSnapshots(ctx context.Context, env *model.T
 	defer session.Close()
 
 	snaps := &t3ShellSnapshots{}
+	gotActive := false
 	err = session.callFirstChunkValue(ctx, "orchestration.subscribeShell", map[string]any{}, func(value json.RawMessage) (bool, error) {
 		var item struct {
 			Kind     string          `json:"kind"`
@@ -338,10 +346,17 @@ func (s *T3ThreadsService) fetchShellSnapshots(ctx context.Context, env *model.T
 			return false, nil // 活动帧：快照前的等待帧，继续读
 		}
 		snaps.Active = item.Snapshot
+		gotActive = true
 		return true, nil
 	})
-	if err != nil {
+	if err != nil && !gotActive {
 		return nil, err
+	}
+	if err != nil {
+		// 活跃快照已完整收下，收尾写（Ack/Interrupt）失败不推翻活跃面——
+		// 与归档 RPC 失败同一降级：记进 ArchiveErr，活跃线程照常返回。
+		snaps.ArchiveErr = err
+		return snaps, nil
 	}
 
 	// 归档线程来自独立一次性 RPC（真实活跃快照的 archivedThreads 恒为空）。

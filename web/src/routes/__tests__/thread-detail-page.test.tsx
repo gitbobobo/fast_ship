@@ -1,3 +1,4 @@
+import { HTTPError } from "ky";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -263,5 +264,54 @@ describe("ThreadDetailPage", () => {
     await user.click(screen.getByRole("button", { name: "重试" }));
     expect(await screen.findByText("fresh")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("explains a missing thread when the detail request 404s", async () => {
+    const error = Object.create(HTTPError.prototype) as HTTPError;
+    Object.defineProperty(error, "response", {
+      value: new Response(JSON.stringify({ code: 40418, message: "T3 线程不存在" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      }),
+    });
+    detail.mockRejectedValue(error);
+
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/threads/e1/t1"]}>
+          <Routes>
+            <Route path="/threads/:environmentId/:threadId" element={<ThreadDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("线程不存在，可能已被删除或移动。")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "去重新配对" })).toBeNull();
+  });
+
+  it("surfaces the server message and a re-pair link for rejected credentials", async () => {
+    const error = Object.create(HTTPError.prototype) as HTTPError;
+    Object.defineProperty(error, "response", {
+      value: new Response(
+        JSON.stringify({ code: 50202, message: "T3 环境拒绝凭证（可能已过期或被吊销），请重新配对" }),
+        { status: 502, headers: { "Content-Type": "application/json" } },
+      ),
+    });
+    detail.mockRejectedValue(error);
+
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/threads/e1/t1"]}>
+          <Routes>
+            <Route path="/threads/:environmentId/:threadId" element={<ThreadDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText(/请重新配对/)).toBeInTheDocument();
+    const link = await screen.findByRole("link", { name: "去重新配对" });
+    expect(link).toHaveAttribute("href", "/settings/environments");
   });
 });

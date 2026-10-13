@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { HTTPError } from "ky";
 import { Link, useParams } from "react-router";
 import { ArrowLeft, Cpu, GitBranch, GitPullRequest } from "lucide-react";
 import { Header } from "@/components/layout/header";
@@ -10,11 +12,35 @@ import { formatRelativeTime } from "@/lib/utils/format";
 
 export default function ThreadDetailPage() {
   const { environmentId = "", threadId = "" } = useParams();
-  const { data, isLoading, isError, isFetching, refetch } = useThreadDetail(environmentId, threadId);
+  const { data, error, isLoading, isError, isFetching, refetch } = useThreadDetail(environmentId, threadId);
   const thread = data?.thread;
   const model = thread
     ? [thread.provider, thread.model].filter(Boolean).join(" / ")
     : "";
+
+  // 首次加载失败的文案按服务端响应区分：404=线程没了，其余带服务端
+  // message；凭证失效一类在文案外再给重新配对入口。
+  const [errorMessage, setErrorMessage] = useState("");
+  useEffect(() => {
+    setErrorMessage("");
+    if (!(error instanceof HTTPError)) return;
+    let cancelled = false;
+    void error.response
+      .clone()
+      .json<ApiResponse<unknown>>()
+      .then((body) => {
+        if (!cancelled && body?.message) setErrorMessage(body.message);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [error]);
+  const notFound = error instanceof HTTPError && error.response.status === 404;
+  const needsRepair = errorMessage.includes("重新配对");
+  const failureText = notFound
+    ? "线程不存在，可能已被删除或移动。"
+    : errorMessage || "线程加载失败，所在环境可能暂时不可达。";
 
   return (
     <>
@@ -36,15 +62,21 @@ export default function ThreadDetailPage() {
           </div>
         ) : !data || !thread ? (
           <div className="py-16 text-center text-sm text-muted-foreground">
-            <p>线程加载失败，可能已被删除，或所在环境暂时不可达。</p>
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-3"
-              onClick={() => refetch()}
-            >
-              重试
-            </Button>
+            <p>{failureText}</p>
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => refetch()}>
+                重试
+              </Button>
+              {needsRepair && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  render={<Link to="/settings/environments" />}
+                >
+                  去重新配对
+                </Button>
+              )}
+            </div>
           </div>
         ) : (
           <>

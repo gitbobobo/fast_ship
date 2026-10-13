@@ -43,15 +43,16 @@ type fakeT3Environment struct {
 	t  *testing.T
 	mu sync.Mutex
 
-	baseURL      string
-	pairingCodes map[string]bool   // 有效配对码
-	validBearers map[string]bool   // 有效 Bearer
-	grantScope   string            // /oauth/token 回的 scope；默认 orchestration:read
-	snapshot     json.RawMessage   // subscribeShell 首块 value（活跃快照，归档为空）
-	archive      json.RawMessage   // getArchivedShellSnapshot 一次性返回值
-	archiveFail  bool              // true 时归档 RPC 回 Exit Failure（G1 降级路径）
-	projections  map[string]string // threadId -> wire 投影 JSON
-	turnItems    map[string]string // itemId -> getTurnItem 返回的完整条目 JSON
+	baseURL         string
+	pairingCodes    map[string]bool   // 有效配对码
+	validBearers    map[string]bool   // 有效 Bearer
+	grantScope      string            // /oauth/token 回的 scope；默认 orchestration:read
+	snapshot        json.RawMessage   // subscribeShell 首块 value（活跃快照，归档为空）
+	archive         json.RawMessage   // getArchivedShellSnapshot 一次性返回值
+	archiveFail     bool              // true 时归档 RPC 回 Exit Failure（G1 降级路径）
+	dropAfterActive bool              // true 时活跃快照发出后立即断连（客户端 Ack 写失败）
+	projections     map[string]string // threadId -> wire 投影 JSON
+	turnItems       map[string]string // itemId -> getTurnItem 返回的完整条目 JSON
 
 	gotTokenForms []map[string]string
 	gotRPC        []t3RecordedRPC // WS 一次性请求（方法+payload）
@@ -224,6 +225,7 @@ func (f *fakeT3Environment) handleWS(w http.ResponseWriter, r *http.Request) {
 		snapshot := f.snapshot
 		archive := f.archive
 		archiveFail := f.archiveFail
+		dropAfterActive := f.dropAfterActive
 		turnItems := make(map[string]string, len(f.turnItems))
 		for id, item := range f.turnItems {
 			turnItems[id] = item
@@ -274,6 +276,11 @@ func (f *fakeT3Environment) handleWS(w http.ResponseWriter, r *http.Request) {
 					})
 					// 首块无需 Ack 即可发出；Interrupt 只结束订阅流，
 					// 连接保留给同一会话上的后续一次性 RPC（真实语义）。
+					if dropAfterActive {
+						// 快照已送达后断连：客户端的 Ack/Interrupt 写会失败，
+						// 覆盖「读完整后收尾写失败不丢活跃面」的降级路径。
+						return
+					}
 					f.waitStreamEnd(conn)
 				case "orchestration.getArchivedShellSnapshot":
 					if archiveFail {
@@ -1570,4 +1577,85 @@ func mustJSON(v any) json.RawMessage {
 
 func mustJSONString(v any) string {
 	return string(mustJSON(v))
+}
+
+// TestT3ThreadsSnapshotWriteFailureKeepsActive 覆盖审查 r1#3：活跃快照已经
+// 完整收下后，收尾写（Ack/Interrupt）失败不推翻活跃面——与归档 RPC 失败
+// 同一降级：活跃线程照常返回，环境标降级，错误写进 ArchiveErr。
+func TestT3ThreadsSnapshotWriteFailureKeepsActive(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.dropAfterActive = true // 快照送达即断连：客户端 Ack/Interrupt 写失败
+	e.fake.mu.Unlock()
+
+	if _, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "断连机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	result, err := e.th.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Id != "th-1" {
+		t.Fatalf("active threads must survive post-snapshot write failure, got %+v", result.Items)
+	}
+	if len(result.Environments) != 1 || result.Environments[0].Status != T3EnvironmentStatusUnreachable {
+		t.Fatalf("post-snapshot failure must mark the environment degraded, got %+v", result.Environments)
+	}
+}
+
+// TestT3ThreadDetailRevokedCredentialHintsRepair 覆盖审查 r1#1：详情路径与
+// 列表同一探测语义——凭证吊销时不再落到 WS 握手失败的一句笼统 50202，
+// 而是「请重新配对」的明确指引。
+func TestT3ThreadDetailRevokedCredentialHintsRepair(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "吊销机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	e.fake.revokeBearers()
+	_, err = e.th.Detail(ctx, userID, env.Id, "th-1")
+	if err == nil || t3ErrCode(err) != errs.ErrT3Upstream.Code {
+		t.Fatalf("expected upstream error after revoke, got %v", err)
+	}
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || !strings.Contains(appErr.Message, "重新配对") {
+		t.Fatalf("expected re-pair hint in message, got %v", err)
+	}
+}
+
+// TestT3WSAuthInvalidErrorIsCredentialRejected 覆盖审查 r1#1 的第二条修法：
+// RPC 层的 EnvironmentAuthInvalidError（无 message 的旧形态）与
+// EnvironmentAuthorizationError 一样归成凭证失效。
+func TestT3WSAuthInvalidErrorIsCredentialRejected(t *testing.T) {
+	frame := rpcFrame{
+		Exit: &rpcExit{
+			Tag: "Failure",
+			Cause: []rpcFailureCause{{
+				Tag:   "Fail",
+				Error: json.RawMessage(`{"_tag":"EnvironmentAuthInvalidError"}`),
+			}},
+		},
+	}
+	if _, err := frame.exitValue(); !errors.Is(err, errT3CredentialRejected) {
+		t.Fatalf("EnvironmentAuthInvalidError must classify as credential rejected, got %v", err)
+	}
 }

@@ -295,8 +295,13 @@ func t3RPCCauseError(cause []rpcFailureCause) error {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(first.Error, &tagged); err == nil {
-			if tagged.Tag == "EnvironmentAuthorizationError" {
-				return fmt.Errorf("%w: %s", errT3CredentialRejected, tagged.Message)
+			// AuthorizationError=RPC 层授权拒绝（scope/权限不足），
+			// AuthInvalidError=凭证无效/过期；两者都按凭证失效处理。
+			if tagged.Tag == "EnvironmentAuthorizationError" || tagged.Tag == "EnvironmentAuthInvalidError" {
+				if tagged.Message != "" {
+					return fmt.Errorf("%w: %s", errT3CredentialRejected, tagged.Message)
+				}
+				return errT3CredentialRejected
 			}
 			if tagged.Message != "" {
 				return fmt.Errorf("%s: %s", tagged.Tag, tagged.Message)
