@@ -79,10 +79,13 @@ export function ImageStrip({
   environmentId,
   images,
   onRemove,
+  locked = false,
 }: {
   environmentId: string;
   images: ComposerImage[];
   onRemove: (key: string) => void;
+  /** 请求还在飞时禁用移除，避免删掉已经写进命令体的附件。 */
+  locked?: boolean;
 }) {
   if (images.length === 0) return null;
   return (
@@ -126,8 +129,9 @@ export function ImageStrip({
           <button
             type="button"
             aria-label={`移除图片 ${image.name}`}
+            disabled={locked}
             onClick={() => onRemove(image.key)}
-            className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-foreground text-background shadow"
+            className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-foreground text-background shadow disabled:pointer-events-none disabled:opacity-50"
           >
             <X className="h-3 w-3" />
           </button>

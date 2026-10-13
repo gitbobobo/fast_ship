@@ -12,6 +12,15 @@ import (
 )
 
 // parseOptionalCursorQuery 解析可选的非负整数游标；空串返回 nil。
+// queuedEditText 排队编辑的 text 必填：缺省会把已有正文清成空串。
+// 显式 "" 仍放行（只改图片，或清掉占位正文）。
+func queuedEditText(raw *string) (string, bool) {
+	if raw == nil {
+		return "", false
+	}
+	return *raw, true
+}
+
 func parseOptionalCursorQuery(raw string) (*int, error) {
 	if raw == "" {
 		return nil, nil
@@ -257,9 +266,10 @@ func (h *T3EnvironmentHandler) EditQueuedRun(c *gin.Context) {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
 		return
 	}
-	text := ""
-	if raw.Text != nil {
-		text = *raw.Text
+	text, ok := queuedEditText(raw.Text)
+	if !ok {
+		response.BadRequest(c, 40001, "text 不能缺省")
+		return
 	}
 	var attachments *[]service.T3ChatAttachment
 	if len(raw.Attachments) > 0 && string(raw.Attachments) != "null" {
