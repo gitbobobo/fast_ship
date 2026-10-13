@@ -1,8 +1,9 @@
-import { Suspense, lazy, type ReactNode } from "react";
+import { Suspense, lazy, useEffect, type ReactNode } from "react";
 import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
 
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
@@ -35,6 +36,11 @@ const SettingsIssuePromptsPage = lazy(
   () => import("@/routes/settings/issue-prompts"),
 );
 const ApiKeysPage = lazy(() => import("@/routes/settings/api-keys"));
+const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
+const ThreadsPage = lazy(() => import("@/routes/threads/index"));
+const ThreadDetailPage = lazy(
+  () => import("@/routes/threads/$environmentId/$threadId"),
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -46,6 +52,8 @@ const queryClient = new QueryClient({
 });
 
 export default function App() {
+  useEffect(() => watchThreadsIdentity(queryClient), []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
@@ -93,6 +101,14 @@ export default function App() {
               <Route
                 path="/documents"
                 element={<LazyPage render={<DocumentsPage />} />}
+              />
+              <Route
+                path="/threads"
+                element={<LazyPage render={<ThreadsPage />} />}
+              />
+              <Route
+                path="/threads/:environmentId/:threadId"
+                element={<LazyPage render={<ThreadDetailPage />} />}
               />
               <Route
                 path="/board"
@@ -144,6 +160,10 @@ export default function App() {
                 <Route
                   path="api-keys"
                   element={<LazyPage render={<ApiKeysPage />} />}
+                />
+                <Route
+                  path="environments"
+                  element={<LazyPage render={<EnvironmentsPage />} />}
                 />
               </Route>
             </Route>

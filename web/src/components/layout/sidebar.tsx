@@ -11,6 +11,7 @@ import {
   ScrollText,
   FileText,
   Images,
+  MessagesSquare,
 } from "lucide-react";
 import {
   Tooltip,
@@ -30,6 +31,7 @@ const navItems = [
   { to: "/logs", label: "日志", icon: ScrollText, end: false },
   { to: "/documents", label: "文档", icon: FileText, end: true },
   { to: "/board", label: "看板", icon: Kanban, end: true },
+  { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
   { to: "/versions", label: "版本", icon: Tags, end: true },
   { to: "/screenshots", label: "截图", icon: Images, end: true },
 ];

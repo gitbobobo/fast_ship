@@ -1,0 +1,43 @@
+package service
+
+import "github.com/godbobo/fast_ship/server/internal/api"
+
+// T3 线程只读集成（INT-82）的契约类型。
+//
+// 契约真相源是 api/types.gen.go（oapi-codegen 自 api/openapi.yaml 生成），
+// 这里按 api_types.go 惯例为 service 层既有名字提供类型别名；字段名以生成
+// 类型为准（Id/EnvironmentId/PairingUrl 风格），optional 的 error/status/
+// child_thread_id/detail_available 为指针（api.Ptr/Deref/NonEmpty/True 处理）。
+type (
+	// 环境连接
+	T3EnvironmentResponse      = api.T3Environment
+	CreateT3EnvironmentRequest = api.CreateT3EnvironmentRequest
+	UpdateT3EnvironmentRequest = api.UpdateT3EnvironmentRequest
+
+	// 线程聚合（列表 Data 形状：items + environments）
+	T3ThreadListResponse = api.ListT3Threads200JSONResponseBody_Data
+	T3ThreadSummary      = api.T3ThreadSummary
+	T3ThreadItem         = api.T3ThreadItem
+	T3ThreadDetail       = api.T3ThreadDetail
+
+	// 枚举
+	T3EnvironmentStatus   = api.T3EnvironmentStatus
+	T3ThreadItemType      = api.T3ThreadItemType
+	T3ThreadSummaryStatus = api.T3ThreadSummaryStatus
+)
+
+// 枚举值沿用生成常量；service 侧保持既有短名，避免引用点散落 api 包名。
+const (
+	T3EnvironmentStatusOK          = api.Ok
+	T3EnvironmentStatusUnreachable = api.Unreachable
+	T3EnvironmentStatusRepair      = api.Repair
+
+	T3ThreadItemTypeUserMessage      = api.UserMessage
+	T3ThreadItemTypeAssistantMessage = api.AssistantMessage
+	T3ThreadItemTypeReasoning        = api.Reasoning
+	T3ThreadItemTypeCommandExecution = api.CommandExecution
+	T3ThreadItemTypeDynamicTool      = api.DynamicTool
+	T3ThreadItemTypeFileChange       = api.FileChange
+	T3ThreadItemTypeSubagent         = api.Subagent
+	T3ThreadTypeError                = api.Error
+)

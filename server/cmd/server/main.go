@@ -71,6 +71,7 @@ var autoMigrateModels = []interface{}{
 	&model.ScreenshotScreen{},
 	&model.ScreenshotVersion{},
 	&model.ScreenshotAnnotation{},
+	&model.T3Environment{},
 }
 
 func main() {
@@ -151,6 +152,7 @@ func main() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_environments_user_name ON t3_environments(user_id, name)")
 
 	if err := dropLegacyCollabTables(db, zapLogger); err != nil {
 		log.Fatalf("协作区数据迁移失败: %v", err)
@@ -199,6 +201,7 @@ func main() {
 	artifactRepo := repository.NewArtifactRepository(db)
 	screenshotRepo := repository.NewScreenshotRepository(db)
 	screenshotAnnotationRepo := repository.NewScreenshotAnnotationRepository(db)
+	t3EnvironmentRepo := repository.NewT3EnvironmentRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
@@ -221,6 +224,8 @@ func main() {
 	screenshotAnnotationService := service.NewScreenshotAnnotationService(screenshotAnnotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
+	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zapLogger)
+	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zapLogger)
 
 	// 初始化 Handler
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
@@ -240,6 +245,7 @@ func main() {
 	screenshotHandler := handler.NewScreenshotHandler(screenshotService, cfg)
 	screenshotAnnotationHandler := handler.NewScreenshotAnnotationHandler(screenshotAnnotationService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
+	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -303,7 +309,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

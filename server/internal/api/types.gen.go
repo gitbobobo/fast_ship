@@ -62,6 +62,87 @@ func (e ScreenshotAnnotationStatus) Valid() bool {
 	}
 }
 
+// Defines values for T3EnvironmentStatus.
+const (
+	Ok          T3EnvironmentStatus = "ok"
+	Repair      T3EnvironmentStatus = "repair"
+	Unreachable T3EnvironmentStatus = "unreachable"
+)
+
+// Valid indicates whether the value is a known member of the T3EnvironmentStatus enum.
+func (e T3EnvironmentStatus) Valid() bool {
+	switch e {
+	case Ok:
+		return true
+	case Repair:
+		return true
+	case Unreachable:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for T3ThreadItemType.
+const (
+	AssistantMessage T3ThreadItemType = "assistant_message"
+	CommandExecution T3ThreadItemType = "command_execution"
+	DynamicTool      T3ThreadItemType = "dynamic_tool"
+	Error            T3ThreadItemType = "error"
+	FileChange       T3ThreadItemType = "file_change"
+	Reasoning        T3ThreadItemType = "reasoning"
+	Subagent         T3ThreadItemType = "subagent"
+	UserMessage      T3ThreadItemType = "user_message"
+)
+
+// Valid indicates whether the value is a known member of the T3ThreadItemType enum.
+func (e T3ThreadItemType) Valid() bool {
+	switch e {
+	case AssistantMessage:
+		return true
+	case CommandExecution:
+		return true
+	case DynamicTool:
+		return true
+	case Error:
+		return true
+	case FileChange:
+		return true
+	case Reasoning:
+		return true
+	case Subagent:
+		return true
+	case UserMessage:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for T3ThreadSummaryStatus.
+const (
+	Archived T3ThreadSummaryStatus = "archived"
+	Idle     T3ThreadSummaryStatus = "idle"
+	Running  T3ThreadSummaryStatus = "running"
+	Waiting  T3ThreadSummaryStatus = "waiting"
+)
+
+// Valid indicates whether the value is a known member of the T3ThreadSummaryStatus enum.
+func (e T3ThreadSummaryStatus) Valid() bool {
+	switch e {
+	case Archived:
+		return true
+	case Idle:
+		return true
+	case Running:
+		return true
+	case Waiting:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for UpdateIssueRequestStateReason.
 const (
 	UpdateIssueRequestStateReasonCompleted  UpdateIssueRequestStateReason = "completed"
@@ -359,6 +440,17 @@ type CreateScreenshotAnnotationRequest struct {
 	Width   *float32 `json:"width"`
 	X       *float32 `json:"x"`
 	Y       *float32 `json:"y"`
+}
+
+// CreateT3EnvironmentRequest defines model for CreateT3EnvironmentRequest.
+type CreateT3EnvironmentRequest struct {
+	// Name 环境显示名；同一用户下唯一（重复返回 40912）
+	Name string `json:"name"`
+
+	// PairingUrl 配对链接：`t3 pair` 直接链接（`https://host/#token=code`，hash 优先，
+	// 兼容 `?token=`）或 hosted 包装链接（`https://relay/?host=<backend>&token=code`）。
+	// 协议支持 http/https/ws/wss；缺省协议时 IP 字面量补 http、其余补 https。
+	PairingUrl string `json:"pairing_url"`
 }
 
 // CreateVersionRequest defines model for CreateVersionRequest.
@@ -1361,6 +1453,112 @@ type ShipStage = model.ShipStage
 // ShipStatus 空串表示尚未发货（idle）
 type ShipStatus = model.ShipStatus
 
+// T3Environment 已配对的 T3 环境连接；不泄漏任何凭证字段
+type T3Environment struct {
+	// Address 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host）
+	Address string `json:"address"`
+
+	// Error 最近一次探测失败的说明；成功时省略
+	Error *string `json:"error,omitempty"`
+	Id    string  `json:"id"`
+	Name  string  `json:"name"`
+
+	// Status 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
+	// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对
+	Status    T3EnvironmentStatus `json:"status"`
+	UpdatedAt string              `json:"updated_at"`
+}
+
+// T3EnvironmentStatus 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
+// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对
+type T3EnvironmentStatus string
+
+// T3ThreadDetail defines model for T3ThreadDetail.
+type T3ThreadDetail struct {
+	Items  []T3ThreadItem  `json:"items"`
+	Thread T3ThreadSummary `json:"thread"`
+}
+
+// T3ThreadItem 归一化线程条目。映射规则：user_message/assistant_message/reasoning 原样带快照文本；
+// proposed_plan → assistant_message；command_execution（text=命令，summary=命令首行，
+// 输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
+// dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
+// 上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
+// 结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
+// 结构性/交互性事件（checkpoint、approval_request、handoff、notification、
+// system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外截断。
+type T3ThreadItem struct {
+	// ChildThreadId 仅 subagent；子线程 ID
+	ChildThreadId *string `json:"child_thread_id,omitempty"`
+
+	// DetailAvailable 条目在快照之外还有正文，可经 items/{itemId} 补读：
+	// 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉
+	// 输出/结果，file_change 上游 detail 也无 diff 故为 false）；补读响应恒为
+	// false。缺省即 false。
+	DetailAvailable *bool `json:"detail_available,omitempty"`
+
+	// Id Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分）
+	Id string `json:"id"`
+
+	// Status T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略
+	Status *string `json:"status,omitempty"`
+
+	// Summary 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名
+	Summary string `json:"summary"`
+
+	// Text 正文，不额外截断（命令=命令文本；文件=元数据；展开后的完整正文经 items/{itemId} 获取）
+	Text string           `json:"text"`
+	Type T3ThreadItemType `json:"type"`
+
+	// UpdatedAt 上游条目自带的 updatedAt（RFC3339）原样透传，作为条目版本；上游省略时本字段缺省
+	UpdatedAt *string `json:"updated_at,omitempty"`
+}
+
+// T3ThreadItemType defines model for T3ThreadItem.Type.
+type T3ThreadItemType string
+
+// T3ThreadSummary defines model for T3ThreadSummary.
+type T3ThreadSummary struct {
+	// Branch 工作分支；T3 侧为 null 时为空串
+	Branch          string `json:"branch"`
+	EnvironmentId   string `json:"environment_id"`
+	EnvironmentName string `json:"environment_name"`
+
+	// Id T3 threadId
+	Id        string `json:"id"`
+	Model     string `json:"model"`
+	ProjectId string `json:"project_id"`
+
+	// ProjectName 来自 WS shell 快照项目表，列表和详情均使用该来源
+	ProjectName string `json:"project_name"`
+
+	// Provider T3 providerInstanceId
+	Provider string `json:"provider"`
+
+	// PullRequestCount 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计）
+	PullRequestCount int `json:"pull_request_count"`
+
+	// Status 由 T3 归一化（对齐 T3 Sidebar 的判定顺序）：
+	// archivedAt 非空 → archived；其次 pendingRuntimeRequest 非空（等用户审批/输入）→ waiting；
+	// 再看 activityRunStatus（后台 run 未停时 shell.status 可能已是 completed/idle）：
+	// preparing/starting/running → running、waiting → waiting；
+	// 最后 shell.status 兜底（preparing/queued/starting/running → running、
+	// waiting → waiting、其余 → idle）
+	Status T3ThreadSummaryStatus `json:"status"`
+	Title  string                `json:"title"`
+
+	// UpdatedAt T3 原样返回的 ISO-8601 时间
+	UpdatedAt string `json:"updated_at"`
+}
+
+// T3ThreadSummaryStatus 由 T3 归一化（对齐 T3 Sidebar 的判定顺序）：
+// archivedAt 非空 → archived；其次 pendingRuntimeRequest 非空（等用户审批/输入）→ waiting；
+// 再看 activityRunStatus（后台 run 未停时 shell.status 可能已是 completed/idle）：
+// preparing/starting/running → running、waiting → waiting；
+// 最后 shell.status 兜底（preparing/queued/starting/running → running、
+// waiting → waiting、其余 → idle）
+type T3ThreadSummaryStatus string
+
 // UpdateAISettingsRequest defines model for UpdateAISettingsRequest.
 type UpdateAISettingsRequest struct {
 	// ApiHost 缺省回退默认 host；须为合法 URL
@@ -1462,6 +1660,14 @@ type UpdateScreenshotScreenRequest struct {
 
 	// Title 界面标题（≤200 字符）；空串回退显示 screen_key
 	Title *string `json:"title,omitempty"`
+}
+
+// UpdateT3EnvironmentRequest 指针语义：字段出现才更新，都不传返回 40001
+type UpdateT3EnvironmentRequest struct {
+	Name *string `json:"name,omitempty"`
+
+	// PairingUrl 出现时重新配对（覆盖地址与 Bearer），用于修复 repair 状态
+	PairingUrl *string `json:"pairing_url,omitempty"`
 }
 
 // UpdateVersionRequest defines model for UpdateVersionRequest.
@@ -1619,6 +1825,15 @@ type ScreenshotScreenId = string
 
 // ScreenshotVersionId defines model for ScreenshotVersionId.
 type ScreenshotVersionId = string
+
+// T3EnvironmentId defines model for T3EnvironmentId.
+type T3EnvironmentId = string
+
+// T3ThreadId defines model for T3ThreadId.
+type T3ThreadId = string
+
+// T3ThreadItemId defines model for T3ThreadItemId.
+type T3ThreadItemId = string
 
 // VersionId defines model for VersionId.
 type VersionId = string
@@ -1822,6 +2037,74 @@ type UpdateDocument200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int       `json:"code"`
 	Data *Document `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListT3Environments200JSONResponseBody_Data defines parameters for ListT3Environments.
+type ListT3Environments200JSONResponseBody_Data struct {
+	Items []T3Environment `json:"items"`
+}
+
+// ListT3Environments200JSONResponseBody defines parameters for ListT3Environments.
+type ListT3Environments200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                         `json:"code"`
+	Data *ListT3Environments200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateT3Environment200JSONResponseBody defines parameters for CreateT3Environment.
+type CreateT3Environment200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 已配对的 T3 环境连接；不泄漏任何凭证字段
+	Data *T3Environment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateT3Environment200JSONResponseBody defines parameters for UpdateT3Environment.
+type UpdateT3Environment200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 已配对的 T3 环境连接；不泄漏任何凭证字段
+	Data *T3Environment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetT3Thread200JSONResponseBody defines parameters for GetT3Thread.
+type GetT3Thread200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int             `json:"code"`
+	Data *T3ThreadDetail `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetT3ThreadItem200JSONResponseBody defines parameters for GetT3ThreadItem.
+type GetT3ThreadItem200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 归一化线程条目。映射规则：user_message/assistant_message/reasoning 原样带快照文本；
+	// proposed_plan → assistant_message；command_execution（text=命令，summary=命令首行，
+	// 输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
+	// dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
+	// 上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
+	// 结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
+	// 结构性/交互性事件（checkpoint、approval_request、handoff、notification、
+	// system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外截断。
+	Data *T3ThreadItem `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -2755,6 +3038,22 @@ type GetScreenshotVersionContentHeadParams struct {
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
 }
 
+// ListT3Threads200JSONResponseBody_Data defines parameters for ListT3Threads.
+type ListT3Threads200JSONResponseBody_Data struct {
+	Environments []T3Environment   `json:"environments"`
+	Items        []T3ThreadSummary `json:"items"`
+}
+
+// ListT3Threads200JSONResponseBody defines parameters for ListT3Threads.
+type ListT3Threads200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                    `json:"code"`
+	Data *ListT3Threads200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // GetVersion200JSONResponseBody defines parameters for GetVersion.
 type GetVersion200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -2846,6 +3145,12 @@ type RegisterJSONRequestBody = RegisterRequest
 
 // UpdateDocumentJSONRequestBody defines body for UpdateDocument for application/json ContentType.
 type UpdateDocumentJSONRequestBody = UpdateDocumentRequest
+
+// CreateT3EnvironmentJSONRequestBody defines body for CreateT3Environment for application/json ContentType.
+type CreateT3EnvironmentJSONRequestBody = CreateT3EnvironmentRequest
+
+// UpdateT3EnvironmentJSONRequestBody defines body for UpdateT3Environment for application/json ContentType.
+type UpdateT3EnvironmentJSONRequestBody = UpdateT3EnvironmentRequest
 
 // UpdateIssuePromptsJSONRequestBody defines body for UpdateIssuePrompts for application/json ContentType.
 type UpdateIssuePromptsJSONRequestBody UpdateIssuePromptsJSONBody
