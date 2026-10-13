@@ -194,19 +194,20 @@ function DraftSession({
     const ids = tracker.idsFor(
       JSON.stringify([text, attachments.map((a) => a.id)]),
     );
-    uploads.retain();
     try {
-      await send.mutateAsync({
-        command_id: ids.command_id,
-        message_id: ids.message_id,
-        text,
+      await uploads.submit(() =>
+        send.mutateAsync({
+          command_id: ids.command_id,
+          message_id: ids.message_id,
+          text,
+          attachments,
+        }),
         attachments,
-      });
+      );
       tracker.reset();
       setText("");
-      uploads.clear();
     } catch {
-      uploads.release();
+      // 错误由 mutation 状态展示；失败重试沿用同一组 ID。
     }
   };
 
@@ -261,19 +262,20 @@ function QueuedEditComposer({
   const submit = async () => {
     const attachments = uploads.attachmentsOf();
     onSaving(true);
-    uploads.retain();
     try {
-      await edit.mutateAsync({
-        runId: item.run_id,
-        text,
-        attachments: sameAttachmentIds(original, attachments)
-          ? undefined
-          : attachments,
-      });
-      uploads.clear();
+      await uploads.submit(
+        () =>
+          edit.mutateAsync({
+            runId: item.run_id,
+            text,
+            attachments: sameAttachmentIds(original, attachments)
+              ? undefined
+              : attachments,
+          }),
+        attachments,
+      );
       onExit();
     } catch {
-      uploads.release();
       onSaving(false);
     }
   };

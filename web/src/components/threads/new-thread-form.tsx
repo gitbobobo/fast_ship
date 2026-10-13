@@ -196,24 +196,26 @@ export function NewThreadForm({
         buildModelSelection(resolved),
       ]),
     );
-    uploads.retain();
     try {
-      const result = await create.mutateAsync({
-        command_id: ids.command_id,
-        thread_id: ids.thread_id,
-        project_id: project.id,
-        message: { message_id: ids.message_id, text, attachments },
-        model_selection: buildModelSelection(resolved),
-        runtime_mode: "full-access",
-        workspace,
-      });
+      const result = await uploads.submit(
+        () =>
+          create.mutateAsync({
+            command_id: ids.command_id,
+            thread_id: ids.thread_id,
+            project_id: project.id,
+            message: { message_id: ids.message_id, text, attachments },
+            model_selection: buildModelSelection(resolved),
+            runtime_mode: "full-access",
+            workspace,
+          }),
+        attachments,
+      );
       tracker.reset();
-      uploads.clear();
       navigate(
         `/threads/${encodeURIComponent(environment.id)}/${encodeURIComponent(result.thread_id)}`,
       );
     } catch {
-      uploads.release();
+      // 错误由 create.error 展示；重试沿用同一组 ID。
     }
   };
 

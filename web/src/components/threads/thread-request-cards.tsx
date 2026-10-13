@@ -210,7 +210,7 @@ function UserInputAnswerForm({
   onHold,
 }: CardProps & { onHold: (held: boolean) => void }) {
   const uploads = useImageUploads(environmentId);
-  const respond = useRespondRequest(environmentId, threadId, uploads.clear);
+  const respond = useRespondRequest(environmentId, threadId);
   useEffect(() => () => onHold(false), [onHold]);
   const questions = item.questions ?? [];
   const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>(() =>
@@ -240,30 +240,32 @@ function UserInputAnswerForm({
 
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!canSend || !item.request_id) return;
+    const requestId = item.request_id;
+    if (!canSend || !requestId) return;
     const byQuestion: Record<string, ReturnType<typeof uploads.attachmentsOf>> = {};
     for (const q of questions) {
       const files = uploads.attachmentsOf(q.id);
       if (files.length > 0) byQuestion[q.id] = files;
     }
     onHold(true);
-    uploads.retain();
-    respond.mutate(
-      {
-        requestId: item.request_id,
-        input: {
-          type: "user_input",
-          answers,
-          ...(Object.keys(byQuestion).length > 0
-            ? { attachments_by_question_id: byQuestion }
-            : {}),
-        },
-      },
-      {
-        onError: () => uploads.release(),
-        onSettled: () => onHold(false),
-      },
-    );
+    const sent = Object.values(byQuestion).flat();
+    void uploads
+      .submit(
+        () =>
+          respond.mutateAsync({
+            requestId,
+            input: {
+              type: "user_input",
+              answers,
+              ...(Object.keys(byQuestion).length > 0
+                ? { attachments_by_question_id: byQuestion }
+                : {}),
+            },
+          }),
+        sent,
+      )
+      .catch(() => undefined)
+      .finally(() => onHold(false));
   };
 
   return (
@@ -299,6 +301,7 @@ function UserInputAnswerForm({
                     name={`${item.id}:${q.id}`}
                     checked={checked}
                     className="mt-1"
+                    disabled={respond.isPending || stale}
                     onChange={() =>
                       multi
                         ? patch(q.id, {
@@ -325,6 +328,7 @@ function UserInputAnswerForm({
                 value={draft.custom}
                 aria-label={`${q.header || q.question} 自定义回答`}
                 placeholder="输入你的回答"
+                disabled={respond.isPending || stale}
                 onChange={(e) =>
                   patch(q.id, {
                     custom: e.target.value,

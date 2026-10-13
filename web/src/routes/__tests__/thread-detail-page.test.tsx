@@ -260,6 +260,45 @@ describe("ThreadDetailPage", () => {
       expect(api.deleteAttachment).not.toHaveBeenCalled();
     });
 
+    it("deletes a later draft image after a send succeeds", async () => {
+      const user = userEvent.setup();
+      mockDetail([]);
+      api.send.mockResolvedValue({ sequence: 1 });
+      api.uploadAttachment
+        .mockResolvedValueOnce({
+          type: "image",
+          id: "att-sent",
+          name: "sent.png",
+          mime_type: "image/png",
+          size_bytes: 4,
+        })
+        .mockResolvedValueOnce({
+          type: "image",
+          id: "att-next",
+          name: "next.png",
+          mime_type: "image/png",
+          size_bytes: 4,
+        });
+      api.deleteAttachment.mockResolvedValue(null);
+      await renderPage();
+      await user.upload(
+        screen.getByTestId("image-input"),
+        new File([new Uint8Array([1, 2, 3, 4])], "sent.png", { type: "image/png" }),
+      );
+      await waitFor(() => expect(screen.queryByLabelText("上传中")).toBeNull());
+      await user.click(within(composer()).getByRole("button", { name: "发送" }));
+      await waitFor(() => expect(api.send).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(screen.queryByLabelText("移除图片 sent.png")).toBeNull());
+      await user.upload(
+        screen.getByTestId("image-input"),
+        new File([new Uint8Array([1, 2, 3, 4])], "next.png", { type: "image/png" }),
+      );
+      expect(await screen.findByLabelText("移除图片 next.png")).toBeEnabled();
+      await user.click(screen.getByLabelText("移除图片 next.png"));
+      await waitFor(() => expect(api.deleteAttachment).toHaveBeenCalledWith("e1", "att-next"));
+      expect(api.deleteAttachment).not.toHaveBeenCalledWith("e1", "att-sent");
+    });
+
     it("does not delete submitted images if the page unmounts while a send is in flight", async () => {
       const user = userEvent.setup();
       mockDetail([]);
@@ -829,6 +868,43 @@ describe("ThreadDetailPage", () => {
       });
     });
 
+    it("disables answer choices while a response is in flight", async () => {
+      const user = userEvent.setup();
+      mockDetail(
+        [
+          item({
+            id: "src::q1",
+            type: "user_input_request",
+            summary: "选方案",
+            request_id: "req-2",
+            request_status: "pending",
+            response_capability: "live",
+            questions: [
+              {
+                id: "q1",
+                header: "方案",
+                question: "用哪个方案？",
+                options: [
+                  { label: "A", description: "快" },
+                  { label: "B", description: "稳", value: "b-value" },
+                ],
+              },
+            ],
+          }),
+        ],
+        "waiting",
+      );
+      let finish!: () => void;
+      api.respond.mockReturnValue(new Promise((r) => (finish = () => r({ sequence: 1 }))));
+      await renderPage();
+      const form = screen.getByRole("form", { name: "回答提问" });
+      await user.click(within(form).getByLabelText(/B/));
+      await user.click(within(form).getByRole("button", { name: "提交回答" }));
+      expect(within(form).getByRole("radio", { name: /A/ })).toBeDisabled();
+      expect(within(form).getByRole("radio", { name: /B/ })).toBeDisabled();
+      await act(async () => finish());
+    });
+
     it("disables image removal while answering a user input request", async () => {
       const user = userEvent.setup();
       const pending = item({
@@ -873,6 +949,50 @@ describe("ThreadDetailPage", () => {
       await act(async () => finish());
       await waitFor(() => expect(api.respond).toHaveBeenCalledTimes(1));
       expect(api.deleteAttachment).not.toHaveBeenCalled();
+    });
+
+    it("deletes submitted question images if the page unmounts and the response fails", async () => {
+      const user = userEvent.setup();
+      const pending = item({
+        id: "src::q1",
+        type: "user_input_request",
+        summary: "选方案",
+        request_id: "req-2",
+        request_status: "pending",
+        response_capability: "live",
+        questions: [
+          {
+            id: "q1",
+            header: "方案",
+            question: "用哪个方案？",
+            options: [{ label: "A", description: "快" }],
+          },
+        ],
+      });
+      detail.mockResolvedValue(detailOf([pending], "waiting"));
+      let fail!: (reason?: unknown) => void;
+      api.respond.mockReturnValue(new Promise((_, reject) => (fail = reject)));
+      api.uploadAttachment.mockResolvedValue({
+        type: "image",
+        id: "att-q",
+        name: "q.png",
+        mime_type: "image/png",
+        size_bytes: 4,
+      });
+      api.deleteAttachment.mockResolvedValue(null);
+      const view = await renderPage();
+      const form = screen.getByRole("form", { name: "回答提问" });
+      await user.click(within(form).getByLabelText(/A/));
+      await user.upload(
+        within(form).getByLabelText("为 方案 添加图片"),
+        new File([new Uint8Array([1, 2, 3, 4])], "q.png", { type: "image/png" }),
+      );
+      await waitFor(() => expect(screen.queryByLabelText("上传中")).toBeNull());
+      await user.click(within(form).getByRole("button", { name: "提交回答" }));
+      await waitFor(() => expect(api.respond).toHaveBeenCalledTimes(1));
+      view.unmount();
+      await act(async () => fail(new Error("no")));
+      await waitFor(() => expect(api.deleteAttachment).toHaveBeenCalledWith("e1", "att-q"));
     });
 
     it("does not delete submitted question images if a poll resolves the request first", async () => {
