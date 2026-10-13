@@ -87,7 +87,7 @@ export function ThreadChat({
   const exitEdit = () => {
     if (!editing) return;
     setText(editing.draft);
-    uploads.restoreParked();
+    uploads.restoreParked({ discardUnsaved: true });
     setEditing(null);
     edit.reset();
   };
