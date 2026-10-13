@@ -5,6 +5,22 @@ import (
 	"testing"
 )
 
+func TestQueuedEditTextRejectsOmittedField(t *testing.T) {
+	if _, ok := queuedEditText(nil); ok {
+		t.Fatal("omitted text must be rejected")
+	}
+	empty := ""
+	got, ok := queuedEditText(&empty)
+	if !ok || got != "" {
+		t.Fatalf("explicit empty string must pass, got (%q, %v)", got, ok)
+	}
+	body := "改文案"
+	got, ok = queuedEditText(&body)
+	if !ok || got != body {
+		t.Fatalf("present text must pass, got (%q, %v)", got, ok)
+	}
+}
+
 func TestParseOptionalCursorQuery(t *testing.T) {
 	got, err := parseOptionalCursorQuery("")
 	if err != nil || got != nil {

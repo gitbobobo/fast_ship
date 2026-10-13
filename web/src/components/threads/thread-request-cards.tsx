@@ -333,6 +333,7 @@ function UserInputAnswerForm({
               environmentId={environmentId}
               images={mine}
               onRemove={uploads.remove}
+              locked={respond.isPending || stale}
             />
             <input
               ref={(el) => {
@@ -352,6 +353,7 @@ function UserInputAnswerForm({
               type="button"
               size="xs"
               variant="ghost"
+              disabled={respond.isPending || stale}
               onClick={() => fileInputs.current[q.id]?.click()}
             >
               添加图片

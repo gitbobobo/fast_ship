@@ -81,6 +81,7 @@ export function ThreadComposer({
         environmentId={environmentId}
         images={uploads.images}
         onRemove={uploads.remove}
+        locked={submitting || disabled}
       />
       <Textarea
         value={text}
@@ -115,7 +116,7 @@ export function ThreadComposer({
           variant="ghost"
           size="icon-sm"
           aria-label="添加图片"
-          disabled={disabled}
+          disabled={disabled || submitting}
           onClick={() => fileInput.current?.click()}
         >
           <ImagePlus className="h-4 w-4" />
