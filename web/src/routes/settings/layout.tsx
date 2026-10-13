@@ -9,6 +9,7 @@ import {
   SlidersHorizontal,
   Sparkles,
   Copy,
+  Server,
 } from "lucide-react";
 
 const settingsNavItems = [
@@ -18,6 +19,7 @@ const settingsNavItems = [
   { to: "/settings/ai", label: "AI 配置", icon: Sparkles },
   { to: "/settings/issue-prompts", label: "问题提示词", icon: Copy },
   { to: "/settings/api-keys", label: "API Keys", icon: Key },
+  { to: "/settings/environments", label: "环境", icon: Server },
 ];
 
 function SettingsSidebar() {

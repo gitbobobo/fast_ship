@@ -1,4 +1,4 @@
-import ky from "ky";
+import ky, { HTTPError } from "ky";
 import { useAuthStore } from "@/lib/store/auth-store";
 
 // Separate ky instance for refresh requests (no afterResponse hook to avoid loops)
@@ -30,6 +30,36 @@ export async function tryRefreshToken(): Promise<string> {
     });
 
   return refreshPromise;
+}
+
+// ApiRequestError 把失败的 HTTP 响应一次解码成可直接读的错误：状态码 +
+// 服务端 {code,message}。HTTPError 的 body 只能消费一次，在组件 effect 里
+// 读会被 React StrictMode 的双执行丢掉——所以解码固定在请求边界完成。
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code: number | null;
+
+  constructor(status: number, code: number | null, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export async function decodeApiError<T>(promise: Promise<T>): Promise<T> {
+  try {
+    return await promise;
+  } catch (err) {
+    if (err instanceof HTTPError) {
+      const body = await err.response
+        .json<ApiResponse<unknown>>()
+        .catch(() => null);
+      if (body && typeof body.message === "string" && body.message) {
+        throw new ApiRequestError(err.response.status, body.code ?? null, body.message);
+      }
+    }
+    throw err;
+  }
 }
 
 export const api = ky.create({

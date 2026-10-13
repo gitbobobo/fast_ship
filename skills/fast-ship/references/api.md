@@ -5403,3 +5403,356 @@ JWT 可更新全部字段；API Key 只允许传 `{"status":"resolved"}`，其�
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
+
+## environments
+
+T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-82）
+
+### GET `/api/environments`
+
+<!-- operationId: listT3Environments -->
+
+列出已配对的 T3 环境并探测状态
+
+有界并行逐个环境探测（`GET {address}/api/auth/session`，单请求同时回答可达性与凭证有效性，
+单环境独立预算，坏环境不拖垮其它环境）：
+`ok`=Bearer 会话有效；`unreachable`=网络不可达/超时/5xx；`repair`=可达但凭证失效（需重新配对）；
+`degraded`=可达且凭证有效，但部分数据读取失败（如归档快照），其余数据仍返回。
+响应不包含任何凭证字段。
+
+**鉴权**：公开
+
+**成功响应**
+
+**200** 环境列表（含探测状态）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].name` | string | 是 |  |
+| `items[].address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
+| `items[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `items[].error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
+| `items[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+
+### POST `/api/environments`
+
+<!-- operationId: createT3Environment -->
+
+通过配对链接新增 T3 环境
+
+解析配对链接（支持 `t3 pair` 直接链接 `https://host/#token=...` 与 hosted 包装链接
+`https://relay/?host=<backend>&token=...`），用一次性配对码向 T3 服务端
+`POST /oauth/token` 换取**仅 `orchestration:read`** 的 Bearer 会话并加密落库；
+返回的 scope 若超出请求值则拒绝建立会话（50202）。配对码一次性，不落库。
+
+**鉴权**：公开
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string（长度 ≥1） | 是 | 环境显示名；同一用户下唯一（重复返回 40912） |
+| `pairing_url` | string（长度 ≥1） | 是 | 配对链接：`t3 pair` 直接链接（`https://host/#token=code`，hash 优先， 兼容 `?token=`）或 hosted 包装链接（`https://relay/?host=<backend>&token=code`）。 协议支持 http/https/ws/wss；缺省协议时 IP 字面量补 http、其余补 https。 |
+
+**成功响应**
+
+**200** 创建成功，返回带探测状态的环境
+
+`data`：
+
+已配对的 T3 环境连接；不泄漏任何凭证字段
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
+| `status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 配对链接无效或缺少配对码（40005） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 409 | 环境名称已存在（40912） |
+| 502 | 配对失败（上游拒绝/不可达/scope 超宽）（50202） |
+
+### PUT `/api/environments/{id}`
+
+<!-- operationId: updateT3Environment -->
+
+改名或重新配对
+
+指针语义：字段出现才更新。`pairing_url` 出现时重新走配对流程，
+覆盖地址与 Bearer（用于修复 `repair` 状态）；两个都不传返回 40001。
+改名与重配按字段条件更新：并发改名/重配互不覆盖；环境被并发删除时
+返回 40417 且不复活记录；并发改名触发唯一索引冲突时返回 40912。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+
+**请求体**
+
+`application/json`，必填。
+
+指针语义：字段出现才更新，都不传返回 40001
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string（长度 ≥1） | 否 |  |
+| `pairing_url` | string | 否 | 出现时重新配对（覆盖地址与 Bearer），用于修复 repair 状态 |
+
+**成功响应**
+
+**200** 更新成功，返回带探测状态的环境
+
+`data`：
+
+已配对的 T3 环境连接；不泄漏任何凭证字段
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
+| `status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 环境不存在（40417） |
+| 409 | 环境名称已存在（40912） |
+| 502 | 重新配对失败（50202） |
+
+### DELETE `/api/environments/{id}`
+
+<!-- operationId: deleteT3Environment -->
+
+删除环境
+
+删除本地记录。注意：orchestration:read 会话在 T3 协议上没有自吊销端点
+（`/api/auth/clients/revoke` 需要 `access:write`），Bearer 由 T3 服务端按
+`expires_in` 自行过期；如需立即吊销请在 T3 侧的访问设置中操作。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+
+**成功响应**
+
+**200** 删除成功
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 环境不存在（40417） |
+
+### GET `/api/environments/{id}/threads/{threadId}`
+
+<!-- operationId: getT3Thread -->
+
+读取单个线程的完整归一化时间线（只读）
+
+通过 T3 的 `GET /api/orchestration/threads/{threadId}` HTTP 快照端点取完整投影
+（WS 侧同名为分页受限窗口，不满足「完整历史」要求），按投影的
+`visibleTurnItems`（含 fork 继承前缀、已排除回滚/被取代条目）归一化为
+ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` 合成。
+长消息不截断；命令输出/工具输出/subagent 结果在 wire 投影中被上游裁剪，
+`detail_available=true` 的条目经 items/{itemId} 端点补读。
+结构性事件（checkpoint 等）被丢弃。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+
+**成功响应**
+
+**200** 线程详情
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `thread` | object | 是 |  |
+| `thread.id` | string | 是 | T3 threadId |
+| `thread.environment_id` | string | 是 |  |
+| `thread.environment_name` | string | 是 |  |
+| `thread.project_id` | string | 是 |  |
+| `thread.project_name` | string | 是 | 来自 WS shell 快照项目表，列表和详情均使用该来源 |
+| `thread.title` | string | 是 |  |
+| `thread.status` | string（enum: running \| waiting \| idle \| archived） | 是 | 由 T3 归一化（对齐 T3 Sidebar 的判定顺序）： archivedAt 非空 → archived；其次 pendingRuntimeRequest 非空（等用户审批/输入）→ waiting； 再看 activityRunStatus（后台 run 未停时 shell.status 可能已是 completed/idle）： preparing/starting/running → running、waiting → waiting； 最后 shell.status 兜底（preparing/queued/starting/running → running、 waiting → waiting、其余 → idle） |
+| `thread.branch` | string | 是 | 工作分支；T3 侧为 null 时为空串 |
+| `thread.provider` | string | 是 | T3 providerInstanceId |
+| `thread.model` | string | 是 |  |
+| `thread.updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
+| `thread.pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
+| `thread.parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分） |
+| `items[].type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error） | 是 |  |
+| `items[].text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；展开后的完整正文经 items/{itemId} 获取） |
+| `items[].summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名 |
+| `items[].status` | string | 否 | T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略 |
+| `items[].updated_at` | string | 否 | 上游条目自带的 updatedAt（RFC3339）原样透传，作为条目版本；上游省略时本字段缺省 |
+| `items[].child_thread_id` | string | 否 | 仅 subagent；子线程 ID |
+| `items[].detail_available` | boolean | 否 | 条目在快照之外还有正文，可经 items/{itemId} 补读： 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉 输出/结果，file_change 上游 detail 也无 diff 故为 false）；补读响应恒为 false。缺省即 false。 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 502 | T3 环境调用失败（50202，含凭证失效提示） |
+
+### GET `/api/environments/{id}/threads/{threadId}/items/{itemId}`
+
+<!-- operationId: getT3ThreadItem -->
+
+读取单个线程条目的完整正文（只读，按需补读）
+
+先取指定线程的可见时间线验证 `itemId` 是其成员（40419 = 不是成员），
+再从可信行自身派生 T3 `orchestration.getTurnItem` 参数（threadId/itemId
+取行内条目的持久身份；不接受前端指定来源或 RPC 方法），返回完整归一化
+ThreadItem：text 含命令 input+output / subagent prompt+result+progress /
+工具全量 input+output，summary 为单行短摘要，`detail_available=false`
+（已无可再取的正文）。上游对单条正文有 256KB 限界，截断后缀原样保留。
+`detail_available=false` 的条目直接返回快照形态，不发起补读。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `itemId` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id，来自线程详情的 items[].id） |
+
+**成功响应**
+
+**200** 完整条目
+
+`data`：
+
+归一化线程条目。映射规则：user_message/assistant_message/reasoning 原样带快照文本；
+proposed_plan → assistant_message；command_execution（text=命令，summary=命令首行，
+输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
+dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
+上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
+结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
+结构性/交互性事件（checkpoint、approval_request、handoff、notification、
+system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外截断。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分） |
+| `type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error） | 是 |  |
+| `text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；展开后的完整正文经 items/{itemId} 获取） |
+| `summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名 |
+| `status` | string | 否 | T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略 |
+| `updated_at` | string | 否 | 上游条目自带的 updatedAt（RFC3339）原样透传，作为条目版本；上游省略时本字段缺省 |
+| `child_thread_id` | string | 否 | 仅 subagent；子线程 ID |
+| `detail_available` | boolean | 否 | 条目在快照之外还有正文，可经 items/{itemId} 补读： 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉 输出/结果，file_change 上游 detail 也无 diff 故为 false）；补读响应恒为 false。缺省即 false。 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 环境不存在（40417）、线程不存在（40418）或条目不属于该线程（40419） |
+| 502 | T3 环境调用失败（50202，含凭证失效提示） |
+
+### GET `/api/threads`
+
+<!-- operationId: listT3Threads -->
+
+聚合当前用户全部 T3 环境的线程（只读，实时转发）
+
+多环境有界并行读取（并行度 4），不落库。每环境在独立预算内：
+先 `GET /api/auth/session` 分类凭证状态，再经 WS RPC
+`orchestration.subscribeShell` 取活跃快照、一次性 RPC
+`orchestration.getArchivedShellSnapshot` 取归档线程，随后立即断开；
+整轮有总预算（小于前端超时）。单环境失败或超时不阻塞其它环境，
+错误保留在 `environments` 数组的 `status/error` 中，健康环境的
+已读结果照常返回。列表排除 `lineage.relationshipToParent=subagent` 的
+子代理线程（与 T3 自身列表一致）。第一版返回完整轻量列表，
+筛选与分页由前端处理。
+
+**鉴权**：公开
+
+**成功响应**
+
+**200** 线程聚合与环境状态
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 | T3 threadId |
+| `items[].environment_id` | string | 是 |  |
+| `items[].environment_name` | string | 是 |  |
+| `items[].project_id` | string | 是 |  |
+| `items[].project_name` | string | 是 | 来自 WS shell 快照项目表，列表和详情均使用该来源 |
+| `items[].title` | string | 是 |  |
+| `items[].status` | string（enum: running \| waiting \| idle \| archived） | 是 | 由 T3 归一化（对齐 T3 Sidebar 的判定顺序）： archivedAt 非空 → archived；其次 pendingRuntimeRequest 非空（等用户审批/输入）→ waiting； 再看 activityRunStatus（后台 run 未停时 shell.status 可能已是 completed/idle）： preparing/starting/running → running、waiting → waiting； 最后 shell.status 兜底（preparing/queued/starting/running → running、 waiting → waiting、其余 → idle） |
+| `items[].branch` | string | 是 | 工作分支；T3 侧为 null 时为空串 |
+| `items[].provider` | string | 是 | T3 providerInstanceId |
+| `items[].model` | string | 是 |  |
+| `items[].updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
+| `items[].pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
+| `items[].parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
+| `environments` | object[] | 是 |  |
+| `environments[].id` | string | 是 |  |
+| `environments[].name` | string | 是 |  |
+| `environments[].address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
+| `environments[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `environments[].error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
+| `environments[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |

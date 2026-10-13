@@ -30,6 +30,7 @@ func Setup(
 	screenshotHandler *handler.ScreenshotHandler,
 	screenshotAnnotationHandler *handler.ScreenshotAnnotationHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
+	t3EnvironmentHandler *handler.T3EnvironmentHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -215,6 +216,18 @@ func Setup(
 		api.GET("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Get)
 		api.PUT("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Update)
 		api.DELETE("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Delete)
+
+		// JWT 必须 — T3 环境连接与只读线程（INT-82；读取涉及用户私有凭证，API Key 一律拒绝）
+		t3 := api.Group("", middleware.RequireJWT(cfg, authService))
+		{
+			t3.GET("/environments", t3EnvironmentHandler.List)
+			t3.POST("/environments", t3EnvironmentHandler.Create)
+			t3.PUT("/environments/:id", t3EnvironmentHandler.Update)
+			t3.DELETE("/environments/:id", t3EnvironmentHandler.Delete)
+			t3.GET("/environments/:id/threads/:threadId", t3EnvironmentHandler.GetThread)
+			t3.GET("/environments/:id/threads/:threadId/items/:itemId", t3EnvironmentHandler.GetThreadItem)
+			t3.GET("/threads", t3EnvironmentHandler.ListThreads)
+		}
 	}
 
 	setupWebRoutes(r, cfg.Server.WebDistDir)

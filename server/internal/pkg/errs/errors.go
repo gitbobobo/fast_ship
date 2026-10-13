@@ -22,6 +22,7 @@ var (
 	ErrTargetBranchNotFound       = New(40002, "目标分支不存在")
 	ErrProjectGitHubNotConfigured = New(40003, "该项目尚未关联 GitHub 仓库")
 	ErrScreenshotImageTooLarge    = New(40004, "截图尺寸超出可处理范围")
+	ErrPairingURLInvalid          = New(40005, "配对链接无效或缺少配对码")
 )
 
 // 认证错误 40100-40199
@@ -61,6 +62,9 @@ var (
 	ErrScreenshotVersionNotFound    = New(40414, "截图版本不存在")
 	ErrIssueAttachmentNotFound      = New(40415, "问题附件不存在")
 	ErrScreenshotAnnotationNotFound = New(40416, "截图标注不存在")
+	ErrT3EnvironmentNotFound        = New(40417, "T3 环境不存在")
+	ErrT3ThreadNotFound             = New(40418, "T3 线程不存在")
+	ErrT3ThreadItemNotFound         = New(40419, "T3 线程条目不存在")
 )
 
 // 业务冲突 40900-40999
@@ -77,6 +81,7 @@ var (
 	ErrLogRunEntryLimitExceeded = New(40909, "该运行日志条数已达上限")
 	ErrIssueNotRecommendable    = New(40910, "该 issue 当前状态不可被推荐")
 	ErrRecommendationDeferred   = New(40911, "该推荐已被用户延后处理，请勿再次推荐")
+	ErrT3EnvironmentNameExists  = New(40912, "环境名称在当前用户下已存在")
 )
 
 // 前置条件未满足 41200-41299
@@ -93,4 +98,5 @@ var (
 var (
 	ErrGitHubAPI  = New(50200, "GitHub API 调用失败")
 	ErrAIProvider = New(50201, "AI 服务调用失败")
+	ErrT3Upstream = New(50202, "T3 环境调用失败")
 )
