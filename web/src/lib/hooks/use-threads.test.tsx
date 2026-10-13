@@ -74,6 +74,24 @@ describe("useThreadDetail polling", () => {
     await act(() => vi.advanceTimersByTimeAsync(THREAD_DETAIL_POLL_MS * 5));
     expect(detail).toHaveBeenCalledTimes(3);
   });
+
+  it("stops polling after a refetch failure even while cached data says running", async () => {
+    detail
+      .mockResolvedValueOnce(response("running"))
+      .mockRejectedValueOnce(new Error("gone"))
+      .mockResolvedValue(response("running"));
+    const { wrapper } = setup();
+
+    renderHook(() => useThreadDetail("e1", "t1"), { wrapper });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(detail).toHaveBeenCalledTimes(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(THREAD_DETAIL_POLL_MS));
+    expect(detail).toHaveBeenCalledTimes(2);
+
+    await act(() => vi.advanceTimersByTimeAsync(THREAD_DETAIL_POLL_MS * 5));
+    expect(detail).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("identity isolation", () => {

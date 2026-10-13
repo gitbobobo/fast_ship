@@ -116,7 +116,7 @@ export function useThreads() {
   });
 }
 
-/** 详情只在线程运行中每隔几秒轮询，状态变为非运行后自动停止。 */
+/** 详情只在线程运行中每隔几秒轮询；状态变为非运行或读取失败后自动停止，由用户手动重试恢复。 */
 export function useThreadDetail(environmentId: string, threadId: string) {
   const userId = useUserId();
   return useQuery({
@@ -126,6 +126,7 @@ export function useThreadDetail(environmentId: string, threadId: string) {
     enabled: Boolean(userId && environmentId && threadId),
     refetchOnMount: "always",
     refetchInterval: (query) =>
+      query.state.status !== "error" &&
       query.state.data?.thread.status === "running"
         ? THREAD_DETAIL_POLL_MS
         : false,
