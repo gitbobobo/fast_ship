@@ -1,9 +1,9 @@
-import { HTTPError } from "ky";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiRequestError } from "@/lib/api/client";
 import ThreadDetailPage from "@/routes/threads/$environmentId/$threadId";
 import type { ThreadDetail, ThreadItem } from "@/lib/api/threads";
 import { signInAs, teardownAuth } from "@/test/auth";
@@ -267,14 +267,7 @@ describe("ThreadDetailPage", () => {
   });
 
   it("explains a missing thread when the detail request 404s", async () => {
-    const error = Object.create(HTTPError.prototype) as HTTPError;
-    Object.defineProperty(error, "response", {
-      value: new Response(JSON.stringify({ code: 40418, message: "T3 线程不存在" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      }),
-    });
-    detail.mockRejectedValue(error);
+    detail.mockRejectedValue(new ApiRequestError(404, 40418, "T3 线程不存在"));
 
     render(
       <QueryClientProvider client={client}>
@@ -291,14 +284,9 @@ describe("ThreadDetailPage", () => {
   });
 
   it("surfaces the server message and a re-pair link for rejected credentials", async () => {
-    const error = Object.create(HTTPError.prototype) as HTTPError;
-    Object.defineProperty(error, "response", {
-      value: new Response(
-        JSON.stringify({ code: 50202, message: "T3 环境拒绝凭证（可能已过期或被吊销），请重新配对" }),
-        { status: 502, headers: { "Content-Type": "application/json" } },
-      ),
-    });
-    detail.mockRejectedValue(error);
+    detail.mockRejectedValue(
+      new ApiRequestError(502, 50202, "T3 环境拒绝凭证（可能已过期或被吊销），请重新配对"),
+    );
 
     render(
       <QueryClientProvider client={client}>

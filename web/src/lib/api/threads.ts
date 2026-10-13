@@ -1,4 +1,4 @@
-import { api } from "./client";
+import { api, decodeApiError } from "./client";
 
 export type EnvironmentStatus = "ok" | "unreachable" | "repair";
 
@@ -103,12 +103,16 @@ export const environmentApi = {
 
 export const threadApi = {
   list: (signal?: AbortSignal) =>
-    api.get("threads", options(signal)).json<ApiResponse<ThreadList>>(),
+    decodeApiError(
+      api.get("threads", options(signal)).json<ApiResponse<ThreadList>>(),
+    ),
 
   detail: (environmentId: string, threadId: string, signal?: AbortSignal) =>
-    api
-      .get(threadPath(environmentId, threadId), options(signal))
-      .json<ApiResponse<ThreadDetail>>(),
+    decodeApiError(
+      api
+        .get(threadPath(environmentId, threadId), options(signal))
+        .json<ApiResponse<ThreadDetail>>(),
+    ),
 
   itemDetail: (
     environmentId: string,
@@ -116,10 +120,12 @@ export const threadApi = {
     itemId: string,
     signal?: AbortSignal,
   ) =>
-    api
-      .get(
-        `${threadPath(environmentId, threadId)}/items/${encodeURIComponent(itemId)}`,
-        options(signal),
-      )
-      .json<ApiResponse<ThreadItem>>(),
+    decodeApiError(
+      api
+        .get(
+          `${threadPath(environmentId, threadId)}/items/${encodeURIComponent(itemId)}`,
+          options(signal),
+        )
+        .json<ApiResponse<ThreadItem>>(),
+    ),
 };

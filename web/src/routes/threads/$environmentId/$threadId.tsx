@@ -1,5 +1,3 @@
-import { useEffect, useState } from "react";
-import { HTTPError } from "ky";
 import { Link, useParams } from "react-router";
 import { ArrowLeft, Cpu, GitBranch, GitPullRequest } from "lucide-react";
 import { Header } from "@/components/layout/header";
@@ -7,6 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { ThreadItemView } from "@/components/threads/thread-item-view";
 import { ThreadStatusBadge } from "@/components/threads/thread-status-badge";
+import { ApiRequestError } from "@/lib/api/client";
 import { useThreadDetail } from "@/lib/hooks/use-threads";
 import { formatRelativeTime } from "@/lib/utils/format";
 
@@ -19,22 +18,10 @@ export default function ThreadDetailPage() {
     : "";
 
   // 首次加载失败的文案按服务端响应区分：404=线程没了，其余带服务端
-  // message；凭证失效一类在文案外再给重新配对入口。
-  const [errorMessage, setErrorMessage] = useState("");
-  useEffect(() => {
-    setErrorMessage("");
-    if (!(error instanceof HTTPError)) return;
-    let cancelled = false;
-    void error.response.json<ApiResponse<unknown>>()
-      .then((body) => {
-        if (!cancelled && body?.message) setErrorMessage(body.message);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [error]);
-  const notFound = error instanceof HTTPError && error.response.status === 404;
+  // message；凭证失效一类在文案外再给重新配对入口。响应体在请求边界
+  // 已解码成 ApiRequestError（见 client.ts），这里同步读即可。
+  const notFound = error instanceof ApiRequestError && error.status === 404;
+  const errorMessage = error instanceof ApiRequestError ? error.message : "";
   const needsRepair = errorMessage.includes("重新配对");
   const failureText = notFound
     ? "线程不存在，可能已被删除或移动。"
