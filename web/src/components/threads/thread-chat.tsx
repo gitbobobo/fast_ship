@@ -1,8 +1,7 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type {
-  ChatAttachment,
   ThreadActivity,
   ThreadDetail,
   ThreadQueue,
@@ -23,16 +22,9 @@ import {
 import { ThreadComposer } from "./thread-composer";
 import { ThreadQueuePanel, actionErrorText } from "./thread-queue";
 
-interface EditingState {
-  runId: string;
-  original: ChatAttachment[];
-  /** 进入编辑前输入框里的草稿，退出时放回去。 */
-  draft: string;
-}
-
 /**
- * 详情页底部：队列 + 输入框 + Stop。所有写操作之后由 hooks 立刻重读详情；
- * 这里不乐观改状态，Stop 的「停止中」以 mutation 进行中或服务端 activity.stopping 为准。
+ * 详情页底部：队列 + 输入框 + Stop。草稿和排队编辑各持有一套上传，
+ * 生命周期跟组件挂载走：切编辑目标或退出未保存即卸载，未引用的附件会被删掉。
  */
 export function ThreadChat({
   detail,
@@ -61,74 +53,34 @@ export function ThreadChat({
   const active = isThreadActive(detail);
   const archived = detail.thread.status === "archived";
 
-  const [text, setText] = useState("");
-  const [editing, setEditing] = useState<EditingState | null>(null);
-  const [tracker] = useState(createIdTracker);
-  const uploads = useImageUploads(environmentId);
-  const send = useSendThreadMessage(environmentId, threadId);
+  const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const edit = useEditQueued(environmentId, threadId);
   const stop = useStopThread(environmentId, threadId);
-
-  const editingItem = editing
-    ? queue.items.find((i) => i.run_id === editing.runId)
+  const stopping = stop.isPending || activity.stopping;
+  const editingItem = editingRunId
+    ? queue.items.find((i) => i.run_id === editingRunId)
     : undefined;
 
   const startEdit = (item: ThreadQueueItem) => {
-    setEditing({
-      runId: item.run_id,
-      original: item.attachments ?? [],
-      draft: editing ? editing.draft : text,
-    });
-    setText(item.text);
-    uploads.parkAndShowExisting(item.attachments ?? []);
+    if (edit.isPending) return;
+    if (editingRunId === item.run_id) return;
+    setEditingRunId(item.run_id);
     edit.reset();
   };
 
-  const exitEdit = () => {
-    if (!editing) return;
-    setText(editing.draft);
-    uploads.restoreParked({ discardUnsaved: true });
-    setEditing(null);
-    edit.reset();
-  };
-
-  const submit = async () => {
-    const attachments = uploads.attachmentsOf();
-    try {
-      if (editing) {
-        await edit.mutateAsync({
-          runId: editing.runId,
-          text,
-          // 缺省不传 = 保留原附件；变了才整组替换（[] = 清空）。
-          attachments: sameAttachmentIds(editing.original, attachments)
-            ? undefined
-            : attachments,
-        });
-        setText(editing.draft);
-        uploads.restoreParked();
-        setEditing(null);
-        return;
-      }
-      const ids = tracker.idsFor(
-        JSON.stringify([text, attachments.map((a) => a.id)]),
-      );
-      await send.mutateAsync({
-        command_id: ids.command_id,
-        message_id: ids.message_id,
-        text,
-        attachments,
-      });
-      tracker.reset();
-      setText("");
-      uploads.clear();
-    } catch {
-      // 错误由 mutation 状态展示；失败重试沿用同一组 ID。
-    }
-  };
-
-  const stopping = stop.isPending || activity.stopping;
-  const failure = editing ? edit.error : send.error || stop.error;
-  const pending = editing ? edit.isPending : send.isPending;
+  const stopButton =
+    (active || activity.stopping) && (
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        disabled={stopping || stale}
+        onClick={() => stop.mutate()}
+      >
+        <Square className="mr-1.5 h-3.5 w-3.5" />
+        {stopping ? "停止中…" : "停止"}
+      </Button>
+    );
 
   return (
     <div className="space-y-3">
@@ -138,7 +90,8 @@ export function ThreadChat({
         queue={queue}
         canOperate={canOperate}
         stale={stale}
-        editingRunId={editing?.runId}
+        editingRunId={editingRunId ?? undefined}
+        actionLocked={edit.isPending}
         onEdit={startEdit}
       />
       {!canOperate ? (
@@ -153,51 +106,192 @@ export function ThreadChat({
           线程已归档，无法发送消息
         </p>
       ) : (
-        <ThreadComposer
-          environmentId={environmentId}
-          text={text}
-          onTextChange={setText}
-          uploads={uploads}
-          submitLabel={editing ? "保存修改" : active ? "加入队列" : "发送"}
-          submitting={pending}
-          blocked={Boolean(editing) && (stale || !editingItem)}
-          allowImageOnly
-          disabled={pending}
-          onSubmit={() => void submit()}
-          error={
-            (editing ? edit.isError : send.isError || stop.isError)
-              ? actionErrorText(failure)
-              : undefined
-          }
-          banner={
-            editing && (
-              <div className="flex items-center justify-between gap-2 rounded-lg bg-primary/5 px-3 py-1.5 text-xs">
-                <span>
-                  正在编辑排队消息
-                  {!editingItem && "（该消息已开始发送或已被取消）"}
-                </span>
-                <Button type="button" size="xs" variant="ghost" onClick={exitEdit}>
-                  退出编辑
-                </Button>
-              </div>
-            )
-          }
-          actions={
-            (active || activity.stopping) && (
+        <>
+          <DraftSession
+            hidden={Boolean(editingRunId)}
+            environmentId={environmentId}
+            threadId={threadId}
+            active={active}
+            stopError={stop.error}
+            stopIsError={stop.isError}
+            actions={stopButton}
+          />
+          {editingItem && (
+            <QueuedEditComposer
+              key={editingItem.run_id}
+              item={editingItem}
+              environmentId={environmentId}
+              stale={stale}
+              edit={edit}
+              stopError={stop.error}
+              stopIsError={stop.isError}
+              actions={stopButton}
+              onExit={() => {
+                setEditingRunId(null);
+                edit.reset();
+              }}
+            />
+          )}
+          {editingRunId && !editingItem && (
+            <p className="rounded-lg bg-muted/50 px-3 py-2 text-center text-sm text-muted-foreground">
+              该排队消息已开始发送或已被取消
               <Button
                 type="button"
-                size="sm"
-                variant="outline"
-                disabled={stopping || stale}
-                onClick={() => stop.mutate()}
+                size="xs"
+                variant="ghost"
+                className="ml-2"
+                onClick={() => {
+                  setEditingRunId(null);
+                  edit.reset();
+                }}
               >
-                <Square className="mr-1.5 h-3.5 w-3.5" />
-                {stopping ? "停止中…" : "停止"}
+                退出编辑
               </Button>
-            )
-          }
-        />
+            </p>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+function DraftSession({
+  hidden,
+  environmentId,
+  threadId,
+  active,
+  stopError,
+  stopIsError,
+  actions,
+}: {
+  hidden: boolean;
+  environmentId: string;
+  threadId: string;
+  active: boolean;
+  stopError: unknown;
+  stopIsError: boolean;
+  actions: ReactNode;
+}) {
+  const [text, setText] = useState("");
+  const [tracker] = useState(createIdTracker);
+  const uploads = useImageUploads(environmentId);
+  const send = useSendThreadMessage(environmentId, threadId);
+
+  const submit = async () => {
+    const attachments = uploads.attachmentsOf();
+    const ids = tracker.idsFor(
+      JSON.stringify([text, attachments.map((a) => a.id)]),
+    );
+    try {
+      await send.mutateAsync({
+        command_id: ids.command_id,
+        message_id: ids.message_id,
+        text,
+        attachments,
+      });
+      tracker.reset();
+      setText("");
+      uploads.clear();
+    } catch {
+      // 错误由 mutation 状态展示；失败重试沿用同一组 ID。
+    }
+  };
+
+  if (hidden) return null;
+
+  return (
+    <ThreadComposer
+      environmentId={environmentId}
+      text={text}
+      onTextChange={setText}
+      uploads={uploads}
+      submitLabel={active ? "加入队列" : "发送"}
+      submitting={send.isPending}
+      allowImageOnly
+      disabled={send.isPending}
+      onSubmit={() => void submit()}
+      error={
+        send.isError || stopIsError
+          ? actionErrorText(send.error || stopError)
+          : undefined
+      }
+      actions={actions}
+    />
+  );
+}
+
+function QueuedEditComposer({
+  item,
+  environmentId,
+  stale,
+  edit,
+  stopError,
+  stopIsError,
+  actions,
+  onExit,
+}: {
+  item: ThreadQueueItem;
+  environmentId: string;
+  stale: boolean;
+  edit: ReturnType<typeof useEditQueued>;
+  stopError: unknown;
+  stopIsError: boolean;
+  actions: ReactNode;
+  onExit: () => void;
+}) {
+  const [text, setText] = useState(item.text);
+  const [original] = useState(item.attachments ?? []);
+  const uploads = useImageUploads(environmentId, original);
+
+  const submit = async () => {
+    const attachments = uploads.attachmentsOf();
+    try {
+      await edit.mutateAsync({
+        runId: item.run_id,
+        text,
+        attachments: sameAttachmentIds(original, attachments)
+          ? undefined
+          : attachments,
+      });
+      uploads.clear();
+      onExit();
+    } catch {
+      // 错误由 mutation 状态展示。
+    }
+  };
+
+  return (
+    <ThreadComposer
+      environmentId={environmentId}
+      text={text}
+      onTextChange={setText}
+      uploads={uploads}
+      submitLabel="保存修改"
+      submitting={edit.isPending}
+      blocked={stale}
+      allowImageOnly
+      disabled={edit.isPending}
+      onSubmit={() => void submit()}
+      error={
+        edit.isError || stopIsError
+          ? actionErrorText(edit.error || stopError)
+          : undefined
+      }
+      banner={
+        <div className="flex items-center justify-between gap-2 rounded-lg bg-primary/5 px-3 py-1.5 text-xs">
+          <span>正在编辑排队消息</span>
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={edit.isPending}
+            onClick={onExit}
+          >
+            退出编辑
+          </Button>
+        </div>
+      }
+      actions={actions}
+    />
   );
 }

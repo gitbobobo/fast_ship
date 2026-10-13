@@ -384,7 +384,7 @@ func (s *T3ThreadsService) WorkspaceOptions(ctx context.Context, userID, envID, 
 // t3ThreadWorkspaceWire 把请求工作区解析成 launchThread 的 workspaceStrategy。
 // worktree 的 base_ref 缺省为主检出当前分支（经 vcs.refreshStatus 解析），
 // start_from_origin 缺省取 T3 设置 newWorktreesStartFromOrigin。
-// cwd 已由调用方从上游项目解析（不接受前端任意路径）。
+// root/worktree 的 cwd 由调用方从上游项目解析；existing_worktree 的路径原样转给 T3。
 func (s *T3ThreadsService) t3ThreadWorkspaceWire(ctx context.Context, session *t3RPCSession, workspaceRoot string, workspace *api.T3ThreadWorkspace) (map[string]any, error) {
 	if workspace == nil || workspace.Type == "" {
 		return map[string]any{"type": "root"}, nil

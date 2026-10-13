@@ -35,8 +35,7 @@ export function ThreadComposer({
   submitting?: boolean;
   /** 额外的不可提交条件（缺项目、环境只读、目标陈旧等）。 */
   blocked?: boolean;
-  /** 编辑排队消息要求正文非空；其余场景允许只发图片。 */
-  allowImageOnly?: boolean;
+  /** 允许只发图片（空正文）。 */
   /** 整体不可输入（只读环境）。 */
   disabled?: boolean;
   onSubmit: () => void;

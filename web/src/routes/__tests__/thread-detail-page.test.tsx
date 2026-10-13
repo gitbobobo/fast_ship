@@ -324,20 +324,23 @@ describe("ThreadDetailPage", () => {
       api.editQueued.mockResolvedValue({ sequence: 1 });
       await renderPage();
 
-      const box = await screen.findByRole("textbox", { name: "消息内容" });
-      await user.type(box, "草稿");
+      const draftBox = await screen.findByRole("textbox", { name: "消息内容" });
+      await user.type(draftBox, "草稿");
       await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
       expect(screen.getByText(/正在编辑排队消息/)).toBeInTheDocument();
-      expect(box).toHaveValue("第一条");
+      const editBox = screen.getByRole("textbox", { name: "消息内容" });
+      expect(editBox).toHaveValue("第一条");
 
-      await user.clear(box);
-      await user.type(box, "改过的");
+      await user.clear(editBox);
+      await user.type(editBox, "改过的");
       await user.click(screen.getByRole("button", { name: "保存修改" }));
       await waitFor(() => expect(api.editQueued).toHaveBeenCalledTimes(1));
       const [, , runId, body] = api.editQueued.mock.calls[0];
       expect(runId).toBe("r1");
       expect(body).toEqual({ text: "改过的", attachments: undefined });
-      await waitFor(() => expect(box).toHaveValue("草稿"));
+      await waitFor(() =>
+        expect(screen.getByRole("textbox", { name: "消息内容" })).toHaveValue("草稿"),
+      );
       expect(screen.queryByText(/正在编辑排队消息/)).toBeNull();
     });
 
@@ -350,12 +353,12 @@ describe("ThreadDetailPage", () => {
         }),
       );
       await renderPage();
-      const box = await screen.findByRole("textbox", { name: "消息内容" });
-      await user.type(box, "草稿");
+      const draftBox = await screen.findByRole("textbox", { name: "消息内容" });
+      await user.type(draftBox, "草稿");
       await user.click(within(screen.getAllByTestId("queue-item")[1]).getByRole("button", { name: "编辑" }));
-      expect(box).toHaveValue("第二条");
+      expect(screen.getByRole("textbox", { name: "消息内容" })).toHaveValue("第二条");
       await user.click(screen.getByRole("button", { name: "退出编辑" }));
-      expect(box).toHaveValue("草稿");
+      expect(screen.getByRole("textbox", { name: "消息内容" })).toHaveValue("草稿");
       expect(api.editQueued).not.toHaveBeenCalled();
     });
 
@@ -472,6 +475,63 @@ describe("ThreadDetailPage", () => {
       expect(screen.getByLabelText("移除图片 draft.png")).toBeInTheDocument();
       expect(screen.queryByLabelText("移除图片 edit.png")).toBeNull();
       expect(api.deleteAttachment).not.toHaveBeenCalledWith("e1", "att-draft");
+    });
+
+    it("keeps in-edit images when clicking Edit on the same queued item", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      api.uploadAttachment.mockResolvedValue({
+        type: "image",
+        id: "att-edit",
+        name: "edit.png",
+        mime_type: "image/png",
+        size_bytes: 4,
+      });
+      api.deleteAttachment.mockResolvedValue(null);
+      await renderPage();
+      await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
+      await user.upload(
+        screen.getByTestId("image-input"),
+        new File([new Uint8Array([5, 6, 7, 8])], "edit.png", { type: "image/png" }),
+      );
+      expect(await screen.findByLabelText("移除图片 edit.png")).toBeInTheDocument();
+      await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
+      expect(screen.getByLabelText("移除图片 edit.png")).toBeInTheDocument();
+      expect(api.deleteAttachment).not.toHaveBeenCalled();
+    });
+
+    it("discards in-edit images when switching to another queued item", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      api.uploadAttachment.mockResolvedValue({
+        type: "image",
+        id: "att-edit",
+        name: "edit.png",
+        mime_type: "image/png",
+        size_bytes: 4,
+      });
+      api.deleteAttachment.mockResolvedValue(null);
+      await renderPage();
+      await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
+      await user.upload(
+        screen.getByTestId("image-input"),
+        new File([new Uint8Array([5, 6, 7, 8])], "edit.png", { type: "image/png" }),
+      );
+      expect(await screen.findByLabelText("移除图片 edit.png")).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByLabelText("上传中")).toBeNull());
+      await user.click(within(screen.getAllByTestId("queue-item")[1]).getByRole("button", { name: "编辑" }));
+      await waitFor(() => expect(api.deleteAttachment).toHaveBeenCalledWith("e1", "att-edit"));
+      expect(screen.queryByLabelText("移除图片 edit.png")).toBeNull();
     });
 
     it("shows a held queue and resumes it", async () => {
@@ -621,6 +681,49 @@ describe("ThreadDetailPage", () => {
         type: "user_input",
         answers: { q1: "b-value" },
       });
+    });
+
+    it("discards question images when the request is no longer answerable", async () => {
+      const user = userEvent.setup();
+      const pending = item({
+        id: "src::q1",
+        type: "user_input_request",
+        summary: "选方案",
+        request_id: "req-2",
+        request_status: "pending",
+        response_capability: "live",
+        questions: [
+          {
+            id: "q1",
+            header: "方案",
+            question: "用哪个方案？",
+            options: [{ label: "A" }],
+          },
+        ],
+      });
+      detail.mockResolvedValue(detailOf([pending], "waiting"));
+      api.uploadAttachment.mockResolvedValue({
+        type: "image",
+        id: "att-q",
+        name: "q.png",
+        mime_type: "image/png",
+        size_bytes: 4,
+      });
+      api.deleteAttachment.mockResolvedValue(null);
+      await renderPage();
+      const form = screen.getByRole("form", { name: "回答提问" });
+      await user.upload(
+        within(form).getByLabelText("为 方案 添加图片"),
+        new File([new Uint8Array([1, 2, 3, 4])], "q.png", { type: "image/png" }),
+      );
+      expect(await screen.findByLabelText("移除图片 q.png")).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByLabelText("上传中")).toBeNull());
+      detail.mockResolvedValue(
+        detailOf([{ ...pending, request_status: "resolved" }], "idle"),
+      );
+      await act(() => client.refetchQueries({ predicate: (q) => q.queryKey[2] === "thread" }));
+      await waitFor(() => expect(api.deleteAttachment).toHaveBeenCalledWith("e1", "att-q"));
+      expect(screen.queryByLabelText("移除图片 q.png")).toBeNull();
     });
 
     describe("secret requests", () => {

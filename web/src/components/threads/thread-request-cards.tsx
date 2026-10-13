@@ -164,11 +164,51 @@ export function ApprovalRequestCard(props: CardProps) {
 const emptyDraft: AnswerDraft = { picked: [], custom: "" };
 
 export function UserInputRequestCard(props: CardProps) {
-  const { item, environmentId, threadId, canOperate, stale } = props;
+  const answerable = isRequestAnswerable(props.item) && props.canOperate;
+  if (!answerable) return <UserInputReadOnly {...props} />;
+  return <UserInputAnswerForm {...props} />;
+}
+
+function UserInputReadOnly({ item, environmentId, canOperate }: CardProps) {
+  const questions = item.questions ?? [];
+  const given = item.answers ?? {};
+  return (
+    <section data-testid="thread-item-user_input_request" className={CARD}>
+      <UserInputHeading />
+      {questions.map((q) => (
+        <div key={q.id} className="space-y-0.5">
+          <p className="break-words whitespace-pre-wrap">{q.question}</p>
+          {given[q.id] !== undefined && (
+            <p className="text-xs text-muted-foreground">
+              回答：{[given[q.id]].flat().map(String).join("、")}
+            </p>
+          )}
+        </div>
+      ))}
+      {questions.length === 0 && <p>{item.text || item.summary}</p>}
+      <Unanswerable item={item} environmentId={environmentId} canOperate={canOperate} />
+    </section>
+  );
+}
+
+function UserInputHeading() {
+  return (
+    <h3 className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+      <CircleHelp className="h-3.5 w-3.5" />
+      需要你的回答
+    </h3>
+  );
+}
+
+function UserInputAnswerForm({
+  item,
+  environmentId,
+  threadId,
+  stale,
+}: CardProps) {
   const uploads = useImageUploads(environmentId);
   const respond = useRespondRequest(environmentId, threadId, uploads.clear);
   const questions = item.questions ?? [];
-  const answerable = isRequestAnswerable(item) && canOperate;
   const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>(() =>
     Object.fromEntries(
       questions.map((q) => [q.id, { picked: [], custom: q.initial_answer ?? "" }]),
@@ -214,38 +254,6 @@ export function UserInputRequestCard(props: CardProps) {
     });
   };
 
-  const heading = (
-    <h3 className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-      <CircleHelp className="h-3.5 w-3.5" />
-      需要你的回答
-    </h3>
-  );
-
-  if (!answerable) {
-    const given = item.answers ?? {};
-    return (
-      <section data-testid="thread-item-user_input_request" className={CARD}>
-        {heading}
-        {questions.map((q) => (
-          <div key={q.id} className="space-y-0.5">
-            <p className="break-words whitespace-pre-wrap">{q.question}</p>
-            {given[q.id] !== undefined && (
-              <p className="text-xs text-muted-foreground">
-                回答：{[given[q.id]].flat().map(String).join("、")}
-              </p>
-            )}
-          </div>
-        ))}
-        {questions.length === 0 && <p>{item.text || item.summary}</p>}
-        <Unanswerable
-          item={item}
-          environmentId={environmentId}
-          canOperate={canOperate}
-        />
-      </section>
-    );
-  }
-
   return (
     <form
       onSubmit={submit}
@@ -253,7 +261,7 @@ export function UserInputRequestCard(props: CardProps) {
       data-testid="thread-item-user_input_request"
       className={CARD}
     >
-      {heading}
+      <UserInputHeading />
       {questions.map((q) => {
         const draft = draftOf(q.id);
         const multi = Boolean(q.multi_select);
