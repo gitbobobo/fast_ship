@@ -21,11 +21,16 @@ import (
 //     须带 x-t3-orchestration-protocol: 2（environmentHttp.ts orchestration.threadSnapshot；
 //     WS 侧同名读取是分页受限窗口，只有 HTTP 侧返回完整历史，故走 HTTP）
 //
-// Fast Ship 只请求 orchestration:read，且校验返回 scope 恰好等于请求值，
-// 拒绝任何更宽的会话。
+// 兑换请求不携带 scope（auth.ts 中 scope 为 optional）：T3 服务端按配对链接的
+// 授权授予完整 scope（标准客户端含 orchestration:read + orchestration:operate，
+// EnvironmentAuth.exchangeBootstrapCredentialForAccessToken 在 requestedScopes
+// 缺省时返回整份 grant.scopes）。授予的 scope 原样落库；会话能力（能否操作）
+// 由精确 token 的 scope 列判定，见 t3HasOperateScope。INT-82 时代的只读旧环境
+// 不自动升级，重新配对后自然带 operate。
 
 const (
-	t3ScopeOrchestrationRead = "orchestration:read"
+	t3ScopeOrchestrationRead    = "orchestration:read"
+	t3ScopeOrchestrationOperate = "orchestration:operate"
 
 	t3GrantTypeTokenExchange   = "urn:ietf:params:oauth:grant-type:token-exchange"
 	t3TokenTypeBootstrap       = "urn:t3:params:oauth:token-type:environment-bootstrap"
@@ -66,15 +71,15 @@ func newT3HTTPClient() *t3HTTPClient {
 	}
 }
 
-// exchangeBearer 用一次性配对码换取仅 orchestration:read 的 Bearer 会话。
-// 任何错误都返回带上下文的 error，由调用方映射成 40005/50202。
+// exchangeBearer 用一次性配对码换取 Bearer 会话（不申请 scope，授予值由
+// 配对链接的授权决定）。任何错误都返回带上下文的 error，由调用方映射成
+// 40005/50202。
 func (c *t3HTTPClient) exchangeBearer(ctx context.Context, httpBaseURL, pairingCredential string) (*t3BearerCredentials, error) {
 	form := url.Values{}
 	form.Set("grant_type", t3GrantTypeTokenExchange)
 	form.Set("subject_token", pairingCredential)
 	form.Set("subject_token_type", t3TokenTypeBootstrap)
 	form.Set("requested_token_type", t3TokenTypeAccessToken)
-	form.Set("scope", t3ScopeOrchestrationRead)
 	form.Set("client_label", "Fast Ship")
 	form.Set("client_device_type", "bot")
 
@@ -108,9 +113,6 @@ func (c *t3HTTPClient) exchangeBearer(ctx context.Context, httpBaseURL, pairingC
 	}
 	if !strings.EqualFold(tokenResp.TokenType, "Bearer") {
 		return nil, fmt.Errorf("token 响应类型 %q 不是 Bearer，拒绝使用", tokenResp.TokenType)
-	}
-	if !t3ScopeExactlyRead(tokenResp.Scope) {
-		return nil, fmt.Errorf("服务端授予的 scope %q 超出 orchestration:read，拒绝建立会话", tokenResp.Scope)
 	}
 
 	expiresIn := t3NumberValue(tokenResp.ExpiresIn)
@@ -216,14 +218,29 @@ func (c *t3HTTPClient) doJSON(req *http.Request) ([]byte, int, error) {
 	return body, resp.StatusCode, nil
 }
 
-// t3ScopeExactlyRead 校验授予 scope 恰好是 orchestration:read 一项。
-// 按 RFC 6749 以单个空格切分（与 T3 的 parseOAuthScope 一致，空段即非法）。
-func t3ScopeExactlyRead(scope string) bool {
-	scopes := strings.Split(scope, " ")
-	if len(scopes) != 1 {
-		return false
+// t3GrantedScopes 把落库的 scope 串切成列表（RFC 6749 以单个空格分隔，
+// 与 T3 的 parseOAuthScope 一致；空段丢弃）。
+func t3GrantedScopes(scope string) []string {
+	parts := strings.Split(scope, " ")
+	granted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			granted = append(granted, part)
+		}
 	}
-	return scopes[0] == t3ScopeOrchestrationRead
+	return granted
+}
+
+// t3HasOperateScope 判定会话是否可操作：唯一依据是精确持有
+// orchestration:operate（T3 RpcAuthorization 的写方法全部要求该 scope，
+// legacy 宽 scope 集不含它，无需再做父级推导）。
+func t3HasOperateScope(scope string) bool {
+	for _, granted := range t3GrantedScopes(scope) {
+		if granted == t3ScopeOrchestrationOperate {
+			return true
+		}
+	}
+	return false
 }
 
 func t3ErrorMessage(body []byte) string {
@@ -281,4 +298,76 @@ func shortenT3Error(err error) string {
 		msg = msg[:200]
 	}
 	return msg
+}
+
+// resolvePairedHTTPURL 把 T3 返回的附件路径解析到配对 origin 上。
+// 禁止字符串拼接把 `@host` / `//host` / 绝对 URL 带到别的主机。
+func resolvePairedHTTPURL(httpBaseURL, relativePath string) (string, error) {
+	base, err := url.Parse(strings.TrimSpace(httpBaseURL))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return "", fmt.Errorf("配对地址无效")
+	}
+	ref, err := url.Parse(strings.TrimSpace(relativePath))
+	if err != nil || relativePath == "" {
+		return "", fmt.Errorf("附件地址无效")
+	}
+	resolved := base.ResolveReference(ref)
+	if resolved.Scheme != base.Scheme || resolved.Host != base.Host {
+		return "", fmt.Errorf("附件地址必须落在配对主机上")
+	}
+	if resolved.User != nil {
+		return "", fmt.Errorf("附件地址必须落在配对主机上")
+	}
+	return resolved.String(), nil
+}
+
+// postRawBytes 把原始字节流式 POST 到上游相对路径（签名上传 URL）。
+// body 原样转发不落盘；contentLength 用于上游的 Content-Length 校验
+// （缺失或与声明的 sizeBytes 不符会被 T3 拒绝）。
+func (c *t3HTTPClient) postRawBytes(ctx context.Context, httpBaseURL, relativePath, contentType string, contentLength int64, body io.Reader) (int, []byte, error) {
+	endpoint, err := resolvePairedHTTPURL(httpBaseURL, relativePath)
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("构造上传请求失败: %w", err)
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	req.ContentLength = contentLength
+	respBody, status, err := c.doJSON(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("上传请求失败: %w", err)
+	}
+	return status, respBody, nil
+}
+
+// getRawBytes GET 上游相对路径并返回字节与 Content-Type（附件内容代理）。
+func (c *t3HTTPClient) getRawBytes(ctx context.Context, httpBaseURL, relativePath, bearerToken string) (status int, contentType string, body []byte, err error) {
+	endpoint, err := resolvePairedHTTPURL(httpBaseURL, relativePath)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("构造附件请求失败: %w", err)
+	}
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("附件请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, c.maxBodyBytes+1))
+	if readErr != nil {
+		return resp.StatusCode, "", nil, fmt.Errorf("读取附件失败: %w", readErr)
+	}
+	if int64(len(data)) > c.maxBodyBytes {
+		return resp.StatusCode, "", nil, fmt.Errorf("附件超过 %d 字节上限，已拒绝转发", c.maxBodyBytes)
+	}
+	return resp.StatusCode, resp.Header.Get("Content-Type"), data, nil
 }

@@ -30,13 +30,21 @@ type t3ArchivedShellSnapshot struct {
 }
 
 type t3ProjectShell struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID                    string            `json:"id"`
+	Title                 string            `json:"title"`
+	WorkspaceRoot         *string           `json:"workspaceRoot"`
+	DefaultModelSelection *t3ModelSelection `json:"defaultModelSelection"`
 }
 
 type t3ModelSelection struct {
-	InstanceID string `json:"instanceId"`
-	Model      string `json:"model"`
+	InstanceID string          `json:"instanceId"`
+	Model      string          `json:"model"`
+	Options    []t3ModelOption `json:"options"`
+}
+
+type t3ModelOption struct {
+	ID    string `json:"id"`
+	Value any    `json:"value"`
 }
 
 // t3ThreadLineage 线程谱系：relationshipToParent ∈ {fork, subagent, null}。
@@ -82,6 +90,8 @@ type t3ThreadShell struct {
 	LinkedPullReq          *json.RawMessage          `json:"linkedPullRequest"`
 	BranchPullReq          *json.RawMessage          `json:"branchPullRequest"`
 	ArchivedAt             *string                   `json:"archivedAt"`
+	LatestRunID            *string                   `json:"latestRunId"`
+	ActiveRunID            *string                   `json:"activeRunId"`
 	UpdatedAt              string                    `json:"updatedAt"`
 }
 
@@ -91,20 +101,94 @@ type t3ThreadShell struct {
 // （orchestrationV2.ts:1927），由 WS 快照侧的 threadShellFromProjection 派生。
 // 这里只解码归一化用到的字段，未知字段忽略。
 type t3AppThread struct {
-	ID         string           `json:"id"`
-	ProjectID  string           `json:"projectId"`
-	Title      string           `json:"title"`
-	Lineage    *t3ThreadLineage `json:"lineage"`
-	ArchivedAt *string          `json:"archivedAt"`
-	UpdatedAt  string           `json:"updatedAt"`
+	ID                     string           `json:"id"`
+	ProjectID              string           `json:"projectId"`
+	Title                  string           `json:"title"`
+	ActiveProviderThreadId *string          `json:"activeProviderThreadId"`
+	Lineage                *t3ThreadLineage `json:"lineage"`
+	ArchivedAt             *string          `json:"archivedAt"`
+	UpdatedAt              string           `json:"updatedAt"`
 }
 
 // t3ThreadProjection 是 HTTP 快照端点返回的完整投影。
 // 时间线以 visibleTurnItems 为准：fork 线程的继承前缀只在这里，
 // 回滚/取消的条目也已被上游按其可见性规则排除。
+// 队列/活动派生与请求条目补齐另读 runs/messages/providerSessions/
+// providerThreads/providerTurns/runtimeRequests/turnItems（contracts
+// orchestrationV2.ts OrchestrationV2ThreadProjection）。
 type t3ThreadProjection struct {
 	Thread           t3AppThread          `json:"thread"`
+	Runs             []t3Run              `json:"runs"`
+	Messages         []t3Message          `json:"messages"`
+	ProviderSessions []t3ProviderSession  `json:"providerSessions"`
+	ProviderThreads  []t3ProviderThread   `json:"providerThreads"`
+	ProviderTurns    []t3ProviderTurn     `json:"providerTurns"`
+	RuntimeRequests  []t3RuntimeRequest   `json:"runtimeRequests"`
+	TurnItems        []json.RawMessage    `json:"turnItems"`
 	VisibleTurnItems []t3ProjectedTurnRow `json:"visibleTurnItems"`
+}
+
+// t3Run 是投影里的 run 行（只解码派生队列/活动用到的字段）。
+type t3Run struct {
+	ID               string  `json:"id"`
+	Ordinal          int     `json:"ordinal"`
+	Status           string  `json:"status"`
+	QueuePosition    *int    `json:"queuePosition"`
+	QueueHeld        *bool   `json:"queueHeld"`
+	UserMessageID    string  `json:"userMessageId"`
+	ProviderThreadID *string `json:"providerThreadId"`
+	ActiveAttemptID  *string `json:"activeAttemptId"`
+}
+
+// t3Message 是投影里的会话消息行（排队消息的正文/附件来源）。
+type t3Message struct {
+	ID                  string            `json:"id"`
+	Text                string            `json:"text"`
+	Attachments         []json.RawMessage `json:"attachments"`
+	DelegatedCompletion *json.RawMessage  `json:"delegatedCompletion"`
+	NotificationPayload *json.RawMessage  `json:"notification"`
+}
+
+// t3TurnCapabilities 是 provider 会话声明的回合能力
+// （threadWorkflows.ts 的 capabilities.turns）。
+type t3TurnCapabilities struct {
+	SupportsQueuedMessages             *bool `json:"supportsQueuedMessages"`
+	SupportsActiveSteering             *bool `json:"supportsActiveSteering"`
+	SupportsSteeringByInterruptRestart *bool `json:"supportsSteeringByInterruptRestart"`
+}
+
+type t3SessionCapabilities struct {
+	Turns t3TurnCapabilities `json:"turns"`
+}
+
+// t3ProviderSession 是投影里的 provider 会话行（能力与状态）。
+type t3ProviderSession struct {
+	ID           string                `json:"id"`
+	Status       string                `json:"status"`
+	Capabilities t3SessionCapabilities `json:"capabilities"`
+}
+
+// t3ProviderThread 是 provider 线程行（把 run/thread 关到 provider 会话）。
+type t3ProviderThread struct {
+	ID                 string  `json:"id"`
+	AppThreadID        *string `json:"appThreadId"`
+	ProviderSessionID  *string `json:"providerSessionId"`
+	ProviderInstanceID *string `json:"providerInstanceId"`
+}
+
+// t3ProviderTurn 是 provider 回合行（steer 可行性判定用）。
+type t3ProviderTurn struct {
+	RunAttemptID *string `json:"runAttemptId"`
+	Status       string  `json:"status"`
+}
+
+// t3RuntimeRequest 是运行时请求记录（审批/提问条目的状态与应答通道来源）。
+type t3RuntimeRequest struct {
+	ID                 string          `json:"id"`
+	Status             string          `json:"status"`
+	ResponseCapability json.RawMessage `json:"responseCapability"`
+	Decision           *string         `json:"decision"`
+	Answers            map[string]any  `json:"answers"`
 }
 
 // t3ShellSnapshots 是同一 WS 会话取回的活跃 + 归档两份 shell 快照。
@@ -257,6 +341,8 @@ func t3PullRequestCount(shell *t3ThreadShell) int {
 // 的 ThreadShell（WS 快照侧由 threadShellFromProjection 派生），与列表共用
 // 同一状态映射，不扫描历史 runs。shell 由调用方按线程 ID 在活跃/归档快照中
 // 找出（含子代理子线程），找不到时调用方明确失败，不假 idle。
+// 审批/提问条目按投影 runtimeRequests 补齐状态；queue/activity 由投影
+// runs/messages/会话能力派生（口径对齐 T3 deriveThreadQueueWorkflowState）。
 func normalizeT3ThreadDetail(env *model.T3Environment, projection json.RawMessage, shell *t3ThreadShell, projectNames map[string]string) (*T3ThreadDetail, error) {
 	parsed, err := decodeT3Projection(projection)
 	if err != nil {
@@ -269,10 +355,17 @@ func normalizeT3ThreadDetail(env *model.T3Environment, projection json.RawMessag
 	for _, row := range parsed.VisibleTurnItems {
 		item, ok := normalizeT3TurnItem(row.SourceThreadID, row.Item)
 		if ok {
+			annotateT3ItemOrigin(&item, row)
 			items = append(items, item)
 		}
 	}
-	return &T3ThreadDetail{Thread: summary, Items: items}, nil
+	enrichT3RequestItems(items, parsed.RuntimeRequests)
+	return &T3ThreadDetail{
+		Thread:   summary,
+		Items:    items,
+		Queue:    *deriveT3ThreadQueue(parsed),
+		Activity: *deriveT3ThreadActivity(parsed, shell),
+	}, nil
 }
 
 func decodeT3Projection(projection json.RawMessage) (*t3ThreadProjection, error) {
@@ -300,6 +393,18 @@ func t3StableItemID(sourceThreadID, sourceItemID string) string {
 	return sourceThreadID + "::" + sourceItemID
 }
 
+// annotateT3ItemOrigin 把可见行的来源/继承标记写到条目上，供前端判断
+// 审批/提问/密钥能否在本线程作答。
+func annotateT3ItemOrigin(item *T3ThreadItem, row t3ProjectedTurnRow) {
+	if item == nil {
+		return
+	}
+	item.SourceThreadId = api.NonEmpty(row.SourceThreadID)
+	if row.Visibility == "inherited" {
+		item.Inherited = api.True(true)
+	}
+}
+
 func findT3VisibleRow(rows []t3ProjectedTurnRow, itemID string) (*t3ProjectedTurnRow, bool) {
 	for i := range rows {
 		if t3StableItemID(rows[i].SourceThreadID, rows[i].SourceItemID) == itemID {
@@ -313,7 +418,8 @@ func findT3VisibleRow(rows []t3ProjectedTurnRow, itemID string) (*t3ProjectedTur
 //
 // 映射（详见 docs/internal/threads.md）：
 //
-//	user_message/assistant_message/reasoning → 同名，text=快照文本
+//	user_message/assistant_message/reasoning → 同名，text=快照文本；
+//	            user_message 另带 attachments[]（图片元数据）
 //	proposed_plan → assistant_message（text=markdown）
 //	command_execution → text=命令，summary=命令首行；wire 投影已裁掉输出，
 //	                    detail_available=true（展开经 getTurnItem 补读完整正文）
@@ -322,7 +428,11 @@ func findT3VisibleRow(rows []t3ProjectedTurnRow, itemID string) (*t3ProjectedTur
 //	              diff（专用 diff 读路径不属于本集成），detail_available=false
 //	subagent → text=任务，summary=任务首行，child_thread_id 带出；detail_available=true
 //	error → text=失败信息，summary=失败类别
-//	结构性/交互性事件（checkpoint、approval_request、handoff、fork 标记等）→ 丢弃
+//	approval_request/user_input_request → 交互条目（request_id 带出，状态/
+//	            应答通道由 enrichT3RequestItems 按投影 runtimeRequests 补齐）
+//	secret_request → 密钥请求（label/reason/placeholder/secret_status；
+//	            绝不携带密钥值）
+//	结构性事件（checkpoint、handoff、fork 标记等）→ 丢弃
 //
 // 正文不额外截断（上游裁剪如实保留）；summary 是 rune 安全的单行短摘要；
 // updated_at 是上游条目的 updatedAt 原样透传（条目自带版本，上游省略即缺省）。
@@ -346,13 +456,15 @@ func normalizeT3TurnItem(sourceThreadID string, raw json.RawMessage) (T3ThreadIt
 	switch base.Type {
 	case "user_message":
 		var m struct {
-			Text string `json:"text"`
+			Text        string            `json:"text"`
+			Attachments []json.RawMessage `json:"attachments"`
 		}
 		if !mustDecode(raw, &m) {
 			return T3ThreadItem{}, false
 		}
 		item.Type = T3ThreadItemTypeUserMessage
 		item.Text = m.Text
+		item.Attachments = normalizeT3ChatAttachments(m.Attachments)
 	case "assistant_message":
 		var m struct {
 			Text string `json:"text"`
@@ -429,6 +541,69 @@ func normalizeT3TurnItem(sourceThreadID string, raw json.RawMessage) (T3ThreadIt
 		item.Type = T3ThreadTypeError
 		item.Text = m.Failure.Message
 		item.Summary = m.Failure.Class
+	case "approval_request":
+		// 审批请求：request_id 关联投影 runtimeRequests（状态/应答通道/已定
+		// decision 由 Detail/ItemDetail 的 enrich 补齐）；options 用请求自带
+		// 的（缺省请求由前端按 Approve/Decline/Always allow this session/
+		// Cancel 展示，服务端不自增 acceptAlways）。
+		var m struct {
+			RequestID   string             `json:"requestId"`
+			RequestKind string             `json:"requestKind"`
+			Prompt      *string            `json:"prompt"`
+			AppName     *string            `json:"appName"`
+			Options     []t3ApprovalOption `json:"options"`
+		}
+		if !mustDecode(raw, &m) || m.RequestID == "" {
+			return T3ThreadItem{}, false
+		}
+		item.Type = T3ThreadItemTypeApprovalRequest
+		item.RequestId = api.Ptr(m.RequestID)
+		item.RequestKind = api.NonEmpty(m.RequestKind)
+		item.Prompt = api.NonEmptyPtr(m.Prompt)
+		item.AppName = api.NonEmptyPtr(m.AppName)
+		item.Options = normalizeT3ApprovalOptions(m.Options)
+		item.Summary = firstT3Line(api.Deref(m.Prompt))
+		if item.Summary == "" && item.AppName != nil {
+			item.Summary = *item.AppName
+		}
+	case "user_input_request":
+		// 用户输入请求：问题列表原样带出；条目上的 answers（questionAnswer）
+		// 先落进来，runtimeRequests 补齐由 enrich 覆盖。
+		var m struct {
+			RequestID    string                `json:"requestId"`
+			Questions    []t3UserInputQuestion `json:"questions"`
+			ResponseMode *string               `json:"responseMode"`
+			Answers      map[string]any        `json:"answers"`
+		}
+		if !mustDecode(raw, &m) || m.RequestID == "" {
+			return T3ThreadItem{}, false
+		}
+		item.Type = T3ThreadItemTypeUserInputRequest
+		item.RequestId = api.Ptr(m.RequestID)
+		item.Questions = normalizeT3UserInputQuestions(m.Questions)
+		item.ResponseMode = api.NonEmptyPtr(m.ResponseMode)
+		item.Answers = m.Answers
+		if len(item.Questions) > 0 {
+			item.Summary = firstT3Line(item.Questions[0].Question)
+		}
+	case "secret_request":
+		// 密钥请求：只带「问了什么/答了没有」，绝不携带密钥值。
+		var m struct {
+			Label        string  `json:"label"`
+			Reason       string  `json:"reason"`
+			Placeholder  *string `json:"placeholder"`
+			SecretStatus string  `json:"secretStatus"`
+		}
+		if !mustDecode(raw, &m) || m.Label == "" {
+			return T3ThreadItem{}, false
+		}
+		item.Type = T3ThreadItemTypeSecretRequest
+		item.Label = api.Ptr(m.Label)
+		item.Text = m.Reason
+		item.Reason = api.Ptr(m.Reason)
+		item.Placeholder = api.NonEmptyPtr(m.Placeholder)
+		item.SecretStatus = api.NonEmpty(m.SecretStatus)
+		item.Summary = firstT3Line(m.Label)
 	case "dynamic_tool", "file_search", "web_search", "todo_list":
 		item.Type = T3ThreadItemTypeDynamicTool
 		item.Summary = t3ToolItemSummary(base.Type, raw)

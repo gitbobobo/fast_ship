@@ -42,6 +42,7 @@ const GithubTokensPage = lazy(
 );
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
+const NewThreadPage = lazy(() => import("@/routes/threads/new"));
 const ThreadDetailPage = lazy(
   () => import("@/routes/threads/$environmentId/$threadId"),
 );
@@ -116,6 +117,10 @@ export default function App() {
               <Route
                 path="/threads"
                 element={<LazyPage render={<ThreadsPage />} />}
+              />
+              <Route
+                path="/threads/new"
+                element={<LazyPage render={<NewThreadPage />} />}
               />
               <Route
                 path="/threads/:environmentId/:threadId"

@@ -267,6 +267,7 @@ export default function EnvironmentsPage() {
                 <TableRow>
                   <TableHead>名称</TableHead>
                   <TableHead>状态</TableHead>
+                  <TableHead>权限</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
@@ -294,6 +295,34 @@ export default function EnvironmentsPage() {
                           {env.error}
                         </div>
                       )}
+                    </TableCell>
+                    <TableCell className="align-top">
+                      <span
+                        className={cn(
+                          "inline-flex rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap",
+                          env.access === "operate"
+                            ? "bg-primary/10 text-primary"
+                            : "bg-muted text-muted-foreground",
+                        )}
+                      >
+                        {env.access === "operate" ? "可操作" : "只读"}
+                      </span>
+                      {env.access !== "operate" && (
+                        <div className="mt-1 max-w-48 text-xs text-muted-foreground">
+                          重新配对后可操作
+                        </div>
+                      )}
+                      <details className="mt-1 max-w-48 text-xs text-muted-foreground">
+                        <summary className="cursor-pointer select-none">
+                          查看 scopes
+                        </summary>
+                        <ul className="mt-1 space-y-0.5 font-mono break-all">
+                          {(env.scopes ?? []).map((scope) => (
+                            <li key={scope}>{scope}</li>
+                          ))}
+                          {(env.scopes ?? []).length === 0 && <li>无</li>}
+                        </ul>
+                      </details>
                     </TableCell>
                     <TableCell className="text-right whitespace-nowrap">
                       <Button

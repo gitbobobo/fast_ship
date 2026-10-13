@@ -197,8 +197,8 @@ func (s *T3EnvironmentService) updateRepoError(err error) error {
 // Delete 删除环境。
 //
 // 关于会话吊销：T3 协议的 /api/auth/clients/revoke 需要 access:write scope，
-// 而 Fast Ship 的会话只有 orchestration:read，协议上不存在只读会话的自吊销端点；
-// Bearer 由服务端按 expires_in 自行过期。因此删除是本地删除，不向上游发起吊销
+// Fast Ship 的会话没有该 scope，协议上不存在自吊销端点；Bearer 由服务端按
+// expires_in 自行过期。因此删除是本地删除，不向上游发起吊销
 // （见 docs/internal/threads.md 的安全章节）。
 func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) error {
 	if _, err := s.repo.FindByIDAndUserID(ctx, id, userID); err != nil {
@@ -263,12 +263,5 @@ func (s *T3EnvironmentService) pairEnvironment(ctx context.Context, userID, name
 }
 
 func (s *T3EnvironmentService) toResponse(env *model.T3Environment, status T3EnvironmentStatus, probeErr string) *T3EnvironmentResponse {
-	return &T3EnvironmentResponse{
-		Id:        env.ID,
-		Name:      env.Name,
-		Address:   env.Address,
-		Status:    status,
-		Error:     api.NonEmpty(probeErr),
-		UpdatedAt: formatTime(env.UpdatedAt.UTC()),
-	}
+	return newT3EnvironmentResponse(env, status, probeErr)
 }

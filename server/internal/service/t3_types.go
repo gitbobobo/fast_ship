@@ -20,8 +20,26 @@ type (
 	T3ThreadItem         = api.T3ThreadItem
 	T3ThreadDetail       = api.T3ThreadDetail
 
+	// T3 客户端操作（INT-85）
+	T3ComposerOptions        = api.T3ComposerOptions
+	T3WorkspaceOptions       = api.T3WorkspaceOptions
+	T3CreateThreadRequest    = api.CreateT3ThreadRequest
+	T3ThreadLaunchResult     = api.T3ThreadLaunchResult
+	T3SendMessageRequest     = api.SendT3ThreadMessageRequest
+	T3DispatchResult         = api.T3DispatchResult
+	T3ThreadStopResult       = api.T3ThreadStopResult
+	T3EditQueuedRunRequest   = api.EditT3QueuedRunRequest
+	T3ReorderQueuedRunRequst = api.ReorderT3QueuedRunRequest
+	T3RespondRequest         = api.RespondT3ThreadRequest
+	T3AnswerSecretRequest    = api.AnswerT3SecretRequest
+	T3ChatAttachment         = api.T3ChatAttachment
+	T3ThreadQueue            = api.T3ThreadQueue
+	T3ThreadQueueItem        = api.T3ThreadQueueItem
+	T3ThreadActivity         = api.T3ThreadActivity
+
 	// 枚举
 	T3EnvironmentStatus   = api.T3EnvironmentStatus
+	T3EnvironmentAccess   = api.T3EnvironmentAccess
 	T3ThreadItemType      = api.T3ThreadItemType
 	T3ThreadSummaryStatus = api.T3ThreadSummaryStatus
 )
@@ -33,6 +51,9 @@ const (
 	T3EnvironmentStatusRepair      = api.T3EnvironmentStatusRepair
 	T3EnvironmentStatusDegraded    = api.T3EnvironmentStatusDegraded
 
+	T3EnvironmentAccessReadOnly = api.ReadOnly
+	T3EnvironmentAccessOperate  = api.Operate
+
 	T3ThreadItemTypeUserMessage      = api.UserMessage
 	T3ThreadItemTypeAssistantMessage = api.AssistantMessage
 	T3ThreadItemTypeReasoning        = api.Reasoning
@@ -41,4 +62,7 @@ const (
 	T3ThreadItemTypeFileChange       = api.FileChange
 	T3ThreadItemTypeSubagent         = api.Subagent
 	T3ThreadTypeError                = api.Error
+	T3ThreadItemTypeApprovalRequest  = api.ApprovalRequest
+	T3ThreadItemTypeUserInputRequest = api.UserInputRequest
+	T3ThreadItemTypeSecretRequest    = api.SecretRequest
 )

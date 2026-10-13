@@ -228,7 +228,8 @@ func Setup(
 		api.PUT("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Update)
 		api.DELETE("/documents/:doc_id", middleware.RequireAuth(cfg, apiKeyRepo, authService), documentHandler.Delete)
 
-		// JWT 必须 — T3 环境连接与只读线程（INT-82；读取涉及用户私有凭证，API Key 一律拒绝）
+		// JWT 必须 — T3 环境连接与 T3 客户端操作（INT-82/INT-85；涉及用户私有
+		// 凭证与用户身份操作，API Key 一律拒绝 40301）
 		t3 := api.Group("", middleware.RequireJWT(cfg, authService))
 		{
 			t3.GET("/environments", t3EnvironmentHandler.List)
@@ -238,6 +239,25 @@ func Setup(
 			t3.GET("/environments/:id/threads/:threadId", t3EnvironmentHandler.GetThread)
 			t3.GET("/environments/:id/threads/:threadId/items/:itemId", t3EnvironmentHandler.GetThreadItem)
 			t3.GET("/threads", t3EnvironmentHandler.ListThreads)
+
+			// T3 客户端（INT-85）：启动器/工作区选项与全部写操作。
+			// 只读会话（缺 orchestration:operate）在 service 层统一 40300。
+			t3.GET("/environments/:id/composer-options", t3EnvironmentHandler.GetComposerOptions)
+			t3.GET("/environments/:id/projects/:projectId/workspace-options", t3EnvironmentHandler.GetWorkspaceOptions)
+			t3.POST("/environments/:id/threads", t3EnvironmentHandler.CreateThread)
+			t3.POST("/environments/:id/threads/:threadId/messages", t3EnvironmentHandler.SendMessage)
+			t3.POST("/environments/:id/threads/:threadId/stop", t3EnvironmentHandler.StopThread)
+			t3.POST("/environments/:id/threads/:threadId/queue/resume", t3EnvironmentHandler.ResumeQueue)
+			t3.POST("/environments/:id/threads/:threadId/queue/:runId/steer", t3EnvironmentHandler.SteerQueuedRun)
+			t3.POST("/environments/:id/threads/:threadId/queue/:runId/cancel", t3EnvironmentHandler.CancelQueuedRun)
+			t3.PUT("/environments/:id/threads/:threadId/queue/:runId", t3EnvironmentHandler.EditQueuedRun)
+			t3.POST("/environments/:id/threads/:threadId/queue/:runId/reorder", t3EnvironmentHandler.ReorderQueuedRun)
+			t3.POST("/environments/:id/threads/:threadId/requests/:requestId/respond", t3EnvironmentHandler.RespondToRequest)
+			t3.POST("/environments/:id/threads/:threadId/requests/:requestId/dismiss", t3EnvironmentHandler.DismissRequest)
+			t3.POST("/environments/:id/threads/:threadId/items/:itemId/secret-answer", t3EnvironmentHandler.AnswerSecretRequest)
+			t3.POST("/environments/:id/attachments", t3EnvironmentHandler.UploadAttachment)
+			t3.GET("/environments/:id/attachments/:attachmentId/content", t3EnvironmentHandler.GetAttachmentContent)
+			t3.DELETE("/environments/:id/attachments/:attachmentId", t3EnvironmentHandler.DeleteAttachment)
 		}
 	}
 

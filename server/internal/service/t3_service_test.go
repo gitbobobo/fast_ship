@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,13 +47,25 @@ type fakeT3Environment struct {
 	baseURL         string
 	pairingCodes    map[string]bool   // 有效配对码
 	validBearers    map[string]bool   // 有效 Bearer
-	grantScope      string            // /oauth/token 回的 scope；默认 orchestration:read
+	grantScope      string            // /oauth/token 回的 scope；默认宽 scope（标准客户端授权）
 	snapshot        json.RawMessage   // subscribeShell 首块 value（活跃快照，归档为空）
 	archive         json.RawMessage   // getArchivedShellSnapshot 一次性返回值
 	archiveFail     bool              // true 时归档 RPC 回 Exit Failure（G1 降级路径）
 	dropAfterActive bool              // true 时活跃快照发出后立即断连（客户端 Ack 写失败）
 	projections     map[string]string // threadId -> wire 投影 JSON
 	turnItems       map[string]string // itemId -> getTurnItem 返回的完整条目 JSON
+
+	// 写路径（INT-85）可配置响应
+	configValue    json.RawMessage   // server.getConfig 返回值
+	settingsValue  json.RawMessage   // server.getSettings 返回值
+	vcsStatus      json.RawMessage   // vcs.refreshStatus 返回值
+	vcsRefs        json.RawMessage   // vcs.listRefs 返回值
+	uploaded       map[string][]byte // attachmentId -> 上传的字节（POST /api/attachments/upload/*）
+	assetContent   map[string][]byte // attachmentId -> 下载字节（GET /api/assets/<id>）
+	assetMissing   bool              // true 时 assets.createUrl 回 AssetAttachmentNotFoundError
+	secretFail     string            // 非空时 secrets.answerRequest 回该 reason 的 SecretRequestError
+	secretAnswers  []map[string]any  // secrets.answerRequest 收到的完整 payload（验证转发）
+	deletedUploads []string          // attachments.delete 收到的 attachmentId
 
 	gotTokenForms []map[string]string
 	gotRPC        []t3RecordedRPC // WS 一次性请求（方法+payload）
@@ -70,9 +83,21 @@ func newFakeT3Environment(t *testing.T) *fakeT3Environment {
 		t:            t,
 		pairingCodes: map[string]bool{},
 		validBearers: map[string]bool{},
-		grantScope:   t3ScopeOrchestrationRead,
-		projections:  map[string]string{},
-		turnItems:    map[string]string{},
+		// 官方配对链接缺省授予标准客户端 scope（含 orchestration:operate）。
+		grantScope:    t3ScopeOrchestrationRead + " " + t3ScopeOrchestrationOperate,
+		projections:   map[string]string{},
+		turnItems:     map[string]string{},
+		configValue:   mustJSON(map[string]any{"providers": map[string]any{}}),
+		settingsValue: mustJSON(map[string]any{"newWorktreesStartFromOrigin": true}),
+		vcsStatus:     mustJSON(map[string]any{"isRepo": true, "refName": "main", "hasWorkingTreeChanges": false, "hasPrimaryRemote": true}),
+		vcsRefs: mustJSON(map[string]any{
+			"refs":   []any{map[string]any{"name": "main", "isRemote": false, "isDefault": true, "worktreePath": nil}},
+			"isRepo": true, "hasPrimaryRemote": true, "nextCursor": nil, "totalCount": 1,
+		}),
+		uploaded:       map[string][]byte{},
+		assetContent:   map[string][]byte{},
+		secretAnswers:  []map[string]any{},
+		deletedUploads: []string{},
 	}
 }
 
@@ -101,6 +126,33 @@ func (f *fakeT3Environment) recordedRPC() []t3RecordedRPC {
 	return append([]t3RecordedRPC(nil), f.gotRPC...)
 }
 
+// uploadedAttachment 取 POST 到签名上传端点的字节。
+func (f *fakeT3Environment) uploadedAttachment() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, body := range f.uploaded {
+		return body
+	}
+	return nil
+}
+
+// lastSecretAnswer 取最近一次 secrets.answerRequest 的完整 payload。
+func (f *fakeT3Environment) lastSecretAnswer() map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.secretAnswers) == 0 {
+		return nil
+	}
+	return f.secretAnswers[len(f.secretAnswers)-1]
+}
+
+// deletedAttachmentIDs 取 attachments.delete 收到的 ID 列表。
+func (f *fakeT3Environment) deletedAttachmentIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.deletedUploads...)
+}
+
 func (f *fakeT3Environment) tokenFormCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -116,12 +168,52 @@ func (f *fakeT3Environment) handler() http.Handler {
 			f.handleSession(w, r)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/orchestration/threads/"):
 			f.handleThreadSnapshot(w, r)
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/attachments/upload/"):
+			f.handleAttachmentUpload(w, r)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/assets/"):
+			f.handleAssetDownload(w, r)
 		case r.URL.Path == "/ws":
 			f.handleWS(w, r)
 		default:
 			http.NotFound(w, r)
 		}
 	})
+}
+
+// handleAttachmentUpload 模拟 T3 的签名上传端点：Content-Length 必须非零，
+// 204 接收字节（真实形状：http.ts layerAttachmentUploadRoute）。
+func (f *fakeT3Environment) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Content-Length must match the upload size."))
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if int64(len(body)) != r.ContentLength {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	f.uploaded[r.URL.Path] = body
+	f.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleAssetDownload 模拟签名资产下载端点。
+func (f *fakeT3Environment) handleAssetDownload(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	content, ok := f.assetContent[strings.TrimPrefix(r.URL.Path, "/api/assets/")]
+	f.mu.Unlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	_, _ = w.Write(content)
 }
 
 func (f *fakeT3Environment) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -304,6 +396,72 @@ func (f *fakeT3Environment) handleWS(w http.ResponseWriter, r *http.Request) {
 						continue
 					}
 					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"item":`+item+`}`)))
+				case "orchestration.dispatchCommand":
+					// 一次性命令受理：真实形状 {"sequence":N}。
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"sequence":1}`)))
+				case "orchestration.launchThread":
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"threadId":"th-launched","resumed":false}`)))
+				case "server.getConfig":
+					f.mu.Lock()
+					value := f.configValue
+					f.mu.Unlock()
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
+				case "server.getSettings":
+					f.mu.Lock()
+					value := f.settingsValue
+					f.mu.Unlock()
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
+				case "vcs.refreshStatus":
+					f.mu.Lock()
+					value := f.vcsStatus
+					f.mu.Unlock()
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
+				case "vcs.listRefs":
+					f.mu.Lock()
+					value := f.vcsRefs
+					f.mu.Unlock()
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
+				case "attachments.createUploadUrl":
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(
+						`{"attachmentId":"att-1","relativeUrl":"/api/attachments/upload/fake-token","expiresAt":9999999999999}`)))
+				case "attachments.delete":
+					var payload struct {
+						AttachmentID string `json:"attachmentId"`
+					}
+					_ = json.Unmarshal(frame.Payload, &payload)
+					f.mu.Lock()
+					f.deletedUploads = append(f.deletedUploads, payload.AttachmentID)
+					f.mu.Unlock()
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
+				case "assets.createUrl":
+					f.mu.Lock()
+					missing := f.assetMissing
+					f.mu.Unlock()
+					if missing {
+						_ = sendT3Frame(conn, exitFailureFrame(frame.ID, map[string]any{
+							"_tag":    "AssetAttachmentNotFoundError",
+							"message": "Attachment was not found.",
+						}))
+						continue
+					}
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"relativeUrl":"/api/assets/att-1","expiresAt":9999999999999}`)))
+				case "secrets.answerRequest":
+					var payload map[string]any
+					_ = json.Unmarshal(frame.Payload, &payload)
+					f.mu.Lock()
+					f.secretAnswers = append(f.secretAnswers, payload)
+					failReason := f.secretFail
+					f.mu.Unlock()
+					if failReason != "" {
+						_ = sendT3Frame(conn, exitFailureFrame(frame.ID, map[string]any{
+							"_tag":    "SecretRequestError",
+							"reason":  failReason,
+							"message": "This secret request was already answered.",
+							"cause":   map[string]any{"echoed": "upstream-defect"},
+						}))
+						continue
+					}
+					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
 				default:
 					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
 				}
@@ -441,19 +599,25 @@ func TestT3EnvironmentLifecycle(t *testing.T) {
 	if err != nil || string(plain) == "" {
 		t.Fatalf("decrypt bearer: %v", err)
 	}
-	if stored.BearerScope != t3ScopeOrchestrationRead {
-		t.Fatalf("scope = %q", stored.BearerScope)
+	if stored.BearerScope != e.fake.grantScope {
+		t.Fatalf("scope = %q, want granted %q", stored.BearerScope, e.fake.grantScope)
+	}
+	if !t3HasOperateScope(stored.BearerScope) {
+		t.Fatalf("wide grant must carry operate")
 	}
 	if strings.Contains(string(stored.BearerTokenEncrypted), "bearer-") {
 		t.Fatalf("bearer stored in plaintext")
 	}
 
-	// 兑换请求字段按真实协议
+	// 兑换请求字段按真实协议：不携带 scope（授予由配对链接的授权决定）
 	if len(e.fake.gotTokenForms) != 1 {
 		t.Fatalf("token exchanges = %d", len(e.fake.gotTokenForms))
 	}
 	form := e.fake.gotTokenForms[0]
-	if form["grant_type"] != t3GrantTypeTokenExchange || form["scope"] != t3ScopeOrchestrationRead || form["client_label"] != "Fast Ship" {
+	if _, hasScope := form["scope"]; hasScope {
+		t.Fatalf("exchange request must not carry scope, got %q", form["scope"])
+	}
+	if form["grant_type"] != t3GrantTypeTokenExchange || form["client_label"] != "Fast Ship" {
 		t.Fatalf("token form = %+v", form)
 	}
 
@@ -1085,6 +1249,12 @@ func TestT3ThreadDetailNormalization(t *testing.T) {
 	}
 	if types["th-src::i0"].Type != "user_message" || types["th-src::i0"].Text != "继承的前缀消息" {
 		t.Fatalf("inherited row = %+v", types["th-src::i0"])
+	}
+	if !api.Deref(types["th-src::i0"].Inherited) || api.Deref(types["th-src::i0"].SourceThreadId) != "th-src" {
+		t.Fatalf("inherited origin = %+v", types["th-src::i0"])
+	}
+	if api.Deref(types["th-9::i1"].Inherited) {
+		t.Fatalf("local row must not be marked inherited")
 	}
 	// 条目自带版本：updatedAt 原样透传，上游省略即缺省
 	if types["th-src::i0"].UpdatedAt != nil {

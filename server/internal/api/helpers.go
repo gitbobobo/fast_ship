@@ -26,6 +26,14 @@ func NonEmpty(s string) *string {
 	return &s
 }
 
+// NonEmptyPtr 同 NonEmpty，作用于已解出的 *string；入参为 nil 或空串都返回 nil。
+func NonEmptyPtr(s *string) *string {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return s
+}
+
 // True 在 b 为 true 时返回指向 true 的指针，否则返回 nil。用途同 NonEmpty（bool+omitempty）。
 func True(b bool) *bool {
 	if !b {

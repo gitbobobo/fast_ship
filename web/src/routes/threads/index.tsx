@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ChevronDown,
   MessagesSquare,
+  Plus,
   RefreshCw,
   Search,
   Settings,
@@ -183,18 +184,24 @@ export default function ThreadsPage() {
       <Header
         title="线程"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            aria-label="刷新线程"
-          >
-            <RefreshCw
-              className={cn("mr-1.5 h-3.5 w-3.5", isFetching && "animate-spin")}
-            />
-            刷新
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              aria-label="刷新线程"
+            >
+              <RefreshCw
+                className={cn("mr-1.5 h-3.5 w-3.5", isFetching && "animate-spin")}
+              />
+              刷新
+            </Button>
+            <Button size="sm" render={<Link to="/threads/new" />}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" />
+              新建线程
+            </Button>
+          </div>
         }
       />
       <div className="flex flex-1 flex-col gap-4 p-4 md:p-6">

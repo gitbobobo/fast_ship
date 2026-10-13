@@ -15,7 +15,13 @@ import { itemStatusLabel } from "@/lib/threads";
 import { Button } from "@/components/ui/button";
 import { useThreadItemDetail } from "@/lib/hooks/use-threads";
 import { cn } from "@/lib/utils";
+import { AttachmentThumbs } from "./thread-images";
 import { ThreadMarkdown } from "./thread-markdown";
+import {
+  ApprovalRequestCard,
+  SecretRequestCard,
+  UserInputRequestCard,
+} from "./thread-request-cards";
 
 const COLLAPSED_META: Partial<
   Record<ThreadItemType, { label: string; icon: typeof Terminal }>
@@ -185,11 +191,17 @@ export function ThreadItemView({
   environmentId,
   threadId,
   revision,
+  canOperate = false,
+  stale = false,
 }: {
   item: ThreadItem;
   environmentId: string;
   threadId: string;
   revision: string;
+  /** 环境 access === "operate" 时审批/提问/密钥卡片才可作答。 */
+  canOperate?: boolean;
+  /** 详情刷新失败：交互卡片禁用，避免对可能已变化的目标下命令。 */
+  stale?: boolean;
 }) {
   switch (item.type) {
     case "user_message":
@@ -200,9 +212,32 @@ export function ThreadItemView({
             className="rounded-xl bg-primary/5 px-4 py-3 ring-1 ring-primary/10"
           >
             <ThreadMarkdown text={item.text} />
+            <AttachmentThumbs
+              environmentId={environmentId}
+              attachments={item.attachments}
+              className="mt-2"
+            />
           </div>
         </Bubble>
       );
+    case "approval_request":
+    case "user_input_request":
+    case "secret_request": {
+      const Card = {
+        approval_request: ApprovalRequestCard,
+        user_input_request: UserInputRequestCard,
+        secret_request: SecretRequestCard,
+      }[item.type];
+      return (
+        <Card
+          item={item}
+          environmentId={environmentId}
+          threadId={threadId}
+          canOperate={canOperate}
+          stale={stale}
+        />
+      );
+    }
     case "assistant_message":
       return (
         <Bubble label="助手" icon={<Bot className="h-3.5 w-3.5" />}>

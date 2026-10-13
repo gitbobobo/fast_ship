@@ -46,6 +46,23 @@ func TestRouterT3EndpointsRejectAnonymousAndAPIKey(t *testing.T) {
 		{"list threads", http.MethodGet, "/api/threads", nil},
 		{"thread detail", http.MethodGet, "/api/environments/some-id/threads/th-1", nil},
 		{"thread item detail", http.MethodGet, "/api/environments/some-id/threads/th-1/items/src::item-1", nil},
+		// INT-85 写入口：API Key 在解析 body/访问环境/发上游之前一律 40301
+		{"composer options", http.MethodGet, "/api/environments/some-id/composer-options", nil},
+		{"workspace options", http.MethodGet, "/api/environments/some-id/projects/p-1/workspace-options", nil},
+		{"create thread", http.MethodPost, "/api/environments/some-id/threads", []byte(`{"project_id":"p-1","message":{"text":"hi"}}`)},
+		{"send message", http.MethodPost, "/api/environments/some-id/threads/th-1/messages", []byte(`{"text":"hi"}`)},
+		{"stop thread", http.MethodPost, "/api/environments/some-id/threads/th-1/stop", nil},
+		{"resume queue", http.MethodPost, "/api/environments/some-id/threads/th-1/queue/resume", nil},
+		{"steer queued", http.MethodPost, "/api/environments/some-id/threads/th-1/queue/run-1/steer", []byte(`{}`)},
+		{"cancel queued", http.MethodPost, "/api/environments/some-id/threads/th-1/queue/run-1/cancel", nil},
+		{"edit queued", http.MethodPut, "/api/environments/some-id/threads/th-1/queue/run-1", []byte(`{"text":"x"}`)},
+		{"reorder queued", http.MethodPost, "/api/environments/some-id/threads/th-1/queue/run-1/reorder", []byte(`{"before_run_id":null}`)},
+		{"respond request", http.MethodPost, "/api/environments/some-id/threads/th-1/requests/rr-1/respond", []byte(`{"type":"approval","decision":"accept"}`)},
+		{"dismiss request", http.MethodPost, "/api/environments/some-id/threads/th-1/requests/rr-1/dismiss", nil},
+		{"answer secret", http.MethodPost, "/api/environments/some-id/threads/th-1/items/th-1::sec-1/secret-answer", []byte(`{"type":"save","secret":"x"}`)},
+		{"upload attachment", http.MethodPost, "/api/environments/some-id/attachments", []byte("bytes")},
+		{"attachment content", http.MethodGet, "/api/environments/some-id/attachments/att-1/content", nil},
+		{"delete attachment", http.MethodDelete, "/api/environments/some-id/attachments/att-1", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+"/anonymous", func(t *testing.T) {
@@ -160,5 +177,44 @@ func TestRouterT3EndpointsReachHandlerWithJWT(t *testing.T) {
 	}
 	if itemEnvelope.Code != errs.ErrT3EnvironmentNotFound.Code {
 		t.Fatalf("expected code %d, got %d", errs.ErrT3EnvironmentNotFound.Code, itemEnvelope.Code)
+	}
+
+	// INT-85 写端点对 JWT 同样按路由可达（环境不存在 → 40417，先于 40300）
+	writeCases := []struct {
+		name   string
+		method string
+		path   string
+		body   []byte
+	}{
+		{"composer options", http.MethodGet, "/api/environments/no-env/composer-options", nil},
+		{"workspace options", http.MethodGet, "/api/environments/no-env/projects/p-1/workspace-options", nil},
+		{"create thread", http.MethodPost, "/api/environments/no-env/threads", []byte(`{"project_id":"p-1","message":{"text":"hi"}}`)},
+		{"send message", http.MethodPost, "/api/environments/no-env/threads/th-1/messages", []byte(`{"text":"hi"}`)},
+		{"stop thread", http.MethodPost, "/api/environments/no-env/threads/th-1/stop", nil},
+		{"edit queued", http.MethodPut, "/api/environments/no-env/threads/th-1/queue/run-1", []byte(`{"text":"x"}`)},
+		{"respond request", http.MethodPost, "/api/environments/no-env/threads/th-1/requests/rr-1/respond", []byte(`{"type":"approval","decision":"accept"}`)},
+		{"answer secret", http.MethodPost, "/api/environments/no-env/threads/th-1/items/th-1::s/secret-answer", []byte(`{"type":"decline"}`)},
+		{"attachment content", http.MethodGet, "/api/environments/no-env/attachments/att-1/content", nil},
+	}
+	for _, tc := range writeCases {
+		t.Run("jwt/"+tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(tc.body))
+			if tc.body != nil {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Authorization", jwtAuth)
+			rec := httptest.NewRecorder()
+			env.router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("expected 404 (env not found), got %d: %s", rec.Code, rec.Body.String())
+			}
+			var envelope routerEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			if envelope.Code != errs.ErrT3EnvironmentNotFound.Code {
+				t.Fatalf("expected code %d, got %d", errs.ErrT3EnvironmentNotFound.Code, envelope.Code)
+			}
+		})
 	}
 }

@@ -11,6 +11,7 @@ import {
   watchThreadsIdentity,
 } from "@/lib/hooks/use-threads";
 import { useThreadListStore } from "@/lib/store/thread-list-store";
+import { makeActivity, makeQueue } from "@/test/threads";
 import { signInAs, signOut, teardownAuth } from "@/test/auth";
 
 const { detail, list, itemDetail } = vi.hoisted(() => ({
@@ -29,8 +30,18 @@ function response(status: ThreadStatus, title = "T"): { data: ThreadDetail } {
     data: {
       thread: { id: "t1", title, status } as ThreadDetail["thread"],
       items: [],
+      queue: makeQueue(),
+      activity: makeActivity(),
     },
   };
+}
+
+function detailWith(
+  over: Partial<Pick<ThreadDetail, "queue" | "activity">>,
+  status: ThreadStatus = "idle",
+) {
+  const base = response(status).data;
+  return { data: { ...base, ...over } };
 }
 
 function setup() {
@@ -91,6 +102,42 @@ describe("useThreadDetail polling", () => {
 
     await act(() => vi.advanceTimersByTimeAsync(THREAD_DETAIL_POLL_MS * 5));
     expect(detail).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useThreadDetail polling conditions", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function callsAfterTwoTicks(first: ReturnType<typeof detailWith>) {
+    detail.mockResolvedValue(first);
+    const { wrapper } = setup();
+    renderHook(() => useThreadDetail("e1", "t1"), { wrapper });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    await act(() => vi.advanceTimersByTimeAsync(THREAD_DETAIL_POLL_MS * 2));
+    return detail.mock.calls.length;
+  }
+
+  const item = { run_id: "r1", message_id: "m1", text: "q" };
+
+  it("keeps polling while stopping", async () => {
+    expect(await callsAfterTwoTicks(detailWith({ activity: makeActivity({ stopping: true }) }))).toBe(3);
+  });
+
+  it("keeps polling while a request awaits an answer", async () => {
+    expect(
+      await callsAfterTwoTicks(detailWith({ activity: makeActivity({ has_pending_requests: true }) })),
+    ).toBe(3);
+  });
+
+  it("keeps polling while an unheld queue has work", async () => {
+    expect(await callsAfterTwoTicks(detailWith({ queue: makeQueue({ items: [item] }) }))).toBe(3);
+  });
+
+  it("stops when idle with only a held queue", async () => {
+    expect(
+      await callsAfterTwoTicks(detailWith({ queue: makeQueue({ held: true, items: [item] }) })),
+    ).toBe(1);
   });
 });
 

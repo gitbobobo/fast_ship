@@ -85,24 +85,40 @@ type rpcRequestFrame struct {
 // ctx 取消时连接被立即关闭（见 closeOnCancel），阻塞中的读写随之中断；
 // 取消后的调用在写出前即失败，不再发出任何 RPC 帧。
 func (s *t3RPCSession) call(ctx context.Context, method string, payload any) (json.RawMessage, error) {
+	value, _, err := s.callInspect(ctx, method, payload)
+	return value, err
+}
+
+// callInspect 同 call，但失败时额外返回原始 Failure cause。供密钥等安全
+// 路径按 cause 里的枚举字段分类——调用方负责不把 cause 文本带进用户可见
+// 错误或日志（t3RPCCauseError 的 message 拼接不满足该约束，故不复用）。
+func (s *t3RPCSession) callInspect(ctx context.Context, method string, payload any) (json.RawMessage, []rpcFailureCause, error) {
 	id := s.nextID
 	s.nextID++
 	defer s.closeOnCancel(ctx)()
 	if err := s.sendRequest(ctx, id, method, payload); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for {
 		frame, err := s.readFrame(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		switch {
 		case frame.isExitFor(id):
-			return frame.exitValue()
+			value, err := frame.exitValue()
+			if err != nil {
+				cause := []rpcFailureCause(nil)
+				if frame.Exit != nil {
+					cause = frame.Exit.Cause
+				}
+				return nil, cause, err
+			}
+			return value, nil, nil
 		case frame.isChunkFor(id):
 			// 一次性请求不会发 Chunk；礼貌性 Ack 防止服务端 latch 卡住。
 			if err := s.sendAck(ctx, frame.RequestID); err != nil {
-				return nil, fmt.Errorf("发送 Ack 失败: %w", err)
+				return nil, nil, fmt.Errorf("发送 Ack 失败: %w", err)
 			}
 		}
 	}
