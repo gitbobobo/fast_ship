@@ -1664,7 +1664,7 @@ type UpdateGitHubTokenRequest struct {
 	// Title 非空时替换标题；改标题不重新检测
 	Title *string `json:"title,omitempty"`
 
-	// Token 非空时替换密钥，对所有引用项目立即生效并重新检测；与同用户另一条记录明文重复时返回 40914
+	// Token 非空时替换密钥，对所有引用项目立即生效并重新检测；与同用户另一条记录明文重复时返回 40914；并发替换时密钥已变返回 40915
 	Token *string `json:"token,omitempty"`
 }
 

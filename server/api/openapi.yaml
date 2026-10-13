@@ -1127,7 +1127,8 @@ paths:
       description: |
         改标题不重新检测。替换密钥即对所有引用该 Token 的项目一起生效；
         新明文与同用户另一条记录指纹重复时返回 40914（消息指向已有记录），
-        不做隐式合并。替换后服务端重新检测。
+        不做隐式合并。替换按加载时的指纹条件写入，并发替换返回 40915。
+        替换后服务端重新检测。
       security:
         - jwtAuth: []
       parameters:
@@ -1159,7 +1160,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: 新明文与同用户另一条记录重复（40914）
+          description: 新明文与同用户另一条记录重复（40914）；并发替换时密钥已变（40915）
           content:
             application/json:
               schema:
@@ -4898,7 +4899,7 @@ components:
         token:
           type: string
           minLength: 1
-          description: 非空时替换密钥，对所有引用项目立即生效并重新检测；与同用户另一条记录明文重复时返回 40914
+          description: 非空时替换密钥，对所有引用项目立即生效并重新检测；与同用户另一条记录明文重复时返回 40914；并发替换时密钥已变返回 40915
     GitHubToken:
       type: object
       required: [id, title, token_prefix, detection_status, detection_token_type, detection_scopes, detection_login, detection_detail, referenced_projects, created_at, updated_at]

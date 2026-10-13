@@ -87,6 +87,7 @@ var (
 	ErrGitHubTokenInUse         = New(40913, "该 Token 仍被项目引用，请先解除或更换引用")
 	// 消息不含目标记录信息；替换撞指纹时由 service 用 New 追加已有记录的 title/id。
 	ErrGitHubTokenDuplicate = New(40914, "相同的 Token 已存在")
+	ErrGitHubTokenConflict  = New(40915, "GitHub Token 已被其他请求更新")
 )
 
 // 前置条件未满足 41200-41299

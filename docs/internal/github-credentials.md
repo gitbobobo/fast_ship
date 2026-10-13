@@ -29,7 +29,7 @@ GitHub Token 不再存在项目行上。`user_github_tokens` 是用户级 Token 
 
 - 解密失败（密文损坏或密钥不匹配）与引用行缺失 = `logger.Error` + 50000。日志只带 `project_id`/`token_id` 与底层错误，绝不包含 token 明文或密文。
 - 已配置但解密失败不静默退回匿名——用户以为某把 Token 在用、实际走了另一条路径比报错更难排查。
-- Token 库 API 的重复语义：create 指纹撞已有记录 → 返回已有记录（不改其标题）；update 替换撞同用户另一条 → 40914 并点名已有 title，不隐式合并。被引用（任一用途）的 Token 删除 → 40913。
+- Token 库 API 的重复语义：create 指纹撞已有记录 → 返回已有记录（不改其标题）；update 替换撞同用户另一条 → 40914 并点名已有 title，不隐式合并。替换按加载时指纹条件写入，并发替换 → 40915。被引用（任一用途）的 Token 删除 → 40913。改标题只写 title，不覆盖密文。
 
 ## 历史迁移（`cmd/server/migrate_project_tokens.go`）
 

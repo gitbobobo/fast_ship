@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { watchGithubTokensIdentity } from "@/lib/hooks/use-github-tokens";
 import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
 
 import AppLayout from "@/routes/_layout";
@@ -55,7 +56,14 @@ const queryClient = new QueryClient({
 });
 
 export default function App() {
-  useEffect(() => watchThreadsIdentity(queryClient), []);
+  useEffect(() => {
+    const stopThreads = watchThreadsIdentity(queryClient);
+    const stopGithubTokens = watchGithubTokensIdentity(queryClient);
+    return () => {
+      stopThreads();
+      stopGithubTokens();
+    };
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>

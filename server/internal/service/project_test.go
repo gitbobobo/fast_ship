@@ -301,6 +301,22 @@ func TestProjectRepoUpdate_RejectsDeletedToken(t *testing.T) {
 	}
 }
 
+func TestProjectRepo_NullTokenRefsScanAsEmpty(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-null-token-scan")
+	project := createTestProject(t, svc.db, user.ID)
+	if err := svc.db.Exec("UPDATE projects SET public_github_token_id = NULL, code_github_token_id = NULL WHERE id = ?", project.ID).Error; err != nil {
+		t.Fatalf("null refs: %v", err)
+	}
+	var got model.Project
+	if err := svc.db.First(&got, "id = ?", project.ID).Error; err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got.PublicGitHubTokenID != "" || got.CodeGitHubTokenID != "" {
+		t.Fatalf("NULL refs must scan as empty strings, got public=%q code=%q", got.PublicGitHubTokenID, got.CodeGitHubTokenID)
+	}
+}
+
 func TestProjectServiceGetBranches_NotGitHubConfigured(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-branches")

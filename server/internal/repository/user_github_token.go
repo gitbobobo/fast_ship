@@ -1,11 +1,15 @@
 package repository
 
 import (
+	"errors"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 )
+
+// ErrGitHubTokenConflict 表示替换密钥时加载后的指纹已经变了（另一请求先写完）。
+var ErrGitHubTokenConflict = errors.New("github token updated concurrently")
 
 // UserGitHubTokenRepository 管理用户级 GitHub Token 库。
 // 引用计数不走数据库外键（projects→user_github_tokens 无外键），被引用检查
@@ -46,12 +50,29 @@ func (r *UserGitHubTokenRepository) ListByUserID(userID string) ([]model.UserGit
 	return tokens, err
 }
 
-func (r *UserGitHubTokenRepository) Update(token *model.UserGitHubToken) error {
-	// 不用 Save：GORM 在主键非空且 UPDATE 0 行时会退化 INSERT，把刚删掉的行写回来。
+// UpdateTitle 只写标题，不碰密文和检测列，避免与替换密钥的请求互相覆盖。
+func (r *UserGitHubTokenRepository) UpdateTitle(id, userID, title string) error {
 	res := r.db.Model(&model.UserGitHubToken{}).
-		Where("id = ? AND user_id = ?", token.ID, token.UserID).
+		Where("id = ? AND user_id = ?", id, userID).
 		Updates(map[string]interface{}{
-			"title":             token.Title,
+			"title":      title,
+			"updated_at": time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+// ReplaceSecret 按加载时的指纹条件写密文，并把检测列打回调用方准备好的值。
+// 不用整行 Save：标题请求不会盖回旧密钥；指纹已变则返回冲突而不是用过期快照覆盖。
+func (r *UserGitHubTokenRepository) ReplaceSecret(token *model.UserGitHubToken, expectedFingerprint string) error {
+	res := r.db.Model(&model.UserGitHubToken{}).
+		Where("id = ? AND user_id = ? AND token_fingerprint = ?", token.ID, token.UserID, expectedFingerprint).
+		Updates(map[string]interface{}{
 			"token_encrypted":   token.TokenEncrypted,
 			"token_fingerprint": token.TokenFingerprint,
 			"token_prefix":      token.TokenPrefix,
@@ -66,10 +87,17 @@ func (r *UserGitHubTokenRepository) Update(token *model.UserGitHubToken) error {
 	if res.Error != nil {
 		return res.Error
 	}
-	if res.RowsAffected == 0 {
+	if res.RowsAffected > 0 {
+		return nil
+	}
+	var n int64
+	if err := r.db.Model(&model.UserGitHubToken{}).Where("id = ? AND user_id = ?", token.ID, token.UserID).Count(&n).Error; err != nil {
+		return err
+	}
+	if n == 0 {
 		return gorm.ErrRecordNotFound
 	}
-	return nil
+	return ErrGitHubTokenConflict
 }
 
 // UpdateDetection 只写检测列，并以加载时的指纹为条件：密钥已被替换或行已删除时

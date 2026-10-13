@@ -11,6 +11,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -456,12 +457,66 @@ func TestUserGitHubTokenRepository_UpdateDoesNotResurrect(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 	stored.Title = "resurrected"
-	if err := svc.tokenRepo.Update(stored); !errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := svc.tokenRepo.UpdateTitle(stored.ID, stored.UserID, stored.Title); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("expected ErrRecordNotFound, got %v", err)
+	}
+	if err := svc.tokenRepo.ReplaceSecret(stored, stored.TokenFingerprint); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("replace after delete: expected ErrRecordNotFound, got %v", err)
 	}
 	var count int64
 	svc.db.Model(&model.UserGitHubToken{}).Where("id = ?", created.Id).Count(&count)
 	if count != 0 {
 		t.Fatal("deleted token must not be inserted back")
+	}
+}
+
+func TestGitHubTokenService_UpdateTitleDoesNotRevertSecret(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-token-title-no-revert")
+	service := newTestGitHubTokenService(svc, detectOKClassic)
+	created, err := service.Create(user.ID, &CreateGitHubTokenRequest{Title: "live", Token: "ghp_old"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stale := storedTokenByTitle(t, svc, "live")
+	if _, err := service.Update(user.ID, created.Id, &UpdateGitHubTokenRequest{Token: apiPtr("ghp_new")}); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if err := svc.tokenRepo.UpdateTitle(stale.ID, stale.UserID, "renamed"); err != nil {
+		t.Fatalf("stale title: %v", err)
+	}
+	row := storedTokenByTitle(t, svc, "renamed")
+	plain, decErr := crypto.Decrypt(row.TokenEncrypted, []byte(svc.cfg.Encryption.Key))
+	if decErr != nil || string(plain) != "ghp_new" {
+		t.Fatalf("title update must not restore old secret, got %q err=%v", plain, decErr)
+	}
+	if row.TokenPrefix != githubTokenPrefix("ghp_new") {
+		t.Fatalf("prefix must stay on new secret, got %q", row.TokenPrefix)
+	}
+}
+
+func TestGitHubTokenService_ReplaceSecretConflictKeepsWinner(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-token-replace-cas")
+	service := newTestGitHubTokenService(svc, detectOKClassic)
+	created, err := service.Create(user.ID, &CreateGitHubTokenRequest{Title: "live", Token: "ghp_old"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stale := storedTokenByTitle(t, svc, "live")
+	if _, err := service.Update(user.ID, created.Id, &UpdateGitHubTokenRequest{Token: apiPtr("ghp_winner")}); err != nil {
+		t.Fatalf("first replace: %v", err)
+	}
+	stale.TokenEncrypted = []byte("stale-cipher")
+	stale.TokenFingerprint = githubTokenFingerprint("ghp_loser")
+	stale.TokenPrefix = githubTokenPrefix("ghp_loser")
+	resetDetection(stale)
+	if err := svc.tokenRepo.ReplaceSecret(stale, githubTokenFingerprint("ghp_old")); !errors.Is(err, repository.ErrGitHubTokenConflict) {
+		t.Fatalf("expected ErrGitHubTokenConflict, got %v", err)
+	}
+	row := storedTokenByTitle(t, svc, "live")
+	plain, decErr := crypto.Decrypt(row.TokenEncrypted, []byte(svc.cfg.Encryption.Key))
+	if decErr != nil || string(plain) != "ghp_winner" {
+		t.Fatalf("conflicting replace must not overwrite winner, got %q err=%v", plain, decErr)
 	}
 }

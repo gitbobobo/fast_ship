@@ -174,9 +174,10 @@ func (s *GitHubTokenService) Create(userID string, req *CreateGitHubTokenRequest
 	return s.respond(token, updated, userID)
 }
 
-// Update 改标题或替换密钥。改标题不重检；替换密钥对新明文先查指纹——撞上
-// 同用户另一条记录返回 40914 并点名已有记录，不做隐式合并；替换即对所有
-// 引用项目生效，随后重新检测。
+// Update 改标题或替换密钥。改标题只写 title，不重检；替换密钥对新明文先查
+// 指纹——撞上同用户另一条记录返回 40914 并点名已有记录，不做隐式合并；
+// 替换按加载时的指纹条件写入，并发替换返回 40915。替换即对所有引用项目
+// 生效，随后重新检测。
 func (s *GitHubTokenService) Update(userID, id string, req *UpdateGitHubTokenRequest) (*api.GitHubToken, error) {
 	token, err := s.tokenRepo.FindByID(id, userID)
 	if err != nil {
@@ -188,6 +189,7 @@ func (s *GitHubTokenService) Update(userID, id string, req *UpdateGitHubTokenReq
 
 	newPlaintext := ""
 	replacing := false
+	loadedFingerprint := token.TokenFingerprint
 	if req.Token != nil {
 		normalized, appErr := normalizeGitHubTokenPlaintext(*req.Token)
 		if appErr != nil {
@@ -198,7 +200,7 @@ func (s *GitHubTokenService) Update(userID, id string, req *UpdateGitHubTokenReq
 	}
 	if replacing {
 		fingerprint := githubTokenFingerprint(newPlaintext)
-		if fingerprint != token.TokenFingerprint {
+		if fingerprint != loadedFingerprint {
 			existing, findErr := s.tokenRepo.FindByFingerprint(userID, fingerprint)
 			if findErr == nil {
 				return nil, errs.New(errs.ErrGitHubTokenDuplicate.Code,
@@ -217,22 +219,31 @@ func (s *GitHubTokenService) Update(userID, id string, req *UpdateGitHubTokenReq
 		// 与新密文同一次写入把检测打回 unchecked，避免列表在检测完成前
 		// 用旧 login/status 搭配新 prefix。
 		resetDetection(token)
+		if err := s.tokenRepo.ReplaceSecret(token, loadedFingerprint); err != nil {
+			if errors.Is(err, repository.ErrGitHubTokenConflict) {
+				return nil, errs.ErrGitHubTokenConflict
+			}
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrGitHubTokenNotFound
+			}
+			if isUniqueConstraintError(err) {
+				existing, findErr := s.tokenRepo.FindByFingerprint(userID, token.TokenFingerprint)
+				if findErr == nil {
+					return nil, errs.New(errs.ErrGitHubTokenDuplicate.Code,
+						errs.ErrGitHubTokenDuplicate.Message+"：已有记录「"+existing.Title+"」")
+				}
+			}
+			return nil, errs.ErrInternal
+		}
 	}
 	if req.Title != nil && *req.Title != "" {
-		token.Title = *req.Title
-	}
-	if err := s.tokenRepo.Update(token); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrGitHubTokenNotFound
-		}
-		if replacing && isUniqueConstraintError(err) {
-			existing, findErr := s.tokenRepo.FindByFingerprint(userID, token.TokenFingerprint)
-			if findErr == nil {
-				return nil, errs.New(errs.ErrGitHubTokenDuplicate.Code,
-					errs.ErrGitHubTokenDuplicate.Message+"：已有记录「"+existing.Title+"」")
+		if err := s.tokenRepo.UpdateTitle(id, userID, *req.Title); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrGitHubTokenNotFound
 			}
+			return nil, errs.ErrInternal
 		}
-		return nil, errs.ErrInternal
+		token.Title = *req.Title
 	}
 
 	if replacing {
