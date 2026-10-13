@@ -7,8 +7,13 @@ import {
 import {
   environmentApi,
   threadApi,
+  type CreateThreadInput,
   type EnvironmentInput,
+  type RespondInput,
+  type SendMessageInput,
+  type ChatAttachment,
 } from "@/lib/api/threads";
+import { shouldPollThread } from "@/lib/threads-compose";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { useThreadListStore } from "@/lib/store/thread-list-store";
 
@@ -30,6 +35,23 @@ const keys = {
     environmentId,
     threadId,
   ],
+  composer: (userId: string | null, environmentId: string) => [
+    ROOT,
+    userId,
+    "composer",
+    environmentId,
+  ],
+  workspace: (
+    userId: string | null,
+    environmentId: string,
+    projectId: string,
+    query: string,
+  ) => [ROOT, userId, "workspace", environmentId, projectId, query],
+  attachment: (
+    userId: string | null,
+    environmentId: string,
+    attachmentId: string,
+  ) => [ROOT, userId, "attachment", environmentId, attachmentId],
   item: (
     userId: string | null,
     environmentId: string,
@@ -116,7 +138,11 @@ export function useThreads() {
   });
 }
 
-/** 详情只在线程运行中每隔几秒轮询；状态变为非运行或读取失败后自动停止，由用户手动重试恢复。 */
+/**
+ * 详情在线程有进展时每隔几秒轮询：运行中、停止中、有待作答请求、
+ * 未暂停且队列有待推进项（见 shouldPollThread）。读取失败后自动停止，
+ * 保留旧内容并由页面标陈旧，用户手动重试恢复；窗口重新聚焦时刷新。
+ */
 export function useThreadDetail(environmentId: string, threadId: string) {
   const userId = useUserId();
   return useQuery({
@@ -125,11 +151,164 @@ export function useThreadDetail(environmentId: string, threadId: string) {
       (await threadApi.detail(environmentId, threadId, signal)).data,
     enabled: Boolean(userId && environmentId && threadId),
     refetchOnMount: "always",
+    refetchOnWindowFocus: true,
     refetchInterval: (query) =>
-      query.state.status !== "error" &&
-      query.state.data?.thread.status === "running"
+      query.state.status !== "error" && shouldPollThread(query.state.data)
         ? THREAD_DETAIL_POLL_MS
         : false,
+  });
+}
+
+/** 新建页用：启动器选项（项目表 + provider 配置），只在需要时读取。 */
+export function useComposerOptions(environmentId: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: keys.composer(userId, environmentId),
+    queryFn: async ({ signal }) =>
+      (await threadApi.composerOptions(environmentId, signal)).data,
+    enabled: Boolean(userId && environmentId),
+  });
+}
+
+export function useWorkspaceOptions(
+  environmentId: string,
+  projectId: string,
+  query = "",
+) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: keys.workspace(userId, environmentId, projectId, query),
+    queryFn: async ({ signal }) =>
+      (await threadApi.workspaceOptions(environmentId, projectId, query, signal))
+        .data,
+    enabled: Boolean(userId && environmentId && projectId),
+    placeholderData: (previous, previousQuery) => {
+      if (!previousQuery) return undefined;
+      const prev = previousQuery.queryKey;
+      const curr = keys.workspace(userId, environmentId, projectId, query);
+      // 同一用户/环境/项目才复用（筛选分支的 query 可变）；换项目绝不能露出上一份 cwd/分支。
+      return prev[1] === curr[1] && prev[3] === curr[3] && prev[4] === curr[4]
+        ? previous
+        : undefined;
+    },
+  });
+}
+
+/** 附件缩略图：用 JWT 经 Fast Ship 代理拉成 Blob，调用方自行生成/回收 object URL。 */
+export function useAttachmentBlob(environmentId: string, attachmentId: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: keys.attachment(userId, environmentId, attachmentId),
+    queryFn: ({ signal }) =>
+      threadApi.attachmentContent(environmentId, attachmentId, signal),
+    enabled: Boolean(userId && environmentId && attachmentId),
+    staleTime: Infinity,
+    retry: 0,
+  });
+}
+
+/**
+ * 每次写操作之后立刻重读该线程详情并让列表失效；成功、失败、超时都刷新，
+ * 因为写入可能已被服务端受理。返回的 promise 在详情重读完成后才结束，
+ * 所以 mutation 在刷新确认前保持 pending，不会在 RPC 返回时就当成已生效。
+ */
+export function useRefreshThread(environmentId: string, threadId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return () =>
+    Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: keys.detail(userId, environmentId, threadId),
+      }),
+      queryClient.invalidateQueries({ queryKey: keys.threads(userId) }),
+    ]);
+}
+
+function useThreadMutation<V, R>(
+  environmentId: string,
+  threadId: string,
+  mutationFn: (variables: V) => Promise<R>,
+  onSuccess?: () => void,
+) {
+  const refresh = useRefreshThread(environmentId, threadId);
+  return useMutation({ mutationFn, onSuccess, onSettled: refresh });
+}
+
+export function useSendThreadMessage(environmentId: string, threadId: string) {
+  return useThreadMutation(environmentId, threadId, (input: SendMessageInput) =>
+    threadApi.send(environmentId, threadId, input),
+  );
+}
+
+export function useStopThread(environmentId: string, threadId: string) {
+  return useThreadMutation(environmentId, threadId, (_: void) =>
+    threadApi.stop(environmentId, threadId),
+  );
+}
+
+export function useResumeQueue(environmentId: string, threadId: string) {
+  return useThreadMutation(environmentId, threadId, (_: void) =>
+    threadApi.resumeQueue(environmentId, threadId),
+  );
+}
+
+export function useSteerQueued(environmentId: string, threadId: string) {
+  return useThreadMutation(environmentId, threadId, (runId: string) =>
+    threadApi.steer(environmentId, threadId, runId),
+  );
+}
+
+export function useCancelQueued(environmentId: string, threadId: string) {
+  return useThreadMutation(environmentId, threadId, (runId: string) =>
+    threadApi.cancelQueued(environmentId, threadId, runId),
+  );
+}
+
+export function useEditQueued(environmentId: string, threadId: string) {
+  return useThreadMutation(
+    environmentId,
+    threadId,
+    (v: { runId: string; text: string; attachments?: ChatAttachment[] }) =>
+      threadApi.editQueued(environmentId, threadId, v.runId, {
+        text: v.text,
+        attachments: v.attachments,
+      }),
+  );
+}
+
+export function useReorderQueued(environmentId: string, threadId: string) {
+  return useThreadMutation(
+    environmentId,
+    threadId,
+    (v: { runId: string; beforeRunId: string | null }) =>
+      threadApi.reorderQueued(environmentId, threadId, v.runId, v.beforeRunId),
+  );
+}
+
+/** onSuccess 在刷新前、且不依赖组件仍挂载时执行（应答后卡片会被刷新结果替换）。 */
+export function useRespondRequest(
+  environmentId: string,
+  threadId: string,
+  onSuccess?: () => void,
+) {
+  return useThreadMutation(
+    environmentId,
+    threadId,
+    (v: { requestId: string; input: RespondInput }) =>
+      threadApi.respond(environmentId, threadId, v.requestId, v.input),
+    onSuccess,
+  );
+}
+
+/** 新线程只在发送首条消息时创建；成功后让列表失效，详情由跳转后的页面读取。 */
+export function useCreateThread(environmentId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: (input: CreateThreadInput) =>
+      threadApi.create(environmentId, input),
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: keys.threads(userId) }),
   });
 }
 

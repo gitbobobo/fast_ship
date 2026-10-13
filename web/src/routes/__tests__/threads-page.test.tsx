@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ThreadsPage from "@/routes/threads/index";
 import { signInAs, teardownAuth } from "@/test/auth";
 import { renderWithRoute } from "@/test/render";
+import { makeEnvironment } from "@/test/threads";
 import { useThreads } from "@/lib/hooks/use-threads";
 import { useThreadListStore } from "@/lib/store/thread-list-store";
 import type { Environment, ThreadSummary } from "@/lib/api/threads";
@@ -12,16 +13,7 @@ vi.mock("@/lib/hooks/use-threads", () => ({ useThreads: vi.fn() }));
 
 const refetch = vi.fn();
 
-function env(over: Partial<Environment> = {}): Environment {
-  return {
-    id: "e1",
-    name: "Mac",
-    address: "http://mac:3773",
-    status: "ok",
-    updated_at: "2026-10-13T10:00:00Z",
-    ...over,
-  };
-}
+const env = makeEnvironment;
 
 function thread(i: number, over: Partial<ThreadSummary> = {}): ThreadSummary {
   return {
@@ -66,6 +58,12 @@ describe("ThreadsPage", () => {
   });
 
   afterEach(teardownAuth);
+
+  it("offers 新建线程 as the entry to the composer page", () => {
+    mockThreads([thread(1)]);
+    renderPage();
+    expect(screen.getByRole("link", { name: /新建线程/ })).toHaveAttribute("href", "/threads/new");
+  });
 
   it("guides to environment setup when nothing is paired", () => {
     mockThreads([], []);

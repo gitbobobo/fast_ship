@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EnvironmentsPage from "@/routes/settings/environments";
 import { signInAs, teardownAuth } from "@/test/auth";
 import { renderWithRoute } from "@/test/render";
+import { makeEnvironment } from "@/test/threads";
 import {
   useCreateEnvironment,
   useDeleteEnvironment,
@@ -37,13 +38,7 @@ function envs(items: Environment[] | undefined, over: Record<string, unknown> = 
   } as unknown as ReturnType<typeof useEnvironments>);
 }
 
-const base: Environment = {
-  id: "e1",
-  name: "Mac",
-  address: "http://mac:3773",
-  status: "ok",
-  updated_at: "2026-10-13T10:00:00Z",
-};
+const base: Environment = makeEnvironment();
 
 function renderPage() {
   return renderWithRoute(<EnvironmentsPage />, {
@@ -132,6 +127,29 @@ describe("EnvironmentsPage", () => {
     // 设置导航含「GitHub Tokens」；这里只断言配对凭证本身不落页。
     expect(screen.getAllByRole("link", { name: "GitHub Tokens" }).length).toBeGreaterThan(0);
     expect(container.textContent).not.toMatch(/token=/i);
+  });
+
+  it("shows the two access levels with full scopes, and no local permission editing", async () => {
+    const user = userEvent.setup();
+    envs([
+      base,
+      makeEnvironment({
+        id: "e2",
+        name: "Linux",
+        access: "read-only",
+        scopes: ["orchestration:read"],
+      }),
+    ]);
+    renderPage();
+    expect(screen.getByText("可操作")).toBeInTheDocument();
+    expect(screen.getByText("只读")).toBeInTheDocument();
+    expect(screen.getByText("重新配对后可操作")).toBeInTheDocument();
+
+    const [first] = screen.getAllByText("查看 scopes");
+    await user.click(first);
+    expect(screen.getByText("orchestration:operate")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("switch")).toBeNull();
   });
 
   it("renames, re-pairs and deletes", async () => {

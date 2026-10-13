@@ -5640,7 +5640,7 @@ JWT 可更新全部字段；API Key 只允许传 `{"status":"resolved"}`，其�
 
 ## environments
 
-T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-82）
+T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）
 
 ### GET `/api/environments`
 
@@ -5669,6 +5669,8 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 | `items[].name` | string | 是 |  |
 | `items[].address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
 | `items[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `items[].scopes` | string[] | 是 | 该环境会话实际授予的 T3 scope 列表（配对时服务端授予，原样落库） |
+| `items[].access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
 | `items[].error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `items[].updated_at` | string（date-time） | 是 |  |
 
@@ -5686,8 +5688,11 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 
 解析配对链接（支持 `t3 pair` 直接链接 `https://host/#token=...` 与 hosted 包装链接
 `https://relay/?host=<backend>&token=...`），用一次性配对码向 T3 服务端
-`POST /oauth/token` 换取**仅 `orchestration:read`** 的 Bearer 会话并加密落库；
-返回的 scope 若超出请求值则拒绝建立会话（50202）。配对码一次性，不落库。
+`POST /oauth/token` 换取 Bearer 会话并加密落库。请求不携带 `scope`：
+T3 服务端按配对链接的授权授予完整 scope（标准客户端含 `orchestration:read`
+与 `orchestration:operate`），授予的 scope 原样落库并在响应 `scopes`/`access`
+中带回。配对码一次性，不落库。旧环境（只读会话）不自动升级，重新配对后
+`access` 变为 `operate`。
 
 **鉴权**：公开
 
@@ -5714,6 +5719,8 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 | `name` | string | 是 |  |
 | `address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
 | `status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `scopes` | string[] | 是 | 该环境会话实际授予的 T3 scope 列表（配对时服务端授予，原样落库） |
+| `access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
 | `error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -5733,7 +5740,8 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 改名或重新配对
 
 指针语义：字段出现才更新。`pairing_url` 出现时重新走配对流程，
-覆盖地址与 Bearer（用于修复 `repair` 状态）；两个都不传返回 40001。
+覆盖地址与 Bearer（用于修复 `repair` 状态，同时把只读旧会话升级为
+可操作会话）；两个都不传返回 40001。
 改名与重配按字段条件更新：并发改名/重配互不覆盖；环境被并发删除时
 返回 40417 且不复活记录；并发改名触发唯一索引冲突时返回 40912。
 
@@ -5770,6 +5778,8 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 | `name` | string | 是 |  |
 | `address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
 | `status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `scopes` | string[] | 是 | 该环境会话实际授予的 T3 scope 列表（配对时服务端授予，原样落库） |
+| `access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
 | `error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -5789,9 +5799,10 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 
 删除环境
 
-删除本地记录。注意：orchestration:read 会话在 T3 协议上没有自吊销端点
-（`/api/auth/clients/revoke` 需要 `access:write`），Bearer 由 T3 服务端按
-`expires_in` 自行过期；如需立即吊销请在 T3 侧的访问设置中操作。
+删除本地记录。注意：T3 协议的会话自吊销端点（`/api/auth/clients/revoke`）
+需要 `access:write` scope，Fast Ship 的会话没有该 scope，协议上不存在
+自吊销路径；Bearer 由 T3 服务端按 `expires_in` 自行过期；如需立即吊销
+请在 T3 侧的访问设置中操作。
 
 **鉴权**：公开
 
@@ -5820,7 +5831,7 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 
 <!-- operationId: getT3Thread -->
 
-读取单个线程的完整归一化时间线（只读）
+读取单个线程的完整归一化时间线（含队列与活动状态）
 
 通过 T3 的 `GET /api/orchestration/threads/{threadId}` HTTP 快照端点取完整投影
 （WS 侧同名为分页受限窗口，不满足「完整历史」要求），按投影的
@@ -5828,7 +5839,10 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` 合成。
 长消息不截断；命令输出/工具输出/subagent 结果在 wire 投影中被上游裁剪，
 `detail_available=true` 的条目经 items/{itemId} 端点补读。
-结构性事件（checkpoint 等）被丢弃。
+结构性事件（checkpoint 等）被丢弃。审批/提问/secret 请求条目经投影
+`runtimeRequests` 补齐状态与应答能力。响应另含 `queue`（排队消息工作流，
+口径对齐 T3 `deriveThreadQueueWorkflowState`）与 `activity`（活动 run、
+停止中、待处理请求）。排队消息开始前没有 turn item，出现在 `queue.items`。
 
 **鉴权**：公开
 
@@ -5863,13 +5877,70 @@ ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` �
 | `thread.parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分） |
-| `items[].type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error） | 是 |  |
-| `items[].text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；展开后的完整正文经 items/{itemId} 获取） |
-| `items[].summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名 |
+| `items[].inherited` | boolean | 否 | 是否为 fork 继承前缀行（visibility=inherited）；继承的审批/提问/密钥只展示，不能在本线程作答 |
+| `items[].source_thread_id` | string | 否 | 该条目所在来源线程；继承行指向来源，本地行等于当前线程 |
+| `items[].type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error \| approval_request \| user_input_request \| secret_request） | 是 |  |
+| `items[].text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；审批=缺省时为空；展开后的完整正文经 items/{itemId} 获取） |
+| `items[].summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名、审批/提问=提示或问题首行 |
 | `items[].status` | string | 否 | T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略 |
 | `items[].updated_at` | string | 否 | 上游条目自带的 updatedAt（RFC3339）原样透传，作为条目版本；上游省略时本字段缺省 |
 | `items[].child_thread_id` | string | 否 | 仅 subagent；子线程 ID |
 | `items[].detail_available` | boolean | 否 | 条目在快照之外还有正文，可经 items/{itemId} 补读： 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉 输出/结果，file_change 上游 detail 也无 diff 故为 false）；补读响应恒为 false。缺省即 false。 |
+| `items[].attachments` | object[] | 否 | 仅 user_message；随消息发送的图片附件元数据 |
+| `items[].attachments[].type` | string（enum: image） | 是 |  |
+| `items[].attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
+| `items[].attachments[].name` | string（长度 ≤255） | 是 |  |
+| `items[].attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
+| `items[].attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
+| `items[].request_id` | string | 否 | 仅 approval_request/user_input_request；T3 运行时请求 ID（respond/dismiss 端点使用） |
+| `items[].request_kind` | string | 否 | 仅 approval_request；请求类型（command/file-read/file-change/mcp-elicitation/permission） |
+| `items[].prompt` | string | 否 | 仅 approval_request；审批提示（上游缺省时为空） |
+| `items[].app_name` | string | 否 | 仅 approval_request；发起审批的应用（mcp-elicitation 等）；上游缺省时缺省 |
+| `items[].options` | object[] | 否 | 仅 approval_request；审批可选项（上游自带，按序展示） |
+| `items[].options[].decision` | string | 是 | T3 ProviderApprovalDecision（accept/acceptForSession/acceptAlways/decline/cancel） |
+| `items[].options[].label` | string | 是 |  |
+| `items[].options[].warning` | string | 否 | 提供方给出的警示（如提示注入警告）；上游缺省时缺省 |
+| `items[].decision` | string | 否 | 仅 approval_request；已做出的决定（accept/acceptForSession/acceptAlways/decline/cancel），来自运行时请求记录 |
+| `items[].questions` | object[] | 否 | 仅 user_input_request；问题列表 |
+| `items[].questions[].id` | string | 是 |  |
+| `items[].questions[].header` | string | 是 |  |
+| `items[].questions[].question` | string | 是 |  |
+| `items[].questions[].options` | object[] | 是 |  |
+| `items[].questions[].options[].label` | string | 是 |  |
+| `items[].questions[].options[].description` | string | 是 |  |
+| `items[].questions[].options[].value` | string | 否 | 上游缺省时缺省（提交 answers 时以 label 为值） |
+| `items[].questions[].multi_select` | boolean | 否 | 上游缺省时缺省（视为单选） |
+| `items[].questions[].allow_custom_answer` | boolean | 否 | 上游缺省时缺省 |
+| `items[].questions[].initial_answer` | string | 否 | 可编辑的初始文本；上游缺省时缺省 |
+| `items[].questions[].required` | boolean | 否 | 上游缺省时缺省 |
+| `items[].answers` | object | 否 | 仅 user_input_request；已提交的答案（questionId → 答案值，原样透传） |
+| `items[].response_mode` | string | 否 | 仅 user_input_request；应答通道（message=经消息应答） |
+| `items[].response_capability` | string | 否 | 仅 approval_request/user_input_request；该请求当前的应答通道（live/message/not_resumable，运行时请求记录） |
+| `items[].request_status` | string | 否 | 仅 approval_request/user_input_request；运行时请求状态（pending/resolved/expired/cancelled；pending 才可应答） |
+| `items[].label` | string | 否 | 仅 secret_request；请求的密钥名称 |
+| `items[].reason` | string | 否 | 仅 secret_request；为什么需要该密钥 |
+| `items[].placeholder` | string | 否 | 仅 secret_request；输入框占位文本；上游缺省时缺省 |
+| `items[].secret_status` | string | 否 | 仅 secret_request；密钥请求状态（pending/saved/declined/cancelled；绝不携带密钥值本身） |
+| `queue` | object | 是 | 线程排队消息工作流，口径对齐 T3 `deriveThreadQueueWorkflowState`： items 为用户消息产生的排队 run（自动完成/通知 run 不在内），按 queuePosition（缺省 ordinal）升序。 |
+| `queue.held` | boolean | 是 | 队列被挂起（Stop 或重启恢复后等待用户手动恢复） |
+| `queue.can_reorder` | boolean | 是 | provider 会话能力支持排队消息（排序/编辑/取消可用） |
+| `queue.can_steer` | boolean | 是 | provider 会话能力支持把排队消息上浮为活动运行的转向输入 |
+| `queue.items` | object[] | 是 |  |
+| `queue.items[].run_id` | string | 是 |  |
+| `queue.items[].message_id` | string | 是 |  |
+| `queue.items[].text` | string | 是 | 消息正文；上游投影缺消息时为「Queued message」 |
+| `queue.items[].attachments` | object[] | 否 | 随消息的图片附件元数据；上游缺省时为空数组 |
+| `queue.items[].attachments[].type` | string（enum: image） | 是 |  |
+| `queue.items[].attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
+| `queue.items[].attachments[].name` | string（长度 ≤255） | 是 |  |
+| `queue.items[].attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
+| `queue.items[].attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
+| `activity` | object | 是 | 线程当前活动摘要（活动 run 来自投影 runs，与 queue 同一来源） |
+| `activity.active_run_id` | string | 否 | 活动 run（preparing/starting/running/waiting 的最近一个）；静止时缺省 |
+| `activity.active_run_status` | string | 否 | 活动 run 状态；静止时缺省 |
+| `activity.stopping` | boolean | 是 | 停止请求已下发且尚未落定：活动 run 的最近一条 run_interrupt_request 条目晚于同 run 的最近一条 run_interrupt_result |
+| `activity.has_pending_requests` | boolean | 是 | 有等待用户处理的运行时请求（审批/提问/代答 secret） |
+| `activity.pending_background_task_count` | integer | 是 | 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0） |
 
 **错误**
 
@@ -5883,7 +5954,7 @@ ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` �
 
 <!-- operationId: getT3ThreadItem -->
 
-读取单个线程条目的完整正文（只读，按需补读）
+读取单个线程条目的完整正文（按需补读）
 
 先取指定线程的可见时间线验证 `itemId` 是其成员（40419 = 不是成员），
 再从可信行自身派生 T3 `orchestration.getTurnItem` 参数（threadId/itemId
@@ -5909,25 +5980,67 @@ ThreadItem：text 含命令 input+output / subagent prompt+result+progress /
 
 `data`：
 
-归一化线程条目。映射规则：user_message/assistant_message/reasoning 原样带快照文本；
-proposed_plan → assistant_message；command_execution（text=命令，summary=命令首行，
+归一化线程条目。映射规则：user_message（含 attachments 图片元数据）/
+assistant_message/reasoning 原样带快照文本；proposed_plan →
+assistant_message；command_execution（text=命令，summary=命令首行，
 输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
 dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
 上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
 结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
-结构性/交互性事件（checkpoint、approval_request、handoff、notification、
-system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外截断。
+交互类条目：approval_request（审批，request_id 关联运行时请求）/
+user_input_request（提问）/ secret_request（密钥，绝不携带密钥值）。
+结构性事件（checkpoint、handoff、notification、system_notice 等）丢弃；
+未知类型前向兼容地跳过。正文不额外截断。
+继承行（fork 前缀，visibility=inherited）只展示历史：inherited=true，
+不能在本线程原地应答；source_thread_id 指向来源线程。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `id` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分） |
-| `type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error） | 是 |  |
-| `text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；展开后的完整正文经 items/{itemId} 获取） |
-| `summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名 |
+| `inherited` | boolean | 否 | 是否为 fork 继承前缀行（visibility=inherited）；继承的审批/提问/密钥只展示，不能在本线程作答 |
+| `source_thread_id` | string | 否 | 该条目所在来源线程；继承行指向来源，本地行等于当前线程 |
+| `type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error \| approval_request \| user_input_request \| secret_request） | 是 |  |
+| `text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；审批=缺省时为空；展开后的完整正文经 items/{itemId} 获取） |
+| `summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名、审批/提问=提示或问题首行 |
 | `status` | string | 否 | T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略 |
 | `updated_at` | string | 否 | 上游条目自带的 updatedAt（RFC3339）原样透传，作为条目版本；上游省略时本字段缺省 |
 | `child_thread_id` | string | 否 | 仅 subagent；子线程 ID |
 | `detail_available` | boolean | 否 | 条目在快照之外还有正文，可经 items/{itemId} 补读： 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉 输出/结果，file_change 上游 detail 也无 diff 故为 false）；补读响应恒为 false。缺省即 false。 |
+| `attachments` | object[] | 否 | 仅 user_message；随消息发送的图片附件元数据 |
+| `attachments[].type` | string（enum: image） | 是 |  |
+| `attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
+| `attachments[].name` | string（长度 ≤255） | 是 |  |
+| `attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
+| `attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
+| `request_id` | string | 否 | 仅 approval_request/user_input_request；T3 运行时请求 ID（respond/dismiss 端点使用） |
+| `request_kind` | string | 否 | 仅 approval_request；请求类型（command/file-read/file-change/mcp-elicitation/permission） |
+| `prompt` | string | 否 | 仅 approval_request；审批提示（上游缺省时为空） |
+| `app_name` | string | 否 | 仅 approval_request；发起审批的应用（mcp-elicitation 等）；上游缺省时缺省 |
+| `options` | object[] | 否 | 仅 approval_request；审批可选项（上游自带，按序展示） |
+| `options[].decision` | string | 是 | T3 ProviderApprovalDecision（accept/acceptForSession/acceptAlways/decline/cancel） |
+| `options[].label` | string | 是 |  |
+| `options[].warning` | string | 否 | 提供方给出的警示（如提示注入警告）；上游缺省时缺省 |
+| `decision` | string | 否 | 仅 approval_request；已做出的决定（accept/acceptForSession/acceptAlways/decline/cancel），来自运行时请求记录 |
+| `questions` | object[] | 否 | 仅 user_input_request；问题列表 |
+| `questions[].id` | string | 是 |  |
+| `questions[].header` | string | 是 |  |
+| `questions[].question` | string | 是 |  |
+| `questions[].options` | object[] | 是 |  |
+| `questions[].options[].label` | string | 是 |  |
+| `questions[].options[].description` | string | 是 |  |
+| `questions[].options[].value` | string | 否 | 上游缺省时缺省（提交 answers 时以 label 为值） |
+| `questions[].multi_select` | boolean | 否 | 上游缺省时缺省（视为单选） |
+| `questions[].allow_custom_answer` | boolean | 否 | 上游缺省时缺省 |
+| `questions[].initial_answer` | string | 否 | 可编辑的初始文本；上游缺省时缺省 |
+| `questions[].required` | boolean | 否 | 上游缺省时缺省 |
+| `answers` | object | 否 | 仅 user_input_request；已提交的答案（questionId → 答案值，原样透传） |
+| `response_mode` | string | 否 | 仅 user_input_request；应答通道（message=经消息应答） |
+| `response_capability` | string | 否 | 仅 approval_request/user_input_request；该请求当前的应答通道（live/message/not_resumable，运行时请求记录） |
+| `request_status` | string | 否 | 仅 approval_request/user_input_request；运行时请求状态（pending/resolved/expired/cancelled；pending 才可应答） |
+| `label` | string | 否 | 仅 secret_request；请求的密钥名称 |
+| `reason` | string | 否 | 仅 secret_request；为什么需要该密钥 |
+| `placeholder` | string | 否 | 仅 secret_request；输入框占位文本；上游缺省时缺省 |
+| `secret_status` | string | 否 | 仅 secret_request；密钥请求状态（pending/saved/declined/cancelled；绝不携带密钥值本身） |
 
 **错误**
 
@@ -5941,7 +6054,7 @@ system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外
 
 <!-- operationId: listT3Threads -->
 
-聚合当前用户全部 T3 环境的线程（只读，实时转发）
+聚合当前用户全部 T3 环境的线程（实时转发，不落库）
 
 多环境有界并行读取（并行度 4），不落库。每环境在独立预算内：
 先 `GET /api/auth/session` 分类凭证状态，再经 WS RPC
@@ -5982,6 +6095,8 @@ system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外
 | `environments[].name` | string | 是 |  |
 | `environments[].address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
 | `environments[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `environments[].scopes` | string[] | 是 | 该环境会话实际授予的 T3 scope 列表（配对时服务端授予，原样落库） |
+| `environments[].access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
 | `environments[].error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `environments[].updated_at` | string（date-time） | 是 |  |
 
@@ -5990,3 +6105,820 @@ system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外
 | HTTP | 说明 |
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
+
+### GET `/api/environments/{id}/composer-options`
+
+<!-- operationId: getT3ComposerOptions -->
+
+读取线程启动器选项（项目表 + 服务器配置 + 设置）
+
+一次 WS 会话内取 T3 `orchestration.subscribeShell` 首快照（项目表）+
+`server.getConfig` + `server.getSettings`。`projects` 为归一化项目表
+（snake_case，含 workspace_root 供 workspace-options 解析 cwd）；
+`config`/`settings` 为上游 `server.getConfig`/`server.getSettings`
+响应原样透传（camelCase，字段随 T3 版本演进，客户端按需读取）。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+
+**成功响应**
+
+**200** 启动器选项
+
+`data`：
+
+线程启动器选项（projects 归一化；config/settings 为上游原样透传）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `projects` | object[] | 是 |  |
+| `projects[].id` | string | 是 |  |
+| `projects[].title` | string | 是 |  |
+| `projects[].workspace_root` | string | 否 | 项目主检出根目录（workspace-options 据此解析 cwd）；上游缺省时缺省 |
+| `projects[].default_model_selection` | object | 否 | T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认） |
+| `projects[].default_model_selection.instance_id` | string | 是 | T3 providerInstanceId |
+| `projects[].default_model_selection.model` | string | 是 |  |
+| `projects[].default_model_selection.options` | object[] | 否 | provider 实例声明的模型选项，canonical 数组 `[{id,value}]` （与 T3 ModelSelection.options 一致）；缺省省略 |
+| `projects[].default_model_selection.options[].id` | string | 是 |  |
+| `projects[].default_model_selection.options[].value` | string | 是 | 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传， 布尔选项发 JSON boolean 而非字符串。 |
+| `config` | object | 是 | T3 `server.getConfig` 响应原样透传（camelCase，含 providers 等启动器所需的全部配置） |
+| `settings` | object | 是 | T3 `server.getSettings` 响应原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 环境不存在（40417） |
+| 502 | T3 环境调用失败（50202，含凭证失效提示） |
+
+### GET `/api/environments/{id}/projects/{projectId}/workspace-options`
+
+<!-- operationId: getT3WorkspaceOptions -->
+
+读取线程工作区选项（当前分支 + 分支/引用列表）
+
+项目与 cwd 从上游解析：先经 shell 快照找到该项目的 `workspaceRoot`，
+再在 T3 上执行 `vcs.refreshStatus`（当前分支、工作区状态）与
+`vcs.listRefs`（分支/引用分页列表，`query` 过滤、`cursor` 翻页）。
+不接受前端任意 cwd。新建 worktree 线程的 `base_ref` 默认取这里的
+`ref_name`（主检出当前分支）。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `projectId` | string | 是 | T3 projectId（来自 composer-options 的 projects[].id） |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `query` | string（长度 ≤256） | 否 | 引用名过滤前缀（原样传给 vcs.listRefs） |
+| `cursor` | integer（≥0） | 否 | 分页游标（来自上一页响应的 next_cursor） |
+
+**成功响应**
+
+**200** 工作区选项
+
+`data`：
+
+线程工作区选项（cwd 来自上游项目 workspaceRoot，不接受前端任意路径）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `project_id` | string | 是 |  |
+| `cwd` | string | 是 | 项目主检出根目录 |
+| `is_repo` | boolean | 否 | vcs.refreshStatus 报告该目录是否为 git 仓库 |
+| `ref_name` | string | 否 | 主检出当前分支；新建 worktree 线程的 base_ref 缺省取此值 |
+| `has_working_tree_changes` | boolean | 否 | 工作区有未提交变更 |
+| `has_primary_remote` | boolean | 否 |  |
+| `refs` | object[] | 是 |  |
+| `refs[].name` | string | 是 |  |
+| `refs[].kind` | string | 是 | local / remote（T3 refKind） |
+| `refs[].is_default` | boolean | 否 | 上游标注的默认分支；上游缺省时缺省 |
+| `refs[].worktree_path` | string | 否 | 该引用对应的既有工作树路径（若有）；上游缺省时缺省 |
+| `next_cursor` | integer（可空） | 否 | vcs.listRefs 分页游标；null 表示没有更多 |
+| `total_count` | integer | 否 | 过滤后的引用总数 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，如 cursor 非法） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 环境不存在（40417）或项目不在该环境（40401） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads`
+
+<!-- operationId: createT3Thread -->
+
+在 T3 环境上启动新线程
+
+经 WS RPC `orchestration.launchThread` 启动线程。thread_id 由 Fast Ship
+生成（稳定 UUID，重试幂等）；title 必填，缺省时从首条消息生成种子标题，
+并让 T3 生成正式标题（generateTitle=true）。runtime_mode 缺省
+full-access；interaction_mode 固定 default。workspace 省略时为项目主检出
+（root 不带 branch）；`worktree` 的 `base_ref` 缺省为主检出当前分支
+（经 vcs.refreshStatus 解析），`start_from_origin` 缺省取 T3 设置
+`newWorktreesStartFromOrigin`；`existing_worktree` 需给出已在 T3 侧
+注册的 worktree_path。项目必须属于该环境（project_id 来自
+composer-options），不接受前端任意 cwd。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `command_id` | string | 否 | 稳定命令 ID；缺省由服务端生成。同一操作重试必须带同一 ID |
+| `thread_id` | string | 否 | 稳定线程 ID；缺省由服务端生成。同一操作重试必须带同一 ID（T3 据此幂等） |
+| `project_id` | string | 是 | T3 projectId（来自 composer-options 的 projects[].id） |
+| `message` | object | 是 | 首条消息（必填；title 缺省时据此生成种子标题）。 text 可为空，但 text 与 attachments 不能同时空。 |
+| `message.message_id` | string | 否 | 稳定消息 ID；缺省由服务端生成 |
+| `message.text` | string | 是 | 正文；仅图片消息时为空串 |
+| `message.attachments` | object[] | 否 | 图片附件元数据（来自附件上传端点）；缺省按 [] |
+| `message.attachments[].type` | string（enum: image） | 是 |  |
+| `message.attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
+| `message.attachments[].name` | string（长度 ≤255） | 是 |  |
+| `message.attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
+| `message.attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
+| `title` | string | 否 | 线程标题；缺省时从首条消息生成种子标题并让 T3 生成正式标题 |
+| `model_selection` | object | 否 | T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认） |
+| `model_selection.instance_id` | string | 是 | T3 providerInstanceId |
+| `model_selection.model` | string | 是 |  |
+| `model_selection.options` | object[] | 否 | provider 实例声明的模型选项，canonical 数组 `[{id,value}]` （与 T3 ModelSelection.options 一致）；缺省省略 |
+| `model_selection.options[].id` | string | 是 |  |
+| `model_selection.options[].value` | string | 是 | 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传， 布尔选项发 JSON boolean 而非字符串。 |
+| `runtime_mode` | string（enum: approval-required \| auto-accept-edits \| auto \| full-access，默认 full-access） | 否 | 缺省 full-access |
+| `workspace` | object | 否 | 新线程工作区（对齐 T3 OrchestrationV2ThreadLaunchWorkspaceStrategy）。 缺省为项目主检出（root 不带 branch）。`worktree` 的 `base_ref` 缺省为 主检出当前分支；`start_from_origin` 缺省取 T3 设置 `newWorktreesStartFromOrigin`。`existing_worktree` 的 worktree_path 必填。 |
+| `workspace.type` | string（enum: root \| worktree \| existing_worktree） | 是 |  |
+| `workspace.branch` | string | 否 | 新检出的分支名；缺省由 T3 决定（root 的 Current checkout 不传 branch） |
+| `workspace.base_ref` | string | 否 | 仅 worktree；新建 worktree 的基线引用；缺省为主检出当前分支 |
+| `workspace.start_from_origin` | boolean | 否 | 仅 worktree；缺省取 T3 设置 newWorktreesStartFromOrigin |
+| `workspace.worktree_path` | string | 否 | 仅 existing_worktree；T3 侧已注册的工作树路径（来自 workspace-options 或线程详情） |
+
+**成功响应**
+
+**200** 线程已启动
+
+`data`：
+
+launchThread 结果归一化（thread 详情经 GET threads/{threadId} 读取）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `thread_id` | string | 是 |  |
+| `resumed` | boolean | 是 | 复用了同 ID 的既有线程（幂等重试）时为 true |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，如消息为空、工作区组合非法、图片不合规） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300，重新配对后可操作） |
+| 404 | 环境不存在（40417） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/messages`
+
+<!-- operationId: sendT3ThreadMessage -->
+
+向线程发送消息（活动运行时排队）
+
+经 WS RPC `orchestration.dispatchCommand` 下发 `message.dispatch`，
+dispatchMode 固定 `{type:"queue_after_active"}`：线程空闲立即开始，
+活动中进入队列（线程详情的 queue 可见、可编辑/取消/上浮）。
+attachments 缺省按 `[]` 发送（上游要求字段为数组）。
+不支持 queued messages 的 provider 会话返回 50202（明确报告，
+不自动改用 steer）。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `command_id` | string | 否 | 稳定命令 ID；缺省由服务端生成。同一操作重试必须带同一 ID |
+| `message_id` | string | 否 | 稳定消息 ID；缺省由服务端生成 |
+| `text` | string | 是 | 正文；仅图片消息时为空串。text 与 attachments 不能同时空 |
+| `attachments` | object[] | 否 | 图片附件元数据；缺省按 [] 发送（上游要求字段为数组） |
+| `attachments[].type` | string（enum: image） | 是 |  |
+| `attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
+| `attachments[].name` | string（长度 ≤255） | 是 |  |
+| `attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
+| `attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
+
+**成功响应**
+
+**200** 消息已受理（排队或立即开始）
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，如正文为空、附件超限） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 502 | T3 环境调用失败（50202，含 provider 不支持排队） |
+
+### POST `/api/environments/{id}/threads/{threadId}/stop`
+
+<!-- operationId: stopT3Thread -->
+
+停止线程当前活动（并挂起队列）
+
+经 WS RPC `orchestration.dispatchCommand` 下发 `run.interrupt`
+（holdQueue=true，T3 Stop 按钮口径：同时挂起队列）。目标 run 由
+服务端选择：活动 run（preparing/starting/running/waiting 的最近一个），
+否则仍有后台工作的最近 run（对齐 T3 客户端 stopThread 的选择逻辑）。
+没有可停止的 run 时按 T3 口径视为无操作，返回 stopped=false，
+不杜撰内部 thread.stop 命令。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+
+**成功响应**
+
+**200** 停止请求已下发（或无可停止运行）
+
+`data`：
+
+停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `stopped` | boolean | 是 |  |
+| `run_id` | string | 否 | 被中断的 run；无可停止运行时缺省 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/queue/resume`
+
+<!-- operationId: resumeT3ThreadQueue -->
+
+恢复被挂起的排队队列
+
+经 WS RPC 下发 `queue.resume`（Stop 挂起或重启恢复后的手动恢复）。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+
+**成功响应**
+
+**200** 队列已恢复
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/queue/{runId}/steer`
+
+<!-- operationId: steerT3QueuedRun -->
+
+把排队消息上浮为对活动运行的转向输入
+
+经 WS RPC 下发 `queued-message.promote-to-steer`。target_run_id 由服务端
+解析为当前活动 run；`queue.can_steer=false`（provider 不支持）或没有
+活动 run 时返回 40916/50202，不自动降级重试。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `runId` | string | 是 | T3 runId（排队消息行，来自线程详情 queue.items[].run_id） |
+
+**请求体**
+
+`application/json`，必填。
+
+target_run_id 由服务端解析为当前活动 run，请求体保留字段以显式表达意图
+
+**成功响应**
+
+**200** 已上浮
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 409 | 状态冲突（40916，如无活动 run 可转向） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/queue/{runId}/cancel`
+
+<!-- operationId: cancelT3QueuedRun -->
+
+取消一条排队消息
+
+经 WS RPC 下发 `queued-run.cancel`。队列已开始消费该 run 时返回 40916。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `runId` | string | 是 | T3 runId（排队消息行，来自线程详情 queue.items[].run_id） |
+
+**成功响应**
+
+**200** 已取消
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 409 | 状态冲突（40916，如该 run 已开始） |
+| 502 | T3 环境调用失败（50202） |
+
+### PUT `/api/environments/{id}/threads/{threadId}/queue/{runId}`
+
+<!-- operationId: editT3QueuedRun -->
+
+编辑一条排队消息的正文与附件
+
+经 WS RPC 下发 `queued-run.edit`。`attachments` 三态：字段缺省=保留
+原附件（与 T3 语义一致，不得把缺省反序列化成空数组）；`[]`=清空；
+非空数组=整组替换。队列已开始消费该 run 时返回 40916。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `runId` | string | 是 | T3 runId（排队消息行，来自线程详情 queue.items[].run_id） |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `text` | string（长度 ≥1） | 是 |  |
+| `attachments` | object[] | 否 | 三态：字段缺省=保留原附件（不得反序列化成空数组）；[]=清空； 非空数组=整组替换 |
+| `attachments[].type` | string（enum: image） | 是 |  |
+| `attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
+| `attachments[].name` | string（长度 ≤255） | 是 |  |
+| `attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
+| `attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
+
+**成功响应**
+
+**200** 已编辑
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，如正文为空） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 409 | 状态冲突（40916，如该 run 已开始） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/queue/{runId}/reorder`
+
+<!-- operationId: reorderT3QueuedRun -->
+
+调整排队消息顺序
+
+经 WS RPC 下发 `queued-run.reorder`。`before_run_id` 为目标位置后一条
+排队消息的 run_id；传 null 或缺省表示移到队尾。该 run 不在队列中时
+返回 40916。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `runId` | string | 是 | T3 runId（排队消息行，来自线程详情 queue.items[].run_id） |
+
+**请求体**
+
+`application/json`，必填。
+
+before_run_id 为 null 或缺省表示移到队尾
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `before_run_id` | string（可空） | 否 | 目标位置后一条排队消息的 run_id |
+
+**成功响应**
+
+**200** 已调整
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）或线程不存在（40418） |
+| 409 | 状态冲突（40916，如该 run 已不在队列） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/requests/{requestId}/respond`
+
+<!-- operationId: respondT3ThreadRequest -->
+
+应答审批或用户输入请求
+
+经 WS RPC 下发 `runtime-request.respond`。`type=approval` 携带 decision
+（approve 缺省时使用请求自带 options 的 decision，缺省选项才是
+Approve/Decline/Always allow this session/Cancel，服务端不自增
+acceptAlways）；`type=user_input` 携带 answers（questionId → 答案）与
+可选 attachments_by_question_id。请求已回答/已过期返回 40916。
+继承（fork 前缀）请求不能在本线程原位应答——requestId 必须属于
+本线程的 runtimeRequests。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `requestId` | string（长度 ≤256） | 是 | T3 运行时请求 ID（来自线程详情 items[].request_id） |
+
+**请求体**
+
+`application/json`，必填。
+
+应答联合：approval 携带 decision；user_input 携带 answers
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `type` | string（enum: approval \| user_input） | 是 |  |
+| `decision` | string | 否 | 仅 type=approval；T3 ProviderApprovalDecision（accept/acceptForSession/acceptAlways/decline/cancel），应为请求 options 中的 decision |
+| `answers` | object | 否 | 仅 type=user_input；questionId → 答案值（原样透传给 T3） |
+| `attachments_by_question_id` | object | 否 | 仅 type=user_input；按问题追加图片附件；缺省不发 |
+
+**成功响应**
+
+**200** 已应答
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，如 decision/answers 非法） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）、线程不存在（40418）或请求不属于本线程（40419） |
+| 409 | 状态冲突（40916，请求已回答或已过期） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/requests/{requestId}/dismiss`
+
+<!-- operationId: dismissT3ThreadRequest -->
+
+关闭用户输入请求卡片
+
+经 WS RPC 下发 `thread.user-input.dismiss`（不提供答案，直接收起卡片）。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `requestId` | string（长度 ≤256） | 是 | T3 运行时请求 ID（来自线程详情 items[].request_id） |
+
+**成功响应**
+
+**200** 已关闭
+
+`data`：
+
+dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `sequence` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）、线程不存在（40418）或请求不属于本线程（40419） |
+| 409 | 状态冲突（40916，请求已回答或已过期） |
+| 502 | T3 环境调用失败（50202） |
+
+### POST `/api/environments/{id}/threads/{threadId}/items/{itemId}/secret-answer`
+
+<!-- operationId: answerT3ThreadSecretRequest -->
+
+应答线程内的密钥请求（保存或拒绝）
+
+验证 itemId 是本线程本地 pending 的 secret_request 条目（合成 ID 转回
+T3 真实 turnItemId），再经 WS RPC `secrets.answerRequest` 提交。
+成功返回空 data。密钥值只在这一次请求中经过 Fast Ship：不落库、
+不写日志、不出现在错误信息或任何回显中；上游失败只返回固定文案
+（按 reason 映射 40916/40419/50202，不透传上游 cause）。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `threadId` | string | 是 | T3 threadId |
+| `itemId` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id，来自线程详情的 items[].id） |
+
+**请求体**
+
+`application/json`，必填。
+
+密钥应答联合；save 携带密钥值（仅此一次经过，不落库不回显）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `type` | string | 是 | save（携带 secret）或 decline |
+| `secret` | string（长度 ≥1） | 否 | 仅 type=save；密钥值 |
+
+**成功响应**
+
+**200** 已应答（空 data）
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，如 save 的 secret 为空） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417）、线程不存在（40418）或条目不是本线程的 secret_request（40419） |
+| 409 | 状态冲突（40916，该请求已被回答或代理已停止） |
+| 502 | T3 环境调用失败（50202，固定文案，不含上游详情） |
+
+### POST `/api/environments/{id}/attachments`
+
+<!-- operationId: uploadT3Attachment -->
+
+上传图片附件到 T3 环境（流转发，不落 Fast Ship 盘）
+
+浏览器 → Fast Ship → T3：先经 WS RPC `attachments.createUploadUrl`
+取得同 origin 签名上传 URL，再把请求体原始字节流式 POST 到该 URL，
+返回可直接放进 messages/threads 请求 `attachments` 数组的
+ChatImageAttachment 元数据。字节不落 Fast Ship 盘、不 base64、
+不接受 multipart。仅支持 PNG/JPEG/GIF/WebP，单图上限 10MiB
+（超限 40001）。请求头 `Content-Type` 即图片 MIME，
+`X-File-Name` 提供文件名（缺省 `image.<ext>`）。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+
+**Header 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `X-File-Name` | string（长度 ≤255） | 否 | 文件显示名（进入 T3 后的附件 name） |
+
+**请求体**
+
+`image/gif`，必填。
+
+`image/jpeg`，必填。
+
+`image/png`，必填。
+
+`image/webp`，必填。
+
+**成功响应**
+
+**200** 上传成功，返回附件元数据
+
+`data`：
+
+随消息发送的图片附件元数据（T3 ChatImageAttachment 归一化；上传经 environments/{id}/attachments）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `type` | string（enum: image） | 是 |  |
+| `id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
+| `name` | string（长度 ≤255） | 是 |  |
+| `mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
+| `size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，MIME 不支持/超 10MiB/缺 Content-Length） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417） |
+| 502 | T3 环境调用失败（50202） |
+
+### GET `/api/environments/{id}/attachments/{attachmentId}/content`
+
+<!-- operationId: getT3AttachmentContent -->
+
+读取 T3 附件内容（Fast Ship 代理字节）
+
+经 WS RPC `assets.createUrl`（resource=_tag:"attachment"）取得签名下载
+URL，再由 Fast Ship 拉取字节并原样代理给浏览器（带上游 Content-Type）。
+字节不落盘。附件不存在或上传已过期返回 40417 语义之外的 40418；
+上游未就绪返回 50202。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `attachmentId` | string（长度 ≤256） | 是 | T3 附件 ID（来自附件上传响应的 id） |
+
+**成功响应**
+
+**200** 附件字节（Content-Type 为图片 MIME）
+
+二进制内容（image/gif、image/jpeg、image/png、image/webp），无 JSON 信封。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 环境不存在（40417）或附件不存在/已过期（40418） |
+| 502 | T3 环境调用失败（50202） |
+
+### DELETE `/api/environments/{id}/attachments/{attachmentId}`
+
+<!-- operationId: deleteT3Attachment -->
+
+删除 T3 上的待用附件
+
+经 WS RPC `attachments.delete` 删除尚未被消息引用的 pending 附件。
+
+**鉴权**：公开
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
+| `attachmentId` | string（长度 ≤256） | 是 | T3 附件 ID（来自附件上传响应的 id） |
+
+**成功响应**
+
+**200** 删除成功
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 该环境为只读会话（40300） |
+| 404 | 环境不存在（40417） |
+| 502 | T3 环境调用失败（50202） |

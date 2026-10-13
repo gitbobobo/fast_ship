@@ -1,28 +1,51 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router";
+import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiRequestError } from "@/lib/api/client";
 import ThreadDetailPage from "@/routes/threads/$environmentId/$threadId";
 import type { ThreadDetail, ThreadItem } from "@/lib/api/threads";
 import { signInAs, teardownAuth } from "@/test/auth";
+import { makeActivity, makeEnvironment, makeQueue } from "@/test/threads";
 
-const { detail, itemDetail } = vi.hoisted(() => ({
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+
+const api = vi.hoisted(() => ({
   detail: vi.fn(),
   itemDetail: vi.fn(),
+  envList: vi.fn(),
+  send: vi.fn(),
+  stop: vi.fn(),
+  resumeQueue: vi.fn(),
+  steer: vi.fn(),
+  cancelQueued: vi.fn(),
+  editQueued: vi.fn(),
+  reorderQueued: vi.fn(),
+  respond: vi.fn(),
+  answerSecret: vi.fn(),
+  attachmentContent: vi.fn(),
+  uploadAttachment: vi.fn(),
+  deleteAttachment: vi.fn(),
 }));
+const { detail, itemDetail, envList } = api;
 
-vi.mock("@/lib/api/threads", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/api/threads")>()),
-  threadApi: { list: vi.fn(), detail, itemDetail },
-}));
+vi.mock("@/lib/api/threads", async (importOriginal) => {
+  const { envList: environmentList, ...threadMocks } = api;
+  return {
+    ...(await importOriginal<typeof import("@/lib/api/threads")>()),
+    environmentApi: { list: environmentList },
+    threadApi: { list: vi.fn(), ...threadMocks },
+  };
+});
 
 function detailOf(
   items: ThreadItem[],
   status: ThreadDetail["thread"]["status"] = "idle",
   updatedAt = "2026-10-13T10:00:00Z",
   parentThreadId?: string,
+  extra: Partial<Pick<ThreadDetail, "queue" | "activity">> = {},
 ) {
   return {
     data: {
@@ -42,6 +65,9 @@ function detailOf(
         ...(parentThreadId ? { parent_thread_id: parentThreadId } : {}),
       },
       items,
+      queue: makeQueue(),
+      activity: makeActivity(),
+      ...extra,
     },
   };
 }
@@ -75,6 +101,7 @@ describe("ThreadDetailPage", () => {
     vi.clearAllMocks();
     client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     signInAs("u1");
+    envList.mockResolvedValue({ data: { items: [makeEnvironment()] } });
   });
   afterEach(teardownAuth);
 
@@ -143,12 +170,424 @@ describe("ThreadDetailPage", () => {
     );
   });
 
-  it("is read only: no inputs or write actions", async () => {
-    mockDetail([item({ id: "1", type: "assistant_message", text: "hi" })], "running");
+  it("is read only for read-only environments: no input, hint, no write actions", async () => {
+    envList.mockResolvedValue({
+      data: { items: [makeEnvironment({ access: "read-only", scopes: ["orchestration:read"] })] },
+    });
+    detail.mockResolvedValue(
+      detailOf(
+        [item({ id: "1", type: "assistant_message", text: "hi" })],
+        "running",
+        undefined,
+        undefined,
+        {
+          queue: makeQueue({
+            items: [{ run_id: "r1", message_id: "m1", text: "排队中" }],
+          }),
+        },
+      ),
+    );
     await renderPage();
+    expect(await screen.findByText("该环境为只读会话，重新配对后可操作")).toBeInTheDocument();
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("form")).toBeNull();
+    expect(screen.queryByRole("button", { name: "停止" })).toBeNull();
     expect(screen.getByText("线程运行中，内容会自动更新。")).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑" })).toBeNull();
+  });
+
+  describe("chat", () => {
+    const composer = () => screen.getByRole("form", { name: "消息输入" });
+
+    it("sends a reply when idle with stable ids reused across retries", async () => {
+      const user = userEvent.setup();
+      mockDetail([]);
+      api.send.mockRejectedValueOnce(new ApiRequestError(502, 50202, "T3 环境调用失败"));
+      api.send.mockResolvedValue({ sequence: 1 });
+      await renderPage();
+
+      await user.type(await screen.findByRole("textbox", { name: "消息内容" }), "继续");
+      await user.click(within(composer()).getByRole("button", { name: "发送" }));
+      expect(await screen.findByText("T3 环境调用失败")).toBeInTheDocument();
+      await user.click(within(composer()).getByRole("button", { name: "发送" }));
+
+      await waitFor(() => expect(api.send).toHaveBeenCalledTimes(2));
+      const [, , first] = api.send.mock.calls[0];
+      const [env, thread, second] = api.send.mock.calls[1];
+      expect([env, thread]).toEqual(["e1", "t1"]);
+      expect(second).toMatchObject({ text: "继续", attachments: [] });
+      expect(second.command_id).toBe(first.command_id);
+      expect(second.message_id).toBe(first.message_id);
+      await waitFor(() => expect(screen.getByRole("textbox", { name: "消息内容" })).toHaveValue(""));
+      // 写入后立刻重读详情
+      expect(detail.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it("queues instead of steering while a run is active", async () => {
+      const user = userEvent.setup();
+      mockDetail([], "running");
+      api.send.mockResolvedValue({ sequence: 1 });
+      await renderPage();
+
+      await user.type(await screen.findByRole("textbox", { name: "消息内容" }), "接着做");
+      await user.click(within(composer()).getByRole("button", { name: "加入队列" }));
+      await waitFor(() => expect(api.send).toHaveBeenCalledTimes(1));
+      expect(screen.queryByRole("button", { name: "Steer" })).toBeNull();
+    });
+
+    it("keeps Stop pending until the refreshed detail confirms it", async () => {
+      const user = userEvent.setup();
+      mockDetail([], "running");
+      let finish!: () => void;
+      api.stop.mockReturnValue(new Promise((r) => (finish = () => r({ stopped: true }))));
+      await renderPage();
+
+      await user.click(await screen.findByRole("button", { name: "停止" }));
+      expect(screen.getByRole("button", { name: "停止中…" })).toBeDisabled();
+
+      // RPC 返回后详情仍显示 running：按钮不能凭空变成 idle。
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          activity: makeActivity({ stopping: true, active_run_id: "r1" }),
+        }),
+      );
+      await act(async () => finish());
+      expect(await screen.findByRole("button", { name: "停止中…" })).toBeDisabled();
+      expect(screen.getByText("运行中")).toBeInTheDocument();
+    });
+
+    const queued = (over = {}) =>
+      makeQueue({
+        items: [
+          { run_id: "r1", message_id: "m1", text: "第一条" },
+          { run_id: "r2", message_id: "m2", text: "第二条" },
+        ],
+        ...over,
+      });
+
+    it("shows the queue with Steer only when allowed, plus cancel and reorder", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued({ can_steer: true, can_reorder: true }),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      api.steer.mockResolvedValue({ sequence: 1 });
+      api.cancelQueued.mockResolvedValue({ sequence: 1 });
+      api.reorderQueued.mockResolvedValue({ sequence: 1 });
+      await renderPage();
+
+      const rows = await screen.findAllByTestId("queue-item");
+      expect(rows).toHaveLength(2);
+      await user.click(within(rows[0]).getByRole("button", { name: "Steer" }));
+      expect(api.steer).toHaveBeenCalledWith("e1", "t1", "r1");
+      await user.click(within(rows[1]).getByRole("button", { name: "取消" }));
+      expect(api.cancelQueued).toHaveBeenCalledWith("e1", "t1", "r2");
+      await user.click(within(rows[1]).getByRole("button", { name: "上移" }));
+      expect(api.reorderQueued).toHaveBeenCalledWith("e1", "t1", "r2", "r1");
+      await user.click(within(rows[0]).getByRole("button", { name: "下移" }));
+      expect(api.reorderQueued).toHaveBeenCalledWith("e1", "t1", "r1", null);
+    });
+
+    it("hides Steer and reorder when the provider cannot", async () => {
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      await renderPage();
+      await screen.findAllByTestId("queue-item");
+      expect(screen.queryByRole("button", { name: "Steer" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "上移" })).toBeNull();
+      expect(screen.getAllByRole("button", { name: "编辑" })).toHaveLength(2);
+    });
+
+    it("edits a queued message in the composer; unchanged attachments are omitted", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      api.editQueued.mockResolvedValue({ sequence: 1 });
+      await renderPage();
+
+      const box = await screen.findByRole("textbox", { name: "消息内容" });
+      await user.type(box, "草稿");
+      await user.click(within(screen.getAllByTestId("queue-item")[0]).getByRole("button", { name: "编辑" }));
+      expect(screen.getByText(/正在编辑排队消息/)).toBeInTheDocument();
+      expect(box).toHaveValue("第一条");
+
+      await user.clear(box);
+      await user.type(box, "改过的");
+      await user.click(screen.getByRole("button", { name: "保存修改" }));
+      await waitFor(() => expect(api.editQueued).toHaveBeenCalledTimes(1));
+      const [, , runId, body] = api.editQueued.mock.calls[0];
+      expect(runId).toBe("r1");
+      expect(body).toEqual({ text: "改过的", attachments: undefined });
+      await waitFor(() => expect(box).toHaveValue("草稿"));
+      expect(screen.queryByText(/正在编辑排队消息/)).toBeNull();
+    });
+
+    it("exits edit mode without saving and restores the draft", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued(),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      await renderPage();
+      const box = await screen.findByRole("textbox", { name: "消息内容" });
+      await user.type(box, "草稿");
+      await user.click(within(screen.getAllByTestId("queue-item")[1]).getByRole("button", { name: "编辑" }));
+      expect(box).toHaveValue("第二条");
+      await user.click(screen.getByRole("button", { name: "退出编辑" }));
+      expect(box).toHaveValue("草稿");
+      expect(api.editQueued).not.toHaveBeenCalled();
+    });
+
+    it("shows a held queue and resumes it", async () => {
+      const user = userEvent.setup();
+      detail.mockResolvedValue(
+        detailOf([], "idle", undefined, undefined, { queue: queued({ held: true }) }),
+      );
+      api.resumeQueue.mockResolvedValue({ sequence: 1 });
+      await renderPage();
+      expect(await screen.findByText("队列已暂停")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "恢复队列" }));
+      expect(api.resumeQueue).toHaveBeenCalledWith("e1", "t1");
+    });
+
+    it("disables queue and stop buttons when the snapshot is stale", async () => {
+      detail.mockResolvedValue(
+        detailOf([], "running", undefined, undefined, {
+          queue: queued({ can_steer: true }),
+          activity: makeActivity({ active_run_id: "r0" }),
+        }),
+      );
+      await renderPage();
+      await screen.findAllByTestId("queue-item");
+
+      detail.mockRejectedValue(new Error("down"));
+      await act(() => client.refetchQueries({ predicate: (q) => q.queryKey[2] === "thread" }));
+      await screen.findByText(/刷新失败/);
+      for (const name of ["Steer", "编辑", "取消", "停止"]) {
+        for (const button of screen.getAllByRole("button", { name })) expect(button).toBeDisabled();
+      }
+    });
+  });
+
+  describe("request cards", () => {
+    const approval = (over: Partial<ThreadItem> = {}) =>
+      item({
+        id: "src::a1",
+        type: "approval_request",
+        text: "",
+        summary: "运行 rm",
+        prompt: "允许运行 rm -rf？",
+        request_id: "req-1",
+        request_status: "pending",
+        response_capability: "live",
+        source_thread_id: "t1",
+        ...over,
+      });
+
+    it("falls back to the default four approval options and answers in place", async () => {
+      const user = userEvent.setup();
+      mockDetail([approval()], "waiting");
+      api.respond.mockResolvedValue({ sequence: 1 });
+      await renderPage();
+
+      const card = screen.getByTestId("thread-item-approval_request");
+      expect(within(card).getAllByRole("button").map((b) => b.textContent)).toEqual([
+        "Approve",
+        "Decline",
+        "Always allow this session",
+        "Cancel",
+      ]);
+      await user.click(within(card).getByRole("button", { name: "Always allow this session" }));
+      expect(api.respond).toHaveBeenCalledWith("e1", "t1", "req-1", {
+        type: "approval",
+        decision: "acceptForSession",
+      });
+    });
+
+    it("uses the options carried by the request, including warnings", async () => {
+      mockDetail(
+        [
+          approval({
+            options: [
+              { decision: "accept", label: "Allow once", warning: "可能存在提示注入" },
+              { decision: "decline", label: "Deny" },
+            ],
+          }),
+        ],
+        "waiting",
+      );
+      await renderPage();
+      const card = screen.getByTestId("thread-item-approval_request");
+      expect(within(card).getAllByRole("button").map((b) => b.textContent)).toEqual(["Allow once", "Deny"]);
+      expect(within(card).queryByRole("button", { name: "Approve" })).toBeNull();
+      expect(card).toHaveTextContent("可能存在提示注入");
+    });
+
+    it("shows inherited requests read-only with a link to the source thread", async () => {
+      mockDetail(
+        [approval({ inherited: true, source_thread_id: "parent 1" })],
+        "idle",
+      );
+      await renderPage();
+      const card = screen.getByTestId("thread-item-approval_request");
+      expect(within(card).queryByRole("button")).toBeNull();
+      expect(within(card).getByRole("link", { name: "查看来源线程" })).toHaveAttribute(
+        "href",
+        "/threads/e1/parent%201",
+      );
+    });
+
+    it("does not offer answers for resolved or non-resumable requests", async () => {
+      mockDetail(
+        [
+          approval({ id: "a", request_status: "resolved", decision: "accept" }),
+          approval({ id: "b", response_capability: "not_resumable" }),
+        ],
+        "idle",
+      );
+      await renderPage();
+      expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    });
+
+    it("answers a user input request with the chosen option", async () => {
+      const user = userEvent.setup();
+      mockDetail(
+        [
+          item({
+            id: "src::q1",
+            type: "user_input_request",
+            summary: "选方案",
+            request_id: "req-2",
+            request_status: "pending",
+            response_capability: "live",
+            questions: [
+              {
+                id: "q1",
+                header: "方案",
+                question: "用哪个方案？",
+                options: [
+                  { label: "A", description: "快" },
+                  { label: "B", description: "稳", value: "b-value" },
+                ],
+              },
+            ],
+          }),
+        ],
+        "waiting",
+      );
+      api.respond.mockResolvedValue({ sequence: 1 });
+      await renderPage();
+      const form = screen.getByRole("form", { name: "回答提问" });
+      expect(within(form).getByRole("button", { name: "提交回答" })).toBeDisabled();
+      await user.click(within(form).getByLabelText(/B/));
+      await user.click(within(form).getByRole("button", { name: "提交回答" }));
+      expect(api.respond).toHaveBeenCalledWith("e1", "t1", "req-2", {
+        type: "user_input",
+        answers: { q1: "b-value" },
+      });
+    });
+
+    describe("secret requests", () => {
+      const secretItem = (over: Partial<ThreadItem> = {}) =>
+        item({
+          id: "src::s1",
+          type: "secret_request",
+          summary: "API key",
+          label: "OpenAI key",
+          reason: "用于调用模型",
+          secret_status: "pending",
+          source_thread_id: "t1",
+          ...over,
+        });
+
+      it("masks the field, sends the secret once, clears it, and never leaks it", async () => {
+        const user = userEvent.setup();
+        const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
+          vi.spyOn(console, m).mockImplementation(() => {}),
+        );
+        mockDetail([secretItem()], "waiting");
+        api.answerSecret.mockResolvedValue(null);
+        const { container } = await renderPage();
+
+        expect(screen.getByText(/不会保存在 Fast Ship/)).toBeInTheDocument();
+        const field = screen.getByLabelText("OpenAI key");
+        expect(field.className).toContain("text-security");
+        await user.type(field, "sk-TOP-SECRET");
+        await user.click(screen.getByRole("button", { name: "安全保存" }));
+
+        await waitFor(() =>
+          expect(api.answerSecret).toHaveBeenCalledWith("e1", "t1", "src::s1", {
+            type: "save",
+            secret: "sk-TOP-SECRET",
+          }),
+        );
+        await waitFor(() => expect(field).toHaveValue(""));
+        expect(toast.success).not.toHaveBeenCalled();
+        expect(toast.error).not.toHaveBeenCalled();
+        for (const spy of spies) expect(JSON.stringify(spy.mock.calls)).not.toContain("sk-TOP-SECRET");
+        expect(container.textContent).not.toContain("sk-TOP-SECRET");
+        spies.forEach((s) => s.mockRestore());
+      });
+
+      it("shows a fixed error and keeps the value out of the page on failure", async () => {
+        const user = userEvent.setup();
+        mockDetail([secretItem()], "waiting");
+        api.answerSecret.mockRejectedValue(new ApiRequestError(409, 40916, "echo sk-LEAK"));
+        const { container } = await renderPage();
+
+        await user.type(screen.getByLabelText("OpenAI key"), "sk-LEAK");
+        await user.click(screen.getByRole("button", { name: "安全保存" }));
+        expect(await screen.findByRole("alert")).toHaveTextContent("该请求已被回答或代理已停止");
+        expect(container.textContent).not.toContain("echo sk-LEAK");
+      });
+
+      it("guards against double submit and supports declining", async () => {
+        const user = userEvent.setup();
+        mockDetail([secretItem()], "waiting");
+        let done!: () => void;
+        api.answerSecret.mockReturnValue(new Promise((r) => (done = () => r(null))));
+        await renderPage();
+
+        await user.type(screen.getByLabelText("OpenAI key"), "abc");
+        const save = screen.getByRole("button", { name: "安全保存" });
+        await user.click(save);
+        await user.click(save);
+        expect(api.answerSecret).toHaveBeenCalledTimes(1);
+        await act(async () => done());
+
+        api.answerSecret.mockResolvedValue(null);
+        await user.click(screen.getByRole("button", { name: "拒绝" }));
+        expect(api.answerSecret).toHaveBeenLastCalledWith("e1", "t1", "src::s1", { type: "decline" });
+      });
+
+      it("renders answered and inherited secret requests without a form", async () => {
+        mockDetail(
+          [
+            secretItem({ id: "a", secret_status: "saved" }),
+            secretItem({ id: "b", inherited: true, source_thread_id: "p" }),
+          ],
+          "idle",
+        );
+        await renderPage();
+        expect(screen.queryByRole("textbox")).toBeInTheDocument();
+        expect(screen.queryByLabelText("OpenAI key")).toBeNull();
+        expect(screen.getByText(/已保存/)).toBeInTheDocument();
+        expect(screen.getByRole("link", { name: "查看来源线程" })).toHaveAttribute("href", "/threads/e1/p");
+      });
+    });
   });
 
   it("shows errors inline", async () => {

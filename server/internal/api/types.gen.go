@@ -8,6 +8,30 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for CreateT3ThreadRequestRuntimeMode.
+const (
+	ApprovalRequired CreateT3ThreadRequestRuntimeMode = "approval-required"
+	Auto             CreateT3ThreadRequestRuntimeMode = "auto"
+	AutoAcceptEdits  CreateT3ThreadRequestRuntimeMode = "auto-accept-edits"
+	FullAccess       CreateT3ThreadRequestRuntimeMode = "full-access"
+)
+
+// Valid indicates whether the value is a known member of the CreateT3ThreadRequestRuntimeMode enum.
+func (e CreateT3ThreadRequestRuntimeMode) Valid() bool {
+	switch e {
+	case ApprovalRequired:
+		return true
+	case Auto:
+		return true
+	case AutoAcceptEdits:
+		return true
+	case FullAccess:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GitHubTokenDetectionStatus.
 const (
 	GitHubTokenDetectionStatusFailed    GitHubTokenDetectionStatus = "failed"
@@ -71,6 +95,24 @@ func (e IssueRecommendationStatus) Valid() bool {
 	}
 }
 
+// Defines values for RespondT3ThreadRequestType.
+const (
+	Approval  RespondT3ThreadRequestType = "approval"
+	UserInput RespondT3ThreadRequestType = "user_input"
+)
+
+// Valid indicates whether the value is a known member of the RespondT3ThreadRequestType enum.
+func (e RespondT3ThreadRequestType) Valid() bool {
+	switch e {
+	case Approval:
+		return true
+	case UserInput:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ScreenshotAnnotationStatus.
 const (
 	Open     ScreenshotAnnotationStatus = "open"
@@ -83,6 +125,39 @@ func (e ScreenshotAnnotationStatus) Valid() bool {
 	case Open:
 		return true
 	case Resolved:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for T3ChatAttachmentType.
+const (
+	Image T3ChatAttachmentType = "image"
+)
+
+// Valid indicates whether the value is a known member of the T3ChatAttachmentType enum.
+func (e T3ChatAttachmentType) Valid() bool {
+	switch e {
+	case Image:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for T3EnvironmentAccess.
+const (
+	Operate  T3EnvironmentAccess = "operate"
+	ReadOnly T3EnvironmentAccess = "read-only"
+)
+
+// Valid indicates whether the value is a known member of the T3EnvironmentAccess enum.
+func (e T3EnvironmentAccess) Valid() bool {
+	switch e {
+	case Operate:
+		return true
+	case ReadOnly:
 		return true
 	default:
 		return false
@@ -115,19 +190,24 @@ func (e T3EnvironmentStatus) Valid() bool {
 
 // Defines values for T3ThreadItemType.
 const (
+	ApprovalRequest  T3ThreadItemType = "approval_request"
 	AssistantMessage T3ThreadItemType = "assistant_message"
 	CommandExecution T3ThreadItemType = "command_execution"
 	DynamicTool      T3ThreadItemType = "dynamic_tool"
 	Error            T3ThreadItemType = "error"
 	FileChange       T3ThreadItemType = "file_change"
 	Reasoning        T3ThreadItemType = "reasoning"
+	SecretRequest    T3ThreadItemType = "secret_request"
 	Subagent         T3ThreadItemType = "subagent"
+	UserInputRequest T3ThreadItemType = "user_input_request"
 	UserMessage      T3ThreadItemType = "user_message"
 )
 
 // Valid indicates whether the value is a known member of the T3ThreadItemType enum.
 func (e T3ThreadItemType) Valid() bool {
 	switch e {
+	case ApprovalRequest:
+		return true
 	case AssistantMessage:
 		return true
 	case CommandExecution:
@@ -140,7 +220,11 @@ func (e T3ThreadItemType) Valid() bool {
 		return true
 	case Reasoning:
 		return true
+	case SecretRequest:
+		return true
 	case Subagent:
+		return true
+	case UserInputRequest:
 		return true
 	case UserMessage:
 		return true
@@ -167,6 +251,27 @@ func (e T3ThreadSummaryStatus) Valid() bool {
 	case Running:
 		return true
 	case Waiting:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for T3ThreadWorkspaceType.
+const (
+	ExistingWorktree T3ThreadWorkspaceType = "existing_worktree"
+	Root             T3ThreadWorkspaceType = "root"
+	Worktree         T3ThreadWorkspaceType = "worktree"
+)
+
+// Valid indicates whether the value is a known member of the T3ThreadWorkspaceType enum.
+func (e T3ThreadWorkspaceType) Valid() bool {
+	switch e {
+	case ExistingWorktree:
+		return true
+	case Root:
+		return true
+	case Worktree:
 		return true
 	default:
 		return false
@@ -329,6 +434,15 @@ type AISettings struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// AnswerT3SecretRequest 密钥应答联合；save 携带密钥值（仅此一次经过，不落库不回显）
+type AnswerT3SecretRequest struct {
+	// Secret 仅 type=save；密钥值
+	Secret *string `json:"secret,omitempty"`
+
+	// Type save（携带 secret）或 decline
+	Type string `json:"type"`
+}
+
 // ApiKey defines model for ApiKey.
 type ApiKey struct {
 	CreatedAt string `json:"created_at"`
@@ -482,6 +596,53 @@ type CreateT3EnvironmentRequest struct {
 	PairingUrl string `json:"pairing_url"`
 }
 
+// CreateT3ThreadRequest defines model for CreateT3ThreadRequest.
+type CreateT3ThreadRequest struct {
+	// CommandId 稳定命令 ID；缺省由服务端生成。同一操作重试必须带同一 ID
+	CommandId *string `json:"command_id,omitempty"`
+
+	// Message 首条消息（必填；title 缺省时据此生成种子标题）。
+	// text 可为空，但 text 与 attachments 不能同时空。
+	Message CreateT3ThreadRequest_Message `json:"message"`
+
+	// ModelSelection T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认）
+	ModelSelection *T3ModelSelection `json:"model_selection,omitempty"`
+
+	// ProjectId T3 projectId（来自 composer-options 的 projects[].id）
+	ProjectId string `json:"project_id"`
+
+	// RuntimeMode 缺省 full-access
+	RuntimeMode *CreateT3ThreadRequestRuntimeMode `json:"runtime_mode,omitempty"`
+
+	// ThreadId 稳定线程 ID；缺省由服务端生成。同一操作重试必须带同一 ID（T3 据此幂等）
+	ThreadId *string `json:"thread_id,omitempty"`
+
+	// Title 线程标题；缺省时从首条消息生成种子标题并让 T3 生成正式标题
+	Title *string `json:"title,omitempty"`
+
+	// Workspace 新线程工作区（对齐 T3 OrchestrationV2ThreadLaunchWorkspaceStrategy）。
+	// 缺省为项目主检出（root 不带 branch）。`worktree` 的 `base_ref` 缺省为
+	// 主检出当前分支；`start_from_origin` 缺省取 T3 设置
+	// `newWorktreesStartFromOrigin`。`existing_worktree` 的 worktree_path 必填。
+	Workspace *T3ThreadWorkspace `json:"workspace,omitempty"`
+}
+
+// CreateT3ThreadRequest_Message 首条消息（必填；title 缺省时据此生成种子标题）。
+// text 可为空，但 text 与 attachments 不能同时空。
+type CreateT3ThreadRequest_Message struct {
+	// Attachments 图片附件元数据（来自附件上传端点）；缺省按 []
+	Attachments []T3ChatAttachment `json:"attachments,omitempty"`
+
+	// MessageId 稳定消息 ID；缺省由服务端生成
+	MessageId *string `json:"message_id,omitempty"`
+
+	// Text 正文；仅图片消息时为空串
+	Text string `json:"text"`
+}
+
+// CreateT3ThreadRequestRuntimeMode 缺省 full-access
+type CreateT3ThreadRequestRuntimeMode string
+
 // CreateVersionRequest defines model for CreateVersionRequest.
 type CreateVersionRequest struct {
 	// ReleaseNotes Release 说明；发货前必填
@@ -550,6 +711,14 @@ type DocumentListItem struct {
 	ProjectId string  `json:"project_id"`
 	Title     string  `json:"title"`
 	UpdatedAt string  `json:"updated_at"`
+}
+
+// EditT3QueuedRunRequest defines model for EditT3QueuedRunRequest.
+type EditT3QueuedRunRequest struct {
+	// Attachments 三态：字段缺省=保留原附件（不得反序列化成空数组）；[]=清空；
+	// 非空数组=整组替换
+	Attachments []T3ChatAttachment `json:"attachments,omitempty"`
+	Text        string             `json:"text"`
 }
 
 // Envelope 统一 JSON 信封 {code, message, data}
@@ -1303,6 +1472,28 @@ type RegisterRequest struct {
 	Username string `binding:"required,min=2,max=50" json:"username"`
 }
 
+// ReorderT3QueuedRunRequest before_run_id 为 null 或缺省表示移到队尾
+type ReorderT3QueuedRunRequest struct {
+	// BeforeRunId 目标位置后一条排队消息的 run_id
+	BeforeRunId *string `json:"before_run_id,omitempty"`
+}
+
+// RespondT3ThreadRequest 应答联合：approval 携带 decision；user_input 携带 answers
+type RespondT3ThreadRequest struct {
+	// Answers 仅 type=user_input；questionId → 答案值（原样透传给 T3）
+	Answers map[string]interface{} `json:"answers,omitempty"`
+
+	// AttachmentsByQuestionId 仅 type=user_input；按问题追加图片附件；缺省不发
+	AttachmentsByQuestionId map[string][]T3ChatAttachment `json:"attachments_by_question_id,omitempty"`
+
+	// Decision 仅 type=approval；T3 ProviderApprovalDecision（accept/acceptForSession/acceptAlways/decline/cancel），应为请求 options 中的 decision
+	Decision *string                    `json:"decision,omitempty"`
+	Type     RespondT3ThreadRequestType `json:"type"`
+}
+
+// RespondT3ThreadRequestType defines model for RespondT3ThreadRequest.Type.
+type RespondT3ThreadRequestType string
+
 // ScreenshotAnnotation 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
 type ScreenshotAnnotation struct {
 	// Body 标注文字
@@ -1487,6 +1678,21 @@ type ScreenshotVersion struct {
 	Width int `json:"width"`
 }
 
+// SendT3ThreadMessageRequest defines model for SendT3ThreadMessageRequest.
+type SendT3ThreadMessageRequest struct {
+	// Attachments 图片附件元数据；缺省按 [] 发送（上游要求字段为数组）
+	Attachments []T3ChatAttachment `json:"attachments,omitempty"`
+
+	// CommandId 稳定命令 ID；缺省由服务端生成。同一操作重试必须带同一 ID
+	CommandId *string `json:"command_id,omitempty"`
+
+	// MessageId 稳定消息 ID；缺省由服务端生成
+	MessageId *string `json:"message_id,omitempty"`
+
+	// Text 正文；仅图片消息时为空串。text 与 attachments 不能同时空
+	Text string `json:"text"`
+}
+
 // ShipCheck defines model for ShipCheck.
 type ShipCheck struct {
 	CanShip           bool               `json:"can_ship"`
@@ -1522,8 +1728,69 @@ type ShipStage = model.ShipStage
 // ShipStatus 空串表示尚未发货（idle）
 type ShipStatus = model.ShipStatus
 
+// SteerT3QueuedRunRequest target_run_id 由服务端解析为当前活动 run，请求体保留字段以显式表达意图
+type SteerT3QueuedRunRequest = map[string]interface{}
+
+// T3ApprovalOption 审批可选项（T3 请求自带，缺省请求才是 Approve/Decline/Always allow this session/Cancel）
+type T3ApprovalOption struct {
+	// Decision T3 ProviderApprovalDecision（accept/acceptForSession/acceptAlways/decline/cancel）
+	Decision string `json:"decision"`
+	Label    string `json:"label"`
+
+	// Warning 提供方给出的警示（如提示注入警告）；上游缺省时缺省
+	Warning *string `json:"warning,omitempty"`
+}
+
+// T3ChatAttachment 随消息发送的图片附件元数据（T3 ChatImageAttachment 归一化；上传经 environments/{id}/attachments）
+type T3ChatAttachment struct {
+	// Id T3 附件 ID（createUploadUrl 产出的 attachmentId）
+	Id string `json:"id"`
+
+	// MimeType 仅支持 image/png、image/jpeg、image/gif、image/webp
+	MimeType string `json:"mime_type"`
+	Name     string `json:"name"`
+
+	// SizeBytes 字节数；单图上限 10MiB
+	SizeBytes int                  `json:"size_bytes"`
+	Type      T3ChatAttachmentType `json:"type"`
+}
+
+// T3ChatAttachmentType defines model for T3ChatAttachment.Type.
+type T3ChatAttachmentType string
+
+// T3ComposerOptions 线程启动器选项（projects 归一化；config/settings 为上游原样透传）
+type T3ComposerOptions struct {
+	// Config T3 `server.getConfig` 响应原样透传（camelCase，含 providers 等启动器所需的全部配置）
+	Config   map[string]interface{}       `json:"config"`
+	Projects []T3ComposerOptions_Projects `json:"projects"`
+
+	// Settings T3 `server.getSettings` 响应原样透传（camelCase，含 newWorktreesStartFromOrigin 等设置）
+	Settings map[string]interface{} `json:"settings"`
+}
+
+// T3ComposerOptions_Projects defines model for T3ComposerOptions.Projects.
+type T3ComposerOptions_Projects struct {
+	// DefaultModelSelection T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认）
+	DefaultModelSelection *T3ModelSelection `json:"default_model_selection,omitempty"`
+	Id                    string            `json:"id"`
+	Title                 string            `json:"title"`
+
+	// WorkspaceRoot 项目主检出根目录（workspace-options 据此解析 cwd）；上游缺省时缺省
+	WorkspaceRoot *string `json:"workspace_root,omitempty"`
+}
+
+// T3DispatchResult dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+type T3DispatchResult struct {
+	Sequence int `json:"sequence"`
+}
+
 // T3Environment 已配对的 T3 环境连接；不泄漏任何凭证字段
 type T3Environment struct {
+	// Access 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
+	// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
+	// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+	Access T3EnvironmentAccess `json:"access"`
+
 	// Address 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host）
 	Address string `json:"address"`
 
@@ -1531,6 +1798,9 @@ type T3Environment struct {
 	Error *string `json:"error,omitempty"`
 	Id    string  `json:"id"`
 	Name  string  `json:"name"`
+
+	// Scopes 该环境会话实际授予的 T3 scope 列表（配对时服务端授予，原样落库）
+	Scopes []string `json:"scopes"`
 
 	// Status 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
 	// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
@@ -1540,29 +1810,97 @@ type T3Environment struct {
 	UpdatedAt string              `json:"updated_at"`
 }
 
+// T3EnvironmentAccess 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
+// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
+// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+type T3EnvironmentAccess string
+
 // T3EnvironmentStatus 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
 // repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
 // degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
 // 其余数据仍返回
 type T3EnvironmentStatus string
 
+// T3ModelOption T3 模型选项（canonical `{id,value}`；value 为 string 或 boolean）
+type T3ModelOption struct {
+	Id string `json:"id"`
+
+	// Value 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传，
+	// 布尔选项发 JSON boolean 而非字符串。
+	Value interface{} `json:"value"`
+}
+
+// T3ModelSelection T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认）
+type T3ModelSelection struct {
+	// InstanceId T3 providerInstanceId
+	InstanceId string `json:"instance_id"`
+	Model      string `json:"model"`
+
+	// Options provider 实例声明的模型选项，canonical 数组 `[{id,value}]`
+	// （与 T3 ModelSelection.options 一致）；缺省省略
+	Options []T3ModelOption `json:"options,omitempty"`
+}
+
+// T3ThreadActivity 线程当前活动摘要（活动 run 来自投影 runs，与 queue 同一来源）
+type T3ThreadActivity struct {
+	// ActiveRunId 活动 run（preparing/starting/running/waiting 的最近一个）；静止时缺省
+	ActiveRunId *string `json:"active_run_id,omitempty"`
+
+	// ActiveRunStatus 活动 run 状态；静止时缺省
+	ActiveRunStatus *string `json:"active_run_status,omitempty"`
+
+	// HasPendingRequests 有等待用户处理的运行时请求（审批/提问/代答 secret）
+	HasPendingRequests bool `json:"has_pending_requests"`
+
+	// PendingBackgroundTaskCount 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0）
+	PendingBackgroundTaskCount int `json:"pending_background_task_count"`
+
+	// Stopping 停止请求已下发且尚未落定：活动 run 的最近一条 run_interrupt_request
+	// 条目晚于同 run 的最近一条 run_interrupt_result
+	Stopping bool `json:"stopping"`
+}
+
 // T3ThreadDetail defines model for T3ThreadDetail.
 type T3ThreadDetail struct {
-	Items  []T3ThreadItem  `json:"items"`
+	// Activity 线程当前活动摘要（活动 run 来自投影 runs，与 queue 同一来源）
+	Activity T3ThreadActivity `json:"activity"`
+	Items    []T3ThreadItem   `json:"items"`
+
+	// Queue 线程排队消息工作流，口径对齐 T3 `deriveThreadQueueWorkflowState`：
+	// items 为用户消息产生的排队 run（自动完成/通知 run 不在内），按
+	// queuePosition（缺省 ordinal）升序。
+	Queue  T3ThreadQueue   `json:"queue"`
 	Thread T3ThreadSummary `json:"thread"`
 }
 
-// T3ThreadItem 归一化线程条目。映射规则：user_message/assistant_message/reasoning 原样带快照文本；
-// proposed_plan → assistant_message；command_execution（text=命令，summary=命令首行，
+// T3ThreadItem 归一化线程条目。映射规则：user_message（含 attachments 图片元数据）/
+// assistant_message/reasoning 原样带快照文本；proposed_plan →
+// assistant_message；command_execution（text=命令，summary=命令首行，
 // 输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
 // dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
 // 上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
 // 结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
-// 结构性/交互性事件（checkpoint、approval_request、handoff、notification、
-// system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外截断。
+// 交互类条目：approval_request（审批，request_id 关联运行时请求）/
+// user_input_request（提问）/ secret_request（密钥，绝不携带密钥值）。
+// 结构性事件（checkpoint、handoff、notification、system_notice 等）丢弃；
+// 未知类型前向兼容地跳过。正文不额外截断。
+// 继承行（fork 前缀，visibility=inherited）只展示历史：inherited=true，
+// 不能在本线程原地应答；source_thread_id 指向来源线程。
 type T3ThreadItem struct {
+	// Answers 仅 user_input_request；已提交的答案（questionId → 答案值，原样透传）
+	Answers map[string]interface{} `json:"answers,omitempty"`
+
+	// AppName 仅 approval_request；发起审批的应用（mcp-elicitation 等）；上游缺省时缺省
+	AppName *string `json:"app_name,omitempty"`
+
+	// Attachments 仅 user_message；随消息发送的图片附件元数据
+	Attachments []T3ChatAttachment `json:"attachments,omitempty"`
+
 	// ChildThreadId 仅 subagent；子线程 ID
 	ChildThreadId *string `json:"child_thread_id,omitempty"`
+
+	// Decision 仅 approval_request；已做出的决定（accept/acceptForSession/acceptAlways/decline/cancel），来自运行时请求记录
+	Decision *string `json:"decision,omitempty"`
 
 	// DetailAvailable 条目在快照之外还有正文，可经 items/{itemId} 补读：
 	// 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉
@@ -1573,13 +1911,55 @@ type T3ThreadItem struct {
 	// Id Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分）
 	Id string `json:"id"`
 
+	// Inherited 是否为 fork 继承前缀行（visibility=inherited）；继承的审批/提问/密钥只展示，不能在本线程作答
+	Inherited *bool `json:"inherited,omitempty"`
+
+	// Label 仅 secret_request；请求的密钥名称
+	Label *string `json:"label,omitempty"`
+
+	// Options 仅 approval_request；审批可选项（上游自带，按序展示）
+	Options []T3ApprovalOption `json:"options,omitempty"`
+
+	// Placeholder 仅 secret_request；输入框占位文本；上游缺省时缺省
+	Placeholder *string `json:"placeholder,omitempty"`
+
+	// Prompt 仅 approval_request；审批提示（上游缺省时为空）
+	Prompt *string `json:"prompt,omitempty"`
+
+	// Questions 仅 user_input_request；问题列表
+	Questions []T3UserInputQuestion `json:"questions,omitempty"`
+
+	// Reason 仅 secret_request；为什么需要该密钥
+	Reason *string `json:"reason,omitempty"`
+
+	// RequestId 仅 approval_request/user_input_request；T3 运行时请求 ID（respond/dismiss 端点使用）
+	RequestId *string `json:"request_id,omitempty"`
+
+	// RequestKind 仅 approval_request；请求类型（command/file-read/file-change/mcp-elicitation/permission）
+	RequestKind *string `json:"request_kind,omitempty"`
+
+	// RequestStatus 仅 approval_request/user_input_request；运行时请求状态（pending/resolved/expired/cancelled；pending 才可应答）
+	RequestStatus *string `json:"request_status,omitempty"`
+
+	// ResponseCapability 仅 approval_request/user_input_request；该请求当前的应答通道（live/message/not_resumable，运行时请求记录）
+	ResponseCapability *string `json:"response_capability,omitempty"`
+
+	// ResponseMode 仅 user_input_request；应答通道（message=经消息应答）
+	ResponseMode *string `json:"response_mode,omitempty"`
+
+	// SecretStatus 仅 secret_request；密钥请求状态（pending/saved/declined/cancelled；绝不携带密钥值本身）
+	SecretStatus *string `json:"secret_status,omitempty"`
+
+	// SourceThreadId 该条目所在来源线程；继承行指向来源，本地行等于当前线程
+	SourceThreadId *string `json:"source_thread_id,omitempty"`
+
 	// Status T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略
 	Status *string `json:"status,omitempty"`
 
-	// Summary 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名
+	// Summary 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名、审批/提问=提示或问题首行
 	Summary string `json:"summary"`
 
-	// Text 正文，不额外截断（命令=命令文本；文件=元数据；展开后的完整正文经 items/{itemId} 获取）
+	// Text 正文，不额外截断（命令=命令文本；文件=元数据；审批=缺省时为空；展开后的完整正文经 items/{itemId} 获取）
 	Text string           `json:"text"`
 	Type T3ThreadItemType `json:"type"`
 
@@ -1589,6 +1969,46 @@ type T3ThreadItem struct {
 
 // T3ThreadItemType defines model for T3ThreadItem.Type.
 type T3ThreadItemType string
+
+// T3ThreadLaunchResult launchThread 结果归一化（thread 详情经 GET threads/{threadId} 读取）
+type T3ThreadLaunchResult struct {
+	// Resumed 复用了同 ID 的既有线程（幂等重试）时为 true
+	Resumed  bool   `json:"resumed"`
+	ThreadId string `json:"thread_id"`
+}
+
+// T3ThreadQueue 线程排队消息工作流，口径对齐 T3 `deriveThreadQueueWorkflowState`：
+// items 为用户消息产生的排队 run（自动完成/通知 run 不在内），按
+// queuePosition（缺省 ordinal）升序。
+type T3ThreadQueue struct {
+	// CanReorder provider 会话能力支持排队消息（排序/编辑/取消可用）
+	CanReorder bool `json:"can_reorder"`
+
+	// CanSteer provider 会话能力支持把排队消息上浮为活动运行的转向输入
+	CanSteer bool `json:"can_steer"`
+
+	// Held 队列被挂起（Stop 或重启恢复后等待用户手动恢复）
+	Held  bool                `json:"held"`
+	Items []T3ThreadQueueItem `json:"items"`
+}
+
+// T3ThreadQueueItem 排队中的一条消息（开始前没有 turn item；run_id 用于 steer/edit/cancel/reorder）
+type T3ThreadQueueItem struct {
+	// Attachments 随消息的图片附件元数据；上游缺省时为空数组
+	Attachments []T3ChatAttachment `json:"attachments,omitempty"`
+	MessageId   string             `json:"message_id"`
+	RunId       string             `json:"run_id"`
+
+	// Text 消息正文；上游投影缺消息时为「Queued message」
+	Text string `json:"text"`
+}
+
+// T3ThreadStopResult 停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+type T3ThreadStopResult struct {
+	// RunId 被中断的 run；无可停止运行时缺省
+	RunId   *string `json:"run_id,omitempty"`
+	Stopped bool    `json:"stopped"`
+}
 
 // T3ThreadSummary defines model for T3ThreadSummary.
 type T3ThreadSummary struct {
@@ -1634,6 +2054,93 @@ type T3ThreadSummary struct {
 // 最后 shell.status 兜底（preparing/queued/starting/running → running、
 // waiting → waiting、其余 → idle）
 type T3ThreadSummaryStatus string
+
+// T3ThreadWorkspace 新线程工作区（对齐 T3 OrchestrationV2ThreadLaunchWorkspaceStrategy）。
+// 缺省为项目主检出（root 不带 branch）。`worktree` 的 `base_ref` 缺省为
+// 主检出当前分支；`start_from_origin` 缺省取 T3 设置
+// `newWorktreesStartFromOrigin`。`existing_worktree` 的 worktree_path 必填。
+type T3ThreadWorkspace struct {
+	// BaseRef 仅 worktree；新建 worktree 的基线引用；缺省为主检出当前分支
+	BaseRef *string `json:"base_ref,omitempty"`
+
+	// Branch 新检出的分支名；缺省由 T3 决定（root 的 Current checkout 不传 branch）
+	Branch *string `json:"branch,omitempty"`
+
+	// StartFromOrigin 仅 worktree；缺省取 T3 设置 newWorktreesStartFromOrigin
+	StartFromOrigin *bool                 `json:"start_from_origin,omitempty"`
+	Type            T3ThreadWorkspaceType `json:"type"`
+
+	// WorktreePath 仅 existing_worktree；T3 侧已注册的工作树路径（来自 workspace-options 或线程详情）
+	WorktreePath *string `json:"worktree_path,omitempty"`
+}
+
+// T3ThreadWorkspaceType defines model for T3ThreadWorkspace.Type.
+type T3ThreadWorkspaceType string
+
+// T3UserInputQuestion 用户输入请求中的单个问题（T3 请求自带）
+type T3UserInputQuestion struct {
+	// AllowCustomAnswer 上游缺省时缺省
+	AllowCustomAnswer *bool  `json:"allow_custom_answer,omitempty"`
+	Header            string `json:"header"`
+	Id                string `json:"id"`
+
+	// InitialAnswer 可编辑的初始文本；上游缺省时缺省
+	InitialAnswer *string `json:"initial_answer,omitempty"`
+
+	// MultiSelect 上游缺省时缺省（视为单选）
+	MultiSelect *bool                         `json:"multi_select,omitempty"`
+	Options     []T3UserInputQuestion_Options `json:"options"`
+	Question    string                        `json:"question"`
+
+	// Required 上游缺省时缺省
+	Required *bool `json:"required,omitempty"`
+}
+
+// T3UserInputQuestion_Options defines model for T3UserInputQuestion.Options.
+type T3UserInputQuestion_Options struct {
+	Description string `json:"description"`
+	Label       string `json:"label"`
+
+	// Value 上游缺省时缺省（提交 answers 时以 label 为值）
+	Value *string `json:"value,omitempty"`
+}
+
+// T3WorkspaceOptions 线程工作区选项（cwd 来自上游项目 workspaceRoot，不接受前端任意路径）
+type T3WorkspaceOptions struct {
+	// Cwd 项目主检出根目录
+	Cwd              string `json:"cwd"`
+	HasPrimaryRemote *bool  `json:"has_primary_remote,omitempty"`
+
+	// HasWorkingTreeChanges 工作区有未提交变更
+	HasWorkingTreeChanges *bool `json:"has_working_tree_changes,omitempty"`
+
+	// IsRepo vcs.refreshStatus 报告该目录是否为 git 仓库
+	IsRepo *bool `json:"is_repo,omitempty"`
+
+	// NextCursor vcs.listRefs 分页游标；null 表示没有更多
+	NextCursor *int   `json:"next_cursor,omitempty"`
+	ProjectId  string `json:"project_id"`
+
+	// RefName 主检出当前分支；新建 worktree 线程的 base_ref 缺省取此值
+	RefName *string          `json:"ref_name,omitempty"`
+	Refs    []T3WorkspaceRef `json:"refs"`
+
+	// TotalCount 过滤后的引用总数
+	TotalCount *int `json:"total_count,omitempty"`
+}
+
+// T3WorkspaceRef vcs 引用（分支/标签等，按 T3 vcs.listRefs 原始形状归一化出名称与类别）
+type T3WorkspaceRef struct {
+	// IsDefault 上游标注的默认分支；上游缺省时缺省
+	IsDefault *bool `json:"is_default,omitempty"`
+
+	// Kind local / remote（T3 refKind）
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+
+	// WorktreePath 该引用对应的既有工作树路径（若有）；上游缺省时缺省
+	WorktreePath *string `json:"worktree_path,omitempty"`
+}
 
 // UpdateAISettingsRequest defines model for UpdateAISettingsRequest.
 type UpdateAISettingsRequest struct {
@@ -1903,8 +2410,20 @@ type ScreenshotScreenId = string
 // ScreenshotVersionId defines model for ScreenshotVersionId.
 type ScreenshotVersionId = string
 
+// T3AttachmentId defines model for T3AttachmentId.
+type T3AttachmentId = string
+
 // T3EnvironmentId defines model for T3EnvironmentId.
 type T3EnvironmentId = string
+
+// T3ProjectId defines model for T3ProjectId.
+type T3ProjectId = string
+
+// T3RequestId defines model for T3RequestId.
+type T3RequestId = string
+
+// T3RunId defines model for T3RunId.
+type T3RunId = string
 
 // T3ThreadId defines model for T3ThreadId.
 type T3ThreadId = string
@@ -2158,6 +2677,69 @@ type UpdateT3Environment200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// UploadT3AttachmentParams defines parameters for UploadT3Attachment.
+type UploadT3AttachmentParams struct {
+	// XFileName 文件显示名（进入 T3 后的附件 name）
+	XFileName *string `json:"X-File-Name,omitempty"`
+}
+
+// UploadT3Attachment200JSONResponseBody defines parameters for UploadT3Attachment.
+type UploadT3Attachment200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 随消息发送的图片附件元数据（T3 ChatImageAttachment 归一化；上传经 environments/{id}/attachments）
+	Data *T3ChatAttachment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetT3ComposerOptions200JSONResponseBody defines parameters for GetT3ComposerOptions.
+type GetT3ComposerOptions200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 线程启动器选项（projects 归一化；config/settings 为上游原样透传）
+	Data *T3ComposerOptions `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetT3WorkspaceOptionsParams defines parameters for GetT3WorkspaceOptions.
+type GetT3WorkspaceOptionsParams struct {
+	// Query 引用名过滤前缀（原样传给 vcs.listRefs）
+	Query *string `form:"query,omitempty" json:"query,omitempty"`
+
+	// Cursor 分页游标（来自上一页响应的 next_cursor）
+	Cursor *int `form:"cursor,omitempty" json:"cursor,omitempty"`
+}
+
+// GetT3WorkspaceOptions200JSONResponseBody defines parameters for GetT3WorkspaceOptions.
+type GetT3WorkspaceOptions200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 线程工作区选项（cwd 来自上游项目 workspaceRoot，不接受前端任意路径）
+	Data *T3WorkspaceOptions `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateT3Thread200JSONResponseBody defines parameters for CreateT3Thread.
+type CreateT3Thread200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data launchThread 结果归一化（thread 详情经 GET threads/{threadId} 读取）
+	Data *T3ThreadLaunchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // GetT3Thread200JSONResponseBody defines parameters for GetT3Thread.
 type GetT3Thread200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -2173,15 +2755,128 @@ type GetT3ThreadItem200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int `json:"code"`
 
-	// Data 归一化线程条目。映射规则：user_message/assistant_message/reasoning 原样带快照文本；
-	// proposed_plan → assistant_message；command_execution（text=命令，summary=命令首行，
+	// Data 归一化线程条目。映射规则：user_message（含 attachments 图片元数据）/
+	// assistant_message/reasoning 原样带快照文本；proposed_plan →
+	// assistant_message；command_execution（text=命令，summary=命令首行，
 	// 输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
 	// dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
 	// 上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
 	// 结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
-	// 结构性/交互性事件（checkpoint、approval_request、handoff、notification、
-	// system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外截断。
+	// 交互类条目：approval_request（审批，request_id 关联运行时请求）/
+	// user_input_request（提问）/ secret_request（密钥，绝不携带密钥值）。
+	// 结构性事件（checkpoint、handoff、notification、system_notice 等）丢弃；
+	// 未知类型前向兼容地跳过。正文不额外截断。
+	// 继承行（fork 前缀，visibility=inherited）只展示历史：inherited=true，
+	// 不能在本线程原地应答；source_thread_id 指向来源线程。
 	Data *T3ThreadItem `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SendT3ThreadMessage200JSONResponseBody defines parameters for SendT3ThreadMessage.
+type SendT3ThreadMessage200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ResumeT3ThreadQueue200JSONResponseBody defines parameters for ResumeT3ThreadQueue.
+type ResumeT3ThreadQueue200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// EditT3QueuedRun200JSONResponseBody defines parameters for EditT3QueuedRun.
+type EditT3QueuedRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CancelT3QueuedRun200JSONResponseBody defines parameters for CancelT3QueuedRun.
+type CancelT3QueuedRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ReorderT3QueuedRun200JSONResponseBody defines parameters for ReorderT3QueuedRun.
+type ReorderT3QueuedRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SteerT3QueuedRun200JSONResponseBody defines parameters for SteerT3QueuedRun.
+type SteerT3QueuedRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// DismissT3ThreadRequest200JSONResponseBody defines parameters for DismissT3ThreadRequest.
+type DismissT3ThreadRequest200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// RespondT3ThreadRequest200JSONResponseBody defines parameters for RespondT3ThreadRequest.
+type RespondT3ThreadRequest200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
+	Data *T3DispatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// StopT3Thread200JSONResponseBody defines parameters for StopT3Thread.
+type StopT3Thread200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 停止结果；无可停止运行时按 T3 口径视为无操作（stopped=false）
+	Data *T3ThreadStopResult `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -3268,6 +3963,27 @@ type CreateT3EnvironmentJSONRequestBody = CreateT3EnvironmentRequest
 
 // UpdateT3EnvironmentJSONRequestBody defines body for UpdateT3Environment for application/json ContentType.
 type UpdateT3EnvironmentJSONRequestBody = UpdateT3EnvironmentRequest
+
+// CreateT3ThreadJSONRequestBody defines body for CreateT3Thread for application/json ContentType.
+type CreateT3ThreadJSONRequestBody = CreateT3ThreadRequest
+
+// AnswerT3ThreadSecretRequestJSONRequestBody defines body for AnswerT3ThreadSecretRequest for application/json ContentType.
+type AnswerT3ThreadSecretRequestJSONRequestBody = AnswerT3SecretRequest
+
+// SendT3ThreadMessageJSONRequestBody defines body for SendT3ThreadMessage for application/json ContentType.
+type SendT3ThreadMessageJSONRequestBody = SendT3ThreadMessageRequest
+
+// EditT3QueuedRunJSONRequestBody defines body for EditT3QueuedRun for application/json ContentType.
+type EditT3QueuedRunJSONRequestBody = EditT3QueuedRunRequest
+
+// ReorderT3QueuedRunJSONRequestBody defines body for ReorderT3QueuedRun for application/json ContentType.
+type ReorderT3QueuedRunJSONRequestBody = ReorderT3QueuedRunRequest
+
+// SteerT3QueuedRunJSONRequestBody defines body for SteerT3QueuedRun for application/json ContentType.
+type SteerT3QueuedRunJSONRequestBody = SteerT3QueuedRunRequest
+
+// RespondT3ThreadRequestJSONRequestBody defines body for RespondT3ThreadRequest for application/json ContentType.
+type RespondT3ThreadRequestJSONRequestBody = RespondT3ThreadRequest
 
 // CreateGithubTokenJSONRequestBody defines body for CreateGithubToken for application/json ContentType.
 type CreateGithubTokenJSONRequestBody = CreateGitHubTokenRequest

@@ -35,7 +35,7 @@ func TestExchangeBearer_Success(t *testing.T) {
 			"issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
 			"token_type": "Bearer",
 			"expires_in": 3600,
-			"scope": "orchestration:read"
+			"scope": "orchestration:read orchestration:operate"
 		}`))
 	}))
 	defer server.Close()
@@ -51,7 +51,8 @@ func TestExchangeBearer_Success(t *testing.T) {
 	if creds.ExpiresAt.IsZero() {
 		t.Fatalf("expected expiry to be set from expires_in")
 	}
-	// 真实请求字段：grant_type/subject_token/subject_token_type/requested_token_type/scope
+	// 真实请求字段：grant_type/subject_token/subject_token_type/requested_token_type；
+	// scope 不携带（auth.ts optional，授予由配对链接的授权决定）
 	if gotForm["grant_type"] != t3GrantTypeTokenExchange {
 		t.Fatalf("grant_type = %q", gotForm["grant_type"])
 	}
@@ -64,8 +65,8 @@ func TestExchangeBearer_Success(t *testing.T) {
 	if gotForm["requested_token_type"] != t3TokenTypeAccessToken {
 		t.Fatalf("requested_token_type = %q", gotForm["requested_token_type"])
 	}
-	if gotForm["scope"] != "orchestration:read" {
-		t.Fatalf("scope = %q", gotForm["scope"])
+	if _, hasScope := gotForm["scope"]; hasScope {
+		t.Fatalf("exchange request must not carry scope, got %q", gotForm["scope"])
 	}
 	if ct := gotHeaders.Get("Content-Type"); !strings.HasPrefix(ct, "application/x-www-form-urlencoded") {
 		t.Fatalf("content type = %q", ct)
@@ -103,17 +104,31 @@ func TestExchangeBearer_RejectsAuthInvalid(t *testing.T) {
 	}
 }
 
-func TestExchangeBearer_RejectsWideScope(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"wide","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":3600,"scope":"orchestration:read orchestration:operate access:write"}`))
-	}))
-	defer server.Close()
+// TestExchangeBearer_StoresGrantedScope 授予的 scope（只读或宽）都原样落库，
+// 不再按「恰好 orchestration:read」拒绝（INT-85：不申请 scope，授予值由
+// 配对链接的授权决定；会话能力由 access 判定，见 t3HasOperateScope）。
+func TestExchangeBearer_StoresGrantedScope(t *testing.T) {
+	cases := map[string]string{
+		"read-only": "orchestration:read",
+		"standard":  "orchestration:read orchestration:operate settings:write",
+	}
+	for name, granted := range cases {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"access_token":"tok","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","token_type":"Bearer","expires_in":3600,"scope":"` + granted + `"}`))
+			}))
+			defer server.Close()
 
-	client := newT3HTTPClient()
-	_, err := client.exchangeBearer(context.Background(), server.URL, "code")
-	if err == nil || !strings.Contains(err.Error(), "超出") {
-		t.Fatalf("expected wide scope rejection, got %v", err)
+			client := newT3HTTPClient()
+			creds, err := client.exchangeBearer(context.Background(), server.URL, "code")
+			if err != nil {
+				t.Fatalf("expected grant to be stored, got %v", err)
+			}
+			if creds.Scope != granted {
+				t.Fatalf("scope = %q, want %q", creds.Scope, granted)
+			}
+		})
 	}
 }
 
@@ -226,13 +241,47 @@ func TestFetchThreadDetail_ProtocolAndMapping(t *testing.T) {
 	}
 }
 
-func TestT3ScopeExactlyRead(t *testing.T) {
-	if !t3ScopeExactlyRead("orchestration:read") {
-		t.Fatalf("exact scope should pass")
+func TestResolvePairedHTTPURL(t *testing.T) {
+	base := "http://127.0.0.1:3773"
+	got, err := resolvePairedHTTPURL(base, "/uploads/a?sig=1")
+	if err != nil || got != "http://127.0.0.1:3773/uploads/a?sig=1" {
+		t.Fatalf("relative path: %q %v", got, err)
 	}
-	for _, scope := range []string{"", "orchestration:read orchestration:operate", "access:write", "orchestration:read "} {
-		if t3ScopeExactlyRead(scope) {
-			t.Fatalf("scope %q should fail", scope)
+	same, err := resolvePairedHTTPURL(base, "http://127.0.0.1:3773/uploads/a")
+	if err != nil || same != "http://127.0.0.1:3773/uploads/a" {
+		t.Fatalf("same-origin absolute: %q %v", same, err)
+	}
+	// `@host` 经 ResolveReference 会落在配对 origin 的路径上，不再是拼接攻击。
+	// 真正危险的是协议相对 URL、换 host 的绝对 URL、以及带 userinfo 的绝对 URL。
+	for _, bad := range []string{
+		"//evil.example/steal",
+		"https://evil.example/steal",
+		"http://127.0.0.1:3773@169.254.169.254/x",
+		"",
+	} {
+		if _, err := resolvePairedHTTPURL(base, bad); err == nil {
+			t.Fatalf("expected reject for %q", bad)
+		}
+	}
+}
+
+func TestT3GrantedScopesAndOperate(t *testing.T) {
+	if got := t3GrantedScopes("orchestration:read orchestration:operate"); len(got) != 2 || got[0] != t3ScopeOrchestrationRead {
+		t.Fatalf("granted = %+v", got)
+	}
+	if got := t3GrantedScopes(""); len(got) != 0 {
+		t.Fatalf("empty grant = %+v", got)
+	}
+	// operate 判定唯一看精确 token；只读/legacy 宽串不含即 false
+	if !t3HasOperateScope("orchestration:read orchestration:operate") {
+		t.Fatalf("standard grant should carry operate")
+	}
+	if !t3HasOperateScope("orchestration:operate") {
+		t.Fatalf("exact operate should pass")
+	}
+	for _, scope := range []string{"", "orchestration:read", "access:write", "orchestration:read-write"} {
+		if t3HasOperateScope(scope) {
+			t.Fatalf("scope %q must not imply operate", scope)
 		}
 	}
 }

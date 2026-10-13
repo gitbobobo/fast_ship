@@ -19,7 +19,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// T3ThreadsService 聚合用户各 T3 环境的线程（只读）。
+// T3ThreadsService 聚合用户各 T3 环境的线程，并承载 T3 客户端读写操作
+// （INT-82 只读集成 + INT-85 客户端化：写入协议见 docs/internal/threads.md）。
 //
 // 读取路径（2026-10 核对自 T3 源码）：
 //   - 线程列表：WS RPC `orchestration.subscribeShell` 取活跃快照，再以一次性
@@ -209,10 +210,11 @@ func (s *T3ThreadsService) ItemDetail(ctx context.Context, userID, envID, thread
 		return nil, s.upstreamError(err)
 	}
 
-	rows, err := decodeT3VisibleRows(projection)
+	parsed, err := decodeT3Projection(projection)
 	if err != nil {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "线程投影解析失败: "+shortenT3Error(err))
 	}
+	rows := parsed.VisibleTurnItems
 
 	row, ok := findT3VisibleRow(rows, itemID)
 	if !ok {
@@ -222,6 +224,10 @@ func (s *T3ThreadsService) ItemDetail(ctx context.Context, userID, envID, thread
 	if !ok {
 		return nil, errs.ErrT3ThreadItemNotFound
 	}
+	annotateT3ItemOrigin(&item, *row)
+	enriched := []T3ThreadItem{item}
+	enrichT3RequestItems(enriched, parsed.RuntimeRequests)
+	item = enriched[0]
 	if !api.Deref(item.DetailAvailable) {
 		return &item, nil // 快照已含全部正文（或上游 detail 也不提供），无需补读
 	}
@@ -266,6 +272,7 @@ func (s *T3ThreadsService) ItemDetail(ctx context.Context, userID, envID, thread
 	if !ok {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "线程条目解析失败")
 	}
+	annotateT3ItemOrigin(&full, *row)
 	return &full, nil
 }
 
@@ -380,14 +387,7 @@ func (s *T3ThreadsService) bearerToken(env *model.T3Environment) (string, error)
 }
 
 func (s *T3ThreadsService) envResponse(env *model.T3Environment, status T3EnvironmentStatus, probeErr string) *T3EnvironmentResponse {
-	return &T3EnvironmentResponse{
-		Id:        env.ID,
-		Name:      env.Name,
-		Address:   env.Address,
-		Status:    status,
-		Error:     api.NonEmpty(probeErr),
-		UpdatedAt: formatTime(env.UpdatedAt.UTC()),
-	}
+	return newT3EnvironmentResponse(env, status, probeErr)
 }
 
 // upstreamError 把适配器错误翻译成 Fast Ship 业务错误。

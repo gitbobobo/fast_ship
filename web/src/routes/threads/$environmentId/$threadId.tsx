@@ -3,15 +3,38 @@ import { ArrowLeft, Cpu, GitBranch, GitPullRequest } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
+import { ThreadChat } from "@/components/threads/thread-chat";
 import { ThreadItemView } from "@/components/threads/thread-item-view";
 import { ThreadStatusBadge } from "@/components/threads/thread-status-badge";
 import { ApiRequestError } from "@/lib/api/client";
-import { useThreadDetail } from "@/lib/hooks/use-threads";
+import { useEnvironments, useThreadDetail } from "@/lib/hooks/use-threads";
+import { canOperate as environmentCanOperate } from "@/lib/threads-compose";
 import { formatRelativeTime } from "@/lib/utils/format";
 
+/** 按线程 key 渲染：切线程时输入框、编辑状态、密钥输入等局部状态一并销毁。 */
 export default function ThreadDetailPage() {
   const { environmentId = "", threadId = "" } = useParams();
+  return (
+    <ThreadDetailView
+      key={`${environmentId}/${threadId}`}
+      environmentId={environmentId}
+      threadId={threadId}
+    />
+  );
+}
+
+function ThreadDetailView({
+  environmentId,
+  threadId,
+}: {
+  environmentId: string;
+  threadId: string;
+}) {
   const { data, error, isLoading, isError, isFetching, refetch } = useThreadDetail(environmentId, threadId);
+  const { data: environments } = useEnvironments();
+  const canOperate = environmentCanOperate(
+    environments?.find((e) => e.id === environmentId),
+  );
   const thread = data?.thread;
   const model = thread
     ? [thread.provider, thread.model].filter(Boolean).join(" / ")
@@ -153,10 +176,22 @@ export default function ThreadDetailPage() {
                     environmentId={environmentId}
                     threadId={threadId}
                     revision={item.updated_at || thread.updated_at}
+                    canOperate={canOperate}
+                    stale={isError}
                   />
                 ))}
               </div>
             )}
+            <div className="sticky bottom-0 -mx-1 bg-background/95 px-1 pt-2 pb-3 backdrop-blur">
+              <ThreadChat
+                detail={data}
+                environmentId={environmentId}
+                threadId={threadId}
+                canOperate={canOperate}
+                environmentKnown={environments !== undefined}
+                stale={isError}
+              />
+            </div>
           </>
         )}
       </div>
