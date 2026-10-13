@@ -28,10 +28,10 @@ type (
 
 // 枚举值沿用生成常量；service 侧保持既有短名，避免引用点散落 api 包名。
 const (
-	T3EnvironmentStatusOK          = api.Ok
-	T3EnvironmentStatusUnreachable = api.Unreachable
-	T3EnvironmentStatusRepair      = api.Repair
-	T3EnvironmentStatusDegraded    = api.Degraded
+	T3EnvironmentStatusOK          = api.T3EnvironmentStatusOk
+	T3EnvironmentStatusUnreachable = api.T3EnvironmentStatusUnreachable
+	T3EnvironmentStatusRepair      = api.T3EnvironmentStatusRepair
+	T3EnvironmentStatusDegraded    = api.T3EnvironmentStatusDegraded
 
 	T3ThreadItemTypeUserMessage      = api.UserMessage
 	T3ThreadItemTypeAssistantMessage = api.AssistantMessage

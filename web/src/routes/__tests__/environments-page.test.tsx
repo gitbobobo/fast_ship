@@ -129,7 +129,9 @@ describe("EnvironmentsPage", () => {
     expect(screen.getByText("不可达")).toBeInTheDocument();
     expect(screen.getByText("需重新配对")).toBeInTheDocument();
     expect(screen.getByText("timeout")).toBeInTheDocument();
-    expect(container.textContent).not.toMatch(/token/i);
+    // 设置导航含「GitHub Tokens」；这里只断言配对凭证本身不落页。
+    expect(screen.getAllByRole("link", { name: "GitHub Tokens" }).length).toBeGreaterThan(0);
+    expect(container.textContent).not.toMatch(/token=/i);
   });
 
   it("renames, re-pairs and deletes", async () => {
