@@ -25,9 +25,7 @@ export default function ThreadDetailPage() {
     setErrorMessage("");
     if (!(error instanceof HTTPError)) return;
     let cancelled = false;
-    void error.response
-      .clone()
-      .json<ApiResponse<unknown>>()
+    void error.response.json<ApiResponse<unknown>>()
       .then((body) => {
         if (!cancelled && body?.message) setErrorMessage(body.message);
       })
