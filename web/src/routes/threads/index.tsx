@@ -93,7 +93,13 @@ function EnvironmentFilter({
   );
 }
 
-function EnvironmentProblems({ environments }: { environments: Environment[] }) {
+function EnvironmentProblems({
+  environments,
+  allDown,
+}: {
+  environments: Environment[];
+  allDown: boolean;
+}) {
   if (environments.length === 0) return null;
   return (
     <div
@@ -102,7 +108,11 @@ function EnvironmentProblems({ environments }: { environments: Environment[] }) 
     >
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
       <div className="min-w-0 flex-1">
-        <p>部分环境暂时无法读取，其余环境的线程仍然可见：</p>
+        <p>
+          {allDown
+            ? "所有环境都无法读取："
+            : "部分环境暂时无法读取，其余环境的线程仍然可见："}
+        </p>
         <ul className="mt-1 space-y-0.5">
           {environments.map((env) => (
             <li key={env.id} className="break-words">
@@ -162,6 +172,11 @@ export default function ThreadsPage() {
   const shown = visible.slice(0, limit);
   const noEnvironments = !!data && (environments ?? []).length === 0;
   const hasFilters = !isDefaultThreadFilters(filters);
+  // degraded 仍返回部分数据，不算「无法读取」；只有完全读不出（unreachable/
+  // repair）的环境才算 down，全部 down 才显示「所有环境都无法读取」。
+  const allDown =
+    !!environments?.length &&
+    environments.every((e) => e.status === "unreachable" || e.status === "repair");
 
   return (
     <>
@@ -221,7 +236,7 @@ export default function ThreadsPage() {
                 </Button>
               </div>
             )}
-            <EnvironmentProblems environments={problems} />
+            <EnvironmentProblems environments={problems} allDown={allDown} />
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
               <div className="relative sm:w-64">
                 <Search className="pointer-events-none absolute top-1/2 left-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -294,9 +309,28 @@ export default function ThreadsPage() {
             </div>
 
             {shown.length === 0 ? (
-              <p className="py-16 text-center text-sm text-muted-foreground">
-                {hasFilters ? "没有符合筛选条件的线程" : "暂无线程"}
-              </p>
+              hasFilters ? (
+                <p className="py-16 text-center text-sm text-muted-foreground">
+                  没有符合筛选条件的线程
+                </p>
+              ) : allDown ? (
+                <div className="flex flex-col items-center gap-3 py-16 text-center">
+                  <p className="text-sm text-muted-foreground">
+                    暂时读不到任何线程，请先修复环境连接。
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    render={<Link to="/settings/environments" />}
+                  >
+                    去重新配对
+                  </Button>
+                </div>
+              ) : (
+                <p className="py-16 text-center text-sm text-muted-foreground">
+                  暂无线程
+                </p>
+              )
             ) : (
               <>
                 <div

@@ -215,6 +215,10 @@ func normalizeT3ThreadShell(env *model.T3Environment, shell *t3ThreadShell, proj
 	if projectNames != nil {
 		projectName = projectNames[shell.ProjectID]
 	}
+	var parentThreadID *string
+	if t3IsSubagentThread(shell) && shell.Lineage.ParentThreadID != "" {
+		parentThreadID = api.Ptr(shell.Lineage.ParentThreadID)
+	}
 	return T3ThreadSummary{
 		Id:               shell.ID,
 		EnvironmentId:    env.ID,
@@ -228,6 +232,7 @@ func normalizeT3ThreadShell(env *model.T3Environment, shell *t3ThreadShell, proj
 		Model:            shell.ModelSelection.Model,
 		UpdatedAt:        shell.UpdatedAt,
 		PullRequestCount: t3PullRequestCount(shell),
+		ParentThreadId:   parentThreadID,
 	}
 }
 

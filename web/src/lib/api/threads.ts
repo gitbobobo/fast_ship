@@ -1,6 +1,6 @@
 import { api, decodeApiError } from "./client";
 
-export type EnvironmentStatus = "ok" | "unreachable" | "repair";
+export type EnvironmentStatus = "ok" | "unreachable" | "repair" | "degraded";
 
 export interface Environment {
   id: string;
@@ -26,6 +26,8 @@ export interface ThreadSummary {
   model: string;
   updated_at: string;
   pull_request_count: number;
+  /** 仅详情且为子代理线程时给出：父线程 ID，用于「返回父线程」导航。 */
+  parent_thread_id?: string;
 }
 
 export type ThreadItemType =

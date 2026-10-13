@@ -64,6 +64,7 @@ func (e ScreenshotAnnotationStatus) Valid() bool {
 
 // Defines values for T3EnvironmentStatus.
 const (
+	Degraded    T3EnvironmentStatus = "degraded"
 	Ok          T3EnvironmentStatus = "ok"
 	Repair      T3EnvironmentStatus = "repair"
 	Unreachable T3EnvironmentStatus = "unreachable"
@@ -72,6 +73,8 @@ const (
 // Valid indicates whether the value is a known member of the T3EnvironmentStatus enum.
 func (e T3EnvironmentStatus) Valid() bool {
 	switch e {
+	case Degraded:
+		return true
 	case Ok:
 		return true
 	case Repair:
@@ -1464,13 +1467,17 @@ type T3Environment struct {
 	Name  string  `json:"name"`
 
 	// Status 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
-	// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对
+	// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
+	// degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
+	// 其余数据仍返回
 	Status    T3EnvironmentStatus `json:"status"`
 	UpdatedAt string              `json:"updated_at"`
 }
 
 // T3EnvironmentStatus 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
-// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对
+// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
+// degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
+// 其余数据仍返回
 type T3EnvironmentStatus string
 
 // T3ThreadDetail defines model for T3ThreadDetail.
@@ -1525,9 +1532,12 @@ type T3ThreadSummary struct {
 	EnvironmentName string `json:"environment_name"`
 
 	// Id T3 threadId
-	Id        string `json:"id"`
-	Model     string `json:"model"`
-	ProjectId string `json:"project_id"`
+	Id    string `json:"id"`
+	Model string `json:"model"`
+
+	// ParentThreadId 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省
+	ParentThreadId *string `json:"parent_thread_id,omitempty"`
+	ProjectId      string  `json:"project_id"`
 
 	// ProjectName 来自 WS shell 快照项目表，列表和详情均使用该来源
 	ProjectName string `json:"project_name"`

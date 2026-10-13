@@ -309,11 +309,11 @@ func (s *T3ThreadsService) fetchEnvironmentThreads(ctx context.Context, env *mod
 		threads = append(threads, normalizeT3ThreadShell(env, &archived.Threads[i], projectNames))
 	}
 	if snaps.ArchiveErr != nil {
-		// 归档 RPC 失败不推翻活跃结果（G1）：活跃线程照常展示，环境标降级
-		// 交既有 problem banner 提示，而不是把健康线程整批丢成 unreachable 空。
+		// 归档 RPC 失败不推翻活跃结果（G1）：活跃线程照常展示，环境标 degraded
+		// （部分可读，凭证与连通性都正常），交既有 problem banner 提示。
 		s.logger.Warn("t3 archived shell snapshot read failed, serving active threads only",
 			zap.String("environment_id", env.ID), zap.Error(snaps.ArchiveErr))
-		return threads, T3EnvironmentStatusUnreachable, "归档线程暂不可读"
+		return threads, T3EnvironmentStatusDegraded, "归档线程暂不可读"
 	}
 	return threads, T3EnvironmentStatusOK, ""
 }

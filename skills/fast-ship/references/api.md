@@ -5416,7 +5416,8 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 
 有界并行逐个环境探测（`GET {address}/api/auth/session`，单请求同时回答可达性与凭证有效性，
 单环境独立预算，坏环境不拖垮其它环境）：
-`ok`=Bearer 会话有效；`unreachable`=网络不可达/超时/5xx；`repair`=可达但凭证失效（需重新配对）。
+`ok`=Bearer 会话有效；`unreachable`=网络不可达/超时/5xx；`repair`=可达但凭证失效（需重新配对）；
+`degraded`=可达且凭证有效，但部分数据读取失败（如归档快照），其余数据仍返回。
 响应不包含任何凭证字段。
 
 **鉴权**：公开
@@ -5433,7 +5434,7 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 | `items[].id` | string | 是 |  |
 | `items[].name` | string | 是 |  |
 | `items[].address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
-| `items[].status` | string（enum: ok \| unreachable \| repair） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对 |
+| `items[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
 | `items[].error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `items[].updated_at` | string（date-time） | 是 |  |
 
@@ -5478,7 +5479,7 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 | `id` | string | 是 |  |
 | `name` | string | 是 |  |
 | `address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
-| `status` | string（enum: ok \| unreachable \| repair） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对 |
+| `status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
 | `error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -5534,7 +5535,7 @@ T3 环境连接（配对/重配/删除/探测）与只读线程（仅 JWT，INT-
 | `id` | string | 是 |  |
 | `name` | string | 是 |  |
 | `address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
-| `status` | string（enum: ok \| unreachable \| repair） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对 |
+| `status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
 | `error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -5625,6 +5626,7 @@ ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` �
 | `thread.model` | string | 是 |  |
 | `thread.updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
 | `thread.pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
+| `thread.parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分） |
 | `items[].type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error） | 是 |  |
@@ -5740,11 +5742,12 @@ system_notice 等）丢弃；未知类型前向兼容地跳过。正文不额外
 | `items[].model` | string | 是 |  |
 | `items[].updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
 | `items[].pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
+| `items[].parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
 | `environments` | object[] | 是 |  |
 | `environments[].id` | string | 是 |  |
 | `environments[].name` | string | 是 |  |
 | `environments[].address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
-| `environments[].status` | string（enum: ok \| unreachable \| repair） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对 |
+| `environments[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
 | `environments[].error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
 | `environments[].updated_at` | string（date-time） | 是 |  |
 

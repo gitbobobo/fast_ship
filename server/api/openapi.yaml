@@ -61,7 +61,8 @@ paths:
       description: |
         有界并行逐个环境探测（`GET {address}/api/auth/session`，单请求同时回答可达性与凭证有效性，
         单环境独立预算，坏环境不拖垮其它环境）：
-        `ok`=Bearer 会话有效；`unreachable`=网络不可达/超时/5xx；`repair`=可达但凭证失效（需重新配对）。
+        `ok`=Bearer 会话有效；`unreachable`=网络不可达/超时/5xx；`repair`=可达但凭证失效（需重新配对）；
+        `degraded`=可达且凭证有效，但部分数据读取失败（如归档快照），其余数据仍返回。
         响应不包含任何凭证字段。
       responses:
         '200':
@@ -6291,10 +6292,12 @@ components:
           description: 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host）
         status:
           type: string
-          enum: [ok, unreachable, repair]
+          enum: [ok, unreachable, repair, degraded]
           description: |
             探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
-            repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对
+            repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
+            degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
+            其余数据仍返回
         error:
           type: string
           description: 最近一次探测失败的说明；成功时省略
@@ -6371,6 +6374,9 @@ components:
         pull_request_count:
           type: integer
           description: 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计）
+        parent_thread_id:
+          type: string
+          description: 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省
 
     T3ThreadItem:
       type: object

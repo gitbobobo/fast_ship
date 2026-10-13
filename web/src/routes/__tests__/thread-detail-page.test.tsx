@@ -22,6 +22,7 @@ function detailOf(
   items: ThreadItem[],
   status: ThreadDetail["thread"]["status"] = "idle",
   updatedAt = "2026-10-13T10:00:00Z",
+  parentThreadId?: string,
 ) {
   return {
     data: {
@@ -38,6 +39,7 @@ function detailOf(
         model: "gpt-5",
         updated_at: updatedAt,
         pull_request_count: 1,
+        ...(parentThreadId ? { parent_thread_id: parentThreadId } : {}),
       },
       items,
     },
@@ -323,5 +325,19 @@ describe("ThreadDetailPage", () => {
     ).toHaveAttribute("href", "/settings/environments");
     expect(screen.getByText("still here")).toBeInTheDocument();
     expect(screen.queryByText("线程运行中，内容会自动更新。")).not.toBeInTheDocument();
+  });
+
+  it("links a subagent thread back to its parent", async () => {
+    detail.mockResolvedValue(detailOf([], "idle", undefined, "parent-9"));
+    await renderPage();
+
+    expect(screen.getByRole("link", { name: /返回父线程/ })).toHaveAttribute(
+      "href",
+      "/threads/e1/parent-9",
+    );
+    expect(screen.getByRole("link", { name: /全部线程/ })).toHaveAttribute(
+      "href",
+      "/threads",
+    );
   });
 });

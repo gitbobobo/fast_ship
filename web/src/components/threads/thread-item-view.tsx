@@ -11,6 +11,7 @@ import {
   Wrench,
 } from "lucide-react";
 import type { ThreadItem, ThreadItemType } from "@/lib/api/threads";
+import { itemStatusLabel } from "@/lib/threads";
 import { Button } from "@/components/ui/button";
 import { useThreadItemDetail } from "@/lib/hooks/use-threads";
 import { cn } from "@/lib/utils";
@@ -26,13 +27,22 @@ const COLLAPSED_META: Partial<
   subagent: { label: "子代理", icon: GitFork },
 };
 
+/** 工具调用正文多为单行 JSON，能解析就缩进成多行，读不了的按原文显示。 */
+function prettyJson(text: string) {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 function ItemBody({ item, text }: { item: ThreadItem; text: string }) {
   if (item.type === "reasoning" || item.type === "subagent") {
     return text ? <ThreadMarkdown text={text} /> : null;
   }
   return (
     <pre className="max-h-96 overflow-auto font-mono text-xs break-words whitespace-pre-wrap">
-      {text}
+      {item.type === "dynamic_tool" ? prettyJson(text) : text}
     </pre>
   );
 }
@@ -118,7 +128,7 @@ function CollapsedItem({
         <Icon className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 flex-1 truncate">{summary}</span>
         {item.status && (
-          <span className="shrink-0 text-xs">{item.status}</span>
+          <span className="shrink-0 text-xs">{itemStatusLabel(item.status)}</span>
         )}
       </summary>
       {open && (

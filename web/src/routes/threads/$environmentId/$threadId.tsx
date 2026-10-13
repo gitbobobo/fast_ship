@@ -31,13 +31,24 @@ export default function ThreadDetailPage() {
     <>
       <Header title={thread?.title || "线程详情"} />
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 p-4 md:p-6">
-        <Link
-          to="/threads"
-          className="inline-flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          全部线程
-        </Link>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <Link
+            to="/threads"
+            className="inline-flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            全部线程
+          </Link>
+          {thread?.parent_thread_id && (
+            <Link
+              to={`/threads/${encodeURIComponent(environmentId)}/${encodeURIComponent(thread.parent_thread_id)}`}
+              className="inline-flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              返回父线程
+            </Link>
+          )}
+        </div>
 
         {isLoading ? (
           <div className="space-y-3">

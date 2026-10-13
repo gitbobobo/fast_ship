@@ -34,7 +34,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { HeaderActions } from "@/components/layout/header-actions";
 import { SettingsPageShell } from "@/routes/settings/layout";
 import {
   useCreateEnvironment,
@@ -55,6 +54,7 @@ const STATUS_STYLES: Record<EnvironmentStatus, string> = {
   ok: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
   unreachable: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   repair: "bg-destructive/10 text-destructive",
+  degraded: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
 };
 
 async function errorMessage(error: unknown, fallback: string) {
@@ -191,24 +191,19 @@ export default function EnvironmentsPage() {
   };
 
   return (
-    <SettingsPageShell
-      actions={
-        <HeaderActions
-          primary={
-            <Button size="sm" onClick={() => setDialog({ mode: "create" })}>
-              <Plus className="mr-1.5 h-3.5 w-3.5" />
-              添加环境
-            </Button>
-          }
-        />
-      }
-    >
+    <SettingsPageShell>
       <div className="space-y-6">
-        <div>
-          <h2 className="text-lg font-medium">环境</h2>
-          <p className="text-sm text-muted-foreground">
-            每个环境对应一个 T3 Code 实例，线程页会汇总所有环境里的线程。
-          </p>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-medium">环境</h2>
+            <p className="text-sm text-muted-foreground">
+              每个环境对应一个 T3 Code 实例，线程页会汇总所有环境里的线程。
+            </p>
+          </div>
+          <Button size="sm" onClick={() => setDialog({ mode: "create" })}>
+            <Plus className="mr-1.5 h-3.5 w-3.5" />
+            添加环境
+          </Button>
         </div>
 
         {dialog && (
@@ -262,7 +257,7 @@ export default function EnvironmentsPage() {
           <div className="rounded-lg border bg-muted/40 py-12 text-center">
             <p className="text-sm text-muted-foreground">暂无环境</p>
             <p className="mt-1 text-xs text-muted-foreground">
-              点击右上角按钮，粘贴配对链接添加第一个环境
+              点击「添加环境」，粘贴配对链接添加第一个环境
             </p>
           </div>
         ) : (

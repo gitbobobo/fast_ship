@@ -200,6 +200,36 @@ describe("ThreadsPage", () => {
     expect(within(alert).queryByText(/Mac/)).toBeNull();
   });
 
+  it("guides re-pairing instead of an empty list when every environment is down", () => {
+    mockThreads([], [env({ status: "repair" })]);
+    renderPage();
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("所有环境都无法读取");
+    expect(screen.queryByText("暂无线程")).toBeNull();
+    expect(screen.getByRole("link", { name: "去重新配对" })).toHaveAttribute(
+      "href",
+      "/settings/environments",
+    );
+  });
+
+  it("does not call a partially readable environment down", () => {
+    mockThreads(
+      [thread(1)],
+      [
+        env({ status: "degraded", error: "归档线程暂不可读" }),
+        env({ id: "e2", name: "测试", status: "unreachable" }),
+      ],
+    );
+    renderPage();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "部分环境暂时无法读取",
+    );
+    expect(screen.queryByText("所有环境都无法读取")).toBeNull();
+    expect(cardTitles()).toEqual(["Thread 1"]);
+  });
+
   it("refreshes manually", async () => {
     const user = userEvent.setup();
     mockThreads([thread(1)]);

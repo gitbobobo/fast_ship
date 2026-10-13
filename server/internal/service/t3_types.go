@@ -31,6 +31,7 @@ const (
 	T3EnvironmentStatusOK          = api.Ok
 	T3EnvironmentStatusUnreachable = api.Unreachable
 	T3EnvironmentStatusRepair      = api.Repair
+	T3EnvironmentStatusDegraded    = api.Degraded
 
 	T3ThreadItemTypeUserMessage      = api.UserMessage
 	T3ThreadItemTypeAssistantMessage = api.AssistantMessage

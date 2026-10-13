@@ -1396,7 +1396,7 @@ func TestT3ThreadItemDetail(t *testing.T) {
 }
 
 // TestT3ThreadsArchiveFailureKeepsActiveThreads 覆盖 G1 列表侧：归档 RPC
-// 失败是部分失败——活跃线程照常返回，环境标 unreachable 并附「归档线程
+// 失败是部分失败——活跃线程照常返回，环境标 degraded 并附「归档线程
 // 暂不可读」横幅文案，而不是把健康线程整批丢成空。附带 G2 端到端：
 // pendingBackgroundTasks 经 WS 快照解码后参与状态映射。
 func TestT3ThreadsArchiveFailureKeepsActiveThreads(t *testing.T) {
@@ -1447,7 +1447,7 @@ func TestT3ThreadsArchiveFailureKeepsActiveThreads(t *testing.T) {
 		t.Fatalf("environments = %+v", result.Environments)
 	}
 	envStatus := result.Environments[0]
-	if envStatus.Status != T3EnvironmentStatusUnreachable {
+	if envStatus.Status != T3EnvironmentStatusDegraded {
 		t.Fatalf("archive failure must mark the environment degraded, got %+v", envStatus)
 	}
 	if msg := api.Deref(envStatus.Error); !strings.Contains(msg, "归档") {
@@ -1606,7 +1606,7 @@ func TestT3ThreadsSnapshotWriteFailureKeepsActive(t *testing.T) {
 	if len(result.Items) != 1 || result.Items[0].Id != "th-1" {
 		t.Fatalf("active threads must survive post-snapshot write failure, got %+v", result.Items)
 	}
-	if len(result.Environments) != 1 || result.Environments[0].Status != T3EnvironmentStatusUnreachable {
+	if len(result.Environments) != 1 || result.Environments[0].Status != T3EnvironmentStatusDegraded {
 		t.Fatalf("post-snapshot failure must mark the environment degraded, got %+v", result.Environments)
 	}
 }

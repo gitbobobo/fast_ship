@@ -18,7 +18,24 @@ export const ENVIRONMENT_STATUS_LABELS: Record<EnvironmentStatus, string> = {
   ok: "正常",
   unreachable: "不可达",
   repair: "需重新配对",
+  degraded: "部分可读",
 };
+
+/** T3 条目原始状态的中文名（快照透传值，未知值原样显示）。 */
+export const ITEM_STATUS_LABELS: Record<string, string> = {
+  idle: "空闲",
+  pending: "排队中",
+  running: "运行中",
+  waiting: "等待输入",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  interrupted: "已中断",
+};
+
+export function itemStatusLabel(status: string) {
+  return ITEM_STATUS_LABELS[status] ?? status;
+}
 
 /** status 为空表示默认视图：除已归档外的全部线程。 */
 export interface ThreadFilters {
