@@ -52,10 +52,16 @@ function asExisting(attachment: ChatAttachment): ComposerImage {
   };
 }
 
+function attachmentsFrom(images: ComposerImage[], tag?: string) {
+  return images.flatMap((i) =>
+    i.status === "done" && i.attachment && i.tag === tag ? [i.attachment] : [],
+  );
+}
+
 /**
  * 输入框里的图片：选中即上传（原始字节），上传完成才可随消息发送。
  * 未发送就移除、或组件卸载（含换环境）时，尽力删除上游还没被消息引用的附件。
- * 用 key 重挂载组件来丢弃一个环境下的所有上传引用。
+ * 正在飞行的请求按附件 id 记下快照：卸载不删，失败且会话已结束再补删。
  */
 export function useImageUploads(
   environmentId: string,
@@ -65,19 +71,22 @@ export function useImageUploads(
     existing.map(asExisting),
   );
   const ref = useRef<ComposerImage[]>(images);
+  const inflightRef = useRef(new Set<string>());
+  const sessionRef = useRef(0);
 
   const commit = useCallback((next: ComposerImage[]) => {
     ref.current = next;
     setImages(next);
   }, []);
 
-  /** 已经写进正在飞行的请求：卸载时不要删上游文件。 */
-  const submittedRef = useRef(false);
-
   const discard = useCallback(
     (image: ComposerImage) => {
       dispose(image);
-      if (image.attachment && !image.existing && !submittedRef.current) {
+      if (
+        image.attachment &&
+        !image.existing &&
+        !inflightRef.current.has(image.attachment.id)
+      ) {
         void threadApi
           .deleteAttachment(environmentId, image.attachment.id)
           .catch(() => undefined);
@@ -108,9 +117,11 @@ export function useImageUploads(
         threadApi.uploadAttachment(environmentId, file).then(
           (attachment) => {
             if (!ref.current.some((i) => i.key === image.key)) {
-              void threadApi
-                .deleteAttachment(environmentId, attachment.id)
-                .catch(() => undefined);
+              if (!inflightRef.current.has(attachment.id)) {
+                void threadApi
+                  .deleteAttachment(environmentId, attachment.id)
+                  .catch(() => undefined);
+              }
               return;
             }
             commit(
@@ -153,35 +164,71 @@ export function useImageUploads(
     commit([]);
   }, [commit]);
 
-  const retain = useCallback(() => {
-    submittedRef.current = true;
-  }, []);
-
-  const release = useCallback(() => {
-    submittedRef.current = false;
-  }, []);
-
-  useEffect(
-    () => () => {
-      for (const image of ref.current) discard(image);
-      ref.current = [];
+  /**
+   * 把这次请求快照里的附件交给这次 RPC：飞行中卸载不删；成功只丢本地引用；
+   * 失败且输入会话已结束则补删非 existing 的 id。
+   */
+  const submit = useCallback(
+    async <T,>(run: () => Promise<T>, sent?: ChatAttachment[]): Promise<T> => {
+      const batch = sent ?? attachmentsFrom(ref.current);
+      const ids = new Set(batch.map((a) => a.id));
+      const existingIds = new Set(
+        ref.current.flatMap((i) =>
+          i.existing && i.attachment ? [i.attachment.id] : [],
+        ),
+      );
+      const session = sessionRef.current;
+      for (const id of ids) inflightRef.current.add(id);
+      try {
+        const result = await run();
+        for (const id of ids) inflightRef.current.delete(id);
+        if (sessionRef.current === session) {
+          const next: ComposerImage[] = [];
+          for (const image of ref.current) {
+            if (image.attachment && ids.has(image.attachment.id)) {
+              dispose(image);
+            } else {
+              next.push(image);
+            }
+          }
+          commit(next);
+        }
+        return result;
+      } catch (err) {
+        for (const id of ids) inflightRef.current.delete(id);
+        if (sessionRef.current !== session) {
+          for (const id of ids) {
+            if (!existingIds.has(id)) {
+              void threadApi
+                .deleteAttachment(environmentId, id)
+                .catch(() => undefined);
+            }
+          }
+        }
+        throw err;
+      }
     },
-    [discard],
+    [commit, environmentId],
   );
 
+  useEffect(() => {
+    const session = ++sessionRef.current;
+    return () => {
+      for (const image of ref.current) discard(image);
+      ref.current = [];
+      if (sessionRef.current === session) sessionRef.current += 1;
+    };
+  }, [discard]);
+
   const uploading = images.some((i) => i.status === "uploading");
-  const attachmentsOf = (tag?: string) =>
-    images.flatMap((i) =>
-      i.status === "done" && i.attachment && i.tag === tag ? [i.attachment] : [],
-    );
+  const attachmentsOf = (tag?: string) => attachmentsFrom(images, tag);
 
   return {
     images,
     add,
     remove,
     clear,
-    retain,
-    release,
+    submit,
     uploading,
     attachmentsOf,
   };

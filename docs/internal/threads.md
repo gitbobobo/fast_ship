@@ -260,7 +260,10 @@ body（Content-Type 即 MIME，`X-File-Name` 为显示名）→ WS RPC
 `attachments` 数组。字节不落 Fast Ship 盘、不建附件表、不复用 Issue 附件；
 禁 multipart 自动落临时文件、禁 base64。读取经 `assets.createUrl`
 （attachment 资源，只需 read scope）后由 Fast Ship 代理字节；删除经
-`attachments.delete`（pending 附件）。
+`attachments.delete`（pending 附件）。客户端在消息请求仍飞行时不删已写入该
+请求的 pending 附件；请求失败且输入会话已结束时再补删。T3 接收时会把 pending
+附件复制成线程自己的一份再引用，删除接口只认 pending id，所以请求结算后再删
+待用文件不会弄坏已发出的消息。
 
 ## 密钥安全（secrets.answerRequest）
 
