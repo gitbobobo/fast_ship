@@ -67,29 +67,83 @@ func TestProjectUpdate_EmptyNameIsIgnored(t *testing.T) {
 	}
 }
 
-// clear_github_pr_token 与 github_pr_token / pr_token_source_project_id 互斥
-// 按「字段是否显式提供」判定：false/空串/null 都算提供。若 handler 退回
-// string+omitempty 或指针绑定，这些组合会被 NonEmpty/True/nil 吞掉一个字段，
-// 变成静默替换/清除。
-func TestProjectUpdate_PrTokenMutexByPresence(t *testing.T) {
+// Token 引用字段三态按 presence 判定：key 缺省保留现值；显式 null 与空串都
+// 清空；非空替换。若 handler 退回 *string 指针绑定，null 与缺省不可区分，
+// 清空语义会丢失——此组用例钉住该行为。
+func TestProjectUpdate_TokenRefThreeStatesByPresence(t *testing.T) {
 	env := setupHandlerTestEnv(t)
-	user := createHandlerTestUser(t, env.db, "user-pr-mutex")
+	user := createHandlerTestUser(t, env.db, "user-ref-three")
+	tokenA := createHandlerTestToken(t, env, user.ID, "ghp_token_a")
+	tokenB := createHandlerTestToken(t, env, user.ID, "ghp_token_b")
+	project := createHandlerTestProject(t, env.db, user.ID)
+
+	put := func(t *testing.T, body string) api.Project {
+		t.Helper()
+		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
+		ctx.Params = ginParams("id", project.ID)
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Update(ctx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+		var resp api.Project
+		decodeEnvelope(t, rec, &resp)
+		return resp
+	}
+	storedRefs := func(t *testing.T) (string, string) {
+		t.Helper()
+		var stored model.Project
+		if err := env.db.Where("id = ?", project.ID).First(&stored).Error; err != nil {
+			t.Fatalf("reload project: %v", err)
+		}
+		return stored.PublicGitHubTokenID, stored.CodeGitHubTokenID
+	}
+
+	// key 缺省：保留现值（auto token）
+	resp := put(t, `{}`)
+	if resp.PublicGithubTokenId == "" || resp.CodeGithubTokenId == "" {
+		t.Fatalf("expected auto token refs preserved, got %q/%q", resp.PublicGithubTokenId, resp.CodeGithubTokenId)
+	}
+
+	// 非空替换
+	put(t, `{"public_github_token_id":"`+tokenA.ID+`","code_github_token_id":"`+tokenB.ID+`"}`)
+	if public, code := storedRefs(t); public != tokenA.ID || code != tokenB.ID {
+		t.Fatalf("expected refs replaced, got %q/%q", public, code)
+	}
+
+	// 显式 null 清空；缺省 key 的另一用途保持
+	put(t, `{"public_github_token_id":null}`)
+	public, code := storedRefs(t)
+	if public != "" || code != tokenB.ID {
+		t.Fatalf("expected public cleared only, got %q/%q", public, code)
+	}
+
+	// 空串同样清空
+	put(t, `{"code_github_token_id":""}`)
+	public, code = storedRefs(t)
+	if public != "" || code != "" {
+		t.Fatalf("expected both cleared, got %q/%q", public, code)
+	}
+}
+
+// Token 引用字段类型错误（数字/对象/数组）返回 40001；引用不属于当前用户
+// 或不存在返回 40420；已下线的旧字段静默忽略、不再产生任何效果。
+func TestProjectUpdate_TokenRefValidation(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-ref-validation")
+	other := createHandlerTestUser(t, env.db, "user-ref-validation-other")
+	foreign := createHandlerTestToken(t, env, other.ID, "ghp_foreign")
 	project := createHandlerTestProject(t, env.db, user.ID)
 
 	for _, body := range []string{
-		`{"clear_github_pr_token":false,"github_pr_token":"v2"}`,
-		`{"clear_github_pr_token":true,"github_pr_token":""}`,
-		`{"clear_github_pr_token":true,"github_pr_token":null}`,
-		`{"clear_github_pr_token":null,"github_pr_token":"v2"}`,
-		`{"clear_github_pr_token":true,"pr_token_source_project_id":"x"}`,
-		`{"clear_github_pr_token":true,"pr_token_source_project_id":null}`,
-		`{"clear_github_pr_token":null,"pr_token_source_project_id":"x"}`,
+		`{"public_github_token_id":5}`,
+		`{"code_github_token_id":{}}`,
+		`{"public_github_token_id":["x"]}`,
 	} {
 		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
 		ctx.Params = ginParams("id", project.ID)
 		ctx.Set(middleware.ContextKeyUserID, user.ID)
 		env.projectHandler.Update(ctx)
-
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
 		}
@@ -98,90 +152,77 @@ func TestProjectUpdate_PrTokenMutexByPresence(t *testing.T) {
 			t.Fatalf("expected code 40001 for %s, got %d", body, envelope.Code)
 		}
 	}
-}
-
-// pr_token_source_kind 按 presence 语义判定：JSON key 出现即算提供，
-// 提供则必须为 access/pr——显式 null、空串、其他值、类型错误均 40001；
-// 且须与 pr_token_source_project_id 搭配（单独提供 40001）。
-// kind 不参与既有互斥判定：clear+kind（无 source）落在 kind-alone/取值校验，
-// clear+kind+source 由互斥命中。
-func TestProjectCreate_PRTokenSourceKindValidation(t *testing.T) {
-	env := setupHandlerTestEnv(t)
-	user := createHandlerTestUser(t, env.db, "user-create-pr-kind")
 
 	for _, body := range []string{
-		`{"name":"x","pr_token_source_kind":null}`,
-		`{"name":"x","pr_token_source_kind":"access"}`,
-		`{"name":"x","pr_token_source_kind":"bogus"}`,
-		`{"name":"x","pr_token_source_kind":5}`,
-		`{"name":"x","pr_token_source_kind":"","pr_token_source_project_id":"x"}`,
+		`{"public_github_token_id":"nonexistent-token-id"}`,
+		`{"code_github_token_id":"` + foreign.ID + `"}`,
+	} {
+		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
+		ctx.Params = ginParams("id", project.ID)
+		ctx.Set(middleware.ContextKeyUserID, user.ID)
+		env.projectHandler.Update(ctx)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+		envelope := decodeEnvelope(t, rec, nil)
+		if envelope.Code != 40420 {
+			t.Fatalf("expected code 40420 for %s, got %d", body, envelope.Code)
+		}
+	}
+
+	// 旧字段静默忽略：请求成功但不改动任何引用。
+	ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID,
+		[]byte(`{"github_token":"plaintext","github_pr_token":"plaintext","source_project_id":"x","pr_token_source_project_id":"y","pr_token_source_kind":"access","clear_github_pr_token":true}`))
+	ctx.Params = ginParams("id", project.ID)
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	env.projectHandler.Update(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy fields must be ignored, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var stored model.Project
+	if err := env.db.Where("id = ?", project.ID).First(&stored).Error; err != nil {
+		t.Fatalf("reload project: %v", err)
+	}
+	if stored.GithubOwner != "owner" || stored.PublicGitHubTokenID == "" {
+		t.Fatalf("legacy fields must not modify project state: %+v", stored)
+	}
+}
+
+// 创建路径同样校验引用归属：40420。
+func TestProjectCreate_TokenRefValidation(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-create-ref-validation")
+	other := createHandlerTestUser(t, env.db, "user-create-ref-other")
+	foreign := createHandlerTestToken(t, env, other.ID, "ghp_foreign_create")
+
+	for _, body := range []string{
+		`{"name":"ref-404","public_github_token_id":"nonexistent-token-id"}`,
+		`{"name":"ref-404-foreign","code_github_token_id":"` + foreign.ID + `"}`,
 	} {
 		ctx, rec := newJSONContext(http.MethodPost, "/api/projects", []byte(body))
 		ctx.Set(middleware.ContextKeyUserID, user.ID)
 		env.projectHandler.Create(ctx)
-
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for %s, got %d: %s", body, rec.Code, rec.Body.String())
 		}
 		envelope := decodeEnvelope(t, rec, nil)
-		if envelope.Code != 40001 {
-			t.Fatalf("expected code 40001 for %s, got %d", body, envelope.Code)
+		if envelope.Code != 40420 {
+			t.Fatalf("expected code 40420 for %s, got %d", body, envelope.Code)
 		}
 	}
-}
 
-func TestProjectUpdate_PRTokenSourceKindValidation(t *testing.T) {
-	env := setupHandlerTestEnv(t)
-	user := createHandlerTestUser(t, env.db, "user-pr-kind")
-	project := createHandlerTestProject(t, env.db, user.ID)
-
-	for _, body := range []string{
-		`{"pr_token_source_kind":null}`,
-		`{"pr_token_source_kind":null,"pr_token_source_project_id":"x"}`,
-		`{"pr_token_source_kind":"access"}`,
-		`{"pr_token_source_kind":"pr"}`,
-		`{"pr_token_source_kind":"bogus"}`,
-		`{"pr_token_source_kind":5}`,
-		`{"pr_token_source_kind":"","pr_token_source_project_id":"x"}`,
-		`{"clear_github_pr_token":true,"pr_token_source_kind":null}`,
-		`{"clear_github_pr_token":true,"pr_token_source_kind":"access"}`,
-		`{"clear_github_pr_token":true,"pr_token_source_kind":"access","pr_token_source_project_id":"x"}`,
-	} {
-		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
-		ctx.Params = ginParams("id", project.ID)
-		ctx.Set(middleware.ContextKeyUserID, user.ID)
-		env.projectHandler.Update(ctx)
-
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 for %s, got %d: %s", body, rec.Code, rec.Body.String())
-		}
-		envelope := decodeEnvelope(t, rec, nil)
-		if envelope.Code != 40001 {
-			t.Fatalf("expected code 40001 for %s, got %d", body, envelope.Code)
-		}
+	// 只填仓库不填 Token 合法；响应原样返回引用（空串）。
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects",
+		[]byte(`{"name":"repo-only","repository_url":"https://github.com/owner/repo"}`))
+	ctx.Set(middleware.ContextKeyUserID, user.ID)
+	env.projectHandler.Create(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for repo without token, got %d: %s", rec.Code, rec.Body.String())
 	}
-}
-
-// clear_github_pr_token=false 或显式 null 单独提供是合法无操作，不得误报 400。
-func TestProjectUpdate_ClearPRTokenFalseAloneIsOK(t *testing.T) {
-	env := setupHandlerTestEnv(t)
-	user := createHandlerTestUser(t, env.db, "user-pr-clear-false")
-	project := createHandlerTestProject(t, env.db, user.ID)
-
-	for _, body := range []string{
-		`{"clear_github_pr_token":false}`,
-		`{"clear_github_pr_token":null}`,
-		`{"github_pr_token":null}`,
-		`{"pr_token_source_project_id":null}`,
-	} {
-		ctx, rec := newJSONContext(http.MethodPut, "/api/projects/"+project.ID, []byte(body))
-		ctx.Params = ginParams("id", project.ID)
-		ctx.Set(middleware.ContextKeyUserID, user.ID)
-		env.projectHandler.Update(ctx)
-
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 for %s, got %d: %s", body, rec.Code, rec.Body.String())
-		}
+	var resp api.Project
+	decodeEnvelope(t, rec, &resp)
+	if resp.GithubOwner != "owner" || resp.GithubRepo != "repo" || resp.PublicGithubTokenId != "" || resp.CodeGithubTokenId != "" {
+		t.Fatalf("unexpected create response: %+v", resp)
 	}
 }
 

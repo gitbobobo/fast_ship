@@ -1,15 +1,16 @@
 package service
 
 import (
-	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -161,10 +162,14 @@ func TestParseRepositoryURL(t *testing.T) {
 	}
 }
 
+func newTestProjectService(svc *testServices) *ProjectService {
+	return NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.tokenRepo, svc.storage, svc.cfg, zap.NewNop())
+}
+
 func TestProjectServiceCreate_WithoutGitHub(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-no-github")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	projectSvc := newTestProjectService(svc)
 
 	// 创建不带 GitHub 仓库的项目应该成功
 	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
@@ -174,60 +179,151 @@ func TestProjectServiceCreate_WithoutGitHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if project.GithubOwner != "" {
-		t.Errorf("expected empty GithubOwner, got %q", project.GithubOwner)
+	if project.GithubOwner != "" || project.GithubRepo != "" {
+		t.Fatalf("expected empty github owner/repo, got %q/%q", project.GithubOwner, project.GithubRepo)
 	}
-	if project.GithubRepo != "" {
-		t.Errorf("expected empty GithubRepo, got %q", project.GithubRepo)
+	if project.PublicGithubTokenId != "" || project.CodeGithubTokenId != "" {
+		t.Fatalf("expected empty token references, got %q/%q", project.PublicGithubTokenId, project.CodeGithubTokenId)
 	}
 }
 
-func TestProjectServiceCreate_WithGitHub(t *testing.T) {
+// 创建时可以只填仓库不选 Token：仓库与 Token 相互独立，公开仓库 Token
+// 之后在设置页或项目表单里补配。
+func TestProjectServiceCreate_WithRepoURLButNoToken(t *testing.T) {
 	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-with-github")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	user := createTestUser(t, svc.db, "user-no-token")
+	projectSvc := newTestProjectService(svc)
 
-	// 创建带 GitHub 仓库的项目，提供 token 应该成功
 	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:          "github-project",
-		Description:   api.Ptr("A project with GitHub"),
+		Name:          "no-token-project",
 		RepositoryUrl: api.Ptr("https://github.com/owner/repo"),
-		GithubToken:   api.Ptr("ghp_test123"),
+	})
+	if err != nil {
+		t.Fatalf("expected repo URL without token to succeed, got %v", err)
+	}
+	if project.GithubOwner != "owner" || project.GithubRepo != "repo" {
+		t.Fatalf("expected owner/repo, got %q/%q", project.GithubOwner, project.GithubRepo)
+	}
+	if project.PublicGithubTokenId != "" || project.CodeGithubTokenId != "" {
+		t.Fatalf("expected empty token references, got %q/%q", project.PublicGithubTokenId, project.CodeGithubTokenId)
+	}
+}
+
+// 创建时引用本人 Token 库记录：两个用途可同时引用同一条记录。
+func TestProjectServiceCreate_WithTokenReferences(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-create-refs")
+	projectSvc := newTestProjectService(svc)
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "ghp_create")
+
+	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:                "refs-project",
+		RepositoryUrl:       api.Ptr("https://github.com/owner/repo"),
+		PublicGithubTokenId: api.Ptr(token.ID),
+		CodeGithubTokenId:   api.Ptr(token.ID),
 	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if project.GithubOwner != "owner" {
-		t.Errorf("expected GithubOwner=owner, got %q", project.GithubOwner)
-	}
-	if project.GithubRepo != "repo" {
-		t.Errorf("expected GithubRepo=repo, got %q", project.GithubRepo)
+	if project.PublicGithubTokenId != token.ID || project.CodeGithubTokenId != token.ID {
+		t.Fatalf("expected both references = %s, got %q/%q", token.ID, project.PublicGithubTokenId, project.CodeGithubTokenId)
 	}
 }
 
-func TestProjectServiceCreate_WithRepoURLButNoToken(t *testing.T) {
+// 引用必须属于当前用户：不存在或他人 Token 统一 40420（跨用户不可见）。
+func TestProjectServiceCreate_TokenReferenceValidation(t *testing.T) {
 	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-no-token")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	user := createTestUser(t, svc.db, "user-create-ref-err")
+	other := createTestUser(t, svc.db, "user-create-ref-other")
+	foreign := createTestToken(t, svc.db, svc.cfg.Encryption.Key, other.ID, "ghp_foreign")
+	projectSvc := newTestProjectService(svc)
 
-	// 提供了仓库地址但没有 token 应该失败
-	_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:          "no-token-project",
-		RepositoryUrl: api.Ptr("https://github.com/owner/repo"),
+	for _, tc := range []struct {
+		name     string
+		publicID string
+		codeID   string
+	}{
+		{"missing public token", "nonexistent-token-id", ""},
+		{"foreign public token", foreign.ID, ""},
+		{"missing code token", "", "nonexistent-token-id"},
+		{"foreign code token", "", foreign.ID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+				Name:                "ref-err-project",
+				PublicGithubTokenId: api.NonEmpty(tc.publicID),
+				CodeGithubTokenId:   api.NonEmpty(tc.codeID),
+			})
+			appErr, ok := err.(*errs.AppError)
+			if !ok || !errors.Is(appErr, errs.ErrGitHubTokenNotFound) {
+				t.Fatalf("expected ErrGitHubTokenNotFound, got %v", err)
+			}
+		})
+	}
+}
+
+func TestProjectRepoCreate_RejectsMissingToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-repo-missing-token")
+	err := svc.projectRepo.Create(&model.Project{
+		ID:                  uuid.NewString(),
+		UserID:              user.ID,
+		Name:                "dangling-ref",
+		PublicGitHubTokenID: "gone-token-id",
 	})
-	if err == nil {
-		t.Fatal("expected error when repo URL provided without token, got nil")
+	if !errors.Is(err, repository.ErrGitHubTokenMissing) {
+		t.Fatalf("expected ErrGitHubTokenMissing, got %v", err)
+	}
+	err = svc.projectRepo.Create(&model.Project{
+		ID:     uuid.NewString(),
+		UserID: user.ID,
+		Name:   "no-tokens",
+	})
+	if err != nil {
+		t.Fatalf("empty token refs must be allowed, got %v", err)
+	}
+}
+
+func TestProjectRepoUpdate_RejectsDeletedToken(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-repo-update-gone")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "ghp_live")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = ""
+	})
+	if err := svc.db.Where("id = ?", token.ID).Delete(&model.UserGitHubToken{}).Error; err != nil {
+		t.Fatalf("delete token: %v", err)
+	}
+	project.Name = "renamed"
+	if err := svc.projectRepo.Update(project); !errors.Is(err, repository.ErrGitHubTokenMissing) {
+		t.Fatalf("expected ErrGitHubTokenMissing, got %v", err)
+	}
+}
+
+func TestProjectRepo_NullTokenRefsScanAsEmpty(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-null-token-scan")
+	project := createTestProject(t, svc.db, user.ID)
+	if err := svc.db.Exec("UPDATE projects SET public_github_token_id = NULL, code_github_token_id = NULL WHERE id = ?", project.ID).Error; err != nil {
+		t.Fatalf("null refs: %v", err)
+	}
+	var got model.Project
+	if err := svc.db.First(&got, "id = ?", project.ID).Error; err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got.PublicGitHubTokenID != "" || got.CodeGitHubTokenID != "" {
+		t.Fatalf("NULL refs must scan as empty strings, got public=%q code=%q", got.PublicGitHubTokenID, got.CodeGitHubTokenID)
 	}
 }
 
 func TestProjectServiceGetBranches_NotGitHubConfigured(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-branches")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	projectSvc := newTestProjectService(svc)
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
 	})
 
 	_, _, err := projectSvc.GetBranches(t.Context(), project.ID, user.ID)
@@ -236,313 +332,129 @@ func TestProjectServiceGetBranches_NotGitHubConfigured(t *testing.T) {
 	}
 }
 
-func decryptProjectPRToken(t *testing.T, svc *testServices, projectID string) string {
-	t.Helper()
-	var stored model.Project
-	if err := svc.db.First(&stored, "id = ?", projectID).Error; err != nil {
-		t.Fatalf("reload project: %v", err)
-	}
-	if len(stored.GithubPRTokenEncrypted) == 0 {
-		return ""
-	}
-	plain, err := crypto.Decrypt(stored.GithubPRTokenEncrypted, []byte(svc.cfg.Encryption.Key))
-	if err != nil {
-		t.Fatalf("decrypt stored pr token: %v", err)
-	}
-	return string(plain)
-}
-
-func decryptProjectToken(t *testing.T, svc *testServices, projectID string) string {
-	t.Helper()
-	var stored model.Project
-	if err := svc.db.First(&stored, "id = ?", projectID).Error; err != nil {
-		t.Fatalf("reload project: %v", err)
-	}
-	if len(stored.GithubTokenEncrypted) == 0 {
-		return ""
-	}
-	plain, err := crypto.Decrypt(stored.GithubTokenEncrypted, []byte(svc.cfg.Encryption.Key))
-	if err != nil {
-		t.Fatalf("decrypt stored token: %v", err)
-	}
-	return string(plain)
-}
-
-// 创建时可不带反馈仓库直接配 PR Token；响应只暴露 has_github_pr_token，
-// 明文与密文都不出现在响应 JSON 里。
-func TestProjectServiceCreate_WithPRToken(t *testing.T) {
+// 更新三态：key 缺省保留现值、Set+空值清空、Set+非空替换（须属于当前用户）。
+func TestProjectServiceUpdate_TokenReferenceThreeStates(t *testing.T) {
 	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-token")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-
-	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:          "pr-token-project",
-		GithubPrToken: api.Ptr("pr-token-v1"),
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !project.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token=true")
-	}
-	if got := decryptProjectPRToken(t, svc, project.Id); got != "pr-token-v1" {
-		t.Fatalf("expected stored pr-token-v1, got %q", got)
-	}
-
-	body, err := json.Marshal(project)
-	if err != nil {
-		t.Fatalf("marshal response: %v", err)
-	}
-	if strings.Contains(string(body), "pr-token-v1") || strings.Contains(string(body), `"github_pr_token"`) {
-		t.Fatalf("response leaks pr token material: %s", body)
-	}
-}
-
-// pr_token_source_project_id 复制源项目的 PR Token 密文，解密后与源 Token 相同；
-// 与 github_pr_token 同传时 source 优先（与 source_project_id 语义一致）。
-func TestProjectServiceCreate_PRTokenFromSource(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-source")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-shared")
-	})
-
-	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:                   "pr-source-project",
-		PrTokenSourceProjectId: api.Ptr(source.ID),
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !project.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token=true")
-	}
-	if got := decryptProjectPRToken(t, svc, project.Id); got != "pr-token-shared" {
-		t.Fatalf("expected copied pr-token-shared, got %q", got)
-	}
-
-	project2, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:                   "pr-source-wins",
-		GithubPrToken:          api.Ptr("pr-token-other"),
-		PrTokenSourceProjectId: api.Ptr(source.ID),
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if got := decryptProjectPRToken(t, svc, project2.Id); got != "pr-token-shared" {
-		t.Fatalf("expected source to win with pr-token-shared, got %q", got)
-	}
-}
-
-// source 项目不存在返回 40401；存在但未配 PR Token 返回 40001。
-func TestProjectServiceCreate_PRTokenSourceErrors(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-source-err")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	noPRToken := createTestProject(t, svc.db, user.ID)
-
-	for _, tc := range []struct {
-		name     string
-		sourceID string
-		wantCode int
-	}{
-		{"source missing", "nonexistent-project-id", errs.ErrProjectNotFound.Code},
-		{"source has no pr token", noPRToken.ID, errs.ErrInvalidParams.Code},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-				Name:                   "pr-source-err-" + tc.name,
-				PrTokenSourceProjectId: api.Ptr(tc.sourceID),
-			})
-			appErr, ok := err.(*errs.AppError)
-			if !ok || appErr.Code != tc.wantCode {
-				t.Fatalf("expected code %d, got %v", tc.wantCode, err)
-			}
-		})
-	}
-}
-
-// 未传任何 PR Token 字段时更新保留现值。
-func TestProjectServiceUpdate_PreservesPRToken(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-preserve")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	user := createTestUser(t, svc.db, "user-ref-three")
+	projectSvc := newTestProjectService(svc)
+	tokenA := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "ghp_token_a")
+	tokenB := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "ghp_token_b")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+		p.PublicGitHubTokenID = tokenA.ID
+		p.CodeGitHubTokenID = tokenA.ID
 	})
 
-	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		Description: api.Ptr("renamed"),
-	})
-	if err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if !resp.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token preserved")
-	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
-		t.Fatalf("expected pr-token-v1 preserved, got %q", got)
-	}
-}
-
-// 传非空 github_pr_token 替换现值；显式空串视为不修改。
-func TestProjectServiceUpdate_ReplacesPRToken(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-replace")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
-	})
-
-	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		GithubPrToken: api.Ptr("pr-token-v2"),
-	})
-	if err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if !resp.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token after replace")
-	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v2" {
-		t.Fatalf("expected pr-token-v2, got %q", got)
+	storedRefs := func() (string, string) {
+		var stored model.Project
+		if err := svc.db.First(&stored, "id = ?", project.ID).Error; err != nil {
+			t.Fatalf("reload project: %v", err)
+		}
+		return stored.PublicGitHubTokenID, stored.CodeGitHubTokenID
 	}
 
+	// key 缺省：保留现值
 	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		GithubPrToken: api.Ptr(""),
+		Description: api.Ptr("untouched refs"),
 	}); err != nil {
-		t.Fatalf("update with empty token: %v", err)
+		t.Fatalf("update without refs: %v", err)
 	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v2" {
-		t.Fatalf("expected empty string to keep pr-token-v2, got %q", got)
+	publicRef, codeRef := storedRefs()
+	if publicRef != tokenA.ID || codeRef != tokenA.ID {
+		t.Fatalf("expected refs preserved, got %q/%q", publicRef, codeRef)
+	}
+
+	// 非空替换：公开仓库换到 tokenB，代码仓库保持
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		PublicGithubTokenId: TokenRefUpdate{Set: true, Value: tokenB.ID},
+	}); err != nil {
+		t.Fatalf("update replace public ref: %v", err)
+	}
+	publicRef, codeRef = storedRefs()
+	if publicRef != tokenB.ID || codeRef != tokenA.ID {
+		t.Fatalf("expected public=%s code=%s, got %q/%q", tokenB.ID, tokenA.ID, publicRef, codeRef)
+	}
+
+	// 显式清空：Set+空值清空公开仓库引用
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		PublicGithubTokenId: TokenRefUpdate{Set: true},
+	}); err != nil {
+		t.Fatalf("update clear public ref: %v", err)
+	}
+	publicRef, codeRef = storedRefs()
+	if publicRef != "" || codeRef != tokenA.ID {
+		t.Fatalf("expected public cleared, got %q/%q", publicRef, codeRef)
 	}
 }
 
-// clear_github_pr_token=true 显式清除：字段置空、has_github_pr_token=false、
-// 后续 PR 读取恢复沿用项目 Token；清除不删除既有的 PR 关联行。
-func TestProjectServiceUpdate_ClearsPRToken(t *testing.T) {
+// 更新时引用不属于当前用户返回 40420，且失败请求不改动现值。
+func TestProjectServiceUpdate_TokenReferenceValidation(t *testing.T) {
 	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-clear")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	user := createTestUser(t, svc.db, "user-upd-ref-err")
+	other := createTestUser(t, svc.db, "user-upd-ref-other")
+	foreign := createTestToken(t, svc.db, svc.cfg.Encryption.Key, other.ID, "ghp_foreign_upd")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "ghp_keep")
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
 	})
-
-	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		ClearGithubPrToken: api.Ptr(true),
-	})
-	if err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if resp.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token=false after clear")
-	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "" {
-		t.Fatalf("expected stored pr token cleared, got %q", got)
-	}
-}
-
-// 更新时经 pr_token_source_project_id 复制源项目密文；与 github_pr_token
-// 同传时 source 优先。
-func TestProjectServiceUpdate_PRTokenFromSource(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-upd-source")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-shared")
-	})
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
-	})
-
-	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		PrTokenSourceProjectId: api.Ptr(source.ID),
-	})
-	if err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if !resp.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token after copy")
-	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-shared" {
-		t.Fatalf("expected copied pr-token-shared, got %q", got)
-	}
-
-	resp, err = projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		GithubPrToken:          api.Ptr("pr-token-v2"),
-		PrTokenSourceProjectId: api.Ptr(source.ID),
-	})
-	if err != nil {
-		t.Fatalf("update with token+source: %v", err)
-	}
-	if !resp.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token after token+source")
-	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-shared" {
-		t.Fatalf("expected source to win with pr-token-shared, got %q", got)
-	}
-}
-
-// 更新时 source 项目不存在返回 40401；未配 PR Token 返回 40001。
-func TestProjectServiceUpdate_PRTokenSourceErrors(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-upd-source-err")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	noPRToken := createTestProject(t, svc.db, user.ID)
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
-	})
+	projectSvc := newTestProjectService(svc)
 
 	for _, tc := range []struct {
 		name     string
-		sourceID string
-		wantCode int
+		publicID string
 	}{
-		{"source missing", "nonexistent-project-id", errs.ErrProjectNotFound.Code},
-		{"source has no pr token", noPRToken.ID, errs.ErrInvalidParams.Code},
+		{"missing", "nonexistent-token-id"},
+		{"foreign", foreign.ID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-				PrTokenSourceProjectId: api.Ptr(tc.sourceID),
+				PublicGithubTokenId: TokenRefUpdate{Set: true, Value: tc.publicID},
 			})
 			appErr, ok := err.(*errs.AppError)
-			if !ok || appErr.Code != tc.wantCode {
-				t.Fatalf("expected code %d, got %v", tc.wantCode, err)
+			if !ok || !errors.Is(appErr, errs.ErrGitHubTokenNotFound) {
+				t.Fatalf("expected ErrGitHubTokenNotFound, got %v", err)
 			}
 		})
 	}
-	// 失败请求不得改动现值
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
-		t.Fatalf("expected pr-token-v1 unchanged, got %q", got)
+
+	var stored model.Project
+	if err := svc.db.First(&stored, "id = ?", project.ID).Error; err != nil {
+		t.Fatalf("reload project: %v", err)
+	}
+	if stored.PublicGitHubTokenID != token.ID {
+		t.Fatalf("expected failed updates to leave reference unchanged, got %q", stored.PublicGitHubTokenID)
 	}
 }
 
-// clear 标志与 github_pr_token 同时显式提供即冲突（不论取值——false/空串
-// 也算提供），返回 40001；这是按指针非 nil 判定，不是按解引用后的值。
-func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
+// 响应投影：两个引用字段原样返回（未配置为空串），不再有 has_github_* 布尔标记。
+func TestProjectServiceResponse_TokenReferences(t *testing.T) {
 	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-conflict")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
-	})
+	user := createTestUser(t, svc.db, "user-resp-refs")
+	projectSvc := newTestProjectService(svc)
 
-	for _, req := range []*UpdateProjectRequest{
-		{GithubPrToken: api.Ptr("pr-token-v2"), ClearGithubPrToken: api.Ptr(true)},
-		{GithubPrToken: api.Ptr("pr-token-v2"), ClearGithubPrToken: api.Ptr(false)},
-		{GithubPrToken: api.Ptr(""), ClearGithubPrToken: api.Ptr(true)},
-		{PrTokenSourceProjectId: api.Ptr("src"), ClearGithubPrToken: api.Ptr(true)},
-		{PrTokenSourceProjectId: api.Ptr(""), ClearGithubPrToken: api.Ptr(true)},
-	} {
-		_, err := projectSvc.Update(project.ID, user.ID, req)
-		appErr, ok := err.(*errs.AppError)
-		if !ok || appErr.Code != errs.ErrInvalidParams.Code {
-			t.Fatalf("expected 40001 for %+v, got %v", req, err)
-		}
+	bare := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
+	})
+	resp, err := projectSvc.Get(bare.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
 	}
-	// 冲突请求不得改动现值
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
-		t.Fatalf("expected pr-token-v1 unchanged after conflict, got %q", got)
+	if resp.PublicGithubTokenId != "" || resp.CodeGithubTokenId != "" {
+		t.Fatalf("expected empty references, got %q/%q", resp.PublicGithubTokenId, resp.CodeGithubTokenId)
+	}
+
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "ghp_linked")
+	linked := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+	resp, err = projectSvc.Get(linked.ID, user.ID)
+	if err != nil {
+		t.Fatalf("get linked: %v", err)
+	}
+	if resp.PublicGithubTokenId != token.ID || resp.CodeGithubTokenId != token.ID {
+		t.Fatalf("expected references=%s, got %q/%q", token.ID, resp.PublicGithubTokenId, resp.CodeGithubTokenId)
 	}
 }
 
@@ -553,7 +465,7 @@ func TestProjectServiceUpdate_ClearAndReplaceConflict(t *testing.T) {
 func TestProjectServiceList_IssueCount(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-issue-count")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	projectSvc := newTestProjectService(svc)
 
 	busy := createTestProject(t, svc.db, user.ID)
 	quiet := createTestProject(t, svc.db, user.ID)
@@ -648,159 +560,12 @@ func TestProjectServiceList_IssueCount(t *testing.T) {
 	}
 }
 
-// pr_token_source_kind=access 时经 pr_token_source_project_id 复制源项目的
-// GitHub Access Token 密文（同密钥直接复用 blob）；显式 "pr" 与缺省等价。
-func TestProjectServiceCreate_PRTokenSourceKindAccess(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-kind-access")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "access-token-src")
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-src")
-	})
-
-	project, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:                   "pr-kind-access",
-		PrTokenSourceProjectId: api.Ptr(source.ID),
-		PrTokenSourceKind:      api.Ptr(api.Access),
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if !project.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token=true")
-	}
-	if got := decryptProjectPRToken(t, svc, project.Id); got != "access-token-src" {
-		t.Fatalf("expected copied access-token-src, got %q", got)
-	}
-
-	project2, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:                   "pr-kind-explicit-pr",
-		PrTokenSourceProjectId: api.Ptr(source.ID),
-		PrTokenSourceKind:      api.Ptr(api.Pr),
-	})
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
-	}
-	if got := decryptProjectPRToken(t, svc, project2.Id); got != "pr-token-src" {
-		t.Fatalf("expected explicit pr to copy pr-token-src, got %q", got)
-	}
-}
-
-// pr_token_source_kind 单独提供（不带 source）、取值非法、或 kind=access 而源项目
-// 未配 Access Token 均返回 40001；kind=pr 时源项目未配 PR Token 同原逻辑 40001。
-func TestProjectServiceCreate_PRTokenSourceKindErrors(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-kind-err")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "access-token-src")
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-src")
-	})
-	accessOnly := createTestProject(t, svc.db, user.ID)
-	noAccess := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = nil
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-x")
-	})
-
-	for _, tc := range []struct {
-		name     string
-		kind     *api.PrTokenSourceKind
-		sourceID *string
-	}{
-		{"kind alone access", api.Ptr(api.Access), nil},
-		{"kind alone pr", api.Ptr(api.Pr), nil},
-		{"kind invalid", api.Ptr(api.PrTokenSourceKind("bogus")), api.Ptr(source.ID)},
-		{"access kind but source has no access token", api.Ptr(api.Access), api.Ptr(noAccess.ID)},
-		{"pr kind but source has no pr token", api.Ptr(api.Pr), api.Ptr(accessOnly.ID)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-				Name:                   "pr-kind-err",
-				PrTokenSourceProjectId: tc.sourceID,
-				PrTokenSourceKind:      tc.kind,
-			})
-			appErr, ok := err.(*errs.AppError)
-			if !ok || appErr.Code != errs.ErrInvalidParams.Code {
-				t.Fatalf("expected 40001, got %v", err)
-			}
-		})
-	}
-}
-
-// 更新时 kind=access 同样复制源项目 Access Token 密文；显式 "pr" 走原逻辑。
-func TestProjectServiceUpdate_PRTokenSourceKindAccess(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-upd-kind")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "access-token-src")
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-src")
-	})
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
-	})
-
-	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		PrTokenSourceProjectId: api.Ptr(source.ID),
-		PrTokenSourceKind:      api.Ptr(api.Access),
-	})
-	if err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if !resp.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token after access-kind copy")
-	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "access-token-src" {
-		t.Fatalf("expected copied access-token-src, got %q", got)
-	}
-}
-
-// 更新路径同样的 kind 校验：单独提供、非法值、access 源无 Access Token 均 40001。
-func TestProjectServiceUpdate_PRTokenSourceKindErrors(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-upd-kind-err")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	noAccess := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = nil
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-x")
-	})
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
-	})
-
-	for _, tc := range []struct {
-		name     string
-		kind     *api.PrTokenSourceKind
-		sourceID *string
-	}{
-		{"kind alone access", api.Ptr(api.Access), nil},
-		{"kind invalid", api.Ptr(api.PrTokenSourceKind("bogus")), api.Ptr(noAccess.ID)},
-		{"access kind but source has no access token", api.Ptr(api.Access), api.Ptr(noAccess.ID)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-				PrTokenSourceProjectId: tc.sourceID,
-				PrTokenSourceKind:      tc.kind,
-			})
-			appErr, ok := err.(*errs.AppError)
-			if !ok || appErr.Code != errs.ErrInvalidParams.Code {
-				t.Fatalf("expected 40001, got %v", err)
-			}
-		})
-	}
-	// 失败请求不得改动现值
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
-		t.Fatalf("expected pr-token-v1 unchanged, got %q", got)
-	}
-}
-
 // description 按指针三态更新：nil 保留现值、指向空串清空、指向非空替换
 // （INT-67 回归：Update 曾从未给 project.Description 赋值，任何取值都静默无效）。
 func TestProjectServiceUpdate_Description(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-desc")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
+	projectSvc := newTestProjectService(svc)
 	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
 		p.Description = "old desc"
 	})
@@ -839,89 +604,5 @@ func TestProjectServiceUpdate_Description(t *testing.T) {
 	}
 	if resp.Description != "" || storedDesc() != "" {
 		t.Fatalf("expected cleared description, got resp=%q stored=%q", resp.Description, storedDesc())
-	}
-}
-
-// has_github_token 与 has_github_pr_token 同为布尔标记：
-// 按 GithubTokenEncrypted 是否非空填充。
-func TestProjectServiceResponse_HasGithubToken(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-has-token")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-
-	noToken := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = nil
-	})
-	resp, err := projectSvc.Get(noToken.ID, user.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if resp.HasGithubToken {
-		t.Fatal("expected has_github_token=false")
-	}
-
-	withToken := createTestProject(t, svc.db, user.ID)
-	resp, err = projectSvc.Get(withToken.ID, user.ID)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	if !resp.HasGithubToken {
-		t.Fatal("expected has_github_token=true")
-	}
-}
-
-// clear_github_pr_token=false 单独传按未提供处理：不报错也不改动现值。
-func TestProjectServiceUpdate_ClearFalseIsNoop(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-pr-clear-false")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubPRTokenEncrypted = encryptTestToken(t, svc.cfg, "pr-token-v1")
-	})
-
-	resp, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		ClearGithubPrToken: api.Ptr(false),
-	})
-	if err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	if !resp.HasGithubPrToken {
-		t.Fatal("expected has_github_pr_token unchanged")
-	}
-	if got := decryptProjectPRToken(t, svc, project.ID); got != "pr-token-v1" {
-		t.Fatalf("expected pr-token-v1 unchanged, got %q", got)
-	}
-}
-
-// source_project_id 指向未配置 Access Token 的项目：Create 直接 40001，
-// Update 也 40001 且不抹掉项目现有 Token（不再静默写空密文）。
-func TestProjectService_GitHubTokenSourceWithoutToken(t *testing.T) {
-	svc := setupTestServices(t)
-	user := createTestUser(t, svc.db, "user-access-src-empty")
-	projectSvc := NewProjectService(svc.projectRepo, svc.versionRepo, svc.syncStateRepo, svc.storage, svc.cfg, zap.NewNop())
-	source := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = nil
-	})
-	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "access-token-v1")
-	})
-
-	_, err := projectSvc.Create(user.ID, &CreateProjectRequest{
-		Name:            "from-empty-source",
-		RepositoryUrl:   api.Ptr("https://github.com/acme/demo"),
-		SourceProjectId: api.Ptr(source.ID),
-	})
-	if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
-		t.Fatalf("create: expected 40001, got %v", err)
-	}
-
-	_, err = projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
-		SourceProjectId: api.Ptr(source.ID),
-	})
-	if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != errs.ErrInvalidParams.Code {
-		t.Fatalf("update: expected 40001, got %v", err)
-	}
-	if got := decryptProjectToken(t, svc, project.ID); got != "access-token-v1" {
-		t.Fatalf("expected access-token-v1 unchanged, got %q", got)
 	}
 }

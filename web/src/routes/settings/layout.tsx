@@ -6,6 +6,7 @@ import {
   User,
   KeyRound,
   Key,
+  KeySquare,
   SlidersHorizontal,
   Sparkles,
   Copy,
@@ -18,6 +19,7 @@ const settingsNavItems = [
   { to: "/settings/password", label: "修改密码", icon: KeyRound },
   { to: "/settings/ai", label: "AI 配置", icon: Sparkles },
   { to: "/settings/issue-prompts", label: "问题提示词", icon: Copy },
+  { to: "/settings/github-tokens", label: "GitHub Tokens", icon: KeySquare },
   { to: "/settings/api-keys", label: "API Keys", icon: Key },
   { to: "/settings/environments", label: "环境", icon: Server },
 ];

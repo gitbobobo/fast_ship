@@ -38,6 +38,7 @@ type sqliteIndexInfo struct {
 // autoMigrateModels 是启动时 AutoMigrate 的全量模型清单，测试也用它建全新库。
 var autoMigrateModels = []interface{}{
 	&model.User{},
+	&model.UserGitHubToken{},
 	&model.UserAISetting{},
 	&model.UserIssuePromptSetting{},
 	&model.ApiKey{},
@@ -168,6 +169,13 @@ func main() {
 		log.Fatalf("已读水位数据迁移失败: %v", err)
 	}
 
+	// 项目 GitHub Token 密文迁移进用户级 Token 库并切换到引用列（INT-84）。
+	// 依赖 AutoMigrate 已建好 user_github_tokens 与 projects 引用列；
+	// 解密失败等错误直接启动失败，宁可起不来也不带错跑。
+	if err := migrateProjectGitHubTokens(db, []byte(cfg.Encryption.Key), zapLogger); err != nil {
+		log.Fatalf("项目 GitHub Token 迁移失败: %v", err)
+	}
+
 	// 初始化存储
 	fileStorage := storage.NewLocalStorage(cfg.Upload.StoragePath)
 
@@ -176,6 +184,7 @@ func main() {
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
 	userIssuePromptRepo := repository.NewUserIssuePromptSettingRepository(db)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
+	githubTokenRepo := repository.NewUserGitHubTokenRepository(db)
 	dashboardRepo := repository.NewDashboardRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
@@ -210,10 +219,11 @@ func main() {
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zapLogger)
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
+	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zapLogger)
 	dashboardService := service.NewDashboardService(dashboardRepo)
-	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zapLogger)
-	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zapLogger)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, zapLogger, screenshotAnnotationRepo)
+	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zapLogger)
+	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zapLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, zapLogger, screenshotAnnotationRepo)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	recommendationService := service.NewIssueRecommendationService(recommendationRepo, issueRepo, issueInternalMetaRepo, projectRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
@@ -222,7 +232,7 @@ func main() {
 	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zapLogger)
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	screenshotAnnotationService := service.NewScreenshotAnnotationService(screenshotAnnotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage)
-	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zapLogger)
+	shipService := service.NewShipService(versionRepo, projectRepo, githubTokenRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zapLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
 	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zapLogger)
 	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zapLogger)
@@ -232,6 +242,7 @@ func main() {
 	aiHandler := handler.NewAIHandler(aiService)
 	issuePromptHandler := handler.NewIssuePromptHandler(issuePromptService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
+	githubTokenHandler := handler.NewGitHubTokenHandler(githubTokenService)
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
@@ -309,7 +320,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

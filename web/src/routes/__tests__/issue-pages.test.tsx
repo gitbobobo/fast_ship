@@ -7,7 +7,7 @@ import EditInternalIssuePage from "@/routes/projects/$id/issues/$iid/edit";
 import IssueDetailPage from "@/routes/projects/$id/issues/$iid";
 import NewInternalIssuePage from "@/routes/projects/$id/issues/new";
 import IssuesPage from "@/routes/issues/index";
-import { renderWithRoute } from "@/test/render";
+import { renderWithRoute, withTestQueryClient } from "@/test/render";
 import { useProject, useProjects } from "@/lib/hooks/use-projects";
 import {
   useIssues,
@@ -1221,11 +1221,13 @@ describe("Issue pages", () => {
     );
 
     view.rerender(
-      <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-1"]}>
-        <Routes>
-          <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
-        </Routes>
-      </MemoryRouter>,
+      withTestQueryClient(
+        <MemoryRouter initialEntries={["/projects/proj-1/issues/issue-1"]}>
+          <Routes>
+            <Route path="/projects/:id/issues/:iid" element={<IssueDetailPage />} />
+          </Routes>
+        </MemoryRouter>,
+      ),
     );
 
     expect(screen.getByDisplayValue("修复崩溃并补充测试")).toBeInTheDocument();

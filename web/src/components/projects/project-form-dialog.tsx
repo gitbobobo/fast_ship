@@ -1,8 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { Plus } from "lucide-react";
 import { GitHubTokenHelpDialog } from "@/components/projects/github-token-help-dialog";
+import { GithubTokenCreateDialog } from "@/components/settings/github-token-create-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,15 +33,10 @@ import {
   useProject,
   useCreateProject,
   useUpdateProject,
-  useProjects,
 } from "@/lib/hooks/use-projects";
+import { useGithubTokens } from "@/lib/hooks/use-github-tokens";
 import { projectApi } from "@/lib/api/projects";
-import { useTokenSource } from "@/lib/hooks/use-token-source";
-import {
-  accessTokenSourceProjects,
-  prTokenSourceOptions,
-} from "@/lib/utils/token-source";
-import { parseRepoUrl, hasGitHubRepo, repoSlug } from "@/lib/utils/github";
+import { parseRepoUrl, hasGitHubRepo } from "@/lib/utils/github";
 import { toast } from "sonner";
 
 interface ProjectFormDialogProps {
@@ -47,6 +44,73 @@ interface ProjectFormDialogProps {
   onOpenChange: (open: boolean) => void;
   mode: "create" | "edit";
   projectId?: string;
+}
+
+const emptyTokenOption = "__none__";
+
+// Token 引用选择器：选项来自用户级 Token 库，可空；「新建 Token」打开共用
+// 的创建对话框，成功后自动选中新记录。
+function TokenSelect({
+  id,
+  label,
+  value,
+  tokens,
+  isLoading,
+  onChange,
+  onCreateClick,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  tokens: GitHubToken[];
+  isLoading: boolean;
+  onChange: (tokenID: string) => void;
+  onCreateClick: () => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={id}>{label}（可选）</Label>
+      <div className="flex gap-2">
+        <Select
+          value={value || emptyTokenOption}
+          onValueChange={(next) => onChange(next === emptyTokenOption || next === null ? "" : next)}
+        >
+          <SelectTrigger className="w-full" size="default">
+            <SelectValue>
+              {value
+                ? tokens.find((token) => token.id === value)?.title ?? "已选 Token"
+                : "不使用"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={emptyTokenOption}>不使用</SelectItem>
+            {tokens.map((token) => (
+              <SelectItem key={token.id} value={token.id}>
+                {token.title}（{token.token_prefix}••••）
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          aria-label={`新建 ${label}`}
+          onClick={onCreateClick}
+        >
+          <Plus className="h-4 w-4" />
+        </Button>
+      </div>
+      {isLoading && (
+        <p className="text-xs text-muted-foreground">正在加载 Token 列表...</p>
+      )}
+      {!isLoading && tokens.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          还没有 Token，可点击 + 新建
+        </p>
+      )}
+    </div>
+  );
 }
 
 export function ProjectFormDialog({
@@ -60,7 +124,7 @@ export function ProjectFormDialog({
   const { data: project, isLoading } = useProject(projectId ?? "");
   const createProject = useCreateProject();
   const updateProject = useUpdateProject(projectId ?? "");
-  const { data: existingProjects } = useProjects();
+  const { data: tokens, isLoading: tokensLoading } = useGithubTokens();
 
   const schema = isEdit ? projectEditSchema : projectSchema;
   type FormData = ProjectInput | ProjectEditInput;
@@ -77,25 +141,13 @@ export function ProjectFormDialog({
   });
 
   const repositoryUrl = useWatch({ control, name: "repository_url" }) || "";
-  const clearPRToken = useWatch({ control, name: "clear_github_pr_token" });
+  const publicTokenId = useWatch({ control, name: "public_github_token_id" }) || "";
+  const codeTokenId = useWatch({ control, name: "code_github_token_id" }) || "";
   const { owner, repo } = parseRepoUrl(repositoryUrl);
+  const tokenList = useMemo(() => tokens ?? [], [tokens]);
 
-  const { tokenSource, handleTokenSourceChange } = useTokenSource(
-    control,
-    setValue,
-    "github_token",
-    "source_project_id",
-  );
-  const {
-    tokenSource: prTokenSource,
-    handleTokenSourceChange: handlePRTokenSourceChange,
-  } = useTokenSource(
-    control,
-    setValue,
-    "github_pr_token",
-    "pr_token_source_project_id",
-    "pr_token_source_kind",
-  );
+  const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [creatingFor, setCreatingFor] = useState<"public" | "code">("public");
 
   useEffect(() => {
     if (isEdit && project) {
@@ -105,31 +157,33 @@ export function ProjectFormDialog({
         repository_url: hasGitHubRepo(project)
           ? `https://github.com/${project.github_owner}/${project.github_repo}`
           : "",
-        github_token: "",
-        github_pr_token: "",
-        clear_github_pr_token: false,
-        source_project_id: undefined,
-        pr_token_source_project_id: undefined,
-        pr_token_source_kind: undefined,
+        public_github_token_id: project.public_github_token_id || "",
+        code_github_token_id: project.code_github_token_id || "",
       });
     } else if (!isEdit && open) {
       reset({
         name: "",
         description: "",
         repository_url: "",
-        github_token: "",
-        github_pr_token: "",
-        clear_github_pr_token: false,
-        source_project_id: undefined,
-        pr_token_source_project_id: undefined,
-        pr_token_source_kind: undefined,
+        public_github_token_id: "",
+        code_github_token_id: "",
       });
     }
   }, [isEdit, project, open, reset]);
 
+  const openCreateDialog = (purpose: "public" | "code") => {
+    setCreatingFor(purpose);
+    setCreateDialogOpen(true);
+  };
+
+  const handleTokenCreated = (token: GitHubToken) => {
+    setValue(creatingFor === "public" ? "public_github_token_id" : "code_github_token_id", token.id);
+  };
+
   const onSubmit = async (data: FormData) => {
     try {
       if (isEdit) {
+        // 编辑：引用字段只在用户改动过时才提交（缺省保留现值）。
         const payload: Parameters<typeof projectApi.update>[1] = {
           name: data.name,
         };
@@ -137,37 +191,26 @@ export function ProjectFormDialog({
           payload.description = data.description;
         }
         if (data.repository_url) payload.repository_url = data.repository_url;
-        const editData = data as ProjectEditInput;
-        if (editData.source_project_id) {
-          payload.source_project_id = editData.source_project_id;
-        } else if (editData.github_token) {
-          payload.github_token = editData.github_token;
+        if (project && data.public_github_token_id !== undefined) {
+          const current = project.public_github_token_id || "";
+          payload.public_github_token_id =
+            data.public_github_token_id === current
+              ? undefined
+              : data.public_github_token_id || null;
         }
-        if (editData.clear_github_pr_token) {
-          payload.clear_github_pr_token = true;
-        } else if (editData.pr_token_source_project_id) {
-          payload.pr_token_source_project_id = editData.pr_token_source_project_id;
-          if (editData.pr_token_source_kind) {
-            payload.pr_token_source_kind = editData.pr_token_source_kind;
-          }
-        } else if (editData.github_pr_token) {
-          payload.github_pr_token = editData.github_pr_token;
+        if (project && data.code_github_token_id !== undefined) {
+          const current = project.code_github_token_id || "";
+          payload.code_github_token_id =
+            data.code_github_token_id === current
+              ? undefined
+              : data.code_github_token_id || null;
         }
         await updateProject.mutateAsync(payload);
         toast.success("项目已更新");
         onOpenChange(false);
       } else {
         const createData = data as ProjectInput;
-        const payload: {
-          name: string;
-          description?: string;
-          repository_url?: string;
-          github_token?: string;
-          github_pr_token?: string;
-          source_project_id?: string;
-          pr_token_source_project_id?: string;
-          pr_token_source_kind?: "access" | "pr";
-        } = {
+        const payload: Parameters<typeof projectApi.create>[0] = {
           name: createData.name,
         };
         if (createData.description) {
@@ -176,18 +219,11 @@ export function ProjectFormDialog({
         if (createData.repository_url) {
           payload.repository_url = createData.repository_url;
         }
-        if (createData.source_project_id) {
-          payload.source_project_id = createData.source_project_id;
-        } else if (createData.github_token) {
-          payload.github_token = createData.github_token;
+        if (createData.public_github_token_id) {
+          payload.public_github_token_id = createData.public_github_token_id;
         }
-        if (createData.pr_token_source_project_id) {
-          payload.pr_token_source_project_id = createData.pr_token_source_project_id;
-          if (createData.pr_token_source_kind) {
-            payload.pr_token_source_kind = createData.pr_token_source_kind;
-          }
-        } else if (createData.github_pr_token) {
-          payload.github_pr_token = createData.github_pr_token;
+        if (createData.code_github_token_id) {
+          payload.code_github_token_id = createData.code_github_token_id;
         }
         const res = await createProject.mutateAsync(payload);
         toast.success("项目创建成功");
@@ -198,17 +234,6 @@ export function ProjectFormDialog({
       toast.error(isEdit ? "更新失败，请检查输入" : "创建失败，请检查输入");
     }
   };
-
-  const accessTokenSources = accessTokenSourceProjects(
-    existingProjects?.items ?? [],
-    isEdit ? projectId : undefined,
-  );
-  const hasAccessTokenSources = accessTokenSources.length > 0;
-  const prTokenOptions = prTokenSourceOptions(
-    existingProjects?.items ?? [],
-    isEdit ? projectId : undefined,
-  );
-  const hasPRTokenSources = prTokenOptions.length > 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -251,6 +276,14 @@ export function ProjectFormDialog({
 
             <div className="space-y-2">
               <Label htmlFor="project-repository_url">仓库链接（可选）</Label>
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">
+                  仓库与 Token 相互独立，可分开配置
+                </p>
+                {hasGitHubRepo({ github_owner: owner, github_repo: repo }) && (
+                  <GitHubTokenHelpDialog owner={owner} repo={repo} />
+                )}
+              </div>
               <Input
                 id="project-repository_url"
                 placeholder="https://github.com/owner/repo 或 owner/repo"
@@ -263,122 +296,31 @@ export function ProjectFormDialog({
               )}
             </div>
 
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="project-github_token">GitHub Access Token{!repositoryUrl && "（请先填写仓库链接）"}</Label>
-                {repositoryUrl && <GitHubTokenHelpDialog owner={owner} repo={repo} />}
-              </div>
+            <TokenSelect
+              id="project-public_github_token_id"
+              label="公开仓库 Token"
+              value={publicTokenId}
+              tokens={tokenList}
+              isLoading={tokensLoading}
+              onChange={(next) => setValue("public_github_token_id", next)}
+              onCreateClick={() => openCreateDialog("public")}
+            />
+            <p className="text-xs text-muted-foreground -mt-2">
+              用于 Issue 同步、GitHub 写操作、分支查询与发货；未配置时这些功能停用
+            </p>
 
-              {hasAccessTokenSources && (
-                <Select
-                  value={tokenSource}
-                  onValueChange={handleTokenSourceChange}
-                  disabled={!repositoryUrl}
-                >
-                  <SelectTrigger className="w-full" size="default">
-                    <SelectValue>
-                      {tokenSource === ""
-                        ? isEdit
-                          ? "不修改 / 输入新 Token"
-                          : "输入新 Token"
-                        : accessTokenSources.find((p) => p.id === tokenSource)?.name ?? "选择 Token 来源"}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">
-                      {isEdit ? "不修改 / 输入新 Token" : "输入新 Token"}
-                    </SelectItem>
-                    {accessTokenSources.map((proj) => (
-                      <SelectItem key={proj.id} value={proj.id}>
-                        {proj.name}{hasGitHubRepo(proj) ? ` (${repoSlug(proj)})` : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-
-              {(!hasAccessTokenSources || tokenSource === "") && (
-                <>
-                  <Input
-                    id="project-github_token"
-                    type="password"
-                    placeholder={isEdit ? "留空则不修改" : "github_pat_xxx 或 ghp_xxx"}
-                    disabled={!repositoryUrl}
-                    {...register("github_token")}
-                  />
-                  {errors.github_token && (
-                    <p className="text-xs text-destructive">
-                      {errors.github_token.message}
-                    </p>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    {isEdit
-                      ? "留空表示不修改当前 Token。推荐 Fine-grained Token（前缀 github_pat_），并确保选中目标仓库且具备 Contents 写权限"
-                      : "推荐 Fine-grained Token（前缀 github_pat_），并确保选中目标仓库且具备 Contents 写权限"}
-                  </p>
-                </>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="project-github_pr_token">PR 访问 Token（可选）</Label>
-                {isEdit && project?.has_github_pr_token && (
-                  <span className="text-xs text-muted-foreground">已配置</span>
-                )}
-              </div>
-              {hasPRTokenSources && (
-                <Select
-                  value={prTokenSource}
-                  onValueChange={handlePRTokenSourceChange}
-                  disabled={isEdit && !!clearPRToken}
-                >
-                  <SelectTrigger className="w-full" size="default">
-                    <SelectValue>
-                      {prTokenSource === ""
-                        ? isEdit
-                          ? "不修改 / 输入新 Token"
-                          : "输入新 Token"
-                        : prTokenOptions.find((o) => o.value === prTokenSource)?.label ?? "选择 Token 来源"}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">
-                      {isEdit ? "不修改 / 输入新 Token" : "输入新 Token"}
-                    </SelectItem>
-                    {prTokenOptions.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-              {(!hasPRTokenSources || prTokenSource === "") && (
-                <Input
-                  id="project-github_pr_token"
-                  type="password"
-                  placeholder={
-                    isEdit && project?.has_github_pr_token
-                      ? "留空则不修改，输入新值则替换"
-                      : "github_pat_xxx 或 ghp_xxx"
-                  }
-                  disabled={isEdit && !!clearPRToken}
-                  {...register("github_pr_token")}
-                />
-              )}
-              {isEdit && project?.has_github_pr_token && (
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input type="checkbox" {...register("clear_github_pr_token")} />
-                  清除已配置的 PR 访问 Token（恢复沿用项目 Token）
-                </label>
-              )}
-              <p className="text-xs text-muted-foreground">
-                {isEdit && project?.has_github_pr_token
-                  ? "用于访问其他仓库的 PR；留空则继续使用已配置的 PR 访问 Token"
-                  : "用于访问其他仓库的 PR；留空时使用项目 Token"}
-              </p>
-            </div>
+            <TokenSelect
+              id="project-code_github_token_id"
+              label="代码仓库 Token"
+              value={codeTokenId}
+              tokens={tokenList}
+              isLoading={tokensLoading}
+              onChange={(next) => setValue("code_github_token_id", next)}
+              onCreateClick={() => openCreateDialog("code")}
+            />
+            <p className="text-xs text-muted-foreground -mt-2">
+              仅用于读取关联 PR（含其他仓库）；未配置时匿名读公共 PR
+            </p>
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={isSubmitting}>
@@ -401,6 +343,12 @@ export function ProjectFormDialog({
           </form>
         )}
       </DialogContent>
+
+      <GithubTokenCreateDialog
+        open={createDialogOpen}
+        onOpenChange={setCreateDialogOpen}
+        onCreated={handleTokenCreated}
+      />
     </Dialog>
   );
 }

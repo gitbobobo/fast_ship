@@ -18,11 +18,12 @@ func New(code int, message string) *AppError {
 
 // 参数校验错误 40001-40099
 var (
-	ErrInvalidParams              = New(40001, "请求参数无效")
-	ErrTargetBranchNotFound       = New(40002, "目标分支不存在")
-	ErrProjectGitHubNotConfigured = New(40003, "该项目尚未关联 GitHub 仓库")
-	ErrScreenshotImageTooLarge    = New(40004, "截图尺寸超出可处理范围")
-	ErrPairingURLInvalid          = New(40005, "配对链接无效或缺少配对码")
+	ErrInvalidParams                   = New(40001, "请求参数无效")
+	ErrTargetBranchNotFound            = New(40002, "目标分支不存在")
+	ErrProjectGitHubNotConfigured      = New(40003, "该项目尚未关联 GitHub 仓库")
+	ErrScreenshotImageTooLarge         = New(40004, "截图尺寸超出可处理范围")
+	ErrPairingURLInvalid               = New(40005, "配对链接无效或缺少配对码")
+	ErrProjectPublicGitHubTokenMissing = New(40006, "该项目未配置公开仓库 Token")
 )
 
 // 认证错误 40100-40199
@@ -65,6 +66,7 @@ var (
 	ErrT3EnvironmentNotFound        = New(40417, "T3 环境不存在")
 	ErrT3ThreadNotFound             = New(40418, "T3 线程不存在")
 	ErrT3ThreadItemNotFound         = New(40419, "T3 线程条目不存在")
+	ErrGitHubTokenNotFound          = New(40420, "GitHub Token 不存在")
 )
 
 // 业务冲突 40900-40999
@@ -82,6 +84,10 @@ var (
 	ErrIssueNotRecommendable    = New(40910, "该 issue 当前状态不可被推荐")
 	ErrRecommendationDeferred   = New(40911, "该推荐已被用户延后处理，请勿再次推荐")
 	ErrT3EnvironmentNameExists  = New(40912, "环境名称在当前用户下已存在")
+	ErrGitHubTokenInUse         = New(40913, "该 Token 仍被项目引用，请先解除或更换引用")
+	// 消息不含目标记录信息；替换撞指纹时由 service 用 New 追加已有记录的 title/id。
+	ErrGitHubTokenDuplicate = New(40914, "相同的 Token 已存在")
+	ErrGitHubTokenConflict  = New(40915, "GitHub Token 已被其他请求更新")
 )
 
 // 前置条件未满足 41200-41299

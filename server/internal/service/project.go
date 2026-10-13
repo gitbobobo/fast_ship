@@ -40,6 +40,7 @@ func NewProjectService(
 	projectRepo *repository.ProjectRepository,
 	versionRepo *repository.VersionRepository,
 	syncStateRepo *repository.IssueSyncStateRepository,
+	tokenRepo *repository.UserGitHubTokenRepository,
 	storage storage.Storage,
 	cfg *config.Config,
 	logger *zap.Logger,
@@ -49,7 +50,7 @@ func NewProjectService(
 		versionRepo:   versionRepo,
 		syncStateRepo: syncStateRepo,
 		storage:       storage,
-		credentials:   newProjectCredentials(projectRepo, cfg, logger),
+		credentials:   newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
 		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -66,43 +67,38 @@ func (s *ProjectService) Create(userID string, req *CreateProjectRequest) (*Proj
 	}
 
 	var owner, repo string
-	var encryptedToken []byte
-
 	if repositoryURL := api.Deref(req.RepositoryUrl); repositoryURL != "" {
 		owner, repo, err = parseRepositoryURL(repositoryURL)
 		if err != nil {
 			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 		}
-		encryptedToken, err = s.credentials.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
-		if err != nil {
-			return nil, err
-		}
 	}
 
-	// PR 访问 Token 独立于反馈仓库配置：internal 项目也可以只配 PR Token。
-	// 冲突/kind/clear/source 复制/明文加密的判定全部收进 credentials.resolvePRToken；
-	// create 没有现值可保留，currentCiphertext 传 nil。
-	encryptedPRToken, err := s.credentials.resolvePRToken(userID, nil, projectPRTokenInput{
-		plaintext:       req.GithubPrToken,
-		sourceProjectID: req.PrTokenSourceProjectId,
-		sourceKind:      req.PrTokenSourceKind,
-	})
-	if err != nil {
-		return nil, err
+	// 引用必须属于当前用户；仓库与 Token 相互独立，可只填仓库不选 Token。
+	publicTokenID := api.Deref(req.PublicGithubTokenId)
+	codeTokenID := api.Deref(req.CodeGithubTokenId)
+	if appErr := s.credentials.CheckTokenReference(userID, publicTokenID); appErr != nil {
+		return nil, appErr
+	}
+	if appErr := s.credentials.CheckTokenReference(userID, codeTokenID); appErr != nil {
+		return nil, appErr
 	}
 
 	project := &model.Project{
-		ID:                     uuid.New().String(),
-		UserID:                 userID,
-		Name:                   req.Name,
-		Description:            api.Deref(req.Description),
-		GithubOwner:            owner,
-		GithubRepo:             repo,
-		GithubTokenEncrypted:   encryptedToken,
-		GithubPRTokenEncrypted: encryptedPRToken,
+		ID:                  uuid.New().String(),
+		UserID:              userID,
+		Name:                req.Name,
+		Description:         api.Deref(req.Description),
+		GithubOwner:         owner,
+		GithubRepo:          repo,
+		PublicGitHubTokenID: publicTokenID,
+		CodeGitHubTokenID:   codeTokenID,
 	}
 
 	if err := s.projectRepo.Create(project); err != nil {
+		if errors.Is(err, repository.ErrGitHubTokenMissing) {
+			return nil, errs.ErrGitHubTokenNotFound
+		}
 		return nil, errs.ErrInternal
 	}
 
@@ -166,6 +162,26 @@ func (s *ProjectService) List(userID string, page, pageSize int) ([]ProjectRespo
 	return resp, total, nil
 }
 
+// TokenRefUpdate 表达项目更新请求里 Token 引用字段的三态：
+// Set=false（JSON key 缺省）保留现值；Set=true 且 Value 为空（显式 null 或空串）
+// 清空该用途引用；Set=true 且 Value 非空替换。*string 表达不了三态——
+// 显式 null 与 key 缺省解引用后都是 nil，而两者语义相反（清空 vs 保留）。
+type TokenRefUpdate struct {
+	Set   bool
+	Value string
+}
+
+// UpdateProjectRequest 是项目更新的 service 入参，不再别名到 api.UpdateProjectRequest：
+// 两个 Token 引用字段需三态（见 TokenRefUpdate），其余字段沿用生成类型的指针语义；
+// handler 的手写 updateProjectInput 负责把 RawMessage 旁路解析成这里的三态。
+type UpdateProjectRequest struct {
+	Name                *string
+	Description         *string
+	RepositoryUrl       *string
+	PublicGithubTokenId TokenRefUpdate
+	CodeGithubTokenId   TokenRefUpdate
+}
+
 func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*ProjectResponse, error) {
 	project, err := s.projectRepo.FindByID(id, userID)
 	if err != nil {
@@ -196,38 +212,31 @@ func (s *ProjectService) Update(id, userID string, req *UpdateProjectRequest) (*
 		if err != nil {
 			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": "+err.Error())
 		}
-
-		willHaveToken := api.Deref(req.GithubToken) != "" || api.Deref(req.SourceProjectId) != "" || len(project.GithubTokenEncrypted) > 0
-		if !willHaveToken {
-			return nil, errs.New(errs.ErrInvalidParams.Code, errs.ErrInvalidParams.Message+": 请输入 GitHub Token 或选择复用已有项目的 Token")
-		}
-
 		project.GithubOwner = owner
 		project.GithubRepo = repo
 	}
 
-	if api.Deref(req.SourceProjectId) != "" || api.Deref(req.GithubToken) != "" {
-		encryptedToken, err := s.credentials.resolveGitHubToken(userID, api.Deref(req.GithubToken), api.Deref(req.SourceProjectId))
-		if err != nil {
-			return nil, err
+	// Token 引用三态：key 缺省保留、显式空清空、非空替换（须属于当前用户）。
+	if req.PublicGithubTokenId.Set {
+		if appErr := s.credentials.CheckTokenReference(userID, req.PublicGithubTokenId.Value); appErr != nil {
+			return nil, appErr
 		}
-		project.GithubTokenEncrypted = encryptedToken
+		project.PublicGitHubTokenID = req.PublicGithubTokenId.Value
 	}
-
-	// PR 访问 Token：冲突/kind 校验/clear 清除/source 复制/明文替换/保留现值
-	// 的判定全部收进 credentials.resolvePRToken，这里只把结果赋回字段。
-	encryptedPRToken, err := s.credentials.resolvePRToken(userID, project.GithubPRTokenEncrypted, projectPRTokenInput{
-		plaintext:       req.GithubPrToken,
-		sourceProjectID: req.PrTokenSourceProjectId,
-		sourceKind:      req.PrTokenSourceKind,
-		clear:           req.ClearGithubPrToken,
-	})
-	if err != nil {
-		return nil, err
+	if req.CodeGithubTokenId.Set {
+		if appErr := s.credentials.CheckTokenReference(userID, req.CodeGithubTokenId.Value); appErr != nil {
+			return nil, appErr
+		}
+		project.CodeGitHubTokenID = req.CodeGithubTokenId.Value
 	}
-	project.GithubPRTokenEncrypted = encryptedPRToken
 
 	if err := s.projectRepo.Update(project); err != nil {
+		if errors.Is(err, repository.ErrGitHubTokenMissing) {
+			return nil, errs.ErrGitHubTokenNotFound
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrProjectNotFound
+		}
 		return nil, errs.ErrInternal
 	}
 
@@ -325,15 +334,15 @@ func parseRepositoryURL(raw string) (owner, repo string, err error) {
 
 func (s *ProjectService) toResponse(p *model.Project) *ProjectResponse {
 	resp := &ProjectResponse{
-		Id:               p.ID,
-		Name:             p.Name,
-		Description:      p.Description,
-		GithubOwner:      p.GithubOwner,
-		GithubRepo:       p.GithubRepo,
-		HasGithubPrToken: len(p.GithubPRTokenEncrypted) > 0,
-		HasGithubToken:   len(p.GithubTokenEncrypted) > 0,
-		CreatedAt:        p.CreatedAt.Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:        p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		Id:                  p.ID,
+		Name:                p.Name,
+		Description:         p.Description,
+		GithubOwner:         p.GithubOwner,
+		GithubRepo:          p.GithubRepo,
+		PublicGithubTokenId: p.PublicGitHubTokenID,
+		CodeGithubTokenId:   p.CodeGitHubTokenID,
+		CreatedAt:           p.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:           p.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 
 	if s.syncStateRepo != nil {

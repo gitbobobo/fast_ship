@@ -33,8 +33,8 @@ const projectFixture: Project = {
   description: "旧描述",
   github_owner: "",
   github_repo: "",
-  has_github_token: false,
-  has_github_pr_token: false,
+  public_github_token_id: "",
+  code_github_token_id: "",
   created_at: "2026-10-01T00:00:00Z",
   updated_at: "2026-10-01T00:00:00Z",
 };

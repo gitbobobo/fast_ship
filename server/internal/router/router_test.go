@@ -18,6 +18,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
@@ -123,7 +124,8 @@ func TestRouterShipCheckRequiresJWT(t *testing.T) {
 	project := createRouterTestProject(t, env.db, auth.UserID, func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = []byte{}
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 	version := createRouterTestVersion(t, env.db, project.ID, func(v *model.Version) {
 		v.ReleaseNotes = ""
@@ -803,6 +805,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 
 	if err := db.AutoMigrate(
 		&model.User{},
+		&model.UserGitHubToken{},
 		&model.UserAISetting{},
 		&model.UserIssuePromptSetting{},
 		&model.ApiKey{},
@@ -873,6 +876,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	dashboardRepo := repository.NewDashboardRepository(db)
 	projectRepo := repository.NewProjectRepository(db)
+	githubTokenRepo := repository.NewUserGitHubTokenRepository(db)
 	versionRepo := repository.NewVersionRepository(db)
 	issueRepo := repository.NewIssueRepository(db)
 	issueGitHubMetaRepo := repository.NewIssueGitHubMetaRepository(db)
@@ -897,12 +901,13 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
+	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())
 	dashboardService := service.NewDashboardService(dashboardRepo)
-	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, fileStorage, cfg, zap.NewNop())
-	versionService := service.NewVersionService(versionRepo, projectRepo, fileStorage, cfg, zap.NewNop())
+	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
+	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	recommendationRepo := repository.NewIssueRecommendationRepository(db)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), recommendationRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), screenshotAnnotationRepo)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), recommendationRepo, repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), screenshotAnnotationRepo)
 	issueCollabRepo := repository.NewIssueCollabRepository(db)
 	logRepo := repository.NewLogRepository(db)
 	documentRepo := repository.NewDocumentRepository(db)
@@ -914,7 +919,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zap.NewNop())
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	screenshotAnnotationService := service.NewScreenshotAnnotationService(screenshotAnnotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage)
-	shipService := service.NewShipService(versionRepo, projectRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
+	shipService := service.NewShipService(versionRepo, projectRepo, githubTokenRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zap.NewNop())
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
 	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zap.NewNop())
 	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zap.NewNop())
@@ -923,6 +928,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	aiHandler := handler.NewAIHandler(aiService)
 	issuePromptHandler := handler.NewIssuePromptHandler(issuePromptService)
 	apiKeyHandler := handler.NewApiKeyHandler(apiKeyService)
+	githubTokenHandler := handler.NewGitHubTokenHandler(githubTokenService)
 	dashboardHandler := handler.NewDashboardHandler(dashboardService)
 	projectHandler := handler.NewProjectHandler(projectService)
 	versionHandler := handler.NewVersionHandler(versionService, shipService)
@@ -939,7 +945,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,
@@ -967,23 +973,55 @@ func createRouterTestUser(t *testing.T, db *gorm.DB, id, username, email string)
 func createRouterTestProject(t *testing.T, db *gorm.DB, userID string, opts ...func(*model.Project)) *model.Project {
 	t.Helper()
 	project := &model.Project{
-		ID:                   uuid.NewString(),
-		UserID:               userID,
-		Name:                 "proj-" + uuid.NewString(),
-		Description:          "test project",
-		GithubOwner:          "owner",
-		GithubRepo:           "repo",
-		GithubTokenEncrypted: []byte("token"),
-		CreatedAt:            time.Now(),
-		UpdatedAt:            time.Now(),
+		ID:                  uuid.NewString(),
+		UserID:              userID,
+		Name:                "proj-" + uuid.NewString(),
+		Description:         "test project",
+		GithubOwner:         "owner",
+		GithubRepo:          "repo",
+		PublicGitHubTokenID: "auto-token",
+		CodeGitHubTokenID:   "auto-token",
+		CreatedAt:           time.Now(),
+		UpdatedAt:           time.Now(),
 	}
 	for _, opt := range opts {
 		opt(project)
+	}
+	if project.PublicGitHubTokenID == "auto-token" || project.CodeGitHubTokenID == "auto-token" {
+		token := &model.UserGitHubToken{
+			ID:               uuid.NewString(),
+			UserID:           userID,
+			Title:            "auto-token",
+			TokenEncrypted:   encryptRouterTestToken(t, "12345678901234567890123456789012", "gh-token"),
+			TokenFingerprint: uuid.NewString(),
+			TokenPrefix:      "gh-token",
+			DetectionStatus:  model.TokenDetectionUnchecked,
+			DetectionType:    model.TokenTypeUnknown,
+			DetectionScopes:  "[]",
+		}
+		if err := db.Create(token).Error; err != nil {
+			t.Fatalf("create auto token: %v", err)
+		}
+		if project.PublicGitHubTokenID == "auto-token" {
+			project.PublicGitHubTokenID = token.ID
+		}
+		if project.CodeGitHubTokenID == "auto-token" {
+			project.CodeGitHubTokenID = token.ID
+		}
 	}
 	if err := db.Create(project).Error; err != nil {
 		t.Fatalf("create project: %v", err)
 	}
 	return project
+}
+
+func encryptRouterTestToken(t *testing.T, key, plaintext string) []byte {
+	t.Helper()
+	encrypted, err := crypto.Encrypt([]byte(plaintext), []byte(key))
+	if err != nil {
+		t.Fatalf("encrypt token: %v", err)
+	}
+	return encrypted
 }
 
 func createRouterTestVersion(t *testing.T, db *gorm.DB, projectID string, opts ...func(*model.Version)) *model.Version {

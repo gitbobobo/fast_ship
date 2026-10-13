@@ -190,7 +190,9 @@ func (m *issueMirror) SyncAll(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if !project.IsGitHubConfigured() {
+		// 未关联仓库的项目没有同步对象；已关联仓库但未配公开仓库 Token 的项目
+		// 同样跳过——后台同步不报错刷屏，缺凭证的手动同步会给出明确提示。
+		if !project.IsGitHubConfigured() || project.PublicGitHubTokenID == "" {
 			continue
 		}
 		if _, err := m.Sync(ctx, &project); err != nil {

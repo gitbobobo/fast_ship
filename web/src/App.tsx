@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useParams } from "react-router"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { watchGithubTokensIdentity } from "@/lib/hooks/use-github-tokens";
 import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
 
 import AppLayout from "@/routes/_layout";
@@ -36,6 +37,9 @@ const SettingsIssuePromptsPage = lazy(
   () => import("@/routes/settings/issue-prompts"),
 );
 const ApiKeysPage = lazy(() => import("@/routes/settings/api-keys"));
+const GithubTokensPage = lazy(
+  () => import("@/routes/settings/github-tokens"),
+);
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
 const ThreadDetailPage = lazy(
@@ -52,7 +56,14 @@ const queryClient = new QueryClient({
 });
 
 export default function App() {
-  useEffect(() => watchThreadsIdentity(queryClient), []);
+  useEffect(() => {
+    const stopThreads = watchThreadsIdentity(queryClient);
+    const stopGithubTokens = watchGithubTokensIdentity(queryClient);
+    return () => {
+      stopThreads();
+      stopGithubTokens();
+    };
+  }, []);
 
   return (
     <QueryClientProvider client={queryClient}>
@@ -160,6 +171,10 @@ export default function App() {
                 <Route
                   path="api-keys"
                   element={<LazyPage render={<ApiKeysPage />} />}
+                />
+                <Route
+                  path="github-tokens"
+                  element={<LazyPage render={<GithubTokensPage />} />}
                 />
                 <Route
                   path="environments"

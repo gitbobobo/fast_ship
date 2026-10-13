@@ -75,7 +75,6 @@ func TestVersionServiceCreate_ValidatesTargetBranch(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	svc.versionService.newBranchClient = func(token, owner, repo string) gitHubBranchClient {
 		if token != "gh-token" {
@@ -110,7 +109,8 @@ func TestVersionServiceCreate_UnconfiguredProjectTargetCommitish(t *testing.T) {
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
 		p.GithubOwner = ""
 		p.GithubRepo = ""
-		p.GithubTokenEncrypted = nil
+		p.PublicGitHubTokenID = ""
+		p.CodeGitHubTokenID = ""
 	})
 
 	if err := svc.versionService.ensureTargetBranchExists(context.Background(), project, "main"); !errors.Is(err, errs.ErrProjectGitHubNotConfigured) {
@@ -130,7 +130,6 @@ func TestVersionServiceUpdate_RejectsUnknownTargetBranch(t *testing.T) {
 	svc := setupTestServices(t)
 	createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
-		p.GithubTokenEncrypted = encryptTestToken(t, svc.cfg, "gh-token")
 	})
 	version := createTestVersion(t, svc.db, project.ID)
 	svc.versionService.newBranchClient = func(token, owner, repo string) gitHubBranchClient {

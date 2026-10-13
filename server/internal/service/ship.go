@@ -63,6 +63,7 @@ type ShipResult struct {
 func NewShipService(
 	versionRepo *repository.VersionRepository,
 	projectRepo *repository.ProjectRepository,
+	tokenRepo *repository.UserGitHubTokenRepository,
 	artifactRepo *repository.ArtifactRepository,
 	issueRepo *repository.IssueRepository,
 	shipHookRepo *repository.IssueShipHookRepository,
@@ -80,7 +81,7 @@ func NewShipService(
 		hookActions:  issueService,
 		storage:      storage,
 		logger:       logger,
-		credentials:  newProjectCredentials(projectRepo, cfg, logger),
+		credentials:  newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
 		newClient: func(token, owner, repo string) gitHubClient {
 			return ghclient.NewClient(token, owner, repo)
 		},
@@ -351,9 +352,9 @@ func (s *ShipService) buildCheck(ctx context.Context, version *model.Version, pr
 	case project.GithubOwner == "" || project.GithubRepo == "":
 		githubItem.Ok = false
 		githubItem.Detail = api.Ptr("缺少 GitHub 仓库配置")
-	case len(project.GithubTokenEncrypted) == 0:
+	case project.PublicGitHubTokenID == "":
 		githubItem.Ok = false
-		githubItem.Detail = api.Ptr("缺少 GitHub Token")
+		githubItem.Detail = api.Ptr("缺少公开仓库 Token")
 	default:
 		tokenBytes, err := s.credentials.requiredGitHubToken(project)
 		if err != nil {

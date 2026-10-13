@@ -646,6 +646,247 @@ API Key 管理（仅 JWT）
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
+## github-tokens
+
+用户级 GitHub Token 库（仅 JWT）
+
+### GET `/api/github-tokens`
+
+<!-- operationId: listGithubTokens -->
+
+列出当前用户的 GitHub Token
+
+不回显明文；附带每条的引用项目与检测摘要。列表不触发任何 GitHub 请求。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** Token 列表
+
+`data` 为数组。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `title` | string | 是 |  |
+| `token_prefix` | string | 是 | Token 明文前 8 个字符（如 ghp_Ab12），用于列表辨识；其余不存 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/GitHub 5xx，不是凭证无效） |
+| `detection_token_type` | string（enum: classic \| fine_grained \| unknown） | 是 | classic=有 OAuth scopes 的 Classic PAT；fine_grained=github_pat_ 前缀；unknown=无法判断（未检测时恒为 unknown） |
+| `detection_scopes` | string[] | 是 | Classic PAT 的 OAuth scopes；fine-grained 恒为空数组 |
+| `detection_login` | string | 是 | 认证成功时的 GitHub login，否则为空串 |
+| `detection_detail` | string | 是 | 给人看的补充说明（fine-grained 的「无法自动获取完整授权」、失败原因等），不含 token |
+| `detected_at` | string（date-time，可空） | 否 | 最近一次检测完成时间；未检测为 null |
+| `referenced_projects` | object[] | 是 | 两个用途中任一引用了该 Token 的项目 |
+| `referenced_projects[].id` | string | 是 |  |
+| `referenced_projects[].name` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/github-tokens`
+
+<!-- operationId: createGithubToken -->
+
+添加 GitHub Token
+
+同一用户下明文完全相同（SHA-256 指纹一致）的 Token 复用已有记录：返回已有记录，
+不修改其标题。新建成功后服务端立即做一次只读检测（GET /user）；检测失败
+（网络 / GitHub 5xx）或凭证无效（401）仍然保存，响应中 detection_status
+为 failed / invalid，HTTP 状态仍是 200。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `title` | string（长度 1..100） | 是 | Token 标题（如「主仓库发布 Token」） |
+| `token` | string（长度 ≥1） | 是 | GitHub PAT 明文（加密存储，任何响应都不回显） |
+
+**成功响应**
+
+**200** 保存成功（明文重复时返回已有记录）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `title` | string | 是 |  |
+| `token_prefix` | string | 是 | Token 明文前 8 个字符（如 ghp_Ab12），用于列表辨识；其余不存 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/GitHub 5xx，不是凭证无效） |
+| `detection_token_type` | string（enum: classic \| fine_grained \| unknown） | 是 | classic=有 OAuth scopes 的 Classic PAT；fine_grained=github_pat_ 前缀；unknown=无法判断（未检测时恒为 unknown） |
+| `detection_scopes` | string[] | 是 | Classic PAT 的 OAuth scopes；fine-grained 恒为空数组 |
+| `detection_login` | string | 是 | 认证成功时的 GitHub login，否则为空串 |
+| `detection_detail` | string | 是 | 给人看的补充说明（fine-grained 的「无法自动获取完整授权」、失败原因等），不含 token |
+| `detected_at` | string（date-time，可空） | 否 | 最近一次检测完成时间；未检测为 null |
+| `referenced_projects` | object[] | 是 | 两个用途中任一引用了该 Token 的项目 |
+| `referenced_projects[].id` | string | 是 |  |
+| `referenced_projects[].name` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/github-tokens/{id}`
+
+<!-- operationId: updateGithubToken -->
+
+修改标题或替换密钥
+
+改标题不重新检测。替换密钥即对所有引用该 Token 的项目一起生效；
+新明文与同用户另一条记录指纹重复时返回 40914（消息指向已有记录），
+不做隐式合并。替换按加载时的指纹条件写入，并发替换返回 40915。
+替换后服务端重新检测。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `title` | string（长度 1..100） | 否 | 非空时替换标题；改标题不重新检测 |
+| `token` | string（长度 ≥1） | 否 | 非空时替换密钥，对所有引用项目立即生效并重新检测；与同用户另一条记录明文重复时返回 40914；并发替换时密钥已变返回 40915 |
+
+**成功响应**
+
+**200** 更新后的 Token 记录
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `title` | string | 是 |  |
+| `token_prefix` | string | 是 | Token 明文前 8 个字符（如 ghp_Ab12），用于列表辨识；其余不存 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/GitHub 5xx，不是凭证无效） |
+| `detection_token_type` | string（enum: classic \| fine_grained \| unknown） | 是 | classic=有 OAuth scopes 的 Classic PAT；fine_grained=github_pat_ 前缀；unknown=无法判断（未检测时恒为 unknown） |
+| `detection_scopes` | string[] | 是 | Classic PAT 的 OAuth scopes；fine-grained 恒为空数组 |
+| `detection_login` | string | 是 | 认证成功时的 GitHub login，否则为空串 |
+| `detection_detail` | string | 是 | 给人看的补充说明（fine-grained 的「无法自动获取完整授权」、失败原因等），不含 token |
+| `detected_at` | string（date-time，可空） | 否 | 最近一次检测完成时间；未检测为 null |
+| `referenced_projects` | object[] | 是 | 两个用途中任一引用了该 Token 的项目 |
+| `referenced_projects[].id` | string | 是 |  |
+| `referenced_projects[].name` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 新明文与同用户另一条记录重复（40914）；并发替换时密钥已变（40915） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/github-tokens/{id}`
+
+<!-- operationId: deleteGithubToken -->
+
+删除 GitHub Token
+
+仍被任何项目（任一用途）引用时返回 40913，需先解除或更换引用；删除项目不影响 Token 库。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | Token 仍被项目引用（40913） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/github-tokens/{id}/detect`
+
+<!-- operationId: detectGithubToken -->
+
+手动刷新检测
+
+对该 Token 做一次只读检测（GET https://api.github.com/user），刷新检测状态与权限摘要；不创建任何 GitHub 资源。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 检测完成后的 Token 记录（检测失败时 detection_status=failed，仍是 200）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `title` | string | 是 |  |
+| `token_prefix` | string | 是 | Token 明文前 8 个字符（如 ghp_Ab12），用于列表辨识；其余不存 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/GitHub 5xx，不是凭证无效） |
+| `detection_token_type` | string（enum: classic \| fine_grained \| unknown） | 是 | classic=有 OAuth scopes 的 Classic PAT；fine_grained=github_pat_ 前缀；unknown=无法判断（未检测时恒为 unknown） |
+| `detection_scopes` | string[] | 是 | Classic PAT 的 OAuth scopes；fine-grained 恒为空数组 |
+| `detection_login` | string | 是 | 认证成功时的 GitHub login，否则为空串 |
+| `detection_detail` | string | 是 | 给人看的补充说明（fine-grained 的「无法自动获取完整授权」、失败原因等），不含 token |
+| `detected_at` | string（date-time，可空） | 否 | 最近一次检测完成时间；未检测为 null |
+| `referenced_projects` | object[] | 是 | 两个用途中任一引用了该 Token 的项目 |
+| `referenced_projects[].id` | string | 是 |  |
+| `referenced_projects[].name` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
 ## projects
 
 项目 CRUD 与 GitHub 分支
@@ -681,8 +922,8 @@ API Key 管理（仅 JWT）
 | `items[].description` | string | 是 |  |
 | `items[].github_owner` | string | 是 |  |
 | `items[].github_repo` | string | 是 |  |
-| `items[].has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
-| `items[].has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
+| `items[].public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
+| `items[].code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `items[].latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `items[].latest_version.id` | string | 是 |  |
 | `items[].latest_version.version_number` | string | 是 |  |
@@ -729,12 +970,9 @@ API Key 管理（仅 JWT）
 | --- | --- | --- | --- |
 | `name` | string（长度 1..100） | 是 | 项目名，当前用户下唯一 |
 | `description` | string | 否 |  |
-| `repository_url` | string | 否 | GitHub 仓库链接（owner/repo 或完整 URL）；设置时须同时提供 github_token 或 source_project_id |
-| `github_token` | string | 否 | GitHub PAT（加密存储，不回显） |
-| `github_pr_token` | string | 否 | PR 访问 Token，仅用于读取关联 PR（可为其他仓库）；加密存储，不回显 |
-| `source_project_id` | string | 否 | 复用另一项目的 GitHub Token；优先于 github_token |
-| `pr_token_source_project_id` | string | 否 | 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类 |
-| `pr_token_source_kind` | string（enum: access \| pr） | 否 | 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001。access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token |
+| `repository_url` | string | 否 | GitHub 仓库链接（owner/repo 或完整 URL）；不再要求同时提供 Token |
+| `public_github_token_id` | string | 否 | 公开仓库 Token（Token 库记录 id）引用；用于 Issue 同步与 GitHub 写、分支查询、发货。可空；必须属于当前用户，否则 40420 |
+| `code_github_token_id` | string | 否 | 代码仓库 Token（Token 库记录 id）引用；仅用于读取关联 PR（含其他仓库）。可空；必须属于当前用户，否则 40420 |
 
 **成功响应**
 
@@ -749,8 +987,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
-| `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
-| `has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
+| `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
+| `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -809,8 +1047,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
-| `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
-| `has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
+| `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
+| `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -861,13 +1099,9 @@ API Key 管理（仅 JWT）
 | --- | --- | --- | --- |
 | `name` | string（长度 1..100） | 否 |  |
 | `description` | string | 否 | 缺省或 null 保留现值；显式空串清空；非空替换 |
-| `repository_url` | string | 否 | 同创建；变更仓库且项目无 token 时须提供 token |
-| `github_token` | string | 否 |  |
-| `github_pr_token` | string | 否 | PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显 |
-| `clear_github_pr_token` | boolean | 否 | 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 或 pr_token_source_project_id 同时显式提供（无论取值，含 null）返回 40001 |
-| `source_project_id` | string | 否 |  |
-| `pr_token_source_project_id` | string | 否 | 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类 |
-| `pr_token_source_kind` | string（enum: access \| pr） | 否 | 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001。access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token |
+| `repository_url` | string | 否 | 同创建；不再要求项目已配 Token |
+| `public_github_token_id` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420） |
+| `code_github_token_id` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420） |
 
 **成功响应**
 
@@ -882,8 +1116,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
-| `has_github_pr_token` | boolean | 是 | 是否已配置独立 PR 访问 Token |
-| `has_github_token` | boolean | 是 | 是否已配置 GitHub Access Token |
+| `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
+| `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
 | `latest_version.id` | string | 是 |  |
 | `latest_version.version_number` | string | 是 |  |
@@ -976,7 +1210,7 @@ API Key 管理（仅 JWT）
 
 | HTTP | 说明 |
 | --- | --- |
-| 400 | 项目未关联 GitHub 仓库（40003） |
+| 400 | 项目未关联 GitHub 仓库（40003）或已关联仓库但未配置公开仓库 Token（40006） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 502 | GitHub API 调用失败（50200） |
@@ -1864,7 +2098,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | --- | --- |
 | 400 | 请求参数无效（40001-40099） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
-| 403 | API Key 创建 github 来源 Issue（40301）或项目未配 GitHub（40003） |
+| 403 | API Key 创建 github 来源 Issue（40301）或项目未配公开仓库 Token（40003/40006） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 | 502 | GitHub API 调用失败（50200） |
@@ -1978,7 +2212,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 
 | HTTP | 说明 |
 | --- | --- |
-| 400 | 项目未关联 GitHub 仓库（40003） |
+| 400 | 项目未关联 GitHub 仓库（40003）或已关联仓库但未配置公开仓库 Token（40006） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
@@ -2069,7 +2303,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 
 | HTTP | 说明 |
 | --- | --- |
-| 400 | 项目未关联 GitHub 仓库（40003） |
+| 400 | 项目未关联 GitHub 仓库（40003）或已关联仓库但未配置公开仓库 Token（40006） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 404 | 资源不存在（40400-40499） |

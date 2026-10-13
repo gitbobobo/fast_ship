@@ -25,6 +25,8 @@ tags:
     description: AI 设置、标题/清单生成与全局提示词
   - name: api-keys
     description: API Key 管理（仅 JWT）
+  - name: github-tokens
+    description: 用户级 GitHub Token 库（仅 JWT）
   - name: projects
     description: 项目 CRUD 与 GitHub 分支
   - name: versions
@@ -1051,6 +1053,178 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/github-tokens:
+    get:
+      tags: [github-tokens]
+      operationId: listGithubTokens
+      summary: 列出当前用户的 GitHub Token
+      description: 不回显明文；附带每条的引用项目与检测摘要。列表不触发任何 GitHub 请求。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: Token 列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/GitHubToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [github-tokens]
+      operationId: createGithubToken
+      summary: 添加 GitHub Token
+      description: |
+        同一用户下明文完全相同（SHA-256 指纹一致）的 Token 复用已有记录：返回已有记录，
+        不修改其标题。新建成功后服务端立即做一次只读检测（GET /user）；检测失败
+        （网络 / GitHub 5xx）或凭证无效（401）仍然保存，响应中 detection_status
+        为 failed / invalid，HTTP 状态仍是 200。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGitHubTokenRequest'
+      responses:
+        '200':
+          description: 保存成功（明文重复时返回已有记录）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubToken'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/github-tokens/{id}:
+    put:
+      tags: [github-tokens]
+      operationId: updateGithubToken
+      summary: 修改标题或替换密钥
+      description: |
+        改标题不重新检测。替换密钥即对所有引用该 Token 的项目一起生效；
+        新明文与同用户另一条记录指纹重复时返回 40914（消息指向已有记录），
+        不做隐式合并。替换按加载时的指纹条件写入，并发替换返回 40915。
+        替换后服务端重新检测。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGitHubTokenRequest'
+      responses:
+        '200':
+          description: 更新后的 Token 记录
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubToken'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 新明文与同用户另一条记录重复（40914）；并发替换时密钥已变（40915）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [github-tokens]
+      operationId: deleteGithubToken
+      summary: 删除 GitHub Token
+      description: 仍被任何项目（任一用途）引用时返回 40913，需先解除或更换引用；删除项目不影响 Token 库。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Token 仍被项目引用（40913）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/github-tokens/{id}/detect:
+    post:
+      tags: [github-tokens]
+      operationId: detectGithubToken
+      summary: 手动刷新检测
+      description: 对该 Token 做一次只读检测（GET https://api.github.com/user），刷新检测状态与权限摘要；不创建任何 GitHub 资源。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          description: 检测完成后的 Token 记录（检测失败时 detection_status=failed，仍是 200）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubToken'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/dashboard/overview:
     get:
       tags: [dashboard]
@@ -1262,7 +1436,7 @@ paths:
                           default_branch:
                             type: string
         '400':
-          description: 项目未关联 GitHub 仓库（40003）
+          description: 项目未关联 GitHub 仓库（40003）或已关联仓库但未配置公开仓库 Token（40006）
           content:
             application/json:
               schema:
@@ -1678,7 +1852,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          description: API Key 创建 github 来源 Issue（40301）或项目未配 GitHub（40003）
+          description: API Key 创建 github 来源 Issue（40301）或项目未配公开仓库 Token（40003/40006）
           content:
             application/json:
               schema:
@@ -1822,7 +1996,7 @@ paths:
                         items:
                           $ref: '#/components/schemas/IssueLabel'
         '400':
-          description: 项目未关联 GitHub 仓库（40003）
+          description: 项目未关联 GitHub 仓库（40003）或已关联仓库但未配置公开仓库 Token（40006）
           content:
             application/json:
               schema:
@@ -1905,7 +2079,7 @@ paths:
                       data:
                         $ref: '#/components/schemas/IssueSyncResult'
         '400':
-          description: 项目未关联 GitHub 仓库（40003）
+          description: 项目未关联 GitHub 仓库（40003）或已关联仓库但未配置公开仓库 Token（40006）
           content:
             application/json:
               schema:
@@ -4695,11 +4869,93 @@ components:
               type: string
               description: 完整 API Key（fsk_ 前缀），仅创建响应中出现一次，服务端不存原文
 
+    # ---- github tokens ----
+    CreateGitHubTokenRequest:
+      type: object
+      required: [title, token]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Token 标题（如「主仓库发布 Token」）
+          x-oapi-codegen-extra-tags:
+            binding: required,min=1,max=100
+        token:
+          type: string
+          minLength: 1
+          description: GitHub PAT 明文（加密存储，任何响应都不回显）
+          x-oapi-codegen-extra-tags:
+            binding: required,min=1
+    UpdateGitHubTokenRequest:
+      type: object
+      # 不带 binding tag：handler 允许只传 title 或只传 token，两个都可缺省。
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 非空时替换标题；改标题不重新检测
+        token:
+          type: string
+          minLength: 1
+          description: 非空时替换密钥，对所有引用项目立即生效并重新检测；与同用户另一条记录明文重复时返回 40914；并发替换时密钥已变返回 40915
+    GitHubToken:
+      type: object
+      required: [id, title, token_prefix, detection_status, detection_token_type, detection_scopes, detection_login, detection_detail, referenced_projects, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        token_prefix:
+          type: string
+          description: Token 明文前 8 个字符（如 ghp_Ab12），用于列表辨识；其余不存
+        detection_status:
+          type: string
+          enum: [unchecked, ok, invalid, failed]
+          description: unchecked=未检测；ok=认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/GitHub 5xx，不是凭证无效）
+        detection_token_type:
+          type: string
+          enum: [classic, fine_grained, unknown]
+          description: classic=有 OAuth scopes 的 Classic PAT；fine_grained=github_pat_ 前缀；unknown=无法判断（未检测时恒为 unknown）
+        detection_scopes:
+          type: array
+          items:
+            type: string
+          description: Classic PAT 的 OAuth scopes；fine-grained 恒为空数组
+        detection_login:
+          type: string
+          description: 认证成功时的 GitHub login，否则为空串
+        detection_detail:
+          type: string
+          description: 给人看的补充说明（fine-grained 的「无法自动获取完整授权」、失败原因等），不含 token
+        detected_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 最近一次检测完成时间；未检测为 null
+        referenced_projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/GitHubTokenProjectRef'
+          description: 两个用途中任一引用了该 Token 的项目
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    GitHubTokenProjectRef:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+
     # ---- projects ----
-    PrTokenSourceKind:
-      type: string
-      enum: [access, pr]
-      description: access=源项目的 GitHub Access Token；pr=源项目的 PR 访问 Token
     CreateProjectRequest:
       type: object
       required: [name]
@@ -4715,22 +4971,13 @@ components:
           type: string
         repository_url:
           type: string
-          description: GitHub 仓库链接（owner/repo 或完整 URL）；设置时须同时提供 github_token 或 source_project_id
-        github_token:
+          description: GitHub 仓库链接（owner/repo 或完整 URL）；不再要求同时提供 Token
+        public_github_token_id:
           type: string
-          description: GitHub PAT（加密存储，不回显）
-        github_pr_token:
+          description: 公开仓库 Token（Token 库记录 id）引用；用于 Issue 同步与 GitHub 写、分支查询、发货。可空；必须属于当前用户，否则 40420
+        code_github_token_id:
           type: string
-          description: PR 访问 Token，仅用于读取关联 PR（可为其他仓库）；加密存储，不回显
-        source_project_id:
-          type: string
-          description: 复用另一项目的 GitHub Token；优先于 github_token
-        pr_token_source_project_id:
-          type: string
-          description: 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
-        pr_token_source_kind:
-          $ref: '#/components/schemas/PrTokenSourceKind'
-          description: 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001
+          description: 代码仓库 Token（Token 库记录 id）引用；仅用于读取关联 PR（含其他仓库）。可空；必须属于当前用户，否则 40420
     UpdateProjectRequest:
       type: object
       # 不带 binding tag：handler 用手写 updateProjectInput 绑定，原因同
@@ -4745,26 +4992,18 @@ components:
           description: 缺省或 null 保留现值；显式空串清空；非空替换
         repository_url:
           type: string
-          description: 同创建；变更仓库且项目无 token 时须提供 token
-        github_token:
+          description: 同创建；不再要求项目已配 Token
+        public_github_token_id:
           type: string
-        github_pr_token:
+          nullable: true
+          description: 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
+        code_github_token_id:
           type: string
-          description: PR 访问 Token（非空时替换现值）；仅用于读取关联 PR，加密存储不回显
-        clear_github_pr_token:
-          type: boolean
-          description: 为 true 时显式清除 PR 访问 Token 并恢复沿用项目 Token；与 github_pr_token 或 pr_token_source_project_id 同时显式提供（无论取值，含 null）返回 40001
-        source_project_id:
-          type: string
-        pr_token_source_project_id:
-          type: string
-          description: 复用另一项目的 Token 作为 PR 访问 Token；优先于 github_pr_token；与 pr_token_source_kind 搭配选择复制的凭证种类
-        pr_token_source_kind:
-          $ref: '#/components/schemas/PrTokenSourceKind'
-          description: 与 pr_token_source_project_id 搭配，指定复制源项目的哪种凭证；缺省 pr；单独提供（不带 pr_token_source_project_id）返回 40001
+          nullable: true
+          description: 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
     Project:
       type: object
-      required: [id, name, description, github_owner, github_repo, has_github_pr_token, has_github_token, created_at, updated_at]
+      required: [id, name, description, github_owner, github_repo, public_github_token_id, code_github_token_id, created_at, updated_at]
       properties:
         id:
           type: string
@@ -4776,12 +5015,12 @@ components:
           type: string
         github_repo:
           type: string
-        has_github_pr_token:
-          type: boolean
-          description: 是否已配置独立 PR 访问 Token
-        has_github_token:
-          type: boolean
-          description: 是否已配置 GitHub Access Token
+        public_github_token_id:
+          type: string
+          description: 公开仓库 Token 引用；未配置为空串
+        code_github_token_id:
+          type: string
+          description: 代码仓库 Token 引用；未配置为空串
         latest_version:
           $ref: '#/components/schemas/LatestVersion'
         issue_count:
