@@ -194,6 +194,7 @@ function DraftSession({
     const ids = tracker.idsFor(
       JSON.stringify([text, attachments.map((a) => a.id)]),
     );
+    uploads.retain();
     try {
       await send.mutateAsync({
         command_id: ids.command_id,
@@ -205,7 +206,7 @@ function DraftSession({
       setText("");
       uploads.clear();
     } catch {
-      // 错误由 mutation 状态展示；失败重试沿用同一组 ID。
+      uploads.release();
     }
   };
 
@@ -260,6 +261,7 @@ function QueuedEditComposer({
   const submit = async () => {
     const attachments = uploads.attachmentsOf();
     onSaving(true);
+    uploads.retain();
     try {
       await edit.mutateAsync({
         runId: item.run_id,
@@ -271,6 +273,7 @@ function QueuedEditComposer({
       uploads.clear();
       onExit();
     } catch {
+      uploads.release();
       onSaving(false);
     }
   };

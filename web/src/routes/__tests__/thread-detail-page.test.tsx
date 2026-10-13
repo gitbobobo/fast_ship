@@ -260,6 +260,30 @@ describe("ThreadDetailPage", () => {
       expect(api.deleteAttachment).not.toHaveBeenCalled();
     });
 
+    it("does not delete submitted images if the page unmounts while a send is in flight", async () => {
+      const user = userEvent.setup();
+      mockDetail([]);
+      api.send.mockReturnValue(new Promise(() => undefined));
+      api.uploadAttachment.mockResolvedValue({
+        type: "image",
+        id: "att-send",
+        name: "send.png",
+        mime_type: "image/png",
+        size_bytes: 4,
+      });
+      api.deleteAttachment.mockResolvedValue(null);
+      const view = await renderPage();
+      await user.upload(
+        screen.getByTestId("image-input"),
+        new File([new Uint8Array([1, 2, 3, 4])], "send.png", { type: "image/png" }),
+      );
+      await waitFor(() => expect(screen.queryByLabelText("上传中")).toBeNull());
+      await user.click(within(composer()).getByRole("button", { name: "发送" }));
+      await waitFor(() => expect(api.send).toHaveBeenCalledTimes(1));
+      view.unmount();
+      expect(api.deleteAttachment).not.toHaveBeenCalled();
+    });
+
     it("queues instead of steering while a run is active", async () => {
       const user = userEvent.setup();
       mockDetail([], "running");

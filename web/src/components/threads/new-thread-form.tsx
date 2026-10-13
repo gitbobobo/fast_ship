@@ -196,6 +196,7 @@ export function NewThreadForm({
         buildModelSelection(resolved),
       ]),
     );
+    uploads.retain();
     try {
       const result = await create.mutateAsync({
         command_id: ids.command_id,
@@ -212,7 +213,7 @@ export function NewThreadForm({
         `/threads/${encodeURIComponent(environment.id)}/${encodeURIComponent(result.thread_id)}`,
       );
     } catch {
-      // 错误由 create.error 展示；重试沿用同一组 ID。
+      uploads.release();
     }
   };
 

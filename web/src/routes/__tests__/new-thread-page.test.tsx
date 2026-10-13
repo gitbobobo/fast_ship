@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes, useParams } from "react-router";
@@ -326,6 +326,44 @@ describe("NewThreadPage", () => {
     expect(api.create.mock.calls[0][0]).toBe("e2");
     expect(api.create.mock.calls[0][1].project_id).toBe("px");
     expect(api.create.mock.calls[0][1].model_selection).toBeUndefined();
+  });
+
+  it("locks the composer and ignores paste while a create is in flight", async () => {
+    const user = userEvent.setup();
+    let finish!: (value: { thread_id: string; resumed: boolean }) => void;
+    api.create.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+    renderPage();
+    const box = await ready();
+    await user.type(box, "go");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(api.create).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("textbox", { name: "消息内容" })).toBeDisabled();
+    fireEvent.paste(screen.getByRole("textbox", { name: "消息内容" }), {
+      clipboardData: {
+        files: [new File([new Uint8Array([1, 2, 3])], "x.png", { type: "image/png" })],
+      },
+    });
+    expect(api.uploadAttachment).not.toHaveBeenCalled();
+    await act(async () => finish({ thread_id: "t-lock", resumed: false }));
+  });
+
+  it("does not delete submitted images if the page unmounts while create is pending", async () => {
+    const user = userEvent.setup();
+    const attachment = { type: "image", id: "att-1", name: "a.png", mime_type: "image/png", size_bytes: 3 };
+    api.uploadAttachment.mockResolvedValue(attachment);
+    api.deleteAttachment.mockResolvedValue(null);
+    api.create.mockReturnValue(new Promise(() => undefined));
+    const view = renderPage();
+    await ready();
+    await user.upload(
+      screen.getByTestId("image-input"),
+      new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" }),
+    );
+    await waitFor(() => expect(within(screen.getByRole("form", { name: "消息输入" })).getByRole("button", { name: "发送" })).toBeEnabled());
+    await user.click(within(screen.getByRole("form", { name: "消息输入" })).getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(api.create).toHaveBeenCalledTimes(1));
+    view.unmount();
+    expect(api.deleteAttachment).not.toHaveBeenCalled();
   });
 
   it("uploads a picked image as raw bytes and sends its metadata with the first message", async () => {

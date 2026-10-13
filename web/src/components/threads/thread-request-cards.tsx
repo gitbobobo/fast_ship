@@ -247,6 +247,7 @@ function UserInputAnswerForm({
       if (files.length > 0) byQuestion[q.id] = files;
     }
     onHold(true);
+    uploads.retain();
     respond.mutate(
       {
         requestId: item.request_id,
@@ -258,7 +259,10 @@ function UserInputAnswerForm({
             : {}),
         },
       },
-      { onSettled: () => onHold(false) },
+      {
+        onError: () => uploads.release(),
+        onSettled: () => onHold(false),
+      },
     );
   };
 
