@@ -77,16 +77,19 @@ export function EnvironmentChip({
   environments,
   selected,
   onChange,
+  disabled,
 }: {
   environments: Environment[];
   selected?: Environment;
   onChange: (id: string) => void;
+  disabled?: boolean;
 }) {
   return (
     <Chip
       ariaLabel="运行环境"
       icon={<Laptop className="h-3.5 w-3.5 shrink-0" />}
       label={selected ? selected.name : "选择环境"}
+      disabled={disabled}
     >
       <DropdownMenuRadioGroup value={selected?.id ?? ""} onValueChange={onChange}>
         {environments.map((env) => (
@@ -221,6 +224,7 @@ export function NewThreadForm({
 
   const ready = Boolean(composer.data);
   const model = resolved.model;
+  const launching = create.isPending;
 
   const toolbar = (
     <>
@@ -228,12 +232,13 @@ export function NewThreadForm({
         environments={environments}
         selected={environment}
         onChange={onEnvironmentChange}
+        disabled={launching}
       />
       <Chip
         ariaLabel="项目"
         icon={<Folder className="h-3.5 w-3.5 shrink-0" />}
         label={project?.title ?? (composer.isLoading ? "加载中…" : "无可用项目")}
-        disabled={!writable || !projects?.length}
+        disabled={!writable || !projects?.length || launching}
       >
         <DropdownMenuRadioGroup value={project?.id ?? ""} onValueChange={setProjectId}>
           {projects?.map((p) => (
@@ -247,7 +252,7 @@ export function NewThreadForm({
         ariaLabel="工作区"
         icon={<GitBranch className="h-3.5 w-3.5 shrink-0" />}
         label={modeLabel}
-        disabled={!writable || !project || !workspaceData || !isRepo}
+        disabled={!writable || !project || !workspaceData || !isRepo || launching}
       >
         <DropdownMenuItem onClick={() => setChoice({ kind: "root" })}>
           Current checkout
@@ -300,7 +305,7 @@ export function NewThreadForm({
                   : "选择基线分支"
                 : choice.branch || "worktree"
             }
-            disabled={!writable}
+            disabled={!writable || launching}
           >
             <DropdownMenuGroup>
               <DropdownMenuLabel>
@@ -324,6 +329,7 @@ export function NewThreadForm({
             onChange={(e) => setRefQuery(e.target.value)}
             placeholder="筛选分支"
             aria-label="筛选分支"
+            disabled={launching}
             className="h-7 w-28 text-xs"
           />
         </>
@@ -334,6 +340,7 @@ export function NewThreadForm({
           onChange={(e) => setChoice({ ...choice, newBranch: e.target.value })}
           placeholder="新分支名（可选）"
           aria-label="新分支名"
+          disabled={launching}
           className="h-7 w-36 text-xs"
         />
       )}
@@ -341,7 +348,7 @@ export function NewThreadForm({
         ariaLabel="模型"
         icon={<Cpu className="h-3.5 w-3.5 shrink-0" />}
         label={model ? model.name : "默认模型"}
-        disabled={!writable || providers.length === 0}
+        disabled={!writable || providers.length === 0 || launching}
         menuClassName="max-h-80 w-72"
       >
         {providers.map((provider) => (
@@ -370,7 +377,7 @@ export function NewThreadForm({
           label={
             d.choices.find((c) => c.id === effortValue(d, resolved))?.label ?? "默认"
           }
-          disabled={!writable}
+          disabled={!writable || launching}
         >
           <DropdownMenuRadioGroup
             value={effortValue(d, resolved) ?? ""}
