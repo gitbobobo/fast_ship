@@ -105,7 +105,7 @@ AI 评审闭环（字段细节见 api.md screenshots 章）：
 
 一个 Issue 可挂多个 PR（跨仓库也可以）。**时机**：建完 PR 立刻 attach，让 Issue 页能看到实现进度；PR 合并后调一次 sync 刷新状态。
 
-- attach：body 只传 `{"url":"https://github.com/<owner>/<repo>/pull/<n>"}`，支持 `/files`、query 等后缀。服务端自行去 GitHub 拉标题/状态/作者，拉取失败不落记录（502）。重复 attach 幂等，不产生第二行。
+- attach：body 只传 `{"url":"https://github.com/<owner>/<repo>/pull/<n>"}`，支持 `/files`、query 等后缀。服务端自行去 GitHub 拉标题/状态/作者，拉取失败不落记录（502）。重复 attach 幂等，不产生第二行。**attach 必须读回确认**：加 `--verify /api/issues/{iid}` 或紧接一次 GET，确认 `pull_requests[]` 里出现该 PR 才算挂上——502/超时会留下「以为挂上了、实际没落记录」的窟窿，只看退出码不够。
 - 读：详情 `GET /api/issues/:iid` 的 `pull_requests[]` 是全量列表；列表项带 `pull_request_summary {total, open, merged}`（closed = total - open - merged）。
 - sync：返回 `{items, failures}`，每条 PR 是独立失败域——某条拉不到（404/限流）只进 `failures[]`，其余照常刷新；`failures[].id` 是关联行 id。
 - detach：`DELETE /api/issues/:iid/pull-requests/:lid`；不存在的关联返回 40412（非幂等，重复调用会报错）。
