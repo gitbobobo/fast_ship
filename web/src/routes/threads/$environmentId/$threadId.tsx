@@ -96,15 +96,30 @@ export default function ThreadDetailPage() {
                   role="alert"
                   className="flex items-center justify-between gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300"
                 >
-                  <span>刷新失败，当前显示的可能不是最新内容</span>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => refetch()}
-                    disabled={isFetching}
-                  >
-                    重试
-                  </Button>
+                  <span>
+                    {errorMessage
+                      ? `${errorMessage}，当前显示的可能不是最新内容`
+                      : "刷新失败，当前显示的可能不是最新内容"}
+                  </span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {needsRepair && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        render={<Link to="/settings/environments" />}
+                      >
+                        去重新配对
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => refetch()}
+                      disabled={isFetching}
+                    >
+                      重试
+                    </Button>
+                  </div>
                 </div>
               )}
               {thread.status === "running" && (

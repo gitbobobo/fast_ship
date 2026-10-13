@@ -302,4 +302,22 @@ describe("ThreadDetailPage", () => {
     const link = await screen.findByRole("link", { name: "去重新配对" });
     expect(link).toHaveAttribute("href", "/settings/environments");
   });
+
+  it("shows the server message and re-pair link when a refresh fails", async () => {
+    mockDetail([item({ id: "1", type: "assistant_message", text: "still here" })]);
+    await renderPage();
+
+    detail.mockRejectedValue(
+      new ApiRequestError(502, 50202, "T3 环境拒绝凭证（可能已过期或被吊销），请重新配对"),
+    );
+    await act(() => client.refetchQueries());
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("请重新配对");
+    expect(banner).toHaveTextContent("可能不是最新内容");
+    expect(
+      within(banner).getByRole("link", { name: "去重新配对" }),
+    ).toHaveAttribute("href", "/settings/environments");
+    expect(screen.getByText("still here")).toBeInTheDocument();
+  });
 });

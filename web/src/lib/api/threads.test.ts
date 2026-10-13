@@ -13,7 +13,10 @@ const { get, post, put, del } = vi.hoisted(() => {
   };
 });
 
-vi.mock("./client", () => ({ api: { get, post, put, delete: del } }));
+vi.mock("./client", () => ({
+  api: { get, post, put, delete: del },
+  decodeApiError: (promise: Promise<unknown>) => promise,
+}));
 
 const expected = { timeout: THREAD_REQUEST_TIMEOUT_MS, retry: 0 };
 
