@@ -304,7 +304,10 @@ describe("ThreadDetailPage", () => {
   });
 
   it("shows the server message and re-pair link when a refresh fails", async () => {
-    mockDetail([item({ id: "1", type: "assistant_message", text: "still here" })]);
+    mockDetail(
+      [item({ id: "1", type: "assistant_message", text: "still here" })],
+      "running",
+    );
     await renderPage();
 
     detail.mockRejectedValue(
@@ -319,5 +322,6 @@ describe("ThreadDetailPage", () => {
       within(banner).getByRole("link", { name: "去重新配对" }),
     ).toHaveAttribute("href", "/settings/environments");
     expect(screen.getByText("still here")).toBeInTheDocument();
+    expect(screen.queryByText("线程运行中，内容会自动更新。")).not.toBeInTheDocument();
   });
 });

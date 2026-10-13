@@ -122,7 +122,7 @@ export default function ThreadDetailPage() {
                   </div>
                 </div>
               )}
-              {thread.status === "running" && (
+              {thread.status === "running" && !isError && (
                 <p className="text-xs text-muted-foreground">
                   线程运行中，内容会自动更新。
                 </p>
