@@ -29,6 +29,7 @@ export function ThreadQueuePanel({
   canOperate,
   stale,
   editingRunId,
+  actionLocked = false,
   onEdit,
 }: {
   environmentId: string;
@@ -37,6 +38,8 @@ export function ThreadQueuePanel({
   canOperate: boolean;
   stale: boolean;
   editingRunId?: string;
+  /** 保存排队编辑进行中时锁住队列操作，避免卸载正在提交的附件。 */
+  actionLocked?: boolean;
   onEdit: (item: ThreadQueueItem) => void;
 }) {
   const steer = useSteerQueued(environmentId, threadId);
@@ -49,7 +52,7 @@ export function ThreadQueuePanel({
   const mutations = [steer, cancel, reorder, resume];
   const busy = mutations.some((m) => m.isPending);
   const failed = mutations.find((m) => m.isError);
-  const locked = busy || stale || !canOperate;
+  const locked = busy || stale || !canOperate || actionLocked;
 
   return (
     <section aria-label="消息队列" className="space-y-2">

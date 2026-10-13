@@ -36,89 +36,65 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-describe("useImageUploads park", () => {
+describe("useImageUploads", () => {
   beforeEach(() => {
     uploadAttachment.mockReset();
     deleteAttachment.mockReset();
     deleteAttachment.mockResolvedValue(null);
   });
 
-  it("keeps an in-flight parked draft when the upload finishes", async () => {
+  it("seeds existing attachments without uploading", () => {
+    const { result } = renderHook(() =>
+      useImageUploads("e1", [att("queued", "queued.png")]),
+    );
+    expect(result.current.images).toEqual([
+      expect.objectContaining({
+        name: "queued.png",
+        status: "done",
+        existing: true,
+        attachment: att("queued", "queued.png"),
+      }),
+    ]);
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it("deletes a finished upload that the user removed before it landed", async () => {
     const pending = deferred<ChatAttachment>();
     uploadAttachment.mockReturnValue(pending.promise);
     const { result } = renderHook(() => useImageUploads("e1"));
 
     act(() => result.current.add([png()]));
-    expect(result.current.images[0]?.status).toBe("uploading");
-
-    act(() => result.current.parkAndShowExisting([att("queued", "queued.png")]));
-    expect(result.current.images.map((i) => i.name)).toEqual(["queued.png"]);
-
+    const key = result.current.images[0]?.key;
+    expect(key).toBeTruthy();
+    act(() => result.current.remove(key!));
     await act(async () => pending.resolve(att("att-draft")));
-    expect(deleteAttachment).not.toHaveBeenCalled();
-
-    act(() => result.current.restoreParked());
-    await waitFor(() => expect(result.current.images[0]?.status).toBe("done"));
-    expect(result.current.images[0]?.attachment?.id).toBe("att-draft");
-    expect(deleteAttachment).not.toHaveBeenCalled();
+    expect(deleteAttachment).toHaveBeenCalledWith("e1", "att-draft");
   });
 
-  it("records a parked upload failure instead of leaving it spinning", async () => {
-    const pending = deferred<ChatAttachment>();
-    uploadAttachment.mockReturnValue(pending.promise);
-    const { result } = renderHook(() => useImageUploads("e1"));
-
-    act(() => result.current.add([png()]));
-    act(() => result.current.parkAndShowExisting([]));
-    await act(async () => pending.reject(new Error("上游拒绝")));
-
-    act(() => result.current.restoreParked());
-    await waitFor(() => expect(result.current.images[0]?.status).toBe("error"));
-    expect(result.current.images[0]?.error).toBe("上游拒绝");
-    expect(deleteAttachment).not.toHaveBeenCalled();
-  });
-
-  it("discards images added during edit when restoring unsaved", async () => {
-    uploadAttachment
-      .mockResolvedValueOnce(att("att-draft"))
-      .mockResolvedValueOnce(att("att-edit", "edit.png"));
-    const { result } = renderHook(() => useImageUploads("e1"));
-
-    act(() => result.current.add([png()]));
-    await waitFor(() => expect(result.current.images[0]?.status).toBe("done"));
-
-    act(() => result.current.parkAndShowExisting([att("queued", "queued.png")]));
-    act(() => result.current.add([png("edit.png")]));
-    await waitFor(() =>
-      expect(result.current.images.some((i) => i.name === "edit.png" && i.status === "done")).toBe(
-        true,
-      ),
+  it("does not delete existing attachments on unmount", () => {
+    const { unmount } = renderHook(() =>
+      useImageUploads("e1", [att("queued", "queued.png")]),
     );
-
-    act(() => result.current.restoreParked({ discardUnsaved: true }));
-    await waitFor(() => expect(deleteAttachment).toHaveBeenCalledWith("e1", "att-edit"));
-    expect(result.current.images.map((i) => i.attachment?.id)).toEqual(["att-draft"]);
-    expect(deleteAttachment).not.toHaveBeenCalledWith("e1", "att-draft");
+    unmount();
+    expect(deleteAttachment).not.toHaveBeenCalled();
   });
 
-  it("does not delete images added during edit when saving", async () => {
-    uploadAttachment
-      .mockResolvedValueOnce(att("att-draft"))
-      .mockResolvedValueOnce(att("att-edit", "edit.png"));
-    const { result } = renderHook(() => useImageUploads("e1"));
-
+  it("deletes unsent uploads on unmount", async () => {
+    uploadAttachment.mockResolvedValue(att("att-draft"));
+    const { result, unmount } = renderHook(() => useImageUploads("e1"));
     act(() => result.current.add([png()]));
     await waitFor(() => expect(result.current.images[0]?.status).toBe("done"));
-    act(() => result.current.parkAndShowExisting([att("queued", "queued.png")]));
-    act(() => result.current.add([png("edit.png")]));
-    await waitFor(() =>
-      expect(result.current.images.some((i) => i.name === "edit.png" && i.status === "done")).toBe(
-        true,
-      ),
-    );
+    unmount();
+    await waitFor(() => expect(deleteAttachment).toHaveBeenCalledWith("e1", "att-draft"));
+  });
 
-    act(() => result.current.restoreParked());
+  it("clear drops local previews without deleting referenced files", async () => {
+    uploadAttachment.mockResolvedValue(att("att-draft"));
+    const { result } = renderHook(() => useImageUploads("e1"));
+    act(() => result.current.add([png()]));
+    await waitFor(() => expect(result.current.images[0]?.status).toBe("done"));
+    act(() => result.current.clear());
+    expect(result.current.images).toEqual([]);
     expect(deleteAttachment).not.toHaveBeenCalled();
-    expect(result.current.images.map((i) => i.attachment?.id)).toEqual(["att-draft"]);
   });
 });

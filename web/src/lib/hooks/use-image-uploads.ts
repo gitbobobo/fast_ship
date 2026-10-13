@@ -42,15 +42,29 @@ function dispose(image: ComposerImage) {
   if (image.previewUrl) URL.revokeObjectURL?.(image.previewUrl);
 }
 
+function asExisting(attachment: ChatAttachment): ComposerImage {
+  return {
+    key: nextKey(),
+    name: attachment.name,
+    status: "done",
+    attachment,
+    existing: true,
+  };
+}
+
 /**
  * 输入框里的图片：选中即上传（原始字节），上传完成才可随消息发送。
  * 未发送就移除、或组件卸载（含换环境）时，尽力删除上游还没被消息引用的附件。
  * 用 key 重挂载组件来丢弃一个环境下的所有上传引用。
  */
-export function useImageUploads(environmentId: string) {
-  const [images, setImages] = useState<ComposerImage[]>([]);
-  const ref = useRef<ComposerImage[]>([]);
-  const parkedRef = useRef<ComposerImage[] | null>(null);
+export function useImageUploads(
+  environmentId: string,
+  existing: ChatAttachment[] = [],
+) {
+  const [images, setImages] = useState<ComposerImage[]>(() =>
+    existing.map(asExisting),
+  );
+  const ref = useRef<ComposerImage[]>(images);
 
   const commit = useCallback((next: ComposerImage[]) => {
     ref.current = next;
@@ -67,23 +81,6 @@ export function useImageUploads(environmentId: string) {
       }
     },
     [environmentId],
-  );
-
-  /** 当前输入框或停放草稿里都可能持有同一条；停放中不删上游。 */
-  const patchByKey = useCallback(
-    (key: string, patch: (image: ComposerImage) => ComposerImage) => {
-      const parked = parkedRef.current;
-      if (parked?.some((i) => i.key === key)) {
-        parkedRef.current = parked.map((i) => (i.key === key ? patch(i) : i));
-        return true;
-      }
-      if (ref.current.some((i) => i.key === key)) {
-        commit(ref.current.map((i) => (i.key === key ? patch(i) : i)));
-        return true;
-      }
-      return false;
-    },
-    [commit],
   );
 
   const add = useCallback(
@@ -107,29 +104,34 @@ export function useImageUploads(environmentId: string) {
         if (image.status === "error") continue;
         threadApi.uploadAttachment(environmentId, file).then(
           (attachment) => {
-            if (
-              !patchByKey(image.key, (i) => ({
-                ...i,
-                status: "done",
-                attachment,
-              }))
-            ) {
+            if (!ref.current.some((i) => i.key === image.key)) {
               void threadApi
                 .deleteAttachment(environmentId, attachment.id)
                 .catch(() => undefined);
+              return;
             }
+            commit(
+              ref.current.map((i) =>
+                i.key === image.key ? { ...i, status: "done", attachment } : i,
+              ),
+            );
           },
-          (err: unknown) => {
-            patchByKey(image.key, (i) => ({
-              ...i,
-              status: "error",
-              error: err instanceof Error ? err.message : "上传失败",
-            }));
-          },
+          (err: unknown) =>
+            commit(
+              ref.current.map((i) =>
+                i.key === image.key
+                  ? {
+                      ...i,
+                      status: "error",
+                      error: err instanceof Error ? err.message : "上传失败",
+                    }
+                  : i,
+              ),
+            ),
         );
       }
     },
-    [environmentId, commit, patchByKey],
+    [environmentId, commit],
   );
 
   const remove = useCallback(
@@ -138,64 +140,6 @@ export function useImageUploads(environmentId: string) {
       if (!target) return;
       commit(ref.current.filter((i) => i.key !== key));
       discard(target);
-    },
-    [commit, discard],
-  );
-
-  /** 换成一组已存在的附件（进入/退出编辑）；被丢弃的本地上传会清理。 */
-  const reset = useCallback(
-    (existing: ChatAttachment[] = []) => {
-      for (const image of ref.current) discard(image);
-      commit(
-        existing.map((attachment) => ({
-          key: nextKey(),
-          name: attachment.name,
-          status: "done",
-          attachment,
-          existing: true,
-        })),
-      );
-    },
-    [commit, discard],
-  );
-
-  /** 进入排队编辑：把当前草稿图片停到一边，不删上游；展示该条排队消息的附件。 */
-  const parkAndShowExisting = useCallback((existing: ChatAttachment[] = []) => {
-    if (parkedRef.current == null) {
-      parkedRef.current = ref.current;
-    }
-    commit(
-      existing.map((attachment) => ({
-        key: nextKey(),
-        name: attachment.name,
-        status: "done" as const,
-        attachment,
-        existing: true,
-      })),
-    );
-  }, [commit]);
-
-  /**
-   * 退出/保存排队编辑：把停着的草稿图片放回输入框。
-   * 退出未保存时丢掉编辑中新上传的图；保存成功则保留（已写进排队消息）。
-   */
-  const restoreParked = useCallback(
-    (opts?: { discardUnsaved?: boolean }) => {
-      const parked = parkedRef.current;
-      const parkedKeys = new Set((parked ?? []).map((i) => i.key));
-      for (const image of ref.current) {
-        if (
-          opts?.discardUnsaved &&
-          !image.existing &&
-          !parkedKeys.has(image.key)
-        ) {
-          discard(image);
-        } else {
-          dispose(image);
-        }
-      }
-      parkedRef.current = null;
-      commit(parked ?? []);
     },
     [commit, discard],
   );
@@ -209,10 +153,6 @@ export function useImageUploads(environmentId: string) {
   useEffect(
     () => () => {
       for (const image of ref.current) discard(image);
-      if (parkedRef.current) {
-        for (const image of parkedRef.current) discard(image);
-        parkedRef.current = null;
-      }
       ref.current = [];
     },
     [discard],
@@ -228,9 +168,6 @@ export function useImageUploads(environmentId: string) {
     images,
     add,
     remove,
-    reset,
-    parkAndShowExisting,
-    restoreParked,
     clear,
     uploading,
     attachmentsOf,

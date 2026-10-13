@@ -117,11 +117,12 @@ trimmed string）；threadId 稳定生成使重试幂等（launchThread 会复�
 {messageId,text,attachments[]}`。
 
 workspace：`root`（Current checkout，不传 branch）/ `worktree{baseRef,branch?,
-startFromOrigin?}` / `existing_worktree{worktreePath,branch?}`。项目与 cwd 从上游
-shell 快照解析（`projects[].workspaceRoot`），不接受前端任意 cwd。**新 worktree
-的 base_ref 默认主检出当前分支**（共识，经 `vcs.refreshStatus` 解析；不是 T3 UI
-的仓库默认分支）；`start_from_origin` 缺省取 T3 设置
-`newWorktreesStartFromOrigin`。
+startFromOrigin?}` / `existing_worktree{worktreePath,branch?}`。`root` / `worktree`
+的 cwd 从上游 shell 快照解析（`projects[].workspaceRoot`）。`existing_worktree` 的
+`worktreePath` 原样转给 T3（UI 从 workspace-options 选），由 T3 校验路径；Fast Ship
+不另做项目目录白名单。**新 worktree 的 base_ref 默认主检出当前分支**（共识，经
+`vcs.refreshStatus` 解析；不是 T3 UI 的仓库默认分支）；`start_from_origin` 缺省取
+T3 设置 `newWorktreesStartFromOrigin`。
 
 ### 队列与活动（详情的 queue/activity）
 
