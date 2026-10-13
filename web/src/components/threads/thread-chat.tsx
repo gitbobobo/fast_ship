@@ -54,17 +54,31 @@ export function ThreadChat({
   const archived = detail.thread.status === "archived";
 
   const [editingRunId, setEditingRunId] = useState<string | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [heldEditingItem, setHeldEditingItem] = useState<ThreadQueueItem>();
   const edit = useEditQueued(environmentId, threadId);
   const stop = useStopThread(environmentId, threadId);
   const stopping = stop.isPending || activity.stopping;
-  const editingItem = editingRunId
+  const liveEditingItem = editingRunId
     ? queue.items.find((i) => i.run_id === editingRunId)
     : undefined;
+  // 保存中详情可能先把该 run 移出队列；仍挂着编辑器，好让 clear() 先于卸载执行。
+  const editingItem =
+    liveEditingItem ?? (savingEdit ? heldEditingItem : undefined);
 
   const startEdit = (item: ThreadQueueItem) => {
-    if (edit.isPending) return;
+    if (edit.isPending || savingEdit) return;
     if (editingRunId === item.run_id) return;
+    setSavingEdit(false);
+    setHeldEditingItem(item);
     setEditingRunId(item.run_id);
+    edit.reset();
+  };
+
+  const exitEdit = () => {
+    setSavingEdit(false);
+    setHeldEditingItem(undefined);
+    setEditingRunId(null);
     edit.reset();
   };
 
@@ -126,28 +140,26 @@ export function ThreadChat({
               stopError={stop.error}
               stopIsError={stop.isError}
               actions={stopButton}
-              onExit={() => {
-                setEditingRunId(null);
-                edit.reset();
-              }}
+              onSaving={setSavingEdit}
+              onExit={exitEdit}
             />
           )}
           {editingRunId && !editingItem && (
-            <p className="rounded-lg bg-muted/50 px-3 py-2 text-center text-sm text-muted-foreground">
-              该排队消息已开始发送或已被取消
-              <Button
-                type="button"
-                size="xs"
-                variant="ghost"
-                className="ml-2"
-                onClick={() => {
-                  setEditingRunId(null);
-                  edit.reset();
-                }}
-              >
-                退出编辑
-              </Button>
-            </p>
+            <div className="space-y-2">
+              <p className="rounded-lg bg-muted/50 px-3 py-2 text-center text-sm text-muted-foreground">
+                该排队消息已开始发送或已被取消
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  className="ml-2"
+                  onClick={exitEdit}
+                >
+                  退出编辑
+                </Button>
+              </p>
+              {stopButton}
+            </div>
           )}
         </>
       )}
@@ -228,6 +240,7 @@ function QueuedEditComposer({
   stopError,
   stopIsError,
   actions,
+  onSaving,
   onExit,
 }: {
   item: ThreadQueueItem;
@@ -237,6 +250,7 @@ function QueuedEditComposer({
   stopError: unknown;
   stopIsError: boolean;
   actions: ReactNode;
+  onSaving: (saving: boolean) => void;
   onExit: () => void;
 }) {
   const [text, setText] = useState(item.text);
@@ -245,6 +259,7 @@ function QueuedEditComposer({
 
   const submit = async () => {
     const attachments = uploads.attachmentsOf();
+    onSaving(true);
     try {
       await edit.mutateAsync({
         runId: item.run_id,
@@ -256,7 +271,7 @@ function QueuedEditComposer({
       uploads.clear();
       onExit();
     } catch {
-      // 错误由 mutation 状态展示。
+      onSaving(false);
     }
   };
 

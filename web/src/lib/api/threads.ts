@@ -326,7 +326,8 @@ export const threadApi = {
     const collected: WorkspaceRef[] = [];
     let cursor: number | undefined;
     let last: ApiResponse<WorkspaceOptions> | undefined;
-    for (let page = 0; page < 8; page += 1) {
+    // 服务端每次最多跟 8 页；这里再跟有限次。触顶时保留 last.next_cursor，不谎称已经读完。
+    for (let page = 0; page < 32; page += 1) {
       const searchParams: Record<string, string | number> = {};
       if (query) searchParams.query = query;
       if (cursor != null) searchParams.cursor = cursor;
@@ -351,7 +352,11 @@ export const threadApi = {
     if (!last?.data) return last as ApiResponse<WorkspaceOptions>;
     return {
       ...last,
-      data: { ...last.data, refs: collected, next_cursor: null },
+      data: {
+        ...last.data,
+        refs: collected,
+        next_cursor: last.data.next_cursor ?? null,
+      },
     };
   },
 

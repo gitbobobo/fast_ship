@@ -37,6 +37,17 @@ func t3SupportedImageMime(mime string) bool {
 // CreateAttachmentUpload 上传一张图片：createUploadUrl → POST 字节 → 返回
 // 可放进消息 attachments 数组的元数据。
 func (s *T3ThreadsService) CreateAttachmentUpload(ctx context.Context, userID, envID, name, mimeType string, sizeBytes int64, body io.Reader) (*T3ChatAttachment, error) {
+	env, err := s.envRepo.FindByIDAndUserID(ctx, envID, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrT3EnvironmentNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if err := requireT3Operate(env); err != nil {
+		return nil, err
+	}
+
 	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
 	if !t3SupportedImageMime(mimeType) {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "仅支持 PNG/JPEG/GIF/WebP 图片")
@@ -53,17 +64,6 @@ func (s *T3ThreadsService) CreateAttachmentUpload(ctx context.Context, userID, e
 	}
 	if len(name) > 255 {
 		name = name[:255]
-	}
-
-	env, err := s.envRepo.FindByIDAndUserID(ctx, envID, userID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrT3EnvironmentNotFound
-		}
-		return nil, errs.ErrInternal
-	}
-	if err := requireT3Operate(env); err != nil {
-		return nil, err
 	}
 
 	ctx, cancel := s.t3WriteBudget(ctx)

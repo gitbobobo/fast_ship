@@ -58,6 +58,9 @@ func TestT3ReadOnlyEnvironmentWriteGuard(t *testing.T) {
 	if _, err := e.th.SendMessage(ctx, userID, created.Id, "th-1", &T3SendMessageRequest{Text: "你好"}); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
 		t.Fatalf("expected 40300 for read-only env, got %v", err)
 	}
+	if _, err := e.th.CreateAttachmentUpload(ctx, userID, created.Id, "x.txt", "text/plain", 3, strings.NewReader("abc")); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
+		t.Fatalf("expected 40300 for read-only upload before mime check, got %v", err)
+	}
 	if err := e.th.DeleteAttachment(ctx, userID, created.Id, "att-1"); err == nil || t3ErrCode(err) != errs.ErrPermissionDenied.Code {
 		t.Fatalf("expected 40300 for attachment delete, got %v", err)
 	}
@@ -67,7 +70,7 @@ func TestT3ReadOnlyEnvironmentWriteGuard(t *testing.T) {
 	// 只读会话不发任何写 RPC
 	for _, rpc := range e.fake.recordedRPC() {
 		switch rpc.method {
-		case "orchestration.dispatchCommand", "orchestration.launchThread", "attachments.delete":
+		case "orchestration.dispatchCommand", "orchestration.launchThread", "attachments.delete", "attachments.createUploadUrl":
 			t.Fatalf("read-only env must not dispatch %s", rpc.method)
 		}
 	}

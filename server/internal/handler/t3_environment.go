@@ -348,6 +348,9 @@ func (h *T3EnvironmentHandler) AnswerSecretRequest(c *gin.Context) {
 
 // UploadAttachment POST /api/environments/:id/attachments
 func (h *T3EnvironmentHandler) UploadAttachment(c *gin.Context) {
+	if h.denyReadOnly(c) {
+		return
+	}
 	userID := middleware.GetUserID(c)
 	// 原始字节流转发：不经 ShouldBind/multipart（避免落临时文件），
 	// 也不做 base64。Content-Type 即图片 MIME，X-File-Name 是显示名。

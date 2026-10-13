@@ -147,4 +147,28 @@ describe("T3 thread api requests", () => {
     expect(utf8Upload[1].headers).toEqual({ "Content-Type": "image/png" });
     expect(del.mock.calls[0][0]).toBe("environments/e1/attachments/a%2F1");
   });
+
+  it("keeps next_cursor when the client page cap is hit", async () => {
+    let page = 0;
+    get.mockImplementation(
+      () =>
+        ({
+          json: vi.fn().mockImplementation(async () => {
+            page += 1;
+            return {
+              data: {
+                project_id: "p1",
+                cwd: "/r",
+                refs: [{ name: `r${page}`, kind: "local" }],
+                next_cursor: page,
+              },
+            };
+          }),
+        }) as never,
+    );
+    const paged = await threadApi.workspaceOptions("e1", "p1", "");
+    expect(paged.data.refs).toHaveLength(32);
+    expect(paged.data.next_cursor).toBe(32);
+    expect(get).toHaveBeenCalledTimes(32);
+  });
 });
