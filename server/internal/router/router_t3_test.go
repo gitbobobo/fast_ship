@@ -194,6 +194,7 @@ func TestRouterT3EndpointsReachHandlerWithJWT(t *testing.T) {
 		{"edit queued", http.MethodPut, "/api/environments/no-env/threads/th-1/queue/run-1", []byte(`{"text":"x"}`)},
 		{"respond request", http.MethodPost, "/api/environments/no-env/threads/th-1/requests/rr-1/respond", []byte(`{"type":"approval","decision":"accept"}`)},
 		{"answer secret", http.MethodPost, "/api/environments/no-env/threads/th-1/items/th-1::s/secret-answer", []byte(`{"type":"decline"}`)},
+		{"upload attachment", http.MethodPost, "/api/environments/no-env/attachments", []byte("abc")},
 		{"attachment content", http.MethodGet, "/api/environments/no-env/attachments/att-1/content", nil},
 	}
 	for _, tc := range writeCases {

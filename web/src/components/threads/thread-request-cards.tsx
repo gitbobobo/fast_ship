@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router";
 import { CheckCircle2, CircleHelp, Lock, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -164,9 +164,11 @@ export function ApprovalRequestCard(props: CardProps) {
 const emptyDraft: AnswerDraft = { picked: [], custom: "" };
 
 export function UserInputRequestCard(props: CardProps) {
+  // 提交后详情轮询可能先于 POST 成功看到 resolved；先按住表单，避免卸载把已提交的图删掉。
+  const [held, setHeld] = useState(false);
   const answerable = isRequestAnswerable(props.item) && props.canOperate;
-  if (!answerable) return <UserInputReadOnly {...props} />;
-  return <UserInputAnswerForm {...props} />;
+  if (!answerable && !held) return <UserInputReadOnly {...props} />;
+  return <UserInputAnswerForm {...props} onHold={setHeld} />;
 }
 
 function UserInputReadOnly({ item, environmentId, canOperate }: CardProps) {
@@ -205,9 +207,11 @@ function UserInputAnswerForm({
   environmentId,
   threadId,
   stale,
-}: CardProps) {
+  onHold,
+}: CardProps & { onHold: (held: boolean) => void }) {
   const uploads = useImageUploads(environmentId);
   const respond = useRespondRequest(environmentId, threadId, uploads.clear);
+  useEffect(() => () => onHold(false), [onHold]);
   const questions = item.questions ?? [];
   const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>(() =>
     Object.fromEntries(
@@ -242,16 +246,20 @@ function UserInputAnswerForm({
       const files = uploads.attachmentsOf(q.id);
       if (files.length > 0) byQuestion[q.id] = files;
     }
-    respond.mutate({
-      requestId: item.request_id,
-      input: {
-        type: "user_input",
-        answers,
-        ...(Object.keys(byQuestion).length > 0
-          ? { attachments_by_question_id: byQuestion }
-          : {}),
+    onHold(true);
+    respond.mutate(
+      {
+        requestId: item.request_id,
+        input: {
+          type: "user_input",
+          answers,
+          ...(Object.keys(byQuestion).length > 0
+            ? { attachments_by_question_id: byQuestion }
+            : {}),
+        },
       },
-    });
+      { onSettled: () => onHold(false) },
+    );
   };
 
   return (
