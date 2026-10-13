@@ -17,10 +17,6 @@ func NewIssueRepository(db *gorm.DB) *IssueRepository {
 	return &IssueRepository{db: db}
 }
 
-func (r *IssueRepository) DB() *gorm.DB {
-	return r.db
-}
-
 func (r *IssueRepository) Create(issue *model.Issue) error {
 	return r.db.Create(issue).Error
 }

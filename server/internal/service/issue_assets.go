@@ -15,8 +15,12 @@ import (
 )
 
 func (s *IssueService) reconcileIssueAssets(issueID, body string) error {
-	pathsToDelete, err := s.reconcileIssueAssetsTx(nil, issueID, body)
-	if err != nil {
+	var pathsToDelete []string
+	if err := s.assetRepo.Transaction(func(tx *gorm.DB) error {
+		var err error
+		pathsToDelete, err = s.reconcileIssueAssetsTx(tx, issueID, body)
+		return err
+	}); err != nil {
 		return err
 	}
 	s.deleteIssueAssetFiles(pathsToDelete)
@@ -24,10 +28,6 @@ func (s *IssueService) reconcileIssueAssets(issueID, body string) error {
 }
 
 func (s *IssueService) reconcileIssueAssetsTx(tx *gorm.DB, issueID, body string) ([]string, error) {
-	if tx == nil {
-		tx = s.issueRepo.DB()
-	}
-
 	assets, err := s.assetRepo.ListByIssueIDTx(tx, issueID)
 	if err != nil {
 		return nil, err
@@ -61,8 +61,12 @@ func (s *IssueService) reconcileIssueAssetsTx(tx *gorm.DB, issueID, body string)
 }
 
 func (s *IssueService) deleteIssueAssets(issueID string, ids []string) error {
-	pathsToDelete, err := s.deleteIssueAssetsTx(nil, issueID, ids)
-	if err != nil {
+	var pathsToDelete []string
+	if err := s.assetRepo.Transaction(func(tx *gorm.DB) error {
+		var err error
+		pathsToDelete, err = s.deleteIssueAssetsTx(tx, issueID, ids)
+		return err
+	}); err != nil {
 		return err
 	}
 	s.deleteIssueAssetFiles(pathsToDelete)
@@ -72,10 +76,6 @@ func (s *IssueService) deleteIssueAssets(issueID string, ids []string) error {
 func (s *IssueService) deleteIssueAssetsTx(tx *gorm.DB, issueID string, ids []string) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
-	}
-
-	if tx == nil {
-		tx = s.issueRepo.DB()
 	}
 
 	assets, err := s.assetRepo.ListByIssueIDTx(tx, issueID)
@@ -158,10 +158,6 @@ func (s *IssueService) attachDraftAssetsToIssueTx(tx *gorm.DB, projectID, issueI
 	}
 	sort.Strings(ids)
 
-	if tx == nil {
-		tx = s.issueRepo.DB()
-	}
-
 	existingAssets, err := s.assetRepo.ListByIssueIDTx(tx, issueID)
 	if err != nil {
 		return err
@@ -214,17 +210,15 @@ func (s *IssueService) attachDraftAssetsToIssueTx(tx *gorm.DB, projectID, issueI
 }
 
 func (s *IssueService) validateIssueAssetReferences(projectID, issueID, body string) error {
-	return s.validateIssueAssetReferencesTx(nil, projectID, issueID, body)
+	return s.assetRepo.Transaction(func(tx *gorm.DB) error {
+		return s.validateIssueAssetReferencesTx(tx, projectID, issueID, body)
+	})
 }
 
 func (s *IssueService) validateIssueAssetReferencesTx(tx *gorm.DB, projectID, issueID, body string) error {
 	referencedIDs := extractIssueAssetIDs(body)
 	if len(referencedIDs) == 0 {
 		return nil
-	}
-
-	if tx == nil {
-		tx = s.issueRepo.DB()
 	}
 
 	existingIDs := make(map[string]struct{}, len(referencedIDs))
