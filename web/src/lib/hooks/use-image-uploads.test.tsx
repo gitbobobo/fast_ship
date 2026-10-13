@@ -88,6 +88,16 @@ describe("useImageUploads", () => {
     await waitFor(() => expect(deleteAttachment).toHaveBeenCalledWith("e1", "att-draft"));
   });
 
+  it("does not delete retained uploads on unmount", async () => {
+    uploadAttachment.mockResolvedValue(att("att-sent"));
+    const { result, unmount } = renderHook(() => useImageUploads("e1"));
+    act(() => result.current.add([png()]));
+    await waitFor(() => expect(result.current.images[0]?.status).toBe("done"));
+    act(() => result.current.retain());
+    unmount();
+    expect(deleteAttachment).not.toHaveBeenCalled();
+  });
+
   it("clear drops local previews without deleting referenced files", async () => {
     uploadAttachment.mockResolvedValue(att("att-draft"));
     const { result } = renderHook(() => useImageUploads("e1"));

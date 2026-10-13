@@ -71,10 +71,13 @@ export function useImageUploads(
     setImages(next);
   }, []);
 
+  /** 已经写进正在飞行的请求：卸载时不要删上游文件。 */
+  const submittedRef = useRef(false);
+
   const discard = useCallback(
     (image: ComposerImage) => {
       dispose(image);
-      if (image.attachment && !image.existing) {
+      if (image.attachment && !image.existing && !submittedRef.current) {
         void threadApi
           .deleteAttachment(environmentId, image.attachment.id)
           .catch(() => undefined);
@@ -150,6 +153,14 @@ export function useImageUploads(
     commit([]);
   }, [commit]);
 
+  const retain = useCallback(() => {
+    submittedRef.current = true;
+  }, []);
+
+  const release = useCallback(() => {
+    submittedRef.current = false;
+  }, []);
+
   useEffect(
     () => () => {
       for (const image of ref.current) discard(image);
@@ -169,6 +180,8 @@ export function useImageUploads(
     add,
     remove,
     clear,
+    retain,
+    release,
     uploading,
     attachmentsOf,
   };

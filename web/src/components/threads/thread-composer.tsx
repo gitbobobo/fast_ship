@@ -46,6 +46,7 @@ export function ThreadComposer({
   error?: string;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
+  const locked = disabled || submitting;
   const hasImages = uploads.images.some((i) => i.status === "done");
   const hasContent = text.trim().length > 0 || (allowImageOnly && hasImages);
   const canSubmit =
@@ -63,6 +64,7 @@ export function ThreadComposer({
   };
 
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (locked) return;
     const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
     if (files.length > 0) {
       e.preventDefault();
@@ -81,7 +83,7 @@ export function ThreadComposer({
         environmentId={environmentId}
         images={uploads.images}
         onRemove={uploads.remove}
-        locked={submitting || disabled}
+        locked={locked}
       />
       <Textarea
         value={text}
@@ -89,7 +91,7 @@ export function ThreadComposer({
         onKeyDown={onKeyDown}
         onPaste={onPaste}
         placeholder={placeholder}
-        disabled={disabled}
+        disabled={locked}
         aria-label="消息内容"
         className="max-h-60 min-h-20 resize-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
       />
@@ -116,7 +118,7 @@ export function ThreadComposer({
           variant="ghost"
           size="icon-sm"
           aria-label="添加图片"
-          disabled={disabled || submitting}
+          disabled={locked}
           onClick={() => fileInput.current?.click()}
         >
           <ImagePlus className="h-4 w-4" />
