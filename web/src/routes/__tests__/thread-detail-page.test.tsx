@@ -697,7 +697,7 @@ describe("ThreadDetailPage", () => {
             id: "q1",
             header: "方案",
             question: "用哪个方案？",
-            options: [{ label: "A" }],
+            options: [{ label: "A", description: "快" }],
           },
         ],
       });
