@@ -76,6 +76,17 @@ describe("buildIssuePrompt", () => {
     expect(prompt.endsWith("> 问题ID：i1")).toBe(true);
   });
 
+  it("trims trailing newlines from the template before appending the block", () => {
+    // 与服务端 BuildIssuePrompt 的 TrimRight 同口径：尾部换行不产生多余空行
+    const prompt = buildIssuePrompt({
+      projectId: "p1",
+      issueId: "i1",
+      content: "模板正文\n\n\n",
+    });
+
+    expect(prompt).toBe(`模板正文\n\n${APPENDED_BLOCK}`);
+  });
+
   it("renders only the appended block when content is empty", () => {
     const prompt = buildIssuePrompt({
       projectId: "p1",

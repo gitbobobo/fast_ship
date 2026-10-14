@@ -104,10 +104,7 @@ export const T3BindingsSection = forwardRef<
               ? bindingInvalidReason(binding, environment, discovered)
               : null;
             const selectDisabled =
-              busy ||
-              environment.status !== "ok" ||
-              discoveryQuery.isError ||
-              Boolean(discovered?.error);
+              busy || environment.status !== "ok" || discoveryQuery.isError;
             // 失效绑定的旧项目 id 不在发现列表里，仍要作为一项渲染出来（标红）
             const options = discovered?.projects ?? [];
             const showStaleOption =
@@ -168,8 +165,14 @@ export const T3BindingsSection = forwardRef<
                       </SelectItem>
                     )}
                     {options.map((project) => (
-                      <SelectItem key={project.id} value={project.id}>
-                        {project.title}
+                      <SelectItem
+                        key={project.id}
+                        value={project.id}
+                        disabled={!project.workspace_root}
+                      >
+                        {project.workspace_root
+                          ? project.title
+                          : `${project.title}（缺工作区路径，无法绑定）`}
                       </SelectItem>
                     ))}
                   </SelectContent>

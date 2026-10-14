@@ -221,7 +221,9 @@ describe("bindingInvalidReason", () => {
     ).toBeNull();
   });
 
-  it("flags per-environment discovery failure", () => {
+  it("does not flag bindings on archive-only discovery failure", () => {
+    // 归档快照失败是部分失败，活跃项目照常返回；绑定的项目可能只在
+    // 归档面，没拉到不下「已删除」结论
     expect(
       bindingInvalidReason(binding, makeEnvironment(), {
         environment_id: "e1",
@@ -230,7 +232,22 @@ describe("bindingInvalidReason", () => {
         access: "operate",
         error: "daemon 超时",
       }),
-    ).toBe("环境发现失败");
+    ).toBeNull();
+  });
+
+  it("keeps a bound project valid when the active list still contains it", () => {
+    expect(
+      bindingInvalidReason(binding, makeEnvironment(), {
+        environment_id: "e1",
+        name: "Mac",
+        status: "ok",
+        access: "operate",
+        error: "归档读取失败",
+        projects: [
+          { id: "t3-e1", title: "Alpha", workspace_root: "/w/alpha" },
+        ],
+      }),
+    ).toBeNull();
   });
 
   it("flags a snapshot drift: missing project, renamed title, moved root", () => {

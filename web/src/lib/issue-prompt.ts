@@ -31,6 +31,9 @@ export function normalizeIssuePrompts(
  * 推荐理由仅推荐场景出现。不再有 /fast-ship 前缀。
  */
 export function buildIssuePrompt(input: IssuePromptInput): string {
+  // 尾部换行不进正文（与服务端 BuildIssuePrompt 的 TrimRight 同口径），
+  // 否则 web 生成的提示词比服务端多出空行，两边格式不一致。
+  const content = input.content.replace(/\n+$/, "");
   const lines = [
     "以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。",
     "若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：",
@@ -44,5 +47,5 @@ export function buildIssuePrompt(input: IssuePromptInput): string {
     lines.push(`推荐理由：${reasonLines[0]}`, ...reasonLines.slice(1));
   }
   const block = lines.map((line) => `> ${line}`).join("\n");
-  return input.content ? `${input.content}\n\n${block}` : block;
+  return content ? `${content}\n\n${block}` : block;
 }

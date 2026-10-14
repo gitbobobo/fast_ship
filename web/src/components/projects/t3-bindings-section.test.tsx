@@ -255,7 +255,9 @@ describe("T3BindingsSection", () => {
     ).toBeDisabled();
   });
 
-  it("disables a row whose environment failed discovery", () => {
+  it("keeps the row usable when only the archive snapshot failed", () => {
+    // 归档快照失败是部分失败，活跃项目照常返回：绑定不下「已失效」结论，
+    // 该行仍可绑定/换绑（服务端会实时校验）
     discoveryRef.current = {
       data: [discovered("e1", { error: "daemon 超时", projects: [] })],
       isLoading: false,
@@ -264,11 +266,37 @@ describe("T3BindingsSection", () => {
 
     renderSection();
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "绑定已失效：环境发现失败",
-    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("daemon 超时")).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "Mac 的 T3 项目" }),
-    ).toBeDisabled();
+    ).not.toBeDisabled();
+  });
+
+  it("disables discovered projects without a workspace root", async () => {
+    // 无 workspace_root 的项目服务端必拒（40401），渲染为禁用并说明
+    discoveryRef.current = {
+      data: [
+        discovered("e1", {
+          projects: [
+            { id: "t3-e1", title: "Alpha" },
+            { id: "other-e1", title: "Beta", workspace_root: "/w/beta" },
+          ],
+        }),
+      ],
+      isLoading: false,
+      isError: false,
+    };
+    bindingsRef.current = { data: [], isLoading: false, isError: false };
+    const user = userEvent.setup();
+    renderSection();
+
+    await user.click(screen.getByRole("combobox", { name: "Mac 的 T3 项目" }));
+    const option = await screen.findByRole("option", { name: /Alpha/ });
+    expect(option).toHaveAttribute("aria-disabled", "true");
+    expect(option).toHaveTextContent("缺工作区路径，无法绑定");
+    expect(
+      await screen.findByRole("option", { name: "Beta" }),
+    ).not.toBeDisabled();
   });
 });

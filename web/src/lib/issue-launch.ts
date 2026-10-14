@@ -106,7 +106,9 @@ export function preferenceModelPick(
 
 /**
  * 绑定失效原因：环境不可达，或快照与最新发现不一致（T3 项目被删/改名/挪路径）。
- * 该环境没有返回发现结果时不下结论（null），避免把「没拉到」误判成「已失效」。
+ * 该环境没有返回发现结果时不下结论（null）；发现带 error 时（归档快照失败的
+ * 部分失败，活跃项目照常返回）也不下「已删除」的结论——绑定的项目可能只在
+ * 归档面，没拉到不等于不存在。
  */
 export function bindingInvalidReason(
   binding: ProjectT3Binding,
@@ -117,11 +119,13 @@ export function bindingInvalidReason(
     return `环境${ENVIRONMENT_STATUS_LABELS[environment.status] ?? "不可达"}`;
   }
   if (!discovered) return null;
-  if (discovered.error) return "环境发现失败";
   const found = (discovered.projects ?? []).find(
     (project) => project.id === binding.t3_project_id,
   );
-  if (!found) return "绑定的 T3 项目已不存在";
+  if (!found) {
+    if (discovered.error) return null;
+    return "绑定的 T3 项目已不存在";
+  }
   if (binding.t3_project_title && found.title !== binding.t3_project_title) {
     return "T3 项目已改名";
   }
