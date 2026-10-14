@@ -37,7 +37,7 @@ export function ThreadInfoCard({
     <aside
       data-testid="thread-info-card"
       aria-label="线程信息"
-      className="sticky top-20 hidden w-64 shrink-0 self-start lg:block xl:w-72"
+      className="sticky top-20 mt-4 hidden w-64 shrink-0 self-start md:mt-6 lg:block xl:w-72"
     >
       <div className="divide-y rounded-2xl border bg-card py-1 text-sm shadow-xs">
         <div className="py-1">
