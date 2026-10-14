@@ -12,7 +12,10 @@ import {
   FileText,
   Images,
   MessagesSquare,
+  Workflow,
+  Bell,
 } from "lucide-react";
+import { useUnreadNotificationCount } from "@/lib/hooks/use-notifications";
 import {
   Tooltip,
   TooltipContent,
@@ -32,14 +35,22 @@ const navItems = [
   { to: "/documents", label: "文档", icon: FileText, end: true },
   { to: "/board", label: "看板", icon: Kanban, end: true },
   { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
+  { to: "/automations", label: "自动化", icon: Workflow, end: true },
+  { to: "/notifications", label: "通知", icon: Bell, end: true },
   { to: "/versions", label: "版本", icon: Tags, end: true },
   { to: "/screenshots", label: "截图", icon: Images, end: true },
 ];
+
+function unreadLabel(label: string, unread: number) {
+  if (unread <= 0) return label;
+  return `${label}（${unread > 99 ? "99+" : unread} 条未读）`;
+}
 
 function SidebarNavItem({
   item,
   collapsed,
   onNavigate,
+  unread = 0,
 }: {
   item: {
     to: string;
@@ -49,15 +60,18 @@ function SidebarNavItem({
   };
   collapsed: boolean;
   onNavigate?: () => void;
+  unread?: number;
 }) {
+  const name = unreadLabel(item.label, unread);
   const link = (
     <NavLink
       to={item.to}
       end={item.end}
       onClick={onNavigate}
+      aria-label={name}
       className={({ isActive }) =>
         cn(
-          "flex items-center rounded-md text-sm font-medium transition-all duration-200",
+          "relative flex items-center rounded-md text-sm font-medium transition-all duration-200",
           collapsed ? "justify-center px-2 py-2" : "gap-3 px-3 py-2",
           isActive
             ? "bg-primary text-primary-foreground"
@@ -65,7 +79,15 @@ function SidebarNavItem({
         )
       }
     >
-      <item.icon className="h-4 w-4 shrink-0" />
+      <span className="relative shrink-0">
+        <item.icon className="h-4 w-4" />
+        {unread > 0 && collapsed && (
+          <span
+            data-testid="sidebar-unread-dot"
+            className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-destructive"
+          />
+        )}
+      </span>
       <span
         className={cn(
           "transition-all duration-200 overflow-hidden whitespace-nowrap",
@@ -74,6 +96,18 @@ function SidebarNavItem({
       >
         {item.label}
       </span>
+      {unread > 0 && !collapsed && (
+        <span
+          data-testid="sidebar-unread-badge"
+          className={cn(
+            "ml-auto flex h-4 min-w-4 items-center justify-center rounded-full px-1",
+            "text-[10px] font-medium leading-none",
+            "bg-destructive text-white",
+          )}
+        >
+          {unread > 99 ? "99+" : unread}
+        </span>
+      )}
     </NavLink>
   );
 
@@ -81,7 +115,7 @@ function SidebarNavItem({
     return (
       <Tooltip>
         <TooltipTrigger render={link} />
-        <TooltipContent side="right">{item.label}</TooltipContent>
+        <TooltipContent side="right">{name}</TooltipContent>
       </Tooltip>
     );
   }
@@ -134,6 +168,8 @@ function NavContent({
   collapsed?: boolean;
   onNavigate?: () => void;
 }) {
+  const unread = useUnreadNotificationCount().data ?? 0;
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 shrink-0 items-center border-b px-4">
@@ -151,7 +187,7 @@ function NavContent({
       </div>
       <nav
         className={cn(
-          "flex-1 space-y-1 transition-all duration-200",
+          "flex-1 space-y-1 overflow-y-auto transition-all duration-200",
           collapsed ? "p-2" : "p-3"
         )}
       >
@@ -161,6 +197,7 @@ function NavContent({
             item={item}
             collapsed={!!collapsed}
             onNavigate={onNavigate}
+            unread={item.to === "/notifications" ? unread : 0}
           />
         ))}
       </nav>

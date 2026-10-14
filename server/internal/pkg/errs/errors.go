@@ -34,14 +34,16 @@ var (
 	ErrLoginFailed         = New(40103, "用户名/邮箱或密码错误")
 	ErrTokenBlacklist      = New(40104, "Token 已被注销")
 	ErrRefreshTokenInvalid = New(40105, "Refresh Token 无效或已过期")
+	ErrRunTokenInvalid     = New(40106, "运行令牌无效、已过期或已消费")
 )
 
 // 权限错误 40300-40399
 var (
-	ErrPermissionDenied = New(40300, "权限不足")
-	ErrApiKeyForbidden  = New(40301, "API Key 无此操作权限")
-	ErrNotOwner         = New(40302, "非资源所有者")
-	ErrApiKeyRequired   = New(40303, "该操作仅限 API Key 调用")
+	ErrPermissionDenied     = New(40300, "权限不足")
+	ErrApiKeyForbidden      = New(40301, "API Key 无此操作权限")
+	ErrNotOwner             = New(40302, "非资源所有者")
+	ErrApiKeyRequired       = New(40303, "该操作仅限 API Key 调用")
+	ErrCredentialNotAllowed = New(40304, "该端点不允许此凭证类型")
 )
 
 // 资源不存在 40400-40499
@@ -67,6 +69,9 @@ var (
 	ErrT3ThreadNotFound             = New(40418, "T3 线程不存在")
 	ErrT3ThreadItemNotFound         = New(40419, "T3 线程条目不存在")
 	ErrGitHubTokenNotFound          = New(40420, "GitHub Token 不存在")
+	ErrAutomationNotFound           = New(40421, "自动化不存在")
+	ErrAutomationRunNotFound        = New(40422, "自动化运行不存在")
+	ErrNotificationNotFound         = New(40423, "通知不存在")
 )
 
 // 业务冲突 40900-40999
@@ -86,14 +91,18 @@ var (
 	ErrT3EnvironmentNameExists  = New(40912, "环境名称在当前用户下已存在")
 	ErrGitHubTokenInUse         = New(40913, "该 Token 仍被项目引用，请先解除或更换引用")
 	// 消息不含目标记录信息；替换撞指纹时由 service 用 New 追加已有记录的 title/id。
-	ErrGitHubTokenDuplicate = New(40914, "相同的 Token 已存在")
-	ErrGitHubTokenConflict  = New(40915, "GitHub Token 已被其他请求更新")
-	ErrT3StateConflict      = New(40916, "T3 状态冲突")
+	ErrGitHubTokenDuplicate        = New(40914, "相同的 Token 已存在")
+	ErrGitHubTokenConflict         = New(40915, "GitHub Token 已被其他请求更新")
+	ErrT3StateConflict             = New(40916, "T3 状态冲突")
+	ErrAutomationRunReportConflict = New(40917, "运行回报冲突：运行已结束或回报与已受理的结束回报不一致")
+	ErrPageBoundaryInvalid         = New(40918, "分页边界条目已不存在，请从头重新拉取")
+	ErrAutomationActive            = New(40919, "自动化有进行中的运行（或后置操作待执行），暂不能删除")
 )
 
 // 前置条件未满足 41200-41299
 var (
 	ErrBatchCloseTooMany = New(41201, "匹配问题数量过多，请缩小关闭范围后重试")
+	ErrPublicURLMissing  = New(41202, "启用自动化前需配置 server.public_url（FAST_SHIP_SERVER_PUBLIC_URL）")
 )
 
 // 服务器内部错误 50000-50099

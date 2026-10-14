@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { MobileNav } from "./sidebar";
+import { NotificationBell } from "./notification-bell";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -71,6 +72,7 @@ export function Header({
         <h1 className="text-base font-semibold truncate flex-1 min-w-0">{title}</h1>
       )}
       {!title && <div className="flex-1 min-w-0" />}
+      <NotificationBell />
       {actions}
     </header>
   );

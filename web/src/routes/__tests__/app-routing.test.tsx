@@ -58,4 +58,24 @@ describe("App routing defaults", () => {
       "/login",
     );
   });
+
+  it("registers the automations route", async () => {
+    browserEntries.splice(0, browserEntries.length, "/automations");
+
+    render(<App />);
+
+    expect(await screen.findByTestId("navigate-target")).toHaveTextContent(
+      "/login",
+    );
+  });
+
+  it("registers the notifications route", async () => {
+    browserEntries.splice(0, browserEntries.length, "/notifications");
+
+    render(<App />);
+
+    expect(await screen.findByTestId("navigate-target")).toHaveTextContent(
+      "/login",
+    );
+  });
 });

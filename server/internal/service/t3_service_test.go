@@ -1721,14 +1721,14 @@ func TestT3ThreadStatusPendingBackgroundTasks(t *testing.T) {
 		tasks string
 		want  api.T3ThreadSummaryStatus
 	}{
-		{"subagent 占位", `[{"taskId":"bg-1","kind":"subagent"}]`, api.Running},
-		{"monitor 占位", `[{"taskId":"bg-1","kind":"monitor"}]`, api.Running},
-		{"background_task 占位", `[{"taskId":"bg-1","kind":"background_task"}]`, api.Running},
-		{"未知 kind 占位（上游回退 background_task）", `[{"taskId":"bg-1","kind":"hologram"}]`, api.Running},
-		{"kind 缺省占位（旧 roster 按 background_task 加载）", `[{"taskId":"bg-1"}]`, api.Running},
-		{"command 不占位", `[{"taskId":"bg-1","kind":"command"}]`, api.Idle},
-		{"command 与占位混合", `[{"taskId":"b1","kind":"command"},{"taskId":"b2","kind":"monitor"}]`, api.Running},
-		{"空数组不占位", `[]`, api.Idle},
+		{"subagent 占位", `[{"taskId":"bg-1","kind":"subagent"}]`, api.T3ThreadSummaryStatusRunning},
+		{"monitor 占位", `[{"taskId":"bg-1","kind":"monitor"}]`, api.T3ThreadSummaryStatusRunning},
+		{"background_task 占位", `[{"taskId":"bg-1","kind":"background_task"}]`, api.T3ThreadSummaryStatusRunning},
+		{"未知 kind 占位（上游回退 background_task）", `[{"taskId":"bg-1","kind":"hologram"}]`, api.T3ThreadSummaryStatusRunning},
+		{"kind 缺省占位（旧 roster 按 background_task 加载）", `[{"taskId":"bg-1"}]`, api.T3ThreadSummaryStatusRunning},
+		{"command 不占位", `[{"taskId":"bg-1","kind":"command"}]`, api.T3ThreadSummaryStatusIdle},
+		{"command 与占位混合", `[{"taskId":"b1","kind":"command"},{"taskId":"b2","kind":"monitor"}]`, api.T3ThreadSummaryStatusRunning},
+		{"空数组不占位", `[]`, api.T3ThreadSummaryStatusIdle},
 	}
 	for _, c := range kindCases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1745,10 +1745,10 @@ func TestT3ThreadStatusPendingBackgroundTasks(t *testing.T) {
 		shell string
 		want  api.T3ThreadSummaryStatus
 	}{
-		{"archivedAt 最优先", `{"id":"t","status":"completed","archivedAt":"2026-10-01T00:00:00.000Z","pendingBackgroundTasks":[{"taskId":"b","kind":"subagent"}]}`, api.Archived},
-		{"pendingRuntimeRequest 压过占位工作", `{"id":"t","status":"completed","pendingRuntimeRequest":{"id":"rr","kind":"approval","createdAt":"2026-10-12T00:00:00.000Z"},"pendingBackgroundTasks":[{"taskId":"b","kind":"subagent"}]}`, api.Waiting},
-		{"activityRunStatus=waiting 压过占位工作", `{"id":"t","status":"completed","activityRunStatus":"waiting","pendingBackgroundTasks":[{"taskId":"b","kind":"subagent"}]}`, api.Waiting},
-		{"activityRunStatus=running 不被 command 压成 idle", `{"id":"t","status":"completed","activityRunStatus":"running","pendingBackgroundTasks":[{"taskId":"b","kind":"command"}]}`, api.Running},
+		{"archivedAt 最优先", `{"id":"t","status":"completed","archivedAt":"2026-10-01T00:00:00.000Z","pendingBackgroundTasks":[{"taskId":"b","kind":"subagent"}]}`, api.T3ThreadSummaryStatusArchived},
+		{"pendingRuntimeRequest 压过占位工作", `{"id":"t","status":"completed","pendingRuntimeRequest":{"id":"rr","kind":"approval","createdAt":"2026-10-12T00:00:00.000Z"},"pendingBackgroundTasks":[{"taskId":"b","kind":"subagent"}]}`, api.T3ThreadSummaryStatusWaiting},
+		{"activityRunStatus=waiting 压过占位工作", `{"id":"t","status":"completed","activityRunStatus":"waiting","pendingBackgroundTasks":[{"taskId":"b","kind":"subagent"}]}`, api.T3ThreadSummaryStatusWaiting},
+		{"activityRunStatus=running 不被 command 压成 idle", `{"id":"t","status":"completed","activityRunStatus":"running","pendingBackgroundTasks":[{"taskId":"b","kind":"command"}]}`, api.T3ThreadSummaryStatusRunning},
 	}
 	for _, c := range precedenceCases {
 		t.Run(c.name, func(t *testing.T) {

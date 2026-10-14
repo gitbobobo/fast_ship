@@ -49,6 +49,7 @@ type issueMirror struct {
 	logger              *zap.Logger
 	credentials         *ProjectCredentials
 	newClient           gitHubIssueClientFactory
+	eventSink           IssueEventSink
 	mu                  sync.Mutex
 	syncing             map[string]struct{}
 }
@@ -258,6 +259,7 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 		}
 	}
 
+	isNewIssue := issue == nil
 	if issue == nil {
 		sequenceNumber, err := m.issueRepo.NextSequenceNumber(projectID)
 		if err != nil {
@@ -270,6 +272,9 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 			SequenceNumber: sequenceNumber,
 		}
 	}
+	// 旧值快照（issue 随后会被就地覆盖）：事件只在真实变化时发。
+	prevState := issue.State
+	prevLabels := metaLabelsJSON(meta)
 
 	issue.Source = model.IssueSourceGitHub
 	issue.State = model.IssueState(item.GetState())
@@ -296,24 +301,6 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 		return m.issueRepo.SaveTx(tx, issue)
 	}
 
-	if issue.State == model.IssueStateClosed {
-		// GitHub 上已关闭的 issue 不可再被推荐；落库与删推荐同一事务，Delete 失败时回滚避免残留
-		if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
-			if err := persistIssue(tx); err != nil {
-				return err
-			}
-			return m.recRepo.DeleteTx(tx, issue.ID)
-		}); err != nil {
-			return nil, errs.ErrInternal
-		}
-	} else if meta == nil {
-		if err := m.issueRepo.Create(issue); err != nil {
-			return nil, errs.ErrInternal
-		}
-	} else if err := m.issueRepo.Save(issue); err != nil {
-		return nil, errs.ErrInternal
-	}
-
 	gitHubMeta := &model.IssueGitHubMeta{
 		IssueID:           issue.ID,
 		ProjectID:         projectID,
@@ -333,7 +320,30 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 		RawJSON:           toJSONString(item),
 	}
 
-	if err := m.gitHubMetaRepo.Upsert(gitHubMeta); err != nil {
+	var ownerID string
+	if m.eventSink != nil {
+		id, err := m.ownerUserID(projectID)
+		if err != nil {
+			return nil, err
+		}
+		ownerID = id
+	}
+
+	nextLabels := mapLabelNames(item.Labels)
+	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := persistIssue(tx); err != nil {
+			return err
+		}
+		if issue.State == model.IssueStateClosed {
+			if err := m.recRepo.DeleteTx(tx, issue.ID); err != nil {
+				return err
+			}
+		}
+		if err := m.gitHubMetaRepo.UpsertTx(tx, gitHubMeta); err != nil {
+			return err
+		}
+		return m.emitUpsertEventsTx(tx, ownerID, projectID, issue, isNewIssue, prevState, prevLabels, nextLabels)
+	}); err != nil {
 		return nil, errs.ErrInternal
 	}
 
@@ -342,6 +352,70 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 		return nil, errs.ErrInternal
 	}
 	return stored, nil
+}
+
+// emitUpsertEventsTx 把 GitHub 镜像落库产生的真实变化转成自动化事件（INT-90）。
+// 必须与 issue / meta / 推荐删除在同一事务：事件失败则镜像写入一并回滚，
+// 下次同步还能再触发（否则 isNew 变 false，issue_created 会丢）。
+func (m *issueMirror) emitUpsertEventsTx(tx *gorm.DB, ownerID, projectID string, issue *model.Issue, isNew bool, prevState model.IssueState, prevLabels, nextLabels []string) error {
+	if m.eventSink == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	added := missingLabels(nextLabels, prevLabels)
+
+	if isNew {
+		return m.eventSink.EnqueueIssueEventTx(tx, IssueEvent{
+			Type:                model.AutomationTriggerIssueCreated,
+			UserID:              ownerID,
+			ProjectID:           projectID,
+			IssueID:             issue.ID,
+			TriggerKey:          "event:" + uuid.NewString(),
+			IssueSequenceNumber: issue.SequenceNumber,
+			IssueTitle:          issue.Title,
+			OccurredAt:          now,
+		})
+	}
+	if issue.State != prevState {
+		if err := m.eventSink.EnqueueIssueEventTx(tx, IssueEvent{
+			Type:                model.AutomationTriggerIssueStatusChanged,
+			UserID:              ownerID,
+			ProjectID:           projectID,
+			IssueID:             issue.ID,
+			TriggerKey:          "event:" + uuid.NewString(),
+			StatusField:         "state",
+			From:                string(prevState),
+			To:                  string(issue.State),
+			IssueSequenceNumber: issue.SequenceNumber,
+			IssueTitle:          issue.Title,
+			OccurredAt:          now,
+		}); err != nil {
+			return err
+		}
+	}
+	if len(added) > 0 {
+		return m.eventSink.EnqueueIssueEventTx(tx, IssueEvent{
+			Type:                model.AutomationTriggerIssueLabelAdded,
+			UserID:              ownerID,
+			ProjectID:           projectID,
+			IssueID:             issue.ID,
+			TriggerKey:          "event:" + uuid.NewString(),
+			LabelsAdded:         added,
+			IssueSequenceNumber: issue.SequenceNumber,
+			IssueTitle:          issue.Title,
+			OccurredAt:          now,
+		})
+	}
+	return nil
+}
+
+// ownerUserID 事件归属=项目 user_id。
+func (m *issueMirror) ownerUserID(projectID string) (string, error) {
+	project, err := m.projectRepo.FindByIDGlobal(projectID)
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	return project.UserID, nil
 }
 
 // syncComments 先拉完该 Issue 的全部评论分页并映射成 model，再由 ReplaceSynced

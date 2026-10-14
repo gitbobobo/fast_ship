@@ -41,6 +41,8 @@ const GithubTokensPage = lazy(
   () => import("@/routes/settings/github-tokens"),
 );
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
+const AutomationsPage = lazy(() => import("@/routes/automations/index"));
+const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
 const NewThreadPage = lazy(() => import("@/routes/threads/new"));
 const ThreadDetailPage = lazy(
@@ -186,6 +188,18 @@ export default function App() {
                   element={<LazyPage render={<EnvironmentsPage />} />}
                 />
               </Route>
+              <Route
+                path="/settings/automations"
+                element={<Navigate to="/automations" replace />}
+              />
+              <Route
+                path="/automations"
+                element={<LazyPage render={<AutomationsPage />} />}
+              />
+              <Route
+                path="/notifications"
+                element={<LazyPage render={<NotificationsPage />} />}
+              />
             </Route>
 
             {/* 默认重定向 */}

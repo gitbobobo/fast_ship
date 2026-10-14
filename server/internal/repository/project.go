@@ -69,6 +69,16 @@ func (r *ProjectRepository) FindByID(id, userID string) (*model.Project, error) 
 	return r.FindByIDTx(r.db, id, userID)
 }
 
+// FindByIDGlobal 不做用户过滤的按 ID 查找：仅供内部维护路径（如 GitHub 镜像
+// 解析自动化事件归属用户，INT-90）；对外接口一律用带 user_id 的 FindByID。
+func (r *ProjectRepository) FindByIDGlobal(id string) (*model.Project, error) {
+	var project model.Project
+	if err := r.db.Where("id = ?", id).First(&project).Error; err != nil {
+		return nil, err
+	}
+	return &project, nil
+}
+
 func (r *ProjectRepository) FindByIDTx(tx *gorm.DB, id, userID string) (*model.Project, error) {
 	var project model.Project
 	err := tx.Where("id = ? AND user_id = ?", id, userID).First(&project).Error

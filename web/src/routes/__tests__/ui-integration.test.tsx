@@ -16,6 +16,7 @@ import PasswordPage from "@/routes/settings/password";
 
 // Stores & API
 import { useAuthStore } from "@/lib/store/auth-store";
+import { useUnreadNotificationCount } from "@/lib/hooks/use-notifications";
 
 // Mock modules
 vi.mock("@/lib/store/auth-store", () => ({
@@ -93,6 +94,16 @@ function renderWithProviders(ui: React.ReactElement, { initialEntry = "/" } = {}
   );
 }
 
+// Header 现在渲染通知铃（INT-90）：直接渲染 Header 的用例 mock 其数据钩子，
+// 与本文件 mock use-api-keys 等其它钩子的口径一致。
+vi.mock("@/lib/hooks/use-notifications", () => ({
+  NOTIFICATION_UNREAD_POLL_MS: 30000,
+  useNotifications: vi.fn(() => ({ data: [] })),
+  useUnreadNotificationCount: vi.fn(() => ({ data: 0 })),
+  useMarkNotificationRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+  useMarkAllNotificationsRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+}));
+
 describe("UI Integration Tests", () => {
   beforeEach(() => {
     vi.mocked(useAuthStore).mockReturnValue({
@@ -100,6 +111,9 @@ describe("UI Integration Tests", () => {
       setUser: vi.fn(),
       logout: mockLogout,
     } as unknown as ReturnType<typeof useAuthStore>);
+    vi.mocked(useUnreadNotificationCount).mockReturnValue({
+      data: 0,
+    } as unknown as ReturnType<typeof useUnreadNotificationCount>);
   });
 
   afterEach(() => {
@@ -261,6 +275,40 @@ describe("UI Integration Tests", () => {
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 
+    it("renders automations and notifications as top-level sidebar items", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/automations" });
+
+      const automations = screen.getByRole("link", { name: "自动化" });
+      expect(automations).toHaveAttribute("href", "/automations");
+      expect(automations).toHaveAttribute("aria-current", "page");
+
+      const notifications = screen.getByRole("link", { name: "通知" });
+      expect(notifications).toHaveAttribute("href", "/notifications");
+    });
+
+    it("keeps notifications sidebar item active on /notifications", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/notifications" });
+
+      expect(screen.getByRole("link", { name: "通知" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+    });
+
+    it("shows unread count on the notifications sidebar item", () => {
+      vi.mocked(useUnreadNotificationCount).mockReturnValue({
+        data: 3,
+      } as unknown as ReturnType<typeof useUnreadNotificationCount>);
+
+      renderWithProviders(<Sidebar />, { initialEntry: "/dashboard" });
+
+      const notifications = screen.getByRole("link", {
+        name: "通知（3 条未读）",
+      });
+      expect(notifications).toHaveAttribute("href", "/notifications");
+      expect(screen.getByTestId("sidebar-unread-badge")).toHaveTextContent("3");
+    });
+
     it("renders settings layout with all navigation items", () => {
       renderWithProviders(
         <Routes>
@@ -279,6 +327,9 @@ describe("UI Integration Tests", () => {
       expect(screen.getAllByText("修改密码").length).toBeGreaterThan(0);
       expect(screen.getAllByText("AI 配置").length).toBeGreaterThan(0);
       expect(screen.getAllByText("API Keys").length).toBeGreaterThan(0);
+      expect(
+        screen.queryByRole("link", { name: "自动化" }),
+      ).not.toBeInTheDocument();
     });
 
     it("settings page includes general settings", () => {

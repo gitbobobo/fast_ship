@@ -121,7 +121,17 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 				return err
 			}
 		}
-		return nil
+		// 自动化事件（INT-90）：与 issue 创建同事务，回滚则不触发。
+		return s.emitIssueEventTx(tx, IssueEvent{
+			Type:                model.AutomationTriggerIssueCreated,
+			UserID:              userID,
+			ProjectID:           projectID,
+			IssueID:             issue.ID,
+			TriggerKey:          "event:" + uuid.NewString(),
+			IssueSequenceNumber: issue.SequenceNumber,
+			IssueTitle:          issue.Title,
+			OccurredAt:          now,
+		})
 	}); err != nil {
 		var appErr *errs.AppError
 		if errors.As(err, &appErr) {
@@ -322,6 +332,9 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	if issue.Source != model.IssueSourceInternal {
 		return nil, errs.ErrIssueReadOnly
 	}
+	// 旧值快照（自动化事件比较基准，INT-90）：随后 issue 会被就地更新。
+	prevState := issue.State
+	prevLabels := []string(nil)
 	var internalMeta *model.IssueInternalMeta
 	if req.Labels != nil {
 		project, err := s.projectRepo.FindByID(issue.ProjectID, userID)
@@ -350,6 +363,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 				CreatedAt: now,
 			}
 		}
+		prevLabels = parseLabelsJSON(meta.LabelsJSON)
 		meta.LabelsJSON = toJSONString(resolvedLabels)
 		meta.UpdatedByUserID = userID
 		meta.UpdatedAt = now
@@ -399,6 +413,10 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			if err := s.internalMetaRepo.UpsertTx(tx, internalMeta); err != nil {
 				return err
 			}
+		}
+		// 自动化事件（INT-90）：状态区分 state；标签只对新增发一次。
+		if err := s.emitInternalUpdateEvents(tx, issue, req, prevState, prevLabels, internalMeta); err != nil {
+			return err
 		}
 		return nil
 	}); err != nil {

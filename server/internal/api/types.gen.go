@@ -8,6 +8,138 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for AutomationEventFilterField.
+const (
+	State          AutomationEventFilterField = "state"
+	WorkflowStatus AutomationEventFilterField = "workflow_status"
+)
+
+// Valid indicates whether the value is a known member of the AutomationEventFilterField enum.
+func (e AutomationEventFilterField) Valid() bool {
+	switch e {
+	case State:
+		return true
+	case WorkflowStatus:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AutomationPostAction.
+const (
+	AutomationPostActionArchive AutomationPostAction = "archive"
+	AutomationPostActionNone    AutomationPostAction = "none"
+	AutomationPostActionSettle  AutomationPostAction = "settle"
+)
+
+// Valid indicates whether the value is a known member of the AutomationPostAction enum.
+func (e AutomationPostAction) Valid() bool {
+	switch e {
+	case AutomationPostActionArchive:
+		return true
+	case AutomationPostActionNone:
+		return true
+	case AutomationPostActionSettle:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AutomationPostState.
+const (
+	AutomationPostStateFailed    AutomationPostState = "failed"
+	AutomationPostStateNone      AutomationPostState = "none"
+	AutomationPostStatePending   AutomationPostState = "pending"
+	AutomationPostStateSucceeded AutomationPostState = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the AutomationPostState enum.
+func (e AutomationPostState) Valid() bool {
+	switch e {
+	case AutomationPostStateFailed:
+		return true
+	case AutomationPostStateNone:
+		return true
+	case AutomationPostStatePending:
+		return true
+	case AutomationPostStateSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AutomationRunReportRequestPhase.
+const (
+	Finished AutomationRunReportRequestPhase = "finished"
+	Started  AutomationRunReportRequestPhase = "started"
+)
+
+// Valid indicates whether the value is a known member of the AutomationRunReportRequestPhase enum.
+func (e AutomationRunReportRequestPhase) Valid() bool {
+	switch e {
+	case Finished:
+		return true
+	case Started:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AutomationRunStatus.
+const (
+	AutomationRunStatusCompleted  AutomationRunStatus = "completed"
+	AutomationRunStatusDispatched AutomationRunStatus = "dispatched"
+	AutomationRunStatusFailed     AutomationRunStatus = "failed"
+	AutomationRunStatusRunning    AutomationRunStatus = "running"
+	AutomationRunStatusTimedOut   AutomationRunStatus = "timed_out"
+)
+
+// Valid indicates whether the value is a known member of the AutomationRunStatus enum.
+func (e AutomationRunStatus) Valid() bool {
+	switch e {
+	case AutomationRunStatusCompleted:
+		return true
+	case AutomationRunStatusDispatched:
+		return true
+	case AutomationRunStatusFailed:
+		return true
+	case AutomationRunStatusRunning:
+		return true
+	case AutomationRunStatusTimedOut:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AutomationTriggerType.
+const (
+	Cron               AutomationTriggerType = "cron"
+	IssueCreated       AutomationTriggerType = "issue_created"
+	IssueLabelAdded    AutomationTriggerType = "issue_label_added"
+	IssueStatusChanged AutomationTriggerType = "issue_status_changed"
+)
+
+// Valid indicates whether the value is a known member of the AutomationTriggerType enum.
+func (e AutomationTriggerType) Valid() bool {
+	switch e {
+	case Cron:
+		return true
+	case IssueCreated:
+		return true
+	case IssueLabelAdded:
+		return true
+	case IssueStatusChanged:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for CreateT3ThreadRequestRuntimeMode.
 const (
 	ApprovalRequired CreateT3ThreadRequestRuntimeMode = "approval-required"
@@ -89,6 +221,33 @@ func (e IssueRecommendationStatus) Valid() bool {
 	case Active:
 		return true
 	case Deferred:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for NotificationKind.
+const (
+	Agent                    NotificationKind = "agent"
+	AutomationBusy           NotificationKind = "automation_busy"
+	AutomationDispatchFailed NotificationKind = "automation_dispatch_failed"
+	AutomationPostFailed     NotificationKind = "automation_post_failed"
+	AutomationRunTimeout     NotificationKind = "automation_run_timeout"
+)
+
+// Valid indicates whether the value is a known member of the NotificationKind enum.
+func (e NotificationKind) Valid() bool {
+	switch e {
+	case Agent:
+		return true
+	case AutomationBusy:
+		return true
+	case AutomationDispatchFailed:
+		return true
+	case AutomationPostFailed:
+		return true
+	case AutomationRunTimeout:
 		return true
 	default:
 		return false
@@ -235,22 +394,22 @@ func (e T3ThreadItemType) Valid() bool {
 
 // Defines values for T3ThreadSummaryStatus.
 const (
-	Archived T3ThreadSummaryStatus = "archived"
-	Idle     T3ThreadSummaryStatus = "idle"
-	Running  T3ThreadSummaryStatus = "running"
-	Waiting  T3ThreadSummaryStatus = "waiting"
+	T3ThreadSummaryStatusArchived T3ThreadSummaryStatus = "archived"
+	T3ThreadSummaryStatusIdle     T3ThreadSummaryStatus = "idle"
+	T3ThreadSummaryStatusRunning  T3ThreadSummaryStatus = "running"
+	T3ThreadSummaryStatusWaiting  T3ThreadSummaryStatus = "waiting"
 )
 
 // Valid indicates whether the value is a known member of the T3ThreadSummaryStatus enum.
 func (e T3ThreadSummaryStatus) Valid() bool {
 	switch e {
-	case Archived:
+	case T3ThreadSummaryStatusArchived:
 		return true
-	case Idle:
+	case T3ThreadSummaryStatusIdle:
 		return true
-	case Running:
+	case T3ThreadSummaryStatusRunning:
 		return true
-	case Waiting:
+	case T3ThreadSummaryStatusWaiting:
 		return true
 	default:
 		return false
@@ -434,6 +593,24 @@ type AISettings struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// AgentNotificationRequest defines model for AgentNotificationRequest.
+type AgentNotificationRequest struct {
+	Body *string `json:"body,omitempty"`
+
+	// EnvironmentId 可选；缺省用运行的环境
+	EnvironmentId *string `json:"environment_id,omitempty"`
+
+	// ProblemKey 去重身份；同一线程同类问题用同一 key
+	ProblemKey string `json:"problem_key"`
+
+	// StateKey 状态指纹；同 problem_key 下状态变化才刷新通知
+	StateKey string `json:"state_key"`
+
+	// ThreadId 可选；缺省用运行的线程
+	ThreadId *string `json:"thread_id,omitempty"`
+	Title    string  `json:"title"`
+}
+
 // AnswerT3SecretRequest 密钥应答联合；save 携带密钥值（仅此一次经过，不落库不回显）
 type AnswerT3SecretRequest struct {
 	// Secret 仅 type=save；密钥值
@@ -505,6 +682,185 @@ type AuthResponse struct {
 	User  User   `json:"user"`
 }
 
+// Automation defines model for Automation.
+type Automation struct {
+	CreatedAt string `json:"created_at"`
+
+	// CronExpression 仅 cron 触发；五字段标准表达式
+	CronExpression *string `json:"cron_expression,omitempty"`
+	Enabled        bool    `json:"enabled"`
+
+	// EnvironmentId T3 环境 ID
+	EnvironmentId string `json:"environment_id"`
+
+	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
+	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
+	EventFilter *AutomationEventFilter `json:"event_filter,omitempty"`
+	Id          string                 `json:"id"`
+
+	// IssueProjectId 事件过滤的项目；null 表示当前用户全部项目
+	IssueProjectId *string                   `json:"issue_project_id,omitempty"`
+	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
+	Name           string                    `json:"name"`
+
+	// NextRunAt 下次调度时间（UTC RFC3339）；仅 cron 触发
+	NextRunAt *string `json:"next_run_at,omitempty"`
+
+	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
+	PostAction AutomationPostAction `json:"post_action"`
+
+	// PostOnTimeout 超时后是否仍执行后置操作；缺省 false
+	PostOnTimeout bool `json:"post_on_timeout"`
+
+	// PromptTemplate 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明）
+	PromptTemplate string `json:"prompt_template"`
+
+	// RuntimeMode 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
+	RuntimeMode string `json:"runtime_mode"`
+
+	// T3ProjectId T3 项目 ID（线程开在这里）
+	T3ProjectId string `json:"t3_project_id"`
+
+	// TimeoutSeconds 回报截止时长（秒）；1 分钟–24 小时，缺省 3600
+	TimeoutSeconds int `json:"timeout_seconds"`
+
+	// Timezone IANA 时区名，仅 cron 触发；空表示 UTC
+	Timezone *string `json:"timezone,omitempty"`
+
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	TriggerType AutomationTriggerType `json:"trigger_type"`
+	UpdatedAt   string                `json:"updated_at"`
+	Workspace   *AutomationWorkspace  `json:"workspace,omitempty"`
+}
+
+// AutomationEventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
+// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
+type AutomationEventFilter struct {
+	Field *AutomationEventFilterField `json:"field,omitempty"`
+
+	// From 变化前值；空表示任意
+	From *string `json:"from,omitempty"`
+
+	// Labels 匹配任一新加标签名；空数组表示全部加标签事件
+	Labels []string `json:"labels,omitempty"`
+
+	// To 变化后值；空表示任意
+	To *string `json:"to,omitempty"`
+}
+
+// AutomationEventFilterField defines model for AutomationEventFilter.Field.
+type AutomationEventFilterField string
+
+// AutomationModelSelection T3 模型选择（缺省回落 T3 项目默认）
+type AutomationModelSelection struct {
+	InstanceId string                             `json:"instance_id"`
+	Model      string                             `json:"model"`
+	Options    []AutomationModelSelection_Options `json:"options,omitempty"`
+}
+
+// AutomationModelSelection_Options defines model for AutomationModelSelection.Options.
+type AutomationModelSelection_Options struct {
+	Id    *string `json:"id,omitempty"`
+	Value *string `json:"value,omitempty"`
+}
+
+// AutomationPostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
+type AutomationPostAction string
+
+// AutomationPostState defines model for AutomationPostState.
+type AutomationPostState string
+
+// AutomationRun defines model for AutomationRun.
+type AutomationRun struct {
+	AutomationId string  `json:"automation_id"`
+	DeadlineAt   *string `json:"deadline_at,omitempty"`
+
+	// DispatchStartedAt worker 认领并开始派发的时间
+	DispatchStartedAt *string `json:"dispatch_started_at,omitempty"`
+
+	// DispatchedAt 启动 RPC 结果确认时间；为空表示线程是否建成未确认（此类运行不执行后置）
+	DispatchedAt      *string                   `json:"dispatched_at,omitempty"`
+	EnvironmentId     string                    `json:"environment_id"`
+	ErrorCode         *string                   `json:"error_code,omitempty"`
+	ErrorMessage      *string                   `json:"error_message,omitempty"`
+	FinishedAt        *string                   `json:"finished_at,omitempty"`
+	Id                string                    `json:"id"`
+	PostAttempt       int                       `json:"post_attempt"`
+	PostDeadlineAt    *string                   `json:"post_deadline_at,omitempty"`
+	PostError         *string                   `json:"post_error,omitempty"`
+	PostNextAttemptAt *string                   `json:"post_next_attempt_at,omitempty"`
+	PostState         AutomationPostState       `json:"post_state"`
+	StartedAt         *string                   `json:"started_at,omitempty"`
+	Status            *AutomationRunStatus      `json:"status"`
+	Summary           *string                   `json:"summary,omitempty"`
+	T3ProjectId       string                    `json:"t3_project_id"`
+	ThreadId          string                    `json:"thread_id"`
+	TriggerContext    *AutomationTriggerContext `json:"trigger_context,omitempty"`
+
+	// TriggerKey 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`
+	TriggerKey string `json:"trigger_key"`
+
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	TriggerType AutomationTriggerType `json:"trigger_type"`
+	TriggeredAt string                `json:"triggered_at"`
+}
+
+// AutomationRunReportRequest defines model for AutomationRunReportRequest.
+type AutomationRunReportRequest struct {
+	// ErrorCode 仅 finished；非空表示运行失败（状态记 failed）
+	ErrorCode *string `json:"error_code,omitempty"`
+
+	// ErrorMessage 仅 finished
+	ErrorMessage *string                         `json:"error_message,omitempty"`
+	Phase        AutomationRunReportRequestPhase `json:"phase"`
+
+	// Summary 仅 finished；一句话结果摘要
+	Summary *string `json:"summary,omitempty"`
+}
+
+// AutomationRunReportRequestPhase defines model for AutomationRunReportRequest.Phase.
+type AutomationRunReportRequestPhase string
+
+// AutomationRunReportResult defines model for AutomationRunReportResult.
+type AutomationRunReportResult struct {
+	// Replay true 表示这是一次完全相同结束回报的重放
+	Replay bool   `json:"replay"`
+	RunId  string `json:"run_id"`
+
+	// Status 回报后的运行状态
+	Status string `json:"status"`
+}
+
+// AutomationRunStatus dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；其余为终态。回报未开始时状态可能为空。
+type AutomationRunStatus string
+
+// AutomationTriggerContext 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。
+type AutomationTriggerContext struct {
+	// Field 状态变化字段（state | workflow_status）
+	Field               *string  `json:"field,omitempty"`
+	From                *string  `json:"from,omitempty"`
+	IssueId             *string  `json:"issue_id,omitempty"`
+	IssueSequenceNumber *int     `json:"issue_sequence_number,omitempty"`
+	IssueTitle          *string  `json:"issue_title,omitempty"`
+	LabelsAdded         []string `json:"labels_added,omitempty"`
+	ProjectId           *string  `json:"project_id,omitempty"`
+	To                  *string  `json:"to,omitempty"`
+}
+
+// AutomationTriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+type AutomationTriggerType string
+
+// AutomationWorkspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
+type AutomationWorkspace struct {
+	BaseRef         *string `json:"base_ref,omitempty"`
+	Branch          *string `json:"branch,omitempty"`
+	StartFromOrigin *bool   `json:"start_from_origin,omitempty"`
+
+	// Type root / worktree / existing_worktree
+	Type         string  `json:"type"`
+	WorktreePath *string `json:"worktree_path,omitempty"`
+}
+
 // Branch defines model for Branch.
 type Branch struct {
 	Default bool   `json:"default"`
@@ -518,6 +874,41 @@ type CollabAuthorKind = model.CollabAuthorKind
 // CreateApiKeyRequest defines model for CreateApiKeyRequest.
 type CreateApiKeyRequest struct {
 	Name string `binding:"required,min=1,max=100" json:"name"`
+}
+
+// CreateAutomationRequest defines model for CreateAutomationRequest.
+type CreateAutomationRequest struct {
+	CronExpression *string `json:"cron_expression,omitempty"`
+
+	// Enabled 缺省 false；启用时完整校验触发配置与 public_url
+	Enabled       *bool  `json:"enabled,omitempty"`
+	EnvironmentId string `json:"environment_id"`
+
+	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
+	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
+	EventFilter    *AutomationEventFilter `json:"event_filter,omitempty"`
+	IssueProjectId *string                `json:"issue_project_id,omitempty"`
+
+	// ModelSelection T3 模型选择（缺省回落 T3 项目默认）
+	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
+	Name           string                    `json:"name"`
+
+	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
+	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
+	PostOnTimeout  *bool                 `json:"post_on_timeout,omitempty"`
+	PromptTemplate string                `json:"prompt_template"`
+
+	// RuntimeMode 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
+	RuntimeMode    *string `json:"runtime_mode,omitempty"`
+	T3ProjectId    string  `json:"t3_project_id"`
+	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
+	Timezone       *string `json:"timezone,omitempty"`
+
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	TriggerType AutomationTriggerType `json:"trigger_type"`
+
+	// Workspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
+	Workspace *AutomationWorkspace `json:"workspace,omitempty"`
 }
 
 // CreateDocumentRequest defines model for CreateDocumentRequest.
@@ -609,9 +1000,7 @@ type CreateT3ThreadRequest struct {
 	ModelSelection *T3ModelSelection `json:"model_selection,omitempty"`
 
 	// ProjectId T3 projectId（来自 composer-options 的 projects[].id）
-	ProjectId string `json:"project_id"`
-
-	// RuntimeMode 缺省 full-access
+	ProjectId   string                            `json:"project_id"`
 	RuntimeMode *CreateT3ThreadRequestRuntimeMode `json:"runtime_mode,omitempty"`
 
 	// ThreadId 稳定线程 ID；缺省由服务端生成。同一操作重试必须带同一 ID（T3 据此幂等）
@@ -640,7 +1029,7 @@ type CreateT3ThreadRequest_Message struct {
 	Text string `json:"text"`
 }
 
-// CreateT3ThreadRequestRuntimeMode 缺省 full-access
+// CreateT3ThreadRequestRuntimeMode defines model for CreateT3ThreadRequest.RuntimeMode.
 type CreateT3ThreadRequestRuntimeMode string
 
 // CreateVersionRequest defines model for CreateVersionRequest.
@@ -1383,6 +1772,24 @@ type LoginRequest struct {
 	Login    string `binding:"required" json:"login"`
 	Password string `binding:"required" json:"password"`
 }
+
+// Notification defines model for Notification.
+type Notification struct {
+	Body          string           `json:"body"`
+	CreatedAt     string           `json:"created_at"`
+	EnvironmentId *string          `json:"environment_id,omitempty"`
+	Id            string           `json:"id"`
+	Kind          NotificationKind `json:"kind"`
+	LastSeenAt    string           `json:"last_seen_at"`
+	ReadAt        *string          `json:"read_at,omitempty"`
+	RunId         *string          `json:"run_id,omitempty"`
+	ThreadId      *string          `json:"thread_id,omitempty"`
+	Title         string           `json:"title"`
+	UpdatedAt     string           `json:"updated_at"`
+}
+
+// NotificationKind defines model for Notification.Kind.
+type NotificationKind string
 
 // PaginatedData 分页响应 data 形状；与 Envelope allOf 组合后 items 由兄弟 schema 收窄为具体类型
 type PaginatedData struct {
@@ -2242,6 +2649,35 @@ type UpdateAISettingsRequest struct {
 	Model *string `json:"model,omitempty"`
 }
 
+// UpdateAutomationRequest 全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
+type UpdateAutomationRequest struct {
+	CronExpression *string `json:"cron_expression,omitempty"`
+	Enabled        *bool   `json:"enabled,omitempty"`
+	EnvironmentId  string  `json:"environment_id"`
+
+	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
+	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
+	EventFilter    *AutomationEventFilter    `json:"event_filter,omitempty"`
+	IssueProjectId *string                   `json:"issue_project_id,omitempty"`
+	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
+	Name           string                    `json:"name"`
+
+	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
+	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
+	PostOnTimeout  *bool                 `json:"post_on_timeout,omitempty"`
+	PromptTemplate string                `json:"prompt_template"`
+
+	// RuntimeMode 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
+	RuntimeMode    *string `json:"runtime_mode,omitempty"`
+	T3ProjectId    string  `json:"t3_project_id"`
+	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
+	Timezone       *string `json:"timezone,omitempty"`
+
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	TriggerType AutomationTriggerType `json:"trigger_type"`
+	Workspace   *AutomationWorkspace  `json:"workspace,omitempty"`
+}
+
 // UpdateDocumentRequest title/body/parent_id 至少传一个
 type UpdateDocumentRequest struct {
 	// Body ≤200000 rune
@@ -2465,11 +2901,20 @@ type VersionShipHooksStatus string
 // VersionStatus defines model for VersionStatus.
 type VersionStatus = model.VersionStatus
 
+// AutomationId defines model for AutomationId.
+type AutomationId = string
+
+// AutomationRunId defines model for AutomationRunId.
+type AutomationRunId = string
+
 // DocId defines model for DocId.
 type DocId = string
 
 // IssueId defines model for IssueId.
 type IssueId = string
+
+// NotificationId defines model for NotificationId.
+type NotificationId = string
 
 // Page defines model for Page.
 type Page = int
@@ -2691,6 +3136,155 @@ type Register200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int           `json:"code"`
 	Data *AuthResponse `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetAgentThreadParams defines parameters for GetAgentThread.
+type GetAgentThreadParams struct {
+	Limit        *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	BeforeItemId *string `form:"before_item_id,omitempty" json:"before_item_id,omitempty"`
+}
+
+// GetAgentThread200JSONResponseBody defines parameters for GetAgentThread.
+type GetAgentThread200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int             `json:"code"`
+	Data *T3ThreadDetail `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetAgentThreadItem200JSONResponseBody defines parameters for GetAgentThreadItem.
+type GetAgentThreadItem200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 归一化线程条目。映射规则：user_message（含 attachments 图片元数据）/
+	// assistant_message/reasoning 原样带快照文本；proposed_plan →
+	// assistant_message；command_execution（text=命令，summary=命令首行，
+	// 输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
+	// dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
+	// 上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
+	// 结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
+	// 交互类条目：approval_request（审批，request_id 关联运行时请求）/
+	// user_input_request（提问）/ secret_request（密钥，绝不携带密钥值）。
+	// 结构性事件（checkpoint、handoff、notification、system_notice 等）丢弃；
+	// 未知类型前向兼容地跳过。正文不额外截断。
+	// 继承行（fork 前缀，visibility=inherited）只展示历史：inherited=true，
+	// 不能在本线程原地应答；source_thread_id 指向来源线程。
+	Data *T3ThreadItem `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ReportAutomationRun200JSONResponseBody defines parameters for ReportAutomationRun.
+type ReportAutomationRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                        `json:"code"`
+	Data *AutomationRunReportResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListAgentThreadsParams defines parameters for ListAgentThreads.
+type ListAgentThreadsParams struct {
+	EnvironmentId *string `form:"environment_id,omitempty" json:"environment_id,omitempty"`
+	ProjectId     *string `form:"project_id,omitempty" json:"project_id,omitempty"`
+	Status        *string `form:"status,omitempty" json:"status,omitempty"`
+	Settled       *bool   `form:"settled,omitempty" json:"settled,omitempty"`
+}
+
+// ListAgentThreads200JSONResponseBody_Data defines parameters for ListAgentThreads.
+type ListAgentThreads200JSONResponseBody_Data struct {
+	Environments []T3Environment   `json:"environments"`
+	Items        []T3ThreadSummary `json:"items"`
+}
+
+// ListAgentThreads200JSONResponseBody defines parameters for ListAgentThreads.
+type ListAgentThreads200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                       `json:"code"`
+	Data *ListAgentThreads200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetAutomationRun200JSONResponseBody defines parameters for GetAutomationRun.
+type GetAutomationRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int            `json:"code"`
+	Data *AutomationRun `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListAutomations200JSONResponseBody_Data defines parameters for ListAutomations.
+type ListAutomations200JSONResponseBody_Data struct {
+	Items []Automation `json:"items"`
+}
+
+// ListAutomations200JSONResponseBody defines parameters for ListAutomations.
+type ListAutomations200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                      `json:"code"`
+	Data *ListAutomations200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateAutomation200JSONResponseBody defines parameters for CreateAutomation.
+type CreateAutomation200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int         `json:"code"`
+	Data *Automation `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetAutomation200JSONResponseBody defines parameters for GetAutomation.
+type GetAutomation200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int         `json:"code"`
+	Data *Automation `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateAutomation200JSONResponseBody defines parameters for UpdateAutomation.
+type UpdateAutomation200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int         `json:"code"`
+	Data *Automation `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListAutomationRunsParams defines parameters for ListAutomationRuns.
+type ListAutomationRunsParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListAutomationRuns200JSONResponseBody_Data defines parameters for ListAutomationRuns.
+type ListAutomationRuns200JSONResponseBody_Data struct {
+	Items []AutomationRun `json:"items"`
+}
+
+// ListAutomationRuns200JSONResponseBody defines parameters for ListAutomationRuns.
+type ListAutomationRuns200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                         `json:"code"`
+	Data *ListAutomationRuns200JSONResponseBody_Data `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -3372,6 +3966,42 @@ type ListIssueTimeline200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                                        `json:"code"`
 	Data *ListIssueTimeline200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListNotificationsParams defines parameters for ListNotifications.
+type ListNotificationsParams struct {
+	Limit      *int  `form:"limit,omitempty" json:"limit,omitempty"`
+	UnreadOnly *bool `form:"unread_only,omitempty" json:"unread_only,omitempty"`
+}
+
+// ListNotifications200JSONResponseBody_Data defines parameters for ListNotifications.
+type ListNotifications200JSONResponseBody_Data struct {
+	Items []Notification `json:"items"`
+}
+
+// ListNotifications200JSONResponseBody defines parameters for ListNotifications.
+type ListNotifications200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                        `json:"code"`
+	Data *ListNotifications200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetUnreadNotificationCount200JSONResponseBody_Data defines parameters for GetUnreadNotificationCount.
+type GetUnreadNotificationCount200JSONResponseBody_Data struct {
+	Count int `json:"count"`
+}
+
+// GetUnreadNotificationCount200JSONResponseBody defines parameters for GetUnreadNotificationCount.
+type GetUnreadNotificationCount200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                                 `json:"code"`
+	Data *GetUnreadNotificationCount200JSONResponseBody_Data `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -4092,6 +4722,18 @@ type RefreshTokenJSONRequestBody = RefreshRequest
 
 // RegisterJSONRequestBody defines body for Register for application/json ContentType.
 type RegisterJSONRequestBody = RegisterRequest
+
+// PublishAgentNotificationJSONRequestBody defines body for PublishAgentNotification for application/json ContentType.
+type PublishAgentNotificationJSONRequestBody = AgentNotificationRequest
+
+// ReportAutomationRunJSONRequestBody defines body for ReportAutomationRun for application/json ContentType.
+type ReportAutomationRunJSONRequestBody = AutomationRunReportRequest
+
+// CreateAutomationJSONRequestBody defines body for CreateAutomation for application/json ContentType.
+type CreateAutomationJSONRequestBody = CreateAutomationRequest
+
+// UpdateAutomationJSONRequestBody defines body for UpdateAutomation for application/json ContentType.
+type UpdateAutomationJSONRequestBody = UpdateAutomationRequest
 
 // UpdateDocumentJSONRequestBody defines body for UpdateDocument for application/json ContentType.
 type UpdateDocumentJSONRequestBody = UpdateDocumentRequest

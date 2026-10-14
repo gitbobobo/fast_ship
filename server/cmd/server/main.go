@@ -74,6 +74,10 @@ var autoMigrateModels = []interface{}{
 	&model.ScreenshotAnnotation{},
 	&model.T3Environment{},
 	&model.ProjectT3Binding{},
+	&model.Automation{},
+	&model.AutomationRun{},
+	&model.AutomationRunToken{},
+	&model.Notification{},
 }
 
 func main() {
@@ -156,6 +160,19 @@ func main() {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_environments_user_name ON t3_environments(user_id, name)")
 
+	// 自动化（INT-90）：复合/部分索引 AutoMigrate 建不了，全部手工登记。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_enabled_trigger_next ON automations(enabled, trigger_type, next_run_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_user_trigger_project ON automations(user_id, trigger_type, issue_project_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_user_triggered ON automation_runs(user_id, triggered_at DESC, id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_triggered ON automation_runs(automation_id, triggered_at DESC, id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_active_deadline ON automation_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
+	// 同一自动化至多一个活动运行（未结束）或一个待后置运行——重入/删除约束的数据库兜底。
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once ON automation_runs(automation_id) WHERE finished_at IS NULL OR post_state = 'pending'")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
+
 	if err := dropLegacyCollabTables(db, zapLogger); err != nil {
 		log.Fatalf("协作区数据迁移失败: %v", err)
 	}
@@ -215,6 +232,10 @@ func main() {
 	projectT3BindingRepo := repository.NewProjectT3BindingRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
+	automationRepo := repository.NewAutomationRepository(db)
+	automationRunRepo := repository.NewAutomationRunRepository(db)
+	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
+	notificationRepo := repository.NewNotificationRepository(db)
 
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
@@ -239,6 +260,14 @@ func main() {
 	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zapLogger)
 	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zapLogger)
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
+	notificationSink := service.NewNotificationSink(db)
+	notificationService := service.NewNotificationService(notificationRepo)
+	automationService := service.NewAutomationService(db, automationRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zapLogger)
+	automationAgentService := service.NewAutomationAgentService(db, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, zapLogger)
+	automationScheduler := service.NewAutomationScheduler(db, automationRepo, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, issueRepo, cfg, zapLogger)
+
+	// Issue 写路径接入事件出口：事务内匹配自动化并预写运行（INT-90）。
+	issueService.SetIssueEventSink(automationService)
 
 	// 初始化 Handler
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
@@ -261,6 +290,9 @@ func main() {
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
 	t3BindingHandler := handler.NewT3BindingHandler(t3BindingService)
+	automationHandler := handler.NewAutomationHandler(automationService)
+	notificationHandler := handler.NewNotificationHandler(notificationService)
+	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -316,6 +348,9 @@ func main() {
 		}()
 	}
 
+	// 自动化协调循环（INT-90）：到期 cron、待认领运行、超时与后置统一由它推进。
+	automationScheduler.Start()
+
 	// 设置 Gin
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
@@ -324,7 +359,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

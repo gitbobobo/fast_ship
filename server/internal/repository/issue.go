@@ -118,7 +118,11 @@ func NewIssueGitHubMetaRepository(db *gorm.DB) *IssueGitHubMetaRepository {
 }
 
 func (r *IssueGitHubMetaRepository) Upsert(meta *model.IssueGitHubMeta) error {
-	return r.db.Clauses(clause.OnConflict{
+	return r.UpsertTx(r.db, meta)
+}
+
+func (r *IssueGitHubMetaRepository) UpsertTx(tx *gorm.DB, meta *model.IssueGitHubMeta) error {
+	return tx.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "project_id"}, {Name: "github_issue_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"issue_id",

@@ -53,6 +53,12 @@ tags:
     description: 项目截图库（按界面聚合，版本全量保留）
   - name: environments
     description: T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）。例外：t3-projects 发现与项目 t3-bindings 对 API Key 开放（INT-89）
+  - name: automations
+    description: 用户可配置的自动化（cron / 内部 Issue 事件触发 T3 线程；仅 JWT，INT-90）
+  - name: notifications
+    description: 站内通知（自动化运行结果与 Agent 发布；仅 JWT）
+  - name: automation-agent
+    description: 自动化运行令牌专用的 Agent 回报与读取端点（仅 runTokenAuth，INT-90）
 
 paths:
   /api/environments:
@@ -5365,6 +5371,613 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/automations:
+    get:
+      tags: [automations]
+      operationId: listAutomations
+      summary: 列出当前用户的自动化
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 自动化列表（按创建时间倒序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Automation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [automations]
+      operationId: createAutomation
+      summary: 创建自动化（默认停用）
+      description: |
+        cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支持 `@every` 与表达式内时区前缀）；
+        时区为独立 IANA 名称字段，缺省 UTC。启用自动化前服务端必须已配置 `server.public_url`（41202）。
+        新建默认停用；启用时校验完整触发配置。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAutomationRequest'
+      responses:
+        '200':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Automation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 环境或项目不存在（40417 / 40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '412':
+          description: 未配置 server.public_url（41202）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automations/{id}:
+    get:
+      tags: [automations]
+      operationId: getAutomation
+      summary: 获取自动化详情
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+      responses:
+        '200':
+          description: 自动化详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Automation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [automations]
+      operationId: updateAutomation
+      summary: 更新自动化（只影响后续触发）
+      description: 进行中的运行按创建时的配置快照执行，更新不中断已有运行。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAutomationRequest'
+      responses:
+        '200':
+          description: 更新后的自动化
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Automation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          description: 未配置 server.public_url（41202）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [automations]
+      operationId: deleteAutomation
+      summary: 删除自动化
+      description: 有活动运行（运行中或后置操作待执行）时返回 409（40919）；删除会级联清理历史运行记录。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 有活动运行（40919）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automations/{id}/runs:
+    get:
+      tags: [automations]
+      operationId: listAutomationRuns
+      summary: 列出自动化的运行记录
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AutomationId'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: 运行记录（按触发时间倒序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/AutomationRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automation-runs/{id}:
+    get:
+      tags: [automations]
+      operationId: getAutomationRun
+      summary: 获取运行记录详情
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AutomationRunId'
+      responses:
+        '200':
+          description: 运行记录
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AutomationRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/notifications:
+    get:
+      tags: [notifications]
+      operationId: listNotifications
+      summary: 列出当前用户的通知
+      security:
+        - jwtAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: unread_only
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: 通知列表（按更新时间倒序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Notification'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/notifications/unread-count:
+    get:
+      tags: [notifications]
+      operationId: getUnreadNotificationCount
+      summary: 未读通知数
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 未读数量
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [count]
+                        properties:
+                          count:
+                            type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/notifications/{id}/read:
+    post:
+      tags: [notifications]
+      operationId: markNotificationRead
+      summary: 标记单条通知已读
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/NotificationId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/notifications/read-all:
+    post:
+      tags: [notifications]
+      operationId: markAllNotificationsRead
+      summary: 全部通知标记已读
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automation-agent/report:
+    post:
+      tags: [automation-agent]
+      operationId: reportAutomationRun
+      summary: 自动化运行回报（started / finished）
+      description: |
+        仅运行令牌。开始回报幂等；结束回报在同一事务内消费令牌并登记后置操作，
+        允许结束先于开始；线程超时后首次结束不能把状态改成 completed。
+        结束后仅重放完全相同的结束回报（直到 expires_at），其它回报返回 409（40917）。
+      security:
+        - runTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutomationRunReportRequest'
+      responses:
+        '200':
+          description: 回报受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AutomationRunReportResult'
+        '401':
+          description: 运行令牌无效/过期（40106）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: 凭证类型不允许（40304）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 回报冲突（40917）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automation-agent/threads:
+    get:
+      tags: [automation-agent]
+      operationId: listAgentThreads
+      summary: 读取用户 T3 线程列表（可按环境/项目/状态过滤）
+      security:
+        - runTokenAuth: []
+      parameters:
+        - name: environment_id
+          in: query
+          schema:
+            type: string
+        - name: project_id
+          in: query
+          schema:
+            type: string
+            description: T3 项目 ID
+        - name: status
+          in: query
+          schema:
+            type: string
+            description: 过滤线程状态（running / waiting / idle / archived）
+        - name: settled
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: 线程列表与各环境诊断（口径同 GET /api/threads，仅追加过滤）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items, environments]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/T3ThreadSummary'
+                          environments:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/T3Environment'
+        '401':
+          description: 运行令牌无效/过期/已消费（40106）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: 凭证类型不允许（40304）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automation-agent/environments/{id}/threads/{threadId}:
+    get:
+      tags: [automation-agent]
+      operationId: getAgentThread
+      summary: 读取单个 T3 线程详情（items 分页，默认最后 50 条）
+      description: |
+        与 JWT 端点同一线程详情口径，另加 items 分页：页内按时间正序；
+        `before_item_id` 取该条目之前的上一页；引用的边界条目已消失时返回 409（40918）。
+      security:
+        - runTokenAuth: []
+      parameters:
+        - $ref: '#/components/parameters/T3EnvironmentId'
+        - name: threadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: before_item_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 线程详情（items 为分页后的窗口）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/T3ThreadDetail'
+        '401':
+          description: 运行令牌无效/过期/已消费（40106）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: 凭证类型不允许（40304）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 环境/线程不存在（40417 / 40418）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 分页边界失效（40918）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automation-agent/environments/{id}/threads/{threadId}/items/{itemId}:
+    get:
+      tags: [automation-agent]
+      operationId: getAgentThreadItem
+      summary: 读取单个线程条目完整正文
+      security:
+        - runTokenAuth: []
+      parameters:
+        - $ref: '#/components/parameters/T3EnvironmentId'
+        - name: threadId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 线程条目
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/T3ThreadItem'
+        '401':
+          description: 运行令牌无效/过期/已消费（40106）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: 凭证类型不允许（40304）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 环境/线程/条目不存在（40417 / 40418 / 40419）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/automation-agent/notifications:
+    post:
+      tags: [automation-agent]
+      operationId: publishAgentNotification
+      summary: 以运行身份发布站内通知
+      description: kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一问题键相同状态只刷新 last_seen_at。
+      security:
+        - runTokenAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentNotificationRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 运行令牌无效/过期/已消费（40106）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '403':
+          description: 凭证类型不允许（40304）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     jwtAuth:
@@ -5376,6 +5989,14 @@ components:
       type: http
       scheme: bearer
       description: "API Key，以 `fsk_` 开头（Web「设置 → API Key」创建）。与 jwtAuth 共用 `Authorization: Bearer` 头，服务端按 `fsk_` 前缀区分凭证类型。"
+    runTokenAuth:
+      type: http
+      scheme: bearer
+      description: |
+        自动化运行令牌，`fsr_` 开头，由 Fast Ship 在派发自动化线程时写进提示词（INT-90）。
+        仅接受 `Authorization: Bearer`（不支持 query 凭证）；一次运行一个令牌，结束回报时消费。
+        令牌过期前允许重放完全相同的结束回报；读线程/发通知端点在令牌消费后立即拒绝（40106）。
+        携带 `fsk_` API Key 或 JWT 调用返回 403（40304）。
 
   parameters:
     ProjectId:
@@ -5392,6 +6013,27 @@ components:
       schema:
         type: string
       description: T3 环境 ID（UUID，归属当前用户，跨用户一律 40417）
+    AutomationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 自动化 ID（UUID，归属当前用户，跨用户一律 404）
+    AutomationRunId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 自动化运行 ID（UUID，归属当前用户，跨用户一律 404）
+    NotificationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 通知 ID（UUID，归属当前用户，跨用户一律 404）
     T3ThreadId:
       name: threadId
       in: path
@@ -8187,7 +8829,6 @@ components:
           type: string
           enum: [approval-required, auto-accept-edits, auto, full-access]
           default: full-access
-          description: 缺省 full-access
         workspace:
           $ref: '#/components/schemas/T3ThreadWorkspace'
 
@@ -8383,3 +9024,405 @@ components:
         total_count:
           type: integer
           description: 过滤后的引用总数
+
+    AutomationTriggerType:
+      type: string
+      enum: [cron, issue_created, issue_status_changed, issue_label_added]
+      description: 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+
+    AutomationPostAction:
+      type: string
+      enum: [none, settle, archive]
+      description: 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
+
+    AutomationEventFilter:
+      type: object
+      description: |
+        Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
+        issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
+      properties:
+        field:
+          type: string
+          enum: [state, workflow_status]
+        from:
+          type: string
+          description: 变化前值；空表示任意
+        to:
+          type: string
+          description: 变化后值；空表示任意
+        labels:
+          type: array
+          items:
+            type: string
+          description: 匹配任一新加标签名；空数组表示全部加标签事件
+
+    AutomationModelSelection:
+      type: object
+      required: [instance_id, model]
+      description: T3 模型选择（缺省回落 T3 项目默认）
+      properties:
+        instance_id:
+          type: string
+        model:
+          type: string
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              value:
+                type: string
+
+    AutomationWorkspace:
+      type: object
+      required: [type]
+      description: 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
+      properties:
+        type:
+          type: string
+          description: root / worktree / existing_worktree
+        base_ref:
+          type: string
+        branch:
+          type: string
+        start_from_origin:
+          type: boolean
+        worktree_path:
+          type: string
+
+    Automation:
+      type: object
+      required: [id, name, enabled, trigger_type, environment_id, t3_project_id, prompt_template, runtime_mode, timeout_seconds, post_action, post_on_timeout, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        enabled:
+          type: boolean
+        environment_id:
+          type: string
+          description: T3 环境 ID
+        t3_project_id:
+          type: string
+          description: T3 项目 ID（线程开在这里）
+        trigger_type:
+          $ref: '#/components/schemas/AutomationTriggerType'
+        cron_expression:
+          type: string
+          description: 仅 cron 触发；五字段标准表达式
+        timezone:
+          type: string
+          description: IANA 时区名，仅 cron 触发；空表示 UTC
+        next_run_at:
+          type: string
+          nullable: true
+          description: 下次调度时间（UTC RFC3339）；仅 cron 触发
+        issue_project_id:
+          type: string
+          nullable: true
+          description: 事件过滤的项目；null 表示当前用户全部项目
+        event_filter:
+          $ref: '#/components/schemas/AutomationEventFilter'
+        prompt_template:
+          type: string
+          description: 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明）
+        model_selection:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AutomationModelSelection'
+        runtime_mode:
+          type: string
+          description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
+        workspace:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AutomationWorkspace'
+        timeout_seconds:
+          type: integer
+          description: 回报截止时长（秒）；1 分钟–24 小时，缺省 3600
+        post_action:
+          $ref: '#/components/schemas/AutomationPostAction'
+        post_on_timeout:
+          type: boolean
+          description: 超时后是否仍执行后置操作；缺省 false
+        created_at:
+          type: string
+        updated_at:
+          type: string
+
+    CreateAutomationRequest:
+      type: object
+      required: [name, trigger_type, environment_id, t3_project_id, prompt_template]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+        enabled:
+          type: boolean
+          description: 缺省 false；启用时完整校验触发配置与 public_url
+        environment_id:
+          type: string
+        t3_project_id:
+          type: string
+        trigger_type:
+          $ref: '#/components/schemas/AutomationTriggerType'
+        cron_expression:
+          type: string
+        timezone:
+          type: string
+        issue_project_id:
+          type: string
+          nullable: true
+        event_filter:
+          $ref: '#/components/schemas/AutomationEventFilter'
+        prompt_template:
+          type: string
+        model_selection:
+          $ref: '#/components/schemas/AutomationModelSelection'
+        runtime_mode:
+          type: string
+          description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
+        workspace:
+          $ref: '#/components/schemas/AutomationWorkspace'
+        timeout_seconds:
+          type: integer
+        post_action:
+          $ref: '#/components/schemas/AutomationPostAction'
+        post_on_timeout:
+          type: boolean
+
+    UpdateAutomationRequest:
+      type: object
+      description: 全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
+      required: [name, trigger_type, environment_id, t3_project_id, prompt_template]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+        enabled:
+          type: boolean
+        environment_id:
+          type: string
+        t3_project_id:
+          type: string
+        trigger_type:
+          $ref: '#/components/schemas/AutomationTriggerType'
+        cron_expression:
+          type: string
+        timezone:
+          type: string
+        issue_project_id:
+          type: string
+          nullable: true
+        event_filter:
+          $ref: '#/components/schemas/AutomationEventFilter'
+        prompt_template:
+          type: string
+        model_selection:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AutomationModelSelection'
+        runtime_mode:
+          type: string
+          description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
+        workspace:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AutomationWorkspace'
+        timeout_seconds:
+          type: integer
+        post_action:
+          $ref: '#/components/schemas/AutomationPostAction'
+        post_on_timeout:
+          type: boolean
+
+    AutomationRunStatus:
+      type: string
+      enum: [dispatched, running, completed, failed, timed_out]
+      description: dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；其余为终态。回报未开始时状态可能为空。
+
+    AutomationPostState:
+      type: string
+      enum: [none, pending, succeeded, failed]
+
+    AutomationRun:
+      type: object
+      required: [id, automation_id, trigger_type, trigger_key, triggered_at, environment_id, t3_project_id, thread_id, status, post_state, post_attempt]
+      properties:
+        id:
+          type: string
+        automation_id:
+          type: string
+        trigger_type:
+          $ref: '#/components/schemas/AutomationTriggerType'
+        trigger_key:
+          type: string
+          description: 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`
+        trigger_context:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AutomationTriggerContext'
+        triggered_at:
+          type: string
+        status:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/AutomationRunStatus'
+        dispatch_started_at:
+          type: string
+          nullable: true
+          description: worker 认领并开始派发的时间
+        environment_id:
+          type: string
+        t3_project_id:
+          type: string
+        thread_id:
+          type: string
+        dispatched_at:
+          type: string
+          nullable: true
+          description: 启动 RPC 结果确认时间；为空表示线程是否建成未确认（此类运行不执行后置）
+        started_at:
+          type: string
+          nullable: true
+        finished_at:
+          type: string
+          nullable: true
+        deadline_at:
+          type: string
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        summary:
+          type: string
+          nullable: true
+        post_state:
+          $ref: '#/components/schemas/AutomationPostState'
+        post_attempt:
+          type: integer
+        post_next_attempt_at:
+          type: string
+          nullable: true
+        post_deadline_at:
+          type: string
+          nullable: true
+        post_error:
+          type: string
+          nullable: true
+
+    AutomationTriggerContext:
+      type: object
+      description: 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。
+      properties:
+        project_id:
+          type: string
+        issue_id:
+          type: string
+        issue_sequence_number:
+          type: integer
+        issue_title:
+          type: string
+        field:
+          type: string
+          description: 状态变化字段（state | workflow_status）
+        from:
+          type: string
+        to:
+          type: string
+        labels_added:
+          type: array
+          items:
+            type: string
+
+    Notification:
+      type: object
+      required: [id, kind, title, body, created_at, updated_at, last_seen_at]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [agent, automation_dispatch_failed, automation_run_timeout, automation_post_failed, automation_busy]
+        title:
+          type: string
+        body:
+          type: string
+        environment_id:
+          type: string
+          nullable: true
+        thread_id:
+          type: string
+          nullable: true
+        run_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        last_seen_at:
+          type: string
+        read_at:
+          type: string
+          nullable: true
+
+    AutomationRunReportRequest:
+      type: object
+      required: [phase]
+      properties:
+        phase:
+          type: string
+          enum: [started, finished]
+        summary:
+          type: string
+          description: 仅 finished；一句话结果摘要
+        error_code:
+          type: string
+          description: 仅 finished；非空表示运行失败（状态记 failed）
+        error_message:
+          type: string
+          description: 仅 finished
+
+    AutomationRunReportResult:
+      type: object
+      required: [run_id, status, replay]
+      properties:
+        run_id:
+          type: string
+        status:
+          type: string
+          description: 回报后的运行状态
+        replay:
+          type: boolean
+          description: true 表示这是一次完全相同结束回报的重放
+
+    AgentNotificationRequest:
+      type: object
+      required: [title, problem_key, state_key]
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        body:
+          type: string
+          maxLength: 4000
+        problem_key:
+          type: string
+          maxLength: 200
+          description: 去重身份；同一线程同类问题用同一 key
+        state_key:
+          type: string
+          maxLength: 500
+          description: 状态指纹；同 problem_key 下状态变化才刷新通知
+        environment_id:
+          type: string
+          description: 可选；缺省用运行的环境
+        thread_id:
+          type: string
+          description: 可选；缺省用运行的线程

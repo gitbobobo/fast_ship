@@ -19,6 +19,9 @@ type ServerConfig struct {
 	Port       int    `mapstructure:"port"`
 	Mode       string `mapstructure:"mode"`
 	WebDistDir string `mapstructure:"web_dist_dir"`
+	// PublicURL 是外部可访问的服务基址（如 https://fs.example.com），
+	// 用于自动化运行提示词中的回报端点（INT-90）。不从 Host 头推断。
+	PublicURL string `mapstructure:"public_url"`
 }
 
 type DatabaseConfig struct {
@@ -61,6 +64,7 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("jwt.secret", "JWT_SECRET")
 	_ = viper.BindEnv("encryption.key", "ENCRYPTION_KEY")
 	_ = viper.BindEnv("server.web_dist_dir", "FAST_SHIP_WEB_DIST_DIR")
+	_ = viper.BindEnv("server.public_url", "FAST_SHIP_SERVER_PUBLIC_URL")
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, err

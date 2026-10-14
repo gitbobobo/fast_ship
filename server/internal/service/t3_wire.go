@@ -257,17 +257,17 @@ func t3IsSubagentThread(shell *t3ThreadShell) bool {
 // 见下）；最后 shell.status 兜底（旧服务端无 activityRunStatus）。
 func t3ThreadStatus(shell *t3ThreadShell) T3ThreadSummaryStatus {
 	if shell.ArchivedAt != nil && *shell.ArchivedAt != "" {
-		return api.Archived
+		return api.T3ThreadSummaryStatusArchived
 	}
 	if shell.PendingRuntimeRequest != nil {
-		return api.Waiting
+		return api.T3ThreadSummaryStatusWaiting
 	}
 	if shell.ActivityRunStatus != nil {
 		switch *shell.ActivityRunStatus {
 		case "preparing", "starting", "running":
-			return api.Running
+			return api.T3ThreadSummaryStatusRunning
 		case "waiting":
-			return api.Waiting
+			return api.T3ThreadSummaryStatusWaiting
 		}
 	}
 	// 后台工作占位（G2）：根 run 结束后仍在跑的后台 subagent/monitor 会唤醒
@@ -279,16 +279,16 @@ func t3ThreadStatus(shell *t3ThreadShell) T3ThreadSummaryStatus {
 	// activityRunStatus 之后、shell.status 兜底之前。
 	for _, task := range shell.PendingBackgroundTasks {
 		if task.Kind != "command" {
-			return api.Running
+			return api.T3ThreadSummaryStatusRunning
 		}
 	}
 	switch shell.Status {
 	case "preparing", "queued", "starting", "running":
-		return api.Running
+		return api.T3ThreadSummaryStatusRunning
 	case "waiting":
-		return api.Waiting
+		return api.T3ThreadSummaryStatusWaiting
 	default:
-		return api.Idle
+		return api.T3ThreadSummaryStatusIdle
 	}
 }
 

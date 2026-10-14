@@ -143,4 +143,20 @@ type (
 	UpdateScreenshotAnnotationRequest = api.UpdateScreenshotAnnotationRequest
 	ScreenshotAnnotationResponse      = api.ScreenshotAnnotation
 	ScreenshotAnnotationListData      = api.ListScreenshotAnnotations200JSONResponseBody_Data
+
+	// automations（INT-90）
+	CreateAutomationRequest  = api.CreateAutomationRequest
+	UpdateAutomationRequest  = api.UpdateAutomationRequest
+	AutomationResponse       = api.Automation
+	AutomationEventFilter    = api.AutomationEventFilter
+	AutomationModelSelection = api.AutomationModelSelection
+	AutomationWorkspace      = api.AutomationWorkspace
+	AutomationRunResponse    = api.AutomationRun
+	AutomationTriggerContext = api.AutomationTriggerContext
+
+	// notifications & automation agent
+	NotificationResponse       = api.Notification
+	AutomationRunReportRequest = api.AutomationRunReportRequest
+	AutomationRunReportResult  = api.AutomationRunReportResult
+	AgentNotificationRequest   = api.AgentNotificationRequest
 )

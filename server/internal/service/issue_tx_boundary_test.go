@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -131,5 +132,42 @@ func TestIssueMirrorUpsertGitHubIssue_ClosedPathRollsBackWhenRecommendationDelet
 		if !strings.Contains(logText, want) {
 			t.Fatalf("expected GORM error log to contain %q, got: %s", want, logText)
 		}
+	}
+}
+
+type failingIssueEventSink struct{}
+
+func (failingIssueEventSink) EnqueueIssueEventTx(*gorm.DB, IssueEvent) error {
+	return fmt.Errorf("enqueue blocked")
+}
+
+// 镜像写入与自动化事件同一事务：事件失败时新建的 GitHub issue 不得落库。
+func TestIssueMirrorUpsertGitHubIssue_EventFailureRollsBackPersist(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-evt")
+	project := createTestProject(t, svc.db, user.ID)
+	svc.issueService.SetIssueEventSink(failingIssueEventSink{})
+
+	now := time.Now().UTC()
+	item := &ghclient.Issue{
+		Issue: gh.Issue{
+			ID:        gh.Int64(9001),
+			Number:    gh.Int(99),
+			State:     gh.String("open"),
+			Title:     gh.String("事件失败应回滚"),
+			CreatedAt: &gh.Timestamp{Time: now.Add(-time.Hour)},
+			UpdatedAt: &gh.Timestamp{Time: now},
+			User:      &gh.User{Login: gh.String("alice")},
+		},
+	}
+	if _, err := svc.issueService.mirror.upsertGitHubIssue(project.ID, item); err != errs.ErrInternal {
+		t.Fatalf("expected internal error, got %v", err)
+	}
+	var n int64
+	if err := svc.db.Model(&model.Issue{}).Where("project_id = ?", project.ID).Count(&n).Error; err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("issue persist must roll back with event enqueue, got %d rows", n)
 	}
 }
