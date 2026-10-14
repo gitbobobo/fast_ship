@@ -19,10 +19,6 @@ var errT3ReadOnlyEnvironment = errs.New(errs.ErrPermissionDenied.Code, "该环�
 // newT3EnvironmentResponse 由落库记录构造 API 响应；scopes/access 来自
 // BearerScope 列（配对时服务端授予，原样落库）。
 func newT3EnvironmentResponse(env *model.T3Environment, status T3EnvironmentStatus, probeErr string) *T3EnvironmentResponse {
-	access := T3EnvironmentAccessReadOnly
-	if t3HasOperateScope(env.BearerScope) {
-		access = T3EnvironmentAccessOperate
-	}
 	granted := t3GrantedScopes(env.BearerScope)
 	if granted == nil {
 		granted = []string{}
@@ -33,10 +29,18 @@ func newT3EnvironmentResponse(env *model.T3Environment, status T3EnvironmentStat
 		Address:   env.Address,
 		Status:    status,
 		Scopes:    granted,
-		Access:    access,
+		Access:    t3AccessOf(env.BearerScope),
 		Error:     api.NonEmpty(probeErr),
 		UpdatedAt: formatTime(env.UpdatedAt.UTC()),
 	}
+}
+
+// t3AccessOf 由精确 token 的 scope 列判定会话能力。
+func t3AccessOf(scope string) T3EnvironmentAccess {
+	if t3HasOperateScope(scope) {
+		return T3EnvironmentAccessOperate
+	}
+	return T3EnvironmentAccessReadOnly
 }
 
 // requireOperate 写入口的统一守卫：会话缺 orchestration:operate 时返回 40300。

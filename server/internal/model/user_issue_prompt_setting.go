@@ -8,10 +8,30 @@ import (
 )
 
 type IssuePromptItem struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Content       string `json:"content"`
-	SupportsBatch bool   `json:"supports_batch"`
+	ID          string                  `json:"id"`
+	Name        string                  `json:"name"`
+	Content     string                  `json:"content"`
+	Preferences *IssuePromptPreferences `json:"preferences,omitempty"`
+}
+
+// IssuePromptPreferences 提示词条目的 T3 启动偏好；整体可缺省，各字段缺省取默认
+// （environment=auto、workspace=worktree、model_selection=T3 项目默认）。
+type IssuePromptPreferences struct {
+	Environment    *string                    `json:"environment,omitempty"`
+	Workspace      *string                    `json:"workspace,omitempty"`
+	ModelSelection *IssuePromptModelSelection `json:"model_selection,omitempty"`
+}
+
+// IssuePromptModelSelection 与 api.T3ModelSelection 同形（snake_case 存储面）。
+type IssuePromptModelSelection struct {
+	InstanceID string                   `json:"instance_id"`
+	Model      string                   `json:"model"`
+	Options    []IssuePromptModelOption `json:"options,omitempty"`
+}
+
+type IssuePromptModelOption struct {
+	ID    string `json:"id"`
+	Value any    `json:"value"`
 }
 
 // IssuePromptItems 以 JSON 文本存取于 prompts 列。

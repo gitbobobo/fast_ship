@@ -1,5 +1,5 @@
-import { useDeferredValue, useState } from "react";
-import { useNavigate } from "react-router";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router";
 import {
   Plus,
   GitFork,
@@ -40,8 +40,9 @@ import { toast } from "sonner";
 
 export default function ProjectsPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { data, isLoading } = useProjects();
-  const projects = data?.items ?? [];
+  const projects = useMemo(() => data?.items ?? [], [data]);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim().toLowerCase());
 
@@ -51,6 +52,28 @@ export default function ProjectsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogMode, setDialogMode] = useState<"create" | "edit">("create");
   const [editingProjectId, setEditingProjectId] = useState<string | undefined>();
+  const [dialogSection, setDialogSection] = useState<string | undefined>();
+  // ?edit=<projectId>&section=t3 深链：打开一次目标项目的编辑弹框后即清掉参数
+  const deepLinkHandledRef = useRef(false);
+  useEffect(() => {
+    if (deepLinkHandledRef.current || isLoading) return;
+    const editId = searchParams.get("edit");
+    if (!editId || !projects.some((p) => p.id === editId)) return;
+    deepLinkHandledRef.current = true;
+    setDialogMode("edit");
+    setEditingProjectId(editId);
+    setDialogSection(searchParams.get("section") ?? undefined);
+    setDialogOpen(true);
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("edit");
+        next.delete("section");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [isLoading, projects, searchParams, setSearchParams]);
 
   // 按 Issue 总数降序展示；计数缺失按 0，同计数靠稳定排序保持服务端顺序
   const filteredProjects = projects
@@ -234,6 +257,7 @@ export default function ProjectsPage() {
         onOpenChange={setDialogOpen}
         mode={dialogMode}
         projectId={editingProjectId}
+        section={dialogSection}
       />
 
       <AlertDialog

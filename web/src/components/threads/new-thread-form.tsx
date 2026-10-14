@@ -1,16 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Check, ChevronDown, Cpu, Folder, GitBranch, History, Laptop } from "lucide-react";
+import { Folder, GitBranch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import type { Environment } from "@/lib/api/threads";
@@ -21,93 +18,28 @@ import {
   useThreads,
   useWorkspaceOptions,
 } from "@/lib/hooks/use-threads";
+import { actionErrorText } from "@/lib/threads";
 import {
   buildModelSelection,
   buildWorkspace,
   canOperate,
   chooseRef,
   createIdTracker,
-  effortValue,
   parseProviders,
-  previousWorktreeLabel,
   resolveModel,
   resolvePreviousWorktree,
   READ_ONLY_HINT,
   type ModelPick,
   type WorkspaceChoice,
 } from "@/lib/threads-compose";
-import { cn } from "@/lib/utils";
+import {
+  Chip,
+  EffortChip,
+  EnvironmentChip,
+  ModelChip,
+  WorkspaceModeChip,
+} from "./thread-chips";
 import { ThreadComposer } from "./thread-composer";
-import { actionErrorText } from "./thread-queue";
-
-const CHIP =
-  "inline-flex h-7 max-w-48 items-center gap-1.5 rounded-lg bg-muted/50 px-2 text-xs transition-colors hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
-
-function Chip({
-  label,
-  icon,
-  ariaLabel,
-  disabled,
-  children,
-  menuClassName,
-}: {
-  label: string;
-  icon: ReactNode;
-  ariaLabel: string;
-  disabled?: boolean;
-  children: ReactNode;
-  menuClassName?: string;
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger aria-label={ariaLabel} disabled={disabled} className={CHIP}>
-        {icon}
-        <span className="truncate">{label}</span>
-        <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent className={cn("w-64", menuClassName)}>
-        {children}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-/** 运行环境下拉：只读环境置灰不可选。 */
-export function EnvironmentChip({
-  environments,
-  selected,
-  onChange,
-  disabled,
-}: {
-  environments: Environment[];
-  selected?: Environment;
-  onChange: (id: string) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Chip
-      ariaLabel="运行环境"
-      icon={<Laptop className="h-3.5 w-3.5 shrink-0" />}
-      label={selected ? selected.name : "选择环境"}
-      disabled={disabled}
-    >
-      <DropdownMenuRadioGroup value={selected?.id ?? ""} onValueChange={onChange}>
-        {environments.map((env) => (
-          <DropdownMenuRadioItem
-            key={env.id}
-            value={env.id}
-            disabled={!canOperate(env)}
-          >
-            <span className="truncate">{env.name}</span>
-            {!canOperate(env) && (
-              <span className="ml-auto text-xs text-muted-foreground">只读</span>
-            )}
-          </DropdownMenuRadioItem>
-        ))}
-      </DropdownMenuRadioGroup>
-    </Chip>
-  );
-}
 
 function useDebounced<T>(value: T, ms: number) {
   const [debounced, setDebounced] = useState(value);
@@ -180,12 +112,6 @@ export function NewThreadForm({
 
   const workspace = buildWorkspace(choice);
   const isRepo = workspaceData?.is_repo !== false;
-  const modeLabel =
-    choice.kind === "worktree"
-      ? "New worktree"
-      : choice.kind === "existing"
-        ? "Worktree"
-        : "Current checkout";
 
   const submit = async () => {
     if (!project || !workspace) return;
@@ -248,42 +174,13 @@ export function NewThreadForm({
           ))}
         </DropdownMenuRadioGroup>
       </Chip>
-      <Chip
-        ariaLabel="工作区"
-        icon={<GitBranch className="h-3.5 w-3.5 shrink-0" />}
-        label={modeLabel}
+      <WorkspaceModeChip
+        choice={choice}
+        previous={previous}
+        defaultBaseRef={workspaceData?.ref_name ?? ""}
         disabled={!writable || !project || !workspaceData || !isRepo || launching}
-      >
-        <DropdownMenuItem onClick={() => setChoice({ kind: "root" })}>
-          Current checkout
-          {choice.kind === "root" && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          onClick={() =>
-            setChoice({
-              kind: "worktree",
-              baseRef: workspaceData?.ref_name ?? "",
-              newBranch: choice.kind === "worktree" ? choice.newBranch : "",
-            })
-          }
-        >
-          New worktree
-          {choice.kind === "worktree" && <Check className="ml-auto" />}
-        </DropdownMenuItem>
-        {previous && (
-          <DropdownMenuItem
-            onClick={() =>
-              setChoice({ kind: "existing", path: previous.path, branch: previous.branch })
-            }
-          >
-            <History />
-            <span className="truncate">{previousWorktreeLabel(previous)}</span>
-            {choice.kind === "existing" && choice.path === previous.path && (
-              <Check className="ml-auto" />
-            )}
-          </DropdownMenuItem>
-        )}
-      </Chip>
+        onChange={setChoice}
+      />
       {choice.kind === "root" && workspaceData?.ref_name && (
         <span
           className="inline-flex items-center gap-1 px-1 text-xs text-muted-foreground"
@@ -344,60 +241,20 @@ export function NewThreadForm({
           className="h-7 w-36 text-xs"
         />
       )}
-      <Chip
-        ariaLabel="模型"
-        icon={<Cpu className="h-3.5 w-3.5 shrink-0" />}
-        label={model ? model.name : "默认模型"}
+      <ModelChip
+        providers={providers}
+        resolved={resolved}
         disabled={!writable || providers.length === 0 || launching}
-        menuClassName="max-h-80 w-72"
-      >
-        {providers.map((provider) => (
-          <DropdownMenuGroup key={provider.instanceId}>
-            <DropdownMenuLabel>{provider.name}</DropdownMenuLabel>
-            {provider.models.map((m) => (
-              <DropdownMenuItem
-                key={m.slug}
-                onClick={() =>
-                  setPick({ instanceId: provider.instanceId, model: m.slug, efforts: {} })
-                }
-              >
-                <span className="truncate">{m.name}</span>
-                {resolved.provider?.instanceId === provider.instanceId &&
-                  model?.slug === m.slug && <Check className="ml-auto" />}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuGroup>
-        ))}
-      </Chip>
+        onPick={setPick}
+      />
       {model?.descriptors.map((d) => (
-        <Chip
+        <EffortChip
           key={d.id}
-          ariaLabel={d.label}
-          icon={<span className="text-muted-foreground">{d.label}</span>}
-          label={
-            d.choices.find((c) => c.id === effortValue(d, resolved))?.label ?? "默认"
-          }
+          descriptor={d}
+          resolved={resolved}
           disabled={!writable || launching}
-        >
-          <DropdownMenuRadioGroup
-            value={effortValue(d, resolved) ?? ""}
-            onValueChange={(value) =>
-              resolved.provider &&
-              model &&
-              setPick({
-                instanceId: resolved.provider.instanceId,
-                model: model.slug,
-                efforts: { ...resolved.efforts, [d.id]: value },
-              })
-            }
-          >
-            {d.choices.map((c) => (
-              <DropdownMenuRadioItem key={c.id} value={c.id}>
-                {c.label}
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </Chip>
+          onChange={setPick}
+        />
       ))}
     </>
   );

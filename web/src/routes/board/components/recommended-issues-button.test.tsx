@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Environment } from "@/lib/api/threads";
+import { makeEnvironment } from "@/test/threads";
 import { RecommendedIssuesButton } from "./recommended-issues-button";
 
 const {
@@ -14,6 +16,8 @@ const {
   toastErrorMock,
   copyWithToastMock,
   promptList,
+  environmentsRef,
+  launchProps,
 } = vi.hoisted(() => ({
   useRecommendationsMock: vi.fn(),
   useIssueMock: vi.fn(),
@@ -25,12 +29,40 @@ const {
   toastErrorMock: vi.fn(),
   copyWithToastMock: vi.fn(),
   promptList: { current: [] as IssuePrompt[] },
+  environmentsRef: { current: [] as Environment[] },
+  launchProps: {
+    current: null as {
+      open: boolean;
+      projectId: string;
+      issue: { id: string; reference: string; title: string };
+      reason?: string;
+    } | null,
+  },
 }));
 
 vi.mock("@/lib/copy", () => ({ copyWithToast: copyWithToastMock }));
 
 vi.mock("@/lib/hooks/use-issue-prompt", () => ({
   useIssuePromptList: () => promptList.current,
+}));
+
+// 启动弹框内部查询单独测（launch-issue-thread-dialog.test.tsx），这里用桩
+// 组件记录 props，只验证「打开 + 传参」这一层接线。
+vi.mock("@/components/issues/launch-issue-thread-dialog", () => ({
+  LaunchIssueThreadDialog: (props: {
+    open: boolean;
+    projectId: string;
+    issue: { id: string; reference: string; title: string };
+    reason?: string;
+  }) => {
+    launchProps.current = props;
+    return props.open ? <div data-testid="launch-dialog" /> : null;
+  },
+}));
+
+vi.mock("@/lib/hooks/use-threads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hooks/use-threads")>()),
+  useEnvironments: () => ({ data: environmentsRef.current }),
 }));
 
 vi.mock("@/lib/hooks/use-recommendations", () => ({
@@ -241,12 +273,13 @@ describe("RecommendedIssuesButton", () => {
     copyWithToastMock.mockResolvedValue(true);
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    environmentsRef.current = [];
+    launchProps.current = null;
     promptList.current = [
       {
         id: "default",
         name: "默认",
         content: "请处理此问题",
-        supports_batch: true,
       },
     ];
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -367,7 +400,7 @@ describe("RecommendedIssuesButton", () => {
     ).toBeInTheDocument();
   });
 
-  it("copies the prompt with the recommendation reason on Enter", async () => {
+  it("opens the launch dialog with the recommendation reason on Enter", async () => {
     mockRecommendations(ALL_ITEMS);
     renderButton();
     await openDialog();
@@ -375,21 +408,20 @@ describe("RecommendedIssuesButton", () => {
 
     fireEvent.keyDown(window, { key: "Enter" });
 
-    await waitFor(() =>
-      expect(copyWithToastMock).toHaveBeenCalledWith(
-        `/fast-ship 请处理此问题
----
-项目ID：project-1
-问题ID：issue-1
-推荐理由：先做这个能解锁后续工作`,
-        "已复制提示词",
-      ),
-    );
+    expect(await screen.findByTestId("launch-dialog")).toBeInTheDocument();
+    expect(launchProps.current).toMatchObject({
+      open: true,
+      projectId: "project-1",
+      issue: { id: "issue-1", reference: "INT-1", title: "高优任务" },
+      reason: "先做这个能解锁后续工作",
+    });
+    // Enter 只打开弹框，不直接复制
+    expect(copyWithToastMock).not.toHaveBeenCalled();
   });
 
-  it("copies the prompt on Enter even when a list row holds focus", async () => {
+  it("opens the launch dialog on Enter even when a list row holds focus", async () => {
     // 回归：Dialog 打开时 base-ui 自动聚焦首行；行被排除在 Enter 让位名单外，
-    // 焦点落在行上按 Enter 仍是复制，不会变成激活该行
+    // 焦点落在行上按 Enter 仍打开启动弹框，不会变成激活该行
     mockRecommendations(ALL_ITEMS);
     renderButton();
     await openDialog();
@@ -398,17 +430,12 @@ describe("RecommendedIssuesButton", () => {
 
     fireEvent.keyDown(firstRow, { key: "Enter" });
 
-    await waitFor(() =>
-      expect(copyWithToastMock).toHaveBeenCalledWith(
-        expect.stringContaining("推荐理由：先做这个能解锁后续工作"),
-        "已复制提示词",
-      ),
-    );
+    expect(await screen.findByTestId("launch-dialog")).toBeInTheDocument();
     // 焦点行未被 Enter 激活成「重选」，选中项维持
     expect(firstRow).toHaveAttribute("aria-current", "true");
   });
 
-  it("lets Enter activate the dependency chip instead of copying", async () => {
+  it("lets Enter activate the dependency chip instead of launching", async () => {
     mockRecommendations(ALL_ITEMS);
     renderButton();
     await openDialog();
@@ -418,8 +445,42 @@ describe("RecommendedIssuesButton", () => {
 
     fireEvent.keyDown(depChip, { key: "Enter" });
 
-    // Enter 让位原生激活，不触发复制（happy-dom 不会合成 click，验证的是不复制）
-    await waitFor(() => expect(copyWithToastMock).not.toHaveBeenCalled());
+    // Enter 让位原生激活，不打开启动弹框（happy-dom 不会合成 click，验证的是不启动）
+    expect(screen.queryByTestId("launch-dialog")).not.toBeInTheDocument();
+    expect(launchProps.current?.open).not.toBe(true);
+  });
+
+  it("hides the launch button when no environment is operable", async () => {
+    mockRecommendations(ALL_ITEMS);
+    renderButton();
+    await openDialog();
+    await screen.findByRole("heading", { name: "高优任务" });
+
+    expect(
+      screen.queryByRole("button", { name: /启动线程/ }),
+    ).not.toBeInTheDocument();
+    // 复制提示词仍保留作逃生口
+    expect(
+      screen.getByRole("button", { name: /复制提示词/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the launch dialog from the pane button with the recommendation reason", async () => {
+    environmentsRef.current = [makeEnvironment()];
+    mockRecommendations(ALL_ITEMS);
+    renderButton();
+    await openDialog();
+    await screen.findByRole("heading", { name: "高优任务" });
+
+    fireEvent.click(screen.getByRole("button", { name: /启动线程/ }));
+
+    expect(await screen.findByTestId("launch-dialog")).toBeInTheDocument();
+    expect(launchProps.current).toMatchObject({
+      open: true,
+      projectId: "project-1",
+      issue: { id: "issue-1" },
+      reason: "先做这个能解锁后续工作",
+    });
   });
 
   it("ignores navigation keys combined with modifier keys", async () => {
@@ -437,18 +498,17 @@ describe("RecommendedIssuesButton", () => {
     ).toHaveAttribute("aria-current", "true");
   });
 
-  it("opens the prompt picker on Enter when multiple prompts exist", async () => {
+  it("copies the selected template with the recommendation reason from the copy button", async () => {
     promptList.current = [
-      { id: "a", name: "默认", content: "请处理此问题", supports_batch: true },
-      { id: "b", name: "补充测试", content: "请补充测试", supports_batch: false },
+      { id: "a", name: "默认", content: "请处理此问题" },
+      { id: "b", name: "补充测试", content: "请补充测试" },
     ];
     mockRecommendations(ALL_ITEMS);
     renderButton();
     await openDialog();
     await screen.findByRole("heading", { name: "高优任务" });
 
-    fireEvent.keyDown(window, { key: "Enter" });
-
+    fireEvent.click(screen.getByRole("button", { name: /复制提示词/ }));
     const menuItem = await screen.findByRole("menuitem", {
       name: "补充测试",
     });
@@ -456,14 +516,19 @@ describe("RecommendedIssuesButton", () => {
 
     await waitFor(() =>
       expect(copyWithToastMock).toHaveBeenCalledWith(
-        `/fast-ship 请补充测试
----
-项目ID：project-1
-问题ID：issue-1
-推荐理由：先做这个能解锁后续工作`,
+        `请补充测试
+
+> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
+> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
+> \`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship\`
+> 项目ID：project-1
+> 问题ID：issue-1
+> 推荐理由：先做这个能解锁后续工作`,
         "已复制提示词",
       ),
     );
+    // 复制入口不会顺带打开启动弹框
+    expect(screen.queryByTestId("launch-dialog")).not.toBeInTheDocument();
   });
 
   it("peeks a dependency from its chip and returns via the back link", async () => {
@@ -543,6 +608,7 @@ describe("RecommendedIssuesButton", () => {
       "true",
     );
     expect(copyWithToastMock).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("launch-dialog")).not.toBeInTheDocument();
   });
 
   it("keeps the note in the defer dialog when deferring fails", async () => {

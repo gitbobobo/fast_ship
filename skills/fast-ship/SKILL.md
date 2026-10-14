@@ -19,6 +19,32 @@ description: 通过 Fast Ship REST API 完成 Issue 的创建、更新与查询�
 
 **调用任何写接口前先读 `references/api.md` 对应小节，不要凭记忆构造请求体。**
 
+## Fast Ship 附加块（提示词尾部的引用块）
+
+Fast Ship「启动线程」生成的提示词 = 用户模板正文 + 结尾的 `>` 引用块。看到引用块里带
+`项目ID` / `问题ID`，就按这两个 ID 用技能查询并处理该问题，不需要再追问是哪条 issue：
+
+```
+> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
+> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
+> `npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`
+> 项目ID：<project_id>
+> 问题ID：<issue_id>
+> 推荐理由：<reason>   ← 可能出现
+```
+
+当前环境未安装本技能时，先征得用户同意，再执行 `npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`。
+
+## T3 绑定（Agent 辅助配置）
+
+Fast Ship 项目与 T3 项目是显式绑定，Agent 可辅助完成「发现 → 比对 → 绑定」：
+
+1. `GET /api/environments/t3-projects`：列出各环境及其 T3 项目（含 `workspace_root`）。
+2. 用自身仓库路径比对各项目的 `workspace_root`，确定自己对应哪个 T3 项目。
+3. `PUT /api/projects/{id}/t3-bindings/{environmentId}`，body `{"t3_project_id":"..."}` 完成绑定；解绑用 `DELETE` 同路径。
+
+这四个接口是对 API Key 开放的 T3 只读面（不含凭证、不含线程内容）；线程相关端点仍仅 JWT。字段细节见 `references/api.md`。
+
 上表的 `:pid` 在 api.md 里是 `{id}`，`:iid` 是 `{iid}`；`:lid` 是 PR 关联行 id（api.md 里 `pull-requests` 路径下的 `{id}`）。
 
 ## 认证配置

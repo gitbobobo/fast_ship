@@ -39,6 +39,7 @@ import {
   useRestoreRecommendation,
 } from "@/lib/hooks/use-recommendations";
 import { useAuthStore } from "@/lib/store/auth-store";
+import { makeEnvironment } from "@/test/threads";
 import { GITHUB_LOCAL_ASSET_NOTICE } from "@/lib/utils/github-media-proxy";
 import { toast } from "sonner";
 
@@ -252,6 +253,37 @@ vi.mock("@/lib/hooks/use-issue-prompt", () => ({
   useUpdateIssuePrompts: vi.fn(),
 }));
 
+// 「启动线程…」入口只看是否有可操作环境；弹框内部查询由
+// launch-issue-thread-dialog.test.tsx 覆盖，这里用桩验证接线。
+const { useEnvironmentsMock, launchProps } = vi.hoisted(() => ({
+  useEnvironmentsMock: vi.fn(),
+  launchProps: {
+    current: null as {
+      open: boolean;
+      projectId: string;
+      issue: { id: string; reference: string; title: string };
+      reason?: string;
+    } | null,
+  },
+}));
+
+vi.mock("@/lib/hooks/use-threads", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hooks/use-threads")>()),
+  useEnvironments: () => useEnvironmentsMock(),
+}));
+
+vi.mock("@/components/issues/launch-issue-thread-dialog", () => ({
+  LaunchIssueThreadDialog: (props: {
+    open: boolean;
+    projectId: string;
+    issue: { id: string; reference: string; title: string };
+    reason?: string;
+  }) => {
+    launchProps.current = props;
+    return props.open ? <div data-testid="launch-dialog" /> : null;
+  },
+}));
+
 vi.mock("@/lib/hooks/use-recommendations", () => ({
   useRecommendations: vi.fn(() => ({ data: undefined })),
   useDeferRecommendation: vi.fn(() => ({
@@ -463,6 +495,9 @@ describe("Issue pages", () => {
 
   beforeEach(() => {
     authState.token = "jwt-token";
+    useEnvironmentsMock.mockReset();
+    useEnvironmentsMock.mockReturnValue({ data: [] });
+    launchProps.current = null;
     vi.mocked(useAuthStore).mockImplementation(((selector?: (state: typeof authState) => unknown) =>
       selector ? selector(authState) : authState) as typeof useAuthStore);
     // attachmentApi.downloadUrl 等直接读 store.getState 的工具函数依赖此方法
@@ -753,6 +788,34 @@ describe("Issue pages", () => {
     fireEvent.click(screen.getByRole("button", { name: "更多" }));
     expect(screen.getByRole("menuitem", { name: "编辑问题" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "关闭问题" })).toBeInTheDocument();
+    // 无可操作环境时不出现「启动线程…」入口
+    expect(
+      screen.queryByRole("menuitem", { name: /启动线程/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the launch dialog from the more menu when an environment is operable", async () => {
+    mockIssueDetailData();
+    useEnvironmentsMock.mockReturnValue({
+      data: [makeEnvironment()],
+    });
+
+    renderWithRoute(<IssueDetailPage />, {
+      path: "/projects/:id/issues/:iid",
+      initialEntry: "/projects/proj-1/issues/issue-1",
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "更多" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /启动线程/ }));
+
+    expect(await screen.findByTestId("launch-dialog")).toBeInTheDocument();
+    expect(launchProps.current).toMatchObject({
+      open: true,
+      projectId: "proj-1",
+      issue: { id: "issue-1", reference: "GH-42", title: "Crash on launch" },
+    });
+    // 详情页入口不带推荐理由
+    expect(launchProps.current?.reason).toBeUndefined();
   });
 
   it("renders the attachments card for internal issues", () => {
@@ -2219,17 +2282,20 @@ describe("Issue pages", () => {
       initialEntry: "/projects/proj-1/issues/issue-1",
     });
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: /复制提示词/ }),
-    );
+    // 复制入口已从正文挪进「更多」菜单；推荐理由照常附加在引用块里
+    fireEvent.click(await screen.findByRole("button", { name: "更多" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "复制提示词" }));
 
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(
-        `/fast-ship 请处理此问题
----
-项目ID：proj-1
-问题ID：issue-1
-推荐理由：先做这个能解锁后续工作`,
+        `请处理此问题
+
+> 以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。
+> 若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：
+> \`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship\`
+> 项目ID：proj-1
+> 问题ID：issue-1
+> 推荐理由：先做这个能解锁后续工作`,
       ),
     );
   });

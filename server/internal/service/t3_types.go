@@ -20,6 +20,12 @@ type (
 	T3ThreadItem         = api.T3ThreadItem
 	T3ThreadDetail       = api.T3ThreadDetail
 
+	// T3 项目绑定（INT-89）：仅有的对 API Key 开放的 T3 面
+	T3EnvironmentProjects  = api.T3EnvironmentProjects
+	T3DiscoveredProject    = api.T3DiscoveredProject
+	ProjectT3Binding       = api.ProjectT3Binding
+	UpsertT3BindingRequest = api.UpsertT3BindingRequest
+
 	// T3 客户端操作（INT-85）
 	T3ComposerOptions        = api.T3ComposerOptions
 	T3WorkspaceOptions       = api.T3WorkspaceOptions

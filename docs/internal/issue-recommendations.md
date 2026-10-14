@@ -78,13 +78,13 @@ GET 响应为 `{items: [...]}`，单条含 `issue` 摘要（id / project_id / pr
 - 弹框由 `web/src/routes/board/components/` 下三个文件组成：
   - `recommended-issues-button.tsx`：按钮 + 受控 Dialog 壳 + 移除确认 AlertDialog；持有选中态（`selectedIssueId`）、`pendingRemove` 与 `window` 键盘监听（仅 `open` 时挂载）。`DialogContent` 为 `sm:max-w-[1100px]` 双栏。
   - `recommendation-list-pane.tsx`：左栏优先级分组单行列表（`reference + 标题`），组标题吸顶，组内保持服务端 `updated_at` 降序，点击行 = 选中（不再是 Link）。分组常量 `RECOMMENDATION_PRIORITY_GROUPS` 在此定义，选中序与展示序一致。
-  - `recommendation-detail-pane.tsx`：右栏选中项只读详情（不含评论/时间线）。按展示的 issueId 走 `useIssue` + `useIssueCollab`：reference/状态徽标/标题、推荐理由、前置依赖 chip、正文 `GitHubContent`、只读任务清单（含进度）、标签、`CollaborationArea readOnly`（无内容则不渲染）。底部操作栏：复制提示词（带 `reason`）、移除推荐、「打开完整详情页」Link（同标签页）。前置依赖 chip 点击切到该依赖的 peek 视图（可为推荐列表外的 issue），顶部「← 返回 <reference>」回链；peek 下隐藏推荐理由与移除入口，复制提示词不带 reason。切换选中项时父组件以 `key` 重挂载本组件，peek 自动复位。
-- 键盘：`↑`/`↓`（等价 `j`/`k`）跨组移动选中并 `preventDefault`（右栏滚动交给滚轮/触控板）；`Enter` 调 `CopyIssuePromptButton` 的 `handleRef.activate()`——单模板直接复制、多模板点开选择器；`Esc` 走 base-ui 原生关闭。事件源落在 `role="menu"`/`role="alertdialog"` 浮层（提示词选择器、移除确认框）内时全部放行，按键归浮层。
+  - `recommendation-detail-pane.tsx`：右栏选中项只读详情（不含评论/时间线）。按展示的 issueId 走 `useIssue` + `useIssueCollab`：reference/状态徽标/标题、推荐理由、前置依赖 chip、正文 `GitHubContent`、只读任务清单（含进度）、标签、`CollaborationArea readOnly`（无内容则不渲染）。底部操作栏（INT-89 起）：「启动线程…」打开启动弹框（`LaunchIssueThreadDialog`，推荐理由作为 `reason` 传入）、「复制提示词」（带 `reason`）、移除推荐、「打开完整详情页」Link（同标签页）。前置依赖 chip 点击切到该依赖的 peek 视图（可为推荐列表外的 issue），顶部「← 返回 <reference>」回链；peek 下隐藏推荐理由与移除入口，复制提示词不带 reason。切换选中项时父组件以 `key` 重挂载本组件，peek 自动复位。
+- 键盘：`↑`/`↓`（等价 `j`/`k`）跨组移动选中并 `preventDefault`（右栏滚动交给滚轮/触控板）；`Enter` 打开「启动线程」弹框（INT-89 起替代直接复制；打开本身无副作用，交互控件如依赖 chip、textarea 的 Enter 不拦截）；`Esc` 走 base-ui 原生关闭。事件源落在 `role="menu"`/`role="alertdialog"` 浮层（提示词选择器、移除确认框）内时全部放行，按键归浮层。
 - 选中项生命周期：打开默认选中最高优先级第一条；选中项被移除或 60s 轮询消失时顺延同位置（下一条），越界退上一条；列表清空自动关弹框（按钮本就随之隐藏）。
 - `CopyIssuePromptButton`（`web/src/components/issues/copy-issue-prompt-button.tsx`）新增可选 `handleRef`：`CopyIssuePromptButtonHandle.activate()` 暴露「单模板复制 / 多模板开选择器」语义，供弹框 Enter 键复用；复制本身不改 issue 状态、不自动流转。
 - `CollaborationArea`（`web/src/components/issues/collaboration-area.tsx`）新增 `readOnly` prop：隐藏「清空协作区」与各节删除按钮，内部 AlertDialog 不再渲染，组件方可嵌入推荐弹框右栏。
-- 详情页兜底（`web/src/routes/projects/$id/issues/$iid.tsx`）：`useRecommendations(projectId)` 命中当前 issue 时（不看来源，同一 queryKey 命中弹框缓存），在正文卡片上方渲染 `RecommendationBanner`（Sparkles + 优先级徽标 + 推荐理由 + 前置依赖 Link chip）；正文卡片的 `CopyIssuePromptButton` 传入 `reason`，复制出的提示词在 `问题ID` 后带 `推荐理由：` 行。
-- 挂载：`board/index.tsx` 筛选行多选 toggle 之后，`activeProjectId || undefined` 传入（看板无「全部项目」态，空串等同全量）。
+- 详情页兜底（`web/src/routes/projects/$id/issues/$iid.tsx`）：`useRecommendations(projectId)` 命中当前 issue 时（不看来源，同一 queryKey 命中弹框缓存），在正文卡片上方渲染 `RecommendationBanner`（Sparkles + 优先级徽标 + 推荐理由 + 前置依赖 Link chip）；正文卡片的 `CopyIssuePromptButton` 传入 `reason`，复制出的提示词在 `问题ID` 后带 `推荐理由：` 行。（INT-85 时代 `CopyIssuePromptButton` 的 `handleRef` 已随 Enter 改开启动弹框而移除。）
+- 挂载：`board/index.tsx` 筛选行，`activeProjectId || undefined` 传入（看板无「全部项目」态，空串等同全量；INT-89 起筛选行的多选 toggle 已随批量复制移除）。
 
 ## 刷新策略
 

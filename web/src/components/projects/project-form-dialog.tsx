@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Plus } from "lucide-react";
 import { GitHubTokenHelpDialog } from "@/components/projects/github-token-help-dialog";
 import { GithubTokenCreateDialog } from "@/components/settings/github-token-create-dialog";
+import { T3BindingsSection } from "@/components/projects/t3-bindings-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,6 +45,8 @@ interface ProjectFormDialogProps {
   onOpenChange: (open: boolean) => void;
   mode: "create" | "edit";
   projectId?: string;
+  /** 深链（/projects?edit=<id>&section=t3）：打开后滚动到对应节。 */
+  section?: string;
 }
 
 const emptyTokenOption = "__none__";
@@ -118,6 +121,7 @@ export function ProjectFormDialog({
   onOpenChange,
   mode,
   projectId,
+  section,
 }: ProjectFormDialogProps) {
   const navigate = useNavigate();
   const isEdit = mode === "edit";
@@ -148,6 +152,17 @@ export function ProjectFormDialog({
 
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [creatingFor, setCreatingFor] = useState<"public" | "code">("public");
+  const t3SectionRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (open && isEdit && section === "t3") {
+      // 等弹框动画与内容就位后再滚动
+      const frame = window.requestAnimationFrame(() =>
+        t3SectionRef.current?.scrollIntoView({ block: "start" }),
+      );
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [open, isEdit, section, isLoading]);
 
   useEffect(() => {
     if (isEdit && project) {
@@ -321,6 +336,10 @@ export function ProjectFormDialog({
             <p className="text-xs text-muted-foreground -mt-2">
               仅用于读取关联 PR（含其他仓库）；未配置时匿名读公共 PR
             </p>
+
+            {isEdit && projectId && (
+              <T3BindingsSection ref={t3SectionRef} projectId={projectId} />
+            )}
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={isSubmitting}>
