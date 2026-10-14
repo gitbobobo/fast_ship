@@ -14,9 +14,9 @@ import {
   questionAnswer,
   type AnswerDraft,
 } from "@/lib/threads-compose";
+import { actionErrorText } from "@/lib/threads";
 import { cn } from "@/lib/utils";
 import { ImageStrip } from "./thread-images";
-import { actionErrorText } from "./thread-queue";
 
 interface CardProps {
   item: ThreadItem;

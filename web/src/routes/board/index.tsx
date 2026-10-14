@@ -7,7 +7,7 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { ListChecks, Package, Plus } from "lucide-react";
+import { Package, Plus } from "lucide-react";
 import { ProjectSwitcher } from "@/components/projects/project-switcher";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
@@ -25,10 +25,7 @@ import {
   getActiveProjectId,
 } from "@/routes/board/lib/utils";
 import { usePersistedScroll } from "@/lib/hooks/use-persisted-scroll";
-import { useBoardMultiSelect } from "@/routes/board/lib/use-board-multi-select";
-import { BoardSelectionProvider } from "@/routes/board/lib/board-selection-context";
 import { BoardColumn } from "@/routes/board/components/board-column";
-import { BoardBatchCopyButton } from "@/routes/board/components/board-batch-copy-button";
 import { RecommendedIssuesButton } from "@/routes/board/components/recommended-issues-button";
 import {
   BoardIssueCardOverlay,
@@ -75,28 +72,6 @@ export default function BoardPage() {
   }, [activeProjectId, urlProjectId, searchParams, setSearchParams]);
 
   const [activeIssue, setActiveIssue] = useState<Issue | null>(null);
-
-  const {
-    multiSelectMode,
-    selectPreview,
-    selectedIssueIds,
-    selectedCount,
-    toggleMode,
-    selectIssue,
-    handleColumnIssuesChange,
-    exit,
-    getOrderedSelectedIssues,
-  } = useBoardMultiSelect(activeProjectId);
-
-  const boardSelectionValue = useMemo(
-    () => ({
-      multiSelectMode,
-      selectPreview,
-      selectedIssueIds,
-      selectIssue,
-    }),
-    [multiSelectMode, selectPreview, selectedIssueIds, selectIssue],
-  );
 
   const updateWorkflowStatus = useUpdateIssueWorkflowStatus();
 
@@ -160,34 +135,20 @@ export default function BoardPage() {
           activeProjectId ? (
             <HeaderActions
               primary={
-                multiSelectMode ? (
-                  <>
-                    <span className="text-sm text-muted-foreground tabular-nums">
-                      已选 {selectedCount}
-                    </span>
-                    <BoardBatchCopyButton
-                      projectId={activeProjectId}
-                      selectedCount={selectedCount}
-                      getOrderedSelectedIssues={getOrderedSelectedIssues}
-                      onCopied={exit}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  render={
+                    <Link
+                      to={{
+                        pathname: `/projects/${activeProjectId}/issues/new`,
+                      }}
                     />
-                  </>
-                ) : (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    render={
-                      <Link
-                        to={{
-                          pathname: `/projects/${activeProjectId}/issues/new`,
-                        }}
-                      />
-                    }
-                  >
-                    <Plus className="mr-1.5 h-3.5 w-3.5" />
-                    新建问题
-                  </Button>
-                )
+                  }
+                >
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />
+                  新建问题
+                </Button>
               }
             />
           ) : undefined
@@ -208,23 +169,6 @@ export default function BoardPage() {
               placeholder="请选择项目"
               className="w-auto min-w-32"
             />
-          )}
-          {!projectsLoading && !isEmptyProject && (
-            <Button
-              variant={
-                multiSelectMode || selectPreview ? "secondary" : "outline"
-              }
-              size="icon"
-              className="size-8"
-              aria-pressed={multiSelectMode}
-              aria-label={
-                multiSelectMode ? "退出多选模式" : "进入多选模式"
-              }
-              title={multiSelectMode ? "退出多选模式" : "进入多选模式"}
-              onClick={toggleMode}
-            >
-              <ListChecks className="h-4 w-4" />
-            </Button>
           )}
           {!projectsLoading && !isEmptyProject && (
             <RecommendedIssuesButton
@@ -279,21 +223,18 @@ export default function BoardPage() {
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
-            <BoardSelectionProvider value={boardSelectionValue}>
-              <div
-                ref={boardScrollRef}
-                className="flex flex-1 gap-4 overflow-x-auto py-1 pb-2"
-              >
-                {COLUMNS.map((column) => (
-                  <BoardColumn
-                    key={column.id}
-                    columnId={column.id}
-                    projectId={activeProjectId}
-                    onColumnIssuesChange={handleColumnIssuesChange}
-                  />
-                ))}
-              </div>
-            </BoardSelectionProvider>
+            <div
+              ref={boardScrollRef}
+              className="flex flex-1 gap-4 overflow-x-auto py-1 pb-2"
+            >
+              {COLUMNS.map((column) => (
+                <BoardColumn
+                  key={column.id}
+                  columnId={column.id}
+                  projectId={activeProjectId}
+                />
+              ))}
+            </div>
             <DragOverlay dropAnimation={null}>
               {activeIssue ? (
                 <BoardIssueCardOverlay issue={activeIssue} />

@@ -1,5 +1,6 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLocation } from "react-router";
 import { vi } from "vitest";
 import ProjectsPage from "@/routes/projects/index";
 import { renderWithRoute } from "@/test/render";
@@ -24,6 +25,11 @@ vi.mock("@/lib/hooks/use-projects", () => ({
   useUpdateProject: vi.fn(),
   useProject: vi.fn(),
 }));
+
+// 观察地址栏：深链参数应被消费后移除
+function LocationProbe() {
+  return <output data-testid="location-search">{useLocation().search}</output>;
+}
 
 describe("ProjectsPage", () => {
   beforeEach(() => {
@@ -190,6 +196,69 @@ describe("ProjectsPage", () => {
 
     await user.click(editItem);
     expect(screen.getByRole("dialog", { name: "编辑项目" })).toBeInTheDocument();
+  });
+
+  it("opens the edit dialog at the T3 section for ?edit=&section=t3 and clears the params", async () => {
+    const scrollSpy = vi
+      .spyOn(window.HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(() => {});
+
+    renderWithRoute(
+      <>
+        <ProjectsPage />
+        <LocationProbe />
+      </>,
+      { path: "/projects", initialEntry: "/projects?edit=p1&section=t3" },
+    );
+
+    const dialog = await screen.findByRole("dialog", { name: "编辑项目" });
+    expect(
+      await screen.findByRole("region", { name: "T3 绑定" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(scrollSpy).toHaveBeenCalledWith({ block: "start" }),
+    );
+    // 深链参数被消费一次后即移除，刷新/回退不再重开弹框
+    await waitFor(() =>
+      expect(screen.getByTestId("location-search")).toHaveTextContent(""),
+    );
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it("ignores ?edit= when the project does not exist", async () => {
+    renderWithRoute(
+      <>
+        <ProjectsPage />
+        <LocationProbe />
+      </>,
+      { path: "/projects", initialEntry: "/projects?edit=ghost&section=t3" },
+    );
+
+    await waitFor(() => expect(screen.getByText("Alpha App")).toBeInTheDocument());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // 目标项目不存在时参数保留，便于排查
+    expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "edit=ghost",
+    );
+  });
+
+  it("opens the plain edit dialog for ?edit= without a section", async () => {
+    const scrollSpy = vi
+      .spyOn(window.HTMLElement.prototype, "scrollIntoView")
+      .mockImplementation(() => {});
+
+    renderWithRoute(<ProjectsPage />, {
+      path: "/projects",
+      initialEntry: "/projects?edit=p2",
+    });
+
+    expect(
+      await screen.findByRole("dialog", { name: "编辑项目" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("region", { name: "T3 绑定" })).toBeInTheDocument(),
+    );
+    expect(scrollSpy).not.toHaveBeenCalled();
   });
 
   it("opens delete confirmation and deletes project", async () => {

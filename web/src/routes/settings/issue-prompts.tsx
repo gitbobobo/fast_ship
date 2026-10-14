@@ -15,12 +15,15 @@ import {
   useIssuePrompts,
   useUpdateIssuePrompts,
 } from "@/lib/hooks/use-issue-prompt";
+import { useEnvironments } from "@/lib/hooks/use-threads";
+import { describeIssuePromptPreferences } from "@/lib/issue-launch";
 import {
   DEFAULT_ISSUE_PROMPT_CONTENT,
   normalizeIssuePrompts,
 } from "@/lib/issue-prompt";
 import { toast } from "sonner";
 
+// preferences 不在这里编辑（弹框「保存为此模板的默认」写入），原样透传。
 const issuePromptSchema = z.object({
   prompts: z
     .array(
@@ -28,7 +31,7 @@ const issuePromptSchema = z.object({
         id: z.string().min(1),
         name: z.string().min(1, "请输入名称"),
         content: z.string().min(1, "请输入正文"),
-        supports_batch: z.boolean(),
+        preferences: z.custom<IssuePromptPreferences>().optional(),
       }),
     )
     .min(1, "至少保留 1 条"),
@@ -43,12 +46,16 @@ const newPromptId = () =>
 export default function SettingsIssuePromptsPage() {
   const { data, isLoading, isError } = useIssuePrompts();
   const updatePrompts = useUpdateIssuePrompts();
+  const { data: environments } = useEnvironments();
+  const environmentName = (id: string) =>
+    (environments ?? []).find((env) => env.id === id)?.name;
 
   const {
     register,
     control,
     reset,
     handleSubmit,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<IssuePromptFormValues>({
     resolver: zodResolver(issuePromptSchema),
@@ -128,7 +135,7 @@ export default function SettingsIssuePromptsPage() {
         <div>
           <h2 className="text-lg font-medium">问题提示词</h2>
           <p className="text-sm text-muted-foreground">
-            配置问题详情页、推荐任务弹框中「复制提示词」按钮使用的正文模板，可维护多条供切换。
+            配置「复制提示词」与「启动线程」共用的正文模板，可维护多条供切换。
           </p>
         </div>
 
@@ -172,14 +179,30 @@ export default function SettingsIssuePromptsPage() {
                   )}
                 </div>
 
-                <Label className="font-normal text-sm text-foreground">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 shrink-0 rounded border border-input accent-primary"
-                    {...register(`prompts.${i}.supports_batch`)}
-                  />
-                  支持批量复制
-                </Label>
+                {field.preferences ? (
+                  <div className="flex items-center justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2">
+                    <p className="text-xs text-muted-foreground">
+                      默认偏好：
+                      {describeIssuePromptPreferences(
+                        field.preferences,
+                        environmentName,
+                      )}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() =>
+                        setValue(`prompts.${i}.preferences`, undefined, {
+                          shouldDirty: true,
+                        })
+                      }
+                    >
+                      清除偏好
+                    </Button>
+                  </div>
+                ) : null}
 
                 <div className="flex flex-wrap items-center gap-2">
                   <Button
@@ -229,7 +252,6 @@ export default function SettingsIssuePromptsPage() {
                 id: newPromptId(),
                 name: "",
                 content: DEFAULT_ISSUE_PROMPT_CONTENT,
-                supports_batch: false,
               })
             }
           >

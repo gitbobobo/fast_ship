@@ -1,3 +1,4 @@
+import { ApiRequestError } from "@/lib/api/client";
 import type {
   Environment,
   EnvironmentStatus,
@@ -20,6 +21,13 @@ export const ENVIRONMENT_STATUS_LABELS: Record<EnvironmentStatus, string> = {
   repair: "需重新配对",
   degraded: "部分可读",
 };
+
+/** 线程写操作的错误文案：服务端 ApiRequestError 的 message 优先，否则兜底。 */
+export function actionErrorText(error: unknown, fallback = "操作失败，请重试") {
+  return error instanceof ApiRequestError && error.message
+    ? error.message
+    : fallback;
+}
 
 /** T3 条目原始状态的中文名（快照透传值，未知值原样显示）。 */
 export const ITEM_STATUS_LABELS: Record<string, string> = {

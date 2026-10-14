@@ -1,4 +1,4 @@
-import { useState, type Ref } from "react";
+import { useImperativeHandle, useState, type Ref } from "react";
 import { Link } from "react-router";
 import {
   ArrowLeft,
@@ -6,21 +6,22 @@ import {
   Clock,
   ExternalLink,
   ListChecks,
+  Play,
   Sparkles,
   Trash2,
   Undo2,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
-import {
-  CopyIssuePromptButton,
-  type CopyIssuePromptButtonHandle,
-} from "@/components/issues/copy-issue-prompt-button";
+import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
+import { LaunchIssueThreadDialog } from "@/components/issues/launch-issue-thread-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIssue } from "@/lib/hooks/use-issues";
 import { useIssueCollab } from "@/lib/hooks/use-issue-collab";
+import { useEnvironments } from "@/lib/hooks/use-threads";
 import { ISSUE_WORKFLOW_STATUS_LABELS } from "@/lib/issue-workflow-status";
+import { canOperate } from "@/lib/threads-compose";
 import { cn } from "@/lib/utils";
 import { formatRelativeTime } from "@/lib/utils/format";
 
@@ -184,6 +185,11 @@ function IssueLabels({ issue }: { issue: Issue }) {
   );
 }
 
+/** 父组件键盘入口：Enter 打开启动弹框（无其他副作用）。 */
+export interface RecommendationDetailPaneHandle {
+  openLaunchDialog: () => void;
+}
+
 interface RecommendationDetailPaneProps {
   /** 当前选中的推荐条目。 */
   item: IssueRecommendation;
@@ -195,8 +201,8 @@ interface RecommendationDetailPaneProps {
   onRemove: () => void;
   /** 移回推荐请求进行中。 */
   restorePending?: boolean;
-  /** Enter 键复制入口，转发给当前展示的复制按钮。 */
-  copyHandleRef: Ref<CopyIssuePromptButtonHandle>;
+  /** Enter 键启动入口：打开当前展示条目的启动弹框。 */
+  launchHandleRef: Ref<RecommendationDetailPaneHandle>;
   /** 跨项目（全量推荐）时在标题行补项目名。 */
   showProject?: boolean;
 }
@@ -213,16 +219,31 @@ export function RecommendationDetailPane({
   onRestore,
   onRemove,
   restorePending = false,
-  copyHandleRef,
+  launchHandleRef,
   showProject = false,
 }: RecommendationDetailPaneProps) {
   const [peekDep, setPeekDep] = useState<RecommendationDependency | null>(null);
+  const [launchOpen, setLaunchOpen] = useState(false);
   const peeking = peekDep !== null;
   const displayIssueId = peekDep?.issue_id ?? item.issue.id;
 
   const { data: issue, isLoading, isError, refetch } = useIssue(displayIssueId);
   const { data: collab } = useIssueCollab(displayIssueId);
   const hasCollab = !!(collab?.consensus || collab?.summary);
+
+  // 「启动线程…」只在存在可操作环境时出现；环境绑定与否交给弹框处理
+  const { data: launchEnvironments } = useEnvironments();
+  const hasOperableEnvironment = (launchEnvironments ?? []).some((env) =>
+    canOperate(env),
+  );
+
+  useImperativeHandle(
+    launchHandleRef,
+    (): RecommendationDetailPaneHandle => ({
+      openLaunchDialog: () => setLaunchOpen(true),
+    }),
+    [],
+  );
 
   return (
     <div className="flex min-h-0 min-w-0 flex-col">
@@ -346,11 +367,21 @@ export function RecommendationDetailPane({
 
       <div className="flex items-center gap-1 border-t px-5 py-2.5">
         {/* 详情拉取失败/加载中也保留逃生口：推荐条目与依赖摘要自带 id 与 project_id */}
+        {hasOperableEnvironment && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 gap-1.5 text-xs"
+            onClick={() => setLaunchOpen(true)}
+          >
+            <Play className="h-3.5 w-3.5" />
+            启动线程…
+          </Button>
+        )}
         <CopyIssuePromptButton
           projectId={issue?.project_id ?? peekDep?.project_id ?? item.issue.project_id}
           issueId={issue?.id ?? displayIssueId}
           reason={peeking ? undefined : item.reason}
-          handleRef={copyHandleRef}
         />
         {!peeking &&
           (item.status === "deferred" ? (
@@ -397,6 +428,26 @@ export function RecommendationDetailPane({
           打开完整详情页
         </Link>
       </div>
+
+      <LaunchIssueThreadDialog
+        open={launchOpen}
+        onOpenChange={setLaunchOpen}
+        projectId={
+          issue?.project_id ?? peekDep?.project_id ?? item.issue.project_id
+        }
+        issue={
+          issue
+            ? { id: issue.id, reference: issue.reference, title: issue.title }
+            : peekDep
+              ? {
+                  id: peekDep.issue_id,
+                  reference: peekDep.reference,
+                  title: peekDep.title,
+                }
+              : item.issue
+        }
+        reason={peeking ? undefined : item.reason}
+      />
     </div>
   );
 }

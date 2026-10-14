@@ -1,6 +1,5 @@
 import { ArrowDown, ArrowUp, Pause, Pencil, Play, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ApiRequestError } from "@/lib/api/client";
 import type { ThreadQueue, ThreadQueueItem } from "@/lib/api/threads";
 import {
   useCancelQueued,
@@ -8,15 +7,10 @@ import {
   useResumeQueue,
   useSteerQueued,
 } from "@/lib/hooks/use-threads";
+import { actionErrorText } from "@/lib/threads";
 import { reorderTarget } from "@/lib/threads-compose";
 import { cn } from "@/lib/utils";
 import { AttachmentThumbs } from "./thread-images";
-
-export function actionErrorText(error: unknown, fallback = "操作失败，请重试") {
-  return error instanceof ApiRequestError && error.message
-    ? error.message
-    : fallback;
-}
 
 /**
  * 排队消息：在输入框上方展示正文/缩略图。只读环境只展示；陈旧时（详情刷新失败）

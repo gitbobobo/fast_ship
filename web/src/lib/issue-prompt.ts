@@ -2,7 +2,7 @@ export interface IssuePromptInput {
   projectId: string;
   issueId: string;
   content: string;
-  /** 推荐理由；非空时追加在问题ID之后，供 Agent 了解为什么推荐先做。 */
+  /** 推荐理由；仅推荐入口传入，追加为引用块最后一行。 */
   reason?: string;
 }
 
@@ -13,7 +13,6 @@ export const DEFAULT_ISSUE_PROMPTS: IssuePrompt[] = [
     id: "default",
     name: "默认",
     content: DEFAULT_ISSUE_PROMPT_CONTENT,
-    supports_batch: true,
   },
 ];
 
@@ -23,29 +22,27 @@ export function normalizeIssuePrompts(
   if (!prompts || prompts.length === 0) {
     return DEFAULT_ISSUE_PROMPTS.map((p) => ({ ...p }));
   }
-  return prompts.map((p) => ({ ...p, supports_batch: p.supports_batch ?? false }));
+  return prompts.map((p) => ({ ...p }));
 }
 
-export function buildIssuePromptBatch(input: {
-  projectId: string;
-  content: string;
-  issueIds: string[];
-}): string {
-  const issueIdLines = input.issueIds.map(
-    (issueId) => `问题ID：${issueId}`,
-  );
-  return `/fast-ship ${input.content}
----
-项目ID：${input.projectId}
-${issueIdLines.join("\n")}`;
-}
-
+/**
+ * 提示词 = 模板正文 + 结尾的 Markdown 引用块。引用块完全由系统生成：
+ * 指引 Agent 用 fast-ship 技能（未安装时附安装命令）、附项目/问题 ID；
+ * 推荐理由仅推荐场景出现。不再有 /fast-ship 前缀。
+ */
 export function buildIssuePrompt(input: IssuePromptInput): string {
-  const prompt = buildIssuePromptBatch({
-    projectId: input.projectId,
-    content: input.content,
-    issueIds: [input.issueId],
-  });
+  const lines = [
+    "以下信息由 Fast Ship 附加。请使用 fast-ship 技能查询并处理该问题。",
+    "若当前环境未安装 fast-ship 技能，先征得用户同意，再执行：",
+    "`npx skills add https://github.com/gitbobobo/fast_ship --skill fast-ship`",
+    `项目ID：${input.projectId}`,
+    `问题ID：${input.issueId}`,
+  ];
   const reason = input.reason?.trim();
-  return reason ? `${prompt}\n推荐理由：${reason}` : prompt;
+  if (reason) {
+    const reasonLines = reason.split("\n");
+    lines.push(`推荐理由：${reasonLines[0]}`, ...reasonLines.slice(1));
+  }
+  const block = lines.map((line) => `> ${line}`).join("\n");
+  return input.content ? `${input.content}\n\n${block}` : block;
 }

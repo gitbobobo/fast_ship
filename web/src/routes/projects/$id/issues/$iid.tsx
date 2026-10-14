@@ -12,6 +12,7 @@ import {
   Ellipsis,
   ExternalLink,
   Eye,
+  FileText,
   Flag,
   GitBranch,
   GitCommit,
@@ -25,6 +26,7 @@ import {
   MessageSquare,
   Pencil,
   PanelLeft,
+  Play,
   Plus,
   RefreshCw,
   Sparkles,
@@ -37,7 +39,7 @@ import {
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
-import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
+import { LaunchIssueThreadDialog } from "@/components/issues/launch-issue-thread-dialog";
 import { IssueAttachmentsCard } from "@/components/issues/issue-attachments-card";
 import { IssuePullRequestsCard } from "@/components/issues/issue-pull-requests-card";
 import { IssueScreenshotAnnotationsCard } from "@/components/issues/issue-screenshot-annotations-card";
@@ -63,6 +65,9 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
@@ -101,6 +106,10 @@ import {
   ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
+import { useIssuePromptList } from "@/lib/hooks/use-issue-prompt";
+import { useEnvironments } from "@/lib/hooks/use-threads";
+import { buildIssuePrompt } from "@/lib/issue-prompt";
+import { canOperate } from "@/lib/threads-compose";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -607,6 +616,13 @@ export default function IssueDetailPage() {
   const [checklistDraft, setChecklistDraft] = useState<ChecklistDraftItem[]>([]);
   const [labelDraft, setLabelDraft] = useState<string[] | null>(null);
   const [isSuggestionDialogOpen, setIsSuggestionDialogOpen] = useState(false);
+  const [launchDialogOpen, setLaunchDialogOpen] = useState(false);
+  const issuePrompts = useIssuePromptList();
+  // 「启动线程…」入口只在存在可操作环境时出现；绑定与否由弹框处理
+  const { data: launchEnvironments } = useEnvironments();
+  const hasOperableEnvironment = (launchEnvironments ?? []).some((env) =>
+    canOperate(env),
+  );
   const [suggestionState, setSuggestionState] = useState<
     "idle" | "loading" | "ready" | "missing-settings" | "error"
   >("idle");
@@ -992,6 +1008,18 @@ export default function IssueDetailPage() {
     } catch {
       toast.error("同步失败");
     }
+  };
+
+  const copyIssuePrompt = async (content: string) => {
+    await copyWithToast(
+      buildIssuePrompt({
+        projectId: id!,
+        issueId: iid!,
+        content,
+        reason: recommendation?.reason,
+      }),
+      "已复制提示词",
+    );
   };
 
   const handleCopyCurrentViewLink = async () => {
@@ -1658,6 +1686,38 @@ export default function IssueDetailPage() {
                     }
                   />
                   <DropdownMenuContent align="end" className="w-44">
+                    {hasOperableEnvironment && (
+                      <DropdownMenuItem onClick={() => setLaunchDialogOpen(true)}>
+                        <Play className="h-4 w-4" />
+                        启动线程…
+                      </DropdownMenuItem>
+                    )}
+                    {issuePrompts.length === 1 ? (
+                      <DropdownMenuItem
+                        onClick={() => void copyIssuePrompt(issuePrompts[0].content)}
+                      >
+                        <FileText className="h-4 w-4" />
+                        复制提示词
+                      </DropdownMenuItem>
+                    ) : issuePrompts.length > 1 ? (
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger>
+                          <FileText className="h-4 w-4" />
+                          复制提示词
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent>
+                          {issuePrompts.map((prompt) => (
+                            <DropdownMenuItem
+                              key={prompt.id}
+                              onClick={() => void copyIssuePrompt(prompt.content)}
+                            >
+                              {prompt.name}
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    ) : null}
+                    <DropdownMenuSeparator />
                     {isInternalIssue && (
                       <DropdownMenuItem
                         onClick={() =>
@@ -1848,13 +1908,6 @@ export default function IssueDetailPage() {
                     ) : null}
                     <div className="markdown-body">
                       <GitHubContent html={issue.body_html} markdown={issue.body} />
-                    </div>
-                    <div className="mt-3 flex justify-end">
-                      <CopyIssuePromptButton
-                        projectId={id!}
-                        issueId={issue.id}
-                        reason={recommendation?.reason}
-                      />
                     </div>
                   </>
                 ) : (
@@ -2344,6 +2397,18 @@ export default function IssueDetailPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <LaunchIssueThreadDialog
+        open={launchDialogOpen}
+        onOpenChange={setLaunchDialogOpen}
+        projectId={id!}
+        issue={{
+          id: issue.id,
+          reference: issue.reference,
+          title: issue.title,
+        }}
+        reason={recommendation?.reason}
+      />
     </>
   );
 }

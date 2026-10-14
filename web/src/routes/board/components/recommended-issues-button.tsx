@@ -22,7 +22,6 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import type { CopyIssuePromptButtonHandle } from "@/components/issues/copy-issue-prompt-button";
 import {
   useDeferRecommendation,
   useRecommendations,
@@ -33,7 +32,10 @@ import {
   RecommendationListPane,
   RECOMMENDATION_PRIORITY_GROUPS,
 } from "./recommendation-list-pane";
-import { RecommendationDetailPane } from "./recommendation-detail-pane";
+import {
+  RecommendationDetailPane,
+  type RecommendationDetailPaneHandle,
+} from "./recommendation-detail-pane";
 
 type RecommendationTab = "active" | "deferred";
 
@@ -44,7 +46,7 @@ const DEFER_NOTE_MAX_LENGTH = 500;
  * 看板筛选行的「推荐」按钮与推荐弹框。
  * 推荐中与已延后均为空（含加载中、加载失败）时整体不渲染；徽标只计推荐中条数。
  * 弹框分「推荐中」「已延后」两个 tab，共用左右双栏：左栏分组单行列表，右栏选中项
- * 只读详情，决策闭环不出弹框。↑/↓（等价 j/k）跨组移动选中，Enter 复制提示词，
+ * 只读详情，决策闭环不出弹框。↑/↓（等价 j/k）跨组移动选中，Enter 打开启动弹框，
  * Esc 关闭；右栏滚动交给滚轮/触控板，按键不按焦点区分键义。
  */
 export function RecommendedIssuesButton({
@@ -64,7 +66,7 @@ export function RecommendedIssuesButton({
   // 选中项消失时按上次位置顺延（同位置即下一条，越界即上一条）
   const lastSelectedIndexRef = useRef(0);
   const listPaneRef = useRef<HTMLDivElement | null>(null);
-  const copyHandleRef = useRef<CopyIssuePromptButtonHandle | null>(null);
+  const launchHandleRef = useRef<RecommendationDetailPaneHandle | null>(null);
 
   const { data } = useRecommendations(projectId);
   const deferRecommendation = useDeferRecommendation();
@@ -180,7 +182,7 @@ export function RecommendedIssuesButton({
     [orderedItems],
   );
 
-  // 弹框内全局按键（仿 use-board-multi-select 的 window 监听范式，仅 open 时挂载）。
+  // 弹框内全局按键（window 监听，仅 open 时挂载）。
   // 必须用捕获阶段：base-ui Dialog 在 document 上对 ArrowUp/ArrowDown 调 stopPropagation，
   // 冒泡阶段监听拿不到这两个键。事件源落在菜单/确认框浮层内时放行，按键归浮层
   useEffect(() => {
@@ -204,7 +206,7 @@ export function RecommendedIssuesButton({
         moveSelection(-1);
       } else if (event.key === "Enter") {
         // 焦点在可交互控件上时让位原生激活（dep chip、返回、链接、延后/移除/复制按钮），
-        // 左栏行（[data-issue-id]）除外：行的选中交给方向键/点击，Enter 恒定 = 复制提示词。
+        // 左栏行（[data-issue-id]）除外：行的选中交给方向键/点击，Enter 恒定 = 打开启动弹框。
         // 否则 Dialog 打开时 base-ui 自动聚焦首行会把 Enter 吞成行激活。
         if (
           target instanceof HTMLElement &&
@@ -216,7 +218,7 @@ export function RecommendedIssuesButton({
           return;
         }
         event.preventDefault();
-        copyHandleRef.current?.activate();
+        launchHandleRef.current?.openLaunchDialog();
       }
     };
     window.addEventListener("keydown", handleKeyDown, true);
@@ -286,7 +288,7 @@ export function RecommendedIssuesButton({
           onRestore={() => void handleRestore(selectedItem)}
           restorePending={restoreRecommendation.isPending}
           onRemove={() => setPendingRemove(selectedItem)}
-          copyHandleRef={copyHandleRef}
+          launchHandleRef={launchHandleRef}
           showProject={!projectId}
         />
       ) : (
@@ -325,7 +327,7 @@ export function RecommendedIssuesButton({
               </span>
             </DialogTitle>
             <DialogDescription className="text-xs">
-              按优先级排列，开始开发或关闭后自动移出。↑/↓ 切换，Enter 复制提示词。
+              按优先级排列，开始开发或关闭后自动移出。↑/↓ 切换，Enter 打开启动弹框。
             </DialogDescription>
           </DialogHeader>
           <Tabs
