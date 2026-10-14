@@ -86,13 +86,15 @@ export function ThreadChat({
     (active || activity.stopping) && (
       <Button
         type="button"
-        size="sm"
-        variant="outline"
+        size="icon"
+        variant="destructive"
+        className="rounded-full"
+        aria-label={stopping ? "停止中…" : "停止"}
+        title={stopping ? "停止中…" : "停止"}
         disabled={stopping || stale}
         onClick={() => stop.mutate()}
       >
-        <Square className="mr-1.5 h-3.5 w-3.5" />
-        {stopping ? "停止中…" : "停止"}
+        <Square className="size-3.5 fill-current" />
       </Button>
     );
 

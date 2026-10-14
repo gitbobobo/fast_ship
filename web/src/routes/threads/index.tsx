@@ -42,6 +42,10 @@ import {
 import { cn } from "@/lib/utils";
 
 const ALL = "all";
+const SETTLED_LABELS = {
+  unsettled: "未完结",
+  settled: "已完结",
+} as const;
 const FILTER_TRIGGER =
   "h-8 w-full border-0 bg-muted/50 text-sm hover:bg-muted sm:w-40";
 
@@ -306,6 +310,29 @@ export default function ThreadsPage() {
                       </SelectItem>
                     ),
                   )}
+                </SelectContent>
+              </Select>
+              <Select
+                value={filters.settled || ALL}
+                onValueChange={(value) =>
+                  setFilters({
+                    settled:
+                      value === "settled" || value === "unsettled" ? value : "",
+                  })
+                }
+              >
+                <SelectTrigger
+                  aria-label="筛选完结状态"
+                  className={FILTER_TRIGGER}
+                >
+                  <SelectValue>
+                    {filters.settled ? SETTLED_LABELS[filters.settled] : "全部"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL}>全部</SelectItem>
+                  <SelectItem value="unsettled">未完结</SelectItem>
+                  <SelectItem value="settled">已完结</SelectItem>
                 </SelectContent>
               </Select>
               {hasFilters && (

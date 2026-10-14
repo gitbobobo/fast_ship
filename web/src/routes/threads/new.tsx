@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router";
-import { ArrowLeft, Settings } from "lucide-react";
+import { Settings } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { NewThreadForm } from "@/components/threads/new-thread-form";
 import { Button } from "@/components/ui/button";
@@ -26,13 +26,6 @@ export default function NewThreadPage() {
     <>
       <Header title="新建线程" />
       <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 p-4 md:p-6">
-        <Link
-          to="/threads"
-          className="inline-flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          全部线程
-        </Link>
         {isLoading ? (
           <Skeleton className="h-40 rounded-2xl" />
         ) : !environments ? (

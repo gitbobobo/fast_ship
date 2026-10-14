@@ -1,14 +1,18 @@
+import { useMemo, useRef } from "react";
+import { ArrowLeft } from "lucide-react";
 import { Link, useParams } from "react-router";
-import { ArrowLeft, Cpu, GitBranch, GitPullRequest } from "lucide-react";
 import { Header } from "@/components/layout/header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { ThreadChat } from "@/components/threads/thread-chat";
+import { ThreadInfoCard } from "@/components/threads/thread-info-card";
 import { ThreadItemView } from "@/components/threads/thread-item-view";
 import { ThreadStatusBadge } from "@/components/threads/thread-status-badge";
+import { ThreadToolGroup } from "@/components/threads/thread-tool-group";
 import { ApiRequestError } from "@/lib/api/client";
 import { useThreadDetail } from "@/lib/hooks/use-threads";
-import { formatRelativeTime } from "@/lib/utils/format";
+import { useScrollFollow } from "@/lib/hooks/use-scroll-follow";
+import { groupTimeline } from "@/lib/threads-timeline";
 
 /** 按线程 key 渲染：切线程时输入框、编辑状态、密钥输入等局部状态一并销毁。 */
 export default function ThreadDetailPage() {
@@ -32,9 +36,15 @@ function ThreadDetailView({
   const { data, error, isLoading, isError, isFetching, refetch } = useThreadDetail(environmentId, threadId);
   const canOperate = data?.access === "operate";
   const thread = data?.thread;
-  const model = thread
-    ? [thread.provider, thread.model].filter(Boolean).join(" / ")
-    : "";
+  const items = data?.items;
+  const timeline = useMemo(() => groupTimeline(items ?? []), [items]);
+  const chatAnchor = useRef<HTMLDivElement>(null);
+  const lastItem = items?.[items.length - 1];
+  useScrollFollow(
+    chatAnchor,
+    `${items?.length ?? 0}|${lastItem?.id}|${lastItem?.updated_at ?? ""}|${lastItem?.status ?? ""}|${lastItem?.text.length ?? 0}`,
+    Boolean(data),
+  );
 
   // 首次加载失败的文案按服务端响应区分：404=线程没了，其余带服务端
   // message；凭证失效一类在文案外再给重新配对入口。响应体在请求边界
@@ -48,79 +58,60 @@ function ThreadDetailView({
 
   return (
     <>
-      <Header title={thread?.title || "线程详情"} />
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 p-4 md:p-6">
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-          <Link
-            to="/threads"
-            className="inline-flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="h-4 w-4" />
-            全部线程
-          </Link>
-          {thread?.parent_thread_id && (
-            <Link
-              to={`/threads/${encodeURIComponent(environmentId)}/${encodeURIComponent(thread.parent_thread_id)}`}
-              className="inline-flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              返回父线程
-            </Link>
-          )}
-        </div>
-
-        {isLoading ? (
-          <div className="space-y-3">
-            <Skeleton className="h-6 w-2/3" />
-            <Skeleton className="h-24 rounded-xl" />
-            <Skeleton className="h-24 rounded-xl" />
-          </div>
-        ) : !data || !thread ? (
-          <div className="py-16 text-center text-sm text-muted-foreground">
-            <p>{failureText}</p>
-            <div className="mt-3 flex items-center justify-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => refetch()}>
-                重试
-              </Button>
-              {needsRepair && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  render={<Link to="/settings/environments" />}
+      <Header
+        title={thread?.title || "线程详情"}
+        actions={
+          thread && (
+            <>
+              {/* 宽屏时父线程入口在右侧信息卡；窄屏没有信息卡，这里补一个 */}
+              {thread.parent_thread_id && (
+                <Link
+                  to={`/threads/${encodeURIComponent(environmentId)}/${encodeURIComponent(thread.parent_thread_id)}`}
+                  className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground lg:hidden"
                 >
-                  去重新配对
-                </Button>
+                  <ArrowLeft className="size-4" />
+                  父线程
+                </Link>
               )}
+              <ThreadStatusBadge
+                status={thread.status}
+                runStartedAt={thread.run_started_at}
+              />
+            </>
+          )
+        }
+      />
+      <div className="flex w-full flex-1 gap-6 px-4 md:px-6">
+        <div
+          ref={chatAnchor}
+          className="mx-auto flex w-full max-w-3xl min-w-0 flex-1 flex-col gap-5 py-4 md:py-6"
+        >
+          {isLoading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-6 w-2/3" />
+              <Skeleton className="h-24 rounded-xl" />
+              <Skeleton className="h-24 rounded-xl" />
             </div>
-          </div>
-        ) : (
-          <>
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
-                <ThreadStatusBadge status={thread.status} />
-                <span>
-                  {thread.environment_name} · {thread.project_name}
-                </span>
-                {thread.branch && (
-                  <span className="inline-flex items-center gap-1">
-                    <GitBranch className="h-3.5 w-3.5" />
-                    {thread.branch}
-                  </span>
+          ) : !data || !thread ? (
+            <div className="py-16 text-center text-sm text-muted-foreground">
+              <p>{failureText}</p>
+              <div className="mt-3 flex items-center justify-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => refetch()}>
+                  重试
+                </Button>
+                {needsRepair && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    render={<Link to="/settings/environments" />}
+                  >
+                    去重新配对
+                  </Button>
                 )}
-                {model && (
-                  <span className="inline-flex items-center gap-1">
-                    <Cpu className="h-3.5 w-3.5" />
-                    {model}
-                  </span>
-                )}
-                {thread.pull_request_count > 0 && (
-                  <span className="inline-flex items-center gap-1">
-                    <GitPullRequest className="h-3.5 w-3.5" />
-                    {thread.pull_request_count}
-                  </span>
-                )}
-                <span>{formatRelativeTime(thread.updated_at)}更新</span>
               </div>
+            </div>
+          ) : (
+            <>
               {isError && (
                 <div
                   role="alert"
@@ -152,42 +143,51 @@ function ThreadDetailView({
                   </div>
                 </div>
               )}
-              {thread.status === "running" && !isError && (
-                <p className="text-xs text-muted-foreground">
-                  线程运行中，内容会自动更新。
-                </p>
-              )}
-            </div>
 
-            {data.items.length === 0 ? (
-              <p className="py-12 text-center text-sm text-muted-foreground">
-                这个线程还没有内容
-              </p>
-            ) : (
-              <div className="space-y-4">
-                {data.items.map((item) => (
-                  <ThreadItemView
-                    key={item.id}
-                    item={item}
-                    environmentId={environmentId}
-                    threadId={threadId}
-                    revision={item.updated_at || thread.updated_at}
-                    canOperate={canOperate}
-                    stale={isError}
-                  />
-                ))}
+              {data.items.length === 0 ? (
+                <p className="py-12 text-center text-sm text-muted-foreground">
+                  这个线程还没有内容
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  {timeline.map((entry) =>
+                    entry.kind === "group" ? (
+                      <ThreadToolGroup
+                        key={entry.id}
+                        items={entry.items}
+                        live={thread.status === "running"}
+                        environmentId={environmentId}
+                        threadId={threadId}
+                        fallbackRevision={thread.updated_at}
+                      />
+                    ) : (
+                      <ThreadItemView
+                        key={entry.item.id}
+                        item={entry.item}
+                        environmentId={environmentId}
+                        threadId={threadId}
+                        revision={entry.item.updated_at || thread.updated_at}
+                        canOperate={canOperate}
+                        stale={isError}
+                      />
+                    ),
+                  )}
+                </div>
+              )}
+              <div className="sticky bottom-0 mt-auto -mx-1 bg-background/95 px-1 pt-2 pb-3 backdrop-blur">
+                <ThreadChat
+                  detail={data}
+                  environmentId={environmentId}
+                  threadId={threadId}
+                  canOperate={canOperate}
+                  stale={isError}
+                />
               </div>
-            )}
-            <div className="sticky bottom-0 -mx-1 bg-background/95 px-1 pt-2 pb-3 backdrop-blur">
-              <ThreadChat
-                detail={data}
-                environmentId={environmentId}
-                threadId={threadId}
-                canOperate={canOperate}
-                stale={isError}
-              />
-            </div>
-          </>
+            </>
+          )}
+        </div>
+        {thread && (
+          <ThreadInfoCard thread={thread} environmentId={environmentId} />
         )}
       </div>
     </>

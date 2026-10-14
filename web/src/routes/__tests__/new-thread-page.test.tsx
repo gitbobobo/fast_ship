@@ -102,6 +102,7 @@ function thread(over: Partial<ThreadSummary> = {}): ThreadSummary {
     model: "gpt-5",
     updated_at: "2026-10-01T00:00:00Z",
     pull_request_count: 0,
+    settled: false,
     ...over,
   };
 }
@@ -153,6 +154,7 @@ describe("NewThreadPage", () => {
     await ready();
     expect(api.create).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.queryByRole("link", { name: /全部线程/ })).toBeNull();
   });
 
   it("sends from the current checkout without a branch, then opens the thread", async () => {

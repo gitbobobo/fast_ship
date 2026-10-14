@@ -43,6 +43,8 @@ export interface ThreadFilters {
   /** projectKey 值，空表示全部项目。 */
   project: string;
   status: ThreadStatus | "";
+  /** 完结筛选，与 status 独立叠加；空表示不过滤。 */
+  settled: "" | "settled" | "unsettled";
   query: string;
 }
 
@@ -50,6 +52,7 @@ export const DEFAULT_THREAD_FILTERS: ThreadFilters = {
   environmentIds: [],
   project: "",
   status: "",
+  settled: "",
   query: "",
 };
 
@@ -58,6 +61,7 @@ export function isDefaultThreadFilters(filters: ThreadFilters) {
     filters.environmentIds.length === 0 &&
     !filters.project &&
     !filters.status &&
+    !filters.settled &&
     !filters.query.trim()
   );
 }
@@ -85,6 +89,9 @@ export function filterThreads(
     if (filters.status) {
       if (thread.status !== filters.status) return false;
     } else if (thread.status === "archived") {
+      return false;
+    }
+    if (filters.settled && thread.settled !== (filters.settled === "settled")) {
       return false;
     }
     if (
@@ -137,4 +144,35 @@ export function listProblemEnvironments(environments: Environment[]) {
 
 export function threadDetailPath(thread: ThreadSummary) {
   return `/threads/${encodeURIComponent(thread.environment_id)}/${encodeURIComponent(thread.id)}`;
+}
+
+/** 项目图标徽章取项目名首字符；无名时用 "?"。 */
+export function projectInitial(name: string) {
+  const first = [...name.trim()][0];
+  return first ? first.toUpperCase() : "?";
+}
+
+/** 同名项目恒得同一个色号（0..count-1），用于从调色板里挑徽章底色。 */
+export function projectColorIndex(name: string, count: number) {
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + (ch.codePointAt(0) ?? 0)) >>> 0;
+  return hash % count;
+}
+
+/**
+ * 运行已持续的分钟数；起点缺失、无法解析或在未来（时钟偏差）时返回 undefined，
+ * 调用方据此省略时长。
+ */
+export function runMinutes(startedAt: string | undefined, now: number) {
+  if (!startedAt) return undefined;
+  const started = new Date(startedAt).getTime();
+  if (Number.isNaN(started) || started > now) return undefined;
+  return Math.floor((now - started) / 60_000);
+}
+
+export function formatRunMinutes(minutes: number) {
+  if (minutes < 1) return "不足 1 分钟";
+  if (minutes < 60) return `${minutes} 分钟`;
+  const rest = minutes % 60;
+  return `${Math.floor(minutes / 60)} 小时${rest ? ` ${rest} 分钟` : ""}`;
 }

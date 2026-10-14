@@ -14,9 +14,11 @@ export default function AppLayout() {
     () => !shouldBootstrapUser,
   );
   const isBootstrapping = shouldBootstrapUser && !hasBootstrappedUser;
+  // 线程详情是聊天面：位置由 useScrollFollow 触底盘管，不做跨访问恢复。
+  const isChatSurface = /^\/threads\/[^/]+\/[^/]+/.test(location.pathname);
   const mainRef = usePersistedScroll<HTMLElement>(
     getLocationScrollKey(location.pathname, location.search),
-    { ready: Boolean(token) && !isBootstrapping },
+    { ready: Boolean(token) && !isBootstrapping && !isChatSurface },
   );
 
   useEffect(() => {

@@ -7508,7 +7508,7 @@ components:
 
     T3ThreadSummary:
       type: object
-      required: [id, environment_id, environment_name, project_id, project_name, title, status, branch, provider, model, updated_at, pull_request_count]
+      required: [id, environment_id, environment_name, project_id, project_name, title, status, settled, branch, provider, model, updated_at, pull_request_count]
       properties:
         id:
           type: string
@@ -7545,6 +7545,12 @@ components:
         updated_at:
           type: string
           description: T3 原样返回的 ISO-8601 时间
+        settled:
+          type: boolean
+          description: 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含
+        run_started_at:
+          type: string
+          description: 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省
         pull_request_count:
           type: integer
           description: 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计）

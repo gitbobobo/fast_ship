@@ -1,5 +1,5 @@
 import { useRef, type ClipboardEvent, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
-import { ImagePlus, Send } from "lucide-react";
+import { ArrowUp, ImagePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { ImageUploads } from "@/lib/hooks/use-image-uploads";
@@ -14,7 +14,7 @@ export function ThreadComposer({
   text,
   onTextChange,
   uploads,
-  placeholder = "输入消息…",
+  placeholder = "发消息给线程…",
   submitLabel,
   submitting = false,
   blocked = false,
@@ -76,7 +76,7 @@ export function ThreadComposer({
     <form
       onSubmit={submit}
       aria-label="消息输入"
-      className="flex flex-col gap-2 rounded-2xl border bg-card p-3 shadow-xs"
+      className="flex flex-col gap-1.5 rounded-3xl border bg-card px-3.5 pt-3 pb-2.5 shadow-xs"
     >
       {banner}
       <ImageStrip
@@ -93,7 +93,7 @@ export function ThreadComposer({
         placeholder={placeholder}
         disabled={locked}
         aria-label="消息内容"
-        className="max-h-60 min-h-20 resize-none border-0 bg-transparent px-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
+        className="max-h-60 min-h-12 resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0 dark:bg-transparent"
       />
       {error && (
         <p role="alert" className="text-xs text-destructive">
@@ -117,6 +117,7 @@ export function ThreadComposer({
           type="button"
           variant="ghost"
           size="icon-sm"
+          className="rounded-full text-muted-foreground"
           aria-label="添加图片"
           disabled={locked}
           onClick={() => fileInput.current?.click()}
@@ -128,9 +129,15 @@ export function ThreadComposer({
         </div>
         <div className="ml-auto flex items-center gap-2">
           {actions}
-          <Button type="submit" size="sm" disabled={!canSubmit}>
-            <Send className="mr-1.5 h-3.5 w-3.5" />
-            {submitLabel}
+          <Button
+            type="submit"
+            size="icon"
+            className="rounded-full"
+            aria-label={submitLabel}
+            title={submitLabel}
+            disabled={!canSubmit}
+          >
+            <ArrowUp className="size-4" />
           </Button>
         </div>
       </div>
