@@ -43,8 +43,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
-import { SettingsPageShell } from "@/routes/settings/layout";
 import { formatDate } from "@/lib/utils/format";
 import { ApiRequestError } from "@/lib/api/client";
 import { environmentApi, threadApi } from "@/lib/api/threads";
@@ -172,27 +172,25 @@ export default function AutomationsPage() {
   };
 
   return (
-    <SettingsPageShell
-      wide
-      actions={
-        <HeaderActions
-          primary={
-            <Button size="sm" onClick={openCreate}>
-              <Plus className="mr-1.5 h-3.5 w-3.5" />
-              新建自动化
-            </Button>
-          }
-        />
-      }
-    >
-      <div className="space-y-6">
-        <div>
-          <h2 className="text-lg font-medium">自动化</h2>
-          <p className="text-sm text-muted-foreground">
-            按 cron 或内部 Issue 事件自动在 T3 环境开线程执行提示词，
-            运行结束后可自动 settle / archive 线程并发送站内通知。
-          </p>
-        </div>
+    <div className="flex flex-col">
+      <Header
+        title="自动化"
+        actions={
+          <HeaderActions
+            primary={
+              <Button size="sm" onClick={openCreate}>
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                新建自动化
+              </Button>
+            }
+          />
+        }
+      />
+      <div className="mx-auto w-full max-w-5xl space-y-6 p-4 md:p-6">
+        <p className="text-sm text-muted-foreground">
+          按 cron 或内部 Issue 事件自动在 T3 环境开线程执行提示词，
+          运行结束后可自动 settle / archive 线程并发送站内通知。
+        </p>
 
         <AutomationEditorDialog
           open={editorOpen}
@@ -319,7 +317,7 @@ export default function AutomationsPage() {
         automation={runsFor}
         onClose={() => setRunsFor(null)}
       />
-    </SettingsPageShell>
+    </div>
   );
 }
 

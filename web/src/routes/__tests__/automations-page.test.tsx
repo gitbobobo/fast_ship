@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
-import AutomationsPage from "@/routes/settings/automations";
+import AutomationsPage from "@/routes/automations";
 import { renderWithRoute } from "@/test/render";
 import {
   useAutomationRuns,
@@ -14,6 +14,14 @@ import {
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
+}));
+
+vi.mock("@/lib/hooks/use-notifications", () => ({
+  NOTIFICATION_UNREAD_POLL_MS: 30000,
+  useNotifications: vi.fn(() => ({ data: [] })),
+  useUnreadNotificationCount: vi.fn(() => ({ data: 0 })),
+  useMarkNotificationRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+  useMarkAllNotificationsRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
 }));
 
 vi.mock("@/lib/hooks/use-automations", () => ({
@@ -116,8 +124,8 @@ describe("AutomationsPage", () => {
     } as unknown as ReturnType<typeof useAutomations>);
 
     renderWithRoute(<AutomationsPage />, {
-      path: "/settings/automations",
-      initialEntry: "/settings/automations",
+      path: "/automations",
+      initialEntry: "/automations",
     });
 
     expect(screen.getByRole("heading", { name: "自动化" })).toBeInTheDocument();
@@ -129,8 +137,8 @@ describe("AutomationsPage", () => {
 
   it("lists automations with trigger summary and post action", () => {
     renderWithRoute(<AutomationsPage />, {
-      path: "/settings/automations",
-      initialEntry: "/settings/automations",
+      path: "/automations",
+      initialEntry: "/automations",
     });
 
     expect(screen.getByText("每日令牌回报")).toBeInTheDocument();
@@ -149,8 +157,8 @@ describe("AutomationsPage", () => {
     const user = userEvent.setup();
 
     renderWithRoute(<AutomationsPage />, {
-      path: "/settings/automations",
-      initialEntry: "/settings/automations",
+      path: "/automations",
+      initialEntry: "/automations",
     });
 
     await user.click(screen.getByRole("button", { name: "启用" }));
@@ -168,8 +176,8 @@ describe("AutomationsPage", () => {
     const user = userEvent.setup();
 
     renderWithRoute(<AutomationsPage />, {
-      path: "/settings/automations",
-      initialEntry: "/settings/automations",
+      path: "/automations",
+      initialEntry: "/automations",
     });
 
     await user.click(screen.getByRole("button", { name: "新建自动化" }));
@@ -205,8 +213,8 @@ describe("AutomationsPage", () => {
     const user = userEvent.setup();
 
     renderWithRoute(<AutomationsPage />, {
-      path: "/settings/automations",
-      initialEntry: "/settings/automations",
+      path: "/automations",
+      initialEntry: "/automations",
     });
 
     await user.click(
@@ -219,8 +227,8 @@ describe("AutomationsPage", () => {
 
   it("delete button is reachable per row", () => {
     renderWithRoute(<AutomationsPage />, {
-      path: "/settings/automations",
-      initialEntry: "/settings/automations",
+      path: "/automations",
+      initialEntry: "/automations",
     });
 
     expect(

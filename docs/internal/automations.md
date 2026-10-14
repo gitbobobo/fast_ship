@@ -7,6 +7,9 @@ Agent 用一次性运行令牌回报开始/结束，结束后可选自动 settle
 不做内置规则、不做规则树/表达式过滤、不绑定具体 issue、不改 INT-85 客户端语义。
 GitHub PR/推送/CI 事件不在本期。单进程部署假设（无分布式队列）。
 
+界面：自动化在侧边栏一级入口 `/automations`（旧 `/settings/automations` 重定向过来）；
+站内通知在侧边栏 `/notifications`，未读数同时出现在该入口和顶栏铃铛。
+
 ## 数据模型
 
 四张表（`server/internal/model/automation.go`，ID=UUID，时间一律 UTC）：
