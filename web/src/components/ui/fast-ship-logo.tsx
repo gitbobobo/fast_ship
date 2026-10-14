@@ -1,0 +1,27 @@
+import { cn } from "@/lib/utils";
+
+export function FastShipLogo({
+  className,
+  ...props
+}: React.SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 512 512"
+      role="img"
+      aria-label="Fast Ship"
+      className={cn("h-5 w-5", className)}
+      {...props}
+    >
+      <rect width="512" height="512" rx="115" fill="#18181b" />
+      <g transform="rotate(45 256 256)">
+        <path d="M220 330 L240 330 L236 440 Z" fill="#8B5CF6" />
+        <path d="M246 330 L266 330 L256 470 Z" fill="#A855F7" />
+        <path d="M272 330 L292 330 L276 440 Z" fill="#8B5CF6" />
+        <path d="M216 250 L176 320 L176 344 L220 318 Z" fill="#fafafa" />
+        <path d="M296 250 L336 320 L336 344 L292 318 Z" fill="#fafafa" />
+        <path d="M256 70 C300 112 304 180 300 330 L212 330 C208 180 212 112 256 70 Z" fill="#fafafa" />
+        <circle cx="256" cy="200" r="20" fill="#18181b" />
+      </g>
+    </svg>
+  );
+}
