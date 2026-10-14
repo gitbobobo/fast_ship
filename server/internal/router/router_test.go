@@ -838,6 +838,10 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.ScreenshotVersion{},
 		&model.ScreenshotAnnotation{},
 		&model.T3Environment{},
+		&model.Automation{},
+		&model.AutomationRun{},
+		&model.AutomationRunToken{},
+		&model.Notification{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -853,6 +857,9 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once ON automation_runs(automation_id) WHERE finished_at IS NULL OR post_state = 'pending'")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{},
@@ -923,6 +930,10 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
 	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zap.NewNop())
 	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zap.NewNop())
+	notificationSink := service.NewNotificationSink(db)
+	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
+	automationService := service.NewAutomationService(db, repository.NewAutomationRepository(db), repository.NewAutomationRunRepository(db), t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zap.NewNop())
+	automationAgentService := service.NewAutomationAgentService(db, repository.NewAutomationRunRepository(db), repository.NewAutomationRunTokenRepository(db), t3ThreadsService, notificationSink, zap.NewNop())
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
 	aiHandler := handler.NewAIHandler(aiService)
@@ -943,9 +954,12 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	screenshotAnnotationHandler := handler.NewScreenshotAnnotationHandler(screenshotAnnotationService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
+	automationHandler := handler.NewAutomationHandler(automationService)
+	notificationHandler := handler.NewNotificationHandler(notificationService)
+	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,

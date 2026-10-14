@@ -93,6 +93,16 @@ function renderWithProviders(ui: React.ReactElement, { initialEntry = "/" } = {}
   );
 }
 
+// Header 现在渲染通知铃（INT-90）：直接渲染 Header 的用例 mock 其数据钩子，
+// 与本文件 mock use-api-keys 等其它钩子的口径一致。
+vi.mock("@/lib/hooks/use-notifications", () => ({
+  NOTIFICATION_UNREAD_POLL_MS: 30000,
+  useNotifications: vi.fn(() => ({ data: [] })),
+  useUnreadNotificationCount: vi.fn(() => ({ data: 0 })),
+  useMarkNotificationRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+  useMarkAllNotificationsRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+}));
+
 describe("UI Integration Tests", () => {
   beforeEach(() => {
     vi.mocked(useAuthStore).mockReturnValue({

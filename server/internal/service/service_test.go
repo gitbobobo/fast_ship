@@ -99,6 +99,11 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.ScreenshotScreen{},
 		&model.ScreenshotVersion{},
 		&model.ScreenshotAnnotation{},
+		&model.T3Environment{},
+		&model.Automation{},
+		&model.AutomationRun{},
+		&model.AutomationRunToken{},
+		&model.Notification{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}

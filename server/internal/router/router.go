@@ -32,6 +32,9 @@ func Setup(
 	screenshotAnnotationHandler *handler.ScreenshotAnnotationHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	t3EnvironmentHandler *handler.T3EnvironmentHandler,
+	automationHandler *handler.AutomationHandler,
+	notificationHandler *handler.NotificationHandler,
+	automationAgentHandler *handler.AutomationAgentHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -260,6 +263,38 @@ func Setup(
 			t3.DELETE("/environments/:id/attachments/:attachmentId", t3EnvironmentHandler.DeleteAttachment)
 		}
 	}
+
+	// JWT 必须 — 自动化配置与运行记录（INT-90）
+	automations := api.Group("/automations", middleware.RequireJWT(cfg, authService))
+	{
+		automations.GET("", automationHandler.List)
+		automations.POST("", automationHandler.Create)
+		automations.GET("/:id", automationHandler.Get)
+		automations.PUT("/:id", automationHandler.Update)
+		automations.DELETE("/:id", automationHandler.Delete)
+		automations.GET("/:id/runs", automationHandler.ListRuns)
+	}
+	api.GET("/automation-runs/:id", middleware.RequireJWT(cfg, authService), automationHandler.GetRun)
+
+	// JWT 必须 — 站内通知（read-all 为静态段，优先于 :id 匹配）
+	api.GET("/notifications", middleware.RequireJWT(cfg, authService), notificationHandler.List)
+	api.GET("/notifications/unread-count", middleware.RequireJWT(cfg, authService), notificationHandler.UnreadCount)
+	api.POST("/notifications/read-all", middleware.RequireJWT(cfg, authService), notificationHandler.MarkAllRead)
+	api.POST("/notifications/:id/read", middleware.RequireJWT(cfg, authService), notificationHandler.MarkRead)
+
+	// 仅运行令牌 — 自动化 Agent 回报与读取（INT-90）。
+	// report 允许结束后重放完全相同的结束回报（requireLive=false）；
+	// 其余端点令牌消费即失效（requireLive=true）。API Key 一律 40304。
+	api.POST("/automation-agent/report",
+		middleware.RequireRunToken(automationAgentHandler.Agent(), false), automationAgentHandler.Report)
+	api.GET("/automation-agent/threads",
+		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.ListThreads)
+	api.GET("/automation-agent/environments/:id/threads/:threadId",
+		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.GetThread)
+	api.GET("/automation-agent/environments/:id/threads/:threadId/items/:itemId",
+		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.GetThreadItem)
+	api.POST("/automation-agent/notifications",
+		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.PublishNotification)
 
 	setupWebRoutes(r, cfg.Server.WebDistDir)
 }

@@ -6,6 +6,12 @@ Fast Ship 以 T3 客户端身份接入 T3 Code 环境：配对一个 T3 服务�
 线程状态机；每次 API 调用实时转发上游（REST 表达用户操作，适配器转成 T3 一次性
 WS RPC）。
 
+边界补充（INT-90 之后仍成立）：本文描述的客户端语义没有队列镜像、没有第二套
+线程状态机。INT-90 的「自动化」是**用户配置的触发调度与运行账本**（cron /
+Issue 事件 → 开线程 → 令牌回报 → settle/archive 后置），不是线程系统的一部分：
+它只在触发与收尾两个时刻调用本文的 launch/settle/archive 适配器，运行态始终以
+T3 为准。详见 `docs/internal/automations.md`。
+
 架构边界（INT-85 共识）：**复杂性留在适配器**。REST 外层 snake_case，T3 的
 camelCase 留在适配器内；不暴露通用 /rpc 或任意 dispatchCommand 转发端点，
 只暴露下文定案的 REST 表面。已否决的方向：Plan、流式、Issue 开线程、

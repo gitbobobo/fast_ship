@@ -11,6 +11,7 @@ import {
   Sparkles,
   Copy,
   Server,
+  Workflow,
 } from "lucide-react";
 
 const settingsNavItems = [
@@ -22,6 +23,7 @@ const settingsNavItems = [
   { to: "/settings/github-tokens", label: "GitHub Tokens", icon: KeySquare },
   { to: "/settings/api-keys", label: "API Keys", icon: Key },
   { to: "/settings/environments", label: "环境", icon: Server },
+  { to: "/settings/automations", label: "自动化", icon: Workflow },
 ];
 
 function SettingsSidebar() {

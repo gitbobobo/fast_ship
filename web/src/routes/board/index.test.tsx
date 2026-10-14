@@ -119,6 +119,15 @@ async function renderBoardPage() {
   );
 }
 
+// Header 渲染通知铃（INT-90）：本文件不关心通知数据，mock 其钩子。
+vi.mock("@/lib/hooks/use-notifications", () => ({
+  NOTIFICATION_UNREAD_POLL_MS: 30000,
+  useNotifications: vi.fn(() => ({ data: [] })),
+  useUnreadNotificationCount: vi.fn(() => ({ data: 0 })),
+  useMarkNotificationRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+  useMarkAllNotificationsRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+}));
+
 describe("BoardPage select preview", () => {
   beforeEach(() => {
     vi.stubGlobal(
