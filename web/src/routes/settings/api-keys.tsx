@@ -90,6 +90,7 @@ export default function ApiKeysPage() {
 
   return (
     <SettingsPageShell
+      wide
       actions={
         <HeaderActions
           primary={

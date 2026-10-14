@@ -80,9 +80,7 @@ function SettingsBody({ children }: { children: ReactNode }) {
       <SettingsSidebar />
       <div className="flex flex-1 flex-col overflow-hidden">
         <SettingsMobileNav />
-        <div className="flex-1 overflow-y-auto p-4 md:p-6">
-          <div className="max-w-2xl">{children}</div>
-        </div>
+        <div className="flex-1 overflow-y-auto p-4 md:p-6">{children}</div>
       </div>
     </div>
   );
@@ -92,20 +90,26 @@ const SettingsActionsSlotContext = createContext<HTMLElement | null | undefined>
   undefined,
 );
 
+// wide 给表格类页面用：内容上限放宽到 max-w-5xl；默认 max-w-2xl 适合表单页。
 export function SettingsPageShell({
   actions,
+  wide = false,
   children,
 }: {
   actions?: ReactNode;
+  wide?: boolean;
   children: ReactNode;
 }) {
   const slot = useContext(SettingsActionsSlotContext);
+  const content = (
+    <div className={wide ? "max-w-5xl" : "max-w-2xl"}>{children}</div>
+  );
 
   if (slot !== undefined) {
     return (
       <>
         {slot && actions ? createPortal(actions, slot) : null}
-        {children}
+        {content}
       </>
     );
   }
@@ -113,7 +117,7 @@ export function SettingsPageShell({
   return (
     <>
       <Header title="设置" actions={actions} />
-      <SettingsBody>{children}</SettingsBody>
+      <SettingsBody>{content}</SettingsBody>
     </>
   );
 }

@@ -262,6 +262,7 @@ export default function GithubTokensPage() {
 
   return (
     <SettingsPageShell
+      wide
       actions={
         <HeaderActions
           primary={
@@ -322,14 +323,16 @@ export default function GithubTokensPage() {
               <TableBody>
                 {tokens.map((token) => (
                   <TableRow key={token.id}>
-                    <TableCell className="font-medium">{token.title}</TableCell>
+                    <TableCell className="font-medium whitespace-normal break-words">
+                      {token.title}
+                    </TableCell>
                     <TableCell className="font-mono text-sm">
                       {token.token_prefix}••••••••
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="whitespace-normal">
                       <DetectionCell token={token} />
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="whitespace-normal break-words">
                       {token.referenced_projects.length === 0 ? (
                         <span className="text-xs text-muted-foreground">未被引用</span>
                       ) : (
