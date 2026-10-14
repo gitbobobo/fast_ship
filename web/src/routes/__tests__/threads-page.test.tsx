@@ -29,6 +29,7 @@ function thread(i: number, over: Partial<ThreadSummary> = {}): ThreadSummary {
     model: "gpt-5",
     updated_at: new Date(Date.UTC(2026, 9, 1, 0, i)).toISOString(),
     pull_request_count: 0,
+    settled: false,
     ...over,
   };
 }
@@ -87,12 +88,55 @@ describe("ThreadsPage", () => {
     expect(cardTitles()).toEqual(["Needs approval", "Thread 4", "Thread 1"]);
     const first = screen.getAllByTestId("thread-card")[0];
     expect(first).toHaveAttribute("href", "/threads/e1/t2");
-    expect(within(first).getByText("等待输入或审批")).toBeInTheDocument();
-    expect(within(first).getByText("Mac · Alpha")).toBeInTheDocument();
+    expect(within(first).getByText("等待")).toBeInTheDocument();
+    expect(within(first).getByText("Alpha")).toBeInTheDocument();
     expect(within(first).getByText("feature/x")).toBeInTheDocument();
-    expect(within(first).getByText("codex / gpt-5")).toBeInTheDocument();
+    expect(within(first).getByText("gpt-5")).toBeInTheDocument();
+    expect(first.querySelector("[data-provider-icon='codex']")).not.toBeNull();
     expect(within(first).getByLabelText("2 个 PR")).toBeInTheDocument();
     expect(screen.getByText("运行中")).toBeInTheDocument();
+  });
+
+  it("shows the run time on running cards when the start is known", () => {
+    mockThreads([
+      thread(1, {
+        status: "running",
+        run_started_at: new Date(Date.now() - 42 * 60_000 - 5_000).toISOString(),
+      }),
+      thread(2, { status: "running" }),
+    ]);
+    renderPage();
+    expect(screen.getByText("运行中 · 42 分钟")).toBeInTheDocument();
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+  });
+
+  it("dims settled cards and filters them by completion", async () => {
+    const user = userEvent.setup();
+    mockThreads([
+      thread(1, { title: "Open work" }),
+      thread(2, { title: "Done work", settled: true }),
+      thread(3, { title: "Done archived", settled: true, status: "archived" }),
+    ]);
+    renderPage();
+    expect(cardTitles()).toEqual(["已完结，Done work", "Open work"]);
+    const settledCard = screen.getAllByTestId("thread-card")[0];
+    expect(settledCard).toHaveAttribute("data-settled", "true");
+    expect(screen.getAllByTestId("thread-card")[1]).not.toHaveAttribute("data-settled");
+
+    await user.click(screen.getByRole("combobox", { name: "筛选完结状态" }));
+    await user.click(await screen.findByRole("option", { name: "未完结" }));
+    expect(cardTitles()).toEqual(["Open work"]);
+
+    await user.click(screen.getByRole("combobox", { name: "筛选完结状态" }));
+    await user.click(await screen.findByRole("option", { name: "已完结" }));
+    expect(cardTitles()).toEqual(["已完结，Done work"]);
+
+    await user.click(screen.getByRole("combobox", { name: "筛选状态" }));
+    await user.click(await screen.findByRole("option", { name: "已归档" }));
+    expect(cardTitles()).toEqual(["已完结，Done archived"]);
+
+    await user.click(screen.getByRole("button", { name: "清除筛选" }));
+    expect(cardTitles()).toEqual(["已完结，Done work", "Open work"]);
   });
 
   it("filters by title, project, status and environment, and clears", async () => {

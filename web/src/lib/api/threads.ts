@@ -32,6 +32,10 @@ export interface ThreadSummary {
   model: string;
   updated_at: string;
   pull_request_count: number;
+  /** 用户在 T3 把线程收进了历史区（与 status/archived 互不蕴含）。 */
+  settled: boolean;
+  /** 本次运行的开始时间（上游 latestRunStartedAt），运行计时起点。 */
+  run_started_at?: string;
   /** 仅详情且为子代理线程时给出：父线程 ID，用于「返回父线程」导航。 */
   parent_thread_id?: string;
 }

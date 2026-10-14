@@ -62,6 +62,7 @@ function detailOf(
         model: "gpt-5",
         updated_at: updatedAt,
         pull_request_count: 1,
+        settled: false,
         ...(parentThreadId ? { parent_thread_id: parentThreadId } : {}),
       },
       items,
@@ -83,6 +84,13 @@ function item(over: Partial<ThreadItem> & Pick<ThreadItem, "id" | "type">): Thre
 
 let client: QueryClient;
 
+/** 工具条目先折进分组行，读条目正文前要先展开分组。 */
+function expandGroup(user: ReturnType<typeof userEvent.setup>, index = 0) {
+  return user.click(
+    within(screen.getAllByTestId("thread-tool-group")[index]).getAllByRole("button")[0],
+  );
+}
+
 async function renderPage() {
   const view = render(
     <QueryClientProvider client={client}>
@@ -93,7 +101,7 @@ async function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  await screen.findByText("Mac · Alpha");
+  await screen.findByTestId("thread-info-card");
   return view;
 }
 
@@ -143,6 +151,13 @@ describe("ThreadDetailPage", () => {
     ]);
     await renderPage();
 
+    expect(screen.getAllByTestId("thread-tool-group")).toHaveLength(1);
+    expect(
+      screen.getByText("思考 1 段、运行 1 条命令、修改 1 个文件、使用 1 个工具"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("想一想")).toBeNull();
+    await expandGroup(user);
+
     for (const text of ["SECRET-REASONING", "OUT-LINE", "a.ts", "TOOL-OUT"]) {
       expect(screen.queryByText(text, { exact: false })).toBeNull();
     }
@@ -164,6 +179,7 @@ describe("ThreadDetailPage", () => {
     await renderPage();
 
     expect(screen.queryByRole("link", { name: "查看子线程" })).toBeNull();
+    await expandGroup(user);
     await user.click(screen.getByText("Explorer"));
     expect(screen.getByRole("link", { name: "查看子线程" })).toHaveAttribute(
       "href",
@@ -192,7 +208,6 @@ describe("ThreadDetailPage", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("form")).toBeNull();
     expect(screen.queryByRole("button", { name: "停止" })).toBeNull();
-    expect(screen.getByText("线程运行中，内容会自动更新。")).toBeInTheDocument();
     expect(screen.getByText("排队中")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "编辑" })).toBeNull();
   });
@@ -1202,6 +1217,7 @@ describe("ThreadDetailPage", () => {
       await renderPage();
       expect(itemDetail).not.toHaveBeenCalled();
 
+      await expandGroup(user);
       await user.click(screen.getByText("pnpm test"));
       expect(await screen.findByText(/FULL-OUTPUT-TAIL/)).toBeInTheDocument();
       expect(itemDetail).toHaveBeenCalledWith("e1", "t1", "src:c1", expect.any(AbortSignal));
@@ -1214,6 +1230,7 @@ describe("ThreadDetailPage", () => {
       itemDetail.mockReturnValueOnce(new Promise((_, r) => (reject = r)));
       await renderPage();
 
+      await expandGroup(user);
       await user.click(screen.getByText("pnpm test"));
       expect(screen.getByRole("status")).toHaveTextContent("加载中");
 
@@ -1233,6 +1250,7 @@ describe("ThreadDetailPage", () => {
       itemDetail.mockResolvedValue({ data: { ...running, text: "OUT-v1" } });
       await renderPage();
 
+      await expandGroup(user);
       await user.click(screen.getByText("pnpm test"));
       expect(await screen.findByText("OUT-v1")).toBeInTheDocument();
 
@@ -1250,6 +1268,7 @@ describe("ThreadDetailPage", () => {
       itemDetail.mockResolvedValueOnce({ data: { ...running, text: "OUT-v1" } });
       await renderPage();
 
+      await expandGroup(user);
       await user.click(screen.getByText("pnpm test"));
       expect(await screen.findByText("OUT-v1")).toBeInTheDocument();
 
@@ -1268,6 +1287,7 @@ describe("ThreadDetailPage", () => {
       itemDetail.mockResolvedValueOnce({ data: { ...running, text: "OUT-v1" } });
       await renderPage();
 
+      await expandGroup(user);
       await user.click(screen.getByText("pnpm test"));
       expect(await screen.findByText("OUT-v1")).toBeInTheDocument();
 
@@ -1351,20 +1371,53 @@ describe("ThreadDetailPage", () => {
       within(banner).getByRole("link", { name: "去重新配对" }),
     ).toHaveAttribute("href", "/settings/environments");
     expect(screen.getByText("still here")).toBeInTheDocument();
-    expect(screen.queryByText("线程运行中，内容会自动更新。")).not.toBeInTheDocument();
+  });
+
+  it("keeps the chat pure: facts live in the info card and status in the header", async () => {
+    detail.mockResolvedValue(
+      detailOf([item({ id: "1", type: "assistant_message", text: "hello" })], "waiting"),
+    );
+    await renderPage();
+
+    const card = screen.getByTestId("thread-info-card");
+    for (const text of ["Mac", "Alpha", "main", "codex / gpt-5", "1 个 PR"]) {
+      expect(within(card).getByText(text)).toBeInTheDocument();
+    }
+    expect(within(card).queryByRole("link", { name: /返回父线程/ })).toBeNull();
+    expect(screen.getByText("等待")).toBeInTheDocument();
+    expect(screen.queryByText("线程运行中，内容会自动更新。")).toBeNull();
+    expect(screen.queryByRole("link", { name: /全部线程/ })).toBeNull();
+  });
+
+  it("describes a running tool group in the progressive form", async () => {
+    detail.mockResolvedValue(
+      detailOf(
+        [
+          item({ id: "c1", type: "command_execution", summary: "ls", status: "completed" }),
+          item({ id: "c2", type: "command_execution", summary: "git status", status: "running" }),
+        ],
+        "running",
+      ),
+    );
+    await renderPage();
+    expect(within(screen.getByTestId("thread-tool-group")).getByText("正在运行 git")).toBeInTheDocument();
   });
 
   it("links a subagent thread back to its parent", async () => {
     detail.mockResolvedValue(detailOf([], "idle", undefined, "parent-9"));
     await renderPage();
 
-    expect(screen.getByRole("link", { name: /返回父线程/ })).toHaveAttribute(
+    expect(
+      within(screen.getByTestId("thread-info-card")).getByRole("link", { name: /返回父线程/ }),
+    ).toHaveAttribute(
       "href",
       "/threads/e1/parent-9",
     );
-    expect(screen.getByRole("link", { name: /全部线程/ })).toHaveAttribute(
+    // 信息卡在窄屏隐藏，父线程入口在 header 里补一份
+    expect(screen.getByRole("link", { name: "父线程" })).toHaveAttribute(
       "href",
-      "/threads",
+      "/threads/e1/parent-9",
     );
+    expect(screen.queryByRole("link", { name: /全部线程/ })).toBeNull();
   });
 });

@@ -940,10 +940,15 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 			"snapshotSequence": 4,
 			"projects":         []any{map[string]any{"id": "p-1", "title": "Fast Ship 主仓库"}},
 			"threads": []any{
-				shellThread("th-1", "实现只读线程", "running", nil),
+				shellThread("th-1", "实现只读线程", "running", map[string]any{
+					"latestRunStartedAt": "2026-10-12T02:42:00.000Z",
+				}),
 				// 等待审批 + 已排队新 run：pending 优先于 run 状态 → waiting（GPT10）
 				shellThread("th-2", "等待审批", "queued", map[string]any{
 					"pendingRuntimeRequest": map[string]any{"id": "rr-1", "kind": "approval", "createdAt": "2026-10-12T04:00:00.000Z"},
+					// 用户在 T3 收进历史区：与运行态正交透传
+					"settledOverride": "settled",
+					"settledAt":       "2026-10-12T05:00:00.000Z",
 				}),
 				shellThread("th-3", "后台活跃", "completed", map[string]any{
 					"activityRunStatus": "running", // shell.status 已完成但后台 run 未停 → running（Grok8）
@@ -1003,8 +1008,17 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 	if th1.EnvironmentId != healthy.Id || th1.EnvironmentName != "健康" {
 		t.Fatalf("th-1 env fields = %+v", th1)
 	}
+	if got := api.Deref(th1.RunStartedAt); got != "2026-10-12T02:42:00.000Z" {
+		t.Fatalf("th-1 run_started_at passthrough, got %q", got)
+	}
+	if th1.Settled {
+		t.Fatalf("th-1 must not be settled")
+	}
 	if byID["th-2"].Status != "waiting" {
 		t.Fatalf("th-2 should be waiting (pendingRuntimeRequest wins over queued run), got %+v", byID["th-2"])
+	}
+	if !byID["th-2"].Settled {
+		t.Fatalf("th-2 should be settled (settledOverride=settled)")
 	}
 	if byID["th-3"].Status != "running" {
 		t.Fatalf("th-3 should be running (activityRunStatus), got %+v", byID["th-3"])

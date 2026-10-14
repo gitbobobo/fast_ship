@@ -3,8 +3,12 @@ import type { ThreadSummary } from "@/lib/api/threads";
 import {
   DEFAULT_THREAD_FILTERS,
   filterThreads,
+  formatRunMinutes,
   isDefaultThreadFilters,
   listProjects,
+  projectColorIndex,
+  projectInitial,
+  runMinutes,
   sortThreads,
 } from "@/lib/threads";
 
@@ -22,6 +26,7 @@ function thread(over: Partial<ThreadSummary>): ThreadSummary {
     model: "gpt",
     updated_at: "2026-10-01T10:00:00Z",
     pull_request_count: 0,
+    settled: false,
     ...over,
   };
 }
@@ -80,6 +85,23 @@ describe("filterThreads", () => {
       filterThreads(threads, { ...DEFAULT_THREAD_FILTERS, query: " login " }).map((t) => t.id),
     ).toEqual(["1"]);
   });
+
+  it("filters by settled independently of status and keeps archived hidden by default", () => {
+    const list = [
+      thread({ id: "a", settled: true }),
+      thread({ id: "b", status: "running" }),
+      thread({ id: "c", status: "archived", settled: true }),
+      thread({ id: "d", status: "archived" }),
+    ];
+    const ids = (f: Partial<typeof DEFAULT_THREAD_FILTERS>) =>
+      filterThreads(list, { ...DEFAULT_THREAD_FILTERS, ...f }).map((t) => t.id);
+    expect(ids({ settled: "settled" })).toEqual(["a"]);
+    expect(ids({ settled: "unsettled" })).toEqual(["b"]);
+    expect(ids({ settled: "settled", status: "archived" })).toEqual(["c"]);
+    expect(ids({ settled: "unsettled", status: "archived" })).toEqual(["d"]);
+    expect(ids({ settled: "unsettled", status: "running" })).toEqual(["b"]);
+    expect(ids({ settled: "settled", status: "running" })).toEqual([]);
+  });
 });
 
 describe("helpers", () => {
@@ -111,5 +133,30 @@ describe("helpers", () => {
   it("detects default filters", () => {
     expect(isDefaultThreadFilters(DEFAULT_THREAD_FILTERS)).toBe(true);
     expect(isDefaultThreadFilters({ ...DEFAULT_THREAD_FILTERS, query: "x" })).toBe(false);
+    expect(isDefaultThreadFilters({ ...DEFAULT_THREAD_FILTERS, settled: "settled" })).toBe(false);
+  });
+
+  it("computes run minutes and tolerates missing, invalid or future starts", () => {
+    const now = Date.parse("2026-10-14T10:00:00Z");
+    expect(runMinutes("2026-10-14T09:18:30Z", now)).toBe(41);
+    expect(runMinutes("2026-10-14T09:59:59Z", now)).toBe(0);
+    expect(runMinutes(undefined, now)).toBeUndefined();
+    expect(runMinutes("not a date", now)).toBeUndefined();
+    expect(runMinutes("2026-10-14T10:05:00Z", now)).toBeUndefined();
+  });
+
+  it("formats run minutes", () => {
+    expect(formatRunMinutes(0)).toBe("不足 1 分钟");
+    expect(formatRunMinutes(42)).toBe("42 分钟");
+    expect(formatRunMinutes(60)).toBe("1 小时");
+    expect(formatRunMinutes(125)).toBe("2 小时 5 分钟");
+  });
+
+  it("derives a stable project badge", () => {
+    expect(projectInitial(" alpha")).toBe("A");
+    expect(projectInitial("项目")).toBe("项");
+    expect(projectInitial("")).toBe("?");
+    expect(projectColorIndex("Alpha", 8)).toBe(projectColorIndex("Alpha", 8));
+    expect(projectColorIndex("Alpha", 8)).toBeLessThan(8);
   });
 });

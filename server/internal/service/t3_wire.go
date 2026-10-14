@@ -90,7 +90,9 @@ type t3ThreadShell struct {
 	LinkedPullReq          *json.RawMessage          `json:"linkedPullRequest"`
 	BranchPullReq          *json.RawMessage          `json:"branchPullRequest"`
 	ArchivedAt             *string                   `json:"archivedAt"`
+	SettledOverride        *string                   `json:"settledOverride"`
 	LatestRunID            *string                   `json:"latestRunId"`
+	LatestRunStartedAt     *string                   `json:"latestRunStartedAt"`
 	ActiveRunID            *string                   `json:"activeRunId"`
 	UpdatedAt              string                    `json:"updatedAt"`
 }
@@ -304,13 +306,17 @@ func normalizeT3ThreadShell(env *model.T3Environment, shell *t3ThreadShell, proj
 		parentThreadID = api.Ptr(shell.Lineage.ParentThreadID)
 	}
 	return T3ThreadSummary{
-		Id:               shell.ID,
-		EnvironmentId:    env.ID,
-		EnvironmentName:  env.Name,
-		ProjectId:        shell.ProjectID,
-		ProjectName:      projectName,
-		Title:            shell.Title,
-		Status:           t3ThreadStatus(shell),
+		Id:              shell.ID,
+		EnvironmentId:   env.ID,
+		EnvironmentName: env.Name,
+		ProjectId:       shell.ProjectID,
+		ProjectName:     projectName,
+		Title:           shell.Title,
+		Status:          t3ThreadStatus(shell),
+		// settled 是用户维度（在 T3 里收进历史区），与运行态 status 正交：
+		// 归档线程 settledOverride 也可能为 settled，筛选语义由前端决定。
+		Settled:          api.Deref(shell.SettledOverride) == "settled",
+		RunStartedAt:     shell.LatestRunStartedAt,
 		Branch:           branch,
 		Provider:         shell.ModelSelection.InstanceID,
 		Model:            shell.ModelSelection.Model,

@@ -5873,6 +5873,8 @@ ThreadItem 列表；条目 ID 由 `sourceThreadId + "::" + T3 原始条目 id` �
 | `thread.provider` | string | 是 | T3 providerInstanceId |
 | `thread.model` | string | 是 |  |
 | `thread.updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
+| `thread.settled` | boolean | 是 | 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含 |
+| `thread.run_started_at` | string | 否 | 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省 |
 | `thread.pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
 | `thread.parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
 | `items` | object[] | 是 |  |
@@ -6089,6 +6091,8 @@ user_input_request（提问）/ secret_request（密钥，绝不携带密钥值�
 | `items[].provider` | string | 是 | T3 providerInstanceId |
 | `items[].model` | string | 是 |  |
 | `items[].updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
+| `items[].settled` | boolean | 是 | 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含 |
+| `items[].run_started_at` | string | 否 | 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省 |
 | `items[].pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
 | `items[].parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
 | `environments` | object[] | 是 |  |

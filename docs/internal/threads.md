@@ -205,6 +205,11 @@ preparing/starting/running → `running`、waiting → `waiting`；然后
 kind 缺省按 background_task 加载）→ 存在占位条目即 `running`；最后 `shell.status`
 兜底。**详情不扫描历史 runs**，与列表共用同一映射、读同一份可信 shell 快照。
 
+另外两个用户维度字段原样透传（列表/详情共用）：`settled`（上游
+`settledOverride=="settled"`，用户在 T3 把线程收进历史区；与 status/archived
+互不蕴含，筛选与呈现由前端决定）；`run_started_at`（上游
+`latestRunStartedAt`，卡片「运行中 N 分钟」的计时起点）。
+
 ### Turn item 归一化映射
 
 T3 `OrchestrationV2TurnItem` → Fast Ship 11 种 `ThreadItem`。条目 ID 由来源身份

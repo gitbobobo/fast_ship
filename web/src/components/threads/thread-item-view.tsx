@@ -23,7 +23,7 @@ import {
   UserInputRequestCard,
 } from "./thread-request-cards";
 
-const COLLAPSED_META: Partial<
+export const COLLAPSED_META: Partial<
   Record<ThreadItemType, { label: string; icon: typeof Terminal }>
 > = {
   reasoning: { label: "推理", icon: Brain },
@@ -106,7 +106,7 @@ function LoadedItemBody({
 }
 
 /** 折叠项：默认只显示一行摘要，展开后才渲染正文。 */
-function CollapsedItem({
+export function CollapsedItem({
   item,
   environmentId,
   threadId,

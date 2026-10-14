@@ -2039,6 +2039,12 @@ type T3ThreadSummary struct {
 	// PullRequestCount 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计）
 	PullRequestCount int `json:"pull_request_count"`
 
+	// RunStartedAt 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省
+	RunStartedAt *string `json:"run_started_at,omitempty"`
+
+	// Settled 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含
+	Settled bool `json:"settled"`
+
 	// Status 由 T3 归一化（对齐 T3 Sidebar 的判定顺序）：
 	// archivedAt 非空 → archived；其次 pendingRuntimeRequest 非空（等用户审批/输入）→ waiting；
 	// 再看 activityRunStatus（后台 run 未停时 shell.status 可能已是 completed/idle）：

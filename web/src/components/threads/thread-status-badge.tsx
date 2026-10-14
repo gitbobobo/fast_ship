@@ -1,41 +1,65 @@
+import { Archive, Clock, LoaderCircle, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ThreadStatus } from "@/lib/api/threads";
-import { THREAD_STATUS_LABELS } from "@/lib/threads";
+import { formatRunMinutes, runMinutes } from "@/lib/threads";
+import { useNow } from "@/lib/hooks/use-now";
 
-const STATUS_STYLES: Record<ThreadStatus, { badge: string; dot: string }> = {
-  running: {
-    badge: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
-    dot: "bg-emerald-500 animate-pulse motion-reduce:animate-none",
-  },
-  waiting: {
-    badge: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
-    dot: "bg-amber-500",
-  },
-  idle: { badge: "bg-muted text-muted-foreground", dot: "bg-muted-foreground/50" },
-  archived: {
-    badge: "bg-muted text-muted-foreground/70",
-    dot: "bg-muted-foreground/30",
-  },
+const STATUS_TEXT: Record<ThreadStatus, string> = {
+  running: "运行中",
+  waiting: "等待",
+  idle: "空闲",
+  archived: "已归档",
 };
 
+const STATUS_STYLE: Record<
+  ThreadStatus,
+  { icon?: LucideIcon; className: string }
+> = {
+  running: {
+    icon: LoaderCircle,
+    className: "text-sky-600 dark:text-sky-400",
+  },
+  waiting: { icon: Clock, className: "text-muted-foreground" },
+  idle: { className: "text-muted-foreground" },
+  archived: { icon: Archive, className: "text-muted-foreground/70" },
+};
+
+/**
+ * T3 风格的纯文字 + 小图标状态。运行中带计时（起点缺失或无法解析时只显示「运行中」）。
+ */
 export function ThreadStatusBadge({
   status,
+  runStartedAt,
   className,
 }: {
   status: ThreadStatus;
+  runStartedAt?: string;
   className?: string;
 }) {
-  const style = STATUS_STYLES[status] ?? STATUS_STYLES.idle;
+  const now = useNow(30_000, status === "running" && Boolean(runStartedAt));
+  const style = STATUS_STYLE[status] ?? STATUS_STYLE.idle;
+  const Icon = style.icon;
+  const minutes = status === "running" ? runMinutes(runStartedAt, now) : undefined;
+  const text = STATUS_TEXT[status] ?? status;
+
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap",
-        style.badge,
+        "inline-flex shrink-0 items-center gap-1 text-xs font-medium whitespace-nowrap",
+        style.className,
         className,
       )}
     >
-      <span aria-hidden className={cn("h-1.5 w-1.5 rounded-full", style.dot)} />
-      {THREAD_STATUS_LABELS[status] ?? status}
+      {Icon && (
+        <Icon
+          aria-hidden
+          className={cn(
+            "size-3.5",
+            status === "running" && "animate-spin motion-reduce:animate-none",
+          )}
+        />
+      )}
+      {minutes === undefined ? text : `${text} · ${formatRunMinutes(minutes)}`}
     </span>
   );
 }
