@@ -1,2 +1,10 @@
 allowBuilds:
   msw: true
+
+overrides:
+  '@babel/core@^7': ^7.29.7
+  '@humanfs/node@^0.16': ^0.16.8
+  undici@^7: ^7.30.0
+  ws@^8: ^8.22.0
+  source-map-js@^1: ^1.2.2
+  brace-expansion@^5: ^5.0.12
