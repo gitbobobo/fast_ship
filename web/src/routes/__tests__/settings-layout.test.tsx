@@ -7,8 +7,14 @@ vi.mock("@/components/layout/header", () => ({
   Header: ({ title }: { title?: string }) => <header>{title}</header>,
 }));
 
-function Page({ children }: { children: React.ReactNode }) {
-  return <SettingsPageShell>{children}</SettingsPageShell>;
+function Page({
+  wide,
+  children,
+}: {
+  wide?: boolean;
+  children: React.ReactNode;
+}) {
+  return <SettingsPageShell wide={wide}>{children}</SettingsPageShell>;
 }
 
 function renderWithRouter(initialEntry = "/settings") {
@@ -24,6 +30,10 @@ function renderWithRouter(initialEntry = "/settings") {
             element={<Page>配置 MiniMax 接口，用于问题详情页的智能识别建议。</Page>}
           />
           <Route path="api-keys" element={<Page>API Key 管理</Page>} />
+          <Route
+            path="github-tokens"
+            element={<Page wide>GitHub Tokens 管理</Page>}
+          />
         </Route>
       </Routes>
     </MemoryRouter>,
@@ -120,6 +130,28 @@ describe("Settings Layout", () => {
         screen.getByText("配置 MiniMax 接口，用于问题详情页的智能识别建议。"),
       ).toBeInTheDocument();
     });
+  });
+
+  it("caps default pages at max-w-2xl and wide pages at max-w-5xl", async () => {
+    renderWithRouter("/settings/general");
+
+    await waitFor(() => {
+      expect(screen.getByText("管理应用的基本设置")).toBeInTheDocument();
+    });
+    expect(screen.getByText("管理应用的基本设置").closest(".max-w-2xl"))
+      .not.toBeNull();
+  });
+
+  it("lets wide pages use the wider content width", async () => {
+    renderWithRouter("/settings/github-tokens");
+
+    await waitFor(() => {
+      expect(screen.getByText("GitHub Tokens 管理")).toBeInTheDocument();
+    });
+    const wide = screen.getByText("GitHub Tokens 管理").closest(".max-w-5xl");
+    expect(wide).not.toBeNull();
+    expect(screen.getByText("GitHub Tokens 管理").closest(".max-w-2xl"))
+      .toBeNull();
   });
 
   it("highlights active navigation item", async () => {
