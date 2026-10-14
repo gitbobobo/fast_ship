@@ -208,6 +208,7 @@ describe("LaunchIssueThreadDialog", () => {
           project_name: "Alpha",
           title: "t",
           status: "running",
+          settled: false,
           branch: "main",
           provider: "codex",
           model: "gpt-5",

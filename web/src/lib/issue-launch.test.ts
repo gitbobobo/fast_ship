@@ -41,6 +41,7 @@ function makeThread(
     project_name: "Alpha",
     title: "t",
     status,
+    settled: false,
     branch: "main",
     provider: "codex",
     model: "gpt-5",
