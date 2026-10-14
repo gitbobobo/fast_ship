@@ -3,7 +3,6 @@ import { NavLink, useLocation } from "react-router";
 import {
   LayoutDashboard,
   Package,
-  Rocket,
   Tags,
   Bug,
   Kanban,
@@ -20,6 +19,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { FastShipLogo } from "@/components/ui/fast-ship-logo";
 import { UserNav } from "@/components/user-nav";
 import { useSidebarStore } from "@/lib/store/sidebar-store";
 import { cn } from "@/lib/utils";
@@ -137,7 +137,7 @@ function NavContent({
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-14 shrink-0 items-center border-b px-4">
-        <Rocket className="h-5 w-5 shrink-0 text-primary" />
+        <FastShipLogo className="h-5 w-5 shrink-0" />
         <span
           className={cn(
             "text-lg font-semibold tracking-tight transition-all duration-200 overflow-hidden whitespace-nowrap",
