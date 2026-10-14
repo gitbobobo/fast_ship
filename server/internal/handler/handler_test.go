@@ -86,6 +86,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.ScreenshotVersion{},
 		&model.ScreenshotAnnotation{},
 		&model.T3Environment{},
+		&model.ProjectT3Binding{},
 		&model.Automation{},
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
@@ -139,10 +140,11 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	screenshotAnnotationRepo := repository.NewScreenshotAnnotationRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
+	t3EnvironmentRepo := repository.NewT3EnvironmentRepository(db)
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
-	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
+	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
 	githubRepoLabelRepo := repository.NewGitHubRepoLabelRepository(db)
 	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, repository.NewIssueReadStateRepository(db), repository.NewIssueRecommendationRepository(db), repository.NewIssuePullRequestRepository(db), issueAttachmentRepo, fileStorage, cfg, zap.NewNop(), screenshotAnnotationRepo)

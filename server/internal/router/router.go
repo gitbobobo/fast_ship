@@ -32,6 +32,7 @@ func Setup(
 	screenshotAnnotationHandler *handler.ScreenshotAnnotationHandler,
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	t3EnvironmentHandler *handler.T3EnvironmentHandler,
+	t3BindingHandler *handler.T3BindingHandler,
 	automationHandler *handler.AutomationHandler,
 	notificationHandler *handler.NotificationHandler,
 	automationAgentHandler *handler.AutomationAgentHandler,
@@ -262,6 +263,13 @@ func Setup(
 			t3.GET("/environments/:id/attachments/:attachmentId/content", t3EnvironmentHandler.GetAttachmentContent)
 			t3.DELETE("/environments/:id/attachments/:attachmentId", t3EnvironmentHandler.DeleteAttachment)
 		}
+
+		// JWT / API Key 均可 — T3 项目发现与项目绑定（INT-89）：仅有的对 API Key
+		// 开放的 T3 面，不含凭证、不含线程内容；其余 T3 端点仍仅 JWT。
+		api.GET("/environments/t3-projects", middleware.RequireAuth(cfg, apiKeyRepo, authService), t3BindingHandler.ListEnvironmentProjects)
+		api.GET("/projects/:id/t3-bindings", middleware.RequireAuth(cfg, apiKeyRepo, authService), t3BindingHandler.ListBindings)
+		api.PUT("/projects/:id/t3-bindings/:environmentId", middleware.RequireAuth(cfg, apiKeyRepo, authService), t3BindingHandler.UpsertBinding)
+		api.DELETE("/projects/:id/t3-bindings/:environmentId", middleware.RequireAuth(cfg, apiKeyRepo, authService), t3BindingHandler.DeleteBinding)
 	}
 
 	// JWT 必须 — 自动化配置与运行记录（INT-90）

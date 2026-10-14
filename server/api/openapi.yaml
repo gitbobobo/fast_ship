@@ -52,7 +52,7 @@ tags:
   - name: screenshots
     description: 项目截图库（按界面聚合，版本全量保留）
   - name: environments
-    description: T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）
+    description: T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）。例外：t3-projects 发现与项目 t3-bindings 对 API Key 开放（INT-89）
   - name: automations
     description: 用户可配置的自动化（cron / 内部 Issue 事件触发 T3 线程；仅 JWT，INT-90）
   - name: notifications
@@ -221,6 +221,49 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /api/environments/t3-projects:
+    get:
+      tags:
+        - environments
+      operationId: listT3EnvironmentProjects
+      summary: 列出各环境的 T3 项目（绑定用只读发现）
+      description: |
+        逐环境实时拉取 T3 项目表（WS shell 快照 projects，活跃 + 归档去重合并）：
+        多环境有界并行、各自超时预算；单环境失败只标在该环境的
+        `status`/`error` 上，不影响其他环境的结果。响应不含凭证字段。
+        与项目的 `t3-bindings` 读写端点一起，是仅有的对 API Key 开放的
+        T3 面（INT-89）；线程读写、配对、附件等其余 T3 端点仍仅 JWT。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: 各环境及其 T3 项目列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/T3EnvironmentProjects'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          description: 内部错误（50000）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
   /api/environments/{id}/threads/{threadId}:
     get:
       tags: [environments]
@@ -2343,6 +2386,141 @@ paths:
           $ref: '#/components/responses/NotFound'
         '502':
           description: GitHub API 调用失败（50200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/projects/{id}/t3-bindings:
+    get:
+      tags:
+        - environments
+      operationId: listProjectT3Bindings
+      summary: 列出项目的 T3 绑定（附环境名与探测状态）
+      description: |
+        返回该 Fast Ship 项目在各 T3 环境下的 T3 项目绑定快照；
+        `environment_name`/`environment_status` 取当前环境记录与实时探测结果
+        （与 GET /api/environments 同口径）。快照字段与环境当前事实不一致
+        即失效绑定，需重新绑定。JWT 与 API Key 均可访问（INT-89）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: 项目的绑定列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/ProjectT3Binding'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 项目不存在（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: 内部错误（50000）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /api/projects/{id}/t3-bindings/{environmentId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: environmentId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: T3 环境 ID（UUID，归属当前用户；跨用户一律 40417）
+    put:
+      tags:
+        - environments
+      operationId: upsertProjectT3Binding
+      summary: 绑定 T3 项目（实时校验后写入快照）
+      description: |
+        实时到目标环境确认 `t3_project_id` 存在后才写入绑定快照
+        （`t3_project_title`/`workspace_root` 取绑定成功那一刻的上游值），
+        不保存未校验的绑定：T3 项目不在该环境返回 40401，环境不存在 40417，
+        环境不可达/凭证失效/上游错误返回 50202。同一 `(project_id,
+        environment_id)` 重复 PUT 覆盖快照。JWT 与 API Key 均可访问（INT-89）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertT3BindingRequest'
+      responses:
+        '200':
+          description: 绑定成功，返回写入的快照
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ProjectT3Binding'
+        '400':
+          description: 参数校验失败（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 项目不存在（40401）/ 环境不存在（40417）/ T3 项目不在该环境（40401）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: 环境不可达、凭证失效或 T3 上游失败（50202）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+    delete:
+      tags:
+        - environments
+      operationId: deleteProjectT3Binding
+      summary: 解绑 T3 项目
+      description: 删除该环境下的绑定；已解绑时重复 DELETE 返回 200。JWT 与 API Key 均可访问（INT-89）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 项目不存在（40401）
           content:
             application/json:
               schema:
@@ -6374,9 +6552,24 @@ components:
         content:
           type: string
           description: 提示词正文；trim 后非空
-        supports_batch:
-          type: boolean
-          description: 是否支持批量场景
+        preferences:
+          $ref: '#/components/schemas/IssuePromptPreferences'
+    IssuePromptPreferences:
+      type: object
+      description: |
+        T3 启动偏好（绑定在提示词条目上的默认值；对象缺省即各字段取默认）。
+        写入时校验：environment 只能是 "auto" 或已存在的 T3 环境 ID，
+        workspace 只能是 "worktree"|"root"，model_selection 的字段类型；
+        非法值返回 40001
+      properties:
+        environment:
+          type: string
+          description: '"auto" 或已存在的 T3 环境 ID；缺省 auto'
+        workspace:
+          type: string
+          description: '"worktree" 或 "root"；缺省 worktree'
+        model_selection:
+          $ref: '#/components/schemas/T3ModelSelection'
     IssuePrompts:
       type: object
       required: [prompts]
@@ -8087,6 +8280,15 @@ components:
         否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
         `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
 
+    T3EnvironmentStatus:
+      type: string
+      enum: [ok, unreachable, repair, degraded]
+      description: |
+        探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
+        repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
+        degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
+        其余数据仍返回
+
     T3Environment:
       type: object
       description: 已配对的 T3 环境连接；不泄漏任何凭证字段
@@ -8100,13 +8302,7 @@ components:
           type: string
           description: 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host）
         status:
-          type: string
-          enum: [ok, unreachable, repair, degraded]
-          description: |
-            探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
-            repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
-            degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
-            其余数据仍返回
+          $ref: '#/components/schemas/T3EnvironmentStatus'
         scopes:
           type: array
           items:
@@ -8147,6 +8343,82 @@ components:
         pairing_url:
           type: string
           description: 出现时重新配对（覆盖地址与 Bearer），用于修复 repair 状态
+
+    T3DiscoveredProject:
+      type: object
+      description: 环境中发现的 T3 项目（绑定候选）
+      required: [id, title]
+      properties:
+        id:
+          type: string
+          description: T3 projectId
+        title:
+          type: string
+        workspace_root:
+          type: string
+          description: 项目主检出根目录；上游缺省时省略（此类项目不可绑定）
+
+    T3EnvironmentProjects:
+      type: object
+      description: 单个环境的 T3 项目发现结果；该环境失败时 status/error 承载原因、projects 为空
+      required: [environment_id, name, status, access, projects]
+      properties:
+        environment_id:
+          type: string
+        name:
+          type: string
+          description: 环境显示名
+        status:
+          $ref: '#/components/schemas/T3EnvironmentStatus'
+        access:
+          $ref: '#/components/schemas/T3EnvironmentAccess'
+        error:
+          type: string
+          description: 该环境发现失败的说明；成功时省略
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/T3DiscoveredProject'
+
+    ProjectT3Binding:
+      type: object
+      description: |
+        Fast Ship 项目在某 T3 环境绑定的 T3 项目（INT-89）。t3_project_title /
+        workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展示；
+        快照与最新发现不一致即失效绑定，需重新绑定
+      required: [environment_id, environment_name, environment_status, t3_project_id, t3_project_title, workspace_root, created_at, updated_at]
+      properties:
+        environment_id:
+          type: string
+        environment_name:
+          type: string
+          description: 环境显示名（当前记录值）
+        environment_status:
+          $ref: '#/components/schemas/T3EnvironmentStatus'
+        t3_project_id:
+          type: string
+          description: 该环境中的 T3 项目 ID
+        t3_project_title:
+          type: string
+          description: 绑定时快照
+        workspace_root:
+          type: string
+          description: 绑定时快照；启动线程据此解析 cwd
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    UpsertT3BindingRequest:
+      type: object
+      required: [t3_project_id]
+      properties:
+        t3_project_id:
+          type: string
+          minLength: 1
+          description: 该环境中的 T3 项目 ID（来自 GET /api/environments/t3-projects 的 projects[].id）
 
     T3ThreadSummary:
       type: object

@@ -73,6 +73,7 @@ var autoMigrateModels = []interface{}{
 	&model.ScreenshotVersion{},
 	&model.ScreenshotAnnotation{},
 	&model.T3Environment{},
+	&model.ProjectT3Binding{},
 	&model.Automation{},
 	&model.AutomationRun{},
 	&model.AutomationRunToken{},
@@ -228,6 +229,7 @@ func main() {
 	screenshotRepo := repository.NewScreenshotRepository(db)
 	screenshotAnnotationRepo := repository.NewScreenshotAnnotationRepository(db)
 	t3EnvironmentRepo := repository.NewT3EnvironmentRepository(db)
+	projectT3BindingRepo := repository.NewProjectT3BindingRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 	automationRepo := repository.NewAutomationRepository(db)
@@ -238,7 +240,7 @@ func main() {
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zapLogger)
-	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
+	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zapLogger)
 	dashboardService := service.NewDashboardService(dashboardRepo)
@@ -257,6 +259,7 @@ func main() {
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
 	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zapLogger)
 	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zapLogger)
+	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)
 	automationService := service.NewAutomationService(db, automationRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zapLogger)
@@ -286,6 +289,7 @@ func main() {
 	screenshotAnnotationHandler := handler.NewScreenshotAnnotationHandler(screenshotAnnotationService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
+	t3BindingHandler := handler.NewT3BindingHandler(t3BindingService)
 	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
@@ -355,7 +359,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

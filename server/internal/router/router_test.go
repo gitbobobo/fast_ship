@@ -838,6 +838,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 		&model.ScreenshotVersion{},
 		&model.ScreenshotAnnotation{},
 		&model.T3Environment{},
+		&model.ProjectT3Binding{},
 		&model.Automation{},
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
@@ -906,7 +907,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
-	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo)
+	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo)
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())
 	dashboardService := service.NewDashboardService(dashboardRepo)
@@ -930,6 +931,7 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	mediaProxyService := githubmedia.NewProxyService(filepath.Join(t.TempDir(), "media-cache"))
 	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zap.NewNop())
 	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zap.NewNop())
+	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, repository.NewProjectT3BindingRepository(db))
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
 	automationService := service.NewAutomationService(db, repository.NewAutomationRepository(db), repository.NewAutomationRunRepository(db), t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zap.NewNop())
@@ -954,12 +956,13 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	screenshotAnnotationHandler := handler.NewScreenshotAnnotationHandler(screenshotAnnotationService)
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
+	t3BindingHandler := handler.NewT3BindingHandler(t3BindingService)
 	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,

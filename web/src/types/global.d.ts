@@ -672,11 +672,23 @@ interface PaginatedData<T> {
   page_size: number;
 }
 
+/** 提示词模板的启动偏好；由「启动线程」弹框勾选「保存为此模板的默认」写入。 */
+interface IssuePromptPreferences {
+  /** "auto" 表示按绑定与负载自动选环境；否则为具体环境 id */
+  environment?: "auto" | string;
+  workspace?: "worktree" | "root";
+  model_selection?: {
+    instance_id: string;
+    model: string;
+    options?: { id: string; value: string | boolean }[];
+  };
+}
+
 interface IssuePrompt {
   id: string;
   name: string;
   content: string;
-  supports_batch: boolean;
+  preferences?: IssuePromptPreferences;
 }
 
 interface IssuePromptSettings {

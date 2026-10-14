@@ -305,6 +305,24 @@ func (e T3ChatAttachmentType) Valid() bool {
 	}
 }
 
+// Defines values for T3EnvironmentAccess.
+const (
+	Operate  T3EnvironmentAccess = "operate"
+	ReadOnly T3EnvironmentAccess = "read-only"
+)
+
+// Valid indicates whether the value is a known member of the T3EnvironmentAccess enum.
+func (e T3EnvironmentAccess) Valid() bool {
+	switch e {
+	case Operate:
+		return true
+	case ReadOnly:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for T3EnvironmentStatus.
 const (
 	T3EnvironmentStatusDegraded    T3EnvironmentStatus = "degraded"
@@ -323,24 +341,6 @@ func (e T3EnvironmentStatus) Valid() bool {
 	case T3EnvironmentStatusRepair:
 		return true
 	case T3EnvironmentStatusUnreachable:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for T3EnvironmentAccess.
-const (
-	Operate  T3EnvironmentAccess = "operate"
-	ReadOnly T3EnvironmentAccess = "read-only"
-)
-
-// Valid indicates whether the value is a known member of the T3EnvironmentAccess enum.
-func (e T3EnvironmentAccess) Valid() bool {
-	switch e {
-	case Operate:
-		return true
-	case ReadOnly:
 		return true
 	default:
 		return false
@@ -1452,8 +1452,26 @@ type IssuePromptItem struct {
 	// Name trim 后非空
 	Name string `json:"name"`
 
-	// SupportsBatch 是否支持批量场景
-	SupportsBatch *bool `json:"supports_batch,omitempty"`
+	// Preferences T3 启动偏好（绑定在提示词条目上的默认值；对象缺省即各字段取默认）。
+	// 写入时校验：environment 只能是 "auto" 或已存在的 T3 环境 ID，
+	// workspace 只能是 "worktree"|"root"，model_selection 的字段类型；
+	// 非法值返回 40001
+	Preferences *IssuePromptPreferences `json:"preferences,omitempty"`
+}
+
+// IssuePromptPreferences T3 启动偏好（绑定在提示词条目上的默认值；对象缺省即各字段取默认）。
+// 写入时校验：environment 只能是 "auto" 或已存在的 T3 环境 ID，
+// workspace 只能是 "worktree"|"root"，model_selection 的字段类型；
+// 非法值返回 40001
+type IssuePromptPreferences struct {
+	// Environment "auto" 或已存在的 T3 环境 ID；缺省 auto
+	Environment *string `json:"environment,omitempty"`
+
+	// ModelSelection T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认）
+	ModelSelection *T3ModelSelection `json:"model_selection,omitempty"`
+
+	// Workspace "worktree" 或 "root"；缺省 worktree
+	Workspace *string `json:"workspace,omitempty"`
 }
 
 // IssuePrompts defines model for IssuePrompts.
@@ -1827,6 +1845,33 @@ type Project struct {
 	UpdatedAt           string `json:"updated_at"`
 }
 
+// ProjectT3Binding Fast Ship 项目在某 T3 环境绑定的 T3 项目（INT-89）。t3_project_title /
+// workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展示；
+// 快照与最新发现不一致即失效绑定，需重新绑定
+type ProjectT3Binding struct {
+	CreatedAt     string `json:"created_at"`
+	EnvironmentId string `json:"environment_id"`
+
+	// EnvironmentName 环境显示名（当前记录值）
+	EnvironmentName string `json:"environment_name"`
+
+	// EnvironmentStatus 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
+	// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
+	// degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
+	// 其余数据仍返回
+	EnvironmentStatus T3EnvironmentStatus `json:"environment_status"`
+
+	// T3ProjectId 该环境中的 T3 项目 ID
+	T3ProjectId string `json:"t3_project_id"`
+
+	// T3ProjectTitle 绑定时快照
+	T3ProjectTitle string `json:"t3_project_title"`
+	UpdatedAt      string `json:"updated_at"`
+
+	// WorkspaceRoot 绑定时快照；启动线程据此解析 cwd
+	WorkspaceRoot string `json:"workspace_root"`
+}
+
 // RecommendationDependency defines model for RecommendationDependency.
 type RecommendationDependency struct {
 	IssueId        string     `json:"issue_id"`
@@ -2186,6 +2231,16 @@ type T3ComposerOptions_Projects struct {
 	WorkspaceRoot *string `json:"workspace_root,omitempty"`
 }
 
+// T3DiscoveredProject 环境中发现的 T3 项目（绑定候选）
+type T3DiscoveredProject struct {
+	// Id T3 projectId
+	Id    string `json:"id"`
+	Title string `json:"title"`
+
+	// WorkspaceRoot 项目主检出根目录；上游缺省时省略（此类项目不可绑定）
+	WorkspaceRoot *string `json:"workspace_root,omitempty"`
+}
+
 // T3DispatchResult dispatchCommand 受理结果（sequence 为 T3 投影事件序号）
 type T3DispatchResult struct {
 	Sequence int `json:"sequence"`
@@ -2217,16 +2272,38 @@ type T3Environment struct {
 	UpdatedAt string              `json:"updated_at"`
 }
 
+// T3EnvironmentAccess 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
+// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
+// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+type T3EnvironmentAccess string
+
+// T3EnvironmentProjects 单个环境的 T3 项目发现结果；该环境失败时 status/error 承载原因、projects 为空
+type T3EnvironmentProjects struct {
+	// Access 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
+	// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
+	// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
+	Access        T3EnvironmentAccess `json:"access"`
+	EnvironmentId string              `json:"environment_id"`
+
+	// Error 该环境发现失败的说明；成功时省略
+	Error *string `json:"error,omitempty"`
+
+	// Name 环境显示名
+	Name     string                `json:"name"`
+	Projects []T3DiscoveredProject `json:"projects"`
+
+	// Status 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
+	// repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
+	// degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
+	// 其余数据仍返回
+	Status T3EnvironmentStatus `json:"status"`
+}
+
 // T3EnvironmentStatus 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx；
 // repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对；
 // degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照），
 // 其余数据仍返回
 type T3EnvironmentStatus string
-
-// T3EnvironmentAccess 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`，
-// 否则 `read-only`。唯一判定依据是精确 token 的 scope 列；
-// `read-only` 环境调用任何写入口返回 40300（重新配对后可操作）
-type T3EnvironmentAccess string
 
 // T3ModelOption T3 模型选项（canonical `{id,value}`；value 为 string 或 boolean）
 type T3ModelOption struct {
@@ -2773,6 +2850,12 @@ type UpsertShipHookRequest struct {
 	WorkflowStatus *IssueWorkflowStatus `json:"workflow_status,omitempty"`
 }
 
+// UpsertT3BindingRequest defines model for UpsertT3BindingRequest.
+type UpsertT3BindingRequest struct {
+	// T3ProjectId 该环境中的 T3 项目 ID（来自 GET /api/environments/t3-projects 的 projects[].id）
+	T3ProjectId string `json:"t3_project_id"`
+}
+
 // User defines model for User.
 type User struct {
 	// AvatarUrl 形如 /api/avatars/:uid/:filename，未设置为空串
@@ -3265,6 +3348,21 @@ type CreateT3Environment200JSONResponseBody struct {
 
 	// Data 已配对的 T3 环境连接；不泄漏任何凭证字段
 	Data *T3Environment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListT3EnvironmentProjects200JSONResponseBody_Data defines parameters for ListT3EnvironmentProjects.
+type ListT3EnvironmentProjects200JSONResponseBody_Data struct {
+	Items []T3EnvironmentProjects `json:"items"`
+}
+
+// ListT3EnvironmentProjects200JSONResponseBody defines parameters for ListT3EnvironmentProjects.
+type ListT3EnvironmentProjects200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                                `json:"code"`
+	Data *ListT3EnvironmentProjects200JSONResponseBody_Data `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -4360,6 +4458,35 @@ type UploadScreenshot200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListProjectT3Bindings200JSONResponseBody_Data defines parameters for ListProjectT3Bindings.
+type ListProjectT3Bindings200JSONResponseBody_Data struct {
+	Items []ProjectT3Binding `json:"items"`
+}
+
+// ListProjectT3Bindings200JSONResponseBody defines parameters for ListProjectT3Bindings.
+type ListProjectT3Bindings200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                            `json:"code"`
+	Data *ListProjectT3Bindings200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpsertProjectT3Binding200JSONResponseBody defines parameters for UpsertProjectT3Binding.
+type UpsertProjectT3Binding200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data Fast Ship 项目在某 T3 环境绑定的 T3 项目（INT-89）。t3_project_title /
+	// workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展示；
+	// 快照与最新发现不一致即失效绑定，需重新绑定
+	Data *ProjectT3Binding `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListVersionsParams defines parameters for ListVersions.
 type ListVersionsParams struct {
 	// Status 按版本状态过滤
@@ -4709,6 +4836,9 @@ type UploadLogsJSONRequestBody = UploadLogsRequest
 
 // UploadScreenshotMultipartRequestBody defines body for UploadScreenshot for multipart/form-data ContentType.
 type UploadScreenshotMultipartRequestBody UploadScreenshotMultipartBody
+
+// UpsertProjectT3BindingJSONRequestBody defines body for UpsertProjectT3Binding for application/json ContentType.
+type UpsertProjectT3BindingJSONRequestBody = UpsertT3BindingRequest
 
 // CreateVersionJSONRequestBody defines body for CreateVersion for application/json ContentType.
 type CreateVersionJSONRequestBody = CreateVersionRequest

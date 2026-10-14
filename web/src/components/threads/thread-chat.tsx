@@ -19,8 +19,9 @@ import {
   isThreadActive,
   sameAttachmentIds,
 } from "@/lib/threads-compose";
+import { actionErrorText } from "@/lib/threads";
 import { ThreadComposer } from "./thread-composer";
-import { ThreadQueuePanel, actionErrorText } from "./thread-queue";
+import { ThreadQueuePanel } from "./thread-queue";
 
 /**
  * 详情页底部：队列 + 输入框 + Stop。草稿和排队编辑各持有一套上传，

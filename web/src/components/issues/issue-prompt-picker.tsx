@@ -14,7 +14,7 @@ interface IssuePromptPickerProps {
 
 /**
  * 给定一组提示词模板：恰好一条时直接按钮，多条时下拉选择 content。
- * 不负责拉取模板、过滤 supports_batch 或复制逻辑。
+ * 不负责拉取模板或复制逻辑。
  */
 export function IssuePromptPicker({
   prompts,

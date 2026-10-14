@@ -484,7 +484,15 @@ AI 设置、标题/清单生成与全局提示词
 | `prompts[].id` | string | 是 | trim 后非空 |
 | `prompts[].name` | string | 是 | trim 后非空 |
 | `prompts[].content` | string | 是 | 提示词正文；trim 后非空 |
-| `prompts[].supports_batch` | boolean | 否 | 是否支持批量场景 |
+| `prompts[].preferences` | object | 否 | T3 启动偏好（绑定在提示词条目上的默认值；对象缺省即各字段取默认）。 写入时校验：environment 只能是 "auto" 或已存在的 T3 环境 ID， workspace 只能是 "worktree"\|"root"，model_selection 的字段类型； 非法值返回 40001 |
+| `prompts[].preferences.environment` | string | 否 | "auto" 或已存在的 T3 环境 ID；缺省 auto |
+| `prompts[].preferences.workspace` | string | 否 | "worktree" 或 "root"；缺省 worktree |
+| `prompts[].preferences.model_selection` | object | 否 | T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认） |
+| `prompts[].preferences.model_selection.instance_id` | string | 是 | T3 providerInstanceId |
+| `prompts[].preferences.model_selection.model` | string | 是 |  |
+| `prompts[].preferences.model_selection.options` | object[] | 否 | provider 实例声明的模型选项，canonical 数组 `[{id,value}]` （与 T3 ModelSelection.options 一致）；缺省省略 |
+| `prompts[].preferences.model_selection.options[].id` | string | 是 |  |
+| `prompts[].preferences.model_selection.options[].value` | string | 是 | 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传， 布尔选项发 JSON boolean 而非字符串。 |
 
 **错误**
 
@@ -512,7 +520,15 @@ AI 设置、标题/清单生成与全局提示词
 | `prompts[].id` | string | 是 | trim 后非空 |
 | `prompts[].name` | string | 是 | trim 后非空 |
 | `prompts[].content` | string | 是 | 提示词正文；trim 后非空 |
-| `prompts[].supports_batch` | boolean | 否 | 是否支持批量场景 |
+| `prompts[].preferences` | object | 否 | T3 启动偏好（绑定在提示词条目上的默认值；对象缺省即各字段取默认）。 写入时校验：environment 只能是 "auto" 或已存在的 T3 环境 ID， workspace 只能是 "worktree"\|"root"，model_selection 的字段类型； 非法值返回 40001 |
+| `prompts[].preferences.environment` | string | 否 | "auto" 或已存在的 T3 环境 ID；缺省 auto |
+| `prompts[].preferences.workspace` | string | 否 | "worktree" 或 "root"；缺省 worktree |
+| `prompts[].preferences.model_selection` | object | 否 | T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认） |
+| `prompts[].preferences.model_selection.instance_id` | string | 是 | T3 providerInstanceId |
+| `prompts[].preferences.model_selection.model` | string | 是 |  |
+| `prompts[].preferences.model_selection.options` | object[] | 否 | provider 实例声明的模型选项，canonical 数组 `[{id,value}]` （与 T3 ModelSelection.options 一致）；缺省省略 |
+| `prompts[].preferences.model_selection.options[].id` | string | 是 |  |
+| `prompts[].preferences.model_selection.options[].value` | string | 是 | 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传， 布尔选项发 JSON boolean 而非字符串。 |
 
 **成功响应**
 
@@ -526,7 +542,15 @@ AI 设置、标题/清单生成与全局提示词
 | `prompts[].id` | string | 是 | trim 后非空 |
 | `prompts[].name` | string | 是 | trim 后非空 |
 | `prompts[].content` | string | 是 | 提示词正文；trim 后非空 |
-| `prompts[].supports_batch` | boolean | 否 | 是否支持批量场景 |
+| `prompts[].preferences` | object | 否 | T3 启动偏好（绑定在提示词条目上的默认值；对象缺省即各字段取默认）。 写入时校验：environment 只能是 "auto" 或已存在的 T3 环境 ID， workspace 只能是 "worktree"\|"root"，model_selection 的字段类型； 非法值返回 40001 |
+| `prompts[].preferences.environment` | string | 否 | "auto" 或已存在的 T3 环境 ID；缺省 auto |
+| `prompts[].preferences.workspace` | string | 否 | "worktree" 或 "root"；缺省 worktree |
+| `prompts[].preferences.model_selection` | object | 否 | T3 模型选择（instanceId 来自 composer-options 的 providers；缺省用项目默认） |
+| `prompts[].preferences.model_selection.instance_id` | string | 是 | T3 providerInstanceId |
+| `prompts[].preferences.model_selection.model` | string | 是 |  |
+| `prompts[].preferences.model_selection.options` | object[] | 否 | provider 实例声明的模型选项，canonical 数组 `[{id,value}]` （与 T3 ModelSelection.options 一致）；缺省省略 |
+| `prompts[].preferences.model_selection.options[].id` | string | 是 |  |
+| `prompts[].preferences.model_selection.options[].value` | string | 是 | 字符串或布尔（T3 ProviderOptionSelectionValue）。JSON 原样透传， 布尔选项发 JSON boolean 而非字符串。 |
 
 **错误**
 
@@ -5640,7 +5664,7 @@ JWT 可更新全部字段；API Key 只允许传 `{"status":"resolved"}`，其�
 
 ## environments
 
-T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）
+T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）。例外：t3-projects 发现与项目 t3-bindings 对 API Key 开放（INT-89）
 
 ### GET `/api/environments`
 
@@ -5826,6 +5850,46 @@ T3 服务端按配对链接的授权授予完整 scope（标准客户端含 `orc
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 环境不存在（40417） |
+
+### GET `/api/environments/t3-projects`
+
+<!-- operationId: listT3EnvironmentProjects -->
+
+列出各环境的 T3 项目（绑定用只读发现）
+
+逐环境实时拉取 T3 项目表（WS shell 快照 projects，活跃 + 归档去重合并）：
+多环境有界并行、各自超时预算；单环境失败只标在该环境的
+`status`/`error` 上，不影响其他环境的结果。响应不含凭证字段。
+与项目的 `t3-bindings` 读写端点一起，是仅有的对 API Key 开放的
+T3 面（INT-89）；线程读写、配对、附件等其余 T3 端点仍仅 JWT。
+
+**鉴权**：JWT+API Key
+
+**成功响应**
+
+**200** 各环境及其 T3 项目列表
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].environment_id` | string | 是 |  |
+| `items[].name` | string | 是 | 环境显示名 |
+| `items[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `items[].access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
+| `items[].error` | string | 否 | 该环境发现失败的说明；成功时省略 |
+| `items[].projects` | object[] | 是 |  |
+| `items[].projects[].id` | string | 是 | T3 projectId |
+| `items[].projects[].title` | string | 是 |  |
+| `items[].projects[].workspace_root` | string | 否 | 项目主检出根目录；上游缺省时省略（此类项目不可绑定） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 内部错误（50000） |
 
 ### GET `/api/environments/{id}/threads/{threadId}`
 
@@ -6927,6 +6991,142 @@ URL，再由 Fast Ship 拉取字节并原样代理给浏览器（带上游 Conte
 | 403 | 该环境为只读会话（40300） |
 | 404 | 环境不存在（40417） |
 | 502 | T3 环境调用失败（50202） |
+
+### GET `/api/projects/{id}/t3-bindings`
+
+<!-- operationId: listProjectT3Bindings -->
+
+列出项目的 T3 绑定（附环境名与探测状态）
+
+返回该 Fast Ship 项目在各 T3 环境下的 T3 项目绑定快照；
+`environment_name`/`environment_status` 取当前环境记录与实时探测结果
+（与 GET /api/environments 同口径）。快照字段与环境当前事实不一致
+即失效绑定，需重新绑定。JWT 与 API Key 均可访问（INT-89）。
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+
+**成功响应**
+
+**200** 项目的绑定列表
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].environment_id` | string | 是 |  |
+| `items[].environment_name` | string | 是 | 环境显示名（当前记录值） |
+| `items[].environment_status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `items[].t3_project_id` | string | 是 | 该环境中的 T3 项目 ID |
+| `items[].t3_project_title` | string | 是 | 绑定时快照 |
+| `items[].workspace_root` | string | 是 | 绑定时快照；启动线程据此解析 cwd |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 项目不存在（40401） |
+| 500 | 内部错误（50000） |
+
+### PUT `/api/projects/{id}/t3-bindings/{environmentId}`
+
+<!-- operationId: upsertProjectT3Binding -->
+
+绑定 T3 项目（实时校验后写入快照）
+
+实时到目标环境确认 `t3_project_id` 存在后才写入绑定快照
+（`t3_project_title`/`workspace_root` 取绑定成功那一刻的上游值），
+不保存未校验的绑定：T3 项目不在该环境返回 40401，环境不存在 40417，
+环境不可达/凭证失效/上游错误返回 50202。同一 `(project_id,
+environment_id)` 重复 PUT 覆盖快照。JWT 与 API Key 均可访问（INT-89）。
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+| `environmentId` | string | 是 | T3 环境 ID（UUID，归属当前用户；跨用户一律 40417） |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `t3_project_id` | string（长度 ≥1） | 是 | 该环境中的 T3 项目 ID（来自 GET /api/environments/t3-projects 的 projects[].id） |
+
+**成功响应**
+
+**200** 绑定成功，返回写入的快照
+
+`data`：
+
+Fast Ship 项目在某 T3 环境绑定的 T3 项目（INT-89）。t3_project_title /
+workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展示；
+快照与最新发现不一致即失效绑定，需重新绑定
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `environment_id` | string | 是 |  |
+| `environment_name` | string | 是 | 环境显示名（当前记录值） |
+| `environment_status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
+| `t3_project_id` | string | 是 | 该环境中的 T3 项目 ID |
+| `t3_project_title` | string | 是 | 绑定时快照 |
+| `workspace_root` | string | 是 | 绑定时快照；启动线程据此解析 cwd |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数校验失败（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 项目不存在（40401）/ 环境不存在（40417）/ T3 项目不在该环境（40401） |
+| 502 | 环境不可达、凭证失效或 T3 上游失败（50202） |
+
+### DELETE `/api/projects/{id}/t3-bindings/{environmentId}`
+
+<!-- operationId: deleteProjectT3Binding -->
+
+解绑 T3 项目
+
+删除该环境下的绑定；已解绑时重复 DELETE 返回 200。JWT 与 API Key 均可访问（INT-89）。
+
+**鉴权**：JWT+API Key
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+| `environmentId` | string | 是 | T3 环境 ID（UUID，归属当前用户；跨用户一律 40417） |
+
+**成功响应**
+
+**200** 删除成功
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 项目不存在（40401） |
 
 ## automations
 

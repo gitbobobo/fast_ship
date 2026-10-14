@@ -37,7 +37,7 @@ func (h *IssuePromptHandler) UpdatePrompts(c *gin.Context) {
 		return
 	}
 
-	result, err := h.service.UpdatePrompts(userID, req)
+	result, err := h.service.UpdatePrompts(c.Request.Context(), userID, req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

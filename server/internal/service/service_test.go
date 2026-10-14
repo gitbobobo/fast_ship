@@ -100,6 +100,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.ScreenshotVersion{},
 		&model.ScreenshotAnnotation{},
 		&model.T3Environment{},
+		&model.ProjectT3Binding{},
 		&model.Automation{},
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
@@ -118,6 +119,7 @@ func setupTestServices(t *testing.T) *testServices {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_envs_user_name ON t3_environments(user_id, name)")
 
 	tempDir := t.TempDir()
 	fileStorage := storage.NewLocalStorage(filepath.Join(tempDir, "uploads"))
@@ -146,6 +148,7 @@ func setupTestServices(t *testing.T) *testServices {
 	collabRepo := repository.NewIssueCollabRepository(db)
 	readStateRepo := repository.NewIssueReadStateRepository(db)
 	recRepo := repository.NewIssueRecommendationRepository(db)
+	t3EnvironmentRepo := repository.NewT3EnvironmentRepository(db)
 
 	cfg := &config.Config{
 		Encryption: config.EncryptionConfig{
@@ -185,7 +188,7 @@ func setupTestServices(t *testing.T) *testServices {
 		collabService:       NewIssueCollabService(collabRepo, issueRepo, projectRepo, userRepo),
 		recService:          NewIssueRecommendationService(recRepo, issueRepo, internalMetaRepo, projectRepo),
 		aiService:           NewAIService(userAISettingRepo, issueRepo, commentRepo, projectRepo, cfg, zap.NewNop()),
-		issuePromptService:  NewIssuePromptService(userIssuePromptRepo),
+		issuePromptService:  NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo),
 		versionService:      NewVersionService(versionRepo, projectRepo, tokenRepo, fileStorage, cfg, zap.NewNop()),
 		artifactService:     NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage),
 		screenshotService:   NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg),

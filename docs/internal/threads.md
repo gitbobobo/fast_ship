@@ -14,9 +14,17 @@ T3 为准。详见 `docs/internal/automations.md`。
 
 架构边界（INT-85 共识）：**复杂性留在适配器**。REST 外层 snake_case，T3 的
 camelCase 留在适配器内；不暴露通用 /rpc 或任意 dispatchCommand 转发端点，
-只暴露下文定案的 REST 表面。已否决的方向：Plan、流式、Issue 开线程、
+只暴露下文定案的 REST 表面。已否决的方向：Plan、流式、
 Fast Ship 队列镜像、HTTP 写 RPC、浏览器直连 T3、内部 thread.stop /
 secret_request.record、deliveryIntent=auto。
+
+「Issue 开线程」原在否决名单上（INT-85），INT-89 推翻了它，但范围严格限定：
+**前端复用现有新建线程接口发起线程，不保存 Issue ↔ 线程关联**——Fast Ship 侧
+不存在「该 Issue 由哪些线程实现」的记录，启动后的线程就是普通线程，状态推进
+由 Agent 通过 fast-ship 技能回写 workflow_status，线程创建动作本身不改 Issue。
+另一条配套例外：绑定与 T3 项目发现端点（见 `t3-bindings.md`）是仅有的对
+API Key 开放的 T3 只读面（不含凭证、不含线程内容）；线程读写、新建线程、
+附件、配对仍仅 JWT。
 
 ## 实现坐标
 

@@ -195,7 +195,8 @@ export type ThreadWorkspace =
   | { type: "root" }
   | {
       type: "worktree";
-      base_ref: string;
+      /** 缺省时由服务端取项目主检出的当前分支（启动弹框用）。 */
+      base_ref?: string;
       branch?: string;
       start_from_origin?: boolean;
     }
