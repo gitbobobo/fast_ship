@@ -1379,6 +1379,27 @@ func TestNormalizeScreenshotLocale_BCP47Structure(t *testing.T) {
 	}
 }
 
+// platform 是逗号分隔多值过滤的开放词表：含逗号的值无法在 URL/批量过滤里
+// 往返，写入与过滤统一拒绝（40001）。
+func TestNormalizeScreenshotPlatform_ReservesDelimiter(t *testing.T) {
+	valid := map[string]string{
+		"iOS":       "ios",
+		" Harmony ": "harmony",
+		"web":       "web",
+	}
+	for raw, want := range valid {
+		got, err := normalizeScreenshotPlatform(&raw)
+		if err != nil || got == nil || *got != want {
+			t.Fatalf("normalize %q: expected %q, got %q err=%v", raw, want, gotStr(got), err)
+		}
+	}
+
+	withComma := "ios,tablet"
+	if _, err := normalizeScreenshotPlatform(&withComma); err != errs.ErrInvalidParams {
+		t.Fatalf("expected ErrInvalidParams for delimiter in platform, got %v", err)
+	}
+}
+
 func gotStr(s *string) string {
 	if s == nil {
 		return "<nil>"

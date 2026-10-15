@@ -75,7 +75,11 @@ export default function ScreenshotsPage() {
       (v) => v === "open" || v === "resolved",
     );
     return {
-      platform: decodeDimensionFilter(searchParams.get("platform")),
+      // platform 库存是服务端小写化后的值，URL 共享/手输的大写在本地
+      // 匹配前折叠，避免画布显示空而批量/提示词打到实际命中的范围
+      platform: decodeDimensionFilter(searchParams.get("platform")).map((v) =>
+        v.trim().toLowerCase(),
+      ),
       // 与服务端 normalizeScreenshotLocale 同一大小写口径，画布/面板/批量
       // payload 都读这份 filters，避免 URL `en-us` 展示空而批量打到 en-US
       locale: decodeDimensionFilter(searchParams.get("locale")).map(

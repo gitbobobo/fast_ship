@@ -18,6 +18,8 @@ const (
 )
 
 // normalizeScreenshotPlatform 规范化平台：trim+lowercase；空串返回 nil（未标注）。
+// 逗号是过滤参数的保留分隔符（多值逗号拼接），含逗号的值无法在 URL/批量过滤里
+// 往返，写入时直接拒绝（40001）。
 func normalizeScreenshotPlatform(raw *string) (*string, error) {
 	if raw == nil {
 		return nil, nil
@@ -26,7 +28,7 @@ func normalizeScreenshotPlatform(raw *string) (*string, error) {
 	if v == "" {
 		return nil, nil
 	}
-	if utf8.RuneCountInString(v) > maxScreenshotPlatformRunes {
+	if strings.Contains(v, ",") || utf8.RuneCountInString(v) > maxScreenshotPlatformRunes {
 		return nil, errs.ErrInvalidParams
 	}
 	return &v, nil

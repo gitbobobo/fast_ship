@@ -77,7 +77,8 @@ export function CanvasToolbar({
       <Button
         size="sm"
         variant="ghost"
-        title="复制处理标注意见的提示词"
+        title={openCount > 0 ? "复制处理标注意见的提示词" : "当前范围内没有未解决标注"}
+        disabled={openCount === 0}
         onClick={onCopyPrompt}
         data-testid="canvas-copy-prompt"
       >

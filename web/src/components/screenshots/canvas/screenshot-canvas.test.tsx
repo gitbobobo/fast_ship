@@ -684,8 +684,12 @@ describe("ScreenshotCanvas", () => {
     await user.click(launch);
     expect(onLaunchThread).not.toHaveBeenCalled();
 
-    await user.click(screen.getByTestId("canvas-copy-prompt"));
-    expect(onCopyPrompt).toHaveBeenCalledTimes(1);
+    // 复制提示词同样禁用：提示词固定拉 status=open，resolved-only 范围外
+    // 的 open 标注不该被复制出去的指令处理
+    const copy = screen.getByTestId("canvas-copy-prompt");
+    expect(copy).toBeDisabled();
+    await user.click(copy);
+    expect(onCopyPrompt).not.toHaveBeenCalled();
   });
 
   it("enables the launch entry once the scope has open annotations", async () => {

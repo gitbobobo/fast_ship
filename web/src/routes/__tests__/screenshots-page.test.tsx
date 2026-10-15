@@ -249,6 +249,30 @@ describe("ScreenshotsPage", () => {
     expect(canvasProps().scopeFilter.locale).toEqual(["en-US"]);
   });
 
+  it("matches URL platform=WEB against stored web via lowercase folding", async () => {
+    mockScreens([
+      makeScreen({
+        id: "web",
+        screen_key: "home",
+        platform: "web",
+        uploaded_at: "2026-10-05T00:00:00Z",
+      }),
+      makeScreen({
+        id: "ios",
+        screen_key: "settings",
+        platform: "ios",
+        uploaded_at: "2026-10-04T00:00:00Z",
+      }),
+    ]);
+    renderPage("/screenshots?platform=WEB");
+
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["web"]);
+    });
+    // 画布、面板、批量 payload 同源：过滤值已按服务端口径折成小写
+    expect(canvasProps().scopeFilter.platform).toEqual(["web"]);
+  });
+
   it("filters the canvas by dimension selections and encodes them in the URL", async () => {
     const user = userEvent.setup();
     renderPage();
