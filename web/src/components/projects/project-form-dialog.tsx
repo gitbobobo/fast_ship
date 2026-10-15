@@ -10,13 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
@@ -74,26 +68,26 @@ function TokenSelect({
     <div className="space-y-2">
       <Label htmlFor={id}>{label}（可选）</Label>
       <div className="flex gap-2">
-        <Select
+        <OptionSelect
           value={value || emptyTokenOption}
           onValueChange={(next) => onChange(next === emptyTokenOption || next === null ? "" : next)}
-        >
-          <SelectTrigger className="w-full" size="default">
-            <SelectValue>
-              {value
-                ? tokens.find((token) => token.id === value)?.title ?? "已选 Token"
-                : "不使用"}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={emptyTokenOption}>不使用</SelectItem>
-            {tokens.map((token) => (
-              <SelectItem key={token.id} value={token.id}>
-                {token.title}（{token.token_prefix}••••）
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          options={[
+            { value: emptyTokenOption, label: "不使用" },
+            ...tokens.map((token) => ({
+              value: token.id,
+              label: token.title,
+              itemLabel: `${token.title}（${token.token_prefix}••••）`,
+            })),
+          ]}
+          valueLabel={
+            value
+              ? (tokens.find((token) => token.id === value)?.title ?? "已选 Token")
+              : "不使用"
+          }
+          id={id}
+          className="w-full"
+          size="default"
+        />
         <Button
           type="button"
           variant="outline"

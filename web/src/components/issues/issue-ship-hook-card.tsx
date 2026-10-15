@@ -8,13 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   useDeleteIssueShipHook,
@@ -30,7 +24,6 @@ import {
   validateShipHookForm,
 } from "@/lib/issue-ship-hook";
 import {
-  ISSUE_WORKFLOW_STATUS_LABELS,
   ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
@@ -188,7 +181,7 @@ function ShipHookEditForm({
       {workflowEnabled && (
         <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">目标内部状态</Label>
-          <Select
+          <OptionSelect
             value={workflowStatus === "" ? "unset" : workflowStatus}
             disabled={isSaving}
             onValueChange={(value) =>
@@ -198,21 +191,12 @@ function ShipHookEditForm({
                   : (value as IssueWorkflowStatus),
               )
             }
-          >
-            <SelectTrigger className="h-8 text-sm">
-              <SelectValue>
-                {ISSUE_WORKFLOW_STATUS_LABELS[workflowStatus]}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="unset">未设置</SelectItem>
-              {ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            options={[
+              { value: "unset", label: "未设置" },
+              ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
+            ]}
+            className="h-8 text-sm"
+          />
         </div>
       )}
 

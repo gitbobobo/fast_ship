@@ -14,13 +14,7 @@ import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -470,29 +464,21 @@ export default function DocumentsPage() {
                   placeholder="文档标题"
                   data-testid="document-title-input"
                 />
-                <Select
+                <OptionSelect
                   value={editParentId || "__root__"}
                   onValueChange={(value) =>
                     setEditParentId(value === "__root__" || !value ? "" : value)
                   }
-                >
-                  <SelectTrigger className="w-48">
-                    <SelectValue placeholder="父文档">
-                      {editParentId
-                        ? (parentOptions.find((p) => p.id === editParentId)
-                            ?.title ?? editParentId)
-                        : "根文档"}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__root__">根文档</SelectItem>
-                    {parentOptions.map((item) => (
-                      <SelectItem key={item.id} value={item.id}>
-                        {item.title}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  options={[
+                    { value: "__root__", label: "根文档" },
+                    ...parentOptions.map((item) => ({
+                      value: item.id,
+                      label: item.title,
+                    })),
+                  ]}
+                  placeholder="父文档"
+                  className="w-48"
+                />
                 <Button
                   size="sm"
                   onClick={() => void handleSave()}

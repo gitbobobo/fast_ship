@@ -11,13 +11,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import {
   useBatchClosePreviewCount,
   useCloseIssuesBatch,
@@ -95,25 +89,12 @@ export function CloseAllDoneButton({ projectId }: { projectId: string }) {
           <span className="text-sm text-muted-foreground whitespace-nowrap">
             关闭范围
           </span>
-          <Select
+          <OptionSelect
             value={sourceFilter}
             onValueChange={(v) => setSourceFilter(v as IssueSourceFilter)}
-          >
-            <SelectTrigger className="h-8 w-auto">
-              <SelectValue>
-                {ISSUE_SOURCE_FILTER_OPTIONS.find(
-                  (opt) => opt.value === sourceFilter,
-                )?.label ?? sourceFilter}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {ISSUE_SOURCE_FILTER_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            options={ISSUE_SOURCE_FILTER_OPTIONS}
+            className="h-8 w-auto"
+          />
         </div>
         {!isPreviewLoading && previewCount === 0 && (
           <p className="px-1 text-xs text-muted-foreground">

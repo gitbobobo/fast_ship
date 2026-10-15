@@ -7,13 +7,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import {
   Card,
   CardAction,
@@ -209,23 +203,19 @@ export function VersionSidebar({
               <span className="text-xs font-medium text-muted-foreground">
                 目标分支
               </span>
-              <Select
+              <OptionSelect
                 value={targetCommitish || ""}
                 onValueChange={(v) => v && onUpdateTargetCommitish(v)}
                 disabled={branchesLoading || branchesError}
-              >
-                <SelectTrigger className="h-8 text-sm" size="sm">
-                  <SelectValue placeholder={targetCommitish || "选择分支"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {branchOptions.map((branch) => (
-                    <SelectItem key={branch.name} value={branch.name}>
-                      {branch.name}
-                      {branch.default && " (默认)"}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                options={branchOptions.map((branch) => ({
+                  value: branch.name,
+                  label: branch.name,
+                  itemLabel: `${branch.name}${branch.default ? " (默认)" : ""}`,
+                }))}
+                placeholder={targetCommitish || "选择分支"}
+                className="h-8 text-sm"
+                size="sm"
+              />
               {branchesError && (
                 <div className="flex items-center justify-between gap-2 rounded-md border border-destructive/30 px-2 py-1.5">
                   <span className="text-xs text-destructive">

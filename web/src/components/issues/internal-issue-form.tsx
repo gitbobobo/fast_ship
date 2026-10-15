@@ -9,17 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MarkdownEditor } from "@/components/ui/markdown-editor";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  ISSUE_WORKFLOW_STATUS_LABELS,
-  ISSUE_WORKFLOW_STATUS_OPTIONS,
-} from "@/lib/issue-workflow-status";
+import { OptionSelect } from "@/components/ui/option-select";
+import { ISSUE_WORKFLOW_STATUS_OPTIONS } from "@/lib/issue-workflow-status";
 import { useAISettings, useGenerateTitle } from "@/lib/hooks/use-ai";
 
 export const internalIssueFormSchema = z.object({
@@ -275,18 +266,13 @@ export function InternalIssueForm({
               control={control}
               name="workflow_status"
               render={({ field }) => (
-                <Select value={field.value} onValueChange={field.onChange}>
-                  <SelectTrigger id="issue-workflow-status" className="w-full">
-                    <SelectValue>{ISSUE_WORKFLOW_STATUS_LABELS[field.value]}</SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    {ISSUE_WORKFLOW_STATUS_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <OptionSelect
+                  value={field.value}
+                  onValueChange={field.onChange}
+                  options={ISSUE_WORKFLOW_STATUS_OPTIONS}
+                  id="issue-workflow-status"
+                  className="w-full"
+                />
               )}
             />
           </div>

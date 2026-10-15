@@ -19,13 +19,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import { ThreadCard } from "@/components/threads/thread-card";
 import { useThreads } from "@/lib/hooks/use-threads";
 import { useThreadListStore } from "@/lib/store/thread-list-store";
@@ -264,55 +258,51 @@ export default function ThreadsPage() {
                 selected={filters.environmentIds}
                 onChange={(environmentIds) => setFilters({ environmentIds })}
               />
-              <Select
+              <OptionSelect
                 value={filters.project || ALL}
                 onValueChange={(value) =>
                   setFilters({ project: !value || value === ALL ? "" : value })
                 }
-              >
-                <SelectTrigger aria-label="筛选项目" className={FILTER_TRIGGER}>
-                  <SelectValue>
-                    {filters.project
-                      ? (selectedProject?.label ?? "已选项目")
-                      : "全部项目"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL}>全部项目</SelectItem>
-                  {projects.map((project) => (
-                    <SelectItem key={project.key} value={project.key}>
-                      {project.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <Select
+                options={[
+                  { value: ALL, label: "全部项目" },
+                  ...projects.map((project) => ({
+                    value: project.key,
+                    label: project.label,
+                  })),
+                ]}
+                valueLabel={
+                  filters.project
+                    ? (selectedProject?.label ?? "已选项目")
+                    : "全部项目"
+                }
+                aria-label="筛选项目"
+                className={FILTER_TRIGGER}
+              />
+              <OptionSelect
                 value={filters.status || ALL}
                 onValueChange={(value) =>
                   setFilters({
                     status: !value || value === ALL ? "" : (value as ThreadStatus),
                   })
                 }
-              >
-                <SelectTrigger aria-label="筛选状态" className={FILTER_TRIGGER}>
-                  <SelectValue>
-                    {filters.status
-                      ? THREAD_STATUS_LABELS[filters.status]
-                      : "全部状态"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL}>全部状态</SelectItem>
-                  {(Object.keys(THREAD_STATUS_LABELS) as ThreadStatus[]).map(
-                    (status) => (
-                      <SelectItem key={status} value={status}>
-                        {THREAD_STATUS_LABELS[status]}
-                      </SelectItem>
-                    ),
-                  )}
-                </SelectContent>
-              </Select>
-              <Select
+                options={[
+                  { value: ALL, label: "全部状态" },
+                  ...(Object.keys(THREAD_STATUS_LABELS) as ThreadStatus[]).map(
+                    (status) => ({
+                      value: status,
+                      label: THREAD_STATUS_LABELS[status],
+                    }),
+                  ),
+                ]}
+                valueLabel={
+                  filters.status
+                    ? THREAD_STATUS_LABELS[filters.status]
+                    : "全部状态"
+                }
+                aria-label="筛选状态"
+                className={FILTER_TRIGGER}
+              />
+              <OptionSelect
                 value={filters.settled || ALL}
                 onValueChange={(value) =>
                   setFilters({
@@ -320,21 +310,17 @@ export default function ThreadsPage() {
                       value === "settled" || value === "unsettled" ? value : "",
                   })
                 }
-              >
-                <SelectTrigger
-                  aria-label="筛选完结状态"
-                  className={FILTER_TRIGGER}
-                >
-                  <SelectValue>
-                    {filters.settled ? SETTLED_LABELS[filters.settled] : "全部"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={ALL}>全部</SelectItem>
-                  <SelectItem value="unsettled">未完结</SelectItem>
-                  <SelectItem value="settled">已完结</SelectItem>
-                </SelectContent>
-              </Select>
+                options={[
+                  { value: ALL, label: "全部" },
+                  { value: "unsettled", label: "未完结" },
+                  { value: "settled", label: "已完结" },
+                ]}
+                valueLabel={
+                  filters.settled ? SETTLED_LABELS[filters.settled] : "全部"
+                }
+                aria-label="筛选完结状态"
+                className={FILTER_TRIGGER}
+              />
               {hasFilters && (
                 <Button variant="ghost" size="sm" onClick={resetFilters}>
                   清除筛选

@@ -9,13 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import {
   Dialog,
   DialogContent,
@@ -98,6 +92,50 @@ const emptyForm: AutomationInput = {
 };
 
 const browserTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+const TRIGGER_TYPE_OPTIONS = [
+  { value: "cron", label: "定时（cron）" },
+  { value: "issue_created", label: "Issue 新建" },
+  { value: "issue_status_changed", label: "Issue 状态变化" },
+  { value: "issue_label_added", label: "Issue 加标签" },
+];
+
+const TIMEOUT_OPTIONS = [
+  { value: "300", label: "5 分钟" },
+  { value: "900", label: "15 分钟" },
+  { value: "3600", label: "1 小时（默认）" },
+  { value: "14400", label: "4 小时" },
+  { value: "86400", label: "24 小时" },
+];
+
+const RUNTIME_MODE_OPTIONS = [
+  { value: "full-access", label: "full-access（默认）" },
+  { value: "auto", label: "auto" },
+  { value: "auto-accept-edits", label: "auto-accept-edits" },
+  { value: "approval-required", label: "approval-required" },
+];
+
+const POST_ACTION_OPTIONS = [
+  { value: "none", label: "无（默认）" },
+  { value: "settle", label: "settle（收进历史区）" },
+  { value: "archive", label: "archive（归档）" },
+];
+
+const POST_ON_TIMEOUT_OPTIONS = [
+  { value: "no", label: "否（默认）" },
+  { value: "yes", label: "是" },
+];
+
+const ENABLED_OPTIONS = [
+  { value: "off", label: "停用（默认）" },
+  { value: "on", label: "启用" },
+];
+
+const EVENT_FIELD_OPTIONS = [
+  { value: "", label: "任意" },
+  { value: "state", label: "state（开关状态）" },
+  { value: "workflow_status", label: "workflow_status" },
+];
 
 export default function AutomationsPage() {
   const { data: automations, isLoading } = useAutomations();
@@ -476,24 +514,14 @@ function AutomationEditorDialog({
 
           <div className="space-y-2">
             <Label>触发方式</Label>
-            <Select
+            <OptionSelect
               value={form.trigger_type}
               onValueChange={(next) =>
                 set("trigger_type", next as AutomationTriggerType)
               }
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="cron">定时（cron）</SelectItem>
-                <SelectItem value="issue_created">Issue 新建</SelectItem>
-                <SelectItem value="issue_status_changed">
-                  Issue 状态变化
-                </SelectItem>
-                <SelectItem value="issue_label_added">Issue 加标签</SelectItem>
-              </SelectContent>
-            </Select>
+              options={TRIGGER_TYPE_OPTIONS}
+              className="w-full"
+            />
           </div>
 
           {form.trigger_type === "cron" ? (
@@ -549,7 +577,7 @@ function AutomationEditorDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label>T3 环境</Label>
-              <Select
+              <OptionSelect
                 value={form.environment_id}
                 onValueChange={(next) =>
                   onFormChange({
@@ -560,22 +588,17 @@ function AutomationEditorDialog({
                     workspace: null,
                   })
                 }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="选择环境" />
-                </SelectTrigger>
-                <SelectContent>
-                  {environments.map((env) => (
-                    <SelectItem key={env.id} value={env.id}>
-                      {env.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                options={environments.map((env) => ({
+                  value: env.id,
+                  label: env.name,
+                }))}
+                placeholder="选择环境"
+                className="w-full"
+              />
             </div>
             <div className="space-y-2">
               <Label>T3 项目</Label>
-              <Select
+              <OptionSelect
                 value={form.t3_project_id}
                 onValueChange={(next) =>
                   onFormChange({
@@ -585,25 +608,20 @@ function AutomationEditorDialog({
                     workspace: null,
                   })
                 }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="选择项目" />
-                </SelectTrigger>
-                <SelectContent>
-                  {projects.map((project) => (
-                    <SelectItem key={project.id} value={project.id}>
-                      {project.title}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                options={projects.map((project) => ({
+                  value: project.id,
+                  label: project.title,
+                }))}
+                placeholder="选择项目"
+                className="w-full"
+              />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label>模型</Label>
-              <Select
+              <OptionSelect
                 value={modelKey}
                 onValueChange={(next) => {
                   if (!next || next === "default") {
@@ -623,31 +641,25 @@ function AutomationEditorDialog({
                     toAutomationModelSelection(buildModelSelection(resolved)),
                   );
                 }}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="项目默认" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="default">项目默认</SelectItem>
-                  {providers.flatMap((provider) =>
-                    provider.models.map((model) => (
-                      <SelectItem
-                        key={`${provider.instanceId}::${model.slug}`}
-                        value={`${provider.instanceId}::${model.slug}`}
-                      >
-                        {provider.name} / {model.name}
-                      </SelectItem>
-                    )),
-                  )}
-                </SelectContent>
-              </Select>
+                options={[
+                  { value: "default", label: "项目默认" },
+                  ...providers.flatMap((provider) =>
+                    provider.models.map((model) => ({
+                      value: `${provider.instanceId}::${model.slug}`,
+                      label: `${provider.name} / ${model.name}`,
+                    })),
+                  ),
+                ]}
+                placeholder="项目默认"
+                className="w-full"
+              />
               <p className="text-xs text-muted-foreground">
                 选项来自该环境 composer-options；留空用 T3 项目默认模型。
               </p>
             </div>
             <div className="space-y-2">
               <Label>工作区</Label>
-              <Select
+              <OptionSelect
                 value={workspaceKind}
                 onValueChange={(next) => {
                   if (next === "worktree") {
@@ -662,22 +674,19 @@ function AutomationEditorDialog({
                   }
                   set("workspace", null);
                 }}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="root">当前检出（默认）</SelectItem>
-                  <SelectItem value="worktree" disabled={!canWorktree}>
-                    新建 worktree
-                  </SelectItem>
-                  {workspaceKind === "existing_worktree" && (
-                    <SelectItem value="existing_worktree">
-                      已有 worktree
-                    </SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
+                options={[
+                  { value: "root", label: "当前检出（默认）" },
+                  {
+                    value: "worktree",
+                    label: "新建 worktree",
+                    disabled: !canWorktree,
+                  },
+                  ...(workspaceKind === "existing_worktree"
+                    ? [{ value: "existing_worktree", label: "已有 worktree" }]
+                    : []),
+                ]}
+                className="w-full"
+              />
               <p className="text-xs text-muted-foreground">
                 {workspaceKind === "worktree"
                   ? `基线分支 ${form.workspace?.base_ref || "（等待仓库信息）"}`
@@ -700,63 +709,35 @@ function AutomationEditorDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label>超时时长</Label>
-              <Select
+              <OptionSelect
                 value={String(form.timeout_seconds ?? 3600)}
                 onValueChange={(next) => set("timeout_seconds", Number(next))}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="300">5 分钟</SelectItem>
-                  <SelectItem value="900">15 分钟</SelectItem>
-                  <SelectItem value="3600">1 小时（默认）</SelectItem>
-                  <SelectItem value="14400">4 小时</SelectItem>
-                  <SelectItem value="86400">24 小时</SelectItem>
-                </SelectContent>
-              </Select>
+                options={TIMEOUT_OPTIONS}
+                className="w-full"
+              />
             </div>
             <div className="space-y-2">
               <Label>运行模式</Label>
-              <Select
+              <OptionSelect
                 value={form.runtime_mode ?? "full-access"}
                 onValueChange={(next) => set("runtime_mode", next as RuntimeMode)}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="full-access">full-access（默认）</SelectItem>
-                  <SelectItem value="auto">auto</SelectItem>
-                  <SelectItem value="auto-accept-edits">
-                    auto-accept-edits
-                  </SelectItem>
-                  <SelectItem value="approval-required">
-                    approval-required
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+                options={RUNTIME_MODE_OPTIONS}
+                className="w-full"
+              />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
               <Label>结束后置操作</Label>
-              <Select
+              <OptionSelect
                 value={form.post_action ?? "none"}
                 onValueChange={(next) =>
                   set("post_action", next as AutomationInput["post_action"])
                 }
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">无（默认）</SelectItem>
-                  <SelectItem value="settle">settle（收进历史区）</SelectItem>
-                  <SelectItem value="archive">archive（归档）</SelectItem>
-                </SelectContent>
-              </Select>
+                options={POST_ACTION_OPTIONS}
+                className="w-full"
+              />
               {form.post_action === "archive" && (
                 <p className="text-xs text-muted-foreground">
                   archive 会终止仍在活动的线程。
@@ -765,35 +746,23 @@ function AutomationEditorDialog({
             </div>
             <div className="space-y-2">
               <Label>超时后仍执行后置</Label>
-              <Select
+              <OptionSelect
                 value={form.post_on_timeout ? "yes" : "no"}
                 onValueChange={(next) => set("post_on_timeout", next === "yes")}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="no">否（默认）</SelectItem>
-                  <SelectItem value="yes">是</SelectItem>
-                </SelectContent>
-              </Select>
+                options={POST_ON_TIMEOUT_OPTIONS}
+                className="w-full"
+              />
             </div>
           </div>
 
           <div className="space-y-2">
             <Label>启用状态</Label>
-            <Select
+            <OptionSelect
               value={form.enabled ? "on" : "off"}
               onValueChange={(next) => set("enabled", next === "on")}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="off">停用（默认）</SelectItem>
-                <SelectItem value="on">启用</SelectItem>
-              </SelectContent>
-            </Select>
+              options={ENABLED_OPTIONS}
+              className="w-full"
+            />
           </div>
         </div>
 
@@ -832,7 +801,7 @@ function EventFilterFields({
       <div className="grid grid-cols-3 gap-3">
         <div className="space-y-2">
           <Label>字段</Label>
-          <Select
+          <OptionSelect
             value={filter.field ?? ""}
             onValueChange={(next) =>
               onChange({
@@ -840,16 +809,10 @@ function EventFilterFields({
                 field: next === "" ? undefined : (next as "state" | "workflow_status"),
               })
             }
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="任意" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="">任意</SelectItem>
-              <SelectItem value="state">state（开关状态）</SelectItem>
-              <SelectItem value="workflow_status">workflow_status</SelectItem>
-            </SelectContent>
-          </Select>
+            options={EVENT_FIELD_OPTIONS}
+            placeholder="任意"
+            className="w-full"
+          />
         </div>
         <div className="space-y-2">
           <Label>从（可选）</Label>
@@ -902,19 +865,16 @@ function IssueProjectSelect({
   const { data: projects } = useProjects();
   const items = projects?.items ?? [];
   return (
-    <Select value={value} onValueChange={(next) => onChange(next ?? "")}>
-      <SelectTrigger className="w-full">
-        <SelectValue placeholder="全部项目" />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="">全部项目</SelectItem>
-        {items.map((project) => (
-          <SelectItem key={project.id} value={project.id}>
-            {project.name}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <OptionSelect
+      value={value}
+      onValueChange={(next) => onChange(next ?? "")}
+      options={[
+        { value: "", label: "全部项目" },
+        ...items.map((project) => ({ value: project.id, label: project.name })),
+      ]}
+      placeholder="全部项目"
+      className="w-full"
+    />
   );
 }
 

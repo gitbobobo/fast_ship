@@ -1,11 +1,5 @@
 import { Monitor, Sun, Moon } from "lucide-react";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import { SettingsPageShell } from "@/routes/settings/layout";
 import { useThemeStore, type Theme } from "@/lib/store/theme-store";
 
@@ -39,23 +33,22 @@ export default function GeneralPage() {
               </p>
             </div>
           </div>
-          <Select value={theme} onValueChange={(value) => setTheme(value as Theme)}>
-            <SelectTrigger className="w-32">
-              <SelectValue placeholder="选择主题">
-                {currentTheme?.label}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {themes.map((t) => (
-                <SelectItem key={t.value} value={t.value}>
-                  <div className="flex items-center gap-2">
-                    <t.icon className="h-4 w-4" />
-                    {t.label}
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <OptionSelect
+            value={theme}
+            onValueChange={(value) => setTheme(value as Theme)}
+            options={themes.map((t) => ({
+              value: t.value,
+              label: t.label,
+              itemLabel: (
+                <div className="flex items-center gap-2">
+                  <t.icon className="h-4 w-4" />
+                  {t.label}
+                </div>
+              ),
+            }))}
+            placeholder="选择主题"
+            className="w-32"
+          />
         </div>
       </div>
     </SettingsPageShell>

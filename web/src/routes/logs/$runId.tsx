@@ -17,13 +17,7 @@ import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   AlertDialog,
@@ -392,28 +386,15 @@ export default function LogRunDetailPage() {
               }
             />
           </div>
-          <Select
+          <OptionSelect
             value={levelFilter}
             onValueChange={(value) =>
               updateSearchParams({
                 level: value === "all" ? null : value,
               })
             }
-          >
-            <SelectTrigger>
-              <SelectValue>
-                {LOG_LEVELS.find((item) => item.value === levelFilter)?.label ??
-                  levelFilter}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {LOG_LEVELS.map((item) => (
-                <SelectItem key={item.value} value={item.value}>
-                  {item.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            options={LOG_LEVELS}
+          />
           {canResetFilters && (
             <Button variant="ghost" size="sm" onClick={handleResetFilters}>
               <RotateCcw className="h-4 w-4" />
