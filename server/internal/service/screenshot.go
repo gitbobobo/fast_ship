@@ -278,6 +278,11 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 		}
 		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
 	}
+	// 客户端错误（如省略维度无法唯一定位变体的 40001）原样透传；
+	// 其余事务错误对调用方一律是内部错误。
+	if errors.Is(txErr, errs.ErrInvalidParams) {
+		return nil, txErr
+	}
 	if txErr != nil {
 		return nil, errs.ErrInternal
 	}
@@ -293,6 +298,67 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 	return &ScreenshotUploadResult{
 		Screen: toScreenshotScreenResponse(screen),
 	}, nil
+}
+
+// resolveUploadVariants 落实上传表单「维度字段不出现保持原值」的语义。存在性
+// 看原始输入（nil=缺席；显式空串规范化后同为 nil 但语义是清除，必须区分）：
+// 缺席的维度从同 screen_key 的既有截图继承。先按已给出的维度值过滤同 key
+// 截图：恰有一个命中即继承缺席维度；多个命中说明省略无法定位唯一变体，
+// 40001 要求显式给出维度；零个（含全新 screen_key，或给出的维度本就无对应
+// 行）按缺席维度建新行。
+func resolveUploadVariants(
+	txRepo *repository.ScreenshotRepository,
+	input *ScreenshotUploadInput,
+	screenKey string,
+	platform, locale, theme *string,
+) (*string, *string, *string, error) {
+	if input.Platform != nil && input.Locale != nil && input.Theme != nil {
+		return platform, locale, theme, nil
+	}
+	screens, err := txRepo.FindScreensByKey(input.ProjectID, screenKey)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	matches := make([]model.ScreenshotScreen, 0, len(screens))
+	for _, sc := range screens {
+		if dimensionValueMatches(input.Platform != nil, platform, sc.Platform) &&
+			dimensionValueMatches(input.Locale != nil, locale, sc.Locale) &&
+			dimensionValueMatches(input.Theme != nil, theme, sc.Theme) {
+			matches = append(matches, sc)
+		}
+	}
+	if len(matches) == 0 {
+		return platform, locale, theme, nil
+	}
+	if len(matches) > 1 {
+		return nil, nil, nil, errs.ErrInvalidParams
+	}
+	origin := &matches[0]
+	if input.Platform == nil {
+		platform = origin.Platform
+	}
+	if input.Locale == nil {
+		locale = origin.Locale
+	}
+	if input.Theme == nil {
+		theme = origin.Theme
+	}
+	return platform, locale, theme, nil
+}
+
+// dimensionValueMatches 判断维度筛选口径：present=false 的维度不参与过滤；
+// present=true 时按规范化值比较（nil=清除为未标注，对应行上的 NULL）。
+func dimensionValueMatches(present bool, want, have *string) bool {
+	if !present {
+		return true
+	}
+	if want == nil {
+		return have == nil
+	}
+	if have == nil {
+		return false
+	}
+	return *want == *have
 }
 
 // isRetryableScreenshotTxError 识别值得整体重试的并发冲突：唯一索引违例
@@ -343,6 +409,13 @@ func (s *ScreenshotService) uploadScreenshotTx(
 	var renamedPath string
 	txErr := s.screenshotRepo.Transaction(func(txRepo *repository.ScreenshotRepository) error {
 		now := time.Now().UTC()
+		// 表单维度字段不出现（nil）按文档语义继承原值，再定位变体；显式空串
+		// 是「清除为未标注」，与缺席必须区分（规范化会把空串折成 nil，所以
+		// 继承只看原始输入的存在性）
+		platform, locale, theme, vErr := resolveUploadVariants(txRepo, input, screenKey, platform, locale, theme)
+		if vErr != nil {
+			return vErr
+		}
 		existing, findErr := txRepo.FindScreenByVariant(input.ProjectID, screenKey, platform, locale, theme)
 		if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
 			return findErr

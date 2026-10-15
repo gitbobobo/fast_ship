@@ -626,7 +626,6 @@ func assembleScreenshotAnnotations(
 			Body:       a.Body,
 			Status:     api.ScreenshotAnnotationStatus(a.Status),
 			Outdated:   a.Outdated,
-			CropUrl:    fmt.Sprintf("/api/screenshot-annotations/%s/crop", a.ID),
 			CreatedBy:  a.CreatedBy,
 			CreatedAt:  api.JSONTime(a.CreatedAt),
 			UpdatedAt:  api.JSONTime(a.UpdatedAt),
@@ -639,6 +638,9 @@ func assembleScreenshotAnnotations(
 			item.ScreenLocale = screen.Locale
 			item.ScreenTheme = screen.Theme
 			item.ImageUrl = buildScreenshotContentURL(&screen)
+			// crop_url 与 image_url 一样带文件版本：覆盖上传后 uploaded_at 变化即换
+			// URL，浏览器缓存按完整 URL 记键，不会把旧版本的裁剪图当缩略图多放 5 分钟
+			item.CropUrl = fmt.Sprintf("/api/screenshot-annotations/%s/crop?v=%d", a.ID, screen.UploadedAt.UnixNano())
 			dims, hit := dimsCache[screen.ID]
 			if !hit {
 				w, h := dimsOf(&screen)

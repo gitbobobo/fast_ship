@@ -363,6 +363,13 @@ describe("canonicalizeScreenshotPlatform", () => {
       "\u03bf\u03b4\u03bf\u03c3",
     );
   });
+
+  it("trims with Go's whitespace set, not JS trim()", () => {
+    // U+0085（NEL）：Go TrimSpace 去掉，JS trim 不去
+    expect(canonicalizeScreenshotPlatform("\u0085web")).toBe("web");
+    // U+FEFF：Go TrimSpace 不去掉，JS trim 会去掉——必须保留
+    expect(canonicalizeScreenshotPlatform("\ufeffweb")).toBe("\ufeffweb");
+  });
 });
 
 describe("matchesLocaleDimension", () => {

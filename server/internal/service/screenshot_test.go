@@ -344,16 +344,21 @@ func TestScreenshotServiceUpload_DimensionFormSemantics(t *testing.T) {
 		t.Fatalf("expected normalized locale, got %+v", second.Screen.Locale)
 	}
 
-	// 不携带维度字段 = 按「未标注」变体寻址：与 ios 变体是两行
-	untagged := uploadTestScreenshot(t, svc, newScreenshotUploadInput(project.ID, user.ID, "settings"))
-	if untagged.Screen.Id == first.Screen.Id {
-		t.Fatalf("expected missing dims to address the untagged variant")
+	// 不携带维度字段 = 文档语义「不出现保持原值」：唯一同 key 截图即覆盖目标，
+	// 维度原值继承（不新建未标注第二行）
+	inherit := uploadTestScreenshot(t, svc, newScreenshotUploadInput(project.ID, user.ID, "settings"))
+	if inherit.Screen.Id != first.Screen.Id {
+		t.Fatalf("expected omitted dims to inherit and overwrite the sole variant, got %q vs %q", inherit.Screen.Id, first.Screen.Id)
 	}
-	if untagged.Screen.Platform != nil || untagged.Screen.Locale != nil || untagged.Screen.Theme != nil {
-		t.Fatalf("expected untagged variant, got %+v", untagged.Screen)
+	if inherit.Screen.Platform == nil || *inherit.Screen.Platform != "ios" {
+		t.Fatalf("expected inherited platform ios, got %+v", inherit.Screen.Platform)
+	}
+	if inherit.Screen.Locale == nil || *inherit.Screen.Locale != "en-US" ||
+		inherit.Screen.Theme == nil || *inherit.Screen.Theme != "light" {
+		t.Fatalf("expected inherited locale/theme, got %+v", inherit.Screen)
 	}
 
-	// 显式空串 = 清除为未标注，与「缺失」寻址到同一未标注变体并覆盖它
+	// 显式空串 = 清除为未标注：与继承寻址不同目标，新建未标注变体
 	cleared := uploadTestScreenshot(t, svc, func() *ScreenshotUploadInput {
 		i := newScreenshotUploadInput(project.ID, user.ID, "settings")
 		i.Platform = strPtr("")
@@ -361,11 +366,39 @@ func TestScreenshotServiceUpload_DimensionFormSemantics(t *testing.T) {
 		i.Theme = strPtr("")
 		return i
 	}())
-	if cleared.Screen.Id != untagged.Screen.Id {
-		t.Fatalf("expected explicit empty dims to overwrite the untagged variant, got %q vs %q", cleared.Screen.Id, untagged.Screen.Id)
+	if cleared.Screen.Id == first.Screen.Id {
+		t.Fatalf("expected explicit empty dims to create the untagged variant, got the ios variant")
+	}
+	if cleared.Screen.Platform != nil || cleared.Screen.Locale != nil || cleared.Screen.Theme != nil {
+		t.Fatalf("expected untagged variant, got %+v", cleared.Screen)
 	}
 
-	_ = first
+	// 同 key 多变体时空缺维度无法定位唯一目标：40001 要求显式给出维度
+	_, err := svc.screenshotService.Upload(newScreenshotUploadInput(project.ID, user.ID, "settings"))
+	if err != errs.ErrInvalidParams {
+		t.Fatalf("expected ErrInvalidParams for ambiguous omitted dims, got %v", err)
+	}
+
+	// 给出部分维度消歧后，缺席维度从命中的唯一变体继承
+	partial := uploadTestScreenshot(t, svc, func() *ScreenshotUploadInput {
+		i := newScreenshotUploadInput(project.ID, user.ID, "settings")
+		i.Platform = strPtr("ios")
+		return i
+	}())
+	if partial.Screen.Id != first.Screen.Id {
+		t.Fatalf("expected platform=ios to disambiguate to the ios variant, got %q vs %q", partial.Screen.Id, first.Screen.Id)
+	}
+	if partial.Screen.Locale == nil || *partial.Screen.Locale != "en-US" {
+		t.Fatalf("expected inherited locale en-US, got %+v", partial.Screen.Locale)
+	}
+
+	// 全新 screen_key 的省略维度就是未标注新行（无原值可继承）
+	fresh := uploadTestScreenshot(t, svc, newScreenshotUploadInput(project.ID, user.ID, "brand-new"))
+	if fresh.Screen.Platform != nil || fresh.Screen.Locale != nil || fresh.Screen.Theme != nil {
+		t.Fatalf("expected untagged new screen, got %+v", fresh.Screen)
+	}
+
+	_ = second
 }
 
 func TestScreenshotServiceUpload_RejectsInvalidDimensions(t *testing.T) {

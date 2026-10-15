@@ -27,6 +27,7 @@ import {
   filterAnnotationsByDimensions,
   filterScreensByDimensions,
   filterScreensByQuery,
+  goTrim,
   SCREENSHOT_NONE,
 } from "@/lib/screenshots";
 import { useProjects } from "@/lib/hooks/use-projects";
@@ -86,12 +87,15 @@ export default function ScreenshotsPage() {
       locale: decodeDimensionFilter(searchParams.get("locale")).map(
         canonicalizeScreenshotLocale,
       ),
-      // 服务端 theme 词表大小写敏感（light|dark），其余值保持原样——本地折叠
-      // 成 light 会让画布命中而服务端过滤 400；只有未标注哨兵按大小写不敏感
-      // 归位（与服务端 EqualFold 摘哨兵同一口径）
-      theme: decodeDimensionFilter(searchParams.get("theme")).map((v) =>
-        v.toLowerCase() === SCREENSHOT_NONE ? SCREENSHOT_NONE : v,
-      ),
+      // 服务端 theme 词表大小写敏感（light|dark），trim 之外不做大小写折叠——
+      // 本地折成 light 会让画布命中而服务端过滤 400；只有未标注哨兵按大小写
+      // 不敏感归位（与服务端 EqualFold 摘哨兵同一口径）
+      theme: decodeDimensionFilter(searchParams.get("theme")).map((v) => {
+        const trimmed = goTrim(v);
+        return trimmed.toLowerCase() === SCREENSHOT_NONE
+          ? SCREENSHOT_NONE
+          : trimmed;
+      }),
       status: status.length > 0 ? status : ["open"],
     };
   }, [searchParams]);

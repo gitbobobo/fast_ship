@@ -1895,7 +1895,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `items[].screenshot_annotations[].pixel_rect.height` | integer | 是 |  |
 | `items[].screenshot_annotations[].body` | string | 是 | 标注文字 |
 | `items[].screenshot_annotations[].status` | string（enum: open \| resolved） | 是 | open=未解决，resolved=已解决 |
-| `items[].screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token= |
+| `items[].screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 | `items[].screenshot_annotations[].created_by` | string | 是 | 用户名或 "API Key: <name>" |
 | `items[].screenshot_annotations[].created_at` | string（date-time） | 是 |  |
 | `items[].screenshot_annotations[].updated_at` | string（date-time） | 是 |  |
@@ -2113,7 +2113,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `screenshot_annotations[].pixel_rect.height` | integer | 是 |  |
 | `screenshot_annotations[].body` | string | 是 | 标注文字 |
 | `screenshot_annotations[].status` | string（enum: open \| resolved） | 是 | open=未解决，resolved=已解决 |
-| `screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token= |
+| `screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 | `screenshot_annotations[].created_by` | string | 是 | 用户名或 "API Key: <name>" |
 | `screenshot_annotations[].created_at` | string（date-time） | 是 |  |
 | `screenshot_annotations[].updated_at` | string（date-time） | 是 |  |
@@ -2582,7 +2582,7 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `screenshot_annotations[].pixel_rect.height` | integer | 是 |  |
 | `screenshot_annotations[].body` | string | 是 | 标注文字 |
 | `screenshot_annotations[].status` | string（enum: open \| resolved） | 是 | open=未解决，resolved=已解决 |
-| `screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token= |
+| `screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 | `screenshot_annotations[].created_by` | string | 是 | 用户名或 "API Key: <name>" |
 | `screenshot_annotations[].created_at` | string（date-time） | 是 |  |
 | `screenshot_annotations[].updated_at` | string（date-time） | 是 |  |
@@ -2806,7 +2806,7 @@ github 来源 Issue 的更改写回 GitHub 远端，internal 仅写本地；`sta
 | `screenshot_annotations[].pixel_rect.height` | integer | 是 |  |
 | `screenshot_annotations[].body` | string | 是 | 标注文字 |
 | `screenshot_annotations[].status` | string（enum: open \| resolved） | 是 | open=未解决，resolved=已解决 |
-| `screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token= |
+| `screenshot_annotations[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 | `screenshot_annotations[].created_by` | string | 是 | 用户名或 "API Key: <name>" |
 | `screenshot_annotations[].created_at` | string（date-time） | 是 |  |
 | `screenshot_annotations[].updated_at` | string（date-time） | 是 |  |
@@ -5019,7 +5019,8 @@ multipart 字段：`file`（必填；内容嗅探须为 image/png、image/jpeg�
 (project_id, screen_key, platform, locale, theme) 定位一张截图（NULL 与 NULL 视为相等）：
 已存在即覆盖——替换文件、更新宽高/大小/上传时间/上传者，不新增行；不存在则新建。
 表单字段存在性语义：`platform`（trim+小写化，开放词表；空串=清除为未标注）、`locale`（BCP 47 规范化，非法值 40001；空串=清除）、
-`theme`（严格 light|dark，其他值 40001；空串=清除）字段出现才生效，不出现保持原值；`title` 非空才更新。
+`theme`（严格 light|dark，其他值 40001；空串=清除）字段出现才生效，不出现保持原值——按同 screen_key 既有截图继承缺席维度；
+已给出的维度能唯一命中才继承，命中多个变体（省略无法定位唯一目标）返回 40001，零个命中按缺席维度新建；`title` 非空才更新。
 覆盖后该截图上全部 open 标注置为 outdated（待确认）；「确认保留」清零。
 `uploaded_by` 由服务端按凭证自动记录（用户名，或 "API Key: <name>"）。
 
@@ -5317,7 +5318,7 @@ platform 非法长度、locale 非法 BCP 47、theme 非 light|dark 返回 40001
 | `items[].pixel_rect.height` | integer | 是 |  |
 | `items[].body` | string | 是 | 标注文字 |
 | `items[].status` | string（enum: open \| resolved） | 是 | open=未解决，resolved=已解决 |
-| `items[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token= |
+| `items[].crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 | `items[].created_by` | string | 是 | 用户名或 "API Key: <name>" |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
@@ -5458,7 +5459,7 @@ x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为
 | `pixel_rect.height` | integer | 是 |  |
 | `body` | string | 是 | 标注文字 |
 | `status` | string（enum: open \| resolved） | 是 | open=未解决，resolved=已解决 |
-| `crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token= |
+| `crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 | `created_by` | string | 是 | 用户名或 "API Key: <name>" |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
@@ -5542,7 +5543,7 @@ JWT 可更新全部字段；API Key 只允许传 `{"status":"resolved"}`，其�
 | `pixel_rect.height` | integer | 是 |  |
 | `body` | string | 是 | 标注文字 |
 | `status` | string（enum: open \| resolved） | 是 | open=未解决，resolved=已解决 |
-| `crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token= |
+| `crop_url` | string | 是 | /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 | `created_by` | string | 是 | 用户名或 "API Key: <name>" |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -148,8 +149,12 @@ func TestRouterScreenshotAnnotation_CropQueryTokenAndHEAD(t *testing.T) {
 	}
 	decodeRouterEnvelope(t, createRec, &created)
 
-	// ?token= 直连
-	getReq := httptest.NewRequest(http.MethodGet, created.CropURL+"?token="+auth.Token, nil)
+	// ?token= 直连（crop_url 带 ?v= 时 token 用 & 追加）
+	sep := "&"
+	if !strings.Contains(created.CropURL, "?") {
+		sep = "?"
+	}
+	getReq := httptest.NewRequest(http.MethodGet, created.CropURL+sep+"token="+auth.Token, nil)
 	getRec := httptest.NewRecorder()
 	env.router.ServeHTTP(getRec, getReq)
 	if getRec.Code != http.StatusOK {

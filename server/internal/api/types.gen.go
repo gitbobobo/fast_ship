@@ -2412,7 +2412,7 @@ type ScreenshotAnnotation struct {
 	// CreatedBy 用户名或 "API Key: <name>"
 	CreatedBy string `json:"created_by"`
 
-	// CropUrl /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token=
+	// CropUrl /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token=
 	CropUrl string `json:"crop_url"`
 
 	// Height 框选矩形高 / 图高（0~1）

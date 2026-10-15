@@ -146,10 +146,10 @@ func TestScreenshotHandlerUpload_DimensionPresenceSemantics(t *testing.T) {
 		t.Fatalf("expected normalized dims to hit same screen, got %q vs %q", againID, screenID)
 	}
 
-	// 不携带维度字段 → 按「未标注」变体寻址（另一行）
-	untaggedID := upload(map[string]string{"screen_key": "home"})
-	if untaggedID == screenID {
-		t.Fatalf("expected missing dims to address the untagged variant")
+	// 不携带维度字段 → 文档语义「不出现保持原值」：唯一同 key 变体被继承并覆盖
+	inheritID := upload(map[string]string{"screen_key": "home"})
+	if inheritID != screenID {
+		t.Fatalf("expected omitted dims to inherit and overwrite the sole variant, got %q vs %q", inheritID, screenID)
 	}
 
 	// theme 非法 → 40001

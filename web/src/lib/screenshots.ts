@@ -74,8 +74,7 @@ export function canonicalizeScreenshotLocale(value: string): string {
   // 单字符扩展（如 en-u-ca-gregory 的 u）之后的子标签一律小写，region 的
   // 大写规则只在扩展边界前生效，避免把扩展里的 ca 折成 CA 对不上库存
   let inExtension = false;
-  return value
-    .trim()
+  return goTrim(value)
     .split("-")
     .map((part, i) => {
       if (inExtension) return part.toLowerCase();
@@ -99,14 +98,61 @@ export function canonicalizeScreenshotLocale(value: string): string {
 }
 
 /**
+ * 按 Go strings.TrimSpace 的字符集去首尾空白：JS trim() 与它的差异是两处——
+ * JS 不去 U+0085（NEL），Go 不去 U+FEFF（零宽不换行）。这里用 Go 的集合，
+ * 保证 URL 手输过滤值的 trim 结果与服务端逐字符一致。
+ */
+/**
+ * 按 Go strings.TrimSpace 的字符集去首尾空白：JS trim() 与它的差异是两处——
+ * JS 不去 U+0085（NEL），Go 不去 U+FEFF（零宽不换行）。这里用 Go 的集合，
+ * 保证 URL 手输过滤值的 trim 结果与服务端逐字符一致。
+ */
+const GO_WHITESPACE = new Set(
+  [
+    "\t",
+    "\n",
+    "\u000b",
+    "\f",
+    "\r",
+    " ",
+    "\u0085",
+    "\u00a0",
+    "\u1680",
+    "\u2000",
+    "\u2001",
+    "\u2002",
+    "\u2003",
+    "\u2004",
+    "\u2005",
+    "\u2006",
+    "\u2007",
+    "\u2008",
+    "\u2009",
+    "\u200a",
+    "\u2028",
+    "\u2029",
+    "\u202f",
+    "\u205f",
+    "\u3000",
+  ].map((c) => c.codePointAt(0)),
+);
+
+export function goTrim(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && GO_WHITESPACE.has(value.charCodeAt(start))) start++;
+  while (end > start && GO_WHITESPACE.has(value.charCodeAt(end - 1))) end--;
+  return value.slice(start, end);
+}
+
+/**
  * 按服务端 strings.ToLower 的大小写口径折叠平台值：Go 逐字符做简单大小写映射，
  * JS toLowerCase 的全量映射只在两类字符上与它分叉——U+0130（İ，全量映射多出
  * 组合上点）与词尾 Σ（全量映射按上下文给 ς）。先行归位这两类，其余字符两侧
  * 输出一致，URL 共享/手输的过滤值与库存规范形逐字符相同。
  */
 export function canonicalizeScreenshotPlatform(value: string): string {
-  return value
-    .trim()
+  return goTrim(value)
     .replace(/\u0130/g, "i")
     .toLowerCase()
     .replace(/\u03c2/g, "\u03c3");

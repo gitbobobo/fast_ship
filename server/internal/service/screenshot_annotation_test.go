@@ -137,8 +137,9 @@ func TestScreenshotAnnotationServiceCreate_AssemblesResponse(t *testing.T) {
 	if resp.ImageUrl != uploaded.Screen.ContentUrl {
 		t.Fatalf("expected image_url to reuse the screen content_url, got %q vs %q", resp.ImageUrl, uploaded.Screen.ContentUrl)
 	}
-	if resp.CropUrl != "/api/screenshot-annotations/"+resp.Id+"/crop" {
-		t.Fatalf("unexpected crop_url %q", resp.CropUrl)
+	// crop_url 与 image_url 一样带文件版本：覆盖上传后 URL 随 uploaded_at 变化
+	if resp.CropUrl != "/api/screenshot-annotations/"+resp.Id+"/crop?v="+strings.Split(uploaded.Screen.ContentUrl, "?v=")[1] {
+		t.Fatalf("unexpected crop_url %q (content_url %q)", resp.CropUrl, uploaded.Screen.ContentUrl)
 	}
 	if resp.Outdated || resp.ImageWidth != 100 || resp.ImageHeight != 50 {
 		t.Fatalf("unexpected dims/outdated: %+v", resp)

@@ -4920,7 +4920,8 @@ paths:
         (project_id, screen_key, platform, locale, theme) 定位一张截图（NULL 与 NULL 视为相等）：
         已存在即覆盖——替换文件、更新宽高/大小/上传时间/上传者，不新增行；不存在则新建。
         表单字段存在性语义：`platform`（trim+小写化，开放词表；空串=清除为未标注）、`locale`（BCP 47 规范化，非法值 40001；空串=清除）、
-        `theme`（严格 light|dark，其他值 40001；空串=清除）字段出现才生效，不出现保持原值；`title` 非空才更新。
+        `theme`（严格 light|dark，其他值 40001；空串=清除）字段出现才生效，不出现保持原值——按同 screen_key 既有截图继承缺席维度；
+        已给出的维度能唯一命中才继承，命中多个变体（省略无法定位唯一目标）返回 40001，零个命中按缺席维度新建；`title` 非空才更新。
         覆盖后该截图上全部 open 标注置为 outdated（待确认）；「确认保留」清零。
         `uploaded_by` 由服务端按凭证自动记录（用户名，或 "API Key: <name>"）。
       security:
@@ -8784,7 +8785,7 @@ components:
           $ref: '#/components/schemas/ScreenshotAnnotationStatus'
         crop_url:
           type: string
-          description: /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token=
+          description: /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token=
         created_by:
           type: string
           description: '用户名或 "API Key: <name>"'

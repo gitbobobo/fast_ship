@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -111,7 +112,7 @@ func TestScreenshotAnnotationHandlerCreate_JWTFlow(t *testing.T) {
 	if result.Status != "open" || result.Body != "文字溢出" || result.CreatedBy != user.Username {
 		t.Fatalf("unexpected payload: %+v", result)
 	}
-	if result.ScreenKey != "home" || result.CropURL != "/api/screenshot-annotations/"+result.ID+"/crop" {
+	if result.ScreenKey != "home" || !strings.HasPrefix(result.CropURL, "/api/screenshot-annotations/"+result.ID+"/crop?v=") {
 		t.Fatalf("unexpected urls: %+v", result)
 	}
 	if result.Outdated || result.VersionID != "" {

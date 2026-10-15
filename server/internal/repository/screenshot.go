@@ -58,6 +58,17 @@ func derefString(s *string) string {
 	return *s
 }
 
+// FindScreensByKey 列出项目内同 screen_key 的全部变体；覆盖上传的省略维度
+// 继承用它判断「原值」归属，多个变体时由调用方要求显式给出维度。
+func (r *ScreenshotRepository) FindScreensByKey(projectID, screenKey string) ([]model.ScreenshotScreen, error) {
+	var screens []model.ScreenshotScreen
+	err := r.db.Where("project_id = ? AND screen_key = ?", projectID, screenKey).Find(&screens).Error
+	if err != nil {
+		return nil, err
+	}
+	return screens, nil
+}
+
 // ScreenshotScreenFilters 是项目级截图列表的可选过滤项；
 // 各维度的多值与「未标注」桶（IncludeNull）按 OR 并入同维度条件。
 type ScreenshotScreenFilters struct {
