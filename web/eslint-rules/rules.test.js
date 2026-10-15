@@ -70,6 +70,43 @@ describe("fast-ship/select-value-label", () => {
     const messages = lint(`<div><SelectValue /></div>`);
     expect(messages).toHaveLength(1);
   });
+
+  it("通过：成员写法 <Select.Root items> 下的 <Select.Value />", () => {
+    const messages = lint(
+      `<Select.Root value={v} items={items}><Select.Trigger><Select.Value /></Select.Trigger></Select.Root>`,
+    );
+    expect(messages).toHaveLength(0);
+  });
+
+  it("报错：成员写法 <Select.Root> 没传 items", () => {
+    const messages = lint(
+      `<Select.Root value={v}><Select.Trigger><Select.Value /></Select.Trigger></Select.Root>`,
+    );
+    expect(messages).toHaveLength(1);
+  });
+
+  it("报错：{undefined} / {null} / {false} / {\"\"} 不算子内容", () => {
+    for (const empty of ["undefined", "null", "false", '""']) {
+      const messages = lint(
+        `<Select value={v}><SelectTrigger><SelectValue>{${empty}}</SelectValue></SelectTrigger></Select>`,
+      );
+      expect(messages).toHaveLength(1);
+    }
+  });
+
+  it("报错：children={undefined} 不算子内容", () => {
+    const messages = lint(
+      `<Select value={v}><SelectTrigger><SelectValue children={undefined} /></SelectTrigger></Select>`,
+    );
+    expect(messages).toHaveLength(1);
+  });
+
+  it("报错：{...props} 展开不算传了 items", () => {
+    const messages = lint(
+      `<Select value={v} {...props}><SelectTrigger><SelectValue /></SelectTrigger></Select>`,
+    );
+    expect(messages).toHaveLength(1);
+  });
 });
 
 describe("fast-ship/no-raw-select", () => {
@@ -125,6 +162,49 @@ describe("fast-ship/no-raw-select", () => {
     const messages = lintModule(
       `import { Select } from "./select";`,
       OPTION_SELECT_FILE,
+    );
+    expect(messages).toHaveLength(0);
+  });
+
+  it("报错：带扩展名的 ui/select 引入", () => {
+    for (const source of [
+      "@/components/ui/select.tsx",
+      "../components/ui/select.tsx",
+    ]) {
+      const messages = lintModule(`import { Select } from "${source}";`);
+      expect(messages).toHaveLength(1);
+    }
+  });
+
+  it("报错：export ... from 转发 ui/select", () => {
+    const messages = lintModule(
+      `export { Select } from "@/components/ui/select";`,
+    );
+    expect(messages).toHaveLength(1);
+  });
+
+  it("报错：动态 import ui/select 或 @base-ui/react/select", () => {
+    for (const source of [
+      "@/components/ui/select",
+      "@base-ui/react/select",
+    ]) {
+      const messages = lintModule(
+        `async function load() { return import("${source}"); }`,
+      );
+      expect(messages).toHaveLength(1);
+    }
+  });
+
+  it("报错：从 @base-ui/react 根包具名引入 Select", () => {
+    const messages = lintModule(
+      `import { Select } from "@base-ui/react";`,
+    );
+    expect(messages).toHaveLength(1);
+  });
+
+  it("通过：从 @base-ui/react 根包引入其他组件", () => {
+    const messages = lintModule(
+      `import { Dialog } from "@base-ui/react";`,
     );
     expect(messages).toHaveLength(0);
   });

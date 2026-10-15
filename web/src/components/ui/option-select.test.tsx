@@ -59,4 +59,32 @@ describe("OptionSelect", () => {
 
     expect(screen.getByRole("combobox")).toHaveTextContent("选择项目");
   });
+
+  it("value 为 undefined 时按受控空值处理，显示 placeholder", () => {
+    render(
+      <OptionSelect
+        value={undefined}
+        onValueChange={() => {}}
+        options={[{ value: "a", label: "项目 A" }]}
+        placeholder="选择项目"
+      />,
+    );
+
+    expect(screen.getByRole("combobox")).toHaveTextContent("选择项目");
+  });
+
+  it("空值时 valueLabel 不盖掉 placeholder", () => {
+    render(
+      <OptionSelect
+        value=""
+        onValueChange={() => {}}
+        options={[{ value: "a", label: "项目 A" }]}
+        placeholder="选择项目"
+        valueLabel="已选项目"
+      />,
+    );
+
+    expect(screen.getByRole("combobox")).toHaveTextContent("选择项目");
+    expect(screen.getByRole("combobox")).not.toHaveTextContent("已选项目");
+  });
 });

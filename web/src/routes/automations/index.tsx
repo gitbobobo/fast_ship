@@ -9,7 +9,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { OptionSelect } from "@/components/ui/option-select";
+import {
+  OptionSelect,
+  withMissingOption,
+} from "@/components/ui/option-select";
 import {
   Dialog,
   DialogContent,
@@ -131,8 +134,11 @@ const ENABLED_OPTIONS = [
   { value: "on", label: "启用" },
 ];
 
+// "" 在 Base UI 里等于未选中，「任意」这种全放行选项要用哨兵值。
+const EVENT_FIELD_ANY = "__any__";
+const ALL_PROJECTS = "__all__";
 const EVENT_FIELD_OPTIONS = [
-  { value: "", label: "任意" },
+  { value: EVENT_FIELD_ANY, label: "任意" },
   { value: "state", label: "state（开关状态）" },
   { value: "workflow_status", label: "workflow_status" },
 ];
@@ -442,13 +448,13 @@ function AutomationEditorDialog({
   const set = <K extends keyof AutomationInput>(key: K, value: AutomationInput[K]) =>
     onFormChange({ ...form, [key]: value });
 
-  const { data: environments = [] } = useQuery({
+  const { data: environments = [], isLoading: environmentsLoading } = useQuery({
     queryKey: ["automations", "env-options"],
     queryFn: async () => (await environmentApi.list()).data.items,
     enabled: open,
   });
 
-  const { data: composer } = useQuery({
+  const { data: composer, isLoading: composerLoading } = useQuery({
     queryKey: ["automations", "composer", form.environment_id],
     queryFn: async () =>
       (
@@ -588,10 +594,16 @@ function AutomationEditorDialog({
                     workspace: null,
                   })
                 }
-                options={environments.map((env) => ({
-                  value: env.id,
-                  label: env.name,
-                }))}
+                options={withMissingOption(
+                  environments.map((env) => ({
+                    value: env.id,
+                    label: env.name,
+                  })),
+                  form.environment_id,
+                  environmentsLoading
+                    ? "加载中…"
+                    : `${form.environment_id}（已失效）`,
+                )}
                 placeholder="选择环境"
                 className="w-full"
               />
@@ -608,10 +620,14 @@ function AutomationEditorDialog({
                     workspace: null,
                   })
                 }
-                options={projects.map((project) => ({
-                  value: project.id,
-                  label: project.title,
-                }))}
+                options={withMissingOption(
+                  projects.map((project) => ({
+                    value: project.id,
+                    label: project.title,
+                  })),
+                  form.t3_project_id,
+                  composerLoading ? "加载中…" : `${form.t3_project_id}（已失效）`,
+                )}
                 placeholder="选择项目"
                 className="w-full"
               />
@@ -641,15 +657,19 @@ function AutomationEditorDialog({
                     toAutomationModelSelection(buildModelSelection(resolved)),
                   );
                 }}
-                options={[
-                  { value: "default", label: "项目默认" },
-                  ...providers.flatMap((provider) =>
-                    provider.models.map((model) => ({
-                      value: `${provider.instanceId}::${model.slug}`,
-                      label: `${provider.name} / ${model.name}`,
-                    })),
-                  ),
-                ]}
+                options={withMissingOption(
+                  [
+                    { value: "default", label: "项目默认" },
+                    ...providers.flatMap((provider) =>
+                      provider.models.map((model) => ({
+                        value: `${provider.instanceId}::${model.slug}`,
+                        label: `${provider.name} / ${model.name}`,
+                      })),
+                    ),
+                  ],
+                  modelKey,
+                  composerLoading ? "加载中…" : `${modelKey}（已失效）`,
+                )}
                 placeholder="项目默认"
                 className="w-full"
               />
@@ -712,7 +732,11 @@ function AutomationEditorDialog({
               <OptionSelect
                 value={String(form.timeout_seconds ?? 3600)}
                 onValueChange={(next) => set("timeout_seconds", Number(next))}
-                options={TIMEOUT_OPTIONS}
+                options={withMissingOption(
+                  TIMEOUT_OPTIONS,
+                  String(form.timeout_seconds ?? 3600),
+                  `${form.timeout_seconds} 秒`,
+                )}
                 className="w-full"
               />
             </div>
@@ -802,15 +826,17 @@ function EventFilterFields({
         <div className="space-y-2">
           <Label>字段</Label>
           <OptionSelect
-            value={filter.field ?? ""}
+            value={filter.field ?? EVENT_FIELD_ANY}
             onValueChange={(next) =>
               onChange({
                 ...filter,
-                field: next === "" ? undefined : (next as "state" | "workflow_status"),
+                field:
+                  !next || next === EVENT_FIELD_ANY
+                    ? undefined
+                    : (next as "state" | "workflow_status"),
               })
             }
             options={EVENT_FIELD_OPTIONS}
-            placeholder="任意"
             className="w-full"
           />
         </div>
@@ -862,17 +888,20 @@ function IssueProjectSelect({
   value: string;
   onChange: (value: string) => void;
 }) {
-  const { data: projects } = useProjects();
+  const { data: projects, isLoading } = useProjects();
   const items = projects?.items ?? [];
   return (
     <OptionSelect
-      value={value}
-      onValueChange={(next) => onChange(next ?? "")}
-      options={[
-        { value: "", label: "全部项目" },
-        ...items.map((project) => ({ value: project.id, label: project.name })),
-      ]}
-      placeholder="全部项目"
+      value={value || ALL_PROJECTS}
+      onValueChange={(next) => onChange(!next || next === ALL_PROJECTS ? "" : next)}
+      options={withMissingOption(
+        [
+          { value: ALL_PROJECTS, label: "全部项目" },
+          ...items.map((project) => ({ value: project.id, label: project.name })),
+        ],
+        value,
+        isLoading ? "加载中…" : `${value}（已失效）`,
+      )}
       className="w-full"
     />
   );

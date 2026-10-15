@@ -66,6 +66,15 @@ import {
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
 
+const ISSUE_SORT_OPTIONS = [
+  { value: "updated_desc", label: "最近更新" },
+  { value: "updated_asc", label: "最早更新" },
+  { value: "created_desc", label: "最新创建" },
+  { value: "created_asc", label: "最早创建" },
+  { value: "comments_desc", label: "评论最多" },
+  { value: "comments_asc", label: "评论最少" },
+];
+
 function IssueProgressBadge({
   progress,
 }: {
@@ -359,7 +368,10 @@ export default function IssuesPage() {
   const issueLabelFilter = searchParams.get("label") ?? "all";
   const issueSourceFilter = searchParams.get("source") ?? "all";
   const issueWorkflowFilter = searchParams.get("workflow_status") ?? "all";
-  const issueSort = searchParams.get("sort") ?? "updated_desc";
+  const sortParam = searchParams.get("sort");
+  const issueSort = ISSUE_SORT_OPTIONS.some((o) => o.value === sortParam)
+    ? (sortParam as string)
+    : "updated_desc";
   const issuePage = Math.max(
     Number(searchParams.get("page") ?? "1") || 1,
     1,
@@ -667,14 +679,7 @@ export default function IssuesPage() {
               onValueChange={(value) =>
                 updateSearchParams({ sort: value ?? null }, true)
               }
-              options={[
-                { value: "updated_desc", label: "最近更新" },
-                { value: "updated_asc", label: "最早更新" },
-                { value: "created_desc", label: "最新创建" },
-                { value: "created_asc", label: "最早创建" },
-                { value: "comments_desc", label: "评论最多" },
-                { value: "comments_asc", label: "评论最少" },
-              ]}
+              options={ISSUE_SORT_OPTIONS}
               placeholder="排序方式"
               className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted"
             />

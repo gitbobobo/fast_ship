@@ -14,7 +14,10 @@ import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { OptionSelect } from "@/components/ui/option-select";
+import {
+  OptionSelect,
+  withMissingOption,
+} from "@/components/ui/option-select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -469,13 +472,17 @@ export default function DocumentsPage() {
                   onValueChange={(value) =>
                     setEditParentId(value === "__root__" || !value ? "" : value)
                   }
-                  options={[
-                    { value: "__root__", label: "根文档" },
-                    ...parentOptions.map((item) => ({
-                      value: item.id,
-                      label: item.title,
-                    })),
-                  ]}
+                  options={withMissingOption(
+                    [
+                      { value: "__root__", label: "根文档" },
+                      ...parentOptions.map((item) => ({
+                        value: item.id,
+                        label: item.title,
+                      })),
+                    ],
+                    editParentId,
+                    listLoading ? "加载中…" : `${editParentId}（已失效）`,
+                  )}
                   placeholder="父文档"
                   className="w-48"
                 />

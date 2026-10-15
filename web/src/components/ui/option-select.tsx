@@ -47,9 +47,12 @@ export function OptionSelect({
   size?: "sm" | "default";
   "aria-label"?: string;
 }) {
+  // value 传 undefined 会让 Base UI 落入非受控模式，统一归一为 null；
+  // "" 被视为未选中，此时 valueLabel 不应盖掉 placeholder。
+  const hasValue = value != null && value !== "";
   return (
     <Select
-      value={value}
+      value={value ?? null}
       onValueChange={(next) => onValueChange(next ?? null)}
       items={options}
       disabled={disabled}
@@ -60,7 +63,11 @@ export function OptionSelect({
         size={size}
         aria-label={ariaLabel}
       >
-        <SelectValue placeholder={placeholder}>{valueLabel}</SelectValue>
+        {hasValue && valueLabel != null ? (
+          <SelectValue placeholder={placeholder}>{valueLabel}</SelectValue>
+        ) : (
+          <SelectValue placeholder={placeholder} />
+        )}
       </SelectTrigger>
       <SelectContent>
         {options.map((option) => (
@@ -75,4 +82,20 @@ export function OptionSelect({
       </SelectContent>
     </Select>
   );
+}
+
+/**
+ * options 异步加载（或引用的数据被删）时，当前 value 可能不在列表里——
+ * Base UI 查不到会回退显示原始 value。用本函数把当前值补成占位项：
+ * 加载中传「加载中…」，加载完仍缺失传 `xx（已失效）`。
+ */
+export function withMissingOption(
+  options: readonly OptionSelectOption[],
+  value: string | null | undefined,
+  label: ReactNode,
+): OptionSelectOption[] {
+  if (!value || options.some((o) => o.value === value)) {
+    return [...options];
+  }
+  return [{ value, label }, ...options];
 }
