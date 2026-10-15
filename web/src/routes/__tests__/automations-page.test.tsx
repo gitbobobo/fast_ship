@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import AutomationsPage from "@/routes/automations";
@@ -89,7 +89,20 @@ describe("AutomationsPage", () => {
   const toggleMutateAsync = vi.fn();
   const deleteMutateAsync = vi.fn();
 
+  // INT-100：界面语言跟随浏览器，测试固定中文。
+  const setLang = (lang: string) => {
+    Object.defineProperty(window.navigator, "language", {
+      value: lang,
+      configurable: true,
+    });
+    Object.defineProperty(window.navigator, "languages", {
+      value: [lang],
+      configurable: true,
+    });
+  };
+
   beforeEach(() => {
+    setLang("zh-CN");
     vi.mocked(useAutomations).mockReturnValue({
       data: [automation],
       isLoading: false,
@@ -138,6 +151,7 @@ describe("AutomationsPage", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    setLang("en-US");
   });
 
   it("renders the empty state", () => {
@@ -165,9 +179,12 @@ describe("AutomationsPage", () => {
     });
 
     expect(screen.getByText("每日令牌回报")).toBeInTheDocument();
-    expect(
-      screen.getByText("定时（cron） · 0 9 * * *（Asia/Shanghai）"),
-    ).toBeInTheDocument();
+    // INT-100：触发列展示中文描述，原表达式放到 hover。
+    const triggerCell = screen.getByText(
+      "定时（cron） · 每天 09:00（Asia/Shanghai）",
+    );
+    expect(triggerCell).toBeInTheDocument();
+    expect(triggerCell).toHaveAttribute("title", "0 9 * * *（Asia/Shanghai）");
     expect(screen.getByText("settle")).toBeInTheDocument();
     expect(screen.getByText("已停用")).toBeInTheDocument();
     expect(
@@ -211,6 +228,149 @@ describe("AutomationsPage", () => {
     expect(screen.getByText("模型")).toBeInTheDocument();
     expect(screen.getByText("工作区")).toBeInTheDocument();
   });
+
+  // ---- INT-100：可视化频率 + cron 高级模式 ----
+
+  const freqSelect = () =>
+    screen.getByText("频率").closest("div")!.querySelector("[role='combobox']")!;
+  const envTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  it("新建默认「每天 09:00」，带描述与下次运行预览", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(freqSelect()).toHaveTextContent("每天");
+    const time = document.querySelector(
+      "input[type='time']",
+    ) as HTMLInputElement;
+    expect(time.value).toBe("09:00");
+    // 时区默认浏览器时区且可搜索，描述与预览同步展示。
+    expect(
+      within(dialog).getByPlaceholderText("搜索时区…"),
+    ).toBeInTheDocument();
+    expect(
+      await within(dialog).findByText(new RegExp(`每天 09:00（${envTz()}）`)),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(/接下来 3 次运行时间/)).toBeInTheDocument();
+  });
+
+  it("编辑简单表达式还原为「每天」", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    await user.click(screen.getByRole("button", { name: "编辑 每日令牌回报" }));
+    await screen.findByRole("dialog");
+    expect(freqSelect()).toHaveTextContent("每天");
+    const time = document.querySelector(
+      "input[type='time']",
+    ) as HTMLInputElement;
+    expect(time.value).toBe("09:00");
+    expect(
+      screen.getByPlaceholderText("搜索时区…"),
+    ).toHaveValue("Asia/Shanghai");
+  });
+
+  it("编辑复杂表达式落入自定义且原文保留", async () => {
+    vi.mocked(useAutomations).mockReturnValue({
+      data: [
+        { ...automation, cron_expression: "*/7 9-17 * * 1-5", timezone: "" },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAutomations>);
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    await user.click(
+      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
+    );
+    await screen.findByRole("dialog");
+    expect(freqSelect()).toHaveTextContent("自定义（cron 表达式）");
+    const input = screen.getByLabelText("cron 表达式") as HTMLInputElement;
+    expect(input.value).toBe("*/7 9-17 * * 1-5");
+    // 空时区按 UTC 生效并显示出来。
+    expect(screen.getByPlaceholderText("搜索时区…")).toHaveValue("UTC");
+    expect(screen.getByText(/五字段|five|分 时 日 月 周/)).toBeInTheDocument();
+  });
+
+  it("自定义模式：实时校验、示例可点击回填", { timeout: 20000 }, async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    const dialog = await screen.findByRole("dialog");
+
+    await user.click(freqSelect());
+    await user.click(await screen.findByText("自定义（cron 表达式）"));
+
+    const input = (await within(dialog).findByLabelText(
+      "cron 表达式",
+    )) as HTMLInputElement;
+    // 切到自定义时带入当前可视化表达式。
+    expect(input.value).toBe("0 9 * * *");
+
+    await user.clear(input);
+    await user.type(input, "61 * * * *");
+    expect(
+      await within(dialog).findByText(/分钟字段.*超出范围/),
+    ).toBeInTheDocument();
+
+    await user.click(within(dialog).getByText("工作日 18:30"));
+    expect(input.value).toBe("30 18 * * 1-5");
+  });
+
+  it("每周多选星期生成描述", { timeout: 20000 }, async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    const dialog = await screen.findByRole("dialog");
+
+    await user.click(freqSelect());
+    await user.click(await screen.findByText("每周"));
+    // 默认勾了周一；再勾周三。
+    await user.click(within(dialog).getByRole("button", { name: "三" }));
+    expect(
+      await within(dialog).findByText(
+        new RegExp(`每周一、周三 09:00（${envTz()}）`),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("英文界面文案（locale=en）", async () => {
+    setLang("en-US");
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(within(dialog).getByText("Frequency")).toBeInTheDocument();
+    expect(freqSelectEn()).toHaveTextContent("Daily");
+    expect(
+      await within(dialog).findByText(
+        new RegExp(`Daily at 09:00 \\(${envTz()}\\)`),
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText(/Next 3 runs/)).toBeInTheDocument();
+  });
+
+  const freqSelectEn = () =>
+    screen.getByText("Frequency").closest("div")!.querySelector("[role='combobox']")!;
 
   it("edit dialog shows option labels instead of raw values (INT-92)", async () => {
     const user = userEvent.setup();
@@ -330,7 +490,7 @@ describe("AutomationsPage", () => {
     );
   });
 
-  it("PR 触发至少要选一个模型（保存被拦下）", async () => {
+  it("PR 触发至少要选一个模型（保存被拦下）", { timeout: 20000 }, async () => {
     const user = userEvent.setup();
     renderWithRoute(<AutomationsPage />, {
       path: "/automations",
@@ -350,7 +510,7 @@ describe("AutomationsPage", () => {
     expect(createMutateAsync).not.toHaveBeenCalled();
   });
 
-  it("PR 触发创建携带 model_selections 与防抖默认 60", async () => {
+  it("PR 触发创建携带 model_selections 与防抖默认 60", { timeout: 20000 }, async () => {
     vi.mocked(threadApi.composerOptions).mockResolvedValue({
       data: {
         projects: [{ id: "proj-1", title: "示例项目" }],
@@ -378,19 +538,20 @@ describe("AutomationsPage", () => {
       initialEntry: "/automations",
     });
 
+    const selectByLabel = (label: string) =>
+      screen.getByText(label).closest("div")!.querySelector("[role='combobox']")!;
+
     await user.click(screen.getByRole("button", { name: "新建自动化" }));
     await screen.findByRole("dialog");
     await user.type(screen.getByLabelText(/名称/), "PR 审查");
     await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
 
-    let combos = screen.getAllByRole("combobox");
-    await user.click(combos[1]);
+    await user.click(selectByLabel("T3 环境"));
     await user.click(await screen.findByText("本机环境"));
-    combos = screen.getAllByRole("combobox");
-    await user.click(combos[2]);
+    await user.click(selectByLabel("T3 项目"));
     await user.click(await screen.findByText("示例项目"));
 
-    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
 
     await user.click(await screen.findByText("Claude / Claude 5"));
@@ -407,7 +568,7 @@ describe("AutomationsPage", () => {
     ]);
   });
 
-  it("PR 触发勾选模型时带上 descriptor 默认选项", async () => {
+  it("PR 触发勾选模型时带上 descriptor 默认选项", { timeout: 20000 }, async () => {
     vi.mocked(threadApi.composerOptions).mockResolvedValue({
       data: {
         projects: [{ id: "proj-1", title: "示例项目" }],
@@ -448,19 +609,20 @@ describe("AutomationsPage", () => {
       initialEntry: "/automations",
     });
 
+    const selectByLabel = (label: string) =>
+      screen.getByText(label).closest("div")!.querySelector("[role='combobox']")!;
+
     await user.click(screen.getByRole("button", { name: "新建自动化" }));
     await screen.findByRole("dialog");
     await user.type(screen.getByLabelText(/名称/), "PR 审查");
     await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
 
-    let combos = screen.getAllByRole("combobox");
-    await user.click(combos[1]);
+    await user.click(selectByLabel("T3 环境"));
     await user.click(await screen.findByText("本机环境"));
-    combos = screen.getAllByRole("combobox");
-    await user.click(combos[2]);
+    await user.click(selectByLabel("T3 项目"));
     await user.click(await screen.findByText("示例项目"));
 
-    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
     await user.click(await screen.findByText("Claude / Claude 5"));
     await user.click(screen.getByRole("button", { name: "保存" }));

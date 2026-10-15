@@ -23,6 +23,7 @@
     "@uiw/react-md-editor": "^4.1.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "cronstrue": "3.30.0",
     "github-markdown-css": "^5.9.0",
     "ky": "^1.14.3",
     "lucide-react": "^1.7.0",
