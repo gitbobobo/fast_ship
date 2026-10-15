@@ -532,7 +532,11 @@ func (s *ScreenshotService) DeleteScreen(screenID, userID string) error {
 		return errs.ErrInternal
 	}
 
-	_ = s.storage.Delete(deletedPath)
+	// 删除失败把路径写入待删队列，下次启动出队重试；文件已不存在视同
+	// 清理成功——与覆盖上传的清理同一条路径，不留无引用的孤儿文件。
+	if err := s.storage.Delete(deletedPath); err != nil && !isAbsentScreenshotFile(err) {
+		_ = s.screenshotRepo.EnqueuePendingDelete(deletedPath)
+	}
 	return nil
 }
 

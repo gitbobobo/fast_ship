@@ -196,6 +196,50 @@ func TestScreenshotServiceUpload_OverwriteDeleteFailureEnqueuesPending(t *testin
 	}
 }
 
+// 删除截图时存储返回临时错误：事务已把行删掉，唯一引用随行消失，
+// 删除失败必须落待删队列，下次启动重试，否则文件永久成为孤儿。
+func TestScreenshotServiceDeleteScreen_DeleteFailureEnqueuesPending(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	created := uploadTestScreenshot(t, svc, newScreenshotUploadInput(project.ID, user.ID, "home"))
+	path := storedScreenRow(t, svc, created.Screen.Id).FilePath
+
+	svc.screenshotService.storage = &failingDeleteStorage{
+		Storage:   svc.storage,
+		failPaths: map[string]bool{path: true},
+	}
+	if err := svc.screenshotService.DeleteScreen(created.Screen.Id, user.ID); err != nil {
+		t.Fatalf("delete screen: %v", err)
+	}
+
+	var row model.ScreenshotPendingDelete
+	if err := svc.db.First(&row).Error; err != nil {
+		t.Fatalf("expected pending-delete row after failed delete cleanup: %v", err)
+	}
+	if row.Path != path {
+		t.Fatalf("expected pending path %q, got %q", path, row.Path)
+	}
+
+	// 下次启动：换回可删除的存储，出队应清掉孤儿文件并清空队列
+	svc.screenshotService.storage = svc.storage
+	removed, err := DrainScreenshotPendingDeletes(svc.db, svc.storage, zap.NewNop())
+	if err != nil {
+		t.Fatalf("drain after retry: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("expected 1 drained file, got %d", removed)
+	}
+	if exists, _ := svc.storage.Exists(path); exists {
+		t.Fatalf("expected orphan file %q removed on retry drain", path)
+	}
+	var pending int64
+	if err := svc.db.Model(&model.ScreenshotPendingDelete{}).Count(&pending).Error; err != nil || pending != 0 {
+		t.Fatalf("expected queue empty after drain, got %d err=%v", pending, err)
+	}
+}
+
 func TestScreenshotServiceUpload_OverwriteChangesContentURL(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
