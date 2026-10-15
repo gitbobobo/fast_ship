@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gh "github.com/google/go-github/v62/github"
 )
@@ -483,6 +484,59 @@ func TestClientListRepositoryLabels(t *testing.T) {
 	}
 }
 
+// INT-97：裸 &http.Client{} 无超时，GitHub 连接半死会把调用方 goroutine
+// 永久挂住（auto-sync / push 都在后台跑）。认证与未认证两分支的 http.Client
+// 都必须带兜底超时——这里直接断言 Timeout 生效值，而不是等 30s 真挂起。
+func TestNewClient_SetsRequestTimeout(t *testing.T) {
+	for _, token := range []string{"", "ghp_test"} {
+		c := NewClient(token, "owner", "repo")
+		if got := c.client.Client().Timeout; got != githubRequestTimeout {
+			t.Fatalf("token=%q: expected http timeout %v, got %v", token, githubRequestTimeout, got)
+		}
+		if got := c.upload.Client().Timeout; got != githubUploadTimeout {
+			t.Fatalf("token=%q: expected upload timeout %v, got %v", token, githubUploadTimeout, got)
+		}
+	}
+}
+
+// httptest 挂起行为验证：服务端接受连接后永不响应时，带超时的请求必须在
+// 有限时间内返回错误而不是永久阻塞。用 test-only 的短超时 client 复现机制。
+func TestClient_HangingServerReturnsTimeoutError(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // 永不响应，直到测试结束
+	}))
+	t.Cleanup(func() {
+		close(release)
+		server.Close()
+	})
+
+	httpClient := server.Client()
+	httpClient.Timeout = 50 * time.Millisecond
+
+	baseURL, err := url.Parse(server.URL + "/")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	ghClient := gh.NewClient(httpClient)
+	ghClient.BaseURL = baseURL
+	client := &Client{client: ghClient, owner: "owner", repo: "repo"}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := client.ListRepositoryLabels(context.Background(), 1, 10)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected timeout error from hanging server")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("request to hanging server did not return within 10s")
+	}
+}
+
 func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 
@@ -500,6 +554,7 @@ func newTestClient(t *testing.T, handler http.Handler) *Client {
 
 	return &Client{
 		client: ghClient,
+		upload: ghClient,
 		owner:  "owner",
 		repo:   "repo",
 	}
