@@ -211,29 +211,41 @@ type reviewCommentWire struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+const (
+	reviewCommentPageSize = 100
+	reviewCommentMaxPages = 10
+)
+
 func (c *Client) ListReviewComments(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewComment, error) {
 	owner, name, err := splitRepo(repoFullName)
 	if err != nil {
 		return nil, err
 	}
-	var wire []reviewCommentWire
-	err = c.withToken(ctx, installationID, func(bearer string) error {
-		return c.h.doJSON(ctx, http.MethodGet,
-			fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100", owner, name, number), bearer, nil, &wire)
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ReviewComment, 0, len(wire))
-	for _, w := range wire {
-		out = append(out, ReviewComment{
-			ID:          w.ID,
-			User:        w.User.Login,
-			Body:        w.Body,
-			InReplyToID: w.InReplyToID,
-			Path:        w.Path,
-			CreatedAt:   w.CreatedAt,
+	var out []ReviewComment
+	for page := 1; page <= reviewCommentMaxPages; page++ {
+		var wire []reviewCommentWire
+		err = c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=%d&page=%d",
+					owner, name, number, reviewCommentPageSize, page),
+				bearer, nil, &wire)
 		})
+		if err != nil {
+			return nil, err
+		}
+		for _, w := range wire {
+			out = append(out, ReviewComment{
+				ID:          w.ID,
+				User:        w.User.Login,
+				Body:        w.Body,
+				InReplyToID: w.InReplyToID,
+				Path:        w.Path,
+				CreatedAt:   w.CreatedAt,
+			})
+		}
+		if len(wire) < reviewCommentPageSize {
+			break
+		}
 	}
 	return out, nil
 }

@@ -72,7 +72,8 @@ agent finished、取消都会在原事务末尾置位。`ClearPendingSync` /
 - **check**：每个模型一个 check run，名 `Fast Ship review (<model>)`，
   `external_id`=run id；`check_run_id` 用 `WHERE check_run_id IS NULL` 写回。
   Checks API 返回 403 时退回整轮一个 `Fast Ship review` 合并 check
-  （全部运行共享同一 id，状态取聚合）。
+  （全部运行共享同一 id，状态取聚合）。合并 check 同样 403（App 没有 Checks
+  写权限）时跳过 check，仍推/更新机器人评论。
 
 | 运行状态 | 评论格 | check |
 | --- | --- | --- |
@@ -90,7 +91,7 @@ PR 触发且 `dispatched|running`，结束/取消后令牌已消费，访问一�
 
 - `GET /api/automation-agent/pull-request` —— PR 元数据
 - `GET /api/automation-agent/pull-request/diff` —— diff，>1MB 截断并标 `truncated`
-- `GET /api/automation-agent/pull-request/comments` —— review 评论列表
+- `GET /api/automation-agent/pull-request/comments` —— review 评论列表（GitHub 分页，每页 100，最多 10 页）
 - `POST /api/automation-agent/pull-request/review` —— COMMENT/APPROVE/REQUEST_CHANGES，
   commit_id 固定本运行 head SHA
 - `POST /api/automation-agent/pull-request/check` —— 只更新本运行 check 的

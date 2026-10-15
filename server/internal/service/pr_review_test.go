@@ -553,6 +553,56 @@ func TestPromote_InflightCapAndRelease(t *testing.T) {
 	}
 }
 
+func TestPromote_CrossPRMarksReviewPending(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	var seed *model.AutomationRun
+	for i := 0; i < prReviewMaxInflightPerUser; i++ {
+		run := env.seedPRRun(t, a, "octocat/hw", 100+i, fmt.Sprintf("seed-sha-%d", i), model.RunStatusPendingRun)
+		if i == 0 {
+			seed = run
+		}
+	}
+	if err := env.handleWebhook(t, "d-b", "opened", "octocat/hw", 2, "sha-b", false, false); err != nil {
+		t.Fatalf("webhook B: %v", err)
+	}
+	var queued []model.AutomationRun
+	if err := env.db.Where("pr_number = ? AND status = ?", 2, model.AutomationRunQueued).Find(&queued).Error; err != nil {
+		t.Fatalf("queued: %v", err)
+	}
+	if len(queued) != 2 {
+		t.Fatalf("queued on PR B = %d, want 2", len(queued))
+	}
+
+	now := time.Now().UTC()
+	env.pr.SyncPendingReviews(now)
+	if comment := env.fake.LastCommentBody(); !strings.Contains(comment, "排队中") {
+		t.Fatalf("queued comment = %q, want 排队中", comment)
+	}
+	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", seed.ID).
+		Updates(map[string]any{"status": model.AutomationRunCompleted, "finished_at": now}).Error; err != nil {
+		t.Fatalf("finish seed: %v", err)
+	}
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return env.pr.promoteQueuedPRRunsTx(tx, user.ID, now)
+	}); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	var rev model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ? AND pr_number = ?", "octocat/hw", 2).First(&rev).Error; err != nil {
+		t.Fatalf("review B: %v", err)
+	}
+	if !rev.SyncPending {
+		t.Fatal("promoted PR B must be sync_pending so GitHub leaves 排队中")
+	}
+	env.pr.SyncPendingReviews(now.Add(time.Second))
+	if comment := env.fake.LastCommentBody(); !strings.Contains(comment, "进行中") {
+		t.Fatalf("comment after promote = %q, want 进行中", comment)
+	}
+}
+
 // seedPRRun 直接落一条 PR 运行（trigger_key 带随机后缀，允许同 SHA 多行布置现场）。
 func (e *prReviewTestEnv) seedPRRun(t *testing.T, a *model.Automation, repo string, prNumber int, sha string, status model.AutomationRunStatus) *model.AutomationRun {
 	t.Helper()
@@ -931,6 +981,44 @@ func TestSync_ChecksForbiddenFallsBackToMergedCheck(t *testing.T) {
 	}
 	if len(runs) != 2 || runs[0].CheckRunID == nil || *runs[0].CheckRunID != *runs[1].CheckRunID {
 		t.Fatalf("runs must share the merged check id")
+	}
+}
+
+func TestSync_ChecksFullyForbiddenStillPushesComment(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	env.fake.ForbidAllChecks(true)
+
+	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("round: %v", err)
+	}
+	env.pr.SyncPendingReviews(nowUTC().Add(time.Second))
+
+	if n := len(env.fake.CheckRuns("octocat/hw")); n != 0 {
+		t.Fatalf("checks = %d, want 0 when Checks API fully forbidden", n)
+	}
+	if comments := env.fake.Comments("octocat/hw", 1); len(comments) != 1 {
+		t.Fatalf("comments = %d, want 1 (comment still pushed)", len(comments))
+	}
+	var rev model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ?", "octocat/hw").First(&rev).Error; err != nil {
+		t.Fatalf("review: %v", err)
+	}
+	if rev.SyncPending {
+		t.Fatalf("sync_pending still set; sync_error=%q", rev.SyncError)
+	}
+	if rev.SyncError != "" {
+		t.Fatalf("sync_error = %q, want empty", rev.SyncError)
+	}
+	var runs []model.AutomationRun
+	if err := env.db.Where("repo_full_name = ?", "octocat/hw").Find(&runs).Error; err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	for _, run := range runs {
+		if run.CheckRunID != nil {
+			t.Fatalf("run %s has check id %d, want none", run.ID, *run.CheckRunID)
+		}
 	}
 }
 
