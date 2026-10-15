@@ -38,6 +38,8 @@ type routerTestEnv struct {
 	apiKeyRepo      *repository.ApiKeyRepository
 	selfLogStore    *selflog.Store
 	selfLogPipeline *selflog.Pipeline
+	// botService 供机器人 E2E 在同一 SQLite 上模拟重启恢复（INT-101）。
+	botService *service.BotService
 }
 
 type routerEnvelope struct {
@@ -932,6 +934,12 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
+	if err := db.AutoMigrate(repository.BotModels()...); err != nil {
+		t.Fatalf("migrate bot test db: %v", err)
+	}
+	if err := repository.EnsureBotSchema(db); err != nil {
+		t.Fatalf("ensure bot schema: %v", err)
+	}
 
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
@@ -1048,6 +1056,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
 	automationService := service.NewAutomationService(db, repository.NewAutomationRepository(db), repository.NewAutomationRunRepository(db), t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zap.NewNop())
 	automationAgentService := service.NewAutomationAgentService(db, repository.NewAutomationRunRepository(db), repository.NewAutomationRunTokenRepository(db), t3ThreadsService, notificationSink, zap.NewNop())
+	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
 	aiHandler := handler.NewAIHandler(aiService)
@@ -1072,6 +1081,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
+	botHandler := handler.NewBotHandler(botService)
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(nil, "", nil)
 
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
@@ -1080,7 +1090,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, selfLogHandler, githubWebhookHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,
@@ -1088,6 +1098,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 		apiKeyRepo:      apiKeyRepo,
 		selfLogStore:    selfLogStore,
 		selfLogPipeline: selfLogPipeline,
+		botService:      botService,
 	}
 }
 

@@ -61,6 +61,8 @@ tags:
     description: 自动化运行令牌专用的 Agent 回报与读取端点（仅 runTokenAuth，INT-90）
   - name: self-logs
     description: Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人归属及显式系统行（无主行默认不可见）；供代理排查 Fast Ship 自身问题
+  - name: bots
+    description: 内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位
 
 paths:
   /api/environments:
@@ -6445,6 +6447,726 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/bots:
+    get:
+      tags: [bots]
+      operationId: listBots
+      summary: 列出当前用户的机器人
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 机器人列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Bot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [bots]
+      operationId: createBot
+      summary: 创建机器人
+      description: |
+        人设与平台规则在创建时拼成系统提示词并生成 prompt_revision=1；
+        API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不做唯一约束。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBotRequest'
+      responses:
+        '200':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Bot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/test-connection:
+    post:
+      tags: [bots]
+      operationId: testBotConnection
+      summary: 测试模型连接（流式与工具调用兼容性）
+      description: |
+        只做最小模型探测，不写入主线。可传完整未保存配置；也可传 bot_id 使用
+        已保存 key，并允许表单覆盖 base_url/model。streaming 与 tool_call 两项
+        检查分别返回；HTTP 200 且 ok=false 表示配置可达性/兼容性问题。
+        SDK 重试显式关零，不产生隐藏重复调用。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestBotConnectionRequest'
+      responses:
+        '200':
+          description: 检查结果（ok=false 时检查项中带失败详情）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotConnectionCheck'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}:
+    get:
+      tags: [bots]
+      operationId: getBot
+      summary: 读取机器人配置
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          description: 机器人配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Bot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [bots]
+      operationId: updateBot
+      summary: 更新机器人配置
+      description: |
+        指针字段表达「未提供保留」；api_key 缺省保留原 key，空串拒绝（40001）。
+        人设变化重建系统提示词并递增 prompt_revision。配置变化对下个 run 生效，
+        当前 run 使用开始时的快照与已创建的客户端。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBotRequest'
+      responses:
+        '200':
+          description: 更新后的机器人配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Bot'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [bots]
+      operationId: deleteBot
+      summary: 删除机器人（连同对话账本级联删除）
+      description: |
+        存在活动 run 或未终结调用（pending_confirmation/queued/running）时返回
+        40927：先显式停止/取消，避免静默丢任务。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 有活动 run 或未终结调用（40927）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/messages:
+    get:
+      tags: [bots]
+      operationId: listBotMessages
+      summary: 主线消息分页
+      description: |
+        before_seq/after_seq 都是排他 seq 边界，页内按 seq 正序；不使用 offset 分页。
+        两个边界都省略时返回最新的 limit 条（聊天首屏加载尾部）；只给 before_seq
+        返回该边界之前最近的 limit 条（「加载更早」）；只给 after_seq 返回该边界
+        之后最早的 limit 条（断线补读）。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: before_seq
+          in: query
+          schema:
+            type: integer
+            format: int64
+          description: 只返回 seq 小于该值的消息；取距该边界最近的 limit 条（「加载更早」）
+        - name: after_seq
+          in: query
+          schema:
+            type: integer
+            format: int64
+          description: 只返回 seq 大于该值的消息；取距该边界最近的 limit 条（补读）
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 200
+      responses:
+        '200':
+          description: 消息列表（含 total=本次返回条数）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items, total]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotMessage'
+                          total:
+                            type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [bots]
+      operationId: sendBotMessage
+      summary: 向主线发送用户消息
+      description: |
+        client_message_id 必填（幂等键）：同键同正文返回已有消息；同键不同正文
+        返回 40925。消息落库后由 runtime 唤醒/延续主线 run；响应返回已落库
+        消息、当前活动 run（可能尚未包含本消息）与 queued 标记。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendBotMessageRequest'
+      responses:
+        '200':
+          description: 已受理
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SendBotMessageResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 同 client_message_id 已用于不同正文（40925）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/events:
+    get:
+      tags: [bots]
+      operationId: streamBotEvents
+      summary: SSE 事件流（持久重放账本）
+      description: |
+        `text/event-stream`。五种事件固定：`delta`（text_delta 增量、
+        message_commit 完整消息提交、run_started、user_message、lifecycle）、
+        `tool_call`（phase=proposed/awaiting_confirmation/queued/running）、
+        `tool_result`（phase=receipt/decision/terminal）、`done`（run 完成，
+        不是整个事件流关闭）、`error`（run 失败；顺序固定 error → done）。
+        每帧 `id: <event_seq>`；断线后用 `after_seq=N` 重放补齐。心跳是
+        `: ping` 注释。SSE 断开只结束订阅，不取消 run。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: after_seq
+          in: query
+          schema:
+            type: integer
+            format: int64
+            default: 0
+          description: 从该事件 seq 之后开始重放
+      responses:
+        '200':
+          description: 事件流
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/BotStreamEvent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/bots/{id}/runs:
+    get:
+      tags: [bots]
+      operationId: listBotRuns
+      summary: 运行记录列表
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        '200':
+          description: run 列表（新→旧）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/runs/{runId}:
+    get:
+      tags: [bots]
+      operationId: getBotRun
+      summary: 读取运行记录
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: run 详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/runs/{runId}/stop:
+    post:
+      tags: [bots]
+      operationId: stopBotRun
+      summary: 停止主线 run
+      description: |
+        置 stop_requested 并取消当前模型/同步调用 context；run 在安全点收尾为
+        stopped。已持久化调用中缺少协议回复的会补「已被中断」；已受理后台调用
+        继续存在，可逐项取消。重复停止或 run 已结束返回 40928。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 停止已请求（run 状态以响应为准）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 运行状态已变化（40928）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/calls:
+    get:
+      tags: [bots]
+      operationId: listBotCalls
+      summary: 调用列表（支持按状态过滤）
+      description: status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/running 查后台执行。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: status
+          in: query
+          schema:
+            type: string
+          description: 逗号分隔的状态过滤
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 200
+      responses:
+        '200':
+          description: 调用列表（新→旧）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotToolCall'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/calls/{callId}:
+    get:
+      tags: [bots]
+      operationId: getBotCall
+      summary: 读取调用详情（卡片当前状态从调用账本派生）
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: callId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 调用详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotToolCall'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/calls/{callId}/result:
+    get:
+      tags: [bots]
+      operationId: getBotCallResult
+      summary: 读取调用的完整瘦身结果（UI 查看）
+      description: 模型侧的分页续读走 fs_result.read 工具；本端点返回完整结果原文。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: callId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 完整结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotCallResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/calls/{callId}/decision:
+    post:
+      tags: [bots]
+      operationId: decideBotCall
+      summary: 确认卡片决定（approve/reject/always_allow）
+      description: |
+        只对保存好的调用参数决策，不能同时修改参数。approve：CAS 为 queued 并
+        唤醒后台 worker；reject：置 rejected 并落唯一终态结果；always_allow：
+        同一事务建立与本次调用相同 action/范围/字段约束的授权并批准当前调用。
+        重复相同决定幂等返回；相互冲突或状态已变化返回 40926。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: callId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BotCallDecisionRequest'
+      responses:
+        '200':
+          description: 决定已生效（返回最新调用状态）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotToolCall'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 调用状态已变化或决定冲突（40926）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/calls/{callId}/cancel:
+    post:
+      tags: [bots]
+      operationId: cancelBotCall
+      summary: 取消后台调用
+      description: |
+        待确认/queued 直接 CAS 终结（未执行，effect_may_have_occurred=false）；
+        running 记录取消并取消其 context，worker 落唯一终态且标记
+        effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回现状。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: callId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 取消结果（返回最新调用状态）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotToolCall'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/authorizations:
+    get:
+      tags: [bots]
+      operationId: listBotAuthorizations
+      summary: 授权列表
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: active
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: true 时只返回未撤销授权
+      responses:
+        '200':
+          description: 授权列表（新→旧）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotAuthorization'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/authorizations/{authorizationId}:
+    delete:
+      tags: [bots]
+      operationId: revokeBotAuthorization
+      summary: 撤销授权（实际撤销，不物理删除）
+      description: |
+        撤销只写 revoked_at，保留审计关联。撤销对尚未认领的授权调用生效
+        （回到待确认）；已经开始的操作不回滚。重复撤销幂等。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: authorizationId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     jwtAuth:
@@ -10296,3 +11018,387 @@ components:
         text:
           type: string
           maxLength: 40000
+
+    Bot:
+      type: object
+      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, base_url, model, api_key_last4, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        persona_prompt:
+          type: string
+          description: 人设原文；平台规则在服务端拼接，不在此回显
+        prompt_revision:
+          type: integer
+          format: int64
+          description: 人设/平台规则版本；用户明确编辑人设时递增
+        platform_prompt_version:
+          type: integer
+          format: int64
+        toolset_version:
+          type: integer
+          format: int64
+        base_url:
+          type: string
+          description: OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1）
+        model:
+          type: string
+        api_key_last4:
+          type: string
+          description: API Key 末四位；明文任何端点都不回显
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateBotRequest:
+      type: object
+      required: [name, base_url, model, api_key]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        persona_prompt:
+          type: string
+        base_url:
+          type: string
+        model:
+          type: string
+        api_key:
+          type: string
+          description: OpenAI 兼容 API Key；加密落库，仅创建/更新时提交
+
+    UpdateBotRequest:
+      type: object
+      description: 指针字段表达「未提供保留」；api_key 空串拒绝（40001）
+      properties:
+        name:
+          type: string
+        persona_prompt:
+          type: string
+        base_url:
+          type: string
+        model:
+          type: string
+        api_key:
+          type: string
+
+    TestBotConnectionRequest:
+      type: object
+      description: 未保存配置时必须提供 base_url/model/api_key；给 bot_id 时用已保存 key 并允许表单覆盖地址/模型
+      properties:
+        bot_id:
+          type: string
+        base_url:
+          type: string
+        model:
+          type: string
+        api_key:
+          type: string
+
+    BotConnectionCheck:
+      type: object
+      required: [ok, checks]
+      properties:
+        ok:
+          type: boolean
+          description: 流式检查通过即 true
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, passed]
+            properties:
+              name:
+                type: string
+                description: streaming / tool_call
+              passed:
+                type: boolean
+              detail:
+                type: string
+                description: 失败原因（截断；不含密钥）
+
+    BotMessage:
+      type: object
+      required: [id, bot_id, seq, kind, content, created_at]
+      description: 不可改写的主线账本；批准/拒绝/错误/恢复都是追加新消息
+      properties:
+        id:
+          type: string
+        bot_id:
+          type: string
+        seq:
+          type: integer
+          format: int64
+        run_id:
+          type: string
+        request_id:
+          type: string
+        call_id:
+          type: string
+        kind:
+          type: string
+          description: user / assistant / tool_reply / background_result / approval_decision / lifecycle
+        content:
+          type: object
+          description: 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串
+        created_at:
+          type: string
+          format: date-time
+
+    SendBotMessageRequest:
+      type: object
+      required: [text, client_message_id]
+      properties:
+        text:
+          type: string
+          minLength: 1
+        client_message_id:
+          type: string
+          minLength: 1
+          description: 幂等键；同键同正文幂等返回，同键不同正文 40925
+
+    SendBotMessageResult:
+      type: object
+      required: [message, queued]
+      properties:
+        message:
+          $ref: '#/components/schemas/BotMessage'
+        run:
+          $ref: '#/components/schemas/BotRun'
+        queued:
+          type: boolean
+          description: 恒为 true；执行交给 runtime
+
+    BotRun:
+      type: object
+      required: [id, bot_id, trigger_source, trigger_key, status, config_snapshot, input_through_seq, stop_requested, usage_complete, created_at]
+      properties:
+        id:
+          type: string
+        bot_id:
+          type: string
+        trigger_source:
+          type: string
+          description: user_message / tool_result / recovery（以后可增加 schedule）
+        trigger_key:
+          type: string
+        status:
+          type: string
+          description: queued / running / completed / failed / stopped
+        config_snapshot:
+          type: string
+          description: 本次模型/地址/提示词版本快照 JSON；不含明文 key
+        input_through_seq:
+          type: integer
+          format: int64
+        stop_requested:
+          type: boolean
+        prompt_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        completion_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        total_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        cached_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        usage_complete:
+          type: boolean
+          description: false 表示上游未报 usage（缺失与零严格区分）
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BotToolCall:
+      type: object
+      required: [id, bot_id, request_id, provider_tool_call_id, tool_name, action, arguments, execution_mode, requires_confirmation, status, execution_context, result_chars, truncated, effect_may_have_occurred, created_at]
+      properties:
+        id:
+          type: string
+          description: 平台调用 ID，同时是执行幂等键
+        bot_id:
+          type: string
+        request_id:
+          type: string
+        provider_tool_call_id:
+          type: string
+          description: 模型协议配对 ID
+        tool_name:
+          type: string
+        action:
+          type: string
+        arguments:
+          type: object
+          description: 规范化后的参数
+        execution_mode:
+          type: string
+          description: sync / async
+        requires_confirmation:
+          type: boolean
+        status:
+          type: string
+          description: pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed
+        decision:
+          type: string
+          nullable: true
+          description: approve / reject / always_allow
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+        authorization_id:
+          type: string
+          nullable: true
+        execution_context:
+          type: object
+          description: 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围
+        cancel_requested:
+          type: boolean
+        result_preview:
+          type: object
+          description: 进入模型上下文的受限结果（完整结果走 result 端点）
+        result_chars:
+          type: integer
+          format: int64
+        truncated:
+          type: boolean
+        error_code:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        effect_may_have_occurred:
+          type: boolean
+          description: 副作用可能已发生（取消/中断/重启）；不声称回滚
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BotCallResult:
+      type: object
+      required: [call_id, status, truncated, result_chars]
+      properties:
+        call_id:
+          type: string
+        status:
+          type: string
+        result:
+          type: object
+          description: 完整瘦身结果原文
+        truncated:
+          type: boolean
+        result_chars:
+          type: integer
+          format: int64
+
+    BotCallDecisionRequest:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          description: approve / reject / always_allow
+
+    BotAuthorization:
+      type: object
+      required: [id, tool_name, action, scope_kind, scope_id, constraints, created_at]
+      properties:
+        id:
+          type: string
+        tool_name:
+          type: string
+        action:
+          type: string
+        scope_kind:
+          type: string
+          description: project / project_collection / issue_project / thread_launch / thread / thread_stop
+        scope_id:
+          type: string
+          description: 范围主体 ID（项目/Issue 所属项目/T3 项目/线程；project_collection 时为用户 ID）
+        environment_id:
+          type: string
+          nullable: true
+        constraints:
+          type: object
+          description: 规范化约束（如允许写入的字段集合 fields）
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    BotEvent:
+      type: object
+      required: [seq, event_type, payload]
+      description: SSE 重放账本条目（GET /events 的 HTTP 语义只用于流；本 schema 描述单帧 data）
+      properties:
+        seq:
+          type: integer
+          format: int64
+        event_type:
+          type: string
+          description: delta / tool_call / tool_result / done / error
+        payload:
+          type: object
+          description: 统一形状 {bot_id, run_id?, message_id?, call_id?, kind, phase?, payload}
+
+    BotStreamEvent:
+      type: object
+      description: |
+        SSE 帧 data 的统一形状：bot_id 必带；kind 区分 delta 下的
+        text_delta / message_commit / run_started / user_message / lifecycle，
+        tool_call 的 phase 区分 proposed / awaiting_confirmation / queued /
+        running，tool_result 的 phase 区分 receipt / decision / terminal，
+        done 携带 run 终态，error 携带 code/message（顺序固定 error → done）。
+      properties:
+        bot_id:
+          type: string
+        run_id:
+          type: string
+        message_id:
+          type: string
+        call_id:
+          type: string
+        kind:
+          type: string
+        phase:
+          type: string
+        payload:
+          type: object

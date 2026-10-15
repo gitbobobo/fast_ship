@@ -154,6 +154,13 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 // persisted with the local comment after the side effect; the local unique
 // constraint and remote marker lookup make retries converge on that effect.
 func (s *IssueService) CreateInternalCommentIdempotent(issueID, userID string, req CreateInternalIssueCommentRequest, actor, idempotencyKey string) (*IssueCommentResponse, error) {
+	return s.CreateInternalCommentIdempotentContext(context.Background(), issueID, userID, req, actor, idempotencyKey)
+}
+
+// CreateInternalCommentIdempotentContext 是 Context 版本：GitHub 评论的网络
+// 调用在调用方 context 之上加预算（机器人后台 worker 取消用，INT-101）；
+// 旧签名委托此处。
+func (s *IssueService) CreateInternalCommentIdempotentContext(parent context.Context, issueID, userID string, req CreateInternalIssueCommentRequest, actor, idempotencyKey string) (*IssueCommentResponse, error) {
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		return nil, errs.ErrInvalidParams
@@ -196,7 +203,7 @@ func (s *IssueService) CreateInternalCommentIdempotent(issueID, userID string, r
 			return nil, appErr
 		}
 		client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 		defer cancel()
 		commentBody := body
 		var createdComment *ghclient.IssueComment

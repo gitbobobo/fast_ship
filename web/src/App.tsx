@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { watchGithubTokensIdentity } from "@/lib/hooks/use-github-tokens";
 import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
+import { watchBotsIdentity } from "@/lib/hooks/use-bots";
 
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
@@ -43,6 +44,8 @@ const GithubTokensPage = lazy(
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const AutomationsPage = lazy(() => import("@/routes/automations/index"));
 const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
+const BotsPage = lazy(() => import("@/routes/bots/index"));
+const BotDetailPage = lazy(() => import("@/routes/bots/$botId"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
 const NewThreadPage = lazy(() => import("@/routes/threads/new"));
 const ThreadDetailPage = lazy(
@@ -62,9 +65,11 @@ export default function App() {
   useEffect(() => {
     const stopThreads = watchThreadsIdentity(queryClient);
     const stopGithubTokens = watchGithubTokensIdentity(queryClient);
+    const stopBots = watchBotsIdentity(queryClient);
     return () => {
       stopThreads();
       stopGithubTokens();
+      stopBots();
     };
   }, []);
 
@@ -199,6 +204,11 @@ export default function App() {
               <Route
                 path="/notifications"
                 element={<LazyPage render={<NotificationsPage />} />}
+              />
+              <Route path="/bots" element={<LazyPage render={<BotsPage />} />} />
+              <Route
+                path="/bots/:botId"
+                element={<LazyPage render={<BotDetailPage />} />}
               />
             </Route>
 

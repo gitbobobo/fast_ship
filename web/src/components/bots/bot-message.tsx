@@ -1,0 +1,140 @@
+import type { BotCall, BotCallDecision, BotMessage } from "@/lib/api/bots";
+import { cn } from "@/lib/utils";
+import { BotConfirmationCard } from "./bot-confirmation-card";
+import { BotToolCard } from "./bot-tool-card";
+
+const DECISION_LABELS: Record<string, string> = {
+  approve: "已批准",
+  reject: "已拒绝",
+  always_allow: "已设为始终允许",
+};
+
+/**
+ * 主线单条消息：用户右对齐、机器人左对齐；assistant 消息内联渲染
+ * 工具卡（待确认时替换为确认卡）。后台结果、批准决定与生命周期
+ * 事件是平台投影出的结构性消息，用安静的样式与对话正文区分。
+ */
+export function BotMessageView({
+  botId,
+  message,
+  draft = false,
+  calls,
+  busyCallId,
+  callActionError,
+  onDecide,
+  onCancelCall,
+}: {
+  botId: string;
+  message: BotMessage;
+  draft?: boolean;
+  calls: BotCall[];
+  busyCallId: string | null;
+  callActionError?: unknown;
+  onDecide: (callId: string, decision: BotCallDecision) => void;
+  onCancelCall: (callId: string) => void;
+}) {
+  const text = message.content.text;
+
+  if (message.kind === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-2xl rounded-br-sm bg-primary px-3.5 py-2 text-sm text-primary-foreground break-words whitespace-pre-wrap">
+          {text}
+        </div>
+      </div>
+    );
+  }
+
+  if (message.kind === "lifecycle") {
+    // detail 是服务端附加的任意 JSON；已知恢复通知带 note 字段。
+    const note = (message.content.detail as { note?: string } | undefined)?.note;
+    return (
+      <p className="text-center text-xs text-muted-foreground">
+        {note || message.content.event || ""}
+      </p>
+    );
+  }
+
+  if (message.kind === "approval_decision") {
+    const decision = message.content.decision ?? "";
+    return (
+      <p className="text-center text-xs text-muted-foreground">
+        {DECISION_LABELS[decision] ?? "已处理决定"}
+        {message.content.call_id ? " · 调用已按决定继续" : ""}
+      </p>
+    );
+  }
+
+  if (message.kind === "background_result") {
+    return (
+      <section className="space-y-1.5 rounded-xl border border-dashed bg-muted/20 px-3.5 py-2.5 text-sm">
+        <p className="text-xs font-medium text-muted-foreground">
+          平台后台结果
+          {message.content.call_id ? ` · ${message.content.call_id.slice(0, 8)}` : ""}
+        </p>
+        {message.content.summary && (
+          <p className="break-words whitespace-pre-wrap">{message.content.summary}</p>
+        )}
+        {message.content.error_message && (
+          <p className="text-xs text-destructive">
+            {message.content.error_code ? `${message.content.error_code}: ` : ""}
+            {message.content.error_message}
+          </p>
+        )}
+      </section>
+    );
+  }
+
+  if (message.kind === "tool_reply") {
+    // 能关联到工具卡的回执已由卡片吸收；关联不到的退化成协议回复提示行。
+    return (
+      <p className="text-xs text-muted-foreground">
+        {message.content.content || "工具已受理"}
+      </p>
+    );
+  }
+
+  // assistant
+  return (
+    <div className="space-y-2">
+      {(text || draft) && (
+        <div
+          className={cn(
+            "inline-block max-w-[85%] rounded-2xl rounded-bl-sm bg-muted px-3.5 py-2 text-sm break-words whitespace-pre-wrap",
+            draft && "opacity-80",
+          )}
+        >
+          {text}
+          {draft && (
+            <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-foreground/60 align-middle" />
+          )}
+        </div>
+      )}
+      {(message.content.tool_calls ?? []).map((tc) => {
+        const call = calls.find((c) => c.id === tc.call_id);
+        if (call?.status === "pending_confirmation" && call.requires_confirmation) {
+          return (
+            <BotConfirmationCard
+              key={tc.call_id}
+              call={call}
+              busy={busyCallId === call.id}
+              error={callActionError}
+              onDecide={onDecide}
+            />
+          );
+        }
+        return (
+          <BotToolCard
+            key={tc.call_id}
+            botId={botId}
+            call={call}
+            fallbackName={tc.tool_name}
+            fallbackAction={tc.action}
+            onCancel={onCancelCall}
+            cancelling={busyCallId === tc.call_id}
+          />
+        );
+      })}
+    </div>
+  );
+}
