@@ -41,9 +41,9 @@
   防抖行，否则取评审账；已写入 `github_pr_seen_shas` 但不是当前 head 的 SHA
   一律 202 忽略——A 已开轮、B 还在 debounce 时，迟到的 `opened(A)` /
   `synchronize(A)` 也不能删掉 B 的 debounce。force-push 回已见过的 SHA 不再
-  开轮。payload 的 `pull_request.updated_at` 早于已受理 head 的，即使该 SHA
-  从未写入 seen/运行也拒绝——GitHub 先投递 `synchronize(B)` 再迟到
-  `synchronize(A)` 时不能取消 B。webhook 在开事务前拿 per-PR 锁，与 agent
+  开轮。payload 的 `pull_request.updated_at` 早于或等于已受理 head 的，即使
+  该 SHA 从未写入 seen/运行也拒绝——GitHub 先投递 `synchronize(B)` 再迟到
+  同一秒的 `synchronize(A)` 时不能取消 B。webhook 在开事务前拿 per-PR 锁，与 agent
   代发和超时终态串行。曾 dispatched/running
   的由事务外同步调 `T3ThreadsService.StopThread`（`run.interrupt`，`holdQueue=true`）
   中断线程，每运行只尝试一次（`stop_attempted_at` 标记）；queued / 未认领不调。
