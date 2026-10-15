@@ -4,7 +4,7 @@
 
 ## 数据模型
 
-两张表，GORM `AutoMigrate` 注册（`server/cmd/server/main.go`），无外置迁移工具。
+三张表，GORM `AutoMigrate` 注册（`server/cmd/server/main.go`），无外置迁移工具。除 `screenshot_screens`、`screenshot_annotations`（见 Issue 一节）外，`screenshot_pending_deletes` 是待删文件队列：迁移折叠、覆盖上传、删除截图提交后清理旧文件失败（非 ENOENT）时把路径入队，每次启动出队重试删除，文件已不存在视同清理成功——排障「磁盘上为什么还留着截图文件」先查这张表。
 
 ### `screenshot_screens`
 
@@ -59,7 +59,7 @@
 `server/cmd/server/migrate_screenshots.go`，随服务启动自动执行，幂等可重复（versions 表消失后即空操作）：
 
 - 每 screen 折叠为其最新版本（rowid 口径）的文件信息；
-- `group_name` 按 `lower(trim(group_name))` 迁入 `platform`（空 → NULL）；
+- `group_name` 按 Go 侧与服务端写入相同的 `NormalizeScreenshotPlatform` 规则迁入 `platform`（trim+lowercase，空 → NULL）：合规值照常迁入；不合规值（含逗号、等于未标注哨兵 `__none__`、超 100 字符）platform 保持 NULL，原分组名追加进 `title`（title 为空则直接作为 title），分组信息不静默丢弃；规范化后为空的纯非空格空白值（如 `\n`，SQLite trim 只去空格）按未标注跳过；
 - 挂在非最新版本上的 open 标注置 `outdated=true`；
 - 删除旧版本行与 `screenshot_versions` 表；`screenshot_annotations.version_id` 列连同指向 versions 的外键经子表重建移除（顺序关键：标注表必须先摆脱 CASCADE 外键，否则 DROP TABLE 的隐式 DELETE 会连带删标注）；截图表的 `version_count`/`group_name`/`last_uploaded_at` 遗留列一并删除；
 - 事务提交后删除被折叠的旧版本文件。
