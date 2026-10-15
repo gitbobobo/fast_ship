@@ -166,6 +166,12 @@ export default function ScreenshotsPage() {
     () => visibleAnnotations.filter((a) => a.status === "resolved").length,
     [visibleAnnotations],
   );
+  // 启动/复制的口径与提示词目标一致：按状态范围收窄。resolved-only 下范围
+  // 内没有 open，入口置灰，提示词不会指向显示范围之外的标注。
+  const launchOpenCount = useMemo(
+    () => (statusScope.open ? scopeOpenCount : 0),
+    [scopeOpenCount, statusScope],
+  );
 
   // 筛选选项由全量数据推导（含计数与「未标注」桶）
   const platformOptions = useMemo(
@@ -263,10 +269,10 @@ export default function ScreenshotsPage() {
           locale: filters.locale,
           theme: filters.theme,
         },
-        openCount: scopeOpenCount,
+        openCount: launchOpenCount,
         resolvedCount: scopeResolvedCount,
       }),
-    [activeProjectId, filters, scopeOpenCount, scopeResolvedCount],
+    [activeProjectId, filters, launchOpenCount, scopeResolvedCount],
   );
 
   return (
@@ -399,7 +405,7 @@ export default function ScreenshotsPage() {
                 locale: filters.locale,
                 theme: filters.theme,
               }}
-              openCount={scopeOpenCount}
+              openCount={launchOpenCount}
               resetKey={`${activeProjectId}|${searchParams.toString()}`}
               controlsEnabled={openScreenId === null && !uploadOpen && !launchOpen}
               locateRequest={locateRequest}
@@ -423,7 +429,7 @@ export default function ScreenshotsPage() {
           onOpenChange={setLaunchOpen}
           projectId={activeProjectId}
           promptText={promptText}
-          openCount={scopeOpenCount}
+          openCount={launchOpenCount}
         />
       )}
 

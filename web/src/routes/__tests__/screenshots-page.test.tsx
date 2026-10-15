@@ -532,4 +532,31 @@ describe("ScreenshotsPage", () => {
     expect(launchProps.promptText).toContain("项目ID：proj-1");
     expect(launchProps.promptText).toContain("status=open");
   });
+
+  it("disables the launch scope when the status filter is resolved-only", async () => {
+    vi.mocked(useScreenshotAnnotations).mockReturnValue({
+      data: [
+        { id: "a-1", screen_id: "s1", status: "open" } as ScreenshotAnnotation,
+        {
+          id: "a-2",
+          screen_id: "s2",
+          status: "resolved",
+        } as ScreenshotAnnotation,
+      ],
+      isSuccess: true,
+      isFetching: false,
+    } as unknown as ReturnType<typeof useScreenshotAnnotations>);
+    renderPage("/screenshots?status=resolved");
+
+    // resolved-only 时范围内的 open 为 0：入口置灰，提示词不指向范围外标注
+    await waitFor(() => {
+      expect(canvasProps().openCount).toBe(0);
+    });
+    const launchProps = mockLaunchDialog.mock.calls.at(-1)?.[0] as
+      | { openCount: number }
+      | undefined;
+    if (launchProps) {
+      expect(launchProps.openCount).toBe(0);
+    }
+  });
 });

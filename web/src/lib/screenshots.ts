@@ -65,16 +65,23 @@ export function toggleDimensionValue(
 
 /**
  * 按服务端 normalizeScreenshotLocale 的大小写口径折叠语言标签：language 小写、
- * 4 字母 script 首字母大写、2 字母 region 大写。不做 BCP 47 语法校验——库存
- * 里只有合法规范化值，非法 URL 匹配自然落空。选这条而不是搬完整校验器，是
- * 因为前端过滤只要与库存对齐，400 仍由服务端负责。
+ * 4 字母 script 首字母大写、2 字母 region 大写，其余子标签小写。不做 BCP 47
+ * 语法校验——库存里只有合法规范化值，非法 URL 匹配自然落空，400 仍由服务端负责。
  */
 export function canonicalizeScreenshotLocale(value: string): string {
   if (value === SCREENSHOT_NONE) return value;
+  // 单字符扩展（如 en-u-ca-gregory 的 u）之后的子标签一律小写，region 的
+  // 大写规则只在扩展边界前生效，避免把扩展里的 ca 折成 CA 对不上库存
+  let inExtension = false;
   return value
     .trim()
     .split("-")
     .map((part, i) => {
+      if (inExtension) return part.toLowerCase();
+      if (i > 0 && /^[A-Za-z0-9]$/.test(part)) {
+        inExtension = true;
+        return part.toLowerCase();
+      }
       if (i === 0) return part.toLowerCase();
       if (/^[A-Za-z]{4}$/.test(part)) {
         return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();

@@ -273,6 +273,18 @@ describe("canonicalizeScreenshotLocale", () => {
     expect(canonicalizeScreenshotLocale("ZH-hans-cn")).toBe("zh-Hans-CN");
     expect(canonicalizeScreenshotLocale("__none__")).toBe("__none__");
   });
+
+  it("keeps extension subtags lowercase after the singleton", () => {
+    expect(canonicalizeScreenshotLocale("en-u-ca-gregory")).toBe(
+      "en-u-ca-gregory",
+    );
+    expect(canonicalizeScreenshotLocale("en-x-private-us")).toBe(
+      "en-x-private-us",
+    );
+    expect(canonicalizeScreenshotLocale("en-US-u-ca-gregory")).toBe(
+      "en-US-u-ca-gregory",
+    );
+  });
 });
 
 describe("matchesLocaleDimension", () => {
