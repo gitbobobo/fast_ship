@@ -122,7 +122,10 @@ export default function LogRunDetailPage() {
     error: runQueryError,
   } = useLogRun(projectId, runId);
 
-  const levelFilter = searchParams.get("level") ?? "all";
+  const levelParam = searchParams.get("level");
+  const levelFilter = LOG_LEVELS.some((o) => o.value === levelParam)
+    ? (levelParam as string)
+    : "all";
   const queryFilter = searchParams.get("q") ?? "";
   const deferredQuery = useDeferredValue(queryFilter.trim());
 

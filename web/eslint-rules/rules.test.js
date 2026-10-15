@@ -1,6 +1,9 @@
 import { Linter } from "eslint";
 import path from "node:path";
+import tseslint from "typescript-eslint";
 import plugin from "./index.js";
+
+const tsParser = tseslint.parser;
 
 const linter = new Linter();
 const SRC = path.resolve(process.cwd(), "src");
@@ -107,10 +110,20 @@ describe("fast-ship/select-value-label", () => {
     );
     expect(messages).toHaveLength(1);
   });
+
+  it("报错：items={undefined} / {null} / {\"\"} 等于没传", () => {
+    for (const empty of ["undefined", "null", '""']) {
+      const messages = lint(
+        `<Select value={v} items={${empty}}><SelectTrigger><SelectValue /></SelectTrigger></Select>`,
+      );
+      expect(messages).toHaveLength(1);
+    }
+  });
 });
 
 describe("fast-ship/no-raw-select", () => {
-  function lintModule(code, filename = BUSINESS_FILE) {
+  // type-only 语法需要 TS parser，单独开关切换。
+  function lintModule(code, filename = BUSINESS_FILE, useTsParser = false) {
     return linter.verify(
       code,
       [
@@ -118,7 +131,9 @@ describe("fast-ship/no-raw-select", () => {
           files: ["**/*.{ts,tsx}"],
           plugins: { "fast-ship": plugin },
           languageOptions: {
-            ecmaVersion: 2023,
+            ...(useTsParser
+              ? { parser: tsParser }
+              : { ecmaVersion: 2023 }),
             sourceType: "module",
             parserOptions: { ecmaFeatures: { jsx: true } },
           },
@@ -206,6 +221,45 @@ describe("fast-ship/no-raw-select", () => {
     const messages = lintModule(
       `import { Dialog } from "@base-ui/react";`,
     );
+    expect(messages).toHaveLength(0);
+  });
+
+  it("报错：@base-ui/react 根包的命名空间/默认导入都能拿到 Select", () => {
+    for (const code of [
+      `import * as BUI from "@base-ui/react";`,
+      `import BUI from "@base-ui/react";`,
+      `async function load() { return import("@base-ui/react"); }`,
+    ]) {
+      const messages = lintModule(code);
+      expect(messages).toHaveLength(1);
+    }
+  });
+
+  it("报错：export * 转发 @base-ui/react 根包", () => {
+    for (const code of [
+      `export * from "@base-ui/react";`,
+      `export * as ns from "@base-ui/react";`,
+      `export { Select } from "@base-ui/react";`,
+    ]) {
+      const messages = lintModule(code);
+      expect(messages).toHaveLength(1);
+    }
+  });
+
+  it("通过：type-only 引入 Select 不产出运行时代码", () => {
+    for (const code of [
+      `import type { Select } from "@base-ui/react";`,
+      `import { type Select, Combobox } from "@base-ui/react";`,
+      `export type { Select } from "@base-ui/react";`,
+      `import type { Select } from "@/components/ui/select";`,
+    ]) {
+      const messages = lintModule(code, BUSINESS_FILE, true);
+      expect(messages).toHaveLength(0);
+    }
+  });
+
+  it("通过：@base-ui/react 副作用导入不接触 Select", () => {
+    const messages = lintModule(`import "@base-ui/react";`);
     expect(messages).toHaveLength(0);
   });
 });

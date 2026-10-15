@@ -79,10 +79,16 @@ export default {
     }
 
     // 只认显式 items= 属性；{...props} 这类展开无法静态确认含 items，不算数。
+    // items={undefined}/{null}/"" 等于没传，同样拦截。
     function passesItems(selectElement) {
-      return selectElement.openingElement.attributes.some(
-        (attr) => attr.type === "JSXAttribute" && attr.name.name === "items",
+      const attr = selectElement.openingElement.attributes.find(
+        (a) => a.type === "JSXAttribute" && a.name.name === "items",
       );
+      if (!attr || attr.value == null) return false;
+      if (attr.value.type === "JSXExpressionContainer") {
+        return !isEmptyExpression(attr.value.expression);
+      }
+      return attr.value.type !== "Literal" || attr.value.value !== "";
     }
 
     return {

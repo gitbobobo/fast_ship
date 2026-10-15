@@ -481,7 +481,11 @@ export default function DocumentsPage() {
                       })),
                     ],
                     editParentId,
-                    listLoading ? "加载中…" : `${editParentId}（已失效）`,
+                    listLoading
+                      ? "加载中…"
+                      : listError
+                        ? "加载失败，请重试"
+                        : `${editParentId}（已失效）`,
                   )}
                   placeholder="父文档"
                   className="w-48"

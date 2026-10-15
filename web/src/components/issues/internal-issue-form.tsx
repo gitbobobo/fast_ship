@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { MarkdownEditor } from "@/components/ui/markdown-editor";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { OptionSelect } from "@/components/ui/option-select";
-import { ISSUE_WORKFLOW_STATUS_OPTIONS } from "@/lib/issue-workflow-status";
+import { ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS } from "@/lib/issue-workflow-status";
 import { useAISettings, useGenerateTitle } from "@/lib/hooks/use-ai";
 
 export const internalIssueFormSchema = z.object({
@@ -267,9 +267,14 @@ export function InternalIssueForm({
               name="workflow_status"
               render={({ field }) => (
                 <OptionSelect
-                  value={field.value}
-                  onValueChange={field.onChange}
-                  options={ISSUE_WORKFLOW_STATUS_OPTIONS}
+                  value={field.value || "unset"}
+                  onValueChange={(next) =>
+                    field.onChange(!next || next === "unset" ? "" : next)
+                  }
+                  options={[
+                    { value: "unset", label: "未设置" },
+                    ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
+                  ]}
                   id="issue-workflow-status"
                   className="w-full"
                 />

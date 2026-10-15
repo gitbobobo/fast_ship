@@ -620,9 +620,18 @@ export default function IssuesPage() {
             </div>
             <OptionSelect
               value={issueStateFilter}
-              onValueChange={(value) =>
-                updateSearchParams({ state: value ?? null }, true)
-              }
+              onValueChange={(value) => {
+                // state 默认值是 open，「全部状态」必须显式写 all——
+                // 走通用删除路径会回弹成 open。
+                const next = new URLSearchParams(searchParams);
+                if (!value || value === "open") {
+                  next.delete("state");
+                } else {
+                  next.set("state", value);
+                }
+                next.delete("page");
+                setSearchParams(next, { replace: true });
+              }}
               options={[
                 { value: "all", label: "状态", itemLabel: "全部状态" },
                 { value: "open", label: "开启" },

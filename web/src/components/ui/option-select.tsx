@@ -63,11 +63,9 @@ export function OptionSelect({
         size={size}
         aria-label={ariaLabel}
       >
-        {hasValue && valueLabel != null ? (
-          <SelectValue placeholder={placeholder}>{valueLabel}</SelectValue>
-        ) : (
-          <SelectValue placeholder={placeholder} />
-        )}
+        <SelectValue placeholder={placeholder}>
+          {hasValue ? valueLabel : undefined}
+        </SelectValue>
       </SelectTrigger>
       <SelectContent>
         {options.map((option) => (
@@ -87,7 +85,8 @@ export function OptionSelect({
 /**
  * options 异步加载（或引用的数据被删）时，当前 value 可能不在列表里——
  * Base UI 查不到会回退显示原始 value。用本函数把当前值补成占位项：
- * 加载中传「加载中…」，加载完仍缺失传 `xx（已失效）`。
+ * 加载中传「加载中…」，加载完仍缺失传 `xx（已失效）`。占位项标记 disabled，
+ * 只用于收起态文案，点开下拉时不能选中它去覆盖联动字段。
  */
 export function withMissingOption(
   options: readonly OptionSelectOption[],
@@ -97,5 +96,5 @@ export function withMissingOption(
   if (!value || options.some((o) => o.value === value)) {
     return [...options];
   }
-  return [{ value, label }, ...options];
+  return [{ value, label, disabled: true }, ...options];
 }

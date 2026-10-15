@@ -8,7 +8,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import { OptionSelect } from "@/components/ui/option-select";
+import {
+  OptionSelect,
+  withMissingOption,
+} from "@/components/ui/option-select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   useDeleteIssueShipHook,
@@ -191,10 +194,14 @@ function ShipHookEditForm({
                   : (value as IssueWorkflowStatus),
               )
             }
-            options={[
-              { value: "unset", label: "未设置" },
-              ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
-            ]}
+            options={withMissingOption(
+              [
+                { value: "unset", label: "未设置" },
+                ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
+              ],
+              workflowStatus === "" ? "unset" : workflowStatus,
+              `${workflowStatus}（未知）`,
+            )}
             className="h-8 text-sm"
           />
         </div>

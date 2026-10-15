@@ -24,14 +24,21 @@ function resolvesToUiSelect(filename, source) {
 }
 
 // 模块说明符里 Select 组件的来源：返回 "ui" | "baseui" | null。
-// @base-ui/react 根包会再导出 Select 命名空间，具名引入/转发 Select 同样拦截。
+// @base-ui/react 根包会再导出 Select 命名空间：具名引入/转发 Select、
+// 命名空间/默认导入、export *、import() 这些能拿到 Select 的形式全部拦截；
+// import type / export type 不产出运行时代码，不算使用。
 function selectSource(filename, source, specifiers) {
   if (source === "@base-ui/react/select") return "baseui";
   if (source === "@base-ui/react") {
-    const hasSelect = (specifiers ?? []).some(
+    if (specifiers == null) return "baseui";
+    const hasSelect = specifiers.some(
       (s) =>
-        (s.type === "ImportSpecifier" || s.type === "ExportSpecifier") &&
-        (s.imported?.name ?? s.local?.name) === "Select",
+        s.type === "ImportNamespaceSpecifier" ||
+        s.type === "ImportDefaultSpecifier" ||
+        s.type === "ExportNamespaceSpecifier" ||
+        ((s.type === "ImportSpecifier" || s.type === "ExportSpecifier") &&
+          s.importKind !== "type" &&
+          (s.imported?.name ?? s.local?.name) === "Select"),
     );
     return hasSelect ? "baseui" : null;
   }
@@ -57,6 +64,7 @@ export default {
     if (ALLOWED_FILES.has(context.filename)) return {};
 
     function check(node, sourceNode, specifiers) {
+      if (node.importKind === "type" || node.exportKind === "type") return;
       const source = sourceNode?.value;
       if (typeof source !== "string") return;
       const kind = selectSource(context.filename, source, specifiers);

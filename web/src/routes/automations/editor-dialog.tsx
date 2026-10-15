@@ -119,13 +119,21 @@ export function AutomationEditorDialog({
   const set = <K extends keyof AutomationInput>(key: K, value: AutomationInput[K]) =>
     onFormChange({ ...form, [key]: value });
 
-  const { data: environments = [], isLoading: environmentsLoading } = useQuery({
+  const {
+    data: environments = [],
+    isLoading: environmentsLoading,
+    isError: environmentsError,
+  } = useQuery({
     queryKey: ["automations", "env-options"],
     queryFn: async () => (await environmentApi.list()).data.items,
     enabled: open,
   });
 
-  const { data: composer, isLoading: composerLoading } = useQuery({
+  const {
+    data: composer,
+    isLoading: composerLoading,
+    isError: composerError,
+  } = useQuery({
     queryKey: ["automations", "composer", form.environment_id],
     queryFn: async () =>
       (
@@ -273,7 +281,9 @@ export function AutomationEditorDialog({
                   form.environment_id,
                   environmentsLoading
                     ? "加载中…"
-                    : `${form.environment_id}（已失效）`,
+                    : environmentsError
+                      ? "加载失败，请重试"
+                      : `${form.environment_id}（已失效）`,
                 )}
                 placeholder="选择环境"
                 className="w-full"
@@ -297,7 +307,11 @@ export function AutomationEditorDialog({
                     label: project.title,
                   })),
                   form.t3_project_id,
-                  composerLoading ? "加载中…" : `${form.t3_project_id}（已失效）`,
+                  composerLoading
+                    ? "加载中…"
+                    : composerError
+                      ? "加载失败，请重试"
+                      : `${form.t3_project_id}（已失效）`,
                 )}
                 placeholder="选择项目"
                 className="w-full"
@@ -339,7 +353,11 @@ export function AutomationEditorDialog({
                     ),
                   ],
                   modelKey,
-                  composerLoading ? "加载中…" : `${modelKey}（已失效）`,
+                  composerLoading
+                    ? "加载中…"
+                    : composerError
+                      ? "加载失败，请重试"
+                      : `${modelKey}（已失效）`,
                 )}
                 placeholder="项目默认"
                 className="w-full"
@@ -416,7 +434,11 @@ export function AutomationEditorDialog({
               <OptionSelect
                 value={form.runtime_mode ?? "full-access"}
                 onValueChange={(next) => set("runtime_mode", next as RuntimeMode)}
-                options={RUNTIME_MODE_OPTIONS}
+                options={withMissingOption(
+                  RUNTIME_MODE_OPTIONS,
+                  form.runtime_mode ?? "full-access",
+                  `${form.runtime_mode}（未知）`,
+                )}
                 className="w-full"
               />
             </div>
@@ -507,7 +529,11 @@ function EventFilterFields({
                     : (next as "state" | "workflow_status"),
               })
             }
-            options={EVENT_FIELD_OPTIONS}
+            options={withMissingOption(
+              EVENT_FIELD_OPTIONS,
+              filter.field ?? EVENT_FIELD_ANY,
+              `${filter.field}（未知）`,
+            )}
             className="w-full"
           />
         </div>
@@ -559,7 +585,7 @@ function IssueProjectSelect({
   value: string;
   onChange: (value: string) => void;
 }) {
-  const { data: projects, isLoading } = useProjects();
+  const { data: projects, isLoading, isError } = useProjects();
   const items = projects?.items ?? [];
   return (
     <OptionSelect
@@ -571,7 +597,11 @@ function IssueProjectSelect({
           ...items.map((project) => ({ value: project.id, label: project.name })),
         ],
         value,
-        isLoading ? "加载中…" : `${value}（已失效）`,
+        isLoading
+          ? "加载中…"
+          : isError
+            ? "加载失败，请重试"
+            : `${value}（已失效）`,
       )}
       className="w-full"
     />

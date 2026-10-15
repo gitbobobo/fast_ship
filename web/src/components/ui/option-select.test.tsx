@@ -1,5 +1,8 @@
 import { render, screen } from "@testing-library/react";
-import { OptionSelect } from "@/components/ui/option-select";
+import {
+  OptionSelect,
+  withMissingOption,
+} from "@/components/ui/option-select";
 
 // 回归守护：收起态必须显示 label 而不是内部 value（Base UI 无 items 时会露 value）。
 describe("OptionSelect", () => {
@@ -86,5 +89,48 @@ describe("OptionSelect", () => {
 
     expect(screen.getByRole("combobox")).toHaveTextContent("选择项目");
     expect(screen.getByRole("combobox")).not.toHaveTextContent("已选项目");
+  });
+
+  it("异步选项 pending 时注入占位项显示文案而非原始 ID", () => {
+    render(
+      <OptionSelect
+        value="env-1"
+        onValueChange={() => {}}
+        options={withMissingOption([], "env-1", "加载中…")}
+      />,
+    );
+
+    const trigger = screen.getByRole("combobox");
+    expect(trigger).toHaveTextContent("加载中…");
+    expect(trigger).not.toHaveTextContent("env-1");
+  });
+
+  it("value 缺失时注入禁用的占位项，防止误选覆盖联动字段", () => {
+    const options = withMissingOption(
+      [{ value: "a", label: "项目 A" }],
+      "env-1",
+      "env-1（已失效）",
+    );
+
+    expect(options[0]).toEqual({
+      value: "env-1",
+      label: "env-1（已失效）",
+      disabled: true,
+    });
+    expect(options).toHaveLength(2);
+  });
+
+  it("value 已在 options 中或为空时不注入占位项", () => {
+    const base = [{ value: "a", label: "项目 A" }];
+
+    expect(withMissingOption(base, "a", "多余")).toEqual([
+      { value: "a", label: "项目 A" },
+    ]);
+    expect(withMissingOption(base, null, "多余")).toEqual([
+      { value: "a", label: "项目 A" },
+    ]);
+    expect(withMissingOption(base, "", "多余")).toEqual([
+      { value: "a", label: "项目 A" },
+    ]);
   });
 });

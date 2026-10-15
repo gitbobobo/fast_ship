@@ -7,7 +7,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { OptionSelect } from "@/components/ui/option-select";
+import {
+  OptionSelect,
+  withMissingOption,
+} from "@/components/ui/option-select";
 import {
   Card,
   CardAction,
@@ -207,12 +210,20 @@ export function VersionSidebar({
                 value={targetCommitish || ""}
                 onValueChange={(v) => v && onUpdateTargetCommitish(v)}
                 disabled={branchesLoading || branchesError}
-                options={branchOptions.map((branch) => ({
-                  value: branch.name,
-                  label: branch.name,
-                  itemLabel: `${branch.name}${branch.default ? " (默认)" : ""}`,
-                }))}
-                placeholder={targetCommitish || "选择分支"}
+                options={withMissingOption(
+                  branchOptions.map((branch) => ({
+                    value: branch.name,
+                    label: branch.name,
+                    itemLabel: `${branch.name}${branch.default ? " (默认)" : ""}`,
+                  })),
+                  targetCommitish,
+                  branchesLoading
+                    ? "加载中…"
+                    : branchesError
+                      ? "加载失败，请重试"
+                      : `${targetCommitish}（已失效）`,
+                )}
+                placeholder="选择分支"
                 className="h-8 text-sm"
                 size="sm"
               />

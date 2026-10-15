@@ -71,7 +71,10 @@ import {
   DropdownMenuTrigger,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { OptionSelect } from "@/components/ui/option-select";
+import {
+  OptionSelect,
+  withMissingOption,
+} from "@/components/ui/option-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
@@ -1365,10 +1368,14 @@ export default function IssueDetailPage() {
               value={issue.internal_meta?.workflow_status || "unset"}
               onValueChange={(value) => void handleWorkflowStatusChange(value ?? "unset")}
               disabled={updateInternalMeta.isPending}
-              options={[
-                { value: "unset", label: "未设置" },
-                ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
-              ]}
+              options={withMissingOption(
+                [
+                  { value: "unset", label: "未设置" },
+                  ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
+                ],
+                issue.internal_meta?.workflow_status || "unset",
+                `${issue.internal_meta?.workflow_status}（未知）`,
+              )}
               placeholder="未设置"
               className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted"
             />

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import AutomationsPage from "@/routes/automations";
 import { renderWithRoute } from "@/test/render";
+import { environmentApi, threadApi } from "@/lib/api/threads";
 import {
   useAutomationRuns,
   useAutomations,
@@ -111,6 +112,27 @@ describe("AutomationsPage", () => {
     vi.mocked(useDeleteAutomation).mockReturnValue({
       mutateAsync: deleteMutateAsync,
     } as unknown as ReturnType<typeof useDeleteAutomation>);
+    // mockReturnValue(挂起 Promise) 的实现不会被 clearAllMocks 清掉，
+    // 每个用例开始前重放 resolved 实现，防 pending 泄漏到后续用例。
+    vi.mocked(environmentApi.list).mockResolvedValue({
+      data: { items: [{ id: "env-1", name: "本机环境" }] },
+    });
+    vi.mocked(threadApi.composerOptions).mockResolvedValue({
+      data: {
+        projects: [{ id: "proj-1", title: "示例项目" }],
+        config: {},
+        settings: {},
+      },
+    });
+    vi.mocked(threadApi.workspaceOptions).mockResolvedValue({
+      data: {
+        project_id: "proj-1",
+        cwd: "/tmp",
+        is_repo: true,
+        ref_name: "main",
+        refs: [],
+      },
+    });
   });
 
   afterEach(() => {
