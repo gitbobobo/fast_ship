@@ -185,6 +185,7 @@ describe("fast-ship/no-raw-select", () => {
     for (const source of [
       "@/components/ui/select.tsx",
       "../components/ui/select.tsx",
+      "@base-ui/react/select.js",
     ]) {
       const messages = lintModule(`import { Select } from "${source}";`);
       expect(messages).toHaveLength(1);

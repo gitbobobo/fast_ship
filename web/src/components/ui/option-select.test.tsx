@@ -1,4 +1,6 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { vi } from "vitest";
 import {
   OptionSelect,
   withMissingOption,
@@ -118,6 +120,29 @@ describe("OptionSelect", () => {
       disabled: true,
     });
     expect(options).toHaveLength(2);
+  });
+
+  it("重选当前值不触发 onValueChange，防止联动字段被同值点击清空", async () => {
+    const user = userEvent.setup();
+    const onValueChange = vi.fn();
+    render(
+      <OptionSelect
+        value="a"
+        onValueChange={onValueChange}
+        options={[
+          { value: "a", label: "项目 A" },
+          { value: "b", label: "项目 B" },
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: "项目 A" }));
+    expect(onValueChange).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: "项目 B" }));
+    expect(onValueChange).toHaveBeenCalledWith("b");
   });
 
   it("value 已在 options 中或为空时不注入占位项", () => {

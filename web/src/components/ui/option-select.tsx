@@ -50,10 +50,16 @@ export function OptionSelect({
   // value 传 undefined 会让 Base UI 落入非受控模式，统一归一为 null；
   // "" 被视为未选中，此时 valueLabel 不应盖掉 placeholder。
   const hasValue = value != null && value !== "";
+  const current = value ?? null;
   return (
     <Select
-      value={value ?? null}
-      onValueChange={(next) => onValueChange(next ?? null)}
+      value={current}
+      // Base UI 对重选当前值也会触发 onValueChange：提前挡掉，避免
+      // 环境/项目这类联动选择器被同值点击清空下游字段。
+      onValueChange={(next) => {
+        const normalized = next ?? null;
+        if (normalized !== current) onValueChange(normalized);
+      }}
       items={options}
       disabled={disabled}
     >

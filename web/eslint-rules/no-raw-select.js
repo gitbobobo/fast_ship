@@ -28,8 +28,9 @@ function resolvesToUiSelect(filename, source) {
 // 命名空间/默认导入、export *、import() 这些能拿到 Select 的形式全部拦截；
 // import type / export type 不产出运行时代码，不算使用。
 function selectSource(filename, source, specifiers) {
-  if (source === "@base-ui/react/select") return "baseui";
-  if (source === "@base-ui/react") {
+  const bare = source.replace(MODULE_EXT, "");
+  if (bare === "@base-ui/react/select") return "baseui";
+  if (bare === "@base-ui/react") {
     if (specifiers == null) return "baseui";
     const hasSelect = specifiers.some(
       (s) =>

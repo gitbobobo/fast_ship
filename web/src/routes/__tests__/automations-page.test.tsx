@@ -116,14 +116,14 @@ describe("AutomationsPage", () => {
     // 每个用例开始前重放 resolved 实现，防 pending 泄漏到后续用例。
     vi.mocked(environmentApi.list).mockResolvedValue({
       data: { items: [{ id: "env-1", name: "本机环境" }] },
-    });
+    } as unknown as Awaited<ReturnType<typeof environmentApi.list>>);
     vi.mocked(threadApi.composerOptions).mockResolvedValue({
       data: {
         projects: [{ id: "proj-1", title: "示例项目" }],
         config: {},
         settings: {},
       },
-    });
+    } as unknown as Awaited<ReturnType<typeof threadApi.composerOptions>>);
     vi.mocked(threadApi.workspaceOptions).mockResolvedValue({
       data: {
         project_id: "proj-1",
@@ -132,7 +132,7 @@ describe("AutomationsPage", () => {
         ref_name: "main",
         refs: [],
       },
-    });
+    } as unknown as Awaited<ReturnType<typeof threadApi.workspaceOptions>>);
   });
 
   afterEach(() => {
