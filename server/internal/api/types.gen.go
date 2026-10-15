@@ -3609,6 +3609,16 @@ type UpdateMe200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// UpdatePassword200JSONResponseBody defines parameters for UpdatePassword.
+type UpdatePassword200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *RefreshResponse `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // RefreshToken200JSONResponseBody defines parameters for RefreshToken.
 type RefreshToken200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功

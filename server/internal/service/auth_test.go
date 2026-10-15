@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ type authTestServices struct {
 	db               *gorm.DB
 	cfg              *config.Config
 	authService      *AuthService
+	userRepo         *repository.UserRepository
 	jwtBlacklistRepo *repository.JWTBlacklistRepository
 	refreshTokenRepo *repository.RefreshTokenRepository
 }
@@ -55,6 +57,7 @@ func setupAuthTestServices(t *testing.T) *authTestServices {
 		db:               db,
 		cfg:              cfg,
 		authService:      NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, nil),
+		userRepo:         userRepo,
 		jwtBlacklistRepo: jwtBlacklistRepo,
 		refreshTokenRepo: refreshTokenRepo,
 	}
@@ -64,8 +67,8 @@ func TestAuthServiceRefreshAccessTokenSuccess(t *testing.T) {
 	services := setupAuthTestServices(t)
 	user := createTestUser(t, services.db, "user-refresh-success")
 
-	refreshToken, err := services.authService.generateRefreshToken(user.ID)
-	if err != nil {
+	refreshToken, created, err := services.authService.generateRefreshToken(user)
+	if err != nil || !created {
 		t.Fatalf("generate refresh token: %v", err)
 	}
 
@@ -147,8 +150,8 @@ func TestAuthServiceRefreshAccessTokenInvalidToken(t *testing.T) {
 func TestAuthServiceLogoutRevokesRefreshToken(t *testing.T) {
 	services := setupAuthTestServices(t)
 	user := createTestUser(t, services.db, "user-logout-refresh")
-	refreshToken, err := services.authService.generateRefreshToken(user.ID)
-	if err != nil {
+	refreshToken, created, err := services.authService.generateRefreshToken(user)
+	if err != nil || !created {
 		t.Fatalf("generate refresh token: %v", err)
 	}
 
@@ -172,6 +175,280 @@ func TestAuthServiceLogoutRevokesRefreshToken(t *testing.T) {
 	}
 	if stored.RevokedAt == nil {
 		t.Fatalf("expected refresh token to be revoked on logout")
+	}
+}
+
+func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
+	services := setupAuthTestServices(t)
+	ctx := context.Background()
+
+	reg, err := services.authService.Register(ctx, &RegisterRequest{
+		Username: "pwuser",
+		Email:    "pwuser@example.com",
+		Password: "OldPass123",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	oldRefresh := reg.RefreshToken
+	userID := reg.User.Id
+
+	// 再开一条会话，确认改密把多条 refresh token 一并吊销。
+	second, err := services.authService.Login(ctx, &LoginRequest{Login: "pwuser", Password: "OldPass123"})
+	if err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+
+	resp, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "OldPass123",
+		NewPassword: "NewPass456",
+	})
+	if err != nil {
+		t.Fatalf("update password: %v", err)
+	}
+	if resp.Token == "" || resp.RefreshToken == "" {
+		t.Fatalf("expected new token pair for current session, got %+v", resp)
+	}
+
+	if _, err := services.authService.RefreshAccessToken(oldRefresh); err != errs.ErrRefreshTokenInvalid {
+		t.Fatalf("expected old refresh token rejected, got %v", err)
+	}
+	if _, err := services.authService.RefreshAccessToken(second.RefreshToken); err != errs.ErrRefreshTokenInvalid {
+		t.Fatalf("expected other session refresh token rejected, got %v", err)
+	}
+
+	// 改密前签发的 access token 版本为 0，已不再是当前版本。
+	if current, err := services.authService.IsTokenVersionCurrent(userID, 0); err != nil || current {
+		t.Fatalf("expected pre-change token version rejected, current=%v err=%v", current, err)
+	}
+	if current, err := services.authService.IsTokenVersionCurrent(userID, 1); err != nil || !current {
+		t.Fatalf("expected post-change token version accepted, current=%v err=%v", current, err)
+	}
+
+	token, err := jwt.Parse(resp.Token, func(token *jwt.Token) (any, error) {
+		return []byte(services.cfg.JWT.Secret), nil
+	})
+	if err != nil {
+		t.Fatalf("parse new access token: %v", err)
+	}
+	claims := token.Claims.(jwt.MapClaims)
+	if ver, ok := claims["ver"].(float64); !ok || int64(ver) != 1 {
+		t.Fatalf("expected ver=1 in new token, got %v", claims["ver"])
+	}
+
+	if _, err := services.authService.RefreshAccessToken(resp.RefreshToken); err != nil {
+		t.Fatalf("expected new refresh token usable: %v", err)
+	}
+	if _, err := services.authService.Login(ctx, &LoginRequest{Login: "pwuser", Password: "NewPass456"}); err != nil {
+		t.Fatalf("expected login with new password: %v", err)
+	}
+	if _, err := services.authService.Login(ctx, &LoginRequest{Login: "pwuser", Password: "OldPass123"}); err != errs.ErrLoginFailed {
+		t.Fatalf("expected old password rejected, got %v", err)
+	}
+}
+
+// 连续两次改密必须各自推进 token_version：版本自增在事务内完成并回读。
+// 若两次都写成同一个版本，第一次换出的 access token 会在第二次改密后仍有效。
+func TestAuthServiceUpdatePasswordIncrementsVersionEachTime(t *testing.T) {
+	services := setupAuthTestServices(t)
+	ctx := context.Background()
+
+	reg, err := services.authService.Register(ctx, &RegisterRequest{
+		Username: "pwuser2",
+		Email:    "pwuser2@example.com",
+		Password: "OldPass123",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	userID := reg.User.Id
+
+	first, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "OldPass123",
+		NewPassword: "MidPass456",
+	})
+	if err != nil {
+		t.Fatalf("first update password: %v", err)
+	}
+	second, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "MidPass456",
+		NewPassword: "NewPass789",
+	})
+	if err != nil {
+		t.Fatalf("second update password: %v", err)
+	}
+
+	var user model.User
+	if err := services.db.First(&user, "id = ?", userID).Error; err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if user.TokenVersion != 2 {
+		t.Fatalf("expected token_version=2 after two changes, got %d", user.TokenVersion)
+	}
+
+	// 第一次改密换出的凭证对第二次改密后也必须全部失效。
+	if _, err := services.authService.RefreshAccessToken(first.RefreshToken); err != errs.ErrRefreshTokenInvalid {
+		t.Fatalf("expected first refresh token revoked, got %v", err)
+	}
+	if current, err := services.authService.IsTokenVersionCurrent(userID, 1); err != nil || current {
+		t.Fatalf("expected ver=1 rejected after second change, current=%v err=%v", current, err)
+	}
+
+	token, err := jwt.Parse(second.Token, func(token *jwt.Token) (any, error) {
+		return []byte(services.cfg.JWT.Secret), nil
+	})
+	if err != nil {
+		t.Fatalf("parse second access token: %v", err)
+	}
+	if ver, ok := token.Claims.(jwt.MapClaims)["ver"].(float64); !ok || int64(ver) != 2 {
+		t.Fatalf("expected ver=2 in second token, got %v", token.Claims.(jwt.MapClaims)["ver"])
+	}
+	if _, err := services.authService.RefreshAccessToken(second.RefreshToken); err != nil {
+		t.Fatalf("expected second refresh token usable: %v", err)
+	}
+}
+
+// 改密事务以验证过的旧密码哈希为写谓词：谓词不成立（并发改密已提交）
+// 必须整体拒绝——不得推进版本、不得吊销会话、不得签发替代凭证。
+func TestUserRepositoryUpdatePasswordRejectsStaleProof(t *testing.T) {
+	services := setupAuthTestServices(t)
+	user := createTestUser(t, services.db, "user-stale-proof")
+	rt := mustCreateRefreshTokenRecord(t, services.db, user.ID, time.Now().Add(time.Hour), nil)
+
+	next := &model.RefreshToken{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		TokenHash: uuid.NewString(),
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	_, err := services.userRepo.UpdatePasswordAndRotateSessions(user.ID, "not-the-current-hash", "new-hash", next)
+	if !errors.Is(err, repository.ErrPasswordChanged) {
+		t.Fatalf("expected ErrPasswordChanged, got %v", err)
+	}
+
+	var stored model.User
+	if err := services.db.First(&stored, "id = ?", user.ID).Error; err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if stored.TokenVersion != user.TokenVersion || stored.PasswordHash != user.PasswordHash {
+		t.Fatalf("expected user untouched: version=%d hash-changed=%v", stored.TokenVersion, stored.PasswordHash != user.PasswordHash)
+	}
+	var count int64
+	services.db.Model(&model.RefreshToken{}).Where("id = ?", next.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("expected no replacement row written")
+	}
+	services.db.Model(&model.RefreshToken{}).Where("id = ? AND revoked_at IS NULL", rt.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("expected existing refresh token left unrevoked")
+	}
+}
+
+// 资料/头像等普通更新只能写自己的列：整行回写会把改密推进过的
+// token_version 覆盖回旧值，复活已吊销会话（INT-95 复审第三轮）。
+func TestAuthServiceUpdateProfilePreservesTokenVersion(t *testing.T) {
+	services := setupAuthTestServices(t)
+	ctx := context.Background()
+
+	reg, err := services.authService.Register(ctx, &RegisterRequest{
+		Username: "pwprofile",
+		Email:    "pwprofile@example.com",
+		Password: "OldPass123",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	userID := reg.User.Id
+
+	if _, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "OldPass123",
+		NewPassword: "NewPass456",
+	}); err != nil {
+		t.Fatalf("update password: %v", err)
+	}
+
+	username := "pwprofile-renamed"
+	if _, err := services.authService.UpdateProfile(userID, &UpdateProfileRequest{Username: &username}); err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	if _, err := services.authService.UpdateAvatar(userID, "https://example.com/a.png"); err != nil {
+		t.Fatalf("update avatar: %v", err)
+	}
+
+	var user model.User
+	if err := services.db.First(&user, "id = ?", userID).Error; err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if user.TokenVersion != 1 {
+		t.Fatalf("expected token_version preserved at 1, got %d", user.TokenVersion)
+	}
+	if user.PasswordHash == "" {
+		t.Fatalf("expected password_hash untouched")
+	}
+}
+
+// Rotate 的顺序是先条件吊销再补发：旧行已被吊销（改密全量吊销/登出）时
+// 不得再创建后继，否则改密扫描与新签发之间会漏出存活令牌（INT-95 复审）。
+func TestRefreshTokenRepositoryRotateDoesNotIssueAfterRevoke(t *testing.T) {
+	services := setupAuthTestServices(t)
+	user := createTestUser(t, services.db, "user-rotate-revoked")
+
+	rt := mustCreateRefreshTokenRecord(t, services.db, user.ID, time.Now().Add(time.Hour), nil)
+	if err := services.refreshTokenRepo.Revoke(rt.ID); err != nil {
+		t.Fatalf("revoke current token: %v", err)
+	}
+
+	next := &model.RefreshToken{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		TokenHash: uuid.NewString(),
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	rotated, err := services.refreshTokenRepo.Rotate(rt.ID, next)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rotated {
+		t.Fatalf("expected rotate to refuse issuance for a revoked token")
+	}
+	var count int64
+	if err := services.db.Model(&model.RefreshToken{}).Where("id = ?", next.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count successor: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no successor row, got %d", count)
+	}
+}
+
+// 登录/注册签发 refresh token 钉死在验证凭证时读到的 token_version 上：
+// 版本已被推进（并发改密）则不落库。
+func TestRefreshTokenRepositoryCreateIfTokenVersion(t *testing.T) {
+	services := setupAuthTestServices(t)
+	user := createTestUser(t, services.db, "user-create-fence")
+
+	mk := func() *model.RefreshToken {
+		return &model.RefreshToken{
+			ID:        uuid.NewString(),
+			UserID:    user.ID,
+			TokenHash: uuid.NewString(),
+			ExpiresAt: time.Now().Add(time.Hour),
+			CreatedAt: time.Now(),
+		}
+	}
+
+	created, err := services.refreshTokenRepo.CreateIfTokenVersion(mk(), user.TokenVersion+1)
+	if err != nil {
+		t.Fatalf("create with stale version: %v", err)
+	}
+	if created {
+		t.Fatalf("expected creation skipped when token_version moved on")
+	}
+
+	created, err = services.refreshTokenRepo.CreateIfTokenVersion(mk(), user.TokenVersion)
+	if err != nil || !created {
+		t.Fatalf("expected creation at current version: %v", err)
 	}
 }
 

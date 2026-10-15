@@ -7,6 +7,55 @@ const REFRESH_RETRY_HEADER = "x-fast-ship-refresh-retried";
 
 let refreshPromise: Promise<string> | null = null;
 
+let credentialRotation: Promise<unknown> | null = null;
+
+// 轮换发起请求自身携带此标记，401 时不得等待轮换窗口（等待对象正是自己）。
+export const ROTATION_OWNER_HEADER = "x-fast-ship-rotation-owner";
+
+// 凭据轮换（改密续签）窗口内，服务端已使旧凭证失效而新凭证尚未写回 store；
+// 此时并发请求的旧 token 收到 401 不能走 refresh→logout，要先等轮换落地。
+export function withCredentialRotation<T>(fn: () => Promise<T>): Promise<T> {
+  const p = Promise.resolve().then(fn);
+  credentialRotation = p;
+  const done = () => {
+    if (credentialRotation === p) credentialRotation = null;
+  };
+  p.then(done, done);
+  return p;
+}
+
+// 401 恢复出口，ky 钩子与 XHR 上传共用：先等轮换窗口落地；store 凭证若已
+// 轮换（与本次请求所携不同）直接拿来重试，否则走正常 refresh。
+export async function resolveSessionToken(
+  usedToken: string | null,
+  opts?: { skipRotationWait?: boolean },
+): Promise<string> {
+  if (!opts?.skipRotationWait && credentialRotation) {
+    try {
+      await credentialRotation;
+    } catch {
+      // 轮换失败按普通 401 继续走刷新流程
+    }
+  }
+
+  const current = useAuthStore.getState().token;
+  if (current && current !== usedToken) {
+    return current;
+  }
+
+  try {
+    return await tryRefreshToken();
+  } catch (err) {
+    // 刷新失败的这段时间凭证可能已被并行轮换救回（改密续签写入了新对），
+    // 再查一次 store——有新凭证就用它，别误走 logout。
+    const fallback = useAuthStore.getState().token;
+    if (fallback && fallback !== usedToken) {
+      return fallback;
+    }
+    throw err;
+  }
+}
+
 export async function tryRefreshToken(): Promise<string> {
   if (refreshPromise) return refreshPromise;
 
@@ -19,10 +68,18 @@ export async function tryRefreshToken(): Promise<string> {
     .post("auth/refresh", { json: { refresh_token: refreshToken } })
     .json<ApiResponse<{ token: string; refresh_token: string }>>()
     .then((res) => {
+      const state = useAuthStore.getState();
+      // CAS：发起刷新后凭证若已被并行轮换（改密续签），迟到的响应引用的
+      // refresh token 已随改密吊销——不得覆盖 store 里的新凭证。
+      if (state.refreshToken !== refreshToken) {
+        if (state.token) {
+          return state.token;
+        }
+        throw new Error("Session rotated");
+      }
       const { token, refresh_token: nextRefreshToken } = res.data;
-      const authStore = useAuthStore.getState();
-      authStore.setToken(token);
-      authStore.setRefreshToken(nextRefreshToken);
+      state.setToken(token);
+      state.setRefreshToken(nextRefreshToken);
       return token;
     })
     .finally(() => {
@@ -82,8 +139,14 @@ export const api = ky.create({
           return;
         }
 
+        const usedToken =
+          request.headers.get("Authorization")?.replace(/^Bearer /, "") ?? null;
+
         try {
-          const newToken = await tryRefreshToken();
+          const newToken = await resolveSessionToken(usedToken, {
+            skipRotationWait:
+              request.headers.get(ROTATION_OWNER_HEADER) === "1",
+          });
           request.headers.set("Authorization", `Bearer ${newToken}`);
           request.headers.set(REFRESH_RETRY_HEADER, "1");
           return ky(request, options);

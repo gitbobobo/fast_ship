@@ -86,13 +86,13 @@ func (s *AuthService) Register(ctx context.Context, req *RegisterRequest) (*Auth
 		return nil, errs.ErrInternal
 	}
 
-	token, err := s.generateToken(user.ID, user.Username)
+	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	refreshToken, err := s.generateRefreshToken(user.ID)
-	if err != nil {
+	refreshToken, created, err := s.generateRefreshToken(user)
+	if err != nil || !created {
 		return nil, errs.ErrInternal
 	}
 
@@ -120,14 +120,18 @@ func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*AuthRespon
 		return nil, errs.ErrLoginFailed
 	}
 
-	token, err := s.generateToken(user.ID, user.Username)
+	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	refreshToken, err := s.generateRefreshToken(user.ID)
+	refreshToken, created, err := s.generateRefreshToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
+	}
+	if !created {
+		// 密码校验与签发之间该用户刚改过密码：本次登录依据的旧密码已失效。
+		return nil, errs.ErrLoginFailed
 	}
 
 	s.log(ctx).Info("登录成功", slog.String("user_id", user.ID))
@@ -169,14 +173,18 @@ func (s *AuthService) RefreshAccessToken(refreshToken string) (*RefreshResponse,
 		return nil, errs.ErrUserNotFound
 	}
 
-	token, err := s.generateToken(user.ID, user.Username)
+	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	newRefreshToken, err := s.rotateRefreshToken(rt)
+	newRefreshToken, rotated, err := s.rotateRefreshToken(rt)
 	if err != nil {
 		return nil, errs.ErrInternal
+	}
+	if !rotated {
+		// 旧 refresh token 在校验后被改密扫描（或登出）吊销——不得再补发。
+		return nil, errs.ErrRefreshTokenInvalid
 	}
 
 	return &RefreshResponse{
@@ -200,6 +208,7 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 		return nil, errs.ErrUserNotFound
 	}
 
+	fields := map[string]any{}
 	if username := api.Deref(req.Username); username != "" && username != user.Username {
 		exists, err := s.userRepo.ExistsByUsername(username)
 		if err != nil {
@@ -209,6 +218,7 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 			return nil, errs.ErrUsernameExists
 		}
 		user.Username = username
+		fields["username"] = username
 	}
 
 	if email := api.Deref(req.Email); email != "" && email != user.Email {
@@ -220,10 +230,13 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 			return nil, errs.ErrEmailExists
 		}
 		user.Email = email
+		fields["email"] = email
 	}
 
-	if err := s.userRepo.Update(user); err != nil {
-		return nil, errs.ErrInternal
+	if len(fields) > 0 {
+		if err := s.userRepo.UpdateFields(userID, fields); err != nil {
+			return nil, errs.ErrInternal
+		}
 	}
 
 	resp := s.toUserResponse(user)
@@ -238,48 +251,86 @@ func (s *AuthService) UpdateAvatar(userID string, avatarURL string) (*UserRespon
 
 	if avatarURL != user.AvatarURL {
 		user.AvatarURL = avatarURL
-	}
-
-	if err := s.userRepo.Update(user); err != nil {
-		return nil, errs.ErrInternal
+		if err := s.userRepo.UpdateFields(userID, map[string]any{"avatar_url": avatarURL}); err != nil {
+			return nil, errs.ErrInternal
+		}
 	}
 
 	resp := s.toUserResponse(user)
 	return &resp, nil
 }
 
-func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *UpdatePasswordRequest) error {
+// UpdatePassword 改密成功后在同一事务里吊销该用户全部 refresh token 并递增
+// token_version，使其他会话的 access token 立即失效；同时返回为当前会话
+// 新签发的 token 对，让发起改密的会话继续持有有效凭证。
+func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *UpdatePasswordRequest) (*RefreshResponse, error) {
 	user, err := s.userRepo.FindByID(userID)
 	if err != nil {
-		return errs.ErrUserNotFound
+		return nil, errs.ErrUserNotFound
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword)); err != nil {
-		return errs.ErrLoginFailed
+		return nil, errs.ErrLoginFailed
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
-		return errs.ErrInternal
+		return nil, errs.ErrInternal
 	}
 
-	user.PasswordHash = string(hashedPassword)
+	raw, next, err := s.buildRefreshToken(userID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	// 版本号在事务内自增并回读：并发改密必须各自推进，否则先后两次改密
+	// 停在同一版本，前一次换出的 access token 会错误地保持有效。
+	// 把刚通过 bcrypt 校验的旧哈希作为写谓词——授权依据在写时点必须
+	// 仍然成立，否则并发改密会拿着已作废的旧密码证明覆盖新密码。
+	newVersion, err := s.userRepo.UpdatePasswordAndRotateSessions(userID, user.PasswordHash, string(hashedPassword), next)
+	if errors.Is(err, repository.ErrPasswordChanged) {
+		return nil, errs.ErrLoginFailed
+	}
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	user.TokenVersion = newVersion
+	token, err := s.generateToken(user)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
 	s.log(ctx).Info("用户修改密码", slog.String("user_id", userID))
-	return s.userRepo.Update(user)
+	return &RefreshResponse{
+		Token:        token,
+		RefreshToken: fmt.Sprintf("fsr_%s", raw),
+	}, nil
 }
 
 func (s *AuthService) IsTokenBlacklisted(jti string) (bool, error) {
 	return s.jwtBlacklistRepo.Exists(jti)
 }
 
-func (s *AuthService) generateToken(userID, username string) (string, error) {
+// IsTokenVersionCurrent 校验 JWT 的 ver claim 与用户当前 token_version 一致。
+// 无 ver 的历史 token 按版本 0 处理；用户已删除或查库失败都视为失效。
+func (s *AuthService) IsTokenVersionCurrent(userID string, ver int64) (bool, error) {
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return false, err
+	}
+	return int64(user.TokenVersion) == ver, nil
+}
+
+func (s *AuthService) generateToken(user *model.User) (string, error) {
 	jti := uuid.New().String()
 	claims := jwt.MapClaims{
-		"sub":      userID,
-		"username": username,
+		"sub":      user.ID,
+		"username": user.Username,
 		"jti":      jti,
 		"iat":      time.Now().Unix(),
 		"exp":      time.Now().Add(time.Duration(s.cfg.JWT.ExpireHours) * time.Hour).Unix(),
+		"ver":      user.TokenVersion,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -322,30 +373,40 @@ func FormatApiKey(raw string) string {
 	return fmt.Sprintf("fsk_%s", raw)
 }
 
-func (s *AuthService) generateRefreshToken(userID string) (string, error) {
-	raw, refreshToken, err := s.buildRefreshToken(userID)
+// generateRefreshToken 仅在用户 token_version 仍是验证时读到的版本时写入；
+// created=false 表示签发期间版本已被改密推进，该凭证不得落地。
+func (s *AuthService) generateRefreshToken(user *model.User) (string, bool, error) {
+	raw, refreshToken, err := s.buildRefreshToken(user.ID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	if err := s.refreshTokenRepo.Create(refreshToken); err != nil {
-		return "", err
+	created, err := s.refreshTokenRepo.CreateIfTokenVersion(refreshToken, user.TokenVersion)
+	if err != nil {
+		return "", false, err
+	}
+	if !created {
+		return "", false, nil
 	}
 
-	return fmt.Sprintf("fsr_%s", raw), nil
+	return fmt.Sprintf("fsr_%s", raw), true, nil
 }
 
-func (s *AuthService) rotateRefreshToken(current *model.RefreshToken) (string, error) {
+func (s *AuthService) rotateRefreshToken(current *model.RefreshToken) (string, bool, error) {
 	raw, next, err := s.buildRefreshToken(current.UserID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	if err := s.refreshTokenRepo.Rotate(current.ID, next); err != nil {
-		return "", err
+	rotated, err := s.refreshTokenRepo.Rotate(current.ID, next)
+	if err != nil {
+		return "", false, err
+	}
+	if !rotated {
+		return "", false, nil
 	}
 
-	return fmt.Sprintf("fsr_%s", raw), nil
+	return fmt.Sprintf("fsr_%s", raw), true, nil
 }
 
 func (s *AuthService) buildRefreshToken(userID string) (string, *model.RefreshToken, error) {

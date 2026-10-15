@@ -142,12 +142,13 @@ func (h *AuthHandler) UpdatePassword(c *gin.Context) {
 	}
 
 	userID := middleware.GetUserID(c)
-	if err := h.authService.UpdatePassword(c.Request.Context(), userID, &req); err != nil {
+	result, err := h.authService.UpdatePassword(c.Request.Context(), userID, &req)
+	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
 
-	response.SuccessEmpty(c)
+	response.Success(c, result)
 }
 
 var allowedAvatarExts = map[string]bool{

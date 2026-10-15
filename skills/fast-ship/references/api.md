@@ -245,7 +245,7 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 
 <!-- operationId: updatePassword -->
 
-修改密码
+修改密码（吊销其他全部会话；返回为当前会话新签发的 token 与 refresh token）
 
 **鉴权**：JWT+API Key
 
@@ -260,9 +260,14 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 
 **成功响应**
 
-**200** 操作成功（data 为 null）
+**200** 改密成功；该用户其余 refresh token 已吊销、改密前签发的 access token 已失效，data 为当前会话的新 token 对
 
-`data` 为 null。
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `token` | string | 是 |  |
+| `refresh_token` | string | 是 |  |
 
 **错误**
 
