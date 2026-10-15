@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -459,10 +460,17 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	// 注册路由
 	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, selfLogHandler, githubWebhookHandler, authService, apiKeyRepo)
 
-	// 启动服务
+	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
+	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	appLogger.Info("服务启动", slog.String("addr", addr), slog.Bool(selflog.AttrSystemScope, true))
-	if err := r.Run(addr); err != nil {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		fatal("服务启动失败", err)
 	}
 }

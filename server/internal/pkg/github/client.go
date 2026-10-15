@@ -18,6 +18,7 @@ func ptr[T any](v T) *T { return &v }
 
 type Client struct {
 	client *gh.Client
+	upload *gh.Client
 	owner  string
 	repo   string
 }
@@ -68,21 +69,35 @@ func (c *Client) ListRepositoryLabels(ctx context.Context, page, perPage int) ([
 	return c.client.Issues.ListLabels(ctx, c.owner, c.repo, opts)
 }
 
+// githubRequestTimeout 兜底所有 GitHub API 调用：连接半死时无超时的请求会
+// 永久挂住调用方 goroutine（auto-sync / push 等路径都在后台 goroutine 里跑）。
+const githubRequestTimeout = 30 * time.Second
+
+// githubUploadTimeout 单独给 release asset 上传：http.Client.Timeout 覆盖整个
+// 请求体传输，大文件在慢链路上会超出 30s 被误杀；仍设上限防半死连接永久挂住。
+const githubUploadTimeout = 30 * time.Minute
+
 // NewClient 创建绑定单个 owner/repo 的 GitHub 客户端。
 // token 为空时走未认证请求：空 AccessToken 的 oauth2 客户端仍会发出
 // "Authorization: Bearer " 头导致 401，而未认证请求可访问公共仓库
 // （未配 GitHub 的项目 attach 公共仓库 PR 依赖这一行为）。
 func NewClient(token, owner, repo string) *Client {
-	httpClient := &http.Client{}
-	if token != "" {
-		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-		httpClient = oauth2.NewClient(context.Background(), ts)
-	}
 	return &Client{
-		client: gh.NewClient(httpClient),
+		client: gh.NewClient(newHTTPClient(token, githubRequestTimeout)),
+		upload: gh.NewClient(newHTTPClient(token, githubUploadTimeout)),
 		owner:  owner,
 		repo:   repo,
 	}
+}
+
+func newHTTPClient(token string, timeout time.Duration) *http.Client {
+	if token == "" {
+		return &http.Client{Timeout: timeout}
+	}
+	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
+	c := oauth2.NewClient(context.Background(), ts)
+	c.Timeout = timeout
+	return c
 }
 
 func (c *Client) ValidateRepository(ctx context.Context) error {
@@ -321,7 +336,7 @@ func (c *Client) UploadAsset(ctx context.Context, releaseID int64, filename stri
 	}
 
 	opts := &gh.UploadOptions{Name: filename}
-	_, _, err = c.client.Repositories.UploadReleaseAsset(ctx, c.owner, c.repo, releaseID, opts, file)
+	_, _, err = c.upload.Repositories.UploadReleaseAsset(ctx, c.owner, c.repo, releaseID, opts, file)
 	if err != nil {
 		return fmt.Errorf("upload asset %s failed: %w", filename, err)
 	}

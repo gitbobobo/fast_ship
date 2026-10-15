@@ -114,6 +114,16 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 	meta.UpdatedAt = now
 	applyExplicitWorkflowStatus(meta, workflowStatus, now)
 
+	// 事件归属用户在事务外解析：单连接池下闭包内再借连接会永久自锁（INT-97）。
+	ownerID := issue.AuthorUserID
+	if workflowStatus != prevWorkflowStatus && ownerID == "" {
+		project, err := s.projectRepo.FindByIDGlobal(issue.ProjectID)
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		ownerID = project.UserID
+	}
+
 	// 同步刷新 issues 主表的 updated_at（仅此一列），使看板按 updated_at DESC 排序时能反映状态变更。
 	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
 		if err := s.internalMetaRepo.UpsertTx(tx, meta); err != nil {
@@ -130,14 +140,6 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 		// 自动化事件（INT-90）：workflow_status 变化与 state 变化是两类事件，
 		// 无变化（重复设置同一状态）不触发。
 		if workflowStatus != prevWorkflowStatus {
-			ownerID := issue.AuthorUserID
-			if ownerID == "" {
-				project, perr := s.projectRepo.FindByIDGlobal(issue.ProjectID)
-				if perr != nil {
-					return errs.ErrInternal
-				}
-				ownerID = project.UserID
-			}
 			if err := s.emitIssueEventTx(tx, IssueEvent{
 				Type:                model.AutomationTriggerIssueStatusChanged,
 				UserID:              ownerID,
@@ -220,11 +222,13 @@ func (s *IssueService) BatchUpdateInternalMeta(userID string, items []BatchUpdat
 	return resp, nil
 }
 
-// emitInternalUpdateEvents 内部 issue 更新（UpdateInternalIssue）的自动化事件：
+// emitInternalUpdateEventsTx 内部 issue 更新（UpdateInternalIssue）的自动化事件：
 // state 变化发状态事件，标签只对新增集合发一次事件。无变化不触发。
-// internalMeta 为 nil 表示本次未改标签。
-func (s *IssueService) emitInternalUpdateEvents(
+// internalMeta 为 nil 表示本次未改标签。ownerID 由调用方在事务外解析传入——
+// 闭包内调任何走池根的方法都会在单连接池下自锁（INT-97）。
+func (s *IssueService) emitInternalUpdateEventsTx(
 	tx *gorm.DB,
+	ownerID string,
 	issue *model.Issue,
 	req UpdateInternalIssueRequest,
 	prevState model.IssueState,
@@ -232,14 +236,6 @@ func (s *IssueService) emitInternalUpdateEvents(
 	internalMeta *model.IssueInternalMeta,
 ) error {
 	now := time.Now().UTC()
-	ownerID := issue.AuthorUserID
-	if ownerID == "" {
-		project, err := s.projectRepo.FindByIDGlobal(issue.ProjectID)
-		if err != nil {
-			return errs.ErrInternal
-		}
-		ownerID = project.UserID
-	}
 	if req.State != nil && issue.State != prevState {
 		if err := s.emitIssueEventTx(tx, IssueEvent{
 			Type:                model.AutomationTriggerIssueStatusChanged,

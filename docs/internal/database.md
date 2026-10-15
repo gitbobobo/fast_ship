@@ -2,6 +2,18 @@
 
 SQLite（glebarez/modernc 驱动，纯 Go 无 CGO），单文件 `database.path`。连接固定一个（`SetMaxOpenConns(1)`），靠 `busy_timeout` 串行化竞争。
 
+## 硬性规则：事务闭包内只能用事务句柄
+
+`SetMaxOpenConns(1)` 意味着全局只有一条连接。`Transaction(func(tx) {...})` 会借走这唯一的连接开事务；闭包内再调用任何走池根的方法（`r.db`/`s.db`/`repo` 的非 Tx 方法），等于向空池借第二条连接——`database/sql.(*DB).conn` 的借连接等待**没有超时**，`busy_timeout` 只覆盖 SQLite 锁等待，管不到池级等待。结果是 goroutine 永久挂起、事务永不提交，此后所有查库请求排队，**服务整体冻结**（INT-97 生产事故）。
+
+因此：
+
+- 事务闭包内只允许：事务句柄本身（`tx.X` / `txRepo.X`）、实参显式传事务句柄的调用（`repo.SaveTx(tx, ...)`、`s.emitIssueEventTx(tx, ...)`）。`XxxTx` 命名不构成放行理由——不收句柄的 `XxxTx`（如 `UploadRunTx`）是自己开事务的方法，闭包内调用同样自锁。
+- 禁止在闭包内再经事务发起方句柄调用：`db.Transaction(func(tx){ db.Exec(...) })` 里的 `db.Exec` 就是向池根借第二条连接。
+- 事务里需要的数据（如项目归属人）在**进事务前**查好传入，参考 `issue_mirror.go` `upsertGitHubIssue` 的 `ownerID` 解析。
+- 禁止把 `x.db` 池根句柄作为实参传进闭包内调用。
+- 守护：`service` 包的 `TestTransactionClosuresOnlyUseTxHandles` 用 AST 扫描全部事务闭包，随 `go test ./...` 运行；回归用例见 `single_conn_pool_test.go`（单连接池 + goroutine 超时断言）。已知盲区：把 `r.db` 赋给局部变量再调用、`Transaction(fc)` 委托形态的闭包体——写这两类代码时须人工核对本规则。
+
 Fast Ship 自身日志（INT-94）不在本库：独立 SQLite 文件 `logging.self_log_path`，见 `docs/internal/self-logs.md`。
 
 ## 外键约定

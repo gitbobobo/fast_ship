@@ -247,22 +247,15 @@ func (s *DocumentService) Update(docID, userID string, req *UpdateDocumentReques
 		}
 	}
 
-	var updated *model.Document
-	err := s.docRepo.Transaction(func(txRepo *repository.DocumentRepository) error {
-		doc, err := txRepo.FindByID(docID)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errs.ErrDocumentNotFound
-			}
-			return errs.ErrInternal
-		}
-		if err := s.ensureProjectAccess(doc.ProjectID, userID); err != nil {
-			if errors.Is(err, errs.ErrProjectNotFound) {
-				return errs.ErrDocumentNotFound
-			}
-			return err
-		}
+	// 归属校验在事务外完成：单连接池下闭包内再借连接会永久自锁（INT-97），
+	// 事务里只用已加载的 doc.ProjectID / doc.ID。
+	doc, err := s.loadAccessibleDocument(docID, userID)
+	if err != nil {
+		return nil, err
+	}
 
+	var updated *model.Document
+	err = s.docRepo.Transaction(func(txRepo *repository.DocumentRepository) error {
 		fields := map[string]interface{}{
 			"updated_at": time.Now(),
 		}
@@ -289,6 +282,10 @@ func (s *DocumentService) Update(docID, userID string, req *UpdateDocumentReques
 		}
 		fresh, err := txRepo.FindByID(doc.ID)
 		if err != nil {
+			// 文档可能在归属校验后被并发删除：与原事务内首读一致映射为 NotFound。
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrDocumentNotFound
+			}
 			return errs.ErrInternal
 		}
 		updated = fresh
