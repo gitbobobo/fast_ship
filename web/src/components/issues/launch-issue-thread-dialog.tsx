@@ -182,6 +182,7 @@ function LaunchIssueThreadBody({
 
   const create = useCreateThread(environment?.id ?? "");
   const [tracker] = useState(createIdTracker);
+  const [launchError, setLaunchError] = useState<unknown>(null);
   const [saveDefault, setSaveDefault] = useState(false);
   const promptText = buildIssuePrompt({
     projectId,
@@ -227,22 +228,23 @@ function LaunchIssueThreadBody({
 
   const launch = async () => {
     if (!environment || !binding || launching) return;
+    setLaunchError(null);
     // 新 worktree 不传 base_ref：由服务端取 T3 项目主检出的当前分支。
     const workspaceInput =
       workspace === "worktree"
         ? ({ type: "worktree" } as const)
         : ({ type: "root" } as const);
     const modelSelection = buildModelSelection(resolved);
-    const ids = tracker.idsFor(
-      JSON.stringify([
-        environment.id,
-        binding.t3_project_id,
-        promptText,
-        workspaceInput,
-        modelSelection,
-      ]),
-    );
     try {
+      const ids = tracker.idsFor(
+        JSON.stringify([
+          environment.id,
+          binding.t3_project_id,
+          promptText,
+          workspaceInput,
+          modelSelection,
+        ]),
+      );
       const result = await create.mutateAsync({
         command_id: ids.command_id,
         thread_id: ids.thread_id,
@@ -268,8 +270,10 @@ function LaunchIssueThreadBody({
             ),
         },
       });
-    } catch {
-      // 失败信息由 create.error 展示在弹框内；重试沿用同一组 ID，不会重复建线程。
+    } catch (error) {
+      // mutation 失败经 create.isError 展示在弹框内；提交前的异常（ID 生成等）
+      // 没有 mutation 状态，须本地兜住。重试沿用同一组 ID，不会重复建线程。
+      setLaunchError(error);
     }
   };
 
@@ -526,9 +530,9 @@ function LaunchIssueThreadBody({
         保存为此模板的默认
       </label>
 
-      {create.isError && (
+      {(create.isError || launchError !== null) && (
         <p role="alert" className="mt-3 text-xs text-destructive">
-          {actionErrorText(create.error, "启动失败，请重试")}
+          {actionErrorText(create.error ?? launchError, "启动失败，请重试")}
         </p>
       )}
 

@@ -39,6 +39,7 @@ export default defineConfig([
       'react-refresh/only-export-components': 'off',
       'fast-ship/select-value-label': 'error',
       'fast-ship/no-raw-select': 'error',
+      'fast-ship/no-secure-context-crypto': 'error',
     },
   },
 ])

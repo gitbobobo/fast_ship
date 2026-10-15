@@ -107,6 +107,7 @@ import { useIssuePromptList } from "@/lib/hooks/use-issue-prompt";
 import { useEnvironments } from "@/lib/hooks/use-threads";
 import { buildIssuePrompt } from "@/lib/issue-prompt";
 import { canOperate } from "@/lib/threads-compose";
+import { uuid } from "@/lib/uuid";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -1065,7 +1066,7 @@ export default function IssueDetailPage() {
     setChecklistDraft((current) => [
       ...current,
       {
-        localId: globalThis.crypto?.randomUUID?.() ?? `draft-${Date.now()}`,
+        localId: uuid(),
         title: "",
         isCompleted: false,
       },
@@ -1180,7 +1181,7 @@ export default function IssueDetailPage() {
     const nextDraft = [
       ...checklistDraft,
       ...selectedItems.map((item) => ({
-        localId: globalThis.crypto?.randomUUID?.() ?? `draft-${Date.now()}-${item.id}`,
+        localId: uuid(),
         title: item.title,
         isCompleted: false,
       })),

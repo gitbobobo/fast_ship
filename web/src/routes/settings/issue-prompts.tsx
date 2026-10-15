@@ -17,6 +17,7 @@ import {
 } from "@/lib/hooks/use-issue-prompt";
 import { useEnvironments } from "@/lib/hooks/use-threads";
 import { describeIssuePromptPreferences } from "@/lib/issue-launch";
+import { uuid } from "@/lib/uuid";
 import {
   DEFAULT_ISSUE_PROMPT_CONTENT,
   normalizeIssuePrompts,
@@ -38,10 +39,6 @@ const issuePromptSchema = z.object({
 });
 
 type IssuePromptFormValues = z.infer<typeof issuePromptSchema>;
-
-const newPromptId = () =>
-  globalThis.crypto?.randomUUID?.() ??
-  `prompt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 export default function SettingsIssuePromptsPage() {
   const { data, isLoading, isError } = useIssuePrompts();
@@ -249,7 +246,7 @@ export default function SettingsIssuePromptsPage() {
             variant="outline"
             onClick={() =>
               append({
-                id: newPromptId(),
+                id: uuid(),
                 name: "",
                 content: DEFAULT_ISSUE_PROMPT_CONTENT,
               })

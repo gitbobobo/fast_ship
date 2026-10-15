@@ -188,16 +188,18 @@ function DraftSession({
   actions: ReactNode;
 }) {
   const [text, setText] = useState("");
+  const [submitError, setSubmitError] = useState<unknown>(null);
   const [tracker] = useState(createIdTracker);
   const uploads = useImageUploads(environmentId);
   const send = useSendThreadMessage(environmentId, threadId);
 
   const submit = async () => {
-    const attachments = uploads.attachmentsOf();
-    const ids = tracker.idsFor(
-      JSON.stringify([text, attachments.map((a) => a.id)]),
-    );
+    setSubmitError(null);
     try {
+      const attachments = uploads.attachmentsOf();
+      const ids = tracker.idsFor(
+        JSON.stringify([text, attachments.map((a) => a.id)]),
+      );
       await uploads.submit(() =>
         send.mutateAsync({
           command_id: ids.command_id,
@@ -209,8 +211,10 @@ function DraftSession({
       );
       tracker.reset();
       setText("");
-    } catch {
-      // 错误由 mutation 状态展示；失败重试沿用同一组 ID。
+    } catch (error) {
+      // mutation 失败经 send.isError 落到同一错误位；提交前的异常（ID 生成等）
+      // 没有 mutation 状态，须本地兜住而不是静默无反应。重试沿用同一组 ID。
+      setSubmitError(error);
     }
   };
 
@@ -228,8 +232,8 @@ function DraftSession({
       disabled={send.isPending}
       onSubmit={() => void submit()}
       error={
-        send.isError || stopIsError
-          ? actionErrorText(send.error || stopError)
+        send.isError || stopIsError || submitError !== null
+          ? actionErrorText(send.error || stopError || submitError)
           : undefined
       }
       actions={actions}

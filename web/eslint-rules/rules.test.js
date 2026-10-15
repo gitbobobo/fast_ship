@@ -264,3 +264,100 @@ describe("fast-ship/no-raw-select", () => {
     expect(messages).toHaveLength(0);
   });
 });
+
+describe("fast-ship/no-secure-context-crypto", () => {
+  const UUID_FILE = `${SRC}/lib/uuid.ts`;
+
+  function lintCode(code, filename = BUSINESS_FILE, useTsParser = false) {
+    return linter.verify(
+      code,
+      [
+        {
+          files: ["**/*.{ts,tsx}"],
+          plugins: { "fast-ship": plugin },
+          languageOptions: {
+            ...(useTsParser ? { parser: tsParser } : { ecmaVersion: 2023 }),
+            sourceType: "module",
+            parserOptions: { ecmaFeatures: { jsx: true } },
+          },
+          rules: { "fast-ship/no-secure-context-crypto": "error" },
+        },
+      ],
+      { filename },
+    );
+  }
+
+  it("报错：crypto.randomUUID 的各种直读/直调写法", () => {
+    for (const code of [
+      `crypto.randomUUID();`,
+      `const f = crypto.randomUUID;`,
+      `globalThis.crypto.randomUUID();`,
+      `globalThis.crypto?.randomUUID?.();`,
+      `window.crypto.randomUUID();`,
+      `self.crypto.randomUUID();`,
+      `navigator.crypto.randomUUID();`,
+      `crypto["randomUUID"]();`,
+      `globalThis["crypto"].randomUUID();`,
+    ]) {
+      const messages = lintCode(code);
+      expect(messages, code).toHaveLength(1);
+      expect(messages[0].ruleId).toBe("fast-ship/no-secure-context-crypto");
+    }
+  });
+
+  it("报错：crypto.subtle 同属仅安全上下文 API", () => {
+    const messages = lintCode(`crypto.subtle.digest("SHA-256", data);`);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].messageId).toBe("blocked");
+  });
+
+  it("报错：TS 断言/非空断言不改写就拦不住", () => {
+    for (const code of [`crypto!.randomUUID();`, `(crypto as Crypto).randomUUID();`]) {
+      const messages = lintCode(code, BUSINESS_FILE, true);
+      expect(messages, code).toHaveLength(1);
+    }
+  });
+
+  it("报错：解构 crypto 拿到 randomUUID", () => {
+    for (const code of [
+      `const { randomUUID } = crypto;`,
+      `const { randomUUID: gen } = globalThis.crypto;`,
+      `const { ["randomUUID"]: gen } = crypto;`,
+    ]) {
+      const messages = lintCode(code);
+      expect(messages, code).toHaveLength(1);
+    }
+  });
+
+  it("报错：Node 内置 crypto 的具名导入", () => {
+    for (const code of [
+      `import { randomUUID } from "crypto";`,
+      `import { randomUUID } from "node:crypto";`,
+    ]) {
+      const messages = lintCode(code);
+      expect(messages, code).toHaveLength(1);
+    }
+  });
+
+  it("通过：getRandomValues、第三方对象与 helper 调用", () => {
+    for (const code of [
+      `crypto.getRandomValues(buf);`,
+      `crypto.randomBytes(16);`,
+      `foo.randomUUID();`,
+      `getCrypto().randomUUID();`,
+      `uuid();`,
+      `const { getRandomValues } = crypto;`,
+      `import { createHash } from "node:crypto";`,
+    ]) {
+      expect(lintCode(code), code).toHaveLength(0);
+    }
+  });
+
+  it("放行：src/lib/uuid.ts 是 helper 的唯一实现点", () => {
+    const messages = lintCode(
+      `export function uuid() { return globalThis.crypto?.randomUUID?.() ?? "x"; }`,
+      UUID_FILE,
+    );
+    expect(messages).toHaveLength(0);
+  });
+});
