@@ -244,6 +244,67 @@ func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
 	}
 }
 
+// 连续两次改密必须各自推进 token_version：版本自增在事务内完成并回读。
+// 若两次都写成同一个版本，第一次换出的 access token 会在第二次改密后仍有效。
+func TestAuthServiceUpdatePasswordIncrementsVersionEachTime(t *testing.T) {
+	services := setupAuthTestServices(t)
+	ctx := context.Background()
+
+	reg, err := services.authService.Register(ctx, &RegisterRequest{
+		Username: "pwuser2",
+		Email:    "pwuser2@example.com",
+		Password: "OldPass123",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	userID := reg.User.Id
+
+	first, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "OldPass123",
+		NewPassword: "MidPass456",
+	})
+	if err != nil {
+		t.Fatalf("first update password: %v", err)
+	}
+	second, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "MidPass456",
+		NewPassword: "NewPass789",
+	})
+	if err != nil {
+		t.Fatalf("second update password: %v", err)
+	}
+
+	var user model.User
+	if err := services.db.First(&user, "id = ?", userID).Error; err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if user.TokenVersion != 2 {
+		t.Fatalf("expected token_version=2 after two changes, got %d", user.TokenVersion)
+	}
+
+	// 第一次改密换出的凭证对第二次改密后也必须全部失效。
+	if _, err := services.authService.RefreshAccessToken(first.RefreshToken); err != errs.ErrRefreshTokenInvalid {
+		t.Fatalf("expected first refresh token revoked, got %v", err)
+	}
+	if current, err := services.authService.IsTokenVersionCurrent(userID, 1); err != nil || current {
+		t.Fatalf("expected ver=1 rejected after second change, current=%v err=%v", current, err)
+	}
+
+	token, err := jwt.Parse(second.Token, func(token *jwt.Token) (any, error) {
+		return []byte(services.cfg.JWT.Secret), nil
+	})
+	if err != nil {
+		t.Fatalf("parse second access token: %v", err)
+	}
+	if ver, ok := token.Claims.(jwt.MapClaims)["ver"].(float64); !ok || int64(ver) != 2 {
+		t.Fatalf("expected ver=2 in second token, got %v", token.Claims.(jwt.MapClaims)["ver"])
+	}
+	if _, err := services.authService.RefreshAccessToken(second.RefreshToken); err != nil {
+		t.Fatalf("expected second refresh token usable: %v", err)
+	}
+}
+
 // Rotate 的顺序是先条件吊销再补发：旧行已被吊销（改密全量吊销/登出）时
 // 不得再创建后继，否则改密扫描与新签发之间会漏出存活令牌（INT-95 复审）。
 func TestRefreshTokenRepositoryRotateDoesNotIssueAfterRevoke(t *testing.T) {

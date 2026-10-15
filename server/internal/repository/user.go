@@ -76,16 +76,25 @@ func (r *UserRepository) Update(user *model.User) error {
 }
 
 // UpdatePasswordAndRotateSessions 在同一事务里改密并轮换会话凭证：更新密码哈希、
-// 把 token_version 写为 tokenVersion、吊销该用户全部未吊销的 refresh token，
+// token_version 在事务内原子自增并回读、吊销该用户全部未吊销的 refresh token，
 // 再写入为当前会话新签发的 refresh token。任一失败整体回滚——已改密的用户
-// 不会落在新旧会话都不可用的中间态。
-func (r *UserRepository) UpdatePasswordAndRotateSessions(userID, passwordHash string, tokenVersion int, next *model.RefreshToken) error {
+// 不会落在新旧会话都不可用的中间态。并发改密各自拿到不同版本号：自增必须在
+// 事务内完成，用调用方预读的 nextVersion 写回会让两次改密停在同一版本。
+func (r *UserRepository) UpdatePasswordAndRotateSessions(userID, passwordHash string, next *model.RefreshToken) (int, error) {
 	now := time.Now()
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&model.User{}).Where("id = ?", userID).Updates(map[string]any{
+	var newVersion int
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.User{}).Where("id = ?", userID).Updates(map[string]any{
 			"password_hash": passwordHash,
-			"token_version": tokenVersion,
-		}).Error; err != nil {
+			"token_version": gorm.Expr("token_version + 1"),
+		})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		if err := tx.Model(&model.User{}).Where("id = ?", userID).Pluck("token_version", &newVersion).Error; err != nil {
 			return err
 		}
 		if err := tx.Model(&model.RefreshToken{}).
@@ -95,6 +104,7 @@ func (r *UserRepository) UpdatePasswordAndRotateSessions(userID, passwordHash st
 		}
 		return tx.Create(next).Error
 	})
+	return newVersion, err
 }
 
 func (r *UserRepository) ExistsByUsername(username string) (bool, error) {

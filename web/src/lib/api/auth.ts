@@ -44,6 +44,11 @@ export const authApi = {
   uploadAvatar: (formData: FormData) =>
     api.post("auth/avatar", { body: formData }).json<ApiResponse<User>>(),
 
-  updatePassword: (data: { old_password: string; new_password: string }) =>
-    api.put("auth/password", { json: data }).json<ApiResponse<SessionTokens>>(),
+  updatePassword: (
+    data: { old_password: string; new_password: string },
+    headers?: Record<string, string>,
+  ) =>
+    api
+      .put("auth/password", { json: data, headers })
+      .json<ApiResponse<SessionTokens>>(),
 };

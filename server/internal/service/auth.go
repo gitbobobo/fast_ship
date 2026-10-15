@@ -279,12 +279,14 @@ func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *Up
 		return nil, errs.ErrInternal
 	}
 
-	nextVersion := user.TokenVersion + 1
-	if err := s.userRepo.UpdatePasswordAndRotateSessions(userID, string(hashedPassword), nextVersion, next); err != nil {
+	// 版本号在事务内自增并回读：并发改密必须各自推进，否则先后两次改密
+	// 停在同一版本，前一次换出的 access token 会错误地保持有效。
+	newVersion, err := s.userRepo.UpdatePasswordAndRotateSessions(userID, string(hashedPassword), next)
+	if err != nil {
 		return nil, errs.ErrInternal
 	}
 
-	user.TokenVersion = nextVersion
+	user.TokenVersion = newVersion
 	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal

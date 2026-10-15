@@ -9,6 +9,9 @@ let refreshPromise: Promise<string> | null = null;
 
 let credentialRotation: Promise<unknown> | null = null;
 
+// 轮换发起请求自身携带此标记，401 时不得等待轮换窗口（等待对象正是自己）。
+export const ROTATION_OWNER_HEADER = "x-fast-ship-rotation-owner";
+
 // 凭据轮换（改密续签）窗口内，服务端已使旧凭证失效而新凭证尚未写回 store；
 // 此时并发请求的旧 token 收到 401 不能走 refresh→logout，要先等轮换落地。
 export function withCredentialRotation<T>(fn: () => Promise<T>): Promise<T> {
@@ -19,6 +22,27 @@ export function withCredentialRotation<T>(fn: () => Promise<T>): Promise<T> {
   };
   p.then(done, done);
   return p;
+}
+
+// 401 恢复出口，ky 钩子与 XHR 上传共用：先等轮换窗口落地；store 凭证若已
+// 轮换（与本次请求所携不同）直接拿来重试，否则走正常 refresh。
+export async function resolveSessionToken(
+  usedToken: string | null,
+  opts?: { skipRotationWait?: boolean },
+): Promise<string> {
+  if (!opts?.skipRotationWait && credentialRotation) {
+    try {
+      await credentialRotation;
+    } catch {
+      // 轮换失败按普通 401 继续走刷新流程
+    }
+  }
+
+  const current = useAuthStore.getState().token;
+  if (current && current !== usedToken) {
+    return current;
+  }
+  return tryRefreshToken();
 }
 
 export async function tryRefreshToken(): Promise<string> {
@@ -96,28 +120,14 @@ export const api = ky.create({
           return;
         }
 
-        if (credentialRotation) {
-          try {
-            await credentialRotation;
-          } catch {
-            // 轮换失败按普通 401 继续走下面的刷新流程
-          }
-        }
-
-        // store 里的凭证已被轮换（如改密续签）：直接换用当前 token 重试，
-        // 不走 refresh——本次请求持有的旧 refresh token 已随改密吊销。
-        const currentToken = useAuthStore.getState().token;
-        if (
-          currentToken &&
-          request.headers.get("Authorization") !== `Bearer ${currentToken}`
-        ) {
-          request.headers.set("Authorization", `Bearer ${currentToken}`);
-          request.headers.set(REFRESH_RETRY_HEADER, "1");
-          return ky(request, options);
-        }
+        const usedToken =
+          request.headers.get("Authorization")?.replace(/^Bearer /, "") ?? null;
 
         try {
-          const newToken = await tryRefreshToken();
+          const newToken = await resolveSessionToken(usedToken, {
+            skipRotationWait:
+              request.headers.get(ROTATION_OWNER_HEADER) === "1",
+          });
           request.headers.set("Authorization", `Bearer ${newToken}`);
           request.headers.set(REFRESH_RETRY_HEADER, "1");
           return ky(request, options);

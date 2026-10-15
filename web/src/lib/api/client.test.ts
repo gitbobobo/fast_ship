@@ -143,6 +143,54 @@ describe("api client auth retry", () => {
     expect(refreshPostMock).not.toHaveBeenCalled();
   });
 
+  // 轮换发起请求自身（带 ROTATION_OWNER_HEADER）拿到 401 时绝不能等待
+  // credentialRotation——它等待的正是自己，否则死锁。
+  it("does not let the rotation-owning request await its own rotation", async () => {
+    refreshPostMock.mockReturnValue({
+      json: vi.fn().mockResolvedValue({
+        data: { token: "refreshed-token", refresh_token: "new-refresh" },
+      }),
+    });
+    kyMock.mockResolvedValue("retried-response");
+
+    const { withCredentialRotation, ROTATION_OWNER_HEADER } = await import("./client");
+    const apiConfig = kyCreateMock.mock.calls[1][0];
+    const afterResponse = apiConfig.hooks.afterResponse[0];
+    const request = new Request("http://localhost/api/auth/password", {
+      method: "PUT",
+      headers: {
+        Authorization: "Bearer access-token",
+        [ROTATION_OWNER_HEADER]: "1",
+      },
+    });
+
+    // 挂起轮换窗口：若钩子误等自己，resultPromise 永远不会 settle。
+    let resolveRotation: () => void = () => {};
+    const rotation = withCredentialRotation(
+      () => new Promise<void>((resolve) => { resolveRotation = resolve; }),
+    );
+
+    const resultPromise = afterResponse(
+      request,
+      {},
+      new Response(null, { status: 401 }),
+    );
+    const result = await Promise.race([
+      resultPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("deadlock")), 1000)),
+    ]);
+
+    expect(result).toBe("retried-response");
+    expect(refreshPostMock).toHaveBeenCalledWith("auth/refresh", {
+      json: { refresh_token: "refresh-token" },
+    });
+    const retriedRequest = kyMock.mock.calls[0][0] as Request;
+    expect(retriedRequest.headers.get("Authorization")).toBe("Bearer refreshed-token");
+
+    resolveRotation();
+    await rotation;
+  });
+
   it("still refreshes when the 401 response came back on the current token", async () => {
     refreshPostMock.mockReturnValue({
       json: vi.fn().mockResolvedValue({

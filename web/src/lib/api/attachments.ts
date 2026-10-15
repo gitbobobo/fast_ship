@@ -1,5 +1,5 @@
 import { useAuthStore } from "@/lib/store/auth-store";
-import { api, tryRefreshToken } from "./client";
+import { api, resolveSessionToken } from "./client";
 
 interface UploadResult {
   status: number;
@@ -96,7 +96,7 @@ export const attachmentApi = {
 
     let newToken: string;
     try {
-      newToken = await tryRefreshToken();
+      newToken = await resolveSessionToken(token);
     } catch {
       useAuthStore.getState().logout();
       window.location.href = "/login";
