@@ -261,15 +261,10 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 
 	isNewIssue := issue == nil
 	if issue == nil {
-		sequenceNumber, err := m.issueRepo.NextSequenceNumber(projectID)
-		if err != nil {
-			return nil, errs.ErrInternal
-		}
 		issue = &model.Issue{
-			ID:             uuid.NewString(),
-			ProjectID:      projectID,
-			Source:         model.IssueSourceGitHub,
-			SequenceNumber: sequenceNumber,
+			ID:        uuid.NewString(),
+			ProjectID: projectID,
+			Source:    model.IssueSourceGitHub,
 		}
 	}
 	// 旧值快照（issue 随后会被就地覆盖）：事件只在真实变化时发。
@@ -302,7 +297,6 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 	}
 
 	gitHubMeta := &model.IssueGitHubMeta{
-		IssueID:           issue.ID,
 		ProjectID:         projectID,
 		GitHubIssueID:     item.GetID(),
 		GitHubNodeID:      item.GetNodeID(),
@@ -331,6 +325,41 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 
 	nextLabels := mapLabelNames(item.Labels)
 	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		// 身份与取号都在事务内复核（INT-96）：事务外的 meta/issue 查询只是
+		// 快照，推送路径又不过同步锁——并发方可能已抢先落库同一 GitHub
+		// issue，此时转更新路径而不是再造一行（否则留下无 meta 的孤儿
+		// issue 并双发 issue_created）；真是首见才取号插入。单连接池让
+		// 这段判断与写入整体串行。
+		if isNewIssue {
+			racedMeta, err := m.gitHubMetaRepo.FindByProjectAndGitHubIDTx(tx, projectID, item.GetID())
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			var raced *model.Issue
+			if racedMeta != nil {
+				raced, err = m.issueRepo.FindByIDTx(tx, racedMeta.IssueID)
+				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+			}
+			if racedMeta != nil && raced != nil {
+				isNewIssue = false
+				meta = racedMeta
+				prevState = raced.State
+				prevLabels = metaLabelsJSON(racedMeta)
+				issue.ID = racedMeta.IssueID
+				issue.SequenceNumber = raced.SequenceNumber
+			} else {
+				// meta 悬空（issue 行缺失）时回落到新建：meta upsert 会
+				// 把归属重绑到新行，行为与旧的自愈路径一致。
+				sequenceNumber, err := m.issueRepo.NextSequenceNumberTx(tx, projectID)
+				if err != nil {
+					return err
+				}
+				issue.SequenceNumber = sequenceNumber
+			}
+		}
+		gitHubMeta.IssueID = issue.ID
 		if err := persistIssue(tx); err != nil {
 			return err
 		}

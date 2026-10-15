@@ -12,6 +12,7 @@ SQLite（glebarez/modernc 驱动，纯 Go 无 CGO），单文件 `database.path`
 - 禁止在闭包内再经事务发起方句柄调用：`db.Transaction(func(tx){ db.Exec(...) })` 里的 `db.Exec` 就是向池根借第二条连接。
 - 事务里需要的数据（如项目归属人）在**进事务前**查好传入，参考 `issue_mirror.go` `upsertGitHubIssue` 的 `ownerID` 解析。
 - 禁止把 `x.db` 池根句柄作为实参传进闭包内调用。
+- 读-改-写类取值（如 `MAX+1` 取号、`NextSequenceNumberTx`）必须与写入在同一事务内走 tx 句柄：单连接让事务整体串行，取号放事务外会让并发方读到同一快照、撞唯一索引（INT-96）。取号同事务只保证序号唯一，不保证同键实体唯一——并发首见同一实体（如同一 `github_issue_id`）仍需在事务内复核身份再决定走创建还是更新，参考 `issue_mirror.go` `upsertGitHubIssue`。
 - 守护：`service` 包的 `TestTransactionClosuresOnlyUseTxHandles` 用 AST 扫描全部事务闭包，随 `go test ./...` 运行；回归用例见 `single_conn_pool_test.go`（单连接池 + goroutine 超时断言）。已知盲区：把 `r.db` 赋给局部变量再调用、`Transaction(fc)` 委托形态的闭包体——写这两类代码时须人工核对本规则。
 
 Fast Ship 自身日志（INT-94）不在本库：独立 SQLite 文件 `logging.self_log_path`，见 `docs/internal/self-logs.md`。
