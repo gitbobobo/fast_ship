@@ -6,6 +6,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
+	"github.com/godbobo/fast_ship/server/internal/service"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -228,25 +229,8 @@ func foldScreenshotVersions(db *gorm.DB, logger *zap.Logger) error {
 	})
 }
 
-// drainScreenshotPendingDeletes 出队待删截图文件：删除成功移除队列行，
-// 失败打错误日志并把行留在队列里等下次启动重试。只返回数据库层的错误；
-// 单个文件删除失败不算错误（幂等重试），按返回的成功数统计。
+// drainScreenshotPendingDeletes 出队待删截图文件（实现在 service，覆盖上传
+// 失败落队与启动清理共用同一条路径）。文件已不存在视同清理成功。
 func drainScreenshotPendingDeletes(db *gorm.DB, fileStorage storage.Storage, logger *zap.Logger) (int, error) {
-	var pending []model.ScreenshotPendingDelete
-	if err := db.Find(&pending).Error; err != nil {
-		return 0, fmt.Errorf("读取待删截图文件队列失败: %w", err)
-	}
-	removed := 0
-	for _, row := range pending {
-		if err := fileStorage.Delete(row.Path); err != nil {
-			logger.Error("删除旧截图文件失败，留下队列行下次启动重试",
-				zap.String("path", row.Path), zap.Error(err))
-			continue
-		}
-		if err := db.Where("path = ?", row.Path).Delete(&model.ScreenshotPendingDelete{}).Error; err != nil {
-			return removed, fmt.Errorf("移除待删队列行 %s 失败: %w", row.Path, err)
-		}
-		removed++
-	}
-	return removed, nil
+	return service.DrainScreenshotPendingDeletes(db, fileStorage, logger)
 }

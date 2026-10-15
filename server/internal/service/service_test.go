@@ -98,6 +98,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.RecommendationDependency{},
 		&model.ScreenshotScreen{},
 		&model.ScreenshotAnnotation{},
+		&model.ScreenshotPendingDelete{},
 		&model.T3Environment{},
 		&model.ProjectT3Binding{},
 		&model.Automation{},

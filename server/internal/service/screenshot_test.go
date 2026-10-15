@@ -12,9 +12,24 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
+
+// failingDeleteStorage 按黑名单让 Delete 失败，用来测覆盖上传删旧文件失败后落队。
+type failingDeleteStorage struct {
+	storage.Storage
+	failPaths map[string]bool
+}
+
+func (s *failingDeleteStorage) Delete(path string) error {
+	if s.failPaths[path] {
+		return errors.New("simulated delete failure")
+	}
+	return s.Storage.Delete(path)
+}
 
 var testJPEGBytes = []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
 
@@ -131,6 +146,56 @@ func TestScreenshotServiceUpload_OverwritesSameVariant(t *testing.T) {
 // 覆盖上传后 content_url 必须跟着文件变（?v= 随 uploaded_at 推进）：
 // URL 不变时浏览器画旧图、画布以 content_url 为换图指纹与草稿作废
 // 依据的逻辑全部失效。
+func TestScreenshotServiceUpload_OverwriteDeleteFailureEnqueuesPending(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	first := uploadTestScreenshot(t, svc, newScreenshotUploadInput(project.ID, user.ID, "home"))
+	firstPath := storedScreenRow(t, svc, first.Screen.Id).FilePath
+	time.Sleep(2 * time.Millisecond)
+
+	svc.screenshotService.storage = &failingDeleteStorage{
+		Storage:   svc.storage,
+		failPaths: map[string]bool{firstPath: true},
+	}
+	second := uploadTestScreenshot(t, svc, newScreenshotUploadInput(project.ID, user.ID, "home"))
+	if first.Screen.Id != second.Screen.Id {
+		t.Fatalf("expected overwrite of the same screen, got %q vs %q", first.Screen.Id, second.Screen.Id)
+	}
+
+	if exists, _ := svc.storage.Exists(firstPath); !exists {
+		t.Fatalf("expected replaced file %q to remain after failed delete", firstPath)
+	}
+	var pending int64
+	if err := svc.db.Model(&model.ScreenshotPendingDelete{}).Count(&pending).Error; err != nil || pending != 1 {
+		t.Fatalf("expected pending-delete row after failed overwrite delete, got %d err=%v", pending, err)
+	}
+	var row model.ScreenshotPendingDelete
+	if err := svc.db.First(&row).Error; err != nil {
+		t.Fatalf("read pending row: %v", err)
+	}
+	if row.Path != firstPath {
+		t.Fatalf("expected pending path %q, got %q", firstPath, row.Path)
+	}
+
+	// 下次启动：换回可删除的存储，出队应删掉旧文件并清空队列
+	svc.screenshotService.storage = svc.storage
+	removed, err := DrainScreenshotPendingDeletes(svc.db, svc.storage, zap.NewNop())
+	if err != nil {
+		t.Fatalf("drain after retry: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("expected 1 drained file, got %d", removed)
+	}
+	if exists, _ := svc.storage.Exists(firstPath); exists {
+		t.Fatalf("expected replaced file %q removed on retry drain", firstPath)
+	}
+	if err := svc.db.Model(&model.ScreenshotPendingDelete{}).Count(&pending).Error; err != nil || pending != 0 {
+		t.Fatalf("expected queue empty after drain, got %d err=%v", pending, err)
+	}
+}
+
 func TestScreenshotServiceUpload_OverwriteChangesContentURL(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")

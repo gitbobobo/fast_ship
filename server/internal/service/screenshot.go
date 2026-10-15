@@ -282,9 +282,12 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 		return nil, errs.ErrInternal
 	}
 
-	// 提交成功后再删被替换的旧文件；路径不同才有得删（新上传没有旧文件）
+	// 提交成功后再删被替换的旧文件；路径不同才有得删（新上传没有旧文件）。
+	// 删除失败把路径写入待删队列，下次启动出队重试；文件已不存在视同清理成功。
 	if replacedOldPath != "" {
-		_ = s.storage.Delete(replacedOldPath)
+		if err := s.storage.Delete(replacedOldPath); err != nil && !isAbsentScreenshotFile(err) {
+			_ = s.screenshotRepo.EnqueuePendingDelete(replacedOldPath)
+		}
 	}
 
 	return &ScreenshotUploadResult{

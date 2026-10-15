@@ -552,6 +552,39 @@ func TestScreenshotAnnotationServiceBatch_StatusIntersectsOpen(t *testing.T) {
 	}
 }
 
+// 面板 resolved-only 批量 confirm 必须与强制 open 交集为空：范围内即使
+// 有过期 open 标注也不能被确认（对应前端把 status=resolved 并入 payload）。
+func TestScreenshotAnnotationServiceBatch_ResolvedOnlyConfirmLeavesOutdatedOpen(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "a.png", makeTestPNG(t, 100, 50))
+	openAnn := createTestAnnotation(t, svc, uploaded.Screen.Id, user.ID, validAnnotationRequest())
+	if err := svc.db.Model(&model.ScreenshotAnnotation{}).Where("id = ?", openAnn.Id).Update("outdated", true).Error; err != nil {
+		t.Fatalf("mark outdated: %v", err)
+	}
+	resolvedAnn := createTestAnnotation(t, svc, uploaded.Screen.Id, user.ID, validAnnotationRequest())
+	if _, err := svc.annotationService.Update(resolvedAnn.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.Resolved)}, false); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	res, err := svc.annotationService.Batch(project.ID, user.ID, &ScreenshotAnnotationBatchRequest{
+		Action: api.Confirm,
+		Filter: &api.ScreenshotAnnotationBatchRequest_Filter{Status: api.Ptr(api.Resolved)},
+	})
+	if err != nil || res.Updated != 0 {
+		t.Fatalf("resolved-only confirm: %+v err=%v", res, err)
+	}
+	row, err := svc.annotationRepo.FindByID(openAnn.Id)
+	if err != nil {
+		t.Fatalf("find open: %v", err)
+	}
+	if !row.Outdated || row.Status != "open" {
+		t.Fatalf("expected hidden open annotation untouched, got %+v", row)
+	}
+}
+
 // 批量过滤与列表 GET 同一套维度规范化：批量传 locale=en-us 要命中库存里的
 // en-US，而不是拉到空集。
 func TestScreenshotAnnotationServiceBatch_NormalizesDimensionFilters(t *testing.T) {

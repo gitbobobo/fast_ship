@@ -63,6 +63,28 @@ export function toggleDimensionValue(
     : [...values, value];
 }
 
+/**
+ * 按服务端 normalizeScreenshotLocale 的大小写口径折叠语言标签：language 小写、
+ * 4 字母 script 首字母大写、2 字母 region 大写。不做 BCP 47 语法校验——库存
+ * 里只有合法规范化值，非法 URL 匹配自然落空。选这条而不是搬完整校验器，是
+ * 因为前端过滤只要与库存对齐，400 仍由服务端负责。
+ */
+export function canonicalizeScreenshotLocale(value: string): string {
+  if (value === SCREENSHOT_NONE) return value;
+  return value
+    .trim()
+    .split("-")
+    .map((part, i) => {
+      if (i === 0) return part.toLowerCase();
+      if (/^[A-Za-z]{4}$/.test(part)) {
+        return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+      }
+      if (/^[A-Za-z]{2}$/.test(part)) return part.toUpperCase();
+      return part.toLowerCase();
+    })
+    .join("-");
+}
+
 /** 单维度是否命中：空过滤放行全部；命中任一选中值或（选中未标注桶时）NULL */
 export function matchesDimension(
   value: string | null,
@@ -71,6 +93,16 @@ export function matchesDimension(
   if (filter.length === 0) return true;
   const key = value ?? SCREENSHOT_NONE;
   return filter.includes(key);
+}
+
+/** locale 维度命中：按 BCP 47 大小写口径比较，让 URL `en-us` 命中库存 `en-US` */
+export function matchesLocaleDimension(
+  value: string | null,
+  filter: DimensionFilter,
+): boolean {
+  if (filter.length === 0) return true;
+  const key = canonicalizeScreenshotLocale(value ?? SCREENSHOT_NONE);
+  return filter.some((item) => canonicalizeScreenshotLocale(item) === key);
 }
 
 /** 画布截图集合过滤：三个维度各自独立多选，空过滤放行 */
@@ -85,7 +117,7 @@ export function filterScreensByDimensions(
   return screens.filter(
     (s) =>
       matchesDimension(s.platform, filters.platform) &&
-      matchesDimension(s.locale, filters.locale) &&
+      matchesLocaleDimension(s.locale, filters.locale) &&
       matchesDimension(s.theme, filters.theme),
   );
 }
@@ -119,7 +151,7 @@ export function filterAnnotationsByDimensions(
     if (!screen) return false;
     return (
       matchesDimension(screen.platform, filters.platform) &&
-      matchesDimension(screen.locale, filters.locale) &&
+      matchesLocaleDimension(screen.locale, filters.locale) &&
       matchesDimension(screen.theme, filters.theme)
     );
   });

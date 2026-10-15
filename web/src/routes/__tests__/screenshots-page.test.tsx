@@ -225,6 +225,30 @@ describe("ScreenshotsPage", () => {
     });
   });
 
+  it("matches URL locale=en-us against stored en-US for canvas and batch scope", async () => {
+    mockScreens([
+      makeScreen({
+        id: "en",
+        screen_key: "home",
+        locale: "en-US",
+        uploaded_at: "2026-10-05T00:00:00Z",
+      }),
+      makeScreen({
+        id: "zh",
+        screen_key: "settings",
+        locale: "zh-CN",
+        uploaded_at: "2026-10-04T00:00:00Z",
+      }),
+    ]);
+    renderPage("/screenshots?locale=en-us");
+
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["en"]);
+    });
+    // 画布、面板、批量 payload 同源：过滤值已按服务端口径折成 en-US
+    expect(canvasProps().scopeFilter.locale).toEqual(["en-US"]);
+  });
+
   it("filters the canvas by dimension selections and encodes them in the URL", async () => {
     const user = userEvent.setup();
     renderPage();

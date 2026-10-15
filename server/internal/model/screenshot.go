@@ -33,9 +33,9 @@ func (ScreenshotScreen) TableName() string {
 	return "screenshot_screens"
 }
 
-// ScreenshotPendingDelete 是折叠迁移的待删文件队列（INT-99）：旧版本文件路径
-// 在删除事务提交前落库，提交后逐个删文件，成功即出队；删除失败的行留在表里，
-// 下次启动继续重试，不依赖迁移进程存活。
+// ScreenshotPendingDelete 是待删截图文件队列（INT-99）：折叠迁移在提交前落队，
+// 覆盖上传在旧文件 Delete 失败后落队。成功即出队；失败或进程中途退出的行
+// 留在表里，下次启动继续重试。
 type ScreenshotPendingDelete struct {
 	Path      string    `gorm:"type:text;primaryKey" json:"-"`
 	CreatedAt time.Time `gorm:"not null" json:"-"`

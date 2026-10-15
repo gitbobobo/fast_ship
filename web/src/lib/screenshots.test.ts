@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SCREENSHOT_NONE,
+  canonicalizeScreenshotLocale,
   decodeDimensionFilter,
   deriveDimensionOptions,
   dimensionLabel,
@@ -9,6 +10,7 @@ import {
   filterScreensByDimensions,
   filterScreensByQuery,
   matchesDimension,
+  matchesLocaleDimension,
   screenDisplayName,
   toggleDimensionValue,
 } from "./screenshots";
@@ -173,6 +175,20 @@ describe("filterScreensByDimensions", () => {
       }),
     ).toHaveLength(3);
   });
+
+  it("matches URL locale=en-us against stored en-US", () => {
+    const localized = [
+      makeScreen({ id: "en", locale: "en-US" }),
+      makeScreen({ id: "zh", locale: "zh-CN" }),
+    ];
+    expect(
+      filterScreensByDimensions(localized, {
+        platform: [],
+        locale: ["en-us"],
+        theme: [],
+      }).map((s) => s.id),
+    ).toEqual(["en"]);
+  });
 });
 
 describe("filterScreensByQuery", () => {
@@ -229,6 +245,41 @@ describe("filterAnnotationsByDimensions", () => {
         theme: [],
       }).map((a) => a.id),
     ).toEqual(["a1", "a2"]);
+  });
+
+  it("matches annotations on screens whose locale differs only by BCP 47 case", () => {
+    const localized = [
+      makeScreen({ id: "s-en", locale: "en-US" }),
+      makeScreen({ id: "s-zh", locale: "zh-CN" }),
+    ];
+    const byLocale = new Map(localized.map((s) => [s.id, s]));
+    const items = [
+      makeAnnotation({ id: "a-en", screen_id: "s-en" }),
+      makeAnnotation({ id: "a-zh", screen_id: "s-zh" }),
+    ];
+    expect(
+      filterAnnotationsByDimensions(items, byLocale, {
+        platform: [],
+        locale: ["en-us"],
+        theme: [],
+      }).map((a) => a.id),
+    ).toEqual(["a-en"]);
+  });
+});
+
+describe("canonicalizeScreenshotLocale", () => {
+  it("folds BCP 47 case the way the server stores tags", () => {
+    expect(canonicalizeScreenshotLocale("en-us")).toBe("en-US");
+    expect(canonicalizeScreenshotLocale("ZH-hans-cn")).toBe("zh-Hans-CN");
+    expect(canonicalizeScreenshotLocale("__none__")).toBe("__none__");
+  });
+});
+
+describe("matchesLocaleDimension", () => {
+  it("treats en-us and en-US as the same locale", () => {
+    expect(matchesLocaleDimension("en-US", ["en-us"])).toBe(true);
+    expect(matchesLocaleDimension("en-US", ["zh-CN"])).toBe(false);
+    expect(matchesLocaleDimension(null, ["__none__"])).toBe(true);
   });
 });
 

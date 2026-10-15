@@ -123,12 +123,16 @@ export function AnnotationPanel({
     successMessage: string,
   ) => {
     try {
+      // OpenAPI filter.status 是单值。resolved-only 与服务端强制 open
+      // 取交集为空（updated:0），避免把面板藏起来的 open 标注确认掉；
+      // 含 open（open / all）时省略，保持服务端默认 open 范围。
       const res = await batch.mutateAsync({
         action,
         filter: {
           platform: scopeFilter.platform,
           locale: scopeFilter.locale,
           theme: scopeFilter.theme,
+          ...(statusFilter === "resolved" ? { status: "resolved" as const } : {}),
         },
       });
       toast.success(`${successMessage}（${res.data.updated} 条）`);

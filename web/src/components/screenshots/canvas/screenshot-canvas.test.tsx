@@ -464,6 +464,45 @@ describe("ScreenshotCanvas", () => {
     );
   });
 
+  it("sends status=resolved on batch confirm when the panel is resolved-only", async () => {
+    // 面板筛成已解决时列表藏起全部 open；payload 必须带 status=resolved，
+    // 与服务端强制 open 交集为空，不会把看不见的 outdated open 确认掉
+    vi.mocked(screenshotAnnotationApi.batch).mockResolvedValue({
+      code: 0,
+      message: "ok",
+      data: { updated: 0 },
+    });
+    const user = userEvent.setup();
+    renderCanvas({
+      statusScope: { open: false, resolved: true },
+      annotations: [
+        makeAnnotation({ id: "a-out", outdated: true, body: "过期未解决" }),
+        makeAnnotation({
+          id: "a-done",
+          status: "resolved",
+          body: "已解决的",
+        }),
+      ],
+    });
+
+    const panel = screen.getByTestId("annotation-panel");
+    expect(within(panel).queryByText("过期未解决")).toBeNull();
+    expect(within(panel).getByText("已解决的")).toBeInTheDocument();
+
+    await user.click(within(panel).getByTestId("panel-batch-confirm"));
+    await waitFor(() =>
+      expect(screenshotAnnotationApi.batch).toHaveBeenCalledWith("p-1", {
+        action: "confirm",
+        filter: {
+          platform: undefined,
+          locale: undefined,
+          theme: undefined,
+          status: "resolved",
+        },
+      }),
+    );
+  });
+
   it("hides the batch row when the scope has no annotations, disabling confirm without outdated", () => {
     // 无标注：批量操作整行不出现
     const { unmount } = renderCanvas();

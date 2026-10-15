@@ -1,8 +1,11 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ScreenshotRepository 承载 screenshot_screens 表存取。
@@ -105,4 +108,14 @@ func (r *ScreenshotRepository) MarkScreenAnnotationsOutdated(screenID string) er
 
 func (r *ScreenshotRepository) DeleteScreen(id string) error {
 	return r.db.Where("id = ?", id).Delete(&model.ScreenshotScreen{}).Error
+}
+
+// EnqueuePendingDelete 把覆盖上传删不掉的旧文件路径写入待删队列，
+// 下次启动由 DrainScreenshotPendingDeletes 出队重试；主键冲突视为已在队里。
+func (r *ScreenshotRepository) EnqueuePendingDelete(path string) error {
+	if path == "" {
+		return nil
+	}
+	row := model.ScreenshotPendingDelete{Path: path, CreatedAt: time.Now().UTC()}
+	return r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error
 }

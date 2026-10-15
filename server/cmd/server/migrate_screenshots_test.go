@@ -10,6 +10,8 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
@@ -332,6 +334,37 @@ func TestRunBootMigrations_PendingDeleteRetriesAcrossBoots(t *testing.T) {
 	}
 	if err := db.Model(&model.ScreenshotPendingDelete{}).Count(&pending).Error; err != nil || pending != 0 {
 		t.Fatalf("expected queue drained on retry, got %d err=%v", pending, err)
+	}
+}
+
+// 进程在 Delete 成功后、出队提交前退出时，下次启动对已缺失文件得到 ENOENT；
+// 应视同清理成功出队，不再当可重试失败永久报错。
+func TestDrainScreenshotPendingDeletes_MissingFileCountsAsSuccess(t *testing.T) {
+	db, store, _ := setupLegacyScreenshotDB(t)
+	if err := db.AutoMigrate(&model.ScreenshotPendingDelete{}); err != nil {
+		t.Fatalf("migrate pending deletes: %v", err)
+	}
+	missing := "screenshots/already-gone.png"
+	if err := db.Create(&model.ScreenshotPendingDelete{
+		Path: missing, CreatedAt: time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed pending row: %v", err)
+	}
+
+	core, logs := observer.New(zapcore.ErrorLevel)
+	removed, err := drainScreenshotPendingDeletes(db, store, zap.New(core))
+	if err != nil {
+		t.Fatalf("drain missing file: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("expected missing file to count as 1 drained, got %d", removed)
+	}
+	var pending int64
+	if err := db.Model(&model.ScreenshotPendingDelete{}).Count(&pending).Error; err != nil || pending != 0 {
+		t.Fatalf("expected queue empty, got %d err=%v", pending, err)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("expected no error logs for missing file, got %+v", logs.All())
 	}
 }
 

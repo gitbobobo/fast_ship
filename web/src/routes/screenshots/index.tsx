@@ -19,6 +19,7 @@ import {
 import { copyWithToast } from "@/lib/copy";
 import { buildAnnotationPrompt } from "@/lib/annotation-prompt";
 import {
+  canonicalizeScreenshotLocale,
   decodeDimensionFilter,
   deriveDimensionOptions,
   encodeDimensionFilter,
@@ -75,7 +76,11 @@ export default function ScreenshotsPage() {
     );
     return {
       platform: decodeDimensionFilter(searchParams.get("platform")),
-      locale: decodeDimensionFilter(searchParams.get("locale")),
+      // 与服务端 normalizeScreenshotLocale 同一大小写口径，画布/面板/批量
+      // payload 都读这份 filters，避免 URL `en-us` 展示空而批量打到 en-US
+      locale: decodeDimensionFilter(searchParams.get("locale")).map(
+        canonicalizeScreenshotLocale,
+      ),
       theme: decodeDimensionFilter(searchParams.get("theme")),
       status: status.length > 0 ? status : ["open"],
     };
