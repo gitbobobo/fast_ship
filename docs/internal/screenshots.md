@@ -127,7 +127,7 @@ Annotation = {id, project_id, screen_id, issue_id, issue_reference, issue_title,
               created_by, created_at, updated_at, resolved_at}
 ```
 
-`content_url` = `/api/screenshot-screens/{sid}/content?v=<uploaded_at 纳秒值>`（v 随文件变化：覆盖上传推进 uploaded_at 即换 URL，浏览器缓存按完整 URL 记键自然失效，画布占位重置与草稿作废也拿它当换图指纹），`image_url` 同形（标注所在截图），`crop_url` = `/api/screenshot-annotations/{id}/crop`；前端自行追加 `&token=`。上传返回 `{screen}`；批量返回 `{updated}`。
+`content_url` = `/api/screenshot-screens/{sid}/content?v=<uploaded_at 纳秒值>`（v 随文件变化：覆盖上传推进 uploaded_at 即换 URL，浏览器缓存按完整 URL 记键自然失效，画布占位重置与草稿作废也拿它当换图指纹），`image_url` 同形（标注所在截图），`crop_url` = `/api/screenshot-annotations/{id}/crop?v=<uploaded_at 纳秒值>`（与 content_url 同一个 v，覆盖上传后旧裁剪图的浏览器缓存随之失效）；前端自行追加 `&token=`。上传返回 `{screen}`；批量返回 `{updated}`。
 
 ## 前端画布与标注
 
