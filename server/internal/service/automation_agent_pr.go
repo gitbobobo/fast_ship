@@ -128,8 +128,8 @@ func (s *AutomationAgentService) AgentPullRequestComments(ctx context.Context, i
 }
 
 // AgentSubmitPullRequestReview POST /api/automation-agent/pull-request/review
-// commit_id 固定取本运行 head SHA。写 GitHub 前再读运行行：synchronize 取消后
-// 不得再提交 COMMENT/APPROVE/REQUEST_CHANGES。
+// commit_id 固定取本运行 head SHA。与 webhook 取消共用 per-PR 锁，锁内再读
+// 运行行：synchronize 取消后不得再提交 COMMENT/APPROVE/REQUEST_CHANGES。
 func (s *AutomationAgentService) AgentSubmitPullRequestReview(ctx context.Context, identity *RunTokenIdentity, req *api.AgentPullRequestReviewRequest) (*api.AgentPullRequestReviewResult, error) {
 	run, err := s.loadPRRun(ctx, identity.RunID)
 	if err != nil {
