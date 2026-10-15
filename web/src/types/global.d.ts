@@ -547,37 +547,35 @@ interface DashboardDailyResolvedPoint {
   projects: DashboardDailyResolvedProjectPoint[];
 }
 
-/** 截图库：一个「界面」（screen_key 标识）聚合全部历史版本截图 */
+/** 截图库：一张截图 = (screen_key, platform, locale, theme) 变体，再上传即覆盖 */
 interface ScreenshotScreen {
   id: string;
   project_id: string;
   screen_key: string;
   /** 显示名；为空时回退展示 screen_key */
   title: string;
-  /** 分组名；空串表示未分组 */
-  group: string;
-  version_count: number;
-  last_uploaded_at: string;
-  created_at: string;
-}
-
-interface ScreenshotVersion {
-  id: string;
-  screen_id: string;
-  note: string;
-  file_name: string;
-  file_size: number;
+  /** 平台（开放词表小写）；null 表示未标注 */
+  platform: string | null;
+  /** 语言（BCP 47 规范化大小写）；null 表示未标注 */
+  locale: string | null;
+  /** 亮度主题；null 表示未标注 */
+  theme: ScreenshotTheme | null;
+  /** 上传时内容嗅探得到的类型 */
   mime_type: string;
-  /** 用户名或 "API Key: <name>" */
-  uploaded_by: string;
-  uploaded_at: string;
-  /** 图片内容路径，需附带 ?token= 访问 */
-  content_url: string;
-  /** 原图宽像素；0 表示未知（存量版本未记录尺寸） */
+  file_size: number;
+  /** 原图宽像素；0 表示未知 */
   width: number;
   /** 原图高像素；0 表示未知 */
   height: number;
+  /** 用户名或 "API Key: <name>" */
+  uploaded_by: string;
+  uploaded_at: string;
+  created_at: string;
+  /** 图片内容路径，需附带 ?token= 访问 */
+  content_url: string;
 }
+
+type ScreenshotTheme = "light" | "dark";
 
 type ScreenshotAnnotationStatus = "open" | "resolved";
 
@@ -589,26 +587,26 @@ interface ScreenshotAnnotationRect {
   height: number;
 }
 
-/** 挂在某个截图版本上的「矩形框 + 文字」标注；x/y/width/height 为图片宽高比例（0~1） */
+/** 挂在某张截图上的「矩形框 + 文字」标注；x/y/width/height 为图片宽高比例（0~1） */
 interface ScreenshotAnnotation {
   id: string;
   project_id: string;
   screen_id: string;
-  version_id: string;
   issue_id: string | null;
   issue_reference: string | null;
   issue_title: string | null;
   screen_key: string;
-  /** 界面显示名；空串时回退展示 screen_key */
+  /** 截图显示名；空串时回退展示 screen_key */
   screen_title: string;
-  /** 界面分组；空串表示未分组 */
-  screen_group: string;
-  /** 所在版本的原图地址，需附带 ?token= 访问 */
+  screen_platform: string | null;
+  screen_locale: string | null;
+  screen_theme: ScreenshotTheme | null;
+  /** 所在截图的原图地址，需附带 ?token= 访问 */
   image_url: string;
   image_width: number;
   image_height: number;
-  /** 是否挂在界面当前最新版本上 */
-  is_latest_version: boolean;
+  /** 截图被覆盖更新后未「确认保留」；resolved 恒为 false */
+  outdated: boolean;
   x: number;
   y: number;
   width: number;
@@ -641,22 +639,28 @@ interface UpdateScreenshotAnnotationPayload {
   issue_id?: string;
 }
 
-interface ScreenshotScreenListItem extends ScreenshotScreen {
-  latest_version: ScreenshotVersion | null;
-}
-
-interface ScreenshotScreenDetail extends ScreenshotScreen {
-  /** uploaded_at 倒序 */
-  versions: ScreenshotVersion[];
-}
-
 interface ScreenshotScreenListData {
-  items: ScreenshotScreenListItem[];
+  items: ScreenshotScreen[];
 }
 
 interface ScreenshotUploadResult {
   screen: ScreenshotScreen;
-  version: ScreenshotVersion;
+}
+
+interface ScreenshotAnnotationBatchPayload {
+  action: "confirm" | "resolve";
+  filter?: {
+    platform?: string[];
+    locale?: string[];
+    theme?: string[];
+    status?: ScreenshotAnnotationStatus;
+    outdated?: boolean | null;
+    screen_id?: string;
+  };
+}
+
+interface ScreenshotAnnotationBatchResult {
+  updated: number;
 }
 
 interface ApiResponse<T> {

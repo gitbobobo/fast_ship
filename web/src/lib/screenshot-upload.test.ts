@@ -82,7 +82,7 @@ describe("uploadScreenshotBatch", () => {
     expect(result.failed[0].message).toBe("上传失败");
   });
 
-  it("multi-file batch uses normalized file name as screen_key and shared group", async () => {
+  it("multi-file batch uses normalized file name as screen_key and shared dimensions", async () => {
     const calls: UploadScreenshotFields[] = [];
     const uploadOne = vi.fn<UploadOne>((_pid, _file, fields) => {
       calls.push(fields);
@@ -90,17 +90,22 @@ describe("uploadScreenshotBatch", () => {
     });
     const files = [makeFile("Home Page.png"), makeFile("设置.png")];
 
-    await uploadScreenshotBatch("p1", files, { group: "核心" }, uploadOne);
+    await uploadScreenshotBatch(
+      "p1",
+      files,
+      { platform: "ios", locale: "zh-CN", theme: "dark" },
+      uploadOne,
+    );
 
     expect(calls.map((c) => c.screen_key)).toEqual(["home-page", "设置"]);
-    expect(calls.every((c) => c.group === "核心")).toBe(true);
-    // 多文件不带 title/note
-    expect(calls.every((c) => c.title === undefined && c.note === undefined)).toBe(
-      true,
-    );
+    expect(calls.every((c) => c.platform === "ios")).toBe(true);
+    expect(calls.every((c) => c.locale === "zh-CN")).toBe(true);
+    expect(calls.every((c) => c.theme === "dark")).toBe(true);
+    // 多文件不带 title
+    expect(calls.every((c) => c.title === undefined)).toBe(true);
   });
 
-  it("single file uses the provided screen_key, title and note", async () => {
+  it("single file uses the provided screen_key, title and dimensions", async () => {
     const calls: UploadScreenshotFields[] = [];
     const uploadOne = vi.fn<UploadOne>((_pid, _file, fields) => {
       calls.push(fields);
@@ -110,16 +115,19 @@ describe("uploadScreenshotBatch", () => {
     await uploadScreenshotBatch(
       "p1",
       [makeFile("whatever.png")],
-      { group: "核心", screenKey: "main-screen", title: "主界面", note: "改版后" },
+      {
+        platform: "web",
+        screenKey: "main-screen",
+        title: "主界面",
+      },
       uploadOne,
     );
 
     expect(calls).toEqual([
       {
         screen_key: "main-screen",
-        group: "核心",
+        platform: "web",
         title: "主界面",
-        note: "改版后",
       },
     ]);
   });

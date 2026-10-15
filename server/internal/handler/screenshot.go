@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -10,6 +11,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
 
@@ -63,18 +65,26 @@ func (h *ScreenshotHandler) Upload(c *gin.Context) {
 	}
 	defer file.Close()
 
-	var group *string
-	if value, ok := c.GetPostForm("group"); ok {
-		group = &value
+	// 维度字段沿用表单存在性语义：字段出现才生效（空串清除为未标注），不出现保持原值
+	var platform, locale, theme *string
+	if v, ok := c.GetPostForm("platform"); ok {
+		platform = &v
+	}
+	if v, ok := c.GetPostForm("locale"); ok {
+		locale = &v
+	}
+	if v, ok := c.GetPostForm("theme"); ok {
+		theme = &v
 	}
 
 	result, err := h.screenshotService.Upload(&service.ScreenshotUploadInput{
 		ProjectID:  projectID,
 		UserID:     userID,
 		ScreenKey:  c.PostForm("screen_key"),
-		Group:      group,
 		Title:      c.PostForm("title"),
-		Note:       c.PostForm("note"),
+		Platform:   platform,
+		Locale:     locale,
+		Theme:      theme,
 		FileName:   header.Filename,
 		UploadedBy: uploadedBy,
 		Reader:     file,
@@ -87,24 +97,33 @@ func (h *ScreenshotHandler) Upload(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// parseScreenshotDimensionFilters 把 query 上的逗号多值维度过滤解析成 repo 过滤结构；
+// 各维度按自己的规则规范化（platform 小写、locale BCP 47、theme light|dark），
+// 非法值返回 40001。
+func parseScreenshotDimensionFilters(c *gin.Context) (repository.ScreenshotScreenFilters, error) {
+	var filters repository.ScreenshotScreenFilters
+	var err error
+	if filters.Platforms, filters.IncludeNoPlat, err = service.ParseScreenshotPlatformFilter(c.Query("platform")); err != nil {
+		return filters, err
+	}
+	if filters.Locales, filters.IncludeNoLocale, err = service.ParseScreenshotLocaleFilter(c.Query("locale")); err != nil {
+		return filters, err
+	}
+	filters.Themes, filters.IncludeNoTheme, err = service.ParseScreenshotThemeFilter(c.Query("theme"))
+	return filters, err
+}
+
 func (h *ScreenshotHandler) List(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	result, err := h.screenshotService.List(projectID, userID)
+	filters, err := parseScreenshotDimensionFilters(c)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}
 
-	response.Success(c, result)
-}
-
-func (h *ScreenshotHandler) Get(c *gin.Context) {
-	screenID := c.Param("sid")
-	userID := middleware.GetUserID(c)
-
-	result, err := h.screenshotService.Get(screenID, userID)
+	result, err := h.screenshotService.List(projectID, userID, filters)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -144,23 +163,11 @@ func (h *ScreenshotHandler) DeleteScreen(c *gin.Context) {
 	response.SuccessEmpty(c)
 }
 
-func (h *ScreenshotHandler) DeleteVersion(c *gin.Context) {
-	versionID := c.Param("vid")
-	userID := middleware.GetUserID(c)
-
-	if err := h.screenshotService.DeleteVersion(versionID, userID); err != nil {
-		middleware.HandleAppError(c, err)
-		return
-	}
-
-	response.SuccessEmpty(c)
-}
-
 func (h *ScreenshotHandler) Content(c *gin.Context) {
-	versionID := c.Param("vid")
+	screenID := c.Param("sid")
 	userID := middleware.GetUserID(c)
 
-	reader, mimeType, fileSize, err := h.screenshotService.GetVersionContent(versionID, userID)
+	reader, mimeType, fileSize, err := h.screenshotService.GetScreenContent(screenID, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -173,4 +180,16 @@ func (h *ScreenshotHandler) Content(c *gin.Context) {
 	c.Header("Content-Disposition", "inline")
 	c.Header("Cache-Control", "private, max-age=300")
 	c.DataFromReader(200, fileSize, mimeType, reader, nil)
+}
+
+// parseBoolQuery 解析布尔 query 参数；未提供返回 nil，非法值由调用方拒绝。
+func parseBoolQuery(raw string) (*bool, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return nil, errs.ErrInvalidParams
+	}
+	return &v, nil
 }

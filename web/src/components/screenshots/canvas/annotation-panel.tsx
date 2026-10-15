@@ -7,6 +7,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import {
+  BadgeCheck,
   Check,
   ChevronDown,
   Crosshair,
@@ -40,6 +41,7 @@ import {
 import { screenshotAnnotationApi } from "@/lib/api/screenshot-annotations";
 import { useIssues } from "@/lib/hooks/use-issues";
 import {
+  useBatchScreenshotAnnotations,
   useDeleteScreenshotAnnotation,
   useUpdateScreenshotAnnotation,
 } from "@/lib/hooks/use-screenshot-annotations";
@@ -54,6 +56,14 @@ interface AnnotationPanelProps {
   annotations: ScreenshotAnnotation[];
   statusFilter: AnnotationStatusFilter;
   onStatusFilterChange: (filter: AnnotationStatusFilter) => void;
+  /** 批量动作的过滤范围（与画布筛选一致的维度值，含 __none__） */
+  scopeFilter: {
+    platform?: string[];
+    locale?: string[];
+    theme?: string[];
+  };
+  /** 当前范围内过期待确认的 open 标注数 */
+  outdatedCount: number;
   selectedId: string | null;
   hoverId: string | null;
   /** 定位后短暂闪烁的标注 id，画布矩形与面板条目同步提示 */
@@ -74,6 +84,8 @@ export function AnnotationPanel({
   annotations,
   statusFilter,
   onStatusFilterChange,
+  scopeFilter,
+  outdatedCount,
   selectedId,
   hoverId,
   flashId,
@@ -83,6 +95,7 @@ export function AnnotationPanel({
 }: AnnotationPanelProps) {
   const listRef = useRef<HTMLUListElement>(null);
   const deleteMutation = useDeleteScreenshotAnnotation(projectId);
+  const batch = useBatchScreenshotAnnotations(projectId);
   const [pendingDelete, setPendingDelete] =
     useState<ScreenshotAnnotation | null>(null);
 
@@ -104,6 +117,25 @@ export function AnnotationPanel({
       ?.querySelector(`[data-annotation-id="${CSS.escape(selectedId)}"]`)
       ?.scrollIntoView({ block: "nearest" });
   }, [selectedId, shown]);
+
+  const runBatch = async (
+    action: ScreenshotAnnotationBatchPayload["action"],
+    successMessage: string,
+  ) => {
+    try {
+      const res = await batch.mutateAsync({
+        action,
+        filter: {
+          platform: scopeFilter.platform,
+          locale: scopeFilter.locale,
+          theme: scopeFilter.theme,
+        },
+      });
+      toast.success(`${successMessage}（${res.data.updated} 条）`);
+    } catch {
+      toast.error("批量操作失败，请稍后重试");
+    }
+  };
 
   const confirmDelete = async () => {
     if (!pendingDelete) return;
@@ -144,6 +176,35 @@ export function AnnotationPanel({
           </TabsList>
         </Tabs>
       </div>
+
+      {(outdatedCount > 0 || shown.some((a) => a.status === "open")) && (
+        <div className="flex items-center gap-1.5 border-b px-3 py-1.5">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            disabled={batch.isPending || outdatedCount === 0}
+            title="把当前范围内已过期的未解决标注清零（确认保留）"
+            onClick={() => void runBatch("confirm", "已全部确认保留")}
+            data-testid="panel-batch-confirm"
+          >
+            <BadgeCheck className="mr-1 h-3.5 w-3.5" />
+            全部确认保留{outdatedCount > 0 ? `（${outdatedCount}）` : ""}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 text-xs"
+            disabled={batch.isPending || !shown.some((a) => a.status === "open")}
+            title="把当前范围内的未解决标注全部标为已解决"
+            onClick={() => void runBatch("resolve", "已全部标记已解决")}
+            data-testid="panel-batch-resolve"
+          >
+            <Check className="mr-1 h-3.5 w-3.5" />
+            全部标记已解决
+          </Button>
+        </div>
+      )}
 
       {shown.length === 0 ? (
         <p className="px-3 py-10 text-center text-sm text-muted-foreground">
@@ -365,8 +426,13 @@ function AnnotationItem({
             >
               {resolved ? "已解决" : "未解决"}
             </Badge>
-            {!annotation.is_latest_version && (
-              <Badge variant="outline">旧版本</Badge>
+            {annotation.outdated && (
+              <Badge
+                variant="outline"
+                className="border-amber-500/60 text-amber-600 dark:text-amber-400"
+              >
+                待确认
+              </Badge>
             )}
           </div>
         </div>

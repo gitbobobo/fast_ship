@@ -63,7 +63,6 @@ var (
 	ErrRecommendationNotFound       = New(40411, "推荐不存在")
 	ErrPullRequestNotFound          = New(40412, "PR 关联不存在")
 	ErrScreenshotScreenNotFound     = New(40413, "界面不存在")
-	ErrScreenshotVersionNotFound    = New(40414, "截图版本不存在")
 	ErrIssueAttachmentNotFound      = New(40415, "问题附件不存在")
 	ErrScreenshotAnnotationNotFound = New(40416, "截图标注不存在")
 	ErrT3EnvironmentNotFound        = New(40417, "T3 环境不存在")
@@ -99,6 +98,7 @@ var (
 	ErrPageBoundaryInvalid         = New(40918, "分页边界条目已不存在，请从头重新拉取")
 	ErrAutomationActive            = New(40919, "自动化有进行中的运行（或后置操作待执行），暂不能删除")
 	ErrRunNotPRReview              = New(40920, "运行不是进行中的 GitHub PR 审查，无法使用 PR 端点")
+	ErrScreenshotVariantExists     = New(40921, "相同界面标识与平台/语言/亮度组合的截图已存在")
 )
 
 // 前置条件未满足 41200-41299

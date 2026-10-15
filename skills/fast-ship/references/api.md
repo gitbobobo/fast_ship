@@ -1871,18 +1871,19 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `items[].screenshot_annotations` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无关联标注时缺省）；列表项不出现 |
 | `items[].screenshot_annotations[].id` | string | 是 |  |
 | `items[].screenshot_annotations[].project_id` | string | 是 |  |
-| `items[].screenshot_annotations[].screen_id` | string | 是 | 所属界面 ID（由版本冗余带出，便于过滤） |
-| `items[].screenshot_annotations[].version_id` | string | 是 | 标注挂在该版本上；版本删除时标注级联删除 |
+| `items[].screenshot_annotations[].screen_id` | string | 是 | 所属截图 ID |
 | `items[].screenshot_annotations[].issue_id` | string（可空） | 是 | 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注 |
 | `items[].screenshot_annotations[].issue_reference` | string（可空） | 是 | 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null |
 | `items[].screenshot_annotations[].issue_title` | string（可空） | 是 | 关联 Issue 的标题；未关联为 null |
 | `items[].screenshot_annotations[].screen_key` | string | 是 |  |
-| `items[].screenshot_annotations[].screen_title` | string | 是 | 界面显示名；空串时客户端回退展示 screen_key |
-| `items[].screenshot_annotations[].screen_group` | string | 是 | 界面分组；空串表示未分组 |
-| `items[].screenshot_annotations[].image_url` | string | 是 | 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img> |
-| `items[].screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知（存量版本未记录尺寸） |
+| `items[].screenshot_annotations[].screen_title` | string | 是 | 截图显示名；空串时客户端回退展示 screen_key |
+| `items[].screenshot_annotations[].screen_platform` | string（可空） | 是 | 所属截图的平台；null 表示未标注 |
+| `items[].screenshot_annotations[].screen_locale` | string（可空） | 是 | 所属截图的语言；null 表示未标注 |
+| `items[].screenshot_annotations[].screen_theme` | string（可空） | 是 | 所属截图的亮度主题；null 表示未标注 |
+| `items[].screenshot_annotations[].image_url` | string | 是 | 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img> |
+| `items[].screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知 |
 | `items[].screenshot_annotations[].image_height` | integer | 是 | 原图高像素；0 表示未知 |
-| `items[].screenshot_annotations[].is_latest_version` | boolean | 是 | 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看） |
+| `items[].screenshot_annotations[].outdated` | boolean | 是 | 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false |
 | `items[].screenshot_annotations[].x` | number | 是 | 框选矩形左上角横坐标 / 图宽（0~1） |
 | `items[].screenshot_annotations[].y` | number | 是 | 框选矩形左上角纵坐标 / 图高（0~1） |
 | `items[].screenshot_annotations[].width` | number | 是 | 框选矩形宽 / 图宽（0~1） |
@@ -2088,18 +2089,19 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `screenshot_annotations` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无关联标注时缺省）；列表项不出现 |
 | `screenshot_annotations[].id` | string | 是 |  |
 | `screenshot_annotations[].project_id` | string | 是 |  |
-| `screenshot_annotations[].screen_id` | string | 是 | 所属界面 ID（由版本冗余带出，便于过滤） |
-| `screenshot_annotations[].version_id` | string | 是 | 标注挂在该版本上；版本删除时标注级联删除 |
+| `screenshot_annotations[].screen_id` | string | 是 | 所属截图 ID |
 | `screenshot_annotations[].issue_id` | string（可空） | 是 | 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注 |
 | `screenshot_annotations[].issue_reference` | string（可空） | 是 | 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null |
 | `screenshot_annotations[].issue_title` | string（可空） | 是 | 关联 Issue 的标题；未关联为 null |
 | `screenshot_annotations[].screen_key` | string | 是 |  |
-| `screenshot_annotations[].screen_title` | string | 是 | 界面显示名；空串时客户端回退展示 screen_key |
-| `screenshot_annotations[].screen_group` | string | 是 | 界面分组；空串表示未分组 |
-| `screenshot_annotations[].image_url` | string | 是 | 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img> |
-| `screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知（存量版本未记录尺寸） |
+| `screenshot_annotations[].screen_title` | string | 是 | 截图显示名；空串时客户端回退展示 screen_key |
+| `screenshot_annotations[].screen_platform` | string（可空） | 是 | 所属截图的平台；null 表示未标注 |
+| `screenshot_annotations[].screen_locale` | string（可空） | 是 | 所属截图的语言；null 表示未标注 |
+| `screenshot_annotations[].screen_theme` | string（可空） | 是 | 所属截图的亮度主题；null 表示未标注 |
+| `screenshot_annotations[].image_url` | string | 是 | 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img> |
+| `screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知 |
 | `screenshot_annotations[].image_height` | integer | 是 | 原图高像素；0 表示未知 |
-| `screenshot_annotations[].is_latest_version` | boolean | 是 | 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看） |
+| `screenshot_annotations[].outdated` | boolean | 是 | 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false |
 | `screenshot_annotations[].x` | number | 是 | 框选矩形左上角横坐标 / 图宽（0~1） |
 | `screenshot_annotations[].y` | number | 是 | 框选矩形左上角纵坐标 / 图高（0~1） |
 | `screenshot_annotations[].width` | number | 是 | 框选矩形宽 / 图宽（0~1） |
@@ -2556,18 +2558,19 @@ Issue CRUD、过滤、同步、清单、发货钩子与图片附件
 | `screenshot_annotations` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无关联标注时缺省）；列表项不出现 |
 | `screenshot_annotations[].id` | string | 是 |  |
 | `screenshot_annotations[].project_id` | string | 是 |  |
-| `screenshot_annotations[].screen_id` | string | 是 | 所属界面 ID（由版本冗余带出，便于过滤） |
-| `screenshot_annotations[].version_id` | string | 是 | 标注挂在该版本上；版本删除时标注级联删除 |
+| `screenshot_annotations[].screen_id` | string | 是 | 所属截图 ID |
 | `screenshot_annotations[].issue_id` | string（可空） | 是 | 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注 |
 | `screenshot_annotations[].issue_reference` | string（可空） | 是 | 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null |
 | `screenshot_annotations[].issue_title` | string（可空） | 是 | 关联 Issue 的标题；未关联为 null |
 | `screenshot_annotations[].screen_key` | string | 是 |  |
-| `screenshot_annotations[].screen_title` | string | 是 | 界面显示名；空串时客户端回退展示 screen_key |
-| `screenshot_annotations[].screen_group` | string | 是 | 界面分组；空串表示未分组 |
-| `screenshot_annotations[].image_url` | string | 是 | 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img> |
-| `screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知（存量版本未记录尺寸） |
+| `screenshot_annotations[].screen_title` | string | 是 | 截图显示名；空串时客户端回退展示 screen_key |
+| `screenshot_annotations[].screen_platform` | string（可空） | 是 | 所属截图的平台；null 表示未标注 |
+| `screenshot_annotations[].screen_locale` | string（可空） | 是 | 所属截图的语言；null 表示未标注 |
+| `screenshot_annotations[].screen_theme` | string（可空） | 是 | 所属截图的亮度主题；null 表示未标注 |
+| `screenshot_annotations[].image_url` | string | 是 | 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img> |
+| `screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知 |
 | `screenshot_annotations[].image_height` | integer | 是 | 原图高像素；0 表示未知 |
-| `screenshot_annotations[].is_latest_version` | boolean | 是 | 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看） |
+| `screenshot_annotations[].outdated` | boolean | 是 | 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false |
 | `screenshot_annotations[].x` | number | 是 | 框选矩形左上角横坐标 / 图宽（0~1） |
 | `screenshot_annotations[].y` | number | 是 | 框选矩形左上角纵坐标 / 图高（0~1） |
 | `screenshot_annotations[].width` | number | 是 | 框选矩形宽 / 图宽（0~1） |
@@ -2779,18 +2782,19 @@ github 来源 Issue 的更改写回 GitHub 远端，internal 仅写本地；`sta
 | `screenshot_annotations` | object[] | 否 | omitempty；仅 Issue 详情响应携带（无关联标注时缺省）；列表项不出现 |
 | `screenshot_annotations[].id` | string | 是 |  |
 | `screenshot_annotations[].project_id` | string | 是 |  |
-| `screenshot_annotations[].screen_id` | string | 是 | 所属界面 ID（由版本冗余带出，便于过滤） |
-| `screenshot_annotations[].version_id` | string | 是 | 标注挂在该版本上；版本删除时标注级联删除 |
+| `screenshot_annotations[].screen_id` | string | 是 | 所属截图 ID |
 | `screenshot_annotations[].issue_id` | string（可空） | 是 | 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注 |
 | `screenshot_annotations[].issue_reference` | string（可空） | 是 | 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null |
 | `screenshot_annotations[].issue_title` | string（可空） | 是 | 关联 Issue 的标题；未关联为 null |
 | `screenshot_annotations[].screen_key` | string | 是 |  |
-| `screenshot_annotations[].screen_title` | string | 是 | 界面显示名；空串时客户端回退展示 screen_key |
-| `screenshot_annotations[].screen_group` | string | 是 | 界面分组；空串表示未分组 |
-| `screenshot_annotations[].image_url` | string | 是 | 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img> |
-| `screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知（存量版本未记录尺寸） |
+| `screenshot_annotations[].screen_title` | string | 是 | 截图显示名；空串时客户端回退展示 screen_key |
+| `screenshot_annotations[].screen_platform` | string（可空） | 是 | 所属截图的平台；null 表示未标注 |
+| `screenshot_annotations[].screen_locale` | string（可空） | 是 | 所属截图的语言；null 表示未标注 |
+| `screenshot_annotations[].screen_theme` | string（可空） | 是 | 所属截图的亮度主题；null 表示未标注 |
+| `screenshot_annotations[].image_url` | string | 是 | 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img> |
+| `screenshot_annotations[].image_width` | integer | 是 | 原图宽像素；0 表示未知 |
 | `screenshot_annotations[].image_height` | integer | 是 | 原图高像素；0 表示未知 |
-| `screenshot_annotations[].is_latest_version` | boolean | 是 | 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看） |
+| `screenshot_annotations[].outdated` | boolean | 是 | 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false |
 | `screenshot_annotations[].x` | number | 是 | 框选矩形左上角横坐标 / 图宽（0~1） |
 | `screenshot_annotations[].y` | number | 是 | 框选矩形左上角纵坐标 / 图高（0~1） |
 | `screenshot_annotations[].width` | number | 是 | 框选矩形宽 / 图宽（0~1） |
@@ -4942,15 +4946,16 @@ GitHub 媒体代理（HEAD，仅头信息）
 
 ## screenshots
 
-项目截图库（按界面聚合，版本全量保留）
+项目截图库（每变体一张图，覆盖上传即替换文件，只保留最新版）
 
 ### GET `/api/projects/{id}/screenshots`
 
 <!-- operationId: listScreenshotScreens -->
 
-列出项目全部界面（last_uploaded_at 倒序）
+列出项目全部截图（uploaded_at 倒序）
 
-每项为界面字段 + version_count + latest_version（最新一个版本，无版本时为 null，实际不会发生）。
+可选 query 过滤：`platform`/`locale`/`theme`（逗号分隔多值，OR 语义；值 `__none__` 表示「未标注」桶即 NULL，可与其他值混用，可组合）。
+每项为截图字段 + 文件信息 + content_url。
 
 **鉴权**：JWT+API Key
 
@@ -4960,9 +4965,17 @@ GitHub 媒体代理（HEAD，仅头信息）
 | --- | --- | --- | --- |
 | `id` | string | 是 | 项目 ID（UUID） |
 
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `platform` | string | 否 | 逗号分隔多值；`__none__` 表示未标注（NULL） |
+| `locale` | string | 否 | 逗号分隔多值；`__none__` 表示未标注（NULL） |
+| `theme` | string | 否 | 逗号分隔多值（light/dark）；`__none__` 表示未标注（NULL） |
+
 **成功响应**
 
-**200** 界面列表（data 为 {items}，非分页信封）
+**200** 截图列表（data 为 {items}，非分页信封）
 
 `data`：
 
@@ -4973,27 +4986,23 @@ GitHub 媒体代理（HEAD，仅头信息）
 | `items[].project_id` | string | 是 |  |
 | `items[].screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
 | `items[].title` | string | 是 | 可为空串，客户端回退显示 screen_key |
-| `items[].group` | string | 是 | 自由文本分组；空串表示未分组 |
-| `items[].version_count` | integer | 是 | 该界面累计保留的版本数 |
-| `items[].last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
+| `items[].platform` | string（可空） | 是 | 平台（开放词表，trim+小写）；null 表示未标注 |
+| `items[].locale` | string（可空） | 是 | 语言（BCP 47 规范化大小写）；null 表示未标注 |
+| `items[].theme` | string（enum: light \| dark，可空） | 是 | 亮度主题；null 表示未标注 |
+| `items[].mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
+| `items[].file_size` | integer（int64） | 是 | 文件字节数 |
+| `items[].width` | integer | 是 | 原图宽像素；0 表示未知 |
+| `items[].height` | integer | 是 | 原图高像素；0 表示未知 |
+| `items[].uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
+| `items[].uploaded_at` | string（date-time） | 是 | 当前文件的上传时间；覆盖上传即更新，列表按它倒序 |
 | `items[].created_at` | string（date-time） | 是 |  |
-| `items[].latest_version` | object（可空） | 是 | 最新一个版本；无版本时为 null |
-| `items[].latest_version.id` | string | 是 |  |
-| `items[].latest_version.screen_id` | string | 是 |  |
-| `items[].latest_version.note` | string | 是 |  |
-| `items[].latest_version.file_name` | string | 是 |  |
-| `items[].latest_version.file_size` | integer（int64） | 是 |  |
-| `items[].latest_version.mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
-| `items[].latest_version.uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
-| `items[].latest_version.uploaded_at` | string（date-time） | 是 |  |
-| `items[].latest_version.width` | integer | 是 | 原图宽像素；0 表示未知（历史存量版本未记录尺寸） |
-| `items[].latest_version.height` | integer | 是 | 原图高像素；0 表示未知 |
-| `items[].latest_version.content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
+| `items[].content_url` | string | 是 | /api/screenshot-screens/{sid}/content?v=<uploaded_at 纳秒值>；v 随文件变化（覆盖上传即换 URL，浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 
 **错误**
 
 | HTTP | 说明 |
 | --- | --- |
+| 400 | 请求参数无效（40001-40099） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
@@ -5006,9 +5015,12 @@ GitHub 媒体代理（HEAD，仅头信息）
 
 multipart 字段：`file`（必填；内容嗅探须为 image/png、image/jpeg、image/webp、image/gif，大小受服务端 upload.max_file_size 限制）、
 `screen_key`（必填；服务端按 ToLower+TrimSpace 规范化，规范化后须 1~100 字符，否则 40001）、
-`group`/`title`/`note`（可选）。
-同 project 下 screen_key 唯一对应一个界面：首次出现自动建界面，重复上传归并为新版本（版本全量保留，不去重、不清理）。
-表单含 `group` 字段（允许空串=未分组）即更新界面分组；`title` 非空即更新界面标题；`note` 记在该版本上。
+`title`/`platform`/`locale`/`theme`（可选）。
+(project_id, screen_key, platform, locale, theme) 定位一张截图（NULL 与 NULL 视为相等）：
+已存在即覆盖——替换文件、更新宽高/大小/上传时间/上传者，不新增行；不存在则新建。
+表单字段存在性语义：`platform`（trim+小写化，开放词表；空串=清除为未标注）、`locale`（BCP 47 规范化，非法值 40001；空串=清除）、
+`theme`（严格 light|dark，其他值 40001；空串=清除）字段出现才生效，不出现保持原值；`title` 非空才更新。
+覆盖后该截图上全部 open 标注置为 outdated（待确认）；「确认保留」清零。
 `uploaded_by` 由服务端按凭证自动记录（用户名，或 "API Key: <name>"）。
 
 **鉴权**：JWT+API Key
@@ -5027,39 +5039,35 @@ multipart 字段：`file`（必填；内容嗅探须为 image/png、image/jpeg�
 | --- | --- | --- | --- |
 | `file` | binary | 是 | 截图文件；内容须为 image/png、image/jpeg、image/webp、image/gif |
 | `screen_key` | string | 是 | 界面标识；规范化后 1~100 字符 |
-| `group` | string（长度 ≤100） | 否 | 分组名（≤100 字符）；字段出现即更新（空串置为未分组），不出现则保持原值 |
 | `title` | string（长度 ≤200） | 否 | 界面标题（≤200 字符）；非空才更新 |
-| `note` | string（长度 ≤1000） | 否 | 本次上传版本的备注（≤1000 字符） |
+| `platform` | string（长度 ≤100） | 否 | 平台（开放词表，trim+小写，≤100 字符）；字段出现即生效（空串清除为未标注） |
+| `locale` | string | 否 | 语言（BCP 47，服务端规范化大小写，非法值 40001）；字段出现即生效（空串清除） |
+| `theme` | string（enum: light \| dark） | 否 | 亮度主题（严格 light\|dark，其他值 40001）；字段出现即生效（空串清除） |
 
 **成功响应**
 
-**200** 上传结果（screen 为归并后的界面，version 为新建版本）
+**200** 上传结果（screen 为新建或覆盖后的截图）
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `screen` | object | 是 |  |
+| `screen` | object | 是 | 截图库中的一张截图：(project_id, screen_key, platform, locale, theme) 唯一，再上传即覆盖文件 |
 | `screen.id` | string | 是 |  |
 | `screen.project_id` | string | 是 |  |
 | `screen.screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
 | `screen.title` | string | 是 | 可为空串，客户端回退显示 screen_key |
-| `screen.group` | string | 是 | 自由文本分组；空串表示未分组 |
-| `screen.version_count` | integer | 是 | 该界面累计保留的版本数 |
-| `screen.last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
+| `screen.platform` | string（可空） | 是 | 平台（开放词表，trim+小写）；null 表示未标注 |
+| `screen.locale` | string（可空） | 是 | 语言（BCP 47 规范化大小写）；null 表示未标注 |
+| `screen.theme` | string（enum: light \| dark，可空） | 是 | 亮度主题；null 表示未标注 |
+| `screen.mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
+| `screen.file_size` | integer（int64） | 是 | 文件字节数 |
+| `screen.width` | integer | 是 | 原图宽像素；0 表示未知 |
+| `screen.height` | integer | 是 | 原图高像素；0 表示未知 |
+| `screen.uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
+| `screen.uploaded_at` | string（date-time） | 是 | 当前文件的上传时间；覆盖上传即更新，列表按它倒序 |
 | `screen.created_at` | string（date-time） | 是 |  |
-| `version` | object | 是 |  |
-| `version.id` | string | 是 |  |
-| `version.screen_id` | string | 是 |  |
-| `version.note` | string | 是 |  |
-| `version.file_name` | string | 是 |  |
-| `version.file_size` | integer（int64） | 是 |  |
-| `version.mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
-| `version.uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
-| `version.uploaded_at` | string（date-time） | 是 |  |
-| `version.width` | integer | 是 | 原图宽像素；0 表示未知（历史存量版本未记录尺寸） |
-| `version.height` | integer | 是 | 原图高像素；0 表示未知 |
-| `version.content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
+| `screen.content_url` | string | 是 | /api/screenshot-screens/{sid}/content?v=<uploaded_at 纳秒值>；v 随文件变化（覆盖上传即换 URL，浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 
 **错误**
 
@@ -5071,64 +5079,15 @@ multipart 字段：`file`（必填；内容嗅探须为 image/png、image/jpeg�
 | 413 | 请求体超过大小限制（裸 413，无 JSON body） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/screenshot-screens/{sid}`
-
-<!-- operationId: getScreenshotScreen -->
-
-获取界面详情（含全部版本，uploaded_at 倒序）
-
-**鉴权**：JWT+API Key
-
-**路径参数**
-
-| 名称 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `sid` | string | 是 | 截图界面 ID（UUID） |
-
-**成功响应**
-
-**200** 界面详情
-
-`data`：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `id` | string | 是 |  |
-| `project_id` | string | 是 |  |
-| `screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
-| `title` | string | 是 | 可为空串，客户端回退显示 screen_key |
-| `group` | string | 是 | 自由文本分组；空串表示未分组 |
-| `version_count` | integer | 是 | 该界面累计保留的版本数 |
-| `last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
-| `created_at` | string（date-time） | 是 |  |
-| `versions` | object[] | 是 | 全部历史版本，uploaded_at 倒序 |
-| `versions[].id` | string | 是 |  |
-| `versions[].screen_id` | string | 是 |  |
-| `versions[].note` | string | 是 |  |
-| `versions[].file_name` | string | 是 |  |
-| `versions[].file_size` | integer（int64） | 是 |  |
-| `versions[].mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
-| `versions[].uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
-| `versions[].uploaded_at` | string（date-time） | 是 |  |
-| `versions[].width` | integer | 是 | 原图宽像素；0 表示未知（历史存量版本未记录尺寸） |
-| `versions[].height` | integer | 是 | 原图高像素；0 表示未知 |
-| `versions[].content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 401 | 未提供或提供无效凭证（40100-40199） |
-| 404 | 资源不存在（40400-40499） |
-| 500 | 服务器内部错误（50000） |
-
 ### PATCH `/api/screenshot-screens/{sid}`
 
 <!-- operationId: updateScreenshotScreen -->
 
-更新界面分组/标题（仅 JWT）
+更新截图标题/平台/语言/亮度（仅 JWT）
 
-group 与 title 均为可选指针字段：字段出现才更新（group 允许空串置为未分组），都不传返回 40001。
+四字段均为可选指针字段：字段出现才更新（三个维度允许空串清除为未标注），都不传返回 40001。
+platform 非法长度、locale 非法 BCP 47、theme 非 light|dark 返回 40001；
+改出的 (screen_key, platform, locale, theme) 组合与项目内已有截图撞唯一约束返回 409（40921）。
 
 **鉴权**：仅 JWT
 
@@ -5136,24 +5095,28 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `sid` | string | 是 | 截图界面 ID（UUID） |
+| `sid` | string | 是 | 截图 ID（UUID） |
 
 **请求体**
 
 `application/json`，必填。
 
-两字段均可选，出现才更新；都不传返回 40001
+四字段均可选，出现才更新（三个维度允许空串清除为未标注）；都不传返回 40001；维度组合撞唯一约束返回 409（40921）
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `group` | string（长度 ≤100） | 否 | 分组名（≤100 字符）；允许空串置为未分组 |
 | `title` | string（长度 ≤200） | 否 | 界面标题（≤200 字符）；空串回退显示 screen_key |
+| `platform` | string（长度 ≤100） | 否 | 平台（开放词表，trim+小写，≤100 字符）；空串清除为未标注 |
+| `locale` | string | 否 | 语言（BCP 47，服务端规范化大小写，非法值 40001）；空串清除为未标注 |
+| `theme` | string（enum: light \| dark \| ""） | 否 | 亮度主题（严格 light\|dark，其他值 40001）；空串清除为未标注 |
 
 **成功响应**
 
-**200** 更新后的界面详情（含全部版本）
+**200** 更新后的截图
 
 `data`：
+
+截图库中的一张截图：(project_id, screen_key, platform, locale, theme) 唯一，再上传即覆盖文件
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
@@ -5161,22 +5124,17 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 | `project_id` | string | 是 |  |
 | `screen_key` | string | 是 | 服务端规范化（ToLower+TrimSpace）后的界面标识 |
 | `title` | string | 是 | 可为空串，客户端回退显示 screen_key |
-| `group` | string | 是 | 自由文本分组；空串表示未分组 |
-| `version_count` | integer | 是 | 该界面累计保留的版本数 |
-| `last_uploaded_at` | string（date-time） | 是 | 最近一次上传时间，列表按它倒序 |
+| `platform` | string（可空） | 是 | 平台（开放词表，trim+小写）；null 表示未标注 |
+| `locale` | string（可空） | 是 | 语言（BCP 47 规范化大小写）；null 表示未标注 |
+| `theme` | string（enum: light \| dark，可空） | 是 | 亮度主题；null 表示未标注 |
+| `mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
+| `file_size` | integer（int64） | 是 | 文件字节数 |
+| `width` | integer | 是 | 原图宽像素；0 表示未知 |
+| `height` | integer | 是 | 原图高像素；0 表示未知 |
+| `uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
+| `uploaded_at` | string（date-time） | 是 | 当前文件的上传时间；覆盖上传即更新，列表按它倒序 |
 | `created_at` | string（date-time） | 是 |  |
-| `versions` | object[] | 是 | 全部历史版本，uploaded_at 倒序 |
-| `versions[].id` | string | 是 |  |
-| `versions[].screen_id` | string | 是 |  |
-| `versions[].note` | string | 是 |  |
-| `versions[].file_name` | string | 是 |  |
-| `versions[].file_size` | integer（int64） | 是 |  |
-| `versions[].mime_type` | string | 是 | 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一） |
-| `versions[].uploaded_by` | string | 是 | 用户名或 "API Key: <name>" |
-| `versions[].uploaded_at` | string（date-time） | 是 |  |
-| `versions[].width` | integer | 是 | 原图宽像素；0 表示未知（历史存量版本未记录尺寸） |
-| `versions[].height` | integer | 是 | 原图高像素；0 表示未知 |
-| `versions[].content_url` | string | 是 | /api/screenshot-versions/{vid}/content；前端自行追加 ?token= |
+| `content_url` | string | 是 | /api/screenshot-screens/{sid}/content?v=<uploaded_at 纳秒值>；v 随文件变化（覆盖上传即换 URL，浏览器缓存按完整 URL 记键），前端自行追加 &token= |
 
 **错误**
 
@@ -5186,13 +5144,14 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 404 | 资源不存在（40400-40499） |
+| 409 | 业务冲突（40900-40999） |
 | 500 | 服务器内部错误（50000） |
 
 ### DELETE `/api/screenshot-screens/{sid}`
 
 <!-- operationId: deleteScreenshotScreen -->
 
-删除界面及其全部版本与磁盘文件（仅 JWT）
+删除截图及其文件与全部标注（仅 JWT）
 
 **鉴权**：仅 JWT
 
@@ -5200,7 +5159,7 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `sid` | string | 是 | 截图界面 ID（UUID） |
+| `sid` | string | 是 | 截图 ID（UUID） |
 
 **成功响应**
 
@@ -5217,44 +5176,13 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
-### DELETE `/api/screenshot-versions/{vid}`
+### GET `/api/screenshot-screens/{sid}/content`
 
-<!-- operationId: deleteScreenshotVersion -->
+<!-- operationId: getScreenshotScreenContent -->
 
-删除单个截图版本与文件（仅 JWT）
+获取截图图片内容
 
-若删除的是该界面最后一个版本，连带删除界面本身。
-
-**鉴权**：仅 JWT
-
-**路径参数**
-
-| 名称 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `vid` | string | 是 | 截图版本 ID（UUID） |
-
-**成功响应**
-
-**200** 操作成功（data 为 null）
-
-`data` 为 null。
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 401 | 未提供或提供无效凭证（40100-40199） |
-| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
-| 404 | 资源不存在（40400-40499） |
-| 500 | 服务器内部错误（50000） |
-
-### GET `/api/screenshot-versions/{vid}/content`
-
-<!-- operationId: getScreenshotVersionContent -->
-
-获取截图版本图片内容
-
-返回图片二进制内容（存储时嗅探的 mime type，`Content-Disposition: inline`，`Cache-Control: private, max-age=300`）。支持 Authorization 头或 `?token=` query 凭证（供 `<img>` 直链）。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。
+返回图片二进制内容（存储时嗅探的 mime type，`Content-Disposition: inline`，`Cache-Control: private, max-age=300`——缓存键是含 `?v=` 修订参数的完整 URL，覆盖上传推进 v 即自然失效）。支持 Authorization 头或 `?token=` query 凭证（供 `<img>` 直链）。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。
 
 **鉴权**：JWT+API Key，支持 ?token=
 
@@ -5262,7 +5190,7 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `vid` | string | 是 | 截图版本 ID（UUID） |
+| `sid` | string | 是 | 截图 ID（UUID） |
 
 **Query 参数**
 
@@ -5284,11 +5212,11 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
-### HEAD `/api/screenshot-versions/{vid}/content`
+### HEAD `/api/screenshot-screens/{sid}/content`
 
-<!-- operationId: getScreenshotVersionContentHead -->
+<!-- operationId: getScreenshotScreenContentHead -->
 
-获取截图版本图片头信息（HEAD）
+获取截图图片头信息（HEAD）
 
 与 GET 语义相同但不返回 body。
 
@@ -5298,7 +5226,7 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `vid` | string | 是 | 截图版本 ID（UUID） |
+| `sid` | string | 是 | 截图 ID（UUID） |
 
 **Query 参数**
 
@@ -5322,14 +5250,17 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 
 <!-- operationId: listScreenshotAnnotations -->
 
-列出项目全部截图标注（可按状态 / Issue / 界面过滤）
+列出项目全部截图标注（可按状态 / 过期 / 维度 / Issue / 截图过滤）
 
-返回项目下全部截图标注（含挂在旧版本上的），按创建先后升序。
-可选 query 过滤：`status`（open/resolved，缺省返回全部；非法值 40001）、`issue_id`、`screen_id`（精确匹配，可组合）。
-每条标注返回：原图地址（image_url，即所在版本的 content_url）、比例坐标（x/y/width/height，0~1）、
-像素坐标（pixel_rect；原图尺寸未知的存量版本为 null）、文字、所属画面（screen_key/screen_title/screen_group）、
-关联 Issue（issue_id/issue_reference/issue_title，未关联均为 null）、是否挂在界面最新版本（is_latest_version）
-与裁剪图地址（crop_url）。删除界面/版本会级联删除其上标注；删除 Issue 只解除关联不删标注。
+返回项目下截图标注，按创建先后升序。
+可选 query 过滤：`status`（open/resolved，缺省返回全部；非法值 40001）、`outdated`（true/false）、
+`issue_id`、`screen_id`（精确匹配）、`platform`/`locale`/`theme`（逗号分隔多值，OR 语义；
+值 `__none__` 表示「未标注」桶即截图维度为 NULL，可与其他值混用），全部可组合。
+每条标注返回：原图地址（image_url，即所在截图的 content_url）、比例坐标（x/y/width/height，0~1）、
+像素坐标（pixel_rect；原图尺寸未知时为 null）、文字、状态、是否过期（outdated，截图被覆盖更新后未确认）、
+所属截图（screen_key/screen_title/screen_platform/screen_locale/screen_theme）、
+关联 Issue（issue_id/issue_reference/issue_title，未关联均为 null）与裁剪图地址（crop_url）。
+删除截图会级联删除其上标注；删除 Issue 只解除关联不删标注。
 
 **鉴权**：JWT+API Key
 
@@ -5344,8 +5275,12 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `status` | string（enum: open \| resolved） | 否 | 按状态过滤；缺省返回全部状态。open=未解决，resolved=已解决 |
+| `outdated` | boolean | 否 | 按过期标记过滤；true=仅过期（待确认），false=仅未过期 |
 | `issue_id` | string | 否 | 只返回关联该 Issue 的标注（UUID） |
-| `screen_id` | string | 否 | 只返回该界面（含全部历史版本）上的标注 |
+| `screen_id` | string | 否 | 只返回该截图上的标注 |
+| `platform` | string | 否 | 逗号分隔多值；`__none__` 表示未标注（NULL） |
+| `locale` | string | 否 | 逗号分隔多值；`__none__` 表示未标注（NULL） |
+| `theme` | string | 否 | 逗号分隔多值（light/dark）；`__none__` 表示未标注（NULL） |
 
 **成功响应**
 
@@ -5358,18 +5293,19 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].project_id` | string | 是 |  |
-| `items[].screen_id` | string | 是 | 所属界面 ID（由版本冗余带出，便于过滤） |
-| `items[].version_id` | string | 是 | 标注挂在该版本上；版本删除时标注级联删除 |
+| `items[].screen_id` | string | 是 | 所属截图 ID |
 | `items[].issue_id` | string（可空） | 是 | 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注 |
 | `items[].issue_reference` | string（可空） | 是 | 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null |
 | `items[].issue_title` | string（可空） | 是 | 关联 Issue 的标题；未关联为 null |
 | `items[].screen_key` | string | 是 |  |
-| `items[].screen_title` | string | 是 | 界面显示名；空串时客户端回退展示 screen_key |
-| `items[].screen_group` | string | 是 | 界面分组；空串表示未分组 |
-| `items[].image_url` | string | 是 | 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img> |
-| `items[].image_width` | integer | 是 | 原图宽像素；0 表示未知（存量版本未记录尺寸） |
+| `items[].screen_title` | string | 是 | 截图显示名；空串时客户端回退展示 screen_key |
+| `items[].screen_platform` | string（可空） | 是 | 所属截图的平台；null 表示未标注 |
+| `items[].screen_locale` | string（可空） | 是 | 所属截图的语言；null 表示未标注 |
+| `items[].screen_theme` | string（可空） | 是 | 所属截图的亮度主题；null 表示未标注 |
+| `items[].image_url` | string | 是 | 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img> |
+| `items[].image_width` | integer | 是 | 原图宽像素；0 表示未知 |
 | `items[].image_height` | integer | 是 | 原图高像素；0 表示未知 |
-| `items[].is_latest_version` | boolean | 是 | 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看） |
+| `items[].outdated` | boolean | 是 | 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false |
 | `items[].x` | number | 是 | 框选矩形左上角横坐标 / 图宽（0~1） |
 | `items[].y` | number | 是 | 框选矩形左上角纵坐标 / 图高（0~1） |
 | `items[].width` | number | 是 | 框选矩形宽 / 图宽（0~1） |
@@ -5396,13 +5332,69 @@ group 与 title 均为可选指针字段：字段出现才更新（group 允许�
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
-### POST `/api/screenshot-versions/{vid}/annotations`
+### POST `/api/projects/{id}/screenshot-annotations/batch`
+
+<!-- operationId: batchScreenshotAnnotations -->
+
+批量处理当前过滤范围内的标注（仅 JWT）
+
+对 `filter` 圈定的标注集执行同一动作。`action=confirm`（确认保留：清除 outdated，
+仅作用于 open 标注）或 `action=resolve`（标记已解决：置 status=resolved 并记录 resolved_at，
+仅作用于 open 标注）。filter 字段均可选，缺省即不限制；返回实际更新的标注数。
+API Key 调用返回 403（40301）——API Key 只能逐条把标注置 resolved，没有批量能力。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 项目 ID（UUID） |
+
+**请求体**
+
+`application/json`，必填。
+
+对 filter 圈定的标注集执行批量动作；filter 缺省字段即不限制
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `action` | string（enum: confirm \| resolve） | 是 | confirm=确认保留（清除 outdated）；resolve=标记已解决；两者都只作用于 open 标注 |
+| `filter` | object | 否 |  |
+| `filter.platform` | string[] | 否 | 平台多值；含 `__none__` 表示「未标注」（NULL） |
+| `filter.locale` | string[] | 否 | 语言多值；含 `__none__` 表示「未标注」（NULL） |
+| `filter.theme` | string[]（enum: light \| dark \| __none__） | 否 | 亮度多值；`__none__` 表示「未标注」（NULL） |
+| `filter.status` | string（enum: open \| resolved） | 否 | open=未解决，resolved=已解决 |
+| `filter.outdated` | boolean（可空） | 否 | 按过期标记过滤；缺省不限制 |
+| `filter.screen_id` | string | 否 | 只作用于该截图上的标注 |
+
+**成功响应**
+
+**200** 批量处理结果
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `updated` | integer | 是 | 实际更新的标注数 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/screenshot-screens/{sid}/annotations`
 
 <!-- operationId: createScreenshotAnnotation -->
 
-在截图版本上新建矩形标注（仅 JWT）
+在截图上新建矩形标注（仅 JWT）
 
-在指定版本图片上创建「矩形框 + 文字」标注。坐标为图片宽高比例（0~1）：
+在指定截图上创建「矩形框 + 文字」标注。坐标为图片宽高比例（0~1）：
 x/y 为左上角，width/height 为尺寸；须满足 0 ≤ x,y、0 < width,height、x+width ≤ 1、y+height ≤ 1，否则 40001。
 `issue_id` 可选：缺省或空串表示不关联；提供时须为同一项目内的 Issue（不存在或跨项目返回 40001）。
 API Key 调用返回 403（40301）。
@@ -5413,7 +5405,7 @@ API Key 调用返回 403（40301）。
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `vid` | string | 是 | 截图版本 ID（UUID） |
+| `sid` | string | 是 | 截图 ID（UUID） |
 
 **请求体**
 
@@ -5436,24 +5428,25 @@ x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为
 
 `data`：
 
-挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+挂在某张截图上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `project_id` | string | 是 |  |
-| `screen_id` | string | 是 | 所属界面 ID（由版本冗余带出，便于过滤） |
-| `version_id` | string | 是 | 标注挂在该版本上；版本删除时标注级联删除 |
+| `screen_id` | string | 是 | 所属截图 ID |
 | `issue_id` | string（可空） | 是 | 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注 |
 | `issue_reference` | string（可空） | 是 | 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null |
 | `issue_title` | string（可空） | 是 | 关联 Issue 的标题；未关联为 null |
 | `screen_key` | string | 是 |  |
-| `screen_title` | string | 是 | 界面显示名；空串时客户端回退展示 screen_key |
-| `screen_group` | string | 是 | 界面分组；空串表示未分组 |
-| `image_url` | string | 是 | 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img> |
-| `image_width` | integer | 是 | 原图宽像素；0 表示未知（存量版本未记录尺寸） |
+| `screen_title` | string | 是 | 截图显示名；空串时客户端回退展示 screen_key |
+| `screen_platform` | string（可空） | 是 | 所属截图的平台；null 表示未标注 |
+| `screen_locale` | string（可空） | 是 | 所属截图的语言；null 表示未标注 |
+| `screen_theme` | string（可空） | 是 | 所属截图的亮度主题；null 表示未标注 |
+| `image_url` | string | 是 | 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img> |
+| `image_width` | integer | 是 | 原图宽像素；0 表示未知 |
 | `image_height` | integer | 是 | 原图高像素；0 表示未知 |
-| `is_latest_version` | boolean | 是 | 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看） |
+| `outdated` | boolean | 是 | 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false |
 | `x` | number | 是 | 框选矩形左上角横坐标 / 图宽（0~1） |
 | `y` | number | 是 | 框选矩形左上角纵坐标 / 图高（0~1） |
 | `width` | number | 是 | 框选矩形宽 / 图宽（0~1） |
@@ -5519,24 +5512,25 @@ JWT 可更新全部字段；API Key 只允许传 `{"status":"resolved"}`，其�
 
 `data`：
 
-挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+挂在某张截图上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `project_id` | string | 是 |  |
-| `screen_id` | string | 是 | 所属界面 ID（由版本冗余带出，便于过滤） |
-| `version_id` | string | 是 | 标注挂在该版本上；版本删除时标注级联删除 |
+| `screen_id` | string | 是 | 所属截图 ID |
 | `issue_id` | string（可空） | 是 | 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注 |
 | `issue_reference` | string（可空） | 是 | 关联 Issue 的短编号（INT-n / GH-n）；未关联为 null |
 | `issue_title` | string（可空） | 是 | 关联 Issue 的标题；未关联为 null |
 | `screen_key` | string | 是 |  |
-| `screen_title` | string | 是 | 界面显示名；空串时客户端回退展示 screen_key |
-| `screen_group` | string | 是 | 界面分组；空串表示未分组 |
-| `image_url` | string | 是 | 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img> |
-| `image_width` | integer | 是 | 原图宽像素；0 表示未知（存量版本未记录尺寸） |
+| `screen_title` | string | 是 | 截图显示名；空串时客户端回退展示 screen_key |
+| `screen_platform` | string（可空） | 是 | 所属截图的平台；null 表示未标注 |
+| `screen_locale` | string（可空） | 是 | 所属截图的语言；null 表示未标注 |
+| `screen_theme` | string（可空） | 是 | 所属截图的亮度主题；null 表示未标注 |
+| `image_url` | string | 是 | 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img> |
+| `image_width` | integer | 是 | 原图宽像素；0 表示未知 |
 | `image_height` | integer | 是 | 原图高像素；0 表示未知 |
-| `is_latest_version` | boolean | 是 | 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看） |
+| `outdated` | boolean | 是 | 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false |
 | `x` | number | 是 | 框选矩形左上角横坐标 / 图宽（0~1） |
 | `y` | number | 是 | 框选矩形左上角纵坐标 / 图高（0~1） |
 | `width` | number | 是 | 框选矩形宽 / 图宽（0~1） |

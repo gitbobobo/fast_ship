@@ -13,7 +13,7 @@ import {
   clampScale,
   containedImageBox,
   countOpenAnnotations,
-  countOpenOnOlderVersions,
+  countOutdatedOpen,
   dragToRatioRect,
   filterAnnotationsForPanel,
   fitViewport,
@@ -30,8 +30,21 @@ import {
   zoomAt,
 } from "./screenshot-canvas";
 
-function screen(id: string, group: string, at: string) {
-  return { id, group, last_uploaded_at: at };
+function screen(
+  id: string,
+  platform: string | null,
+  at: string,
+  extra: Partial<ScreenshotScreen> = {},
+) {
+  return {
+    id,
+    screen_key: id,
+    platform,
+    locale: null,
+    theme: null,
+    uploaded_at: at,
+    ...extra,
+  };
 }
 
 function annotation(
@@ -41,17 +54,18 @@ function annotation(
     id: "a-1",
     project_id: "p-1",
     screen_id: "s-1",
-    version_id: "v-1",
     issue_id: null,
     issue_reference: null,
     issue_title: null,
     screen_key: "home",
     screen_title: "",
-    screen_group: "",
+    screen_platform: null,
+    screen_locale: null,
+    screen_theme: null,
     image_url: "",
     image_width: 100,
     image_height: 100,
-    is_latest_version: true,
+    outdated: false,
     x: 0.1,
     y: 0.1,
     width: 0.2,
@@ -69,11 +83,11 @@ function annotation(
 }
 
 describe("layoutCanvas", () => {
-  it("orders named groups by latest upload desc and puts ungrouped last", () => {
+  it("orders platforms by latest upload desc and puts the untagged section last", () => {
     const layout = layoutCanvas(
       [
         screen("1", "设置", "2026-10-01T00:00:00Z"),
-        screen("2", "", "2026-10-09T00:00:00Z"),
+        screen("2", null, "2026-10-09T00:00:00Z"),
         screen("3", "首页", "2026-10-05T00:00:00Z"),
       ],
       () => 1,
@@ -81,16 +95,49 @@ describe("layoutCanvas", () => {
     expect(layout.groups.map((g) => g.title)).toEqual([
       "首页",
       "设置",
-      "未分组",
+      "未标注",
     ]);
     expect(layout.groups.map((g) => g.titleRect.y)).toEqual(
       [...layout.groups.map((g) => g.titleRect.y)].sort((a, b) => a - b),
     );
   });
 
+  it("keeps locale/theme variants of one screen_key adjacent and unsplit", () => {
+    const layout = layoutCanvas(
+      [
+        screen("home", "web", "2026-10-01T00:00:00Z", { locale: "en" }),
+        screen("settings", "web", "2026-10-02T00:00:00Z"),
+        screen("home-zh", "web", "2026-10-03T00:00:00Z", {
+          screen_key: "home",
+          locale: "zh",
+        }),
+        screen("home-dark", "web", "2026-10-04T00:00:00Z", {
+          screen_key: "home",
+          theme: "dark",
+        }),
+      ],
+      () => 1,
+      2,
+    );
+    const order = layout.cards.map((c) => c.screenId);
+    // home 变体聚成一簇相邻：三个位置连续，中间不插其他截图
+    const positions = [
+      order.indexOf("home"),
+      order.indexOf("home-zh"),
+      order.indexOf("home-dark"),
+    ].sort((a, b) => a - b);
+    expect(positions).toEqual([positions[0], positions[0] + 1, positions[0] + 2]);
+    // 簇内两张同行（列数 2，簇能整行放下），第三张紧随其后一行
+    const byId = Object.fromEntries(layout.cards.map((c) => [c.screenId, c]));
+    const rowMates = [byId.home, byId["home-zh"], byId["home-dark"]].filter(
+      (c) => c.rect.y === byId.home.rect.y,
+    );
+    expect(rowMates).toHaveLength(2);
+  });
+
   it("sorts cards inside a group by last upload desc on a fixed-column grid", () => {
     const screens = Array.from({ length: GRID_COLUMNS + 1 }, (_, i) =>
-      screen(`s${i}`, "", `2026-10-0${i + 1}T00:00:00Z`),
+      screen(`s${i}`, null, `2026-10-0${i + 1}T00:00:00Z`),
     );
     const layout = layoutCanvas(screens, () => 1);
     expect(layout.cards[0].screenId).toBe(`s${GRID_COLUMNS}`);
@@ -106,7 +153,7 @@ describe("layoutCanvas", () => {
 
   it("honors an explicit column count and caps it by group size", () => {
     const screens = Array.from({ length: 10 }, (_, i) =>
-      screen(`s${i}`, "", `2026-10-${String(i + 10)}T00:00:00Z`),
+      screen(`s${i}`, null, `2026-10-${String(i + 10)}T00:00:00Z`),
     );
     const wide = layoutCanvas(screens, () => 1, 8);
     expect(wide.cards.filter((c) => c.rect.y === wide.cards[0].rect.y)).toHaveLength(8);
@@ -119,8 +166,8 @@ describe("layoutCanvas", () => {
   it("uses image aspect, falling back to 4:3 when unknown", () => {
     const layout = layoutCanvas(
       [
-        screen("known", "", "2026-10-02T00:00:00Z"),
-        screen("unknown", "", "2026-10-01T00:00:00Z"),
+        screen("known", null, "2026-10-02T00:00:00Z"),
+        screen("unknown", null, "2026-10-01T00:00:00Z"),
       ],
       (id) => (id === "known" ? 2 : null),
     );
@@ -140,7 +187,7 @@ describe("layoutCanvas", () => {
 describe("pickCanvasColumns", () => {
   const many = (n: number) =>
     Array.from({ length: n }, (_, i) =>
-      screen(`s${i}`, "", `2026-10-01T00:00:${String(i % 60).padStart(2, "0")}Z`),
+      screen(`s${i}`, null, `2026-10-01T00:00:${String(i % 60).padStart(2, "0")}Z`),
     );
   const fitScale = (n: number, columns: number, container: { width: number; height: number }) => {
     const { bounds } = layoutCanvas(many(n), () => 2, columns);
@@ -321,31 +368,26 @@ describe("annotation geometry", () => {
 });
 
 describe("annotation aggregation", () => {
-  const latest = (id: string) => (id === "s-1" ? "v-2" : "v-9");
-
-  it("counts open annotations on older versions per screen", () => {
-    const counts = countOpenOnOlderVersions(
-      [
-        annotation({ id: "1", version_id: "v-1" }),
-        annotation({ id: "2", version_id: "v-1", status: "resolved" }),
-        annotation({ id: "3", version_id: "v-2" }),
-        annotation({ id: "4", screen_id: "s-2", version_id: "v-9" }),
-      ],
-      latest,
-    );
+  it("counts outdated open annotations per screen", () => {
+    const counts = countOutdatedOpen([
+      annotation({ id: "1", outdated: true }),
+      annotation({ id: "2", outdated: true, status: "resolved" }),
+      annotation({ id: "3", outdated: false }),
+      annotation({ id: "4", screen_id: "s-2", outdated: true }),
+    ]);
     expect(counts.get("s-1")).toBe(1);
-    expect(counts.has("s-2")).toBe(false);
+    expect(counts.has("s-2")).toBe(true);
+    expect(counts.get("s-2")).toBe(1);
   });
 
   it("counts open annotations that a delete would cascade", () => {
     const list = [
-      annotation({ id: "1", version_id: "v-1" }),
-      annotation({ id: "2", version_id: "v-2" }),
-      annotation({ id: "3", version_id: "v-2", status: "resolved" }),
-      annotation({ id: "4", screen_id: "s-2", version_id: "v-3" }),
+      annotation({ id: "1" }),
+      annotation({ id: "2" }),
+      annotation({ id: "3", status: "resolved" }),
+      annotation({ id: "4", screen_id: "s-2" }),
     ];
     expect(countOpenAnnotations(list, { screenId: "s-1" })).toBe(2);
-    expect(countOpenAnnotations(list, { versionId: "v-2" })).toBe(1);
   });
 
   it("filters panel annotations by scope and status", () => {

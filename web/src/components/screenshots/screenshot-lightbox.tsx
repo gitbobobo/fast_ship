@@ -6,11 +6,9 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { useQueryClient } from "@tanstack/react-query";
 import {
   ChevronLeft,
   ChevronRight,
-  Columns2,
   Images,
   Loader2,
   MoreHorizontal,
@@ -19,13 +17,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
 import {
   Dialog,
   DialogContent,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { OptionSelect } from "@/components/ui/option-select";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,12 +38,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-  screenshotScreenDetailQueryOptions,
-  useDeleteScreenshotScreen,
-  useDeleteScreenshotVersion,
-  useScreenshotScreen,
-} from "@/lib/hooks/use-screenshots";
+import { useDeleteScreenshotScreen } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
 import { screenshotApi } from "@/lib/api/screenshots";
 import {
@@ -55,7 +46,10 @@ import {
   countOpenAnnotations,
 } from "@/lib/screenshot-canvas";
 import { screenDisplayName } from "@/lib/screenshots";
-import { formatDate, formatFileSize, formatRelativeTime } from "@/lib/utils/format";
+import {
+  formatFileSize,
+  formatRelativeTime,
+} from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 import { AnnotationOverlay } from "./annotation-overlay";
 import { ScreenshotEditDialog } from "./screenshot-edit-dialog";
@@ -66,14 +60,10 @@ interface ScreenshotLightboxProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   projectId: string;
-  /** 当前分组过滤后的导航列表，左右键/箭头在此范围内切换 */
-  screens: ScreenshotScreenListItem[];
+  /** 当前筛选后的导航列表，左右键/箭头在此范围内切换 */
+  screens: ScreenshotScreen[];
   screenId: string | null;
   onNavigate: (screenId: string) => void;
-  /** 打开时默认选中的版本；不在该界面的版本里则回退最新版本 */
-  initialVersionId?: string | null;
-  /** 在叠加层里高亮的标注 */
-  focusAnnotationId?: string | null;
 }
 
 /** 放大态：只有「适配 / 放大」两档，放大后按此宽度渲染 */
@@ -86,46 +76,6 @@ interface ZoomState {
   /** 点击的视口坐标 */
   px: number;
   py: number;
-}
-
-function versionLabel(version: ScreenshotVersion): string {
-  const stamp = formatDate(version.uploaded_at);
-  return version.note ? `${version.note} · ${stamp}` : stamp;
-}
-
-function versionOptionLabel(
-  version: ScreenshotVersion,
-  index: number,
-): string {
-  return `${index === 0 ? "最新 · " : ""}${versionLabel(version)}`;
-}
-
-function VersionSelect({
-  versions,
-  value,
-  onChange,
-  className,
-}: {
-  versions: ScreenshotVersion[];
-  value: string;
-  onChange: (versionId: string) => void;
-  className?: string;
-}) {
-  return (
-    <OptionSelect
-      value={value || undefined}
-      onValueChange={(v) => {
-        if (v) onChange(v);
-      }}
-      options={versions.map((version, index) => ({
-        value: version.id,
-        label: versionOptionLabel(version, index),
-      }))}
-      placeholder="选择版本"
-      className={cn("w-56", className)}
-      aria-label="选择版本"
-    />
-  );
 }
 
 /** 图片区两侧的全高翻页条：悬停整条高亮，到首尾时变暗不可点（不循环） */
@@ -160,83 +110,20 @@ function NavZone({
   );
 }
 
-function ComparePane({
-  side,
-  versions,
-  selectedId,
-  onSelect,
-  annotations,
-  focusAnnotationId,
-}: {
-  side: "left" | "right";
-  versions: ScreenshotVersion[];
-  selectedId: string;
-  onSelect: (versionId: string) => void;
-  annotations: ScreenshotAnnotation[];
-  focusAnnotationId?: string | null;
-}) {
-  const imgRef = useRef<HTMLImageElement>(null);
-  const version =
-    versions.find((v) => v.id === selectedId) ?? versions[0] ?? null;
-  return (
-    <div className="flex min-h-0 min-w-0 flex-col gap-2">
-      {/* relative z-20：控件行抬到两侧翻页区（z-10）之上，避免边缘点击被翻页区吃掉 */}
-      <div className="relative z-20 flex items-center gap-2">
-        <Badge variant="outline">{side === "left" ? "左" : "右"}</Badge>
-        <VersionSelect
-          versions={versions}
-          value={version?.id ?? ""}
-          onChange={onSelect}
-          className="w-full flex-1"
-        />
-      </div>
-      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/30">
-        {version ? (
-          <>
-            <img
-              ref={imgRef}
-              src={screenshotApi.contentUrl(version)}
-              alt={version.file_name}
-              className="max-h-full max-w-full object-contain"
-            />
-            <AnnotationOverlay
-              imgRef={imgRef}
-              annotations={annotations.filter(
-                (a) => a.version_id === version.id,
-              )}
-              focusAnnotationId={focusAnnotationId}
-            />
-          </>
-        ) : (
-          <Images className="h-10 w-10 text-muted-foreground/40" />
-        )}
-      </div>
-      {version && (
-        <p className="truncate text-xs text-muted-foreground">
-          {version.file_name} · {formatFileSize(version.file_size)} ·{" "}
-          {formatRelativeTime(version.uploaded_at)}
-        </p>
-      )}
-    </div>
-  );
-}
-
 /**
  * 单图视图：默认 object-contain 适配；点击放大到原始像素 ÷ dpr（不低于
  * 适配尺寸 2 倍），以点击处为中心；放大后可滚动或鼠标拖拽，再点回到适配。
  */
 function ZoomableImage({
-  version,
+  screen,
   zoom,
   onZoomChange,
   annotations,
-  focusAnnotationId,
 }: {
-  version: ScreenshotVersion;
+  screen: ScreenshotScreen;
   zoom: ZoomState | null;
   onZoomChange: (zoom: ZoomState | null) => void;
   annotations: ScreenshotAnnotation[];
-  focusAnnotationId?: string | null;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fitImgRef = useRef<HTMLImageElement>(null);
@@ -357,7 +244,8 @@ function ZoomableImage({
     if (zoom) centerOnZoom(zoom);
   };
 
-  const src = screenshotApi.contentUrl(version);
+  const src = screenshotApi.contentUrl(screen);
+  const name = screenDisplayName(screen);
   if (zoom) {
     return (
       <div
@@ -373,7 +261,7 @@ function ZoomableImage({
           <img
             ref={zoomImgRef}
             src={src}
-            alt={version.file_name}
+            alt={name}
             role="button"
             tabIndex={0}
             draggable={false}
@@ -384,11 +272,7 @@ function ZoomableImage({
             className="m-auto max-w-none cursor-zoom-out select-none"
             style={zoom.width > 0 ? { width: zoom.width } : undefined}
           />
-          <AnnotationOverlay
-            imgRef={zoomImgRef}
-            annotations={annotations}
-            focusAnnotationId={focusAnnotationId}
-          />
+          <AnnotationOverlay imgRef={zoomImgRef} annotations={annotations} />
         </div>
       </div>
     );
@@ -404,7 +288,7 @@ function ZoomableImage({
       <img
         ref={fitImgRef}
         src={src}
-        alt={version.file_name}
+        alt={name}
         role="button"
         tabIndex={0}
         draggable={false}
@@ -413,11 +297,7 @@ function ZoomableImage({
         data-zoom="fit"
         className="max-h-full max-w-full cursor-zoom-in select-none object-contain"
       />
-      <AnnotationOverlay
-        imgRef={fitImgRef}
-        annotations={annotations}
-        focusAnnotationId={focusAnnotationId}
-      />
+      <AnnotationOverlay imgRef={fitImgRef} annotations={annotations} />
     </div>
   );
 }
@@ -429,80 +309,23 @@ export function ScreenshotLightbox({
   screens,
   screenId,
   onNavigate,
-  initialVersionId = null,
-  focusAnnotationId = null,
 }: ScreenshotLightboxProps) {
-  const {
-    data: detail,
-    isLoading,
-    isFetching,
-    isError,
-  } = useScreenshotScreen(open && screenId ? screenId : "");
-  const queryClient = useQueryClient();
   const deleteScreen = useDeleteScreenshotScreen(projectId);
-  const deleteVersion = useDeleteScreenshotVersion(projectId);
-  const { data: annotationData, isLoading: annotationsLoading } =
-    useScreenshotAnnotations(projectId, open);
+  const { data: annotationData, isFetching: annotationsFetching } =
+    useScreenshotAnnotations(projectId, {}, open);
   const annotations = annotationData ?? EMPTY_ANNOTATIONS;
 
-  // 新界面加载期间继续展示上一份成功加载的详情，不整块切成骨架屏；
-  // 旧图回退仅限同一次打开期间的翻页——关闭时清空， reopen 不残留
-  const [lastDetail, setLastDetail] = useState<ScreenshotScreenDetail | null>(
-    null,
-  );
-  const [prevOpen, setPrevOpen] = useState(open);
-  if (open !== prevOpen) {
-    setPrevOpen(open);
-    if (!open) setLastDetail(null);
-  }
-  if (open && detail && detail !== lastDetail) {
-    setLastDetail(detail);
-  }
-  // 请求失败不再回退旧图，显示空态（toast+关弹窗在下方 effect）
-  const shownDetail = detail ?? (isError ? null : lastDetail);
-  const shownDetailId = shownDetail?.id ?? null;
-  const versions = shownDetail?.versions ?? [];
-  // detail 未到达的旧图回退窗口：只保旧图本体，信息行/缩略图条不混搭旧数据
-  const staleView = !detail && shownDetail !== null;
-
-  const listItem = screens.find((s) => s.id === screenId) ?? null;
-  const screen = detail ?? listItem;
+  const screen = screens.find((s) => s.id === screenId) ?? null;
   const displayName = screen ? screenDisplayName(screen) : "";
 
-  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
-    null,
-  );
-  const [comparing, setComparing] = useState(false);
-  const [leftVersionId, setLeftVersionId] = useState<string | null>(null);
-  const [rightVersionId, setRightVersionId] = useState<string | null>(null);
   const [zoom, setZoom] = useState<ZoomState | null>(null);
   const [editOpen, setEditOpen] = useState(false);
-  const [confirm, setConfirm] = useState<"version" | "screen" | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // 切界面即回到适配窗口：放大是查看状态，不等新详情到达才重置
-  const [prevNavScreenId, setPrevNavScreenId] = useState(screenId);
-  if (screenId !== prevNavScreenId) {
-    setPrevNavScreenId(screenId);
+  // 切界面/关弹窗回到适配窗口：放大是查看状态
+  useEffect(() => {
     setZoom(null);
-  }
-
-  // 在新界面详情真正到达时重置版本/对比选择与放大；加载期间保持旧界面的
-  // 原选择（配合「继续显示上一张图」），对比模式翻页后回退「最新 / 次新」默认
-  const [prevDetailId, setPrevDetailId] = useState(shownDetailId);
-  if (shownDetailId !== prevDetailId) {
-    setPrevDetailId(shownDetailId);
-    setSelectedVersionId(null);
-    setLeftVersionId(null);
-    setRightVersionId(null);
-    setZoom(null);
-  }
-
-  // 未手动选择时，优先落在 initialVersionId（从画布定位到旧版本标注）
-  const currentVersion =
-    versions.find((v) => v.id === selectedVersionId) ??
-    versions.find((v) => v.id === initialVersionId) ??
-    versions[0] ??
-    null;
+  }, [screenId, open]);
 
   const navIndex = screens.findIndex((s) => s.id === screenId);
   const canPrev = navIndex > 0;
@@ -515,24 +338,6 @@ export function ScreenshotLightbox({
     if (canNext) onNavigate(screens[navIndex + 1].id);
   }, [canNext, navIndex, screens, onNavigate]);
 
-  // 预取前后相邻界面的详情，让翻页不需要等请求
-  useEffect(() => {
-    if (!open || navIndex < 0) return;
-    for (const i of [navIndex - 1, navIndex + 1]) {
-      const target = screens[i];
-      if (!target) continue;
-      void queryClient.prefetchQuery(
-        screenshotScreenDetailQueryOptions(target.id),
-      );
-    }
-  }, [open, navIndex, screens, queryClient]);
-
-  // 切换版本、进出对比、关闭弹窗时回到适配窗口（切界面由上方 detail 到达重置）
-  const currentVersionId = currentVersion?.id;
-  useEffect(() => {
-    setZoom(null);
-  }, [currentVersionId, comparing, open]);
-
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -540,7 +345,7 @@ export function ScreenshotLightbox({
       if (target?.closest("input, textarea, select, [contenteditable]")) {
         return;
       }
-      // Select 下拉/更多菜单/删除确认打开时让位给浮层自己的按键处理。
+      // 下拉/菜单/确认框打开时让位给浮层自己的按键处理。
       // Base UI 会把关闭的浮层保留在 [hidden] 容器里，只统计未隐藏的才算打开
       const isShown = (el: Element) => !el.closest("[hidden]");
       if (
@@ -580,81 +385,42 @@ export function ScreenshotLightbox({
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [open, zoom, goPrev, goNext]);
 
-  useEffect(() => {
-    if (open && screenId && isError) {
-      toast.error("截图界面不存在或已被删除");
-      onOpenChange(false);
-    }
-  }, [open, screenId, isError, onOpenChange]);
-
-  const enterCompare = () => {
-    // 默认左=最新、右=次新
-    setLeftVersionId(versions[0]?.id ?? null);
-    setRightVersionId((versions[1] ?? versions[0])?.id ?? null);
-    setComparing(true);
-  };
-
-  const handleDeleteVersion = async () => {
-    if (!currentVersion || !screenId) return;
-    const lastOne = versions.length <= 1;
-    try {
-      await deleteVersion.mutateAsync({
-        versionId: currentVersion.id,
-        screenId,
-      });
-      toast.success("已删除该版本");
-      // 最后一个版本被删会连带删除 screen
-      if (lastOne) onOpenChange(false);
-    } catch {
-      toast.error("删除失败，请稍后重试");
-    }
-  };
-
   const handleDeleteScreen = async () => {
     if (!screenId) return;
     try {
       await deleteScreen.mutateAsync(screenId);
-      toast.success("已删除界面及其全部版本");
+      toast.success("已删除截图及其标注");
       onOpenChange(false);
     } catch {
       toast.error("删除失败，请稍后重试");
     }
   };
 
-  // 标题栏第二行：screen_key（有 title 时）+ 当前版本文件信息
+  // 标题栏第二行：screen_key（有 title 时）+ 文件信息与维度
   const infoParts: Array<string | null | undefined> = [];
   if (screen?.title) infoParts.push(screen.screen_key);
-  if (!comparing && currentVersion && !staleView) {
+  if (screen) {
     infoParts.push(
-      currentVersion.note,
-      currentVersion.file_name,
-      formatFileSize(currentVersion.file_size),
-      formatRelativeTime(currentVersion.uploaded_at),
+      screen.platform,
+      screen.locale,
+      screen.theme === "dark" ? "暗色" : screen.theme === "light" ? "亮色" : null,
+      formatFileSize(screen.file_size),
+      formatRelativeTime(screen.uploaded_at),
+      screen.uploaded_by,
     );
   }
   const infoLine = infoParts.filter(Boolean).join(" · ");
 
-  const currentVersionAnnotations = annotations.filter(
-    (a) => a.version_id === currentVersion?.id,
-  );
+  const screenAnnotations = screen
+    ? annotations.filter((a) => a.screen_id === screen.id)
+    : EMPTY_ANNOTATIONS;
   // 删除会级联删掉挂在其上的全部标注（不分状态），确认框提示总数与其中未解决数
-  const totalOnVersion = currentVersion
-    ? countAnnotations(annotations, { versionId: currentVersion.id })
-    : 0;
-  const openOnVersion = currentVersion
-    ? countOpenAnnotations(annotations, { versionId: currentVersion.id })
-    : 0;
   const totalOnScreen = screenId
     ? countAnnotations(annotations, { screenId })
     : 0;
   const openOnScreen = screenId
     ? countOpenAnnotations(annotations, { screenId })
     : 0;
-
-  // 对比两侧：未选时左=最新、右=次新；只有一个版本时两侧同一张
-  const leftCompareId = leftVersionId ?? versions[0]?.id ?? "";
-  const rightCompareId =
-    rightVersionId ?? versions[1]?.id ?? versions[0]?.id ?? "";
 
   return (
     <>
@@ -666,11 +432,16 @@ export function ScreenshotLightbox({
                 <DialogTitle className="truncate text-sm">
                   {displayName}
                 </DialogTitle>
-                {screen && (
-                  <Badge variant="secondary">{screen.version_count} 个版本</Badge>
+                {screen?.platform && (
+                  <Badge variant="outline">{screen.platform}</Badge>
                 )}
-                {screen?.group && (
-                  <Badge variant="outline">{screen.group}</Badge>
+                {screen?.locale && (
+                  <Badge variant="outline">{screen.locale}</Badge>
+                )}
+                {screen?.theme && (
+                  <Badge variant="outline">
+                    {screen.theme === "dark" ? "暗色" : "亮色"}
+                  </Badge>
                 )}
               </div>
               {infoLine && (
@@ -680,27 +451,11 @@ export function ScreenshotLightbox({
               )}
             </div>
 
-            {!comparing && versions.length > 0 && (
-              <VersionSelect
-                versions={versions}
-                value={currentVersion?.id ?? ""}
-                onChange={setSelectedVersionId}
-              />
-            )}
-            <Button
-              variant={comparing ? "default" : "outline"}
-              size="sm"
-              onClick={() => (comparing ? setComparing(false) : enterCompare())}
-              disabled={versions.length === 0}
-            >
-              <Columns2 className="mr-1.5 h-3.5 w-3.5" />
-              {comparing ? "退出对比" : "对比"}
-            </Button>
             <Button
               variant="outline"
               size="icon-sm"
-              aria-label="编辑界面"
-              disabled={!detail}
+              aria-label="编辑截图"
+              disabled={!screen}
               onClick={() => setEditOpen(true)}
             >
               <Pencil className="h-3.5 w-3.5" />
@@ -720,62 +475,32 @@ export function ScreenshotLightbox({
               <DropdownMenuContent align="end">
                 <DropdownMenuItem
                   variant="destructive"
-                  disabled={!detail || !currentVersion || comparing}
-                  onClick={() => setConfirm("version")}
+                  disabled={!screen}
+                  onClick={() => setConfirmDelete(true)}
                 >
                   <Trash2 className="mr-2 h-4 w-4" />
-                  删除当前版本
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  variant="destructive"
-                  disabled={!detail}
-                  onClick={() => setConfirm("screen")}
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  删除界面
+                  删除截图
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
 
           <div className="relative min-h-0 flex-1 bg-muted/30">
-            {comparing && versions.length > 0 ? (
-              <div className="grid h-full grid-cols-1 gap-2 overflow-y-auto sm:grid-cols-2">
-                <ComparePane
-                  side="left"
-                  versions={versions}
-                  selectedId={leftCompareId}
-                  onSelect={setLeftVersionId}
-                  annotations={annotations}
-                  focusAnnotationId={focusAnnotationId}
-                />
-                <ComparePane
-                  side="right"
-                  versions={versions}
-                  selectedId={rightCompareId}
-                  onSelect={setRightVersionId}
-                  annotations={annotations}
-                  focusAnnotationId={focusAnnotationId}
-                />
-              </div>
-            ) : !comparing && currentVersion ? (
+            {screen ? (
               <ZoomableImage
-                version={currentVersion}
+                screen={screen}
                 zoom={zoom}
                 onZoomChange={setZoom}
-                annotations={currentVersionAnnotations}
-                focusAnnotationId={focusAnnotationId}
+                annotations={screenAnnotations}
               />
-            ) : !shownDetail && isLoading ? (
-              <Skeleton className="h-full w-full" />
             ) : (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
                 <Images className="h-10 w-10 text-muted-foreground/40" />
-                <p className="text-sm">暂无截图版本</p>
+                <p className="text-sm">截图不存在或已被删除</p>
               </div>
             )}
 
-            {/* 翻页区始终存在，不受详情加载状态影响 */}
+            {/* 翻页区始终存在 */}
             {navIndex >= 0 && screens.length > 1 && (
               <>
                 <NavZone
@@ -791,109 +516,43 @@ export function ScreenshotLightbox({
               </>
             )}
 
-            {isFetching && (
+            {annotationsFetching && (
               <div className="absolute top-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-background/80 px-3 py-1 text-xs text-muted-foreground shadow-sm backdrop-blur">
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 加载中
-              </div>
-            )}
-
-            {!comparing && !staleView && versions.length > 1 && currentVersion && (
-              // 两侧各留 5rem，不伸进全高翻页区（w-16/sm:w-20）
-              <div className="absolute bottom-3 left-1/2 z-20 flex max-w-[calc(100%-10rem)] -translate-x-1/2 gap-2 overflow-x-auto rounded-lg bg-background/80 p-2 shadow-md backdrop-blur">
-                {versions.map((version) => (
-                  <button
-                    key={version.id}
-                    type="button"
-                    className={cn(
-                      "h-14 w-20 shrink-0 overflow-hidden rounded-md border bg-muted/30 transition-colors",
-                      version.id === currentVersion.id
-                        ? "border-primary ring-2 ring-primary/40"
-                        : "border-transparent hover:border-primary/40",
-                    )}
-                    onClick={() => setSelectedVersionId(version.id)}
-                    aria-label={versionLabel(version)}
-                  >
-                    <img
-                      src={screenshotApi.contentUrl(version)}
-                      alt={version.file_name}
-                      className="h-full w-full object-cover"
-                      loading="lazy"
-                    />
-                  </button>
-                ))}
               </div>
             )}
           </div>
         </DialogContent>
       </Dialog>
 
-      {detail && (
+      {screen && (
         <ScreenshotEditDialog
           open={editOpen}
           onOpenChange={setEditOpen}
           projectId={projectId}
-          screen={detail}
+          screen={screen}
         />
       )}
 
       <AlertDialog
-        open={confirm === "version"}
-        onOpenChange={(o) => {
-          if (!o) setConfirm(null);
-        }}
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>删除当前版本？</AlertDialogTitle>
+            <AlertDialogTitle>删除截图？</AlertDialogTitle>
             <AlertDialogDescription>
-              {versions.length <= 1
-                ? "这是该界面的最后一个版本，删除后界面将一并移除，不可恢复。"
-                : "删除后不可恢复。"}
-              {annotationsLoading && "正在读取关联标注…"}
-              {!annotationsLoading &&
-                totalOnVersion > 0 &&
-                `将同时删除 ${totalOnVersion} 条标注${openOnVersion > 0 ? `，其中 ${openOnVersion} 条未解决` : ""}。`}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={annotationsLoading}
-              onClick={() => {
-                setConfirm(null);
-                void handleDeleteVersion();
-              }}
-            >
-              确认删除
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog
-        open={confirm === "screen"}
-        onOpenChange={(o) => {
-          if (!o) setConfirm(null);
-        }}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>删除界面？</AlertDialogTitle>
-            <AlertDialogDescription>
-              将删除「{displayName}」及其全部 {versions.length} 个版本，不可恢复。
-              {annotationsLoading && "正在读取关联标注…"}
-              {!annotationsLoading &&
-                totalOnScreen > 0 &&
+              将删除「{displayName}」及其标注，不可恢复。
+              {totalOnScreen > 0 &&
                 `将同时删除 ${totalOnScreen} 条标注${openOnScreen > 0 ? `，其中 ${openOnScreen} 条未解决` : ""}。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
-              disabled={annotationsLoading}
               onClick={() => {
-                setConfirm(null);
+                setConfirmDelete(false);
                 void handleDeleteScreen();
               }}
             >

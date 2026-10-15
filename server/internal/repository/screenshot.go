@@ -5,8 +5,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// ScreenshotRepository 同时承载 screen 与 version 两表的存取：
-// screen 的版本增删要求同事务重算冗余统计，单一 repo 便于共享 Transaction。
+// ScreenshotRepository 承载 screenshot_screens 表存取。
+// 标注的过期置位与批量动作要求与截图写路径同事务，这里只提供事务入口。
 type ScreenshotRepository struct {
 	db *gorm.DB
 }
@@ -34,100 +34,75 @@ func (r *ScreenshotRepository) FindScreenByID(id string) (*model.ScreenshotScree
 	return &screen, nil
 }
 
-func (r *ScreenshotRepository) FindScreenByKey(projectID, screenKey string) (*model.ScreenshotScreen, error) {
+// FindScreenByVariant 按 (project_id, screen_key, platform, locale, theme) 找变体；
+// NULL 维度与 NULL 相等（COALESCE 口径），与表达式唯一索引一致。
+func (r *ScreenshotRepository) FindScreenByVariant(projectID, screenKey string, platform, locale, theme *string) (*model.ScreenshotScreen, error) {
 	var screen model.ScreenshotScreen
-	err := r.db.Where("project_id = ? AND screen_key = ?", projectID, screenKey).First(&screen).Error
+	err := r.db.Where(
+		"project_id = ? AND screen_key = ? AND COALESCE(platform,'') = ? AND COALESCE(locale,'') = ? AND COALESCE(theme,'') = ?",
+		projectID, screenKey, derefString(platform), derefString(locale), derefString(theme),
+	).First(&screen).Error
 	if err != nil {
 		return nil, err
 	}
 	return &screen, nil
 }
 
-func (r *ScreenshotRepository) ListScreensByProject(projectID string) ([]model.ScreenshotScreen, error) {
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// ScreenshotScreenFilters 是项目级截图列表的可选过滤项；
+// 各维度的多值与「未标注」桶（IncludeNull）按 OR 并入同维度条件。
+type ScreenshotScreenFilters struct {
+	Platforms       []string
+	IncludeNoPlat   bool
+	Locales         []string
+	IncludeNoLocale bool
+	Themes          []string
+	IncludeNoTheme  bool
+}
+
+func (r *ScreenshotRepository) ListScreensByProject(projectID string, filters ScreenshotScreenFilters) ([]model.ScreenshotScreen, error) {
+	query := r.db.Where("project_id = ?", projectID)
+	query = applyDimensionFilter(query, "platform", filters.Platforms, filters.IncludeNoPlat)
+	query = applyDimensionFilter(query, "locale", filters.Locales, filters.IncludeNoLocale)
+	query = applyDimensionFilter(query, "theme", filters.Themes, filters.IncludeNoTheme)
 	var screens []model.ScreenshotScreen
-	err := r.db.Where("project_id = ?", projectID).
-		Order("last_uploaded_at DESC, id ASC").
-		Find(&screens).Error
+	err := query.Order("uploaded_at DESC, id ASC").Find(&screens).Error
 	return screens, err
+}
+
+// applyDimensionFilter 拼一个维度的多值过滤：命中任一枚举值或（要求时）为 NULL。
+// 值走参数占位符，不由字符串拼接注入；空过滤不产生条件。
+func applyDimensionFilter(query *gorm.DB, column string, values []string, includeNull bool) *gorm.DB {
+	switch {
+	case len(values) > 0 && includeNull:
+		return query.Where("("+column+" IN ? OR "+column+" IS NULL)", values)
+	case len(values) > 0:
+		return query.Where(column+" IN ?", values)
+	case includeNull:
+		return query.Where(column + " IS NULL")
+	default:
+		return query
+	}
 }
 
 func (r *ScreenshotRepository) UpdateScreenByMap(id string, fields map[string]interface{}) error {
 	return r.db.Model(&model.ScreenshotScreen{}).Where("id = ?", id).Updates(fields).Error
 }
 
+// MarkScreenAnnotationsOutdated 把界面上全部 open 标注置为过期（截图覆盖后调用）。
+// resolved 不动；与覆盖写同事务，走事务闭包内的 repo 句柄。
+func (r *ScreenshotRepository) MarkScreenAnnotationsOutdated(screenID string) error {
+	return r.db.Model(&model.ScreenshotAnnotation{}).
+		Where("screen_id = ? AND status = ?", screenID, "open").
+		Update("outdated", true).Error
+}
+
 func (r *ScreenshotRepository) DeleteScreen(id string) error {
 	return r.db.Where("id = ?", id).Delete(&model.ScreenshotScreen{}).Error
-}
-
-func (r *ScreenshotRepository) CreateVersion(version *model.ScreenshotVersion) error {
-	return r.db.Create(version).Error
-}
-
-func (r *ScreenshotRepository) FindVersionByID(id string) (*model.ScreenshotVersion, error) {
-	var version model.ScreenshotVersion
-	err := r.db.Where("id = ?", id).First(&version).Error
-	if err != nil {
-		return nil, err
-	}
-	return &version, nil
-}
-
-// 「最新版本」统一按 rowid（插入顺序）判定：uploaded_at 取自事务开始时间，
-// 写锁等待或时钟回拨下可能与提交顺序不一致；rowid 才是真实的落库先后。
-func (r *ScreenshotRepository) ListVersionsByScreenID(screenID string) ([]model.ScreenshotVersion, error) {
-	var versions []model.ScreenshotVersion
-	err := r.db.Where("screen_id = ?", screenID).
-		Order("rowid DESC").
-		Find(&versions).Error
-	return versions, err
-}
-
-func (r *ScreenshotRepository) FindLatestVersionByScreenID(screenID string) (*model.ScreenshotVersion, error) {
-	var version model.ScreenshotVersion
-	err := r.db.Where("screen_id = ?", screenID).
-		Order("rowid DESC").
-		First(&version).Error
-	if err != nil {
-		return nil, err
-	}
-	return &version, nil
-}
-
-// LatestVersionsByScreenIDs 一次查询取回多个 screen 各自最新版本（rowid 最大者），
-// 返回 screen_id → version 的映射；无版本的 screen 不在结果中。
-func (r *ScreenshotRepository) LatestVersionsByScreenIDs(screenIDs []string) (map[string]model.ScreenshotVersion, error) {
-	latest := make(map[string]model.ScreenshotVersion, len(screenIDs))
-	if len(screenIDs) == 0 {
-		return latest, nil
-	}
-
-	// 版本全量保留，rowid 最大者即最新插入的版本；
-	// 直接在 SQL 里按 screen 取最新一行，避免把全量历史拉回内存排序
-	sub := r.db.Model(&model.ScreenshotVersion{}).
-		Select("MAX(rowid)").
-		Where("screen_id IN ?", screenIDs).
-		Group("screen_id")
-	var versions []model.ScreenshotVersion
-	err := r.db.Where("rowid IN (?)", sub).Find(&versions).Error
-	if err != nil {
-		return nil, err
-	}
-	for _, version := range versions {
-		latest[version.ScreenID] = version
-	}
-	return latest, nil
-}
-
-func (r *ScreenshotRepository) CountVersionsByScreenID(screenID string) (int64, error) {
-	var count int64
-	err := r.db.Model(&model.ScreenshotVersion{}).Where("screen_id = ?", screenID).Count(&count).Error
-	return count, err
-}
-
-func (r *ScreenshotRepository) DeleteVersion(id string) error {
-	return r.db.Where("id = ?", id).Delete(&model.ScreenshotVersion{}).Error
-}
-
-func (r *ScreenshotRepository) DeleteVersionsByScreenID(screenID string) error {
-	return r.db.Where("screen_id = ?", screenID).Delete(&model.ScreenshotVersion{}).Error
 }

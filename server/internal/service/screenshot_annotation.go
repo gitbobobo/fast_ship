@@ -62,12 +62,12 @@ var (
 
 // cropBytesPerPixel 返回每像素驻留字节预算；16 位 PNG 需探文件头判 ColorModel，
 // 探测失败按最大档预留
-func (s *ScreenshotAnnotationService) cropBytesPerPixel(version *model.ScreenshotVersion) int64 {
-	switch version.MimeType {
+func (s *ScreenshotAnnotationService) cropBytesPerPixel(screen *model.ScreenshotScreen) int64 {
+	switch screen.MimeType {
 	case "image/jpeg", "image/gif":
 		return 12
 	case "image/png":
-		if s.isPNG16Bit(version) {
+		if s.isPNG16Bit(screen) {
 			return 16
 		}
 		return 8
@@ -77,8 +77,8 @@ func (s *ScreenshotAnnotationService) cropBytesPerPixel(version *model.Screensho
 }
 
 // isPNG16Bit 读 PNG 头判位深：RGBA64/NRGBA64/Gray16/Alpha16 都是 16 位通道
-func (s *ScreenshotAnnotationService) isPNG16Bit(version *model.ScreenshotVersion) bool {
-	reader, err := s.storage.Get(version.FilePath)
+func (s *ScreenshotAnnotationService) isPNG16Bit(screen *model.ScreenshotScreen) bool {
+	reader, err := s.storage.Get(screen.FilePath)
 	if err != nil {
 		return true
 	}
@@ -99,10 +99,33 @@ type ScreenshotAnnotationListFilters struct {
 	Status   string
 	IssueID  string
 	ScreenID string
+	Outdated *bool
+
+	Platforms       []string
+	IncludeNoPlat   bool
+	Locales         []string
+	IncludeNoLocale bool
+	Themes          []string
+	IncludeNoTheme  bool
 }
 
-// ScreenshotAnnotationService 承载截图标注的读写与裁剪；展示组装（含屏幕/版本/Issue
-// 上下文与像素换算）与本包内 IssueService.Get 共用同一组函数。
+func (f ScreenshotAnnotationListFilters) repoFilters() repository.ScreenshotAnnotationFilters {
+	return repository.ScreenshotAnnotationFilters{
+		Status:          f.Status,
+		IssueID:         f.IssueID,
+		ScreenID:        f.ScreenID,
+		Outdated:        f.Outdated,
+		Platforms:       f.Platforms,
+		IncludeNoPlat:   f.IncludeNoPlat,
+		Locales:         f.Locales,
+		IncludeNoLocale: f.IncludeNoLocale,
+		Themes:          f.Themes,
+		IncludeNoTheme:  f.IncludeNoTheme,
+	}
+}
+
+// ScreenshotAnnotationService 承载截图标注的读写与裁剪；展示组装（含屏幕上下文
+// 与像素换算）与本包内 IssueService.Get 共用同一组函数。
 type ScreenshotAnnotationService struct {
 	annotationRepo *repository.ScreenshotAnnotationRepository
 	screenshotRepo *repository.ScreenshotRepository
@@ -156,33 +179,7 @@ func (s *ScreenshotAnnotationService) loadAccessibleAnnotation(annotationID, use
 	return annotation, nil
 }
 
-// loadAccessibleVersion 与 ScreenshotService 同思路：版本不存在、界面缺失或
-// 跨用户统一按版本不存在返回（标注创建/裁剪的父资源是版本，错误码用 40414）。
-func (s *ScreenshotAnnotationService) loadAccessibleVersion(versionID, userID string) (*model.ScreenshotVersion, *model.ScreenshotScreen, error) {
-	version, err := s.screenshotRepo.FindVersionByID(versionID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil, errs.ErrScreenshotVersionNotFound
-		}
-		return nil, nil, errs.ErrInternal
-	}
-	screen, err := s.screenshotRepo.FindScreenByID(version.ScreenID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil, errs.ErrScreenshotVersionNotFound
-		}
-		return nil, nil, errs.ErrInternal
-	}
-	if err := s.ensureProjectAccess(screen.ProjectID, userID); err != nil {
-		if errors.Is(err, errs.ErrProjectNotFound) {
-			return nil, nil, errs.ErrScreenshotVersionNotFound
-		}
-		return nil, nil, err
-	}
-	return version, screen, nil
-}
-
-// List 返回项目全部标注（可选按 status/issue_id/screen_id 过滤），按创建先后升序。
+// List 返回项目全部标注（可选按 status/outdated/issue_id/screen_id/维度过滤），按创建先后升序。
 func (s *ScreenshotAnnotationService) List(projectID, userID string, filters ScreenshotAnnotationListFilters) (*ScreenshotAnnotationListData, error) {
 	if filters.Status != "" && !api.ScreenshotAnnotationStatus(filters.Status).Valid() {
 		return nil, errs.ErrInvalidParams
@@ -191,11 +188,7 @@ func (s *ScreenshotAnnotationService) List(projectID, userID string, filters Scr
 		return nil, err
 	}
 
-	annotations, err := s.annotationRepo.ListByProject(projectID, repository.ScreenshotAnnotationFilters{
-		Status:   filters.Status,
-		IssueID:  filters.IssueID,
-		ScreenID: filters.ScreenID,
-	})
+	annotations, err := s.annotationRepo.ListByProject(projectID, filters.repoFilters())
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -206,9 +199,98 @@ func (s *ScreenshotAnnotationService) List(projectID, userID string, filters Scr
 	return &ScreenshotAnnotationListData{Items: items}, nil
 }
 
-// Create 在版本上创建标注；坐标为图片宽高比例，issue_id 缺省/空串 = 不关联。
+// Batch 对过滤圈定的标注集执行批量动作：confirm=确认保留（清除 outdated）、
+// resolve=标记已解决。两者都只作用于 open 标注：outdated 只对 open 有意义，
+// resolve 重申 resolved 不应碰 resolved_at。
+func (s *ScreenshotAnnotationService) Batch(projectID, userID string, req *ScreenshotAnnotationBatchRequest) (*ScreenshotAnnotationBatchResult, error) {
+	switch req.Action {
+	case api.Confirm, api.Resolve:
+	default:
+		return nil, errs.ErrInvalidParams
+	}
+	if req.Filter == nil {
+		req.Filter = &api.ScreenshotAnnotationBatchRequest_Filter{}
+	}
+	if req.Filter.Status != nil && !req.Filter.Status.Valid() {
+		return nil, errs.ErrInvalidParams
+	}
+	if err := s.ensureProjectAccess(projectID, userID); err != nil {
+		return nil, err
+	}
+
+	// 批量过滤与列表 GET 共用同一套维度规范化（platform 小写、locale BCP 47、
+	// theme light|dark），否则过滤值与库存值对不上、批量范围会悄悄偏离面板展示
+	platforms, includeNoPlat, err := normalizeScreenshotFilterValues(req.Filter.Platform, normalizeScreenshotPlatform)
+	if err != nil {
+		return nil, err
+	}
+	locales, includeNoLocale, err := normalizeScreenshotFilterValues(req.Filter.Locale, normalizeScreenshotLocale)
+	if err != nil {
+		return nil, err
+	}
+	themes, includeNoTheme, err := normalizeScreenshotFilterValues(toStrings(req.Filter.Theme), normalizeScreenshotTheme)
+	if err != nil {
+		return nil, err
+	}
+
+	listFilters := ScreenshotAnnotationListFilters{
+		ScreenID:        derefString(req.Filter.ScreenId),
+		Outdated:        req.Filter.Outdated,
+		Platforms:       platforms,
+		IncludeNoPlat:   includeNoPlat,
+		Locales:         locales,
+		IncludeNoLocale: includeNoLocale,
+		Themes:          themes,
+		IncludeNoTheme:  includeNoTheme,
+	}
+	if req.Filter.Status != nil {
+		listFilters.Status = string(*req.Filter.Status)
+	}
+	filters := listFilters.repoFilters()
+	// 两个动作都只作用于 open 标注：显式 status 与强制的 open 取交集——
+	// 传 resolved 等价于空集（直接返回 0，不碰范围内任何标注），不能放大
+	if filters.Status != "" && filters.Status != screenshotAnnotationStatusOpen {
+		return &ScreenshotAnnotationBatchResult{Updated: 0}, nil
+	}
+	filters.Status = screenshotAnnotationStatusOpen
+	if req.Action == api.Confirm && filters.Outdated == nil {
+		// 确认保留只对已过期的标注有意义
+		filters.Outdated = api.Ptr(true)
+	}
+
+	now := time.Now().UTC()
+	var fields map[string]interface{}
+	if req.Action == api.Resolve {
+		fields = map[string]interface{}{
+			"status":      screenshotAnnotationStatusResolved,
+			"resolved_at": now,
+			"updated_at":  now,
+			"outdated":    false,
+		}
+	} else {
+		fields = map[string]interface{}{
+			"outdated": false,
+		}
+	}
+
+	updated, err := s.annotationRepo.BatchUpdateByFilters(projectID, filters, fields)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	return &ScreenshotAnnotationBatchResult{Updated: int(updated)}, nil
+}
+
+func toStrings(values []api.ScreenshotAnnotationBatchRequestFilterTheme) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		out = append(out, string(v))
+	}
+	return out
+}
+
+// Create 在截图上创建标注；坐标为图片宽高比例，issue_id 缺省/空串 = 不关联。
 // 坐标字段是指针：缺省/null 与显式 0 区分开，缺省按 40001 拒绝而不是静默落左上角。
-func (s *ScreenshotAnnotationService) Create(versionID, userID, createdBy string, req *CreateScreenshotAnnotationRequest) (*ScreenshotAnnotationResponse, error) {
+func (s *ScreenshotAnnotationService) Create(screenID, userID, createdBy string, req *CreateScreenshotAnnotationRequest) (*ScreenshotAnnotationResponse, error) {
 	if req.X == nil || req.Y == nil || req.Width == nil || req.Height == nil ||
 		!validAnnotationRect(float64(*req.X), float64(*req.Y), float64(*req.Width), float64(*req.Height)) {
 		return nil, errs.ErrInvalidParams
@@ -217,7 +299,7 @@ func (s *ScreenshotAnnotationService) Create(versionID, userID, createdBy string
 		return nil, errs.ErrInvalidParams
 	}
 
-	version, screen, err := s.loadAccessibleVersion(versionID, userID)
+	screen, err := s.loadAccessibleScreen(screenID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +312,6 @@ func (s *ScreenshotAnnotationService) Create(versionID, userID, createdBy string
 	now := time.Now().UTC()
 	annotation := &model.ScreenshotAnnotation{
 		ID:        uuid.NewString(),
-		VersionID: version.ID,
 		ScreenID:  screen.ID,
 		ProjectID: screen.ProjectID,
 		IssueID:   issueID,
@@ -248,6 +329,25 @@ func (s *ScreenshotAnnotationService) Create(versionID, userID, createdBy string
 		return nil, errs.ErrInternal
 	}
 	return s.respondWithAnnotation(annotation)
+}
+
+// loadAccessibleScreen 与 ScreenshotService 同思路：截图不存在或跨用户统一按
+// 不存在返回（标注创建/裁剪的父资源是截图，错误码用 40413）。
+func (s *ScreenshotAnnotationService) loadAccessibleScreen(screenID, userID string) (*model.ScreenshotScreen, error) {
+	screen, err := s.screenshotRepo.FindScreenByID(screenID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrScreenshotScreenNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if err := s.ensureProjectAccess(screen.ProjectID, userID); err != nil {
+		if errors.Is(err, errs.ErrProjectNotFound) {
+			return nil, errs.ErrScreenshotScreenNotFound
+		}
+		return nil, err
+	}
+	return screen, nil
 }
 
 // Update 按指针语义更新 body/status/issue_id。API Key 只允许整包
@@ -291,6 +391,9 @@ func (s *ScreenshotAnnotationService) Update(annotationID, userID string, req *U
 		if *req.Status == api.Resolved {
 			fields["resolved_at"] = now
 			annotation.ResolvedAt = &now
+			// 已解决即无需确认；从 outdated 恢复成 resolved 不残留过期标记
+			fields["outdated"] = false
+			annotation.Outdated = false
 		} else {
 			fields["resolved_at"] = nil
 			annotation.ResolvedAt = nil
@@ -327,7 +430,7 @@ func (s *ScreenshotAnnotationService) resolveIssueID(raw *string, projectID stri
 	return raw, nil
 }
 
-// Delete 删除标注行；文件无关，FK 兜底版本/界面/项目级联。
+// Delete 删除标注行；文件无关，FK 兜底截图/项目级联。
 func (s *ScreenshotAnnotationService) Delete(annotationID, userID string) error {
 	annotation, err := s.loadAccessibleAnnotation(annotationID, userID)
 	if err != nil {
@@ -339,27 +442,27 @@ func (s *ScreenshotAnnotationService) Delete(annotationID, userID string) error 
 	return nil
 }
 
-// resolveCropTarget 校验标注访问权限与裁剪目标，返回标注、版本与文件头尺寸；
+// resolveCropTarget 校验标注访问权限与裁剪目标，返回标注、截图与文件头尺寸；
 // HEAD 探测与真实裁剪共用同一份门禁，状态码语义保持一致
-func (s *ScreenshotAnnotationService) resolveCropTarget(annotationID, userID string) (*model.ScreenshotAnnotation, *model.ScreenshotVersion, int, int, error) {
+func (s *ScreenshotAnnotationService) resolveCropTarget(annotationID, userID string) (*model.ScreenshotAnnotation, *model.ScreenshotScreen, int, int, error) {
 	annotation, err := s.loadAccessibleAnnotation(annotationID, userID)
 	if err != nil {
 		return nil, nil, 0, 0, err
 	}
-	version, err := s.screenshotRepo.FindVersionByID(annotation.VersionID)
+	screen, err := s.screenshotRepo.FindScreenByID(annotation.ScreenID)
 	if err != nil {
 		return nil, nil, 0, 0, errs.ErrScreenshotAnnotationNotFound
 	}
 
 	// 解码前按文件头尺寸做像素预算校验；头部都读不出来时像素解码同样会失败
-	imgW, imgH := resolveScreenshotVersionDims(s.storage, version)
+	imgW, imgH := resolveScreenshotDims(s.storage, screen)
 	if imgW <= 0 || imgH <= 0 {
 		return nil, nil, 0, 0, errs.ErrInternal
 	}
 	if int64(imgW)*int64(imgH) > maxScreenshotDecodePixels {
 		return nil, nil, 0, 0, errs.ErrScreenshotImageTooLarge
 	}
-	return annotation, version, imgW, imgH, nil
+	return annotation, screen, imgW, imgH, nil
 }
 
 // CheckCrop 供 HEAD 请求做轻量校验：走与 Crop 相同的存在性/权限/像素预算
@@ -374,7 +477,7 @@ func (s *ScreenshotAnnotationService) CheckCrop(annotationID, userID string) err
 // 成功时返回的 release 必须在调用方把 PNG 写完响应后再调用——解码信号量同时
 // 覆盖已编码缓冲的驻留期，慢客户端不会绕过并发上限堆积大响应体。
 func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, userID string) (*bytes.Reader, func(), error) {
-	annotation, version, imgW, imgH, err := s.resolveCropTarget(annotationID, userID)
+	annotation, screen, imgW, imgH, err := s.resolveCropTarget(annotationID, userID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -387,7 +490,7 @@ func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, us
 	case <-ctx.Done():
 		return nil, nil, errs.ErrInternal
 	}
-	weight := int64(imgW) * int64(imgH) * s.cropBytesPerPixel(version)
+	weight := int64(imgW) * int64(imgH) * s.cropBytesPerPixel(screen)
 	if err := screenshotCropBytesSem.Acquire(ctx, weight); err != nil {
 		<-screenshotCropDecodeSem
 		return nil, nil, errs.ErrInternal
@@ -397,14 +500,14 @@ func (s *ScreenshotAnnotationService) Crop(ctx context.Context, annotationID, us
 		<-screenshotCropDecodeSem
 	}
 
-	reader, err := s.storage.Get(version.FilePath)
+	reader, err := s.storage.Get(screen.FilePath)
 	if err != nil {
 		release()
 		return nil, nil, errs.ErrScreenshotAnnotationNotFound
 	}
 	defer reader.Close()
 
-	src, err := s.decodeCropSource(reader, version)
+	src, err := s.decodeCropSource(reader, screen)
 	if err != nil {
 		release()
 		return nil, nil, errs.ErrInternal
@@ -450,7 +553,7 @@ func (s *ScreenshotAnnotationService) buildAnnotationResponses(annotations []mod
 	if err != nil {
 		return nil, err
 	}
-	return assembleScreenshotAnnotations(annotations, related, issues, s.versionDims), nil
+	return assembleScreenshotAnnotations(annotations, related, issues, s.screenDims), nil
 }
 
 func (s *ScreenshotAnnotationService) loadAnnotationIssues(annotations []model.ScreenshotAnnotation) (map[string]model.Issue, error) {
@@ -472,27 +575,27 @@ func (s *ScreenshotAnnotationService) loadAnnotationIssues(annotations []model.S
 	return issues, nil
 }
 
-// versionDims 返回版本原图宽高：优先用落库值；存量行（width=0）惰性解码
+// screenDims 返回截图原图宽高：优先用落库值；存量行（width=0）惰性解码
 // 文件头探测，仍失败返回 0,0（调用方据此输出 pixel_rect=null）。
-func (s *ScreenshotAnnotationService) versionDims(version *model.ScreenshotVersion) (int, int) {
-	return resolveScreenshotVersionDims(s.storage, version)
+func (s *ScreenshotAnnotationService) screenDims(screen *model.ScreenshotScreen) (int, int) {
+	return resolveScreenshotDims(s.storage, screen)
 }
 
-// resolveScreenshotVersionDims 是版本尺寸的共享解析：记录值优先，
+// resolveScreenshotDims 是截图尺寸的共享解析：记录值优先，
 // 未记录时按存储 mime 解码文件头；解码失败不报错，返回 0,0。
-func resolveScreenshotVersionDims(st storage.Storage, version *model.ScreenshotVersion) (int, int) {
-	if version == nil {
+func resolveScreenshotDims(st storage.Storage, screen *model.ScreenshotScreen) (int, int) {
+	if screen == nil {
 		return 0, 0
 	}
-	if version.Width > 0 && version.Height > 0 {
-		return version.Width, version.Height
+	if screen.Width > 0 && screen.Height > 0 {
+		return screen.Width, screen.Height
 	}
-	reader, err := st.Get(version.FilePath)
+	reader, err := st.Get(screen.FilePath)
 	if err != nil {
 		return 0, 0
 	}
 	defer reader.Close()
-	cfg, err := decodeScreenshotImageConfig(reader, version.MimeType)
+	cfg, err := decodeScreenshotImageConfig(reader, screen.MimeType)
 	if err != nil {
 		return 0, 0
 	}
@@ -501,12 +604,12 @@ func resolveScreenshotVersionDims(st storage.Storage, version *model.ScreenshotV
 
 // assembleScreenshotAnnotations 把标注行组装为契约响应；IssueService.Get
 // 内嵌 screenshot_annotations 时共用此函数保证字段口径一致。
-// related 提供版本/界面/最新版本；issues 提供 issue_id → Issue（含 GitHubMeta）。
+// related 提供界面行；issues 提供 issue_id → Issue（含 GitHubMeta）。
 func assembleScreenshotAnnotations(
 	annotations []model.ScreenshotAnnotation,
 	related *repository.ScreenshotAnnotationRelated,
 	issues map[string]model.Issue,
-	dimsOf func(*model.ScreenshotVersion) (int, int),
+	dimsOf func(*model.ScreenshotScreen) (int, int),
 ) []api.ScreenshotAnnotation {
 	items := make([]api.ScreenshotAnnotation, 0, len(annotations))
 	dimsCache := make(map[string][2]int, len(annotations))
@@ -516,15 +619,14 @@ func assembleScreenshotAnnotations(
 			Id:         a.ID,
 			ProjectId:  a.ProjectID,
 			ScreenId:   a.ScreenID,
-			VersionId:  a.VersionID,
 			X:          float32(a.X),
 			Y:          float32(a.Y),
 			Width:      float32(a.Width),
 			Height:     float32(a.Height),
 			Body:       a.Body,
 			Status:     api.ScreenshotAnnotationStatus(a.Status),
+			Outdated:   a.Outdated,
 			CropUrl:    fmt.Sprintf("/api/screenshot-annotations/%s/crop", a.ID),
-			ImageUrl:   buildScreenshotContentURL(a.VersionID),
 			CreatedBy:  a.CreatedBy,
 			CreatedAt:  api.JSONTime(a.CreatedAt),
 			UpdatedAt:  api.JSONTime(a.UpdatedAt),
@@ -533,18 +635,15 @@ func assembleScreenshotAnnotations(
 		if screen, ok := related.Screens[a.ScreenID]; ok {
 			item.ScreenKey = screen.ScreenKey
 			item.ScreenTitle = screen.Title
-			item.ScreenGroup = screen.GroupName
-		}
-		if latest, ok := related.Latest[a.ScreenID]; ok {
-			item.IsLatestVersion = latest.ID == a.VersionID
-		}
-		if version, ok := related.Versions[a.VersionID]; ok {
-			version := version
-			dims, hit := dimsCache[version.ID]
+			item.ScreenPlatform = screen.Platform
+			item.ScreenLocale = screen.Locale
+			item.ScreenTheme = screen.Theme
+			item.ImageUrl = buildScreenshotContentURL(&screen)
+			dims, hit := dimsCache[screen.ID]
 			if !hit {
-				w, h := dimsOf(&version)
+				w, h := dimsOf(&screen)
 				dims = [2]int{w, h}
-				dimsCache[version.ID] = dims
+				dimsCache[screen.ID] = dims
 			}
 			item.ImageWidth = dims[0]
 			item.ImageHeight = dims[1]
@@ -623,14 +722,14 @@ func annotationCropMargin(rect image.Rectangle) int {
 // decodeCropSource 解码截图像素。jpeg 直接流式解码后再重开一遍流扫 EXIF 头；
 // gif 先用 DecodeConfig 取逻辑画布、再重开流 Decode 第一帧——两遍都走流，不
 // ReadAll 整文件，大元数据（GIF 注释/应用扩展、JPEG ICC 段）不会驻留内存。
-func (s *ScreenshotAnnotationService) decodeCropSource(reader io.Reader, version *model.ScreenshotVersion) (image.Image, error) {
-	switch version.MimeType {
+func (s *ScreenshotAnnotationService) decodeCropSource(reader io.Reader, screen *model.ScreenshotScreen) (image.Image, error) {
+	switch screen.MimeType {
 	case "image/jpeg":
 		img, err := jpeg.Decode(reader)
 		if err != nil {
 			return nil, err
 		}
-		r2, err := s.storage.Get(version.FilePath)
+		r2, err := s.storage.Get(screen.FilePath)
 		if err != nil {
 			return nil, err
 		}
@@ -645,7 +744,7 @@ func (s *ScreenshotAnnotationService) decodeCropSource(reader io.Reader, version
 		if err != nil {
 			return nil, err
 		}
-		r2, err := s.storage.Get(version.FilePath)
+		r2, err := s.storage.Get(screen.FilePath)
 		if err != nil {
 			return nil, err
 		}
@@ -662,7 +761,7 @@ func (s *ScreenshotAnnotationService) decodeCropSource(reader io.Reader, version
 		draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
 		return canvas, nil
 	default:
-		return decodeScreenshotImage(reader, version.MimeType)
+		return decodeScreenshotImage(reader, screen.MimeType)
 	}
 }
 

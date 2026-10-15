@@ -45,7 +45,7 @@ export function IssueScreenshotAnnotationsCard({
           return (
             <Link
               key={annotation.id}
-              to={`/screenshots?project=${encodeURIComponent(projectId)}&view=canvas&annotation=${encodeURIComponent(annotation.id)}`}
+              to={`/screenshots?project=${encodeURIComponent(projectId)}&annotation=${encodeURIComponent(annotation.id)}`}
               className="flex items-start gap-3.5 rounded-xl border border-border/60 px-4 py-3 transition-all hover:border-primary/30 hover:shadow-md"
             >
               <img

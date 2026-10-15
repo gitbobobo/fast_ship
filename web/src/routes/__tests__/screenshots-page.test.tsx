@@ -1,20 +1,16 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
+import { MemoryRouter, Route, Routes } from "react-router";
 import ScreenshotsPage from "@/routes/screenshots/index";
-import { renderWithRoute } from "@/test/render";
 import { useProjects } from "@/lib/hooks/use-projects";
 import { useScreenshotScreens } from "@/lib/hooks/use-screenshots";
 import { useScreenshotAnnotations } from "@/lib/hooks/use-screenshot-annotations";
-import {
-  getSavedScroll,
-  resetScrollPositions,
-} from "@/lib/scroll-positions";
-import { MemoryRouter, Route, Routes } from "react-router";
 
 const mockUploadDialog = vi.fn((_props: unknown) => null);
 const mockLightbox = vi.fn((_props: unknown) => null);
 const mockCanvas = vi.fn((_props: unknown) => <div data-testid="canvas-stub" />);
+const mockLaunchDialog = vi.fn((_props: unknown) => null);
 
 vi.mock("@/lib/hooks/use-projects", () => ({
   useProjects: vi.fn(),
@@ -52,53 +48,67 @@ vi.mock("@/components/screenshots/screenshot-lightbox", () => ({
   ScreenshotLightbox: (props: unknown) => mockLightbox(props),
 }));
 
+vi.mock("@/components/screenshots/launch-annotation-thread-dialog", () => ({
+  LaunchAnnotationThreadDialog: (props: unknown) => mockLaunchDialog(props),
+}));
+
+vi.mock("@/lib/hooks/use-notifications", () => ({
+  NOTIFICATION_UNREAD_POLL_MS: 30000,
+  useNotifications: vi.fn(() => ({ data: [] })),
+  useUnreadNotificationCount: vi.fn(() => ({ data: 0 })),
+  useMarkNotificationRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+  useMarkAllNotificationsRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
+}));
+
 function makeScreen(
-  overrides: Partial<ScreenshotScreenListItem>,
-): ScreenshotScreenListItem {
+  overrides: Partial<ScreenshotScreen>,
+): ScreenshotScreen {
   return {
     id: "s-x",
     project_id: "proj-1",
     screen_key: "key",
     title: "",
-    group: "",
-    version_count: 1,
-    last_uploaded_at: "2026-10-01T00:00:00Z",
+    platform: null,
+    locale: null,
+    theme: null,
+    mime_type: "image/png",
+    file_size: 1,
+    width: 0,
+    height: 0,
+    uploaded_by: "bobo",
+    uploaded_at: "2026-10-01T00:00:00Z",
     created_at: "2026-10-01T00:00:00Z",
-    latest_version: null,
+    content_url: `/api/screenshot-screens/${overrides.id ?? "s-x"}/content`,
     ...overrides,
   };
 }
 
-const screensFixture: ScreenshotScreenListItem[] = [
+const screensFixture: ScreenshotScreen[] = [
   makeScreen({
     id: "s1",
     screen_key: "home",
     title: "首页",
-    group: "核心",
-    version_count: 3,
-    last_uploaded_at: "2026-10-05T00:00:00Z",
+    platform: "ios",
+    uploaded_at: "2026-10-05T00:00:00Z",
   }),
   makeScreen({
     id: "s2",
     screen_key: "settings",
-    group: "核心",
-    version_count: 1,
-    last_uploaded_at: "2026-10-02T00:00:00Z",
+    platform: "ios",
+    uploaded_at: "2026-10-02T00:00:00Z",
   }),
   makeScreen({
     id: "s3",
     screen_key: "kanban",
     title: "看板",
-    group: "辅助",
-    version_count: 5,
-    last_uploaded_at: "2026-10-07T00:00:00Z",
+    platform: "web",
+    uploaded_at: "2026-10-07T00:00:00Z",
   }),
   makeScreen({
     id: "s4",
     screen_key: "misc",
-    group: "",
-    version_count: 2,
-    last_uploaded_at: "2026-10-03T00:00:00Z",
+    platform: null,
+    uploaded_at: "2026-10-03T00:00:00Z",
   }),
 ];
 
@@ -123,26 +133,37 @@ function mockProjects(items: Project[] = [
   } as unknown as ReturnType<typeof useProjects>);
 }
 
-function mockScreens(items: ScreenshotScreenListItem[]) {
+function mockScreens(items: ScreenshotScreen[]) {
   vi.mocked(useScreenshotScreens).mockReturnValue({
     data: { items },
     isLoading: false,
   } as unknown as ReturnType<typeof useScreenshotScreens>);
 }
 
-// Header 现在渲染通知铃（INT-90）：直接渲染 Header 的用例 mock 其数据钩子，
-// 与本文件 mock use-api-keys 等其它钩子的口径一致。
-vi.mock("@/lib/hooks/use-notifications", () => ({
-  NOTIFICATION_UNREAD_POLL_MS: 30000,
-  useNotifications: vi.fn(() => ({ data: [] })),
-  useUnreadNotificationCount: vi.fn(() => ({ data: 0 })),
-  useMarkNotificationRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
-  useMarkAllNotificationsRead: vi.fn(() => ({ mutate: vi.fn(), mutateAsync: vi.fn() })),
-}));
+function renderPage(initialEntry = "/screenshots") {
+  return render(
+    <MemoryRouter initialEntries={[initialEntry]}>
+      <Routes>
+        <Route path="/screenshots" element={<ScreenshotsPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+function canvasProps() {
+  return mockCanvas.mock.calls.at(-1)?.[0] as {
+    screens: ScreenshotScreen[];
+    resetKey: string;
+    locateRequest: { annotationId: string; nonce: number } | null;
+    openCount: number;
+    scopeFilter: Record<string, string[] | undefined>;
+    statusScope: { open: boolean; resolved: boolean };
+    onLaunchThread: () => void;
+  };
+}
 
 describe("ScreenshotsPage", () => {
   beforeEach(() => {
-    resetScrollPositions();
     mockProjects();
     mockScreens(screensFixture);
   });
@@ -151,229 +172,160 @@ describe("ScreenshotsPage", () => {
     vi.clearAllMocks();
   });
 
-  it("renders group tabs in order: 全部 → groups by latest upload desc → 未分组", () => {
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
+  it("goes straight to the canvas: no list view or view toggle", () => {
+    renderPage();
 
-    const tabs = screen.getAllByRole("tab").map((t) => t.textContent);
-    expect(tabs).toEqual(["全部", "辅助", "核心", "未分组"]);
-  });
-
-  it("renders screen cards with display name and version count", () => {
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-
-    expect(screen.getByText("首页")).toBeInTheDocument();
-    // title 为空时回退显示 screen_key
-    expect(screen.getByText("settings")).toBeInTheDocument();
-    expect(screen.getByText("5 个版本")).toBeInTheDocument();
-  });
-
-  it("filters cards by group tab and ungrouped tab", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-
-    await user.click(screen.getByRole("tab", { name: "核心" }));
-    expect(screen.getByText("首页")).toBeInTheDocument();
-    expect(screen.getByText("settings")).toBeInTheDocument();
-    expect(screen.queryByText("看板")).not.toBeInTheDocument();
-    expect(screen.queryByText("misc")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: "未分组" }));
-    expect(screen.queryByText("首页")).not.toBeInTheDocument();
-    expect(screen.getByText("misc")).toBeInTheDocument();
-  });
-
-  it("filters cards by search query within the current tab", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-
-    await user.type(
-      screen.getByPlaceholderText("搜索名称或界面标识"),
-      "kan",
-    );
-    expect(screen.getByText("看板")).toBeInTheDocument();
-    expect(screen.queryByText("首页")).not.toBeInTheDocument();
-  });
-
-  it("opens the lightbox on the clicked card with the filtered list", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-
-    await user.click(screen.getByTestId("screenshot-card-s3"));
-
-    expect(mockLightbox).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        open: true,
-        screenId: "s3",
-        projectId: "proj-1",
-      }),
-    );
-    const lastCall = mockLightbox.mock.calls.at(-1)?.[0] as {
-      screens: ScreenshotScreenListItem[];
-    };
-    expect(lastCall.screens.map((s) => s.id)).toEqual([
-      "s1",
-      "s2",
-      "s3",
-      "s4",
-    ]);
-  });
-
-  it("switches between list and canvas views via the view toggle", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-
-    expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /画布/ }));
     expect(screen.getByTestId("canvas-stub")).toBeInTheDocument();
-    expect(screen.queryByTestId("screenshot-card-s1")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /列表/ }));
-    expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
-    expect(screen.getByTestId("screenshot-card-s1")).toBeInTheDocument();
-  });
-
-  it("persists the inner list scroll position across remounts", () => {
-    const first = renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-    fireEvent.scroll(screen.getByTestId("screenshots-scroll"), {
-      target: { scrollTop: 500 },
-    });
-    expect(getSavedScroll("screenshots:proj-1")).toBe(500);
-    first.unmount();
-
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-    expect(screen.getByTestId("screenshots-scroll").scrollTop).toBe(500);
-  });
-
-  it("restores the list scroll position after a canvas round-trip", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-    const scroller = screen.getByTestId("screenshots-scroll");
-    fireEvent.scroll(scroller, { target: { scrollTop: 500 } });
-
-    await user.click(screen.getByRole("button", { name: "画布" }));
-    // 真实浏览器里切到画布时内容塌缩会把 scrollTop 夹到 0；
-    // 手动补一个 scroll 事件，验证 ready 关闭时不会把 0 写回存储
-    fireEvent.scroll(scroller, { target: { scrollTop: 0 } });
-    expect(getSavedScroll("screenshots:proj-1")).toBe(500);
-
-    await user.click(screen.getByRole("button", { name: "列表" }));
-    expect(scroller.scrollTop).toBe(500);
-  });
-
-  it("keeps the same shell and toolbar when switching views", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-
-    const toolbarSignature = () => {
-      const search = screen.getByPlaceholderText("搜索名称或界面标识");
-      const toolbar = search.closest("div.border-b") as HTMLElement;
-      return {
-        shell: toolbar.parentElement?.className,
-        toolbar: toolbar.className,
-        tabs: screen.getAllByRole("tab").map((t) => t.textContent),
-        buttons: screen
-          .getAllByRole("button")
-          .filter((b) => b.hasAttribute("aria-pressed"))
-          .map((b) => b.textContent),
-      };
-    };
-
-    const listSignature = toolbarSignature();
-    expect(screen.getByRole("button", { name: "列表", pressed: true })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "画布" }));
-    expect(screen.getByRole("button", { name: "画布", pressed: true })).toBeInTheDocument();
-    expect(toolbarSignature()).toEqual(listSignature);
-  });
-
-  it("scopes the canvas to the active tab and search query", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots?view=canvas",
-    });
-
-    const lastScreens = () =>
-      (mockCanvas.mock.calls.at(-1)?.[0] as {
-        screens: ScreenshotScreenListItem[];
-        resetKey: string;
-      }).screens.map((s) => s.id);
-
-    expect(lastScreens()).toEqual(["s1", "s2", "s3", "s4"]);
-    await user.click(screen.getByRole("tab", { name: "核心" }));
-    expect(lastScreens()).toEqual(["s1", "s2"]);
+    // 列表时代的控件不再出现
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(
-      (mockCanvas.mock.calls.at(-1)?.[0] as { resetKey: string }).resetKey,
-    ).toContain("g:核心");
-
-    await user.type(screen.getByPlaceholderText("搜索名称或界面标识"), "set");
-    expect(lastScreens()).toEqual(["s2"]);
-  });
-
-  it("shows the empty-project state when there are no projects", () => {
-    mockProjects([]);
-    mockScreens([]);
-
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
-    });
-
-    expect(screen.getAllByText("暂无项目")).toHaveLength(2);
+      screen.queryByRole("button", { name: /列表/ }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /上传截图/i }),
+      screen.queryByRole("button", { name: /画布/ }),
     ).not.toBeInTheDocument();
   });
 
-  it("shows the empty-screen state for a project without screenshots", () => {
-    mockScreens([]);
+  it("ignores the legacy ?view= param and still lands on the canvas", () => {
+    const first = renderPage("/screenshots?view=list");
+    expect(screen.getByTestId("canvas-stub")).toBeInTheDocument();
+    first.unmount();
 
-    renderWithRoute(<ScreenshotsPage />, {
-      path: "/screenshots",
-      initialEntry: "/screenshots",
+    renderPage("/screenshots?view=canvas");
+    expect(screen.getByTestId("canvas-stub")).toBeInTheDocument();
+  });
+
+  it("defaults the status filter to open without writing it into the URL", async () => {
+    renderPage();
+
+    // 默认只看未解决在解码层生效：URL 无 status 参数也拿到 open 范围，
+    // 与刷新行为一致；不允许清空到空集（空集 = 隐藏全部标注的歧义）
+    await waitFor(() => {
+      expect(canvasProps().statusScope).toEqual({ open: true, resolved: false });
+    });
+    expect(canvasProps().resetKey).not.toContain("status=");
+
+    // 状态多选清空后回落默认 open，而不是 open/resolved 全不选
+    const user = userEvent.setup();
+    await waitFor(() =>
+      expect(screen.getByTestId("filter-状态")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("filter-状态"));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /open/ }));
+    await waitFor(() => {
+      expect(canvasProps().statusScope).toEqual({ open: true, resolved: false });
+    });
+  });
+
+  it("keeps both statuses when the filter selects open and resolved", async () => {
+    renderPage("/screenshots?status=open,resolved");
+
+    await waitFor(() => {
+      expect(canvasProps().statusScope).toEqual({ open: true, resolved: true });
+    });
+  });
+
+  it("filters the canvas by dimension selections and encodes them in the URL", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("filter-平台")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("filter-平台"));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /ios/ }));
+
+    await waitFor(() => {
+      expect(canvasProps().resetKey).toContain("platform=ios");
+    });
+    expect(canvasProps().screens.map((s) => s.id)).toEqual(["s1", "s2"]);
+
+    // 多值（含未标注桶）：逗号编码进同一参数（URLSearchParams 会转义逗号）
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /未标注/ }));
+    await waitFor(() => {
+      expect(decodeURIComponent(canvasProps().resetKey)).toContain(
+        "platform=ios,__none__",
+      );
+    });
+    expect(canvasProps().screens.map((s) => s.id)).toEqual(["s1", "s2", "s4"]);
+  });
+
+  it("narrows the canvas to screenshots matching the search box", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const searchBox = screen.getByTestId("screenshot-search");
+    // 标题命中
+    await user.type(searchBox, "看板");
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["s3"]);
     });
 
-    expect(
-      screen.getByText(/该项目暂无截图/),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    // screen_key 大小写不敏感命中
+    await user.clear(searchBox);
+    await user.type(searchBox, "SETT");
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["s2"]);
+    });
+  });
+
+  it("stacks the search box on top of the dimension filters", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("filter-平台")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("filter-平台"));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /ios/ }));
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["s1", "s2"]);
+    });
+
+    // 平台=ios 范围内再搜 screen_key，只剩交集
+    await user.type(screen.getByTestId("screenshot-search"), "home");
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["s1"]);
+    });
+  });
+
+  it("shows the search empty state when nothing matches", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.type(screen.getByTestId("screenshot-search"), "不存在的界面");
+    await waitFor(() => {
+      expect(
+        screen.getByText("没有匹配的截图，调整搜索关键词后再试"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
+  });
+
+  it("shows the empty state with a center upload button for a project without screenshots", async () => {
+    mockScreens([]);
+    const user = userEvent.setup();
+    renderPage();
+
+    const uploadButtons = await screen.findAllByRole("button", {
+      name: /上传截图/,
+    });
+    // 顶栏一个 + 空状态画布中央一个
+    expect(uploadButtons.length).toBe(2);
+    expect(screen.queryByTestId("canvas-stub")).not.toBeInTheDocument();
+
+    await user.click(uploadButtons[1]);
+    await waitFor(() => {
+      expect(
+        (mockUploadDialog.mock.calls.at(-1)?.[0] as { open: boolean }).open,
+      ).toBe(true);
+    });
   });
 
   it("waits for the in-flight fetch before honoring ?annotation= deep links", async () => {
-    // 过期缓存：isSuccess=true 但数据不含目标，同时仍在拉取
     const annotation = {
       id: "a-1",
       screen_id: "s1",
-      version_id: "s1-v1",
       status: "open",
     } as ScreenshotAnnotation;
     const queryState = {
@@ -390,24 +342,13 @@ describe("ScreenshotsPage", () => {
         >,
     );
 
-    const lastLocate = () =>
-      (mockCanvas.mock.calls.at(-1)?.[0] as {
-        locateRequest: { annotationId: string } | null;
-      }).locateRequest;
-
-    const utils = render(
-      <MemoryRouter initialEntries={["/screenshots?view=canvas&annotation=a-1"]}>
-        <Routes>
-          <Route path="/screenshots" element={<ScreenshotsPage />} />
-        </Routes>
-      </MemoryRouter>,
-    );
+    const utils = renderPage("/screenshots?view=canvas&annotation=a-1");
 
     await waitFor(() =>
       expect(screen.getByTestId("canvas-stub")).toBeInTheDocument(),
     );
     // 拉取未落地时不判存在性、不发定位请求
-    expect(lastLocate()).toBeNull();
+    expect(canvasProps().locateRequest).toBeNull();
 
     queryState.current = {
       data: [annotation],
@@ -422,6 +363,149 @@ describe("ScreenshotsPage", () => {
       </MemoryRouter>,
     );
 
-    await waitFor(() => expect(lastLocate()?.annotationId).toBe("a-1"));
+    await waitFor(() => {
+      expect(canvasProps().locateRequest?.annotationId).toBe("a-1");
+    });
+  });
+
+  it("relaxes dimension filters that hide the deep-linked annotation's screen", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    // 先筛出 web 平台（s1 被滤掉）
+    await waitFor(() =>
+      expect(screen.getByTestId("filter-平台")).toBeInTheDocument(),
+    );
+    await user.click(screen.getByTestId("filter-平台"));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /web/ }));
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["s3"]);
+    });
+
+    // 深链指向 s1 上的标注：自动放宽平台过滤并定位
+    vi.mocked(useScreenshotAnnotations).mockReturnValue({
+      data: [
+        {
+          id: "a-1",
+          screen_id: "s1",
+          status: "open",
+        } as ScreenshotAnnotation,
+      ],
+      isSuccess: true,
+      isFetching: false,
+    } as unknown as ReturnType<typeof useScreenshotAnnotations>);
+
+    renderPage("/screenshots?platform=web&annotation=a-1");
+    await waitFor(() => {
+      expect(canvasProps().locateRequest?.annotationId).toBe("a-1");
+    });
+    // 放宽后画布恢复全量
+    expect(canvasProps().screens.map((s) => s.id).sort()).toEqual([
+      "s1",
+      "s2",
+      "s3",
+      "s4",
+    ]);
+  });
+
+  it("relaxes every hiding dimension and the status filter in one URL write", async () => {
+    // 深链指向 s4（全维度未标注）上的已解决标注：platform=web + locale + theme
+    // + status 四个放宽合并进同一次写入——逐项多次 setSearchParams 会互相覆盖，
+    // 最后一次放宽赢，其余维度仍把目标挡在外面
+    vi.mocked(useScreenshotAnnotations).mockReturnValue({
+      data: [
+        {
+          id: "a-1",
+          screen_id: "s4",
+          status: "resolved",
+        } as ScreenshotAnnotation,
+      ],
+      isSuccess: true,
+      isFetching: false,
+    } as unknown as ReturnType<typeof useScreenshotAnnotations>);
+    renderPage(
+      "/screenshots?platform=web&locale=fr-FR&theme=dark&status=open&annotation=a-1",
+    );
+
+    await waitFor(() => {
+      expect(canvasProps().locateRequest?.annotationId).toBe("a-1");
+    });
+    const props = canvasProps();
+    // 所有遮挡维度都放宽，画布恢复全量
+    expect(props.screens.map((s) => s.id).sort()).toEqual([
+      "s1",
+      "s2",
+      "s3",
+      "s4",
+    ]);
+    // 目标状态并入筛选范围：resolved 也在面板范围内
+    expect(props.statusScope).toEqual({ open: true, resolved: true });
+  });
+
+  it("relaxes only the status filter for a resolved deep link inside current dimensions", async () => {
+    // s3 是 web 平台：维度已命中，唯一遮挡是默认 status=open
+    vi.mocked(useScreenshotAnnotations).mockReturnValue({
+      data: [
+        {
+          id: "a-3",
+          screen_id: "s3",
+          status: "resolved",
+        } as ScreenshotAnnotation,
+      ],
+      isSuccess: true,
+      isFetching: false,
+    } as unknown as ReturnType<typeof useScreenshotAnnotations>);
+    renderPage("/screenshots?platform=web&annotation=a-3");
+
+    await waitFor(() => {
+      expect(canvasProps().locateRequest?.annotationId).toBe("a-3");
+    });
+    const props = canvasProps();
+    expect(props.screens.map((s) => s.id)).toEqual(["s3"]);
+    expect(props.statusScope).toEqual({ open: true, resolved: true });
+  });
+
+  it("passes the prompt scope counts and opens the launch dialog from the canvas", async () => {
+    vi.mocked(useScreenshotAnnotations).mockReturnValue({
+      data: [
+        { id: "a-1", screen_id: "s1", status: "open" } as ScreenshotAnnotation,
+        {
+          id: "a-2",
+          screen_id: "s2",
+          status: "resolved",
+        } as ScreenshotAnnotation,
+      ],
+      isSuccess: true,
+      isFetching: false,
+    } as unknown as ReturnType<typeof useScreenshotAnnotations>);
+    const user = userEvent.setup();
+    renderPage();
+
+    await waitFor(() => {
+      expect(canvasProps().openCount).toBe(1);
+    });
+    expect(canvasProps().scopeFilter).toEqual({
+      platform: [],
+      locale: [],
+      theme: [],
+    });
+
+    await user.click(screen.getByTestId("canvas-stub"));
+    void user;
+    // 通过画布 props 触发启动入口
+    canvasProps().onLaunchThread();
+    await waitFor(() => {
+      expect(
+        (mockLaunchDialog.mock.calls.at(-1)?.[0] as { open: boolean }).open,
+      ).toBe(true);
+    });
+    const launchProps = mockLaunchDialog.mock.calls.at(-1)?.[0] as {
+      openCount: number;
+      promptText: string;
+    };
+    expect(launchProps.openCount).toBe(1);
+    // 提示词携带项目 ID 与过滤口径（空过滤 = 仅 status=open）
+    expect(launchProps.promptText).toContain("项目ID：proj-1");
+    expect(launchProps.promptText).toContain("status=open");
   });
 });

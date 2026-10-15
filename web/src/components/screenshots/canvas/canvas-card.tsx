@@ -24,7 +24,7 @@ export interface CanvasDraft {
 }
 
 interface CanvasCardProps {
-  screen: ScreenshotScreenListItem;
+  screen: ScreenshotScreen;
   /** 卡片在世界坐标的位置与尺寸（含元信息行） */
   rect: Rect;
   imageHeight: number;
@@ -35,7 +35,8 @@ interface CanvasCardProps {
   annotations: ScreenshotAnnotation[];
   /** 标注 → 面板同序序号（矩形角标） */
   annotationIndex: Map<string, number>;
-  olderOpenCount: number;
+  /** 覆盖更新后待确认的 open 标注数 */
+  outdatedOpenCount: number;
   selectedAnnotationId: string | null;
   hoverAnnotationId: string | null;
   flashAnnotationId: string | null;
@@ -43,13 +44,13 @@ interface CanvasCardProps {
   draft: CanvasDraft | null;
   onFocusCard: (screenId: string) => void;
   onOpenPreview: (screenId: string) => void;
-  onImageSize: (versionId: string, width: number, height: number) => void;
+  onImageSize: (screenId: string, width: number, height: number) => void;
   onSelectAnnotation: (annotationId: string) => void;
   onHoverAnnotation: (annotationId: string | null) => void;
-  onDrawEnd: (screen: ScreenshotScreenListItem, rect: Rect) => void;
+  onDrawEnd: (screen: ScreenshotScreen, rect: Rect) => void;
 }
 
-/** 画布上的一张截图卡片：只展示最新版本，叠加该版本的标注矩形 */
+/** 画布上的一张截图卡片：叠加该截图的标注矩形，标语言/亮度与待确认徽标 */
 function CanvasCardImpl({
   screen,
   rect,
@@ -58,7 +59,7 @@ function CanvasCardImpl({
   aspectKnown,
   annotations,
   annotationIndex,
-  olderOpenCount,
+  outdatedOpenCount,
   selectedAnnotationId,
   hoverAnnotationId,
   flashAnnotationId,
@@ -71,12 +72,12 @@ function CanvasCardImpl({
   onHoverAnnotation,
   onDrawEnd,
 }: CanvasCardProps) {
-  const version = screen.latest_version;
   const imageAreaRef = useRef<HTMLDivElement>(null);
   const [drawRect, setDrawRect] = useState<Rect | null>(null);
-  // 图片加载完成前保留占位；按版本记录，换版后重新占位
-  const [loadedVersionId, setLoadedVersionId] = useState<string | null>(null);
-  const imageLoaded = !!version && loadedVersionId === version.id;
+  // 图片加载完成前保留占位；覆盖上传换图后重新占位
+  const [loadedScreenRev, setLoadedScreenRev] = useState<string | null>(null);
+  // 以 content_url 为图版本指纹：覆盖上传换图即重置占位
+  const imageLoaded = loadedScreenRev === screen.content_url;
   const stopDrawRef = useRef<(() => void) | null>(null);
 
   useEffect(() => () => stopDrawRef.current?.(), []);
@@ -84,7 +85,7 @@ function CanvasCardImpl({
   // 在图片区拖出矩形：像素位移直接除以图片区屏幕盒尺寸即得比例坐标，
   // 与画布缩放无关
   const onImagePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!drawEnabled || e.button !== 0 || !version || !aspectKnown) return;
+    if (!drawEnabled || e.button !== 0 || !aspectKnown) return;
     const el = imageAreaRef.current;
     if (!el) return;
     e.stopPropagation();
@@ -156,9 +157,9 @@ function CanvasCardImpl({
             {!imageLoaded && (
               <Images className="absolute h-8 w-8 text-muted-foreground/40" />
             )}
-            {version && imageEnabled && (
+            {imageEnabled && (
               <img
-                src={screenshotApi.contentUrl(version)}
+                src={screenshotApi.contentUrl(screen)}
                 alt={name}
                 draggable={false}
                 loading="lazy"
@@ -166,11 +167,15 @@ function CanvasCardImpl({
                 className="h-full w-full select-none object-contain"
                 onLoad={(e) => {
                   const img = e.currentTarget;
-                  setLoadedVersionId(version.id);
-                  // 接口已给尺寸的版本不必再量，避免每次 onLoad 都触发重排
-                  const needsMeasure = !version.width || !version.height;
+                  setLoadedScreenRev(screen.content_url);
+                  // 接口已给尺寸的截图不必再量，避免每次 onLoad 都触发重排
+                  const needsMeasure = !screen.width || !screen.height;
                   if (needsMeasure && img.naturalWidth > 0) {
-                    onImageSize(version.id, img.naturalWidth, img.naturalHeight);
+                    onImageSize(
+                      screen.id,
+                      img.naturalWidth,
+                      img.naturalHeight,
+                    );
                   }
                 }}
               />
@@ -238,21 +243,31 @@ function CanvasCardImpl({
         </div>
 
         <div
-          className="flex shrink-0 items-center gap-2"
+          className="flex shrink-0 items-center gap-1.5"
           style={{ height: CARD_META_HEIGHT }}
         >
           <p className="min-w-0 truncate text-sm font-medium">{name}</p>
-          {olderOpenCount > 0 && (
+          {screen.locale && (
+            <Badge variant="outline" className="shrink-0">
+              {screen.locale}
+            </Badge>
+          )}
+          {screen.theme && (
+            <Badge variant="outline" className="shrink-0">
+              {screen.theme === "dark" ? "暗色" : "亮色"}
+            </Badge>
+          )}
+          {outdatedOpenCount > 0 && (
             <Badge
               variant="outline"
               className="shrink-0 border-amber-500/60 text-amber-600 dark:text-amber-400"
+              data-testid={`canvas-card-outdated-${screen.id}`}
             >
-              上一版有 {olderOpenCount} 条未解决
+              {outdatedOpenCount} 条待确认
             </Badge>
           )}
           <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-            {screen.version_count} 个版本 ·{" "}
-            {formatRelativeTime(screen.last_uploaded_at)}
+            {formatRelativeTime(screen.uploaded_at)}
           </span>
         </div>
       </div>

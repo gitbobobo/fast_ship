@@ -50,7 +50,7 @@ tags:
   - name: media
     description: GitHub 媒体代理
   - name: screenshots
-    description: 项目截图库（按界面聚合，版本全量保留）
+    description: 项目截图库（每变体一张图，覆盖上传即替换文件，只保留最新版）
   - name: environments
     description: T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）。例外：t3-projects 发现与项目 t3-bindings 对 API Key 开放（INT-89）
   - name: automations
@@ -4916,9 +4916,12 @@ paths:
       description: |
         multipart 字段：`file`（必填；内容嗅探须为 image/png、image/jpeg、image/webp、image/gif，大小受服务端 upload.max_file_size 限制）、
         `screen_key`（必填；服务端按 ToLower+TrimSpace 规范化，规范化后须 1~100 字符，否则 40001）、
-        `group`/`title`/`note`（可选）。
-        同 project 下 screen_key 唯一对应一个界面：首次出现自动建界面，重复上传归并为新版本（版本全量保留，不去重、不清理）。
-        表单含 `group` 字段（允许空串=未分组）即更新界面分组；`title` 非空即更新界面标题；`note` 记在该版本上。
+        `title`/`platform`/`locale`/`theme`（可选）。
+        (project_id, screen_key, platform, locale, theme) 定位一张截图（NULL 与 NULL 视为相等）：
+        已存在即覆盖——替换文件、更新宽高/大小/上传时间/上传者，不新增行；不存在则新建。
+        表单字段存在性语义：`platform`（trim+小写化，开放词表；空串=清除为未标注）、`locale`（BCP 47 规范化，非法值 40001；空串=清除）、
+        `theme`（严格 light|dark，其他值 40001；空串=清除）字段出现才生效，不出现保持原值；`title` 非空才更新。
+        覆盖后该截图上全部 open 标注置为 outdated（待确认）；「确认保留」清零。
         `uploaded_by` 由服务端按凭证自动记录（用户名，或 "API Key: <name>"）。
       security:
         - jwtAuth: []
@@ -4940,21 +4943,24 @@ paths:
                 screen_key:
                   type: string
                   description: 界面标识；规范化后 1~100 字符
-                group:
-                  type: string
-                  maxLength: 100
-                  description: 分组名（≤100 字符）；字段出现即更新（空串置为未分组），不出现则保持原值
                 title:
                   type: string
                   maxLength: 200
                   description: 界面标题（≤200 字符）；非空才更新
-                note:
+                platform:
                   type: string
-                  maxLength: 1000
-                  description: 本次上传版本的备注（≤1000 字符）
+                  maxLength: 100
+                  description: 平台（开放词表，trim+小写，≤100 字符）；字段出现即生效（空串清除为未标注）
+                locale:
+                  type: string
+                  description: 语言（BCP 47，服务端规范化大小写，非法值 40001）；字段出现即生效（空串清除）
+                theme:
+                  type: string
+                  enum: [light, dark]
+                  description: 亮度主题（严格 light|dark，其他值 40001）；字段出现即生效（空串清除）
       responses:
         '200':
-          description: 上传结果（screen 为归并后的界面，version 为新建版本）
+          description: 上传结果（screen 为新建或覆盖后的截图）
           content:
             application/json:
               schema:
@@ -4977,16 +4983,36 @@ paths:
     get:
       tags: [screenshots]
       operationId: listScreenshotScreens
-      summary: 列出项目全部界面（last_uploaded_at 倒序）
-      description: 每项为界面字段 + version_count + latest_version（最新一个版本，无版本时为 null，实际不会发生）。
+      summary: 列出项目全部截图（uploaded_at 倒序）
+      description: |
+        可选 query 过滤：`platform`/`locale`/`theme`（逗号分隔多值，OR 语义；值 `__none__` 表示「未标注」桶即 NULL，可与其他值混用，可组合）。
+        每项为截图字段 + 文件信息 + content_url。
       security:
         - jwtAuth: []
         - apiKeyAuth: []
       parameters:
         - $ref: '#/components/parameters/ProjectId'
+        - name: platform
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 逗号分隔多值；`__none__` 表示未标注（NULL）
+        - name: locale
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 逗号分隔多值；`__none__` 表示未标注（NULL）
+        - name: theme
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 逗号分隔多值（light/dark）；`__none__` 表示未标注（NULL）
       responses:
         '200':
-          description: 界面列表（data 为 {items}，非分页信封）
+          description: 截图列表（data 为 {items}，非分页信封）
           content:
             application/json:
               schema:
@@ -5001,7 +5027,9 @@ paths:
                           items:
                             type: array
                             items:
-                              $ref: '#/components/schemas/ScreenshotScreenListItem'
+                              $ref: '#/components/schemas/ScreenshotScreen'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -5010,38 +5038,14 @@ paths:
           $ref: '#/components/responses/InternalError'
 
   /api/screenshot-screens/{sid}:
-    get:
-      tags: [screenshots]
-      operationId: getScreenshotScreen
-      summary: 获取界面详情（含全部版本，uploaded_at 倒序）
-      security:
-        - jwtAuth: []
-        - apiKeyAuth: []
-      parameters:
-        - $ref: '#/components/parameters/ScreenshotScreenId'
-      responses:
-        '200':
-          description: 界面详情
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Envelope'
-                  - type: object
-                    properties:
-                      data:
-                        $ref: '#/components/schemas/ScreenshotScreenDetail'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
     patch:
       tags: [screenshots]
       operationId: updateScreenshotScreen
-      summary: 更新界面分组/标题（仅 JWT）
-      description: group 与 title 均为可选指针字段：字段出现才更新（group 允许空串置为未分组），都不传返回 40001。
+      summary: 更新截图标题/平台/语言/亮度（仅 JWT）
+      description: |
+        四字段均为可选指针字段：字段出现才更新（三个维度允许空串清除为未标注），都不传返回 40001。
+        platform 非法长度、locale 非法 BCP 47、theme 非 light|dark 返回 40001；
+        改出的 (screen_key, platform, locale, theme) 组合与项目内已有截图撞唯一约束返回 409（40921）。
       security:
         - jwtAuth: []
       parameters:
@@ -5054,7 +5058,7 @@ paths:
               $ref: '#/components/schemas/UpdateScreenshotScreenRequest'
       responses:
         '200':
-          description: 更新后的界面详情（含全部版本）
+          description: 更新后的截图
           content:
             application/json:
               schema:
@@ -5063,7 +5067,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/ScreenshotScreenDetail'
+                        $ref: '#/components/schemas/ScreenshotScreen'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -5072,12 +5076,14 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
     delete:
       tags: [screenshots]
       operationId: deleteScreenshotScreen
-      summary: 删除界面及其全部版本与磁盘文件（仅 JWT）
+      summary: 删除截图及其文件与全部标注（仅 JWT）
       security:
         - jwtAuth: []
       parameters:
@@ -5094,39 +5100,17 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/screenshot-versions/{vid}:
-    delete:
-      tags: [screenshots]
-      operationId: deleteScreenshotVersion
-      summary: 删除单个截图版本与文件（仅 JWT）
-      description: 若删除的是该界面最后一个版本，连带删除界面本身。
-      security:
-        - jwtAuth: []
-      parameters:
-        - $ref: '#/components/parameters/ScreenshotVersionId'
-      responses:
-        '200':
-          $ref: '#/components/responses/EmptySuccess'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /api/screenshot-versions/{vid}/content:
+  /api/screenshot-screens/{sid}/content:
     get:
       tags: [screenshots]
-      operationId: getScreenshotVersionContent
-      summary: 获取截图版本图片内容
-      description: "返回图片二进制内容（存储时嗅探的 mime type，`Content-Disposition: inline`，`Cache-Control: private, max-age=300`）。支持 Authorization 头或 `?token=` query 凭证（供 `<img>` 直链）。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。"
+      operationId: getScreenshotScreenContent
+      summary: 获取截图图片内容
+      description: "返回图片二进制内容（存储时嗅探的 mime type，`Content-Disposition: inline`，`Cache-Control: private, max-age=300`——缓存键是含 `?v=` 修订参数的完整 URL，覆盖上传推进 v 即自然失效）。支持 Authorization 头或 `?token=` query 凭证（供 `<img>` 直链）。同一路径另注册 HEAD 变体，语义同 GET 但不返回 body。"
       security:
         - jwtAuth: []
         - apiKeyAuth: []
       parameters:
-        - $ref: '#/components/parameters/ScreenshotVersionId'
+        - $ref: '#/components/parameters/ScreenshotScreenId'
         - $ref: '#/components/parameters/QueryToken'
       responses:
         '200':
@@ -5144,14 +5128,14 @@ paths:
           $ref: '#/components/responses/InternalError'
     head:
       tags: [screenshots]
-      operationId: getScreenshotVersionContentHead
-      summary: 获取截图版本图片头信息（HEAD）
+      operationId: getScreenshotScreenContentHead
+      summary: 获取截图图片头信息（HEAD）
       description: 与 GET 语义相同但不返回 body。
       security:
         - jwtAuth: []
         - apiKeyAuth: []
       parameters:
-        - $ref: '#/components/parameters/ScreenshotVersionId'
+        - $ref: '#/components/parameters/ScreenshotScreenId'
         - $ref: '#/components/parameters/QueryToken'
       responses:
         '200':
@@ -5167,14 +5151,17 @@ paths:
     get:
       tags: [screenshots]
       operationId: listScreenshotAnnotations
-      summary: 列出项目全部截图标注（可按状态 / Issue / 界面过滤）
+      summary: 列出项目全部截图标注（可按状态 / 过期 / 维度 / Issue / 截图过滤）
       description: |
-        返回项目下全部截图标注（含挂在旧版本上的），按创建先后升序。
-        可选 query 过滤：`status`（open/resolved，缺省返回全部；非法值 40001）、`issue_id`、`screen_id`（精确匹配，可组合）。
-        每条标注返回：原图地址（image_url，即所在版本的 content_url）、比例坐标（x/y/width/height，0~1）、
-        像素坐标（pixel_rect；原图尺寸未知的存量版本为 null）、文字、所属画面（screen_key/screen_title/screen_group）、
-        关联 Issue（issue_id/issue_reference/issue_title，未关联均为 null）、是否挂在界面最新版本（is_latest_version）
-        与裁剪图地址（crop_url）。删除界面/版本会级联删除其上标注；删除 Issue 只解除关联不删标注。
+        返回项目下截图标注，按创建先后升序。
+        可选 query 过滤：`status`（open/resolved，缺省返回全部；非法值 40001）、`outdated`（true/false）、
+        `issue_id`、`screen_id`（精确匹配）、`platform`/`locale`/`theme`（逗号分隔多值，OR 语义；
+        值 `__none__` 表示「未标注」桶即截图维度为 NULL，可与其他值混用），全部可组合。
+        每条标注返回：原图地址（image_url，即所在截图的 content_url）、比例坐标（x/y/width/height，0~1）、
+        像素坐标（pixel_rect；原图尺寸未知时为 null）、文字、状态、是否过期（outdated，截图被覆盖更新后未确认）、
+        所属截图（screen_key/screen_title/screen_platform/screen_locale/screen_theme）、
+        关联 Issue（issue_id/issue_reference/issue_title，未关联均为 null）与裁剪图地址（crop_url）。
+        删除截图会级联删除其上标注；删除 Issue 只解除关联不删标注。
       security:
         - jwtAuth: []
         - apiKeyAuth: []
@@ -5186,6 +5173,12 @@ paths:
           schema:
             $ref: '#/components/schemas/ScreenshotAnnotationStatus'
           description: 按状态过滤；缺省返回全部状态
+        - name: outdated
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: 按过期标记过滤；true=仅过期（待确认），false=仅未过期
         - name: issue_id
           in: query
           required: false
@@ -5197,7 +5190,25 @@ paths:
           required: false
           schema:
             type: string
-          description: 只返回该界面（含全部历史版本）上的标注
+          description: 只返回该截图上的标注
+        - name: platform
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 逗号分隔多值；`__none__` 表示未标注（NULL）
+        - name: locale
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 逗号分隔多值；`__none__` 表示未标注（NULL）
+        - name: theme
+          in: query
+          required: false
+          schema:
+            type: string
+          description: 逗号分隔多值（light/dark）；`__none__` 表示未标注（NULL）
       responses:
         '200':
           description: 标注列表（data 为 {items}，非分页信封）
@@ -5225,20 +5236,63 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/screenshot-versions/{vid}/annotations:
+  /api/projects/{id}/screenshot-annotations/batch:
+    post:
+      tags: [screenshots]
+      operationId: batchScreenshotAnnotations
+      summary: 批量处理当前过滤范围内的标注（仅 JWT）
+      description: |
+        对 `filter` 圈定的标注集执行同一动作。`action=confirm`（确认保留：清除 outdated，
+        仅作用于 open 标注）或 `action=resolve`（标记已解决：置 status=resolved 并记录 resolved_at，
+        仅作用于 open 标注）。filter 字段均可选，缺省即不限制；返回实际更新的标注数。
+        API Key 调用返回 403（40301）——API Key 只能逐条把标注置 resolved，没有批量能力。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScreenshotAnnotationBatchRequest'
+      responses:
+        '200':
+          description: 批量处理结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/ScreenshotAnnotationBatchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/screenshot-screens/{sid}/annotations:
     post:
       tags: [screenshots]
       operationId: createScreenshotAnnotation
-      summary: 在截图版本上新建矩形标注（仅 JWT）
+      summary: 在截图上新建矩形标注（仅 JWT）
       description: |
-        在指定版本图片上创建「矩形框 + 文字」标注。坐标为图片宽高比例（0~1）：
+        在指定截图上创建「矩形框 + 文字」标注。坐标为图片宽高比例（0~1）：
         x/y 为左上角，width/height 为尺寸；须满足 0 ≤ x,y、0 < width,height、x+width ≤ 1、y+height ≤ 1，否则 40001。
         `issue_id` 可选：缺省或空串表示不关联；提供时须为同一项目内的 Issue（不存在或跨项目返回 40001）。
         API Key 调用返回 403（40301）。
       security:
         - jwtAuth: []
       parameters:
-        - $ref: '#/components/parameters/ScreenshotVersionId'
+        - $ref: '#/components/parameters/ScreenshotScreenId'
       requestBody:
         required: true
         content:
@@ -6524,14 +6578,7 @@ components:
       required: true
       schema:
         type: string
-      description: 截图界面 ID（UUID）
-    ScreenshotVersionId:
-      name: vid
-      in: path
-      required: true
-      schema:
-        type: string
-      description: 截图版本 ID（UUID）
+      description: 截图 ID（UUID）
     ScreenshotAnnotationId:
       name: aid
       in: path
@@ -8562,7 +8609,8 @@ components:
     # ---- screenshots ----
     ScreenshotScreen:
       type: object
-      required: [id, project_id, screen_key, title, group, version_count, last_uploaded_at, created_at]
+      description: 截图库中的一张截图：(project_id, screen_key, platform, locale, theme) 唯一，再上传即覆盖文件
+      required: [id, project_id, screen_key, title, platform, locale, theme, mime_type, file_size, width, height, uploaded_by, uploaded_at, created_at, content_url]
       properties:
         id:
           type: string
@@ -8574,95 +8622,70 @@ components:
         title:
           type: string
           description: 可为空串，客户端回退显示 screen_key
-        group:
+        platform:
           type: string
-          description: 自由文本分组；空串表示未分组
-        version_count:
-          type: integer
-          description: 该界面累计保留的版本数
-        last_uploaded_at:
+          nullable: true
+          description: 平台（开放词表，trim+小写）；null 表示未标注
+        locale:
           type: string
-          format: date-time
-          description: 最近一次上传时间，列表按它倒序
-        created_at:
+          nullable: true
+          description: 语言（BCP 47 规范化大小写）；null 表示未标注
+        theme:
           type: string
-          format: date-time
-    ScreenshotVersion:
-      type: object
-      required: [id, screen_id, note, file_name, file_size, mime_type, uploaded_by, uploaded_at, width, height, content_url]
-      properties:
-        id:
-          type: string
-        screen_id:
-          type: string
-        note:
-          type: string
-        file_name:
-          type: string
-        file_size:
-          type: integer
-          format: int64
+          nullable: true
+          enum: [light, dark]
+          description: 亮度主题；null 表示未标注
         mime_type:
           type: string
           description: 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一）
+        file_size:
+          type: integer
+          format: int64
+          description: 文件字节数
+        width:
+          type: integer
+          description: 原图宽像素；0 表示未知
+        height:
+          type: integer
+          description: 原图高像素；0 表示未知
         uploaded_by:
           type: string
           description: '用户名或 "API Key: <name>"'
         uploaded_at:
           type: string
           format: date-time
-        width:
-          type: integer
-          description: 原图宽像素；0 表示未知（历史存量版本未记录尺寸）
-        height:
-          type: integer
-          description: 原图高像素；0 表示未知
+          description: 当前文件的上传时间；覆盖上传即更新，列表按它倒序
+        created_at:
+          type: string
+          format: date-time
         content_url:
           type: string
-          description: /api/screenshot-versions/{vid}/content；前端自行追加 ?token=
-    ScreenshotScreenListItem:
-      allOf:
-        - $ref: '#/components/schemas/ScreenshotScreen'
-        - type: object
-          required: [latest_version]
-          properties:
-            latest_version:
-              type: object
-              nullable: true
-              allOf:
-                - $ref: '#/components/schemas/ScreenshotVersion'
-              description: 最新一个版本；无版本时为 null
-    ScreenshotScreenDetail:
-      allOf:
-        - $ref: '#/components/schemas/ScreenshotScreen'
-        - type: object
-          required: [versions]
-          properties:
-            versions:
-              type: array
-              items:
-                $ref: '#/components/schemas/ScreenshotVersion'
-              description: 全部历史版本，uploaded_at 倒序
+          description: /api/screenshot-screens/{sid}/content?v=<uploaded_at 纳秒值>；v 随文件变化（覆盖上传即换 URL，浏览器缓存按完整 URL 记键），前端自行追加 &token=
     ScreenshotUploadResult:
       type: object
-      required: [screen, version]
+      required: [screen]
       properties:
         screen:
           $ref: '#/components/schemas/ScreenshotScreen'
-        version:
-          $ref: '#/components/schemas/ScreenshotVersion'
     UpdateScreenshotScreenRequest:
       type: object
-      description: 两字段均可选，出现才更新；都不传返回 40001
+      description: 四字段均可选，出现才更新（三个维度允许空串清除为未标注）；都不传返回 40001；维度组合撞唯一约束返回 409（40921）
       properties:
-        group:
-          type: string
-          maxLength: 100
-          description: 分组名（≤100 字符）；允许空串置为未分组
         title:
           type: string
           maxLength: 200
           description: 界面标题（≤200 字符）；空串回退显示 screen_key
+        platform:
+          type: string
+          maxLength: 100
+          description: 平台（开放词表，trim+小写，≤100 字符）；空串清除为未标注
+        locale:
+          type: string
+          description: 语言（BCP 47，服务端规范化大小写，非法值 40001）；空串清除为未标注
+        theme:
+          type: string
+          enum: [light, dark, ""]
+          description: 亮度主题（严格 light|dark，其他值 40001）；空串清除为未标注
 
     # ---- screenshot annotations ----
     ScreenshotAnnotationStatus:
@@ -8686,8 +8709,8 @@ components:
 
     ScreenshotAnnotation:
       type: object
-      description: 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
-      required: [id, project_id, screen_id, version_id, issue_id, issue_reference, issue_title, screen_key, screen_title, screen_group, image_url, image_width, image_height, is_latest_version, x, y, width, height, pixel_rect, body, status, crop_url, created_by, created_at, updated_at, resolved_at]
+      description: 挂在某张截图上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+      required: [id, project_id, screen_id, issue_id, issue_reference, issue_title, screen_key, screen_title, screen_platform, screen_locale, screen_theme, image_url, image_width, image_height, outdated, x, y, width, height, pixel_rect, body, status, crop_url, created_by, created_at, updated_at, resolved_at]
       properties:
         id:
           type: string
@@ -8695,10 +8718,7 @@ components:
           type: string
         screen_id:
           type: string
-          description: 所属界面 ID（由版本冗余带出，便于过滤）
-        version_id:
-          type: string
-          description: 标注挂在该版本上；版本删除时标注级联删除
+          description: 所属截图 ID
         issue_id:
           type: string
           nullable: true
@@ -8715,22 +8735,31 @@ components:
           type: string
         screen_title:
           type: string
-          description: 界面显示名；空串时客户端回退展示 screen_key
-        screen_group:
+          description: 截图显示名；空串时客户端回退展示 screen_key
+        screen_platform:
           type: string
-          description: 界面分组；空串表示未分组
+          nullable: true
+          description: 所属截图的平台；null 表示未标注
+        screen_locale:
+          type: string
+          nullable: true
+          description: 所属截图的语言；null 表示未标注
+        screen_theme:
+          type: string
+          nullable: true
+          description: 所属截图的亮度主题；null 表示未标注
         image_url:
           type: string
-          description: 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img>
+          description: 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img>
         image_width:
           type: integer
-          description: 原图宽像素；0 表示未知（存量版本未记录尺寸）
+          description: 原图宽像素；0 表示未知
         image_height:
           type: integer
           description: 原图高像素；0 表示未知
-        is_latest_version:
+        outdated:
           type: boolean
-          description: 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看）
+          description: 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false
         x:
           type: number
           description: 框选矩形左上角横坐标 / 图宽（0~1）
@@ -8770,6 +8799,51 @@ components:
           format: date-time
           nullable: true
           description: 最近一次标为已解决的时间；open 状态为 null
+
+    ScreenshotAnnotationBatchRequest:
+      type: object
+      description: 对 filter 圈定的标注集执行批量动作；filter 缺省字段即不限制
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [confirm, resolve]
+          description: confirm=确认保留（清除 outdated）；resolve=标记已解决；两者都只作用于 open 标注
+        filter:
+          type: object
+          properties:
+            platform:
+              type: array
+              items:
+                type: string
+              description: 平台多值；含 `__none__` 表示「未标注」（NULL）
+            locale:
+              type: array
+              items:
+                type: string
+              description: 语言多值；含 `__none__` 表示「未标注」（NULL）
+            theme:
+              type: array
+              items:
+                type: string
+                enum: [light, dark, "__none__"]
+              description: 亮度多值；`__none__` 表示「未标注」（NULL）
+            status:
+              $ref: '#/components/schemas/ScreenshotAnnotationStatus'
+            outdated:
+              type: boolean
+              nullable: true
+              description: 按过期标记过滤；缺省不限制
+            screen_id:
+              type: string
+              description: 只作用于该截图上的标注
+    ScreenshotAnnotationBatchResult:
+      type: object
+      required: [updated]
+      properties:
+        updated:
+          type: integer
+          description: 实际更新的标注数
 
     CreateScreenshotAnnotationRequest:
       type: object

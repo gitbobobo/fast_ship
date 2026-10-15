@@ -10,9 +10,9 @@ vi.mock("@/lib/store/auth-store", () => ({
   },
 }));
 
-const version = {
-  id: "ver-1",
-  content_url: "/api/screenshot-versions/ver-1/content",
+const screen = {
+  id: "scr-1",
+  content_url: "/api/screenshot-screens/scr-1/content",
 };
 
 describe("screenshotApi.contentUrl", () => {
@@ -23,8 +23,8 @@ describe("screenshotApi.contentUrl", () => {
   it("returns the content path without token when logged out", async () => {
     const { screenshotApi } = await import("./screenshots");
 
-    expect(screenshotApi.contentUrl(version)).toBe(
-      "/api/screenshot-versions/ver-1/content",
+    expect(screenshotApi.contentUrl(screen)).toBe(
+      "/api/screenshot-screens/scr-1/content",
     );
   });
 
@@ -32,8 +32,8 @@ describe("screenshotApi.contentUrl", () => {
     authState.token = "jwt-token";
     const { screenshotApi } = await import("./screenshots");
 
-    expect(screenshotApi.contentUrl(version)).toBe(
-      "/api/screenshot-versions/ver-1/content?token=jwt-token",
+    expect(screenshotApi.contentUrl(screen)).toBe(
+      "/api/screenshot-screens/scr-1/content?token=jwt-token",
     );
   });
 
@@ -42,7 +42,7 @@ describe("screenshotApi.contentUrl", () => {
     const { screenshotApi } = await import("./screenshots");
 
     expect(
-      screenshotApi.contentUrl({ id: "ver-9", content_url: "" }),
-    ).toBe("/api/screenshot-versions/ver-9/content?token=jwt-token");
+      screenshotApi.contentUrl({ id: "scr-9", content_url: "" }),
+    ).toBe("/api/screenshot-screens/scr-9/content?token=jwt-token");
   });
 });

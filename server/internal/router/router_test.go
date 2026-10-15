@@ -922,7 +922,6 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		&model.LogEntry{},
 		&model.Document{},
 		&model.ScreenshotScreen{},
-		&model.ScreenshotVersion{},
 		&model.ScreenshotAnnotation{},
 		&model.T3Environment{},
 		&model.ProjectT3Binding{},
@@ -944,7 +943,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_variant ON screenshot_screens(project_id, screen_key, COALESCE(platform,''),COALESCE(locale,''),COALESCE(theme,''))")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
 	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once

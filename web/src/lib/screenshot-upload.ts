@@ -20,12 +20,13 @@ export function normalizeScreenKey(fileName: string): string {
 }
 
 export interface ScreenshotUploadMeta {
-  /** 本批共用的分组；不传保持界面原分组（置为未分组走编辑） */
-  group?: string;
-  /** 以下三项仅单文件上传时生效 */
+  /** 本批共用的维度与标题；不传保持原值（清除为未标注传空串） */
+  platform?: string;
+  locale?: string;
+  theme?: string;
+  /** 以下两项仅单文件上传时生效 */
   screenKey?: string;
   title?: string;
-  note?: string;
 }
 
 export interface ScreenshotUploadFailure {
@@ -62,10 +63,10 @@ export async function uploadScreenshotBatch(
         single && meta.screenKey
           ? meta.screenKey
           : normalizeScreenKey(file.name),
-      group: meta.group,
-      ...(single
-        ? { title: meta.title, note: meta.note }
-        : {}),
+      platform: meta.platform,
+      locale: meta.locale,
+      theme: meta.theme,
+      ...(single ? { title: meta.title } : {}),
     };
     try {
       await uploadOne(projectId, file, fields);

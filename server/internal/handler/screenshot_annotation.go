@@ -19,16 +19,42 @@ func NewScreenshotAnnotationHandler(annotationService *service.ScreenshotAnnotat
 	return &ScreenshotAnnotationHandler{annotationService: annotationService}
 }
 
-// List 返回项目全部标注；status/issue_id/screen_id query 过滤，status 非法值 40001。
+// parseAnnotationFilters 解析标注列表 query：status/outdated/issue_id/screen_id
+// 与逗号多值的维度过滤（__none__ = 未标注桶）。
+func parseAnnotationFilters(c *gin.Context) (service.ScreenshotAnnotationListFilters, error) {
+	filters := service.ScreenshotAnnotationListFilters{
+		Status:   c.Query("status"),
+		IssueID:  c.Query("issue_id"),
+		ScreenID: c.Query("screen_id"),
+	}
+	outdated, err := parseBoolQuery(c.Query("outdated"))
+	if err != nil {
+		return filters, err
+	}
+	filters.Outdated = outdated
+	// 维度过滤与截图列表共用同一套规范化，保证两个 GET 的过滤口径一致
+	if filters.Platforms, filters.IncludeNoPlat, err = service.ParseScreenshotPlatformFilter(c.Query("platform")); err != nil {
+		return filters, err
+	}
+	if filters.Locales, filters.IncludeNoLocale, err = service.ParseScreenshotLocaleFilter(c.Query("locale")); err != nil {
+		return filters, err
+	}
+	filters.Themes, filters.IncludeNoTheme, err = service.ParseScreenshotThemeFilter(c.Query("theme"))
+	return filters, err
+}
+
+// List 返回项目全部标注；query 过滤，非法值 40001。
 func (h *ScreenshotAnnotationHandler) List(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	result, err := h.annotationService.List(projectID, userID, service.ScreenshotAnnotationListFilters{
-		Status:   c.Query("status"),
-		IssueID:  c.Query("issue_id"),
-		ScreenID: c.Query("screen_id"),
-	})
+	filters, err := parseAnnotationFilters(c)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	result, err := h.annotationService.List(projectID, userID, filters)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -37,9 +63,29 @@ func (h *ScreenshotAnnotationHandler) List(c *gin.Context) {
 	response.Success(c, result)
 }
 
-// Create 在版本上新建标注（路由层已限 JWT）；created_by 取请求者可读标识。
+// Batch 对过滤范围执行批量确认保留/标记已解决（路由层已限 JWT）。
+func (h *ScreenshotAnnotationHandler) Batch(c *gin.Context) {
+	projectID := c.Param("id")
+	userID := middleware.GetUserID(c)
+
+	var req api.ScreenshotAnnotationBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		middleware.HandleAppError(c, errs.ErrInvalidParams)
+		return
+	}
+
+	result, err := h.annotationService.Batch(projectID, userID, &req)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+
+	response.Success(c, result)
+}
+
+// Create 在截图上新建标注（路由层已限 JWT）；created_by 取请求者可读标识。
 func (h *ScreenshotAnnotationHandler) Create(c *gin.Context) {
-	versionID := c.Param("vid")
+	screenID := c.Param("sid")
 	userID := middleware.GetUserID(c)
 	createdBy := middleware.ActorLabel(c)
 
@@ -49,7 +95,7 @@ func (h *ScreenshotAnnotationHandler) Create(c *gin.Context) {
 		return
 	}
 
-	result, err := h.annotationService.Create(versionID, userID, createdBy, &req)
+	result, err := h.annotationService.Create(screenID, userID, createdBy, &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -90,7 +136,7 @@ func (h *ScreenshotAnnotationHandler) Delete(c *gin.Context) {
 	response.SuccessEmpty(c)
 }
 
-// Crop 输出标注框选区域的 PNG 裁剪图，响应头与版本 content 端点一致。
+// Crop 输出标注框选区域的 PNG 裁剪图，响应头与截图 content 端点一致。
 // HEAD 变体只跑存在性/权限/像素预算校验，不解码、不生成 PNG
 func (h *ScreenshotAnnotationHandler) Crop(c *gin.Context) {
 	annotationID := c.Param("aid")

@@ -36,6 +36,17 @@ func (s *LocalStorage) Delete(path string) error {
 	return os.Remove(fullPath)
 }
 
+// Rename 用 os.Rename 完成同根目录内的原子改名；跨设备场景不存在——
+// 两个路径都解析自同一 basePath。
+func (s *LocalStorage) Rename(oldPath, newPath string) error {
+	from := filepath.Join(s.basePath, oldPath)
+	to := filepath.Join(s.basePath, newPath)
+	if err := os.MkdirAll(filepath.Dir(to), 0750); err != nil {
+		return err
+	}
+	return os.Rename(from, to)
+}
+
 func (s *LocalStorage) DeletePrefix(path string) error {
 	fullPath := filepath.Join(s.basePath, path)
 	return os.RemoveAll(fullPath)
