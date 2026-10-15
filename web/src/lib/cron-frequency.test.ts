@@ -239,6 +239,18 @@ describe("描述文案", () => {
     const zh = describeCronExpression("0 9 15 * 1", "UTC", "zh");
     expect(zh).toContain("或者");
     expect(zh).not.toContain("OR day-of-week");
+    // `*/1`（step=1）robfig 保留 star 位 → AND 语义，不标 OR；
+    // 列表中含 `*`/`?` 的 range 同样置 star 位（`1,?` 归一化后为 `1,*`）；
+    // `1,*/2` 各 range 的 star 均被清除（step>1）→ 仍是 OR 语义
+    expect(describeCronExpression("0 9 */1 * 1", "UTC", "en")).not.toContain(
+      "OR day-of-week",
+    );
+    expect(describeCronExpression("0 9 1,? * 1", "UTC", "en")).not.toContain(
+      "OR day-of-week",
+    );
+    expect(describeCronExpression("0 9 1,*/2 * 1", "UTC", "en")).toContain(
+      "OR day-of-week",
+    );
   });
 });
 

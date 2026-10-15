@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  computeTimezone,
   effectiveTimezone,
   isValidTimezone,
   nextCronRuns,
@@ -203,9 +204,13 @@ describe("时区工具", () => {
     expect(isValidTimezone("UTC+8")).toBe(false);
   });
 
-  it("effectiveTimezone：Local 解析为本机时区", () => {
+  it("Local：展示层保留原值，计算层解析本机时区", () => {
+    expect(effectiveTimezone("Local")).toBe("Local");
     const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    expect(effectiveTimezone("Local")).toBe(sys ?? "UTC");
+    expect(computeTimezone("Local")).toBe(sys ?? "UTC");
+    // Local 的 nextCronRuns 合法且有结果（按本机时区近似预览）
+    const r = nextCronRuns("0 9 * * *", "Local", 1);
+    expect(r.ok).toBe(true);
   });
 
   it("timezoneOptions 含 UTC 与常见时区", () => {

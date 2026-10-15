@@ -222,15 +222,16 @@ export function describeCronExpression(
   const tz = effectiveTimezone(timezone);
   const tzSuffix = locale === "zh" ? `（${tz}）` : ` (${tz})`;
   if (restored) return describeFrequency(restored, locale) + tzSuffix;
-  if (!parseCronExpression(expression).ok) return null;
+  const parsed = parseCronExpression(expression);
+  if (!parsed.ok) return null;
   try {
     // cronstrue 不认 `?`（robfig 里 ?=*），先归一化再描述。
     const normalized = expression.trim().replace(/\?/g, "*");
-    const parts = normalized.split(/\s+/);
-    // dom/dow 都非星在 robfig 是「或」语义；cronstrue 中文译「或者」正确，
-    // 英文恒译 "and"（与选项无关），给英文读者补消歧注。
+    // dom/dow 均非星在 robfig 是「或」语义；cronstrue 中文译「或者」正确，
+    // 英文恒译 "and"（与选项无关），给英文读者补消歧注。判定用解析出的
+    // star 标志而非字面星号：*/1、含 * 的列表同样置 star（AND 语义）。
     const orNote =
-      parts.length === 5 && !isStar(parts[2]) && !isStar(parts[4]) && locale === "en"
+      !parsed.schedule.dom.star && !parsed.schedule.dow.star && locale === "en"
         ? " (day-of-month OR day-of-week)"
         : "";
     return (

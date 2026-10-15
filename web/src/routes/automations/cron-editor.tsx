@@ -13,6 +13,7 @@ import {
   nextCronRuns,
   timezoneOptions,
   effectiveTimezone,
+  computeTimezone,
   isValidTimezone,
 } from "@/lib/cron-schedule";
 import {
@@ -314,11 +315,11 @@ export function CronScheduleFields({
         timezone={tz}
         needsDayPick={freq.kind === "weekly" && freq.weekdays.length === 0}
         needsTime={
+          generated === null &&
           freq.kind !== "custom" &&
           freq.kind !== "minutes" &&
           freq.kind !== "hours" &&
-          generated === null &&
-          freq.weekdays.length > 0
+          !(freq.kind === "weekly" && freq.weekdays.length === 0)
         }
         locale={locale}
       />
@@ -353,7 +354,8 @@ function SchedulePreview({
     const desc = describeCronExpression(expression, timezone, locale);
     const dateLocale = locale === "zh" ? "zh-CN" : "en-US";
     const fmtOpts: Intl.DateTimeFormatOptions = {
-      timeZone: timezone,
+      // 「Local」按浏览器本机时区尽力预览，标注仍是 Local（= 服务器机器时区）。
+      timeZone: computeTimezone(timezone),
       month: "short",
       day: "numeric",
       weekday: "short",

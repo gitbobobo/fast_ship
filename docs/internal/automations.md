@@ -89,6 +89,8 @@ cron 解析用 `robfig/cron/v3` 自定义 parser（`automationCronParser`）：�
 - 列表「触发」列显示人话描述，原表达式+时区放在 cell `title`。
 - 服务端存储/API 不变：`cron_expression` 五字段 + `timezone` IANA 名称，
   空时区 = UTC；新建表单默认浏览器时区 + `0 9 * * *`（每天 09:00）。
+- `Local` 时区（Go `time.LoadLocation` 合法值）：展示/描述/落库均保留原值；
+  前端预览按浏览器本机时区尽力近似，与服务器机器时区可能不同。
 
 ## Issue 事件（`automation_events.go`）
 

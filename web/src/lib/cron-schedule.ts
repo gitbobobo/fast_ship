@@ -260,16 +260,22 @@ export function isValidTimezone(tz: string): boolean {
 }
 
 /**
- * 生效时区：空值按 UTC（与服务端一致）；「Local」在 Go 侧合法，浏览器端解析为
- * 本机时区——注意与服务端机器时区可能不同，仅作尽力预览。
+ * 生效时区：空值按 UTC（与服务端一致）。「Local」是 Go `time.LoadLocation`
+ * 接受的合法值，原样保留用于展示（语义 = 服务器机器时区）。
  */
 export function effectiveTimezone(tz: string | null | undefined): string {
   const t = (tz ?? "").trim();
-  if (t === "") return "UTC";
-  if (t === "Local") {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  }
-  return t;
+  return t === "" ? "UTC" : t;
+}
+
+/**
+ * 计算用时区：「Local」在浏览器端解析为本机时区（尽力近似——与服务器机器
+ * 时区可能不同，预览与描述仍以 Local 标注，不作静默替换）。
+ */
+export function computeTimezone(tz: string): string {
+  return tz === "Local"
+    ? Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+    : tz;
 }
 
 /** 可搜索时区列表；老环境不支持 supportedValuesOf 时退回常用列表。 */
@@ -284,9 +290,9 @@ export function timezoneOptions(): string[] {
          "America/New_York", "America/Los_Angeles", "America/Santiago",
          "Australia/Sydney", "Pacific/Auckland"];
   const sorted = [...names].sort((a, b) => a.localeCompare(b, "en"));
-  return sorted.includes("UTC")
-    ? ["UTC", ...sorted.filter((n) => n !== "UTC")]
-    : ["UTC", ...sorted];
+  // Local = 服务器机器时区（Go 合法值），固定跟在 UTC 后便于存量数据展示/选择。
+  const pinned = ["UTC", "Local"];
+  return [...pinned, ...sorted.filter((n) => !pinned.includes(n))];
 }
 
 function wallParts(ms: number, tz: string): WallParts {
@@ -371,7 +377,7 @@ export function nextCronRun(
   timezone: string,
   fromMs: number,
 ): number | null {
-  const tz = effectiveTimezone(timezone);
+  const tz = computeTimezone(effectiveTimezone(timezone));
   // 空字段集永不可能命中（如 ", * * * *" 解析出空分钟集——robfig 同样接受并
   // 在 5 年扫描后返回空）。逐分钟扫 5 年会拖死渲染线程，提前判无匹配。
   const domEmpty = schedule.dom.bits.size === 0;
