@@ -83,9 +83,12 @@ func (r *IssueRepository) ListByProject(projectID string) ([]model.Issue, error)
 	return issues, err
 }
 
-func (r *IssueRepository) NextSequenceNumber(projectID string) (int, error) {
+// NextSequenceNumberTx 在事务句柄上取下一个项目内序号。必须随写入同事务调用：
+// MaxOpenConns=1 下事务串行执行，MAX+1 与 INSERT 不会交错；事务外取号会让并发
+// 创建读到同一个 MAX，撞 idx_issues_project_sequence（INT-96）。
+func (r *IssueRepository) NextSequenceNumberTx(tx *gorm.DB, projectID string) (int, error) {
 	var currentMax int
-	if err := r.db.Model(&model.Issue{}).
+	if err := tx.Model(&model.Issue{}).
 		Where("project_id = ?", projectID).
 		Select("COALESCE(MAX(sequence_number), 0)").
 		Scan(&currentMax).Error; err != nil {
@@ -144,8 +147,12 @@ func (r *IssueGitHubMetaRepository) UpsertTx(tx *gorm.DB, meta *model.IssueGitHu
 }
 
 func (r *IssueGitHubMetaRepository) FindByProjectAndGitHubID(projectID string, gitHubIssueID int64) (*model.IssueGitHubMeta, error) {
+	return r.FindByProjectAndGitHubIDTx(r.db, projectID, gitHubIssueID)
+}
+
+func (r *IssueGitHubMetaRepository) FindByProjectAndGitHubIDTx(tx *gorm.DB, projectID string, gitHubIssueID int64) (*model.IssueGitHubMeta, error) {
 	var meta model.IssueGitHubMeta
-	if err := r.db.Where("project_id = ? AND github_issue_id = ?", projectID, gitHubIssueID).First(&meta).Error; err != nil {
+	if err := tx.Where("project_id = ? AND github_issue_id = ?", projectID, gitHubIssueID).First(&meta).Error; err != nil {
 		return nil, err
 	}
 	return &meta, nil

@@ -83,17 +83,11 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 		return nil, errs.ErrInternal
 	}
 
-	sequenceNumber, err := s.issueRepo.NextSequenceNumber(projectID)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-
 	now := time.Now().UTC()
 	issue := &model.Issue{
 		ID:              uuid.NewString(),
 		ProjectID:       projectID,
 		Source:          model.IssueSourceInternal,
-		SequenceNumber:  sequenceNumber,
 		State:           model.IssueStateOpen,
 		Title:           title,
 		Body:            body,
@@ -110,6 +104,13 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 	}
 
 	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
+		// 取号与插入同事务（INT-96）：并发创建在单连接池上串行，
+		// 事务外取号会读到同一个 MAX 撞唯一索引。
+		sequenceNumber, err := s.issueRepo.NextSequenceNumberTx(tx, projectID)
+		if err != nil {
+			return err
+		}
+		issue.SequenceNumber = sequenceNumber
 		if err := s.issueRepo.CreateTx(tx, issue); err != nil {
 			return err
 		}
