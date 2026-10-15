@@ -86,7 +86,7 @@ func (s *AuthService) Register(ctx context.Context, req *RegisterRequest) (*Auth
 		return nil, errs.ErrInternal
 	}
 
-	token, err := s.generateToken(user.ID, user.Username)
+	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -120,7 +120,7 @@ func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*AuthRespon
 		return nil, errs.ErrLoginFailed
 	}
 
-	token, err := s.generateToken(user.ID, user.Username)
+	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -169,7 +169,7 @@ func (s *AuthService) RefreshAccessToken(refreshToken string) (*RefreshResponse,
 		return nil, errs.ErrUserNotFound
 	}
 
-	token, err := s.generateToken(user.ID, user.Username)
+	token, err := s.generateToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -248,38 +248,70 @@ func (s *AuthService) UpdateAvatar(userID string, avatarURL string) (*UserRespon
 	return &resp, nil
 }
 
-func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *UpdatePasswordRequest) error {
+// UpdatePassword 改密成功后在同一事务里吊销该用户全部 refresh token 并递增
+// token_version，使其他会话的 access token 立即失效；同时返回为当前会话
+// 新签发的 token 对，让发起改密的会话继续持有有效凭证。
+func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *UpdatePasswordRequest) (*RefreshResponse, error) {
 	user, err := s.userRepo.FindByID(userID)
 	if err != nil {
-		return errs.ErrUserNotFound
+		return nil, errs.ErrUserNotFound
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword)); err != nil {
-		return errs.ErrLoginFailed
+		return nil, errs.ErrLoginFailed
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
-		return errs.ErrInternal
+		return nil, errs.ErrInternal
 	}
 
-	user.PasswordHash = string(hashedPassword)
+	raw, next, err := s.buildRefreshToken(userID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	nextVersion := user.TokenVersion + 1
+	if err := s.userRepo.UpdatePasswordAndRotateSessions(userID, string(hashedPassword), nextVersion, next); err != nil {
+		return nil, errs.ErrInternal
+	}
+
+	user.TokenVersion = nextVersion
+	token, err := s.generateToken(user)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+
 	s.log(ctx).Info("用户修改密码", slog.String("user_id", userID))
-	return s.userRepo.Update(user)
+	return &RefreshResponse{
+		Token:        token,
+		RefreshToken: fmt.Sprintf("fsr_%s", raw),
+	}, nil
 }
 
 func (s *AuthService) IsTokenBlacklisted(jti string) (bool, error) {
 	return s.jwtBlacklistRepo.Exists(jti)
 }
 
-func (s *AuthService) generateToken(userID, username string) (string, error) {
+// IsTokenVersionCurrent 校验 JWT 的 ver claim 与用户当前 token_version 一致。
+// 无 ver 的历史 token 按版本 0 处理；用户已删除或查库失败都视为失效。
+func (s *AuthService) IsTokenVersionCurrent(userID string, ver int64) (bool, error) {
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		return false, err
+	}
+	return int64(user.TokenVersion) == ver, nil
+}
+
+func (s *AuthService) generateToken(user *model.User) (string, error) {
 	jti := uuid.New().String()
 	claims := jwt.MapClaims{
-		"sub":      userID,
-		"username": username,
+		"sub":      user.ID,
+		"username": user.Username,
 		"jti":      jti,
 		"iat":      time.Now().Unix(),
 		"exp":      time.Now().Add(time.Duration(s.cfg.JWT.ExpireHours) * time.Hour).Unix(),
+		"ver":      user.TokenVersion,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)

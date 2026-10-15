@@ -1464,7 +1464,7 @@ paths:
     put:
       tags: [auth]
       operationId: updatePassword
-      summary: 修改密码
+      summary: 修改密码（吊销其他全部会话；返回为当前会话新签发的 token 与 refresh token）
       security:
         - jwtAuth: []
         - apiKeyAuth: []
@@ -1476,7 +1476,16 @@ paths:
               $ref: '#/components/schemas/UpdatePasswordRequest'
       responses:
         '200':
-          $ref: '#/components/responses/EmptySuccess'
+          description: 改密成功；该用户其余 refresh token 已吊销、改密前签发的 access token 已失效，data 为当前会话的新 token 对
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/RefreshResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':

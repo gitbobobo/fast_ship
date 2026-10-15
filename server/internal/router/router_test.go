@@ -123,6 +123,80 @@ func TestRouterAuthRegisterLoginAndMe(t *testing.T) {
 	}
 }
 
+// 改密后旧 refresh token 与改密前签发的 access token 全部失效；
+// 响应里的新 token 对让当前会话继续可用（INT-95 验收）。
+func TestRouterAuthUpdatePasswordRevokesOtherSessions(t *testing.T) {
+	env := setupRouterTestEnv(t)
+
+	registerBody := []byte(`{"username":"pwrotate","email":"pwrotate@example.com","password":"Password123"}`)
+	registerReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(registerBody))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerRec := httptest.NewRecorder()
+	env.router.ServeHTTP(registerRec, registerReq)
+	if registerRec.Code != http.StatusOK {
+		t.Fatalf("register failed: %d %s", registerRec.Code, registerRec.Body.String())
+	}
+
+	var registerResp struct {
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeRouterEnvelope(t, registerRec, &registerResp)
+
+	updateBody := []byte(`{"old_password":"Password123","new_password":"NewPass456"}`)
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/auth/password", bytes.NewReader(updateBody))
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateReq.Header.Set("Authorization", "Bearer "+registerResp.Token)
+	updateRec := httptest.NewRecorder()
+	env.router.ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("update password failed: %d %s", updateRec.Code, updateRec.Body.String())
+	}
+
+	var updateResp struct {
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	decodeRouterEnvelope(t, updateRec, &updateResp)
+	if updateResp.Token == "" || updateResp.RefreshToken == "" {
+		t.Fatalf("expected new token pair in update password response: %s", updateRec.Body.String())
+	}
+
+	meWithOld := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	meWithOld.Header.Set("Authorization", "Bearer "+registerResp.Token)
+	meOldRec := httptest.NewRecorder()
+	env.router.ServeHTTP(meOldRec, meWithOld)
+	if meOldRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected old access token rejected, got %d: %s", meOldRec.Code, meOldRec.Body.String())
+	}
+
+	refreshOldBody := []byte(`{"refresh_token":"` + registerResp.RefreshToken + `"}`)
+	refreshOldReq := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", bytes.NewReader(refreshOldBody))
+	refreshOldReq.Header.Set("Content-Type", "application/json")
+	refreshOldRec := httptest.NewRecorder()
+	env.router.ServeHTTP(refreshOldRec, refreshOldReq)
+	if refreshOldRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected old refresh token rejected, got %d: %s", refreshOldRec.Code, refreshOldRec.Body.String())
+	}
+
+	meWithNew := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
+	meWithNew.Header.Set("Authorization", "Bearer "+updateResp.Token)
+	meNewRec := httptest.NewRecorder()
+	env.router.ServeHTTP(meNewRec, meWithNew)
+	if meNewRec.Code != http.StatusOK {
+		t.Fatalf("expected new access token accepted, got %d: %s", meNewRec.Code, meNewRec.Body.String())
+	}
+
+	refreshNewBody := []byte(`{"refresh_token":"` + updateResp.RefreshToken + `"}`)
+	refreshNewReq := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", bytes.NewReader(refreshNewBody))
+	refreshNewReq.Header.Set("Content-Type", "application/json")
+	refreshNewRec := httptest.NewRecorder()
+	env.router.ServeHTTP(refreshNewRec, refreshNewReq)
+	if refreshNewRec.Code != http.StatusOK {
+		t.Fatalf("expected new refresh token accepted, got %d: %s", refreshNewRec.Code, refreshNewRec.Body.String())
+	}
+}
+
 func TestRouterShipCheckRequiresJWT(t *testing.T) {
 	env := setupRouterTestEnv(t)
 	auth := registerAndLoginRouterUser(t, env.router, "shiptester", "shiptester@example.com", "Password123")

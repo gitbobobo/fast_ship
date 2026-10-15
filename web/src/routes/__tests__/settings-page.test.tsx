@@ -106,16 +106,22 @@ describe("Settings Profile Page", () => {
 });
 
 describe("Settings Password Page", () => {
+  const authState = {
+    user: {
+      id: "user-1",
+      username: "test-user",
+      email: "test@example.com",
+      created_at: "2026-04-06T10:00:00Z",
+      updated_at: "2026-04-06T11:00:00Z",
+    },
+    setToken: vi.fn(),
+    setRefreshToken: vi.fn(),
+  };
+
   beforeEach(() => {
-    vi.mocked(useAuthStore).mockReturnValue({
-      user: {
-        id: "user-1",
-        username: "test-user",
-        email: "test@example.com",
-        created_at: "2026-04-06T10:00:00Z",
-        updated_at: "2026-04-06T10:00:00Z",
-      },
-    } as unknown as ReturnType<typeof useAuthStore>);
+    vi.mocked(useAuthStore).mockImplementation(((
+      selector: (state: typeof authState) => unknown,
+    ) => selector(authState)) as unknown as typeof useAuthStore);
   });
 
   afterEach(() => {
@@ -124,7 +130,7 @@ describe("Settings Password Page", () => {
 
   it("updates password and resets password fields on success", async () => {
     vi.mocked(authApi.updatePassword).mockResolvedValue({
-      data: null,
+      data: { token: "rotated-token", refresh_token: "rotated-refresh" },
     } as Awaited<ReturnType<typeof authApi.updatePassword>>);
 
     const user = userEvent.setup();

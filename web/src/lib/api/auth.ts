@@ -17,6 +17,11 @@ interface AuthResponse {
   user: User;
 }
 
+interface SessionTokens {
+  token: string;
+  refresh_token: string;
+}
+
 export const authApi = {
   login: (data: LoginRequest) =>
     api.post("auth/login", { json: data }).json<ApiResponse<AuthResponse>>(),
@@ -40,5 +45,5 @@ export const authApi = {
     api.post("auth/avatar", { body: formData }).json<ApiResponse<User>>(),
 
   updatePassword: (data: { old_password: string; new_password: string }) =>
-    api.put("auth/password", { json: data }).json<ApiResponse<null>>(),
+    api.put("auth/password", { json: data }).json<ApiResponse<SessionTokens>>(),
 };

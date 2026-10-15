@@ -119,11 +119,20 @@ func handleJWTAuth(c *gin.Context, tokenString string, cfg *config.Config, authS
 	sub, _ := claims["sub"].(string)
 	username, _ := claims["username"].(string)
 	exp, _ := claims["exp"].(float64)
+	ver, _ := claims["ver"].(float64)
 
 	// 检查黑名单
 	blacklisted, err := authService.IsTokenBlacklisted(jti)
 	if err != nil || blacklisted {
 		response.Unauthorized(c, errs.ErrTokenBlacklist.Code, errs.ErrTokenBlacklist.Message)
+		c.Abort()
+		return
+	}
+
+	// 用户级令牌版本：改密后此前签发的 token 立即失效
+	current, err := authService.IsTokenVersionCurrent(sub, int64(ver))
+	if err != nil || !current {
+		response.Unauthorized(c, errs.ErrTokenInvalid.Code, errs.ErrTokenInvalid.Message)
 		c.Abort()
 		return
 	}

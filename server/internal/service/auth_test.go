@@ -175,6 +175,75 @@ func TestAuthServiceLogoutRevokesRefreshToken(t *testing.T) {
 	}
 }
 
+func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
+	services := setupAuthTestServices(t)
+	ctx := context.Background()
+
+	reg, err := services.authService.Register(ctx, &RegisterRequest{
+		Username: "pwuser",
+		Email:    "pwuser@example.com",
+		Password: "OldPass123",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	oldRefresh := reg.RefreshToken
+	userID := reg.User.Id
+
+	// 再开一条会话，确认改密把多条 refresh token 一并吊销。
+	second, err := services.authService.Login(ctx, &LoginRequest{Login: "pwuser", Password: "OldPass123"})
+	if err != nil {
+		t.Fatalf("second login: %v", err)
+	}
+
+	resp, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "OldPass123",
+		NewPassword: "NewPass456",
+	})
+	if err != nil {
+		t.Fatalf("update password: %v", err)
+	}
+	if resp.Token == "" || resp.RefreshToken == "" {
+		t.Fatalf("expected new token pair for current session, got %+v", resp)
+	}
+
+	if _, err := services.authService.RefreshAccessToken(oldRefresh); err != errs.ErrRefreshTokenInvalid {
+		t.Fatalf("expected old refresh token rejected, got %v", err)
+	}
+	if _, err := services.authService.RefreshAccessToken(second.RefreshToken); err != errs.ErrRefreshTokenInvalid {
+		t.Fatalf("expected other session refresh token rejected, got %v", err)
+	}
+
+	// 改密前签发的 access token 版本为 0，已不再是当前版本。
+	if current, err := services.authService.IsTokenVersionCurrent(userID, 0); err != nil || current {
+		t.Fatalf("expected pre-change token version rejected, current=%v err=%v", current, err)
+	}
+	if current, err := services.authService.IsTokenVersionCurrent(userID, 1); err != nil || !current {
+		t.Fatalf("expected post-change token version accepted, current=%v err=%v", current, err)
+	}
+
+	token, err := jwt.Parse(resp.Token, func(token *jwt.Token) (any, error) {
+		return []byte(services.cfg.JWT.Secret), nil
+	})
+	if err != nil {
+		t.Fatalf("parse new access token: %v", err)
+	}
+	claims := token.Claims.(jwt.MapClaims)
+	if ver, ok := claims["ver"].(float64); !ok || int64(ver) != 1 {
+		t.Fatalf("expected ver=1 in new token, got %v", claims["ver"])
+	}
+
+	if _, err := services.authService.RefreshAccessToken(resp.RefreshToken); err != nil {
+		t.Fatalf("expected new refresh token usable: %v", err)
+	}
+	if _, err := services.authService.Login(ctx, &LoginRequest{Login: "pwuser", Password: "NewPass456"}); err != nil {
+		t.Fatalf("expected login with new password: %v", err)
+	}
+	if _, err := services.authService.Login(ctx, &LoginRequest{Login: "pwuser", Password: "OldPass123"}); err != errs.ErrLoginFailed {
+		t.Fatalf("expected old password rejected, got %v", err)
+	}
+}
+
 func TestRefreshTokenRepositoryCleanExpired(t *testing.T) {
 	services := setupAuthTestServices(t)
 	user := createTestUser(t, services.db, "user-clean-refresh")

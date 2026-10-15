@@ -156,9 +156,72 @@ func TestRequireAuth_RejectsBlacklistedJWT(t *testing.T) {
 	}
 }
 
+func TestRequireAuth_RejectsStaleTokenVersion(t *testing.T) {
+	env := setupAuthMiddlewareTest(t)
+
+	// 改密把 token_version 提到 1 后，此前签发（ver=0）及无 ver 的历史 token 都应失效。
+	if err := env.db.Model(&model.User{}).Where("id = ?", "user-1").Update("token_version", 1).Error; err != nil {
+		t.Fatalf("bump token version: %v", err)
+	}
+
+	zero := int64(0)
+	for name, token := range map[string]string{
+		"ver0":   env.jwtTokenWithVer("user-1", "tester", "jti-stale-ver0", &zero),
+		"legacy": env.jwtToken("user-1", "tester", "jti-stale-legacy"),
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		rec := httptest.NewRecorder()
+		env.router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: expected 401, got %d: %s", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestRequireAuth_AllowsCurrentTokenVersion(t *testing.T) {
+	env := setupAuthMiddlewareTest(t)
+
+	if err := env.db.Model(&model.User{}).Where("id = ?", "user-1").Update("token_version", 1).Error; err != nil {
+		t.Fatalf("bump token version: %v", err)
+	}
+
+	one := int64(1)
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+env.jwtTokenWithVer("user-1", "tester", "jti-current", &one))
+
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRequireAuth_RejectsTokenForDeletedUser(t *testing.T) {
+	env := setupAuthMiddlewareTest(t)
+
+	if err := env.db.Delete(&model.User{}, "id = ?", "user-1").Error; err != nil {
+		t.Fatalf("delete user: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+env.jwtToken("user-1", "tester", "jti-deleted-user"))
+
+	rec := httptest.NewRecorder()
+	env.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 type authMiddlewareEnv struct {
 	router           *gin.Engine
 	cfg              *config.Config
+	db               *gorm.DB
 	apiKeyRepo       *repository.ApiKeyRepository
 	jwtBlacklistRepo *repository.JWTBlacklistRepository
 }
@@ -226,19 +289,30 @@ func setupAuthMiddlewareTest(t *testing.T) *authMiddlewareEnv {
 	return &authMiddlewareEnv{
 		router:           router,
 		cfg:              cfg,
+		db:               db,
 		apiKeyRepo:       apiKeyRepo,
 		jwtBlacklistRepo: jwtBlacklistRepo,
 	}
 }
 
 func (e *authMiddlewareEnv) jwtToken(userID, username, jti string) string {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+	return e.jwtTokenWithVer(userID, username, jti, nil)
+}
+
+// jwtTokenWithVer 签一个带 ver claim 的测试 JWT；ver 为 nil 时省略该 claim，
+// 对应改密版本机制上线前签发的历史 token。
+func (e *authMiddlewareEnv) jwtTokenWithVer(userID, username, jti string, ver *int64) string {
+	claims := jwt.MapClaims{
 		"sub":      userID,
 		"username": username,
 		"jti":      jti,
 		"iat":      time.Now().Unix(),
 		"exp":      time.Now().Add(time.Hour).Unix(),
-	})
+	}
+	if ver != nil {
+		claims["ver"] = *ver
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	signed, err := token.SignedString([]byte(e.cfg.JWT.Secret))
 	if err != nil {
