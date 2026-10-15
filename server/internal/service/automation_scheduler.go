@@ -194,7 +194,7 @@ func (s *AutomationScheduler) dispatchDueCron(a *model.Automation, now time.Time
 		_, next, err := parseAutomationCron(current.CronExpression, current.Timezone, now)
 		if err != nil {
 			// 配置损坏（如表达式被手工改库）：停调度并告警，不无限循环。
-			s.logger.Error("cron 表达式解析失败，暂停该自动化的后续调度",
+			s.logger.With(zap.String("user_id", a.UserID)).Error("cron 表达式解析失败，暂停该自动化的后续调度",
 				zap.String("automation_id", a.ID), zap.String("user_id", a.UserID), zap.Error(err))
 			return tx.Model(&model.Automation{}).Where("id = ?", a.ID).
 				Update("next_run_at", nil).Error

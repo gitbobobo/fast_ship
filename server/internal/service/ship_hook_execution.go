@@ -94,7 +94,7 @@ func (s *ShipService) ExecutePendingShipHooks(projectID, userID string, version 
 		s.executeConsumedShipHook(hook, userID, executionVersion)
 		hook.RetryPending = shipHookHasFailure(hook)
 		if err := s.shipHookRepo.CompleteExecution(hook, time.Now().UTC()); err != nil {
-			s.logger.Error("persist ship hook execution result failed",
+			s.logger.With(zap.String("user_id", userID)).Error("persist ship hook execution result failed",
 				zap.String("issue_id", hook.IssueID),
 				zap.Error(err),
 			)
