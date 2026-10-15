@@ -117,7 +117,7 @@ func (s *IssueAttachmentService) Upload(issueID, userID, fileName string, reader
 		return nil, errs.ErrInternal
 	}
 
-	s.logger.Info("issue attachment uploaded",
+	s.logger.With(zap.String("user_id", userID)).Info("issue attachment uploaded",
 		zap.String("action", "upload_issue_attachment"),
 		zap.String("issue_id", issueID),
 		zap.String("user_id", userID),

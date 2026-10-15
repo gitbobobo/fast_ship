@@ -67,7 +67,7 @@ func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssue
 		return nil, errs.ErrInternal
 	}
 
-	s.logger.Info("issue checklist replaced",
+	s.logger.With(zap.String("user_id", userID)).Info("issue checklist replaced",
 		zap.String("action", "replace_checklist"),
 		zap.String("issue_id", issueID),
 		zap.String("user_id", userID),
@@ -159,7 +159,7 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 		return nil, errs.ErrInternal
 	}
 
-	s.logger.Info("issue internal meta updated",
+	s.logger.With(zap.String("user_id", userID)).Info("issue internal meta updated",
 		zap.String("action", "update_internal_meta"),
 		zap.String("issue_id", issueID),
 		zap.String("user_id", userID),
@@ -208,7 +208,7 @@ func (s *IssueService) BatchUpdateInternalMeta(userID string, items []BatchUpdat
 	}
 
 	resp.ElapsedMs = time.Since(start).Milliseconds()
-	s.logger.Info("batch update internal meta",
+	s.logger.With(zap.String("user_id", userID)).Info("batch update internal meta",
 		zap.String("action", "batch_update_internal_meta"),
 		zap.String("user_id", userID),
 		zap.String("actor", actor),

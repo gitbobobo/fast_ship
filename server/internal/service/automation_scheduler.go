@@ -335,7 +335,7 @@ func (s *AutomationScheduler) handlePostAction(run *model.AutomationRun, now tim
 	if snap.PostAction == model.AutomationPostSettle {
 		quiet, err := s.threads.ThreadSettleSafe(ctx, run.UserID, run.EnvironmentID, run.ThreadID)
 		if err != nil {
-			s.logger.Warn("读取线程运行状态失败，稍后重试后置",
+			s.logger.With(zap.String("user_id", run.UserID)).Warn("读取线程运行状态失败，稍后重试后置",
 				zap.String("run_id", run.ID), zap.String("user_id", run.UserID), zap.Error(err))
 			s.retryPost(run, now)
 			return
@@ -355,7 +355,7 @@ func (s *AutomationScheduler) handlePostAction(run *model.AutomationRun, now tim
 	case t3PostAccepted:
 		s.succeedPost(run, now)
 	case t3PostRejected:
-		s.logger.Warn("后置命令被上游拒绝",
+		s.logger.With(zap.String("user_id", run.UserID)).Warn("后置命令被上游拒绝",
 			zap.String("run_id", run.ID), zap.String("user_id", run.UserID), zap.String("action", string(snap.PostAction)), zap.Error(err))
 		s.bumpPostAttempt(run, shortenT3Error(err), now)
 	case t3PostTransportError:
@@ -517,7 +517,7 @@ func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model
 			map[string]any{"dispatched_at": now}); err != nil {
 			s.logger.Error("记录派发时间失败", zap.String("run_id", run.ID), zap.String("user_id", run.UserID), zap.Error(err))
 		}
-		s.logger.Info("自动化线程已启动",
+		s.logger.With(zap.String("user_id", run.UserID)).Info("自动化线程已启动",
 			zap.String("run_id", run.ID),
 			zap.String("user_id", run.UserID),
 			zap.String("thread_id", result.ThreadId),
@@ -526,7 +526,7 @@ func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model
 		// RPC 已发出但结果未确认：保留预分配 thread_id 等回报或 deadline，
 		// 不自动重试（同一 thread_id 的重试交给 T3 幂等，但这里无从判断上游
 		// 是否受理——明确不动）。
-		s.logger.Warn("线程启动 RPC 已发出但结果未确认，等待回报或超时",
+		s.logger.With(zap.String("user_id", run.UserID)).Warn("线程启动 RPC 已发出但结果未确认，等待回报或超时",
 			zap.String("run_id", run.ID), zap.String("user_id", run.UserID), zap.Error(err))
 	default:
 		s.failDispatch(run, "dispatch_failed", shortenT3Error(err), now)

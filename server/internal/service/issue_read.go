@@ -50,7 +50,7 @@ func (s *IssueService) MarkIssueRead(issueID, userID string) error {
 // 发货钩子评论不走这里：它们本身不算未读，也不该替用户消掉真正的未读。
 func (s *IssueService) advanceReadWatermark(issueID, userID string, at time.Time) {
 	if err := s.readStateRepo.Advance(userID, issueID, at); err != nil {
-		s.logger.Warn("推进已读水位失败",
+		s.logger.With(zap.String("user_id", userID)).Warn("推进已读水位失败",
 			zap.String("issue_id", issueID),
 			zap.String("user_id", userID),
 			zap.Error(err),

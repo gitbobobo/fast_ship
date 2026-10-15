@@ -71,7 +71,7 @@ func (s *ShipService) ExecutePendingShipHooks(projectID, userID string, version 
 		claimedAt.Add(-5*time.Minute),
 	)
 	if err != nil {
-		s.logger.Error("consume pending ship hooks failed",
+		s.logger.With(zap.String("user_id", userID)).Error("consume pending ship hooks failed",
 			zap.String("project_id", projectID),
 			zap.String("version_id", version.ID),
 			zap.Error(err),

@@ -89,7 +89,7 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 		// 用户自己发的评论把已读水位推到该评论时间，这条 Issue 顺带变已读
 		s.advanceReadWatermark(issueID, userID, comment.GitHubCreatedAt)
 
-		s.logger.Info("issue comment created",
+		s.logger.With(zap.String("user_id", userID)).Info("issue comment created",
 			zap.String("action", "create_comment"),
 			zap.String("issue_id", issueID),
 			zap.String("user_id", userID),
@@ -139,7 +139,7 @@ func (s *IssueService) CreateInternalComment(issueID, userID string, req CreateI
 		return nil, errs.ErrInternal
 	}
 
-	s.logger.Info("issue comment created",
+	s.logger.With(zap.String("user_id", userID)).Info("issue comment created",
 		zap.String("action", "create_comment"),
 		zap.String("issue_id", issueID),
 		zap.String("user_id", userID),

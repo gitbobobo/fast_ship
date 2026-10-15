@@ -142,7 +142,7 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 
 	// 创建 Tag
 	_ = s.updateShipState(version, model.ShipStatusInProgress, model.ShipStageCreateTag, "正在创建 Git Tag")
-	s.logger.Info("creating tag", zap.String("tag", version.VersionNumber))
+	s.logger.With(zap.String("user_id", userID)).Info("creating tag", zap.String("tag", version.VersionNumber))
 	if err := gh.CreateTag(ctx, version.VersionNumber, version.TargetCommitish); err != nil {
 		message := fmt.Sprintf("创建 Tag 失败: %s", s.describeGitHubOperationError(project, err))
 		s.recordFailure(version, model.ShipStageCreateTag, message)
@@ -151,7 +151,7 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 
 	// 创建 Release
 	_ = s.updateShipState(version, model.ShipStatusInProgress, model.ShipStageCreateRelease, "正在创建 GitHub Release")
-	s.logger.Info("creating release", zap.String("tag", version.VersionNumber))
+	s.logger.With(zap.String("user_id", userID)).Info("creating release", zap.String("tag", version.VersionNumber))
 	release, err := gh.CreateRelease(ctx, version.VersionNumber, version.VersionNumber, version.ReleaseNotes)
 	if err != nil {
 		message := fmt.Sprintf("创建 Release 失败: %s", s.describeGitHubOperationError(project, err))
@@ -173,7 +173,7 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 		wg.Add(1)
 		go func(idx int, a model.Artifact) {
 			defer wg.Done()
-			s.logger.Info("uploading artifact", zap.String("file", a.FileName))
+			s.logger.With(zap.String("user_id", userID)).Info("uploading artifact", zap.String("file", a.FileName))
 
 			reader, err := s.storage.Get(a.FilePath)
 			if err != nil {
@@ -232,11 +232,11 @@ func (s *ShipService) Ship(versionID, userID string) (*ShipResult, error) {
 		return nil, errs.ErrInternal
 	}
 
-	s.logger.Info("version shipped successfully", zap.String("version", version.VersionNumber))
+	s.logger.With(zap.String("user_id", userID)).Info("version shipped successfully", zap.String("version", version.VersionNumber))
 
 	result, hookErr := s.ExecutePendingShipHooks(project.ID, userID, version)
 	if hookErr != nil {
-		s.logger.Error("execute pending ship hooks failed", zap.Error(hookErr))
+		s.logger.With(zap.String("user_id", userID)).Error("execute pending ship hooks failed", zap.Error(hookErr))
 		version.ShipHooksStatus = "incomplete"
 		version.ShipMessage = "已成功发货到 GitHub，但问题钩子尚未完成，将在后续发货时重试"
 		version.ErrorLog = hookErr.Error()

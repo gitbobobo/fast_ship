@@ -174,7 +174,7 @@ func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter stri
 	}
 
 	resp.ElapsedMs = time.Since(start).Milliseconds()
-	s.logger.Info("batch close done issues",
+	s.logger.With(zap.String("user_id", userID)).Info("batch close done issues",
 		zap.String("project_id", projectID),
 		zap.String("user_id", userID),
 		zap.String("source_filter", sourceFilter),
@@ -321,7 +321,7 @@ func (s *IssueService) GetRepositoryLabels(projectID, userID string) ([]IssueLab
 			Description: item.Description,
 			SyncedAt:    now,
 		}); err != nil {
-			s.logger.Warn("缓存仓库标签失败", zap.String("project_id", projectID), zap.String("label", item.Name), zap.Error(err))
+			s.logger.With(zap.String("user_id", userID)).Warn("缓存仓库标签失败", zap.String("project_id", projectID), zap.String("label", item.Name), zap.Error(err))
 		}
 	}
 
