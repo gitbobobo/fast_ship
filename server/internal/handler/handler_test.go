@@ -142,7 +142,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 	t3EnvironmentRepo := repository.NewT3EnvironmentRepository(db)
 
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, nil)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())

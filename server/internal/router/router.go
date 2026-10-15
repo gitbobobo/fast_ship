@@ -36,6 +36,7 @@ func Setup(
 	automationHandler *handler.AutomationHandler,
 	notificationHandler *handler.NotificationHandler,
 	automationAgentHandler *handler.AutomationAgentHandler,
+	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
@@ -304,6 +305,15 @@ func Setup(
 		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.GetThreadItem)
 	api.POST("/automation-agent/notifications",
 		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.PublishNotification)
+
+	// Fast Ship 自身日志查询（INT-94，只读）：JWT（Web 管理员）与 fsk_ API Key
+	// （代理）可查本人及系统级日志；fsr_ 令牌 40301。
+	selfLogs := api.Group("/self-logs", middleware.RequireSelfLogAuth(cfg, apiKeyRepo, authService))
+	{
+		selfLogs.GET("", selfLogHandler.ListSelfLogs)
+		selfLogs.GET("/aggregate", selfLogHandler.AggregateSelfLogs)
+		selfLogs.GET("/trace", selfLogHandler.TraceSelfLogs)
+	}
 
 	// 仅运行令牌 — GitHub PR 评审代发（INT-93）。owner/repo/PR/SHA 取自运行行；
 	// 运行结束/取消后令牌消费，访问一律 40106。

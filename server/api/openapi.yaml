@@ -59,6 +59,8 @@ tags:
     description: 站内通知（自动化运行结果与 Agent 发布；仅 JWT）
   - name: automation-agent
     description: 自动化运行令牌专用的 Agent 回报与读取端点（仅 runTokenAuth，INT-90）
+  - name: self-logs
+    description: Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人归属及显式系统行（无主行默认不可见）；供代理排查 Fast Ship 自身问题
 
 paths:
   /api/environments:
@@ -5978,6 +5980,173 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/self-logs:
+    get:
+      tags: [self-logs]
+      operationId: listSelfLogs
+      summary: 分页查询 Fast Ship 自身日志（slog 采集，独立日志库）
+      description: |
+        只读查询 Fast Ship 服务端自身的结构化日志（INT-94，与 /projects/:id/logs 的业务日志无关）。
+        可见范围：当前用户归属的日志（user_id 等于调用者），以及显式标记的系统行（无业务关联列的进程级启动日志）。
+        无归属且未标系统的行（解析失败、键冲突、漏标）对任何认证用户均不可见。请求路径日志均带 user_id。
+        传入他人 user_id 过滤只会得到空结果。游标为键集分页（时间+ID），插入不影响翻页稳定性；
+        next_cursor 为 null 表示没有更多。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SelfLogStartTime'
+        - $ref: '#/components/parameters/SelfLogEndTime'
+        - $ref: '#/components/parameters/SelfLogLevel'
+        - $ref: '#/components/parameters/SelfLogMinLevel'
+        - $ref: '#/components/parameters/SelfLogModules'
+        - $ref: '#/components/parameters/SelfLogRequestID'
+        - $ref: '#/components/parameters/SelfLogUserID'
+        - $ref: '#/components/parameters/SelfLogProjectID'
+        - $ref: '#/components/parameters/SelfLogIssueID'
+        - $ref: '#/components/parameters/SelfLogAutomationID'
+        - $ref: '#/components/parameters/SelfLogRunID'
+        - $ref: '#/components/parameters/SelfLogThreadID'
+        - $ref: '#/components/parameters/SelfLogExtraEq'
+        - $ref: '#/components/parameters/SelfLogKeyword'
+        - $ref: '#/components/parameters/SelfLogExcludeKeyword'
+        - $ref: '#/components/parameters/SelfLogCursor'
+        - $ref: '#/components/parameters/SelfLogLimit'
+        - $ref: '#/components/parameters/SelfLogOrder'
+        - $ref: '#/components/parameters/SelfLogFields'
+      responses:
+        '200':
+          description: 日志分页列表（含下一页游标提示）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SelfLogPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 凭证类型不允许（40301：fsr_ 运行令牌/刷新令牌无权查询自身日志）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/self-logs/aggregate:
+    get:
+      tags: [self-logs]
+      operationId: aggregateSelfLogs
+      summary: 按模块/级别/时间桶聚合统计自身日志条数
+      description: |
+        过滤条件与 GET /api/self-logs 完全一致，对命中条数按 `by` 维度组合分组计数；
+        `by` 可多选（逗号分隔）；含 time 时 bucket 缺省为 minute（minute/hour）。
+        可见范围与列表端点相同（本人归属 + 显式系统行；无主行不可见）。按时间桶聚合时保留最近 2000 个桶（超出 truncated=true）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: by
+          in: query
+          required: true
+          schema:
+            type: string
+          description: 聚合维度，逗号分隔组合，取值 module / level / time（如 `by=module,level`）
+        - name: bucket
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [minute, hour]
+            default: minute
+          description: 时间桶粒度；仅 by 含 time 时生效
+        - $ref: '#/components/parameters/SelfLogStartTime'
+        - $ref: '#/components/parameters/SelfLogEndTime'
+        - $ref: '#/components/parameters/SelfLogLevel'
+        - $ref: '#/components/parameters/SelfLogMinLevel'
+        - $ref: '#/components/parameters/SelfLogModules'
+        - $ref: '#/components/parameters/SelfLogRequestID'
+        - $ref: '#/components/parameters/SelfLogUserID'
+        - $ref: '#/components/parameters/SelfLogProjectID'
+        - $ref: '#/components/parameters/SelfLogIssueID'
+        - $ref: '#/components/parameters/SelfLogAutomationID'
+        - $ref: '#/components/parameters/SelfLogRunID'
+        - $ref: '#/components/parameters/SelfLogThreadID'
+        - $ref: '#/components/parameters/SelfLogExtraEq'
+        - $ref: '#/components/parameters/SelfLogKeyword'
+        - $ref: '#/components/parameters/SelfLogExcludeKeyword'
+      responses:
+        '200':
+          description: 聚合行（行数上限 2000；按桶时间倒序截断，truncated=true 表示还有更早的桶）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SelfLogAggregateResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 凭证类型不允许（40301）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/self-logs/trace:
+    get:
+      tags: [self-logs]
+      operationId: traceSelfLogs
+      summary: 按请求 ID 或 run ID 查询整条链路日志
+      description: |
+        返回该请求/运行从开始到结束的全部日志（时间正序）。可见范围与列表端点相同（本人归属 + 显式系统行；无主行不可见）。
+        request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即查询键，
+        失败请求（panic/5xx）的条目携带堆栈。上限 1000 条；超出时保留最新 1000 条（时间正序），truncated=true。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SelfLogRequestID'
+        - $ref: '#/components/parameters/SelfLogRunID'
+        - $ref: '#/components/parameters/SelfLogFields'
+      responses:
+        '200':
+          description: 链路日志（时间正序；截断时 truncated=true）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/SelfLogTraceResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 凭证类型不允许（40301）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/github/webhooks:
     post:
       tags: [automation-agent]
@@ -6212,7 +6381,6 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
-
 components:
   securitySchemes:
     jwtAuth:
@@ -6412,6 +6580,148 @@ components:
       schema:
         type: string
       description: 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
+    SelfLogStartTime:
+      name: start_time
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+      description: 起始时间（含），RFC3339
+    SelfLogEndTime:
+      name: end_time
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+      description: 结束时间（含），RFC3339
+    SelfLogLevel:
+      name: level
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [DEBUG, INFO, WARN, ERROR]
+      description: 精确级别过滤
+    SelfLogMinLevel:
+      name: min_level
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [DEBUG, INFO, WARN, ERROR]
+      description: 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准）
+    SelfLogModules:
+      name: modules
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段
+    SelfLogRequestID:
+      name: request_id
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 按请求 ID 过滤（响应头 X-Request-Id 的值）
+    SelfLogUserID:
+      name: user_id
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 按归属用户过滤；仅限本人，他人 ID 只会得到空结果
+    SelfLogProjectID:
+      name: project_id
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 按关联项目 ID 过滤
+    SelfLogIssueID:
+      name: issue_id
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 按关联 Issue ID 过滤
+    SelfLogAutomationID:
+      name: automation_id
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 按关联自动化 ID 过滤
+    SelfLogRunID:
+      name: run_id
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 按关联自动化运行 ID 过滤
+    SelfLogThreadID:
+      name: thread_id
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 按关联 T3 线程 ID 过滤
+    SelfLogExtraEq:
+      name: extra_eq
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 附加字段等值过滤，可重复，格式 `key=value`（json_extract 后 CAST 为文本再比较，数字值如 status=200 也可匹配）
+    SelfLogKeyword:
+      name: keyword
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 关键词包含过滤（匹配 message 与 extra）
+    SelfLogExcludeKeyword:
+      name: exclude_keyword
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 关键词排除过滤（同 keyword 口径）
+    SelfLogCursor:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 分页游标；取上一页响应的 next_cursor
+    SelfLogLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 100
+        minimum: 1
+        maximum: 500
+      description: 单页条数；越界（<1 或 >500）回落为 100
+    SelfLogOrder:
+      name: order
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: desc
+      description: 按时间排序方向；游标内含方向，翻页时不允许改变
+    SelfLogFields:
+      name: fields
+      in: query
+      required: false
+      schema:
+        type: string
+      description: 返回字段选择，逗号分隔（如 `module,message,extra`）；id/time/level/message 始终返回，其余未选字段在条目中省略。未知字段名返回 40001
 
   responses:
     EmptySuccess:
@@ -9716,6 +10026,102 @@ components:
         thread_id:
           type: string
           description: 可选；缺省用运行的线程
+    SelfLogEntry:
+      type: object
+      description: Fast Ship 自身日志条目（入库前已脱敏：token/密钥/密码/Authorization 一律不落明文）
+      required: [id, time, level, message]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: 存储行 ID；与时间联合构成游标定位
+        time:
+          type: string
+          format: date-time
+        level:
+          type: string
+          enum: [DEBUG, INFO, WARN, ERROR]
+        module:
+          type: string
+          description: 产生日志的模块（http / automation / t3 / github / auth / api_key 等）
+        message:
+          type: string
+        request_id:
+          type: string
+        user_id:
+          type: string
+        project_id:
+          type: string
+        issue_id:
+          type: string
+        automation_id:
+          type: string
+        run_id:
+          type: string
+        thread_id:
+          type: string
+        extra:
+          type: object
+          additionalProperties: true
+          description: 其余结构化字段（JSON 对象）；未选入 fields 时省略
+
+    SelfLogPage:
+      type: object
+      description: 自身日志分页（键集游标；next_cursor 为 null 表示没有更多）
+      required: [items, next_cursor, has_more]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelfLogEntry'
+        next_cursor:
+          type: string
+          nullable: true
+          description: 下一页游标；没有更多时为 null
+        has_more:
+          type: boolean
+
+    SelfLogAggregateResult:
+      type: object
+      description: 自身日志聚合结果
+      required: [rows, truncated]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelfLogAggregateRow'
+        truncated:
+          type: boolean
+          description: 超过单次聚合上限（2000 行）被截断；按时间桶时保留的是最近的桶
+
+    SelfLogAggregateRow:
+      type: object
+      description: 一行聚合计数；未选择的维度字段省略
+      required: [count]
+      properties:
+        count:
+          type: integer
+        module:
+          type: string
+        level:
+          type: string
+        time_bucket:
+          type: string
+          format: date-time
+          description: 时间桶起点（对齐分钟/小时），RFC3339
+
+    SelfLogTraceResult:
+      type: object
+      description: 请求/运行链路日志（时间正序）
+      required: [items, truncated]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SelfLogEntry'
+        truncated:
+          type: boolean
+          description: 超过单次链路上限（1000 条）被截断；保留的是最新 1000 条
 
 
     AgentPullRequestDetail:

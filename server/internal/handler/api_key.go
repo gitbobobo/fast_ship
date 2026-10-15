@@ -23,7 +23,7 @@ func (h *ApiKeyHandler) Create(c *gin.Context) {
 	}
 
 	userID := middleware.GetUserID(c)
-	result, err := h.apiKeyService.Create(userID, &req)
+	result, err := h.apiKeyService.Create(c.Request.Context(), userID, &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -47,7 +47,7 @@ func (h *ApiKeyHandler) Delete(c *gin.Context) {
 	id := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	if err := h.apiKeyService.Delete(id, userID); err != nil {
+	if err := h.apiKeyService.Delete(c.Request.Context(), id, userID); err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}

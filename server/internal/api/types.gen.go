@@ -323,6 +323,30 @@ func (e ScreenshotAnnotationStatus) Valid() bool {
 	}
 }
 
+// Defines values for SelfLogEntryLevel.
+const (
+	SelfLogEntryLevelDEBUG SelfLogEntryLevel = "DEBUG"
+	SelfLogEntryLevelERROR SelfLogEntryLevel = "ERROR"
+	SelfLogEntryLevelINFO  SelfLogEntryLevel = "INFO"
+	SelfLogEntryLevelWARN  SelfLogEntryLevel = "WARN"
+)
+
+// Valid indicates whether the value is a known member of the SelfLogEntryLevel enum.
+func (e SelfLogEntryLevel) Valid() bool {
+	switch e {
+	case SelfLogEntryLevelDEBUG:
+		return true
+	case SelfLogEntryLevelERROR:
+		return true
+	case SelfLogEntryLevelINFO:
+		return true
+	case SelfLogEntryLevelWARN:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for T3ChatAttachmentType.
 const (
 	Image T3ChatAttachmentType = "image"
@@ -515,6 +539,72 @@ func (e VersionShipHooksStatus) Valid() bool {
 	}
 }
 
+// Defines values for SelfLogLevel.
+const (
+	SelfLogLevelDEBUG SelfLogLevel = "DEBUG"
+	SelfLogLevelERROR SelfLogLevel = "ERROR"
+	SelfLogLevelINFO  SelfLogLevel = "INFO"
+	SelfLogLevelWARN  SelfLogLevel = "WARN"
+)
+
+// Valid indicates whether the value is a known member of the SelfLogLevel enum.
+func (e SelfLogLevel) Valid() bool {
+	switch e {
+	case SelfLogLevelDEBUG:
+		return true
+	case SelfLogLevelERROR:
+		return true
+	case SelfLogLevelINFO:
+		return true
+	case SelfLogLevelWARN:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SelfLogMinLevel.
+const (
+	SelfLogMinLevelDEBUG SelfLogMinLevel = "DEBUG"
+	SelfLogMinLevelERROR SelfLogMinLevel = "ERROR"
+	SelfLogMinLevelINFO  SelfLogMinLevel = "INFO"
+	SelfLogMinLevelWARN  SelfLogMinLevel = "WARN"
+)
+
+// Valid indicates whether the value is a known member of the SelfLogMinLevel enum.
+func (e SelfLogMinLevel) Valid() bool {
+	switch e {
+	case SelfLogMinLevelDEBUG:
+		return true
+	case SelfLogMinLevelERROR:
+		return true
+	case SelfLogMinLevelINFO:
+		return true
+	case SelfLogMinLevelWARN:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SelfLogOrder.
+const (
+	SelfLogOrderAsc  SelfLogOrder = "asc"
+	SelfLogOrderDesc SelfLogOrder = "desc"
+)
+
+// Valid indicates whether the value is a known member of the SelfLogOrder enum.
+func (e SelfLogOrder) Valid() bool {
+	switch e {
+	case SelfLogOrderAsc:
+		return true
+	case SelfLogOrderDesc:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListIssuesParamsWorkflowStatus.
 const (
 	ListIssuesParamsWorkflowStatusDone       ListIssuesParamsWorkflowStatus = "done"
@@ -605,6 +695,138 @@ func (e ListLogEntriesParamsSort) Valid() bool {
 	case TimestampAsc:
 		return true
 	case TimestampDesc:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListSelfLogsParamsLevel.
+const (
+	ListSelfLogsParamsLevelDEBUG ListSelfLogsParamsLevel = "DEBUG"
+	ListSelfLogsParamsLevelERROR ListSelfLogsParamsLevel = "ERROR"
+	ListSelfLogsParamsLevelINFO  ListSelfLogsParamsLevel = "INFO"
+	ListSelfLogsParamsLevelWARN  ListSelfLogsParamsLevel = "WARN"
+)
+
+// Valid indicates whether the value is a known member of the ListSelfLogsParamsLevel enum.
+func (e ListSelfLogsParamsLevel) Valid() bool {
+	switch e {
+	case ListSelfLogsParamsLevelDEBUG:
+		return true
+	case ListSelfLogsParamsLevelERROR:
+		return true
+	case ListSelfLogsParamsLevelINFO:
+		return true
+	case ListSelfLogsParamsLevelWARN:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListSelfLogsParamsMinLevel.
+const (
+	ListSelfLogsParamsMinLevelDEBUG ListSelfLogsParamsMinLevel = "DEBUG"
+	ListSelfLogsParamsMinLevelERROR ListSelfLogsParamsMinLevel = "ERROR"
+	ListSelfLogsParamsMinLevelINFO  ListSelfLogsParamsMinLevel = "INFO"
+	ListSelfLogsParamsMinLevelWARN  ListSelfLogsParamsMinLevel = "WARN"
+)
+
+// Valid indicates whether the value is a known member of the ListSelfLogsParamsMinLevel enum.
+func (e ListSelfLogsParamsMinLevel) Valid() bool {
+	switch e {
+	case ListSelfLogsParamsMinLevelDEBUG:
+		return true
+	case ListSelfLogsParamsMinLevelERROR:
+		return true
+	case ListSelfLogsParamsMinLevelINFO:
+		return true
+	case ListSelfLogsParamsMinLevelWARN:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ListSelfLogsParamsOrder.
+const (
+	ListSelfLogsParamsOrderAsc  ListSelfLogsParamsOrder = "asc"
+	ListSelfLogsParamsOrderDesc ListSelfLogsParamsOrder = "desc"
+)
+
+// Valid indicates whether the value is a known member of the ListSelfLogsParamsOrder enum.
+func (e ListSelfLogsParamsOrder) Valid() bool {
+	switch e {
+	case ListSelfLogsParamsOrderAsc:
+		return true
+	case ListSelfLogsParamsOrderDesc:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AggregateSelfLogsParamsBucket.
+const (
+	Hour   AggregateSelfLogsParamsBucket = "hour"
+	Minute AggregateSelfLogsParamsBucket = "minute"
+)
+
+// Valid indicates whether the value is a known member of the AggregateSelfLogsParamsBucket enum.
+func (e AggregateSelfLogsParamsBucket) Valid() bool {
+	switch e {
+	case Hour:
+		return true
+	case Minute:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AggregateSelfLogsParamsLevel.
+const (
+	AggregateSelfLogsParamsLevelDEBUG AggregateSelfLogsParamsLevel = "DEBUG"
+	AggregateSelfLogsParamsLevelERROR AggregateSelfLogsParamsLevel = "ERROR"
+	AggregateSelfLogsParamsLevelINFO  AggregateSelfLogsParamsLevel = "INFO"
+	AggregateSelfLogsParamsLevelWARN  AggregateSelfLogsParamsLevel = "WARN"
+)
+
+// Valid indicates whether the value is a known member of the AggregateSelfLogsParamsLevel enum.
+func (e AggregateSelfLogsParamsLevel) Valid() bool {
+	switch e {
+	case AggregateSelfLogsParamsLevelDEBUG:
+		return true
+	case AggregateSelfLogsParamsLevelERROR:
+		return true
+	case AggregateSelfLogsParamsLevelINFO:
+		return true
+	case AggregateSelfLogsParamsLevelWARN:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AggregateSelfLogsParamsMinLevel.
+const (
+	AggregateSelfLogsParamsMinLevelDEBUG AggregateSelfLogsParamsMinLevel = "DEBUG"
+	AggregateSelfLogsParamsMinLevelERROR AggregateSelfLogsParamsMinLevel = "ERROR"
+	AggregateSelfLogsParamsMinLevelINFO  AggregateSelfLogsParamsMinLevel = "INFO"
+	AggregateSelfLogsParamsMinLevelWARN  AggregateSelfLogsParamsMinLevel = "WARN"
+)
+
+// Valid indicates whether the value is a known member of the AggregateSelfLogsParamsMinLevel enum.
+func (e AggregateSelfLogsParamsMinLevel) Valid() bool {
+	switch e {
+	case AggregateSelfLogsParamsMinLevelDEBUG:
+		return true
+	case AggregateSelfLogsParamsMinLevelERROR:
+		return true
+	case AggregateSelfLogsParamsMinLevelINFO:
+		return true
+	case AggregateSelfLogsParamsMinLevelWARN:
 		return true
 	default:
 		return false
@@ -2269,6 +2491,67 @@ type ScreenshotVersion struct {
 	Width int `json:"width"`
 }
 
+// SelfLogAggregateResult 自身日志聚合结果
+type SelfLogAggregateResult struct {
+	Rows []SelfLogAggregateRow `json:"rows"`
+
+	// Truncated 超过单次聚合上限（2000 行）被截断；按时间桶时保留的是最近的桶
+	Truncated bool `json:"truncated"`
+}
+
+// SelfLogAggregateRow 一行聚合计数；未选择的维度字段省略
+type SelfLogAggregateRow struct {
+	Count  int     `json:"count"`
+	Level  *string `json:"level,omitempty"`
+	Module *string `json:"module,omitempty"`
+
+	// TimeBucket 时间桶起点（对齐分钟/小时），RFC3339
+	TimeBucket *string `json:"time_bucket,omitempty"`
+}
+
+// SelfLogEntry Fast Ship 自身日志条目（入库前已脱敏：token/密钥/密码/Authorization 一律不落明文）
+type SelfLogEntry struct {
+	AutomationId *string `json:"automation_id,omitempty"`
+
+	// Extra 其余结构化字段（JSON 对象）；未选入 fields 时省略
+	Extra map[string]interface{} `json:"extra,omitempty"`
+
+	// Id 存储行 ID；与时间联合构成游标定位
+	Id      int64             `json:"id"`
+	IssueId *string           `json:"issue_id,omitempty"`
+	Level   SelfLogEntryLevel `json:"level"`
+	Message string            `json:"message"`
+
+	// Module 产生日志的模块（http / automation / t3 / github / auth / api_key 等）
+	Module    *string `json:"module,omitempty"`
+	ProjectId *string `json:"project_id,omitempty"`
+	RequestId *string `json:"request_id,omitempty"`
+	RunId     *string `json:"run_id,omitempty"`
+	ThreadId  *string `json:"thread_id,omitempty"`
+	Time      string  `json:"time"`
+	UserId    *string `json:"user_id,omitempty"`
+}
+
+// SelfLogEntryLevel defines model for SelfLogEntry.Level.
+type SelfLogEntryLevel string
+
+// SelfLogPage 自身日志分页（键集游标；next_cursor 为 null 表示没有更多）
+type SelfLogPage struct {
+	HasMore bool           `json:"has_more"`
+	Items   []SelfLogEntry `json:"items"`
+
+	// NextCursor 下一页游标；没有更多时为 null
+	NextCursor *string `json:"next_cursor"`
+}
+
+// SelfLogTraceResult 请求/运行链路日志（时间正序）
+type SelfLogTraceResult struct {
+	Items []SelfLogEntry `json:"items"`
+
+	// Truncated 超过单次链路上限（1000 条）被截断；保留的是最新 1000 条
+	Truncated bool `json:"truncated"`
+}
+
 // SendT3ThreadMessageRequest defines model for SendT3ThreadMessageRequest.
 type SendT3ThreadMessageRequest struct {
 	// Attachments 图片附件元数据；缺省按 [] 发送（上游要求字段为数组）
@@ -3096,6 +3379,63 @@ type ScreenshotScreenId = string
 
 // ScreenshotVersionId defines model for ScreenshotVersionId.
 type ScreenshotVersionId = string
+
+// SelfLogAutomationID defines model for SelfLogAutomationID.
+type SelfLogAutomationID = string
+
+// SelfLogCursor defines model for SelfLogCursor.
+type SelfLogCursor = string
+
+// SelfLogEndTime defines model for SelfLogEndTime.
+type SelfLogEndTime = string
+
+// SelfLogExcludeKeyword defines model for SelfLogExcludeKeyword.
+type SelfLogExcludeKeyword = string
+
+// SelfLogExtraEq defines model for SelfLogExtraEq.
+type SelfLogExtraEq = string
+
+// SelfLogFields defines model for SelfLogFields.
+type SelfLogFields = string
+
+// SelfLogIssueID defines model for SelfLogIssueID.
+type SelfLogIssueID = string
+
+// SelfLogKeyword defines model for SelfLogKeyword.
+type SelfLogKeyword = string
+
+// SelfLogLevel defines model for SelfLogLevel.
+type SelfLogLevel string
+
+// SelfLogLimit defines model for SelfLogLimit.
+type SelfLogLimit = int
+
+// SelfLogMinLevel defines model for SelfLogMinLevel.
+type SelfLogMinLevel string
+
+// SelfLogModules defines model for SelfLogModules.
+type SelfLogModules = string
+
+// SelfLogOrder defines model for SelfLogOrder.
+type SelfLogOrder string
+
+// SelfLogProjectID defines model for SelfLogProjectID.
+type SelfLogProjectID = string
+
+// SelfLogRequestID defines model for SelfLogRequestID.
+type SelfLogRequestID = string
+
+// SelfLogRunID defines model for SelfLogRunID.
+type SelfLogRunID = string
+
+// SelfLogStartTime defines model for SelfLogStartTime.
+type SelfLogStartTime = string
+
+// SelfLogThreadID defines model for SelfLogThreadID.
+type SelfLogThreadID = string
+
+// SelfLogUserID defines model for SelfLogUserID.
+type SelfLogUserID = string
 
 // T3AttachmentId defines model for T3AttachmentId.
 type T3AttachmentId = string
@@ -4821,6 +5161,186 @@ type GetScreenshotVersionContentParams struct {
 type GetScreenshotVersionContentHeadParams struct {
 	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
+}
+
+// ListSelfLogsParams defines parameters for ListSelfLogs.
+type ListSelfLogsParams struct {
+	// StartTime 起始时间（含），RFC3339
+	StartTime *SelfLogStartTime `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime 结束时间（含），RFC3339
+	EndTime *SelfLogEndTime `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Level 精确级别过滤
+	Level *ListSelfLogsParamsLevel `form:"level,omitempty" json:"level,omitempty"`
+
+	// MinLevel 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准）
+	MinLevel *ListSelfLogsParamsMinLevel `form:"min_level,omitempty" json:"min_level,omitempty"`
+
+	// Modules 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段
+	Modules *SelfLogModules `form:"modules,omitempty" json:"modules,omitempty"`
+
+	// RequestId 按请求 ID 过滤（响应头 X-Request-Id 的值）
+	RequestId *SelfLogRequestID `form:"request_id,omitempty" json:"request_id,omitempty"`
+
+	// UserId 按归属用户过滤；仅限本人，他人 ID 只会得到空结果
+	UserId *SelfLogUserID `form:"user_id,omitempty" json:"user_id,omitempty"`
+
+	// ProjectId 按关联项目 ID 过滤
+	ProjectId *SelfLogProjectID `form:"project_id,omitempty" json:"project_id,omitempty"`
+
+	// IssueId 按关联 Issue ID 过滤
+	IssueId *SelfLogIssueID `form:"issue_id,omitempty" json:"issue_id,omitempty"`
+
+	// AutomationId 按关联自动化 ID 过滤
+	AutomationId *SelfLogAutomationID `form:"automation_id,omitempty" json:"automation_id,omitempty"`
+
+	// RunId 按关联自动化运行 ID 过滤
+	RunId *SelfLogRunID `form:"run_id,omitempty" json:"run_id,omitempty"`
+
+	// ThreadId 按关联 T3 线程 ID 过滤
+	ThreadId *SelfLogThreadID `form:"thread_id,omitempty" json:"thread_id,omitempty"`
+
+	// ExtraEq 附加字段等值过滤，可重复，格式 `key=value`（json_extract 后 CAST 为文本再比较，数字值如 status=200 也可匹配）
+	ExtraEq *SelfLogExtraEq `form:"extra_eq,omitempty" json:"extra_eq,omitempty"`
+
+	// Keyword 关键词包含过滤（匹配 message 与 extra）
+	Keyword *SelfLogKeyword `form:"keyword,omitempty" json:"keyword,omitempty"`
+
+	// ExcludeKeyword 关键词排除过滤（同 keyword 口径）
+	ExcludeKeyword *SelfLogExcludeKeyword `form:"exclude_keyword,omitempty" json:"exclude_keyword,omitempty"`
+
+	// Cursor 分页游标；取上一页响应的 next_cursor
+	Cursor *SelfLogCursor `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// Limit 单页条数；越界（<1 或 >500）回落为 100
+	Limit *SelfLogLimit `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Order 按时间排序方向；游标内含方向，翻页时不允许改变
+	Order *ListSelfLogsParamsOrder `form:"order,omitempty" json:"order,omitempty"`
+
+	// Fields 返回字段选择，逗号分隔（如 `module,message,extra`）；id/time/level/message 始终返回，其余未选字段在条目中省略。未知字段名返回 40001
+	Fields *SelfLogFields `form:"fields,omitempty" json:"fields,omitempty"`
+}
+
+// ListSelfLogsParamsLevel defines parameters for ListSelfLogs.
+type ListSelfLogsParamsLevel string
+
+// ListSelfLogsParamsMinLevel defines parameters for ListSelfLogs.
+type ListSelfLogsParamsMinLevel string
+
+// ListSelfLogsParamsOrder defines parameters for ListSelfLogs.
+type ListSelfLogsParamsOrder string
+
+// ListSelfLogs200JSONResponseBody defines parameters for ListSelfLogs.
+type ListSelfLogs200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 自身日志分页（键集游标；next_cursor 为 null 表示没有更多）
+	Data *SelfLogPage `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// AggregateSelfLogsParams defines parameters for AggregateSelfLogs.
+type AggregateSelfLogsParams struct {
+	// By 聚合维度，逗号分隔组合，取值 module / level / time（如 `by=module,level`）
+	By string `form:"by" json:"by"`
+
+	// Bucket 时间桶粒度；仅 by 含 time 时生效
+	Bucket *AggregateSelfLogsParamsBucket `form:"bucket,omitempty" json:"bucket,omitempty"`
+
+	// StartTime 起始时间（含），RFC3339
+	StartTime *SelfLogStartTime `form:"start_time,omitempty" json:"start_time,omitempty"`
+
+	// EndTime 结束时间（含），RFC3339
+	EndTime *SelfLogEndTime `form:"end_time,omitempty" json:"end_time,omitempty"`
+
+	// Level 精确级别过滤
+	Level *AggregateSelfLogsParamsLevel `form:"level,omitempty" json:"level,omitempty"`
+
+	// MinLevel 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准）
+	MinLevel *AggregateSelfLogsParamsMinLevel `form:"min_level,omitempty" json:"min_level,omitempty"`
+
+	// Modules 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段
+	Modules *SelfLogModules `form:"modules,omitempty" json:"modules,omitempty"`
+
+	// RequestId 按请求 ID 过滤（响应头 X-Request-Id 的值）
+	RequestId *SelfLogRequestID `form:"request_id,omitempty" json:"request_id,omitempty"`
+
+	// UserId 按归属用户过滤；仅限本人，他人 ID 只会得到空结果
+	UserId *SelfLogUserID `form:"user_id,omitempty" json:"user_id,omitempty"`
+
+	// ProjectId 按关联项目 ID 过滤
+	ProjectId *SelfLogProjectID `form:"project_id,omitempty" json:"project_id,omitempty"`
+
+	// IssueId 按关联 Issue ID 过滤
+	IssueId *SelfLogIssueID `form:"issue_id,omitempty" json:"issue_id,omitempty"`
+
+	// AutomationId 按关联自动化 ID 过滤
+	AutomationId *SelfLogAutomationID `form:"automation_id,omitempty" json:"automation_id,omitempty"`
+
+	// RunId 按关联自动化运行 ID 过滤
+	RunId *SelfLogRunID `form:"run_id,omitempty" json:"run_id,omitempty"`
+
+	// ThreadId 按关联 T3 线程 ID 过滤
+	ThreadId *SelfLogThreadID `form:"thread_id,omitempty" json:"thread_id,omitempty"`
+
+	// ExtraEq 附加字段等值过滤，可重复，格式 `key=value`（json_extract 后 CAST 为文本再比较，数字值如 status=200 也可匹配）
+	ExtraEq *SelfLogExtraEq `form:"extra_eq,omitempty" json:"extra_eq,omitempty"`
+
+	// Keyword 关键词包含过滤（匹配 message 与 extra）
+	Keyword *SelfLogKeyword `form:"keyword,omitempty" json:"keyword,omitempty"`
+
+	// ExcludeKeyword 关键词排除过滤（同 keyword 口径）
+	ExcludeKeyword *SelfLogExcludeKeyword `form:"exclude_keyword,omitempty" json:"exclude_keyword,omitempty"`
+}
+
+// AggregateSelfLogsParamsBucket defines parameters for AggregateSelfLogs.
+type AggregateSelfLogsParamsBucket string
+
+// AggregateSelfLogsParamsLevel defines parameters for AggregateSelfLogs.
+type AggregateSelfLogsParamsLevel string
+
+// AggregateSelfLogsParamsMinLevel defines parameters for AggregateSelfLogs.
+type AggregateSelfLogsParamsMinLevel string
+
+// AggregateSelfLogs200JSONResponseBody defines parameters for AggregateSelfLogs.
+type AggregateSelfLogs200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 自身日志聚合结果
+	Data *SelfLogAggregateResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// TraceSelfLogsParams defines parameters for TraceSelfLogs.
+type TraceSelfLogsParams struct {
+	// RequestId 按请求 ID 过滤（响应头 X-Request-Id 的值）
+	RequestId *SelfLogRequestID `form:"request_id,omitempty" json:"request_id,omitempty"`
+
+	// RunId 按关联自动化运行 ID 过滤
+	RunId *SelfLogRunID `form:"run_id,omitempty" json:"run_id,omitempty"`
+
+	// Fields 返回字段选择，逗号分隔（如 `module,message,extra`）；id/time/level/message 始终返回，其余未选字段在条目中省略。未知字段名返回 40001
+	Fields *SelfLogFields `form:"fields,omitempty" json:"fields,omitempty"`
+}
+
+// TraceSelfLogs200JSONResponseBody defines parameters for TraceSelfLogs.
+type TraceSelfLogs200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 请求/运行链路日志（时间正序）
+	Data *SelfLogTraceResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
 }
 
 // ListT3Threads200JSONResponseBody_Data defines parameters for ListT3Threads.

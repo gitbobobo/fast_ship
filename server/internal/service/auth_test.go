@@ -1,6 +1,9 @@
 package service
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +54,7 @@ func setupAuthTestServices(t *testing.T) *authTestServices {
 	return &authTestServices{
 		db:               db,
 		cfg:              cfg,
-		authService:      NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg),
+		authService:      NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, nil),
 		jwtBlacklistRepo: jwtBlacklistRepo,
 		refreshTokenRepo: refreshTokenRepo,
 	}
@@ -211,6 +214,21 @@ func createPersistedRefreshToken(t *testing.T, db *gorm.DB, userID string, expir
 	}
 
 	return "fsr_" + raw
+}
+
+func TestLoginFailureDoesNotLogAttemptedLogin(t *testing.T) {
+	services := setupAuthTestServices(t)
+	var buf bytes.Buffer
+	services.authService.logger = slog.New(slog.NewJSONHandler(&buf, nil))
+
+	probe := "secret-username-should-not-leak"
+	_, err := services.authService.Login(context.Background(), &LoginRequest{Login: probe, Password: "wrong"})
+	if err == nil {
+		t.Fatalf("expected login failure")
+	}
+	if strings.Contains(buf.String(), probe) {
+		t.Fatalf("登录失败不应把尝试的登录名写入无归属日志: %s", buf.String())
+	}
 }
 
 func mustCreateRefreshTokenRecord(t *testing.T, db *gorm.DB, userID string, expiresAt time.Time, revokedAt *time.Time) *model.RefreshToken {

@@ -42,6 +42,7 @@ func RequireRunToken(agent *service.AutomationAgentService, requireLive bool) gi
 		c.Set(ContextKeyUserID, identity.UserID)
 		c.Set(ContextKeyRunID, identity.RunID)
 		c.Set(ContextKeyAuthType, AuthTypeRunToken)
+		BindRequestUser(c)
 		c.Next()
 	}
 }

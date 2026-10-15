@@ -200,7 +200,7 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 	s.deleteIssueAssetFiles(assetPathsToDelete)
 
 	if _, err := s.mirror.syncTimeline(ctx, client, stored, createdIssue.GetNumber()); err != nil {
-		s.logger.Warn("sync timeline after creating github issue failed", zap.String("issue_id", stored.ID), zap.Error(err))
+		s.logger.With(zap.String("user_id", userID)).Warn("sync timeline after creating github issue failed", zap.String("issue_id", stored.ID), zap.Error(err))
 	}
 
 	meta, err := s.loadInternalMeta(stored.ID)
@@ -424,7 +424,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	}
 	if req.Body != nil {
 		if err := s.reconcileIssueAssets(issue.ID, *req.Body); err != nil {
-			s.logger.Warn("reconcile issue assets failed", zap.String("issue_id", issue.ID), zap.Error(err))
+			s.logger.With(zap.String("user_id", userID)).Warn("reconcile issue assets failed", zap.String("issue_id", issue.ID), zap.Error(err))
 		}
 	}
 
@@ -506,7 +506,7 @@ func (s *IssueService) UploadInternalIssueAsset(issueID, userID, fileName string
 		return nil, errs.ErrInternal
 	}
 
-	s.logger.Info("issue asset uploaded",
+	s.logger.With(zap.String("user_id", userID)).Info("issue asset uploaded",
 		zap.String("action", "upload_issue_asset"),
 		zap.String("issue_id", issueID),
 		zap.String("user_id", userID),

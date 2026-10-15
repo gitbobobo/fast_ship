@@ -8380,3 +8380,196 @@ commit_id 由服务端取本运行的 head SHA，不接受请求传入。
 | 401 | 运行令牌无效/过期/已消费（40106） |
 | 403 | 凭证类型不允许（40304） |
 | 500 | 服务器内部错误（50000） |
+
+## self-logs
+
+Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人归属及显式系统行（无主行默认不可见）；供代理排查 Fast Ship 自身问题
+
+### GET `/api/self-logs`
+
+<!-- operationId: listSelfLogs -->
+
+分页查询 Fast Ship 自身日志（slog 采集，独立日志库）
+
+只读查询 Fast Ship 服务端自身的结构化日志（INT-94，与 /projects/:id/logs 的业务日志无关）。
+可见范围：当前用户归属的日志（user_id 等于调用者），以及显式标记的系统行（无业务关联列的进程级启动日志）。
+无归属且未标系统的行（解析失败、键冲突、漏标）对任何认证用户均不可见。请求路径日志均带 user_id。
+传入他人 user_id 过滤只会得到空结果。游标为键集分页（时间+ID），插入不影响翻页稳定性；
+next_cursor 为 null 表示没有更多。
+
+**鉴权**：JWT+API Key
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `start_time` | string（date-time） | 否 | 起始时间（含），RFC3339 |
+| `end_time` | string（date-time） | 否 | 结束时间（含），RFC3339 |
+| `level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 精确级别过滤 |
+| `min_level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准） |
+| `modules` | string | 否 | 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段 |
+| `request_id` | string | 否 | 按请求 ID 过滤（响应头 X-Request-Id 的值） |
+| `user_id` | string | 否 | 按归属用户过滤；仅限本人，他人 ID 只会得到空结果 |
+| `project_id` | string | 否 | 按关联项目 ID 过滤 |
+| `issue_id` | string | 否 | 按关联 Issue ID 过滤 |
+| `automation_id` | string | 否 | 按关联自动化 ID 过滤 |
+| `run_id` | string | 否 | 按关联自动化运行 ID 过滤 |
+| `thread_id` | string | 否 | 按关联 T3 线程 ID 过滤 |
+| `extra_eq` | string | 否 | 附加字段等值过滤，可重复，格式 `key=value`（json_extract 后 CAST 为文本再比较，数字值如 status=200 也可匹配） |
+| `keyword` | string | 否 | 关键词包含过滤（匹配 message 与 extra） |
+| `exclude_keyword` | string | 否 | 关键词排除过滤（同 keyword 口径） |
+| `cursor` | string | 否 | 分页游标；取上一页响应的 next_cursor |
+| `limit` | integer（1..500，默认 100） | 否 | 单页条数；越界（<1 或 >500）回落为 100 |
+| `order` | string（enum: asc \| desc，默认 desc） | 否 | 按时间排序方向；游标内含方向，翻页时不允许改变 |
+| `fields` | string | 否 | 返回字段选择，逗号分隔（如 `module,message,extra`）；id/time/level/message 始终返回，其余未选字段在条目中省略。未知字段名返回 40001 |
+
+**成功响应**
+
+**200** 日志分页列表（含下一页游标提示）
+
+`data`：
+
+自身日志分页（键集游标；next_cursor 为 null 表示没有更多）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | integer（int64） | 是 | 存储行 ID；与时间联合构成游标定位 |
+| `items[].time` | string（date-time） | 是 |  |
+| `items[].level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 是 |  |
+| `items[].module` | string | 否 | 产生日志的模块（http / automation / t3 / github / auth / api_key 等） |
+| `items[].message` | string | 是 |  |
+| `items[].request_id` | string | 否 |  |
+| `items[].user_id` | string | 否 |  |
+| `items[].project_id` | string | 否 |  |
+| `items[].issue_id` | string | 否 |  |
+| `items[].automation_id` | string | 否 |  |
+| `items[].run_id` | string | 否 |  |
+| `items[].thread_id` | string | 否 |  |
+| `items[].extra` | object | 否 | 其余结构化字段（JSON 对象）；未选入 fields 时省略 |
+| `next_cursor` | string（可空） | 是 | 下一页游标；没有更多时为 null |
+| `has_more` | boolean | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 凭证类型不允许（40301：fsr_ 运行令牌/刷新令牌无权查询自身日志） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/self-logs/aggregate`
+
+<!-- operationId: aggregateSelfLogs -->
+
+按模块/级别/时间桶聚合统计自身日志条数
+
+过滤条件与 GET /api/self-logs 完全一致，对命中条数按 `by` 维度组合分组计数；
+`by` 可多选（逗号分隔）；含 time 时 bucket 缺省为 minute（minute/hour）。
+可见范围与列表端点相同（本人归属 + 显式系统行；无主行不可见）。按时间桶聚合时保留最近 2000 个桶（超出 truncated=true）。
+
+**鉴权**：JWT+API Key
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `by` | string | 是 | 聚合维度，逗号分隔组合，取值 module / level / time（如 `by=module,level`） |
+| `bucket` | string（enum: minute \| hour，默认 minute） | 否 | 时间桶粒度；仅 by 含 time 时生效 |
+| `start_time` | string（date-time） | 否 | 起始时间（含），RFC3339 |
+| `end_time` | string（date-time） | 否 | 结束时间（含），RFC3339 |
+| `level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 精确级别过滤 |
+| `min_level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准） |
+| `modules` | string | 否 | 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段 |
+| `request_id` | string | 否 | 按请求 ID 过滤（响应头 X-Request-Id 的值） |
+| `user_id` | string | 否 | 按归属用户过滤；仅限本人，他人 ID 只会得到空结果 |
+| `project_id` | string | 否 | 按关联项目 ID 过滤 |
+| `issue_id` | string | 否 | 按关联 Issue ID 过滤 |
+| `automation_id` | string | 否 | 按关联自动化 ID 过滤 |
+| `run_id` | string | 否 | 按关联自动化运行 ID 过滤 |
+| `thread_id` | string | 否 | 按关联 T3 线程 ID 过滤 |
+| `extra_eq` | string | 否 | 附加字段等值过滤，可重复，格式 `key=value`（json_extract 后 CAST 为文本再比较，数字值如 status=200 也可匹配） |
+| `keyword` | string | 否 | 关键词包含过滤（匹配 message 与 extra） |
+| `exclude_keyword` | string | 否 | 关键词排除过滤（同 keyword 口径） |
+
+**成功响应**
+
+**200** 聚合行（行数上限 2000；按桶时间倒序截断，truncated=true 表示还有更早的桶）
+
+`data`：
+
+自身日志聚合结果
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `rows` | object[] | 是 |  |
+| `rows[].count` | integer | 是 |  |
+| `rows[].module` | string | 否 |  |
+| `rows[].level` | string | 否 |  |
+| `rows[].time_bucket` | string（date-time） | 否 | 时间桶起点（对齐分钟/小时），RFC3339 |
+| `truncated` | boolean | 是 | 超过单次聚合上限（2000 行）被截断；按时间桶时保留的是最近的桶 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 凭证类型不允许（40301） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/self-logs/trace`
+
+<!-- operationId: traceSelfLogs -->
+
+按请求 ID 或 run ID 查询整条链路日志
+
+返回该请求/运行从开始到结束的全部日志（时间正序）。可见范围与列表端点相同（本人归属 + 显式系统行；无主行不可见）。
+request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即查询键，
+失败请求（panic/5xx）的条目携带堆栈。上限 1000 条；超出时保留最新 1000 条（时间正序），truncated=true。
+
+**鉴权**：JWT+API Key
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `request_id` | string | 否 | 按请求 ID 过滤（响应头 X-Request-Id 的值） |
+| `run_id` | string | 否 | 按关联自动化运行 ID 过滤 |
+| `fields` | string | 否 | 返回字段选择，逗号分隔（如 `module,message,extra`）；id/time/level/message 始终返回，其余未选字段在条目中省略。未知字段名返回 40001 |
+
+**成功响应**
+
+**200** 链路日志（时间正序；截断时 truncated=true）
+
+`data`：
+
+请求/运行链路日志（时间正序）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | integer（int64） | 是 | 存储行 ID；与时间联合构成游标定位 |
+| `items[].time` | string（date-time） | 是 |  |
+| `items[].level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 是 |  |
+| `items[].module` | string | 否 | 产生日志的模块（http / automation / t3 / github / auth / api_key 等） |
+| `items[].message` | string | 是 |  |
+| `items[].request_id` | string | 否 |  |
+| `items[].user_id` | string | 否 |  |
+| `items[].project_id` | string | 否 |  |
+| `items[].issue_id` | string | 否 |  |
+| `items[].automation_id` | string | 否 |  |
+| `items[].run_id` | string | 否 |  |
+| `items[].thread_id` | string | 否 |  |
+| `items[].extra` | object | 否 | 其余结构化字段（JSON 对象）；未选入 fields 时省略 |
+| `truncated` | boolean | 是 | 超过单次链路上限（1000 条）被截断；保留的是最新 1000 条 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 凭证类型不允许（40301） |
+| 500 | 服务器内部错误（50000） |

@@ -199,7 +199,7 @@ func setupAuthMiddlewareTest(t *testing.T) *authMiddlewareEnv {
 	userRepo := repository.NewUserRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, nil)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 
 	router := gin.New()

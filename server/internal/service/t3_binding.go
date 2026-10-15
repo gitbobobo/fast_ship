@@ -90,7 +90,7 @@ func (s *T3BindingService) discoverEnvironmentProjects(ctx context.Context, env 
 	item.Projects = mergeT3DiscoveredProjects(snaps)
 	if snaps.ArchiveErr != nil {
 		// 归档面失败不推翻活跃面结果（G1）：活跃项目照常返回，环境标 degraded。
-		s.logger.Warn("t3 archived shell snapshot read failed during project discovery",
+		s.logger.With(zap.String("user_id", env.UserID)).Warn("t3 archived shell snapshot read failed during project discovery",
 			zap.String("environment_id", env.ID), zap.Error(snaps.ArchiveErr))
 		item.Status = T3EnvironmentStatusDegraded
 		item.Error = api.NonEmpty("归档项目暂不可读")

@@ -1,19 +1,27 @@
 package service
 
 import (
+	"context"
+	"log/slog"
+
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/selflog"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 )
 
 type ApiKeyService struct {
 	apiKeyRepo *repository.ApiKeyRepository
+	logger     *slog.Logger
 }
 
-func NewApiKeyService(apiKeyRepo *repository.ApiKeyRepository) *ApiKeyService {
-	return &ApiKeyService{apiKeyRepo: apiKeyRepo}
+func NewApiKeyService(apiKeyRepo *repository.ApiKeyRepository, logger *slog.Logger) *ApiKeyService {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ApiKeyService{apiKeyRepo: apiKeyRepo, logger: logger}
 }
 
 // toApiKeyResponse 把存储模型投影为契约类型；ApiKeyCreated 仅在创建响应中
@@ -30,7 +38,15 @@ func toApiKeyResponse(key model.ApiKey) api.ApiKey {
 	}
 }
 
-func (s *ApiKeyService) Create(userID string, req *CreateApiKeyRequest) (*ApiKeyResponse, error) {
+func (s *ApiKeyService) log(ctx context.Context) *slog.Logger {
+	l := selflog.LoggerOr(ctx, s.logger)
+	if selflog.LoggerFromContext(ctx) != nil {
+		return l.With(slog.String("module", "api_key"))
+	}
+	return l
+}
+
+func (s *ApiKeyService) Create(ctx context.Context, userID string, req *CreateApiKeyRequest) (*ApiKeyResponse, error) {
 	raw, err := GenerateApiKeyRaw()
 	if err != nil {
 		return nil, errs.ErrInternal
@@ -51,6 +67,13 @@ func (s *ApiKeyService) Create(userID string, req *CreateApiKeyRequest) (*ApiKey
 	if err := s.apiKeyRepo.Create(apiKey); err != nil {
 		return nil, errs.ErrInternal
 	}
+
+	// 只记元信息，明文 key 不落日志（响应里也仅此一次返回）。
+	s.log(ctx).Info("创建 API Key",
+		slog.String("user_id", userID),
+		slog.String("api_key_id", apiKey.ID),
+		slog.String("name", apiKey.Name),
+	)
 
 	resp := api.ApiKeyCreated{
 		Id:         apiKey.ID,
@@ -77,6 +100,13 @@ func (s *ApiKeyService) List(userID string) ([]api.ApiKey, error) {
 	return result, nil
 }
 
-func (s *ApiKeyService) Delete(id, userID string) error {
-	return s.apiKeyRepo.Delete(id, userID)
+func (s *ApiKeyService) Delete(ctx context.Context, id, userID string) error {
+	if err := s.apiKeyRepo.Delete(id, userID); err != nil {
+		return err
+	}
+	s.log(ctx).Info("删除 API Key",
+		slog.String("user_id", userID),
+		slog.String("api_key_id", id),
+	)
+	return nil
 }

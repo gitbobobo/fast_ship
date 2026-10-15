@@ -169,7 +169,7 @@ func (s *GitHubTokenService) Create(userID string, req *CreateGitHubTokenRequest
 	updated, appErr := s.runDetection(token, plaintext, now)
 	if appErr != nil {
 		// 检测通道故障（而非检测结果失败）不阻断保存：记录保持 unchecked。
-		s.logger.Warn("github token detection skipped", zap.String("token_id", token.ID), zap.String("error", appErr.Message))
+		s.logger.With(zap.String("user_id", userID)).Warn("github token detection skipped", zap.String("token_id", token.ID), zap.String("error", appErr.Message))
 	}
 	return s.respond(token, updated, userID)
 }
@@ -248,7 +248,7 @@ func (s *GitHubTokenService) Update(userID, id string, req *UpdateGitHubTokenReq
 
 	if replacing {
 		if _, appErr := s.runDetection(token, newPlaintext, time.Now().UTC()); appErr != nil {
-			s.logger.Warn("github token detection skipped", zap.String("token_id", token.ID), zap.String("error", appErr.Message))
+			s.logger.With(zap.String("user_id", userID)).Warn("github token detection skipped", zap.String("token_id", token.ID), zap.String("error", appErr.Message))
 		}
 	}
 	return s.respond(token, true, userID)
@@ -329,7 +329,7 @@ func (s *GitHubTokenService) runDetection(token *model.UserGitHubToken, plaintex
 func (s *GitHubTokenService) decrypt(token *model.UserGitHubToken) (string, *errs.AppError) {
 	plaintext, err := crypto.Decrypt(token.TokenEncrypted, []byte(s.cfg.Encryption.Key))
 	if err != nil {
-		s.logger.Error("decrypt github token failed", zap.String("token_id", token.ID), zap.Error(err))
+		s.logger.With(zap.String("user_id", token.UserID)).Error("decrypt github token failed", zap.String("token_id", token.ID), zap.Error(err))
 		return "", errs.New(errs.ErrInternal.Code, "GitHub Token 解密失败，请替换该 Token")
 	}
 	return string(plaintext), nil

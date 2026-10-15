@@ -37,7 +37,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	result, err := h.authService.Register(&req)
+	result, err := h.authService.Register(c.Request.Context(), &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -53,7 +53,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	result, err := h.authService.Login(&req)
+	result, err := h.authService.Login(c.Request.Context(), &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return
@@ -142,7 +142,7 @@ func (h *AuthHandler) UpdatePassword(c *gin.Context) {
 	}
 
 	userID := middleware.GetUserID(c)
-	if err := h.authService.UpdatePassword(userID, &req); err != nil {
+	if err := h.authService.UpdatePassword(c.Request.Context(), userID, &req); err != nil {
 		middleware.HandleAppError(c, err)
 		return
 	}

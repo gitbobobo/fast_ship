@@ -228,7 +228,7 @@ func (s *AIService) SuggestIssueChecklist(ctx context.Context, issueID, userID, 
 		return nil, err
 	}
 
-	s.logger.Info("issue checklist suggestions generated",
+	s.logger.With(zap.String("user_id", userID)).Info("issue checklist suggestions generated",
 		zap.String("action", "suggest_checklist"),
 		zap.String("issue_id", issueID),
 		zap.String("user_id", userID),
