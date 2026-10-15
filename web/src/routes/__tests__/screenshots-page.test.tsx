@@ -273,6 +273,29 @@ describe("ScreenshotsPage", () => {
     expect(canvasProps().scopeFilter.platform).toEqual(["web"]);
   });
 
+  it("matches URL theme=__NONE__ against untagged screens like the server", async () => {
+    mockScreens([
+      makeScreen({
+        id: "tagged",
+        screen_key: "home",
+        theme: "dark",
+        uploaded_at: "2026-10-05T00:00:00Z",
+      }),
+      makeScreen({
+        id: "untagged",
+        screen_key: "settings",
+        uploaded_at: "2026-10-04T00:00:00Z",
+      }),
+    ]);
+    renderPage("/screenshots?theme=__NONE__");
+
+    await waitFor(() => {
+      expect(canvasProps().screens.map((s) => s.id)).toEqual(["untagged"]);
+    });
+    // 画布、面板、批量 payload 同源：哨兵按服务端 EqualFold 口径归位
+    expect(canvasProps().scopeFilter.theme).toEqual(["__none__"]);
+  });
+
   it("filters the canvas by dimension selections and encodes them in the URL", async () => {
     const user = userEvent.setup();
     renderPage();

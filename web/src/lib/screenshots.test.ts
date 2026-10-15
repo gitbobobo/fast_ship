@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   SCREENSHOT_NONE,
   canonicalizeScreenshotLocale,
+  canonicalizeScreenshotPlatform,
   decodeDimensionFilter,
   deriveDimensionOptions,
   dimensionLabel,
@@ -341,6 +342,26 @@ describe("canonicalizeScreenshotLocale", () => {
     for (const [raw, want] of Object.entries(SHARED_LOCALE_VECTORS)) {
       expect(canonicalizeScreenshotLocale(raw)).toBe(want);
     }
+  });
+});
+
+describe("canonicalizeScreenshotPlatform", () => {
+  it("folds ASCII case and trims like the server", () => {
+    expect(canonicalizeScreenshotPlatform(" WEB ")).toBe("web");
+    expect(canonicalizeScreenshotPlatform("Harmony")).toBe("harmony");
+  });
+
+  it("keeps non-ASCII values verbatim except case", () => {
+    expect(canonicalizeScreenshotPlatform("设置")).toBe("设置");
+  });
+
+  it("matches Go strings.ToLower where JS toLowerCase diverges", () => {
+    // İ：全量映射是 i + 组合上点，Go 简单映射是 i
+    expect(canonicalizeScreenshotPlatform("\u0130")).toBe("i");
+    // 词尾 Σ：全量映射按上下文给 ς，Go 简单映射一律 σ
+    expect(canonicalizeScreenshotPlatform("\u039f\u0394\u039f\u03a3")).toBe(
+      "\u03bf\u03b4\u03bf\u03c3",
+    );
   });
 });
 

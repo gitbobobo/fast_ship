@@ -98,6 +98,20 @@ export function canonicalizeScreenshotLocale(value: string): string {
     .join("-");
 }
 
+/**
+ * 按服务端 strings.ToLower 的大小写口径折叠平台值：Go 逐字符做简单大小写映射，
+ * JS toLowerCase 的全量映射只在两类字符上与它分叉——U+0130（İ，全量映射多出
+ * 组合上点）与词尾 Σ（全量映射按上下文给 ς）。先行归位这两类，其余字符两侧
+ * 输出一致，URL 共享/手输的过滤值与库存规范形逐字符相同。
+ */
+export function canonicalizeScreenshotPlatform(value: string): string {
+  return value
+    .trim()
+    .replace(/\u0130/g, "i")
+    .toLowerCase()
+    .replace(/\u03c2/g, "\u03c3");
+}
+
 /** 单维度是否命中：空过滤放行全部；命中任一选中值或（选中未标注桶时）NULL */
 export function matchesDimension(
   value: string | null,

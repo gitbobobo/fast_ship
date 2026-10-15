@@ -20,6 +20,7 @@ import { copyWithToast } from "@/lib/copy";
 import { buildAnnotationPrompt } from "@/lib/annotation-prompt";
 import {
   canonicalizeScreenshotLocale,
+  canonicalizeScreenshotPlatform,
   decodeDimensionFilter,
   deriveDimensionOptions,
   encodeDimensionFilter,
@@ -75,17 +76,22 @@ export default function ScreenshotsPage() {
       (v) => v === "open" || v === "resolved",
     );
     return {
-      // platform 库存是服务端小写化后的值，URL 共享/手输的大写在本地
-      // 匹配前折叠，避免画布显示空而批量/提示词打到实际命中的范围
-      platform: decodeDimensionFilter(searchParams.get("platform")).map((v) =>
-        v.trim().toLowerCase(),
+      // platform 库存是服务端 strings.ToLower 简单映射后的值，URL 共享/手输的
+      // 值按同一口径折叠，避免画布显示空而批量/提示词打到实际命中的范围
+      platform: decodeDimensionFilter(searchParams.get("platform")).map(
+        canonicalizeScreenshotPlatform,
       ),
       // 与服务端 normalizeScreenshotLocale 同一大小写口径，画布/面板/批量
       // payload 都读这份 filters，避免 URL `en-us` 展示空而批量打到 en-US
       locale: decodeDimensionFilter(searchParams.get("locale")).map(
         canonicalizeScreenshotLocale,
       ),
-      theme: decodeDimensionFilter(searchParams.get("theme")),
+      // 服务端 theme 词表大小写敏感（light|dark），其余值保持原样——本地折叠
+      // 成 light 会让画布命中而服务端过滤 400；只有未标注哨兵按大小写不敏感
+      // 归位（与服务端 EqualFold 摘哨兵同一口径）
+      theme: decodeDimensionFilter(searchParams.get("theme")).map((v) =>
+        v.toLowerCase() === SCREENSHOT_NONE ? SCREENSHOT_NONE : v,
+      ),
       status: status.length > 0 ? status : ["open"],
     };
   }, [searchParams]);
