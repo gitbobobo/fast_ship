@@ -123,15 +123,9 @@ func (s *PRReviewService) stopOneCancelledRun(run *model.AutomationRun, now time
 func (s *PRReviewService) OnLaunchCancelled(run *model.AutomationRun, now time.Time) {
 	// CreateThread 返回后才发现已取消：令牌可能刚签发、尚未被 webhook 消费。
 	_ = s.runs.ConsumeRunTokensTx(s.db, []string{run.ID}, now)
-	if s.threads == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), automationPostCommandBudget)
-	defer cancel()
-	if _, err := s.threads.StopThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
-		s.logger.Warn("取消刚启动的审查线程失败",
-			zap.String("run_id", run.ID), zap.String("thread_id", run.ThreadID), zap.Error(err))
-	}
+	// 与 stopCancelledPRThreads 共用 stop_attempted_at：先占标记再中断，避免
+	// 随后的 SyncPendingReviews 再发一次 run.interrupt。
+	s.stopOneCancelledRun(run, now)
 }
 
 // ---- 评论 + check 同步 ----

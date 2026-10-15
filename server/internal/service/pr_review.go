@@ -233,7 +233,9 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 		return nil
 	}
 
-	// 仓库范围：GitHub App 安装到的仓库中，已和 Fast Ship 项目关联的才审查。
+	// 仓库范围：GitHub App 安装到的仓库中，已和 Fast Ship 项目关联、且该项目
+	// 绑定了 GitHub Token 的才审查——只填仓库名、不持有 Token 的用户不能借用
+	// 共享 App 安装令牌在别人的仓上发评论 / check / REQUEST_CHANGES。
 	linked, err := listProjectsByGitHubRepoTx(tx, repoFullName)
 	if err != nil {
 		return err
@@ -335,6 +337,9 @@ func matchPRRules(tx *gorm.DB, triggerType model.AutomationTriggerType, projects
 }
 
 // listProjectsByGitHubRepoTx 反查关联项目（owner/repo 大小写不敏感）。
+// 必须绑定公开或代码仓库 Token：项目创建允许「只填仓库不选 Token」，那种行
+// 不能当作对本仓的授权。webhook 事务内不调 GitHub，无法现场核对该 Token 是否
+// 真能访问此仓——那是项目绑定时的既有缺口。
 func listProjectsByGitHubRepoTx(tx *gorm.DB, repoFullName string) ([]model.Project, error) {
 	owner, name, ok := strings.Cut(repoFullName, "/")
 	if !ok {
@@ -344,7 +349,16 @@ func listProjectsByGitHubRepoTx(tx *gorm.DB, repoFullName string) ([]model.Proje
 	err := tx.
 		Where("LOWER(github_owner) = LOWER(?) AND LOWER(github_repo) = LOWER(?)", owner, name).
 		Find(&projects).Error
-	return projects, err
+	if err != nil {
+		return nil, err
+	}
+	out := projects[:0]
+	for i := range projects {
+		if projects[i].PublicGitHubTokenID != "" || projects[i].CodeGitHubTokenID != "" {
+			out = append(out, projects[i])
+		}
+	}
+	return out, nil
 }
 
 // ---- 开轮与排队提升 ----

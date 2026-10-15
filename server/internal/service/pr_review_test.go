@@ -226,13 +226,14 @@ func (e *prReviewTestEnv) createUserWithRepo(t *testing.T, owner, repo string) (
 		t.Fatalf("create user: %v", err)
 	}
 	project := &model.Project{
-		ID:          uuid.NewString(),
-		UserID:      user.ID,
-		Name:        "p-" + uuid.NewString()[:8],
-		GithubOwner: owner,
-		GithubRepo:  repo,
-		CreatedAt:   time.Now().UTC(),
-		UpdatedAt:   time.Now().UTC(),
+		ID:                  uuid.NewString(),
+		UserID:              user.ID,
+		Name:                "p-" + uuid.NewString()[:8],
+		GithubOwner:         owner,
+		GithubRepo:          repo,
+		PublicGitHubTokenID: "tok-pr-review",
+		CreatedAt:           time.Now().UTC(),
+		UpdatedAt:           time.Now().UTC(),
 	}
 	if err := e.db.Create(project).Error; err != nil {
 		t.Fatalf("create project: %v", err)
@@ -357,6 +358,46 @@ func TestWebhook_IgnoresDraftForkUnlinked(t *testing.T) {
 	}
 	if n := countDebounces(t, env.db); n != 0 {
 		t.Fatalf("debounces = %d, want 0", n)
+	}
+}
+
+func TestWebhook_IgnoresRepoWithoutGitHubToken(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, project := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(a *model.Automation) { a.DebounceSeconds = 0 })
+	if err := env.db.Model(project).Update("public_github_token_id", "").Error; err != nil {
+		t.Fatalf("clear token: %v", err)
+	}
+
+	if err := env.handleWebhook(t, "d-notoken", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	if n := countRuns(t, env.db, "1=1"); n != 0 {
+		t.Fatalf("runs = %d, want 0 (unbound repo is not authorized)", n)
+	}
+}
+
+func TestOnLaunchCancelled_MarksStopAttempted(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	run := env.seedPRRun(t, a, "octocat/hw", 1, "sha-1", model.AutomationRunCancelled)
+	now := nowUTC()
+	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
+		Updates(map[string]any{"dispatch_started_at": now, "finished_at": now, "error_code": "superseded"}).Error; err != nil {
+		t.Fatalf("mark claimed: %v", err)
+	}
+	if err := env.db.Where("id = ?", run.ID).First(run).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+
+	env.pr.OnLaunchCancelled(run, now)
+	if len(env.stopper.stops) != 1 || env.stopper.stops[0] != run.ThreadID {
+		t.Fatalf("stops = %v, want [%s]", env.stopper.stops, run.ThreadID)
+	}
+	env.pr.SyncPendingReviews(now.Add(time.Second))
+	if len(env.stopper.stops) != 1 {
+		t.Fatalf("stops after sync = %d, want 1 (stop_attempted_at)", len(env.stopper.stops))
 	}
 }
 

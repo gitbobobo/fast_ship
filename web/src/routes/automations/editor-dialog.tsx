@@ -390,10 +390,16 @@ export function AutomationEditorDialog({
                 <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border p-2">
                   {providers.flatMap((provider) =>
                     provider.models.map((model) => {
-                      const sel: AutomationModelSelection = {
-                        instance_id: provider.instanceId,
+                      const resolved = resolveModel(providers, t3Project, {
+                        instanceId: provider.instanceId,
                         model: model.slug,
-                      };
+                        efforts: {},
+                      });
+                      const sel =
+                        toAutomationModelSelection(buildModelSelection(resolved)) ?? {
+                          instance_id: provider.instanceId,
+                          model: model.slug,
+                        };
                       const checked = (form.model_selections ?? []).some(
                         (s) => sameModel(s, sel),
                       );

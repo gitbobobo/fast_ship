@@ -15,7 +15,9 @@
   不处理 ready_for_review / reopened / closed。draft 打开后标可审的 PR，等到
   下一次非 draft、非 fork 的 synchronize。
 - 仓库范围：GitHub App 安装到的仓库中，`projects.github_owner/github_repo`
-  已关联（大小写不敏感反查）的才审查；未关联项目 → 202 忽略，不取消、不开轮。
+  已关联（大小写不敏感反查）且该项目绑定了公开或代码仓库 Token 的才审查。
+  未关联、或只填仓库名未绑 Token → 202 忽略，不取消、不开轮。webhook 事务内
+  不调 GitHub，不现场验证该 Token 对该仓的权限。
 - 规则匹配：`trigger_type` 必须与 action 一致（opened 规则不响应 synchronize，
   反之亦然）；`issue_project_id` 非空则必须匹配该项目，为空则该用户任一关联项目
   命中即可；同一 automation id 只开一轮。
