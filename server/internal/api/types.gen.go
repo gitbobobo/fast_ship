@@ -1321,6 +1321,9 @@ type Bot struct {
 	Model     string `json:"model"`
 	Name      string `json:"name"`
 
+	// NextEventSeq 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史
+	NextEventSeq int64 `json:"next_event_seq"`
+
 	// PersonaPrompt 人设原文；平台规则在服务端拼接，不在此回显
 	PersonaPrompt         string `json:"persona_prompt"`
 	PlatformPromptVersion int64  `json:"platform_prompt_version"`

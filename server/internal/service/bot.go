@@ -84,7 +84,8 @@ func NewBotService(
 
 // ---------- 响应类型 ----------
 
-// BotResponse 管理面响应；key 全链路脱敏，只回末四位。
+// BotResponse 管理面响应；key 全链路脱敏，只回末四位。NextEventSeq 是
+// 事件账本水位：详情页订阅以它-1 起读，与消息快照衔接（不从 0 重放）。
 type BotResponse struct {
 	ID                    string `json:"id"`
 	Name                  string `json:"name"`
@@ -95,6 +96,7 @@ type BotResponse struct {
 	BaseURL               string `json:"base_url"`
 	Model                 string `json:"model"`
 	APIKeyLast4           string `json:"api_key_last4"`
+	NextEventSeq          int64  `json:"next_event_seq"`
 	CreatedAt             string `json:"created_at"`
 	UpdatedAt             string `json:"updated_at"`
 }
@@ -110,6 +112,7 @@ func botResponseOf(b *model.Bot) BotResponse {
 		BaseURL:               b.BaseURL,
 		Model:                 b.Model,
 		APIKeyLast4:           b.APIKeyLast4,
+		NextEventSeq:          b.NextEventSeq,
 		CreatedAt:             b.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt:             b.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}

@@ -11021,7 +11021,7 @@ components:
 
     Bot:
       type: object
-      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, base_url, model, api_key_last4, created_at, updated_at]
+      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, base_url, model, api_key_last4, next_event_seq, created_at, updated_at]
       properties:
         id:
           type: string
@@ -11048,6 +11048,11 @@ components:
         api_key_last4:
           type: string
           description: API Key 末四位；明文任何端点都不回显
+        next_event_seq:
+          type: integer
+          format: int64
+          description: 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq，
+            与详情快照衔接，不从 0 重放历史
         created_at:
           type: string
           format: date-time

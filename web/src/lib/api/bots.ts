@@ -11,9 +11,9 @@ export interface Bot {
   model: string;
   /** 已配置密钥的末四位；空串表示尚未配置。 */
   api_key_last4: string;
-  /** 消息/事件水位；当前契约尚未回传，缺失时订阅游标回退 0 全量补读。 */
+  /** 消息/事件账本水位（下一条的 seq）；订阅游标取 next_event_seq - 1。 */
   next_message_seq?: number;
-  next_event_seq?: number;
+  next_event_seq: number;
   created_at: string;
   updated_at: string;
 }

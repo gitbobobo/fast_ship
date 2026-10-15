@@ -8604,6 +8604,7 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 | `items[].base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `items[].model` | string | 是 |  |
 | `items[].api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `items[].next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 
@@ -8654,6 +8655,7 @@ API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不�
 | `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `model` | string | 是 |  |
 | `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -8745,6 +8747,7 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `model` | string | 是 |  |
 | `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -8805,6 +8808,7 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `model` | string | 是 |  |
 | `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
