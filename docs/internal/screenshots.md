@@ -56,7 +56,7 @@
 
 ## 迁移（INT-99）
 
-`server/cmd/server/migrate_screenshots.go`，随服务启动自动执行，幂等可重复（versions 表消失后即空操作）：
+`server/cmd/server/migrate_screenshots.go`，随服务启动自动执行，幂等可重复（versions 表消失后折叠跳过，但待删队列的出队重试每次启动照常进行——清理失败的孤儿文件靠它最终删除）：
 
 - 每 screen 折叠为其最新版本（rowid 口径）的文件信息；
 - `group_name` 按 Go 侧与服务端写入相同的 `NormalizeScreenshotPlatform` 规则迁入 `platform`（trim+lowercase，空 → NULL）：合规值照常迁入；不合规值（含逗号、等于未标注哨兵 `__none__`、超 100 字符）platform 保持 NULL，原分组名追加进 `title`（title 为空则直接作为 title），分组信息不静默丢弃；规范化后为空的纯非空格空白值（如 `\n`，SQLite trim 只去空格）按未标注跳过；
