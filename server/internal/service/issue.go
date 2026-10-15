@@ -400,6 +400,16 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 	}
 	issue.UpdatedAt = time.Now().UTC()
 
+	// 事件归属用户在事务外解析：单连接池下闭包内再借连接会永久自锁（INT-97）。
+	ownerID := issue.AuthorUserID
+	if ownerID == "" {
+		project, err := s.projectRepo.FindByIDGlobal(issue.ProjectID)
+		if err != nil {
+			return nil, errs.ErrInternal
+		}
+		ownerID = project.UserID
+	}
+
 	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
 		if err := s.issueRepo.SaveTx(tx, issue); err != nil {
 			return err
@@ -415,7 +425,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			}
 		}
 		// 自动化事件（INT-90）：状态区分 state；标签只对新增发一次。
-		if err := s.emitInternalUpdateEvents(tx, issue, req, prevState, prevLabels, internalMeta); err != nil {
+		if err := s.emitInternalUpdateEventsTx(tx, ownerID, issue, req, prevState, prevLabels, internalMeta); err != nil {
 			return err
 		}
 		return nil
