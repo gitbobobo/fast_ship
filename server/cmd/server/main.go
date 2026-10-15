@@ -281,6 +281,9 @@ func main() {
 	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
 
+	// 业务库就绪后再注入归属解析器：注入前的入库日志只能是启动类（显式 system_scope）。
+	selfLogPipeline.SetOwnerResolver(service.NewSelfLogOwnerResolver(db))
+
 	// 模块化日志（INT-94）：按模块打上 module 字段，便于自身日志按模块检索。
 	githubLogger := zapLogger.With(zap.String("module", "github"))
 	t3Logger := zapLogger.With(zap.String("module", "t3"))
@@ -413,7 +416,7 @@ func main() {
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
-	appLogger.Info("服务启动", slog.String("addr", addr))
+	appLogger.Info("服务启动", slog.String("addr", addr), slog.Bool(selflog.AttrSystemScope, true))
 	if err := r.Run(addr); err != nil {
 		fatal("服务启动失败", err)
 	}

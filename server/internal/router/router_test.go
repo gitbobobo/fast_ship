@@ -935,6 +935,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 			t.Fatalf("start self log pipeline: %v", err)
 		}
 		t.Cleanup(selfLogPipeline.Close)
+		selfLogPipeline.SetOwnerResolver(service.NewSelfLogOwnerResolver(db))
 		appLogger = slog.New(selfLogPipeline.Handler())
 	}
 

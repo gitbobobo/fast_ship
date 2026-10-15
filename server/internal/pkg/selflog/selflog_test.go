@@ -286,6 +286,7 @@ func TestQueryFilterCombinations(t *testing.T) {
 		{Time: now.Add(-1 * time.Hour), Level: LevelError, Module: "automation", Message: "调度失败", AutomationID: "auto-1", RunID: "run-9", UserID: "u-2"},
 		{Time: now.Add(-30 * time.Minute), Level: LevelInfo, Module: "t3", Message: "线程启动", ThreadID: "th-1"},
 		{Time: now, Level: LevelError, Module: "github", Message: "同步失败 token=" + fakeSecret("ghp_", "AbCdEfGhIjKlMnOpQrSt") + "", UserID: "u-1"},
+		{Time: now.Add(time.Second), Level: LevelInfo, Module: "app", Message: "服务启动", SystemScope: true},
 	}
 	if err := store.Add(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -317,8 +318,8 @@ func TestQueryFilterCombinations(t *testing.T) {
 	if got := count(Filter{Keyword: "失败"}); got != 2 {
 		t.Errorf("关键词包含 = %d, want 2", got)
 	}
-	if got := count(Filter{ExcludeKw: "失败"}); got != 3 {
-		t.Errorf("关键词排除 = %d, want 3", got)
+	if got := count(Filter{ExcludeKw: "失败"}); got != 4 {
+		t.Errorf("关键词排除 = %d, want 4", got)
 	}
 	if got := count(Filter{RunID: "run-9"}); got != 1 {
 		t.Errorf("run_id 过滤 = %d, want 1", got)
@@ -327,7 +328,17 @@ func TestQueryFilterCombinations(t *testing.T) {
 		t.Errorf("extra 等值过滤 = %d, want 1", got)
 	}
 	if got := count(Filter{VisibleUserID: "u-1"}); got != 4 {
-		t.Errorf("可见性过滤 = %d, want 4 (3 条 u-1 + 1 条系统级)", got)
+		t.Errorf("可见性过滤 = %d, want 4 (3 条 u-1 + 1 条显式系统行)", got)
+	}
+	if got := count(Filter{VisibleUserID: "u-1", ThreadID: "th-1"}); got != 0 {
+		t.Errorf("带 thread_id 的无主行不应再当系统行公开 = %d, want 0", got)
+	}
+	sys, err := store.Query(ctx, Filter{VisibleUserID: "u-1", Keyword: "服务启动"}, "", 10, false)
+	if err != nil {
+		t.Fatalf("query system: %v", err)
+	}
+	if len(sys.Items) != 1 || !sys.Items[0].SystemScope {
+		t.Errorf("显式系统行应对 u-1 可见: %+v", sys.Items)
 	}
 
 	// 组合：模块 + 级别。
@@ -800,6 +811,137 @@ func TestCapacityAndWritePerformance(t *testing.T) {
 		t.Fatalf("5000 条写入耗时 %v 超出预期", elapsed)
 	}
 	t.Logf("容量: %d 条 / %d 字节, 平均 %d 字节/条, 写入耗时 %v", total, size, perEntry, elapsed)
+}
+
+func TestStoreRejectsSystemScopeOnBusinessRows(t *testing.T) {
+	p, store := testPipeline(t, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.Add(ctx, []Entry{
+		{Time: now, Level: LevelInfo, Message: "误标系统", ProjectID: "proj-1", SystemScope: true},
+		{Time: now.Add(time.Second), Level: LevelInfo, Message: "显式系统", SystemScope: true},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	p.Close()
+
+	all, err := store.Query(ctx, Filter{}, "", 10, true)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(all.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(all.Items))
+	}
+	var biz, sys *Entry
+	for i := range all.Items {
+		switch all.Items[i].Message {
+		case "误标系统":
+			biz = &all.Items[i]
+		case "显式系统":
+			sys = &all.Items[i]
+		}
+	}
+	if biz == nil || biz.SystemScope || biz.ProjectID != "proj-1" {
+		t.Fatalf("带关联列的行应强制非系统: %+v", biz)
+	}
+	if sys == nil || !sys.SystemScope {
+		t.Fatalf("无关联列的显式系统行应保留: %+v", sys)
+	}
+	visible, err := store.Query(ctx, Filter{VisibleUserID: "u-any"}, "", 10, true)
+	if err != nil {
+		t.Fatalf("visible: %v", err)
+	}
+	if len(visible.Items) != 1 || visible.Items[0].Message != "显式系统" {
+		t.Fatalf("误标业务行不得对所有认证用户公开: %+v", visible.Items)
+	}
+}
+
+func TestVisibilityPredicateSharedAcrossReads(t *testing.T) {
+	p, store := testPipeline(t, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if err := store.Add(ctx, []Entry{
+		{Time: now, Level: LevelInfo, Module: "http", Message: "owned", RequestID: "req-owned", UserID: "u-1"},
+		{Time: now.Add(time.Second), Level: LevelWarn, Module: "t3", Message: "hidden", RequestID: "req-hidden", ThreadID: "th-hidden"},
+		{Time: now.Add(2 * time.Second), Level: LevelInfo, Module: "app", Message: "boot", SystemScope: true},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	p.Close()
+
+	page, err := store.Query(ctx, Filter{VisibleUserID: "u-1"}, "", 10, true)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("list u-1 = %d, want 2 (owned+system)", len(page.Items))
+	}
+	page, err = store.Query(ctx, Filter{VisibleUserID: "u-2"}, "", 10, true)
+	if err != nil {
+		t.Fatalf("query u-2: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].Message != "boot" {
+		t.Fatalf("list u-2 应只见系统行: %+v", page.Items)
+	}
+
+	rows, _, err := store.Aggregate(ctx, Filter{VisibleUserID: "u-1"}, true, false, false, "")
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	byModule := map[string]int64{}
+	for _, row := range rows {
+		byModule[row.Module] = row.Count
+	}
+	if byModule["http"] != 1 || byModule["app"] != 1 || byModule["t3"] != 0 {
+		t.Fatalf("aggregate 应排除无主关联行: %+v", rows)
+	}
+
+	items, _, err := store.Trace(ctx, Filter{VisibleUserID: "u-1", RequestID: "req-owned"})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("trace owned = %d err=%v, want 1", len(items), err)
+	}
+	items, _, err = store.Trace(ctx, Filter{VisibleUserID: "u-1", RequestID: "req-hidden"})
+	if err != nil || len(items) != 0 {
+		t.Fatalf("trace hidden = %d err=%v, want 0", len(items), err)
+	}
+}
+
+func TestPipelineIngestsSystemScopeAttr(t *testing.T) {
+	p, store := testPipeline(t, nil)
+	logger := slog.New(p.Handler())
+	logger.Info("服务启动", slog.Bool(AttrSystemScope, true), slog.String("module", "app"))
+	logger.Info("带项目却误标系统", slog.Bool(AttrSystemScope, true), slog.String("project_id", "proj-x"))
+	p.Close()
+
+	page, err := store.Query(context.Background(), Filter{}, "", 10, true)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(page.Items))
+	}
+	var boot, biz *Entry
+	for i := range page.Items {
+		switch page.Items[i].Message {
+		case "服务启动":
+			boot = &page.Items[i]
+		case "带项目却误标系统":
+			biz = &page.Items[i]
+		}
+	}
+	if boot == nil || !boot.SystemScope {
+		t.Fatalf("启动行应入库为系统行: %+v", boot)
+	}
+	if biz == nil || biz.SystemScope || biz.ProjectID != "proj-x" {
+		t.Fatalf("带关联列的误标行应强制非系统: %+v", biz)
+	}
+	visible, err := store.Query(context.Background(), Filter{VisibleUserID: "u-1"}, "", 10, true)
+	if err != nil {
+		t.Fatalf("visible: %v", err)
+	}
+	if len(visible.Items) != 1 || visible.Items[0].Message != "服务启动" {
+		t.Fatalf("仅系统行应对任意认证用户可见: %+v", visible.Items)
+	}
 }
 
 // fakeSecret 运行时拼接出密钥形状的假值；脱敏断言依赖形状，

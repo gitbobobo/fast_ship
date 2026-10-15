@@ -15,7 +15,9 @@ import (
 var ErrInvalidCursor = errors.New("invalid self log cursor")
 
 // Filter 是列表/聚合/链路共用的过滤条件。VisibleUserID 非空时只返回
-// 归属该用户或无归属（进程级，如启动）的条目。请求路径日志必须带 user_id。
+// 归属该用户的条目，或显式系统行（system_scope=1 且无任何业务关联列）。
+// 空归属且未标系统的行（解析失败、键冲突、漏标）对任何认证用户均不可见。
+// VisibleUserID 为空时不收窄（仅内部调用；公开查询入口拒绝空 requester）。
 type Filter struct {
 	StartTime     *time.Time
 	EndTime       *time.Time
@@ -264,7 +266,10 @@ func applyFilter(db *gorm.DB, f Filter) *gorm.DB {
 		db = db.Where("CAST(json_extract(self_logs.extra, ?) AS TEXT) = ?", "$."+kv[0], kv[1])
 	}
 	if f.VisibleUserID != "" {
-		db = db.Where("user_id = ? OR user_id = ''", f.VisibleUserID)
+		db = db.Where(
+			"user_id = ? OR (system_scope = 1 AND user_id = '' AND project_id = '' AND issue_id = '' AND automation_id = '' AND run_id = '' AND thread_id = '')",
+			f.VisibleUserID,
+		)
 	}
 	return db
 }
@@ -323,5 +328,6 @@ func recordToEntry(r Record) Entry {
 		RunID:        r.RunID,
 		ThreadID:     r.ThreadID,
 		Extra:        extra,
+		SystemScope:  r.SystemScope != 0,
 	}
 }

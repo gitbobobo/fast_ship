@@ -8116,7 +8116,7 @@ kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一�
 
 ## self-logs
 
-Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人及系统级日志；供代理排查 Fast Ship 自身问题
+Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人归属及显式系统行（无主行默认不可见）；供代理排查 Fast Ship 自身问题
 
 ### GET `/api/self-logs`
 
@@ -8125,7 +8125,8 @@ Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独�
 分页查询 Fast Ship 自身日志（slog 采集，独立日志库）
 
 只读查询 Fast Ship 服务端自身的结构化日志（INT-94，与 /projects/:id/logs 的业务日志无关）。
-可见范围：当前用户归属的日志（user_id 等于调用者）与无归属的进程级日志（启动等）；请求路径日志均带 user_id。
+可见范围：当前用户归属的日志（user_id 等于调用者），以及显式标记的系统行（无业务关联列的进程级启动日志）。
+无归属且未标系统的行（解析失败、键冲突、漏标）对任何认证用户均不可见。请求路径日志均带 user_id。
 传入他人 user_id 过滤只会得到空结果。游标为键集分页（时间+ID），插入不影响翻页稳定性；
 next_cursor 为 null 表示没有更多。
 
@@ -8199,7 +8200,7 @@ next_cursor 为 null 表示没有更多。
 
 过滤条件与 GET /api/self-logs 完全一致，对命中条数按 `by` 维度组合分组计数；
 `by` 可多选（逗号分隔）；含 time 时 bucket 缺省为 minute（minute/hour）。
-可见范围与列表端点相同。按时间桶聚合时保留最近 2000 个桶（超出 truncated=true）。
+可见范围与列表端点相同（本人归属 + 显式系统行；无主行不可见）。按时间桶聚合时保留最近 2000 个桶（超出 truncated=true）。
 
 **鉴权**：JWT+API Key
 
@@ -8257,7 +8258,7 @@ next_cursor 为 null 表示没有更多。
 
 按请求 ID 或 run ID 查询整条链路日志
 
-返回该请求/运行从开始到结束的全部日志（时间正序）。
+返回该请求/运行从开始到结束的全部日志（时间正序）。可见范围与列表端点相同（本人归属 + 显式系统行；无主行不可见）。
 request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即查询键，
 失败请求（panic/5xx）的条目携带堆栈。上限 1000 条；超出时保留最新 1000 条（时间正序），truncated=true。
 

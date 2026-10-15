@@ -27,6 +27,7 @@ const (
 	AttrAutomationID = "automation_id"
 	AttrRunID        = "run_id"
 	AttrThreadID     = "thread_id"
+	AttrSystemScope  = "system_scope"
 )
 
 // CorrelationFields 列出可作等值过滤与链路查询的关联字段名（供 handler 校验 fields 参数）。
@@ -50,8 +51,21 @@ type Entry struct {
 	RunID        string    `json:"run_id,omitempty"`
 	ThreadID     string    `json:"thread_id,omitempty"`
 	Extra        string    `json:"extra,omitempty"`
+	// SystemScope 为 true 表示显式系统行（仅进程级启动日志）。带 user_id 或
+	// 任一业务关联列时写入侧强制为 false，避免误标公开业务日志。
+	SystemScope bool `json:"-"`
 	// Dropped 标记该条因管道积压被丢弃前的重试信息，仅供内部诊断，不入库。
 	Dropped bool `json:"-"`
+}
+
+// HasAssociation 表示该行带业务关联列（不含 request_id）。有关联列的行不能作为系统行公开。
+func (e Entry) HasAssociation() bool {
+	return e.ProjectID != "" || e.IssueID != "" || e.AutomationID != "" || e.RunID != "" || e.ThreadID != ""
+}
+
+// allowsSystemScope 仅当无归属且无业务关联列时允许 system_scope=1。
+func (e Entry) allowsSystemScope() bool {
+	return e.UserID == "" && !e.HasAssociation()
 }
 
 // LevelValue 返回级别的数值（数值越大越严重），未知级别按 INFO 处理。
@@ -101,6 +115,12 @@ func ParseLevel(s string) (string, bool) {
 // Sink 是日志库的写入端；Pipeline 通过它与具体存储解耦，测试可注入失败实现。
 type Sink interface {
 	Add(ctx context.Context, entries []Entry) error
+}
+
+// OwnerResolver 在管道批量刷盘前按关联列补全空 user_id。
+// 仅由 batchLoop 调用；禁止打 zap/slog（避免自入队循环）。返回与 rows 等长，""=未知。
+type OwnerResolver interface {
+	ResolveOwners(ctx context.Context, rows []Entry) []string
 }
 
 func normalize(s string) string {

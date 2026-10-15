@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// ownerResolveTimeout 是刷盘前归属解析的上限；超时则本批按无主写入（API 不可见）。
+const ownerResolveTimeout = 2 * time.Second
+
 // Pipeline 把 slog 记录异步批量写入日志库，同时把可读文本写到 stdout。
 // 采集侧的任何故障（缓冲满、写库失败）都只影响日志自身，绝不反压业务。
 type Pipeline struct {
@@ -30,6 +33,9 @@ type Pipeline struct {
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+
+	mu       sync.RWMutex
+	resolver OwnerResolver
 }
 
 // Options 是 Pipeline 的可调参数；零值字段取默认值。
@@ -106,6 +112,14 @@ func (p *Pipeline) Close() {
 	})
 }
 
+// SetOwnerResolver 注入归属解析器。main 在业务库 repository 就绪后调用；
+// 注入前的启动类日志只能靠显式 system_scope。传 nil 清除。
+func (p *Pipeline) SetOwnerResolver(r OwnerResolver) {
+	p.mu.Lock()
+	p.resolver = r
+	p.mu.Unlock()
+}
+
 // Dropped 返回因缓冲满被丢弃的条数（诊断用）。
 func (p *Pipeline) Dropped() int64 { return p.dropped.Load() }
 
@@ -134,6 +148,7 @@ func (p *Pipeline) batchLoop() {
 		if len(buffer) == 0 {
 			return
 		}
+		p.applyOwners(ctx, buffer)
 		if err := p.sink.Add(ctx, buffer); err != nil {
 			// 写失败只计数并回显 stdout，绝不重试拖积队列，更不反压业务。
 			p.failed.Add(int64(len(buffer)))
@@ -275,6 +290,10 @@ func (h *pipelineHandler) Handle(ctx context.Context, r slog.Record) error {
 			entry.RunID = sanitizeString(asString(value))
 		case AttrThreadID:
 			entry.ThreadID = sanitizeString(asString(value))
+		case AttrSystemScope:
+			if b, ok := value.(bool); ok {
+				entry.SystemScope = b
+			}
 		default:
 			extra[key] = sanitizeAttrValue(key, value)
 		}
@@ -355,6 +374,33 @@ func asString(v interface{}) string {
 		return ""
 	default:
 		return fmt.Sprintf("%v", t)
+	}
+}
+
+// applyOwners 在刷盘前清除误标的 system_scope，并按关联列补全空 user_id。
+// Handle 只入队，解析放在 batcher 以免与业务库 SetMaxOpenConns(1) 自等待。
+func (p *Pipeline) applyOwners(ctx context.Context, rows []Entry) {
+	for i := range rows {
+		if !rows[i].allowsSystemScope() {
+			rows[i].SystemScope = false
+		}
+	}
+	p.mu.RLock()
+	resolver := p.resolver
+	p.mu.RUnlock()
+	if resolver == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, ownerResolveTimeout)
+	defer cancel()
+	owners := resolver.ResolveOwners(rctx, rows)
+	if len(owners) != len(rows) {
+		return
+	}
+	for i := range rows {
+		if rows[i].UserID == "" && owners[i] != "" {
+			rows[i].UserID = owners[i]
+		}
 	}
 }
 

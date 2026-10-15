@@ -28,6 +28,8 @@ type Record struct {
 	AutomationID string `gorm:"type:text;not null;default:'';index"`
 	RunID        string `gorm:"type:text;not null;default:'';index"`
 	ThreadID     string `gorm:"type:text;not null;default:''"`
+	// SystemScope 1=显式系统行（无归属且无业务关联列）。默认 0；存量空归属行不回填。
+	SystemScope int `gorm:"column:system_scope;not null;default:0"`
 	// Extra 指针语义：nil 存 NULL，供 json_extract 直接跳过（空串不是合法 JSON）。
 	Extra *string `gorm:"type:text"`
 }
@@ -90,6 +92,10 @@ func (s *Store) Add(ctx context.Context, entries []Entry) error {
 			AutomationID: e.AutomationID,
 			RunID:        e.RunID,
 			ThreadID:     e.ThreadID,
+		}
+		// 带 user_id 或任一关联列时拒绝系统行：误标不得把业务日志公开给所有认证用户。
+		if e.SystemScope && e.allowsSystemScope() {
+			rec.SystemScope = 1
 		}
 		if e.Extra != "" {
 			rec.Extra = &e.Extra

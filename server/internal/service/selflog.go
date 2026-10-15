@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -11,7 +12,7 @@ import (
 )
 
 // SelfLogService 是 Fast Ship 自身日志（INT-94）的只读查询服务。
-// 可见性规则在这里统一收口：调用者只能看到自己归属的日志与无归属的进程级日志。
+// 可见性规则在这里统一收口：调用者只能看到自己归属的日志与显式系统行。
 type SelfLogService struct {
 	store *selflog.Store
 }
@@ -29,8 +30,11 @@ type SelfLogListParams struct {
 	Fields []string
 }
 
-// ListSelfLogs 分页查询自身日志；requesterUserID 为空时（系统内部调用）不做归属收窄。
+// ListSelfLogs 分页查询自身日志。公开入口拒绝空 requesterUserID（默认不可见，而非不收窄）。
 func (s *SelfLogService) ListSelfLogs(ctx context.Context, requesterUserID string, p SelfLogListParams) (*api.SelfLogPage, error) {
+	if err := requireSelfLogRequester(requesterUserID); err != nil {
+		return nil, err
+	}
 	p.Filter.VisibleUserID = requesterUserID
 	page, err := s.store.Query(ctx, p.Filter, p.Cursor, p.Limit, p.Asc)
 	if err != nil {
@@ -62,6 +66,9 @@ type SelfLogAggregateParams struct {
 
 // AggregateSelfLogs 按维度组合统计条数；可见范围与列表一致。
 func (s *SelfLogService) AggregateSelfLogs(ctx context.Context, requesterUserID string, p SelfLogAggregateParams) (*api.SelfLogAggregateResult, error) {
+	if err := requireSelfLogRequester(requesterUserID); err != nil {
+		return nil, err
+	}
 	p.Filter.VisibleUserID = requesterUserID
 	rows, truncated, err := s.store.Aggregate(ctx, p.Filter, p.ByModule, p.ByLevel, p.ByTime, p.Bucket)
 	if err != nil {
@@ -87,6 +94,9 @@ func (s *SelfLogService) AggregateSelfLogs(ctx context.Context, requesterUserID 
 // TraceSelfLogs 按请求 ID 或 run ID 返回整条链路（时间正序）。
 // 两者必须恰好提供一个；可见范围与列表一致。
 func (s *SelfLogService) TraceSelfLogs(ctx context.Context, requesterUserID, requestID, runID string, fields []string) (*api.SelfLogTraceResult, error) {
+	if err := requireSelfLogRequester(requesterUserID); err != nil {
+		return nil, err
+	}
 	if (requestID == "") == (runID == "") {
 		return nil, errs.ErrInvalidParams
 	}
@@ -158,4 +168,11 @@ func SelfLogEntryToAPI(e selflog.Entry, fields []string) api.SelfLogEntry {
 		}
 	}
 	return entry
+}
+
+func requireSelfLogRequester(userID string) error {
+	if strings.TrimSpace(userID) == "" {
+		return errs.ErrInvalidParams
+	}
+	return nil
 }

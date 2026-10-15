@@ -284,7 +284,7 @@ func TestRequestLogVisibilityBindsUserAfterAuth(t *testing.T) {
 		t.Fatalf("panic status = %d", w.Code)
 	}
 
-	slog.New(env.pipeline.Handler()).Info("服务启动", slog.String("module", "app"))
+	slog.New(env.pipeline.Handler()).Info("服务启动", slog.String("module", "app"), slog.Bool(selflog.AttrSystemScope, true))
 	env.pipeline.Close()
 
 	alice, err := env.store.Query(context.Background(), selflog.Filter{VisibleUserID: "user-alice"}, "", 50, true)

@@ -132,9 +132,9 @@ func TestSelfLogsListFiltersVisibilityAndCursor(t *testing.T) {
 		t.Fatalf("组合过滤应只见 alice 的 automation ERROR: %+v", page.Items)
 	}
 
-	// 可见性：alice 看不到 bob 的运行日志，但能看到系统级（无归属）。
+	// 可见性：alice 看不到 bob 的运行日志，但能看到显式系统行。
 	seedSelfLog(t, env, []selflog.Entry{
-		{Time: now, Level: selflog.LevelInfo, Module: "app", Message: "系统启动"},
+		{Time: now, Level: selflog.LevelInfo, Module: "app", Message: "系统启动", SystemScope: true},
 	})
 	_, resp = getSelfLogs(t, env, alice.Token, "?run_id=run-b")
 	page = decodeSelfLogPage(t, resp)
