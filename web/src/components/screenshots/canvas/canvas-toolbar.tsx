@@ -1,10 +1,10 @@
 import {
   BoxSelect,
-  Eye,
-  EyeOff,
+  Copy,
   Maximize,
   PanelRightClose,
   PanelRightOpen,
+  Play,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -14,31 +14,36 @@ import { Separator } from "@/components/ui/separator";
 interface CanvasToolbarProps {
   scale: number;
   drawMode: boolean;
-  showResolved: boolean;
   panelOpen: boolean;
+  /** 当前筛选范围内 open 标注数；为 0 时「启动线程」置灰 */
+  openCount: number;
   /** 父级用 ResizeObserver 实测高度，给「适应全部」留顶部净空 */
   ref?: React.Ref<HTMLDivElement>;
   onToggleDraw: () => void;
-  onToggleResolved: () => void;
   onTogglePanel: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
   onFit: () => void;
+  /** 固定入口：启动线程处理标注意见（带二次确认的弹框） */
+  onLaunchThread: () => void;
+  /** 固定入口：复制处理提示词（不确认） */
+  onCopyPrompt: () => void;
 }
 
-/** 画布左上角工具栏：框选、显示已解决、缩放、适应全部、面板开关 */
+/** 画布左上角工具栏：框选、缩放、适应全部、面板开关，以及处理标注意见的固定入口 */
 export function CanvasToolbar({
   scale,
   drawMode,
-  showResolved,
   panelOpen,
+  openCount,
   ref,
   onToggleDraw,
-  onToggleResolved,
   onTogglePanel,
   onZoomIn,
   onZoomOut,
   onFit,
+  onLaunchThread,
+  onCopyPrompt,
 }: CanvasToolbarProps) {
   return (
     <div
@@ -57,19 +62,28 @@ export function CanvasToolbar({
         <BoxSelect className="mr-1 h-3.5 w-3.5" />
         框选
       </Button>
+      <Separator orientation="vertical" className="mx-0.5 h-5" />
       <Button
         size="sm"
-        variant={showResolved ? "secondary" : "ghost"}
-        aria-pressed={showResolved}
-        title="在画布上显示已解决的标注"
-        onClick={onToggleResolved}
+        variant="ghost"
+        title={openCount > 0 ? "启动线程逐条处理当前范围内的标注意见" : "当前范围内没有未解决标注"}
+        disabled={openCount === 0}
+        onClick={onLaunchThread}
+        data-testid="canvas-launch-thread"
       >
-        {showResolved ? (
-          <Eye className="mr-1 h-3.5 w-3.5" />
-        ) : (
-          <EyeOff className="mr-1 h-3.5 w-3.5" />
-        )}
-        已解决
+        <Play className="mr-1 h-3.5 w-3.5" />
+        启动线程
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        title={openCount > 0 ? "复制处理标注意见的提示词" : "当前范围内没有未解决标注"}
+        disabled={openCount === 0}
+        onClick={onCopyPrompt}
+        data-testid="canvas-copy-prompt"
+      >
+        <Copy className="mr-1 h-3.5 w-3.5" />
+        复制提示词
       </Button>
       <Separator orientation="vertical" className="mx-0.5 h-5" />
       <Button

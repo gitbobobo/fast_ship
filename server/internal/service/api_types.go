@@ -132,9 +132,6 @@ type (
 	// screenshots
 	UpdateScreenshotScreenRequest = api.UpdateScreenshotScreenRequest
 	ScreenshotScreenResponse      = api.ScreenshotScreen
-	ScreenshotVersionResponse     = api.ScreenshotVersion
-	ScreenshotScreenListItem      = api.ScreenshotScreenListItem
-	ScreenshotScreenDetail        = api.ScreenshotScreenDetail
 	ScreenshotUploadResult        = api.ScreenshotUploadResult
 	ScreenshotScreenListData      = api.ListScreenshotScreens200JSONResponseBody_Data
 
@@ -143,6 +140,8 @@ type (
 	UpdateScreenshotAnnotationRequest = api.UpdateScreenshotAnnotationRequest
 	ScreenshotAnnotationResponse      = api.ScreenshotAnnotation
 	ScreenshotAnnotationListData      = api.ListScreenshotAnnotations200JSONResponseBody_Data
+	ScreenshotAnnotationBatchRequest  = api.ScreenshotAnnotationBatchRequest
+	ScreenshotAnnotationBatchResult   = api.ScreenshotAnnotationBatchResult
 
 	// automations（INT-90）
 	CreateAutomationRequest  = api.CreateAutomationRequest

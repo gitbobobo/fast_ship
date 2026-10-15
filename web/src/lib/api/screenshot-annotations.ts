@@ -5,7 +5,15 @@ export interface ScreenshotAnnotationFilters {
   status?: ScreenshotAnnotationStatus;
   issue_id?: string;
   screen_id?: string;
+  outdated?: boolean;
+  /** 逗号多值，含「未标注」桶 __none__ */
+  platform?: string[];
+  locale?: string[];
+  theme?: string[];
 }
+
+const joinValues = (values?: string[]) =>
+  values && values.length > 0 ? values.join(",") : undefined;
 
 export const screenshotAnnotationApi = {
   list: (projectId: string, filters: ScreenshotAnnotationFilters = {}) =>
@@ -15,13 +23,25 @@ export const screenshotAnnotationApi = {
           ...(filters.status ? { status: filters.status } : {}),
           ...(filters.issue_id ? { issue_id: filters.issue_id } : {}),
           ...(filters.screen_id ? { screen_id: filters.screen_id } : {}),
+          ...(filters.outdated !== undefined
+            ? { outdated: String(filters.outdated) }
+            : {}),
+          ...(joinValues(filters.platform)
+            ? { platform: joinValues(filters.platform) }
+            : {}),
+          ...(joinValues(filters.locale)
+            ? { locale: joinValues(filters.locale) }
+            : {}),
+          ...(joinValues(filters.theme)
+            ? { theme: joinValues(filters.theme) }
+            : {}),
         },
       })
       .json<ApiResponse<{ items: ScreenshotAnnotation[] }>>(),
 
-  create: (versionId: string, payload: CreateScreenshotAnnotationPayload) =>
+  create: (screenId: string, payload: CreateScreenshotAnnotationPayload) =>
     api
-      .post(`screenshot-versions/${versionId}/annotations`, { json: payload })
+      .post(`screenshot-screens/${screenId}/annotations`, { json: payload })
       .json<ApiResponse<ScreenshotAnnotation>>(),
 
   update: (annotationId: string, payload: UpdateScreenshotAnnotationPayload) =>
@@ -33,6 +53,13 @@ export const screenshotAnnotationApi = {
     api
       .delete(`screenshot-annotations/${annotationId}`)
       .json<ApiResponse<null>>(),
+
+  batch: (projectId: string, payload: ScreenshotAnnotationBatchPayload) =>
+    api
+      .post(`projects/${projectId}/screenshot-annotations/batch`, {
+        json: payload,
+      })
+      .json<ApiResponse<ScreenshotAnnotationBatchResult>>(),
 
   // 裁剪图是 <img> 直链，需带 ?token=；拼法同 screenshotApi.contentUrl
   cropUrl: (annotation: Pick<ScreenshotAnnotation, "id" | "crop_url">) => {

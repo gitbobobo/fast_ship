@@ -1,5 +1,4 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router";
+import { useState } from "react";
 import { FileText, GitBranch, Laptop, Play, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -23,10 +22,6 @@ import { buildIssuePrompt, normalizeIssuePrompts } from "@/lib/issue-prompt";
 import {
   countBusyThreads,
   isLaunchable,
-  joinEnvironmentsWithBindings,
-  pickAutoEnvironmentRow,
-  preferenceModelPick,
-  resolveEnvironmentChoice,
   unlaunchableReason,
 } from "@/lib/issue-launch";
 import {
@@ -34,22 +29,8 @@ import {
   useIssuePrompts,
   useUpdateIssuePrompts,
 } from "@/lib/hooks/use-issue-prompt";
-import { useProjectT3Bindings } from "@/lib/hooks/use-t3-bindings";
-import {
-  useComposerOptions,
-  useCreateThread,
-  useEnvironments,
-  useThreads,
-  useWorkspaceOptions,
-} from "@/lib/hooks/use-threads";
-import { actionErrorText } from "@/lib/threads";
-import {
-  buildModelSelection,
-  createIdTracker,
-  parseProviders,
-  resolveModel,
-  type ModelPick,
-} from "@/lib/threads-compose";
+import { useThreadLaunch } from "@/lib/hooks/use-thread-launch";
+import { buildModelSelection } from "@/lib/threads-compose";
 
 export interface LaunchIssueThreadDialogProps {
   open: boolean;
@@ -62,7 +43,9 @@ export interface LaunchIssueThreadDialogProps {
 
 /**
  * 从问题启动 T3 线程的弹框。默认值按 模板偏好 → 项目绑定 + 自动负载 取；
- * 弹框关闭即卸载，状态全部随之重置。
+ * 弹框关闭即卸载，状态全部随之重置。环境/模型/工作区的启动机制在
+ * useThreadLaunch（与截图标注的启动对话框共用），这里只保留模板选择
+ * 与偏好持久化。
  */
 export function LaunchIssueThreadDialog({
   open,
@@ -98,119 +81,63 @@ function LaunchIssueThreadBody({
   reason?: string;
   onClose: () => void;
 }) {
-  const navigate = useNavigate();
   const prompts = useIssuePromptList();
   const { data: promptSettings } = useIssuePrompts();
   const updatePrompts = useUpdateIssuePrompts();
-  const environmentsQuery = useEnvironments();
-  const bindingsQuery = useProjectT3Bindings(projectId);
-  const threadsQuery = useThreads();
 
   const [promptId, setPromptId] = useState("");
   const prompt = prompts.find((p) => p.id === promptId) ?? prompts[0];
   const preferences = prompt?.preferences;
+  const scope = `${preferences?.environment ?? ""}:${prompt?.id ?? ""}`;
 
-  const rows = useMemo(
-    () =>
-      joinEnvironmentsWithBindings(
-        environmentsQuery.data ?? [],
-        bindingsQuery.data ?? [],
-      ),
-    [environmentsQuery.data, bindingsQuery.data],
-  );
-  const threads = threadsQuery.data?.items ?? [];
-  const autoRow = pickAutoEnvironmentRow(rows, threads);
-
-  // 环境默认值 = 偏好（仍可启动时）→ 自动负载；用户显式选择覆盖二者。
-  const prefEnv = resolveEnvironmentChoice(preferences?.environment, rows);
-  const [envPick, setEnvPick] = useState<string | null>(null);
-  const envChoice = envPick ?? prefEnv.choice;
-  const selectedRow =
-    envChoice === "auto"
-      ? autoRow
-      : rows.find((row) => row.environment.id === envChoice);
-  const launchableRow =
-    selectedRow && isLaunchable(selectedRow) ? selectedRow : undefined;
-  const environment = launchableRow?.environment;
-  const binding = launchableRow?.binding;
-
-  // 模型/工作区选择按「环境 + 模板」作用域隔离：换环境或换模板即回落该作用域的默认值。
-  const scope = `${environment?.id ?? ""}:${prompt?.id ?? ""}`;
-  const [pickState, setPickState] = useState<{
-    scope: string;
-    value: ModelPick | null;
-  }>({ scope, value: null });
-  const pick = pickState.scope === scope ? pickState.value : null;
-  const setPick = (value: ModelPick | null) => setPickState({ scope, value });
-  const [workspaceState, setWorkspaceState] = useState<{
-    scope: string;
-    value: "worktree" | "root";
-  } | null>(null);
-  const workspaceKind =
-    (workspaceState?.scope === scope ? workspaceState.value : undefined) ??
-    preferences?.workspace ??
-    "worktree";
-  const setWorkspace = (value: "worktree" | "root") =>
-    setWorkspaceState({ scope, value });
-
-  const composer = useComposerOptions(environment?.id ?? "");
-  const workspaceOptions = useWorkspaceOptions(
-    environment?.id ?? "",
-    binding?.t3_project_id ?? "",
-  );
-  const t3Project = composer.data?.projects.find(
-    (p) => p.id === binding?.t3_project_id,
-  );
-  const providers = useMemo(
-    () => parseProviders(composer.data?.config),
-    [composer.data],
-  );
-  const prefPick = useMemo(
-    () => preferenceModelPick(preferences?.model_selection, providers),
-    [preferences, providers],
-  );
-  // 偏好模型在目标环境不存在（含快照缺失该实例）时回落项目默认并提示。
-  const modelPrefMissed = Boolean(
-    preferences?.model_selection && composer.data && !prefPick,
-  );
-  const resolved = resolveModel(providers, t3Project, pick ?? prefPick);
-
-  const isRepo = workspaceOptions.data?.is_repo !== false;
-  const workspace: "worktree" | "root" =
-    workspaceKind === "worktree" && isRepo ? "worktree" : "root";
-  const refName = workspaceOptions.data?.ref_name;
-
-  const create = useCreateThread(environment?.id ?? "");
-  const [tracker] = useState(createIdTracker);
-  const [launchError, setLaunchError] = useState<unknown>(null);
-  const [saveDefault, setSaveDefault] = useState(false);
   const promptText = buildIssuePrompt({
     projectId,
     issueId: issue.id,
     content: prompt?.content ?? "",
     reason,
   });
-  const launching = create.isPending;
 
-  const bindSettingsTo = `/projects?edit=${encodeURIComponent(projectId)}&section=t3`;
-  const goBind = () => {
-    onClose();
-    navigate(bindSettingsTo);
-  };
+  const launchState = useThreadLaunch({
+    projectId,
+    promptText,
+    scope,
+    preferences: preferences ?? null,
+  });
+  const {
+    environmentsQuery,
+    environments,
+    rows,
+    threads,
+    autoRow,
+    prefEnv,
+    envChoice,
+    setEnvPick,
+    selectedRow,
+    environment,
+    binding,
+    workspace,
+    setWorkspace,
+    isRepo,
+    refName,
+    composer,
+    providers,
+    modelPrefMissed,
+    resolved,
+    setPick,
+    launching,
+    hasBinding,
+    bindingStale,
+    canLaunch,
+    goBind,
+    goPairSettings,
+    launch,
+    launchErrorText,
+  } = launchState;
 
-  const environments = environmentsQuery.data;
-  const hasBinding = rows.some((row) => row.binding);
-  const bindingStale = Boolean(
-    environment && binding && composer.data && !t3Project,
-  );
-  const canLaunch =
-    Boolean(environment && binding) &&
-    !bindingStale &&
-    !composer.isError &&
-    !launching;
+  const [saveDefault, setSaveDefault] = useState(false);
 
   const persistPreferences = async () => {
-    const modelSelection = buildModelSelection(resolved);
+    const modelSelection = buildModelSelection(launchState.resolved);
     const next = normalizeIssuePrompts(promptSettings?.prompts).map((p) =>
       p.id === prompt.id
         ? {
@@ -226,56 +153,14 @@ function LaunchIssueThreadBody({
     await updatePrompts.mutateAsync(next);
   };
 
-  const launch = async () => {
-    if (!environment || !binding || launching) return;
-    setLaunchError(null);
-    // 新 worktree 不传 base_ref：由服务端取 T3 项目主检出的当前分支。
-    const workspaceInput =
-      workspace === "worktree"
-        ? ({ type: "worktree" } as const)
-        : ({ type: "root" } as const);
-    const modelSelection = buildModelSelection(resolved);
-    try {
-      const ids = tracker.idsFor(
-        JSON.stringify([
-          environment.id,
-          binding.t3_project_id,
-          promptText,
-          workspaceInput,
-          modelSelection,
-        ]),
-      );
-      const result = await create.mutateAsync({
-        command_id: ids.command_id,
-        thread_id: ids.thread_id,
-        project_id: binding.t3_project_id,
-        message: { message_id: ids.message_id, text: promptText },
-        model_selection: modelSelection,
-        runtime_mode: "full-access",
-        workspace: workspaceInput,
-      });
-      tracker.reset();
+  const doLaunch = () =>
+    launch(onClose, () => {
       if (saveDefault) {
         void persistPreferences().catch(() =>
           toast.error("线程已启动，但模板偏好保存失败"),
         );
       }
-      onClose();
-      toast.success(`已在 ${environment.name} 启动线程`, {
-        action: {
-          label: "查看",
-          onClick: () =>
-            navigate(
-              `/threads/${encodeURIComponent(environment.id)}/${encodeURIComponent(result.thread_id)}`,
-            ),
-        },
-      });
-    } catch (error) {
-      // mutation 失败经 create.isError 展示在弹框内；提交前的异常（ID 生成等）
-      // 没有 mutation 状态，须本地兜住。重试沿用同一组 ID，不会重复建线程。
-      setLaunchError(error);
-    }
-  };
+    });
 
   const copyPrompt = () =>
     void copyWithToast(promptText, "已复制提示词");
@@ -285,7 +170,7 @@ function LaunchIssueThreadBody({
       onKeyDown={(event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
           event.preventDefault();
-          void launch();
+          void doLaunch();
         }
       }}
     >
@@ -324,10 +209,7 @@ function LaunchIssueThreadBody({
             variant="outline"
             size="sm"
             className="mt-3"
-            onClick={() => {
-              onClose();
-              navigate("/settings/environments");
-            }}
+            onClick={() => goPairSettings(onClose)}
           >
             去设置配对
           </Button>
@@ -408,7 +290,7 @@ function LaunchIssueThreadBody({
               </>
             )}
             <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={goBind}>
+            <DropdownMenuItem onClick={() => goBind(onClose)}>
               <Settings2 className="h-4 w-4" />
               去绑定…
             </DropdownMenuItem>
@@ -485,7 +367,7 @@ function LaunchIssueThreadBody({
               <button
                 type="button"
                 className="ml-1 underline underline-offset-2 hover:text-foreground"
-                onClick={goBind}
+                onClick={() => goBind(onClose)}
               >
                 去绑定
               </button>
@@ -530,9 +412,9 @@ function LaunchIssueThreadBody({
         保存为此模板的默认
       </label>
 
-      {(create.isError || launchError !== null) && (
+      {(launchState.create.isError || launchState.launchError !== null) && (
         <p role="alert" className="mt-3 text-xs text-destructive">
-          {actionErrorText(create.error ?? launchError, "启动失败，请重试")}
+          {launchErrorText()}
         </p>
       )}
 
@@ -544,7 +426,7 @@ function LaunchIssueThreadBody({
         >
           复制提示词
         </Button>
-        <Button onClick={() => void launch()} disabled={!canLaunch}>
+        <Button onClick={() => void doLaunch()} disabled={!canLaunch}>
           <Play className="h-4 w-4" />
           {launching ? "启动中…" : "启动 ⌘↵"}
         </Button>

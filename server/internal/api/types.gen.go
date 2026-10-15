@@ -305,6 +305,45 @@ func (e RespondT3ThreadRequestType) Valid() bool {
 	}
 }
 
+// Defines values for ScreenshotAnnotationBatchRequestAction.
+const (
+	Confirm ScreenshotAnnotationBatchRequestAction = "confirm"
+	Resolve ScreenshotAnnotationBatchRequestAction = "resolve"
+)
+
+// Valid indicates whether the value is a known member of the ScreenshotAnnotationBatchRequestAction enum.
+func (e ScreenshotAnnotationBatchRequestAction) Valid() bool {
+	switch e {
+	case Confirm:
+		return true
+	case Resolve:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ScreenshotAnnotationBatchRequestFilterTheme.
+const (
+	ScreenshotAnnotationBatchRequestFilterThemeDark                     ScreenshotAnnotationBatchRequestFilterTheme = "dark"
+	ScreenshotAnnotationBatchRequestFilterThemeLight                    ScreenshotAnnotationBatchRequestFilterTheme = "light"
+	ScreenshotAnnotationBatchRequestFilterThemeUnderscoreUnderscoreNone ScreenshotAnnotationBatchRequestFilterTheme = "__none__"
+)
+
+// Valid indicates whether the value is a known member of the ScreenshotAnnotationBatchRequestFilterTheme enum.
+func (e ScreenshotAnnotationBatchRequestFilterTheme) Valid() bool {
+	switch e {
+	case ScreenshotAnnotationBatchRequestFilterThemeDark:
+		return true
+	case ScreenshotAnnotationBatchRequestFilterThemeLight:
+		return true
+	case ScreenshotAnnotationBatchRequestFilterThemeUnderscoreUnderscoreNone:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ScreenshotAnnotationStatus.
 const (
 	Open     ScreenshotAnnotationStatus = "open"
@@ -317,6 +356,24 @@ func (e ScreenshotAnnotationStatus) Valid() bool {
 	case Open:
 		return true
 	case Resolved:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ScreenshotScreenTheme.
+const (
+	ScreenshotScreenThemeDark  ScreenshotScreenTheme = "dark"
+	ScreenshotScreenThemeLight ScreenshotScreenTheme = "light"
+)
+
+// Valid indicates whether the value is a known member of the ScreenshotScreenTheme enum.
+func (e ScreenshotScreenTheme) Valid() bool {
+	switch e {
+	case ScreenshotScreenThemeDark:
+		return true
+	case ScreenshotScreenThemeLight:
 		return true
 	default:
 		return false
@@ -515,6 +572,27 @@ func (e UpdateIssueRequestStateReason) Valid() bool {
 	}
 }
 
+// Defines values for UpdateScreenshotScreenRequestTheme.
+const (
+	UpdateScreenshotScreenRequestThemeDark  UpdateScreenshotScreenRequestTheme = "dark"
+	UpdateScreenshotScreenRequestThemeEmpty UpdateScreenshotScreenRequestTheme = ""
+	UpdateScreenshotScreenRequestThemeLight UpdateScreenshotScreenRequestTheme = "light"
+)
+
+// Valid indicates whether the value is a known member of the UpdateScreenshotScreenRequestTheme enum.
+func (e UpdateScreenshotScreenRequestTheme) Valid() bool {
+	switch e {
+	case UpdateScreenshotScreenRequestThemeDark:
+		return true
+	case UpdateScreenshotScreenRequestThemeEmpty:
+		return true
+	case UpdateScreenshotScreenRequestThemeLight:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for VersionShipHooksStatus.
 const (
 	VersionShipHooksStatusCompleted  VersionShipHooksStatus = "completed"
@@ -695,6 +773,24 @@ func (e ListLogEntriesParamsSort) Valid() bool {
 	case TimestampAsc:
 		return true
 	case TimestampDesc:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UploadScreenshotMultipartBodyTheme.
+const (
+	UploadScreenshotMultipartBodyThemeDark  UploadScreenshotMultipartBodyTheme = "dark"
+	UploadScreenshotMultipartBodyThemeLight UploadScreenshotMultipartBodyTheme = "light"
+)
+
+// Valid indicates whether the value is a known member of the UploadScreenshotMultipartBodyTheme enum.
+func (e UploadScreenshotMultipartBodyTheme) Valid() bool {
+	switch e {
+	case UploadScreenshotMultipartBodyThemeDark:
+		return true
+	case UploadScreenshotMultipartBodyThemeLight:
 		return true
 	default:
 		return false
@@ -2307,7 +2403,7 @@ type RespondT3ThreadRequest struct {
 // RespondT3ThreadRequestType defines model for RespondT3ThreadRequest.Type.
 type RespondT3ThreadRequestType string
 
-// ScreenshotAnnotation 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+// ScreenshotAnnotation 挂在某张截图上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
 type ScreenshotAnnotation struct {
 	// Body 标注文字
 	Body      string `json:"body"`
@@ -2316,7 +2412,7 @@ type ScreenshotAnnotation struct {
 	// CreatedBy 用户名或 "API Key: <name>"
 	CreatedBy string `json:"created_by"`
 
-	// CropUrl /api/screenshot-annotations/{aid}/crop；统一输出 PNG，前端自行追加 ?token=
+	// CropUrl /api/screenshot-annotations/{aid}/crop?v=<所属截图 uploaded_at 纳秒值>；统一输出 PNG，v 随覆盖上传变化（浏览器缓存按完整 URL 记键），前端自行追加 &token=
 	CropUrl string `json:"crop_url"`
 
 	// Height 框选矩形高 / 图高（0~1）
@@ -2326,14 +2422,11 @@ type ScreenshotAnnotation struct {
 	// ImageHeight 原图高像素；0 表示未知
 	ImageHeight int `json:"image_height"`
 
-	// ImageUrl 标注所在版本的原图地址（版本 content_url）；追加 ?token= 供 <img>
+	// ImageUrl 所在截图的原图地址（content_url，带 ?v= 修订参数）；追加 &token= 供 <img>
 	ImageUrl string `json:"image_url"`
 
-	// ImageWidth 原图宽像素；0 表示未知（存量版本未记录尺寸）
+	// ImageWidth 原图宽像素；0 表示未知
 	ImageWidth int `json:"image_width"`
-
-	// IsLatestVersion 标注是否挂在该界面当前最新版本上（画布只展示最新版本，旧版本标注经预览弹窗查看）
-	IsLatestVersion bool `json:"is_latest_version"`
 
 	// IssueId 关联的本项目 Issue ID；未关联为 null。删除 Issue 只解除关联不删标注
 	IssueId *string `json:"issue_id"`
@@ -2344,6 +2437,9 @@ type ScreenshotAnnotation struct {
 	// IssueTitle 关联 Issue 的标题；未关联为 null
 	IssueTitle *string `json:"issue_title"`
 
+	// Outdated 截图被覆盖更新后仍未「确认保留」；resolved 标注恒为 false
+	Outdated bool `json:"outdated"`
+
 	// PixelRect 由比例坐标 × 原图尺寸换算的像素矩形；原图尺寸未知时为 null
 	PixelRect *ScreenshotAnnotationRect `json:"pixel_rect"`
 	ProjectId string                    `json:"project_id"`
@@ -2351,22 +2447,25 @@ type ScreenshotAnnotation struct {
 	// ResolvedAt 最近一次标为已解决的时间；open 状态为 null
 	ResolvedAt *string `json:"resolved_at"`
 
-	// ScreenGroup 界面分组；空串表示未分组
-	ScreenGroup string `json:"screen_group"`
-
-	// ScreenId 所属界面 ID（由版本冗余带出，便于过滤）
+	// ScreenId 所属截图 ID
 	ScreenId  string `json:"screen_id"`
 	ScreenKey string `json:"screen_key"`
 
-	// ScreenTitle 界面显示名；空串时客户端回退展示 screen_key
+	// ScreenLocale 所属截图的语言；null 表示未标注
+	ScreenLocale *string `json:"screen_locale"`
+
+	// ScreenPlatform 所属截图的平台；null 表示未标注
+	ScreenPlatform *string `json:"screen_platform"`
+
+	// ScreenTheme 所属截图的亮度主题；null 表示未标注
+	ScreenTheme *string `json:"screen_theme"`
+
+	// ScreenTitle 截图显示名；空串时客户端回退展示 screen_key
 	ScreenTitle string `json:"screen_title"`
 
 	// Status open=未解决，resolved=已解决
 	Status    ScreenshotAnnotationStatus `json:"status"`
 	UpdatedAt string                     `json:"updated_at"`
-
-	// VersionId 标注挂在该版本上；版本删除时标注级联删除
-	VersionId string `json:"version_id"`
 
 	// Width 框选矩形宽 / 图宽（0~1）
 	Width float32 `json:"width"`
@@ -2376,6 +2475,46 @@ type ScreenshotAnnotation struct {
 
 	// Y 框选矩形左上角纵坐标 / 图高（0~1）
 	Y float32 `json:"y"`
+}
+
+// ScreenshotAnnotationBatchRequest 对 filter 圈定的标注集执行批量动作；filter 缺省字段即不限制
+type ScreenshotAnnotationBatchRequest struct {
+	// Action confirm=确认保留（清除 outdated）；resolve=标记已解决；两者都只作用于 open 标注
+	Action ScreenshotAnnotationBatchRequestAction   `json:"action"`
+	Filter *ScreenshotAnnotationBatchRequest_Filter `json:"filter,omitempty"`
+}
+
+// ScreenshotAnnotationBatchRequestAction confirm=确认保留（清除 outdated）；resolve=标记已解决；两者都只作用于 open 标注
+type ScreenshotAnnotationBatchRequestAction string
+
+// ScreenshotAnnotationBatchRequestFilterTheme defines model for ScreenshotAnnotationBatchRequest.Filter.Theme.
+type ScreenshotAnnotationBatchRequestFilterTheme string
+
+// ScreenshotAnnotationBatchRequest_Filter defines model for ScreenshotAnnotationBatchRequest.Filter.
+type ScreenshotAnnotationBatchRequest_Filter struct {
+	// Locale 语言多值；含 `__none__` 表示「未标注」（NULL）
+	Locale []string `json:"locale,omitempty"`
+
+	// Outdated 按过期标记过滤；缺省不限制
+	Outdated *bool `json:"outdated,omitempty"`
+
+	// Platform 平台多值；含 `__none__` 表示「未标注」（NULL）
+	Platform []string `json:"platform,omitempty"`
+
+	// ScreenId 只作用于该截图上的标注
+	ScreenId *string `json:"screen_id,omitempty"`
+
+	// Status open=未解决，resolved=已解决
+	Status *ScreenshotAnnotationStatus `json:"status,omitempty"`
+
+	// Theme 亮度多值；`__none__` 表示「未标注」（NULL）
+	Theme []ScreenshotAnnotationBatchRequestFilterTheme `json:"theme,omitempty"`
+}
+
+// ScreenshotAnnotationBatchResult defines model for ScreenshotAnnotationBatchResult.
+type ScreenshotAnnotationBatchResult struct {
+	// Updated 实际更新的标注数
+	Updated int `json:"updated"`
 }
 
 // ScreenshotAnnotationRect 像素矩形（原图坐标系）
@@ -2389,106 +2528,55 @@ type ScreenshotAnnotationRect struct {
 // ScreenshotAnnotationStatus open=未解决，resolved=已解决
 type ScreenshotAnnotationStatus string
 
-// ScreenshotScreen defines model for ScreenshotScreen.
+// ScreenshotScreen 截图库中的一张截图：(project_id, screen_key, platform, locale, theme) 唯一，再上传即覆盖文件
 type ScreenshotScreen struct {
-	CreatedAt string `json:"created_at"`
-
-	// Group 自由文本分组；空串表示未分组
-	Group string `json:"group"`
-	Id    string `json:"id"`
-
-	// LastUploadedAt 最近一次上传时间，列表按它倒序
-	LastUploadedAt string `json:"last_uploaded_at"`
-	ProjectId      string `json:"project_id"`
-
-	// ScreenKey 服务端规范化（ToLower+TrimSpace）后的界面标识
-	ScreenKey string `json:"screen_key"`
-
-	// Title 可为空串，客户端回退显示 screen_key
-	Title string `json:"title"`
-
-	// VersionCount 该界面累计保留的版本数
-	VersionCount int `json:"version_count"`
-}
-
-// ScreenshotScreenDetail defines model for ScreenshotScreenDetail.
-type ScreenshotScreenDetail struct {
-	CreatedAt string `json:"created_at"`
-
-	// Group 自由文本分组；空串表示未分组
-	Group string `json:"group"`
-	Id    string `json:"id"`
-
-	// LastUploadedAt 最近一次上传时间，列表按它倒序
-	LastUploadedAt string `json:"last_uploaded_at"`
-	ProjectId      string `json:"project_id"`
-
-	// ScreenKey 服务端规范化（ToLower+TrimSpace）后的界面标识
-	ScreenKey string `json:"screen_key"`
-
-	// Title 可为空串，客户端回退显示 screen_key
-	Title string `json:"title"`
-
-	// VersionCount 该界面累计保留的版本数
-	VersionCount int `json:"version_count"`
-
-	// Versions 全部历史版本，uploaded_at 倒序
-	Versions []ScreenshotVersion `json:"versions"`
-}
-
-// ScreenshotScreenListItem defines model for ScreenshotScreenListItem.
-type ScreenshotScreenListItem struct {
-	CreatedAt string `json:"created_at"`
-
-	// Group 自由文本分组；空串表示未分组
-	Group string `json:"group"`
-	Id    string `json:"id"`
-
-	// LastUploadedAt 最近一次上传时间，列表按它倒序
-	LastUploadedAt string `json:"last_uploaded_at"`
-
-	// LatestVersion 最新一个版本；无版本时为 null
-	LatestVersion *ScreenshotVersion `json:"latest_version"`
-	ProjectId     string             `json:"project_id"`
-
-	// ScreenKey 服务端规范化（ToLower+TrimSpace）后的界面标识
-	ScreenKey string `json:"screen_key"`
-
-	// Title 可为空串，客户端回退显示 screen_key
-	Title string `json:"title"`
-
-	// VersionCount 该界面累计保留的版本数
-	VersionCount int `json:"version_count"`
-}
-
-// ScreenshotUploadResult defines model for ScreenshotUploadResult.
-type ScreenshotUploadResult struct {
-	Screen  ScreenshotScreen  `json:"screen"`
-	Version ScreenshotVersion `json:"version"`
-}
-
-// ScreenshotVersion defines model for ScreenshotVersion.
-type ScreenshotVersion struct {
-	// ContentUrl /api/screenshot-versions/{vid}/content；前端自行追加 ?token=
+	// ContentUrl /api/screenshot-screens/{sid}/content?v=<uploaded_at 纳秒值>；v 随文件变化（覆盖上传即换 URL，浏览器缓存按完整 URL 记键），前端自行追加 &token=
 	ContentUrl string `json:"content_url"`
-	FileName   string `json:"file_name"`
-	FileSize   int64  `json:"file_size"`
+	CreatedAt  string `json:"created_at"`
+
+	// FileSize 文件字节数
+	FileSize int64 `json:"file_size"`
 
 	// Height 原图高像素；0 表示未知
 	Height int    `json:"height"`
 	Id     string `json:"id"`
 
+	// Locale 语言（BCP 47 规范化大小写）；null 表示未标注
+	Locale *string `json:"locale"`
+
 	// MimeType 上传时内容嗅探得到的类型（image/png、image/jpeg、image/webp、image/gif 之一）
-	MimeType   string `json:"mime_type"`
-	Note       string `json:"note"`
-	ScreenId   string `json:"screen_id"`
+	MimeType string `json:"mime_type"`
+
+	// Platform 平台（开放词表，trim+小写）；null 表示未标注
+	Platform  *string `json:"platform"`
+	ProjectId string  `json:"project_id"`
+
+	// ScreenKey 服务端规范化（ToLower+TrimSpace）后的界面标识
+	ScreenKey string `json:"screen_key"`
+
+	// Theme 亮度主题；null 表示未标注
+	Theme *ScreenshotScreenTheme `json:"theme"`
+
+	// Title 可为空串，客户端回退显示 screen_key
+	Title string `json:"title"`
+
+	// UploadedAt 当前文件的上传时间；覆盖上传即更新，列表按它倒序
 	UploadedAt string `json:"uploaded_at"`
 
 	// UploadedBy 用户名或 "API Key: <name>"
 	UploadedBy string `json:"uploaded_by"`
 
-	// Width 原图宽像素；0 表示未知（历史存量版本未记录尺寸）
+	// Width 原图宽像素；0 表示未知
 	Width int `json:"width"`
+}
+
+// ScreenshotScreenTheme 亮度主题；null 表示未标注
+type ScreenshotScreenTheme string
+
+// ScreenshotUploadResult defines model for ScreenshotUploadResult.
+type ScreenshotUploadResult struct {
+	// Screen 截图库中的一张截图：(project_id, screen_key, platform, locale, theme) 唯一，再上传即覆盖文件
+	Screen ScreenshotScreen `json:"screen"`
 }
 
 // SelfLogAggregateResult 自身日志聚合结果
@@ -3192,14 +3280,23 @@ type UpdateScreenshotAnnotationRequest struct {
 	Status *ScreenshotAnnotationStatus `json:"status,omitempty"`
 }
 
-// UpdateScreenshotScreenRequest 两字段均可选，出现才更新；都不传返回 40001
+// UpdateScreenshotScreenRequest 四字段均可选，出现才更新（三个维度允许空串清除为未标注）；都不传返回 40001；维度组合撞唯一约束返回 409（40921）
 type UpdateScreenshotScreenRequest struct {
-	// Group 分组名（≤100 字符）；允许空串置为未分组
-	Group *string `json:"group,omitempty"`
+	// Locale 语言（BCP 47，服务端规范化大小写，非法值 40001）；空串清除为未标注
+	Locale *string `json:"locale,omitempty"`
+
+	// Platform 平台（开放词表，trim+小写，≤100 字符）；空串清除为未标注
+	Platform *string `json:"platform,omitempty"`
+
+	// Theme 亮度主题（严格 light|dark，其他值 40001）；空串清除为未标注
+	Theme *UpdateScreenshotScreenRequestTheme `json:"theme,omitempty"`
 
 	// Title 界面标题（≤200 字符）；空串回退显示 screen_key
 	Title *string `json:"title,omitempty"`
 }
+
+// UpdateScreenshotScreenRequestTheme 亮度主题（严格 light|dark，其他值 40001）；空串清除为未标注
+type UpdateScreenshotScreenRequestTheme string
 
 // UpdateT3EnvironmentRequest 指针语义：字段出现才更新，都不传返回 40001
 type UpdateT3EnvironmentRequest struct {
@@ -3376,9 +3473,6 @@ type ScreenshotAnnotationId = string
 
 // ScreenshotScreenId defines model for ScreenshotScreenId.
 type ScreenshotScreenId = string
-
-// ScreenshotVersionId defines model for ScreenshotVersionId.
-type ScreenshotVersionId = string
 
 // SelfLogAutomationID defines model for SelfLogAutomationID.
 type SelfLogAutomationID = string
@@ -4948,11 +5042,23 @@ type ListScreenshotAnnotationsParams struct {
 	// Status 按状态过滤；缺省返回全部状态
 	Status *ScreenshotAnnotationStatus `form:"status,omitempty" json:"status,omitempty"`
 
+	// Outdated 按过期标记过滤；true=仅过期（待确认），false=仅未过期
+	Outdated *bool `form:"outdated,omitempty" json:"outdated,omitempty"`
+
 	// IssueId 只返回关联该 Issue 的标注（UUID）
 	IssueId *string `form:"issue_id,omitempty" json:"issue_id,omitempty"`
 
-	// ScreenId 只返回该界面（含全部历史版本）上的标注
+	// ScreenId 只返回该截图上的标注
 	ScreenId *string `form:"screen_id,omitempty" json:"screen_id,omitempty"`
+
+	// Platform 逗号分隔多值；`__none__` 表示未标注（NULL）
+	Platform *string `form:"platform,omitempty" json:"platform,omitempty"`
+
+	// Locale 逗号分隔多值；`__none__` 表示未标注（NULL）
+	Locale *string `form:"locale,omitempty" json:"locale,omitempty"`
+
+	// Theme 逗号分隔多值（light/dark）；`__none__` 表示未标注（NULL）
+	Theme *string `form:"theme,omitempty" json:"theme,omitempty"`
 }
 
 // ListScreenshotAnnotations200JSONResponseBody_Data defines parameters for ListScreenshotAnnotations.
@@ -4970,9 +5076,31 @@ type ListScreenshotAnnotations200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// BatchScreenshotAnnotations200JSONResponseBody defines parameters for BatchScreenshotAnnotations.
+type BatchScreenshotAnnotations200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                              `json:"code"`
+	Data *ScreenshotAnnotationBatchResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListScreenshotScreensParams defines parameters for ListScreenshotScreens.
+type ListScreenshotScreensParams struct {
+	// Platform 逗号分隔多值；`__none__` 表示未标注（NULL）
+	Platform *string `form:"platform,omitempty" json:"platform,omitempty"`
+
+	// Locale 逗号分隔多值；`__none__` 表示未标注（NULL）
+	Locale *string `form:"locale,omitempty" json:"locale,omitempty"`
+
+	// Theme 逗号分隔多值（light/dark）；`__none__` 表示未标注（NULL）
+	Theme *string `form:"theme,omitempty" json:"theme,omitempty"`
+}
+
 // ListScreenshotScreens200JSONResponseBody_Data defines parameters for ListScreenshotScreens.
 type ListScreenshotScreens200JSONResponseBody_Data struct {
-	Items []ScreenshotScreenListItem `json:"items"`
+	Items []ScreenshotScreen `json:"items"`
 }
 
 // ListScreenshotScreens200JSONResponseBody defines parameters for ListScreenshotScreens.
@@ -4990,18 +5118,24 @@ type UploadScreenshotMultipartBody struct {
 	// File 截图文件；内容须为 image/png、image/jpeg、image/webp、image/gif
 	File openapi_types.File `json:"file"`
 
-	// Group 分组名（≤100 字符）；字段出现即更新（空串置为未分组），不出现则保持原值
-	Group *string `json:"group,omitempty"`
+	// Locale 语言（BCP 47，服务端规范化大小写，非法值 40001）；字段出现即生效（空串清除）
+	Locale *string `json:"locale,omitempty"`
 
-	// Note 本次上传版本的备注（≤1000 字符）
-	Note *string `json:"note,omitempty"`
+	// Platform 平台（开放词表，trim+小写，≤100 字符）；字段出现即生效（空串清除为未标注）
+	Platform *string `json:"platform,omitempty"`
 
 	// ScreenKey 界面标识；规范化后 1~100 字符
 	ScreenKey string `json:"screen_key"`
 
+	// Theme 亮度主题（严格 light|dark，其他值 40001）；字段出现即生效（空串清除）
+	Theme *UploadScreenshotMultipartBodyTheme `json:"theme,omitempty"`
+
 	// Title 界面标题（≤200 字符）；非空才更新
 	Title *string `json:"title,omitempty"`
 }
+
+// UploadScreenshotMultipartBodyTheme defines parameters for UploadScreenshot.
+type UploadScreenshotMultipartBodyTheme string
 
 // UploadScreenshot200JSONResponseBody defines parameters for UploadScreenshot.
 type UploadScreenshot200JSONResponseBody struct {
@@ -5110,7 +5244,7 @@ type UpdateScreenshotAnnotation200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int `json:"code"`
 
-	// Data 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+	// Data 挂在某张截图上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
 	Data *ScreenshotAnnotation `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
@@ -5129,21 +5263,13 @@ type GetScreenshotAnnotationCropHeadParams struct {
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
 }
 
-// GetScreenshotScreen200JSONResponseBody defines parameters for GetScreenshotScreen.
-type GetScreenshotScreen200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                     `json:"code"`
-	Data *ScreenshotScreenDetail `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
 // UpdateScreenshotScreen200JSONResponseBody defines parameters for UpdateScreenshotScreen.
 type UpdateScreenshotScreen200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
-	Code int                     `json:"code"`
-	Data *ScreenshotScreenDetail `json:"data,omitempty"`
+	Code int `json:"code"`
+
+	// Data 截图库中的一张截图：(project_id, screen_key, platform, locale, theme) 唯一，再上传即覆盖文件
+	Data *ScreenshotScreen `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -5154,21 +5280,21 @@ type CreateScreenshotAnnotation200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int `json:"code"`
 
-	// Data 挂在某个截图版本上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
+	// Data 挂在某张截图上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
 	Data *ScreenshotAnnotation `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
 }
 
-// GetScreenshotVersionContentParams defines parameters for GetScreenshotVersionContent.
-type GetScreenshotVersionContentParams struct {
+// GetScreenshotScreenContentParams defines parameters for GetScreenshotScreenContent.
+type GetScreenshotScreenContentParams struct {
 	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
 }
 
-// GetScreenshotVersionContentHeadParams defines parameters for GetScreenshotVersionContentHead.
-type GetScreenshotVersionContentHeadParams struct {
+// GetScreenshotScreenContentHeadParams defines parameters for GetScreenshotScreenContentHead.
+type GetScreenshotScreenContentHeadParams struct {
 	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
 }
@@ -5577,6 +5703,9 @@ type BatchCloseDoneIssuesJSONRequestBody BatchCloseDoneIssuesJSONBody
 
 // UploadLogsJSONRequestBody defines body for UploadLogs for application/json ContentType.
 type UploadLogsJSONRequestBody = UploadLogsRequest
+
+// BatchScreenshotAnnotationsJSONRequestBody defines body for BatchScreenshotAnnotations for application/json ContentType.
+type BatchScreenshotAnnotationsJSONRequestBody = ScreenshotAnnotationBatchRequest
 
 // UploadScreenshotMultipartRequestBody defines body for UploadScreenshot for multipart/form-data ContentType.
 type UploadScreenshotMultipartRequestBody UploadScreenshotMultipartBody

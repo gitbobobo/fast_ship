@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -46,7 +47,7 @@ func routerServeJSON(t *testing.T, env *routerTestEnv, method, path, authorizati
 	return rec
 }
 
-// 通过路由上传一张可解码的截图，返回 version_id。JWT 流程。
+// 通过路由上传一张可解码的截图，返回截图 ID。JWT 流程。
 func uploadRouterScreenshot(t *testing.T, env *routerTestEnv, token, projectID string, content []byte) string {
 	t.Helper()
 	uploadReq := newRouterMultipartRequest(t, "/api/projects/"+projectID+"/screenshots", "file", "shot.png", content, map[string]string{
@@ -59,12 +60,12 @@ func uploadRouterScreenshot(t *testing.T, env *routerTestEnv, token, projectID s
 		t.Fatalf("upload screenshot: %d: %s", uploadRec.Code, uploadRec.Body.String())
 	}
 	var uploaded struct {
-		Version struct {
+		Screen struct {
 			ID string `json:"id"`
-		} `json:"version"`
+		} `json:"screen"`
 	}
 	decodeRouterEnvelope(t, uploadRec, &uploaded)
-	return uploaded.Version.ID
+	return uploaded.Screen.ID
 }
 
 func TestRouterScreenshotAnnotation_AuthMatrix(t *testing.T) {
@@ -74,13 +75,13 @@ func TestRouterScreenshotAnnotation_AuthMatrix(t *testing.T) {
 	jwtAuth := "Bearer " + auth.Token
 	apiKeyAuth := createRouterScreenshotAPIKey(t, env, auth.UserID, "CI-Ann", "ANNAPIKEY1234567890")
 
-	versionID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
+	screenID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
 	createBody, _ := json.Marshal(map[string]any{
 		"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.4, "body": "路由创建",
 	})
 
 	// JWT 创建 → 200
-	createRec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-versions/"+versionID+"/annotations", jwtAuth, createBody)
+	createRec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", jwtAuth, createBody)
 	if createRec.Code != http.StatusOK {
 		t.Fatalf("jwt create: %d: %s", createRec.Code, createRec.Body.String())
 	}
@@ -100,7 +101,7 @@ func TestRouterScreenshotAnnotation_AuthMatrix(t *testing.T) {
 		status int
 		code   int
 	}{
-		{"apikey create", http.MethodPost, "/api/screenshot-versions/" + versionID + "/annotations", apiKeyAuth, createBody, http.StatusForbidden, 40301},
+		{"apikey create", http.MethodPost, "/api/screenshot-screens/" + screenID + "/annotations", apiKeyAuth, createBody, http.StatusForbidden, 40301},
 		{"apikey delete", http.MethodDelete, "/api/screenshot-annotations/" + annotationID, apiKeyAuth, nil, http.StatusForbidden, 40301},
 		{"apikey update resolve", http.MethodPut, "/api/screenshot-annotations/" + annotationID, apiKeyAuth, []byte(`{"status":"resolved"}`), http.StatusOK, 0},
 		{"apikey update reopen", http.MethodPut, "/api/screenshot-annotations/" + annotationID, apiKeyAuth, []byte(`{"status":"open"}`), http.StatusForbidden, 40301},
@@ -127,7 +128,7 @@ func TestRouterScreenshotAnnotation_AuthMatrix(t *testing.T) {
 	}
 
 	// 无凭证 → 401
-	if rec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-versions/"+versionID+"/annotations", "", createBody); rec.Code != http.StatusUnauthorized {
+	if rec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", "", createBody); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth create: expected 401, got %d", rec.Code)
 	}
 }
@@ -137,19 +138,23 @@ func TestRouterScreenshotAnnotation_CropQueryTokenAndHEAD(t *testing.T) {
 	auth := registerAndLoginRouterUser(t, env.router, "cropuser", "cropuser@example.com", "Password123")
 	project := createRouterTestProject(t, env.db, auth.UserID)
 
-	versionID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
+	screenID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
 	createBody, _ := json.Marshal(map[string]any{
 		"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.4, "body": "裁剪",
 	})
-	createRec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-versions/"+versionID+"/annotations", "Bearer "+auth.Token, createBody)
+	createRec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", "Bearer "+auth.Token, createBody)
 	var created struct {
 		ID      string `json:"id"`
 		CropURL string `json:"crop_url"`
 	}
 	decodeRouterEnvelope(t, createRec, &created)
 
-	// ?token= 直连
-	getReq := httptest.NewRequest(http.MethodGet, created.CropURL+"?token="+auth.Token, nil)
+	// ?token= 直连（crop_url 带 ?v= 时 token 用 & 追加）
+	sep := "&"
+	if !strings.Contains(created.CropURL, "?") {
+		sep = "?"
+	}
+	getReq := httptest.NewRequest(http.MethodGet, created.CropURL+sep+"token="+auth.Token, nil)
 	getRec := httptest.NewRecorder()
 	env.router.ServeHTTP(getRec, getReq)
 	if getRec.Code != http.StatusOK {
@@ -186,11 +191,11 @@ func TestRouterIssueDetail_EmbedsScreenshotAnnotations(t *testing.T) {
 	project := createRouterTestProject(t, env.db, auth.UserID)
 	issue := createRouterTestIssue(t, env.db, project.ID)
 
-	versionID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
+	screenID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
 	createBody, _ := json.Marshal(map[string]any{
 		"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.4, "body": "缺陷", "issue_id": issue.ID,
 	})
-	createRec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-versions/"+versionID+"/annotations", "Bearer "+auth.Token, createBody)
+	createRec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", "Bearer "+auth.Token, createBody)
 	if createRec.Code != http.StatusOK {
 		t.Fatalf("create with issue: %d: %s", createRec.Code, createRec.Body.String())
 	}

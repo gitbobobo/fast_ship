@@ -110,23 +110,23 @@ Content-Type: application/json; charset=utf-8
 
 ## 截图标注（AI 评审闭环）
 
-截图页画布上的矩形框选标注挂在**具体截图版本**上，供人/AI 交换评审意见。API Key 可读全部标注、拉裁剪图、标为已解决；不能创建/删除标注（40301），改文字/关联 Issue/重开也要 JWT。
+截图页画布上的矩形框选标注挂在**具体截图**上，供人/AI 交换评审意见。API Key 可读全部标注、拉裁剪图、标为已解决；不能创建/删除标注或批量处理（40301），改文字/关联 Issue/重开也要 JWT。
 
-- 列表：`GET /api/projects/{id}/screenshot-annotations` → `{items:[...]}`，query 可按 `status`（open/resolved）、`issue_id`、`screen_id` 过滤。
+- 列表：`GET /api/projects/{id}/screenshot-annotations` → `{items:[...]}`，query 可按 `status`（open/resolved）、`outdated`（true/false）、`issue_id`、`screen_id`、`platform`/`locale`/`theme`（逗号多值，`__none__` = 未标注桶）过滤。
 - Issue 维度：`GET /api/issues/{iid}` 的 `screenshot_annotations[]` 内嵌关联到该 Issue 的标注（无则缺省）。
-- 每条标注带：`image_url`（所在版本原图）、`crop_url`（框选区域裁剪图，PNG，四周带外边距）、比例坐标 `x/y/width/height`（0~1）、像素坐标 `pixel_rect`（尺寸未知时为 null）、`screen_key`/`screen_title`/`screen_group`、`is_latest_version`、`status`。
+- 每条标注带：`image_url`（所在截图原图）、`crop_url`（框选区域裁剪图，PNG，四周带外边距）、比例坐标 `x/y/width/height`（0~1）、像素坐标 `pixel_rect`（尺寸未知时为 null）、`screen_key`/`screen_title`/`screen_platform`/`screen_locale`/`screen_theme`、`outdated`（截图被覆盖更新后待确认）、`status`。
 - `crop_url`/`image_url` 是 `<img>` 直链路径：脚本调用带 Authorization 头即可，Web 端 `<img>` 才需要 `?token=<jwt>`。
 - 标已解决：`PUT /api/screenshot-annotations/{aid}`，body 整包只传 `{"status":"resolved"}`——带其他字段或 `open` 会被 40301。
 - 原图超过解码像素上限（约 64MP）时 crop 返回 40004（`尺寸超出可处理范围`），此时用 `image_url` 拉原图自行缩放。
 
 AI 评审闭环（字段细节见 api.md screenshots 章）：
 
-1. `GET /api/issues/{iid}` 读 `screenshot_annotations`，或按 `issue_id`/`status=open` 过滤项目标注。
+1. `GET /api/issues/{iid}` 读 `screenshot_annotations`，或按维度过滤 + `status=open` 拉项目标注。
 2. 按 `crop_url` 拉裁剪图，看用户框选了哪块区域、写了什么意见。
-3. 修改 UI 后，`POST /api/projects/{id}/screenshots` 以**同一 `screen_key`** 上传新截图（自动归入同一界面成为新版本；旧标注挂在旧版本上保留，`is_latest_version` 变 false）。
-4. 逐条 `PUT {"status":"resolved"}` 标已解决。
+3. 修改 UI 后，`POST /api/projects/{id}/screenshots` 以**同一 `screen_key` + 同一组 platform/locale/theme** 上传新截图（同变体即覆盖更新，文件与宽高/上传时间被替换；该截图上全部 open 标注置 `outdated=true`，等待人工「确认保留」或你确认修完后置 resolved）。
+4. 逐条 `PUT {"status":"resolved"}` 标已解决（JWT 批量场景可用 `POST /api/projects/{id}/screenshot-annotations/batch`，API Key 无此能力）。
 
-删 Issue 只清空标注的 `issue_id`（标注保留）；删截图版本/界面会级联删标注。
+删 Issue 只清空标注的 `issue_id`（标注保留）；删截图会级联删标注。
 
 ## Issue 关联 PR
 

@@ -346,9 +346,11 @@ func isIdent(e ast.Expr, name string) bool {
 }
 
 // txClosureSafeSelfFields 是不打库的自身字段名白名单：s.logger.With(...) 这类
-// 日志链在闭包内可用；repo/sink/mirror 等一律走 Tx 命名或显式传句柄。
+// 日志链与 s.storage.Rename(...) 这类文件操作在闭包内可用（都够不到连接池）；
+// repo/sink/mirror 等一律走 Tx 命名或显式传句柄。
 var txClosureSafeSelfFields = map[string]struct{}{
-	"logger": {},
+	"logger":  {},
+	"storage": {},
 }
 
 // receiverRoot 返回选择器链最左端的标识符与紧邻它的字段名：

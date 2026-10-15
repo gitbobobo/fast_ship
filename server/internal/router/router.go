@@ -200,20 +200,19 @@ func Setup(
 		api.DELETE("/attachments/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueAttachmentHandler.Delete)
 		api.GET("/attachments/:aid/download", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), issueAttachmentHandler.Download)
 
-		// 截图库 —— 上传与读 JWT / API Key 均可；分组/标题修改与删除仅 JWT；content 支持 ?token= 供 <img> 直链
+		// 截图库 —— 上传与读 JWT / API Key 均可；标题/维度修改与删除仅 JWT；content 支持 ?token= 供 <img> 直链
 		api.POST("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.Upload)
 		api.GET("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.List)
-		api.GET("/screenshot-screens/:sid", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.Get)
-		api.GET("/screenshot-versions/:vid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
-		api.HEAD("/screenshot-versions/:vid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
+		api.GET("/screenshot-screens/:sid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
+		api.HEAD("/screenshot-screens/:sid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
 		api.PATCH("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.Update)
 		api.DELETE("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteScreen)
-		api.DELETE("/screenshot-versions/:vid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteVersion)
 
-		// 截图标注 —— 列表与裁剪图 JWT / API Key 均可；新建与删除仅 JWT；
+		// 截图标注 —— 列表与裁剪图 JWT / API Key 均可；新建、删除与批量动作仅 JWT；
 		// PUT 两类凭证均可，service 内再按凭证限制 API Key 只能置 resolved；crop 支持 ?token= 直链。
 		api.GET("/projects/:id/screenshot-annotations", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotAnnotationHandler.List)
-		api.POST("/screenshot-versions/:vid/annotations", middleware.RequireJWT(cfg, authService), screenshotAnnotationHandler.Create)
+		api.POST("/projects/:id/screenshot-annotations/batch", middleware.RequireJWT(cfg, authService), screenshotAnnotationHandler.Batch)
+		api.POST("/screenshot-screens/:sid/annotations", middleware.RequireJWT(cfg, authService), screenshotAnnotationHandler.Create)
 		api.PUT("/screenshot-annotations/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotAnnotationHandler.Update)
 		api.DELETE("/screenshot-annotations/:aid", middleware.RequireJWT(cfg, authService), screenshotAnnotationHandler.Delete)
 		api.GET("/screenshot-annotations/:aid/crop", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotAnnotationHandler.Crop)

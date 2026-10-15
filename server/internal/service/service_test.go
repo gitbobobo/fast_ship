@@ -97,8 +97,8 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.IssueRecommendation{},
 		&model.RecommendationDependency{},
 		&model.ScreenshotScreen{},
-		&model.ScreenshotVersion{},
 		&model.ScreenshotAnnotation{},
+		&model.ScreenshotPendingDelete{},
 		&model.T3Environment{},
 		&model.ProjectT3Binding{},
 		&model.Automation{},
@@ -118,7 +118,7 @@ func setupTestServices(t *testing.T) *testServices {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_variant ON screenshot_screens(project_id, screen_key, COALESCE(platform,''),COALESCE(locale,''),COALESCE(theme,''))")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_envs_user_name ON t3_environments(user_id, name)")
 
 	tempDir := t.TempDir()

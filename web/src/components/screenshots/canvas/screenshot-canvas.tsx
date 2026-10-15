@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 import { useCreateScreenshotAnnotation } from "@/lib/hooks/use-screenshot-annotations";
 import {
   aspectFromSize,
-  countOpenOnOlderVersions,
+  countOutdatedOpen,
   CANVAS_ZOOM_VAR,
   FIT_PADDING,
   fitViewport,
@@ -21,7 +21,6 @@ import {
   pickCanvasColumns,
   rectsIntersect,
   visibleWorldRect,
-  type AnnotationStatusFilter,
   type Rect,
 } from "@/lib/screenshot-canvas";
 import { AnnotationPanel } from "./annotation-panel";
@@ -49,38 +48,58 @@ export interface CanvasLocateRequest {
 
 interface ScreenshotCanvasProps {
   projectId: string;
-  /** 画布范围内的界面（已按分组 tab 与搜索过滤） */
-  screens: ScreenshotScreenListItem[];
-  /** 项目全部标注，含旧版本上的 */
+  /** 画布范围内的截图（已按维度过滤） */
+  screens: ScreenshotScreen[];
+  /** 维度范围（未按搜索收窄）内的截图 id：面板列表、计数与批量按钮同源，
+   * 搜索隐藏截图上的标注仍计入，避免「显示 1 条却解决 2 条」 */
+  scopeScreenIds: ReadonlySet<string>;
+  /** 范围内全部标注（未按状态过滤；画布叠加与面板按 statusScope 收敛） */
   annotations: ScreenshotAnnotation[];
   annotationsReady: boolean;
-  /** 项目/分组变化时变化，触发视图重置 */
+  /** 状态过滤范围（来自 URL 筛选条）：哪些状态出现在画布叠加与面板里 */
+  statusScope: { open: boolean; resolved: boolean };
+  /** 面板状态 tab 切换回写 URL 筛选条 */
+  onStatusScopeChange: (scope: { open: boolean; resolved: boolean }) => void;
+  /** 批量动作与提示词共用的维度过滤（含 __none__ 桶） */
+  scopeFilter: {
+    platform?: string[];
+    locale?: string[];
+    theme?: string[];
+  };
+  /** 当前范围 open 标注数；工具栏「启动线程」以它置灰 */
+  openCount: number;
+  /** 项目/筛选变化时变化，触发视图重置 */
   resetKey: string;
   /** 预览弹窗等浮层打开时关闭画布快捷键 */
   controlsEnabled: boolean;
   locateRequest: CanvasLocateRequest | null;
-  onOpenPreview: (
-    screenId: string,
-    versionId?: string,
-    annotationId?: string,
-  ) => void;
+  onOpenPreview: (screenId: string) => void;
+  onLaunchThread: () => void;
+  onCopyPrompt: () => void;
 }
 
 interface DraftState {
   screenId: string;
-  versionId: string;
+  contentUrl: string;
   rect: Rect;
 }
 
 export function ScreenshotCanvas({
   projectId,
   screens,
+  scopeScreenIds,
   annotations,
   annotationsReady,
+  statusScope,
+  onStatusScopeChange,
+  scopeFilter,
+  openCount,
   resetKey,
   controlsEnabled,
   locateRequest,
   onOpenPreview,
+  onLaunchThread,
+  onCopyPrompt,
 }: ScreenshotCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const {
@@ -100,17 +119,14 @@ export function ScreenshotCanvas({
     () => typeof window === "undefined" || window.innerWidth >= 1024,
   );
   const [drawMode, setDrawMode] = useState(false);
-  const [showResolved, setShowResolved] = useState(false);
-  const [statusFilter, setStatusFilter] =
-    useState<AnnotationStatusFilter>("open");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hoverId, setHoverId] = useState<string | null>(null);
   const [flashId, setFlashId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftState | null>(null);
-  // 接口未给尺寸的存量版本，用图片 onLoad 量到的宽高比校正排版
+  // 接口未给尺寸的存量截图，用图片 onLoad 量到的宽高比校正排版
   const [measured, setMeasured] = useState<Record<string, number>>({});
   const flashTimerRef = useRef<number | null>(null);
-  // 已放行挂载 <img> 的界面集合，按 resetKey（项目|分组）归位：
+  // 已放行挂载 <img> 的截图集合，按 resetKey（项目|筛选）归位：
   // 同范围数据刷新不重置（已加载的图不卸载，避免闪烁与重复下载），
   // 换范围时清空从头分批，不让上个范围的额度带进新范围
   const [releasedImgs, setReleasedImgs] = useState<{
@@ -135,7 +151,7 @@ export function ScreenshotCanvas({
     setReleasedImgs({ key: resetKey, ids: new Set() });
   }
 
-  // 切项目/分组：清掉选中、草稿、框选态（视图重置在下方 effect）
+  // 切项目/筛选：清掉选中、草稿、框选态（视图重置在下方 effect）
   const [prevResetKey, setPrevResetKey] = useState(resetKey);
   if (resetKey !== prevResetKey) {
     setPrevResetKey(resetKey);
@@ -154,11 +170,11 @@ export function ScreenshotCanvas({
   // aspectOf 供 pickCanvasColumns/layoutCanvas 高频调用，必须 O(1)
   const aspectOf = useCallback(
     (screenId: string): number | null => {
-      const version = screenById.get(screenId)?.latest_version;
-      if (!version) return null;
+      const screen = screenById.get(screenId);
+      if (!screen) return null;
       return (
-        aspectFromSize(version.width, version.height) ??
-        measured[version.id] ??
+        aspectFromSize(screen.width, screen.height) ??
+        measured[screenId] ??
         null
       );
     },
@@ -185,7 +201,7 @@ export function ScreenshotCanvas({
     [layout.cards],
   );
 
-  // 视图重置：新范围（项目/分组）第一次有卡片且量到容器尺寸时适应全部
+  // 视图重置：新范围（项目/筛选）第一次有卡片且量到容器尺寸时适应全部
   const fittedKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (fittedKeyRef.current === resetKey) return;
@@ -194,7 +210,7 @@ export function ScreenshotCanvas({
     jumpTo(fitViewport(layout.bounds, size, FIT_PADDING, toolbarH + TOOLBAR_GAP));
   }, [resetKey, size, layout, toolbarH, jumpTo]);
 
-  // 搜索/数据变化把内容整体挪出视口时自动适应全部，避免整屏空白；
+  // 筛选/数据变化把内容整体挪出视口时自动适应全部，避免整屏空白；
   // 只在布局变化时评估，手动平移到空白处不会触发
   const layoutRef = useRef(layout);
   useEffect(() => {
@@ -209,46 +225,52 @@ export function ScreenshotCanvas({
     }
   }, [layout, size, viewport, toolbarH, moveTo]);
 
-  // 草稿只认它画上去的那个版本：界面换版或被过滤出画布时草稿作废
+  // 草稿只认它画上去的那张截图：截图被覆盖（content_url 变化）或被过滤出画布时草稿作废
   useEffect(() => {
     if (!draft) return;
     const screen = screenById.get(draft.screenId);
-    if (!screen || screen.latest_version?.id !== draft.versionId) {
+    if (!screen || screen.content_url !== draft.contentUrl) {
       setDraft(null);
       toast.info("截图已更新，标注草稿已取消");
     }
   }, [draft, screenById]);
 
-  // 画布只展示最新版本：标注按「挂在该界面最新版本」归到卡片上
+  // 画布叠加与面板共同的状态范围
+  const inScope = useCallback(
+    (a: ScreenshotAnnotation) =>
+      (a.status === "open" && statusScope.open) ||
+      (a.status === "resolved" && statusScope.resolved),
+    [statusScope],
+  );
+
+  // 标注按所属截图归到卡片上（只画状态范围内的）
   const annotationsByScreen = useMemo(() => {
     const map = new Map<string, ScreenshotAnnotation[]>();
     for (const a of annotations) {
-      const latestId = screenById.get(a.screen_id)?.latest_version?.id;
-      if (!latestId || a.version_id !== latestId) continue;
-      if (a.status === "resolved" && !showResolved) continue;
+      if (!inScope(a)) continue;
+      if (!screenById.has(a.screen_id)) continue;
       const list = map.get(a.screen_id);
       if (list) list.push(a);
       else map.set(a.screen_id, [a]);
     }
     return map;
-  }, [annotations, screenById, showResolved]);
+  }, [annotations, screenById, inScope]);
 
-  const olderOpenCounts = useMemo(
-    () =>
-      countOpenOnOlderVersions(
-        annotations,
-        (screenId) => screenById.get(screenId)?.latest_version?.id,
-      ),
-    [annotations, screenById],
+  const outdatedOpenCounts = useMemo(
+    () => countOutdatedOpen(annotations),
+    [annotations],
   );
 
-  // 面板范围 = 当前画布内的界面；新的在上
+  // 面板范围 = 维度范围截图（不随搜索收窄，与批量按钮同源）内的状态范围内
+  // 标注；新的在上。画布叠加另行按搜索后的 screenById 收敛
   const scopeAnnotations = useMemo(
     () =>
       annotations
-        .filter((a) => screenById.has(a.screen_id))
+        .filter(
+          (a) => scopeScreenIds.has(a.screen_id) && inScope(a),
+        )
         .sort((a, b) => b.created_at.localeCompare(a.created_at)),
-    [annotations, screenById],
+    [annotations, scopeScreenIds, inScope],
   );
 
   // 标注序号角标与面板条目同序，画布矩形与列表一眼对上
@@ -281,29 +303,24 @@ export function ScreenshotCanvas({
     [cardRectById, size, moveTo],
   );
 
-  // 定位：最新版本上的标注平移缩放到卡片并闪烁；旧版本交给预览弹窗
+  // 定位：平移缩放到卡片并闪烁
   const locate = useCallback(
     (annotation: ScreenshotAnnotation) => {
       const screen = screenById.get(annotation.screen_id);
       if (!screen) {
-        toast.info("该标注所在的界面不在当前画布范围内");
+        toast.info("该标注所在的截图不在当前画布范围内");
         return;
       }
-      if (screen.latest_version?.id !== annotation.version_id) {
-        onOpenPreview(screen.id, annotation.version_id, annotation.id);
+      if (!inScope(annotation)) {
+        toast.info("该标注不在当前状态筛选范围内，请调整顶部筛选条");
         return;
-      }
-      if (annotation.status === "resolved") {
-        setShowResolved(true);
-        // 面板滤镜切到「全部」，否则选中项不在列表里
-        setStatusFilter("all");
       }
       setSelectedId(annotation.id);
       setDrawMode(false);
       focusCard(screen.id);
       flash(annotation.id);
     },
-    [screenById, onOpenPreview, focusCard, flash],
+    [screenById, inScope, focusCard, flash],
   );
 
   // URL / 外部触发的定位请求：等数据与容器尺寸就绪后只处理一次
@@ -314,7 +331,7 @@ export function ScreenshotCanvas({
     }
     if (!annotationsReady || size.width <= 0 || screens.length === 0) return;
     const target = annotations.find((a) => a.id === locateRequest.annotationId);
-    // 所在界面还没进入画布范围（放宽 tab/搜索的更新未生效）时继续等
+    // 所在截图还没进入画布范围（放宽筛选的更新未生效）时继续等
     if (target && !screenById.has(target.screen_id)) return;
     handledNonceRef.current = locateRequest.nonce;
     if (!target) {
@@ -361,9 +378,9 @@ export function ScreenshotCanvas({
   }, [controlsEnabled, toggleDraw, draft, drawMode]);
 
   const handleImageSize = useCallback(
-    (versionId: string, width: number, height: number) => {
+    (screenId: string, width: number, height: number) => {
       setMeasured((prev) =>
-        prev[versionId] ? prev : { ...prev, [versionId]: height / width },
+        prev[screenId] ? prev : { ...prev, [screenId]: height / width },
       );
     },
     [],
@@ -375,11 +392,10 @@ export function ScreenshotCanvas({
   }, []);
 
   const handleDrawEnd = useCallback(
-    (screen: ScreenshotScreenListItem, rect: Rect) => {
-      if (!screen.latest_version) return;
+    (screen: ScreenshotScreen, rect: Rect) => {
       setDraft({
         screenId: screen.id,
-        versionId: screen.latest_version.id,
+        contentUrl: screen.content_url,
         rect,
       });
     },
@@ -391,7 +407,7 @@ export function ScreenshotCanvas({
     const rect = normalizeRatioRect(draft.rect);
     try {
       const res = await createAnnotation.mutateAsync({
-        versionId: draft.versionId,
+        screenId: draft.screenId,
         payload: { ...rect, body },
       });
       toast.success("已添加标注");
@@ -537,7 +553,7 @@ export function ScreenshotCanvas({
                 aspectKnown={aspectOf(screen.id) !== null}
                 annotations={cardAnnotations}
                 annotationIndex={annotationIndex}
-                olderOpenCount={olderOpenCounts.get(screen.id) ?? 0}
+                outdatedOpenCount={outdatedOpenCounts.get(screen.id) ?? 0}
                 selectedAnnotationId={owns(selectedId)}
                 hoverAnnotationId={owns(hoverId)}
                 flashAnnotationId={owns(flashId)}
@@ -553,7 +569,7 @@ export function ScreenshotCanvas({
             );
           })}
 
-          {/* 分组标题渲染在卡片之后：统一的悬浮标签样式，深缩时
+          {/* 分区标题渲染在卡片之后：统一的悬浮标签样式，深缩时
               反放大保持可读并放宽宽度不被 titleRect 截断。以左上为
               原点反放大：标签落回本组首行，不再盖住上一组尾行 */}
           {layout.groups.map((group) => (
@@ -589,14 +605,15 @@ export function ScreenshotCanvas({
           ref={toolbarRef}
           scale={viewport.scale}
           drawMode={drawMode}
-          showResolved={showResolved}
           panelOpen={panelOpen}
+          openCount={openCount}
           onToggleDraw={toggleDraw}
-          onToggleResolved={() => setShowResolved((on) => !on)}
           onTogglePanel={() => setPanelOpen((open) => !open)}
           onZoomIn={() => zoomByFactor(1.25)}
           onZoomOut={() => zoomByFactor(0.8)}
           onFit={fitAll}
+          onLaunchThread={onLaunchThread}
+          onCopyPrompt={onCopyPrompt}
         />
 
         {drawEnabled && !draft && (
@@ -614,8 +631,24 @@ export function ScreenshotCanvas({
           <AnnotationPanel
             projectId={projectId}
             annotations={scopeAnnotations}
-            statusFilter={statusFilter}
-            onStatusFilterChange={setStatusFilter}
+            statusFilter={
+              // 面板 tab 与 URL 状态过滤双向同源：范围只含一个状态时锁定该 tab
+              statusScope.open && !statusScope.resolved
+                ? "open"
+                : !statusScope.open && statusScope.resolved
+                  ? "resolved"
+                  : "all"
+            }
+            onStatusFilterChange={(filter) => {
+              onStatusScopeChange({
+                open: filter !== "resolved",
+                resolved: filter !== "open",
+              });
+            }}
+            scopeFilter={scopeFilter}
+            outdatedCount={
+              [...outdatedOpenCounts.values()].reduce((a, b) => a + b, 0)
+            }
             selectedId={selectedId}
             hoverId={hoverId}
             flashId={flashId}

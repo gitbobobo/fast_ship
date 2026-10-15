@@ -8,6 +8,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -30,7 +31,7 @@ func makeHandlerTestPNG(t *testing.T, w, h int) []byte {
 	return buf.Bytes()
 }
 
-func uploadHandlerScreenshot(t *testing.T, env *handlerTestEnv, userID, username, projectID, screenKey string, content []byte) (screenID, versionID string) {
+func uploadHandlerScreenshot(t *testing.T, env *handlerTestEnv, userID, username, projectID, screenKey string, content []byte) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	ctx := newScreenshotUploadContext(t, rec, projectID, "shot.png", content, map[string]string{
@@ -45,21 +46,18 @@ func uploadHandlerScreenshot(t *testing.T, env *handlerTestEnv, userID, username
 		Screen struct {
 			ID string `json:"id"`
 		} `json:"screen"`
-		Version struct {
-			ID string `json:"id"`
-		} `json:"version"`
 	}
 	decodeEnvelope(t, rec, &uploaded)
-	return uploaded.Screen.ID, uploaded.Version.ID
+	return uploaded.Screen.ID
 }
 
-func createHandlerAnnotation(t *testing.T, env *handlerTestEnv, userID, username, versionID, body string) string {
+func createHandlerAnnotation(t *testing.T, env *handlerTestEnv, userID, username, screenID, body string) string {
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{
 		"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.4, "body": body,
 	})
-	ctx, rec := newJSONContext(http.MethodPost, "/api/screenshot-versions/"+versionID+"/annotations", payload)
-	ctx.Params = ginParams("vid", versionID)
+	ctx, rec := newJSONContext(http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", payload)
+	ctx.Params = ginParams("sid", screenID)
 	setScreenshotJWTContext(ctx, userID, username)
 	env.annotationHandler.Create(ctx)
 	if rec.Code != http.StatusOK {
@@ -82,13 +80,13 @@ func TestScreenshotAnnotationHandlerCreate_JWTFlow(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-1")
 	project := createHandlerTestProject(t, env.db, user.ID)
-	_, versionID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	screenID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
 
 	payload, _ := json.Marshal(map[string]any{
 		"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.4, "body": "文字溢出",
 	})
-	ctx, rec := newJSONContext(http.MethodPost, "/api/screenshot-versions/"+versionID+"/annotations", payload)
-	ctx.Params = ginParams("vid", versionID)
+	ctx, rec := newJSONContext(http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", payload)
+	ctx.Params = ginParams("sid", screenID)
 	setScreenshotJWTContext(ctx, user.ID, user.Username)
 	env.annotationHandler.Create(ctx)
 
@@ -96,13 +94,16 @@ func TestScreenshotAnnotationHandlerCreate_JWTFlow(t *testing.T) {
 		t.Fatalf("expected create 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var result struct {
-		ID        string `json:"id"`
-		Status    string `json:"status"`
-		Body      string `json:"body"`
-		CreatedBy string `json:"created_by"`
-		ScreenKey string `json:"screen_key"`
-		ImageURL  string `json:"image_url"`
-		CropURL   string `json:"crop_url"`
+		ID        string  `json:"id"`
+		Status    string  `json:"status"`
+		Body      string  `json:"body"`
+		CreatedBy string  `json:"created_by"`
+		ScreenKey string  `json:"screen_key"`
+		ImageURL  string  `json:"image_url"`
+		CropURL   string  `json:"crop_url"`
+		Outdated  bool    `json:"outdated"`
+		VersionID string  `json:"version_id"`
+		Platform  *string `json:"screen_platform"`
 		PixelRect struct {
 			X, Y, Width, Height int
 		} `json:"pixel_rect"`
@@ -111,8 +112,11 @@ func TestScreenshotAnnotationHandlerCreate_JWTFlow(t *testing.T) {
 	if result.Status != "open" || result.Body != "文字溢出" || result.CreatedBy != user.Username {
 		t.Fatalf("unexpected payload: %+v", result)
 	}
-	if result.ScreenKey != "home" || result.CropURL != "/api/screenshot-annotations/"+result.ID+"/crop" {
+	if result.ScreenKey != "home" || !strings.HasPrefix(result.CropURL, "/api/screenshot-annotations/"+result.ID+"/crop?v=") {
 		t.Fatalf("unexpected urls: %+v", result)
+	}
+	if result.Outdated || result.VersionID != "" {
+		t.Fatalf("expected no version concept and not outdated, got %+v", result)
 	}
 	if result.PixelRect.X != 10 || result.PixelRect.Y != 10 || result.PixelRect.Width != 40 || result.PixelRect.Height != 20 {
 		t.Fatalf("unexpected pixel_rect: %+v", result.PixelRect)
@@ -123,13 +127,13 @@ func TestScreenshotAnnotationHandlerCreate_RejectsInvalidRect(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-1")
 	project := createHandlerTestProject(t, env.db, user.ID)
-	_, versionID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	screenID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
 
 	payload, _ := json.Marshal(map[string]any{
 		"x": 0.9, "y": 0.2, "width": 0.4, "height": 0.4, "body": "出界",
 	})
-	ctx, rec := newJSONContext(http.MethodPost, "/api/screenshot-versions/"+versionID+"/annotations", payload)
-	ctx.Params = ginParams("vid", versionID)
+	ctx, rec := newJSONContext(http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", payload)
+	ctx.Params = ginParams("sid", screenID)
 	setScreenshotJWTContext(ctx, user.ID, user.Username)
 	env.annotationHandler.Create(ctx)
 
@@ -146,11 +150,11 @@ func TestScreenshotAnnotationHandlerList_Filters(t *testing.T) {
 	user := createHandlerTestUser(t, env.db, "user-1")
 	project := createHandlerTestProject(t, env.db, user.ID)
 	issue := createHandlerTestIssue(t, env.db, project.ID)
-	screenID, versionID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
-	_, otherVersionID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "login", makeHandlerTestPNG(t, 100, 50))
+	screenID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	otherScreenID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "login", makeHandlerTestPNG(t, 100, 50))
 
-	linked := createHandlerAnnotation(t, env, user.ID, user.Username, versionID, "home 标注")
-	createHandlerAnnotation(t, env, user.ID, user.Username, otherVersionID, "login 标注")
+	linked := createHandlerAnnotation(t, env, user.ID, user.Username, screenID, "home 标注")
+	createHandlerAnnotation(t, env, user.ID, user.Username, otherScreenID, "login 标注")
 
 	// 关联 issue
 	linkPayload, _ := json.Marshal(map[string]any{"issue_id": issue.ID})
@@ -163,7 +167,9 @@ func TestScreenshotAnnotationHandlerList_Filters(t *testing.T) {
 	}
 
 	list := func(query string) (int, []struct {
-		ID string `json:"id"`
+		ID       string  `json:"id"`
+		Outdated bool    `json:"outdated"`
+		Platform *string `json:"screen_platform"`
 	}) {
 		ctx, rec := newJSONContext(http.MethodGet, "/api/projects/"+project.ID+"/screenshot-annotations?"+query, nil)
 		ctx.Params = ginParams("id", project.ID)
@@ -171,7 +177,9 @@ func TestScreenshotAnnotationHandlerList_Filters(t *testing.T) {
 		env.annotationHandler.List(ctx)
 		var result struct {
 			Items []struct {
-				ID string `json:"id"`
+				ID       string  `json:"id"`
+				Outdated bool    `json:"outdated"`
+				Platform *string `json:"screen_platform"`
 			} `json:"items"`
 		}
 		decodeEnvelope(t, rec, &result)
@@ -194,18 +202,96 @@ func TestScreenshotAnnotationHandlerList_Filters(t *testing.T) {
 	if code != http.StatusOK || len(items) != 0 {
 		t.Fatalf("status filter: %d %+v", code, items)
 	}
+	code, items = list("outdated=false")
+	if code != http.StatusOK || len(items) != 2 {
+		t.Fatalf("outdated filter: %d %+v", code, items)
+	}
+	code, items = list("platform=__none__")
+	if code != http.StatusOK || len(items) != 2 {
+		t.Fatalf("dimension filter: %d %+v", code, items)
+	}
 	code, _ = list("status=bogus")
 	if code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for bad status, got %d", code)
 	}
+	code, _ = list("outdated=maybe")
+	if code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for bad outdated, got %d", code)
+	}
+}
+
+func TestScreenshotAnnotationHandlerBatch_ConfirmAndResolve(t *testing.T) {
+	env := setupHandlerTestEnv(t)
+	user := createHandlerTestUser(t, env.db, "user-1")
+	project := createHandlerTestProject(t, env.db, user.ID)
+	stranger := createHandlerTestUser(t, env.db, "stranger")
+
+	screenID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	a1 := createHandlerAnnotation(t, env, user.ID, user.Username, screenID, "a1")
+	a2 := createHandlerAnnotation(t, env, user.ID, user.Username, screenID, "a2")
+
+	// 覆盖上传使两条 open 标注过期
+	uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+
+	batch := func(payload string, jwt bool) *httptest.ResponseRecorder {
+		ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/screenshot-annotations/batch", []byte(payload))
+		ctx.Params = ginParams("id", project.ID)
+		if jwt {
+			setScreenshotJWTContext(ctx, user.ID, user.Username)
+		} else {
+			setAnnotationAPIKeyContext(ctx, user.ID, "CI-Bot")
+		}
+		env.annotationHandler.Batch(ctx)
+		return rec
+	}
+
+	rec := batch(`{"action":"confirm"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm batch: %d: %s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Updated int `json:"updated"`
+	}
+	decodeEnvelope(t, rec, &result)
+	if result.Updated != 2 {
+		t.Fatalf("expected 2 confirmed, got %+v", result)
+	}
+
+	// 覆盖再次置位后批量 resolve
+	uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	rec = batch(`{"action":"resolve"}`, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve batch: %d: %s", rec.Code, rec.Body.String())
+	}
+	decodeEnvelope(t, rec, &result)
+	if result.Updated != 2 {
+		t.Fatalf("expected 2 resolved, got %+v", result)
+	}
+
+	// 非法 action → 40001
+	rec = batch(`{"action":"nope"}`, true)
+	if rec.Code != http.StatusBadRequest || decodeEnvelope(t, rec, nil).Code != 40001 {
+		t.Fatalf("bad action: expected 40001, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 跨用户项目 → 404（API Key 无批量能力由路由层 RequireJWT 拦截，见 router 测试）
+	ctx, rec := newJSONContext(http.MethodPost, "/api/projects/"+project.ID+"/screenshot-annotations/batch", []byte(`{"action":"resolve"}`))
+	ctx.Params = ginParams("id", project.ID)
+	setScreenshotJWTContext(ctx, stranger.ID, stranger.Username)
+	env.annotationHandler.Batch(ctx)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign project batch: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	_ = a1
+	_ = a2
 }
 
 func TestScreenshotAnnotationHandlerUpdate_APIKeyRestriction(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-1")
 	project := createHandlerTestProject(t, env.db, user.ID)
-	_, versionID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
-	annotationID := createHandlerAnnotation(t, env, user.ID, user.Username, versionID, "初稿")
+	screenID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	annotationID := createHandlerAnnotation(t, env, user.ID, user.Username, screenID, "初稿")
 
 	update := func(payload string, apiKey bool) *httptest.ResponseRecorder {
 		ctx, rec := newJSONContext(http.MethodPut, "/api/screenshot-annotations/"+annotationID, []byte(payload))
@@ -255,8 +341,8 @@ func TestScreenshotAnnotationHandler_NotFoundAndForeign(t *testing.T) {
 	owner := createHandlerTestUser(t, env.db, "owner")
 	stranger := createHandlerTestUser(t, env.db, "stranger")
 	project := createHandlerTestProject(t, env.db, owner.ID)
-	_, versionID := uploadHandlerScreenshot(t, env, owner.ID, owner.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
-	annotationID := createHandlerAnnotation(t, env, owner.ID, owner.Username, versionID, "私有")
+	screenID := uploadHandlerScreenshot(t, env, owner.ID, owner.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	annotationID := createHandlerAnnotation(t, env, owner.ID, owner.Username, screenID, "私有")
 
 	for _, tc := range []struct {
 		name string
@@ -302,8 +388,8 @@ func TestScreenshotAnnotationHandlerDeleteAndCrop(t *testing.T) {
 	env := setupHandlerTestEnv(t)
 	user := createHandlerTestUser(t, env.db, "user-1")
 	project := createHandlerTestProject(t, env.db, user.ID)
-	_, versionID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
-	annotationID := createHandlerAnnotation(t, env, user.ID, user.Username, versionID, "裁剪我")
+	screenID := uploadHandlerScreenshot(t, env, user.ID, user.Username, project.ID, "home", makeHandlerTestPNG(t, 100, 50))
+	annotationID := createHandlerAnnotation(t, env, user.ID, user.Username, screenID, "裁剪我")
 
 	// crop 输出 PNG 与内容协商头
 	ctx, rec := newJSONContext(http.MethodGet, "/api/screenshot-annotations/"+annotationID+"/crop", nil)

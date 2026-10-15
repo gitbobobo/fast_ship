@@ -396,8 +396,8 @@ func (s *IssueService) Get(issueID, userID string) (*IssueResponse, error) {
 		resp.ScreenshotAnnotations = assembleScreenshotAnnotations(
 			annotations, related,
 			map[string]model.Issue{issue.ID: *issue},
-			func(version *model.ScreenshotVersion) (int, int) {
-				return resolveScreenshotVersionDims(s.storage, version)
+			func(screen *model.ScreenshotScreen) (int, int) {
+				return resolveScreenshotDims(s.storage, screen)
 			},
 		)
 	}

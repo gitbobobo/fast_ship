@@ -9,17 +9,18 @@ function makeAnnotation(
     id: "a-1",
     project_id: "p-1",
     screen_id: "s1",
-    version_id: "v1",
     issue_id: "i-1",
     issue_reference: "INT-1",
     issue_title: "修样式",
     screen_key: "home",
     screen_title: "",
-    screen_group: "",
+    screen_platform: null,
+    screen_locale: null,
+    screen_theme: null,
     image_url: "",
     image_width: 0,
     image_height: 0,
-    is_latest_version: true,
+    outdated: false,
     x: 0.1,
     y: 0.1,
     width: 0.2,
@@ -67,7 +68,7 @@ describe("IssueScreenshotAnnotationsCard", () => {
     const link = screen.getByText("按钮错位").closest("a");
     expect(link).toHaveAttribute(
       "href",
-      "/screenshots?project=p-1&view=canvas&annotation=a-1",
+      "/screenshots?project=p-1&annotation=a-1",
     );
   });
 });

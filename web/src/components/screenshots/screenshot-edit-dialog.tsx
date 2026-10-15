@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { ApiRequestError } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,6 +10,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  OptionSelect,
+  type OptionSelectOption,
+} from "@/components/ui/option-select";
 import { useUpdateScreenshotScreen } from "@/lib/hooks/use-screenshots";
 
 interface ScreenshotEditDialogProps {
@@ -18,33 +23,53 @@ interface ScreenshotEditDialogProps {
   screen: ScreenshotScreen;
 }
 
+const THEME_OPTIONS: OptionSelectOption[] = [
+  { value: "", label: "未标注" },
+  { value: "light", label: "亮色" },
+  { value: "dark", label: "暗色" },
+];
+
+/** 编辑截图：标题与三个变体维度；维度空串 = 清除为未标注 */
 export function ScreenshotEditDialog({
   open,
   onOpenChange,
   projectId,
   screen,
 }: ScreenshotEditDialogProps) {
-  const [group, setGroup] = useState(screen.group);
   const [title, setTitle] = useState(screen.title);
+  const [platform, setPlatform] = useState(screen.platform ?? "");
+  const [locale, setLocale] = useState(screen.locale ?? "");
+  const [theme, setTheme] = useState(screen.theme ?? "");
   const updateScreen = useUpdateScreenshotScreen(projectId);
 
   useEffect(() => {
     if (!open) return;
-    setGroup(screen.group);
     setTitle(screen.title);
-  }, [open, screen.group, screen.title]);
+    setPlatform(screen.platform ?? "");
+    setLocale(screen.locale ?? "");
+    setTheme(screen.theme ?? "");
+  }, [open, screen]);
 
   const handleSubmit = async () => {
     try {
       await updateScreen.mutateAsync({
         screenId: screen.id,
-        // group/title 空串合法：分别表示未分组、回退显示 screen_key
-        payload: { group: group.trim(), title: title.trim() },
+        // title/维度空串合法：标题回退显示 screen_key，维度清除为未标注
+        payload: {
+          title: title.trim(),
+          platform: platform.trim(),
+          locale: locale.trim(),
+          theme,
+        },
       });
       toast.success("已保存");
       onOpenChange(false);
-    } catch {
-      toast.error("保存失败，请稍后重试");
+    } catch (error) {
+      const message =
+        error instanceof ApiRequestError && error.code === 40921
+          ? "相同界面标识与平台/语言/亮度组合的截图已存在"
+          : "保存失败，请稍后重试";
+      toast.error(message);
     }
   };
 
@@ -52,7 +77,7 @@ export function ScreenshotEditDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>编辑界面</DialogTitle>
+          <DialogTitle>编辑截图</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4">
@@ -71,13 +96,33 @@ export function ScreenshotEditDialog({
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="edit-screenshot-group">分组</Label>
+            <Label htmlFor="edit-screenshot-platform">平台</Label>
             <Input
-              id="edit-screenshot-group"
-              value={group}
-              onChange={(e) => setGroup(e.target.value)}
+              id="edit-screenshot-platform"
+              value={platform}
+              onChange={(e) => setPlatform(e.target.value)}
               maxLength={100}
-              placeholder="留空为未分组"
+              placeholder="如 web / ios；留空为未标注"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-screenshot-locale">语言</Label>
+            <Input
+              id="edit-screenshot-locale"
+              value={locale}
+              onChange={(e) => setLocale(e.target.value)}
+              maxLength={35}
+              placeholder="BCP 47，如 zh-CN；留空为未标注"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="edit-screenshot-theme">亮度</Label>
+            <OptionSelect
+              value={theme}
+              onValueChange={(v) => setTheme(v ?? "")}
+              options={THEME_OPTIONS}
+              className="w-full"
+              aria-label="亮度"
             />
           </div>
 

@@ -14,6 +14,7 @@ vi.mock("@/lib/api/screenshot-annotations", async (importOriginal) => {
     screenshotAnnotationApi: {
       ...mod.screenshotAnnotationApi,
       create: vi.fn(),
+      batch: vi.fn(),
     },
   };
 });
@@ -22,38 +23,41 @@ vi.mock("@/lib/hooks/use-issues", () => ({
   useIssues: vi.fn(() => ({ data: { items: [] } })),
 }));
 
-function makeVersion(id: string, screenId: string): ScreenshotVersion {
-  return {
-    id,
-    screen_id: screenId,
-    note: "",
-    file_name: `${id}.png`,
-    file_size: 1,
-    mime_type: "image/png",
-    uploaded_by: "bobo",
-    uploaded_at: "2026-10-05T00:00:00Z",
-    content_url: `/api/screenshot-versions/${id}/content`,
-    width: 800,
-    height: 600,
-  };
-}
-
 function makeScreen(
   id: string,
-  overrides: Partial<ScreenshotScreenListItem> = {},
-): ScreenshotScreenListItem {
+  overrides: Partial<ScreenshotScreen> = {},
+): ScreenshotScreen {
+  const uploadedAt = overrides.uploaded_at ?? "2026-10-05T00:00:00Z";
   return {
     id,
     project_id: "p-1",
-    screen_key: id,
+    screen_key: overrides.screen_key ?? id,
     title: `界面 ${id}`,
-    group: "",
-    version_count: 2,
-    last_uploaded_at: "2026-10-05T00:00:00Z",
+    platform: overrides.platform ?? null,
+    locale: overrides.locale ?? null,
+    theme: overrides.theme ?? null,
+    mime_type: "image/png",
+    file_size: 1,
+    width: 800,
+    height: 600,
+    uploaded_by: "bobo",
+    uploaded_at: uploadedAt,
     created_at: "2026-10-01T00:00:00Z",
-    latest_version: makeVersion(`${id}-v2`, id),
-    ...overrides,
+    // 与服务端真实返回同形：content_url 带 ?v=<uploaded_at 纳秒值> 修订参数
+    content_url:
+      overrides.content_url ??
+      `/api/screenshot-screens/${id}/content?v=${Date.parse(uploadedAt) * 1000}`,
   };
+}
+
+/** 模拟覆盖上传后的刷新数据：uploaded_at 推进，content_url 由它派生变化 */
+function overwriteScreen(screen: ScreenshotScreen): ScreenshotScreen {
+  const { content_url: _contentUrl, uploaded_at: _uploadedAt, ...rest } =
+    screen;
+  return makeScreen(screen.id, {
+    ...rest,
+    uploaded_at: "2026-10-06T00:00:00Z",
+  });
 }
 
 function makeAnnotation(
@@ -63,17 +67,18 @@ function makeAnnotation(
     id: "a-x",
     project_id: "p-1",
     screen_id: "s1",
-    version_id: "s1-v2",
     issue_id: null,
     issue_reference: null,
     issue_title: null,
     screen_key: "s1",
     screen_title: "界面 s1",
-    screen_group: "",
+    screen_platform: null,
+    screen_locale: null,
+    screen_theme: null,
     image_url: "",
     image_width: 800,
     image_height: 600,
-    is_latest_version: true,
+    outdated: false,
     x: 0.1,
     y: 0.1,
     width: 0.2,
@@ -90,6 +95,8 @@ function makeAnnotation(
   };
 }
 
+const DEFAULT_STATUS_SCOPE = { open: true, resolved: false };
+
 function renderCanvas(
   props: Partial<Parameters<typeof ScreenshotCanvas>[0]> = {},
 ) {
@@ -102,13 +109,20 @@ function renderCanvas(
     <QueryClientProvider client={queryClient}>
       <ScreenshotCanvas
         projectId="p-1"
-        screens={[makeScreen("s1"), makeScreen("s2", { group: "设置" })]}
+        screens={[makeScreen("s1"), makeScreen("s2", { platform: "设置" })]}
+        scopeScreenIds={new Set(["s1", "s2"])}
         annotations={[]}
         annotationsReady
-        resetKey="p-1|__all__"
+        statusScope={DEFAULT_STATUS_SCOPE}
+        onStatusScopeChange={vi.fn()}
+        scopeFilter={{}}
+        openCount={0}
+        resetKey="p-1|"
         controlsEnabled
         locateRequest={null}
         onOpenPreview={vi.fn()}
+        onLaunchThread={vi.fn()}
+        onCopyPrompt={vi.fn()}
         {...props}
         {...nextProps}
       />
@@ -151,20 +165,38 @@ describe("ScreenshotCanvas", () => {
     }
   });
 
-  it("lays out group titles and renders a card per screen", () => {
+  it("lays out platform sections and renders a card per screen", () => {
     renderCanvas();
 
     expect(screen.getByRole("heading", { name: "设置" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "未分组" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "未标注" })).toBeInTheDocument();
     expect(screen.getByTestId("canvas-card-s1")).toBeInTheDocument();
     expect(screen.getByTestId("canvas-card-s2")).toBeInTheDocument();
+  });
+
+  it("badges locale/theme and the outdated-open count on the card", () => {
+    renderCanvas({
+      screens: [
+        makeScreen("s1", { locale: "zh-CN", theme: "dark" }),
+        makeScreen("s2", { platform: "设置" }),
+      ],
+      annotations: [makeAnnotation({ id: "a-out", outdated: true })],
+    });
+
+    const card = screen.getByTestId("canvas-card-s1");
+    expect(within(card).getByText("zh-CN")).toBeInTheDocument();
+    expect(within(card).getByText("暗色")).toBeInTheDocument();
+    // 覆盖更新后待确认的 open 标注数
+    expect(
+      within(card).getByTestId("canvas-card-outdated-s1"),
+    ).toHaveTextContent("1 条待确认");
   });
 
   it("uses more than four columns and still renders images when zoomed far out", async () => {
     const user = userEvent.setup();
     const screens = Array.from({ length: 60 }, (_, i) =>
       makeScreen(`m${i}`, {
-        last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+        uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
       }),
     );
     renderCanvas({ screens });
@@ -190,9 +222,9 @@ describe("ScreenshotCanvas", () => {
       }
     });
 
-    // 分组标题反向缩放：5% 时屏幕上仍保持可读字号而不是缩没
+    // 分区标题反向缩放：5% 时屏幕上仍保持可读字号而不是缩没
     const titleWrap = screen
-      .getByRole("heading", { name: "未分组" })
+      .getByRole("heading", { name: "未标注" })
       .closest("div")!;
     const counter = Number(
       /scale\(([\d.]+)\)/.exec(titleWrap.style.transform)?.[1],
@@ -204,7 +236,7 @@ describe("ScreenshotCanvas", () => {
     const many = (stamp: number) =>
       Array.from({ length: 60 }, (_, i) =>
         makeScreen(`a${i}`, {
-          last_uploaded_at: `2026-10-0${stamp}T00:00:${String(i).padStart(2, "0")}Z`,
+          uploaded_at: `2026-10-0${stamp}T00:00:${String(i).padStart(2, "0")}Z`,
         }),
       );
     const { rerenderWith } = renderCanvas({ screens: many(5) });
@@ -224,7 +256,7 @@ describe("ScreenshotCanvas", () => {
     const many = (prefix: string) =>
       Array.from({ length: 60 }, (_, i) =>
         makeScreen(`${prefix}${i}`, {
-          last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+          uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
         }),
       );
     const { rerenderWith } = renderCanvas({ screens: many("a") });
@@ -236,7 +268,7 @@ describe("ScreenshotCanvas", () => {
     });
 
     // 换范围后额度重置：新范围首帧只挂首批 30 张，而不是一次性挂满
-    rerenderWith({ screens: many("b"), resetKey: "p-1|g:设置" });
+    rerenderWith({ screens: many("b"), resetKey: "p-1|platform=ios" });
     expect(document.querySelectorAll("[data-canvas-card] img").length).toBe(30);
   });
 
@@ -244,13 +276,13 @@ describe("ScreenshotCanvas", () => {
     const many = (prefix: string) =>
       Array.from({ length: 60 }, (_, i) =>
         makeScreen(`${prefix}${i}`, {
-          last_uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
+          uploaded_at: `2026-10-05T00:00:${String(i).padStart(2, "0")}Z`,
         }),
       );
     const { rerenderWith } = renderCanvas({ screens: many("a") });
     // 趁批次计时器在飞（80ms 窗口内）直接切范围：旧计时器作废后
     // 新范围必须照常分批，不能停在首批
-    rerenderWith({ screens: many("b"), resetKey: "p-1|g:设置" });
+    rerenderWith({ screens: many("b"), resetKey: "p-1|platform=ios" });
     expect(
       document.querySelectorAll("[data-canvas-card] img").length,
     ).toBeLessThanOrEqual(30);
@@ -266,7 +298,7 @@ describe("ScreenshotCanvas", () => {
     ).not.toBeNull();
   });
 
-  it("swaps the placeholder for the image after load and resets on version change", () => {
+  it("swaps the placeholder for the image after load and resets on overwrite", () => {
     const { rerenderWith } = renderCanvas();
     const card = screen.getByTestId("canvas-card-s1");
     expect(card.querySelector("svg.lucide-images")).not.toBeNull();
@@ -274,10 +306,11 @@ describe("ScreenshotCanvas", () => {
     fireEvent.load(card.querySelector("img")!);
     expect(card.querySelector("svg.lucide-images")).toBeNull();
 
+    // 覆盖上传换图（content_url 随 uploaded_at 的 ?v= 变化）后重新占位
     rerenderWith({
       screens: [
-        makeScreen("s1", { latest_version: makeVersion("s1-v3", "s1") }),
-        makeScreen("s2", { group: "设置" }),
+        overwriteScreen(makeScreen("s1")),
+        makeScreen("s2", { platform: "设置" }),
       ],
     });
     expect(
@@ -292,31 +325,30 @@ describe("ScreenshotCanvas", () => {
     expect(root.className).not.toMatch(/rounded/);
   });
 
-  it("overlays open annotations on the latest version and hides resolved by default", async () => {
-    const user = userEvent.setup();
-    renderCanvas({
+  it("overlays annotations per status scope from the URL filter", () => {
+    const { rerenderWith } = renderCanvas({
       annotations: [
         makeAnnotation({ id: "a-open" }),
         makeAnnotation({ id: "a-done", status: "resolved" }),
-        // 挂在旧版本上的不叠加在画布卡片上
-        makeAnnotation({ id: "a-old", version_id: "s1-v1" }),
       ],
     });
 
     const card = screen.getByTestId("canvas-card-s1");
     expect(within(card).getByTestId("annotation-rect-a-open")).toBeInTheDocument();
     expect(within(card).queryByTestId("annotation-rect-a-done")).toBeNull();
-    expect(within(card).queryByTestId("annotation-rect-a-old")).toBeNull();
-    // 上一版有未解决标注的提示
-    expect(within(card).getByText("上一版有 1 条未解决")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /已解决/, pressed: false }));
-    expect(within(card).getByTestId("annotation-rect-a-done")).toBeInTheDocument();
+    // 筛选条把 resolved 加入状态范围后已解决标注也叠加
+    rerenderWith({ statusScope: { open: true, resolved: true } });
+    expect(
+      within(card).getByTestId("annotation-rect-a-done"),
+    ).toBeInTheDocument();
   });
 
   it("lists scoped annotations in the panel, open only by default", async () => {
+    const onStatusScopeChange = vi.fn();
     const user = userEvent.setup();
     renderCanvas({
+      onStatusScopeChange,
       annotations: [
         makeAnnotation({ id: "a-open", body: "未解决的" }),
         makeAnnotation({ id: "a-done", body: "已解决的", status: "resolved" }),
@@ -329,8 +361,163 @@ describe("ScreenshotCanvas", () => {
     expect(within(panel).queryByText("已解决的")).toBeNull();
     expect(within(panel).queryByText("别的范围")).toBeNull();
 
+    // 面板「全部」tab 回写状态范围（open + resolved）
     await user.click(within(panel).getByRole("tab", { name: "全部" }));
+    expect(onStatusScopeChange).toHaveBeenCalledWith({
+      open: true,
+      resolved: true,
+    });
+  });
+
+  it("offers batch confirm/resolve scoped to the current filters", async () => {
+    vi.mocked(screenshotAnnotationApi.batch).mockResolvedValue({
+      code: 0,
+      message: "ok",
+      data: { updated: 2 },
+    });
+    const user = userEvent.setup();
+    renderCanvas({
+      scopeFilter: { platform: ["ios", "__none__"] },
+      openCount: 2,
+      annotations: [
+        makeAnnotation({ id: "a-out", outdated: true }),
+        makeAnnotation({ id: "a-plain" }),
+      ],
+    });
+
+    const panel = screen.getByTestId("annotation-panel");
+    await user.click(within(panel).getByTestId("panel-batch-confirm"));
+    await waitFor(() =>
+      expect(screenshotAnnotationApi.batch).toHaveBeenCalledWith("p-1", {
+        action: "confirm",
+        filter: {
+          platform: ["ios", "__none__"],
+          locale: undefined,
+          theme: undefined,
+        },
+      }),
+    );
+
+    await user.click(within(panel).getByTestId("panel-batch-resolve"));
+    await waitFor(() =>
+      expect(screenshotAnnotationApi.batch).toHaveBeenCalledWith("p-1", {
+        action: "resolve",
+        filter: {
+          platform: ["ios", "__none__"],
+          locale: undefined,
+          theme: undefined,
+        },
+      }),
+    );
+  });
+
+  it("keeps the panel and batch scope at the dimension range while search narrows the canvas", async () => {
+    // 搜索把 s2 隐藏出画布：面板列表与批量按钮仍按维度范围（scopeScreenIds）
+    // 计，「全部解决」的作用范围与展示数量同源，不会漏掉隐藏截图上的标注
+    vi.mocked(screenshotAnnotationApi.batch).mockResolvedValue({
+      code: 0,
+      message: "ok",
+      data: { updated: 2 },
+    });
+    const user = userEvent.setup();
+    renderCanvas({
+      screens: [makeScreen("s1")],
+      scopeScreenIds: new Set(["s1", "s2"]),
+      scopeFilter: { platform: ["ios", "__none__"] },
+      openCount: 2,
+      annotations: [
+        makeAnnotation({ id: "a-visible", screen_id: "s1" }),
+        makeAnnotation({ id: "a-hidden", screen_id: "s2" }),
+      ],
+    });
+
+    // 画布只剩 s1 的卡片
+    expect(screen.getByTestId("canvas-card-s1")).toBeInTheDocument();
+    expect(screen.queryByTestId("canvas-card-s2")).toBeNull();
+    // 画布叠加只画 s1 的标注
+    expect(
+      within(screen.getByTestId("canvas-card-s1")).getByTestId(
+        "annotation-rect-a-visible",
+      ),
+    ).toBeInTheDocument();
+
+    // 面板两条都在（含搜索隐藏截图上的），计数与批量范围一致
+    const panel = screen.getByTestId("annotation-panel");
+    expect(
+      within(panel).getByTestId("annotation-item-a-visible"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByTestId("annotation-item-a-hidden"),
+    ).toBeInTheDocument();
+
+    // 批量解决按维度过滤发出，覆盖面板展示的全集
+    await user.click(within(panel).getByTestId("panel-batch-resolve"));
+    await waitFor(() =>
+      expect(screenshotAnnotationApi.batch).toHaveBeenCalledWith("p-1", {
+        action: "resolve",
+        filter: {
+          platform: ["ios", "__none__"],
+          locale: undefined,
+          theme: undefined,
+        },
+      }),
+    );
+  });
+
+  it("sends status=resolved on batch confirm when the panel is resolved-only", async () => {
+    // 面板筛成已解决时列表藏起全部 open；payload 必须带 status=resolved，
+    // 与服务端强制 open 交集为空，不会把看不见的 outdated open 确认掉
+    vi.mocked(screenshotAnnotationApi.batch).mockResolvedValue({
+      code: 0,
+      message: "ok",
+      data: { updated: 0 },
+    });
+    const user = userEvent.setup();
+    renderCanvas({
+      statusScope: { open: false, resolved: true },
+      annotations: [
+        makeAnnotation({ id: "a-out", outdated: true, body: "过期未解决" }),
+        makeAnnotation({
+          id: "a-done",
+          status: "resolved",
+          body: "已解决的",
+        }),
+      ],
+    });
+
+    const panel = screen.getByTestId("annotation-panel");
+    expect(within(panel).queryByText("过期未解决")).toBeNull();
     expect(within(panel).getByText("已解决的")).toBeInTheDocument();
+
+    await user.click(within(panel).getByTestId("panel-batch-confirm"));
+    await waitFor(() =>
+      expect(screenshotAnnotationApi.batch).toHaveBeenCalledWith("p-1", {
+        action: "confirm",
+        filter: {
+          platform: undefined,
+          locale: undefined,
+          theme: undefined,
+          status: "resolved",
+        },
+      }),
+    );
+  });
+
+  it("hides the batch row when the scope has no annotations, disabling confirm without outdated", () => {
+    // 无标注：批量操作整行不出现
+    const { unmount } = renderCanvas();
+    const panel = screen.getByTestId("annotation-panel");
+    expect(within(panel).queryByTestId("panel-batch-confirm")).toBeNull();
+    unmount();
+
+    // 有 open 但无过期：确认保留置灰，标记已解决可用
+    renderCanvas({
+      annotations: [makeAnnotation({ id: "a-plain" })],
+      openCount: 1,
+    });
+    const panel2 = screen.getByTestId("annotation-panel");
+    expect(within(panel2).getByTestId("panel-batch-confirm")).toBeDisabled();
+    expect(within(panel2).getByTestId("panel-batch-resolve")).toBeEnabled();
   });
 
   it("shows an empty hint when the scope has no annotations", () => {
@@ -338,19 +525,7 @@ describe("ScreenshotCanvas", () => {
     expect(screen.getByText("暂无标注")).toBeInTheDocument();
   });
 
-  it("locates an annotation on an older version through the preview dialog", async () => {
-    const onOpenPreview = vi.fn();
-    const user = userEvent.setup();
-    renderCanvas({
-      onOpenPreview,
-      annotations: [makeAnnotation({ id: "a-old", version_id: "s1-v1" })],
-    });
-
-    await user.click(screen.getByRole("button", { name: "定位" }));
-    expect(onOpenPreview).toHaveBeenCalledWith("s1", "s1-v1", "a-old");
-  });
-
-  it("locates a latest-version annotation on the canvas and highlights it", async () => {
+  it("locates an annotation on the canvas and highlights it", async () => {
     const user = userEvent.setup();
     renderCanvas({ annotations: [makeAnnotation({ id: "a-open" })] });
 
@@ -364,6 +539,18 @@ describe("ScreenshotCanvas", () => {
     );
     expect(screen.getByTestId("annotation-rect-a-open")).toHaveClass(
       "animate-pulse",
+    );
+  });
+
+  it("locates a deep-linked annotation once data is ready", async () => {
+    renderCanvas({
+      locateRequest: { annotationId: "a-open", nonce: 1 },
+      annotations: [makeAnnotation({ id: "a-open" })],
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("annotation-item-a-open")).toHaveClass(
+        "ring-1",
+      ),
     );
   });
 
@@ -423,7 +610,7 @@ describe("ScreenshotCanvas", () => {
     expect(onOpenPreview).toHaveBeenCalledWith("s2");
   });
 
-  it("draws a rectangle on the latest version and creates the annotation via the API", async () => {
+  it("draws a rectangle and creates the annotation via the screen API", async () => {
     vi.mocked(screenshotAnnotationApi.create).mockResolvedValue({
       code: 0,
       message: "ok",
@@ -462,7 +649,7 @@ describe("ScreenshotCanvas", () => {
     await user.type(input, "间距太小{Enter}");
 
     await waitFor(() =>
-      expect(screenshotAnnotationApi.create).toHaveBeenCalledWith("s1-v2", {
+      expect(screenshotAnnotationApi.create).toHaveBeenCalledWith("s1", {
         x: 0.1,
         y: 0.1,
         width: 0.5,
@@ -486,20 +673,32 @@ describe("ScreenshotCanvas", () => {
     expect(screen.queryByRole("textbox", { name: "标注内容" })).toBeNull();
   });
 
-  it("switches the panel filter to all when locating a resolved annotation", async () => {
-    const utils = renderCanvas({
-      annotations: [
-        makeAnnotation({ id: "a-done", body: "已解决的", status: "resolved" }),
-      ],
-    });
+  it("offers the fixed annotation-handling entries with launch disabled at zero open", async () => {
+    const onLaunchThread = vi.fn();
+    const onCopyPrompt = vi.fn();
+    const user = userEvent.setup();
+    renderCanvas({ onLaunchThread, onCopyPrompt, openCount: 0 });
 
-    const panel = screen.getByTestId("annotation-panel");
-    expect(within(panel).queryByText("已解决的")).toBeNull();
+    const launch = screen.getByTestId("canvas-launch-thread");
+    expect(launch).toBeDisabled();
+    await user.click(launch);
+    expect(onLaunchThread).not.toHaveBeenCalled();
 
-    utils.rerenderWith({ locateRequest: { annotationId: "a-done", nonce: 1 } });
-    await waitFor(() =>
-      expect(within(panel).getByText("已解决的")).toBeInTheDocument(),
-    );
+    // 复制提示词同样禁用：提示词固定拉 status=open，resolved-only 范围外
+    // 的 open 标注不该被复制出去的指令处理
+    const copy = screen.getByTestId("canvas-copy-prompt");
+    expect(copy).toBeDisabled();
+    await user.click(copy);
+    expect(onCopyPrompt).not.toHaveBeenCalled();
+  });
+
+  it("enables the launch entry once the scope has open annotations", async () => {
+    const onLaunchThread = vi.fn();
+    const user = userEvent.setup();
+    renderCanvas({ onLaunchThread, openCount: 3 });
+
+    await user.click(screen.getByTestId("canvas-launch-thread"));
+    expect(onLaunchThread).toHaveBeenCalledTimes(1);
   });
 
   it("does not enter space-pan while a button has keyboard focus", () => {
@@ -558,7 +757,7 @@ describe("ScreenshotCanvas", () => {
     expect(onOpenPreview).toHaveBeenCalledWith("s1");
   });
 
-  it("cancels the pending draft when the screen's latest version changes", async () => {
+  it("cancels the pending draft when the screen is overwritten", async () => {
     vi.mocked(screenshotAnnotationApi.create).mockClear();
     const utils = renderCanvas();
     fireEvent.keyDown(window, { key: "r" });
@@ -572,11 +771,12 @@ describe("ScreenshotCanvas", () => {
     fireEvent.pointerUp(window, { clientX: 200, clientY: 120, pointerId: 1 });
     await screen.findByRole("textbox", { name: "标注内容" });
 
-    // 数据刷新把 s1 的最新版本换成 v3：画在 v2 上的草稿必须作废
+    // 数据刷新把 s1 的文件换成新上传（content_url 随 uploaded_at 的 ?v= 变化）：
+    // 画在旧图上的草稿必须作废
     utils.rerenderWith({
       screens: [
-        makeScreen("s1", { latest_version: makeVersion("s1-v3", "s1") }),
-        makeScreen("s2", { group: "设置" }),
+        overwriteScreen(makeScreen("s1")),
+        makeScreen("s2", { platform: "设置" }),
       ],
     });
 

@@ -74,8 +74,8 @@ var autoMigrateModels = []interface{}{
 	&model.LogEntry{},
 	&model.Document{},
 	&model.ScreenshotScreen{},
-	&model.ScreenshotVersion{},
 	&model.ScreenshotAnnotation{},
+	&model.ScreenshotPendingDelete{},
 	&model.T3Environment{},
 	&model.ProjectT3Binding{},
 	&model.Automation{},
@@ -181,82 +181,17 @@ func main() {
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 
-	dropLegacyLogTables(db, zapLogger)
+	// 初始化存储（迁移要清理旧截图文件，先于迁移创建）
+	fileStorage := storage.NewLocalStorage(cfg.Upload.StoragePath)
 
-	// 修正存量库上与模型不符的外键。必须先于 AutoMigrate：
-	// 缺失外键交给 AutoMigrate 会隐式整表重建，悬空行还在就会直接失败。
-	if err := repairLegacyForeignKeys(db, zapLogger, foreignKeyBackupPath(cfg.Database.Path)); err != nil {
-		fatal("外键约束迁移失败", err)
-	}
-
-	// 自动迁移
-	if err := db.AutoMigrate(autoMigrateModels...); err != nil {
+	// 全部库迁移收敛到一个入口：--dry-run 在任何写入之前只读统计并退出（INT-99）。
+	if err := runBootMigrations(db, fileStorage, zapLogger, dryRun(), foreignKeyBackupPath(cfg.Database.Path), []byte(cfg.Encryption.Key)); err != nil {
 		fatal("数据库迁移失败", err)
 	}
-
-	// 创建唯一索引
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_sequence ON issues(project_id, sequence_number)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_project_github_issue ON issue_github_meta(project_id, github_issue_id)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_runs_project_last_entry ON log_runs(project_id, last_entry_at DESC)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
-	// webhook 反查关联项目（owner/repo 大小写不敏感）。
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_projects_github_repo ON projects(github_owner, github_repo)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_environments_user_name ON t3_environments(user_id, name)")
-
-	// 自动化（INT-90）：复合/部分索引 AutoMigrate 建不了，全部手工登记。
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_enabled_trigger_next ON automations(enabled, trigger_type, next_run_at)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_user_trigger_project ON automations(user_id, trigger_type, issue_project_id)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_user_triggered ON automation_runs(user_id, triggered_at DESC, id)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_triggered ON automation_runs(automation_id, triggered_at DESC, id)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_active_deadline ON automation_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
-	// 同一自动化至多一个活动运行（未结束）或一个待后置运行——重入/删除约束的
-	// 数据库兜底。只约束 cron/issue 触发：GitHub PR 触发（INT-93）一轮多模型
-	// 并行 + 排队，允许同一规则多行未结束。必须 DROP 再 CREATE：
-	// CREATE IF NOT EXISTS 不会替换已有定义（INT-90 存量库升级）。
-	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-ON automation_runs(automation_id)
-WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
-  AND (finished_at IS NULL OR post_state = 'pending')`)
-	// PR 审查：按 repo+pr+sha 找同一轮运行（SHA 变化取消、轮次聚合）。
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
-
-	if err := dropLegacyCollabTables(db, zapLogger); err != nil {
-		fatal("协作区数据迁移失败", err)
+	if dryRun() {
+		boot.Info("dry-run 结束，未做任何修改")
+		return
 	}
-
-	if err := backfillIssueSourceModel(db); err != nil {
-		fatal("问题数据迁移失败", err)
-	}
-	if err := backfillIssueAssetStatusModel(db); err != nil {
-		fatal("问题资源数据迁移失败", err)
-	}
-	if err := backfillIssueReadStates(db, zapLogger); err != nil {
-		fatal("已读水位数据迁移失败", err)
-	}
-
-	// 项目 GitHub Token 密文迁移进用户级 Token 库并切换到引用列（INT-84）。
-	// 依赖 AutoMigrate 已建好 user_github_tokens 与 projects 引用列；
-	// 解密失败等错误直接启动失败，宁可起不来也不带错跑。
-	if err := migrateProjectGitHubTokens(db, []byte(cfg.Encryption.Key), zapLogger); err != nil {
-		fatal("项目 GitHub Token 迁移失败", err)
-	}
-
-	// 初始化存储
-	fileStorage := storage.NewLocalStorage(cfg.Upload.StoragePath)
 
 	// 初始化 Repository
 	userRepo := repository.NewUserRepository(db)
@@ -473,6 +408,136 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	if err := srv.ListenAndServe(); err != nil {
 		fatal("服务启动失败", err)
 	}
+}
+
+// dryRun 报告是否带 --dry-run 启动标志：只执行迁移预演打印统计后退出。
+func dryRun() bool {
+	for _, arg := range os.Args[1:] {
+		if arg == "--dry-run" {
+			return true
+		}
+	}
+	return false
+}
+
+// runBootMigrations 是服务启动的全部库迁移入口，按固定顺序执行：
+//
+//  1. --dry-run：在任何写入之前只读统计截图库折叠迁移将做什么，打印后直接返回；
+//     旧日志表删除、外键修复、AutoMigrate 一律不碰，「未做任何修改」成立。
+//  2. 正常启动：先修存量库外键（AutoMigrate 隐式重建表会撞悬空行），再给存量
+//     多版本库补可空文件列（有数据行上加 NOT NULL 列会被 SQLite 拒绝），
+//     然后 AutoMigrate、截图库折叠迁移（先于变体唯一索引：索引要建在
+//     platform 迁移完成的数据上）、索引登记与各数据回填。
+//
+// 测试用它从旧表结构走完整升级路径。
+func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Logger, dryRun bool, fkBackupPath string, encryptionKey []byte) error {
+	if dryRun {
+		stats, err := collectScreenshotMigrationStats(db)
+		if err != nil {
+			return err
+		}
+		logger.Info("截图库迁移 dry-run",
+			zap.Int64("screens", stats.Screens),
+			zap.Int64("versions_total", stats.VersionTotal),
+			zap.Int64("versions_to_delete", stats.ObsoleteVersions))
+		return nil
+	}
+
+	dropLegacyLogTables(db, logger)
+
+	// 修正存量库上与模型不符的外键。必须先于 AutoMigrate：
+	// 缺失外键交给 AutoMigrate 会隐式整表重建，悬空行还在就会直接失败。
+	if err := repairLegacyForeignKeys(db, logger, fkBackupPath); err != nil {
+		return fmt.Errorf("外键约束迁移失败: %w", err)
+	}
+
+	// 截图库折叠的前置：给存量 screenshot_screens 补可空文件列，避免
+	// AutoMigrate 在有数据行的旧表上加 NOT NULL 列被拒绝。
+	if err := prepareScreenshotFoldMigration(db); err != nil {
+		return fmt.Errorf("截图文件列准备失败: %w", err)
+	}
+
+	// 自动迁移
+	if err := db.AutoMigrate(autoMigrateModels...); err != nil {
+		return err
+	}
+
+	// 截图库折叠迁移（INT-99）：把多版本库收敛为单文件截图。
+	if err := migrateScreenshots(db, fileStorage, logger); err != nil {
+		return fmt.Errorf("截图库迁移失败: %w", err)
+	}
+
+	createBootIndexes(db)
+
+	if err := dropLegacyCollabTables(db, logger); err != nil {
+		return fmt.Errorf("协作区数据迁移失败: %w", err)
+	}
+
+	if err := backfillIssueSourceModel(db); err != nil {
+		return fmt.Errorf("问题数据迁移失败: %w", err)
+	}
+	if err := backfillIssueAssetStatusModel(db); err != nil {
+		return fmt.Errorf("问题资源数据迁移失败: %w", err)
+	}
+	if err := backfillIssueReadStates(db, logger); err != nil {
+		return fmt.Errorf("已读水位数据迁移失败: %w", err)
+	}
+
+	// 项目 GitHub Token 密文迁移进用户级 Token 库并切换到引用列（INT-84）。
+	// 依赖 AutoMigrate 已建好 user_github_tokens 与 projects 引用列；
+	// 解密失败等错误直接启动失败，宁可起不来也不带错跑。
+	if err := migrateProjectGitHubTokens(db, encryptionKey, logger); err != nil {
+		return fmt.Errorf("项目 GitHub Token 迁移失败: %w", err)
+	}
+	return nil
+}
+
+// createBootIndexes 登记全部手工索引：复合/部分/表达式索引 AutoMigrate 建不了。
+func createBootIndexes(db *gorm.DB) {
+	// 创建唯一索引
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_user_name ON projects(user_id, name)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_project_version ON versions(project_id, version_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_project_sequence ON issues(project_id, sequence_number)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_project_github_issue ON issue_github_meta(project_id, github_issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_github_meta_issue_id ON issue_github_meta(issue_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_github_comment ON issue_comments(issue_id, github_comment_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_comments_issue_idempotency_key ON issue_comments(issue_id, idempotency_key) WHERE idempotency_key <> ''")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_timeline_issue_event_key ON issue_timeline_events(issue_id, event_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_issue_pull_requests_issue_pr ON issue_pull_requests(issue_id, provider, repo_full_name, number)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_runs_project_last_entry ON log_runs(project_id, last_entry_at DESC)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
+	// webhook 反查关联项目（owner/repo 大小写不敏感）。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_projects_github_repo ON projects(github_owner, github_repo)")
+	// 截图变体唯一性（INT-99）：(project_id, screen_key, platform, locale, theme)，
+	// NULL 与 NULL 视为相等（COALESCE 表达式索引）。旧 (project_id, screen_key)
+	// 唯一索引必须 DROP：多维度变体在同一 screen_key 下合法。
+	db.Exec("DROP INDEX IF EXISTS idx_screenshot_screens_project_key")
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_variant
+	ON screenshot_screens(project_id, screen_key, COALESCE(platform,''), COALESCE(locale,''), COALESCE(theme,''))`)
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_environments_user_name ON t3_environments(user_id, name)")
+
+	// 自动化（INT-90）：复合/部分索引 AutoMigrate 建不了，全部手工登记。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_enabled_trigger_next ON automations(enabled, trigger_type, next_run_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_user_trigger_project ON automations(user_id, trigger_type, issue_project_id)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_user_triggered ON automation_runs(user_id, triggered_at DESC, id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_triggered ON automation_runs(automation_id, triggered_at DESC, id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_active_deadline ON automation_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
+	// 同一自动化至多一个活动运行（未结束）或一个待后置运行——重入/删除约束的
+	// 数据库兜底。只约束 cron/issue 触发：GitHub PR 触发（INT-93）一轮多模型
+	// 并行 + 排队，允许同一规则多行未结束。必须 DROP 再 CREATE：
+	// CREATE IF NOT EXISTS 不会替换已有定义（INT-90 存量库升级）。
+	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
+	ON automation_runs(automation_id)
+	WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
+	  AND (finished_at IS NULL OR post_state = 'pending')`)
+	// PR 审查：按 repo+pr+sha 找同一轮运行（SHA 变化取消、轮次聚合）。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
 }
 
 // selfLogMinLevel 把配置中的级别名转为 slog 级别；未知取值按 INFO。

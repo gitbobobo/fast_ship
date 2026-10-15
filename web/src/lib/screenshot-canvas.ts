@@ -1,8 +1,6 @@
 // 截图画布的纯函数：自动排版、视口变换、比例坐标换算。
 // 世界坐标 → 屏幕坐标：screen = world * scale + (x, y)。
 
-import { deriveGroupTabs, decodeGroupTab } from "./screenshots";
-
 export interface Viewport {
   x: number;
   y: number;
@@ -37,7 +35,8 @@ export const MAX_COLUMNS = 24;
 /** 「适应全部」与选列数共用的容器留白 */
 export const FIT_PADDING = 48;
 export const DEFAULT_ASPECT = 3 / 4;
-export const UNGROUPED_TITLE = "未分组";
+/** 无平台截图的分区标题 */
+export const UNTAGGED_PLATFORM_TITLE = "未标注";
 
 /** 标注最小有效尺寸（占图宽/高的比例），更小的框视为误触 */
 export const MIN_ANNOTATION_RATIO = 0.01;
@@ -51,11 +50,11 @@ export const MIN_ANNOTATION_RATIO = 0.01;
  */
 export const CANVAS_ZOOM_VAR = "--canvas-zoom";
 
-export interface CanvasScreenInput {
-  id: string;
-  group: string;
-  last_uploaded_at: string;
-}
+/** 布局输入直接取 ScreenshotScreen 的结构子集，画布传参零转换 */
+export type CanvasScreenInput = Pick<
+  ScreenshotScreen,
+  "id" | "screen_key" | "platform" | "locale" | "theme" | "uploaded_at"
+>
 
 export interface CanvasCardLayout {
   screenId: string;
@@ -83,37 +82,94 @@ export function clampScale(scale: number): number {
   return Math.min(Math.max(scale, MIN_SCALE), MAX_SCALE);
 }
 
+interface CanvasSectionItem {
+  input: CanvasScreenInput;
+  /** 同 screen_key 的变体共享聚类键，行填充时不拆散 */
+  cluster: string;
+}
+
 interface CanvasSection {
   key: string;
   title: string;
-  items: CanvasScreenInput[];
+  items: CanvasSectionItem[];
 }
 
-/** 分组分区：命名组按组内最近上传倒序，未分组在最后；组内按 last_uploaded_at 倒序 */
+/**
+ * 按平台分区：命名平台按区内最近上传倒序，「未标注」区在最后；
+ * 区内按 screen_key 聚类，聚类按区内最近上传倒序，聚类内 locale/theme
+ * 变体按字典序相邻。
+ */
 function buildSections(screens: CanvasScreenInput[]): CanvasSection[] {
-  const groupOrder = deriveGroupTabs(screens).map(decodeGroupTab);
-  const buckets = new Map<string, CanvasScreenInput[]>();
-  for (const name of groupOrder) buckets.set(name, []);
-  const ungrouped: CanvasScreenInput[] = [];
+  const platformOf = (s: CanvasScreenInput) => s.platform ?? UNTAGGED_PLATFORM_TITLE;
+  const latestByPlatform = new Map<string, string>();
   for (const screen of screens) {
-    if (screen.group) buckets.get(screen.group)?.push(screen);
-    else ungrouped.push(screen);
+    const name = platformOf(screen);
+    const prev = latestByPlatform.get(name);
+    if (!prev || screen.uploaded_at > prev) {
+      latestByPlatform.set(name, screen.uploaded_at);
+    }
+  }
+  // 命名平台按区内最近上传倒序；「未标注」区不参与排序，固定在最后
+  const untagged = UNTAGGED_PLATFORM_TITLE;
+  const platforms = [...latestByPlatform.keys()]
+    .filter((name) => name !== untagged)
+    .sort(
+      (a, b) =>
+        latestByPlatform.get(b)!.localeCompare(latestByPlatform.get(a)!) ||
+        a.localeCompare(b),
+    );
+  if (latestByPlatform.has(untagged)) {
+    platforms.push(untagged);
   }
 
-  const sections: CanvasSection[] = groupOrder.map((name) => ({
-    key: `g:${name}`,
+  const sections: CanvasSection[] = platforms.map((name) => ({
+    key: `p:${name}`,
     title: name,
-    items: buckets.get(name) ?? [],
+    items: [],
   }));
-  if (ungrouped.length > 0) {
-    sections.push({ key: "__ungrouped__", title: UNGROUPED_TITLE, items: ungrouped });
+  const byName = new Map(sections.map((s) => [s.title, s]));
+  for (const screen of screens) {
+    byName.get(platformOf(screen))?.items.push({
+      input: screen,
+      cluster: `${screen.screen_key}\u0000${screen.platform ?? ""}`,
+    });
   }
-  return sections.map((section) => ({
-    ...section,
-    items: [...section.items].sort((a, b) =>
-      b.last_uploaded_at.localeCompare(a.last_uploaded_at),
-    ),
-  }));
+
+  for (const section of sections) {
+    // 聚类：键 = screen_key；聚类间按各自最近上传倒序，聚类内按 locale/theme
+    const clusters = new Map<string, CanvasSectionItem[]>();
+    for (const item of section.items) {
+      const list = clusters.get(item.input.screen_key);
+      if (list) list.push(item);
+      else clusters.set(item.input.screen_key, [item]);
+    }
+    const ordered: CanvasSectionItem[] = [];
+    const clusterLatest = (items: CanvasSectionItem[]) =>
+      items.reduce(
+        (acc, item) =>
+          item.input.uploaded_at > acc ? item.input.uploaded_at : acc,
+        "",
+      );
+    const keys = [...clusters.keys()].sort((a, b) => {
+      const diff = clusterLatest(clusters.get(b)!).localeCompare(
+        clusterLatest(clusters.get(a)!),
+      );
+      if (diff !== 0) return diff;
+      return a.localeCompare(b);
+    });
+    for (const key of keys) {
+      const items = clusters.get(key)!;
+      items.sort(
+        (a, b) =>
+          (a.input.locale ?? "").localeCompare(b.input.locale ?? "") ||
+          (a.input.theme ?? "").localeCompare(b.input.theme ?? "") ||
+          b.input.uploaded_at.localeCompare(a.input.uploaded_at),
+      );
+      ordered.push(...items);
+    }
+    section.items = ordered;
+  }
+  return sections;
 }
 
 // emit 缺省时只算世界边界（选列数候选评估用），不分配卡片/组对象
@@ -147,24 +203,57 @@ function layoutSections(
     cursorY += GROUP_TITLE_HEIGHT;
     maxRight = Math.max(maxRight, sectionWidth);
 
-    for (let rowStart = 0; rowStart < items.length; rowStart += columns) {
-      const row = items.slice(rowStart, rowStart + columns);
+    // 行首能把整个变体簇放进剩余列数时整簇同行（同 screen_key 的变体
+    // 不拆行），簇比行宽还大或放不下时退回普通逐行填充
+    let i = 0;
+    while (i < items.length) {
+      const row: CanvasSectionItem[] = [];
+      const cluster = items[i].cluster;
+      let clusterSize = 0;
+      while (
+        i + clusterSize < items.length &&
+        items[i + clusterSize].cluster === cluster
+      ) {
+        clusterSize++;
+      }
+      if (clusterSize <= columns) {
+        for (; i < items.length && items[i].cluster === cluster; i++) {
+          row.push(items[i]);
+        }
+        // 行未满时补下一簇，避免行尾空洞（下一簇可能因此跨行）
+        while (i < items.length && row.length < columns) {
+          row.push(items[i]);
+          i++;
+        }
+      } else {
+        for (
+          let filled = 0;
+          filled < columns &&
+          i < items.length &&
+          items[i].cluster === cluster;
+          filled++
+        ) {
+          row.push(items[i]);
+          i++;
+        }
+      }
+
       const imageHeights = row.map((item) => {
-        const aspect = aspectOf(item.id);
+        const aspect = aspectOf(item.input.id);
         return CARD_WIDTH * (aspect && aspect > 0 ? aspect : DEFAULT_ASPECT);
       });
       const rowHeight = Math.max(...imageHeights) + CARD_META_HEIGHT;
       if (emit) {
-        row.forEach((item, i) => {
+        row.forEach((item, j) => {
           emit.card({
-            screenId: item.id,
+            screenId: item.input.id,
             rect: {
-              x: i * (CARD_WIDTH + CARD_GAP),
+              x: j * (CARD_WIDTH + CARD_GAP),
               y: cursorY,
               width: CARD_WIDTH,
-              height: imageHeights[i] + CARD_META_HEIGHT,
+              height: imageHeights[j] + CARD_META_HEIGHT,
             },
-            imageHeight: imageHeights[i],
+            imageHeight: imageHeights[j],
           });
         });
       }
@@ -182,9 +271,9 @@ function layoutSections(
 }
 
 /**
- * 按分组自动排版：命名组按组内最近上传倒序，未分组在最后；组内按
- * last_uploaded_at 倒序，固定列数网格（默认 GRID_COLUMNS，每组不超过
- * 组内数量），行高取该行最高卡片。aspectOf 返回图片高/宽，未知时回退 4:3。
+ * 按平台分区自动排版：命名平台按区内最近上传倒序、未标注区在最后；
+ * 区内同 screen_key 的变体相邻且不跨行，固定列数网格（默认 GRID_COLUMNS，
+ * 每区不超过区内数量），行高取该行最高卡片。aspectOf 返回图片高/宽，未知时回退 4:3。
  */
 export function layoutCanvas(
   screens: CanvasScreenInput[],
@@ -428,43 +517,37 @@ export function aspectFromSize(
   return height / width;
 }
 
-/** 每个界面「挂在非最新版本且仍未解决」的标注数 */
-export function countOpenOnOlderVersions(
+/** 每张截图上「过期且未解决」的标注数（覆盖更新后待确认） */
+export function countOutdatedOpen(
   annotations: ScreenshotAnnotation[],
-  latestVersionIdOf: (screenId: string) => string | null | undefined,
 ): Map<string, number> {
   const counts = new Map<string, number>();
   for (const a of annotations) {
-    if (a.status !== "open") continue;
-    const latestId = latestVersionIdOf(a.screen_id);
-    if (!latestId || a.version_id === latestId) continue;
+    if (a.status !== "open" || !a.outdated) continue;
     counts.set(a.screen_id, (counts.get(a.screen_id) ?? 0) + 1);
   }
   return counts;
 }
 
-/** 删除界面/版本时会被级联删除的标注数（不分状态） */
+/** 删除截图时会被级联删除的标注数（不分状态） */
 export function countAnnotations(
   annotations: ScreenshotAnnotation[],
-  scope: { screenId?: string; versionId?: string },
+  scope: { screenId?: string },
 ): number {
   return annotations.filter(
-    (a) =>
-      (scope.screenId === undefined || a.screen_id === scope.screenId) &&
-      (scope.versionId === undefined || a.version_id === scope.versionId),
+    (a) => scope.screenId === undefined || a.screen_id === scope.screenId,
   ).length;
 }
 
-/** 删除界面/版本时会被级联删除的未解决标注数 */
+/** 删除截图时会被级联删除的未解决标注数 */
 export function countOpenAnnotations(
   annotations: ScreenshotAnnotation[],
-  scope: { screenId?: string; versionId?: string },
+  scope: { screenId?: string },
 ): number {
   return annotations.filter(
     (a) =>
       a.status === "open" &&
-      (scope.screenId === undefined || a.screen_id === scope.screenId) &&
-      (scope.versionId === undefined || a.version_id === scope.versionId),
+      (scope.screenId === undefined || a.screen_id === scope.screenId),
   ).length;
 }
 

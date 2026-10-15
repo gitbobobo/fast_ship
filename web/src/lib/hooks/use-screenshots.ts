@@ -1,11 +1,7 @@
-import {
-  queryOptions,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   screenshotApi,
+  type ScreenshotScreenQueryFilters,
   type UpdateScreenshotScreenPayload,
 } from "@/lib/api/screenshots";
 import {
@@ -20,39 +16,24 @@ function invalidateScreenshotList(
   void queryClient.invalidateQueries({
     queryKey: ["screenshots", "list", projectId],
   });
-  // 上传新版本会改变标注的 is_latest_version，删除界面/版本会级联删标注
+  // 上传覆盖会改变标注的 outdated，删除截图会级联删标注
   void queryClient.invalidateQueries({
     queryKey: ["screenshot-annotations", "list", projectId],
   });
 }
 
-export function useScreenshotScreens(projectId: string) {
+export function useScreenshotScreens(
+  projectId: string,
+  filters: ScreenshotScreenQueryFilters = {},
+) {
+  const key = JSON.stringify(filters);
   return useQuery({
-    queryKey: ["screenshots", "list", projectId],
+    queryKey: ["screenshots", "list", projectId, key],
     queryFn: async () => {
-      const res = await screenshotApi.list(projectId);
+      const res = await screenshotApi.list(projectId, filters);
       return res.data;
     },
     enabled: !!projectId,
-  });
-}
-
-/** 详情查询配置共享给 useQuery 与 prefetchQuery，避免两处静默失配 */
-export function screenshotScreenDetailQueryOptions(screenId: string) {
-  return queryOptions({
-    queryKey: ["screenshots", "detail", screenId],
-    queryFn: async () => {
-      const res = await screenshotApi.get(screenId);
-      return res.data;
-    },
-    retry: false,
-  });
-}
-
-export function useScreenshotScreen(screenId: string) {
-  return useQuery({
-    ...screenshotScreenDetailQueryOptions(screenId),
-    enabled: !!screenId,
   });
 }
 
@@ -84,11 +65,8 @@ export function useUpdateScreenshotScreen(projectId: string) {
       screenId: string;
       payload: UpdateScreenshotScreenPayload;
     }) => screenshotApi.update(screenId, payload),
-    onSuccess: (_data, variables) => {
+    onSuccess: (_data) => {
       invalidateScreenshotList(queryClient, projectId);
-      void queryClient.invalidateQueries({
-        queryKey: ["screenshots", "detail", variables.screenId],
-      });
     },
   });
 }
@@ -97,29 +75,8 @@ export function useDeleteScreenshotScreen(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (screenId: string) => screenshotApi.deleteScreen(screenId),
-    onSuccess: (_data, screenId) => {
+    onSuccess: (_data) => {
       invalidateScreenshotList(queryClient, projectId);
-      void queryClient.removeQueries({
-        queryKey: ["screenshots", "detail", screenId],
-      });
-    },
-  });
-}
-
-export function useDeleteScreenshotVersion(projectId: string) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      versionId,
-    }: {
-      versionId: string;
-      screenId: string;
-    }) => screenshotApi.deleteVersion(versionId),
-    onSuccess: (_data, variables) => {
-      invalidateScreenshotList(queryClient, projectId);
-      void queryClient.invalidateQueries({
-        queryKey: ["screenshots", "detail", variables.screenId],
-      });
     },
   });
 }
