@@ -140,13 +140,15 @@ func (s *BotService) buildRunContext(bot *model.Bot, run *model.BotRun) (*botBui
 				return nil, errs.ErrInternal
 			}
 			// 回执/结果配对：协议回复引用 provider_tool_call_id；每个调用恰好
-			// 一条。先补发缓存的 assistant 再落 tool 消息，块保持连续。
+			// 一条。先补发缓存的 assistant 再落 tool 消息，块保持连续；缓存的
+			// 延迟输入等最后一个 tool 回复落库后再补发——插在 tool 块中间会被
+			// OpenAI 兼容端拒绝（tool 响应必须连续）。
 			flushAssistant()
 			delete(openToolCalls, content.ProviderToolCallID)
+			messages = append(messages, openai.ToolMessage(content.Content, content.ProviderToolCallID))
 			if len(openToolCalls) == 0 {
 				flushDeferred()
 			}
-			messages = append(messages, openai.ToolMessage(content.Content, content.ProviderToolCallID))
 		case model.BotMessageKindBackgroundResult:
 			var content botBackgroundResultContent
 			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {

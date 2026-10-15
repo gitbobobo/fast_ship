@@ -229,8 +229,9 @@ export function foldStreamEvent(
       const patch = (data.payload ?? {}) as Partial<BotCall>;
       const id = patch.id ?? data.call_id;
       if (!id) break;
-      const previous = sinks.getCalls().find((c) => c.id === id);
-      sinks.setCalls(mergeCalls(previous ? [previous] : [], { ...patch, id }));
+      // 全量列表进 mergeCalls：只传匹配项会把缓存整表替换成一个调用，
+      // 第二张确认卡一出现就把第一张挤掉。
+      sinks.setCalls(mergeCalls(sinks.getCalls(), { ...patch, id }));
       break;
     }
     case "error": {

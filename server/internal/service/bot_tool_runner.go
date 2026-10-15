@@ -27,8 +27,9 @@ const botAsyncExecTimeout = 15 * time.Minute
 // commitAssistantTurn 在一个短事务内提交：assistant 消息、每调用的账本行、
 // 异步回执（dedup receipt:<call_id>）、校验失败的即时回复与全部 SSE 事件。
 // scope/授权解析与调用 ID 分配都在事务外完成（消息账本有防 UPDATE 守护，
-// assistant 行必须一次写对）；提交成功后才唤醒 worker。
-func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requestRow *model.BotModelRequest, reply *botModelReply) ([]*model.BotToolCall, error) {
+// assistant 行必须一次写对）；提交成功后才唤醒 worker。msgID 由调用方在
+// 模型请求前预分配，流式增量信封已携带同一 ID。
+func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requestRow *model.BotModelRequest, reply *botModelReply, msgID string) ([]*model.BotToolCall, error) {
 	now := time.Now().UTC()
 	requestID := requestRow.ID
 
@@ -124,7 +125,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			return err
 		}
 		assistantMsg := &model.BotMessage{
-			ID: uuid.NewString(), BotID: bot.ID, Seq: seq,
+			ID: msgID, BotID: bot.ID, Seq: seq,
 			RunID: &run.ID, RequestID: &requestID,
 			Kind: model.BotMessageKindAssistant, ContentJSON: string(assistantRaw),
 			CreatedAt: now,

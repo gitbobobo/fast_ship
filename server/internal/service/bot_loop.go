@@ -74,7 +74,9 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		}
 		s.advanceInputWatermarks(run, built.InputThroughSeq)
 
-		deltas := s.newDeltaBuffer(bot.ID, run.ID)
+		// 预分配 assistant 消息 ID：流式增量信封先带上它，提交时复用同一个。
+		assistantMsgID := uuid.NewString()
+		deltas := s.newDeltaBuffer(bot.ID, run.ID, assistantMsgID)
 		reply, streamErr := botStreamChat(ctx, &streamClient, built.Request, deltas.onDelta)
 		deltas.flush()
 		if streamErr != nil {
@@ -89,7 +91,7 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		s.finishModelRequest(requestRow, reply, nil)
 		s.accumulateRunUsage(run, reply)
 
-		calls, err := s.commitAssistantTurn(bot, run, requestRow, reply)
+		calls, err := s.commitAssistantTurn(bot, run, requestRow, reply, assistantMsgID)
 		if err != nil {
 			s.finishFailed(bot, run, "commit_failed", err)
 			return
@@ -325,19 +327,21 @@ func addToPtr(p *int64, v int64) *int64 {
 // ---------- 流式增量批量落事件 ----------
 
 // botDeltaBuffer 合并正文流式片段（约 100ms 一批写入），完整 assistant 消息
-// 仍只在模型调用结束时追加一次；流式片段不改消息。
+// 仍只在模型调用结束时追加一次；流式片段不改消息。msgID 是预分配的
+// assistant 消息 ID：增量信封带上它，客户端才能把片段挂到正确草稿上。
 type botDeltaBuffer struct {
 	svc   *BotService
 	botID string
 	runID string
+	msgID string
 
 	mu    sync.Mutex
 	buf   strings.Builder
 	timer *time.Timer
 }
 
-func (s *BotService) newDeltaBuffer(botID, runID string) *botDeltaBuffer {
-	return &botDeltaBuffer{svc: s, botID: botID, runID: runID}
+func (s *BotService) newDeltaBuffer(botID, runID, msgID string) *botDeltaBuffer {
+	return &botDeltaBuffer{svc: s, botID: botID, runID: runID, msgID: msgID}
 }
 
 func (d *botDeltaBuffer) onDelta(text string) {
@@ -366,8 +370,9 @@ func (d *botDeltaBuffer) flush() {
 	runID := d.runID
 	err := d.svc.db.Transaction(func(tx *gorm.DB) error {
 		return d.svc.appendEventTx(tx, d.botID, &runID, "", model.BotEventDelta, botEventEnvelope{
-			Kind:    "text_delta",
-			Payload: map[string]interface{}{"text": text, "run_id": d.runID},
+			Kind:      "text_delta",
+			MessageID: d.msgID,
+			Payload:   map[string]interface{}{"text": text, "run_id": d.runID},
 		})
 	})
 	if err != nil {

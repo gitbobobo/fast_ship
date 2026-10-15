@@ -253,6 +253,61 @@ describe("useBotChat", () => {
     await waitFor(() => expect(result.current.backgroundCalls).toEqual([]));
   });
 
+  it("keeps earlier call cards when a second call streams in", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    emit(
+      "tool_call",
+      {
+        call_id: "c1",
+        phase: "awaiting_confirmation",
+        payload: {
+          id: "c1",
+          tool_name: "fs_issue",
+          action: "update",
+          execution_mode: "async",
+          status: "pending_confirmation",
+          requires_confirmation: true,
+        },
+      },
+      20,
+    );
+    emit(
+      "tool_call",
+      {
+        call_id: "c2",
+        phase: "awaiting_confirmation",
+        payload: {
+          id: "c2",
+          tool_name: "fs_issue",
+          action: "comment",
+          execution_mode: "async",
+          status: "pending_confirmation",
+          requires_confirmation: true,
+        },
+      },
+      21,
+    );
+
+    // 第二张确认卡到达不得把第一张挤掉，否则第一张无法批准/取消。
+    await waitFor(() =>
+      expect(result.current.calls.map((c) => c.id)).toEqual(["c1", "c2"]),
+    );
+
+    emit(
+      "tool_result",
+      { call_id: "c1", phase: "terminal", payload: { id: "c1", status: "succeeded" } },
+      22,
+    );
+    await waitFor(() =>
+      expect(result.current.calls.map((c) => `${c.id}:${c.status}`)).toEqual([
+        "c1:succeeded",
+        "c2:pending_confirmation",
+      ]),
+    );
+  });
+
   it("keeps background calls visible after the run finishes", async () => {
     // 首载给活动 run；done 后的重读返回完成态（服务端权威记录）。
     api.runs.mockReset();

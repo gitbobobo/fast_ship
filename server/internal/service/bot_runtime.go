@@ -203,12 +203,17 @@ func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, boo
 	// 没有未消费输入就不建 run：判断对象是真正的模型输入（user /
 	// background_result），不是账本末位——我们自己的 assistant/回复消息也会
 	// 推高账本水位，用末位比对会让重复投递的触发产生空跑。
-	hasNew, err := s.messages.HasModelInputSince(bot.ID, bot.OfferedInputSeq)
-	if err != nil {
-		return nil, false, err
-	}
-	if !hasNew {
-		return nil, false, nil
+	// recovery 唤醒例外：恢复通知是 lifecycle 消息，不属于模型输入类，
+	// HasModelInputSince 看不见它；通知已带 dedup 落库，直接放行建 run，
+	// 否则重启后的恢复通知永远到不了模型。
+	if wake.Trigger != model.BotTriggerRecovery {
+		hasNew, err := s.messages.HasModelInputSince(bot.ID, bot.OfferedInputSeq)
+		if err != nil {
+			return nil, false, err
+		}
+		if !hasNew {
+			return nil, false, nil
+		}
 	}
 
 	now := time.Now().UTC()
@@ -228,7 +233,7 @@ func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, boo
 	if run.TriggerKey == "" {
 		run.TriggerKey = "wake:" + run.ID
 	}
-	err = s.runs.CreateTx(s.db, run)
+	err := s.runs.CreateTx(s.db, run)
 	if err != nil {
 		// 唯一索引冲突：已有 run（并发唤醒或重复触发），回落为复用活动 run。
 		if existing, findErr := s.runs.FindActiveByBot(bot.ID); findErr == nil {

@@ -1601,7 +1601,7 @@ func TestBotDeltaBufferRecurrentFlush(t *testing.T) {
 		t.Fatalf("seed run: %v", err)
 	}
 
-	d := env.bots.newDeltaBuffer(bot.ID, "run-delta")
+	d := env.bots.newDeltaBuffer(bot.ID, "run-delta", "msg-delta")
 	d.onDelta("第一段")
 	time.Sleep(150 * time.Millisecond) // 定时器先落一批
 	d.onDelta("第二段")
@@ -1623,6 +1623,10 @@ func TestBotDeltaBufferRecurrentFlush(t *testing.T) {
 			continue
 		}
 		count++
+		// 增量信封必须带预分配的 assistant 消息 ID，客户端才能挂草稿。
+		if env0.MessageID != "msg-delta" {
+			t.Fatalf("text_delta 应携带 message_id: %+v", env0)
+		}
 		if m, ok := env0.Payload.(map[string]interface{}); ok {
 			if s, ok := m["text"].(string); ok {
 				text += s
@@ -1634,5 +1638,113 @@ func TestBotDeltaBufferRecurrentFlush(t *testing.T) {
 	}
 	if text != "第一段第二段" {
 		t.Fatalf("SSE 增量应覆盖完整文本: %q", text)
+	}
+}
+
+func TestBotEnsureRunRecoveryTrigger(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botrecover")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+
+	// 无模型输入时普通唤醒不建 run。
+	run, found, err := env.bots.ensureRun(botRow, botWake{Trigger: model.BotTriggerUserMessage, Key: "plain"})
+	if err != nil {
+		t.Fatalf("ensureRun(user): %v", err)
+	}
+	if found {
+		t.Fatalf("无输入不应建 run: %+v", run)
+	}
+
+	// recovery 唤醒例外：恢复通知是 lifecycle 消息（不在模型输入类里），
+	// 但必须建 run，否则重启后的恢复通知永远到不了模型。
+	run, found, err = env.bots.ensureRun(botRow, botWake{Trigger: model.BotTriggerRecovery, Key: "recovery:t1"})
+	if err != nil {
+		t.Fatalf("ensureRun(recovery): %v", err)
+	}
+	if !found || run == nil || run.Status != model.BotRunStatusRunning {
+		t.Fatalf("recovery 唤醒应建活动 run: found=%v run=%+v", found, run)
+	}
+
+	// 活动_run 仍在时，重复 recovery 唤醒复用同一 run（唯一索引兜底）。
+	run2, found2, err := env.bots.ensureRun(botRow, botWake{Trigger: model.BotTriggerRecovery, Key: "recovery:t2"})
+	if err != nil || !found2 || run2.ID != run.ID {
+		t.Fatalf("重复 recovery 唤醒应复用活动 run: %v %v %+v", err, found2, run2)
+	}
+}
+
+func TestBotContextToolRepliesBeforeDeferredUser(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botorder")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+
+	// 账本：assistant 双工具调用 → tool(A) → user（延迟输入）→ tool(B)。
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-order", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "order",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusCompleted,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now, FinishedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	msgs := repository.NewBotMessageRepository(env.db)
+	appendMsg := func(kind model.BotMessageKind, content interface{}) {
+		t.Helper()
+		raw, err := json.Marshal(content)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		seq, err := env.bots.bots.NextMessageSeqTx(env.db, bot.ID)
+		if err != nil {
+			t.Fatalf("seq: %v", err)
+		}
+		msg := &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID, Seq: seq,
+			Kind: kind, ContentJSON: string(raw), CreatedAt: time.Now().UTC()}
+		if err := msgs.AppendTx(env.db, msg); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	appendMsg(model.BotMessageKindUser, botUserContent{Text: "帮我查两个问题"})
+	appendMsg(model.BotMessageKindAssistant, botAssistantContent{ToolCalls: []botAssistantToolCall{
+		{ProviderToolCallID: "callA", ToolName: "fs_issue", Action: "list", Arguments: "{}"},
+		{ProviderToolCallID: "callB", ToolName: "fs_issue", Action: "list", Arguments: "{}"},
+	}})
+	appendMsg(model.BotMessageKindToolReply, botToolReplyContent{ProviderToolCallID: "callA", Content: "A 结果"})
+	appendMsg(model.BotMessageKindUser, botUserContent{Text: "追加的话"})
+	appendMsg(model.BotMessageKindToolReply, botToolReplyContent{ProviderToolCallID: "callB", Content: "B 结果"})
+
+	built, err := env.bots.buildRunContext(botRow, run)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	raw, err := json.Marshal(built.Request.Messages)
+	if err != nil {
+		t.Fatalf("marshal messages: %v", err)
+	}
+	var roles []struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(raw, &roles); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// 期望协议顺序：system + 首条 user + assistant + tool(A)、tool(B) 连续
+	// 成块 + 延迟 user + 末尾运行时上下文 user（buildRunContext 恒定追加）。
+	want := []string{"system", "user", "assistant", "tool", "tool", "user", "user"}
+	if len(roles) != len(want) {
+		t.Fatalf("消息数不符: %v", roles)
+	}
+	for i, r := range roles {
+		if r.Role != want[i] {
+			t.Fatalf("第 %d 条角色应为 %s，实际 %s（tool 响应必须连续）: %v", i, want[i], r.Role, roles)
+		}
 	}
 }
