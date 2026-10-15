@@ -188,7 +188,7 @@ func setupPRReviewTestEnv(t *testing.T) *prReviewTestEnv {
 	if err := db.AutoMigrate(
 		&model.User{}, &model.Project{}, &model.T3Environment{},
 		&model.Automation{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
-		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{},
+		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{}, &model.GitHubPRSeenSHA{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -1320,6 +1320,59 @@ func TestWebhook_StaleSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 	}
 	if n := countRuns(t, env.db, "head_sha = ? AND status <> ?", "sha-1", model.AutomationRunCancelled); n != 0 {
 		t.Fatalf("sha-1 inflight after late sync = %d, want 0", n)
+	}
+}
+
+// 防抖窗口内还没有 review/运行时，迟到的旧 SHA 不能删掉当前 debounce。
+func TestWebhook_DelayedSHADoesNotDropNewerDebounce(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.TriggerType = model.AutomationTriggerGitHubPROpened
+		x.DebounceSeconds = 60
+	})
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.Name = "synchronize"
+		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		x.DebounceSeconds = 60
+	})
+
+	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("opened: %v", err)
+	}
+	if err := env.handleWebhook(t, "d-sync", "synchronize", "octocat/hw", 1, "sha-2", false, false); err != nil {
+		t.Fatalf("synchronize: %v", err)
+	}
+	if n := countDebounces(t, env.db); n != 1 {
+		t.Fatalf("debounce after sha-2 = %d, want 1", n)
+	}
+	var d model.GitHubPRDebounce
+	if err := env.db.First(&d).Error; err != nil {
+		t.Fatalf("debounce: %v", err)
+	}
+	if d.HeadSHA != "sha-2" {
+		t.Fatalf("debounce sha = %s, want sha-2", d.HeadSHA)
+	}
+
+	if err := env.handleWebhook(t, "d-open-late", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("late opened: %v", err)
+	}
+	if err := env.handleWebhook(t, "d-sync-late", "synchronize", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("late synchronize: %v", err)
+	}
+	if err := env.db.First(&d).Error; err != nil {
+		t.Fatalf("reload debounce: %v", err)
+	}
+	if d.HeadSHA != "sha-2" {
+		t.Fatalf("late delivery replaced debounce sha = %s, want sha-2", d.HeadSHA)
+	}
+
+	env.pr.ProcessDueDebounces(time.Now().UTC().Add(2 * time.Minute))
+	if n := countRuns(t, env.db, "head_sha = ?", "sha-1"); n != 0 {
+		t.Fatalf("stale SHA runs = %d, want 0", n)
+	}
+	if n := countRuns(t, env.db, "head_sha = ?", "sha-2"); n == 0 {
+		t.Fatal("sha-2 round missing after debounce fired")
 	}
 }
 

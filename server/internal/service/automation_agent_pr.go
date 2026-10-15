@@ -128,7 +128,8 @@ func (s *AutomationAgentService) AgentPullRequestComments(ctx context.Context, i
 }
 
 // AgentSubmitPullRequestReview POST /api/automation-agent/pull-request/review
-// commit_id 固定取本运行 head SHA。
+// commit_id 固定取本运行 head SHA。写 GitHub 前再读运行行：synchronize 取消后
+// 不得再提交 COMMENT/APPROVE/REQUEST_CHANGES。
 func (s *AutomationAgentService) AgentSubmitPullRequestReview(ctx context.Context, identity *RunTokenIdentity, req *api.AgentPullRequestReviewRequest) (*api.AgentPullRequestReviewResult, error) {
 	run, err := s.loadPRRun(ctx, identity.RunID)
 	if err != nil {
@@ -143,14 +144,45 @@ func (s *AutomationAgentService) AgentSubmitPullRequestReview(ctx context.Contex
 	default:
 		return nil, errs.New(errs.ErrInvalidParams.Code, "event 必须是 COMMENT / APPROVE / REQUEST_CHANGES")
 	}
-	if err := gh.SubmitReview(ctx, run.InstallationID, run.RepoFullName, run.PRNumber, githubapp.ReviewInput{
-		Event:    string(req.Event),
-		Body:     api.Deref(req.Body),
-		CommitID: run.HeadSHA,
-	}); err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "提交 review 失败: "+shortenGitHubError(err))
+	do := func() error {
+		return s.submitReviewIfLive(ctx, gh, run, req)
+	}
+	if s.prReview == nil {
+		if err := do(); err != nil {
+			return nil, err
+		}
+		return &api.AgentPullRequestReviewResult{Submitted: true}, nil
+	}
+	var out error
+	s.prReview.withPRLock(run.RepoFullName, run.PRNumber, func() {
+		out = do()
+	})
+	if out != nil {
+		return nil, out
 	}
 	return &api.AgentPullRequestReviewResult{Submitted: true}, nil
+}
+
+func (s *AutomationAgentService) submitReviewIfLive(ctx context.Context, gh githubapp.PullRequestGitHub, run *model.AutomationRun, req *api.AgentPullRequestReviewRequest) error {
+	fresh, err := s.runs.FindByID(ctx, run.ID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrRunTokenInvalid
+		}
+		return errs.ErrInternal
+	}
+	if !fresh.TriggerType.IsPRTrigger() ||
+		(fresh.Status != model.AutomationRunDispatched && fresh.Status != model.AutomationRunRunning) {
+		return errs.ErrRunNotPRReview
+	}
+	if err := gh.SubmitReview(ctx, fresh.InstallationID, fresh.RepoFullName, fresh.PRNumber, githubapp.ReviewInput{
+		Event:    string(req.Event),
+		Body:     api.Deref(req.Body),
+		CommitID: fresh.HeadSHA,
+	}); err != nil {
+		return errs.New(errs.ErrGitHubAPI.Code, "提交 review 失败: "+shortenGitHubError(err))
+	}
+	return nil
 }
 
 // AgentUpdateCheck POST /api/automation-agent/pull-request/check：只更新本运行

@@ -37,11 +37,11 @@
 - **SHA 变化**：新 head SHA 使该 PR 下旧 SHA 的全部在途运行（排队+进行中，
   跨规则跨用户跨模型）一律 `cancelled`（`error_code='superseded'`），令牌消费、
   名额立即释放，并删除该 PR 下 `head_sha <> 新 SHA` 的防抖行（opened 窗口
-  不能对过期提交开火）。取消前先判过期 webhook：已有评审账且 `action=opened`
-  （opened 每个 PR 只开一次）、或本次 SHA 已有任意运行（含已取消）的迟到
-  `synchronize`，直接 202 忽略，避免 delayed `opened(A)` 把当前 `B` 取消并
-  重开 A。force-push 回已审过的 SHA 不再开轮。曾 dispatched/running 的由事务
-  外同步调 `T3ThreadsService.StopThread`（`run.interrupt`，`holdQueue=true`）
+  不能对过期提交开火）。取消前先判过期 webhook：当前 head 取评审账或未开火
+  的防抖行；已写入 `github_pr_seen_shas` 但不是当前 head 的 SHA 一律 202
+  忽略——防抖窗口内还没有 review/运行时，迟到的 `opened(A)` 也不能删掉当前
+  `B` 的 debounce。force-push 回已见过的 SHA 不再开轮。曾 dispatched/running
+  的由事务外同步调 `T3ThreadsService.StopThread`（`run.interrupt`，`holdQueue=true`）
   中断线程，每运行只尝试一次（`stop_attempted_at` 标记）；queued / 未认领不调。
   `launchThreadForRun` 仅在运行仍是 dispatched/`''` 时签发令牌；CreateThread
   返回后（含 RPC 已发出未确认）重读状态，已取消则消费令牌并立刻中断。
@@ -98,7 +98,8 @@ PR 触发且 `dispatched|running`，结束/取消后令牌已消费，访问一�
 - `GET /api/automation-agent/pull-request/diff` —— diff，>1MB 截断并标 `truncated`
 - `GET /api/automation-agent/pull-request/comments` —— review 评论列表（GitHub 分页，每页 100，最多 10 页）
 - `POST /api/automation-agent/pull-request/review` —— COMMENT/APPROVE/REQUEST_CHANGES，
-  commit_id 固定本运行 head SHA
+  commit_id 固定本运行 head SHA。写 GitHub 前在 per-PR 锁内重读运行行，已取消/
+  结束则 40920 且不提交（避免 superseded SHA 留下 blocking REQUEST_CHANGES）
 - `POST /api/automation-agent/pull-request/check` —— 只更新本运行 check 的
   title/summary/text；结论由运行终态决定。写 GitHub 前在 per-PR 锁内重读运行
   行，已取消/结束则 40920 且不 PATCH；若 PATCH 之后才变成终态，置
@@ -130,7 +131,8 @@ issue 评论、review 评论、check run、review 提交）、`fake.go`。不借
   CREATE**，`CREATE IF NOT EXISTS` 不会替换已有定义）——PR 触发允许同一规则
   多行未结束（一轮多模型 + 排队）；
 - `idx_automation_runs_pr_head(automation_runs.repo_full_name, pr_number, head_sha)`；
-- `idx_projects_github_repo(projects.github_owner, github_repo)`。
+- `idx_projects_github_repo(projects.github_owner, github_repo)`；
+- `github_pr_seen_shas(repo_full_name, pr_number, head_sha)` PK——已受理 SHA。
 
 ## 已知限制
 

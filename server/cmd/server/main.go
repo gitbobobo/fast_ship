@@ -82,6 +82,7 @@ var autoMigrateModels = []interface{}{
 	&model.GitHubWebhookDelivery{},
 	&model.GitHubPRDebounce{},
 	&model.GitHubPRReview{},
+	&model.GitHubPRSeenSHA{},
 }
 
 func main() {
