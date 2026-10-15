@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,10 +56,16 @@ type AutomationScheduler struct {
 	cfg       *config.Config
 	logger    *zap.Logger
 
+	// prReview GitHub PR 评审的协调面（INT-93）；可 nil（测试/未启用）。
+	prReview *PRReviewService
+
 	dispatchQueue chan string
-	stopOnce      sync.Once
-	stopCh        chan struct{}
-	doneCh        chan struct{}
+	// kickCh 缓冲 1 的立即触发：webhook 提交防抖/开轮后踢协调循环补一轮 tick
+	//（循环仍是唯一执行者，kick 只是把下一次 tick 提前）。
+	kickCh   chan struct{}
+	stopOnce sync.Once
+	stopCh   chan struct{}
+	doneCh   chan struct{}
 }
 
 func NewAutomationScheduler(
@@ -77,8 +84,24 @@ func NewAutomationScheduler(
 		threads: threads, sink: sink, issueRepo: issueRepo,
 		cfg: cfg, logger: logger,
 		dispatchQueue: make(chan string, automationDispatchQueue),
+		kickCh:        make(chan struct{}, 1),
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
+	}
+}
+
+// UsePRReview 挂接 GitHub PR 评审协调面（INT-93）；调度循环负责驱动它的两个
+// 事务外步骤（到期防抖、评论/check 同步）。
+func (s *AutomationScheduler) UsePRReview(pr *PRReviewService) {
+	s.prReview = pr
+	pr.SetKick(s.Kick)
+}
+
+// Kick 非阻塞请求立即补一轮 tick（缓冲 1，已挂起时合并）。
+func (s *AutomationScheduler) Kick() {
+	select {
+	case s.kickCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -105,6 +128,8 @@ func (s *AutomationScheduler) coordinateLoop() {
 		select {
 		case <-s.stopCh:
 			return
+		case <-s.kickCh:
+			s.tick(time.Now().UTC())
 		case <-ticker.C:
 			s.tick(time.Now().UTC())
 		}
@@ -114,9 +139,22 @@ func (s *AutomationScheduler) coordinateLoop() {
 func (s *AutomationScheduler) tick(now time.Time) {
 	// 每步独立容错：一步失败不拖垮同轮其它步骤。
 	s.dispatchDueCrons(now)
+	if s.prReview != nil {
+		// PR 评审：到期防抖开轮（在待认领扫描之前，让本轮立即派发新提升的运行）。
+		s.prReview.ProcessDueDebounces(now)
+	}
 	s.queueClaimableRuns(now)
 	s.markTimeouts(now)
+	if s.prReview != nil {
+		// 超时释放名额后提升排队；再扫一遍待认领，避免再等 10 秒。
+		s.prReview.PromoteQueuedPRRuns(now)
+		s.queueClaimableRuns(now)
+	}
 	s.runDuePostActions(now)
+	if s.prReview != nil {
+		// PR 评审：评论/check 同步（纯 GitHub 调用，放最后不阻塞派发）。
+		s.prReview.SyncPendingReviews(now)
+	}
 }
 
 // dispatchDueCrons 步骤 1：到期 cron。短事务内核对 enabled + 旧 next_run_at
@@ -250,6 +288,19 @@ func (s *AutomationScheduler) markTimeouts(now time.Time) {
 }
 
 func (s *AutomationScheduler) timeoutRun(run *model.AutomationRun, now time.Time) {
+	do := func() {
+		s.timeoutRunTx(run, now)
+	}
+	// PR 运行与 agent SubmitReview 共用 per-PR 锁，避免超时提交之后仍发出
+	// REQUEST_CHANGES。先锁再开事务，顺序与 webhook/agent 一致。
+	if run.TriggerType.IsPRTrigger() && s.prReview != nil && run.RepoFullName != "" && run.PRNumber != 0 {
+		s.prReview.withPRLock(run.RepoFullName, run.PRNumber, do)
+		return
+	}
+	do()
+}
+
+func (s *AutomationScheduler) timeoutRunTx(run *model.AutomationRun, now time.Time) {
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		cols := map[string]any{
 			"status":        string(model.AutomationRunTimedOut),
@@ -270,6 +321,11 @@ func (s *AutomationScheduler) timeoutRun(run *model.AutomationRun, now time.Time
 			if err := registerPostPending(tx, run.ID, run.DeadlineAt); err != nil {
 				return err
 			}
+		}
+
+		// PR 评审（INT-93）：状态变化置同步标记（事务外推评论/check）。
+		if err := markPRReviewPendingTx(tx, run, now); err != nil {
+			return err
 		}
 
 		return s.sink.PublishTx(tx, NotificationInput{
@@ -492,6 +548,14 @@ func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model
 	}
 	now := nowUTC()
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var current model.AutomationRun
+		if err := tx.Where("id = ?", run.ID).First(&current).Error; err != nil {
+			return err
+		}
+		// 认领后、签发前可能已被新 SHA 取消：不签发令牌，避免取消后仍能代发。
+		if current.Status != model.AutomationRunDispatched && current.Status != model.RunStatusPendingRun {
+			return errAutomationLaunchAborted
+		}
 		return s.tokens.CreateInTx(tx, &model.AutomationRunToken{
 			RunID:     run.ID,
 			TokenHash: hashRunToken(token),
@@ -500,7 +564,16 @@ func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model
 		})
 	})
 	if err != nil {
+		if errors.Is(err, errAutomationLaunchAborted) {
+			return
+		}
 		s.failDispatch(run, "dispatch_token_error", "保存运行令牌失败", now)
+		return
+	}
+
+	// 签发后、开线程前再读一次：已取消则不建孤儿线程。
+	if fresh, err := s.runs.FindByID(ctx, run.ID); err == nil &&
+		fresh.Status != model.AutomationRunDispatched && fresh.Status != model.RunStatusPendingRun {
 		return
 	}
 
@@ -513,9 +586,17 @@ func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model
 	case err == nil:
 		// 线程确认建成：记录 dispatched_at（后置操作只对已确认运行执行）。
 		if _, err := s.runs.UpdateColumnsWhere(context.Background(), run.ID,
-			"status = ?", []any{string(model.AutomationRunDispatched)},
+			"status = ?", []any{model.AutomationRunDispatched},
 			map[string]any{"dispatched_at": now}); err != nil {
 			s.logger.Error("记录派发时间失败", zap.String("run_id", run.ID), zap.String("user_id", run.UserID), zap.Error(err))
+		}
+		// PR 评审（INT-93）先停后建竞态：CreateThread 期间运行可能已被新 SHA
+		// 取消——立刻再读状态，已取消就马上中断刚建的线程并消费令牌。
+		if run.TriggerType.IsPRTrigger() {
+			if fresh, err := s.runs.FindByID(context.Background(), run.ID); err == nil &&
+				fresh.Status == model.AutomationRunCancelled && s.prReview != nil {
+				s.prReview.OnLaunchCancelled(fresh, now)
+			}
 		}
 		s.logger.With(zap.String("user_id", run.UserID)).Info("自动化线程已启动",
 			zap.String("run_id", run.ID),
@@ -524,8 +605,13 @@ func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model
 			zap.Bool("resumed", result.Resumed))
 	case launchSent:
 		// RPC 已发出但结果未确认：保留预分配 thread_id 等回报或 deadline，
-		// 不自动重试（同一 thread_id 的重试交给 T3 幂等，但这里无从判断上游
-		// 是否受理——明确不动）。
+		// 不自动重试。若期间已被取消，立刻消费令牌并中断（与成功路径同口径）。
+		if run.TriggerType.IsPRTrigger() {
+			if fresh, err := s.runs.FindByID(context.Background(), run.ID); err == nil &&
+				fresh.Status == model.AutomationRunCancelled && s.prReview != nil {
+				s.prReview.OnLaunchCancelled(fresh, now)
+			}
+		}
 		s.logger.With(zap.String("user_id", run.UserID)).Warn("线程启动 RPC 已发出但结果未确认，等待回报或超时",
 			zap.String("run_id", run.ID), zap.String("user_id", run.UserID), zap.Error(err))
 	default:
@@ -533,12 +619,15 @@ func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model
 	}
 }
 
+// errAutomationLaunchAborted 运行在签发令牌前已离开 dispatched/”（取消等）。
+var errAutomationLaunchAborted = errors.New("automation: launch aborted")
+
 // failDispatch 派发失败（未送达/拒绝）：终态 + 站内通知。
 func (s *AutomationScheduler) failDispatch(run *model.AutomationRun, code, message string, now time.Time) {
 	snap := parseAutomationSnapshot(run.ConfigSnapshotJSON)
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		n, err := s.runs.UpdateColumnsWhereTx(tx, run.ID,
-			"status IN (?, ?)", []any{string(model.RunStatusPendingRun), string(model.AutomationRunDispatched)},
+			"status IN (?, ?)", []any{model.RunStatusPendingRun, model.AutomationRunDispatched},
 			map[string]any{
 				"status":        string(model.AutomationRunFailed),
 				"finished_at":   now,
@@ -546,6 +635,10 @@ func (s *AutomationScheduler) failDispatch(run *model.AutomationRun, code, messa
 				"error_message": truncate(message, 500),
 			})
 		if err != nil || n == 0 {
+			return err
+		}
+		// PR 评审（INT-93）：失败也要推到评论/check。
+		if err := markPRReviewPendingTx(tx, run, now); err != nil {
 			return err
 		}
 		return s.sink.PublishTx(tx, NotificationInput{
@@ -563,10 +656,12 @@ func (s *AutomationScheduler) failDispatch(run *model.AutomationRun, code, messa
 	if err != nil {
 		s.logger.Error("记录派发失败失败", zap.String("run_id", run.ID), zap.String("user_id", run.UserID), zap.Error(err))
 	}
+	s.Kick()
 }
 
 // buildRunPrompt 渲染提示词：用户模板占位符 + 服务端回报说明（public_url + 令牌）。
-// Issue 正文派发时从 Issue 库现读，不落运行记录。
+// Issue 正文派发时从 Issue 库现读，不落运行记录；PR 评审运行带 PR 上下文与
+// 代发端点说明。
 func (s *AutomationScheduler) buildRunPrompt(run *model.AutomationRun, snap automationConfigSnapshot, token, publicURL string) string {
 	ctxData := map[string]string{
 		"{{issue_id}}":    "",
@@ -584,7 +679,38 @@ func (s *AutomationScheduler) buildRunPrompt(run *model.AutomationRun, snap auto
 			ctxData["{{issue_title}}"] = *triggerCtx.IssueTitle
 		}
 	}
-	return renderAutomationPrompt(snap.PromptTemplate, publicURL, token, run.ID, ctxData)
+	prInstructions := ""
+	if run.TriggerType.IsPRTrigger() {
+		var prCtx prTriggerContext
+		if json.Unmarshal([]byte(run.TriggerContextJSON), &prCtx) == nil {
+			ctxData["{{repo}}"] = prCtx.Repo
+			ctxData["{{pr_number}}"] = strconv.Itoa(prCtx.PRNumber)
+			ctxData["{{pr_title}}"] = prCtx.PRTitle
+			ctxData["{{pr_url}}"] = prCtx.PRURL
+			ctxData["{{head_sha}}"] = prCtx.HeadSHA
+		}
+		prInstructions = prAgentPromptInstructions(publicURL)
+	}
+	return renderAutomationPrompt(snap.PromptTemplate, publicURL, token, run.ID, ctxData, prInstructions)
+}
+
+// prAgentPromptInstructions PR 评审线程的代发端点说明（拼进提示词）。
+func prAgentPromptInstructions(publicURL string) string {
+	return fmt.Sprintf(`## GitHub PR 评审代发端点（系统附加）
+
+本次运行审查 GitHub PR，以下端点以本运行的身份代发（无需也不可提供 GitHub 凭证；
+owner/repo/PR 号/commit 均由服务端从运行记录解析，不接受传入）：
+
+- 读取 PR 元数据：GET %s/api/automation-agent/pull-request
+- 读取 diff（超过 1MB 截断）：GET %s/api/automation-agent/pull-request/diff
+- 读取已有 review 评论：GET %s/api/automation-agent/pull-request/comments
+- 提交 review（event=COMMENT|APPROVE|REQUEST_CHANGES，commit 固定为本轮 head）：
+  POST %s/api/automation-agent/pull-request/review（{"event":"COMMENT","body":"..."}）
+- 更新本运行 check 的标题与说明（结论由运行终态决定）：
+  POST %s/api/automation-agent/pull-request/check（{"title":"...","summary":"...","text":"..."})
+
+令牌随本运行结束（含取消）立即失效。
+`, publicURL, publicURL, publicURL, publicURL, publicURL)
 }
 
 // buildT3LaunchRequest 由运行行与快照组装 launchThread 请求：命令/线程/消息 ID

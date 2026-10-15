@@ -72,12 +72,9 @@ import {
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  OptionSelect,
+  withMissingOption,
+} from "@/components/ui/option-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
@@ -1367,27 +1364,21 @@ export default function IssueDetailPage() {
 
           <div className="flex items-center justify-between gap-2">
             <span className="text-sm">内部状态</span>
-            <Select
+            <OptionSelect
               value={issue.internal_meta?.workflow_status || "unset"}
               onValueChange={(value) => void handleWorkflowStatusChange(value ?? "unset")}
               disabled={updateInternalMeta.isPending}
-            >
-              <SelectTrigger className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="未设置">
-                  {issue.internal_meta?.workflow_status
-                    ? ISSUE_WORKFLOW_STATUS_LABELS[issue.internal_meta.workflow_status as IssueWorkflowStatus]
-                    : "未设置"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="unset">未设置</SelectItem>
-                {ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              options={withMissingOption(
+                [
+                  { value: "unset", label: "未设置" },
+                  ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
+                ],
+                issue.internal_meta?.workflow_status || "unset",
+                `${issue.internal_meta?.workflow_status}（未知）`,
+              )}
+              placeholder="未设置"
+              className="h-7 w-auto min-w-[80px] border-0 bg-muted/50 text-xs text-muted-foreground hover:bg-muted data-[state=open]:bg-muted"
+            />
           </div>
 
           {((issue.github?.assignees?.length ?? 0) > 0 ||

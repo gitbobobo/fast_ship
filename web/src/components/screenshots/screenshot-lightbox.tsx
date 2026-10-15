@@ -25,13 +25,7 @@ import {
   DialogContent,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -118,36 +112,19 @@ function VersionSelect({
   className?: string;
 }) {
   return (
-    <Select
+    <OptionSelect
       value={value || undefined}
       onValueChange={(v) => {
         if (v) onChange(v);
       }}
-    >
-      <SelectTrigger className={cn("w-56", className)} aria-label="选择版本">
-        {/* 下拉收起时 Item 已卸载，Value 需用函数按 value 查回 label */}
-        <SelectValue placeholder="选择版本">
-          {(selectedId) => {
-            const index = versions.findIndex((v) => v.id === selectedId);
-            return index >= 0
-              ? versionOptionLabel(versions[index], index)
-              : "";
-          }}
-        </SelectValue>
-      </SelectTrigger>
-      <SelectContent>
-        {versions.map((version, index) => (
-          <SelectItem
-            key={version.id}
-            value={version.id}
-            label={versionOptionLabel(version, index)}
-          >
-            {index === 0 ? "最新 · " : ""}
-            {versionLabel(version)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+      options={versions.map((version, index) => ({
+        value: version.id,
+        label: versionOptionLabel(version, index),
+      }))}
+      placeholder="选择版本"
+      className={cn("w-56", className)}
+      aria-label="选择版本"
+    />
   );
 }
 

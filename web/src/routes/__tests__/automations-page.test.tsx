@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import AutomationsPage from "@/routes/automations";
 import { renderWithRoute } from "@/test/render";
+import { environmentApi, threadApi } from "@/lib/api/threads";
+import { toast } from "sonner";
 import {
   useAutomationRuns,
   useAutomations,
@@ -111,6 +113,27 @@ describe("AutomationsPage", () => {
     vi.mocked(useDeleteAutomation).mockReturnValue({
       mutateAsync: deleteMutateAsync,
     } as unknown as ReturnType<typeof useDeleteAutomation>);
+    // mockReturnValue(挂起 Promise) 的实现不会被 clearAllMocks 清掉，
+    // 每个用例开始前重放 resolved 实现，防 pending 泄漏到后续用例。
+    vi.mocked(environmentApi.list).mockResolvedValue({
+      data: { items: [{ id: "env-1", name: "本机环境" }] },
+    } as unknown as Awaited<ReturnType<typeof environmentApi.list>>);
+    vi.mocked(threadApi.composerOptions).mockResolvedValue({
+      data: {
+        projects: [{ id: "proj-1", title: "示例项目" }],
+        config: {},
+        settings: {},
+      },
+    } as unknown as Awaited<ReturnType<typeof threadApi.composerOptions>>);
+    vi.mocked(threadApi.workspaceOptions).mockResolvedValue({
+      data: {
+        project_id: "proj-1",
+        cwd: "/tmp",
+        is_repo: true,
+        ref_name: "main",
+        refs: [],
+      },
+    } as unknown as Awaited<ReturnType<typeof threadApi.workspaceOptions>>);
   });
 
   afterEach(() => {
@@ -189,6 +212,73 @@ describe("AutomationsPage", () => {
     expect(screen.getByText("工作区")).toBeInTheDocument();
   });
 
+  it("edit dialog shows option labels instead of raw values (INT-92)", async () => {
+    const user = userEvent.setup();
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
+    );
+    await screen.findByRole("dialog");
+
+    // value "no"/"settle"/"off" 与显示文案不同，收起态必须渲染 label。
+    const postOnTimeout = screen
+      .getByText("超时后仍执行后置")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(postOnTimeout).toHaveTextContent("否（默认）");
+    expect(postOnTimeout).not.toHaveTextContent(/\bno\b/);
+
+    const postAction = screen
+      .getByText("结束后置操作")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(postAction).toHaveTextContent("settle（收进历史区）");
+
+    const enabled = screen
+      .getByText("启用状态")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(enabled).toHaveTextContent("停用（默认）");
+    expect(enabled).not.toHaveTextContent(/\boff\b/);
+  });
+
+  it("edit dialog shows 加载中… while option queries are pending (INT-92)", async () => {
+    // 环境/项目选项异步加载期间，收起态不得闪出内部 id。
+    const { environmentApi, threadApi } = await import("@/lib/api/threads");
+    vi.mocked(environmentApi.list).mockReturnValue(new Promise(() => {}));
+    vi.mocked(threadApi.composerOptions).mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
+    );
+    await screen.findByRole("dialog");
+
+    const envSelect = screen
+      .getByText("T3 环境")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(envSelect).toHaveTextContent("加载中…");
+    expect(envSelect).not.toHaveTextContent("env-1");
+
+    const projectSelect = screen
+      .getByText("T3 项目")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(projectSelect).toHaveTextContent("加载中…");
+    expect(projectSelect).not.toHaveTextContent("proj-1");
+  });
+
   it("shows runs dialog on history click", async () => {
     vi.mocked(useAutomationRuns).mockReturnValue({
       data: [
@@ -238,5 +328,235 @@ describe("AutomationsPage", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "删除 每日令牌回报" }),
     );
+  });
+
+  it("PR 触发至少要选一个模型（保存被拦下）", async () => {
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    await screen.findByRole("dialog");
+    await user.type(screen.getByLabelText(/名称/), "PR 审查");
+    await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
+
+    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(await screen.findByText("GitHub PR 打开"));
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(createMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("PR 触发创建携带 model_selections 与防抖默认 60", async () => {
+    vi.mocked(threadApi.composerOptions).mockResolvedValue({
+      data: {
+        projects: [{ id: "proj-1", title: "示例项目" }],
+        config: {
+          providers: [
+            {
+              instanceId: "inst-a",
+              displayName: "Claude",
+              models: [{ slug: "claude-5", name: "Claude 5" }],
+            },
+            {
+              instanceId: "inst-b",
+              displayName: "GLM",
+              models: [{ slug: "glm-5", name: "GLM 5" }],
+            },
+          ],
+        },
+        settings: {},
+      },
+    } as never);
+    createMutateAsync.mockResolvedValue({});
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    await screen.findByRole("dialog");
+    await user.type(screen.getByLabelText(/名称/), "PR 审查");
+    await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
+
+    let combos = screen.getAllByRole("combobox");
+    await user.click(combos[1]);
+    await user.click(await screen.findByText("本机环境"));
+    combos = screen.getAllByRole("combobox");
+    await user.click(combos[2]);
+    await user.click(await screen.findByText("示例项目"));
+
+    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(await screen.findByText("GitHub PR 打开"));
+
+    await user.click(await screen.findByText("Claude / Claude 5"));
+    await user.click(screen.getByText("GLM / GLM 5"));
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const payload = createMutateAsync.mock.calls[0][0];
+    expect(payload.trigger_type).toBe("github_pr_opened");
+    expect(payload.debounce_seconds).toBe(60);
+    expect(payload.model_selections).toEqual([
+      { instance_id: "inst-a", model: "claude-5" },
+      { instance_id: "inst-b", model: "glm-5" },
+    ]);
+  });
+
+  it("PR 触发勾选模型时带上 descriptor 默认选项", async () => {
+    vi.mocked(threadApi.composerOptions).mockResolvedValue({
+      data: {
+        projects: [{ id: "proj-1", title: "示例项目" }],
+        config: {
+          providers: [
+            {
+              instanceId: "inst-a",
+              displayName: "Claude",
+              models: [
+                {
+                  slug: "claude-5",
+                  name: "Claude 5",
+                  capabilities: {
+                    optionDescriptors: [
+                      {
+                        type: "select",
+                        id: "effort",
+                        currentValue: "high",
+                        options: [
+                          { id: "low", label: "Low" },
+                          { id: "high", label: "High", isDefault: true },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        settings: {},
+      },
+    } as never);
+    createMutateAsync.mockResolvedValue({});
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    await screen.findByRole("dialog");
+    await user.type(screen.getByLabelText(/名称/), "PR 审查");
+    await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
+
+    let combos = screen.getAllByRole("combobox");
+    await user.click(combos[1]);
+    await user.click(await screen.findByText("本机环境"));
+    combos = screen.getAllByRole("combobox");
+    await user.click(combos[2]);
+    await user.click(await screen.findByText("示例项目"));
+
+    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(await screen.findByText("GitHub PR 打开"));
+    await user.click(await screen.findByText("Claude / Claude 5"));
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    expect(createMutateAsync.mock.calls[0][0].model_selections).toEqual([
+      {
+        instance_id: "inst-a",
+        model: "claude-5",
+        options: [{ id: "effort", value: "high" }],
+      },
+    ]);
+  });
+
+  it("运行列表显示排队/已取消、轮次与 SHA", async () => {
+    vi.mocked(useAutomationRuns).mockReturnValue({
+      data: [
+        {
+          id: "r-q",
+          automation_id: "a-1",
+          trigger_type: "github_pr_synchronize",
+          trigger_key: "pr:o/h:1:s2:i:m",
+          triggered_at: "2026-10-14T00:00:00Z",
+          status: "queued",
+          environment_id: "env-1",
+          t3_project_id: "proj-1",
+          thread_id: "th-q",
+          deadline_at: "2026-10-14T01:00:00Z",
+          post_state: "none",
+          post_attempt: 0,
+          repo_full_name: "octocat/hw",
+          pr_number: 1,
+          head_sha: "abcdef1234567890",
+          round_number: 3,
+          model_name: "claude-5",
+        },
+        {
+          id: "r-c",
+          automation_id: "a-1",
+          trigger_type: "github_pr_synchronize",
+          trigger_key: "pr:o/h:1:s1:i:m",
+          triggered_at: "2026-10-13T00:00:00Z",
+          status: "cancelled",
+          error_code: "superseded",
+          environment_id: "env-1",
+          t3_project_id: "proj-1",
+          thread_id: "th-c",
+          deadline_at: "2026-10-13T01:00:00Z",
+          post_state: "none",
+          post_attempt: 0,
+          head_sha: "1234567890abcdef",
+          round_number: 2,
+          model_name: "glm-5",
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAutomationRuns>);
+    const user = userEvent.setup();
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    await user.click(
+      screen.getByRole("button", { name: "查看运行记录 每日令牌回报" }),
+    );
+
+    expect(await screen.findByText("排队中")).toBeInTheDocument();
+    expect(screen.getByText("已取消")).toBeInTheDocument();
+    expect(screen.getByText("superseded")).toBeInTheDocument();
+    expect(screen.getByText(/R3/)).toBeInTheDocument();
+    expect(screen.getByText(/abcdef1/)).toBeInTheDocument();
+  });
+
+  it("PR 触发的规则在列表里显示防抖摘要", () => {
+    vi.mocked(useAutomations).mockReturnValue({
+      data: [
+        {
+          ...automation,
+          name: "PR 评审",
+          trigger_type: "github_pr_synchronize",
+          model_selections: [
+            { instance_id: "inst-a", model: "claude-5" },
+          ],
+          debounce_seconds: 120,
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAutomations>);
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+    expect(screen.getByText("PR 评审")).toBeInTheDocument();
+    expect(
+      screen.getByText("GitHub PR 新提交 · claude-5 · 防抖 120s"),
+    ).toBeInTheDocument();
   });
 });

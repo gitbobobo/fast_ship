@@ -43,24 +43,26 @@ func (r *AutomationRepository) ListByUserID(ctx context.Context, userID string) 
 // AutomationUpdate 是一次配置更新的列集合：nil 字段不写（保留现值）。
 // NextRunAt 由 service 依据 cron 重算后传入。
 type AutomationUpdate struct {
-	Name               *string
-	Enabled            *bool
-	EnvironmentID      *string
-	T3ProjectID        *string
-	TriggerType        *model.AutomationTriggerType
-	CronExpression     *string
-	Timezone           *string
-	NextRunAt          *time.Time
-	IssueProjectID     **string // 双指针：nil=不改；*nil=置 NULL；**非 nil=写入值
-	EventFilterJSON    *string
-	PromptTemplate     *string
-	ModelSelectionJSON *string
-	RuntimeMode        *string
-	WorkspaceJSON      *string
-	TimeoutSeconds     *int
-	PostAction         *model.AutomationPostAction
-	PostOnTimeout      *bool
-	UpdatedAt          time.Time
+	Name                *string
+	Enabled             *bool
+	EnvironmentID       *string
+	T3ProjectID         *string
+	TriggerType         *model.AutomationTriggerType
+	CronExpression      *string
+	Timezone            *string
+	NextRunAt           *time.Time
+	IssueProjectID      **string // 双指针：nil=不改；*nil=置 NULL；**非 nil=写入值
+	EventFilterJSON     *string
+	PromptTemplate      *string
+	ModelSelectionJSON  *string
+	ModelSelectionsJSON *string // GitHub PR 多模型（INT-93）
+	DebounceSeconds     *int
+	RuntimeMode         *string
+	WorkspaceJSON       *string
+	TimeoutSeconds      *int
+	PostAction          *model.AutomationPostAction
+	PostOnTimeout       *bool
+	UpdatedAt           time.Time
 }
 
 // Update 条件 UPDATE（WHERE id + user_id），影响 0 行返回 gorm.ErrRecordNotFound。
@@ -104,6 +106,12 @@ func (r *AutomationRepository) Update(ctx context.Context, id, userID string, up
 	}
 	if update.ModelSelectionJSON != nil {
 		columns["model_selection_json"] = *update.ModelSelectionJSON
+	}
+	if update.ModelSelectionsJSON != nil {
+		columns["model_selections_json"] = *update.ModelSelectionsJSON
+	}
+	if update.DebounceSeconds != nil {
+		columns["debounce_seconds"] = *update.DebounceSeconds
 	}
 	if update.RuntimeMode != nil {
 		columns["runtime_mode"] = *update.RuntimeMode
@@ -255,6 +263,96 @@ func (r *AutomationRunRepository) ListDuePostTx(db *gorm.DB, now time.Time, limi
 		Limit(limit).
 		Find(&items).Error
 	return items, err
+}
+
+// ---- GitHub PR 审查（INT-93）----
+
+// prTriggerTypesIn SQLite IN 占位里的 PR 触发类型清单。
+var prTriggerTypesIn = []string{
+	string(model.AutomationTriggerGitHubPROpened),
+	string(model.AutomationTriggerGitHubPRSynchronize),
+}
+
+// CancelSupersededPRRunsTx SHA 变化：该 PR 下旧 SHA 的全部在途运行（排队+进行中，
+// 跨规则跨用户跨模型）一律取消并消费已有令牌。返回取消的运行 ID 列表（供事务外
+// StopThread），0 行=无在途。
+func (r *AutomationRunRepository) CancelSupersededPRRunsTx(tx *gorm.DB, repoFullName string, prNumber int, newSHA string, now time.Time) ([]string, error) {
+	var oldRuns []model.AutomationRun
+	err := tx.
+		Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ? AND status IN (?, ?, ?, ?)",
+			repoFullName, prNumber, newSHA,
+			model.AutomationRunQueued, model.RunStatusPendingRun,
+			model.AutomationRunDispatched, model.AutomationRunRunning).
+		Find(&oldRuns).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(oldRuns) == 0 {
+		return nil, nil
+	}
+	res := tx.Model(&model.AutomationRun{}).
+		Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ? AND status IN (?, ?, ?, ?)",
+			repoFullName, prNumber, newSHA,
+			model.AutomationRunQueued, model.RunStatusPendingRun,
+			model.AutomationRunDispatched, model.AutomationRunRunning).
+		Updates(map[string]any{
+			"status":        string(model.AutomationRunCancelled),
+			"finished_at":   now,
+			"error_code":    "superseded",
+			"error_message": "PR 已推送新提交，本轮审查被新 SHA 取代",
+			"post_state":    string(model.AutomationPostStateNone),
+		})
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	ids := make([]string, 0, len(oldRuns))
+	for i := range oldRuns {
+		ids = append(ids, oldRuns[i].ID)
+	}
+	return ids, nil
+}
+
+// ConsumeRunTokensTx 消费一批运行的回报令牌（取消后回报立即失效）。
+func (r *AutomationRunRepository) ConsumeRunTokensTx(tx *gorm.DB, runIDs []string, now time.Time) error {
+	if len(runIDs) == 0 {
+		return nil
+	}
+	return tx.Model(&model.AutomationRunToken{}).
+		Where("run_id IN ? AND consumed_at IS NULL", runIDs).
+		Update("consumed_at", now).Error
+}
+
+// CountPRInflightTx 用户 PR 触发的在途数（排队中的 queued 不计）。
+func (r *AutomationRunRepository) CountPRInflightTx(tx *gorm.DB, userID string) (int64, error) {
+	var n int64
+	err := tx.Model(&model.AutomationRun{}).
+		Where("user_id = ? AND trigger_type IN ? AND status IN (?, ?, ?)",
+			userID, prTriggerTypesIn,
+			model.RunStatusPendingRun, model.AutomationRunDispatched, model.AutomationRunRunning).
+		Count(&n).Error
+	return n, err
+}
+
+// ListOldestQueuedPRRunsTx 用户排队中的 PR 运行（triggered_at 最老优先）。
+func (r *AutomationRunRepository) ListOldestQueuedPRRunsTx(tx *gorm.DB, userID string, limit int) ([]model.AutomationRun, error) {
+	var items []model.AutomationRun
+	err := tx.
+		Where("user_id = ? AND trigger_type IN ? AND status = ?",
+			userID, prTriggerTypesIn, model.AutomationRunQueued).
+		Order("triggered_at ASC, id ASC").
+		Limit(limit).
+		Find(&items).Error
+	return items, err
+}
+
+// ListUserIDsWithQueuedPRRunsTx 仍有 queued PR 运行的用户（调度循环提升用）。
+func (r *AutomationRunRepository) ListUserIDsWithQueuedPRRunsTx(tx *gorm.DB) ([]string, error) {
+	var ids []string
+	err := tx.Model(&model.AutomationRun{}).
+		Where("trigger_type IN ? AND status = ?", prTriggerTypesIn, model.AutomationRunQueued).
+		Distinct("user_id").
+		Pluck("user_id", &ids).Error
+	return ids, err
 }
 
 type AutomationRunTokenRepository struct {

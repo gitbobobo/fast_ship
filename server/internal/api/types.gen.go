@@ -8,6 +8,27 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for AgentPullRequestReviewRequestEvent.
+const (
+	APPROVE        AgentPullRequestReviewRequestEvent = "APPROVE"
+	COMMENT        AgentPullRequestReviewRequestEvent = "COMMENT"
+	REQUESTCHANGES AgentPullRequestReviewRequestEvent = "REQUEST_CHANGES"
+)
+
+// Valid indicates whether the value is a known member of the AgentPullRequestReviewRequestEvent enum.
+func (e AgentPullRequestReviewRequestEvent) Valid() bool {
+	switch e {
+	case APPROVE:
+		return true
+	case COMMENT:
+		return true
+	case REQUESTCHANGES:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AutomationEventFilterField.
 const (
 	State          AutomationEventFilterField = "state"
@@ -91,9 +112,11 @@ func (e AutomationRunReportRequestPhase) Valid() bool {
 
 // Defines values for AutomationRunStatus.
 const (
+	AutomationRunStatusCancelled  AutomationRunStatus = "cancelled"
 	AutomationRunStatusCompleted  AutomationRunStatus = "completed"
 	AutomationRunStatusDispatched AutomationRunStatus = "dispatched"
 	AutomationRunStatusFailed     AutomationRunStatus = "failed"
+	AutomationRunStatusQueued     AutomationRunStatus = "queued"
 	AutomationRunStatusRunning    AutomationRunStatus = "running"
 	AutomationRunStatusTimedOut   AutomationRunStatus = "timed_out"
 )
@@ -101,11 +124,15 @@ const (
 // Valid indicates whether the value is a known member of the AutomationRunStatus enum.
 func (e AutomationRunStatus) Valid() bool {
 	switch e {
+	case AutomationRunStatusCancelled:
+		return true
 	case AutomationRunStatusCompleted:
 		return true
 	case AutomationRunStatusDispatched:
 		return true
 	case AutomationRunStatusFailed:
+		return true
+	case AutomationRunStatusQueued:
 		return true
 	case AutomationRunStatusRunning:
 		return true
@@ -118,16 +145,22 @@ func (e AutomationRunStatus) Valid() bool {
 
 // Defines values for AutomationTriggerType.
 const (
-	Cron               AutomationTriggerType = "cron"
-	IssueCreated       AutomationTriggerType = "issue_created"
-	IssueLabelAdded    AutomationTriggerType = "issue_label_added"
-	IssueStatusChanged AutomationTriggerType = "issue_status_changed"
+	Cron                AutomationTriggerType = "cron"
+	GithubPrOpened      AutomationTriggerType = "github_pr_opened"
+	GithubPrSynchronize AutomationTriggerType = "github_pr_synchronize"
+	IssueCreated        AutomationTriggerType = "issue_created"
+	IssueLabelAdded     AutomationTriggerType = "issue_label_added"
+	IssueStatusChanged  AutomationTriggerType = "issue_status_changed"
 )
 
 // Valid indicates whether the value is a known member of the AutomationTriggerType enum.
 func (e AutomationTriggerType) Valid() bool {
 	switch e {
 	case Cron:
+		return true
+	case GithubPrOpened:
+		return true
+	case GithubPrSynchronize:
 		return true
 	case IssueCreated:
 		return true
@@ -815,6 +848,13 @@ type AISettings struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// AgentCheckUpdateRequest 只更新本运行 check run 的标题与说明；结论（conclusion）由运行终态决定，不接受传入。
+type AgentCheckUpdateRequest struct {
+	Summary *string `json:"summary,omitempty"`
+	Text    *string `json:"text,omitempty"`
+	Title   *string `json:"title,omitempty"`
+}
+
 // AgentNotificationRequest defines model for AgentNotificationRequest.
 type AgentNotificationRequest struct {
 	Body *string `json:"body,omitempty"`
@@ -831,6 +871,57 @@ type AgentNotificationRequest struct {
 	// ThreadId 可选；缺省用运行的线程
 	ThreadId *string `json:"thread_id,omitempty"`
 	Title    string  `json:"title"`
+}
+
+// AgentPullRequestComment defines model for AgentPullRequestComment.
+type AgentPullRequestComment struct {
+	Body        string  `json:"body"`
+	CreatedAt   string  `json:"created_at"`
+	Id          int     `json:"id"`
+	InReplyToId *int    `json:"in_reply_to_id,omitempty"`
+	Path        *string `json:"path,omitempty"`
+	User        string  `json:"user"`
+}
+
+// AgentPullRequestDetail 本运行审查的 PR 元数据（从运行行与 GitHub 读取；不接受请求参数）
+type AgentPullRequestDetail struct {
+	BaseRef *string `json:"base_ref,omitempty"`
+	Body    *string `json:"body,omitempty"`
+	Draft   *bool   `json:"draft,omitempty"`
+	HeadRef *string `json:"head_ref,omitempty"`
+
+	// HeadSha 本运行绑定的 head commit SHA
+	HeadSha      string `json:"head_sha"`
+	HtmlUrl      string `json:"html_url"`
+	PrNumber     int    `json:"pr_number"`
+	RepoFullName string `json:"repo_full_name"`
+	Title        string `json:"title"`
+}
+
+// AgentPullRequestDiff defines model for AgentPullRequestDiff.
+type AgentPullRequestDiff struct {
+	// Content 统一 diff 文本
+	Content string `json:"content"`
+
+	// Truncated 超过 1MB 截断时为 true
+	Truncated bool `json:"truncated"`
+}
+
+// AgentPullRequestReviewRequest defines model for AgentPullRequestReviewRequest.
+type AgentPullRequestReviewRequest struct {
+	// Body review 正文（APPROVE 时可空）
+	Body *string `json:"body,omitempty"`
+
+	// Event 审查结论；commit_id 由服务端取本运行 head SHA
+	Event AgentPullRequestReviewRequestEvent `json:"event"`
+}
+
+// AgentPullRequestReviewRequestEvent 审查结论；commit_id 由服务端取本运行 head SHA
+type AgentPullRequestReviewRequestEvent string
+
+// AgentPullRequestReviewResult defines model for AgentPullRequestReviewResult.
+type AgentPullRequestReviewResult struct {
+	Submitted bool `json:"submitted"`
 }
 
 // AnswerT3SecretRequest 密钥应答联合；save 携带密钥值（仅此一次经过，不落库不回显）
@@ -910,7 +1001,11 @@ type Automation struct {
 
 	// CronExpression 仅 cron 触发；五字段标准表达式
 	CronExpression *string `json:"cron_expression,omitempty"`
-	Enabled        bool    `json:"enabled"`
+
+	// DebounceSeconds 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。
+	// 0=立即；缺省 60；上限 86400。
+	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
+	Enabled         bool `json:"enabled"`
 
 	// EnvironmentId T3 环境 ID
 	EnvironmentId string `json:"environment_id"`
@@ -923,7 +1018,12 @@ type Automation struct {
 	// IssueProjectId 事件过滤的项目；null 表示当前用户全部项目
 	IssueProjectId *string                   `json:"issue_project_id,omitempty"`
 	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-	Name           string                    `json:"name"`
+
+	// ModelSelections GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮，
+	// 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择，
+	// 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。
+	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
+	Name            string                     `json:"name"`
 
 	// NextRunAt 下次调度时间（UTC RFC3339）；仅 cron 触发
 	NextRunAt *string `json:"next_run_at,omitempty"`
@@ -949,7 +1049,10 @@ type Automation struct {
 	// Timezone IANA 时区名，仅 cron 触发；空表示 UTC
 	Timezone *string `json:"timezone,omitempty"`
 
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
+	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
+	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
 	TriggerType AutomationTriggerType `json:"trigger_type"`
 	UpdatedAt   string                `json:"updated_at"`
 	Workspace   *AutomationWorkspace  `json:"workspace,omitempty"`
@@ -1001,28 +1104,49 @@ type AutomationRun struct {
 	DispatchStartedAt *string `json:"dispatch_started_at,omitempty"`
 
 	// DispatchedAt 启动 RPC 结果确认时间；为空表示线程是否建成未确认（此类运行不执行后置）
-	DispatchedAt      *string                   `json:"dispatched_at,omitempty"`
-	EnvironmentId     string                    `json:"environment_id"`
-	ErrorCode         *string                   `json:"error_code,omitempty"`
-	ErrorMessage      *string                   `json:"error_message,omitempty"`
-	FinishedAt        *string                   `json:"finished_at,omitempty"`
-	Id                string                    `json:"id"`
-	PostAttempt       int                       `json:"post_attempt"`
-	PostDeadlineAt    *string                   `json:"post_deadline_at,omitempty"`
-	PostError         *string                   `json:"post_error,omitempty"`
-	PostNextAttemptAt *string                   `json:"post_next_attempt_at,omitempty"`
-	PostState         AutomationPostState       `json:"post_state"`
-	StartedAt         *string                   `json:"started_at,omitempty"`
-	Status            *AutomationRunStatus      `json:"status"`
-	Summary           *string                   `json:"summary,omitempty"`
-	T3ProjectId       string                    `json:"t3_project_id"`
-	ThreadId          string                    `json:"thread_id"`
-	TriggerContext    *AutomationTriggerContext `json:"trigger_context,omitempty"`
+	DispatchedAt  *string `json:"dispatched_at,omitempty"`
+	EnvironmentId string  `json:"environment_id"`
+	ErrorCode     *string `json:"error_code,omitempty"`
+	ErrorMessage  *string `json:"error_message,omitempty"`
+	FinishedAt    *string `json:"finished_at,omitempty"`
 
-	// TriggerKey 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`
+	// HeadSha 仅 GitHub PR 触发；本轮审查的 head commit SHA
+	HeadSha *string `json:"head_sha,omitempty"`
+	Id      string  `json:"id"`
+
+	// ModelInstanceId 仅 GitHub PR 触发；本运行绑定的模型 instance_id
+	ModelInstanceId *string `json:"model_instance_id,omitempty"`
+
+	// ModelName 仅 GitHub PR 触发；本运行绑定的模型名
+	ModelName         *string             `json:"model_name,omitempty"`
+	PostAttempt       int                 `json:"post_attempt"`
+	PostDeadlineAt    *string             `json:"post_deadline_at,omitempty"`
+	PostError         *string             `json:"post_error,omitempty"`
+	PostNextAttemptAt *string             `json:"post_next_attempt_at,omitempty"`
+	PostState         AutomationPostState `json:"post_state"`
+
+	// PrNumber 仅 GitHub PR 触发
+	PrNumber *int `json:"pr_number,omitempty"`
+
+	// RepoFullName 仅 GitHub PR 触发；owner/repo
+	RepoFullName *string `json:"repo_full_name,omitempty"`
+
+	// RoundNumber 仅 GitHub PR 触发；同一 PR 内递增的轮次（从 1 起，同一轮各模型共享）
+	RoundNumber    *int                      `json:"round_number,omitempty"`
+	StartedAt      *string                   `json:"started_at,omitempty"`
+	Status         *AutomationRunStatus      `json:"status"`
+	Summary        *string                   `json:"summary,omitempty"`
+	T3ProjectId    string                    `json:"t3_project_id"`
+	ThreadId       string                    `json:"thread_id"`
+	TriggerContext *AutomationTriggerContext `json:"trigger_context,omitempty"`
+
+	// TriggerKey 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>`
 	TriggerKey string `json:"trigger_key"`
 
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
+	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
+	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
 	TriggerType AutomationTriggerType `json:"trigger_type"`
 	TriggeredAt string                `json:"triggered_at"`
 }
@@ -1053,7 +1177,10 @@ type AutomationRunReportResult struct {
 	Status string `json:"status"`
 }
 
-// AutomationRunStatus dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；其余为终态。回报未开始时状态可能为空。
+// AutomationRunStatus queued=PR 审查排队（用户并发上限内不占在途名额，等调度提升）；
+// dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；
+// cancelled=被新 head SHA 取代或规则改动后废弃（终态）；
+// completed/failed/timed_out 为终态。回报未开始时状态可能为空。
 type AutomationRunStatus string
 
 // AutomationTriggerContext 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。
@@ -1069,7 +1196,10 @@ type AutomationTriggerContext struct {
 	To                  *string  `json:"to,omitempty"`
 }
 
-// AutomationTriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+// AutomationTriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
+// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
+// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
 type AutomationTriggerType string
 
 // AutomationWorkspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
@@ -1102,6 +1232,9 @@ type CreateApiKeyRequest struct {
 type CreateAutomationRequest struct {
 	CronExpression *string `json:"cron_expression,omitempty"`
 
+	// DebounceSeconds 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
+	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
+
 	// Enabled 缺省 false；启用时完整校验触发配置与 public_url
 	Enabled       *bool  `json:"enabled,omitempty"`
 	EnvironmentId string `json:"environment_id"`
@@ -1113,7 +1246,10 @@ type CreateAutomationRequest struct {
 
 	// ModelSelection T3 模型选择（缺省回落 T3 项目默认）
 	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-	Name           string                    `json:"name"`
+
+	// ModelSelections GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
+	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
+	Name            string                     `json:"name"`
 
 	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
 	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
@@ -1126,7 +1262,10 @@ type CreateAutomationRequest struct {
 	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
 	Timezone       *string `json:"timezone,omitempty"`
 
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
+	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
+	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
 	TriggerType AutomationTriggerType `json:"trigger_type"`
 
 	// Workspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
@@ -2935,15 +3074,21 @@ type UpdateAISettingsRequest struct {
 // UpdateAutomationRequest 全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
 type UpdateAutomationRequest struct {
 	CronExpression *string `json:"cron_expression,omitempty"`
-	Enabled        *bool   `json:"enabled,omitempty"`
-	EnvironmentId  string  `json:"environment_id"`
+
+	// DebounceSeconds 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
+	DebounceSeconds *int   `json:"debounce_seconds,omitempty"`
+	Enabled         *bool  `json:"enabled,omitempty"`
+	EnvironmentId   string `json:"environment_id"`
 
 	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
 	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
 	EventFilter    *AutomationEventFilter    `json:"event_filter,omitempty"`
 	IssueProjectId *string                   `json:"issue_project_id,omitempty"`
 	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-	Name           string                    `json:"name"`
+
+	// ModelSelections GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
+	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
+	Name            string                     `json:"name"`
 
 	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
 	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
@@ -2956,7 +3101,10 @@ type UpdateAutomationRequest struct {
 	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
 	Timezone       *string `json:"timezone,omitempty"`
 
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。
+	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
+	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
+	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
 	TriggerType AutomationTriggerType `json:"trigger_type"`
 	Workspace   *AutomationWorkspace  `json:"workspace,omitempty"`
 }
@@ -3521,6 +3669,53 @@ type GetAgentThreadItem200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// GetAgentPullRequest200JSONResponseBody defines parameters for GetAgentPullRequest.
+type GetAgentPullRequest200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 本运行审查的 PR 元数据（从运行行与 GitHub 读取；不接受请求参数）
+	Data *AgentPullRequestDetail `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListAgentPullRequestComments200JSONResponseBody_Data defines parameters for ListAgentPullRequestComments.
+type ListAgentPullRequestComments200JSONResponseBody_Data struct {
+	Items []AgentPullRequestComment `json:"items"`
+}
+
+// ListAgentPullRequestComments200JSONResponseBody defines parameters for ListAgentPullRequestComments.
+type ListAgentPullRequestComments200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                                   `json:"code"`
+	Data *ListAgentPullRequestComments200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetAgentPullRequestDiff200JSONResponseBody defines parameters for GetAgentPullRequestDiff.
+type GetAgentPullRequestDiff200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                   `json:"code"`
+	Data *AgentPullRequestDiff `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SubmitAgentPullRequestReview200JSONResponseBody defines parameters for SubmitAgentPullRequestReview.
+type SubmitAgentPullRequestReview200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                           `json:"code"`
+	Data *AgentPullRequestReviewResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ReportAutomationRun200JSONResponseBody defines parameters for ReportAutomationRun.
 type ReportAutomationRun200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -3981,6 +4176,16 @@ type GithubMediaProxyHeadParams struct {
 
 	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
+}
+
+// ReceiveGitHubWebhookJSONBody defines parameters for ReceiveGitHubWebhook.
+type ReceiveGitHubWebhookJSONBody = map[string]interface{}
+
+// ReceiveGitHubWebhookParams defines parameters for ReceiveGitHubWebhook.
+type ReceiveGitHubWebhookParams struct {
+	XGitHubEvent     string `json:"X-GitHub-Event"`
+	XGitHubDelivery  string `json:"X-GitHub-Delivery"`
+	XHubSignature256 string `json:"X-Hub-Signature-256"`
 }
 
 // GetIssuePrompts200JSONResponseBody defines parameters for GetIssuePrompts.
@@ -5246,6 +5451,12 @@ type RegisterJSONRequestBody = RegisterRequest
 // PublishAgentNotificationJSONRequestBody defines body for PublishAgentNotification for application/json ContentType.
 type PublishAgentNotificationJSONRequestBody = AgentNotificationRequest
 
+// UpdateAgentPullRequestCheckJSONRequestBody defines body for UpdateAgentPullRequestCheck for application/json ContentType.
+type UpdateAgentPullRequestCheckJSONRequestBody = AgentCheckUpdateRequest
+
+// SubmitAgentPullRequestReviewJSONRequestBody defines body for SubmitAgentPullRequestReview for application/json ContentType.
+type SubmitAgentPullRequestReviewJSONRequestBody = AgentPullRequestReviewRequest
+
 // ReportAutomationRunJSONRequestBody defines body for ReportAutomationRun for application/json ContentType.
 type ReportAutomationRunJSONRequestBody = AutomationRunReportRequest
 
@@ -5290,6 +5501,9 @@ type CreateGithubTokenJSONRequestBody = CreateGitHubTokenRequest
 
 // UpdateGithubTokenJSONRequestBody defines body for UpdateGithubToken for application/json ContentType.
 type UpdateGithubTokenJSONRequestBody = UpdateGitHubTokenRequest
+
+// ReceiveGitHubWebhookJSONRequestBody defines body for ReceiveGitHubWebhook for application/json ContentType.
+type ReceiveGitHubWebhookJSONRequestBody = ReceiveGitHubWebhookJSONBody
 
 // UpdateIssuePromptsJSONRequestBody defines body for UpdateIssuePrompts for application/json ContentType.
 type UpdateIssuePromptsJSONRequestBody UpdateIssuePromptsJSONBody

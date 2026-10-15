@@ -53,6 +53,11 @@ var automationPromptPlaceholders = []string{
 	"{{issue_id}}", "{{issue_title}}", "{{issue_body}}", "{{trigger_key}}",
 }
 
+// automationPRPromptPlaceholders GitHub PR 评审模板的占位符（webhook 上下文替换）。
+var automationPRPromptPlaceholders = []string{
+	"{{repo}}", "{{pr_number}}", "{{pr_title}}", "{{pr_url}}", "{{head_sha}}",
+}
+
 type AutomationService struct {
 	db          *gorm.DB
 	autos       *repository.AutomationRepository
@@ -160,27 +165,29 @@ func (s *AutomationService) Create(ctx context.Context, userID string, req *api.
 
 	now := time.Now().UTC()
 	a := &model.Automation{
-		ID:                 uuid.NewString(),
-		UserID:             userID,
-		CreatedAt:          now,
-		UpdatedAt:          now,
-		Enabled:            built.Enabled,
-		Name:               built.Name,
-		EnvironmentID:      built.EnvironmentID,
-		T3ProjectID:        built.T3ProjectID,
-		TriggerType:        built.TriggerType,
-		CronExpression:     built.CronExpression,
-		Timezone:           built.Timezone,
-		NextRunAt:          built.NextRunAt,
-		IssueProjectID:     built.IssueProjectID,
-		EventFilterJSON:    built.EventFilterJSON,
-		PromptTemplate:     built.PromptTemplate,
-		ModelSelectionJSON: built.ModelSelectionJSON,
-		RuntimeMode:        built.RuntimeMode,
-		WorkspaceJSON:      built.WorkspaceJSON,
-		TimeoutSeconds:     built.TimeoutSeconds,
-		PostAction:         built.PostAction,
-		PostOnTimeout:      built.PostOnTimeout,
+		ID:                  uuid.NewString(),
+		UserID:              userID,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		Enabled:             built.Enabled,
+		Name:                built.Name,
+		EnvironmentID:       built.EnvironmentID,
+		T3ProjectID:         built.T3ProjectID,
+		TriggerType:         built.TriggerType,
+		CronExpression:      built.CronExpression,
+		Timezone:            built.Timezone,
+		NextRunAt:           built.NextRunAt,
+		IssueProjectID:      built.IssueProjectID,
+		EventFilterJSON:     built.EventFilterJSON,
+		PromptTemplate:      built.PromptTemplate,
+		ModelSelectionJSON:  built.ModelSelectionJSON,
+		ModelSelectionsJSON: built.ModelSelectionsJSON,
+		DebounceSeconds:     built.DebounceSeconds,
+		RuntimeMode:         built.RuntimeMode,
+		WorkspaceJSON:       built.WorkspaceJSON,
+		TimeoutSeconds:      built.TimeoutSeconds,
+		PostAction:          built.PostAction,
+		PostOnTimeout:       built.PostOnTimeout,
 	}
 	if err := s.autos.Create(ctx, a); err != nil {
 		if isUniqueConstraintError(err) {
@@ -228,6 +235,8 @@ func (s *AutomationService) Update(ctx context.Context, userID, id string, req *
 	eventFilter := built.EventFilterJSON
 	prompt := built.PromptTemplate
 	modelSel := built.ModelSelectionJSON
+	modelSels := built.ModelSelectionsJSON
+	debounce := built.DebounceSeconds
 	runtimeMode := built.RuntimeMode
 	workspace := built.WorkspaceJSON
 	postAction := built.PostAction
@@ -236,23 +245,25 @@ func (s *AutomationService) Update(ctx context.Context, userID, id string, req *
 		issueProjectID = built.IssueProjectID
 	}
 	update := &repository.AutomationUpdate{
-		Name:               &built.Name,
-		Enabled:            &enabled,
-		EnvironmentID:      &envID,
-		T3ProjectID:        &projectID,
-		TriggerType:        &triggerType,
-		CronExpression:     &cronExpr,
-		Timezone:           &tz,
-		NextRunAt:          built.NextRunAt,
-		EventFilterJSON:    &eventFilter,
-		PromptTemplate:     &prompt,
-		ModelSelectionJSON: &modelSel,
-		RuntimeMode:        &runtimeMode,
-		WorkspaceJSON:      &workspace,
-		TimeoutSeconds:     &built.TimeoutSeconds,
-		PostAction:         &postAction,
-		PostOnTimeout:      &built.PostOnTimeout,
-		UpdatedAt:          time.Now().UTC(),
+		Name:                &built.Name,
+		Enabled:             &enabled,
+		EnvironmentID:       &envID,
+		T3ProjectID:         &projectID,
+		TriggerType:         &triggerType,
+		CronExpression:      &cronExpr,
+		Timezone:            &tz,
+		NextRunAt:           built.NextRunAt,
+		EventFilterJSON:     &eventFilter,
+		PromptTemplate:      &prompt,
+		ModelSelectionJSON:  &modelSel,
+		ModelSelectionsJSON: &modelSels,
+		DebounceSeconds:     &debounce,
+		RuntimeMode:         &runtimeMode,
+		WorkspaceJSON:       &workspace,
+		TimeoutSeconds:      &built.TimeoutSeconds,
+		PostAction:          &postAction,
+		PostOnTimeout:       &built.PostOnTimeout,
+		UpdatedAt:           time.Now().UTC(),
 	}
 	update.IssueProjectID = &issueProjectID // **string：置回可空字段（nil → NULL）
 
@@ -304,43 +315,47 @@ func (s *AutomationService) requirePublicURL() error {
 
 // builtAutomation 是一次配置解析的产物（create/update 共用）。
 type builtAutomation struct {
-	Name               string
-	Enabled            bool
-	EnvironmentID      string
-	T3ProjectID        string
-	TriggerType        model.AutomationTriggerType
-	CronExpression     string
-	Timezone           string
-	NextRunAt          *time.Time
-	IssueProjectID     *string
-	EventFilterJSON    string
-	PromptTemplate     string
-	ModelSelectionJSON string
-	RuntimeMode        string
-	WorkspaceJSON      string
-	TimeoutSeconds     int
-	PostAction         model.AutomationPostAction
-	PostOnTimeout      bool
+	Name                string
+	Enabled             bool
+	EnvironmentID       string
+	T3ProjectID         string
+	TriggerType         model.AutomationTriggerType
+	CronExpression      string
+	Timezone            string
+	NextRunAt           *time.Time
+	IssueProjectID      *string
+	EventFilterJSON     string
+	PromptTemplate      string
+	ModelSelectionJSON  string
+	ModelSelectionsJSON string
+	DebounceSeconds     int
+	RuntimeMode         string
+	WorkspaceJSON       string
+	TimeoutSeconds      int
+	PostAction          model.AutomationPostAction
+	PostOnTimeout       bool
 }
 
 // automationConfigInput 是 create/update 共用的归一化配置输入（两个请求类型
 // 字段一致，转换见 newAutomationConfigInput）。
 type automationConfigInput struct {
-	Name           string
-	TriggerType    api.AutomationTriggerType
-	CronExpression *string
-	Timezone       *string
-	EnvironmentId  string
-	T3ProjectId    string
-	IssueProjectId *string
-	EventFilter    *api.AutomationEventFilter
-	PromptTemplate string
-	ModelSelection *api.AutomationModelSelection
-	RuntimeMode    *string
-	Workspace      *api.AutomationWorkspace
-	TimeoutSeconds *int
-	PostAction     *api.AutomationPostAction
-	PostOnTimeout  *bool
+	Name            string
+	TriggerType     api.AutomationTriggerType
+	CronExpression  *string
+	Timezone        *string
+	EnvironmentId   string
+	T3ProjectId     string
+	IssueProjectId  *string
+	EventFilter     *api.AutomationEventFilter
+	PromptTemplate  string
+	ModelSelection  *api.AutomationModelSelection
+	ModelSelections []api.AutomationModelSelection
+	DebounceSeconds *int
+	RuntimeMode     *string
+	Workspace       *api.AutomationWorkspace
+	TimeoutSeconds  *int
+	PostAction      *api.AutomationPostAction
+	PostOnTimeout   *bool
 }
 
 func newAutomationConfigInput(req any) automationConfigInput {
@@ -350,7 +365,8 @@ func newAutomationConfigInput(req any) automationConfigInput {
 			Name: r.Name, TriggerType: r.TriggerType, CronExpression: r.CronExpression,
 			Timezone: r.Timezone, EnvironmentId: r.EnvironmentId, T3ProjectId: r.T3ProjectId,
 			IssueProjectId: r.IssueProjectId, EventFilter: r.EventFilter, PromptTemplate: r.PromptTemplate,
-			ModelSelection: r.ModelSelection, RuntimeMode: r.RuntimeMode, Workspace: r.Workspace,
+			ModelSelection: r.ModelSelection, ModelSelections: r.ModelSelections, DebounceSeconds: r.DebounceSeconds,
+			RuntimeMode: r.RuntimeMode, Workspace: r.Workspace,
 			TimeoutSeconds: r.TimeoutSeconds, PostAction: r.PostAction, PostOnTimeout: r.PostOnTimeout,
 		}
 	case *api.UpdateAutomationRequest:
@@ -358,7 +374,8 @@ func newAutomationConfigInput(req any) automationConfigInput {
 			Name: r.Name, TriggerType: r.TriggerType, CronExpression: r.CronExpression,
 			Timezone: r.Timezone, EnvironmentId: r.EnvironmentId, T3ProjectId: r.T3ProjectId,
 			IssueProjectId: r.IssueProjectId, EventFilter: r.EventFilter, PromptTemplate: r.PromptTemplate,
-			ModelSelection: r.ModelSelection, RuntimeMode: r.RuntimeMode, Workspace: r.Workspace,
+			ModelSelection: r.ModelSelection, ModelSelections: r.ModelSelections, DebounceSeconds: r.DebounceSeconds,
+			RuntimeMode: r.RuntimeMode, Workspace: r.Workspace,
 			TimeoutSeconds: r.TimeoutSeconds, PostAction: r.PostAction, PostOnTimeout: r.PostOnTimeout,
 		}
 	}
@@ -472,6 +489,34 @@ func (s *AutomationService) buildAutomationConfig(
 		modelSelJSON = string(raw)
 	}
 
+	// GitHub PR 触发（INT-93）：必须显式多模型选择；cron/issue 忽略并清空。
+	modelSelsJSON := ""
+	debounceSeconds := 0
+	builtTrigger := model.AutomationTriggerType(triggerType)
+	if builtTrigger.IsPRTrigger() {
+		sels, err := normalizePRModelSelections(input.ModelSelections)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(sels)
+		if err != nil {
+			return nil, errs.ErrInvalidParams
+		}
+		modelSelsJSON = string(raw)
+
+		debounceSeconds = prReviewDebounceDefaultSeconds
+		if input.DebounceSeconds != nil {
+			debounceSeconds = *input.DebounceSeconds
+		}
+		if debounceSeconds < 0 || debounceSeconds > prReviewDebounceMaxSeconds {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "防抖窗口须在 0 到 86400 秒之间（0=立即）")
+		}
+		// PR 触发不做事件字段过滤；项目范围用 issue_project_id。
+		if filterJSON != "" {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发不支持事件过滤字段")
+		}
+	}
+
 	workspaceJSON := ""
 	if input.Workspace != nil && string(input.Workspace.Type) != "" {
 		switch api.T3ThreadWorkspaceType(input.Workspace.Type) {
@@ -487,21 +532,23 @@ func (s *AutomationService) buildAutomationConfig(
 	}
 
 	built := &builtAutomation{
-		Name:               name,
-		EnvironmentID:      input.EnvironmentId,
-		T3ProjectID:        input.T3ProjectId,
-		TriggerType:        model.AutomationTriggerType(triggerType),
-		CronExpression:     strings.TrimSpace(cronExpression),
-		Timezone:           strings.TrimSpace(timezone),
-		IssueProjectID:     issueProject,
-		EventFilterJSON:    filterJSON,
-		PromptTemplate:     prompt,
-		ModelSelectionJSON: modelSelJSON,
-		RuntimeMode:        mode,
-		WorkspaceJSON:      workspaceJSON,
-		TimeoutSeconds:     timeoutSeconds,
-		PostAction:         post,
-		PostOnTimeout:      postOnTimeout,
+		Name:                name,
+		EnvironmentID:       input.EnvironmentId,
+		T3ProjectID:         input.T3ProjectId,
+		TriggerType:         model.AutomationTriggerType(triggerType),
+		CronExpression:      strings.TrimSpace(cronExpression),
+		Timezone:            strings.TrimSpace(timezone),
+		IssueProjectID:      issueProject,
+		EventFilterJSON:     filterJSON,
+		PromptTemplate:      prompt,
+		ModelSelectionJSON:  modelSelJSON,
+		ModelSelectionsJSON: modelSelsJSON,
+		DebounceSeconds:     debounceSeconds,
+		RuntimeMode:         mode,
+		WorkspaceJSON:       workspaceJSON,
+		TimeoutSeconds:      timeoutSeconds,
+		PostAction:          post,
+		PostOnTimeout:       postOnTimeout,
 	}
 
 	if built.TriggerType == model.AutomationTriggerCron {
@@ -544,10 +591,38 @@ func parseAutomationCron(expression, timezone string, now time.Time) (*time.Loca
 	return loc, next, nil
 }
 
+// normalizePRModelSelections 校验 PR 触发的多模型选择：1–10 个、每个显式给出
+// instance_id/model、(instance_id, model) 不重复。必须显式选择，不能「项目默认」。
+func normalizePRModelSelections(sels []api.AutomationModelSelection) ([]api.AutomationModelSelection, error) {
+	if len(sels) < prReviewModelsMin {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发必须至少选择一个模型")
+	}
+	if len(sels) > prReviewModelsMax {
+		return nil, errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发最多选择 10 个模型")
+	}
+	seen := map[string]bool{}
+	for i := range sels {
+		sel := &sels[i]
+		if strings.TrimSpace(sel.InstanceId) == "" || strings.TrimSpace(sel.Model) == "" {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "模型选择缺少 instance_id 或 model")
+		}
+		key := sel.InstanceId + "::" + sel.Model
+		if seen[key] {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "模型选择重复："+sel.InstanceId+" / "+sel.Model)
+		}
+		seen[key] = true
+	}
+	return sels, nil
+}
+
 // validateAutomationEventFilter 校验事件过滤结构与触发类型匹配。
 func validateAutomationEventFilter(triggerType model.AutomationTriggerType, filter *api.AutomationEventFilter) error {
 	if filter == nil {
 		return nil
+	}
+	if triggerType.IsPRTrigger() {
+		// GitHub PR 触发不带事件字段过滤（开轮范围只由项目与 action 决定）。
+		return errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发不支持事件过滤字段")
 	}
 	switch triggerType {
 	case model.AutomationTriggerIssueStatusChanged:
@@ -617,21 +692,22 @@ func eventFilterMatches(filterJSON string, event IssueEvent) bool {
 
 func newAutomationResponse(a *model.Automation) AutomationResponse {
 	resp := AutomationResponse{
-		Id:             a.ID,
-		Name:           a.Name,
-		Enabled:        a.Enabled,
-		EnvironmentId:  a.EnvironmentID,
-		T3ProjectId:    a.T3ProjectID,
-		TriggerType:    api.AutomationTriggerType(a.TriggerType),
-		CronExpression: api.NonEmptyPtr(optString(a.CronExpression)),
-		Timezone:       api.NonEmptyPtr(optString(a.Timezone)),
-		TimeoutSeconds: a.TimeoutSeconds,
-		PostAction:     api.AutomationPostAction(a.PostAction),
-		PostOnTimeout:  a.PostOnTimeout,
-		RuntimeMode:    a.RuntimeMode,
-		PromptTemplate: a.PromptTemplate,
-		CreatedAt:      a.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:      a.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		Id:              a.ID,
+		Name:            a.Name,
+		Enabled:         a.Enabled,
+		EnvironmentId:   a.EnvironmentID,
+		T3ProjectId:     a.T3ProjectID,
+		TriggerType:     api.AutomationTriggerType(a.TriggerType),
+		CronExpression:  api.NonEmptyPtr(optString(a.CronExpression)),
+		Timezone:        api.NonEmptyPtr(optString(a.Timezone)),
+		TimeoutSeconds:  a.TimeoutSeconds,
+		DebounceSeconds: api.Ptr(a.DebounceSeconds),
+		PostAction:      api.AutomationPostAction(a.PostAction),
+		PostOnTimeout:   a.PostOnTimeout,
+		RuntimeMode:     a.RuntimeMode,
+		PromptTemplate:  a.PromptTemplate,
+		CreatedAt:       a.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:       a.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if a.NextRunAt != nil {
 		resp.NextRunAt = api.Ptr(a.NextRunAt.UTC().Format(time.RFC3339Nano))
@@ -649,6 +725,12 @@ func newAutomationResponse(a *model.Automation) AutomationResponse {
 		var sel AutomationModelSelection
 		if json.Unmarshal([]byte(a.ModelSelectionJSON), &sel) == nil {
 			resp.ModelSelection = &sel
+		}
+	}
+	if a.ModelSelectionsJSON != "" {
+		var sels []AutomationModelSelection
+		if json.Unmarshal([]byte(a.ModelSelectionsJSON), &sels) == nil {
+			resp.ModelSelections = sels
 		}
 	}
 	if a.WorkspaceJSON != "" {
@@ -704,6 +786,20 @@ func newAutomationRunResponse(run *model.AutomationRun) AutomationRunResponse {
 		resp.PostDeadlineAt = api.Ptr(run.PostDeadlineAt.UTC().Format(time.RFC3339Nano))
 	}
 	resp.PostError = api.NonEmptyPtr(&run.PostError)
+	if run.RepoFullName != "" {
+		resp.RepoFullName = api.Ptr(run.RepoFullName)
+		resp.PrNumber = api.Ptr(run.PRNumber)
+		resp.RoundNumber = api.Ptr(run.RoundNumber)
+	}
+	if run.HeadSHA != "" {
+		resp.HeadSha = api.Ptr(run.HeadSHA)
+	}
+	if run.ModelInstanceID != "" {
+		resp.ModelInstanceId = api.Ptr(run.ModelInstanceID)
+	}
+	if run.ModelName != "" {
+		resp.ModelName = api.Ptr(run.ModelName)
+	}
 	return resp
 }
 
@@ -715,13 +811,17 @@ func optString(s string) *string {
 }
 
 // renderAutomationPrompt 渲染用户模板占位符并追加服务端回报说明。
-// 渲染结果不落库（config_snapshot 只存模板原样）。
-func renderAutomationPrompt(template, publicURL, token, runID string, ctxData map[string]string) string {
+// 渲染结果不落库（config_snapshot 只存模板原样）。prInstructions 非空时是
+// GitHub PR 评审运行的代发端点说明（INT-93）。
+func renderAutomationPrompt(template, publicURL, token, runID string, ctxData map[string]string, prInstructions string) string {
 	body := template
 	for key, value := range ctxData {
 		body = strings.ReplaceAll(body, key, value)
 	}
 	for _, key := range automationPromptPlaceholders {
+		body = strings.ReplaceAll(body, key, "")
+	}
+	for _, key := range automationPRPromptPlaceholders {
 		body = strings.ReplaceAll(body, key, "")
 	}
 
@@ -743,6 +843,10 @@ func renderAutomationPrompt(template, publicURL, token, runID string, ctxData ma
 
 注意：结束回报（finished）被受理后令牌立即失效，之后不能再读取线程或发通知。
 `, publicURL, token, publicURL, publicURL, publicURL, publicURL)
+
+	if prInstructions != "" {
+		instructions += "\n" + prInstructions
+	}
 
 	return strings.TrimSpace(body) + "\n" + instructions
 }

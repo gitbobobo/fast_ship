@@ -7154,7 +7154,7 @@ workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展�
 | `items[].enabled` | boolean | 是 |  |
 | `items[].environment_id` | string | 是 | T3 环境 ID |
 | `items[].t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
+| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
 | `items[].cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
 | `items[].timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
 | `items[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
@@ -7171,6 +7171,13 @@ workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展�
 | `items[].model_selection.options` | object[] | 否 |  |
 | `items[].model_selection.options[].id` | string | 否 |  |
 | `items[].model_selection.options[].value` | string | 否 |  |
+| `items[].model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
+| `items[].model_selections[].instance_id` | string | 是 |  |
+| `items[].model_selections[].model` | string | 是 |  |
+| `items[].model_selections[].options` | object[] | 否 |  |
+| `items[].model_selections[].options[].id` | string | 否 |  |
+| `items[].model_selections[].options[].value` | string | 否 |  |
+| `items[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `items[].runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `items[].workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `items[].workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7213,7 +7220,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `enabled` | boolean | 否 | 缺省 false；启用时完整校验触发配置与 public_url |
 | `environment_id` | string | 是 |  |
 | `t3_project_id` | string | 是 |  |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
+| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
 | `cron_expression` | string | 否 |  |
 | `timezone` | string | 否 |  |
 | `issue_project_id` | string（可空） | 否 |  |
@@ -7229,6 +7236,13 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
+| `model_selections` | object[] | 否 | GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
+| `model_selections[].instance_id` | string | 是 |  |
+| `model_selections[].model` | string | 是 |  |
+| `model_selections[].options` | object[] | 否 |  |
+| `model_selections[].options[].id` | string | 否 |  |
+| `model_selections[].options[].value` | string | 否 |  |
+| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
 | `runtime_mode` | string | 否 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7253,7 +7267,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `enabled` | boolean | 是 |  |
 | `environment_id` | string | 是 | T3 环境 ID |
 | `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
+| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
 | `cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
 | `timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
 | `next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
@@ -7270,6 +7284,13 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
+| `model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
+| `model_selections[].instance_id` | string | 是 |  |
+| `model_selections[].model` | string | 是 |  |
+| `model_selections[].options` | object[] | 否 |  |
+| `model_selections[].options[].id` | string | 否 |  |
+| `model_selections[].options[].value` | string | 否 |  |
+| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7320,7 +7341,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `enabled` | boolean | 是 |  |
 | `environment_id` | string | 是 | T3 环境 ID |
 | `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
+| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
 | `cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
 | `timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
 | `next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
@@ -7337,6 +7358,13 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
+| `model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
+| `model_selections[].instance_id` | string | 是 |  |
+| `model_selections[].model` | string | 是 |  |
+| `model_selections[].options` | object[] | 否 |  |
+| `model_selections[].options[].id` | string | 否 |  |
+| `model_selections[].options[].value` | string | 否 |  |
+| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7386,7 +7414,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `enabled` | boolean | 否 |  |
 | `environment_id` | string | 是 |  |
 | `t3_project_id` | string | 是 |  |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
+| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
 | `cron_expression` | string | 否 |  |
 | `timezone` | string | 否 |  |
 | `issue_project_id` | string（可空） | 否 |  |
@@ -7402,6 +7430,13 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
+| `model_selections` | object[] | 否 | GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
+| `model_selections[].instance_id` | string | 是 |  |
+| `model_selections[].model` | string | 是 |  |
+| `model_selections[].options` | object[] | 否 |  |
+| `model_selections[].options[].id` | string | 否 |  |
+| `model_selections[].options[].value` | string | 否 |  |
+| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
 | `runtime_mode` | string | 否 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7426,7 +7461,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `enabled` | boolean | 是 |  |
 | `environment_id` | string | 是 | T3 环境 ID |
 | `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
+| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
 | `cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
 | `timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
 | `next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
@@ -7443,6 +7478,13 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
+| `model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
+| `model_selections[].instance_id` | string | 是 |  |
+| `model_selections[].model` | string | 是 |  |
+| `model_selections[].options` | object[] | 否 |  |
+| `model_selections[].options[].id` | string | 否 |  |
+| `model_selections[].options[].value` | string | 否 |  |
+| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7528,8 +7570,14 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].automation_id` | string | 是 |  |
-| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
-| `items[].trigger_key` | string | 是 | 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>` |
+| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `items[].trigger_key` | string | 是 | 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
+| `items[].repo_full_name` | string | 否 | 仅 GitHub PR 触发；owner/repo |
+| `items[].pr_number` | integer | 否 | 仅 GitHub PR 触发 |
+| `items[].head_sha` | string | 否 | 仅 GitHub PR 触发；本轮审查的 head commit SHA |
+| `items[].round_number` | integer | 否 | 仅 GitHub PR 触发；同一 PR 内递增的轮次（从 1 起，同一轮各模型共享） |
+| `items[].model_instance_id` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型 instance_id |
+| `items[].model_name` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型名 |
 | `items[].trigger_context` | object（可空） | 否 | 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。 |
 | `items[].trigger_context.project_id` | string | 否 |  |
 | `items[].trigger_context.issue_id` | string | 否 |  |
@@ -7540,7 +7588,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `items[].trigger_context.to` | string | 否 |  |
 | `items[].trigger_context.labels_added` | string[] | 否 |  |
 | `items[].triggered_at` | string | 是 |  |
-| `items[].status` | string（enum: dispatched \| running \| completed \| failed \| timed_out，可空） | 是 | dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；其余为终态。回报未开始时状态可能为空。 |
+| `items[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled，可空） | 是 | queued=PR 审查排队（用户并发上限内不占在途名额，等调度提升）； dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始； cancelled=被新 head SHA 取代或规则改动后废弃（终态）； completed/failed/timed_out 为终态。回报未开始时状态可能为空。 |
 | `items[].dispatch_started_at` | string（可空） | 否 | worker 认领并开始派发的时间 |
 | `items[].environment_id` | string | 是 |  |
 | `items[].t3_project_id` | string | 是 |  |
@@ -7590,8 +7638,14 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `automation_id` | string | 是 |  |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added） | 是 | 触发类型。cron 按五字段标准表达式调度；其余为内部 Issue 事件。 |
-| `trigger_key` | string | 是 | 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>` |
+| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `trigger_key` | string | 是 | 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
+| `repo_full_name` | string | 否 | 仅 GitHub PR 触发；owner/repo |
+| `pr_number` | integer | 否 | 仅 GitHub PR 触发 |
+| `head_sha` | string | 否 | 仅 GitHub PR 触发；本轮审查的 head commit SHA |
+| `round_number` | integer | 否 | 仅 GitHub PR 触发；同一 PR 内递增的轮次（从 1 起，同一轮各模型共享） |
+| `model_instance_id` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型 instance_id |
+| `model_name` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型名 |
 | `trigger_context` | object（可空） | 否 | 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。 |
 | `trigger_context.project_id` | string | 否 |  |
 | `trigger_context.issue_id` | string | 否 |  |
@@ -7602,7 +7656,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `trigger_context.to` | string | 否 |  |
 | `trigger_context.labels_added` | string[] | 否 |  |
 | `triggered_at` | string | 是 |  |
-| `status` | string（enum: dispatched \| running \| completed \| failed \| timed_out，可空） | 是 | dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；其余为终态。回报未开始时状态可能为空。 |
+| `status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled，可空） | 是 | queued=PR 审查排队（用户并发上限内不占在途名额，等调度提升）； dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始； cancelled=被新 head SHA 取代或规则改动后废弃（终态）； completed/failed/timed_out 为终态。回报未开始时状态可能为空。 |
 | `dispatch_started_at` | string（可空） | 否 | worker 认领并开始派发的时间 |
 | `environment_id` | string | 是 |  |
 | `t3_project_id` | string | 是 |  |
@@ -8098,6 +8152,219 @@ kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一�
 | `state_key` | string（长度 ≤500） | 是 | 状态指纹；同 problem_key 下状态变化才刷新通知 |
 | `environment_id` | string | 否 | 可选；缺省用运行的环境 |
 | `thread_id` | string | 否 | 可选；缺省用运行的线程 |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 运行令牌无效/过期/已消费（40106） |
+| 403 | 凭证类型不允许（40304） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/github/webhooks`
+
+<!-- operationId: receiveGitHubWebhook -->
+
+接收 GitHub App webhook（pull_request opened/synchronize）
+
+公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256，webhook secret）验签。
+secret 未配置时返回 503，不接受未签名请求。只处理 pull_request 的 opened/synchronize；
+draft 与 fork 一律 202 忽略。仓库必须已和 Fast Ship 项目关联才会进入防抖/开轮。
+同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且不再开轮）。
+
+**鉴权**：公开
+
+**Header 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `X-GitHub-Event` | string | 是 |  |
+| `X-GitHub-Delivery` | string | 是 |  |
+| `X-Hub-Signature-256` | string | 是 |  |
+
+**请求体**
+
+`application/json`，必填。
+
+GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner/repo、PR 号、head SHA、draft/fork 标记与 installation id）
+
+**成功响应**
+
+**202** 已受理（含幂等重复、draft/fork、未关联仓库等忽略场景）
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 503 | webhook secret 未配置 |
+
+### GET `/api/automation-agent/pull-request`
+
+<!-- operationId: getAgentPullRequest -->
+
+读取本运行的 PR 元数据
+
+仅运行令牌；owner/repo/PR 号由运行行给出，不接受请求参数。
+运行必须是 GitHub PR 触发且处于 dispatched/running；结束后（含取消）令牌访问一律 40106。
+
+**鉴权**：runTokenAuth
+
+**成功响应**
+
+**200** PR 元数据
+
+`data`：
+
+本运行审查的 PR 元数据（从运行行与 GitHub 读取；不接受请求参数）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `repo_full_name` | string | 是 |  |
+| `pr_number` | integer | 是 |  |
+| `head_sha` | string | 是 | 本运行绑定的 head commit SHA |
+| `title` | string | 是 |  |
+| `body` | string（可空） | 否 |  |
+| `html_url` | string | 是 |  |
+| `base_ref` | string | 否 |  |
+| `head_ref` | string | 否 |  |
+| `draft` | boolean | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 运行令牌无效/过期/已消费（40106） |
+| 403 | 凭证类型不允许（40304） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/automation-agent/pull-request/diff`
+
+<!-- operationId: getAgentPullRequestDiff -->
+
+读取本运行 PR 的 diff
+
+超过 1MB 截断并在 returned 字段标明 truncated。
+
+**鉴权**：runTokenAuth
+
+**成功响应**
+
+**200** diff 内容
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `content` | string | 是 | 统一 diff 文本 |
+| `truncated` | boolean | 是 | 超过 1MB 截断时为 true |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 运行令牌无效/过期/已消费（40106） |
+| 403 | 凭证类型不允许（40304） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/automation-agent/pull-request/comments`
+
+<!-- operationId: listAgentPullRequestComments -->
+
+读取本运行 PR 的 review 评论列表
+
+**鉴权**：runTokenAuth
+
+**成功响应**
+
+**200** review 评论列表
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | integer | 是 |  |
+| `items[].user` | string | 是 |  |
+| `items[].body` | string | 是 |  |
+| `items[].in_reply_to_id` | integer（可空） | 否 |  |
+| `items[].path` | string（可空） | 否 |  |
+| `items[].created_at` | string | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 运行令牌无效/过期/已消费（40106） |
+| 403 | 凭证类型不允许（40304） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/automation-agent/pull-request/review`
+
+<!-- operationId: submitAgentPullRequestReview -->
+
+提交 PR review（COMMENT / APPROVE / REQUEST_CHANGES）
+
+commit_id 由服务端取本运行的 head SHA，不接受请求传入。
+
+**鉴权**：runTokenAuth
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `event` | string（enum: COMMENT \| APPROVE \| REQUEST_CHANGES） | 是 | 审查结论；commit_id 由服务端取本运行 head SHA |
+| `body` | string | 否 | review 正文（APPROVE 时可空） |
+
+**成功响应**
+
+**200** review 已提交
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `submitted` | boolean | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 运行令牌无效/过期/已消费（40106） |
+| 403 | 凭证类型不允许（40304） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/automation-agent/pull-request/check`
+
+<!-- operationId: updateAgentPullRequestCheck -->
+
+更新本运行 check run 的标题与说明（结论由运行终态决定）
+
+请求不接受 check run id；服务端只更新本运行绑定的 check。
+
+**鉴权**：runTokenAuth
+
+**请求体**
+
+`application/json`，必填。
+
+只更新本运行 check run 的标题与说明；结论（conclusion）由运行终态决定，不接受传入。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `title` | string（长度 ≤200） | 否 |  |
+| `summary` | string（长度 ≤8000） | 否 |  |
+| `text` | string（长度 ≤40000） | 否 |  |
 
 **成功响应**
 

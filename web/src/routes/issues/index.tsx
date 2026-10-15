@@ -25,13 +25,7 @@ import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import {
   Card,
   CardContent,
@@ -71,6 +65,15 @@ import {
 } from "@/lib/utils/github";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
+
+const ISSUE_SORT_OPTIONS = [
+  { value: "updated_desc", label: "最近更新" },
+  { value: "updated_asc", label: "最早更新" },
+  { value: "created_desc", label: "最新创建" },
+  { value: "created_asc", label: "最早创建" },
+  { value: "comments_desc", label: "评论最多" },
+  { value: "comments_asc", label: "评论最少" },
+];
 
 function IssueProgressBadge({
   progress,
@@ -365,7 +368,10 @@ export default function IssuesPage() {
   const issueLabelFilter = searchParams.get("label") ?? "all";
   const issueSourceFilter = searchParams.get("source") ?? "all";
   const issueWorkflowFilter = searchParams.get("workflow_status") ?? "all";
-  const issueSort = searchParams.get("sort") ?? "updated_desc";
+  const sortParam = searchParams.get("sort");
+  const issueSort = ISSUE_SORT_OPTIONS.some((o) => o.value === sortParam)
+    ? (sortParam as string)
+    : "updated_desc";
   const issuePage = Math.max(
     Number(searchParams.get("page") ?? "1") || 1,
     1,
@@ -612,123 +618,80 @@ export default function IssuesPage() {
                 className="h-8 w-full border-0 bg-muted/50 pl-8 text-sm placeholder:text-muted-foreground/70 hover:bg-muted sm:w-56"
               />
             </div>
-            <Select
+            <OptionSelect
               value={issueStateFilter}
-              onValueChange={(value) =>
-                updateSearchParams({ state: value ?? null }, true)
-              }
-            >
-              <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="全部状态">
-                  {{
-                    all: "状态",
-                    open: "开启",
-                    closed: "关闭",
-                  }[issueStateFilter] ?? issueStateFilter}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部状态</SelectItem>
-                <SelectItem value="open">开启</SelectItem>
-                <SelectItem value="closed">关闭</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
+              onValueChange={(value) => {
+                // state 默认值是 open，「全部状态」必须显式写 all——
+                // 走通用删除路径会回弹成 open。
+                const next = new URLSearchParams(searchParams);
+                if (!value || value === "open") {
+                  next.delete("state");
+                } else {
+                  next.set("state", value);
+                }
+                next.delete("page");
+                setSearchParams(next, { replace: true });
+              }}
+              options={[
+                { value: "all", label: "状态", itemLabel: "全部状态" },
+                { value: "open", label: "开启" },
+                { value: "closed", label: "关闭" },
+              ]}
+              placeholder="全部状态"
+              className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted"
+            />
+            <OptionSelect
               value={issueLabelFilter}
               onValueChange={(value) =>
                 updateSearchParams({ label: value ?? null }, true)
               }
               disabled={filtersLoading || labels.length === 0}
-            >
-              <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="全部标签">
-                  {issueLabelFilter === "all" ? "标签" : issueLabelFilter}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部标签</SelectItem>
-                {labels.map((label) => (
-                  <SelectItem key={label} value={label}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
+              options={[
+                { value: "all", label: "标签", itemLabel: "全部标签" },
+                ...labels.map((label) => ({ value: label, label })),
+              ]}
+              placeholder="全部标签"
+              className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted"
+            />
+            <OptionSelect
               value={issueSourceFilter}
               onValueChange={(value) =>
                 updateSearchParams({ source: value ?? null }, true)
               }
-            >
-              <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="全部来源">
-                  {issueSourceFilter === "all"
-                    ? "来源"
-                    : issueSourceFilter === "github"
-                      ? "GitHub"
-                      : "内部"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部来源</SelectItem>
-                <SelectItem value="internal">内部</SelectItem>
-                <SelectItem value="github">GitHub</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select
+              options={[
+                { value: "all", label: "来源", itemLabel: "全部来源" },
+                { value: "internal", label: "内部" },
+                { value: "github", label: "GitHub" },
+              ]}
+              placeholder="全部来源"
+              className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted"
+            />
+            <OptionSelect
               value={issueWorkflowFilter}
               onValueChange={(value) =>
                 updateSearchParams({ workflow_status: value ?? null }, true)
               }
-            >
-              <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="内部状态">
-                  {issueWorkflowFilter === "all"
-                    ? "内部状态"
-                    : issueWorkflowFilter === "unset"
-                      ? "未设置"
-                      : ISSUE_WORKFLOW_STATUS_LABELS[
-                          issueWorkflowFilter as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
-                        ] ?? issueWorkflowFilter}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">全部内部状态</SelectItem>
-                <SelectItem value="unset">未设置</SelectItem>
-                {ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
+              options={[
+                {
+                  value: "all",
+                  label: "内部状态",
+                  itemLabel: "全部内部状态",
+                },
+                { value: "unset", label: "未设置" },
+                ...ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
+              ]}
+              placeholder="内部状态"
+              className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted"
+            />
+            <OptionSelect
               value={issueSort}
               onValueChange={(value) =>
                 updateSearchParams({ sort: value ?? null }, true)
               }
-            >
-              <SelectTrigger className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted">
-                <SelectValue placeholder="排序方式">
-                  {{
-                    updated_desc: "最近更新",
-                    updated_asc: "最早更新",
-                    created_desc: "最新创建",
-                    created_asc: "最早创建",
-                    comments_desc: "评论最多",
-                    comments_asc: "评论最少",
-                  }[issueSort] ?? "排序"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="updated_desc">最近更新</SelectItem>
-                <SelectItem value="updated_asc">最早更新</SelectItem>
-                <SelectItem value="created_desc">最新创建</SelectItem>
-                <SelectItem value="created_asc">最早创建</SelectItem>
-                <SelectItem value="comments_desc">评论最多</SelectItem>
-                <SelectItem value="comments_asc">评论最少</SelectItem>
-              </SelectContent>
-            </Select>
+              options={ISSUE_SORT_OPTIONS}
+              placeholder="排序方式"
+              className="h-8 border-0 bg-muted/50 text-sm hover:bg-muted data-[state=open]:bg-muted"
+            />
             <Button
               variant={canResetFilters ? "outline" : "ghost"}
               size="sm"

@@ -9,6 +9,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -25,7 +26,23 @@ type AutomationAgentService struct {
 	threads *T3ThreadsService
 	sink    *NotificationSink
 	logger  *zap.Logger
+
+	// pr GitHub App 访问面（INT-93 PR 代发端点用）；未配置时 PR 端点报错。
+	pr githubapp.PullRequestGitHub
+	// prReview 与取消/同步共用 per-PR 锁；可 nil（单测不注入时只做重读校验）。
+	prReview *PRReviewService
+	// kick 结束回报后踢调度循环提升排队（可 nil）。
+	kick func()
 }
+
+// SetPRGitHub 注入 GitHub App 访问面（真实客户端或测试 fake）。
+func (s *AutomationAgentService) SetPRGitHub(gh githubapp.PullRequestGitHub) { s.pr = gh }
+
+// SetPRReview 绑定 PR 评审协调面，让 agent check 更新与取消/同步串行。
+func (s *AutomationAgentService) SetPRReview(pr *PRReviewService) { s.prReview = pr }
+
+// SetKick 绑定调度循环 kick（运行结束后立刻提升排队）。
+func (s *AutomationAgentService) SetKick(fn func()) { s.kick = fn }
 
 func NewAutomationAgentService(
 	db *gorm.DB,
@@ -74,6 +91,9 @@ func (s *AutomationAgentService) ResolveRunToken(ctx context.Context, rawToken s
 			return nil, errs.ErrRunTokenInvalid
 		}
 		return nil, errs.ErrInternal
+	}
+	if requireLive && run.Status == model.AutomationRunCancelled {
+		return nil, errs.ErrRunTokenInvalid
 	}
 	return &RunTokenIdentity{UserID: run.UserID, RunID: run.ID}, nil
 }
@@ -218,6 +238,11 @@ func (s *AutomationAgentService) reportFinished(ctx context.Context, runID strin
 				}
 			}
 		}
+
+		// PR 评审（INT-93）：终态落库后置同步标记（事务外推评论/check）。
+		if err := markPRReviewPendingTx(tx, &run, now); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -230,6 +255,9 @@ func (s *AutomationAgentService) reportFinished(ctx context.Context, runID strin
 			return nil, errs.ErrInternal
 		}
 		return &api.AutomationRunReportResult{RunId: runID, Status: string(run.Status), Replay: true}, nil
+	}
+	if s.kick != nil {
+		s.kick()
 	}
 	// 落库后的实际状态（迟到回报保持 timed_out）。
 	run, err := s.runs.FindByID(ctx, runID)
