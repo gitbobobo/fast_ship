@@ -4,13 +4,7 @@ import { Unlink } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import { useEnvironments } from "@/lib/hooks/use-threads";
 import {
   useBindT3Project,
@@ -135,48 +129,46 @@ export const T3BindingsSection = forwardRef<
                     </p>
                   )}
                 </div>
-                <Select
+                <OptionSelect
                   value={binding?.t3_project_id ?? NONE_VALUE}
                   onValueChange={(value) =>
                     void handleSelect(environment.id, value ?? NONE_VALUE)
                   }
                   disabled={selectDisabled}
-                >
-                  <SelectTrigger
-                    size="sm"
-                    className={cn(
-                      "w-44",
-                      invalidReason && "border-destructive text-destructive",
-                    )}
-                    aria-label={`${environment.name} 的 T3 项目`}
-                  >
-                    <SelectValue>
-                      {binding
-                        ? (binding.t3_project_title ?? binding.t3_project_id)
-                        : "不绑定"}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NONE_VALUE}>不绑定</SelectItem>
-                    {showStaleOption && binding && (
-                      <SelectItem value={binding.t3_project_id}>
-                        {binding.t3_project_title ?? binding.t3_project_id}
-                        （已失效）
-                      </SelectItem>
-                    )}
-                    {options.map((project) => (
-                      <SelectItem
-                        key={project.id}
-                        value={project.id}
-                        disabled={!project.workspace_root}
-                      >
-                        {project.workspace_root
-                          ? project.title
-                          : `${project.title}（缺工作区路径，无法绑定）`}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  options={[
+                    { value: NONE_VALUE, label: "不绑定" },
+                    ...(showStaleOption && binding
+                      ? [
+                          {
+                            value: binding.t3_project_id,
+                            label:
+                              binding.t3_project_title ??
+                              binding.t3_project_id,
+                            itemLabel: `${binding.t3_project_title ?? binding.t3_project_id}（已失效）`,
+                          },
+                        ]
+                      : []),
+                    ...options.map((project) => ({
+                      value: project.id,
+                      label: project.title,
+                      disabled: !project.workspace_root,
+                      itemLabel: project.workspace_root
+                        ? project.title
+                        : `${project.title}（缺工作区路径，无法绑定）`,
+                    })),
+                  ]}
+                  valueLabel={
+                    binding
+                      ? (binding.t3_project_title ?? binding.t3_project_id)
+                      : "不绑定"
+                  }
+                  size="sm"
+                  className={cn(
+                    "w-44",
+                    invalidReason && "border-destructive text-destructive",
+                  )}
+                  aria-label={`${environment.name} 的 T3 项目`}
+                />
                 {binding && (
                   <Button
                     type="button"

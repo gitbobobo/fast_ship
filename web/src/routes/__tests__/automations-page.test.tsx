@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
 import AutomationsPage from "@/routes/automations";
 import { renderWithRoute } from "@/test/render";
+import { environmentApi, threadApi } from "@/lib/api/threads";
 import {
   useAutomationRuns,
   useAutomations,
@@ -111,6 +112,27 @@ describe("AutomationsPage", () => {
     vi.mocked(useDeleteAutomation).mockReturnValue({
       mutateAsync: deleteMutateAsync,
     } as unknown as ReturnType<typeof useDeleteAutomation>);
+    // mockReturnValue(挂起 Promise) 的实现不会被 clearAllMocks 清掉，
+    // 每个用例开始前重放 resolved 实现，防 pending 泄漏到后续用例。
+    vi.mocked(environmentApi.list).mockResolvedValue({
+      data: { items: [{ id: "env-1", name: "本机环境" }] },
+    } as unknown as Awaited<ReturnType<typeof environmentApi.list>>);
+    vi.mocked(threadApi.composerOptions).mockResolvedValue({
+      data: {
+        projects: [{ id: "proj-1", title: "示例项目" }],
+        config: {},
+        settings: {},
+      },
+    } as unknown as Awaited<ReturnType<typeof threadApi.composerOptions>>);
+    vi.mocked(threadApi.workspaceOptions).mockResolvedValue({
+      data: {
+        project_id: "proj-1",
+        cwd: "/tmp",
+        is_repo: true,
+        ref_name: "main",
+        refs: [],
+      },
+    } as unknown as Awaited<ReturnType<typeof threadApi.workspaceOptions>>);
   });
 
   afterEach(() => {
@@ -187,6 +209,73 @@ describe("AutomationsPage", () => {
     expect(screen.getByText("新建默认停用；启用前需在服务端配置 public_url。")).toBeInTheDocument();
     expect(screen.getByText("模型")).toBeInTheDocument();
     expect(screen.getByText("工作区")).toBeInTheDocument();
+  });
+
+  it("edit dialog shows option labels instead of raw values (INT-92)", async () => {
+    const user = userEvent.setup();
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
+    );
+    await screen.findByRole("dialog");
+
+    // value "no"/"settle"/"off" 与显示文案不同，收起态必须渲染 label。
+    const postOnTimeout = screen
+      .getByText("超时后仍执行后置")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(postOnTimeout).toHaveTextContent("否（默认）");
+    expect(postOnTimeout).not.toHaveTextContent(/\bno\b/);
+
+    const postAction = screen
+      .getByText("结束后置操作")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(postAction).toHaveTextContent("settle（收进历史区）");
+
+    const enabled = screen
+      .getByText("启用状态")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(enabled).toHaveTextContent("停用（默认）");
+    expect(enabled).not.toHaveTextContent(/\boff\b/);
+  });
+
+  it("edit dialog shows 加载中… while option queries are pending (INT-92)", async () => {
+    // 环境/项目选项异步加载期间，收起态不得闪出内部 id。
+    const { environmentApi, threadApi } = await import("@/lib/api/threads");
+    vi.mocked(environmentApi.list).mockReturnValue(new Promise(() => {}));
+    vi.mocked(threadApi.composerOptions).mockReturnValue(new Promise(() => {}));
+    const user = userEvent.setup();
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
+    );
+    await screen.findByRole("dialog");
+
+    const envSelect = screen
+      .getByText("T3 环境")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(envSelect).toHaveTextContent("加载中…");
+    expect(envSelect).not.toHaveTextContent("env-1");
+
+    const projectSelect = screen
+      .getByText("T3 项目")
+      .closest("div")!
+      .querySelector("[role='combobox']");
+    expect(projectSelect).toHaveTextContent("加载中…");
+    expect(projectSelect).not.toHaveTextContent("proj-1");
   });
 
   it("shows runs dialog on history click", async () => {

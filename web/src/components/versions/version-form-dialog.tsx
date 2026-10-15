@@ -6,13 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { OptionSelect } from "@/components/ui/option-select";
 import {
   Dialog,
   DialogContent,
@@ -110,7 +104,7 @@ export function VersionFormDialog({
 
           <div className="space-y-2">
             <Label htmlFor="target_commitish">目标分支（可选）</Label>
-            <Select
+            <OptionSelect
               value={targetBranch ?? ""}
               onValueChange={(value) =>
                 setValue("target_commitish", value ?? undefined, {
@@ -119,22 +113,17 @@ export function VersionFormDialog({
                 })
               }
               disabled={branchesLoading || branchesError}
-            >
-              <SelectTrigger id="target_commitish" className="w-full">
-                <SelectValue
-                  placeholder={
-                    branchesLoading ? "加载分支中..." : "选择目标分支"
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {branchesData?.branches.map((branch) => (
-                  <SelectItem key={branch.name} value={branch.name}>
-                    {branch.default ? `${branch.name}（默认）` : branch.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              options={(branchesData?.branches ?? []).map((branch) => ({
+                value: branch.name,
+                label: branch.name,
+                itemLabel: branch.default
+                  ? `${branch.name}（默认）`
+                  : branch.name,
+              }))}
+              placeholder={branchesLoading ? "加载分支中..." : "选择目标分支"}
+              id="target_commitish"
+              className="w-full"
+            />
             {branchesError && (
               <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/30 px-3 py-2">
                 <p className="text-xs text-destructive">
