@@ -76,6 +76,7 @@ func setupWebhookHandlerEnv(t *testing.T, secret string) *webhookHandlerEnv {
 		fake, nil, sink, cfg, logger)
 	agent := service.NewAutomationAgentService(db, runs, tokens, nil, sink, logger)
 	agent.SetPRGitHub(fake)
+	agent.SetPRReview(prReview)
 
 	webhookHandler := NewGitHubWebhookHandler(prReview, secret, fake)
 	agentHandler := NewAutomationAgentHandler(agent)
@@ -140,7 +141,7 @@ func TestWebhookHandler_OpenRoundEndToEnd(t *testing.T) {
 	if err := env.db.Create(user).Error; err != nil {
 		t.Fatalf("user: %v", err)
 	}
-	project := &model.Project{ID: uuid.NewString(), UserID: user.ID, Name: "p", GithubOwner: "octocat", GithubRepo: "hw", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	project := &model.Project{ID: uuid.NewString(), UserID: user.ID, Name: "p", GithubOwner: "octocat", GithubRepo: "hw", PublicGitHubTokenID: "tok-pr-review", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	if err := env.db.Create(project).Error; err != nil {
 		t.Fatalf("project: %v", err)
 	}
@@ -253,6 +254,15 @@ func (e *webhookHandlerEnv) getWithToken(path, token string) *httptest.ResponseR
 	return w
 }
 
+func (e *webhookHandlerEnv) postJSONWithToken(path, token string, body []byte) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	e.router.ServeHTTP(w, req)
+	return w
+}
+
 // TestAgentPR_TokenLifecycle 进行中的 PR 运行可读元数据/diff；结束后令牌 40106；
 // fsk_ API Key 40304；非 PR 运行 40920。
 func TestAgentPR_TokenLifecycle(t *testing.T) {
@@ -316,5 +326,107 @@ func TestAgentPR_NonPRRunRejected(t *testing.T) {
 	w := env.getWithToken("/api/automation-agent/pull-request", token)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "40920") {
 		t.Fatalf("non-PR run = %d %s, want 409/40920", w.Code, w.Body.String())
+	}
+}
+
+func (e *webhookHandlerEnv) seedCheckForRun(t *testing.T, run *model.AutomationRun) int64 {
+	t.Helper()
+	checkID, err := e.fake.CreateCheckRun(context.Background(), run.InstallationID, run.RepoFullName, "Fast Ship review (claude)", run.HeadSHA, run.ID)
+	if err != nil {
+		t.Fatalf("create check: %v", err)
+	}
+	if err := e.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).Update("check_run_id", checkID).Error; err != nil {
+		t.Fatalf("bind check: %v", err)
+	}
+	return checkID
+}
+
+// TestAgentPR_UpdateCheckRejectsCancelledRun 取消后即使令牌未消费也不再把 check
+// 打回 in_progress。
+func TestAgentPR_UpdateCheckRejectsCancelledRun(t *testing.T) {
+	env := setupWebhookHandlerEnv(t, "whsec")
+	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
+	if err := env.db.Create(user).Error; err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
+	env.seedCheckForRun(t, run)
+
+	w := env.postJSONWithToken("/api/automation-agent/pull-request/check", token, []byte(`{"title":"评审中","summary":"s"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("live check = %d %s", w.Code, w.Body.String())
+	}
+	before := env.fake.CallCounts()["UpdateCheckRun"]
+
+	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
+		Updates(map[string]any{
+			"status":      model.AutomationRunCancelled,
+			"finished_at": time.Now().UTC(),
+			"error_code":  "superseded",
+		}).Error; err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	w = env.postJSONWithToken("/api/automation-agent/pull-request/check", token, []byte(`{"title":"仍在写","summary":"s"}`))
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "40106") {
+		t.Fatalf("cancelled check = %d %s, want 401/40106", w.Code, w.Body.String())
+	}
+	if after := env.fake.CallCounts()["UpdateCheckRun"]; after != before {
+		t.Fatalf("UpdateCheckRun after cancel = %d, want %d", after, before)
+	}
+}
+
+type cancelAfterCheckUpdate struct {
+	githubapp.PullRequestGitHub
+	after func()
+}
+
+func (c *cancelAfterCheckUpdate) UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in githubapp.CheckUpdate) error {
+	err := c.PullRequestGitHub.UpdateCheckRun(ctx, installationID, repoFullName, checkRunID, in)
+	if c.after != nil {
+		c.after()
+	}
+	return err
+}
+
+// TestAgentPR_UpdateCheckMarksPendingIfCancelledDuringWrite PATCH 之后才变成终态
+// 时置 sync_pending，让同步覆盖 in_progress。
+func TestAgentPR_UpdateCheckMarksPendingIfCancelledDuringWrite(t *testing.T) {
+	env := setupWebhookHandlerEnv(t, "whsec")
+	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
+	if err := env.db.Create(user).Error; err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
+	env.seedCheckForRun(t, run)
+	now := time.Now().UTC()
+	if err := env.db.Create(&model.GitHubPRReview{
+		RepoFullName: run.RepoFullName, PRNumber: run.PRNumber, InstallationID: run.InstallationID,
+		RoundNumber: 1, HeadSHA: run.HeadSHA, SyncPending: false, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("review: %v", err)
+	}
+
+	env.agent.SetPRGitHub(&cancelAfterCheckUpdate{
+		PullRequestGitHub: env.fake,
+		after: func() {
+			_ = env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
+				Updates(map[string]any{
+					"status":      model.AutomationRunCancelled,
+					"finished_at": time.Now().UTC(),
+					"error_code":  "superseded",
+				}).Error
+		},
+	})
+
+	w := env.postJSONWithToken("/api/automation-agent/pull-request/check", token, []byte(`{"title":"评审中","summary":"s"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("check = %d %s", w.Code, w.Body.String())
+	}
+	var rev model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ? AND pr_number = ?", run.RepoFullName, run.PRNumber).First(&rev).Error; err != nil {
+		t.Fatalf("reload review: %v", err)
+	}
+	if !rev.SyncPending {
+		t.Fatal("expected sync_pending after cancel-during-write")
 	}
 }

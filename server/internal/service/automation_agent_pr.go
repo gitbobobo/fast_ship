@@ -154,7 +154,9 @@ func (s *AutomationAgentService) AgentSubmitPullRequestReview(ctx context.Contex
 }
 
 // AgentUpdateCheck POST /api/automation-agent/pull-request/check：只更新本运行
-// check 的 title/summary/text；结论由运行终态决定（同步路径写）。
+// check 的 title/summary/text；结论由运行终态决定（同步路径写）。写 GitHub 前
+// 再读一次运行行：synchronize 取消后不得把 check 打回 in_progress。有 PR 锁时
+// 与评论/check 同步串行；写完若已终态则置 sync_pending 让同步覆盖。
 func (s *AutomationAgentService) AgentUpdateCheck(ctx context.Context, identity *RunTokenIdentity, req *api.AgentCheckUpdateRequest) error {
 	run, err := s.loadPRRun(ctx, identity.RunID)
 	if err != nil {
@@ -167,6 +169,34 @@ func (s *AutomationAgentService) AgentUpdateCheck(ctx context.Context, identity 
 	if err != nil {
 		return err
 	}
+	do := func() error {
+		return s.updateCheckIfLive(ctx, gh, run, req)
+	}
+	if s.prReview == nil {
+		return do()
+	}
+	var out error
+	s.prReview.withPRLock(run.RepoFullName, run.PRNumber, func() {
+		out = do()
+	})
+	return out
+}
+
+func (s *AutomationAgentService) updateCheckIfLive(ctx context.Context, gh githubapp.PullRequestGitHub, run *model.AutomationRun, req *api.AgentCheckUpdateRequest) error {
+	fresh, err := s.runs.FindByID(ctx, run.ID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrRunTokenInvalid
+		}
+		return errs.ErrInternal
+	}
+	if !fresh.TriggerType.IsPRTrigger() ||
+		(fresh.Status != model.AutomationRunDispatched && fresh.Status != model.AutomationRunRunning) {
+		return errs.ErrRunNotPRReview
+	}
+	if fresh.CheckRunID == nil {
+		return errs.New(errs.ErrRunNotPRReview.Code, "本运行的 check run 尚未创建，请稍后重试")
+	}
 	in := githubapp.CheckUpdate{
 		Status:  githubapp.CheckInProgress,
 		Title:   api.Deref(req.Title),
@@ -174,10 +204,17 @@ func (s *AutomationAgentService) AgentUpdateCheck(ctx context.Context, identity 
 		Text:    api.Deref(req.Text),
 	}
 	if in.Title == "" {
-		in.Title = checkNameForModel(run.ModelName)
+		in.Title = checkNameForModel(fresh.ModelName)
 	}
-	if err := gh.UpdateCheckRun(ctx, run.InstallationID, run.RepoFullName, *run.CheckRunID, in); err != nil {
+	if err := gh.UpdateCheckRun(ctx, fresh.InstallationID, fresh.RepoFullName, *fresh.CheckRunID, in); err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "更新 check 失败: "+shortenGitHubError(err))
+	}
+	after, err := s.runs.FindByID(ctx, run.ID)
+	if err != nil {
+		return nil
+	}
+	if after.Status != model.AutomationRunDispatched && after.Status != model.AutomationRunRunning {
+		_ = markPRReviewPendingTx(s.db, after, time.Now().UTC())
 	}
 	return nil
 }

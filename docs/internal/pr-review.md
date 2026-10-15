@@ -37,9 +37,12 @@
 - **SHA 变化**：新 head SHA 使该 PR 下旧 SHA 的全部在途运行（排队+进行中，
   跨规则跨用户跨模型）一律 `cancelled`（`error_code='superseded'`），令牌消费、
   名额立即释放，并删除该 PR 下 `head_sha <> 新 SHA` 的防抖行（opened 窗口
-  不能对过期提交开火）。曾 dispatched/running 的由事务外同步调
-  `T3ThreadsService.StopThread`（`run.interrupt`，`holdQueue=true`）中断线程，
-  每运行只尝试一次（`stop_attempted_at` 标记）；queued / 未认领不调。
+  不能对过期提交开火）。取消前先判过期 webhook：已有评审账且 `action=opened`
+  （opened 每个 PR 只开一次）、或本次 SHA 已有任意运行（含已取消）的迟到
+  `synchronize`，直接 202 忽略，避免 delayed `opened(A)` 把当前 `B` 取消并
+  重开 A。force-push 回已审过的 SHA 不再开轮。曾 dispatched/running 的由事务
+  外同步调 `T3ThreadsService.StopThread`（`run.interrupt`，`holdQueue=true`）
+  中断线程，每运行只尝试一次（`stop_attempted_at` 标记）；queued / 未认领不调。
   `launchThreadForRun` 仅在运行仍是 dispatched/`''` 时签发令牌；CreateThread
   返回后（含 RPC 已发出未确认）重读状态，已取消则消费令牌并立刻中断。
 
@@ -97,7 +100,9 @@ PR 触发且 `dispatched|running`，结束/取消后令牌已消费，访问一�
 - `POST /api/automation-agent/pull-request/review` —— COMMENT/APPROVE/REQUEST_CHANGES，
   commit_id 固定本运行 head SHA
 - `POST /api/automation-agent/pull-request/check` —— 只更新本运行 check 的
-  title/summary/text；结论由运行终态决定
+  title/summary/text；结论由运行终态决定。写 GitHub 前在 per-PR 锁内重读运行
+  行，已取消/结束则 40920 且不 PATCH；若 PATCH 之后才变成终态，置
+  `sync_pending` 让同步覆盖 `in_progress`。
 
 提示词额外替换 `{{repo}}` `{{pr_number}}` `{{pr_title}}` `{{pr_url}}` `{{head_sha}}`
 并附五个端点说明；工作区仍用规则上的 root/worktree，不为 PR 单独 clone。

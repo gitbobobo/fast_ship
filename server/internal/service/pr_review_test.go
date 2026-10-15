@@ -1260,6 +1260,69 @@ func TestWebhook_StaleOpenedDebounceDroppedOnNewSHA(t *testing.T) {
 	}
 }
 
+// 迟到的 opened(A) 不能把已经在跑的 SHA B 取消并重开 A。
+func TestWebhook_StaleOpenedDoesNotCancelNewerSHA(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.Name = "synchronize"
+		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		x.DebounceSeconds = 0
+	})
+
+	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("opened: %v", err)
+	}
+	if err := env.handleWebhook(t, "d-sync", "synchronize", "octocat/hw", 1, "sha-2", false, false); err != nil {
+		t.Fatalf("synchronize: %v", err)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status = ?", "sha-2", model.RunStatusPendingRun); n != 2 {
+		t.Fatalf("sha-2 pending = %d, want 2", n)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status = ?", "sha-1", model.AutomationRunCancelled); n != 2 {
+		t.Fatalf("sha-1 cancelled = %d, want 2", n)
+	}
+
+	if err := env.handleWebhook(t, "d-open-late", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("late opened: %v", err)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status <> ?", "sha-2", model.AutomationRunCancelled); n != 2 {
+		t.Fatalf("sha-2 still inflight = %d, want 2 (late opened must not cancel)", n)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status <> ?", "sha-1", model.AutomationRunCancelled); n != 0 {
+		t.Fatalf("sha-1 reopened = %d, want 0", n)
+	}
+}
+
+// 迟到的 synchronize(旧 SHA) 同样不能取消当前 head。
+func TestWebhook_StaleSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.Name = "synchronize"
+		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		x.DebounceSeconds = 0
+	})
+
+	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("opened: %v", err)
+	}
+	if err := env.handleWebhook(t, "d-sync", "synchronize", "octocat/hw", 1, "sha-2", false, false); err != nil {
+		t.Fatalf("synchronize: %v", err)
+	}
+	if err := env.handleWebhook(t, "d-sync-late", "synchronize", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("late synchronize: %v", err)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status = ?", "sha-2", model.RunStatusPendingRun); n != 2 {
+		t.Fatalf("sha-2 pending = %d, want 2", n)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status <> ?", "sha-1", model.AutomationRunCancelled); n != 0 {
+		t.Fatalf("sha-1 inflight after late sync = %d, want 0", n)
+	}
+}
+
 // 同步清位不能盖掉期间新置的 pending（新 SHA / 新终态）。
 func TestClearPendingSync_DoesNotClobberNewerPending(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
