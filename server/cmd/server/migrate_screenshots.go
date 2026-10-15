@@ -265,6 +265,12 @@ func migrateScreenshotGroupNames(tx *gorm.DB) error {
 			}
 			continue
 		}
+		// nil = 规范化后为空（如纯非空格空白 \n：SQLite trim 只去空格，行仍进
+		// 本循环）：分组名没有可保留的信息，platform 保持 NULL（未标注）即可，
+		// 迁移一次性完成（versions 表随同删除），无重复追加 title 的顾虑
+		if platform == nil {
+			continue
+		}
 		if err := tx.Model(&model.ScreenshotScreen{}).Where("id = ?", row.ID).Update("platform", *platform).Error; err != nil {
 			return err
 		}

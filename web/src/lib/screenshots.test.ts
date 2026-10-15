@@ -370,6 +370,12 @@ describe("canonicalizeScreenshotPlatform", () => {
     // U+FEFF：Go TrimSpace 不去掉，JS trim 会去掉——必须保留
     expect(canonicalizeScreenshotPlatform("\ufeffweb")).toBe("\ufeffweb");
   });
+
+  it("keeps U+FEFF through dimension filter decoding", () => {
+    // 解码环节也不能用 JS trim 抢先剥掉 FEFF，否则 canonicalize 无从恢复
+    expect(decodeDimensionFilter("\ufeffweb")).toEqual(["\ufeffweb"]);
+    expect(decodeDimensionFilter("\u0085web")).toEqual(["web"]);
+  });
 });
 
 describe("matchesLocaleDimension", () => {

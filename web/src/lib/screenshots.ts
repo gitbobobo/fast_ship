@@ -21,7 +21,9 @@ export function decodeDimensionFilter(raw: string | null): DimensionFilter {
   if (!raw) return [];
   return raw
     .split(",")
-    .map((v) => v.trim())
+    // 与 Go strings.TrimSpace 同字符集：JS trim 会先剥掉 U+FEFF，服务端却
+    // 保留它当独立平台值，维度寻址就此分叉
+    .map(goTrim)
     .filter((v) => v.length > 0);
 }
 

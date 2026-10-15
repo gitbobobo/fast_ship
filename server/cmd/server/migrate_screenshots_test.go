@@ -406,6 +406,7 @@ func TestRunBootMigrations_GroupNameFollowsPlatformRules(t *testing.T) {
 		{"screen-none", "", "__none__"},
 		{"screen-none-upper", "已标注", "__NONE__"},
 		{"screen-long", "", longName},
+		{"screen-ws", "", "\n"},
 		{"screen-ok", "", " Harmony "},
 	}
 	for _, c := range cases {
@@ -448,6 +449,16 @@ func TestRunBootMigrations_GroupNameFollowsPlatformRules(t *testing.T) {
 		if screen.Title != c.wantTitle {
 			t.Fatalf("%s: expected title %q, got %q", c.id, c.wantTitle, screen.Title)
 		}
+	}
+
+	// 纯非空格空白分组名（SQLite trim 只去空格，行仍进迁移循环）：Go 侧规范化
+	// 为空即未标注——platform 保持 NULL、title 不动，不因解引用 nil 而中断迁移
+	var ws model.ScreenshotScreen
+	if err := db.Where("id = ?", "screen-ws").First(&ws).Error; err != nil {
+		t.Fatalf("find screen-ws: %v", err)
+	}
+	if ws.Platform != nil || ws.Title != "" {
+		t.Fatalf("expected untagged screen with title intact, got platform=%+v title=%q", ws.Platform, ws.Title)
 	}
 
 	// 合规：照常 trim+lowercase 迁入
