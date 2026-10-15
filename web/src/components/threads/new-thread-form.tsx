@@ -73,6 +73,7 @@ export function NewThreadForm({
   const create = useCreateThread(environment.id);
   const uploads = useImageUploads(environment.id);
   const [tracker] = useState(createIdTracker);
+  const [submitError, setSubmitError] = useState<unknown>(null);
   const threads = useThreads();
 
   const projects = composer.data?.projects;
@@ -115,17 +116,18 @@ export function NewThreadForm({
 
   const submit = async () => {
     if (!project || !workspace) return;
-    const attachments = uploads.attachmentsOf();
-    const ids = tracker.idsFor(
-      JSON.stringify([
-        project.id,
-        text,
-        attachments.map((a) => a.id),
-        workspace,
-        buildModelSelection(resolved),
-      ]),
-    );
+    setSubmitError(null);
     try {
+      const attachments = uploads.attachmentsOf();
+      const ids = tracker.idsFor(
+        JSON.stringify([
+          project.id,
+          text,
+          attachments.map((a) => a.id),
+          workspace,
+          buildModelSelection(resolved),
+        ]),
+      );
       const result = await uploads.submit(
         () =>
           create.mutateAsync({
@@ -143,8 +145,10 @@ export function NewThreadForm({
       navigate(
         `/threads/${encodeURIComponent(environment.id)}/${encodeURIComponent(result.thread_id)}`,
       );
-    } catch {
-      // 错误由 create.error 展示；重试沿用同一组 ID。
+    } catch (error) {
+      // mutation 失败经 create.isError 落到同一错误位；提交前的异常（ID 生成等）
+      // 没有 mutation 状态，须本地兜住。重试沿用同一组 ID。
+      setSubmitError(error);
     }
   };
 
@@ -297,7 +301,11 @@ export function NewThreadForm({
         blocked={!writable || !ready || !project || !workspace}
         onSubmit={() => void submit()}
         toolbar={toolbar}
-        error={create.isError ? actionErrorText(create.error) : undefined}
+        error={
+          create.isError || submitError !== null
+            ? actionErrorText(create.error || submitError)
+            : undefined
+        }
       />
     </div>
   );

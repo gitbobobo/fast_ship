@@ -24,6 +24,9 @@ const api = vi.hoisted(() => ({
   deleteAttachment: vi.fn(),
 }));
 
+const uuidMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/uuid", () => ({ uuid: uuidMock }));
+
 vi.mock("@/lib/api/threads", async (importOriginal) => {
   const { envList, ...threadMocks } = api;
   return {
@@ -140,6 +143,8 @@ async function ready() {
 describe("NewThreadPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    let n = 0;
+    uuidMock.mockImplementation(() => `uuid-${++n}`);
     signInAs("u1");
     setEnvironments([makeEnvironment()]);
     api.list.mockResolvedValue({ data: { items: [], environments: [] } });
@@ -203,6 +208,20 @@ describe("NewThreadPage", () => {
     expect(second.command_id).toBe(first.command_id);
     expect(second.thread_id).toBe(first.thread_id);
     expect(second.message.message_id).toBe(first.message.message_id);
+  });
+
+  it("shows an inline error when id generation throws instead of dying silently", async () => {
+    const user = userEvent.setup();
+    uuidMock.mockImplementation(() => {
+      throw new TypeError("crypto.randomUUID is not a function");
+    });
+    renderPage();
+
+    await user.type(await ready(), "hi");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("操作失败，请重试");
+    expect(api.create).not.toHaveBeenCalled();
   });
 
   it("creates a new worktree from the current branch, omitting an empty branch name", async () => {

@@ -13,6 +13,7 @@ import type {
   WorkspaceOptions,
   WorkspaceRef,
 } from "@/lib/api/threads";
+import { uuid } from "@/lib/uuid";
 
 /** 写操作只看 access；环境未加载或缺省一律按只读处理。 */
 export function canOperate(environment?: Pick<Environment, "access">) {
@@ -41,11 +42,6 @@ export function shouldPollThread(detail?: ThreadDetail) {
   );
 }
 
-/** 稳定 ID 组：同一次发送的重试必须带同一组。 */
-export function newId() {
-  return crypto.randomUUID();
-}
-
 export interface SendIds {
   command_id: string;
   message_id: string;
@@ -63,7 +59,7 @@ export function createIdTracker() {
       if (current?.fingerprint !== fingerprint) {
         current = {
           fingerprint,
-          ids: { command_id: newId(), message_id: newId(), thread_id: newId() },
+          ids: { command_id: uuid(), message_id: uuid(), thread_id: uuid() },
         };
       }
       return current.ids;

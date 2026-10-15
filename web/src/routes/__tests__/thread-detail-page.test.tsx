@@ -31,6 +31,9 @@ const api = vi.hoisted(() => ({
 }));
 const { detail, itemDetail, envList } = api;
 
+const uuidMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/uuid", () => ({ uuid: uuidMock }));
+
 vi.mock("@/lib/api/threads", async (importOriginal) => {
   const { envList: environmentList, ...threadMocks } = api;
   return {
@@ -108,6 +111,8 @@ async function renderPage() {
 describe("ThreadDetailPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    let n = 0;
+    uuidMock.mockImplementation(() => `uuid-${++n}`);
     client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     signInAs("u1");
     envList.mockResolvedValue({ data: { items: [makeEnvironment()] } });
@@ -245,6 +250,22 @@ describe("ThreadDetailPage", () => {
       await waitFor(() => expect(screen.getByRole("textbox", { name: "消息内容" })).toHaveValue(""));
       // 写入后立刻重读详情
       expect(detail.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it("shows an inline error when send-id generation throws instead of dying silently", async () => {
+      const user = userEvent.setup();
+      mockDetail([]);
+      api.send.mockResolvedValue({ sequence: 1 });
+      uuidMock.mockImplementation(() => {
+        throw new TypeError("crypto.randomUUID is not a function");
+      });
+      await renderPage();
+
+      await user.type(await screen.findByRole("textbox", { name: "消息内容" }), "hi");
+      await user.click(within(composer()).getByRole("button", { name: "发送" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("操作失败，请重试");
+      expect(api.send).not.toHaveBeenCalled();
     });
 
     it("disables image removal while a send is in flight", async () => {

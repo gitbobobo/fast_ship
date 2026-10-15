@@ -27,6 +27,7 @@ const {
   copyMock,
   toastSuccessMock,
   toastErrorMock,
+  uuidMock,
 } = vi.hoisted(() => ({
   promptsRef: { current: [] as IssuePrompt[] },
   promptSettingsRef: { current: undefined as IssuePromptSettings | undefined },
@@ -41,7 +42,10 @@ const {
   copyMock: vi.fn(),
   toastSuccessMock: vi.fn(),
   toastErrorMock: vi.fn(),
+  uuidMock: vi.fn(),
 }));
+
+vi.mock("@/lib/uuid", () => ({ uuid: uuidMock }));
 
 vi.mock("react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react-router")>()),
@@ -190,6 +194,9 @@ describe("LaunchIssueThreadDialog", () => {
     copyMock.mockReset();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
+    let n = 0;
+    uuidMock.mockReset();
+    uuidMock.mockImplementation(() => `uuid-${++n}`);
   });
 
   it("auto-selects the least busy launchable environment", async () => {
@@ -388,6 +395,19 @@ describe("LaunchIssueThreadDialog", () => {
         expect.anything(),
       ),
     );
+  });
+
+  it("shows an inline error when id generation throws (insecure HTTP context)", async () => {
+    uuidMock.mockImplementation(() => {
+      throw new TypeError("crypto.randomUUID is not a function");
+    });
+    renderDialog();
+
+    fireEvent.click(await screen.findByRole("button", { name: /启动 ⌘↵/ }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("启动失败，请重试");
+    expect(createMock).not.toHaveBeenCalled();
+    expect(toastSuccessMock).not.toHaveBeenCalled();
   });
 
   it("persists the chosen defaults back to the template when opted in", async () => {
