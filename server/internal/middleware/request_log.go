@@ -90,6 +90,10 @@ func BindRequestUser(c *gin.Context) {
 		slog.String("user_id", uid),
 		slog.String("auth_type", GetAuthType(c)),
 	)
+	// 运行令牌端点同时绑定 run_id，使 trace?run_id= 能串起 agent 的 HTTP 活动。
+	if rid := GetRunID(c); rid != "" {
+		logger = logger.With(slog.String("run_id", rid))
+	}
 	c.Set(ContextKeyRequestLogger, logger)
 	c.Request = c.Request.WithContext(selflog.WithRequestScope(c.Request.Context(), logger, RequestIDOf(c)))
 }

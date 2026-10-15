@@ -367,6 +367,44 @@ func TestRequestLogHandlerScopeLoggerCarriesRequestID(t *testing.T) {
 	}
 }
 
+func TestRequestLogBindsRunIDForRunTokenAuth(t *testing.T) {
+	env := newRequestLogEnv(t)
+	env.router.Use(func(c *gin.Context) {
+		// 模拟 RequireRunToken 解析成功后的上下文绑定。
+		c.Set(ContextKeyUserID, "user-agent")
+		c.Set(ContextKeyRunID, "run-42")
+		c.Set(ContextKeyAuthType, AuthTypeRunToken)
+		BindRequestUser(c)
+		c.Next()
+	})
+	env.router.POST("/api/automation-agent/report", func(c *gin.Context) {
+		LoggerFrom(c).Info("Agent 回报", slog.String("thread_id", "th-1"))
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	env.do(t, http.MethodPost, "/api/automation-agent/report", map[string]string{RequestIDHeader: "req-run"})
+	entries := env.traceByRequestID(t, "req-run")
+	var completion *selflog.Entry
+	for i := range entries {
+		if entries[i].Message == "请求完成" {
+			completion = &entries[i]
+		}
+	}
+	if completion == nil {
+		t.Fatalf("完成日志未入库: %+v", entries)
+	}
+	if completion.RunID != "run-42" || completion.UserID != "user-agent" {
+		t.Fatalf("run-token 请求日志应带 run_id 归属: %+v", completion)
+	}
+	page, err := env.store.Query(context.Background(), selflog.Filter{VisibleUserID: "user-agent", RunID: "run-42"}, "", 50, true)
+	if err != nil {
+		t.Fatalf("query by run_id: %v", err)
+	}
+	if len(page.Items) == 0 {
+		t.Fatalf("trace?run_id= 应能查到 agent HTTP 活动: %+v", page.Items)
+	}
+}
+
 // fakeSecret 运行时拼接出密钥形状的假值；脱敏断言依赖形状，
 // 但字面量直接写进源码会被密钥扫描工具误杀，故运行时拼接。
 func fakeSecret(prefix, suffix string) string {
