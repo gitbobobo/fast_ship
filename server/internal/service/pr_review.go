@@ -166,18 +166,43 @@ type gitHubPRPayload struct {
 // ErrDeliveryDuplicated 同一 X-GitHub-Delivery 的重复投递：202 但不再开轮。
 var ErrDeliveryDuplicated = errors.New("pr_review: delivery duplicated")
 
+// webhookPRKey 从 payload 取出 per-PR 锁键。number 为 0 或仓库名为空时调用方不取锁。
+func webhookPRKey(p *gitHubPRPayload) (repo string, pr int) {
+	repo = p.Repository.FullName
+	if repo == "" {
+		repo = p.PullRequest.Head.Repo.FullName
+	}
+	if repo == "" {
+		repo = p.PullRequest.Base.Repo.FullName
+	}
+	return repo, p.Number
+}
+
 // HandleGitHubWebhook webhook 入口：一个事务内完成幂等登记、过滤、取消旧轮、
 // 防抖/立即开轮；事务内 GitHub 调用数为 0。重复投递返回 ErrDeliveryDuplicated
-// （handler 仍回 202）。
+// （handler 仍回 202）。能解析出仓库+PR 时先拿 per-PR 锁再开事务，与 agent
+// 代发（SubmitReview / UpdateCheck）串行，避免「取消已提交、审查仍发出」。
 func (s *PRReviewService) HandleGitHubWebhook(ctx context.Context, event, deliveryID string, body []byte) error {
 	var payload gitHubPRPayload
 	// payload 解析失败按忽略处理（已验签说明来自 GitHub，格式异常不重试）。
 	_ = json.Unmarshal(body, &payload)
 
 	now := nowUTC()
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return s.handleWebhookTx(tx, event, deliveryID, &payload, now)
-	})
+	runTx := func() error {
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return s.handleWebhookTx(tx, event, deliveryID, &payload, now)
+		})
+	}
+
+	// 先锁后事务：agent 持锁期间会读库再调 GitHub；若 webhook 先开事务再等锁，
+	// 两边会交叉等待。锁只包本事务（无 GitHub 调用），kick 在解锁之后。
+	repo, pr := webhookPRKey(&payload)
+	var err error
+	if repo != "" && pr != 0 {
+		s.withPRLock(repo, pr, func() { err = runTx() })
+	} else {
+		err = runTx()
+	}
 	if err != nil {
 		if errors.Is(err, ErrDeliveryDuplicated) {
 			return err
@@ -317,10 +342,10 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 	return nil
 }
 
-// isStalePRHeadTx 判断迟到 webhook 的 head SHA 是否已经过期。当前 head 取评审账
-// 或未开火的防抖行；本次 SHA 就是当前 head → 接受。已经受理过、但不是当前 head
-// 的 SHA 一律拒绝（含防抖窗口内还没有 review/运行的迟到投递，以及 force-push
-// 回已见过的 SHA）。其余视为新 SHA。
+// isStalePRHeadTx 判断迟到 webhook 的 head SHA 是否已经过期。当前 head 优先取
+// 未开火的防抖行，否则取评审账；本次 SHA 就是当前 head → 接受。已经受理过、
+// 但不是当前 head 的 SHA 一律拒绝（含「A 已有 review、B 还在 debounce」时迟到
+// 的 A，以及 force-push 回已见过的 SHA）。其余视为新 SHA。
 func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action string) (bool, error) {
 	latest, err := currentPRHeadSHATx(tx, repoFullName, prNumber)
 	if err != nil {
@@ -353,26 +378,27 @@ func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action
 	return n > 0, nil
 }
 
-// currentPRHeadSHATx 当前受理的 head：已开轮看评审账，否则看最新防抖行。
+// currentPRHeadSHATx 当前受理的 head：未开火的防抖行优先（窗口内的新 SHA 比
+// 已开轮的评审账更新）；没有 debounce 才看评审账。
 func currentPRHeadSHATx(tx *gorm.DB, repoFullName string, prNumber int) (string, error) {
-	var rev model.GitHubPRReview
-	err := tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).First(&rev).Error
-	if err == nil && rev.HeadSHA != "" {
-		return rev.HeadSHA, nil
+	var d model.GitHubPRDebounce
+	err := tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).
+		Order("updated_at DESC").First(&d).Error
+	if err == nil && d.HeadSHA != "" {
+		return d.HeadSHA, nil
 	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", err
 	}
-	var d model.GitHubPRDebounce
-	err = tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).
-		Order("updated_at DESC").First(&d).Error
+	var rev model.GitHubPRReview
+	err = tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).First(&rev).Error
+	if err == nil {
+		return rev.HeadSHA, nil
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", nil
 	}
-	if err != nil {
-		return "", err
-	}
-	return d.HeadSHA, nil
+	return "", err
 }
 
 // prRuleMatch 命中的规则与其宿主项目。

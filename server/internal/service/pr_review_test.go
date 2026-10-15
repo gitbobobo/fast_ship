@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -1373,6 +1374,183 @@ func TestWebhook_DelayedSHADoesNotDropNewerDebounce(t *testing.T) {
 	}
 	if n := countRuns(t, env.db, "head_sha = ?", "sha-2"); n == 0 {
 		t.Fatal("sha-2 round missing after debounce fired")
+	}
+}
+
+// A 已开轮（评审账仍是 A）、B 还在 debounce 时，迟到的 A 不能删掉 B。
+func TestWebhook_PendingDebouncePreferredOverReviewHead(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.TriggerType = model.AutomationTriggerGitHubPROpened
+		x.DebounceSeconds = 0
+	})
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.Name = "synchronize"
+		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		x.DebounceSeconds = 60
+	})
+
+	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("opened: %v", err)
+	}
+	var rev model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ? AND pr_number = ?", "octocat/hw", 1).First(&rev).Error; err != nil {
+		t.Fatalf("review after open: %v", err)
+	}
+	if rev.HeadSHA != "sha-1" {
+		t.Fatalf("review sha after open = %s, want sha-1", rev.HeadSHA)
+	}
+
+	if err := env.handleWebhook(t, "d-sync", "synchronize", "octocat/hw", 1, "sha-2", false, false); err != nil {
+		t.Fatalf("synchronize: %v", err)
+	}
+	var d model.GitHubPRDebounce
+	if err := env.db.First(&d).Error; err != nil {
+		t.Fatalf("debounce: %v", err)
+	}
+	if d.HeadSHA != "sha-2" {
+		t.Fatalf("debounce sha = %s, want sha-2", d.HeadSHA)
+	}
+	if err := env.db.Where("repo_full_name = ? AND pr_number = ?", "octocat/hw", 1).First(&rev).Error; err != nil {
+		t.Fatalf("review after sync: %v", err)
+	}
+	if rev.HeadSHA != "sha-1" {
+		t.Fatalf("review still sha-1 until B fires, got %s", rev.HeadSHA)
+	}
+
+	if err := env.handleWebhook(t, "d-open-late", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("late opened: %v", err)
+	}
+	if err := env.handleWebhook(t, "d-sync-late", "synchronize", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("late synchronize: %v", err)
+	}
+	if err := env.db.First(&d).Error; err != nil {
+		t.Fatalf("reload debounce: %v", err)
+	}
+	if d.HeadSHA != "sha-2" {
+		t.Fatalf("late A dropped B debounce, sha = %s", d.HeadSHA)
+	}
+
+	env.pr.ProcessDueDebounces(time.Now().UTC().Add(2 * time.Minute))
+	if n := countRuns(t, env.db, "head_sha = ? AND status <> ?", "sha-1", model.AutomationRunCancelled); n != 0 {
+		t.Fatalf("live sha-1 after B fired = %d, want 0", n)
+	}
+	if n := countRuns(t, env.db, "head_sha = ?", "sha-2"); n == 0 {
+		t.Fatal("sha-2 round missing after debounce fired")
+	}
+}
+
+type blockingSubmitReview struct {
+	githubapp.PullRequestGitHub
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingSubmitReview) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in githubapp.ReviewInput) error {
+	select {
+	case <-b.entered:
+	default:
+		close(b.entered)
+	}
+	<-b.release
+	return b.PullRequestGitHub.SubmitReview(ctx, installationID, repoFullName, number, in)
+}
+
+// webhook 取消必须等 in-flight SubmitReview 释放 per-PR 锁，不能插在重读与提交之间。
+func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.Name = "synchronize"
+		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		x.DebounceSeconds = 0
+	})
+	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("opened: %v", err)
+	}
+	var run model.AutomationRun
+	if err := env.db.Where("head_sha = ?", "sha-1").First(&run).Error; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := env.db.Model(&run).Update("status", model.AutomationRunDispatched).Error; err != nil {
+		t.Fatalf("mark dispatched: %v", err)
+	}
+	run.Status = model.AutomationRunDispatched
+
+	blocker := &blockingSubmitReview{
+		PullRequestGitHub: env.fake,
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	agent := NewAutomationAgentService(env.db, env.runs,
+		repository.NewAutomationRunTokenRepository(env.db), nil, NewNotificationSink(env.db), zap.NewNop())
+	agent.SetPRGitHub(blocker)
+	agent.SetPRReview(env.pr)
+
+	body := "ok"
+	req := &api.AgentPullRequestReviewRequest{Event: api.COMMENT, Body: &body}
+	identity := &RunTokenIdentity{UserID: run.UserID, RunID: run.ID}
+
+	submitDone := make(chan error, 1)
+	go func() {
+		_, err := agent.AgentSubmitPullRequestReview(context.Background(), identity, req)
+		submitDone <- err
+	}()
+	select {
+	case <-blocker.entered:
+	case err := <-submitDone:
+		t.Fatalf("submit returned before GitHub call: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SubmitReview")
+	}
+
+	webhookDone := make(chan error, 1)
+	go func() {
+		webhookDone <- env.pr.HandleGitHubWebhook(context.Background(), "pull_request", "d-sync",
+			webhookPayload("synchronize", "octocat/hw", 1, "sha-2", false, false))
+	}()
+
+	// 持锁期间 webhook 不得把 sha-1 取消掉。
+	select {
+	case err := <-webhookDone:
+		close(blocker.release)
+		t.Fatalf("webhook returned while SubmitReview held the lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	var still model.AutomationRun
+	if err := env.db.Where("id = ?", run.ID).First(&still).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if still.Status == model.AutomationRunCancelled {
+		close(blocker.release)
+		t.Fatal("run cancelled while SubmitReview held the lock")
+	}
+
+	close(blocker.release)
+	select {
+	case err := <-submitDone:
+		if err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for submit")
+	}
+	select {
+	case err := <-webhookDone:
+		if err != nil {
+			t.Fatalf("webhook: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for webhook")
+	}
+
+	if err := env.db.Where("id = ?", run.ID).First(&still).Error; err != nil {
+		t.Fatalf("reload after webhook: %v", err)
+	}
+	if still.Status != model.AutomationRunCancelled {
+		t.Fatalf("status after webhook = %s, want cancelled", still.Status)
 	}
 }
 
