@@ -13,6 +13,7 @@ type Config struct {
 	Upload     UploadConfig     `mapstructure:"upload"`
 	Encryption EncryptionConfig `mapstructure:"encryption"`
 	Issues     IssuesConfig     `mapstructure:"issues"`
+	GitHubApp  GitHubAppConfig  `mapstructure:"github_app"`
 }
 
 type ServerConfig struct {
@@ -50,6 +51,16 @@ type IssuesConfig struct {
 	AutoSyncIntervalMinutes int  `mapstructure:"auto_sync_interval_minutes"`
 }
 
+// GitHubAppConfig GitHub App 身份（INT-93）。私钥只给 PEM 文件路径——私钥本体
+// 不进库、不进环境变量正文；webhook_secret 为空时 webhook 端点 503。
+type GitHubAppConfig struct {
+	AppID          string `mapstructure:"app_id"`
+	PrivateKeyPath string `mapstructure:"private_key_path"`
+	WebhookSecret  string `mapstructure:"webhook_secret"`
+	// Fake 仅 server.mode=debug 时允许 true：注入假 GitHub 实现，本地自测评审链路。
+	Fake bool `mapstructure:"fake"`
+}
+
 func Load(path string) (*Config, error) {
 	viper.SetConfigFile(path)
 
@@ -65,6 +76,10 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("encryption.key", "ENCRYPTION_KEY")
 	_ = viper.BindEnv("server.web_dist_dir", "FAST_SHIP_WEB_DIST_DIR")
 	_ = viper.BindEnv("server.public_url", "FAST_SHIP_SERVER_PUBLIC_URL")
+	_ = viper.BindEnv("github_app.app_id", "FAST_SHIP_GITHUB_APP_APP_ID")
+	_ = viper.BindEnv("github_app.private_key_path", "FAST_SHIP_GITHUB_APP_PRIVATE_KEY_PATH")
+	_ = viper.BindEnv("github_app.webhook_secret", "FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET")
+	_ = viper.BindEnv("github_app.fake", "FAST_SHIP_GITHUB_APP_FAKE")
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, err

@@ -6,7 +6,9 @@ export type AutomationTriggerType =
   | "cron"
   | "issue_created"
   | "issue_status_changed"
-  | "issue_label_added";
+  | "issue_label_added"
+  | "github_pr_opened"
+  | "github_pr_synchronize";
 
 export type AutomationPostAction = "none" | "settle" | "archive";
 
@@ -51,6 +53,9 @@ export interface Automation {
   event_filter?: AutomationEventFilter | null;
   prompt_template: string;
   model_selection?: AutomationModelSelection | null;
+  // GitHub PR 触发的多模型选择（每个模型各开一个运行）。
+  model_selections?: AutomationModelSelection[];
+  debounce_seconds?: number;
   runtime_mode: string;
   workspace?: AutomationWorkspace | null;
   timeout_seconds: number;
@@ -61,11 +66,13 @@ export interface Automation {
 }
 
 export type AutomationRunStatus =
+  | "queued"
   | "dispatched"
   | "running"
   | "completed"
   | "failed"
-  | "timed_out";
+  | "timed_out"
+  | "cancelled";
 
 export type AutomationPostState = "none" | "pending" | "succeeded" | "failed";
 
@@ -89,6 +96,13 @@ export interface AutomationRun {
   environment_id: string;
   t3_project_id: string;
   thread_id: string;
+  // GitHub PR 触发的运行上下文。
+  repo_full_name?: string | null;
+  pr_number?: number | null;
+  head_sha?: string | null;
+  round_number?: number | null;
+  model_instance_id?: string | null;
+  model_name?: string | null;
   dispatch_started_at?: string | null;
   dispatched_at?: string | null;
   started_at?: string | null;
@@ -116,6 +130,9 @@ export interface AutomationInput {
   event_filter?: AutomationEventFilter | null;
   prompt_template: string;
   model_selection?: AutomationModelSelection | null;
+  // GitHub PR 触发：1–10 个模型，必须显式选择。
+  model_selections?: AutomationModelSelection[];
+  debounce_seconds?: number;
   runtime_mode?: RuntimeMode;
   workspace?: AutomationWorkspace | null;
   timeout_seconds?: number;
@@ -151,6 +168,10 @@ export function automationTriggerLabel(type: AutomationTriggerType): string {
       return "Issue 状态变化";
     case "issue_label_added":
       return "Issue 加标签";
+    case "github_pr_opened":
+      return "GitHub PR 打开";
+    case "github_pr_synchronize":
+      return "GitHub PR 新提交";
   }
 }
 
@@ -159,6 +180,8 @@ export function automationRunStatusLabel(status: string | null): string {
     case null:
     case "":
       return "待派发";
+    case "queued":
+      return "排队中";
     case "dispatched":
       return "已派发";
     case "running":
@@ -169,6 +192,8 @@ export function automationRunStatusLabel(status: string | null): string {
       return "已失败";
     case "timed_out":
       return "已超时";
+    case "cancelled":
+      return "已取消";
     default:
       return status;
   }

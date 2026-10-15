@@ -24,3 +24,9 @@ issues:
   auto_sync_enabled: true
   auto_sync_on_startup: true
   auto_sync_interval_minutes: 15
+
+github_app:
+  app_id: ""  # GitHub App ID；留空则 PR 评审（INT-93）端点按未配置处理
+  private_key_path: ""  # App 私钥 PEM 文件路径；私钥不进库、不进环境变量正文
+  webhook_secret: ""  # webhook 验签密钥；留空时 POST /api/github/webhooks 一律 503
+  fake: false  # 仅 server.mode=debug 允许 true：注入假 GitHub 实现（本地自测）

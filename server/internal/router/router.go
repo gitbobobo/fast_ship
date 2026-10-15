@@ -36,6 +36,7 @@ func Setup(
 	automationHandler *handler.AutomationHandler,
 	notificationHandler *handler.NotificationHandler,
 	automationAgentHandler *handler.AutomationAgentHandler,
+	githubWebhookHandler *handler.GitHubWebhookHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -303,6 +304,24 @@ func Setup(
 		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.GetThreadItem)
 	api.POST("/automation-agent/notifications",
 		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.PublishNotification)
+
+	// 仅运行令牌 — GitHub PR 评审代发（INT-93）。owner/repo/PR/SHA 取自运行行；
+	// 运行结束/取消后令牌消费，访问一律 40106。
+	prReview := api.Group("/automation-agent/pull-request",
+		middleware.RequireRunToken(automationAgentHandler.Agent(), true))
+	{
+		prReview.GET("", automationAgentHandler.GetPullRequest)
+		prReview.GET("/diff", automationAgentHandler.GetPullRequestDiff)
+		prReview.GET("/comments", automationAgentHandler.ListPullRequestComments)
+		prReview.POST("/review", automationAgentHandler.SubmitPullRequestReview)
+		prReview.POST("/check", automationAgentHandler.UpdatePullRequestCheck)
+	}
+
+	// GitHub App webhook 入站（INT-93）：公开端点，X-Hub-Signature-256 验签。
+	api.POST("/github/webhooks", githubWebhookHandler.Handle)
+
+	// 自测观察面（INT-93）：仅 fake + debug 模式有内容；JWT 必须，不进 OpenAPI。
+	api.GET("/debug/github-review-log", middleware.RequireJWT(cfg, authService), githubWebhookHandler.DebugReviewLog)
 
 	setupWebRoutes(r, cfg.Server.WebDistDir)
 }

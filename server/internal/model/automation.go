@@ -11,11 +11,19 @@ import "time"
 type AutomationTriggerType string
 
 const (
-	AutomationTriggerCron               AutomationTriggerType = "cron"
-	AutomationTriggerIssueCreated       AutomationTriggerType = "issue_created"
-	AutomationTriggerIssueStatusChanged AutomationTriggerType = "issue_status_changed"
-	AutomationTriggerIssueLabelAdded    AutomationTriggerType = "issue_label_added"
+	AutomationTriggerCron                AutomationTriggerType = "cron"
+	AutomationTriggerIssueCreated        AutomationTriggerType = "issue_created"
+	AutomationTriggerIssueStatusChanged  AutomationTriggerType = "issue_status_changed"
+	AutomationTriggerIssueLabelAdded     AutomationTriggerType = "issue_label_added"
+	AutomationTriggerGitHubPROpened      AutomationTriggerType = "github_pr_opened"
+	AutomationTriggerGitHubPRSynchronize AutomationTriggerType = "github_pr_synchronize"
 )
+
+// IsPRTrigger GitHub PR 事件触发：走防抖/多模型/排队通道，与 cron/issue 的
+// 单活动运行约束互不影响。
+func (t AutomationTriggerType) IsPRTrigger() bool {
+	return t == AutomationTriggerGitHubPROpened || t == AutomationTriggerGitHubPRSynchronize
+}
 
 func (t AutomationTriggerType) IsIssueEvent() bool {
 	return t == AutomationTriggerIssueCreated ||
@@ -28,7 +36,9 @@ func IsValidAutomationTriggerType(t AutomationTriggerType) bool {
 	case AutomationTriggerCron,
 		AutomationTriggerIssueCreated,
 		AutomationTriggerIssueStatusChanged,
-		AutomationTriggerIssueLabelAdded:
+		AutomationTriggerIssueLabelAdded,
+		AutomationTriggerGitHubPROpened,
+		AutomationTriggerGitHubPRSynchronize:
 		return true
 	}
 	return false
@@ -55,15 +65,18 @@ type AutomationRunStatus string
 const (
 	// RunStatusPendingRun 表示运行行已创建但尚未被 worker 认领（status 存空串）。
 	RunStatusPendingRun     AutomationRunStatus = ""
+	AutomationRunQueued     AutomationRunStatus = "queued"
 	AutomationRunDispatched AutomationRunStatus = "dispatched"
 	AutomationRunRunning    AutomationRunStatus = "running"
 	AutomationRunCompleted  AutomationRunStatus = "completed"
 	AutomationRunFailed     AutomationRunStatus = "failed"
 	AutomationRunTimedOut   AutomationRunStatus = "timed_out"
+	AutomationRunCancelled  AutomationRunStatus = "cancelled"
 )
 
 func (s AutomationRunStatus) Terminal() bool {
-	return s == AutomationRunCompleted || s == AutomationRunFailed || s == AutomationRunTimedOut
+	return s == AutomationRunCompleted || s == AutomationRunFailed ||
+		s == AutomationRunTimedOut || s == AutomationRunCancelled
 }
 
 type AutomationPostState string
@@ -98,13 +111,19 @@ type Automation struct {
 	// EventFilterJSON 事件过滤（状态变化 field/from/to、加标签匹配名称），无过滤为空串。
 	EventFilterJSON string `gorm:"column:event_filter_json;type:text" json:"event_filter_json,omitempty"`
 
-	PromptTemplate     string               `gorm:"column:prompt_template;type:text;not null" json:"prompt_template"`
-	ModelSelectionJSON string               `gorm:"column:model_selection_json;type:text" json:"model_selection_json,omitempty"`
-	RuntimeMode        string               `gorm:"type:text;not null;default:full-access" json:"runtime_mode"`
-	WorkspaceJSON      string               `gorm:"column:workspace_json;type:text" json:"workspace_json,omitempty"`
-	TimeoutSeconds     int                  `gorm:"not null;default:3600" json:"timeout_seconds"`
-	PostAction         AutomationPostAction `gorm:"column:post_action;type:text;not null;default:none" json:"post_action"`
-	PostOnTimeout      bool                 `gorm:"column:post_on_timeout;not null;default:false" json:"post_on_timeout"`
+	PromptTemplate     string `gorm:"column:prompt_template;type:text;not null" json:"prompt_template"`
+	ModelSelectionJSON string `gorm:"column:model_selection_json;type:text" json:"model_selection_json,omitempty"`
+	// ModelSelectionsJSON GitHub PR 触发的多模型数组（元素同 model_selection 的单个对象）；
+	// cron/issue 触发为空串。
+	ModelSelectionsJSON string `gorm:"column:model_selections_json;type:text" json:"model_selections_json,omitempty"`
+	// DebounceSeconds 仅 GitHub PR 触发：防抖窗口秒数（0=立即）；service 落库时
+	// 显式给值（PR 触发缺省 60，cron/issue 恒 0），不用列默认值以便存 0。
+	DebounceSeconds int                  `gorm:"not null;default:0" json:"debounce_seconds"`
+	RuntimeMode     string               `gorm:"type:text;not null;default:full-access" json:"runtime_mode"`
+	WorkspaceJSON   string               `gorm:"column:workspace_json;type:text" json:"workspace_json,omitempty"`
+	TimeoutSeconds  int                  `gorm:"not null;default:3600" json:"timeout_seconds"`
+	PostAction      AutomationPostAction `gorm:"column:post_action;type:text;not null;default:none" json:"post_action"`
+	PostOnTimeout   bool                 `gorm:"column:post_on_timeout;not null;default:false" json:"post_on_timeout"`
 
 	// 外键 CASCADE：删用户/环境/项目带走自动化；进行中的运行经 runs 的
 	// automation_id CASCADE 一并清理（活动运行会先被 service 40919 拦下）。
@@ -140,7 +159,8 @@ type AutomationRun struct {
 	LaunchCommandID  string `gorm:"column:launch_command_id;type:text;not null" json:"launch_command_id"`
 	InitialMessageID string `gorm:"column:initial_message_id;type:text;not null" json:"initial_message_id"`
 
-	// Status 空串=待认领；dispatched/running=活动；completed/failed/timed_out=终态。
+	// Status 空串=待认领；queued=PR 审查排队（不占在途名额）；dispatched/running=
+	// 活动；completed/failed/timed_out/cancelled=终态。
 	Status            AutomationRunStatus `gorm:"type:text;not null;default:''" json:"status"`
 	DispatchStartedAt *time.Time          `json:"dispatch_started_at,omitempty"`
 	// DispatchedAt 仅在启动 RPC 结果得到确认（launchThread 成功或 agent 回报开始）时写入；
@@ -162,6 +182,21 @@ type AutomationRun struct {
 	PostNextAttemptAt *time.Time          `gorm:"column:post_next_attempt_at" json:"post_next_attempt_at,omitempty"`
 	PostDeadlineAt    *time.Time          `gorm:"column:post_deadline_at" json:"post_deadline_at,omitempty"`
 	PostError         string              `gorm:"column:post_error;type:text" json:"post_error,omitempty"`
+
+	// GitHub PR 审查（INT-93）专用列；cron/issue 触发保持零值。
+	RepoFullName   string `gorm:"column:repo_full_name;type:text" json:"repo_full_name,omitempty"`
+	PRNumber       int    `gorm:"column:pr_number" json:"pr_number,omitempty"`
+	HeadSHA        string `gorm:"column:head_sha;type:text" json:"head_sha,omitempty"`
+	RoundNumber    int    `gorm:"column:round_number" json:"round_number,omitempty"`
+	InstallationID int64  `gorm:"column:installation_id" json:"installation_id,omitempty"`
+	// CheckRunID 本运行在 GitHub 上的 check run；NULL=尚未创建（或退回合并 check）。
+	CheckRunID *int64 `gorm:"column:check_run_id" json:"check_run_id,omitempty"`
+	// ModelInstanceID/ModelName 本运行绑定的模型（一轮多模型并行，每个模型一行）。
+	ModelInstanceID string `gorm:"column:model_instance_id;type:text" json:"model_instance_id,omitempty"`
+	ModelName       string `gorm:"column:model_name;type:text" json:"model_name,omitempty"`
+	// StopAttemptedAt 取消后的远端线程中断尝试（StopThread 只发一次的标记）；
+	// 排队取消与未认领的空串运行为 NULL 且不发。
+	StopAttemptedAt *time.Time `gorm:"column:stop_attempted_at" json:"stop_attempted_at,omitempty"`
 
 	// 外键 CASCADE：删自动化带走全部运行记录；删用户级联（经 automations 或直接）。
 	Automation Automation `gorm:"foreignKey:AutomationID;constraint:OnDelete:CASCADE" json:"-"`
