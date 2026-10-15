@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,7 +42,15 @@ const TRIGGER_TYPE_OPTIONS = [
   { value: "issue_created", label: "Issue 新建" },
   { value: "issue_status_changed", label: "Issue 状态变化" },
   { value: "issue_label_added", label: "Issue 加标签" },
+  { value: "github_pr_opened", label: "GitHub PR 打开" },
+  { value: "github_pr_synchronize", label: "GitHub PR 新提交" },
 ];
+
+export const isPRTrigger = (t: AutomationTriggerType) =>
+  t === "github_pr_opened" || t === "github_pr_synchronize";
+
+const sameModel = (a: AutomationModelSelection, b: AutomationModelSelection) =>
+  a.instance_id === b.instance_id && a.model === b.model;
 
 const TIMEOUT_OPTIONS = [
   { value: "300", label: "5 分钟" },
@@ -118,6 +127,20 @@ export function AutomationEditorDialog({
 }) {
   const set = <K extends keyof AutomationInput>(key: K, value: AutomationInput[K]) =>
     onFormChange({ ...form, [key]: value });
+
+  // toggleModelSelection PR 触发的多模型勾选：(instance_id, model) 不可重复。
+  const toggleModelSelection = (sel: AutomationModelSelection) => {
+    const list = form.model_selections ?? [];
+    if (list.some((s) => sameModel(s, sel))) {
+      set("model_selections", list.filter((s) => !sameModel(s, sel)));
+      return;
+    }
+    if (list.length >= 10) {
+      toast.error("最多选择 10 个模型");
+      return;
+    }
+    set("model_selections", [...list, sel]);
+  };
 
   const {
     data: environments = [],
@@ -201,13 +224,47 @@ export function AutomationEditorDialog({
             <Label>触发方式</Label>
             <OptionSelect
               value={form.trigger_type}
-              onValueChange={(next) =>
-                set("trigger_type", next as AutomationTriggerType)
-              }
+              onValueChange={(next) => {
+                const trigger = (next ?? form.trigger_type) as AutomationTriggerType;
+                onFormChange({
+                  ...form,
+                  trigger_type: trigger,
+                  // 触发通道切换：清理互不兼容的模型选择形态。
+                  model_selection: isPRTrigger(trigger)
+                    ? null
+                    : form.model_selection,
+                  model_selections: isPRTrigger(trigger)
+                    ? (form.model_selections ?? [])
+                    : [],
+                  debounce_seconds: isPRTrigger(trigger)
+                    ? (form.debounce_seconds ?? 60)
+                    : 0,
+                  event_filter: isPRTrigger(trigger) ? null : form.event_filter,
+                });
+              }}
               options={TRIGGER_TYPE_OPTIONS}
               className="w-full"
             />
           </div>
+
+          {isPRTrigger(form.trigger_type) && (
+            <div className="space-y-2">
+              <Label htmlFor="automation-debounce">防抖窗口（秒）</Label>
+              <Input
+                id="automation-debounce"
+                type="number"
+                min={0}
+                max={86400}
+                value={form.debounce_seconds ?? 60}
+                onChange={(e) =>
+                  set("debounce_seconds", Number(e.target.value))
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                窗口内新推送会重置计时，到点只审查最新提交；0 表示立即开审。默认 60。
+              </p>
+            </div>
+          )}
 
           {form.trigger_type === "cron" ? (
             <div className="grid grid-cols-2 gap-3">
@@ -236,6 +293,11 @@ export function AutomationEditorDialog({
                 </p>
               </div>
             </div>
+          ) : isPRTrigger(form.trigger_type) ? (
+            <p className="text-xs text-muted-foreground">
+              GitHub PR 触发不做事件字段过滤：仓库范围由 GitHub App 安装与项目关联决定，
+              draft 与 fork 不审查。
+            </p>
           ) : (
             <EventFilterFields
               triggerType={form.trigger_type}
@@ -270,6 +332,7 @@ export function AutomationEditorDialog({
                     environment_id: next ?? "",
                     t3_project_id: "",
                     model_selection: null,
+                    model_selections: [],
                     workspace: null,
                   })
                 }
@@ -298,6 +361,7 @@ export function AutomationEditorDialog({
                     ...form,
                     t3_project_id: next ?? "",
                     model_selection: null,
+                    model_selections: [],
                     workspace: null,
                   })
                 }
@@ -320,6 +384,47 @@ export function AutomationEditorDialog({
           </div>
 
           <div className="grid grid-cols-2 gap-3">
+            {isPRTrigger(form.trigger_type) ? (
+              <div className="space-y-2">
+                <Label>模型（可多选，每个模型各开一个运行）</Label>
+                <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border p-2">
+                  {providers.flatMap((provider) =>
+                    provider.models.map((model) => {
+                      const sel: AutomationModelSelection = {
+                        instance_id: provider.instanceId,
+                        model: model.slug,
+                      };
+                      const checked = (form.model_selections ?? []).some(
+                        (s) => sameModel(s, sel),
+                      );
+                      return (
+                        <label
+                          key={`${provider.instanceId}::${model.slug}`}
+                          className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/60"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleModelSelection(sel)}
+                          />
+                          <span>
+                            {provider.name} / {model.name}
+                          </span>
+                        </label>
+                      );
+                    }),
+                  )}
+                  {!providers.length && (
+                    <p className="px-1 py-0.5 text-xs text-muted-foreground">
+                      选择 T3 环境与项目后展示可用模型。
+                    </p>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  必须显式选择（不能「项目默认」）；一次触发每个模型并行开一个运行。
+                </p>
+              </div>
+            ) : (
             <div className="space-y-2">
               <Label>模型</Label>
               <OptionSelect
@@ -366,6 +471,7 @@ export function AutomationEditorDialog({
                 选项来自该环境 composer-options；留空用 T3 项目默认模型。
               </p>
             </div>
+            )}
             <div className="space-y-2">
               <Label>工作区</Label>
               <OptionSelect
