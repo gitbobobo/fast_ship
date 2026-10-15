@@ -130,3 +130,71 @@ func (h *AutomationAgentHandler) PublishNotification(c *gin.Context) {
 	}
 	response.SuccessEmpty(c)
 }
+
+// ---- GitHub PR 评审代发（INT-93）：owner/repo/PR/SHA 全部取自运行行 ----
+
+func (h *AutomationAgentHandler) identity(c *gin.Context) *service.RunTokenIdentity {
+	return &service.RunTokenIdentity{
+		UserID: middleware.GetUserID(c),
+		RunID:  middleware.GetRunID(c),
+	}
+}
+
+// GetPullRequest GET /api/automation-agent/pull-request
+func (h *AutomationAgentHandler) GetPullRequest(c *gin.Context) {
+	result, err := h.agentService.AgentPullRequest(c.Request.Context(), h.identity(c))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// GetPullRequestDiff GET /api/automation-agent/pull-request/diff
+func (h *AutomationAgentHandler) GetPullRequestDiff(c *gin.Context) {
+	result, err := h.agentService.AgentPullRequestDiff(c.Request.Context(), h.identity(c))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// ListPullRequestComments GET /api/automation-agent/pull-request/comments
+func (h *AutomationAgentHandler) ListPullRequestComments(c *gin.Context) {
+	items, err := h.agentService.AgentPullRequestComments(c.Request.Context(), h.identity(c))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"items": items})
+}
+
+// SubmitPullRequestReview POST /api/automation-agent/pull-request/review
+func (h *AutomationAgentHandler) SubmitPullRequestReview(c *gin.Context) {
+	var req api.AgentPullRequestReviewRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
+		return
+	}
+	result, err := h.agentService.AgentSubmitPullRequestReview(c.Request.Context(), h.identity(c), &req)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// UpdatePullRequestCheck POST /api/automation-agent/pull-request/check
+func (h *AutomationAgentHandler) UpdatePullRequestCheck(c *gin.Context) {
+	var req api.AgentCheckUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
+		return
+	}
+	if err := h.agentService.AgentUpdateCheck(c.Request.Context(), h.identity(c), &req); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.SuccessEmpty(c)
+}

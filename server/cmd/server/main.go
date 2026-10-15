@@ -16,6 +16,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -78,6 +79,9 @@ var autoMigrateModels = []interface{}{
 	&model.AutomationRun{},
 	&model.AutomationRunToken{},
 	&model.Notification{},
+	&model.GitHubWebhookDelivery{},
+	&model.GitHubPRDebounce{},
+	&model.GitHubPRReview{},
 }
 
 func main() {
@@ -157,6 +161,8 @@ func main() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_runs_project_last_entry ON log_runs(project_id, last_entry_at DESC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
+	// webhook 反查关联项目（owner/repo 大小写不敏感）。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_projects_github_repo ON projects(github_owner, github_repo)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_environments_user_name ON t3_environments(user_id, name)")
 
@@ -167,8 +173,17 @@ func main() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_user_triggered ON automation_runs(user_id, triggered_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_triggered ON automation_runs(automation_id, triggered_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_active_deadline ON automation_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
-	// 同一自动化至多一个活动运行（未结束）或一个待后置运行——重入/删除约束的数据库兜底。
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once ON automation_runs(automation_id) WHERE finished_at IS NULL OR post_state = 'pending'")
+	// 同一自动化至多一个活动运行（未结束）或一个待后置运行——重入/删除约束的
+	// 数据库兜底。只约束 cron/issue 触发：GitHub PR 触发（INT-93）一轮多模型
+	// 并行 + 排队，允许同一规则多行未结束。必须 DROP 再 CREATE：
+	// CREATE IF NOT EXISTS 不会替换已有定义（INT-90 存量库升级）。
+	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
+ON automation_runs(automation_id)
+WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
+  AND (finished_at IS NULL OR post_state = 'pending')`)
+	// PR 审查：按 repo+pr+sha 找同一轮运行（SHA 变化取消、轮次聚合）。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
@@ -263,8 +278,35 @@ func main() {
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)
 	automationService := service.NewAutomationService(db, automationRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zapLogger)
+
+	// GitHub App（INT-93）：真实安装令牌客户端或 debug 自测 fake；凭据缺失时
+	// PR 代发端点报错，webhook 端点因验签密钥为空一律 503。
+	var ghPR githubapp.PullRequestGitHub
+	var ghFake *githubapp.Fake
+	if cfg.GitHubApp.Fake && cfg.Server.Mode == "debug" {
+		ghFake = githubapp.NewFake()
+		ghPR = ghFake
+		zapLogger.Info("GitHub App fake 模式（debug 自测）")
+	} else if cfg.GitHubApp.AppID != "" && cfg.GitHubApp.PrivateKeyPath != "" {
+		creds := &githubapp.AppCredentials{
+			AppID:          cfg.GitHubApp.AppID,
+			PrivateKeyPath: cfg.GitHubApp.PrivateKeyPath,
+		}
+		ghPR = githubapp.NewClient(githubapp.NewInstallationTokenStore(creds))
+	}
 	automationAgentService := service.NewAutomationAgentService(db, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, zapLogger)
+	automationAgentService.SetPRGitHub(ghPR)
 	automationScheduler := service.NewAutomationScheduler(db, automationRepo, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, issueRepo, cfg, zapLogger)
+	automationAgentService.SetKick(automationScheduler.Kick)
+
+	// PR 评审协调面（INT-93）：webhook 事务、防抖开轮、排队提升、评论/check 同步。
+	prReviewService := service.NewPRReviewService(db,
+		automationRepo, automationRunRepo, projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(db),
+		repository.NewGitHubPRDebounceRepository(db),
+		repository.NewGitHubPRReviewRepository(db),
+		ghPR, t3ThreadsService, notificationSink, cfg, zapLogger)
+	automationScheduler.UsePRReview(prReviewService)
 
 	// Issue 写路径接入事件出口：事务内匹配自动化并预写运行（INT-90）。
 	issueService.SetIssueEventSink(automationService)
@@ -293,6 +335,7 @@ func main() {
 	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
+	githubWebhookHandler := handler.NewGitHubWebhookHandler(prReviewService, cfg.GitHubApp.WebhookSecret, ghFake)
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -359,7 +402,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, githubWebhookHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

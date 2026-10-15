@@ -5,7 +5,9 @@ Agent 用一次性运行令牌回报开始/结束，结束后可选自动 settle
 
 **边界**：Fast Ship 只负责触发、上下文、运行账本、状态回报与后置操作。
 不做内置规则、不做规则树/表达式过滤、不绑定具体 issue、不改 INT-85 客户端语义。
-GitHub PR/推送/CI 事件不在本期。单进程部署假设（无分布式队列）。
+GitHub PR 评审触发（`github_pr_opened` / `github_pr_synchronize`）见
+[pr-review.md](pr-review.md)（INT-93）；推送/CI 等其余事件不在本期。
+单进程部署假设（无分布式队列）。
 
 界面：自动化在侧边栏一级入口 `/automations`（旧 `/settings/automations` 重定向过来）；
 站内通知在侧边栏 `/notifications`，未读数同时出现在该入口和顶栏铃铛。
@@ -16,8 +18,8 @@ GitHub PR/推送/CI 事件不在本期。单进程部署假设（无分布式队
 
 | 表 | 关键列 | 说明 |
 | --- | --- | --- |
-| `automations` | `enabled`、`trigger_type(cron\|issue_created\|issue_status_changed\|issue_label_added)`、`cron_expression`、`timezone`、`next_run_at`、可空 `issue_project_id`、`event_filter_json`、`prompt_template`、可空 `model_selection_json`、`runtime_mode`、`workspace_json`、`timeout_seconds`、`post_action`、`post_on_timeout` | 触发配置与线程创建参数。时区是独立 IANA 字段（API 未传默认 UTC），**不**写进表达式。 |
-| `automation_runs` | `trigger_key`（UNIQUE 于 automation）、`trigger_context_json`、`config_snapshot_json`、预分配 `environment_id/t3_project_id/thread_id/launch_command_id/initial_message_id`、`status(dispatched\|running\|completed\|failed\|timed_out，未确认派发时为空串)`、`deadline_at`、`post_state/pending` 系列 | 一次触发的完整账本。`dispatched_at` 仅在启动 RPC 结果确认（launch 成功或 agent 回报开始）时写入，为空 = 线程是否建成未确认。 |
+| `automations` | `enabled`、`trigger_type(cron\|issue_created\|issue_status_changed\|issue_label_added\|github_pr_opened\|github_pr_synchronize)`、`cron_expression`、`timezone`、`next_run_at`、可空 `issue_project_id`、`event_filter_json`、`prompt_template`、可空 `model_selection_json`、`model_selections_json`、`debounce_seconds`（仅 PR 触发，cron/issue 恒 0）、`runtime_mode`、`workspace_json`、`timeout_seconds`、`post_action`、`post_on_timeout` | 触发配置与线程创建参数。时区是独立 IANA 字段（API 未传默认 UTC），**不**写进表达式。 |
+| `automation_runs` | `trigger_key`（UNIQUE 于 automation）、`trigger_context_json`、`config_snapshot_json`、预分配 `environment_id/t3_project_id/thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled，未确认派发时为空串)`、`deadline_at`、`post_state/pending` 系列、PR 专用列 `repo_full_name/pr_number/head_sha/round_number/installation_id/check_run_id/model_instance_id/model_name/stop_attempted_at` | 一次触发的完整账本。`dispatched_at` 仅在启动 RPC 结果确认（launch 成功或 agent 回报开始）时写入，为空 = 线程是否建成未确认。 |
 | `automation_run_tokens` | `run_id` PK、`token_hash`（UNIQUE）、`expires_at`、`consumed_at` | 每次运行一个回报令牌，只存 SHA-256。 |
 | `notifications` | `kind`、`dedup_key`（UNIQUE 于 user）、`state_fingerprint`、`read_at` | environment/thread/run 为弱引用（无外键），目标删除后通知保留。 |
 
@@ -28,8 +30,11 @@ T3 项目/线程/命令 ID 与 Issue ID 不建 FK（远端生命周期不由本�
 关键索引（`cmd/server/main.go` 手工登记）：
 
 - `automation_runs UNIQUE(automation_id, trigger_key)` —— 触发幂等；
-- **部分唯一** `automation_runs(automation_id) WHERE finished_at IS NULL OR post_state='pending'`
-  —— 同一自动化至多一个活动/待后置运行，是重入与删除约束的数据库兜底；
+- **部分唯一** `automation_runs(automation_id) WHERE trigger_type IN
+  (cron/issue 三类) AND (finished_at IS NULL OR post_state='pending')`
+  —— cron/issue 同一自动化至多一个活动/待后置运行，是重入与删除约束的数据库
+  兜底；PR 触发（INT-93）不受此约束（一轮多模型 + 排队）；
+- `automation_runs(repo_full_name, pr_number, head_sha)` —— PR 审查按轮聚合；
 - `notifications UNIQUE(user_id, dedup_key)` + 未读部分索引。
 
 **快照纪律**：`config_snapshot_json` 存创建运行时的配置（模板原文、模型、工作区、

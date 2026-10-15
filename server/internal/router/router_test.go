@@ -859,7 +859,12 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_project_key ON screenshot_screens(project_id, screen_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once ON automation_runs(automation_id) WHERE finished_at IS NULL OR post_state = 'pending'")
+	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
+ON automation_runs(automation_id)
+WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
+  AND (finished_at IS NULL OR post_state = 'pending')`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 
 	cfg := &config.Config{
@@ -960,9 +965,10 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
+	githubWebhookHandler := handler.NewGitHubWebhookHandler(nil, "", nil)
 
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, githubWebhookHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:     r,

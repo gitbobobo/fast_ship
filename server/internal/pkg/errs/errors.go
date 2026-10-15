@@ -35,6 +35,7 @@ var (
 	ErrTokenBlacklist      = New(40104, "Token 已被注销")
 	ErrRefreshTokenInvalid = New(40105, "Refresh Token 无效或已过期")
 	ErrRunTokenInvalid     = New(40106, "运行令牌无效、已过期或已消费")
+	ErrWebhookSignature    = New(40107, "Webhook 签名无效或缺失")
 )
 
 // 权限错误 40300-40399
@@ -97,6 +98,7 @@ var (
 	ErrAutomationRunReportConflict = New(40917, "运行回报冲突：运行已结束或回报与已受理的结束回报不一致")
 	ErrPageBoundaryInvalid         = New(40918, "分页边界条目已不存在，请从头重新拉取")
 	ErrAutomationActive            = New(40919, "自动化有进行中的运行（或后置操作待执行），暂不能删除")
+	ErrRunNotPRReview              = New(40920, "运行不是进行中的 GitHub PR 审查，无法使用 PR 端点")
 )
 
 // 前置条件未满足 41200-41299
