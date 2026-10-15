@@ -86,7 +86,8 @@ type PullRequestGitHub interface {
 	SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) error
 }
 
-// ErrForbidden GitHub 返回 403（如 Checks API 未授权）：调用方据此退回合并 check。
+// ErrForbidden GitHub 返回 403（如 Checks API 未授权）：调用方据此退回合并 check；
+// 合并 check 同样 403 则跳过 check、仍同步评论。
 var ErrForbidden = errors.New("githubapp: forbidden")
 
 // StatusError 非 2xx 响应。

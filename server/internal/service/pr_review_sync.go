@@ -180,6 +180,11 @@ func (s *PRReviewService) pushCancelledOldSHAChecks(ctx context.Context, rev *mo
 	for i := range old {
 		in := checkUpdateForRun(old[i])
 		if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, *old[i].CheckRunID, in); err != nil {
+			if githubapp.IsForbidden(err) {
+				s.logger.Warn("更新旧 SHA check 403，跳过其余 check",
+					zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
+				return nil
+			}
 			return fmt.Errorf("更新旧轮 check 失败: %w", err)
 		}
 	}
@@ -205,7 +210,8 @@ func (s *PRReviewService) ensureChecksAndPush(ctx context.Context, rev *model.Gi
 }
 
 // ensureCheckRuns 为缺 check 的运行创建 check run。GitHub 返回 403（Checks API
-// 未授权）时退回整轮一个 `Fast Ship review` 合并 check。
+// 未授权）时退回整轮一个 `Fast Ship review` 合并 check。合并 check 同样 403
+// 时跳过 check（不再重试同一端点），调用方仍推评论。
 func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHubPRReview, runs []model.AutomationRun) error {
 	mergedID, mergedUsed := s.roundMergedCheckID(runs)
 	var pending []model.AutomationRun
@@ -230,13 +236,19 @@ func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHub
 			if !githubapp.IsForbidden(err) {
 				return fmt.Errorf("创建 check run 失败: %w", err)
 			}
-			// 403 → 整轮退回一个合并 check（先记 mergedUsed，其余运行直接挂它）。
+			// 403 → 整轮退回一个合并 check。合并 check 若同样 403（App 没有
+			// Checks 写权限），不再重试同一端点：跳过 check，让调用方继续推评论。
 			s.logger.Warn("Checks API 403，退回整轮合并 check",
 				zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
 			if mergedID == 0 {
 				id, err := s.gh.CreateCheckRun(ctx, rev.InstallationID, rev.RepoFullName,
 					"Fast Ship review", run.HeadSHA, "round:"+itoa10(rev.RoundNumber))
 				if err != nil {
+					if githubapp.IsForbidden(err) {
+						s.logger.Warn("Checks API 全部 403，跳过 check，仍同步评论",
+							zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
+						return nil
+					}
 					return fmt.Errorf("创建合并 check run 失败: %w", err)
 				}
 				mergedID = id
@@ -316,12 +328,22 @@ func (s *PRReviewService) pushCheckStates(ctx context.Context, rev *model.GitHub
 			run := group[0]
 			in := checkUpdateForRun(run)
 			if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
+				if githubapp.IsForbidden(err) {
+					s.logger.Warn("更新 check 403，跳过其余 check",
+						zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
+					return nil
+				}
 				return fmt.Errorf("更新 check run 失败: %w", err)
 			}
 			continue
 		}
 		in := checkUpdateForGroup(group)
 		if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
+			if githubapp.IsForbidden(err) {
+				s.logger.Warn("更新合并 check 403，跳过其余 check",
+					zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
+				return nil
+			}
 			return fmt.Errorf("更新合并 check run 失败: %w", err)
 		}
 	}

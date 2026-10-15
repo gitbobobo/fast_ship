@@ -510,6 +510,11 @@ func (s *PRReviewService) promoteQueuedPRRunsTx(tx *gorm.DB, userID string, now 
 		if n == 0 {
 			return nil // 状态被并发改写（防御；单连接事务内不应发生）
 		}
+		// 跨 PR 提升：PR A 释放名额后 PR B 从 queued 变为待认领，必须置 B 的
+		// sync_pending，否则评论/check 会一直停在「排队中」直到 B 自己终态。
+		if err := markPRReviewPendingTx(tx, &run, now); err != nil {
+			return err
+		}
 	}
 }
 

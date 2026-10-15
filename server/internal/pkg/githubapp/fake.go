@@ -15,14 +15,15 @@ import (
 // webhook 事务期间 GitHub 调用数为 0 的断言靠 CallCounts。
 
 type Fake struct {
-	mu          sync.Mutex
-	prs         map[string]map[int]*PullRequest  // repo -> number -> PR
-	comments    map[string]map[int][]fakeComment // repo -> number -> issue comments
-	reviews     map[string][]fakeComment         // repo -> review comments
-	checks      map[string]fakeCheck             // repo -> latest check per id
-	nextID      int64
-	diffText    string
-	forbidCheck bool // CreateCheckRun 返回 403（退回合并 check 的分支）
+	mu             sync.Mutex
+	prs            map[string]map[int]*PullRequest  // repo -> number -> PR
+	comments       map[string]map[int][]fakeComment // repo -> number -> issue comments
+	reviews        map[string][]fakeComment         // repo -> review comments
+	checks         map[string]fakeCheck             // repo -> latest check per id
+	nextID         int64
+	diffText       string
+	forbidCheck    bool // 按模型 CreateCheckRun 返回 403（退回合并 check）
+	forbidAllCheck bool // 全部 Create/UpdateCheckRun 返回 403（App 无 Checks 权限）
 
 	Calls []FakeCall
 }
@@ -103,11 +104,18 @@ func (f *Fake) SetDiff(text string) {
 	f.diffText = text
 }
 
-// ForbidChecks 让 CreateCheckRun 返回 403（验证退回合并 check）。
+// ForbidChecks 让按模型的 CreateCheckRun 返回 403（验证退回合并 check）。
 func (f *Fake) ForbidChecks(v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.forbidCheck = v
+}
+
+// ForbidAllChecks 让全部 check 写接口返回 403（App 未授权 Checks）。
+func (f *Fake) ForbidAllChecks(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forbidAllCheck = v
 }
 
 // Comments 当前 issue 评论快照（repo+pr）。
@@ -244,6 +252,9 @@ func (f *Fake) CreateCheckRun(ctx context.Context, installationID int64, repoFul
 	f.record("CreateCheckRun", repoFullName, 0, name)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.forbidAllCheck {
+		return 0, ErrForbidden
+	}
 	// ForbidChecks 只拒绝按模型的 check 名；合并 check（退回形态）保持可用，
 	// 与「403 只影响 Checks 按模型粒度」的真实场景一致。
 	if f.forbidCheck && name != "Fast Ship review" {
@@ -259,6 +270,9 @@ func (f *Fake) UpdateCheckRun(ctx context.Context, installationID int64, repoFul
 	f.record("UpdateCheckRun", repoFullName, int(checkRunID%100000), fmt.Sprintf("%s/%s/%s", in.Status, in.Conclusion, in.Title))
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.forbidAllCheck {
+		return ErrForbidden
+	}
 	key := fmt.Sprintf("%s/%d", repoFullName, checkRunID)
 	c, ok := f.checks[key]
 	if !ok {
