@@ -52,7 +52,7 @@
 
 `(project_id, screen_key, platform, locale, theme)` 已存在时上传 = 覆盖：替换文件、更新宽高/大小/上传时间/上传者，不新增行；不存在则新建。并发首传同一新变体两边都会错过 `FindScreenByVariant` 并撞表达式唯一索引，上传事务按 `LogRepository.UploadRunTx` 的惯例做有界重试（最多 5 次、线性退避 20ms）；重试上限内仍失败才返回 ErrInternal 并清理已落盘文件。
 
-覆盖后该截图上全部 `open` 标注置 `outdated=true`（「确认保留」清零；再次覆盖重新置位）；`resolved` 标注不受影响。表单维度字段沿用 presence 语义：字段出现才生效（空串 = 清除为未标注），不出现保持原值；`title` 非空才覆盖。
+覆盖后该截图上全部 `open` 标注置 `outdated=true`（「确认保留」清零；再次覆盖重新置位）；`resolved` 标注不受影响。表单维度字段沿用 presence 语义：字段出现才生效（空串 = 清除为未标注），不出现按「保持原值」继承——按已给出的维度过滤同 `screen_key` 既有截图，恰有一个命中即继承其缺席维度并覆盖该行，命中多个变体（省略无法定位唯一目标）返回 40001，零个命中按缺席维度新建；`title` 非空才覆盖。
 
 ## 迁移（INT-99）
 
@@ -95,7 +95,7 @@ Issue 详情响应内嵌 `screenshot_annotations`（`IssueService.Get`，无关�
 
 表单字段存在性语义（service 层 `*string` 表达存在性）：
 
-- `platform`/`locale`/`theme` 字段出现 → 规范化后写入（空串 = 清除为 NULL）；未携带则按 NULL 寻址变体（与「未标注」变体匹配）。
+- `platform`/`locale`/`theme` 字段出现 → 规范化后写入（空串 = 清除为 NULL）；未携带则按「保持原值」继承（`resolveUploadVariants`）：按已给出的维度过滤同 `screen_key` 既有截图，恰有一个命中即继承其缺席维度并覆盖该行，命中多个变体返回 40001（省略无法定位唯一目标），零个命中按缺席维度新建（全新 `screen_key` 即未标注新行）。
 - `title` 非空才覆盖 `screen.title`；空串/未携带保持不变（上传表单无法清空 title，清空走 PATCH）。
 
 文件先落临时路径（`tmp-<uuid>.<ext>`），事务内确认 screen 后 rename 到正式路径（放在 DB 写之后、提交之前：DB 失败不动磁盘，rename 失败事务回滚）；提交成功后删被替换的旧文件，改名后提交失败由调用方删除孤儿新文件。
