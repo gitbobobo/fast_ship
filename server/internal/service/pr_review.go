@@ -253,6 +253,9 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 	if stale {
 		return nil
 	}
+	if err := s.reviews.RecordSeenSHATx(tx, repoFullName, p.Number, head.SHA, now); err != nil {
+		return err
+	}
 
 	// SHA 变化：该 PR 下旧 SHA 的全部在途运行一律取消（跨规则跨用户跨模型），
 	// 名额随终态释放；不登记 settle/archive。顺带丢掉旧 SHA 的防抖行——opened
@@ -314,24 +317,32 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 	return nil
 }
 
-// isStalePRHeadTx 判断迟到 webhook 的 head SHA 是否已经过期。无评审账 → 接受；
-// 账上 HeadSHA 就是本次 SHA → 接受（同提交重投）；其余 opened 一律拒绝（opened
-// 每个 PR 只开一次，迟到的 opened 不能推翻后续 synchronize）；synchronize 若该
-// SHA 已有任意运行（含已取消）也拒绝——force-push 回已审过的 SHA 不再开轮。
+// isStalePRHeadTx 判断迟到 webhook 的 head SHA 是否已经过期。当前 head 取评审账
+// 或未开火的防抖行；本次 SHA 就是当前 head → 接受。已经受理过、但不是当前 head
+// 的 SHA 一律拒绝（含防抖窗口内还没有 review/运行的迟到投递，以及 force-push
+// 回已见过的 SHA）。其余视为新 SHA。
 func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action string) (bool, error) {
-	var rev model.GitHubPRReview
-	err := tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).First(&rev).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
+	latest, err := currentPRHeadSHATx(tx, repoFullName, prNumber)
 	if err != nil {
 		return false, err
 	}
-	if rev.HeadSHA == sha {
+	if latest == sha {
 		return false, nil
 	}
-	if action == "opened" {
+	var seen int64
+	if err := tx.Model(&model.GitHubPRSeenSHA{}).
+		Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?", repoFullName, prNumber, sha).
+		Count(&seen).Error; err != nil {
+		return false, err
+	}
+	if seen > 0 {
 		return true, nil
+	}
+	if action == "opened" && latest != "" {
+		return true, nil
+	}
+	if latest == "" {
+		return false, nil
 	}
 	var n int64
 	if err := tx.Model(&model.AutomationRun{}).
@@ -340,6 +351,28 @@ func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// currentPRHeadSHATx 当前受理的 head：已开轮看评审账，否则看最新防抖行。
+func currentPRHeadSHATx(tx *gorm.DB, repoFullName string, prNumber int) (string, error) {
+	var rev model.GitHubPRReview
+	err := tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).First(&rev).Error
+	if err == nil && rev.HeadSHA != "" {
+		return rev.HeadSHA, nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", err
+	}
+	var d model.GitHubPRDebounce
+	err = tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).
+		Order("updated_at DESC").First(&d).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return d.HeadSHA, nil
 }
 
 // prRuleMatch 命中的规则与其宿主项目。

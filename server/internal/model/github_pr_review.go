@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-// GitHub PR 自动评审（INT-93）的三张支撑表。均不含指向 GitHub 的外键——
+// GitHub PR 自动评审（INT-93）的支撑表。均不含指向 GitHub 的外键——
 // 远端对象（delivery、PR、check）的生命周期由 GitHub 管理，这里只存账。
 
 // GitHubWebhookDelivery webhook 幂等账：X-GitHub-Delivery 为 PK，重复投递插入
@@ -53,3 +53,15 @@ type GitHubPRReview struct {
 }
 
 func (GitHubPRReview) TableName() string { return "github_pr_reviews" }
+
+// GitHubPRSeenSHA 已受理过的 PR head SHA。防抖窗口内还没有 github_pr_reviews
+// 行、也没有运行时，靠这张表拒绝迟到的旧 SHA，避免 DeleteStaleSHATx 把当前
+// debounce 删掉。force-push 回已见过的 SHA 不再开轮。
+type GitHubPRSeenSHA struct {
+	RepoFullName string    `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
+	PRNumber     int       `gorm:"column:pr_number;primaryKey" json:"pr_number"`
+	HeadSHA      string    `gorm:"column:head_sha;type:text;primaryKey" json:"head_sha"`
+	SeenAt       time.Time `gorm:"column:seen_at;not null" json:"seen_at"`
+}
+
+func (GitHubPRSeenSHA) TableName() string { return "github_pr_seen_shas" }

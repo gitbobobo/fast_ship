@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// GitHub PR 自动评审（INT-93）三张支撑表的仓储。全部走调用方传入的 tx/db，
+// GitHub PR 自动评审（INT-93）支撑表的仓储。全部走调用方传入的 tx/db，
 // 与自动化调度共用「MaxOpenConns=1、事务内只碰 tx」的纪律。
 
 type GitHubWebhookDeliveryRepository struct {
@@ -159,6 +159,17 @@ func (r *GitHubPRReviewRepository) ClearRunCheckRunIDTx(tx *gorm.DB, runID strin
 	return tx.Model(&model.AutomationRun{}).
 		Where("id = ?", runID).
 		Update("check_run_id", nil).Error
+}
+
+// RecordSeenSHATx 记下已受理的 head SHA；重复插入忽略。
+func (r *GitHubPRReviewRepository) RecordSeenSHATx(tx *gorm.DB, repoFullName string, prNumber int, sha string, now time.Time) error {
+	err := tx.Create(&model.GitHubPRSeenSHA{
+		RepoFullName: repoFullName, PRNumber: prNumber, HeadSHA: sha, SeenAt: now,
+	}).Error
+	if isUniqueConstraintError(err) {
+		return nil
+	}
+	return err
 }
 
 // RoundNumberForHeadSHATx 同一 SHA 共用一轮：该 repo+pr+sha 已有运行则复用其

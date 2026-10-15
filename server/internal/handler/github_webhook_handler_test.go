@@ -51,7 +51,7 @@ func setupWebhookHandlerEnv(t *testing.T, secret string) *webhookHandlerEnv {
 		&model.User{}, &model.Project{}, &model.ApiKey{}, &model.T3Environment{},
 		&model.JWTBlacklist{}, &model.RefreshToken{},
 		&model.Automation{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
-		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{},
+		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{}, &model.GitHubPRSeenSHA{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -428,5 +428,37 @@ func TestAgentPR_UpdateCheckMarksPendingIfCancelledDuringWrite(t *testing.T) {
 	}
 	if !rev.SyncPending {
 		t.Fatal("expected sync_pending after cancel-during-write")
+	}
+}
+
+// TestAgentPR_SubmitReviewRejectsCancelledRun 取消后不再提交 superseded SHA 的 review。
+func TestAgentPR_SubmitReviewRejectsCancelledRun(t *testing.T) {
+	env := setupWebhookHandlerEnv(t, "whsec")
+	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
+	if err := env.db.Create(user).Error; err != nil {
+		t.Fatalf("user: %v", err)
+	}
+	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
+
+	w := env.postJSONWithToken("/api/automation-agent/pull-request/review", token, []byte(`{"event":"COMMENT","body":"ok"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("live review = %d %s", w.Code, w.Body.String())
+	}
+	before := env.fake.CallCounts()["SubmitReview"]
+
+	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
+		Updates(map[string]any{
+			"status":      model.AutomationRunCancelled,
+			"finished_at": time.Now().UTC(),
+			"error_code":  "superseded",
+		}).Error; err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	w = env.postJSONWithToken("/api/automation-agent/pull-request/review", token, []byte(`{"event":"REQUEST_CHANGES","body":"stale"}`))
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "40106") {
+		t.Fatalf("cancelled review = %d %s, want 401/40106", w.Code, w.Body.String())
+	}
+	if after := env.fake.CallCounts()["SubmitReview"]; after != before {
+		t.Fatalf("SubmitReview after cancel = %d, want %d", after, before)
 	}
 }
