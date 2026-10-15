@@ -25,17 +25,14 @@ export interface Frequency {
   time: string;
   /** weekly：选中的星期（0=周日 … 6=周六）。 */
   weekdays: number[];
-  /** monthly：第几天；"last" 语义为月末（落到 31 日，小月不触发）。 */
-  dayOfMonth: number | "last";
+  /** monthly：每月第几天（1–31）。 */
+  dayOfMonth: number;
 }
 
 export const MINUTE_STEP_OPTIONS = [1, 2, 5, 10, 15, 20, 30] as const;
 export const HOUR_STEP_OPTIONS = [1, 2, 3, 4, 6, 8, 12] as const;
 export const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0] as const; // 周一 … 周日
-export const DAY_OF_MONTH_OPTIONS = [
-  ...Array.from({ length: 31 }, (_, i) => i + 1),
-  "last" as const,
-];
+export const DAY_OF_MONTH_OPTIONS = Array.from({ length: 31 }, (_, i) => i + 1);
 
 export const defaultFrequency = (): Frequency => ({
   kind: "daily",
@@ -48,11 +45,19 @@ export const defaultFrequency = (): Frequency => ({
 
 const TIME_RE = /^(\d{1,2}):(\d{2})$/;
 
-/** 频率 → 五字段表达式；无法生成（如每周未选日）返回 null。 */
+/** 频率 → 五字段表达式；无法生成（如每周未选日、时间非法）返回 null。 */
 export function cronFromFrequency(f: Frequency): string | null {
+  const needsTime =
+    f.kind === "daily" ||
+    f.kind === "weekly" ||
+    f.kind === "monthly" ||
+    f.kind === "weekdays";
   const time = TIME_RE.exec(f.time ?? "");
-  const m = time ? String(Number(time[2])) : "0";
-  const h = time ? String(Number(time[1])) : "9";
+  const hour = time ? Number(time[1]) : NaN;
+  const minute = time ? Number(time[2]) : NaN;
+  if (needsTime && (!time || hour > 23 || minute > 59)) return null;
+  const m = time ? String(minute) : "0";
+  const h = time ? String(hour) : "9";
   switch (f.kind) {
     case "minutes":
       return f.everyMinutes === 1
@@ -70,7 +75,7 @@ export function cronFromFrequency(f: Frequency): string | null {
       return `${m} ${h} * * ${days.sort((a, b) => a - b).join(",")}`;
     }
     case "monthly":
-      return `${m} ${h} ${f.dayOfMonth === "last" ? 31 : f.dayOfMonth} * *`;
+      return `${m} ${h} ${f.dayOfMonth} * *`;
     case "weekdays":
       return `${m} ${h} * * 1-5`;
     case "custom":
@@ -80,7 +85,13 @@ export function cronFromFrequency(f: Frequency): string | null {
 
 const isStar = (s: string) => s === "*" || s === "?";
 const isInt = (s: string) => /^\d+$/.test(s);
-const stepMatch = (s: string) => /^\*\/(\d+)$/.exec(s);
+/** 与「星号步进」等价的写法：星号/N、0/N（robfig 展开为 0-max）、0-max/N。 */
+const stepMatch = (s: string, max: number) => {
+  const m = /^(\*|0|0-\d+)\/(\d+)$/.exec(s);
+  if (!m) return null;
+  if (m[1] !== "*" && m[1] !== "0" && m[1] !== `0-${max}`) return null;
+  return Number(m[2]);
+};
 
 /**
  * 表达式 → 频率还原。只能还原可视化层能生成的形态（允许 * 与 ? 互换、
@@ -90,24 +101,28 @@ export function frequencyFromCron(expression: string): Frequency | null {
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5) return null;
   const [mi, ho, dom, mo, dow] = fields;
-  if (mo !== "*") return null;
+  if (!isStar(mo)) return null;
   const base = defaultFrequency();
 
   if (isStar(dom) && isStar(dow)) {
     // 时字段放开：分钟级（*/N）或整点每小时（0 *）
     if (isStar(ho)) {
       if (isStar(mi)) return { ...base, kind: "minutes", everyMinutes: 1 };
-      const s = stepMatch(mi);
-      if (s && MINUTE_STEP_OPTIONS.includes(Number(s[1]) as never)) {
-        return { ...base, kind: "minutes", everyMinutes: Number(s[1]) };
+      const s = stepMatch(mi, 59);
+      if (s !== null && (MINUTE_STEP_OPTIONS as readonly number[]).includes(s)) {
+        return { ...base, kind: "minutes", everyMinutes: s };
       }
       // "0 * * * *" = 每小时整点；"5 * * * *" 等不在可视化范围 → null
       return mi === "0" ? { ...base, kind: "hours", everyHours: 1 } : null;
     }
     // 每隔 N 小时：0 */N * * *
-    const s = stepMatch(ho);
-    if (mi === "0" && s && HOUR_STEP_OPTIONS.includes(Number(s[1]) as never)) {
-      return { ...base, kind: "hours", everyHours: Number(s[1]) };
+    const s = stepMatch(ho, 23);
+    if (
+      mi === "0" &&
+      s !== null &&
+      (HOUR_STEP_OPTIONS as readonly number[]).includes(s)
+    ) {
+      return { ...base, kind: "hours", everyHours: s };
     }
   }
 
@@ -183,11 +198,6 @@ export function describeFrequency(f: Frequency, locale: UiLocale): string {
       return `Every ${names.join(", ")} at ${t}`;
     }
     case "monthly": {
-      if (f.dayOfMonth === "last") {
-        return zh
-          ? `每月最后一天 ${t}（按 31 日触发，没有 31 日的月份不运行）`
-          : `Monthly on the last day at ${t} (fires on the 31st; months without a 31st are skipped)`;
-      }
       const skip = f.dayOfMonth >= 29;
       if (zh) return `每月 ${f.dayOfMonth} 日 ${t}${skip ? "（没有该日的月份不运行）" : ""}`;
       return `Monthly on day ${f.dayOfMonth} at ${t}${skip ? " (months without it are skipped)" : ""}`;
@@ -214,9 +224,22 @@ export function describeCronExpression(
   if (restored) return describeFrequency(restored, locale) + tzSuffix;
   if (!parseCronExpression(expression).ok) return null;
   try {
-    return cronstrue.toString(expression.trim(), {
-      locale: locale === "zh" ? "zh_CN" : "en",
-    }) + tzSuffix;
+    // cronstrue 不认 `?`（robfig 里 ?=*），先归一化再描述。
+    const normalized = expression.trim().replace(/\?/g, "*");
+    const parts = normalized.split(/\s+/);
+    // dom/dow 都非星在 robfig 是「或」语义；cronstrue 中文译「或者」正确，
+    // 英文恒译 "and"（与选项无关），给英文读者补消歧注。
+    const orNote =
+      parts.length === 5 && !isStar(parts[2]) && !isStar(parts[4]) && locale === "en"
+        ? " (day-of-month OR day-of-week)"
+        : "";
+    return (
+      cronstrue.toString(normalized, {
+        locale: locale === "zh" ? "zh_CN" : "en",
+      }) +
+      orNote +
+      tzSuffix
+    );
   } catch {
     return null;
   }

@@ -198,8 +198,14 @@ describe("时区工具", () => {
     expect(isValidTimezone("UTC")).toBe(true);
     expect(isValidTimezone("Asia/Shanghai")).toBe(true);
     expect(isValidTimezone("")).toBe(true);
+    expect(isValidTimezone("Local")).toBe(true); // Go 合法，浏览器解析本机时区
     expect(isValidTimezone("Beijing")).toBe(false);
     expect(isValidTimezone("UTC+8")).toBe(false);
+  });
+
+  it("effectiveTimezone：Local 解析为本机时区", () => {
+    const sys = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(effectiveTimezone("Local")).toBe(sys ?? "UTC");
   });
 
   it("timezoneOptions 含 UTC 与常见时区", () => {
@@ -227,6 +233,29 @@ describe("整日被跳过的时区不挂起（robfig 会死循环的缺口）", 
       // runs[1] = 12-31 09:00（+14）
       expect(new Date(r.runs[0]).toISOString()).toBe("2011-12-29T19:00:00.000Z");
       expect(new Date(r.runs[1]).toISOString()).toBe("2011-12-30T19:00:00.000Z");
+    }
+  });
+});
+
+describe("空字段集立即返回（robfig 接受但 5 年扫不出结果）", () => {
+  // ", * * * *"：逗号空段被 FieldsFunc 丢弃 → 分钟集为空，robfig 同样解析成功。
+  it("空分钟集表达式合法且立即返回无运行", () => {
+    const parsed = parseCronExpression(", * * * *");
+    expect(parsed.ok).toBe(true);
+    const started = Date.now();
+    const r = nextCronRuns(", * * * *", "UTC", 3);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.runs).toEqual([]);
+  });
+
+  it("空日字段在非星号语义下仍可经周字段命中", () => {
+    // "0 9 , * 5" = 每周五 09:00：dom 空但非 star → OR 语义由 dow 命中。
+    const r = nextCronRuns("0 9 , * 5", "UTC", 1, Date.UTC(2026, 9, 15));
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.runs.length).toBe(1);
+      expect(new Date(r.runs[0]).getUTCDay()).toBe(5);
     }
   });
 });

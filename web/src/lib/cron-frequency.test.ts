@@ -30,7 +30,7 @@ describe("频率 → cron 生成", () => {
     [base({ kind: "weekly", time: "08:00", weekdays: [0] }), "0 8 * * 0"],
     [base({ kind: "weekly", time: "08:00", weekdays: [0, 6] }), "0 8 * * 0,6"],
     [base({ kind: "monthly", time: "09:00", dayOfMonth: 15 }), "0 9 15 * *"],
-    [base({ kind: "monthly", time: "09:00", dayOfMonth: "last" }), "0 9 31 * *"],
+    [base({ kind: "monthly", time: "09:00", dayOfMonth: 31 }), "0 9 31 * *"],
     [base({ kind: "weekdays", time: "18:30" }), "30 18 * * 1-5"],
   ])("%o → %s", (freq, expr) => {
     expect(cronFromFrequency(freq)).toBe(expr);
@@ -38,6 +38,14 @@ describe("频率 → cron 生成", () => {
 
   it("每周未选任何一天时无法生成", () => {
     expect(cronFromFrequency(base({ kind: "weekly", weekdays: [] }))).toBeNull();
+  });
+
+  it("需要时间的频率在时间非法/缺失时不生成（不清空也不回退默认时间）", () => {
+    for (const kind of ["daily", "weekly", "monthly", "weekdays"] as const) {
+      expect(cronFromFrequency(base({ kind, time: "" }))).toBeNull();
+      expect(cronFromFrequency(base({ kind, time: "25:00" }))).toBeNull();
+      expect(cronFromFrequency(base({ kind, time: "9:99" }))).toBeNull();
+    }
   });
 
   it("custom 不由本层生成", () => {
@@ -92,7 +100,7 @@ describe("cron → 频率还原", () => {
       kind: "monthly",
       dayOfMonth: 15,
     });
-    // 31 日还原为 monthly 第 31 天（UI 中体现为「月末」语义选项）
+    // 31 日还原为 monthly 第 31 天（描述会注明短月不运行）
     expect(frequencyFromCron("0 9 31 * *")).toMatchObject({
       kind: "monthly",
       dayOfMonth: 31,
@@ -114,6 +122,33 @@ describe("cron → 频率还原", () => {
     "",
   ])("不可还原 → null: %s", (expr) => {
     expect(frequencyFromCron(expr)).toBeNull();
+  });
+
+  it("? 与 * 互换、等价步进写法可还原", () => {
+    expect(frequencyFromCron("0 9 * ? *")).toMatchObject({
+      kind: "daily",
+      time: "09:00",
+    });
+    expect(frequencyFromCron("30 9 ? * 5")).toMatchObject({
+      kind: "weekly",
+      weekdays: [5],
+    });
+    for (const expr of ["0/10 * * * *", "0-59/10 * * * *", "*/10 * * * *"]) {
+      expect(frequencyFromCron(expr)).toMatchObject({
+        kind: "minutes",
+        everyMinutes: 10,
+      });
+    }
+    for (const expr of ["0 0/6 * * *", "0 0-23/6 * * *", "0 */6 * * *"]) {
+      expect(frequencyFromCron(expr)).toMatchObject({
+        kind: "hours",
+        everyHours: 6,
+      });
+    }
+    // 非零起点的步进不等价 */N → 不可还原；不在选项内的步进同样不可还原
+    expect(frequencyFromCron("1/10 * * * *")).toBeNull();
+    expect(frequencyFromCron("0 1/6 * * *")).toBeNull();
+    expect(frequencyFromCron("*/7 * * * *")).toBeNull();
   });
 
   it("生成→还原 往返", () => {
@@ -151,10 +186,10 @@ describe("描述文案", () => {
     expect(
       describeFrequency(base({ kind: "weekdays", time: "18:00" }), "zh"),
     ).toBe("工作日（周一至周五）18:00");
-    // 月末语义明确提示：没有 31 日的月份不运行
+    // 31 日明确提示短月不运行
     expect(
-      describeFrequency(base({ kind: "monthly", dayOfMonth: "last" }), "zh"),
-    ).toContain("没有 31 日的月份不运行");
+      describeFrequency(base({ kind: "monthly", dayOfMonth: 31 }), "zh"),
+    ).toContain("没有该日的月份不运行");
     expect(
       describeFrequency(base({ kind: "monthly", dayOfMonth: 30 }), "zh"),
     ).toContain("没有该日的月份不运行");
@@ -195,6 +230,15 @@ describe("描述文案", () => {
     );
     expect(describeCronExpression("bad expr", "UTC", "zh")).toBeNull();
     expect(describeCronExpression("", "UTC", "en")).toBeNull();
+  });
+
+  it("? 归一化后仍可描述；英文 dom/dow 为「或」语义时补消歧注", () => {
+    expect(describeCronExpression("0 9 * ? 5", "UTC", "en")).toBeTruthy();
+    const en = describeCronExpression("0 9 15 * 1", "UTC", "en");
+    expect(en).toContain("OR day-of-week");
+    const zh = describeCronExpression("0 9 15 * 1", "UTC", "zh");
+    expect(zh).toContain("或者");
+    expect(zh).not.toContain("OR day-of-week");
   });
 });
 

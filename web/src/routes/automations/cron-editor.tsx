@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Combobox } from "@base-ui/react/combobox";
 import { CheckIcon, ChevronDownIcon } from "lucide-react";
 
@@ -48,13 +48,12 @@ const TEXT: Record<string, Record<UiLocale, string>> = {
   hourUnit: { zh: "小时", en: "h" },
   atTime: { zh: "时间", en: "At" },
   dayOfMonth: { zh: "日期", en: "Day" },
-  monthLast: { zh: "月末（31 日）", en: "Last day (31st)" },
   daySuffix: { zh: "日", en: "" },
   everyPrefix: { zh: "每隔", en: "Every" },
   cronExpr: { zh: "cron 表达式", en: "Cron expression" },
   cronHelp: {
-    zh: "标准五字段：分 时 日 月 周；支持 * , - / 与 JAN–DEC、SUN–SAT 名称；不支持秒与 @every。夏令时跳过的本地时间不触发，重复的本地时间只触发先出现的一次。",
-    en: "Standard 5 fields: minute hour day month weekday; supports * , - / and JAN–DEC, SUN–SAT names; no seconds or @every. Local times skipped by DST do not fire; repeated local times fire only on the first occurrence.",
+    zh: "标准五字段：分 时 日 月 周；支持 * , - / 与 JAN–DEC、SUN–SAT 名称；不支持秒与 @every。夏令时跳过的本地时间不触发；时钟回拨产生的重复本地时间会各触发一次。",
+    en: "Standard 5 fields: minute hour day month weekday; supports * , - / and JAN–DEC, SUN–SAT names; no seconds or @every. Local times skipped by DST do not fire; repeated local times from a fallback transition each fire once.",
   },
   examples: { zh: "示例", en: "Examples" },
   nextRuns: { zh: "接下来 3 次运行时间", en: "Next 3 runs" },
@@ -69,6 +68,10 @@ const TEXT: Record<string, Record<UiLocale, string>> = {
   pickOneDay: {
     zh: "请选择至少一个星期",
     en: "Pick at least one weekday",
+  },
+  pickTime: {
+    zh: "请填写有效的触发时间",
+    en: "Enter a valid trigger time",
   },
   intervalHint: {
     zh: "需要其他间隔请选「自定义」。",
@@ -107,14 +110,13 @@ export function CronScheduleFields({
 
   const generated = cronFromFrequency(freq);
   const effectiveExpr = freq.kind === "custom" ? expression : (generated ?? "");
-  // 提交给表单的表达式：weekly 未选日等暂时无法生成时保留上一份，不被清空。
-  const submitExpr = freq.kind === "custom" ? expression : (generated ?? expression);
+  // 提交给表单的表达式：可视化层无法生成时提交空串，由表单必填校验拦截保存。
+  const submitExpr = freq.kind === "custom" ? expression : (generated ?? "");
   const tz = effectiveTimezone(timezone);
 
   const applyFreq = (next: Frequency) => {
     setFreq(next);
-    const expr = cronFromFrequency(next);
-    if (expr !== null) onChange(expr, timezone);
+    onChange(cronFromFrequency(next) ?? "", timezone);
   };
 
   const pickKind = (kind: FrequencyKind) => {
@@ -223,22 +225,15 @@ export function CronScheduleFields({
               <OptionSelect
                 value={String(freq.dayOfMonth)}
                 onValueChange={(next) =>
-                  applyFreq({
-                    ...freq,
-                    dayOfMonth: next === "last" ? "last" : Number(next),
-                  })
+                  applyFreq({ ...freq, dayOfMonth: Number(next) })
                 }
-                options={DAY_OF_MONTH_OPTIONS.map((d): OptionSelectOption => {
-                  const isLast = d === "last";
-                  return {
-                    value: String(d),
-                    label: isLast
-                      ? t("monthLast", locale)
-                      : locale === "zh"
-                        ? `${d} ${t("daySuffix", locale)}`
-                        : `Day ${d}`,
-                  };
-                })}
+                options={DAY_OF_MONTH_OPTIONS.map((d): OptionSelectOption => ({
+                  value: String(d),
+                  label:
+                    locale === "zh"
+                      ? `${d} ${t("daySuffix", locale)}`
+                      : `Day ${d}`,
+                }))}
                 className="w-full"
               />
             </div>
@@ -318,6 +313,13 @@ export function CronScheduleFields({
         expression={effectiveExpr}
         timezone={tz}
         needsDayPick={freq.kind === "weekly" && freq.weekdays.length === 0}
+        needsTime={
+          freq.kind !== "custom" &&
+          freq.kind !== "minutes" &&
+          freq.kind !== "hours" &&
+          generated === null &&
+          freq.weekdays.length > 0
+        }
         locale={locale}
       />
     </div>
@@ -329,23 +331,28 @@ function SchedulePreview({
   expression,
   timezone,
   needsDayPick,
+  needsTime,
   locale,
 }: {
   expression: string;
   timezone: string;
   needsDayPick: boolean;
+  needsTime: boolean;
   locale: UiLocale;
 }) {
+  // 预览以 now 为基准；弹窗停留期间最早的运行会过期，定时把 now 往前推。
+  const [now, setNow] = useState(() => Date.now());
   const preview = useMemo(() => {
     if (!isValidTimezone(timezone)) {
       return { error: t("invalidTz", locale) };
     }
-    const result = nextCronRuns(expression, timezone, 3);
+    const result = nextCronRuns(expression, timezone, 3, now);
     if (!result.ok) {
       return { error: cronErrorMessage(result.error, locale) };
     }
     const desc = describeCronExpression(expression, timezone, locale);
-    const fmt = new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
+    const dateLocale = locale === "zh" ? "zh-CN" : "en-US";
+    const fmtOpts: Intl.DateTimeFormatOptions = {
       timeZone: timezone,
       month: "short",
       day: "numeric",
@@ -353,18 +360,44 @@ function SchedulePreview({
       hour: "2-digit",
       minute: "2-digit",
       hourCycle: "h23",
-    });
+    };
+    const fmt = new Intl.DateTimeFormat(dateLocale, fmtOpts);
+    const formatted = result.runs.map((ms) => fmt.format(new Date(ms)));
+    // 回拨时段两个 UTC 时刻映射到同一墙钟（如 01:30 出现两次），补时区缩写消歧。
+    let runs = formatted;
+    if (new Set(formatted).size !== formatted.length) {
+      const withZone = new Intl.DateTimeFormat(dateLocale, {
+        ...fmtOpts,
+        timeZoneName: "short",
+      });
+      runs = result.runs.map((ms) => withZone.format(new Date(ms)));
+    }
     return {
       desc,
-      runs: result.runs.map((ms) => fmt.format(new Date(ms))),
+      runs,
+      firstRunMs: result.runs[0],
       empty: result.runs.length === 0,
     };
-  }, [expression, timezone, locale]);
+  }, [expression, timezone, locale, now]);
+
+  useEffect(() => {
+    const firstRunMs =
+      "firstRunMs" in preview ? preview.firstRunMs : undefined;
+    const delay = firstRunMs
+      ? Math.min(Math.max(firstRunMs - Date.now() + 1000, 2000), 60_000)
+      : 60_000;
+    const id = setTimeout(() => setNow(Date.now()), delay);
+    return () => clearTimeout(id);
+  }, [preview]);
 
   if (needsDayPick) {
     return (
       <p className="text-xs text-destructive">{t("pickOneDay", locale)}</p>
     );
+  }
+
+  if (needsTime) {
+    return <p className="text-xs text-destructive">{t("pickTime", locale)}</p>;
   }
 
   return (

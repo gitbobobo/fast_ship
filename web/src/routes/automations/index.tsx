@@ -59,6 +59,7 @@ import {
   useUpdateAutomation,
 } from "@/lib/hooks/use-automations";
 import { describeCronExpression, uiLocale } from "@/lib/cron-frequency";
+import { effectiveTimezone } from "@/lib/cron-schedule";
 
 // 自动化设置页（INT-90）：列表/新建/编辑/启停/删除 + 运行记录。
 // 新建默认停用、空提示词；archive 后置会终止活动线程，表单里就地说明。
@@ -235,12 +236,12 @@ export default function AutomationsPage() {
                     <TableCell className="font-medium">{a.name}</TableCell>
                     <TableCell
                       className="text-sm"
-                      // hover 展示原始表达式与时区（INT-100）。
+                      // hover 展示原始表达式与时区（空时区服务端按 UTC）（INT-100）。
                       title={
                         a.trigger_type === "cron"
-                          ? `${a.cron_expression ?? ""}${
-                              a.timezone ? `（${a.timezone}）` : ""
-                            }`
+                          ? `${a.cron_expression ?? ""}（${effectiveTimezone(
+                              a.timezone ?? "",
+                            )}）`
                           : undefined
                       }
                     >

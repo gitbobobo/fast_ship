@@ -250,6 +250,7 @@ function tzFormatter(tz: string): Intl.DateTimeFormat {
 /** IANA 时区是否可用（Intl 不接受即视为无效，同服务端 LoadLocation 的口径）。 */
 export function isValidTimezone(tz: string): boolean {
   if (tz === "" ) return true; // 留空 = UTC
+  if (tz === "Local") return true; // Go 接受；浏览器按下一条规则解析本机时区
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: tz });
     return true;
@@ -258,10 +259,17 @@ export function isValidTimezone(tz: string): boolean {
   }
 }
 
-/** 生效时区：空值按 UTC（与服务端一致）。 */
+/**
+ * 生效时区：空值按 UTC（与服务端一致）；「Local」在 Go 侧合法，浏览器端解析为
+ * 本机时区——注意与服务端机器时区可能不同，仅作尽力预览。
+ */
 export function effectiveTimezone(tz: string | null | undefined): string {
   const t = (tz ?? "").trim();
-  return t === "" ? "UTC" : t;
+  if (t === "") return "UTC";
+  if (t === "Local") {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  }
+  return t;
 }
 
 /** 可搜索时区列表；老环境不支持 supportedValuesOf 时退回常用列表。 */
@@ -364,6 +372,21 @@ export function nextCronRun(
   fromMs: number,
 ): number | null {
   const tz = effectiveTimezone(timezone);
+  // 空字段集永不可能命中（如 ", * * * *" 解析出空分钟集——robfig 同样接受并
+  // 在 5 年扫描后返回空）。逐分钟扫 5 年会拖死渲染线程，提前判无匹配。
+  const domEmpty = schedule.dom.bits.size === 0;
+  const dowEmpty = schedule.dow.bits.size === 0;
+  const dayImpossible =
+    (domEmpty && dowEmpty) ||
+    ((schedule.dom.star || schedule.dow.star) && (domEmpty || dowEmpty));
+  if (
+    schedule.minute.bits.size === 0 ||
+    schedule.hour.bits.size === 0 ||
+    schedule.month.bits.size === 0 ||
+    dayImpossible
+  ) {
+    return null;
+  }
   // 起点：下一整秒（Next 返回严格大于 from 的时刻）。
   let t = Math.floor(fromMs / 1000) * 1000 + 1000;
   let added = false;
