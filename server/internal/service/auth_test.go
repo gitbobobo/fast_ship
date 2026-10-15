@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ type authTestServices struct {
 	db               *gorm.DB
 	cfg              *config.Config
 	authService      *AuthService
+	userRepo         *repository.UserRepository
 	jwtBlacklistRepo *repository.JWTBlacklistRepository
 	refreshTokenRepo *repository.RefreshTokenRepository
 }
@@ -55,6 +57,7 @@ func setupAuthTestServices(t *testing.T) *authTestServices {
 		db:               db,
 		cfg:              cfg,
 		authService:      NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, nil),
+		userRepo:         userRepo,
 		jwtBlacklistRepo: jwtBlacklistRepo,
 		refreshTokenRepo: refreshTokenRepo,
 	}
@@ -302,6 +305,43 @@ func TestAuthServiceUpdatePasswordIncrementsVersionEachTime(t *testing.T) {
 	}
 	if _, err := services.authService.RefreshAccessToken(second.RefreshToken); err != nil {
 		t.Fatalf("expected second refresh token usable: %v", err)
+	}
+}
+
+// 改密事务以验证过的旧密码哈希为写谓词：谓词不成立（并发改密已提交）
+// 必须整体拒绝——不得推进版本、不得吊销会话、不得签发替代凭证。
+func TestUserRepositoryUpdatePasswordRejectsStaleProof(t *testing.T) {
+	services := setupAuthTestServices(t)
+	user := createTestUser(t, services.db, "user-stale-proof")
+	rt := mustCreateRefreshTokenRecord(t, services.db, user.ID, time.Now().Add(time.Hour), nil)
+
+	next := &model.RefreshToken{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		TokenHash: uuid.NewString(),
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	_, err := services.userRepo.UpdatePasswordAndRotateSessions(user.ID, "not-the-current-hash", "new-hash", next)
+	if !errors.Is(err, repository.ErrPasswordChanged) {
+		t.Fatalf("expected ErrPasswordChanged, got %v", err)
+	}
+
+	var stored model.User
+	if err := services.db.First(&stored, "id = ?", user.ID).Error; err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if stored.TokenVersion != user.TokenVersion || stored.PasswordHash != user.PasswordHash {
+		t.Fatalf("expected user untouched: version=%d hash-changed=%v", stored.TokenVersion, stored.PasswordHash != user.PasswordHash)
+	}
+	var count int64
+	services.db.Model(&model.RefreshToken{}).Where("id = ?", next.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("expected no replacement row written")
+	}
+	services.db.Model(&model.RefreshToken{}).Where("id = ? AND revoked_at IS NULL", rt.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("expected existing refresh token left unrevoked")
 	}
 }
 

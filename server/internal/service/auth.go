@@ -285,7 +285,12 @@ func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *Up
 
 	// 版本号在事务内自增并回读：并发改密必须各自推进，否则先后两次改密
 	// 停在同一版本，前一次换出的 access token 会错误地保持有效。
-	newVersion, err := s.userRepo.UpdatePasswordAndRotateSessions(userID, string(hashedPassword), next)
+	// 把刚通过 bcrypt 校验的旧哈希作为写谓词——授权依据在写时点必须
+	// 仍然成立，否则并发改密会拿着已作废的旧密码证明覆盖新密码。
+	newVersion, err := s.userRepo.UpdatePasswordAndRotateSessions(userID, user.PasswordHash, string(hashedPassword), next)
+	if errors.Is(err, repository.ErrPasswordChanged) {
+		return nil, errs.ErrLoginFailed
+	}
 	if err != nil {
 		return nil, errs.ErrInternal
 	}

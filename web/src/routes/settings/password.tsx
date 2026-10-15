@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { SettingsPageShell } from "@/routes/settings/layout";
 import { authApi } from "@/lib/api/auth";
-import { ROTATION_OWNER_HEADER, withCredentialRotation } from "@/lib/api/client";
+import { withCredentialRotation } from "@/lib/api/client";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toast } from "sonner";
 
@@ -44,14 +44,10 @@ export default function PasswordPage() {
   const onSubmit = async (data: PasswordInput) => {
     try {
       await withCredentialRotation(async () => {
-        const res = await authApi.updatePassword(
-          {
-            old_password: data.old_password,
-            new_password: data.new_password,
-          },
-          // 该请求自身即是轮换发起方：401 时钩子不能等待轮换窗口（会自等死锁）。
-          { [ROTATION_OWNER_HEADER]: "1" },
-        );
+        const res = await authApi.updatePassword({
+          old_password: data.old_password,
+          new_password: data.new_password,
+        });
         // 服务端已吊销其他会话并下发当前会话的新凭证；旧 token 即刻失效，
         // 必须先在轮换窗口内换上新凭证，并发请求才不会被弹去登录。
         setToken(res.data.token);

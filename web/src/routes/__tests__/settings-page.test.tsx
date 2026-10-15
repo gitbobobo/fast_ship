@@ -6,7 +6,6 @@ import ProfilePage from "@/routes/settings/profile";
 import PasswordPage from "@/routes/settings/password";
 import { renderWithRoute } from "@/test/render";
 import { authApi } from "@/lib/api/auth";
-import { ROTATION_OWNER_HEADER } from "@/lib/api/client";
 import { useAISettings, useUpdateAISettings } from "@/lib/hooks/use-ai";
 import { useAuthStore } from "@/lib/store/auth-store";
 
@@ -151,13 +150,10 @@ describe("Settings Password Page", () => {
     await user.click(screen.getByRole("button", { name: "修改密码" }));
 
     await waitFor(() =>
-      expect(authApi.updatePassword).toHaveBeenCalledWith(
-        {
-          old_password: "OldPass123",
-          new_password: "NewPass123",
-        },
-        { [ROTATION_OWNER_HEADER]: "1" },
-      ),
+      expect(authApi.updatePassword).toHaveBeenCalledWith({
+        old_password: "OldPass123",
+        new_password: "NewPass123",
+      }),
     );
     await waitFor(() => {
       expect(oldPasswordInput).toHaveValue("");

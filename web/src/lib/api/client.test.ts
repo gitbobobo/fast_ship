@@ -191,6 +191,42 @@ describe("api client auth retry", () => {
     await rotation;
   });
 
+  // CAS：先于轮换启动的 refresh，其迟到响应不得覆盖改密写入的新凭证。
+  it("discards a refresh response that lands after credentials rotated", async () => {
+    refreshPostMock.mockReturnValue({
+      json: vi.fn().mockResolvedValue({
+        data: { token: "stale-pair-token", refresh_token: "stale-pair-refresh" },
+      }),
+    });
+
+    const { tryRefreshToken } = await import("./client");
+
+    const pending = tryRefreshToken();
+    // 刷新在途期间，改密续签把 store 换成了新凭证对
+    authState.token = "rotated-access";
+    authState.refreshToken = "rotated-refresh";
+
+    await expect(pending).resolves.toBe("rotated-access");
+    expect(authState.setToken).not.toHaveBeenCalled();
+    expect(authState.setRefreshToken).not.toHaveBeenCalled();
+  });
+
+  // 刷新在途期间被服务端拒绝（refresh token 已随改密吊销），但 store
+  // 已被改密写入新凭证——恢复出口应取回新凭证而不是失败→logout。
+  it("falls back to rotated credentials when an in-flight refresh is rejected", async () => {
+    refreshPostMock.mockReturnValue({
+      json: vi.fn().mockRejectedValue(new Error("401")),
+    });
+
+    const { resolveSessionToken } = await import("./client");
+
+    const pending = resolveSessionToken("access-token");
+    authState.token = "rotated-access";
+    authState.refreshToken = "rotated-refresh";
+
+    await expect(pending).resolves.toBe("rotated-access");
+  });
+
   it("still refreshes when the 401 response came back on the current token", async () => {
     refreshPostMock.mockReturnValue({
       json: vi.fn().mockResolvedValue({

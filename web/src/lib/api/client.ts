@@ -42,7 +42,18 @@ export async function resolveSessionToken(
   if (current && current !== usedToken) {
     return current;
   }
-  return tryRefreshToken();
+
+  try {
+    return await tryRefreshToken();
+  } catch (err) {
+    // 刷新失败的这段时间凭证可能已被并行轮换救回（改密续签写入了新对），
+    // 再查一次 store——有新凭证就用它，别误走 logout。
+    const fallback = useAuthStore.getState().token;
+    if (fallback && fallback !== usedToken) {
+      return fallback;
+    }
+    throw err;
+  }
 }
 
 export async function tryRefreshToken(): Promise<string> {
@@ -57,10 +68,18 @@ export async function tryRefreshToken(): Promise<string> {
     .post("auth/refresh", { json: { refresh_token: refreshToken } })
     .json<ApiResponse<{ token: string; refresh_token: string }>>()
     .then((res) => {
+      const state = useAuthStore.getState();
+      // CAS：发起刷新后凭证若已被并行轮换（改密续签），迟到的响应引用的
+      // refresh token 已随改密吊销——不得覆盖 store 里的新凭证。
+      if (state.refreshToken !== refreshToken) {
+        if (state.token) {
+          return state.token;
+        }
+        throw new Error("Session rotated");
+      }
       const { token, refresh_token: nextRefreshToken } = res.data;
-      const authStore = useAuthStore.getState();
-      authStore.setToken(token);
-      authStore.setRefreshToken(nextRefreshToken);
+      state.setToken(token);
+      state.setRefreshToken(nextRefreshToken);
       return token;
     })
     .finally(() => {
