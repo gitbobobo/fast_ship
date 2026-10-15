@@ -71,8 +71,11 @@ func (r *UserRepository) FindByUsernameOrEmail(login string) (*model.User, error
 	return &user, nil
 }
 
-func (r *UserRepository) Update(user *model.User) error {
-	return r.db.Save(user).Error
+// UpdateFields 只写入给定列。禁止整行 Save 回写：调用方持有的 user 副本可能
+// 早于一次已提交的改密，全量回写会把 token_version/password_hash 覆盖回旧值，
+// 复活本该吊销的全部会话。
+func (r *UserRepository) UpdateFields(userID string, fields map[string]any) error {
+	return r.db.Model(&model.User{}).Where("id = ?", userID).Updates(fields).Error
 }
 
 // UpdatePasswordAndRotateSessions 在同一事务里改密并轮换会话凭证：更新密码哈希、

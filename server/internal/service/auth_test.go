@@ -305,6 +305,49 @@ func TestAuthServiceUpdatePasswordIncrementsVersionEachTime(t *testing.T) {
 	}
 }
 
+// 资料/头像等普通更新只能写自己的列：整行回写会把改密推进过的
+// token_version 覆盖回旧值，复活已吊销会话（INT-95 复审第三轮）。
+func TestAuthServiceUpdateProfilePreservesTokenVersion(t *testing.T) {
+	services := setupAuthTestServices(t)
+	ctx := context.Background()
+
+	reg, err := services.authService.Register(ctx, &RegisterRequest{
+		Username: "pwprofile",
+		Email:    "pwprofile@example.com",
+		Password: "OldPass123",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	userID := reg.User.Id
+
+	if _, err := services.authService.UpdatePassword(ctx, userID, &UpdatePasswordRequest{
+		OldPassword: "OldPass123",
+		NewPassword: "NewPass456",
+	}); err != nil {
+		t.Fatalf("update password: %v", err)
+	}
+
+	username := "pwprofile-renamed"
+	if _, err := services.authService.UpdateProfile(userID, &UpdateProfileRequest{Username: &username}); err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	if _, err := services.authService.UpdateAvatar(userID, "https://example.com/a.png"); err != nil {
+		t.Fatalf("update avatar: %v", err)
+	}
+
+	var user model.User
+	if err := services.db.First(&user, "id = ?", userID).Error; err != nil {
+		t.Fatalf("load user: %v", err)
+	}
+	if user.TokenVersion != 1 {
+		t.Fatalf("expected token_version preserved at 1, got %d", user.TokenVersion)
+	}
+	if user.PasswordHash == "" {
+		t.Fatalf("expected password_hash untouched")
+	}
+}
+
 // Rotate 的顺序是先条件吊销再补发：旧行已被吊销（改密全量吊销/登出）时
 // 不得再创建后继，否则改密扫描与新签发之间会漏出存活令牌（INT-95 复审）。
 func TestRefreshTokenRepositoryRotateDoesNotIssueAfterRevoke(t *testing.T) {

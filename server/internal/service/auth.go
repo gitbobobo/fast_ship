@@ -208,6 +208,7 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 		return nil, errs.ErrUserNotFound
 	}
 
+	fields := map[string]any{}
 	if username := api.Deref(req.Username); username != "" && username != user.Username {
 		exists, err := s.userRepo.ExistsByUsername(username)
 		if err != nil {
@@ -217,6 +218,7 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 			return nil, errs.ErrUsernameExists
 		}
 		user.Username = username
+		fields["username"] = username
 	}
 
 	if email := api.Deref(req.Email); email != "" && email != user.Email {
@@ -228,10 +230,13 @@ func (s *AuthService) UpdateProfile(userID string, req *UpdateProfileRequest) (*
 			return nil, errs.ErrEmailExists
 		}
 		user.Email = email
+		fields["email"] = email
 	}
 
-	if err := s.userRepo.Update(user); err != nil {
-		return nil, errs.ErrInternal
+	if len(fields) > 0 {
+		if err := s.userRepo.UpdateFields(userID, fields); err != nil {
+			return nil, errs.ErrInternal
+		}
 	}
 
 	resp := s.toUserResponse(user)
@@ -246,10 +251,9 @@ func (s *AuthService) UpdateAvatar(userID string, avatarURL string) (*UserRespon
 
 	if avatarURL != user.AvatarURL {
 		user.AvatarURL = avatarURL
-	}
-
-	if err := s.userRepo.Update(user); err != nil {
-		return nil, errs.ErrInternal
+		if err := s.userRepo.UpdateFields(userID, map[string]any{"avatar_url": avatarURL}); err != nil {
+			return nil, errs.ErrInternal
+		}
 	}
 
 	resp := s.toUserResponse(user)
