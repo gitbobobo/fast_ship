@@ -65,7 +65,8 @@ export function toggleDimensionValue(
 
 /**
  * 按服务端 normalizeScreenshotLocale 的大小写口径折叠语言标签：language 小写、
- * 4 字母 script 首字母大写、2 字母 region 大写，其余子标签小写。不做 BCP 47
+ * 4 字母 script 首字母大写、2 字母 region 大写，其余子标签小写。主标签为 x 的
+ * privateuse-only 标签整串小写，后续段不再当 region/script 折叠。不做 BCP 47
  * 语法校验——库存里只有合法规范化值，非法 URL 匹配自然落空，400 仍由服务端负责。
  */
 export function canonicalizeScreenshotLocale(value: string): string {
@@ -78,6 +79,11 @@ export function canonicalizeScreenshotLocale(value: string): string {
     .split("-")
     .map((part, i) => {
       if (inExtension) return part.toLowerCase();
+      if (i === 0 && part.toLowerCase() === "x") {
+        // 主标签即 privateuse：x 本身小写，其后全部按扩展折叠
+        inExtension = true;
+        return part.toLowerCase();
+      }
       if (i > 0 && /^[A-Za-z0-9]$/.test(part)) {
         inExtension = true;
         return part.toLowerCase();

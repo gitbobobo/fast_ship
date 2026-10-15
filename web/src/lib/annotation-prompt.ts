@@ -2,6 +2,8 @@
 // 结构与 buildIssuePrompt 一致：正文 + 结尾「> 」引用块；单处维护，
 // 指引 Agent 用 fast-ship 技能调标注 API 逐条处理，不内联任何凭证。
 
+import { SCREENSHOT_NONE } from "./screenshots";
+
 /** 当前筛选范围描述：三维过滤 + 状态计数 */
 export interface AnnotationPromptFilters {
   platform?: string[];
@@ -24,7 +26,7 @@ function describeDimension(
   values: string[] | undefined,
 ): string | null {
   if (!values || values.length === 0) return null;
-  const labels = values.map((v) => (v === "__none__" ? "未标注" : v));
+  const labels = values.map((v) => (v === SCREENSHOT_NONE ? "未标注" : v));
   return `${name}: ${labels.join("、")}`;
 }
 

@@ -18,8 +18,9 @@ const (
 )
 
 // normalizeScreenshotPlatform 规范化平台：trim+lowercase；空串返回 nil（未标注）。
-// 逗号是过滤参数的保留分隔符（多值逗号拼接），含逗号的值无法在 URL/批量过滤里
-// 往返，写入时直接拒绝（40001）。
+// 保留字两类直接拒绝（40001）：逗号是过滤参数的保留分隔符（多值逗号拼接），
+// 含逗号的值无法在 URL/批量过滤里往返；「未标注」哨兵 __none__ 是过滤保留字，
+// 一经小写化必与 screenshotDimensionNone 同形，大小写变体一并覆盖。
 func normalizeScreenshotPlatform(raw *string) (*string, error) {
 	if raw == nil {
 		return nil, nil
@@ -28,10 +29,19 @@ func normalizeScreenshotPlatform(raw *string) (*string, error) {
 	if v == "" {
 		return nil, nil
 	}
+	if v == screenshotDimensionNone {
+		return nil, errs.ErrInvalidParams
+	}
 	if strings.Contains(v, ",") || utf8.RuneCountInString(v) > maxScreenshotPlatformRunes {
 		return nil, errs.ErrInvalidParams
 	}
 	return &v, nil
+}
+
+// NormalizeScreenshotPlatform 是平台规范化的跨包入口：启动迁移等外部写入口
+// 与服务内写入路径共用同一套规则（trim+lowercase、保留字拒绝）。
+func NormalizeScreenshotPlatform(raw string) (*string, error) {
+	return normalizeScreenshotPlatform(&raw)
 }
 
 // normalizeScreenshotLocale 规范化语言标签：trim 后按 BCP 47（RFC 5646）完整
@@ -119,20 +129,26 @@ func normalizeBCP47Locale(lower string) (*string, error) {
 		}
 		i++
 	}
-	// variant：5-8 字母数字，或数字开头的 4 字母，可多个
+	// variant：5-8 字母数字，或数字开头的 4 字母，可多个但不得重复
+	// （§2.2.5；输入已小写，直接按段值判重）
 	isVariant := func(seg string) bool {
 		if len(seg) >= 5 && len(seg) <= 8 && isAlnum(seg) {
 			return true
 		}
 		return len(seg) == 4 && isDigits(seg[:1]) && isAlnum(seg)
 	}
+	seenVariants := map[string]bool{}
 	for i < n && isVariant(segments[i]) {
+		if seenVariants[segments[i]] {
+			return nil, errs.ErrInvalidParams
+		}
+		seenVariants[segments[i]] = true
 		i++
 	}
-	// extension：单字符 singleton（x 除外）+ 1~N 个 2-8 字母数字子标签；
-	// 同一 singleton 不得重复
+	// extension：单字符 singleton（RFC 5646 §2.1 限字母数字，x 除外）
+	// + 1~N 个 2-8 字母数字子标签；同一 singleton 不得重复
 	seenSingletons := map[byte]bool{}
-	for i < n && len(segments[i]) == 1 && segments[i][0] != 'x' {
+	for i < n && len(segments[i]) == 1 && isAlnum(segments[i]) && segments[i][0] != 'x' {
 		singleton := segments[i][0]
 		if seenSingletons[singleton] {
 			return nil, errs.ErrInvalidParams
@@ -264,7 +280,8 @@ func ParseScreenshotThemeFilter(raw string) ([]string, bool, error) {
 }
 
 // normalizeScreenshotFilterValues 规范化批量过滤里的一个维度值数组：
-// `__none__` 摘出为「未标注」桶，其余逐值走与写入相同的规范化。
+// 哨兵（不区分大小写，EqualFold）必须在 normalize 之前摘出为「未标注」桶，
+// 否则 __NONE__ 会被平台词表当保留字拒成 400；其余逐值走与写入相同的规范化。
 func normalizeScreenshotFilterValues(values []string, normalize func(*string) (*string, error)) ([]string, bool, error) {
 	includeNone := false
 	out := make([]string, 0, len(values))
@@ -273,7 +290,7 @@ func normalizeScreenshotFilterValues(values []string, normalize func(*string) (*
 		if v == "" {
 			continue
 		}
-		if v == screenshotDimensionNone {
+		if strings.EqualFold(v, screenshotDimensionNone) {
 			includeNone = true
 			continue
 		}

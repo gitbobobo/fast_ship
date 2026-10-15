@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -147,11 +148,8 @@ func foldScreenshotVersions(db *gorm.DB, logger *zap.Logger) error {
 			return fmt.Errorf("折叠最新版本到截图行失败: %w", err)
 		}
 
-		// 2. group_name 按规范化值迁入 platform（空串与 NULL 都保持未标注）；幂等
-		if err := tx.Exec(`
-			UPDATE screenshot_screens SET platform = lower(trim(group_name))
-			WHERE platform IS NULL AND group_name IS NOT NULL AND trim(group_name) <> ''
-		`).Error; err != nil {
+		// 2. group_name 在 Go 侧按与写入相同的规则迁入 platform（空串与 NULL 都保持未标注）
+		if err := migrateScreenshotGroupNames(tx); err != nil {
 			return fmt.Errorf("迁移 group_name 到 platform 失败: %w", err)
 		}
 
@@ -233,4 +231,43 @@ func foldScreenshotVersions(db *gorm.DB, logger *zap.Logger) error {
 // 失败落队与启动清理共用同一条路径）。文件已不存在视同清理成功。
 func drainScreenshotPendingDeletes(db *gorm.DB, fileStorage storage.Storage, logger *zap.Logger) (int, error) {
 	return service.DrainScreenshotPendingDeletes(db, fileStorage, logger)
+}
+
+// migrateScreenshotGroupNames 把旧 group_name 迁入 platform：Go 侧逐行调用与
+// 写入相同的 NormalizeScreenshotPlatform——SQL lower(trim) 绕不过平台词表的
+// 保留字（未标注哨兵、逗号分隔符）与长度上限。不合规旧分组名 platform 保持
+// 未标注（NULL），原名追加进 title（title 为空则直接作为 title），分组信息
+// 不静默丢弃；幂等：只处理 platform 尚为 NULL 且 group_name 非空的行。
+func migrateScreenshotGroupNames(tx *gorm.DB) error {
+	var rows []struct {
+		ID        string
+		Title     string
+		GroupName string
+	}
+	if err := tx.Raw(`
+		SELECT id, title, group_name FROM screenshot_screens
+		WHERE platform IS NULL AND group_name IS NOT NULL AND trim(group_name) <> ''
+	`).Scan(&rows).Error; err != nil {
+		return err
+	}
+	for _, row := range rows {
+		group := strings.TrimSpace(row.GroupName)
+		platform, err := service.NormalizeScreenshotPlatform(group)
+		if err != nil {
+			title := strings.TrimSpace(row.Title)
+			if title == "" {
+				title = group
+			} else {
+				title = title + " " + group
+			}
+			if err := tx.Model(&model.ScreenshotScreen{}).Where("id = ?", row.ID).Update("title", title).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		if err := tx.Model(&model.ScreenshotScreen{}).Where("id = ?", row.ID).Update("platform", *platform).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

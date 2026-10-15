@@ -382,6 +382,7 @@ func TestScreenshotServiceUpload_RejectsInvalidDimensions(t *testing.T) {
 		{"theme invalid", func(i *ScreenshotUploadInput) { i.Theme = strPtr("blue") }},
 		{"theme case strict", func(i *ScreenshotUploadInput) { i.Theme = strPtr("Light") }},
 		{"platform too long", func(i *ScreenshotUploadInput) { i.Platform = strPtr(strings.Repeat("p", 101)) }},
+		{"platform reserved sentinel", func(i *ScreenshotUploadInput) { i.Platform = strPtr("__NONE__") }},
 		{"title too long", func(i *ScreenshotUploadInput) { i.Title = strings.Repeat("t", maxScreenshotTitleRunes+1) }},
 	}
 	for _, tc := range cases {

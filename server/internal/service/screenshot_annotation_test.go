@@ -1274,6 +1274,13 @@ func TestParseScreenshotDimensionFilters(t *testing.T) {
 		t.Fatalf("empty platform parse: %v %v err=%v", platforms, none, err)
 	}
 
+	// 哨兵在 normalize 之前摘出且不区分大小写：__NONE__ 摘进未标注桶，
+	// 不被平台词表拒成 400
+	platforms, none, err = ParseScreenshotPlatformFilter("__NONE__,ios")
+	if err != nil || len(platforms) != 1 || platforms[0] != "ios" || !none {
+		t.Fatalf("platform sentinel filter: %v %v err=%v", platforms, none, err)
+	}
+
 	// locale 过滤值与库存里规范化后的大小写对上（写入是 en-US，过滤传 en-us）
 	locales, none, err := ParseScreenshotLocaleFilter(" en-us , zh-HANS-CN,__none__")
 	if err != nil || len(locales) != 2 || locales[0] != "en-US" || locales[1] != "zh-Hans-CN" || !none {
@@ -1359,15 +1366,17 @@ func TestNormalizeScreenshotLocale_BCP47Structure(t *testing.T) {
 	}
 
 	invalid := []string{
-		"en-a",           // extension singleton 无内容
-		"en-a-bbb-a-ccc", // singleton a 重复
-		"e",              // language 过短
-		"en-",            // 空段
-		"en--US",         // 空段
-		"123",            // language 必须是字母
-		"x",              // privateuse 无子标签
-		"x-",             // privateuse 空子标签
-		"en-US-x",        // privateuse 无子标签
+		"en-a",            // extension singleton 无内容
+		"en-a-bbb-a-ccc",  // singleton a 重复
+		"en-,-abc",        // singleton 必须是字母数字（§2.1），逗号不合法
+		"de-de-1901-1901", // variant 不得重复（§2.2.5）
+		"e",               // language 过短
+		"en-",             // 空段
+		"en--US",          // 空段
+		"123",             // language 必须是字母
+		"x",               // privateuse 无子标签
+		"x-",              // privateuse 空子标签
+		"en-US-x",         // privateuse 无子标签
 		"not a locale!",
 		"en_!!",
 		"en-US-x-!bad", // privateuse 子标签含非字母数字
@@ -1397,6 +1406,15 @@ func TestNormalizeScreenshotPlatform_ReservesDelimiter(t *testing.T) {
 	withComma := "ios,tablet"
 	if _, err := normalizeScreenshotPlatform(&withComma); err != errs.ErrInvalidParams {
 		t.Fatalf("expected ErrInvalidParams for delimiter in platform, got %v", err)
+	}
+
+	// 「未标注」哨兵是过滤保留字：写入路径拒绝，大小写变体一并覆盖
+	// （小写化后与 screenshotDimensionNone 同形）
+	for _, reserved := range []string{"__none__", "__NONE__"} {
+		v := reserved
+		if _, err := normalizeScreenshotPlatform(&v); err != errs.ErrInvalidParams {
+			t.Fatalf("expected ErrInvalidParams for reserved sentinel %q, got %v", reserved, err)
+		}
 	}
 }
 

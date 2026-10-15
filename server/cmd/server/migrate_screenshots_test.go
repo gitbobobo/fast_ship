@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -387,6 +388,75 @@ func TestRunBootMigrations_DropsShellScreensWithoutVersions(t *testing.T) {
 	var count int64
 	if err := db.Model(&model.ScreenshotScreen{}).Where("id = ?", "screen-empty").Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("expected shell screen dropped, got %d err=%v", count, err)
+	}
+}
+
+// 第三个写入口：group_name → platform 必须走与服务端写入相同的规范化
+// （保留哨兵/逗号拒绝、长度上限），不能绕成 SQL lower(trim)。不合规旧分组名
+// platform 保持未标注，原名不静默丢弃——追加进 title（title 为空则直接作为
+// title）；合规值照常迁入。
+func TestRunBootMigrations_GroupNameFollowsPlatformRules(t *testing.T) {
+	db, store, _ := setupLegacyScreenshotDB(t)
+	insertLegacyFixtures(t, db, store)
+
+	now := time.Now().UTC()
+	longName := strings.Repeat("g", 120)
+	cases := []struct{ id, title, groupName string }{
+		{"screen-comma", "带逗号", "ios,tablet"},
+		{"screen-none", "", "__none__"},
+		{"screen-none-upper", "已标注", "__NONE__"},
+		{"screen-long", "", longName},
+		{"screen-ok", "", " Harmony "},
+	}
+	for _, c := range cases {
+		if err := db.Exec(`
+			INSERT INTO screenshot_screens (id, project_id, screen_key, title, group_name, version_count, last_uploaded_at, created_at)
+			VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+		`, c.id, "proj-1", c.id, c.title, c.groupName, now, now).Error; err != nil {
+			t.Fatalf("insert screen %s: %v", c.id, err)
+		}
+		path := "proj-1/screenshots/" + c.id + ".png"
+		if err := db.Exec(`
+			INSERT INTO screenshot_versions (id, screen_id, file_name, file_path, mime_type, file_size, note, uploaded_by, uploaded_at, width, height)
+			VALUES (?, ?, 'shot.png', ?, 'image/png', 1, '', 'u', ?, 10, 10)
+		`, c.id+"-v", c.id, path, now).Error; err != nil {
+			t.Fatalf("insert version %s: %v", c.id, err)
+		}
+		if err := store.Save(path, bytes.NewReader([]byte("png:"+c.id))); err != nil {
+			t.Fatalf("store file %s: %v", path, err)
+		}
+	}
+
+	if err := runBootMigrations(db, store, zap.NewNop(), false, "", []byte("12345678901234567890123456789012")); err != nil {
+		t.Fatalf("boot migrations: %v", err)
+	}
+
+	// 不合规：platform 未标注（NULL），原分组名进 title 兜底
+	for _, c := range []struct{ id, wantTitle string }{
+		{"screen-comma", "带逗号 ios,tablet"},
+		{"screen-none", "__none__"},
+		{"screen-none-upper", "已标注 __NONE__"},
+		{"screen-long", longName},
+	} {
+		var screen model.ScreenshotScreen
+		if err := db.Where("id = ?", c.id).First(&screen).Error; err != nil {
+			t.Fatalf("find %s: %v", c.id, err)
+		}
+		if screen.Platform != nil {
+			t.Fatalf("%s: expected platform NULL, got %q", c.id, *screen.Platform)
+		}
+		if screen.Title != c.wantTitle {
+			t.Fatalf("%s: expected title %q, got %q", c.id, c.wantTitle, screen.Title)
+		}
+	}
+
+	// 合规：照常 trim+lowercase 迁入
+	var ok model.ScreenshotScreen
+	if err := db.Where("id = ?", "screen-ok").First(&ok).Error; err != nil {
+		t.Fatalf("find screen-ok: %v", err)
+	}
+	if ok.Platform == nil || *ok.Platform != "harmony" {
+		t.Fatalf("expected platform harmony, got %+v", ok.Platform)
 	}
 }
 

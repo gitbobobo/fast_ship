@@ -267,6 +267,57 @@ describe("filterAnnotationsByDimensions", () => {
   });
 });
 
+// 与服务端 TestNormalizeScreenshotLocale_BCP47Structure（server/internal/service/
+// screenshot_annotation_test.go）共享的 BCP 47 向量表：每个合法向量断言前端
+// 折叠结果与 Go 规范化输出同字符串，含全部注册 grandfathered 标签与 x- 主标签。
+// 服务端判非法的向量（en-a、en-a-bbb-a-ccc、en-,-abc、de-de-1901-1901、e、
+// en-、en--US、123、x、x-、en-US-x、not a locale!、en_!!、en-US-x-!bad）前端
+// 不做语法校验、原样返回，400 一律由服务端负责。
+const SHARED_LOCALE_VECTORS: Record<string, string> = {
+  en: "en",
+  "EN-us": "en-US",
+  "zh-hans-cn": "zh-Hans-CN",
+  "en-419": "en-419",
+  "sl-rozaj-biske": "sl-rozaj-biske",
+  "de-ch-1901": "de-CH-1901",
+  "en-a-bbb": "en-a-bbb",
+  "en-us-x-twain": "en-US-x-twain",
+  "en-x-us": "en-x-us",
+  "es-419-x-private": "es-419-x-private",
+  "zh-hant-tw-x-pinyin": "zh-Hant-TW-x-pinyin",
+  // privateuse-only 主标签
+  "x-acme": "x-acme",
+  "x-US": "x-us",
+  "X-Abcd-US": "x-abcd-us",
+  // grandfathered（RFC 5646 注册表，前端按 langtag 规则推导出同一字符串）
+  "en-gb-oed": "en-GB-oed",
+  "i-ami": "i-ami",
+  "i-bnn": "i-bnn",
+  "i-default": "i-default",
+  "i-enochian": "i-enochian",
+  "i-hak": "i-hak",
+  "i-klingon": "i-klingon",
+  "i-lux": "i-lux",
+  "i-mingo": "i-mingo",
+  "i-navajo": "i-navajo",
+  "i-pwn": "i-pwn",
+  "i-tao": "i-tao",
+  "i-tay": "i-tay",
+  "i-tsu": "i-tsu",
+  "sgn-be-fr": "sgn-BE-FR",
+  "sgn-be-nl": "sgn-BE-NL",
+  "sgn-ch-de": "sgn-CH-DE",
+  "art-lojban": "art-lojban",
+  "cel-gaulish": "cel-gaulish",
+  "no-bok": "no-bok",
+  "no-nyn": "no-nyn",
+  "zh-guoyu": "zh-guoyu",
+  "zh-hakka": "zh-hakka",
+  "zh-min": "zh-min",
+  "zh-min-nan": "zh-min-nan",
+  "zh-xiang": "zh-xiang",
+};
+
 describe("canonicalizeScreenshotLocale", () => {
   it("folds BCP 47 case the way the server stores tags", () => {
     expect(canonicalizeScreenshotLocale("en-us")).toBe("en-US");
@@ -284,6 +335,12 @@ describe("canonicalizeScreenshotLocale", () => {
     expect(canonicalizeScreenshotLocale("en-US-u-ca-gregory")).toBe(
       "en-US-u-ca-gregory",
     );
+  });
+
+  it("matches the server's canonical output on every shared vector", () => {
+    for (const [raw, want] of Object.entries(SHARED_LOCALE_VECTORS)) {
+      expect(canonicalizeScreenshotLocale(raw)).toBe(want);
+    }
   });
 });
 
