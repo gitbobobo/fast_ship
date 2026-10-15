@@ -407,6 +407,73 @@ describe("AutomationsPage", () => {
     ]);
   });
 
+  it("PR 触发勾选模型时带上 descriptor 默认选项", async () => {
+    vi.mocked(threadApi.composerOptions).mockResolvedValue({
+      data: {
+        projects: [{ id: "proj-1", title: "示例项目" }],
+        config: {
+          providers: [
+            {
+              instanceId: "inst-a",
+              displayName: "Claude",
+              models: [
+                {
+                  slug: "claude-5",
+                  name: "Claude 5",
+                  capabilities: {
+                    optionDescriptors: [
+                      {
+                        type: "select",
+                        id: "effort",
+                        currentValue: "high",
+                        options: [
+                          { id: "low", label: "Low" },
+                          { id: "high", label: "High", isDefault: true },
+                        ],
+                      },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        settings: {},
+      },
+    } as never);
+    createMutateAsync.mockResolvedValue({});
+    const user = userEvent.setup();
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    await screen.findByRole("dialog");
+    await user.type(screen.getByLabelText(/名称/), "PR 审查");
+    await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
+
+    let combos = screen.getAllByRole("combobox");
+    await user.click(combos[1]);
+    await user.click(await screen.findByText("本机环境"));
+    combos = screen.getAllByRole("combobox");
+    await user.click(combos[2]);
+    await user.click(await screen.findByText("示例项目"));
+
+    await user.click(screen.getAllByRole("combobox")[0]);
+    await user.click(await screen.findByText("GitHub PR 打开"));
+    await user.click(await screen.findByText("Claude / Claude 5"));
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    expect(createMutateAsync.mock.calls[0][0].model_selections).toEqual([
+      {
+        instance_id: "inst-a",
+        model: "claude-5",
+        options: [{ id: "effort", value: "high" }],
+      },
+    ]);
+  });
+
   it("运行列表显示排队/已取消、轮次与 SHA", async () => {
     vi.mocked(useAutomationRuns).mockReturnValue({
       data: [
