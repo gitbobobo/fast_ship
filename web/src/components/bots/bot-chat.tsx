@@ -39,9 +39,10 @@ export function BotChat({ botId }: { botId: string }) {
     const value = text.trim();
     if (!value || chat.sending) return;
     setText("");
-    await chat.sendMessage(value);
-    // 发送失败把草稿还回来，避免用户输入丢失。
-    if (chat.sendError) setText(value);
+    const ok = await chat.sendMessage(value);
+    // 发送失败把草稿还回来，避免用户输入丢失（sendError 是渲染期快照，
+    // 不能作为恢复依据）。
+    if (!ok) setText(value);
   };
 
   if (chat.loading) {

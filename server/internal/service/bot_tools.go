@@ -91,8 +91,7 @@ type botIssueArgs struct {
 	Sort     string `json:"sort,omitempty" jsonschema:"description=排序"`
 	// create / update 用
 	Title       string    `json:"title,omitempty" jsonschema:"description=标题（create 必填；update 提供即替换）"`
-	Body        string    `json:"body,omitempty" jsonschema:"description=正文（Markdown）；update 提供即替换"`
-	BodySet     bool      `json:"-" jsonschema:"-"`
+	Body        *string   `json:"body,omitempty" jsonschema:"description=正文（Markdown）；create 缺省为空，update 提供即替换、省略即保留"`
 	Labels      *[]string `json:"labels,omitempty" jsonschema:"description=标签整组替换（仅 GitHub）"`
 	StateReason *string   `json:"state_reason,omitempty" jsonschema:"description=completed/not_planned/reopened（state=closed 时）"`
 	// set_workflow 用

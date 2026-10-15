@@ -1525,3 +1525,114 @@ func TestBotAsync(t *testing.T) {
 		t.Fatalf("异步执行应有后台结果消息")
 	}
 }
+
+func TestBotIssueUpdatePreservesBody(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botbody")
+	bot := env.createBot(t, userID)
+
+	project, err := env.bots.projects.Create(userID, &CreateProjectRequest{Name: "正文保留项目"})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	original := "原始正文，只改标题时不得被清空"
+	issue, err := env.bots.issues.CreateInternalIssue(project.Id, userID,
+		CreateInternalIssueRequest{Title: "原标题", Body: &original})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+
+	// 只改标题：参数不带 body，不得把 body 覆写成空串。
+	newTitle := "新标题"
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID,
+		ToolName: "fs_issue", Action: "update",
+		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"title":%q}`, issue.Id, newTitle),
+		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
+	}
+	if _, err := env.bots.runIssueWrite(context.Background(), call); err != nil {
+		t.Fatalf("runIssueWrite(仅标题): %v", err)
+	}
+	fresh, err := env.bots.issues.Get(issue.Id, userID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if fresh.Title != newTitle {
+		t.Fatalf("标题应更新: %+v", fresh.Title)
+	}
+	if fresh.Body != original {
+		t.Fatalf("字段级更新不得清空正文: %q", fresh.Body)
+	}
+
+	// 显式带 body：允许替换。
+	newBody := "替换后的正文"
+	call2 := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID,
+		ToolName: "fs_issue", Action: "update",
+		ArgumentsJSON: fmt.Sprintf(`{"action":"update","issue_id":%q,"body":%q}`, issue.Id, newBody),
+		ExecutionMode: string(model.BotExecutionAsync), Status: model.BotCallStatusRunning,
+	}
+	if _, err := env.bots.runIssueWrite(context.Background(), call2); err != nil {
+		t.Fatalf("runIssueWrite(带正文): %v", err)
+	}
+	fresh2, err := env.bots.issues.Get(issue.Id, userID)
+	if err != nil {
+		t.Fatalf("get2: %v", err)
+	}
+	if fresh2.Body != newBody {
+		t.Fatalf("显式 body 应替换: %q", fresh2.Body)
+	}
+}
+
+func TestBotDeltaBufferRecurrentFlush(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botdelta")
+	bot := env.createBot(t, userID)
+
+	// 事件带 run 外键：先落一个真实 run 夹具。
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-delta", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "delta-buffer",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusCompleted,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now, FinishedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+
+	d := env.bots.newDeltaBuffer(bot.ID, "run-delta")
+	d.onDelta("第一段")
+	time.Sleep(150 * time.Millisecond) // 定时器先落一批
+	d.onDelta("第二段")
+	d.flush() // 流末尾再落一批
+	d.flush() // 空缓冲：不重复落事件
+
+	var bodies []string
+	if err := env.db.Model(&model.BotEvent{}).
+		Where("bot_id = ?", bot.ID).
+		Order("seq asc").
+		Pluck("payload_json", &bodies).Error; err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	var text string
+	count := 0
+	for _, b := range bodies {
+		var env0 botEventEnvelope
+		if err := json.Unmarshal([]byte(b), &env0); err != nil || env0.Kind != "text_delta" {
+			continue
+		}
+		count++
+		if m, ok := env0.Payload.(map[string]interface{}); ok {
+			if s, ok := m["text"].(string); ok {
+				text += s
+			}
+		}
+	}
+	if count != 2 {
+		t.Fatalf("应分两批落事件，实际 %d: %v", count, bodies)
+	}
+	if text != "第一段第二段" {
+		t.Fatalf("SSE 增量应覆盖完整文本: %q", text)
+	}
+}

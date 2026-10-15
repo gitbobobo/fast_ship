@@ -195,8 +195,9 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 
 		// 3. message_commit 事件（供其他标签页同步完整消息）。
 		if err := s.appendEventTx(tx, bot.ID, &run.ID, "", model.BotEventDelta, botEventEnvelope{
-			Kind:    "message_commit",
-			Payload: map[string]interface{}{"message_id": assistantMsg.ID, "seq": assistantMsg.Seq},
+			Kind:      "message_commit",
+			MessageID: assistantMsg.ID,
+			Payload:   botMessageResponseOf(assistantMsg),
 		}); err != nil {
 			return err
 		}

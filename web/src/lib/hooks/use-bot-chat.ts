@@ -392,9 +392,9 @@ export function useBotChat(botId: string) {
   );
 
   const sendMessage = useCallback(
-    async (text: string) => {
+    async (text: string): Promise<boolean> => {
       const trimmed = text.trim();
-      if (!trimmed || !userId || sending) return;
+      if (!trimmed || !userId || sending) return false;
       setSendError(null);
       setSending(true);
       if (!pendingMessageIdRef.current) pendingMessageIdRef.current = uuid();
@@ -414,8 +414,10 @@ export function useBotChat(botId: string) {
             (previous) => mergeRun(previous ?? [], result.run as BotRun),
           );
         }
+        return true;
       } catch (err) {
         setSendError(err);
+        return false;
       } finally {
         setSending(false);
       }

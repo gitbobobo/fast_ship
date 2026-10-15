@@ -108,7 +108,7 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 	case "create":
 		req := CreateInternalIssueRequest{
 			Title: strings.TrimSpace(args.Title),
-			Body:  &args.Body,
+			Body:  args.Body,
 		}
 		source := strings.TrimSpace(args.Source)
 		if source == "" || source == "internal" {
@@ -119,8 +119,10 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		}
 		return nil, errs.New(errs.ErrInvalidParams.Code, "source 只支持 internal/github")
 	case "update":
-		req := UpdateInternalIssueRequest{
-			Body: &args.Body,
+		req := UpdateInternalIssueRequest{}
+		// 只在调用参数真的带了 body 时才替换；字段级更新不得清空正文。
+		if args.Body != nil {
+			req.Body = args.Body
 		}
 		if strings.TrimSpace(args.Title) != "" {
 			title := strings.TrimSpace(args.Title)

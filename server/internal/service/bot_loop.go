@@ -331,10 +331,9 @@ type botDeltaBuffer struct {
 	botID string
 	runID string
 
-	mu      sync.Mutex
-	buf     strings.Builder
-	timer   *time.Timer
-	flushed bool
+	mu    sync.Mutex
+	buf   strings.Builder
+	timer *time.Timer
 }
 
 func (s *BotService) newDeltaBuffer(botID, runID string) *botDeltaBuffer {
@@ -350,16 +349,14 @@ func (d *botDeltaBuffer) onDelta(text string) {
 	}
 }
 
-// flush 幂等：流结束与定时器只会有一次真正写库。
+// flush 取走当前缓冲整体落一次事件；定时器与流末尾并发调用时由互斥与
+// 空缓冲判空保证不重复。写完即复位，后续增量继续按 100ms 批量落库。
 func (d *botDeltaBuffer) flush() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.flushed {
-		return
-	}
-	d.flushed = true
 	if d.timer != nil {
 		d.timer.Stop()
+		d.timer = nil
 	}
 	text := d.buf.String()
 	d.buf.Reset()

@@ -877,6 +877,20 @@ func runSSEScenario(t *testing.T) {
 	for _, fr := range frames {
 		if fr.event == "delta" && strings.Contains(fr.data, "message_commit") {
 			hasCommit = true
+			// message_commit 携带完整消息：其他标签页据此直接渲染。
+			var frame struct {
+				MessageID string          `json:"message_id"`
+				Payload   json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal([]byte(fr.data), &frame); err != nil {
+				t.Fatalf("解析 message_commit: %v", err)
+			}
+			if frame.MessageID == "" {
+				t.Fatalf("message_commit 缺 message_id: %s", fr.data)
+			}
+			if !json.Valid(frame.Payload) || !strings.Contains(string(frame.Payload), `"content"`) {
+				t.Fatalf("message_commit 载荷应为完整消息: %s", fr.data)
+			}
 		}
 	}
 	if !hasCommit {

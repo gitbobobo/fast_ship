@@ -297,7 +297,8 @@ describe("useBotChat", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     api.send.mockRejectedValueOnce(new Error("网络错误"));
-    await act(() => result.current.sendMessage("帮我看看问题"));
+    const failed = await act(() => result.current.sendMessage("帮我看看问题"));
+    expect(failed).toBe(false);
     expect(result.current.sendError).toBeInstanceOf(Error);
 
     api.send.mockResolvedValueOnce({
@@ -312,7 +313,8 @@ describe("useBotChat", () => {
       run: null,
       queued: false,
     });
-    await act(() => result.current.sendMessage("帮我看看问题"));
+    const ok = await act(() => result.current.sendMessage("帮我看看问题"));
+    expect(ok).toBe(true);
 
     expect(api.send).toHaveBeenCalledTimes(2);
     const first = api.send.mock.calls[0][1].client_message_id;
