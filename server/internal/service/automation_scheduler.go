@@ -288,6 +288,19 @@ func (s *AutomationScheduler) markTimeouts(now time.Time) {
 }
 
 func (s *AutomationScheduler) timeoutRun(run *model.AutomationRun, now time.Time) {
+	do := func() {
+		s.timeoutRunTx(run, now)
+	}
+	// PR 运行与 agent SubmitReview 共用 per-PR 锁，避免超时提交之后仍发出
+	// REQUEST_CHANGES。先锁再开事务，顺序与 webhook/agent 一致。
+	if run.TriggerType.IsPRTrigger() && s.prReview != nil && run.RepoFullName != "" && run.PRNumber != 0 {
+		s.prReview.withPRLock(run.RepoFullName, run.PRNumber, do)
+		return
+	}
+	do()
+}
+
+func (s *AutomationScheduler) timeoutRunTx(run *model.AutomationRun, now time.Time) {
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		cols := map[string]any{
 			"status":        string(model.AutomationRunTimedOut),

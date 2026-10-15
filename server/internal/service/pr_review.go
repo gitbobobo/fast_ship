@@ -150,6 +150,7 @@ type gitHubPRPayload struct {
 				FullName string `json:"full_name"`
 			} `json:"repo"`
 		} `json:"base"`
+		UpdatedAt string `json:"updated_at"`
 	} `json:"pull_request"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -271,14 +272,20 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 
 	// 迟到的 opened/synchronize 可能带着已被更新 head 取代的 SHA。先判过期再
 	// 取消：否则 delayed opened(A) 会把当前 B 的在途运行取消并重开 A。
-	stale, err := isStalePRHeadTx(tx, repoFullName, p.Number, head.SHA, p.Action)
+	prUpdatedAt := parseGitHubTime(p.PullRequest.UpdatedAt)
+	stale, err := isStalePRHeadTx(tx, repoFullName, p.Number, head.SHA, p.Action, prUpdatedAt)
 	if err != nil {
 		return err
 	}
 	if stale {
 		return nil
 	}
-	if err := s.reviews.RecordSeenSHATx(tx, repoFullName, p.Number, head.SHA, now); err != nil {
+	var seenUpdatedAt *time.Time
+	if !prUpdatedAt.IsZero() {
+		t := prUpdatedAt
+		seenUpdatedAt = &t
+	}
+	if err := s.reviews.RecordSeenSHATx(tx, repoFullName, p.Number, head.SHA, now, seenUpdatedAt); err != nil {
 		return err
 	}
 
@@ -342,17 +349,41 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 	return nil
 }
 
+// parseGitHubTime 解析 payload 的 RFC3339 时间；空或非法当作零值（跳过时序比较）。
+func parseGitHubTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t.UTC()
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC()
+	}
+	return time.Time{}
+}
+
 // isStalePRHeadTx 判断迟到 webhook 的 head SHA 是否已经过期。当前 head 优先取
-// 未开火的防抖行，否则取评审账；本次 SHA 就是当前 head → 接受。已经受理过、
-// 但不是当前 head 的 SHA 一律拒绝（含「A 已有 review、B 还在 debounce」时迟到
-// 的 A，以及 force-push 回已见过的 SHA）。其余视为新 SHA。
-func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action string) (bool, error) {
+// 未开火的防抖行，否则取评审账；本次 SHA 就是当前 head → 接受。payload
+// updated_at 早于已受理 head 的 → 拒绝（GitHub 先投递 B 再迟到 A，A 从未写入
+// seen/运行）。已经受理过、但不是当前 head 的 SHA 一律拒绝。其余视为新 SHA。
+func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action string, prUpdatedAt time.Time) (bool, error) {
 	latest, err := currentPRHeadSHATx(tx, repoFullName, prNumber)
 	if err != nil {
 		return false, err
 	}
 	if latest == sha {
 		return false, nil
+	}
+	if !prUpdatedAt.IsZero() {
+		last, err := lastAcceptedPRUpdatedAtTx(tx, repoFullName, prNumber)
+		if err != nil {
+			return false, err
+		}
+		if !last.IsZero() && prUpdatedAt.Before(last) {
+			return true, nil
+		}
 	}
 	var seen int64
 	if err := tx.Model(&model.GitHubPRSeenSHA{}).
@@ -376,6 +407,23 @@ func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action
 		return false, err
 	}
 	return n > 0, nil
+}
+
+// lastAcceptedPRUpdatedAtTx 已受理 head 里最新的 pull_request.updated_at。
+func lastAcceptedPRUpdatedAtTx(tx *gorm.DB, repoFullName string, prNumber int) (time.Time, error) {
+	var row model.GitHubPRSeenSHA
+	err := tx.Where("repo_full_name = ? AND pr_number = ? AND pr_updated_at IS NOT NULL", repoFullName, prNumber).
+		Order("pr_updated_at DESC").First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	if row.PRUpdatedAt == nil {
+		return time.Time{}, nil
+	}
+	return row.PRUpdatedAt.UTC(), nil
 }
 
 // currentPRHeadSHATx 当前受理的 head：未开火的防抖行优先（窗口内的新 SHA 比

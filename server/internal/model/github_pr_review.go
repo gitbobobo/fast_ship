@@ -58,10 +58,11 @@ func (GitHubPRReview) TableName() string { return "github_pr_reviews" }
 // 行、也没有运行时，靠这张表拒绝迟到的旧 SHA，避免 DeleteStaleSHATx 把当前
 // debounce 删掉。force-push 回已见过的 SHA 不再开轮。
 type GitHubPRSeenSHA struct {
-	RepoFullName string    `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
-	PRNumber     int       `gorm:"column:pr_number;primaryKey" json:"pr_number"`
-	HeadSHA      string    `gorm:"column:head_sha;type:text;primaryKey" json:"head_sha"`
-	SeenAt       time.Time `gorm:"column:seen_at;not null" json:"seen_at"`
+	RepoFullName string     `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
+	PRNumber     int        `gorm:"column:pr_number;primaryKey" json:"pr_number"`
+	HeadSHA      string     `gorm:"column:head_sha;type:text;primaryKey" json:"head_sha"`
+	SeenAt       time.Time  `gorm:"column:seen_at;not null" json:"seen_at"`
+	PRUpdatedAt  *time.Time `gorm:"column:pr_updated_at" json:"pr_updated_at"`
 }
 
 func (GitHubPRSeenSHA) TableName() string { return "github_pr_seen_shas" }
