@@ -366,8 +366,9 @@ func parseGitHubTime(s string) time.Time {
 
 // isStalePRHeadTx 判断迟到 webhook 的 head SHA 是否已经过期。当前 head 优先取
 // 未开火的防抖行，否则取评审账；本次 SHA 就是当前 head → 接受。payload
-// updated_at 早于已受理 head 的 → 拒绝（GitHub 先投递 B 再迟到 A，A 从未写入
-// seen/运行）。已经受理过、但不是当前 head 的 SHA 一律拒绝。其余视为新 SHA。
+// updated_at 早于或等于已受理 head 的 → 拒绝（含同一秒的乱序投递；GitHub
+// 先投递 B 再迟到 A，A 从未写入 seen/运行）。已经受理过、但不是当前 head
+// 的 SHA 一律拒绝。其余视为新 SHA。
 func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action string, prUpdatedAt time.Time) (bool, error) {
 	latest, err := currentPRHeadSHATx(tx, repoFullName, prNumber)
 	if err != nil {
@@ -381,7 +382,7 @@ func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action
 		if err != nil {
 			return false, err
 		}
-		if !last.IsZero() && prUpdatedAt.Before(last) {
+		if !last.IsZero() && !prUpdatedAt.After(last) {
 			return true, nil
 		}
 	}

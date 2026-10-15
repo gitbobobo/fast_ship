@@ -1595,6 +1595,29 @@ func TestWebhook_OutOfOrderSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 	}
 }
 
+// 同一 updated_at 的乱序 synchronize 也不能取消当前 head。
+func TestWebhook_EqualTimeSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		x.DebounceSeconds = 0
+	})
+	t0 := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
+	if err := env.handleWebhookAt(t, "d-b", "synchronize", "octocat/hw", 1, "sha-2", false, false, t0); err != nil {
+		t.Fatalf("synchronize B: %v", err)
+	}
+	if err := env.handleWebhookAt(t, "d-a-late", "synchronize", "octocat/hw", 1, "sha-1", false, false, t0); err != nil {
+		t.Fatalf("equal-time synchronize A: %v", err)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status <> ?", "sha-2", model.AutomationRunCancelled); n == 0 {
+		t.Fatal("equal-time A cancelled current B")
+	}
+	if n := countRuns(t, env.db, "head_sha = ?", "sha-1"); n != 0 {
+		t.Fatalf("stale A opened runs = %d, want 0", n)
+	}
+}
+
 // 超时终态必须等 in-flight SubmitReview 释放 per-PR 锁。
 func TestTimeout_WaitsForInFlightSubmitReview(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
