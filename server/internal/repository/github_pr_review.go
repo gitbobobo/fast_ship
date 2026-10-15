@@ -161,10 +161,11 @@ func (r *GitHubPRReviewRepository) ClearRunCheckRunIDTx(tx *gorm.DB, runID strin
 		Update("check_run_id", nil).Error
 }
 
-// RecordSeenSHATx 记下已受理的 head SHA；重复插入忽略。
-func (r *GitHubPRReviewRepository) RecordSeenSHATx(tx *gorm.DB, repoFullName string, prNumber int, sha string, now time.Time) error {
+// RecordSeenSHATx 记下已受理的 head SHA；重复插入忽略。prUpdatedAt 是 payload
+// 里 pull_request.updated_at，用来拒绝比已受理 head 更旧的迟到 synchronize。
+func (r *GitHubPRReviewRepository) RecordSeenSHATx(tx *gorm.DB, repoFullName string, prNumber int, sha string, now time.Time, prUpdatedAt *time.Time) error {
 	err := tx.Create(&model.GitHubPRSeenSHA{
-		RepoFullName: repoFullName, PRNumber: prNumber, HeadSHA: sha, SeenAt: now,
+		RepoFullName: repoFullName, PRNumber: prNumber, HeadSHA: sha, SeenAt: now, PRUpdatedAt: prUpdatedAt,
 	}).Error
 	if isUniqueConstraintError(err) {
 		return nil

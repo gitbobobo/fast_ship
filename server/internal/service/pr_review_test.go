@@ -287,11 +287,20 @@ func (e *prReviewTestEnv) createPRRule(t *testing.T, user *model.User, mutate fu
 
 // webhookPayload 构造 GitHub 官方 pull_request 事件形状的 payload。
 func webhookPayload(action, repo string, number int, sha string, draft, fork bool) []byte {
+	return webhookPayloadAt(action, repo, number, sha, draft, fork, time.Time{})
+}
+
+func webhookPayloadAt(action, repo string, number int, sha string, draft, fork bool, updatedAt time.Time) []byte {
 	owner, name, _ := strings.Cut(repo, "/")
+	updatedField := ""
+	if !updatedAt.IsZero() {
+		updatedField = fmt.Sprintf(`"updated_at": %q,`, updatedAt.UTC().Format(time.RFC3339))
+	}
 	return []byte(fmt.Sprintf(`{
 		"action": %q,
 		"number": %d,
 		"pull_request": {
+			%s
 			"draft": %t,
 			"html_url": "https://github.com/%s/pull/%d",
 			"title": "Add feature",
@@ -301,14 +310,19 @@ func webhookPayload(action, repo string, number int, sha string, draft, fork boo
 		},
 		"repository": {"full_name": %q, "owner": {"login": %q}, "name": %q},
 		"installation": {"id": 12345}
-	}`, action, number, draft, repo, number, sha, fork, repo, repo, repo, owner, name))
+	}`, action, number, updatedField, draft, repo, number, sha, fork, repo, repo, repo, owner, name))
 }
 
 // handleWebhook 以给定 action/SHA 投递事件。
 func (e *prReviewTestEnv) handleWebhook(t *testing.T, delivery, action, repo string, number int, sha string, draft, fork bool) error {
 	t.Helper()
+	return e.handleWebhookAt(t, delivery, action, repo, number, sha, draft, fork, time.Time{})
+}
+
+func (e *prReviewTestEnv) handleWebhookAt(t *testing.T, delivery, action, repo string, number int, sha string, draft, fork bool, updatedAt time.Time) error {
+	t.Helper()
 	return e.pr.HandleGitHubWebhook(context.Background(), "pull_request", delivery,
-		webhookPayload(action, repo, number, sha, draft, fork))
+		webhookPayloadAt(action, repo, number, sha, draft, fork, updatedAt))
 }
 
 func countDebounces(t *testing.T, db *gorm.DB) int64 {
@@ -1551,6 +1565,132 @@ func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
 	}
 	if still.Status != model.AutomationRunCancelled {
 		t.Fatalf("status after webhook = %s, want cancelled", still.Status)
+	}
+}
+
+// GitHub 先投递 synchronize(B)、再迟到 synchronize(A)（A 从未 seen）不能取消 B。
+func TestWebhook_OutOfOrderSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) {
+		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		x.DebounceSeconds = 0
+	})
+	t1 := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	if err := env.handleWebhookAt(t, "d-b", "synchronize", "octocat/hw", 1, "sha-2", false, false, t2); err != nil {
+		t.Fatalf("synchronize B: %v", err)
+	}
+	if n := countRuns(t, env.db, "head_sha = ?", "sha-2"); n == 0 {
+		t.Fatal("sha-2 round missing")
+	}
+	if err := env.handleWebhookAt(t, "d-a-late", "synchronize", "octocat/hw", 1, "sha-1", false, false, t1); err != nil {
+		t.Fatalf("late synchronize A: %v", err)
+	}
+	if n := countRuns(t, env.db, "head_sha = ? AND status <> ?", "sha-2", model.AutomationRunCancelled); n == 0 {
+		t.Fatal("late A cancelled current B")
+	}
+	if n := countRuns(t, env.db, "head_sha = ?", "sha-1"); n != 0 {
+		t.Fatalf("stale A opened runs = %d, want 0", n)
+	}
+}
+
+// 超时终态必须等 in-flight SubmitReview 释放 per-PR 锁。
+func TestTimeout_WaitsForInFlightSubmitReview(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("opened: %v", err)
+	}
+	var run model.AutomationRun
+	if err := env.db.Where("head_sha = ?", "sha-1").First(&run).Error; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if err := env.db.Model(&run).Updates(map[string]any{
+		"status":      model.AutomationRunDispatched,
+		"deadline_at": nowUTC().Add(-time.Minute),
+	}).Error; err != nil {
+		t.Fatalf("mark dispatched: %v", err)
+	}
+	if err := env.db.Where("id = ?", run.ID).First(&run).Error; err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+
+	blocker := &blockingSubmitReview{
+		PullRequestGitHub: env.fake,
+		entered:           make(chan struct{}),
+		release:           make(chan struct{}),
+	}
+	agent := NewAutomationAgentService(env.db, env.runs,
+		repository.NewAutomationRunTokenRepository(env.db), nil, NewNotificationSink(env.db), zap.NewNop())
+	agent.SetPRGitHub(blocker)
+	agent.SetPRReview(env.pr)
+
+	sink := NewNotificationSink(env.db)
+	sched := NewAutomationScheduler(env.db,
+		repository.NewAutomationRepository(env.db), env.runs,
+		repository.NewAutomationRunTokenRepository(env.db), nil, sink,
+		repository.NewIssueRepository(env.db),
+		&config.Config{Server: config.ServerConfig{PublicURL: "https://fs.example.com"}}, zap.NewNop())
+	sched.UsePRReview(env.pr)
+
+	body := "ok"
+	req := &api.AgentPullRequestReviewRequest{Event: api.COMMENT, Body: &body}
+	identity := &RunTokenIdentity{UserID: run.UserID, RunID: run.ID}
+
+	submitDone := make(chan error, 1)
+	go func() {
+		_, err := agent.AgentSubmitPullRequestReview(context.Background(), identity, req)
+		submitDone <- err
+	}()
+	select {
+	case <-blocker.entered:
+	case err := <-submitDone:
+		t.Fatalf("submit returned before GitHub call: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SubmitReview")
+	}
+
+	timeoutDone := make(chan struct{})
+	go func() {
+		sched.timeoutRun(&run, nowUTC())
+		close(timeoutDone)
+	}()
+	select {
+	case <-timeoutDone:
+		close(blocker.release)
+		t.Fatal("timeout returned while SubmitReview held the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	var still model.AutomationRun
+	if err := env.db.Where("id = ?", run.ID).First(&still).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if still.Status == model.AutomationRunTimedOut {
+		close(blocker.release)
+		t.Fatal("run timed out while SubmitReview held the lock")
+	}
+
+	close(blocker.release)
+	select {
+	case err := <-submitDone:
+		if err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for submit")
+	}
+	select {
+	case <-timeoutDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for timeoutRun")
+	}
+	if err := env.db.Where("id = ?", run.ID).First(&still).Error; err != nil {
+		t.Fatalf("reload after timeout: %v", err)
+	}
+	if still.Status != model.AutomationRunTimedOut {
+		t.Fatalf("status after timeout = %s, want timed_out", still.Status)
 	}
 }
 
