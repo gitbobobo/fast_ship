@@ -62,6 +62,36 @@ cron 解析用 `robfig/cron/v3` 自定义 parser（`automationCronParser`）：�
 五字段（分 时 日 月 周）；秒字段、`@every` 描述符、表达式内 `TZ=`/`CRON_TZ=`
 前缀都被显式拒绝（robfig 会无条件剥离 TZ 前缀，这里在解析前拦截）。
 
+## 前端可视化调度（INT-100，`web/src/lib/`、`routes/automations/cron-editor.tsx`）
+
+新建/编辑共用一个弹窗；cron 触发的主层是「频率选择」（每 N 分钟/每 N 小时/每天/
+每周多选/每月某日/工作日），自动生成五字段表达式；最后一个选项「自定义」
+进入 cron 高级模式（实时校验、字段级错误、示例回填）。分钟步进只列整除 60 的值
+（1/2/5/10/15/20/30），小时只列整除 24 的值——非整除间隔只能走自定义，这是
+「可视化层能 1:1 还原」的前提。「月末」在五字段 cron 里不可表达（L 被拒），
+每月只提供 1–31 日；29–31 日的描述会注明短月不运行。可视化层生成不出表达式的
+状态（每周未选日、时间非法）会上报空表达式，由表单必填校验拦截保存。
+
+- `cron-schedule.ts`：robfig `SpecSchedule.Next` 的 TypeScript 移植（`*`/`?`、
+  `N/step→N-max`、dom/dow 星号决定 AND/OR、DST 校正、5 年上限），墙钟换算只
+  依赖 `Intl`。**预览行为 = 服务端调度行为**，由 `cron-schedule.test.ts` 里的
+  黄金向量保证（向量由 Go 侧同款 parser 离线生成，覆盖 UTC/上海/纽约/柏林/
+  圣地亚哥/Apia/Lord Howe 的 DST 边界）。
+  - 已知分叉：robfig 在「整日被跳过的时区」（Apia 2011-12-30 等）里 day 循环
+    原地死循环；本实现检测到「时间不前进」跳到下一个真实午夜，等效该日不匹配，
+    不挂起页面。
+  - robfig 另一怪癖保持一致：午夜被跳过的日子里，小时循环不回看星期——
+    `0 9 * * 6` 在 Santiago 2026-09-06（周日）也会触发 09:00。
+  - 空字段集（`, * * * *` 这类逗号空段表达式）robfig 解析成功且永不命中；
+    本实现在 Next 入口判空直接返回无运行，避免逐分钟扫 5 年拖死渲染线程。
+- `cron-frequency.ts`：频率↔表达式双向转换与人话描述（结构化描述优先，
+  还原不了时用 cronstrue）；界面语言跟随浏览器（zh* → 中文，其余英文）。
+- 列表「触发」列显示人话描述，原表达式+时区放在 cell `title`。
+- 服务端存储/API 不变：`cron_expression` 五字段 + `timezone` IANA 名称，
+  空时区 = UTC；新建表单默认浏览器时区 + `0 9 * * *`（每天 09:00）。
+- `Local` 时区（Go `time.LoadLocation` 合法值）：展示/描述/落库均保留原值；
+  前端预览按浏览器本机时区尽力近似，与服务器机器时区可能不同。
+
 ## Issue 事件（`automation_events.go`）
 
 `IssueService.SetIssueEventSink` 注入事件出口；`EnqueueIssueEventTx(tx, event)` 在

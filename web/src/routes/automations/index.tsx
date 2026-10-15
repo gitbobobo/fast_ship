@@ -58,6 +58,8 @@ import {
   useToggleAutomation,
   useUpdateAutomation,
 } from "@/lib/hooks/use-automations";
+import { describeCronExpression, uiLocale } from "@/lib/cron-frequency";
+import { effectiveTimezone } from "@/lib/cron-schedule";
 
 // 自动化设置页（INT-90）：列表/新建/编辑/启停/删除 + 运行记录。
 // 新建默认停用、空提示词；archive 后置会终止活动线程，表单里就地说明。
@@ -68,7 +70,8 @@ const emptyForm: AutomationInput = {
   environment_id: "",
   t3_project_id: "",
   trigger_type: "cron",
-  cron_expression: "",
+  // INT-100：默认「每天 09:00」，用户无需接触 cron 语法。
+  cron_expression: "0 9 * * *",
   timezone: "",
   issue_project_id: null,
   event_filter: null,
@@ -231,7 +234,17 @@ export default function AutomationsPage() {
                 {automations.map((a) => (
                   <TableRow key={a.id}>
                     <TableCell className="font-medium">{a.name}</TableCell>
-                    <TableCell className="text-sm">
+                    <TableCell
+                      className="text-sm"
+                      // hover 展示原始表达式与时区（空时区服务端按 UTC）（INT-100）。
+                      title={
+                        a.trigger_type === "cron"
+                          ? `${a.cron_expression ?? ""}（${effectiveTimezone(
+                              a.timezone ?? "",
+                            )}）`
+                          : undefined
+                      }
+                    >
                       {triggerSummary(a)}
                     </TableCell>
                     <TableCell className="text-sm">
@@ -346,9 +359,13 @@ function automationToForm(a: Automation): AutomationInput {
 function triggerSummary(a: Automation): string {
   const label = automationTriggerLabel(a.trigger_type);
   if (a.trigger_type === "cron") {
-    return `${label} · ${a.cron_expression ?? ""}${
-      a.timezone ? `（${a.timezone}）` : ""
-    }`;
+    const desc = describeCronExpression(
+      a.cron_expression ?? "",
+      a.timezone ?? "",
+      uiLocale(),
+    );
+    // 描述不出来（表达式损坏等）时至少展示原表达式。
+    return desc ? `${label} · ${desc}` : `${label} · ${a.cron_expression ?? ""}`;
   }
   if (isPRTrigger(a.trigger_type)) {
     const models = (a.model_selections ?? [])

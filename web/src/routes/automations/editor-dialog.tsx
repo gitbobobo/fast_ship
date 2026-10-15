@@ -32,6 +32,7 @@ import {
   parseProviders,
   resolveModel,
 } from "@/lib/threads-compose";
+import { CronScheduleFields } from "./cron-editor";
 
 // 自动化新建/编辑弹窗（INT-90）：选项常量与表单控件集中在此文件。
 
@@ -267,32 +268,13 @@ export function AutomationEditorDialog({
           )}
 
           {form.trigger_type === "cron" ? (
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-2">
-                <Label htmlFor="automation-cron">cron 表达式</Label>
-                <Input
-                  id="automation-cron"
-                  value={form.cron_expression ?? ""}
-                  placeholder="*/10 * * * *"
-                  onChange={(e) => set("cron_expression", e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  标准五字段：分 时 日 月 周；不支持秒与 @every。
-                </p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="automation-tz">时区</Label>
-                <Input
-                  id="automation-tz"
-                  value={form.timezone ?? ""}
-                  placeholder={browserTimezone()}
-                  onChange={(e) => set("timezone", e.target.value)}
-                />
-                <p className="text-xs text-muted-foreground">
-                  IANA 名称，留空按 UTC。
-                </p>
-              </div>
-            </div>
+            <CronScheduleFields
+              expression={form.cron_expression ?? ""}
+              timezone={form.timezone ?? ""}
+              onChange={(expr, tz) =>
+                onFormChange({ ...form, cron_expression: expr, timezone: tz })
+              }
+            />
           ) : isPRTrigger(form.trigger_type) ? (
             <p className="text-xs text-muted-foreground">
               GitHub PR 触发不做事件字段过滤：仓库范围由 GitHub App 安装与项目关联决定，
