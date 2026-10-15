@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +17,13 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
+	"github.com/godbobo/fast_ship/server/internal/pkg/selflog"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/router"
 	"github.com/godbobo/fast_ship/server/internal/service"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
@@ -81,6 +83,13 @@ var autoMigrateModels = []interface{}{
 }
 
 func main() {
+	// 启动期引导日志：配置与日志管道就绪前的失败只能走 stderr。
+	boot := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	fatal := func(msg string, err error) {
+		boot.Error(msg, slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
 	// 加载配置
 	cfgPath := "configs/config.yaml"
 	if envPath := os.Getenv("CONFIG_PATH"); envPath != "" {
@@ -89,22 +98,57 @@ func main() {
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
+		fatal("加载配置失败", err)
 	}
 
-	// 初始化日志
-	var zapLogger *zap.Logger
-	if cfg.Server.Mode == "debug" {
-		zapLogger, _ = zap.NewDevelopment()
-	} else {
-		zapLogger, _ = zap.NewProduction()
+	// 自身日志管道（INT-94）：slog → 异步批量写独立 SQLite 日志库；
+	// 写库失败只计数丢弃，绝不反压业务。
+	if err := os.MkdirAll(filepath.Dir(cfg.Logging.SelfLogPath()), 0750); err != nil {
+		fatal("创建自身日志目录失败", err)
 	}
+	selfLogStore, err := selflog.OpenStore(cfg.Logging.SelfLogPath())
+	if err != nil {
+		fatal("打开自身日志库失败", err)
+	}
+	selfLogPipeline, err := selflog.Start(selflog.Options{
+		Sink:     selfLogStore,
+		MinLevel: selfLogMinLevel(cfg.Logging.MinLevel),
+		Retention: selflog.RetentionOptions{
+			KeepDays:   cfg.Logging.SelfLogRetentionDays(),
+			MaxEntries: cfg.Logging.SelfLogMaxEntries(),
+			Interval:   cfg.Logging.SelfLogCleanupInterval(),
+		},
+	})
+	if err != nil {
+		fatal("启动自身日志管道失败", err)
+	}
+	defer selfLogPipeline.Close()
+	appLogger := slog.New(selfLogPipeline.Handler())
+
+	// 初始化日志：zap 保留给既有服务层；stdout/err 可读输出之外，
+	// 通过 zapcore Tee 把同一份日志桥接进自身日志库（INT-94）。
+	var stdoutCore zapcore.Core
+	stackLevel := zapcore.ErrorLevel
+	if cfg.Server.Mode == "debug" {
+		stdoutCore = zapcore.NewCore(
+			zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()),
+			zapcore.Lock(os.Stderr), zapcore.DebugLevel)
+		stackLevel = zapcore.WarnLevel
+	} else {
+		stdoutCore = zapcore.NewCore(
+			zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+			zapcore.Lock(os.Stdout), zapcore.InfoLevel)
+	}
+	zapLogger := zap.New(
+		zapcore.NewTee(stdoutCore, selflog.NewZapCore(selfLogPipeline.IngestHandler(), zapcore.DebugLevel)),
+		zap.AddStacktrace(stackLevel),
+	)
 	defer zapLogger.Sync()
 
 	// 确保数据目录存在
 	dbDir := filepath.Dir(cfg.Database.Path)
 	if err := os.MkdirAll(dbDir, 0750); err != nil {
-		log.Fatalf("创建数据目录失败: %v", err)
+		fatal("创建数据目录失败", err)
 	}
 
 	// 初始化数据库
@@ -117,7 +161,7 @@ func main() {
 		Logger: gormLogger,
 	})
 	if err != nil {
-		log.Fatalf("连接数据库失败: %v", err)
+		fatal("连接数据库失败", err)
 	}
 
 	// SQLite 文件锁是连接级竞争：单连接串行化避免跨连接 BUSY；
@@ -125,7 +169,7 @@ func main() {
 	// 持续流量下空闲计时会被反复重置，再用生命周期兜底强制回收。
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("获取数据库连接失败: %v", err)
+		fatal("获取数据库连接失败", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
@@ -136,12 +180,12 @@ func main() {
 	// 修正存量库上与模型不符的外键。必须先于 AutoMigrate：
 	// 缺失外键交给 AutoMigrate 会隐式整表重建，悬空行还在就会直接失败。
 	if err := repairLegacyForeignKeys(db, zapLogger, foreignKeyBackupPath(cfg.Database.Path)); err != nil {
-		log.Fatalf("外键约束迁移失败: %v", err)
+		fatal("外键约束迁移失败", err)
 	}
 
 	// 自动迁移
 	if err := db.AutoMigrate(autoMigrateModels...); err != nil {
-		log.Fatalf("数据库迁移失败: %v", err)
+		fatal("数据库迁移失败", err)
 	}
 
 	// 创建唯一索引
@@ -174,24 +218,24 @@ func main() {
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
 
 	if err := dropLegacyCollabTables(db, zapLogger); err != nil {
-		log.Fatalf("协作区数据迁移失败: %v", err)
+		fatal("协作区数据迁移失败", err)
 	}
 
 	if err := backfillIssueSourceModel(db); err != nil {
-		log.Fatalf("问题数据迁移失败: %v", err)
+		fatal("问题数据迁移失败", err)
 	}
 	if err := backfillIssueAssetStatusModel(db); err != nil {
-		log.Fatalf("问题资源数据迁移失败: %v", err)
+		fatal("问题资源数据迁移失败", err)
 	}
 	if err := backfillIssueReadStates(db, zapLogger); err != nil {
-		log.Fatalf("已读水位数据迁移失败: %v", err)
+		fatal("已读水位数据迁移失败", err)
 	}
 
 	// 项目 GitHub Token 密文迁移进用户级 Token 库并切换到引用列（INT-84）。
 	// 依赖 AutoMigrate 已建好 user_github_tokens 与 projects 引用列；
 	// 解密失败等错误直接启动失败，宁可起不来也不带错跑。
 	if err := migrateProjectGitHubTokens(db, []byte(cfg.Encryption.Key), zapLogger); err != nil {
-		log.Fatalf("项目 GitHub Token 迁移失败: %v", err)
+		fatal("项目 GitHub Token 迁移失败", err)
 	}
 
 	// 初始化存储
@@ -237,34 +281,39 @@ func main() {
 	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
 
+	// 模块化日志（INT-94）：按模块打上 module 字段，便于自身日志按模块检索。
+	githubLogger := zapLogger.With(zap.String("module", "github"))
+	t3Logger := zapLogger.With(zap.String("module", "t3"))
+	automationLogger := zapLogger.With(zap.String("module", "automation"))
+
 	// 初始化 Service
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
-	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zapLogger)
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, appLogger.With(slog.String("module", "auth")))
+	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zapLogger.With(zap.String("module", "ai")))
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
-	apiKeyService := service.NewApiKeyService(apiKeyRepo)
-	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zapLogger)
+	apiKeyService := service.NewApiKeyService(apiKeyRepo, appLogger.With(slog.String("module", "api_key")))
+	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, githubLogger)
 	dashboardService := service.NewDashboardService(dashboardRepo)
-	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zapLogger)
-	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, zapLogger)
-	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, zapLogger, screenshotAnnotationRepo)
+	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
+	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
+	issueService := service.NewIssueService(issueRepo, issueGitHubMetaRepo, issueCommentRepo, issueTimelineRepo, issueInternalMetaRepo, issueShipHookService, issueChecklistRepo, issueSyncStateRepo, issueAssetRepo, issueDraftAssetRepo, projectRepo, githubTokenRepo, userRepo, githubRepoLabelRepo, issueReadStateRepo, recommendationRepo, issuePullRequestRepo, issueAttachmentRepo, fileStorage, cfg, githubLogger, screenshotAnnotationRepo)
 	issueCollabService := service.NewIssueCollabService(issueCollabRepo, issueRepo, projectRepo, userRepo)
 	recommendationService := service.NewIssueRecommendationService(recommendationRepo, issueRepo, issueInternalMetaRepo, projectRepo)
 	logService := service.NewLogService(logRepo, projectRepo)
 	documentService := service.NewDocumentService(documentRepo, projectRepo)
 	artifactService := service.NewArtifactService(artifactRepo, versionRepo, projectRepo, fileStorage)
-	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, zapLogger)
+	issueAttachmentService := service.NewIssueAttachmentService(issueAttachmentRepo, issueRepo, projectRepo, fileStorage, cfg, githubLogger)
 	screenshotService := service.NewScreenshotService(screenshotRepo, projectRepo, fileStorage, cfg)
 	screenshotAnnotationService := service.NewScreenshotAnnotationService(screenshotAnnotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage)
-	shipService := service.NewShipService(versionRepo, projectRepo, githubTokenRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, zapLogger)
+	shipService := service.NewShipService(versionRepo, projectRepo, githubTokenRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, githubLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
-	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, zapLogger)
-	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, zapLogger)
+	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, t3Logger)
+	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, t3Logger)
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)
-	automationService := service.NewAutomationService(db, automationRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zapLogger)
-	automationAgentService := service.NewAutomationAgentService(db, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, zapLogger)
-	automationScheduler := service.NewAutomationScheduler(db, automationRepo, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, issueRepo, cfg, zapLogger)
+	automationService := service.NewAutomationService(db, automationRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, automationLogger)
+	automationAgentService := service.NewAutomationAgentService(db, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, automationLogger)
+	automationScheduler := service.NewAutomationScheduler(db, automationRepo, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, issueRepo, cfg, automationLogger)
 
 	// Issue 写路径接入事件出口：事务内匹配自动化并预写运行（INT-90）。
 	issueService.SetIssueEventSink(automationService)
@@ -293,6 +342,7 @@ func main() {
 	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
+	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -351,21 +401,35 @@ func main() {
 	// 自动化协调循环（INT-90）：到期 cron、待认领运行、超时与后置统一由它推进。
 	automationScheduler.Start()
 
-	// 设置 Gin
+	// 设置 Gin：请求日志中间件自带 recover 与 5xx 堆栈采集，替代 gin.Recovery。
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
-	r.Use(gin.Recovery())
+	r.Use(middleware.RequestLog(appLogger))
 	r.Use(middleware.CORS())
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, selfLogHandler, authService, apiKeyRepo)
 
 	// 启动服务
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
-	zapLogger.Info("服务启动", zap.String("addr", addr))
+	appLogger.Info("服务启动", slog.String("addr", addr))
 	if err := r.Run(addr); err != nil {
-		log.Fatalf("服务启动失败: %v", err)
+		fatal("服务启动失败", err)
+	}
+}
+
+// selfLogMinLevel 把配置中的级别名转为 slog 级别；未知取值按 INFO。
+func selfLogMinLevel(name string) slog.Level {
+	switch name {
+	case "debug", "DEBUG":
+		return slog.LevelDebug
+	case "warn", "WARN":
+		return slog.LevelWarn
+	case "error", "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }
 

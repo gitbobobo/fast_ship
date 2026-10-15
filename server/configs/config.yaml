@@ -24,3 +24,11 @@ issues:
   auto_sync_enabled: true
   auto_sync_on_startup: true
   auto_sync_interval_minutes: 15
+
+# Fast Ship 自身日志（INT-94）：独立 SQLite 日志库，异步批量写入，只读查询见 /api/self-logs
+logging:
+  self_log_path: ./data/self_logs.db  # 独立日志库文件，不与业务库混用
+  retention_days: 7  # 保留天数
+  max_entries: 1000000  # 最大条数上限
+  cleanup_interval_minutes: 60  # 清理周期
+  min_level: info  # 入库最低级别（debug/info/warn/error）；stdout 输出不受影响

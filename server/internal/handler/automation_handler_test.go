@@ -75,7 +75,7 @@ func setupAutomationHandlerEnv(t *testing.T) *automationHandlerEnv {
 		repository.NewIssueRepository(db), sink, cfg, logger))
 	notificationHandler := NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository(db)))
 	agentHandler := NewAutomationAgentHandler(agent)
-	authService := service.NewAuthService(repository.NewUserRepository(db), repository.NewJWTBlacklistRepository(db), repository.NewRefreshTokenRepository(db), cfg)
+	authService := service.NewAuthService(repository.NewUserRepository(db), repository.NewJWTBlacklistRepository(db), repository.NewRefreshTokenRepository(db), cfg, nil)
 	apiKeyRepo := repository.NewApiKeyRepository(db)
 	_ = apiKeyRepo
 

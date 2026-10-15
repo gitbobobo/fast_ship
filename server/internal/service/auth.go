@@ -1,11 +1,13 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/pkg/selflog"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -26,18 +29,31 @@ type AuthService struct {
 	jwtBlacklistRepo *repository.JWTBlacklistRepository
 	refreshTokenRepo *repository.RefreshTokenRepository
 	cfg              *config.Config
+	logger           *slog.Logger
 }
 
-func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repository.JWTBlacklistRepository, refreshTokenRepo *repository.RefreshTokenRepository, cfg *config.Config) *AuthService {
+func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repository.JWTBlacklistRepository, refreshTokenRepo *repository.RefreshTokenRepository, cfg *config.Config, logger *slog.Logger) *AuthService {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &AuthService{
 		userRepo:         userRepo,
 		jwtBlacklistRepo: jwtBlacklistRepo,
 		refreshTokenRepo: refreshTokenRepo,
 		cfg:              cfg,
+		logger:           logger,
 	}
 }
 
-func (s *AuthService) Register(req *RegisterRequest) (*AuthResponse, error) {
+func (s *AuthService) log(ctx context.Context) *slog.Logger {
+	l := selflog.LoggerOr(ctx, s.logger)
+	if selflog.LoggerFromContext(ctx) != nil {
+		return l.With(slog.String("module", "auth"))
+	}
+	return l
+}
+
+func (s *AuthService) Register(ctx context.Context, req *RegisterRequest) (*AuthResponse, error) {
 	exists, err := s.userRepo.ExistsByUsername(req.Username)
 	if err != nil {
 		return nil, errs.ErrInternal
@@ -80,6 +96,7 @@ func (s *AuthService) Register(req *RegisterRequest) (*AuthResponse, error) {
 		return nil, errs.ErrInternal
 	}
 
+	s.log(ctx).Info("用户注册", slog.String("user_id", user.ID), slog.String("username", user.Username))
 	return &AuthResponse{
 		Token:        token,
 		RefreshToken: refreshToken,
@@ -87,16 +104,19 @@ func (s *AuthService) Register(req *RegisterRequest) (*AuthResponse, error) {
 	}, nil
 }
 
-func (s *AuthService) Login(req *LoginRequest) (*AuthResponse, error) {
+func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*AuthResponse, error) {
 	user, err := s.userRepo.FindByUsernameOrEmail(req.Login)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// 无归属行不写尝试的登录名，避免把探测用标识公开给所有可查系统日志的用户。
+			s.log(ctx).Warn("登录失败：用户不存在")
 			return nil, errs.ErrLoginFailed
 		}
 		return nil, errs.ErrInternal
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		s.log(ctx).Warn("登录失败：密码错误", slog.String("user_id", user.ID))
 		return nil, errs.ErrLoginFailed
 	}
 
@@ -110,6 +130,7 @@ func (s *AuthService) Login(req *LoginRequest) (*AuthResponse, error) {
 		return nil, errs.ErrInternal
 	}
 
+	s.log(ctx).Info("登录成功", slog.String("user_id", user.ID))
 	return &AuthResponse{
 		Token:        token,
 		RefreshToken: refreshToken,
@@ -227,7 +248,7 @@ func (s *AuthService) UpdateAvatar(userID string, avatarURL string) (*UserRespon
 	return &resp, nil
 }
 
-func (s *AuthService) UpdatePassword(userID string, req *UpdatePasswordRequest) error {
+func (s *AuthService) UpdatePassword(ctx context.Context, userID string, req *UpdatePasswordRequest) error {
 	user, err := s.userRepo.FindByID(userID)
 	if err != nil {
 		return errs.ErrUserNotFound
@@ -243,6 +264,7 @@ func (s *AuthService) UpdatePassword(userID string, req *UpdatePasswordRequest) 
 	}
 
 	user.PasswordHash = string(hashedPassword)
+	s.log(ctx).Info("用户修改密码", slog.String("user_id", userID))
 	return s.userRepo.Update(user)
 }
 

@@ -2,6 +2,8 @@
 
 SQLite（glebarez/modernc 驱动，纯 Go 无 CGO），单文件 `database.path`。连接固定一个（`SetMaxOpenConns(1)`），靠 `busy_timeout` 串行化竞争。
 
+Fast Ship 自身日志（INT-94）不在本库：独立 SQLite 文件 `logging.self_log_path`，见 `docs/internal/self-logs.md`。
+
 ## 外键约定
 
 **所有外键都必须 `ON DELETE CASCADE`。** DSN 全局开启 `_pragma=foreign_keys(1)`，删除父行由数据库级联清理子行，业务代码不手动删子表。

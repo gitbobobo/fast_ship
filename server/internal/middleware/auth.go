@@ -133,6 +133,7 @@ func handleJWTAuth(c *gin.Context, tokenString string, cfg *config.Config, authS
 	c.Set(ContextKeyJTI, jti)
 	c.Set(ContextKeyExp, exp)
 	c.Set(ContextKeyUserName, username)
+	BindRequestUser(c)
 	c.Next()
 }
 
@@ -157,6 +158,7 @@ func handleApiKeyAuth(c *gin.Context, token string, apiKeyRepo *repository.ApiKe
 	c.Set(ContextKeyAuthType, AuthTypeApiKey)
 	c.Set(ContextKeyAPIKey, apiKey.Name)
 	c.Set(ContextKeyAPIKeyID, apiKey.ID)
+	BindRequestUser(c)
 	c.Next()
 }
 

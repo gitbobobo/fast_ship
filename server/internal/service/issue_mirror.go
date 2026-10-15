@@ -93,7 +93,7 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 	}
 
 	if err := m.syncRepositoryLabels(ctx, client, project.ID); err != nil {
-		m.logger.Warn("同步仓库标签失败", zap.String("project_id", project.ID), zap.Error(err))
+		m.logger.Warn("同步仓库标签失败", zap.String("project_id", project.ID), zap.String("user_id", project.UserID), zap.Error(err))
 	}
 
 	var since *time.Time
@@ -197,7 +197,7 @@ func (m *issueMirror) SyncAll(ctx context.Context) {
 			continue
 		}
 		if _, err := m.Sync(ctx, &project); err != nil {
-			m.logger.Warn("background issue sync failed", zap.String("project_id", project.ID), zap.Error(err))
+			m.logger.Warn("background issue sync failed", zap.String("project_id", project.ID), zap.String("user_id", project.UserID), zap.Error(err))
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -17,10 +18,12 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/handler"
+	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
+	"github.com/godbobo/fast_ship/server/internal/pkg/selflog"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/service"
@@ -30,9 +33,11 @@ import (
 )
 
 type routerTestEnv struct {
-	router     *gin.Engine
-	db         *gorm.DB
-	apiKeyRepo *repository.ApiKeyRepository
+	router          *gin.Engine
+	db              *gorm.DB
+	apiKeyRepo      *repository.ApiKeyRepository
+	selfLogStore    *selflog.Store
+	selfLogPipeline *selflog.Pipeline
 }
 
 type routerEnvelope struct {
@@ -794,6 +799,14 @@ func TestRouterServesSPAFromWebDist(t *testing.T) {
 }
 
 func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv {
+	return setupRouterTestEnvMaybeLogs(t, false, opts...)
+}
+
+func setupLoggedRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv {
+	return setupRouterTestEnvMaybeLogs(t, true, opts...)
+}
+
+func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerConfigOption) *routerTestEnv {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -905,10 +918,30 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 
-	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg)
+	selfLogStore, err := selflog.OpenStore(filepath.Join(t.TempDir(), "self_logs.db"))
+	if err != nil {
+		t.Fatalf("open self log store: %v", err)
+	}
+	var selfLogPipeline *selflog.Pipeline
+	var appLogger *slog.Logger
+	if captureLogs {
+		selfLogPipeline, err = selflog.Start(selflog.Options{
+			Sink:          selfLogStore,
+			Stdout:        slog.NewTextHandler(io.Discard, nil),
+			FlushInterval: 5 * time.Millisecond,
+			MinLevel:      slog.LevelDebug,
+		})
+		if err != nil {
+			t.Fatalf("start self log pipeline: %v", err)
+		}
+		t.Cleanup(selfLogPipeline.Close)
+		appLogger = slog.New(selfLogPipeline.Handler())
+	}
+
+	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, loggerOrNil(appLogger, "auth"))
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
-	apiKeyService := service.NewApiKeyService(apiKeyRepo)
+	apiKeyService := service.NewApiKeyService(apiKeyRepo, loggerOrNil(appLogger, "api_key"))
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, zap.NewNop())
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, zap.NewNop())
@@ -961,14 +994,28 @@ func setupRouterTestEnv(t *testing.T, opts ...routerConfigOption) *routerTestEnv
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 
+	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
+
 	r := gin.New()
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, authService, apiKeyRepo)
+	if captureLogs && appLogger != nil {
+		r.Use(middleware.RequestLog(appLogger))
+	}
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, selfLogHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
-		router:     r,
-		db:         db,
-		apiKeyRepo: apiKeyRepo,
+		router:          r,
+		db:              db,
+		apiKeyRepo:      apiKeyRepo,
+		selfLogStore:    selfLogStore,
+		selfLogPipeline: selfLogPipeline,
 	}
+}
+
+func loggerOrNil(base *slog.Logger, module string) *slog.Logger {
+	if base == nil {
+		return nil
+	}
+	return base.With(slog.String("module", module))
 }
 
 func createRouterTestUser(t *testing.T, db *gorm.DB, id, username, email string) *model.User {

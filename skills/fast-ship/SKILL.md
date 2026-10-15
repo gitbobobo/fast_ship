@@ -13,6 +13,7 @@ description: 通过 Fast Ship REST API 完成 Issue 的创建、更新与查询�
 | 开始做了 | `PUT /api/issues/:iid/internal-meta` 置 `in_progress` |
 | 记录共识/决策 | `PUT /api/issues/:iid/collab/consensus` |
 | 按 `INT-xxx` 找 issue | `GET /api/projects/:pid/issues?q=INT-56` 换 UUID（路径参数只认 UUID） |
+| 查 Fast Ship 自身日志 | `GET /api/self-logs`（列表）、`/aggregate`、`/trace`（`request_id` 或 `run_id` 二选一）；与项目日志 `/projects/:id/logs` 无关；fsr_ 令牌 40301 |
 | 把 PR 挂到 issue | `POST /api/issues/:iid/pull-requests`，body `{"url":"<PR链接>"}` |
 | 刷新 PR 状态 | `POST /api/issues/:iid/pull-requests/sync`（合并后调，逐行失败看 `failures[]`） |
 | 摘掉某个 PR | `DELETE /api/issues/:iid/pull-requests/:lid`（`:lid` 是关联行 id，即 api.md 里的 `{id}`） |
@@ -157,6 +158,10 @@ spec 的 security 经常同时写 JWT 和 API Key，真正的拒绝在 handler �
 - `PUT /api/issues/{iid}/collab/consensus`、`PUT /api/issues/{iid}/collab/summary`、`PUT /api/issues/{iid}/recommendation` 只接受 API Key。JWT 调用返回 403（40303）。
 - 推荐被用户延后后，`PUT recommendation` 返回 409（40911）——不要重试再推荐，也不要试图 DELETE（同样 40911）。`PUT`/`DELETE /api/issues/{iid}/recommendation/defer` 是延后/恢复，仅 JWT（API Key 40301）。彻底移除延后项只能由 JWT 用户做。
 - `POST /api/projects/{id}/logs` 只接受 API Key。JWT 调用返回 403（40303）。
+
+### 自身日志不是项目日志
+
+`GET /api/self-logs`、`/aggregate`、`/trace` 查的是 Fast Ship 服务端自己的 slog（INT-94）。项目运行日志仍走 `/api/projects/{id}/logs`。`fsr_` 令牌查自身日志返回 40301。失败请求用响应头 `X-Request-Id` 调 `/trace?request_id=`；自动化用 `run_id`。
 
 ### checklist 是整组替换
 

@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"log"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -162,7 +162,8 @@ func (h *IssueHandler) Get(c *gin.Context) {
 	// collab 读取失败降级为不带该字段，不拖垮详情响应。
 	collab, err := h.collabService.GetArea(issueID, userID)
 	if err != nil {
-		log.Printf("issue %s: 读取协作区失败: %v", issueID, err)
+		middleware.LoggerFrom(c).Warn("读取协作区失败，详情降级为不带协作区",
+			slog.String("issue_id", issueID), slog.String("user_id", userID), slog.String("error", err.Error()))
 	} else {
 		item.Collab = collab
 	}
@@ -170,7 +171,8 @@ func (h *IssueHandler) Get(c *gin.Context) {
 	// PR 关联同样仅详情填充，读取失败降级为不带该字段。
 	pullRequests, err := h.issueService.ListIssuePullRequests(issueID)
 	if err != nil {
-		log.Printf("issue %s: 读取 PR 关联失败: %v", issueID, err)
+		middleware.LoggerFrom(c).Warn("读取 PR 关联失败，详情降级为不带 PR 列表",
+			slog.String("issue_id", issueID), slog.String("user_id", userID), slog.String("error", err.Error()))
 	} else {
 		item.PullRequests = pullRequests
 	}

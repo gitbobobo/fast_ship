@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadOverridesServerModeFromEnv(t *testing.T) {
@@ -89,5 +90,54 @@ issues:
 
 	if !cfg.Database.LogSQL {
 		t.Fatal("expected database log_sql true from env override")
+	}
+}
+
+func TestLoggingConfigDefaultsWhenSectionOmitted(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte(`server:
+  port: 4888
+  mode: debug
+
+database:
+  path: ./data/fast_ship.db
+  log_sql: false
+
+jwt:
+  secret: "change-me"
+  expire_hours: 24
+
+upload:
+  max_file_size: 524288000
+  storage_path: ./data/uploads
+
+encryption:
+  key: "12345678901234567890123456789012"
+
+issues:
+  auto_sync_enabled: true
+  auto_sync_on_startup: true
+  auto_sync_interval_minutes: 15
+`)
+	if err := os.WriteFile(configPath, content, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if got := cfg.Logging.SelfLogPath(); got != "./data/self_logs.db" {
+		t.Fatalf("self log path = %q, want default", got)
+	}
+	if got := cfg.Logging.SelfLogRetentionDays(); got != 7 {
+		t.Fatalf("retention days = %d, want 7", got)
+	}
+	if got := cfg.Logging.SelfLogMaxEntries(); got != 1000000 {
+		t.Fatalf("max entries = %d, want 1000000", got)
+	}
+	if got := cfg.Logging.SelfLogCleanupInterval(); got != time.Hour {
+		t.Fatalf("cleanup interval = %s, want 1h", got)
 	}
 }
