@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   AutomationEditorDialog,
   browserTimezone,
+  isPRTrigger,
 } from "./editor-dialog";
 import {
   Dialog,
@@ -73,6 +74,8 @@ const emptyForm: AutomationInput = {
   event_filter: null,
   prompt_template: "",
   model_selection: null,
+  model_selections: [],
+  debounce_seconds: 60,
   runtime_mode: "full-access",
   workspace: null,
   timeout_seconds: 3600,
@@ -112,6 +115,21 @@ export default function AutomationsPage() {
     if (form.trigger_type === "cron" && !form.cron_expression?.trim()) {
       toast.error("定时触发需要填写 cron 表达式");
       return;
+    }
+    if (isPRTrigger(form.trigger_type)) {
+      if (!form.model_selections?.length) {
+        toast.error("GitHub PR 触发必须至少选择一个模型");
+        return;
+      }
+      if (form.model_selections.length > 10) {
+        toast.error("最多选择 10 个模型");
+        return;
+      }
+      const debounce = form.debounce_seconds ?? 60;
+      if (debounce < 0 || debounce > 86400) {
+        toast.error("防抖窗口须在 0 到 86400 秒之间（0=立即）");
+        return;
+      }
     }
     if (form.workspace?.type === "worktree" && !form.workspace.base_ref?.trim()) {
       toast.error("新建 worktree 需要仓库当前分支，请稍候再试或改用当前检出");
@@ -315,6 +333,8 @@ function automationToForm(a: Automation): AutomationInput {
     event_filter: a.event_filter ?? null,
     prompt_template: a.prompt_template,
     model_selection: a.model_selection ?? null,
+    model_selections: a.model_selections ?? [],
+    debounce_seconds: a.debounce_seconds ?? 60,
     runtime_mode: (a.runtime_mode as RuntimeMode) || "full-access",
     workspace: a.workspace ?? null,
     timeout_seconds: a.timeout_seconds,
@@ -330,7 +350,18 @@ function triggerSummary(a: Automation): string {
       a.timezone ? `（${a.timezone}）` : ""
     }`;
   }
+  if (isPRTrigger(a.trigger_type)) {
+    const models = (a.model_selections ?? [])
+      .map((m) => m.model)
+      .join("、");
+    const debounce = a.debounce_seconds ?? 60;
+    return `${label}${models ? ` · ${models}` : ""} · 防抖 ${debounce}s`;
+  }
   return label;
+}
+
+function shortSHA(sha: string): string {
+  return sha.length > 7 ? sha.slice(0, 7) : sha;
 }
 
 function postActionSummary(a: Automation): string {
@@ -391,6 +422,7 @@ function AutomationRunsDialog({
                 <TableRow>
                   <TableHead>触发时间</TableHead>
                   <TableHead>状态</TableHead>
+                  <TableHead>模型 / 轮次 / SHA</TableHead>
                   <TableHead>摘要 / 错误</TableHead>
                   <TableHead>后置</TableHead>
                 </TableRow>
@@ -409,6 +441,11 @@ function AutomationRunsDialog({
                           {run.error_code}
                         </span>
                       ) : null}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-sm">
+                      {run.model_name || "—"}
+                      {run.round_number ? ` · R${run.round_number}` : ""}
+                      {run.head_sha ? ` · ${shortSHA(run.head_sha)}` : ""}
                     </TableCell>
                     <TableCell className="max-w-[16rem] text-sm">
                       <span className="line-clamp-2">
