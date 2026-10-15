@@ -15,6 +15,15 @@ token_version 在签发时写进 JWT 的 `ver` claim；无 `ver` 的历史 token
 
 `PUT /api/auth/password` 成功时在**同一事务**里（`UserRepository.UpdatePasswordAndRotateSessions`）：更新密码哈希、`token_version + 1`、吊销该用户全部未吊销的 refresh token，并写入为当前会话新签发的 refresh token。响应返回新 token 对（`RefreshResponse` 形状），前端必须立即换存——旧凭证此后一律 401。API Key 不受改密影响。
 
+## 签发栅栏
+
+改密不是唯一的写方：并发的登录/刷新可能在旧密码、旧 refresh token 尚有效时通过校验，而在改密事务提交后才把新凭证落库——漏出扫描的 refresh token 仍能换出活 token。两处签发因此都有栅栏：
+
+- `RefreshTokenRepository.CreateIfTokenVersion`：登录/注册写入 refresh token 前，在事务内核对 `token_version` 仍等于验证时读到的版本，变了就放弃写入。
+- `RefreshTokenRepository.Rotate`：刷新轮换先条件吊销旧行（`RowsAffected=1` 才继续）再补发后继；旧行若已被改密扫描吊销，旋转直接中止，不产生新行。
+
+Web 侧镜像约束：改密响应落地前旧凭证已死、新凭证未写回，期间并发请求的旧 token 401 不能走 refresh→logout。`withCredentialRotation` 包住改密调用，401 钩子在该窗口内等待轮换，再以 store 当前 token 直接重试。
+
 ## 事务边界
 
 改密事务内创建新 refresh token 是刻意的：先改密后补发凭证会留下「密码已换但无会话可用」的中间态。单连接池规则（见 database.md）要求闭包内只用 `tx` 句柄，该方法的三个写操作都走 `tx`。

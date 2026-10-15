@@ -101,4 +101,73 @@ describe("api client auth retry", () => {
     expect(kyMock).not.toHaveBeenCalled();
     expect(refreshPostMock).not.toHaveBeenCalled();
   });
+
+  // 改密续签窗口：服务端已吊销旧凭证、新凭证随后写进 store；并发请求的旧
+  // token 401 应等待轮换并直接用新 token 重试，绝不能拿旧 refresh token 走
+  // 刷新（它已被吊销，失败会 logout 弹走发起改密的浏览器）。
+  it("waits for credential rotation and retries a stale-token 401 with the rotated token", async () => {
+    kyMock.mockResolvedValue("retried-response");
+    authState.token = "rotated-access-token"; // 轮换落地后 store 持有的新 token
+
+    const { withCredentialRotation } = await import("./client");
+    const apiConfig = kyCreateMock.mock.calls[1][0];
+    const afterResponse = apiConfig.hooks.afterResponse[0];
+    const request = new Request("http://localhost/api/notifications/unread-count", {
+      headers: { Authorization: "Bearer stale-access-token" },
+    });
+
+    let resolveRotation: () => void = () => {};
+    const rotation = withCredentialRotation(
+      () => new Promise<void>((resolve) => { resolveRotation = resolve; }),
+    );
+
+    const resultPromise = afterResponse(
+      request,
+      {},
+      new Response(null, { status: 401 }),
+    );
+
+    await Promise.resolve();
+    expect(refreshPostMock).not.toHaveBeenCalled();
+    expect(kyMock).not.toHaveBeenCalled();
+
+    resolveRotation();
+    const result = await resultPromise;
+    await rotation;
+
+    expect(result).toBe("retried-response");
+    const retriedRequest = kyMock.mock.calls[0][0] as Request;
+    expect(retriedRequest.headers.get("Authorization")).toBe(
+      "Bearer rotated-access-token",
+    );
+    expect(refreshPostMock).not.toHaveBeenCalled();
+  });
+
+  it("still refreshes when the 401 response came back on the current token", async () => {
+    refreshPostMock.mockReturnValue({
+      json: vi.fn().mockResolvedValue({
+        data: {
+          token: "refreshed-token",
+          refresh_token: "new-refresh-token",
+        },
+      }),
+    });
+    kyMock.mockResolvedValue("retried-response");
+
+    await import("./client");
+    const apiConfig = kyCreateMock.mock.calls[1][0];
+    const afterResponse = apiConfig.hooks.afterResponse[0];
+    const request = new Request("http://localhost/api/projects", {
+      headers: { Authorization: "Bearer access-token" },
+    });
+
+    const result = await afterResponse(request, {}, new Response(null, { status: 401 }));
+
+    expect(refreshPostMock).toHaveBeenCalledWith("auth/refresh", {
+      json: { refresh_token: "refresh-token" },
+    });
+    expect(result).toBe("retried-response");
+    const retriedRequest = kyMock.mock.calls[0][0] as Request;
+    expect(retriedRequest.headers.get("Authorization")).toBe("Bearer refreshed-token");
+  });
 });

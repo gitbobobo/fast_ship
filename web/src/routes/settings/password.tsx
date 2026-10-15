@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { SettingsPageShell } from "@/routes/settings/layout";
 import { authApi } from "@/lib/api/auth";
+import { withCredentialRotation } from "@/lib/api/client";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { toast } from "sonner";
 
@@ -42,13 +43,16 @@ export default function PasswordPage() {
 
   const onSubmit = async (data: PasswordInput) => {
     try {
-      const res = await authApi.updatePassword({
-        old_password: data.old_password,
-        new_password: data.new_password,
+      await withCredentialRotation(async () => {
+        const res = await authApi.updatePassword({
+          old_password: data.old_password,
+          new_password: data.new_password,
+        });
+        // 服务端已吊销其他会话并下发当前会话的新凭证；旧 token 即刻失效，
+        // 必须先在轮换窗口内换上新凭证，并发请求才不会被弹去登录。
+        setToken(res.data.token);
+        setRefreshToken(res.data.refresh_token);
       });
-      // 服务端已吊销其他会话并下发当前会话的新凭证；旧 token 即刻失效，必须换上。
-      setToken(res.data.token);
-      setRefreshToken(res.data.refresh_token);
       reset();
       toast.success("密码已修改，其他会话已退出");
     } catch {

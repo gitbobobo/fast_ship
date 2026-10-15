@@ -64,8 +64,8 @@ func TestAuthServiceRefreshAccessTokenSuccess(t *testing.T) {
 	services := setupAuthTestServices(t)
 	user := createTestUser(t, services.db, "user-refresh-success")
 
-	refreshToken, err := services.authService.generateRefreshToken(user.ID)
-	if err != nil {
+	refreshToken, created, err := services.authService.generateRefreshToken(user)
+	if err != nil || !created {
 		t.Fatalf("generate refresh token: %v", err)
 	}
 
@@ -147,8 +147,8 @@ func TestAuthServiceRefreshAccessTokenInvalidToken(t *testing.T) {
 func TestAuthServiceLogoutRevokesRefreshToken(t *testing.T) {
 	services := setupAuthTestServices(t)
 	user := createTestUser(t, services.db, "user-logout-refresh")
-	refreshToken, err := services.authService.generateRefreshToken(user.ID)
-	if err != nil {
+	refreshToken, created, err := services.authService.generateRefreshToken(user)
+	if err != nil || !created {
 		t.Fatalf("generate refresh token: %v", err)
 	}
 
@@ -241,6 +241,70 @@ func TestAuthServiceUpdatePasswordRevokesOldSessions(t *testing.T) {
 	}
 	if _, err := services.authService.Login(ctx, &LoginRequest{Login: "pwuser", Password: "OldPass123"}); err != errs.ErrLoginFailed {
 		t.Fatalf("expected old password rejected, got %v", err)
+	}
+}
+
+// Rotate 的顺序是先条件吊销再补发：旧行已被吊销（改密全量吊销/登出）时
+// 不得再创建后继，否则改密扫描与新签发之间会漏出存活令牌（INT-95 复审）。
+func TestRefreshTokenRepositoryRotateDoesNotIssueAfterRevoke(t *testing.T) {
+	services := setupAuthTestServices(t)
+	user := createTestUser(t, services.db, "user-rotate-revoked")
+
+	rt := mustCreateRefreshTokenRecord(t, services.db, user.ID, time.Now().Add(time.Hour), nil)
+	if err := services.refreshTokenRepo.Revoke(rt.ID); err != nil {
+		t.Fatalf("revoke current token: %v", err)
+	}
+
+	next := &model.RefreshToken{
+		ID:        uuid.NewString(),
+		UserID:    user.ID,
+		TokenHash: uuid.NewString(),
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	rotated, err := services.refreshTokenRepo.Rotate(rt.ID, next)
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if rotated {
+		t.Fatalf("expected rotate to refuse issuance for a revoked token")
+	}
+	var count int64
+	if err := services.db.Model(&model.RefreshToken{}).Where("id = ?", next.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count successor: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no successor row, got %d", count)
+	}
+}
+
+// 登录/注册签发 refresh token 钉死在验证凭证时读到的 token_version 上：
+// 版本已被推进（并发改密）则不落库。
+func TestRefreshTokenRepositoryCreateIfTokenVersion(t *testing.T) {
+	services := setupAuthTestServices(t)
+	user := createTestUser(t, services.db, "user-create-fence")
+
+	mk := func() *model.RefreshToken {
+		return &model.RefreshToken{
+			ID:        uuid.NewString(),
+			UserID:    user.ID,
+			TokenHash: uuid.NewString(),
+			ExpiresAt: time.Now().Add(time.Hour),
+			CreatedAt: time.Now(),
+		}
+	}
+
+	created, err := services.refreshTokenRepo.CreateIfTokenVersion(mk(), user.TokenVersion+1)
+	if err != nil {
+		t.Fatalf("create with stale version: %v", err)
+	}
+	if created {
+		t.Fatalf("expected creation skipped when token_version moved on")
+	}
+
+	created, err = services.refreshTokenRepo.CreateIfTokenVersion(mk(), user.TokenVersion)
+	if err != nil || !created {
+		t.Fatalf("expected creation at current version: %v", err)
 	}
 }
 

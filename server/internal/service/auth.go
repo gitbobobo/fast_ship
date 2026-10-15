@@ -91,8 +91,8 @@ func (s *AuthService) Register(ctx context.Context, req *RegisterRequest) (*Auth
 		return nil, errs.ErrInternal
 	}
 
-	refreshToken, err := s.generateRefreshToken(user.ID)
-	if err != nil {
+	refreshToken, created, err := s.generateRefreshToken(user)
+	if err != nil || !created {
 		return nil, errs.ErrInternal
 	}
 
@@ -125,9 +125,13 @@ func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*AuthRespon
 		return nil, errs.ErrInternal
 	}
 
-	refreshToken, err := s.generateRefreshToken(user.ID)
+	refreshToken, created, err := s.generateRefreshToken(user)
 	if err != nil {
 		return nil, errs.ErrInternal
+	}
+	if !created {
+		// 密码校验与签发之间该用户刚改过密码：本次登录依据的旧密码已失效。
+		return nil, errs.ErrLoginFailed
 	}
 
 	s.log(ctx).Info("登录成功", slog.String("user_id", user.ID))
@@ -174,9 +178,13 @@ func (s *AuthService) RefreshAccessToken(refreshToken string) (*RefreshResponse,
 		return nil, errs.ErrInternal
 	}
 
-	newRefreshToken, err := s.rotateRefreshToken(rt)
+	newRefreshToken, rotated, err := s.rotateRefreshToken(rt)
 	if err != nil {
 		return nil, errs.ErrInternal
+	}
+	if !rotated {
+		// 旧 refresh token 在校验后被改密扫描（或登出）吊销——不得再补发。
+		return nil, errs.ErrRefreshTokenInvalid
 	}
 
 	return &RefreshResponse{
@@ -354,30 +362,40 @@ func FormatApiKey(raw string) string {
 	return fmt.Sprintf("fsk_%s", raw)
 }
 
-func (s *AuthService) generateRefreshToken(userID string) (string, error) {
-	raw, refreshToken, err := s.buildRefreshToken(userID)
+// generateRefreshToken 仅在用户 token_version 仍是验证时读到的版本时写入；
+// created=false 表示签发期间版本已被改密推进，该凭证不得落地。
+func (s *AuthService) generateRefreshToken(user *model.User) (string, bool, error) {
+	raw, refreshToken, err := s.buildRefreshToken(user.ID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	if err := s.refreshTokenRepo.Create(refreshToken); err != nil {
-		return "", err
+	created, err := s.refreshTokenRepo.CreateIfTokenVersion(refreshToken, user.TokenVersion)
+	if err != nil {
+		return "", false, err
+	}
+	if !created {
+		return "", false, nil
 	}
 
-	return fmt.Sprintf("fsr_%s", raw), nil
+	return fmt.Sprintf("fsr_%s", raw), true, nil
 }
 
-func (s *AuthService) rotateRefreshToken(current *model.RefreshToken) (string, error) {
+func (s *AuthService) rotateRefreshToken(current *model.RefreshToken) (string, bool, error) {
 	raw, next, err := s.buildRefreshToken(current.UserID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
-	if err := s.refreshTokenRepo.Rotate(current.ID, next); err != nil {
-		return "", err
+	rotated, err := s.refreshTokenRepo.Rotate(current.ID, next)
+	if err != nil {
+		return "", false, err
+	}
+	if !rotated {
+		return "", false, nil
 	}
 
-	return fmt.Sprintf("fsr_%s", raw), nil
+	return fmt.Sprintf("fsr_%s", raw), true, nil
 }
 
 func (s *AuthService) buildRefreshToken(userID string) (string, *model.RefreshToken, error) {

@@ -7,6 +7,20 @@ const REFRESH_RETRY_HEADER = "x-fast-ship-refresh-retried";
 
 let refreshPromise: Promise<string> | null = null;
 
+let credentialRotation: Promise<unknown> | null = null;
+
+// 凭据轮换（改密续签）窗口内，服务端已使旧凭证失效而新凭证尚未写回 store；
+// 此时并发请求的旧 token 收到 401 不能走 refresh→logout，要先等轮换落地。
+export function withCredentialRotation<T>(fn: () => Promise<T>): Promise<T> {
+  const p = Promise.resolve().then(fn);
+  credentialRotation = p;
+  const done = () => {
+    if (credentialRotation === p) credentialRotation = null;
+  };
+  p.then(done, done);
+  return p;
+}
+
 export async function tryRefreshToken(): Promise<string> {
   if (refreshPromise) return refreshPromise;
 
@@ -80,6 +94,26 @@ export const api = ky.create({
           request.headers.get(REFRESH_RETRY_HEADER) === "1"
         ) {
           return;
+        }
+
+        if (credentialRotation) {
+          try {
+            await credentialRotation;
+          } catch {
+            // 轮换失败按普通 401 继续走下面的刷新流程
+          }
+        }
+
+        // store 里的凭证已被轮换（如改密续签）：直接换用当前 token 重试，
+        // 不走 refresh——本次请求持有的旧 refresh token 已随改密吊销。
+        const currentToken = useAuthStore.getState().token;
+        if (
+          currentToken &&
+          request.headers.get("Authorization") !== `Bearer ${currentToken}`
+        ) {
+          request.headers.set("Authorization", `Bearer ${currentToken}`);
+          request.headers.set(REFRESH_RETRY_HEADER, "1");
+          return ky(request, options);
         }
 
         try {
