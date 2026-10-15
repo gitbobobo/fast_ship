@@ -244,6 +244,16 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 		return nil // 不关联不取消、不开轮
 	}
 
+	// 迟到的 opened/synchronize 可能带着已被更新 head 取代的 SHA。先判过期再
+	// 取消：否则 delayed opened(A) 会把当前 B 的在途运行取消并重开 A。
+	stale, err := isStalePRHeadTx(tx, repoFullName, p.Number, head.SHA, p.Action)
+	if err != nil {
+		return err
+	}
+	if stale {
+		return nil
+	}
+
 	// SHA 变化：该 PR 下旧 SHA 的全部在途运行一律取消（跨规则跨用户跨模型），
 	// 名额随终态释放；不登记 settle/archive。顺带丢掉旧 SHA 的防抖行——opened
 	// 规则的窗口不能在 synchronize 新 SHA 之后再开火。
@@ -302,6 +312,34 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 		}
 	}
 	return nil
+}
+
+// isStalePRHeadTx 判断迟到 webhook 的 head SHA 是否已经过期。无评审账 → 接受；
+// 账上 HeadSHA 就是本次 SHA → 接受（同提交重投）；其余 opened 一律拒绝（opened
+// 每个 PR 只开一次，迟到的 opened 不能推翻后续 synchronize）；synchronize 若该
+// SHA 已有任意运行（含已取消）也拒绝——force-push 回已审过的 SHA 不再开轮。
+func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action string) (bool, error) {
+	var rev model.GitHubPRReview
+	err := tx.Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).First(&rev).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if rev.HeadSHA == sha {
+		return false, nil
+	}
+	if action == "opened" {
+		return true, nil
+	}
+	var n int64
+	if err := tx.Model(&model.AutomationRun{}).
+		Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?", repoFullName, prNumber, sha).
+		Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // prRuleMatch 命中的规则与其宿主项目。

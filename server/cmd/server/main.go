@@ -307,6 +307,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 		repository.NewGitHubPRReviewRepository(db),
 		ghPR, t3ThreadsService, notificationSink, cfg, zapLogger)
 	automationScheduler.UsePRReview(prReviewService)
+	automationAgentService.SetPRReview(prReviewService)
 
 	// Issue 写路径接入事件出口：事务内匹配自动化并预写运行（INT-90）。
 	issueService.SetIssueEventSink(automationService)
