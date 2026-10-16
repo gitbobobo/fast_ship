@@ -90,8 +90,16 @@ func validQuotaLabel(raw string) (string, *errs.AppError) {
 	return label, nil
 }
 
+// credentialHintMinReveal 是回显末 4 位所需的最小凭据长度。更短的凭据整段打码：
+// 末 4 位等于全文或大半个文，而 credential_hint 会随账号列表返回（含 API Key
+// 只读路径），回显即等于泄漏明文。
+const credentialHintMinReveal = 8
+
+// credentialHintMasked 是短凭据的固定遮罩，不含原文字符也不透露长度。
+const credentialHintMasked = "…••••"
+
 // credentialHint 取首个必填密文字段的末 4 位（无则首个密文字段、再退化首个字段），
-// 形如 …ab12；绝不回显更长的片段。
+// 形如 …ab12；凭据不足 credentialHintMinReveal 位时整段打码。
 func credentialHint(provider quota.Provider, creds quota.Credentials) string {
 	key := ""
 	for _, field := range provider.CredentialFields {
@@ -112,10 +120,10 @@ func credentialHint(provider quota.Provider, creds quota.Credentials) string {
 		key = provider.CredentialFields[0].Key
 	}
 	value := []rune(creds[key])
-	if len(value) > 4 {
-		value = value[len(value)-4:]
+	if len(value) < credentialHintMinReveal {
+		return credentialHintMasked
 	}
-	return "…" + string(value)
+	return "…" + string(value[len(value)-4:])
 }
 
 func (s *QuotaService) encryptCredentials(creds quota.Credentials) ([]byte, *errs.AppError) {

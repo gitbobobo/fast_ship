@@ -31,7 +31,7 @@ Codex、Devin、Factory Droid。取数与解析细节以 CodexBar（MIT）Swift 
 | `id` / `user_id` | TEXT 主键；user_id 索引 + FK users cascade |
 | `provider` / `label` | 供应商 id；用户起的账号名 |
 | `credentials_encrypted` | BLOB。整组凭据 JSON `{"key":"value"}` 的 AES-256-GCM 密文（`internal/pkg/crypto`）；**不存明文指纹**——允许同用户重复添加相同凭据 |
-| `credential_hint` | 形如 `…ab12`，只存首个必填密文字段的末 4 位；绝不存/回显更长片段 |
+| `credential_hint` | 形如 `…ab12`，只存首个必填密文字段的末 4 位；不足 8 位的凭据整段打码（`…••••`）——短凭据的「末 4 位」等于全文或大半个文，而该字段会随账号列表返回 |
 | `snapshot_json` | 最近一次成功抓取的 `quota.Snapshot` JSON 原文（windows/balance/plan_name/fetched_at） |
 | `plan_name` / `status` / `last_error` | 冗余出快照便于查询；status ∈ ok / credential_invalid / provider_error / pending |
 | `last_fetched_at` / `last_success_at` | 最近一次**成功**抓取时间（= 快照数据时间）；失败不触碰，两者等值 |
@@ -97,7 +97,7 @@ quota:
 - 仅 JWT：`GET /api/quota/providers`、`POST/PUT/DELETE /api/quota/accounts[/{id}]`、
   `POST /api/quota/accounts/{id}/refresh`、`POST /api/quota/test`。
 - JWT + API Key（只读）：`GET /api/quota/accounts`——即「机器人读取额度接口」，
-  API Key 不写。响应不含凭据（只有 `credential_hint` 末 4 位）。
+  API Key 不写。响应不含凭据（只有打码后的 `credential_hint`）。
 
 错误码：40030 供应商未知；40031 凭据字段缺失或非法；40430 账号不存在
 （含他人账号）；42900 手动刷新过于频繁（HTTP 429，由 handler 显式映射——

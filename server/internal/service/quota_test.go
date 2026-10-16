@@ -617,3 +617,58 @@ func TestQuotaScheduler_Round(t *testing.T) {
 		t.Fatalf("nextWait = %v, want 5m", wait)
 	}
 }
+
+// 短凭据不得把整段（或大半段）明文当尾号回显：credential_hint 会随账号列表
+// 返回（含 API Key 只读路径），1–7 位凭据的「末 4 位」就是明文或大半个明文。
+func TestQuotaService_CredentialHintMasksShortSecrets(t *testing.T) {
+	provider := fakeQuotaProvider("fake", func(ctx context.Context, client *http.Client, baseURL string, creds quota.Credentials) (quota.Snapshot, error) {
+		return fakeQuotaSnapshot(), nil
+	})
+
+	cases := []struct {
+		secret string
+		want   string
+	}{
+		{"a", credentialHintMasked},
+		{"abcd", credentialHintMasked},
+		{"abcdefg", credentialHintMasked},
+		{"abcdefgh", "…efgh"},
+		{"fk-secret-ab12", "…ab12"},
+		{"凭据凭据凭据凭据凭", "…据凭据凭"},
+	}
+	for _, tc := range cases {
+		if got := credentialHint(provider, quota.Credentials{"api_key": tc.secret}); got != tc.want {
+			t.Fatalf("credentialHint(%q) = %q, want %q", tc.secret, got, tc.want)
+		}
+	}
+
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-short-hint")
+	service := newTestQuotaService(svc, provider)
+
+	// 3 位凭据：响应与账号列表里都不能出现明文（用 'q' 避开 UUID 的十六进制字符）。
+	resp, err := service.Create(user.ID, &CreateQuotaAccountRequest{
+		Provider: "fake", Label: "短凭据", Credentials: map[string]string{"api_key": "qqq"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if resp.CredentialHint != credentialHintMasked {
+		t.Fatalf("short secret hint = %q, want %q", resp.CredentialHint, credentialHintMasked)
+	}
+	accounts, err := service.List(user.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	raw, err := json.Marshal(accounts)
+	if err != nil {
+		t.Fatalf("marshal accounts: %v", err)
+	}
+	if strings.Contains(string(raw), "qqq") {
+		t.Fatalf("short secret leaked into account list: %s", raw)
+	}
+	// 数据库里存的仍是完整密文，可正常抓取。
+	if creds := decryptedQuotaCreds(t, svc, storedQuotaAccount(t, svc, resp.Id)); creds["api_key"] != "qqq" {
+		t.Fatalf("stored creds = %+v, want api_key qqq", creds)
+	}
+}
