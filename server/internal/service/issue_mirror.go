@@ -33,10 +33,13 @@ type issueMilestonePayload struct {
 }
 
 // issueMirror 负责 GitHub→本地的镜像同步：先拉全远端分页再写库、同一项目用
-// 内存锁防并发。push 路径（创建/更新 issue、发评论）经 upsertGitHubIssue、
-// refreshTimelineAfterPush、recordPushedComment 把远端响应写回本地，不经同步锁。
-// 依赖在构造时按值固化，只有 newClient 由 IssueService 闭包委托、调用时现取，
-// 保证测试替换 s.newClient 对镜像同样生效；其余字段测试不会在构造后更换。
+// 内存锁防并发。集合镜像的不变式：完整镜像 = 一个事务里替换评论与时间线两个
+// 集合并推进水位（writeFullCollections）；任何非完整写入 = 一个事务里写入并
+// 清空水位（writePartialCollections）。push 路径（创建/更新 issue、发评论）经
+// upsertGitHubIssue、refreshTimelineAfterPush、recordPushedComment 把远端响应
+// 写回本地，不经同步锁。依赖在构造时按值固化，只有 newClient 由 IssueService
+// 闭包委托、调用时现取，保证测试替换 s.newClient 对镜像同样生效；其余字段测试
+// 不会在构造后更换。
 type issueMirror struct {
 	issueRepo           *repository.IssueRepository
 	gitHubMetaRepo      *repository.IssueGitHubMetaRepository
@@ -128,18 +131,24 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 			}
 
 			// 远端 issue 相对集合水位未变时跳过评论/时间线拉取，计数取现有
-			// 镜像行数；水位随时间线镜像在同一事务里推进（syncTimeline），
-			// 失败则下轮重试。
+			// 镜像行数；水位与两个集合镜像在同一事务里推进
+			//（writeFullCollections），失败则下轮重试。
 			var commentCount, timelineCount int
 			if needsCollectionSync(issue.GitHubMeta, item) {
-				commentCount, syncErr = m.syncComments(ctx, client, issue, item.GetNumber())
-				if syncErr != nil {
-					return failSync(syncErr)
+				// 完整镜像的取数都在事务外完成：两个集合都拉成功才进写库事务，
+				// 任一取数失败本轮一个集合也不写（failSync 记失败，下轮重拉）。
+				comments, err := m.fetchComments(ctx, client, issue.ID, item.GetNumber())
+				if err != nil {
+					return failSync(err)
 				}
-				timelineCount, syncErr = m.syncTimeline(ctx, client, issue, item)
-				if syncErr != nil {
-					return failSync(syncErr)
+				events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
+				if err != nil {
+					return failSync(err)
 				}
+				if err := m.writeFullCollections(issue, item, comments, events); err != nil {
+					return failSync(err)
+				}
+				commentCount, timelineCount = len(comments), len(events)
 			} else {
 				var err error
 				if commentCount, err = m.commentRepo.CountSynced(issue.ID); err != nil {
@@ -475,9 +484,9 @@ func needsCollectionSync(meta *model.IssueGitHubMeta, item *ghclient.Issue) bool
 	return item.GetComments() != meta.CollectionsSyncedComments
 }
 
-// syncComments 先拉完该 Issue 的全部评论分页并映射成 model，再由 ReplaceSynced
-// 单事务写入；任一分页失败时本地集合保持同步前数据，一个字也不写。
-func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient, issue *model.Issue, issueNumber int) (int, error) {
+// fetchComments 拉完该 Issue 的全部评论分页并映射成 model，不含写库；
+// 任一分页失败时返回 GitHub API 错误，调用方什么也不该写。
+func (m *issueMirror) fetchComments(ctx context.Context, client gitHubIssueClient, issueID string, issueNumber int) ([]*model.IssueComment, error) {
 	const perPage = 100
 	page := 1
 	var comments []*model.IssueComment
@@ -485,14 +494,14 @@ func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient
 	for {
 		items, resp, err := client.ListIssueComments(ctx, issueNumber, page, perPage)
 		if err != nil {
-			return 0, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 评论失败: %v", err))
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 评论失败: %v", err))
 		}
 
 		for _, item := range items {
 			if item == nil || item.GetID() == 0 {
 				continue
 			}
-			comments = append(comments, buildGitHubIssueCommentModel(issue.ID, item))
+			comments = append(comments, buildGitHubIssueCommentModel(issueID, item))
 		}
 
 		if resp == nil || resp.NextPage == 0 {
@@ -501,10 +510,7 @@ func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient
 		page = resp.NextPage
 	}
 
-	if err := m.commentRepo.ReplaceSynced(issue.ID, comments); err != nil {
-		return 0, errs.ErrInternal
-	}
-	return len(comments), nil
+	return comments, nil
 }
 
 // fetchTimeline 拉完该 Issue 的全部时间线分页并映射成 model，不含写库；
@@ -548,34 +554,36 @@ func (m *issueMirror) fetchTimeline(ctx context.Context, client gitHubIssueClien
 	return events, nil
 }
 
-// syncTimeline 是后台同步的时间线镜像路径：先拉完全部远端分页，再在同一个
-// 数据库事务里替换时间线镜像并推进集合水位。替换与水位必须同事务——push 路径
-// （refreshTimelineAfterPush）也会替换时间线且不经同步锁，两者分开提交会出现
-// 「push 的旧快照覆盖镜像、水位却已推进」的组合，下一次同步因判据一致而跳过
-// 拉取，缺失事件再也无法自愈；同事务后谁最后提交，就由谁同时决定镜像与水位。
-// 水位取本轮列表返回的 item 远端快照而不是 upsert 后读回的 issue 行：后者可能
-// 已被并发 push 覆盖，水位不能指向超出本次快照覆盖范围的状态。
-func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient, issue *model.Issue, item *ghclient.Issue) (int, error) {
-	events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
-	if err != nil {
-		return 0, err
-	}
+// writeFullCollections 是「完整镜像」的原子单元：评论替换、时间线替换与集合水位
+// 推进必须在同一个事务里提交。两个集合的取数（fetchComments/fetchTimeline）已在
+// 事务外完成，事务内只写库。不能拆成多个事务：push 路径也写集合且不经同步锁，
+// 拆开后 push 的旧正文写回可以落在两个集合的取数/提交之间，而最后提交的集合事务
+// 仍会推进水位，留下「旧镜像 + 已确认水位」——跳过判据再也发现不了该 issue，缺失
+// 内容不再自愈（反例见 docs/internal/issue-sync.md「集合拉取水位」）。同事务后谁
+// 最后提交，就由谁同时决定两个集合与水位。水位取本轮列表返回的 item 远端快照而
+// 不是 upsert 后读回的 issue 行：后者可能已被并发 push 覆盖，水位不能指向超出
+// 本次快照覆盖范围的状态。
+func (m *issueMirror) writeFullCollections(issue *model.Issue, item *ghclient.Issue, comments []*model.IssueComment, events []*model.IssueTimelineEvent) error {
 	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := m.commentRepo.ReplaceSyncedTx(tx, issue.ID, comments); err != nil {
+			return err
+		}
 		if err := m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events); err != nil {
 			return err
 		}
 		return m.gitHubMetaRepo.AdvanceCollectionsWatermarkTx(tx, issue.ID, item.GetUpdatedAt().UTC(), item.GetComments())
 	}); err != nil {
-		return 0, errs.ErrInternal
+		return errs.ErrInternal
 	}
-	return len(events), nil
+	return nil
 }
 
 // writePartialCollections 执行一次「非完整镜像」的集合写入。push 路径只把远端
 // 响应里的一条评论或一次时间线刷新写回本地，没有重拉两个集合，所以必须在同一个
 // 事务里清空集合水位（ClearCollectionsWatermarkTx）：push 的响应可能比后台同步
 // 刚镜像的远端状态旧，若不清空，水位会指向被旧响应覆盖的镜像，跳过判据再也发现
-// 不了该 issue。所有「只写一部分集合」的路径都必须走这里；完整镜像走 syncTimeline。
+// 不了该 issue。所有「只写一部分集合」的路径都必须走这里；完整镜像走
+// writeFullCollections。
 // 清空后的恢复前提见 docs/internal/issue-sync.md「集合拉取水位」。
 func (m *issueMirror) writePartialCollections(issueID string, write func(tx *gorm.DB) error) error {
 	return m.issueRepo.Transaction(func(tx *gorm.DB) error {

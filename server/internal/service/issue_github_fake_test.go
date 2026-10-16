@@ -33,10 +33,12 @@ type fakeIssueGitHubClient struct {
 	pullRequests       map[int]*gh.PullRequest
 	pullRequestErr     error
 	onGetPullRequest   func(number int)
-	// validateErr 注入 ValidateRepository 失败；onListIssues 在 ListIssues
-	// 开头回调（可阻塞同步）；listIssuesSince 记录每次调用的 since 参数。
-	validateErr  error
-	onListIssues func()
+	// validateErr 注入 ValidateRepository 失败；onListIssues/onListTimeline 分别在
+	// ListIssues / ListIssueTimeline 开头回调（用于在两轮取数之间注入写库）；
+	// listIssuesSince 记录每次调用的 since 参数。
+	validateErr    error
+	onListIssues   func()
+	onListTimeline func()
 	// mu 保护 listIssuesSince 与 commentListCalls/timelineListCalls：目前只有
 	// ListIssues 会被并发同步路径调用；若未来并发测试命中推送方法，其余记录
 	// 字段需一并加锁。
@@ -134,6 +136,9 @@ func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber
 }
 
 func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber, page, _ int) ([]*ghclient.TimelineEvent, *gh.Response, error) {
+	if f.onListTimeline != nil {
+		f.onListTimeline()
+	}
 	f.mu.Lock()
 	if f.timelineListCalls == nil {
 		f.timelineListCalls = map[int]int{}

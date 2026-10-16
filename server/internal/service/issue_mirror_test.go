@@ -296,7 +296,8 @@ func TestIssueServiceSyncProjectIssues_PagedCollectionsCommitAndResyncDedupes(t 
 	}
 }
 
-// 评论第二页拉取失败：第一页已映射的增/改与远端缺失清理都不提交，集合保持同步前数据。
+// 评论第二页拉取失败：完整镜像全有或全无——第一页已映射的增/改与远端缺失清理都
+// 不提交，评论与时间线两个集合都保持同步前数据，水位不推进。
 func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -311,6 +312,9 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 		issues: []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
 		comments: map[int][]*ghclient.IssueComment{
 			42: {testGitHubSyncComment(500, "old body", now), testGitHubSyncComment(599, "stale", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
 	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
@@ -355,6 +359,26 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 		t.Fatalf("expected stale comment 599 kept after failed sync")
 	}
 
+	// 取数顺序是先评论后时间线：评论分页失败时时间线取数也不该发出，
+	// 镜像与水位都停留在首轮种子值。
+	storedTimeline := storedTimelineByKey(t, svc, issueID)
+	if len(storedTimeline) != 1 || storedTimeline["gh:700"].EventType != "labeled" {
+		t.Fatalf("expected timeline collection untouched after comment fetch failure, got %+v", storedTimeline)
+	}
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now) {
+		t.Fatalf("expected watermark kept at seed value %v after comment failure, got %v", now, meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected watermark comments kept at 0, got %d", meta.CollectionsSyncedComments)
+	}
+	if comments, timeline := fake.countCollectionCalls(); timeline != 1 {
+		t.Fatalf("expected timeline fetch skipped after comment fetch failure, got comments=%d timeline=%d", comments, timeline)
+	}
+
 	state, err := svc.syncStateRepo.Get(project.ID)
 	if err != nil {
 		t.Fatalf("load sync state: %v", err)
@@ -364,8 +388,9 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 	}
 }
 
-// 时间线第二页拉取失败：事件集合保持同步前数据；评论是独立原子边界，本轮照常提交。
-func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *testing.T) {
+// 时间线第二页拉取失败：完整镜像全有或全无——已拉到的评论也不再落库，两个集合
+// 都保持同步前数据，水位不推进，下一轮同步整体重试。
+func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsBothCollections(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
@@ -377,6 +402,9 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 	now := time.Now().UTC()
 	fake := &fakeIssueGitHubClient{
 		issues: []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "old body", now)},
+		},
 		timeline: map[int][]*ghclient.TimelineEvent{
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now), testGitHubSyncTimelineEvent(799, "subscribed", now)},
 		},
@@ -392,10 +420,10 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 
 	// 第二轮模拟远端变更：updated_at 必须推进，否则会被变更判据跳过。
 	fake.issues = []*ghclient.Issue{testGitHubSyncIssue(101, 42, now.Add(time.Minute))}
-	// 评论集合正常更新（独立原子边界，先提交）；时间线第一页把 700 改成
+	// 评论集合正常返回（尝试把 500 改成新正文）；时间线第一页把 700 改成
 	// closed 并新增 701、丢弃 799，第二页失败。
 	fake.comments = map[int][]*ghclient.IssueComment{
-		42: {testGitHubSyncComment(500, "committed despite timeline failure", now)},
+		42: {testGitHubSyncComment(500, "would-be new body", now)},
 	}
 	fake.timelinePages = map[int][][]*ghclient.TimelineEvent{
 		42: {
@@ -413,9 +441,10 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 		t.Fatalf("expected github api error, got %v", err)
 	}
 
+	// 全有或全无：时间线取数失败时，已拉到的评论更新同样不落库。
 	storedComments := storedCommentsByGitHubID(t, svc, issueID)
-	if got := storedComments[500]; got.Body != "committed despite timeline failure" {
-		t.Fatalf("expected comments committed independently of timeline failure, got %+v", storedComments)
+	if got := storedComments[500]; got.Body != "old body" {
+		t.Fatalf("expected comment 500 to keep first-round body after timeline failure, got %+v", storedComments)
 	}
 
 	stored := storedTimelineByKey(t, svc, issueID)
@@ -432,7 +461,7 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 		t.Fatalf("expected stale event 799 kept after failed sync")
 	}
 
-	// 水位随镜像同事务推进：时间线失败本轮不得推进，仍停留在首轮种子值，
+	// 水位随完整镜像同事务推进：时间线失败本轮不得推进，仍停留在首轮种子值，
 	// 下一轮同步才会重试拉取。
 	var meta model.IssueGitHubMeta
 	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
@@ -1030,6 +1059,97 @@ func TestIssueServiceRecordPushedComment_ClearsWatermarkAndNextSyncHeals(t *test
 	comments = storedCommentsByGitHubID(t, svc, issueID)
 	if got := comments[500]; got.Body != "remote" {
 		t.Fatalf("expected comment 500 healed back to remote body, got %q", got.Body)
+	}
+}
+
+// 确定性回归（INT-104 第三轮 C<P<T 反例）：push 评论写回落在评论取数之后、完整
+// 镜像写库事务之前。完整镜像是一个原子单元（评论替换 + 时间线替换 + 推进水位
+// 同事务），最后提交的事务同时决定两个集合与水位——push 的旧正文被同一事务的
+// 评论替换覆盖，水位推进与之匹配，下一轮判据认为已完整镜像不再重拉；不存在
+// 「旧镜像 + 已确认水位」需要自愈。
+func TestIssueServiceSyncProjectIssues_PushWriteBetweenFetchesIsOverwrittenByFullMirror(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "remote", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+
+	// 第二轮模拟远端变更（updated_at 推进、评论数 1），并在时间线取数开头注入
+	// push 写回：此时评论已取完（远端正文），写库事务尚未开始——push 的延迟
+	// 响应（同 github_comment_id=500、旧正文）先落库并清空水位。
+	updated := testGitHubSyncIssue(101, 42, now.Add(time.Minute))
+	updated.Comments = intPtr(1)
+	fake.issues = []*ghclient.Issue{updated}
+	var once sync.Once
+	fake.onListTimeline = func() {
+		once.Do(func() {
+			var issue model.Issue
+			if err := svc.db.First(&issue, "project_id = ?", project.ID).Error; err != nil {
+				t.Fatalf("load issue in callback: %v", err)
+			}
+			stored, err := svc.issueRepo.FindByID(issue.ID)
+			if err != nil {
+				t.Fatalf("load issue with meta in callback: %v", err)
+			}
+			pushed := buildGitHubIssueCommentModel(stored.ID, testGitHubSyncComment(500, "stale-push", now))
+			if err := svc.issueService.mirror.recordPushedComment(stored, pushed); err != nil {
+				t.Fatalf("record pushed comment in callback: %v", err)
+			}
+		})
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync with injected push write: %v", err)
+	}
+
+	// 完整镜像事务覆盖 push 写回：终态正文 = 远端值，不再是 stale-push。
+	stored := storedCommentsByGitHubID(t, svc, issueID)
+	if got := stored[500]; got.Body != "remote" {
+		t.Fatalf("expected full mirror to overwrite stale push body, got %q", got.Body)
+	}
+
+	// 水位已推进到本轮列表快照：非 nil，评论数等于 item.GetComments()。
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("expected watermark advanced to list snapshot %v, got %v", now.Add(time.Minute), meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != updated.GetComments() {
+		t.Fatalf("expected watermark comments=%d, got %d", updated.GetComments(), meta.CollectionsSyncedComments)
+	}
+
+	// 远端不再变化：判据认为该 issue 已完整镜像，下一轮不请求评论/时间线接口。
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("second sync after full mirror: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments || afterTimeline != beforeTimeline {
+		t.Fatalf("expected no collection refetch once fully mirrored, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
 	}
 }
 

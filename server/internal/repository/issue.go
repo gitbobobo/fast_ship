@@ -218,20 +218,20 @@ func (r *IssueCommentRepository) UpsertTx(tx *gorm.DB, comment *model.IssueComme
 	}).Create(comment).Error
 }
 
-// ReplaceSynced 在单个事务内把该 Issue 的 GitHub 评论镜像替换成本轮拉取的集合：
-// 逐条 upsert 后清掉不在集合内的镜像行，任一步失败整体回滚。
-// 远端分页必须由调用方拉完——事务内只执行数据库操作。
-func (r *IssueCommentRepository) ReplaceSynced(issueID string, comments []*model.IssueComment) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		keepIDs := make([]int64, 0, len(comments))
-		for _, comment := range comments {
-			if err := r.UpsertTx(tx, comment); err != nil {
-				return err
-			}
-			keepIDs = append(keepIDs, comment.GitHubCommentID)
+// ReplaceSyncedTx 把该 Issue 的 GitHub 评论镜像替换成本轮拉取的集合：逐条 upsert
+// 后清掉不在集合内的镜像行，任一步失败整体回滚。必须在调用方的事务内与时间线替换
+// （IssueTimelineRepository.ReplaceSyncedTx）及集合水位变更
+// （Advance/ClearCollectionsWatermarkTx）一起提交，理由见 issue_mirror.go 的
+// writeFullCollections；远端分页必须在事务外拉完——事务内只执行数据库操作。
+func (r *IssueCommentRepository) ReplaceSyncedTx(tx *gorm.DB, issueID string, comments []*model.IssueComment) error {
+	keepIDs := make([]int64, 0, len(comments))
+	for _, comment := range comments {
+		if err := r.UpsertTx(tx, comment); err != nil {
+			return err
 		}
-		return r.DeleteMissingTx(tx, issueID, keepIDs)
-	})
+		keepIDs = append(keepIDs, comment.GitHubCommentID)
+	}
+	return r.DeleteMissingTx(tx, issueID, keepIDs)
 }
 
 func (r *IssueCommentRepository) Create(comment *model.IssueComment) error {
