@@ -63,7 +63,13 @@ func (s *BotService) runProjectWrite(ctx context.Context, call *model.BotToolCal
 		if args.RepositoryURL != "" {
 			req.RepositoryUrl = &args.RepositoryURL
 		}
-		return s.projects.Create(userID, req)
+		resp, err := s.projects.Create(userID, req)
+		if err != nil {
+			return nil, err
+		}
+		// 写结果与读取一致走瘦身投影：完整响应带凭证引用，会随后台结果
+		// 发给模型供应商。
+		return botSlimProject(resp), nil
 	case "update":
 		req := &UpdateProjectRequest{Description: args.Description}
 		if name := strings.TrimSpace(args.Name); name != "" {
@@ -72,7 +78,11 @@ func (s *BotService) runProjectWrite(ctx context.Context, call *model.BotToolCal
 		if args.RepositoryURL != "" {
 			req.RepositoryUrl = &args.RepositoryURL
 		}
-		return s.projects.Update(args.ID, userID, req)
+		resp, err := s.projects.Update(args.ID, userID, req)
+		if err != nil {
+			return nil, err
+		}
+		return botSlimProject(resp), nil
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_project 不支持该写动作")
 }

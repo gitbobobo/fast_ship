@@ -2919,3 +2919,36 @@ func TestBotFinishFailedRespectsAcceptedStop(t *testing.T) {
 		t.Fatalf("受理过的停止必须落 stopped，实际 %s", fresh.Status)
 	}
 }
+
+func TestBotProjectWriteResultSlimsTokenRefs(t *testing.T) {
+	// fs_project 写结果与读取一致走瘦身投影：凭证引用不随后台结果进模型上下文。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botpwslim")
+	bot := env.createBot(t, userID)
+	env.db.Create(&model.UserGitHubToken{
+		ID: "tok-w", UserID: userID, Title: "写引用凭证",
+		TokenFingerprint: "fp-write", TokenPrefix: "ghp_",
+		DetectionStatus: model.TokenDetectionUnchecked, DetectionType: model.TokenTypeClassic,
+		DetectionScopes: "", DetectionLogin: "", DetectionDetail: "{}",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+	tokenID := "tok-w"
+	created, err := env.bots.projects.Create(userID, &CreateProjectRequest{
+		Name:                "写引用项目",
+		PublicGithubTokenId: &tokenID,
+	})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	out, err := env.bots.runProjectWrite(context.Background(), &model.BotToolCall{
+		ID: "call-pwrite", BotID: bot.ID, ToolName: "fs_project", Action: "update",
+		ArgumentsJSON: `{"action":"update","id":"` + created.Id + `","description":"更新"}`,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	raw, _ := json.Marshal(out)
+	if strings.Contains(string(raw), "public_github_token_id") || strings.Contains(string(raw), "code_github_token_id") {
+		t.Fatalf("写结果不得携带凭证引用: %s", raw)
+	}
+}

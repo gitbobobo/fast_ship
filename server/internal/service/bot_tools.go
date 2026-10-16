@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -225,7 +226,10 @@ func botToolRegistry() []*botToolDef {
 	}
 }
 
-var botToolsetLoaded *botToolsetHolder
+var (
+	botToolsetOnce   sync.Once
+	botToolsetLoaded *botToolsetHolder
+)
 
 type botToolsetHolder struct {
 	tools    []*botToolDef
@@ -237,57 +241,60 @@ type botToolsetHolder struct {
 	bytes int
 }
 
-// botToolsetOf 懒加载进程级工具集；schema 生成失败属于编程错误，直接 panic。
+// botToolsetOf 懒加载进程级工具集（sync.Once 串行化首次构造，避免并发
+// 首轮的数据竞争与半可见状态）；schema 生成失败属于编程错误，直接 panic。
 func botToolsetOf() *botToolsetHolder {
-	if botToolsetLoaded == nil {
-		tools := botToolRegistry()
-		holder := &botToolsetHolder{
-			tools:    tools,
-			byName:   map[string]*botToolDef{},
-			byAction: map[string]botActionDef{},
-		}
-		reflector := &jsonschema.Reflector{
-			Anonymous:      true,
-			DoNotReference: true,
-			ExpandedStruct: true,
-		}
-		var rawAll []byte
-		for _, tool := range tools {
-			schema := reflector.ReflectFromType(tool.ArgsType)
-			schema.ID = ""
-			schema.Version = ""
-			schema.Definitions = nil
-			schema.Description = tool.Description
-			raw, err := schema.MarshalJSON()
-			if err != nil {
-				panic(fmt.Sprintf("bot tool schema %s: %v", tool.Name, err))
-			}
-			var parsed map[string]interface{}
-			if err := json.Unmarshal(raw, &parsed); err != nil {
-				panic(fmt.Sprintf("bot tool schema %s: %v", tool.Name, err))
-			}
-			tool.Parameters = shared.FunctionParameters(parsed)
-			rawAll = append(rawAll, raw...)
-			holder.byName[tool.Name] = tool
-			for _, action := range tool.Actions {
-				holder.byAction[tool.Name+"/"+action.Name] = action
-			}
-			holder.schemas = append(holder.schemas, openai.ChatCompletionToolUnionParam{
-				OfFunction: &openai.ChatCompletionFunctionToolParam{
-					Function: shared.FunctionDefinitionParam{
-						Name:        tool.Name,
-						Description: param.NewOpt(tool.Description),
-						Parameters:  tool.Parameters,
-					},
-				},
-			})
-		}
-		sum := sha256.Sum256(rawAll)
-		holder.hash = hex.EncodeToString(sum[:])
-		holder.bytes = len(rawAll)
-		botToolsetLoaded = holder
-	}
+	botToolsetOnce.Do(func() { botToolsetLoaded = botBuildToolset() })
 	return botToolsetLoaded
+}
+
+func botBuildToolset() *botToolsetHolder {
+	tools := botToolRegistry()
+	holder := &botToolsetHolder{
+		tools:    tools,
+		byName:   map[string]*botToolDef{},
+		byAction: map[string]botActionDef{},
+	}
+	reflector := &jsonschema.Reflector{
+		Anonymous:      true,
+		DoNotReference: true,
+		ExpandedStruct: true,
+	}
+	var rawAll []byte
+	for _, tool := range tools {
+		schema := reflector.ReflectFromType(tool.ArgsType)
+		schema.ID = ""
+		schema.Version = ""
+		schema.Definitions = nil
+		schema.Description = tool.Description
+		raw, err := schema.MarshalJSON()
+		if err != nil {
+			panic(fmt.Sprintf("bot tool schema %s: %v", tool.Name, err))
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(raw, &parsed); err != nil {
+			panic(fmt.Sprintf("bot tool schema %s: %v", tool.Name, err))
+		}
+		tool.Parameters = shared.FunctionParameters(parsed)
+		rawAll = append(rawAll, raw...)
+		holder.byName[tool.Name] = tool
+		for _, action := range tool.Actions {
+			holder.byAction[tool.Name+"/"+action.Name] = action
+		}
+		holder.schemas = append(holder.schemas, openai.ChatCompletionToolUnionParam{
+			OfFunction: &openai.ChatCompletionFunctionToolParam{
+				Function: shared.FunctionDefinitionParam{
+					Name:        tool.Name,
+					Description: param.NewOpt(tool.Description),
+					Parameters:  tool.Parameters,
+				},
+			},
+		})
+	}
+	sum := sha256.Sum256(rawAll)
+	holder.hash = hex.EncodeToString(sum[:])
+	holder.bytes = len(rawAll)
+	return holder
 }
 
 // botToolsTokenEstimate 工具定义的 token 占用估算：chars/4（估算值，标注估算方式）。
