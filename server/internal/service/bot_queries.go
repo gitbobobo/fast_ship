@@ -148,6 +148,23 @@ type BotChatSnapshot struct {
 	NextEventSeq int64                 `json:"next_event_seq"`
 }
 
+// listAllUnfinishedCalls 分页取全本机器人未终态调用（页大小 200，按
+// created_at/id 游标推进）。
+func listAllUnfinishedCalls(tx *gorm.DB, botID string) ([]model.BotToolCall, error) {
+	repo := repository.NewBotToolCallRepository(tx)
+	all := make([]model.BotToolCall, 0, 8)
+	for {
+		page, err := repo.ListUnfinishedByBotPage(botID, len(all), 200)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < 200 {
+			return all, nil
+		}
+	}
+}
+
 // GetChatSnapshot 单事务一致读；messageLimit 是消息尾部页大小。
 func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*BotChatSnapshot, error) {
 	if messageLimit <= 0 || messageLimit > 200 {
@@ -183,9 +200,9 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 			snap.Calls = append(snap.Calls, botToolCallResponseOf(&callRows[i]))
 		}
 
-		// 未终态调用必须全量收录（数量有界）：超过一页时最新 100 条可能
-		// 不含历史页里的待确认卡片，聊天页将无法批准/取消。
-		unfinished, err := repository.NewBotToolCallRepository(tx).ListUnfinishedByBot(botID, 100)
+		// 未终态调用必须全量收录：待确认卡片必须可操作。分页取全（数量
+		// 无数据库上界，但实际有界且只读）。
+		unfinished, err := listAllUnfinishedCalls(tx, botID)
 		if err != nil {
 			return err
 		}

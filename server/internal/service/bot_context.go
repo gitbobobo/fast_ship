@@ -96,6 +96,13 @@ func (s *BotService) buildRunContext(bot *model.Bot, run *model.BotRun) (*botBui
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
+	// 窗口起点对齐协议块：滑窗起点可能落在一个 tool 回复块中间（assistant
+	// 行在窗外），丢弃开头成串的孤儿 tool 回复——裸 tool 角色消息会被
+	// OpenAI 兼容端拒绝。回复一定排在 assistant 之后，assistant 行在窗内
+	// 时它的回复不会落在窗外。
+	for len(rows) > 0 && rows[0].Kind == model.BotMessageKindToolReply {
+		rows = rows[1:]
+	}
 
 	// 预取调用状态：assistant 消息里的工具调用列表带平台状态说明。
 	pending := make([]botPendingInput, 0, 4)

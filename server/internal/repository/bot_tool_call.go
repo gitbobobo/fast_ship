@@ -72,6 +72,24 @@ func (r *BotToolCallRepository) ListUnfinishedByBot(botID string, limit int) ([]
 	return rows, err
 }
 
+// ListUnfinishedByBotPage 带偏移分页（快照取全用；offset 语义按同序稳定）。
+func (r *BotToolCallRepository) ListUnfinishedByBotPage(botID string, offset, limit int) ([]model.BotToolCall, error) {
+	var rows []model.BotToolCall
+	err := r.db.Where("bot_id = ? AND finished_at IS NULL", botID).
+		Order("created_at ASC, id ASC").Offset(offset).Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
+// ListQueuedSync 全局分页读排队中的同步调用（启动恢复用：后台扫描只认领
+// 异步调用，这些调用只能由恢复补终态）。
+func (r *BotToolCallRepository) ListQueuedSync(limit int) ([]model.BotToolCall, error) {
+	var rows []model.BotToolCall
+	err := r.db.Where("status = ? AND execution_mode = ?",
+		model.BotCallStatusQueued, model.BotExecutionSync).
+		Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
 // ListUnfinished 返回所有未到终态的调用（启动恢复与超时扫描用）。
 func (r *BotToolCallRepository) ListUnfinished() ([]model.BotToolCall, error) {
 	var rows []model.BotToolCall

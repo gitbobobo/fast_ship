@@ -2349,3 +2349,123 @@ func TestBotContextWindowSlides(t *testing.T) {
 		t.Fatalf("最新输入必须进入本轮上下文")
 	}
 }
+
+func TestBotRecoveryQueuedSyncPaged(t *testing.T) {
+	// 全局 queued 超过一页时，恢复必须取全所有排队同步调用（分页直到取尽）。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botpaged")
+	bot := env.createBot(t, userID)
+
+	const total = 260
+	callIDs := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		_, id := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionSync))
+		callIDs = append(callIDs, id)
+	}
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	var remaining int64
+	env.db.Model(&model.BotToolCall{}).
+		Where("id IN ? AND status = ?", callIDs, model.BotCallStatusQueued).
+		Count(&remaining)
+	if remaining != 0 {
+		t.Fatalf("全部排队同步调用都应被恢复补终态，剩余 %d", remaining)
+	}
+}
+
+func TestBotSnapshotUnfinishedBeyondPage(t *testing.T) {
+	// 未终态调用超过快照其余部分时必须分页取全，不允许 100 条硬截断。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsnapall")
+	bot := env.createBot(t, userID)
+
+	const total = 130
+	pendingIDs := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		_, id := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusPendingConfirmation, string(model.BotExecutionAsync))
+		pendingIDs = append(pendingIDs, id)
+	}
+	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if len(snap.Calls) < total {
+		t.Fatalf("快照应收录全部未终态调用: %d < %d", len(snap.Calls), total)
+	}
+	seen := map[string]bool{}
+	for _, c := range snap.Calls {
+		seen[c.ID] = true
+	}
+	for _, id := range pendingIDs {
+		if !seen[id] {
+			t.Fatalf("待确认调用缺失: %s", id)
+		}
+	}
+}
+
+func TestBotContextWindowAlignedToBlock(t *testing.T) {
+	// 滑窗起点落在 tool 回复块中间时，开头的孤儿 tool 回复必须被丢弃：
+	// 裸 tool 角色消息会被 OpenAI 兼容端拒绝。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botalign")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-align", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "align",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	msgs := repository.NewBotMessageRepository(env.db)
+	appendMsg := func(kind model.BotMessageKind, raw string) {
+		t.Helper()
+		seq, err := env.bots.bots.NextMessageSeqTx(env.db, bot.ID)
+		if err != nil {
+			t.Fatalf("seq: %v", err)
+		}
+		msg := &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID, Seq: seq,
+			Kind: kind, ContentJSON: raw, CreatedAt: now}
+		if err := msgs.AppendTx(env.db, msg); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	// 窗口起点（maxSeq-limit）落在 assistant 行上，tool 回复成为窗口第一行
+	//——assistant 在窗外，回复是孤儿。
+	appendMsg(model.BotMessageKindUser, `{"text":"旧消息1"}`)
+	appendMsg(model.BotMessageKindUser, `{"text":"旧消息2"}`)
+	appendMsg(model.BotMessageKindAssistant,
+		`{"tool_calls":[{"call_id":"c1","provider_tool_call_id":"callA","tool_name":"fs_issue","action":"list","arguments":"{}"}]}`)
+	appendMsg(model.BotMessageKindToolReply,
+		`{"provider_tool_call_id":"callA","content":"结果","status":"succeeded"}`)
+	for seq := 5; seq <= botHistoryFetchLimit+3; seq++ {
+		appendMsg(model.BotMessageKindUser, `{"text":"旧消息"}`)
+	}
+	appendMsg(model.BotMessageKindUser, `{"text":"触发新构建"}`)
+
+	built, err := env.bots.buildRunContext(botRow, run)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	raw, err := json.Marshal(built.Request.Messages)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// 裸 tool 回复（assistant 在窗外）不得出现：开头的孤儿回复被丢弃。
+	for _, frag := range []string{`"role":"tool"`} {
+		if strings.Contains(string(raw), frag) {
+			t.Fatalf("窗外 assistant 的孤儿 tool 回复不得进入协议消息")
+		}
+	}
+	if !strings.Contains(string(raw), "触发新构建") {
+		t.Fatalf("新输入必须仍在协议消息里")
+	}
+}

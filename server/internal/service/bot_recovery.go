@@ -110,49 +110,55 @@ func (s *BotService) RecoverOnStartup() error {
 
 	// 3b. queued 同步调用：提交后、执行前崩溃会留下永远无人认领的排队调用
 	//（后台扫描只执行异步），模型上下文会带着未闭合的 tool_calls 块。恢复
-	// 补 not_executed 终态与唯一回复，让模型重新决定。条件更新挡住与活 worker
-	// 认领的竞速。
-	queued, err := s.calls.ListQueued(256)
-	if err != nil {
-		return err
-	}
-	for i := range queued {
-		call := &queued[i]
-		if call.ExecutionMode != string(model.BotExecutionSync) {
-			continue
+	// 补 not_executed 终态与唯一回复，让模型重新决定。直接按同步调用分页
+	// 取全——全局 queued 页面可能被异步调用挤占；条件更新挡住与活 worker
+	// 认领的竞速，处理过的调用落终态后自然翻页。
+	for {
+		queued, err := s.calls.ListQueuedSync(256)
+		if err != nil {
+			return err
 		}
-		runID := s.runIDOfCall(call)
-		txErr := s.db.Transaction(func(tx *gorm.DB) error {
-			ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
-				string(model.BotCallStatusQueued), map[string]interface{}{
-					"status":        model.BotCallStatusNotExecuted,
-					"finished_at":   now,
-					"error_code":    "not_executed",
-					"error_message": "服务在调用执行前重启",
+		if len(queued) == 0 {
+			break
+		}
+		for i := range queued {
+			call := &queued[i]
+			runID := s.runIDOfCall(call)
+			txErr := s.db.Transaction(func(tx *gorm.DB) error {
+				ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
+					string(model.BotCallStatusQueued), map[string]interface{}{
+						"status":        model.BotCallStatusNotExecuted,
+						"finished_at":   now,
+						"error_code":    "not_executed",
+						"error_message": "服务在调用执行前重启",
+					})
+				if err != nil || !ok {
+					return err
+				}
+				call.Status = model.BotCallStatusNotExecuted
+				reply := botToolReplyContent{
+					CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
+					ToolName: call.ToolName, Status: string(model.BotCallStatusNotExecuted),
+					Content: botFailureReplyText(errs.New(errs.ErrInvalidParams.Code,
+						"调用未执行（服务重启）：请在新输入到达后重新决定是否再次调用")),
+				}
+				if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
+					return err
+				}
+				return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
+					Kind: "tool_result", Phase: "terminal",
+					Payload: botToolCallResponseOf(call),
 				})
-			if err != nil || !ok {
-				return err
-			}
-			call.Status = model.BotCallStatusNotExecuted
-			reply := botToolReplyContent{
-				CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
-				ToolName: call.ToolName, Status: string(model.BotCallStatusNotExecuted),
-				Content: botFailureReplyText(errs.New(errs.ErrInvalidParams.Code,
-					"调用未执行（服务重启）：请在新输入到达后重新决定是否再次调用")),
-			}
-			if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
-				return err
-			}
-			return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
-				Kind: "tool_result", Phase: "terminal",
-				Payload: botToolCallResponseOf(call),
 			})
-		})
-		if txErr != nil {
-			s.logger.Warn("恢复排队同步调用失败", zap.String("call_id", call.ID), zap.Error(txErr))
-			continue
+			if txErr != nil {
+				s.logger.Warn("恢复排队同步调用失败", zap.String("call_id", call.ID), zap.Error(txErr))
+				continue
+			}
+			affectedBots[call.BotID] = true
 		}
-		affectedBots[call.BotID] = true
+		if len(queued) < 256 {
+			break
+		}
 	}
 
 	// 4. 通知机器人：每个受影响 bot 追加 lifecycle 消息并触发 recovery run。
