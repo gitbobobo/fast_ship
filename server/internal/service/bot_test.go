@@ -2469,3 +2469,26 @@ func TestBotContextWindowAlignedToBlock(t *testing.T) {
 		t.Fatalf("新输入必须仍在协议消息里")
 	}
 }
+
+func TestBotInvalidCallPreservesRawArguments(t *testing.T) {
+	// 模型发来坏参数（非法 JSON）的调用：校验失败的即时回复照发，但
+	// assistant 账本必须保留原始参数——下一轮回放时空参数会被校验历史
+	// 参数的供应商拒绝，用户消息将永远到不了模型。
+	env := setupBotTestEnv(t,
+		fakeModelTurn{ToolCalls: []fakeModelToolCall{{ID: "call-bad", Name: "fs_issue", Args: `{bad json`}}},
+		fakeModelTurn{Text: "这次参数是对的"},
+	)
+	userID := createBotTestUser(t, env.db, "botbadargs")
+	bot := env.createBot(t, userID)
+	env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "hi", ClientMessageID: "b1"})
+	waitForBot(t, "第一轮结束", 15*time.Second, func() bool {
+		return env.botSettled(bot.ID)
+	})
+
+	var ledgerArgs string
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindAssistant).Limit(1).Pluck("content_json", &ledgerArgs)
+	if !strings.Contains(ledgerArgs, "{bad json") {
+		t.Fatalf("assistant 账本必须保留原始坏参数: %s", ledgerArgs)
+	}
+}

@@ -102,12 +102,19 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				call.Status = model.BotCallStatusPendingConfirmation
 			}
 		}
+		// 账本里的 assistant 调用要原样回放给模型：校验失败的调用保留
+		// 原始参数（含坏 JSON/未知参数）——空参数会被校验历史参数的
+		// 供应商拒绝，用户消息将永远到不了模型。
+		arguments := entry.call.ArgumentsJSON
+		if entry.prepared == nil {
+			arguments = tc.Arguments
+		}
 		content.ToolCalls = append(content.ToolCalls, botAssistantToolCall{
 			CallID:             entry.call.ID,
 			ProviderToolCallID: tc.ID,
 			ToolName:           tc.Name,
 			Action:             entry.call.Action,
-			Arguments:          entry.call.ArgumentsJSON,
+			Arguments:          arguments,
 		})
 		entries = append(entries, entry)
 	}
