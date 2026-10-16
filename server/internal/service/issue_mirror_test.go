@@ -983,6 +983,9 @@ func TestIssueServiceRefreshTimelineAfterPush_ClearsWatermarkSoNextSyncRefetches
 		t.Fatalf("expected next sync to refetch both collections after push cleared the watermark, got comments %d→%d timeline %d→%d",
 			beforeComments, afterComments, beforeTimeline, afterTimeline)
 	}
+	if calls := fake.countGetIssueCalls(); calls != 0 {
+		t.Fatalf("expected the list path to do the recovery (no GetIssue calls), got %d", calls)
+	}
 }
 
 // push 路径的评论写回（recordPushedComment）同样是「只写一部分集合」：三处写入
@@ -1056,17 +1059,759 @@ func TestIssueServiceRecordPushedComment_ClearsWatermarkAndNextSyncHeals(t *test
 		t.Fatalf("expected next sync to refetch both collections after push cleared the watermark, got comments %d→%d timeline %d→%d",
 			beforeComments, afterComments, beforeTimeline, afterTimeline)
 	}
+	if calls := fake.countGetIssueCalls(); calls != 0 {
+		t.Fatalf("expected the list path to do the recovery (no GetIssue calls), got %d", calls)
+	}
 	comments = storedCommentsByGitHubID(t, svc, issueID)
 	if got := comments[500]; got.Body != "remote" {
 		t.Fatalf("expected comment 500 healed back to remote body, got %q", got.Body)
 	}
 }
 
-// 确定性回归（INT-104 第三轮 C<P<T 反例）：push 评论写回落在评论取数之后、完整
-// 镜像写库事务之前。完整镜像是一个原子单元（评论替换 + 时间线替换 + 推进水位
-// 同事务），最后提交的事务同时决定两个集合与水位——push 的旧正文被同一事务的
-// 评论替换覆盖，水位推进与之匹配，下一轮判据认为已完整镜像不再重拉；不存在
-// 「旧镜像 + 已确认水位」需要自愈。
+// markCollectionsStaleAfterPush 是「仅状态变更」push（关闭/重开）的水位处理
+// （INT-105）：不做任何网络取数，只在同一事务里清空集合水位；下一次同步因水位
+// 为空保守重拉两个集合，closed 等时间线事件由此补齐。
+func TestIssueServiceMarkCollectionsStaleAfterPush_ClearsWatermarkSoNextSyncRefetches(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(1)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+
+	if err := svc.issueService.mirror.markCollectionsStaleAfterPush(issueID); err != nil {
+		t.Fatalf("mark collections stale after push: %v", err)
+	}
+	// 换新结构体重读：GORM 扫 NULL 到已复用的 *time.Time 字段不会置回 nil。
+	var cleared model.IssueGitHubMeta
+	if err := svc.db.First(&cleared, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("reload github meta: %v", err)
+	}
+	if cleared.CollectionsSyncedUpdatedAt != nil || cleared.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected collections watermark cleared, got %v / %d", cleared.CollectionsSyncedUpdatedAt, cleared.CollectionsSyncedComments)
+	}
+
+	// 远端无变化：水位为空让下一轮同步重拉两个集合。
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync after mark stale: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments+1 || afterTimeline != beforeTimeline+1 {
+		t.Fatalf("expected next sync to refetch both collections after mark stale, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
+	}
+	if calls := fake.countGetIssueCalls(); calls != 0 {
+		t.Fatalf("expected the list path to do the recovery (no GetIssue calls), got %d", calls)
+	}
+}
+
+// 看板「关闭全部」对 GitHub 来源 issue 走仅状态变更的 push（INT-105）：每条只发
+// 一次状态 PATCH、整个批量过程不拉评论/时间线，只清空集合水位；closed 时间线
+// 事件由下一次增量同步补齐。
+func TestIssueServiceBatchCloseDoneIssues_GitHubIssuesCloseWithOnePatchEachAndNoTimelineFetch(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{
+			testGitHubSyncIssue(101, 42, now),
+			testGitHubSyncIssue(102, 43, now),
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+			43: {testGitHubSyncTimelineEvent(710, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	var metas []model.IssueGitHubMeta
+	if err := svc.db.Where("project_id = ?", project.ID).Order("number ASC").Find(&metas).Error; err != nil {
+		t.Fatalf("load synced metas: %v", err)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("expected 2 synced github issues, got %d", len(metas))
+	}
+	// 批量关闭按「open + workflow done」过滤，GitHub issue 也读内部 meta 的
+	// workflow_status：直接写库把它标成 done。
+	for _, m := range metas {
+		meta := &model.IssueInternalMeta{
+			IssueID:         m.IssueID,
+			WorkflowStatus:  model.IssueWorkflowStatusDone,
+			UpdatedByUserID: user.ID,
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		if err := svc.db.Create(meta).Error; err != nil {
+			t.Fatalf("create internal meta: %v", err)
+		}
+	}
+
+	// 每条 issue 各自的关闭响应：写回路径按 GitHub 响应里的 issue ID 定位本地行。
+	closedAt := now.Add(time.Minute)
+	issueIDByNumber := make(map[int]string, len(metas))
+	for _, m := range metas {
+		item := testGitHubSyncIssue(m.GitHubIssueID, m.Number, closedAt)
+		item.State = stringPtr("closed")
+		item.StateReason = stringPtr("completed")
+		item.ClosedAt = &gh.Timestamp{Time: closedAt}
+		if fake.updatedIssuesByNumber == nil {
+			fake.updatedIssuesByNumber = map[int]*ghclient.Issue{}
+		}
+		fake.updatedIssuesByNumber[m.Number] = item
+		issueIDByNumber[m.Number] = m.IssueID
+	}
+
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	resp, err := svc.issueService.BatchCloseDoneIssues(project.ID, user.ID, string(model.IssueSourceGitHub))
+	if err != nil {
+		t.Fatalf("batch close done issues: %v", err)
+	}
+	if resp.Total != 2 || resp.Succeeded != 2 || resp.Failed != 0 || len(resp.Failures) != 0 {
+		t.Fatalf("unexpected batch close result: %+v", resp)
+	}
+	if len(fake.updateIssueCalls) != 2 {
+		t.Fatalf("expected one github update call per issue, got %d", len(fake.updateIssueCalls))
+	}
+	calledNumbers := map[int]bool{}
+	for _, call := range fake.updateIssueCalls {
+		calledNumbers[call.IssueNumber] = true
+		if call.State != "closed" || call.StateReason != "completed" {
+			t.Fatalf("unexpected update call: %+v", call)
+		}
+	}
+	if !calledNumbers[42] || !calledNumbers[43] || len(calledNumbers) != 2 {
+		t.Fatalf("expected update calls for issues 42 and 43, got %v", calledNumbers)
+	}
+	// 批量过程一个集合拉取都不发生（种子同步留下的计数不增长）。
+	if comments, timeline := fake.countCollectionCalls(); comments != beforeComments || timeline != beforeTimeline {
+		t.Fatalf("expected batch close to fetch no collections, got comments %d→%d timeline %d→%d",
+			beforeComments, comments, beforeTimeline, timeline)
+	}
+	for _, m := range metas {
+		// 换新结构体重读：GORM 扫 NULL 到已复用的 *time.Time 字段不会置回 nil。
+		var cleared model.IssueGitHubMeta
+		if err := svc.db.First(&cleared, "issue_id = ?", m.IssueID).Error; err != nil {
+			t.Fatalf("reload github meta: %v", err)
+		}
+		if cleared.CollectionsSyncedUpdatedAt != nil || cleared.CollectionsSyncedComments != 0 {
+			t.Fatalf("expected collections watermark cleared for issue %d, got %v / %d", m.Number, cleared.CollectionsSyncedUpdatedAt, cleared.CollectionsSyncedComments)
+		}
+	}
+
+	// 远端补上 closed 时间线事件后，下一次增量同步重拉两个集合并推进水位。
+	fake.issues = []*ghclient.Issue{
+		fake.updatedIssuesByNumber[42],
+		fake.updatedIssuesByNumber[43],
+	}
+	fake.timeline = map[int][]*ghclient.TimelineEvent{
+		42: {
+			testGitHubSyncTimelineEvent(700, "labeled", now),
+			testGitHubSyncTimelineEvent(701, "closed", closedAt),
+		},
+		43: {
+			testGitHubSyncTimelineEvent(710, "labeled", now),
+			testGitHubSyncTimelineEvent(711, "closed", closedAt),
+		},
+	}
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync after batch close: %v", err)
+	}
+	if comments, timeline := fake.countCollectionCalls(); comments != beforeComments+2 || timeline != beforeTimeline+2 {
+		t.Fatalf("expected next sync to refetch both collections for both issues, got comments %d→%d timeline %d→%d",
+			beforeComments, comments, beforeTimeline, timeline)
+	}
+	closedEventKeyByNumber := map[int]string{42: "gh:701", 43: "gh:711"}
+	for number, issueID := range issueIDByNumber {
+		var refreshed model.IssueGitHubMeta
+		if err := svc.db.First(&refreshed, "issue_id = ?", issueID).Error; err != nil {
+			t.Fatalf("reload github meta after sync: %v", err)
+		}
+		if refreshed.CollectionsSyncedUpdatedAt == nil {
+			t.Fatalf("expected sync to re-advance the collections watermark for issue %d", number)
+		}
+		events := storedTimelineByKey(t, svc, issueID)
+		wantKey, ok := closedEventKeyByNumber[number]
+		if !ok {
+			t.Fatalf("unexpected synced issue number %d", number)
+		}
+		if _, ok := events[wantKey]; !ok {
+			t.Fatalf("expected closed timeline event %s for issue %d, got %v", wantKey, number, keysOf(events))
+		}
+	}
+}
+
+func keysOf(events map[string]model.IssueTimelineEvent) []string {
+	keys := make([]string, 0, len(events))
+	for key := range events {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// 逃逸窗口回归（INT-105）：水位被 state-only push 清空的 issue 若落到增量窗口
+// 之外（该轮增量列表不再返回它），恢复不能只等增量列表——healStaleCollections
+// 兜底重拉它的两个集合、推进水位、补上 closed 时间线事件。
+func TestIssueServiceSync_HealsStaleCollectionsEvenWhenIssueNotListed(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(1)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+
+	// state-only push（等价于看板关闭全部/发货钩子关单的写回）清空集合水位。
+	if err := svc.issueService.mirror.markCollectionsStaleAfterPush(issueID); err != nil {
+		t.Fatalf("mark collections stale after push: %v", err)
+	}
+
+	// 远端补上 closed 事件，但该 issue 落到增量窗口之外：列表不再返回它
+	// （并发 Sync 已用更大的 maxIssueUpdatedAt 推进游标的场景）。兜底经 GetIssue
+	// 取真实远端快照做水位。
+	closedAt := now.Add(time.Minute)
+	closedItem := testGitHubSyncIssue(101, 42, closedAt)
+	closedItem.Comments = intPtr(1)
+	fake.issues = nil
+	fake.issuesByNumber = map[int]*ghclient.Issue{42: closedItem}
+	fake.timeline = map[int][]*ghclient.TimelineEvent{
+		42: {
+			testGitHubSyncTimelineEvent(700, "labeled", now),
+			testGitHubSyncTimelineEvent(701, "closed", closedAt),
+		},
+	}
+
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
+	if err != nil {
+		t.Fatalf("healing sync: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments+1 || afterTimeline != beforeTimeline+1 {
+		t.Fatalf("expected heal to refetch both collections for the unlisted issue, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
+	}
+
+	if calls := fake.countGetIssueCalls(); calls != 1 {
+		t.Fatalf("expected heal to fetch the remote issue snapshot exactly once, got %d", calls)
+	}
+
+	// 水位被兜底推进，且取的是 GetIssue 的远端 updated_at（不是被污染的本地值）。
+	var healed model.IssueGitHubMeta
+	if err := svc.db.First(&healed, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("reload github meta: %v", err)
+	}
+	if healed.CollectionsSyncedUpdatedAt == nil || !healed.CollectionsSyncedUpdatedAt.Equal(closedAt) {
+		t.Fatalf("expected heal to advance watermark to remote %v, got %v", closedAt, healed.CollectionsSyncedUpdatedAt)
+	}
+
+	// closed 时间线事件被补齐。
+	events := storedTimelineByKey(t, svc, issueID)
+	if _, ok := events["gh:701"]; !ok {
+		t.Fatalf("expected closed timeline event gh:701 healed, got %v", keysOf(events))
+	}
+
+	// 兜底计入本轮响应计数（与列表路径同口径：本轮镜像的集合大小）。
+	if result.SyncedCommentCount != 1 || result.SyncedTimelineCount != 2 {
+		t.Fatalf("expected heal counts merged into sync response, got %+v", result)
+	}
+}
+
+// 兜底有界：单轮 Sync 对空水位 meta 的兜底重拉不超过 staleCollectionsHealLimit 条，
+// 其余留到下一轮逐步排空（有界防 GitHub 限流，不是收敛手段）。
+func TestIssueServiceSync_HealsAtMostStaleCollectionsHealLimitPerRound(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	total := staleCollectionsHealLimit + 2
+	issues := make([]*ghclient.Issue, 0, total)
+	issuesByNumber := make(map[int]*ghclient.Issue, total)
+	comments := make(map[int][]*ghclient.IssueComment, total)
+	timeline := make(map[int][]*ghclient.TimelineEvent, total)
+	for i := 0; i < total; i++ {
+		number := 100 + i
+		item := testGitHubSyncIssue(int64(1000+i), number, now)
+		issues = append(issues, item)
+		issuesByNumber[number] = item
+		comments[number] = []*ghclient.IssueComment{testGitHubSyncComment(int64(5000+i), "a", now)}
+		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(7000+i), "labeled", now)}
+	}
+	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	var metas []model.IssueGitHubMeta
+	if err := svc.db.Where("project_id = ?", project.ID).Order("number ASC").Find(&metas).Error; err != nil {
+		t.Fatalf("load synced metas: %v", err)
+	}
+	if len(metas) != total {
+		t.Fatalf("expected %d synced github issues, got %d", total, len(metas))
+	}
+
+	// 全部清空水位（模拟批量关闭全部），且增量列表不再返回任何 issue：
+	// 整轮恢复只能靠兜底路径。
+	for _, m := range metas {
+		if err := svc.issueService.mirror.markCollectionsStaleAfterPush(m.IssueID); err != nil {
+			t.Fatalf("mark collections stale for issue %d: %v", m.Number, err)
+		}
+	}
+	fake.issues = nil
+
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("first healing sync: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments+staleCollectionsHealLimit || afterTimeline != beforeTimeline+staleCollectionsHealLimit {
+		t.Fatalf("expected heal bounded to %d issues, got comments %d→%d timeline %d→%d",
+			staleCollectionsHealLimit, beforeComments, afterComments, beforeTimeline, afterTimeline)
+	}
+	var remaining int64
+	if err := svc.db.Model(&model.IssueGitHubMeta{}).
+		Where("project_id = ? AND collections_synced_updated_at IS NULL", project.ID).
+		Count(&remaining).Error; err != nil {
+		t.Fatalf("count stale metas: %v", err)
+	}
+	if remaining != 2 {
+		t.Fatalf("expected 2 stale metas left for the next round, got %d", remaining)
+	}
+
+	// 下一轮把剩余的排空。
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("second healing sync: %v", err)
+	}
+	if err := svc.db.Model(&model.IssueGitHubMeta{}).
+		Where("project_id = ? AND collections_synced_updated_at IS NULL", project.ID).
+		Count(&remaining).Error; err != nil {
+		t.Fatalf("count stale metas after second sync: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("expected all stale metas drained across rounds, got %d", remaining)
+	}
+}
+
+// 兜底单条失败不拖死整轮：某条空水位对应的远端 issue 取数持久失败（例如已被删除、
+// 404）时，只跳过该条并保留空水位待下轮重试，其他空水位条目照常补齐，Sync 仍返回
+// 成功——兜底是 backstop，不能让一条持久错误把整个项目同步永久记败、游标停摆。
+func TestIssueServiceSync_HealFailureDoesNotFailWholeSync(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	item42 := testGitHubSyncIssue(101, 42, now)
+	item43 := testGitHubSyncIssue(102, 43, now)
+	fake := &fakeIssueGitHubClient{
+		issues:         []*ghclient.Issue{item42, item43},
+		issuesByNumber: map[int]*ghclient.Issue{42: item42, 43: item43},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+			43: {testGitHubSyncComment(510, "b", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+			43: {testGitHubSyncTimelineEvent(710, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	var metas []model.IssueGitHubMeta
+	if err := svc.db.Where("project_id = ?", project.ID).Order("number ASC").Find(&metas).Error; err != nil {
+		t.Fatalf("load synced metas: %v", err)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("expected 2 synced github issues, got %d", len(metas))
+	}
+	issueIDByNumber := make(map[int]string, len(metas))
+	for _, m := range metas {
+		if err := svc.issueService.mirror.markCollectionsStaleAfterPush(m.IssueID); err != nil {
+			t.Fatalf("mark collections stale for issue %d: %v", m.Number, err)
+		}
+		issueIDByNumber[m.Number] = m.IssueID
+	}
+
+	// 列表不再返回任何 issue；42 的评论取数持久失败（如远端已删除），43 正常。
+	fake.issues = nil
+	fake.commentErrs = map[int]map[int]error{
+		42: {1: errs.New(errs.ErrGitHubAPI.Code, "404 Not Found")},
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync should not fail because one stale issue cannot be fetched: %v", err)
+	}
+
+	assertWatermark := func(number int, wantAdvanced bool) {
+		t.Helper()
+		var meta model.IssueGitHubMeta
+		if err := svc.db.First(&meta, "issue_id = ?", issueIDByNumber[number]).Error; err != nil {
+			t.Fatalf("reload meta for issue %d: %v", number, err)
+		}
+		if wantAdvanced && meta.CollectionsSyncedUpdatedAt == nil {
+			t.Fatalf("expected issue %d healed and watermark advanced", number)
+		}
+		if !wantAdvanced && meta.CollectionsSyncedUpdatedAt != nil {
+			t.Fatalf("expected issue %d kept stale for the next round", number)
+		}
+	}
+	assertWatermark(43, true)
+	assertWatermark(42, false)
+
+	// 持久错误修好后（远端恢复/issue 不再 404），下一轮把保留的空水位补上。
+	delete(fake.commentErrs, 42)
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("retry sync after transient failure: %v", err)
+	}
+	assertWatermark(42, true)
+}
+
+// 完整镜像的失效版本守卫（INT-105）：取数期间发生并发 push（失效版本递增）时，
+// 旧的取数快照必须被放弃——不替换集合、也不推进水位；否则会把 push 清空的水位
+// 写回非空，抹掉失效信号，之后游标越过该 issue 就再也没人补时间线。
+func TestIssueServiceWriteFullCollections_SkipsStaleSnapshotWhenInvalidatedDuringFetch(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fake := &fakeIssueGitHubClient{
+		issues:   []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
+		comments: map[int][]*ghclient.IssueComment{42: {testGitHubSyncComment(500, "a", now)}},
+		timeline: map[int][]*ghclient.TimelineEvent{42: {testGitHubSyncTimelineEvent(700, "labeled", now)}},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+
+	var seeded model.IssueGitHubMeta
+	if err := svc.db.First(&seeded, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load seeded meta: %v", err)
+	}
+	issue, err := svc.issueService.issueRepo.FindByID(issueID)
+	if err != nil {
+		t.Fatalf("load issue: %v", err)
+	}
+
+	// 模拟取数期间被 push 失效：版本递增、水位清空。
+	if err := svc.issueService.mirror.markCollectionsStaleAfterPush(issueID); err != nil {
+		t.Fatalf("invalidate collections: %v", err)
+	}
+
+	// 用失效前的版本提交旧快照：必须被放弃。
+	advanced, err := svc.issueService.mirror.writeFullCollections(
+		issue, seeded.CollectionsInvalidatedVersion, now.Add(time.Minute), 0,
+		nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("write full collections (stale version): %v", err)
+	}
+	if advanced {
+		t.Fatal("expected stale snapshot to be skipped when invalidated during fetch")
+	}
+	var afterStale model.IssueGitHubMeta
+	if err := svc.db.First(&afterStale, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("reload meta: %v", err)
+	}
+	if afterStale.CollectionsSyncedUpdatedAt != nil {
+		t.Fatalf("expected watermark kept empty after skipped stale snapshot, got %v", afterStale.CollectionsSyncedUpdatedAt)
+	}
+	// 旧快照必须什么都没写：种子评论与时间线保持原样（只断言空水位的话，错实现
+	// 即使替换了集合也能通过）。
+	if got := storedCommentsByGitHubID(t, svc, issueID); len(got) != 1 || got[500].Body != "a" {
+		t.Fatalf("expected seed comments untouched when stale snapshot is skipped, got %+v", got)
+	}
+	if events := storedTimelineByKey(t, svc, issueID); len(events) != 1 {
+		t.Fatalf("expected seed timeline untouched when stale snapshot is skipped, got %v", keysOf(events))
+	}
+	// 列表路径与直接完整镜像路径不调 GetIssue；只有兜底会调。
+	if calls := fake.countGetIssueCalls(); calls != 0 {
+		t.Fatalf("expected no GetIssue calls outside the heal path, got %d", calls)
+	}
+
+	// 版本未变时正常推进。
+	advanced, err = svc.issueService.mirror.writeFullCollections(
+		issue, afterStale.CollectionsInvalidatedVersion, now.Add(time.Minute), 0,
+		nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("write full collections (current version): %v", err)
+	}
+	if !advanced {
+		t.Fatal("expected full mirror to advance when the invalidation version is unchanged")
+	}
+}
+
+// 兜底公平轮转（INT-105）：每轮固定取 staleCollectionsHealLimit 条，候选按上次
+// 队列位置升序（NULL 最前），每次实际尝试后把该条目排到队尾；即使最早排队的一整批
+// 持续失败，较旧、更久未尝试的可恢复条目也能在后续轮次拿到配额，不会被饿死。
+func TestIssueServiceSync_HealsStaleCollectionsFairlyDespitePersistentFailures(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	total := staleCollectionsHealLimit + 1
+	issues := make([]*ghclient.Issue, 0, total)
+	issuesByNumber := make(map[int]*ghclient.Issue, total)
+	comments := make(map[int][]*ghclient.IssueComment, total)
+	timeline := make(map[int][]*ghclient.TimelineEvent, total)
+	for i := 0; i < total; i++ {
+		number := 200 + i
+		item := testGitHubSyncIssue(int64(2000+i), number, now)
+		issues = append(issues, item)
+		issuesByNumber[number] = item
+		comments[number] = []*ghclient.IssueComment{testGitHubSyncComment(int64(6000+i), "a", now)}
+		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(8000+i), "labeled", now)}
+	}
+	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	var metas []model.IssueGitHubMeta
+	if err := svc.db.Where("project_id = ?", project.ID).Order("number ASC").Find(&metas).Error; err != nil {
+		t.Fatalf("load metas: %v", err)
+	}
+	if len(metas) != total {
+		t.Fatalf("expected %d metas, got %d", total, len(metas))
+	}
+	// 全部失效；排队位置人工安排：编号 200..200+limit-1 更早排队（now-1h），
+	// 最后一个 200+limit 排在它们之后（now）。
+	survivor := 200 + staleCollectionsHealLimit
+	for _, m := range metas {
+		if err := svc.issueService.mirror.markCollectionsStaleAfterPush(m.IssueID); err != nil {
+			t.Fatalf("invalidate %d: %v", m.Number, err)
+		}
+		queuedAt := now
+		if m.Number != survivor {
+			queuedAt = now.Add(-time.Hour)
+		}
+		if err := svc.db.Model(&model.IssueGitHubMeta{}).
+			Where("issue_id = ?", m.IssueID).
+			Update("collections_heal_queued_at", queuedAt).Error; err != nil {
+			t.Fatalf("set queued_at for %d: %v", m.Number, err)
+		}
+	}
+	fake.issues = nil
+	// 排队最久的一整批（编号 200..200+limit-1）持续失败；最后一个 200+limit 尚可恢复。
+	commentErrs := make(map[int]map[int]error, staleCollectionsHealLimit)
+	for i := 0; i < staleCollectionsHealLimit; i++ {
+		commentErrs[200+i] = map[int]error{1: errs.New(errs.ErrGitHubAPI.Code, "404 Not Found")}
+	}
+	fake.commentErrs = commentErrs
+
+	// 第一轮：排队最久的一批占满配额并全部失败，200+limit 未进候选。
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	var survivorMeta model.IssueGitHubMeta
+	if err := svc.db.First(&survivorMeta, "project_id = ? AND number = ?", project.ID, survivor).Error; err != nil {
+		t.Fatalf("load survivor meta: %v", err)
+	}
+	if survivorMeta.CollectionsSyncedUpdatedAt != nil {
+		t.Fatal("expected survivor meta to be skipped in the first round while the longest-waiting ones fill the quota")
+	}
+
+	// 第二轮：失败过的条目 attempts_at 已更新、排到后面，从未尝试过的 survivor 先被补齐。
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	if err := svc.db.First(&survivorMeta, "project_id = ? AND number = ?", project.ID, survivor).Error; err != nil {
+		t.Fatalf("reload survivor meta: %v", err)
+	}
+	if survivorMeta.CollectionsSyncedUpdatedAt == nil {
+		t.Fatal("expected survivor meta to be healed in the second round despite persistent failures of the longest-waiting ones")
+	}
+}
+
+// 从未尝试过的空水位条目按排队时间先来先服务（INT-105 R4）：即使每轮都有更晚进入
+// 的、同样没尝试过的条目，排队更久的旧条目也会先被选中；否则新条目会永久挤出旧条目。
+func TestIssueServiceSync_HealQueueServesOldestUntriedFirst(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	total := staleCollectionsHealLimit + 1
+	issues := make([]*ghclient.Issue, 0, total)
+	issuesByNumber := make(map[int]*ghclient.Issue, total)
+	comments := make(map[int][]*ghclient.IssueComment, total)
+	timeline := make(map[int][]*ghclient.TimelineEvent, total)
+	for i := 0; i < total; i++ {
+		number := 400 + i
+		item := testGitHubSyncIssue(int64(4000+i), number, now)
+		issues = append(issues, item)
+		issuesByNumber[number] = item
+		comments[number] = []*ghclient.IssueComment{testGitHubSyncComment(int64(8000+i), "a", now)}
+		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(9000+i), "labeled", now)}
+	}
+	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	var metas []model.IssueGitHubMeta
+	if err := svc.db.Where("project_id = ?", project.ID).Order("number ASC").Find(&metas).Error; err != nil {
+		t.Fatalf("load metas: %v", err)
+	}
+	// 全部失效；排队位置随编号递增（400 排队最久），且都从未被兜底尝试。
+	for i, m := range metas {
+		if err := svc.issueService.mirror.markCollectionsStaleAfterPush(m.IssueID); err != nil {
+			t.Fatalf("invalidate %d: %v", m.Number, err)
+		}
+		if err := svc.db.Model(&model.IssueGitHubMeta{}).
+			Where("issue_id = ?", m.IssueID).
+			Update("collections_heal_queued_at", now.Add(time.Duration(i)*time.Second)).Error; err != nil {
+			t.Fatalf("set queued_at for %d: %v", m.Number, err)
+		}
+	}
+	fake.issues = nil
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("healing sync: %v", err)
+	}
+	var oldest model.IssueGitHubMeta
+	if err := svc.db.First(&oldest, "project_id = ? AND number = ?", project.ID, 400).Error; err != nil {
+		t.Fatalf("load oldest meta: %v", err)
+	}
+	if oldest.CollectionsSyncedUpdatedAt == nil {
+		t.Fatal("expected the longest-waiting never-attempted item to be healed first")
+	}
+}
+
+// 重新失效不重置兜底轮转位置（INT-105）：若实现按「失败计数」排且重新失效时清零，
+// 每轮把最新的一批重新失效就会把更久未尝试的旧条目永久挤出候选；按「上次尝试
+// 时间」排序则不会——先写尝试时间、再重新失效，最久未尝试的条目仍会被优先选中。
+func TestIssueServiceSync_HealRotationIsNotResetByReinvalidation(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	project := createTestProject(t, svc.db, user.ID)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	total := staleCollectionsHealLimit + 1
+	issues := make([]*ghclient.Issue, 0, total)
+	issuesByNumber := make(map[int]*ghclient.Issue, total)
+	comments := make(map[int][]*ghclient.IssueComment, total)
+	timeline := make(map[int][]*ghclient.TimelineEvent, total)
+	for i := 0; i < total; i++ {
+		number := 300 + i
+		item := testGitHubSyncIssue(int64(3000+i), number, now)
+		issues = append(issues, item)
+		issuesByNumber[number] = item
+		comments[number] = []*ghclient.IssueComment{testGitHubSyncComment(int64(7000+i), "a", now)}
+		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(9000+i), "labeled", now)}
+	}
+	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	var metas []model.IssueGitHubMeta
+	if err := svc.db.Where("project_id = ?", project.ID).Order("number ASC").Find(&metas).Error; err != nil {
+		t.Fatalf("load metas: %v", err)
+	}
+	if len(metas) != total {
+		t.Fatalf("expected %d metas, got %d", total, len(metas))
+	}
+	// 先全部失效；再把 300 的排队位置设为最早（now-2h）、其余为 now-1h。随后只对
+	// 300 再来一次「等待中的 push」：正确的实现不改变它的队列位置，错误的实现
+	// （每次失效都重置当前时间）会把它送到队尾、被挤出候选。
+	for _, m := range metas {
+		if err := svc.issueService.mirror.markCollectionsStaleAfterPush(m.IssueID); err != nil {
+			t.Fatalf("invalidate %d: %v", m.Number, err)
+		}
+		queuedAt := now.Add(-time.Hour)
+		if m.Number == 300 {
+			queuedAt = now.Add(-2 * time.Hour)
+		}
+		if err := svc.db.Model(&model.IssueGitHubMeta{}).
+			Where("issue_id = ?", m.IssueID).
+			Update("collections_heal_queued_at", queuedAt).Error; err != nil {
+			t.Fatalf("set queued_at for %d: %v", m.Number, err)
+		}
+	}
+	// number ASC 下 metas[0] 就是 300。
+	if err := svc.issueService.mirror.markCollectionsStaleAfterPush(metas[0].IssueID); err != nil {
+		t.Fatalf("re-invalidate oldest: %v", err)
+	}
+	fake.issues = nil
+
+	// 一轮兜底：等待中被重新失效的 300 应保持最早排队位置、优先被补齐。
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("healing sync: %v", err)
+	}
+	var oldest model.IssueGitHubMeta
+	if err := svc.db.First(&oldest, "project_id = ? AND number = ?", project.ID, 300).Error; err != nil {
+		t.Fatalf("load oldest meta: %v", err)
+	}
+	if oldest.CollectionsSyncedUpdatedAt == nil {
+		t.Fatal("expected the longest-waiting item to keep its queue position and be healed first despite a waiting push")
+	}
+}
+
+// 确定性回归（INT-104 第三轮 C<P<T 反例，INT-105 后机制更新）：push 评论写回
+// 落在评论取数之后、完整镜像写库事务之前。`recordPushedComment` 会让失效版本
+// 自增，因此该轮完整镜像事务因版本不符整体回滚（旧快照一个字也不写），同轮
+// `healStaleCollections` 再取数并写入——终态正文 "remote" 与推进的水位由兜底
+// 写入，而不是完整镜像事务。不论哪条路径，都不存在「旧镜像 + 已确认水位」。
 func TestIssueServiceSyncProjectIssues_PushWriteBetweenFetchesIsOverwrittenByFullMirror(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")

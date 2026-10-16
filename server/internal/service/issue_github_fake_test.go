@@ -18,21 +18,32 @@ type fakeIssueGitHubClient struct {
 	timeline      map[int][]*ghclient.TimelineEvent
 	// 分页模式：commentsPages/timelinePages 按页返回并推导 NextPage；
 	// commentErrs/timelineErrs 按 (issueNumber, page) 注入拉取失败。
-	commentsPages      map[int][][]*ghclient.IssueComment
-	commentErrs        map[int]map[int]error
-	timelinePages      map[int][][]*ghclient.TimelineEvent
-	timelineErrs       map[int]map[int]error
-	createdComment     *ghclient.IssueComment
-	createCommentErr   error
-	updatedIssue       *ghclient.Issue
-	createdIssue       *ghclient.Issue
-	createIssueErr     error
-	createIssueCalls   []fakeCreateIssueCall
-	createCommentCalls []fakeCreateCommentCall
-	updateIssueCalls   []fakeUpdateIssueCall
-	pullRequests       map[int]*gh.PullRequest
-	pullRequestErr     error
-	onGetPullRequest   func(number int)
+	commentsPages    map[int][][]*ghclient.IssueComment
+	commentErrs      map[int]map[int]error
+	timelinePages    map[int][][]*ghclient.TimelineEvent
+	timelineErrs     map[int]map[int]error
+	createdComment   *ghclient.IssueComment
+	createCommentErr error
+	updatedIssue     *ghclient.Issue
+	// issuesByNumber 供 GetIssue 返回单个 issue 的远端快照（同步兜底路径 INT-105）；
+	// 未命中时依次回落到 issues 列表与 updatedIssue。getIssueErr 按编号注入取数失败；
+	// getIssueCalls 记录 GetIssue 调用次数，用于断言只有兜底路径会调它。
+	issuesByNumber map[int]*ghclient.Issue
+	getIssueErr    map[int]error
+	getIssueCalls  map[int]int
+	// updatedIssuesByNumber 按 issue 编号返回更新响应，供多条 issue 各自写回的
+	// 批量用例使用；map 非空而编号未命中时直接 panic——写回按 GitHub 响应里的
+	// issue ID 定位本地行，静默回落 updatedIssue 会让批次用例串号或造出幽灵行。
+	// map 为空时回落 updatedIssue（既有单 issue 用例只配后者）。
+	updatedIssuesByNumber map[int]*ghclient.Issue
+	createdIssue          *ghclient.Issue
+	createIssueErr        error
+	createIssueCalls      []fakeCreateIssueCall
+	createCommentCalls    []fakeCreateCommentCall
+	updateIssueCalls      []fakeUpdateIssueCall
+	pullRequests          map[int]*gh.PullRequest
+	pullRequestErr        error
+	onGetPullRequest      func(number int)
 	// validateErr 注入 ValidateRepository 失败；onListIssues/onListTimeline 分别在
 	// ListIssues / ListIssueTimeline 开头回调（用于在两轮取数之间注入写库）；
 	// listIssuesSince 记录每次调用的 since 参数。
@@ -105,6 +116,37 @@ func (f *fakeIssueGitHubClient) countCollectionCalls() (comments, timeline int) 
 		timeline += n
 	}
 	return comments, timeline
+}
+
+func (f *fakeIssueGitHubClient) GetIssue(_ context.Context, issueNumber int) (*ghclient.Issue, error) {
+	if f.getIssueCalls == nil {
+		f.getIssueCalls = map[int]int{}
+	}
+	f.getIssueCalls[issueNumber]++
+	if err := f.getIssueErr[issueNumber]; err != nil {
+		return nil, err
+	}
+	if item, ok := f.issuesByNumber[issueNumber]; ok {
+		return item, nil
+	}
+	for _, item := range f.issues {
+		if item != nil && item.GetNumber() == issueNumber {
+			return item, nil
+		}
+	}
+	if f.updatedIssue != nil && f.updatedIssue.GetNumber() == issueNumber {
+		return f.updatedIssue, nil
+	}
+	return nil, fmt.Errorf("fakeIssueGitHubClient: no issue configured for number %d", issueNumber)
+}
+
+// countGetIssueCalls 返回 GetIssue 累计调用次数（仅兜底路径会调它）。
+func (f *fakeIssueGitHubClient) countGetIssueCalls() int {
+	total := 0
+	for _, n := range f.getIssueCalls {
+		total += n
+	}
+	return total
 }
 
 func (f *fakeIssueGitHubClient) ListRepositoryLabels(context.Context, int, int) ([]*gh.Label, *gh.Response, error) {
@@ -191,6 +233,13 @@ func (f *fakeIssueGitHubClient) UpdateIssue(_ context.Context, issueNumber int, 
 		call.Labels = append([]string(nil), (*req.Labels)...)
 	}
 	f.updateIssueCalls = append(f.updateIssueCalls, call)
+	if len(f.updatedIssuesByNumber) > 0 {
+		item, ok := f.updatedIssuesByNumber[issueNumber]
+		if !ok {
+			panic(fmt.Sprintf("fakeIssueGitHubClient: updatedIssuesByNumber 未配置编号 %d 的更新响应", issueNumber))
+		}
+		return item, nil
+	}
 	return f.updatedIssue, nil
 }
 

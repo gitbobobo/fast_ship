@@ -25,6 +25,7 @@ const (
 type gitHubIssueClient interface {
 	ValidateRepository(ctx context.Context) error
 	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*ghclient.Issue, *gh.Response, error)
+	GetIssue(ctx context.Context, issueNumber int) (*ghclient.Issue, error)
 	ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error)
 	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.IssueComment, *gh.Response, error)
 	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.TimelineEvent, *gh.Response, error)

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -836,6 +837,11 @@ func TestIssueCommentUpsertPersistsIdempotencyKeyForExistingGitHubComment(t *tes
 	}
 }
 
+// 仅状态变更的 push（关闭/重开）不在请求内全量重拉时间线（INT-105）：只发一次
+// PATCH 并用 GitHub 响应写回本地，同一事务里清空集合水位；closed 时间线事件交给
+// 下一次增量同步补齐。先种子同步推进集合水位，「水位被清空」断言才有鉴别力
+// （createTestIssue 建的 meta 行本来就是空水位）。含标题/正文/标签的更新仍立即
+// 刷新，见 WritesGitHubTitleBack 等。
 func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -843,38 +849,66 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 	})
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	closedAt := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
-	fake := &fakeIssueGitHubClient{
-		updatedIssue: &ghclient.Issue{
-			Issue: gh.Issue{
-				ID:          int64Ptr(1001),
-				NodeID:      stringPtr("I_kw_test"),
-				Number:      intPtr(42),
-				State:       stringPtr("closed"),
-				StateReason: stringPtr("completed"),
-				Title:       stringPtr("Crash on launch"),
-				Body:        stringPtr("App crashes"),
-				HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
-				User: &gh.User{
-					Login:     stringPtr("alice"),
-					AvatarURL: stringPtr("https://avatars.example/alice.png"),
-				},
-				CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
-				UpdatedAt: &gh.Timestamp{Time: closedAt},
-				ClosedAt:  &gh.Timestamp{Time: closedAt},
+	openItem := &ghclient.Issue{
+		Issue: gh.Issue{
+			ID:      int64Ptr(1001),
+			NodeID:  stringPtr("I_kw_test"),
+			Number:  intPtr(42),
+			State:   stringPtr("open"),
+			Title:   stringPtr("Crash on launch"),
+			Body:    stringPtr("App crashes"),
+			HTMLURL: stringPtr("https://github.com/owner/repo/issues/42"),
+			User: &gh.User{
+				Login:     stringPtr("alice"),
+				AvatarURL: stringPtr("https://avatars.example/alice.png"),
 			},
+			CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+			UpdatedAt: &gh.Timestamp{Time: issue.UpdatedAt},
 		},
-		timeline: map[int][]*ghclient.TimelineEvent{
-			42: {
-				{
-					Timeline: gh.Timeline{
-						ID:        int64Ptr(701),
-						Event:     stringPtr("closed"),
-						Actor:     &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")},
-						CreatedAt: &gh.Timestamp{Time: closedAt},
-					},
-				},
+	}
+	closedAt := issue.UpdatedAt.Add(time.Minute)
+	closedItem := &ghclient.Issue{
+		Issue: gh.Issue{
+			ID:          int64Ptr(1001),
+			NodeID:      stringPtr("I_kw_test"),
+			Number:      intPtr(42),
+			State:       stringPtr("closed"),
+			StateReason: stringPtr("completed"),
+			Title:       stringPtr("Crash on launch"),
+			Body:        stringPtr("App crashes"),
+			HTMLURL:     stringPtr("https://github.com/owner/repo/issues/42"),
+			User: &gh.User{
+				Login:     stringPtr("alice"),
+				AvatarURL: stringPtr("https://avatars.example/alice.png"),
 			},
+			CreatedAt: &gh.Timestamp{Time: issue.CreatedAt},
+			UpdatedAt: &gh.Timestamp{Time: closedAt},
+			ClosedAt:  &gh.Timestamp{Time: closedAt},
+		},
+	}
+	actor := &gh.User{Login: stringPtr("alice"), AvatarURL: stringPtr("https://avatars.example/alice.png")}
+	labeledEvent := &ghclient.TimelineEvent{
+		Timeline: gh.Timeline{
+			ID:        int64Ptr(700),
+			Event:     stringPtr("labeled"),
+			Actor:     actor,
+			CreatedAt: &gh.Timestamp{Time: issue.UpdatedAt},
+		},
+	}
+	closedEvent := &ghclient.TimelineEvent{
+		Timeline: gh.Timeline{
+			ID:        int64Ptr(701),
+			Event:     stringPtr("closed"),
+			Actor:     actor,
+			CreatedAt: &gh.Timestamp{Time: closedAt},
+		},
+	}
+	fake := &fakeIssueGitHubClient{
+		updatedIssue: closedItem,
+		// issues 供种子同步与关闭后的增量同步列表使用；时间线在两轮同步里才被拉取。
+		issues: []*ghclient.Issue{openItem},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {labeledEvent},
 		},
 	}
 	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
@@ -882,6 +916,21 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
 		return fake
+	}
+
+	// 种子同步推进集合水位。
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, user.ID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	var seeded model.IssueGitHubMeta
+	if err := svc.db.First(&seeded, "issue_id = ?", issue.ID).Error; err != nil {
+		t.Fatalf("load github meta after seed sync: %v", err)
+	}
+	if seeded.CollectionsSyncedUpdatedAt == nil {
+		t.Fatal("expected seed sync to advance the collections watermark")
+	}
+	if comments, timeline := fake.countCollectionCalls(); comments != 1 || timeline != 1 {
+		t.Fatalf("expected seed sync to fetch both collections once, got comments=%d timeline=%d", comments, timeline)
 	}
 
 	state := model.IssueStateClosed
@@ -904,15 +953,55 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 		t.Fatalf("unexpected updated issue payload: %+v", updated)
 	}
 
+	// push 当时评论/时间线一个都不拉（种子同步的计数不增长），只清空集合水位。
+	if comments, timeline := fake.countCollectionCalls(); comments != 1 || timeline != 1 {
+		t.Fatalf("expected no collection fetches during state-only push, got comments=%d timeline=%d", comments, timeline)
+	}
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issue.ID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt != nil {
+		t.Fatalf("expected collections watermark cleared after state-only push, got %v", meta.CollectionsSyncedUpdatedAt)
+	}
+
+	// 下一次增量同步重拉两个集合、推进水位，closed 事件出现在本地时间线里。
+	fake.issues = []*ghclient.Issue{closedItem}
+	fake.timeline[42] = []*ghclient.TimelineEvent{labeledEvent, closedEvent}
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, user.ID); err != nil {
+		t.Fatalf("sync after github state update: %v", err)
+	}
+	if comments, timeline := fake.countCollectionCalls(); comments != 2 || timeline != 2 {
+		t.Fatalf("expected next sync to refetch both collections, got comments=%d timeline=%d", comments, timeline)
+	}
+	// 恢复来自增量列表路径（issue 仍被列出），不是兜底路径。
+	if calls := fake.countGetIssueCalls(); calls != 0 {
+		t.Fatalf("expected the list path to do the recovery (no GetIssue calls), got %d", calls)
+	}
+	var refreshed model.IssueGitHubMeta
+	if err := svc.db.First(&refreshed, "issue_id = ?", issue.ID).Error; err != nil {
+		t.Fatalf("reload github meta: %v", err)
+	}
+	if refreshed.CollectionsSyncedUpdatedAt == nil {
+		t.Fatal("expected sync to re-advance the collections watermark")
+	}
+
 	events, total, err := svc.issueService.ListTimeline(issue.ID, user.ID, 1, 20)
 	if err != nil {
 		t.Fatalf("list timeline after github state update: %v", err)
 	}
-	if total != 1 || len(events) != 1 {
-		t.Fatalf("expected one synced timeline event, got total=%d len=%d", total, len(events))
+	if total != 2 || len(events) != 2 {
+		t.Fatalf("expected two synced timeline events, got total=%d len=%d", total, len(events))
 	}
-	if events[0].EventType != "closed" || events[0].Summary != "关闭了问题" {
-		t.Fatalf("unexpected timeline event payload: %+v", events[0])
+	var closed *IssueTimelineEventResponse
+	for i := range events {
+		if events[i].EventType == "closed" {
+			closed = &events[i]
+			break
+		}
+	}
+	if closed == nil || closed.Summary != "关闭了问题" {
+		t.Fatalf("expected closed timeline event healed by next sync, got %+v", events)
 	}
 }
 
@@ -970,6 +1059,10 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubTitleBack(t *testing.T) {
 	}
 	if updated.Title != "修复崩溃并补充测试" {
 		t.Fatalf("unexpected updated issue title: %q", updated.Title)
+	}
+	// 含标题的更新仍立即刷新时间线：stateOnly 优化只对仅状态变更的推送生效。
+	if comments, timeline := fake.countCollectionCalls(); timeline != 1 || comments != 0 {
+		t.Fatalf("expected title update to refresh timeline immediately, got comments=%d timeline=%d", comments, timeline)
 	}
 }
 

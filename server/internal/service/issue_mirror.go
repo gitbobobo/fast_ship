@@ -36,8 +36,8 @@ type issueMilestonePayload struct {
 // 内存锁防并发。集合镜像的不变式：完整镜像 = 一个事务里替换评论与时间线两个
 // 集合并推进水位（writeFullCollections）；任何非完整写入 = 一个事务里写入并
 // 清空水位（writePartialCollections）。push 路径（创建/更新 issue、发评论）经
-// upsertGitHubIssue、refreshTimelineAfterPush、recordPushedComment 把远端响应
-// 写回本地，不经同步锁。依赖在构造时按值固化，只有 newClient 由 IssueService
+// upsertGitHubIssue、refreshTimelineAfterPush、markCollectionsStaleAfterPush、
+// recordPushedComment 把远端响应写回本地，不经同步锁。依赖在构造时按值固化，只有 newClient 由 IssueService
 // 闭包委托、调用时现取，保证测试替换 s.newClient 对镜像同样生效；其余字段测试
 // 不会在构造后更换。
 type issueMirror struct {
@@ -108,11 +108,11 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 	const perPage = 100
 	var (
 		page              = 1
-		syncedIssues      int
-		syncedComments    int
-		syncedTimeline    int
 		maxIssueUpdatedAt *time.Time
 	)
+	// collectionSizes 按 issue 汇总本轮的集合镜像大小，同一个 issue 以最后一次成功
+	// 处理的尺寸为准（列表路径或兜底路径），避免同一个 Issue 被重复计入响应计数。
+	collectionSizes := map[string]issueCollectionSize{}
 
 	for {
 		items, resp, err := client.ListIssues(ctx, "all", since, page, perPage)
@@ -134,7 +134,13 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 			// 镜像行数；水位与两个集合镜像在同一事务里推进
 			//（writeFullCollections），失败则下轮重试。
 			var commentCount, timelineCount int
+			listCounted := true
 			if needsCollectionSync(issue.GitHubMeta, item) {
+				// 取数前记下失效版本；事务内复核，避免拿旧快照抹掉并发 push 的失效意图。
+				expectedVersion := int64(0)
+				if issue.GitHubMeta != nil {
+					expectedVersion = issue.GitHubMeta.CollectionsInvalidatedVersion
+				}
 				// 完整镜像的取数都在事务外完成：两个集合都拉成功才进写库事务，
 				// 任一取数失败本轮一个集合也不写（failSync 记失败，下轮重拉）。
 				comments, err := m.fetchComments(ctx, client, issue.ID, item.GetNumber())
@@ -145,10 +151,17 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 				if err != nil {
 					return failSync(err)
 				}
-				if err := m.writeFullCollections(issue, item, comments, events); err != nil {
+				advanced, err := m.writeFullCollections(issue, expectedVersion, item.GetUpdatedAt().UTC(), item.GetComments(), comments, events)
+				if err != nil {
 					return failSync(err)
 				}
-				commentCount, timelineCount = len(comments), len(events)
+				if advanced {
+					commentCount, timelineCount = len(comments), len(events)
+				} else {
+					// 未推进说明取数期间被并发 push 失效：本轮不计入，由兜底重拉后
+					// 计入，避免同一个 issue 被 SyncedIssueCount 重复计数。
+					listCounted = false
+				}
 			} else {
 				var err error
 				if commentCount, err = m.commentRepo.CountSynced(issue.ID); err != nil {
@@ -159,9 +172,9 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 				}
 			}
 
-			syncedIssues++
-			syncedComments += commentCount
-			syncedTimeline += timelineCount
+			if listCounted {
+				collectionSizes[issue.ID] = issueCollectionSize{comments: commentCount, timeline: timelineCount}
+			}
 
 			updatedAt := item.GetUpdatedAt().UTC()
 			if maxIssueUpdatedAt == nil || updatedAt.After(*maxIssueUpdatedAt) {
@@ -173,6 +186,18 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 			break
 		}
 		page = resp.NextPage
+	}
+
+	// 增量列表之后的有界兜底（INT-105）：把落到增量窗口之外的空水位 Issue 也补齐，
+	// 详见 healStaleCollections。
+	if err := m.healStaleCollections(ctx, client, project.ID, collectionSizes); err != nil {
+		return failSync(err)
+	}
+	syncedIssues, syncedComments, syncedTimeline := 0, 0, 0
+	for _, size := range collectionSizes {
+		syncedIssues++
+		syncedComments += size.comments
+		syncedTimeline += size.timeline
 	}
 
 	completedAt := time.Now().UTC()
@@ -223,6 +248,102 @@ func (m *issueMirror) SyncAll(ctx context.Context) {
 			m.logger.Warn("background issue sync failed", zap.String("project_id", project.ID), zap.String("user_id", project.UserID), zap.Error(err))
 		}
 	}
+}
+
+// staleCollectionsHealLimit 是每轮 Sync 兜底重拉空水位 Issue 的条数上限（INT-105）。
+// 这是防 GitHub 限流的有界兜底，不是收敛手段：空水位是持久信号，按「上次兜底
+// 尝试时间」升序取（NULL 最前），每次尝试后重新排到后面，形成跨轮公平轮转，
+// 剩余的留到后续同步逐步排空；正常路径仍由增量列表驱动。
+const staleCollectionsHealLimit = 50
+
+// healStaleCollections 在增量列表之后做有界的兜底重拉（INT-105）。水位被 push 部分
+// 写入（markCollectionsStaleAfterPush/refreshTimelineAfterPush/recordPushedComment）
+// 清空的 Issue，恢复路径原本完全依赖它再次被增量列表返回；但并发的 Sync 可能已按
+// 旧数据跳过它、又用更大的 maxIssueUpdatedAt 推进游标越过它的 updated_at，此后它
+// 再也不会被列出，closed 等时间线事件会一直缺到它下次远端变更；不跑后台同步的
+// 部署（issues.auto_sync_enabled=false）更是只能等手动同步。空水位本身是持久信号，
+// 这里取至多 staleCollectionsHealLimit 条，逐个完整重拉两个集合并推进水位——上限是
+// 防 GitHub 限流的有界兜底而非收敛手段，空水位也可能来自 INT-104 升级前的旧 meta
+// 行，会在多轮同步里逐步排空；增量列表主路径不变。
+// 水位用 GetIssue 取到的远端快照：本地 issue.UpdatedAt 会被 GORM 自动更新与本地
+// 工作流操作污染，不是远端时间戳。并发正确性沿用
+// writeFullCollections/writePartialCollections 的既有不变量——写库事务内复核失效
+// 版本，取数期间被 push 失效就放弃旧快照、保留空水位待下轮。
+// 单条失败只跳过、记一次尝试并记 warn，不中断整轮：兜底是 backstop，不能因为某条
+// 远端已被删除（404）之类的持久错误让整个项目同步永久记败、游标停摆；空水位保留，
+// 尝试时间把失败条目轮转到候选后部避免饿死其他条目。查询本身失败才按 Sync 约定
+// 返回错误。每个补齐成功的 Issue 把集合尺寸写入 sizes，由调用方按 Issue 去重汇总。
+func (m *issueMirror) healStaleCollections(ctx context.Context, client gitHubIssueClient, projectID string, sizes map[string]issueCollectionSize) error {
+	metas, err := m.gitHubMetaRepo.ListStaleCollectionsByProject(projectID, staleCollectionsHealLimit)
+	if err != nil {
+		return errs.ErrInternal
+	}
+	for _, meta := range metas {
+		if ctx.Err() != nil {
+			// 调用方已取消：保留已完成的部分，剩余留给下一轮。
+			break
+		}
+		// 无论成败都移到队尾：候选按队列位置升序取，这样每个条目最终都会被尝试到，
+		// 不会因为一直失败或每轮被重新失效而长期占满上限。
+		if markErr := m.gitHubMetaRepo.MarkCollectionsHealQueued(meta.IssueID, time.Now().UTC()); markErr != nil {
+			m.logger.Warn("兜底队列位置写入失败",
+				zap.String("project_id", projectID), zap.String("issue_id", meta.IssueID), zap.Error(markErr))
+		}
+		issue, err := m.issueRepo.FindByID(meta.IssueID)
+		if err != nil {
+			m.logHealFailure(projectID, meta, "本地 Issue 缺失", err)
+			continue
+		}
+		// 取远端真实快照做水位：本地 issue.UpdatedAt 不是远端时间戳。
+		item, err := client.GetIssue(ctx, meta.Number)
+		if err != nil {
+			m.logHealFailure(projectID, meta, "取远端 Issue 失败", err)
+			continue
+		}
+		comments, err := m.fetchComments(ctx, client, issue.ID, meta.Number)
+		if err != nil {
+			m.logHealFailure(projectID, meta, "拉评论失败", err)
+			continue
+		}
+		events, err := m.fetchTimeline(ctx, client, issue.ID, meta.Number)
+		if err != nil {
+			m.logHealFailure(projectID, meta, "拉时间线失败", err)
+			continue
+		}
+		// 与增量路径一致：两个集合都在事务外拉成功才进完整镜像写库事务；
+		// 版本在事务内复核，取数期间被 push 失效则放弃旧快照、保留空水位。
+		// expectedVersion 用刚 FindByID 读回的版本（而非候选列表那一轮快照）：候选可能
+		// 在队列里等了一会儿，用旧版本会把复核窗口无谓放宽到整个排队期，白白浪费取数。
+		expectedVersion := meta.CollectionsInvalidatedVersion
+		if issue.GitHubMeta != nil {
+			expectedVersion = issue.GitHubMeta.CollectionsInvalidatedVersion
+		}
+		advanced, err := m.writeFullCollections(issue, expectedVersion, item.GetUpdatedAt().UTC(), item.GetComments(), comments, events)
+		if err != nil {
+			m.logHealFailure(projectID, meta, "写库失败", err)
+			continue
+		}
+		if !advanced {
+			continue
+		}
+		sizes[issue.ID] = issueCollectionSize{comments: len(comments), timeline: len(events)}
+	}
+	return nil
+}
+
+// issueCollectionSize 是单个 Issue 本轮镜像的评论/时间线行数：按 Issue 去重汇总，
+// 同一个 issue 以最后一次成功处理的尺寸为准（INT-105）。
+type issueCollectionSize struct {
+	comments int
+	timeline int
+}
+
+// logHealFailure 记一条兜底失败日志；队列位置已在进入单条处理时写过，这里不再动
+// 排序键，只留观测口。
+func (m *issueMirror) logHealFailure(projectID string, meta model.IssueGitHubMeta, reason string, err error) {
+	m.logger.Warn("兜底重拉失败，保留空水位待下轮重试",
+		zap.String("project_id", projectID), zap.String("issue_id", meta.IssueID),
+		zap.Int("number", meta.Number), zap.String("reason", reason), zap.Error(err))
 }
 
 func (m *issueMirror) syncRepositoryLabels(ctx context.Context, client gitHubIssueClient, projectID string) error {
@@ -334,7 +455,10 @@ func (m *issueMirror) upsertGitHubIssue(projectID string, item *ghclient.Issue) 
 		Locked:            item.GetLocked(),
 		ActiveLockReason:  item.GetActiveLockReason(),
 		SyncedAt:          now,
-		RawJSON:           toJSONString(item),
+		// 新 meta 直接进入兜底队列（水位可能要到下一次镜像才推进）；已存在的行因
+		// UpsertTx 不更新该列而保留原队列位置（INT-105）。
+		CollectionsHealQueuedAt: &now,
+		RawJSON:                 toJSONString(item),
 	}
 
 	var ownerID string
@@ -560,37 +684,58 @@ func (m *issueMirror) fetchTimeline(ctx context.Context, client gitHubIssueClien
 // 拆开后 push 的旧正文写回可以落在两个集合的取数/提交之间，而最后提交的集合事务
 // 仍会推进水位，留下「旧镜像 + 已确认水位」——跳过判据再也发现不了该 issue，缺失
 // 内容不再自愈（反例见 docs/internal/issue-sync.md「集合拉取水位」）。同事务后谁
-// 最后提交，就由谁同时决定两个集合与水位。水位取本轮列表返回的 item 远端快照而
-// 不是 upsert 后读回的 issue 行：后者可能已被并发 push 覆盖，水位不能指向超出
-// 本次快照覆盖范围的状态。
-func (m *issueMirror) writeFullCollections(issue *model.Issue, item *ghclient.Issue, comments []*model.IssueComment, events []*model.IssueTimelineEvent) error {
-	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+// 最后提交，就由谁同时决定两个集合与水位。
+//
+// expectedVersion 是取数前读到的失效版本，同时传入水位语义所需的远端快照
+// （remoteUpdatedAt/commentsCount，由调用方显式传入）：增量列表路径传本轮列表
+// 返回的 item 快照；兜底路径传 GetIssue 取到的远端快照。事务内复核版本，只有
+// 版本未变才写入；版本变化说明取数期间发生了并发 push，本次旧快照被放弃
+// （返回 advanced=false，水位保持空待重拉），否则会抹掉 push 的失效意图。
+func (m *issueMirror) writeFullCollections(issue *model.Issue, expectedVersion int64, remoteUpdatedAt time.Time, commentsCount int, comments []*model.IssueComment, events []*model.IssueTimelineEvent) (bool, error) {
+	advanced := false
+	err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		ok, err := m.gitHubMetaRepo.AdvanceCollectionsWatermarkIfVersionTx(tx, issue.ID, expectedVersion, remoteUpdatedAt, commentsCount)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errCollectionsInvalidatedDuringFetch
+		}
 		if err := m.commentRepo.ReplaceSyncedTx(tx, issue.ID, comments); err != nil {
 			return err
 		}
 		if err := m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events); err != nil {
 			return err
 		}
-		return m.gitHubMetaRepo.AdvanceCollectionsWatermarkTx(tx, issue.ID, item.GetUpdatedAt().UTC(), item.GetComments())
-	}); err != nil {
-		return errs.ErrInternal
+		advanced = true
+		return nil
+	})
+	if errors.Is(err, errCollectionsInvalidatedDuringFetch) {
+		return false, nil
 	}
-	return nil
+	if err != nil {
+		return false, errs.ErrInternal
+	}
+	return advanced, nil
 }
 
+// errCollectionsInvalidatedDuringFetch 是完整镜像的内部信号：取数期间发生了并发
+// push，本次旧快照不应写入。它不是失败，调用方应保留空水位等下轮重拉。
+var errCollectionsInvalidatedDuringFetch = errors.New("collections invalidated during fetch")
+
 // writePartialCollections 执行一次「非完整镜像」的集合写入。push 路径只把远端
-// 响应里的一条评论或一次时间线刷新写回本地，没有重拉两个集合，所以必须在同一个
-// 事务里清空集合水位（ClearCollectionsWatermarkTx）：push 的响应可能比后台同步
-// 刚镜像的远端状态旧，若不清空，水位会指向被旧响应覆盖的镜像，跳过判据再也发现
-// 不了该 issue。所有「只写一部分集合」的路径都必须走这里；完整镜像走
-// writeFullCollections。
-// 清空后的恢复前提见 docs/internal/issue-sync.md「集合拉取水位」。
+// 响应里的一条评论或一次时间线刷新写回本地，或者连集合都没写（仅状态变更的
+// 关闭/重开），没有重拉两个集合，所以必须在同一个事务里让位给空水位并递增失效
+// 版本（InvalidateCollectionsTx）：push 的响应可能比后台同步刚镜像的远端状态旧，
+// 若不清空，水位会指向被旧响应覆盖的镜像；递增版本则让并发进行中的完整镜像事务
+// 能发现取数已过期。所有「只写一部分集合」的路径都必须走这里；完整镜像走
+// writeFullCollections。恢复前提见 docs/internal/issue-sync.md「集合拉取水位」。
 func (m *issueMirror) writePartialCollections(issueID string, write func(tx *gorm.DB) error) error {
 	return m.issueRepo.Transaction(func(tx *gorm.DB) error {
 		if err := write(tx); err != nil {
 			return err
 		}
-		return m.gitHubMetaRepo.ClearCollectionsWatermarkTx(tx, issueID)
+		return m.gitHubMetaRepo.InvalidateCollectionsTx(tx, issueID)
 	})
 }
 
@@ -607,6 +752,21 @@ func (m *issueMirror) refreshTimelineAfterPush(ctx context.Context, client gitHu
 	}
 	if err := m.writePartialCollections(issue.ID, func(tx *gorm.DB) error {
 		return m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events)
+	}); err != nil {
+		return errs.ErrInternal
+	}
+	return nil
+}
+
+// markCollectionsStaleAfterPush 处理「仅状态变更」的 push（关闭/重开，如看板
+// 批量关闭、发货钩子关单）：本轮只发了状态 PATCH 并用响应写回 issue，没有重拉
+// 评论/时间线任何集合，所以不做网络取数，只按 writePartialCollections 的不变量
+// 在同一事务里清空集合水位，该 issue 下一次被增量列表返回时后台同步会重拉两个
+// 集合、补上 closed 等时间线事件。保持纯本地写库是有意的：批量关闭每条 issue
+// 只承担一次 PATCH 的往返，不再串行附加每页 100 条的时间线全量拉取。
+func (m *issueMirror) markCollectionsStaleAfterPush(issueID string) error {
+	if err := m.writePartialCollections(issueID, func(tx *gorm.DB) error {
+		return nil
 	}); err != nil {
 		return errs.ErrInternal
 	}

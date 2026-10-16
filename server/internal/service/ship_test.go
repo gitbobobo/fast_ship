@@ -690,8 +690,17 @@ func TestShipServiceShip_GitHubCommentFailureStillShips(t *testing.T) {
 	if got.ShipHook.Results.Close == nil || !got.ShipHook.Results.Close.Ok {
 		t.Fatalf("expected close to continue after comment failure, got %+v", got.ShipHook.Results)
 	}
-	if len(fakeIssueGH.updateIssueCalls) == 0 {
-		t.Fatalf("expected close to call GitHub update")
+	// 关单走仅状态变更的 push（INT-105）：只发一次状态 PATCH，不拉时间线。
+	// 评论步骤的 ListIssueComments（fast-ship-hook marker 去重）属于评论 push
+	// 路径的既有行为，不在此断言。
+	if len(fakeIssueGH.updateIssueCalls) != 1 {
+		t.Fatalf("expected exactly one github update call for close, got %d", len(fakeIssueGH.updateIssueCalls))
+	}
+	if call := fakeIssueGH.updateIssueCalls[0]; call.State != "closed" || call.StateReason != "completed" {
+		t.Fatalf("unexpected close update call: %+v", call)
+	}
+	if _, timeline := fakeIssueGH.countCollectionCalls(); timeline != 0 {
+		t.Fatalf("expected no timeline fetches during hook close, got timeline=%d", timeline)
 	}
 }
 
