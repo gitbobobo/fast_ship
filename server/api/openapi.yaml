@@ -6744,6 +6744,45 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/bots/{id}/chat:
+    get:
+      tags: [bots]
+      operationId: getBotChatSnapshot
+      summary: 聊天页一致快照
+      description: |
+        消息尾部页、调用、run 与事件水位（next_event_seq）取自同一读取点。
+        详情页先装快照再订阅：SSE 游标从 next_event_seq - 1 起读，与快照内容
+        严格衔接，既不重放快照已含的事件也不漏掉快照之后的事件。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: message_limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+          description: 消息尾部页大小
+      responses:
+        '200':
+          description: 快照
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotChatSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/bots/{id}/events:
     get:
       tags: [bots]
@@ -11059,6 +11098,29 @@ components:
         updated_at:
           type: string
           format: date-time
+
+    BotChatSnapshot:
+      type: object
+      required: [bot, messages, calls, runs, next_event_seq]
+      properties:
+        bot:
+          $ref: '#/components/schemas/Bot'
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotMessage'
+        calls:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotToolCall'
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/BotRun'
+        next_event_seq:
+          type: integer
+          format: int64
+          description: 与快照同一读取点的事件账本水位（下一条的 seq）
 
     CreateBotRequest:
       type: object

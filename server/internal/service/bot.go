@@ -486,9 +486,12 @@ func (s *BotService) SendMessage(userID, botID string, req *SendMessageRequest) 
 		if err := txMsgs.AppendTx(tx, msg); err != nil {
 			return err
 		}
+		// user_message 携带完整消息投影：其他标签页据此直接入时间线，
+		// 不依赖自己发消息时的 REST 响应。
 		return s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
-			Kind:    "user_message",
-			Payload: map[string]interface{}{"message_id": msg.ID, "seq": msg.Seq},
+			Kind:      "user_message",
+			MessageID: msg.ID,
+			Payload:   botMessageResponseOf(msg),
 		})
 	})
 	if txErr != nil {

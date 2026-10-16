@@ -9,14 +9,12 @@ import type { BotCall, BotMessage, BotRun } from "@/lib/api/bots";
 import { signInAs, teardownAuth } from "@/test/auth";
 
 const api = vi.hoisted(() => ({
+  getChatSnapshot: vi.fn(),
   messages: vi.fn(),
-  calls: vi.fn(),
-  runs: vi.fn(),
   send: vi.fn(),
   stopRun: vi.fn(),
   decide: vi.fn(),
   cancelCall: vi.fn(),
-  get: vi.fn(),
 }));
 
 vi.mock("@/lib/api/bots", async (importOriginal) => ({
@@ -65,8 +63,17 @@ const committedMessage: BotMessage = {
   created_at: "2026-10-15T00:01:00Z",
 };
 
-function seedRuns(runs: BotRun[]) {
-  api.runs.mockResolvedValue({ data: { items: runs } });
+// 快照基础形状：与 GET /api/bots/{id}/chat 响应 data 一致，按用例覆盖。
+const snapshotBase = {
+  bot,
+  messages: [] as BotMessage[],
+  calls: [] as BotCall[],
+  runs: [] as BotRun[],
+  next_event_seq: 10,
+};
+
+function snapshotWith(overrides: Partial<typeof snapshotBase> = {}) {
+  return { data: { ...snapshotBase, ...overrides } };
 }
 
 const activeRun: BotRun = {
@@ -76,6 +83,18 @@ const activeRun: BotRun = {
   status: "running",
   stop_requested: false,
   created_at: "2026-10-15T00:00:30Z",
+};
+
+const queuedCall: BotCall = {
+  id: "c1",
+  bot_id: "b1",
+  tool_name: "fs_issue",
+  action: "update",
+  arguments: {},
+  execution_mode: "async",
+  requires_confirmation: true,
+  status: "queued",
+  created_at: "2026-10-15T00:00:40Z",
 };
 
 function setup() {
@@ -102,10 +121,8 @@ function hook() {
 
 beforeEach(() => {
   signInAs("A");
-  api.get.mockResolvedValue({ data: bot });
+  api.getChatSnapshot.mockResolvedValue(snapshotWith());
   api.messages.mockResolvedValue({ data: { items: [] } });
-  api.calls.mockResolvedValue({ data: { items: [] } });
-  seedRuns([]);
 });
 
 afterEach(() => {
@@ -114,14 +131,38 @@ afterEach(() => {
 });
 
 describe("useBotChat", () => {
-  it("loads history and subscribes after the detail cursor", async () => {
+  it("snapshot 安装后订阅从水位续读", async () => {
+    api.getChatSnapshot.mockResolvedValue(snapshotWith({ next_event_seq: 42 }));
     const { result } = hook();
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
-    expect(stream.captured?.afterSeq).toBe(9);
+    // 订阅游标 = 快照 next_event_seq - 1（同一读取点，既不漏也不重放）。
+    expect(stream.captured?.afterSeq).toBe(41);
     expect(result.current.entries).toEqual([]);
     expect(result.current.activeRun).toBeNull();
+  });
+
+  it("旧快照不覆盖 SSE 已合并的调用状态", async () => {
+    // 首载快照无 c1；随后到达的快照响应模拟 in-flight 旧数据（c1 仍 queued）。
+    api.getChatSnapshot
+      .mockResolvedValueOnce(snapshotWith())
+      .mockResolvedValueOnce(snapshotWith({ calls: [queuedCall] }));
+    const { client, result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "tool_result",
+      { call_id: "c1", phase: "terminal", payload: { id: "c1", status: "succeeded" } },
+      20,
+    );
+    await waitFor(() => expect(result.current.calls[0]?.status).toBe("succeeded"));
+
+    await act(() =>
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.calls[0]?.status).toBe("succeeded");
   });
 
   it("run_started 到达即折叠出活动 run（运行栏实时出现）", async () => {
@@ -158,9 +199,9 @@ describe("useBotChat", () => {
   });
 
   it("folds tool events into the call ledger and keeps receipts out of the timeline", async () => {
-    api.messages.mockResolvedValue({
-      data: {
-        items: [
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        messages: [
           {
             id: "m-1",
             bot_id: "b1",
@@ -209,8 +250,8 @@ describe("useBotChat", () => {
             created_at: "2026-10-15T00:00:42Z",
           },
         ],
-      },
-    });
+      }),
+    );
     const { result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -309,33 +350,21 @@ describe("useBotChat", () => {
   });
 
   it("keeps background calls visible after the run finishes", async () => {
-    // 首载给活动 run；done 后的重读返回完成态（服务端权威记录）。
-    api.runs.mockReset();
-    api.runs.mockResolvedValueOnce({ data: { items: [activeRun] } });
-    api.runs.mockResolvedValue({
-      data: {
-        items: [
-          { ...activeRun, status: "completed", finished_at: "2026-10-15T00:05:00Z" },
-        ],
-      },
-    });
-    api.calls.mockResolvedValue({
-      data: {
-        items: [
-          {
-            id: "c1",
-            bot_id: "b1",
-            tool_name: "fs_issue",
-            action: "comment",
-            arguments: {},
-            execution_mode: "async",
-            requires_confirmation: false,
-            status: "queued",
-            created_at: "2026-10-15T00:00:40Z",
-          },
-        ],
-      },
-    });
+    // 首载给活动 run；done 触发的快照重读返回完成态（服务端权威记录）。
+    const completedRun: BotRun = {
+      ...activeRun,
+      status: "completed",
+      finished_at: "2026-10-15T00:05:00Z",
+    };
+    const backgroundCall: BotCall = {
+      ...queuedCall,
+      tool_name: "fs_issue",
+      action: "comment",
+      requires_confirmation: false,
+    };
+    api.getChatSnapshot
+      .mockResolvedValueOnce(snapshotWith({ runs: [activeRun], calls: [backgroundCall] }))
+      .mockResolvedValue(snapshotWith({ runs: [completedRun], calls: [backgroundCall] }));
     const { result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(result.current.runActive).toBe(true));
@@ -389,7 +418,7 @@ describe("useBotChat", () => {
   });
 
   it("stops the main run without touching background calls", async () => {
-    seedRuns([activeRun]);
+    api.getChatSnapshot.mockResolvedValue(snapshotWith({ runs: [activeRun] }));
     const { result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -404,7 +433,7 @@ describe("useBotChat", () => {
   });
 
   it("decides and cancels calls through the ledger endpoints", async () => {
-    const pending = {
+    const pending: BotCall = {
       id: "c1",
       bot_id: "b1",
       tool_name: "fs_project",
@@ -415,7 +444,7 @@ describe("useBotChat", () => {
       status: "pending_confirmation",
       created_at: "2026-10-15T00:00:40Z",
     };
-    api.calls.mockResolvedValue({ data: { items: [pending] } });
+    api.getChatSnapshot.mockResolvedValue(snapshotWith({ calls: [pending] }));
     const { result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -453,10 +482,10 @@ describe("useBotChat", () => {
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalledTimes(1));
     emit("delta", { message_id: "d1", payload: { text: "A" } }, 10);
 
-    // 详情重读后游标前进，订阅重建：从 max(游标, 已见 seq) 续读，不重放。
-    api.get.mockResolvedValue({ data: { ...bot, next_event_seq: 12 } });
+    // 快照重读后水位前进，订阅重建：从 max(游标, 已见 seq) 续读，不重放。
+    api.getChatSnapshot.mockResolvedValue(snapshotWith({ next_event_seq: 12 }));
     await act(() =>
-      client.refetchQueries({ queryKey: botKeys.detail("A", "b1") }),
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
     );
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalledTimes(2));
     expect(stream.close).toHaveBeenCalledTimes(1);

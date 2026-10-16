@@ -8984,6 +8984,115 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | 409 | 同 client_message_id 已用于不同正文（40925） |
 | 500 | 服务器内部错误（50000） |
 
+### GET `/api/bots/{id}/chat`
+
+<!-- operationId: getBotChatSnapshot -->
+
+聊天页一致快照
+
+消息尾部页、调用、run 与事件水位（next_event_seq）取自同一读取点。
+详情页先装快照再订阅：SSE 游标从 next_event_seq - 1 起读，与快照内容
+严格衔接，既不重放快照已含的事件也不漏掉快照之后的事件。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `message_limit` | integer（≤200，默认 50） | 否 | 消息尾部页大小 |
+
+**成功响应**
+
+**200** 快照
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `bot` | object | 是 |  |
+| `bot.id` | string | 是 |  |
+| `bot.name` | string | 是 |  |
+| `bot.persona_prompt` | string | 是 | 人设原文；平台规则在服务端拼接，不在此回显 |
+| `bot.prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
+| `bot.platform_prompt_version` | integer（int64） | 是 |  |
+| `bot.toolset_version` | integer（int64） | 是 |  |
+| `bot.base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `bot.model` | string | 是 |  |
+| `bot.api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `bot.next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `bot.created_at` | string（date-time） | 是 |  |
+| `bot.updated_at` | string（date-time） | 是 |  |
+| `messages` | object[] | 是 |  |
+| `messages[].id` | string | 是 |  |
+| `messages[].bot_id` | string | 是 |  |
+| `messages[].seq` | integer（int64） | 是 |  |
+| `messages[].run_id` | string | 否 |  |
+| `messages[].request_id` | string | 否 |  |
+| `messages[].call_id` | string | 否 |  |
+| `messages[].kind` | string | 是 | user / assistant / tool_reply / background_result / approval_decision / lifecycle |
+| `messages[].content` | object | 是 | 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串 |
+| `messages[].created_at` | string（date-time） | 是 |  |
+| `calls` | object[] | 是 |  |
+| `calls[].id` | string | 是 | 平台调用 ID，同时是执行幂等键 |
+| `calls[].bot_id` | string | 是 |  |
+| `calls[].request_id` | string | 是 |  |
+| `calls[].provider_tool_call_id` | string | 是 | 模型协议配对 ID |
+| `calls[].tool_name` | string | 是 |  |
+| `calls[].action` | string | 是 |  |
+| `calls[].arguments` | object | 是 | 规范化后的参数 |
+| `calls[].execution_mode` | string | 是 | sync / async |
+| `calls[].requires_confirmation` | boolean | 是 |  |
+| `calls[].status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `calls[].decision` | string（可空） | 否 | approve / reject / always_allow |
+| `calls[].decided_at` | string（date-time，可空） | 否 |  |
+| `calls[].authorization_id` | string（可空） | 否 |  |
+| `calls[].execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `calls[].cancel_requested` | boolean | 否 |  |
+| `calls[].result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
+| `calls[].result_chars` | integer（int64） | 是 |  |
+| `calls[].truncated` | boolean | 是 |  |
+| `calls[].error_code` | string（可空） | 否 |  |
+| `calls[].error_message` | string（可空） | 否 |  |
+| `calls[].effect_may_have_occurred` | boolean | 是 | 副作用可能已发生（取消/中断/重启）；不声称回滚 |
+| `calls[].created_at` | string（date-time） | 是 |  |
+| `calls[].started_at` | string（date-time，可空） | 否 |  |
+| `calls[].finished_at` | string（date-time，可空） | 否 |  |
+| `runs` | object[] | 是 |  |
+| `runs[].id` | string | 是 |  |
+| `runs[].bot_id` | string | 是 |  |
+| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `runs[].trigger_key` | string | 是 |  |
+| `runs[].status` | string | 是 | queued / running / completed / failed / stopped |
+| `runs[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `runs[].input_through_seq` | integer（int64） | 是 |  |
+| `runs[].stop_requested` | boolean | 是 |  |
+| `runs[].prompt_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].completion_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].total_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].cached_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `runs[].error_code` | string（可空） | 否 |  |
+| `runs[].error_message` | string（可空） | 否 |  |
+| `runs[].created_at` | string（date-time） | 是 |  |
+| `runs[].started_at` | string（date-time，可空） | 否 |  |
+| `runs[].finished_at` | string（date-time，可空） | 否 |  |
+| `next_event_seq` | integer（int64） | 是 | 与快照同一读取点的事件账本水位（下一条的 seq） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
 ### GET `/api/bots/{id}/events`
 
 <!-- operationId: streamBotEvents -->

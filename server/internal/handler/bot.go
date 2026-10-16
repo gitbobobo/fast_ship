@@ -92,6 +92,25 @@ func (h *BotHandler) Delete(c *gin.Context) {
 
 // ---------- 消息 ----------
 
+// GetChatSnapshot 聊天页初始读取：同一读取点的消息/调用/run 与事件水位。
+func (h *BotHandler) GetChatSnapshot(c *gin.Context) {
+	limit := 50
+	if raw := c.Query("message_limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			response.BadRequest(c, 40001, "message_limit 必须是 1-200 的整数")
+			return
+		}
+		limit = parsed
+	}
+	snap, err := h.bots.GetChatSnapshot(middleware.GetUserID(c), c.Param("id"), limit)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, snap)
+}
+
 func (h *BotHandler) ListMessages(c *gin.Context) {
 	before := parseSeqParam(c, "before_seq")
 	after := parseSeqParam(c, "after_seq")

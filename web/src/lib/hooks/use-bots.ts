@@ -51,6 +51,13 @@ export const botKeys = {
     "authorizations",
     botId,
   ],
+  /** 聊天页一致快照：messages/calls/runs/detail 缓存的水合来源。 */
+  snapshot: (userId: string | null, botId: string) => [
+    BOTS_ROOT,
+    userId,
+    "snapshot",
+    botId,
+  ],
 };
 
 function useUserId() {

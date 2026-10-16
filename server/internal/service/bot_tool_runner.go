@@ -143,7 +143,8 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			}
 			calls = append(calls, call)
 
-			// 事件：tool_call 提案。
+			// 事件：tool_call 提案，载荷带完整调用投影（参数、执行模式、
+			// 确认要求）——确认卡不靠前端猜默认值。
 			phase := "proposed"
 			if call.Status == model.BotCallStatusPendingConfirmation {
 				phase = "awaiting_confirmation"
@@ -152,10 +153,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			}
 			if err := s.appendEventTx(tx, bot.ID, &run.ID, call.ID, model.BotEventToolCall, botEventEnvelope{
 				Kind: "tool_call", Phase: phase,
-				Payload: map[string]interface{}{
-					"tool_name": call.ToolName, "action": call.Action,
-					"status": string(call.Status),
-				},
+				Payload: botToolCallResponseOf(call),
 			}); err != nil {
 				return err
 			}
@@ -491,7 +489,7 @@ func (s *BotService) executeQueuedCall(callID string) {
 	call.StartedAt = &now
 	s.emitEvent(bot.ID, nil, call.ID, model.BotEventToolCall, botEventEnvelope{
 		Kind: "tool_call", Phase: "running",
-		Payload: map[string]interface{}{"tool_name": call.ToolName, "action": call.Action},
+		Payload: botToolCallResponseOf(call),
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), botAsyncExecTimeout)
@@ -557,7 +555,9 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 		}
 		if call.ExecutionMode != string(model.BotExecutionAsync) {
 			// 同步工具：协议回复就在本事务内补齐（每个 provider_tool_call_id
-			// 恰好一条 tool 消息）；不追加第二条结果消息。
+			// 恰好一条 tool 消息）；不追加第二条结果消息。tool_result 事件
+			// 同事务落库：其他标签页的卡片不靠重读也能翻到终态。
+			call.Status = status
 			content := outcome.PreviewJSON
 			if execErr != nil {
 				content = botFailureReplyText(execErr)
@@ -567,7 +567,13 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 				ToolName: call.ToolName, Status: string(status),
 				Content: content,
 			}
-			return s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now)
+			if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
+				return err
+			}
+			return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
+				Kind: "tool_result", Phase: "terminal",
+				Payload: botToolCallResponseOf(call),
+			})
 		}
 		// 平台后台结果只属于异步调用（完成事件不复用 provider_tool_call_id）。
 		return s.appendBackgroundResultTx(tx, runID, call, status, outcome, execErr, effect, now)

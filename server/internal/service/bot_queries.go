@@ -7,6 +7,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"gorm.io/gorm"
 )
 
@@ -135,6 +136,71 @@ func (s *BotService) CancelCall(userID, botID, callID string) (*BotToolCallRespo
 }
 
 // ---------- SSE 支撑 ----------
+
+// BotChatSnapshot 是聊天页的初始读取：消息、调用、run 与事件水位取自同一
+// 读取点。订阅游标（next_event_seq - 1）与快照内容严格衔接——事件既不重放
+// 快照已含的内容，也不漏掉快照之后的内容（先订阅后补读兜住中间窗口）。
+type BotChatSnapshot struct {
+	Bot          BotResponse           `json:"bot"`
+	Messages     []BotMessageResponse  `json:"messages"`
+	Calls        []BotToolCallResponse `json:"calls"`
+	Runs         []BotRunResponse      `json:"runs"`
+	NextEventSeq int64                 `json:"next_event_seq"`
+}
+
+// GetChatSnapshot 单事务一致读；messageLimit 是消息尾部页大小。
+func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*BotChatSnapshot, error) {
+	if messageLimit <= 0 || messageLimit > 200 {
+		messageLimit = 50
+	}
+	snap := &BotChatSnapshot{}
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		bot, err := repository.NewBotRepository(tx).FindByIDAndUser(botID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotNotFound
+			}
+			return err
+		}
+		snap.Bot = botResponseOf(bot)
+		snap.NextEventSeq = bot.NextEventSeq
+
+		msgs, err := repository.NewBotMessageRepository(tx).ListMainline(botID, 0, 0, messageLimit)
+		if err != nil {
+			return err
+		}
+		snap.Messages = make([]BotMessageResponse, 0, len(msgs))
+		for i := range msgs {
+			snap.Messages = append(snap.Messages, botMessageResponseOf(&msgs[i]))
+		}
+
+		callRows, err := repository.NewBotToolCallRepository(tx).ListByBot(botID, nil, 100)
+		if err != nil {
+			return err
+		}
+		snap.Calls = make([]BotToolCallResponse, 0, len(callRows))
+		for i := range callRows {
+			snap.Calls = append(snap.Calls, botToolCallResponseOf(&callRows[i]))
+		}
+
+		runRows, err := repository.NewBotRunRepository(tx).ListByBot(botID, 50)
+		if err != nil {
+			return err
+		}
+		snap.Runs = make([]BotRunResponse, 0, len(runRows))
+		for i := range runRows {
+			snap.Runs = append(snap.Runs, botRunResponseOf(&runRows[i]))
+		}
+		return nil
+	})
+	if txErr != nil {
+		if errors.Is(txErr, errs.ErrBotNotFound) {
+			return nil, txErr
+		}
+		return nil, errs.ErrInternal
+	}
+	return snap, nil
+}
 
 // BotEventResponse 是事件的 API 投影（重放用）。
 type BotEventResponse struct {

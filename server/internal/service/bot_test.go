@@ -1748,3 +1748,167 @@ func TestBotContextToolRepliesBeforeDeferredUser(t *testing.T) {
 		}
 	}
 }
+
+func TestBotChatSnapshotConsistent(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsnap")
+	bot := env.createBot(t, userID)
+
+	// 直接经 SendMessage 落一条 user 消息与事件，快照应同时含两者。
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "快照", ClientMessageID: "snap-1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if snap.Bot.ID != bot.ID {
+		t.Fatalf("bot 不符: %+v", snap.Bot)
+	}
+	if len(snap.Messages) != 1 {
+		t.Fatalf("消息数不符: %+v", snap.Messages)
+	}
+	var uc botUserContent
+	if err := json.Unmarshal(snap.Messages[0].Content, &uc); err != nil || uc.Text != "快照" {
+		t.Fatalf("消息不符: %+v", snap.Messages[0])
+	}
+	// 水位必须不小于快照内任何事件重放所需的下界：游标从 next_event_seq-1
+	// 续读不能重放快照已含内容。
+	if snap.NextEventSeq < 1 {
+		t.Fatalf("next_event_seq 应为正: %d", snap.NextEventSeq)
+	}
+
+	// 一次事件（user_message 的 SSE 投影）seq < NextEventSeq：事件先落库、
+	// 水位在其后，订阅重放不会漏也不会重复这条消息。
+	var eventSeqs []int64
+	if err := env.db.Model(&model.BotEvent{}).Where("bot_id = ?", bot.ID).
+		Order("seq asc").Pluck("seq", &eventSeqs).Error; err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	if len(eventSeqs) == 0 || eventSeqs[len(eventSeqs)-1] >= snap.NextEventSeq {
+		t.Fatalf("事件应全部落在水位之前: events=%v watermark=%d", eventSeqs, snap.NextEventSeq)
+	}
+}
+
+func TestBotRecoveryQueuedSyncCall(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botqsync")
+	bot := env.createBot(t, userID)
+
+	// 夹具：提交后、执行前崩溃留下的 queued 同步调用。
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionSync))
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+
+	fresh, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if fresh.Status != model.BotCallStatusNotExecuted || fresh.FinishedAt == nil {
+		t.Fatalf("queued 同步调用应恢复为 not_executed: %+v", fresh.Status)
+	}
+
+	// 协议回复必须补齐（每个 provider_tool_call_id 恰好一条 tool 消息）。
+	var replyCount int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindToolReply).Count(&replyCount)
+	if replyCount != 1 {
+		t.Fatalf("应恰好补一条 tool 回复: %d", replyCount)
+	}
+
+	// tool_result 终态事件随事务落库，其他标签页不重读也能翻卡。
+	var eventCount int64
+	env.db.Model(&model.BotEvent{}).Where("bot_id = ? AND event_type = ?",
+		bot.ID, model.BotEventToolResult).Count(&eventCount)
+	if eventCount != 1 {
+		t.Fatalf("应补一条 tool_result 事件: %d", eventCount)
+	}
+
+	// 幂等：重复恢复不再补第二条回复。
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("recovery2: %v", err)
+	}
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindToolReply).Count(&replyCount)
+	if replyCount != 1 {
+		t.Fatalf("重复恢复不得补第二条回复: %d", replyCount)
+	}
+}
+
+func TestBotSyncFinalizeEmitsToolResult(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsync")
+	bot := env.createBot(t, userID)
+
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusRunning, string(model.BotExecutionSync))
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	runID := env.bots.runIDOfCall(call)
+	botModel, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+	env.bots.finalizeCall(botModel, runID, call, model.BotCallStatusSucceeded,
+		botToolOutcome{ResultJSON: "{}", PreviewJSON: "{}", ResultChars: 2}, nil, false)
+
+	// 同步调用终态：tool_result 事件与回复同事务落库，卡片不靠重读翻终态。
+	// （BotEvent 无 call_id 列，调用标识在事件信封里。）
+	var events []model.BotEvent
+	env.db.Where("bot_id = ? AND event_type = ?",
+		bot.ID, model.BotEventToolResult).Find(&events)
+	if len(events) != 1 {
+		t.Fatalf("同步终态应补一条 tool_result 事件: %d", len(events))
+	}
+	var env0 botEventEnvelope
+	if err := json.Unmarshal([]byte(events[0].PayloadJSON), &env0); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if env0.CallID != callID {
+		t.Fatalf("事件信封应带 call_id: %+v", env0)
+	}
+	if m, ok := env0.Payload.(map[string]interface{}); ok {
+		if m["id"] != callID || m["status"] != string(model.BotCallStatusSucceeded) {
+			t.Fatalf("tool_result 应带完整调用投影: %v", m)
+		}
+	} else {
+		t.Fatalf("载荷应为对象: %v", env0.Payload)
+	}
+}
+
+func TestBotContextRejectsUnclosedToolBlock(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botunclosed")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+
+	// 恢复缺口兜底：账本停在 assistant tool_calls、没有回复 → 拒绝发请求。
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-unclosed", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "unclosed",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	raw, _ := json.Marshal(botAssistantContent{ToolCalls: []botAssistantToolCall{
+		{ProviderToolCallID: "callX", ToolName: "fs_issue", Action: "list", Arguments: "{}"},
+	}})
+	msg := &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID,
+		Seq: 1, Kind: model.BotMessageKindAssistant, ContentJSON: string(raw), CreatedAt: now}
+	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, msg); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	if _, err := env.bots.buildRunContext(botRow, run); err == nil {
+		t.Fatalf("未闭合 tool 块应拒绝构建上下文")
+	}
+}

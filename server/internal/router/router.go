@@ -303,6 +303,7 @@ func Setup(
 		bots.PUT("/:id", botHandler.Update)
 		bots.DELETE("/:id", botHandler.Delete)
 		bots.GET("/:id/messages", botHandler.ListMessages)
+		bots.GET("/:id/chat", botHandler.GetChatSnapshot)
 		bots.POST("/:id/messages", botHandler.SendMessage)
 		bots.GET("/:id/events", botHandler.StreamEvents)
 		bots.GET("/:id/runs", botHandler.ListRuns)

@@ -199,6 +199,21 @@ export interface BotAuthorization {
   revoked_at?: string | null;
 }
 
+/**
+ * 聊天页一致快照：bot、消息尾部页、调用、run 与事件水位取自服务端
+ * 同一读取点。订阅游标取 next_event_seq - 1，与快照内容严格衔接，
+ * 既不重放快照已含的事件也不漏掉其后的事件。
+ */
+export interface ChatSnapshot {
+  bot: Bot;
+  /** 消息最新一页（默认 50 条），seq 正序。 */
+  messages: BotMessage[];
+  calls: BotCall[];
+  runs: BotRun[];
+  /** 与快照同一读取点的事件账本水位（下一条的 seq）。 */
+  next_event_seq: number;
+}
+
 export interface SendBotMessageInput {
   client_message_id: string;
   text: string;
@@ -254,6 +269,14 @@ export const botApi = {
   get: (botId: string, signal?: AbortSignal) =>
     decodeApiError(
       api.get(botPath(botId), options(signal)).json<ApiResponse<Bot>>(),
+    ),
+
+  /** message_limit 用服务端默认（50，与 BOT_HISTORY_PAGE 一致），不额外传参。 */
+  getChatSnapshot: (botId: string, signal?: AbortSignal) =>
+    decodeApiError(
+      api
+        .get(`${botPath(botId)}/chat`, options(signal))
+        .json<ApiResponse<ChatSnapshot>>(),
     ),
 
   update: (botId: string, input: UpdateBotInput) =>

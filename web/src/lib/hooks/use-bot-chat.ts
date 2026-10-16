@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   botApi,
+  type Bot,
   type BotCall,
   type BotCallDecision,
   type BotCallStatus,
@@ -18,7 +19,7 @@ import {
 } from "@/lib/bot-stream";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { uuid } from "@/lib/uuid";
-import { botKeys, useBot } from "./use-bots";
+import { botKeys } from "./use-bots";
 
 /** 主线历史每页条数；「加载更早」沿用同值判断是否还有更早消息。 */
 export const BOT_HISTORY_PAGE = 50;
@@ -119,6 +120,76 @@ export function mergeRun(
   return next;
 }
 
+// ---- 快照安装合并：防止迟到的旧快照覆盖 SSE 已折叠的新状态 ----
+
+/** 状态推进序：更靠后的状态胜出；同分保留已缓存值。 */
+const CALL_STATUS_RANK: Record<BotCallStatus, number> = {
+  queued: 0,
+  pending_confirmation: 1,
+  running: 2,
+  succeeded: 3,
+  failed: 3,
+  rejected: 3,
+  cancelled: 3,
+  not_executed: 3,
+};
+
+/** run 状态推进序：终态 > running > queued；同分保留已缓存值。 */
+const RUN_STATUS_RANK: Record<BotRunStatus, number> = {
+  queued: 0,
+  running: 1,
+  completed: 2,
+  failed: 2,
+  stopped: 2,
+};
+
+export function mergeCallSnapshots(
+  previous: BotCall[],
+  incoming: BotCall[],
+): BotCall[] {
+  const merged = new Map(previous.map((c) => [c.id, c]));
+  for (const call of incoming) {
+    const cached = merged.get(call.id);
+    if (
+      !cached ||
+      CALL_STATUS_RANK[call.status] > CALL_STATUS_RANK[cached.status]
+    ) {
+      merged.set(call.id, call);
+    }
+  }
+  return [...merged.values()];
+}
+
+export function mergeRunSnapshots(
+  previous: BotRun[],
+  incoming: BotRun[],
+): BotRun[] {
+  const merged = new Map(previous.map((r) => [r.id, r]));
+  for (const run of incoming) {
+    const cached = merged.get(run.id);
+    if (
+      !cached ||
+      RUN_STATUS_RANK[run.status] > RUN_STATUS_RANK[cached.status]
+    ) {
+      merged.set(run.id, run);
+    }
+  }
+  return [...merged.values()];
+}
+
+/** bot 只做整体替换，水位字段单调取大（旧快照不得回拨订阅游标）。 */
+export function mergeBotSnapshot(previous: Bot | undefined, incoming: Bot): Bot {
+  if (!previous) return incoming;
+  return {
+    ...incoming,
+    next_event_seq: Math.max(incoming.next_event_seq, previous.next_event_seq ?? 1),
+    next_message_seq: Math.max(
+      incoming.next_message_seq ?? 1,
+      previous.next_message_seq ?? 1,
+    ),
+  };
+}
+
 // ---- 主线时间线装配 ----
 
 export interface BotChatEntry {
@@ -211,6 +282,12 @@ export function foldStreamEvent(
         }
         const draftId = data.message_id ?? message?.id;
         if (draftId) sinks.clearDraft(draftId);
+      } else if (data.kind === "user_message") {
+        // 完整 user 消息投影：其他标签页不经过自己的 REST 发送也能入时间线。
+        const message = data.payload as BotMessage | undefined;
+        if (message?.id) {
+          sinks.setMessages(mergeMessages(sinks.getMessages(), [message]));
+        }
       } else if (data.kind === "run_started" && data.run_id) {
         // 运行栏依赖 activeRun：run_started 到达即把 run 折叠进缓存。
         sinks.setRuns(
@@ -296,34 +373,60 @@ export function useBotChat(botId: string) {
   const subscriptionRef = useRef<BotStreamSubscription | null>(null);
   const lastSeenSeqRef = useRef(0);
 
-  const botQuery = useBot(botId);
-  const messagesQuery = useQuery({
-    queryKey: botKeys.messages(userId, botId),
-    queryFn: async ({ signal }) =>
-      (await botApi.messages(botId, { limit: BOT_HISTORY_PAGE }, signal)).data.items,
-    enabled: Boolean(userId && botId),
-    refetchOnMount: "always",
-  });
-  const callsQuery = useQuery({
-    queryKey: botKeys.calls(userId, botId),
-    queryFn: async ({ signal }) => (await botApi.calls(botId, signal)).data.items,
-    enabled: Boolean(userId && botId),
-    refetchOnMount: "always",
-  });
-  const runsQuery = useQuery({
-    queryKey: botKeys.runs(userId, botId),
-    queryFn: async ({ signal }) => (await botApi.runs(botId, signal)).data.items,
+  // 单一水合来源：bot 详情、消息、调用与 run 全部来自同一读取点的快照，
+  // 消除分离请求的竞态窗口（快照与水位同点，SSE 从水位续读不漏不重）。
+  // 快照安装进各自缓存时用合并语义，迟到的旧快照覆盖不掉 SSE 已折叠状态。
+  const snapshotQuery = useQuery({
+    queryKey: botKeys.snapshot(userId, botId),
+    queryFn: async ({ signal }) => {
+      const snapshot = (await botApi.getChatSnapshot(botId, signal)).data;
+      const messagesKey = botKeys.messages(userId, botId);
+      const callsKey = botKeys.calls(userId, botId);
+      const runsKey = botKeys.runs(userId, botId);
+      queryClient.setQueryData<BotMessage[]>(messagesKey, (previous) =>
+        mergeMessages(previous ?? [], snapshot.messages),
+      );
+      queryClient.setQueryData<BotCall[]>(callsKey, (previous) =>
+        mergeCallSnapshots(previous ?? [], snapshot.calls),
+      );
+      queryClient.setQueryData<BotRun[]>(runsKey, (previous) =>
+        mergeRunSnapshots(previous ?? [], snapshot.runs),
+      );
+      queryClient.setQueryData<Bot>(botKeys.detail(userId, botId), (previous) =>
+        mergeBotSnapshot(previous, snapshot.bot),
+      );
+      return snapshot;
+    },
     enabled: Boolean(userId && botId),
     refetchOnMount: "always",
   });
 
-  // 订阅游标：详情的 next_event_seq - 1（事件先落库再发送，全量补读也幂等）。
-  const cursor = botQuery.data
-    ? Math.max(0, (botQuery.data.next_event_seq ?? 1) - 1)
+  // 三份主线缓存由快照查询经 setQueryData 水合；这里的 useQuery 只订阅
+  // 缓存供渲染响应（enabled 恒为 false，queryFn 不会被调用）。
+  const messagesQuery = useQuery({
+    queryKey: botKeys.messages(userId, botId),
+    queryFn: () => [] as BotMessage[],
+    enabled: false,
+  });
+  const callsQuery = useQuery({
+    queryKey: botKeys.calls(userId, botId),
+    queryFn: () => [] as BotCall[],
+    enabled: false,
+  });
+  const runsQuery = useQuery({
+    queryKey: botKeys.runs(userId, botId),
+    queryFn: () => [] as BotRun[],
+    enabled: false,
+  });
+
+  // 订阅游标：快照的 next_event_seq - 1（快照与水位同读取点，竞态窗口消失）。
+  const cursor = snapshotQuery.data
+    ? Math.max(0, (snapshotQuery.data.next_event_seq ?? 1) - 1)
     : null;
 
   useEffect(() => {
     if (!userId || !botId || cursor === null) return;
+    const snapshotKey = botKeys.snapshot(userId, botId);
     const messagesKey = botKeys.messages(userId, botId);
     const callsKey = botKeys.calls(userId, botId);
     const runsKey = botKeys.runs(userId, botId);
@@ -359,8 +462,9 @@ export function useBotChat(botId: string) {
           setCalls: (calls) => queryClient.setQueryData<BotCall[]>(callsKey, calls),
           getRuns: () => queryClient.getQueryData<BotRun[]>(runsKey) ?? [],
           setRuns: (runs) => queryClient.setQueryData<BotRun[]>(runsKey, runs),
+          // 权威重读走快照端点；安装的合并语义保护已折叠状态。
           refreshRuns: () =>
-            void queryClient.invalidateQueries({ queryKey: runsKey }),
+            void queryClient.invalidateQueries({ queryKey: snapshotKey }),
           appendDraft,
           clearDraft,
         });
@@ -513,17 +617,11 @@ export function useBotChat(botId: string) {
     subscriptionRef.current?.resume();
   }, []);
 
-  /** 首屏加载失败后的手动重试：让三份主线数据重新读取。 */
+  /** 首屏加载失败后的手动重试：快照重读并重新水合三份主线缓存。 */
   const retry = useCallback(() => {
     if (!userId || !botId) return;
     void queryClient.invalidateQueries({
-      queryKey: botKeys.messages(userId, botId),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: botKeys.calls(userId, botId),
-    });
-    void queryClient.invalidateQueries({
-      queryKey: botKeys.runs(userId, botId),
+      queryKey: botKeys.snapshot(userId, botId),
     });
   }, [botId, queryClient, userId]);
 
@@ -537,10 +635,8 @@ export function useBotChat(botId: string) {
   );
 
   return {
-    loading:
-      Boolean(userId) &&
-      (messagesQuery.isPending || callsQuery.isPending || runsQuery.isPending),
-    loadError: messagesQuery.error ?? callsQuery.error ?? runsQuery.error,
+    loading: Boolean(userId) && snapshotQuery.isPending,
+    loadError: snapshotQuery.error,
     entries,
     calls: callsQuery.data ?? [],
     activeRun,

@@ -1370,6 +1370,17 @@ type BotCallResult struct {
 	Truncated   bool                   `json:"truncated"`
 }
 
+// BotChatSnapshot defines model for BotChatSnapshot.
+type BotChatSnapshot struct {
+	Bot      Bot           `json:"bot"`
+	Calls    []BotToolCall `json:"calls"`
+	Messages []BotMessage  `json:"messages"`
+
+	// NextEventSeq 与快照同一读取点的事件账本水位（下一条的 seq）
+	NextEventSeq int64    `json:"next_event_seq"`
+	Runs         []BotRun `json:"runs"`
+}
+
 // BotConnectionCheck defines model for BotConnectionCheck.
 type BotConnectionCheck struct {
 	Checks []BotConnectionCheck_Checks `json:"checks"`
@@ -4309,6 +4320,22 @@ type GetBotCallResult200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int            `json:"code"`
 	Data *BotCallResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotChatSnapshotParams defines parameters for GetBotChatSnapshot.
+type GetBotChatSnapshotParams struct {
+	// MessageLimit 消息尾部页大小
+	MessageLimit *int `form:"message_limit,omitempty" json:"message_limit,omitempty"`
+}
+
+// GetBotChatSnapshot200JSONResponseBody defines parameters for GetBotChatSnapshot.
+type GetBotChatSnapshot200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *BotChatSnapshot `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`

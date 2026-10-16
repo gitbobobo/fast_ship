@@ -183,6 +183,12 @@ func (s *BotService) buildRunContext(bot *model.Bot, run *model.BotRun) (*botBui
 	}
 	flushAssistant()
 	flushDeferred()
+	// 协议闭合守护：账本若留下未配对回复的 tool_calls（恢复缺口的兜底），
+	// 拒绝发请求——OpenAI 兼容端会拒绝不连续的 tool 块，宁可显式失败。
+	if len(openToolCalls) > 0 || openAssistant != nil {
+		return nil, errs.New(errs.ErrInternal.Code,
+			"上下文构建失败：存在未闭合的工具调用块，需恢复补齐协议回复后重试")
+	}
 
 	// 6. 本轮运行时上下文（末尾；当前时间、待处理输入等易变内容只在这里）。
 	rt := botRuntimeContext{
