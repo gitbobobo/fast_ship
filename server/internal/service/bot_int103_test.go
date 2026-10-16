@@ -202,6 +202,98 @@ func TestBotScheduleDueWithinGraceRuns(t *testing.T) {
 	}
 }
 
+// ---------- 2.5 派发时冻结有效配置 ----------
+
+// TestBotScheduleDispatchFreezesConfigSnapshot 派发时落定的 run 快照必须记录
+// 有效配置：任务未指定模型记机器人当时的 model/base_url，任务指定了用任务的；
+// 派发后、执行前编辑机器人不影响已派发的运行。
+func TestBotScheduleDispatchFreezesConfigSnapshot(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "快照运行一"}, fakeModelTurn{Text: "快照运行二"})
+	userID := createBotTestUser(t, env.db, "schedfreeze")
+	bot := env.createBot(t, userID)
+
+	// 场景一：任务不指定模型 —— 快照记机器人当时的配置。
+	due := time.Now().UTC().Add(-3 * time.Second)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NeedsReport = false
+		tk.NextRunAt = &due
+	})
+	env.bots.scheduleTick(time.Now().UTC())
+	var run model.BotRun
+	env.db.Where("schedule_task_id = ?", task.ID).First(&run)
+
+	var snap botConfigSnapshot
+	if err := json.Unmarshal([]byte(run.ConfigSnapshotJSON), &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if snap.Model != "fake-model" || snap.BaseURL != env.fake.URL() {
+		t.Fatalf("快照应记录派发时的有效配置: %+v", snap)
+	}
+
+	// 派发后、执行前编辑机器人：这次运行仍按快照执行（执行槽载入时即使
+	// 读到编辑后的机器人，快照值优先）。
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"model": "edited-model", "base_url": "http://edited.invalid",
+	}).Error; err != nil {
+		t.Fatalf("edit bot: %v", err)
+	}
+	edited, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load edited bot: %v", err)
+	}
+	if runModelOf(&run, edited) != "fake-model" || runBaseURLOf(&run, edited) != env.fake.URL() {
+		t.Fatalf("编辑后 runModelOf/runBaseURLOf 应仍取快照值: model=%s url=%s",
+			runModelOf(&run, edited), runBaseURLOf(&run, edited))
+	}
+	req := env.fake.nextRequest(t, 10*time.Second)
+	var payload struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("decode request: %v", err)
+	}
+	if payload.Model != "fake-model" {
+		t.Fatalf("已派发的运行应使用快照模型，实得 %s", payload.Model)
+	}
+	done := waitForScheduleRunFinished(t, env, run.ID)
+	if done.Status != model.BotRunStatusCompleted {
+		t.Fatalf("编辑配置不应影响已派发的运行: %s %v", done.Status, done.ErrorMessage)
+	}
+
+	// 场景二：任务指定模型 —— 快照用任务的模型。
+	bot2 := env.createBot(t, userID)
+	due2 := time.Now().UTC().Add(-3 * time.Second)
+	task2 := seedScheduleTask(t, env, bot2.ID, func(tk *model.BotScheduleTask) {
+		tk.NeedsReport = false
+		tk.Model = "task-model"
+		tk.NextRunAt = &due2
+	})
+	env.bots.scheduleTick(time.Now().UTC())
+	var run2 model.BotRun
+	env.db.Where("schedule_task_id = ?", task2.ID).First(&run2)
+	var snap2 botConfigSnapshot
+	if err := json.Unmarshal([]byte(run2.ConfigSnapshotJSON), &snap2); err != nil {
+		t.Fatalf("decode snapshot2: %v", err)
+	}
+	if snap2.Model != "task-model" || snap2.BaseURL != env.fake.URL() {
+		t.Fatalf("任务指定模型时快照应用任务的模型: %+v", snap2)
+	}
+	req2 := env.fake.nextRequest(t, 10*time.Second)
+	var payload2 struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(req2.Body, &payload2); err != nil {
+		t.Fatalf("decode request2: %v", err)
+	}
+	if payload2.Model != "task-model" {
+		t.Fatalf("指定模型的任务应按任务模型执行，实得 %s", payload2.Model)
+	}
+	done2 := waitForScheduleRunFinished(t, env, run2.ID)
+	if done2.Status != model.BotRunStatusCompleted {
+		t.Fatalf("指定模型的运行应完成: %s %v", done2.Status, done2.ErrorMessage)
+	}
+}
+
 // ---------- 3. 独立会话 ----------
 
 func TestBotScheduleIndependentSession(t *testing.T) {
@@ -321,6 +413,95 @@ func TestBotScheduleConcurrentWithMain(t *testing.T) {
 	}
 }
 
+// ---------- 4.5 新输入判定按 run 收窄 ----------
+
+// appendScheduleBackgroundResult 给指定 schedule run 名下追加一条平台后台
+// 结果消息（等价该 run 的异步写完成投影），seq 取账本末位之后。不落 call 行，
+// 消息也就不带 call_id 外键。
+func appendScheduleBackgroundResult(t *testing.T, env *botTestEnv, botID string, runID string, callID string) {
+	t.Helper()
+	seq, err := env.bots.bots.NextMessageSeqTx(env.db, botID)
+	if err != nil {
+		t.Fatalf("seq: %v", err)
+	}
+	raw, err := json.Marshal(botBackgroundResultContent{
+		CallID: callID, ToolName: "fs_project", Action: "create", Status: "succeeded",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	dedup := "terminal:" + callID
+	runIDCopy := runID
+	msg := &model.BotMessage{
+		ID: uuid.NewString(), BotID: botID, Seq: seq,
+		RunID: &runIDCopy,
+		Kind:  model.BotMessageKindBackgroundResult, ContentJSON: string(raw),
+		SessionKind: model.BotSessionKindSchedule,
+		DedupKey:    &dedup, CreatedAt: time.Now().UTC(),
+	}
+	if err := repository.NewBotMessageRepository(env.db).AppendTx(env.db, msg); err != nil {
+		t.Fatalf("append background result: %v", err)
+	}
+}
+
+// TestBotScheduleInputSinceRunScoped 单元级：schedule 会话的新输入判定按 run
+// 收窄，同机器人另一个 schedule run 名下的 background_result 不算自己的新
+// 输入（不收窄的查询能看到，证明两条查询确实不同、收窄真正生效）。
+func TestBotScheduleInputSinceRunScoped(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedruninput")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+
+	runA := seedScheduleRun(t, env, bot.ID, task.ID)
+	runB := seedScheduleRun(t, env, bot.ID, task.ID)
+	appendScheduleBackgroundResult(t, env, bot.ID, runB.ID, "call-sibling-"+uuid.NewString()[:8])
+
+	narrowed, err := env.bots.messages.HasModelInputSince(bot.ID, model.BotSessionKindSchedule, runA.ID, runA.InputThroughSeq)
+	if err != nil || narrowed {
+		t.Fatalf("按 A 的 run 收窄后，B 的消息不应算 A 的新输入: %v %v", narrowed, err)
+	}
+	unscoped, err := env.bots.messages.HasModelInputSince(bot.ID, model.BotSessionKindSchedule, "", runA.InputThroughSeq)
+	if err != nil || !unscoped {
+		t.Fatalf("不收窄应能看到 B 的消息（对照）: %v %v", unscoped, err)
+	}
+	own, err := env.bots.messages.HasModelInputSince(bot.ID, model.BotSessionKindSchedule, runB.ID, 0)
+	if err != nil || !own {
+		t.Fatalf("B 名下的消息应算 B 自己的新输入: %v %v", own, err)
+	}
+}
+
+// TestBotScheduleSiblingRunNotBlocking 行为级：A 运行中，B 名下出现更高 seq
+// 的 schedule background_result，A 不被 B 的消息卡住收尾、也不据此空跑第二
+// 次模型请求，正常落 completed。
+func TestBotScheduleSiblingRunNotBlocking(t *testing.T) {
+	hold := make(chan struct{})
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "A 的定时汇报", Hold: hold})
+	userID := createBotTestUser(t, env.db, "schedsibling")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) { tk.NeedsReport = false })
+
+	runA := seedScheduleRun(t, env, bot.ID, task.ID)
+	env.bots.wakeScheduleRun(bot.ID, runA.ID)
+	env.fake.nextRequest(t, 10*time.Second) // A 的第一次模型请求（挂起中）
+
+	// A 运行中：B 的异步写完成，落一条更高 seq 的 schedule 结果消息。
+	runB := seedScheduleRun(t, env, bot.ID, task.ID)
+	appendScheduleBackgroundResult(t, env, bot.ID, runB.ID, "call-sibling-"+uuid.NewString()[:8])
+
+	close(hold)
+	finished := waitForScheduleRunFinished(t, env, runA.ID)
+	if finished.Status != model.BotRunStatusCompleted {
+		t.Fatalf("A 应正常收尾 completed，不被 B 的消息卡住: %s %v", finished.Status, finished.ErrorMessage)
+	}
+	// A 只应发过开头那一次模型请求：B 的消息不算 A 的新输入。
+	select {
+	case extra := <-env.fake.requests:
+		t.Fatalf("A 不应因 B 的消息再发模型请求: %.120s", extra.Body)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
 // ---------- 5. 默认放行 ----------
 
 func TestBotScheduleDefaultPassAsyncWrite(t *testing.T) {
@@ -424,7 +605,7 @@ func TestBotScheduleEventNeedsReportSuccess(t *testing.T) {
 		t.Fatalf("事件应带结果摘要: %+v", content)
 	}
 	// 事件是主线新输入，主线读取面能查到。
-	hasNew, err := env.bots.messages.HasModelInputSince(bot.ID, model.BotSessionKindMain, 0)
+	hasNew, err := env.bots.messages.HasModelInputSince(bot.ID, model.BotSessionKindMain, "", 0)
 	if err != nil || !hasNew {
 		t.Fatalf("schedule_event 应被识别为主线输入: %v %v", hasNew, err)
 	}

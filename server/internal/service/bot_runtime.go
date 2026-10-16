@@ -236,7 +236,7 @@ func (s *BotService) scanOnce() {
 // background_result / schedule_event）；账本水位差可能来自非输入消息与
 // schedule 会话的消息。
 func (s *BotService) hasUnconsumedInput(b *model.Bot) bool {
-	hasNew, err := s.messages.HasModelInputSince(b.ID, model.BotSessionKindMain, b.OfferedInputSeq)
+	hasNew, err := s.messages.HasModelInputSince(b.ID, model.BotSessionKindMain, "", b.OfferedInputSeq)
 	return err == nil && hasNew
 }
 
@@ -262,7 +262,7 @@ func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, boo
 	// HasModelInputSince 看不见它；通知已带 dedup 落库，直接放行建 run，
 	// 否则重启后的恢复通知永远到不了模型。
 	if wake.Trigger != model.BotTriggerRecovery {
-		hasNew, err := s.messages.HasModelInputSince(bot.ID, model.BotSessionKindMain, bot.OfferedInputSeq)
+		hasNew, err := s.messages.HasModelInputSince(bot.ID, model.BotSessionKindMain, "", bot.OfferedInputSeq)
 		if err != nil {
 			return nil, false, err
 		}

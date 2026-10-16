@@ -70,6 +70,22 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			return nil // next_run_at 已被并发推进或重排，跳过
 		}
 
+		// 派发时冻结有效配置：同事务读一次机器人记下当时的 model/base_url，
+		// wakeScheduleRun 之后（载入执行槽才 Get 机器人）即使配置被编辑，
+		// 这次运行仍按快照执行——与主线 ensureRun 的 botSnapshotOf 同语义。
+		// 只做一次主键查询，不发网络调用。
+		var botRow model.Bot
+		if err := tx.Where("id = ?", current.BotID).First(&botRow).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // 机器人已删除（任务会级联删除），跳过
+			}
+			return err
+		}
+		snap := botSnapshotOf(&botRow)
+		if current.Model != "" {
+			snap.Model = current.Model
+		}
+
 		run := &model.BotRun{
 			ID: uuid.NewString(), BotID: current.BotID,
 			TriggerSource: model.BotTriggerSchedule,
@@ -81,7 +97,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		taskID := current.ID
 		run.ScheduleTaskID = &taskID
 		run.ScheduledFor = &planned
-		run.ConfigSnapshotJSON = botScheduleSnapshotJSON(&current)
+		run.ConfigSnapshotJSON = marshalJSONString(snap)
 		missed := now.Sub(planned) > botScheduleMissGrace
 		if missed {
 			// 错过的计划时间：跳过并记录，不执行、不补跑；直接落终态。
@@ -131,12 +147,6 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 // 一次 run。
 func botScheduleTriggerKey(taskID string, planned time.Time) string {
 	return "schedule:" + taskID + ":" + planned.UTC().Format(time.RFC3339Nano)
-}
-
-// botScheduleSnapshotJSON 是 schedule run 的配置快照：任务可指定模型覆盖
-// 机器人当前模型；地址/密钥沿用机器人当前配置（收尾前不随编辑变化）。
-func botScheduleSnapshotJSON(task *model.BotScheduleTask) string {
-	return marshalJSONString(map[string]interface{}{"model": task.Model})
 }
 
 // isBotRunDuplicateTriggerKey 识别 (bot_id, trigger_key) 唯一冲突。
@@ -205,7 +215,7 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 	finished := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(
-			tx, bot.ID, model.BotSessionKindSchedule, run.InputThroughSeq)
+			tx, bot.ID, model.BotSessionKindSchedule, botInputRunID(run), run.InputThroughSeq)
 		if err != nil || hasNew {
 			return err
 		}

@@ -363,7 +363,7 @@ func (s *BotService) Delete(userID, botID string) error {
 		if err := tx.Raw("SELECT offered_input_seq FROM bots WHERE id = ?", botID).Scan(&bot).Error; err != nil {
 			return errs.ErrInternal
 		}
-		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, botID, model.BotSessionKindMain, bot.OfferedInputSeq)
+		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, botID, model.BotSessionKindMain, "", bot.OfferedInputSeq)
 		if err != nil {
 			return errs.ErrInternal
 		}

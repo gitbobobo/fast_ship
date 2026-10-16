@@ -45,23 +45,33 @@ func botInputKinds() []model.BotMessageKind {
 	}
 }
 
-// HasModelInputSince 报告指定会话在水位之后是否存在新输入。
-func (r *BotMessageRepository) HasModelInputSince(botID, sessionKind string, seq int64) (bool, error) {
-	var count int64
-	err := r.db.Model(&model.BotMessage{}).Where(
+// HasModelInputSince 报告指定会话在水位之后是否存在新输入。runID 非空时再
+// 按 run 收窄：schedule 会话按 run 隔离，同一机器人其他 schedule run 的消息
+// 不算自己的新输入；主线传空串不收窄。
+func (r *BotMessageRepository) HasModelInputSince(botID, sessionKind, runID string, seq int64) (bool, error) {
+	q := r.db.Model(&model.BotMessage{}).Where(
 		"bot_id = ? AND session_kind = ? AND seq > ? AND kind IN (?)", botID, sessionKind, seq,
 		botInputKinds(),
-	).Count(&count).Error
+	)
+	if runID != "" {
+		q = q.Where("run_id = ?", runID)
+	}
+	var count int64
+	err := q.Count(&count).Error
 	return count > 0, err
 }
 
 // HasModelInputSinceTx 同 HasModelInputSince，供完成前的原子检查使用。
-func (r *BotMessageRepository) HasModelInputSinceTx(tx *gorm.DB, botID, sessionKind string, seq int64) (bool, error) {
-	var count int64
-	err := tx.Model(&model.BotMessage{}).Where(
+func (r *BotMessageRepository) HasModelInputSinceTx(tx *gorm.DB, botID, sessionKind, runID string, seq int64) (bool, error) {
+	q := tx.Model(&model.BotMessage{}).Where(
 		"bot_id = ? AND session_kind = ? AND seq > ? AND kind IN (?)", botID, sessionKind, seq,
 		botInputKinds(),
-	).Count(&count).Error
+	)
+	if runID != "" {
+		q = q.Where("run_id = ?", runID)
+	}
+	var count int64
+	err := q.Count(&count).Error
 	return count > 0, err
 }
 

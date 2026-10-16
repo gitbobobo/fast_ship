@@ -294,8 +294,17 @@ func runBaseURLOf(run *model.BotRun, bot *model.Bot) string {
 	return bot.BaseURL
 }
 
+// botInputRunID 解析 run 的新输入判定范围：schedule 会话按 run 隔离（同一
+// 机器人其他 schedule run 的消息不算自己的新输入），主线会话不收窄。
+func botInputRunID(run *model.BotRun) string {
+	if run.SessionKind == model.BotSessionKindSchedule {
+		return run.ID
+	}
+	return ""
+}
+
 // safePoint 读取停止标记与未消费输入；run 的本地水位同步自数据库。输入检查
-// 按会话判别：主线只看主线消息，schedule 会话只看自己的消息。
+// 按会话判别：主线只看主线消息，schedule 会话只看自己 run 名下的消息。
 func (s *BotService) safePoint(run *model.BotRun) botSafePoint {
 	input := botSafePoint{}
 	fresh, err := s.runs.FindByID(run.ID)
@@ -307,7 +316,7 @@ func (s *BotService) safePoint(run *model.BotRun) botSafePoint {
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		s.logger.Warn("读取 run 失败", zap.String("run_id", run.ID), zap.Error(err))
 	}
-	hasNew, err := s.messages.HasModelInputSince(run.BotID, run.SessionKind, run.InputThroughSeq)
+	hasNew, err := s.messages.HasModelInputSince(run.BotID, run.SessionKind, botInputRunID(run), run.InputThroughSeq)
 	if err == nil {
 		input.HasNewInput = hasNew
 	}
@@ -335,7 +344,7 @@ func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
 	}
 	finished := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
-		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, bot.ID, model.BotSessionKindMain, run.InputThroughSeq)
+		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, bot.ID, model.BotSessionKindMain, "", run.InputThroughSeq)
 		if err != nil || hasNew {
 			return err
 		}
