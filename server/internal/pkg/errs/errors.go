@@ -24,6 +24,8 @@ var (
 	ErrScreenshotImageTooLarge         = New(40004, "截图尺寸超出可处理范围")
 	ErrPairingURLInvalid               = New(40005, "配对链接无效或缺少配对码")
 	ErrProjectPublicGitHubTokenMissing = New(40006, "该项目未配置公开仓库 Token")
+	ErrQuotaProviderUnknown            = New(40030, "未知的额度供应商")
+	ErrQuotaCredentialsInvalid         = New(40031, "凭据字段缺失或非法")
 )
 
 // 认证错误 40100-40199
@@ -76,6 +78,7 @@ var (
 	ErrBotRunNotFound               = New(40425, "机器人运行不存在")
 	ErrBotCallNotFound              = New(40426, "机器人调用不存在")
 	ErrBotAuthorizationNotFound     = New(40427, "机器人授权不存在")
+	ErrQuotaAccountNotFound         = New(40430, "额度账号不存在")
 )
 
 // 业务冲突 40900-40999
@@ -108,6 +111,11 @@ var (
 	ErrBotCallStateConflict     = New(40926, "调用状态已变化，操作未生效")
 	ErrBotDeleteConflict        = New(40927, "机器人存在进行中的运行或未终结的调用，请先停止或等待完成")
 	ErrBotRunStateConflict      = New(40928, "运行状态已变化，操作未生效")
+)
+
+// 请求过于频繁 42900-42999
+var (
+	ErrQuotaRefreshTooOften = New(42900, "刷新过于频繁")
 )
 
 // 前置条件未满足 41200-41299

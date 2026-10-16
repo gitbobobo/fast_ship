@@ -90,6 +90,7 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
 		&model.Notification{},
+		&model.QuotaAccount{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}

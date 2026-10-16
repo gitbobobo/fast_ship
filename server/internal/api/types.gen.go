@@ -287,6 +287,99 @@ func (e NotificationKind) Valid() bool {
 	}
 }
 
+// Defines values for QuotaAccountStatus.
+const (
+	QuotaAccountStatusCredentialInvalid QuotaAccountStatus = "credential_invalid"
+	QuotaAccountStatusOk                QuotaAccountStatus = "ok"
+	QuotaAccountStatusPending           QuotaAccountStatus = "pending"
+	QuotaAccountStatusProviderError     QuotaAccountStatus = "provider_error"
+)
+
+// Valid indicates whether the value is a known member of the QuotaAccountStatus enum.
+func (e QuotaAccountStatus) Valid() bool {
+	switch e {
+	case QuotaAccountStatusCredentialInvalid:
+		return true
+	case QuotaAccountStatusOk:
+		return true
+	case QuotaAccountStatusPending:
+		return true
+	case QuotaAccountStatusProviderError:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for QuotaProbeStatus.
+const (
+	QuotaProbeStatusCredentialInvalid QuotaProbeStatus = "credential_invalid"
+	QuotaProbeStatusOk                QuotaProbeStatus = "ok"
+	QuotaProbeStatusProviderError     QuotaProbeStatus = "provider_error"
+)
+
+// Valid indicates whether the value is a known member of the QuotaProbeStatus enum.
+func (e QuotaProbeStatus) Valid() bool {
+	switch e {
+	case QuotaProbeStatusCredentialInvalid:
+		return true
+	case QuotaProbeStatusOk:
+		return true
+	case QuotaProbeStatusProviderError:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for QuotaWindowKind.
+const (
+	Daily    QuotaWindowKind = "daily"
+	FiveHour QuotaWindowKind = "five_hour"
+	Monthly  QuotaWindowKind = "monthly"
+	Other    QuotaWindowKind = "other"
+	Weekly   QuotaWindowKind = "weekly"
+)
+
+// Valid indicates whether the value is a known member of the QuotaWindowKind enum.
+func (e QuotaWindowKind) Valid() bool {
+	switch e {
+	case Daily:
+		return true
+	case FiveHour:
+		return true
+	case Monthly:
+		return true
+	case Other:
+		return true
+	case Weekly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for QuotaWindowUnit.
+const (
+	Count   QuotaWindowUnit = "count"
+	Percent QuotaWindowUnit = "percent"
+	Usd     QuotaWindowUnit = "usd"
+)
+
+// Valid indicates whether the value is a known member of the QuotaWindowUnit enum.
+func (e QuotaWindowUnit) Valid() bool {
+	switch e {
+	case Count:
+		return true
+	case Percent:
+		return true
+	case Usd:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RespondT3ThreadRequestType.
 const (
 	Approval  RespondT3ThreadRequestType = "approval"
@@ -1636,6 +1729,18 @@ type CreateProjectRequest struct {
 	RepositoryUrl *string `json:"repository_url,omitempty"`
 }
 
+// CreateQuotaAccountRequest defines model for CreateQuotaAccountRequest.
+type CreateQuotaAccountRequest struct {
+	// Credentials 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义
+	Credentials QuotaCredentials `json:"credentials"`
+
+	// Label 用户给账号起的名字（如「我的 Pro」）
+	Label string `binding:"required,min=1,max=100" json:"label"`
+
+	// Provider 供应商 id（GET /api/quota/providers 返回的 id）；未知返回 40030
+	Provider string `binding:"required" json:"provider"`
+}
+
 // CreateScreenshotAnnotationRequest x/y/width/height 必填；字段缺省或传 null 一律 40001（nullable 仅为让服务端能区分缺省与显式 0）
 type CreateScreenshotAnnotationRequest struct {
 	// Body 标注文字（1~1000 字符）
@@ -2547,6 +2652,128 @@ type ProjectT3Binding struct {
 	WorkspaceRoot string `json:"workspace_root"`
 }
 
+// QuotaAccount defines model for QuotaAccount.
+type QuotaAccount struct {
+	Balance   *QuotaBalance `json:"balance"`
+	CreatedAt string        `json:"created_at"`
+
+	// CredentialHint 凭据尾号（形如 …ab12）；绝不回显明文
+	CredentialHint string `json:"credential_hint"`
+
+	// FetchedAt 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null
+	FetchedAt *string `json:"fetched_at"`
+	Id        string  `json:"id"`
+	Label     string  `json:"label"`
+
+	// LastError 最近一次失败原因（脱敏后的用户可读文本）
+	LastError string `json:"last_error"`
+
+	// LastSuccessAt 同 fetched_at（保留字段名便于前端区分）
+	LastSuccessAt *string `json:"last_success_at"`
+
+	// PlanName 最近一次成功快照的套餐名；未抓取过为空串
+	PlanName string `json:"plan_name"`
+	Provider string `json:"provider"`
+
+	// ProviderName 供应商显示名（随供应商元数据，非用户可改）
+	ProviderName string `json:"provider_name"`
+
+	// Status ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取
+	Status    QuotaAccountStatus `json:"status"`
+	UpdatedAt string             `json:"updated_at"`
+
+	// Windows 最近一次成功快照的窗口；失败时保留旧数据
+	Windows []QuotaWindow `json:"windows"`
+}
+
+// QuotaAccountStatus ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取
+type QuotaAccountStatus string
+
+// QuotaBalance defines model for QuotaBalance.
+type QuotaBalance struct {
+	// Amount 金额；显式 double，不降 float32
+	Amount   float64 `json:"amount"`
+	Currency string  `json:"currency"`
+	Label    string  `json:"label"`
+}
+
+// QuotaCredentialField defines model for QuotaCredentialField.
+type QuotaCredentialField struct {
+	Help string `json:"help"`
+
+	// Key 凭据字段标识（api_key / token / access_token / org_id / account_id），提交时以它为 credentials 的 map key
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Placeholder string `json:"placeholder"`
+	Required    bool   `json:"required"`
+
+	// Secret 密文字段前端用密码框展示；任何响应不回显
+	Secret bool `json:"secret"`
+}
+
+// QuotaCredentials 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义
+type QuotaCredentials map[string]string
+
+// QuotaProbe defines model for QuotaProbe.
+type QuotaProbe struct {
+	Balance *QuotaBalance `json:"balance"`
+
+	// Detail 可选；更细的诊断（HTTP 状态码等），可为空串
+	Detail string `json:"detail"`
+
+	// Error status != ok 时给用户可读原因（已脱敏）
+	Error    string           `json:"error"`
+	PlanName string           `json:"plan_name"`
+	Status   QuotaProbeStatus `json:"status"`
+	Windows  []QuotaWindow    `json:"windows"`
+}
+
+// QuotaProbeStatus defines model for QuotaProbe.Status.
+type QuotaProbeStatus string
+
+// QuotaProvider defines model for QuotaProvider.
+type QuotaProvider struct {
+	CredentialFields []QuotaCredentialField `json:"credential_fields"`
+
+	// Id 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory）
+	Id string `json:"id"`
+
+	// Instructions 「凭据从哪里获取」分步说明，逐条一句话
+	Instructions []string `json:"instructions"`
+	Name         string   `json:"name"`
+
+	// PlanHint 可选，仅供空态提示
+	PlanHint string `json:"plan_hint"`
+
+	// Warning 会话令牌类供应商必填的过期提示；其余为空串
+	Warning string `json:"warning"`
+}
+
+// QuotaWindow defines model for QuotaWindow.
+type QuotaWindow struct {
+	Kind QuotaWindowKind `json:"kind"`
+
+	// Label 面向用户的窗口名；other 类给准确名字（如 MCP 次数）
+	Label string   `json:"label"`
+	Limit *float64 `json:"limit,omitempty"`
+
+	// ResetAt UTC；窗口重置时间
+	ResetAt *string         `json:"reset_at,omitempty"`
+	Unit    QuotaWindowUnit `json:"unit"`
+
+	// Used 单位由 unit 决定
+	Used *float64 `json:"used,omitempty"`
+
+	// UsedPercent 0..100，四舍五入到 1 位小数；算不出为 null
+	UsedPercent *float64 `json:"used_percent"`
+}
+
+// QuotaWindowKind defines model for QuotaWindow.Kind.
+type QuotaWindowKind string
+
+// QuotaWindowUnit defines model for QuotaWindow.Unit.
+type QuotaWindowUnit string
+
 // RecommendationDependency defines model for RecommendationDependency.
 type RecommendationDependency struct {
 	IssueId        string     `json:"issue_id"`
@@ -3390,6 +3617,15 @@ type TestBotConnectionRequest struct {
 	Model   *string `json:"model,omitempty"`
 }
 
+// TestQuotaCredentialsRequest defines model for TestQuotaCredentialsRequest.
+type TestQuotaCredentialsRequest struct {
+	// Credentials 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义
+	Credentials QuotaCredentials `json:"credentials"`
+
+	// Provider 供应商 id；未知返回 40030
+	Provider string `binding:"required" json:"provider"`
+}
+
 // UpdateAISettingsRequest defines model for UpdateAISettingsRequest.
 type UpdateAISettingsRequest struct {
 	// ApiHost 缺省回退默认 host；须为合法 URL
@@ -3517,6 +3753,15 @@ type UpdateProjectRequest struct {
 
 	// RepositoryUrl 同创建；不再要求项目已配 Token
 	RepositoryUrl *string `json:"repository_url,omitempty"`
+}
+
+// UpdateQuotaAccountRequest defines model for UpdateQuotaAccountRequest.
+type UpdateQuotaAccountRequest struct {
+	// Credentials 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义
+	Credentials *QuotaCredentials `json:"credentials,omitempty"`
+
+	// Label 非空时替换标签；改标签不触发抓取
+	Label *string `binding:"omitempty,max=100" json:"label,omitempty"`
 }
 
 // UpdateScreenshotAnnotationRequest 指针语义：字段出现才更新，都不传返回 40001。
@@ -3716,6 +3961,9 @@ type PullRequestLinkId = string
 
 // QueryToken defines model for QueryToken.
 type QueryToken = string
+
+// QuotaAccountId defines model for QuotaAccountId.
+type QuotaAccountId = string
 
 // RunId defines model for RunId.
 type RunId = string
@@ -5706,6 +5954,66 @@ type CreateVersion200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListQuotaAccounts200JSONResponseBody defines parameters for ListQuotaAccounts.
+type ListQuotaAccounts200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int            `json:"code"`
+	Data []QuotaAccount `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateQuotaAccount200JSONResponseBody defines parameters for CreateQuotaAccount.
+type CreateQuotaAccount200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int           `json:"code"`
+	Data *QuotaAccount `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateQuotaAccount200JSONResponseBody defines parameters for UpdateQuotaAccount.
+type UpdateQuotaAccount200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int           `json:"code"`
+	Data *QuotaAccount `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// RefreshQuotaAccount200JSONResponseBody defines parameters for RefreshQuotaAccount.
+type RefreshQuotaAccount200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int           `json:"code"`
+	Data *QuotaAccount `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListQuotaProviders200JSONResponseBody defines parameters for ListQuotaProviders.
+type ListQuotaProviders200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int             `json:"code"`
+	Data []QuotaProvider `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// TestQuotaCredentials200JSONResponseBody defines parameters for TestQuotaCredentials.
+type TestQuotaCredentials200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int         `json:"code"`
+	Data *QuotaProbe `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListIssueRecommendationsParams defines parameters for ListIssueRecommendations.
 type ListIssueRecommendationsParams struct {
 	// ProjectId 项目 ID；缺省返回当前用户全部项目的推荐
@@ -6218,6 +6526,15 @@ type UpsertProjectT3BindingJSONRequestBody = UpsertT3BindingRequest
 
 // CreateVersionJSONRequestBody defines body for CreateVersion for application/json ContentType.
 type CreateVersionJSONRequestBody = CreateVersionRequest
+
+// CreateQuotaAccountJSONRequestBody defines body for CreateQuotaAccount for application/json ContentType.
+type CreateQuotaAccountJSONRequestBody = CreateQuotaAccountRequest
+
+// UpdateQuotaAccountJSONRequestBody defines body for UpdateQuotaAccount for application/json ContentType.
+type UpdateQuotaAccountJSONRequestBody = UpdateQuotaAccountRequest
+
+// TestQuotaCredentialsJSONRequestBody defines body for TestQuotaCredentials for application/json ContentType.
+type TestQuotaCredentialsJSONRequestBody = TestQuotaCredentialsRequest
 
 // UpdateScreenshotAnnotationJSONRequestBody defines body for UpdateScreenshotAnnotation for application/json ContentType.
 type UpdateScreenshotAnnotationJSONRequestBody = UpdateScreenshotAnnotationRequest

@@ -86,6 +86,7 @@ var autoMigrateModels = []interface{}{
 	&model.GitHubPRDebounce{},
 	&model.GitHubPRReview{},
 	&model.GitHubPRSeenSHA{},
+	&model.QuotaAccount{},
 }
 
 func init() {
@@ -242,6 +243,7 @@ func main() {
 	automationRunRepo := repository.NewAutomationRunRepository(db)
 	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
+	quotaAccountRepo := repository.NewQuotaAccountRepository(db)
 
 	// 业务库就绪后再注入归属解析器：注入前的入库日志只能是启动类（显式 system_scope）。
 	selfLogPipeline.SetOwnerResolver(service.NewSelfLogOwnerResolver(db))
@@ -250,6 +252,7 @@ func main() {
 	githubLogger := zapLogger.With(zap.String("module", "github"))
 	t3Logger := zapLogger.With(zap.String("module", "t3"))
 	automationLogger := zapLogger.With(zap.String("module", "automation"))
+	quotaLogger := zapLogger.With(zap.String("module", "quota"))
 
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, appLogger.With(slog.String("module", "auth")))
@@ -301,6 +304,11 @@ func main() {
 	automationScheduler := service.NewAutomationScheduler(db, automationRepo, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, issueRepo, cfg, automationLogger)
 	automationAgentService.SetKick(automationScheduler.Kick)
 
+	// 订阅套餐额度（INT-109）：凭据加密落库 + 定时抓取；quota.enabled=false 时
+	// 接口仍可用（手动刷新正常），只是没有后台轮。
+	quotaService := service.NewQuotaService(quotaAccountRepo, cfg, quotaLogger, nil)
+	quotaScheduler := service.NewQuotaScheduler(quotaService, quotaAccountRepo, cfg, quotaLogger)
+
 	// PR 评审协调面（INT-93）：webhook 事务、防抖开轮、排队提升、评论/check 同步。
 	prReviewService := service.NewPRReviewService(db,
 		automationRepo, automationRunRepo, projectRepo,
@@ -341,6 +349,7 @@ func main() {
 	botHandler := handler.NewBotHandler(botService)
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(prReviewService, cfg.GitHubApp.WebhookSecret, ghFake)
+	quotaHandler := handler.NewQuotaHandler(quotaService)
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -399,6 +408,10 @@ func main() {
 	// 自动化协调循环（INT-90）：到期 cron、待认领运行、超时与后置统一由它推进。
 	automationScheduler.Start()
 
+	if cfg.Quota.Enabled {
+		quotaScheduler.Start()
+	}
+
 	// 机器人（INT-101）：启动恢复在所有 worker 之前；恢复完成后才启动
 	// runtime 与后台 worker。
 	if err := botService.RecoverOnStartup(); err != nil {
@@ -414,7 +427,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。

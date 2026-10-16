@@ -25,6 +25,17 @@ issues:
   auto_sync_on_startup: true
   auto_sync_interval_minutes: 15
 
+# 订阅套餐额度（INT-109）：定时抓取各 AI 编码服务额度，只读展示。
+# base_urls 仅部署/测试覆盖供应商 origin 用，如 {"factory": "http://127.0.0.1:5099"}。
+quota:
+  enabled: true
+  interval_minutes: 10
+  run_on_startup: true
+  max_concurrency: 3
+  request_timeout_seconds: 20
+  manual_refresh_cooldown_seconds: 30
+  base_urls: {}
+
 # Fast Ship 自身日志（INT-94）：独立 SQLite 日志库，异步批量写入，只读查询见 /api/self-logs
 logging:
   self_log_path: ./data/self_logs.db  # 独立日志库文件，不与业务库混用
