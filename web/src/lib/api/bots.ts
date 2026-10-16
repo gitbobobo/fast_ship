@@ -62,7 +62,8 @@ export type BotMessageKind =
   | "tool_reply"
   | "background_result"
   | "approval_decision"
-  | "lifecycle";
+  | "lifecycle"
+  | "schedule_event";
 
 /** assistant content.tool_calls 的条目：与调用账本（calls）按 call_id 关联。 */
 export interface BotAssistantToolCall {
@@ -79,8 +80,9 @@ export interface BotAssistantToolCall {
  * user/assistant 是 text（assistant 另带 tool_calls）；tool_reply 携带
  * call_id/tool_name/status 与协议回复字符串 content；background_result 携带
  * call_id/tool_name/action/status 与可选 summary、错误信息；approval_decision
- * 是 call_id + decision；lifecycle 是 event + 任意 detail。字段可空是因为
- * 具体形状取决于 kind。
+ * 是 call_id + decision；lifecycle 是 event + 任意 detail；schedule_event
+ * 携带 task_id/task_name/run_id/status 与可选 summary、错误信息。字段可空
+ * 是因为具体形状取决于 kind。
  */
 export interface BotMessageContent {
   text?: string;
@@ -99,6 +101,10 @@ export interface BotMessageContent {
   decision?: string;
   event?: string;
   detail?: unknown;
+  /** schedule_event：定时任务运行事件的归属信息。 */
+  task_id?: string;
+  task_name?: string;
+  run_id?: string;
 }
 
 export interface BotMessage {
@@ -227,6 +233,73 @@ export interface SendBotMessageResult {
   queued: boolean;
 }
 
+// ---- 定时任务（INT-103）----
+
+export type BotScheduleRunStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "skipped";
+
+export interface BotScheduleRun {
+  id: string;
+  task_id: string;
+  status: BotScheduleRunStatus;
+  summary: string;
+  /** 静默运行（结果不回报到对话）。 */
+  silent: boolean;
+  error_code?: string;
+  error_message?: string;
+  scheduled_for: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  duration_ms: number | null;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+/**
+ * 定时任务只能由机器人经工具创建/修改/删除，前端只读 + 启停。
+ * timezone 空串按 UTC；model 空串 = 用机器人自身模型。
+ */
+export interface BotScheduleTask {
+  id: string;
+  bot_id: string;
+  name: string;
+  cron_expression: string;
+  timezone: string;
+  instruction: string;
+  model: string;
+  needs_report: boolean;
+  enabled: boolean;
+  next_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+  last_run: BotScheduleRun | null;
+}
+
+export interface BotScheduleRunsQuery {
+  limit?: number;
+  offset?: number;
+}
+
+export function botScheduleRunStatusLabel(status: BotScheduleRunStatus): string {
+  switch (status) {
+    case "running":
+      return "运行中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "已失败";
+    case "stopped":
+      return "已停止";
+    case "skipped":
+      return "已跳过";
+  }
+}
+
 export const BOT_REQUEST_TIMEOUT_MS = 35_000;
 
 function options(signal?: AbortSignal) {
@@ -241,13 +314,15 @@ function write<T>(promise: Promise<ApiResponse<T>>) {
 const botPath = (botId: string) => `bots/${encodeURIComponent(botId)}`;
 const callPath = (botId: string, callId: string) =>
   `${botPath(botId)}/calls/${encodeURIComponent(callId)}`;
+const scheduleTaskPath = (botId: string, taskId: string) =>
+  `${botPath(botId)}/schedule-tasks/${encodeURIComponent(taskId)}`;
 
 /** searchParams 只收已定义字段，避免 undefined 被序列化成字符串。 */
-function definedParams(params: BotMessagesQuery) {
+function definedParams(params: Record<string, number | undefined>) {
   const searchParams: Record<string, string> = {};
-  if (params.after_seq !== undefined) searchParams.after_seq = String(params.after_seq);
-  if (params.before_seq !== undefined) searchParams.before_seq = String(params.before_seq);
-  if (params.limit !== undefined) searchParams.limit = String(params.limit);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) searchParams[key] = String(value);
+  }
   return Object.keys(searchParams).length > 0 ? searchParams : undefined;
 }
 
@@ -297,7 +372,11 @@ export const botApi = {
       api
         .get(`${botPath(botId)}/messages`, {
           ...options(signal),
-          searchParams: definedParams(query),
+          searchParams: definedParams({
+            after_seq: query.after_seq,
+            before_seq: query.before_seq,
+            limit: query.limit,
+          }),
         })
         .json<ApiResponse<{ items: BotMessage[] }>>(),
     ),
@@ -369,5 +448,48 @@ export const botApi = {
           options(),
         )
         .json<ApiResponse<null>>(),
+    ),
+
+  scheduleTasks: (botId: string, signal?: AbortSignal) =>
+    decodeApiError(
+      api
+        .get(`${botPath(botId)}/schedule-tasks`, options(signal))
+        .json<ApiResponse<{ items: BotScheduleTask[] }>>(),
+    ),
+
+  scheduleTask: (botId: string, taskId: string, signal?: AbortSignal) =>
+    decodeApiError(
+      api
+        .get(scheduleTaskPath(botId, taskId), options(signal))
+        .json<ApiResponse<BotScheduleTask>>(),
+    ),
+
+  scheduleTaskRuns: (
+    botId: string,
+    taskId: string,
+    query: BotScheduleRunsQuery = {},
+    signal?: AbortSignal,
+  ) =>
+    decodeApiError(
+      api
+        .get(`${scheduleTaskPath(botId, taskId)}/runs`, {
+          ...options(signal),
+          searchParams: definedParams({
+            limit: query.limit,
+            offset: query.offset,
+          }),
+        })
+        .json<ApiResponse<{ items: BotScheduleRun[] }>>(),
+    ),
+
+  /** 用户侧唯一写操作：任务的增删改由机器人经工具完成。 */
+  setScheduleTaskEnabled: (botId: string, taskId: string, enabled: boolean) =>
+    write(
+      api
+        .put(`${scheduleTaskPath(botId, taskId)}/enabled`, {
+          json: { enabled },
+          ...options(),
+        })
+        .json<ApiResponse<BotScheduleTask>>(),
     ),
 };

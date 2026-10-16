@@ -57,6 +57,9 @@ const (
 	BotRunStatusCompleted BotRunStatus = "completed"
 	BotRunStatusFailed    BotRunStatus = "failed"
 	BotRunStatusStopped   BotRunStatus = "stopped"
+	// BotRunStatusSkipped 是定时任务专用终态：计划时间已错过超过宽限，按
+	// 「跳过并记录」处理，不执行。
+	BotRunStatusSkipped BotRunStatus = "skipped"
 )
 
 type BotRunTrigger string
@@ -65,10 +68,19 @@ const (
 	BotTriggerUserMessage BotRunTrigger = "user_message"
 	BotTriggerToolResult  BotRunTrigger = "tool_result"
 	BotTriggerRecovery    BotRunTrigger = "recovery"
+	BotTriggerSchedule    BotRunTrigger = "schedule"
 )
 
-// BotRun 是一次主线执行。同一 bot 至多一个未结束 run（部分唯一索引兜底），
-// 唯一 (bot_id, trigger_key) 让重复投递的触发不重复建 run。
+// 会话判别：主线（main）与定时任务（schedule）共用 bot_runs/bot_messages
+// 账本与 seq 水位，但读取面互相隔离。列默认 main，存量行无需回填。
+const (
+	BotSessionKindMain     = "main"
+	BotSessionKindSchedule = "schedule"
+)
+
+// BotRun 是一次主线执行。同一 bot 至多一个未结束主线 run（部分唯一索引按
+// session_kind='main' 兜底），唯一 (bot_id, trigger_key) 让重复投递的触发
+// 不重复建 run；schedule 会话不受部分唯一约束，靠 trigger_key 幂等。
 type BotRun struct {
 	ID            string        `gorm:"type:text;primaryKey" json:"id"`
 	BotID         string        `gorm:"type:text;not null" json:"bot_id"`
@@ -77,6 +89,15 @@ type BotRun struct {
 	// TriggerContextJSON 记录触发来源的细节（消息 seq、call_id 等）。
 	TriggerContextJSON string       `gorm:"type:text;not null" json:"trigger_context_json"`
 	Status             BotRunStatus `gorm:"type:text;not null" json:"status"`
+	// SessionKind 区分主线与定时任务会话；ScheduleTaskID / ScheduledFor 只
+	// 在 schedule 会话有值（不建外键：任务删除后运行记录仍保留供排查）。
+	SessionKind    string     `gorm:"type:text;not null;default:main" json:"session_kind"`
+	ScheduleTaskID *string    `gorm:"type:text" json:"schedule_task_id,omitempty"`
+	ScheduledFor   *time.Time `json:"scheduled_for,omitempty"`
+	// Summary 是运行收尾时的结果摘要（截断到安全长度）；Silent 标记静默
+	// 结果（[[SILENT]] 哨兵）。skipped run 的 Summary 记跳过原因。
+	Summary string `gorm:"type:text;not null;default:''" json:"summary"`
+	Silent  bool   `gorm:"not null;default:false" json:"silent"`
 	// ConfigSnapshotJSON 是本次 run 的模型 / 地址 / 提示词版本快照，不含明文 key。
 	ConfigSnapshotJSON string `gorm:"type:text;not null" json:"config_snapshot"`
 	// InputThroughSeq 是本 run 已消费的输入水位；新输入指 seq 大于它的

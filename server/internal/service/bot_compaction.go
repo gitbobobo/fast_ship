@@ -454,7 +454,7 @@ func (s *BotService) planCompaction(bot *model.Bot, run *model.BotRun, reason mo
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	rows, err := s.listMessagesThrough(bot.ID, state.SummaryThroughSeq, maxSeq)
+	rows, err := s.listMessagesThrough(bot.ID, model.BotSessionKindMain, "", state.SummaryThroughSeq, maxSeq)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -840,7 +840,7 @@ func (s *BotService) estimateSnapshotTokensPair(bot *model.Bot, plan *botCompact
 	if bot == nil || plan == nil || plan.State == nil {
 		return 0, 0
 	}
-	rows, err := s.listMessagesThrough(bot.ID, snap.SummaryThroughSeq, 0)
+	rows, err := s.listMessagesThrough(bot.ID, model.BotSessionKindMain, "", snap.SummaryThroughSeq, 0)
 	if err != nil {
 		rows = nil
 	}
@@ -1567,6 +1567,9 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	if to >= 3 && from < 3 {
+		return "工具集已升级：fs_schedule 开放定时任务管理（list/create/update/delete/runs/enable/disable，全部同步执行；旧动作 status 已移除）"
+	}
 	return "工具集已升级：新增 fs_memory 系列与 fs_memory_search；旧动作 fs_memory/search 已改名为 fs_memory_search/search"
 }
 

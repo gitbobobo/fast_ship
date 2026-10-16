@@ -58,6 +58,19 @@ export const botKeys = {
     "snapshot",
     botId,
   ],
+  scheduleTasks: (userId: string | null, botId: string) => [
+    BOTS_ROOT,
+    userId,
+    "schedule-tasks",
+    botId,
+  ],
+  scheduleTaskRuns: (userId: string | null, botId: string, taskId: string) => [
+    BOTS_ROOT,
+    userId,
+    "schedule-task-runs",
+    botId,
+    taskId,
+  ],
 };
 
 function useUserId() {
@@ -151,6 +164,58 @@ export function useRevokeAuthorization(botId: string) {
     onSettled: () =>
       queryClient.invalidateQueries({
         queryKey: botKeys.authorizations(userId, botId),
+      }),
+  });
+}
+
+/** 详情弹窗固定拉最近一页运行记录；不做翻页。 */
+export const BOT_SCHEDULE_RUNS_PAGE = 20;
+
+/** 列表轮询间隔：任务状态由机器人/调度器在服务端改变，前端没有推送。 */
+export const BOT_SCHEDULE_TASKS_POLL_MS = 15_000;
+
+export function useBotScheduleTasks(botId: string) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.scheduleTasks(userId, botId),
+    queryFn: async ({ signal }) =>
+      (await botApi.scheduleTasks(botId, signal)).data.items,
+    enabled: Boolean(userId && botId),
+    refetchOnMount: "always",
+    // 任务的增改由机器人经工具完成，计划运行也不在聊天事件里：
+    // 停在详情页时轮询，保证「下次运行」「最近一次结果」自己跟上。
+    refetchInterval: BOT_SCHEDULE_TASKS_POLL_MS,
+  });
+}
+
+/** taskId 为空不读：详情弹窗关闭时不发请求。 */
+export function useBotScheduleTaskRuns(botId: string, taskId: string | null) {
+  const userId = useUserId();
+  return useQuery({
+    queryKey: botKeys.scheduleTaskRuns(userId, botId, taskId ?? ""),
+    queryFn: async ({ signal }) =>
+      (
+        await botApi.scheduleTaskRuns(
+          botId,
+          taskId as string,
+          { limit: BOT_SCHEDULE_RUNS_PAGE },
+          signal,
+        )
+      ).data.items,
+    enabled: Boolean(userId && botId && taskId),
+  });
+}
+
+/** 启停成功后任务行整体失效：enabled 与 last_run/next_run_at 一并刷新。 */
+export function useSetBotScheduleTaskEnabled(botId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: ({ taskId, enabled }: { taskId: string; enabled: boolean }) =>
+      botApi.setScheduleTaskEnabled(botId, taskId, enabled),
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: botKeys.scheduleTasks(userId, botId),
       }),
   });
 }

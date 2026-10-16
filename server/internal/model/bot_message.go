@@ -19,6 +19,10 @@ type BotMessage struct {
 	// ContentJSON 按 kind 携带完整正文、assistant 的工具调用数组或结构化事件。
 	ContentJSON string `gorm:"type:text;not null" json:"content"`
 
+	// SessionKind 区分主线与定时任务会话；两套会话共用 seq 水位，读取面按
+	// 此列隔离（主线读者只看 main，定时任务会话不对用户展示）。默认 main。
+	SessionKind string `gorm:"type:text;not null;default:main" json:"session_kind"`
+
 	// ClientMessageID 是用户发送幂等键；DedupKey 例如 receipt:<call_id>、
 	// terminal:<call_id>，两者都靠唯一索引挡重复追加。
 	ClientMessageID *string   `gorm:"type:text" json:"client_message_id,omitempty"`
@@ -44,12 +48,16 @@ const (
 	BotMessageKindBackgroundResult BotMessageKind = "background_result"
 	BotMessageKindApprovalDecision BotMessageKind = "approval_decision"
 	BotMessageKindLifecycle        BotMessageKind = "lifecycle"
+	// BotMessageKindScheduleEvent 是定时任务运行事件（INT-103）：落在主线
+	// 会话末尾，触发机器人判断是否通知用户。
+	BotMessageKindScheduleEvent BotMessageKind = "schedule_event"
 )
 
-// IsModelInput 报告该类消息是否算「新输入」：只有用户消息与平台后台结果会
-// 触发/延续主线；回执与审计类消息随工具块进入上下文，不算新输入。
+// IsModelInput 报告该类消息是否算「新输入」：用户消息、平台后台结果与定时
+// 任务运行事件会触发/延续主线；回执与审计类消息随工具块进入上下文，不算
+// 新输入。
 func (k BotMessageKind) IsModelInput() bool {
-	return k == BotMessageKindUser || k == BotMessageKindBackgroundResult
+	return k == BotMessageKindUser || k == BotMessageKindBackgroundResult || k == BotMessageKindScheduleEvent
 }
 
 // BotEvent 是 SSE 的持久重放账本：不进入模型上下文，解决断线补齐、后台结果
@@ -60,7 +68,9 @@ type BotEvent struct {
 
 	RunID *string `gorm:"type:text" json:"run_id,omitempty"`
 	// EventType 固定五种 SSE 类型：delta / tool_call / tool_result / done / error。
-	EventType   string    `gorm:"type:text;not null" json:"event_type"`
+	EventType string `gorm:"type:text;not null" json:"event_type"`
+	// SessionKind 隔离定时任务的流式事件：聊天页读者只返回 main。
+	SessionKind string    `gorm:"type:text;not null;default:main" json:"session_kind"`
 	PayloadJSON string    `gorm:"type:text;not null" json:"payload"`
 	CreatedAt   time.Time `gorm:"not null" json:"created_at"`
 

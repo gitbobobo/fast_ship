@@ -1248,10 +1248,35 @@ func TestBotCapabilityAndHelp(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "botcap")
 	bot := env.createBot(t, userID)
 
+	capabilityContent := func(tool string) string {
+		call := &model.BotToolCall{
+			ID: uuid.NewString(), BotID: bot.ID, RequestID: "req-x",
+			ProviderToolCallID: "prov", ToolName: tool, Action: "status",
+			ArgumentsJSON: `{"action":"status"}`, ArgumentsHash: "x", ExecutionMode: "sync",
+			Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
+			CreatedAt: time.Now().UTC(),
+		}
+		content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		return content
+	}
+
+	// 冻结在 v2 的会话：fs_schedule 不可用（工具面没有任务管理动作）。
+	env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Update("toolset_version", 2)
+	if content := capabilityContent("fs_schedule"); !strings.Contains(content, `"available":false`) {
+		t.Fatalf("fs_schedule 回复不含 \"available\":false: %s", content)
+	}
+	// 已激活 v3 的会话：fs_schedule 可用。
+	env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Update("toolset_version", 3)
+	if content := capabilityContent("fs_schedule"); !strings.Contains(content, `"available":true`) {
+		t.Fatalf("v3 下 fs_schedule 应可用: %s", content)
+	}
+
 	for _, tc := range []struct {
 		tool, action, args, contains string
 	}{
-		{"fs_schedule", "status", `{"action":"status"}`, `"available":false`},
 		{"fs_memory", "status", `{"action":"status"}`, `"capability":"memory"`},
 		{"fs_help", "read", "{}", "工具说明"},
 	} {

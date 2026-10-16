@@ -27,13 +27,14 @@ type BotService struct {
 	cfg    *config.Config
 	logger *zap.Logger
 
-	bots     *repository.BotRepository
-	messages *repository.BotMessageRepository
-	events   *repository.BotEventRepository
-	runs     *repository.BotRunRepository
-	requests *repository.BotModelRequestRepository
-	calls    *repository.BotToolCallRepository
-	authz    *repository.BotAuthorizationRepository
+	bots       *repository.BotRepository
+	messages   *repository.BotMessageRepository
+	events     *repository.BotEventRepository
+	runs       *repository.BotRunRepository
+	requests   *repository.BotModelRequestRepository
+	calls      *repository.BotToolCallRepository
+	authz      *repository.BotAuthorizationRepository
+	schedTasks *repository.BotScheduleTaskRepository
 
 	projects *ProjectService
 	issues   *IssueService
@@ -74,22 +75,23 @@ func NewBotService(
 	bindings *T3BindingService,
 ) *BotService {
 	return &BotService{
-		db:        db,
-		cfg:       cfg,
-		logger:    logger,
-		bots:      repository.NewBotRepository(db),
-		messages:  repository.NewBotMessageRepository(db),
-		events:    repository.NewBotEventRepository(db),
-		runs:      repository.NewBotRunRepository(db),
-		requests:  repository.NewBotModelRequestRepository(db),
-		calls:     repository.NewBotToolCallRepository(db),
-		authz:     repository.NewBotAuthorizationRepository(db),
-		projects:  projects,
-		issues:    issues,
-		threads:   threads,
-		bindings:  bindings,
-		rt:        newBotRuntimeState(),
-		streamHub: newBotStreamHub(),
+		db:         db,
+		cfg:        cfg,
+		logger:     logger,
+		bots:       repository.NewBotRepository(db),
+		messages:   repository.NewBotMessageRepository(db),
+		events:     repository.NewBotEventRepository(db),
+		runs:       repository.NewBotRunRepository(db),
+		requests:   repository.NewBotModelRequestRepository(db),
+		calls:      repository.NewBotToolCallRepository(db),
+		authz:      repository.NewBotAuthorizationRepository(db),
+		schedTasks: repository.NewBotScheduleTaskRepository(db),
+		projects:   projects,
+		issues:     issues,
+		threads:    threads,
+		bindings:   bindings,
+		rt:         newBotRuntimeState(),
+		streamHub:  newBotStreamHub(),
 	}
 }
 
@@ -328,6 +330,18 @@ func (s *BotService) Delete(userID, botID string) error {
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return errs.ErrInternal
 		}
+		// 定时任务 run 不占主线槽，删除时同样视为进行中：避免级联删除一个
+		// 正在执行的会话。
+		var activeSchedule int64
+		if err := tx.Model(&model.BotRun{}).
+			Where("bot_id = ? AND finished_at IS NULL AND session_kind = ?",
+				botID, model.BotSessionKindSchedule).
+			Count(&activeSchedule).Error; err != nil {
+			return errs.ErrInternal
+		}
+		if activeSchedule > 0 {
+			return errs.ErrBotDeleteConflict
+		}
 		active, err := repository.NewBotToolCallRepository(tx).ListByBot(botID, []string{
 			string(model.BotCallStatusPendingConfirmation),
 			string(model.BotCallStatusQueued),
@@ -349,7 +363,7 @@ func (s *BotService) Delete(userID, botID string) error {
 		if err := tx.Raw("SELECT offered_input_seq FROM bots WHERE id = ?", botID).Scan(&bot).Error; err != nil {
 			return errs.ErrInternal
 		}
-		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, botID, bot.OfferedInputSeq)
+		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, botID, model.BotSessionKindMain, bot.OfferedInputSeq)
 		if err != nil {
 			return errs.ErrInternal
 		}
@@ -523,6 +537,7 @@ func (s *BotService) SendMessage(userID, botID string, req *SendMessageRequest) 
 			Seq:             seq,
 			Kind:            model.BotMessageKindUser,
 			ContentJSON:     string(raw),
+			SessionKind:     model.BotSessionKindMain,
 			ClientMessageID: &clientMsgID,
 			CreatedAt:       time.Now().UTC(),
 		}

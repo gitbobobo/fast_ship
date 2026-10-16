@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { BotChat } from "@/components/bots/bot-chat";
 import { BotFormDialog } from "@/components/bots/bot-form-dialog";
 import { BotAuthorizationsDialog } from "@/components/bots/bot-authorizations-dialog";
+import { BotScheduleSection } from "@/components/bots/bot-schedule-section";
 import { useBot } from "@/lib/hooks/use-bots";
 
 /**
@@ -54,6 +55,7 @@ export default function BotDetailPage() {
         </div>
       ) : (
         <>
+          <BotScheduleSection botId={botId} />
           <BotChat key={botId} botId={botId} />
           {bot && (
             <>

@@ -98,7 +98,8 @@ func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFree
 	applyRunCredentialFreeze(bot, *freeze)
 }
 
-// botLoop 单 run 主循环。
+// botLoop 单 run 主循环。主线与定时任务（INT-103）共用同一骨架：差异只有
+// 上下文构建、压缩/工具集激活（schedule 全部跳过）、记忆基线与收尾分支。
 func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Context) {
 	key, err := s.decryptAPIKey(bot)
 	if err != nil {
@@ -111,6 +112,16 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 	client := botNewClient(freeze.BaseURL, key)
 	streamClient := client
 
+	// schedule 会话冻结物：任务快照、run 开始时的工具集与记忆注入。
+	var sched *botScheduleSession
+	if run.SessionKind == model.BotSessionKindSchedule {
+		sched, err = s.newScheduleSession(bot, run)
+		if err != nil {
+			s.finishFailed(bot, run, "schedule_task_missing", err)
+			return
+		}
+	}
+
 	var calls []*model.BotToolCall
 	contextLimitRetried := false
 	for {
@@ -120,51 +131,62 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			return
 		}
 
-		if err := s.activateOnProcessStart(bot); err != nil {
-			s.logger.Warn("激活工具集失败")
+		if sched == nil {
+			if err := s.activateOnProcessStart(bot); err != nil {
+				s.logger.Warn("激活工具集失败")
+			}
+			if bot.SystemPromptText != freeze.SystemPromptText {
+				// 进程首次运行的工具/提示词激活是重启边界，允许接收新前缀。
+				freeze.SystemPromptText = bot.SystemPromptText
+				freeze.PromptRevision = bot.PromptRevision
+				freeze.PlatformPromptVersion = bot.PlatformPromptVersion
+				freeze.PersonaPrompt = bot.PersonaPrompt
+			}
+			if fresh, err := s.bots.Get(bot.ID); err == nil {
+				bot.LastToldVersion = fresh.LastToldVersion
+				bot.OfferedInputSeq = fresh.OfferedInputSeq
+			}
+			applyRunCredentialFreeze(bot, freeze)
+			applyRunPromptFreeze(bot, freeze)
+			s.maybeTellToolset(bot, run)
 		}
-		if bot.SystemPromptText != freeze.SystemPromptText {
-			// 进程首次运行的工具/提示词激活是重启边界，允许接收新前缀。
-			freeze.SystemPromptText = bot.SystemPromptText
-			freeze.PromptRevision = bot.PromptRevision
-			freeze.PlatformPromptVersion = bot.PlatformPromptVersion
-			freeze.PersonaPrompt = bot.PersonaPrompt
-		}
-		if fresh, err := s.bots.Get(bot.ID); err == nil {
-			bot.LastToldVersion = fresh.LastToldVersion
-			bot.OfferedInputSeq = fresh.OfferedInputSeq
-		}
-		applyRunCredentialFreeze(bot, freeze)
-		applyRunPromptFreeze(bot, freeze)
-		s.maybeTellToolset(bot, run)
 
-		built, err := s.buildRunContext(bot, run)
+		var built *botBuiltContext
+		if sched != nil {
+			built, err = s.buildScheduleRunContext(bot, run, sched)
+		} else {
+			built, err = s.buildRunContext(bot, run)
+		}
 		if err != nil {
 			s.finishFailed(bot, run, "context_build_failed", err)
 			return
 		}
-		window := s.cfg.Bots.Context.WindowTokensFor(runModelOf(run, bot))
-		trigger := botFloorRatio(window, s.cfg.Bots.Context.CompressionRatioV())
-		if built.InputTokensEstimate >= trigger {
-			outcome, err := s.runCompactionCycle(ctx, bot, run, model.BotCompactionThreshold)
-			if err != nil {
-				if errors.Is(err, errContextUncompressible) || built.InputTokensEstimate >= window {
-					s.finishFailed(bot, run, compactionFailCode(err), err)
+		// schedule 会话不做 INT-102 压缩：独立会话天然短，且压缩会改写
+		// bot_context_states 持久投影（主线专属状态）。
+		if sched == nil {
+			window := s.cfg.Bots.Context.WindowTokensFor(runModelOf(run, bot))
+			trigger := botFloorRatio(window, s.cfg.Bots.Context.CompressionRatioV())
+			if built.InputTokensEstimate >= trigger {
+				outcome, err := s.runCompactionCycle(ctx, bot, run, model.BotCompactionThreshold)
+				if err != nil {
+					if errors.Is(err, errContextUncompressible) || built.InputTokensEstimate >= window {
+						s.finishFailed(bot, run, compactionFailCode(err), err)
+						return
+					}
+				}
+				if s.maintenanceStopped(ctx, run) {
+					s.finishStopped(bot, run)
 					return
 				}
-			}
-			if s.maintenanceStopped(ctx, run) {
-				s.finishStopped(bot, run)
-				return
-			}
-			if outcome != nil && outcome.Published {
-				s.acceptCompactionBoundary(bot, &freeze, outcome.Snapshot)
-				s.clearUsageBaseline(bot.ID)
-			}
-			built, err = s.buildRunContext(bot, run)
-			if err != nil {
-				s.finishFailed(bot, run, "context_build_failed", err)
-				return
+				if outcome != nil && outcome.Published {
+					s.acceptCompactionBoundary(bot, &freeze, outcome.Snapshot)
+					s.clearUsageBaseline(bot.ID)
+				}
+				built, err = s.buildRunContext(bot, run)
+				if err != nil {
+					s.finishFailed(bot, run, "context_build_failed", err)
+					return
+				}
 			}
 		}
 		requestRow, err := s.beginModelRequest(bot, run, built)
@@ -188,8 +210,9 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 				return
 			}
 			// 上游上下文超限：强制压缩一次后恰好重试一次；其他错误
-			//（400 参数、429 限流等）不重试。
-			if botIsContextLimitError(streamErr) && !contextLimitRetried {
+			//（400 参数、429 限流等）不重试。schedule 会话不压缩，超限
+			// 直接失败并记录。
+			if sched == nil && botIsContextLimitError(streamErr) && !contextLimitRetried {
 				contextLimitRetried = true
 				outcome, compErr := s.runCompactionCycle(ctx, bot, run, model.BotCompactionForced)
 				if compErr != nil {
@@ -213,7 +236,10 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		}
 		contextLimitRetried = false
 		s.finishModelRequest(requestRow, reply, nil)
-		s.rememberUsageBaseline(bot, run, built, reply)
+		if sched == nil {
+			// usage 增量基线是主线压缩估算的状态，schedule 会话不碰。
+			s.rememberUsageBaseline(bot, run, built, reply)
+		}
 		s.accumulateRunUsage(run, reply)
 
 		calls, err := s.commitAssistantTurn(bot, run, requestRow, reply, assistantMsgID)
@@ -268,7 +294,8 @@ func runBaseURLOf(run *model.BotRun, bot *model.Bot) string {
 	return bot.BaseURL
 }
 
-// safePoint 读取停止标记与未消费输入；run 的本地水位同步自数据库。
+// safePoint 读取停止标记与未消费输入；run 的本地水位同步自数据库。输入检查
+// 按会话判别：主线只看主线消息，schedule 会话只看自己的消息。
 func (s *BotService) safePoint(run *model.BotRun) botSafePoint {
 	input := botSafePoint{}
 	fresh, err := s.runs.FindByID(run.ID)
@@ -280,7 +307,7 @@ func (s *BotService) safePoint(run *model.BotRun) botSafePoint {
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		s.logger.Warn("读取 run 失败", zap.String("run_id", run.ID), zap.Error(err))
 	}
-	hasNew, err := s.messages.HasModelInputSince(run.BotID, run.InputThroughSeq)
+	hasNew, err := s.messages.HasModelInputSince(run.BotID, run.SessionKind, run.InputThroughSeq)
 	if err == nil {
 		input.HasNewInput = hasNew
 	}
@@ -288,22 +315,27 @@ func (s *BotService) safePoint(run *model.BotRun) botSafePoint {
 }
 
 // advanceInputWatermarks 推进 run 消费水位与 bot 的 offered 水位（已交给模型
-// 请求的输入不再自动重试）。
+// 请求的输入不再自动重试）。offered 水位只由主线推进，schedule 会话不碰。
 func (s *BotService) advanceInputWatermarks(run *model.BotRun, seq int64) {
 	if seq <= run.InputThroughSeq {
 		return
 	}
 	run.InputThroughSeq = seq
 	_, _ = s.runs.UpdateColumns(run.ID, nil, map[string]interface{}{"input_through_seq": seq})
-	_ = s.bots.SetOfferedInputSeq(run.BotID, seq)
+	if run.SessionKind != model.BotSessionKindSchedule {
+		_ = s.bots.SetOfferedInputSeq(run.BotID, seq)
+	}
 }
 
 // tryFinishRun 最后一次检查与 completed 落定在同一短事务：检查后恰好到达的
 // 新消息不会被丢唤醒。
 func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
+	if run.SessionKind == model.BotSessionKindSchedule {
+		return s.tryFinishScheduleRun(bot, run)
+	}
 	finished := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
-		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, bot.ID, run.InputThroughSeq)
+		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, bot.ID, model.BotSessionKindMain, run.InputThroughSeq)
 		if err != nil || hasNew {
 			return err
 		}
@@ -341,7 +373,12 @@ func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
 
 // finishStopped / finishFailed 落定终态并发 done（失败先 error 再 done）。
 // 终态与事件同一事务：崩溃不留无事件的已终态 run；提交后再发布 SSE。
+// schedule 会话走专属收尾（摘要/静默判定与运行事件）。
 func (s *BotService) finishStopped(bot *model.Bot, run *model.BotRun) {
+	if run.SessionKind == model.BotSessionKindSchedule {
+		s.finishScheduleStopped(bot, run)
+		return
+	}
 	now := time.Now().UTC()
 	ok := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -367,6 +404,10 @@ func (s *BotService) finishStopped(bot *model.Bot, run *model.BotRun) {
 }
 
 func (s *BotService) finishFailed(bot *model.Bot, run *model.BotRun, code string, cause error) {
+	if run.SessionKind == model.BotSessionKindSchedule {
+		s.finishScheduleFailed(bot, run, code, cause)
+		return
+	}
 	now := time.Now().UTC()
 	msg := botErrMessage(cause)
 	ok := false

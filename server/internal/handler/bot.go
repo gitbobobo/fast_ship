@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -245,6 +246,75 @@ func (h *BotHandler) CallDecision(c *gin.Context) {
 
 func (h *BotHandler) CancelCall(c *gin.Context) {
 	result, err := h.bots.CancelCall(middleware.GetUserID(c), c.Param("id"), c.Param("callId"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// ---------- 定时任务（INT-103：用户只能查看与开关，没有创建/编辑端点） ----------
+
+func (h *BotHandler) ListScheduleTasks(c *gin.Context) {
+	items, err := h.bots.ListScheduleTasks(middleware.GetUserID(c), c.Param("id"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"items": items})
+}
+
+func (h *BotHandler) GetScheduleTask(c *gin.Context) {
+	result, err := h.bots.GetScheduleTask(middleware.GetUserID(c), c.Param("id"), c.Param("taskId"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *BotHandler) ListScheduleTaskRuns(c *gin.Context) {
+	limit := 20
+	if raw := c.Query("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			response.BadRequest(c, 40001, "limit 必须是 1-100 的整数")
+			return
+		}
+		limit = parsed
+	}
+	offset := 0
+	if raw := c.Query("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			response.BadRequest(c, 40001, "offset 必须是非负整数")
+			return
+		}
+		offset = parsed
+	}
+	items, err := h.bots.ListScheduleTaskRuns(middleware.GetUserID(c), c.Param("id"), c.Param("taskId"), limit, offset)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"items": items})
+}
+
+// SetScheduleTaskEnabled body 只有 {"enabled":bool}；未知字段与缺省 enabled
+// 都按 400 拒绝（用户对任务唯一的写操作）。
+func (h *BotHandler) SetScheduleTaskEnabled(c *gin.Context) {
+	var req service.SetScheduleTaskEnabledRequest
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: body 只接受 {\"enabled\":bool}")
+		return
+	}
+	if req.Enabled == nil {
+		response.BadRequest(c, 40001, "请求参数无效: enabled 必填")
+		return
+	}
+	result, err := h.bots.SetScheduleTaskEnabled(middleware.GetUserID(c), c.Param("id"), c.Param("taskId"), *req.Enabled)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

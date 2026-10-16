@@ -1869,7 +1869,8 @@ func TestBotToolsetUpgradeBoundary(t *testing.T) {
 	env.bots.maybeTellToolset(fresh, run)
 	env.bots.maybeTellToolset(fresh, run)
 	var n int64
-	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?", bot.ID, "toolset_notice:2").Count(&n)
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND dedup_key = ?",
+		bot.ID, fmt.Sprintf("toolset_notice:%d", botToolsetVersion)).Count(&n)
 	if n != 1 {
 		t.Fatalf("重复告知不得发生，实得 %d", n)
 	}

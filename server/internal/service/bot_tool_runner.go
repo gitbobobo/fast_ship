@@ -72,7 +72,19 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			entry.prepared = prepared
 			s.resolveCallScope(bot, prepared, tc.Arguments, &entry.execCtx)
 			if prepared.RequiresConfirmation {
-				if err := botRequireScope(prepared); err != nil {
+				// schedule 会话默认放行（INT-103）：直接排队执行，不建授权
+				// 记录、不等待确认；范围仍要求可解析（目标不明的调用按失败
+				// 回复模型）。
+				if run.SessionKind == model.BotSessionKindSchedule {
+					if err := botRequireScope(prepared); err != nil {
+						entry.invalidErr = err
+						entry.call.Status = model.BotCallStatusFailed
+						entry.call.FinishedAt = &now
+						entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
+						entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
+						entry.prepared = nil
+					}
+				} else if err := botRequireScope(prepared); err != nil {
 					entry.invalidErr = err
 					entry.call.Status = model.BotCallStatusFailed
 					entry.call.FinishedAt = &now
@@ -100,6 +112,9 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			case entry.authzID != nil:
 				call.Status = model.BotCallStatusQueued
 				call.AuthorizationID = entry.authzID
+			case run.SessionKind == model.BotSessionKindSchedule:
+				// schedule 会话：需确认的写操作默认放行，直接排队（无授权记录）。
+				call.Status = model.BotCallStatusQueued
 			default:
 				call.Status = model.BotCallStatusPendingConfirmation
 			}
@@ -137,7 +152,8 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			ID: msgID, BotID: bot.ID, Seq: seq,
 			RunID: &run.ID, RequestID: &requestID,
 			Kind: model.BotMessageKindAssistant, ContentJSON: string(assistantRaw),
-			CreatedAt: now,
+			SessionKind: run.SessionKind,
+			CreatedAt:   now,
 		}
 		if err := txMsgs.AppendTx(tx, assistantMsg); err != nil {
 			return err
@@ -333,7 +349,8 @@ func (s *BotService) appendToolReplyTx(tx *gorm.DB, botID, runID, requestID stri
 		ID: uuid.NewString(), BotID: botID, Seq: seq,
 		RunID: &runID, RequestID: &requestID, CallID: &call.ID,
 		Kind: model.BotMessageKindToolReply, ContentJSON: string(raw),
-		DedupKey: &dedup, CreatedAt: now,
+		SessionKind: botRunSessionKindTx(tx, runID),
+		DedupKey:    &dedup, CreatedAt: now,
 	}
 	return txMsgs.AppendTx(tx, msg)
 }
@@ -521,7 +538,8 @@ func (s *BotService) executeQueuedCall(callID string) {
 	}
 	call.Status = model.BotCallStatusRunning
 	call.StartedAt = &now
-	s.emitEvent(bot.ID, nil, call.ID, model.BotEventToolCall, botEventEnvelope{
+	// 事件带 run：会话判别由此推导，schedule 会话的执行事件不进聊天页。
+	s.emitEvent(bot.ID, runIDPtr(s.runIDOfCall(call)), call.ID, model.BotEventToolCall, botEventEnvelope{
 		Kind: "tool_call", Phase: "running",
 		Payload: botToolCallResponseOf(call),
 	})
@@ -645,11 +663,23 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 		return // 终态已被取消路径落定
 	}
 	s.publishEvent(bot.ID)
-	// 新结果唤醒现有 run，或触发新的 tool_result run。
-	s.wakeRuntime(bot.ID, botWake{
+	// 新结果唤醒现有 run，或触发新的 tool_result run；schedule 会话的调用
+	// 唤醒对应执行槽（不进主线）。
+	s.wakeForCallResult(bot.ID, call, string(status))
+}
+
+// wakeForCallResult 后台结果唤醒所属会话：主线调用唤醒主线（现有 run 继续
+// 或新建 tool_result run），schedule 会话的调用唤醒对应执行槽。
+func (s *BotService) wakeForCallResult(botID string, call *model.BotToolCall, status string) {
+	runID := s.runIDOfCall(call)
+	if runID != "" && s.runs.SessionKindOf(runID) == model.BotSessionKindSchedule {
+		s.wakeScheduleRun(botID, runID)
+		return
+	}
+	s.wakeRuntime(botID, botWake{
 		Trigger: model.BotTriggerToolResult,
 		Key:     "tool_result:" + call.ID,
-		Context: marshalJSONString(map[string]interface{}{"call_id": call.ID, "status": string(status)}),
+		Context: marshalJSONString(map[string]interface{}{"call_id": call.ID, "status": status}),
 	})
 }
 
@@ -759,12 +789,8 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 			return fresh, false
 		}
 		s.publishEvent(call.BotID)
-		// 取消也是模型输入（后台结果）：立即唤醒主线，不等 5 秒扫描兜底。
-		s.wakeRuntime(call.BotID, botWake{
-			Trigger: model.BotTriggerToolResult,
-			Key:     "tool_result:" + call.ID,
-			Context: marshalJSONString(map[string]interface{}{"call_id": call.ID, "status": string(model.BotCallStatusCancelled)}),
-		})
+		// 取消也是模型输入（后台结果）：立即唤醒所属会话，不等 5 秒扫描兜底。
+		s.wakeForCallResult(call.BotID, call, string(model.BotCallStatusCancelled))
 		fresh, _ := s.calls.FindByID(call.ID)
 		return fresh, true
 	case model.BotCallStatusRunning:
@@ -808,7 +834,8 @@ func (s *BotService) appendBackgroundResultTx(tx *gorm.DB, runID string, call *m
 		ID: uuid.NewString(), BotID: call.BotID, Seq: seq,
 		RunID: runIDPtr(runID), CallID: &call.ID,
 		Kind: model.BotMessageKindBackgroundResult, ContentJSON: string(raw),
-		DedupKey: &dedup, CreatedAt: now,
+		SessionKind: botRunSessionKindTx(tx, runID),
+		DedupKey:    &dedup, CreatedAt: now,
 	}
 	if err := repository.NewBotMessageRepository(tx).AppendTx(tx, msg); err != nil {
 		// 幂等：恢复/重放已追加过同样结果时跳过。

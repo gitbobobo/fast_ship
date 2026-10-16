@@ -35,22 +35,32 @@ func (r *BotMessageRepository) MaxSeqTx(tx *gorm.DB, botID string) (int64, error
 	return seq, err
 }
 
-// HasModelInputSince 报告水位之后是否存在新输入（user / background_result）。
-func (r *BotMessageRepository) HasModelInputSince(botID string, seq int64) (bool, error) {
+// botInputKinds 是会话内算「新输入」的消息类别：user / background_result /
+// schedule_event（定时任务事件只出现在主线会话）。
+func botInputKinds() []model.BotMessageKind {
+	return []model.BotMessageKind{
+		model.BotMessageKindUser,
+		model.BotMessageKindBackgroundResult,
+		model.BotMessageKindScheduleEvent,
+	}
+}
+
+// HasModelInputSince 报告指定会话在水位之后是否存在新输入。
+func (r *BotMessageRepository) HasModelInputSince(botID, sessionKind string, seq int64) (bool, error) {
 	var count int64
 	err := r.db.Model(&model.BotMessage{}).Where(
-		"bot_id = ? AND seq > ? AND kind IN (?)", botID, seq,
-		[]model.BotMessageKind{model.BotMessageKindUser, model.BotMessageKindBackgroundResult},
+		"bot_id = ? AND session_kind = ? AND seq > ? AND kind IN (?)", botID, sessionKind, seq,
+		botInputKinds(),
 	).Count(&count).Error
 	return count > 0, err
 }
 
 // HasModelInputSinceTx 同 HasModelInputSince，供完成前的原子检查使用。
-func (r *BotMessageRepository) HasModelInputSinceTx(tx *gorm.DB, botID string, seq int64) (bool, error) {
+func (r *BotMessageRepository) HasModelInputSinceTx(tx *gorm.DB, botID, sessionKind string, seq int64) (bool, error) {
 	var count int64
 	err := tx.Model(&model.BotMessage{}).Where(
-		"bot_id = ? AND seq > ? AND kind IN (?)", botID, seq,
-		[]model.BotMessageKind{model.BotMessageKindUser, model.BotMessageKindBackgroundResult},
+		"bot_id = ? AND session_kind = ? AND seq > ? AND kind IN (?)", botID, sessionKind, seq,
+		botInputKinds(),
 	).Count(&count).Error
 	return count > 0, err
 }
@@ -58,9 +68,9 @@ func (r *BotMessageRepository) HasModelInputSinceTx(tx *gorm.DB, botID string, s
 // ListMainline 主线分页：页内一律 seq 正序，before/after 都是排他 seq 边界，
 // 不用 offset。两边界都缺省（聊天首屏）与只给 before（「加载更早」）都取
 // 距账本末尾最近的 limit 条后翻回正序；只给 after（补读）取该边界之后
-// 最早的 limit 条。
+// 最早的 limit 条。只返回主线消息，定时任务会话不对用户展示。
 func (r *BotMessageRepository) ListMainline(botID string, before, after int64, limit int) ([]model.BotMessage, error) {
-	q := r.db.Where("bot_id = ?", botID)
+	q := r.db.Where("bot_id = ? AND session_kind = ?", botID, model.BotSessionKindMain)
 	if before > 0 {
 		q = q.Where("seq < ?", before)
 	}
@@ -82,15 +92,19 @@ func (r *BotMessageRepository) ListMainline(botID string, before, after int64, l
 	return rows, nil
 }
 
-// ListAfterSeq 重放用：返回 seq 大于 after 的全部后续消息（正序）。
+// ListAfterSeq 重放用：返回主线 seq 大于 after 的全部后续消息（正序）。
 func (r *BotMessageRepository) ListAfterSeq(botID string, after int64, limit int) ([]model.BotMessage, error) {
-	return r.ListSeqRange(botID, after, 0, limit)
+	return r.ListSeqRange(botID, model.BotSessionKindMain, "", after, 0, limit)
 }
 
-// ListSeqRange 按 seq 正序取 (after, through]；through<=0 表示无上界。
-// 压缩与构建按页读取，避免滑窗截掉尚未摘要的历史。
-func (r *BotMessageRepository) ListSeqRange(botID string, after, through int64, limit int) ([]model.BotMessage, error) {
-	q := r.db.Where("bot_id = ? AND seq > ?", botID, after)
+// ListSeqRange 按会话与 seq 正序取 (after, through]；through<=0 表示无上界，
+// runID 非空时再限定单次运行（定时任务会话按 run 隔离投影）。压缩与构建按
+// 页读取，避免滑窗截掉尚未摘要的历史。
+func (r *BotMessageRepository) ListSeqRange(botID, sessionKind, runID string, after, through int64, limit int) ([]model.BotMessage, error) {
+	q := r.db.Where("bot_id = ? AND session_kind = ? AND seq > ?", botID, sessionKind, after)
+	if runID != "" {
+		q = q.Where("run_id = ?", runID)
+	}
 	if through > 0 {
 		q = q.Where("seq <= ?", through)
 	}
@@ -133,4 +147,17 @@ func (r *BotMessageRepository) ListByRun(botID, runID string) ([]model.BotMessag
 	err := r.db.Where("bot_id = ? AND run_id = ?", botID, runID).
 		Order("seq ASC").Find(&rows).Error
 	return rows, err
+}
+
+// LastAssistantOfRun 返回 run 内最后一条 assistant 消息；没有返回
+// gorm.ErrRecordNotFound。定时任务收尾用它判定静默哨兵与结果摘要。
+func (r *BotMessageRepository) LastAssistantOfRun(botID, runID string) (*model.BotMessage, error) {
+	var row model.BotMessage
+	if err := r.db.Where(
+		"bot_id = ? AND run_id = ? AND session_kind = ? AND kind = ?",
+		botID, runID, model.BotSessionKindSchedule, model.BotMessageKindAssistant,
+	).Order("seq DESC").First(&row).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
 }

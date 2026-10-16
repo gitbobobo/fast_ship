@@ -19,11 +19,11 @@ import (
 	"github.com/openai/openai-go/v2/shared"
 )
 
-// 白名单工具：v2 固定 11 个工具、38 个 action（v1 为 10 工具/29 action，冻结
-// 保留供存量会话在压缩边界前使用）。所有业务写操作均为
-// async + 用户确认/已有授权；同步读取也记调用账本。不做反射调用 service、
-// 不提供任意 RPC。参数使用专用结构体，action 在 schema 中列 enum，服务端
-// 再校验该 action 的必填、禁止字段。
+// 白名单工具：v3 固定 11 个工具、44 个 action（v2 为 11/38，v1 为 10/29，
+// 均为独立冻结副本供存量会话在压缩边界前使用）。业务写操作为
+// async + 用户确认/已有授权；同步读取与 fs_schedule（INT-103，全部同步）
+// 也记调用账本。不做反射调用 service、不提供任意 RPC。参数使用专用结构体，
+// action 在 schema 中列 enum，服务端再校验该 action 的必填、禁止字段。
 
 type botActionDef struct {
 	Name                 string
@@ -45,8 +45,39 @@ type botToolDef struct {
 // 共用空参数对象。
 type botNoArgs struct{}
 
+// botScheduleArgs 是 fs_schedule/fs_memory 在 v1/v2 冻结注册表里的占位参数
+// 结构体；v3 起 fs_schedule 使用独立的 botScheduleTaskArgs，此结构体只为
+// 存量会话的前缀稳定保留，不得复用或修改。
 type botScheduleArgs struct {
 	Action string `json:"action" jsonschema:"enum=status,required"`
+}
+
+// botScheduleTaskArgs 是 v3 fs_schedule 的参数超集：schema 描述并集，服务端
+// 按 action 校验必填/禁止字段。全部动作同步执行、立即生效。
+type botScheduleTaskArgs struct {
+	Action string `json:"action" jsonschema:"enum=list,create,update,delete,runs,enable,disable,required"`
+	// TaskID 是任务 ID（update/delete/runs/enable/disable 必填；create 禁止）。
+	TaskID string `json:"task_id,omitempty" jsonschema:"description=任务 ID（update/delete/runs/enable/disable 必填）"`
+	// Name 任务名（create 必填；update 提供即改）。
+	Name string `json:"name,omitempty" jsonschema:"description=任务名（create 必填；update 可改）"`
+	// Cron 标准五字段表达式 分 时 日 月 周（create 必填；update 提供即改）。
+	Cron string `json:"cron,omitempty" jsonschema:"description=cron 表达式，标准五字段（分 时 日 月 周；create 必填；update 提供即改）"`
+	// Timezone 是 IANA 名称；空串=UTC。update 传空保持原值，显式换时区传 UTC。
+	Timezone string `json:"timezone,omitempty" jsonschema:"description=时区，IANA 名称如 Asia/Shanghai（可选，默认 UTC；update 提供即改）"`
+	// Instruction 是每次运行交给机器人的任务指令（create 必填；update 提供即改）。
+	Instruction string `json:"instruction,omitempty" jsonschema:"description=任务指令：每次运行交给你的目标说明（create 必填；update 可改）"`
+	// Model 可选：空串用机器人当前模型。
+	Model string `json:"model,omitempty" jsonschema:"description=运行使用的模型名（可选；默认用机器人当前模型）"`
+	// NeedsReport 标记成功且非静默的运行是否也追加事件进主线。
+	NeedsReport *bool `json:"needs_report,omitempty" jsonschema:"description=运行是否需要汇报（可选；true 时成功且非静默的运行也会通知主线）"`
+	// Limit/Offset 是 runs/list 的分页参数。
+	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100）"`
+	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
+}
+
+// NeedsReportBool 是 needs_report 的缺省读取（缺省 false）。
+func (a *botScheduleTaskArgs) NeedsReportBool() bool {
+	return a.NeedsReport != nil && *a.NeedsReport
 }
 
 // botMemoryArgs 是 fs_memory 的参数超集（v2 起可用）。
@@ -145,9 +176,142 @@ type botEnvironmentArgs struct {
 	Action string `json:"action" jsonschema:"enum=list,projects,required"`
 }
 
-// botToolRegistry 按固定顺序注册全部工具；顺序即协议 tools 数组顺序，
-// 全局 toolset_version 提升后才变化。
-func botToolRegistry() []*botToolDef {
+// 各版本注册表按固定顺序独立冻结为字面量；顺序即协议 tools 数组顺序。
+// v1/v2 是历史版本的冻结副本——v3 变化（含 fs_schedule 及任何共享工具的
+// 描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+
+// botToolRegistryV3 是当前发布注册表：fs_schedule 自 INT-103 起开放
+// list/create/update/delete/runs/enable/disable，全部同步执行。
+func botToolRegistryV3() []*botToolDef {
+	return []*botToolDef{
+		{
+			Name:        "fs_project",
+			Description: "操作 Fast Ship 项目：list/get 读取，create/update 为需确认的写操作（首期只开放名称、描述、仓库 URL）。",
+			ArgsType:    reflect.TypeOf(botProjectArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "列出当前用户项目", Mode: model.BotExecutionSync},
+				{Name: "get", Description: "读取项目详情", Mode: model.BotExecutionSync},
+				{Name: "create", Description: "创建项目", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "update", Description: "更新项目（名称/描述/仓库 URL）", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			},
+		},
+		{
+			Name:        "fs_issue",
+			Description: "操作 Fast Ship Issue：list/get/comments/timeline 读取，create/update/set_workflow/replace_checklist/comment 为需确认的写操作。replace_checklist 是整组替换。",
+			ArgsType:    reflect.TypeOf(botIssueArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "按项目列出 Issue", Mode: model.BotExecutionSync},
+				{Name: "get", Description: "读取 Issue 详情", Mode: model.BotExecutionSync},
+				{Name: "comments", Description: "读取 Issue 评论", Mode: model.BotExecutionSync},
+				{Name: "timeline", Description: "读取 Issue 时间线", Mode: model.BotExecutionSync},
+				{Name: "create", Description: "创建 Issue（内部或 GitHub）", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "update", Description: "更新 Issue 标题/正文/状态/标签", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "set_workflow", Description: "设置工作流状态", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "replace_checklist", Description: "整组替换验收清单", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "comment", Description: "发表 Issue 评论", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			},
+		},
+		{
+			Name:        "fs_thread",
+			Description: "操作已连接 T3 环境里的线程：list/get/item/composer_options/workspace_options 读取，launch/send/stop 为需确认的写操作。launch 只表示启动 RPC 受理，不代表远端完成。",
+			ArgsType:    reflect.TypeOf(botThreadArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "列出全部环境的线程", Mode: model.BotExecutionSync},
+				{Name: "get", Description: "读取线程详情", Mode: model.BotExecutionSync},
+				{Name: "item", Description: "读取线程条目", Mode: model.BotExecutionSync},
+				{Name: "composer_options", Description: "读取启动器选项", Mode: model.BotExecutionSync},
+				{Name: "workspace_options", Description: "读取工作区/引用选项", Mode: model.BotExecutionSync},
+				{Name: "launch", Description: "在新线程中启动 T3 任务", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "send", Description: "向既有线程发消息", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "stop", Description: "停止远端线程的当前运行", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			},
+		},
+		{
+			Name:        "fs_environment",
+			Description: "读取已连接的 T3 环境与其项目。首期不开放配对、密钥代答与环境删除。",
+			ArgsType:    reflect.TypeOf(botEnvironmentArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "列出已连接环境", Mode: model.BotExecutionSync},
+				{Name: "projects", Description: "发现各环境的 T3 项目", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_schedule",
+			Description: "管理本机器人绑定的定时任务：list/create/update/delete/runs/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。",
+			ArgsType:    reflect.TypeOf(botScheduleTaskArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
+				{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
+				{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）", Mode: model.BotExecutionSync},
+				{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+				{Name: "runs", Description: "查看任务最近运行记录（task_id 必填）", Mode: model.BotExecutionSync},
+				{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+				{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_memory",
+			Description: "操作本机器人的长期记忆文件：USER.md（用户偏好）、MEMORY.md（长期事实与决策）、daily/YYYY-MM-DD.md（每日笔记）。写入立即持久生效；list/read/history/restore 可查看与恢复历史版本。",
+			ArgsType:    reflect.TypeOf(botMemoryArgs{}),
+			Actions: []botActionDef{
+				{Name: "status", Description: "查询记忆能力状态与注入上限", Mode: model.BotExecutionSync},
+				{Name: "list", Description: "列出记忆文件元数据（prefix 可选）", Mode: model.BotExecutionSync},
+				{Name: "read", Description: "读取当前正文或指定版本（offset/limit 按 Unicode 字符）", Mode: model.BotExecutionSync},
+				{Name: "create", Description: "新建记忆文件（已存在则冲突；墓碑可重建）", Mode: model.BotExecutionSync},
+				{Name: "replace", Description: "整体替换正文（需 expected_version）", Mode: model.BotExecutionSync},
+				{Name: "append", Description: "追加正文（需 expected_version）", Mode: model.BotExecutionSync},
+				{Name: "delete", Description: "删除文件（写墓碑版本，历史保留；需 expected_version）", Mode: model.BotExecutionSync},
+				{Name: "history", Description: "查看最近版本元数据", Mode: model.BotExecutionSync},
+				{Name: "restore", Description: "把指定旧版本恢复为新当前版本（需 expected_version）", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_memory_search",
+			Description: "在本机器人记忆文件中做关键词全文检索（SQLite FTS5 trigram）；返回路径、版本、片段与排名，正文用 fs_memory.read 取回。",
+			ArgsType:    reflect.TypeOf(botMemorySearchArgs{}),
+			Actions: []botActionDef{
+				{Name: "search", Description: "关键词全文检索本机器人记忆", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_help",
+			Description: "读取嵌入程序的工具使用说明。",
+			ArgsType:    reflect.TypeOf(botHelpArgs{}),
+			Actions: []botActionDef{
+				{Name: "read", Description: "读取使用说明", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_result",
+			Description: "按 call_id 分页读取被截断的完整工具结果（offset/limit 以 Unicode 字符计）。",
+			ArgsType:    reflect.TypeOf(botResultArgs{}),
+			Actions: []botActionDef{
+				{Name: "read", Description: "读取完整结果", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_stop",
+			Description: "结束当前主线运行（等效用户点击停止）。",
+			ArgsType:    reflect.TypeOf(botStopArgs{}),
+			Actions: []botActionDef{
+				{Name: "stop", Description: "停止当前 run", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_cancel",
+			Description: "取消本机器人的指定后台调用。",
+			ArgsType:    reflect.TypeOf(botCancelArgs{}),
+			Actions: []botActionDef{
+				{Name: "cancel", Description: "取消后台调用", Mode: model.BotExecutionSync},
+			},
+		},
+	}
+}
+
+// botToolRegistryV2 是 INT-102 冻结的 v2 注册表：fs_schedule 仍是 status
+// 占位（available:false），fs_memory 全量开放并新增 fs_memory_search。
+// 存量会话在压缩边界/重启前的构建必须使用与本版完全一致的字节。
+func botToolRegistryV2() []*botToolDef {
 	return []*botToolDef{
 		{
 			Name:        "fs_project",
@@ -271,23 +435,107 @@ func botToolRegistry() []*botToolDef {
 // 占位（available:false），无 fs_memory_search。存量会话在压缩边界/重启前
 // 的构建必须使用与本版完全一致的字节（前缀稳定）。
 func botToolRegistryV1() []*botToolDef {
-	v2 := botToolRegistry()
-	out := make([]*botToolDef, 0, len(v2)-1)
-	for _, tool := range v2 {
-		cp := *tool
-		if cp.Name == "fs_memory" {
-			cp.Description = "跨会话记忆能力状态查询（首期不可用）。"
-			cp.ArgsType = reflect.TypeOf(botScheduleArgs{})
-			cp.Actions = []botActionDef{
+	return []*botToolDef{
+		{
+			Name:        "fs_project",
+			Description: "操作 Fast Ship 项目：list/get 读取，create/update 为需确认的写操作（首期只开放名称、描述、仓库 URL）。",
+			ArgsType:    reflect.TypeOf(botProjectArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "列出当前用户项目", Mode: model.BotExecutionSync},
+				{Name: "get", Description: "读取项目详情", Mode: model.BotExecutionSync},
+				{Name: "create", Description: "创建项目", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "update", Description: "更新项目（名称/描述/仓库 URL）", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			},
+		},
+		{
+			Name:        "fs_issue",
+			Description: "操作 Fast Ship Issue：list/get/comments/timeline 读取，create/update/set_workflow/replace_checklist/comment 为需确认的写操作。replace_checklist 是整组替换。",
+			ArgsType:    reflect.TypeOf(botIssueArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "按项目列出 Issue", Mode: model.BotExecutionSync},
+				{Name: "get", Description: "读取 Issue 详情", Mode: model.BotExecutionSync},
+				{Name: "comments", Description: "读取 Issue 评论", Mode: model.BotExecutionSync},
+				{Name: "timeline", Description: "读取 Issue 时间线", Mode: model.BotExecutionSync},
+				{Name: "create", Description: "创建 Issue（内部或 GitHub）", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "update", Description: "更新 Issue 标题/正文/状态/标签", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "set_workflow", Description: "设置工作流状态", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "replace_checklist", Description: "整组替换验收清单", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "comment", Description: "发表 Issue 评论", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			},
+		},
+		{
+			Name:        "fs_thread",
+			Description: "操作已连接 T3 环境里的线程：list/get/item/composer_options/workspace_options 读取，launch/send/stop 为需确认的写操作。launch 只表示启动 RPC 受理，不代表远端完成。",
+			ArgsType:    reflect.TypeOf(botThreadArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "列出全部环境的线程", Mode: model.BotExecutionSync},
+				{Name: "get", Description: "读取线程详情", Mode: model.BotExecutionSync},
+				{Name: "item", Description: "读取线程条目", Mode: model.BotExecutionSync},
+				{Name: "composer_options", Description: "读取启动器选项", Mode: model.BotExecutionSync},
+				{Name: "workspace_options", Description: "读取工作区/引用选项", Mode: model.BotExecutionSync},
+				{Name: "launch", Description: "在新线程中启动 T3 任务", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "send", Description: "向既有线程发消息", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+				{Name: "stop", Description: "停止远端线程的当前运行", Mode: model.BotExecutionAsync, RequiresConfirmation: true},
+			},
+		},
+		{
+			Name:        "fs_environment",
+			Description: "读取已连接的 T3 环境与其项目。首期不开放配对、密钥代答与环境删除。",
+			ArgsType:    reflect.TypeOf(botEnvironmentArgs{}),
+			Actions: []botActionDef{
+				{Name: "list", Description: "列出已连接环境", Mode: model.BotExecutionSync},
+				{Name: "projects", Description: "发现各环境的 T3 项目", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_schedule",
+			Description: "定时调度能力状态查询（首期不可用）。",
+			ArgsType:    reflect.TypeOf(botScheduleArgs{}),
+			Actions: []botActionDef{
+				{Name: "status", Description: "查询调度能力是否可用", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_memory",
+			Description: "跨会话记忆能力状态查询（首期不可用）。",
+			ArgsType:    reflect.TypeOf(botScheduleArgs{}),
+			Actions: []botActionDef{
 				{Name: "status", Description: "查询记忆能力是否可用", Mode: model.BotExecutionSync},
-			}
-		}
-		if cp.Name == "fs_memory_search" {
-			continue
-		}
-		out = append(out, &cp)
+			},
+		},
+		{
+			Name:        "fs_help",
+			Description: "读取嵌入程序的工具使用说明。",
+			ArgsType:    reflect.TypeOf(botHelpArgs{}),
+			Actions: []botActionDef{
+				{Name: "read", Description: "读取使用说明", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_result",
+			Description: "按 call_id 分页读取被截断的完整工具结果（offset/limit 以 Unicode 字符计）。",
+			ArgsType:    reflect.TypeOf(botResultArgs{}),
+			Actions: []botActionDef{
+				{Name: "read", Description: "读取完整结果", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_stop",
+			Description: "结束当前主线运行（等效用户点击停止）。",
+			ArgsType:    reflect.TypeOf(botStopArgs{}),
+			Actions: []botActionDef{
+				{Name: "stop", Description: "停止当前 run", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_cancel",
+			Description: "取消本机器人的指定后台调用。",
+			ArgsType:    reflect.TypeOf(botCancelArgs{}),
+			Actions: []botActionDef{
+				{Name: "cancel", Description: "取消后台调用", Mode: model.BotExecutionSync},
+			},
+		},
 	}
-	return out
 }
 
 var (
@@ -326,10 +574,13 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		return holder
 	}
 	var tools []*botToolDef
-	if version == 1 {
+	switch version {
+	case 1:
 		tools = botToolRegistryV1()
-	} else {
-		tools = botToolRegistry()
+	case 2:
+		tools = botToolRegistryV2()
+	default:
+		tools = botToolRegistryV3()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -413,6 +664,8 @@ var botRenamedActions = map[string]string{
 	// v2 起草期曾把检索放在 fs_memory 下，发布形态是独立工具；
 	// 旧叫法返回明确改名提示而不是静默转发。
 	"fs_memory/search": "fs_memory_search/search",
+	// v3 起 fs_schedule 的 status 占位被真实任务管理动作取代。
+	"fs_schedule/status": "fs_schedule/list",
 }
 
 // botToolActionErrorReply 面向模型的结构化错误正文（改名提示含目标与帮助入口）。
@@ -466,15 +719,19 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 	}
 	// 改名/移除动作过渡期：action 从原始参数探出（参数形态可能已不属于
 	// 本工具声明的字段集，字段白名单会先一步拒绝），先查静态映射回结构
-	// 化提示，不偷执行新动作。
+	// 化提示，不偷执行新动作。冻结工具集里仍存在的动作不受映射影响
+	//（如 v2 会话的 fs_schedule/status）。
 	var actionProbe struct {
 		Action string `json:"action"`
 	}
 	if raw := rawMap["action"]; len(raw) > 0 {
 		_ = json.Unmarshal(raw, &actionProbe.Action)
 	}
-	if target, renamed := botRenamedActions[toolName+"/"+strings.TrimSpace(actionProbe.Action)]; renamed {
-		return nil, &botRenamedActionError{Tool: toolName, Old: strings.TrimSpace(actionProbe.Action), RenamedTo: target}
+	probedAction := strings.TrimSpace(actionProbe.Action)
+	if target, renamed := botRenamedActions[toolName+"/"+probedAction]; renamed {
+		if _, stillAvailable := ts.byAction[toolName+"/"+probedAction]; !stillAvailable {
+			return nil, &botRenamedActionError{Tool: toolName, Old: probedAction, RenamedTo: target}
+		}
 	}
 	knownKeys := botArgKeys(tool.ArgsType)
 	for key := range rawMap {
@@ -626,6 +883,29 @@ func botValidateActionFields(toolName, action string, raw map[string]json.RawMes
 		}
 	case "fs_environment/list", "fs_environment/projects":
 	case "fs_schedule/status", "fs_memory/status", "fs_help/read", "fs_stop/stop":
+	case "fs_schedule/list":
+		// 无必填；limit/offset 可选。
+	case "fs_schedule/create":
+		if !has("name") || str("name") == "" {
+			return bad("fs_schedule create 需要 name")
+		}
+		if !has("cron") || str("cron") == "" {
+			return bad("fs_schedule create 需要 cron（标准五字段）")
+		}
+		if !has("instruction") || str("instruction") == "" {
+			return bad("fs_schedule create 需要 instruction")
+		}
+		if has("task_id") {
+			return bad("fs_schedule create 不接受 task_id")
+		}
+	case "fs_schedule/update":
+		if !has("task_id") || str("task_id") == "" {
+			return bad("fs_schedule update 需要 task_id")
+		}
+	case "fs_schedule/delete", "fs_schedule/runs", "fs_schedule/enable", "fs_schedule/disable":
+		if !has("task_id") || str("task_id") == "" {
+			return bad("fs_schedule " + action + " 需要 task_id")
+		}
 	case "fs_memory/list":
 		// 无必填；prefix 可选。
 	case "fs_memory/read", "fs_memory/history":
@@ -698,6 +978,10 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 		return s.execThreadRead(ctx, call)
 	case "fs_environment/list", "fs_environment/projects":
 		return s.execEnvironmentRead(ctx, call)
+	case "fs_schedule/list", "fs_schedule/create", "fs_schedule/update",
+		"fs_schedule/delete", "fs_schedule/runs", "fs_schedule/enable", "fs_schedule/disable":
+		// 定时任务管理（INT-103）：全部同步、立即生效，与 fs_memory 写同类。
+		return s.execScheduleTool(call)
 	case "fs_schedule/status", "fs_memory/status":
 		return s.execCapabilityStatus(call)
 	case "fs_memory/list", "fs_memory/read", "fs_memory/create", "fs_memory/replace",

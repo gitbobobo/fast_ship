@@ -8956,7 +8956,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `run` | object | 否 |  |
 | `run.id` | string | 是 |  |
 | `run.bot_id` | string | 是 |  |
-| `run.trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
 | `run.trigger_key` | string | 是 |  |
 | `run.status` | string | 是 | queued / running / completed / failed / stopped |
 | `run.config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9067,7 +9067,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs` | object[] | 是 |  |
 | `runs[].id` | string | 是 |  |
 | `runs[].bot_id` | string | 是 |  |
-| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
 | `runs[].trigger_key` | string | 是 |  |
 | `runs[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `runs[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9172,7 +9172,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].bot_id` | string | 是 |  |
-| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
 | `items[].trigger_key` | string | 是 |  |
 | `items[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `items[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9222,7 +9222,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9276,7 +9276,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9300,6 +9300,251 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 409 | 运行状态已变化（40928） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/schedule-tasks`
+
+<!-- operationId: listBotScheduleTasks -->
+
+定时任务列表
+
+机器人定时任务（INT-103）用户侧只读；任务的创建/修改/删除只经机器人 fs_schedule 工具。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 任务列表（新→旧，含最近一次运行）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].bot_id` | string | 是 |  |
+| `items[].name` | string | 是 |  |
+| `items[].cron_expression` | string | 是 | 标准五字段 cron（分 时 日 月 周） |
+| `items[].timezone` | string | 是 | IANA 时区名称；空串 = UTC |
+| `items[].instruction` | string | 是 | 每次运行交给机器人的任务指令 |
+| `items[].model` | string | 是 | 运行使用的模型；空串用机器人当前模型 |
+| `items[].needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
+| `items[].enabled` | boolean | 是 |  |
+| `items[].next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+| `items[].last_run` | object（可空） | 是 |  |
+| `items[].last_run.id` | string | 是 |  |
+| `items[].last_run.task_id` | string（可空） | 是 |  |
+| `items[].last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
+| `items[].last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
+| `items[].last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `items[].last_run.error_code` | string | 否 |  |
+| `items[].last_run.error_message` | string | 否 |  |
+| `items[].last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
+| `items[].last_run.started_at` | string（date-time，可空） | 是 |  |
+| `items[].last_run.finished_at` | string（date-time，可空） | 是 |  |
+| `items[].last_run.duration_ms` | integer（int64，可空） | 是 |  |
+| `items[].last_run.prompt_tokens` | integer（int64） | 否 |  |
+| `items[].last_run.completion_tokens` | integer（int64） | 否 |  |
+| `items[].last_run.total_tokens` | integer（int64） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/schedule-tasks/{taskId}`
+
+<!-- operationId: getBotScheduleTask -->
+
+读取定时任务
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+
+**成功响应**
+
+**200** 任务详情
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `bot_id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `cron_expression` | string | 是 | 标准五字段 cron（分 时 日 月 周） |
+| `timezone` | string | 是 | IANA 时区名称；空串 = UTC |
+| `instruction` | string | 是 | 每次运行交给机器人的任务指令 |
+| `model` | string | 是 | 运行使用的模型；空串用机器人当前模型 |
+| `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
+| `enabled` | boolean | 是 |  |
+| `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+| `last_run` | object（可空） | 是 |  |
+| `last_run.id` | string | 是 |  |
+| `last_run.task_id` | string（可空） | 是 |  |
+| `last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
+| `last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
+| `last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `last_run.error_code` | string | 否 |  |
+| `last_run.error_message` | string | 否 |  |
+| `last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
+| `last_run.started_at` | string（date-time，可空） | 是 |  |
+| `last_run.finished_at` | string（date-time，可空） | 是 |  |
+| `last_run.duration_ms` | integer（int64，可空） | 是 |  |
+| `last_run.prompt_tokens` | integer（int64） | 否 |  |
+| `last_run.completion_tokens` | integer（int64） | 否 |  |
+| `last_run.total_tokens` | integer（int64） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/schedule-tasks/{taskId}/runs`
+
+<!-- operationId: listBotScheduleTaskRuns -->
+
+定时任务运行记录列表
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `limit` | integer（≤100，默认 20） | 否 |  |
+| `offset` | integer（默认 0） | 否 |  |
+
+**成功响应**
+
+**200** 运行记录列表（新→旧）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].task_id` | string（可空） | 是 |  |
+| `items[].status` | string | 是 | running / completed / failed / stopped / skipped |
+| `items[].summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
+| `items[].silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `items[].error_code` | string | 否 |  |
+| `items[].error_message` | string | 否 |  |
+| `items[].scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
+| `items[].started_at` | string（date-time，可空） | 是 |  |
+| `items[].finished_at` | string（date-time，可空） | 是 |  |
+| `items[].duration_ms` | integer（int64，可空） | 是 |  |
+| `items[].prompt_tokens` | integer（int64） | 否 |  |
+| `items[].completion_tokens` | integer（int64） | 否 |  |
+| `items[].total_tokens` | integer（int64） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/bots/{id}/schedule-tasks/{taskId}/enabled`
+
+<!-- operationId: setBotScheduleTaskEnabled -->
+
+开启/关闭定时任务
+
+用户对任务唯一的写操作。body 只接受 {"enabled":bool}；出现其它字段返回
+40001。重新开启时 next_run_at 重算为当前时间之后的下一次，不补跑过期计划。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | boolean | 是 |  |
+
+**成功响应**
+
+**200** 任务现状（含重算后的 next_run_at 与最近一次运行）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `bot_id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `cron_expression` | string | 是 | 标准五字段 cron（分 时 日 月 周） |
+| `timezone` | string | 是 | IANA 时区名称；空串 = UTC |
+| `instruction` | string | 是 | 每次运行交给机器人的任务指令 |
+| `model` | string | 是 | 运行使用的模型；空串用机器人当前模型 |
+| `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
+| `enabled` | boolean | 是 |  |
+| `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+| `last_run` | object（可空） | 是 |  |
+| `last_run.id` | string | 是 |  |
+| `last_run.task_id` | string（可空） | 是 |  |
+| `last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
+| `last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
+| `last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `last_run.error_code` | string | 否 |  |
+| `last_run.error_message` | string | 否 |  |
+| `last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
+| `last_run.started_at` | string（date-time，可空） | 是 |  |
+| `last_run.finished_at` | string（date-time，可空） | 是 |  |
+| `last_run.duration_ms` | integer（int64，可空） | 是 |  |
+| `last_run.prompt_tokens` | integer（int64） | 否 |  |
+| `last_run.completion_tokens` | integer（int64） | 否 |  |
+| `last_run.total_tokens` | integer（int64） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求体携带未知字段或缺 enabled（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
 ### GET `/api/bots/{id}/calls`

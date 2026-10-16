@@ -7191,6 +7191,176 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/bots/{id}/schedule-tasks:
+    get:
+      tags: [bots]
+      operationId: listBotScheduleTasks
+      summary: 定时任务列表
+      description: 机器人定时任务（INT-103）用户侧只读；任务的创建/修改/删除只经机器人 fs_schedule 工具。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          description: 任务列表（新→旧，含最近一次运行）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotScheduleTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/schedule-tasks/{taskId}:
+    get:
+      tags: [bots]
+      operationId: getBotScheduleTask
+      summary: 读取定时任务
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotScheduleTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/schedule-tasks/{taskId}/runs:
+    get:
+      tags: [bots]
+      operationId: listBotScheduleTaskRuns
+      summary: 定时任务运行记录列表
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: 运行记录列表（新→旧）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/BotScheduleRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/bots/{id}/schedule-tasks/{taskId}/enabled:
+    put:
+      tags: [bots]
+      operationId: setBotScheduleTaskEnabled
+      summary: 开启/关闭定时任务
+      description: |
+        用户对任务唯一的写操作。body 只接受 {"enabled":bool}；出现其它字段返回
+        40001。重新开启时 next_run_at 重算为当前时间之后的下一次，不补跑过期计划。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: 任务现状（含重算后的 next_run_at 与最近一次运行）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotScheduleTask'
+        '400':
+          description: 请求体携带未知字段或缺 enabled（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/bots/{id}/calls:
     get:
       tags: [bots]
@@ -11723,7 +11893,7 @@ components:
           type: string
         trigger_source:
           type: string
-          description: user_message / tool_result / recovery（以后可增加 schedule）
+          description: user_message / tool_result / recovery / schedule
         trigger_key:
           type: string
         status:
@@ -11773,6 +11943,97 @@ components:
           type: string
           format: date-time
           nullable: true
+
+    BotScheduleTask:
+      type: object
+      required: [id, bot_id, name, cron_expression, timezone, instruction, model, needs_report, enabled, next_run_at, created_at, updated_at, last_run]
+      properties:
+        id:
+          type: string
+        bot_id:
+          type: string
+        name:
+          type: string
+        cron_expression:
+          type: string
+          description: 标准五字段 cron（分 时 日 月 周）
+        timezone:
+          type: string
+          description: IANA 时区名称；空串 = UTC
+        instruction:
+          type: string
+          description: 每次运行交给机器人的任务指令
+        model:
+          type: string
+          description: 运行使用的模型；空串用机器人当前模型
+        needs_report:
+          type: boolean
+          description: true 时成功且非静默的运行也追加事件进主线
+        enabled:
+          type: boolean
+        next_run_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 下一次计划触发时间（UTC）；停用或调度暂停时为 null
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_run:
+          nullable: true
+          $ref: '#/components/schemas/BotScheduleRun'
+
+    BotScheduleRun:
+      type: object
+      required: [id, task_id, status, summary, silent, scheduled_for, started_at, finished_at, duration_ms]
+      properties:
+        id:
+          type: string
+        task_id:
+          type: string
+          nullable: true
+        status:
+          type: string
+          description: running / completed / failed / stopped / skipped
+        summary:
+          type: string
+          description: 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串
+        silent:
+          type: boolean
+          description: true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报
+        error_code:
+          type: string
+        error_message:
+          type: string
+        scheduled_for:
+          type: string
+          format: date-time
+          nullable: true
+          description: 本 run 对应的计划时间（UTC）
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_ms:
+          type: integer
+          format: int64
+          nullable: true
+        prompt_tokens:
+          type: integer
+          format: int64
+        completion_tokens:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
 
     BotToolCall:
       type: object
