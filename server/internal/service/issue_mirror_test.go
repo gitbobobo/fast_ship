@@ -956,6 +956,83 @@ func TestIssueServiceRefreshTimelineAfterPush_ClearsWatermarkSoNextSyncRefetches
 	}
 }
 
+// push 路径的评论写回（recordPushedComment）同样是「只写一部分集合」：三处写入
+// 必须与集合水位清空同事务。否则延迟的创建响应覆盖已镜像正文后，远端 (updated_at,
+// 评论数) 与水位一致，跳过判据再也发现不了该 issue，旧正文不再自愈；清空后该
+// issue 下次被增量列表返回时重拉两个集合，把镜像修回远端值。
+func TestIssueServiceRecordPushedComment_ClearsWatermarkAndNextSyncHeals(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(1)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "remote", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+	stored, err := svc.issueRepo.FindByID(issueID)
+	if err != nil {
+		t.Fatalf("load stored issue: %v", err)
+	}
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || meta.CollectionsSyncedComments != 1 {
+		t.Fatalf("expected seed sync to advance the collections watermark, got %v / %d", meta.CollectionsSyncedUpdatedAt, meta.CollectionsSyncedComments)
+	}
+
+	// 延迟的创建响应：同一个 github_comment_id=500，正文落后于远端已镜像的值。
+	pushed := buildGitHubIssueCommentModel(stored.ID, testGitHubSyncComment(500, "stale-push", now))
+	if err := svc.issueService.mirror.recordPushedComment(stored, pushed); err != nil {
+		t.Fatalf("record pushed comment: %v", err)
+	}
+	comments := storedCommentsByGitHubID(t, svc, issueID)
+	if got := comments[500]; got.Body != "stale-push" {
+		t.Fatalf("expected push response to overwrite mirrored body, got %q", got.Body)
+	}
+
+	// 换新结构体重读：GORM 扫 NULL 到已复用的 *time.Time 字段不会置回 nil。
+	var cleared model.IssueGitHubMeta
+	if err := svc.db.First(&cleared, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("reload github meta: %v", err)
+	}
+	if cleared.CollectionsSyncedUpdatedAt != nil || cleared.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected collections watermark cleared after push, got %v / %d", cleared.CollectionsSyncedUpdatedAt, cleared.CollectionsSyncedComments)
+	}
+
+	// 远端无变化：水位为空让下一轮同步重拉两个集合，评论正文修回远端值。
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync after push: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments+1 || afterTimeline != beforeTimeline+1 {
+		t.Fatalf("expected next sync to refetch both collections after push cleared the watermark, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
+	}
+	comments = storedCommentsByGitHubID(t, svc, issueID)
+	if got := comments[500]; got.Body != "remote" {
+		t.Fatalf("expected comment 500 healed back to remote body, got %q", got.Body)
+	}
+}
+
 // SyncAll 跳过未配置 GitHub 的项目，单项目失败不中断后续项目。
 func TestIssueMirrorSyncAll_SkipsUnconfiguredAndContinuesAfterFailure(t *testing.T) {
 	svc := setupTestServices(t)

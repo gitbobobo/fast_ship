@@ -571,22 +571,34 @@ func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient
 	return len(events), nil
 }
 
+// writePartialCollections 执行一次「非完整镜像」的集合写入。push 路径只把远端
+// 响应里的一条评论或一次时间线刷新写回本地，没有重拉两个集合，所以必须在同一个
+// 事务里清空集合水位（ClearCollectionsWatermarkTx）：push 的响应可能比后台同步
+// 刚镜像的远端状态旧，若不清空，水位会指向被旧响应覆盖的镜像，跳过判据再也发现
+// 不了该 issue。所有「只写一部分集合」的路径都必须走这里；完整镜像走 syncTimeline。
+// 清空后的恢复前提见 docs/internal/issue-sync.md「集合拉取水位」。
+func (m *issueMirror) writePartialCollections(issueID string, write func(tx *gorm.DB) error) error {
+	return m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := write(tx); err != nil {
+			return err
+		}
+		return m.gitHubMetaRepo.ClearCollectionsWatermarkTx(tx, issueID)
+	})
+}
+
 // refreshTimelineAfterPush 是 push 路径（创建/更新 issue）的时间线刷新：push
-// 只重拉了时间线、没有重拉评论，不能推进集合水位，所以在与 syncTimeline 相同
-// 的事务边界里替换镜像并清空水位，下一次后台同步会保守重拉两个集合。清空而非
-// 推进的理由：以本函数拿到的快照推进水位会让本地评论镜像落后于水位，丢的评论
-// 无法被发现。与后台同步并发时（push 不经同步锁），镜像与水位要么同属最后提交
-// 的事务，要么都保持旧值，不会出现「旧镜像 + 新水位」。
+// 只重拉了时间线、没有重拉评论，不能推进集合水位，所以走 writePartialCollections
+// 在同一事务里替换镜像并清空水位，该 issue 下一次被增量列表返回时后台同步会重拉
+// 两个集合。清空而非推进的理由：以本函数拿到的快照推进水位会让本地评论镜像落后
+// 于水位，丢的评论无法被发现。与后台同步并发时（push 不经同步锁），镜像与水位
+// 要么同属最后提交的事务，要么都保持旧值，不会出现「旧镜像 + 新水位」。
 func (m *issueMirror) refreshTimelineAfterPush(ctx context.Context, client gitHubIssueClient, issue *model.Issue, item *ghclient.Issue) error {
 	events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
 	if err != nil {
 		return err
 	}
-	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
-		if err := m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events); err != nil {
-			return err
-		}
-		return m.gitHubMetaRepo.ClearCollectionsWatermarkTx(tx, issue.ID)
+	if err := m.writePartialCollections(issue.ID, func(tx *gorm.DB) error {
+		return m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events)
 	}); err != nil {
 		return errs.ErrInternal
 	}
@@ -594,25 +606,32 @@ func (m *issueMirror) refreshTimelineAfterPush(ctx context.Context, client gitHu
 }
 
 // recordPushedComment 把刚推送到 GitHub 的评论写回本地：upsert 评论行、
-// 推进 issue.UpdatedAt、累计 meta.CommentsCount。调用方在成功后自行推进
-// 已读水位、记日志；写回不经同步锁。
+// 推进 issue.UpdatedAt、累计 meta.CommentsCount。这是非完整镜像的集合写入
+// （push 只写回远端响应里的一条评论，没有重拉评论/时间线集合），所以三处写入
+// 与集合水位清空经 writePartialCollections 同事务提交：push 的响应可能比后台
+// 同步刚镜像的远端状态旧，若不清空，水位会指向被旧响应覆盖的评论镜像，跳过
+// 判据再也发现不了该 issue。清空后，该 issue 下一次被增量列表返回时后台同步
+// 会重拉两个集合、把镜像修回远端值。调用方在成功后自行推进已读水位、记日志；
+// 写回不经同步锁。
 func (m *issueMirror) recordPushedComment(issue *model.Issue, comment *model.IssueComment) error {
-	if err := m.commentRepo.Upsert(comment); err != nil {
-		return errs.ErrInternal
-	}
 	now := time.Now().UTC()
 	updatedAt := comment.GitHubUpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = now
 	}
 	issue.UpdatedAt = updatedAt
-	if err := m.issueRepo.Save(issue); err != nil {
-		return errs.ErrInternal
-	}
 	meta := issue.GitHubMeta
 	meta.CommentsCount++
 	meta.SyncedAt = now
-	if err := m.gitHubMetaRepo.Upsert(meta); err != nil {
+	if err := m.writePartialCollections(issue.ID, func(tx *gorm.DB) error {
+		if err := m.commentRepo.UpsertTx(tx, comment); err != nil {
+			return err
+		}
+		if err := m.issueRepo.SaveTx(tx, issue); err != nil {
+			return err
+		}
+		return m.gitHubMetaRepo.UpsertTx(tx, meta)
+	}); err != nil {
 		return errs.ErrInternal
 	}
 	return nil

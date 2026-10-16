@@ -6,11 +6,11 @@
 
 `issue_github_meta` 上的 `collections_synced_updated_at` / `collections_synced_comments` 记录上次成功镜像评论/时间线集合时远端 Issue 的 `updated_at` 与评论数（不在 meta upsert 的覆盖列里）。逐条处理时 `needsCollectionSync` 按它判断：远端 `updated_at` 晚于水位，或远端评论数与水位不一致——`updated_at` 只有秒级精度，同一秒内新增的评论靠评论数发现——才请求该 Issue 的评论/时间线接口；否则整段跳过。水位为空（新 Issue、加列前的旧 meta 行）一律重拉一次做 bootstrap。
 
-时间线镜像替换与水位变更在同一个数据库事务里提交（`syncTimeline`：`ReplaceSyncedTx` + `AdvanceCollectionsWatermarkTx`）：并发的 push 路径也会替换时间线且不经同步锁，两者若分开提交会出现「旧镜像 + 新水位」，缺失内容再也不会被判据发现。push 路径的时间线刷新（`refreshTimelineAfterPush`）在同一事务里替换镜像并**清空**水位——push 只重拉了时间线、没有重拉评论，不能推进——下一次后台同步会重拉该 Issue 的两个集合。
+时间线镜像替换与水位变更在同一个数据库事务里提交（`syncTimeline`：`ReplaceSyncedTx` + `AdvanceCollectionsWatermarkTx`）：并发的 push 路径也会替换时间线且不经同步锁，两者若分开提交会出现「旧镜像 + 新水位」，缺失内容再也不会被判据发现。对集合镜像的每一次本地写入，要么在同一个事务里推进水位（完整镜像），要么在同一个事务里清空水位（部分写入，入口 `writePartialCollections`）。push 路径的两类部分写入都走后者：时间线刷新（`refreshTimelineAfterPush`：`ReplaceSyncedTx`）只重拉了时间线、没有重拉评论，不能推进；评论写回（`recordPushedComment`：评论 upsert + issue 保存 + meta upsert）只把远端响应里的一条评论写回本地，而 push 的响应可能比后台同步刚镜像的远端状态旧。两者清空水位后，该 Issue **下一次被增量列表返回时**后台同步才会重拉它的两个集合。
 
 跳过时响应里的 `SyncedCommentCount`/`SyncedTimelineCount` 取该 Issue 现有镜像行数（`CountSynced`/`Count`），与重拉路径一样表达「镜像集合大小」而非本轮写入行数。水位只在评论和时间线都成功镜像后随时间线事务推进；任一集合失败水位不动，下一轮重试。
 
-已知限制：判据只认 `updated_at` 与评论数两个信号。远端在同 1 秒内先变更、同步恰好夹在中间、又发生第二次变更时，两次变更的 `updated_at` 与评论数可能完全相同，不会被本轮发现，要等该 Issue 下次变更才补上（窗口为亚秒级）。另外，不改动 `updated_at` 的远端时间线事件（如交叉引用、提交引用）也不会单独触发重拉。
+已知限制：判据只认 `updated_at` 与评论数两个信号。远端在同 1 秒内先变更、同步恰好夹在中间、又发生第二次变更时，两次变更的 `updated_at` 与评论数可能完全相同，不会被本轮发现，要等该 Issue 下次变更才补上（窗口为亚秒级）。另外，不改动 `updated_at` 的远端时间线事件（如交叉引用、提交引用）也不会单独触发重拉。push 路径清空的集合水位只在该 Issue 下次被增量列表（`since` 窗口）返回时才有机会生效——若同一轮别的 Issue 把项目水位推得更远，该 Issue 暂时不会被列出，本地镜像要等它下次远端变更才补齐（这一点改动前就存在）。
 
 ## 事务边界
 
