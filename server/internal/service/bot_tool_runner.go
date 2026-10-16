@@ -707,6 +707,7 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 		// cancelled 终态（恢复只修未终态调用，缺口会让机器人永远不知道
 		// 已受理的操作被取消）。
 		runID := s.runIDOfCall(call)
+		lostRace := false
 		var txErr error
 		txErr = s.db.Transaction(func(tx *gorm.DB) error {
 			ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
@@ -716,15 +717,24 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 					"error_code":    "cancelled",
 					"error_message": "被用户或机器人取消（未执行）",
 				})
-			if err != nil || !ok {
+			if err != nil {
 				return err
+			}
+			if !ok {
+				// 初读与 CAS 之间被 worker 认领：取消没有发生，也不该
+				// 报成功——重读最新状态交给调用方（对 running 会再走
+				// 记标记路径）。
+				lostRace = true
+				return nil
 			}
 			call.Status = model.BotCallStatusCancelled
 			// 终态结果消息（唯一 terminal）。
 			return s.appendBackgroundResultTx(tx, runID, call, model.BotCallStatusCancelled, botToolOutcome{}, nil, false, now)
 		})
-		if txErr != nil {
-			s.logger.Warn("落取消终态失败", zap.String("call_id", call.ID), zap.Error(txErr))
+		if txErr != nil || lostRace {
+			if txErr != nil {
+				s.logger.Warn("落取消终态失败", zap.String("call_id", call.ID), zap.Error(txErr))
+			}
 			fresh, _ := s.calls.FindByID(call.ID)
 			return fresh, false
 		}

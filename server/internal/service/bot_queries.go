@@ -127,9 +127,22 @@ func (s *BotService) CancelCall(userID, botID, callID string) (*BotToolCallRespo
 		resp := botToolCallResponseOf(call)
 		return &resp, nil
 	}
-	fresh, _ := s.cancelBotCall(call)
-	if fresh == nil {
-		return nil, errs.ErrInternal
+	fresh := call
+	for attempt := 0; attempt < 3; attempt++ {
+		if fresh.Status.IsTerminal() {
+			break
+		}
+		next, _ := s.cancelBotCall(fresh)
+		if next == nil {
+			return nil, errs.ErrInternal
+		}
+		// 状态没动（含 queued CAS 被 worker 认领抢走的竞速重读）就停手；
+		// 状态推进了（queued→running 等）则用新状态继续取消意图。
+		if next.Status == fresh.Status {
+			fresh = next
+			break
+		}
+		fresh = next
 	}
 	resp := botToolCallResponseOf(fresh)
 	return &resp, nil

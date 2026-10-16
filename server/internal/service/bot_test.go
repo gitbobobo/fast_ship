@@ -2952,3 +2952,41 @@ func TestBotProjectWriteResultSlimsTokenRefs(t *testing.T) {
 		t.Fatalf("写结果不得携带凭证引用: %s", raw)
 	}
 }
+
+func TestBotCancelQueuedLostRaceReportsRunning(t *testing.T) {
+	// queued CAS 被 worker 认领抢走时取消不得报成功：重读交给调用方，
+	// CancelCall 用推进后的状态继续表达取消意图（记标记）。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botcancelost")
+	bot := env.createBot(t, userID)
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionAsync))
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+
+	// 竞速：初读后 worker 认领成 running。
+	env.db.Transaction(func(tx *gorm.DB) error {
+		_, err := repository.NewBotToolCallRepository(tx).ClaimQueuedTx(tx, callID, time.Now().UTC())
+		return err
+	})
+	fresh, cancelled := env.bots.cancelBotCall(call)
+	if cancelled {
+		t.Fatalf("CAS 落空的取消不得报成功")
+	}
+	if fresh.Status != model.BotCallStatusRunning {
+		t.Fatalf("应重读返回最新状态，实际 %s", fresh.Status)
+	}
+	// CancelCall 用重读后的 running 状态继续取消：记标记（终态由 worker
+	// 的 finalizeCall 落定，测试里没有真实 worker，看标记即可）。
+	if _, err := env.bots.CancelCall(userID, bot.ID, callID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	marked, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if marked.CancelRequestedAt == nil {
+		t.Fatalf("取消意图必须以标记表达，等 worker 落定终态")
+	}
+}
