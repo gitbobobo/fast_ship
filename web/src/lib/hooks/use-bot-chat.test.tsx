@@ -3,7 +3,7 @@ import { StrictMode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useBotChat, foldStreamEvent } from "./use-bot-chat";
+import { useBotChat, foldStreamEvent, mergeCallSnapshots } from "./use-bot-chat";
 import { botKeys } from "./use-bots";
 import type { BotCall, BotMessage, BotRun } from "@/lib/api/bots";
 import { signInAs, teardownAuth } from "@/test/auth";
@@ -595,6 +595,25 @@ describe("foldStreamEvent", () => {
     expect(state.runs.map((r) => `${r.id}:${r.status}:${r.error_code}:${r.error_message}`)).toEqual([
       "r-err:failed:model_request_failed:上游 502",
     ]);
+  });
+  it("同分快照也合并：权威快照补齐缓存缺失的终态字段", () => {
+    const previous: BotCall[] = [{
+      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
+      status: "failed", created_at: "2026-01-01T00:00:00Z",
+    } as unknown as BotCall];
+    const authoritative: BotCall = {
+      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
+      status: "failed", error_code: "github_unauthorized", error_message: "402",
+      created_at: "2026-01-01T00:00:00Z",
+    } as unknown as BotCall;
+    const merged = mergeCallSnapshots(previous, [authoritative]);
+    expect(merged[0].error_code).toBe("github_unauthorized");
+    // 反向（快照更旧更空）也不丢缓存里已有的字段。
+    const back = mergeCallSnapshots([authoritative], [{
+      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
+      status: "failed", created_at: "2026-01-01T00:00:00Z",
+    } as unknown as BotCall]);
+    expect(back[0].error_code).toBe("github_unauthorized");
   });
   it("快照合并顺着批准转移方向：queued 胜过缓存的 pending_confirmation", () => {
     const { state, sinks: sinksObj } = sinks();

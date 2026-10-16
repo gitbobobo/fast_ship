@@ -2752,3 +2752,34 @@ func TestBotAlwaysAllowPersistsSourceParam(t *testing.T) {
 		t.Fatalf("github 来源不得命中 internal 的 always-allow 规则")
 	}
 }
+
+func TestBotProjectListSlimsTokenRefs(t *testing.T) {
+	// fs_project/list 与 get 一致走瘦身投影：GitHub 凭证引用 ID 不进模型上下文。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botplistslim")
+	bot := env.createBot(t, userID)
+	env.db.Create(&model.UserGitHubToken{
+		ID: "tok-123", UserID: userID, Title: "测试凭证",
+		TokenFingerprint: "fp-plist", TokenPrefix: "ghp_",
+		DetectionStatus: model.TokenDetectionUnchecked, DetectionType: model.TokenTypeClassic,
+		DetectionScopes: "", DetectionLogin: "", DetectionDetail: "{}",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+	tokenID := "tok-123"
+	if _, err := env.bots.projects.Create(userID, &CreateProjectRequest{
+		Name:                "凭证项目",
+		PublicGithubTokenId: &tokenID,
+	}); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	raw, err := env.bots.execProjectRead(context.Background(), &model.BotToolCall{
+		ID: "call-plist", BotID: bot.ID, ToolName: "fs_project",
+		Action: "list", ArgumentsJSON: `{"action":"list","page":1,"page_size":20}`,
+	})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.Contains(raw, "public_github_token_id") || strings.Contains(raw, "code_github_token_id") {
+		t.Fatalf("列表结果不得携带凭证引用: %s", raw)
+	}
+}

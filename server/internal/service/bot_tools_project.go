@@ -28,7 +28,12 @@ func (s *BotService) execProjectRead(ctx context.Context, call *model.BotToolCal
 		if err != nil {
 			return "", err
 		}
-		return botMarshalResult(botSlimPage("projects", items, total, page, pageSize))
+		// 与 get 一致走瘦身投影：完整响应带 GitHub 凭证引用 ID，不进模型上下文。
+		slim := make([]map[string]interface{}, 0, len(items))
+		for i := range items {
+			slim = append(slim, botSlimProject(&items[i]))
+		}
+		return botMarshalResult(botSlimPage("projects", slim, total, page, pageSize))
 	case "get":
 		if strings.TrimSpace(args.ID) == "" {
 			return "", errs.ErrInvalidParams

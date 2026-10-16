@@ -152,11 +152,12 @@ export function mergeCallSnapshots(
   const merged = new Map(previous.map((c) => [c.id, c]));
   for (const call of incoming) {
     const cached = merged.get(call.id);
-    if (
-      !cached ||
-      CALL_STATUS_RANK[call.status] > CALL_STATUS_RANK[cached.status]
-    ) {
+    if (!cached || CALL_STATUS_RANK[call.status] > CALL_STATUS_RANK[cached.status]) {
       merged.set(call.id, call);
+    } else if (CALL_STATUS_RANK[call.status] === CALL_STATUS_RANK[cached.status]) {
+      // 同分也合并：缓存里的终态可能缺 error/result 元数据（只收到过
+      // 状态级 tool_result 事件的标签页），权威快照字段更全就补齐。
+      merged.set(call.id, { ...cached, ...call });
     }
   }
   return [...merged.values()];
