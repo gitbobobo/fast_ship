@@ -2588,3 +2588,23 @@ func TestBotTerminalRunEventInSameTx(t *testing.T) {
 		t.Fatalf("stopped 终态必须带 done 事件，实际 %d", events)
 	}
 }
+
+func TestBotHelpResultIsValidJSON(t *testing.T) {
+	// fs_help/read 的结果会以 json.RawMessage 透出到调用列表与快照：
+	// 裸文本让整个响应无法序列化，必须是合法 JSON。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "bothelp")
+	bot := env.createBot(t, userID)
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_help",
+		Action: "read", ExecutionMode: string(model.BotExecutionSync),
+		Status: model.BotCallStatusRunning, CreatedAt: time.Now().UTC(),
+	}
+	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if !json.Valid([]byte(content)) {
+		t.Fatalf("fs_help 结果必须是合法 JSON: %q", content[:30])
+	}
+}

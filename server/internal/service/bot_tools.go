@@ -505,7 +505,9 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 	case "fs_schedule/status", "fs_memory/status":
 		return s.execCapabilityStatus(call)
 	case "fs_help/read":
-		return botHelpText, nil
+		// 帮助文本包成 JSON：结果会以 json.RawMessage 透出到调用列表与
+		// 快照，裸文本会让整个响应无法序列化。
+		return marshalJSONString(map[string]string{"text": botHelpText}), nil
 	case "fs_result/read":
 		return s.execResultRead(call)
 	case "fs_stop/stop":
