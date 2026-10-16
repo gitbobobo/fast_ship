@@ -466,23 +466,42 @@ func (s *BotService) executeQueuedCall(callID string) {
 		return
 	}
 
-	// 撤销对尚未认领的授权调用生效：授权失效则回到待确认。
+	// 撤销对尚未认领的授权调用生效：授权失效则回到待确认（快速路径）。
 	if call.AuthorizationID != nil {
 		authz, authzErr := s.authz.FindByID(*call.AuthorizationID)
 		if authzErr != nil || authz.RevokedAt != nil || authz.BotID != bot.ID {
-			s.revertQueuedCall(call, "authorization_revoked")
+			s.revertQueuedCall(call)
 			return
 		}
 	}
 
+	// 认领与授权复核在同一事务内：撤销与认领的竞速由事务串行化裁决，
+	// 已撤销的授权不能再把调用推进到 running。
 	now := time.Now().UTC()
-	var claimed bool
+	var claimed, authzRevoked bool
 	claimErr := s.db.Transaction(func(tx *gorm.DB) error {
+		claimed, authzRevoked = false, false
+		if call.AuthorizationID != nil {
+			authz, err := repository.NewBotAuthorizationRepository(tx).FindByID(*call.AuthorizationID)
+			if err != nil {
+				return err
+			}
+			if authz.RevokedAt != nil || authz.BotID != bot.ID {
+				authzRevoked = true
+				return nil
+			}
+		}
 		var err error
 		claimed, err = repository.NewBotToolCallRepository(tx).ClaimQueuedTx(tx, callID, now)
 		return err
 	})
-	if claimErr != nil || !claimed {
+	if claimErr != nil {
+		return
+	}
+	if authzRevoked || !claimed {
+		if authzRevoked {
+			s.revertQueuedCall(call)
+		}
 		return
 	}
 	call.Status = model.BotCallStatusRunning
@@ -733,8 +752,9 @@ func (s *BotService) appendBackgroundResultTx(tx *gorm.DB, runID string, call *m
 	})
 }
 
-// revertQueuedCall 授权失效时把排队调用退回待确认。
-func (s *BotService) revertQueuedCall(call *model.BotToolCall, reason string) {
+// revertQueuedCall 授权失效时把排队调用退回待确认；事件带完整调用投影，
+// 订阅端合并后立即恢复审批控件，不靠重读。
+func (s *BotService) revertQueuedCall(call *model.BotToolCall) {
 	ok, err := s.calls.UpdateWhere(call.ID, string(model.BotCallStatusQueued), map[string]interface{}{
 		"status":           model.BotCallStatusPendingConfirmation,
 		"authorization_id": nil,
@@ -742,8 +762,10 @@ func (s *BotService) revertQueuedCall(call *model.BotToolCall, reason string) {
 	if err != nil || !ok {
 		return
 	}
+	call.Status = model.BotCallStatusPendingConfirmation
+	call.AuthorizationID = nil
 	s.emitEvent(call.BotID, nil, call.ID, model.BotEventToolCall, botEventEnvelope{
 		Kind: "tool_call", Phase: "awaiting_confirmation",
-		Payload: map[string]interface{}{"reason": reason},
+		Payload: botToolCallResponseOf(call),
 	})
 }

@@ -385,21 +385,13 @@ func (s *BotService) RevokeAuthorization(userID, botID, authzID string) error {
 	if !revoked {
 		return nil // 幂等：已撤销
 	}
-	// 让引用该授权、仍在排队的调用回到待确认。
+	// 让引用该授权、仍在排队的调用回到待确认；事件带完整调用投影
+	//（与 worker 认领前的撤销复核同一条退回路径）。
 	var queued []*model.BotToolCall
 	if err := s.db.Where("bot_id = ? AND authorization_id = ? AND status = ?",
 		botID, authzID, model.BotCallStatusQueued).Find(&queued).Error; err == nil {
 		for _, call := range queued {
-			ok, err := s.calls.UpdateWhere(call.ID, string(model.BotCallStatusQueued), map[string]interface{}{
-				"status":           model.BotCallStatusPendingConfirmation,
-				"authorization_id": nil,
-			})
-			if err == nil && ok {
-				s.emitEvent(botID, nil, call.ID, model.BotEventToolCall, botEventEnvelope{
-					Kind: "tool_call", Phase: "awaiting_confirmation",
-					Payload: map[string]interface{}{"reason": "authorization_revoked"},
-				})
-			}
+			s.revertQueuedCall(call)
 		}
 	}
 	return nil

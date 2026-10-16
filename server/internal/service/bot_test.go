@@ -1912,3 +1912,96 @@ func TestBotContextRejectsUnclosedToolBlock(t *testing.T) {
 		t.Fatalf("未闭合 tool 块应拒绝构建上下文")
 	}
 }
+
+func TestBotRevokeEventCarriesRestoredCall(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botrev2")
+	bot := env.createBot(t, userID)
+
+	now := time.Now().UTC()
+	authz := &model.BotAuthorization{
+		ID: uuid.NewString(), BotID: bot.ID,
+		ToolName: "fs_project", Action: "create",
+		ScopeKind: "project_collection", ScopeID: userID,
+		ConstraintsJSON: "{}", RuleHash: "hash-rev2", CreatedAt: now,
+	}
+	if err := env.db.Create(authz).Error; err != nil {
+		t.Fatalf("seed authz: %v", err)
+	}
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionAsync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+		Update("authorization_id", authz.ID).Error; err != nil {
+		t.Fatalf("bind authz: %v", err)
+	}
+
+	if err := env.bots.RevokeAuthorization(userID, bot.ID, authz.ID); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	// 撤销事件必须带恢复后的完整调用投影：订阅端合并即恢复审批控件，
+	// 卡片不能停在 queued 等重读。
+	var events []model.BotEvent
+	env.db.Where("bot_id = ? AND event_type = ?", bot.ID, model.BotEventToolCall).
+		Order("seq asc").Find(&events)
+	var restored *botEventEnvelope
+	for i := range events {
+		var env0 botEventEnvelope
+		if err := json.Unmarshal([]byte(events[i].PayloadJSON), &env0); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		if env0.CallID == callID {
+			restored = &env0
+		}
+	}
+	if restored == nil {
+		t.Fatalf("撤销应发 tool_call 事件")
+	}
+	m, ok := restored.Payload.(map[string]interface{})
+	if !ok || m["id"] != callID || m["status"] != string(model.BotCallStatusPendingConfirmation) {
+		t.Fatalf("撤销事件应带 pending_confirmation 投影: %v", restored.Payload)
+	}
+}
+
+func TestBotClaimRechecksAuthorization(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botclaim")
+	bot := env.createBot(t, userID)
+
+	// 竞速窗口：认领前授权已被撤销但快速路径检查刚通过（撤销提交在
+	// 预检与认领之间）。认领事务内的授权复核必须挡住它。
+	now := time.Now().UTC()
+	authz := &model.BotAuthorization{
+		ID: uuid.NewString(), BotID: bot.ID,
+		ToolName: "fs_project", Action: "create",
+		ScopeKind: "project_collection", ScopeID: userID,
+		ConstraintsJSON: "{}", RuleHash: "hash-claim", CreatedAt: now,
+	}
+	if err := env.db.Create(authz).Error; err != nil {
+		t.Fatalf("seed authz: %v", err)
+	}
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionAsync))
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+		Update("authorization_id", authz.ID).Error; err != nil {
+		t.Fatalf("bind authz: %v", err)
+	}
+
+	// 只撤销授权行，不走过 revertQueuedCall 的退回路径——复现「撤销已提交、
+	// 退回更新输给认领」的时序。
+	if err := env.db.Model(&model.BotAuthorization{}).Where("id = ?", authz.ID).
+		Update("revoked_at", time.Now().UTC()).Error; err != nil {
+		t.Fatalf("revoke raw: %v", err)
+	}
+
+	env.bots.executeQueuedCall(callID)
+
+	fresh, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if fresh.Status != model.BotCallStatusPendingConfirmation {
+		t.Fatalf("已撤销授权不得认领执行，应退回待确认: %+v", fresh.Status)
+	}
+	if fresh.FinishedAt != nil {
+		t.Fatalf("调用不得被执行: %+v", fresh.FinishedAt)
+	}
+}
