@@ -299,34 +299,40 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 }
 
 // Delete 有活动 run 或未终结调用时返回冲突：先显式处理，避免静默丢任务。
-// pending_confirmation / queued 的调用也算未终结（rejected/cancelled 等终态不算）。
+// pending_confirmation / queued 的调用也算未终结（rejected/cancelled 等终态
+// 不算）。冲突检查与删除在同一事务内：发送准入（NextMessageSeqTx 取号）与
+// 删除天然串行，先删则并发发送因 bot 缺失失败，先入账则删除撞活动 run。
 func (s *BotService) Delete(userID, botID string) error {
-	if _, err := s.bots.FindByIDAndUser(botID, userID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errs.ErrBotNotFound
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		if _, err := repository.NewBotRepository(tx).FindByIDAndUser(botID, userID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotNotFound
+			}
+			return errs.ErrInternal
 		}
-		return errs.ErrInternal
-	}
-
-	if _, err := s.runs.FindActiveByBot(botID); err == nil {
-		return errs.ErrBotDeleteConflict
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return errs.ErrInternal
-	}
-	active, err := s.calls.ListByBot(botID, []string{
-		string(model.BotCallStatusPendingConfirmation),
-		string(model.BotCallStatusQueued),
-		string(model.BotCallStatusRunning),
-	}, 1)
-	if err != nil {
-		return errs.ErrInternal
-	}
-	if len(active) > 0 {
-		return errs.ErrBotDeleteConflict
-	}
-
-	if err := s.bots.Delete(botID); err != nil {
-		return errs.ErrInternal
+		if _, err := repository.NewBotRunRepository(tx).FindActiveByBot(botID); err == nil {
+			return errs.ErrBotDeleteConflict
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrInternal
+		}
+		active, err := repository.NewBotToolCallRepository(tx).ListByBot(botID, []string{
+			string(model.BotCallStatusPendingConfirmation),
+			string(model.BotCallStatusQueued),
+			string(model.BotCallStatusRunning),
+		}, 1)
+		if err != nil {
+			return errs.ErrInternal
+		}
+		if len(active) > 0 {
+			return errs.ErrBotDeleteConflict
+		}
+		if err := repository.NewBotRepository(tx).Delete(botID); err != nil {
+			return errs.ErrInternal
+		}
+		return nil
+	})
+	if txErr != nil {
+		return txErr
 	}
 	return nil
 }

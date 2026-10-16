@@ -2608,3 +2608,31 @@ func TestBotHelpResultIsValidJSON(t *testing.T) {
 		t.Fatalf("fs_help 结果必须是合法 JSON: %q", content[:30])
 	}
 }
+
+func TestBotRecoveryEmitsTerminalRunEvents(t *testing.T) {
+	// 重启恢复把活动 run 置 failed 时必须同事务补 error/done 事件：一直
+	// 挂在页面上的客户端按 SSE 游标回放就能把原 run 折到 failed。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botrecevent")
+	bot := env.createBot(t, userID)
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-recevent", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "recevent",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	var kinds []string
+	env.db.Model(&model.BotEvent{}).Where("bot_id = ? AND run_id = ? AND event_type IN ?",
+		bot.ID, run.ID, []string{model.BotEventError, model.BotEventDone}).
+		Order("seq ASC").Pluck("event_type", &kinds)
+	if len(kinds) != 2 || kinds[0] != model.BotEventError || kinds[1] != model.BotEventDone {
+		t.Fatalf("恢复必须为原 run 补 error+done 事件，实际 %v", kinds)
+	}
+}

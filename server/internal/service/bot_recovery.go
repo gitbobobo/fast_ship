@@ -53,16 +53,40 @@ func (s *BotService) RecoverOnStartup() error {
 
 	affectedBots := map[string]bool{}
 	for _, run := range runs {
-		ok, err := s.runs.UpdateColumns(run.ID, map[string]interface{}{"finished_at": nil},
-			map[string]interface{}{
-				"status":        model.BotRunStatusFailed,
-				"finished_at":   now,
-				"error_code":    "server_restarted",
-				"error_message": "服务在运行执行中重启，未完成步骤不再继续",
+		// 终态转移与 error/done 事件同一事务：一直挂在页面上的客户端重启
+		// 后按 SSE 游标回放也能把原 run 折到 failed，不必等快照重读。
+		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			ok, err := repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
+				map[string]interface{}{"finished_at": nil},
+				map[string]interface{}{
+					"status":        model.BotRunStatusFailed,
+					"finished_at":   now,
+					"error_code":    "server_restarted",
+					"error_message": "服务在运行执行中重启，未完成步骤不再继续",
+				})
+			if err != nil || !ok {
+				return err
+			}
+			if err := s.appendEventTx(tx, run.BotID, runIDPtr(run.ID), "", model.BotEventError, botEventEnvelope{
+				Kind: "run_error",
+				Payload: map[string]interface{}{
+					"code": "server_restarted", "message": "服务在运行执行中重启，未完成步骤不再继续",
+					"status": string(model.BotRunStatusFailed),
+				},
+			}); err != nil {
+				return err
+			}
+			return s.appendEventTx(tx, run.BotID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
+				Kind: "run_done", Phase: string(model.BotRunStatusFailed),
+				Payload: map[string]interface{}{"status": string(model.BotRunStatusFailed)},
 			})
-		if err == nil && ok {
-			affectedBots[run.BotID] = true
+		})
+		if txErr != nil {
+			s.logger.Warn("恢复 run 失败", zap.String("run_id", run.ID), zap.Error(txErr))
+			continue
 		}
+		affectedBots[run.BotID] = true
+		s.publishEvent(run.BotID)
 	}
 
 	for i := range calls {
