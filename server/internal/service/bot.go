@@ -348,7 +348,9 @@ func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (
 	toolOK, toolDetail := botProbeToolCall(baseURL, modelName, apiKey)
 	checks = append(checks, ConnectionCheckResult{Name: "tool_call", Passed: toolOK, Detail: toolDetail})
 
-	ok := streamOK
+	// 聚合成功要求两项都过：能聊天不能调用工具的供应商跑不了工具循环，
+	// 编辑器据 ok 判定测试结果，不能给假成功。
+	ok := streamOK && toolOK
 	return &TestConnectionResponse{Ok: ok, Checks: checks}, nil
 }
 
@@ -371,6 +373,11 @@ func (s *BotService) resolveTestTarget(userID string, req *TestConnectionRequest
 	plain, err := s.decryptAPIKey(bot)
 	if err != nil {
 		return "", "", "", err
+	}
+	// 表单里填了替换密钥就测新密钥：旧密钥有效不代表替换后能用，测试
+	// 连接必须反映将要保存的配置。
+	if req.APIKey != nil && strings.TrimSpace(*req.APIKey) != "" {
+		plain = strings.TrimSpace(*req.APIKey)
 	}
 	if req.BaseURL != nil && strings.TrimSpace(*req.BaseURL) != "" {
 		baseURL = strings.TrimSpace(*req.BaseURL)

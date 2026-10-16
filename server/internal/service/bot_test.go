@@ -71,6 +71,21 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 	f := &fakeModelServer{requests: make(chan fakeModelRequest, 64), shutdown: make(chan struct{}), turns: turns}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		// 坏密钥：替换密钥的测试必须真的用新密钥，假服务按头拒绝。
+		if strings.Contains(r.Header.Get("Authorization"), "bad-replacement") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":{"message":"invalid api key","type":"auth_error"}}`)
+			return
+		}
+		// no-tools-model：只拒绝带工具的请求，模拟「能聊天不能调工具」的
+		// 供应商，验证聚合测试结果不给假成功。
+		if strings.Contains(string(body), "no-tools-model") && strings.Contains(string(body), "fs_probe_echo") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"tools is not supported","type":"invalid_request_error"}}`)
+			return
+		}
 		select {
 		case f.requests <- fakeModelRequest{Body: body}:
 		default:
@@ -464,6 +479,32 @@ func TestBotConnection(t *testing.T) {
 	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{BotID: &bot.ID})
 	if err != nil || !res.Ok {
 		t.Fatalf("bot_id connection: %v %+v", err, res)
+	}
+
+	// 聚合成功要求流式与工具调用都过：能聊天不能调工具的供应商跑不了
+	// 工具循环，不能给假成功。
+	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{BotID: &bot.ID,
+		Model: strPtrBot("no-tools-model")})
+	if err != nil {
+		t.Fatalf("tool probe: %v", err)
+	}
+	if res.Ok {
+		t.Fatalf("工具探测失败时聚合结果不得为 ok: %+v", res)
+	}
+	for _, c := range res.Checks {
+		if c.Name == "tool_call" && c.Passed {
+			t.Fatalf("no-tools-model 的工具探测应失败: %+v", res)
+		}
+	}
+
+	// 表单填了替换密钥就测新密钥：坏的新密钥不得被旧密钥救活。
+	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{BotID: &bot.ID,
+		APIKey: strPtrBot("sk-bad-replacement-9999")})
+	if err != nil {
+		t.Fatalf("replacement key: %v", err)
+	}
+	if res.Ok || res.Checks[0].Passed {
+		t.Fatalf("坏替换密钥应测试失败（不得回退已存密钥）: %+v", res)
 	}
 
 	if _, err := env.bots.TestConnection(userID, &TestConnectionRequest{}); err == nil {
