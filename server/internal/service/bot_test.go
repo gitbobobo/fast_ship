@@ -2005,3 +2005,38 @@ func TestBotClaimRechecksAuthorization(t *testing.T) {
 		t.Fatalf("调用不得被执行: %+v", fresh.FinishedAt)
 	}
 }
+
+func TestBotCloseUnstartedSyncAtomic(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botunstarted")
+	bot := env.createBot(t, userID)
+
+	// 新输入/停止触发的收尾：终态、协议回复与事件同一事务——崩溃窗口不存在。
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionSync))
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	env.bots.closeUnstartedSyncCalls([]*model.BotToolCall{call}, "stop_requested")
+
+	fresh, err := env.bots.calls.FindByID(callID)
+	if err != nil || fresh.Status != model.BotCallStatusNotExecuted || fresh.FinishedAt == nil {
+		t.Fatalf("应落 not_executed 终态: %v %+v", err, fresh)
+	}
+	var replyCount, eventCount int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindToolReply).Count(&replyCount)
+	env.db.Model(&model.BotEvent{}).Where("bot_id = ? AND event_type = ?",
+		bot.ID, model.BotEventToolResult).Count(&eventCount)
+	if replyCount != 1 || eventCount != 1 {
+		t.Fatalf("回复与事件应同事务落库: replies=%d events=%d", replyCount, eventCount)
+	}
+
+	// 重复收尾幂等：终态行不再变化。
+	env.bots.closeUnstartedSyncCalls([]*model.BotToolCall{call}, "stop_requested")
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindToolReply).Count(&replyCount)
+	if replyCount != 1 {
+		t.Fatalf("重复收尾不得补第二条回复: %d", replyCount)
+	}
+}

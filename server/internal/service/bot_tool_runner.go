@@ -373,33 +373,38 @@ func (s *BotService) closeUnstartedSyncCalls(calls []*model.BotToolCall, reason 
 		}
 		runID := s.runIDOfCall(call)
 		now := time.Now().UTC()
-		ok, err := s.calls.UpdateWhere(call.ID, string(model.BotCallStatusQueued), map[string]interface{}{
-			"status":        model.BotCallStatusNotExecuted,
-			"finished_at":   now,
-			"error_code":    "not_executed",
-			"error_message": reason,
-		})
-		if err != nil || !ok {
-			continue
-		}
-		call.Status = model.BotCallStatusNotExecuted
-		reply := botToolReplyContent{
-			CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
-			ToolName: call.ToolName, Status: string(model.BotCallStatusNotExecuted),
-			Content: botFailureReplyText(errs.New(errs.ErrInvalidParams.Code,
-				"调用未执行（"+reason+"）：请在新输入到达后重新决定是否再次调用")),
-		}
+		// 状态转移、协议回复与事件同一事务：崩溃不会留下无回复的终态行
+		//（恢复只修 queued 同步调用，缺口将永久阻塞上下文构建）。
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
-			return s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now)
+			ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
+				string(model.BotCallStatusQueued), map[string]interface{}{
+					"status":        model.BotCallStatusNotExecuted,
+					"finished_at":   now,
+					"error_code":    "not_executed",
+					"error_message": reason,
+				})
+			if err != nil || !ok {
+				return err
+			}
+			call.Status = model.BotCallStatusNotExecuted
+			reply := botToolReplyContent{
+				CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
+				ToolName: call.ToolName, Status: string(model.BotCallStatusNotExecuted),
+				Content: botFailureReplyText(errs.New(errs.ErrInvalidParams.Code,
+					"调用未执行（"+reason+"）：请在新输入到达后重新决定是否再次调用")),
+			}
+			if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
+				return err
+			}
+			return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
+				Kind: "tool_result", Phase: "terminal",
+				Payload: botToolCallResponseOf(call),
+			})
 		})
 		if txErr != nil {
-			s.logger.Warn("补 not_executed 回复失败", zap.String("call_id", call.ID), zap.Error(txErr))
+			s.logger.Warn("补 not_executed 终态失败", zap.String("call_id", call.ID), zap.Error(txErr))
 			continue
 		}
-		s.emitEvent(call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
-			Kind: "tool_result", Phase: "terminal",
-			Payload: map[string]interface{}{"status": string(model.BotCallStatusNotExecuted), "reason": reason},
-		})
 	}
 }
 
