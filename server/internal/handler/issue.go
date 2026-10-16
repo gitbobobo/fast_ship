@@ -286,7 +286,7 @@ func (h *IssueHandler) Sync(c *gin.Context) {
 	projectID := c.Param("id")
 	userID := middleware.GetUserID(c)
 
-	result, err := h.issueService.SyncProjectIssues(projectID, userID)
+	result, err := h.issueService.SyncProjectIssues(c.Request.Context(), projectID, userID)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

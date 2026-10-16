@@ -158,6 +158,18 @@ func (r *IssueGitHubMetaRepository) FindByProjectAndGitHubIDTx(tx *gorm.DB, proj
 	return &meta, nil
 }
 
+// MarkCollectionsSynced 推进该 Issue 评论/时间线集合的镜像水位。只写这两列，
+// 不触碰 synced_at 与 UpsertTx 管理的镜像字段；由同步路径在两个集合都成功
+// 镜像后调用。
+func (r *IssueGitHubMetaRepository) MarkCollectionsSynced(issueID string, remoteUpdatedAt time.Time, commentsCount int) error {
+	return r.db.Model(&model.IssueGitHubMeta{}).
+		Where("issue_id = ?", issueID).
+		Updates(map[string]any{
+			"collections_synced_updated_at": remoteUpdatedAt,
+			"collections_synced_comments":   commentsCount,
+		}).Error
+}
+
 type IssueCommentRepository struct {
 	db *gorm.DB
 }
@@ -256,6 +268,17 @@ func (r *IssueCommentRepository) ListAllByIssueID(issueID string) ([]model.Issue
 		Order("created_at ASC, id ASC").
 		Find(&comments).Error
 	return comments, err
+}
+
+// CountSynced 返回该 Issue 下 source='github' 的镜像评论行数。
+func (r *IssueCommentRepository) CountSynced(issueID string) (int, error) {
+	var count int64
+	if err := r.db.Model(&model.IssueComment{}).
+		Where("issue_id = ? AND source = ?", issueID, model.IssueSourceGitHub).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 // MaxCreatedAt 返回该 Issue 本地评论的最新 created_at，没有评论时返回 nil。
@@ -364,6 +387,17 @@ func (r *IssueTimelineRepository) List(issueID string, includeCommented bool, pa
 		Limit(pageSize).
 		Find(&events).Error
 	return events, total, err
+}
+
+// Count 返回该 Issue 的时间线镜像行数；时间线无来源概念，全部行都属镜像。
+func (r *IssueTimelineRepository) Count(issueID string) (int, error) {
+	var count int64
+	if err := r.db.Model(&model.IssueTimelineEvent{}).
+		Where("issue_id = ?", issueID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 type IssueSyncStateRepository struct {

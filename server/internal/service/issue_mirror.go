@@ -127,13 +127,29 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 				return failSync(syncErr)
 			}
 
-			commentCount, syncErr := m.syncComments(ctx, client, issue, item.GetNumber())
-			if syncErr != nil {
-				return failSync(syncErr)
-			}
-			timelineCount, syncErr := m.syncTimeline(ctx, client, issue, item.GetNumber())
-			if syncErr != nil {
-				return failSync(syncErr)
+			// 远端 issue 相对集合水位未变时跳过评论/时间线拉取，计数取现有
+			// 镜像行数；水位只在两个集合都成功镜像后推进，失败则下轮重试。
+			var commentCount, timelineCount int
+			if needsCollectionSync(issue.GitHubMeta, item) {
+				commentCount, syncErr = m.syncComments(ctx, client, issue, item.GetNumber())
+				if syncErr != nil {
+					return failSync(syncErr)
+				}
+				timelineCount, syncErr = m.syncTimeline(ctx, client, issue, item.GetNumber())
+				if syncErr != nil {
+					return failSync(syncErr)
+				}
+				if err := m.gitHubMetaRepo.MarkCollectionsSynced(issue.ID, item.GetUpdatedAt().UTC(), item.GetComments()); err != nil {
+					return failSync(errs.ErrInternal)
+				}
+			} else {
+				var err error
+				if commentCount, err = m.commentRepo.CountSynced(issue.ID); err != nil {
+					return failSync(errs.ErrInternal)
+				}
+				if timelineCount, err = m.timelineRepo.Count(issue.ID); err != nil {
+					return failSync(errs.ErrInternal)
+				}
 			}
 
 			syncedIssues++
@@ -447,6 +463,20 @@ func (m *issueMirror) ownerUserID(projectID string) (string, error) {
 	return project.UserID, nil
 }
 
+// needsCollectionSync 判断是否要重拉该 Issue 的评论/时间线集合。meta 为 nil
+// 或水位为空（新 issue、改动前留下的旧 meta 行）→ 重拉一次做 bootstrap；
+// 远端 updated_at 晚于水位 → 远端有更新；updated_at 只有秒级精度，同一秒内
+// 新增的评论靠远端评论数与水位不一致发现。
+func needsCollectionSync(meta *model.IssueGitHubMeta, item *ghclient.Issue) bool {
+	if meta == nil || meta.CollectionsSyncedUpdatedAt == nil {
+		return true
+	}
+	if item.GetUpdatedAt().UTC().After(*meta.CollectionsSyncedUpdatedAt) {
+		return true
+	}
+	return item.GetComments() != meta.CollectionsSyncedComments
+}
+
 // syncComments 先拉完该 Issue 的全部评论分页并映射成 model，再由 ReplaceSynced
 // 单事务写入；任一分页失败时本地集合保持同步前数据，一个字也不写。
 func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient, issue *model.Issue, issueNumber int) (int, error) {
@@ -737,7 +767,7 @@ func shortSHA(sha string) string {
 	return sha[:7]
 }
 
-func (s *IssueService) SyncProjectIssues(projectID, userID string) (*IssueSyncResponse, error) {
+func (s *IssueService) SyncProjectIssues(ctx context.Context, projectID, userID string) (*IssueSyncResponse, error) {
 	project, err := s.projectRepo.FindByID(projectID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -750,7 +780,7 @@ func (s *IssueService) SyncProjectIssues(projectID, userID string) (*IssueSyncRe
 		return nil, errs.ErrProjectGitHubNotConfigured
 	}
 
-	return s.mirror.Sync(context.Background(), project)
+	return s.mirror.Sync(ctx, project)
 }
 
 func (s *IssueService) SyncAllProjectsIncremental(ctx context.Context) {
