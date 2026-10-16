@@ -45,6 +45,8 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 	}
 	entries := make([]preparedEntry, 0, len(reply.ToolCalls))
 	content := botAssistantContent{Text: reply.Text}
+	// 校验用本请求构建时的冻结工具集（压缩边界后新旧版本可能不同）。
+	ts := botToolsetVersionOf(requestRow.ToolsetVersion)
 	for _, tc := range reply.ToolCalls {
 		entry := preparedEntry{
 			providerID: tc.ID,
@@ -58,7 +60,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				CreatedAt:          now,
 			},
 		}
-		prepared, err := botPrepareToolCall(tc.Name, tc.Arguments)
+		prepared, err := botPrepareToolCall(ts, tc.Name, tc.Arguments)
 		if err != nil {
 			entry.invalidErr = err
 			entry.call.ToolName = tc.Name
@@ -172,7 +174,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 				replyContent := botToolReplyContent{
 					CallID: call.ID, ProviderToolCallID: entry.providerID,
 					ToolName: entry.toolName, Status: string(model.BotCallStatusFailed),
-					Content: botFailureReplyText(entry.invalidErr),
+					Content: botToolActionErrorReply(entry.invalidErr),
 				}
 				if err := s.appendToolReplyTx(tx, bot.ID, run.ID, requestID, call, replyContent, now); err != nil {
 					return err
@@ -584,6 +586,7 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 		"result_json":              outcome.ResultJSON,
 		"result_preview_json":      outcome.PreviewJSON,
 		"result_chars":             outcome.ResultChars,
+		"result_items":             outcome.ResultItems,
 		"truncated":                outcome.Truncated,
 		"effect_may_have_occurred": effect,
 	}

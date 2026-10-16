@@ -137,6 +137,18 @@ func (r *BotToolCallRepository) UpdateWhereTx(tx *gorm.DB, callID string, fromSt
 	return res.RowsAffected > 0, nil
 }
 
+// BackfillResultItems 为存量调用补记结果条数（首次折叠时解析 ResultJSON
+// 补算）；只补 result_items 仍为 0 且结果非空的行。
+func (r *BotToolCallRepository) BackfillResultItems(callID string, items int64) (bool, error) {
+	res := r.db.Model(&model.BotToolCall{}).
+		Where("id = ? AND result_items = 0", callID).
+		Update("result_items", items)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 // BotAuthorizationRepository 管结构化「始终允许」：撤销只写 revoked_at。
 type BotAuthorizationRepository struct {
 	db *gorm.DB

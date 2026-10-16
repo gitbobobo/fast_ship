@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/openai/openai-go/v2"
@@ -51,6 +53,8 @@ type botStreamRequest struct {
 	Messages []openai.ChatCompletionMessageParamUnion
 	Tools    []openai.ChatCompletionToolUnionParam
 	Model    string
+	// MaxCompletionTokens 是辅助请求的输出预算；0 表示不限制（主线不加人为上限）。
+	MaxCompletionTokens int64
 }
 
 // botStreamChat 发起流式请求并聚合：finish_reason 之后继续读取可能随后到达
@@ -62,6 +66,9 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 		StreamOptions: openai.ChatCompletionStreamOptionsParam{
 			IncludeUsage: param.NewOpt(true),
 		},
+	}
+	if req.MaxCompletionTokens > 0 {
+		params.MaxCompletionTokens = param.NewOpt(req.MaxCompletionTokens)
 	}
 	if len(req.Tools) > 0 {
 		params.Tools = req.Tools
@@ -200,6 +207,52 @@ func botProbeToolCall(baseURL, modelName, apiKey string) (bool, string) {
 		return false, "服务未报告 finish_reason"
 	}
 	return true, ""
+}
+
+// botIsContextLimitError 判定上游「上下文长度超限」类错误：这是唯一允许
+// 触发强制压缩后重试一次的失败；普通 400 参数错误与 429 限流不在此列。
+// 判定靠结构化 status/code 与常见报错文案的组合——不依赖单一供应商文案。
+func botIsContextLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *openai.Error
+	status := 0
+	code := ""
+	msg := err.Error()
+	if errors.As(err, &apiErr) {
+		status = apiErr.StatusCode
+		code = apiErr.Code
+	}
+	if code == "context_length_exceeded" || code == "context_window_exceeded" {
+		return true
+	}
+	// 仅 400/413 体量的文案匹配；429/500 永不视为上下文超限。
+	if status != 0 && status != 400 && status != 413 {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many requests") {
+		return false
+	}
+	// 只匹配明确的超窗含义；「不支持 max_tokens」等普通 400 不得触发强制压缩。
+	markers := []string{
+		"context_length_exceeded",
+		"context_window_exceeded",
+		"maximum context length",
+		"maximum context window",
+		"context window is",
+		"prompt is too long",
+		"please reduce the length of the messages",
+		"reduce the length of the messages",
+		"this model's maximum context",
+	}
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // botProbeErrText 截断上游错误文本（错误不透传密钥，也不整段透传响应体）。

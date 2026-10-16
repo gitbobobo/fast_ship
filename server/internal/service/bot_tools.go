@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -18,7 +19,8 @@ import (
 	"github.com/openai/openai-go/v2/shared"
 )
 
-// 白名单工具：固定 10 个工具、29 个 action。所有业务写操作均为
+// 白名单工具：v2 固定 11 个工具、38 个 action（v1 为 10 工具/29 action，冻结
+// 保留供存量会话在压缩边界前使用）。所有业务写操作均为
 // async + 用户确认/已有授权；同步读取也记调用账本。不做反射调用 service、
 // 不提供任意 RPC。参数使用专用结构体，action 在 schema 中列 enum，服务端
 // 再校验该 action 的必填、禁止字段。
@@ -45,6 +47,29 @@ type botNoArgs struct{}
 
 type botScheduleArgs struct {
 	Action string `json:"action" jsonschema:"enum=status,required"`
+}
+
+// botMemoryArgs 是 fs_memory 的参数超集（v2 起可用）。
+type botMemoryArgs struct {
+	Action  string  `json:"action" jsonschema:"enum=status,list,read,create,replace,append,delete,history,restore,required"`
+	Path    string  `json:"path,omitempty" jsonschema:"description=记忆文件路径（USER.md / MEMORY.md / daily/YYYY-MM-DD.md；list 之外必填）"`
+	Prefix  string  `json:"prefix,omitempty" jsonschema:"description=路径前缀过滤（list 可选，如 daily/）"`
+	Content *string `json:"content,omitempty" jsonschema:"description=正文（create/replace/append 必填；提供空串即写空内容）"`
+	// ExpectedVersion 是乐观并发版本（replace/append/delete/restore 必填）。
+	ExpectedVersion *int64 `json:"expected_version,omitempty" jsonschema:"description=期望当前版本号（replace/append/delete/restore 必填）"`
+	Version         *int64 `json:"version,omitempty" jsonschema:"description=目标版本号（restore 必填；read 可选读旧版本）"`
+	// Offset/Limit 以 Unicode 字符计。
+	Offset int `json:"offset,omitempty" jsonschema:"description=起始字符偏移（read，默认 0）"`
+	Limit  int `json:"limit,omitempty" jsonschema:"description=条数或字符数上限（read 默认 4000 上限 16000；history 默认 20 上限 50）"`
+}
+
+// botMemorySearchArgs 是 fs_memory_search 的参数（v2 新增）。
+type botMemorySearchArgs struct {
+	Action     string `json:"action" jsonschema:"enum=search,required"`
+	Query      string `json:"query" jsonschema:"description=检索关键词（必填；≥3 字符走全文索引，1-2 字符走子串匹配）"`
+	PathPrefix string `json:"path_prefix,omitempty" jsonschema:"description=路径前缀过滤（可选，如 daily/）"`
+	Limit      int    `json:"limit,omitempty" jsonschema:"description=命中上限（默认 10，最大 50）"`
+	Offset     int    `json:"offset,omitempty" jsonschema:"description=分页偏移（默认 0）"`
 }
 
 type botHelpArgs struct{}
@@ -185,10 +210,26 @@ func botToolRegistry() []*botToolDef {
 		},
 		{
 			Name:        "fs_memory",
-			Description: "跨会话记忆能力状态查询（首期不可用）。",
-			ArgsType:    reflect.TypeOf(botScheduleArgs{}),
+			Description: "操作本机器人的长期记忆文件：USER.md（用户偏好）、MEMORY.md（长期事实与决策）、daily/YYYY-MM-DD.md（每日笔记）。写入立即持久生效；list/read/history/restore 可查看与恢复历史版本。",
+			ArgsType:    reflect.TypeOf(botMemoryArgs{}),
 			Actions: []botActionDef{
-				{Name: "status", Description: "查询记忆能力是否可用", Mode: model.BotExecutionSync},
+				{Name: "status", Description: "查询记忆能力状态与注入上限", Mode: model.BotExecutionSync},
+				{Name: "list", Description: "列出记忆文件元数据（prefix 可选）", Mode: model.BotExecutionSync},
+				{Name: "read", Description: "读取当前正文或指定版本（offset/limit 按 Unicode 字符）", Mode: model.BotExecutionSync},
+				{Name: "create", Description: "新建记忆文件（已存在则冲突；墓碑可重建）", Mode: model.BotExecutionSync},
+				{Name: "replace", Description: "整体替换正文（需 expected_version）", Mode: model.BotExecutionSync},
+				{Name: "append", Description: "追加正文（需 expected_version）", Mode: model.BotExecutionSync},
+				{Name: "delete", Description: "删除文件（写墓碑版本，历史保留；需 expected_version）", Mode: model.BotExecutionSync},
+				{Name: "history", Description: "查看最近版本元数据", Mode: model.BotExecutionSync},
+				{Name: "restore", Description: "把指定旧版本恢复为新当前版本（需 expected_version）", Mode: model.BotExecutionSync},
+			},
+		},
+		{
+			Name:        "fs_memory_search",
+			Description: "在本机器人记忆文件中做关键词全文检索（SQLite FTS5 trigram）；返回路径、版本、片段与排名，正文用 fs_memory.read 取回。",
+			ArgsType:    reflect.TypeOf(botMemorySearchArgs{}),
+			Actions: []botActionDef{
+				{Name: "search", Description: "关键词全文检索本机器人记忆", Mode: model.BotExecutionSync},
 			},
 		},
 		{
@@ -226,31 +267,78 @@ func botToolRegistry() []*botToolDef {
 	}
 }
 
+// botToolRegistryV1 是 INT-101 冻结的 v1 注册表：fs_memory/fs_schedule 均为
+// 占位（available:false），无 fs_memory_search。存量会话在压缩边界/重启前
+// 的构建必须使用与本版完全一致的字节（前缀稳定）。
+func botToolRegistryV1() []*botToolDef {
+	v2 := botToolRegistry()
+	out := make([]*botToolDef, 0, len(v2)-1)
+	for _, tool := range v2 {
+		cp := *tool
+		if cp.Name == "fs_memory" {
+			cp.Description = "跨会话记忆能力状态查询（首期不可用）。"
+			cp.ArgsType = reflect.TypeOf(botScheduleArgs{})
+			cp.Actions = []botActionDef{
+				{Name: "status", Description: "查询记忆能力是否可用", Mode: model.BotExecutionSync},
+			}
+		}
+		if cp.Name == "fs_memory_search" {
+			continue
+		}
+		out = append(out, &cp)
+	}
+	return out
+}
+
 var (
-	botToolsetOnce   sync.Once
-	botToolsetLoaded *botToolsetHolder
+	botToolsetsMu   sync.Mutex
+	botToolsetsByID = map[int64]*botToolsetHolder{}
 )
 
 type botToolsetHolder struct {
+	version  int64
 	tools    []*botToolDef
 	byName   map[string]*botToolDef
 	byAction map[string]botActionDef
 	schemas  []openai.ChatCompletionToolUnionParam
-	// hash / bytes 是 tools 数组的 SHA-256 与序列化字节数（估算占用用）。
+	// hash / bytes 是线上完整 tools 数组实际字节的 SHA-256 与长度——
+	// tools_hash 必须对发送给模型的 tools 数组序列化结果计算，不能只对
+	// 逐工具参数 schema 计算（版本号也不能代替内容哈希）。
 	hash  string
 	bytes int
 }
 
-// botToolsetOf 懒加载进程级工具集（sync.Once 串行化首次构造，避免并发
-// 首轮的数据竞争与半可见状态）；schema 生成失败属于编程错误，直接 panic。
+// botToolsetOf 懒加载进程级工具集（当前发布版本）；schema 生成失败属于
+// 编程错误，直接 panic。
 func botToolsetOf() *botToolsetHolder {
-	botToolsetOnce.Do(func() { botToolsetLoaded = botBuildToolset() })
-	return botToolsetLoaded
+	return botToolsetVersionOf(botToolsetVersion)
 }
 
-func botBuildToolset() *botToolsetHolder {
-	tools := botToolRegistry()
+// botToolsetVersionOf 取指定发布版本的工具集；未知版本回退当前版本。
+// 冻结版本供存量会话在压缩边界/重启前继续构建相同字节。
+func botToolsetVersionOf(version int64) *botToolsetHolder {
+	if version <= 0 || version > botToolsetVersion {
+		version = botToolsetVersion
+	}
+	botToolsetsMu.Lock()
+	defer botToolsetsMu.Unlock()
+	if holder, ok := botToolsetsByID[version]; ok {
+		return holder
+	}
+	var tools []*botToolDef
+	if version == 1 {
+		tools = botToolRegistryV1()
+	} else {
+		tools = botToolRegistry()
+	}
+	holder := botBuildToolset(version, tools)
+	botToolsetsByID[version] = holder
+	return holder
+}
+
+func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 	holder := &botToolsetHolder{
+		version:  version,
 		tools:    tools,
 		byName:   map[string]*botToolDef{},
 		byAction: map[string]botActionDef{},
@@ -260,7 +348,6 @@ func botBuildToolset() *botToolsetHolder {
 		DoNotReference: true,
 		ExpandedStruct: true,
 	}
-	var rawAll []byte
 	for _, tool := range tools {
 		schema := reflector.ReflectFromType(tool.ArgsType)
 		schema.ID = ""
@@ -276,7 +363,6 @@ func botBuildToolset() *botToolsetHolder {
 			panic(fmt.Sprintf("bot tool schema %s: %v", tool.Name, err))
 		}
 		tool.Parameters = shared.FunctionParameters(parsed)
-		rawAll = append(rawAll, raw...)
 		holder.byName[tool.Name] = tool
 		for _, action := range tool.Actions {
 			holder.byAction[tool.Name+"/"+action.Name] = action
@@ -291,19 +377,59 @@ func botBuildToolset() *botToolsetHolder {
 			},
 		})
 	}
-	sum := sha256.Sum256(rawAll)
+	wire, err := json.Marshal(holder.schemas)
+	if err != nil {
+		panic(fmt.Sprintf("bot toolset wire marshal: %v", err))
+	}
+	sum := sha256.Sum256(wire)
 	holder.hash = hex.EncodeToString(sum[:])
-	holder.bytes = len(rawAll)
+	holder.bytes = len(wire)
 	return holder
 }
 
 // botToolsTokenEstimate 工具定义的 token 占用估算：chars/4（估算值，标注估算方式）。
-func botToolsTokenEstimate() (int64, string) {
-	ts := botToolsetOf()
+func botToolsTokenEstimate(ts *botToolsetHolder) (int64, string) {
 	return int64(ts.bytes) / 4, "chars/4"
 }
 
 // ---------- 调用准备：解析、规范化、校验、范围解析 ----------
+
+// botRenamedActionError 是改名/移除动作过渡期错误：旧调用不偷偷转发到新
+// 动作，回结构化提示让模型改用新名（帮助入口见 fs_help.read）。
+type botRenamedActionError struct {
+	Tool      string
+	Old       string
+	RenamedTo string
+}
+
+func (e *botRenamedActionError) Error() string {
+	return fmt.Sprintf("工具 %s 的动作 %s 已改名为 %s，请改用新动作",
+		e.Tool, e.Old, e.RenamedTo)
+}
+
+// botRenamedActions 是改名/移除动作的静态过渡映射；条目至少保留两个后续
+// 发布版本。映射键为 tool/action 全名。
+var botRenamedActions = map[string]string{
+	// v2 起草期曾把检索放在 fs_memory 下，发布形态是独立工具；
+	// 旧叫法返回明确改名提示而不是静默转发。
+	"fs_memory/search": "fs_memory_search/search",
+}
+
+// botToolActionErrorReply 面向模型的结构化错误正文（改名提示含目标与帮助入口）。
+func botToolActionErrorReply(err error) string {
+	var renamed *botRenamedActionError
+	if errors.As(err, &renamed) {
+		raw, _ := json.Marshal(map[string]interface{}{
+			"error":      "action_renamed",
+			"tool":       renamed.Tool,
+			"old_action": renamed.Old,
+			"renamed_to": renamed.RenamedTo,
+			"help":       "fs_help action=read",
+		})
+		return string(raw)
+	}
+	return botFailureReplyText(err)
+}
 
 // botPreparedCall 是模型工具调用经服务端校验后的落库形态。
 type botPreparedCall struct {
@@ -324,10 +450,10 @@ type botPreparedCall struct {
 	ParamConstraint string
 }
 
-// botPrepareToolCall 解析并校验一次模型工具调用；任何失败都返回 AppError，
+// botPrepareToolCall 解析并校验一次模型工具调用；ts 是该会话冻结的工具集
+// （不同会话版本可能不同）。任何失败都返回 AppError 或 botRenamedActionError，
 // 由调用方以同步失败回复模型（不建确认卡片）。
-func botPrepareToolCall(toolName, rawArguments string) (*botPreparedCall, error) {
-	ts := botToolsetOf()
+func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*botPreparedCall, error) {
 	tool, ok := ts.byName[toolName]
 	if !ok {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "未知工具: "+toolName)
@@ -337,6 +463,18 @@ func botPrepareToolCall(toolName, rawArguments string) (*botPreparedCall, error)
 	var rawMap map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(rawArguments), &rawMap); err != nil {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+	}
+	// 改名/移除动作过渡期：action 从原始参数探出（参数形态可能已不属于
+	// 本工具声明的字段集，字段白名单会先一步拒绝），先查静态映射回结构
+	// 化提示，不偷执行新动作。
+	var actionProbe struct {
+		Action string `json:"action"`
+	}
+	if raw := rawMap["action"]; len(raw) > 0 {
+		_ = json.Unmarshal(raw, &actionProbe.Action)
+	}
+	if target, renamed := botRenamedActions[toolName+"/"+strings.TrimSpace(actionProbe.Action)]; renamed {
+		return nil, &botRenamedActionError{Tool: toolName, Old: strings.TrimSpace(actionProbe.Action), RenamedTo: target}
 	}
 	knownKeys := botArgKeys(tool.ArgsType)
 	for key := range rawMap {
@@ -375,6 +513,10 @@ func botPrepareToolCall(toolName, rawArguments string) (*botPreparedCall, error)
 	}
 	meta, ok := ts.byAction[toolName+"/"+prepared.Action]
 	if !ok {
+		// 改名/移除动作过渡期：先查静态映射回结构化提示，不偷执行新动作。
+		if target, renamed := botRenamedActions[toolName+"/"+prepared.Action]; renamed {
+			return nil, &botRenamedActionError{Tool: toolName, Old: prepared.Action, RenamedTo: target}
+		}
 		return nil, errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf("工具 %s 不支持 action %s", toolName, prepared.Action))
 	}
 	prepared.Mode = meta.Mode
@@ -484,6 +626,50 @@ func botValidateActionFields(toolName, action string, raw map[string]json.RawMes
 		}
 	case "fs_environment/list", "fs_environment/projects":
 	case "fs_schedule/status", "fs_memory/status", "fs_help/read", "fs_stop/stop":
+	case "fs_memory/list":
+		// 无必填；prefix 可选。
+	case "fs_memory/read", "fs_memory/history":
+		if !has("path") || str("path") == "" {
+			return bad("fs_memory " + action + " 需要 path")
+		}
+	case "fs_memory/create":
+		if !has("path") || str("path") == "" {
+			return bad("fs_memory create 需要 path")
+		}
+		if !has("content") {
+			return bad("fs_memory create 需要 content")
+		}
+	case "fs_memory/replace", "fs_memory/append":
+		if !has("path") || str("path") == "" {
+			return bad("fs_memory " + action + " 需要 path")
+		}
+		if !has("content") {
+			return bad("fs_memory " + action + " 需要 content")
+		}
+		if !has("expected_version") {
+			return bad("fs_memory " + action + " 需要 expected_version")
+		}
+	case "fs_memory/delete":
+		if !has("path") || str("path") == "" {
+			return bad("fs_memory delete 需要 path")
+		}
+		if !has("expected_version") {
+			return bad("fs_memory delete 需要 expected_version")
+		}
+	case "fs_memory/restore":
+		if !has("path") || str("path") == "" {
+			return bad("fs_memory restore 需要 path")
+		}
+		if !has("version") {
+			return bad("fs_memory restore 需要 version")
+		}
+		if !has("expected_version") {
+			return bad("fs_memory restore 需要 expected_version")
+		}
+	case "fs_memory_search/search":
+		if !has("query") || str("query") == "" {
+			return bad("fs_memory_search search 需要 query")
+		}
 	case "fs_result/read":
 		if !has("call_id") {
 			return bad("fs_result read 需要 call_id")
@@ -514,6 +700,11 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 		return s.execEnvironmentRead(ctx, call)
 	case "fs_schedule/status", "fs_memory/status":
 		return s.execCapabilityStatus(call)
+	case "fs_memory/list", "fs_memory/read", "fs_memory/create", "fs_memory/replace",
+		"fs_memory/append", "fs_memory/delete", "fs_memory/history", "fs_memory/restore":
+		return s.execMemoryTool(call)
+	case "fs_memory_search/search":
+		return s.execMemorySearch(call)
 	case "fs_help/read":
 		// 帮助文本包成 JSON：结果会以 json.RawMessage 透出到调用列表与
 		// 快照，裸文本会让整个响应无法序列化。

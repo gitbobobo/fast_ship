@@ -44,6 +44,60 @@ func (s *BotService) runBot(botID string, wake botWake, ctx context.Context) {
 	s.botLoop(bot, run, ctx)
 }
 
+// botRunFreeze 是一次主线 run 期间冻结的配置：人设/模型/地址/密钥对当前
+// run 生效，只在压缩或进程重启边界接收允许变化的字段。
+type botRunFreeze struct {
+	Model                 string
+	BaseURL               string
+	APIKeyEncrypted       []byte
+	SystemPromptText      string
+	PromptRevision        int64
+	PlatformPromptVersion int64
+	PersonaPrompt         string
+}
+
+func captureRunFreeze(bot *model.Bot, run *model.BotRun) botRunFreeze {
+	key := append([]byte(nil), bot.APIKeyEncrypted...)
+	return botRunFreeze{
+		Model:                 runModelOf(run, bot),
+		BaseURL:               runBaseURLOf(run, bot),
+		APIKeyEncrypted:       key,
+		SystemPromptText:      bot.SystemPromptText,
+		PromptRevision:        bot.PromptRevision,
+		PlatformPromptVersion: bot.PlatformPromptVersion,
+		PersonaPrompt:         bot.PersonaPrompt,
+	}
+}
+
+func applyRunCredentialFreeze(bot *model.Bot, freeze botRunFreeze) {
+	bot.Model = freeze.Model
+	bot.BaseURL = freeze.BaseURL
+	bot.APIKeyEncrypted = freeze.APIKeyEncrypted
+}
+
+func applyRunPromptFreeze(bot *model.Bot, freeze botRunFreeze) {
+	bot.SystemPromptText = freeze.SystemPromptText
+	bot.PromptRevision = freeze.PromptRevision
+	bot.PlatformPromptVersion = freeze.PlatformPromptVersion
+	bot.PersonaPrompt = freeze.PersonaPrompt
+}
+
+func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFreeze, snap *botBoundarySnapshot) {
+	if snap == nil {
+		return
+	}
+	s.installBoundarySnapshot(bot, snap)
+	if fresh, err := s.bots.Get(bot.ID); err == nil {
+		bot.LastToldVersion = fresh.LastToldVersion
+		bot.OfferedInputSeq = fresh.OfferedInputSeq
+	}
+	freeze.SystemPromptText = snap.SystemPromptText
+	freeze.PromptRevision = snap.PromptRevision
+	freeze.PlatformPromptVersion = snap.PlatformPromptVersion
+	freeze.PersonaPrompt = snap.PersonaPrompt
+	applyRunCredentialFreeze(bot, *freeze)
+}
+
 // botLoop 单 run 主循环。
 func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Context) {
 	key, err := s.decryptAPIKey(bot)
@@ -51,10 +105,14 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		s.finishFailed(bot, run, "key_decrypt_failed", err)
 		return
 	}
-	client := botNewClient(runBaseURLOf(run, bot), key)
+	freeze := captureRunFreeze(bot, run)
+	applyRunCredentialFreeze(bot, freeze)
+	applyRunPromptFreeze(bot, freeze)
+	client := botNewClient(freeze.BaseURL, key)
 	streamClient := client
 
 	var calls []*model.BotToolCall
+	contextLimitRetried := false
 	for {
 		if input := s.safePoint(run); input.StopRequested {
 			s.closeUnstartedSyncCalls(calls, "stop_requested")
@@ -62,10 +120,52 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			return
 		}
 
+		if err := s.activateOnProcessStart(bot); err != nil {
+			s.logger.Warn("激活工具集失败")
+		}
+		if bot.SystemPromptText != freeze.SystemPromptText {
+			// 进程首次运行的工具/提示词激活是重启边界，允许接收新前缀。
+			freeze.SystemPromptText = bot.SystemPromptText
+			freeze.PromptRevision = bot.PromptRevision
+			freeze.PlatformPromptVersion = bot.PlatformPromptVersion
+			freeze.PersonaPrompt = bot.PersonaPrompt
+		}
+		if fresh, err := s.bots.Get(bot.ID); err == nil {
+			bot.LastToldVersion = fresh.LastToldVersion
+			bot.OfferedInputSeq = fresh.OfferedInputSeq
+		}
+		applyRunCredentialFreeze(bot, freeze)
+		applyRunPromptFreeze(bot, freeze)
+		s.maybeTellToolset(bot, run)
+
 		built, err := s.buildRunContext(bot, run)
 		if err != nil {
 			s.finishFailed(bot, run, "context_build_failed", err)
 			return
+		}
+		window := s.cfg.Bots.Context.WindowTokensFor(runModelOf(run, bot))
+		trigger := botFloorRatio(window, s.cfg.Bots.Context.CompressionRatioV())
+		if built.InputTokensEstimate >= trigger {
+			outcome, err := s.runCompactionCycle(ctx, bot, run, model.BotCompactionThreshold)
+			if err != nil {
+				if errors.Is(err, errContextUncompressible) || built.InputTokensEstimate >= window {
+					s.finishFailed(bot, run, compactionFailCode(err), err)
+					return
+				}
+			}
+			if s.maintenanceStopped(ctx, run) {
+				s.finishStopped(bot, run)
+				return
+			}
+			if outcome != nil && outcome.Published {
+				s.acceptCompactionBoundary(bot, &freeze, outcome.Snapshot)
+				s.clearUsageBaseline(bot.ID)
+			}
+			built, err = s.buildRunContext(bot, run)
+			if err != nil {
+				s.finishFailed(bot, run, "context_build_failed", err)
+				return
+			}
 		}
 		requestRow, err := s.beginModelRequest(bot, run, built)
 		if err != nil {
@@ -87,10 +187,33 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 				s.finishStopped(bot, run)
 				return
 			}
+			// 上游上下文超限：强制压缩一次后恰好重试一次；其他错误
+			//（400 参数、429 限流等）不重试。
+			if botIsContextLimitError(streamErr) && !contextLimitRetried {
+				contextLimitRetried = true
+				outcome, compErr := s.runCompactionCycle(ctx, bot, run, model.BotCompactionForced)
+				if compErr != nil {
+					s.finishFailed(bot, run, compactionFailCode(compErr), compErr)
+					return
+				}
+				if outcome == nil || !outcome.Published {
+					s.finishFailed(bot, run, "context_uncompressible", errContextUncompressible)
+					return
+				}
+				if s.maintenanceStopped(ctx, run) {
+					s.finishStopped(bot, run)
+					return
+				}
+				s.acceptCompactionBoundary(bot, &freeze, outcome.Snapshot)
+				s.clearUsageBaseline(bot.ID)
+				continue
+			}
 			s.finishFailed(bot, run, "model_request_failed", streamErr)
 			return
 		}
+		contextLimitRetried = false
 		s.finishModelRequest(requestRow, reply, nil)
+		s.rememberUsageBaseline(bot, run, built, reply)
 		s.accumulateRunUsage(run, reply)
 
 		calls, err := s.commitAssistantTurn(bot, run, requestRow, reply, assistantMsgID)
@@ -304,7 +427,10 @@ func (s *BotService) beginModelRequest(bot *model.Bot, run *model.BotRun, built 
 			Status:              model.BotModelRequestRunning,
 			InputThroughSeq:     built.InputThroughSeq,
 			PromptRevision:      bot.PromptRevision,
-			ToolsetVersion:      bot.ToolsetVersion,
+			ToolsetVersion:      built.ToolsetVersion,
+			ContextGeneration:   built.ContextGeneration,
+			InputTokensEstimate: built.InputTokensEstimate,
+			InputEstimator:      built.InputEstimator,
 			PrefixHash:          built.PrefixHash,
 			ToolsHash:           built.ToolsHash,
 			RequestHash:         built.RequestHash,
@@ -355,6 +481,13 @@ func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply)
 	run.TotalTokens = addToPtr(run.TotalTokens, reply.TotalTokens)
 	run.CachedTokens = addToPtr(run.CachedTokens, reply.CachedTokens)
 	run.UsageComplete = true
+}
+
+func compactionFailCode(err error) string {
+	if err != nil && (errors.Is(err, errContextUncompressible) || strings.Contains(err.Error(), "context_uncompressible")) {
+		return "context_uncompressible"
+	}
+	return "context_compaction_failed"
 }
 
 func addToPtr(p *int64, v int64) *int64 {

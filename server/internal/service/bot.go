@@ -51,6 +51,17 @@ type BotService struct {
 
 	// streamHub 是 SSE 订阅注册表；事件先落库再发布，订阅方按 seq 去重。
 	streamHub *botStreamHub
+
+	// nowFn 可注入时钟（夜间整理测试）；空则用 time.Now。
+	nowFn func() time.Time
+	// maintJobs 是全局单一维护队列（夜间整理）；compaction 走主线不入队。
+	maintJobs chan botMaintJob
+	maintOnce sync.Once
+}
+
+type botMaintJob struct {
+	botID      string
+	triggerKey string
 }
 
 func NewBotService(
@@ -222,6 +233,7 @@ func (s *BotService) buildBot(userID string, req *CreateBotRequest) (*model.Bot,
 		PromptRevision:        1,
 		PlatformPromptVersion: botPlatformPromptVersion,
 		ToolsetVersion:        botToolsetVersion,
+		LastToldVersion:       botToolsetVersion,
 		BaseURL:               baseURL,
 		Model:                 modelName,
 		APIKeyEncrypted:       cipher,
@@ -257,6 +269,7 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 		bot.PersonaPrompt = *req.PersonaPrompt
 		bot.SystemPromptText = buildBotSystemPrompt(bot.PersonaPrompt)
 		bot.PromptRevision++
+		bot.PlatformPromptVersion = botPlatformPromptVersion
 		personaChanged = true
 	}
 	if req.BaseURL != nil {

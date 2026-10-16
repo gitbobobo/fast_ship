@@ -44,7 +44,11 @@ type BotToolCall struct {
 	ResultJSON        *string `gorm:"type:text" json:"-"`
 	ResultPreviewJSON *string `gorm:"type:text" json:"result_preview,omitempty"`
 	ResultChars       int64   `gorm:"not null" json:"result_chars"`
-	Truncated         bool    `gorm:"not null" json:"truncated"`
+	// ResultItems 是结果实际返回条数：列表记条数、普通对象记 1、空结果记 0
+	//（不是分页总命中数）；折叠引用与压缩统计使用。INT-102 前的存量数据在
+	// 首次折叠时按 ResultJSON 补算。
+	ResultItems int64 `gorm:"not null;default:0" json:"result_items"`
+	Truncated   bool  `gorm:"not null" json:"truncated"`
 
 	ErrorCode    *string `json:"error_code,omitempty"`
 	ErrorMessage *string `json:"error_message,omitempty"`
