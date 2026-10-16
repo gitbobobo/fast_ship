@@ -528,15 +528,10 @@ func (s *BotService) executeQueuedCall(callID string) {
 	status := model.BotCallStatusSucceeded
 	if execErr != nil {
 		status = model.BotCallStatusFailed
-		// 取消竞速：取消请求已记录则终态为 cancelled，且副作用可能已发生。
-		fresh, ferr := s.calls.FindByID(callID)
-		if ferr == nil && fresh.CancelRequestedAt != nil {
-			status = model.BotCallStatusCancelled
-		}
 	}
-	effect := status == model.BotCallStatusCancelled
+	// 取消标记的终态裁决统一在 finalizeCall 内最后一次核对。
 	outcome := botBuildOutcome(call.ID, output, execErr)
-	s.finalizeCall(bot, s.runIDOfCall(call), call, status, outcome, execErr, effect)
+	s.finalizeCall(bot, s.runIDOfCall(call), call, status, outcome, execErr, false)
 }
 
 // runAsyncTool 分派异步写操作到对应适配器。
@@ -556,6 +551,12 @@ func (s *BotService) runAsyncTool(ctx context.Context, call *model.BotToolCall) 
 // 终态已被别人落定（取消竞速），迟到返回不覆盖。
 func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotToolCall, status model.BotToolCallStatus, outcome botToolOutcome, execErr error, effect bool) {
 	now := time.Now().UTC()
+	// 取消竞速：无论工具返回成败，取消请求已记录则终态为 cancelled——
+	// 成功返回的写入也可能已生效，副作用标记必须跟着取消走。
+	if fresh, err := s.calls.FindByID(call.ID); err == nil && fresh.CancelRequestedAt != nil {
+		status = model.BotCallStatusCancelled
+		effect = true
+	}
 	cols := map[string]interface{}{
 		"status":                   status,
 		"finished_at":              now,

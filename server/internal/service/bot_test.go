@@ -2090,3 +2090,88 @@ func TestBotStartWorkerPoolOnce(t *testing.T) {
 		t.Fatalf("Start 不得重建 worker 池（会搁浅原 worker 与取消句柄）")
 	}
 }
+
+func TestBotRejectWakesRuntime(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botreject2")
+	bot := env.createBot(t, userID)
+
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusPendingConfirmation, string(model.BotExecutionAsync))
+	if _, err := env.bots.DecideCall(userID, bot.ID, callID, &CallDecisionRequest{Decision: string(model.BotDecisionReject)}); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+
+	// reject 是落库的模型输入：主线应被立即唤醒并消费，run 不能一直挂着。
+	waitForBot(t, "reject run 结束", 15*time.Second, func() bool {
+		return env.botSettled(bot.ID)
+	})
+}
+
+func TestBotCancelAfterSuccessfulWrite(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botcancelwin")
+	bot := env.createBot(t, userID)
+
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusRunning, string(model.BotExecutionAsync))
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	runID := env.bots.runIDOfCall(call)
+	botModel, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+
+	// 写入成功返回但取消已受理：终态 cancelled，副作用标记可能发生。
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+		Update("cancel_requested_at", time.Now().UTC()).Error; err != nil {
+		t.Fatalf("mark cancel: %v", err)
+	}
+	env.bots.finalizeCall(botModel, runID, call, model.BotCallStatusSucceeded,
+		botToolOutcome{ResultJSON: "{}", PreviewJSON: "{}", ResultChars: 2}, nil, false)
+
+	fresh, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if fresh.Status != model.BotCallStatusCancelled {
+		t.Fatalf("取消已受理时成功写入也应终态 cancelled: %+v", fresh.Status)
+	}
+	if !fresh.EffectMayHaveOccurred {
+		t.Fatalf("成功写入 + 取消应标记副作用可能发生: %+v", fresh)
+	}
+}
+
+func TestBotPanicFinishesRun(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botpanic")
+	bot := env.createBot(t, userID)
+
+	// 落一条 running run，模拟 runBot panic 后的恢复路径。
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-panic", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "panic",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+
+	// 直接验证 panic 恢复路径：落库终态 + 槽释放。
+	env.bots.finishRunAfterPanic(bot.ID, "boom")
+
+	fresh, err := env.bots.runs.FindByID("run-panic")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fresh.Status != model.BotRunStatusFailed || fresh.FinishedAt == nil {
+		t.Fatalf("panic 后落库 run 必须置 failed: %+v", fresh.Status)
+	}
+	// 活动槽已被恢复路径释放：后续唤醒可正常进槽。
+	if env.bots.rt.acquire(bot.ID, &botWake{Trigger: model.BotTriggerUserMessage, Key: "after"}) == nil {
+		t.Fatalf("panic 后槽应已释放")
+	}
+}

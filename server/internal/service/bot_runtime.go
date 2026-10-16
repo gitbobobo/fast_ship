@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -113,6 +114,21 @@ func (s *BotService) wakeRuntime(botID string, wake botWake) {
 	go s.runBotSlot(botID)
 }
 
+// finishRunAfterPanic 把 panic 槽位上仍在 running 的落库 run 置 failed
+// 并发 done；CAS 兜底，已终态的 run 不动。scanOnce 对有活动 run 的 bot
+// 不再唤醒，不落终态这条 run 会永远挂着并阻塞删除。
+func (s *BotService) finishRunAfterPanic(botID string, cause interface{}) {
+	run, err := s.runs.FindActiveByBot(botID)
+	if err != nil {
+		return
+	}
+	bot, err := s.bots.Get(botID)
+	if err != nil {
+		return
+	}
+	s.finishFailed(bot, run, "panicked", errs.New(errs.ErrInternal.Code, fmt.Sprintf("主线执行 panic: %v", cause)))
+}
+
 // takePending 取出该槽待处理的触发描述（无则用回退值）。
 func (rt *botRuntimeState) takePending(botID string, fallback botWake) botWake {
 	rt.mu.Lock()
@@ -132,6 +148,9 @@ func (s *BotService) runBotSlot(botID string) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Error("机器人主线执行 panic", zap.String("bot_id", botID), zap.Any("panic", r))
+			// 落库的 run 不能留在 running：scanOnce 对有活动 run 的 bot
+			// 不再唤醒，否则这条 run 永远无人收尾、阻塞删除。
+			s.finishRunAfterPanic(botID, r)
 			// 释放槽；本轮放弃，等下一次唤醒或扫描。
 			s.rt.release(botID)
 		}

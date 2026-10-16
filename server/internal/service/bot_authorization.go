@@ -275,6 +275,14 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 	})
 	if decision != model.BotDecisionReject {
 		s.enqueueCallWork(callID)
+	} else {
+		// reject 也是落库的模型输入：原 run 可能已结束，立即唤醒主线，
+		// 不等扫描兜底（与取消同型）。
+		s.wakeRuntime(botID, botWake{
+			Trigger: model.BotTriggerToolResult,
+			Key:     "tool_result:" + callID,
+			Context: marshalJSONString(map[string]interface{}{"call_id": callID, "status": string(model.BotCallStatusRejected)}),
+		})
 	}
 
 	fresh, err := s.calls.FindByID(callID)
