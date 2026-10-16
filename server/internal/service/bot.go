@@ -326,6 +326,23 @@ func (s *BotService) Delete(userID, botID string) error {
 		if len(active) > 0 {
 			return errs.ErrBotDeleteConflict
 		}
+		// 未消费输入也算冲突：消息事务已提交但 run 尚未由调度异步创建，
+		// 此时删除会把刚受理的消息级联掉，而发送方已拿到成功响应。判定用
+		// 真实的输入消息（user/lifecycle）——后台结果等非输入消息也占
+		// seq，裸水位比较会永远冲突。
+		var bot struct {
+			OfferedInputSeq int64
+		}
+		if err := tx.Raw("SELECT offered_input_seq FROM bots WHERE id = ?", botID).Scan(&bot).Error; err != nil {
+			return errs.ErrInternal
+		}
+		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(tx, botID, bot.OfferedInputSeq)
+		if err != nil {
+			return errs.ErrInternal
+		}
+		if hasNew {
+			return errs.ErrBotDeleteConflict
+		}
 		if err := repository.NewBotRepository(tx).Delete(botID); err != nil {
 			return errs.ErrInternal
 		}

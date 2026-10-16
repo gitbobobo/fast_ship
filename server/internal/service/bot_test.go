@@ -1168,7 +1168,9 @@ func TestBotCancelCall(t *testing.T) {
 		}
 		break
 	}
-	// 取消产生的后台结果会立即唤醒处理它的 run：等它结束后再删除。
+	// 取消产生的后台结果会立即唤醒处理它的 run：等它结束后再删除。删除
+	// 守卫还要求未消费输入被排空（取消唤醒的 run 可能尚未消费输入，扫描
+	// 会再建 run 处理）——轮询直到满足全部删除条件。
 	waitForBot(t, "取消 run 结束", 15*time.Second, func() bool {
 		return env.botSettled(bot.ID)
 	})
@@ -2634,5 +2636,37 @@ func TestBotRecoveryEmitsTerminalRunEvents(t *testing.T) {
 		Order("seq ASC").Pluck("event_type", &kinds)
 	if len(kinds) != 2 || kinds[0] != model.BotEventError || kinds[1] != model.BotEventDone {
 		t.Fatalf("恢复必须为原 run 补 error+done 事件，实际 %v", kinds)
+	}
+}
+
+func TestBotDeleteConflictOnUnconsumedInput(t *testing.T) {
+	// 消息事务已提交但 run 尚未由调度创建（异步窗口）：删除必须返回冲突，
+	// 不能把发送方已拿到成功响应的消息级联掉。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botdelunconsumed")
+	bot := env.createBot(t, userID)
+	msgs := repository.NewBotMessageRepository(env.db)
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		// 模拟真实准入：先取号（推进 next_message_seq）再追加消息。
+		seq, err := env.bots.bots.NextMessageSeqTx(tx, bot.ID)
+		if err != nil {
+			return err
+		}
+		return msgs.AppendTx(tx, &model.BotMessage{
+			ID: uuid.NewString(), BotID: bot.ID, Seq: seq,
+			Kind: model.BotMessageKindUser, ContentJSON: `{"text":"hi"}`, CreatedAt: time.Now().UTC(),
+		})
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := env.bots.Delete(userID, bot.ID); !errors.Is(err, errs.ErrBotDeleteConflict) {
+		t.Fatalf("未消费输入必须挡删除，实际 %v", err)
+	}
+	// 消费水位推进后删除放行。
+	if err := env.bots.bots.SetOfferedInputSeq(bot.ID, 1); err != nil {
+		t.Fatalf("offered: %v", err)
+	}
+	if err := env.bots.Delete(userID, bot.ID); err != nil {
+		t.Fatalf("消费后应可删除: %v", err)
 	}
 }
