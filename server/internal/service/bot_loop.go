@@ -249,8 +249,10 @@ func (s *BotService) finishFailed(bot *model.Bot, run *model.BotRun, code string
 	ok := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var err error
+		// failed 转移带 stop_requested_at IS NULL：错误检出后才受理的停止
+		// 请求不能被 failed 覆盖（与 completed 同型保护）。
 		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil},
+			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil},
 			map[string]interface{}{
 				"status":        model.BotRunStatusFailed,
 				"finished_at":   now,
@@ -279,7 +281,11 @@ func (s *BotService) finishFailed(bot *model.Bot, run *model.BotRun, code string
 	}
 	if ok {
 		s.publishEvent(bot.ID)
+		return
 	}
+	// CAS 失败：可能已被受理的停止抢占（错误检出后停止落库）——落 stopped，
+	// 让停止路径赢；已终态时 finishStopped 的 CAS 自然落空。
+	s.finishStopped(bot, run)
 }
 
 // ---------- 模型请求记录 ----------

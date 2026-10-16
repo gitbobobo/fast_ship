@@ -2854,3 +2854,68 @@ func TestBotScanSkipsNonInputWatermarkLag(t *testing.T) {
 		t.Fatalf("未消费的用户输入必须被识别")
 	}
 }
+
+func TestBotAsyncClaimRechecksCancelAfterRegister(t *testing.T) {
+	// 取消落在 claim 与 cancel 注册之间：注册后核对标记，不再执行外部写入。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botclaimcancel")
+	bot := env.createBot(t, userID)
+	runID, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusRunning, string(model.BotExecutionAsync))
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+
+	// 模拟竞速：认领（running）后、注册前标记已落库。
+	env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+		Update("cancel_requested_at", time.Now().UTC())
+	if !env.bots.abortIfCancelRequested(botRow, call) {
+		t.Fatalf("已标记的取消必须中止执行")
+	}
+	fresh, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if fresh.Status != model.BotCallStatusCancelled || !fresh.EffectMayHaveOccurred {
+		t.Fatalf("竞速窗口的取消必须落 cancelled + effect=true，实际 %s effect=%v",
+			fresh.Status, fresh.EffectMayHaveOccurred)
+	}
+	_ = runID
+}
+
+func TestBotFinishFailedRespectsAcceptedStop(t *testing.T) {
+	// 错误检出后才受理的停止请求：failed 转移让位，run 落 stopped。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botfailstop")
+	bot := env.createBot(t, userID)
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-failstop", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "failstop",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Update("stop_requested_at", now).Error; err != nil {
+		t.Fatalf("mark stop: %v", err)
+	}
+	env.bots.finishFailed(botRow, run, "context_build_failed", errs.New(errs.ErrInternal.Code, "x"))
+	fresh, err := env.bots.runs.FindByID(run.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if fresh.Status != model.BotRunStatusStopped {
+		t.Fatalf("受理过的停止必须落 stopped，实际 %s", fresh.Status)
+	}
+}

@@ -530,6 +530,12 @@ func (s *BotService) executeQueuedCall(callID string) {
 		cancel()
 		s.unregisterCallCancel(callID)
 	}()
+	// 注册后再核对一次取消标记：claim 与注册之间的窗口里 cancelBotCall
+	// 可能已记录标记（此时 signalCallCancel 还没有可取消的 handler），
+	// 直接以取消语义执行，不再发起外部写入。
+	if s.abortIfCancelRequested(bot, call) {
+		return
+	}
 
 	output, execErr := s.runAsyncTool(ctx, call)
 
@@ -553,6 +559,19 @@ func (s *BotService) runAsyncTool(ctx context.Context, call *model.BotToolCall) 
 		return s.runThreadWrite(ctx, call)
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "工具没有异步实现: "+call.ToolName)
+}
+
+// abortIfCancelRequested 核对持久化的取消标记；已受理的取消直接落
+// cancelled 终态（副作用标记为 true：注册前外部写入可能已发生），返回
+// 是否应中止执行。
+func (s *BotService) abortIfCancelRequested(bot *model.Bot, call *model.BotToolCall) bool {
+	fresh, err := s.calls.FindByID(call.ID)
+	if err == nil && fresh.CancelRequestedAt != nil {
+		s.finalizeCall(bot, s.runIDOfCall(call), call, model.BotCallStatusCancelled,
+			botToolOutcome{ResultJSON: "{}", PreviewJSON: "{}", ResultChars: 2}, nil, true)
+		return true
+	}
+	return false
 }
 
 // finalizeCall 原子落终态、结果、background_result 消息与事件；CAS 失败说明
