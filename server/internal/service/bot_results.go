@@ -26,6 +26,7 @@ type botToolOutcome struct {
 	ResultJSON  string // 完整精简结果（总是保存，供 fs_result.read 续读）
 	PreviewJSON string // 进入模型上下文的受限结果
 	ResultChars int64
+	ResultItems int64
 	Truncated   bool
 }
 
@@ -37,7 +38,8 @@ func botBuildOutcome(callID string, result interface{}, execErr error) botToolOu
 			"error":   botErrMessage(execErr),
 		}
 		raw, _ := json.Marshal(errPayload)
-		return botToolOutcome{ResultJSON: string(raw), PreviewJSON: string(raw), ResultChars: int64(utf8.RuneCountInString(string(raw)))}
+		s := string(raw)
+		return botToolOutcome{ResultJSON: s, PreviewJSON: s, ResultChars: int64(utf8.RuneCountInString(s)), ResultItems: 0}
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
@@ -56,7 +58,7 @@ func botBuildOutcomeRaw(callID, raw string, execErr error) botToolOutcome {
 		raw = string(errPayload)
 	}
 	chars := int64(utf8.RuneCountInString(raw))
-	out := botToolOutcome{ResultJSON: raw, ResultChars: chars}
+	out := botToolOutcome{ResultJSON: raw, ResultChars: chars, ResultItems: botResultItemCount(raw)}
 	if chars <= botResultBudgetChars {
 		out.PreviewJSON = raw
 		return out
@@ -75,6 +77,35 @@ func botBuildOutcomeRaw(callID, raw string, execErr error) botToolOutcome {
 	out.PreviewJSON = string(previewRaw)
 	out.Truncated = true
 	return out
+}
+
+// botResultItemCount 按工具结果形状取当前返回条数：顶层数组用长度；
+// {items:[...]} 包装（botSlimPage）用 items 长度；空列表 0；普通对象 1。
+func botResultItemCount(raw string) int64 {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "null" || s == "[]" || s == "{}" {
+		return 0
+	}
+	if s[0] == '[' {
+		var arr []json.RawMessage
+		if json.Unmarshal([]byte(s), &arr) == nil {
+			return int64(len(arr))
+		}
+		return 0
+	}
+	if s[0] == '{' {
+		var obj map[string]json.RawMessage
+		if json.Unmarshal([]byte(s), &obj) == nil {
+			if items, ok := obj["items"]; ok {
+				var arr []json.RawMessage
+				if json.Unmarshal(items, &arr) == nil {
+					return int64(len(arr))
+				}
+			}
+		}
+		return 1
+	}
+	return 1
 }
 
 func botErrMessage(err error) string {
@@ -136,16 +167,18 @@ func (s *BotService) execResultRead(call *model.BotToolCall) (string, error) {
 
 // ---------- 能力查询 / 帮助 / 停止 / 取消 ----------
 
-// execCapabilityStatus 明确返回 available:false；不建立调度或记忆表，也不转调
-// 现有 AutomationService。
+// execCapabilityStatus 返回能力状态：fs_memory 自 INT-102 起可用；
+// fs_schedule 仍明确返回 available:false，不转调现有 AutomationService。
 func (s *BotService) execCapabilityStatus(call *model.BotToolCall) (string, error) {
 	capability := "schedule"
+	available := false
 	if call.ToolName == "fs_memory" {
 		capability = "memory"
+		available = true
 	}
 	return botMarshalResult(map[string]interface{}{
 		"capability":      capability,
-		"available":       false,
+		"available":       available,
 		"toolset_version": botToolsetVersion,
 	})
 }
@@ -160,7 +193,8 @@ const botHelpText = `Fast Ship 机器人工具说明：
 - fs_thread launch 受理成功只表示启动 RPC 已发出，远端 Agent 是否完成用 fs_thread get/item 查询。
 - 大结果被截断时（truncated=true）用 fs_result.read 按 offset/limit 续读，单位是 Unicode 字符。
 - fs_stop.stop 结束当前主线运行；fs_cancel.cancel 取消本机器人的某个后台调用。
-- fs_schedule/fs_memory 首期不可用（available=false）。`
+- 记忆：fs_memory list/read/create/replace/append/delete/history/restore（写操作需 expected_version 乐观锁）；fs_memory_search search 关键词检索（≥3 字符全文匹配）。USER.md 记用户画像，MEMORY.md 记长期事实，daily/YYYY-MM-DD.md 是每日笔记。
+- fs_schedule 不可用（available=false）。`
 
 // execStopCurrentRun 请求停止当前主线 run；回复后由安全点收尾为 stopped。
 func (s *BotService) execStopCurrentRun(call *model.BotToolCall) (string, error) {

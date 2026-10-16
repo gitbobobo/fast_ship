@@ -48,10 +48,13 @@ type fakeModelTurn struct {
 	// BreakAfterText 流完文本后立刻断开连接：模拟「发了部分正文就报错」
 	// 的上游故障（草稿已挂出但永远等不来 message_commit）。
 	BreakAfterText bool
+	// FinishReason 覆盖默认 stop/tool_calls，供摘要 length 截断等场景。
+	FinishReason string
 }
 
 type fakeModelRequest struct {
-	Body []byte
+	Body          []byte
+	Authorization string
 }
 
 type fakeModelServer struct {
@@ -59,6 +62,8 @@ type fakeModelServer struct {
 	mu       sync.Mutex
 	turns    []fakeModelTurn
 	requests chan fakeModelRequest
+	// strict 为 true 时脚本耗尽即失败，不再回退默认文本。
+	strict bool
 	// shutdown 在 Cleanup 中先于 srv.Close 关闭：卡在 Hold 上的处理协程
 	// 得以退出，避免测试收尾在 Server.Close 上永久等待。
 	shutdown chan struct{}
@@ -87,7 +92,7 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 			return
 		}
 		select {
-		case f.requests <- fakeModelRequest{Body: body}:
+		case f.requests <- fakeModelRequest{Body: body, Authorization: r.Header.Get("Authorization")}:
 		default:
 			// 缓冲满即丢弃：不阻塞服务协程；需要断言请求体的测试会及时消费。
 		}
@@ -96,6 +101,12 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 		if len(f.turns) > 0 {
 			turn = f.turns[0]
 			f.turns = f.turns[1:]
+		} else if f.strict {
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":{"message":"script_exhausted"}}`)
+			return
 		} else {
 			turn = fakeModelTurn{Text: "(脚本外的默认回复)"}
 		}
@@ -135,6 +146,9 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 		finish := "stop"
 		if len(turn.ToolCalls) > 0 {
 			finish = "tool_calls"
+		}
+		if turn.FinishReason != "" {
+			finish = turn.FinishReason
 		}
 		if turn.Text != "" {
 			// 拆成两片：验证流式聚合与 UTF-8 分片拼接。
@@ -2302,8 +2316,7 @@ func TestBotSnapshotIncludesOldUnfinishedCalls(t *testing.T) {
 }
 
 func TestBotContextWindowSlides(t *testing.T) {
-	// 账本超过抓取上限后窗口必须滑动：新输入永远能进上下文，run 能正常
-	// 收尾（否则同页空转重建、模型被反复调用）。
+	// 分页从摘要水位读到账本末尾：中间页不得出现缺口，最新输入必须进入。
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "botwindow")
 	bot := env.createBot(t, userID)
@@ -2323,13 +2336,15 @@ func TestBotContextWindowSlides(t *testing.T) {
 		t.Fatalf("seed run: %v", err)
 	}
 	msgs := repository.NewBotMessageRepository(env.db)
-	for seq := 1; seq <= botHistoryFetchLimit+2; seq++ {
-		msg := &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID, Seq: int64(seq),
-			Kind:        model.BotMessageKindUser,
-			ContentJSON: `{"text":"旧消息"}`, CreatedAt: now}
-		if seq == botHistoryFetchLimit+2 {
-			msg.ContentJSON = `{"text":"最新输入"}`
+	const total = botHistoryPageSize*2 + 5
+	for seq := 1; seq <= total; seq++ {
+		text := fmt.Sprintf("msg-%d", seq)
+		if seq == total {
+			text = "最新输入"
 		}
+		raw, _ := json.Marshal(botUserContent{Text: text})
+		msg := &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID, Seq: int64(seq),
+			Kind: model.BotMessageKindUser, ContentJSON: string(raw), CreatedAt: now}
 		if err := msgs.AppendTx(env.db, msg); err != nil {
 			t.Fatalf("append: %v", err)
 		}
@@ -2339,9 +2354,8 @@ func TestBotContextWindowSlides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	// 消费水位必须到达账本末尾：最新的输入已进入本轮上下文。
-	if built.InputThroughSeq < int64(botHistoryFetchLimit+2) {
-		t.Fatalf("窗口滑动后消费水位应达账本末尾: %d", built.InputThroughSeq)
+	if built.InputThroughSeq != int64(total) {
+		t.Fatalf("消费水位应达账本末尾: %d", built.InputThroughSeq)
 	}
 	raw, err := json.Marshal(built.Request.Messages)
 	if err != nil {
@@ -2349,6 +2363,9 @@ func TestBotContextWindowSlides(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "最新输入") {
 		t.Fatalf("最新输入必须进入本轮上下文")
+	}
+	if !strings.Contains(string(raw), "msg-1") || !strings.Contains(string(raw), fmt.Sprintf("msg-%d", botHistoryPageSize+1)) {
+		t.Fatalf("分页读取不得丢掉首页或跨页消息")
 	}
 }
 
@@ -2440,17 +2457,11 @@ func TestBotContextWindowAlignedToBlock(t *testing.T) {
 			t.Fatalf("append: %v", err)
 		}
 	}
-	// 窗口起点（maxSeq-limit）落在 assistant 行上，tool 回复成为窗口第一行
-	//——assistant 在窗外，回复是孤儿。
 	appendMsg(model.BotMessageKindUser, `{"text":"旧消息1"}`)
-	appendMsg(model.BotMessageKindUser, `{"text":"旧消息2"}`)
 	appendMsg(model.BotMessageKindAssistant,
 		`{"tool_calls":[{"call_id":"c1","provider_tool_call_id":"callA","tool_name":"fs_issue","action":"list","arguments":"{}"}]}`)
 	appendMsg(model.BotMessageKindToolReply,
 		`{"provider_tool_call_id":"callA","content":"结果","status":"succeeded"}`)
-	for seq := 5; seq <= botHistoryFetchLimit+3; seq++ {
-		appendMsg(model.BotMessageKindUser, `{"text":"旧消息"}`)
-	}
 	appendMsg(model.BotMessageKindUser, `{"text":"触发新构建"}`)
 
 	built, err := env.bots.buildRunContext(botRow, run)
@@ -2461,14 +2472,123 @@ func TestBotContextWindowAlignedToBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	// 裸 tool 回复（assistant 在窗外）不得出现：开头的孤儿回复被丢弃。
-	for _, frag := range []string{`"role":"tool"`} {
-		if strings.Contains(string(raw), frag) {
-			t.Fatalf("窗外 assistant 的孤儿 tool 回复不得进入协议消息")
+	assertToolCallPaired(t, raw, "callA", "单页")
+	if !strings.Contains(string(raw), "触发新构建") {
+		t.Fatalf("新输入必须进入")
+	}
+
+	envPage := setupBotTestEnv(t)
+	uPage := createBotTestUser(t, envPage.db, "botalignpage")
+	botPage := envPage.createBot(t, uPage)
+	rowPage, err := envPage.bots.bots.Get(botPage.ID)
+	if err != nil {
+		t.Fatalf("bot page: %v", err)
+	}
+	nowP := time.Now().UTC()
+	runP := &model.BotRun{
+		ID: "run-align-page", BotID: botPage.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "align-page",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: nowP, StartedAt: &nowP,
+	}
+	if err := envPage.bots.runs.CreateTx(envPage.db, runP); err != nil {
+		t.Fatalf("seed run page: %v", err)
+	}
+	if err := envPage.db.Transaction(func(tx *gorm.DB) error {
+		msgs := repository.NewBotMessageRepository(tx)
+		for i := 0; i < botHistoryPageSize-1; i++ {
+			seq, err := envPage.bots.bots.NextMessageSeqTx(tx, botPage.ID)
+			if err != nil {
+				return err
+			}
+			raw, _ := json.Marshal(botUserContent{Text: fmt.Sprintf("pad-%d", i)})
+			if err := msgs.AppendTx(tx, &model.BotMessage{
+				ID: uuid.NewString(), BotID: botPage.ID, Seq: seq,
+				Kind: model.BotMessageKindUser, ContentJSON: string(raw), CreatedAt: nowP,
+			}); err != nil {
+				return err
+			}
+		}
+		seqA, err := envPage.bots.bots.NextMessageSeqTx(tx, botPage.ID)
+		if err != nil {
+			return err
+		}
+		asst, _ := json.Marshal(botAssistantContent{ToolCalls: []botAssistantToolCall{{
+			CallID: "c-page", ProviderToolCallID: "callPage", ToolName: "fs_issue", Action: "list", Arguments: "{}",
+		}}})
+		if err := msgs.AppendTx(tx, &model.BotMessage{
+			ID: uuid.NewString(), BotID: botPage.ID, Seq: seqA,
+			Kind: model.BotMessageKindAssistant, ContentJSON: string(asst), CreatedAt: nowP,
+		}); err != nil {
+			return err
+		}
+		seqT, err := envPage.bots.bots.NextMessageSeqTx(tx, botPage.ID)
+		if err != nil {
+			return err
+		}
+		reply, _ := json.Marshal(botToolReplyContent{
+			CallID: "c-page", ProviderToolCallID: "callPage", ToolName: "fs_issue",
+			Status: "succeeded", Content: "跨页结果",
+		})
+		if err := msgs.AppendTx(tx, &model.BotMessage{
+			ID: uuid.NewString(), BotID: botPage.ID, Seq: seqT,
+			Kind: model.BotMessageKindToolReply, ContentJSON: string(reply), CreatedAt: nowP,
+		}); err != nil {
+			return err
+		}
+		seqU, err := envPage.bots.bots.NextMessageSeqTx(tx, botPage.ID)
+		if err != nil {
+			return err
+		}
+		userRaw, _ := json.Marshal(botUserContent{Text: "跨分页新输入"})
+		return msgs.AppendTx(tx, &model.BotMessage{
+			ID: uuid.NewString(), BotID: botPage.ID, Seq: seqU,
+			Kind: model.BotMessageKindUser, ContentJSON: string(userRaw), CreatedAt: nowP,
+		})
+	}); err != nil {
+		t.Fatalf("seed page: %v", err)
+	}
+	builtP, err := envPage.bots.buildRunContext(rowPage, runP)
+	if err != nil {
+		t.Fatalf("build page: %v", err)
+	}
+	rawP, _ := json.Marshal(builtP.Request.Messages)
+	assertToolCallPaired(t, rawP, "callPage", "跨分页")
+	if !strings.Contains(string(rawP), "跨分页新输入") {
+		t.Fatalf("跨分页后的新输入必须进入")
+	}
+}
+
+// assertToolCallPaired 解析协议消息数组，断言 assistant 的工具调用与 tool
+// 回复按 ID 配对且相邻出现——只查字符串存在会漏掉角色错置/ID 不配对。
+func assertToolCallPaired(t *testing.T, raw []byte, providerID, what string) {
+	t.Helper()
+	var msgs []struct {
+		Role       string `json:"role"`
+		ToolCallID string `json:"tool_call_id"`
+		ToolCalls  []struct {
+			ID string `json:"id"`
+		} `json:"tool_calls"`
+	}
+	if err := json.Unmarshal(raw, &msgs); err != nil {
+		t.Fatalf("%s：协议消息解析失败: %v", what, err)
+	}
+	asstIdx, toolIdx := -1, -1
+	for i, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			if tc.ID == providerID && m.Role == "assistant" {
+				asstIdx = i
+			}
+		}
+		if m.Role == "tool" && m.ToolCallID == providerID {
+			toolIdx = i
 		}
 	}
-	if !strings.Contains(string(raw), "触发新构建") {
-		t.Fatalf("新输入必须仍在协议消息里")
+	if asstIdx < 0 {
+		t.Fatalf("%s：缺少 assistant 工具调用 id=%s", what, providerID)
+	}
+	if toolIdx != asstIdx+1 {
+		t.Fatalf("%s：assistant 调用 id=%s 必须与 tool 回复相邻配对 asst=%d tool=%d", what, providerID, asstIdx, toolIdx)
 	}
 }
 
@@ -2680,7 +2800,7 @@ func TestBotIssueCreateAuthzBindsSource(t *testing.T) {
 	botRow := &model.Bot{ID: bot.ID, UserID: userID}
 
 	ruleOf := func(source string) botAuthorizationRule {
-		prep, err := botPrepareToolCall("fs_issue",
+		prep, err := botPrepareToolCall(botToolsetOf(), "fs_issue",
 			`{"action":"create","project_id":"p1","title":"t","source":"`+source+`"}`)
 		if err != nil {
 			t.Fatalf("prepare(%s): %v", source, err)
@@ -2713,7 +2833,7 @@ func TestBotAlwaysAllowPersistsSourceParam(t *testing.T) {
 
 	sourcedCall := func(source string) *model.BotToolCall {
 		args := `{"action":"create","project_id":"p1","title":"t","source":"` + source + `"}`
-		prep, err := botPrepareToolCall("fs_issue", args)
+		prep, err := botPrepareToolCall(botToolsetOf(), "fs_issue", args)
 		if err != nil {
 			t.Fatalf("prepare(%s): %v", source, err)
 		}
@@ -2730,7 +2850,7 @@ func TestBotAlwaysAllowPersistsSourceParam(t *testing.T) {
 	if err := json.Unmarshal([]byte(sourcedCall("internal").ExecutionContextJSON), &freshCtx); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	prep2, err := botPrepareToolCall("fs_issue",
+	prep2, err := botPrepareToolCall(botToolsetOf(), "fs_issue",
 		`{"action":"create","project_id":"p1","title":"t2","source":"internal"}`)
 	if err != nil {
 		t.Fatalf("prepare2: %v", err)
@@ -2741,7 +2861,7 @@ func TestBotAlwaysAllowPersistsSourceParam(t *testing.T) {
 		t.Fatalf("同源后续 create 必须命中 always-allow 规则")
 	}
 
-	prep3, err := botPrepareToolCall("fs_issue",
+	prep3, err := botPrepareToolCall(botToolsetOf(), "fs_issue",
 		`{"action":"create","project_id":"p1","title":"t3","source":"github"}`)
 	if err != nil {
 		t.Fatalf("prepare3: %v", err)
@@ -2805,7 +2925,7 @@ func TestBotIssueWriteAuthzBindsTargetSource(t *testing.T) {
 
 	ruleOf := func(issueID string) string {
 		args := `{"action":"update","issue_id":"` + issueID + `","title":"新标题"}`
-		prep, err := botPrepareToolCall("fs_issue", args)
+		prep, err := botPrepareToolCall(botToolsetOf(), "fs_issue", args)
 		if err != nil {
 			t.Fatalf("prepare(%s): %v", issueID, err)
 		}

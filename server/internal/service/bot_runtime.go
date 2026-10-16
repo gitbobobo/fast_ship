@@ -24,6 +24,18 @@ type botRuntimeState struct {
 	mu      sync.Mutex
 	active  map[string]*botActivation
 	started bool
+
+	// memSnaps 是冻结记忆注入缓存：按投影 generation 冻结，压缩发布或
+	// 进程重启才刷新（见 frozenMemorySnapshot）。
+	memMu    sync.Mutex
+	memSnaps map[string]*botFrozenMemory
+	// activated 标记本进程已对该机器人做过工具/提示词激活（重启后首次运行）。
+	activated map[string]bool
+
+	// usageBase 是最近一次成功主线请求的实际投影基线（进程内）：用前缀
+	// JSON 追加关系与序列化字节差做增量估算；重启或基线失效则整包回退。
+	usageMu   sync.Mutex
+	usageBase map[string]*botUsageBaseline
 }
 
 type botActivation struct {
@@ -35,7 +47,12 @@ type botActivation struct {
 }
 
 func newBotRuntimeState() *botRuntimeState {
-	return &botRuntimeState{active: map[string]*botActivation{}}
+	return &botRuntimeState{
+		active:    map[string]*botActivation{},
+		memSnaps:  map[string]*botFrozenMemory{},
+		activated: map[string]bool{},
+		usageBase: map[string]*botUsageBaseline{},
+	}
 }
 
 // acquire 抢占该 bot 的执行槽；已被占（在跑）返回 false——本线程的唤醒会
@@ -101,7 +118,10 @@ func (s *BotService) Start() {
 	// 工作并触发过一次初始化，这里不得重建 worker 池（会搁浅原 worker、
 	// 丢失已登记的取消句柄）。
 	s.ensureWorkers()
+	s.ensureMaintWorker()
 	go s.scanLoop()
+	go s.nightlyLoop()
+	s.scanNightlyOnce()
 }
 
 // wakeRuntime 唤醒某机器人的主线：有 goroutine 在跑就标记 requeue（安全点

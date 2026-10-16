@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -36,6 +37,32 @@ func (s *BotService) RecoverOnStartup() error {
 			"error_code":    "server_restarted",
 			"error_message": "服务在模型请求执行中重启，结果未知",
 		})
+	}
+
+	// 1b. 维护运行与维护请求（INT-102）：执行中崩溃一律标 failed
+	//（server_restarted），不自动重放；压缩周期的归档/摘要副作用以
+	// operation_key 幂等键兜底，夜间整理由协调器下一日再触发。
+	maintRepo := repository.NewBotMaintenanceRepository(s.db)
+	if mRuns, mErr := maintRepo.ListUnfinished(); mErr == nil {
+		for _, mr := range mRuns {
+			_, _ = maintRepo.UpdateColumns(mr.ID,
+				map[string]interface{}{"finished_at": nil},
+				repository.MarkFinishedCols(model.BotMaintenanceFailed, now,
+					"server_restarted", "服务在维护运行执行中重启，结果未知"))
+			if mr.Kind == model.BotMaintenanceCompaction {
+				s.recordInterruptedCompaction(mr, now)
+			}
+		}
+	}
+	if mReqs, mErr := maintRepo.ListUnfinishedRequests(); mErr == nil {
+		for _, mreq := range mReqs {
+			_, _ = maintRepo.UpdateRequestColumns(mreq.ID, nil, map[string]interface{}{
+				"status":        model.BotModelRequestFailed,
+				"finished_at":   now,
+				"error_code":    "server_restarted",
+				"error_message": "服务在维护请求执行中重启，结果未知",
+			})
+		}
 	}
 
 	// 2. 活动主线 run。
@@ -95,6 +122,17 @@ func (s *BotService) RecoverOnStartup() error {
 		hadReceipt := s.callHasReceipt(call)
 		isAsync := call.ExecutionMode == string(model.BotExecutionAsync)
 		effect := isAsync && call.Status == model.BotCallStatusRunning
+		interruptNote := "调用被服务重启中断；请先用读取类工具核实现状，再决定是否重试"
+		if botIsMemoryWriteCall(call) {
+			written, werr := repository.NewBotMemoryRepository(s.db).HasVersionWithOperationKey(call.BotID, call.ID)
+			if werr == nil && written {
+				effect = true
+				interruptNote = "记忆写入已落库（已写入）；调用终态因重启未落定，请勿重复写入"
+			} else {
+				effect = true
+				interruptNote = "记忆写入效果未知；请用 fs_memory.read 核实后再决定是否重试，不要自动重放"
+			}
+		}
 		runID := s.runIDOfCall(call)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
 			ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
@@ -114,7 +152,7 @@ func (s *BotService) RecoverOnStartup() error {
 				reply := botToolReplyContent{
 					CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
 					ToolName: call.ToolName, Status: string(model.BotCallStatusFailed),
-					Content: botFailureReplyText(errs.New(errs.ErrInternal.Code, "调用被服务重启中断；请先用读取类工具核实现状，再决定是否重试")),
+					Content: botFailureReplyText(errs.New(errs.ErrInternal.Code, interruptNote)),
 				}
 				if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
 					return err
@@ -254,4 +292,33 @@ func (s *BotService) appendRecoveryNotice(botID string, now time.Time) error {
 		Context: `{"notice_message_id":"` + noticeID + `"}`,
 	})
 	return nil
+}
+
+func (s *BotService) recordInterruptedCompaction(mr model.BotMaintenanceRun, now time.Time) {
+	var n int64
+	if err := s.db.Model(&model.BotCompaction{}).Where("maintenance_run_id = ?", mr.ID).Count(&n).Error; err != nil || n > 0 {
+		return
+	}
+	code := "server_restarted"
+	msg := "服务在维护运行执行中重启，结果未知"
+	reason := model.BotCompactionThreshold
+	if strings.Contains(mr.TriggerKey, string(model.BotCompactionForced)) {
+		reason = model.BotCompactionForced
+	}
+	row := &model.BotCompaction{
+		ID:                uuid.NewString(),
+		BotID:             mr.BotID,
+		MaintenanceRunID:  mr.ID,
+		ParentRunID:       mr.ParentRunID,
+		Reason:            reason,
+		Status:            model.BotCompactionFailed,
+		FoldedResultsJSON: "{}",
+		Estimator:         botTokensEstimatorBytes35,
+		ErrorCode:         &code,
+		ErrorMessage:      &msg,
+		CreatedAt:         now,
+	}
+	_ = s.db.Transaction(func(tx *gorm.DB) error {
+		return repository.NewBotContextRepository(tx).CreateCompactionTx(tx, row)
+	})
 }
