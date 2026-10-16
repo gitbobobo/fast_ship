@@ -191,10 +191,14 @@ func (s *BotService) scanLoop() {
 }
 
 func (s *BotService) scanOnce() {
-	// 未消费输入：主线水位落后于消息水位 → 唤醒。
+	// 未消费输入：粗筛（水位落后）后按真实模型输入判定——后台结果等非
+	// 输入消息也推高账本水位，裸水位比较会让空闲 bot 永远被扫中空转。
 	var bots []model.Bot
 	if err := s.db.Where("offered_input_seq < next_message_seq - 1").Find(&bots).Error; err == nil {
 		for _, b := range bots {
+			if !s.hasUnconsumedInput(&b) {
+				continue
+			}
 			if _, busy := s.activeRunOf(b.ID); !busy {
 				s.wakeRuntime(b.ID, botWake{
 					Trigger: model.BotTriggerUserMessage,
@@ -205,6 +209,13 @@ func (s *BotService) scanOnce() {
 	}
 	// 后台调用：排队的调用推给 worker（重复推送无害，CAS 认领挡住并发）。
 	s.scanQueuedCalls()
+}
+
+// hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（user /
+// background_result）；账本水位差可能来自非输入消息。
+func (s *BotService) hasUnconsumedInput(b *model.Bot) bool {
+	hasNew, err := s.messages.HasModelInputSince(b.ID, b.OfferedInputSeq)
+	return err == nil && hasNew
 }
 
 func itoa64(v int64) string {

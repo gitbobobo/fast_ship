@@ -169,7 +169,7 @@ func (s *BotService) resolveIssueScope(bot *model.Bot, prepared *botPreparedCall
 		}
 		prepared.ParamConstraint = "source=" + source
 	default:
-		projectID, err := s.issueProjectOf(rawString(raw["issue_id"]), bot.UserID)
+		projectID, source, err := s.issueScopeOf(rawString(raw["issue_id"]), bot.UserID)
 		if err != nil {
 			// 找不到目标：保持空 scope，执行阶段会以同样错误失败；
 			// 这里不建卡也不伪造范围。
@@ -177,17 +177,22 @@ func (s *BotService) resolveIssueScope(bot *model.Bot, prepared *botPreparedCall
 			return
 		}
 		prepared.ScopeID = projectID
+		// 目标 issue 的来源决定副作用落点（internal 只写平台 / github 走
+		// GitHub 写入），update/comment/set_workflow/replace_checklist 的
+		// 「总是允许」都必须按来源绑定。
+		prepared.ParamConstraint = "source=" + source
 	}
 	if prepared.Action == "update" {
 		prepared.FieldsConstraint = presentFields(raw, "title", "body", "state", "state_reason", "labels")
 	}
 }
 
-// issueProjectOf 读取 issue 归属项目（同时校验归属人）。
-func (s *BotService) issueProjectOf(issueID, userID string) (string, error) {
+// issueScopeOf 读取 issue 归属项目与来源（同时校验归属人）：两者都是
+// 授权规则的组成部分。
+func (s *BotService) issueScopeOf(issueID, userID string) (string, string, error) {
 	issue, err := s.issues.Get(issueID, userID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return issue.ProjectId, nil
+	return issue.ProjectId, string(issue.Source), nil
 }

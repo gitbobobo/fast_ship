@@ -2783,3 +2783,74 @@ func TestBotProjectListSlimsTokenRefs(t *testing.T) {
 		t.Fatalf("列表结果不得携带凭证引用: %s", raw)
 	}
 }
+
+func TestBotIssueWriteAuthzBindsTargetSource(t *testing.T) {
+	// update/comment 等写动作的授权按目标 issue 的来源绑定：internal 的
+	// 「总是允许」不得匹配同项目 github issue 的写操作。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsrctgt")
+	bot := env.createBot(t, userID)
+	botRow := &model.Bot{ID: bot.ID, UserID: userID}
+	proj, err := env.bots.projects.Create(userID, &CreateProjectRequest{Name: "来源绑定项目"})
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	projectID := proj.Id
+	env.db.Create(&model.Issue{ID: "iss-int", ProjectID: projectID, Source: model.IssueSourceInternal,
+		State: model.IssueStateOpen, Title: "平台", SequenceNumber: 1, AuthorUserID: userID,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	env.db.Create(&model.Issue{ID: "iss-gh", ProjectID: projectID, Source: model.IssueSourceGitHub,
+		State: model.IssueStateOpen, Title: "GitHub", SequenceNumber: 2, AuthorUserID: userID,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+
+	ruleOf := func(issueID string) string {
+		args := `{"action":"update","issue_id":"` + issueID + `","title":"新标题"}`
+		prep, err := botPrepareToolCall("fs_issue", args)
+		if err != nil {
+			t.Fatalf("prepare(%s): %v", issueID, err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(args), &raw); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		env.bots.resolveIssueScope(botRow, prep, raw)
+		return botRuleHash(botRuleOf(prep))
+	}
+	if ruleOf("iss-int") == ruleOf("iss-gh") {
+		t.Fatalf("同项目不同来源 issue 的写授权规则必须不同")
+	}
+}
+
+func TestBotScanSkipsNonInputWatermarkLag(t *testing.T) {
+	// 正常回复后账本水位被 assistant/tool-reply 行推高，而输入水位已记录
+	// 到用户输入 seq：裸水位比较永远「落后」，扫描会永远空转；谓词必须
+	// 只认真正的模型输入。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botskipscan")
+	bot := env.createBot(t, userID)
+	msgs := repository.NewBotMessageRepository(env.db)
+	appendMsg := func(kind model.BotMessageKind) {
+		t.Helper()
+		if err := env.db.Transaction(func(tx *gorm.DB) error {
+			seq, err := env.bots.bots.NextMessageSeqTx(tx, bot.ID)
+			if err != nil {
+				return err
+			}
+			return msgs.AppendTx(tx, &model.BotMessage{
+				ID: uuid.NewString(), BotID: bot.ID, Seq: seq,
+				Kind: kind, ContentJSON: `{}`, CreatedAt: time.Now().UTC(),
+			})
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	appendMsg(model.BotMessageKindUser)      // seq 1：输入，已被消费（offered=1）
+	appendMsg(model.BotMessageKindAssistant) // seq 2：非输入，推高账本水位
+	if env.bots.hasUnconsumedInput(&model.Bot{ID: bot.ID, OfferedInputSeq: 1, NextMessageSeq: 3}) {
+		t.Fatalf("只有非输入消息推高账本时不得判定有未消费输入")
+	}
+	appendMsg(model.BotMessageKindUser) // seq 3：新输入未消费
+	if !env.bots.hasUnconsumedInput(&model.Bot{ID: bot.ID, OfferedInputSeq: 1, NextMessageSeq: 4}) {
+		t.Fatalf("未消费的用户输入必须被识别")
+	}
+}
