@@ -2522,3 +2522,40 @@ func TestBotFinalizeRechecksCancelInTx(t *testing.T) {
 		t.Fatalf("成功返回也可能已生效，副作用标记必须为 true")
 	}
 }
+
+func TestBotFinishDoesNotOverwriteAcceptedStop(t *testing.T) {
+	// 停止请求落在 tryFinishRun 事务前一刻：completed 不得覆盖，run 由
+	// 下一轮安全点落 stopped。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botstoprace")
+	bot := env.createBot(t, userID)
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-stoprace", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "stoprace",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+	// 竞速窗口：finish 前停止请求已受理。
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Update("stop_requested_at", now).Error; err != nil {
+		t.Fatalf("mark stop: %v", err)
+	}
+	if env.bots.tryFinishRun(botRow, run) {
+		t.Fatalf("受理过的停止不得被 completed 覆盖")
+	}
+	fresh, err := env.bots.runs.FindByID(run.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if fresh.Status != model.BotRunStatusRunning || fresh.FinishedAt != nil {
+		t.Fatalf("run 应保持未终态等下一轮落 stopped，实际 %s", fresh.Status)
+	}
+}

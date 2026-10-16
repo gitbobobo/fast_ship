@@ -185,8 +185,11 @@ func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
 			return err
 		}
 		now := time.Now().UTC()
+		// 完成转移必须带 stop_requested_at IS NULL：停止请求落在本事务前
+		// 一刻也不能被 completed 覆盖，返回 false 后由下一轮安全点落
+		// stopped。
 		ok, err := repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
-			map[string]interface{}{"finished_at": nil},
+			map[string]interface{}{"finished_at": nil, "stop_requested_at": nil},
 			map[string]interface{}{
 				"status":            model.BotRunStatusCompleted,
 				"finished_at":       now,
