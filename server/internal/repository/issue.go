@@ -158,30 +158,95 @@ func (r *IssueGitHubMetaRepository) FindByProjectAndGitHubIDTx(tx *gorm.DB, proj
 	return &meta, nil
 }
 
-// AdvanceCollectionsWatermarkTx 推进该 Issue 评论/时间线集合的镜像水位。只写
-// 这两列，不触碰 synced_at 与 UpsertTx 管理的镜像字段。必须与集合镜像写入
+// AdvanceCollectionsWatermarkIfVersionTx 在集合镜像事务内复核失效版本后推进该
+// Issue 评论/时间线集合的镜像水位。预期版本与当前版本不一致，说明取数期间发生了
+// 并发 push（writePartialCollections 递增了 collections_invalidated_version）：
+// 本次取到的是旧快照，放弃推进并返回 false，让空水位保留给下一次重拉（INT-105）。
+// 版本读取与水位写入在同一事务内，MaxOpenConns=1 下与并发 push 的失效事务串行，
+// 不会出现「读到的版本还没变、写入时已经变了」的窗口。必须与集合镜像写入
 // （ReplaceSyncedTx）同一事务：事务外单独推进会与并发 push 路径的镜像替换交错，
 // 留下「旧镜像 + 新水位」的组合，缺失的集合内容再也不会被判据发现重拉。
-func (r *IssueGitHubMetaRepository) AdvanceCollectionsWatermarkTx(tx *gorm.DB, issueID string, remoteUpdatedAt time.Time, commentsCount int) error {
-	return tx.Model(&model.IssueGitHubMeta{}).
+func (r *IssueGitHubMetaRepository) AdvanceCollectionsWatermarkIfVersionTx(tx *gorm.DB, issueID string, expectedVersion int64, remoteUpdatedAt time.Time, commentsCount int) (bool, error) {
+	var meta model.IssueGitHubMeta
+	err := tx.Select("collections_invalidated_version").
+		Where("issue_id = ?", issueID).First(&meta).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, err
+		}
+		// meta 不在（issue 已删）时没有可推进的水位，交由上层跳过。
+		return false, nil
+	}
+	if meta.CollectionsInvalidatedVersion != expectedVersion {
+		return false, nil
+	}
+	if err := tx.Model(&model.IssueGitHubMeta{}).
 		Where("issue_id = ?", issueID).
 		Updates(map[string]any{
 			"collections_synced_updated_at": remoteUpdatedAt,
 			"collections_synced_comments":   commentsCount,
-		}).Error
+			"collections_heal_queued_at":    nil,
+		}).Error; err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// ClearCollectionsWatermarkTx 清空该 Issue 的集合镜像水位，供 push 路径使用：
-// push 只重拉了时间线、没有重拉评论，不能推进水位，只能置空让下一次后台同步
-// 保守重拉两个集合。必须与集合镜像写入（ReplaceSyncedTx）同一事务，理由同
-// AdvanceCollectionsWatermarkTx——镜像与水位要么同属一个提交者，要么都保持旧值。
-func (r *IssueGitHubMetaRepository) ClearCollectionsWatermarkTx(tx *gorm.DB, issueID string) error {
+// InvalidateCollectionsTx 让该 Issue 的集合镜像失效，供 push 路径使用：push 只
+// 重拉了时间线或一条评论、没有重拉两个集合，不能推进水位，只能置空让下一次后台
+// 同步（增量列表或兜底）保守重拉。同时递增 collections_invalidated_version，使
+// 并发进行中的完整镜像事务能在提交前发现取数已过期、放弃旧快照。
+// 队列位置（collections_heal_queued_at）只在「健康→失效」时分配：本来就已空水位
+// （还在排队等待）的条目保持不变，否则等待中的 push 会把条目送到队尾、被新进
+// 条目插队（INT-105）。必须与集合镜像写入（ReplaceSyncedTx）同一事务，理由同
+// AdvanceCollectionsWatermarkIfVersionTx。
+func (r *IssueGitHubMetaRepository) InvalidateCollectionsTx(tx *gorm.DB, issueID string) error {
+	now := time.Now().UTC()
 	return tx.Model(&model.IssueGitHubMeta{}).
 		Where("issue_id = ?", issueID).
 		Updates(map[string]any{
-			"collections_synced_updated_at": nil,
-			"collections_synced_comments":   0,
+			"collections_synced_updated_at":   nil,
+			"collections_synced_comments":     0,
+			"collections_invalidated_version": gorm.Expr("collections_invalidated_version + 1"),
+			"collections_heal_queued_at": gorm.Expr(
+				"CASE WHEN collections_synced_updated_at IS NULL THEN collections_heal_queued_at ELSE ? END", now),
 		}).Error
+}
+
+// MarkCollectionsHealQueued 把条目移到兜底队列尾部：记录一次实际尝试（成功或
+// 失败都该调），候选按 collections_heal_queued_at 升序取，因此下次会排在其它
+// 等待条目之后，形成“最久未尝试优先”的公平轮转（INT-105）。
+func (r *IssueGitHubMetaRepository) MarkCollectionsHealQueued(issueID string, at time.Time) error {
+	return r.db.Model(&model.IssueGitHubMeta{}).
+		Where("issue_id = ?", issueID).
+		Update("collections_heal_queued_at", at).Error
+}
+
+// staleCollectionsSafeLimit 是 ListStaleCollectionsByProject 的安全上限：兜底查询
+// 必须保持有界，limit 非正或超过它都回落为它。
+const staleCollectionsSafeLimit = 100
+
+// ListStaleCollectionsByProject 列出该项目集合水位为空的 GitHub meta 行，是同步
+// 兜底重拉（INT-105 healStaleCollections）的数据源：push 部分写入清空水位、或
+// 加列前的旧数据没有水位，这些 Issue 的两个集合镜像不完整。按队列位置升序取
+// （NULL 最前，仅剩加列前的存量行；其余按首次入队时间先后）——等待期间被重新
+// 失效不会改变位置，实际尝试后才移到队尾，所以新进入的条目插不到已在等待的旧
+// 条目前面，形成近似先来先服务，每个条目最终都会被尝试（队列位置是墙上时钟，
+// 依赖系统时间正常前进；持续的回拨只会推迟重试，不影响正确性）。limit 决定单轮重拉的
+// 有界规模（防 GitHub 限流）。
+func (r *IssueGitHubMetaRepository) ListStaleCollectionsByProject(projectID string, limit int) ([]model.IssueGitHubMeta, error) {
+	if limit <= 0 || limit > staleCollectionsSafeLimit {
+		limit = staleCollectionsSafeLimit
+	}
+	var metas []model.IssueGitHubMeta
+	if err := r.db.
+		Where("project_id = ? AND collections_synced_updated_at IS NULL", projectID).
+		Order("collections_heal_queued_at ASC").
+		Limit(limit).
+		Find(&metas).Error; err != nil {
+		return nil, err
+	}
+	return metas, nil
 }
 
 type IssueCommentRepository struct {
@@ -221,7 +286,7 @@ func (r *IssueCommentRepository) UpsertTx(tx *gorm.DB, comment *model.IssueComme
 // ReplaceSyncedTx 把该 Issue 的 GitHub 评论镜像替换成本轮拉取的集合：逐条 upsert
 // 后清掉不在集合内的镜像行，任一步失败整体回滚。必须在调用方的事务内与时间线替换
 // （IssueTimelineRepository.ReplaceSyncedTx）及集合水位变更
-// （Advance/ClearCollectionsWatermarkTx）一起提交，理由见 issue_mirror.go 的
+// （AdvanceCollectionsWatermarkIfVersionTx/InvalidateCollectionsTx）一起提交，理由见 issue_mirror.go 的
 // writeFullCollections；远端分页必须在事务外拉完——事务内只执行数据库操作。
 func (r *IssueCommentRepository) ReplaceSyncedTx(tx *gorm.DB, issueID string, comments []*model.IssueComment) error {
 	keepIDs := make([]int64, 0, len(comments))
@@ -359,7 +424,7 @@ func (r *IssueTimelineRepository) UpsertTx(tx *gorm.DB, event *model.IssueTimeli
 
 // ReplaceSyncedTx 把该 Issue 的时间线镜像替换成本轮拉取的集合：逐条 upsert 后
 // 清掉 event_key 不在集合内的行，任一步失败整体回滚。必须在调用方的事务内与
-// 集合水位变更（Advance/ClearCollectionsWatermarkTx）一起提交；远端分页必须
+// 集合水位变更（AdvanceCollectionsWatermarkIfVersionTx/InvalidateCollectionsTx）一起提交；远端分页必须
 // 在事务外拉完——事务内只执行数据库操作。
 func (r *IssueTimelineRepository) ReplaceSyncedTx(tx *gorm.DB, issueID string, events []*model.IssueTimelineEvent) error {
 	keepKeys := make([]string, 0, len(events))

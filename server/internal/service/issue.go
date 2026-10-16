@@ -331,7 +331,16 @@ func (s *IssueService) UpdateInternalIssueContext(ctx context.Context, issueID, 
 			}
 			s.deleteIssueAssetFiles(assetPathsToDelete)
 		}
-		if err := s.mirror.refreshTimelineAfterPush(ctx, client, stored, updatedIssue); err != nil {
+		// 仅状态变更（关闭/重开，如看板批量关闭、发货钩子关单）不立即全量重拉
+		// 时间线：只清空集合水位（纯本地写库），closed 等时间线事件交给既有增量
+		// 同步补齐（INT-105）。含标题/正文/标签的更新仍照旧立即刷新时间线。
+		// stateOnly 为真时必有 req.State != nil（本分支开头的只读校验保证）。
+		stateOnly := req.Title == nil && req.Body == nil && req.Labels == nil
+		if stateOnly {
+			if err := s.mirror.markCollectionsStaleAfterPush(stored.ID); err != nil {
+				return nil, err
+			}
+		} else if err := s.mirror.refreshTimelineAfterPush(ctx, client, stored, updatedIssue); err != nil {
 			return nil, err
 		}
 		meta, err := s.loadInternalMeta(stored.ID)

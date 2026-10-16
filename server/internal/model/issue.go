@@ -90,13 +90,25 @@ type IssueGitHubMeta struct {
 	SyncedAt          time.Time `gorm:"not null;index" json:"synced_at"`
 	// CollectionsSyncedUpdatedAt 是评论/时间线集合的镜像水位：上次成功镜像
 	// 两个集合时远端 issue 的 updated_at。不在 UpsertTx 的 AssignmentColumns
-	// 里，仅由 AdvanceCollectionsWatermarkTx 在时间线镜像同一事务里推进
-	// （push 路径用 ClearCollectionsWatermarkTx 清空）。
+	// 里，仅由 AdvanceCollectionsWatermarkIfVersionTx 在时间线镜像同一事务里推进
+	// （push 路径用 InvalidateCollectionsTx 清空并递增失效版本）。
 	CollectionsSyncedUpdatedAt *time.Time `gorm:"column:collections_synced_updated_at" json:"collections_synced_updated_at"`
 	// CollectionsSyncedComments 记录上次成功镜像集合时远端 issue 的评论数：
 	// updated_at 只有秒级精度，同一秒内新增的评论靠它与远端评论数比对发现。
-	CollectionsSyncedComments int    `gorm:"not null;default:0;column:collections_synced_comments" json:"collections_synced_comments"`
-	RawJSON                   string `gorm:"type:text" json:"-"`
+	CollectionsSyncedComments int `gorm:"not null;default:0;column:collections_synced_comments" json:"collections_synced_comments"`
+	// CollectionsInvalidatedVersion 是集合失效版本：push 的部分写入
+	// （writePartialCollections）每失效一次自增。完整镜像在取数前读它、写库
+	// 事务内复核；版本变化说明取数期间发生了并发 push，此时放弃这次旧快照、
+	// 保留空水位待重拉（INT-105）。时间戳只到秒级，版本号保证同一秒内的失效
+	// 也能被辨别。
+	CollectionsInvalidatedVersion int64 `gorm:"not null;default:0;column:collections_invalidated_version" json:"-"`
+	// CollectionsHealQueuedAt 是兜底队列位置（排队时间）：条目首次变 stale（push 让
+	// 健康水位失效）或新 meta 创建时分配，之后一直保留；每次实际兜底尝试（无论
+	// 成败）重新置为当前时间，即“移回队尾”。等待期间再被 push（仍 stale）不改变
+	// 它，所以旧条目不会被新进条目插队。候选按它升序取（NULL 最前，仅剩加列前的
+	// 存量行），保证“最久未尝试/排队最久优先”，每个空水位条目最终都会被尝试（INT-105）。
+	CollectionsHealQueuedAt *time.Time `gorm:"column:collections_heal_queued_at" json:"-"`
+	RawJSON                 string     `gorm:"type:text" json:"-"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }

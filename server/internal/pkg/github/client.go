@@ -239,6 +239,24 @@ func (c *Client) CreateIssueComment(ctx context.Context, issueNumber int, body s
 	return &comment, nil
 }
 
+// GetIssue 拉取单个 Issue 的当前远端快照（含 updated_at 与 comments 计数）。
+// 同步兜底重拉（INT-105）用它取得真实的远端水位：本地 issues.updated_at 会被
+// GORM 自动更新与本地工作流操作污染，不能当远端时间戳。
+func (c *Client) GetIssue(ctx context.Context, issueNumber int) (*Issue, error) {
+	path := fmt.Sprintf("repos/%s/%s/issues/%d", c.owner, c.repo, issueNumber)
+	req, err := c.client.NewRequest("GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", mediaTypeFullJSON)
+
+	var issue Issue
+	if _, err := c.client.Do(ctx, req, &issue); err != nil {
+		return nil, err
+	}
+	return &issue, nil
+}
+
 func (c *Client) UpdateIssue(ctx context.Context, issueNumber int, payload UpdateIssueRequest) (*Issue, error) {
 	path := fmt.Sprintf("repos/%s/%s/issues/%d", c.owner, c.repo, issueNumber)
 	req, err := c.client.NewRequest("PATCH", path, payload)
