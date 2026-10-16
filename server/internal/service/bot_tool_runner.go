@@ -558,12 +558,6 @@ func (s *BotService) runAsyncTool(ctx context.Context, call *model.BotToolCall) 
 // 终态已被别人落定（取消竞速），迟到返回不覆盖。
 func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotToolCall, status model.BotToolCallStatus, outcome botToolOutcome, execErr error, effect bool) {
 	now := time.Now().UTC()
-	// 取消竞速：无论工具返回成败，取消请求已记录则终态为 cancelled——
-	// 成功返回的写入也可能已生效，副作用标记必须跟着取消走。
-	if fresh, err := s.calls.FindByID(call.ID); err == nil && fresh.CancelRequestedAt != nil {
-		status = model.BotCallStatusCancelled
-		effect = true
-	}
 	cols := map[string]interface{}{
 		"status":                   status,
 		"finished_at":              now,
@@ -579,6 +573,16 @@ func (s *BotService) finalizeCall(bot *model.Bot, runID string, call *model.BotT
 	}
 	var ok bool
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		// 取消竞速重查必须在本事务内：取消方记录标记与本 CAS 之间的窗口
+		// 里，取消请求已受理的成功写入不得以 effect=false 落 succeeded。
+		if fresh, err := repository.NewBotToolCallRepository(tx).FindByID(call.ID); err == nil && fresh.CancelRequestedAt != nil {
+			// 无论工具返回成败，取消请求已记录则终态为 cancelled——成功
+			// 返回的写入也可能已生效，副作用标记跟着取消走。
+			status = model.BotCallStatusCancelled
+			effect = true
+			cols["status"] = status
+			cols["effect_may_have_occurred"] = effect
+		}
 		var err error
 		ok, err = repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
 			string(model.BotCallStatusRunning), cols)
@@ -770,6 +774,8 @@ func (s *BotService) appendBackgroundResultTx(tx *gorm.DB, runID string, call *m
 			"status": string(status), "message_id": msg.ID,
 			"tool_name": call.ToolName, "action": call.Action,
 			"effect_may_have_occurred": effect,
+			// 平台后台结果的完整消息投影：订阅端不靠快照重读也能渲染。
+			"message": botMessageResponseOf(msg),
 		},
 	})
 }

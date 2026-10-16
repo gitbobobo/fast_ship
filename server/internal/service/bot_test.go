@@ -2492,3 +2492,33 @@ func TestBotInvalidCallPreservesRawArguments(t *testing.T) {
 		t.Fatalf("assistant 账本必须保留原始坏参数: %s", ledgerArgs)
 	}
 }
+
+func TestBotFinalizeRechecksCancelInTx(t *testing.T) {
+	// 取消标记在终态事务前一刻才写入也必须被认出：accepted 取消不能以
+	// effect=false 落 succeeded。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botfinrec")
+	bot := env.createBot(t, userID)
+	runID, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusRunning, string(model.BotExecutionSync))
+
+	// 模拟竞速窗口：finalize 读取前先在库里记上取消标记。
+	env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
+		Update("cancel_requested_at", time.Now().UTC())
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	env.bots.finalizeCall(&model.Bot{ID: bot.ID}, runID, call,
+		model.BotCallStatusSucceeded, botToolOutcome{ResultJSON: "{}"}, nil, false)
+
+	fresh, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if fresh.Status != model.BotCallStatusCancelled {
+		t.Fatalf("受理过的取消必须落 cancelled，实际 %s", fresh.Status)
+	}
+	if !fresh.EffectMayHaveOccurred {
+		t.Fatalf("成功返回也可能已生效，副作用标记必须为 true")
+	}
+}

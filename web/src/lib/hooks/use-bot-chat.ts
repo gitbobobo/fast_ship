@@ -312,6 +312,15 @@ export function foldStreamEvent(
       // 全量列表进 mergeCalls：只传匹配项会把缓存整表替换成一个调用，
       // 第二张确认卡一出现就把第一张挤掉。
       sinks.setCalls(mergeCalls(sinks.getCalls(), { ...patch, id }));
+      // 异步终态事件的平台后台结果带完整消息投影：不等快照重读直接入时间线。
+      const resultPayload = data.payload as
+        | { message?: BotMessage | undefined }
+        | undefined;
+      if (resultPayload?.message?.id) {
+        sinks.setMessages(
+          mergeMessages(sinks.getMessages(), [resultPayload.message]),
+        );
+      }
       break;
     }
     case "error": {

@@ -596,4 +596,33 @@ describe("foldStreamEvent", () => {
       "r-err:failed:model_request_failed:上游 502",
     ]);
   });
+  it("异步终态 tool_result 携带完整后台结果消息并入时间线", () => {
+    const { state, sinks: sinksObj } = sinks();
+    const backgroundMessage: BotMessage = {
+      id: "m-bg",
+      bot_id: "bot-1",
+      seq: 7,
+      kind: "background_result",
+      content: { summary: "issue 已创建", status: "succeeded" },
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    foldStreamEvent(
+      {
+        event: "tool_result",
+        data: JSON.stringify({
+          call_id: "call-1",
+          payload: {
+            id: "call-1",
+            status: "succeeded",
+            message_id: "m-bg",
+            message: backgroundMessage,
+          },
+        }),
+        id: 11,
+      },
+      sinksObj,
+    );
+    expect(state.messages.map((m) => m.id)).toEqual(["m-bg"]);
+    expect(state.calls.map((c) => `${c.id}:${c.status}`)).toEqual(["call-1:succeeded"]);
+  });
 });
