@@ -671,29 +671,38 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 	now := time.Now().UTC()
 	switch call.Status {
 	case model.BotCallStatusPendingConfirmation, model.BotCallStatusQueued:
-		ok, err := s.calls.UpdateWhere(call.ID, string(call.Status), map[string]interface{}{
-			"status":        model.BotCallStatusCancelled,
-			"finished_at":   now,
-			"error_code":    "cancelled",
-			"error_message": "被用户或机器人取消（未执行）",
-		})
-		if err != nil || !ok {
-			fresh, _ := s.calls.FindByID(call.ID)
-			return fresh, false
-		}
-		// 终态结果消息（唯一 terminal）。
+		// 终态转移、结果消息与事件同一事务：崩溃不会留下无结果消息的
+		// cancelled 终态（恢复只修未终态调用，缺口会让机器人永远不知道
+		// 已受理的操作被取消）。
 		runID := s.runIDOfCall(call)
-		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		var txErr error
+		txErr = s.db.Transaction(func(tx *gorm.DB) error {
+			ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
+				string(call.Status), map[string]interface{}{
+					"status":        model.BotCallStatusCancelled,
+					"finished_at":   now,
+					"error_code":    "cancelled",
+					"error_message": "被用户或机器人取消（未执行）",
+				})
+			if err != nil || !ok {
+				return err
+			}
+			call.Status = model.BotCallStatusCancelled
+			// 终态结果消息（唯一 terminal）。
 			return s.appendBackgroundResultTx(tx, runID, call, model.BotCallStatusCancelled, botToolOutcome{}, nil, false, now)
 		})
 		if txErr != nil {
-			s.logger.Warn("追加取消结果失败", zap.String("call_id", call.ID), zap.Error(txErr))
+			s.logger.Warn("落取消终态失败", zap.String("call_id", call.ID), zap.Error(txErr))
+			fresh, _ := s.calls.FindByID(call.ID)
+			return fresh, false
 		}
-		s.emitEvent(call.BotID, nil, call.ID, model.BotEventToolResult, botEventEnvelope{
-			Kind: "tool_result", Phase: "terminal",
-			Payload: map[string]interface{}{"status": string(model.BotCallStatusCancelled)},
-		})
 		s.publishEvent(call.BotID)
+		// 取消也是模型输入（后台结果）：立即唤醒主线，不等 5 秒扫描兜底。
+		s.wakeRuntime(call.BotID, botWake{
+			Trigger: model.BotTriggerToolResult,
+			Key:     "tool_result:" + call.ID,
+			Context: marshalJSONString(map[string]interface{}{"call_id": call.ID, "status": string(model.BotCallStatusCancelled)}),
+		})
 		fresh, _ := s.calls.FindByID(call.ID)
 		return fresh, true
 	case model.BotCallStatusRunning:

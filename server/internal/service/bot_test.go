@@ -1121,6 +1121,10 @@ func TestBotCancelCall(t *testing.T) {
 		}
 		break
 	}
+	// 取消产生的后台结果会立即唤醒处理它的 run：等它结束后再删除。
+	waitForBot(t, "取消 run 结束", 15*time.Second, func() bool {
+		return env.botSettled(bot.ID)
+	})
 	if err := env.bots.Delete(userID, bot.ID); err != nil {
 		t.Fatalf("终态后删除应成功: %v", err)
 	}
@@ -2038,5 +2042,51 @@ func TestBotCloseUnstartedSyncAtomic(t *testing.T) {
 		bot.ID, model.BotMessageKindToolReply).Count(&replyCount)
 	if replyCount != 1 {
 		t.Fatalf("重复收尾不得补第二条回复: %d", replyCount)
+	}
+}
+
+func TestBotCancelQueuedCallAtomic(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botcancel2")
+	bot := env.createBot(t, userID)
+
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionAsync))
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+
+	// 原始 run 已结束后取消：终态、结果消息、事件同事务；并立即唤醒主线。
+	fresh, cancelled := env.bots.cancelBotCall(call)
+	if !cancelled || fresh.Status != model.BotCallStatusCancelled {
+		t.Fatalf("cancel: %+v %+v", cancelled, fresh)
+	}
+
+	var resultMsgs int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindBackgroundResult).Count(&resultMsgs)
+	if resultMsgs != 1 {
+		t.Fatalf("取消结果消息应同事务落库: %d", resultMsgs)
+	}
+
+	// 幂等：重复取消不补第二条结果消息。
+	again, _ := env.bots.cancelBotCall(fresh)
+	if again.Status != model.BotCallStatusCancelled {
+		t.Fatalf("repeat cancel: %+v", again)
+	}
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindBackgroundResult).Count(&resultMsgs)
+	if resultMsgs != 1 {
+		t.Fatalf("重复取消不得补第二条结果消息: %d", resultMsgs)
+	}
+}
+
+func TestBotStartWorkerPoolOnce(t *testing.T) {
+	env := setupBotTestEnv(t)
+	env.bots.ensureWorkers()
+	firstCh := env.bots.workCh
+	env.bots.Start()
+	if env.bots.workCh != firstCh {
+		t.Fatalf("Start 不得重建 worker 池（会搁浅原 worker 与取消句柄）")
 	}
 }

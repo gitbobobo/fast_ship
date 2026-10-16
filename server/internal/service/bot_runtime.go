@@ -96,7 +96,10 @@ func (s *BotService) Start() {
 	s.rt.started = true
 	s.rt.mu.Unlock()
 
-	s.startWorkers()
+	// 经 ensureWorkers 的 workOnce 守卫启动：Start 之前若恢复竞速已入队
+	// 工作并触发过一次初始化，这里不得重建 worker 池（会搁浅原 worker、
+	// 丢失已登记的取消句柄）。
+	s.ensureWorkers()
 	go s.scanLoop()
 }
 
