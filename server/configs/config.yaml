@@ -26,6 +26,8 @@ issues:
   auto_sync_interval_minutes: 15
 
 # 订阅套餐额度（INT-109）：定时抓取各 AI 编码服务额度，只读展示。
+# enabled / run_on_startup 的缺省为 true：老配置文件没有 quota 段时升级后仍会
+# 定时抓取，不需要手动补配置；显式写 false 才关闭。
 # base_urls 仅部署/测试覆盖供应商 origin 用，如 {"factory": "http://127.0.0.1:5099"}。
 quota:
   enabled: true

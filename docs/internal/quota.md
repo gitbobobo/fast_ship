@@ -89,6 +89,9 @@ quota:
 ```
 
 数值项均有默认回退（`QuotaConfig` 上的方法），`base_urls` 只经配置文件覆盖。
+`enabled` 与 `run_on_startup` 用 `viper.SetDefault` 设为 `true`：老部署的配置文件
+里没有 `quota` 段，只看结构体零值会把它们反序列化成 `false`，等于升级后静默
+停掉后台抓取；显式写 `false` 仍能关闭（有 `config_test.go` 用例钉住）。
 
 ## API 与用户隔离 / API Key 边界
 
@@ -129,6 +132,11 @@ quota:
   为真、非不限量且内联 `credits.balance` 缺失时，会再请求 `remaining_balance`
   端点补工作区余额（该请求还需要 `account_id`）。首版只展示响应内联的
   `credits.balance`，缺失时余额为空。
+- **Devin 嵌套配额的「剩余」不当总量**：CodexBar 的通用字典回退把 `available`
+  同时当 limit 候选，`{used:3, available:7}` 会算成 42.9%；这里把 `available`/
+  `remaining` 只当剩余，没有显式上限时用「已用 + 剩余」推总量（得 30%），
+  只有剩余而无总量时不给百分比。这是相对 CodexBar 的刻意偏离：静默偏低的
+  百分比会让用户以为还有余量。
 - **数值类型一律 float64**：契约里 `used_percent`/`used`/`limit`/`amount`
   在 openapi 显式标 `format: double`（生成 `float64`/`*float64`）。金额与
   百分比不降 float32 是显式决定——`10.1` 降精度会变成 `10.100000381469727`。

@@ -1949,3 +1949,53 @@ func TestRegistryCredentialFieldsMatchContract(t *testing.T) {
 		}
 	}
 }
+
+// available/remaining 是「剩余」，既不能当已用，也不能当总量：used=3、available=7
+// 的真值是 30%。把剩余当分母会得到 42.9%（低估用量），所以没有显式上限时用
+// 「已用 + 剩余」推总量。
+func TestDevinRemainingIsNotTheTotalLimit(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want float64
+	}{
+		{
+			name: "used 与 available，无显式上限",
+			body: `{"quota_usage":{"daily_quota":{"used":3,"available":7}}}`,
+			want: 30,
+		},
+		{
+			name: "used 与 remaining，无显式上限",
+			body: `{"quota_usage":{"daily_quota":{"used":30,"remaining":70}}}`,
+			want: 30,
+		},
+		{
+			name: "显式上限优先于剩余",
+			body: `{"quota_usage":{"daily_quota":{"used":3,"available":7,"quota":10}}}`,
+			want: 30,
+		},
+		{
+			name: "只有 remaining 与 limit",
+			body: `{"quota_usage":{"daily_quota":{"remaining":70,"limit":100}}}`,
+			want: 30,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+				return http.StatusOK, []byte(tc.body)
+			})
+			ctx, cancel := fetchCtx()
+			defer cancel()
+
+			snapshot, err := fetchDevin(ctx, server.Client(), server.URL, Credentials{"token": "tok", "org_id": "org-1"})
+			if err != nil {
+				t.Fatalf("取数失败: %v", err)
+			}
+			daily := findWindow(t, snapshot.Windows, WindowDaily, "每日")
+			if daily.UsedPercent == nil || *daily.UsedPercent != tc.want {
+				t.Fatalf("%s 期望 %v%%，得到 %v", tc.body, tc.want, daily.UsedPercent)
+			}
+		})
+	}
+}

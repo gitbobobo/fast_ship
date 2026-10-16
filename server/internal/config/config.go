@@ -312,6 +312,12 @@ func (c BotsConfig) validate() error {
 func Load(path string) (*Config, error) {
 	viper.SetConfigFile(path)
 
+	// 新配置段的缺省值：老部署的配置文件里没有 quota 段时，viper 会把这两个
+	// bool 反序列化成 false，等于升级后静默关掉后台抓取；这里给缺省值兜底，
+	// 显式写 false 仍可关闭。其余数值项走 QuotaConfig 上的默认回退方法。
+	viper.SetDefault("quota.enabled", true)
+	viper.SetDefault("quota.run_on_startup", true)
+
 	// 支持环境变量覆盖
 	viper.SetEnvPrefix("FAST_SHIP")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))

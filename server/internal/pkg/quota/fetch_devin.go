@@ -286,14 +286,18 @@ func devinPercent(obj map[string]any) (float64, bool) {
 	if v, ok := firstNumber(obj, "remaining_percent", "remainingPercent", "percent_remaining", "percentRemaining"); ok {
 		return 100 - scaled(v), true
 	}
-	// used 键与 limit/remaining 键严格区分：available 是「剩余」，绝不能当 used，
-	// 否则用量会被反向计算（CodexBar 的 percent(from:) 同样只在这里用 remaining/limit 列表）。
+	// used 键与 limit/remaining 键严格区分：available/remaining 是「剩余」，绝不能当
+	// used，也不能当成总量——used=3、available=7 当总量会得到 42.9%（真值 30%），
+	// 偏低的百分比会让用户以为还有余量。没有显式上限时用「已用 + 剩余」推总量。
 	used, usedOK := firstNumber(obj, "used", "usage", "used_count", "usedCount", "consumed")
-	limit, limitOK := firstNumber(obj, "limit", "quota", "total", "max", "available")
+	limit, limitOK := firstNumber(obj, "limit", "quota", "total", "max")
+	remaining, remainingOK := firstNumber(obj, "remaining", "left", "available")
+	if usedOK && !limitOK && remainingOK && remaining >= 0 {
+		limit, limitOK = used+remaining, true
+	}
 	if usedOK && limitOK && limit > 0 {
 		return used / limit * 100, true
 	}
-	remaining, remainingOK := firstNumber(obj, "remaining", "left", "available")
 	if remainingOK && limitOK && limit > 0 {
 		return (limit - remaining) / limit * 100, true
 	}
