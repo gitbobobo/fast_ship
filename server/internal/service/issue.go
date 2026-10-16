@@ -155,6 +155,12 @@ func (s *IssueService) CreateInternalIssue(projectID, userID string, req CreateI
 }
 
 func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInternalIssueRequest) (*IssueResponse, error) {
+	return s.CreateGitHubIssueContext(context.Background(), projectID, userID, req)
+}
+
+// CreateGitHubIssueContext 是 Context 版本：网络调用透传调用方 context，
+// 供后台 worker 取消（机器人 INT-101）；旧签名委托此处。
+func (s *IssueService) CreateGitHubIssueContext(ctx context.Context, projectID, userID string, req CreateInternalIssueRequest) (*IssueResponse, error) {
 	title := strings.TrimSpace(req.Title)
 	body := api.Deref(req.Body)
 	if title == "" {
@@ -176,7 +182,6 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 
 	client := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 
-	ctx := context.Background()
 	if err := s.validateIssueAssetReferences(projectID, "", body); err != nil {
 		return nil, err
 	}
@@ -214,6 +219,12 @@ func (s *IssueService) CreateGitHubIssue(projectID, userID string, req CreateInt
 }
 
 func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error) {
+	return s.UpdateInternalIssueContext(context.Background(), issueID, userID, req)
+}
+
+// UpdateInternalIssueContext 是 Context 版本：GitHub 写回分支的网络调用透传
+// 调用方 context（机器人后台 worker 取消用，INT-101）；旧签名委托此处。
+func (s *IssueService) UpdateInternalIssueContext(ctx context.Context, issueID, userID string, req UpdateInternalIssueRequest) (*IssueResponse, error) {
 	if req.Title == nil && req.Body == nil && req.State == nil && req.StateReason == nil && req.Labels == nil {
 		return nil, errs.ErrInvalidParams
 	}
@@ -300,7 +311,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 		if labelsToUpdate != nil {
 			updateReq.Labels = labelsToUpdate
 		}
-		updatedIssue, err := client.UpdateIssue(context.Background(), issue.GitHubMeta.Number, updateReq)
+		updatedIssue, err := client.UpdateIssue(ctx, issue.GitHubMeta.Number, updateReq)
 		if err != nil {
 			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("更新 GitHub Issue 失败: %v", err))
 		}
@@ -320,7 +331,7 @@ func (s *IssueService) UpdateInternalIssue(issueID, userID string, req UpdateInt
 			}
 			s.deleteIssueAssetFiles(assetPathsToDelete)
 		}
-		if _, err := s.mirror.syncTimeline(context.Background(), client, stored, issue.GitHubMeta.Number); err != nil {
+		if _, err := s.mirror.syncTimeline(ctx, client, stored, issue.GitHubMeta.Number); err != nil {
 			return nil, err
 		}
 		meta, err := s.loadInternalMeta(stored.ID)

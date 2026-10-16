@@ -88,6 +88,10 @@ var autoMigrateModels = []interface{}{
 	&model.GitHubPRSeenSHA{},
 }
 
+func init() {
+	autoMigrateModels = append(autoMigrateModels, repository.BotModels()...)
+}
+
 func main() {
 	// 启动期引导日志：配置与日志管道就绪前的失败只能走 stderr。
 	boot := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -193,6 +197,12 @@ func main() {
 		return
 	}
 
+	// 机器人（INT-101）：部分索引 / 复合索引 / 消息防改写守护在 AutoMigrate
+	// 之后集中补齐；任何一条失败都启动退出，绝不带错运行。
+	if err := repository.EnsureBotSchema(db); err != nil {
+		fatal("机器人表结构初始化失败", err)
+	}
+
 	// 初始化 Repository
 	userRepo := repository.NewUserRepository(db)
 	userAISettingRepo := repository.NewUserAISettingRepository(db)
@@ -268,6 +278,9 @@ func main() {
 	notificationService := service.NewNotificationService(notificationRepo)
 	automationService := service.NewAutomationService(db, automationRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, automationLogger)
 
+	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
+	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)
+
 	// GitHub App（INT-93）：真实安装令牌客户端或 debug 自测 fake；凭据缺失时
 	// PR 代发端点报错，webhook 端点因验签密钥为空一律 503。
 	var ghPR githubapp.PullRequestGitHub
@@ -325,6 +338,7 @@ func main() {
 	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
+	botHandler := handler.NewBotHandler(botService)
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(prReviewService, cfg.GitHubApp.WebhookSecret, ghFake)
 
@@ -385,6 +399,13 @@ func main() {
 	// 自动化协调循环（INT-90）：到期 cron、待认领运行、超时与后置统一由它推进。
 	automationScheduler.Start()
 
+	// 机器人（INT-101）：启动恢复在所有 worker 之前；恢复完成后才启动
+	// runtime 与后台 worker。
+	if err := botService.RecoverOnStartup(); err != nil {
+		fatal("机器人启动恢复失败", err)
+	}
+	botService.Start()
+
 	// 设置 Gin：请求日志中间件自带 recover 与 5xx 堆栈采集，替代 gin.Recovery。
 	gin.SetMode(cfg.Server.Mode)
 	r := gin.New()
@@ -393,7 +414,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, selfLogHandler, githubWebhookHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。

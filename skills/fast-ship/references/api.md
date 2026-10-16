@@ -8573,3 +8573,1101 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | 凭证类型不允许（40301） |
 | 500 | 服务器内部错误（50000） |
+
+## bots
+
+内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位
+
+### GET `/api/bots`
+
+<!-- operationId: listBots -->
+
+列出当前用户的机器人
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 机器人列表
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].name` | string | 是 |  |
+| `items[].persona_prompt` | string | 是 | 人设原文；平台规则在服务端拼接，不在此回显 |
+| `items[].prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
+| `items[].platform_prompt_version` | integer（int64） | 是 |  |
+| `items[].toolset_version` | integer（int64） | 是 |  |
+| `items[].base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `items[].model` | string | 是 |  |
+| `items[].api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `items[].next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/bots`
+
+<!-- operationId: createBot -->
+
+创建机器人
+
+人设与平台规则在创建时拼成系统提示词并生成 prompt_revision=1；
+API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不做唯一约束。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string（长度 ≥1） | 是 |  |
+| `persona_prompt` | string | 否 |  |
+| `base_url` | string | 是 |  |
+| `model` | string | 是 |  |
+| `api_key` | string | 是 | OpenAI 兼容 API Key；加密落库，仅创建/更新时提交 |
+
+**成功响应**
+
+**200** 创建成功
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `persona_prompt` | string | 是 | 人设原文；平台规则在服务端拼接，不在此回显 |
+| `prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
+| `platform_prompt_version` | integer（int64） | 是 |  |
+| `toolset_version` | integer（int64） | 是 |  |
+| `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `model` | string | 是 |  |
+| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/bots/test-connection`
+
+<!-- operationId: testBotConnection -->
+
+测试模型连接（流式与工具调用兼容性）
+
+只做最小模型探测，不写入主线。可传完整未保存配置；也可传 bot_id 使用
+已保存 key，并允许表单覆盖 base_url/model。streaming 与 tool_call 两项
+检查分别返回；HTTP 200 且 ok=false 表示配置可达性/兼容性问题。
+SDK 重试显式关零，不产生隐藏重复调用。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+未保存配置时必须提供 base_url/model/api_key；给 bot_id 时用已保存 key 并允许表单覆盖地址/模型
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `bot_id` | string | 否 |  |
+| `base_url` | string | 否 |  |
+| `model` | string | 否 |  |
+| `api_key` | string | 否 |  |
+
+**成功响应**
+
+**200** 检查结果（ok=false 时检查项中带失败详情）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `ok` | boolean | 是 | 流式检查通过即 true |
+| `checks` | object[] | 是 |  |
+| `checks[].name` | string | 是 | streaming / tool_call |
+| `checks[].passed` | boolean | 是 |  |
+| `checks[].detail` | string | 否 | 失败原因（截断；不含密钥） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}`
+
+<!-- operationId: getBot -->
+
+读取机器人配置
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 机器人配置
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `persona_prompt` | string | 是 | 人设原文；平台规则在服务端拼接，不在此回显 |
+| `prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
+| `platform_prompt_version` | integer（int64） | 是 |  |
+| `toolset_version` | integer（int64） | 是 |  |
+| `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `model` | string | 是 |  |
+| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/bots/{id}`
+
+<!-- operationId: updateBot -->
+
+更新机器人配置
+
+指针字段表达「未提供保留」；api_key 缺省保留原 key，空串拒绝（40001）。
+人设变化重建系统提示词并递增 prompt_revision。配置变化对下个 run 生效，
+当前 run 使用开始时的快照与已创建的客户端。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**请求体**
+
+`application/json`，必填。
+
+指针字段表达「未提供保留」；api_key 空串拒绝（40001）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | 否 |  |
+| `persona_prompt` | string | 否 |  |
+| `base_url` | string | 否 |  |
+| `model` | string | 否 |  |
+| `api_key` | string | 否 |  |
+
+**成功响应**
+
+**200** 更新后的机器人配置
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `persona_prompt` | string | 是 | 人设原文；平台规则在服务端拼接，不在此回显 |
+| `prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
+| `platform_prompt_version` | integer（int64） | 是 |  |
+| `toolset_version` | integer（int64） | 是 |  |
+| `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `model` | string | 是 |  |
+| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/bots/{id}`
+
+<!-- operationId: deleteBot -->
+
+删除机器人（连同对话账本级联删除）
+
+存在活动 run 或未终结调用（pending_confirmation/queued/running）时返回
+40927：先显式停止/取消，避免静默丢任务。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 有活动 run 或未终结调用（40927） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/messages`
+
+<!-- operationId: listBotMessages -->
+
+主线消息分页
+
+before_seq/after_seq 都是排他 seq 边界，页内按 seq 正序；不使用 offset 分页。
+两个边界都省略时返回最新的 limit 条（聊天首屏加载尾部）；只给 before_seq
+返回该边界之前最近的 limit 条（「加载更早」）；只给 after_seq 返回该边界
+之后最早的 limit 条（断线补读）。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `before_seq` | integer（int64） | 否 | 只返回 seq 小于该值的消息；取距该边界最近的 limit 条（「加载更早」） |
+| `after_seq` | integer（int64） | 否 | 只返回 seq 大于该值的消息；取距该边界最近的 limit 条（补读） |
+| `limit` | integer（≤200，默认 100） | 否 |  |
+
+**成功响应**
+
+**200** 消息列表（含 total=本次返回条数）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].bot_id` | string | 是 |  |
+| `items[].seq` | integer（int64） | 是 |  |
+| `items[].run_id` | string | 否 |  |
+| `items[].request_id` | string | 否 |  |
+| `items[].call_id` | string | 否 |  |
+| `items[].kind` | string | 是 | user / assistant / tool_reply / background_result / approval_decision / lifecycle |
+| `items[].content` | object | 是 | 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串 |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `total` | integer | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/bots/{id}/messages`
+
+<!-- operationId: sendBotMessage -->
+
+向主线发送用户消息
+
+client_message_id 必填（幂等键）：同键同正文返回已有消息；同键不同正文
+返回 40925。消息落库后由 runtime 唤醒/延续主线 run；响应返回已落库
+消息、当前活动 run（可能尚未包含本消息）与 queued 标记。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `text` | string（长度 ≥1） | 是 |  |
+| `client_message_id` | string（长度 ≥1） | 是 | 幂等键；同键同正文幂等返回，同键不同正文 40925 |
+
+**成功响应**
+
+**200** 已受理
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `message` | object | 是 | 不可改写的主线账本；批准/拒绝/错误/恢复都是追加新消息 |
+| `message.id` | string | 是 |  |
+| `message.bot_id` | string | 是 |  |
+| `message.seq` | integer（int64） | 是 |  |
+| `message.run_id` | string | 否 |  |
+| `message.request_id` | string | 否 |  |
+| `message.call_id` | string | 否 |  |
+| `message.kind` | string | 是 | user / assistant / tool_reply / background_result / approval_decision / lifecycle |
+| `message.content` | object | 是 | 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串 |
+| `message.created_at` | string（date-time） | 是 |  |
+| `run` | object | 否 |  |
+| `run.id` | string | 是 |  |
+| `run.bot_id` | string | 是 |  |
+| `run.trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `run.trigger_key` | string | 是 |  |
+| `run.status` | string | 是 | queued / running / completed / failed / stopped |
+| `run.config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `run.input_through_seq` | integer（int64） | 是 |  |
+| `run.stop_requested` | boolean | 是 |  |
+| `run.prompt_tokens` | integer（int64，可空） | 否 |  |
+| `run.completion_tokens` | integer（int64，可空） | 否 |  |
+| `run.total_tokens` | integer（int64，可空） | 否 |  |
+| `run.cached_tokens` | integer（int64，可空） | 否 |  |
+| `run.usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `run.error_code` | string（可空） | 否 |  |
+| `run.error_message` | string（可空） | 否 |  |
+| `run.created_at` | string（date-time） | 是 |  |
+| `run.started_at` | string（date-time，可空） | 否 |  |
+| `run.finished_at` | string（date-time，可空） | 否 |  |
+| `queued` | boolean | 是 | 恒为 true；执行交给 runtime |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 同 client_message_id 已用于不同正文（40925） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/chat`
+
+<!-- operationId: getBotChatSnapshot -->
+
+聊天页一致快照
+
+消息尾部页、调用、run 与事件水位（next_event_seq）取自同一读取点。
+详情页先装快照再订阅：SSE 游标从 next_event_seq - 1 起读，与快照内容
+严格衔接，既不重放快照已含的事件也不漏掉快照之后的事件。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `message_limit` | integer（≤200，默认 50） | 否 | 消息尾部页大小 |
+
+**成功响应**
+
+**200** 快照
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `bot` | object | 是 |  |
+| `bot.id` | string | 是 |  |
+| `bot.name` | string | 是 |  |
+| `bot.persona_prompt` | string | 是 | 人设原文；平台规则在服务端拼接，不在此回显 |
+| `bot.prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
+| `bot.platform_prompt_version` | integer（int64） | 是 |  |
+| `bot.toolset_version` | integer（int64） | 是 |  |
+| `bot.base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `bot.model` | string | 是 |  |
+| `bot.api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `bot.next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `bot.created_at` | string（date-time） | 是 |  |
+| `bot.updated_at` | string（date-time） | 是 |  |
+| `messages` | object[] | 是 |  |
+| `messages[].id` | string | 是 |  |
+| `messages[].bot_id` | string | 是 |  |
+| `messages[].seq` | integer（int64） | 是 |  |
+| `messages[].run_id` | string | 否 |  |
+| `messages[].request_id` | string | 否 |  |
+| `messages[].call_id` | string | 否 |  |
+| `messages[].kind` | string | 是 | user / assistant / tool_reply / background_result / approval_decision / lifecycle |
+| `messages[].content` | object | 是 | 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串 |
+| `messages[].created_at` | string（date-time） | 是 |  |
+| `calls` | object[] | 是 |  |
+| `calls[].id` | string | 是 | 平台调用 ID，同时是执行幂等键 |
+| `calls[].bot_id` | string | 是 |  |
+| `calls[].request_id` | string | 是 |  |
+| `calls[].provider_tool_call_id` | string | 是 | 模型协议配对 ID |
+| `calls[].tool_name` | string | 是 |  |
+| `calls[].action` | string | 是 |  |
+| `calls[].arguments` | object | 是 | 规范化后的参数 |
+| `calls[].execution_mode` | string | 是 | sync / async |
+| `calls[].requires_confirmation` | boolean | 是 |  |
+| `calls[].status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `calls[].decision` | string（可空） | 否 | approve / reject / always_allow |
+| `calls[].decided_at` | string（date-time，可空） | 否 |  |
+| `calls[].authorization_id` | string（可空） | 否 |  |
+| `calls[].execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `calls[].cancel_requested` | boolean | 否 |  |
+| `calls[].result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
+| `calls[].result_chars` | integer（int64） | 是 |  |
+| `calls[].truncated` | boolean | 是 |  |
+| `calls[].error_code` | string（可空） | 否 |  |
+| `calls[].error_message` | string（可空） | 否 |  |
+| `calls[].effect_may_have_occurred` | boolean | 是 | 副作用可能已发生（取消/中断/重启）；不声称回滚 |
+| `calls[].created_at` | string（date-time） | 是 |  |
+| `calls[].started_at` | string（date-time，可空） | 否 |  |
+| `calls[].finished_at` | string（date-time，可空） | 否 |  |
+| `runs` | object[] | 是 |  |
+| `runs[].id` | string | 是 |  |
+| `runs[].bot_id` | string | 是 |  |
+| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `runs[].trigger_key` | string | 是 |  |
+| `runs[].status` | string | 是 | queued / running / completed / failed / stopped |
+| `runs[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `runs[].input_through_seq` | integer（int64） | 是 |  |
+| `runs[].stop_requested` | boolean | 是 |  |
+| `runs[].prompt_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].completion_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].total_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].cached_tokens` | integer（int64，可空） | 否 |  |
+| `runs[].usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `runs[].error_code` | string（可空） | 否 |  |
+| `runs[].error_message` | string（可空） | 否 |  |
+| `runs[].created_at` | string（date-time） | 是 |  |
+| `runs[].started_at` | string（date-time，可空） | 否 |  |
+| `runs[].finished_at` | string（date-time，可空） | 否 |  |
+| `next_event_seq` | integer（int64） | 是 | 与快照同一读取点的事件账本水位（下一条的 seq） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/events`
+
+<!-- operationId: streamBotEvents -->
+
+SSE 事件流（持久重放账本）
+
+`text/event-stream`。五种事件固定：`delta`（text_delta 增量、
+message_commit 完整消息提交、run_started、user_message、lifecycle）、
+`tool_call`（phase=proposed/awaiting_confirmation/queued/running）、
+`tool_result`（phase=receipt/decision/terminal）、`done`（run 完成，
+不是整个事件流关闭）、`error`（run 失败；顺序固定 error → done）。
+每帧 `id: <event_seq>`；断线后用 `after_seq=N` 重放补齐。心跳是
+`: ping` 注释。SSE 断开只结束订阅，不取消 run。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `after_seq` | integer（int64，默认 0） | 否 | 从该事件 seq 之后开始重放 |
+
+**成功响应**
+
+**200** 事件流
+
+`text/event-stream`：object
+
+SSE 帧 data 的统一形状：bot_id 必带；kind 区分 delta 下的
+text_delta / message_commit / run_started / user_message / lifecycle，
+tool_call 的 phase 区分 proposed / awaiting_confirmation / queued /
+running，tool_result 的 phase 区分 receipt / decision / terminal，
+done 携带 run 终态，error 携带 code/message（顺序固定 error → done）。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+
+### GET `/api/bots/{id}/runs`
+
+<!-- operationId: listBotRuns -->
+
+运行记录列表
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `limit` | integer（≤100，默认 50） | 否 |  |
+
+**成功响应**
+
+**200** run 列表（新→旧）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].bot_id` | string | 是 |  |
+| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `items[].trigger_key` | string | 是 |  |
+| `items[].status` | string | 是 | queued / running / completed / failed / stopped |
+| `items[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `items[].input_through_seq` | integer（int64） | 是 |  |
+| `items[].stop_requested` | boolean | 是 |  |
+| `items[].prompt_tokens` | integer（int64，可空） | 否 |  |
+| `items[].completion_tokens` | integer（int64，可空） | 否 |  |
+| `items[].total_tokens` | integer（int64，可空） | 否 |  |
+| `items[].cached_tokens` | integer（int64，可空） | 否 |  |
+| `items[].usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `items[].error_code` | string（可空） | 否 |  |
+| `items[].error_message` | string（可空） | 否 |  |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].started_at` | string（date-time，可空） | 否 |  |
+| `items[].finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/runs/{runId}`
+
+<!-- operationId: getBotRun -->
+
+读取运行记录
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `runId` | string | 是 |  |
+
+**成功响应**
+
+**200** run 详情
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `bot_id` | string | 是 |  |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `trigger_key` | string | 是 |  |
+| `status` | string | 是 | queued / running / completed / failed / stopped |
+| `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `input_through_seq` | integer（int64） | 是 |  |
+| `stop_requested` | boolean | 是 |  |
+| `prompt_tokens` | integer（int64，可空） | 否 |  |
+| `completion_tokens` | integer（int64，可空） | 否 |  |
+| `total_tokens` | integer（int64，可空） | 否 |  |
+| `cached_tokens` | integer（int64，可空） | 否 |  |
+| `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `error_code` | string（可空） | 否 |  |
+| `error_message` | string（可空） | 否 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `started_at` | string（date-time，可空） | 否 |  |
+| `finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/bots/{id}/runs/{runId}/stop`
+
+<!-- operationId: stopBotRun -->
+
+停止主线 run
+
+置 stop_requested 并取消当前模型/同步调用 context；run 在安全点收尾为
+stopped。已持久化调用中缺少协议回复的会补「已被中断」；已受理后台调用
+继续存在，可逐项取消。重复停止或 run 已结束返回 40928。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `runId` | string | 是 |  |
+
+**成功响应**
+
+**200** 停止已请求（run 状态以响应为准）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `bot_id` | string | 是 |  |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery（以后可增加 schedule） |
+| `trigger_key` | string | 是 |  |
+| `status` | string | 是 | queued / running / completed / failed / stopped |
+| `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `input_through_seq` | integer（int64） | 是 |  |
+| `stop_requested` | boolean | 是 |  |
+| `prompt_tokens` | integer（int64，可空） | 否 |  |
+| `completion_tokens` | integer（int64，可空） | 否 |  |
+| `total_tokens` | integer（int64，可空） | 否 |  |
+| `cached_tokens` | integer（int64，可空） | 否 |  |
+| `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `error_code` | string（可空） | 否 |  |
+| `error_message` | string（可空） | 否 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `started_at` | string（date-time，可空） | 否 |  |
+| `finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 运行状态已变化（40928） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/calls`
+
+<!-- operationId: listBotCalls -->
+
+调用列表（支持按状态过滤）
+
+status 逗号分隔；常用 pending_confirmation 查待确认卡片、queued/running 查后台执行。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `status` | string | 否 | 逗号分隔的状态过滤 |
+| `limit` | integer（≤200，默认 100） | 否 |  |
+
+**成功响应**
+
+**200** 调用列表（新→旧）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 | 平台调用 ID，同时是执行幂等键 |
+| `items[].bot_id` | string | 是 |  |
+| `items[].request_id` | string | 是 |  |
+| `items[].provider_tool_call_id` | string | 是 | 模型协议配对 ID |
+| `items[].tool_name` | string | 是 |  |
+| `items[].action` | string | 是 |  |
+| `items[].arguments` | object | 是 | 规范化后的参数 |
+| `items[].execution_mode` | string | 是 | sync / async |
+| `items[].requires_confirmation` | boolean | 是 |  |
+| `items[].status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `items[].decision` | string（可空） | 否 | approve / reject / always_allow |
+| `items[].decided_at` | string（date-time，可空） | 否 |  |
+| `items[].authorization_id` | string（可空） | 否 |  |
+| `items[].execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `items[].cancel_requested` | boolean | 否 |  |
+| `items[].result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
+| `items[].result_chars` | integer（int64） | 是 |  |
+| `items[].truncated` | boolean | 是 |  |
+| `items[].error_code` | string（可空） | 否 |  |
+| `items[].error_message` | string（可空） | 否 |  |
+| `items[].effect_may_have_occurred` | boolean | 是 | 副作用可能已发生（取消/中断/重启）；不声称回滚 |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].started_at` | string（date-time，可空） | 否 |  |
+| `items[].finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/calls/{callId}`
+
+<!-- operationId: getBotCall -->
+
+读取调用详情（卡片当前状态从调用账本派生）
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `callId` | string | 是 |  |
+
+**成功响应**
+
+**200** 调用详情
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 平台调用 ID，同时是执行幂等键 |
+| `bot_id` | string | 是 |  |
+| `request_id` | string | 是 |  |
+| `provider_tool_call_id` | string | 是 | 模型协议配对 ID |
+| `tool_name` | string | 是 |  |
+| `action` | string | 是 |  |
+| `arguments` | object | 是 | 规范化后的参数 |
+| `execution_mode` | string | 是 | sync / async |
+| `requires_confirmation` | boolean | 是 |  |
+| `status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `decision` | string（可空） | 否 | approve / reject / always_allow |
+| `decided_at` | string（date-time，可空） | 否 |  |
+| `authorization_id` | string（可空） | 否 |  |
+| `execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `cancel_requested` | boolean | 否 |  |
+| `result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
+| `result_chars` | integer（int64） | 是 |  |
+| `truncated` | boolean | 是 |  |
+| `error_code` | string（可空） | 否 |  |
+| `error_message` | string（可空） | 否 |  |
+| `effect_may_have_occurred` | boolean | 是 | 副作用可能已发生（取消/中断/重启）；不声称回滚 |
+| `created_at` | string（date-time） | 是 |  |
+| `started_at` | string（date-time，可空） | 否 |  |
+| `finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/calls/{callId}/result`
+
+<!-- operationId: getBotCallResult -->
+
+读取调用的完整瘦身结果（UI 查看）
+
+模型侧的分页续读走 fs_result.read 工具；本端点返回完整结果原文。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `callId` | string | 是 |  |
+
+**成功响应**
+
+**200** 完整结果
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `call_id` | string | 是 |  |
+| `status` | string | 是 |  |
+| `result` | object | 否 | 完整瘦身结果原文 |
+| `truncated` | boolean | 是 |  |
+| `result_chars` | integer（int64） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/bots/{id}/calls/{callId}/decision`
+
+<!-- operationId: decideBotCall -->
+
+确认卡片决定（approve/reject/always_allow）
+
+只对保存好的调用参数决策，不能同时修改参数。approve：CAS 为 queued 并
+唤醒后台 worker；reject：置 rejected 并落唯一终态结果；always_allow：
+同一事务建立与本次调用相同 action/范围/字段约束的授权并批准当前调用。
+重复相同决定幂等返回；相互冲突或状态已变化返回 40926。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `callId` | string | 是 |  |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `decision` | string | 是 | approve / reject / always_allow |
+
+**成功响应**
+
+**200** 决定已生效（返回最新调用状态）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 平台调用 ID，同时是执行幂等键 |
+| `bot_id` | string | 是 |  |
+| `request_id` | string | 是 |  |
+| `provider_tool_call_id` | string | 是 | 模型协议配对 ID |
+| `tool_name` | string | 是 |  |
+| `action` | string | 是 |  |
+| `arguments` | object | 是 | 规范化后的参数 |
+| `execution_mode` | string | 是 | sync / async |
+| `requires_confirmation` | boolean | 是 |  |
+| `status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `decision` | string（可空） | 否 | approve / reject / always_allow |
+| `decided_at` | string（date-time，可空） | 否 |  |
+| `authorization_id` | string（可空） | 否 |  |
+| `execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `cancel_requested` | boolean | 否 |  |
+| `result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
+| `result_chars` | integer（int64） | 是 |  |
+| `truncated` | boolean | 是 |  |
+| `error_code` | string（可空） | 否 |  |
+| `error_message` | string（可空） | 否 |  |
+| `effect_may_have_occurred` | boolean | 是 | 副作用可能已发生（取消/中断/重启）；不声称回滚 |
+| `created_at` | string（date-time） | 是 |  |
+| `started_at` | string（date-time，可空） | 否 |  |
+| `finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 调用状态已变化或决定冲突（40926） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/bots/{id}/calls/{callId}/cancel`
+
+<!-- operationId: cancelBotCall -->
+
+取消后台调用
+
+待确认/queued 直接 CAS 终结（未执行，effect_may_have_occurred=false）；
+running 记录取消并取消其 context，worker 落唯一终态且标记
+effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回现状。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `callId` | string | 是 |  |
+
+**成功响应**
+
+**200** 取消结果（返回最新调用状态）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 平台调用 ID，同时是执行幂等键 |
+| `bot_id` | string | 是 |  |
+| `request_id` | string | 是 |  |
+| `provider_tool_call_id` | string | 是 | 模型协议配对 ID |
+| `tool_name` | string | 是 |  |
+| `action` | string | 是 |  |
+| `arguments` | object | 是 | 规范化后的参数 |
+| `execution_mode` | string | 是 | sync / async |
+| `requires_confirmation` | boolean | 是 |  |
+| `status` | string | 是 | pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed |
+| `decision` | string（可空） | 否 | approve / reject / always_allow |
+| `decided_at` | string（date-time，可空） | 否 |  |
+| `authorization_id` | string（可空） | 否 |  |
+| `execution_context` | object | 是 | 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围 |
+| `cancel_requested` | boolean | 否 |  |
+| `result_preview` | object | 否 | 进入模型上下文的受限结果（完整结果走 result 端点） |
+| `result_chars` | integer（int64） | 是 |  |
+| `truncated` | boolean | 是 |  |
+| `error_code` | string（可空） | 否 |  |
+| `error_message` | string（可空） | 否 |  |
+| `effect_may_have_occurred` | boolean | 是 | 副作用可能已发生（取消/中断/重启）；不声称回滚 |
+| `created_at` | string（date-time） | 是 |  |
+| `started_at` | string（date-time，可空） | 否 |  |
+| `finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/bots/{id}/authorizations`
+
+<!-- operationId: listBotAuthorizations -->
+
+授权列表
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**Query 参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `active` | boolean（默认 false） | 否 | true 时只返回未撤销授权 |
+
+**成功响应**
+
+**200** 授权列表（新→旧）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].tool_name` | string | 是 |  |
+| `items[].action` | string | 是 |  |
+| `items[].scope_kind` | string | 是 | project / project_collection / issue_project / thread_launch / thread / thread_stop |
+| `items[].scope_id` | string | 是 | 范围主体 ID（项目/Issue 所属项目/T3 项目/线程；project_collection 时为用户 ID） |
+| `items[].environment_id` | string（可空） | 否 |  |
+| `items[].constraints` | object | 是 | 规范化约束（如允许写入的字段集合 fields） |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].revoked_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/bots/{id}/authorizations/{authorizationId}`
+
+<!-- operationId: revokeBotAuthorization -->
+
+撤销授权（实际撤销，不物理删除）
+
+撤销只写 revoked_at，保留审计关联。撤销对尚未认领的授权调用生效
+（回到待确认）；已经开始的操作不回滚。重复撤销幂等。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `authorizationId` | string | 是 |  |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |

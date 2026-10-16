@@ -1,0 +1,212 @@
+package service
+
+import (
+	"context"
+	"time"
+
+	"github.com/openai/openai-go/v2"
+	"github.com/openai/openai-go/v2/option"
+	"github.com/openai/openai-go/v2/packages/param"
+	"github.com/openai/openai-go/v2/shared"
+)
+
+// bot_openai.go 是官方 openai-go 的适配层：客户端构造、流式聚合、usage 提取
+// 与连接探测。任意 base URL 保留（http/https、自托管、内网），不追加 /v1；
+// SDK 重试显式关零——连接测试与被中断的请求不允许产生隐藏的重复调用。
+
+const botProbeTimeout = 30 * time.Second
+
+// botNewClient 按运行配置构造客户端；重试关零是显式决策。
+func botNewClient(baseURL, apiKey string) openai.Client {
+	return openai.NewClient(
+		option.WithAPIKey(apiKey),
+		option.WithBaseURL(baseURL),
+		option.WithMaxRetries(0),
+	)
+}
+
+// botModelReply 是一次流式模型请求的聚合结果。
+type botModelReply struct {
+	Text      string
+	ToolCalls []botModelToolCall
+	// ProviderRequestID 是响应里的请求身份；拿不到为空。
+	ProviderRequestID string
+	FinishReason      string
+	// Usage 可空：缺失与零必须区分，不伪造统计。
+	UsageComplete    bool
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+	CachedTokens     int64
+}
+
+type botModelToolCall struct {
+	ID        string
+	Name      string
+	Arguments string // 原始 JSON 字符串（跨 chunk 拼接）
+}
+
+// botStreamRequest 是 contextBuilder 的产物：消息数组 + 固定工具数组。
+type botStreamRequest struct {
+	Messages []openai.ChatCompletionMessageParamUnion
+	Tools    []openai.ChatCompletionToolUnionParam
+	Model    string
+}
+
+// botStreamChat 发起流式请求并聚合：finish_reason 之后继续读取可能随后到达
+// 的 usage chunk；文本增量经 onDelta 透出（由调用方合并批量落 SSE）。
+func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequest, onDelta func(text string)) (*botModelReply, error) {
+	params := openai.ChatCompletionNewParams{
+		Model:    req.Model,
+		Messages: req.Messages,
+		StreamOptions: openai.ChatCompletionStreamOptionsParam{
+			IncludeUsage: param.NewOpt(true),
+		},
+	}
+	if len(req.Tools) > 0 {
+		params.Tools = req.Tools
+		// 声明串行偏好，但不依赖兼容服务一定遵守；循环按安全点收编并行调用。
+		params.ParallelToolCalls = param.NewOpt(false)
+	}
+
+	stream := client.Chat.Completions.NewStreaming(ctx, params)
+	defer stream.Close()
+
+	reply := &botModelReply{}
+	// 流式工具调用按 index 分片拼接。
+	parts := map[int64]*botModelToolCall{}
+	order := []int64{}
+
+	for stream.Next() {
+		chunk := stream.Current()
+		if chunk.ID != "" {
+			reply.ProviderRequestID = chunk.ID
+		}
+		if chunk.JSON.Usage.Valid() {
+			reply.UsageComplete = true
+			reply.PromptTokens = chunk.Usage.PromptTokens
+			reply.CompletionTokens = chunk.Usage.CompletionTokens
+			reply.TotalTokens = chunk.Usage.TotalTokens
+			reply.CachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
+		}
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				reply.FinishReason = choice.FinishReason
+			}
+			if text := choice.Delta.Content; text != "" {
+				reply.Text += text
+				if onDelta != nil {
+					onDelta(text)
+				}
+			}
+			for _, tc := range choice.Delta.ToolCalls {
+				part, ok := parts[tc.Index]
+				if !ok {
+					part = &botModelToolCall{}
+					parts[tc.Index] = part
+					order = append(order, tc.Index)
+				}
+				if tc.ID != "" {
+					part.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					part.Name += tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					part.Arguments += tc.Function.Arguments
+				}
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	for _, idx := range order {
+		if part := parts[idx]; part.ID != "" && part.Name != "" {
+			reply.ToolCalls = append(reply.ToolCalls, *part)
+		}
+	}
+	return reply, nil
+}
+
+// ---------- 连接探测 ----------
+
+// botProbeStreaming 最小流式探测：一条 user 消息，读到任一片段或正常结束即通过。
+func botProbeStreaming(baseURL, modelName, apiKey string) (bool, string) {
+	client := botNewClient(baseURL, apiKey)
+	ctx, cancel := context.WithTimeout(context.Background(), botProbeTimeout)
+	defer cancel()
+
+	stream := client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
+		Model:               modelName,
+		Messages:            []openai.ChatCompletionMessageParamUnion{openai.UserMessage("ping")},
+		MaxCompletionTokens: param.NewOpt(int64(16)),
+	})
+	defer stream.Close()
+	sawChunk := false
+	for stream.Next() {
+		sawChunk = true
+		break
+	}
+	if err := stream.Err(); err != nil {
+		return false, botProbeErrText(err)
+	}
+	if !sawChunk {
+		return false, "服务未返回任何流式片段"
+	}
+	return true, ""
+}
+
+// botProbeToolCall 工具调用兼容性探测：带一个极小工具发起流式请求，检查
+// 服务接受 tools 字段并能正常结束（不强制模型必须调用该工具）。
+func botProbeToolCall(baseURL, modelName, apiKey string) (bool, string) {
+	client := botNewClient(baseURL, apiKey)
+	ctx, cancel := context.WithTimeout(context.Background(), botProbeTimeout)
+	defer cancel()
+
+	tools := []openai.ChatCompletionToolUnionParam{{
+		OfFunction: &openai.ChatCompletionFunctionToolParam{
+			Function: shared.FunctionDefinitionParam{
+				Name:        "fs_probe_echo",
+				Description: param.NewOpt("连通性探测工具，返回 pong。"),
+				Parameters: shared.FunctionParameters{
+					"type":                 "object",
+					"properties":           map[string]interface{}{},
+					"additionalProperties": false,
+				},
+			},
+		},
+	}}
+	stream := client.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
+		Model:               modelName,
+		Messages:            []openai.ChatCompletionMessageParamUnion{openai.UserMessage("ping")},
+		Tools:               tools,
+		MaxCompletionTokens: param.NewOpt(int64(64)),
+	})
+	defer stream.Close()
+	sawFinish := false
+	for stream.Next() {
+		chunk := stream.Current()
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				sawFinish = true
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return false, botProbeErrText(err)
+	}
+	if !sawFinish {
+		return false, "服务未报告 finish_reason"
+	}
+	return true, ""
+}
+
+// botProbeErrText 截断上游错误文本（错误不透传密钥，也不整段透传响应体）。
+func botProbeErrText(err error) string {
+	msg := err.Error()
+	if len(msg) > 300 {
+		msg = msg[:300]
+	}
+	return msg
+}

@@ -36,6 +36,7 @@ func Setup(
 	automationHandler *handler.AutomationHandler,
 	notificationHandler *handler.NotificationHandler,
 	automationAgentHandler *handler.AutomationAgentHandler,
+	botHandler *handler.BotHandler,
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
 	authService *service.AuthService,
@@ -290,6 +291,32 @@ func Setup(
 	api.GET("/notifications/unread-count", middleware.RequireJWT(cfg, authService), notificationHandler.UnreadCount)
 	api.POST("/notifications/read-all", middleware.RequireJWT(cfg, authService), notificationHandler.MarkAllRead)
 	api.POST("/notifications/:id/read", middleware.RequireJWT(cfg, authService), notificationHandler.MarkRead)
+
+	// JWT 必须 — 内置机器人（INT-101）：管理、主线、运行、调用、确认授权与
+	// SSE 全部仅 JWT；test-connection 为静态段，优先于 :id 匹配。
+	bots := api.Group("/bots", middleware.RequireJWT(cfg, authService))
+	{
+		bots.GET("", botHandler.List)
+		bots.POST("", botHandler.Create)
+		bots.POST("/test-connection", botHandler.TestConnection)
+		bots.GET("/:id", botHandler.Get)
+		bots.PUT("/:id", botHandler.Update)
+		bots.DELETE("/:id", botHandler.Delete)
+		bots.GET("/:id/messages", botHandler.ListMessages)
+		bots.GET("/:id/chat", botHandler.GetChatSnapshot)
+		bots.POST("/:id/messages", botHandler.SendMessage)
+		bots.GET("/:id/events", botHandler.StreamEvents)
+		bots.GET("/:id/runs", botHandler.ListRuns)
+		bots.GET("/:id/runs/:runId", botHandler.GetRun)
+		bots.POST("/:id/runs/:runId/stop", botHandler.StopRun)
+		bots.GET("/:id/calls", botHandler.ListCalls)
+		bots.GET("/:id/calls/:callId", botHandler.GetCall)
+		bots.GET("/:id/calls/:callId/result", botHandler.GetCallResult)
+		bots.POST("/:id/calls/:callId/decision", botHandler.CallDecision)
+		bots.POST("/:id/calls/:callId/cancel", botHandler.CancelCall)
+		bots.GET("/:id/authorizations", botHandler.ListAuthorizations)
+		bots.DELETE("/:id/authorizations/:authorizationId", botHandler.RevokeAuthorization)
+	}
 
 	// 仅运行令牌 — 自动化 Agent 回报与读取（INT-90）。
 	// report 允许结束后重放完全相同的结束回报（requireLive=false）；

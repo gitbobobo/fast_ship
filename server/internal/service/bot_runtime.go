@@ -1,0 +1,589 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+	"gorm.io/gorm"
+)
+
+// botRuntimeState 维护每机器人的串行执行：一个 bot 同一时刻至多一个主线
+// goroutine。数据库是事实来源，激活表只负责「有 run 在跑就别再起新的」；
+// 丢失唤醒由轻量扫描补回。
+type botRuntimeState struct {
+	mu      sync.Mutex
+	active  map[string]*botActivation
+	started bool
+}
+
+type botActivation struct {
+	cancel context.CancelFunc
+	// requeue 标记执行期间又有唤醒：主线循环退出后由收尾重启。
+	requeue bool
+	// pending 是重启循环要用的最新触发描述。
+	pending *botWake
+}
+
+func newBotRuntimeState() *botRuntimeState {
+	return &botRuntimeState{active: map[string]*botActivation{}}
+}
+
+// acquire 抢占该 bot 的执行槽；已被占（在跑）返回 false——本线程的唤醒会
+// 在安全点被看到。
+func (rt *botRuntimeState) acquire(botID string, wake *botWake) *botActivation {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if _, busy := rt.active[botID]; busy {
+		return nil
+	}
+	a := &botActivation{pending: wake}
+	rt.active[botID] = a
+	return a
+}
+
+func (rt *botRuntimeState) setCancel(botID string, cancel context.CancelFunc) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if a, ok := rt.active[botID]; ok {
+		a.cancel = cancel
+	}
+}
+
+// markRequeue 执行期间再收到唤醒时置位并记录触发描述。
+func (rt *botRuntimeState) markRequeue(botID string, wake *botWake) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if a, ok := rt.active[botID]; ok {
+		a.requeue = true
+		if wake != nil {
+			a.pending = wake
+		}
+	}
+}
+
+// release 释放执行槽；返回 requeue 与待处理的触发描述。
+func (rt *botRuntimeState) release(botID string) (requeue bool, wake *botWake) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	a, ok := rt.active[botID]
+	if !ok {
+		return false, nil
+	}
+	requeue = a.requeue
+	wake = a.pending
+	delete(rt.active, botID)
+	return requeue, wake
+}
+
+// ---------- 唤醒与启动 ----------
+
+// Start 启动主线调度与后台 worker（在启动恢复之后调用）。
+func (s *BotService) Start() {
+	s.rt.mu.Lock()
+	if s.rt.started {
+		s.rt.mu.Unlock()
+		return
+	}
+	s.rt.started = true
+	s.rt.mu.Unlock()
+
+	// 经 ensureWorkers 的 workOnce 守卫启动：Start 之前若恢复竞速已入队
+	// 工作并触发过一次初始化，这里不得重建 worker 池（会搁浅原 worker、
+	// 丢失已登记的取消句柄）。
+	s.ensureWorkers()
+	go s.scanLoop()
+}
+
+// wakeRuntime 唤醒某机器人的主线：有 goroutine 在跑就标记 requeue（安全点
+// 会看到新输入），否则为它起一个执行 goroutine。run 的创建在循环内完成。
+func (s *BotService) wakeRuntime(botID string, wake botWake) {
+	if a := s.rt.acquire(botID, &wake); a == nil {
+		s.rt.markRequeue(botID, &wake)
+		return
+	}
+	go s.runBotSlot(botID)
+}
+
+// finishRunAfterPanic 把 panic 槽位上仍在 running 的落库 run 置 failed
+// 并发 done；CAS 兜底，已终态的 run 不动。scanOnce 对有活动 run 的 bot
+// 不再唤醒，不落终态这条 run 会永远挂着并阻塞删除。
+func (s *BotService) finishRunAfterPanic(botID string, cause interface{}) {
+	run, err := s.runs.FindActiveByBot(botID)
+	if err != nil {
+		return
+	}
+	bot, err := s.bots.Get(botID)
+	if err != nil {
+		return
+	}
+	s.finishFailed(bot, run, "panicked", errs.New(errs.ErrInternal.Code, fmt.Sprintf("主线执行 panic: %v", cause)))
+}
+
+// takePending 取出该槽待处理的触发描述（无则用回退值）。
+func (rt *botRuntimeState) takePending(botID string, fallback botWake) botWake {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	a, ok := rt.active[botID]
+	if !ok || a.pending == nil {
+		return fallback
+	}
+	wake := *a.pending
+	a.pending = nil
+	return wake
+}
+
+// runBotSlot 是该 bot 的串行执行槽：每次重入都换新的 context——停止后的
+// 重启不能用被取消的旧 context。
+func (s *BotService) runBotSlot(botID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("机器人主线执行 panic", zap.String("bot_id", botID), zap.Any("panic", r))
+			// 落库的 run 不能留在 running：scanOnce 对有活动 run 的 bot
+			// 不再唤醒，否则这条 run 永远无人收尾、阻塞删除。
+			s.finishRunAfterPanic(botID, r)
+			// 释放槽；本轮放弃，等下一次唤醒或扫描。
+			s.rt.release(botID)
+		}
+	}()
+	wake := s.rt.takePending(botID, botWake{Trigger: model.BotTriggerUserMessage})
+	for {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.rt.setCancel(botID, cancel)
+		// cancel 挂在 runBot 的 panic 展开上：主线 panic 也不能泄漏 context。
+		func() {
+			defer cancel()
+			s.runBot(botID, wake, ctx)
+		}()
+		requeue, pending := s.rt.release(botID)
+		if !requeue {
+			return
+		}
+		if pending != nil {
+			wake = *pending
+		} else {
+			wake = s.rt.takePending(botID, wake)
+		}
+		// 执行期间又有唤醒：重启循环继续消化新输入。
+		if s.rt.acquire(botID, nil) == nil {
+			return
+		}
+	}
+}
+
+// scanLoop 轻量扫描：补回丢失的唤醒（主线无 run 但有未消费输入）并驱动
+// 后台 worker 认领。
+func (s *BotService) scanLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.scanOnce()
+	}
+}
+
+func (s *BotService) scanOnce() {
+	// 未消费输入：粗筛（水位落后）后按真实模型输入判定——后台结果等非
+	// 输入消息也推高账本水位，裸水位比较会让空闲 bot 永远被扫中空转。
+	var bots []model.Bot
+	if err := s.db.Where("offered_input_seq < next_message_seq - 1").Find(&bots).Error; err == nil {
+		for _, b := range bots {
+			if !s.hasUnconsumedInput(&b) {
+				continue
+			}
+			if _, busy := s.activeRunOf(b.ID); !busy {
+				s.wakeRuntime(b.ID, botWake{
+					Trigger: model.BotTriggerUserMessage,
+					Key:     "scan:" + itoa64(b.NextMessageSeq-1),
+				})
+			}
+		}
+	}
+	// 后台调用：排队的调用推给 worker（重复推送无害，CAS 认领挡住并发）。
+	s.scanQueuedCalls()
+}
+
+// hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（user /
+// background_result）；账本水位差可能来自非输入消息。
+func (s *BotService) hasUnconsumedInput(b *model.Bot) bool {
+	hasNew, err := s.messages.HasModelInputSince(b.ID, b.OfferedInputSeq)
+	return err == nil && hasNew
+}
+
+func itoa64(v int64) string {
+	return strconv.FormatInt(v, 10)
+}
+
+// ---------- 主线 run 生命周期 ----------
+
+// ensureRun 确保存在可执行的活动 run：有就直接用；没有且确有未消费输入时
+// 创建（部分唯一索引兜底并发，唯一 (bot_id, trigger_key) 挡重复触发）。
+func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, bool, error) {
+	if run, err := s.runs.FindActiveByBot(bot.ID); err == nil {
+		return run, true, nil
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, false, err
+	}
+
+	// 没有未消费输入就不建 run：判断对象是真正的模型输入（user /
+	// background_result），不是账本末位——我们自己的 assistant/回复消息也会
+	// 推高账本水位，用末位比对会让重复投递的触发产生空跑。
+	// recovery 唤醒例外：恢复通知是 lifecycle 消息，不属于模型输入类，
+	// HasModelInputSince 看不见它；通知已带 dedup 落库，直接放行建 run，
+	// 否则重启后的恢复通知永远到不了模型。
+	if wake.Trigger != model.BotTriggerRecovery {
+		hasNew, err := s.messages.HasModelInputSince(bot.ID, bot.OfferedInputSeq)
+		if err != nil {
+			return nil, false, err
+		}
+		if !hasNew {
+			return nil, false, nil
+		}
+	}
+
+	now := time.Now().UTC()
+	snapRaw, _ := json.Marshal(botSnapshotOf(bot))
+	run := &model.BotRun{
+		ID:                 uuid.NewString(),
+		BotID:              bot.ID,
+		TriggerSource:      wake.Trigger,
+		TriggerKey:         wake.Key,
+		TriggerContextJSON: wake.Context,
+		Status:             model.BotRunStatusRunning,
+		ConfigSnapshotJSON: string(snapRaw),
+		InputThroughSeq:    0,
+		CreatedAt:          now,
+		StartedAt:          &now,
+	}
+	if run.TriggerKey == "" {
+		run.TriggerKey = "wake:" + run.ID
+	}
+	err := s.runs.CreateTx(s.db, run)
+	if err != nil {
+		// 唯一索引冲突：已有 run（并发唤醒或重复触发），回落为复用活动 run。
+		if existing, findErr := s.runs.FindActiveByBot(bot.ID); findErr == nil {
+			return existing, true, nil
+		}
+		return nil, false, err
+	}
+	s.emitRunEvent(bot.ID, run, model.BotEventDelta, botEventEnvelope{
+		Kind: "run_started", Payload: map[string]interface{}{"trigger": string(wake.Trigger)},
+	})
+	return run, true, nil
+}
+
+// activeRunOf 返回活动 run 及是否存在。
+func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
+	run, err := s.runs.FindActiveByBot(botID)
+	if err != nil {
+		return nil, false
+	}
+	return run, true
+}
+
+// RequestStop 停止主线：置 stop_requested 并取消当前模型/同步调用 context；
+// 已受理后台调用继续存在，可逐项取消。
+func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, error) {
+	if _, err := s.bots.FindByIDAndUser(botID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrBotNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	run, err := s.runs.FindByID(runID)
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, errs.ErrBotRunNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	if run.BotID != botID {
+		return nil, errs.ErrBotRunNotFound
+	}
+	if run.FinishedAt != nil {
+		return nil, errs.ErrBotRunStateConflict
+	}
+
+	now := time.Now().UTC()
+	ok, err := s.runs.UpdateColumns(runID, map[string]interface{}{"finished_at": nil},
+		map[string]interface{}{"stop_requested_at": now})
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	if !ok {
+		return nil, errs.ErrBotRunStateConflict
+	}
+	// 取消执行 context：当前模型请求/同步工具收到取消；循环在安全点收尾为 stopped。
+	s.cancelBotContext(botID)
+
+	// 重新读取（循环可能已在安全点落定 stopped）。
+	fresh, err := s.runs.FindByID(runID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := botRunResponseOf(fresh)
+	return &resp, nil
+}
+
+// cancelBotContext 取消该 bot 当前执行（若在跑）。
+func (s *BotService) cancelBotContext(botID string) {
+	s.rt.mu.Lock()
+	defer s.rt.mu.Unlock()
+	if a, ok := s.rt.active[botID]; ok && a.cancel != nil {
+		a.cancel()
+	}
+}
+
+// ---------- 响应投影 ----------
+
+func rfc3339(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339Nano)
+	return &s
+}
+
+// BotRunResponse 是 run 的 API 投影；config_snapshot 不含明文 key，原样返回。
+type BotRunResponse struct {
+	ID               string  `json:"id"`
+	BotID            string  `json:"bot_id"`
+	TriggerSource    string  `json:"trigger_source"`
+	TriggerKey       string  `json:"trigger_key"`
+	Status           string  `json:"status"`
+	ConfigSnapshot   string  `json:"config_snapshot"`
+	InputThroughSeq  int64   `json:"input_through_seq"`
+	StopRequested    bool    `json:"stop_requested"`
+	PromptTokens     *int64  `json:"prompt_tokens"`
+	CompletionTokens *int64  `json:"completion_tokens"`
+	TotalTokens      *int64  `json:"total_tokens"`
+	CachedTokens     *int64  `json:"cached_tokens"`
+	UsageComplete    bool    `json:"usage_complete"`
+	ErrorCode        *string `json:"error_code"`
+	ErrorMessage     *string `json:"error_message"`
+	CreatedAt        string  `json:"created_at"`
+	StartedAt        *string `json:"started_at"`
+	FinishedAt       *string `json:"finished_at"`
+}
+
+func botRunResponseOf(run *model.BotRun) BotRunResponse {
+	return BotRunResponse{
+		ID:               run.ID,
+		BotID:            run.BotID,
+		TriggerSource:    string(run.TriggerSource),
+		TriggerKey:       run.TriggerKey,
+		Status:           string(run.Status),
+		ConfigSnapshot:   run.ConfigSnapshotJSON,
+		InputThroughSeq:  run.InputThroughSeq,
+		StopRequested:    run.StopRequestedAt != nil,
+		PromptTokens:     run.PromptTokens,
+		CompletionTokens: run.CompletionTokens,
+		TotalTokens:      run.TotalTokens,
+		CachedTokens:     run.CachedTokens,
+		UsageComplete:    run.UsageComplete,
+		ErrorCode:        run.ErrorCode,
+		ErrorMessage:     run.ErrorMessage,
+		CreatedAt:        run.CreatedAt.UTC().Format(time.RFC3339Nano),
+		StartedAt:        rfc3339(run.StartedAt),
+		FinishedAt:       rfc3339(run.FinishedAt),
+	}
+}
+
+// BotMessageResponse 是消息的 API 投影；content 原样透传（已是 JSON）。
+type BotMessageResponse struct {
+	ID        string          `json:"id"`
+	BotID     string          `json:"bot_id"`
+	Seq       int64           `json:"seq"`
+	RunID     *string         `json:"run_id"`
+	RequestID *string         `json:"request_id"`
+	CallID    *string         `json:"call_id"`
+	Kind      string          `json:"kind"`
+	Content   json.RawMessage `json:"content"`
+	CreatedAt string          `json:"created_at"`
+}
+
+func botMessageResponseOf(m *model.BotMessage) BotMessageResponse {
+	return BotMessageResponse{
+		ID:        m.ID,
+		BotID:     m.BotID,
+		Seq:       m.Seq,
+		RunID:     m.RunID,
+		RequestID: m.RequestID,
+		CallID:    m.CallID,
+		Kind:      string(m.Kind),
+		Content:   json.RawMessage(m.ContentJSON),
+		CreatedAt: m.CreatedAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// ---------- 消息内容形态（ContentJSON 的 kind 专属结构） ----------
+
+type botUserContent struct {
+	Text string `json:"text"`
+}
+
+type botAssistantToolCall struct {
+	CallID             string `json:"call_id"`
+	ProviderToolCallID string `json:"provider_tool_call_id"`
+	ToolName           string `json:"tool_name"`
+	Action             string `json:"action"`
+	// Arguments 是规范化后的 JSON 字符串；协议投影原样回传。
+	Arguments string `json:"arguments"`
+}
+
+type botAssistantContent struct {
+	Text      string                 `json:"text"`
+	ToolCalls []botAssistantToolCall `json:"tool_calls,omitempty"`
+}
+
+// botToolReplyContent 是同步工具回复与异步回执共用的 tool 角色消息正文；
+// Content 即发送给模型的协议字符串。
+type botToolReplyContent struct {
+	CallID             string `json:"call_id"`
+	ProviderToolCallID string `json:"provider_tool_call_id"`
+	ToolName           string `json:"tool_name"`
+	Status             string `json:"status"`
+	Content            string `json:"content"`
+}
+
+// botBackgroundResultContent 是后台完成投影出的「平台后台结果」消息。
+type botBackgroundResultContent struct {
+	CallID                string `json:"call_id"`
+	ToolName              string `json:"tool_name"`
+	Action                string `json:"action"`
+	Status                string `json:"status"`
+	ErrorCode             string `json:"error_code,omitempty"`
+	ErrorMessage          string `json:"error_message,omitempty"`
+	EffectMayHaveOccurred bool   `json:"effect_may_have_occurred,omitempty"`
+	Summary               string `json:"summary,omitempty"`
+}
+
+type botDecisionContent struct {
+	CallID   string `json:"call_id"`
+	Decision string `json:"decision"`
+}
+
+type botLifecycleContent struct {
+	Event  string          `json:"event"`
+	Detail json.RawMessage `json:"detail,omitempty"`
+}
+
+// ---------- 事件追加与发布 ----------
+
+// botEventEnvelope 是 SSE data 的统一形状。
+type botEventEnvelope struct {
+	BotID     string      `json:"bot_id"`
+	RunID     string      `json:"run_id,omitempty"`
+	MessageID string      `json:"message_id,omitempty"`
+	CallID    string      `json:"call_id,omitempty"`
+	Kind      string      `json:"kind"`
+	Phase     string      `json:"phase,omitempty"`
+	Payload   interface{} `json:"payload,omitempty"`
+}
+
+// appendEventTx 在事务内取事件号并落库；调用方提交后自行 publish。
+func (s *BotService) appendEventTx(tx *gorm.DB, botID string, runID *string, callID string, eventType string, env botEventEnvelope) error {
+	seq, err := s.bots.NextEventSeqTx(tx, botID)
+	if err != nil {
+		return err
+	}
+	env.BotID = botID
+	if runID != nil {
+		env.RunID = *runID
+	}
+	env.CallID = callID
+	raw, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	event := &model.BotEvent{
+		BotID:       botID,
+		Seq:         seq,
+		RunID:       runID,
+		EventType:   eventType,
+		PayloadJSON: string(raw),
+		CreatedAt:   time.Now().UTC(),
+	}
+	return repository.NewBotEventRepository(tx).AppendTx(tx, event)
+}
+
+// emitEvent 独立短事务落一条事件并在提交后发布给 SSE 订阅者。
+func (s *BotService) emitEvent(botID string, runID *string, callID string, eventType string, env botEventEnvelope) {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		return s.appendEventTx(tx, botID, runID, callID, eventType, env)
+	})
+	if err != nil {
+		s.logger.Warn("追加机器人事件失败", zap.String("bot_id", botID), zap.Error(err))
+		return
+	}
+	s.publishEvent(botID)
+}
+
+// emitRunEvent 带 run 的便捷封装。
+func (s *BotService) emitRunEvent(botID string, run *model.BotRun, eventType string, env botEventEnvelope) {
+	runID := run.ID
+	s.emitEvent(botID, &runID, "", eventType, env)
+}
+
+// publishEvent 通知所有订阅者有新事件（订阅方回读数据库，按 seq 去重）。
+func (s *BotService) publishEvent(botID string) {
+	maxSeq, err := s.events.MaxSeq(botID)
+	if err != nil {
+		return
+	}
+	s.streamHub.publish(botID, maxSeq)
+}
+
+// ---------- SSE 订阅注册表 ----------
+
+// botStreamHub 只传「有新事件、最新 seq 是多少」；订阅方从数据库补读，
+// 保证先订阅后补读之间不漏事件，也不把负载挤过内存。
+type botStreamHub struct {
+	mu   sync.Mutex
+	subs map[string]map[chan int64]struct{}
+}
+
+func newBotStreamHub() *botStreamHub {
+	return &botStreamHub{subs: map[string]map[chan int64]struct{}{}}
+}
+
+func (h *botStreamHub) subscribe(botID string) (<-chan int64, func()) {
+	ch := make(chan int64, 8)
+	h.mu.Lock()
+	if h.subs[botID] == nil {
+		h.subs[botID] = map[chan int64]struct{}{}
+	}
+	h.subs[botID][ch] = struct{}{}
+	h.mu.Unlock()
+	cancel := func() {
+		h.mu.Lock()
+		if set, ok := h.subs[botID]; ok {
+			delete(set, ch)
+			if len(set) == 0 {
+				delete(h.subs, botID)
+			}
+		}
+		h.mu.Unlock()
+	}
+	return ch, cancel
+}
+
+func (h *botStreamHub) publish(botID string, seq int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.subs[botID] {
+		select {
+		case ch <- seq:
+		default:
+			// 订阅方堆积时丢弃信号：它会按 seq 主动补读。
+		}
+	}
+}

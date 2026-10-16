@@ -1309,6 +1309,214 @@ type AutomationWorkspace struct {
 	WorktreePath *string `json:"worktree_path,omitempty"`
 }
 
+// Bot defines model for Bot.
+type Bot struct {
+	// ApiKeyLast4 API Key 末四位；明文任何端点都不回显
+	ApiKeyLast4 string `json:"api_key_last4"`
+
+	// BaseUrl OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1）
+	BaseUrl   string `json:"base_url"`
+	CreatedAt string `json:"created_at"`
+	Id        string `json:"id"`
+	Model     string `json:"model"`
+	Name      string `json:"name"`
+
+	// NextEventSeq 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史
+	NextEventSeq int64 `json:"next_event_seq"`
+
+	// PersonaPrompt 人设原文；平台规则在服务端拼接，不在此回显
+	PersonaPrompt         string `json:"persona_prompt"`
+	PlatformPromptVersion int64  `json:"platform_prompt_version"`
+
+	// PromptRevision 人设/平台规则版本；用户明确编辑人设时递增
+	PromptRevision int64  `json:"prompt_revision"`
+	ToolsetVersion int64  `json:"toolset_version"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+// BotAuthorization defines model for BotAuthorization.
+type BotAuthorization struct {
+	Action string `json:"action"`
+
+	// Constraints 规范化约束（如允许写入的字段集合 fields）
+	Constraints   map[string]interface{} `json:"constraints"`
+	CreatedAt     string                 `json:"created_at"`
+	EnvironmentId *string                `json:"environment_id,omitempty"`
+	Id            string                 `json:"id"`
+	RevokedAt     *string                `json:"revoked_at,omitempty"`
+
+	// ScopeId 范围主体 ID（项目/Issue 所属项目/T3 项目/线程；project_collection 时为用户 ID）
+	ScopeId string `json:"scope_id"`
+
+	// ScopeKind project / project_collection / issue_project / thread_launch / thread / thread_stop
+	ScopeKind string `json:"scope_kind"`
+	ToolName  string `json:"tool_name"`
+}
+
+// BotCallDecisionRequest defines model for BotCallDecisionRequest.
+type BotCallDecisionRequest struct {
+	// Decision approve / reject / always_allow
+	Decision string `json:"decision"`
+}
+
+// BotCallResult defines model for BotCallResult.
+type BotCallResult struct {
+	CallId string `json:"call_id"`
+
+	// Result 完整瘦身结果原文
+	Result      map[string]interface{} `json:"result,omitempty"`
+	ResultChars int64                  `json:"result_chars"`
+	Status      string                 `json:"status"`
+	Truncated   bool                   `json:"truncated"`
+}
+
+// BotChatSnapshot defines model for BotChatSnapshot.
+type BotChatSnapshot struct {
+	Bot      Bot           `json:"bot"`
+	Calls    []BotToolCall `json:"calls"`
+	Messages []BotMessage  `json:"messages"`
+
+	// NextEventSeq 与快照同一读取点的事件账本水位（下一条的 seq）
+	NextEventSeq int64    `json:"next_event_seq"`
+	Runs         []BotRun `json:"runs"`
+}
+
+// BotConnectionCheck defines model for BotConnectionCheck.
+type BotConnectionCheck struct {
+	Checks []BotConnectionCheck_Checks `json:"checks"`
+
+	// Ok 流式检查通过即 true
+	Ok bool `json:"ok"`
+}
+
+// BotConnectionCheck_Checks defines model for BotConnectionCheck.Checks.
+type BotConnectionCheck_Checks struct {
+	// Detail 失败原因（截断；不含密钥）
+	Detail *string `json:"detail,omitempty"`
+
+	// Name streaming / tool_call
+	Name   string `json:"name"`
+	Passed bool   `json:"passed"`
+}
+
+// BotEvent SSE 重放账本条目（GET /events 的 HTTP 语义只用于流；本 schema 描述单帧 data）
+type BotEvent struct {
+	// EventType delta / tool_call / tool_result / done / error
+	EventType string `json:"event_type"`
+
+	// Payload 统一形状 {bot_id, run_id?, message_id?, call_id?, kind, phase?, payload}
+	Payload map[string]interface{} `json:"payload"`
+	Seq     int64                  `json:"seq"`
+}
+
+// BotMessage 不可改写的主线账本；批准/拒绝/错误/恢复都是追加新消息
+type BotMessage struct {
+	BotId  string  `json:"bot_id"`
+	CallId *string `json:"call_id,omitempty"`
+
+	// Content 按 kind 变化的正文；assistant 含 text 与 tool_calls 数组；tool_reply 含协议回复字符串
+	Content   map[string]interface{} `json:"content"`
+	CreatedAt string                 `json:"created_at"`
+	Id        string                 `json:"id"`
+
+	// Kind user / assistant / tool_reply / background_result / approval_decision / lifecycle
+	Kind      string  `json:"kind"`
+	RequestId *string `json:"request_id,omitempty"`
+	RunId     *string `json:"run_id,omitempty"`
+	Seq       int64   `json:"seq"`
+}
+
+// BotRun defines model for BotRun.
+type BotRun struct {
+	BotId            string `json:"bot_id"`
+	CachedTokens     *int64 `json:"cached_tokens,omitempty"`
+	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
+
+	// ConfigSnapshot 本次模型/地址/提示词版本快照 JSON；不含明文 key
+	ConfigSnapshot  string  `json:"config_snapshot"`
+	CreatedAt       string  `json:"created_at"`
+	ErrorCode       *string `json:"error_code,omitempty"`
+	ErrorMessage    *string `json:"error_message,omitempty"`
+	FinishedAt      *string `json:"finished_at,omitempty"`
+	Id              string  `json:"id"`
+	InputThroughSeq int64   `json:"input_through_seq"`
+	PromptTokens    *int64  `json:"prompt_tokens,omitempty"`
+	StartedAt       *string `json:"started_at,omitempty"`
+
+	// Status queued / running / completed / failed / stopped
+	Status        string `json:"status"`
+	StopRequested bool   `json:"stop_requested"`
+	TotalTokens   *int64 `json:"total_tokens,omitempty"`
+	TriggerKey    string `json:"trigger_key"`
+
+	// TriggerSource user_message / tool_result / recovery（以后可增加 schedule）
+	TriggerSource string `json:"trigger_source"`
+
+	// UsageComplete false 表示上游未报 usage（缺失与零严格区分）
+	UsageComplete bool `json:"usage_complete"`
+}
+
+// BotStreamEvent SSE 帧 data 的统一形状：bot_id 必带；kind 区分 delta 下的
+// text_delta / message_commit / run_started / user_message / lifecycle，
+// tool_call 的 phase 区分 proposed / awaiting_confirmation / queued /
+// running，tool_result 的 phase 区分 receipt / decision / terminal，
+// done 携带 run 终态，error 携带 code/message（顺序固定 error → done）。
+type BotStreamEvent struct {
+	BotId     *string                `json:"bot_id,omitempty"`
+	CallId    *string                `json:"call_id,omitempty"`
+	Kind      *string                `json:"kind,omitempty"`
+	MessageId *string                `json:"message_id,omitempty"`
+	Payload   map[string]interface{} `json:"payload,omitempty"`
+	Phase     *string                `json:"phase,omitempty"`
+	RunId     *string                `json:"run_id,omitempty"`
+}
+
+// BotToolCall defines model for BotToolCall.
+type BotToolCall struct {
+	Action string `json:"action"`
+
+	// Arguments 规范化后的参数
+	Arguments       map[string]interface{} `json:"arguments"`
+	AuthorizationId *string                `json:"authorization_id,omitempty"`
+	BotId           string                 `json:"bot_id"`
+	CancelRequested *bool                  `json:"cancel_requested,omitempty"`
+	CreatedAt       string                 `json:"created_at"`
+	DecidedAt       *string                `json:"decided_at,omitempty"`
+
+	// Decision approve / reject / always_allow
+	Decision *string `json:"decision,omitempty"`
+
+	// EffectMayHaveOccurred 副作用可能已发生（取消/中断/重启）；不声称回滚
+	EffectMayHaveOccurred bool    `json:"effect_may_have_occurred"`
+	ErrorCode             *string `json:"error_code,omitempty"`
+	ErrorMessage          *string `json:"error_message,omitempty"`
+
+	// ExecutionContext 服务端生成的执行身份（T3 command/thread/message ID 等）与授权范围
+	ExecutionContext map[string]interface{} `json:"execution_context"`
+
+	// ExecutionMode sync / async
+	ExecutionMode string  `json:"execution_mode"`
+	FinishedAt    *string `json:"finished_at,omitempty"`
+
+	// Id 平台调用 ID，同时是执行幂等键
+	Id string `json:"id"`
+
+	// ProviderToolCallId 模型协议配对 ID
+	ProviderToolCallId   string `json:"provider_tool_call_id"`
+	RequestId            string `json:"request_id"`
+	RequiresConfirmation bool   `json:"requires_confirmation"`
+	ResultChars          int64  `json:"result_chars"`
+
+	// ResultPreview 进入模型上下文的受限结果（完整结果走 result 端点）
+	ResultPreview map[string]interface{} `json:"result_preview,omitempty"`
+	StartedAt     *string                `json:"started_at,omitempty"`
+
+	// Status pending_confirmation / queued / running / succeeded / failed / rejected / cancelled / not_executed
+	Status    string `json:"status"`
+	ToolName  string `json:"tool_name"`
+	Truncated bool   `json:"truncated"`
+}
+
 // Branch defines model for Branch.
 type Branch struct {
 	Default bool   `json:"default"`
@@ -1366,6 +1574,16 @@ type CreateAutomationRequest struct {
 
 	// Workspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
 	Workspace *AutomationWorkspace `json:"workspace,omitempty"`
+}
+
+// CreateBotRequest defines model for CreateBotRequest.
+type CreateBotRequest struct {
+	// ApiKey OpenAI 兼容 API Key；加密落库，仅创建/更新时提交
+	ApiKey        string  `json:"api_key"`
+	BaseUrl       string  `json:"base_url"`
+	Model         string  `json:"model"`
+	Name          string  `json:"name"`
+	PersonaPrompt *string `json:"persona_prompt,omitempty"`
 }
 
 // CreateDocumentRequest defines model for CreateDocumentRequest.
@@ -2640,6 +2858,23 @@ type SelfLogTraceResult struct {
 	Truncated bool `json:"truncated"`
 }
 
+// SendBotMessageRequest defines model for SendBotMessageRequest.
+type SendBotMessageRequest struct {
+	// ClientMessageId 幂等键；同键同正文幂等返回，同键不同正文 40925
+	ClientMessageId string `json:"client_message_id"`
+	Text            string `json:"text"`
+}
+
+// SendBotMessageResult defines model for SendBotMessageResult.
+type SendBotMessageResult struct {
+	// Message 不可改写的主线账本；批准/拒绝/错误/恢复都是追加新消息
+	Message BotMessage `json:"message"`
+
+	// Queued 恒为 true；执行交给 runtime
+	Queued bool    `json:"queued"`
+	Run    *BotRun `json:"run,omitempty"`
+}
+
 // SendT3ThreadMessageRequest defines model for SendT3ThreadMessageRequest.
 type SendT3ThreadMessageRequest struct {
 	// Attachments 图片附件元数据；缺省按 [] 发送（上游要求字段为数组）
@@ -3147,6 +3382,14 @@ type T3WorkspaceRef struct {
 	WorktreePath *string `json:"worktree_path,omitempty"`
 }
 
+// TestBotConnectionRequest 未保存配置时必须提供 base_url/model/api_key；给 bot_id 时用已保存 key 并允许表单覆盖地址/模型
+type TestBotConnectionRequest struct {
+	ApiKey  *string `json:"api_key,omitempty"`
+	BaseUrl *string `json:"base_url,omitempty"`
+	BotId   *string `json:"bot_id,omitempty"`
+	Model   *string `json:"model,omitempty"`
+}
+
 // UpdateAISettingsRequest defines model for UpdateAISettingsRequest.
 type UpdateAISettingsRequest struct {
 	// ApiHost 缺省回退默认 host；须为合法 URL
@@ -3195,6 +3438,15 @@ type UpdateAutomationRequest struct {
 	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
 	TriggerType AutomationTriggerType `json:"trigger_type"`
 	Workspace   *AutomationWorkspace  `json:"workspace,omitempty"`
+}
+
+// UpdateBotRequest 指针字段表达「未提供保留」；api_key 空串拒绝（40001）
+type UpdateBotRequest struct {
+	ApiKey        *string `json:"api_key,omitempty"`
+	BaseUrl       *string `json:"base_url,omitempty"`
+	Model         *string `json:"model,omitempty"`
+	Name          *string `json:"name,omitempty"`
+	PersonaPrompt *string `json:"persona_prompt,omitempty"`
 }
 
 // UpdateDocumentRequest title/body/parent_id 至少传一个
@@ -3933,6 +4185,242 @@ type ListAutomationRuns200JSONResponseBody struct {
 type GetAvatarParams struct {
 	// Token 可选 query 凭证（JWT 或 `fsk_` API Key），供无法携带 Authorization 头的场景（`<img>`、浏览器直链下载）。与 Authorization 头二选一，头优先。
 	Token *QueryToken `form:"token,omitempty" json:"token,omitempty"`
+}
+
+// ListBots200JSONResponseBody_Data defines parameters for ListBots.
+type ListBots200JSONResponseBody_Data struct {
+	Items []Bot `json:"items"`
+}
+
+// ListBots200JSONResponseBody defines parameters for ListBots.
+type ListBots200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                               `json:"code"`
+	Data *ListBots200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateBot200JSONResponseBody defines parameters for CreateBot.
+type CreateBot200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int  `json:"code"`
+	Data *Bot `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// TestBotConnection200JSONResponseBody defines parameters for TestBotConnection.
+type TestBotConnection200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                 `json:"code"`
+	Data *BotConnectionCheck `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBot200JSONResponseBody defines parameters for GetBot.
+type GetBot200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int  `json:"code"`
+	Data *Bot `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateBot200JSONResponseBody defines parameters for UpdateBot.
+type UpdateBot200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int  `json:"code"`
+	Data *Bot `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListBotAuthorizationsParams defines parameters for ListBotAuthorizations.
+type ListBotAuthorizationsParams struct {
+	// Active true 时只返回未撤销授权
+	Active *bool `form:"active,omitempty" json:"active,omitempty"`
+}
+
+// ListBotAuthorizations200JSONResponseBody_Data defines parameters for ListBotAuthorizations.
+type ListBotAuthorizations200JSONResponseBody_Data struct {
+	Items []BotAuthorization `json:"items"`
+}
+
+// ListBotAuthorizations200JSONResponseBody defines parameters for ListBotAuthorizations.
+type ListBotAuthorizations200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                            `json:"code"`
+	Data *ListBotAuthorizations200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListBotCallsParams defines parameters for ListBotCalls.
+type ListBotCallsParams struct {
+	// Status 逗号分隔的状态过滤
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+	Limit  *int    `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListBotCalls200JSONResponseBody_Data defines parameters for ListBotCalls.
+type ListBotCalls200JSONResponseBody_Data struct {
+	Items []BotToolCall `json:"items"`
+}
+
+// ListBotCalls200JSONResponseBody defines parameters for ListBotCalls.
+type ListBotCalls200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                   `json:"code"`
+	Data *ListBotCalls200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotCall200JSONResponseBody defines parameters for GetBotCall.
+type GetBotCall200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int          `json:"code"`
+	Data *BotToolCall `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CancelBotCall200JSONResponseBody defines parameters for CancelBotCall.
+type CancelBotCall200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int          `json:"code"`
+	Data *BotToolCall `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// DecideBotCall200JSONResponseBody defines parameters for DecideBotCall.
+type DecideBotCall200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int          `json:"code"`
+	Data *BotToolCall `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotCallResult200JSONResponseBody defines parameters for GetBotCallResult.
+type GetBotCallResult200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int            `json:"code"`
+	Data *BotCallResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotChatSnapshotParams defines parameters for GetBotChatSnapshot.
+type GetBotChatSnapshotParams struct {
+	// MessageLimit 消息尾部页大小
+	MessageLimit *int `form:"message_limit,omitempty" json:"message_limit,omitempty"`
+}
+
+// GetBotChatSnapshot200JSONResponseBody defines parameters for GetBotChatSnapshot.
+type GetBotChatSnapshot200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *BotChatSnapshot `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// StreamBotEventsParams defines parameters for StreamBotEvents.
+type StreamBotEventsParams struct {
+	// AfterSeq 从该事件 seq 之后开始重放
+	AfterSeq *int64 `form:"after_seq,omitempty" json:"after_seq,omitempty"`
+}
+
+// ListBotMessagesParams defines parameters for ListBotMessages.
+type ListBotMessagesParams struct {
+	// BeforeSeq 只返回 seq 小于该值的消息；取距该边界最近的 limit 条（「加载更早」）
+	BeforeSeq *int64 `form:"before_seq,omitempty" json:"before_seq,omitempty"`
+
+	// AfterSeq 只返回 seq 大于该值的消息；取距该边界最近的 limit 条（补读）
+	AfterSeq *int64 `form:"after_seq,omitempty" json:"after_seq,omitempty"`
+	Limit    *int   `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListBotMessages200JSONResponseBody_Data defines parameters for ListBotMessages.
+type ListBotMessages200JSONResponseBody_Data struct {
+	Items []BotMessage `json:"items"`
+	Total int          `json:"total"`
+}
+
+// ListBotMessages200JSONResponseBody defines parameters for ListBotMessages.
+type ListBotMessages200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                      `json:"code"`
+	Data *ListBotMessages200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SendBotMessage200JSONResponseBody defines parameters for SendBotMessage.
+type SendBotMessage200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                   `json:"code"`
+	Data *SendBotMessageResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListBotRunsParams defines parameters for ListBotRuns.
+type ListBotRunsParams struct {
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListBotRuns200JSONResponseBody_Data defines parameters for ListBotRuns.
+type ListBotRuns200JSONResponseBody_Data struct {
+	Items []BotRun `json:"items"`
+}
+
+// ListBotRuns200JSONResponseBody defines parameters for ListBotRuns.
+type ListBotRuns200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                  `json:"code"`
+	Data *ListBotRuns200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotRun200JSONResponseBody defines parameters for GetBotRun.
+type GetBotRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int     `json:"code"`
+	Data *BotRun `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// StopBotRun200JSONResponseBody defines parameters for StopBotRun.
+type StopBotRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int     `json:"code"`
+	Data *BotRun `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
 }
 
 // DashboardOverview200JSONResponseBody defines parameters for DashboardOverview.
@@ -5601,6 +6089,21 @@ type CreateAutomationJSONRequestBody = CreateAutomationRequest
 
 // UpdateAutomationJSONRequestBody defines body for UpdateAutomation for application/json ContentType.
 type UpdateAutomationJSONRequestBody = UpdateAutomationRequest
+
+// CreateBotJSONRequestBody defines body for CreateBot for application/json ContentType.
+type CreateBotJSONRequestBody = CreateBotRequest
+
+// TestBotConnectionJSONRequestBody defines body for TestBotConnection for application/json ContentType.
+type TestBotConnectionJSONRequestBody = TestBotConnectionRequest
+
+// UpdateBotJSONRequestBody defines body for UpdateBot for application/json ContentType.
+type UpdateBotJSONRequestBody = UpdateBotRequest
+
+// DecideBotCallJSONRequestBody defines body for DecideBotCall for application/json ContentType.
+type DecideBotCallJSONRequestBody = BotCallDecisionRequest
+
+// SendBotMessageJSONRequestBody defines body for SendBotMessage for application/json ContentType.
+type SendBotMessageJSONRequestBody = SendBotMessageRequest
 
 // UpdateDocumentJSONRequestBody defines body for UpdateDocument for application/json ContentType.
 type UpdateDocumentJSONRequestBody = UpdateDocumentRequest

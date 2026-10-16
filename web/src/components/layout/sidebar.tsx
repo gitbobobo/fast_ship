@@ -11,6 +11,7 @@ import {
   FileText,
   Images,
   MessagesSquare,
+  Bot,
   Workflow,
   Bell,
 } from "lucide-react";
@@ -35,6 +36,7 @@ const navItems = [
   { to: "/documents", label: "文档", icon: FileText, end: true },
   { to: "/board", label: "看板", icon: Kanban, end: true },
   { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
+  { to: "/bots", label: "机器人", icon: Bot, end: false },
   { to: "/automations", label: "自动化", icon: Workflow, end: true },
   { to: "/notifications", label: "通知", icon: Bell, end: true },
   { to: "/versions", label: "版本", icon: Tags, end: true },

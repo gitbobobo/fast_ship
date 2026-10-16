@@ -72,6 +72,10 @@ var (
 	ErrAutomationNotFound           = New(40421, "自动化不存在")
 	ErrAutomationRunNotFound        = New(40422, "自动化运行不存在")
 	ErrNotificationNotFound         = New(40423, "通知不存在")
+	ErrBotNotFound                  = New(40424, "机器人不存在")
+	ErrBotRunNotFound               = New(40425, "机器人运行不存在")
+	ErrBotCallNotFound              = New(40426, "机器人调用不存在")
+	ErrBotAuthorizationNotFound     = New(40427, "机器人授权不存在")
 )
 
 // 业务冲突 40900-40999
@@ -99,6 +103,11 @@ var (
 	ErrAutomationActive            = New(40919, "自动化有进行中的运行（或后置操作待执行），暂不能删除")
 	ErrRunNotPRReview              = New(40920, "运行不是进行中的 GitHub PR 审查，无法使用 PR 端点")
 	ErrScreenshotVariantExists     = New(40921, "相同界面标识与平台/语言/亮度组合的截图已存在")
+	// 机器人（INT-101）：幂等键冲突、状态机冲突、删除前置条件与决定互斥。
+	ErrBotClientMessageConflict = New(40925, "相同 client_message_id 已用于不同正文")
+	ErrBotCallStateConflict     = New(40926, "调用状态已变化，操作未生效")
+	ErrBotDeleteConflict        = New(40927, "机器人存在进行中的运行或未终结的调用，请先停止或等待完成")
+	ErrBotRunStateConflict      = New(40928, "运行状态已变化，操作未生效")
 )
 
 // 前置条件未满足 41200-41299
@@ -114,7 +123,8 @@ var (
 
 // GitHub API 错误 50200-50299
 var (
-	ErrGitHubAPI  = New(50200, "GitHub API 调用失败")
-	ErrAIProvider = New(50201, "AI 服务调用失败")
-	ErrT3Upstream = New(50202, "T3 环境调用失败")
+	ErrGitHubAPI        = New(50200, "GitHub API 调用失败")
+	ErrAIProvider       = New(50201, "AI 服务调用失败")
+	ErrT3Upstream       = New(50202, "T3 环境调用失败")
+	ErrBotModelUpstream = New(50203, "机器人模型服务调用失败")
 )
