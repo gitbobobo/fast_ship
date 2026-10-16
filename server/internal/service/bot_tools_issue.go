@@ -160,6 +160,14 @@ func (s *BotService) resolveIssueScope(bot *model.Bot, prepared *botPreparedCall
 	switch prepared.Action {
 	case "create":
 		prepared.ScopeID = rawString(raw["project_id"])
+		// source 决定副作用落点（internal 建平台 issue / github 建 GitHub
+		// issue），授权规则必须按来源绑定：internal 的「总是允许」不得
+		// 覆盖 github 来源的建卡。
+		source := rawString(raw["source"])
+		if source == "" {
+			source = "internal"
+		}
+		prepared.ParamConstraint = "source=" + source
 	default:
 		projectID, err := s.issueProjectOf(rawString(raw["issue_id"]), bot.UserID)
 		if err != nil {

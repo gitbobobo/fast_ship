@@ -312,6 +312,9 @@ type botPreparedCall struct {
 	EnvironmentID *string
 	// FieldsConstraint 是 update 类动作允许写入的字段集合（写进授权约束）。
 	FieldsConstraint []string
+	// ParamConstraint 是参数值级约束（如 source=github）：同一动作不同参数
+	// 值的副作用不同，「总是允许」必须按值绑定，不能只看字段集合。
+	ParamConstraint string
 }
 
 // botPrepareToolCall 解析并校验一次模型工具调用；任何失败都返回 AppError，

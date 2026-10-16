@@ -27,6 +27,9 @@ type botAuthorizationRule struct {
 	ScopeID       string   `json:"scope_id"`
 	EnvironmentID string   `json:"environment_id,omitempty"`
 	Fields        []string `json:"fields,omitempty"`
+	// Param 是参数值级约束（如 source=github）：值不同副作用不同的动作按
+	// 值绑定授权。
+	Param string `json:"param,omitempty"`
 }
 
 // botRuleOf 由准备好的调用构造规则（字段约束排序后哈希，保证子集语义：
@@ -45,6 +48,7 @@ func botRuleOf(prepared *botPreparedCall) botAuthorizationRule {
 		ScopeID:       prepared.ScopeID,
 		EnvironmentID: envID,
 		Fields:        fields,
+		Param:         prepared.ParamConstraint,
 	}
 }
 

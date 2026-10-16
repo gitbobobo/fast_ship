@@ -2670,3 +2670,35 @@ func TestBotDeleteConflictOnUnconsumedInput(t *testing.T) {
 		t.Fatalf("消费后应可删除: %v", err)
 	}
 }
+
+func TestBotIssueCreateAuthzBindsSource(t *testing.T) {
+	// fs_issue.create 的 source 决定副作用落点（平台 issue / GitHub issue）：
+	// internal 的「总是允许」不得匹配 github 来源的建卡，反之亦然。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsrcbind")
+	bot := env.createBot(t, userID)
+	botRow := &model.Bot{ID: bot.ID, UserID: userID}
+
+	ruleOf := func(source string) botAuthorizationRule {
+		prep, err := botPrepareToolCall("fs_issue",
+			`{"action":"create","project_id":"p1","title":"t","source":"`+source+`"}`)
+		if err != nil {
+			t.Fatalf("prepare(%s): %v", source, err)
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(prep.ArgumentsJSON), &raw); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		env.bots.resolveIssueScope(botRow, prep, raw)
+		return botRuleOf(prep)
+	}
+	internalRule := ruleOf("internal")
+	githubRule := ruleOf("github")
+	absentRule := ruleOf("") // 缺省 source 走 internal，规则应与显式 internal 一致
+	if botRuleHash(internalRule) == botRuleHash(githubRule) {
+		t.Fatalf("internal 与 github 来源的授权规则必须不同")
+	}
+	if botRuleHash(internalRule) != botRuleHash(absentRule) {
+		t.Fatalf("缺省 source 应与 internal 同规则")
+	}
+}
