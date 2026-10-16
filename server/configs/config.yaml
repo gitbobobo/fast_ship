@@ -38,3 +38,23 @@ github_app:
   private_key_path: ""  # App 私钥 PEM 文件路径；私钥不进库、不进环境变量正文
   webhook_secret: ""  # webhook 验签密钥；留空时 POST /api/github/webhooks 一律 503
   fake: false  # 仅 server.mode=debug 允许 true：注入假 GitHub 实现（本地自测）
+
+# 机器人（INT-102）：上下文压缩阈值、记忆限额与夜间整理时程。
+# 全部为部署级配置；三个辅助模型留空即继承各机器人自己的主模型。
+bots:
+  context:
+    window_tokens: 32768    # 默认上下文窗口；接口 usage 缺失时按 UTF-8 字节/3.5 粗估
+    model_windows: {}       # 按实际模型名覆盖窗口值，如 {"my-model": 65536}
+    compression_ratio: 0.75 # 估算达到窗口该比例时进入压缩周期
+    target_ratio: 0.45      # 压缩后目标体量占触发阈值的比例
+    protect_user_turns: 3   # 保护最近的用户轮数（最小 3）
+    fold_large_ratio: 0.01  # 工具结果投影超过窗口该比例算「大结果」可折叠
+    fold_min_clear_ratio: 0.02  # 累计净清除量达到窗口该比例才批量发布折叠
+    summary_model: ""       # 摘要模型；留空继承机器人主模型
+    archive_model: ""       # 压缩前静默存档模型；留空继承机器人主模型
+  memory:
+    user_max_chars: 1500    # USER.md 注入字符上限
+    memory_max_chars: 8000  # MEMORY.md 注入字符上限
+    nightly_model: ""       # 夜间整理模型；留空继承机器人主模型
+    timezone: UTC           # IANA 时区：夜间「当地日期」与 daily 文件命名
+    nightly_time: "03:00"   # 当地时区每日触发时刻（HH:MM）

@@ -84,9 +84,18 @@ func (r *BotMessageRepository) ListMainline(botID string, before, after int64, l
 
 // ListAfterSeq 重放用：返回 seq 大于 after 的全部后续消息（正序）。
 func (r *BotMessageRepository) ListAfterSeq(botID string, after int64, limit int) ([]model.BotMessage, error) {
+	return r.ListSeqRange(botID, after, 0, limit)
+}
+
+// ListSeqRange 按 seq 正序取 (after, through]；through<=0 表示无上界。
+// 压缩与构建按页读取，避免滑窗截掉尚未摘要的历史。
+func (r *BotMessageRepository) ListSeqRange(botID string, after, through int64, limit int) ([]model.BotMessage, error) {
+	q := r.db.Where("bot_id = ? AND seq > ?", botID, after)
+	if through > 0 {
+		q = q.Where("seq <= ?", through)
+	}
 	var rows []model.BotMessage
-	err := r.db.Where("bot_id = ? AND seq > ?", botID, after).
-		Order("seq ASC").Limit(limit).Find(&rows).Error
+	err := q.Order("seq ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
 

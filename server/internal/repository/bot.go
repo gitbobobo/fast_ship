@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
@@ -22,7 +23,9 @@ func (r *BotRepository) Create(bot *model.Bot) error {
 	return r.db.Create(bot).Error
 }
 
-// UpdateConfig 只写配置类列，不碰水位；调用方先加载再改。
+// UpdateConfig 只写配置类列，不碰水位；调用方先加载再改。toolset_version
+// 是运行时激活水位（只在压缩/重启边界切换），这里不回写——并发编辑不得把
+// 已激活的新版本覆盖回旧值（INT-102）。
 func (r *BotRepository) UpdateConfig(bot *model.Bot) error {
 	return r.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
 		"name":                    bot.Name,
@@ -30,13 +33,42 @@ func (r *BotRepository) UpdateConfig(bot *model.Bot) error {
 		"system_prompt_text":      bot.SystemPromptText,
 		"prompt_revision":         bot.PromptRevision,
 		"platform_prompt_version": bot.PlatformPromptVersion,
-		"toolset_version":         bot.ToolsetVersion,
 		"base_url":                bot.BaseURL,
 		"model":                   bot.Model,
 		"api_key_encrypted":       bot.APIKeyEncrypted,
 		"api_key_last4":           bot.APIKeyLast4,
 		"updated_at":              bot.UpdatedAt,
 	}).Error
+}
+
+// ActivateToolsetTx 在事务内把激活水位推进到目标工具/平台版本并按当前人设
+// 重建平台规则（存量提示词里写着「记忆不可用」，只改常量不会更新存量正文；
+// 必须在压缩/重启边界重建、递增 revision 再冻结）。返回是否命中。
+func (r *BotRepository) ActivateToolsetTx(tx *gorm.DB, botID string, toolsetVersion, platformPromptVersion int64, systemPromptText string, promptRevision int64, now time.Time) (bool, error) {
+	res := tx.Model(&model.Bot{}).
+		Where("id = ? AND (toolset_version < ? OR platform_prompt_version < ?)", botID, toolsetVersion, platformPromptVersion).
+		Updates(map[string]interface{}{
+			"toolset_version":         toolsetVersion,
+			"platform_prompt_version": platformPromptVersion,
+			"system_prompt_text":      systemPromptText,
+			"prompt_revision":         promptRevision,
+			"updated_at":              now,
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// TellToolsetVersionTx 在事务内推进告知水位（CAS 旧水位，防止并发重复告知）。
+func (r *BotRepository) TellToolsetVersionTx(tx *gorm.DB, botID string, fromVersion, toVersion int64) (bool, error) {
+	res := tx.Model(&model.Bot{}).
+		Where("id = ? AND last_told_version = ?", botID, fromVersion).
+		Update("last_told_version", toVersion)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 func (r *BotRepository) Get(id string) (*model.Bot, error) {

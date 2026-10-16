@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ type Config struct {
 	Issues     IssuesConfig     `mapstructure:"issues"`
 	Logging    LoggingConfig    `mapstructure:"logging"`
 	GitHubApp  GitHubAppConfig  `mapstructure:"github_app"`
+	Bots       BotsConfig       `mapstructure:"bots"`
 }
 
 type ServerConfig struct {
@@ -109,6 +111,159 @@ type GitHubAppConfig struct {
 	Fake bool `mapstructure:"fake"`
 }
 
+// BotsConfig 是机器人（INT-101/INT-102）的部署配置：上下文压缩阈值、记忆
+// 限额与夜间整理时程。全部为部署级配置，无机器人管理表单字段。
+type BotsConfig struct {
+	Context BotsContextConfig `mapstructure:"context"`
+	Memory  BotsMemoryConfig  `mapstructure:"memory"`
+}
+
+type BotsContextConfig struct {
+	// WindowTokens 是默认模型上下文窗口；ModelWindows 按实际模型名覆盖。
+	WindowTokens int64            `mapstructure:"window_tokens"`
+	ModelWindows map[string]int64 `mapstructure:"model_windows"`
+	// CompressionRatio 触发压缩的窗口占比（默认 0.75）。
+	CompressionRatio float64 `mapstructure:"compression_ratio"`
+	// TargetRatio 压缩后目标体量占触发阈值的比例（默认 0.45）。
+	TargetRatio float64 `mapstructure:"target_ratio"`
+	// ProtectUserTurns 保护最近的用户轮数（最小 3）。
+	ProtectUserTurns int `mapstructure:"protect_user_turns"`
+	// FoldLargeRatio 判定「大结果」的窗口占比（默认 0.01）。
+	FoldLargeRatio float64 `mapstructure:"fold_large_ratio"`
+	// FoldMinClearRatio 折叠批量发布的最小净清除量占比（默认 0.02）。
+	FoldMinClearRatio float64 `mapstructure:"fold_min_clear_ratio"`
+	// SummaryModel / ArchiveModel 空值继承机器人主模型。
+	SummaryModel string `mapstructure:"summary_model"`
+	ArchiveModel string `mapstructure:"archive_model"`
+}
+
+type BotsMemoryConfig struct {
+	// UserMaxChars / MemoryMaxChars 是常驻文件的注入字符上限（Unicode 字符）。
+	UserMaxChars   int64 `mapstructure:"user_max_chars"`
+	MemoryMaxChars int64 `mapstructure:"memory_max_chars"`
+	// NightlyModel 空值继承机器人主模型。
+	NightlyModel string `mapstructure:"nightly_model"`
+	// Timezone 决定夜间整理的「当地日期」与 daily 文件命名（IANA 时区）。
+	Timezone string `mapstructure:"timezone"`
+	// NightlyTime 是当地时区的每日触发时刻（HH:MM，默认 03:00）。
+	NightlyTime string `mapstructure:"nightly_time"`
+}
+
+// WindowTokensFor 返回指定模型的上下文窗口（未知模型用默认值）。
+func (c BotsContextConfig) WindowTokensFor(model string) int64 {
+	if c.ModelWindows != nil {
+		if w, ok := c.ModelWindows[model]; ok && w > 0 {
+			return w
+		}
+	}
+	if c.WindowTokens > 0 {
+		return c.WindowTokens
+	}
+	return 32768
+}
+
+func (c BotsContextConfig) CompressionRatioV() float64 {
+	if c.CompressionRatio > 0 && c.CompressionRatio < 1 {
+		return c.CompressionRatio
+	}
+	return 0.75
+}
+
+func (c BotsContextConfig) TargetRatioV() float64 {
+	if c.TargetRatio > 0 && c.TargetRatio < 1 {
+		return c.TargetRatio
+	}
+	return 0.45
+}
+
+func (c BotsContextConfig) ProtectUserTurnsV() int {
+	if c.ProtectUserTurns >= 3 {
+		return c.ProtectUserTurns
+	}
+	return 3
+}
+
+func (c BotsContextConfig) FoldLargeRatioV() float64 {
+	if c.FoldLargeRatio > 0 && c.FoldLargeRatio < 1 {
+		return c.FoldLargeRatio
+	}
+	return 0.01
+}
+
+func (c BotsContextConfig) FoldMinClearRatioV() float64 {
+	if c.FoldMinClearRatio > 0 && c.FoldMinClearRatio < 1 {
+		return c.FoldMinClearRatio
+	}
+	return 0.02
+}
+
+// botMemoryInjectMinChars 是注入上限下限：必须能放下截断标记本身。
+const botMemoryInjectMinChars int64 = 64
+
+func (c BotsMemoryConfig) UserMaxCharsV() int64 {
+	if c.UserMaxChars > 0 {
+		return c.UserMaxChars
+	}
+	return 1500
+}
+
+func (c BotsMemoryConfig) MemoryMaxCharsV() int64 {
+	if c.MemoryMaxChars > 0 {
+		return c.MemoryMaxChars
+	}
+	return 8000
+}
+
+// Location 解析夜间整理时区；非法值回退 UTC（Load 已校验，这里是防御）。
+func (c BotsMemoryConfig) Location() *time.Location {
+	if c.Timezone != "" {
+		if loc, err := time.LoadLocation(c.Timezone); err == nil {
+			return loc
+		}
+	}
+	return time.UTC
+}
+
+// NightlyClock 返回每日触发时刻（时、分）；非法值回退 03:00。
+func (c BotsMemoryConfig) NightlyClock() (hour, minute int) {
+	var h, m int
+	if _, err := fmt.Sscanf(c.NightlyTime, "%d:%d", &h, &m); err == nil && h >= 0 && h <= 23 && m >= 0 && m <= 59 {
+		return h, m
+	}
+	return 3, 0
+}
+
+// validate 配置级校验：明显非法值直接拒绝启动。
+func (c BotsConfig) validate() error {
+	if c.Context.CompressionRatio != 0 && (c.Context.CompressionRatio <= 0 || c.Context.CompressionRatio >= 1) {
+		return fmt.Errorf("bots.context.compression_ratio 必须在 (0,1) 内")
+	}
+	if c.Context.TargetRatio != 0 && (c.Context.TargetRatio <= 0 || c.Context.TargetRatio >= 1) {
+		return fmt.Errorf("bots.context.target_ratio 必须在 (0,1) 内")
+	}
+	if c.Context.ProtectUserTurns != 0 && c.Context.ProtectUserTurns < 3 {
+		return fmt.Errorf("bots.context.protect_user_turns 不得小于 3")
+	}
+	if c.Memory.UserMaxChars != 0 && c.Memory.UserMaxChars < botMemoryInjectMinChars {
+		return fmt.Errorf("bots.memory.user_max_chars 不得小于 %d（需容纳截断标记）", botMemoryInjectMinChars)
+	}
+	if c.Memory.MemoryMaxChars != 0 && c.Memory.MemoryMaxChars < botMemoryInjectMinChars {
+		return fmt.Errorf("bots.memory.memory_max_chars 不得小于 %d（需容纳截断标记）", botMemoryInjectMinChars)
+	}
+	if c.Memory.Timezone != "" {
+		if _, err := time.LoadLocation(c.Memory.Timezone); err != nil {
+			return fmt.Errorf("bots.memory.timezone 非法: %v", err)
+		}
+	}
+	if c.Memory.NightlyTime != "" {
+		var h, m int
+		if _, err := fmt.Sscanf(c.Memory.NightlyTime, "%d:%d", &h, &m); err != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+			return fmt.Errorf("bots.memory.nightly_time 必须是 HH:MM")
+		}
+	}
+	return nil
+}
+
 func Load(path string) (*Config, error) {
 	viper.SetConfigFile(path)
 
@@ -130,6 +285,19 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("github_app.private_key_path", "FAST_SHIP_GITHUB_APP_PRIVATE_KEY_PATH")
 	_ = viper.BindEnv("github_app.webhook_secret", "FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET")
 	_ = viper.BindEnv("github_app.fake", "FAST_SHIP_GITHUB_APP_FAKE")
+	_ = viper.BindEnv("bots.context.window_tokens", "FAST_SHIP_BOTS_CONTEXT_WINDOW_TOKENS")
+	_ = viper.BindEnv("bots.context.compression_ratio", "FAST_SHIP_BOTS_CONTEXT_COMPRESSION_RATIO")
+	_ = viper.BindEnv("bots.context.target_ratio", "FAST_SHIP_BOTS_CONTEXT_TARGET_RATIO")
+	_ = viper.BindEnv("bots.context.protect_user_turns", "FAST_SHIP_BOTS_CONTEXT_PROTECT_USER_TURNS")
+	_ = viper.BindEnv("bots.context.fold_large_ratio", "FAST_SHIP_BOTS_CONTEXT_FOLD_LARGE_RATIO")
+	_ = viper.BindEnv("bots.context.fold_min_clear_ratio", "FAST_SHIP_BOTS_CONTEXT_FOLD_MIN_CLEAR_RATIO")
+	_ = viper.BindEnv("bots.context.summary_model", "FAST_SHIP_BOTS_CONTEXT_SUMMARY_MODEL")
+	_ = viper.BindEnv("bots.context.archive_model", "FAST_SHIP_BOTS_CONTEXT_ARCHIVE_MODEL")
+	_ = viper.BindEnv("bots.memory.user_max_chars", "FAST_SHIP_BOTS_MEMORY_USER_MAX_CHARS")
+	_ = viper.BindEnv("bots.memory.memory_max_chars", "FAST_SHIP_BOTS_MEMORY_MEMORY_MAX_CHARS")
+	_ = viper.BindEnv("bots.memory.nightly_model", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_MODEL")
+	_ = viper.BindEnv("bots.memory.timezone", "FAST_SHIP_BOTS_MEMORY_TIMEZONE")
+	_ = viper.BindEnv("bots.memory.nightly_time", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_TIME")
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, err
@@ -137,6 +305,9 @@ func Load(path string) (*Config, error) {
 
 	var cfg Config
 	if err := viper.Unmarshal(&cfg); err != nil {
+		return nil, err
+	}
+	if err := cfg.Bots.validate(); err != nil {
 		return nil, err
 	}
 

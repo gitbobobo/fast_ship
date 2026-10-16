@@ -18,7 +18,11 @@ type Bot struct {
 	SystemPromptText      string `gorm:"type:text;not null" json:"-"`
 	PromptRevision        int64  `gorm:"not null" json:"prompt_revision"`
 	PlatformPromptVersion int64  `gorm:"not null" json:"platform_prompt_version"`
-	ToolsetVersion        int64  `gorm:"not null" json:"toolset_version"`
+	// ToolsetVersion 是该对话线最近激活的工具版本（压缩/重启边界才切换）；
+	// LastToldVersion 是最后一次通过 lifecycle 事件告知过的版本水位，用于
+	// 重启或长期不活跃后补发应告知的变更（INT-102）。
+	ToolsetVersion  int64 `gorm:"not null" json:"toolset_version"`
+	LastToldVersion int64 `gorm:"not null;default:1" json:"last_told_version"`
 
 	BaseURL string `gorm:"type:text;not null" json:"base_url"`
 	// Model 列存模型名；列名 model 不是 SQLite 保留字，GORM 会加引号。
@@ -116,7 +120,16 @@ type BotModelRequest struct {
 	Status          BotModelRequestStatus `gorm:"type:text;not null" json:"status"`
 	InputThroughSeq int64                 `gorm:"not null" json:"input_through_seq"`
 	PromptRevision  int64                 `gorm:"not null" json:"prompt_revision"`
-	ToolsetVersion  int64                 `gorm:"not null" json:"toolset_version"`
+	// ToolsetVersion 记录本次请求实际使用的冻结工具版本（取自构建产物，
+	// 不读可能过时的 bots.toolset_version）。
+	ToolsetVersion int64 `gorm:"not null" json:"toolset_version"`
+	// ContextGeneration 是请求构建时的投影状态代数：压缩发布 +1 后基线失效。
+	ContextGeneration int64 `gorm:"not null;default:0" json:"context_generation"`
+
+	// InputTokensEstimate 是发送前的上下文 token 估算值；InputEstimator 标注
+	// 估算方式（usage_delta/3.5 或 utf8_bytes/3.5）。估算不写进实际 usage 列。
+	InputTokensEstimate int64  `gorm:"not null;default:0" json:"input_tokens_estimate"`
+	InputEstimator      string `gorm:"type:text;not null;default:''" json:"input_estimator"`
 
 	// PrefixHash / ToolsHash / RequestHash 是不可变前缀（系统提示到最近消息）、
 	// 工具定义数组与两者合并的 SHA-256，用于缓存命中与回归对比。
