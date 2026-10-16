@@ -45,6 +45,9 @@ type fakeModelTurn struct {
 	// Hold 非 nil 时请求阻塞到该 channel 可读或请求 context 结束——测试用它
 	// 把「模型请求进行中」精确控制在时点上。
 	Hold <-chan struct{}
+	// BreakAfterText 流完文本后立刻断开连接：模拟「发了部分正文就报错」
+	// 的上游故障（草稿已挂出但永远等不来 message_commit）。
+	BreakAfterText bool
 }
 
 type fakeModelRequest struct {
@@ -125,6 +128,9 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 			writeChunk(chunk(string(runes[:half]), nil, ""))
 			if half > 0 {
 				writeChunk(chunk(string(runes[half:]), nil, ""))
+			}
+			if turn.BreakAfterText {
+				panic(http.ErrAbortHandler)
 			}
 		}
 		for i, tc := range turn.ToolCalls {
@@ -2173,5 +2179,54 @@ func TestBotPanicFinishesRun(t *testing.T) {
 	// 活动槽已被恢复路径释放：后续唤醒可正常进槽。
 	if env.bots.rt.acquire(bot.ID, &botWake{Trigger: model.BotTriggerUserMessage, Key: "after"}) == nil {
 		t.Fatalf("panic 后槽应已释放")
+	}
+}
+
+func TestBotDiscardDraftOnModelFailure(t *testing.T) {
+	// 上游发完部分正文就断连：run 失败，且必须发 message_discard 让客户端
+	// 丢弃挂出的草稿——否则残缺回复被当成完整回答一直挂着。
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "写到一半", BreakAfterText: true})
+	userID := createBotTestUser(t, env.db, "botdiscard")
+	bot := env.createBot(t, userID)
+	env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "hi", ClientMessageID: "d1"})
+	waitForBot(t, "run failed", 15*time.Second, func() bool {
+		return env.botSettled(bot.ID)
+	})
+
+	var runs []model.BotRun
+	env.db.Where("bot_id = ?", bot.ID).Find(&runs)
+	if len(runs) != 1 || runs[0].Status != model.BotRunStatusFailed {
+		t.Fatalf("run 应失败: %+v", runs)
+	}
+
+	// 部分正文曾挂出（text_delta），失败后必须紧跟 message_discard。
+	var events []model.BotEvent
+	env.db.Where("bot_id = ? AND event_type = ?", bot.ID, model.BotEventDelta).
+		Order("seq asc").Find(&events)
+	kinds := make([]string, 0, len(events))
+	for i := range events {
+		var env0 botEventEnvelope
+		if err := json.Unmarshal([]byte(events[i].PayloadJSON), &env0); err == nil {
+			kinds = append(kinds, env0.Kind)
+		}
+	}
+	hasDelta, hasDiscard := false, false
+	for _, k := range kinds {
+		if k == "text_delta" {
+			hasDelta = true
+		}
+		if k == "message_discard" {
+			hasDiscard = true
+		}
+	}
+	if !hasDelta || !hasDiscard {
+		t.Fatalf("失败流应先 delta 后 discard: %v", kinds)
+	}
+	// 账本不得提交残缺的 assistant 消息。
+	var msgCount int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?",
+		bot.ID, model.BotMessageKindAssistant).Count(&msgCount)
+	if msgCount != 0 {
+		t.Fatalf("失败流不得提交 assistant 消息: %d", msgCount)
 	}
 }

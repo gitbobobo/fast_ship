@@ -282,6 +282,9 @@ export function foldStreamEvent(
         }
         const draftId = data.message_id ?? message?.id;
         if (draftId) sinks.clearDraft(draftId);
+      } else if (data.kind === "message_discard") {
+        // 模型请求失败/停止打断：草稿等不来 message_commit，直接丢弃。
+        if (data.message_id) sinks.clearDraft(data.message_id);
       } else if (data.kind === "user_message") {
         // 完整 user 消息投影：其他标签页不经过自己的 REST 发送也能入时间线。
         const message = data.payload as BotMessage | undefined;
@@ -313,13 +316,14 @@ export function foldStreamEvent(
     }
     case "error": {
       if (!data.run_id) break;
-      const payload = (data.payload ?? {}) as Partial<BotRun>;
+      // run_error 载荷字段是 code/message（服务端 finishFailed 的形状）。
+      const payload = (data.payload ?? {}) as { code?: string; message?: string };
       sinks.setRuns(
         mergeRun(sinks.getRuns(), {
           id: data.run_id,
           status: "failed",
-          error_code: payload.error_code,
-          error_message: payload.error_message,
+          error_code: payload.code,
+          error_message: payload.message,
         }),
       );
       break;

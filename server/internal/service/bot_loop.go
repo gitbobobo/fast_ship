@@ -80,6 +80,8 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		reply, streamErr := botStreamChat(ctx, &streamClient, built.Request, deltas.onDelta)
 		deltas.flush()
 		if streamErr != nil {
+			// 失败（含用户停止打断）：草稿等不来 message_commit，丢弃。
+			deltas.discard()
 			s.finishModelRequest(requestRow, reply, streamErr)
 			if input := s.safePoint(run); input.StopRequested {
 				s.finishStopped(bot, run)
@@ -377,6 +379,23 @@ func (d *botDeltaBuffer) flush() {
 	})
 	if err != nil {
 		d.svc.logger.Warn("写入流式事件失败", zap.String("bot_id", d.botID), zap.Error(err))
+		return
+	}
+	d.svc.publishEvent(d.botID)
+}
+
+// discard 请求客户端丢弃已挂出的部分草稿：模型请求失败（含用户停止打断）
+// 时草稿不会等来 message_commit，不丢弃会被当成完整回复一直挂着。
+func (d *botDeltaBuffer) discard() {
+	runID := d.runID
+	err := d.svc.db.Transaction(func(tx *gorm.DB) error {
+		return d.svc.appendEventTx(tx, d.botID, &runID, "", model.BotEventDelta, botEventEnvelope{
+			Kind:      "message_discard",
+			MessageID: d.msgID,
+		})
+	})
+	if err != nil {
+		d.svc.logger.Warn("写入草稿丢弃事件失败", zap.String("bot_id", d.botID), zap.Error(err))
 		return
 	}
 	d.svc.publishEvent(d.botID)

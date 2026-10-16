@@ -175,8 +175,15 @@ describe("useBotChat", () => {
     expect(result.current.activeRun?.status).toBe("running");
   });
 
-  it("accumulates delta drafts and replaces them on message_commit", async () => {
+  it("message_discard 到达即丢弃挂出的草稿", async () => {
     const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    emit("delta", { message_id: "m-d", payload: { text: "写到一半" } }, 10);
+    await waitFor(() => expect(result.current.entries).toHaveLength(1));
+    emit("delta", { kind: "message_discard", message_id: "m-d" }, 11);
+    await waitFor(() => expect(result.current.entries).toHaveLength(0));
+  });
+  it("accumulates delta drafts and replaces them on message_commit", async () => {    const { result } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
 
     emit("delta", { message_id: "m-a", payload: { text: "你好" } }, 10);
@@ -571,5 +578,22 @@ describe("foldStreamEvent", () => {
       sinksObj,
     );
     expect(state.messages).toEqual([]);
+  });
+  it("run_error 用 payload 的 code/message 字段填充失败原因", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "error",
+        data: JSON.stringify({
+          run_id: "r-err",
+          payload: { code: "model_request_failed", message: "上游 502" },
+        }),
+        id: 10,
+      },
+      sinksObj,
+    );
+    expect(state.runs.map((r) => `${r.id}:${r.status}:${r.error_code}:${r.error_message}`)).toEqual([
+      "r-err:failed:model_request_failed:上游 502",
+    ]);
   });
 });
