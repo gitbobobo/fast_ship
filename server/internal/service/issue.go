@@ -205,7 +205,7 @@ func (s *IssueService) CreateGitHubIssueContext(ctx context.Context, projectID, 
 	}
 	s.deleteIssueAssetFiles(assetPathsToDelete)
 
-	if _, err := s.mirror.syncTimeline(ctx, client, stored, createdIssue.GetNumber()); err != nil {
+	if err := s.mirror.refreshTimelineAfterPush(ctx, client, stored, createdIssue); err != nil {
 		s.logger.With(zap.String("user_id", userID)).Warn("sync timeline after creating github issue failed", zap.String("issue_id", stored.ID), zap.Error(err))
 	}
 
@@ -331,7 +331,7 @@ func (s *IssueService) UpdateInternalIssueContext(ctx context.Context, issueID, 
 			}
 			s.deleteIssueAssetFiles(assetPathsToDelete)
 		}
-		if _, err := s.mirror.syncTimeline(ctx, client, stored, issue.GitHubMeta.Number); err != nil {
+		if err := s.mirror.refreshTimelineAfterPush(ctx, client, stored, updatedIssue); err != nil {
 			return nil, err
 		}
 		meta, err := s.loadInternalMeta(stored.ID)

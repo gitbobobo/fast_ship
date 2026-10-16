@@ -33,10 +33,13 @@ type issueMilestonePayload struct {
 }
 
 // issueMirror 负责 GitHub→本地的镜像同步：先拉全远端分页再写库、同一项目用
-// 内存锁防并发。push 路径（创建/更新 issue、发评论）经 upsertGitHubIssue、
-// syncTimeline、recordPushedComment 把远端响应写回本地，不经同步锁。
-// 依赖在构造时按值固化，只有 newClient 由 IssueService 闭包委托、调用时现取，
-// 保证测试替换 s.newClient 对镜像同样生效；其余字段测试不会在构造后更换。
+// 内存锁防并发。集合镜像的不变式：完整镜像 = 一个事务里替换评论与时间线两个
+// 集合并推进水位（writeFullCollections）；任何非完整写入 = 一个事务里写入并
+// 清空水位（writePartialCollections）。push 路径（创建/更新 issue、发评论）经
+// upsertGitHubIssue、refreshTimelineAfterPush、recordPushedComment 把远端响应
+// 写回本地，不经同步锁。依赖在构造时按值固化，只有 newClient 由 IssueService
+// 闭包委托、调用时现取，保证测试替换 s.newClient 对镜像同样生效；其余字段测试
+// 不会在构造后更换。
 type issueMirror struct {
 	issueRepo           *repository.IssueRepository
 	gitHubMetaRepo      *repository.IssueGitHubMetaRepository
@@ -127,13 +130,33 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 				return failSync(syncErr)
 			}
 
-			commentCount, syncErr := m.syncComments(ctx, client, issue, item.GetNumber())
-			if syncErr != nil {
-				return failSync(syncErr)
-			}
-			timelineCount, syncErr := m.syncTimeline(ctx, client, issue, item.GetNumber())
-			if syncErr != nil {
-				return failSync(syncErr)
+			// 远端 issue 相对集合水位未变时跳过评论/时间线拉取，计数取现有
+			// 镜像行数；水位与两个集合镜像在同一事务里推进
+			//（writeFullCollections），失败则下轮重试。
+			var commentCount, timelineCount int
+			if needsCollectionSync(issue.GitHubMeta, item) {
+				// 完整镜像的取数都在事务外完成：两个集合都拉成功才进写库事务，
+				// 任一取数失败本轮一个集合也不写（failSync 记失败，下轮重拉）。
+				comments, err := m.fetchComments(ctx, client, issue.ID, item.GetNumber())
+				if err != nil {
+					return failSync(err)
+				}
+				events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
+				if err != nil {
+					return failSync(err)
+				}
+				if err := m.writeFullCollections(issue, item, comments, events); err != nil {
+					return failSync(err)
+				}
+				commentCount, timelineCount = len(comments), len(events)
+			} else {
+				var err error
+				if commentCount, err = m.commentRepo.CountSynced(issue.ID); err != nil {
+					return failSync(errs.ErrInternal)
+				}
+				if timelineCount, err = m.timelineRepo.Count(issue.ID); err != nil {
+					return failSync(errs.ErrInternal)
+				}
 			}
 
 			syncedIssues++
@@ -447,9 +470,23 @@ func (m *issueMirror) ownerUserID(projectID string) (string, error) {
 	return project.UserID, nil
 }
 
-// syncComments 先拉完该 Issue 的全部评论分页并映射成 model，再由 ReplaceSynced
-// 单事务写入；任一分页失败时本地集合保持同步前数据，一个字也不写。
-func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient, issue *model.Issue, issueNumber int) (int, error) {
+// needsCollectionSync 判断是否要重拉该 Issue 的评论/时间线集合。meta 为 nil
+// 或水位为空（新 issue、改动前留下的旧 meta 行）→ 重拉一次做 bootstrap；
+// 远端 updated_at 晚于水位 → 远端有更新；updated_at 只有秒级精度，同一秒内
+// 新增的评论靠远端评论数与水位不一致发现。
+func needsCollectionSync(meta *model.IssueGitHubMeta, item *ghclient.Issue) bool {
+	if meta == nil || meta.CollectionsSyncedUpdatedAt == nil {
+		return true
+	}
+	if item.GetUpdatedAt().UTC().After(*meta.CollectionsSyncedUpdatedAt) {
+		return true
+	}
+	return item.GetComments() != meta.CollectionsSyncedComments
+}
+
+// fetchComments 拉完该 Issue 的全部评论分页并映射成 model，不含写库；
+// 任一分页失败时返回 GitHub API 错误，调用方什么也不该写。
+func (m *issueMirror) fetchComments(ctx context.Context, client gitHubIssueClient, issueID string, issueNumber int) ([]*model.IssueComment, error) {
 	const perPage = 100
 	page := 1
 	var comments []*model.IssueComment
@@ -457,14 +494,14 @@ func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient
 	for {
 		items, resp, err := client.ListIssueComments(ctx, issueNumber, page, perPage)
 		if err != nil {
-			return 0, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 评论失败: %v", err))
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 评论失败: %v", err))
 		}
 
 		for _, item := range items {
 			if item == nil || item.GetID() == 0 {
 				continue
 			}
-			comments = append(comments, buildGitHubIssueCommentModel(issue.ID, item))
+			comments = append(comments, buildGitHubIssueCommentModel(issueID, item))
 		}
 
 		if resp == nil || resp.NextPage == 0 {
@@ -473,15 +510,12 @@ func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient
 		page = resp.NextPage
 	}
 
-	if err := m.commentRepo.ReplaceSynced(issue.ID, comments); err != nil {
-		return 0, errs.ErrInternal
-	}
-	return len(comments), nil
+	return comments, nil
 }
 
-// syncTimeline 先拉完该 Issue 的全部时间线分页并映射成 model，再由 ReplaceSynced
-// 单事务写入；任一分页失败时本地集合保持同步前数据，一个字也不写。
-func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient, issue *model.Issue, issueNumber int) (int, error) {
+// fetchTimeline 拉完该 Issue 的全部时间线分页并映射成 model，不含写库；
+// 任一分页失败时返回 GitHub API 错误，调用方什么也不该写。
+func (m *issueMirror) fetchTimeline(ctx context.Context, client gitHubIssueClient, issueID string, issueNumber int) ([]*model.IssueTimelineEvent, error) {
 	const perPage = 100
 	page := 1
 	var events []*model.IssueTimelineEvent
@@ -489,7 +523,7 @@ func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient
 	for {
 		items, resp, err := client.ListIssueTimeline(ctx, issueNumber, page, perPage)
 		if err != nil {
-			return 0, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 动态失败: %v", err))
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 动态失败: %v", err))
 		}
 
 		for _, item := range items {
@@ -498,7 +532,7 @@ func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient
 			}
 			events = append(events, &model.IssueTimelineEvent{
 				ID:              uuid.NewString(),
-				IssueID:         issue.ID,
+				IssueID:         issueID,
 				EventKey:        buildTimelineEventKey(item),
 				GitHubEventID:   item.GetID(),
 				EventType:       item.GetEvent(),
@@ -517,32 +551,95 @@ func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient
 		page = resp.NextPage
 	}
 
-	if err := m.timelineRepo.ReplaceSynced(issue.ID, events); err != nil {
-		return 0, errs.ErrInternal
+	return events, nil
+}
+
+// writeFullCollections 是「完整镜像」的原子单元：评论替换、时间线替换与集合水位
+// 推进必须在同一个事务里提交。两个集合的取数（fetchComments/fetchTimeline）已在
+// 事务外完成，事务内只写库。不能拆成多个事务：push 路径也写集合且不经同步锁，
+// 拆开后 push 的旧正文写回可以落在两个集合的取数/提交之间，而最后提交的集合事务
+// 仍会推进水位，留下「旧镜像 + 已确认水位」——跳过判据再也发现不了该 issue，缺失
+// 内容不再自愈（反例见 docs/internal/issue-sync.md「集合拉取水位」）。同事务后谁
+// 最后提交，就由谁同时决定两个集合与水位。水位取本轮列表返回的 item 远端快照而
+// 不是 upsert 后读回的 issue 行：后者可能已被并发 push 覆盖，水位不能指向超出
+// 本次快照覆盖范围的状态。
+func (m *issueMirror) writeFullCollections(issue *model.Issue, item *ghclient.Issue, comments []*model.IssueComment, events []*model.IssueTimelineEvent) error {
+	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := m.commentRepo.ReplaceSyncedTx(tx, issue.ID, comments); err != nil {
+			return err
+		}
+		if err := m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events); err != nil {
+			return err
+		}
+		return m.gitHubMetaRepo.AdvanceCollectionsWatermarkTx(tx, issue.ID, item.GetUpdatedAt().UTC(), item.GetComments())
+	}); err != nil {
+		return errs.ErrInternal
 	}
-	return len(events), nil
+	return nil
+}
+
+// writePartialCollections 执行一次「非完整镜像」的集合写入。push 路径只把远端
+// 响应里的一条评论或一次时间线刷新写回本地，没有重拉两个集合，所以必须在同一个
+// 事务里清空集合水位（ClearCollectionsWatermarkTx）：push 的响应可能比后台同步
+// 刚镜像的远端状态旧，若不清空，水位会指向被旧响应覆盖的镜像，跳过判据再也发现
+// 不了该 issue。所有「只写一部分集合」的路径都必须走这里；完整镜像走
+// writeFullCollections。
+// 清空后的恢复前提见 docs/internal/issue-sync.md「集合拉取水位」。
+func (m *issueMirror) writePartialCollections(issueID string, write func(tx *gorm.DB) error) error {
+	return m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := write(tx); err != nil {
+			return err
+		}
+		return m.gitHubMetaRepo.ClearCollectionsWatermarkTx(tx, issueID)
+	})
+}
+
+// refreshTimelineAfterPush 是 push 路径（创建/更新 issue）的时间线刷新：push
+// 只重拉了时间线、没有重拉评论，不能推进集合水位，所以走 writePartialCollections
+// 在同一事务里替换镜像并清空水位，该 issue 下一次被增量列表返回时后台同步会重拉
+// 两个集合。清空而非推进的理由：以本函数拿到的快照推进水位会让本地评论镜像落后
+// 于水位，丢的评论无法被发现。与后台同步并发时（push 不经同步锁），镜像与水位
+// 要么同属最后提交的事务，要么都保持旧值，不会出现「旧镜像 + 新水位」。
+func (m *issueMirror) refreshTimelineAfterPush(ctx context.Context, client gitHubIssueClient, issue *model.Issue, item *ghclient.Issue) error {
+	events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
+	if err != nil {
+		return err
+	}
+	if err := m.writePartialCollections(issue.ID, func(tx *gorm.DB) error {
+		return m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events)
+	}); err != nil {
+		return errs.ErrInternal
+	}
+	return nil
 }
 
 // recordPushedComment 把刚推送到 GitHub 的评论写回本地：upsert 评论行、
-// 推进 issue.UpdatedAt、累计 meta.CommentsCount。调用方在成功后自行推进
-// 已读水位、记日志；写回不经同步锁。
+// 推进 issue.UpdatedAt、累计 meta.CommentsCount。这是非完整镜像的集合写入
+// （push 只写回远端响应里的一条评论，没有重拉评论/时间线集合），所以三处写入
+// 与集合水位清空经 writePartialCollections 同事务提交：push 的响应可能比后台
+// 同步刚镜像的远端状态旧，若不清空，水位会指向被旧响应覆盖的评论镜像，跳过
+// 判据再也发现不了该 issue。清空后，该 issue 下一次被增量列表返回时后台同步
+// 会重拉两个集合、把镜像修回远端值。调用方在成功后自行推进已读水位、记日志；
+// 写回不经同步锁。
 func (m *issueMirror) recordPushedComment(issue *model.Issue, comment *model.IssueComment) error {
-	if err := m.commentRepo.Upsert(comment); err != nil {
-		return errs.ErrInternal
-	}
 	now := time.Now().UTC()
 	updatedAt := comment.GitHubUpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = now
 	}
 	issue.UpdatedAt = updatedAt
-	if err := m.issueRepo.Save(issue); err != nil {
-		return errs.ErrInternal
-	}
 	meta := issue.GitHubMeta
 	meta.CommentsCount++
 	meta.SyncedAt = now
-	if err := m.gitHubMetaRepo.Upsert(meta); err != nil {
+	if err := m.writePartialCollections(issue.ID, func(tx *gorm.DB) error {
+		if err := m.commentRepo.UpsertTx(tx, comment); err != nil {
+			return err
+		}
+		if err := m.issueRepo.SaveTx(tx, issue); err != nil {
+			return err
+		}
+		return m.gitHubMetaRepo.UpsertTx(tx, meta)
+	}); err != nil {
 		return errs.ErrInternal
 	}
 	return nil
@@ -737,7 +834,7 @@ func shortSHA(sha string) string {
 	return sha[:7]
 }
 
-func (s *IssueService) SyncProjectIssues(projectID, userID string) (*IssueSyncResponse, error) {
+func (s *IssueService) SyncProjectIssues(ctx context.Context, projectID, userID string) (*IssueSyncResponse, error) {
 	project, err := s.projectRepo.FindByID(projectID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -750,7 +847,7 @@ func (s *IssueService) SyncProjectIssues(projectID, userID string) (*IssueSyncRe
 		return nil, errs.ErrProjectGitHubNotConfigured
 	}
 
-	return s.mirror.Sync(context.Background(), project)
+	return s.mirror.Sync(ctx, project)
 }
 
 func (s *IssueService) SyncAllProjectsIncremental(ctx context.Context) {

@@ -33,14 +33,21 @@ type fakeIssueGitHubClient struct {
 	pullRequests       map[int]*gh.PullRequest
 	pullRequestErr     error
 	onGetPullRequest   func(number int)
-	// validateErr 注入 ValidateRepository 失败；onListIssues 在 ListIssues
-	// 开头回调（可阻塞同步）；listIssuesSince 记录每次调用的 since 参数。
-	validateErr  error
-	onListIssues func()
-	// mu 仅保护 listIssuesSince：目前只有 ListIssues 会被并发同步路径调用；
-	// 若未来并发测试命中推送方法，其余记录字段需一并加锁。
+	// validateErr 注入 ValidateRepository 失败；onListIssues/onListTimeline 分别在
+	// ListIssues / ListIssueTimeline 开头回调（用于在两轮取数之间注入写库）；
+	// listIssuesSince 记录每次调用的 since 参数。
+	validateErr    error
+	onListIssues   func()
+	onListTimeline func()
+	// mu 保护 listIssuesSince 与 commentListCalls/timelineListCalls：目前只有
+	// ListIssues 会被并发同步路径调用；若未来并发测试命中推送方法，其余记录
+	// 字段需一并加锁。
 	mu              sync.Mutex
 	listIssuesSince []*time.Time
+	// commentListCalls/timelineListCalls 按 issue 记录两个集合拉取接口的
+	// 调用次数（命中注入错误也计入，表示请求已发出）。
+	commentListCalls  map[int]int
+	timelineListCalls map[int]int
 }
 
 type fakeCreateIssueCall struct {
@@ -87,11 +94,30 @@ func (f *fakeIssueGitHubClient) recordedSinceCalls() []*time.Time {
 	return append([]*time.Time(nil), f.listIssuesSince...)
 }
 
+// countCollectionCalls 返回评论/时间线拉取接口各自累计的调用次数。
+func (f *fakeIssueGitHubClient) countCollectionCalls() (comments, timeline int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, n := range f.commentListCalls {
+		comments += n
+	}
+	for _, n := range f.timelineListCalls {
+		timeline += n
+	}
+	return comments, timeline
+}
+
 func (f *fakeIssueGitHubClient) ListRepositoryLabels(context.Context, int, int) ([]*gh.Label, *gh.Response, error) {
 	return f.repoLabels, &gh.Response{NextPage: 0}, f.repoLabelsErr
 }
 
 func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber, page, _ int) ([]*ghclient.IssueComment, *gh.Response, error) {
+	f.mu.Lock()
+	if f.commentListCalls == nil {
+		f.commentListCalls = map[int]int{}
+	}
+	f.commentListCalls[issueNumber]++
+	f.mu.Unlock()
 	if err := f.commentErrs[issueNumber][page]; err != nil {
 		return nil, nil, err
 	}
@@ -110,6 +136,15 @@ func (f *fakeIssueGitHubClient) ListIssueComments(_ context.Context, issueNumber
 }
 
 func (f *fakeIssueGitHubClient) ListIssueTimeline(_ context.Context, issueNumber, page, _ int) ([]*ghclient.TimelineEvent, *gh.Response, error) {
+	if f.onListTimeline != nil {
+		f.onListTimeline()
+	}
+	f.mu.Lock()
+	if f.timelineListCalls == nil {
+		f.timelineListCalls = map[int]int{}
+	}
+	f.timelineListCalls[issueNumber]++
+	f.mu.Unlock()
 	if err := f.timelineErrs[issueNumber][page]; err != nil {
 		return nil, nil, err
 	}

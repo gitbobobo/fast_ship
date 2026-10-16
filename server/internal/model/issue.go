@@ -88,7 +88,15 @@ type IssueGitHubMeta struct {
 	Locked            bool      `gorm:"not null;default:false" json:"locked"`
 	ActiveLockReason  string    `gorm:"type:text" json:"active_lock_reason"`
 	SyncedAt          time.Time `gorm:"not null;index" json:"synced_at"`
-	RawJSON           string    `gorm:"type:text" json:"-"`
+	// CollectionsSyncedUpdatedAt 是评论/时间线集合的镜像水位：上次成功镜像
+	// 两个集合时远端 issue 的 updated_at。不在 UpsertTx 的 AssignmentColumns
+	// 里，仅由 AdvanceCollectionsWatermarkTx 在时间线镜像同一事务里推进
+	// （push 路径用 ClearCollectionsWatermarkTx 清空）。
+	CollectionsSyncedUpdatedAt *time.Time `gorm:"column:collections_synced_updated_at" json:"collections_synced_updated_at"`
+	// CollectionsSyncedComments 记录上次成功镜像集合时远端 issue 的评论数：
+	// updated_at 只有秒级精度，同一秒内新增的评论靠它与远端评论数比对发现。
+	CollectionsSyncedComments int    `gorm:"not null;default:0;column:collections_synced_comments" json:"collections_synced_comments"`
+	RawJSON                   string `gorm:"type:text" json:"-"`
 
 	Issue Issue `gorm:"foreignKey:IssueID;constraint:OnDelete:CASCADE" json:"-"`
 }

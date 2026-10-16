@@ -3,7 +3,8 @@ package model
 import "time"
 
 // FastShipHookCommentMarker 是发货钩子评论正文携带的标记。判断「钩子留言」
-// 只能用正文子串：syncComments 的 Upsert 会把 IdempotencyKey 覆盖为空，靠不住。
+// 只能用正文子串：同步路径替换评论镜像（IssueCommentRepository.ReplaceSyncedTx）
+// 时不带 IdempotencyKey，会把既有值覆盖为空，靠不住。
 const FastShipHookCommentMarker = "<!-- fast-ship-hook:"
 
 // IssueReadState 记录用户在某个 Issue 上已读到哪条评论（水位）。

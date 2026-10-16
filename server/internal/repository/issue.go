@@ -158,6 +158,32 @@ func (r *IssueGitHubMetaRepository) FindByProjectAndGitHubIDTx(tx *gorm.DB, proj
 	return &meta, nil
 }
 
+// AdvanceCollectionsWatermarkTx 推进该 Issue 评论/时间线集合的镜像水位。只写
+// 这两列，不触碰 synced_at 与 UpsertTx 管理的镜像字段。必须与集合镜像写入
+// （ReplaceSyncedTx）同一事务：事务外单独推进会与并发 push 路径的镜像替换交错，
+// 留下「旧镜像 + 新水位」的组合，缺失的集合内容再也不会被判据发现重拉。
+func (r *IssueGitHubMetaRepository) AdvanceCollectionsWatermarkTx(tx *gorm.DB, issueID string, remoteUpdatedAt time.Time, commentsCount int) error {
+	return tx.Model(&model.IssueGitHubMeta{}).
+		Where("issue_id = ?", issueID).
+		Updates(map[string]any{
+			"collections_synced_updated_at": remoteUpdatedAt,
+			"collections_synced_comments":   commentsCount,
+		}).Error
+}
+
+// ClearCollectionsWatermarkTx 清空该 Issue 的集合镜像水位，供 push 路径使用：
+// push 只重拉了时间线、没有重拉评论，不能推进水位，只能置空让下一次后台同步
+// 保守重拉两个集合。必须与集合镜像写入（ReplaceSyncedTx）同一事务，理由同
+// AdvanceCollectionsWatermarkTx——镜像与水位要么同属一个提交者，要么都保持旧值。
+func (r *IssueGitHubMetaRepository) ClearCollectionsWatermarkTx(tx *gorm.DB, issueID string) error {
+	return tx.Model(&model.IssueGitHubMeta{}).
+		Where("issue_id = ?", issueID).
+		Updates(map[string]any{
+			"collections_synced_updated_at": nil,
+			"collections_synced_comments":   0,
+		}).Error
+}
+
 type IssueCommentRepository struct {
 	db *gorm.DB
 }
@@ -192,20 +218,20 @@ func (r *IssueCommentRepository) UpsertTx(tx *gorm.DB, comment *model.IssueComme
 	}).Create(comment).Error
 }
 
-// ReplaceSynced 在单个事务内把该 Issue 的 GitHub 评论镜像替换成本轮拉取的集合：
-// 逐条 upsert 后清掉不在集合内的镜像行，任一步失败整体回滚。
-// 远端分页必须由调用方拉完——事务内只执行数据库操作。
-func (r *IssueCommentRepository) ReplaceSynced(issueID string, comments []*model.IssueComment) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		keepIDs := make([]int64, 0, len(comments))
-		for _, comment := range comments {
-			if err := r.UpsertTx(tx, comment); err != nil {
-				return err
-			}
-			keepIDs = append(keepIDs, comment.GitHubCommentID)
+// ReplaceSyncedTx 把该 Issue 的 GitHub 评论镜像替换成本轮拉取的集合：逐条 upsert
+// 后清掉不在集合内的镜像行，任一步失败整体回滚。必须在调用方的事务内与时间线替换
+// （IssueTimelineRepository.ReplaceSyncedTx）及集合水位变更
+// （Advance/ClearCollectionsWatermarkTx）一起提交，理由见 issue_mirror.go 的
+// writeFullCollections；远端分页必须在事务外拉完——事务内只执行数据库操作。
+func (r *IssueCommentRepository) ReplaceSyncedTx(tx *gorm.DB, issueID string, comments []*model.IssueComment) error {
+	keepIDs := make([]int64, 0, len(comments))
+	for _, comment := range comments {
+		if err := r.UpsertTx(tx, comment); err != nil {
+			return err
 		}
-		return r.DeleteMissingTx(tx, issueID, keepIDs)
-	})
+		keepIDs = append(keepIDs, comment.GitHubCommentID)
+	}
+	return r.DeleteMissingTx(tx, issueID, keepIDs)
 }
 
 func (r *IssueCommentRepository) Create(comment *model.IssueComment) error {
@@ -256,6 +282,17 @@ func (r *IssueCommentRepository) ListAllByIssueID(issueID string) ([]model.Issue
 		Order("created_at ASC, id ASC").
 		Find(&comments).Error
 	return comments, err
+}
+
+// CountSynced 返回该 Issue 下 source='github' 的镜像评论行数。
+func (r *IssueCommentRepository) CountSynced(issueID string) (int, error) {
+	var count int64
+	if err := r.db.Model(&model.IssueComment{}).
+		Where("issue_id = ? AND source = ?", issueID, model.IssueSourceGitHub).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 // MaxCreatedAt 返回该 Issue 本地评论的最新 created_at，没有评论时返回 nil。
@@ -320,20 +357,19 @@ func (r *IssueTimelineRepository) UpsertTx(tx *gorm.DB, event *model.IssueTimeli
 	}).Create(event).Error
 }
 
-// ReplaceSynced 在单个事务内把该 Issue 的时间线镜像替换成本轮拉取的集合：
-// 逐条 upsert 后清掉 event_key 不在集合内的行，任一步失败整体回滚。
-// 远端分页必须由调用方拉完——事务内只执行数据库操作。
-func (r *IssueTimelineRepository) ReplaceSynced(issueID string, events []*model.IssueTimelineEvent) error {
-	return r.db.Transaction(func(tx *gorm.DB) error {
-		keepKeys := make([]string, 0, len(events))
-		for _, event := range events {
-			if err := r.UpsertTx(tx, event); err != nil {
-				return err
-			}
-			keepKeys = append(keepKeys, event.EventKey)
+// ReplaceSyncedTx 把该 Issue 的时间线镜像替换成本轮拉取的集合：逐条 upsert 后
+// 清掉 event_key 不在集合内的行，任一步失败整体回滚。必须在调用方的事务内与
+// 集合水位变更（Advance/ClearCollectionsWatermarkTx）一起提交；远端分页必须
+// 在事务外拉完——事务内只执行数据库操作。
+func (r *IssueTimelineRepository) ReplaceSyncedTx(tx *gorm.DB, issueID string, events []*model.IssueTimelineEvent) error {
+	keepKeys := make([]string, 0, len(events))
+	for _, event := range events {
+		if err := r.UpsertTx(tx, event); err != nil {
+			return err
 		}
-		return r.DeleteMissingTx(tx, issueID, keepKeys)
-	})
+		keepKeys = append(keepKeys, event.EventKey)
+	}
+	return r.DeleteMissingTx(tx, issueID, keepKeys)
 }
 
 func (r *IssueTimelineRepository) DeleteMissing(issueID string, eventKeys []string) error {
@@ -364,6 +400,17 @@ func (r *IssueTimelineRepository) List(issueID string, includeCommented bool, pa
 		Limit(pageSize).
 		Find(&events).Error
 	return events, total, err
+}
+
+// Count 返回该 Issue 的时间线镜像行数；时间线无来源概念，全部行都属镜像。
+func (r *IssueTimelineRepository) Count(issueID string) (int, error) {
+	var count int64
+	if err := r.db.Model(&model.IssueTimelineEvent{}).
+		Where("issue_id = ?", issueID).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 type IssueSyncStateRepository struct {

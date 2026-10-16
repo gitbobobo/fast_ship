@@ -164,7 +164,7 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 		return fake
 	}
 
-	result, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID)
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
 	if err != nil {
 		t.Fatalf("sync project issues: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestIssueServiceSyncProjectIssues_RejectsNotGitHubConfigured(t *testing.T) 
 		p.GithubRepo = ""
 	})
 
-	_, err := svc.issueService.SyncProjectIssues(project.ID, user.ID)
+	_, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, user.ID)
 	if err == nil {
 		t.Fatal("expected error for project without GitHub config, got nil")
 	}
@@ -264,7 +264,7 @@ func TestIssueServiceSyncProjectIssues_PagedCollectionsCommitAndResyncDedupes(t 
 		return fake
 	}
 
-	result, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID)
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
 	if err != nil {
 		t.Fatalf("sync project issues: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestIssueServiceSyncProjectIssues_PagedCollectionsCommitAndResyncDedupes(t 
 	}
 
 	// 重复同步：upsert 撞唯一键更新既有行，集合行数不变。
-	result, err = svc.issueService.SyncProjectIssues(project.ID, project.UserID)
+	result, err = svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
 	if err != nil {
 		t.Fatalf("resync project issues: %v", err)
 	}
@@ -296,7 +296,8 @@ func TestIssueServiceSyncProjectIssues_PagedCollectionsCommitAndResyncDedupes(t 
 	}
 }
 
-// 评论第二页拉取失败：第一页已映射的增/改与远端缺失清理都不提交，集合保持同步前数据。
+// 评论第二页拉取失败：完整镜像全有或全无——第一页已映射的增/改与远端缺失清理都
+// 不提交，评论与时间线两个集合都保持同步前数据，水位不推进。
 func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -312,17 +313,22 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 		comments: map[int][]*ghclient.IssueComment{
 			42: {testGitHubSyncComment(500, "old body", now), testGitHubSyncComment(599, "stale", now)},
 		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
 	}
 	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
 		return fake
 	}
 
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID); err != nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("seed sync: %v", err)
 	}
 	issueID := syncedGitHubIssueID(t, svc, project.ID)
 
-	// 第二轮：第一页改 500 并新增 501、丢弃 599，第二页失败。
+	// 第二轮模拟远端变更：updated_at 必须推进，否则会被变更判据跳过。
+	fake.issues = []*ghclient.Issue{testGitHubSyncIssue(101, 42, now.Add(time.Minute))}
+	// 第一页改 500 并新增 501、丢弃 599，第二页失败。
 	fake.commentsPages = map[int][][]*ghclient.IssueComment{
 		42: {
 			{testGitHubSyncComment(500, "new body", now), testGitHubSyncComment(501, "new", now)},
@@ -331,7 +337,7 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 	}
 	fake.commentErrs = map[int]map[int]error{42: {2: fmt.Errorf("page 2 boom")}}
 
-	_, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID)
+	_, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
 	if err == nil {
 		t.Fatal("expected sync error on second comments page, got nil")
 	}
@@ -353,6 +359,26 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 		t.Fatalf("expected stale comment 599 kept after failed sync")
 	}
 
+	// 取数顺序是先评论后时间线：评论分页失败时时间线取数也不该发出，
+	// 镜像与水位都停留在首轮种子值。
+	storedTimeline := storedTimelineByKey(t, svc, issueID)
+	if len(storedTimeline) != 1 || storedTimeline["gh:700"].EventType != "labeled" {
+		t.Fatalf("expected timeline collection untouched after comment fetch failure, got %+v", storedTimeline)
+	}
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now) {
+		t.Fatalf("expected watermark kept at seed value %v after comment failure, got %v", now, meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected watermark comments kept at 0, got %d", meta.CollectionsSyncedComments)
+	}
+	if comments, timeline := fake.countCollectionCalls(); timeline != 1 {
+		t.Fatalf("expected timeline fetch skipped after comment fetch failure, got comments=%d timeline=%d", comments, timeline)
+	}
+
 	state, err := svc.syncStateRepo.Get(project.ID)
 	if err != nil {
 		t.Fatalf("load sync state: %v", err)
@@ -362,8 +388,9 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 	}
 }
 
-// 时间线第二页拉取失败：事件集合保持同步前数据；评论是独立原子边界，本轮照常提交。
-func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *testing.T) {
+// 时间线第二页拉取失败：完整镜像全有或全无——已拉到的评论也不再落库，两个集合
+// 都保持同步前数据，水位不推进，下一轮同步整体重试。
+func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsBothCollections(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
@@ -375,6 +402,9 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 	now := time.Now().UTC()
 	fake := &fakeIssueGitHubClient{
 		issues: []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "old body", now)},
+		},
 		timeline: map[int][]*ghclient.TimelineEvent{
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now), testGitHubSyncTimelineEvent(799, "subscribed", now)},
 		},
@@ -383,15 +413,17 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 		return fake
 	}
 
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID); err != nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("seed sync: %v", err)
 	}
 	issueID := syncedGitHubIssueID(t, svc, project.ID)
 
-	// 第二轮：评论集合正常更新（独立原子边界，先提交）；时间线第一页把 700 改成
+	// 第二轮模拟远端变更：updated_at 必须推进，否则会被变更判据跳过。
+	fake.issues = []*ghclient.Issue{testGitHubSyncIssue(101, 42, now.Add(time.Minute))}
+	// 评论集合正常返回（尝试把 500 改成新正文）；时间线第一页把 700 改成
 	// closed 并新增 701、丢弃 799，第二页失败。
 	fake.comments = map[int][]*ghclient.IssueComment{
-		42: {testGitHubSyncComment(500, "committed despite timeline failure", now)},
+		42: {testGitHubSyncComment(500, "would-be new body", now)},
 	}
 	fake.timelinePages = map[int][][]*ghclient.TimelineEvent{
 		42: {
@@ -401,7 +433,7 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 	}
 	fake.timelineErrs = map[int]map[int]error{42: {2: fmt.Errorf("page 2 boom")}}
 
-	_, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID)
+	_, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
 	if err == nil {
 		t.Fatal("expected sync error on second timeline page, got nil")
 	}
@@ -409,9 +441,10 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 		t.Fatalf("expected github api error, got %v", err)
 	}
 
+	// 全有或全无：时间线取数失败时，已拉到的评论更新同样不落库。
 	storedComments := storedCommentsByGitHubID(t, svc, issueID)
-	if got := storedComments[500]; got.Body != "committed despite timeline failure" {
-		t.Fatalf("expected comments committed independently of timeline failure, got %+v", storedComments)
+	if got := storedComments[500]; got.Body != "old body" {
+		t.Fatalf("expected comment 500 to keep first-round body after timeline failure, got %+v", storedComments)
 	}
 
 	stored := storedTimelineByKey(t, svc, issueID)
@@ -426,6 +459,19 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 	}
 	if _, ok := stored["gh:799"]; !ok {
 		t.Fatalf("expected stale event 799 kept after failed sync")
+	}
+
+	// 水位随完整镜像同事务推进：时间线失败本轮不得推进，仍停留在首轮种子值，
+	// 下一轮同步才会重试拉取。
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now) {
+		t.Fatalf("expected watermark kept at seed value %v after timeline failure, got %v", now, meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected watermark comments kept at 0, got %d", meta.CollectionsSyncedComments)
 	}
 }
 
@@ -453,7 +499,7 @@ func TestIssueServiceSyncProjectIssues_EmptyRemoteCleansMirrorKeepsInternal(t *t
 		return fake
 	}
 
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID); err != nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("seed sync: %v", err)
 	}
 	issueID := syncedGitHubIssueID(t, svc, project.ID)
@@ -473,10 +519,12 @@ func TestIssueServiceSyncProjectIssues_EmptyRemoteCleansMirrorKeepsInternal(t *t
 		t.Fatalf("seed internal comment: %v", err)
 	}
 
+	// 第二轮模拟远端变更（清空集合）：updated_at 必须推进，否则会被变更判据跳过。
+	fake.issues = []*ghclient.Issue{testGitHubSyncIssue(101, 42, now.Add(time.Minute))}
 	fake.comments = nil
 	fake.timeline = nil
 
-	result, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID)
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
 	if err != nil {
 		t.Fatalf("resync with empty remote: %v", err)
 	}
@@ -533,7 +581,7 @@ func TestIssueServiceSyncProjectIssues_ConcurrentSyncRejected(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := svc.issueService.SyncProjectIssues(project.ID, user.ID)
+		_, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, user.ID)
 		done <- err
 	}()
 
@@ -543,7 +591,7 @@ func TestIssueServiceSyncProjectIssues_ConcurrentSyncRejected(t *testing.T) {
 		t.Fatal("first sync did not reach ListIssues")
 	}
 
-	_, err := svc.issueService.SyncProjectIssues(project.ID, user.ID)
+	_, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, user.ID)
 	appErr, ok := err.(*errs.AppError)
 	if !ok || appErr.Code != errs.ErrIssueSyncRunning.Code {
 		t.Fatalf("expected sync-running error, got %v", err)
@@ -565,7 +613,7 @@ func TestIssueServiceSyncProjectIssues_ConcurrentSyncRejected(t *testing.T) {
 		t.Fatalf("first sync failed: %v", err)
 	}
 
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, user.ID); err != nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, user.ID); err != nil {
 		t.Fatalf("sync after release should succeed: %v", err)
 	}
 }
@@ -589,7 +637,7 @@ func TestIssueServiceSyncProjectIssues_FailureReleasesLock(t *testing.T) {
 		return fake
 	}
 
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID); err == nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err == nil {
 		t.Fatal("expected sync error, got nil")
 	}
 	state, err := svc.syncStateRepo.Get(project.ID)
@@ -601,7 +649,7 @@ func TestIssueServiceSyncProjectIssues_FailureReleasesLock(t *testing.T) {
 	}
 
 	fake.commentErrs = nil
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID); err != nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("sync after failure should succeed: %v", err)
 	}
 }
@@ -629,7 +677,7 @@ func TestIssueServiceSyncProjectIssues_IncrementalSince(t *testing.T) {
 		return fake
 	}
 
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID); err != nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
 	sinceCalls := fake.recordedSinceCalls()
@@ -646,7 +694,7 @@ func TestIssueServiceSyncProjectIssues_IncrementalSince(t *testing.T) {
 	}
 
 	fake.issues = nil
-	if _, err := svc.issueService.SyncProjectIssues(project.ID, project.UserID); err != nil {
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("second sync: %v", err)
 	}
 	sinceCalls = fake.recordedSinceCalls()
@@ -664,6 +712,444 @@ func TestIssueServiceSyncProjectIssues_IncrementalSince(t *testing.T) {
 	}
 	if state.LastIssueUpdatedAt == nil || !state.LastIssueUpdatedAt.Equal(now) {
 		t.Fatalf("expected last_issue_updated_at kept at %v after empty sync, got %v", now, state.LastIssueUpdatedAt)
+	}
+}
+
+// 远端无变更的第二次同步：不请求评论/时间线接口，响应计数取现有镜像行数。
+func TestIssueServiceSyncProjectIssues_UnchangedRemoteSkipsCollectionFetch(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC()
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(2)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now), testGitHubSyncComment(501, "b", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	if result.SyncedCommentCount != 2 || result.SyncedTimelineCount != 1 {
+		t.Fatalf("unexpected first sync result: %+v", result)
+	}
+
+	result, err = svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	if result.SyncedIssueCount != 1 || result.SyncedCommentCount != 2 || result.SyncedTimelineCount != 1 {
+		t.Fatalf("unexpected second sync result: %+v", result)
+	}
+	if comments, timeline := fake.countCollectionCalls(); comments != 1 || timeline != 1 {
+		t.Fatalf("expected collection fetches only in the first sync, got comments=%d timeline=%d", comments, timeline)
+	}
+}
+
+// 水位为空（改动前留下的旧 meta 行）：同步仍重拉一次评论/时间线做 bootstrap。
+func TestIssueServiceSyncProjectIssues_EmptyWatermarkBootstraps(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC()
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+
+	// 模拟无水位列的旧数据：meta 在、水位为空。
+	if err := svc.db.Model(&model.IssueGitHubMeta{}).
+		Where("issue_id = ?", issueID).
+		Updates(map[string]any{"collections_synced_updated_at": nil, "collections_synced_comments": 0}).Error; err != nil {
+		t.Fatalf("clear collections watermark: %v", err)
+	}
+
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
+	if err != nil {
+		t.Fatalf("bootstrap sync: %v", err)
+	}
+	if result.SyncedCommentCount != 1 {
+		t.Fatalf("unexpected bootstrap sync result: %+v", result)
+	}
+	if comments, timeline := fake.countCollectionCalls(); comments != 2 || timeline != 2 {
+		t.Fatalf("expected bootstrap sync to refetch collections, got comments=%d timeline=%d", comments, timeline)
+	}
+}
+
+// updated_at 相同但远端评论数变化（同一秒内新增评论）：仍会重拉集合。
+func TestIssueServiceSyncProjectIssues_CommentCountChangeRefetches(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC()
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(1)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// 同一秒新增一条评论：updated_at 不变，远端评论数 1→2。
+	updated := testGitHubSyncIssue(101, 42, now)
+	updated.Comments = intPtr(2)
+	fake.issues = []*ghclient.Issue{updated}
+	fake.comments = map[int][]*ghclient.IssueComment{
+		42: {testGitHubSyncComment(500, "a", now), testGitHubSyncComment(501, "b", now)},
+	}
+
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	if result.SyncedCommentCount != 2 {
+		t.Fatalf("unexpected second sync result: %+v", result)
+	}
+	if comments, _ := fake.countCollectionCalls(); comments != 2 {
+		t.Fatalf("expected comment refetch on comments-count change, got %d calls", comments)
+	}
+}
+
+// 集合拉取失败不推进水位：错误消失后下一轮同步仍重试拉取。
+func TestIssueServiceSyncProjectIssues_FailedCollectionFetchKeepsWatermark(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+
+	// 第二轮模拟远端变更（updated_at 推进），但评论拉取失败：水位不推进。
+	fake.issues = []*ghclient.Issue{testGitHubSyncIssue(101, 42, now.Add(time.Minute))}
+	fake.comments = map[int][]*ghclient.IssueComment{
+		42: {testGitHubSyncComment(500, "a", now), testGitHubSyncComment(501, "b", now)},
+	}
+	fake.commentErrs = map[int]map[int]error{42: {1: errors.New("comments down")}}
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err == nil {
+		t.Fatal("expected sync error, got nil")
+	}
+
+	fake.commentErrs = nil
+	result, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID)
+	if err != nil {
+		t.Fatalf("retry sync: %v", err)
+	}
+	if result.SyncedCommentCount != 2 {
+		t.Fatalf("unexpected retry sync result: %+v", result)
+	}
+	// 评论 = 首轮 + 失败轮 + 重试轮共 3 次；时间线失败轮未到达，共 2 次。
+	if comments, timeline := fake.countCollectionCalls(); comments != 3 || timeline != 2 {
+		t.Fatalf("expected collection fetches retried after failure, got comments=%d timeline=%d", comments, timeline)
+	}
+
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("expected watermark advanced to %v, got %v", now.Add(time.Minute), meta.CollectionsSyncedUpdatedAt)
+	}
+}
+
+// push 路径的时间线刷新只重拉了时间线、没有重拉评论：同一事务里清空集合水位
+// 而不是推进——若推进，push 的时间线快照会与「已同步」的水位共存，缺失内容
+// 再也无法被判据发现。清空后即使远端再无变化，下一次后台同步也要保守重拉两个
+// 集合，这是 push 扰动后的自愈路径。
+func TestIssueServiceRefreshTimelineAfterPush_ClearsWatermarkSoNextSyncRefetches(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(1)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+	stored, err := svc.issueRepo.FindByID(issueID)
+	if err != nil {
+		t.Fatalf("load stored issue: %v", err)
+	}
+
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil {
+		t.Fatal("expected seed sync to advance the collections watermark")
+	}
+
+	if err := svc.issueService.mirror.refreshTimelineAfterPush(context.Background(), fake, stored, item); err != nil {
+		t.Fatalf("refresh timeline after push: %v", err)
+	}
+	// 换新结构体重读：GORM 扫 NULL 到已复用的 *time.Time 字段不会置回 nil。
+	var cleared model.IssueGitHubMeta
+	if err := svc.db.First(&cleared, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("reload github meta: %v", err)
+	}
+	meta = cleared
+	if meta.CollectionsSyncedUpdatedAt != nil {
+		t.Fatalf("expected collections watermark cleared after push, got %v", meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected collections watermark comments cleared after push, got %d", meta.CollectionsSyncedComments)
+	}
+
+	// 远端再无变化（updated_at/评论数与首轮一致），下一轮同步因水位为空仍重拉两个集合。
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync after push: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments+1 || afterTimeline != beforeTimeline+1 {
+		t.Fatalf("expected next sync to refetch both collections after push cleared the watermark, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
+	}
+}
+
+// push 路径的评论写回（recordPushedComment）同样是「只写一部分集合」：三处写入
+// 必须与集合水位清空同事务。否则延迟的创建响应覆盖已镜像正文后，远端 (updated_at,
+// 评论数) 与水位一致，跳过判据再也发现不了该 issue，旧正文不再自愈；清空后该
+// issue 下次被增量列表返回时重拉两个集合，把镜像修回远端值。
+func TestIssueServiceRecordPushedComment_ClearsWatermarkAndNextSyncHeals(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(1)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "remote", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+	stored, err := svc.issueRepo.FindByID(issueID)
+	if err != nil {
+		t.Fatalf("load stored issue: %v", err)
+	}
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || meta.CollectionsSyncedComments != 1 {
+		t.Fatalf("expected seed sync to advance the collections watermark, got %v / %d", meta.CollectionsSyncedUpdatedAt, meta.CollectionsSyncedComments)
+	}
+
+	// 延迟的创建响应：同一个 github_comment_id=500，正文落后于远端已镜像的值。
+	pushed := buildGitHubIssueCommentModel(stored.ID, testGitHubSyncComment(500, "stale-push", now))
+	if err := svc.issueService.mirror.recordPushedComment(stored, pushed); err != nil {
+		t.Fatalf("record pushed comment: %v", err)
+	}
+	comments := storedCommentsByGitHubID(t, svc, issueID)
+	if got := comments[500]; got.Body != "stale-push" {
+		t.Fatalf("expected push response to overwrite mirrored body, got %q", got.Body)
+	}
+
+	// 换新结构体重读：GORM 扫 NULL 到已复用的 *time.Time 字段不会置回 nil。
+	var cleared model.IssueGitHubMeta
+	if err := svc.db.First(&cleared, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("reload github meta: %v", err)
+	}
+	if cleared.CollectionsSyncedUpdatedAt != nil || cleared.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected collections watermark cleared after push, got %v / %d", cleared.CollectionsSyncedUpdatedAt, cleared.CollectionsSyncedComments)
+	}
+
+	// 远端无变化：水位为空让下一轮同步重拉两个集合，评论正文修回远端值。
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync after push: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments+1 || afterTimeline != beforeTimeline+1 {
+		t.Fatalf("expected next sync to refetch both collections after push cleared the watermark, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
+	}
+	comments = storedCommentsByGitHubID(t, svc, issueID)
+	if got := comments[500]; got.Body != "remote" {
+		t.Fatalf("expected comment 500 healed back to remote body, got %q", got.Body)
+	}
+}
+
+// 确定性回归（INT-104 第三轮 C<P<T 反例）：push 评论写回落在评论取数之后、完整
+// 镜像写库事务之前。完整镜像是一个原子单元（评论替换 + 时间线替换 + 推进水位
+// 同事务），最后提交的事务同时决定两个集合与水位——push 的旧正文被同一事务的
+// 评论替换覆盖，水位推进与之匹配，下一轮判据认为已完整镜像不再重拉；不存在
+// 「旧镜像 + 已确认水位」需要自愈。
+func TestIssueServiceSyncProjectIssues_PushWriteBetweenFetchesIsOverwrittenByFullMirror(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "remote", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+
+	// 第二轮模拟远端变更（updated_at 推进、评论数 1），并在时间线取数开头注入
+	// push 写回：此时评论已取完（远端正文），写库事务尚未开始——push 的延迟
+	// 响应（同 github_comment_id=500、旧正文）先落库并清空水位。
+	updated := testGitHubSyncIssue(101, 42, now.Add(time.Minute))
+	updated.Comments = intPtr(1)
+	fake.issues = []*ghclient.Issue{updated}
+	var once sync.Once
+	fake.onListTimeline = func() {
+		once.Do(func() {
+			var issue model.Issue
+			if err := svc.db.First(&issue, "project_id = ?", project.ID).Error; err != nil {
+				t.Fatalf("load issue in callback: %v", err)
+			}
+			stored, err := svc.issueRepo.FindByID(issue.ID)
+			if err != nil {
+				t.Fatalf("load issue with meta in callback: %v", err)
+			}
+			pushed := buildGitHubIssueCommentModel(stored.ID, testGitHubSyncComment(500, "stale-push", now))
+			if err := svc.issueService.mirror.recordPushedComment(stored, pushed); err != nil {
+				t.Fatalf("record pushed comment in callback: %v", err)
+			}
+		})
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync with injected push write: %v", err)
+	}
+
+	// 完整镜像事务覆盖 push 写回：终态正文 = 远端值，不再是 stale-push。
+	stored := storedCommentsByGitHubID(t, svc, issueID)
+	if got := stored[500]; got.Body != "remote" {
+		t.Fatalf("expected full mirror to overwrite stale push body, got %q", got.Body)
+	}
+
+	// 水位已推进到本轮列表快照：非 nil，评论数等于 item.GetComments()。
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("expected watermark advanced to list snapshot %v, got %v", now.Add(time.Minute), meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != updated.GetComments() {
+		t.Fatalf("expected watermark comments=%d, got %d", updated.GetComments(), meta.CollectionsSyncedComments)
+	}
+
+	// 远端不再变化：判据认为该 issue 已完整镜像，下一轮不请求评论/时间线接口。
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("second sync after full mirror: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments || afterTimeline != beforeTimeline {
+		t.Fatalf("expected no collection refetch once fully mirrored, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
 	}
 }
 
