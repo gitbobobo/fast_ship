@@ -196,59 +196,90 @@ func (s *BotService) tryFinishRun(bot *model.Bot, run *model.BotRun) bool {
 				"input_through_seq": run.InputThroughSeq,
 			})
 		finished = ok
-		return err
+		if err != nil || !ok {
+			return err
+		}
+		// 终态事件与终态转移同一事务：崩溃不会留下没有 done 事件的已终
+		// 态 run（重连客户端按游标回放时 run 栏会永远卡在 running）。
+		return s.appendEventTx(tx, bot.ID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
+			Kind: "run_done", Phase: string(model.BotRunStatusCompleted),
+			Payload: map[string]interface{}{"status": string(model.BotRunStatusCompleted)},
+		})
 	})
 	if txErr != nil {
 		s.logger.Warn("完成 run 失败", zap.String("run_id", run.ID), zap.Error(txErr))
 		return false
 	}
 	if finished {
-		s.emitRunEvent(bot.ID, run, model.BotEventDone, botEventEnvelope{
-			Kind: "run_done", Phase: string(model.BotRunStatusCompleted),
-			Payload: map[string]interface{}{"status": string(model.BotRunStatusCompleted)},
-		})
+		s.publishEvent(bot.ID)
 	}
 	return finished
 }
 
 // finishStopped / finishFailed 落定终态并发 done（失败先 error 再 done）。
+// 终态与事件同一事务：崩溃不留无事件的已终态 run；提交后再发布 SSE。
 func (s *BotService) finishStopped(bot *model.Bot, run *model.BotRun) {
 	now := time.Now().UTC()
-	ok, err := s.runs.UpdateColumns(run.ID, map[string]interface{}{"finished_at": nil},
-		map[string]interface{}{"status": model.BotRunStatusStopped, "finished_at": now})
-	if err != nil || !ok {
+	ok := false
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
+			map[string]interface{}{"finished_at": nil},
+			map[string]interface{}{"status": model.BotRunStatusStopped, "finished_at": now})
+		if err != nil || !ok {
+			return err
+		}
+		return s.appendEventTx(tx, bot.ID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
+			Kind: "run_done", Phase: string(model.BotRunStatusStopped),
+			Payload: map[string]interface{}{"status": string(model.BotRunStatusStopped)},
+		})
+	})
+	if txErr != nil {
+		s.logger.Warn("落停止终态失败", zap.String("run_id", run.ID), zap.Error(txErr))
 		return
 	}
-	s.emitRunEvent(bot.ID, run, model.BotEventDone, botEventEnvelope{
-		Kind: "run_done", Phase: string(model.BotRunStatusStopped),
-		Payload: map[string]interface{}{"status": string(model.BotRunStatusStopped)},
-	})
+	if ok {
+		s.publishEvent(bot.ID)
+	}
 }
 
 func (s *BotService) finishFailed(bot *model.Bot, run *model.BotRun, code string, cause error) {
 	now := time.Now().UTC()
 	msg := botErrMessage(cause)
-	ok, err := s.runs.UpdateColumns(run.ID, map[string]interface{}{"finished_at": nil},
-		map[string]interface{}{
-			"status":        model.BotRunStatusFailed,
-			"finished_at":   now,
-			"error_code":    code,
-			"error_message": msg,
+	ok := false
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		ok, err = repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, run.ID,
+			map[string]interface{}{"finished_at": nil},
+			map[string]interface{}{
+				"status":        model.BotRunStatusFailed,
+				"finished_at":   now,
+				"error_code":    code,
+				"error_message": msg,
+			})
+		if err != nil || !ok {
+			return err
+		}
+		if err := s.appendEventTx(tx, bot.ID, runIDPtr(run.ID), "", model.BotEventError, botEventEnvelope{
+			Kind: "run_error",
+			Payload: map[string]interface{}{
+				"code": code, "message": msg, "status": string(model.BotRunStatusFailed),
+			},
+		}); err != nil {
+			return err
+		}
+		return s.appendEventTx(tx, bot.ID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
+			Kind: "run_done", Phase: string(model.BotRunStatusFailed),
+			Payload: map[string]interface{}{"status": string(model.BotRunStatusFailed)},
 		})
-	if err != nil || !ok {
+	})
+	if txErr != nil {
+		s.logger.Warn("落失败终态", zap.String("run_id", run.ID), zap.Error(txErr))
 		return
 	}
-	runID := run.ID
-	s.emitEvent(bot.ID, &runID, "", model.BotEventError, botEventEnvelope{
-		Kind: "run_error",
-		Payload: map[string]interface{}{
-			"code": code, "message": msg, "status": string(model.BotRunStatusFailed),
-		},
-	})
-	s.emitRunEvent(bot.ID, run, model.BotEventDone, botEventEnvelope{
-		Kind: "run_done", Phase: string(model.BotRunStatusFailed),
-		Payload: map[string]interface{}{"status": string(model.BotRunStatusFailed)},
-	})
+	if ok {
+		s.publishEvent(bot.ID)
+	}
 }
 
 // ---------- 模型请求记录 ----------

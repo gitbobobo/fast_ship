@@ -596,6 +596,25 @@ describe("foldStreamEvent", () => {
       "r-err:failed:model_request_failed:上游 502",
     ]);
   });
+  it("快照合并顺着批准转移方向：queued 胜过缓存的 pending_confirmation", () => {
+    const { state, sinks: sinksObj } = sinks();
+    state.calls = [{
+      id: "call-1", bot_id: "bot-1", tool_name: "fs_issue", action: "create",
+      status: "pending_confirmation", created_at: "2026-01-01T00:00:00Z",
+    } as unknown as BotCall];
+    foldStreamEvent(
+      {
+        event: "tool_call",
+        data: JSON.stringify({
+          call_id: "call-1",
+          payload: { id: "call-1", status: "queued" },
+        }),
+        id: 12,
+      },
+      sinksObj,
+    );
+    expect(state.calls[0].status).toBe("queued");
+  });
   it("异步终态 tool_result 携带完整后台结果消息并入时间线", () => {
     const { state, sinks: sinksObj } = sinks();
     const backgroundMessage: BotMessage = {

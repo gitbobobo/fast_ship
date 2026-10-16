@@ -122,10 +122,12 @@ export function mergeRun(
 
 // ---- 快照安装合并：防止迟到的旧快照覆盖 SSE 已折叠的新状态 ----
 
-/** 状态推进序：更靠后的状态胜出；同分保留已缓存值。 */
+/** 状态推进序：更靠后的状态胜出；同分保留已缓存值。
+ *  批准转移是 pending_confirmation → queued，序必须顺着转移方向，
+ *  否则权威快照里的 queued 会输给缓存里的旧待确认卡。 */
 const CALL_STATUS_RANK: Record<BotCallStatus, number> = {
-  queued: 0,
-  pending_confirmation: 1,
+  pending_confirmation: 0,
+  queued: 1,
   running: 2,
   succeeded: 3,
   failed: 3,

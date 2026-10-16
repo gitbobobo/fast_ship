@@ -2559,3 +2559,32 @@ func TestBotFinishDoesNotOverwriteAcceptedStop(t *testing.T) {
 		t.Fatalf("run 应保持未终态等下一轮落 stopped，实际 %s", fresh.Status)
 	}
 }
+
+func TestBotTerminalRunEventInSameTx(t *testing.T) {
+	// 终态转移与 done 事件同一事务：finishStopped 提交后账本里必须有
+	// done 事件（崩溃不留无事件的已终态 run）。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "bottermevent")
+	bot := env.createBot(t, userID)
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-termevent", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "termevent",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+	env.bots.finishStopped(botRow, run)
+	var events int64
+	env.db.Model(&model.BotEvent{}).Where("bot_id = ? AND event_type = ?",
+		bot.ID, model.BotEventDone).Count(&events)
+	if events != 1 {
+		t.Fatalf("stopped 终态必须带 done 事件，实际 %d", events)
+	}
+}
