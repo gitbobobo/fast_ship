@@ -2990,3 +2990,26 @@ func TestBotCancelQueuedLostRaceReportsRunning(t *testing.T) {
 		t.Fatalf("取消意图必须以标记表达，等 worker 落定终态")
 	}
 }
+
+func TestBotCancelQueuedSyncAppendsProtocolReply(t *testing.T) {
+	// 取消排队中的同步调用必须补协议回复：assistant 已声明的 tool 块要
+	// 闭合，否则后续 buildRunContext 全部失败。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botcancelsync")
+	bot := env.createBot(t, userID)
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionSync))
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("find: %v", err)
+	}
+	fresh, cancelled := env.bots.cancelBotCall(call)
+	if !cancelled || fresh.Status != model.BotCallStatusCancelled {
+		t.Fatalf("取消应成功落 cancelled: %s %v", fresh.Status, cancelled)
+	}
+	var replies int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ? AND call_id = ?",
+		bot.ID, model.BotMessageKindToolReply, callID).Count(&replies)
+	if replies != 1 {
+		t.Fatalf("同步调用取消必须补恰好一条协议回复，实际 %d", replies)
+	}
+}

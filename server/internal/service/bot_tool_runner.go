@@ -728,7 +728,24 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 				return nil
 			}
 			call.Status = model.BotCallStatusCancelled
-			// 终态结果消息（唯一 terminal）。
+			if call.ExecutionMode == string(model.BotExecutionSync) {
+				// 同步调用：协议回复必须闭合 assistant 已声明的 tool 块
+				// （每个 provider_tool_call_id 恰好一条 tool 消息），否则
+				// 后续 buildRunContext 全部失败。
+				reply := botToolReplyContent{
+					CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
+					ToolName: call.ToolName, Status: string(model.BotCallStatusCancelled),
+					Content: botFailureReplyText(errs.New(errs.ErrInvalidParams.Code, "调用在排队时被取消，未执行")),
+				}
+				if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
+					return err
+				}
+				return s.appendEventTx(tx, call.BotID, runIDPtr(runID), call.ID, model.BotEventToolResult, botEventEnvelope{
+					Kind: "tool_result", Phase: "terminal",
+					Payload: botToolCallResponseOf(call),
+				})
+			}
+			// 终态结果消息（唯一 terminal，仅异步调用）。
 			return s.appendBackgroundResultTx(tx, runID, call, model.BotCallStatusCancelled, botToolOutcome{}, nil, false, now)
 		})
 		if txErr != nil || lostRace {
