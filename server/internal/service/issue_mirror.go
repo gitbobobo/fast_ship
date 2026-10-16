@@ -34,7 +34,7 @@ type issueMilestonePayload struct {
 
 // issueMirror 负责 GitHub→本地的镜像同步：先拉全远端分页再写库、同一项目用
 // 内存锁防并发。push 路径（创建/更新 issue、发评论）经 upsertGitHubIssue、
-// syncTimeline、recordPushedComment 把远端响应写回本地，不经同步锁。
+// refreshTimelineAfterPush、recordPushedComment 把远端响应写回本地，不经同步锁。
 // 依赖在构造时按值固化，只有 newClient 由 IssueService 闭包委托、调用时现取，
 // 保证测试替换 s.newClient 对镜像同样生效；其余字段测试不会在构造后更换。
 type issueMirror struct {
@@ -128,19 +128,17 @@ func (m *issueMirror) Sync(ctx context.Context, project *model.Project) (*IssueS
 			}
 
 			// 远端 issue 相对集合水位未变时跳过评论/时间线拉取，计数取现有
-			// 镜像行数；水位只在两个集合都成功镜像后推进，失败则下轮重试。
+			// 镜像行数；水位随时间线镜像在同一事务里推进（syncTimeline），
+			// 失败则下轮重试。
 			var commentCount, timelineCount int
 			if needsCollectionSync(issue.GitHubMeta, item) {
 				commentCount, syncErr = m.syncComments(ctx, client, issue, item.GetNumber())
 				if syncErr != nil {
 					return failSync(syncErr)
 				}
-				timelineCount, syncErr = m.syncTimeline(ctx, client, issue, item.GetNumber())
+				timelineCount, syncErr = m.syncTimeline(ctx, client, issue, item)
 				if syncErr != nil {
 					return failSync(syncErr)
-				}
-				if err := m.gitHubMetaRepo.MarkCollectionsSynced(issue.ID, item.GetUpdatedAt().UTC(), item.GetComments()); err != nil {
-					return failSync(errs.ErrInternal)
 				}
 			} else {
 				var err error
@@ -509,9 +507,9 @@ func (m *issueMirror) syncComments(ctx context.Context, client gitHubIssueClient
 	return len(comments), nil
 }
 
-// syncTimeline 先拉完该 Issue 的全部时间线分页并映射成 model，再由 ReplaceSynced
-// 单事务写入；任一分页失败时本地集合保持同步前数据，一个字也不写。
-func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient, issue *model.Issue, issueNumber int) (int, error) {
+// fetchTimeline 拉完该 Issue 的全部时间线分页并映射成 model，不含写库；
+// 任一分页失败时返回 GitHub API 错误，调用方什么也不该写。
+func (m *issueMirror) fetchTimeline(ctx context.Context, client gitHubIssueClient, issueID string, issueNumber int) ([]*model.IssueTimelineEvent, error) {
 	const perPage = 100
 	page := 1
 	var events []*model.IssueTimelineEvent
@@ -519,7 +517,7 @@ func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient
 	for {
 		items, resp, err := client.ListIssueTimeline(ctx, issueNumber, page, perPage)
 		if err != nil {
-			return 0, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 动态失败: %v", err))
+			return nil, errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("同步 Issue 动态失败: %v", err))
 		}
 
 		for _, item := range items {
@@ -528,7 +526,7 @@ func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient
 			}
 			events = append(events, &model.IssueTimelineEvent{
 				ID:              uuid.NewString(),
-				IssueID:         issue.ID,
+				IssueID:         issueID,
 				EventKey:        buildTimelineEventKey(item),
 				GitHubEventID:   item.GetID(),
 				EventType:       item.GetEvent(),
@@ -547,10 +545,52 @@ func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient
 		page = resp.NextPage
 	}
 
-	if err := m.timelineRepo.ReplaceSynced(issue.ID, events); err != nil {
+	return events, nil
+}
+
+// syncTimeline 是后台同步的时间线镜像路径：先拉完全部远端分页，再在同一个
+// 数据库事务里替换时间线镜像并推进集合水位。替换与水位必须同事务——push 路径
+// （refreshTimelineAfterPush）也会替换时间线且不经同步锁，两者分开提交会出现
+// 「push 的旧快照覆盖镜像、水位却已推进」的组合，下一次同步因判据一致而跳过
+// 拉取，缺失事件再也无法自愈；同事务后谁最后提交，就由谁同时决定镜像与水位。
+// 水位取本轮列表返回的 item 远端快照而不是 upsert 后读回的 issue 行：后者可能
+// 已被并发 push 覆盖，水位不能指向超出本次快照覆盖范围的状态。
+func (m *issueMirror) syncTimeline(ctx context.Context, client gitHubIssueClient, issue *model.Issue, item *ghclient.Issue) (int, error) {
+	events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
+	if err != nil {
+		return 0, err
+	}
+	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events); err != nil {
+			return err
+		}
+		return m.gitHubMetaRepo.AdvanceCollectionsWatermarkTx(tx, issue.ID, item.GetUpdatedAt().UTC(), item.GetComments())
+	}); err != nil {
 		return 0, errs.ErrInternal
 	}
 	return len(events), nil
+}
+
+// refreshTimelineAfterPush 是 push 路径（创建/更新 issue）的时间线刷新：push
+// 只重拉了时间线、没有重拉评论，不能推进集合水位，所以在与 syncTimeline 相同
+// 的事务边界里替换镜像并清空水位，下一次后台同步会保守重拉两个集合。清空而非
+// 推进的理由：以本函数拿到的快照推进水位会让本地评论镜像落后于水位，丢的评论
+// 无法被发现。与后台同步并发时（push 不经同步锁），镜像与水位要么同属最后提交
+// 的事务，要么都保持旧值，不会出现「旧镜像 + 新水位」。
+func (m *issueMirror) refreshTimelineAfterPush(ctx context.Context, client gitHubIssueClient, issue *model.Issue, item *ghclient.Issue) error {
+	events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
+	if err != nil {
+		return err
+	}
+	if err := m.issueRepo.Transaction(func(tx *gorm.DB) error {
+		if err := m.timelineRepo.ReplaceSyncedTx(tx, issue.ID, events); err != nil {
+			return err
+		}
+		return m.gitHubMetaRepo.ClearCollectionsWatermarkTx(tx, issue.ID)
+	}); err != nil {
+		return errs.ErrInternal
+	}
+	return nil
 }
 
 // recordPushedComment 把刚推送到 GitHub 的评论写回本地：upsert 评论行、

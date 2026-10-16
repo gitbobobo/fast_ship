@@ -222,9 +222,11 @@ func TestIssueTimelineReplaceSynced_ReplacesMirror(t *testing.T) {
 	seedSyncTestEvent(t, db, issue.ID, "gh:1", "stale")
 	kept := seedSyncTestEvent(t, db, issue.ID, "gh:2", "labeled")
 
-	err := timeline.ReplaceSynced(issue.ID, []*model.IssueTimelineEvent{
-		newSyncTestEvent(issue.ID, "gh:2", "closed"),
-		newSyncTestEvent(issue.ID, "gh:3", "reopened"),
+	err := db.Transaction(func(tx *gorm.DB) error {
+		return timeline.ReplaceSyncedTx(tx, issue.ID, []*model.IssueTimelineEvent{
+			newSyncTestEvent(issue.ID, "gh:2", "closed"),
+			newSyncTestEvent(issue.ID, "gh:3", "reopened"),
+		})
 	})
 	if err != nil {
 		t.Fatalf("replace synced timeline: %v", err)
@@ -249,9 +251,11 @@ func TestIssueTimelineReplaceSynced_RollsBackOnUpsertFailure(t *testing.T) {
 
 	stale := seedSyncTestEvent(t, db, issue.ID, "gh:1", "stale")
 
-	err := timeline.ReplaceSynced(issue.ID, []*model.IssueTimelineEvent{
-		newSyncTestEvent(issue.ID, "gh:2", "labeled"),
-		newSyncTestEvent("ghost-issue", "gh:3", "closed"),
+	err := db.Transaction(func(tx *gorm.DB) error {
+		return timeline.ReplaceSyncedTx(tx, issue.ID, []*model.IssueTimelineEvent{
+			newSyncTestEvent(issue.ID, "gh:2", "labeled"),
+			newSyncTestEvent("ghost-issue", "gh:3", "closed"),
+		})
 	})
 	if err == nil {
 		t.Fatal("expected upsert failure, got nil")
@@ -277,8 +281,10 @@ func TestIssueTimelineReplaceSynced_RollsBackOnDeleteFailure(t *testing.T) {
 		db.Exec("DROP TRIGGER IF EXISTS fail_event_delete")
 	})
 
-	err := timeline.ReplaceSynced(issue.ID, []*model.IssueTimelineEvent{
-		newSyncTestEvent(issue.ID, "gh:2", "labeled"),
+	err := db.Transaction(func(tx *gorm.DB) error {
+		return timeline.ReplaceSyncedTx(tx, issue.ID, []*model.IssueTimelineEvent{
+			newSyncTestEvent(issue.ID, "gh:2", "labeled"),
+		})
 	})
 	if err == nil {
 		t.Fatal("expected delete failure, got nil")

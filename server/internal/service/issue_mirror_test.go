@@ -431,6 +431,19 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsCollection(t *tes
 	if _, ok := stored["gh:799"]; !ok {
 		t.Fatalf("expected stale event 799 kept after failed sync")
 	}
+
+	// 水位随镜像同事务推进：时间线失败本轮不得推进，仍停留在首轮种子值，
+	// 下一轮同步才会重试拉取。
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now) {
+		t.Fatalf("expected watermark kept at seed value %v after timeline failure, got %v", now, meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected watermark comments kept at 0, got %d", meta.CollectionsSyncedComments)
+	}
 }
 
 // 远端返回空集合：GitHub 镜像行全部清掉；source='internal' 的本地评论保留。
@@ -866,6 +879,80 @@ func TestIssueServiceSyncProjectIssues_FailedCollectionFetchKeepsWatermark(t *te
 	}
 	if meta.CollectionsSyncedUpdatedAt == nil || !meta.CollectionsSyncedUpdatedAt.Equal(now.Add(time.Minute)) {
 		t.Fatalf("expected watermark advanced to %v, got %v", now.Add(time.Minute), meta.CollectionsSyncedUpdatedAt)
+	}
+}
+
+// push 路径的时间线刷新只重拉了时间线、没有重拉评论：同一事务里清空集合水位
+// 而不是推进——若推进，push 的时间线快照会与「已同步」的水位共存，缺失内容
+// 再也无法被判据发现。清空后即使远端再无变化，下一次后台同步也要保守重拉两个
+// 集合，这是 push 扰动后的自愈路径。
+func TestIssueServiceRefreshTimelineAfterPush_ClearsWatermarkSoNextSyncRefetches(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-1")
+	token := createTestToken(t, svc.db, svc.cfg.Encryption.Key, user.ID, "gh-token")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.PublicGitHubTokenID = token.ID
+		p.CodeGitHubTokenID = token.ID
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	item := testGitHubSyncIssue(101, 42, now)
+	item.Comments = intPtr(1)
+	fake := &fakeIssueGitHubClient{
+		issues: []*ghclient.Issue{item},
+		comments: map[int][]*ghclient.IssueComment{
+			42: {testGitHubSyncComment(500, "a", now)},
+		},
+		timeline: map[int][]*ghclient.TimelineEvent{
+			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
+		},
+	}
+	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+		return fake
+	}
+
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("seed sync: %v", err)
+	}
+	issueID := syncedGitHubIssueID(t, svc, project.ID)
+	stored, err := svc.issueRepo.FindByID(issueID)
+	if err != nil {
+		t.Fatalf("load stored issue: %v", err)
+	}
+
+	var meta model.IssueGitHubMeta
+	if err := svc.db.First(&meta, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("load github meta: %v", err)
+	}
+	if meta.CollectionsSyncedUpdatedAt == nil {
+		t.Fatal("expected seed sync to advance the collections watermark")
+	}
+
+	if err := svc.issueService.mirror.refreshTimelineAfterPush(context.Background(), fake, stored, item); err != nil {
+		t.Fatalf("refresh timeline after push: %v", err)
+	}
+	// 换新结构体重读：GORM 扫 NULL 到已复用的 *time.Time 字段不会置回 nil。
+	var cleared model.IssueGitHubMeta
+	if err := svc.db.First(&cleared, "issue_id = ?", issueID).Error; err != nil {
+		t.Fatalf("reload github meta: %v", err)
+	}
+	meta = cleared
+	if meta.CollectionsSyncedUpdatedAt != nil {
+		t.Fatalf("expected collections watermark cleared after push, got %v", meta.CollectionsSyncedUpdatedAt)
+	}
+	if meta.CollectionsSyncedComments != 0 {
+		t.Fatalf("expected collections watermark comments cleared after push, got %d", meta.CollectionsSyncedComments)
+	}
+
+	// 远端再无变化（updated_at/评论数与首轮一致），下一轮同步因水位为空仍重拉两个集合。
+	beforeComments, beforeTimeline := fake.countCollectionCalls()
+	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
+		t.Fatalf("sync after push: %v", err)
+	}
+	afterComments, afterTimeline := fake.countCollectionCalls()
+	if afterComments != beforeComments+1 || afterTimeline != beforeTimeline+1 {
+		t.Fatalf("expected next sync to refetch both collections after push cleared the watermark, got comments %d→%d timeline %d→%d",
+			beforeComments, afterComments, beforeTimeline, afterTimeline)
 	}
 }
 
