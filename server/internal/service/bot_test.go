@@ -2271,3 +2271,81 @@ func TestBotDiscardDraftOnModelFailure(t *testing.T) {
 		t.Fatalf("失败流不得提交 assistant 消息: %d", msgCount)
 	}
 }
+
+func TestBotSnapshotIncludesOldUnfinishedCalls(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botsnapcall")
+	bot := env.createBot(t, userID)
+
+	// 100 条终态调用挤占页面，第 101 条 pending_confirmation 是老账本里的
+	// 待确认卡片：快照必须收录它，否则聊天页无法批准。
+	for i := 0; i < 100; i++ {
+		seedBotCallFixture(t, env, bot.ID, model.BotCallStatusSucceeded, string(model.BotExecutionAsync))
+	}
+	_, pendingID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusPendingConfirmation, string(model.BotExecutionAsync))
+
+	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	found := false
+	for _, c := range snap.Calls {
+		if c.ID == pendingID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("快照必须收录未终态调用（待确认卡片可操作）: %d", len(snap.Calls))
+	}
+}
+
+func TestBotContextWindowSlides(t *testing.T) {
+	// 账本超过抓取上限后窗口必须滑动：新输入永远能进上下文，run 能正常
+	// 收尾（否则同页空转重建、模型被反复调用）。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botwindow")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("bot: %v", err)
+	}
+
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: "run-window", BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "window",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	msgs := repository.NewBotMessageRepository(env.db)
+	for seq := 1; seq <= botHistoryFetchLimit+2; seq++ {
+		msg := &model.BotMessage{ID: uuid.NewString(), BotID: bot.ID, Seq: int64(seq),
+			Kind:        model.BotMessageKindUser,
+			ContentJSON: `{"text":"旧消息"}`, CreatedAt: now}
+		if seq == botHistoryFetchLimit+2 {
+			msg.ContentJSON = `{"text":"最新输入"}`
+		}
+		if err := msgs.AppendTx(env.db, msg); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	built, err := env.bots.buildRunContext(botRow, run)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	// 消费水位必须到达账本末尾：最新的输入已进入本轮上下文。
+	if built.InputThroughSeq < int64(botHistoryFetchLimit+2) {
+		t.Fatalf("窗口滑动后消费水位应达账本末尾: %d", built.InputThroughSeq)
+	}
+	raw, err := json.Marshal(built.Request.Messages)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), "最新输入") {
+		t.Fatalf("最新输入必须进入本轮上下文")
+	}
+}

@@ -63,6 +63,15 @@ func (r *BotToolCallRepository) ListPendingConfirmation(botID string, limit int)
 	return rows, err
 }
 
+// ListUnfinishedByBot 列出本机器人全部未终态调用（快照收录：数量有界且
+// 必须可操作）。
+func (r *BotToolCallRepository) ListUnfinishedByBot(botID string, limit int) ([]model.BotToolCall, error) {
+	var rows []model.BotToolCall
+	err := r.db.Where("bot_id = ? AND finished_at IS NULL", botID).
+		Order("created_at ASC, id ASC").Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
 // ListUnfinished 返回所有未到终态的调用（启动恢复与超时扫描用）。
 func (r *BotToolCallRepository) ListUnfinished() ([]model.BotToolCall, error) {
 	var rows []model.BotToolCall

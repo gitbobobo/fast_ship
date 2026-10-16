@@ -183,6 +183,20 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 			snap.Calls = append(snap.Calls, botToolCallResponseOf(&callRows[i]))
 		}
 
+		// 未终态调用必须全量收录（数量有界）：超过一页时最新 100 条可能
+		// 不含历史页里的待确认卡片，聊天页将无法批准/取消。
+		unfinished, err := repository.NewBotToolCallRepository(tx).ListUnfinishedByBot(botID, 100)
+		if err != nil {
+			return err
+		}
+		seen := map[string]bool{}
+		for _, c := range unfinished {
+			if !seen[c.ID] {
+				seen[c.ID] = true
+				snap.Calls = append(snap.Calls, botToolCallResponseOf(&c))
+			}
+		}
+
 		runRows, err := repository.NewBotRunRepository(tx).ListByBot(botID, 50)
 		if err != nil {
 			return err

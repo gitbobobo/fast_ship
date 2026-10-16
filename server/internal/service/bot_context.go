@@ -78,8 +78,21 @@ func (s *BotService) buildRunContext(bot *model.Bot, run *model.BotRun) (*botBui
 	// 4. 会话摘要（首期为空，历史下界 0 = 全量）。
 	_, fromSeq := botConversationSummary(bot.ID)
 
-	// 5. 历史投影。
-	rows, err := s.messages.ListAfterSeq(bot.ID, fromSeq-1, botHistoryFetchLimit)
+	// 5. 历史投影：窗口取最近的 botHistoryFetchLimit 条。固定从 0 起读在
+	// 账本超过上限后会永远停在第一页——新输入进不来、run 永远在空转重建
+	// 同一页。窗口滑动后，更早的历史归摘要/记忆层（预留接缝）。
+	maxSeq, err := s.messages.MaxSeq(bot.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	windowStart := fromSeq - 1
+	if maxSeq > int64(botHistoryFetchLimit) {
+		windowStart = maxSeq - int64(botHistoryFetchLimit)
+		if windowStart < fromSeq-1 {
+			windowStart = fromSeq - 1
+		}
+	}
+	rows, err := s.messages.ListAfterSeq(bot.ID, windowStart, botHistoryFetchLimit)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
