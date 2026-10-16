@@ -318,6 +318,7 @@ func (s *BotService) buildAlwaysAllowValue(botID string, call *model.BotToolCall
 		ScopeID:       execCtx.ScopeID,
 		EnvironmentID: envID,
 		Fields:        fields,
+		Param:         execCtx.Param,
 	}
 	var envPtr *string
 	if envID != "" {

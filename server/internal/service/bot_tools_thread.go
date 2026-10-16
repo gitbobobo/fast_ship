@@ -136,6 +136,9 @@ type botCallExecContext struct {
 	CommandID string   `json:"command_id,omitempty"`
 	MessageID string   `json:"message_id,omitempty"`
 	Fields    []string `json:"fields,omitempty"`
+	// Param 与授权规则的参数值级约束一致（如 source=github）：always-allow
+	// 重建规则时必须有它，否则后续调用哈希永远对不上。
+	Param string `json:"param,omitempty"`
 }
 
 func botThreadMessage(text string) api.CreateT3ThreadRequest_Message {

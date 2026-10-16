@@ -2702,3 +2702,53 @@ func TestBotIssueCreateAuthzBindsSource(t *testing.T) {
 		t.Fatalf("缺省 source 应与 internal 同规则")
 	}
 }
+
+func TestBotAlwaysAllowPersistsSourceParam(t *testing.T) {
+	// always-allow 存规则时必须带上参数值约束：internal 来源受理后重建的
+	// 规则要能匹配后续 internal create，且不匹配 github create。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "botalwsrc")
+	bot := env.createBot(t, userID)
+	botRow := &model.Bot{ID: bot.ID, UserID: userID}
+
+	sourcedCall := func(source string) *model.BotToolCall {
+		args := `{"action":"create","project_id":"p1","title":"t","source":"` + source + `"}`
+		prep, err := botPrepareToolCall("fs_issue", args)
+		if err != nil {
+			t.Fatalf("prepare(%s): %v", source, err)
+		}
+		var execCtx botCallExecContext
+		env.bots.resolveCallScope(botRow, prep, args, &execCtx)
+		return &model.BotToolCall{
+			ID: uuid.NewString(), BotID: bot.ID, ToolName: "fs_issue", Action: "create",
+			ExecutionContextJSON: marshalExecContext(execCtx),
+		}
+	}
+	authz := env.bots.buildAlwaysAllowValue(bot.ID, sourcedCall("internal"))
+
+	var freshCtx botCallExecContext
+	if err := json.Unmarshal([]byte(sourcedCall("internal").ExecutionContextJSON), &freshCtx); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	prep2, err := botPrepareToolCall("fs_issue",
+		`{"action":"create","project_id":"p1","title":"t2","source":"internal"}`)
+	if err != nil {
+		t.Fatalf("prepare2: %v", err)
+	}
+	env.bots.resolveCallScope(botRow, prep2,
+		`{"action":"create","project_id":"p1","title":"t2","source":"internal"}`, &freshCtx)
+	if got := botRuleHash(botRuleOf(prep2)); got != authz.RuleHash {
+		t.Fatalf("同源后续 create 必须命中 always-allow 规则")
+	}
+
+	prep3, err := botPrepareToolCall("fs_issue",
+		`{"action":"create","project_id":"p1","title":"t3","source":"github"}`)
+	if err != nil {
+		t.Fatalf("prepare3: %v", err)
+	}
+	env.bots.resolveCallScope(botRow, prep3,
+		`{"action":"create","project_id":"p1","title":"t3","source":"github"}`, &freshCtx)
+	if got := botRuleHash(botRuleOf(prep3)); got == authz.RuleHash {
+		t.Fatalf("github 来源不得命中 internal 的 always-allow 规则")
+	}
+}

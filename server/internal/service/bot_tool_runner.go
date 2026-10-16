@@ -272,6 +272,7 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 	execCtx.ScopeKind = prepared.ScopeKind
 	execCtx.ScopeID = prepared.ScopeID
 	execCtx.Fields = prepared.FieldsConstraint
+	execCtx.Param = prepared.ParamConstraint
 }
 
 // botRequireScope 写操作必须有可展示的具体范围，否则建卡失败。
