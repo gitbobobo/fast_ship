@@ -434,17 +434,55 @@ func (s *BotService) closeUnstartedSyncCalls(calls []*model.BotToolCall, reason 
 	}
 }
 
-// closeUnstartedWriteCalls 只给尚未认领的写操作补 not_executed：读类调用
-// （botCallIsReadOnly）保留给调用方继续执行，不因新输入被丢弃。
+// closeUnstartedWriteCalls 给尚未认领的写操作补 not_executed：读类调用
+// （botCallIsReadOnly）保留给调用方继续执行，不因新输入被丢弃。同步写走
+// 协议回复，已受理但尚未被 worker 认领的异步写走后台结果——两者都要闭合，
+// 否则排队中的写会在用户改了主意之后仍然落地。
 func (s *BotService) closeUnstartedWriteCalls(calls []*model.BotToolCall, reason string) {
-	writes := make([]*model.BotToolCall, 0, len(calls))
+	syncWrites := make([]*model.BotToolCall, 0, len(calls))
 	for _, call := range calls {
 		if botCallIsReadOnly(call) {
 			continue
 		}
-		writes = append(writes, call)
+		if call.ExecutionMode == string(model.BotExecutionAsync) {
+			s.closeUnstartedAsyncCall(call, reason)
+			continue
+		}
+		syncWrites = append(syncWrites, call)
 	}
-	s.closeUnstartedSyncCalls(writes, reason)
+	s.closeUnstartedSyncCalls(syncWrites, reason)
+}
+
+// closeUnstartedAsyncCall 把 queued 的异步写原子地置为 not_executed 并补后台
+// 结果；已被 worker 认领（running）的调用 CAS 失败即跳过——副作用可能已经
+// 发生，不能在这里逆转，交给模型按后台结果如实汇报。
+func (s *BotService) closeUnstartedAsyncCall(call *model.BotToolCall, reason string) {
+	if call.Status != model.BotCallStatusQueued {
+		return
+	}
+	runID := s.runIDOfCall(call)
+	now := time.Now().UTC()
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		ok, err := repository.NewBotToolCallRepository(tx).UpdateWhereTx(tx, call.ID,
+			string(model.BotCallStatusQueued), map[string]interface{}{
+				"status":        model.BotCallStatusNotExecuted,
+				"finished_at":   now,
+				"error_code":    "not_executed",
+				"error_message": reason,
+			})
+		if err != nil || !ok {
+			return err
+		}
+		call.Status = model.BotCallStatusNotExecuted
+		return s.appendBackgroundResultMsgTx(tx, runID, call, model.BotCallStatusNotExecuted,
+			botToolOutcome{}, "not_executed", reason, false, now)
+	})
+	if txErr != nil {
+		s.logger.Warn("补异步 not_executed 终态失败", zap.String("call_id", call.ID), zap.Error(txErr))
+		return
+	}
+	s.publishEvent(call.BotID)
+	s.wakeForCallResult(call.BotID, call, string(model.BotCallStatusNotExecuted))
 }
 
 // botCallIsReadOnly 判断一个调用是否是纯读取动作：只有同步执行且命中读类
@@ -844,13 +882,23 @@ func (s *BotService) cancelBotCall(call *model.BotToolCall) (*model.BotToolCall,
 
 // appendBackgroundResultTx 在事务内追加平台后台结果消息与事件（幂等）。
 func (s *BotService) appendBackgroundResultTx(tx *gorm.DB, runID string, call *model.BotToolCall, status model.BotToolCallStatus, outcome botToolOutcome, execErr error, effect bool, now time.Time) error {
+	code, message := "", ""
+	if execErr != nil {
+		code, message = botErrCodeOf(execErr), botErrMessage(execErr)
+	}
+	return s.appendBackgroundResultMsgTx(tx, runID, call, status, outcome, code, message, effect, now)
+}
+
+// appendBackgroundResultMsgTx 是显式错误码的版本：终态原因不总能用一个
+// error 表达（如平台侧未执行 not_executed），此时直接给错误码与说明。
+func (s *BotService) appendBackgroundResultMsgTx(tx *gorm.DB, runID string, call *model.BotToolCall, status model.BotToolCallStatus, outcome botToolOutcome, errorCode, errorMessage string, effect bool, now time.Time) error {
 	result := botBackgroundResultContent{
 		CallID: call.ID, ToolName: call.ToolName, Action: call.Action,
 		Status: string(status), EffectMayHaveOccurred: effect,
 	}
-	if execErr != nil {
-		result.ErrorCode = botErrCodeOf(execErr)
-		result.ErrorMessage = botErrMessage(execErr)
+	if errorCode != "" || errorMessage != "" {
+		result.ErrorCode = errorCode
+		result.ErrorMessage = errorMessage
 	}
 	if outcome.ResultJSON != "" {
 		result.Summary = botResultSummary(outcome.ResultJSON)

@@ -20,13 +20,13 @@ import (
 // 新输入只暂停写操作、Issue 写入保护。
 
 func TestBotInt110ToolsetActionEnumsComplete(t *testing.T) {
-	v3 := botToolsetVersionOf(3)
+	v4 := botToolsetVersionOf(4)
 	for tool, want := range map[string][]string{
 		"fs_project": {"list", "get", "create", "update"},
 		"fs_issue":   {"list", "get", "comments", "timeline", "create", "update", "set_workflow", "replace_checklist", "comment"},
 		"fs_thread":  {"list", "get", "item", "composer_options", "workspace_options", "launch", "send", "stop"},
 	} {
-		raw, _ := json.Marshal(v3.byName[tool].Parameters)
+		raw, _ := json.Marshal(v4.byName[tool].Parameters)
 		var schema map[string]interface{}
 		_ = json.Unmarshal(raw, &schema)
 		props, _ := schema["properties"].(map[string]interface{})
@@ -45,20 +45,22 @@ func TestBotInt110ToolsetActionEnumsComplete(t *testing.T) {
 			t.Fatalf("%s schema 应把各动作必填字段写入 action 描述: %q", tool, desc)
 		}
 	}
-	// v1/v2 冻结：枚举仍是历史生成结果（只列第一个取值），不得被修正污染。
-	for _, v := range []int64{1, 2} {
+	// v1/v2/v3 冻结：枚举仍是历史生成结果（只列第一个取值），不得被修正污染。
+	for _, v := range []int64{1, 2, 3} {
 		raw, _ := json.Marshal(botToolsetVersionOf(v).byName["fs_issue"].Parameters)
 		if strings.Count(string(raw), `"enum":["list"`) == 0 {
 			t.Fatalf("v%d fs_issue 枚举应保持冻结的旧字节: %s", v, raw)
 		}
 	}
-	if botToolsetVersionOf(1).hash != botToolsetV1FrozenHash || botToolsetVersionOf(2).hash != botToolsetV2FrozenHash {
-		t.Fatalf("v1/v2 tools_hash 偏离冻结基线")
+	if botToolsetVersionOf(1).hash != botToolsetV1FrozenHash ||
+		botToolsetVersionOf(2).hash != botToolsetV2FrozenHash ||
+		botToolsetVersionOf(3).hash != botToolsetV3FrozenHash {
+		t.Fatalf("v1/v2/v3 tools_hash 偏离冻结基线")
 	}
 }
 
 func TestBotInt110ActionFieldValidation(t *testing.T) {
-	ts := botToolsetVersionOf(3)
+	ts := botToolsetOf()
 	ok := []struct{ tool, args string }{
 		// 非字符串必填字段只要求出现：items 是数组、expected_version 是数字。
 		{"fs_issue", `{"action":"replace_checklist","issue_id":"i1","items":[]}`},
@@ -382,5 +384,69 @@ func TestBotInt110RequestStopRejectsFinishedRun(t *testing.T) {
 	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?", bot.ID, model.BotMessageKindUser).Count(&n)
 	if n != 0 {
 		t.Fatalf("被拒的停止不得落消息，实得 %d 条", n)
+	}
+}
+
+func TestBotInt110CloseUnstartedAsyncWrite(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int110async")
+	bot := env.createBot(t, userID)
+	project, err := env.bots.projects.Create(userID, &CreateProjectRequest{Name: "INT110 异步暂停"})
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	original := "原始正文"
+	issue, err := env.bots.issues.CreateInternalIssue(project.Id, userID,
+		CreateInternalIssueRequest{Title: "原标题", Body: &original})
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusQueued, string(model.BotExecutionAsync))
+	env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).Updates(map[string]interface{}{
+		"tool_name":      "fs_issue",
+		"action":         "update",
+		"arguments_json": fmt.Sprintf(`{"action":"update","issue_id":%q,"title":"不应落地"}`, issue.Id),
+	})
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	env.bots.closeUnstartedAsyncCall(call, "new_input_before_execution")
+
+	fresh, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("fresh: %v", err)
+	}
+	if fresh.Status != model.BotCallStatusNotExecuted || fresh.ErrorCode == nil || *fresh.ErrorCode != "not_executed" {
+		t.Fatalf("排队中的异步写应置 not_executed: %+v", fresh)
+	}
+	after, err := env.bots.issues.Get(issue.Id, userID)
+	if err != nil {
+		t.Fatalf("issue after: %v", err)
+	}
+	if after.Title != "原标题" {
+		t.Fatalf("未开始的异步写不得落地: %q", after.Title)
+	}
+	var results int64
+	env.db.Model(&model.BotMessage{}).
+		Where("bot_id = ? AND kind = ? AND call_id = ?", bot.ID, model.BotMessageKindBackgroundResult, callID).
+		Count(&results)
+	if results != 1 {
+		t.Fatalf("应补一条后台结果消息，实得 %d", results)
+	}
+
+	// 已被 worker 认领（running）的写不在这里逆转：副作用可能已发生。
+	_, runningID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusRunning, string(model.BotExecutionAsync))
+	runningCall, err := env.bots.calls.FindByID(runningID)
+	if err != nil {
+		t.Fatalf("running call: %v", err)
+	}
+	env.bots.closeUnstartedAsyncCall(runningCall, "new_input_before_execution")
+	freshRunning, err := env.bots.calls.FindByID(runningID)
+	if err != nil {
+		t.Fatalf("fresh running: %v", err)
+	}
+	if freshRunning.Status != model.BotCallStatusRunning {
+		t.Fatalf("已认领的写不应被逆转: %+v", freshRunning)
 	}
 }

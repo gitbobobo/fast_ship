@@ -1567,6 +1567,9 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	if to >= 4 && from < 4 {
+		return "工具集已升级：参数 schema 修正 action 枚举、补齐各动作必填字段，fs_thread list/get 支持筛选分页与详情条目，fs_issue get 返回正文/清单/标签，fs_issue update/replace_checklist 支持写入保护"
+	}
 	if to >= 3 && from < 3 {
 		return "工具集已升级：fs_schedule 开放定时任务管理（list/create/update/delete/runs/enable/disable，全部同步执行；旧动作 status 已移除）"
 	}

@@ -871,12 +871,14 @@ func TestBotScheduleDeleteMissingTaskNotFound(t *testing.T) {
 	}
 }
 
-// INT-101 / INT-102 冻结的工具集 wire 字节 SHA-256：改动任一版本都会让
-// 存量会话的前缀与 tools_hash 失稳，这里钉死。这是跨版本契约，不是实现
-// 细节；v3 是活跃版本，允许演进，不在此钉死。
+// 已发布工具集的 wire 字节 SHA-256：改动任一版本都会让存量会话的前缀与
+// tools_hash 失稳，这里钉死。这是跨版本契约，不是实现细节；v4 是活跃版本，
+// 允许演进，不在此钉死。
 const (
 	botToolsetV1FrozenHash = "c1da7e95288ed681392529f68a812ec1ac403bcd53cee1414634cca28197ef06"
 	botToolsetV2FrozenHash = "4ec300f75e9aff618b820246c85cc497db6e4d8027cbce342696cc629560ca19"
+	// v3 在 INT-110 后冻结：schema 修正只进 v4，旧会话继续用旧字节。
+	botToolsetV3FrozenHash = "9e420a0b28375b39967b9080dc46b28cb876e40ad04c7a402043e8dfc9c7cd07"
 )
 
 func TestBotScheduleToolsetVersions(t *testing.T) {
@@ -886,15 +888,19 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	if v1.hash == v2.hash || v2.hash == v3.hash || v1.hash == v3.hash {
 		t.Fatalf("三个版本的工具集 hash 必须互不相同")
 	}
-	// v1/v2 的 wire 字节已冻结：hash 必须与基线（c211713）逐字节一致。
-	if v1.hash != botToolsetV1FrozenHash || v2.hash != botToolsetV2FrozenHash {
-		t.Fatalf("v1/v2 tools_hash 偏离冻结基线: v1=%s v2=%s", v1.hash, v2.hash)
+	v4 := botToolsetVersionOf(4)
+	// 已发布版本的 wire 字节已冻结：hash 必须与基线逐字节一致。
+	if v1.hash != botToolsetV1FrozenHash || v2.hash != botToolsetV2FrozenHash || v3.hash != botToolsetV3FrozenHash {
+		t.Fatalf("v1/v2/v3 tools_hash 偏离冻结基线: v1=%s v2=%s v3=%s", v1.hash, v2.hash, v3.hash)
 	}
-	if len(v3.schemas) != 11 || len(v2.schemas) != 11 || len(v1.schemas) != 10 {
-		t.Fatalf("v1/v2/v3 工具数应为 10/11/11，实得 %d/%d/%d", len(v1.schemas), len(v2.schemas), len(v3.schemas))
+	if v4.hash == v3.hash {
+		t.Fatalf("v4 应使用修正后的 schema")
 	}
-	// v3 fs_schedule：7 个同步动作。
-	sched := v3.byName["fs_schedule"]
+	if len(v4.schemas) != 11 || len(v3.schemas) != 11 || len(v2.schemas) != 11 || len(v1.schemas) != 10 {
+		t.Fatalf("v1/v2/v3/v4 工具数应为 10/11/11/11，实得 %d/%d/%d/%d", len(v1.schemas), len(v2.schemas), len(v3.schemas), len(v4.schemas))
+	}
+	// v3/v4 fs_schedule：7 个同步动作。
+	sched := v4.byName["fs_schedule"]
 	if sched == nil || len(sched.Actions) != 7 {
 		t.Fatalf("v3 fs_schedule 应有 7 个动作: %+v", sched)
 	}
@@ -920,6 +926,18 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 			t.Fatalf("v%d fs_schedule 应使用冻结的占位参数结构体", v.version)
 		}
 	}
+	// v3 冻结的参数结构体：schema enum 仍是历史生成结果（只列 list）。
+	if v3.byName["fs_schedule"].ArgsType.Name() != "botScheduleTaskArgsFrozen" {
+		t.Fatalf("v3 fs_schedule 应使用冻结参数结构体")
+	}
+	v3SchemaRaw, _ := json.Marshal(v3.byName["fs_schedule"].Parameters)
+	var v3Schema map[string]interface{}
+	_ = json.Unmarshal(v3SchemaRaw, &v3Schema)
+	v3Props, _ := v3Schema["properties"].(map[string]interface{})
+	v3Action, _ := v3Props["action"].(map[string]interface{})
+	if enum, _ := v3Action["enum"].([]interface{}); len(enum) != 1 || enum[0] != "list" {
+		t.Fatalf("v3 schema 应保持冻结的旧枚举: %v", enum)
+	}
 	// v3 会话调旧动作 status → 改名提示；v2 会话仍可用 status。
 	if _, err := botPrepareToolCall(v3, "fs_schedule", `{"action":"status"}`); err == nil {
 		t.Fatalf("v3 不应再接受 fs_schedule/status")
@@ -928,10 +946,10 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	if err != nil || prepared.Action != "status" || prepared.Mode != model.BotExecutionSync {
 		t.Fatalf("v2 fs_schedule/status 应照常可用: %v %+v", err, prepared)
 	}
-	// v3 新参数结构体：schema enum 列全 7 个动作。
+	// v4 修正后的参数结构体：schema enum 列全 7 个动作。
 	rawSchema, _ := json.Marshal(sched.Parameters)
 	if !strings.Contains(string(rawSchema), "list") || !strings.Contains(string(rawSchema), "disable") {
-		t.Fatalf("v3 schema 应列出全部动作: %s", rawSchema)
+		t.Fatalf("v4 schema 应列出全部动作: %s", rawSchema)
 	}
 }
 

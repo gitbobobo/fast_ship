@@ -205,9 +205,10 @@ type botEnvironmentArgs struct {
 // v1/v2 是历史版本的冻结副本——v3 变化（含 fs_schedule 及任何共享工具的
 // 描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
 
-// botToolRegistryV3 是当前发布注册表：fs_schedule 自 INT-103 起开放
-// list/create/update/delete/runs/enable/disable，全部同步执行。
-func botToolRegistryV3() []*botToolDef {
+// botToolRegistryV4 是当前发布注册表：fs_schedule 自 INT-103 起开放
+// list/create/update/delete/runs/enable/disable，全部同步执行。INT-110 起
+// 参数 schema 修正 action 枚举并新增线程/Issue 字段。
+func botToolRegistryV4() []*botToolDef {
 	return []*botToolDef{
 		{
 			Name:        "fs_project",
@@ -333,10 +334,25 @@ func botToolRegistryV3() []*botToolDef {
 	}
 }
 
+// botToolRegistryV3 是 INT-103 冻结的 v3 注册表。工具/动作/描述与 v4 完全
+// 相同，只有参数结构体不同：用冻结副本，保证已发布 v3 会话的 tools_hash 不
+// 因 INT-110 的 schema 修正而回退。
+func botToolRegistryV3() []*botToolDef {
+	tools := botToolRegistryV4()
+	botUseFrozenArgs(3, tools)
+	return tools
+}
+
 // botToolRegistryV2 是 INT-102 冻结的 v2 注册表：fs_schedule 仍是 status
 // 占位（available:false），fs_memory 全量开放并新增 fs_memory_search。
 // 存量会话在压缩边界/重启前的构建必须使用与本版完全一致的字节。
 func botToolRegistryV2() []*botToolDef {
+	tools := botToolRegistryV2Literal()
+	botUseFrozenArgs(2, tools)
+	return tools
+}
+
+func botToolRegistryV2Literal() []*botToolDef {
 	return []*botToolDef{
 		{
 			Name:        "fs_project",
@@ -460,6 +476,12 @@ func botToolRegistryV2() []*botToolDef {
 // 占位（available:false），无 fs_memory_search。存量会话在压缩边界/重启前
 // 的构建必须使用与本版完全一致的字节（前缀稳定）。
 func botToolRegistryV1() []*botToolDef {
+	tools := botToolRegistryV1Literal()
+	botUseFrozenArgs(1, tools)
+	return tools
+}
+
+func botToolRegistryV1Literal() []*botToolDef {
 	return []*botToolDef{
 		{
 			Name:        "fs_project",
@@ -604,11 +626,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV1()
 	case 2:
 		tools = botToolRegistryV2()
-	default:
+	case 3:
 		tools = botToolRegistryV3()
-	}
-	if version <= 2 {
-		botUseFrozenArgs(version, tools)
+	default:
+		tools = botToolRegistryV4()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -672,9 +693,9 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 	return holder
 }
 
-// botUseFrozenArgs 把 v1/v2 的 schema 参数换回冻结结构体：这些结构体在 v3
-// 修正枚举、新增字段后字节会变，冻结副本保证存量会话的 tools_hash 不回退。
-// v1 的 fs_memory 是 status 占位（用 botScheduleArgs），不在此替换。
+// botUseFrozenArgs 把 v1/v2/v3 的 schema 参数换回冻结结构体：这些结构体在
+// v4 修正枚举、新增字段后字节会变，冻结副本保证已发布版本的 tools_hash 不
+// 回退。v1 的 fs_memory 是 status 占位（用 botScheduleArgs），不在此替换。
 func botUseFrozenArgs(version int64, tools []*botToolDef) {
 	frozen := map[string]reflect.Type{
 		"fs_project":     reflect.TypeOf(botProjectArgsFrozen{}),
@@ -685,6 +706,9 @@ func botUseFrozenArgs(version int64, tools []*botToolDef) {
 	if version >= 2 {
 		frozen["fs_memory"] = reflect.TypeOf(botMemoryArgsFrozen{})
 	}
+	if version >= 3 {
+		frozen["fs_schedule"] = reflect.TypeOf(botScheduleTaskArgsFrozen{})
+	}
 	for _, tool := range tools {
 		if typ, ok := frozen[tool.Name]; ok {
 			tool.ArgsType = typ
@@ -693,8 +717,8 @@ func botUseFrozenArgs(version int64, tools []*botToolDef) {
 }
 
 // botConditionalSchemaVersion 是从此版本起把 per-action 必填字段写进 schema
-// 描述的工具集版本。v1/v2 的 wire 字节已冻结，不能注入。
-const botConditionalSchemaVersion int64 = 3
+// 描述的工具集版本。v1/v2/v3 的 wire 字节已冻结，不能注入。
+const botConditionalSchemaVersion int64 = 4
 
 // botReadOnlyActions 标记纯读取动作；未列出的动作按写处理。
 var botReadOnlyActions = map[string]bool{

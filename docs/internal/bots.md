@@ -357,9 +357,10 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 覆盖范围准确，再完善新输入与写入保护」一致。
 
 - **Schema 准确**：多取值 `action` 枚举此前只会生成第一个取值（invopop
-  `enum=a,b` 语法），v3 起改用 `enum=a,enum=b` 逐项声明；v1/v2 的旧字节由
+  `enum=a,b` 语法），v4 起改用 `enum=a,enum=b` 逐项声明；v1/v2/v3 的旧字节由
   `bot_args_frozen.go` 的冻结结构体逐字节保留（`botToolsetV1FrozenHash` /
-  `V2FrozenHash` 钉死）。各动作必填字段写进 `action` 字段的 schema 描述
+  `V2FrozenHash` / `V3FrozenHash` 钉死；v3 与 v4 工具/动作/描述相同，仅参数
+  结构体不同）。各动作必填字段写进 `action` 字段的 schema 描述
   （`botActionRules` 同时是服务端校验的唯一事实源）；不用 `if/then` 是因为
   多数 OpenAI 兼容后端不校验 JSON Schema，条件分支只增加每请求约 700 token
   的固定开销而无强制力。
@@ -379,10 +380,11 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   续读会跳过一段谁也没看过的内容。返回体带 `offset` / `end` / `next_offset`
   / `has_more` 与说明。截断预览只给开头约 500 字符（`botResultPreviewChars`），
   避免「看到预览」被当成「看到完整结果」。
-- **新输入只暂停写操作**：安全点发现新输入时，尚未开始的写操作补
-  `not_executed`（回复用独立 `error_code=not_executed`，不再复用参数校验的
-  40001）；读类调用（`botReadOnlyActions` 判定，含 sync 的读与记忆/schedule
-  读）允许执行完，已有结果不丢。
+- **新输入只暂停写操作**：安全点发现新输入时（每个调用前重查，前一个长读
+  不会把新输入盖过去），尚未开始的写操作补 `not_executed`：同步写走协议回复
+  （`error_code=not_executed`，不再复用参数校验的 40001），已受理但尚未被
+  worker 认领的异步写走后台结果（CAS `queued→not_executed`，认领竞速失败即
+  跳过）；读类调用（`botReadOnlyActions` 判定）允许执行完，已有结果不丢。
 - **停止按钮 = 用户消息**：`POST /runs/:id/stop` 追加一条「停止」用户消息并
   唤醒（`client_message_id=stop:<runID>` 幂等），不再硬取消当前回复、后台
   调用或远端线程；是否结束由机器人结合上下文决定，真正要停自己时仍可用
