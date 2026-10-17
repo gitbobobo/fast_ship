@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
-	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"gorm.io/gorm"
 )
 
@@ -38,7 +38,7 @@ func (s *AutomationAgentService) loadPRRun(ctx context.Context, runID string) (*
 }
 
 // prGitHub 返回注入的 GitHub 访问面（未配置时报错）。
-func (s *AutomationAgentService) prGitHub() (githubapp.PullRequestGitHub, error) {
+func (s *AutomationAgentService) prGitHub() (githubapi.GitHubClient, error) {
 	if s.pr == nil {
 		return nil, errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
 	}
@@ -163,7 +163,7 @@ func (s *AutomationAgentService) AgentSubmitPullRequestReview(ctx context.Contex
 	return &api.AgentPullRequestReviewResult{Submitted: true}, nil
 }
 
-func (s *AutomationAgentService) submitReviewIfLive(ctx context.Context, gh githubapp.PullRequestGitHub, run *model.AutomationRun, req *api.AgentPullRequestReviewRequest) error {
+func (s *AutomationAgentService) submitReviewIfLive(ctx context.Context, gh githubapi.GitHubClient, run *model.AutomationRun, req *api.AgentPullRequestReviewRequest) error {
 	fresh, err := s.runs.FindByID(ctx, run.ID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -175,7 +175,7 @@ func (s *AutomationAgentService) submitReviewIfLive(ctx context.Context, gh gith
 		(fresh.Status != model.AutomationRunDispatched && fresh.Status != model.AutomationRunRunning) {
 		return errs.ErrRunNotPRReview
 	}
-	if err := gh.SubmitReview(ctx, fresh.InstallationID, fresh.RepoFullName, fresh.PRNumber, githubapp.ReviewInput{
+	if err := gh.SubmitReview(ctx, fresh.InstallationID, fresh.RepoFullName, fresh.PRNumber, githubapi.ReviewInput{
 		Event:    string(req.Event),
 		Body:     api.Deref(req.Body),
 		CommitID: fresh.HeadSHA,
@@ -214,7 +214,7 @@ func (s *AutomationAgentService) AgentUpdateCheck(ctx context.Context, identity 
 	return out
 }
 
-func (s *AutomationAgentService) updateCheckIfLive(ctx context.Context, gh githubapp.PullRequestGitHub, run *model.AutomationRun, req *api.AgentCheckUpdateRequest) error {
+func (s *AutomationAgentService) updateCheckIfLive(ctx context.Context, gh githubapi.GitHubClient, run *model.AutomationRun, req *api.AgentCheckUpdateRequest) error {
 	fresh, err := s.runs.FindByID(ctx, run.ID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -229,8 +229,8 @@ func (s *AutomationAgentService) updateCheckIfLive(ctx context.Context, gh githu
 	if fresh.CheckRunID == nil {
 		return errs.New(errs.ErrRunNotPRReview.Code, "本运行的 check run 尚未创建，请稍后重试")
 	}
-	in := githubapp.CheckUpdate{
-		Status:  githubapp.CheckInProgress,
+	in := githubapi.CheckUpdate{
+		Status:  githubapi.CheckInProgress,
 		Title:   api.Deref(req.Title),
 		Summary: api.Deref(req.Summary),
 		Text:    api.Deref(req.Text),

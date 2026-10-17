@@ -21,15 +21,6 @@ import (
 	"gorm.io/gorm"
 )
 
-type gitHubClient interface {
-	ValidateRepository(ctx context.Context) error
-	CreateTag(ctx context.Context, tag, commitish string) error
-	CreateRelease(ctx context.Context, tag, name, body string) (*gh.RepositoryRelease, error)
-	UploadAsset(ctx context.Context, releaseID int64, filename string, file *os.File) error
-}
-
-type gitHubClientFactory func(token, owner, repo string) gitHubClient
-
 // shipHookActions is deliberately narrower than IssueService. Shipping only
 // needs these issue side effects; depending on the whole issue application
 // service made this workflow needlessly coupled to unrelated issue features.
@@ -50,7 +41,7 @@ type ShipService struct {
 	storage      storage.Storage
 	logger       *zap.Logger
 	credentials  *ProjectCredentials
-	newClient    gitHubClientFactory
+	newClient    ghclient.ClientFactory
 }
 
 // ShipResult 内嵌契约类型保持序列化形状一致；RecoveredVersionIDs 是内部
@@ -82,7 +73,7 @@ func NewShipService(
 		storage:      storage,
 		logger:       logger,
 		credentials:  newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
-		newClient: func(token, owner, repo string) gitHubClient {
+		newClient: func(token, owner, repo string) ghclient.Client {
 			return ghclient.NewClient(token, owner, repo)
 		},
 	}

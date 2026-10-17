@@ -110,7 +110,7 @@ func TestShipServiceShip_SuccessUpdatesVersionAndUploadsAssets(t *testing.T) {
 			HTMLURL: stringPtr("https://github.com/owner/repo/releases/tag/v1.0.0"),
 		},
 	}
-	svc.shipService.newClient = func(token, owner, repo string) gitHubClient {
+	svc.shipService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
@@ -183,7 +183,7 @@ func TestShipServiceShip_CreateReleaseFailureRecordsFailureState(t *testing.T) {
 	fake := &fakeGitHubClient{
 		createReleaseErr: errors.New("release api down"),
 	}
-	svc.shipService.newClient = func(token, owner, repo string) gitHubClient {
+	svc.shipService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -244,7 +244,7 @@ func TestShipServiceShip_CreateTagPermissionFailureUsesActionableMessage(t *test
 			Message:  "Resource not accessible by personal access token",
 		},
 	}
-	svc.shipService.newClient = func(token, owner, repo string) gitHubClient {
+	svc.shipService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -291,7 +291,7 @@ func TestShipServiceShip_UploadFailureRecordsFailureState(t *testing.T) {
 		release:        &gh.RepositoryRelease{ID: int64Ptr(42)},
 		uploadAssetErr: errors.New("asset upload failed"),
 	}
-	svc.shipService.newClient = func(token, owner, repo string) gitHubClient {
+	svc.shipService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -323,6 +323,7 @@ func TestShipServiceShip_UploadFailureRecordsFailureState(t *testing.T) {
 }
 
 type fakeGitHubClient struct {
+	stubGitHubClient
 	mu sync.Mutex
 
 	validateErr      error
@@ -398,7 +399,7 @@ func stubSuccessfulShipClient(t *testing.T, svc *testServices, releaseURL string
 			HTMLURL: stringPtr(releaseURL),
 		},
 	}
-	svc.shipService.newClient = func(token, owner, repo string) gitHubClient {
+	svc.shipService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 	return fake
@@ -494,7 +495,7 @@ func TestShipServiceShip_FailedShipDoesNotConsumeHook(t *testing.T) {
 		t.Fatalf("upsert ship hook: %v", err)
 	}
 
-	svc.shipService.newClient = func(token, owner, repo string) gitHubClient {
+	svc.shipService.newClient = func(token, owner, repo string) ghclient.Client {
 		return &fakeGitHubClient{createReleaseErr: errors.New("release api down")}
 	}
 
@@ -653,7 +654,7 @@ func TestShipServiceShip_GitHubCommentFailureStillShips(t *testing.T) {
 		},
 		timeline: map[int][]*ghclient.TimelineEvent{42: {}},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fakeIssueGH
 	}
 	stubSuccessfulShipClient(t, svc, "")

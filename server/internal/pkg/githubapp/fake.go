@@ -8,18 +8,23 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 )
 
-// Fake PullRequestGitHub 的内存实现：读接口返回入站时存下的 PR 数据（SetPR），
-// diff 固定短字符串；写接口记账（Calls）供测试断言。注释/check 的 ID 按序号递增。
-// webhook 事务期间 GitHub 调用数为 0 的断言靠 CallCounts。
+// Fake githubapi.GitHubClient 的内存实现：读接口返回入站时存下的 PR 数据
+// （SetPR），diff 固定短字符串；写接口记账（Calls）供测试断言。注释/check 的
+// ID 按序号递增。webhook 事务期间 GitHub 调用数为 0 的断言靠 CallCounts。
+
+// 编译期钉住 Fake 满足 seam 契约。
+var _ githubapi.GitHubClient = (*Fake)(nil)
 
 type Fake struct {
 	mu             sync.Mutex
-	prs            map[string]map[int]*PullRequest  // repo -> number -> PR
-	comments       map[string]map[int][]fakeComment // repo -> number -> issue comments
-	reviews        map[string][]fakeComment         // repo -> review comments
-	checks         map[string]fakeCheck             // repo -> latest check per id
+	prs            map[string]map[int]*githubapi.PullRequest // repo -> number -> PR
+	comments       map[string]map[int][]fakeComment          // repo -> number -> issue comments
+	reviews        map[string][]fakeComment                  // repo -> review comments
+	checks         map[string]fakeCheck                      // repo -> latest check per id
 	nextID         int64
 	diffText       string
 	forbidCheck    bool // 按模型 CreateCheckRun 返回 403（退回合并 check）
@@ -39,12 +44,12 @@ type fakeCheck struct {
 	ID      int64
 	Name    string
 	HeadSHA string
-	Update  CheckUpdate
+	Update  githubapi.CheckUpdate
 }
 
 // FakeCall 一次写调用的记账（读调用也记，供「事务内调用数为 0」断言）。
 type FakeCall struct {
-	Method string // GetPullRequest / CreateIssueComment / ...
+	Method string // GetPullRequest / CreatePullRequestComment / ...
 	Repo   string
 	Number int
 	Detail string // 附加信息（review event、check 状态等）
@@ -52,7 +57,7 @@ type FakeCall struct {
 
 func NewFake() *Fake {
 	return &Fake{
-		prs:      map[string]map[int]*PullRequest{},
+		prs:      map[string]map[int]*githubapi.PullRequest{},
 		comments: map[string]map[int][]fakeComment{},
 		reviews:  map[string][]fakeComment{},
 		checks:   map[string]fakeCheck{},
@@ -86,11 +91,11 @@ func (f *Fake) TotalCalls() int {
 }
 
 // SetPR 入站 PR 数据（GetPullRequest 读这份）。
-func (f *Fake) SetPR(repo string, number int, pr *PullRequest) {
+func (f *Fake) SetPR(repo string, number int, pr *githubapi.PullRequest) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.prs[repo] == nil {
-		f.prs[repo] = map[int]*PullRequest{}
+		f.prs[repo] = map[int]*githubapi.PullRequest{}
 	}
 	pr.RepoFullName = repo
 	pr.Number = number
@@ -176,7 +181,7 @@ func (f *Fake) ReviewEvents(repo string) []string {
 	return out
 }
 
-func (f *Fake) GetPullRequest(ctx context.Context, installationID int64, repoFullName string, number int) (*PullRequest, error) {
+func (f *Fake) GetPullRequest(ctx context.Context, installationID int64, repoFullName string, number int) (*githubapi.PullRequest, error) {
 	f.record("GetPullRequest", repoFullName, number, "")
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -195,20 +200,20 @@ func (f *Fake) GetPullRequestDiff(ctx context.Context, installationID int64, rep
 	return f.diffText, nil
 }
 
-func (f *Fake) ListReviewComments(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewComment, error) {
+func (f *Fake) ListReviewComments(ctx context.Context, installationID int64, repoFullName string, number int) ([]githubapi.ReviewComment, error) {
 	f.record("ListReviewComments", repoFullName, number, "")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	list := f.reviews[repoFullName]
-	out := make([]ReviewComment, 0, len(list))
+	out := make([]githubapi.ReviewComment, 0, len(list))
 	for _, c := range list {
-		out = append(out, ReviewComment{ID: c.ID, User: c.User, Body: c.Body, CreatedAt: c.CreatedAt})
+		out = append(out, githubapi.ReviewComment{ID: c.ID, User: c.User, Body: c.Body, CreatedAt: c.CreatedAt})
 	}
 	return out, nil
 }
 
-func (f *Fake) FindIssueCommentByMarker(ctx context.Context, installationID int64, repoFullName string, number int, marker string) (int64, bool, error) {
-	f.record("FindIssueCommentByMarker", repoFullName, number, marker)
+func (f *Fake) FindPullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, marker string) (int64, bool, error) {
+	f.record("FindPullRequestComment", repoFullName, number, marker)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, c := range f.comments[repoFullName][number] {
@@ -219,8 +224,8 @@ func (f *Fake) FindIssueCommentByMarker(ctx context.Context, installationID int6
 	return 0, false, nil
 }
 
-func (f *Fake) CreateIssueComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (int64, error) {
-	f.record("CreateIssueComment", repoFullName, number, "")
+func (f *Fake) CreatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (int64, error) {
+	f.record("CreatePullRequestComment", repoFullName, number, "")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.comments[repoFullName] == nil {
@@ -233,8 +238,8 @@ func (f *Fake) CreateIssueComment(ctx context.Context, installationID int64, rep
 	return id, nil
 }
 
-func (f *Fake) UpdateIssueComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error {
-	f.record("UpdateIssueComment", repoFullName, int(commentID%100000), "")
+func (f *Fake) UpdatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error {
+	f.record("UpdatePullRequestComment", repoFullName, int(commentID%100000), "")
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for number, list := range f.comments[repoFullName] {
@@ -245,7 +250,7 @@ func (f *Fake) UpdateIssueComment(ctx context.Context, installationID int64, rep
 			}
 		}
 	}
-	return &StatusError{StatusCode: 404, Method: "PATCH", URL: "issues/comments", Body: "not found"}
+	return &githubapi.StatusError{StatusCode: 404, Method: "PATCH", URL: "issues/comments", Body: "not found"}
 }
 
 func (f *Fake) CreateCheckRun(ctx context.Context, installationID int64, repoFullName, name, headSHA, externalID string) (int64, error) {
@@ -253,12 +258,12 @@ func (f *Fake) CreateCheckRun(ctx context.Context, installationID int64, repoFul
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.forbidAllCheck {
-		return 0, ErrForbidden
+		return 0, githubapi.ErrForbidden
 	}
 	// ForbidChecks 只拒绝按模型的 check 名；合并 check（退回形态）保持可用，
 	// 与「403 只影响 Checks 按模型粒度」的真实场景一致。
 	if f.forbidCheck && name != "Fast Ship review" {
-		return 0, ErrForbidden
+		return 0, githubapi.ErrForbidden
 	}
 	f.nextID++
 	id := f.nextID
@@ -266,12 +271,12 @@ func (f *Fake) CreateCheckRun(ctx context.Context, installationID int64, repoFul
 	return id, nil
 }
 
-func (f *Fake) UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in CheckUpdate) error {
+func (f *Fake) UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in githubapi.CheckUpdate) error {
 	f.record("UpdateCheckRun", repoFullName, int(checkRunID%100000), fmt.Sprintf("%s/%s/%s", in.Status, in.Conclusion, in.Title))
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.forbidAllCheck {
-		return ErrForbidden
+		return githubapi.ErrForbidden
 	}
 	key := fmt.Sprintf("%s/%d", repoFullName, checkRunID)
 	c, ok := f.checks[key]
@@ -283,7 +288,7 @@ func (f *Fake) UpdateCheckRun(ctx context.Context, installationID int64, repoFul
 	return nil
 }
 
-func (f *Fake) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) error {
+func (f *Fake) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in githubapi.ReviewInput) error {
 	f.record("SubmitReview", repoFullName, number, in.Event)
 	return nil
 }
@@ -319,7 +324,7 @@ func SeedFakeFromWebhook(f *Fake, body []byte) {
 	if p.PullRequest.Body != nil {
 		bodyText = *p.PullRequest.Body
 	}
-	f.SetPR(p.Repository.FullName, p.Number, &PullRequest{
+	f.SetPR(p.Repository.FullName, p.Number, &githubapi.PullRequest{
 		Title:   p.PullRequest.Title,
 		Body:    bodyText,
 		HTMLURL: p.PullRequest.HTMLURL,

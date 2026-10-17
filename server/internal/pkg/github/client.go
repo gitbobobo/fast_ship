@@ -16,7 +16,32 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
-type Client struct {
+// Client 业务 service 依赖的 GitHub repo 能力面（Issue 同步/写、分支、发布）。
+// 实现只有 *TokenClient；PR 读取（关联 PR 的 attach/sync）走 githubapi.GitHubClient
+// 的 *PRClient 实现，两个 adapter 共享同一份 REST 代码。
+type Client interface {
+	ValidateRepository(ctx context.Context) error
+	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error)
+	GetIssue(ctx context.Context, issueNumber int) (*Issue, error)
+	ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error)
+	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, *gh.Response, error)
+	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, *gh.Response, error)
+	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*IssueComment, error)
+	UpdateIssue(ctx context.Context, issueNumber int, req UpdateIssueRequest) (*Issue, error)
+	CreateIssue(ctx context.Context, title, body string) (*Issue, error)
+	CreateTag(ctx context.Context, tag, commitish string) error
+	CreateRelease(ctx context.Context, tag, name, body string) (*gh.RepositoryRelease, error)
+	UploadAsset(ctx context.Context, releaseID int64, filename string, file *os.File) error
+	ListBranches(ctx context.Context) ([]*Branch, string, error)
+}
+
+// ClientFactory 按 token/owner/repo 构造绑定单仓库的客户端；测试注入替身的缝。
+type ClientFactory func(token, owner, repo string) Client
+
+// 编译期钉住具体实现满足接口。
+var _ Client = (*TokenClient)(nil)
+
+type TokenClient struct {
 	client *gh.Client
 	upload *gh.Client
 	owner  string
@@ -64,7 +89,7 @@ type Branch struct {
 	Default bool   `json:"default"`
 }
 
-func (c *Client) ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error) {
+func (c *TokenClient) ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error) {
 	opts := &gh.ListOptions{Page: page, PerPage: perPage}
 	return c.client.Issues.ListLabels(ctx, c.owner, c.repo, opts)
 }
@@ -81,8 +106,8 @@ const githubUploadTimeout = 30 * time.Minute
 // token 为空时走未认证请求：空 AccessToken 的 oauth2 客户端仍会发出
 // "Authorization: Bearer " 头导致 401，而未认证请求可访问公共仓库
 // （未配 GitHub 的项目 attach 公共仓库 PR 依赖这一行为）。
-func NewClient(token, owner, repo string) *Client {
-	return &Client{
+func NewClient(token, owner, repo string) *TokenClient {
+	return &TokenClient{
 		client: gh.NewClient(newHTTPClient(token, githubRequestTimeout)),
 		upload: gh.NewClient(newHTTPClient(token, githubUploadTimeout)),
 		owner:  owner,
@@ -100,18 +125,12 @@ func newHTTPClient(token string, timeout time.Duration) *http.Client {
 	return c
 }
 
-func (c *Client) ValidateRepository(ctx context.Context) error {
+func (c *TokenClient) ValidateRepository(ctx context.Context) error {
 	_, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
 	return err
 }
 
-// GetPullRequest 拉取单个 PR 的详情（含 title/state/draft/merged_at/head/base 等）。
-func (c *Client) GetPullRequest(ctx context.Context, number int) (*gh.PullRequest, error) {
-	pr, _, err := c.client.PullRequests.Get(ctx, c.owner, c.repo, number)
-	return pr, err
-}
-
-func (c *Client) ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error) {
+func (c *TokenClient) ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*Issue, *gh.Response, error) {
 	query := url.Values{}
 	if state != "" {
 		query.Set("state", state)
@@ -143,7 +162,7 @@ func (c *Client) ListIssues(ctx context.Context, state string, since *time.Time,
 	return issues, resp, nil
 }
 
-func (c *Client) ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, *gh.Response, error) {
+func (c *TokenClient) ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*IssueComment, *gh.Response, error) {
 	query := url.Values{}
 	query.Set("sort", "created")
 	query.Set("direction", "asc")
@@ -201,7 +220,7 @@ func (t *TimelineEvent) GetIssueType() *TimelineIssueType {
 	return t.IssueType
 }
 
-func (c *Client) ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, *gh.Response, error) {
+func (c *TokenClient) ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*TimelineEvent, *gh.Response, error) {
 	query := url.Values{}
 	if page > 0 {
 		query.Set("page", fmt.Sprintf("%d", page))
@@ -223,7 +242,7 @@ func (c *Client) ListIssueTimeline(ctx context.Context, issueNumber, page, perPa
 	return events, resp, nil
 }
 
-func (c *Client) CreateIssueComment(ctx context.Context, issueNumber int, body string) (*IssueComment, error) {
+func (c *TokenClient) CreateIssueComment(ctx context.Context, issueNumber int, body string) (*IssueComment, error) {
 	payload := map[string]string{"body": body}
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments", c.owner, c.repo, issueNumber)
 	req, err := c.client.NewRequest("POST", path, payload)
@@ -242,7 +261,7 @@ func (c *Client) CreateIssueComment(ctx context.Context, issueNumber int, body s
 // GetIssue 拉取单个 Issue 的当前远端快照（含 updated_at 与 comments 计数）。
 // 同步兜底重拉（INT-105）用它取得真实的远端水位：本地 issues.updated_at 会被
 // GORM 自动更新与本地工作流操作污染，不能当远端时间戳。
-func (c *Client) GetIssue(ctx context.Context, issueNumber int) (*Issue, error) {
+func (c *TokenClient) GetIssue(ctx context.Context, issueNumber int) (*Issue, error) {
 	path := fmt.Sprintf("repos/%s/%s/issues/%d", c.owner, c.repo, issueNumber)
 	req, err := c.client.NewRequest("GET", path, nil)
 	if err != nil {
@@ -257,7 +276,7 @@ func (c *Client) GetIssue(ctx context.Context, issueNumber int) (*Issue, error) 
 	return &issue, nil
 }
 
-func (c *Client) UpdateIssue(ctx context.Context, issueNumber int, payload UpdateIssueRequest) (*Issue, error) {
+func (c *TokenClient) UpdateIssue(ctx context.Context, issueNumber int, payload UpdateIssueRequest) (*Issue, error) {
 	path := fmt.Sprintf("repos/%s/%s/issues/%d", c.owner, c.repo, issueNumber)
 	req, err := c.client.NewRequest("PATCH", path, payload)
 	if err != nil {
@@ -272,7 +291,7 @@ func (c *Client) UpdateIssue(ctx context.Context, issueNumber int, payload Updat
 	return &issue, nil
 }
 
-func (c *Client) CreateIssue(ctx context.Context, title, body string) (*Issue, error) {
+func (c *TokenClient) CreateIssue(ctx context.Context, title, body string) (*Issue, error) {
 	payload := map[string]string{"title": title, "body": body}
 	path := fmt.Sprintf("repos/%s/%s/issues", c.owner, c.repo)
 	req, err := c.client.NewRequest("POST", path, payload)
@@ -289,7 +308,7 @@ func (c *Client) CreateIssue(ctx context.Context, title, body string) (*Issue, e
 }
 
 // CreateTag 创建 Git Tag（如果不存在）
-func (c *Client) CreateTag(ctx context.Context, tag, commitish string) error {
+func (c *TokenClient) CreateTag(ctx context.Context, tag, commitish string) error {
 	commitish = strings.TrimSpace(commitish)
 	if commitish == "" {
 		return errors.New("target commitish is empty")
@@ -318,7 +337,7 @@ func (c *Client) CreateTag(ctx context.Context, tag, commitish string) error {
 }
 
 // CreateRelease 创建 GitHub Release（如果不存在则创建，已存在则返回已有的）
-func (c *Client) CreateRelease(ctx context.Context, tag, name, body string) (*gh.RepositoryRelease, error) {
+func (c *TokenClient) CreateRelease(ctx context.Context, tag, name, body string) (*gh.RepositoryRelease, error) {
 	// 检查是否已存在
 	release, _, err := c.client.Repositories.GetReleaseByTag(ctx, c.owner, c.repo, tag)
 	if err == nil {
@@ -338,7 +357,7 @@ func (c *Client) CreateRelease(ctx context.Context, tag, name, body string) (*gh
 }
 
 // UploadAsset 上传文件到 Release
-func (c *Client) UploadAsset(ctx context.Context, releaseID int64, filename string, file *os.File) error {
+func (c *TokenClient) UploadAsset(ctx context.Context, releaseID int64, filename string, file *os.File) error {
 	// 先检查是否有同名 asset，有则删除
 	assets, _, err := c.client.Repositories.ListReleaseAssets(ctx, c.owner, c.repo, releaseID, nil)
 	if err != nil {
@@ -366,7 +385,7 @@ func isNotFound(err error) bool {
 	return errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == 404
 }
 
-func (c *Client) resolveCommitish(ctx context.Context, commitish string) (string, error) {
+func (c *TokenClient) resolveCommitish(ctx context.Context, commitish string) (string, error) {
 	sha, _, err := c.client.Repositories.GetCommitSHA1(ctx, c.owner, c.repo, commitish, "")
 	if err != nil {
 		return "", err
@@ -379,7 +398,7 @@ func (c *Client) resolveCommitish(ctx context.Context, commitish string) (string
 }
 
 // ListBranches fetches all branches from the repository
-func (c *Client) ListBranches(ctx context.Context) ([]*Branch, string, error) {
+func (c *TokenClient) ListBranches(ctx context.Context) ([]*Branch, string, error) {
 	// Get repository info to find default branch
 	repo, _, err := c.client.Repositories.Get(ctx, c.owner, c.repo)
 	if err != nil {
