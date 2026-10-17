@@ -395,6 +395,44 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   尽量保留双方修改后再提交。检查与写入之间仍有极小竞态窗口（服务端尚未做
   事务级 CAS），待后续收敛。
 
+## 对话页呈现与工具本地化（INT-111）
+
+- **Markdown 渲染范围**：assistant 正文经 `web/src/components/bots/bot-markdown.tsx`
+  按 GFM 渲染（标题/列表/表格/行内与围栏代码/引用/链接/分隔线），复用全局
+  `github-markdown-css` 的 `.markdown-body`。边界与 `ThreadMarkdown` 一致：不解析
+  原始 HTML（react-markdown 默认转义，无 `rehype-raw`）、不渲染任何图片
+  （`disallowedElements=["img"]`，Markdown 与 HTML 图片都不出图）、`javascript:`
+  等危险链接目标被丢弃、链接一律新窗口。围栏代码块带语言标签与复制按钮，
+  **不做语法高亮**（与仓库其它 Markdown 面一致，不引入高亮依赖）。
+  user 消息保持纯文本不解析。
+- **流式围栏降级**：`web/src/lib/bots/markdown-stream.ts` 的
+  `splitIncompleteFence` 按 CommonMark 围栏规则（``` 与 ~~~、长度 ≥3、
+  行首缩进 ≤3 空格、闭围栏长度 ≥ 开围栏、反引号开围栏信息串不得含反引号）
+  找出最后一个未闭合围栏；流式渲染时围栏起始行之后的内容按纯文本展示
+  （标记原样可见），闭合后自动升级为代码块。非流式正文不走该降级——
+  CommonMark 里未闭合围栏本来就是合法的延续到文末的代码块。扫描器识别
+  行首围栏与 blockquote 容器内的围栏（含嵌套）：逐行剥掉容器标记后按同一
+  规则判定，开/闭围栏需容器深度相同（顶层围栏不会被内容里的 `> ``` ` 行
+  误闭合），切分偏移仍取原始行起点。列表项缩进内的围栏不在扫描范围——
+  其内容列取决于列表标记宽度，逐行扫描给不出完整 CommonMark 语义，
+  部分实现反而会引入新的误判，保持已知边界。
+- **工具调用本地化**：工具卡与确认卡的主标题、只读/写入徽标查
+  `web/src/lib/bots/tool-labels.ts` 的映射表，不以 `fs_issue.create` 这类
+  原始标识当标题。工具卡把原始 `tool.action` 与完整参数 JSON 折叠进
+  「查看原始调用」；确认卡是刻意例外——「始终允许」按精确 action 授权，
+  因此常驻原始 `tool.action` 小字、完整参数 JSON 默认展开不折叠。参数
+  摘要成 chips：`*_id` 显示前 8 位短标识（完整值进 title），
+  `issue_id+project_id` 链接到 `/projects/{pid}/issues/{iid}`、
+  `thread_id+env_id` 链接到 `/threads/{env}/{tid}`，其余 ID 没有对应路由
+  时只显示短标识不造坏链；分页与 `expected_*` 等次要参数不进 chips。
+- **映射表维护约定**：`tool-labels.ts` 是前端侧副本，唯一事实源是
+  `server/internal/service/bot_tools.go` 的 `botToolRegistryV4()`（工具与
+  action 清单）和 `botReadOnlyActions`（只读集合）。effect 不能靠
+  `requires_confirmation` 推断——`fs_schedule` 的写操作同步执行、不需要
+  确认但仍是写入。后端新增/改名工具或 action 时必须同步更新此表；
+  表外条目按「未知」回退：标签显示原始 `tool.action`、effect 保守按
+  写入、chips 走通用字段集，不抛错（账本可能先于界面升级）。
+
 ## 边界与决策
 
 - **身份**：机器人继承归属人身份（userID 恒取机器人归属人），全部端点仅

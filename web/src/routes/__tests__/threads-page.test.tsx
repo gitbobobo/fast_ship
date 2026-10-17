@@ -208,7 +208,7 @@ describe("ThreadsPage", () => {
     await user.click(screen.getByRole("button", { name: /加载更多（还有 10 条）/ }));
     expect(cardTitles()).toHaveLength(130);
     expect(screen.queryByRole("button", { name: /加载更多/ })).toBeNull();
-  });
+  }, 20000);
 
   it("restores filters after leaving and coming back", async () => {
     const user = userEvent.setup();

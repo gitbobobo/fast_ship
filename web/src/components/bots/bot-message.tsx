@@ -7,6 +7,7 @@ import type {
 import { botScheduleRunStatusLabel } from "@/lib/api/bots";
 import { cn } from "@/lib/utils";
 import { BotConfirmationCard } from "./bot-confirmation-card";
+import { BotMarkdown } from "./bot-markdown";
 import { BotToolCard } from "./bot-tool-card";
 
 const DECISION_LABELS: Record<string, string> = {
@@ -135,11 +136,11 @@ export function BotMessageView({
       {(text || draft) && (
         <div
           className={cn(
-            "inline-block max-w-[85%] rounded-2xl rounded-bl-sm bg-muted px-3.5 py-2 text-sm break-words whitespace-pre-wrap",
+            "inline-block max-w-[85%] min-w-0 rounded-2xl rounded-bl-sm bg-muted px-3.5 py-2 text-sm",
             draft && "opacity-80",
           )}
         >
-          {text}
+          <BotMarkdown text={text ?? ""} streaming={draft} />
           {draft && (
             <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-foreground/60 align-middle" />
           )}
