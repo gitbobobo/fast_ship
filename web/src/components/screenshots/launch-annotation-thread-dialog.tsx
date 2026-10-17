@@ -15,7 +15,8 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
-import { Chip, EffortChip, ModelChip } from "@/components/threads/thread-chips";
+import { Chip, EffortChip } from "@/components/threads/thread-chips";
+import { ModelPicker } from "@/components/threads/model-picker";
 import { copyWithToast } from "@/lib/copy";
 import {
   countBusyThreads,
@@ -285,7 +286,7 @@ function LaunchAnnotationThreadBody({
                   <span className="text-xs text-muted-foreground">加载中…</span>
                 ) : (
                   <>
-                    <ModelChip
+                    <ModelPicker
                       providers={providers}
                       resolved={resolved}
                       disabled={launching || providers.length === 0}

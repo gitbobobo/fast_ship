@@ -1,11 +1,9 @@
 import type { ReactNode } from "react";
-import { Check, ChevronDown, Cpu, GitBranch, History, Laptop } from "lucide-react";
+import { Check, ChevronDown, GitBranch, History, Laptop } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
@@ -18,13 +16,12 @@ import {
   type EffortDescriptor,
   type ModelPick,
   type PreviousWorktree,
-  type ProviderChoice,
   type ResolvedModel,
   type WorkspaceChoice,
 } from "@/lib/threads-compose";
 import { cn } from "@/lib/utils";
 
-const CHIP =
+export const CHIP =
   "inline-flex h-7 max-w-48 items-center gap-1.5 rounded-lg bg-muted/50 px-2 text-xs transition-colors hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 
 export function Chip({
@@ -150,49 +147,6 @@ export function WorkspaceModeChip({
           )}
         </DropdownMenuItem>
       )}
-    </Chip>
-  );
-}
-
-/** 模型下拉：按实例分组列出模型，选中后重置推理强度等选项。 */
-export function ModelChip({
-  providers,
-  resolved,
-  disabled,
-  onPick,
-}: {
-  providers: ProviderChoice[];
-  resolved: ResolvedModel;
-  disabled?: boolean;
-  onPick: (pick: ModelPick) => void;
-}) {
-  return (
-    <Chip
-      ariaLabel="模型"
-      icon={<Cpu className="h-3.5 w-3.5 shrink-0" />}
-      label={resolved.model ? resolved.model.name : "默认模型"}
-      disabled={disabled}
-      menuClassName="max-h-80 w-72"
-    >
-      {providers.map((provider) => (
-        <DropdownMenuGroup key={provider.instanceId}>
-          <DropdownMenuLabel>{provider.name}</DropdownMenuLabel>
-          {provider.models.map((model) => (
-            <DropdownMenuItem
-              key={model.slug}
-              onClick={() =>
-                onPick({ instanceId: provider.instanceId, model: model.slug, efforts: {} })
-              }
-            >
-              <span className="truncate">{model.name}</span>
-              {resolved.provider?.instanceId === provider.instanceId &&
-                resolved.model?.slug === model.slug && (
-                  <Check className="ml-auto" />
-                )}
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuGroup>
-      ))}
     </Chip>
   );
 }

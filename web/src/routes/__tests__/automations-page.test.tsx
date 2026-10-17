@@ -553,8 +553,11 @@ describe("AutomationsPage", () => {
     await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
 
-    await user.click(await screen.findByText("Claude / Claude 5"));
-    await user.click(screen.getByText("GLM / GLM 5"));
+    // 模型多选走统一 ModelMultiPicker：点开触发器 → 在面板里点模型行。
+    await user.click(screen.getByRole("button", { name: "模型" }));
+    await user.click(await screen.findByRole("option", { name: /Claude 5/ }));
+    await user.click(screen.getByRole("button", { name: "GLM" }));
+    await user.click(await screen.findByRole("option", { name: /GLM 5/ }));
 
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
@@ -623,7 +626,8 @@ describe("AutomationsPage", () => {
 
     await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
-    await user.click(await screen.findByText("Claude / Claude 5"));
+    await user.click(screen.getByRole("button", { name: "模型" }));
+    await user.click(await screen.findByRole("option", { name: /Claude 5/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     expect(createMutateAsync.mock.calls[0][0].model_selections).toEqual([
