@@ -282,6 +282,8 @@ function ModelPickerPanel({
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat) return;
+      // IME 组合中（中日韩输入未确认）的 Enter/方向键不当作选择操作。
+      if (event.isComposing || event.keyCode === 229) return;
       const onButton =
         event.target instanceof HTMLElement &&
         event.target.closest("button") !== null;

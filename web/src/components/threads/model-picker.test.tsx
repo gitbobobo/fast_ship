@@ -301,6 +301,28 @@ describe("ModelPicker", () => {
       efforts: {},
     });
   });
+
+  it("IME 组合中的 Enter 不触发选择", async () => {
+    const onPick = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ModelPicker
+        providers={PROVIDERS}
+        resolved={resolvedFor("codex", "gpt-5")}
+        onPick={onPick}
+      />,
+    );
+    await openPanel(user);
+    fireEvent.keyDown(window, { key: "ArrowDown", isComposing: true });
+    fireEvent.keyDown(window, { key: "Enter", isComposing: true });
+    expect(onPick).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect(onPick).toHaveBeenCalledWith({
+      instanceId: "codex",
+      model: "gpt-5",
+      efforts: {},
+    });
+  });
 });
 
 describe("ModelMultiPicker", () => {
