@@ -6,14 +6,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { ChevronDown, Folder, Search } from "lucide-react";
 import type { ComposerProject } from "@/lib/api/threads";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-
-// 与 thread-chips.tsx 的 CHIP 同一外观；有意不导出，避免与未合并分支互相依赖。
-const CHIP =
-  "inline-flex h-7 max-w-48 items-center gap-1.5 rounded-lg bg-muted/50 px-2 text-xs transition-colors hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
+import { CHIP } from "./thread-chips";
 
 /** 徽标配色：按项目 id 稳定散列取色，同一项目在任何入口颜色一致。 */
 const BADGE_COLORS = [
@@ -105,8 +102,8 @@ export function T3ProjectPicker({
   const current = projects.find((p) => p.id === value);
   const label = triggerLabel ?? current?.title ?? placeholder;
   return (
-    <PopoverPrimitive.Root open={open} onOpenChange={setOpen}>
-      <PopoverPrimitive.Trigger
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
         className={cn(CHIP, className)}
         aria-label={ariaLabel ?? "项目"}
         disabled={disabled}
@@ -118,35 +115,19 @@ export function T3ProjectPicker({
         )}
         <span className="truncate">{label}</span>
         <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
-      </PopoverPrimitive.Trigger>
-      <PopoverPrimitive.Portal>
-        <PopoverPrimitive.Positioner
-          className="isolate z-50 outline-none"
-          align="start"
-          alignOffset={0}
-          side="bottom"
-          sideOffset={4}
-        >
-          <PopoverPrimitive.Popup
-            className={cn(
-              "z-50 origin-(--transform-origin) rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 outline-none",
-              "data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
-              "data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:overflow-hidden data-closed:fade-out-0 data-closed:zoom-out-95",
-            )}
-          >
-            <T3ProjectPickerPanel
-              projects={projects}
-              value={value}
-              onSelect={(project) => {
-                if (project.id !== value) onValueChange(project.id);
-                setOpen(false);
-              }}
-              onRequestClose={() => setOpen(false)}
-            />
-          </PopoverPrimitive.Popup>
-        </PopoverPrimitive.Positioner>
-      </PopoverPrimitive.Portal>
-    </PopoverPrimitive.Root>
+      </PopoverTrigger>
+      <PopoverContent className="w-auto overflow-hidden p-0">
+        <T3ProjectPickerPanel
+          projects={projects}
+          value={value}
+          onSelect={(project) => {
+            if (project.id !== value) onValueChange(project.id);
+            setOpen(false);
+          }}
+          onRequestClose={() => setOpen(false)}
+        />
+      </PopoverContent>
+    </Popover>
   );
 }
 
