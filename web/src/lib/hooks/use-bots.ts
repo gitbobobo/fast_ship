@@ -203,6 +203,9 @@ export function useBotScheduleTaskRuns(botId: string, taskId: string | null) {
         )
       ).data.items,
     enabled: Boolean(userId && botId && taskId),
+    // 弹窗打开期间运行记录也会变（运行中的那次会落终态）：与任务列表同一
+    // 节奏轮询，不然界面上的「运行中」会一直停在那里。弹窗关闭即停。
+    refetchInterval: BOT_SCHEDULE_TASKS_POLL_MS,
   });
 }
 
