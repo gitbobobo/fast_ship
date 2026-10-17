@@ -35,6 +35,11 @@ interface FlatModel {
   model: ModelChoice;
 }
 
+/** 导航条目：固定项（如「项目默认」）不占数字快捷键，只参与 ↑/↓/Enter。 */
+type PickerEntry =
+  | { kind: "leading" }
+  | { kind: "model"; item: FlatModel };
+
 /** macOS 用 ⌘、其他平台用 Ctrl；happy-dom 的 navigator.platform/userAgent 也可用。 */
 function isMacPlatform() {
   return /mac|iphone|ipad|ipod/i.test(
@@ -251,7 +256,12 @@ function ModelPickerPanel({
     }
     return flat.filter((item) => item.provider.instanceId === rail);
   }, [flat, searching, query, rail, favoritesSet]);
-  const focused = Math.min(highlight, Math.max(visible.length - 1, 0));
+  // 导航条目 = 固定项（如有）+ 可见模型行；⌘N 只映射模型行，固定项不占快捷键。
+  const entries = useMemo<PickerEntry[]>(() => {
+    const models = visible.map((item): PickerEntry => ({ kind: "model", item }));
+    return leadingOption ? [{ kind: "leading" }, ...models] : models;
+  }, [leadingOption, visible]);
+  const focused = Math.min(highlight, Math.max(entries.length - 1, 0));
 
   const focusSearch = () => searchRef.current?.focus({ preventScroll: true });
   // 打开后焦点落在搜索框；rAF/timeout 兜底等 Popover 自身的焦点转移结束。
@@ -300,21 +310,25 @@ function ModelPickerPanel({
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        if (visible.length === 0) return;
+        if (entries.length === 0) return;
         event.preventDefault();
         const delta = event.key === "ArrowDown" ? 1 : -1;
         setHighlight(
           (h) =>
-            (Math.min(h, visible.length - 1) + delta + visible.length) %
-            visible.length,
+            (Math.min(h, entries.length - 1) + delta + entries.length) %
+            entries.length,
         );
       } else if (event.key === "Enter") {
         // rail/收藏按钮的 Enter 交给按钮自身（触发其点击）。
         if (onButton) return;
-        const item = visible[focused];
-        if (item) {
+        const entry = entries[focused];
+        if (entry?.kind === "leading") {
           event.preventDefault();
-          onSelect(item);
+          leadingOption?.onSelect();
+          onRequestClose();
+        } else if (entry) {
+          event.preventDefault();
+          onSelect(entry.item);
         }
       } else if (event.key === "Escape") {
         event.preventDefault();
@@ -324,7 +338,7 @@ function ModelPickerPanel({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [visible, focused, multiple, onSelect, onRequestClose]);
+  }, [entries, visible, focused, multiple, onSelect, leadingOption, onRequestClose]);
 
   const railButton = (key: string, label: string, icon: ReactNode) => (
     <button
@@ -348,15 +362,15 @@ function ModelPickerPanel({
     </button>
   );
 
-  const renderRow = (item: FlatModel, index: number) => {
+  const renderRow = (item: FlatModel, index: number, modelIndex: number) => {
     const key = modelFavoriteKey(item.provider.instanceId, item.model.slug);
     const favorite = favoritesSet.has(key);
     const selected = isSelected(item);
     const jumpLabel =
-      !multiple && index < JUMP_LIMIT
+      !multiple && modelIndex < JUMP_LIMIT
         ? isMacPlatform()
-          ? `⌘${index + 1}`
-          : `Ctrl+${index + 1}`
+          ? `⌘${modelIndex + 1}`
+          : `Ctrl+${modelIndex + 1}`
         : null;
     return (
       <div
@@ -462,28 +476,34 @@ function ModelPickerPanel({
           aria-multiselectable={multiple || undefined}
           className="max-h-72 overflow-y-auto overscroll-contain p-1"
         >
-          {leadingOption && (
-            <div
-              role="option"
-              aria-selected={leadingOption.selected}
-              className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 select-none hover:bg-accent"
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
-                leadingOption.onSelect();
-                onRequestClose();
-              }}
-            >
-              <div className="min-w-0 flex-1 text-left">
-                <div className="truncate text-xs font-medium leading-snug">
-                  {leadingOption.label}
+          {entries.map((entry, index) =>
+            entry.kind === "leading" ? (
+              <div
+                key="leading"
+                role="option"
+                aria-selected={leadingOption?.selected ?? false}
+                data-highlighted={index === focused || undefined}
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 select-none data-[highlighted]:bg-accent"
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setHighlight(index)}
+                onClick={() => {
+                  leadingOption?.onSelect();
+                  onRequestClose();
+                }}
+              >
+                <div className="min-w-0 flex-1 text-left">
+                  <div className="truncate text-xs font-medium leading-snug">
+                    {leadingOption?.label}
+                  </div>
                 </div>
+                {leadingOption?.selected && (
+                  <Check className="size-3.5 shrink-0" aria-hidden />
+                )}
               </div>
-              {leadingOption.selected && (
-                <Check className="size-3.5 shrink-0" aria-hidden />
-              )}
-            </div>
+            ) : (
+              renderRow(entry.item, index, index - (leadingOption ? 1 : 0))
+            ),
           )}
-          {visible.map(renderRow)}
           {visible.length === 0 && (
             <p className="px-2 py-6 text-center text-xs text-muted-foreground">
               没有匹配的模型

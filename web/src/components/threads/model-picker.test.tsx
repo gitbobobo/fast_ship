@@ -263,6 +263,46 @@ describe("ModelPicker", () => {
     expect(trigger()).toHaveTextContent("项目默认");
   });
 
+  it("键盘可选中 leadingOption：Enter 触发固定项", async () => {
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ModelPicker
+        providers={PROVIDERS}
+        resolved={resolvedFor("codex", "gpt-5")}
+        onPick={vi.fn()}
+        leadingOption={{ label: "项目默认", selected: false, onSelect }}
+      />,
+    );
+    await openPanel(user);
+    // 高亮默认落在固定项（第一行），Enter 应触发它而不是模型。
+    fireEvent.keyDown(window, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
+  });
+
+  it("有 leadingOption 时 ⌘1 仍直选第一条模型", async () => {
+    const onPick = vi.fn();
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ModelPicker
+        providers={PROVIDERS}
+        resolved={resolvedFor("codex", "gpt-5")}
+        onPick={onPick}
+        leadingOption={{ label: "项目默认", selected: false, onSelect }}
+      />,
+    );
+    await openPanel(user);
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+    expect(onPick).toHaveBeenCalledWith({
+      instanceId: "codex",
+      model: "gpt-5",
+      efforts: {},
+    });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it("⌘1 直选第一条可见行", async () => {
     const onPick = vi.fn();
     const user = userEvent.setup();

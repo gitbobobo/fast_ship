@@ -40,7 +40,8 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
 ## 键盘
 
 - `↑`/`↓` 在当前可见行间移动高亮（环绕），`Enter` 选中高亮行，`Esc`
-  关闭面板（不影响外层 Dialog）。
+  关闭面板（不影响外层 Dialog）。`leadingOption` 也纳入高亮与 `↑`/`↓`/`Enter`
+  导航（固定在第一位），但不占数字直选快捷键。
 - 单选的前 9 条可见行右侧显示直选 chip：macOS `⌘1`…`⌘9`、其他平台
   `Ctrl+1`…`Ctrl+9`；平台判断只看 `navigator.platform`/`navigator.userAgent`
   （不用 `userAgentData`，happy-dom 下也可用）。处理上 meta/ctrl 任一修饰
