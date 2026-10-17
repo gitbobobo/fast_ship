@@ -27,11 +27,25 @@ func (r *BotRunRepository) FindByID(id string) (*model.BotRun, error) {
 	return &run, nil
 }
 
-// FindActiveByBot 返回该 bot 唯一的未结束 run；没有返回 gorm.ErrRecordNotFound。
+// SessionKindOf 返回 run 的会话判别；run 不存在返回 main（调用账本永远挂在
+// 某个已存在的 run 下，缺行只发生在极端竞态，按主线处理）。
+func (r *BotRunRepository) SessionKindOf(runID string) string {
+	if runID == "" {
+		return model.BotSessionKindMain
+	}
+	var kind string
+	if err := r.db.Raw("SELECT session_kind FROM bot_runs WHERE id = ?", runID).Scan(&kind).Error; err != nil || kind == "" {
+		return model.BotSessionKindMain
+	}
+	return kind
+}
+
+// FindActiveByBot 返回该 bot 唯一的未结束主线 run；没有返回
+// gorm.ErrRecordNotFound。定时任务 run 不占主线槽（按 session_kind 收窄）。
 func (r *BotRunRepository) FindActiveByBot(botID string) (*model.BotRun, error) {
 	var run model.BotRun
-	if err := r.db.Where("bot_id = ? AND finished_at IS NULL", botID).
-		First(&run).Error; err != nil {
+	if err := r.db.Where("bot_id = ? AND finished_at IS NULL AND session_kind = ?",
+		botID, model.BotSessionKindMain).First(&run).Error; err != nil {
 		return nil, err
 	}
 	return &run, nil
@@ -46,11 +60,33 @@ func (r *BotRunRepository) FindByTriggerKeyTx(tx *gorm.DB, botID, triggerKey str
 	return &run, nil
 }
 
+// ListByBot 主线 run 列表（用户可见的 /runs）；定时任务 run 走
+// schedule-tasks/{taskId}/runs 读取。
 func (r *BotRunRepository) ListByBot(botID string, limit int) ([]model.BotRun, error) {
 	var rows []model.BotRun
-	err := r.db.Where("bot_id = ?", botID).
+	err := r.db.Where("bot_id = ? AND session_kind = ?", botID, model.BotSessionKindMain).
 		Order("created_at DESC, id DESC").Limit(limit).Find(&rows).Error
 	return rows, err
+}
+
+// ListByScheduleTask 返回定时任务最近的运行记录（新→旧），跨任务共享
+// bot 级账本但按任务过滤。
+func (r *BotRunRepository) ListByScheduleTask(botID, taskID string, limit, offset int) ([]model.BotRun, error) {
+	var rows []model.BotRun
+	err := r.db.Where("bot_id = ? AND schedule_task_id = ?", botID, taskID).
+		Order("created_at DESC, id DESC").Limit(limit).Offset(offset).Find(&rows).Error
+	return rows, err
+}
+
+// LatestByScheduleTask 返回任务最近一条运行记录；没有返回
+// gorm.ErrRecordNotFound。
+func (r *BotRunRepository) LatestByScheduleTask(botID, taskID string) (*model.BotRun, error) {
+	var run model.BotRun
+	if err := r.db.Where("bot_id = ? AND schedule_task_id = ?", botID, taskID).
+		Order("created_at DESC, id DESC").First(&run).Error; err != nil {
+		return nil, err
+	}
+	return &run, nil
 }
 
 func (r *BotRunRepository) ListActive() ([]model.BotRun, error) {
@@ -166,7 +202,7 @@ func (r *BotEventRepository) AppendTx(tx *gorm.DB, event *model.BotEvent) error 
 
 func (r *BotEventRepository) ListAfterSeq(botID string, after int64, limit int) ([]model.BotEvent, error) {
 	var rows []model.BotEvent
-	err := r.db.Where("bot_id = ? AND seq > ?", botID, after).
+	err := r.db.Where("bot_id = ? AND session_kind = ? AND seq > ?", botID, model.BotSessionKindMain, after).
 		Order("seq ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }

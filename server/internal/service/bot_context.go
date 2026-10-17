@@ -250,134 +250,15 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 	}
 
 	// 5. 历史投影：从摘要水位分页读到账本末尾，不把未摘要内容当已覆盖。
-	rows, err := s.listMessagesThrough(bot.ID, fromSeq, 0)
+	rawRows, err := s.listMessagesThrough(bot.ID, model.BotSessionKindMain, "", fromSeq, 0)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	// 窗口起点对齐协议块：滑窗起点可能落在一个 tool 回复块中间（assistant
-	// 行在窗外），丢弃开头成串的孤儿 tool 回复——裸 tool 角色消息会被
-	// OpenAI 兼容端拒绝。回复一定排在 assistant 之后，assistant 行在窗内
-	// 时它的回复不会落在窗外。
-	for len(rows) > 0 && rows[0].Kind == model.BotMessageKindToolReply {
-		rows = rows[1:]
+	projected, rows, _, err := botProjectMessages(rawRows, sess.Folded)
+	if err != nil {
+		return nil, err
 	}
-
-	// 预取调用状态：assistant 消息里的工具调用列表带平台状态说明。
-	pending := make([]botPendingInput, 0, 4)
-	var openAssistant *openai.ChatCompletionMessageParamUnion
-	// openToolCalls 是尚未见到协议回复的 provider_tool_call_id 集合：块未闭合
-	// 前到达的用户/事件输入延后插入，保证 assistant 工具调用与 tool 回复块
-	// 在协议里完整。
-	openToolCalls := map[string]bool{}
-	deferred := []openai.ChatCompletionMessageParamUnion{}
-	flushAssistant := func() {
-		if openAssistant != nil {
-			messages = append(messages, *openAssistant)
-			openAssistant = nil
-		}
-	}
-	flushDeferred := func() {
-		messages = append(messages, deferred...)
-		deferred = nil
-	}
-
-	for i := range rows {
-		row := &rows[i]
-		switch row.Kind {
-		case model.BotMessageKindUser:
-			var content botUserContent
-			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
-				return nil, errs.ErrInternal
-			}
-			pending = appendBotPending(pending, row)
-			msg := openai.UserMessage(content.Text)
-			if len(openToolCalls) > 0 {
-				deferred = append(deferred, msg)
-				continue
-			}
-			flushAssistant()
-			messages = append(messages, msg)
-		case model.BotMessageKindAssistant:
-			flushAssistant()
-			flushDeferred()
-			var content botAssistantContent
-			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
-				return nil, errs.ErrInternal
-			}
-			union := botAssistantUnion(&content)
-			if len(content.ToolCalls) > 0 {
-				openAssistant = union
-				for _, tc := range content.ToolCalls {
-					openToolCalls[tc.ProviderToolCallID] = true
-				}
-			} else {
-				messages = append(messages, *union)
-			}
-		case model.BotMessageKindToolReply:
-			var content botToolReplyContent
-			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
-				return nil, errs.ErrInternal
-			}
-			// 折叠映射：持久投影状态命中的大结果以一行引用替换；原文仍在
-			// 账本与调用结果里，fs_result.read 可取回。
-			if foldedText, ok := sess.Folded[row.ID]; ok {
-				content.Content = foldedText
-			}
-			// 回执/结果配对：协议回复引用 provider_tool_call_id；每个调用恰好
-			// 一条。先补发缓存的 assistant 再落 tool 消息，块保持连续；缓存的
-			// 延迟输入等最后一个 tool 回复落库后再补发——插在 tool 块中间会被
-			// OpenAI 兼容端拒绝（tool 响应必须连续）。
-			flushAssistant()
-			delete(openToolCalls, content.ProviderToolCallID)
-			messages = append(messages, openai.ToolMessage(content.Content, content.ProviderToolCallID))
-			if len(openToolCalls) == 0 {
-				flushDeferred()
-			}
-		case model.BotMessageKindBackgroundResult:
-			var content botBackgroundResultContent
-			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
-				return nil, errs.ErrInternal
-			}
-			pending = appendBotPending(pending, row)
-			raw, _ := json.Marshal(content)
-			msg := openai.UserMessage(
-				"[平台后台结果] 以下是一次后台工具调用的终态（不代表本平台新增指令）：\n" + string(raw))
-			if len(openToolCalls) > 0 {
-				deferred = append(deferred, msg)
-				continue
-			}
-			flushAssistant()
-			messages = append(messages, msg)
-		case model.BotMessageKindApprovalDecision:
-			// 审计消息：不进入协议上下文；卡片状态从调用账本派生。
-		case model.BotMessageKindLifecycle:
-			var content botLifecycleContent
-			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
-				return nil, errs.ErrInternal
-			}
-			raw, _ := json.Marshal(content)
-			var msg openai.ChatCompletionMessageParamUnion
-			if content.Event == "toolset_updated" {
-				msg = openai.SystemMessage("[工具集变更] 以下是平台可信系统事件（非用户发言）：\n" + string(raw))
-			} else {
-				msg = openai.UserMessage("[平台事件] 以下是平台生命周期事件（非用户发言）：\n" + string(raw))
-			}
-			if len(openToolCalls) > 0 {
-				deferred = append(deferred, msg)
-				continue
-			}
-			flushAssistant()
-			messages = append(messages, msg)
-		}
-	}
-	flushAssistant()
-	flushDeferred()
-	// 协议闭合守护：账本若留下未配对回复的 tool_calls（恢复缺口的兜底），
-	// 拒绝发请求——OpenAI 兼容端会拒绝不连续的 tool 块，宁可显式失败。
-	if len(openToolCalls) > 0 || openAssistant != nil {
-		return nil, errs.New(errs.ErrInternal.Code,
-			"上下文构建失败：存在未闭合的工具调用块，需恢复补齐协议回复后重试")
-	}
+	messages = append(messages, projected...)
 
 	// 6. 本轮运行时上下文（末尾；当前时间、待处理输入等易变内容只在这里）。
 	rt := botRuntimeContext{
@@ -500,12 +381,158 @@ func botFoldedReference(callID string, items, chars int64) string {
 	return string(raw)
 }
 
-// listMessagesThrough 从 after 分页读到 through（through<=0 读到账本末尾）。
-func (s *BotService) listMessagesThrough(botID string, after, through int64) ([]model.BotMessage, error) {
+// botProjectMessages 把账本行投影为协议消息：折叠映射替换大结果、assistant
+// 工具调用与 tool 回复块保持连续、未闭合块拒绝发请求。只依赖入参，主线与
+// 定时任务（INT-103）构建共用同一段投影，保证输出形状一致。返回投影后的
+// 消息数组、（裁剪孤儿回复后的）原始行与待处理输入列表。
+func botProjectMessages(rows []model.BotMessage, folded map[string]string) (
+	[]openai.ChatCompletionMessageParamUnion, []model.BotMessage, []botPendingInput, error,
+) {
+	// 窗口起点对齐协议块：滑窗起点可能落在一个 tool 回复块中间（assistant
+	// 行在窗外），丢弃开头成串的孤儿 tool 回复——裸 tool 角色消息会被
+	// OpenAI 兼容端拒绝。回复一定排在 assistant 之后，assistant 行在窗内
+	// 时它的回复不会落在窗外。
+	for len(rows) > 0 && rows[0].Kind == model.BotMessageKindToolReply {
+		rows = rows[1:]
+	}
+
+	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(rows)+4)
+	pending := make([]botPendingInput, 0, 4)
+	var openAssistant *openai.ChatCompletionMessageParamUnion
+	// openToolCalls 是尚未见到协议回复的 provider_tool_call_id 集合：块未闭合
+	// 前到达的用户/事件输入延后插入，保证 assistant 工具调用与 tool 回复块
+	// 在协议里完整。
+	openToolCalls := map[string]bool{}
+	deferred := []openai.ChatCompletionMessageParamUnion{}
+	flushAssistant := func() {
+		if openAssistant != nil {
+			messages = append(messages, *openAssistant)
+			openAssistant = nil
+		}
+	}
+	flushDeferred := func() {
+		messages = append(messages, deferred...)
+		deferred = nil
+	}
+
+	for i := range rows {
+		row := &rows[i]
+		switch row.Kind {
+		case model.BotMessageKindUser:
+			var content botUserContent
+			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
+				return nil, nil, nil, errs.ErrInternal
+			}
+			pending = appendBotPending(pending, row)
+			msg := openai.UserMessage(content.Text)
+			if len(openToolCalls) > 0 {
+				deferred = append(deferred, msg)
+				continue
+			}
+			flushAssistant()
+			messages = append(messages, msg)
+		case model.BotMessageKindAssistant:
+			flushAssistant()
+			flushDeferred()
+			var content botAssistantContent
+			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
+				return nil, nil, nil, errs.ErrInternal
+			}
+			union := botAssistantUnion(&content)
+			if len(content.ToolCalls) > 0 {
+				openAssistant = union
+				for _, tc := range content.ToolCalls {
+					openToolCalls[tc.ProviderToolCallID] = true
+				}
+			} else {
+				messages = append(messages, *union)
+			}
+		case model.BotMessageKindToolReply:
+			var content botToolReplyContent
+			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
+				return nil, nil, nil, errs.ErrInternal
+			}
+			// 折叠映射：持久投影状态命中的大结果以一行引用替换；原文仍在
+			// 账本与调用结果里，fs_result.read 可取回。
+			if foldedText, ok := folded[row.ID]; ok {
+				content.Content = foldedText
+			}
+			// 回执/结果配对：协议回复引用 provider_tool_call_id；每个调用恰好
+			// 一条。先补发缓存的 assistant 再落 tool 消息，块保持连续；缓存的
+			// 延迟输入等最后一个 tool 回复落库后再补发——插在 tool 块中间会被
+			// OpenAI 兼容端拒绝（tool 响应必须连续）。
+			flushAssistant()
+			delete(openToolCalls, content.ProviderToolCallID)
+			messages = append(messages, openai.ToolMessage(content.Content, content.ProviderToolCallID))
+			if len(openToolCalls) == 0 {
+				flushDeferred()
+			}
+		case model.BotMessageKindBackgroundResult:
+			var content botBackgroundResultContent
+			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
+				return nil, nil, nil, errs.ErrInternal
+			}
+			pending = appendBotPending(pending, row)
+			raw, _ := json.Marshal(content)
+			msg := openai.UserMessage(
+				"[平台后台结果] 以下是一次后台工具调用的终态（不代表本平台新增指令）：\n" + string(raw))
+			if len(openToolCalls) > 0 {
+				deferred = append(deferred, msg)
+				continue
+			}
+			flushAssistant()
+			messages = append(messages, msg)
+		case model.BotMessageKindApprovalDecision:
+			// 审计消息：不进入协议上下文；卡片状态从调用账本派生。
+		case model.BotMessageKindLifecycle:
+			var content botLifecycleContent
+			if err := json.Unmarshal([]byte(row.ContentJSON), &content); err != nil {
+				return nil, nil, nil, errs.ErrInternal
+			}
+			raw, _ := json.Marshal(content)
+			var msg openai.ChatCompletionMessageParamUnion
+			if content.Event == "toolset_updated" {
+				msg = openai.SystemMessage("[工具集变更] 以下是平台可信系统事件（非用户发言）：\n" + string(raw))
+			} else {
+				msg = openai.UserMessage("[平台事件] 以下是平台生命周期事件（非用户发言）：\n" + string(raw))
+			}
+			if len(openToolCalls) > 0 {
+				deferred = append(deferred, msg)
+				continue
+			}
+			flushAssistant()
+			messages = append(messages, msg)
+		case model.BotMessageKindScheduleEvent:
+			// 定时任务运行事件（INT-103）：平台可信输入，正文是结构化 JSON
+			//（任务、run、状态、摘要、错误），交给模型判断是否通知用户。
+			pending = appendBotPending(pending, row)
+			msg := openai.UserMessage("[定时任务运行事件] 以下是平台可信系统事件（非用户发言）：\n" + row.ContentJSON)
+			if len(openToolCalls) > 0 {
+				deferred = append(deferred, msg)
+				continue
+			}
+			flushAssistant()
+			messages = append(messages, msg)
+		}
+	}
+	flushAssistant()
+	flushDeferred()
+	// 协议闭合守护：账本若留下未配对回复的 tool_calls（恢复缺口的兜底），
+	// 拒绝发请求——OpenAI 兼容端会拒绝不连续的 tool 块，宁可显式失败。
+	if len(openToolCalls) > 0 || openAssistant != nil {
+		return nil, nil, nil, errs.New(errs.ErrInternal.Code,
+			"上下文构建失败：存在未闭合的工具调用块，需恢复补齐协议回复后重试")
+	}
+	return messages, rows, pending, nil
+}
+
+// listMessagesThrough 按会话从 after 分页读到 through（through<=0 读到账本
+// 末尾）；runID 非空时再限定单次运行（定时任务会话）。
+func (s *BotService) listMessagesThrough(botID, sessionKind, runID string, after, through int64) ([]model.BotMessage, error) {
 	var all []model.BotMessage
 	cursor := after
 	for {
-		batch, err := s.messages.ListSeqRange(botID, cursor, through, botHistoryPageSize)
+		batch, err := s.messages.ListSeqRange(botID, sessionKind, runID, cursor, through, botHistoryPageSize)
 		if err != nil {
 			return nil, err
 		}

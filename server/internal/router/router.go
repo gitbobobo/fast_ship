@@ -330,6 +330,12 @@ func Setup(
 		bots.POST("/:id/calls/:callId/cancel", botHandler.CancelCall)
 		bots.GET("/:id/authorizations", botHandler.ListAuthorizations)
 		bots.DELETE("/:id/authorizations/:authorizationId", botHandler.RevokeAuthorization)
+		// 定时任务（INT-103）：用户只能查看与开关，没有创建/编辑/删除端点；
+		// 任务的创建/修改/删除只经机器人 fs_schedule 工具。
+		bots.GET("/:id/schedule-tasks", botHandler.ListScheduleTasks)
+		bots.GET("/:id/schedule-tasks/:taskId", botHandler.GetScheduleTask)
+		bots.GET("/:id/schedule-tasks/:taskId/runs", botHandler.ListScheduleTaskRuns)
+		bots.PUT("/:id/schedule-tasks/:taskId/enabled", botHandler.SetScheduleTaskEnabled)
 	}
 
 	// 仅运行令牌 — 自动化 Agent 回报与读取（INT-90）。

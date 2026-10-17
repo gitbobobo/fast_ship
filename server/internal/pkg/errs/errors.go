@@ -78,6 +78,7 @@ var (
 	ErrBotRunNotFound               = New(40425, "机器人运行不存在")
 	ErrBotCallNotFound              = New(40426, "机器人调用不存在")
 	ErrBotAuthorizationNotFound     = New(40427, "机器人授权不存在")
+	ErrBotScheduleTaskNotFound      = New(40429, "定时任务不存在")
 	ErrQuotaAccountNotFound         = New(40430, "额度账号不存在")
 )
 

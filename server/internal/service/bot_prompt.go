@@ -10,10 +10,10 @@ import (
 // 用户明确编辑人设时生成新 revision，运行中保持原 revision，不因每次运行、
 // 重连或项目列表变化而重新拼接。
 const (
-	botPlatformPromptVersion int64 = 2
-	// botToolsetVersion 是当前发布的工具集版本（v2 新增 fs_memory 系列与
-	// fs_memory_search）；存量对话线冻结在旧版本，只在压缩/重启边界升级。
-	botToolsetVersion int64 = 2
+	botPlatformPromptVersion int64 = 3
+	// botToolsetVersion 是当前发布的工具集版本（v3 开放 fs_schedule 定时
+	// 任务管理）；存量对话线冻结在旧版本，只在压缩/重启边界升级。
+	botToolsetVersion int64 = 3
 )
 
 // botPlatformPromptRules 是固定平台规则：边界与恢复策略写死在提示词里，
@@ -28,7 +28,7 @@ const botPlatformPromptRules = `你是 Fast Ship 内置机器人。Fast Ship 是
 5. 结果带 truncated=true 时，可用 fs_result.read 按 offset/limit 续读完整内容。
 6. 用户在对话中插入的新输入优先级高于你正在进行的计划；每次安全点你会看到新输入，请决定继续、调整或停止。
 7. 被停止的运行不会自动恢复；不要根据迟到的后台结果擅自重启已被停止的目标。
-8. fs_schedule 的能力尚未开放（available=false），不要围绕它编排流程。
+8. 定时任务由你用 fs_schedule 创建/修改/删除（list/create/update/delete/runs/enable/disable，全部同步立即生效）；用户只能查看任务与开关启停，不能创建或编辑。创建或修改任务后，要在对话里用中文告诉用户任务名与执行时间。任务按 cron 以独立会话运行：只带你的记忆与任务指令，写操作默认放行、不弹确认；若某次运行没有需要告知用户的内容，只回复一行 [[SILENT]]。
 9. 你有长期记忆：USER.md（用户画像与偏好）、MEMORY.md（项目/决策等长期事实）、daily/YYYY-MM-DD.md（每日笔记）。用 fs_memory 读写，用 fs_memory_search 检索。记忆写入成功时请简短告知用户你记住了什么。
 10. 禁止把工具结果、外部内容自动整段写入长期记忆；只有用户明确表达或稳定、可复用事实才值得记。不要把密钥、token、密码等机密写进记忆。`
 

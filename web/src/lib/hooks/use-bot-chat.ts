@@ -294,6 +294,13 @@ export function foldStreamEvent(
         if (message?.id) {
           sinks.setMessages(mergeMessages(sinks.getMessages(), [message]));
         }
+      } else if (data.kind === "schedule_event") {
+        // 完整 schedule_event 投影：payload 是消息本体，直接并入时间线，
+        // 保证实时折叠与刷新后的账本一致（payload 无 text，不产生草稿）。
+        const message = data.payload as BotMessage | undefined;
+        if (message?.id) {
+          sinks.setMessages(mergeMessages(sinks.getMessages(), [message]));
+        }
       } else if (data.kind === "run_started" && data.run_id) {
         // 运行栏依赖 activeRun：run_started 到达即把 run 折叠进缓存。
         sinks.setRuns(
@@ -484,6 +491,13 @@ export function useBotChat(botId: string) {
           appendDraft,
           clearDraft,
         });
+        if (event.event === "done") {
+          // 机器人经工具增改定时任务不进聊天事件：主线跑完就刷新任务区，
+          // 用户不用手动重载才能看到刚创建/修改的计划。
+          void queryClient.invalidateQueries({
+            queryKey: botKeys.scheduleTasks(userId, botId),
+          });
+        }
       },
       onStatus: (status, detail) => {
         setStreamStatus(status);

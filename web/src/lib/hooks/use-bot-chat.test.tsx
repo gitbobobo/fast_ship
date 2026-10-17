@@ -663,4 +663,38 @@ describe("foldStreamEvent", () => {
     expect(state.messages.map((m) => m.id)).toEqual(["m-bg"]);
     expect(state.calls.map((c) => `${c.id}:${c.status}`)).toEqual(["call-1:succeeded"]);
   });
+
+  it("schedule_event delta 折叠为完整消息，与刷新后的账本一致", () => {
+    const { state, sinks: sinksObj } = sinks();
+    const scheduleEventMessage: BotMessage = {
+      id: "m-se",
+      bot_id: "b1",
+      seq: 9,
+      kind: "schedule_event",
+      content: {
+        task_id: "t1",
+        task_name: "每日汇总",
+        run_id: "r-s1",
+        status: "completed",
+        summary: "已汇总 3 条变化",
+      },
+      created_at: "2026-10-17T01:02:10Z",
+    };
+    const event = {
+      event: "delta",
+      data: JSON.stringify({
+        kind: "schedule_event",
+        message_id: "m-se",
+        payload: scheduleEventMessage,
+      }),
+      id: 13,
+    };
+    foldStreamEvent(event, sinksObj);
+    // 重复投递幂等；payload 无 text，不得落入草稿分支产生空块。
+    foldStreamEvent(event, sinksObj);
+    expect(
+      state.messages.map((m) => `${m.id}:${m.kind}:${m.content.task_name}`),
+    ).toEqual(["m-se:schedule_event:每日汇总"]);
+    expect(state.drafts.size).toBe(0);
+  });
 });

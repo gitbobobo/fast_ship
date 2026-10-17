@@ -80,6 +80,27 @@ func (s *BotService) RecoverOnStartup() error {
 
 	affectedBots := map[string]bool{}
 	for _, run := range runs {
+		// 定时任务 run 中断也是失败：失败必报，运行事件必须与终态同一事务——
+		// 分两次提交时进程若在中间退出，这条 run 已不再是活动 run，事件就永远
+		// 补不回来了。任务与摘要都在事务外先读好：事务内复用同一连接再查询会
+		// 自锁（MaxOpenConns=1）。
+		var schedTask *model.BotScheduleTask
+		schedSummary := ""
+		if run.SessionKind == model.BotSessionKindSchedule && run.ScheduleTaskID != nil {
+			task, err := s.schedTasks.FindByID(*run.ScheduleTaskID)
+			if err == nil {
+				schedTask = task
+			} else {
+				// 任务在崩溃前被删掉：失败仍是必报项，用派发时记下的任务名
+				// 建 stub（与 finishScheduleFailed 对称），否则这次失败既报不
+				// 出去、也无从经任务查询看到。
+				schedTask = &model.BotScheduleTask{
+					ID:   *run.ScheduleTaskID,
+					Name: botScheduleTaskNameFromContext(&run),
+				}
+			}
+			_, schedSummary = s.botSilentSummaryOf(run.BotID, run.ID)
+		}
 		// 终态转移与 error/done 事件同一事务：一直挂在页面上的客户端重启
 		// 后按 SSE 游标回放也能把原 run 折到 failed，不必等快照重读。
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -103,10 +124,18 @@ func (s *BotService) RecoverOnStartup() error {
 			}); err != nil {
 				return err
 			}
-			return s.appendEventTx(tx, run.BotID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
+			if err := s.appendEventTx(tx, run.BotID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
 				Kind: "run_done", Phase: string(model.BotRunStatusFailed),
 				Payload: map[string]interface{}{"status": string(model.BotRunStatusFailed)},
-			})
+			}); err != nil {
+				return err
+			}
+			if schedTask == nil {
+				return nil
+			}
+			return s.appendScheduleEventTx(tx, run.BotID, schedTask, &run,
+				model.BotRunStatusFailed, schedSummary, "server_restarted",
+				"服务在定时任务运行执行中重启，未完成步骤不再继续", now)
 		})
 		if txErr != nil {
 			s.logger.Warn("恢复 run 失败", zap.String("run_id", run.ID), zap.Error(txErr))

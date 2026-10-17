@@ -1,8 +1,8 @@
-# 内置机器人（INT-101 + INT-102）
+# 内置机器人（INT-101 + INT-102 + INT-103）
 
 Fast Ship 内置「机器人（智能体）」：用户自带 OpenAI 兼容 API Key，机器人通过
-白名单工具操作 Fast Ship 的项目、Issue、已连接 T3 环境与线程。本文记录架构、
-边界与关键决策；实现以 `server/internal/service/bot*.go` 为准。
+白名单工具操作 Fast Ship 的项目、Issue、已连接 T3 环境与线程，并可绑定定时
+任务。本文记录架构、边界与关键决策；实现以 `server/internal/service/bot*.go` 为准。
 
 ## 总体结构
 
@@ -13,10 +13,12 @@ service/bot_loop.go        核心工具循环（安全点 → 构建 → 流式 
 service/bot_context.go     账本 → Chat Completions 投影、前缀/工具哈希、运行时上下文
 service/bot_prompt.go      固定平台规则与版本
 service/bot_openai.go      官方 openai-go 适配（流式聚合、usage、连接探测）
-service/bot_tools.go       固定工具注册表（v1：10 工具/29 action；v2：11 工具/38 action）、schema 生成、参数校验
+service/bot_tools.go       固定工具注册表（v1：10 工具/29 action；v2：11/38；v3：11/44）、schema 生成、参数校验
 service/bot_compaction.go  压缩计划、安全切点、折叠、滚动摘要、工具集激活
 service/bot_memory.go      记忆路径白名单、注入截断、归档去重
 service/bot_maintenance.go 维护模型请求、静默存档、夜间整理执行器
+service/bot_schedule.go            定时任务：schedule 会话上下文、静默哨兵、事件、工具执行、用户侧只读服务
+service/bot_schedule_scheduler.go  定时任务调度（10s ticker）、执行槽、schedule run 收尾
 service/bot_tools_project.go / bot_tools_issue.go / bot_tools_thread.go   工具适配
 service/bot_tool_runner.go assistant 回合提交、同步执行、后台 worker、取消与终态
 service/bot_authorization.go 确认决定、结构化「始终允许」、撤销
@@ -24,19 +26,21 @@ service/bot_results.go     结果瘦身、截断、fs_result.read 续读、能�
 service/bot_recovery.go    启动恢复
 handler/bot.go             REST（全部仅 JWT）
 handler/bot_stream.go      SSE 重放与订阅
-repository/bot*.go         七张表的仓库；repository/bot_schema.go 建索引与守护
+repository/bot*.go         各表仓库；repository/bot_schema.go 建索引与守护
 ```
 
 调度保持单进程：**数据库是事实来源**，内存结构只负责唤醒，丢失唤醒由轻量
-扫描（5s）补回。主线每机器人一个执行槽（至多一个未结束 run 由部分唯一索引
-兜底）；后台调用由 4 个 worker 并发执行。
+扫描（5s）补回。主线每机器人一个执行槽（至多一个未结束主线 run 由部分唯一
+索引兜底），schedule 会话按 run 各占一个槽、可与主线并行（INT-103）；后台
+调用由 4 个 worker 并发执行；定时任务另有 10s 调度 ticker。
 
 ## 数据模型
 
-十三条普通表（INT-101 的 `bots`、`bot_messages`、`bot_runs`、
+十四条普通表（INT-101 的 `bots`、`bot_messages`、`bot_runs`、
 `bot_model_requests`、`bot_tool_calls`、`bot_authorizations`、`bot_events`，
 INT-102 新增 `bot_context_states`、`bot_compactions`、`bot_memory_files`、
-`bot_memory_versions`、`bot_maintenance_runs`、`bot_maintenance_requests`）
+`bot_memory_versions`、`bot_maintenance_runs`、`bot_maintenance_requests`，
+INT-103 新增 `bot_schedule_tasks`）
 加一张 FTS5 虚表 `bot_memory_fts`，全部 UUID 主键、UTC 时间、不嵌软删除；
 实际外键一律 `OnDelete:CASCADE`，整机器人删除级联清理。
 
@@ -44,9 +48,13 @@ INT-102 新增 `bot_context_states`、`bot_compactions`、`bot_memory_files`、
   SQLite 触发器 `trg_bot_messages_append_only` 拦截一切 UPDATE（级联 DELETE
   不受影响）。幂等与去重靠唯一索引：`(bot_id, client_message_id)`、
   `(bot_id, dedup_key)`（`receipt:<call_id>` / `terminal:<call_id>` /
-  `decision:<call_id>` / `recovery:<分钟>`）。
+  `decision:<call_id>` / `recovery:<分钟>`）。`session_kind` 列（默认 main）
+  区分主线与定时任务会话，两套会话共用 seq 水位、读取面互相隔离。
 - `bot_runs` 唯一 `(bot_id, trigger_key)` 挡重复触发；部分唯一
-  `(bot_id) WHERE finished_at IS NULL` 保证每机器人至多一个主线 run。
+  `(bot_id) WHERE finished_at IS NULL AND session_kind='main'` 保证每机器人
+  至多一个未结束主线 run（INT-103 起按会话判别收窄，schedule run 可与主线
+  并行）；`schedule_task_id/scheduled_for/summary/silent` 只在 schedule 会话
+  有值，`schedule_task_id` 不建外键——任务删除后运行记录保留供排查。
 - `bot_tool_calls` 的 ID 同时是执行幂等键；`provider_tool_call_id` 只做模型
   协议配对。状态机全部条件 UPDATE（CAS）：`pending_confirmation→queued`
   （决定）、`queued→running`（认领）、`running→终态`（完成/取消竞速只有
@@ -106,12 +114,16 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 工具集按 `bots.toolset_version` 列冻结并版本化：v1 = INT-101 的 10 工具 /
 29 action（`fs_memory`/`fs_schedule` 占位），v2 起 `fs_memory` 开放
 `list/read/history/create/replace/append/delete/restore`（读类同步、写类
-同步立即落库），另加 `fs_memory_search`。版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
+同步立即落库），另加 `fs_memory_search`；v3（INT-103）起 `fs_schedule`
+开放定时任务管理（见下节）。三个版本的注册表都是**独立冻结的字面量**——
+新版本变化不得改写旧版本的字节（存量会话的 tools_hash 失稳即前缀失稳）。
+版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
 规则并递增 prompt_revision）；告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
-旧 action 名（如 `fs_memory/search`）会命中改名映射表返回结构化迁移指引
-——不静默代执行新 action。
+旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
+改名映射表返回结构化迁移指引——不静默代执行新动作；冻结工具集里仍存在的
+同名动作不受映射影响。
 
 所有业务写操作为 async + 确认/授权；同步读取也记调用账本。不做反射调用
 service、不提供任意 RPC。参数用专用结构体，action 列 enum，服务端校验
@@ -198,6 +210,110 @@ path+version）；只有 sources 无正文、截断或 `{}` 不算成功，不�
 path→version，无新笔记的空成功不会让次日重跑全部 daily。恢复中断的压缩
 周期会补一条失败的最终压缩记录。
 
+### 定时任务（INT-103）
+
+机器人可绑定多个定时任务，与主对话线相互独立。任务只由机器人经 `fs_schedule`
+创建/修改/删除；用户只能查看（任务、指令、最近运行）并通过 REST 开启/关闭。
+
+- **数据模型**：`bot_schedule_tasks`（bot、cron 五字段、时区 IANA 空串=UTC、
+  指令、可选模型、needs_report、enabled、next_run_at）。调度事实来源是
+  `next_run_at`（UTC 存储）；启用/重新启用时重算为 now 之后的下一次，停用
+  清空（不补跑过期计划）。每机器人任务数上限 200，与列表读取上限一致——建得比
+  看得见还多的话，用户唯一的任务管理面（列表 + 开关）就管不到那些任务；计数与
+  插入在同一事务内（任务允许并行运行，分开读会让并发创建都通过检查）。
+- **会话隔离**：schedule run 复用 `bot_runs`/`bot_messages`/`bot_events`，
+  以 `session_kind='schedule'` 判别；每次运行是独立会话，只带同一份系统提示
+  + 冻结记忆注入（run 开始现读一次、run 内冻结）+ 冻结工具集 + 只含本 run
+  的消息 + 末尾运行时上下文（任务名/指令/cron/静默约定）。主线一切读取面
+  （`FindActiveByBot`、/runs、`ListMainline`、聊天快照、SSE 重放、
+  `HasModelInputSince`）按 `session_kind='main'` 收窄；`offered_input_seq`
+  只由主线推进。run 的模型/地址取配置快照（任务可指定模型覆盖）；密钥密文
+  （`bot_runs.api_key_encrypted_snapshot`，不进任何 API 投影）与 `base_url`
+  在派发时成对冻结——轮换密钥又换地址时，不能把新密钥发往旧地址。schedule
+  会话的「新输入」判定按 `run_id` 收窄，同一机器人另一个 schedule run 的
+  后台结果不算自己的输入。
+- **不做压缩**：schedule 会话不读写 `bot_context_states`/`bot_compactions`、
+  不跑压缩周期、不发工具集告知。折叠是**无状态、确定性**的：tool_reply 正文
+  超过 6000 字符即替换为一行 `fs_result.read` 引用——同一 run 内任何一次投影
+  结果一致（前缀稳定），原文仍在账本与调用结果里。这与主线「压缩驱动折叠」
+  （大结果换引用、写入持久投影、按窗口与门槛裁剪）不同：schedule 会话生命
+  只有一次运行，没有跨请求的水位需要维护，确定性规则即可保证不漂移。
+- **调度**：`bot_schedule_scheduler.go` 单进程 10s ticker（与 Automation
+  同纪律：事务内绝不发网络调用）。每 tick 短事务逐任务核对 `enabled` + 旧
+  `next_run_at` 未变，建 run 并在同一事务内 CAS 推进 `next_run_at` 到严格晚
+  于 now 的下一次（0 行 = 被并发抢走）。触发幂等靠 `UNIQUE(bot_id,
+  trigger_key)`，`trigger_key = schedule:<task_id>:<计划时间 UTC RFC3339>`。
+  计划时间已过 **90s 宽限**（≥tick 间隔）即视为错过：记一条 `status=skipped`
+  的运行（`scheduled_for=原计划时间`，summary 写明跳过），不执行不补跑。单轮
+  tick 按键集分页**排空**到期集合（上限 1000 条/tick，约 9000 条同刻到期的
+  容量）——只读一批的话，超过一批的同刻到期任务会被拖过宽限、误记成错过；
+  触上限会告警，不静默丢弃。
+  重启不重复触发（trigger_key 唯一 + 不在启动时补跑），未完成的 schedule
+  run 由启动恢复统一置 failed（`server_restarted`）并照常追加主线事件。
+  同一计划时间已有运行记录时仍推进 `next_run_at`（否则任务会永远停在到期集合里
+  空转）。cron 解析复用 automation 的五字段 parser 与时区校验
+  （`parseAutomationCron` 同一函数），解析失败暂停该任务（`next_run_at` 置空且
+  `enabled=false`，不留「开着但不再跑」）。对已启用、且这次计划还在宽限内等着
+  派发的任务再点「启用」不会重算计划（不吞掉这次触发）；只有原本停用或没有下次
+  计划时才重算。
+- **执行槽**：`botRuntimeState.active` 的 key 泛化为会话槽——主线 `botID`、
+  schedule `"schedule:"+runID`。schedule run 与主线可同时运行、互不让位；
+  同一 schedule run 不重复执行（槽占用即放弃）。`scanOnce` 每 5s 按键集分页重扫
+  **全部**未完成的 schedule run 补回丢失的唤醒（`wakeScheduleRun` 按槽占用与终态
+  幂等）；只扫最早一页的话，最早的若干条都占着槽时较新的丢失唤醒会被饿死。否则
+  一次瞬态失败会让 run 卡在 running，并挡住机器人删除。
+- **结算后才收尾**：schedule run 自己的异步写全部落终态前不完成——等待在
+  构建请求之前阻塞轮询（不发模型请求空转），`tryFinishScheduleRun` 在终态
+  事务内再核对一次。调用终态与后台结果同一事务落库，所以计数归零即结果可见，
+  重建上下文后模型据实汇报成败；等待上限是单次异步执行超时加 5 分钟，超时按
+  `async_calls_unsettled` 显式失败，不谎报成功。失败终态被停止请求抢先后回落
+  `stopped`（与主线 `finishFailed` 同型兜底）。
+- **默认放行**：schedule 会话里需确认的写调用直接排队执行，**不写**
+  `bot_authorizations`、不产生 `pending_confirmation`（回执即 queued）；范围
+  仍要求可解析，目标不明的调用按失败回复模型。`fs_stop` 停当前 run、
+  `fs_cancel` 取消自己的后台调用，被取消的 schedule run 落 `stopped`。
+- **事件进主线**：与 run 终态同一事务追加消息 kind `schedule_event`
+  （`session_kind='main'`、`run_id=NULL`，正文 JSON 含 task_id/task_name/
+  run_id/status/summary/error_code/error_message）。时机：**failed 必报**；
+  `completed && needs_report && !silent` 才报；成功静默、成功且不需汇报、
+  stopped 不追加；`needs_report` 的任务被跳过时追加一条 `status=skipped` 的事件
+  （跳过也是一次「没跑」，不能零信号；跳过摘要写明原定计划时间）。任务在运行期间
+  被删除时仍按派发时冻结的
+  `needs_report` 与任务名判定并追加事件（失败必报；含启动恢复路径）——读不到
+  任务行时用占位名「已删除的定时任务」，否则这次运行的结果既报不出去、用户也
+  无从经任务查询看到。`schedule_event` 是主线模型输入（计入
+  `HasModelInputSince`），主线循环自动被唤醒判断是否通知用户。
+- **静默约定**：运行时上下文明确要求「无话可说只回复一行 `[[SILENT]]`」。
+  收尾取本 run 最后一条 assistant 正文，去尾部空白与句号后等于哨兵即
+  `silent=true`，summary 记空串；否则 summary 取正文并截断到 2000 字符。
+- **工具**：`fs_schedule`（v3）动作固定 7 个：`list/create/update/delete/
+  runs/enable/disable`，全部同步执行、立即生效。create/update 校验 cron 五
+  字段与时区，结果带 `next_run_at` 与 cron/时区原文，让模型能在回复里用中文
+  说明执行时间。update 省略字段即保留；`model` 用指针区分「未提供」与「空串」
+  ——传空串明确清除模型覆盖、回到机器人当前模型。`list` 支持 `limit`/`offset`
+  分页（默认且最多 200），返回真实 `total` 与 `has_more`：把截断结果当总量会让
+  旧任务不可达、也就无从管理。旧占位动作 `fs_schedule/status` 走改名映射回结构化提示
+  （冻结在 v1/v2 的会话仍可用 status 查询可用性）。
+- **REST（仅 JWT，接口形状已与前端冻结）**：
+  `GET /api/bots/{id}/schedule-tasks`、`GET .../{taskId}`、
+  `GET .../{taskId}/runs?limit=&offset=`、
+  `PUT .../{taskId}/enabled`（body 只接受 `{"enabled":bool}`，其它字段 400）。
+  没有任何创建/编辑/删除端点。`BotScheduleTask` 含 `last_run`；
+  `BotScheduleRun` 含 `status/summary/silent/scheduled_for/duration_ms/usage`。
+- **删除任务**：同一事务里给该任务未完成的运行置 `stop_requested_at` 再删任务
+  ——运行记录只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住
+  机器人删除；已跑了很久的运行不受影响，会在下一个安全点收尾为 `stopped`。
+- **已知限制**：schedule 会话不做压缩与摘要（超长会话靠确定性折叠与上游
+  上下文限制显式失败）；错过不补跑；无用户侧任务编辑。**同一任务在一次运行
+  还没结束时仍会按 cron 再次触发**（多个 run 并行、各自默认放行写操作）——
+  这是产品决定：不限制任务运行的并发，与「运行内不限制工具调用次数/并发/费用」
+  一致；运行之间靠 `session_kind` + `run_id` 隔离，互不看见对方的输入。另外：
+  重启或 `async_calls_unsettled`
+  失败后，该 run 已受理的排队异步写仍会执行，结果落在已终态的 schedule 会话
+  里，主线不可见也不上报；`schedule_event` 唤醒主线靠 5s 扫描（非即时）；
+  同一机器人的多个定时任务同刻到时会并行起多个 run，模型调用并发无上限
+  （仅 4 个异步 worker 兜底）。
+
 ### 确认与授权
 
 无授权的写操作保持 `pending_confirmation`（不阻塞主线继续对话）。approve：
@@ -231,6 +347,7 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 `id: <event_seq>`；心跳是 `: ping` 注释；run 失败顺序固定 error → done；done
 是某个 run 完成，不是事件流关闭。事件先落库再发送；订阅先注册再补读，避免
 补读与订阅之间漏事件；断开只结束订阅、不取消 run；慢客户端断开后按 seq 重放。
+事件行带 `session_kind`，重放只返回 main——定时任务的流式事件不进聊天页。
 正文流式片段约 100ms 一批落事件，完整 assistant 消息只在模型调用结束时追加
 一次（流式片段不改消息）。
 
@@ -251,12 +368,14 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 - **既有自动化边界**：`AutomationService` 是调度与账本，不是机器人的执行器；
   机器人调用 Issue service 时既有 Issue 事件自动化仍可能正常触发（确认说明
   应反映这一点）。
-- **仍不做**：调度（`fs_schedule` 仍 `available:false`）、环境配对/删除/密钥
-  代答；不设人为 token/费用/步数上限，上游上下文不足时明确失败并记录错误。
-  记忆与摘要/自动压缩已于 INT-102 落地（见上两节）；不新增任何用户/管理
-  端记忆 REST 接口，记忆只经模型工具面访问。
+- **仍不做**：环境配对/删除/密钥代答；不设人为 token/费用/步数上限，上游
+  上下文不足时明确失败并记录错误。记忆与摘要/自动压缩已于 INT-102 落地
+  （见上两节）；定时任务已于 INT-103 落地（见上节）——任务由机器人工具面
+  维护，用户侧只有查看与开关，不新增任务编辑 REST。记忆仍只经模型工具面
+  访问。
 - **未来扩展面**：`Wake(botID, source, triggerKey, payload)` 已以 `botWake`
-  形态存在，定时触发（schedule）将来只需新增触发源并提升 toolset_version。
+  形态存在；schedule 触发源已随 INT-103 落地，后续触发类型（如事件驱动）
+  只需新增触发源与会话判别。
 - 契约真相源是 `server/api/openapi.yaml`；`make api-types` 生成
   `internal/api/types.gen.go`，`make api-docs` 生成
   `skills/fast-ship/references/api.md`。

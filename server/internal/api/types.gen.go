@@ -1542,11 +1542,66 @@ type BotRun struct {
 	TotalTokens   *int64 `json:"total_tokens,omitempty"`
 	TriggerKey    string `json:"trigger_key"`
 
-	// TriggerSource user_message / tool_result / recovery（以后可增加 schedule）
+	// TriggerSource user_message / tool_result / recovery / schedule
 	TriggerSource string `json:"trigger_source"`
 
 	// UsageComplete false 表示上游未报 usage（缺失与零严格区分）
 	UsageComplete bool `json:"usage_complete"`
+}
+
+// BotScheduleRun defines model for BotScheduleRun.
+type BotScheduleRun struct {
+	CompletionTokens *int64  `json:"completion_tokens,omitempty"`
+	DurationMs       *int64  `json:"duration_ms"`
+	ErrorCode        *string `json:"error_code,omitempty"`
+	ErrorMessage     *string `json:"error_message,omitempty"`
+	FinishedAt       *string `json:"finished_at"`
+	Id               string  `json:"id"`
+	PromptTokens     *int64  `json:"prompt_tokens,omitempty"`
+
+	// ScheduledFor 本 run 对应的计划时间（UTC）
+	ScheduledFor *string `json:"scheduled_for"`
+
+	// Silent true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报
+	Silent    bool    `json:"silent"`
+	StartedAt *string `json:"started_at"`
+
+	// Status running / completed / failed / stopped / skipped
+	Status string `json:"status"`
+
+	// Summary 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串
+	Summary     string  `json:"summary"`
+	TaskId      *string `json:"task_id"`
+	TotalTokens *int64  `json:"total_tokens,omitempty"`
+}
+
+// BotScheduleTask defines model for BotScheduleTask.
+type BotScheduleTask struct {
+	BotId     string `json:"bot_id"`
+	CreatedAt string `json:"created_at"`
+
+	// CronExpression 标准五字段 cron（分 时 日 月 周）
+	CronExpression string `json:"cron_expression"`
+	Enabled        bool   `json:"enabled"`
+	Id             string `json:"id"`
+
+	// Instruction 每次运行交给机器人的任务指令
+	Instruction string         `json:"instruction"`
+	LastRun     BotScheduleRun `json:"last_run"`
+
+	// Model 运行使用的模型；空串用机器人当前模型
+	Model string `json:"model"`
+	Name  string `json:"name"`
+
+	// NeedsReport true 时成功且非静默的运行也追加事件进主线
+	NeedsReport bool `json:"needs_report"`
+
+	// NextRunAt 下一次计划触发时间（UTC）；停用或调度暂停时为 null
+	NextRunAt *string `json:"next_run_at"`
+
+	// Timezone IANA 时区名称；空串 = UTC
+	Timezone  string `json:"timezone"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // BotStreamEvent SSE 帧 data 的统一形状：bot_id 必带；kind 区分 delta 下的
@@ -4671,6 +4726,67 @@ type StopBotRun200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListBotScheduleTasks200JSONResponseBody_Data defines parameters for ListBotScheduleTasks.
+type ListBotScheduleTasks200JSONResponseBody_Data struct {
+	Items []BotScheduleTask `json:"items"`
+}
+
+// ListBotScheduleTasks200JSONResponseBody defines parameters for ListBotScheduleTasks.
+type ListBotScheduleTasks200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                           `json:"code"`
+	Data *ListBotScheduleTasks200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetBotScheduleTask200JSONResponseBody defines parameters for GetBotScheduleTask.
+type GetBotScheduleTask200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *BotScheduleTask `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// SetBotScheduleTaskEnabledJSONBody defines parameters for SetBotScheduleTaskEnabled.
+type SetBotScheduleTaskEnabledJSONBody struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SetBotScheduleTaskEnabled200JSONResponseBody defines parameters for SetBotScheduleTaskEnabled.
+type SetBotScheduleTaskEnabled200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *BotScheduleTask `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListBotScheduleTaskRunsParams defines parameters for ListBotScheduleTaskRuns.
+type ListBotScheduleTaskRunsParams struct {
+	Limit  *int `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset *int `form:"offset,omitempty" json:"offset,omitempty"`
+}
+
+// ListBotScheduleTaskRuns200JSONResponseBody_Data defines parameters for ListBotScheduleTaskRuns.
+type ListBotScheduleTaskRuns200JSONResponseBody_Data struct {
+	Items []BotScheduleRun `json:"items"`
+}
+
+// ListBotScheduleTaskRuns200JSONResponseBody defines parameters for ListBotScheduleTaskRuns.
+type ListBotScheduleTaskRuns200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                              `json:"code"`
+	Data *ListBotScheduleTaskRuns200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // DashboardOverview200JSONResponseBody defines parameters for DashboardOverview.
 type DashboardOverview200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -6412,6 +6528,9 @@ type DecideBotCallJSONRequestBody = BotCallDecisionRequest
 
 // SendBotMessageJSONRequestBody defines body for SendBotMessage for application/json ContentType.
 type SendBotMessageJSONRequestBody = SendBotMessageRequest
+
+// SetBotScheduleTaskEnabledJSONRequestBody defines body for SetBotScheduleTaskEnabled for application/json ContentType.
+type SetBotScheduleTaskEnabledJSONRequestBody SetBotScheduleTaskEnabledJSONBody
 
 // UpdateDocumentJSONRequestBody defines body for UpdateDocument for application/json ContentType.
 type UpdateDocumentJSONRequestBody = UpdateDocumentRequest

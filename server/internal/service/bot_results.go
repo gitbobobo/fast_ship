@@ -168,19 +168,32 @@ func (s *BotService) execResultRead(call *model.BotToolCall) (string, error) {
 // ---------- 能力查询 / 帮助 / 停止 / 取消 ----------
 
 // execCapabilityStatus 返回能力状态：fs_memory 自 INT-102 起可用；
-// fs_schedule 仍明确返回 available:false，不转调现有 AutomationService。
+// fs_schedule 自 INT-103（v3）起可用——冻结在 v1/v2 工具集的会话工具面里
+// 还没有任务管理动作，按激活边界（压缩或重启）升级后开放。
 func (s *BotService) execCapabilityStatus(call *model.BotToolCall) (string, error) {
 	capability := "schedule"
 	available := false
+	note := ""
 	if call.ToolName == "fs_memory" {
 		capability = "memory"
 		available = true
+	} else {
+		live := int64(0)
+		_ = s.db.Raw(`SELECT toolset_version FROM bots WHERE id = ?`, call.BotID).Scan(&live).Error
+		available = live >= 3
+		if !available {
+			note = "定时任务在工具集 v3 开放；当前会话冻结在旧版本，压缩或重启边界后升级"
+		}
 	}
-	return botMarshalResult(map[string]interface{}{
+	out := map[string]interface{}{
 		"capability":      capability,
 		"available":       available,
 		"toolset_version": botToolsetVersion,
-	})
+	}
+	if note != "" {
+		out["note"] = note
+	}
+	return botMarshalResult(out)
 }
 
 // botHelpText 是嵌入程序的工具使用说明；fs_help.read 原样返回。
@@ -194,7 +207,7 @@ const botHelpText = `Fast Ship 机器人工具说明：
 - 大结果被截断时（truncated=true）用 fs_result.read 按 offset/limit 续读，单位是 Unicode 字符。
 - fs_stop.stop 结束当前主线运行；fs_cancel.cancel 取消本机器人的某个后台调用。
 - 记忆：fs_memory list/read/create/replace/append/delete/history/restore（写操作需 expected_version 乐观锁）；fs_memory_search search 关键词检索（≥3 字符全文匹配）。USER.md 记用户画像，MEMORY.md 记长期事实，daily/YYYY-MM-DD.md 是每日笔记。
-- fs_schedule 不可用（available=false）。`
+- 定时任务：fs_schedule list/create/update/delete/runs/enable/disable（全部同步、立即生效）。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（默认 UTC）。任务由你创建/修改/删除；用户只能查看与开关。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。`
 
 // execStopCurrentRun 请求停止当前主线 run；回复后由安全点收尾为 stopped。
 func (s *BotService) execStopCurrentRun(call *model.BotToolCall) (string, error) {

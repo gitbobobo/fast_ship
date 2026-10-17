@@ -126,4 +126,35 @@ describe("bot api requests", () => {
     expect(calls(post)[1][1].json).toEqual({ decision: "always_allow" });
     expect(calls(post)[2][1].json).toEqual({ decision: "reject" });
   });
+
+  it("routes schedule-task requests with encoded paths", async () => {
+    const { signal } = new AbortController();
+    await botApi.scheduleTasks("b 1", signal);
+    await botApi.scheduleTask("b 1", "t/1", signal);
+    await botApi.scheduleTaskRuns("b 1", "t 1", { limit: 20, offset: 40 }, signal);
+    await botApi.setScheduleTaskEnabled("b 1", "t 1", false);
+
+    expect(calls(get).map(([path]) => path)).toEqual([
+      "bots/b%201/schedule-tasks",
+      "bots/b%201/schedule-tasks/t%2F1",
+      "bots/b%201/schedule-tasks/t%201/runs",
+    ]);
+    expect(
+      (calls(get)[2][1] as { searchParams?: unknown }).searchParams,
+    ).toEqual({ limit: "20", offset: "40" });
+    expect(calls(put).map(([path]) => path)).toEqual([
+      "bots/b%201/schedule-tasks/t%201/enabled",
+    ]);
+  });
+
+  it("sends enabled as the only toggle body and omits undefined run params", async () => {
+    await botApi.setScheduleTaskEnabled("b1", "t1", true);
+    await botApi.scheduleTaskRuns("b1", "t1");
+    await botApi.scheduleTaskRuns("b1", "t1", { limit: 20 });
+
+    expect(calls(put)[0][1].json).toEqual({ enabled: true });
+    expect(
+      calls(get).map(([, o]) => (o as { searchParams?: unknown }).searchParams),
+    ).toEqual([undefined, { limit: "20" }]);
+  });
 });

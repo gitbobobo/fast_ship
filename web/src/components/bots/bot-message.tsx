@@ -1,4 +1,10 @@
-import type { BotCall, BotCallDecision, BotMessage } from "@/lib/api/bots";
+import type {
+  BotCall,
+  BotCallDecision,
+  BotMessage,
+  BotScheduleRunStatus,
+} from "@/lib/api/bots";
+import { botScheduleRunStatusLabel } from "@/lib/api/bots";
 import { cn } from "@/lib/utils";
 import { BotConfirmationCard } from "./bot-confirmation-card";
 import { BotToolCard } from "./bot-tool-card";
@@ -82,6 +88,35 @@ export function BotMessageView({
           </p>
         )}
       </section>
+    );
+  }
+
+  if (message.kind === "schedule_event") {
+    // 定时任务运行事件是平台投影出的结构性消息：安静的居中事件行，
+    // 不是机器人的回复气泡。状态文案与「定时任务」区同一套标签。
+    const failed = message.content.status === "failed";
+    const statusLabel =
+      botScheduleRunStatusLabel(message.content.status as BotScheduleRunStatus) ??
+      message.content.status ??
+      "";
+    return (
+      <p
+        className={cn(
+          "text-center text-xs text-muted-foreground",
+          failed && "text-destructive",
+        )}
+      >
+        定时任务「
+        {message.content.task_name || message.content.task_id || "未命名任务"}」
+        {statusLabel}
+        {message.content.summary ? `：${message.content.summary}` : ""}
+        {message.content.error_message && (
+          <span className="block">
+            {message.content.error_code ? `${message.content.error_code}: ` : ""}
+            {message.content.error_message}
+          </span>
+        )}
+      </p>
     );
   }
 

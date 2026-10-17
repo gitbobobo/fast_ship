@@ -89,6 +89,14 @@ func (rt *botRuntimeState) markRequeue(botID string, wake *botWake) {
 }
 
 // release 释放执行槽；返回 requeue 与待处理的触发描述。
+// hasSlot 报告某个执行槽是否被占（扫描补唤醒时跳过已在跑的 run）。
+func (rt *botRuntimeState) hasSlot(key string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	_, ok := rt.active[key]
+	return ok
+}
+
 func (rt *botRuntimeState) release(botID string) (requeue bool, wake *botWake) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -121,6 +129,7 @@ func (s *BotService) Start() {
 	s.ensureMaintWorker()
 	go s.scanLoop()
 	go s.nightlyLoop()
+	go s.scheduleLoop()
 	s.scanNightlyOnce()
 }
 
@@ -229,12 +238,63 @@ func (s *BotService) scanOnce() {
 	}
 	// 后台调用：排队的调用推给 worker（重复推送无害，CAS 认领挡住并发）。
 	s.scanQueuedCalls()
+	// 定时任务运行：补回丢失的唤醒——wakeScheduleRun 的瞬态失败或执行槽异常
+	// 结束会让 run 永远卡在 running（未完成的 schedule run 还会挡住机器人删除）。
+	// 任务允许并行，未完成 run 数量无上限，所以扫完整个集合，但只唤醒「还没有
+	// 执行槽」的那些（已占槽的本来就在跑，不需要补）；单轮唤醒数另有上限，
+	// 下一轮会自动照顾到剩下的——已唤醒的占了槽，不会再被重复唤醒，因此不会
+	// 永远停在同一批最早的 run 上。
+	woken := 0
+	for _, run := range s.listUnfinishedScheduleRuns() {
+		if woken >= botScheduleWakePerScan {
+			return
+		}
+		if s.rt.hasSlot(botScheduleSlotKey(run.ID)) {
+			continue
+		}
+		s.wakeScheduleRun(run.BotID, run.ID)
+		woken++
+	}
 }
 
-// hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（user /
-// background_result）；账本水位差可能来自非输入消息。
+// listUnfinishedScheduleRuns 按键集分页取全部未完成的 schedule run（扫完即止，
+// 行数上限只是防止异常积累把扫描拖长的安全阀）。分页键是 (created_at, id)，
+// 查询期间集合变化不会像 offset 那样跳行。
+func (s *BotService) listUnfinishedScheduleRuns() []model.BotRun {
+	const pageSize = 100
+	const maxRows = 10000
+	out := make([]model.BotRun, 0, pageSize)
+	var lastCreated time.Time
+	lastID := ""
+	for len(out) < maxRows {
+		q := s.db.Where("finished_at IS NULL AND session_kind = ?", model.BotSessionKindSchedule)
+		if !lastCreated.IsZero() {
+			q = q.Where("created_at > ? OR (created_at = ? AND id > ?)", lastCreated, lastCreated, lastID)
+		}
+		var page []model.BotRun
+		if err := q.Order("created_at ASC, id ASC").Limit(pageSize).Find(&page).Error; err != nil {
+			s.logger.Warn("扫描未完成定时任务失败", zap.Error(err))
+			return out
+		}
+		out = append(out, page...)
+		if len(page) < pageSize {
+			return out
+		}
+		lastCreated = page[len(page)-1].CreatedAt
+		lastID = page[len(page)-1].ID
+	}
+	// 触到安全阀：未完成 run 病态积累，更晚的 run 这一轮扫不到。告警而不是
+	// 静默截断（与调度排空上限触顶告警对齐）。
+	s.logger.Warn("未完成的定时任务运行过多，本轮扫描触到上限",
+		zap.Int("scanned", len(out)))
+	return out
+}
+
+// hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（主线会话内的 user /
+// background_result / schedule_event）；账本水位差可能来自非输入消息与
+// schedule 会话的消息。
 func (s *BotService) hasUnconsumedInput(b *model.Bot) bool {
-	hasNew, err := s.messages.HasModelInputSince(b.ID, b.OfferedInputSeq)
+	hasNew, err := s.messages.HasModelInputSince(b.ID, model.BotSessionKindMain, "", b.OfferedInputSeq)
 	return err == nil && hasNew
 }
 
@@ -260,7 +320,7 @@ func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, boo
 	// HasModelInputSince 看不见它；通知已带 dedup 落库，直接放行建 run，
 	// 否则重启后的恢复通知永远到不了模型。
 	if wake.Trigger != model.BotTriggerRecovery {
-		hasNew, err := s.messages.HasModelInputSince(bot.ID, bot.OfferedInputSeq)
+		hasNew, err := s.messages.HasModelInputSince(bot.ID, model.BotSessionKindMain, "", bot.OfferedInputSeq)
 		if err != nil {
 			return nil, false, err
 		}
@@ -278,6 +338,7 @@ func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, boo
 		TriggerKey:         wake.Key,
 		TriggerContextJSON: wake.Context,
 		Status:             model.BotRunStatusRunning,
+		SessionKind:        model.BotSessionKindMain,
 		ConfigSnapshotJSON: string(snapRaw),
 		InputThroughSeq:    0,
 		CreatedAt:          now,
@@ -342,7 +403,7 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		return nil, errs.ErrBotRunStateConflict
 	}
 	// 取消执行 context：当前模型请求/同步工具收到取消；循环在安全点收尾为 stopped。
-	s.cancelBotContext(botID)
+	s.cancelBotContext(botID, run)
 
 	// 重新读取（循环可能已在安全点落定 stopped）。
 	fresh, err := s.runs.FindByID(runID)
@@ -353,11 +414,17 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	return &resp, nil
 }
 
-// cancelBotContext 取消该 bot 当前执行（若在跑）。
-func (s *BotService) cancelBotContext(botID string) {
+// cancelBotContext 按 run 的会话解析执行槽并取消（若在跑）：schedule run 的
+// 槽 key 是 "schedule:"+runID（见 wakeScheduleRun），主线 run 用 botID。取消
+// 当前的模型请求/同步工具调用，循环在安全点收尾。
+func (s *BotService) cancelBotContext(botID string, run *model.BotRun) {
+	key := botID
+	if run.SessionKind == model.BotSessionKindSchedule {
+		key = "schedule:" + run.ID
+	}
 	s.rt.mu.Lock()
 	defer s.rt.mu.Unlock()
-	if a, ok := s.rt.active[botID]; ok && a.cancel != nil {
+	if a, ok := s.rt.active[key]; ok && a.cancel != nil {
 		a.cancel()
 	}
 }
@@ -509,16 +576,32 @@ type botEventEnvelope struct {
 	Payload   interface{} `json:"payload,omitempty"`
 }
 
-// appendEventTx 在事务内取事件号并落库；调用方提交后自行 publish。
+// botRunSessionKindTx 在事务内解析 run 的会话判别；runID 为空或缺行按主线
+// 处理（lifecycle / 用户消息等无 run 事件都属于主线）。
+func botRunSessionKindTx(tx *gorm.DB, runID string) string {
+	if runID == "" {
+		return model.BotSessionKindMain
+	}
+	var kind string
+	if err := tx.Raw("SELECT session_kind FROM bot_runs WHERE id = ?", runID).Scan(&kind).Error; err != nil || kind == "" {
+		return model.BotSessionKindMain
+	}
+	return kind
+}
+
+// appendEventTx 在事务内取事件号并落库；调用方提交后自行 publish。会话判别
+// 从 run 推导，定时任务 run 的流式事件不会进入聊天页（读者只返回 main）。
 func (s *BotService) appendEventTx(tx *gorm.DB, botID string, runID *string, callID string, eventType string, env botEventEnvelope) error {
 	seq, err := s.bots.NextEventSeqTx(tx, botID)
 	if err != nil {
 		return err
 	}
-	env.BotID = botID
+	runKey := ""
 	if runID != nil {
+		runKey = *runID
 		env.RunID = *runID
 	}
+	env.BotID = botID
 	env.CallID = callID
 	raw, err := json.Marshal(env)
 	if err != nil {
@@ -529,6 +612,7 @@ func (s *BotService) appendEventTx(tx *gorm.DB, botID string, runID *string, cal
 		Seq:         seq,
 		RunID:       runID,
 		EventType:   eventType,
+		SessionKind: botRunSessionKindTx(tx, runKey),
 		PayloadJSON: string(raw),
 		CreatedAt:   time.Now().UTC(),
 	}

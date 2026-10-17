@@ -8,8 +8,8 @@ import (
 )
 
 // BotModels 返回机器人的全部表模型（七张主线表 + INT-102 的压缩/记忆/维护
-// 表），供 AutoMigrate 与测试建库共用。FTS5 虚表与触发器不在 GORM 模型体系
-// 内，由 botSchemaDDL 创建。
+// 表 + INT-103 的定时任务表），供 AutoMigrate 与测试建库共用。FTS5 虚表与
+// 触发器不在 GORM 模型体系内，由 botSchemaDDL 创建。
 func BotModels() []interface{} {
 	return []interface{}{
 		&model.Bot{},
@@ -25,6 +25,7 @@ func BotModels() []interface{} {
 		&model.BotMemoryVersion{},
 		&model.BotMaintenanceRun{},
 		&model.BotMaintenanceRequest{},
+		&model.BotScheduleTask{},
 	}
 }
 
@@ -35,12 +36,13 @@ var botSchemaDDL = []string{
 	// bots：按用户列表；不唯一机器人名称（产品决策）。
 	`CREATE INDEX IF NOT EXISTS idx_bots_user_created ON bots(user_id, created_at DESC, id)`,
 
-	// bot_messages：账本正序读、幂等键、去重键与来源反查。
+	// bot_messages：账本正序读、幂等键、去重键、来源反查与会话隔离读。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_messages_bot_seq ON bot_messages(bot_id, seq)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_messages_client_message ON bot_messages(bot_id, client_message_id)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_messages_dedup ON bot_messages(bot_id, dedup_key)`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_messages_run_seq ON bot_messages(run_id, seq)`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_messages_call_seq ON bot_messages(call_id, seq)`,
+	`CREATE INDEX IF NOT EXISTS idx_bot_messages_bot_session_seq ON bot_messages(bot_id, session_kind, seq)`,
 	// 消息只追加：任何 UPDATE 直接失败；删除（整机器人级联清理）不受影响。
 	`CREATE TRIGGER IF NOT EXISTS trg_bot_messages_append_only
 BEFORE UPDATE ON bot_messages
@@ -49,9 +51,13 @@ BEGIN
 END`,
 
 	// bot_runs：触发去重 + 每机器人至多一个未结束主线 run + 列表索引。
+	// INT-103 起主线唯一性按 session_kind='main' 收窄（定时任务可并行）；
+	// 存量库的旧索引用 DROP+CREATE 幂等替换。
+	`DROP INDEX IF EXISTS idx_bot_runs_active_once`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_runs_active_once ON bot_runs(bot_id) WHERE finished_at IS NULL AND session_kind = 'main'`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_runs_bot_trigger ON bot_runs(bot_id, trigger_key)`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_runs_active_once ON bot_runs(bot_id) WHERE finished_at IS NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_runs_bot_created ON bot_runs(bot_id, created_at DESC, id)`,
+	`CREATE INDEX IF NOT EXISTS idx_bot_runs_schedule_task ON bot_runs(schedule_task_id, created_at DESC)`,
 
 	// bot_model_requests：run 内请求序号唯一。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_model_requests_run_ordinal ON bot_model_requests(run_id, ordinal)`,
@@ -132,6 +138,15 @@ END`,
 	`CREATE INDEX IF NOT EXISTS idx_bot_maintenance_runs_scan ON bot_maintenance_runs(kind, status, created_at)`,
 	// bot_maintenance_requests：运行内请求序号唯一。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_maintenance_requests_run_ordinal ON bot_maintenance_requests(maintenance_run_id, ordinal)`,
+
+	// ---------- INT-103：定时任务 ----------
+
+	// bot_schedule_tasks：按机器人列表 + 调度扫描（仅已启用且有计划时间的行）。
+	`CREATE INDEX IF NOT EXISTS idx_bot_schedule_tasks_bot_list ON bot_schedule_tasks(bot_id, created_at DESC, id)`,
+	`CREATE INDEX IF NOT EXISTS idx_bot_schedule_tasks_due ON bot_schedule_tasks(enabled, next_run_at) WHERE next_run_at IS NOT NULL`,
+
+	// bot_events：会话隔离读（聊天页只返回 main）。
+	`CREATE INDEX IF NOT EXISTS idx_bot_events_bot_session_seq ON bot_events(bot_id, session_kind, seq)`,
 
 	// bot_memory_fts 是派生全文索引（trigram），事实来源是文件/版本表；
 	// 只索引未删除文件的当前正文，不索引历史版本。同步由文件表触发器完成，
