@@ -87,10 +87,19 @@ func (s *BotService) RecoverOnStartup() error {
 		var schedTask *model.BotScheduleTask
 		schedSummary := ""
 		if run.SessionKind == model.BotSessionKindSchedule && run.ScheduleTaskID != nil {
-			if task, err := s.schedTasks.FindByID(*run.ScheduleTaskID); err == nil {
+			task, err := s.schedTasks.FindByID(*run.ScheduleTaskID)
+			if err == nil {
 				schedTask = task
-				_, schedSummary = s.botSilentSummaryOf(run.BotID, run.ID)
+			} else {
+				// 任务在崩溃前被删掉：失败仍是必报项，用派发时记下的任务名
+				// 建 stub（与 finishScheduleFailed 对称），否则这次失败既报不
+				// 出去、也无从经任务查询看到。
+				schedTask = &model.BotScheduleTask{
+					ID:   *run.ScheduleTaskID,
+					Name: botScheduleTaskNameFromContext(&run),
+				}
 			}
+			_, schedSummary = s.botSilentSummaryOf(run.BotID, run.ID)
 		}
 		// 终态转移与 error/done 事件同一事务：一直挂在页面上的客户端重启
 		// 后按 SSE 游标回放也能把原 run 折到 failed，不必等快照重读。

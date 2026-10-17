@@ -242,7 +242,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   于 now 的下一次（0 行 = 被并发抢走）。触发幂等靠 `UNIQUE(bot_id,
   trigger_key)`，`trigger_key = schedule:<task_id>:<计划时间 UTC RFC3339>`。
   计划时间已过 **90s 宽限**（≥tick 间隔）即视为错过：记一条 `status=skipped`
-  的运行（`scheduled_for=原计划时间`，summary 写明跳过），不执行不补跑；
+  的运行（`scheduled_for=原计划时间`，summary 写明跳过），不执行不补跑。单轮
+  tick 按键集分页**排空**到期集合（上限 1000 条/tick，约 9000 条同刻到期的
+  容量）——只读一批的话，超过一批的同刻到期任务会被拖过宽限、误记成错过；
+  触上限会告警，不静默丢弃。
   重启不重复触发（trigger_key 唯一 + 不在启动时补跑），未完成的 schedule
   run 由启动恢复统一置 failed（`server_restarted`）并照常追加主线事件。
   cron 解析复用 automation 的五字段 parser 与时区校验（`parseAutomationCron`
@@ -267,8 +270,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   （`session_kind='main'`、`run_id=NULL`，正文 JSON 含 task_id/task_name/
   run_id/status/summary/error_code/error_message）。时机：**failed 必报**；
   `completed && needs_report && !silent` 才报；成功静默、成功且不需汇报、
-  skipped、stopped 都不追加。失败事件在任务先被删除时仍会追加——任务名取派发
-  时记在触发上下文里的那份（此时用户已无法通过任务查询看到这次失败）。`schedule_event` 是主线模型输入（计入
+  skipped、stopped 都不追加。失败事件在任务先被删除时仍会追加（含启动恢复
+  路径）——任务名取派发时记在触发上下文里的那份，读不到任务行时用占位名
+  「已删除的定时任务」（此时用户已无法通过任务查询看到这次失败）。`schedule_event` 是主线模型输入（计入
   `HasModelInputSince`），主线循环自动被唤醒判断是否通知用户。
 - **静默约定**：运行时上下文明确要求「无话可说只回复一行 `[[SILENT]]`」。
   收尾取本 run 最后一条 assistant 正文，去尾部空白与句号后等于哨兵即

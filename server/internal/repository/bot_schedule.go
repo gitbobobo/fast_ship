@@ -94,9 +94,19 @@ func (r *BotScheduleTaskRepository) Delete(botID, taskID string) error {
 
 // ListDue 扫描已启用且到期的任务（短事务外粗筛用；逐任务在事务内复核）。
 func (r *BotScheduleTaskRepository) ListDue(now time.Time, limit int) ([]model.BotScheduleTask, error) {
+	return r.ListDueAfter(now, nil, "", limit)
+}
+
+// ListDueAfter 是 ListDue 的键集分页版：只取 (next_run_at, id) 严格大于游标的
+// 行，供单轮排空到期集合使用（处理过的任务会把 next_run_at 推进，但游标取自
+// 读取时的值，因此不会回头也不会因集合变化跳行）。
+func (r *BotScheduleTaskRepository) ListDueAfter(now time.Time, afterRunAt *time.Time, afterID string, limit int) ([]model.BotScheduleTask, error) {
+	q := r.db.Where("enabled = ? AND next_run_at IS NOT NULL AND next_run_at <= ?", true, now)
+	if afterRunAt != nil {
+		q = q.Where("next_run_at > ? OR (next_run_at = ? AND id > ?)", *afterRunAt, *afterRunAt, afterID)
+	}
 	var rows []model.BotScheduleTask
-	err := r.db.Where("enabled = ? AND next_run_at IS NOT NULL AND next_run_at <= ?", true, now).
-		Order("next_run_at ASC").Limit(limit).Find(&rows).Error
+	err := q.Order("next_run_at ASC, id ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
 

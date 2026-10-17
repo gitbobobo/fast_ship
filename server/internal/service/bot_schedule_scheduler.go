@@ -26,8 +26,12 @@ const (
 	// botScheduleMissGrace 是计划时间的错过宽限：超过即视为错过（须大于
 	// tick 间隔，容忍调度抖动）。
 	botScheduleMissGrace = 90 * time.Second
-	// botScheduleDispatchBatch 单轮最多处理的到期任务数。
+	// botScheduleDispatchBatch 每次读取的到期任务条数。
 	botScheduleDispatchBatch = 50
+	// botScheduleDrainPerTick 单轮最多排空的到期任务数：宽限是 90s、tick 10s，
+	// 所以单 tick 至少要把「90s 内会堆积的数量」排空，否则有效任务会被当成
+	// 错过的计划记成 skipped。1000 条/tick 对应约 9000 条同刻到期的容量。
+	botScheduleDrainPerTick = 1000
 	// botScheduleCallSettleWait 是等待本 run 异步调用结算的上限：单次异步调用
 	// 自身的执行超时是 botAsyncExecTimeout，这里多给一段余量；超过就显式失败，
 	// 不谎报成功。
@@ -90,15 +94,33 @@ func (s *BotService) scheduleLoop() {
 	}
 }
 
+// scheduleTick 排空到期集合：单次只读一批的话，同刻到期任务数超过一批时
+// 剩下的会被拖过宽限、被误记成「错过」。按 (next_run_at, id) 键集分页逐批
+// 处理，直到取空或触到单轮上限；触上限时告警，不静默丢弃。
 func (s *BotService) scheduleTick(now time.Time) {
-	due, err := s.schedTasks.ListDue(now, botScheduleDispatchBatch)
-	if err != nil {
-		s.logger.Warn("扫描到期定时任务失败", zap.Error(err))
-		return
+	var afterRunAt *time.Time
+	afterID := ""
+	for drained := 0; drained < botScheduleDrainPerTick; {
+		due, err := s.schedTasks.ListDueAfter(now, afterRunAt, afterID, botScheduleDispatchBatch)
+		if err != nil {
+			s.logger.Warn("扫描到期定时任务失败", zap.Error(err))
+			return
+		}
+		if len(due) == 0 {
+			return
+		}
+		for i := range due {
+			s.dispatchDueScheduleTask(&due[i], now)
+		}
+		drained += len(due)
+		afterRunAt = due[len(due)-1].NextRunAt
+		afterID = due[len(due)-1].ID
+		if len(due) < botScheduleDispatchBatch {
+			return
+		}
 	}
-	for i := range due {
-		s.dispatchDueScheduleTask(&due[i], now)
-	}
+	s.logger.Warn("单轮到期任务超过排空上限，剩余放到下一轮",
+		zap.Int("drained", botScheduleDrainPerTick))
 }
 
 // dispatchDueScheduleTask 处理一个到期任务：短事务内核对 enabled + 旧

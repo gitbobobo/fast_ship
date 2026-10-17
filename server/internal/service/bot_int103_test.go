@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1328,4 +1329,77 @@ func TestBotScheduleScanCoversAllUnfinishedRuns(t *testing.T) {
 		}
 		seen[got[i].ID] = true
 	}
+}
+
+// 任务在崩溃前被删掉时，恢复路径的失败事件也不能丢（与 finishScheduleFailed 对称）。
+func TestBotScheduleRecoveryEventAfterTaskDeleted(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedrecovdel")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Update("trigger_context_json", marshalJSONString(map[string]interface{}{
+			"task_id": task.ID, "task_name": task.Name,
+		})).Error; err != nil {
+		t.Fatalf("set trigger context: %v", err)
+	}
+	if err := env.db.Exec(`DELETE FROM bot_schedule_tasks WHERE id = ?`, task.ID).Error; err != nil {
+		t.Fatalf("delete task: %v", err)
+	}
+	reloaded := mustFindRun(t, env, run.ID)
+
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	fresh := mustFindRun(t, env, run.ID)
+	if fresh.Status != model.BotRunStatusFailed {
+		t.Fatalf("中断的 schedule run 应置 failed: %+v", fresh)
+	}
+	n, content := countScheduleEvents(t, env, bot.ID)
+	if n != 1 {
+		t.Fatalf("任务被删除后恢复事件仍应追加，实得 %d", n)
+	}
+	if content.TaskName != task.Name || content.ErrorCode != "server_restarted" {
+		t.Fatalf("恢复事件应带派发时的任务名与 server_restarted: %+v", content)
+	}
+	_ = reloaded
+}
+
+// 同刻到期任务超过一批时单轮要排空：否则剩下的会被拖过宽限、误记成 skipped。
+func TestBotScheduleDrainsDueBacklog(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "[[SILENT]]"})
+	userID := createBotTestUser(t, env.db, "schedbacklog")
+	bot := env.createBot(t, userID)
+	const n = 60 // 超过 botScheduleDispatchBatch（50）
+	due := time.Now().UTC().Add(-3 * time.Second)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("批量任务%02d", i)
+		seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+			tk.Name = name
+			tk.NeedsReport = false
+			tk.NextRunAt = &due
+		})
+	}
+	env.bots.scheduleTick(time.Now().UTC())
+
+	var runs []model.BotRun
+	if err := env.db.Where("bot_id = ? AND session_kind = ?", bot.ID, model.BotSessionKindSchedule).Find(&runs).Error; err != nil {
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != n {
+		t.Fatalf("单轮应排空 %d 条到期任务，实得 %d 条 run", n, len(runs))
+	}
+	for i := range runs {
+		if runs[i].Status == model.BotRunStatusSkipped {
+			t.Fatalf("宽限内到期的任务不应记 skipped: %s", runs[i].ID)
+		}
+	}
+	// 收尾：等这些 run 结束，避免后台 goroutine 干扰后续用例。
+	waitForBot(t, "批量运行收尾", 30*time.Second, func() bool {
+		var unfinished int64
+		env.db.Model(&model.BotRun{}).
+			Where("bot_id = ? AND finished_at IS NULL", bot.ID).Count(&unfinished)
+		return unfinished == 0
+	})
 }
