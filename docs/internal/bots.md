@@ -225,7 +225,11 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   的消息 + 末尾运行时上下文（任务名/指令/cron/静默约定）。主线一切读取面
   （`FindActiveByBot`、/runs、`ListMainline`、聊天快照、SSE 重放、
   `HasModelInputSince`）按 `session_kind='main'` 收窄；`offered_input_seq`
-  只由主线推进。run 的模型/地址取配置快照（任务可指定模型覆盖）。
+  只由主线推进。run 的模型/地址取配置快照（任务可指定模型覆盖）；密钥密文
+  （`bot_runs.api_key_encrypted_snapshot`，不进任何 API 投影）与 `base_url`
+  在派发时成对冻结——轮换密钥又换地址时，不能把新密钥发往旧地址。schedule
+  会话的「新输入」判定按 `run_id` 收窄，同一机器人另一个 schedule run 的
+  后台结果不算自己的输入。
 - **不做压缩**：schedule 会话不读写 `bot_context_states`/`bot_compactions`、
   不跑压缩周期、不发工具集告知。折叠是**无状态、确定性**的：tool_reply 正文
   超过 6000 字符即替换为一行 `fs_result.read` 引用——同一 run 内任何一次投影

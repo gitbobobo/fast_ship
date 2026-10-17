@@ -98,6 +98,10 @@ type BotRun struct {
 	// 结果（[[SILENT]] 哨兵）。skipped run 的 Summary 记跳过原因。
 	Summary string `gorm:"type:text;not null;default:''" json:"summary"`
 	Silent  bool   `gorm:"not null;default:false" json:"silent"`
+	// APIKeyEncryptedSnapshot 是派发时冻结的密钥密文（仅 schedule run 有值）。
+	// 它与配置快照里的 base_url 成对使用：派发后用户同时换了地址与密钥时，
+	// 不能把新密钥发往旧地址。禁止出现在任何 API 投影（json:"-"）。
+	APIKeyEncryptedSnapshot []byte `gorm:"type:blob" json:"-"`
 	// ConfigSnapshotJSON 是本次 run 的模型 / 地址 / 提示词版本快照，不含明文 key。
 	ConfigSnapshotJSON string `gorm:"type:text;not null" json:"config_snapshot"`
 	// InputThroughSeq 是本 run 已消费的输入水位；新输入指 seq 大于它的

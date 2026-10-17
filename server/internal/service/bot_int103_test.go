@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -229,6 +230,15 @@ func TestBotScheduleDispatchFreezesConfigSnapshot(t *testing.T) {
 	if snap.Model != "fake-model" || snap.BaseURL != env.fake.URL() {
 		t.Fatalf("快照应记录派发时的有效配置: %+v", snap)
 	}
+	// 密钥密文与 base_url 成对冻结（派发时写入，不进任何 API 投影）。
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	if len(run.APIKeyEncryptedSnapshot) == 0 ||
+		!bytes.Equal(run.APIKeyEncryptedSnapshot, botRow.APIKeyEncrypted) {
+		t.Fatalf("快照应冻结派发时的密钥密文")
+	}
 
 	// 派发后、执行前编辑机器人：这次运行仍按快照执行（执行槽载入时即使
 	// 读到编辑后的机器人，快照值优先）。
@@ -254,6 +264,9 @@ func TestBotScheduleDispatchFreezesConfigSnapshot(t *testing.T) {
 	}
 	if payload.Model != "fake-model" {
 		t.Fatalf("已派发的运行应使用快照模型，实得 %s", payload.Model)
+	}
+	if !strings.Contains(req.Authorization, "sk-test-abcdef123456") {
+		t.Fatalf("已派发的运行应使用派发时的密钥，实得 %s", req.Authorization)
 	}
 	done := waitForScheduleRunFinished(t, env, run.ID)
 	if done.Status != model.BotRunStatusCompleted {
@@ -987,7 +1000,7 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 	if off.NextRunAt != nil {
 		t.Fatalf("停用后 next_run_at 应清空: %+v", off.NextRunAt)
 	}
-	updated, err := env.bots.updateScheduleTask(off, "", "0 10 * * *", "Asia/Shanghai", "", "", nil)
+	updated, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "0 10 * * *", "Asia/Shanghai", "", "", nil)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -1005,5 +1018,55 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 	}
 	if on.NextRunAt == nil || !on.NextRunAt.After(time.Now().UTC()) {
 		t.Fatalf("重新启用应重算未来计划: %+v", on.NextRunAt)
+	}
+}
+
+// 密钥与地址成对冻结：派发后轮换密钥并把地址指向别处，这次运行必须仍用
+// 派发时的密钥与地址（否则会把新密钥发往旧供应商）。
+func TestBotScheduleFrozenCredentialPairing(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "[[SILENT]]"})
+	userID := createBotTestUser(t, env.db, "schedcred")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NeedsReport = false
+	})
+
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	now := time.Now().UTC()
+	planned := now.Add(-time.Second)
+	taskID := task.ID
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource:  model.BotTriggerSchedule,
+		TriggerKey:     botScheduleTriggerKey(taskID, planned),
+		Status:         model.BotRunStatusRunning,
+		SessionKind:    model.BotSessionKindSchedule,
+		ScheduleTaskID: &taskID, ScheduledFor: &planned,
+		ConfigSnapshotJSON:      marshalJSONString(botSnapshotOf(botRow)),
+		APIKeyEncryptedSnapshot: append([]byte(nil), botRow.APIKeyEncrypted...),
+		CreatedAt:               now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+
+	// 派发之后轮换密钥、换地址：新密钥不得发往旧地址。
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"api_key_encrypted": []byte("rotated-cipher-not-decryptable"),
+		"base_url":          "http://edited.invalid/v1",
+	}).Error; err != nil {
+		t.Fatalf("rotate bot: %v", err)
+	}
+	env.bots.wakeScheduleRun(bot.ID, run.ID)
+	done := waitForScheduleRunFinished(t, env, run.ID)
+	if done.Status != model.BotRunStatusCompleted {
+		t.Fatalf("应使用冻结密钥正常完成: %s %v", done.Status, done.ErrorMessage)
+	}
+	req := env.fake.nextRequest(t, 10*time.Second)
+	if !strings.Contains(req.Authorization, "sk-test-abcdef123456") {
+		t.Fatalf("运行应使用派发时冻结的密钥，实得 Authorization=%q", req.Authorization)
 	}
 }

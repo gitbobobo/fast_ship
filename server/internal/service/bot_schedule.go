@@ -313,9 +313,48 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 	return task, nil
 }
 
-// updateScheduleTask 按提供（非空）的字段更新任务；cron/时区变化时重算
-// next_run_at 为 now 之后的下一次。
-func (s *BotService) updateScheduleTask(task *model.BotScheduleTask, name, cronExpr, timezone, instruction, mdl string, needsReport *bool) (*model.BotScheduleTask, error) {
+// updateScheduleTask 在事务内重新读取任务后按提供（非空）的字段更新；
+// cron/时区变化且任务启用时重算 next_run_at 为 now 之后的下一次。读改写走
+// 同一事务：与用户启停（setScheduleTaskEnabled）在同一连接上串行化，避免
+// 「读到启用 → 期间被停用 → 把 next_run_at 又写回去」的竞态。
+func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone, instruction, mdl string, needsReport *bool) (*model.BotScheduleTask, error) {
+	var out *model.BotScheduleTask
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		repo := repository.NewBotScheduleTaskRepository(tx)
+		task, err := repo.FindByIDAndBot(taskID, botID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotScheduleTaskNotFound
+			}
+			return err
+		}
+		updated, err := applyScheduleTaskUpdate(task, name, cronExpr, timezone, instruction, mdl, needsReport)
+		if err != nil {
+			return err
+		}
+		cols := map[string]interface{}{
+			"name": updated.Name, "cron_expression": updated.CronExpression,
+			"timezone": updated.Timezone, "instruction": updated.Instruction,
+			"model": updated.Model, "needs_report": updated.NeedsReport,
+			"next_run_at": updated.NextRunAt, "updated_at": time.Now().UTC(),
+		}
+		if ok, err := repo.UpdateColumns(updated.ID, nil, cols); err != nil || !ok {
+			return errs.ErrInternal
+		}
+		out = updated
+		return nil
+	})
+	if txErr != nil {
+		if appErr, ok := txErr.(*errs.AppError); ok {
+			return nil, appErr
+		}
+		return nil, errs.ErrInternal
+	}
+	return out, nil
+}
+
+// applyScheduleTaskUpdate 是纯字段应用与校验（不碰数据库），供事务内调用。
+func applyScheduleTaskUpdate(task *model.BotScheduleTask, name, cronExpr, timezone, instruction, mdl string, needsReport *bool) (*model.BotScheduleTask, error) {
 	cronChanged := false
 	if strings.TrimSpace(name) != "" {
 		if utf8.RuneCountInString(strings.TrimSpace(name)) > botScheduleTaskNameMaxLen {
@@ -349,28 +388,18 @@ func (s *BotService) updateScheduleTask(task *model.BotScheduleTask, name, cronE
 	if err := botValidateScheduleTaskFields(task.Name, task.CronExpression, task.Timezone, task.Instruction); err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
 	if cronChanged {
 		if !task.Enabled {
 			// 停用的任务保持「无下次计划」：改 cron/时区不该让接口与界面显示
 			// 一个永远不会触发的未来时间（重新启用时才重算）。
 			task.NextRunAt = nil
 		} else {
-			_, next, err := parseAutomationCron(task.CronExpression, task.Timezone, now)
+			_, next, err := parseAutomationCron(task.CronExpression, task.Timezone, time.Now().UTC())
 			if err != nil {
 				return nil, err
 			}
 			task.NextRunAt = &next
 		}
-	}
-	cols := map[string]interface{}{
-		"name": task.Name, "cron_expression": task.CronExpression,
-		"timezone": task.Timezone, "instruction": task.Instruction,
-		"model": task.Model, "needs_report": task.NeedsReport,
-		"next_run_at": task.NextRunAt, "updated_at": now,
-	}
-	if ok, err := s.schedTasks.UpdateColumns(task.ID, nil, cols); err != nil || !ok {
-		return nil, errs.ErrInternal
 	}
 	return task, nil
 }
@@ -669,14 +698,8 @@ func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botSchedu
 }
 
 func (s *BotService) execScheduleUpdate(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
-	task, err := s.schedTasks.FindByIDAndBot(strings.TrimSpace(args.TaskID), call.BotID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", errs.ErrBotScheduleTaskNotFound
-		}
-		return "", errs.ErrInternal
-	}
-	updated, err := s.updateScheduleTask(task, args.Name, args.Cron, args.Timezone, args.Instruction, args.Model, args.NeedsReport)
+	updated, err := s.updateScheduleTask(call.BotID, strings.TrimSpace(args.TaskID),
+		args.Name, args.Cron, args.Timezone, args.Instruction, args.Model, args.NeedsReport)
 	if err != nil {
 		return "", err
 	}

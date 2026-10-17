@@ -57,7 +57,12 @@ type botRunFreeze struct {
 }
 
 func captureRunFreeze(bot *model.Bot, run *model.BotRun) botRunFreeze {
+	// schedule run 用派发时冻结的密钥密文（与快照里的 base_url 成对）；
+	// 主线在 run 开始时读一次当前密钥。
 	key := append([]byte(nil), bot.APIKeyEncrypted...)
+	if run.SessionKind == model.BotSessionKindSchedule && len(run.APIKeyEncryptedSnapshot) > 0 {
+		key = append([]byte(nil), run.APIKeyEncryptedSnapshot...)
+	}
 	return botRunFreeze{
 		Model:                 runModelOf(run, bot),
 		BaseURL:               runBaseURLOf(run, bot),
@@ -101,14 +106,16 @@ func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFree
 // botLoop 单 run 主循环。主线与定时任务（INT-103）共用同一骨架：差异只有
 // 上下文构建、压缩/工具集激活（schedule 全部跳过）、记忆基线与收尾分支。
 func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Context) {
+	// 先冻结再取密钥：schedule run 的地址与密钥是派发时成对冻结的，解密必须用
+	// 冻结的那一份，否则轮换密钥后会把新密钥发往旧地址。
+	freeze := captureRunFreeze(bot, run)
+	applyRunCredentialFreeze(bot, freeze)
+	applyRunPromptFreeze(bot, freeze)
 	key, err := s.decryptAPIKey(bot)
 	if err != nil {
 		s.finishFailed(bot, run, "key_decrypt_failed", err)
 		return
 	}
-	freeze := captureRunFreeze(bot, run)
-	applyRunCredentialFreeze(bot, freeze)
-	applyRunPromptFreeze(bot, freeze)
 	client := botNewClient(freeze.BaseURL, key)
 	streamClient := client
 

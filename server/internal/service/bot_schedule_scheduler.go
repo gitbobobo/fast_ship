@@ -93,6 +93,9 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			Status:        model.BotRunStatusRunning,
 			SessionKind:   model.BotSessionKindSchedule,
 			Summary:       "",
+			// 密钥与 base_url 成对冻结：派发后用户换地址又换密钥时，
+			// 不能把新密钥发往旧地址（运行结尾直接用这份密文）。
+			APIKeyEncryptedSnapshot: append([]byte(nil), botRow.APIKeyEncrypted...),
 		}
 		taskID := current.ID
 		run.ScheduleTaskID = &taskID
