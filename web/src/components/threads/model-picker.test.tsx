@@ -125,6 +125,25 @@ describe("ModelPicker", () => {
     expect(options[0]).toHaveTextContent("Claude Opus 5");
   });
 
+  it("providers 后到时 rail 不会停在空列表上", async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <ModelPicker providers={[]} resolved={{ efforts: {} }} onPick={vi.fn()} />,
+    );
+    await openPanel(user);
+    // composer-options 还在路上时面板已打开，此时 providers 为空。
+    rerender(
+      <ModelPicker
+        providers={PROVIDERS}
+        resolved={resolvedFor("codex", "gpt-5")}
+        onPick={vi.fn()}
+      />,
+    );
+    const options = within(screen.getByRole("listbox")).getAllByRole("option");
+    expect(options.length).toBeGreaterThan(0);
+    expect(options[0]).toHaveTextContent("GPT-5");
+  });
+
   it("rail 切换到其他 provider 后列出其模型", async () => {
     const user = userEvent.setup();
     render(

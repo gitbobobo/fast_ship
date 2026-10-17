@@ -11,6 +11,81 @@ const REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/reg
 const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "web", "src", "lib", "acp-registry-icons.ts");
 const NON_PATH_PRIMITIVE = /<(circle|rect|line|polygon|polyline|text|ellipse|use|image|g[\s>])/;
 
+// 图标来自外部 CDN，raw 分支会进 DOM，所以只保留白名单里的 SVG 元素/属性：
+// 任何 on* 事件、href/xlink:href、style、script/style/foreignObject/image/use
+// 都会被去掉。白名单在生成时生效，提交的是已清洗的内容。
+const ALLOWED_TAGS = new Set([
+  "path",
+  "circle",
+  "line",
+  "polygon",
+  "polyline",
+  "rect",
+  "ellipse",
+  "g",
+  "text",
+  "tspan",
+]);
+const ALLOWED_ATTRS = new Set([
+  "d",
+  "fill",
+  "fill-rule",
+  "fill-opacity",
+  "clip-rule",
+  "stroke",
+  "stroke-width",
+  "stroke-linecap",
+  "stroke-linejoin",
+  "stroke-opacity",
+  "opacity",
+  "cx",
+  "cy",
+  "r",
+  "rx",
+  "ry",
+  "x1",
+  "y1",
+  "x2",
+  "y2",
+  "x",
+  "y",
+  "dx",
+  "dy",
+  "width",
+  "height",
+  "points",
+  "transform",
+  "text-anchor",
+  "font-family",
+  "font-size",
+  "font-style",
+  "font-weight",
+]);
+
+function sanitizeSvgInner(inner) {
+  let out = inner
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "")
+    // 整段丢掉危险容器（含自闭合）：它们可以加载外部内容或执行脚本。
+    .replace(/<(script|style|foreignObject|image|use|a|animate|set|iframe)\b[^>]*\/?>/gi, "")
+    .replace(/<\/(script|style|foreignObject|image|use|a|animate|set|iframe)>/gi, "");
+  out = out.replace(
+    /<(\/?)([a-zA-Z][\w:-]*)((?:\s+[\w:.-]+\s*=\s*"[^"]*")*)\s*(\/?)>/g,
+    (_m, close, tag, attrs, selfClose) => {
+      const name = tag.toLowerCase();
+      if (!ALLOWED_TAGS.has(name)) return "";
+      if (close) return `</${name}>`;
+      const kept = [];
+      for (const match of attrs.matchAll(/([\w:.-]+)\s*=\s*"([^"]*)"/g)) {
+        const attr = match[1].toLowerCase();
+        if (ALLOWED_ATTRS.has(attr)) kept.push(`${attr}="${match[2]}"`);
+      }
+      return `<${name}${kept.length ? " " + kept.join(" ") : ""}${selfClose ? " /" : ""}>`;
+    },
+  );
+  return normalizeWhitespace(out);
+}
+
 function normalizeWhitespace(value) {
   return value.replace(/\s+/g, " ").trim();
 }
@@ -22,7 +97,7 @@ function parseIcon(svg) {
   const svgStart = svg.indexOf("<svg");
   const inner = svg.slice(svg.indexOf(">", svgStart) + 1, svg.lastIndexOf("</svg>"));
   if (NON_PATH_PRIMITIVE.test(inner)) {
-    return { viewBox, raw: normalizeWhitespace(inner) };
+    return { viewBox, raw: sanitizeSvgInner(inner) };
   }
   const paths = [...inner.matchAll(/<path\b([^>]*)>/gs)].flatMap(([, attrs]) => {
     const d = /\sd\s*=\s*"([^"]*)"/s.exec(attrs)?.[1];
@@ -31,7 +106,7 @@ function parseIcon(svg) {
     return [{ d: normalizeWhitespace(d), ...(fillRule ? { fillRule } : {}) }];
   });
   if (paths.length === 0) {
-    return { viewBox, raw: normalizeWhitespace(inner) };
+    return { viewBox, raw: sanitizeSvgInner(inner) };
   }
   return { viewBox, paths };
 }

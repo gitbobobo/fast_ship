@@ -28,6 +28,22 @@ import { CHIP } from "./thread-chips";
 
 const FAVORITES_RAIL = "favorites";
 
+/** 面板默认 rail：有可用收藏时收藏 rail，否则当前 provider，再到第一个 provider。 */
+function pickDefaultRail(
+  providers: ProviderChoice[],
+  activeInstanceId: string | undefined,
+  favorites: string[],
+): string {
+  const favoriteSet = new Set(favorites);
+  const hasAvailableFavorite = providers.some((provider) =>
+    provider.models.some((model) =>
+      favoriteSet.has(modelFavoriteKey(provider.instanceId, model.slug)),
+    ),
+  );
+  if (hasAvailableFavorite) return FAVORITES_RAIL;
+  return activeInstanceId ?? providers[0]?.instanceId ?? FAVORITES_RAIL;
+}
+
 interface FlatModel {
   provider: ProviderChoice;
   model: ModelChoice;
@@ -206,18 +222,33 @@ function ModelPickerPanel({
   const favorites = useModelFavoritesStore((s) => s.favorites);
   const toggleFavorite = useModelFavoritesStore((s) => s.toggleFavorite);
   const favoritesSet = useMemo(() => new Set(favorites), [favorites]);
-  const [rail, setRail] = useState(() => {
-    // 有可用收藏时默认落在收藏 rail（对齐 T3），否则落在当前 provider。
-    const favoriteSet = new Set(favorites);
-    const hasAvailableFavorite = providers.some((provider) =>
-      provider.models.some((model) =>
-        favoriteSet.has(modelFavoriteKey(provider.instanceId, model.slug)),
-      ),
+  // rail：挂载时（即打开时）算一次默认值；用户手动点过后不再自动改。
+  // providers 为空时打开（自动化弹框还在加载 composer-options）会在挂载时
+  // 占位到收藏 rail，等 providers 到达后重算一次，不会停在空列表上。
+  const [rail, setRail] = useState(() =>
+    pickDefaultRail(providers, activeInstanceId, favorites),
+  );
+  const userPickedRail = useRef(false);
+  const providersPending = useRef(providers.length === 0);
+  useEffect(() => {
+    if (userPickedRail.current || providers.length === 0) return;
+    if (providersPending.current) {
+      providersPending.current = false;
+      setRail(pickDefaultRail(providers, activeInstanceId, favorites));
+      return;
+    }
+    // providers 一直在：只校正已失效的 rail（不在列表里的 provider）。
+    setRail((current) =>
+      current === FAVORITES_RAIL ||
+      providers.some((provider) => provider.instanceId === current)
+        ? current
+        : pickDefaultRail(providers, activeInstanceId, favorites),
     );
-    return hasAvailableFavorite
-      ? FAVORITES_RAIL
-      : (activeInstanceId ?? providers[0]?.instanceId ?? FAVORITES_RAIL);
-  });
+  }, [providers, activeInstanceId, favorites]);
+  const pickRail = (key: string) => {
+    userPickedRail.current = true;
+    setRail(key);
+  };
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -327,7 +358,7 @@ function ModelPickerPanel({
       aria-label={label}
       aria-pressed={rail === key}
       onClick={() => {
-        setRail(key);
+        pickRail(key);
         focusSearch();
       }}
       className="relative isolate flex aspect-square w-full cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-foreground/10 focus-visible:bg-foreground/10 focus-visible:outline-none"
