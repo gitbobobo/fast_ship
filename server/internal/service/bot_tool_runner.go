@@ -417,8 +417,7 @@ func (s *BotService) closeUnstartedSyncCalls(calls []*model.BotToolCall, reason 
 			reply := botToolReplyContent{
 				CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
 				ToolName: call.ToolName, Status: string(model.BotCallStatusNotExecuted),
-				Content: botFailureReplyText(errs.New(errs.ErrInvalidParams.Code,
-					"调用未执行（"+reason+"）：请在新输入到达后重新决定是否再次调用")),
+				Content: botNotExecutedReplyText(reason),
 			}
 			if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
 				return err
@@ -433,6 +432,40 @@ func (s *BotService) closeUnstartedSyncCalls(calls []*model.BotToolCall, reason 
 			continue
 		}
 	}
+}
+
+// closeUnstartedWriteCalls 只给尚未认领的写操作补 not_executed：读类调用
+// （botCallIsReadOnly）保留给调用方继续执行，不因新输入被丢弃。
+func (s *BotService) closeUnstartedWriteCalls(calls []*model.BotToolCall, reason string) {
+	writes := make([]*model.BotToolCall, 0, len(calls))
+	for _, call := range calls {
+		if botCallIsReadOnly(call) {
+			continue
+		}
+		writes = append(writes, call)
+	}
+	s.closeUnstartedSyncCalls(writes, reason)
+}
+
+// botCallIsReadOnly 判断一个调用是否是纯读取动作：只有同步执行且命中读类
+// 动作表才算。同步执行的写动作（fs_memory 写、fs_schedule 管理）不是读。
+func botCallIsReadOnly(call *model.BotToolCall) bool {
+	if call.ExecutionMode != string(model.BotExecutionSync) {
+		return false
+	}
+	return botReadOnlyActions[call.ToolName+"/"+call.Action]
+}
+
+// botNotExecutedReplyText 是「调用未执行」的模型回复：与参数校验失败（40001）
+// 区分开，用独立的 error_code 标明原因（新输入 / 停止 / 服务重启）。
+func botNotExecutedReplyText(reason string) string {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"accepted":   false,
+		"error_code": "not_executed",
+		"reason":     reason,
+		"error":      "调用未执行（" + reason + "）：请基于新输入重新决定是否再次调用",
+	})
+	return string(payload)
 }
 
 // runIDOfCall 从请求记录反查 run（事务外调用）。

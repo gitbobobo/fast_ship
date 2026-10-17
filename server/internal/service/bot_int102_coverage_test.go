@@ -1822,7 +1822,9 @@ END`, botB.ID)).Error; err != nil {
 
 func TestBotToolsetUpgradeBoundary(t *testing.T) {
 	env := setupBotTestEnv(t, archiveAndSummaryTurns("摘要")...)
-	env.fake.strict = true
+	// 工具集 v3 修正枚举并加入条件必填后 wire 明显变大，压缩的固定前缀更重。
+	// 本测试验证的是「压缩边界激活新版本」，窗口与可压缩账本相应放大，使目标
+	// 仍可达；脚本外的摘要批次由假服务的默认回复兜底（非 strict）。
 	userID := createBotTestUser(t, env.db, "ts2")
 	bot := env.createBot(t, userID)
 	env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
@@ -1845,8 +1847,13 @@ func TestBotToolsetUpgradeBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal v1: %v", err)
 	}
-	env.cfg.Bots.Context.WindowTokens = 8000
-	seedCompactableLedger(t, env, bot.ID, "upgrade")
+	env.cfg.Bots.Context.WindowTokens = 20000
+	seedBotUserMessage(t, env, bot.ID, "最早的问题 INT-102 thread_id=thr_keep_me")
+	seedBotAssistantToolBlock(t, env, bot.ID, "call-old-upgrade", "fs_issue", strings.Repeat("很长的工具结果", 8000))
+	for i := 1; i <= 3; i++ {
+		seedBotUserMessage(t, env, bot.ID, fmt.Sprintf("保护轮%d", i))
+		seedBotAssistantToolBlock(t, env, bot.ID, fmt.Sprintf("call-p%d", i), "fs_issue", "小结果")
+	}
 	botRow, _ = env.bots.bots.Get(bot.ID)
 	botRow.ToolsetVersion = 1
 	botRow.LastToldVersion = 1

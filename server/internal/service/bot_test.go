@@ -1193,9 +1193,14 @@ func TestBotCancelCall(t *testing.T) {
 	}
 }
 
-func TestBotStopRun(t *testing.T) {
+func TestBotStopRunSendsUserMessage(t *testing.T) {
+	// 「停止」按钮等价于用户发来一条「停止」消息：不硬取消当前回复，由机器
+	// 人结合上下文决定后续动作（可用 fs_stop 真正结束运行）。
 	hold := make(chan struct{})
-	env := setupBotTestEnv(t, fakeModelTurn{Text: "长回答", Hold: hold})
+	env := setupBotTestEnv(t,
+		fakeModelTurn{Text: "长回答", Hold: hold},
+		fakeModelTurn{Text: "好的，已停止"},
+	)
 	userID := createBotTestUser(t, env.db, "botstop")
 	bot := env.createBot(t, userID)
 
@@ -1206,15 +1211,31 @@ func TestBotStopRun(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("runs: %d", len(runs))
 	}
-	stopped, err := env.bots.RequestStop(userID, bot.ID, runs[0].ID)
-	if err != nil || !stopped.StopRequested {
-		t.Fatalf("stop: %v %+v", err, stopped)
+	if _, err := env.bots.RequestStop(userID, bot.ID, runs[0].ID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	// 停止输入到达后 run 仍在跑：没有硬取消当前回复。
+	fresh, err := env.bots.GetRun(userID, bot.ID, runs[0].ID)
+	if err != nil || fresh.StopRequested {
+		t.Fatalf("停止按钮不得硬取消当前回复: %v %+v", err, fresh)
+	}
+	countUserMessages := func() int64 {
+		var n int64
+		env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?", bot.ID, model.BotMessageKindUser).Count(&n)
+		return n
+	}
+	if got := countUserMessages(); got != 2 {
+		t.Fatalf("应追加一条停止消息，实得 %d 条用户消息", got)
+	}
+	// 重复点击同一 run 幂等。
+	if _, err := env.bots.RequestStop(userID, bot.ID, runs[0].ID); err != nil {
+		t.Fatalf("repeat stop: %v", err)
+	}
+	if got := countUserMessages(); got != 2 {
+		t.Fatalf("重复停止不得重复落消息，实得 %d", got)
 	}
 	close(hold)
-	waitForBot(t, "run stopped", 15*time.Second, func() bool {
-		fresh, e := env.bots.GetRun(userID, bot.ID, runs[0].ID)
-		return e == nil && fresh.Status == "stopped" && fresh.FinishedAt != nil
-	})
+	waitForBot(t, "run settled", 15*time.Second, func() bool { return env.botSettled(bot.ID) })
 }
 
 func TestBotCancelOwnCallTool(t *testing.T) {
@@ -1313,10 +1334,10 @@ func TestBotResultTruncation(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.PreviewJSON), &preview); err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if !preview.Truncated || preview.NextOffset != botResultBudgetChars {
+	if !preview.Truncated || preview.NextOffset != botResultPreviewChars {
 		t.Fatalf("preview meta: %+v", preview)
 	}
-	if len([]rune(preview.Preview)) != botResultBudgetChars {
+	if len([]rune(preview.Preview)) != botResultPreviewChars {
 		t.Fatalf("preview 长度不符")
 	}
 	if strings.ContainsRune(preview.Preview, 0xFFFD) {
@@ -1344,16 +1365,54 @@ func TestBotResultTruncation(t *testing.T) {
 		t.Fatalf("fs_result.read: %v", err)
 	}
 	var page struct {
-		Offset   int64  `json:"offset"`
-		Content  string `json:"content"`
-		HasMore  bool   `json:"has_more"`
-		TotalLen int64  `json:"total_chars"`
+		Offset     int64  `json:"offset"`
+		Content    string `json:"content"`
+		HasMore    bool   `json:"has_more"`
+		TotalLen   int64  `json:"total_chars"`
+		NextOffset int64  `json:"next_offset"`
 	}
 	if err := json.Unmarshal([]byte(content), &page); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if page.Offset != botResultBudgetChars || len([]rune(page.Content)) != 10 || !page.HasMore {
 		t.Fatalf("续读结果不符: %+v", page)
+	}
+	if page.NextOffset != page.Offset+10 {
+		t.Fatalf("next_offset 应为切片结束位置: %+v", page)
+	}
+	// 读取体必须整体落在预算内：否则会被通用截断再切一次，按 next_offset
+	// 续读时就会跳过一段谁也没看过的内容。
+	fullRead := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, RequestID: "req-x",
+		ProviderToolCallID: "prov-full", ToolName: "fs_result", Action: "read",
+		ArgumentsJSON: fmt.Sprintf(`{"action":"read","call_id":%q,"offset":0,"limit":16000}`, callID),
+		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
+		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
+	}
+	fullContent, err := env.bots.botExecuteSyncTool(context.Background(), fullRead)
+	if err != nil {
+		t.Fatalf("fs_result.read full: %v", err)
+	}
+	if n := len([]rune(fullContent)); n > botResultBudgetChars {
+		t.Fatalf("读取体应在预算内，实得 %d 字符", n)
+	}
+	outFull := botBuildOutcomeRaw(fullRead.ID, fullContent, nil)
+	if outFull.Truncated {
+		t.Fatalf("读取体不得被二次截断")
+	}
+	var fullPage struct {
+		Content    string `json:"content"`
+		NextOffset int64  `json:"next_offset"`
+		HasMore    bool   `json:"has_more"`
+	}
+	if err := json.Unmarshal([]byte(fullContent), &fullPage); err != nil {
+		t.Fatalf("decode full: %v", err)
+	}
+	if fullPage.NextOffset != int64(len([]rune(fullPage.Content))) {
+		t.Fatalf("next_offset 应等于本次交付的字符边界: %+v", fullPage)
+	}
+	if !fullPage.HasMore {
+		t.Fatalf("源结果远大于一次读取，应 has_more")
 	}
 	// 越权读取别的机器人：按不存在处理。
 	other := env.createBot(t, userID)

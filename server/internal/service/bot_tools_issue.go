@@ -47,7 +47,7 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 			if err != nil {
 				return "", err
 			}
-			return botMarshalResult(botSlimIssue(issue))
+			return botMarshalResult(botSlimIssueDetail(issue))
 		case "comments":
 			page, pageSize, pageErr := botValidatePage(args.Page, args.PageSize)
 			if pageErr != nil {
@@ -77,12 +77,13 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 func botSlimIssues(items []IssueResponse) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(items))
 	for i := range items {
-		out = append(out, botSlimIssue(&items[i]))
+		out = append(out, botSlimIssueListItem(&items[i]))
 	}
 	return out
 }
 
-func botSlimIssue(i *IssueResponse) map[string]interface{} {
+// botSlimIssueListItem 是列表项的精简形状：列表保持轻量，详情走 get。
+func botSlimIssueListItem(i *IssueResponse) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         i.Id,
 		"seq":        i.SequenceNumber,
@@ -95,6 +96,48 @@ func botSlimIssue(i *IssueResponse) map[string]interface{} {
 		out["workflow_status"] = string(i.InternalMeta.WorkflowStatus)
 	}
 	return out
+}
+
+// botSlimIssueDetail 是 get 的详情投影：正文、清单、标签等做决策所需的完整
+// 信息（列表不携带）。updated_at / checklist_updated_at 是后续写操作的
+// 写入保护基准，必须原样给出。
+func botSlimIssueDetail(i *IssueResponse) map[string]interface{} {
+	out := botSlimIssueListItem(i)
+	out["reference"] = i.Reference
+	out["body"] = i.Body
+	out["state_reason"] = i.StateReason
+	out["author"] = i.Author.Login
+	out["updated_at"] = i.UpdatedAt
+	out["created_at"] = i.CreatedAt
+	if i.InternalMeta != nil {
+		if len(i.InternalMeta.Labels) > 0 {
+			out["labels"] = i.InternalMeta.Labels
+		}
+		if len(i.InternalMeta.Checklist) > 0 {
+			out["checklist"] = i.InternalMeta.Checklist
+		}
+		if i.InternalMeta.ProgressPercent != nil {
+			out["progress_percent"] = *i.InternalMeta.ProgressPercent
+		}
+		if i.InternalMeta.ChecklistUpdatedAt != nil {
+			out["checklist_updated_at"] = *i.InternalMeta.ChecklistUpdatedAt
+		}
+	}
+	if i.PullRequestSummary != nil {
+		out["pull_request_summary"] = i.PullRequestSummary
+	}
+	return out
+}
+
+// botIssueConflictResult 把「他人已改动，本次未执行」回给模型：带上目标最新
+// 内容，便于重新读取并保留双方修改后再提交，而不是静默覆盖。
+func botIssueConflictResult(reason string, current *IssueResponse) map[string]interface{} {
+	return map[string]interface{}{
+		"conflict": true,
+		"reason":   reason,
+		"note":     "目标已被他人改动，本次未执行；请基于下面的最新内容重新读取，保留双方修改后再提交",
+		"current":  botSlimIssueDetail(current),
+	}
 }
 
 // runIssueWrite 在 worker 内执行 fs_issue 写操作。
@@ -119,6 +162,16 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		}
 		return nil, errs.New(errs.ErrInvalidParams.Code, "source 只支持 internal/github")
 	case "update":
+		// 写入保护：确认期间目标被别人改过就不执行，回冲突与最新内容。
+		if expected := strings.TrimSpace(args.ExpectedUpdatedAt); expected != "" {
+			current, err := s.issues.Get(args.IssueID, userID)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(current.UpdatedAt) != expected {
+				return botIssueConflictResult("issue_updated", current), nil
+			}
+		}
 		req := UpdateInternalIssueRequest{}
 		// 只在调用参数真的带了 body 时才替换；字段级更新不得清空正文。
 		if args.Body != nil {
@@ -144,6 +197,20 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		status := model.IssueWorkflowStatus(strings.TrimSpace(args.WorkflowStatus))
 		return s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
 	case "replace_checklist":
+		// 写入保护：清单整组替换前核对上次读到的清单版本。
+		if expected := strings.TrimSpace(args.ExpectedChecklistUpdatedAt); expected != "" {
+			current, err := s.issues.Get(args.IssueID, userID)
+			if err != nil {
+				return nil, err
+			}
+			currentVersion := ""
+			if current.InternalMeta != nil && current.InternalMeta.ChecklistUpdatedAt != nil {
+				currentVersion = strings.TrimSpace(*current.InternalMeta.ChecklistUpdatedAt)
+			}
+			if currentVersion != expected {
+				return botIssueConflictResult("checklist_updated", current), nil
+			}
+		}
 		req := ReplaceIssueChecklistRequest{Items: args.Items}
 		return s.issues.ReplaceChecklist(args.IssueID, userID, req, botIssueActor)
 	case "comment":

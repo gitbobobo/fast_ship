@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 
@@ -30,6 +31,10 @@ type botActionDef struct {
 	Description          string
 	Mode                 model.BotToolExecutionMode
 	RequiresConfirmation bool
+	// ReadOnly 标记纯读取动作：新输入到达时读类调用允许执行完，只有未开始的
+	// 写操作才补 not_executed。同步执行的写动作（fs_memory 写、fs_schedule 管理）
+	// 也属于写，不能只按 Mode 判断。
+	ReadOnly bool
 }
 
 type botToolDef struct {
@@ -55,7 +60,7 @@ type botScheduleArgs struct {
 // botScheduleTaskArgs 是 v3 fs_schedule 的参数超集：schema 描述并集，服务端
 // 按 action 校验必填/禁止字段。全部动作同步执行、立即生效。
 type botScheduleTaskArgs struct {
-	Action string `json:"action" jsonschema:"enum=list,create,update,delete,runs,enable,disable,required"`
+	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=enable,enum=disable,required"`
 	// TaskID 是任务 ID（update/delete/runs/enable/disable 必填；create 禁止）。
 	TaskID string `json:"task_id,omitempty" jsonschema:"description=任务 ID（update/delete/runs/enable/disable 必填）"`
 	// Name 任务名（create 必填；update 提供即改）。
@@ -84,7 +89,7 @@ func (a *botScheduleTaskArgs) NeedsReportBool() bool {
 
 // botMemoryArgs 是 fs_memory 的参数超集（v2 起可用）。
 type botMemoryArgs struct {
-	Action  string  `json:"action" jsonschema:"enum=status,list,read,create,replace,append,delete,history,restore,required"`
+	Action  string  `json:"action" jsonschema:"enum=status,enum=list,enum=read,enum=create,enum=replace,enum=append,enum=delete,enum=history,enum=restore,required"`
 	Path    string  `json:"path,omitempty" jsonschema:"description=记忆文件路径（USER.md / MEMORY.md / daily/YYYY-MM-DD.md；list 之外必填）"`
 	Prefix  string  `json:"prefix,omitempty" jsonschema:"description=路径前缀过滤（list 可选，如 daily/）"`
 	Content *string `json:"content,omitempty" jsonschema:"description=正文（create/replace/append 必填；提供空串即写空内容）"`
@@ -123,7 +128,7 @@ type botCancelArgs struct {
 }
 
 type botProjectArgs struct {
-	Action        string  `json:"action" jsonschema:"enum=list,get,create,update,required"`
+	Action        string  `json:"action" jsonschema:"enum=list,enum=get,enum=create,enum=update,required"`
 	ID            string  `json:"id,omitempty" jsonschema:"description=项目 ID（get/update 必填）"`
 	Page          int     `json:"page,omitempty" jsonschema:"description=页码（从 1 起，list 用）"`
 	PageSize      int     `json:"page_size,omitempty" jsonschema:"description=页长（1-100，list 用）"`
@@ -133,9 +138,11 @@ type botProjectArgs struct {
 }
 
 // botIssueArgs 是 fs_issue 的参数超集：schema 描述并集，服务端按 action
-// 校验必填/禁止字段（botValidateActionFields）。
+// 校验必填/禁止字段（botActionRules）。
+// v3 起 action 枚举用 `enum=a,enum=b` 语法逐项声明（`enum=a,b` 只会生成
+// 第一个取值）；v1/v2 的旧字节由 bot_args_frozen.go 的冻结结构体保留。
 type botIssueArgs struct {
-	Action string `json:"action" jsonschema:"enum=list,get,comments,timeline,create,update,set_workflow,replace_checklist,comment,required"`
+	Action string `json:"action" jsonschema:"enum=list,enum=get,enum=comments,enum=timeline,enum=create,enum=update,enum=set_workflow,enum=replace_checklist,enum=comment,required"`
 	// list / create 用
 	ProjectID string `json:"project_id,omitempty" jsonschema:"description=Fast Ship 项目 ID（list/create 必填）"`
 	// 读取与写操作共用
@@ -159,23 +166,39 @@ type botIssueArgs struct {
 	Items []IssueChecklistItemInput `json:"items,omitempty" jsonschema:"description=完整清单（replace_checklist 必填，整组替换）"`
 	// comment 用
 	CommentBody string `json:"comment_body,omitempty" jsonschema:"description=评论正文（comment 必填）"`
+	// 写入保护（update）：先 get 读回的 issue.updated_at（RFC3339）。与当前值不符
+	// 说明已被他人改动，服务端拒绝静默覆盖并把最新内容回给模型；省略即不检查。
+	ExpectedUpdatedAt string `json:"expected_updated_at,omitempty" jsonschema:"description=写入前读到的 issue.updated_at（RFC3339，update 可选）；不符即拒绝静默覆盖"`
+	// 写入保护（replace_checklist）：先 get 读回的 internal_meta.checklist_updated_at。
+	// 省略即不检查。
+	ExpectedChecklistUpdatedAt string `json:"expected_checklist_updated_at,omitempty" jsonschema:"description=写入前读到的 internal_meta.checklist_updated_at（RFC3339，replace_checklist 可选）；不符即拒绝静默覆盖"`
 }
 
 // botThreadArgs 是 fs_thread 的参数超集。
 type botThreadArgs struct {
-	Action    string `json:"action" jsonschema:"enum=list,get,item,composer_options,workspace_options,launch,send,stop,required"`
-	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（除 list 外必填）"`
+	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,required"`
+	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（get/item/composer_options/workspace_options/launch/send/stop 必填）"`
 	ThreadID  string `json:"thread_id,omitempty" jsonschema:"description=T3 线程 ID（get/item/send/stop 必填）"`
-	ItemID    string `json:"item_id,omitempty" jsonschema:"description=T3 线程条目 ID（item 必填）"`
-	ProjectID string `json:"project_id,omitempty" jsonschema:"description=T3 项目 ID（workspace_options/launch 必填）"`
+	ItemID    string `json:"item_id,omitempty" jsonschema:"description=T3 线程条目 ID（item 必填；条目 ID 由 get 返回的 items[].id 提供）"`
+	ProjectID string `json:"project_id,omitempty" jsonschema:"description=T3 项目 ID（workspace_options/launch 必填；list 可选，只保留该项目的线程）"`
 	Query     string `json:"query,omitempty" jsonschema:"description=引用名过滤（workspace_options）"`
 	Cursor    *int   `json:"cursor,omitempty" jsonschema:"description=上一页返回的 next_cursor（workspace_options）"`
 	Text      string `json:"text,omitempty" jsonschema:"description=消息正文（launch/send 必填）"`
 	Title     string `json:"title,omitempty" jsonschema:"description=线程标题（launch 可选，缺省由 T3 生成）"`
+	// list 过滤与分页：默认只看未归档线程（归档线程不属于巡检范围）。
+	IncludeArchived *bool  `json:"include_archived,omitempty" jsonschema:"description=list 可选；true 时连归档线程一起返回（默认 false，只返回未归档线程）"`
+	Settled         *bool  `json:"settled,omitempty" jsonschema:"description=list 可选；按 settled 过滤（true 只看已收进历史区的线程）"`
+	Status          string `json:"status,omitempty" jsonschema:"description=list 可选；按运行态过滤（running/idle/waiting/archived/error 等，服务端原样比较）"`
+	UpdatedAfter    string `json:"updated_after,omitempty" jsonschema:"description=list 可选；只返回 updated_at 晚于该 RFC3339 时间的线程"`
+	Page            int    `json:"page,omitempty" jsonschema:"description=页码（从 1 起，list 用；过滤后稳定排序再切片）"`
+	PageSize        int    `json:"page_size,omitempty" jsonschema:"description=页长（1-100，list 用，默认 50；服务端强制上限，不允许一次拉全量）"`
+	// get 的条目分页：详情默认只回最近若干条，完整历史按 offset 向前读。
+	ItemLimit  int `json:"item_limit,omitempty" jsonschema:"description=get 可选；返回的线程条目条数（默认 50，上限 200）"`
+	ItemOffset int `json:"item_offset,omitempty" jsonschema:"description=get 可选；条目偏移（从 0 起，配合 item_limit 向前翻完整历史）"`
 }
 
 type botEnvironmentArgs struct {
-	Action string `json:"action" jsonschema:"enum=list,projects,required"`
+	Action string `json:"action" jsonschema:"enum=list,enum=projects,required"`
 }
 
 // 各版本注册表按固定顺序独立冻结为字面量；顺序即协议 tools 数组顺序。
@@ -584,6 +607,9 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 	default:
 		tools = botToolRegistryV3()
 	}
+	if version <= 2 {
+		botUseFrozenArgs(version, tools)
+	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
 	return holder
@@ -615,9 +641,15 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 		if err := json.Unmarshal(raw, &parsed); err != nil {
 			panic(fmt.Sprintf("bot tool schema %s: %v", tool.Name, err))
 		}
+		if version >= botConditionalSchemaVersion {
+			botAnnotateActionRequirements(tool.Name, parsed)
+		}
 		tool.Parameters = shared.FunctionParameters(parsed)
 		holder.byName[tool.Name] = tool
-		for _, action := range tool.Actions {
+		for i := range tool.Actions {
+			action := tool.Actions[i]
+			action.ReadOnly = botReadOnlyActions[tool.Name+"/"+action.Name]
+			tool.Actions[i] = action
 			holder.byAction[tool.Name+"/"+action.Name] = action
 		}
 		holder.schemas = append(holder.schemas, openai.ChatCompletionToolUnionParam{
@@ -638,6 +670,79 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 	holder.hash = hex.EncodeToString(sum[:])
 	holder.bytes = len(wire)
 	return holder
+}
+
+// botUseFrozenArgs 把 v1/v2 的 schema 参数换回冻结结构体：这些结构体在 v3
+// 修正枚举、新增字段后字节会变，冻结副本保证存量会话的 tools_hash 不回退。
+// v1 的 fs_memory 是 status 占位（用 botScheduleArgs），不在此替换。
+func botUseFrozenArgs(version int64, tools []*botToolDef) {
+	frozen := map[string]reflect.Type{
+		"fs_project":     reflect.TypeOf(botProjectArgsFrozen{}),
+		"fs_issue":       reflect.TypeOf(botIssueArgsFrozen{}),
+		"fs_thread":      reflect.TypeOf(botThreadArgsFrozen{}),
+		"fs_environment": reflect.TypeOf(botEnvironmentArgsFrozen{}),
+	}
+	if version >= 2 {
+		frozen["fs_memory"] = reflect.TypeOf(botMemoryArgsFrozen{})
+	}
+	for _, tool := range tools {
+		if typ, ok := frozen[tool.Name]; ok {
+			tool.ArgsType = typ
+		}
+	}
+}
+
+// botConditionalSchemaVersion 是从此版本起把 per-action 必填字段写进 schema
+// 描述的工具集版本。v1/v2 的 wire 字节已冻结，不能注入。
+const botConditionalSchemaVersion int64 = 3
+
+// botReadOnlyActions 标记纯读取动作；未列出的动作按写处理。
+var botReadOnlyActions = map[string]bool{
+	"fs_project/list": true, "fs_project/get": true,
+	"fs_issue/list": true, "fs_issue/get": true, "fs_issue/comments": true, "fs_issue/timeline": true,
+	"fs_thread/list": true, "fs_thread/get": true, "fs_thread/item": true,
+	"fs_thread/composer_options": true, "fs_thread/workspace_options": true,
+	"fs_environment/list": true, "fs_environment/projects": true,
+	"fs_schedule/list": true, "fs_schedule/runs": true, "fs_schedule/status": true,
+	"fs_memory/status": true, "fs_memory/list": true, "fs_memory/read": true, "fs_memory/history": true,
+	"fs_memory_search/search": true,
+	"fs_help/read":            true, "fs_result/read": true,
+}
+
+// botAnnotateActionRequirements 把各动作的必填字段写进 action 字段的 schema
+// 描述里（服务端校验的事实源是 botActionRules，这里只是同一份规则的机器可读
+// 投影）。不用 allOf/if-then 的原因：不少 OpenAI 兼容后端根本不校验 JSON
+// Schema，条件分支只带来每请求约 700 token 的固定开销，没有实际强制力；真正
+// 的强制在服务端。描述按 action 名排序，保证 wire 字节稳定（tools_hash）。
+func botAnnotateActionRequirements(toolName string, schema map[string]interface{}) {
+	prefix := toolName + "/"
+	actions := make([]string, 0, 8)
+	for key, rule := range botActionRules {
+		if strings.HasPrefix(key, prefix) && len(rule.Required) > 0 {
+			actions = append(actions, strings.TrimPrefix(key, prefix))
+		}
+	}
+	if len(actions) == 0 {
+		return
+	}
+	sort.Strings(actions)
+	parts := make([]string, 0, len(actions))
+	for _, action := range actions {
+		names := make([]string, 0, len(botActionRules[prefix+action].Required))
+		for _, field := range botActionRules[prefix+action].Required {
+			names = append(names, field.Name)
+		}
+		parts = append(parts, action+"="+strings.Join(names, "\u3001"))
+	}
+	properties, ok := schema["properties"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	actionField, ok := properties["action"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	actionField["description"] = "必填字段（服务端强制）：" + strings.Join(parts, "；")
 }
 
 // botToolsTokenEstimate 工具定义的 token 占用估算：chars/4（估算值，标注估算方式）。
@@ -803,165 +908,130 @@ func botArgKeys(t reflect.Type) map[string]bool {
 	return out
 }
 
-// botValidateActionFields 按工具+action 校验必填/禁止字段。
+// botRequiredField 是一个必填字段；AllowEmpty 为 true 时只要求字段出现
+// （如记忆正文允许写空串）。
+type botRequiredField struct {
+	Name       string
+	AllowEmpty bool
+}
+
+// botActionRule 描述一个工具动作的字段约束：Required 是服务端校验与 v3
+// 起的 schema 描述共同的事实源；Forbidden 是明确禁止出现的字段。
+type botActionRule struct {
+	Required  []botRequiredField
+	Forbidden []string
+}
+
+func req(names ...string) []botRequiredField {
+	out := make([]botRequiredField, 0, len(names))
+	for _, name := range names {
+		out = append(out, botRequiredField{Name: name})
+	}
+	return out
+}
+
+func reqAllowEmpty(names ...string) []botRequiredField {
+	out := make([]botRequiredField, 0, len(names))
+	for _, name := range names {
+		out = append(out, botRequiredField{Name: name, AllowEmpty: true})
+	}
+	return out
+}
+
+// botActionRules 是「工具/动作 → 字段约束」的单一事实源：服务端校验与 v3
+// 起的 schema 描述都由它生成，避免中文描述与机器校验各说各话。列出的动作
+// 才被接受；未列出的动作一律返回 40001。
+var botActionRules = map[string]botActionRule{
+	"fs_project/list":   {},
+	"fs_project/get":    {Required: req("id")},
+	"fs_project/update": {Required: req("id")},
+	"fs_project/create": {Required: req("name"), Forbidden: []string{"id"}},
+
+	"fs_issue/list":              {Required: req("project_id")},
+	"fs_issue/get":               {Required: req("issue_id")},
+	"fs_issue/comments":          {Required: req("issue_id")},
+	"fs_issue/timeline":          {Required: req("issue_id")},
+	"fs_issue/update":            {Required: req("issue_id")},
+	"fs_issue/set_workflow":      {Required: req("issue_id", "workflow_status")},
+	"fs_issue/replace_checklist": {Required: req("issue_id", "items")},
+	"fs_issue/comment":           {Required: req("issue_id", "comment_body")},
+	"fs_issue/create":            {Required: req("project_id", "title")},
+
+	"fs_thread/list":              {},
+	"fs_thread/get":               {Required: req("env_id", "thread_id")},
+	"fs_thread/item":              {Required: req("env_id", "thread_id", "item_id")},
+	"fs_thread/composer_options":  {Required: req("env_id")},
+	"fs_thread/workspace_options": {Required: req("env_id", "project_id")},
+	"fs_thread/launch":            {Required: req("env_id", "project_id", "text")},
+	"fs_thread/send":              {Required: req("env_id", "thread_id", "text")}, "fs_thread/stop": {Required: req("env_id", "thread_id")},
+
+	"fs_environment/list":     {},
+	"fs_environment/projects": {},
+
+	"fs_schedule/status":  {},
+	"fs_schedule/list":    {},
+	"fs_schedule/create":  {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id"}},
+	"fs_schedule/update":  {Required: req("task_id")},
+	"fs_schedule/delete":  {Required: req("task_id")},
+	"fs_schedule/runs":    {Required: req("task_id")},
+	"fs_schedule/enable":  {Required: req("task_id")},
+	"fs_schedule/disable": {Required: req("task_id")},
+
+	"fs_memory/status":  {},
+	"fs_memory/list":    {},
+	"fs_memory/read":    {Required: req("path")},
+	"fs_memory/history": {Required: req("path")},
+	"fs_memory/create":  {Required: append(req("path"), reqAllowEmpty("content")...)},
+	"fs_memory/replace": {Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...)},
+	"fs_memory/append":  {Required: append(append(req("path"), reqAllowEmpty("content")...), req("expected_version")...)},
+	"fs_memory/delete":  {Required: req("path", "expected_version")},
+	"fs_memory/restore": {Required: req("path", "version", "expected_version")},
+
+	"fs_memory_search/search": {Required: req("query")},
+
+	"fs_help/read":     {},
+	"fs_stop/stop":     {},
+	"fs_result/read":   {Required: req("call_id")},
+	"fs_cancel/cancel": {Required: req("call_id")},
+}
+
+// botValidateActionFields 按工具+action 校验必填/禁止字段（botActionRules 是
+// 唯一事实源；同一份规则也生成 action 字段的必填描述）。
 func botValidateActionFields(toolName, action string, raw map[string]json.RawMessage) error {
-	has := func(key string) bool {
-		v, ok := raw[key]
+	key := toolName + "/" + action
+	rule, ok := botActionRules[key]
+	if !ok {
+		return errs.New(errs.ErrInvalidParams.Code, "不支持的工具动作: "+key)
+	}
+	has := func(field string) bool {
+		v, ok := raw[field]
 		return ok && string(v) != "null"
 	}
-	str := func(key string) string {
+	// isEmptyString 只对真正的字符串值判空：数字/数组/对象等必填字段只要求
+	// 出现（否则 items、expected_version 这类非字符串字段会被误判为空）。
+	isEmptyString := func(field string) bool {
+		v, ok := raw[field]
+		if !ok || string(v) == "null" {
+			return true
+		}
 		var s string
-		_ = json.Unmarshal(raw[key], &s)
-		return strings.TrimSpace(s)
+		if err := json.Unmarshal(v, &s); err != nil {
+			return false
+		}
+		return strings.TrimSpace(s) == ""
 	}
 	bad := func(msg string) error {
 		return errs.New(errs.ErrInvalidParams.Code, msg)
 	}
-	switch toolName + "/" + action {
-	case "fs_project/list":
-	case "fs_project/get", "fs_project/update":
-		if !has("id") {
-			return bad("fs_project " + action + " 需要 id")
+	for _, field := range rule.Required {
+		if !has(field.Name) || (!field.AllowEmpty && isEmptyString(field.Name)) {
+			return bad(toolName + " " + action + " 需要 " + field.Name)
 		}
-	case "fs_project/create":
-		if !has("name") || str("name") == "" {
-			return bad("fs_project create 需要 name")
+	}
+	for _, field := range rule.Forbidden {
+		if has(field) {
+			return bad(toolName + " " + action + " 不接受 " + field)
 		}
-		if has("id") {
-			return bad("fs_project create 不接受 id")
-		}
-	case "fs_issue/list":
-		if !has("project_id") {
-			return bad("fs_issue list 需要 project_id")
-		}
-	case "fs_issue/get", "fs_issue/comments", "fs_issue/timeline",
-		"fs_issue/update", "fs_issue/set_workflow", "fs_issue/replace_checklist", "fs_issue/comment":
-		if !has("issue_id") {
-			return bad("fs_issue " + action + " 需要 issue_id")
-		}
-		if action == "comment" && (!has("comment_body") || str("comment_body") == "") {
-			return bad("fs_issue comment 需要 comment_body")
-		}
-		if action == "set_workflow" && !has("workflow_status") {
-			return bad("fs_issue set_workflow 需要 workflow_status")
-		}
-		if action == "replace_checklist" && !has("items") {
-			return bad("fs_issue replace_checklist 需要 items（整组替换）")
-		}
-	case "fs_issue/create":
-		if !has("project_id") {
-			return bad("fs_issue create 需要 project_id")
-		}
-		if !has("title") || str("title") == "" {
-			return bad("fs_issue create 需要 title")
-		}
-	case "fs_thread/list":
-	case "fs_thread/get", "fs_thread/item":
-		if !has("env_id") || !has("thread_id") {
-			return bad("fs_thread " + action + " 需要 env_id 与 thread_id")
-		}
-		if action == "item" && !has("item_id") {
-			return bad("fs_thread item 需要 item_id")
-		}
-	case "fs_thread/composer_options":
-		if !has("env_id") {
-			return bad("fs_thread composer_options 需要 env_id")
-		}
-	case "fs_thread/workspace_options":
-		if !has("env_id") || !has("project_id") {
-			return bad("fs_thread workspace_options 需要 env_id 与 project_id")
-		}
-	case "fs_thread/launch":
-		if !has("env_id") || !has("project_id") || !has("text") {
-			return bad("fs_thread launch 需要 env_id、project_id 与 text")
-		}
-	case "fs_thread/send":
-		if !has("env_id") || !has("thread_id") || !has("text") {
-			return bad("fs_thread send 需要 env_id、thread_id 与 text")
-		}
-	case "fs_thread/stop":
-		if !has("env_id") || !has("thread_id") {
-			return bad("fs_thread stop 需要 env_id 与 thread_id")
-		}
-	case "fs_environment/list", "fs_environment/projects":
-	case "fs_schedule/status", "fs_memory/status", "fs_help/read", "fs_stop/stop":
-	case "fs_schedule/list":
-		// 无必填；limit/offset 可选。
-	case "fs_schedule/create":
-		if !has("name") || str("name") == "" {
-			return bad("fs_schedule create 需要 name")
-		}
-		if !has("cron") || str("cron") == "" {
-			return bad("fs_schedule create 需要 cron（标准五字段）")
-		}
-		if !has("instruction") || str("instruction") == "" {
-			return bad("fs_schedule create 需要 instruction")
-		}
-		if has("task_id") {
-			return bad("fs_schedule create 不接受 task_id")
-		}
-	case "fs_schedule/update":
-		if !has("task_id") || str("task_id") == "" {
-			return bad("fs_schedule update 需要 task_id")
-		}
-	case "fs_schedule/delete", "fs_schedule/runs", "fs_schedule/enable", "fs_schedule/disable":
-		if !has("task_id") || str("task_id") == "" {
-			return bad("fs_schedule " + action + " 需要 task_id")
-		}
-	case "fs_memory/list":
-		// 无必填；prefix 可选。
-	case "fs_memory/read", "fs_memory/history":
-		if !has("path") || str("path") == "" {
-			return bad("fs_memory " + action + " 需要 path")
-		}
-	case "fs_memory/create":
-		if !has("path") || str("path") == "" {
-			return bad("fs_memory create 需要 path")
-		}
-		if !has("content") {
-			return bad("fs_memory create 需要 content")
-		}
-	case "fs_memory/replace", "fs_memory/append":
-		if !has("path") || str("path") == "" {
-			return bad("fs_memory " + action + " 需要 path")
-		}
-		if !has("content") {
-			return bad("fs_memory " + action + " 需要 content")
-		}
-		if !has("expected_version") {
-			return bad("fs_memory " + action + " 需要 expected_version")
-		}
-	case "fs_memory/delete":
-		if !has("path") || str("path") == "" {
-			return bad("fs_memory delete 需要 path")
-		}
-		if !has("expected_version") {
-			return bad("fs_memory delete 需要 expected_version")
-		}
-	case "fs_memory/restore":
-		if !has("path") || str("path") == "" {
-			return bad("fs_memory restore 需要 path")
-		}
-		if !has("version") {
-			return bad("fs_memory restore 需要 version")
-		}
-		if !has("expected_version") {
-			return bad("fs_memory restore 需要 expected_version")
-		}
-	case "fs_memory_search/search":
-		if !has("query") || str("query") == "" {
-			return bad("fs_memory_search search 需要 query")
-		}
-	case "fs_result/read":
-		if !has("call_id") {
-			return bad("fs_result read 需要 call_id")
-		}
-	case "fs_cancel/cancel":
-		if !has("call_id") {
-			return bad("fs_cancel cancel 需要 call_id")
-		}
-	default:
-		return bad("不支持的工具动作: " + toolName + "/" + action)
 	}
 	return nil
 }

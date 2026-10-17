@@ -287,26 +287,27 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			continue
 		}
 		if input := s.safePoint(run); input.HasNewInput {
-			// 有新输入：未开始的调用补 not_executed，让模型重新决定。
-			s.closeUnstartedSyncCalls(calls, "new_input_before_execution")
+			// 新输入到达：未开始的写操作全部补 not_executed，让模型重新
+			// 决定；读类调用允许执行完（它们只读、无副作用）。
+			s.closeUnstartedWriteCalls(calls, "new_input_before_execution")
+			// 继续执行本批的读类调用，不丢弃已经拿到的读取结果。
+			for _, call := range calls {
+				if !botCallIsReadOnly(call) {
+					continue
+				}
+				s.invokeOrAccept(bot, run, call, ctx)
+			}
 			continue
 		}
 
 		for _, call := range calls {
 			s.invokeOrAccept(bot, run, call, ctx)
-			if input := s.safePoint(run); input.StopRequested || input.HasNewInput {
-				s.closeUnstartedSyncCalls(calls, stopOrNewInputReason(input))
+			if input := s.safePoint(run); input.StopRequested {
+				s.closeUnstartedSyncCalls(calls, "stop_requested")
 				break
 			}
 		}
 	}
-}
-
-func stopOrNewInputReason(input botSafePoint) string {
-	if input.StopRequested {
-		return "stop_requested"
-	}
-	return "new_input_before_execution"
 }
 
 // runBaseURLOf run 期间的地址：优先配置快照。

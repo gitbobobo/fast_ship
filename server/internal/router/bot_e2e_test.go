@@ -473,10 +473,10 @@ func TestBotE2E(t *testing.T) {
 		waitForE2E(t, "run finished", 20*time.Second, func() bool { return e.runFinished(t, botID) })
 	})
 
-	t.Run("StopCancelAndLateResult", func(t *testing.T) {
+	t.Run("StopSendsUserMessage", func(t *testing.T) {
 		hold := make(chan struct{})
 		e := setupE2E(t)
-		e.fake.setSchedule(e2eTurn{Text: "长回答", Hold: hold})
+		e.fake.setSchedule(e2eTurn{Text: "长回答", Hold: hold}, e2eTurn{Text: "好的，已停止"})
 		botID := e.createBot(t)
 		e.doJSON(t, http.MethodPost, "/api/bots/"+botID+"/messages",
 			map[string]interface{}{"text": "开始", "client_message_id": "sc1"})
@@ -490,17 +490,16 @@ func TestBotE2E(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("stop: %d %v", code, body)
 		}
+		// 「停止」等价于一条用户消息：不硬取消当前回复，run 继续跑，由机器人
+		// 结合上下文决定后续动作。
+		runs = e.botRuns(t, botID)
+		if runs[0].(map[string]interface{})["stop_requested"] != false {
+			t.Fatalf("停止按钮不得硬取消当前回复: %v", runs[0])
+		}
 		close(hold)
-		waitForE2E(t, "run stopped", 20*time.Second, func() bool {
+		waitForE2E(t, "run settled", 20*time.Second, func() bool {
 			runs := e.botRuns(t, botID)
-			return len(runs) == 1 && runs[0].(map[string]interface{})["status"] == "stopped"
-		})
-		// 停止后的迟到结果不能复活 run：再发消息也不应继承旧 run 的停止态。
-		e.doJSON(t, http.MethodPost, "/api/bots/"+botID+"/messages",
-			map[string]interface{}{"text": "再来一句", "client_message_id": "sc2"})
-		waitForE2E(t, "新 run 完成", 20*time.Second, func() bool {
-			runs := e.botRuns(t, botID)
-			return len(runs) == 2 && runs[0].(map[string]interface{})["status"] == "completed"
+			return len(runs) == 1 && runs[0].(map[string]interface{})["status"] == "completed"
 		})
 	})
 

@@ -351,6 +351,48 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 正文流式片段约 100ms 一批落事件，完整 assistant 消息只在模型调用结束时追加
 一次（流式片段不改消息）。
 
+## 读取完整性、写入保护与停止语义（INT-110）
+
+工具面按「读得完整、写得安全」收敛，与共识「优先读取不丢失、详情可读、
+覆盖范围准确，再完善新输入与写入保护」一致。
+
+- **Schema 准确**：多取值 `action` 枚举此前只会生成第一个取值（invopop
+  `enum=a,b` 语法），v3 起改用 `enum=a,enum=b` 逐项声明；v1/v2 的旧字节由
+  `bot_args_frozen.go` 的冻结结构体逐字节保留（`botToolsetV1FrozenHash` /
+  `V2FrozenHash` 钉死）。各动作必填字段写进 `action` 字段的 schema 描述
+  （`botActionRules` 同时是服务端校验的唯一事实源）；不用 `if/then` 是因为
+  多数 OpenAI 兼容后端不校验 JSON Schema，条件分支只增加每请求约 700 token
+  的固定开销而无强制力。
+- **列表筛选与分页**：`fs_thread list` 默认只返回未归档线程，支持
+  `project_id` / `settled` / `status` / `updated_after` 过滤与 `page` /
+  `page_size`（默认 50、上限 100）；结果带 `total_items` / `returned_items` /
+  `has_more` 与各环境的读取覆盖（`environments`，未完整读取时给
+  `incomplete_environments` 与说明）。某环境读不到不谎报为「不存在」，也不
+  宣称全部正常。
+- **详情可读**：`fs_issue get` 返回正文、清单、标签、`updated_at` /
+  `checklist_updated_at`（列表项保持精简）；`fs_thread get` 返回线程状态、
+  最近条目（含条目 id、短摘要与 `detail_available`）以及完整历史的翻页入口
+  （`item_offset` / `next_item_offset`），条目正文用 `fs_thread item` 按 id
+  补读。
+- **结果续读无损**：`fs_result.read` 把整个读取体控制在预算内（必要时收缩
+  `content` 并迭代收敛），保证不会被通用截断再切一次——否则按 `next_offset`
+  续读会跳过一段谁也没看过的内容。返回体带 `offset` / `end` / `next_offset`
+  / `has_more` 与说明。截断预览只给开头约 500 字符（`botResultPreviewChars`），
+  避免「看到预览」被当成「看到完整结果」。
+- **新输入只暂停写操作**：安全点发现新输入时，尚未开始的写操作补
+  `not_executed`（回复用独立 `error_code=not_executed`，不再复用参数校验的
+  40001）；读类调用（`botReadOnlyActions` 判定，含 sync 的读与记忆/schedule
+  读）允许执行完，已有结果不丢。
+- **停止按钮 = 用户消息**：`POST /runs/:id/stop` 追加一条「停止」用户消息并
+  唤醒（`client_message_id=stop:<runID>` 幂等），不再硬取消当前回复、后台
+  调用或远端线程；是否结束由机器人结合上下文决定，真正要停自己时仍可用
+  `fs_stop`。停止后的迟到结果不复活旧 run。
+- **Issue 写入保护**：`fs_issue update` / `replace_checklist` 支持
+  `expected_updated_at` / `expected_checklist_updated_at`（先 `get` 读回）。
+  不符时不写入，回 `conflict=true`、原因与目标最新内容，让机器人重新读取、
+  尽量保留双方修改后再提交。检查与写入之间仍有极小竞态窗口（服务端尚未做
+  事务级 CAS），待后续收敛。
+
 ## 边界与决策
 
 - **身份**：机器人继承归属人身份（userID 恒取机器人归属人），全部端点仅
