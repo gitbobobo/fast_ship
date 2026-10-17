@@ -24,6 +24,9 @@ type QuotaScheduler struct {
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+	// kickCh 缓冲 1 的立即重算：HTTP 侧新建/换凭据/手动刷新会在调度器睡眠期间
+	// 写入更早的 next_retry_at，kick 让循环重算等待而不必等满原来的定时器。
+	kickCh chan struct{}
 }
 
 func NewQuotaScheduler(svc *QuotaService, repo *repository.QuotaAccountRepository, cfg *config.Config, logger *zap.Logger) *QuotaScheduler {
@@ -35,6 +38,15 @@ func NewQuotaScheduler(svc *QuotaService, repo *repository.QuotaAccountRepositor
 		now:    time.Now,
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
+		kickCh: make(chan struct{}, 1),
+	}
+}
+
+// Kick 非阻塞请求重新计算下一次等待（缓冲 1，已挂起时合并）。
+func (s *QuotaScheduler) Kick() {
+	select {
+	case s.kickCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -60,6 +72,10 @@ func (s *QuotaScheduler) loop() {
 		case <-s.stopCh:
 			timer.Stop()
 			return
+		case <-s.kickCh:
+			// 有账号的 next_retry_at 变了（新建/换凭据/手动刷新），重算等待。
+			timer.Stop()
+			continue
 		case t := <-timer.C:
 			s.runRound(t.UTC())
 		}

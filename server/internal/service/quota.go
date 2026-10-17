@@ -38,6 +38,20 @@ type QuotaService struct {
 	now      func() time.Time
 
 	fetchLocks sync.Map // account ID → *sync.Mutex，串行化同一账号的抓取
+
+	// kick 让后台调度器在抓取结果落库后重算等待：HTTP 侧的新建/换凭据/
+	// 手动刷新都会写更早的 next_retry_at，而调度器可能正睡一个更长的定时器。
+	// main 在启动调度前注入；测试不设时为 nil（无操作）。
+	kick func()
+}
+
+// SetKick 注入调度器唤醒函数，在启动调度前调用一次。
+func (s *QuotaService) SetKick(kick func()) { s.kick = kick }
+
+func (s *QuotaService) kickSchedule() {
+	if s.kick != nil {
+		s.kick()
+	}
 }
 
 // NewQuotaService 装配额度服务。registry 为 nil 时用真实供应商注册表
@@ -382,6 +396,8 @@ func (s *QuotaService) FetchAccountNow(ctx context.Context, accountID string) {
 // 成功写快照与调度清零（窗口临近重置时 next_retry_at 提前到 reset+30s）；
 // 失败只写 status/last_error/failure_count/next_retry_at，保留上次成功快照。
 func (s *QuotaService) fetchLocked(ctx context.Context, account *model.QuotaAccount) {
+	// 无论成功还是失败都写了 next_retry_at，结束后让调度器按新值重算等待。
+	defer s.kickSchedule()
 	now := s.now().UTC()
 	provider, ok := s.providerByID(account.Provider)
 	if !ok {

@@ -672,3 +672,52 @@ func TestQuotaService_CredentialHintMasksShortSecrets(t *testing.T) {
 		t.Fatalf("stored creds = %+v, want api_key qqq", creds)
 	}
 }
+
+// HTTP 侧在调度器已经睡下之后写入更早的 next_retry_at（新建账号抓取失败 →
+// 2 分钟后重试），Kick 必须让循环重算等待，而不是等满原来的 interval。
+func TestQuotaScheduler_KickWakesEarlierRetry(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-kick")
+	fetched := make(chan struct{}, 4)
+	service := newTestQuotaService(svc, fakeQuotaProvider("fake", func(context.Context, *http.Client, string, quota.Credentials) (quota.Snapshot, error) {
+		select {
+		case fetched <- struct{}{}:
+		default:
+		}
+		return fakeQuotaSnapshot(), nil
+	}))
+	cfg := svc.cfg
+	cfg.Quota.IntervalMinutes = 60
+	cfg.Quota.RunOnStartup = false
+	repo := repository.NewQuotaAccountRepository(svc.db)
+	sched := NewQuotaScheduler(service, repo, cfg, zap.NewNop())
+	sched.Start()
+	defer sched.Stop()
+
+	// 先让循环按「没有任何账号」算出 60 分钟的等待并睡下。
+	time.Sleep(100 * time.Millisecond)
+
+	enc, err := crypto.Encrypt([]byte(`{"api_key":"k"}`), []byte(cfg.Encryption.Key))
+	if err != nil {
+		t.Fatalf("encrypt creds: %v", err)
+	}
+	retryAt := time.Now().UTC().Add(50 * time.Millisecond)
+	account := &model.QuotaAccount{
+		ID: uuid.NewString(), UserID: user.ID, Provider: "fake", Label: "backoff",
+		CredentialHint: "…x", Status: model.QuotaStatusProviderError,
+		CredentialsEncrypted: enc, NextRetryAt: &retryAt,
+	}
+	if err := svc.db.Create(account).Error; err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	sched.Kick()
+
+	select {
+	case <-fetched:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Kick 后 3s 内没有重抓——调度器仍在睡原来的 60 分钟定时器")
+	}
+	if stored := storedQuotaAccount(t, svc, account.ID); stored.Status != model.QuotaStatusOK {
+		t.Fatalf("重抓后账号应为 ok，得到 %q", stored.Status)
+	}
+}

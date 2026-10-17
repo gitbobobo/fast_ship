@@ -73,6 +73,11 @@ next_retry_at)`：失败退避到期与「窗口预抓」都按自己的时刻�
 进度条在重置后很快刷出满额；无临近重置时 `next_retry_at` 也落
 `now + interval` 的绝对时间（不是 NULL），保证各账号按自己的节奏到期。
 
+调度器睡下后，HTTP 侧的写入仍可能把某个账号的 `next_retry_at` 改早（新建账号
+同步抓取失败 → 2 分钟后重试、换凭据、手动刷新）。`QuotaService` 在每次抓取
+结果落库后调 `SetKick` 注入的 `QuotaScheduler.Kick()`（缓冲 1，合并），
+循环收到后丢弃旧定时器重算等待——否则要等满原来的 interval 才会重试。
+
 `quota.enabled=false` 时接口仍可用（手动刷新正常），只是没有后台轮。
 
 ## 配置（`server/configs/config.yaml` + `FAST_SHIP_QUOTA_*`）

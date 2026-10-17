@@ -308,6 +308,8 @@ func main() {
 	// 接口仍可用（手动刷新正常），只是没有后台轮。
 	quotaService := service.NewQuotaService(quotaAccountRepo, cfg, quotaLogger, nil)
 	quotaScheduler := service.NewQuotaScheduler(quotaService, quotaAccountRepo, cfg, quotaLogger)
+	// HTTP 侧新建/换凭据/手动刷新写入更早的 next_retry_at 时，叫醒可能在睡长定时器的调度器。
+	quotaService.SetKick(quotaScheduler.Kick)
 
 	// PR 评审协调面（INT-93）：webhook 事务、防抖开轮、排队提升、评论/check 同步。
 	prReviewService := service.NewPRReviewService(db,
