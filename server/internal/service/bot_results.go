@@ -188,6 +188,12 @@ func (s *BotService) execResultRead(call *model.BotToolCall) (string, error) {
 			break
 		}
 		keep := int64(len(content)) - over - 16
+		// 至少前进 1 个字符：转义膨胀（如大量反斜杠/引号）会让 over 不小于
+		// 本次切片长度，否则会返回空 content + 同一 next_offset，续读永远
+		// 卡在原地。预算足够容纳 1 个转义后的字符。
+		if keep < 1 && offset+int64(len(content)) < total {
+			keep = 1
+		}
 		if keep < 0 {
 			keep = 0
 		}

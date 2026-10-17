@@ -393,6 +393,11 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	if run.BotID != botID {
 		return nil, errs.ErrBotRunNotFound
 	}
+	if run.SessionKind != model.BotSessionKindMain {
+		// 停止入口只作用于主线：定时任务运行是独立会话，主线「停止」消息它
+		// 看不到，也不能在这里改用主线唤醒。
+		return nil, errs.New(errs.ErrInvalidParams.Code, "停止入口只作用于主线运行；定时任务运行请等其自行结束")
+	}
 	if run.FinishedAt != nil {
 		return nil, errs.ErrBotRunStateConflict
 	}

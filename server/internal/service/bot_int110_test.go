@@ -450,3 +450,70 @@ func TestBotInt110CloseUnstartedAsyncWrite(t *testing.T) {
 		t.Fatalf("已认领的写不应被逆转: %+v", freshRunning)
 	}
 }
+
+func TestBotInt110ResultReadAdvancesWithEscaping(t *testing.T) {
+	// 切片里全是反斜杠：嵌进 JSON 后每个字符转义成两个，若收缩后 keep 落到 0
+	// 会返回空 content 且 next_offset 不变，续读原地死循环。
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int110esc")
+	bot := env.createBot(t, userID)
+	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusSucceeded, string(model.BotExecutionSync))
+	source := strings.Repeat("\\", botResultBudgetChars+2000)
+	env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).Updates(map[string]interface{}{"result_json": source})
+
+	reader := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, RequestID: "req-esc",
+		ProviderToolCallID: "prov-esc", ToolName: "fs_result", Action: "read",
+		ArgumentsJSON: fmt.Sprintf(`{"action":"read","call_id":%q,"offset":0,"limit":16000}`, callID),
+		ArgumentsHash: "x", ExecutionMode: "sync", Status: model.BotCallStatusQueued,
+		ExecutionContextJSON: "{}", CreatedAt: time.Now().UTC(),
+	}
+	content, err := env.bots.botExecuteSyncTool(context.Background(), reader)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var page struct {
+		Content    string `json:"content"`
+		NextOffset int64  `json:"next_offset"`
+		HasMore    bool   `json:"has_more"`
+	}
+	if err := json.Unmarshal([]byte(content), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if page.Content == "" || page.NextOffset <= 0 {
+		t.Fatalf("转义膨胀时也必须前进: %+v", page)
+	}
+	if !page.HasMore {
+		t.Fatalf("源结果远大于一页，应 has_more")
+	}
+	if out := botBuildOutcomeRaw(reader.ID, content, nil); out.Truncated {
+		t.Fatalf("读取体不得被二次截断")
+	}
+}
+
+func TestBotInt110RequestStopRejectsScheduleRun(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int110schedstop")
+	bot := env.createBot(t, userID)
+
+	now := time.Now().UTC()
+	taskID := uuid.NewString()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource: model.BotTriggerSchedule, TriggerKey: "int110-schedule-stop",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusRunning,
+		SessionKind: model.BotSessionKindSchedule, ScheduleTaskID: &taskID,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed schedule run: %v", err)
+	}
+	if _, err := env.bots.RequestStop(userID, bot.ID, run.ID); err == nil {
+		t.Fatalf("schedule run 的停止应被拒绝")
+	}
+	var n int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?", bot.ID, model.BotMessageKindUser).Count(&n)
+	if n != 0 {
+		t.Fatalf("被拒的 schedule 停止不得落主线消息，实得 %d 条", n)
+	}
+}
