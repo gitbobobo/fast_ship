@@ -41,7 +41,12 @@ function pickDefaultRail(
     ),
   );
   if (hasAvailableFavorite) return FAVORITES_RAIL;
-  return activeInstanceId ?? providers[0]?.instanceId ?? FAVORITES_RAIL;
+  // activeInstanceId 可能来自已失效的持久化选择（provider 已不存在），
+  // 不校验会直接落在空 rail 上。
+  const active = providers.find(
+    (provider) => provider.instanceId === activeInstanceId,
+  );
+  return active?.instanceId ?? providers[0]?.instanceId ?? FAVORITES_RAIL;
 }
 
 interface FlatModel {
@@ -113,6 +118,9 @@ export function ModelPicker({
           providers={providers}
           activeInstanceId={resolved.provider?.instanceId}
           isSelected={(item) =>
+            // 「项目默认」选中时不再把回落模型也标成选中（否则两条
+            // aria-selected=true，看起来像第二个显式选择）。
+            !leadingOption?.selected &&
             resolved.provider?.instanceId === item.provider.instanceId &&
             resolved.model?.slug === item.model.slug
           }

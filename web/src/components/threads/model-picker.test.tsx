@@ -300,6 +300,24 @@ describe("ModelPicker", () => {
     await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
   });
 
+  it("「项目默认」选中时不再把回落模型也标成选中", async () => {
+    const user = userEvent.setup();
+    render(
+      <ModelPicker
+        providers={PROVIDERS}
+        resolved={resolvedFor("codex", "gpt-5")}
+        onPick={vi.fn()}
+        leadingOption={{ label: "项目默认", selected: true, onSelect: vi.fn() }}
+      />,
+    );
+    const listbox = await openPanel(user);
+    const selected = within(listbox)
+      .getAllByRole("option")
+      .filter((option) => option.getAttribute("aria-selected") === "true");
+    expect(selected).toHaveLength(1);
+    expect(selected[0]).toHaveTextContent("项目默认");
+  });
+
   it("方向键移动高亮，Enter 选中", async () => {
     const onPick = vi.fn();
     const user = userEvent.setup();
@@ -365,6 +383,21 @@ describe("ModelMultiPicker", () => {
       />,
     );
     expect(trigger()).toHaveTextContent("GPT-5、GPT-5 Mini +1");
+  });
+
+  it("已选模型所属 provider 已失效时，rail 回落到可用 provider", async () => {
+    const user = userEvent.setup();
+    render(
+      <ModelMultiPicker
+        providers={PROVIDERS}
+        selected={[pickOf("gone", "old-model")]}
+        onToggle={vi.fn()}
+      />,
+    );
+    const listbox = await openPanel(user);
+    const options = within(listbox).getAllByRole("option");
+    expect(options.length).toBeGreaterThan(0);
+    expect(options[0]).toHaveTextContent("GPT-5");
   });
 
   it("点行调用 onToggle 且面板不关闭，行有选中态", async () => {
