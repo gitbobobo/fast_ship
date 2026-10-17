@@ -163,15 +163,17 @@ func factoryPoolWindow(value any, kind, label string, now time.Time) *Window {
 	return &w
 }
 
-// factoryPoolHasData 与 CodexBar 的 hasUsageData 一致：任一窗口的相关键存在即算
-// 有数据（包括 0 值的 usedPercent / secondsRemaining），不能要求非零。
+// factoryPoolHasData 判断 core 池是否报出了数据：任一窗口报出相关字段即算有数据，
+// 0 值也算。CodexBar 的 usedPercent 是非可选字段（缺省即 0），只能用「> 0」近似
+// 「确实报过值」；这里从原始 JSON 取值，能分辨「键存在且为 0」与「键不存在」，
+// 所以与 secondsRemaining 一样按存在判断——不会把已上报的 0% 核心池整池丢掉。
 func factoryPoolHasData(pool map[string]any) bool {
 	for _, key := range []string{"fiveHour", "weekly", "monthly"} {
 		obj, ok := asObject(pool[key])
 		if !ok {
 			continue
 		}
-		if p, ok := asNumber(obj["usedPercent"]); ok && p > 0 {
+		if _, ok := asNumber(obj["usedPercent"]); ok {
 			return true
 		}
 		if _, ok := flexibleDate(obj["windowEnd"]); ok {

@@ -1999,3 +1999,34 @@ func TestDevinRemainingIsNotTheTotalLimit(t *testing.T) {
 		})
 	}
 }
+
+// core 池只报 usedPercent: 0（没有 windowEnd / secondsRemaining）时也算有数据：
+// 判定按「键存在」而不是「值非零」，否则整池 0% 的核心窗口会被丢掉。
+func TestFactoryCorePoolZeroUsedPercentAloneIsData(t *testing.T) {
+	body := `{"usesTokenRateLimitsBilling":true,"limits":{
+		"standard":{"fiveHour":{"usedPercent":10,"secondsRemaining":600}},
+		"core":{"fiveHour":{"usedPercent":0}}}}`
+	server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+		switch r.URL.Path {
+		case "/api/app/auth/me":
+			return http.StatusOK, []byte(`{}`)
+		case "/api/billing/limits":
+			return http.StatusOK, []byte(body)
+		}
+		return http.StatusNotFound, []byte(`{}`)
+	})
+	ctx, cancel := fetchCtx()
+	defer cancel()
+
+	snapshot, err := fetchFactory(ctx, server.Client(), server.URL, Credentials{"api_key": "fk-key"})
+	if err != nil {
+		t.Fatalf("取数失败: %v", err)
+	}
+	core := findWindow(t, snapshot.Windows, WindowFiveHour, "Core 5 小时")
+	if core.UsedPercent == nil || *core.UsedPercent != 0 {
+		t.Fatalf("usedPercent=0 单独出现也算有数据，期望 0%%，得到 %v", core.UsedPercent)
+	}
+	if core.ResetAt != nil {
+		t.Fatalf("没有计时字段时不应有重置时间，得到 %v", core.ResetAt)
+	}
+}

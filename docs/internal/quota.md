@@ -137,6 +137,11 @@ quota:
   `remaining` 只当剩余，没有显式上限时用「已用 + 剩余」推总量（得 30%），
   只有剩余而无总量时不给百分比。这是相对 CodexBar 的刻意偏离：静默偏低的
   百分比会让用户以为还有余量。
+- **Factory core 池「有数据」按键存在判定**：CodexBar 的 `hasUsageData` 用
+  `usedPercent > 0`，因为它的 `usedPercent` 是非可选字段（缺省即 0）、分不清
+  「没报」与「报了 0」。这里从原始 JSON 取值，能分辨两者，所以按「键存在」判定
+  （与 `secondsRemaining` 一致）——只报 `usedPercent: 0` 的核心池会以 0% 窗口
+  展示，而不是被当成无数据整池丢掉。
 - **数值类型一律 float64**：契约里 `used_percent`/`used`/`limit`/`amount`
   在 openapi 显式标 `format: double`（生成 `float64`/`*float64`）。金额与
   百分比不降 float32 是显式决定——`10.1` 降精度会变成 `10.100000381469727`。
