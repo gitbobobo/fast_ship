@@ -391,9 +391,10 @@ func TestIssueServiceList_EmptyProject(t *testing.T) {
 // TestIssueServiceList_JSONColumnBadDataAndLegacyShapes 覆盖 JSON 列的坏数据容错与
 // 标签/指派人旧对象形态兼容：坏 JSON 的行不得让查询失败、也不得参与匹配；对象数组
 // 形态的标签（8b274f3 改存储格式前的存量数据）与混排数组的每个元素都要能按名称/
-// 登录名匹配。期望值全部硬编码。注意 Label/Assignee/Milestone 为空串即「不过滤」
-// （新旧一致的契约），空串筛选值不会到达 SQL，无 name 对象元素取到 NULL、与任何
-// 非空筛选值都不相等，等价地由各「不匹配」case 覆盖。
+// 登录名匹配。标签列顶层必须是数组、元素只认字符串与对象两种形态，与迁移前的
+// extractLabelNames 一致。期望值全部硬编码。注意 Label/Assignee/Milestone 为空串即
+// 「不过滤」（新旧一致的契约），空串筛选值不会到达 SQL，无 name 对象元素取到 NULL、
+// 与任何非空筛选值都不相等，等价地由各「不匹配」case 覆盖。
 func TestIssueServiceList_JSONColumnBadDataAndLegacyShapes(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
@@ -441,6 +442,22 @@ func TestIssueServiceList_JSONColumnBadDataAndLegacyShapes(t *testing.T) {
 			title: "empty string json columns", author: "jack",
 			updated: listFixtureTime(10), created: listFixtureTime(10),
 			gh: &listFixtureGHMeta{number: 110, labels: ``, assignees: ``, milestone: ``}},
+		{seq: 11, source: model.IssueSourceGitHub, state: model.IssueStateOpen,
+			title: "top-level string labels json", author: "kate",
+			updated: listFixtureTime(11), created: listFixtureTime(11),
+			gh: &listFixtureGHMeta{number: 111, labels: `'"urgent"'`, assignees: `[]`}},
+		{seq: 12, source: model.IssueSourceGitHub, state: model.IssueStateOpen,
+			title: "top-level object labels json", author: "lem",
+			updated: listFixtureTime(12), created: listFixtureTime(12),
+			gh: &listFixtureGHMeta{number: 112, labels: `{"name":"urgent"}`, assignees: `[]`}},
+		{seq: 13, source: model.IssueSourceGitHub, state: model.IssueStateOpen,
+			title: "numeric label element", author: "mallory",
+			updated: listFixtureTime(13), created: listFixtureTime(13),
+			gh: &listFixtureGHMeta{number: 113, labels: `[3]`, assignees: `[]`}},
+		{seq: 14, source: model.IssueSourceGitHub, state: model.IssueStateOpen,
+			title: "top-level boolean labels json", author: "nina",
+			updated: listFixtureTime(14), created: listFixtureTime(14),
+			gh: &listFixtureGHMeta{number: 114, labels: `true`, assignees: `[]`}},
 	})
 
 	cases := []struct {
@@ -449,12 +466,20 @@ func TestIssueServiceList_JSONColumnBadDataAndLegacyShapes(t *testing.T) {
 		wantSeqs []int
 	}{
 		// 坏数据行只影响对应筛选，不影响无筛选查询。
-		{"no filter keeps bad-data rows", IssueListFilters{}, []int{10, 9, 8, 7, 6, 5, 4, 3, 2, 1}},
+		{"no filter keeps bad-data rows", IssueListFilters{}, []int{14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}},
 		// 标签对象形态（历史数据兼容）与混排数组。
 		{"legacy object-form gh label matches case-insensitively", IssueListFilters{Label: "legacy"}, []int{1}},
 		{"legacy object-form im label matches", IssueListFilters{Label: "legacyim"}, []int{2}},
 		{"mixed label array string element", IssueListFilters{Label: "plain"}, []int{3}},
 		{"mixed label array object element", IssueListFilters{Label: "obj"}, []int{3}},
+		// 顶层必须是 JSON 数组：合法 JSON 但顶层是标量/对象的行按「没有标签」处理
+		// （与 extractLabelNames 一致），json_each 不得取出元素意外命中筛选
+		// （seq 11/12/14）。
+		{"top-level string labels json does not match", IssueListFilters{Label: "urgent"}, []int{}},
+		{"top-level object labels json does not match", IssueListFilters{Label: "urgent"}, []int{}},
+		{"top-level boolean labels json does not match", IssueListFilters{Label: "true"}, []int{}},
+		// 元素只认字符串与对象：数字元素不参与匹配（seq 13）。
+		{"numeric label element does not match", IssueListFilters{Label: "3"}, []int{}},
 		// 无 name 的对象元素与坏 JSON 行都不匹配任何筛选值（含各自的坏文本本身，
 		// 筛选是全等匹配、不做子串）。
 		{"nameless object element does not match its color", IssueListFilters{Label: "fff"}, []int{}},

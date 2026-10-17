@@ -151,6 +151,16 @@ func jsonColumnOr(column, fallback string) string {
 	return "CASE WHEN json_valid(" + column + ") THEN " + column + " ELSE '" + fallback + "' END"
 }
 
+// jsonArrayOr 返回保证是 JSON 数组的列表达式：NULL、空串、坏 JSON 与其它顶层形态
+// （标量、对象）统一回落到 '[]'。迁移前的 extractLabelNames 只接受字符串数组或对象
+// 数组，顶层非数组一律按「没有标签」处理；不这样收口的话，`"urgent"`、
+// `{"name":"urgent"}` 这类行的元素会被 json_each 取出来意外命中标签筛选。
+// json_type 必须在 json_valid 为真后才能调用（坏 JSON 上会抛 malformed JSON），
+// 且本驱动不保证 AND 短路，因此用嵌套 CASE 而不是 AND。
+func jsonArrayOr(column string) string {
+	return "CASE WHEN json_valid(" + column + ") THEN (CASE WHEN json_type(" + column + ") = 'array' THEN " + column + " ELSE '[]' END) ELSE '[]' END"
+}
+
 // buildFilteredQuery 构造 Issue 列表过滤查询：issues 为主表左联两张 meta 表
 // （两表 issue_id 都是唯一键，不会行扇出）。JSON 列的 NULL、空串与坏 JSON 直接喂给
 // json_each/json_extract 会抛 malformed JSON 拖垮整条查询，统一经 jsonColumnOr 的
@@ -178,15 +188,20 @@ func (r *IssueRepository) buildFilteredQuery(q IssueListQuery) *gorm.DB {
 	}
 	if q.Label != "" {
 		// 标签历史数据有两种形态：纯名称数组 ["a","b"] 与对象数组 [{"name":"a"}]
-		// （8b274f3 改存储格式前的存量行），两种都要参与匹配；无 name 的对象元素
-		// json_extract 得 NULL，不匹配任何筛选值。语义照旧是 EqualFold（lower 等值）。
-		// 两个 EXISTS 用 OR 连接并作为单个 Where 传入，GORM 会整体加括号，
-		// 不影响与其他条件的 AND 语义。
+		// （8b274f3 改存储格式前的存量行），两种都要参与匹配。顶层必须是数组、元素
+		// 只认字符串与对象两种形态，与迁移前的 extractLabelNames 一致：顶层标量/
+		// 对象的行经 jsonArrayOr 收口按「没有标签」处理，数字/布尔/null 元素与无
+		// name 的对象元素都得 NULL，不匹配任何筛选值；混排数组仍按元素处理（更
+		// 宽容，保持现状）。语义照旧是 EqualFold（lower 等值）。两个 EXISTS 用 OR
+		// 连接并作为单个 Where 传入，GORM 会整体加括号，不影响与其他条件的 AND
+		// 语义。
 		query = query.Where(
-			"EXISTS (SELECT 1 FROM json_each("+jsonColumnOr("gh.labels_json", "[]")+") AS je "+
-				"WHERE lower(CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') ELSE je.value END) = lower(?)) "+
-				"OR EXISTS (SELECT 1 FROM json_each("+jsonColumnOr("im.labels_json", "[]")+") AS je "+
-				"WHERE lower(CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') ELSE je.value END) = lower(?))",
+			"EXISTS (SELECT 1 FROM json_each("+jsonArrayOr("gh.labels_json")+") AS je "+
+				"WHERE lower(CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') "+
+				"WHEN 'text' THEN je.value END) = lower(?)) "+
+				"OR EXISTS (SELECT 1 FROM json_each("+jsonArrayOr("im.labels_json")+") AS je "+
+				"WHERE lower(CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') "+
+				"WHEN 'text' THEN je.value END) = lower(?))",
 			q.Label, q.Label)
 	}
 	if q.Assignee != "" {

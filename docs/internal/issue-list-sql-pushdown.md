@@ -49,16 +49,24 @@ service 层（`issue_list.go`）只做映射与编排：`List` 先 `CountFiltere
 `labels_json` / `assignees_json` / `milestone_json` 的 Go 零值是空串，空串与被写坏的
 JSON（如 `{oops`）都会让 SQLite 的 `json_each` / `json_extract` 抛 `malformed JSON`，
 使整条列表查询失败。迁移前的内存过滤用 `parseJSON` / `extractLabelNames` 对坏数据一律
-按空处理，这是既有契约，SQL 侧必须保持：所有 JSON 列表达式先过 `jsonColumnOr` 的
-`json_valid` 防护——NULL、空串、坏 JSON 统一回落到合法默认值（`'[]'` / `'{}'`），
-结果按空集/不匹配处理；meta 行不存在的 JOIN NULL 走同一路径。合法但非对象的 JSON
-（如 `'5'`）`json_extract` 得 NULL，比较不匹配，同旧行为。
+按空处理，这是既有契约，SQL 侧必须保持：所有 JSON 列表达式先过 `json_valid` 防护
+（`jsonColumnOr`；标签列用 `jsonArrayOr`，额外要求顶层是数组，见下）——NULL、空串、
+坏 JSON 统一回落到合法默认值（`'[]'` / `'{}'`），结果按空集/不匹配处理；meta 行不存在
+的 JOIN NULL 走同一路径。合法但非对象的 JSON（如 `'5'`）`json_extract` 得 NULL，
+比较不匹配，同旧行为。
 
 标签历史数据有两种形态：commit 8b274f3 把存储从完整对象数组改为纯名称数组之前，存量行
-是 `[{"name":"x","color":...}]`。label 筛选在 EXISTS 里用
-`CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') ELSE je.value END`
-同时取两种形态的名称（大小写不敏感）；无 name 的对象元素得 NULL，不匹配任何筛选值。
-assignee 按元素匹配：`CASE WHEN je.type = 'object' THEN json_extract(je.value,'$.login') END`，
+是 `[{"name":"x","color":...}]`。标签列先经 `jsonArrayOr` 收口：`json_valid` 为真且
+`json_type(...)='array'` 才取原列，否则回落 `'[]'`——顶层必须是 JSON 数组，顶层
+标量（如 `"urgent"`）、对象（如 `{"name":"urgent"}`）、布尔/null 一律按无标签处理，
+与迁移前的 `extractLabelNames` 一致。`json_type` 不能依赖 `AND` 短路（本驱动在坏
+JSON 上会抛 malformed JSON），必须嵌在 `json_valid` 为真的 CASE 分支里求值。label
+筛选在 EXISTS 里用
+`CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') WHEN 'text' THEN je.value END`
+同时取两种形态的名称（大小写不敏感），元素只认字符串与对象两种形态：数字/布尔/null
+元素与无 name 的对象元素都得 NULL，不匹配任何筛选值；混排数组仍按元素处理（更宽容，
+保持现状）。assignee 按元素匹配：
+`CASE WHEN je.type = 'object' THEN json_extract(je.value,'$.login') END`，
 字符串元素得 NULL 不匹配——旧实现对无法解析成对象数组的行整体不匹配，新实现按元素
 处理，更宽容。GetFilterOptions 仍走 Go 侧 `extractLabelNames`，两种形态与坏数据本来就
 兼容，未改。

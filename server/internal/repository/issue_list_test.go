@@ -218,18 +218,23 @@ func TestIssueRepositoryListFiltered_PageBeyondEnd(t *testing.T) {
 
 // TestIssueRepositoryListFiltered_JSONValidGuard：label/assignee/milestone 条件必须
 // 带 json_valid 防护——坏 JSON 直接喂给 json_each/json_extract 会抛 malformed JSON
-// 让整条查询失败，这里锁住防护，防止后续改动把它删掉。
+// 让整条查询失败，这里锁住防护，防止后续改动把它删掉。label 条件还要求顶层收口为
+// JSON 数组（json_type）——顶层标量/对象的行按「没有标签」处理，防止 json_each
+// 取出元素意外命中筛选（与迁移前的 extractLabelNames 一致）。
 func TestIssueRepositoryListFiltered_JSONValidGuard(t *testing.T) {
 	repo, recorder, projectID := setupIssueListSQLTestDB(t)
 
-	for _, q := range []IssueListQuery{
-		{ProjectID: projectID, Label: "bug"},
-		{ProjectID: projectID, Assignee: "alice"},
-		{ProjectID: projectID, Milestone: "sprint"},
+	for _, tc := range []struct {
+		query    IssueListQuery
+		wantType bool // label 条件额外断言顶层数组收口
+	}{
+		{query: IssueListQuery{ProjectID: projectID, Label: "bug"}, wantType: true},
+		{query: IssueListQuery{ProjectID: projectID, Assignee: "alice"}},
+		{query: IssueListQuery{ProjectID: projectID, Milestone: "sprint"}},
 	} {
 		recorder.reset()
-		if _, err := repo.CountFiltered(q); err != nil {
-			t.Fatalf("count filtered %+v: %v", q, err)
+		if _, err := repo.CountFiltered(tc.query); err != nil {
+			t.Fatalf("count filtered %+v: %v", tc.query, err)
 		}
 		mains := recorder.matching("FROM `issues`")
 		if len(mains) != 1 {
@@ -237,6 +242,9 @@ func TestIssueRepositoryListFiltered_JSONValidGuard(t *testing.T) {
 		}
 		if !strings.Contains(mains[0], "json_valid") {
 			t.Fatalf("filter SQL must keep the json_valid guard, got %s", mains[0])
+		}
+		if tc.wantType && !strings.Contains(mains[0], "json_type(") {
+			t.Fatalf("label SQL must keep the json_type array guard, got %s", mains[0])
 		}
 	}
 }
