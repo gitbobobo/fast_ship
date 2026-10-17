@@ -318,6 +318,28 @@ describe("ModelPicker", () => {
     expect(selected[0]).toHaveTextContent("项目默认");
   });
 
+  it("provider 实例 id 叫 favorites 时不与收藏 rail 冲突", async () => {
+    const user = userEvent.setup();
+    const providers: ProviderChoice[] = [
+      ...PROVIDERS,
+      {
+        instanceId: "favorites",
+        name: "Favs",
+        models: [
+          { slug: "fav-model", name: "Fav Model", isDefault: false, descriptors: [] },
+        ],
+      },
+    ];
+    render(
+      <ModelPicker providers={providers} resolved={{ efforts: {} }} onPick={vi.fn()} />,
+    );
+    await openPanel(user);
+    await user.click(screen.getByRole("button", { name: "Favs" }));
+    const options = within(screen.getByRole("listbox")).getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0]).toHaveTextContent("Fav Model");
+  });
+
   it("方向键移动高亮，Enter 选中", async () => {
     const onPick = vi.fn();
     const user = userEvent.setup();

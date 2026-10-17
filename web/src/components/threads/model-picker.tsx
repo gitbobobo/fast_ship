@@ -26,7 +26,9 @@ import { cn } from "@/lib/utils";
 import { ProviderIcon } from "./provider-icon";
 import { CHIP } from "./thread-chips";
 
-const FAVORITES_RAIL = "favorites";
+// 哨兵值不能是合法的 provider 实例 ID（实例 ID 首字符必须是字母），
+// 否则 instanceId 叫 favorites 的 provider 会和收藏 rail 撞 key。
+const FAVORITES_RAIL = "__favorites__";
 
 /** 面板默认 rail：有可用收藏时收藏 rail，否则当前 provider，再到第一个 provider。 */
 function pickDefaultRail(
