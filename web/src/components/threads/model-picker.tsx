@@ -27,25 +27,16 @@ import { ProviderIcon } from "./provider-icon";
 import { CHIP } from "./thread-chips";
 
 const FAVORITES_RAIL = "favorites";
-/** 数字键直选只覆盖前 9 条可见行。 */
-const JUMP_LIMIT = 9;
 
 interface FlatModel {
   provider: ProviderChoice;
   model: ModelChoice;
 }
 
-/** 导航条目：固定项（如「项目默认」）不占数字快捷键，只参与 ↑/↓/Enter。 */
+/** 导航条目：固定项（如「项目默认」）与模型行都参与 ↑/↓/Enter。 */
 type PickerEntry =
   | { kind: "leading" }
   | { kind: "model"; item: FlatModel };
-
-/** macOS 用 ⌘、其他平台用 Ctrl；happy-dom 的 navigator.platform/userAgent 也可用。 */
-function isMacPlatform() {
-  return /mac|iphone|ipad|ipod/i.test(
-    `${navigator.platform} ${navigator.userAgent}`,
-  );
-}
 
 function modelPickOf(item: FlatModel): ModelPick {
   return {
@@ -297,17 +288,6 @@ function ModelPickerPanel({
       const onButton =
         event.target instanceof HTMLElement &&
         event.target.closest("button") !== null;
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
-        if (!multiple && /^[1-9]$/.test(event.key)) {
-          const item = visible[Number(event.key) - 1];
-          if (item) {
-            event.preventDefault();
-            event.stopPropagation();
-            onSelect(item);
-          }
-        }
-        return;
-      }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         if (entries.length === 0) return;
@@ -338,7 +318,7 @@ function ModelPickerPanel({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [entries, visible, focused, multiple, onSelect, leadingOption, onRequestClose]);
+  }, [entries, focused, onSelect, leadingOption, onRequestClose]);
 
   const railButton = (key: string, label: string, icon: ReactNode) => (
     <button
@@ -362,16 +342,10 @@ function ModelPickerPanel({
     </button>
   );
 
-  const renderRow = (item: FlatModel, index: number, modelIndex: number) => {
+  const renderRow = (item: FlatModel, index: number) => {
     const key = modelFavoriteKey(item.provider.instanceId, item.model.slug);
     const favorite = favoritesSet.has(key);
     const selected = isSelected(item);
-    const jumpLabel =
-      !multiple && modelIndex < JUMP_LIMIT
-        ? isMacPlatform()
-          ? `⌘${modelIndex + 1}`
-          : `Ctrl+${modelIndex + 1}`
-        : null;
     return (
       <div
         key={key}
@@ -399,11 +373,6 @@ function ModelPickerPanel({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {selected && <Check className="size-3.5" aria-hidden />}
-          {jumpLabel && (
-            <kbd className="rounded border border-border bg-muted px-1 py-0.5 font-mono text-[10px] leading-none text-muted-foreground">
-              {jumpLabel}
-            </kbd>
-          )}
           <button
             type="button"
             aria-label={
@@ -437,7 +406,7 @@ function ModelPickerPanel({
     >
       {/* 左 rail：收藏 + 每个 provider 一项，选中项右侧有高亮条。 */}
       <div
-        className="flex w-9 shrink-0 flex-col gap-1 overflow-y-auto overscroll-contain border-r border-border/70 bg-muted/30 p-1"
+        className="flex w-9 shrink-0 flex-col gap-2.5 overflow-y-auto overscroll-contain border-r border-border/70 bg-muted/30 p-1"
         aria-label="Providers"
       >
         {railButton(
@@ -504,7 +473,7 @@ function ModelPickerPanel({
                 )}
               </div>
             ) : (
-              renderRow(entry.item, index, index - (leadingOption ? 1 : 0))
+              renderRow(entry.item, index)
             ),
           )}
           {visible.length === 0 && (

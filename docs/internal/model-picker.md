@@ -23,8 +23,11 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
   其 `label`（调用方仍可用 `triggerLabel` 覆盖，如「已失效」标注）。
 - 面板复用 `web/src/components/ui/popover.tsx` 的 `Popover`（Base UI
   `@base-ui/react/popover` 封装）；触发器样式复用 `thread-chips.tsx`
-  导出的 `CHIP` 常量；provider 图标一律 `ProviderIcon`
-  （`provider-icons.ts` 的映射不随本组件扩展）。
+  导出的 `CHIP` 常量；provider 图标一律 `ProviderIcon`。
+- ACP registry 接入的 harness 按实例后缀区分图标：`acpRegistry_devin` →
+  `devin`、`acpRegistry_factory_droid` → `factory-droid`（注册表 agent id 把
+  `-` 换成 `_`）；未登记的 agent 回落通用 `acp` glyph。图标数据内联在
+  `provider-icons.ts`，不依赖外部 CDN。
 
 ## 收藏
 
@@ -41,11 +44,9 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
 
 - `↑`/`↓` 在当前可见行间移动高亮（环绕），`Enter` 选中高亮行，`Esc`
   关闭面板（不影响外层 Dialog）。`leadingOption` 也纳入高亮与 `↑`/`↓`/`Enter`
-  导航（固定在第一位），但不占数字直选快捷键。
-- 单选的前 9 条可见行右侧显示直选 chip：macOS `⌘1`…`⌘9`、其他平台
-  `Ctrl+1`…`Ctrl+9`；平台判断只看 `navigator.platform`/`navigator.userAgent`
-  （不用 `userAgentData`，happy-dom 下也可用）。处理上 meta/ctrl 任一修饰
-  键都接受。
+  导航（固定在第一位）。
+- 不提供数字快捷键：面板不显示也不响应 `⌘N`/`Ctrl+N`。
+- 搜索框内的 IME 组合事件（`event.isComposing` / `keyCode === 229`）不触发选择。
 
 ## 调用点
 
@@ -63,5 +64,3 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
 - 面板内容经 Portal 挂到 document.body：行 `role="option"`、列表
   `role="listbox"`、rail 按钮 aria-label 为 provider 名；收藏按钮 aria-label
   为 `收藏 <模型名>`/`取消收藏 <模型名>`。
-- 数字键直选在测试里用
-  `fireEvent.keyDown(window, { key: "1", metaKey: true })`（或 `ctrlKey`）。

@@ -281,47 +281,6 @@ describe("ModelPicker", () => {
     await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
   });
 
-  it("有 leadingOption 时 ⌘1 仍直选第一条模型", async () => {
-    const onPick = vi.fn();
-    const onSelect = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <ModelPicker
-        providers={PROVIDERS}
-        resolved={resolvedFor("codex", "gpt-5")}
-        onPick={onPick}
-        leadingOption={{ label: "项目默认", selected: false, onSelect }}
-      />,
-    );
-    await openPanel(user);
-    fireEvent.keyDown(window, { key: "1", metaKey: true });
-    expect(onPick).toHaveBeenCalledWith({
-      instanceId: "codex",
-      model: "gpt-5",
-      efforts: {},
-    });
-    expect(onSelect).not.toHaveBeenCalled();
-  });
-
-  it("⌘1 直选第一条可见行", async () => {
-    const onPick = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <ModelPicker
-        providers={PROVIDERS}
-        resolved={resolvedFor("codex", "gpt-5")}
-        onPick={onPick}
-      />,
-    );
-    await openPanel(user);
-    fireEvent.keyDown(window, { key: "1", metaKey: true });
-    expect(onPick).toHaveBeenCalledWith({
-      instanceId: "codex",
-      model: "gpt-5",
-      efforts: {},
-    });
-  });
-
   it("方向键移动高亮，Enter 选中", async () => {
     const onPick = vi.fn();
     const user = userEvent.setup();
@@ -412,19 +371,4 @@ describe("ModelMultiPicker", () => {
     expect(screen.getByRole("listbox")).toBeInTheDocument();
   });
 
-  it("多选不响应数字键直选", async () => {
-    const onToggle = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <ModelMultiPicker
-        providers={PROVIDERS}
-        selected={[]}
-        onToggle={onToggle}
-      />,
-    );
-    await openPanel(user);
-    fireEvent.keyDown(window, { key: "1", metaKey: true });
-    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
-    expect(onToggle).not.toHaveBeenCalled();
-  });
 });
