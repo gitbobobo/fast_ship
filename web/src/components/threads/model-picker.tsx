@@ -431,7 +431,10 @@ function ModelPickerPanel({
   };
 
   return (
-    <div className="flex max-h-80 w-80 flex-row overflow-hidden" data-slot="model-picker-panel">
+    <div
+      className="flex h-[min(22rem,var(--available-height))] w-80 flex-row overflow-hidden"
+      data-slot="model-picker-panel"
+    >
       {/* 左 rail：收藏 + 每个 provider 一项，选中项右侧有高亮条。 */}
       <div
         className="flex w-9 shrink-0 flex-col gap-1 overflow-y-auto overscroll-contain border-r border-border/70 bg-muted/30 p-1"
@@ -456,7 +459,7 @@ function ModelPickerPanel({
       </div>
 
       {/* 搜索 + 列表 */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-2 border-b border-border/70 px-2.5">
           <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
           <input
@@ -474,7 +477,7 @@ function ModelPickerPanel({
           role="listbox"
           aria-label="模型列表"
           aria-multiselectable={multiple || undefined}
-          className="max-h-72 overflow-y-auto overscroll-contain p-1"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1"
         >
           {entries.map((entry, index) =>
             entry.kind === "leading" ? (
