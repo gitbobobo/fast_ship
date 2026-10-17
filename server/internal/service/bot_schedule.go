@@ -37,7 +37,12 @@ const (
 	botScheduleInstructionMaxLen = 8000
 	botScheduleRunsDefaultLimit  = 20
 	botScheduleRunsMaxLimit      = 100
-	botScheduleTasksListLimit    = 200
+	// botScheduleTasksListLimit 是列表读取（工具分页与用户 REST/界面）的上限。
+	botScheduleTasksListLimit = 200
+	// botScheduleTasksMaxPerBot 是每机器人任务数上限，与列表读取上限一致：
+	// 建得比看得见还多的话，用户唯一的任务管理面（列表 + 开关）就管不到那些
+	// 看不见的任务。
+	botScheduleTasksMaxPerBot = botScheduleTasksListLimit
 )
 
 // botScheduleSession 是一次 schedule run 冻结的会话上下文：任务快照、工具集
@@ -294,6 +299,15 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 	timezone = strings.TrimSpace(timezone)
 	if err := botValidateScheduleTaskFields(name, cronExpr, timezone, instruction); err != nil {
 		return nil, err
+	}
+	// 上限与列表读取一致：别让任务多到用户界面看不见、也就无法开关。
+	existing, err := s.schedTasks.CountByBot(botID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	if existing >= botScheduleTasksMaxPerBot {
+		return nil, errs.New(errs.ErrInvalidParams.Code,
+			"定时任务数量已达上限（每个机器人最多 200 个），请先删除不再需要的任务")
 	}
 	now := time.Now().UTC()
 	_, next, err := parseAutomationCron(cronExpr, timezone, now)

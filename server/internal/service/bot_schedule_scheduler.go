@@ -185,6 +185,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			run.StartedAt = &nowUTC
 			run.TriggerContextJSON = marshalJSONString(map[string]interface{}{
 				"task_id": current.ID, "task_name": current.Name,
+				"needs_report":  current.NeedsReport,
 				"scheduled_for": planned.UTC().Format(time.RFC3339Nano),
 			})
 		}
@@ -235,6 +236,17 @@ func botScheduleTaskNameFromContext(run *model.BotRun) string {
 		return ctx.TaskName
 	}
 	return "已删除的定时任务"
+}
+
+// botScheduleNeedsReportFromContext 取派发时冻结的「需要汇报」；缺失按 false。
+func botScheduleNeedsReportFromContext(run *model.BotRun) bool {
+	var ctx struct {
+		NeedsReport bool `json:"needs_report"`
+	}
+	if run.TriggerContextJSON != "" && json.Unmarshal([]byte(run.TriggerContextJSON), &ctx) == nil {
+		return ctx.NeedsReport
+	}
+	return false
 }
 
 // isBotRunDuplicateTriggerKey 识别 (bot_id, trigger_key) 唯一冲突。
@@ -333,16 +345,20 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 		}); err != nil {
 			return err
 		}
-		// 失败或「需要汇报且非静默」才追加事件；成功静默只记录。
+		// 失败或「需要汇报且非静默」才追加事件；成功静默只记录。任务在运行
+		// 期间被删掉时用派发时冻结的「需要汇报」与任务名兜底：这次运行已经
+		// 跑完并产出了要汇报的内容，用户也再无法从任务查询看到它。
 		if !silent && run.ScheduleTaskID != nil {
-			var task model.BotScheduleTask
-			if err := tx.Where("id = ?", *run.ScheduleTaskID).First(&task).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return nil // 任务已删除：运行记录保留，事件无从谈起
-				}
+			task := model.BotScheduleTask{ID: *run.ScheduleTaskID, Name: botScheduleTaskNameFromContext(run)}
+			needsReport := botScheduleNeedsReportFromContext(run)
+			var stored model.BotScheduleTask
+			if err := tx.Where("id = ?", *run.ScheduleTaskID).First(&stored).Error; err == nil {
+				task = stored
+				needsReport = stored.NeedsReport
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			if task.NeedsReport {
+			if needsReport {
 				return s.appendScheduleEventTx(tx, bot.ID, &task, run,
 					model.BotRunStatusCompleted, summary, "", "", now)
 			}

@@ -218,7 +218,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
 - **数据模型**：`bot_schedule_tasks`（bot、cron 五字段、时区 IANA 空串=UTC、
   指令、可选模型、needs_report、enabled、next_run_at）。调度事实来源是
   `next_run_at`（UTC 存储）；启用/重新启用时重算为 now 之后的下一次，停用
-  清空（不补跑过期计划）。
+  清空（不补跑过期计划）。每机器人任务数上限 200，与列表读取上限一致——建得比
+  看得见还多的话，用户唯一的任务管理面（列表 + 开关）就管不到那些任务。
 - **会话隔离**：schedule run 复用 `bot_runs`/`bot_messages`/`bot_events`，
   以 `session_kind='schedule'` 判别；每次运行是独立会话，只带同一份系统提示
   + 冻结记忆注入（run 开始现读一次、run 内冻结）+ 冻结工具集 + 只含本 run
@@ -270,9 +271,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   （`session_kind='main'`、`run_id=NULL`，正文 JSON 含 task_id/task_name/
   run_id/status/summary/error_code/error_message）。时机：**failed 必报**；
   `completed && needs_report && !silent` 才报；成功静默、成功且不需汇报、
-  skipped、stopped 都不追加。失败事件在任务先被删除时仍会追加（含启动恢复
-  路径）——任务名取派发时记在触发上下文里的那份，读不到任务行时用占位名
-  「已删除的定时任务」（此时用户已无法通过任务查询看到这次失败）。`schedule_event` 是主线模型输入（计入
+  skipped、stopped 都不追加。任务在运行期间被删除时仍按派发时冻结的
+  `needs_report` 与任务名判定并追加事件（失败必报；含启动恢复路径）——读不到
+  任务行时用占位名「已删除的定时任务」，否则这次运行的结果既报不出去、用户也
+  无从经任务查询看到。`schedule_event` 是主线模型输入（计入
   `HasModelInputSince`），主线循环自动被唤醒判断是否通知用户。
 - **静默约定**：运行时上下文明确要求「无话可说只回复一行 `[[SILENT]]`」。
   收尾取本 run 最后一条 assistant 正文，去尾部空白与句号后等于哨兵即

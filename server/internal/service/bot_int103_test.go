@@ -1403,3 +1403,69 @@ func TestBotScheduleDrainsDueBacklog(t *testing.T) {
 		return unfinished == 0
 	})
 }
+
+// 任务数上限与列表读取上限一致：建得比看得见还多，用户就管不到看不见的任务。
+func TestBotScheduleCreateRespectsTaskCap(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedcap")
+	bot := env.createBot(t, userID)
+	now := time.Now().UTC()
+	next := now.Add(time.Hour)
+	for i := 0; i < botScheduleTasksMaxPerBot; i++ {
+		task := &model.BotScheduleTask{
+			ID: uuid.NewString(), BotID: bot.ID,
+			Name: fmt.Sprintf("满额任务%03d", i), CronExpression: "0 9 * * *",
+			Instruction: "跑一下", Enabled: true, NextRunAt: &next,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := env.bots.schedTasks.Create(task); err != nil {
+			t.Fatalf("seed task %d: %v", i, err)
+		}
+	}
+	_, err := env.bots.createScheduleTask(bot.ID, "超额任务", "0 9 * * *", "Asia/Shanghai", "跑一下", "", false)
+	if err == nil {
+		t.Fatalf("超过任务数上限时应拒绝创建")
+	}
+	appErr, ok := err.(*errs.AppError)
+	if !ok || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("应为参数错误（提示上限），实得 %T %v", err, err)
+	}
+}
+
+// 任务在运行期间被删除时，已完成且需要汇报的运行仍要追加事件（用派发时冻结的
+// 需要汇报与任务名兜底）。
+func TestBotScheduleCompletedEventAfterTaskDeleted(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedcompdel")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NeedsReport = true
+	})
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	ctx := marshalJSONString(map[string]interface{}{
+		"task_id": task.ID, "task_name": task.Name, "needs_report": true,
+	})
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Update("trigger_context_json", ctx).Error; err != nil {
+		t.Fatalf("set trigger context: %v", err)
+	}
+	run.TriggerContextJSON = ctx
+	if err := env.db.Exec(`DELETE FROM bot_schedule_tasks WHERE id = ?`, task.ID).Error; err != nil {
+		t.Fatalf("delete task: %v", err)
+	}
+
+	if !env.bots.tryFinishScheduleRun(botRow, run) {
+		t.Fatalf("没有未结算调用时应能完成")
+	}
+	n, content := countScheduleEvents(t, env, bot.ID)
+	if n != 1 {
+		t.Fatalf("任务被删除后已完成且需汇报的运行仍应追加事件，实得 %d", n)
+	}
+	if content.TaskName != task.Name || content.Status != string(model.BotRunStatusCompleted) {
+		t.Fatalf("事件应带派发时的任务名与完成状态: %+v", content)
+	}
+}
