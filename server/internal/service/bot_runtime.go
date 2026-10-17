@@ -230,6 +230,16 @@ func (s *BotService) scanOnce() {
 	}
 	// 后台调用：排队的调用推给 worker（重复推送无害，CAS 认领挡住并发）。
 	s.scanQueuedCalls()
+	// 定时任务运行：补回丢失的唤醒——wakeScheduleRun 的瞬态失败或执行槽异常
+	// 结束会让 run 永远卡在 running（未完成的 schedule run 还会挡住机器人删除）。
+	// wakeScheduleRun 自身按槽占用与终态幂等，重复扫描无害。
+	var schedRuns []model.BotRun
+	if err := s.db.Where("finished_at IS NULL AND session_kind = ?", model.BotSessionKindSchedule).
+		Order("created_at ASC").Limit(botScheduleDispatchBatch).Find(&schedRuns).Error; err == nil {
+		for i := range schedRuns {
+			s.wakeScheduleRun(schedRuns[i].BotID, schedRuns[i].ID)
+		}
+	}
 }
 
 // hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（主线会话内的 user /

@@ -249,8 +249,15 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   同一函数），解析失败暂停该任务（next_run_at 置空）。
 - **执行槽**：`botRuntimeState.active` 的 key 泛化为会话槽——主线 `botID`、
   schedule `"schedule:"+runID`。schedule run 与主线可同时运行、互不让位；
-  同一 schedule run 不重复执行（槽占用即放弃），run 终态后到达的后台结果
-  保留在会话里不再续跑（已知限制，见下）。
+  同一 schedule run 不重复执行（槽占用即放弃）。`scanOnce` 每 5s 重扫未完成的
+  schedule run 补回丢失的唤醒（`wakeScheduleRun` 按槽占用与终态幂等），否则
+  一次瞬态失败会让 run 卡在 running，并挡住机器人删除。
+- **结算后才收尾**：schedule run 自己的异步写全部落终态前不完成——等待在
+  构建请求之前阻塞轮询（不发模型请求空转），`tryFinishScheduleRun` 在终态
+  事务内再核对一次。调用终态与后台结果同一事务落库，所以计数归零即结果可见，
+  重建上下文后模型据实汇报成败；等待上限是单次异步执行超时加 5 分钟，超时按
+  `async_calls_unsettled` 显式失败，不谎报成功。失败终态被停止请求抢先后回落
+  `stopped`（与主线 `finishFailed` 同型兜底）。
 - **默认放行**：schedule 会话里需确认的写调用直接排队执行，**不写**
   `bot_authorizations`、不产生 `pending_confirmation`（回执即 queued）；范围
   仍要求可解析，目标不明的调用按失败回复模型。`fs_stop` 停当前 run、
@@ -276,8 +283,13 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   没有任何创建/编辑/删除端点。`BotScheduleTask` 含 `last_run`；
   `BotScheduleRun` 含 `status/summary/silent/scheduled_for/duration_ms/usage`。
 - **已知限制**：schedule 会话不做压缩与摘要（超长会话靠确定性折叠与上游
-  上下文限制显式失败）；错过不补跑；run 终态后晚到的后台结果不再驱动续跑
-  （记录保留在会话中）；无用户侧任务编辑。
+  上下文限制显式失败）；错过不补跑；无用户侧任务编辑。同一任务在一次运行
+  还没结束时仍会按 cron 再次触发（多个 run 并行、各自默认放行写操作）——
+  是否改为「跳过并记录」待产品决定。另外：重启或 `async_calls_unsettled`
+  失败后，该 run 已受理的排队异步写仍会执行，结果落在已终态的 schedule 会话
+  里，主线不可见也不上报；`schedule_event` 唤醒主线靠 5s 扫描（非即时）；
+  同一机器人的多个定时任务同刻到时会并行起多个 run，模型调用并发无上限
+  （仅 4 个异步 worker 兜底）。
 
 ### 确认与授权
 

@@ -27,7 +27,56 @@ const (
 	botScheduleMissGrace = 90 * time.Second
 	// botScheduleDispatchBatch 单轮最多处理的到期任务数。
 	botScheduleDispatchBatch = 50
+	// botScheduleCallSettleWait 是等待本 run 异步调用结算的上限：单次异步调用
+	// 自身的执行超时是 botAsyncExecTimeout，这里多给一段余量；超过就显式失败，
+	// 不谎报成功。
+	botScheduleCallSettleWait = botAsyncExecTimeout + 5*time.Minute
+	// botScheduleCallSettlePoll 是等待结算的轮询间隔。
+	botScheduleCallSettlePoll = 500 * time.Millisecond
 )
+
+// scheduleWaitOutcome 是等待本次运行异步调用结算的结果。
+type scheduleWaitOutcome int
+
+const (
+	scheduleWaitSettled scheduleWaitOutcome = iota
+	scheduleWaitStopped
+	scheduleWaitTimeout
+)
+
+// waitScheduleCallsSettled 等到本次 schedule run 的异步写都落终态。
+// 等待期间不发模型请求（否则模型会看不到新内容反复空跑），结算后循环重建
+// 上下文，模型就能据实汇报调用的真实成败。
+func (s *BotService) waitScheduleCallsSettled(ctx context.Context, run *model.BotRun) scheduleWaitOutcome {
+	return s.waitScheduleCallsSettledUntil(ctx, run, time.Now().Add(botScheduleCallSettleWait))
+}
+
+// waitScheduleCallsSettledUntil 同 waitScheduleCallsSettled，deadline 可注入。
+func (s *BotService) waitScheduleCallsSettledUntil(ctx context.Context, run *model.BotRun, deadline time.Time) scheduleWaitOutcome {
+	for {
+		unsettled, err := s.calls.CountUnsettledByRun(run.ID)
+		if err != nil {
+			// 查询失败不阻塞运行：宁可让模型看旧结果，也不把一次瞬时数据库
+			// 抖动变成运行失败。
+			s.logger.Warn("查询未结算调用失败", zap.String("run_id", run.ID), zap.Error(err))
+			return scheduleWaitSettled
+		}
+		if unsettled == 0 {
+			return scheduleWaitSettled
+		}
+		if s.safePoint(run).StopRequested {
+			return scheduleWaitStopped
+		}
+		if time.Now().After(deadline) {
+			return scheduleWaitTimeout
+		}
+		select {
+		case <-ctx.Done():
+			return scheduleWaitStopped
+		case <-time.After(botScheduleCallSettlePoll):
+		}
+	}
+}
 
 // scheduleLoop 每 10s 扫描一次到期任务；启动后立即跑一轮（错过处理由
 // next_run_at 与宽限决定，不依赖停机时长）。
@@ -217,6 +266,12 @@ func (s *BotService) tryFinishScheduleRun(bot *model.Bot, run *model.BotRun) boo
 	silent, summary := s.botSilentSummaryOf(bot.ID, run.ID)
 	finished := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		// 本次运行自己的异步写还没结算（queued/running）时不收尾：晚到的结果
+		// 可能就是失败，是运行结果的一部分。等结算后循环会重建上下文。
+		unsettled, err := repository.NewBotToolCallRepository(tx).CountUnsettledByRun(run.ID)
+		if err != nil || unsettled > 0 {
+			return err
+		}
 		hasNew, err := repository.NewBotMessageRepository(tx).HasModelInputSinceTx(
 			tx, bot.ID, model.BotSessionKindSchedule, botInputRunID(run), run.InputThroughSeq)
 		if err != nil || hasNew {
@@ -322,7 +377,12 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 	}
 	if ok {
 		s.publishEvent(bot.ID)
+		return
 	}
+	// CAS 失败：可能已被受理的停止抢占（错误检出后停止落库）。落 stopped，
+	// 否则 run 会永远停在 running + stop_requested，无人再消费，还会让机器人
+	// 删除被一直拒绝（与主线 finishFailed 同型兜底）。
+	s.finishScheduleStopped(bot, run)
 }
 
 // finishScheduleStopped 落 stopped 终态：被取消的 schedule run 不追加主线

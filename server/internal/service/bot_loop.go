@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -136,6 +137,22 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			s.closeUnstartedSyncCalls(calls, "stop_requested")
 			s.finishStopped(bot, run)
 			return
+		}
+
+		// schedule 会话先等自己的异步写结算：调用结果（可能失败）是本次运行
+		// 结果的一部分，未结算就结束会谎报成功且丢掉真实状态。等待期间不发
+		// 模型请求，结算后重建上下文，模型就能据实汇报。
+		if sched != nil {
+			switch s.waitScheduleCallsSettled(ctx, run) {
+			case scheduleWaitStopped:
+				s.closeUnstartedSyncCalls(calls, "stop_requested")
+				s.finishStopped(bot, run)
+				return
+			case scheduleWaitTimeout:
+				s.finishFailed(bot, run, "async_calls_unsettled",
+					errs.New(errs.ErrInternal.Code, "定时任务运行内仍有未结算的后台调用"))
+				return
+			}
 		}
 
 		if sched == nil {

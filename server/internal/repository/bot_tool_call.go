@@ -72,6 +72,18 @@ func (r *BotToolCallRepository) ListUnfinishedByBot(botID string, limit int) ([]
 	return rows, err
 }
 
+// CountUnsettledByRun 统计某次运行里还没落终态的工具调用（调用账本没有 run 列，
+// 经它所属的模型请求关联到 run）。schedule 会话必须等自己的异步写结算后才能
+// 收尾：调用结果（可能失败）是本次运行结果的一部分。
+func (r *BotToolCallRepository) CountUnsettledByRun(runID string) (int64, error) {
+	var n int64
+	err := r.db.Model(&model.BotToolCall{}).
+		Joins("JOIN bot_model_requests ON bot_model_requests.id = bot_tool_calls.request_id").
+		Where("bot_model_requests.run_id = ? AND bot_tool_calls.finished_at IS NULL", runID).
+		Count(&n).Error
+	return n, err
+}
+
 // ListUnfinishedByBotPage 带偏移分页（快照取全用；offset 语义按同序稳定）。
 func (r *BotToolCallRepository) ListUnfinishedByBotPage(botID string, offset, limit int) ([]model.BotToolCall, error) {
 	var rows []model.BotToolCall

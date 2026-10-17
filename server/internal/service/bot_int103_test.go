@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -1068,5 +1069,122 @@ func TestBotScheduleFrozenCredentialPairing(t *testing.T) {
 	req := env.fake.nextRequest(t, 10*time.Second)
 	if !strings.Contains(req.Authorization, "sk-test-abcdef123456") {
 		t.Fatalf("运行应使用派发时冻结的密钥，实得 Authorization=%q", req.Authorization)
+	}
+}
+
+// 运行内还有未结算的异步调用时不得收尾：调用结果可能是失败，是运行结果的一部分。
+func TestBotScheduleCompletionWaitsForSettledCalls(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedsettle")
+	bot := env.createBot(t, userID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	call := seedUnsettledScheduleCall(t, env, run)
+
+	if env.bots.tryFinishScheduleRun(botRow, run) {
+		t.Fatalf("还有未结算调用时不应完成")
+	}
+	fresh, _ := env.bots.runs.FindByID(run.ID)
+	if fresh.FinishedAt != nil {
+		t.Fatalf("未结算时 run 不应落终态: %+v", fresh)
+	}
+
+	// 结算后可以完成（真实失败/成功由模型的下一轮汇报）。
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", call.ID).
+		Updates(map[string]interface{}{"status": model.BotCallStatusSucceeded, "finished_at": time.Now().UTC()}).Error; err != nil {
+		t.Fatalf("settle call: %v", err)
+	}
+	if !env.bots.tryFinishScheduleRun(botRow, run) {
+		t.Fatalf("调用结算后应能完成")
+	}
+}
+
+// 等待结算：未结算时到点返回 timeout，结算后返回 settled。
+func TestBotScheduleWaitForCallSettlement(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedwait")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	call := seedUnsettledScheduleCall(t, env, run)
+
+	if got := env.bots.waitScheduleCallsSettledUntil(context.Background(), run, time.Now()); got != scheduleWaitTimeout {
+		t.Fatalf("未结算且到点应 timeout，实得 %v", got)
+	}
+	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", call.ID).
+		Updates(map[string]interface{}{"status": model.BotCallStatusFailed, "finished_at": time.Now().UTC()}).Error; err != nil {
+		t.Fatalf("settle call: %v", err)
+	}
+	if got := env.bots.waitScheduleCallsSettledUntil(context.Background(), run, time.Now().Add(time.Second)); got != scheduleWaitSettled {
+		t.Fatalf("结算后应 settled，实得 %v", got)
+	}
+}
+
+// seedUnsettledScheduleCall 落一次属于该 run 的排队中异步调用（经模型请求关联）。
+func seedUnsettledScheduleCall(t *testing.T, env *botTestEnv, run *model.BotRun) *model.BotToolCall {
+	t.Helper()
+	now := time.Now().UTC()
+	req := &model.BotModelRequest{
+		ID: uuid.NewString(), RunID: run.ID, Ordinal: 1,
+		Status: model.BotModelRequestSucceeded, PromptRevision: 1, ToolsetVersion: 3,
+		StartedAt: now, FinishedAt: &now,
+	}
+	if err := env.db.Create(req).Error; err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: run.BotID, RequestID: req.ID,
+		ProviderToolCallID: "prov-settle", ToolName: "fs_project", Action: "create",
+		ArgumentsJSON: "{}", ArgumentsHash: "x", ExecutionMode: "async",
+		Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
+		CreatedAt: now,
+	}
+	if err := env.db.Create(call).Error; err != nil {
+		t.Fatalf("seed call: %v", err)
+	}
+	return call
+}
+
+// 失败终态被停止请求抢先后必须回落 stopped：否则 run 永远停在
+// running + stop_requested，无人再消费，还会让机器人删除一直被拒绝。
+func TestBotScheduleFailedFallsBackToStopped(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedstoprace")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	// 停止请求抢先落库：failed 的 CAS 必须失败。
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Update("stop_requested_at", time.Now().UTC()).Error; err != nil {
+		t.Fatalf("mark stop: %v", err)
+	}
+	env.bots.finishScheduleFailed(botRow, run, "model_request_failed",
+		errs.New(errs.ErrInternal.Code, "模拟失败"))
+	fresh := mustFindRun(t, env, run.ID)
+	if fresh.Status != model.BotRunStatusStopped || fresh.FinishedAt == nil {
+		t.Fatalf("停止抢先时应回落 stopped，实得 %+v", fresh)
+	}
+}
+
+// 丢失唤醒兜底：扫描能把卡在 running 的 schedule run 重新推回执行槽。
+func TestBotScheduleScanResumesStuckRun(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "[[SILENT]]"})
+	userID := createBotTestUser(t, env.db, "schedscan")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+
+	env.bots.scanOnce()
+	done := waitForScheduleRunFinished(t, env, run.ID)
+	if done.Status != model.BotRunStatusCompleted {
+		t.Fatalf("重扫应把 run 跑完: %s %v", done.Status, done.ErrorMessage)
 	}
 }
