@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ComposerProject } from "@/lib/api/threads";
-import { T3ProjectPicker } from "./t3-project-picker";
+import { T3ProjectPicker, shortenPath } from "./t3-project-picker";
 
 const PROJECTS: ComposerProject[] = [
   { id: "p1", title: "Fast Ship", workspace_root: "/code/fast-ship" },
@@ -93,24 +93,41 @@ describe("T3ProjectPicker", () => {
     expect(screen.getByText("无匹配项目")).toBeInTheDocument();
   });
 
-  it("直选 chip 只标到前 9 条可见行", async () => {
-    const ten: ComposerProject[] = Array.from({ length: 10 }, (_, i) => ({
-      id: `p${i}`,
-      title: `Project ${i + 1}`,
-    }));
+  it("长工作区路径省略中间段，保留开头与项目目录", async () => {
     const user = userEvent.setup();
+    const long: ComposerProject[] = [
+      {
+        id: "p-long",
+        title: "fast_ship",
+        workspace_root: "/Users/godbobo/work/projects/fast_ship",
+      },
+    ];
     render(
-      <T3ProjectPicker projects={ten} value="" onValueChange={vi.fn()} />,
+      <T3ProjectPicker projects={long} value="" onValueChange={vi.fn()} />,
     );
     const listbox = await openPanel(user);
-    const options = within(listbox).getAllByRole("option");
-    expect(options).toHaveLength(10);
-    for (let i = 0; i < 9; i++) {
-      expect(options[i]).toHaveTextContent(
-        new RegExp(`(⌘|Ctrl\\+)${i + 1}`),
-      );
-    }
-    expect(options[9]).not.toHaveTextContent(/⌘|Ctrl\+/);
+    const option = within(listbox).getByRole("option", { name: /fast_ship/ });
+    expect(option).toHaveTextContent("Local · /Users/…/projects/fast_ship");
+    expect(option).not.toHaveTextContent(
+      "/Users/godbobo/work/projects/fast_ship",
+    );
+  });
+
+  it("数字键不再直选项目", async () => {
+    const onValueChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <T3ProjectPicker
+        projects={PROJECTS}
+        value=""
+        onValueChange={onValueChange}
+      />,
+    );
+    await openPanel(user);
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
   });
 
   it("↑/↓ 环绕移动高亮，Enter 选中高亮行", async () => {
@@ -137,50 +154,6 @@ describe("T3ProjectPicker", () => {
     fireEvent.keyDown(window, { key: "Enter" });
     expect(onValueChange).toHaveBeenCalledWith("p2");
     await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
-  });
-
-  it("⌘N / Ctrl+N 直选第 N 条可见行", async () => {
-    const onValueChange = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <T3ProjectPicker
-        projects={PROJECTS}
-        value=""
-        onValueChange={onValueChange}
-      />,
-    );
-    await openPanel(user);
-    fireEvent.keyDown(window, { key: "2", metaKey: true });
-    expect(onValueChange).toHaveBeenCalledWith("p2");
-    await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
-
-    await user.click(trigger());
-    await screen.findByRole("listbox");
-    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
-    expect(onValueChange).toHaveBeenCalledWith("p1");
-  });
-
-  it("越界数字键不选中但仍拦截默认行为", async () => {
-    const onValueChange = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <T3ProjectPicker
-        projects={PROJECTS}
-        value=""
-        onValueChange={onValueChange}
-      />,
-    );
-    await openPanel(user);
-    const event = new KeyboardEvent("keydown", {
-      key: "9",
-      metaKey: true,
-      cancelable: true,
-    });
-    window.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(true);
-    expect(onValueChange).not.toHaveBeenCalled();
-    // 面板保持打开。
-    expect(screen.getByRole("listbox")).toBeInTheDocument();
   });
 
   it("IME 组合中的 Enter 不触发选择", async () => {
@@ -270,5 +243,29 @@ describe("T3ProjectPicker", () => {
     expect(trigger()).toHaveTextContent("选择项目");
     await openPanel(user);
     expect(screen.getByText("无匹配项目")).toBeInTheDocument();
+  });
+});
+
+describe("shortenPath", () => {
+  it("短路径原样返回", () => {
+    expect(shortenPath("/code/fast-ship")).toBe("/code/fast-ship");
+  });
+
+  it("长路径省略中间段，保留开头与项目目录", () => {
+    expect(shortenPath("/Users/godbobo/work/projects/fast_ship")).toBe(
+      "/Users/…/projects/fast_ship",
+    );
+  });
+
+  it("段数不足 3 时即使超长也不省略", () => {
+    expect(shortenPath("/a/verylongsegmentname", 5)).toBe(
+      "/a/verylongsegmentname",
+    );
+  });
+
+  it("保留两段仍超长时退化为 …/尾段", () => {
+    expect(shortenPath("/a/b/c/verylongfoldername", 8)).toBe(
+      "…/verylongfoldername",
+    );
   });
 });

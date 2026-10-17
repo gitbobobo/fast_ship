@@ -11,9 +11,6 @@ import { ChevronDown, Folder, Search } from "lucide-react";
 import type { ComposerProject } from "@/lib/api/threads";
 import { cn } from "@/lib/utils";
 
-/** 数字键直选只覆盖前 9 条可见行。 */
-const JUMP_LIMIT = 9;
-
 // 与 thread-chips.tsx 的 CHIP 同一外观；有意不导出，避免与未合并分支互相依赖。
 const CHIP =
   "inline-flex h-7 max-w-48 items-center gap-1.5 rounded-lg bg-muted/50 px-2 text-xs transition-colors hover:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
@@ -52,10 +49,24 @@ function projectInitials(title: string): string {
   return chars.join("").toUpperCase();
 }
 
-/** macOS 用 ⌘、其他平台用 Ctrl；happy-dom 的 navigator.platform/userAgent 也可用。 */
-function isMacPlatform() {
-  return /mac|iphone|ipad|ipod/i.test(
-    `${navigator.platform} ${navigator.userAgent}`,
+/**
+ * 超长路径省略中间段，保留开头与结尾（结尾是项目目录，信息量最大）。
+ * 例：/Users/me/work/projects/fast_ship → /Users/…/projects/fast_ship。
+ */
+export function shortenPath(path: string, maxLength = 30): string {
+  if (path.length <= maxLength) return path;
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length < 3) return path;
+  const head = segments[0];
+  const tail = segments[segments.length - 1];
+  const candidates = [
+    `/${head}/…/${segments.slice(-2).join("/")}`,
+    `/${head}/…/${tail}`,
+    `…/${tail}`,
+  ];
+  return (
+    candidates.find((candidate) => candidate.length <= maxLength) ??
+    candidates[candidates.length - 1]
   );
 }
 
@@ -77,7 +88,7 @@ export interface T3ProjectPickerProps {
 
 /**
  * T3 项目选择器：对齐 T3 Code 新建线程的项目选择交互——chip 触发器 +
- * Portal 面板（搜索 + 单列项目列表 + ⌘N 直选 + 键盘导航）。
+ * Portal 面板（搜索 + 单列项目列表 + ↑↓/Enter/Esc 键盘导航，无数字快捷键）。
  * Fast Ship 里所有「选 T3 Code 项目」的入口统一走这个组件。
  */
 export function T3ProjectPicker({
@@ -172,8 +183,7 @@ interface T3ProjectPickerPanelProps {
  * 弹出面板：搜索框 + 单列项目列表 + 底部键盘提示。
  * 键盘监听挂 window 捕获阶段（覆盖搜索框/列表任一焦点位置）：
  * ↑/↓ 环绕移动高亮、Enter 选中、Esc 关闭并 stopPropagation（不连累外层
- * Dialog）；⌘N/Ctrl+N 直选第 N 条可见行，识别到就先拦默认行为——即使
- * 越界也要拦，否则 Chromium 里 ⌘1..8 会切浏览器标签页。
+ * Dialog）。不做数字快捷键直选。
  */
 function T3ProjectPickerPanel({
   projects,
@@ -222,15 +232,6 @@ function T3ProjectPickerPanel({
       if (event.defaultPrevented || event.repeat) return;
       // IME 组合中（中日韩输入未确认）的 Enter/方向键不当作选择操作。
       if (event.isComposing || event.keyCode === 229) return;
-      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
-        if (/^[1-9]$/.test(event.key)) {
-          event.preventDefault();
-          event.stopPropagation();
-          const item = visible[Number(event.key) - 1];
-          if (item) onSelect(item);
-        }
-        return;
-      }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         if (visible.length === 0) return;
@@ -257,7 +258,6 @@ function T3ProjectPickerPanel({
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [visible, focused, onSelect, onRequestClose]);
 
-  const mac = isMacPlatform();
   return (
     <div
       className="flex max-h-80 w-80 flex-col overflow-hidden"
@@ -309,16 +309,14 @@ function T3ProjectPickerPanel({
                   {project.title}
                 </div>
                 {project.workspace_root && (
-                  <div className="mt-0.5 truncate text-xs leading-snug text-muted-foreground">
-                    Local · {project.workspace_root}
+                  <div
+                    title={project.workspace_root}
+                    className="mt-0.5 truncate text-xs leading-snug text-muted-foreground"
+                  >
+                    Local · {shortenPath(project.workspace_root)}
                   </div>
                 )}
               </div>
-              {index < JUMP_LIMIT && (
-                <kbd className="shrink-0 rounded border border-border bg-muted px-1 py-0.5 font-mono text-[10px] leading-none text-muted-foreground">
-                  {mac ? `⌘${index + 1}` : `Ctrl+${index + 1}`}
-                </kbd>
-              )}
             </div>
           );
         })}
@@ -329,9 +327,7 @@ function T3ProjectPickerPanel({
         )}
       </div>
       <div className="border-t border-border/70 px-2.5 py-1.5 text-[10px] leading-none text-muted-foreground">
-        {mac
-          ? "↑↓ 移动 · Enter 选择 · ⌘1-9 直选 · Esc 关闭"
-          : "↑↓ 移动 · Enter 选择 · Ctrl+1-9 直选 · Esc 关闭"}
+        ↑↓ 移动 · Enter 选择 · Esc 关闭
       </div>
     </div>
   );

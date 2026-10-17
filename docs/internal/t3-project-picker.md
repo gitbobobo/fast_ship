@@ -27,8 +27,9 @@
 - 行内容：左侧彩色首字母徽标——多词名取前两个词首字母、单词名取前
   两字符，颜色按 `project.id` 稳定散列到固定调色板（不引入新依赖）；
   中间第一行项目名、第二行副标题（有 `workspace_root` 时
-  `Local · <workspace_root>`，否则省略）；右侧前 9 条可见行显示直选
-  chip。当前项目行 `aria-selected` 并带背景高亮。
+  `Local · <workspace_root>`，超过 30 字符的路径省略中间段、保留
+  开头与项目目录，如 `/Users/…/projects/fast_ship`；更短的路径原样
+  显示）。当前项目行 `aria-selected` 并带背景高亮。
 - 搜索：打开自动聚焦；只按 `project.title` 大小写不敏感过滤；无结果
   显示「无匹配项目」。关闭面板即卸载，搜索词与高亮随之重置。
 - 选中语义：点击当前项目只关闭面板不回调；点击其它项目回调一次
@@ -42,18 +43,15 @@
 - `↑`/`↓` 在可见行间环绕移动高亮并把高亮行滚入可视区，`Enter`
   选中高亮行，`Esc` 关闭面板并 `stopPropagation`（不连带关闭外层
   Dialog）。
-- 前 9 条可见行可用数字键直选：macOS `⌘1`…`⌘9`、其他平台
-  `Ctrl+1`…`Ctrl+9`；平台判断只看
-  `navigator.platform`/`navigator.userAgent`（happy-dom 下也可用）。
-  识别到 `meta`/`ctrl` + 数字就先 `preventDefault()` +
-  `stopPropagation()`，再判断目标行是否存在——越界不选中但仍拦截，
-  否则 Chromium 的 ⌘1..8 会切浏览器标签页。
+- 不做数字快捷键直选：`meta`/`ctrl` 组合键直接放行给浏览器，带
+  修饰键的按键不参与列表导航。
 
 ## 与 INT-112 ModelPicker 的关系
 
 交互约定与模型选择器（INT-112，PR #91 的 `ModelPicker`）保持一致：
-chip 触发器、Portal 面板、搜索自动聚焦、↑↓/Enter/Esc/⌘N 键盘协议、
-`triggerLabel` 覆盖与 `ariaLabel` 约定均相同。两处有意不从
+chip 触发器、Portal 面板、搜索自动聚焦、↑↓/Enter/Esc 键盘协议、
+`triggerLabel` 覆盖与 `ariaLabel` 约定均相同；本组件无数字快捷键
+（`ModelPicker` 有，本项目选择器按需求不做）。两处有意不从
 `thread-chips.tsx` 导入 `CHIP` 常量（避免与未合并分支互相依赖），
 picker 内自带同一份 chip 样式字符串；对齐时若样式要改需同步两边。
 项目列表比模型面板简单：没有 provider rail、收藏与多选。
@@ -73,7 +71,9 @@ picker 内自带同一份 chip 样式字符串；对齐时若样式要改需同�
 
 - 面板内容经 Portal 挂到 document.body：行 `role="option"`、列表
   `role="listbox"`、搜索框 aria-label「搜索项目」。
-- 数字键直选用 `fireEvent.keyDown(window, { key: "1", metaKey: true })`
-  （或 `ctrlKey`）；断言越界仍拦截默认行为时手动构造
-  `KeyboardEvent` 并检查 `defaultPrevented`。
+- 路径省略逻辑导出了 `shortenPath(path, maxLength = 30)` 供单测；
+  组件里以 `Local · <shortenPath(workspace_root)>` 渲染并带
+  `title` 全路径。
+- 带修饰键的数字键现在不应触发选择，测试断言 `onValueChange` 未被
+  调用且面板保持打开即可。
 - 徽标颜色来自项目 id 散列，测试不要断言具体颜色，断言首字母即可。
