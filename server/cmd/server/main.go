@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -286,7 +287,7 @@ func main() {
 
 	// GitHub App（INT-93）：真实安装令牌客户端或 debug 自测 fake；凭据缺失时
 	// PR 代发端点报错，webhook 端点因验签密钥为空一律 503。
-	var ghPR githubapp.PullRequestGitHub
+	var ghPR githubapi.GitHubClient
 	var ghFake *githubapp.Fake
 	if cfg.GitHubApp.Fake && cfg.Server.Mode == "debug" {
 		ghFake = githubapp.NewFake()

@@ -1,12 +1,11 @@
 package service
 
 import (
-	"context"
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
-	gh "github.com/google/go-github/v62/github"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"regexp"
@@ -21,21 +20,6 @@ const (
 	batchCloseDoneMaxIssues   = 200
 	batchCloseDoneMaxFailures = 50
 )
-
-type gitHubIssueClient interface {
-	ValidateRepository(ctx context.Context) error
-	ListIssues(ctx context.Context, state string, since *time.Time, page, perPage int) ([]*ghclient.Issue, *gh.Response, error)
-	GetIssue(ctx context.Context, issueNumber int) (*ghclient.Issue, error)
-	ListRepositoryLabels(ctx context.Context, page, perPage int) ([]*gh.Label, *gh.Response, error)
-	ListIssueComments(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.IssueComment, *gh.Response, error)
-	ListIssueTimeline(ctx context.Context, issueNumber, page, perPage int) ([]*ghclient.TimelineEvent, *gh.Response, error)
-	CreateIssueComment(ctx context.Context, issueNumber int, body string) (*ghclient.IssueComment, error)
-	UpdateIssue(ctx context.Context, issueNumber int, req ghclient.UpdateIssueRequest) (*ghclient.Issue, error)
-	CreateIssue(ctx context.Context, title, body string) (*ghclient.Issue, error)
-	GetPullRequest(ctx context.Context, number int) (*gh.PullRequest, error)
-}
-
-type gitHubIssueClientFactory func(token, owner, repo string) gitHubIssueClient
 
 type IssueService struct {
 	issueRepo           *repository.IssueRepository
@@ -60,9 +44,11 @@ type IssueService struct {
 	cfg                 *config.Config
 	logger              *zap.Logger
 	credentials         *ProjectCredentials
-	newClient           gitHubIssueClientFactory
-	mirror              *issueMirror
-	eventSink           IssueEventSink
+	newClient           ghclient.ClientFactory
+	// newPRClient 构造关联 PR 读取客户端（attach/sync）；测试注入替身的缝。
+	newPRClient func(token string) githubapi.GitHubClient
+	mirror      *issueMirror
+	eventSink   IssueEventSink
 }
 
 // SetIssueEventSink 注入自动化事件出口（INT-90，由 main 装配；测试可不注入）。
@@ -144,8 +130,11 @@ func NewIssueService(
 		cfg:                 cfg,
 		logger:              logger,
 		credentials:         newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
-		newClient: func(token, owner, repo string) gitHubIssueClient {
+		newClient: func(token, owner, repo string) ghclient.Client {
 			return ghclient.NewClient(token, owner, repo)
+		},
+		newPRClient: func(token string) githubapi.GitHubClient {
+			return ghclient.NewPRClient(token)
 		},
 	}
 	// 镜像的 client 工厂在调用时才读 s.newClient，测试替换对两条路径同时生效；
@@ -161,7 +150,7 @@ func NewIssueService(
 		projectRepo:         projectRepo,
 		logger:              logger,
 		credentials:         s.credentials,
-		newClient: func(token, owner, repo string) gitHubIssueClient {
+		newClient: func(token, owner, repo string) ghclient.Client {
 			return s.newClient(token, owner, repo)
 		},
 		syncing: make(map[string]struct{}),

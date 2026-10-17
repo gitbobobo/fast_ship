@@ -3,14 +3,17 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
 )
 
 type fakeIssueGitHubClient struct {
+	stubGitHubClient
 	issues        []*ghclient.Issue
 	repoLabels    []*gh.Label
 	repoLabelsErr error
@@ -41,9 +44,12 @@ type fakeIssueGitHubClient struct {
 	createIssueCalls      []fakeCreateIssueCall
 	createCommentCalls    []fakeCreateCommentCall
 	updateIssueCalls      []fakeUpdateIssueCall
-	pullRequests          map[int]*gh.PullRequest
-	pullRequestErr        error
-	onGetPullRequest      func(number int)
+	// PR 读取走 githubapi seam：按 repo+number 登记远端 PR。pullRequestErr 对
+	// 所有 repo 生效，pullRequestErrs 按 repo 注入（sync 每行是独立失败域）。
+	pullRequests     map[string]map[int]*githubapi.PullRequest
+	pullRequestErr   error
+	pullRequestErrs  map[string]error
+	onGetPullRequest func(repo string, number int)
 	// validateErr 注入 ValidateRepository 失败；onListIssues/onListTimeline 分别在
 	// ListIssues / ListIssueTimeline 开头回调（用于在两轮取数之间注入写库）；
 	// listIssuesSince 记录每次调用的 since 参数。
@@ -251,16 +257,27 @@ func (f *fakeIssueGitHubClient) CreateIssue(_ context.Context, title, body strin
 	return f.createdIssue, f.createIssueErr
 }
 
-func (f *fakeIssueGitHubClient) GetPullRequest(_ context.Context, number int) (*gh.PullRequest, error) {
+func (f *fakeIssueGitHubClient) GetPullRequest(_ context.Context, _ int64, repoFullName string, number int) (*githubapi.PullRequest, error) {
 	if f.onGetPullRequest != nil {
-		f.onGetPullRequest(number)
+		f.onGetPullRequest(repoFullName, number)
 	}
 	if f.pullRequestErr != nil {
 		return nil, f.pullRequestErr
 	}
-	pr, ok := f.pullRequests[number]
+	if err := f.pullRequestErrs[repoFullName]; err != nil {
+		return nil, err
+	}
+	pr, ok := f.pullRequests[repoFullName][number]
 	if !ok {
-		return nil, fmt.Errorf("pull request %d not found", number)
+		// GitHub 的仓库名不区分大小写：按登记键的大小写变体再找一次。
+		for repo, byNumber := range f.pullRequests {
+			if strings.EqualFold(repo, repoFullName) {
+				if pr, ok := byNumber[number]; ok {
+					return pr, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("pull request %s#%d not found", repoFullName, number)
 	}
 	return pr, nil
 }

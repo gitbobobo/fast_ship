@@ -18,11 +18,11 @@ import (
 )
 
 type VersionService struct {
-	versionRepo     *repository.VersionRepository
-	projectRepo     *repository.ProjectRepository
-	storage         storage.Storage
-	credentials     *ProjectCredentials
-	newBranchClient gitHubBranchClientFactory
+	versionRepo *repository.VersionRepository
+	projectRepo *repository.ProjectRepository
+	storage     storage.Storage
+	credentials *ProjectCredentials
+	newClient   ghclient.ClientFactory
 }
 
 func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *repository.ProjectRepository, tokenRepo *repository.UserGitHubTokenRepository, storage storage.Storage, cfg *config.Config, logger *zap.Logger) *VersionService {
@@ -31,7 +31,7 @@ func NewVersionService(versionRepo *repository.VersionRepository, projectRepo *r
 		projectRepo: projectRepo,
 		storage:     storage,
 		credentials: newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
-		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
+		newClient: func(token, owner, repo string) ghclient.Client {
 			return ghclient.NewClient(token, owner, repo)
 		},
 	}
@@ -173,7 +173,7 @@ func (s *VersionService) ensureTargetBranchExists(ctx context.Context, project *
 		return appErr
 	}
 
-	branches, _, err := s.newBranchClient(string(tokenBytes), project.GithubOwner, project.GithubRepo).ListBranches(ctx)
+	branches, _, err := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo).ListBranches(ctx)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, fmt.Sprintf("获取 GitHub 分支失败: %v", err))
 	}

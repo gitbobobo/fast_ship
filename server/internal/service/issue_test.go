@@ -33,7 +33,7 @@ func TestIssueServiceGetRepositoryLabels_ReturnsSortedLabels(t *testing.T) {
 			{Name: stringPtr("Bug"), Color: stringPtr("f00"), Description: stringPtr("duplicate should be ignored")},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -65,7 +65,7 @@ func TestIssueServiceGetRepositoryLabels_ReturnsGitHubError(t *testing.T) {
 	fake := &fakeIssueGitHubClient{
 		repoLabelsErr: fmt.Errorf("github unavailable"),
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -911,7 +911,7 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubStateBack(t *testing.T) {
 			42: {labeledEvent},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -1035,7 +1035,7 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubTitleBack(t *testing.T) {
 			42: {},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -1118,7 +1118,7 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubBodyBack(t *testing.T) {
 			42: {},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -1180,7 +1180,7 @@ func TestIssueServiceUpdateInternalIssue_GitHubBodyReconcilesLocalAssets(t *test
 		},
 		timeline: map[int][]*ghclient.TimelineEvent{42: {}},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1268,7 +1268,7 @@ func TestIssueServiceUpdateInternalIssue_WritesGitHubLabelsBack(t *testing.T) {
 			},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -1309,7 +1309,7 @@ func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubState(t *testing.T)
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -1337,7 +1337,7 @@ func TestIssueServiceUpdateInternalIssue_RejectsInvalidGitHubLabels(t *testing.T
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -1382,7 +1382,7 @@ func TestIssueServiceCreateInternalComment_WritesGitHubCommentBack(t *testing.T)
 			BodyHTML: stringPtr("<p>已在 <strong>GitHub</strong> 回复</p>"),
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" || owner != "owner" || repo != "repo" {
 			t.Fatalf("unexpected github client args: token=%q owner=%q repo=%q", token, owner, repo)
 		}
@@ -1550,7 +1550,7 @@ func TestIssueServiceUpdateInternalIssue_SetsInternalLabels(t *testing.T) {
 			{Name: stringPtr("ios"), Color: stringPtr("0969da"), Description: stringPtr("iOS platform")},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1592,7 +1592,7 @@ func TestIssueServiceUpdateInternalIssue_RejectsUnknownInternalLabels(t *testing
 			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("")},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1635,7 +1635,7 @@ func TestIssueServiceList_FiltersByInternalLabels(t *testing.T) {
 			{Name: stringPtr("bug"), Color: stringPtr("d73a4a"), Description: stringPtr("")},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1679,7 +1679,7 @@ func TestIssueServiceGetFilterOptions_IncludesInternalLabels(t *testing.T) {
 			{Name: stringPtr("enhancement"), Color: stringPtr("a2eeef"), Description: stringPtr("")},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1736,7 +1736,7 @@ func TestIssueServiceCreateGitHubIssue_CreatesGitHubIssueAndSyncsToLocal(t *test
 		},
 	}
 
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
@@ -1806,7 +1806,7 @@ func TestIssueServiceCreateGitHubIssue_AttachesReferencedDraftAssets(t *testing.
 		},
 	}
 
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
@@ -1860,7 +1860,7 @@ func TestIssueServiceCreateGitHubIssue_ReturnsErrorWhenReferencedDraftAssetNotFo
 	})
 
 	fake := &fakeIssueGitHubClient{}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1920,7 +1920,7 @@ func TestIssueServiceCreateGitHubIssue_GitHubAPIFailure(t *testing.T) {
 		createIssueErr: fmt.Errorf("github api error"),
 	}
 
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 

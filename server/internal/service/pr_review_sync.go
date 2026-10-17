@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
@@ -174,7 +174,7 @@ func (s *PRReviewService) pushCancelledOldSHAChecks(ctx context.Context, rev *mo
 	for i := range old {
 		in := checkUpdateForRun(old[i])
 		if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, *old[i].CheckRunID, in); err != nil {
-			if githubapp.IsForbidden(err) {
+			if githubapi.IsForbidden(err) {
 				s.logger.Warn("更新旧 SHA check 403，跳过其余 check",
 					zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
 				return nil
@@ -227,7 +227,7 @@ func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHub
 		name := checkNameForModel(run.ModelName)
 		id, err := s.gh.CreateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, name, run.HeadSHA, run.ID)
 		if err != nil {
-			if !githubapp.IsForbidden(err) {
+			if !githubapi.IsForbidden(err) {
 				return fmt.Errorf("创建 check run 失败: %w", err)
 			}
 			// 403 → 整轮退回一个合并 check。合并 check 若同样 403（App 没有
@@ -238,7 +238,7 @@ func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHub
 				id, err := s.gh.CreateCheckRun(ctx, rev.InstallationID, rev.RepoFullName,
 					"Fast Ship review", run.HeadSHA, "round:"+itoa10(rev.RoundNumber))
 				if err != nil {
-					if githubapp.IsForbidden(err) {
+					if githubapi.IsForbidden(err) {
 						s.logger.Warn("Checks API 全部 403，跳过 check，仍同步评论",
 							zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
 						return nil
@@ -322,7 +322,7 @@ func (s *PRReviewService) pushCheckStates(ctx context.Context, rev *model.GitHub
 			run := group[0]
 			in := checkUpdateForRun(run)
 			if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
-				if githubapp.IsForbidden(err) {
+				if githubapi.IsForbidden(err) {
 					s.logger.Warn("更新 check 403，跳过其余 check",
 						zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
 					return nil
@@ -333,7 +333,7 @@ func (s *PRReviewService) pushCheckStates(ctx context.Context, rev *model.GitHub
 		}
 		in := checkUpdateForGroup(group)
 		if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
-			if githubapp.IsForbidden(err) {
+			if githubapi.IsForbidden(err) {
 				s.logger.Warn("更新合并 check 403，跳过其余 check",
 					zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
 				return nil
@@ -359,33 +359,33 @@ func checkNameForModel(modelName string) string {
 }
 
 // checkUpdateForRun 单运行 → check 状态映射。
-func checkUpdateForRun(run model.AutomationRun) githubapp.CheckUpdate {
-	in := githubapp.CheckUpdate{
+func checkUpdateForRun(run model.AutomationRun) githubapi.CheckUpdate {
+	in := githubapi.CheckUpdate{
 		Title:   checkNameForModel(run.ModelName),
 		Summary: runStatusLabel(run.Status),
 		Text:    checkTextForRun(run),
 	}
 	switch run.Status {
 	case model.AutomationRunQueued:
-		in.Status = githubapp.CheckQueued
+		in.Status = githubapi.CheckQueued
 	case model.RunStatusPendingRun, model.AutomationRunDispatched, model.AutomationRunRunning:
-		in.Status = githubapp.CheckInProgress
+		in.Status = githubapi.CheckInProgress
 	case model.AutomationRunCompleted:
-		in.Status = githubapp.CheckCompleted
-		in.Conclusion = githubapp.ConclusionSuccess
+		in.Status = githubapi.CheckCompleted
+		in.Conclusion = githubapi.ConclusionSuccess
 	case model.AutomationRunFailed, model.AutomationRunTimedOut:
-		in.Status = githubapp.CheckCompleted
-		in.Conclusion = githubapp.ConclusionFailure
+		in.Status = githubapi.CheckCompleted
+		in.Conclusion = githubapi.ConclusionFailure
 	case model.AutomationRunCancelled:
-		in.Status = githubapp.CheckCompleted
-		in.Conclusion = githubapp.ConclusionCancelled
+		in.Status = githubapi.CheckCompleted
+		in.Conclusion = githubapi.ConclusionCancelled
 	}
 	return in
 }
 
 // checkUpdateForGroup 合并 check：全部终态才收敛；有失败即失败；全取消才取消。
-func checkUpdateForGroup(runs []model.AutomationRun) githubapp.CheckUpdate {
-	in := githubapp.CheckUpdate{
+func checkUpdateForGroup(runs []model.AutomationRun) githubapi.CheckUpdate {
+	in := githubapi.CheckUpdate{
 		Title:   "Fast Ship review",
 		Summary: "整轮合并 check（Checks API 不可用时的退回形态）",
 	}
@@ -409,19 +409,19 @@ func checkUpdateForGroup(runs []model.AutomationRun) githubapp.CheckUpdate {
 	switch {
 	case !allDone:
 		if anyActive {
-			in.Status = githubapp.CheckInProgress
+			in.Status = githubapi.CheckInProgress
 		} else {
-			in.Status = githubapp.CheckQueued
+			in.Status = githubapi.CheckQueued
 		}
 	case anyFailed:
-		in.Status = githubapp.CheckCompleted
-		in.Conclusion = githubapp.ConclusionFailure
+		in.Status = githubapi.CheckCompleted
+		in.Conclusion = githubapi.ConclusionFailure
 	case allCancelled:
-		in.Status = githubapp.CheckCompleted
-		in.Conclusion = githubapp.ConclusionCancelled
+		in.Status = githubapi.CheckCompleted
+		in.Conclusion = githubapi.ConclusionCancelled
 	default:
-		in.Status = githubapp.CheckCompleted
-		in.Conclusion = githubapp.ConclusionSuccess
+		in.Status = githubapi.CheckCompleted
+		in.Conclusion = githubapi.ConclusionSuccess
 	}
 	return in
 }
@@ -472,18 +472,18 @@ func runStatusLabel(status model.AutomationRunStatus) string {
 func (s *PRReviewService) pushComment(ctx context.Context, rev *model.GitHubPRReview, runs []model.AutomationRun) error {
 	body := prReviewCommentBody(rev, runs)
 	if rev.CommentID != 0 {
-		if err := s.gh.UpdateIssueComment(ctx, rev.InstallationID, rev.RepoFullName, rev.CommentID, body); err == nil {
+		if err := s.gh.UpdatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.CommentID, body); err == nil {
 			return nil
-		} else if !githubapp.IsNotFound(err) {
+		} else if !githubapi.IsNotFound(err) {
 			return fmt.Errorf("更新机器人评论失败: %w", err)
 		}
 	}
-	commentID, found, err := s.gh.FindIssueCommentByMarker(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, prReviewCommentMarker)
+	commentID, found, err := s.gh.FindPullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, prReviewCommentMarker)
 	if err != nil {
 		return fmt.Errorf("查找机器人评论失败: %w", err)
 	}
 	if found {
-		if err := s.gh.UpdateIssueComment(ctx, rev.InstallationID, rev.RepoFullName, commentID, body); err != nil {
+		if err := s.gh.UpdatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, commentID, body); err != nil {
 			return fmt.Errorf("更新机器人评论失败: %w", err)
 		}
 		if commentID != rev.CommentID {
@@ -493,7 +493,7 @@ func (s *PRReviewService) pushComment(ctx context.Context, rev *model.GitHubPRRe
 		}
 		return nil
 	}
-	created, err := s.gh.CreateIssueComment(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, body)
+	created, err := s.gh.CreatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, body)
 	if err != nil {
 		return fmt.Errorf("创建机器人评论失败: %w", err)
 	}
@@ -593,9 +593,3 @@ func markReviewPendingAfterCancelTx(tx *gorm.DB, repoFullName string, prNumber i
 	}
 	return nil
 }
-
-// 编译期钉住接口实现。
-var (
-	_ githubapp.PullRequestGitHub = (*githubapp.Client)(nil)
-	_ githubapp.PullRequestGitHub = (*githubapp.Fake)(nil)
-)

@@ -41,6 +41,6 @@ GitHub Token 不再存在项目行上。`user_github_tokens` 是用户级 Token 
 - 检测状态一律 `unchecked`、`detected_at` NULL，不依赖 GitHub 在线。
 - 成功后清空旧列并尝试 `DROP COLUMN`（失败仅告警，留空列同样幂等）；幂等性靠「只选旧列非 NULL 的行 + 事务原子性」保证，全新库直接跳过。
 
-## client factory 仍然分家
+## client 收拢（INT-107）
 
-凭证模块只管引用解析与解密，不合并 GitHub client 构造。各 service 的 client factory 按能力划分、各自可注入替身：`IssueService.newClient`（issue/PR 读写）、`ShipService.newClient`（tag/release/asset）、`ProjectService` 与 `VersionService.newBranchClient`（分支列表）。
+凭证模块只管引用解析与解密，不合并 GitHub client 构造。GitHub 访问面收拢在 seam 包 `server/internal/githubapi`（PR 能力契约 + 共享 REST 实现），两个 adapter 是它的实现：`pkg/github`（用户 Token：`TokenClient` 实现 repo 能力接口 `github.Client`，`PRClient` 实现 `githubapi.GitHubClient` 做关联 PR 读取，token 空即匿名）与 `pkg/githubapp`（App 安装令牌：`githubapp.Client`）。业务 service 不再各留私有接口：`IssueService`/`ShipService` 用 `github.ClientFactory`（issue 同步/写、tag/release/asset），`ProjectService` 与 `VersionService` 同样经 `github.ClientFactory` 拿分支列表；`IssueService` 另有 `newPRClient` 缝构造 `githubapi.GitHubClient`（attach/sync 关联 PR，走代码仓库 Token 或匿名）。测试替身经同一组 factory 字段注入。

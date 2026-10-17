@@ -520,7 +520,7 @@ func TestClient_HangingServerReturnsTimeoutError(t *testing.T) {
 	}
 	ghClient := gh.NewClient(httpClient)
 	ghClient.BaseURL = baseURL
-	client := &Client{client: ghClient, owner: "owner", repo: "repo"}
+	client := &TokenClient{client: ghClient, owner: "owner", repo: "repo"}
 
 	done := make(chan error, 1)
 	go func() {
@@ -537,7 +537,7 @@ func TestClient_HangingServerReturnsTimeoutError(t *testing.T) {
 	}
 }
 
-func newTestClient(t *testing.T, handler http.Handler) *Client {
+func newTestClient(t *testing.T, handler http.Handler) *TokenClient {
 	t.Helper()
 
 	server := httptest.NewServer(handler)
@@ -552,7 +552,7 @@ func newTestClient(t *testing.T, handler http.Handler) *Client {
 	ghClient.BaseURL = baseURL
 	ghClient.UploadURL = baseURL
 
-	return &Client{
+	return &TokenClient{
 		client: ghClient,
 		upload: ghClient,
 		owner:  "owner",
