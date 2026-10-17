@@ -283,9 +283,11 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   没有任何创建/编辑/删除端点。`BotScheduleTask` 含 `last_run`；
   `BotScheduleRun` 含 `status/summary/silent/scheduled_for/duration_ms/usage`。
 - **已知限制**：schedule 会话不做压缩与摘要（超长会话靠确定性折叠与上游
-  上下文限制显式失败）；错过不补跑；无用户侧任务编辑。同一任务在一次运行
-  还没结束时仍会按 cron 再次触发（多个 run 并行、各自默认放行写操作）——
-  是否改为「跳过并记录」待产品决定。另外：重启或 `async_calls_unsettled`
+  上下文限制显式失败）；错过不补跑；无用户侧任务编辑。**同一任务在一次运行
+  还没结束时仍会按 cron 再次触发**（多个 run 并行、各自默认放行写操作）——
+  这是产品决定：不限制任务运行的并发，与「运行内不限制工具调用次数/并发/费用」
+  一致；运行之间靠 `session_kind` + `run_id` 隔离，互不看见对方的输入。另外：
+  重启或 `async_calls_unsettled`
   失败后，该 run 已受理的排队异步写仍会执行，结果落在已终态的 schedule 会话
   里，主线不可见也不上报；`schedule_event` 唤醒主线靠 5s 扫描（非即时）；
   同一机器人的多个定时任务同刻到时会并行起多个 run，模型调用并发无上限
