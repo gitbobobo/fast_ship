@@ -286,29 +286,24 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			}
 			continue
 		}
-		stopped := false
 		newInputSeen := false
 		for _, call := range calls {
 			input := s.safePoint(run)
 			if input.StopRequested {
 				s.closeUnstartedSyncCalls(calls, "stop_requested")
-				stopped = true
 				break
 			}
-			if input.HasNewInput {
+			if input.HasNewInput && !newInputSeen {
+				// 一发现新输入就闭合尚未开始的写操作：排队中的异步写必须
+				// 在继续做剩余读之前 CAS 掉，否则读得很久时 worker 仍可能
+				// 把它落地。每个调用前重查，长读不会把新输入盖过去。
+				s.closeUnstartedWriteCalls(calls, "new_input_before_execution")
 				newInputSeen = true
 			}
-			// 新输入到达：尚未开始的写操作暂停执行（循环结束后统一补
-			// not_executed）；读类调用继续执行完，已拿到的结果不丢。
-			// 每个调用前都重新检查，避免前面一个长读把新输入盖过去后
-			// 又执行了后面的写。
 			if newInputSeen && !botCallIsReadOnly(call) {
 				continue
 			}
 			s.invokeOrAccept(bot, run, call, ctx)
-		}
-		if newInputSeen && !stopped {
-			s.closeUnstartedWriteCalls(calls, "new_input_before_execution")
 		}
 	}
 }
