@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 import { Box } from "lucide-react";
-import { PROVIDER_ICONS, providerIconKey } from "@/lib/provider-icons";
+import { resolveProviderIcon } from "@/lib/provider-icons";
 import { cn } from "@/lib/utils";
 
 /**
@@ -14,11 +14,34 @@ export function ProviderIcon({
   providerInstanceId: string;
   className?: string;
 }) {
-  const key = providerIconKey(providerInstanceId);
-  if (!key) {
+  const resolved = resolveProviderIcon(providerInstanceId);
+  if (!resolved) {
     return <Box aria-hidden className={cn("size-3.5 shrink-0", className)} />;
   }
-  const icon = PROVIDER_ICONS[key];
+  const { key, icon } = resolved;
+  const style = {
+    "--icon-light": icon.fill.light,
+    "--icon-dark": icon.fill.dark,
+  } as CSSProperties;
+  // 非路径原语（circle/line/text/polygon…）的图标用原始 inner markup 渲染；
+  // 内容是 ACP registry 生成的静态 SVG，不是用户输入。currentColor 由
+  // 主题色变量通过 color 驱动。
+  if (icon.raw) {
+    return (
+      <svg
+        aria-hidden
+        viewBox={icon.viewBox}
+        fill="currentColor"
+        data-provider-icon={key}
+        className={cn(
+          "size-3.5 shrink-0 text-(--icon-light) dark:text-(--icon-dark)",
+          className,
+        )}
+        style={style}
+        dangerouslySetInnerHTML={{ __html: icon.raw }}
+      />
+    );
+  }
   return (
     <svg
       aria-hidden
@@ -29,14 +52,9 @@ export function ProviderIcon({
         "size-3.5 shrink-0 fill-(--icon-light) dark:fill-(--icon-dark)",
         className,
       )}
-      style={
-        {
-          "--icon-light": icon.fill.light,
-          "--icon-dark": icon.fill.dark,
-        } as CSSProperties
-      }
+      style={style}
     >
-      {icon.paths.map((path) => {
+      {(icon.paths ?? []).map((path) => {
         const detail = "fill" in path ? path.fill : undefined;
         return (
           <path

@@ -31,8 +31,13 @@ import {
   buildModelSelection,
   parseProviders,
   resolveModel,
+  type ModelPick,
 } from "@/lib/threads-compose";
 import { T3ProjectPicker } from "@/components/threads/t3-project-picker";
+import {
+  ModelMultiPicker,
+  ModelPicker,
+} from "@/components/threads/model-picker";
 import { CronScheduleFields } from "./cron-editor";
 
 // 自动化新建/编辑弹窗（INT-90）：选项常量与表单控件集中在此文件。
@@ -180,9 +185,29 @@ export function AutomationEditorDialog({
     [composer?.config],
   );
   const t3Project = projects.find((p) => p.id === form.t3_project_id);
-  const modelKey = form.model_selection
-    ? `${form.model_selection.instance_id}::${form.model_selection.model}`
-    : "default";
+  const modelPick: ModelPick | null = form.model_selection
+    ? {
+        instanceId: form.model_selection.instance_id,
+        model: form.model_selection.model,
+        efforts: Object.fromEntries(
+          (form.model_selection.options ?? [])
+            .filter((o) => typeof o.value === "string")
+            .map((o) => [o.id, String(o.value)]),
+        ),
+      }
+    : null;
+  const modelResolved = resolveModel(providers, t3Project, modelPick);
+  // 已选模型在当前 providers 里找不到（换环境/项目或快照过期）时标记失效，
+  // 收起态显示 `xx（已失效）` 而不是回落模型的名字。
+  const selection = form.model_selection;
+  const modelMissing = Boolean(
+    selection &&
+      !providers.some(
+        (p) =>
+          p.instanceId === selection.instance_id &&
+          p.models.some((m) => m.slug === selection.model),
+      ),
+  );
   const workspaceKind = form.workspace?.type ?? "root";
   const canWorktree = workspaceOpts?.is_repo !== false && Boolean(workspaceOpts?.ref_name);
 
@@ -369,91 +394,66 @@ export function AutomationEditorDialog({
             {isPRTrigger(form.trigger_type) ? (
               <div className="space-y-2">
                 <Label>模型（可多选，每个模型各开一个运行）</Label>
-                <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border p-2">
-                  {providers.flatMap((provider) =>
-                    provider.models.map((model) => {
-                      const resolved = resolveModel(providers, t3Project, {
-                        instanceId: provider.instanceId,
-                        model: model.slug,
-                        efforts: {},
-                      });
-                      const sel =
-                        toAutomationModelSelection(buildModelSelection(resolved)) ?? {
-                          instance_id: provider.instanceId,
-                          model: model.slug,
-                        };
-                      const checked = (form.model_selections ?? []).some(
-                        (s) => sameModel(s, sel),
-                      );
-                      return (
-                        <label
-                          key={`${provider.instanceId}::${model.slug}`}
-                          className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/60"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleModelSelection(sel)}
-                          />
-                          <span>
-                            {provider.name} / {model.name}
-                          </span>
-                        </label>
-                      );
-                    }),
-                  )}
-                  {!providers.length && (
-                    <p className="px-1 py-0.5 text-xs text-muted-foreground">
-                      选择 T3 环境与项目后展示可用模型。
-                    </p>
-                  )}
-                </div>
+                <ModelMultiPicker
+                  providers={providers}
+                  selected={(form.model_selections ?? []).map((sel) => ({
+                    instanceId: sel.instance_id,
+                    model: sel.model,
+                    efforts: {},
+                  }))}
+                  disabled={providers.length === 0}
+                  className="w-full max-w-none"
+                  onToggle={(pick) => {
+                    const resolved = resolveModel(providers, t3Project, pick);
+                    const sel = toAutomationModelSelection(
+                      buildModelSelection(resolved),
+                    ) ?? {
+                      instance_id: pick.instanceId,
+                      model: pick.model,
+                    };
+                    toggleModelSelection(sel);
+                  }}
+                />
                 <p className="text-xs text-muted-foreground">
                   必须显式选择（不能「项目默认」）；一次触发每个模型并行开一个运行。
                 </p>
+                {!providers.length && (
+                  <p className="text-xs text-muted-foreground">
+                    选择 T3 环境与项目后展示可用模型。
+                  </p>
+                )}
               </div>
             ) : (
             <div className="space-y-2">
               <Label>模型</Label>
-              <OptionSelect
-                value={modelKey}
-                onValueChange={(next) => {
-                  if (!next || next === "default") {
-                    set("model_selection", null);
-                    return;
-                  }
-                  const sep = next.indexOf("::");
-                  const instanceId = sep >= 0 ? next.slice(0, sep) : next;
-                  const model = sep >= 0 ? next.slice(sep + 2) : "";
-                  const resolved = resolveModel(providers, t3Project, {
-                    instanceId,
-                    model,
-                    efforts: {},
-                  });
+              <ModelPicker
+                providers={providers}
+                resolved={modelResolved}
+                // 有显式选择时即使 providers 没能加载也要能改回「项目默认」
+                // （composer-options 失败 / 无可用 provider）。
+                disabled={providers.length === 0 && !selection}
+                className="w-full max-w-none"
+                leadingOption={{
+                  label: "项目默认",
+                  selected: !selection,
+                  onSelect: () => set("model_selection", null),
+                }}
+                triggerLabel={
+                  composerLoading
+                    ? "加载中…"
+                    : composerError
+                      ? "加载失败，请重试"
+                      : modelMissing
+                        ? `${selection?.model}（已失效）`
+                        : undefined
+                }
+                onPick={(pick) => {
+                  const resolved = resolveModel(providers, t3Project, pick);
                   set(
                     "model_selection",
                     toAutomationModelSelection(buildModelSelection(resolved)),
                   );
                 }}
-                options={withMissingOption(
-                  [
-                    { value: "default", label: "项目默认" },
-                    ...providers.flatMap((provider) =>
-                      provider.models.map((model) => ({
-                        value: `${provider.instanceId}::${model.slug}`,
-                        label: `${provider.name} / ${model.name}`,
-                      })),
-                    ),
-                  ],
-                  modelKey,
-                  composerLoading
-                    ? "加载中…"
-                    : composerError
-                      ? "加载失败，请重试"
-                      : `${modelKey}（已失效）`,
-                )}
-                placeholder="项目默认"
-                className="w-full"
               />
               <p className="text-xs text-muted-foreground">
                 选项来自该环境 composer-options；留空用 T3 项目默认模型。
