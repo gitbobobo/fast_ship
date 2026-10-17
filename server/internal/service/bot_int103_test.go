@@ -1001,7 +1001,7 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 	if off.NextRunAt != nil {
 		t.Fatalf("停用后 next_run_at 应清空: %+v", off.NextRunAt)
 	}
-	updated, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "0 10 * * *", "Asia/Shanghai", "", "", nil)
+	updated, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "0 10 * * *", "Asia/Shanghai", "", nil, nil)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -1186,5 +1186,40 @@ func TestBotScheduleScanResumesStuckRun(t *testing.T) {
 	done := waitForScheduleRunFinished(t, env, run.ID)
 	if done.Status != model.BotRunStatusCompleted {
 		t.Fatalf("重扫应把 run 跑完: %s %v", done.Status, done.ErrorMessage)
+	}
+}
+
+// 模型覆盖可显式清除：省略 model 保持原值，传空串回到机器人当前模型。
+func TestBotScheduleUpdateClearsModelOverride(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedmodel")
+	bot := env.createBot(t, userID)
+	task, err := env.bots.createScheduleTask(bot.ID, "模型任务", "0 9 * * *", "Asia/Shanghai", "跑一下", "cheap-model", false)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if task.Model != "cheap-model" {
+		t.Fatalf("create 应记录模型覆盖: %+v", task.Model)
+	}
+	// 省略 model（nil）：保持覆盖。
+	kept, err := env.bots.updateScheduleTask(bot.ID, task.ID, "改名只", "", "", "", nil, nil)
+	if err != nil {
+		t.Fatalf("update keep: %v", err)
+	}
+	if kept.Model != "cheap-model" || kept.Name != "改名只" {
+		t.Fatalf("省略 model 应保留原覆盖: %+v", kept)
+	}
+	// 显式空串：清除覆盖，回到机器人当前模型。
+	empty := ""
+	cleared, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "", &empty, nil)
+	if err != nil {
+		t.Fatalf("update clear: %v", err)
+	}
+	if cleared.Model != "" {
+		t.Fatalf("传空串应清除模型覆盖，实得 %q", cleared.Model)
+	}
+	stored, _ := env.bots.schedTasks.FindByID(task.ID)
+	if stored.Model != "" {
+		t.Fatalf("库里应已清除模型覆盖，实得 %q", stored.Model)
 	}
 }

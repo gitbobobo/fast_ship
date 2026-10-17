@@ -274,7 +274,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
 - **工具**：`fs_schedule`（v3）动作固定 7 个：`list/create/update/delete/
   runs/enable/disable`，全部同步执行、立即生效。create/update 校验 cron 五
   字段与时区，结果带 `next_run_at` 与 cron/时区原文，让模型能在回复里用中文
-  说明执行时间。旧占位动作 `fs_schedule/status` 走改名映射回结构化提示
+  说明执行时间。update 省略字段即保留；`model` 用指针区分「未提供」与「空串」
+  ——传空串明确清除模型覆盖、回到机器人当前模型。旧占位动作 `fs_schedule/status` 走改名映射回结构化提示
   （冻结在 v1/v2 的会话仍可用 status 查询可用性）。
 - **REST（仅 JWT，接口形状已与前端冻结）**：
   `GET /api/bots/{id}/schedule-tasks`、`GET .../{taskId}`、

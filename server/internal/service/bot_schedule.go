@@ -317,7 +317,7 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 // cron/时区变化且任务启用时重算 next_run_at 为 now 之后的下一次。读改写走
 // 同一事务：与用户启停（setScheduleTaskEnabled）在同一连接上串行化，避免
 // 「读到启用 → 期间被停用 → 把 next_run_at 又写回去」的竞态。
-func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone, instruction, mdl string, needsReport *bool) (*model.BotScheduleTask, error) {
+func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone, instruction string, mdl *string, needsReport *bool) (*model.BotScheduleTask, error) {
 	var out *model.BotScheduleTask
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		repo := repository.NewBotScheduleTaskRepository(tx)
@@ -354,7 +354,8 @@ func (s *BotService) updateScheduleTask(botID, taskID, name, cronExpr, timezone,
 }
 
 // applyScheduleTaskUpdate 是纯字段应用与校验（不碰数据库），供事务内调用。
-func applyScheduleTaskUpdate(task *model.BotScheduleTask, name, cronExpr, timezone, instruction, mdl string, needsReport *bool) (*model.BotScheduleTask, error) {
+// mdl 为 nil 表示未提供（保留原值），指向空串表示显式清除模型覆盖。
+func applyScheduleTaskUpdate(task *model.BotScheduleTask, name, cronExpr, timezone, instruction string, mdl *string, needsReport *bool) (*model.BotScheduleTask, error) {
 	cronChanged := false
 	if strings.TrimSpace(name) != "" {
 		if utf8.RuneCountInString(strings.TrimSpace(name)) > botScheduleTaskNameMaxLen {
@@ -379,8 +380,8 @@ func applyScheduleTaskUpdate(task *model.BotScheduleTask, name, cronExpr, timezo
 		}
 		task.Instruction = strings.TrimSpace(instruction)
 	}
-	if strings.TrimSpace(mdl) != "" {
-		task.Model = strings.TrimSpace(mdl)
+	if mdl != nil {
+		task.Model = strings.TrimSpace(*mdl)
 	}
 	if needsReport != nil {
 		task.NeedsReport = *needsReport
@@ -687,7 +688,11 @@ func timeOrUTC(name string) *time.Location {
 }
 
 func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
-	task, err := s.createScheduleTask(call.BotID, args.Name, args.Cron, args.Timezone, args.Instruction, args.Model, args.NeedsReportBool())
+	mdl := ""
+	if args.Model != nil {
+		mdl = *args.Model
+	}
+	task, err := s.createScheduleTask(call.BotID, args.Name, args.Cron, args.Timezone, args.Instruction, mdl, args.NeedsReportBool())
 	if err != nil {
 		return "", err
 	}

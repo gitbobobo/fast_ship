@@ -66,8 +66,10 @@ type botScheduleTaskArgs struct {
 	Timezone string `json:"timezone,omitempty" jsonschema:"description=时区，IANA 名称如 Asia/Shanghai（可选，默认 UTC；update 提供即改）"`
 	// Instruction 是每次运行交给机器人的任务指令（create 必填；update 提供即改）。
 	Instruction string `json:"instruction,omitempty" jsonschema:"description=任务指令：每次运行交给你的目标说明（create 必填；update 可改）"`
-	// Model 可选：空串用机器人当前模型。
-	Model string `json:"model,omitempty" jsonschema:"description=运行使用的模型名（可选；默认用机器人当前模型）"`
+	// Model 可选：省略则保持原值（update）/用机器人当前模型（create）；
+	// 显式传空串清除覆盖，回到机器人当前模型。用指针区分「未提供」与
+	// 「显式清空」，否则创建时指定的模型永远无法撤掉。
+	Model *string `json:"model,omitempty" jsonschema:"description=运行使用的模型名（可选；省略则保持不变或跟随机器人当前模型，传空串清除覆盖）"`
 	// NeedsReport 标记成功且非静默的运行是否也追加事件进主线。
 	NeedsReport *bool `json:"needs_report,omitempty" jsonschema:"description=运行是否需要汇报（可选；true 时成功且非静默的运行也会通知主线）"`
 	// Limit/Offset 是 runs/list 的分页参数。
