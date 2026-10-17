@@ -1,13 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
-import { Folder, GitBranch } from "lucide-react";
+import { GitBranch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import type { Environment } from "@/lib/api/threads";
@@ -39,6 +37,7 @@ import {
   ModelChip,
   WorkspaceModeChip,
 } from "./thread-chips";
+import { T3ProjectPicker } from "./t3-project-picker";
 import { ThreadComposer } from "./thread-composer";
 
 function useDebounced<T>(value: T, ms: number) {
@@ -164,20 +163,20 @@ export function NewThreadForm({
         onChange={onEnvironmentChange}
         disabled={launching}
       />
-      <Chip
+      <T3ProjectPicker
+        projects={projects ?? []}
+        value={project?.id ?? ""}
+        onValueChange={setProjectId}
         ariaLabel="项目"
-        icon={<Folder className="h-3.5 w-3.5 shrink-0" />}
-        label={project?.title ?? (composer.isLoading ? "加载中…" : "无可用项目")}
         disabled={!writable || !projects?.length || launching}
-      >
-        <DropdownMenuRadioGroup value={project?.id ?? ""} onValueChange={setProjectId}>
-          {projects?.map((p) => (
-            <DropdownMenuRadioItem key={p.id} value={p.id}>
-              <span className="truncate">{p.title}</span>
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-      </Chip>
+        triggerLabel={
+          projects?.length
+            ? undefined
+            : composer.isLoading
+              ? "加载中…"
+              : "无可用项目"
+        }
+      />
       <WorkspaceModeChip
         choice={choice}
         previous={previous}

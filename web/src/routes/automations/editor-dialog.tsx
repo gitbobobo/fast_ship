@@ -32,6 +32,7 @@ import {
   parseProviders,
   resolveModel,
 } from "@/lib/threads-compose";
+import { T3ProjectPicker } from "@/components/threads/t3-project-picker";
 import { CronScheduleFields } from "./cron-editor";
 
 // 自动化新建/编辑弹窗（INT-90）：选项常量与表单控件集中在此文件。
@@ -336,31 +337,30 @@ export function AutomationEditorDialog({
             </div>
             <div className="space-y-2">
               <Label>T3 项目</Label>
-              <OptionSelect
+              <T3ProjectPicker
+                projects={projects}
                 value={form.t3_project_id}
                 onValueChange={(next) =>
                   onFormChange({
                     ...form,
-                    t3_project_id: next ?? "",
+                    t3_project_id: next,
                     model_selection: null,
                     model_selections: [],
                     workspace: null,
                   })
                 }
-                options={withMissingOption(
-                  projects.map((project) => ({
-                    value: project.id,
-                    label: project.title,
-                  })),
-                  form.t3_project_id,
+                ariaLabel="T3 项目"
+                placeholder="选择项目"
+                className="w-full max-w-none"
+                triggerLabel={
                   composerLoading
                     ? "加载中…"
                     : composerError
                       ? "加载失败，请重试"
-                      : `${form.t3_project_id}（已失效）`,
-                )}
-                placeholder="选择项目"
-                className="w-full"
+                      : form.t3_project_id && !t3Project
+                        ? `${form.t3_project_id}（已失效）`
+                        : undefined
+                }
               />
             </div>
           </div>
