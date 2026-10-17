@@ -628,7 +628,7 @@ func (s *BotService) execScheduleTool(call *model.BotToolCall) (string, error) {
 	}
 	switch args.Action {
 	case "list":
-		return s.execScheduleList(call)
+		return s.execScheduleList(call, &args)
 	case "create":
 		return s.execScheduleCreate(call, &args)
 	case "update":
@@ -643,8 +643,25 @@ func (s *BotService) execScheduleTool(call *model.BotToolCall) (string, error) {
 	return "", errs.New(errs.ErrInvalidParams.Code, "不支持的 fs_schedule 动作: "+args.Action)
 }
 
-func (s *BotService) execScheduleList(call *model.BotToolCall) (string, error) {
-	tasks, err := s.schedTasks.ListByBot(call.BotID, botScheduleTasksListLimit)
+// execScheduleList 分页列出任务：total 是真实总数，has_more 提示还有更旧的
+// 任务未返回——把截断结果当成总量会让旧任务变得不可达、也就无从管理。
+func (s *BotService) execScheduleList(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
+	limit := args.Limit
+	if limit <= 0 {
+		limit = botScheduleTasksListLimit
+	}
+	if limit > botScheduleTasksListLimit {
+		limit = botScheduleTasksListLimit
+	}
+	offset := args.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	tasks, err := s.schedTasks.ListByBotPage(call.BotID, offset, limit)
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	total, err := s.schedTasks.CountByBot(call.BotID)
 	if err != nil {
 		return "", errs.ErrInternal
 	}
@@ -652,7 +669,13 @@ func (s *BotService) execScheduleList(call *model.BotToolCall) (string, error) {
 	for i := range tasks {
 		items = append(items, s.scheduleTaskSlim(&tasks[i]))
 	}
-	return botMarshalResult(map[string]interface{}{"items": items, "total": len(items)})
+	out := map[string]interface{}{
+		"items": items, "total": total, "limit": limit, "offset": offset,
+	}
+	if int64(offset+len(items)) < total {
+		out["has_more"] = true
+	}
+	return botMarshalResult(out)
 }
 
 // scheduleTaskSlim 是工具结果里的任务投影：带 next_run_at 与 cron/时区原文，

@@ -73,7 +73,7 @@ type botScheduleTaskArgs struct {
 	// NeedsReport 标记成功且非静默的运行是否也追加事件进主线。
 	NeedsReport *bool `json:"needs_report,omitempty" jsonschema:"description=运行是否需要汇报（可选；true 时成功且非静默的运行也会通知主线）"`
 	// Limit/Offset 是 runs/list 的分页参数。
-	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100）"`
+	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
 	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
 }
 

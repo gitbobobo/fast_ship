@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -161,7 +162,8 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			nowUTC := now
 			run.StartedAt = &nowUTC
 			run.TriggerContextJSON = marshalJSONString(map[string]interface{}{
-				"task_id": current.ID, "scheduled_for": planned.UTC().Format(time.RFC3339Nano),
+				"task_id": current.ID, "task_name": current.Name,
+				"scheduled_for": planned.UTC().Format(time.RFC3339Nano),
 			})
 		}
 		if err := tx.Create(run).Error; err != nil {
@@ -199,6 +201,18 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 // 一次 run。
 func botScheduleTriggerKey(taskID string, planned time.Time) string {
 	return "schedule:" + taskID + ":" + planned.UTC().Format(time.RFC3339Nano)
+}
+
+// botScheduleTaskNameFromContext 取派发时记下的任务名；缺失时给一个可读占位，
+// 让任务被删除后仍能报出可辨认的失败事件。
+func botScheduleTaskNameFromContext(run *model.BotRun) string {
+	var ctx struct {
+		TaskName string `json:"task_name"`
+	}
+	if run.TriggerContextJSON != "" && json.Unmarshal([]byte(run.TriggerContextJSON), &ctx) == nil && ctx.TaskName != "" {
+		return ctx.TaskName
+	}
+	return "已删除的定时任务"
 }
 
 // isBotRunDuplicateTriggerKey 识别 (bot_id, trigger_key) 唯一冲突。
@@ -357,16 +371,21 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 		}); err != nil {
 			return err
 		}
-		// 主线事件只在 run.ScheduleTaskID 可解析到任务时追加。
+		// 主线事件只在 run.ScheduleTaskID 可解析到任务时追加。任务在运行失败
+		// 之前被删掉时用派发时记在触发上下文里的名字兜底——失败必报，而且用户
+		// 已经无法通过任务查询看到这次失败。
 		if run.ScheduleTaskID == nil {
 			return nil
 		}
 		var task model.BotScheduleTask
 		if err := tx.Where("id = ?", *run.ScheduleTaskID).First(&task).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
 			}
-			return err
+			task = model.BotScheduleTask{
+				ID:   *run.ScheduleTaskID,
+				Name: botScheduleTaskNameFromContext(run),
+			}
 		}
 		return s.appendScheduleEventTx(tx, bot.ID, &task, run,
 			model.BotRunStatusFailed, summary, code, msg, now)

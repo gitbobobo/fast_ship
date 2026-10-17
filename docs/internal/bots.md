@@ -266,7 +266,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   （`session_kind='main'`、`run_id=NULL`，正文 JSON 含 task_id/task_name/
   run_id/status/summary/error_code/error_message）。时机：**failed 必报**；
   `completed && needs_report && !silent` 才报；成功静默、成功且不需汇报、
-  skipped、stopped 都不追加。`schedule_event` 是主线模型输入（计入
+  skipped、stopped 都不追加。失败事件在任务先被删除时仍会追加——任务名取派发
+  时记在触发上下文里的那份（此时用户已无法通过任务查询看到这次失败）。`schedule_event` 是主线模型输入（计入
   `HasModelInputSince`），主线循环自动被唤醒判断是否通知用户。
 - **静默约定**：运行时上下文明确要求「无话可说只回复一行 `[[SILENT]]`」。
   收尾取本 run 最后一条 assistant 正文，去尾部空白与句号后等于哨兵即
@@ -275,7 +276,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   runs/enable/disable`，全部同步执行、立即生效。create/update 校验 cron 五
   字段与时区，结果带 `next_run_at` 与 cron/时区原文，让模型能在回复里用中文
   说明执行时间。update 省略字段即保留；`model` 用指针区分「未提供」与「空串」
-  ——传空串明确清除模型覆盖、回到机器人当前模型。旧占位动作 `fs_schedule/status` 走改名映射回结构化提示
+  ——传空串明确清除模型覆盖、回到机器人当前模型。`list` 支持 `limit`/`offset`
+  分页（默认且最多 200），返回真实 `total` 与 `has_more`：把截断结果当总量会让
+  旧任务不可达、也就无从管理。旧占位动作 `fs_schedule/status` 走改名映射回结构化提示
   （冻结在 v1/v2 的会话仍可用 status 查询可用性）。
 - **REST（仅 JWT，接口形状已与前端冻结）**：
   `GET /api/bots/{id}/schedule-tasks`、`GET .../{taskId}`、

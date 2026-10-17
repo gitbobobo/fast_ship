@@ -1223,3 +1223,84 @@ func TestBotScheduleUpdateClearsModelOverride(t *testing.T) {
 		t.Fatalf("库里应已清除模型覆盖，实得 %q", stored.Model)
 	}
 }
+
+// 任务列表分页：total 是真实总数、has_more 提示还有更旧的，不能用截断结果当总量。
+func TestBotScheduleListPagination(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedlist")
+	bot := env.createBot(t, userID)
+	for _, name := range []string{"任务A", "任务B", "任务C"} {
+		if _, err := env.bots.createScheduleTask(bot.ID, name, "0 9 * * *", "Asia/Shanghai", "跑一下", "", false); err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+	}
+	type listOut struct {
+		Items   []map[string]interface{} `json:"items"`
+		Total   int64                    `json:"total"`
+		Limit   int                      `json:"limit"`
+		Offset  int                      `json:"offset"`
+		HasMore bool                     `json:"has_more"`
+	}
+	decode := func(out string) listOut {
+		var parsed listOut
+		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+			t.Fatalf("decode list: %v %s", err, out)
+		}
+		return parsed
+	}
+
+	first := decode(mustScheduleCall(t, env, bot.ID, `{"action":"list","limit":2}`))
+	if len(first.Items) != 2 || first.Total != 3 || !first.HasMore || first.Limit != 2 || first.Offset != 0 {
+		t.Fatalf("首页应为 2/3 且 has_more: %+v", first)
+	}
+	second := decode(mustScheduleCall(t, env, bot.ID, `{"action":"list","limit":2,"offset":2}`))
+	if len(second.Items) != 1 || second.Total != 3 || second.HasMore || second.Offset != 2 {
+		t.Fatalf("第二页应为 1/3 且无 has_more: %+v", second)
+	}
+}
+
+func mustScheduleCall(t *testing.T, env *botTestEnv, botID, args string) string {
+	t.Helper()
+	out, err := botScheduleCall(t, env, botID, args)
+	if err != nil {
+		t.Fatalf("call %s: %v", args, err)
+	}
+	return out
+}
+
+// 任务在运行失败前被删掉时，失败事件仍要进主线（失败必报，且用户已无法从
+// 任务查询看到这次失败），任务名用派发时记下的那份。
+func TestBotScheduleFailureEventAfterTaskDeleted(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "scheddeltask")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	// 派发时会把任务名写进触发上下文；这里补上并删掉任务行。
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Update("trigger_context_json", marshalJSONString(map[string]interface{}{
+			"task_id": task.ID, "task_name": task.Name,
+		})).Error; err != nil {
+		t.Fatalf("set trigger context: %v", err)
+	}
+	if err := env.db.Exec(`DELETE FROM bot_schedule_tasks WHERE id = ?`, task.ID).Error; err != nil {
+		t.Fatalf("delete task: %v", err)
+	}
+	run.TriggerContextJSON = marshalJSONString(map[string]interface{}{
+		"task_id": task.ID, "task_name": task.Name,
+	})
+
+	env.bots.finishScheduleFailed(botRow, run, "schedule_task_missing",
+		errs.New(errs.ErrInternal.Code, "定时任务已删除"))
+	n, content := countScheduleEvents(t, env, bot.ID)
+	if n != 1 {
+		t.Fatalf("任务被删除后失败事件仍应追加，实得 %d", n)
+	}
+	if content.TaskName != task.Name || content.Status != string(model.BotRunStatusFailed) {
+		t.Fatalf("事件应带派发时的任务名与失败状态: %+v", content)
+	}
+}

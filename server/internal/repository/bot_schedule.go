@@ -46,6 +46,21 @@ func (r *BotScheduleTaskRepository) ListByBot(botID string, limit int) ([]model.
 	return rows, err
 }
 
+// ListByBotPage 按创建时间新→旧分页列出任务（工具侧 list 动作使用）。
+func (r *BotScheduleTaskRepository) ListByBotPage(botID string, offset, limit int) ([]model.BotScheduleTask, error) {
+	var rows []model.BotScheduleTask
+	err := r.db.Where("bot_id = ?", botID).
+		Order("created_at DESC, id DESC").Offset(offset).Limit(limit).Find(&rows).Error
+	return rows, err
+}
+
+// CountByBot 返回该机器人的任务总数（分页时给出真实总数，别把截断当总量）。
+func (r *BotScheduleTaskRepository) CountByBot(botID string) (int64, error) {
+	var n int64
+	err := r.db.Model(&model.BotScheduleTask{}).Where("bot_id = ?", botID).Count(&n).Error
+	return n, err
+}
+
 // UpdateColumns 条件更新任务列；返回是否命中。
 func (r *BotScheduleTaskRepository) UpdateColumns(taskID string, where map[string]interface{}, cols map[string]interface{}) (bool, error) {
 	q := r.db.Model(&model.BotScheduleTask{}).Where("id = ?", taskID)
