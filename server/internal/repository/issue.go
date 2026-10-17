@@ -2,6 +2,8 @@ package repository
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -74,13 +76,224 @@ func (r *IssueRepository) ListByIDsTx(tx *gorm.DB, ids []string) (map[string]mod
 	return result, nil
 }
 
-func (r *IssueRepository) ListByProject(projectID string) ([]model.Issue, error) {
+// IssueListQuery 是 Issue 列表的过滤条件，与 service.IssueListFilters 同义：
+// 由 service 层映射后传入（Query 保证已 TrimSpace），SQL 构造与过滤语义集中在 repository。
+type IssueListQuery struct {
+	ProjectID string
+	State     string
+	Source    string
+	Workflow  string // "", "unset", "todo", "in_progress", "done"
+	Query     string // 空串不过滤
+	Label     string
+	Assignee  string
+	Milestone string
+}
+
+// IssueFilterOptionSource 是筛选下拉选项的数据源投影：一行 Issue 摘出 GitHub meta
+// 与 internal meta 的标签/指派人/里程碑 JSON，meta 缺失的列为空串。
+type IssueFilterOptionSource struct {
+	LabelsJSON         string
+	AssigneesJSON      string
+	MilestoneJSON      string
+	InternalLabelsJSON string
+}
+
+// issueListColumns 是列表分页查询的投影列：排除 body/body_html，列表响应不携带
+// 正文（详情接口走 FindByID 读全列）。body 只允许出现在 WHERE 的搜索条件里。
+const issueListColumns = "issues.id, issues.project_id, issues.source, issues.sequence_number, issues.state, issues.state_reason, issues.title, issues.author_user_id, issues.author_login, issues.author_avatar_url, issues.closed_at, issues.created_at, issues.updated_at"
+
+// issueGitHubMetaListColumns 是列表预载 GitHub meta 的投影列：排除 raw_json 与
+// collections_* 列（列表响应用不到），必须含 issue_id 供 GORM 回填关联。
+const issueGitHubMetaListColumns = "issue_id, project_id, github_issue_id, github_node_id, number, html_url, author_association, assignees_json, labels_json, milestone_json, reactions_json, comments_count, locked, active_lock_reason, synced_at"
+
+// issueSortNumberExpr 是排序决胜键：GitHub issue 走 meta.number，否则用项目内序号。
+const issueSortNumberExpr = "CASE WHEN issues.source = 'github' AND gh.number IS NOT NULL THEN gh.number ELSE issues.sequence_number END"
+
+// issueCommentCountExpr 是评论数排序键：无 GitHub meta 记 0，与内存实现一致。
+const issueCommentCountExpr = "COALESCE(gh.comments_count, 0)"
+
+// escapeLikePattern 转义 LIKE 通配符，配合 ESCAPE '\' 使用，让用户输入里的
+// %、_、\ 按字面量匹配。
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+}
+
+// issueQueryAsNumber 判断 q 是否为整数字面量（strconv.Atoi 语义，允许 +/- 前缀），
+// 是则追加序号与 GitHub number 的精确匹配分支。
+func issueQueryAsNumber(query string) (int, bool) {
+	num, err := strconv.Atoi(strings.TrimSpace(query))
+	return num, err == nil
+}
+
+// buildIssueSearchCondition 构造 q 搜索条件：标题/正文/作者/reference 的大小写
+// 不敏感子串，纯数字时再 OR 序号与 GitHub number 精确匹配。整组条件带括号，
+// 与其他过滤器之间保持 AND 语义。已知边界：SQLite 的 lower/LIKE 只折叠 ASCII，
+// 与 Go strings.ToLower 的 Unicode 折叠在非 ASCII 大写字母上不一致（中文无影响）。
+func buildIssueSearchCondition(query string) (string, []interface{}) {
+	pattern := "%" + escapeLikePattern(strings.ToLower(query)) + "%"
+	referenceExpr := "CASE WHEN issues.source = 'github' AND gh.number IS NOT NULL " +
+		"THEN 'GH-' || gh.number ELSE 'INT-' || issues.sequence_number END"
+	expr := "(lower(issues.title) LIKE ? ESCAPE '\\' OR lower(issues.body) LIKE ? ESCAPE '\\' " +
+		"OR lower(issues.author_login) LIKE ? ESCAPE '\\' OR lower(" + referenceExpr + ") LIKE ? ESCAPE '\\')"
+	args := []interface{}{pattern, pattern, pattern, pattern}
+	if num, ok := issueQueryAsNumber(query); ok {
+		expr += " OR issues.sequence_number = ? OR gh.number = ?"
+		args = append(args, num, num)
+	}
+	return expr, args
+}
+
+// jsonColumnOr 返回保证合法的 JSON 列表达式：列值为 NULL、空串或坏 JSON 时回落到
+// fallback。迁移前的内存过滤用 parseJSON/extractLabelNames 对坏数据一律按空处理，
+// 直接把这些列喂给 json_each/json_extract 会在坏数据上抛 malformed JSON，让整条
+// 列表查询失败——这里必须保持「坏数据按空处理」的旧契约。
+func jsonColumnOr(column, fallback string) string {
+	return "CASE WHEN json_valid(" + column + ") THEN " + column + " ELSE '" + fallback + "' END"
+}
+
+// jsonArrayOr 返回保证是 JSON 数组的列表达式：NULL、空串、坏 JSON 与其它顶层形态
+// （标量、对象）统一回落到 '[]'。迁移前的 extractLabelNames 只接受字符串数组或对象
+// 数组，顶层非数组一律按「没有标签」处理；不这样收口的话，`"urgent"`、
+// `{"name":"urgent"}` 这类行的元素会被 json_each 取出来意外命中标签筛选。
+// json_type 必须在 json_valid 为真后才能调用（坏 JSON 上会抛 malformed JSON），
+// 且本驱动不保证 AND 短路，因此用嵌套 CASE 而不是 AND。
+func jsonArrayOr(column string) string {
+	return "CASE WHEN json_valid(" + column + ") THEN (CASE WHEN json_type(" + column + ") = 'array' THEN " + column + " ELSE '[]' END) ELSE '[]' END"
+}
+
+// buildFilteredQuery 构造 Issue 列表过滤查询：issues 为主表左联两张 meta 表
+// （两表 issue_id 都是唯一键，不会行扇出）。JSON 列的 NULL、空串与坏 JSON 直接喂给
+// json_each/json_extract 会抛 malformed JSON 拖垮整条查询，统一经 jsonColumnOr 的
+// json_valid 防护回落到合法默认值，保持内存实现「坏数据按空处理」的契约；meta 不存在
+// 的行（JOIN 出 NULL）走同一路径得空集/NULL，与「meta 为空直接不匹配」一致。
+func (r *IssueRepository) buildFilteredQuery(q IssueListQuery) *gorm.DB {
+	query := r.db.Model(&model.Issue{}).
+		Joins("LEFT JOIN issue_github_meta AS gh ON gh.issue_id = issues.id").
+		Joins("LEFT JOIN issue_internal_meta AS im ON im.issue_id = issues.id").
+		Where("issues.project_id = ?", q.ProjectID)
+
+	if q.State != "" {
+		query = query.Where("issues.state = ?", q.State)
+	}
+	if q.Source != "" {
+		query = query.Where("issues.source = ?", q.Source)
+	}
+	switch q.Workflow {
+	case "":
+		// 不过滤
+	case "unset":
+		query = query.Where("(im.issue_id IS NULL OR im.workflow_status = '')")
+	default:
+		query = query.Where("im.workflow_status = ?", q.Workflow)
+	}
+	if q.Label != "" {
+		// 标签历史数据有两种形态：纯名称数组 ["a","b"] 与对象数组 [{"name":"a"}]
+		// （8b274f3 改存储格式前的存量行），两种都要参与匹配。顶层必须是数组、元素
+		// 只认字符串与对象两种形态，与迁移前的 extractLabelNames 一致：顶层标量/
+		// 对象的行经 jsonArrayOr 收口按「没有标签」处理，数字/布尔/null 元素与无
+		// name 的对象元素都得 NULL，不匹配任何筛选值；混排数组仍按元素处理（更
+		// 宽容，保持现状）。语义照旧是 EqualFold（lower 等值）。两个 EXISTS 用 OR
+		// 连接并作为单个 Where 传入，GORM 会整体加括号，不影响与其他条件的 AND
+		// 语义。
+		query = query.Where(
+			"EXISTS (SELECT 1 FROM json_each("+jsonArrayOr("gh.labels_json")+") AS je "+
+				"WHERE lower(CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') "+
+				"WHEN 'text' THEN je.value END) = lower(?)) "+
+				"OR EXISTS (SELECT 1 FROM json_each("+jsonArrayOr("im.labels_json")+") AS je "+
+				"WHERE lower(CASE je.type WHEN 'object' THEN json_extract(je.value,'$.name') "+
+				"WHEN 'text' THEN je.value END) = lower(?))",
+			q.Label, q.Label)
+	}
+	if q.Assignee != "" {
+		// 元素应为 {"login":...} 对象；CASE 只对对象元素求值 json_extract，字符串
+		// 元素得 NULL 不匹配——旧实现对无法解析成对象数组的行整体不匹配，新实现按
+		// 元素处理，更宽容。
+		query = query.Where(
+			"gh.issue_id IS NOT NULL AND EXISTS (SELECT 1 FROM json_each("+jsonColumnOr("gh.assignees_json", "[]")+") AS je "+
+				"WHERE lower(CASE WHEN je.type = 'object' THEN json_extract(je.value,'$.login') END) = lower(?))",
+			q.Assignee)
+	}
+	if q.Milestone != "" {
+		// 空串/坏 JSON 回落 '{}'；合法但非对象的 JSON json_extract 得 NULL，
+		// 比较为 NULL → 不匹配，与旧行为一致。
+		query = query.Where(
+			"gh.issue_id IS NOT NULL AND lower(json_extract("+jsonColumnOr("gh.milestone_json", "{}")+",'$.title')) = lower(?)",
+			q.Milestone)
+	}
+	if q.Query != "" {
+		expr, args := buildIssueSearchCondition(q.Query)
+		query = query.Where(expr, args...)
+	}
+	return query
+}
+
+// issueListOrderClause 把排序键映射为 ORDER BY 表达式；未知键回落到 updated_desc，
+// 与迁移前内存排序的默认分支一致。决胜规则同旧 sortIssues：时间同值按 sortNum，
+// 评论数同值按 updated_at（无第三级）。每个分支末尾以 sequence_number DESC 收尾
+// 作为唯一键兜底：上述排序键完全并列时（如 comments_asc/desc 的 commentCount 与
+// updated_at 都相同），SQL 不保证并列行的先后，LIMIT/OFFSET 分页跨请求会不稳定；
+// sequence_number 有项目内唯一索引 idx_issues_project_sequence，兜底后得到全序。
+func issueListOrderClause(sortKey string) string {
+	switch sortKey {
+	case "updated_asc":
+		return "issues.updated_at ASC, " + issueSortNumberExpr + " ASC, issues.sequence_number DESC"
+	case "created_desc":
+		return "issues.created_at DESC, " + issueSortNumberExpr + " DESC, issues.sequence_number DESC"
+	case "created_asc":
+		return "issues.created_at ASC, " + issueSortNumberExpr + " ASC, issues.sequence_number DESC"
+	case "comments_desc":
+		return issueCommentCountExpr + " DESC, issues.updated_at DESC, issues.sequence_number DESC"
+	case "comments_asc":
+		return issueCommentCountExpr + " ASC, issues.updated_at ASC, issues.sequence_number DESC"
+	default:
+		return "issues.updated_at DESC, " + issueSortNumberExpr + " DESC, issues.sequence_number DESC"
+	}
+}
+
+// CountFiltered 统计过滤后的总数，供列表分页 total；不读正文。
+func (r *IssueRepository) CountFiltered(q IssueListQuery) (int64, error) {
+	var total int64
+	if err := r.buildFilteredQuery(q).Count(&total).Error; err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// ListFiltered 分页取过滤后的 Issue：SQL 带 LIMIT/OFFSET，投影不含 body/body_html，
+// GitHub meta 预载不含 raw_json。limit<=0 时不加 LIMIT，仅限不需要分页边界的
+// 内部调用（如批量上限探测）。
+func (r *IssueRepository) ListFiltered(q IssueListQuery, sortKey string, offset, limit int) ([]model.Issue, error) {
+	query := r.buildFilteredQuery(q).
+		Select(issueListColumns).
+		Order(issueListOrderClause(sortKey)).
+		Offset(offset)
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
 	var issues []model.Issue
-	err := r.db.Preload("GitHubMeta").
-		Where("project_id = ?", projectID).
-		Order("updated_at DESC, sequence_number DESC").
-		Find(&issues).Error
-	return issues, err
+	if err := query.
+		Preload("GitHubMeta", func(db *gorm.DB) *gorm.DB {
+			return db.Select(issueGitHubMetaListColumns)
+		}).
+		Find(&issues).Error; err != nil {
+		return nil, err
+	}
+	return issues, nil
+}
+
+// ListFilterOptionSources 投影项目全部 Issue 的筛选下拉数据源（不含正文与
+// raw_json）：每行一个 Issue，摘出两张 meta 表的标签/指派人/里程碑 JSON，
+// meta 缺失的列 COALESCE 成空串，交由上层按空处理。
+func (r *IssueRepository) ListFilterOptionSources(projectID string) ([]IssueFilterOptionSource, error) {
+	var rows []IssueFilterOptionSource
+	err := r.db.Model(&model.Issue{}).
+		Joins("LEFT JOIN issue_github_meta AS gh ON gh.issue_id = issues.id").
+		Joins("LEFT JOIN issue_internal_meta AS im ON im.issue_id = issues.id").
+		Where("issues.project_id = ?", projectID).
+		Select("COALESCE(gh.labels_json,'') AS labels_json, COALESCE(gh.assignees_json,'') AS assignees_json, " +
+			"COALESCE(gh.milestone_json,'') AS milestone_json, COALESCE(im.labels_json,'') AS internal_labels_json").
+		Scan(&rows).Error
+	return rows, err
 }
 
 // NextSequenceNumberTx 在事务句柄上取下一个项目内序号。必须随写入同事务调用：
