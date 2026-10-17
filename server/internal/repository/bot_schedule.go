@@ -121,8 +121,9 @@ func (r *BotScheduleTaskRepository) AdvanceNextRunTx(tx *gorm.DB, taskID string,
 	return res.RowsAffected > 0, nil
 }
 
-// PauseTx 调度解析失败时暂停任务（next_run_at 置空），不无限循环。
+// PauseTx 调度解析失败时暂停任务：清空 next_run_at 并置 enabled=false，避免留下
+// 「界面上开着但永远不会再跑」的任务（用户只能靠关-开治愈）。
 func (r *BotScheduleTaskRepository) PauseTx(tx *gorm.DB, taskID string) error {
 	return tx.Model(&model.BotScheduleTask{}).Where("id = ?", taskID).
-		Update("next_run_at", nil).Error
+		Updates(map[string]interface{}{"next_run_at": nil, "enabled": false}).Error
 }

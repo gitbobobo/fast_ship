@@ -89,6 +89,14 @@ func (rt *botRuntimeState) markRequeue(botID string, wake *botWake) {
 }
 
 // release 释放执行槽；返回 requeue 与待处理的触发描述。
+// hasSlot 报告某个执行槽是否被占（扫描补唤醒时跳过已在跑的 run）。
+func (rt *botRuntimeState) hasSlot(key string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	_, ok := rt.active[key]
+	return ok
+}
+
 func (rt *botRuntimeState) release(botID string) (requeue bool, wake *botWake) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -232,20 +240,29 @@ func (s *BotService) scanOnce() {
 	s.scanQueuedCalls()
 	// 定时任务运行：补回丢失的唤醒——wakeScheduleRun 的瞬态失败或执行槽异常
 	// 结束会让 run 永远卡在 running（未完成的 schedule run 还会挡住机器人删除）。
-	// wakeScheduleRun 自身按槽占用与终态幂等，重复扫描无害。任务允许并行，
-	// 所以这里必须扫完而不是只取最早的一页：最早的若干条都占着槽时，更新的
-	// 丢失唤醒会被一直饿死。
+	// 任务允许并行，未完成 run 数量无上限，所以扫完整个集合，但只唤醒「还没有
+	// 执行槽」的那些（已占槽的本来就在跑，不需要补）；单轮唤醒数另有上限，
+	// 下一轮会自动照顾到剩下的——已唤醒的占了槽，不会再被重复唤醒，因此不会
+	// 永远停在同一批最早的 run 上。
+	woken := 0
 	for _, run := range s.listUnfinishedScheduleRuns() {
+		if woken >= botScheduleWakePerScan {
+			return
+		}
+		if s.rt.hasSlot(botScheduleSlotKey(run.ID)) {
+			continue
+		}
 		s.wakeScheduleRun(run.BotID, run.ID)
+		woken++
 	}
 }
 
 // listUnfinishedScheduleRuns 按键集分页取全部未完成的 schedule run（扫完即止，
-// 另有行数上限防止异常积累把扫描拖长）。分页键是 (created_at, id)，查询期间
-// 集合变化不会像 offset 那样跳行。
+// 行数上限只是防止异常积累把扫描拖长的安全阀）。分页键是 (created_at, id)，
+// 查询期间集合变化不会像 offset 那样跳行。
 func (s *BotService) listUnfinishedScheduleRuns() []model.BotRun {
 	const pageSize = 100
-	const maxRows = 1000
+	const maxRows = 10000
 	out := make([]model.BotRun, 0, pageSize)
 	var lastCreated time.Time
 	lastID := ""
@@ -266,6 +283,10 @@ func (s *BotService) listUnfinishedScheduleRuns() []model.BotRun {
 		lastCreated = page[len(page)-1].CreatedAt
 		lastID = page[len(page)-1].ID
 	}
+	// 触到安全阀：未完成 run 病态积累，更晚的 run 这一轮扫不到。告警而不是
+	// 静默截断（与调度排空上限触顶告警对齐）。
+	s.logger.Warn("未完成的定时任务运行过多，本轮扫描触到上限",
+		zap.Int("scanned", len(out)))
 	return out
 }
 

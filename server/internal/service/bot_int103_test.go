@@ -1519,3 +1519,154 @@ func TestBotScheduleCreateCapIsAtomic(t *testing.T) {
 		t.Fatalf("任务数不得超过上限 %d，实得 %d", botScheduleTasksMaxPerBot, total)
 	}
 }
+
+// L1：删除任务时请求停止它未完成的运行——任务一删，这些 run 既查不到也停不了，
+// 却会一直挡住机器人删除。
+func TestBotScheduleDeleteStopsUnfinishedRuns(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "[[SILENT]]"})
+	userID := createBotTestUser(t, env.db, "scheddelstop")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+
+	if err := env.bots.deleteScheduleTask(bot.ID, task.ID); err != nil {
+		t.Fatalf("delete task: %v", err)
+	}
+	fresh := mustFindRun(t, env, run.ID)
+	if fresh.StopRequestedAt == nil {
+		t.Fatalf("删除任务应请求停止未完成的 run: %+v", fresh)
+	}
+	// 扫描补唤醒后，孤儿 run 在安全点收尾为 stopped。
+	env.bots.scanOnce()
+	done := waitForScheduleRunFinished(t, env, run.ID)
+	if done.Status != model.BotRunStatusStopped {
+		t.Fatalf("被停止的孤儿 run 应收尾为 stopped，实得 %s（%v）", done.Status, done.ErrorMessage)
+	}
+}
+
+// L2：同一计划时间已有运行记录时仍要推进 next_run_at，否则任务永远停在到期集合里
+// 每 tick 空转。
+func TestBotScheduleDuplicateTriggerAdvancesPlan(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "[[SILENT]]"})
+	userID := createBotTestUser(t, env.db, "scheddup")
+	bot := env.createBot(t, userID)
+	planned := time.Now().UTC().Add(-3 * time.Second)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NextRunAt = &planned
+	})
+	taskID := task.ID
+	existing := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource:  model.BotTriggerSchedule,
+		TriggerKey:     botScheduleTriggerKey(taskID, planned),
+		Status:         model.BotRunStatusCompleted,
+		SessionKind:    model.BotSessionKindSchedule,
+		ScheduleTaskID: &taskID, ScheduledFor: &planned,
+		ConfigSnapshotJSON: "{}", CreatedAt: planned,
+	}
+	if err := env.bots.runs.CreateTx(env.db, existing); err != nil {
+		t.Fatalf("seed existing run: %v", err)
+	}
+
+	env.bots.dispatchDueScheduleTask(task, time.Now().UTC())
+	fresh, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if fresh.NextRunAt == nil || fresh.NextRunAt.Equal(planned) {
+		t.Fatalf("撞重复计划时间后仍应推进 next_run_at，实得 %+v", fresh.NextRunAt)
+	}
+	var count int64
+	env.db.Model(&model.BotRun{}).Where("schedule_task_id = ?", task.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("不应重复建 run，实得 %d", count)
+	}
+}
+
+// L3：对「已启用且这次计划还在宽限内等派发」的任务再点启用，不该吃掉这次触发。
+func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedenable")
+	bot := env.createBot(t, userID)
+	due := time.Now().UTC().Add(-5 * time.Second)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NextRunAt = &due
+	})
+	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if got.NextRunAt == nil || !got.NextRunAt.Equal(due) {
+		t.Fatalf("已启用任务再启用应保留待派发的计划，实得 %+v", got.NextRunAt)
+	}
+	// 停用后再启用才重算。
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	back, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	if err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if back.NextRunAt == nil || !back.NextRunAt.After(time.Now().UTC()) {
+		t.Fatalf("重新启用应重算未来计划，实得 %+v", back.NextRunAt)
+	}
+}
+
+// L4：cron 解析失败时任务应被真正暂停（enabled=false），不留「开着但不再跑」。
+func TestBotSchedulePauseDisablesTask(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedpause")
+	bot := env.createBot(t, userID)
+	due := time.Now().UTC().Add(-3 * time.Second)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.CronExpression = "not a cron"
+		tk.NextRunAt = &due
+	})
+	env.bots.scheduleTick(time.Now().UTC())
+	fresh, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if fresh.Enabled || fresh.NextRunAt != nil {
+		t.Fatalf("解析失败应暂停（enabled=false 且无下次计划），实得 %+v", fresh)
+	}
+}
+
+// R1/R2：需要汇报的任务被跳过时要留一条事件，并写明原定计划时间。
+func TestBotScheduleSkippedReportsWhenNeeded(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedskiprep")
+	bot := env.createBot(t, userID)
+	past := time.Now().UTC().Add(-10 * time.Minute)
+	reportTask := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Name = "要汇报的"
+		tk.NeedsReport = true
+		tk.NextRunAt = &past
+	})
+	quietTask := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Name = "不汇报的"
+		tk.NeedsReport = false
+		tk.NextRunAt = &past
+	})
+
+	env.bots.scheduleTick(time.Now().UTC())
+	for _, id := range []string{reportTask.ID, quietTask.ID} {
+		var run model.BotRun
+		if err := env.db.Where("schedule_task_id = ?", id).First(&run).Error; err != nil {
+			t.Fatalf("run for %s: %v", id, err)
+		}
+		if run.Status != model.BotRunStatusSkipped {
+			t.Fatalf("超宽限应记 skipped: %+v", run)
+		}
+		if !strings.Contains(run.Summary, "原定") {
+			t.Fatalf("skipped 摘要应写明原定计划时间: %q", run.Summary)
+		}
+	}
+	n, content := countScheduleEvents(t, env, bot.ID)
+	if n != 1 {
+		t.Fatalf("只有需要汇报的任务跳过才留事件，实得 %d", n)
+	}
+	if content.Status != string(model.BotRunStatusSkipped) || content.TaskName != "要汇报的" {
+		t.Fatalf("跳过事件内容不符: %+v", content)
+	}
+}

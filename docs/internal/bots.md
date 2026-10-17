@@ -250,8 +250,12 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   触上限会告警，不静默丢弃。
   重启不重复触发（trigger_key 唯一 + 不在启动时补跑），未完成的 schedule
   run 由启动恢复统一置 failed（`server_restarted`）并照常追加主线事件。
-  cron 解析复用 automation 的五字段 parser 与时区校验（`parseAutomationCron`
-  同一函数），解析失败暂停该任务（next_run_at 置空）。
+  同一计划时间已有运行记录时仍推进 `next_run_at`（否则任务会永远停在到期集合里
+  空转）。cron 解析复用 automation 的五字段 parser 与时区校验
+  （`parseAutomationCron` 同一函数），解析失败暂停该任务（`next_run_at` 置空且
+  `enabled=false`，不留「开着但不再跑」）。对已启用、且这次计划还在宽限内等着
+  派发的任务再点「启用」不会重算计划（不吞掉这次触发）；只有原本停用或没有下次
+  计划时才重算。
 - **执行槽**：`botRuntimeState.active` 的 key 泛化为会话槽——主线 `botID`、
   schedule `"schedule:"+runID`。schedule run 与主线可同时运行、互不让位；
   同一 schedule run 不重复执行（槽占用即放弃）。`scanOnce` 每 5s 按键集分页重扫
@@ -272,7 +276,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   （`session_kind='main'`、`run_id=NULL`，正文 JSON 含 task_id/task_name/
   run_id/status/summary/error_code/error_message）。时机：**failed 必报**；
   `completed && needs_report && !silent` 才报；成功静默、成功且不需汇报、
-  skipped、stopped 都不追加。任务在运行期间被删除时仍按派发时冻结的
+  stopped 不追加；`needs_report` 的任务被跳过时追加一条 `status=skipped` 的事件
+  （跳过也是一次「没跑」，不能零信号；跳过摘要写明原定计划时间）。任务在运行期间
+  被删除时仍按派发时冻结的
   `needs_report` 与任务名判定并追加事件（失败必报；含启动恢复路径）——读不到
   任务行时用占位名「已删除的定时任务」，否则这次运行的结果既报不出去、用户也
   无从经任务查询看到。`schedule_event` 是主线模型输入（计入
@@ -294,6 +300,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   `PUT .../{taskId}/enabled`（body 只接受 `{"enabled":bool}`，其它字段 400）。
   没有任何创建/编辑/删除端点。`BotScheduleTask` 含 `last_run`；
   `BotScheduleRun` 含 `status/summary/silent/scheduled_for/duration_ms/usage`。
+- **删除任务**：同一事务里给该任务未完成的运行置 `stop_requested_at` 再删任务
+  ——运行记录只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住
+  机器人删除；已跑了很久的运行不受影响，会在下一个安全点收尾为 `stopped`。
 - **已知限制**：schedule 会话不做压缩与摘要（超长会话靠确定性折叠与上游
   上下文限制显式失败）；错过不补跑；无用户侧任务编辑。**同一任务在一次运行
   还没结束时仍会按 cron 再次触发**（多个 run 并行、各自默认放行写操作）——

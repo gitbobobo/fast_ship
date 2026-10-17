@@ -445,11 +445,16 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool) 
 		}
 		cols := map[string]interface{}{"enabled": enabled, "updated_at": now}
 		if enabled {
-			_, next, parseErr := parseAutomationCron(task.CronExpression, task.Timezone, now)
-			if parseErr != nil {
-				return parseErr
+			// 只有「原本停用」或「没有下次计划」才重算。已经启用、且这次计划
+			// 就在宽限内等着派发的任务，再点一次「启用」不该吃掉这一次触发。
+			recompute := !task.Enabled || task.NextRunAt == nil
+			if recompute {
+				_, next, parseErr := parseAutomationCron(task.CronExpression, task.Timezone, now)
+				if parseErr != nil {
+					return parseErr
+				}
+				cols["next_run_at"] = next
 			}
-			cols["next_run_at"] = next
 		} else {
 			cols["next_run_at"] = nil
 		}
@@ -478,12 +483,40 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool) 
 }
 
 // deleteScheduleTask 删除任务；运行记录保留（账本供排查）。
+// deleteScheduleTask 删除任务，并在同一事务里请求停止它未完成的运行：运行记录
+// 只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住机器人删除。
+// 已跑了很久的 run 不受影响，会在下一个安全点收尾为 stopped。
 func (s *BotService) deleteScheduleTask(botID, taskID string) error {
-	if err := s.schedTasks.Delete(botID, taskID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+	var stoppedRunIDs []string
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		var runs []model.BotRun
+		if err := tx.Where("bot_id = ? AND schedule_task_id = ? AND finished_at IS NULL", botID, taskID).
+			Find(&runs).Error; err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		for i := range runs {
+			ok, err := repository.NewBotRunRepository(tx).UpdateColumnsWhereTx(tx, runs[i].ID,
+				map[string]interface{}{"finished_at": nil},
+				map[string]interface{}{"stop_requested_at": now})
+			if err != nil {
+				return err
+			}
+			if ok {
+				stoppedRunIDs = append(stoppedRunIDs, runs[i].ID)
+			}
+		}
+		return repository.NewBotScheduleTaskRepository(tx).Delete(botID, taskID)
+	})
+	if txErr != nil {
+		if errors.Is(txErr, gorm.ErrRecordNotFound) {
 			return errs.ErrBotScheduleTaskNotFound
 		}
 		return errs.ErrInternal
+	}
+	// 提交后补唤醒：没有执行槽的孤儿 run 靠 5s 扫描也能被捡起，这里让收尾更快。
+	for _, runID := range stoppedRunIDs {
+		s.wakeScheduleRun(botID, runID)
 	}
 	return nil
 }

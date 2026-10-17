@@ -38,7 +38,15 @@ const (
 	botScheduleCallSettleWait = botAsyncExecTimeout + 5*time.Minute
 	// botScheduleCallSettlePoll 是等待结算的轮询间隔。
 	botScheduleCallSettlePoll = 500 * time.Millisecond
+	// botScheduleWakePerScan 是单轮扫描最多补唤醒的 run 数；已唤醒的会占住槽，
+	// 下一轮自然轮到后面的 run，不会饿死。
+	botScheduleWakePerScan = 200
 )
+
+// botScheduleSlotKey 是 schedule run 的执行槽 key（与 wakeScheduleRun 一致）。
+func botScheduleSlotKey(runID string) string {
+	return "schedule:" + runID
+}
 
 // scheduleWaitOutcome 是等待本次运行异步调用结算的结果。
 type scheduleWaitOutcome int
@@ -177,7 +185,9 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		if missed {
 			// 错过的计划时间：跳过并记录，不执行、不补跑；直接落终态。
 			run.Status = model.BotRunStatusSkipped
-			run.Summary = "错过的计划时间，已跳过"
+			// 写明原定计划时间：跨越很长停机时次数不会逐个补记，至少留得住
+			// 「哪次没跑」这条线索。
+			run.Summary = "错过的计划时间（原定 " + planned.UTC().Format(time.RFC3339) + "），已跳过"
 			finished := now
 			run.FinishedAt = &finished
 		} else {
@@ -190,14 +200,31 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 			})
 		}
 		if err := tx.Create(run).Error; err != nil {
-			// 唯一索引冲突：同一计划时间已建过 run（重启/并发），不重复。
+			// 唯一索引冲突：同一计划时间已建过 run（重启/并发/回滚快照）。
+			// 该次计划已由既有 run 覆盖，但 next_run_at 仍必须推进——否则任务
+			// 会永远停在到期集合里，每 tick 空转一次。
 			if isBotRunDuplicateTriggerKey(err) {
-				return nil
+				s.logger.Warn("定时任务的计划时间已有运行记录，跳过重复创建并推进计划",
+					zap.String("task_id", current.ID),
+					zap.Time("planned", planned))
+				_, next, parseErr := parseAutomationCron(current.CronExpression, current.Timezone, now)
+				if parseErr != nil {
+					return repository.NewBotScheduleTaskRepository(tx).PauseTx(tx, current.ID)
+				}
+				_, advErr := repository.NewBotScheduleTaskRepository(tx).AdvanceNextRunTx(tx, current.ID, planned, next)
+				return advErr
 			}
 			return err
 		}
 		if !missed {
 			wakeRunID = run.ID
+		} else if current.NeedsReport {
+			// 需要汇报的任务：跳过也是一次「没跑」，不能零信号。一条停机只记
+			// 一条，不会刷屏。
+			if err := s.appendScheduleEventTx(tx, current.BotID, &current, run,
+				model.BotRunStatusSkipped, run.Summary, "", "", now); err != nil {
+				return err
+			}
 		}
 
 		// CAS 推进 next_run_at 到严格晚于 now 的下一次；0 行 = 被并发抢走。
@@ -266,7 +293,7 @@ func (s *BotService) wakeScheduleRun(botID, runID string) {
 		run.SessionKind != model.BotSessionKindSchedule {
 		return
 	}
-	slot := "schedule:" + runID
+	slot := botScheduleSlotKey(runID)
 	if s.rt.acquire(slot, &botWake{Trigger: model.BotTriggerSchedule, Key: run.TriggerKey}) == nil {
 		return
 	}
@@ -284,26 +311,26 @@ func (s *BotService) runScheduleSlot(botID, runID string) {
 					s.finishFailed(bot, run, "panicked", errs.New(errs.ErrInternal.Code, "定时任务执行 panic"))
 				}
 			}
-			s.rt.release("schedule:" + runID)
+			s.rt.release(botScheduleSlotKey(runID))
 		}
 	}()
 	run, err := s.runs.FindByID(runID)
 	if err != nil || run.FinishedAt != nil || run.SessionKind != model.BotSessionKindSchedule {
-		s.rt.release("schedule:" + runID)
+		s.rt.release(botScheduleSlotKey(runID))
 		return
 	}
 	bot, err := s.bots.Get(botID)
 	if err != nil {
-		s.rt.release("schedule:" + runID)
+		s.rt.release(botScheduleSlotKey(runID))
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s.rt.setCancel("schedule:"+runID, cancel)
+	s.rt.setCancel(botScheduleSlotKey(runID), cancel)
 	func() {
 		defer cancel()
 		s.botLoop(bot, run, ctx)
 	}()
-	s.rt.release("schedule:" + runID)
+	s.rt.release(botScheduleSlotKey(runID))
 }
 
 // ---------- schedule run 收尾（D3/D4：终态与事件同一事务） ----------
