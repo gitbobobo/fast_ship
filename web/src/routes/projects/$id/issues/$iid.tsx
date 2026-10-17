@@ -1,41 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import {
-  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Circle,
-  CircleDot,
-  Clock,
   Copy,
   Ellipsis,
   ExternalLink,
-  Eye,
   FileText,
-  Flag,
-  GitBranch,
-  GitCommit,
-  GitMerge,
   Inbox,
   Lightbulb,
   Link2,
-  ListChecks,
   Loader2,
-  Lock,
   MessageSquare,
   Pencil,
   PanelLeft,
   Play,
-  Plus,
   RefreshCw,
-  Sparkles,
-  Tag,
-  Trash2,
-  Unlock,
-  User,
-  Wand2,
-  X,
 } from "lucide-react";
 import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
@@ -44,21 +26,14 @@ import { IssueAttachmentsCard } from "@/components/issues/issue-attachments-card
 import { IssuePullRequestsCard } from "@/components/issues/issue-pull-requests-card";
 import { IssueScreenshotAnnotationsCard } from "@/components/issues/issue-screenshot-annotations-card";
 import { IssueShipHookCard } from "@/components/issues/issue-ship-hook-card";
+import { IssueWorkflowStatusBadge } from "@/components/issues/issue-workflow-status-badge";
 import { Header } from "@/components/layout/header";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 
 import {
   DropdownMenu,
@@ -93,13 +68,9 @@ import {
   useUpdateIssueInternalMeta,
 } from "@/lib/hooks/use-issues";
 import { useProject } from "@/lib/hooks/use-projects";
-import {
-  useRecommendations,
-  useRestoreRecommendation,
-} from "@/lib/hooks/use-recommendations";
+import { useRecommendations } from "@/lib/hooks/use-recommendations";
 import { useIssueChecklistSuggestions } from "@/lib/hooks/use-ai";
 import {
-  ISSUE_WORKFLOW_STATUS_LABELS,
   ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
   type IssueWorkflowStatus,
 } from "@/lib/issue-workflow-status";
@@ -107,7 +78,6 @@ import { useIssuePromptList } from "@/lib/hooks/use-issue-prompt";
 import { useEnvironments } from "@/lib/hooks/use-threads";
 import { buildIssuePrompt } from "@/lib/issue-prompt";
 import { canOperate } from "@/lib/threads-compose";
-import { uuid } from "@/lib/uuid";
 import { readIssueDetailContext } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -120,176 +90,19 @@ import { cn, getInitials } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
 import { formatDate, formatRelativeTime } from "@/lib/utils/format";
 import { toast } from "sonner";
-
-
-function getEventIcon(eventType: string) {
-  switch (eventType) {
-    case "labeled":
-    case "unlabeled":
-      return Tag;
-    case "milestoned":
-    case "demilestoned":
-      return Flag;
-    case "assigned":
-    case "unassigned":
-      return User;
-    case "closed":
-      return CheckCircle2;
-    case "reopened":
-      return Circle;
-    case "renamed":
-      return Pencil;
-    case "locked":
-      return Lock;
-    case "unlocked":
-      return Unlock;
-    case "referenced":
-    case "cross-referenced":
-      return GitCommit;
-    case "merged":
-      return GitMerge;
-    case "head_ref_deleted":
-    case "head_ref_restored":
-      return GitBranch;
-    case "review_requested":
-    case "review_request_removed":
-      return Eye;
-    case "issue_type_added":
-    case "issue_type_removed":
-    case "added_type":
-    case "removed_type":
-      return CircleDot;
-    default:
-      return Circle;
-  }
-}
-
-function getLabelFromPayload(payload: Record<string, unknown>) {
-  if (!payload || typeof payload !== "object") return null;
-  const label = payload.label as Record<string, unknown> | undefined;
-  if (!label || typeof label !== "object") return null;
-  return {
-    name: String(label.name || ""),
-    color: String(label.color || ""),
-  };
-}
-
-function getIssueTypeFromPayload(payload: Record<string, unknown>) {
-  if (!payload || typeof payload !== "object") return null;
-  const issueType = payload.issue_type as Record<string, unknown> | undefined;
-  if (!issueType || typeof issueType !== "object") return null;
-  return {
-    name: String(issueType.name || ""),
-    color: String(issueType.color || ""),
-  };
-}
-
-function ColoredPill({ name, color }: { name: string; color: string }) {
-  const bg = color ? `#${color}20` : "var(--muted)";
-  const text = color ? `#${color}` : "var(--muted-foreground)";
-  return (
-    <span
-      className="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium"
-      style={{ backgroundColor: bg, borderColor: `${text}40`, color: text }}
-    >
-      {name}
-    </span>
-  );
-}
-
-function renderEventSummary(event: IssueTimelineEvent) {
-  switch (event.event_type) {
-    case "labeled": {
-      const label = getLabelFromPayload(event.payload);
-      if (label?.name) {
-        return (
-          <>
-            添加了标签 <ColoredPill name={label.name} color={label.color} />
-          </>
-        );
-      }
-      if (event.summary && event.summary !== event.event_type) return event.summary;
-      return "添加了标签";
-    }
-    case "unlabeled": {
-      const label = getLabelFromPayload(event.payload);
-      if (label?.name) {
-        return (
-          <>
-            移除了标签 <ColoredPill name={label.name} color={label.color} />
-          </>
-        );
-      }
-      if (event.summary && event.summary !== event.event_type) return event.summary;
-      return "移除了标签";
-    }
-    case "issue_type_added":
-    case "added_type": {
-      const type = getIssueTypeFromPayload(event.payload);
-      if (type?.name) {
-        return (
-          <>
-            添加了问题类型 <ColoredPill name={type.name} color={type.color} />
-          </>
-        );
-      }
-      if (event.summary && event.summary !== event.event_type) return event.summary;
-      return "添加了问题类型";
-    }
-    case "issue_type_removed":
-    case "removed_type": {
-      const type = getIssueTypeFromPayload(event.payload);
-      if (type?.name) {
-        return (
-          <>
-            移除了问题类型 <ColoredPill name={type.name} color={type.color} />
-          </>
-        );
-      }
-      if (event.summary && event.summary !== event.event_type) return event.summary;
-      return "移除了问题类型";
-    }
-    default:
-      return event.summary || event.event_type;
-  }
-}
-
-function getCommentAnchorId(commentId: number) {
-  return `issuecomment-${commentId}`;
-}
-
-function getTimelineAnchorId(eventId: number) {
-  return `issueevent-${eventId}`;
-}
-
-function findPayloadHtmlUrl(value: unknown, depth = 0): string | null {
-  if (depth > 4 || !value || typeof value !== "object") {
-    return null;
-  }
-
-  if ("html_url" in value && typeof value.html_url === "string" && value.html_url) {
-    return value.html_url;
-  }
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findPayloadHtmlUrl(item, depth + 1);
-      if (found) {
-        return found;
-      }
-    }
-    return null;
-  }
-
-  for (const nestedValue of Object.values(value)) {
-    const found = findPayloadHtmlUrl(nestedValue, depth + 1);
-    if (found) {
-      return found;
-    }
-  }
-
-  return null;
-}
+import {
+  IssueCommentComposer,
+  IssueTimeline,
+  findPayloadHtmlUrl,
+  getCommentAnchorId,
+  getTimelineAnchorId,
+  type IssueTimelineItem,
+} from "./components/issue-timeline";
+import {
+  IssueChecklistCard,
+  type IssueChecklistDraftItem,
+} from "./components/issue-checklist-card";
+import { IssueRecommendationBanner } from "./components/issue-recommendation-banner";
 
 function StateBadge({ state }: { state: "open" | "closed" }) {
   const isOpen = state === "open";
@@ -307,19 +120,6 @@ function StateBadge({ state }: { state: "open" | "closed" }) {
     </span>
   );
 }
-
-type ChecklistDraftItem = {
-  localId: string;
-  id?: string;
-  title: string;
-  isCompleted: boolean;
-};
-
-type SuggestedChecklistDraftItem = {
-  id: string;
-  title: string;
-  selected: boolean;
-};
 
 function ProgressBadge({ progress }: { progress?: number | null }) {
   if (progress == null) {
@@ -343,51 +143,6 @@ function ProgressBadge({ progress }: { progress?: number | null }) {
       进度 {progress}%
     </span>
   );
-}
-
-function WorkflowStatusBadge({ status }: { status?: string | null }) {
-  if (!status) {
-    return null;
-  }
-
-  const label = ISSUE_WORKFLOW_STATUS_LABELS[status as IssueWorkflowStatus];
-  if (!label) {
-    return null;
-  }
-
-  const className =
-    status === "todo"
-      ? "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400"
-      : status === "in_progress"
-        ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-        : "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
-
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
-        className,
-      )}
-    >
-      {label}
-    </span>
-  );
-}
-
-function normalizeChecklistDraft(items: ChecklistDraftItem[]) {
-  return items.map((item) => ({
-    id: item.id ?? "",
-    title: item.title.trim(),
-    is_completed: item.isCompleted,
-  }));
-}
-
-function calculateChecklistProgress(items: Array<{ isCompleted: boolean }>) {
-  if (items.length === 0) {
-    return null;
-  }
-  const completed = items.filter((item) => item.isCompleted).length;
-  return Math.round((completed * 100) / items.length);
 }
 
 function normalizeLabelNames(labels: string[]) {
@@ -425,171 +180,6 @@ function toggleLabelName(labels: string[], labelName: string) {
     : [...labels, labelName];
 }
 
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-14 text-center">
-      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-muted">
-        <MessageSquare className="h-5 w-5 text-muted-foreground" />
-      </div>
-      <p className="text-sm font-medium text-muted-foreground">{message}</p>
-    </div>
-  );
-}
-
-const RECOMMENDATION_PRIORITY_META: Record<
-  IssueRecommendation["priority"],
-  { label: string; className: string }
-> = {
-  high: {
-    label: "高优先级",
-    className: "border-destructive/30 bg-destructive/10 text-destructive",
-  },
-  medium: {
-    label: "中优先级",
-    className:
-      "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  },
-  low: {
-    label: "低优先级",
-    className:
-      "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400",
-  },
-};
-
-function RecommendationDependencyLink({
-  dep,
-}: {
-  dep: RecommendationDependency;
-}) {
-  const closed = dep.state === "closed";
-  const done = closed || dep.workflow_status === "done";
-  const label = closed
-    ? "已关闭"
-    : ISSUE_WORKFLOW_STATUS_LABELS[dep.workflow_status];
-
-  const statusClass = done
-    ? "text-muted-foreground"
-    : dep.workflow_status === "in_progress"
-      ? "text-amber-600 dark:text-amber-400"
-      : "text-slate-600 dark:text-slate-400";
-
-  return (
-    <Link
-      to={`/projects/${dep.project_id}/issues/${dep.issue_id}`}
-      className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-background px-1.5 py-0.5 text-xs hover:bg-muted"
-    >
-      <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
-        {dep.reference}
-      </span>
-      <span
-        className={cn(
-          "min-w-0 truncate",
-          done && "text-muted-foreground line-through",
-        )}
-      >
-        {dep.title}
-      </span>
-      <span className={cn("shrink-0", statusClass)}>{label}</span>
-    </Link>
-  );
-}
-
-/** 推荐横幅：被推荐的问题进入详情页时显示在正文卡片上方，与正文同级呈现「为什么现在做这条」。 */
-function RecommendationBanner({
-  recommendation,
-}: {
-  recommendation: IssueRecommendation;
-}) {
-  const priority = RECOMMENDATION_PRIORITY_META[recommendation.priority];
-  return (
-    <section
-      aria-label="推荐"
-      className="rounded-2xl border border-violet-500/25 bg-violet-500/5 px-4 py-3.5"
-    >
-      <div className="flex items-center gap-2">
-        <Sparkles className="h-4 w-4 text-violet-500" />
-        <span className="text-sm font-semibold">推荐任务</span>
-        <span
-          className={cn(
-            "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-            priority.className,
-          )}
-        >
-          {priority.label}
-        </span>
-      </div>
-      <p className="mt-2 text-sm leading-relaxed whitespace-pre-wrap text-foreground/90">
-        {recommendation.reason}
-      </p>
-      {recommendation.dependencies.length > 0 && (
-        <div className="mt-2.5 flex items-start gap-2">
-          <span className="shrink-0 py-0.5 text-xs text-muted-foreground">
-            前置
-          </span>
-          <div className="flex min-w-0 flex-wrap gap-1.5">
-            {recommendation.dependencies.map((dep) => (
-              <RecommendationDependencyLink key={dep.issue_id} dep={dep} />
-            ))}
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-/** 已延后推荐横幅：低调灰底，展示延后时间与备注，可一键移回推荐。 */
-function DeferredRecommendationBanner({
-  recommendation,
-}: {
-  recommendation: IssueRecommendation;
-}) {
-  const restoreRecommendation = useRestoreRecommendation();
-
-  const handleRestore = async () => {
-    try {
-      await restoreRecommendation.mutateAsync(recommendation.issue.id);
-      toast.success("已移回推荐");
-    } catch {
-      toast.error("移回推荐失败");
-    }
-  };
-
-  return (
-    <section
-      aria-label="已延后推荐"
-      className="rounded-2xl border bg-muted/40 px-4 py-3.5"
-    >
-      <div className="flex items-center gap-2">
-        <Clock className="h-4 w-4 text-muted-foreground" />
-        <span className="text-sm font-medium text-muted-foreground">
-          已延后
-          {recommendation.deferred_at
-            ? ` · ${formatRelativeTime(recommendation.deferred_at)}`
-            : ""}
-        </span>
-        <Button
-          variant="outline"
-          size="sm"
-          className="ml-auto h-7 text-xs"
-          onClick={() => void handleRestore()}
-          disabled={restoreRecommendation.isPending}
-        >
-          {restoreRecommendation.isPending ? "移回中..." : "移回推荐"}
-        </Button>
-      </div>
-      {recommendation.defer_note ? (
-        <p className="mt-1.5 text-sm leading-relaxed whitespace-pre-wrap text-foreground/80">
-          {recommendation.defer_note}
-        </p>
-      ) : null}
-    </section>
-  );
-}
-
-type TimelineItem =
-  | { type: "comment"; data: IssueComment; created_at: string }
-  | { type: "event"; data: IssueTimelineEvent; created_at: string };
-
 export default function IssueDetailPage() {
   const token = useAuthStore((state) => state.token);
   const { id, iid } = useParams();
@@ -606,14 +196,10 @@ export default function IssueDetailPage() {
   );
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt: string } | null>(null);
-  const [commentDraft, setCommentDraft] = useState("");
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isTitleEditing, setIsTitleEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [isChecklistEditing, setIsChecklistEditing] = useState(false);
-  const [checklistDraft, setChecklistDraft] = useState<ChecklistDraftItem[]>([]);
   const [labelDraft, setLabelDraft] = useState<string[] | null>(null);
-  const [isSuggestionDialogOpen, setIsSuggestionDialogOpen] = useState(false);
   const [launchDialogOpen, setLaunchDialogOpen] = useState(false);
   const issuePrompts = useIssuePromptList();
   // 「启动线程…」入口只在存在可操作环境时出现；绑定与否由弹框处理
@@ -621,15 +207,7 @@ export default function IssueDetailPage() {
   const hasOperableEnvironment = (launchEnvironments ?? []).some((env) =>
     canOperate(env),
   );
-  const [suggestionState, setSuggestionState] = useState<
-    "idle" | "loading" | "ready" | "missing-settings" | "error"
-  >("idle");
-  const [suggestedChecklistItems, setSuggestedChecklistItems] = useState<
-    SuggestedChecklistDraftItem[]
-  >([]);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
   const timelineSectionRef = useRef<HTMLDivElement | null>(null);
-  const isChecklistEditingRef = useRef(false);
   const labelDraftRef = useRef<string[] | null>(null);
   const labelPersistedRef = useRef<string[]>([]);
   const labelCommitInFlightRef = useRef(false);
@@ -663,7 +241,8 @@ export default function IssueDetailPage() {
   const createComment = useCreateIssueComment(iid!, id);
   const replaceChecklist = useReplaceIssueChecklist(iid!, id);
   const suggestChecklist = useIssueChecklistSuggestions(iid!);
-  const { data: issueListData } = useIssues(id!, {
+  // 当前页与 prev/next 页共用同一组筛选，只有 page 不同
+  const issueListFilters = {
     state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
     q: issueContext.q || undefined,
     label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
@@ -673,32 +252,19 @@ export default function IssueDetailPage() {
         ? undefined
         : issueContext.workflowStatus || undefined,
     sort: issueContext.sort,
+  };
+  const { data: issueListData } = useIssues(id!, {
+    ...issueListFilters,
     page: issueContext.page,
     page_size: 20,
   });
   const { data: prevPageData } = useIssues(id!, {
-    state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
-    q: issueContext.q || undefined,
-    label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
-    source: issueContext.source === "all" ? undefined : issueContext.source || undefined,
-    workflow_status:
-      issueContext.workflowStatus === "all"
-        ? undefined
-        : issueContext.workflowStatus || undefined,
-    sort: issueContext.sort,
+    ...issueListFilters,
     page: issueContext.page > 1 ? issueContext.page - 1 : 1,
     page_size: 20,
   });
   const { data: nextPageData } = useIssues(id!, {
-    state: issueContext.state === "all" ? undefined : issueContext.state || undefined,
-    q: issueContext.q || undefined,
-    label: issueContext.label === "all" ? undefined : issueContext.label || undefined,
-    source: issueContext.source === "all" ? undefined : issueContext.source || undefined,
-    workflow_status:
-      issueContext.workflowStatus === "all"
-        ? undefined
-        : issueContext.workflowStatus || undefined,
-    sort: issueContext.sort,
+    ...issueListFilters,
     page: issueContext.page + 1,
     page_size: 20,
   });
@@ -718,7 +284,7 @@ export default function IssueDetailPage() {
     isLoading: timelineLoading,
   } = useInfiniteIssueTimeline(iid!, 20);
   const syncIssues = useSyncProjectIssues(id!);
-  const persistedChecklist = useMemo(
+  const persistedChecklist: IssueChecklistDraftItem[] = useMemo(
     () =>
       (issue?.internal_meta?.checklist ?? []).map((item) => ({
         localId: item.id,
@@ -728,18 +294,6 @@ export default function IssueDetailPage() {
       })),
     [issue?.internal_meta?.checklist],
   );
-  const draftProgress = useMemo(
-    () => calculateChecklistProgress(checklistDraft),
-    [checklistDraft],
-  );
-  const completedChecklistCount = useMemo(
-    () => checklistDraft.filter((item) => item.isCompleted).length,
-    [checklistDraft],
-  );
-  const isChecklistDirty = useMemo(() => {
-    return JSON.stringify(normalizeChecklistDraft(checklistDraft)) !==
-      JSON.stringify(normalizeChecklistDraft(persistedChecklist));
-  }, [checklistDraft, persistedChecklist]);
   const issueLabelNames = useMemo(
     () =>
       normalizeLabelNames(
@@ -770,17 +324,6 @@ export default function IssueDetailPage() {
     labelDraftRef.current = normalized;
     setLabelDraft(normalized);
   }, []);
-
-  useEffect(() => {
-    isChecklistEditingRef.current = isChecklistEditing;
-  }, [isChecklistEditing]);
-
-  useEffect(() => {
-    if (isChecklistEditingRef.current) {
-      return;
-    }
-    setChecklistDraft(persistedChecklist);
-  }, [persistedChecklist]);
 
   useEffect(() => {
     if (labelCommitInFlightRef.current || labelQueuedRef.current) {
@@ -818,8 +361,8 @@ export default function IssueDetailPage() {
   const loadedTimelinePages = infiniteTimelineData?.pages.length ?? 1;
   const targetCommentAnchorId = isCommentAnchorHash ? location.hash.slice(1) : null;
   const targetTimelineAnchorId = isTimelineAnchorHash ? location.hash.slice(1) : null;
-  const timelineItems: TimelineItem[] = useMemo(() => {
-    const items: TimelineItem[] = [
+  const timelineItems: IssueTimelineItem[] = useMemo(() => {
+    const items: IssueTimelineItem[] = [
       ...comments.map((c) => ({ type: "comment" as const, data: c, created_at: c.created_at })),
       ...timeline.map((e) => ({ type: "event" as const, data: e, created_at: e.created_at })),
     ];
@@ -828,7 +371,25 @@ export default function IssueDetailPage() {
   }, [comments, timeline]);
 
   const hasMore = hasNextCommentsPage || hasNextTimelinePage;
+  const isFetchingMoreTimeline = isFetchingNextCommentsPage || isFetchingNextTimelinePage;
   const isLoadingTimeline = commentsLoading || timelineLoading;
+
+  // 时间线无限滚动：模块只给一个触发时机，两个分页各自按原条件补拉
+  const handleTimelineLoadMore = useCallback(() => {
+    if (hasNextCommentsPage && !isFetchingNextCommentsPage) {
+      void fetchNextCommentsPage();
+    }
+    if (hasNextTimelinePage && !isFetchingNextTimelinePage) {
+      void fetchNextTimelinePage();
+    }
+  }, [
+    fetchNextCommentsPage,
+    fetchNextTimelinePage,
+    hasNextCommentsPage,
+    hasNextTimelinePage,
+    isFetchingNextCommentsPage,
+    isFetchingNextTimelinePage,
+  ]);
 
   const updateSearchParam = useCallback(
     (key: string, value: number) => {
@@ -912,40 +473,6 @@ export default function IssueDetailPage() {
     isFetchingNextTimelinePage,
     loadedTimelinePages,
     targetTimelineAnchorId,
-  ]);
-
-  useEffect(() => {
-    if (!sentinelRef.current) {
-      return;
-    }
-    if (typeof IntersectionObserver === "undefined") {
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (entry?.isIntersecting) {
-          if (hasNextCommentsPage && !isFetchingNextCommentsPage) {
-            void fetchNextCommentsPage();
-          }
-          if (hasNextTimelinePage && !isFetchingNextTimelinePage) {
-            void fetchNextTimelinePage();
-          }
-        }
-      },
-      { rootMargin: "200px" }
-    );
-
-    observer.observe(sentinelRef.current);
-    return () => observer.disconnect();
-  }, [
-    fetchNextCommentsPage,
-    fetchNextTimelinePage,
-    hasNextCommentsPage,
-    hasNextTimelinePage,
-    isFetchingNextCommentsPage,
-    isFetchingNextTimelinePage,
   ]);
 
   useEffect(() => {
@@ -1051,151 +578,32 @@ export default function IssueDetailPage() {
     await copyGitHubUrl(targetUrl, successMessage);
   };
 
-  const handleCopyCommentGitHubLink = async (comment: IssueComment) => {
-    await copyGitHubUrl(comment.html_url, "已复制 GitHub 深链接");
-  };
-
-  const handleCopyTimelineGitHubLink = async (event: IssueTimelineEvent) => {
-    const eventHtmlUrl = findPayloadHtmlUrl(event.payload);
-    const targetUrl = eventHtmlUrl || issue?.github?.html_url;
-    const successMessage = eventHtmlUrl ? "已复制 GitHub 深链接" : "当前动态没有精确 GitHub 链接，已复制问题链接";
-    await copyGitHubUrl(targetUrl, successMessage);
-  };
-
-  const handleChecklistAdd = () => {
-    setChecklistDraft((current) => [
-      ...current,
-      {
-        localId: uuid(),
-        title: "",
-        isCompleted: false,
-      },
-    ]);
-  };
-
-  const handleChecklistChange = (
-    localId: string,
-    updates: Partial<Pick<ChecklistDraftItem, "title" | "isCompleted">>,
-  ) => {
-    setChecklistDraft((current) =>
-      current.map((item) =>
-        item.localId === localId ? { ...item, ...updates } : item,
-      ),
-    );
-  };
-
-  const handleChecklistRemove = (localId: string) => {
-    setChecklistDraft((current) => current.filter((item) => item.localId !== localId));
-  };
-
-  const persistChecklist = async (
-    nextDraft: ChecklistDraftItem[],
-    options?: { successMessage?: string; rollbackDraft?: ChecklistDraftItem[]; exitEditMode?: boolean },
-  ) => {
-    const normalized = nextDraft.map((item) => ({
-      id: item.id,
-      title: item.title.trim(),
-      is_completed: item.isCompleted,
-    }));
-    if (normalized.some((item) => !item.title)) {
-      toast.error("请先填写所有任务清单标题");
-      return false;
-    }
-
-    try {
-      await replaceChecklist.mutateAsync({ items: normalized });
-      if (options?.successMessage) {
-        toast.success(options.successMessage);
+  // 清单模块只管 draft 与交互；持久化、成功/失败 toast 都由路由负责
+  const handleSaveChecklist = useCallback(
+    async (
+      items: { id?: string; title: string; is_completed: boolean }[],
+      options?: { successMessage?: string },
+    ): Promise<boolean> => {
+      try {
+        await replaceChecklist.mutateAsync({ items });
+        if (options?.successMessage) {
+          toast.success(options.successMessage);
+        }
+        return true;
+      } catch {
+        toast.error("保存任务清单失败");
+        return false;
       }
-      if (options?.exitEditMode) {
-        setIsChecklistEditing(false);
-      }
-      return true;
-    } catch {
-      if (options?.rollbackDraft) {
-        setChecklistDraft(options.rollbackDraft);
-      }
-      toast.error("保存任务清单失败");
-      return false;
-    }
-  };
+    },
+    [replaceChecklist],
+  );
 
-  const handleChecklistSave = async () => {
-    await persistChecklist(checklistDraft, {
-      successMessage: "任务清单已保存",
-      exitEditMode: true,
-    });
-  };
+  const requestChecklistSuggestions = useCallback(
+    () => suggestChecklist.mutateAsync(),
+    [suggestChecklist],
+  );
 
-  const handleChecklistToggleCompleted = async (localId: string) => {
-    const rollbackDraft = checklistDraft;
-    const nextDraft = checklistDraft.map((item) =>
-      item.localId === localId ? { ...item, isCompleted: !item.isCompleted } : item,
-    );
-    setChecklistDraft(nextDraft);
-    await persistChecklist(nextDraft, { rollbackDraft });
-  };
-
-  const handleChecklistCancelEdit = () => {
-    setChecklistDraft(persistedChecklist);
-    setIsChecklistEditing(false);
-  };
-
-  const handleOpenSuggestionDialog = async () => {
-    setIsSuggestionDialogOpen(true);
-    setSuggestionState("loading");
-    setSuggestedChecklistItems([]);
-
-    try {
-      const result = await suggestChecklist.mutateAsync();
-      setSuggestedChecklistItems(
-        result.items.map((item, index) => ({
-          id: `${index}-${item.title}`,
-          title: item.title,
-          selected: true,
-        })),
-      );
-      setSuggestionState("ready");
-    } catch (error) {
-      const status = (error as { response?: { status?: number } })?.response?.status;
-      setSuggestionState(status === 404 ? "missing-settings" : "error");
-    }
-  };
-
-  const handleSuggestionToggle = (id: string) => {
-    setSuggestedChecklistItems((current) =>
-      current.map((item) =>
-        item.id === id ? { ...item, selected: !item.selected } : item,
-      ),
-    );
-  };
-
-  const handleAppendSuggestions = async () => {
-    const selectedItems = suggestedChecklistItems.filter((item) => item.selected);
-    if (selectedItems.length === 0) {
-      toast.error("请至少选择一项");
-      return;
-    }
-
-    const rollbackDraft = checklistDraft;
-    const nextDraft = [
-      ...checklistDraft,
-      ...selectedItems.map((item) => ({
-        localId: uuid(),
-        title: item.title,
-        isCompleted: false,
-      })),
-    ];
-    setChecklistDraft(nextDraft);
-
-    const success = await persistChecklist(nextDraft, {
-      rollbackDraft,
-      successMessage: "已补充到任务清单",
-    });
-    if (success) {
-      setIsSuggestionDialogOpen(false);
-    }
-  };
+  const handleConfigureAi = useCallback(() => navigate("/settings/ai"), [navigate]);
 
   const handleToggleIssueState = async () => {
     if (!issue) {
@@ -1300,19 +708,20 @@ export default function IssueDetailPage() {
     await commitLabelDraft();
   };
 
-  const handleCreateComment = async () => {
-    if (!commentDraft.trim()) {
-      toast.error("请输入评论内容");
-      return;
-    }
-    try {
-      await createComment.mutateAsync({ body: commentDraft });
-      setCommentDraft("");
-      toast.success("评论已发布");
-    } catch {
-      toast.error("发布评论失败");
-    }
-  };
+  // 评论输入框的空值校验与清空都在 composer 模块内；这里只负责发布与 toast
+  const handleCreateComment = useCallback(
+    async (body: string): Promise<boolean> => {
+      try {
+        await createComment.mutateAsync({ body });
+        toast.success("评论已发布");
+        return true;
+      } catch {
+        toast.error("发布评论失败");
+        return false;
+      }
+    },
+    [createComment],
+  );
 
   if (isLoading) {
     return (
@@ -1471,170 +880,14 @@ export default function IssueDetailPage() {
         annotations={issue.screenshot_annotations}
       />
 
-      <Card>
-        <CardContent className="space-y-4 p-4">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold">任务清单</h3>
-            {isChecklistEditing ? (
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="取消编辑"
-                  onClick={handleChecklistCancelEdit}
-                  disabled={replaceChecklist.isPending}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  size="icon-sm"
-                  aria-label="保存"
-                  title="保存任务清单"
-                  onClick={() => void handleChecklistSave()}
-                  disabled={!isChecklistDirty || replaceChecklist.isPending}
-                >
-                  {replaceChecklist.isPending ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Check className="h-3.5 w-3.5" />
-                  )}
-                </Button>
-              </div>
-            ) : (
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="智能识别任务清单建议"
-                  onClick={() => void handleOpenSuggestionDialog()}
-                >
-                  <Sparkles className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="编辑"
-                  title="编辑任务清单"
-                  onClick={() => setIsChecklistEditing(true)}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            )}
-          </div>
-
-          {checklistDraft.length > 0 && (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="font-semibold">{draftProgress ?? 0}%</span>
-                <span className="text-xs text-muted-foreground">
-                  {completedChecklistCount}/{checklistDraft.length} 项完成
-                  {issue.internal_meta?.checklist_updated_at && (
-                    <span className="ml-1">· 更新于 {formatRelativeTime(issue.internal_meta.checklist_updated_at)}</span>
-                  )}
-                </span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-muted">
-                <div
-                  className={cn(
-                    "h-full rounded-full transition-all",
-                    (draftProgress ?? 0) >= 100 ? "bg-emerald-500" : "bg-amber-500",
-                  )}
-                  style={{ width: `${draftProgress ?? 0}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          <div className="space-y-2">
-            {checklistDraft.length === 0 ? (
-              <div className="text-sm text-muted-foreground">
-                还没有任务清单。
-              </div>
-            ) : (
-              checklistDraft.map((item, index) => (
-                <div
-                  key={item.localId}
-                  className={cn(
-                    "group flex items-center gap-3 rounded-lg border p-2.5 transition-colors",
-                    isChecklistEditing ? "bg-card" : "bg-card hover:bg-muted/50",
-                  )}
-                >
-                  {isChecklistEditing ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handleChecklistChange(item.localId, { isCompleted: !item.isCompleted })}
-                        className={cn(
-                          "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border transition-colors",
-                          item.isCompleted
-                            ? "border-emerald-500 bg-emerald-500 text-white"
-                            : "border-input bg-background text-transparent hover:border-muted-foreground",
-                        )}
-                      >
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                      </button>
-                      <Input
-                        value={item.title}
-                        onChange={(event) =>
-                          handleChecklistChange(item.localId, { title: event.target.value })
-                        }
-                        placeholder={`任务 ${index + 1}`}
-                        className={cn("h-8 flex-1", item.isCompleted && "text-muted-foreground line-through")}
-                      />
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 shrink-0"
-                        aria-label={`删除任务清单 ${index + 1}`}
-                        onClick={() => handleChecklistRemove(item.localId)}
-                      >
-                        <Trash2 className="h-4 w-4 text-muted-foreground" />
-                      </Button>
-                    </>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        disabled={replaceChecklist.isPending}
-                        onClick={() => void handleChecklistToggleCompleted(item.localId)}
-                        aria-label={
-                          item.isCompleted
-                            ? `取消完成任务清单 ${index + 1}`
-                            : `标记完成任务清单 ${index + 1}`
-                        }
-                        className={cn(
-                          "inline-flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded border transition-colors",
-                          item.isCompleted
-                            ? "border-emerald-500 bg-emerald-500 text-white"
-                            : "border-input bg-background text-transparent hover:border-muted-foreground",
-                        )}
-                      >
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                      </button>
-                      <p
-                        className={cn(
-                          "min-w-0 flex-1 text-sm",
-                          item.isCompleted && "text-muted-foreground line-through",
-                        )}
-                      >
-                        {item.title}
-                      </p>
-                    </>
-                  )}
-                </div>
-              ))
-            )}
-
-            {isChecklistEditing && (
-              <Button variant="outline" className="w-full" onClick={handleChecklistAdd}>
-                <Plus className="mr-1.5 h-3.5 w-3.5" />
-                {checklistDraft.length === 0 ? "添加第一项" : "添加项"}
-              </Button>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      <IssueChecklistCard
+        items={persistedChecklist}
+        updatedAt={issue.internal_meta?.checklist_updated_at ?? null}
+        isSaving={replaceChecklist.isPending}
+        onSave={handleSaveChecklist}
+        requestSuggestions={requestChecklistSuggestions}
+        onConfigureAi={handleConfigureAi}
+      />
     </>
   );
 
@@ -1782,11 +1035,7 @@ export default function IssueDetailPage() {
           {/* Main Content */}
           <div className="min-w-0 space-y-6 [&_img]:cursor-zoom-in" onClick={handleImageClick}>
             {recommendation ? (
-              recommendation.status === "deferred" ? (
-                <DeferredRecommendationBanner recommendation={recommendation} />
-              ) : (
-                <RecommendationBanner recommendation={recommendation} />
-              )
+              <IssueRecommendationBanner recommendation={recommendation} />
             ) : null}
             {/* Issue Header Card */}
             <div className="overflow-hidden rounded-2xl border bg-card shadow-sm transition-shadow hover:shadow-md">
@@ -1797,7 +1046,10 @@ export default function IssueDetailPage() {
                     {ISSUE_SOURCE_LABELS[issue.source]}
                   </span>
                   <ProgressBadge progress={issue.internal_meta?.progress_percent} />
-                  <WorkflowStatusBadge status={issue.internal_meta?.workflow_status} />
+                  <IssueWorkflowStatusBadge
+                    size="md"
+                    status={issue.internal_meta?.workflow_status}
+                  />
                   {(issue.source === "github"
                     ? issue.github?.labels ?? []
                     : issue.internal_meta?.labels ?? []
@@ -1926,171 +1178,22 @@ export default function IssueDetailPage() {
             <div className="-mt-6">
               <div id="timeline" ref={timelineSectionRef} className="scroll-mt-20" />
 
-              {isLoadingTimeline ? (
-                <div className="relative space-y-6 pt-6">
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <Skeleton key={i} className="h-24 rounded-2xl" />
-                  ))}
-                </div>
-              ) : timelineItems.length === 0 ? (
-                <div className="py-6">
-                  <EmptyState message="暂无评论和动态" />
-                </div>
-              ) : (
-                <div className="relative space-y-0 pt-4">
-                  <div className="absolute bottom-0 left-4 top-0 w-px bg-border" />
+              <IssueTimeline
+                items={timelineItems}
+                isLoading={isLoadingTimeline}
+                hasMore={hasMore}
+                isFetchingMore={isFetchingMoreTimeline}
+                onLoadMore={handleTimelineLoadMore}
+                flashHighlightId={flashHighlightId}
+                onNavigateToAnchor={setAnchor}
+                onCopyGithubLink={copyGitHubUrl}
+                fallbackGithubUrl={issue.github?.html_url ?? null}
+              />
 
-                  {timelineItems.map((item) =>
-                    item.type === "comment" ? (
-                      <div
-                        key={`comment-${item.data.id}`}
-                        id={getCommentAnchorId(item.data.github_comment_id)}
-                        className={cn(
-                          "relative pb-6 scroll-mt-20 transition-all",
-                          flashHighlightId === getCommentAnchorId(item.data.github_comment_id)
-                            ? "ring-2 ring-primary/30 rounded-2xl"
-                            : ""
-                        )}
-                      >
-                        <div className="group overflow-hidden rounded-2xl border bg-card transition-all hover:border-foreground/15 hover:shadow-sm">
-                          <div className="flex items-center justify-between border-b bg-muted/30 px-4 py-3 md:px-5">
-                            <div className="flex items-center gap-3">
-                              <Avatar size="sm">
-                                <AvatarImage src={toGitHubMediaProxyUrl(item.data.author.avatar_url, token)} alt={item.data.author.login} />
-                                <AvatarFallback>{getInitials(item.data.author.login)}</AvatarFallback>
-                              </Avatar>
-                              <div className="flex flex-col">
-                                <span className="text-sm font-medium">@{item.data.author.login}</span>
-                                <span className="text-xs text-muted-foreground">{formatDate(item.data.created_at)}</span>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
-                              <Button
-                                variant="ghost"
-                                size="icon-xs"
-                                aria-label={`定位到评论 ${item.data.github_comment_id}`}
-                                onClick={() =>
-                                  setAnchor(`#${getCommentAnchorId(item.data.github_comment_id)}`)
-                                }
-                              >
-                                <Link2 className="h-3.5 w-3.5" />
-                              </Button>
-                              {item.data.source === "github" && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  aria-label={`复制评论 ${item.data.github_comment_id} 的 GitHub 深链接`}
-                                  onClick={() => void handleCopyCommentGitHubLink(item.data)}
-                                >
-                                  <ExternalLink className="h-3.5 w-3.5" />
-                                </Button>
-                              )}
-                            </div>
-                          </div>
-                          <div className="px-4 py-4 md:px-5 md:py-5">
-                            <GitHubContent
-                              className="markdown-body"
-                              html={item.data.body_html}
-                              markdown={item.data.body || "_空评论_"}
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div
-                        key={`event-${item.data.id}`}
-                        id={getTimelineAnchorId(item.data.github_event_id)}
-                        className={cn(
-                          "group relative flex items-start gap-3 pb-4 scroll-mt-20 md:gap-4",
-                          flashHighlightId === getTimelineAnchorId(item.data.github_event_id)
-                            ? "rounded-lg bg-primary/5 py-1"
-                            : ""
-                        )}
-                      >
-                        {/* Timeline badge - centered on the vertical line */}
-                        <div className="absolute left-4 top-0 flex shrink-0 -translate-x-1/2">
-                          <div className="flex h-8 w-8 items-center justify-center rounded-full border bg-background shadow-sm">
-                            {(() => {
-                              const Icon = getEventIcon(item.data.event_type);
-                              return <Icon className="h-3.5 w-3.5 text-muted-foreground" />;
-                            })()}
-                          </div>
-                        </div>
-
-                        <div className="min-w-0 flex-1 pl-8 pt-1.5">
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <span className="text-sm font-semibold text-foreground">
-                              {item.data.actor.login || "GitHub"}
-                            </span>
-                            <span className="text-sm text-muted-foreground">{renderEventSummary(item.data)}</span>
-                            <span className="text-xs text-muted-foreground/80">
-                              {formatRelativeTime(item.data.created_at)}
-                            </span>
-                          </div>
-
-                          {item.data.body && (
-                            <p className="mt-1 text-sm text-muted-foreground line-clamp-3">{item.data.body}</p>
-                          )}
-
-                          <div className="mt-1 flex items-center gap-2 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100">
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label={`定位到动态 ${item.data.github_event_id}`}
-                              onClick={() =>
-                                setAnchor(`#${getTimelineAnchorId(item.data.github_event_id)}`)
-                              }
-                            >
-                              <Link2 className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label={`复制动态 ${item.data.github_event_id} 的 GitHub 深链接`}
-                              onClick={() => void handleCopyTimelineGitHubLink(item.data)}
-                            >
-                              <ExternalLink className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  )}
-                </div>
-              )}
-
-              {timelineItems.length > 0 && hasMore && (
-                <div ref={sentinelRef} className="h-1 w-full" />
-              )}
-
-            <Card>
-              <CardContent className="space-y-4 p-5 md:p-6">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-sm font-semibold">{isInternalIssue ? "内部评论" : "添加评论"}</h2>
-                    <p className="text-sm text-muted-foreground">
-                      {isInternalIssue ? "评论仅保存在 Fast Ship 内部。" : "评论会直接发布到 GitHub Issue。"}
-                    </p>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  <Textarea
-                    value={commentDraft}
-                    onChange={(event) => setCommentDraft(event.target.value)}
-                    rows={5}
-                    placeholder="使用 Markdown 输入评论内容"
-                  />
-                  <div className="flex justify-end">
-                    <Button
-                      onClick={() => void handleCreateComment()}
-                      disabled={createComment.isPending}
-                    >
-                      {createComment.isPending ? "发布中..." : "发布评论"}
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+              <IssueCommentComposer
+                isInternalIssue={isInternalIssue}
+                onSubmit={handleCreateComment}
+              />
             </div>
           </div>
 
@@ -2123,254 +1226,6 @@ export default function IssueDetailPage() {
           </div>
         </SheetContent>
       </Sheet>
-
-            <Dialog open={isSuggestionDialogOpen} onOpenChange={setIsSuggestionDialogOpen}>
-              <DialogContent className="flex w-[90vw] max-w-[calc(100%-2rem)] flex-col overflow-hidden p-0 max-h-[90vh] sm:max-w-[1100px]">
-                <DialogHeader className="shrink-0 border-b bg-muted/30 px-6 pt-5 pb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                      <Wand2 className="h-4.5 w-4.5" />
-                    </div>
-                    <div className="flex-1">
-                      <DialogTitle className="text-base">清单建议</DialogTitle>
-                      <DialogDescription className="mt-0.5 text-xs">
-                        基于问题内容智能识别可补充的任务清单项
-                      </DialogDescription>
-                    </div>
-                  </div>
-                </DialogHeader>
-
-                <div className="grid flex-1 gap-0 overflow-hidden md:grid-cols-[3fr_2fr]">
-                  <div className="flex flex-col gap-3 overflow-hidden border-r px-6 py-5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <Lightbulb className="h-4 w-4 text-amber-500" />
-                        <span className="text-sm font-semibold">AI 建议</span>
-                        {suggestionState === "ready" && suggestedChecklistItems.length > 0 && (
-                          <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary">
-                            {suggestedChecklistItems.filter((i) => i.selected).length}/
-                            {suggestedChecklistItems.length} 已选
-                          </span>
-                        )}
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-8 gap-1.5 text-xs"
-                        onClick={() => void handleOpenSuggestionDialog()}
-                        disabled={suggestionState === "loading"}
-                      >
-                        {suggestionState === "loading" ? (
-                          <>
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            识别中...
-                          </>
-                        ) : (
-                          <>
-                            <RefreshCw className="h-3.5 w-3.5" />
-                            重新识别
-                          </>
-                        )}
-                      </Button>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto rounded-xl border bg-muted/20 p-3">
-                      {suggestionState === "loading" ? (
-                        <div className="space-y-3">
-                          {[...Array(4)].map((_, i) => (
-                            <div
-                              key={i}
-                              className="flex items-start gap-3 rounded-lg border border-dashed border-border/60 bg-background/50 p-3"
-                            >
-                              <Skeleton className="mt-0.5 h-5 w-5 shrink-0 rounded" />
-                              <div className="flex-1 space-y-2">
-                                <Skeleton className="h-4 w-3/4 rounded" />
-                                <Skeleton className="h-3 w-1/4 rounded" />
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : suggestionState === "missing-settings" ? (
-                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
-                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                            <Sparkles className="h-5 w-5 text-muted-foreground" />
-                          </div>
-                          <p className="mt-4 text-sm font-medium">尚未配置 AI</p>
-                          <p className="mt-1 max-w-[240px] text-xs text-muted-foreground leading-relaxed">
-                            先在设置中保存 API Host、模型和 API Key，再回来使用智能识别。
-                          </p>
-                          <Button
-                            className="mt-5 h-8 text-xs"
-                            size="sm"
-                            onClick={() => navigate("/settings/ai")}
-                          >
-                            前往 AI 配置
-                          </Button>
-                        </div>
-                      ) : suggestionState === "error" ? (
-                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
-                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-destructive/10">
-                            <RefreshCw className="h-5 w-5 text-destructive" />
-                          </div>
-                          <p className="mt-4 text-sm font-medium">识别失败</p>
-                          <p className="mt-1 max-w-[240px] text-xs text-muted-foreground leading-relaxed">
-                            当前无法获取 AI 建议，请稍后重试。
-                          </p>
-                        </div>
-                      ) : suggestedChecklistItems.length === 0 ? (
-                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
-                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                            <Lightbulb className="h-5 w-5 text-muted-foreground" />
-                          </div>
-                          <p className="mt-4 text-sm font-medium">暂无建议项</p>
-                          <p className="mt-1 max-w-[240px] text-xs text-muted-foreground leading-relaxed">
-                            当前内容不足以生成建议，可以在补充评论后再试一次。
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          {suggestedChecklistItems.map((item, index) => (
-                            <button
-                              key={item.id}
-                              type="button"
-                              onClick={() => handleSuggestionToggle(item.id)}
-                              className={cn(
-                                "group flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-all duration-150",
-                                item.selected
-                                  ? "border-primary/20 bg-background shadow-sm"
-                                  : "border-border/60 bg-background/60 opacity-70 hover:opacity-100",
-                              )}
-                            >
-                              <span
-                                className={cn(
-                                  "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-all duration-150",
-                                  item.selected
-                                    ? "border-emerald-500 bg-emerald-500 text-white shadow-sm"
-                                    : "border-input bg-background text-transparent group-hover:border-emerald-500/50",
-                                )}
-                              >
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                              </span>
-                              <div className="min-w-0 flex-1">
-                                <p className="text-sm font-medium leading-5">{item.title}</p>
-                                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                                  建议项 {index + 1}
-                                </p>
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-3 overflow-hidden bg-muted/10 px-6 py-5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <ListChecks className="h-4 w-4 text-emerald-500" />
-                        <span className="text-sm font-semibold">任务清单</span>
-                        {checklistDraft.length > 0 && (
-                          <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
-                            {checklistDraft.filter((i) => i.isCompleted).length}/
-                            {checklistDraft.length} 完成
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto rounded-xl border bg-muted/20 p-3">
-                      {checklistDraft.length === 0 ? (
-                        <div className="flex h-full min-h-[280px] flex-col items-center justify-center rounded-lg border border-dashed bg-background px-6 text-center">
-                          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-                            <Inbox className="h-5 w-5 text-muted-foreground" />
-                          </div>
-                          <p className="mt-4 text-sm font-medium">当前还没有任务清单项</p>
-                          <p className="mt-1 max-w-[200px] text-xs text-muted-foreground leading-relaxed">
-                            从左侧选择建议项，追加到这里。
-                          </p>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          {checklistDraft.map((item, index) => (
-                            <div
-                              key={item.localId}
-                              className="flex items-start gap-3 rounded-lg border bg-background p-3"
-                            >
-                              <span
-                                className={cn(
-                                  "mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md border",
-                                  item.isCompleted
-                                    ? "border-emerald-500 bg-emerald-500 text-white"
-                                    : "border-input bg-background text-transparent",
-                                )}
-                              >
-                                <CheckCircle2 className="h-3.5 w-3.5" />
-                              </span>
-                              <div className="min-w-0 flex-1">
-                                <p
-                                  className={cn(
-                                    "text-sm leading-5",
-                                    item.isCompleted && "text-muted-foreground line-through",
-                                  )}
-                                >
-                                  {item.title || `任务 ${index + 1}`}
-                                </p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <DialogFooter className="shrink-0 border-t bg-muted/30 px-6 py-4 sm:justify-between">
-                  <div className="hidden items-center gap-2 text-xs text-muted-foreground sm:flex">
-                    {suggestionState === "ready" && suggestedChecklistItems.length > 0 ? (
-                      <>
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                        已选择 {suggestedChecklistItems.filter((i) => i.selected).length} 项建议
-                      </>
-                    ) : suggestionState === "loading" ? null : (
-                      <>
-                        <Lightbulb className="h-3.5 w-3.5" />
-                        点击建议项即可选中或取消
-                      </>
-                    )}
-                  </div>
-                  <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 text-xs"
-                      onClick={() => setIsSuggestionDialogOpen(false)}
-                    >
-                      关闭
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="h-8 gap-1.5 text-xs"
-                      aria-label="追加到任务清单"
-                      onClick={() => void handleAppendSuggestions()}
-                      disabled={
-                        suggestionState !== "ready" ||
-                        suggestedChecklistItems.every((item) => !item.selected) ||
-                        replaceChecklist.isPending
-                      }
-                    >
-                      {replaceChecklist.isPending && (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      )}
-                      {replaceChecklist.isPending
-                        ? "追加中..."
-                        : `追加到任务清单 (${suggestedChecklistItems.filter((i) => i.selected).length})`}
-                    </Button>
-                  </div>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
 
       {/* Image Lightbox */}
       <Dialog open={lightboxOpen} onOpenChange={setLightboxOpen}>

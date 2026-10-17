@@ -45,16 +45,13 @@ import {
   useSyncProjectIssues,
   useUpdateIssue,
 } from "@/lib/hooks/use-issues";
-import {
-  ISSUE_WORKFLOW_STATUS_LABELS,
-  ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS,
-  type IssueWorkflowStatus,
-} from "@/lib/issue-workflow-status";
+import { ISSUE_WORKFLOW_STATUS_SELECT_OPTIONS } from "@/lib/issue-workflow-status";
 import { buildIssueDetailSearchParams } from "@/lib/issue-list-context";
 import { ISSUE_SOURCE_LABELS } from "@/lib/issue-source";
 import { IssuePullRequestBadge } from "@/components/issues/issue-pull-request-badge";
 import { IssueShipHookBadge } from "@/components/issues/issue-ship-hook-badge";
 import { IssueCommentCountMeta } from "@/components/issues/issue-comment-count-meta";
+import { IssueWorkflowStatusBadge } from "@/components/issues/issue-workflow-status-badge";
 import { cn } from "@/lib/utils";
 import { copyWithToast } from "@/lib/copy";
 import {
@@ -99,39 +96,6 @@ function IssueProgressBadge({
       )}
     >
       进度 {progress}%
-    </span>
-  );
-}
-
-function IssueWorkflowStatusBadge({
-  status,
-}: {
-  status?: string | null;
-}) {
-  if (!status) {
-    return null;
-  }
-
-  const label = ISSUE_WORKFLOW_STATUS_LABELS[status as IssueWorkflowStatus];
-  if (!label) {
-    return null;
-  }
-
-  const className =
-    status === "todo"
-      ? "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400"
-      : status === "in_progress"
-        ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-        : "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400";
-
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
-        className,
-      )}
-    >
-      {label}
     </span>
   );
 }

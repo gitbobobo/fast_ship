@@ -15,6 +15,7 @@ import { GitHubContent } from "@/components/github-content";
 import { CollaborationArea } from "@/components/issues/collaboration-area";
 import { CopyIssuePromptButton } from "@/components/issues/copy-issue-prompt-button";
 import { LaunchIssueThreadDialog } from "@/components/issues/launch-issue-thread-dialog";
+import { IssueWorkflowStatusBadge } from "@/components/issues/issue-workflow-status-badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIssue } from "@/lib/hooks/use-issues";
@@ -37,29 +38,6 @@ function StatePill({ state }: { state: Issue["state"] }) {
       )}
     >
       {open ? "Open" : "Closed"}
-    </span>
-  );
-}
-
-function WorkflowStatusPill({ status }: { status?: string | null }) {
-  if (!status) return null;
-  const label =
-    ISSUE_WORKFLOW_STATUS_LABELS[
-      status as keyof typeof ISSUE_WORKFLOW_STATUS_LABELS
-    ];
-  if (!label) return null;
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium",
-        status === "in_progress"
-          ? "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-          : status === "done"
-            ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
-            : "border-slate-500/20 bg-slate-500/10 text-slate-600 dark:text-slate-400",
-      )}
-    >
-      {label}
     </span>
   );
 }
@@ -288,7 +266,8 @@ export function RecommendationDetailPane({
                   {issue.reference}
                 </span>
                 <StatePill state={issue.state} />
-                <WorkflowStatusPill
+                <IssueWorkflowStatusBadge
+                  size="xs"
                   status={issue.internal_meta?.workflow_status}
                 />
               </div>
