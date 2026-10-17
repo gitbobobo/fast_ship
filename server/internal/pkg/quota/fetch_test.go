@@ -2030,3 +2030,33 @@ func TestFactoryCorePoolZeroUsedPercentAloneIsData(t *testing.T) {
 		t.Fatalf("没有计时字段时不应有重置时间，得到 %v", core.ResetAt)
 	}
 }
+
+// 旧版 Factory 接口返回 2xx 但没有可识别额度（usage 缺失/为空）时必须报接口异常：
+// 返回空快照会被 service 当成成功，用空窗口覆盖掉上次可用的数据。
+func TestFactoryLegacyEmptyUsageIsProviderError(t *testing.T) {
+	cases := map[string]string{
+		"usage 缺失": `{"userId":"user-1"}`,
+		"usage 为空": `{"usage":{},"userId":"user-1"}`,
+		"标准与高级窗口都没有可解析字段": `{"usage":{"standard":{"x":1},"premium":{"y":2}}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+				switch r.URL.Path {
+				case "/api/app/auth/me":
+					return http.StatusOK, []byte(`{"organization":{"subscription":{"orbSubscription":{"plan":{"name":"Pro"}}}}}`)
+				case "/api/billing/limits":
+					return http.StatusNotFound, []byte(`{}`)
+				case "/api/organization/subscription/usage":
+					return http.StatusOK, []byte(body)
+				}
+				return http.StatusNotFound, []byte(`{}`)
+			})
+			ctx, cancel := fetchCtx()
+			defer cancel()
+
+			_, err := fetchFactory(ctx, server.Client(), server.URL, Credentials{"api_key": "fk-key"})
+			requireProviderError(t, err)
+		})
+	}
+}

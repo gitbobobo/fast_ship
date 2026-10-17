@@ -204,7 +204,14 @@ func fetchFactoryLegacyUsage(ctx context.Context, client *http.Client, base stri
 	if err != nil {
 		return Snapshot{}, ProviderError("Factory 用量数据无法解析，接口可能已变更。", 0)
 	}
-	return buildFactoryLegacySnapshot(authInfo, usageRoot), nil
+	snapshot := buildFactoryLegacySnapshot(authInfo, usageRoot)
+	// 旧版接口可能返回 2xx 却没有可识别的额度（usage 缺失或结构变了）。空快照不能
+	// 当成功：service 会用空窗口覆盖掉上次可用的数据并标记正常，同时把下一次
+	// 抓取推到常规节奏。与其他六家「无可识别数据即 provider_error」保持一致。
+	if len(snapshot.Windows) == 0 && snapshot.Balance == nil {
+		return Snapshot{}, ProviderError("Factory 旧版用量接口没有可识别的额度数据，接口可能已变更。", 0)
+	}
+	return snapshot, nil
 }
 
 func buildFactoryLegacySnapshot(authInfo, usageRoot map[string]any) Snapshot {
@@ -239,9 +246,14 @@ func factoryLegacyWindow(value any, label string, periodEnd *time.Time) *Window 
 	if !ok {
 		return nil
 	}
-	used, _ := asNumber(obj["userTokens"])
-	allowance, _ := asNumber(obj["totalAllowance"])
+	used, hasUsed := asNumber(obj["userTokens"])
+	allowance, hasAllowance := asNumber(obj["totalAllowance"])
 	ratio, hasRatio := asNumber(obj["usedRatio"])
+	// 三个量一个都没有，说明这不是一个额度池对象（旧接口结构变了）：不要造一个
+	// 0% 的空窗口，否则空响应会被当成「真的有额度且为 0」写进快照。
+	if !hasUsed && !hasAllowance && !hasRatio {
+		return nil
+	}
 
 	// ratio==0 但 used>0 说明比值是占位哨兵，忽略后按 used/allowance 计算。
 	ratioIsSentinel := hasRatio && ratio == 0 && used > 0 && allowance > 0 && allowance <= 1e12
