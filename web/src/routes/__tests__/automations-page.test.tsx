@@ -431,10 +431,8 @@ describe("AutomationsPage", () => {
     expect(envSelect).toHaveTextContent("加载中…");
     expect(envSelect).not.toHaveTextContent("env-1");
 
-    const projectSelect = screen
-      .getByText("T3 项目")
-      .closest("div")!
-      .querySelector("[role='combobox']");
+    // T3 项目是 T3ProjectPicker chip（button + aria-label），不是 combobox。
+    const projectSelect = screen.getByRole("button", { name: "T3 项目" });
     expect(projectSelect).toHaveTextContent("加载中…");
     expect(projectSelect).not.toHaveTextContent("proj-1");
   });
@@ -548,8 +546,9 @@ describe("AutomationsPage", () => {
 
     await user.click(selectByLabel("T3 环境"));
     await user.click(await screen.findByText("本机环境"));
-    await user.click(selectByLabel("T3 项目"));
-    await user.click(await screen.findByText("示例项目"));
+    // T3 项目走 T3ProjectPicker：点触发器 → 在面板列表里点项目行。
+    await user.click(screen.getByRole("button", { name: "T3 项目" }));
+    await user.click(await screen.findByRole("option", { name: /示例项目/ }));
 
     await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
@@ -619,8 +618,8 @@ describe("AutomationsPage", () => {
 
     await user.click(selectByLabel("T3 环境"));
     await user.click(await screen.findByText("本机环境"));
-    await user.click(selectByLabel("T3 项目"));
-    await user.click(await screen.findByText("示例项目"));
+    await user.click(screen.getByRole("button", { name: "T3 项目" }));
+    await user.click(await screen.findByRole("option", { name: /示例项目/ }));
 
     await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
