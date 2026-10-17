@@ -138,6 +138,7 @@ func (s *BotService) scheduleTick(now time.Time) {
 func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now time.Time) {
 	planned := *task.NextRunAt
 	wakeRunID := ""
+	appendedEvent := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		var current model.BotScheduleTask
 		if err := tx.Where("id = ? AND enabled = ?", task.ID, true).First(&current).Error; err != nil {
@@ -225,6 +226,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 				model.BotRunStatusSkipped, run.Summary, "", "", now); err != nil {
 				return err
 			}
+			appendedEvent = true
 		}
 
 		// CAS 推进 next_run_at 到严格晚于 now 的下一次；0 行 = 被并发抢走。
@@ -244,6 +246,11 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 	}
 	if wakeRunID != "" {
 		s.wakeScheduleRun(task.BotID, wakeRunID)
+	}
+	if appendedEvent {
+		// 跳过事件已落账本，但本路径没有别的发布点：不 publish 的话订阅方要等
+		// 下一次别的事件才看得到这一行。
+		s.publishEvent(task.BotID)
 	}
 }
 

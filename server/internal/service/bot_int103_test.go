@@ -1670,3 +1670,26 @@ func TestBotScheduleSkippedReportsWhenNeeded(t *testing.T) {
 		t.Fatalf("跳过事件内容不符: %+v", content)
 	}
 }
+
+// 跳过事件也必须 publish：否则订阅方要等下一次别的事件才看得到这一行。
+func TestBotScheduleSkippedEventPublishesToSubscribers(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedskippub")
+	bot := env.createBot(t, userID)
+	past := time.Now().UTC().Add(-10 * time.Minute)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NeedsReport = true
+		tk.NextRunAt = &past
+	})
+
+	ch, cancel := env.bots.SubscribeEvents(bot.ID)
+	defer cancel()
+	env.bots.dispatchDueScheduleTask(task, time.Now().UTC())
+
+	select {
+	case <-ch:
+		// 收到有新事件的信号即可（订阅方按 seq 回读）。
+	case <-time.After(2 * time.Second):
+		t.Fatalf("跳过事件追加后应发布一次事件通知")
+	}
+}
