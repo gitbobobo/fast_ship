@@ -62,6 +62,28 @@ const ALLOWED_ATTRS = new Set([
   "font-weight",
 ]);
 
+// 这些属性的值必须匹安全字面量：`fill`/`stroke` 允许颜色与 currentColor/none，
+// 不允许 `url(...)`（可指向外部 paint server）等；数值类属性只允许数字。
+const PAINT_VALUE =
+  /^(none|currentColor|transparent|#[0-9a-f]{3,8}|rgba?\([^()]*\)|hsla?\([^()]*\)|oklch\([^()]*\)|[a-z]+)$/i;
+const NUMBER_VALUE = /^(0|1|0?\.\d+|\d+(\.\d+)?)(%|px|pt|em|rem)?$/i;
+const ATTR_VALUE_PATTERNS = {
+  fill: PAINT_VALUE,
+  stroke: PAINT_VALUE,
+  "fill-opacity": NUMBER_VALUE,
+  "stroke-opacity": NUMBER_VALUE,
+  opacity: NUMBER_VALUE,
+  "stroke-width": NUMBER_VALUE,
+  "font-size": NUMBER_VALUE,
+  "fill-rule": /^(nonzero|evenodd)$/i,
+  "clip-rule": /^(nonzero|evenodd)$/i,
+  "font-family": /^[-\w\s,'"]+$/,
+};
+function attrValueAllowed(name, value) {
+  const pattern = ATTR_VALUE_PATTERNS[name];
+  return pattern ? pattern.test(value) : true;
+}
+
 function parseTag(tag) {
   const match = /^<\s*(\/?)\s*([a-zA-Z][\w:-]*)([\s\S]*?)>$/.exec(tag);
   if (!match) return null;
@@ -76,7 +98,9 @@ function parseTag(tag) {
   )) {
     const attrName = attr[1].toLowerCase();
     if (!ALLOWED_ATTRS.has(attrName)) continue;
-    const value = (attr[2] ?? attr[3] ?? attr[4] ?? "").replace(/"/g, "&quot;");
+    const rawValue = attr[2] ?? attr[3] ?? attr[4] ?? "";
+    if (!attrValueAllowed(attrName, rawValue)) continue;
+    const value = rawValue.replace(/"/g, "&quot;");
     kept.push(`${attrName}="${value}"`);
   }
   const selfClose = /\/\s*$/.test(rawAttrs);
