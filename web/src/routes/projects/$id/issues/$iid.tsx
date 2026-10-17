@@ -100,6 +100,8 @@ import {
 } from "./components/issue-timeline";
 import {
   IssueChecklistCard,
+  IssueChecklistSuggestionsDialog,
+  useIssueChecklistController,
   type IssueChecklistDraftItem,
 } from "./components/issue-checklist-card";
 import { IssueRecommendationBanner } from "./components/issue-recommendation-banner";
@@ -605,6 +607,16 @@ export default function IssueDetailPage() {
 
   const handleConfigureAi = useCallback(() => navigate("/settings/ai"), [navigate]);
 
+  // 清单状态只在 route 创建一次：桌面 aside 与移动 Sheet 的两份卡片共享同一份 draft/编辑态/建议弹框
+  const checklistController = useIssueChecklistController({
+    items: persistedChecklist,
+    updatedAt: issue?.internal_meta?.checklist_updated_at ?? null,
+    isSaving: replaceChecklist.isPending,
+    onSave: handleSaveChecklist,
+    requestSuggestions: requestChecklistSuggestions,
+    onConfigureAi: handleConfigureAi,
+  });
+
   const handleToggleIssueState = async () => {
     if (!issue) {
       return;
@@ -880,14 +892,7 @@ export default function IssueDetailPage() {
         annotations={issue.screenshot_annotations}
       />
 
-      <IssueChecklistCard
-        items={persistedChecklist}
-        updatedAt={issue.internal_meta?.checklist_updated_at ?? null}
-        isSaving={replaceChecklist.isPending}
-        onSave={handleSaveChecklist}
-        requestSuggestions={requestChecklistSuggestions}
-        onConfigureAi={handleConfigureAi}
-      />
+      <IssueChecklistCard controller={checklistController} />
     </>
   );
 
@@ -1226,6 +1231,9 @@ export default function IssueDetailPage() {
           </div>
         </SheetContent>
       </Sheet>
+
+      {/* 清单建议弹框全局只渲染一份，由 checklistController 驱动 */}
+      <IssueChecklistSuggestionsDialog controller={checklistController} />
 
       {/* Image Lightbox */}
       <Dialog open={lightboxOpen} onOpenChange={setLightboxOpen}>
