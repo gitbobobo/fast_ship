@@ -300,15 +300,6 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 	if err := botValidateScheduleTaskFields(name, cronExpr, timezone, instruction); err != nil {
 		return nil, err
 	}
-	// 上限与列表读取一致：别让任务多到用户界面看不见、也就无法开关。
-	existing, err := s.schedTasks.CountByBot(botID)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	if existing >= botScheduleTasksMaxPerBot {
-		return nil, errs.New(errs.ErrInvalidParams.Code,
-			"定时任务数量已达上限（每个机器人最多 200 个），请先删除不再需要的任务")
-	}
 	now := time.Now().UTC()
 	_, next, err := parseAutomationCron(cronExpr, timezone, now)
 	if err != nil {
@@ -321,7 +312,26 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 		NeedsReport: needsReport, Enabled: true, NextRunAt: &next,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if err := s.schedTasks.Create(task); err != nil {
+	// 计数与插入在同一事务里：定时任务允许并行运行，两个并发的 schedule 会话
+	// 可能同时创建任务，分开读会让两次都通过上限检查、建出超额的任务（而列表
+	// 读取有上限，超额的那条用户既看不到也关不掉）。单进程 + MaxOpenConns=1
+	// 下事务即串行化（与仓内其它计数约束同一假设）。
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		repo := repository.NewBotScheduleTaskRepository(tx)
+		existing, err := repo.CountByBot(botID)
+		if err != nil {
+			return err
+		}
+		if existing >= botScheduleTasksMaxPerBot {
+			return errs.New(errs.ErrInvalidParams.Code,
+				"定时任务数量已达上限（每个机器人最多 200 个），请先删除不再需要的任务")
+		}
+		return repo.Create(task)
+	})
+	if txErr != nil {
+		if appErr, ok := txErr.(*errs.AppError); ok {
+			return nil, appErr
+		}
 		return nil, errs.ErrInternal
 	}
 	return task, nil

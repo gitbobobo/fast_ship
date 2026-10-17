@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1467,5 +1468,54 @@ func TestBotScheduleCompletedEventAfterTaskDeleted(t *testing.T) {
 	}
 	if content.TaskName != task.Name || content.Status != string(model.BotRunStatusCompleted) {
 		t.Fatalf("事件应带派发时的任务名与完成状态: %+v", content)
+	}
+}
+
+// 上限检查必须在事务里与插入一起做：定时任务允许并行运行，并发的两次创建
+// 分开读会都通过检查、建出超额任务（而列表读取有上限，超额那条用户管不到）。
+func TestBotScheduleCreateCapIsAtomic(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedcaprace")
+	bot := env.createBot(t, userID)
+	now := time.Now().UTC()
+	next := now.Add(time.Hour)
+	for i := 0; i < botScheduleTasksMaxPerBot-1; i++ {
+		task := &model.BotScheduleTask{
+			ID: uuid.NewString(), BotID: bot.ID,
+			Name: fmt.Sprintf("已存在%03d", i), CronExpression: "0 9 * * *",
+			Instruction: "跑一下", Enabled: true, NextRunAt: &next,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := env.bots.schedTasks.Create(task); err != nil {
+			t.Fatalf("seed task %d: %v", i, err)
+		}
+	}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	success := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := env.bots.createScheduleTask(bot.ID, fmt.Sprintf("并发任务%d", i),
+				"0 9 * * *", "Asia/Shanghai", "跑一下", "", false); err == nil {
+				mu.Lock()
+				success++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if success != 1 {
+		t.Fatalf("只剩 1 个名额时并发创建应只成功 1 次，实得 %d", success)
+	}
+	total, err := env.bots.schedTasks.CountByBot(bot.ID)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if total != botScheduleTasksMaxPerBot {
+		t.Fatalf("任务数不得超过上限 %d，实得 %d", botScheduleTasksMaxPerBot, total)
 	}
 }
