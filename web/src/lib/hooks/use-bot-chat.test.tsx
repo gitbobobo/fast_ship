@@ -424,19 +424,17 @@ describe("useBotChat", () => {
     expect(api.send.mock.calls[2][1].client_message_id).not.toBe(first);
   });
 
-  it("stops the main run without touching background calls", async () => {
+  it("sends a stop request without touching background calls", async () => {
     api.getChatSnapshot.mockResolvedValue(snapshotWith({ runs: [activeRun] }));
     const { result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
 
-    api.stopRun.mockResolvedValue({
-      ...activeRun,
-      status: "running",
-      stop_requested: true,
-    });
+    api.stopRun.mockResolvedValue({ ...activeRun, status: "running" });
     await act(() => result.current.stopRun());
     expect(api.stopRun).toHaveBeenCalledWith("b1", "r1");
-    await waitFor(() => expect(result.current.stopRequested).toBe(true));
+    // 停止等价于一条用户消息，服务端不再硬取消：本地不自造 stop_requested，
+    // 保持服务器权威值。
+    expect(result.current.stopRequested).toBe(false);
   });
 
   it("decides and cancels calls through the ledger endpoints", async () => {

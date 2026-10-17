@@ -21,6 +21,10 @@ const botResultBudgetChars = 16000
 const botResultReadDefaultLimit = 4000
 const botResultReadMaxLimit = 16000
 
+// botResultPreviewChars 是截断预览的长度：只给开头一小段，避免模型把
+// 「看到了预览」误当成「已经看到完整结果」。其余靠 fs_result.read 续读。
+const botResultPreviewChars = 500
+
 // botToolOutcome 是一次工具执行的统一产出：完整结果、给模型的预览与统计。
 type botToolOutcome struct {
 	ResultJSON  string // 完整精简结果（总是保存，供 fs_result.read 续读）
@@ -63,15 +67,21 @@ func botBuildOutcomeRaw(callID, raw string, execErr error) botToolOutcome {
 		out.PreviewJSON = raw
 		return out
 	}
-	// 截断预览：模型可按 next_offset 用 fs_result.read 续读。
+	// 截断预览：模型可按 next_offset 用 fs_result.read 续读。预览只给开头
+	// 一小段，且 next_offset 指向预览之后的位置，内容不重叠也不丢失。
 	runes := []rune(raw)
-	preview := string(runes[:botResultBudgetChars])
+	previewLen := len(runes)
+	if previewLen > botResultPreviewChars {
+		previewLen = botResultPreviewChars
+	}
+	preview := string(runes[:previewLen])
 	previewPayload := map[string]interface{}{
 		"call_id":     callID,
 		"truncated":   true,
 		"preview":     preview,
 		"total_chars": chars,
-		"next_offset": botResultBudgetChars,
+		"next_offset": previewLen,
+		"note":        "仅预览开头，用 fs_result action=read call_id=<call_id> offset=next_offset 续读",
 	}
 	previewRaw, _ := json.Marshal(previewPayload)
 	out.PreviewJSON = string(previewRaw)
@@ -155,14 +165,41 @@ func (s *BotService) execResultRead(call *model.BotToolCall) (string, error) {
 	if end > total {
 		end = total
 	}
-	payload := map[string]interface{}{
-		"call_id":     target.ID,
-		"total_chars": total,
-		"offset":      offset,
-		"content":     string(runes[offset:end]),
-		"has_more":    end < total,
+	// 读取体必须整体落在预算内：否则它自己会被通用截断逻辑再截一次，
+	// 而模型按 next_offset 继续读时就会跳过一段永远没人看过的内容。
+	// 逐步收缩 content 直到序列化体积不超预算（JSON 转义会膨胀，故迭代收敛）。
+	content := runes[offset:end]
+	var payload map[string]interface{}
+	var raw string
+	for attempt := 0; ; attempt++ {
+		payload = map[string]interface{}{
+			"call_id":     target.ID,
+			"total_chars": total,
+			"offset":      offset,
+			"end":         offset + int64(len(content)),
+			"next_offset": offset + int64(len(content)),
+			"has_more":    offset+int64(len(content)) < total,
+			"content":     string(content),
+			"note":        "这是 call_id " + target.ID + " 的结果切片；继续读用 offset=next_offset",
+		}
+		raw = botMustJSON(payload)
+		over := int64(utf8.RuneCountInString(raw)) - botResultBudgetChars
+		if over <= 0 || len(content) == 0 || attempt >= 8 {
+			break
+		}
+		keep := int64(len(content)) - over - 16
+		// 至少前进 1 个字符：转义膨胀（如大量反斜杠/引号）会让 over 不小于
+		// 本次切片长度，否则会返回空 content + 同一 next_offset，续读永远
+		// 卡在原地。预算足够容纳 1 个转义后的字符。
+		if keep < 1 && offset+int64(len(content)) < total {
+			keep = 1
+		}
+		if keep < 0 {
+			keep = 0
+		}
+		content = content[:keep]
 	}
-	return botMarshalResult(payload)
+	return raw, nil
 }
 
 // ---------- 能力查询 / 帮助 / 停止 / 取消 ----------
@@ -202,10 +239,14 @@ const botHelpText = `Fast Ship 机器人工具说明：
 - 读取类（同步）：fs_project list/get、fs_issue list/get/comments/timeline、fs_thread list/get/item/composer_options/workspace_options、fs_environment list/projects。
 - 写操作（异步、需确认或已有授权）：fs_project create/update、fs_issue create/update/set_workflow/replace_checklist/comment、fs_thread launch/send/stop。
 - 写操作受理后你会收到回执 status=pending_confirmation（等待用户确认）或 queued（已授权、已排队）；执行完成后平台会以「平台后台结果」消息送达终态。
+- fs_issue get 返回正文、清单、标签等完整信息；列表项只保留决策所需的最小字段。update/replace_checklist 前先 get 读回 updated_at / checklist_updated_at，并原样带上 expected_updated_at / expected_checklist_updated_at；目标已被改动时返回 conflict 与最新内容，应重新读取、保留双方修改后再提交。
 - fs_issue replace_checklist 是整组替换：items 必须是完整清单，不是增量。
+- fs_thread list 默认只返回未归档线程，支持 project_id/settled/status/updated_after 过滤与 page/page_size 分页；返回 total_items/returned_items/has_more 以及各环境的读取覆盖情况（incomplete_environments）。
+- fs_thread get 返回线程状态、最近条目（含条目 id 与短摘要）与完整历史翻页入口（item_offset/next_item_offset）；条目正文用 fs_thread action=item item_id=<id> 补读。
 - fs_thread launch 受理成功只表示启动 RPC 已发出，远端 Agent 是否完成用 fs_thread get/item 查询。
-- 大结果被截断时（truncated=true）用 fs_result.read 按 offset/limit 续读，单位是 Unicode 字符。
-- fs_stop.stop 结束当前主线运行；fs_cancel.cancel 取消本机器人的某个后台调用。
+- 大结果被截断时（truncated=true）结果体只给开头预览（preview），用 fs_result action=read call_id=<call_id> offset=next_offset 续读，单位是 Unicode 字符；续读返回体标明切片范围与 next_offset，按它继续不会漏内容。
+- fs_stop.stop 结束当前主线运行；用户点「停止」只是发来一条「停止」消息，是否停止由你决定，可用 fs_stop 执行。fs_cancel.cancel 取消本机器人的某个后台调用。
+- 中断（如服务重启、调用被取消）后结果可能无法核实（effect_may_have_occurred=true）：不要断言失败、不要自动重放副作用，先用读取类工具核实现状。
 - 记忆：fs_memory list/read/create/replace/append/delete/history/restore（写操作需 expected_version 乐观锁）；fs_memory_search search 关键词检索（≥3 字符全文匹配）。USER.md 记用户画像，MEMORY.md 记长期事实，daily/YYYY-MM-DD.md 是每日笔记。
 - 定时任务：fs_schedule list/create/update/delete/runs/enable/disable（全部同步、立即生效）。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（默认 UTC）。任务由你创建/修改/删除；用户只能查看与开关。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。`
 

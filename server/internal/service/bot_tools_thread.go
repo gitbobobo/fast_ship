@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -26,15 +29,22 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		return botMarshalResult(botSlimThreadList(list))
-	case "get", "item":
-		if call.Action == "get" {
-			detail, err := s.threads.Detail(ctx, userID, args.EnvID, args.ThreadID)
-			if err != nil {
-				return "", err
-			}
-			return botMarshalResult(map[string]interface{}{"thread": detail.Thread, "queue": detail.Queue, "activity": detail.Activity})
+		result, err := botSlimThreadList(list, &args)
+		if err != nil {
+			return "", err
 		}
+		return botMarshalResult(result)
+	case "get":
+		detail, err := s.threads.Detail(ctx, userID, args.EnvID, args.ThreadID)
+		if err != nil {
+			return "", err
+		}
+		result, err := botSlimThreadDetail(detail, &args)
+		if err != nil {
+			return "", err
+		}
+		return botMarshalResult(result)
+	case "item":
 		item, err := s.threads.ItemDetail(ctx, userID, args.EnvID, args.ThreadID, args.ItemID)
 		if err != nil {
 			return "", err
@@ -175,20 +185,230 @@ func buildThreadExecIDs(action string) (threadID, commandID, messageID string) {
 	return "", "", ""
 }
 
-func botSlimThreadList(list *T3ThreadListResponse) map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(list.Items))
-	for _, t := range list.Items {
-		out = append(out, map[string]interface{}{
-			"id":             t.Id,
-			"title":          t.Title,
-			"status":         string(t.Status),
-			"environment_id": t.EnvironmentId,
-			"project_id":     t.ProjectId,
-			"project_name":   t.ProjectName,
-			"settled":        t.Settled,
-		})
+const (
+	botThreadPageDefault = 50
+	botThreadPageMax     = 100
+	botThreadItemDefault = 50
+	botThreadItemMax     = 200
+	botThreadTextPreview = 500
+)
+
+// botThreadPage 校验线程列表分页：服务端强制页长上限，从机制上排除「一次拉全量」。
+func botThreadPage(page, pageSize int) (int, int, error) {
+	if page <= 0 {
+		page = 1
 	}
-	return map[string]interface{}{"threads": out}
+	if pageSize <= 0 {
+		pageSize = botThreadPageDefault
+	}
+	if pageSize > botThreadPageMax {
+		return 0, 0, errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf("page_size 最大 %d", botThreadPageMax))
+	}
+	return page, pageSize, nil
+}
+
+// botSlimThreadList 过滤、稳定分页并回报覆盖范围。默认排除归档线程（归档
+// 不属于巡检范围）；include_archived=true 才纳入。过滤后按 updated_at 降序、
+// id 升序排序，保证同一 filter 下分页稳定。
+func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[string]interface{}, error) {
+	page, pageSize, err := botThreadPage(args.Page, args.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	var updatedAfter time.Time
+	if raw := strings.TrimSpace(args.UpdatedAfter); raw != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, raw)
+		if parseErr != nil {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "updated_after 需要 RFC3339 时间")
+		}
+		updatedAfter = parsed
+	}
+	includeArchived := args.IncludeArchived != nil && *args.IncludeArchived
+
+	filtered := make([]T3ThreadSummary, 0, len(list.Items))
+	for _, thread := range list.Items {
+		if !includeArchived && thread.Status == api.T3ThreadSummaryStatusArchived {
+			continue
+		}
+		if args.ProjectID != "" && thread.ProjectId != args.ProjectID {
+			continue
+		}
+		if args.Settled != nil && thread.Settled != *args.Settled {
+			continue
+		}
+		if args.Status != "" && string(thread.Status) != args.Status {
+			continue
+		}
+		if !updatedAfter.IsZero() {
+			when, parseErr := time.Parse(time.RFC3339, thread.UpdatedAt)
+			if parseErr != nil || !when.After(updatedAfter) {
+				continue
+			}
+		}
+		filtered = append(filtered, thread)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].UpdatedAt != filtered[j].UpdatedAt {
+			return filtered[i].UpdatedAt > filtered[j].UpdatedAt
+		}
+		return filtered[i].Id < filtered[j].Id
+	})
+
+	total := len(filtered)
+	// 防溢出：page 可能极大，(page-1)*pageSize 相加前先判断边界。
+	start := total
+	if pageSize > 0 && page-1 <= total/pageSize {
+		start = (page - 1) * pageSize
+	}
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	items := make([]map[string]interface{}, 0, end-start)
+	for i := start; i < end; i++ {
+		items = append(items, botSlimThreadSummary(&filtered[i]))
+	}
+
+	// 覆盖范围：某环境读不到时如实报告，不把「未读到」说成「不存在」，
+	// 也不宣称全部正常。
+	coverage := make([]map[string]interface{}, 0, len(list.Environments))
+	incomplete := make([]string, 0, 2)
+	for i := range list.Environments {
+		env := &list.Environments[i]
+		entry := map[string]interface{}{
+			"id":     env.Id,
+			"name":   env.Name,
+			"status": string(env.Status),
+		}
+		if env.Error != nil && *env.Error != "" {
+			entry["error"] = *env.Error
+		}
+		if env.Status != T3EnvironmentStatusOK {
+			incomplete = append(incomplete, env.Name)
+		}
+		coverage = append(coverage, entry)
+	}
+	out := map[string]interface{}{
+		"kind":             "threads",
+		"items":            items,
+		"total_items":      total,
+		"returned_items":   len(items),
+		"page":             page,
+		"page_size":        pageSize,
+		"has_more":         end < total,
+		"environments":     coverage,
+		"include_archived": includeArchived,
+	}
+	if len(incomplete) > 0 {
+		out["incomplete_environments"] = incomplete
+		out["note"] = "部分环境未能完整读取，结果不代表全部环境的完整范围"
+	}
+	return out, nil
+}
+
+func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
+	out := map[string]interface{}{
+		"id":             t.Id,
+		"title":          t.Title,
+		"status":         string(t.Status),
+		"settled":        t.Settled,
+		"updated_at":     t.UpdatedAt,
+		"environment_id": t.EnvironmentId,
+		"project_id":     t.ProjectId,
+	}
+	if t.ProjectName != "" {
+		out["project_name"] = t.ProjectName
+	}
+	if t.ParentThreadId != nil {
+		out["parent_thread_id"] = *t.ParentThreadId
+	}
+	return out
+}
+
+// botSlimThreadDetail 返回线程详情：运行态/元数据 + 最近条目（带 item id）
+// + 完整历史的分页入口。条目正文用 fs_thread item 按 id 补读。
+func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs) (map[string]interface{}, error) {
+	itemLimit := args.ItemLimit
+	if itemLimit <= 0 {
+		itemLimit = botThreadItemDefault
+	}
+	if itemLimit > botThreadItemMax {
+		return nil, errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf("item_limit 最大 %d", botThreadItemMax))
+	}
+	offset := args.ItemOffset
+	if offset < 0 {
+		offset = 0
+	}
+
+	all := detail.Items
+	total := len(all)
+	if offset > total {
+		offset = total
+	}
+	// 偏移从最新一条往前数：offset=0 是最新的 item_limit 条。
+	end := total - offset
+	if end < 0 {
+		end = 0
+	}
+	start := end - itemLimit
+	if start < 0 {
+		start = 0
+	}
+	items := make([]map[string]interface{}, 0, end-start)
+	for i := start; i < end; i++ {
+		items = append(items, botSlimThreadItemSummary(&all[i]))
+	}
+	return map[string]interface{}{
+		"thread":           botSlimThreadSummary(&detail.Thread),
+		"queue":            detail.Queue,
+		"activity":         detail.Activity,
+		"access":           string(detail.Access),
+		"items":            items,
+		"total_items":      total,
+		"item_offset":      offset,
+		"item_limit":       itemLimit,
+		"next_item_offset": offset + (end - start),
+		"has_more_items":   start > 0,
+		"item_note":        "条目按时间升序（从旧到新）；此处是最近的切片，向前翻用 item_offset=next_item_offset，正文用 fs_thread action=item item_id=<id>",
+	}, nil
+}
+
+// botSlimThreadItemSummary 是详情内条目列表的精简形状：给 id 与短摘要，
+// 正文（text）走 fs_thread item 按需补读。
+func botSlimThreadItemSummary(item *T3ThreadItem) map[string]interface{} {
+	out := map[string]interface{}{
+		"id":         item.Id,
+		"type":       string(item.Type),
+		"status":     item.Status,
+		"updated_at": item.UpdatedAt,
+	}
+	if item.Summary != "" {
+		out["summary"] = item.Summary
+	}
+	if item.DetailAvailable != nil && *item.DetailAvailable {
+		out["detail_available"] = true
+	}
+	if item.Inherited != nil && *item.Inherited {
+		out["inherited"] = true
+	}
+	if item.Text != "" {
+		out["text_preview"] = truncateBotRunes(item.Text, botThreadTextPreview)
+	}
+	return out
+}
+
+func truncateBotRunes(s string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= limit {
+		return s
+	}
+	return string(runes[:limit]) + "…"
 }
 
 func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {

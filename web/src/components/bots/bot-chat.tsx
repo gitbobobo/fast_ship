@@ -66,7 +66,7 @@ export function BotChat({ botId }: { botId: string }) {
     );
   }
 
-  const stopLabel = chat.stopRequested ? "停止中…" : "停止";
+  const stopLabel = chat.stopRequested ? "停止中…" : "请求停止";
   const runBadge = chat.stopRequested
     ? "停止中"
     : chat.activeRun?.status === "queued"
@@ -107,11 +107,12 @@ export function BotChat({ botId }: { botId: string }) {
             className="ml-auto"
             disabled={chat.stopping || chat.stopRequested}
             aria-label={stopLabel}
+            title="向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行"
             onClick={() => void chat.stopRun()}
           >
             {chat.stopping && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
             <Square className="mr-1 h-3 w-3 fill-current" />
-            停止主线
+            请求停止
           </Button>
         </div>
       )}

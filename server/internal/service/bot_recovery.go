@@ -230,8 +230,7 @@ func (s *BotService) RecoverOnStartup() error {
 				reply := botToolReplyContent{
 					CallID: call.ID, ProviderToolCallID: call.ProviderToolCallID,
 					ToolName: call.ToolName, Status: string(model.BotCallStatusNotExecuted),
-					Content: botFailureReplyText(errs.New(errs.ErrInvalidParams.Code,
-						"调用未执行（服务重启）：请在新输入到达后重新决定是否再次调用")),
+					Content: botNotExecutedReplyText("server_restarted"),
 				}
 				if err := s.appendToolReplyTx(tx, call.BotID, runID, call.RequestID, call, reply, now); err != nil {
 					return err

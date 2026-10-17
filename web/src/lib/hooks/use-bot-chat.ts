@@ -570,16 +570,10 @@ export function useBotChat(botId: string) {
     setStopError(null);
     setStopping(true);
     try {
-      const updated = await botApi.stopRun(botId, activeRun.id);
-      queryClient.setQueryData<BotRun[]>(
-        botKeys.runs(userId, botId),
-        (previous) =>
-          mergeRun(previous ?? [], {
-            id: updated.id || activeRun.id,
-            // 受理成功即置位，UI 立即进入「停止中」；权威状态经 runs 重读收敛。
-            stop_requested: true,
-          }),
-      );
+      // 「停止」等价于向机器人发一条「停止」消息：服务端不再硬取消当前回复，
+      // 是否结束由机器人决定。这里不回填 stop_requested，改为重读 run 收敛。
+      await botApi.stopRun(botId, activeRun.id);
+      await queryClient.invalidateQueries({ queryKey: botKeys.runs(userId, botId) });
     } catch (err) {
       setStopError(err);
     } finally {

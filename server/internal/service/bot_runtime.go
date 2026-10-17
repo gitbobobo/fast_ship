@@ -372,6 +372,10 @@ func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
 
 // RequestStop 停止主线：置 stop_requested 并取消当前模型/同步调用 context；
 // 已受理后台调用继续存在，可逐项取消。
+// RequestStop 把「停止」入口当作一条用户输入：追加一条「停止」消息并唤醒
+// 机器人，由它结合上下文决定后续动作（继续、调整或结束）。不再硬编码为
+// 取消当前回复、全部后台调用或远端线程——那些由机器人按目标决定；真正要
+// 结束自身运行时它仍可用 fs_stop。已结束的 run 不接受停止输入（409）。
 func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, error) {
 	if _, err := s.bots.FindByIDAndUser(botID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -381,7 +385,7 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	}
 	run, err := s.runs.FindByID(runID)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrBotRunNotFound
 		}
 		return nil, errs.ErrInternal
@@ -389,23 +393,83 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 	if run.BotID != botID {
 		return nil, errs.ErrBotRunNotFound
 	}
+	if run.SessionKind != model.BotSessionKindMain {
+		// 停止入口只作用于主线：定时任务运行是独立会话，主线「停止」消息它
+		// 看不到，也不能在这里改用主线唤醒。
+		return nil, errs.New(errs.ErrInvalidParams.Code, "停止入口只作用于主线运行；定时任务运行请等其自行结束")
+	}
 	if run.FinishedAt != nil {
 		return nil, errs.ErrBotRunStateConflict
 	}
 
-	now := time.Now().UTC()
-	ok, err := s.runs.UpdateColumns(runID, map[string]interface{}{"finished_at": nil},
-		map[string]interface{}{"stop_requested_at": now})
-	if err != nil {
+	// 「run 仍未结束」与「追加停止消息」在同一事务内判定与写入：run 若在
+	// 两者之间自然完成，这里直接返回 409，不会留下一条驱动新 run 的陈旧
+	// 停止消息。同一 run 重复点击用 client_message_id 幂等，只落一条。
+	clientMsgID := "stop:" + runID
+	var msgSeq int64
+	var already bool
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		fresh, err := repository.NewBotRunRepository(tx).FindByID(runID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotRunNotFound
+			}
+			return errs.ErrInternal
+		}
+		if fresh.FinishedAt != nil {
+			return errs.ErrBotRunStateConflict
+		}
+		txMsgs := repository.NewBotMessageRepository(tx)
+		if existing, findErr := txMsgs.FindByClientMessageID(botID, clientMsgID); findErr == nil {
+			msgSeq = existing.Seq
+			already = true
+			return nil
+		} else if !errors.Is(findErr, gorm.ErrRecordNotFound) {
+			return errs.ErrInternal
+		}
+		seq, seqErr := s.bots.NextMessageSeqTx(tx, botID)
+		if seqErr != nil {
+			return errs.ErrInternal
+		}
+		raw, marshalErr := json.Marshal(botUserContent{Text: "停止"})
+		if marshalErr != nil {
+			return errs.ErrInternal
+		}
+		msg := &model.BotMessage{
+			ID:              uuid.NewString(),
+			BotID:           botID,
+			Seq:             seq,
+			Kind:            model.BotMessageKindUser,
+			ContentJSON:     string(raw),
+			SessionKind:     model.BotSessionKindMain,
+			ClientMessageID: &clientMsgID,
+			CreatedAt:       time.Now().UTC(),
+		}
+		if err := txMsgs.AppendTx(tx, msg); err != nil {
+			return errs.ErrInternal
+		}
+		msgSeq = seq
+		return s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
+			Kind:      "user_message",
+			MessageID: msg.ID,
+			Payload:   botMessageResponseOf(msg),
+		})
+	})
+	if txErr != nil {
+		if errors.Is(txErr, errs.ErrBotRunStateConflict) || errors.Is(txErr, errs.ErrBotRunNotFound) {
+			return nil, txErr
+		}
 		return nil, errs.ErrInternal
 	}
-	if !ok {
-		return nil, errs.ErrBotRunStateConflict
+	if !already {
+		s.publishEvent(botID)
+		s.wakeRuntime(botID, botWake{
+			Trigger: model.BotTriggerUserMessage,
+			Key:     fmt.Sprintf("user_message:%d", msgSeq),
+			Context: fmt.Sprintf(`{"message_seq":%d,"client_message_id":%q,"kind":"stop"}`, msgSeq, clientMsgID),
+		})
 	}
-	// 取消执行 context：当前模型请求/同步工具收到取消；循环在安全点收尾为 stopped。
-	s.cancelBotContext(botID, run)
 
-	// 重新读取（循环可能已在安全点落定 stopped）。
 	fresh, err := s.runs.FindByID(runID)
 	if err != nil {
 		return nil, errs.ErrInternal

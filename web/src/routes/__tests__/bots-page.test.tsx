@@ -384,7 +384,7 @@ describe("BotDetailPage", () => {
     expect(within(background).getByText("后台调用（1）")).toBeInTheDocument();
 
     await user.click(
-      within(runBar).getByRole("button", { name: "停止" }),
+      within(runBar).getByRole("button", { name: "请求停止" }),
     );
     await waitFor(() => expect(chatStop).toHaveBeenCalled());
     expect(chatCancel).not.toHaveBeenCalled();
