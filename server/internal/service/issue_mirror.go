@@ -51,7 +51,7 @@ type issueMirror struct {
 	projectRepo         *repository.ProjectRepository
 	logger              *zap.Logger
 	credentials         *ProjectCredentials
-	newClient           gitHubIssueClientFactory
+	newClient           ghclient.ClientFactory
 	eventSink           IssueEventSink
 	mu                  sync.Mutex
 	syncing             map[string]struct{}
@@ -273,7 +273,7 @@ const staleCollectionsHealLimit = 50
 // 远端已被删除（404）之类的持久错误让整个项目同步永久记败、游标停摆；空水位保留，
 // 尝试时间把失败条目轮转到候选后部避免饿死其他条目。查询本身失败才按 Sync 约定
 // 返回错误。每个补齐成功的 Issue 把集合尺寸写入 sizes，由调用方按 Issue 去重汇总。
-func (m *issueMirror) healStaleCollections(ctx context.Context, client gitHubIssueClient, projectID string, sizes map[string]issueCollectionSize) error {
+func (m *issueMirror) healStaleCollections(ctx context.Context, client ghclient.Client, projectID string, sizes map[string]issueCollectionSize) error {
 	metas, err := m.gitHubMetaRepo.ListStaleCollectionsByProject(projectID, staleCollectionsHealLimit)
 	if err != nil {
 		return errs.ErrInternal
@@ -346,7 +346,7 @@ func (m *issueMirror) logHealFailure(projectID string, meta model.IssueGitHubMet
 		zap.Int("number", meta.Number), zap.String("reason", reason), zap.Error(err))
 }
 
-func (m *issueMirror) syncRepositoryLabels(ctx context.Context, client gitHubIssueClient, projectID string) error {
+func (m *issueMirror) syncRepositoryLabels(ctx context.Context, client ghclient.Client, projectID string) error {
 	const perPage = 100
 	page := 1
 	now := time.Now().UTC()
@@ -610,7 +610,7 @@ func needsCollectionSync(meta *model.IssueGitHubMeta, item *ghclient.Issue) bool
 
 // fetchComments 拉完该 Issue 的全部评论分页并映射成 model，不含写库；
 // 任一分页失败时返回 GitHub API 错误，调用方什么也不该写。
-func (m *issueMirror) fetchComments(ctx context.Context, client gitHubIssueClient, issueID string, issueNumber int) ([]*model.IssueComment, error) {
+func (m *issueMirror) fetchComments(ctx context.Context, client ghclient.Client, issueID string, issueNumber int) ([]*model.IssueComment, error) {
 	const perPage = 100
 	page := 1
 	var comments []*model.IssueComment
@@ -639,7 +639,7 @@ func (m *issueMirror) fetchComments(ctx context.Context, client gitHubIssueClien
 
 // fetchTimeline 拉完该 Issue 的全部时间线分页并映射成 model，不含写库；
 // 任一分页失败时返回 GitHub API 错误，调用方什么也不该写。
-func (m *issueMirror) fetchTimeline(ctx context.Context, client gitHubIssueClient, issueID string, issueNumber int) ([]*model.IssueTimelineEvent, error) {
+func (m *issueMirror) fetchTimeline(ctx context.Context, client ghclient.Client, issueID string, issueNumber int) ([]*model.IssueTimelineEvent, error) {
 	const perPage = 100
 	page := 1
 	var events []*model.IssueTimelineEvent
@@ -745,7 +745,7 @@ func (m *issueMirror) writePartialCollections(issueID string, write func(tx *gor
 // 两个集合。清空而非推进的理由：以本函数拿到的快照推进水位会让本地评论镜像落后
 // 于水位，丢的评论无法被发现。与后台同步并发时（push 不经同步锁），镜像与水位
 // 要么同属最后提交的事务，要么都保持旧值，不会出现「旧镜像 + 新水位」。
-func (m *issueMirror) refreshTimelineAfterPush(ctx context.Context, client gitHubIssueClient, issue *model.Issue, item *ghclient.Issue) error {
+func (m *issueMirror) refreshTimelineAfterPush(ctx context.Context, client ghclient.Client, issue *model.Issue, item *ghclient.Issue) error {
 	events, err := m.fetchTimeline(ctx, client, issue.ID, item.GetNumber())
 	if err != nil {
 		return err

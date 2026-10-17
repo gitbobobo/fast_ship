@@ -12,8 +12,8 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -21,8 +21,8 @@ import (
 )
 
 // GitHub PR 自动评审（INT-93）入口：webhook 事务、防抖、排队提升。所有 GitHub
-// 调用都在事务外（webhook 事务内调用数为 0）；复杂性收敛在 githubapp 适配器，
-// 这里的协调仍是一个「10 秒循环 + kick」。
+// 调用都在事务外（webhook 事务内调用数为 0）；复杂性收敛在适配器（githubapp
+// 安装令牌 + 共享 githubapi REST 实现），这里的协调仍是一个「10 秒循环 + kick」。
 
 // prReviewMaxInflightPerUser 用户并发上限：PR 触发同时最多 5 个审查运行（排队不占名额）。
 const prReviewMaxInflightPerUser = 5
@@ -80,7 +80,7 @@ type PRReviewService struct {
 	logger     *zap.Logger
 
 	// gh 评审链路的 GitHub 访问面（真实安装令牌客户端或测试/自测 fake）。
-	gh githubapp.PullRequestGitHub
+	gh githubapi.GitHubClient
 	// threads 取消路径的中断出口（StopThread 同口径）；可 nil（单测）。
 	threads prThreadStopper
 
@@ -99,7 +99,7 @@ func NewPRReviewService(
 	deliveries *repository.GitHubWebhookDeliveryRepository,
 	debounces *repository.GitHubPRDebounceRepository,
 	reviews *repository.GitHubPRReviewRepository,
-	gh githubapp.PullRequestGitHub,
+	gh githubapi.GitHubClient,
 	threads prThreadStopper,
 	sink *NotificationSink,
 	cfg *config.Config,

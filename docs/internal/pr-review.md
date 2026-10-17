@@ -124,11 +124,16 @@ PR 触发且 `dispatched|running`，结束/取消后令牌已消费，访问一�
   允许 true；注入内存假实现，入站 webhook 会 `SeedFakeFromWebhook`（simulate
   脚本不必另调 SetPR），`GET /api/debug/github-review-log`（JWT）可看调用记录
 
-适配器在 `server/internal/pkg/githubapp/`：`webhook.go`（HMAC-SHA256 常量时间
-比较，`sha1=` 前缀拒绝）、`app.go`（App JWT RS256 约 9 分钟 → 安装令牌，按
-installation_id 进程内缓存，401 作废重试一次）、`client.go`（PR 元数据/diff、
-issue 评论、review 评论、check run、review 提交）、`fake.go`。不借用
-`pkg/github` 的 PAT 客户端，不读 `user_github_tokens`。
+适配器分两层（INT-107 收拢）：seam 包 `server/internal/githubapi/` 定义
+`GitHubClient` 契约（PR 元数据/diff、review 评论、机器人顶层评论
+`FindPullRequestComment`/`CreatePullRequestComment`/`UpdatePullRequestComment`、
+check run、review 提交）并提供唯一的 REST 实现（bearer 注入、401 作废凭证重试
+一次、非 2xx 转 `*StatusError`）；`server/internal/pkg/githubapp/` 是安装令牌
+adapter——`webhook.go`（HMAC-SHA256 常量时间比较，`sha1=` 前缀拒绝）、`app.go`
+（App JWT RS256 约 9 分钟 → 安装令牌，按 installation_id 进程内缓存，实现
+`githubapi.AuthProvider`）、`client.go`（薄壳包 `githubapi.NewClient`）、
+`fake.go`（内存假实现）。`pkg/github` 的 `PRClient`（用户 Token/匿名）复用同一份
+REST 实现，供 issue 关联 PR 的 attach/sync 使用；评审链路不读 `user_github_tokens`。
 
 ## 索引
 

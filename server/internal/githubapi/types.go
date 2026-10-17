@@ -1,7 +1,6 @@
-package githubapp
+package githubapi
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,17 +8,23 @@ import (
 	"time"
 )
 
-// PullRequest 是评审链路需要的 PR 元数据子集。
+// PullRequest PR 元数据（评审链路与 issue 关联行共用的子集；字段从 GitHub
+// pulls/{n} 响应映射）。RepoFullName 取 base 仓库的 canonical 名。
 type PullRequest struct {
 	RepoFullName string
 	Number       int
 	Title        string
 	Body         string
 	HTMLURL      string
+	State        string
+	Draft        bool
+	Merged       bool
+	MergedAt     *time.Time
+	ClosedAt     *time.Time
 	HeadSHA      string
 	HeadRef      string
 	BaseRef      string
-	Draft        bool
+	AuthorLogin  string
 }
 
 // ReviewComment 是 PR 的 review 评论（行内评论，不含 issue 评论）。
@@ -68,27 +73,9 @@ type CheckUpdate struct {
 	Text    string
 }
 
-// PullRequestGitHub PR 评审链路对 GitHub 的全部访问面。实现：client.go（安装
-// 令牌真实调用）与 fake.go（内存假实现，记录调用供断言）。
-type PullRequestGitHub interface {
-	// 元数据
-	GetPullRequest(ctx context.Context, installationID int64, repoFullName string, number int) (*PullRequest, error)
-	GetPullRequestDiff(ctx context.Context, installationID int64, repoFullName string, number int) (string, error)
-	ListReviewComments(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewComment, error)
-	// 机器人顶层评论（每 PR 一条）
-	FindIssueCommentByMarker(ctx context.Context, installationID int64, repoFullName string, number int, marker string) (commentID int64, found bool, err error)
-	CreateIssueComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (commentID int64, err error)
-	UpdateIssueComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error
-	// check run
-	CreateCheckRun(ctx context.Context, installationID int64, repoFullName, name, headSHA, externalID string) (checkRunID int64, err error)
-	UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in CheckUpdate) error
-	// review
-	SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) error
-}
-
 // ErrForbidden GitHub 返回 403（如 Checks API 未授权）：调用方据此退回合并 check；
 // 合并 check 同样 403 则跳过 check、仍同步评论。
-var ErrForbidden = errors.New("githubapp: forbidden")
+var ErrForbidden = errors.New("githubapi: forbidden")
 
 // StatusError 非 2xx 响应。
 type StatusError struct {
@@ -99,7 +86,7 @@ type StatusError struct {
 }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("githubapp: %s %s -> %d: %s", e.Method, e.URL, e.StatusCode, truncateBody(e.Body))
+	return fmt.Sprintf("githubapi: %s %s -> %d: %s", e.Method, e.URL, e.StatusCode, truncateBody(e.Body))
 }
 
 // IsForbidden 判断 err 是否 403（直接或包在链里）。
@@ -117,6 +104,12 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
 }
 
+// isStatus 判断 err 链里是否带指定状态码的 *StatusError。
+func isStatus(err error, code int) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == code
+}
+
 func truncateBody(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) > 300 {
@@ -129,7 +122,14 @@ func truncateBody(s string) string {
 func splitRepo(repoFullName string) (string, string, error) {
 	owner, name, ok := strings.Cut(repoFullName, "/")
 	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
-		return "", "", fmt.Errorf("githubapp: 仓库名须为 owner/name，得到 %q", repoFullName)
+		return "", "", fmt.Errorf("githubapi: 仓库名须为 owner/name，得到 %q", repoFullName)
 	}
 	return owner, name, nil
+}
+
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
