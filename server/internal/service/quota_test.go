@@ -717,7 +717,17 @@ func TestQuotaScheduler_KickWakesEarlierRetry(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Kick 后 3s 内没有重抓——调度器仍在睡原来的 60 分钟定时器")
 	}
-	if stored := storedQuotaAccount(t, svc, account.ID); stored.Status != model.QuotaStatusOK {
-		t.Fatalf("重抓后账号应为 ok，得到 %q", stored.Status)
+	// 抓取协程在 fake provider 返回后才落库；收到 fetched 只是开始抓取，立刻
+	// 断言会和落库竞态。有界轮询到状态写完。
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		stored := storedQuotaAccount(t, svc, account.ID)
+		if stored.Status == model.QuotaStatusOK {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("重抓后账号应为 ok，得到 %q", stored.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
