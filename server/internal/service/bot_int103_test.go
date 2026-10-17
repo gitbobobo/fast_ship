@@ -1304,3 +1304,28 @@ func TestBotScheduleFailureEventAfterTaskDeleted(t *testing.T) {
 		t.Fatalf("事件应带派发时的任务名与失败状态: %+v", content)
 	}
 }
+
+// 恢复扫描必须扫完所有未完成的 schedule run：只取最早一页时，最早的若干条
+// 若都占着槽，更新的丢失唤醒会被一直饿死。
+func TestBotScheduleScanCoversAllUnfinishedRuns(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedscanall")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+
+	const want = 120
+	for i := 0; i < want; i++ {
+		seedScheduleRun(t, env, bot.ID, task.ID)
+	}
+	got := env.bots.listUnfinishedScheduleRuns()
+	if len(got) != want {
+		t.Fatalf("应扫到全部 %d 条未完成 run，实得 %d", want, len(got))
+	}
+	seen := map[string]bool{}
+	for i := range got {
+		if seen[got[i].ID] {
+			t.Fatalf("分页重复返回了 run %s", got[i].ID)
+		}
+		seen[got[i].ID] = true
+	}
+}

@@ -249,8 +249,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   同一函数），解析失败暂停该任务（next_run_at 置空）。
 - **执行槽**：`botRuntimeState.active` 的 key 泛化为会话槽——主线 `botID`、
   schedule `"schedule:"+runID`。schedule run 与主线可同时运行、互不让位；
-  同一 schedule run 不重复执行（槽占用即放弃）。`scanOnce` 每 5s 重扫未完成的
-  schedule run 补回丢失的唤醒（`wakeScheduleRun` 按槽占用与终态幂等），否则
+  同一 schedule run 不重复执行（槽占用即放弃）。`scanOnce` 每 5s 按键集分页重扫
+  **全部**未完成的 schedule run 补回丢失的唤醒（`wakeScheduleRun` 按槽占用与终态
+  幂等）；只扫最早一页的话，最早的若干条都占着槽时较新的丢失唤醒会被饿死。否则
   一次瞬态失败会让 run 卡在 running，并挡住机器人删除。
 - **结算后才收尾**：schedule run 自己的异步写全部落终态前不完成——等待在
   构建请求之前阻塞轮询（不发模型请求空转），`tryFinishScheduleRun` 在终态

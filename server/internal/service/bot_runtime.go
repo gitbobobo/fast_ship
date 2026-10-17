@@ -232,14 +232,41 @@ func (s *BotService) scanOnce() {
 	s.scanQueuedCalls()
 	// 定时任务运行：补回丢失的唤醒——wakeScheduleRun 的瞬态失败或执行槽异常
 	// 结束会让 run 永远卡在 running（未完成的 schedule run 还会挡住机器人删除）。
-	// wakeScheduleRun 自身按槽占用与终态幂等，重复扫描无害。
-	var schedRuns []model.BotRun
-	if err := s.db.Where("finished_at IS NULL AND session_kind = ?", model.BotSessionKindSchedule).
-		Order("created_at ASC").Limit(botScheduleDispatchBatch).Find(&schedRuns).Error; err == nil {
-		for i := range schedRuns {
-			s.wakeScheduleRun(schedRuns[i].BotID, schedRuns[i].ID)
-		}
+	// wakeScheduleRun 自身按槽占用与终态幂等，重复扫描无害。任务允许并行，
+	// 所以这里必须扫完而不是只取最早的一页：最早的若干条都占着槽时，更新的
+	// 丢失唤醒会被一直饿死。
+	for _, run := range s.listUnfinishedScheduleRuns() {
+		s.wakeScheduleRun(run.BotID, run.ID)
 	}
+}
+
+// listUnfinishedScheduleRuns 按键集分页取全部未完成的 schedule run（扫完即止，
+// 另有行数上限防止异常积累把扫描拖长）。分页键是 (created_at, id)，查询期间
+// 集合变化不会像 offset 那样跳行。
+func (s *BotService) listUnfinishedScheduleRuns() []model.BotRun {
+	const pageSize = 100
+	const maxRows = 1000
+	out := make([]model.BotRun, 0, pageSize)
+	var lastCreated time.Time
+	lastID := ""
+	for len(out) < maxRows {
+		q := s.db.Where("finished_at IS NULL AND session_kind = ?", model.BotSessionKindSchedule)
+		if !lastCreated.IsZero() {
+			q = q.Where("created_at > ? OR (created_at = ? AND id > ?)", lastCreated, lastCreated, lastID)
+		}
+		var page []model.BotRun
+		if err := q.Order("created_at ASC, id ASC").Limit(pageSize).Find(&page).Error; err != nil {
+			s.logger.Warn("扫描未完成定时任务失败", zap.Error(err))
+			return out
+		}
+		out = append(out, page...)
+		if len(page) < pageSize {
+			return out
+		}
+		lastCreated = page[len(page)-1].CreatedAt
+		lastID = page[len(page)-1].ID
+	}
+	return out
 }
 
 // hasUnconsumedInput 判断 bot 是否确有未交给模型的输入（主线会话内的 user /
