@@ -5,7 +5,7 @@
 // 需要联网。生成后提交产物；registry 有新增 agent 时重跑即可。
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const OUT = join(dirname(fileURLToPath(import.meta.url)), "..", "web", "src", "lib", "acp-registry-icons.ts");
@@ -62,27 +62,63 @@ const ALLOWED_ATTRS = new Set([
   "font-weight",
 ]);
 
-function sanitizeSvgInner(inner) {
-  let out = inner
+function parseTag(tag) {
+  const match = /^<\s*(\/?)\s*([a-zA-Z][\w:-]*)([\s\S]*?)>$/.exec(tag);
+  if (!match) return null;
+  const [, close, rawName, rawAttrs] = match;
+  const name = rawName.toLowerCase();
+  if (!ALLOWED_TAGS.has(name)) return null;
+  if (close) return { name, close: true, selfClose: false, rebuilt: `</${name}>` };
+  const kept = [];
+  // 单引号、双引号、无引号三种写法都解析；不在白名单的属性一律丢弃。
+  for (const attr of rawAttrs.matchAll(
+    /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g,
+  )) {
+    const attrName = attr[1].toLowerCase();
+    if (!ALLOWED_ATTRS.has(attrName)) continue;
+    const value = (attr[2] ?? attr[3] ?? attr[4] ?? "").replace(/"/g, "&quot;");
+    kept.push(`${attrName}="${value}"`);
+  }
+  const selfClose = /\/\s*$/.test(rawAttrs);
+  return {
+    name,
+    close: false,
+    selfClose,
+    rebuilt: `<${name}${kept.length ? " " + kept.join(" ") : ""}${selfClose ? " /" : ""}>`,
+  };
+}
+
+/**
+ * 清洗图标 inner markup：不信任 CDN 内容，逐标签重建，只保留白名单元素/属性。
+ * 不能解析的 `<...>`、未闭合的 `<`、非白名单标签一律丢弃；文本只在
+ * `<text>`/`<tspan>` 内保留（其余位置的裸文本也丢掉，fail closed）。
+ */
+export function sanitizeSvgInner(inner) {
+  const source = inner
     .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "")
-    // 整段丢掉危险容器（含自闭合）：它们可以加载外部内容或执行脚本。
-    .replace(/<(script|style|foreignObject|image|use|a|animate|set|iframe)\b[^>]*\/?>/gi, "")
-    .replace(/<\/(script|style|foreignObject|image|use|a|animate|set|iframe)>/gi, "");
-  out = out.replace(
-    /<(\/?)([a-zA-Z][\w:-]*)((?:\s+[\w:.-]+\s*=\s*"[^"]*")*)\s*(\/?)>/g,
-    (_m, close, tag, attrs, selfClose) => {
-      const name = tag.toLowerCase();
-      if (!ALLOWED_TAGS.has(name)) return "";
-      if (close) return `</${name}>`;
-      const kept = [];
-      for (const match of attrs.matchAll(/([\w:.-]+)\s*=\s*"([^"]*)"/g)) {
-        const attr = match[1].toLowerCase();
-        if (ALLOWED_ATTRS.has(attr)) kept.push(`${attr}="${match[2]}"`);
+    .replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
+  let out = "";
+  let cursor = 0;
+  let textDepth = 0;
+  while (cursor < source.length) {
+    const lt = source.indexOf("<", cursor);
+    if (lt === -1) {
+      if (textDepth > 0) out += source.slice(cursor);
+      break;
+    }
+    if (textDepth > 0) out += source.slice(cursor, lt);
+    const gt = source.indexOf(">", lt);
+    if (gt === -1) break;
+    const parsed = parseTag(source.slice(lt, gt + 1));
+    if (parsed) {
+      out += parsed.rebuilt;
+      if (parsed.name === "text" || parsed.name === "tspan") {
+        if (parsed.close) textDepth = Math.max(0, textDepth - 1);
+        else if (!parsed.selfClose) textDepth += 1;
       }
-      return `<${name}${kept.length ? " " + kept.join(" ") : ""}${selfClose ? " /" : ""}>`;
-    },
-  );
+    }
+    cursor = gt + 1;
+  }
   return normalizeWhitespace(out);
 }
 
@@ -111,6 +147,7 @@ function parseIcon(svg) {
   return { viewBox, paths };
 }
 
+export async function generate() {
 const registry = await (await fetch(REGISTRY_URL)).json();
 const agents = [...registry.agents, ...(registry.extensions ?? [])].sort((a, b) =>
   a.id.localeCompare(b.id),
@@ -167,3 +204,8 @@ const out = [
 
 writeFileSync(OUT, out);
 console.log(`wrote ${OUT}: ${blocks.length} agents`);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await generate();
+}
