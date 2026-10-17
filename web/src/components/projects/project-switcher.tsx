@@ -235,12 +235,12 @@ function ProjectSwitcherPanel({
         !event.shiftKey
       ) {
         if (/^[1-9]$/.test(event.key)) {
+          // 识别到直选快捷键就先拦截：目标行越界时也要拦，否则浏览器接管
+          // （Chromium 的 ⌘1..8 是切换标签页）
+          event.preventDefault();
+          event.stopPropagation();
           const project = visible[Number(event.key) - 1];
-          if (project) {
-            event.preventDefault();
-            event.stopPropagation();
-            onPick(project);
-          }
+          if (project) onPick(project);
         }
         return;
       }

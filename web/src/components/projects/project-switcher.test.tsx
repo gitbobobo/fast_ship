@@ -439,12 +439,14 @@ describe("ProjectSwitcher", () => {
     );
   });
 
-  it("数字键超出可见行数时不动作", async () => {
+  it("数字键超出可见行数时不动作，但仍拦截浏览器默认行为", async () => {
     const user = userEvent.setup();
     const { onValueChange } = renderSwitcher();
 
     await openPanel(user);
-    fireEvent.keyDown(window, { key: "9", metaKey: true });
+    // 目标行越界时也要 preventDefault，否则 Chromium 会把 ⌘1..8 当成切换标签页
+    const event = fireEvent.keyDown(window, { key: "9", metaKey: true });
+    expect(event).toBe(false);
     expect(onValueChange).not.toHaveBeenCalled();
     expect(
       screen.getByRole("dialog", { name: "切换项目" }),
