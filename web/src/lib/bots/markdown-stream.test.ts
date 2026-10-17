@@ -79,4 +79,57 @@ describe("splitIncompleteFence", () => {
     const text = "正文里有 ``` 但不是行首围栏";
     expect(splitIncompleteFence(text).openTail).toBeNull();
   });
+
+  it("blockquote 内未闭合围栏从容器行切出 openTail", () => {
+    const text = "前文\n> ```ts\n> const a = 1;";
+    expect(splitIncompleteFence(text)).toEqual({
+      complete: "前文\n",
+      openTail: "> ```ts\n> const a = 1;",
+    });
+  });
+
+  it("blockquote 内已闭合围栏不算未闭合", () => {
+    const text = "> ```ts\n> const a = 1;\n> ```";
+    expect(splitIncompleteFence(text).openTail).toBeNull();
+  });
+
+  it("嵌套 blockquote（> >）内未闭合围栏可识别", () => {
+    const text = "前文\n> > ```ts\n> > const a = 1;";
+    expect(splitIncompleteFence(text)).toEqual({
+      complete: "前文\n",
+      openTail: "> > ```ts\n> > const a = 1;",
+    });
+  });
+
+  it("紧凑嵌套 blockquote（>>）内的围栏同样可识别", () => {
+    const text = ">> ```ts\ncode";
+    expect(splitIncompleteFence(text)).toEqual({
+      complete: "",
+      openTail: ">> ```ts\ncode",
+    });
+  });
+
+  it("普通引用文本不误判为围栏", () => {
+    const text = "> 普通引用文本\n> 第二行引用";
+    expect(splitIncompleteFence(text)).toEqual({
+      complete: text,
+      openTail: null,
+    });
+  });
+
+  it("顶层围栏不会被内容里的容器前缀行误闭合", () => {
+    const text = "```\n> ```ts\n> x\n> ```\n后文";
+    expect(splitIncompleteFence(text)).toEqual({
+      complete: "",
+      openTail: text,
+    });
+  });
+
+  it("blockquote 内围栏只被同容器深度的行闭合", () => {
+    const text = "> ```ts\n> > ```\n> x";
+    expect(splitIncompleteFence(text)).toEqual({
+      complete: "",
+      openTail: text,
+    });
+  });
 });
