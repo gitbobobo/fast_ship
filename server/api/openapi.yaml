@@ -63,6 +63,8 @@ tags:
     description: Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人归属及显式系统行（无主行默认不可见）；供代理排查 Fast Ship 自身问题
   - name: bots
     description: 内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位
+  - name: quota
+    description: 订阅套餐额度（INT-109）：粘贴凭据后服务端定时抓取各 AI 编码服务订阅额度并只读展示。管理端点仅 JWT；GET /api/quota/accounts 对 JWT 与 API Key 均开放（只读，机器人取数通道）
 
 paths:
   /api/environments:
@@ -2174,6 +2176,258 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/quota/providers:
+    get:
+      tags: [quota]
+      operationId: listQuotaProviders
+      summary: 列出支持的额度供应商
+      description: 返回各供应商的凭据字段元数据与「凭据从哪里获取」的分步说明；前端按它动态渲染添加表单。不触发任何抓取。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 供应商列表（固定顺序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/QuotaProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/quota/accounts:
+    get:
+      tags: [quota]
+      operationId: listQuotaAccounts
+      summary: 列出当前用户的额度账号
+      description: 回显最近一次成功抓取的快照（窗口、余额、套餐名）与状态；凭据不回显，credential_hint 只含末 4 位。JWT 与 API Key 均可（API Key 是机器人取数通道，只读）。
+      security:
+        - jwtAuth: []
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: 额度账号列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/QuotaAccount'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [quota]
+      operationId: createQuotaAccount
+      summary: 添加额度账号
+      description: |
+        整组凭据按供应商元数据校验后 AES-256-GCM 加密落库；保存后服务端同步抓取一次，
+        抓取失败仍然保存（HTTP 200，status 为 credential_invalid / provider_error），
+        未抓取过时 status 为 pending。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateQuotaAccountRequest'
+      responses:
+        '200':
+          description: 保存成功（含同步抓取结果）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuotaAccount'
+        '400':
+          description: 参数无效（40001）；供应商未知（40030）；必填凭据字段缺失或为空（40031）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/quota/accounts/{id}:
+    put:
+      tags: [quota]
+      operationId: updateQuotaAccount
+      summary: 修改标签或整组替换凭据
+      description: |
+        省略 credentials 表示只改标签（不触发抓取）；提供 credentials 则整组替换凭据，
+        抓取状态打回 pending 并同步重抓一次，旧快照保留到新快照写入。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/QuotaAccountId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateQuotaAccountRequest'
+      responses:
+        '200':
+          description: 更新后的额度账号
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuotaAccount'
+        '400':
+          description: 参数无效（40001）；凭据字段缺失或为空（40031）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 账号不存在或不属于当前用户（40430）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [quota]
+      operationId: deleteQuotaAccount
+      summary: 删除额度账号
+      description: 删除该行（连带凭据密文与快照）；他人的账号一律 40430，不泄露存在性。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/QuotaAccountId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 账号不存在或不属于当前用户（40430）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/quota/accounts/{id}/refresh:
+    post:
+      tags: [quota]
+      operationId: refreshQuotaAccount
+      summary: 立即抓取一次
+      description: |
+        同步抓取并落库后返回账号；抓取结果（成功或失败）落在 status 字段，HTTP 仍为 200。
+        同一账号距上次成功抓取过近时返回 42900，message 写明需等待的秒数。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/QuotaAccountId'
+      responses:
+        '200':
+          description: 抓取完成后的额度账号
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuotaAccount'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 账号不存在或不属于当前用户（40430）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: 手动刷新过于频繁（42900），message 含 Refresh-After 秒数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/quota/test:
+    post:
+      tags: [quota]
+      operationId: testQuotaCredentials
+      summary: 测试一组凭据
+      description: 不落库、不改任何账号状态；结果落在 data.status，HTTP 恒为 200（参数校验错误除外）。供「添加账号」对话框的测试按钮。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestQuotaCredentialsRequest'
+      responses:
+        '200':
+          description: 探测结果（status != ok 时 error 给用户可读原因，detail 为可选诊断）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuotaProbe'
+        '400':
+          description: 参数无效（40001）；供应商未知（40030）；凭据字段缺失或为空（40031）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -7313,6 +7567,13 @@ components:
       schema:
         type: string
       description: API Key ID
+    QuotaAccountId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 额度账号 ID（UUID）
     IssueId:
       name: iid
       in: path
@@ -8072,6 +8333,217 @@ components:
           type: string
         name:
           type: string
+
+    # ---- quota（INT-109）----
+    QuotaCredentials:
+      type: object
+      additionalProperties:
+        type: string
+      description: 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义
+    QuotaCredentialField:
+      type: object
+      required: [key, label, secret, required, placeholder, help]
+      properties:
+        key:
+          type: string
+          description: 凭据字段标识（api_key / token / access_token / org_id / account_id），提交时以它为 credentials 的 map key
+        label:
+          type: string
+        secret:
+          type: boolean
+          description: 密文字段前端用密码框展示；任何响应不回显
+        required:
+          type: boolean
+        placeholder:
+          type: string
+        help:
+          type: string
+    QuotaProvider:
+      type: object
+      required: [id, name, plan_hint, credential_fields, instructions, warning]
+      properties:
+        id:
+          type: string
+          description: 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory）
+        name:
+          type: string
+        plan_hint:
+          type: string
+          description: 可选，仅供空态提示
+        credential_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuotaCredentialField'
+        instructions:
+          type: array
+          items:
+            type: string
+          description: 「凭据从哪里获取」分步说明，逐条一句话
+        warning:
+          type: string
+          description: 会话令牌类供应商必填的过期提示；其余为空串
+    QuotaWindow:
+      type: object
+      required: [kind, label, used_percent, unit]
+      properties:
+        kind:
+          type: string
+          enum: [five_hour, daily, weekly, monthly, other]
+        label:
+          type: string
+          description: 面向用户的窗口名；other 类给准确名字（如 MCP 次数）
+        used_percent:
+          type: number
+          format: double
+          nullable: true
+          description: 0..100，四舍五入到 1 位小数；算不出为 null
+        used:
+          type: number
+          format: double
+          nullable: true
+          description: 单位由 unit 决定
+        limit:
+          type: number
+          format: double
+          nullable: true
+        unit:
+          type: string
+          enum: [percent, usd, count]
+        reset_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: UTC；窗口重置时间
+    QuotaBalance:
+      type: object
+      required: [label, amount, currency]
+      properties:
+        label:
+          type: string
+        amount:
+          type: number
+          format: double
+          description: 金额；显式 double，不降 float32
+        currency:
+          type: string
+    QuotaAccount:
+      type: object
+      required: [id, provider, provider_name, label, credential_hint, plan_name, status, last_error, fetched_at, last_success_at, windows, balance, created_at, updated_at]
+      properties:
+        id:
+          type: string
+        provider:
+          type: string
+        provider_name:
+          type: string
+          description: 供应商显示名（随供应商元数据，非用户可改）
+        label:
+          type: string
+        credential_hint:
+          type: string
+          description: 凭据尾号（形如 …ab12）；绝不回显明文
+        plan_name:
+          type: string
+          description: 最近一次成功快照的套餐名；未抓取过为空串
+        status:
+          type: string
+          enum: [ok, credential_invalid, provider_error, pending]
+          description: ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取
+        last_error:
+          type: string
+          description: 最近一次失败原因（脱敏后的用户可读文本）
+        fetched_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null
+        last_success_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 同 fetched_at（保留字段名便于前端区分）
+        windows:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuotaWindow'
+          description: 最近一次成功快照的窗口；失败时保留旧数据
+        balance:
+          allOf:
+            - $ref: '#/components/schemas/QuotaBalance'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    CreateQuotaAccountRequest:
+      type: object
+      required: [provider, label, credentials]
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          description: 供应商 id（GET /api/quota/providers 返回的 id）；未知返回 40030
+          x-oapi-codegen-extra-tags:
+            binding: required
+        label:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 用户给账号起的名字（如「我的 Pro」）
+          x-oapi-codegen-extra-tags:
+            binding: required,min=1,max=100
+        credentials:
+          $ref: '#/components/schemas/QuotaCredentials'
+    UpdateQuotaAccountRequest:
+      type: object
+      # 省略 credentials 表示只改标签；给了就是整组替换。
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 非空时替换标签；改标签不触发抓取
+          x-oapi-codegen-extra-tags:
+            binding: omitempty,max=100
+        credentials:
+          $ref: '#/components/schemas/QuotaCredentials'
+    TestQuotaCredentialsRequest:
+      type: object
+      required: [provider, credentials]
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          description: 供应商 id；未知返回 40030
+          x-oapi-codegen-extra-tags:
+            binding: required
+        credentials:
+          $ref: '#/components/schemas/QuotaCredentials'
+    QuotaProbe:
+      type: object
+      required: [status, plan_name, windows, balance, error, detail]
+      properties:
+        status:
+          type: string
+          enum: [ok, credential_invalid, provider_error]
+        plan_name:
+          type: string
+        windows:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuotaWindow'
+        balance:
+          allOf:
+            - $ref: '#/components/schemas/QuotaBalance'
+          nullable: true
+        error:
+          type: string
+          description: status != ok 时给用户可读原因（已脱敏）
+        detail:
+          type: string
+          description: 可选；更细的诊断（HTTP 状态码等），可为空串
 
     # ---- projects ----
     CreateProjectRequest:

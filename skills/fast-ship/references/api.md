@@ -9671,3 +9671,373 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
+
+## quota
+
+订阅套餐额度（INT-109）：粘贴凭据后服务端定时抓取各 AI 编码服务订阅额度并只读展示。管理端点仅 JWT；GET /api/quota/accounts 对 JWT 与 API Key 均开放（只读，机器人取数通道）
+
+### GET `/api/quota/providers`
+
+<!-- operationId: listQuotaProviders -->
+
+列出支持的额度供应商
+
+返回各供应商的凭据字段元数据与「凭据从哪里获取」的分步说明；前端按它动态渲染添加表单。不触发任何抓取。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 供应商列表（固定顺序）
+
+`data` 为数组。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory） |
+| `name` | string | 是 |  |
+| `plan_hint` | string | 是 | 可选，仅供空态提示 |
+| `credential_fields` | object[] | 是 |  |
+| `credential_fields[].key` | string | 是 | 凭据字段标识（api_key / token / access_token / org_id / account_id），提交时以它为 credentials 的 map key |
+| `credential_fields[].label` | string | 是 |  |
+| `credential_fields[].secret` | boolean | 是 | 密文字段前端用密码框展示；任何响应不回显 |
+| `credential_fields[].required` | boolean | 是 |  |
+| `credential_fields[].placeholder` | string | 是 |  |
+| `credential_fields[].help` | string | 是 |  |
+| `instructions` | string[] | 是 | 「凭据从哪里获取」分步说明，逐条一句话 |
+| `warning` | string | 是 | 会话令牌类供应商必填的过期提示；其余为空串 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/quota/accounts`
+
+<!-- operationId: listQuotaAccounts -->
+
+列出当前用户的额度账号
+
+回显最近一次成功抓取的快照（窗口、余额、套餐名）与状态；凭据不回显，credential_hint 只含末 4 位。JWT 与 API Key 均可（API Key 是机器人取数通道，只读）。
+
+**鉴权**：JWT+API Key
+
+**成功响应**
+
+**200** 额度账号列表
+
+`data` 为数组。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `provider` | string | 是 |  |
+| `provider_name` | string | 是 | 供应商显示名（随供应商元数据，非用户可改） |
+| `label` | string | 是 |  |
+| `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
+| `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
+| `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
+| `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
+| `last_success_at` | string（date-time，可空） | 是 | 同 fetched_at（保留字段名便于前端区分） |
+| `windows` | object[] | 是 | 最近一次成功快照的窗口；失败时保留旧数据 |
+| `windows[].kind` | string（enum: five_hour \| daily \| weekly \| monthly \| other） | 是 |  |
+| `windows[].label` | string | 是 | 面向用户的窗口名；other 类给准确名字（如 MCP 次数） |
+| `windows[].used_percent` | number（double，可空） | 是 | 0..100，四舍五入到 1 位小数；算不出为 null |
+| `windows[].used` | number（double，可空） | 否 | 单位由 unit 决定 |
+| `windows[].limit` | number（double，可空） | 否 |  |
+| `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
+| `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `balance` | object（可空） | 是 |  |
+| `balance.label` | string | 是 |  |
+| `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
+| `balance.currency` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/quota/accounts`
+
+<!-- operationId: createQuotaAccount -->
+
+添加额度账号
+
+整组凭据按供应商元数据校验后 AES-256-GCM 加密落库；保存后服务端同步抓取一次，
+抓取失败仍然保存（HTTP 200，status 为 credential_invalid / provider_error），
+未抓取过时 status 为 pending。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string（长度 ≥1） | 是 | 供应商 id（GET /api/quota/providers 返回的 id）；未知返回 40030 |
+| `label` | string（长度 1..100） | 是 | 用户给账号起的名字（如「我的 Pro」） |
+| `credentials` | object | 是 | 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义 |
+
+**成功响应**
+
+**200** 保存成功（含同步抓取结果）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `provider` | string | 是 |  |
+| `provider_name` | string | 是 | 供应商显示名（随供应商元数据，非用户可改） |
+| `label` | string | 是 |  |
+| `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
+| `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
+| `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
+| `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
+| `last_success_at` | string（date-time，可空） | 是 | 同 fetched_at（保留字段名便于前端区分） |
+| `windows` | object[] | 是 | 最近一次成功快照的窗口；失败时保留旧数据 |
+| `windows[].kind` | string（enum: five_hour \| daily \| weekly \| monthly \| other） | 是 |  |
+| `windows[].label` | string | 是 | 面向用户的窗口名；other 类给准确名字（如 MCP 次数） |
+| `windows[].used_percent` | number（double，可空） | 是 | 0..100，四舍五入到 1 位小数；算不出为 null |
+| `windows[].used` | number（double，可空） | 否 | 单位由 unit 决定 |
+| `windows[].limit` | number（double，可空） | 否 |  |
+| `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
+| `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `balance` | object（可空） | 是 |  |
+| `balance.label` | string | 是 |  |
+| `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
+| `balance.currency` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001）；供应商未知（40030）；必填凭据字段缺失或为空（40031） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/quota/accounts/{id}`
+
+<!-- operationId: updateQuotaAccount -->
+
+修改标签或整组替换凭据
+
+省略 credentials 表示只改标签（不触发抓取）；提供 credentials 则整组替换凭据，
+抓取状态打回 pending 并同步重抓一次，旧快照保留到新快照写入。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 额度账号 ID（UUID） |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `label` | string（长度 1..100） | 否 | 非空时替换标签；改标签不触发抓取 |
+| `credentials` | object | 否 | 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义 |
+
+**成功响应**
+
+**200** 更新后的额度账号
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `provider` | string | 是 |  |
+| `provider_name` | string | 是 | 供应商显示名（随供应商元数据，非用户可改） |
+| `label` | string | 是 |  |
+| `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
+| `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
+| `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
+| `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
+| `last_success_at` | string（date-time，可空） | 是 | 同 fetched_at（保留字段名便于前端区分） |
+| `windows` | object[] | 是 | 最近一次成功快照的窗口；失败时保留旧数据 |
+| `windows[].kind` | string（enum: five_hour \| daily \| weekly \| monthly \| other） | 是 |  |
+| `windows[].label` | string | 是 | 面向用户的窗口名；other 类给准确名字（如 MCP 次数） |
+| `windows[].used_percent` | number（double，可空） | 是 | 0..100，四舍五入到 1 位小数；算不出为 null |
+| `windows[].used` | number（double，可空） | 否 | 单位由 unit 决定 |
+| `windows[].limit` | number（double，可空） | 否 |  |
+| `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
+| `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `balance` | object（可空） | 是 |  |
+| `balance.label` | string | 是 |  |
+| `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
+| `balance.currency` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001）；凭据字段缺失或为空（40031） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 账号不存在或不属于当前用户（40430） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/quota/accounts/{id}`
+
+<!-- operationId: deleteQuotaAccount -->
+
+删除额度账号
+
+删除该行（连带凭据密文与快照）；他人的账号一律 40430，不泄露存在性。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 额度账号 ID（UUID） |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 账号不存在或不属于当前用户（40430） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/quota/accounts/{id}/refresh`
+
+<!-- operationId: refreshQuotaAccount -->
+
+立即抓取一次
+
+同步抓取并落库后返回账号；抓取结果（成功或失败）落在 status 字段，HTTP 仍为 200。
+同一账号距上次成功抓取过近时返回 42900，message 写明需等待的秒数。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 额度账号 ID（UUID） |
+
+**成功响应**
+
+**200** 抓取完成后的额度账号
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `provider` | string | 是 |  |
+| `provider_name` | string | 是 | 供应商显示名（随供应商元数据，非用户可改） |
+| `label` | string | 是 |  |
+| `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
+| `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
+| `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
+| `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
+| `last_success_at` | string（date-time，可空） | 是 | 同 fetched_at（保留字段名便于前端区分） |
+| `windows` | object[] | 是 | 最近一次成功快照的窗口；失败时保留旧数据 |
+| `windows[].kind` | string（enum: five_hour \| daily \| weekly \| monthly \| other） | 是 |  |
+| `windows[].label` | string | 是 | 面向用户的窗口名；other 类给准确名字（如 MCP 次数） |
+| `windows[].used_percent` | number（double，可空） | 是 | 0..100，四舍五入到 1 位小数；算不出为 null |
+| `windows[].used` | number（double，可空） | 否 | 单位由 unit 决定 |
+| `windows[].limit` | number（double，可空） | 否 |  |
+| `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
+| `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `balance` | object（可空） | 是 |  |
+| `balance.label` | string | 是 |  |
+| `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
+| `balance.currency` | string | 是 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 账号不存在或不属于当前用户（40430） |
+| 429 | 手动刷新过于频繁（42900），message 含 Refresh-After 秒数 |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/quota/test`
+
+<!-- operationId: testQuotaCredentials -->
+
+测试一组凭据
+
+不落库、不改任何账号状态；结果落在 data.status，HTTP 恒为 200（参数校验错误除外）。供「添加账号」对话框的测试按钮。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string（长度 ≥1） | 是 | 供应商 id；未知返回 40030 |
+| `credentials` | object | 是 | 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义 |
+
+**成功响应**
+
+**200** 探测结果（status != ok 时 error 给用户可读原因，detail 为可选诊断）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `status` | string（enum: ok \| credential_invalid \| provider_error） | 是 |  |
+| `plan_name` | string | 是 |  |
+| `windows` | object[] | 是 |  |
+| `windows[].kind` | string（enum: five_hour \| daily \| weekly \| monthly \| other） | 是 |  |
+| `windows[].label` | string | 是 | 面向用户的窗口名；other 类给准确名字（如 MCP 次数） |
+| `windows[].used_percent` | number（double，可空） | 是 | 0..100，四舍五入到 1 位小数；算不出为 null |
+| `windows[].used` | number（double，可空） | 否 | 单位由 unit 决定 |
+| `windows[].limit` | number（double，可空） | 否 |  |
+| `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
+| `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `balance` | object（可空） | 是 |  |
+| `balance.label` | string | 是 |  |
+| `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
+| `balance.currency` | string | 是 |  |
+| `error` | string | 是 | status != ok 时给用户可读原因（已脱敏） |
+| `detail` | string | 是 | 可选；更细的诊断（HTTP 状态码等），可为空串 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001）；供应商未知（40030）；凭据字段缺失或为空（40031） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |

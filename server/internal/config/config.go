@@ -18,6 +18,7 @@ type Config struct {
 	Logging    LoggingConfig    `mapstructure:"logging"`
 	GitHubApp  GitHubAppConfig  `mapstructure:"github_app"`
 	Bots       BotsConfig       `mapstructure:"bots"`
+	Quota      QuotaConfig      `mapstructure:"quota"`
 }
 
 type ServerConfig struct {
@@ -233,6 +234,50 @@ func (c BotsMemoryConfig) NightlyClock() (hour, minute int) {
 	return 3, 0
 }
 
+// QuotaConfig 是订阅套餐额度（INT-109）的抓取与调度配置。
+// BaseURLs 按供应商 id 覆盖默认 origin，仅部署/测试用。
+type QuotaConfig struct {
+	Enabled                      bool              `mapstructure:"enabled"`
+	IntervalMinutes              int               `mapstructure:"interval_minutes"`
+	RunOnStartup                 bool              `mapstructure:"run_on_startup"`
+	MaxConcurrency               int               `mapstructure:"max_concurrency"`
+	RequestTimeoutSeconds        int               `mapstructure:"request_timeout_seconds"`
+	ManualRefreshCooldownSeconds int               `mapstructure:"manual_refresh_cooldown_seconds"`
+	BaseURLs                     map[string]string `mapstructure:"base_urls"`
+}
+
+// Interval 返回调度轮间隔（默认 10 分钟）。
+func (c QuotaConfig) Interval() time.Duration {
+	if c.IntervalMinutes <= 0 {
+		return 10 * time.Minute
+	}
+	return time.Duration(c.IntervalMinutes) * time.Minute
+}
+
+// MaxConcurrencyV 返回单轮并发抓取上限（默认 3）。
+func (c QuotaConfig) MaxConcurrencyV() int {
+	if c.MaxConcurrency <= 0 {
+		return 3
+	}
+	return c.MaxConcurrency
+}
+
+// RequestTimeout 返回单次抓取超时（默认 20 秒）。
+func (c QuotaConfig) RequestTimeout() time.Duration {
+	if c.RequestTimeoutSeconds <= 0 {
+		return 20 * time.Second
+	}
+	return time.Duration(c.RequestTimeoutSeconds) * time.Second
+}
+
+// ManualRefreshCooldown 返回手动刷新冷却（默认 30 秒）。
+func (c QuotaConfig) ManualRefreshCooldown() time.Duration {
+	if c.ManualRefreshCooldownSeconds <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.ManualRefreshCooldownSeconds) * time.Second
+}
+
 // validate 配置级校验：明显非法值直接拒绝启动。
 func (c BotsConfig) validate() error {
 	if c.Context.CompressionRatio != 0 && (c.Context.CompressionRatio <= 0 || c.Context.CompressionRatio >= 1) {
@@ -267,6 +312,12 @@ func (c BotsConfig) validate() error {
 func Load(path string) (*Config, error) {
 	viper.SetConfigFile(path)
 
+	// 新配置段的缺省值：老部署的配置文件里没有 quota 段时，viper 会把这两个
+	// bool 反序列化成 false，等于升级后静默关掉后台抓取；这里给缺省值兜底，
+	// 显式写 false 仍可关闭。其余数值项走 QuotaConfig 上的默认回退方法。
+	viper.SetDefault("quota.enabled", true)
+	viper.SetDefault("quota.run_on_startup", true)
+
 	// 支持环境变量覆盖
 	viper.SetEnvPrefix("FAST_SHIP")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -298,6 +349,12 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("bots.memory.nightly_model", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_MODEL")
 	_ = viper.BindEnv("bots.memory.timezone", "FAST_SHIP_BOTS_MEMORY_TIMEZONE")
 	_ = viper.BindEnv("bots.memory.nightly_time", "FAST_SHIP_BOTS_MEMORY_NIGHTLY_TIME")
+	_ = viper.BindEnv("quota.enabled", "FAST_SHIP_QUOTA_ENABLED")
+	_ = viper.BindEnv("quota.interval_minutes", "FAST_SHIP_QUOTA_INTERVAL_MINUTES")
+	_ = viper.BindEnv("quota.run_on_startup", "FAST_SHIP_QUOTA_RUN_ON_STARTUP")
+	_ = viper.BindEnv("quota.max_concurrency", "FAST_SHIP_QUOTA_MAX_CONCURRENCY")
+	_ = viper.BindEnv("quota.request_timeout_seconds", "FAST_SHIP_QUOTA_REQUEST_TIMEOUT_SECONDS")
+	_ = viper.BindEnv("quota.manual_refresh_cooldown_seconds", "FAST_SHIP_QUOTA_MANUAL_REFRESH_COOLDOWN_SECONDS")
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, err

@@ -153,6 +153,14 @@ type (
 	AutomationRunResponse    = api.AutomationRun
 	AutomationTriggerContext = api.AutomationTriggerContext
 
+	// quota（INT-109）
+	CreateQuotaAccountRequest   = api.CreateQuotaAccountRequest
+	UpdateQuotaAccountRequest   = api.UpdateQuotaAccountRequest
+	TestQuotaCredentialsRequest = api.TestQuotaCredentialsRequest
+	QuotaAccountResponse        = api.QuotaAccount
+	QuotaProviderResponse       = api.QuotaProvider
+	QuotaProbeResponse          = api.QuotaProbe
+
 	// notifications & automation agent
 	NotificationResponse       = api.Notification
 	AutomationRunReportRequest = api.AutomationRunReportRequest

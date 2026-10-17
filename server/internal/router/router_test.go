@@ -931,6 +931,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
 		&model.Notification{},
+		&model.QuotaAccount{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -1083,6 +1084,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 	botHandler := handler.NewBotHandler(botService)
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(nil, "", nil)
+	quotaHandler := handler.NewQuotaHandler(service.NewQuotaService(repository.NewQuotaAccountRepository(db), cfg, zap.NewNop(), nil))
 
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 
@@ -1090,7 +1092,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,

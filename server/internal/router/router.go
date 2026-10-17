@@ -39,6 +39,7 @@ func Setup(
 	botHandler *handler.BotHandler,
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
+	quotaHandler *handler.QuotaHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -101,6 +102,19 @@ func Setup(
 			githubTokens.DELETE("/:id", githubTokenHandler.Delete)
 			githubTokens.POST("/:id/detect", githubTokenHandler.Detect)
 		}
+
+		// JWT 必须 — 订阅套餐额度管理（INT-109）：供应商元数据、账号增删改、
+		// 手动刷新与凭据测试仅 JWT；GET /accounts 对 API Key 只读开放（机器人取数通道）。
+		quotaJWT := api.Group("/quota", middleware.RequireJWT(cfg, authService))
+		{
+			quotaJWT.GET("/providers", quotaHandler.ListProviders)
+			quotaJWT.POST("/accounts", quotaHandler.CreateAccount)
+			quotaJWT.PUT("/accounts/:id", quotaHandler.UpdateAccount)
+			quotaJWT.DELETE("/accounts/:id", quotaHandler.DeleteAccount)
+			quotaJWT.POST("/accounts/:id/refresh", quotaHandler.RefreshAccount)
+			quotaJWT.POST("/test", quotaHandler.Test)
+		}
+		api.GET("/quota/accounts", middleware.RequireAuth(cfg, apiKeyRepo, authService), quotaHandler.ListAccounts)
 
 		// JWT 必须 — 项目写操作
 		projectWrite := api.Group("/projects", middleware.RequireJWT(cfg, authService))

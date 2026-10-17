@@ -14,6 +14,7 @@ import {
   Bot,
   Workflow,
   Bell,
+  Gauge,
 } from "lucide-react";
 import { useUnreadNotificationCount } from "@/lib/hooks/use-notifications";
 import {
@@ -38,6 +39,7 @@ const navItems = [
   { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
   { to: "/bots", label: "机器人", icon: Bot, end: false },
   { to: "/automations", label: "自动化", icon: Workflow, end: true },
+  { to: "/quota", label: "套餐额度", icon: Gauge, end: true },
   { to: "/notifications", label: "通知", icon: Bell, end: true },
   { to: "/versions", label: "版本", icon: Tags, end: true },
   { to: "/screenshots", label: "截图", icon: Images, end: true },

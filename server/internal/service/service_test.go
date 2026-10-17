@@ -105,6 +105,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
 		&model.Notification{},
+		&model.QuotaAccount{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}

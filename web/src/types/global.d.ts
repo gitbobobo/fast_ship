@@ -698,3 +698,89 @@ interface IssuePrompt {
 interface IssuePromptSettings {
   prompts: IssuePrompt[] | null;
 }
+
+/* 套餐额度（INT-109）：字段与冻结契约 v1 §2–§5 逐字一致。 */
+
+/** 额度窗口类型；other 用于非时间窗口（如 MCP 次数），label 由后端给准确名字 */
+type QuotaWindowKind = "five_hour" | "daily" | "weekly" | "monthly" | "other";
+
+interface QuotaWindow {
+  kind: QuotaWindowKind;
+  /** 面向用户的窗口名 */
+  label: string;
+  /** 0..100；算不出百分比时为 null */
+  used_percent: number | null;
+  /** 服务端 omitempty：nil 时字段整个缺省（undefined），区别于显式 null */
+  used?: number | null;
+  limit?: number | null;
+  unit: "percent" | "usd" | "count";
+  /** UTC RFC3339；无重置时间为 null */
+  reset_at: string | null;
+}
+
+interface QuotaBalance {
+  label: string;
+  amount: number;
+  currency: string;
+}
+
+/** 供应商凭据表单字段元数据：按它动态渲染输入框 */
+interface QuotaCredentialField {
+  key: string;
+  label: string;
+  /** true 时用 type="password" 渲染 */
+  secret: boolean;
+  required: boolean;
+  placeholder: string;
+  help: string;
+}
+
+/** GET /api/quota/providers 的 data 元素 */
+interface QuotaProvider {
+  id: string;
+  name: string;
+  /** 可选，仅供空态提示 */
+  plan_hint?: string;
+  credential_fields: QuotaCredentialField[];
+  /** 「凭据从哪里获取」分步说明，逐条一句话 */
+  instructions: string[];
+  /** 会话令牌类供应商的过期警告；其余为空串 */
+  warning: string;
+}
+
+/** ok 正常；credential_invalid 凭据失效；provider_error 接口异常；pending 暂未抓取 */
+type QuotaAccountStatus = "ok" | "credential_invalid" | "provider_error" | "pending";
+
+interface QuotaAccount {
+  id: string;
+  provider: string;
+  provider_name: string;
+  label: string;
+  /** 只回显末 4 位；绝不含明文 */
+  credential_hint: string;
+  /** 最近一次成功快照的套餐名；未抓取过为空串 */
+  plan_name: string;
+  status: QuotaAccountStatus;
+  /** 最近一次失败原因（脱敏后的用户可读文本） */
+  last_error: string;
+  /** 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null */
+  fetched_at: string | null;
+  last_success_at: string | null;
+  /** 最近一次成功快照的窗口；失败时保留旧数据 */
+  windows: QuotaWindow[];
+  balance: QuotaBalance | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** /api/quota/test 的探测结果：不落库、不改账号状态 */
+interface QuotaProbe {
+  status: QuotaAccountStatus;
+  plan_name: string;
+  windows: QuotaWindow[];
+  balance: QuotaBalance | null;
+  /** status != ok 时给用户可读原因 */
+  error: string;
+  /** 可选的更细诊断（HTTP 状态码等），可为空 */
+  detail: string;
+}

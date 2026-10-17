@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { watchGithubTokensIdentity } from "@/lib/hooks/use-github-tokens";
 import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
 import { watchBotsIdentity } from "@/lib/hooks/use-bots";
+import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
 
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
@@ -44,6 +45,7 @@ const GithubTokensPage = lazy(
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const AutomationsPage = lazy(() => import("@/routes/automations/index"));
 const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
+const QuotaPage = lazy(() => import("@/routes/quota/index"));
 const BotsPage = lazy(() => import("@/routes/bots/index"));
 const BotDetailPage = lazy(() => import("@/routes/bots/$botId"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
@@ -66,10 +68,12 @@ export default function App() {
     const stopThreads = watchThreadsIdentity(queryClient);
     const stopGithubTokens = watchGithubTokensIdentity(queryClient);
     const stopBots = watchBotsIdentity(queryClient);
+    const stopQuota = watchQuotaIdentity(queryClient);
     return () => {
       stopThreads();
       stopGithubTokens();
       stopBots();
+      stopQuota();
     };
   }, []);
 
@@ -204,6 +208,10 @@ export default function App() {
               <Route
                 path="/notifications"
                 element={<LazyPage render={<NotificationsPage />} />}
+              />
+              <Route
+                path="/quota"
+                element={<LazyPage render={<QuotaPage />} />}
               />
               <Route path="/bots" element={<LazyPage render={<BotsPage />} />} />
               <Route
