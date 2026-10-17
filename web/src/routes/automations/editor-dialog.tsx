@@ -429,7 +429,9 @@ export function AutomationEditorDialog({
               <ModelPicker
                 providers={providers}
                 resolved={modelResolved}
-                disabled={providers.length === 0}
+                // 有显式选择时即使 providers 没能加载也要能改回「项目默认」
+                // （composer-options 失败 / 无可用 provider）。
+                disabled={providers.length === 0 && !selection}
                 className="w-full max-w-none"
                 leadingOption={{
                   label: "项目默认",
