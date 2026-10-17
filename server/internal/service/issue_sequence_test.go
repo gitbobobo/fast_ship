@@ -186,19 +186,18 @@ func runConcurrently(n int, fn func(i int) error) []error {
 }
 
 // assertProjectSequences 断言项目下恰有 want 个 issue 且序号正好是 1..want。
+// 只 Pluck sequence_number 单列，不读正文。
 func assertProjectSequences(t *testing.T, svc *testServices, projectID string, want int) {
 	t.Helper()
 
-	issues, err := svc.issueRepo.ListByProject(projectID)
-	if err != nil {
-		t.Fatalf("list issues: %v", err)
+	seqs := make([]int, 0, want)
+	if err := svc.db.Model(&model.Issue{}).
+		Where("project_id = ?", projectID).
+		Pluck("sequence_number", &seqs).Error; err != nil {
+		t.Fatalf("pluck sequences: %v", err)
 	}
-	if len(issues) != want {
-		t.Fatalf("expected %d issues, got %d", want, len(issues))
-	}
-	seqs := make([]int, 0, len(issues))
-	for _, issue := range issues {
-		seqs = append(seqs, issue.SequenceNumber)
+	if len(seqs) != want {
+		t.Fatalf("expected %d issues, got %d", want, len(seqs))
 	}
 	sort.Ints(seqs)
 	for i, seq := range seqs {

@@ -7,6 +7,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"sort"
@@ -14,31 +15,25 @@ import (
 	"time"
 )
 
-func (s *IssueService) loadFilteredIssues(projectID string, filters IssueListFilters) ([]model.Issue, map[string]*model.IssueInternalMeta, error) {
-	issues, err := s.issueRepo.ListByProject(projectID)
-	if err != nil {
-		return nil, nil, errs.ErrInternal
+// toIssueListQuery 把 service 层过滤器映射为 repository 的查询条件；
+// q 在此统一 TrimSpace，repository 收到的 Query 保证已归一化。
+func toIssueListQuery(projectID string, filters IssueListFilters) repository.IssueListQuery {
+	return repository.IssueListQuery{
+		ProjectID: projectID,
+		State:     filters.State,
+		Source:    filters.Source,
+		Workflow:  filters.Workflow,
+		Query:     strings.TrimSpace(filters.Query),
+		Label:     filters.Label,
+		Assignee:  filters.Assignee,
+		Milestone: filters.Milestone,
 	}
-
-	metaByIssueID, err := s.internalMetaByIssueIDs(issues)
-	if err != nil {
-		return nil, nil, errs.ErrInternal
-	}
-
-	filtered := make([]model.Issue, 0, len(issues))
-	for _, issue := range issues {
-		var meta *model.IssueInternalMeta
-		if current, ok := metaByIssueID[issue.ID]; ok {
-			meta = current
-		}
-		if !matchesIssueFilters(issue, issue.GitHubMeta, meta, filters) {
-			continue
-		}
-		filtered = append(filtered, issue)
-	}
-	return filtered, metaByIssueID, nil
 }
 
+// List 过滤、排序、分页全部下推 SQL（INT-106）：单次 COUNT + 单次分页 SELECT
+// （LIMIT/OFFSET，投影不含正文），meta/shipHook/未读/PR 聚合只按本页 Issue 查询，
+// 读盘量与项目 Issue 总量解耦。列表响应不携带正文（Body/BodyHtml 为空串，
+// 详情走 Get）。page 超过末页时返回空切片且 total 不变，与迁移前一致。
 func (s *IssueService) List(projectID, userID string, filters IssueListFilters, page, pageSize int) ([]IssueResponse, int64, error) {
 	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -47,25 +42,28 @@ func (s *IssueService) List(projectID, userID string, filters IssueListFilters, 
 		return nil, 0, errs.ErrInternal
 	}
 
-	filtered, metaByIssueID, err := s.loadFilteredIssues(projectID, filters)
+	query := toIssueListQuery(projectID, filters)
+	total, err := s.issueRepo.CountFiltered(query)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, errs.ErrInternal
 	}
-	sortIssues(filtered, filters.Sort)
 
-	total := int64(len(filtered))
-	start := (page - 1) * pageSize
-	if start > len(filtered) {
-		start = len(filtered)
+	offset := (page - 1) * pageSize
+	if offset < 0 {
+		offset = 0
 	}
-	end := start + pageSize
-	if end > len(filtered) {
-		end = len(filtered)
+	pageIssues, err := s.issueRepo.ListFiltered(query, filters.Sort, offset, pageSize)
+	if err != nil {
+		return nil, 0, errs.ErrInternal
+	}
+
+	metaByIssueID, err := s.internalMetaByIssueIDs(pageIssues)
+	if err != nil {
+		return nil, 0, errs.ErrInternal
 	}
 
 	labelMap := s.buildLabelMap(projectID)
 
-	pageIssues := filtered[start:end]
 	shipHooksByIssueID, err := s.shipHookService.shipHooksByIssueIDs(pageIssues)
 	if err != nil {
 		return nil, 0, err
@@ -110,11 +108,11 @@ func (s *IssueService) CountIssues(projectID, userID string, filters IssueListFi
 		return 0, errs.ErrInternal
 	}
 
-	filtered, _, err := s.loadFilteredIssues(projectID, filters)
+	total, err := s.issueRepo.CountFiltered(toIssueListQuery(projectID, filters))
 	if err != nil {
-		return 0, err
+		return 0, errs.ErrInternal
 	}
-	return int64(len(filtered)), nil
+	return total, nil
 }
 
 func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter string) (*BatchCloseDoneIssuesResponse, error) {
@@ -126,14 +124,16 @@ func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter stri
 		return nil, errs.ErrInternal
 	}
 
+	// 只取 done+open 的行，多取 1 条探测是否超上限，等价于迁移前的 total 判断；
+	// 排序键取默认 updated_desc（本场景只关心行集，不关心顺序）。
 	filters := IssueListFilters{
 		State:    string(model.IssueStateOpen),
 		Workflow: string(model.IssueWorkflowStatusDone),
 		Source:   sourceFilter,
 	}
-	filtered, _, err := s.loadFilteredIssues(projectID, filters)
+	filtered, err := s.issueRepo.ListFiltered(toIssueListQuery(projectID, filters), "updated_desc", 0, batchCloseDoneMaxIssues+1)
 	if err != nil {
-		return nil, err
+		return nil, errs.ErrInternal
 	}
 
 	total := len(filtered)
@@ -186,6 +186,8 @@ func (s *IssueService) BatchCloseDoneIssues(projectID, userID, sourceFilter stri
 	return resp, nil
 }
 
+// GetFilterOptions 走只读投影查询（INT-106）：不读整行 Issue，只取两张 meta 表的
+// 标签/指派人/里程碑 JSON，去重与排序行为与迁移前一致。
 func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterOptionsResponse, error) {
 	if _, err := s.projectRepo.FindByID(projectID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -194,12 +196,7 @@ func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterO
 		return nil, errs.ErrInternal
 	}
 
-	issues, err := s.issueRepo.ListByProject(projectID)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-
-	internalMetaByIssueID, err := s.internalMetaByIssueIDs(issues)
+	sources, err := s.issueRepo.ListFilterOptionSources(projectID)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -208,28 +205,23 @@ func (s *IssueService) GetFilterOptions(projectID, userID string) (*IssueFilterO
 	assigneeSet := make(map[string]struct{})
 	milestoneSet := make(map[string]struct{})
 
-	for _, issue := range issues {
-		meta := issue.GitHubMeta
-		if meta != nil {
-			for _, name := range extractLabelNames(meta.LabelsJSON) {
-				if name != "" {
-					labelSet[name] = struct{}{}
-				}
-			}
-			for _, assignee := range parseJSON[[]issueUserPayload](meta.AssigneesJSON) {
-				if assignee.Login != "" {
-					assigneeSet[assignee.Login] = struct{}{}
-				}
-			}
-			if milestone := parseJSON[*issueMilestonePayload](meta.MilestoneJSON); milestone != nil && milestone.Title != "" {
-				milestoneSet[milestone.Title] = struct{}{}
+	for _, source := range sources {
+		for _, name := range extractLabelNames(source.LabelsJSON) {
+			if name != "" {
+				labelSet[name] = struct{}{}
 			}
 		}
-		if iMeta, ok := internalMetaByIssueID[issue.ID]; ok && iMeta.LabelsJSON != "" {
-			for _, name := range extractLabelNames(iMeta.LabelsJSON) {
-				if name != "" {
-					labelSet[name] = struct{}{}
-				}
+		for _, assignee := range parseJSON[[]issueUserPayload](source.AssigneesJSON) {
+			if assignee.Login != "" {
+				assigneeSet[assignee.Login] = struct{}{}
+			}
+		}
+		if milestone := parseJSON[*issueMilestonePayload](source.MilestoneJSON); milestone != nil && milestone.Title != "" {
+			milestoneSet[milestone.Title] = struct{}{}
+		}
+		for _, name := range extractLabelNames(source.InternalLabelsJSON) {
+			if name != "" {
+				labelSet[name] = struct{}{}
 			}
 		}
 	}

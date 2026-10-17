@@ -183,8 +183,13 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 	if issues[0].Title != "Crash on launch" || issues[0].Github == nil || issues[0].Github.Labels[0].Name != "bug" {
 		t.Fatalf("unexpected issue payload: %+v", issues[0])
 	}
-	if issues[0].BodyHtml != "<p>App crashes on <strong>startup</strong></p>" {
-		t.Fatalf("expected issue html body to be persisted, got %+v", issues[0])
+	// 列表响应不再携带正文（INT-106）；正文持久化改由详情接口断言。
+	detail, err := svc.issueService.Get(issues[0].Id, project.UserID)
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if detail.BodyHtml != "<p>App crashes on <strong>startup</strong></p>" {
+		t.Fatalf("expected issue html body to be persisted, got %+v", detail)
 	}
 
 	comments, total, err := svc.issueService.ListComments(issues[0].Id, project.UserID, 1, 20)

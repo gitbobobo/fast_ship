@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -287,11 +286,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func parseIssueNumberQuery(query string) (int, bool) {
-	num, err := strconv.Atoi(strings.TrimSpace(query))
-	return num, err == nil
-}
-
 func isValidIssueState(state model.IssueState) bool {
 	switch state {
 	case model.IssueStateOpen, model.IssueStateClosed:
@@ -379,160 +373,6 @@ func sortedKeys(values map[string]struct{}) []string {
 	}
 	sort.Strings(items)
 	return items
-}
-
-func issueCommentCount(issue model.Issue) int {
-	if issue.GitHubMeta == nil {
-		return 0
-	}
-	return issue.GitHubMeta.CommentsCount
-}
-
-func issueSortNumber(issue model.Issue) int {
-	if issue.Source == model.IssueSourceGitHub && issue.GitHubMeta != nil {
-		return issue.GitHubMeta.Number
-	}
-	return issue.SequenceNumber
-}
-
-func sortIssues(items []model.Issue, sortKey string) {
-	switch sortKey {
-	case "updated_asc":
-		sort.Slice(items, func(i, j int) bool {
-			if items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
-				return issueSortNumber(items[i]) < issueSortNumber(items[j])
-			}
-			return items[i].UpdatedAt.Before(items[j].UpdatedAt)
-		})
-	case "created_desc":
-		sort.Slice(items, func(i, j int) bool {
-			if items[i].CreatedAt.Equal(items[j].CreatedAt) {
-				return issueSortNumber(items[i]) > issueSortNumber(items[j])
-			}
-			return items[i].CreatedAt.After(items[j].CreatedAt)
-		})
-	case "created_asc":
-		sort.Slice(items, func(i, j int) bool {
-			if items[i].CreatedAt.Equal(items[j].CreatedAt) {
-				return issueSortNumber(items[i]) < issueSortNumber(items[j])
-			}
-			return items[i].CreatedAt.Before(items[j].CreatedAt)
-		})
-	case "comments_desc":
-		sort.Slice(items, func(i, j int) bool {
-			if issueCommentCount(items[i]) == issueCommentCount(items[j]) {
-				return items[i].UpdatedAt.After(items[j].UpdatedAt)
-			}
-			return issueCommentCount(items[i]) > issueCommentCount(items[j])
-		})
-	case "comments_asc":
-		sort.Slice(items, func(i, j int) bool {
-			if issueCommentCount(items[i]) == issueCommentCount(items[j]) {
-				return items[i].UpdatedAt.Before(items[j].UpdatedAt)
-			}
-			return issueCommentCount(items[i]) < issueCommentCount(items[j])
-		})
-	default:
-		sort.Slice(items, func(i, j int) bool {
-			if items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
-				return issueSortNumber(items[i]) > issueSortNumber(items[j])
-			}
-			return items[i].UpdatedAt.After(items[j].UpdatedAt)
-		})
-	}
-}
-
-func matchesIssueFilters(issue model.Issue, gitHubMeta *model.IssueGitHubMeta, meta *model.IssueInternalMeta, filters IssueListFilters) bool {
-	if filters.State != "" && string(issue.State) != filters.State {
-		return false
-	}
-
-	switch filters.Workflow {
-	case "":
-	case "unset":
-		if meta != nil && meta.WorkflowStatus != "" {
-			return false
-		}
-	default:
-		if meta == nil || string(meta.WorkflowStatus) != filters.Workflow {
-			return false
-		}
-	}
-
-	query := strings.TrimSpace(filters.Query)
-	if query != "" {
-		queryLower := strings.ToLower(query)
-		matches := strings.Contains(strings.ToLower(issue.Title), queryLower) ||
-			strings.Contains(strings.ToLower(issue.Body), queryLower) ||
-			strings.Contains(strings.ToLower(issue.AuthorLogin), queryLower) ||
-			strings.Contains(strings.ToLower(buildIssueReference(issue)), queryLower)
-		if num, ok := parseIssueNumberQuery(query); ok {
-			if issue.SequenceNumber == num {
-				matches = true
-			}
-			if gitHubMeta != nil && gitHubMeta.Number == num {
-				matches = true
-			}
-		}
-		if !matches {
-			return false
-		}
-	}
-
-	if filters.Label != "" {
-		matched := false
-		if gitHubMeta != nil {
-			for _, name := range extractLabelNames(gitHubMeta.LabelsJSON) {
-				if strings.EqualFold(name, filters.Label) {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched && meta != nil && meta.LabelsJSON != "" {
-			for _, name := range extractLabelNames(meta.LabelsJSON) {
-				if strings.EqualFold(name, filters.Label) {
-					matched = true
-					break
-				}
-			}
-		}
-		if !matched {
-			return false
-		}
-	}
-
-	if filters.Source != "" && string(issue.Source) != filters.Source {
-		return false
-	}
-
-	if filters.Assignee != "" {
-		if gitHubMeta == nil {
-			return false
-		}
-		matched := false
-		for _, assignee := range parseJSON[[]issueUserPayload](gitHubMeta.AssigneesJSON) {
-			if strings.EqualFold(assignee.Login, filters.Assignee) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return false
-		}
-	}
-
-	if filters.Milestone != "" {
-		if gitHubMeta == nil {
-			return false
-		}
-		milestone := parseJSON[*issueMilestonePayload](gitHubMeta.MilestoneJSON)
-		if milestone == nil || !strings.EqualFold(milestone.Title, filters.Milestone) {
-			return false
-		}
-	}
-
-	return true
 }
 
 // metaLabelsJSON 读取旧 GitHub meta 的标签数组；meta 为空（新建）返回 nil。
