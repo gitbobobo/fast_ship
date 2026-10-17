@@ -4,8 +4,9 @@ board / issues / logs / screenshots / documents / versions 等页头的
 「切换项目」统一走 `web/src/components/projects/project-switcher.tsx` 的
 `ProjectSwitcher`，不要在页面里另写项目下拉。弹出面板对齐 T3 Code 新建
 线程的项目选择器：顶部搜索框、竖向单列项目列表、行尾 `⌘N` 直选 chip、
-底部键盘提示行。键盘与 Portal 约定同 `model-picker.md`（INT-112）；T3 的
-「No project」项与返回箭头在项目域没有对应概念，不照搬。
+底部键盘提示行。键盘与 Portal 约定沿用模型选择器那套（INT-112）：面板经
+Portal 挂到 document.body，键盘监听挂 window 捕获阶段。T3 的「No project」
+项与返回箭头在项目域没有对应概念，不照搬。
 
 ## 组件
 
