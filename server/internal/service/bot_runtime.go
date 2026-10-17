@@ -397,13 +397,72 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		return nil, errs.ErrBotRunStateConflict
 	}
 
-	// 同一 run 重复点击停止：client_message_id 幂等，只落一条「停止」消息。
-	text := "停止"
-	if _, err := s.SendMessage(userID, botID, &SendMessageRequest{
-		Text:            text,
-		ClientMessageID: "stop:" + runID,
-	}); err != nil {
-		return nil, err
+	// 「run 仍未结束」与「追加停止消息」在同一事务内判定与写入：run 若在
+	// 两者之间自然完成，这里直接返回 409，不会留下一条驱动新 run 的陈旧
+	// 停止消息。同一 run 重复点击用 client_message_id 幂等，只落一条。
+	clientMsgID := "stop:" + runID
+	var msgSeq int64
+	var already bool
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		fresh, err := repository.NewBotRunRepository(tx).FindByID(runID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotRunNotFound
+			}
+			return errs.ErrInternal
+		}
+		if fresh.FinishedAt != nil {
+			return errs.ErrBotRunStateConflict
+		}
+		txMsgs := repository.NewBotMessageRepository(tx)
+		if existing, findErr := txMsgs.FindByClientMessageID(botID, clientMsgID); findErr == nil {
+			msgSeq = existing.Seq
+			already = true
+			return nil
+		} else if !errors.Is(findErr, gorm.ErrRecordNotFound) {
+			return errs.ErrInternal
+		}
+		seq, seqErr := s.bots.NextMessageSeqTx(tx, botID)
+		if seqErr != nil {
+			return errs.ErrInternal
+		}
+		raw, marshalErr := json.Marshal(botUserContent{Text: "停止"})
+		if marshalErr != nil {
+			return errs.ErrInternal
+		}
+		msg := &model.BotMessage{
+			ID:              uuid.NewString(),
+			BotID:           botID,
+			Seq:             seq,
+			Kind:            model.BotMessageKindUser,
+			ContentJSON:     string(raw),
+			SessionKind:     model.BotSessionKindMain,
+			ClientMessageID: &clientMsgID,
+			CreatedAt:       time.Now().UTC(),
+		}
+		if err := txMsgs.AppendTx(tx, msg); err != nil {
+			return errs.ErrInternal
+		}
+		msgSeq = seq
+		return s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
+			Kind:      "user_message",
+			MessageID: msg.ID,
+			Payload:   botMessageResponseOf(msg),
+		})
+	})
+	if txErr != nil {
+		if errors.Is(txErr, errs.ErrBotRunStateConflict) || errors.Is(txErr, errs.ErrBotRunNotFound) {
+			return nil, txErr
+		}
+		return nil, errs.ErrInternal
+	}
+	if !already {
+		s.publishEvent(botID)
+		s.wakeRuntime(botID, botWake{
+			Trigger: model.BotTriggerUserMessage,
+			Key:     fmt.Sprintf("user_message:%d", msgSeq),
+			Context: fmt.Sprintf(`{"message_seq":%d,"client_message_id":%q,"kind":"stop"}`, msgSeq, clientMsgID),
+		})
 	}
 
 	fresh, err := s.runs.FindByID(runID)

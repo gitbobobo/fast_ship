@@ -255,7 +255,11 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 	})
 
 	total := len(filtered)
-	start := (page - 1) * pageSize
+	// 防溢出：page 可能极大，(page-1)*pageSize 相加前先判断边界。
+	start := total
+	if pageSize > 0 && page-1 <= total/pageSize {
+		start = (page - 1) * pageSize
+	}
 	if start > total {
 		start = total
 	}
@@ -341,6 +345,9 @@ func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs) (map[strin
 
 	all := detail.Items
 	total := len(all)
+	if offset > total {
+		offset = total
+	}
 	// 偏移从最新一条往前数：offset=0 是最新的 item_limit 条。
 	end := total - offset
 	if end < 0 {

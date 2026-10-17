@@ -3,12 +3,16 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
 )
 
@@ -321,5 +325,62 @@ func TestBotInt110IssueUpdateWriteProtection(t *testing.T) {
 	slim := botSlimIssueDetail(fresh)
 	if slim["updated_at"] == "" || slim["body"] != original {
 		t.Fatalf("详情应含 updated_at 与 body: %+v", slim)
+	}
+}
+
+func TestBotInt110ThreadPageOverflowNoPanic(t *testing.T) {
+	list := &T3ThreadListResponse{
+		Items: []T3ThreadSummary{
+			{Id: "t1", Title: "一", Status: api.T3ThreadSummaryStatusIdle, UpdatedAt: "2026-10-01T00:00:00Z", EnvironmentId: "e1", ProjectId: "p1"},
+			{Id: "t2", Title: "二", Status: api.T3ThreadSummaryStatusIdle, UpdatedAt: "2026-10-02T00:00:00Z", EnvironmentId: "e1", ProjectId: "p1"},
+		},
+	}
+	// 极大 page 不得让 (page-1)*pageSize 溢出成负下标。
+	out, err := botSlimThreadList(list, &botThreadArgs{Page: math.MaxInt, PageSize: 100})
+	if err != nil {
+		t.Fatalf("huge page: %v", err)
+	}
+	if items := out["items"].([]map[string]interface{}); len(items) != 0 {
+		t.Fatalf("越界页应返回空: %+v", items)
+	}
+	if out["total_items"] != 2 {
+		t.Fatalf("总数应保留: %+v", out)
+	}
+
+	detail := &T3ThreadDetail{
+		Thread: T3ThreadSummary{Id: "thr", Status: api.T3ThreadSummaryStatusIdle, UpdatedAt: "2026-10-02T00:00:00Z"},
+		Items:  []T3ThreadItem{{Id: "i1", Type: api.UserMessage, Text: "hi"}},
+	}
+	dOut, err := botSlimThreadDetail(detail, &botThreadArgs{ItemOffset: math.MaxInt, ItemLimit: 5})
+	if err != nil {
+		t.Fatalf("huge item_offset: %v", err)
+	}
+	if items := dOut["items"].([]map[string]interface{}); len(items) != 0 {
+		t.Fatalf("越界条目偏移应返回空: %+v", items)
+	}
+}
+
+func TestBotInt110RequestStopRejectsFinishedRun(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int110stop")
+	bot := env.createBot(t, userID)
+
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "int110-stop-finished",
+		TriggerContextJSON: "{}", Status: model.BotRunStatusCompleted,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now, FinishedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	if _, err := env.bots.RequestStop(userID, bot.ID, run.ID); !errors.Is(err, errs.ErrBotRunStateConflict) {
+		t.Fatalf("已结束 run 的停止应 409，实得 %v", err)
+	}
+	var n int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?", bot.ID, model.BotMessageKindUser).Count(&n)
+	if n != 0 {
+		t.Fatalf("被拒的停止不得落消息，实得 %d 条", n)
 	}
 }

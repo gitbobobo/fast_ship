@@ -286,26 +286,29 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			}
 			continue
 		}
-		if input := s.safePoint(run); input.HasNewInput {
-			// 新输入到达：未开始的写操作全部补 not_executed，让模型重新
-			// 决定；读类调用允许执行完（它们只读、无副作用）。
-			s.closeUnstartedWriteCalls(calls, "new_input_before_execution")
-			// 继续执行本批的读类调用，不丢弃已经拿到的读取结果。
-			for _, call := range calls {
-				if !botCallIsReadOnly(call) {
-					continue
-				}
-				s.invokeOrAccept(bot, run, call, ctx)
-			}
-			continue
-		}
-
+		stopped := false
+		newInputSeen := false
 		for _, call := range calls {
-			s.invokeOrAccept(bot, run, call, ctx)
-			if input := s.safePoint(run); input.StopRequested {
+			input := s.safePoint(run)
+			if input.StopRequested {
 				s.closeUnstartedSyncCalls(calls, "stop_requested")
+				stopped = true
 				break
 			}
+			if input.HasNewInput {
+				newInputSeen = true
+			}
+			// 新输入到达：尚未开始的写操作暂停执行（循环结束后统一补
+			// not_executed）；读类调用继续执行完，已拿到的结果不丢。
+			// 每个调用前都重新检查，避免前面一个长读把新输入盖过去后
+			// 又执行了后面的写。
+			if newInputSeen && !botCallIsReadOnly(call) {
+				continue
+			}
+			s.invokeOrAccept(bot, run, call, ctx)
+		}
+		if newInputSeen && !stopped {
+			s.closeUnstartedWriteCalls(calls, "new_input_before_execution")
 		}
 	}
 }
