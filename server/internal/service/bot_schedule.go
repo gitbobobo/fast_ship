@@ -351,11 +351,17 @@ func (s *BotService) updateScheduleTask(task *model.BotScheduleTask, name, cronE
 	}
 	now := time.Now().UTC()
 	if cronChanged {
-		_, next, err := parseAutomationCron(task.CronExpression, task.Timezone, now)
-		if err != nil {
-			return nil, err
+		if !task.Enabled {
+			// 停用的任务保持「无下次计划」：改 cron/时区不该让接口与界面显示
+			// 一个永远不会触发的未来时间（重新启用时才重算）。
+			task.NextRunAt = nil
+		} else {
+			_, next, err := parseAutomationCron(task.CronExpression, task.Timezone, now)
+			if err != nil {
+				return nil, err
+			}
+			task.NextRunAt = &next
 		}
-		task.NextRunAt = &next
 	}
 	cols := map[string]interface{}{
 		"name": task.Name, "cron_expression": task.CronExpression,

@@ -918,3 +918,92 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 		t.Fatalf("v3 schema 应列出全部动作: %s", rawSchema)
 	}
 }
+
+// ---------- 9. 恢复路径的原子性与停用任务的计划 ----------
+
+// 恢复中断的 schedule run 时，失败事件必须与终态同一事务：事务失败时 run
+// 不能变成 failed（否则下次启动不再遍历它，事件永远补不回来）。
+func TestBotScheduleRecoveryEventAtomic(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "schedrecov")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	recovered, err := env.bots.runs.FindByID(run.ID)
+	if err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+	if recovered.Status != model.BotRunStatusFailed || recovered.FinishedAt == nil {
+		t.Fatalf("中断的 schedule run 应置 failed: %+v", recovered)
+	}
+	if n, content := countScheduleEvents(t, env, bot.ID); n != 1 {
+		t.Fatalf("恢复应追加 1 条运行事件，实得 %d", n)
+	} else if content.Status != string(model.BotRunStatusFailed) || content.ErrorCode != "server_restarted" {
+		t.Fatalf("恢复事件应记 server_restarted: %+v", content)
+	}
+
+	// 让事件写入失败，验证终态与事件同事务：run 必须保持 running。
+	if err := env.db.Exec(`CREATE TRIGGER zz_block_sched_event BEFORE INSERT ON bot_messages
+		WHEN NEW.kind = 'schedule_event' BEGIN SELECT RAISE(ABORT, 'blocked'); END`).Error; err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = env.db.Exec(`DROP TRIGGER IF EXISTS zz_block_sched_event`).Error
+	})
+	second := seedScheduleRun(t, env, bot.ID, task.ID)
+	if err := env.bots.RecoverOnStartup(); err != nil {
+		t.Fatalf("second recover: %v", err)
+	}
+	still := mustFindRun(t, env, second.ID)
+	if still.Status != model.BotRunStatusRunning || still.FinishedAt != nil {
+		t.Fatalf("事件写入失败时终态必须回滚，run 应保持 running: %+v", still)
+	}
+}
+
+func mustFindRun(t *testing.T, env *botTestEnv, runID string) *model.BotRun {
+	t.Helper()
+	run, err := env.bots.runs.FindByID(runID)
+	if err != nil {
+		t.Fatalf("find run: %v", err)
+	}
+	return run
+}
+
+// 停用的任务改 cron/时区不该重新算出下次计划：只有重新启用才重算。
+func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "scheddis")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	off, _ := env.bots.schedTasks.FindByID(task.ID)
+	if off.NextRunAt != nil {
+		t.Fatalf("停用后 next_run_at 应清空: %+v", off.NextRunAt)
+	}
+	updated, err := env.bots.updateScheduleTask(off, "", "0 10 * * *", "Asia/Shanghai", "", "", nil)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.NextRunAt != nil {
+		t.Fatalf("停用任务改 cron 后仍不应有计划时间: %+v", updated.NextRunAt)
+	}
+	persisted, _ := env.bots.schedTasks.FindByID(task.ID)
+	if persisted.NextRunAt != nil || persisted.Enabled {
+		t.Fatalf("库里的停用任务不应有计划时间: %+v", persisted)
+	}
+	// 重新启用才重算。
+	on, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if on.NextRunAt == nil || !on.NextRunAt.After(time.Now().UTC()) {
+		t.Fatalf("重新启用应重算未来计划: %+v", on.NextRunAt)
+	}
+}

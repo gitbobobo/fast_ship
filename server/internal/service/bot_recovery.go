@@ -80,6 +80,18 @@ func (s *BotService) RecoverOnStartup() error {
 
 	affectedBots := map[string]bool{}
 	for _, run := range runs {
+		// 定时任务 run 中断也是失败：失败必报，运行事件必须与终态同一事务——
+		// 分两次提交时进程若在中间退出，这条 run 已不再是活动 run，事件就永远
+		// 补不回来了。任务与摘要都在事务外先读好：事务内复用同一连接再查询会
+		// 自锁（MaxOpenConns=1）。
+		var schedTask *model.BotScheduleTask
+		schedSummary := ""
+		if run.SessionKind == model.BotSessionKindSchedule && run.ScheduleTaskID != nil {
+			if task, err := s.schedTasks.FindByID(*run.ScheduleTaskID); err == nil {
+				schedTask = task
+				_, schedSummary = s.botSilentSummaryOf(run.BotID, run.ID)
+			}
+		}
 		// 终态转移与 error/done 事件同一事务：一直挂在页面上的客户端重启
 		// 后按 SSE 游标回放也能把原 run 折到 failed，不必等快照重读。
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -103,19 +115,22 @@ func (s *BotService) RecoverOnStartup() error {
 			}); err != nil {
 				return err
 			}
-			return s.appendEventTx(tx, run.BotID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
+			if err := s.appendEventTx(tx, run.BotID, runIDPtr(run.ID), "", model.BotEventDone, botEventEnvelope{
 				Kind: "run_done", Phase: string(model.BotRunStatusFailed),
 				Payload: map[string]interface{}{"status": string(model.BotRunStatusFailed)},
-			})
+			}); err != nil {
+				return err
+			}
+			if schedTask == nil {
+				return nil
+			}
+			return s.appendScheduleEventTx(tx, run.BotID, schedTask, &run,
+				model.BotRunStatusFailed, schedSummary, "server_restarted",
+				"服务在定时任务运行执行中重启，未完成步骤不再继续", now)
 		})
 		if txErr != nil {
 			s.logger.Warn("恢复 run 失败", zap.String("run_id", run.ID), zap.Error(txErr))
 			continue
-		}
-		// 定时任务 run 中断也是失败：失败必报，追加主线事件让机器人判断
-		// 是否通知用户（INT-103）。
-		if run.SessionKind == model.BotSessionKindSchedule && run.ScheduleTaskID != nil {
-			s.appendRecoveryScheduleEvent(&run)
 		}
 		affectedBots[run.BotID] = true
 		s.publishEvent(run.BotID)
@@ -297,25 +312,6 @@ func (s *BotService) appendRecoveryNotice(botID string, now time.Time) error {
 		Context: `{"notice_message_id":"` + noticeID + `"}`,
 	})
 	return nil
-}
-
-// appendRecoveryScheduleEvent 给重启中断的 schedule run 补一条主线运行事件
-// （幂等性由一次性恢复保证：只有本事务 CAS 命中的 run 才走到这里）。
-func (s *BotService) appendRecoveryScheduleEvent(run *model.BotRun) {
-	var task model.BotScheduleTask
-	if err := s.db.Where("id = ?", *run.ScheduleTaskID).First(&task).Error; err != nil {
-		return
-	}
-	_, summary := s.botSilentSummaryOf(run.BotID, run.ID)
-	now := time.Now().UTC()
-	txErr := s.db.Transaction(func(tx *gorm.DB) error {
-		return s.appendScheduleEventTx(tx, run.BotID, &task, run,
-			model.BotRunStatusFailed, summary, "server_restarted",
-			"服务在定时任务运行执行中重启，未完成步骤不再继续", now)
-	})
-	if txErr != nil {
-		s.logger.Warn("追加定时任务恢复事件失败", zap.String("run_id", run.ID), zap.Error(txErr))
-	}
 }
 
 func (s *BotService) recordInterruptedCompaction(mr model.BotMaintenanceRun, now time.Time) {
