@@ -1759,7 +1759,7 @@ type BotRun struct {
 	TotalTokens   *int64 `json:"total_tokens,omitempty"`
 	TriggerKey    string `json:"trigger_key"`
 
-	// TriggerSource user_message / tool_result / recovery / schedule
+	// TriggerSource user_message / tool_result / recovery / schedule / manual
 	TriggerSource string `json:"trigger_source"`
 
 	// UsageComplete false 表示上游未报 usage（缺失与零严格区分）

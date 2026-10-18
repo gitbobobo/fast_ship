@@ -9004,7 +9004,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `run` | object | 否 |  |
 | `run.id` | string | 是 |  |
 | `run.bot_id` | string | 是 |  |
-| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `run.trigger_key` | string | 是 |  |
 | `run.status` | string | 是 | queued / running / completed / failed / stopped |
 | `run.config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9119,7 +9119,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs` | object[] | 是 |  |
 | `runs[].id` | string | 是 |  |
 | `runs[].bot_id` | string | 是 |  |
-| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `runs[].trigger_key` | string | 是 |  |
 | `runs[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `runs[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9247,7 +9247,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].bot_id` | string | 是 |  |
-| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `items[].trigger_key` | string | 是 |  |
 | `items[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `items[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9297,7 +9297,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9351,7 +9351,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |

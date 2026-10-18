@@ -181,7 +181,13 @@ export type BotRunStatus =
   | "failed"
   | "stopped";
 
-export type BotRunTrigger = "user_message" | "tool_result" | "recovery";
+// generic run 端点按 run 原值返回：定时任务触发的 run 是 schedule，手动触发是 manual。
+export type BotRunTrigger =
+  | "user_message"
+  | "tool_result"
+  | "recovery"
+  | "schedule"
+  | "manual";
 
 export interface BotRun {
   id: string;

@@ -12455,7 +12455,7 @@ components:
           type: string
         trigger_source:
           type: string
-          description: user_message / tool_result / recovery / schedule
+          description: user_message / tool_result / recovery / schedule / manual
         trigger_key:
           type: string
         status:
