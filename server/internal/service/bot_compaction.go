@@ -515,8 +515,8 @@ func (s *BotService) publishCompaction(bot *model.Bot, maintRun *model.BotMainte
 			return err
 		}
 		// stale 判定传事务内读到的行水位，不用 bot 副本（理由见函数注释）。
-		return s.activateToolsetWithPromptTx(tx, bot, fresh.ToolsetVersion, fresh.PlatformPromptVersion,
-			snap.SystemPromptText, snap.PromptRevision)
+		return s.activateToolsetWithPromptTx(tx, bot.ID, fresh.ToolsetVersion, fresh.PlatformPromptVersion,
+			snap.SystemPromptText, snap.PromptRevision, publishAt)
 	})
 	if publishErr != nil {
 		code, msg := "generation_conflict", botErrMessage(publishErr)
@@ -1622,12 +1622,14 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 // （主线与定时任务共用）。读行 → 判 stale → 按该行人设重建提示词 → 递增
 // revision → 写回，全部收进同一个短事务；生产库 SetMaxOpenConns(1) 让事务内
 // 的读-改-写与其它写者天然串行，因此调用方持有的副本过期也写不坏库——持久
-// 化的提示词总是由事务内读到的行生成，事务结束后这份状态原样复制给本次 run
-// 的副本。每次 run 一个短事务：版本已最新时只有一次 SELECT、不写库，不再
-// 需要进程内的激活缓存与事务后按库补读。
+// 化的提示词总是由事务内读到的行生成。副本只在事务提交成功后回填：事务失败
+// 时副本保持原值，「事务内绝不改 run 副本」是这里的硬不变量（否则 commit 失败
+// 时 run 会冻结一份库里从未持久化的提示词）。每次 run 一个短事务：版本已最新
+// 时只有一次 SELECT、不写库，不再需要进程内的激活缓存与事务后按库补读。
 func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	now := s.now()
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	var state model.Bot
+	err := s.db.Transaction(func(tx *gorm.DB) error {
 		repo := repository.NewBotRepository(tx)
 		fresh, err := repo.Get(bot.ID)
 		if err != nil {
@@ -1645,49 +1647,40 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 				fresh.PromptRevision = rev
 				fresh.ToolsetVersion = botToolsetVersion
 				fresh.PlatformPromptVersion = botPlatformPromptVersion
-			} else {
+			} else if again, gerr := repo.Get(bot.ID); gerr == nil {
 				// 单连接串行下 CAS 不应落空；万一命中 0 行，重读一次以库内行为准。
-				if again, gerr := repo.Get(bot.ID); gerr == nil {
-					fresh = again
-				}
+				fresh = again
 			}
 		}
-		bot.SystemPromptText = fresh.SystemPromptText
-		bot.PromptRevision = fresh.PromptRevision
-		bot.PlatformPromptVersion = fresh.PlatformPromptVersion
-		bot.PersonaPrompt = fresh.PersonaPrompt
-		bot.ToolsetVersion = fresh.ToolsetVersion
+		state = *fresh
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	bot.SystemPromptText = state.SystemPromptText
+	bot.PromptRevision = state.PromptRevision
+	bot.PlatformPromptVersion = state.PlatformPromptVersion
+	bot.PersonaPrompt = state.PersonaPrompt
+	bot.ToolsetVersion = state.ToolsetVersion
+	return nil
 }
 
 // activateToolsetWithPromptTx 在事务内把工具集/平台提示词水位推进到当前版本
 // 并写入发布快照的提示词。stale 判定用 curToolset/curPlatform——调用方在同一
 // 事务里读到的行水位，而不是 bot 副本的版本字段：副本可能是 run 冻结的旧值
 // （并发 run 可能已把库激活到最新），判定与写入必须建立在同一个事实源上，
-// 否则会对已最新的行重复递增 revision。命中 CAS 时把结果同步给 bot 副本；
-// 压缩发布路径的副本对齐由 installBoundarySnapshot 统一装入。
-func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, bot *model.Bot, curToolset, curPlatform int64, prompt string, rev int64) error {
+// 否则会对已最新的行重复递增 revision。prompt/rev 由调用方的快照提供（必须
+// 非空、为正）：这里既不读也不写调用方副本——副本对齐由调用方在事务提交
+// 成功后统一装入（压缩发布走 installBoundarySnapshot）。
+func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, botID string, curToolset, curPlatform int64, prompt string, rev int64, now time.Time) error {
 	if curToolset >= botToolsetVersion && curPlatform >= botPlatformPromptVersion {
 		return nil
 	}
-	if prompt == "" {
-		prompt = buildBotSystemPrompt(bot.PersonaPrompt)
-	}
-	if rev <= 0 {
-		rev = bot.PromptRevision + 1
-	}
-	ok, err := repository.NewBotRepository(tx).ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, s.now())
-	if err != nil {
-		return err
-	}
-	if ok {
-		bot.ToolsetVersion = botToolsetVersion
-		bot.PlatformPromptVersion = botPlatformPromptVersion
-		bot.SystemPromptText = prompt
-		bot.PromptRevision = rev
-	}
-	return nil
+	// 单连接串行下同一事务内的判定与 CAS 作用在同一行，命中 0 行不可达；
+	// 万一发生也只说明水位已被人推过，不回写副本、不报错。
+	_, err := repository.NewBotRepository(tx).ActivateToolsetTx(tx, botID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
+	return err
 }
 
 func (s *BotService) maybeTellToolset(bot *model.Bot, run *model.BotRun) {
