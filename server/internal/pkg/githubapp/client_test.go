@@ -39,7 +39,8 @@ func TestListReviewComments_Paginates(t *testing.T) {
 	defer ts.Close()
 
 	store := &InstallationTokenStore{
-		http: &httpClient{baseURL: ts.URL},
+		baseURL: ts.URL,
+		client:  &http.Client{Timeout: 30 * time.Second},
 		cache: map[int64]cachedInstallToken{
 			7: {token: "tok", expiresAt: time.Now().Add(time.Hour)},
 		},

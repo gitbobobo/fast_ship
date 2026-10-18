@@ -11,6 +11,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -862,12 +863,12 @@ func TestSync_TerminalStatesMapToChecksAndComment(t *testing.T) {
 	for _, c := range checks {
 		conclusions[c.Name] = string(c.Update.Conclusion)
 		switch c.Update.Conclusion {
-		case githubapp.ConclusionFailure:
+		case githubapi.ConclusionFailure:
 			hasFailure = true
-		case githubapp.ConclusionSuccess:
+		case githubapi.ConclusionSuccess:
 			hasSuccess = true
 		}
-		if c.Update.Status == githubapp.CheckQueued {
+		if c.Update.Status == githubapi.CheckQueued {
 			hasInProgress = true
 		}
 	}
@@ -1158,19 +1159,19 @@ func TestCheckUpdateForGroup_TerminalStates(t *testing.T) {
 	running := model.AutomationRun{Status: model.AutomationRunRunning, HeadSHA: "abc"}
 
 	g := checkUpdateForGroup([]model.AutomationRun{failed, timedOut})
-	if g.Status != githubapp.CheckCompleted || g.Conclusion != githubapp.ConclusionFailure {
+	if g.Status != githubapi.CheckCompleted || g.Conclusion != githubapi.ConclusionFailure {
 		t.Fatalf("failed round = %s/%s, want completed/failure", g.Status, g.Conclusion)
 	}
 	g = checkUpdateForGroup([]model.AutomationRun{cancelled, cancelled})
-	if g.Status != githubapp.CheckCompleted || g.Conclusion != githubapp.ConclusionCancelled {
+	if g.Status != githubapi.CheckCompleted || g.Conclusion != githubapi.ConclusionCancelled {
 		t.Fatalf("cancelled round = %s/%s, want completed/cancelled", g.Status, g.Conclusion)
 	}
 	g = checkUpdateForGroup([]model.AutomationRun{completed, cancelled})
-	if g.Status != githubapp.CheckCompleted || g.Conclusion != githubapp.ConclusionSuccess {
+	if g.Status != githubapi.CheckCompleted || g.Conclusion != githubapi.ConclusionSuccess {
 		t.Fatalf("completed+cancelled = %s/%s, want completed/success", g.Status, g.Conclusion)
 	}
 	g = checkUpdateForGroup([]model.AutomationRun{queued, running})
-	if g.Status != githubapp.CheckInProgress {
+	if g.Status != githubapi.CheckInProgress {
 		t.Fatalf("still running = %s, want in_progress", g.Status)
 	}
 }
@@ -1456,19 +1457,19 @@ func TestWebhook_PendingDebouncePreferredOverReviewHead(t *testing.T) {
 }
 
 type blockingSubmitReview struct {
-	githubapp.PullRequestGitHub
+	githubapi.GitHubClient
 	entered chan struct{}
 	release chan struct{}
 }
 
-func (b *blockingSubmitReview) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in githubapp.ReviewInput) error {
+func (b *blockingSubmitReview) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in githubapi.ReviewInput) error {
 	select {
 	case <-b.entered:
 	default:
 		close(b.entered)
 	}
 	<-b.release
-	return b.PullRequestGitHub.SubmitReview(ctx, installationID, repoFullName, number, in)
+	return b.GitHubClient.SubmitReview(ctx, installationID, repoFullName, number, in)
 }
 
 // webhook 取消必须等 in-flight SubmitReview 释放 per-PR 锁，不能插在重读与提交之间。
@@ -1494,9 +1495,9 @@ func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
 	run.Status = model.AutomationRunDispatched
 
 	blocker := &blockingSubmitReview{
-		PullRequestGitHub: env.fake,
-		entered:           make(chan struct{}),
-		release:           make(chan struct{}),
+		GitHubClient: env.fake,
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
 	}
 	agent := NewAutomationAgentService(env.db, env.runs,
 		repository.NewAutomationRunTokenRepository(env.db), nil, NewNotificationSink(env.db), zap.NewNop())
@@ -1641,9 +1642,9 @@ func TestTimeout_WaitsForInFlightSubmitReview(t *testing.T) {
 	}
 
 	blocker := &blockingSubmitReview{
-		PullRequestGitHub: env.fake,
-		entered:           make(chan struct{}),
-		release:           make(chan struct{}),
+		GitHubClient: env.fake,
+		entered:      make(chan struct{}),
+		release:      make(chan struct{}),
 	}
 	agent := NewAutomationAgentService(env.db, env.runs,
 		repository.NewAutomationRunTokenRepository(env.db), nil, NewNotificationSink(env.db), zap.NewNop())
@@ -1757,7 +1758,7 @@ func TestPushComment_PrefersSavedCommentID(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
 	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
-	id, err := env.fake.CreateIssueComment(context.Background(), 1, "octocat/hw", 1, prReviewCommentMarker+"\n旧正文")
+	id, err := env.fake.CreatePullRequestComment(context.Background(), 1, "octocat/hw", 1, prReviewCommentMarker+"\n旧正文")
 	if err != nil {
 		t.Fatalf("seed comment: %v", err)
 	}
@@ -1771,11 +1772,11 @@ func TestPushComment_PrefersSavedCommentID(t *testing.T) {
 	before := env.fake.CallCounts()
 	env.pr.SyncPendingReviews(nowUTC().Add(time.Second))
 	after := env.fake.CallCounts()
-	if after["FindIssueCommentByMarker"]-before["FindIssueCommentByMarker"] != 0 {
+	if after["FindPullRequestComment"]-before["FindPullRequestComment"] != 0 {
 		t.Fatalf("must not scan by marker when comment_id is saved")
 	}
-	if after["UpdateIssueComment"]-before["UpdateIssueComment"] != 1 {
-		t.Fatalf("UpdateIssueComment delta = %d, want 1", after["UpdateIssueComment"]-before["UpdateIssueComment"])
+	if after["UpdatePullRequestComment"]-before["UpdatePullRequestComment"] != 1 {
+		t.Fatalf("UpdateIssueComment delta = %d, want 1", after["UpdatePullRequestComment"]-before["UpdatePullRequestComment"])
 	}
 	if comment := env.fake.LastCommentBody(); !strings.Contains(comment, "完成") {
 		t.Fatalf("comment not updated: %s", comment)

@@ -157,7 +157,7 @@ func TestIssueServiceSyncProjectIssues_ImportsIssuesCommentsAndTimeline(t *testi
 		},
 	}
 
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
@@ -262,7 +262,7 @@ func TestIssueServiceSyncProjectIssues_PagedCollectionsCommitAndResyncDedupes(t 
 			},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
@@ -322,7 +322,7 @@ func TestIssueServiceSyncProjectIssues_CommentPageFailureKeepsCollection(t *test
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -414,7 +414,7 @@ func TestIssueServiceSyncProjectIssues_TimelinePageFailureKeepsBothCollections(t
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now), testGitHubSyncTimelineEvent(799, "subscribed", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -500,7 +500,7 @@ func TestIssueServiceSyncProjectIssues_EmptyRemoteCleansMirrorKeepsInternal(t *t
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -579,7 +579,7 @@ func TestIssueServiceSyncProjectIssues_ConcurrentSyncRejected(t *testing.T) {
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 
 	var factoryCalls atomic.Int32
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		factoryCalls.Add(1)
 		return fake
 	}
@@ -638,7 +638,7 @@ func TestIssueServiceSyncProjectIssues_FailureReleasesLock(t *testing.T) {
 		issues:      []*ghclient.Issue{testGitHubSyncIssue(101, 42, now)},
 		commentErrs: map[int]map[int]error{42: {1: errors.New("comments down")}},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -678,7 +678,7 @@ func TestIssueServiceSyncProjectIssues_IncrementalSince(t *testing.T) {
 			testGitHubSyncIssue(102, 43, now),
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -742,7 +742,7 @@ func TestIssueServiceSyncProjectIssues_UnchangedRemoteSkipsCollectionFetch(t *te
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -783,7 +783,7 @@ func TestIssueServiceSyncProjectIssues_EmptyWatermarkBootstraps(t *testing.T) {
 			42: {testGitHubSyncComment(500, "a", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -830,7 +830,7 @@ func TestIssueServiceSyncProjectIssues_CommentCountChangeRefetches(t *testing.T)
 			42: {testGitHubSyncComment(500, "a", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -875,7 +875,7 @@ func TestIssueServiceSyncProjectIssues_FailedCollectionFetchKeepsWatermark(t *te
 			42: {testGitHubSyncComment(500, "a", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -941,7 +941,7 @@ func TestIssueServiceRefreshTimelineAfterPush_ClearsWatermarkSoNextSyncRefetches
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1015,7 +1015,7 @@ func TestIssueServiceRecordPushedComment_ClearsWatermarkAndNextSyncHeals(t *test
 			42: {testGitHubSyncComment(500, "remote", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1093,7 +1093,7 @@ func TestIssueServiceMarkCollectionsStaleAfterPush_ClearsWatermarkSoNextSyncRefe
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1148,7 +1148,7 @@ func TestIssueServiceBatchCloseDoneIssues_GitHubIssuesCloseWithOnePatchEachAndNo
 			43: {testGitHubSyncTimelineEvent(710, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1299,7 +1299,7 @@ func TestIssueServiceSync_HealsStaleCollectionsEvenWhenIssueNotListed(t *testing
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1386,7 +1386,7 @@ func TestIssueServiceSync_HealsAtMostStaleCollectionsHealLimitPerRound(t *testin
 		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(7000+i), "labeled", now)}
 	}
 	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1466,7 +1466,7 @@ func TestIssueServiceSync_HealFailureDoesNotFailWholeSync(t *testing.T) {
 			43: {testGitHubSyncTimelineEvent(710, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1536,7 +1536,7 @@ func TestIssueServiceWriteFullCollections_SkipsStaleSnapshotWhenInvalidatedDurin
 		comments: map[int][]*ghclient.IssueComment{42: {testGitHubSyncComment(500, "a", now)}},
 		timeline: map[int][]*ghclient.TimelineEvent{42: {testGitHubSyncTimelineEvent(700, "labeled", now)}},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client { return fake }
 
 	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("seed sync: %v", err)
@@ -1624,7 +1624,7 @@ func TestIssueServiceSync_HealsStaleCollectionsFairlyDespitePersistentFailures(t
 		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(8000+i), "labeled", now)}
 	}
 	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client { return fake }
 
 	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("seed sync: %v", err)
@@ -1707,7 +1707,7 @@ func TestIssueServiceSync_HealQueueServesOldestUntriedFirst(t *testing.T) {
 		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(9000+i), "labeled", now)}
 	}
 	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client { return fake }
 
 	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("seed sync: %v", err)
@@ -1764,7 +1764,7 @@ func TestIssueServiceSync_HealRotationIsNotResetByReinvalidation(t *testing.T) {
 		timeline[number] = []*ghclient.TimelineEvent{testGitHubSyncTimelineEvent(int64(9000+i), "labeled", now)}
 	}
 	fake := &fakeIssueGitHubClient{issues: issues, issuesByNumber: issuesByNumber, comments: comments, timeline: timeline}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient { return fake }
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client { return fake }
 
 	if _, err := svc.issueService.SyncProjectIssues(context.Background(), project.ID, project.UserID); err != nil {
 		t.Fatalf("seed sync: %v", err)
@@ -1836,7 +1836,7 @@ func TestIssueServiceSyncProjectIssues_PushWriteBetweenFetchesIsOverwrittenByFul
 			42: {testGitHubSyncTimelineEvent(700, "labeled", now)},
 		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 
@@ -1934,7 +1934,7 @@ func TestIssueMirrorSyncAll_SkipsUnconfiguredAndContinuesAfterFailure(t *testing
 	// 不中断后续」才算被真正测到。
 	var tokensMu sync.Mutex
 	var factoryTokens []string
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		tokensMu.Lock()
 		factoryTokens = append(factoryTokens, token)
 		tokensMu.Unlock()

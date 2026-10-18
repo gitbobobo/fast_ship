@@ -22,19 +22,13 @@ import (
 var repoNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 type ProjectService struct {
-	projectRepo     *repository.ProjectRepository
-	versionRepo     *repository.VersionRepository
-	syncStateRepo   *repository.IssueSyncStateRepository
-	storage         storage.Storage
-	credentials     *ProjectCredentials
-	newBranchClient gitHubBranchClientFactory
+	projectRepo   *repository.ProjectRepository
+	versionRepo   *repository.VersionRepository
+	syncStateRepo *repository.IssueSyncStateRepository
+	storage       storage.Storage
+	credentials   *ProjectCredentials
+	newClient     ghclient.ClientFactory
 }
-
-type gitHubBranchClient interface {
-	ListBranches(ctx context.Context) ([]*ghclient.Branch, string, error)
-}
-
-type gitHubBranchClientFactory func(token, owner, repo string) gitHubBranchClient
 
 func NewProjectService(
 	projectRepo *repository.ProjectRepository,
@@ -51,7 +45,7 @@ func NewProjectService(
 		syncStateRepo: syncStateRepo,
 		storage:       storage,
 		credentials:   newProjectCredentials(projectRepo, tokenRepo, cfg, logger),
-		newBranchClient: func(token, owner, repo string) gitHubBranchClient {
+		newClient: func(token, owner, repo string) ghclient.Client {
 			return ghclient.NewClient(token, owner, repo)
 		},
 	}
@@ -276,7 +270,7 @@ func (s *ProjectService) GetBranches(ctx context.Context, id, userID string) ([]
 	}
 
 	// Create GitHub client and fetch branches.
-	ghClient := s.newBranchClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
+	ghClient := s.newClient(string(tokenBytes), project.GithubOwner, project.GithubRepo)
 	branches, defaultBranch, err := ghClient.ListBranches(ctx)
 	if err != nil {
 		return nil, "", errs.New(50200, fmt.Sprintf("Failed to fetch branches: %v", err))

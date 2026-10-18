@@ -47,7 +47,7 @@ func TestIssueServiceCreateGitHubIssue_LogsCarryUserID(t *testing.T) {
 		// 注入时间线拉取失败，触发 sync timeline 降级日志。
 		timelineErrs: map[int]map[int]error{88: {1: errors.New("timeline boom")}},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newClient = func(token, owner, repo string) ghclient.Client {
 		return fake
 	}
 

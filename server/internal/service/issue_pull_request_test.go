@@ -4,37 +4,46 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
-	gh "github.com/google/go-github/v62/github"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
-func testPullRequest(repoFullName string, number int, state string, mergedAt *gh.Timestamp) *gh.PullRequest {
-	pr := &gh.PullRequest{
-		Number:  intPtr(number),
-		State:   gh.String(state),
-		Title:   gh.String(fmt.Sprintf("Fix crash #%d", number)),
-		HTMLURL: gh.String(fmt.Sprintf("https://github.com/%s/pull/%d", repoFullName, number)),
-		Draft:   gh.Bool(false),
-		User:    &gh.User{Login: gh.String("bob")},
-		Head:    &gh.PullRequestBranch{Ref: gh.String("fix-crash")},
-		Base: &gh.PullRequestBranch{
-			Ref:  gh.String("main"),
-			Repo: &gh.Repository{FullName: gh.String(repoFullName)},
-		},
+func testPullRequest(repoFullName string, number int, state string, mergedAt *time.Time) *githubapi.PullRequest {
+	pr := &githubapi.PullRequest{
+		RepoFullName: repoFullName,
+		Number:       number,
+		State:        state,
+		Title:        fmt.Sprintf("Fix crash #%d", number),
+		HTMLURL:      fmt.Sprintf("https://github.com/%s/pull/%d", repoFullName, number),
+		Draft:        false,
+		AuthorLogin:  "bob",
+		HeadRef:      "fix-crash",
+		BaseRef:      "main",
 	}
 	if mergedAt != nil {
 		pr.MergedAt = mergedAt
 		pr.ClosedAt = mergedAt
 	}
 	return pr
+}
+
+// prSet 组装 fakeIssueGitHubClient.pullRequests 字面量（按 repo+number 索引）。
+func prSet(prs ...*githubapi.PullRequest) map[string]map[int]*githubapi.PullRequest {
+	out := map[string]map[int]*githubapi.PullRequest{}
+	for _, pr := range prs {
+		if out[pr.RepoFullName] == nil {
+			out[pr.RepoFullName] = map[int]*githubapi.PullRequest{}
+		}
+		out[pr.RepoFullName][pr.Number] = pr
+	}
+	return out
 }
 
 func createInternalTestIssue(t *testing.T, db *gorm.DB, projectID string) *model.Issue {
@@ -65,7 +74,7 @@ func withTestGitHubToken(t *testing.T, svc *testServices) func(*model.Project) {
 
 func stubPullRequestClient(t *testing.T, svc *testServices, fake *fakeIssueGitHubClient, wantToken string) {
 	t.Helper()
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
 		if token != wantToken {
 			t.Fatalf("unexpected token: %q", token)
 		}
@@ -95,15 +104,17 @@ func TestIssueServiceAttachPullRequest_InternalIssueSucceeds(t *testing.T) {
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
-	var gotOwner, gotRepo string
+	var gotRepo string
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
+		onGetPullRequest: func(repo string, _ int) {
+			gotRepo = repo
+		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
 		if token != "" {
 			t.Fatalf("expected empty token for internal project, got %q", token)
 		}
-		gotOwner, gotRepo = owner, repo
 		return fake
 	}
 
@@ -114,8 +125,8 @@ func TestIssueServiceAttachPullRequest_InternalIssueSucceeds(t *testing.T) {
 		t.Fatalf("attach pull request: %v", err)
 	}
 
-	if gotOwner != "owner" || gotRepo != "repo" {
-		t.Fatalf("unexpected client repo: %s/%s", gotOwner, gotRepo)
+	if gotRepo != "owner/repo" {
+		t.Fatalf("unexpected client repo: %s", gotRepo)
 	}
 	if resp.State != model.IssuePullRequestStateOpen || resp.Title != "Fix crash #7" ||
 		resp.RepoFullName != "owner/repo" || resp.Number != 7 ||
@@ -146,9 +157,9 @@ func TestIssueServiceAttachPullRequest_Idempotent(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	mergedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
+	mergedAt := time.Now().Add(-time.Hour).UTC()
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -159,7 +170,7 @@ func TestIssueServiceAttachPullRequest_Idempotent(t *testing.T) {
 		t.Fatalf("first attach: %v", err)
 	}
 
-	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "closed", mergedAt)
+	fake.pullRequests = prSet(testPullRequest("owner/repo", 7, "closed", &mergedAt))
 	second, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
 		Url: "https://github.com/owner/repo/pull/7",
 	})
@@ -185,15 +196,17 @@ func TestIssueServiceAttachPullRequest_CrossRepoURL(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	var gotOwner, gotRepo string
+	var gotRepo string
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{42: testPullRequest("other-org/other-repo", 42, "open", nil)},
+		pullRequests: prSet(testPullRequest("other-org/other-repo", 42, "open", nil)),
+		onGetPullRequest: func(repo string, _ int) {
+			gotRepo = repo
+		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
 		if token != "gh-token" {
 			t.Fatalf("expected decrypted project token, got %q", token)
 		}
-		gotOwner, gotRepo = owner, repo
 		return fake
 	}
 
@@ -203,8 +216,8 @@ func TestIssueServiceAttachPullRequest_CrossRepoURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("attach cross-repo pull request: %v", err)
 	}
-	if gotOwner != "other-org" || gotRepo != "other-repo" {
-		t.Fatalf("expected client for other-org/other-repo, got %s/%s", gotOwner, gotRepo)
+	if gotRepo != "other-org/other-repo" {
+		t.Fatalf("expected fetch for other-org/other-repo, got %s", gotRepo)
 	}
 	if resp.RepoFullName != "other-org/other-repo" || resp.Number != 42 {
 		t.Fatalf("unexpected stored repo: %+v", resp)
@@ -217,7 +230,7 @@ func TestIssueServiceAttachPullRequest_RejectsBadURL(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newPRClient = func(string) githubapi.GitHubClient {
 		t.Fatalf("github client must not be built for unparseable URL")
 		return nil
 	}
@@ -263,7 +276,7 @@ func TestIssueServiceAttachPullRequest_AcceptsURLVariants(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -314,7 +327,7 @@ func TestIssueServiceDetachPullRequest(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -374,7 +387,7 @@ func TestIssueServiceSyncPullRequests_RefreshesToMerged(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -385,8 +398,8 @@ func TestIssueServiceSyncPullRequests_RefreshesToMerged(t *testing.T) {
 	}
 	firstSyncedAt := time.Now().UTC()
 
-	mergedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
-	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "closed", mergedAt)
+	mergedAt := time.Now().Add(-time.Hour).UTC()
+	fake.pullRequests = prSet(testPullRequest("owner/repo", 7, "closed", &mergedAt))
 
 	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
 	if err != nil {
@@ -432,14 +445,15 @@ func TestIssueServiceSyncPullRequests_PartialFailureRecorded(t *testing.T) {
 		}
 	}
 
-	clients := map[string]*fakeIssueGitHubClient{
-		"owner/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)}},
-		"gone/repo":  {pullRequestErr: errors.New("404 not found")},
+	fake := &fakeIssueGitHubClient{
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
+		pullRequestErrs: map[string]error{
+			"gone/repo": errors.New("404 not found"),
+		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
-		fake, ok := clients[owner+"/"+repo]
-		if !ok {
-			t.Fatalf("unexpected client repo: %s/%s", owner, repo)
+	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+		if token != "gh-token" {
+			t.Fatalf("unexpected token: %q", token)
 		}
 		return fake
 	}
@@ -527,15 +541,17 @@ func TestIssueServiceSyncPullRequests_RenamedRepoCollisionRecorded(t *testing.T)
 		}
 	}
 
-	clients := map[string]*fakeIssueGitHubClient{
-		// 旧名 repo 的 PR 返回新 canonical 名 new-org/repo → 与 link-new 撞唯一键
-		"old-org/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("new-org/repo", 7, "open", nil)}},
-		"new-org/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("new-org/repo", 7, "open", nil)}},
+	// 新旧两个 repo 名的拉取都返回新 canonical 名 new-org/repo → link-old 与 link-new 撞唯一键
+	canonical := testPullRequest("new-org/repo", 7, "open", nil)
+	fake := &fakeIssueGitHubClient{
+		pullRequests: map[string]map[int]*githubapi.PullRequest{
+			"old-org/repo": {7: canonical},
+			"new-org/repo": {7: canonical},
+		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
-		fake, ok := clients[owner+"/"+repo]
-		if !ok {
-			t.Fatalf("unexpected client repo: %s/%s", owner, repo)
+	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
+		if token != "gh-token" {
+			t.Fatalf("unexpected token: %q", token)
 		}
 		return fake
 	}
@@ -628,7 +644,7 @@ func TestIssueServiceListIssuePullRequests_ReturnsRows(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -655,7 +671,7 @@ func TestIssueServiceAttachPullRequest_CaseVariantURLSameRow(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -690,11 +706,11 @@ func TestIssueServiceAttachPullRequest_ClosedNotMerged(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	closedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
+	closedAt := time.Now().Add(-time.Hour).UTC()
 	pr := testPullRequest("owner/repo", 7, "closed", nil)
-	pr.ClosedAt = closedAt
+	pr.ClosedAt = &closedAt
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: pr},
+		pullRequests: prSet(pr),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -722,9 +738,9 @@ func TestIssueServiceSyncPullRequests_ReopenClearsMergeFields(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	mergedAt := &gh.Timestamp{Time: time.Now().Add(-time.Hour).UTC()}
+	mergedAt := time.Now().Add(-time.Hour).UTC()
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "closed", mergedAt)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "closed", &mergedAt)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -734,7 +750,7 @@ func TestIssueServiceSyncPullRequests_ReopenClearsMergeFields(t *testing.T) {
 		t.Fatalf("attach merged pr: %v", err)
 	}
 
-	fake.pullRequests[7] = testPullRequest("owner/repo", 7, "open", nil)
+	fake.pullRequests = prSet(testPullRequest("owner/repo", 7, "open", nil))
 	result, err := svc.issueService.SyncIssuePullRequests(issue.ID, user.ID)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
@@ -764,9 +780,9 @@ func TestIssueServicePullRequests_DoNotTouchWorkflowStatus(t *testing.T) {
 		t.Fatalf("seed internal meta: %v", err)
 	}
 
-	mergedAt := &gh.Timestamp{Time: now.Add(-time.Hour)}
+	mergedAt := now.Add(-time.Hour)
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "closed", mergedAt)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "closed", &mergedAt)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -805,7 +821,7 @@ func TestIssueServiceAttachPullRequest_CrossUserRejected(t *testing.T) {
 	issue := createTestIssue(t, svc.db, project.ID)
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -850,10 +866,10 @@ func TestIssueServiceSyncPullRequests_DetachedRowNotResurrected(t *testing.T) {
 	}
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	// 拉取成功后、保存前删掉关联行，模拟并发 detach
-	fake.onGetPullRequest = func(_ int) {
+	fake.onGetPullRequest = func(_ string, _ int) {
 		if err := svc.db.Where("id = ?", "link-doomed").Delete(&model.IssuePullRequest{}).Error; err != nil {
 			t.Errorf("delete during fetch: %v", err)
 		}
@@ -909,7 +925,7 @@ func TestIssueServiceAttachPullRequest_UpgradesSyncedOrigin(t *testing.T) {
 	}
 
 	fake := &fakeIssueGitHubClient{
-		pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 	}
 	stubPullRequestClient(t, svc, fake, "gh-token")
 
@@ -964,7 +980,7 @@ func TestIssueServiceAttachPullRequest_UsesCodeToken(t *testing.T) {
 			issue := createInternalTestIssue(t, svc.db, project.ID)
 
 			fake := &fakeIssueGitHubClient{
-				pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)},
+				pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
 			}
 			stubPullRequestClient(t, svc, fake, tc.wantTok)
 
@@ -988,7 +1004,7 @@ func TestIssueServiceAttachPullRequest_CorruptCodeTokenNoFallback(t *testing.T) 
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newPRClient = func(string) githubapi.GitHubClient {
 		t.Fatalf("github client must not be built when code token decryption fails")
 		return nil
 	}
@@ -1008,23 +1024,24 @@ func TestIssueServiceAttachPullRequest_CorruptCodeTokenNoFallback(t *testing.T) 
 	}
 }
 
-// 限流错误（go-github 的 RateLimitError/AbuseRateLimitError，HTTP 403）附限流
+// 限流响应（HTTP 403、响应体含 rate limit / abuse detection 字样）附限流
 // 提示而非权限排查——限流时 PR 与凭证都正常，权限提示会把用户引向查权限。
 // 限额说明只在匿名访问时给出：带 Token 的请求同样会撞次级限流。
-// 注意两者的 Error() 会解引用 Response.Request，构造时必须带非空 Request。
 func TestIssueServiceAttachPullRequest_RateLimitHint(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, user.ID, withTestGitHubToken(t, svc))
 	issue := createTestIssue(t, svc.db, project.ID)
 
-	resp := &http.Response{
-		StatusCode: http.StatusForbidden,
-		Request:    &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/repos/owner/repo/pulls/7"}},
-	}
 	for _, rateErr := range []error{
-		&gh.RateLimitError{Response: resp},
-		&gh.AbuseRateLimitError{Response: resp},
+		&githubapi.StatusError{
+			StatusCode: http.StatusForbidden, Method: http.MethodGet, URL: "/repos/owner/repo/pulls/7",
+			Body: `{"message":"API rate limit exceeded for 203.0.113.4. (But here's the good news: Authenticated requests get a higher rate limit.)"}`,
+		},
+		&githubapi.StatusError{
+			StatusCode: http.StatusForbidden, Method: http.MethodGet, URL: "/repos/owner/repo/pulls/7",
+			Body: `{"message":"You have triggered an abuse detection mechanism and have been temporarily banned from creating content. Please try again in a few minutes."}`,
+		},
 	} {
 		fake := &fakeIssueGitHubClient{pullRequestErr: rateErr}
 		stubPullRequestClient(t, svc, fake, "gh-token")
@@ -1060,11 +1077,10 @@ func TestIssueServiceAttachPullRequest_RateLimitHintAnonymous(t *testing.T) {
 	})
 	issue := createInternalTestIssue(t, svc.db, project.ID)
 
-	resp := &http.Response{
-		StatusCode: http.StatusForbidden,
-		Request:    &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/repos/owner/repo/pulls/7"}},
-	}
-	fake := &fakeIssueGitHubClient{pullRequestErr: &gh.RateLimitError{Response: resp}}
+	fake := &fakeIssueGitHubClient{pullRequestErr: &githubapi.StatusError{
+		StatusCode: http.StatusForbidden, Method: http.MethodGet, URL: "/repos/owner/repo/pulls/7",
+		Body: `{"message":"API rate limit exceeded for 203.0.113.4."}`,
+	}}
 	stubPullRequestClient(t, svc, fake, "")
 
 	_, err := svc.issueService.AttachIssuePullRequest(issue.ID, user.ID, AttachIssuePullRequestRequest{
@@ -1111,7 +1127,7 @@ func TestIssueServiceAttachPullRequest_ErrorNamesCredentialSource(t *testing.T) 
 			project := createTestProject(t, svc.db, user.ID, tc.mutate)
 			issue := createInternalTestIssue(t, svc.db, project.ID)
 
-			notFound := &gh.ErrorResponse{Response: &http.Response{StatusCode: http.StatusNotFound}}
+			notFound := &githubapi.StatusError{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: "/repos/owner/repo/pulls/7"}
 			fake := &fakeIssueGitHubClient{pullRequestErr: notFound}
 			stubPullRequestClient(t, svc, fake, tc.wantTok)
 
@@ -1179,19 +1195,15 @@ func TestIssueServiceSyncPullRequests_UsesCodeTokenAndNamesIt(t *testing.T) {
 		}
 	}
 
-	clients := map[string]*fakeIssueGitHubClient{
-		"owner/repo": {pullRequests: map[int]*gh.PullRequest{7: testPullRequest("owner/repo", 7, "open", nil)}},
-		"gone/repo": {pullRequestErr: &gh.ErrorResponse{
-			Response: &http.Response{StatusCode: http.StatusNotFound},
-		}},
+	fake := &fakeIssueGitHubClient{
+		pullRequests: prSet(testPullRequest("owner/repo", 7, "open", nil)),
+		pullRequestErrs: map[string]error{
+			"gone/repo": &githubapi.StatusError{StatusCode: http.StatusNotFound, Method: http.MethodGet, URL: "/repos/gone/repo/pulls/9"},
+		},
 	}
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newPRClient = func(token string) githubapi.GitHubClient {
 		if token != "code-token" {
 			t.Fatalf("expected code token, got %q", token)
-		}
-		fake, ok := clients[owner+"/"+repo]
-		if !ok {
-			t.Fatalf("unexpected client repo: %s/%s", owner, repo)
 		}
 		return fake
 	}
@@ -1234,7 +1246,7 @@ func TestIssueServiceSyncPullRequests_CorruptCodeTokenRecorded(t *testing.T) {
 		t.Fatalf("seed link: %v", err)
 	}
 
-	svc.issueService.newClient = func(token, owner, repo string) gitHubIssueClient {
+	svc.issueService.newPRClient = func(string) githubapi.GitHubClient {
 		t.Fatalf("github client must not be built when pr token decryption fails")
 		return nil
 	}

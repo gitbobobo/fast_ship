@@ -76,7 +76,7 @@ func TestVersionServiceCreate_ValidatesTargetBranch(t *testing.T) {
 	createTestUser(t, svc.db, "user-1")
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
 	})
-	svc.versionService.newBranchClient = func(token, owner, repo string) gitHubBranchClient {
+	svc.versionService.newClient = func(token, owner, repo string) ghclient.Client {
 		if token != "gh-token" {
 			t.Fatalf("unexpected token: %q", token)
 		}
@@ -132,7 +132,7 @@ func TestVersionServiceUpdate_RejectsUnknownTargetBranch(t *testing.T) {
 	project := createTestProject(t, svc.db, "user-1", func(p *model.Project) {
 	})
 	version := createTestVersion(t, svc.db, project.ID)
-	svc.versionService.newBranchClient = func(token, owner, repo string) gitHubBranchClient {
+	svc.versionService.newClient = func(token, owner, repo string) ghclient.Client {
 		return &fakeBranchClient{
 			branches:      []*ghclient.Branch{{Name: "main", SHA: "abc123", Default: true}},
 			defaultBranch: "main",
@@ -149,6 +149,7 @@ func TestVersionServiceUpdate_RejectsUnknownTargetBranch(t *testing.T) {
 }
 
 type fakeBranchClient struct {
+	stubGitHubClient
 	branches      []*ghclient.Branch
 	defaultBranch string
 	err           error

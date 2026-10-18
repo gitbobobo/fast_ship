@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
@@ -271,7 +272,7 @@ func TestAgentPR_TokenLifecycle(t *testing.T) {
 	if err := env.db.Create(user).Error; err != nil {
 		t.Fatalf("user: %v", err)
 	}
-	env.fake.SetPR("octocat/hw", 1, &githubapp.PullRequest{Title: "T", HTMLURL: "https://github.com/octocat/hw/pull/1", HeadSHA: "s1"})
+	env.fake.SetPR("octocat/hw", 1, &githubapi.PullRequest{Title: "T", HTMLURL: "https://github.com/octocat/hw/pull/1", HeadSHA: "s1"})
 
 	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
 
@@ -376,12 +377,12 @@ func TestAgentPR_UpdateCheckRejectsCancelledRun(t *testing.T) {
 }
 
 type cancelAfterCheckUpdate struct {
-	githubapp.PullRequestGitHub
+	githubapi.GitHubClient
 	after func()
 }
 
-func (c *cancelAfterCheckUpdate) UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in githubapp.CheckUpdate) error {
-	err := c.PullRequestGitHub.UpdateCheckRun(ctx, installationID, repoFullName, checkRunID, in)
+func (c *cancelAfterCheckUpdate) UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in githubapi.CheckUpdate) error {
+	err := c.GitHubClient.UpdateCheckRun(ctx, installationID, repoFullName, checkRunID, in)
 	if c.after != nil {
 		c.after()
 	}
@@ -407,7 +408,7 @@ func TestAgentPR_UpdateCheckMarksPendingIfCancelledDuringWrite(t *testing.T) {
 	}
 
 	env.agent.SetPRGitHub(&cancelAfterCheckUpdate{
-		PullRequestGitHub: env.fake,
+		GitHubClient: env.fake,
 		after: func() {
 			_ = env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
 				Updates(map[string]any{
