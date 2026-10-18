@@ -284,13 +284,15 @@ func hubTestConfig() t3ShellHubConfig {
 	}
 }
 
-func hubTestEnv(address string, updatedAt time.Time) *model.T3Environment {
+// hubTestEnv 构造测试环境行。configRevision 模拟 t3_environments.config_revision
+// 的当前值——hub 的准入/淘汰判定输入，与墙钟时间无关。
+func hubTestEnv(address string, configRevision int64) *model.T3Environment {
 	return &model.T3Environment{
-		ID:        "env-1",
-		UserID:    "user-1",
-		Name:      "T3",
-		Address:   address,
-		UpdatedAt: updatedAt,
+		ID:             "env-1",
+		UserID:         "user-1",
+		Name:           "T3",
+		Address:        address,
+		ConfigRevision: configRevision,
 	}
 }
 
@@ -485,7 +487,7 @@ func TestT3ShellHub_BothFacesSubscribeAckAndShareState(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, activeSub, archiveConn, archiveSub := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 
@@ -529,7 +531,7 @@ func TestT3ShellHub_MetadataFrameIgnored(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 	_, activeConn, activeSub, archiveConn, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 
 	enrichment, _ := json.Marshal(map[string]any{
@@ -570,7 +572,7 @@ func TestT3ShellHub_ResumeUsesAfterSequenceAndSyncMarker(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 	collector := newShellConnCollector(t, srv)
@@ -625,7 +627,7 @@ func TestT3ShellHub_ForceResyncWithoutMarkerWaitsForSnapshot(t *testing.T) {
 	cfg.IdleDisconnect = 0
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 	collector := newShellConnCollector(t, srv)
@@ -703,7 +705,7 @@ func TestT3ShellHub_NoMarkerCapabilityResyncsInsteadOfTrusting(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: false, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, activeSub, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 	if _, has := activeSub.Payload["requestCompletionMarker"]; has {
@@ -757,7 +759,7 @@ func TestT3ShellHub_MarkerWaitTimeoutForcesFullResync(t *testing.T) {
 	cfg.IdleTTL = 10 * time.Second
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 	resumeCollector := newShellConnCollector(t, srv)
@@ -807,7 +809,7 @@ func TestT3ShellHub_PingPongKeepsIdleConnectionAlive(t *testing.T) {
 	cfg.IdleTTL = 10 * time.Second
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 
@@ -838,7 +840,7 @@ func TestT3ShellHub_ReadTimeoutReconnects(t *testing.T) {
 	cfg.IdleTTL = 10 * time.Second
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, activeSub, _, _ := establishBothFaces(t, hub, srv, env, "tok", 7, "th-1")
 	if err := activeConn.sendValue(activeSub.ID, mustMarshalDelta(8, "th-1", "推进")); err != nil {
@@ -867,7 +869,7 @@ func TestT3ShellHub_ArchiveFailureIndependentAndResubscribes(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, activeSub, archiveConn, archiveSub := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 	archiveCollector := newShellConnCollector(t, srv)
@@ -927,7 +929,7 @@ func TestT3ShellHub_ArchiveConnClosureRevokesTrust(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, activeSub, archiveConn, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
 	archiveCollector := newShellConnCollector(t, srv)
@@ -984,7 +986,7 @@ func TestT3ShellHub_CredentialRejectionSurfacesAsFailed(t *testing.T) {
 	_, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok-2", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	view, err := hub.View(context.Background(), env, "tok-1")
 	if err != nil {
@@ -1001,25 +1003,25 @@ func TestT3ShellHub_CredentialRejectionSurfacesAsFailed(t *testing.T) {
 	}
 }
 
-// 凭证替换：指纹变化且版本更新 → 停旧建新；版本不新的迟到请求被拒绝。
+// 凭证替换：指纹变化且世代更新（revision 更高）→ 停旧建新；世代不新的迟到
+// 请求被拒绝。
 func TestT3ShellHub_CredentialReplacementRestartsEntry(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok-1", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 
-	v1 := time.Now()
-	env1 := hubTestEnv(url, v1)
+	env1 := hubTestEnv(url, 0)
 	collector, activeConn, _, _, _ := establishBothFaces(t, hub, srv, env1, "tok-1", 42, "th-1")
 
-	// 迟到请求：同版本不同凭证 → 拒绝（errT3ShellConfigStale），不打断现有 entry。
+	// 迟到请求：同世代不同凭证 → 拒绝（errT3ShellConfigStale），不打断现有 entry。
 	_, err := hub.View(context.Background(), env1, "tok-rotated")
 	if !errors.Is(err, errT3ShellConfigStale) {
 		t.Fatalf("stale-request error = %v, want errT3ShellConfigStale", err)
 	}
 
-	// 凭证替换：新版本 + 新 token → 停旧建新，新 entry 用新 token 建连。
+	// 凭证替换：新世代 + 新 token → 停旧建新，新 entry 用新 token 建连。
 	srv.setBearer("tok-2")
-	env2 := hubTestEnv(url, v1.Add(time.Second))
+	env2 := hubTestEnv(url, 1)
 	viewDone := make(chan *t3ShellView, 1)
 	go func() {
 		view, err := hub.View(context.Background(), env2, "tok-2")
@@ -1051,23 +1053,24 @@ func TestT3ShellHub_CredentialReplacementRestartsEntry(t *testing.T) {
 	hub.mu.Lock()
 	e := hub.entries[t3ShellHubKey("user-1", "env-1")]
 	hub.mu.Unlock()
-	if e == nil || !e.version.Equal(env2.UpdatedAt) {
+	if e == nil || e.configRevision != env2.ConfigRevision {
 		t.Fatalf("registry must hold the replacement entry, got %+v", e)
 	}
 }
 
-// Drop 与迟到 View 交错：Drop 后旧版本的 View 被拒绝，且不复活 entry。
+// Drop 与迟到 View 交错：Drop 后旧世代的 View（revision < cutoff）被拒绝，
+// 且不复活 entry；携带新世代的请求（revision == cutoff）可以重建。
 func TestT3ShellHub_DropGuardsAgainstLateViews(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 
-	v1 := time.Now()
-	env := hubTestEnv(url, v1)
+	env := hubTestEnv(url, 0)
 	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 
-	hub.Drop("user-1", "env-1", v1.Add(time.Second))
-	// 迟到 View（版本不晚于 floor）→ 拒绝且不建连。
+	// 重配形状的 Drop：cutoff 是落库后自增出的新世代（0 → 1）。
+	hub.Drop("user-1", "env-1", 1)
+	// 迟到 View（revision 0 < floor 1）→ 拒绝且不建连。
 	before := srv.connCount.Load()
 	_, err := hub.View(context.Background(), env, "tok")
 	if !errors.Is(err, errT3ShellConfigStale) {
@@ -1084,39 +1087,47 @@ func TestT3ShellHub_DropGuardsAgainstLateViews(t *testing.T) {
 		t.Fatalf("dropped entry must be removed, entries = %d", entries)
 	}
 
-	// 新版本 View 正常重建（喂入新连接的快照）。
-	envNew := hubTestEnv(url, v1.Add(2*time.Second))
+	// 新世代 View 正常重建（喂入新连接的快照）。
+	envNew := hubTestEnv(url, 1)
 	_, _, _, _, _ = establishBothFaces(t, hub, srv, envNew, "tok", 2, "th-1b")
 }
 
-// F3：迟到的 Drop(旧版本) 不得关掉新代 entry——重配提交后 View 已用新凭证
-// 重建 entry 时，后到的 Drop 只应记 floor，不能把新 entry 关掉。
+// 迟到的 Drop（cutoff 更小）不得关掉新代 entry；与 entry 同代的 Drop（真实流程
+// 里「重配 Drop → 新请求重建 → 又一次幂等 Drop」就是这个形状）也只淘汰旧代
+// ——revision < cutoff 才停。
 func TestT3ShellHub_DropKeepsNewerEntry(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
-	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	cfg := hubTestConfig()
+	// 隔离空闲回收：本用例断言的是「Drop 是否关闭 entry」，不能让 reaper 在
+	// 观察窗口内把存活的 entry 断连或收走。
+	cfg.IdleTTL = 30 * time.Second
+	cfg.IdleDisconnect = 0
+	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 
-	v1 := time.Now()
-	env := hubTestEnv(url, v1)
+	// 旧代 entry：revision 0。
+	env := hubTestEnv(url, 0)
 	_, oldConn, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 
-	// floor ≥ entry 版本：旧代 entry 被关闭（原语义保持）。
-	hub.Drop("user-1", "env-1", v1)
+	// Drop(cutoff=1) 大于 entry 的世代 0：旧代 entry 被关闭。
+	hub.Drop("user-1", "env-1", 1)
 	if !oldConn.awaitClosed(2 * time.Second) {
-		t.Fatalf("drop with floor >= entry version must retire the entry")
+		t.Fatalf("drop with greater cutoff must retire the old-generation entry")
 	}
 
-	// 新代 entry：View 用更高版本重建。
-	envNew := hubTestEnv(url, v1.Add(time.Second))
+	// 新代 entry：View 用新世代（revision 1）重建。
+	envNew := hubTestEnv(url, 1)
 	_, newConn, newSub, _, _ := establishBothFaces(t, hub, srv, envNew, "tok", 2, "th-1b")
 
-	// 迟到的 Drop(v1)：新 entry 版本晚于 floor → 保留，连接照常可用。
-	hub.Drop("user-1", "env-1", v1)
+	// 迟到的 Drop(0)：cutoff 小于 entry 世代 → 保留。
+	hub.Drop("user-1", "env-1", 0)
+	// 同代 Drop(1)：只淘汰 revision < cutoff 的旧代 → 保留。
+	hub.Drop("user-1", "env-1", 1)
 	hub.mu.Lock()
 	e := hub.entries[t3ShellHubKey("user-1", "env-1")]
 	hub.mu.Unlock()
-	if e == nil || !e.version.Equal(envNew.UpdatedAt) {
-		t.Fatalf("late drop must keep the newer entry, got %+v", e)
+	if e == nil || e.configRevision != envNew.ConfigRevision {
+		t.Fatalf("late/same-generation drop must keep the newer entry, got %+v", e)
 	}
 	if err := newConn.sendValue(newSub.ID, mustMarshalDelta(3, "th-1b", "仍活着")); err != nil {
 		t.Fatalf("newer entry connection must survive late drop: %v", err)
@@ -1126,18 +1137,18 @@ func TestT3ShellHub_DropKeepsNewerEntry(t *testing.T) {
 	}
 }
 
-// F3：Delete 用删除时刻做 floor——它晚于任何在途请求读到的版本，迟到 View
-// （哪怕带着删除前刚读出的行）一律被拒且不建 entry。
+// F3：Delete 用「删除前 revision + 1」做 tombstone——它大于任何在途请求携带
+// 的 revision（在途请求最多读到删除前的行），迟到 View 一律被拒且不建 entry。
 func TestT3ShellHub_DeleteNowFloorBlocksAllInFlightVersions(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 
-	// 环境行的版本是「删除前」读出的时刻（过去）；删除发生在其后。
-	env := hubTestEnv(url, time.Now().Add(-time.Hour))
+	// 环境行的世代是「删除前」读出的 revision 0；删除发生在其后。
+	env := hubTestEnv(url, 0)
 	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 
-	hub.Drop("user-1", "env-1", time.Now().UTC())
+	hub.Drop("user-1", "env-1", 1) // env.ConfigRevision + 1
 	before := srv.connCount.Load()
 	if _, err := hub.View(context.Background(), env, "tok"); !errors.Is(err, errT3ShellConfigStale) {
 		t.Fatalf("view after delete = %v, want errT3ShellConfigStale", err)
@@ -1154,30 +1165,33 @@ func TestT3ShellHub_DeleteNowFloorBlocksAllInFlightVersions(t *testing.T) {
 	}
 }
 
-// F3 补充：floor 的保留按**记录时刻**计算，不按 floor 值——很久以前的版本
-// 做的 floor 也要立即生效；若按值清理（版本早于 1 小时前即清），长期未动
-// 的环境一重配 floor 就会被清掉、守卫失效。
+// floor 的保留按**记录时刻**计算：floor 值（revision）本身没有时间含义，
+// 刚记下的 floor 必须立即生效并保留满 TTL，不能按值清理。
 func TestT3ShellHub_FloorRetentionKeyedByRecordTime(t *testing.T) {
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 
-	// 无 entry 的环境：Drop 直接记 floor。cutoff 是「变更后的新版本」，语义是
-	// 「早于 cutoff 即拒」；这里用一个很久以后的新版本做 cutoff，再看很旧的
-	// 请求版本是否仍被守卫——floor 的保留按**记录时刻**计，不按版本值计。
-	cutoff := time.Now().UTC().Add(-2 * time.Hour)
-	oldVersion := cutoff.Add(-time.Hour)
-	hub.Drop("user-2", "env-old", cutoff)
+	// 无 entry 的环境：Drop 直接记 floor（cutoff 是变更后的新世代）。
+	hub.Drop("user-2", "env-old", 5)
 	hub.mu.Lock()
 	_, hasFloor := hub.floors[t3ShellHubKey("user-2", "env-old")]
 	hub.mu.Unlock()
 	if !hasFloor {
-		t.Fatalf("freshly recorded floor must not be GC'd even when its version is old")
+		t.Fatalf("freshly recorded floor must not be GC'd")
 	}
 	// env 的 user/env ID 与 Drop 的 key 一致（hubTestEnv 硬编码 user-1/env-1，
 	// 不能用）；地址不可达也无所谓——floor 守卫在任何拨号之前生效。
-	env := &model.T3Environment{ID: "env-old", UserID: "user-2", Address: "http://unused.example", UpdatedAt: oldVersion}
+	// revision 4（< cutoff）的迟到请求被守卫。
+	env := &model.T3Environment{ID: "env-old", UserID: "user-2", Address: "http://127.0.0.1:1", ConfigRevision: 4}
 	if _, err := hub.View(context.Background(), env, "tok"); !errors.Is(err, errT3ShellConfigStale) {
-		t.Fatalf("old floor must still guard, err = %v", err)
+		t.Fatalf("floor must guard smaller revisions, err = %v", err)
+	}
+	// revision == cutoff 的请求放行：判定统一是「< cutoff 即拒」，没有
+	// 「相等即拒」的特例。
+	current := *env
+	current.ConfigRevision = 5
+	if _, err := hub.View(context.Background(), &current, "tok"); errors.Is(err, errT3ShellConfigStale) {
+		t.Fatalf("revision equal to cutoff must be admitted, err = %v", err)
 	}
 }
 
@@ -1192,7 +1206,7 @@ func TestT3ShellHub_ColdSlowSnapshotNotInterruptedByMarkerBudget(t *testing.T) {
 	cfg.IdleDisconnect = 0
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	viewDone := make(chan struct{})
 	var view *t3ShellView
@@ -1245,31 +1259,31 @@ func TestT3ShellHub_ColdSlowSnapshotNotInterruptedByMarkerBudget(t *testing.T) {
 	}
 }
 
-// 云端审查 P2：重配期间并发改名会产生一个「版本更新、但地址/凭证仍是旧的」
-// 中间版本。重配提交后用新版本做 cutoff（语义「早于 cutoff 即拒」），该中间
-// 版本的迟到 View 必须被拒，不能拿旧凭证建 entry 读旧实例的数据。
+// codex 审计时间戳乱序场景的回归（INT-116 方案 B）：updated_at 在 UPDATE 前用
+// time.Now() 生成、没有提交顺序保证——重配生成 t1 尚未提交时，并发改名先提交
+// 更大的 t2，重配随后以 t1 落库并 Drop(t1)，迟到的「旧凭证 + t2」请求能绕过
+// cutoff。config_revision 由 SQL 自增、改名不递增：重配把世代推到 1 后，任何
+// 在途请求无论读到的是改名后的行还是变更前的行，携带的都是 revision 0，一律
+// 被拒；只有重配后读出的 revision 1 被放行。
 func TestT3ShellHub_DropFencesIntermediateRenameVersion(t *testing.T) {
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 
-	base := time.Now().UTC()
-	intermediate := base.Add(time.Second) // 并发改名提交的版本（仍带旧凭证）
-	final := base.Add(2 * time.Second)    // 重配提交的版本（新凭证）
+	// 重配落库（revision 0 → 1）后用新世代做 cutoff。
+	hub.Drop("user-1", "env-1", 1)
 
-	// 重配落库后用新版本做 cutoff。
-	hub.Drop("user-1", "env-1", final)
-
-	env := func(version time.Time) *model.T3Environment {
-		return &model.T3Environment{ID: "env-1", UserID: "user-1", Address: "http://127.0.0.1:1", UpdatedAt: version}
+	env := func(revision int64) *model.T3Environment {
+		return &model.T3Environment{ID: "env-1", UserID: "user-1", Address: "http://127.0.0.1:1", ConfigRevision: revision}
 	}
-	for name, version := range map[string]time.Time{"中间版本": intermediate, "变更前版本": base} {
-		if _, err := hub.View(context.Background(), env(version), "tok"); !errors.Is(err, errT3ShellConfigStale) {
-			t.Fatalf("%s must be fenced, err = %v", name, err)
-		}
+	// 并发改名窗口内读出的行：updated_at 更大，但改名不递增 revision——仍是 0，
+	// 必须被拒（旧实现里它带着更大的时间戳绕过了 cutoff）；变更前读出的行世代
+	// 相同（同为 0），一并被拒——这正是「改名不产生新世代」的含义。
+	if _, err := hub.View(context.Background(), env(0), "tok"); !errors.Is(err, errT3ShellConfigStale) {
+		t.Fatalf("stale revision (rename-window or pre-change read) must be fenced, err = %v", err)
 	}
-	// 携带新版本的正常请求不被 floor 拒（会去拨号并失败，但不是「配置已更新」）。
-	if _, err := hub.View(context.Background(), env(final), "tok"); errors.Is(err, errT3ShellConfigStale) {
-		t.Fatalf("final version must be admitted by the floor, err = %v", err)
+	// 携带新世代的正常请求不被 floor 拒（会去拨号并失败，但不是「配置已更新」）。
+	if _, err := hub.View(context.Background(), env(1), "tok"); errors.Is(err, errT3ShellConfigStale) {
+		t.Fatalf("current revision must be admitted by the floor, err = %v", err)
 	}
 }
 
@@ -1279,7 +1293,7 @@ func TestT3ShellHub_CancelledViewStartsNoSubscription(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1305,7 +1319,7 @@ func TestT3ShellHub_FirstSyncDeadlineReturnsSyncingView(t *testing.T) {
 	_, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
@@ -1328,7 +1342,7 @@ func TestT3ShellHub_IdlePauseResumesWithAfterSequence(t *testing.T) {
 	cfg.IdleCheckInterval = 15 * time.Millisecond
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	collector, _, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 5, "th-1")
 
@@ -1413,7 +1427,7 @@ func TestT3ShellHub_ReapTickRespectsFreshLastUsed(t *testing.T) {
 	cfg.IdleTTL = 10 * time.Second
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, activeSub, archiveConn, _ := establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 	hub.mu.Lock()
@@ -1466,7 +1480,7 @@ func TestT3ShellHub_IdleReclaim(t *testing.T) {
 	cfg := hubTestConfig()
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 
@@ -1493,7 +1507,7 @@ func TestT3ShellHub_IdleReclaim(t *testing.T) {
 func TestT3ShellHub_CloseIdempotent(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 
@@ -1536,7 +1550,7 @@ func TestT3ShellHub_CloseIdempotent(t *testing.T) {
 func TestT3ShellHub_CloseWaitsForDroppedEntryGoroutines(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	_, activeConn, _, archiveConn, _ := establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
 	hub.mu.Lock()
@@ -1550,7 +1564,8 @@ func TestT3ShellHub_CloseWaitsForDroppedEntryGoroutines(t *testing.T) {
 	}
 
 	// 先 Drop（entry 移出注册表——旧实现 Close 就等不到它了），再 Close。
-	hub.Drop("user-1", "env-1", time.Now().Add(time.Hour))
+	// cutoff 取大于 entry 世代（0）的 1，旧代 entry 被摘除。
+	hub.Drop("user-1", "env-1", 1)
 	hub.Close()
 
 	drained := make(chan struct{})
@@ -1583,7 +1598,7 @@ func TestT3ShellHub_ConcurrentViewsShareInitialization(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
-	env := hubTestEnv(url, time.Now())
+	env := hubTestEnv(url, 0)
 
 	const viewers = 8
 	results := make(chan *t3ShellView, viewers)

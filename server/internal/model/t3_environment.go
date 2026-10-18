@@ -17,8 +17,16 @@ type T3Environment struct {
 	BearerTokenEncrypted []byte    `gorm:"type:blob;not null" json:"-"`
 	BearerExpiresAt      time.Time `gorm:"not null" json:"-"`
 	BearerScope          string    `gorm:"type:text;not null" json:"-"`
-	CreatedAt            time.Time `gorm:"not null" json:"created_at"`
-	UpdatedAt            time.Time `gorm:"not null" json:"updated_at"`
+	// ConfigRevision 是连接配置（地址 + 凭证）的单调版本：只在配对列变更时由
+	// 仓库侧用 SQL 自增（config_revision + 1），改名不递增。shell hub 用它做
+	// entry 准入与删除 tombstone——UpdatedAt 是墙钟时间、UPDATE 前生成，没有
+	// 提交顺序保证，不能当世代用（并发改名会让版本号回退，迟到的「旧凭证 +
+	// 更大时间戳」请求能绕过 cutoff）。
+	// not null;default:0 是刻意的：SQLite 允许 ADD COLUMN ... NOT NULL DEFAULT
+	// <常量>，存量库经 AutoMigrate 就地加列。
+	ConfigRevision int64     `gorm:"not null;default:0" json:"-"`
+	CreatedAt      time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt      time.Time `gorm:"not null" json:"updated_at"`
 
 	User User `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
 }

@@ -40,9 +40,9 @@ const (
 	t3RPCServerGetConfig        = "server.getConfig"
 )
 
-// errT3ShellConfigStale 是 View 的版本守卫哨兵：请求携带的环境版本不晚于
-// 已知的 floor/entry 版本（请求是在配置变更前读出的迟到请求）。调用方应当
-// 重读环境后重试，而不是用旧配置建订阅。
+// errT3ShellConfigStale 是 View 的版本守卫哨兵：请求携带的环境配置世代
+// （config_revision）小于已知的 floor/entry 世代——请求是在配置变更前读出的
+// 迟到请求。调用方应当重读环境后重试，而不是用旧配置建订阅。
 var errT3ShellConfigStale = fmt.Errorf("环境配置已更新，请重试")
 
 // t3ShellHubConfig 汇集 hub 的时间参数，测试可整体注入小值。
@@ -208,10 +208,12 @@ func t3ShellFingerprint(address, token string) string {
 
 // View 读取环境的 shell 状态，必要时建 entry 并等待活跃面出现权威快照。
 //
-// 版本守卫：entry 记 env.UpdatedAt 与凭证指纹。指纹不一致且 env.UpdatedAt 更新
-// 才停旧建新；否则拒绝（errT3ShellConfigStale），不打断现有 entry。entry 不存在
-// 但 floor[key] 不晚于请求版本时同样拒绝——防「删除前读出的请求在 Drop 之后
-// 把 entry 复活」。
+// 版本守卫（世代 = t3_environments.config_revision，只在地址/凭证变更时 SQL
+// 自增、改名不递增）：entry 记建立时的世代与凭证指纹。指纹不一致且请求世代
+// 更高才停旧建新；否则拒绝（errT3ShellConfigStale），不打断现有 entry——迟到
+// 的旧世代不得替换新 entry。entry 不存在但 floor[key] 高于请求世代时同样拒绝
+// （请求 revision < cutoff 即拒）——防「删除前读出的请求在 Drop 之后把 entry
+// 复活」。
 //
 // ctx 只用于取消等待，不参与建连：entry 的订阅跑在 hub 的服务生命周期 ctx 上，
 // 请求取消不影响后台同步。等待结束条件：活跃面出现权威快照、或首次建连失败、
@@ -233,11 +235,11 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 	}
 	e := h.entries[key]
 	if e != nil && e.fingerprint != fingerprint {
-		if !env.UpdatedAt.After(e.version) {
+		if env.ConfigRevision <= e.configRevision {
 			h.mu.Unlock()
 			return nil, fmt.Errorf("%w: 环境凭证或地址正在变更", errT3ShellConfigStale)
 		}
-		// 凭证/地址已变：新 entry 先注册占住 key，旧 entry 异步自停
+		// 凭证/地址已变且世代更高：新 entry 先注册占住 key，旧 entry 异步自停
 		// （关连接与 goroutine 退出都在锁外），不打断新 entry。
 		delete(h.entries, key)
 		old := e
@@ -245,7 +247,7 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 		e = nil
 	}
 	if e == nil {
-		if floor, ok := h.floors[key]; ok && env.UpdatedAt.Before(floor.version) {
+		if floor, ok := h.floors[key]; ok && env.ConfigRevision < floor.revision {
 			h.mu.Unlock()
 			return nil, fmt.Errorf("%w: 环境配置已被替换或删除", errT3ShellConfigStale)
 		}
@@ -261,40 +263,39 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 	return e.waitView(ctx, notify)
 }
 
-// t3ShellFloorTTL 是版本 floor 的保留时长。floor 的用途是拒掉「配置变更前
+// t3ShellFloorTTL 是配置世代 floor 的保留时长。floor 的用途是拒掉「配置变更前
 // 读出、变更后才到达」的在途请求，这类请求的生命周期是几十秒量级；按**记录
-// 时刻**保留 1 小时后清理，floors 表不随时间增长。不按 floor 值（旧版本的
-// UpdatedAt）计时：长期未动的环境其旧版本可能远早于 1 小时前，按值清理会让
-// floor 一插入就被清掉、守卫失效。
+// 时刻**保留 1 小时后清理，floors 表不随时间增长。清理只能以记录时刻为准：
+// floor 值（revision）本身没有时间含义，按值清理无从谈起。
 const t3ShellFloorTTL = time.Hour
 
-// t3ShellFloor 是一个环境的版本 floor：version 是「最早可接受的新版本」，
+// t3ShellFloor 是一个环境的配置世代 floor：revision 是「最早可接受的新世代」，
 // at 是记录时刻（只用于过期清理）。
 type t3ShellFloor struct {
-	version time.Time
-	at      time.Time
+	revision int64
+	at       time.Time
 }
 
-// Drop 停掉环境的订阅并记版本 floor（cutoff）。幂等。环境 Update（凭证/地址
-// 变更）与 Delete 都调用它。
+// Drop 停掉环境的订阅并记配置世代 floor（cutoff）。幂等。环境 Update（凭证/
+// 地址变更）与 Delete 都调用它。
 //
-// floor 语义（**早于 cutoff 即拒**）：请求携带的 env.UpdatedAt 早于 cutoff 就
-// 拒绝 View。cutoff 就是「变更后的新版本」：
-//   - Update 传 update.UpdatedAt（本次写入产生的版本）：变更前读出的请求
-//     （含并发改名产生的中间版本——它带着旧凭证）全部被拒，携带新版本的正常
-//     请求（等于 cutoff）可以重建。用「早于」而不是「不晚于」，既能拒掉旧
-//     版本、又不会把变更后的合法请求本身拒掉。
-//   - Delete 传删除时刻（time.Now().UTC()）：删除必然发生在任何在途请求读出
-//     UpdatedAt 之后，因此能拒掉全部在途版本。
+// floor 语义（**请求 revision < cutoff 即拒**）。cutoff 就是「变更后的新世代」：
+//   - Update 传落库后重读出的 config_revision（本次 SQL 自增产生的值）：变更前
+//     读出的请求全部被拒——包括并发改名后仍带着旧凭证的行，改名不递增 revision，
+//     它们的世代与变更前相同，同样小于 cutoff。
+//   - Delete 传删除前读到的 revision + 1：删除后行已不存在，任何在途请求最多
+//     携带删除前读到的 revision，< cutoff 成立即被拒；环境 ID 不可复用，不会有
+//     携带更大 revision 的合法请求撞上这个 tombstone。
 //
-// 只淘汰旧代 entry：entry 的版本（建立时的 env.UpdatedAt）**早于** cutoff 才停；
-// 若 View 已用新配置建了新 entry（版本不早于 cutoff），保留它，不得关掉。
-func (h *t3ShellHub) Drop(userID, envID string, cutoff time.Time) {
+// 只淘汰旧代 entry：entry 的世代（建立时的 env.ConfigRevision）小于 cutoff 才
+// 停；已用新配置建立的同代 entry（revision == cutoff）保留，不得关掉——真实
+// 流程里「重配 Drop 后新请求重建 entry，又一次幂等 Drop」就是这个形状。
+func (h *t3ShellHub) Drop(userID, envID string, cutoffRevision int64) {
 	key := t3ShellHubKey(userID, envID)
 	h.mu.Lock()
 	now := time.Now().UTC()
-	if cur, ok := h.floors[key]; !ok || cutoff.After(cur.version) {
-		h.floors[key] = t3ShellFloor{version: cutoff, at: now}
+	if cur, ok := h.floors[key]; !ok || cutoffRevision > cur.revision {
+		h.floors[key] = t3ShellFloor{revision: cutoffRevision, at: now}
 	}
 	// floors 防膨胀：按记录时刻清理过期 floor（见 t3ShellFloorTTL 的说明）。
 	gcCutoff := now.Add(-t3ShellFloorTTL)
@@ -304,11 +305,10 @@ func (h *t3ShellHub) Drop(userID, envID string, cutoff time.Time) {
 		}
 	}
 	e := h.entries[key]
-	if e != nil && !e.version.Before(cutoff) {
-		e = nil // 新代 entry（版本不早于 cutoff）：保留
-	}
-	if e != nil {
+	if e != nil && e.configRevision < cutoffRevision {
 		delete(h.entries, key)
+	} else {
+		e = nil // 同代或更新代 entry：保留
 	}
 	h.mu.Unlock()
 	if e != nil {
@@ -351,11 +351,11 @@ func (h *t3ShellHub) Close() {
 // 调用方持有 hub 锁。
 func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token string) *t3ShellEntry {
 	e := &t3ShellEntry{
-		hub:         h,
-		key:         key,
-		envID:       env.ID,
-		version:     env.UpdatedAt,
-		fingerprint: t3ShellFingerprint(env.Address, token),
+		hub:            h,
+		key:            key,
+		envID:          env.ID,
+		configRevision: env.ConfigRevision,
+		fingerprint:    t3ShellFingerprint(env.Address, token),
 		// 连接目标与指纹用同一规范化地址，避免结尾斜杠让 WS 路径拼出 //ws。
 		address:    t3ShellNormalizedAddress(env.Address),
 		token:      token,
@@ -402,11 +402,12 @@ type t3ShellEntry struct {
 	// envID 只用于日志。
 	envID string
 
-	// 以下四个在 entry 生命周期内不变（凭证/地址变更走停旧建新）。
-	version     time.Time
-	fingerprint string
-	address     string
-	token       string
+	// 以下四项在 entry 生命周期内不变（凭证/地址变更走停旧建新）。世代取建立
+	// 时的 env.ConfigRevision：与请求世代比对决定停旧建新与 Drop 的淘汰范围。
+	configRevision int64
+	fingerprint    string
+	address        string
+	token          string
 
 	mu sync.Mutex
 	// state 的锁在 t3ShellState 内部；锁序恒为 mu → state.mu。

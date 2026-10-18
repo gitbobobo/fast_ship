@@ -261,19 +261,24 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   `context.AfterFunc` 的取消回调（`t3_ws.go` 的 `closeOnCancel`，其 stop 按 Go
   语义不等待已启动的回调）不在等待范围内：它只做一次 `conn.Close()`，可能在
   `Close()` 返回后的极短时间内完成，不构成泄漏。
-- **版本守卫**：entry 记 `env.UpdatedAt` 与凭证指纹（规范化 address + token）。
-  凭证/地址变更且版本更新 → 停旧建新；否则拒绝（`errT3ShellConfigStale`），
+- **版本守卫**：配置世代是 `t3_environments.config_revision`——只在地址/凭证
+  变更时由仓库侧 SQL 自增（`config_revision + 1`），改名不算；`updated_at` 是
+  UPDATE 前生成的墙钟时间、没有提交顺序保证（并发改名会让版本号回退），只做
+  展示，不能当世代用。entry 记建立时的世代与凭证指纹（规范化 address + token）。
+  凭证/地址变更且世代更新 → 停旧建新；否则拒绝（`errT3ShellConfigStale`），
   调用方按可重试错误处理（「环境配置已更新，请重试」——不做内部重读重试，
   避免同一操作前半程旧配置、后半程新配置的拼接；用户/前端重试会重新加载
-  配置，整个操作用同一份配置完成）。环境 Update（重配）落库成功后调
-  `shellHub.Drop`，cutoff 用**本次写入产生的 UpdatedAt**；Delete 的 cutoff 用
-  **删除时刻**（必然晚于任何在途请求读到的版本）。cutoff 的语义是「**早于即
-  拒**」：变更后的合法请求（版本等于 cutoff）可以重建，变更前的请求一律被拒
-  ——包括并发改名产生、仍带着旧凭证的中间版本，以及「Delete 读到 v1、并发
-  Update 提交 v2、迟到请求带 v2 复活已删环境」这条路径。Drop 只淘汰旧代
-  entry（版本早于 cutoff）：若新请求已用新配置重建 entry，迟到的 Drop 不会
-  把它关掉。floors 表按**记录时刻**保留 1 小时后清理（在途请求只有几十秒
-  量级；不按 floor 值计时，否则长期未动的环境一重配 floor 就会被清掉）。
+  配置，整个操作用同一份配置完成）。环境 Update（重配）落库成功后重读该行拿
+  新世代（自增发生在 SQL 里，Go 侧算不出并发安全的新值；重读失败退回
+  `旧世代+1` 这个最小可能值）调 `shellHub.Drop`；Delete 的 cutoff 用**删除前
+  读到的 revision + 1** 做 tombstone（行已不存在，在途请求最多携带删除前的
+  revision，环境 ID 不可复用）。准入语义是「**请求 revision < cutoff 即拒**」：
+  携带新世代的请求（revision == cutoff）可以重建，变更前的请求一律被拒——
+  包括并发改名后仍带着旧凭证的行（改名不递增 revision，世代与变更前相同），
+  以及「迟到请求复活已删环境」这条路径。Drop 只淘汰旧代 entry（revision 小于
+  cutoff）：若新请求已用新配置重建 entry，迟到的或幂等的重复 Drop 不会把它
+  关掉。floors 表按**记录时刻**保留 1 小时后清理（在途请求只有几十秒量级；
+  revision 值本身没有时间含义，清理只能以记录时刻为准）。
 - **生命周期**：`Close()` 等 hub 级生命周期 WaitGroup 排空——覆盖已被
   Drop/替换/淘汰摘除的 entry 与各订阅 reader，返回后没有本 hub 启动的
   goroutine 仍在运行。

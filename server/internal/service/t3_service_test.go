@@ -1162,6 +1162,27 @@ func TestT3CreateConcurrentSameName(t *testing.T) {
 
 // TestT3ThreadsAggregationAndErrorIsolation 覆盖 panel r1 #7/#8/#9：
 // 归档走独立 RPC、子代理线程排除、坏环境不拖垮健康环境。
+// listUntil 反复读列表直到条件满足。列表只等待活跃面就绪，归档面是独立订阅、
+// 稍后才到：冷启动的第一次 List 完全可能少几个归档线程、或因为归档未就绪而标
+// degraded。需要「两面都热」的断言必须先等条件成立，不能赌第一次调用的时序。
+func listUntil(t *testing.T, e *t3TestEnv, userID string, until func(*T3ThreadListResponse) bool) *T3ThreadListResponse {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		result, err := e.th.List(context.Background(), userID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if until(result) {
+			return result
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for list condition, last = %+v", result.Environments)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -1223,10 +1244,11 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 	}
 	offlineServer.Close()
 
-	result, err := e.th.List(ctx, userID)
-	if err != nil {
-		t.Fatalf("list threads: %v", err)
-	}
+	// 归档线程（th-4）来自独立的归档订阅，等两面都热再断言。
+	result := listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		return len(res.Items) == 4 && len(res.Environments) == 2 &&
+			res.Environments[0].Status == T3EnvironmentStatusOK
+	})
 	// th-1 活跃、th-2 waiting、th-3 running、th-4 归档；th-5 子代理排除
 	if len(result.Items) != 4 {
 		t.Fatalf("expected 4 threads (subagent excluded), got %d: %+v", len(result.Items), result.Items)
@@ -2204,22 +2226,20 @@ func TestT3ThreadsStaleCredentialRejectionSurfacesRepair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	first, err := e.th.List(ctx, userID)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(first.Items) != 1 || first.Environments[0].Status != T3EnvironmentStatusOK {
-		t.Fatalf("warm list = %+v", first.Environments)
-	}
+	// 等热起来：活跃面到得快、归档面可能稍后（归档未就绪时列表是 degraded），
+	// 这里要的是「已有快照且健康」这个前置状态。
+	listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		return len(res.Items) == 1 && res.Environments[0].Status == T3EnvironmentStatusOK
+	})
 
 	// 已有快照后吊销凭证并断开连接：重连探测 401 → Stale + 凭证被拒。
 	e.fake.revokeBearers()
 	e.fake.dropConnections()
 
-	deadline := time.Now().Add(8 * time.Second)
+	repairDeadline := time.Now().Add(8 * time.Second)
 	var status T3EnvironmentStatus
 	var msg string
-	for time.Now().Before(deadline) {
+	for time.Now().Before(repairDeadline) {
 		listed, listErr := e.th.List(ctx, userID)
 		if listErr != nil {
 			t.Fatalf("list: %v", listErr)
@@ -2420,7 +2440,8 @@ func TestT3ThreadsListReflectsPushDeltas(t *testing.T) {
 }
 
 // TestT3EnvironmentUpdateAndDeleteDropHubEntry 覆盖环境服务与 hub 的接线：
-// 重配（凭证变更）落库后清 entry 并记版本 floor；删除后同样清 entry——
+// 重配（凭证变更）落库后 config_revision 自增、清 entry 并以新世代记 floor；
+// 携带旧世代的迟到请求被拒；删除后同样清 entry，且任何世代都被拒——
 // 后续列表用新凭证/不再复活旧订阅。
 func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	e := setupT3ServiceTest(t)
@@ -2449,8 +2470,12 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	if entries != 1 {
 		t.Fatalf("expected one hub entry after list, got %d", entries)
 	}
+	beforeRow, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
+	if err != nil {
+		t.Fatalf("load env before re-pair: %v", err)
+	}
 
-	// 重配（凭证变更）→ Drop：entry 被清、floor 记新版本。
+	// 重配（凭证变更）→ config_revision 自增、Drop：entry 被清、floor 记新世代。
 	e.fake.revokeBearers()
 	if _, err := e.env.Update(ctx, userID, env.Id, &UpdateT3EnvironmentRequest{PairingUrl: strPtr(e.fake.pairingURL(e.fake.baseURL))}); err != nil {
 		t.Fatalf("re-pair: %v", err)
@@ -2461,14 +2486,36 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	if entries != 0 || floors == 0 {
 		t.Fatalf("re-pair must drop the hub entry and record floor, entries=%d floors=%d", entries, floors)
 	}
+	afterRow, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
+	if err != nil {
+		t.Fatalf("load env after re-pair: %v", err)
+	}
+	if afterRow.ConfigRevision != beforeRow.ConfigRevision+1 {
+		t.Fatalf("re-pair must bump config_revision exactly once: %d -> %d", beforeRow.ConfigRevision, afterRow.ConfigRevision)
+	}
+	// 携带旧世代（重配前读出的行）的迟到请求被拒，且不复活 entry。
+	stale := *beforeRow
+	staleToken, err := e.th.bearerToken(&stale)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := e.th.viewShell(ctx, &stale, staleToken); err == nil || !strings.Contains(err.Error(), "请重试") {
+		t.Fatalf("stale revision view after re-pair = %v, want retryable 请重试", err)
+	}
+	e.hub.mu.Lock()
+	entries = len(e.hub.entries)
+	e.hub.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("stale view must not resurrect the entry, entries = %d", entries)
+	}
 
-	// 新凭证列表照常（entry 以新版本重建）。
+	// 新凭证列表照常（entry 以新世代重建）。
 	result, err := e.th.List(ctx, userID)
 	if err != nil || len(result.Items) != 1 {
 		t.Fatalf("list after re-pair = %+v err=%v", result, err)
 	}
 
-	// 删除 → Drop。
+	// 删除 → Drop（tombstone = 删除前 revision + 1）。
 	if err := e.env.Delete(ctx, userID, env.Id); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -2477,6 +2524,16 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	e.hub.mu.Unlock()
 	if entries != 0 {
 		t.Fatalf("delete must drop the hub entry, entries=%d", entries)
+	}
+	// 删除后任何世代都被拒：即使带着删除前最后读出的行（最新 revision）也不得
+	// 复活订阅。
+	last := *afterRow
+	lastToken, err := e.th.bearerToken(&last)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := e.th.viewShell(ctx, &last, lastToken); err == nil || !strings.Contains(err.Error(), "请重试") {
+		t.Fatalf("view after delete = %v, want retryable 请重试", err)
 	}
 }
 
@@ -2503,18 +2560,19 @@ func TestT3ThreadsStaleConfigViewIsRetryable(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 
-	// 构造「配置已在别处提交新版本（v2）且 hub trail 已被 Drop」的世界，
-	// 迟到请求仍拿着 v1 的行与旧凭证。
+	// 构造「配置已在别处被替换或删除（hub trail 已 Drop 到 tombstone）」的世界，
+	// 迟到请求仍拿着 tombstone 之前的行与旧凭证。改名随后落库：它不递增
+	// config_revision，改变不了任何请求携带的世代。
 	row, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
 	if err != nil {
 		t.Fatalf("load env: %v", err)
 	}
-	e.hub.Drop(userID, env.Id, row.UpdatedAt.Add(time.Second))
+	e.hub.Drop(userID, env.Id, row.ConfigRevision+1)
 	if err := e.env.repo.Update(ctx, env.Id, userID, &repository.T3EnvironmentUpdate{
 		Name:      api.Ptr("配置变更机-v2"),
-		UpdatedAt: row.UpdatedAt.Add(2 * time.Second),
+		UpdatedAt: row.UpdatedAt.Add(time.Second),
 	}); err != nil {
-		t.Fatalf("bump env version: %v", err)
+		t.Fatalf("rename env: %v", err)
 	}
 
 	stale := *row
@@ -2525,7 +2583,8 @@ func TestT3ThreadsStaleConfigViewIsRetryable(t *testing.T) {
 	if _, err := e.th.viewShell(ctx, &stale, token); err == nil || !strings.Contains(err.Error(), "请重试") {
 		t.Fatalf("stale view error = %v, want retryable 请重试", err)
 	}
-	// 内部重读会拿到 v2 > floor 并复活 entry——新语义必须保持拒绝。
+	// 内部重读会拿到与 tombstone 之前相同的世代（改名不递增）并复活 entry——
+	// 新语义必须保持拒绝。
 	e.hub.mu.Lock()
 	entries := len(e.hub.entries)
 	e.hub.mu.Unlock()
