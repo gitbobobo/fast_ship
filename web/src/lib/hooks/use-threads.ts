@@ -20,6 +20,13 @@ import { useThreadListStore } from "@/lib/store/thread-list-store";
 export const THREAD_DETAIL_POLL_MS = 3000;
 
 /**
+ * 有环境处于 degraded（冷启动同步中、断线重连中、归档面暂不可读）时的列表轮询间隔。
+ * 服务端此刻从内存快照回答，代价接近零；一旦所有环境回到 ok 就停止轮询。
+ * unreachable / repair 不轮询——那需要用户去环境设置处理。
+ */
+export const THREAD_LIST_DEGRADED_POLL_MS = 15000;
+
+/**
  * 本功能的所有查询都挂在 [ROOT, userId, ...] 下：缓存按用户身份隔离，
  * 没有用户（未登录或正在引导）时不读取。
  */
@@ -126,7 +133,10 @@ export function useDeleteEnvironment() {
   });
 }
 
-/** 列表在打开、窗口重新聚焦、手动刷新时更新，不做定时轮询。 */
+/**
+ * 列表在打开、窗口重新聚焦、手动刷新时更新；仅当有环境处于 degraded（同步中/
+ * 断线重连）时按固定间隔重读，等它自行收敛，其余情况不做定时轮询。
+ */
 export function useThreads() {
   const userId = useUserId();
   return useQuery({
@@ -135,6 +145,10 @@ export function useThreads() {
     enabled: Boolean(userId),
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
+    refetchInterval: (query) =>
+      query.state.data?.environments.some((env) => env.status === "degraded")
+        ? THREAD_LIST_DEGRADED_POLL_MS
+        : false,
   });
 }
 
@@ -300,15 +314,24 @@ export function useRespondRequest(
   );
 }
 
-/** 新线程只在发送首条消息时创建；成功后让列表失效，详情由跳转后的页面读取。 */
+/**
+ * 新线程只在发送首条消息时创建；详情由跳转后的页面读取。
+ *
+ * 创建受理后 mutation 立即结束，调用方据此马上反馈/跳转；列表刷新只在后台进行，
+ * 不再让按钮等待整轮列表重读。成功与失败都触发刷新：写入可能已被上游受理而响应
+ * 未达，列表要能自行核对（稳定 command_id/thread_id 的幂等重试语义不变）。
+ */
 export function useCreateThread(environmentId: string) {
   const queryClient = useQueryClient();
   const userId = useUserId();
+  const refreshList = () => {
+    void queryClient.invalidateQueries({ queryKey: keys.threads(userId) });
+  };
   return useMutation({
     mutationFn: (input: CreateThreadInput) =>
       threadApi.create(environmentId, input),
-    onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: keys.threads(userId) }),
+    onSuccess: refreshList,
+    onError: refreshList,
   });
 }
 

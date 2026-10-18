@@ -266,10 +266,18 @@ describe("ThreadsPage", () => {
     renderPage();
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "部分环境暂时无法读取",
+      "部分环境正在同步或暂时无法读取",
     );
     expect(screen.queryByText("所有环境都无法读取")).toBeNull();
     expect(cardTitles()).toEqual(["Thread 1"]);
+  });
+
+  it("does not claim there are no threads while an environment is still syncing", () => {
+    mockThreads([], [env({ status: "degraded", error: "正在同步 T3 线程快照" })]);
+    renderPage();
+
+    expect(screen.getByText("环境尚未同步完成，稍后会自动显示线程。")).toBeInTheDocument();
+    expect(screen.queryByText("暂无线程")).toBeNull();
   });
 
   it("refreshes manually", async () => {

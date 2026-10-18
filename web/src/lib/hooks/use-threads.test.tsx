@@ -2,9 +2,16 @@ import type { ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ThreadDetail, ThreadItem, ThreadStatus } from "@/lib/api/threads";
+import type {
+  CreateThreadInput,
+  ThreadDetail,
+  ThreadItem,
+  ThreadStatus,
+} from "@/lib/api/threads";
 import {
   THREAD_DETAIL_POLL_MS,
+  THREAD_LIST_DEGRADED_POLL_MS,
+  useCreateThread,
   useThreadDetail,
   useThreadItemDetail,
   useThreads,
@@ -14,7 +21,8 @@ import { useThreadListStore } from "@/lib/store/thread-list-store";
 import { makeActivity, makeQueue } from "@/test/threads";
 import { signInAs, signOut, teardownAuth } from "@/test/auth";
 
-const { detail, list, itemDetail } = vi.hoisted(() => ({
+const { create, detail, list, itemDetail } = vi.hoisted(() => ({
+  create: vi.fn(),
   detail: vi.fn(),
   list: vi.fn(),
   itemDetail: vi.fn(),
@@ -22,7 +30,7 @@ const { detail, list, itemDetail } = vi.hoisted(() => ({
 
 vi.mock("@/lib/api/threads", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/threads")>()),
-  threadApi: { list, detail, itemDetail },
+  threadApi: { create, list, detail, itemDetail },
 }));
 
 function response(status: ThreadStatus, title = "T"): { data: ThreadDetail } {
@@ -56,6 +64,7 @@ function setup() {
 beforeEach(() => signInAs("A"));
 afterEach(() => {
   teardownAuth();
+  create.mockReset();
   detail.mockReset();
   itemDetail.mockReset();
   list.mockReset();
@@ -218,6 +227,97 @@ describe("identity isolation", () => {
     expect(client.getQueryCache().findAll()).toHaveLength(1);
     expect(threads.result.current.data).toBeDefined();
     stop();
+  });
+});
+
+describe("useThreads degraded polling", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("re-reads while an environment is degraded and stops once it recovers", async () => {
+    list
+      .mockResolvedValueOnce({
+        data: { items: [], environments: [{ id: "e1", status: "degraded" }] },
+      })
+      .mockResolvedValue({
+        data: { items: [], environments: [{ id: "e1", status: "ok" }] },
+      });
+    const { wrapper } = setup();
+
+    renderHook(() => useThreads(), { wrapper });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(list).toHaveBeenCalledTimes(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(THREAD_LIST_DEGRADED_POLL_MS));
+    expect(list).toHaveBeenCalledTimes(2);
+
+    await act(() => vi.advanceTimersByTimeAsync(THREAD_LIST_DEGRADED_POLL_MS * 5));
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("never polls while every environment is ok", async () => {
+    list.mockResolvedValue({
+      data: { items: [], environments: [{ id: "e1", status: "ok" }] },
+    });
+    const { wrapper } = setup();
+
+    renderHook(() => useThreads(), { wrapper });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(list).toHaveBeenCalledTimes(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(THREAD_LIST_DEGRADED_POLL_MS * 5));
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useCreateThread refresh decoupling", () => {
+  const input = {
+    command_id: "c1",
+    thread_id: "t9",
+    project_id: "p1",
+    message: { message_id: "m1", text: "hi" },
+    runtime_mode: "full-access",
+    workspace: { type: "root" },
+  } satisfies CreateThreadInput;
+
+  // 列表查询必须在挂载中，invalidateQueries 才会真的发起重读。
+  async function mountWithWarmList() {
+    list.mockResolvedValue({ data: { items: [], environments: [] } });
+    const { wrapper } = setup();
+    const threads = renderHook(() => useThreads(), { wrapper });
+    await waitFor(() => expect(threads.result.current.data).toBeDefined());
+    expect(list).toHaveBeenCalledTimes(1);
+    return { wrapper };
+  }
+
+  it("resolves as soon as the thread is accepted, without waiting for the list refresh", async () => {
+    const { wrapper } = await mountWithWarmList();
+    let releaseList!: (value: { data: { items: []; environments: [] } }) => void;
+    list.mockImplementationOnce(
+      () => new Promise((resolve) => (releaseList = resolve)),
+    );
+    create.mockResolvedValue({ thread_id: "t9", resumed: false });
+
+    const { result } = renderHook(() => useCreateThread("e1"), { wrapper });
+    const settled = await act(async () => result.current.mutateAsync(input));
+
+    expect(settled.thread_id).toBe("t9");
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    // 列表重读仍在飞行，但创建已结算：按钮不再被刷新拖住。
+    expect(result.current.isPending).toBe(false);
+    releaseList({ data: { items: [], environments: [] } });
+  });
+
+  it("still refreshes the list after a failure so an accepted write gets reconciled", async () => {
+    const { wrapper } = await mountWithWarmList();
+    create.mockRejectedValue(new Error("timeout"));
+
+    const { result } = renderHook(() => useCreateThread("e1"), { wrapper });
+    await act(async () => {
+      await expect(result.current.mutateAsync(input)).rejects.toThrow("timeout");
+    });
+
+    await waitFor(() => expect(list).toHaveBeenCalledTimes(2));
   });
 });
 
