@@ -1,12 +1,17 @@
+import { ACP_REGISTRY_ICONS } from "./acp-registry-icons";
+
 /** provider 图标的纯数据（glyph 取自 T3 Code 各 provider 包的 icon 字段）。 */
 export interface ProviderIconData {
   viewBox: string;
   fill: { light: string; dark: string };
-  paths: {
+  /** 结构化路径（内置图标用）；与 raw 二选一。 */
+  paths?: {
     d: string;
     fillRule?: "evenodd" | "nonzero";
     fill?: { light: string; dark: string };
   }[];
+  /** 非路径原语（circle/line/text/polygon…）的原始 inner markup；与 paths 二选一。 */
+  raw?: string;
 }
 
 export const PROVIDER_ICONS = {
@@ -140,10 +145,33 @@ const PREFIX_KEYS: [string, ProviderIconKey][] = [
 
 /**
  * 把 provider 实例 ID（如 `claudeAgent`、`acpRegistry_devin`、`codex_work`）
- * 归一到图标键；未知实例返回 undefined，由调用方用通用图标兜底。
+ * 归一到内置图标键；ACP 接入的实例在这里一律回落通用 `acp`，专属图标由
+ * `resolveProviderIcon` 从注册表图标表里取。
  */
 export function providerIconKey(instanceId: string): ProviderIconKey | undefined {
   const name = /^[a-z]+/.exec(instanceId.trim().toLowerCase())?.[0] ?? "";
   if (name === "pi") return "pi";
   return PREFIX_KEYS.find(([prefix]) => name.startsWith(prefix))?.[1];
+}
+
+/**
+ * 解析实例最终使用的图标：ACP registry 接入的 harness（实例前缀
+ * `acpRegistry_`，后缀是注册表 agent id 把 `-` 换成 `_`）用注册表官方图标，
+ * 只有未登记的 agent 才回落通用 `acp`；其他实例走 `providerIconKey`；
+ * 未知实例返回 null，由调用方用通用立方体兜底。
+ */
+export function resolveProviderIcon(
+  instanceId: string,
+): { key: string; icon: ProviderIconData } | null {
+  const id = instanceId.trim();
+  const acpAgent = /^acpregistry_(.+)$/i.exec(id)?.[1];
+  if (acpAgent) {
+    const agentId = acpAgent.toLowerCase().replace(/_/g, "-");
+    return {
+      key: `acp:${agentId}`,
+      icon: ACP_REGISTRY_ICONS[agentId] ?? PROVIDER_ICONS.acp,
+    };
+  }
+  const key = providerIconKey(id);
+  return key ? { key, icon: PROVIDER_ICONS[key] } : null;
 }

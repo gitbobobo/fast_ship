@@ -34,10 +34,10 @@ import {
   Chip,
   EffortChip,
   EnvironmentChip,
-  ModelChip,
   WorkspaceModeChip,
 } from "./thread-chips";
 import { T3ProjectPicker } from "./t3-project-picker";
+import { ModelPicker } from "./model-picker";
 import { ThreadComposer } from "./thread-composer";
 
 function useDebounced<T>(value: T, ms: number) {
@@ -244,7 +244,7 @@ export function NewThreadForm({
           className="h-7 w-36 text-xs"
         />
       )}
-      <ModelChip
+      <ModelPicker
         providers={providers}
         resolved={resolved}
         disabled={!writable || providers.length === 0 || launching}

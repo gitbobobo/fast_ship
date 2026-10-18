@@ -437,6 +437,40 @@ describe("AutomationsPage", () => {
     expect(projectSelect).not.toHaveTextContent("proj-1");
   });
 
+  it("已选模型但模型列表加载不出来时，仍能改回项目默认", { timeout: 20000 }, async () => {
+    vi.mocked(useAutomations).mockReturnValue({
+      data: [
+        {
+          ...automation,
+          model_selection: { instance_id: "inst-a", model: "claude-5" },
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAutomations>);
+    const user = userEvent.setup();
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
+    );
+    await screen.findByRole("dialog");
+
+    // composer-options 的 providers 为空：触发器仍可用，且能清除失效选择。
+    const trigger = screen.getByRole("button", { name: "模型" });
+    expect(trigger).toBeEnabled();
+    await waitFor(() => expect(trigger).toHaveTextContent("claude-5（已失效）"));
+
+    await user.click(trigger);
+    await user.click(await screen.findByRole("option", { name: "项目默认" }));
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalledTimes(1));
+    expect(updateMutateAsync.mock.calls[0][0].data.model_selection).toBeNull();
+  });
+
   it("shows runs dialog on history click", async () => {
     vi.mocked(useAutomationRuns).mockReturnValue({
       data: [
@@ -553,8 +587,11 @@ describe("AutomationsPage", () => {
     await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
 
-    await user.click(await screen.findByText("Claude / Claude 5"));
-    await user.click(screen.getByText("GLM / GLM 5"));
+    // 模型多选走统一 ModelMultiPicker：点开触发器 → 在面板里点模型行。
+    await user.click(screen.getByRole("button", { name: "模型" }));
+    await user.click(await screen.findByRole("option", { name: /Claude 5/ }));
+    await user.click(screen.getByRole("button", { name: "GLM" }));
+    await user.click(await screen.findByRole("option", { name: /GLM 5/ }));
 
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
@@ -623,7 +660,8 @@ describe("AutomationsPage", () => {
 
     await user.click(selectByLabel("触发方式"));
     await user.click(await screen.findByText("GitHub PR 打开"));
-    await user.click(await screen.findByText("Claude / Claude 5"));
+    await user.click(screen.getByRole("button", { name: "模型" }));
+    await user.click(await screen.findByRole("option", { name: /Claude 5/ }));
     await user.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     expect(createMutateAsync.mock.calls[0][0].model_selections).toEqual([
