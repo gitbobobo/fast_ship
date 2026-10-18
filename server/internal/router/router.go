@@ -40,6 +40,7 @@ func Setup(
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
 	quotaHandler *handler.QuotaHandler,
+	integrationHandler *handler.IntegrationHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -119,6 +120,15 @@ func Setup(
 			quotaJWT.DELETE("/device-authorizations/:id", quotaHandler.CancelDeviceAuthorization)
 		}
 		api.GET("/quota/accounts", middleware.RequireAuth(cfg, apiKeyRepo, authService), quotaHandler.ListAccounts)
+
+		// JWT 必须 — 集成（INT-119）：用户级外部服务连接（当前 GitHub App），
+		// 每个用户只读写自己名下的配置。
+		integrations := api.Group("/integrations", middleware.RequireJWT(cfg, authService))
+		{
+			integrations.GET("/github-app", integrationHandler.Get)
+			integrations.PUT("/github-app", integrationHandler.Update)
+			integrations.POST("/github-app/test", integrationHandler.Test)
+		}
 
 		// JWT 必须 — 项目写操作
 		projectWrite := api.Group("/projects", middleware.RequireJWT(cfg, authService))

@@ -47,10 +47,12 @@ logging:
   min_level: info  # 入库最低级别（debug/info/warn/error）；stdout 输出不受影响
 
 github_app:
-  app_id: ""  # GitHub App ID；留空则 PR 评审（INT-93）端点按未配置处理
-  private_key_path: ""  # App 私钥 PEM 文件路径；私钥不进库、不进环境变量正文
-  webhook_secret: ""  # webhook 验签密钥；留空时 POST /api/github/webhooks 一律 503
-  fake: false  # 仅 server.mode=debug 允许 true：注入假 GitHub 实现（本地自测）
+  # 集成（INT-119）是用户级配置：用户在「设置 → 集成」保存后只看自己的数据库行；
+  # 本节是未保存集成配置的用户共用的部署级兜底（保留单用户部署的升级路径）。
+  app_id: ""  # GitHub App ID；留空则未自行配置的用户 PR 评审不可用
+  private_key_path: ""  # App 私钥 PEM 文件路径；用户保存后密文落库，不进环境变量正文
+  webhook_secret: ""  # webhook 验签密钥；为空时 POST /api/github/webhooks 一律 503
+  fake: false  # 仅 server.mode=debug 允许 true：注入假 GitHub 实现（本地自测，不读集成配置）
 
 # 机器人（INT-102）：上下文压缩阈值、记忆限额与夜间整理时程。
 # 全部为部署级配置；三个辅助模型留空即继承各机器人自己的主模型。

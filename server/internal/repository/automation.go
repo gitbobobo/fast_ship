@@ -344,35 +344,34 @@ var prTriggerTypesIn = []string{
 	string(model.AutomationTriggerGitHubPRSynchronize),
 }
 
-// CancelSupersededPRRunsTx SHA 变化：该 PR 下旧 SHA 的全部在途运行（排队+进行中，
-// 跨规则跨用户跨模型）一律取消并消费已有令牌。返回取消的运行 ID 列表（供事务外
-// StopThread），0 行=无在途。
-func (r *AutomationRunRepository) CancelSupersededPRRunsTx(tx *gorm.DB, repoFullName string, prNumber int, newSHA string, now time.Time) ([]string, error) {
-	var oldRuns []model.AutomationRun
-	err := tx.
-		Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ? AND status IN (?, ?, ?, ?)",
+// CancelSupersededPRRunsTx SHA 变化：该身份下旧 SHA 的在途运行（排队+进行中，
+// 跨规则跨模型）一律取消并消费已有令牌。按运行行持久化的开轮身份（app_user_id）
+// 分区：非空只取消该身份的轮；空串（config 身份，含存量回填行）只取消 config
+// 的轮——各身份的时序账互不干扰，config 不再跨用户全局取消。返回取消的运行
+// ID 列表（供事务外 StopThread），0 行=无在途。
+func (r *AutomationRunRepository) CancelSupersededPRRunsTx(tx *gorm.DB, repoFullName string, prNumber int, newSHA, appUserID string, now time.Time) ([]string, error) {
+	scope := func(q *gorm.DB) *gorm.DB {
+		q = q.Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ? AND status IN (?, ?, ?, ?)",
 			repoFullName, prNumber, newSHA,
 			model.AutomationRunQueued, model.RunStatusPendingRun,
-			model.AutomationRunDispatched, model.AutomationRunRunning).
-		Find(&oldRuns).Error
-	if err != nil {
+			model.AutomationRunDispatched, model.AutomationRunRunning)
+		q = q.Where("app_user_id = ?", appUserID)
+		return q
+	}
+	var oldRuns []model.AutomationRun
+	if err := scope(tx).Find(&oldRuns).Error; err != nil {
 		return nil, err
 	}
 	if len(oldRuns) == 0 {
 		return nil, nil
 	}
-	res := tx.Model(&model.AutomationRun{}).
-		Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ? AND status IN (?, ?, ?, ?)",
-			repoFullName, prNumber, newSHA,
-			model.AutomationRunQueued, model.RunStatusPendingRun,
-			model.AutomationRunDispatched, model.AutomationRunRunning).
-		Updates(map[string]any{
-			"status":        string(model.AutomationRunCancelled),
-			"finished_at":   now,
-			"error_code":    "superseded",
-			"error_message": "PR 已推送新提交，本轮审查被新 SHA 取代",
-			"post_state":    string(model.AutomationPostStateNone),
-		})
+	res := scope(tx.Model(&model.AutomationRun{})).Updates(map[string]any{
+		"status":        string(model.AutomationRunCancelled),
+		"finished_at":   now,
+		"error_code":    "superseded",
+		"error_message": "PR 已推送新提交，本轮审查被新 SHA 取代",
+		"post_state":    string(model.AutomationPostStateNone),
+	})
 	if res.Error != nil {
 		return nil, res.Error
 	}

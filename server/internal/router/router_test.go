@@ -1089,8 +1089,9 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	notificationHandler := handler.NewNotificationHandler(notificationService)
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 	botHandler := handler.NewBotHandler(botService)
-	githubWebhookHandler := handler.NewGitHubWebhookHandler(nil, "", nil)
+	githubWebhookHandler := handler.NewGitHubWebhookHandler(nil, handler.StaticWebhookSecret(""), nil)
 	quotaHandler := handler.NewQuotaHandler(service.NewQuotaService(repository.NewQuotaAccountRepository(db), cfg, zap.NewNop(), nil))
+	integrationHandler := handler.NewIntegrationHandler(service.NewIntegrationService(repository.NewIntegrationRepository(db), cfg, zap.NewNop()))
 
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 
@@ -1098,7 +1099,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, integrationHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,

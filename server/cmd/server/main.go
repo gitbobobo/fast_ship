@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/config"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/handler"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -89,6 +88,7 @@ var autoMigrateModels = []interface{}{
 	&model.GitHubPRReview{},
 	&model.GitHubPRSeenSHA{},
 	&model.QuotaAccount{},
+	&model.Integration{},
 }
 
 func init() {
@@ -247,6 +247,7 @@ func main() {
 	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
 	quotaAccountRepo := repository.NewQuotaAccountRepository(db)
+	integrationRepo := repository.NewIntegrationRepository(db)
 
 	// 业务库就绪后再注入归属解析器：注入前的入库日志只能是启动类（显式 system_scope）。
 	selfLogPipeline.SetOwnerResolver(service.NewSelfLogOwnerResolver(db))
@@ -263,6 +264,9 @@ func main() {
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo, appLogger.With(slog.String("module", "api_key")))
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, githubLogger)
+	// 集成（INT-119）：用户级外部服务连接（当前 GitHub App），每个用户配置自己
+	// 的 App 身份，集中配置、保存即生效。
+	integrationService := service.NewIntegrationService(integrationRepo, cfg, githubLogger)
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
@@ -293,20 +297,25 @@ func main() {
 	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
 	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)
 
-	// GitHub App（INT-93）：真实安装令牌客户端或 debug 自测 fake；凭据缺失时
-	// PR 代发端点报错，webhook 端点因验签密钥为空一律 503。
-	var ghPR githubapi.GitHubClient
+	// GitHub App（INT-93/INT-119）：debug 自测 fake 仍完全走 config（恒返回 fake
+	// 的解析器）；其余一律经 githubapp.Clients 按运行所属用户现取生效配置（该
+	// 用户的数据库行 > config.yaml > 未配置），集成页保存后立即生效，无需重启。
+	// 未配置时 PR 代发端点报「GitHub App 未配置」，webhook 端点按 App ID 头定位
+	// 用户密钥（未知 App 401，密钥为空 503）。
+	var ghPR service.PRGitHubClients
 	var ghFake *githubapp.Fake
 	if cfg.GitHubApp.Fake && cfg.Server.Mode == "debug" {
 		ghFake = githubapp.NewFake()
-		ghPR = ghFake
+		ghPR = githubapp.StaticClients{Client: ghFake}
 		zapLogger.Info("GitHub App fake 模式（debug 自测）")
-	} else if cfg.GitHubApp.AppID != "" && cfg.GitHubApp.PrivateKeyPath != "" {
-		creds := &githubapp.AppCredentials{
-			AppID:          cfg.GitHubApp.AppID,
-			PrivateKeyPath: cfg.GitHubApp.PrivateKeyPath,
-		}
-		ghPR = githubapp.NewClient(githubapp.NewInstallationTokenStore(creds))
+	} else {
+		ghPR = githubapp.NewClients(func(ctx context.Context, userID string) (githubapp.RuntimeConfig, bool, error) {
+			appCfg, ok, err := integrationService.Current(ctx, userID)
+			if err != nil || !ok {
+				return githubapp.RuntimeConfig{}, false, err
+			}
+			return githubapp.RuntimeConfig{AppID: appCfg.AppID, PrivateKeyPEM: appCfg.PrivateKeyPEM}, true, nil
+		})
 	}
 	automationAgentService := service.NewAutomationAgentService(db, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, automationLogger)
 	automationAgentService.SetPRGitHub(ghPR)
@@ -359,8 +368,15 @@ func main() {
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 	botHandler := handler.NewBotHandler(botService)
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
-	githubWebhookHandler := handler.NewGitHubWebhookHandler(prReviewService, cfg.GitHubApp.WebhookSecret, ghFake)
+	// webhook 密钥来源：fake 自测路径完全走 config；其余每次请求按 App ID 头
+	// 现取（定位到用户行，行内为空仍 503，未知 App 401），集成页保存后立即生效。
+	var webhookSecrets handler.WebhookSecretSource = integrationService
+	if ghFake != nil {
+		webhookSecrets = handler.StaticWebhookSecret(cfg.GitHubApp.WebhookSecret)
+	}
+	githubWebhookHandler := handler.NewGitHubWebhookHandler(prReviewService, webhookSecrets, ghFake)
 	quotaHandler := handler.NewQuotaHandler(quotaService)
+	integrationHandler := handler.NewIntegrationHandler(integrationService)
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -438,7 +454,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, integrationHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。
@@ -506,6 +522,13 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	// AutoMigrate 按新主键 (trigger_id, repo, pr) 重建空表。
 	if err := dropLegacyPRDebounces(db); err != nil {
 		return fmt.Errorf("防抖账本重建失败: %w", err)
+	}
+
+	// PR 评审账身份升级（INT-119）：reviews/seen/debounces 的复合主键必须重建
+	// 进 app_user_id（debounces 的 automation_id 旧主键表已在上一步整表丢弃）。
+	// 必须先于 AutoMigrate——它只补列不改主键，重建放在它前面才能让新主键生效。
+	if err := migratePRReviewIdentity(db, logger); err != nil {
+		return fmt.Errorf("PR 评审身份迁移失败: %w", err)
 	}
 
 	// 自动迁移
@@ -601,6 +624,14 @@ func createBootIndexes(db *gorm.DB) {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
+
+	// 集成（INT-119）：(user_id, provider) 复合唯一索引（模型 tag 也会建，这里
+	// 幂等兜底）。
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_user_provider ON integrations(user_id, provider)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_integrations_app_id ON integrations(app_id)")
+	// App ID 全库唯一（INT-119）：webhook 验签候选逐行验签，同 provider 下的
+	// 重复 App ID 行会让创建顺序靠后者永远收不到投递；保存路径另有应用层 409。
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_provider_app_id ON integrations(provider, app_id)")
 }
 
 // selfLogMinLevel 把配置中的级别名转为 slog 级别；未知取值按 INFO。

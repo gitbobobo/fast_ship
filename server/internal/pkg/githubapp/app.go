@@ -33,62 +33,80 @@ const (
 	tokenExchangeTimeout = 30 * time.Second
 )
 
-// AppCredentials 进程内持有的 App 身份。私钥只从 PEM 文件读进内存，
-// 不进数据库、不进环境变量正文、不写日志。
+// AppCredentials 进程内持有的 App 身份。私钥来自 PEM 文件（config 来源）或
+// 直接持有的 PEM 字节（集成页保存的数据库来源，INT-119）；本体不进数据库
+// 明文列、不进环境变量正文、不写日志。
 type AppCredentials struct {
 	AppID          string
 	PrivateKeyPath string
-	APIBaseURL     string // 空取官方 https://api.github.com；测试注入 httptest 用
+	// PrivateKeyPEM 直接持有的私钥；非空时优先于 PrivateKeyPath。
+	PrivateKeyPEM []byte
+	APIBaseURL    string // 空取官方 https://api.github.com；测试注入 httptest 用
 
 	keyOnce sync.Once
 	key     *rsa.PrivateKey
 	keyErr  error
 }
 
-// loadKey 惰性读取并解析 PEM 私钥（PKCS#1 或 PKCS#8）。
+// ParsePrivateKeyPEM 解析 RSA 私钥 PEM（PKCS#1 或 PKCS#8）。
+func ParsePrivateKeyPEM(raw []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return nil, errors.New("githubapp: 私钥不是有效的 PEM")
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("githubapp: 解析私钥失败: %w", err)
+	}
+	rsaKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("githubapp: 私钥必须是 RSA")
+	}
+	return rsaKey, nil
+}
+
+// loadKey 惰性解析私钥：优先内存 PEM，其次文件。
 func (c *AppCredentials) loadKey() (*rsa.PrivateKey, error) {
 	c.keyOnce.Do(func() {
-		raw, err := os.ReadFile(c.PrivateKeyPath)
+		raw := c.PrivateKeyPEM
+		if len(raw) == 0 {
+			fromFile, err := os.ReadFile(c.PrivateKeyPath)
+			if err != nil {
+				c.keyErr = fmt.Errorf("githubapp: 读取私钥失败: %w", err)
+				return
+			}
+			raw = fromFile
+		}
+		key, err := ParsePrivateKeyPEM(raw)
 		if err != nil {
-			c.keyErr = fmt.Errorf("githubapp: 读取私钥失败: %w", err)
+			c.keyErr = err
 			return
 		}
-		block, _ := pem.Decode(raw)
-		if block == nil {
-			c.keyErr = errors.New("githubapp: 私钥文件不是有效的 PEM")
-			return
-		}
-		if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
-			c.key = key
-			return
-		}
-		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err != nil {
-			c.keyErr = fmt.Errorf("githubapp: 解析私钥失败: %w", err)
-			return
-		}
-		rsaKey, ok := key.(*rsa.PrivateKey)
-		if !ok {
-			c.keyErr = errors.New("githubapp: 私钥必须是 RSA")
-			return
-		}
-		c.key = rsaKey
+		c.key = key
 	})
 	return c.key, c.keyErr
 }
 
-// appJWT 签发一次性 App JWT（iss=AppID，约 9 分钟）。
+// signAppJWT 用 App 私钥签发一次性 JWT（iss=appID，约 9 分钟）。
+func signAppJWT(appID string, key *rsa.PrivateKey, now time.Time) (string, error) {
+	claims := jwt.RegisteredClaims{
+		Issuer:    appID,
+		IssuedAt:  jwt.NewNumericDate(now.Add(-tokenSkew)),
+		ExpiresAt: jwt.NewNumericDate(now.Add(appJWTTTL)),
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
+}
+
+// appJWT 签发一次性 App JWT。
 func (c *AppCredentials) appJWT(now time.Time) (string, error) {
 	key, err := c.loadKey()
 	if err != nil {
 		return "", err
 	}
-	claims := jwt.RegisteredClaims{
-		Issuer:    c.AppID,
-		IssuedAt:  jwt.NewNumericDate(now.Add(-tokenSkew)),
-		ExpiresAt: jwt.NewNumericDate(now.Add(appJWTTTL)),
-	}
-	return jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
+	return signAppJWT(c.AppID, key, now)
 }
 
 type cachedInstallToken struct {

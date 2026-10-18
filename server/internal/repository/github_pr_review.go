@@ -8,6 +8,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GitHub PR 自动评审（INT-93）支撑表的仓储。全部走调用方传入的 tx/db，
@@ -50,9 +51,20 @@ func NewGitHubPRDebounceRepository(db *gorm.DB) *GitHubPRDebounceRepository {
 }
 
 // UpsertTx 防抖行：一行只留最新 SHA，窗口内新推送重置 fire_at。
-// 全列覆盖写（PK 冲突时按 PK 更新），保证 fire_at/action/head_sha 同步推进。
+// 主键含验签身份，同一（触发器, 仓库, PR）的不同身份各占一行、互不覆盖；
+// 冲突按主键全列覆盖推进（fire_at/action/head_sha 同步前进）。显式 OnConflict
+// 而不是 Save：config 身份的 app_user_id 是空串（主键零值），Save 会把整行
+// 当「无主键」直接 INSERT，窗口内第二次推送就撞主键。
 func (r *GitHubPRDebounceRepository) UpsertTx(tx *gorm.DB, d *model.GitHubPRDebounce) error {
-	return tx.Save(d).Error
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "trigger_id"}, {Name: "repo_full_name"}, {Name: "pr_number"}, {Name: "app_user_id"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"user_id", "project_id", "installation_id", "action", "head_sha",
+			"pr_title", "pr_url", "base_ref", "head_ref", "fire_at", "updated_at",
+		}),
+	}).Create(d).Error
 }
 
 // ListDueTx 取到期待触发的防抖行。
@@ -63,17 +75,18 @@ func (r *GitHubPRDebounceRepository) ListDueTx(db *gorm.DB, now time.Time, limit
 }
 
 // DeleteTx 消费防抖行（到点开轮后删除；条件命中 0 行=已被并发消费）。
-// 键按触发器（INT-118）：同一自动化的不同触发器各有自己的防抖窗口。
-func (r *GitHubPRDebounceRepository) DeleteTx(tx *gorm.DB, triggerID, repoFullName string, prNumber int) error {
-	return tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ?",
-		triggerID, repoFullName, prNumber).Delete(&model.GitHubPRDebounce{}).Error
+// 键按（触发器, 验签身份）：同一自动化的不同触发器、同一仓库+PR 的不同身份
+// 各有自己的窗口，删除不得越界。
+func (r *GitHubPRDebounceRepository) DeleteTx(tx *gorm.DB, triggerID, repoFullName string, prNumber int, appUserID string) error {
+	return tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ? AND app_user_id = ?",
+		triggerID, repoFullName, prNumber, appUserID).Delete(&model.GitHubPRDebounce{}).Error
 }
 
-// DeleteStaleSHATx 丢掉该 PR 下旧 SHA 的防抖行（opened 规则的窗口不能在
-// synchronize 新 SHA 之后再开一轮）。
-func (r *GitHubPRDebounceRepository) DeleteStaleSHATx(tx *gorm.DB, repoFullName string, prNumber int, currentSHA string) error {
-	return tx.Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ?",
-		repoFullName, prNumber, currentSHA).Delete(&model.GitHubPRDebounce{}).Error
+// DeleteStaleSHATx 丢掉该身份下旧 SHA 的防抖行（opened 规则的窗口不能在
+// synchronize 新 SHA 之后再开一轮）。按验签身份分区：其他身份的窗口不受影响。
+func (r *GitHubPRDebounceRepository) DeleteStaleSHATx(tx *gorm.DB, repoFullName string, prNumber int, currentSHA, appUserID string) error {
+	return tx.Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ? AND app_user_id = ?",
+		repoFullName, prNumber, currentSHA, appUserID).Delete(&model.GitHubPRDebounce{}).Error
 }
 
 type GitHubPRReviewRepository struct {
@@ -84,12 +97,14 @@ func NewGitHubPRReviewRepository(db *gorm.DB) *GitHubPRReviewRepository {
 	return &GitHubPRReviewRepository{db: db}
 }
 
-// UpsertTx 每 PR 一行的同步账：推进轮次/SHA 并置 sync_pending（等待事务外同步）。
-// 已有 comment_id 必须保留——新一轮开轮时调用方不带评论 ID，Save 全列覆盖会把它清零，
-// 随后只能靠标记找回，标记失效就会再发一条顶层评论。
+// UpsertTx 每（PR，验签身份）一行的同步账：推进轮次/SHA 并置 sync_pending
+// （等待事务外同步）。已有 comment_id 必须保留——新一轮开轮时调用方不带评论
+// ID，Save 全列覆盖会把它清零，随后只能靠标记找回，标记失效就会再发一条顶层
+// 评论。
 func (r *GitHubPRReviewRepository) UpsertTx(tx *gorm.DB, rev *model.GitHubPRReview) error {
 	var existing model.GitHubPRReview
-	err := tx.Where("repo_full_name = ? AND pr_number = ?", rev.RepoFullName, rev.PRNumber).
+	err := tx.Where("repo_full_name = ? AND pr_number = ? AND app_user_id = ?",
+		rev.RepoFullName, rev.PRNumber, rev.AppUserID).
 		First(&existing).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		if rev.SyncEpoch == 0 {
@@ -100,15 +115,21 @@ func (r *GitHubPRReviewRepository) UpsertTx(tx *gorm.DB, rev *model.GitHubPRRevi
 	if err != nil {
 		return err
 	}
-	return tx.Model(&existing).Updates(map[string]any{
-		"installation_id": rev.InstallationID,
-		"round_number":    rev.RoundNumber,
-		"head_sha":        rev.HeadSHA,
-		"sync_pending":    true,
-		"sync_epoch":      existing.SyncEpoch + 1,
-		"sync_error":      "",
-		"updated_at":      rev.UpdatedAt,
-	}).Error
+	// 更新条件显式带全三列主键：经 &existing 走 GORM 主键条件时，空串身份
+	// （config）会被当作零值从条件里省掉，退化成按 (repo, pr) 更新所有身份行，
+	// config 开轮会污染用户行的 installation/SHA/轮次/同步状态。
+	return tx.Model(&model.GitHubPRReview{}).
+		Where("repo_full_name = ? AND pr_number = ? AND app_user_id = ?",
+			rev.RepoFullName, rev.PRNumber, rev.AppUserID).
+		Updates(map[string]any{
+			"installation_id": rev.InstallationID,
+			"round_number":    rev.RoundNumber,
+			"head_sha":        rev.HeadSHA,
+			"sync_pending":    true,
+			"sync_epoch":      existing.SyncEpoch + 1,
+			"sync_error":      "",
+			"updated_at":      rev.UpdatedAt,
+		}).Error
 }
 
 // ListPendingSyncTx 取待同步的 PR（调度循环事务外逐个同步评论/check）。
@@ -123,28 +144,17 @@ func (r *GitHubPRReviewRepository) ListPendingSyncTx(db *gorm.DB, limit int) ([]
 // 写 comment_id 也会碰 updated_at，会把清位条件打空。
 func (r *GitHubPRReviewRepository) ClearPendingSync(ctx context.Context, rev *model.GitHubPRReview, now time.Time) error {
 	return r.db.WithContext(ctx).Model(&model.GitHubPRReview{}).
-		Where("repo_full_name = ? AND pr_number = ? AND sync_epoch = ? AND sync_pending = ?",
-			rev.RepoFullName, rev.PRNumber, rev.SyncEpoch, true).
+		Where("repo_full_name = ? AND pr_number = ? AND app_user_id = ? AND sync_epoch = ? AND sync_pending = ?",
+			rev.RepoFullName, rev.PRNumber, rev.AppUserID, rev.SyncEpoch, true).
 		Updates(map[string]any{"sync_pending": false, "sync_error": "", "updated_at": now}).Error
 }
 
 // SetSyncError 同步失败记错误（下轮 tick 重试，不改运行终态）。同样只写本帧。
 func (r *GitHubPRReviewRepository) SetSyncError(ctx context.Context, rev *model.GitHubPRReview, syncErr string, now time.Time) error {
 	return r.db.WithContext(ctx).Model(&model.GitHubPRReview{}).
-		Where("repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-			rev.RepoFullName, rev.PRNumber, rev.SyncEpoch).
+		Where("repo_full_name = ? AND pr_number = ? AND app_user_id = ? AND sync_epoch = ?",
+			rev.RepoFullName, rev.PRNumber, rev.AppUserID, rev.SyncEpoch).
 		Updates(map[string]any{"sync_error": syncErr, "updated_at": now}).Error
-}
-
-// FindByRepoAndPR 读取单行。
-func (r *GitHubPRReviewRepository) FindByRepoAndPR(ctx context.Context, repoFullName string, prNumber int) (*model.GitHubPRReview, error) {
-	var rev model.GitHubPRReview
-	if err := r.db.WithContext(ctx).
-		Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).
-		First(&rev).Error; err != nil {
-		return nil, err
-	}
-	return &rev, nil
 }
 
 // SaveRunCheckRunIDTx 条件写回运行的 check_run_id（NULL 才写，避免覆盖并发写入）。
@@ -162,11 +172,13 @@ func (r *GitHubPRReviewRepository) ClearRunCheckRunIDTx(tx *gorm.DB, runID strin
 		Update("check_run_id", nil).Error
 }
 
-// RecordSeenSHATx 记下已受理的 head SHA；重复插入忽略。prUpdatedAt 是 payload
-// 里 pull_request.updated_at，用来拒绝比已受理 head 更旧的迟到 synchronize。
-func (r *GitHubPRReviewRepository) RecordSeenSHATx(tx *gorm.DB, repoFullName string, prNumber int, sha string, now time.Time, prUpdatedAt *time.Time) error {
+// RecordSeenSHATx 记下该身份已受理的 head SHA；重复插入忽略。prUpdatedAt 是
+// payload 里 pull_request.updated_at，用来拒绝比已受理 head 更旧的迟到
+// synchronize。已见账按验签身份分区（空串=config 全局身份）。
+func (r *GitHubPRReviewRepository) RecordSeenSHATx(tx *gorm.DB, repoFullName string, prNumber int, sha, appUserID string, now time.Time, prUpdatedAt *time.Time) error {
 	err := tx.Create(&model.GitHubPRSeenSHA{
-		RepoFullName: repoFullName, PRNumber: prNumber, HeadSHA: sha, SeenAt: now, PRUpdatedAt: prUpdatedAt,
+		RepoFullName: repoFullName, PRNumber: prNumber, HeadSHA: sha, AppUserID: appUserID,
+		SeenAt: now, PRUpdatedAt: prUpdatedAt,
 	}).Error
 	if isUniqueConstraintError(err) {
 		return nil

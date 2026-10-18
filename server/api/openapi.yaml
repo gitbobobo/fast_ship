@@ -65,6 +65,8 @@ tags:
     description: 内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位
   - name: quota
     description: 订阅套餐额度（INT-109）：粘贴凭据后服务端定时抓取各 AI 编码服务订阅额度并只读展示。管理端点仅 JWT；GET /api/quota/accounts 对 JWT 与 API Key 均开放（只读，机器人取数通道）
+  - name: integrations
+    description: 外部服务集成（INT-119，仅 JWT）：每个用户配置自己的外部服务连接。本期只有 GitHub App（App ID / 私钥 / webhook 密钥），保存后即时生效；密钥只写不读，响应只回「是否已配置」
 
 paths:
   /api/environments:
@@ -2176,6 +2178,119 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/integrations/github-app:
+    get:
+      tags: [integrations]
+      operationId: getGitHubAppIntegration
+      summary: 读取当前用户的 GitHub App 集成配置
+      description: |
+        按当前 JWT 用户读取的 GitHub App 配置，用户之间互不影响。响应不回显私钥与
+        webhook 密钥本体，只给「是否已配置」；不触发任何 GitHub 请求。
+        `source` 说明当前用户生效的来源：`database`=本人集成页保存的配置（优先），
+        `config`=config.yaml 的部署配置兜底（本人尚未保存时），`none`=未配置。
+        webhook 验签在全部身份候选（各用户的行 + config）中逐个比对签名定身份
+        （`X-GitHub-Hook-Installation-Target-ID` 头只作排序提示，不作定位依据）；
+        PR 评审回写使用该轮运行所属用户的 App 身份。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 当前用户生效的 GitHub App 配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubAppIntegration'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [integrations]
+      operationId: updateGitHubAppIntegration
+      summary: 保存当前用户的 GitHub App 集成配置
+      description: |
+        整组保存到当前用户名下（App ID + 私钥 + webhook 密钥），只影响本人；
+        写入后运行中的进程立即改用新配置，无需重启。
+        私钥与 webhook 密钥加密落库，不入日志。保存成功后同步做一次只读检测
+        （用 App JWT 调 `GET /app`）；检测失败或凭证无效仍然保存，响应中
+        `detection_status` 为 `failed` / `invalid`，HTTP 状态仍是 200。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGitHubAppIntegrationRequest'
+      responses:
+        '200':
+          description: 保存后的配置（含本次检测结果）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubAppIntegration'
+        '400':
+          description: App ID 缺失或非数字（40001）、私钥不是有效 RSA PEM（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/integrations/github-app/test:
+    post:
+      tags: [integrations]
+      operationId: testGitHubAppIntegration
+      summary: 测试当前用户的 GitHub App 连接
+      description: |
+        对当前用户生效的配置做一次只读检测：用 App 私钥签 JWT 调 `GET /app`。
+        不创建任何 GitHub 资源、不改配置，只刷新检测状态与说明；
+        `ok`=认证成功，`invalid`=GitHub 拒绝该 App 身份（401），
+        `failed`=网络/限流/GitHub 5xx（不是凭证无效）。
+        未配置时返回 40006。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 检测后的配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubAppIntegration'
+        '400':
+          description: 尚未配置 GitHub App（40006）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -6594,8 +6709,13 @@ paths:
       summary: 接收 GitHub App webhook（pull_request opened/synchronize）
       description: |
         公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256，webhook secret）验签。
-        secret 未配置时返回 503，不接受未签名请求。只处理 pull_request 的 opened/synchronize；
-        draft 与 fork 一律 202 忽略。仓库必须已和 Fast Ship 项目关联才会进入防抖/开轮。
+        集成（INT-119）是用户级配置：验签候选是全部身份（各用户的行 + config 兜底），
+        逐个比对签名并收集命中——恰好一个命中即该候选的用户身份，贯穿后续项目/规则匹配、
+        旧轮取消、防抖与评论/check 回写，不会跨用户生效；多个命中（多份身份配了相同的
+        webhook 密钥）返回 401「无法确定集成身份」。`X-GitHub-Hook-Installation-Target-ID`
+        头只作候选排序提示、不作定位依据（GitHub 文档未保证它等于 App ID）。只处理
+        pull_request 的 opened/synchronize；draft 与 fork 一律 202 忽略。
+        仓库必须已和该身份的 Fast Ship 项目关联才会进入防抖/开轮。
         同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且不再开轮）。
       security: []
       parameters:
@@ -6614,6 +6734,12 @@ paths:
           required: true
           schema:
             type: string
+        - name: X-GitHub-Hook-Installation-Target-ID
+          in: header
+          required: false
+          description: GitHub webhook 携带的目标资源 ID；只作候选排序提示（GitHub 未保证 App 级投递上等于 App ID），身份归属只认验签
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -6626,8 +6752,16 @@ paths:
           description: 已受理（含幂等重复、draft/fork、未关联仓库等忽略场景）
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 签名不匹配（40107）或多个身份命中同一签名（40107）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
         '503':
-          description: webhook secret 未配置
+          description: 候选全部没有 webhook secret（含无任何候选），拒绝接受请求
           content:
             application/json:
               schema:
@@ -8632,6 +8766,66 @@ components:
           type: string
         name:
           type: string
+
+    # ---- integrations（INT-119）----
+    GitHubAppIntegration:
+      type: object
+      required: [provider, configured, source, app_id, private_key_set, webhook_secret_set, webhook_url, detection_status, detection_detail, detected_at, updated_at]
+      properties:
+        provider:
+          type: string
+          enum: [github_app]
+        configured:
+          type: boolean
+          description: 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set
+        source:
+          type: string
+          enum: [database, config, none]
+          description: 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
+        app_id:
+          type: string
+          description: GitHub App ID（未配置时为空串）
+        private_key_set:
+          type: boolean
+          description: 私钥是否已配置（本体永不回显）
+        webhook_secret_set:
+          type: boolean
+          description: webhook 验签密钥是否已配置（本体永不回显）
+        webhook_url:
+          type: string
+          description: 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串
+        detection_status:
+          type: string
+          enum: [unchecked, ok, invalid, failed]
+          description: unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
+        detection_detail:
+          type: string
+          description: 给人看的补充说明（App 名称、失败原因等），不含任何密钥
+        detected_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 最近一次检测完成时间；未检测为 null
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 数据库配置最近保存时间；source 为 config/none 时为 null
+    UpdateGitHubAppIntegrationRequest:
+      type: object
+      required: [app_id]
+      properties:
+        app_id:
+          type: string
+          description: GitHub App ID（纯数字）
+        private_key_pem:
+          type: string
+          nullable: true
+          description: App 私钥 PEM（RSA）；省略或 null 表示保留已有私钥，首次配置必填
+        webhook_secret:
+          type: string
+          nullable: true
+          description: webhook 验签密钥；省略或 null 表示保留已有值，空串表示清空
 
     # ---- quota（INT-109）----
     QuotaCredentials:

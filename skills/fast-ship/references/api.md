@@ -8193,8 +8193,13 @@ kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一�
 接收 GitHub App webhook（pull_request opened/synchronize）
 
 公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256，webhook secret）验签。
-secret 未配置时返回 503，不接受未签名请求。只处理 pull_request 的 opened/synchronize；
-draft 与 fork 一律 202 忽略。仓库必须已和 Fast Ship 项目关联才会进入防抖/开轮。
+集成（INT-119）是用户级配置：验签候选是全部身份（各用户的行 + config 兜底），
+逐个比对签名并收集命中——恰好一个命中即该候选的用户身份，贯穿后续项目/规则匹配、
+旧轮取消、防抖与评论/check 回写，不会跨用户生效；多个命中（多份身份配了相同的
+webhook 密钥）返回 401「无法确定集成身份」。`X-GitHub-Hook-Installation-Target-ID`
+头只作候选排序提示、不作定位依据（GitHub 文档未保证它等于 App ID）。只处理
+pull_request 的 opened/synchronize；draft 与 fork 一律 202 忽略。
+仓库必须已和该身份的 Fast Ship 项目关联才会进入防抖/开轮。
 同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且不再开轮）。
 
 **鉴权**：公开
@@ -8206,6 +8211,7 @@ draft 与 fork 一律 202 忽略。仓库必须已和 Fast Ship 项目关联才�
 | `X-GitHub-Event` | string | 是 |  |
 | `X-GitHub-Delivery` | string | 是 |  |
 | `X-Hub-Signature-256` | string | 是 |  |
+| `X-GitHub-Hook-Installation-Target-ID` | string | 否 | GitHub webhook 携带的目标资源 ID；只作候选排序提示（GitHub 未保证 App 级投递上等于 App ID），身份归属只认验签 |
 
 **请求体**
 
@@ -8222,7 +8228,9 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | HTTP | 说明 |
 | --- | --- |
 | 400 | 请求参数无效（40001-40099） |
-| 503 | webhook secret 未配置 |
+| 401 | 签名不匹配（40107）或多个身份命中同一签名（40107） |
+| 500 | 服务器内部错误（50000） |
+| 503 | 候选全部没有 webhook secret（含无任何候选），拒绝接受请求 |
 
 ### GET `/api/automation-agent/pull-request`
 
@@ -10489,4 +10497,148 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 404 | 会话不存在、已过期或属于其他用户（40431） |
+| 500 | 服务器内部错误（50000） |
+
+## integrations
+
+外部服务集成（INT-119，仅 JWT）：每个用户配置自己的外部服务连接。本期只有 GitHub App（App ID / 私钥 / webhook 密钥），保存后即时生效；密钥只写不读，响应只回「是否已配置」
+
+### GET `/api/integrations/github-app`
+
+<!-- operationId: getGitHubAppIntegration -->
+
+读取当前用户的 GitHub App 集成配置
+
+按当前 JWT 用户读取的 GitHub App 配置，用户之间互不影响。响应不回显私钥与
+webhook 密钥本体，只给「是否已配置」；不触发任何 GitHub 请求。
+`source` 说明当前用户生效的来源：`database`=本人集成页保存的配置（优先），
+`config`=config.yaml 的部署配置兜底（本人尚未保存时），`none`=未配置。
+webhook 验签在全部身份候选（各用户的行 + config）中逐个比对签名定身份
+（`X-GitHub-Hook-Installation-Target-ID` 头只作排序提示，不作定位依据）；
+PR 评审回写使用该轮运行所属用户的 App 身份。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 当前用户生效的 GitHub App 配置
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string（enum: github_app） | 是 |  |
+| `configured` | boolean | 是 | 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set |
+| `source` | string（enum: database \| config \| none） | 是 | 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
+| `app_id` | string | 是 | GitHub App ID（未配置时为空串） |
+| `private_key_set` | boolean | 是 | 私钥是否已配置（本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） |
+| `detection_detail` | string | 是 | 给人看的补充说明（App 名称、失败原因等），不含任何密钥 |
+| `detected_at` | string（date-time，可空） | 是 | 最近一次检测完成时间；未检测为 null |
+| `updated_at` | string（date-time，可空） | 是 | 数据库配置最近保存时间；source 为 config/none 时为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/integrations/github-app`
+
+<!-- operationId: updateGitHubAppIntegration -->
+
+保存当前用户的 GitHub App 集成配置
+
+整组保存到当前用户名下（App ID + 私钥 + webhook 密钥），只影响本人；
+写入后运行中的进程立即改用新配置，无需重启。
+私钥与 webhook 密钥加密落库，不入日志。保存成功后同步做一次只读检测
+（用 App JWT 调 `GET /app`）；检测失败或凭证无效仍然保存，响应中
+`detection_status` 为 `failed` / `invalid`，HTTP 状态仍是 200。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `app_id` | string | 是 | GitHub App ID（纯数字） |
+| `private_key_pem` | string（可空） | 否 | App 私钥 PEM（RSA）；省略或 null 表示保留已有私钥，首次配置必填 |
+| `webhook_secret` | string（可空） | 否 | webhook 验签密钥；省略或 null 表示保留已有值，空串表示清空 |
+
+**成功响应**
+
+**200** 保存后的配置（含本次检测结果）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string（enum: github_app） | 是 |  |
+| `configured` | boolean | 是 | 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set |
+| `source` | string（enum: database \| config \| none） | 是 | 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
+| `app_id` | string | 是 | GitHub App ID（未配置时为空串） |
+| `private_key_set` | boolean | 是 | 私钥是否已配置（本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） |
+| `detection_detail` | string | 是 | 给人看的补充说明（App 名称、失败原因等），不含任何密钥 |
+| `detected_at` | string（date-time，可空） | 是 | 最近一次检测完成时间；未检测为 null |
+| `updated_at` | string（date-time，可空） | 是 | 数据库配置最近保存时间；source 为 config/none 时为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | App ID 缺失或非数字（40001）、私钥不是有效 RSA PEM（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/integrations/github-app/test`
+
+<!-- operationId: testGitHubAppIntegration -->
+
+测试当前用户的 GitHub App 连接
+
+对当前用户生效的配置做一次只读检测：用 App 私钥签 JWT 调 `GET /app`。
+不创建任何 GitHub 资源、不改配置，只刷新检测状态与说明；
+`ok`=认证成功，`invalid`=GitHub 拒绝该 App 身份（401），
+`failed`=网络/限流/GitHub 5xx（不是凭证无效）。
+未配置时返回 40006。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 检测后的配置
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string（enum: github_app） | 是 |  |
+| `configured` | boolean | 是 | 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set |
+| `source` | string（enum: database \| config \| none） | 是 | 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
+| `app_id` | string | 是 | GitHub App ID（未配置时为空串） |
+| `private_key_set` | boolean | 是 | 私钥是否已配置（本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） |
+| `detection_detail` | string | 是 | 给人看的补充说明（App 名称、失败原因等），不含任何密钥 |
+| `detected_at` | string（date-time，可空） | 是 | 最近一次检测完成时间；未检测为 null |
+| `updated_at` | string（date-time，可空） | 是 | 数据库配置最近保存时间；source 为 config/none 时为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 尚未配置 GitHub App（40006） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |

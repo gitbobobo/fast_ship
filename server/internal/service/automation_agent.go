@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -27,16 +26,17 @@ type AutomationAgentService struct {
 	sink    *NotificationSink
 	logger  *zap.Logger
 
-	// pr GitHub App 访问面（INT-93 PR 代发端点用）；未配置时 PR 端点报错。
-	pr githubapi.GitHubClient
+	// prFor PR 代发端点的 GitHub 访问面解析器（INT-93/INT-119）：按运行所属
+	// 用户取其 App 身份；nil 时 PR 端点报「GitHub App 未配置」。
+	prFor PRGitHubClients
 	// prReview 与取消/同步共用 per-PR 锁；可 nil（单测不注入时只做重读校验）。
 	prReview *PRReviewService
 	// kick 结束回报后踢调度循环提升排队（可 nil）。
 	kick func()
 }
 
-// SetPRGitHub 注入 GitHub App 访问面（真实客户端或测试 fake）。
-func (s *AutomationAgentService) SetPRGitHub(gh githubapi.GitHubClient) { s.pr = gh }
+// SetPRGitHub 注入按用户解析的 GitHub App 访问面（真实 resolver 或测试 fake 包装）。
+func (s *AutomationAgentService) SetPRGitHub(gh PRGitHubClients) { s.prFor = gh }
 
 // SetPRReview 绑定 PR 评审协调面，让 agent check 更新与取消/同步串行。
 func (s *AutomationAgentService) SetPRReview(pr *PRReviewService) { s.prReview = pr }
