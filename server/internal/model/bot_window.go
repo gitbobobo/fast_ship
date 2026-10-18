@@ -19,7 +19,11 @@ type BotModelWindow struct {
 	// Detail 记录探测方式（如 "GET /models"），供展示层标注口径。
 	Detail    string    `gorm:"type:text;not null;default:''" json:"detail"`
 	FetchedAt time.Time `gorm:"not null" json:"fetched_at"`
-	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
+	// FailedAt 记录最近一次探测失败的时间，只用于失败退避（成功行 10 分钟内
+	// 不重复同步探测）；不影响成功数据的新鲜度——24h TTL 仍看 FetchedAt。
+	// 成功探测写入时置 nil 清除退避；成功行保留窗口/输出/原始 fetched_at。
+	FailedAt  *time.Time `gorm:"type:timestamp" json:"failed_at,omitempty"`
+	UpdatedAt time.Time  `gorm:"not null" json:"updated_at"`
 }
 
 func (BotModelWindow) TableName() string {

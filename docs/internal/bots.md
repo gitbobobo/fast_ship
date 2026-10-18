@@ -232,6 +232,9 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   （`ON CONFLICT(base_url, model) DO UPDATE … WHERE context_window = 0`）：
   无行则插入，有行仅当当前是失败/空标记才覆盖——「失败不能覆盖成功」由
   数据库条件保证，并发下不存在先查再写的竞争窗口，有效成功行永不覆盖。
+  成功行也通过 `MarkProbeFailed` 记录失败退避时间（`failed_at`，只碰失败
+  时间、不动窗口/输出/`fetched_at`）：数据过期后探测失败时，10 分钟内不重复
+  同步探测，过期后允许重试；成功探测写入清除该时间。
 - **窗口新鲜度收敛到 `ensureModelWindow`**（run 循环里、算出输入估算之后、
   `inputBudgetFor` 之前调用）：缓存新鲜（按行类型取 TTL）→ 直接返回；缺失/
   过期且输入估算低于回退触发阈值 → 后台异步刷新、本轮不等网络；缺失/过期

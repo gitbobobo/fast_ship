@@ -326,7 +326,8 @@ func botRawMessageInt64(item map[string]json.RawMessage, names []string) int64 {
 }
 
 // persistModelWindow 把一份已探测的能力写入窗口缓存（单行）。测试 seeding 与
-// 全列表落缓存的 persistModelWindows 共用同一 upsert 语义。
+// 全列表落缓存的 persistModelWindows 共用同一 upsert 语义。成功行不带
+// FailedAt（nil → Upsert 写 NULL），既有失败退避随成功写入一并清除。
 func (s *BotService) persistModelWindow(baseURL, modelName string, cap *botModelCapability) error {
 	now := s.now()
 	return s.windows.Upsert(&model.BotModelWindow{
@@ -411,25 +412,35 @@ func (s *BotService) persistModelWindowFailure(baseURL, modelName string, cause 
 		Source:          "detect_failed",
 		Detail:          detail,
 		FetchedAt:       now,
+		FailedAt:        &now,
 		UpdatedAt:       now,
 	})
 }
 
-// recordModelWindowProbeFailure 记录一次探测失败。保护「成功缓存不被失败
-// 覆盖」由 UpsertFailure 的原子条件写（WHERE context_window = 0）在数据库层
-// 保证：有效成功行永不覆盖，并发下也不存在 check-then-write 竞争窗口；
-// 失败标记行则按新失败时间刷新（形如重试时间更新）。
+// recordModelWindowProbeFailure 记录一次探测失败，两条条件写在三种状态下互斥
+// 命中、组合正确且并发安全：
+//   - MarkProbeFailed 先行，命中有效成功行只记失败退避时间（窗口/输出/
+//     fetched_at 原样保留）——退避期内 ensureModelWindow 不再反复同步探测；
+//   - UpsertFailure（WHERE context_window = 0）随后：无行插入失败标记、失败
+//     行按新失败时间刷新，有效成功行保持原值（「失败不能覆盖成功」由数据库
+//     条件在数据库层保证，并发下不存在 check-then-write 竞争窗口）。
 func (s *BotService) recordModelWindowProbeFailure(baseURL, modelName string, cause error) {
-	if perr := s.persistModelWindowFailure(baseURL, modelName, cause); perr != nil {
+	normalized := botNormalizeBaseURL(baseURL)
+	if _, err := s.windows.MarkProbeFailed(normalized, modelName, s.now()); err != nil {
+		s.logger.Info("模型窗口失败退避时间写入失败",
+			zap.String("model", modelName), zap.Error(err))
+	}
+	if perr := s.persistModelWindowFailure(normalized, modelName, cause); perr != nil {
 		s.logger.Info("模型窗口失败标记写入失败",
 			zap.String("model", modelName), zap.Error(perr))
 	}
 }
 
 // refreshModelWindow 探测并持久化：成功时列表内全部模型（含配置的辅助模型）
-// 在同一事务落缓存；失败时经 recordModelWindowProbeFailure 处理（原子条件写，
-// 不覆盖已知成功缓存）。成功行的 24h TTL 与失败标记的短 TTL 都让
-// ensureModelWindow 在期内不再打网络。
+// 在同一事务落缓存（成功写清除既有失败退避）；失败时经
+// recordModelWindowProbeFailure 处理（成功行只记失败退避时间，失败标记行走
+// 原子条件写，不覆盖已知成功缓存）。成功行的 24h TTL、失败标记与成功行退避
+// 的短 TTL 都让 ensureModelWindow 在期内不再打网络。
 func (s *BotService) refreshModelWindow(ctx context.Context, baseURL, apiKey, modelName string) error {
 	det, err := s.detectModelWindows(ctx, baseURL, apiKey, modelName)
 	if err != nil {
@@ -463,7 +474,8 @@ func (s *BotService) refreshBotModelWindowAsync(botID string) {
 
 // ensureModelWindow 是「窗口新鲜度」的唯一入口：只有本轮确实要按窗口做压缩
 // 决策时才等网络。
-//   - 缓存行新鲜（成功行 24h、失败标记 10min）→ 直接返回，不打网络；
+//   - 缓存行新鲜（成功行 24h、失败标记 10min、成功行失败退避 10min）→ 直接
+//     返回，不打网络；
 //   - 缓存缺失/过期且输入估算低于回退触发阈值（本轮不依赖窗口）→ 后台异步
 //     刷新，立即返回；
 //   - 缓存缺失/过期且估算已达回退触发阈值（升级后的存量机器人正属此类：本轮
@@ -474,12 +486,18 @@ func (s *BotService) ensureModelWindow(bot *model.Bot, run *model.BotRun, apiKey
 	baseURL := botNormalizeBaseURL(runBaseURLOf(run, bot))
 	modelName := runModelOf(run, bot)
 	if row, err := s.windows.FindByAddrModel(baseURL, modelName); err == nil && row != nil {
-		ttl := botWindowFailedTTL
+		now := s.now()
 		if row.ContextWindow > 0 {
-			ttl = botWindowRefreshTTL
-		}
-		if s.now().Sub(row.FetchedAt) < ttl {
-			return
+			// 成功行先看失败退避：fetched_at 过期后探测失败过，退避期内不再
+			// 每个高上下文工具轮重复付 5s 同步探测；数据仍按 FetchedAt 供用。
+			if row.FailedAt != nil && now.Sub(*row.FailedAt) < botWindowFailedTTL {
+				return
+			}
+			if now.Sub(row.FetchedAt) < botWindowRefreshTTL {
+				return
+			}
+		} else if now.Sub(row.FetchedAt) < botWindowFailedTTL {
+			return // 失败行负缓存
 		}
 	}
 	// 回退（当前已解析）预算的触发阈值即「本轮会不会依赖窗口」的分界：低于

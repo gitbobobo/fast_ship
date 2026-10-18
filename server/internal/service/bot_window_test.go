@@ -337,6 +337,10 @@ func TestBotWindowProbeFailureKeepsSuccessfulCache(t *testing.T) {
 	if row == nil || row.ContextWindow != 1048576 || row.MaxOutputTokens != 262144 {
 		t.Fatalf("成功缓存不得被失败标记覆盖: %+v", row)
 	}
+	// 第五轮复审：成功行同时记下失败退避时间（数据原样，只动 failed_at）。
+	if row == nil || row.FailedAt == nil || time.Since(*row.FailedAt) > time.Minute {
+		t.Fatalf("成功行应记录失败退避时间: %+v", row)
+	}
 	if cap := env.bots.modelCapability(bot, "m1"); cap.Source != "detected" || cap.WindowTokens != 1048576 {
 		t.Fatalf("能力解析应仍用成功缓存: %+v", cap)
 	}
@@ -1327,6 +1331,103 @@ func TestBotWindowFailureMarkerShortTTL(t *testing.T) {
 	env.bots.ensureModelWindow(bot, run, "sk-window-4321", fallbackTrigger)
 	if h := ps.hitCount(); h != hits+1 {
 		t.Fatalf("负缓存过期后应允许重试: %d → %d", hits, h)
+	}
+}
+
+// ---------- 第五轮复审：成功行失败退避 ----------
+
+// TestBotEnsureModelWindowSuccessRowFailedBackoff（第五轮复审）：成功行
+// fetched_at 过期后探测失败，只记失败退避时间——退避期内高上下文工具轮不再
+// 反复付 5s 同步探测，成功数据原样供用；退避过期后允许重试，失败只刷新退避，
+// 成功探测刷新缓存并清除退避。
+func TestBotEnsureModelWindowSuccessRowFailedBackoff(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"m1","context_window":1048576,"max_output_tokens":262144}]}`)
+	userID := createBotTestUser(t, env.db, "winbackoff")
+	bot := createBotRowAt(t, env, userID, ps.URL(), "m1")
+	run := botFixtureRun(t, env, bot)
+
+	// 首探成功，再把行做成「数据过期 + 刚失败过」：fetched_at 25h 前、
+	// failed_at 1 分钟前。
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err != nil {
+		t.Fatalf("首探应成功: %v", err)
+	}
+	stale := time.Now().UTC().Add(-25 * time.Hour)
+	recentFail := time.Now().UTC().Add(-time.Minute)
+	if err := env.bots.windows.Upsert(&model.BotModelWindow{
+		ID: uuid.NewString(), BaseURL: botNormalizeBaseURL(ps.URL()), Model: "m1",
+		ContextWindow: 1048576, MaxOutputTokens: 262144,
+		Source: "detected", Detail: "GET /models",
+		FetchedAt: stale, FailedAt: &recentFail, UpdatedAt: stale,
+	}); err != nil {
+		t.Fatalf("seed stale row: %v", err)
+	}
+
+	// 估算已达触发阈值（会走同步探测的路径）：退避期内不打网络。
+	fallbackTrigger := botFloorRatio(env.bots.inputBudgetFor(bot, "m1"), env.cfg.Bots.Context.CompressionRatioV())
+	hits := ps.hitCount()
+	env.bots.ensureModelWindow(bot, run, "sk-window-4321", fallbackTrigger)
+	if h := ps.hitCount(); h != hits {
+		t.Fatalf("失败退避期内不应重复同步探测: %d → %d", hits, h)
+	}
+	// 成功数据原样：窗口/输出不变，能力解析仍用成功缓存。
+	row := findWindowRow(t, env, ps.URL(), "m1")
+	if row == nil || row.ContextWindow != 1048576 || row.MaxOutputTokens != 262144 {
+		t.Fatalf("退避不得破坏成功缓存: %+v", row)
+	}
+	if cap := env.bots.modelCapability(bot, "m1"); cap.Source != "detected" || cap.WindowTokens != 1048576 {
+		t.Fatalf("能力解析应仍用成功缓存: %+v", cap)
+	}
+
+	// 退避过期（11 分钟前）：允许重试；上游仍失败 → 只刷新退避时间，成功
+	// 数据（窗口/输出/fetched_at）保持原值。
+	oldFail := time.Now().UTC().Add(-botWindowFailedTTL - time.Minute)
+	if err := env.bots.windows.Upsert(&model.BotModelWindow{
+		ID: uuid.NewString(), BaseURL: botNormalizeBaseURL(ps.URL()), Model: "m1",
+		ContextWindow: 1048576, MaxOutputTokens: 262144,
+		Source: "detected", Detail: "GET /models",
+		FetchedAt: stale, FailedAt: &oldFail, UpdatedAt: stale,
+	}); err != nil {
+		t.Fatalf("re-seed expired backoff: %v", err)
+	}
+	ps.setModels(500, `{"error":"boom"}`)
+	env.bots.ensureModelWindow(bot, run, "sk-window-4321", fallbackTrigger)
+	if h := ps.hitCount(); h != hits+1 {
+		t.Fatalf("退避过期后应允许同步探测: %d → %d", hits, h)
+	}
+	row = findWindowRow(t, env, ps.URL(), "m1")
+	if row == nil || row.ContextWindow != 1048576 || row.MaxOutputTokens != 262144 ||
+		row.FetchedAt.Sub(stale).Abs() > time.Second {
+		t.Fatalf("失败探测不得动成功数据，只记退避: %+v", row)
+	}
+	if row == nil || row.FailedAt == nil || time.Since(*row.FailedAt) > botWindowFailedTTL {
+		t.Fatalf("失败探测应刷新退避时间: %+v", row)
+	}
+
+	// 上游恢复：把退避重新拨到过期（新退避本会正确拦住紧接的重试），再次
+	// 同步探测成功 → 缓存刷新，failed_at 清除（Upsert 写 NULL）。
+	ps.setModels(200, `{"data":[{"id":"m1","context_window":1048576,"max_output_tokens":262144}]}`)
+	if err := env.bots.windows.Upsert(&model.BotModelWindow{
+		ID: uuid.NewString(), BaseURL: botNormalizeBaseURL(ps.URL()), Model: "m1",
+		ContextWindow: 1048576, MaxOutputTokens: 262144,
+		Source: "detected", Detail: "GET /models",
+		FetchedAt: stale, FailedAt: &oldFail, UpdatedAt: stale,
+	}); err != nil {
+		t.Fatalf("re-seed expired backoff for success path: %v", err)
+	}
+	env.bots.ensureModelWindow(bot, run, "sk-window-4321", fallbackTrigger)
+	row = findWindowRow(t, env, ps.URL(), "m1")
+	if row == nil || row.FailedAt != nil {
+		t.Fatalf("成功探测应清除失败退避: failed_at=%+v", row)
+	}
+	if row.ContextWindow != 1048576 || row.MaxOutputTokens != 262144 || time.Since(row.FetchedAt) > time.Hour {
+		t.Fatalf("成功探测应刷新缓存: %+v", row)
+	}
+	// 新鲜缓存不再打网络。
+	hits = ps.hitCount()
+	env.bots.ensureModelWindow(bot, run, "sk-window-4321", fallbackTrigger)
+	if h := ps.hitCount(); h != hits {
+		t.Fatalf("成功缓存新鲜期内不应再探测: %d → %d", hits, h)
 	}
 }
 
