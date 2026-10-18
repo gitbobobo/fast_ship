@@ -27,20 +27,22 @@ import (
 // 条件 UPDATE（WHERE id + user_id），影响 0 行即视为已被并发删除，不复活记录、
 // 不用 Save/upsert 覆盖并发写入。ctx 取消（客户端断开/预算到点）后不落库。
 type T3EnvironmentService struct {
-	repo    *repository.T3EnvironmentRepository
-	cfg     *config.Config
-	logger  *zap.Logger
-	http    *t3HTTPClient
-	budgets t3RemoteBudgets
+	repo     *repository.T3EnvironmentRepository
+	cfg      *config.Config
+	logger   *zap.Logger
+	http     *t3HTTPClient
+	shellHub *t3ShellHub
+	budgets  t3RemoteBudgets
 }
 
-func NewT3EnvironmentService(repo *repository.T3EnvironmentRepository, cfg *config.Config, logger *zap.Logger) *T3EnvironmentService {
+func NewT3EnvironmentService(repo *repository.T3EnvironmentRepository, cfg *config.Config, logger *zap.Logger, shellHub *t3ShellHub) *T3EnvironmentService {
 	return &T3EnvironmentService{
-		repo:    repo,
-		cfg:     cfg,
-		logger:  logger,
-		http:    newT3HTTPClient(),
-		budgets: defaultT3RemoteBudgets(),
+		repo:     repo,
+		cfg:      cfg,
+		logger:   logger,
+		http:     newT3HTTPClient(),
+		shellHub: shellHub,
+		budgets:  defaultT3RemoteBudgets(),
 	}
 }
 
@@ -118,6 +120,9 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 		}
 		return nil, errs.ErrInternal
 	}
+	// 更新前的版本：重配成功后给 shellHub.Drop 做 floor 用（hub 对 floor 的
+	// 拒绝规则是「不晚于即拒」，floor 必须低于新版本的任何合法请求版本）。
+	preUpdateVersion := env.UpdatedAt
 
 	newName := env.Name
 	if req.Name != nil {
@@ -175,6 +180,10 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 			env.BearerTokenEncrypted = update.Pairing.BearerTokenEncrypted
 			env.BearerExpiresAt = update.Pairing.BearerExpiresAt
 			env.BearerScope = update.Pairing.BearerScope
+			// 凭证/地址已变：清掉旧订阅 trail（INT-116）。floor 用更新前的
+			// 版本：拿着旧版本读出的迟到 View 被拒（不会用旧凭证复活 entry），
+			// 携带新版本的正常请求（> floor）可以重建 entry。
+			s.shellHub.Drop(userID, id, preUpdateVersion)
 		}
 	}
 
@@ -201,7 +210,8 @@ func (s *T3EnvironmentService) updateRepoError(err error) error {
 // expires_in 自行过期。因此删除是本地删除，不向上游发起吊销
 // （见 docs/internal/threads.md 的安全章节）。
 func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) error {
-	if _, err := s.repo.FindByIDAndUserID(ctx, id, userID); err != nil {
+	env, err := s.repo.FindByIDAndUserID(ctx, id, userID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errs.ErrT3EnvironmentNotFound
 		}
@@ -213,6 +223,9 @@ func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) er
 	if err := s.repo.Delete(ctx, id, userID); err != nil {
 		return errs.ErrInternal
 	}
+	// 删除成功后清掉该环境的订阅 trail（INT-116）；floor 用删除前读出的版本，
+	// 迟到 View（拿着删除前的环境行）会被拒绝，不会复活 entry。
+	s.shellHub.Drop(userID, id, env.UpdatedAt)
 	return nil
 }
 

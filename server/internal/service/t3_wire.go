@@ -20,7 +20,8 @@ type t3ShellSnapshot struct {
 	ArchivedThreads  []t3ThreadShell  `json:"archivedThreads"` // 真实活跃快照恒为空；归档走独立 RPC
 }
 
-// t3ArchivedShellSnapshot 是 orchestration.getArchivedShellSnapshot 的返回形状：
+// t3ArchivedShellSnapshot 是归档面全量快照的形状（orchestration
+// .subscribeArchivedShell 首个流项的 snapshot 字段，INT-116 起由归档订阅维护）：
 // 归档线程在 threads 字段（不是活跃快照的 archivedThreads）。
 type t3ArchivedShellSnapshot struct {
 	SchemaVersion    int              `json:"schemaVersion"`

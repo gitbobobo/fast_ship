@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,6 +26,41 @@ import (
 )
 
 // INT-102 审查 r1 测试覆盖缺口：按 design.md 映射补齐行为断言。
+
+// fixtureRecorder 是 fake 模型服务 handler 与测试 goroutine 共享的捕获状态：
+// handler goroutine 写、测试 goroutine 读，统一加锁（此前是裸变量轮询，
+// -race 下必报 data race）。
+type fixtureRecorder struct {
+	mu     sync.Mutex
+	counts map[string]int
+	values map[string]string
+}
+
+func newFixtureRecorder() *fixtureRecorder {
+	return &fixtureRecorder{counts: map[string]int{}, values: map[string]string{}}
+}
+
+// hit 记一次某类请求；keyValue 成对写入捕获值（如 "auth"、auth / "body"、body）。
+func (r *fixtureRecorder) hit(kind string, keyValue ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counts[kind]++
+	for i := 0; i+1 < len(keyValue); i += 2 {
+		r.values[kind+"."+keyValue[i]] = keyValue[i+1]
+	}
+}
+
+func (r *fixtureRecorder) count(kind string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.counts[kind]
+}
+
+func (r *fixtureRecorder) value(kind, key string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.values[kind+"."+key]
+}
 
 func writeBotMemory(t *testing.T, env *botTestEnv, botID, path, content, key string) *model.BotMemoryFile {
 	t.Helper()
@@ -2035,8 +2071,7 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 	waitForBot(t, "persona next run", 10*time.Second, func() bool { return env.botSettled(bot.ID) })
 
 	holdC := make(chan struct{})
-	var archiveAuth, summaryAuth, mainAuth, mainBodyC string
-	var archiveHits, summaryHits, mainHits int
+	recC := newFixtureRecorder()
 	srvC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		s := string(body)
@@ -2049,8 +2084,7 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(s, "记忆归档器"):
-			archiveHits++
-			archiveAuth = auth
+			recC.hit("archive", "auth", auth)
 			select {
 			case <-holdC:
 			case <-r.Context().Done():
@@ -2058,15 +2092,12 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 			}
 			writeFakeChatSSE(w, `{"items":[]}`)
 		case strings.Contains(s, "上下文压缩器"):
-			summaryHits++
-			summaryAuth = auth
+			recC.hit("summary", "auth", auth)
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintf(w, "data: %s\n\n", `{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":""},"finish_reason":"length"}]}`)
 			fmt.Fprint(w, "data: [DONE]\n\n")
 		case strings.Contains(s, `"tools"`):
-			mainHits++
-			mainAuth = auth
-			mainBodyC = string(body)
+			recC.hit("main", "auth", auth, "body", string(body))
 			if strings.Contains(s, "UNIQUE_PERSONA_MARKER_COMPACT") {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -2102,10 +2133,10 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 		t.Fatalf("send compact freeze: %v", err)
 	}
 	deadline := time.Now().Add(15 * time.Second)
-	for archiveHits == 0 && time.Now().Before(deadline) {
+	for recC.count("archive") == 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if archiveHits == 0 {
+	if recC.count("archive") == 0 {
 		t.Fatalf("应进入归档请求")
 	}
 	markerC := "UNIQUE_PERSONA_MARKER_COMPACT"
@@ -2118,14 +2149,14 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 	}
 	close(holdC)
 	waitForBot(t, "persona compact fail", 20*time.Second, func() bool { return envC.botSettled(botC.ID) })
-	if summaryHits < 1 {
-		t.Fatalf("摘要请求应发生，实得 %d", summaryHits)
+	if recC.count("summary") < 1 {
+		t.Fatalf("摘要请求应发生，实得 %d", recC.count("summary"))
 	}
-	if strings.Contains(summaryAuth, "bad-replacement") || strings.Contains(archiveAuth, "bad-replacement") {
-		t.Fatalf("辅助请求必须使用冻结密钥 archive=%q summary=%q", archiveAuth, summaryAuth)
+	if strings.Contains(recC.value("summary", "auth"), "bad-replacement") || strings.Contains(recC.value("archive", "auth"), "bad-replacement") {
+		t.Fatalf("辅助请求必须使用冻结密钥 archive=%q summary=%q", recC.value("archive", "auth"), recC.value("summary", "auth"))
 	}
-	if mainHits != 1 {
-		t.Fatalf("压缩失败可继续时主线应恰好 1 次，实得 %d", mainHits)
+	if recC.count("main") != 1 {
+		t.Fatalf("压缩失败可继续时主线应恰好 1 次，实得 %d", recC.count("main"))
 	}
 	// 终态与人设/凭据泄漏的直证：假服务对泄漏正文返回 500，run 若终态不是
 	// completed 即说明泄漏漏过；捕获的主线正文与凭据也要逐一核对。
@@ -2134,11 +2165,11 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 	if runC.Status != model.BotRunStatusCompleted {
 		t.Fatalf("压缩失败可继续时 run 应完成，实得 %s err=%v", runC.Status, runC.ErrorMessage)
 	}
-	if strings.Contains(mainBodyC, markerC) {
+	if strings.Contains(recC.value("main", "body"), markerC) {
 		t.Fatalf("捕获的主线请求正文不得包含冻结后编辑的人设")
 	}
-	if strings.Contains(mainAuth, "bad-replacement") {
-		t.Fatalf("主线请求必须使用冻结密钥，实得 %q", mainAuth)
+	if strings.Contains(recC.value("main", "auth"), "bad-replacement") {
+		t.Fatalf("主线请求必须使用冻结密钥，实得 %q", recC.value("main", "auth"))
 	}
 	var mainReq model.BotModelRequest
 	envC.db.Where("run_id IN (SELECT id FROM bot_runs WHERE bot_id = ?)", botC.ID).First(&mainReq)
@@ -2152,8 +2183,7 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 
 	// 独立 no_gain 场景：摘要成功但不产生净缩减，冻结同样不得接收新人设。
 	holdD := make(chan struct{})
-	var mainBodyD, mainAuthD string
-	var archiveHitsD, summaryHitsD, mainHitsD int
+	recD := newFixtureRecorder()
 	srvD := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		s := string(body)
@@ -2166,7 +2196,7 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 		}
 		switch {
 		case strings.Contains(s, "记忆归档器"):
-			archiveHitsD++
+			recD.hit("archive")
 			select {
 			case <-holdD:
 			case <-r.Context().Done():
@@ -2174,13 +2204,11 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 			}
 			writeFakeChatSSE(w, `{"items":[]}`)
 		case strings.Contains(s, "上下文压缩器"):
-			summaryHitsD++
+			recD.hit("summary")
 			// 摘要比待总结段还长但仍在窗口内：after ≥ before，验收判无净缩减。
 			writeFakeChatSSE(w, strings.Repeat("冗长摘要没有净缩减。", 4400))
 		case strings.Contains(s, `"tools"`):
-			mainHitsD++
-			mainAuthD = auth
-			mainBodyD = string(body)
+			recD.hit("main", "auth", auth, "body", string(body))
 			if strings.Contains(s, "UNIQUE_PERSONA_MARKER_NOGAIN") {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)
@@ -2216,10 +2244,10 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 		t.Fatalf("send no_gain: %v", err)
 	}
 	deadlineD := time.Now().Add(15 * time.Second)
-	for archiveHitsD == 0 && time.Now().Before(deadlineD) {
+	for recD.count("archive") == 0 && time.Now().Before(deadlineD) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	if archiveHitsD == 0 {
+	if recD.count("archive") == 0 {
 		t.Fatalf("no_gain 场景应进入归档请求")
 	}
 	markerD := "UNIQUE_PERSONA_MARKER_NOGAIN"
@@ -2233,19 +2261,19 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 	if rowD3.Status != model.BotCompactionNoGain || rowD3.ErrorCode == nil || *rowD3.ErrorCode != "no_reduction" {
 		t.Fatalf("长摘要应落 no_gain/no_reduction 且可继续: %s %v", rowD3.Status, rowD3.ErrorCode)
 	}
-	if mainHitsD != 1 {
-		t.Fatalf("no_gain 可继续时主线应恰好 1 次，实得 %d", mainHitsD)
+	if recD.count("main") != 1 {
+		t.Fatalf("no_gain 可继续时主线应恰好 1 次，实得 %d", recD.count("main"))
 	}
 	var runD2 model.BotRun
 	envD.db.Where("bot_id = ?", botD.ID).Order("created_at DESC").First(&runD2)
 	if runD2.Status != model.BotRunStatusCompleted {
 		t.Fatalf("no_gain 时 run 应完成，实得 %s err=%v", runD2.Status, runD2.ErrorMessage)
 	}
-	if strings.Contains(mainBodyD, markerD) {
+	if strings.Contains(recD.value("main", "body"), markerD) {
 		t.Fatalf("no_gain 的主线正文不得包含冻结后编辑的人设")
 	}
-	if strings.Contains(mainAuthD, "bad-replacement") {
-		t.Fatalf("no_gain 的主线请求必须使用冻结密钥，实得 %q", mainAuthD)
+	if strings.Contains(recD.value("main", "auth"), "bad-replacement") {
+		t.Fatalf("no_gain 的主线请求必须使用冻结密钥，实得 %q", recD.value("main", "auth"))
 	}
 	var mainReqD model.BotModelRequest
 	envD.db.Where("run_id IN (SELECT id FROM bot_runs WHERE bot_id = ?)", botD.ID).First(&mainReqD)

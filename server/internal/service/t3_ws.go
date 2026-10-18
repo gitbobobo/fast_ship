@@ -263,6 +263,25 @@ func (s *t3RPCSession) readFrame(ctx context.Context) (*rpcFrame, error) {
 	return &frame, nil
 }
 
+// readFrameWithIdleTimeout 读下一帧，读超时固定为 idle（不受 ctx 预算钳制）。
+// 供长驻订阅的专用 reader 使用：x/net/websocket 的 Receive 一旦超时连接即不可
+// 续读，调用方必须把超时当作连接死亡去重连，不得重设 deadline 继续读。
+// 与 readFrame 的区别只在超时来源；ctx 取消仍靠 closeOnCancel 关连接解阻塞。
+func (s *t3RPCSession) readFrameWithIdleTimeout(idle time.Duration) (*rpcFrame, error) {
+	s.conn.SetReadDeadline(time.Now().Add(idle))
+
+	// x/net 的 Message 编解码只认 []byte/string，不能用 json.RawMessage 直接收。
+	var data []byte
+	if err := websocket.Message.Receive(s.conn, &data); err != nil {
+		return nil, fmt.Errorf("读取 RPC 帧失败: %w", err)
+	}
+	var frame rpcFrame
+	if err := json.Unmarshal(data, &frame); err != nil {
+		return nil, fmt.Errorf("RPC 帧解析失败: %w", err)
+	}
+	return &frame, nil
+}
+
 func (f *rpcFrame) isExitFor(id int) bool {
 	return f.Tag == "Exit" && f.requestIDMatches(id)
 }

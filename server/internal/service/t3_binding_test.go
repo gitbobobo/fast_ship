@@ -83,14 +83,16 @@ func setupT3BindingTest(t *testing.T) *t3BindingTestEnv {
 		},
 	}
 	envRepo := repository.NewT3EnvironmentRepository(db)
-	th := NewT3ThreadsService(envRepo, cfg, zap.NewNop())
-	// 测试预算：毫秒级，坏环境的隔离不需要真等秒级超时。
-	th.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 2 * time.Second, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second}
+	hub := NewT3ShellHub(zap.NewNop())
+	t.Cleanup(hub.Close)
+	th := NewT3ThreadsService(envRepo, cfg, zap.NewNop(), hub)
+	// 测试预算：秒级封顶，坏环境的隔离不需要真等默认预算。
+	th.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 2 * time.Second, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second, ShellFirstSync: 2 * time.Second}
 	repo := repository.NewProjectT3BindingRepository(db)
 	return &t3BindingTestEnv{
 		db:   db,
 		cfg:  cfg,
-		env:  NewT3EnvironmentService(envRepo, cfg, zap.NewNop()),
+		env:  NewT3EnvironmentService(envRepo, cfg, zap.NewNop(), hub),
 		bind: NewT3BindingService(th, repository.NewProjectRepository(db), repo),
 		repo: repo,
 		fake: fake,
@@ -113,13 +115,10 @@ func TestT3BindingDiscoverProjects(t *testing.T) {
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{
-			map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
-			map[string]any{"id": "p-2", "title": "Beta"},
-		},
-		[]any{},
-	)
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
+		map[string]any{"id": "p-2", "title": "Beta"},
+	}})
 	e.fake.mu.Unlock()
 	okEnvID := e.pairFakeEnv(t, ctx, userID, "健康机")
 	deadEnv := createT3TestEnv(t, e.db, userID, "坏机")
@@ -148,6 +147,13 @@ func TestT3BindingDiscoverProjects(t *testing.T) {
 	if okItem.Projects[1].WorkspaceRoot != nil {
 		t.Fatalf("expected omitted workspace_root for p-2, got: %#v", okItem.Projects[1])
 	}
+	// 项目发现零 shell 调用（INT-116）：订阅类 RPC 不出现。
+	for _, rpc := range e.fake.recordedRPC() {
+		switch rpc.method {
+		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
+			t.Fatalf("discovery must not subscribe shell, got %s", rpc.method)
+		}
+	}
 	// 单环境失败只标自己：status/error 承载原因，projects 恒为空数组。
 	deadItem := byEnv[deadEnv.ID]
 	if deadItem == nil || deadItem.Status != T3EnvironmentStatusUnreachable {
@@ -171,27 +177,30 @@ func TestT3BindingDiscoverProjectsEmpty(t *testing.T) {
 	}
 }
 
-func TestT3BindingDiscoverDegradedOnArchiveFailure(t *testing.T) {
+// 归档面失败与项目发现无关（INT-116：发现走 `/api/projects`，零 shell 调用）：
+// 项目 HTTP 成功即 ok，不再有「归档失败导致发现降级」的契约。
+func TestT3BindingDiscoverIndependentOfArchive(t *testing.T) {
 	e := setupT3BindingTest(t)
-	userID := createTestUser(t, e.db, "binding-discover-degraded").ID
+	userID := createTestUser(t, e.db, "binding-discover-archive").ID
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"}}, []any{})
-	e.fake.archiveFail = true
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
+	}})
+	e.fake.archiveFail = true // 归档订阅持续失败，也影响不到项目发现
 	e.fake.mu.Unlock()
-	e.pairFakeEnv(t, ctx, userID, "降级机")
+	e.pairFakeEnv(t, ctx, userID, "归档坏机")
 
 	items, err := e.bind.DiscoverProjects(ctx, userID)
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
-	if len(items) != 1 || items[0].Status != T3EnvironmentStatusDegraded {
-		t.Fatalf("expected degraded env item, got %#v", items)
+	if len(items) != 1 || items[0].Status != T3EnvironmentStatusOK {
+		t.Fatalf("project HTTP success must be ok regardless of archive, got %#v", items)
 	}
-	// 活跃面项目照常返回（G1：归档面失败不推翻活跃面）。
 	if len(items[0].Projects) != 1 || items[0].Projects[0].Id != "p-1" {
-		t.Fatalf("expected active projects served despite archive failure, got %#v", items[0].Projects)
+		t.Fatalf("expected projects from /api/projects, got %#v", items[0].Projects)
 	}
 }
 
@@ -202,13 +211,10 @@ func TestT3BindingUpsertListDeleteLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{
-			map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
-			map[string]any{"id": "p-2", "title": "Beta", "workspaceRoot": "/ws/beta"},
-		},
-		[]any{},
-	)
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
+		map[string]any{"id": "p-2", "title": "Beta", "workspaceRoot": "/ws/beta"},
+	}})
 	e.fake.mu.Unlock()
 	envID := e.pairFakeEnv(t, ctx, user.ID, "工作站")
 
@@ -286,13 +292,10 @@ func TestT3BindingUpsertValidation(t *testing.T) {
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{
-			map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
-			map[string]any{"id": "p-no-root", "title": "NoRoot"},
-		},
-		[]any{},
-	)
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
+		map[string]any{"id": "p-no-root", "title": "NoRoot"},
+	}})
 	e.fake.mu.Unlock()
 	envID := e.pairFakeEnv(t, ctx, user.ID, "工作站")
 	otherEnvID := e.pairFakeEnv(t, ctx, other.ID, "他人机")
@@ -328,31 +331,34 @@ func TestT3BindingUpsertValidation(t *testing.T) {
 	}
 }
 
-// 归档面失败时若项目不在活跃面，不能下「不存在」的结论（G1）→ 50202 而非 40401。
-func TestT3BindingUpsertArchiveFailure(t *testing.T) {
+// 绑定校验走 `/api/projects`：归档面失败与绑定无关；项目表就是完整事实，
+// 不存在即 40401（INT-116 起不再有「归档不可信不下结论」的灰区）。
+func TestT3BindingUpsertIndependentOfArchive(t *testing.T) {
 	e := setupT3BindingTest(t)
 	user := createTestUser(t, e.db, "binding-archive-user")
 	project := createTestProject(t, e.db, user.ID)
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"}}, []any{})
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
+	}})
 	e.fake.archiveFail = true
 	e.fake.mu.Unlock()
 	envID := e.pairFakeEnv(t, ctx, user.ID, "归档坏")
 
-	// 项目在活跃面：归档失败不阻断绑定。
+	// 归档订阅持续失败不阻断绑定。
 	if _, err := e.bind.Upsert(ctx, user.ID, project.ID, envID, "p-1"); err != nil {
-		t.Fatalf("expected upsert to succeed on active-hit despite archive failure: %v", err)
+		t.Fatalf("expected upsert to succeed regardless of archive failure: %v", err)
 	}
 	if err := e.bind.Delete(ctx, user.ID, project.ID, envID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 
-	// 项目不在活跃面：归档不可信 → 50202，不是 40401。
+	// 项目不在项目表：40401（不再是 50202）。
 	_, err := e.bind.Upsert(ctx, user.ID, project.ID, envID, "p-missing")
-	if code := t3ErrCode(err); code != 50202 {
-		t.Fatalf("expected 50202 for untrustworthy archive, got err %v (code %d)", err, code)
+	if code := t3ErrCode(err); code != 40401 {
+		t.Fatalf("expected 40401 for project absent from /api/projects, got err %v (code %d)", err, code)
 	}
 }
 
@@ -363,7 +369,9 @@ func TestT3BindingListProbeStatuses(t *testing.T) {
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"}}, []any{})
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
+	}})
 	e.fake.mu.Unlock()
 	okEnvID := e.pairFakeEnv(t, ctx, user.ID, "健康机")
 	deadEnv := createT3TestEnv(t, e.db, user.ID, "坏机")
@@ -426,7 +434,9 @@ func TestT3BindingCascade(t *testing.T) {
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture([]any{map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"}}, []any{})
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Alpha", "workspaceRoot": "/ws/alpha"},
+	}})
 	e.fake.mu.Unlock()
 	envID := e.pairFakeEnv(t, ctx, user.ID, "工作站")
 

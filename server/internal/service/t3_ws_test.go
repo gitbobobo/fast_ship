@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,8 +26,8 @@ type fakeT3WSServer struct {
 	projectionExit json.RawMessage // 一次性请求返回的 success value（可选）
 
 	gotRequests     []map[string]any
-	gotAcks         int
-	gotInterrupts   int
+	gotAcks         atomic.Int64 // handler goroutine 写、测试 goroutine 读，原子计数避免 data race
+	gotInterrupts   atomic.Int64
 	failWithError   map[string]any // 非空时对所有请求返回该 Fail 错误
 	refuseAuth      bool           // 握手时拒绝 Bearer
 	wrongProtocolOK bool           // true 时不校验 orchestrationProtocol query
@@ -113,9 +114,9 @@ func (f *fakeT3WSServer) handler() websocket.Handler {
 					_ = sendT3Frame(conn, exitSuccessFrame(id, f.projectionExit))
 				}
 			case "Ack":
-				f.gotAcks++
+				f.gotAcks.Add(1)
 			case "Interrupt":
-				f.gotInterrupts++
+				f.gotInterrupts.Add(1)
 			case "Eof", "Ping":
 			}
 		}
@@ -138,9 +139,9 @@ func (f *fakeT3WSServer) waitForAckOrInterrupt(conn *websocket.Conn) bool {
 		}
 		switch frame.Tag {
 		case "Ack":
-			f.gotAcks++
+			f.gotAcks.Add(1)
 		case "Interrupt":
-			f.gotInterrupts++
+			f.gotInterrupts.Add(1)
 			return true
 		}
 	}
@@ -254,14 +255,14 @@ func TestDialAndSubscribeShell_HappyPath(t *testing.T) {
 	}
 	// Ack/Interrupt 由服务端 goroutine 异步读取，轮询等待后再断言。
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && fake.gotInterrupts == 0 {
+	for time.Now().Before(deadline) && fake.gotInterrupts.Load() == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if fake.gotAcks < 1 {
-		t.Fatalf("expected at least one Ack, got %d", fake.gotAcks)
+	if fake.gotAcks.Load() < 1 {
+		t.Fatalf("expected at least one Ack, got %d", fake.gotAcks.Load())
 	}
-	if fake.gotInterrupts != 1 {
-		t.Fatalf("expected one Interrupt, got %d", fake.gotInterrupts)
+	if fake.gotInterrupts.Load() != 1 {
+		t.Fatalf("expected one Interrupt, got %d", fake.gotInterrupts.Load())
 	}
 }
 

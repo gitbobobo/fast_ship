@@ -199,6 +199,67 @@ func (c *t3HTTPClient) fetchThreadDetail(ctx context.Context, httpBaseURL, beare
 	}
 }
 
+// fetchProjectSnapshot 拉取项目全表（GET /api/projects，无需 orchestration
+// protocol 头，要求 orchestration:read；contracts environmentHttp.ts projects
+// group、project/http.ts snapshot handler）。返回 {projects:[Project], updatedAt}
+// 中的 Project 列表：过滤 deletedAt 非空的项（上游软删即下线），映射成 shell
+// 侧同构的 t3ProjectShell，供启动/绑定路径替代全量 shell 快照。
+//
+// 错误分类：401/403 → errT3CredentialRejected（凭证失效走 repair 引导重新配对）；
+// 404 一律按上游错误——该端点只在较新 T3 上存在，缺端点是版本不兼容而非
+// 「项目不存在」，绝不能映射成 errT3ThreadNotFound；其余状态码与解析失败都是
+// 上游错误。
+func (c *t3HTTPClient) fetchProjectSnapshot(ctx context.Context, httpBaseURL, bearerToken string) ([]t3ProjectShell, error) {
+	endpoint := strings.TrimSuffix(httpBaseURL, "/") + "/api/projects"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("构造项目快照请求失败: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+
+	respBody, status, err := c.doJSON(req)
+	if err != nil {
+		return nil, fmt.Errorf("项目快照请求失败: %w", err)
+	}
+	switch status {
+	case http.StatusOK:
+		var snapshot struct {
+			Projects []struct {
+				ID                    string            `json:"id"`
+				Title                 string            `json:"title"`
+				WorkspaceRoot         string            `json:"workspaceRoot"`
+				DefaultModelSelection *t3ModelSelection `json:"defaultModelSelection"`
+				DeletedAt             *string           `json:"deletedAt"`
+			} `json:"projects"`
+		}
+		if err := json.Unmarshal(respBody, &snapshot); err != nil {
+			return nil, fmt.Errorf("项目快照解析失败: %w", err)
+		}
+		projects := make([]t3ProjectShell, 0, len(snapshot.Projects))
+		for _, project := range snapshot.Projects {
+			if project.DeletedAt != nil {
+				continue
+			}
+			shell := t3ProjectShell{
+				ID:                    project.ID,
+				Title:                 project.Title,
+				DefaultModelSelection: project.DefaultModelSelection,
+			}
+			if project.WorkspaceRoot != "" {
+				root := project.WorkspaceRoot
+				shell.WorkspaceRoot = &root
+			}
+			projects = append(projects, shell)
+		}
+		return projects, nil
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return nil, errT3CredentialRejected
+	default:
+		// 404（端点缺失/版本不兼容）与其余状态码一样按上游错误处理。
+		return nil, fmt.Errorf("项目快照返回 HTTP %d: %s", status, t3ErrorMessage(respBody))
+	}
+}
+
 // doJSON 执行请求并读响应体。读到上限 +1 字节即明确拒绝——响应体被截断的
 // JSON 不能当成完整投影继续解析（截断点可能恰好还是合法 JSON）。
 func (c *t3HTTPClient) doJSON(req *http.Request) ([]byte, int, error) {

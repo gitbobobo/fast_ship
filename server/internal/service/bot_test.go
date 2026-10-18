@@ -235,7 +235,9 @@ func setupBotTestEnv(t *testing.T, turns ...fakeModelTurn) *botTestEnv {
 		repository.NewUserGitHubTokenRepository(base.db),
 		base.storage, base.cfg, zap.NewNop())
 	t3EnvRepo := repository.NewT3EnvironmentRepository(base.db)
-	t3Threads := NewT3ThreadsService(t3EnvRepo, base.cfg, zap.NewNop())
+	t3ShellHub := NewT3ShellHub(zap.NewNop())
+	t.Cleanup(t3ShellHub.Close)
+	t3Threads := NewT3ThreadsService(t3EnvRepo, base.cfg, zap.NewNop(), t3ShellHub)
 	t3Binding := NewT3BindingService(t3Threads, base.projectRepo, repository.NewProjectT3BindingRepository(base.db))
 	fake := newFakeModelServer(t, turns...)
 	bots := NewBotService(base.db, base.cfg, zap.NewNop(), projectService, base.issueService, t3Threads, t3Binding)
