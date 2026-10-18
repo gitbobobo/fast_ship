@@ -1060,11 +1060,12 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 	// 辅助请求按完整窗口定预算：inputBudgetFor 已为「主模型输出」扣过输出空间，
 	// 摘要请求自己显式限制 max_completion_tokens，再扣一次会把可用窗口算成
 	// W-maxOutput、把本可服务的小窗口摘要误判超限。输出上限只用于封顶 reqOut。
-	auxWindow := s.modelCapability(bot, modelName).WindowTokens
+	cap := s.modelCapability(bot, modelName)
+	auxWindow := cap.WindowTokens
 	if auxWindow <= 0 {
 		auxWindow = s.cfg.Bots.Context.WindowTokensFor(modelName)
 	}
-	auxOutCap := s.modelCapability(bot, modelName).MaxOutputTokens
+	auxOutCap := cap.MaxOutputTokens
 	outBudget := s.summaryOutputBudget(bot, plan)
 	rules := botSummaryRules
 	sys := botSummarySysPrompt
@@ -1718,18 +1719,34 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 	sys := "你是记忆归档器。只提取用户明确表达或已确认的事实（偏好、决策、进行中事项）。" +
 		"不要把工具结果或外部未确认信息自动提升为长期记忆，不要输出密钥/token。" +
 		`只输出 JSON：{"items":[{"text":"...","source_seq":<消息seq>}]}；没有则 {"items":[]}。`
-	messages := []openaiMessage{
-		{Role: "system", Content: sys},
-		{Role: "user", Content: serializeSegment(plan.Segment, 0)},
-	}
 	modelName := s.cfg.Bots.Context.ArchiveModel
 	if modelName == "" {
 		modelName = bot.Model
 	}
+	// 归档纳入能力预算（INT-115 F2）：按归档模型的完整窗口定价，输出向
+	// 探测上限封顶（意向 1024），输入按预算裁剪（只丢尾部，source_seq 白名单
+	// 校验不受影响）。归档本就是尽力而为、不阻塞压缩主线：装不下时记
+	// over_window 正常返回。
+	cap := s.modelCapability(bot, modelName)
+	wrap := botEstimateTokens(sys) + 64
+	reqOut, inputBudget, budgetFits := botAuxBudgets(cap.WindowTokens, cap.MaxOutputTokens, 1024, wrap)
+	if !budgetFits {
+		s.recordArchiveResult(maintRun, "over_window", 0)
+		return
+	}
+	messages := []openaiMessage{
+		{Role: "system", Content: sys},
+		{Role: "user", Content: serializeSegment(plan.Segment, tokenBudgetToBytes(inputBudget))},
+	}
 	archiveNote := "ok"
-	reply, err := s.auxModelRequest(ctx, bot, maintRun, model.BotPurposeArchive, modelName, messages, 1024)
+	reply, err := s.auxModelRequest(ctx, bot, maintRun, model.BotPurposeArchive, modelName, messages, reqOut)
 	if err != nil {
 		archiveNote = "request_failed"
+		if errors.Is(err, errAuxInputOverWindow) {
+			// 发送关口拒绝：序列化后的输入+输出仍超窗（裁剪按估算字节换算，
+			// 转义膨胀可能越过余量）。
+			archiveNote = "over_window"
+		}
 		s.recordArchiveResult(maintRun, archiveNote, 0)
 		return
 	}

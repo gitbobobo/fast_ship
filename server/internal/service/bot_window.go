@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // 模型上下文窗口能力（INT-115 需求一）：按「API 地址 + 模型名」自动探测并
@@ -59,10 +61,18 @@ func botNormalizeBaseURL(raw string) string {
 //  2. bot_model_windows 缓存行 ContextWindow > 0 → detected
 //  3. cfg.Bots.Context.WindowTokens（默认 32768）→ fallback
 //
-// MaxOutputTokens 只可能来自第 2 步；manual 不写输出上限。
+// manual 是字段级覆盖（INT-115 F4）：只覆盖窗口；已探测到的输出上限仍从
+// 缓存行读取——否则 inputBudgetFor 不再预留输出空间、辅助请求失去封顶。
+// 缓存无行或行内上限缺失（0）时输出上限为 0。detected 分支的窗口与输出
+// 上限都来自缓存行。
 func (s *BotService) capabilityFor(baseURL, modelName string) botModelCapability {
 	if w, ok := s.cfg.Bots.Context.ModelWindows[modelName]; ok && w > 0 {
-		return botModelCapability{WindowTokens: w, Source: "manual", Detail: "部署配置覆盖"}
+		cap := botModelCapability{WindowTokens: w, Source: "manual", Detail: "部署配置覆盖窗口"}
+		if row, err := s.windows.FindByAddrModel(botNormalizeBaseURL(baseURL), modelName); err == nil && row != nil && row.MaxOutputTokens > 0 {
+			cap.MaxOutputTokens = row.MaxOutputTokens
+			cap.Detail = "部署配置覆盖窗口；输出上限沿用探测缓存"
+		}
+		return cap
 	}
 	if row, err := s.windows.FindByAddrModel(botNormalizeBaseURL(baseURL), modelName); err == nil && row != nil && row.ContextWindow > 0 {
 		cap := botModelCapability{
@@ -116,9 +126,35 @@ var botDetectClient = &http.Client{Timeout: botWindowDetectTimeout}
 var errModelWindowUnknown = errors.New("模型元数据中未找到可用上下文窗口")
 
 // detectModelWindow 拉取当前 API 地址的模型元数据（GET {baseURL}/models，
-// Bearer 鉴权）。网络/解析失败返回 error，调用方按「不阻塞每轮对话」处理；
-// 找得到模型但缺失窗口字段时保持 0 并返回 errModelWindowUnknown。
+// Bearer 鉴权），返回目标模型的能力。网络/解析失败返回 error，调用方按
+// 「不阻塞每轮对话」处理；找得到模型但缺失窗口字段时保持 0 并返回
+// errModelWindowUnknown。
 func (s *BotService) detectModelWindow(ctx context.Context, baseURL, apiKey, modelName string) (*botModelCapability, error) {
+	det, err := s.detectModelWindows(ctx, baseURL, apiKey, modelName)
+	if err != nil {
+		return nil, err
+	}
+	return det.Target, nil
+}
+
+// botModelWindowEntry 是 /models 列表内的一个模型条目（模型名 + 元数据）。
+type botModelWindowEntry struct {
+	Model           string
+	ContextWindow   int64
+	MaxOutputTokens int64
+}
+
+// botModelDetection 是一次 /models 探测的完整解析结果：目标模型的能力 +
+// 列表内全部条目（辅助模型也落缓存，见 persistModelWindows）。
+type botModelDetection struct {
+	Target  *botModelCapability
+	Entries []botModelWindowEntry
+}
+
+// detectModelWindows 拉取并解析 /models 列表：Target 是请求模型的能力
+// （精确匹配优先，其次大小写不敏感；找不到或缺窗口字段时报错），Entries
+// 是列表内全部有名条目（含缺失字段的——落缓存前由调用方过滤）。
+func (s *BotService) detectModelWindows(ctx context.Context, baseURL, apiKey, modelName string) (*botModelDetection, error) {
 	baseURL = botNormalizeBaseURL(baseURL)
 	if baseURL == "" || modelName == "" {
 		return nil, errors.New("探测目标缺失：base_url 与 model 必填")
@@ -147,54 +183,66 @@ func (s *BotService) detectModelWindow(ctx context.Context, baseURL, apiKey, mod
 	if err != nil {
 		return nil, err
 	}
-	meta, err := botParseModelsPayload(body, modelName)
+	entries, err := botParseAllModelEntries(body)
 	if err != nil {
 		return nil, err
 	}
-	if meta.ContextWindow <= 0 {
+	picked, err := botPickModelEntry(entries, modelName)
+	if err != nil {
+		return nil, err
+	}
+	if picked.ContextWindow <= 0 {
 		return nil, errModelWindowUnknown
 	}
-	return &botModelCapability{
-		WindowTokens:    meta.ContextWindow,
-		MaxOutputTokens: meta.MaxOutputTokens,
-		Source:          "detected",
-		Detail:          "GET /models",
-		Detected:        true,
+	return &botModelDetection{
+		Target: &botModelCapability{
+			WindowTokens:    picked.ContextWindow,
+			MaxOutputTokens: picked.MaxOutputTokens,
+			Source:          "detected",
+			Detail:          "GET /models",
+			Detected:        true,
+		},
+		Entries: entries,
 	}, nil
 }
 
-// botModelWindowMeta 是从 /models 载荷里挑出的目标模型元数据。
-type botModelWindowMeta struct {
-	ContextWindow   int64
-	MaxOutputTokens int64
-}
-
-// botParseModelsPayload 宽容解析 /models 响应：顶层可以是 {"data":[...]}
-// （OpenAI/DeepSeek 约定）、{"models":[...]} 或裸数组；逐项取模型名
-// id/model/name，窗口与输出字段按候选顺序取第一个 >0 的值，数字或数字
-// 字符串都接受。找不到指定模型返回 error（精确匹配优先，其次大小写不敏感）。
-func botParseModelsPayload(body []byte, modelName string) (*botModelWindowMeta, error) {
+// botParseAllModelEntries 宽容解析 /models 响应为列表内全部条目：顶层可以
+// 是 {"data":[...]}（OpenAI/DeepSeek 约定）、{"models":[...]} 或裸数组；逐项
+// 取模型名 id/model/name，窗口与输出字段按候选顺序取第一个 >0 的值，数字或
+// 数字字符串都接受。无名条目跳过，缺失字段保持 0。
+func botParseAllModelEntries(body []byte) ([]botModelWindowEntry, error) {
 	items, err := botModelListItems(body)
 	if err != nil {
 		return nil, err
 	}
-	var ci *botModelWindowMeta
+	entries := make([]botModelWindowEntry, 0, len(items))
 	for _, item := range items {
 		name := botModelItemName(item)
 		if name == "" {
 			continue
 		}
-		if name != modelName {
-			if !strings.EqualFold(name, modelName) {
-				continue
-			}
-			if ci == nil {
-				ci = botModelItemMeta(item)
-			}
-			continue
+		meta := botModelItemMeta(item)
+		entries = append(entries, botModelWindowEntry{
+			Model:           name,
+			ContextWindow:   meta.ContextWindow,
+			MaxOutputTokens: meta.MaxOutputTokens,
+		})
+	}
+	return entries, nil
+}
+
+// botPickModelEntry 从列表里挑目标模型：精确匹配优先（首个命中即返回），
+// 其次大小写不敏感（首个命中兜底）。找不到返回 error。
+func botPickModelEntry(entries []botModelWindowEntry, modelName string) (*botModelWindowEntry, error) {
+	var ci *botModelWindowEntry
+	for i := range entries {
+		e := &entries[i]
+		if e.Model == modelName {
+			return e, nil
 		}
-		// 精确匹配优先：命中即返回，不再看大小写变体。
-		return botModelItemMeta(item), nil
+		if ci == nil && strings.EqualFold(e.Model, modelName) {
+			ci = e
+		}
 	}
 	if ci != nil {
 		return ci, nil
@@ -247,8 +295,8 @@ var (
 )
 
 // botModelItemMeta 按候选字段名提取窗口与输出上限。
-func botModelItemMeta(item map[string]json.RawMessage) *botModelWindowMeta {
-	return &botModelWindowMeta{
+func botModelItemMeta(item map[string]json.RawMessage) botModelWindowEntry {
+	return botModelWindowEntry{
 		ContextWindow:   botRawMessageInt64(item, botContextFieldNames),
 		MaxOutputTokens: botRawMessageInt64(item, botOutputFieldNames),
 	}
@@ -277,9 +325,8 @@ func botRawMessageInt64(item map[string]json.RawMessage, names []string) int64 {
 	return 0
 }
 
-// persistModelWindow 把一份已探测的能力写入窗口缓存。TestConnection 与
-// refreshModelWindow 共用同一入口，保证「响应里的结果」与「缓存里的结果」
-// 同源，不再出现二次探测或两者不一致。
+// persistModelWindow 把一份已探测的能力写入窗口缓存（单行）。测试 seeding 与
+// 全列表落缓存的 persistModelWindows 共用同一 upsert 语义。
 func (s *BotService) persistModelWindow(baseURL, modelName string, cap *botModelCapability) error {
 	now := s.now()
 	return s.windows.Upsert(&model.BotModelWindow{
@@ -292,6 +339,40 @@ func (s *BotService) persistModelWindow(baseURL, modelName string, cap *botModel
 		Detail:          cap.Detail,
 		FetchedAt:       now,
 		UpdatedAt:       now,
+	})
+}
+
+// persistModelWindows 把一次 /models 探测得到的列表写入窗口缓存（INT-115
+// F6）：同一事务逐行 upsert，地址相同、模型名各自——SummaryModel/
+// ArchiveModel/NightlyModel 配置成列表内的其他模型时同样能命中探测缓存拿到
+// 输出上限，而不是永远走 fallback。只落 ContextWindow > 0 的条目：缺失/空
+// 字段的条目不得落成 0 行参与预算（失败负缓存只经
+// recordModelWindowProbeFailure 走目标模型）。
+func (s *BotService) persistModelWindows(baseURL string, entries []botModelWindowEntry) error {
+	now := s.now()
+	normalized := botNormalizeBaseURL(baseURL)
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		repo := repository.NewBotWindowRepository(tx)
+		for _, e := range entries {
+			if e.Model == "" || e.ContextWindow <= 0 {
+				continue
+			}
+			row := &model.BotModelWindow{
+				ID:              uuid.NewString(),
+				BaseURL:         normalized,
+				Model:           e.Model,
+				ContextWindow:   e.ContextWindow,
+				MaxOutputTokens: e.MaxOutputTokens,
+				Source:          "detected",
+				Detail:          "GET /models",
+				FetchedAt:       now,
+				UpdatedAt:       now,
+			}
+			if err := repo.Upsert(row); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -308,7 +389,7 @@ func (s *BotService) persistModelWindowFailure(baseURL, modelName string, cause 
 		}
 	}
 	now := s.now()
-	return s.windows.Upsert(&model.BotModelWindow{
+	return s.windows.UpsertFailure(&model.BotModelWindow{
 		ID:              uuid.NewString(),
 		BaseURL:         botNormalizeBaseURL(baseURL),
 		Model:           modelName,
@@ -321,31 +402,28 @@ func (s *BotService) persistModelWindowFailure(baseURL, modelName string, cause 
 	})
 }
 
-// recordModelWindowProbeFailure 记录一次探测失败：地址+模型共享一条缓存，
-// 已有有效窗口（ContextWindow>0）时保留原条目（一次瞬时失败或一个用错密钥的
-// 机器人不得把同上游所有机器人降到回退预算），只在没有可用窗口时才落短 TTL
-// 负缓存标记，让「本来就不返回窗口字段」的上游不再每轮白探。
+// recordModelWindowProbeFailure 记录一次探测失败。保护「成功缓存不被失败
+// 覆盖」由 UpsertFailure 的原子条件写（WHERE context_window = 0）在数据库层
+// 保证：有效成功行永不覆盖，并发下也不存在 check-then-write 竞争窗口；
+// 失败标记行则按新失败时间刷新（形如重试时间更新）。
 func (s *BotService) recordModelWindowProbeFailure(baseURL, modelName string, cause error) {
-	if existing, ferr := s.windows.FindByAddrModel(botNormalizeBaseURL(baseURL), modelName); ferr == nil &&
-		existing != nil && existing.ContextWindow > 0 {
-		return
-	}
 	if perr := s.persistModelWindowFailure(baseURL, modelName, cause); perr != nil {
 		s.logger.Info("模型窗口失败标记写入失败",
 			zap.String("model", modelName), zap.Error(perr))
 	}
 }
 
-// refreshModelWindow 探测并持久化：成功写结果行；失败时经
-// recordModelWindowProbeFailure 处理（不覆盖已知成功缓存）。成功行的 24h TTL
-// 与失败标记的短 TTL 都让 ensureModelWindow 在期内不再打网络。
+// refreshModelWindow 探测并持久化：成功时列表内全部模型（含配置的辅助模型）
+// 在同一事务落缓存；失败时经 recordModelWindowProbeFailure 处理（原子条件写，
+// 不覆盖已知成功缓存）。成功行的 24h TTL 与失败标记的短 TTL 都让
+// ensureModelWindow 在期内不再打网络。
 func (s *BotService) refreshModelWindow(ctx context.Context, baseURL, apiKey, modelName string) error {
-	cap, err := s.detectModelWindow(ctx, baseURL, apiKey, modelName)
+	det, err := s.detectModelWindows(ctx, baseURL, apiKey, modelName)
 	if err != nil {
 		s.recordModelWindowProbeFailure(baseURL, modelName, err)
 		return err
 	}
-	return s.persistModelWindow(baseURL, modelName, cap)
+	return s.persistModelWindows(baseURL, det.Entries)
 }
 
 // refreshBotModelWindowAsync 后台探测并缓存该机器人当前模型的窗口元数据。

@@ -185,7 +185,11 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   及其工具回复块（取更早起点）；另保护所有未被主模型消费的输入。切点按
   (request_id, provider_tool_call_id) 配对，不得把调用-结果块切散。
 - **静默归档**：每轮压缩前把本轮要点追加进当日 daily 笔记（段落哈希 +
-  ≥128 字符条目 shingle 相似度去重），失败不阻塞压缩。
+  ≥128 字符条目 shingle 相似度去重），失败不阻塞压缩。归档按归档模型
+  （`ArchiveModel`，空则主模型）的能力预算执行：输出意向 1024 向探测上限
+  封顶，输入按「窗口−包装−输出」的预算裁剪（只丢尾部，`source_seq` 白名单
+  校验不受影响）；装不下时记 `over_window` 正常返回——归档尽力而为，
+  不阻塞压缩主线。
 - **记账**：压缩、归档、夜间整理各走 `bot_maintenance_runs` +
   `bot_maintenance_requests` 独立账本；不伪造主线 usage。
 
@@ -197,12 +201,17 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 
 - **窗口能力解析**（`bot_window.go`）：解析顺序 manual（部署
   `model_windows` 覆盖）> detected（`bot_model_windows` 缓存，来自
-  `GET {base_url}/models` 探测）> fallback（默认窗口）。`inputBudgetFor`
-  在窗口之上再扣输出空间（maxOutput≤0 或 ≥window 时不保留）；压缩触发、
-  摘要、归档、夜间整理统一走它。缺失字段保持 0，绝不当成 0 上限参与预算；
-  `context_source` 如实区分 manual/detected/fallback，展示层不得把回退值
-  说成已检测。缓存键的地址做 TrimSpace + 去尾部 `/` 规范化，同名模型在不同
-  服务之间不串用。
+  `GET {base_url}/models` 探测）> fallback（默认窗口）。manual 是字段级
+  覆盖：只覆盖窗口，已探测到的输出上限仍从缓存行读取（缓存无行或行内缺失
+  则为 0）——否则输入预算不再预留输出空间、辅助请求失去封顶。
+  `inputBudgetFor` 在窗口之上再扣输出空间（maxOutput≤0 或 ≥window 时不
+  保留），只用于**主模型**的压缩触发与计划；摘要、归档、夜间整理按**完整
+  窗口**定价（`botAuxBudgets`）并各自封顶输出，且 `auxModelRequest` 在发送
+  边界做最终约束：输出 ≤ 探测上限、序列化输入+输出 ≤ 窗口（窗口已知时），
+  违反即干净失败、不发注定非法的请求——即使调用方漏算也不出网。缺失字段
+  保持 0，绝不当成 0 上限参与预算；`context_source` 如实区分
+  manual/detected/fallback，展示层不得把回退值说成已检测。缓存键的地址做
+  TrimSpace + 去尾部 `/` 规范化，同名模型在不同服务之间不串用。
 - **探测**：独立 `http.Client`，10s 超时，Bearer 鉴权；响应宽容解析——顶层
   `{"data":[...]}`（OpenAI/DeepSeek 约定）、`{"models":[...]}` 或裸数组，
   模型名取 id/model/name，窗口字段按 context_window/context_length/
@@ -210,12 +219,19 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   max_completion_tokens/max_tokens/output_token_limit 顺序取第一个 >0 的值
   （数字或数字字符串都接受）；精确匹配优先，其次大小写不敏感。探测失败不
   阻塞每轮对话，只写日志并落一行短 TTL 失败标记（见下）。探测与持久化拆成
-  `detectModelWindow` + `persistModelWindow` 两步：`TestConnection` 探测一次
-  后持久化同一份结果（响应与缓存同源，不做第二次 /models 请求）。
+  `detectModelWindow` + `persistModelWindows` 两步：`TestConnection` 探测一次
+  后持久化同一份结果（响应与缓存同源，不做第二次 /models 请求）；持久化按
+  列表落**全部模型**——同一事务为列表内每个 `ContextWindow>0` 的条目 upsert
+  一行（地址相同、模型名各自），配置成列表内其他模型的 SummaryModel/
+  ArchiveModel/NightlyModel 同样能命中缓存拿到输出上限，缺失/空字段的条目
+  不落 0 行。
 - **失败负缓存**：探测失败（上游不提供窗口字段、网络失败、模型不在列表）也
   落一行 `ContextWindow=0` 的 `detect_failed` 标记（解析层只认 >0，天然跳
   过），TTL 10 分钟——对「本来就不返回窗口字段」的上游不再每轮白探，过期后
-  允许重试。成功行 TTL 24 小时。
+  允许重试。成功行 TTL 24 小时。失败标记走 `UpsertFailure` 原子条件写
+  （`ON CONFLICT(base_url, model) DO UPDATE … WHERE context_window = 0`）：
+  无行则插入，有行仅当当前是失败/空标记才覆盖——「失败不能覆盖成功」由
+  数据库条件保证，并发下不存在先查再写的竞争窗口，有效成功行永不覆盖。
 - **窗口新鲜度收敛到 `ensureModelWindow`**（run 循环里、算出输入估算之后、
   `inputBudgetFor` 之前调用）：缓存新鲜（按行类型取 TTL）→ 直接返回；缺失/
   过期且输入估算低于回退触发阈值 → 后台异步刷新、本轮不等网络；缺失/过期
@@ -271,7 +287,9 @@ LIKE；搜索按 `bot_id` 隔离。
 触发，`trigger_key = nightly:<当地日期>` 唯一挡重复，用可配的更便宜模型
 合并 daily 笔记到 USER.md / MEMORY.md。输出必须是完整 JSON（含正文与来源
 path+version）；只有 sources 无正文、截断或 `{}` 不算成功，不把 daily 标
-为已消费。超窗时按完整辅助请求预算（含 4096 输出、当前常驻正文与每文件
+为已消费。超窗时按完整辅助请求预算（`botAuxBudgets`：输出意向 4096 先向
+窗口余量、再向探测上限封顶，低于 JSON 契约下限 256 或包装自身超窗即按
+`over_window` 干净失败；输入预算 = 窗口−包装−输出，含当前常驻正文与每文件
 标题行）逐批动态分批，单文件按 UTF-8 字节分片并保持字符完整，逐批校验
 本批来源/版本，且本批输入的每个来源都必须被本批声明处理（同一 daily 的
 分片跨批时须逐片覆盖，全部处理完才消费该版本）。

@@ -1506,3 +1506,306 @@ func TestBotChatSnapshotMetricsWithoutRequest(t *testing.T) {
 		t.Fatalf("窗口能力应来自已探测缓存: %+v", snap.Metrics)
 	}
 }
+
+// ---------- F1：auxModelRequest 发送关口 ----------
+
+// seedMaintRun 直接落一行维护运行（无触发键语义），供 auxModelRequest 记账。
+func seedMaintRun(t *testing.T, env *botTestEnv, botID string) *model.BotMaintenanceRun {
+	t.Helper()
+	now := time.Now().UTC()
+	run := &model.BotMaintenanceRun{
+		ID: uuid.NewString(), BotID: botID, Kind: model.BotMaintenanceNightly,
+		TriggerKey: "aux-gate-" + uuid.NewString()[:8], Status: model.BotMaintenanceRunning,
+		ConfigSnapshotJSON: "{}", InputSnapshotJSON: "{}", ResultJSON: "{}",
+		CreatedAt: now, StartedAt: &now,
+	}
+	if err := repository.NewBotMaintenanceRepository(env.db).CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed maint run: %v", err)
+	}
+	return run
+}
+
+// TestAuxModelRequestCapsOutputToDetectedLimit（F1）：即使调用方给超大 maxOut，
+// 实际发出的 max_completion_tokens 也被探测上限封顶。
+func TestAuxModelRequestCapsOutputToDetectedLimit(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok"})
+	userID := createBotTestUser(t, env.db, "auxcap")
+	bot := createBotRowAt(t, env, userID, env.fake.URL(), "fake-model")
+	if err := env.bots.persistModelWindow(env.fake.URL(), "fake-model", &botModelCapability{
+		WindowTokens: 65536, MaxOutputTokens: 512, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+	maintRun := seedMaintRun(t, env, bot.ID)
+
+	if _, err := env.bots.auxModelRequest(context.Background(), bot, maintRun,
+		model.BotPurposeSummary, "fake-model",
+		[]openaiMessage{{Role: "user", Content: "hi"}}, 100000); err != nil {
+		t.Fatalf("封顶后应能发出请求: %v", err)
+	}
+	req := env.fake.nextRequest(t, 5*time.Second)
+	var payload struct {
+		MaxCompletionTokens int64 `json:"max_completion_tokens"`
+	}
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("解析请求: %v", err)
+	}
+	if payload.MaxCompletionTokens != 512 {
+		t.Fatalf("max_completion_tokens 应封顶到探测上限 512，实得 %d", payload.MaxCompletionTokens)
+	}
+}
+
+// TestAuxModelRequestRejectsOverWindowInput（F1）：输入+输出超窗时干净失败——
+// 不建维护账本行、更没有请求出网。
+func TestAuxModelRequestRejectsOverWindowInput(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "auxover")
+	bot := createBotRowAt(t, env, userID, env.fake.URL(), "fake-model")
+	if err := env.bots.persistModelWindow(env.fake.URL(), "fake-model", &botModelCapability{
+		WindowTokens: 512, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+	maintRun := seedMaintRun(t, env, bot.ID)
+
+	// 超窗输入 + 超大 maxOut 同时给：关口都必须拦下。
+	big := strings.Repeat("很长的输入。", 4000)
+	_, err := env.bots.auxModelRequest(context.Background(), bot, maintRun,
+		model.BotPurposeSummary, "fake-model",
+		[]openaiMessage{{Role: "user", Content: big}}, 100000)
+	if err == nil || !errors.Is(err, errAuxInputOverWindow) {
+		t.Fatalf("超窗输入应被发送关口拒绝: %v", err)
+	}
+	var n int64
+	env.db.Model(&model.BotMaintenanceRequest{}).Where("maintenance_run_id = ?", maintRun.ID).Count(&n)
+	if n != 0 {
+		t.Fatalf("被拒请求不得进维护账本: %d", n)
+	}
+	select {
+	case r := <-env.fake.requests:
+		t.Fatalf("超窗请求不得出网: %s", truncateRunes(string(r.Body), 200))
+	default:
+	}
+}
+
+// ---------- F2：静默归档纳入能力预算 ----------
+
+// TestSilentArchiveUsesCapabilityBudgets（F2）：归档请求按归档模型能力定价，
+// 输出向探测上限封顶（旧实现硬编码 1024 会直接越过 512 上限）。
+func TestSilentArchiveUsesCapabilityBudgets(t *testing.T) {
+	env := setupBotTestEnv(t,
+		fakeModelTurn{Text: `{"items":[]}`},
+		fakeModelTurn{Text: "滚动摘要：用户在做机器人主线。"},
+	)
+	env.fake.strict = true
+	userID := createBotTestUser(t, env.db, "archcap")
+	bot := env.createBot(t, userID)
+	env.cfg.Bots.Context.WindowTokens = 30000
+	env.cfg.Bots.Context.ArchiveModel = "arch-model"
+	if err := env.bots.persistModelWindow(env.fake.URL(), "arch-model", &botModelCapability{
+		WindowTokens: 65536, MaxOutputTokens: 512, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed arch cache: %v", err)
+	}
+	seedCompactableLedger(t, env, bot.ID, strings.Repeat("很长的旧历史。", 1200))
+	botRow, _ := env.bots.bots.Get(bot.ID)
+	run := botFixtureRun(t, env, botRow)
+	markHistoryConsumed(t, env, botRow, run)
+
+	out, err := env.bots.runCompactionCycle(context.Background(), botRow, run, model.BotCompactionThreshold)
+	if err != nil || !out.Published {
+		t.Fatalf("归档预算不应破坏压缩: %v %+v", err, out)
+	}
+	req := env.fake.nextRequest(t, 5*time.Second)
+	if !strings.Contains(string(req.Body), "记忆归档器") {
+		t.Fatalf("第一个请求应为归档: %s", truncateRunes(string(req.Body), 200))
+	}
+	var payload struct {
+		MaxCompletionTokens int64 `json:"max_completion_tokens"`
+	}
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("解析归档请求: %v", err)
+	}
+	if payload.MaxCompletionTokens != 512 {
+		t.Fatalf("归档输出应封顶到探测上限 512，实得 %d", payload.MaxCompletionTokens)
+	}
+	arch, _ := countMaintByPurpose(env.db, out.Run.ID)
+	if arch != 1 {
+		t.Fatalf("应恰好一次归档请求: %d", arch)
+	}
+}
+
+// TestSilentArchiveOverWindowSkipsRequest（F2）：归档窗口装不下时记
+// over_window 正常返回——归档尽力而为，不发注定超窗的请求，也不阻塞压缩。
+func TestSilentArchiveOverWindowSkipsRequest(t *testing.T) {
+	env := setupBotTestEnv(t,
+		fakeModelTurn{Text: "滚动摘要：用户在做机器人主线。"},
+	)
+	env.fake.strict = true
+	userID := createBotTestUser(t, env.db, "archover")
+	bot := env.createBot(t, userID)
+	env.cfg.Bots.Context.WindowTokens = 30000
+	env.cfg.Bots.Context.ArchiveModel = "arch-model"
+	// 归档模型窗口很小：装不下「输入+输出」。
+	if err := env.bots.persistModelWindow(env.fake.URL(), "arch-model", &botModelCapability{
+		WindowTokens: 8192, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed arch cache: %v", err)
+	}
+	seedCompactableLedger(t, env, bot.ID, strings.Repeat("很长的旧历史。", 1200))
+	botRow, _ := env.bots.bots.Get(bot.ID)
+	run := botFixtureRun(t, env, botRow)
+	markHistoryConsumed(t, env, botRow, run)
+
+	if _, err := env.bots.runCompactionCycle(context.Background(), botRow, run, model.BotCompactionThreshold); err != nil {
+		t.Fatalf("归档超窗不得阻塞压缩主线: %v", err)
+	}
+	var maint model.BotMaintenanceRun
+	env.db.Where("bot_id = ? AND kind = ?", bot.ID, model.BotMaintenanceCompaction).
+		Order("created_at DESC").First(&maint)
+	if !strings.Contains(maint.ResultJSON, "over_window") {
+		t.Fatalf("归档超窗应记 over_window: %s", maint.ResultJSON)
+	}
+	arch, sum := countMaintByPurpose(env.db, maint.ID)
+	if arch != 0 {
+		t.Fatalf("超窗归档不得发出请求: arch=%d", arch)
+	}
+	if sum != 1 {
+		t.Fatalf("摘要应照常发出: sum=%d", sum)
+	}
+	// 出网的第一条请求应是摘要，不是归档。
+	req := env.fake.nextRequest(t, 5*time.Second)
+	if strings.Contains(string(req.Body), "记忆归档器") {
+		t.Fatalf("超窗归档不得出网: %s", truncateRunes(string(req.Body), 200))
+	}
+}
+
+// ---------- F3：夜间整理输出封顶 ----------
+
+// TestBotNightlyOutputCappedByDetectedLimit（F3）：夜间输出意向 4096 向探测
+// 上限封顶——MaxOutputTokens < 4096 的上游不再每晚带着超限 max_completion_tokens。
+func TestBotNightlyOutputCappedByDetectedLimit(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: `{"user_md":"用户叫 Bobo","memory_md":"项目天狼星","sources":[{"path":"daily/2026-10-15.md","version":1}],"note":"ok"}`})
+	env.fake.strict = true
+	userID := createBotTestUser(t, env.db, "nightcap")
+	bot := env.createBot(t, userID)
+	writeBotMemory(t, env, bot.ID, "daily/2026-10-15.md", "- 用户叫 Bobo\n- 项目天狼星", "n-cap")
+	env.cfg.Bots.Memory.NightlyModel = "cheap-nightly"
+	if err := env.bots.persistModelWindow(env.fake.URL(), "cheap-nightly", &botModelCapability{
+		WindowTokens: 65536, MaxOutputTokens: 1024, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed nightly cache: %v", err)
+	}
+	env.bots.nowFn = func() time.Time {
+		return time.Date(2026, 10, 16, 4, 0, 0, 0, time.UTC)
+	}
+	botRow, _ := env.bots.bots.Get(bot.ID)
+	env.bots.runNightlyForBot(botRow.ID, "nightly:2026-10-16")
+
+	var run model.BotMaintenanceRun
+	env.db.Where("bot_id = ? AND trigger_key = ?", bot.ID, "nightly:2026-10-16").First(&run)
+	if run.Status != model.BotMaintenanceSucceeded {
+		t.Fatalf("夜间运行应成功: %s %v", run.Status, run.ErrorCode)
+	}
+	req := env.fake.nextRequest(t, 5*time.Second)
+	var payload struct {
+		MaxCompletionTokens int64 `json:"max_completion_tokens"`
+	}
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("解析夜间请求: %v", err)
+	}
+	if payload.MaxCompletionTokens != 1024 {
+		t.Fatalf("夜间输出应封顶到探测上限 1024，实得 %d", payload.MaxCompletionTokens)
+	}
+}
+
+// ---------- F4：manual 覆盖保留 detected 输出上限 ----------
+
+// TestBotWindowManualKeepsDetectedOutputLimit（F4）：manual 是字段级覆盖——
+// 窗口取部署值，已探测到的输出上限仍生效（输入预算预留输出空间、辅助封顶）。
+func TestBotWindowManualKeepsDetectedOutputLimit(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"m1","context_window":1048576,"max_output_tokens":262144}]}`)
+	userID := createBotTestUser(t, env.db, "winmanual2")
+	bot := createBotRowAt(t, env, userID, ps.URL(), "m1")
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	env.cfg.Bots.Context.ModelWindows = map[string]int64{"m1": 2000000}
+	cap := env.bots.modelCapability(bot, "m1")
+	if cap.Source != "manual" || cap.WindowTokens != 2000000 || cap.MaxOutputTokens != 262144 || cap.Detected {
+		t.Fatalf("manual 窗口应保留 detected 输出上限: %+v", cap)
+	}
+	if got := env.bots.inputBudgetFor(bot, "m1"); got != 2000000-262144 {
+		t.Fatalf("inputBudgetFor 应为 manual 窗口−输出上限，实得 %d", got)
+	}
+	// 辅助封顶生效：以同一份能力封顶输出。
+	reqOut, _, ok := botAuxBudgets(cap.WindowTokens, cap.MaxOutputTokens, 500000, 64)
+	if !ok || reqOut != 262144 {
+		t.Fatalf("辅助输出应向上限封顶: reqOut=%d ok=%v", reqOut, ok)
+	}
+}
+
+// TestAuxGateUsesManualWindowAndDetectedCap（F4+F1 组合）：manual 窗口与
+// detected 输出上限共存时，发送关口按同一份能力封顶实际请求。
+func TestAuxGateUsesManualWindowAndDetectedCap(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "ok"})
+	userID := createBotTestUser(t, env.db, "auxmanual")
+	bot := createBotRowAt(t, env, userID, env.fake.URL(), "fake-model")
+	if err := env.bots.persistModelWindow(env.fake.URL(), "fake-model", &botModelCapability{
+		WindowTokens: 1048576, MaxOutputTokens: 262144, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+	env.cfg.Bots.Context.ModelWindows = map[string]int64{"fake-model": 2000000}
+	maintRun := seedMaintRun(t, env, bot.ID)
+
+	if _, err := env.bots.auxModelRequest(context.Background(), bot, maintRun,
+		model.BotPurposeSummary, "fake-model",
+		[]openaiMessage{{Role: "user", Content: "hi"}}, 500000); err != nil {
+		t.Fatalf("manual 窗口+detected 上限应共存: %v", err)
+	}
+	req := env.fake.nextRequest(t, 5*time.Second)
+	var payload struct {
+		MaxCompletionTokens int64 `json:"max_completion_tokens"`
+	}
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("解析请求: %v", err)
+	}
+	if payload.MaxCompletionTokens != 262144 {
+		t.Fatalf("manual 窗口下输出仍应封顶到 detected 上限 262144，实得 %d", payload.MaxCompletionTokens)
+	}
+}
+
+// ---------- F6：/models 列表内全部模型落缓存 ----------
+
+// TestBotWindowDetectCachesAllModels（F6）：一次探测把列表内每个模型
+// （ContextWindow>0）都落缓存——配置的辅助模型也能拿到输出上限，不再永远
+// 走 fallback；缺失窗口字段的条目不得落成 0 行。
+func TestBotWindowDetectCachesAllModels(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200,
+		`{"data":[{"id":"m1","context_window":1048576,"max_output_tokens":262144},`+
+			`{"id":"aux-1","context_window":131072,"max_output_tokens":8192},`+
+			`{"id":"no-window","owned_by":"x"}]}`)
+	userID := createBotTestUser(t, env.db, "winall")
+	bot := createBotRowAt(t, env, userID, ps.URL(), "m1")
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row := findWindowRow(t, env, ps.URL(), "m1")
+	if row == nil || row.ContextWindow != 1048576 || row.MaxOutputTokens != 262144 {
+		t.Fatalf("主模型缓存行不符: %+v", row)
+	}
+	aux := findWindowRow(t, env, ps.URL(), "aux-1")
+	if aux == nil || aux.ContextWindow != 131072 || aux.MaxOutputTokens != 8192 || aux.Source != "detected" {
+		t.Fatalf("辅助模型也应落缓存: %+v", aux)
+	}
+	if noWin := findWindowRow(t, env, ps.URL(), "no-window"); noWin != nil {
+		t.Fatalf("缺失窗口字段的条目不得落成 0 行: %+v", noWin)
+	}
+	capability := env.bots.modelCapability(bot, "aux-1")
+	if capability.Source != "detected" || capability.WindowTokens != 131072 || capability.MaxOutputTokens != 8192 {
+		t.Fatalf("辅助模型能力解析应命中缓存: %+v", capability)
+	}
+}

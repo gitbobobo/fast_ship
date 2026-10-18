@@ -53,6 +53,21 @@ function errorText(err: unknown, fallback: string) {
   return err instanceof ApiRequestError && err.message ? err.message : fallback;
 }
 
+/** 一次「测试连接」随行的模型能力，连同它当时测试的目标一起记录：
+ * 目标再变，这份能力就不再代表当前表单。 */
+interface TestedCapability {
+  base_url: string;
+  model: string;
+  context_window?: number;
+  context_source?: string;
+  context_detail?: string;
+}
+
+/** 地址比较与缓存键同一口径：TrimSpace + 去尾部 /。 */
+function normalizeURL(url: string) {
+  return url.trim().replace(/\/+$/, "");
+}
+
 function CheckResult({ check }: { check: BotConnectionCheck }) {
   return (
     <li className="flex items-start gap-2 text-sm">
@@ -76,6 +91,8 @@ function CheckResult({ check }: { check: BotConnectionCheck }) {
  * 创建/编辑机器人：人设、OpenAI 兼容地址、模型与 API Key。
  * key 不回填；编辑时空值表示保留，已配置状态只展示末四位。
  * 「测试连接」可测未保存配置，也可基于已存 key 覆盖表单的地址/模型。
+ * 窗口能力展示跟随当前表单目标：目标与已存值一致显示已存能力，
+ * 「测试连接」成功后显示本次测试返回的能力，目标变了即隐藏旧展示。
  * 关闭即卸载：未保存的表单与测试结果不跨开关保留。
  */
 export function BotFormDialog({
@@ -117,12 +134,39 @@ function BotFormDialogInner({
     editing ? botToForm(editing) : emptyForm,
   );
   const [checks, setChecks] = useState<BotConnectionCheck[] | null>(null);
+  const [tested, setTested] = useState<TestedCapability | null>(null);
 
   const patch = (next: Partial<BotFormState>) =>
     setForm((previous) => ({ ...previous, ...next }));
 
   const busy = create.isPending || update.isPending;
   const testing = testConnection.isPending;
+
+  // 能力展示只跟随当前表单目标（F8）：测试结果属于它测试时的地址+模型，
+  // 已存能力属于已保存的地址+模型；目标变了就不再展示旧值。
+  const formURL = normalizeURL(form.base_url);
+  const formModel = form.model.trim();
+  let shownCapability: TestedCapability | null = null;
+  if (
+    tested &&
+    normalizeURL(tested.base_url) === formURL &&
+    tested.model === formModel
+  ) {
+    shownCapability = tested;
+  } else if (
+    editing &&
+    (editing.context_window ?? 0) > 0 &&
+    normalizeURL(editing.base_url) === formURL &&
+    editing.model.trim() === formModel
+  ) {
+    shownCapability = {
+      base_url: editing.base_url,
+      model: editing.model,
+      context_window: editing.context_window,
+      context_source: editing.context_source,
+      context_detail: editing.context_detail,
+    };
+  }
 
   const validate = (): string | null => {
     if (!form.name.trim()) return "请填写名称";
@@ -148,6 +192,14 @@ function BotFormDialogInner({
         ...(form.api_key.trim() ? { api_key: form.api_key.trim() } : {}),
       });
       setChecks(result.checks);
+      // 记录本次测试返回的能力与目标：弹窗只展示「属于当前表单目标」的能力。
+      setTested({
+        base_url: form.base_url.trim(),
+        model: form.model.trim(),
+        context_window: result.context_window,
+        context_source: result.context_source,
+        context_detail: result.context_detail,
+      });
       if (!result.ok) toast.error("连接测试未全部通过");
     } catch (err) {
       toast.error(errorText(err, "连接测试失败"));
@@ -236,18 +288,21 @@ function BotFormDialogInner({
               onChange={(e) => patch({ model: e.target.value })}
               placeholder="例如：gpt-4o-mini"
             />
-            {editing != null &&
-              editing.context_window != null &&
-              editing.context_window > 0 && (
+            {shownCapability != null &&
+              (shownCapability.context_window ?? 0) > 0 && (
                 <p
                   data-testid="bot-context-window"
                   className="text-xs text-muted-foreground"
                 >
-                  上下文窗口 {editing.context_window.toLocaleString("en-US")}{" "}
+                  上下文窗口{" "}
+                  {(
+                    shownCapability.context_window ?? 0
+                  ).toLocaleString("en-US")}{" "}
                   tokens
-                  {editing.context_source &&
-                    ` · 来源：${CONTEXT_SOURCE_LABELS[editing.context_source] ?? editing.context_source}`}
-                  {editing.context_detail && `（${editing.context_detail}）`}
+                  {shownCapability.context_source &&
+                    ` · 来源：${CONTEXT_SOURCE_LABELS[shownCapability.context_source] ?? shownCapability.context_source}`}
+                  {shownCapability.context_detail &&
+                    `（${shownCapability.context_detail}）`}
                 </p>
               )}
           </div>

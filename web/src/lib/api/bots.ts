@@ -53,6 +53,11 @@ export interface BotConnectionTestResult {
   ok: boolean;
   /** 流式、工具调用兼容性等逐项检查结果。 */
   checks: BotConnectionCheck[];
+  /** 本次探测到的模型能力（探测失败时为回退值，来源如实标注）。 */
+  context_window?: number;
+  max_output_tokens?: number;
+  context_source?: string;
+  context_detail?: string;
 }
 
 /** 可传未保存配置直接测试；或传 bot_id 复用已存 key，表单字段可覆盖地址/模型。 */

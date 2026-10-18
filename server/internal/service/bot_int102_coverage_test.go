@@ -325,6 +325,11 @@ func TestBotAutoCompaction(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	env.cfg.Bots.Context.WindowTokens = 8000
+	// 归档输入是整段原文：本场景单个大工具结果（≈27k token）装不进主模型
+	// 8000 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
+	// 请求。归档模型配置成更大窗口的模型——这正是 ArchiveModel 的用法。
+	env.cfg.Bots.Context.ArchiveModel = "arch-big"
+	env.cfg.Bots.Context.ModelWindows = map[string]int64{"arch-big": 131072}
 	seedBotUserMessage(t, env, bot.ID, "最早自动压缩问题")
 	seedBotAssistantToolBlock(t, env, bot.ID, "call-old-huge", "fs_issue", strings.Repeat("很长的工具结果", 8000))
 	for i := 1; i <= 3; i++ {

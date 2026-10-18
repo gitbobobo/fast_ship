@@ -428,15 +428,17 @@ func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (
 
 	// 窗口探测同步执行并把结果并入返回；探测与持久化只发生一次——响应里的
 	// 结果与缓存里的结果同源（refreshModelWindow 的探测+持久化拆成两步后，
-	// 这里复用同一步持久化，不做第二次 /models 请求）。探测失败回退到当前
-	// 解析值并落失败标记，不冒泡为测试失败（可达性问题已由上面两项检查给出）。
+	// 这里复用同一步持久化，不做第二次 /models 请求）。持久化按 INT-115 F6
+	// 落列表内全部模型（同一事务批量），配置的辅助模型同样能拿到输出上限。
+	// 探测失败回退到当前解析值并落失败标记，不冒泡为测试失败（可达性问题
+	// 已由上面两项检查给出）。
 	capability := s.capabilityFor(baseURL, modelName)
 	ctx, cancel := context.WithTimeout(context.Background(), botWindowDetectTimeout)
-	det, detErr := s.detectModelWindow(ctx, baseURL, apiKey, modelName)
+	det, detErr := s.detectModelWindows(ctx, baseURL, apiKey, modelName)
 	cancel()
 	if detErr == nil {
-		capability = *det
-		if err := s.persistModelWindow(baseURL, modelName, det); err != nil {
+		capability = *det.Target
+		if err := s.persistModelWindows(baseURL, det.Entries); err != nil {
 			s.logger.Info("模型窗口缓存写入失败",
 				zap.String("model", modelName), zap.Error(err))
 		}
