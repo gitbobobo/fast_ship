@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -286,7 +288,9 @@ func TestQuotaService_DeviceAuthorization_LocalExpiry(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	base := service.now()
-	service.now = func() time.Time { return base.Add(2 * time.Hour) } // 上游有效期（+1h）之后
+	// 过本地有效期（封顶 now+30min）但仍在 1 小时保留期内：GET 应先向上游
+	// 代查一次，上游仍无终态才判本地过期。
+	service.now = func() time.Time { return base.Add(31 * time.Minute) }
 	view, err := service.GetDeviceAuthorization(user.ID, started.Id)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -427,6 +431,189 @@ func TestQuotaService_DeviceAuthorization_CancelDuringPoll(t *testing.T) {
 	// 会话已摘除：再 GET 40431。
 	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthNotFound.Code {
 		t.Fatalf("取消后 GET 期望 40431，得到 %v", err)
+	}
+}
+
+// 取消在写库前生效（凭据已缓存）：凭据一旦缓存，下一次 GET 会跳过上游直接
+// 进入提交段——正是「取消晚到一步就会落库」的形态。先取消再 GET，会话已
+// 不可寻址（40431），缓存凭据不得经任何路径落库，也不再触上游。
+func TestQuotaService_DeviceAuthorization_CancelBeforeCommit(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-device-cancel-commit")
+	plane := &odControlPlane{} // token 端点保持 pending：首轮轮询不产生凭据
+	service := newTestQuotaService(svc, deviceAuthQuotaProvider(t, plane))
+
+	started, err := service.StartDeviceAuthorization(user.ID, &StartQuotaDeviceAuthorizationRequest{
+		Provider: "opendesign", Label: "x",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// 走一次 pending 轮询：会话推进到「已代查、仍 pending」。
+	base := service.now()
+	service.now = func() time.Time { return base.Add(time.Minute) }
+	view, err := service.GetDeviceAuthorization(user.ID, started.Id)
+	if err != nil {
+		t.Fatalf("pending get: %v", err)
+	}
+	if view.Status != "pending" {
+		t.Fatalf("首轮应 pending: %+v", view)
+	}
+
+	// 直接给会话缓存凭据（同 package 可访问）：模拟「已兑换、待落库」，
+	// 下一次 GET 不再触上游、直接进入提交段。
+	service.deviceMu.Lock()
+	session := service.deviceSessions[started.Id]
+	service.deviceMu.Unlock()
+	if session == nil {
+		t.Fatal("会话应在表中")
+	}
+	session.creds = quota.Credentials{"control_key": "vela_ctrl_never_stored"}
+
+	if err := service.CancelDeviceAuthorization(user.ID, started.Id); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthNotFound.Code {
+		t.Fatalf("取消后 GET 期望 40431，得到 %v", err)
+	}
+	var count int64
+	svc.db.Model(&model.QuotaAccount{}).Where("user_id = ?", user.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("取消后缓存凭据不得落库，得到 %d 行", count)
+	}
+	if plane.tokenCalls != 1 {
+		t.Fatalf("取消后 GET 不得再触上游，tokenCalls=%d", plane.tokenCalls)
+	}
+}
+
+// 先清理再查找：expiresAt 刚过保留期（有效期之后 1 小时）的会话，GET 直接
+// 40431——不代查上游、不建号；会话确已出表，DELETE 同样 40431。
+func TestQuotaService_DeviceAuthorization_CleanupBeforeFind(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-device-cleanup")
+	plane := &odControlPlane{}
+	service := newTestQuotaService(svc, deviceAuthQuotaProvider(t, plane))
+
+	started, err := service.StartDeviceAuthorization(user.ID, &StartQuotaDeviceAuthorizationRequest{
+		Provider: "opendesign", Label: "x",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	base := service.now()
+	// 有效期封顶在 now+30min；把时钟拨过「有效期 + 1 小时保留期」。
+	service.now = func() time.Time { return base.Add(2 * time.Hour) }
+
+	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthNotFound.Code {
+		t.Fatalf("刚过保留期的会话 GET 期望 40431，得到 %v", err)
+	}
+	if plane.tokenCalls != 0 {
+		t.Fatalf("过期清理不得代查上游，tokenCalls=%d", plane.tokenCalls)
+	}
+	var count int64
+	svc.db.Model(&model.QuotaAccount{}).Where("user_id = ?", user.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("过期清理不得建号，count=%d", count)
+	}
+	service.deviceMu.Lock()
+	_, stillThere := service.deviceSessions[started.Id]
+	service.deviceMu.Unlock()
+	if stillThere {
+		t.Fatal("刚过保留期的会话应已被清理出表")
+	}
+	if err := service.CancelDeviceAuthorization(user.ID, started.Id); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthNotFound.Code {
+		t.Fatalf("清理后 DELETE 期望 40431，得到 %v", err)
+	}
+}
+
+// 并发 Get 与 Cancel 的最终状态自洽（配合 -race 跑）：会话的 mu 串行化 GET
+// 的提交段、commitMu 串行化「取消」与「写库」，任一时刻至多一次落库。因此
+// 有 Get 返回 approved 当且仅当账号数为 1（提交段与 approved 视图同锁推进，
+// 不存在「落库了却没人看到 approved」）；取消先赢则账号数为 0。并发全部
+// 返回后会话已不可寻址，账号数不再增长——「DELETE 已返回却仍新建」不可观测。
+func TestQuotaService_DeviceAuthorization_ConcurrentGetCancel(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-device-concurrent")
+	plane := &odControlPlane{tokenBody: odApprovedTokenBody("vela_ctrl_race_key")}
+	service := newTestQuotaService(svc, deviceAuthQuotaProvider(t, plane))
+
+	started, err := service.StartDeviceAuthorization(user.ID, &StartQuotaDeviceAuthorizationRequest{
+		Provider: "opendesign", Label: "x",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	base := service.now()
+	service.now = func() time.Time { return base.Add(time.Minute) }
+
+	const gets = 8
+	results := make(chan string, gets+1)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	// 恰一次取消：会话存在，必然成功。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		if err := service.CancelDeviceAuthorization(user.ID, started.Id); err != nil {
+			results <- "cancel-failed"
+			return
+		}
+		results <- "cancel-done"
+	}()
+	for i := 0; i < gets; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			view, err := service.GetDeviceAuthorization(user.ID, started.Id)
+			switch {
+			case err == nil:
+				results <- string(view.Status)
+			default:
+				var appErr *errs.AppError
+				if errors.As(err, &appErr) && appErr.Code == errs.ErrQuotaDeviceAuthNotFound.Code {
+					results <- "gone"
+				} else {
+					results <- "unexpected-error"
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	sawApproved := false
+	for r := range results {
+		switch r {
+		case "approved":
+			sawApproved = true
+		case "pending", "gone", "cancel-done":
+			// pending：已代查上游但提交段让位给取消；gone：取消已摘除会话。
+		case "cancel-failed", "unexpected-error":
+			t.Fatalf("并发结果不自洽: %s", r)
+		default:
+			t.Fatalf("未知结果 %q", r)
+		}
+	}
+	var count int64
+	svc.db.Model(&model.QuotaAccount{}).Where("user_id = ?", user.ID).Count(&count)
+	if sawApproved && count != 1 {
+		t.Fatalf("有 Get 提交 approved 却落库 %d 行", count)
+	}
+	if !sawApproved && count != 0 {
+		t.Fatalf("没有任何 Get 提交 approved 却落库 %d 行", count)
+	}
+	// 所有调用返回后再确认一次：会话不可寻址，账号数不再增长。
+	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthNotFound.Code {
+		t.Fatalf("并发结束后 GET 期望 40431，得到 %v", err)
+	}
+	var recount int64
+	svc.db.Model(&model.QuotaAccount{}).Where("user_id = ?", user.ID).Count(&recount)
+	if recount != count {
+		t.Fatalf("并发结束后账号数不应再增长: %d → %d", count, recount)
 	}
 }
 

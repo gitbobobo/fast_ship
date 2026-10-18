@@ -263,11 +263,43 @@ func (s *QuotaService) createWithID(userID, accountID string, req *CreateQuotaAc
 	return nil
 }
 
+// replaceCredentials 整组替换账号凭据的纯 DB 写：校验、加密后经
+// repo.UpdateCredentials 落库（状态打回 pending、清退避），不做同步抓取。
+// Update 与设备授权的 rebind 共用：后者要在会话的 commitMu 内完成落库，而
+// 抓取可能阻塞数十秒，必须由调用方留在锁外自行触发。
+func (s *QuotaService) replaceCredentials(userID, id string, creds quota.Credentials) *errs.AppError {
+	account, err := s.repo.FindByID(id, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrQuotaAccountNotFound
+		}
+		return errs.ErrInternal
+	}
+	provider, appErr := s.requireProvider(account.Provider)
+	if appErr != nil {
+		return appErr
+	}
+	validated, appErr := s.validateCredentials(provider, creds)
+	if appErr != nil {
+		return appErr
+	}
+	encrypted, appErr := s.encryptCredentials(validated)
+	if appErr != nil {
+		return appErr
+	}
+	if err := s.repo.UpdateCredentials(id, userID, encrypted, credentialHint(provider, validated)); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errs.ErrQuotaAccountNotFound
+		}
+		return errs.ErrInternal
+	}
+	return nil
+}
+
 // Update 改标签或整组替换凭据。改标签不触发抓取；替换凭据把状态打回 pending、
 // 清退避，并同步重抓一次（旧快照保留到新快照写入）。
 func (s *QuotaService) Update(userID, id string, req *UpdateQuotaAccountRequest) (*api.QuotaAccount, error) {
-	account, err := s.repo.FindByID(id, userID)
-	if err != nil {
+	if _, err := s.repo.FindByID(id, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrQuotaAccountNotFound
 		}
@@ -286,23 +318,8 @@ func (s *QuotaService) Update(userID, id string, req *UpdateQuotaAccountRequest)
 	}
 
 	if req.Credentials != nil {
-		provider, appErr := s.requireProvider(account.Provider)
-		if appErr != nil {
+		if appErr := s.replaceCredentials(userID, id, quota.Credentials(*req.Credentials)); appErr != nil {
 			return nil, appErr
-		}
-		creds, appErr := s.validateCredentials(provider, *req.Credentials)
-		if appErr != nil {
-			return nil, appErr
-		}
-		encrypted, appErr := s.encryptCredentials(creds)
-		if appErr != nil {
-			return nil, appErr
-		}
-		if err := s.repo.UpdateCredentials(id, userID, encrypted, credentialHint(provider, creds)); err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errs.ErrQuotaAccountNotFound
-			}
-			return nil, errs.ErrInternal
 		}
 		// 换凭据触发的同步抓取刻意不受手动刷新冷却约束：用户主动换凭据
 		// 就应当立即验证新凭据，而不是被上次抓取的冷却挡住。

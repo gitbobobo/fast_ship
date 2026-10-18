@@ -65,8 +65,13 @@ type quotaDeviceSession struct {
 	// lastPollAt 控制向上游代查的节奏。
 	mu         sync.Mutex
 	lastPollAt time.Time
+	// commitMu 串行化「取消」与「提交写库」：提交段在锁内复查 canceled 并
+	// 完成全部数据库写，锁外才做上游抓取（锁内不得发起任何 HTTP 请求）。
+	// 锁顺序固定 deviceMu → commitMu；写路径只拿 commitMu，不得回头拿
+	// deviceMu，避免锁反转。
+	commitMu sync.Mutex
 	// canceled 由 Cancel 先置位再摘除 map：GET 可能已持有会话指针并阻塞在
-	// 上游请求上，取消必须能打断进行中的轮询（拿到凭据后、建号前检查）。
+	// 上游请求上，取消必须能打断进行中的轮询（提交写库前在 commitMu 内复查）。
 	canceled atomic.Bool
 }
 
@@ -179,19 +184,33 @@ func (s *QuotaService) StartDeviceAuthorization(userID string, req *StartQuotaDe
 	return &view, nil
 }
 
-// GetDeviceAuthorization 查询会话状态；仍 pending 且到了轮询节奏时先向上游
-// 代查一次。过期判定顺序：到了节奏先问上游（含已过本地有效期的情形），上游
-// 给出终态就按终态；上游仍 pending（或无结论）且已过 expiresAt 才判本地过期——
-// 用户在批准页待久一点再切回来，批准结果不应被作废。终态之后不再轮询。
+// GetDeviceAuthorization 查询会话状态；先清理过期会话再按 id 查找，仍 pending
+// 且到了轮询节奏时向上游代查一次。过期判定顺序：到了节奏先问上游（含已过
+// 本地有效期的情形），上游给出终态就按终态；上游仍 pending（或无结论）且已过
+// expiresAt 才判本地过期——用户在批准页待久一点再切回来，批准结果不应被作废。
+// 终态之后不再轮询。
 func (s *QuotaService) GetDeviceAuthorization(userID, id string) (*api.QuotaDeviceAuthorization, error) {
+	// 清理必须在查找之前：刚过保留期的会话要在本次 GET 直接 40431——先查后清
+	// 会把它取出、随即被 cleanup 摘除，本次 GET 却继续代查甚至建号，而会话
+	// 已不可寻址也不可取消。
+	s.cleanupDeviceSessions()
 	session := s.findDeviceSession(userID, id)
 	if session == nil {
 		return nil, errs.ErrQuotaDeviceAuthNotFound
 	}
-	s.cleanupDeviceSessions()
 
 	session.mu.Lock()
 	defer session.mu.Unlock()
+	// 复核：等到会话锁的间隙里，并发取消可能已把它摘出表——已不可寻址也
+	// 不可取消，按不存在处理。锁顺序 session.mu → deviceMu；没有任何路径
+	// 反向持有（Cancel 是 deviceMu → commitMu，不碰会话锁）。
+	s.deviceMu.Lock()
+	live := s.deviceSessions[session.id] == session
+	s.deviceMu.Unlock()
+	if !live || session.canceled.Load() {
+		return nil, errs.ErrQuotaDeviceAuthNotFound
+	}
+
 	if session.status != api.QuotaDeviceAuthorizationStatusPending {
 		view := session.view()
 		return &view, nil
@@ -223,14 +242,20 @@ func (s *QuotaService) GetDeviceAuthorization(userID, id string) (*api.QuotaDevi
 	return &view, nil
 }
 
-// CancelDeviceAuthorization 取消会话（用户取消 / 关闭对话框时调用）。先置
-// 取消标志再摘除 map 并立即返回：并发进行中的 GET 阻塞在上游请求上时也能
-// 在建号前看到取消，不落库。
+// CancelDeviceAuthorization 取消会话（用户取消 / 关闭对话框时调用）。在
+// commitMu 内置位取消标志（与提交写库互斥）再摘除 map 并立即返回：并发进行中
+// 的 GET 阻塞在上游请求上时也能在建号前看到取消，不落库。DELETE 返回时，
+// 要么写库已提交（取消晚于提交，语义明确），要么其后的写库一定会在 commitMu
+// 内看到取消而放弃——「检查之后、写库之前」没有窗口。
 func (s *QuotaService) CancelDeviceAuthorization(userID, id string) error {
 	s.deviceMu.Lock()
 	session, ok := s.deviceSessions[id]
 	if ok && session.userID == userID {
+		// 锁顺序固定 deviceMu → commitMu；commitMu 只在置位取消时短暂持有，
+		// 不在锁内做任何慢操作。
+		session.commitMu.Lock()
 		session.canceled.Store(true)
+		session.commitMu.Unlock()
 		delete(s.deviceSessions, id)
 	} else {
 		ok = false
@@ -286,16 +311,21 @@ func (s *QuotaService) pollDeviceAuthorization(session *quotaDeviceSession) erro
 		}
 	}
 
-	// 取消要能打断进行中的轮询：拿到凭据之后、动库之前检查取消标志，
-	// 已取消则直接返回，不建号也不改状态。
+	// ---- 提交段：commitMu 串行化「取消」与「写库」----
+	// 锁内复查取消标志、然后只做数据库写：取消与提交在同一把锁上互斥，
+	// 「检查之后、写库之前」不再有窗口。commitMu 内不得发起任何 HTTP 请求——
+	// rebind 的同步重抓可能阻塞数十秒，会把并发 DELETE 一起拖住。
+	session.commitMu.Lock()
 	if session.canceled.Load() {
+		session.commitMu.Unlock()
 		return nil
 	}
 
 	if session.rebindID != "" {
-		// 为已有账号整组换凭据（Update 自带同步重抓）。
-		creds := api.QuotaCredentials(session.creds)
-		if _, err := s.Update(session.userID, session.rebindID, &UpdateQuotaAccountRequest{Credentials: &creds}); err != nil {
+		// 为已有账号整组换凭据：锁内只做校验+加密+替换凭据的 DB 写（状态打回
+		// pending、清退避），同步重抓留在锁外，效果与 Update 换凭据一致。
+		if appErr := s.replaceCredentials(session.userID, session.rebindID, session.creds); appErr != nil {
+			session.commitMu.Unlock()
 			s.logger.Warn("quota device auth account update failed",
 				zap.String("session_id", session.id),
 				zap.String("account_id", session.rebindID),
@@ -306,22 +336,28 @@ func (s *QuotaService) pollDeviceAuthorization(session *quotaDeviceSession) erro
 	} else {
 		// 幂等建号：预分配的 id 已存在（前次重试落库成功但会话未推进）视为
 		// 成功；建号失败保持 pending 并记 Warn（只带 id，不带密钥），下次重试。
+		// createWithID 只做校验+加密+插入，无 HTTP，可在锁内完成。
 		if appErr := s.createWithID(session.userID, session.accountID, &CreateQuotaAccountRequest{
 			Provider:    session.provider,
 			Label:       session.label,
 			Credentials: api.QuotaCredentials(session.creds),
 		}); appErr != nil {
+			session.commitMu.Unlock()
 			s.logger.Warn("quota device auth account create failed",
 				zap.String("session_id", session.id),
 				zap.String("account_id", session.accountID),
 				zap.String("provider", session.provider))
 			return errDeviceAuthAccountRetry
 		}
-		s.FetchAccountNow(context.Background(), session.accountID)
 	}
 	session.status = api.QuotaDeviceAuthorizationStatusApproved
 	session.authError = ""
 	s.logDeviceStatus(session)
+	session.commitMu.Unlock()
+
+	// 锁外同步抓取：新建账号首次抓取、rebind 让新凭据立即得到验证；抓取
+	// 成败都落在账号 status 上，不影响会话已提交的 approved 终态。
+	s.FetchAccountNow(context.Background(), session.accountID)
 	return nil
 }
 
