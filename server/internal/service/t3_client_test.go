@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -265,6 +266,103 @@ func TestResolvePairedHTTPURL(t *testing.T) {
 	}
 }
 
+// TestFetchProjectSnapshot_ProtocolAndMapping 对照 contracts project.ts 的
+// Project 形状（workspaceRoot 必填、deletedAt 软删、defaultModelSelection 可空）
+// 与 environmentHttp.ts projects group：GET /api/projects、Bearer 认证、
+// 不要求 orchestration protocol 头。
+func TestFetchProjectSnapshot_ProtocolAndMapping(t *testing.T) {
+	var gotHeader http.Header
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotHeader = r.Header.Clone()
+		_, _ = w.Write([]byte(`{
+			"projects": [
+				{"id": "p-1", "title": "Fast Ship", "workspaceRoot": "/repo/fast-ship", "defaultModelSelection": {"instanceId": "inst", "model": "claude-opus-5-5", "options": []}, "scripts": [], "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-02T00:00:00.000Z", "deletedAt": null},
+				{"id": "p-2", "title": "已删除", "workspaceRoot": "/repo/gone", "defaultModelSelection": null, "scripts": [], "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-02T00:00:00.000Z", "deletedAt": "2026-01-03T00:00:00.000Z"},
+				{"id": "p-3", "title": "无模型", "workspaceRoot": "/repo/plain", "scripts": [], "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-02T00:00:00.000Z", "deletedAt": null}
+			],
+			"updatedAt": "2026-01-04T00:00:00.000Z"
+		}`))
+	}))
+	defer server.Close()
+
+	client := newT3HTTPClient()
+	projects, err := client.fetchProjectSnapshot(context.Background(), server.URL, "good-token")
+	if err != nil {
+		t.Fatalf("fetchProjectSnapshot: %v", err)
+	}
+	if gotPath != "/api/projects" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if auth := gotHeader.Get("Authorization"); auth != "Bearer good-token" {
+		t.Fatalf("authorization = %q", auth)
+	}
+	// 该端点无需 orchestration protocol 头（environmentHttp.ts projects group
+	// 只挂 OptionalBearerHeaders）。
+	if gotHeader.Get(t3OrchestrationProtocolHdr) != "" {
+		t.Fatalf("must not send orchestration protocol header")
+	}
+	// 软删项被过滤，映射到 shell 同构形状。
+	if len(projects) != 2 {
+		t.Fatalf("projects = %+v, want 2 (deleted filtered)", projects)
+	}
+	if projects[0].ID != "p-1" || projects[0].Title != "Fast Ship" {
+		t.Fatalf("p-1 = %+v", projects[0])
+	}
+	if projects[0].WorkspaceRoot == nil || *projects[0].WorkspaceRoot != "/repo/fast-ship" {
+		t.Fatalf("p-1 workspaceRoot = %+v", projects[0].WorkspaceRoot)
+	}
+	if projects[0].DefaultModelSelection == nil || projects[0].DefaultModelSelection.Model != "claude-opus-5-5" {
+		t.Fatalf("p-1 modelSelection = %+v", projects[0].DefaultModelSelection)
+	}
+	if projects[1].ID != "p-3" || projects[1].DefaultModelSelection != nil {
+		t.Fatalf("p-3 = %+v", projects[1])
+	}
+
+	// 401 → errT3CredentialRejected（凭证失效引导重新配对）。
+	unauthorized := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"auth_invalid","reason":"invalid_credential"}`))
+	}))
+	defer unauthorized.Close()
+	if _, err := client.fetchProjectSnapshot(context.Background(), unauthorized.URL, "stale"); err != errT3CredentialRejected {
+		t.Fatalf("expected errT3CredentialRejected, got %v", err)
+	}
+
+	// 404 一律按上游错误（端点缺失=版本不兼容），不得产生 errT3ThreadNotFound。
+	notFound := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"not_found","reason":"route_not_found"}`))
+	}))
+	defer notFound.Close()
+	_, err = client.fetchProjectSnapshot(context.Background(), notFound.URL, "tok")
+	if err == nil || errors.Is(err, errT3ThreadNotFound) {
+		t.Fatalf("404 must be a generic upstream error, got %v", err)
+	}
+
+	// 500 → 上游错误（带状态码）。
+	serverError := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":"boom"}`))
+	}))
+	defer serverError.Close()
+	_, err = client.fetchProjectSnapshot(context.Background(), serverError.URL, "tok")
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("expected upstream error with status, got %v", err)
+	}
+
+	// 坏 JSON → 上游错误。
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{not-json`))
+	}))
+	defer broken.Close()
+	if _, err := client.fetchProjectSnapshot(context.Background(), broken.URL, "tok"); err == nil {
+		t.Fatalf("expected decode error")
+	}
+}
+
+// TestT3GrantedScopesAndOperate 判定逻辑（INT-85 契约）。
 func TestT3GrantedScopesAndOperate(t *testing.T) {
 	if got := t3GrantedScopes("orchestration:read orchestration:operate"); len(got) != 2 || got[0] != t3ScopeOrchestrationRead {
 		t.Fatalf("granted = %+v", got)

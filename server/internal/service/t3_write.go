@@ -131,8 +131,11 @@ func (s *T3ThreadsService) fetchProjectionForWrite(ctx context.Context, env *mod
 
 // ------ 启动器与工作区选项 ------
 
-// ComposerOptions 聚合线程启动器选项：shell 快照项目表 + server.getConfig +
+// ComposerOptions 聚合线程启动器选项：项目表 + server.getConfig +
 // server.getSettings（config/settings 原样透传，camelCase 留在适配器内）。
+// 项目表走 HTTP `GET /api/projects`（INT-116）：不再为拿项目配置拉全量 shell
+// 快照、不建 shell 订阅；fetchProjectSnapshot 已把 401/403 分类成凭证被拒，
+// 不再需要前置会话探测。
 func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID string) (*T3ComposerOptions, error) {
 	env, err := s.envRepo.FindByIDAndUserID(ctx, envID, userID)
 	if err != nil {
@@ -149,11 +152,8 @@ func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID st
 	if err != nil {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
-	if status, probeErr := s.http.probeSession(ctx, env.Address, token); status != T3EnvironmentStatusOK {
-		return nil, errs.New(errs.ErrT3Upstream.Code, probeErr)
-	}
 
-	snaps, err := s.fetchShellSnapshots(ctx, env, token)
+	projectShells, err := s.http.fetchProjectSnapshot(ctx, env.Address, token)
 	if err != nil {
 		return nil, s.upstreamError(err)
 	}
@@ -173,26 +173,19 @@ func (s *T3ThreadsService) ComposerOptions(ctx context.Context, userID, envID st
 		return nil, s.upstreamError(err)
 	}
 
-	projects := make([]api.T3ComposerOptions_Projects, 0, len(snaps.Active.Projects)+len(snaps.Archived.Projects))
-	seen := make(map[string]struct{}, len(snaps.Active.Projects)+len(snaps.Archived.Projects))
-	for _, source := range [][]t3ProjectShell{snaps.Active.Projects, snaps.Archived.Projects} {
-		for _, project := range source {
-			if _, dup := seen[project.ID]; dup {
-				continue
-			}
-			seen[project.ID] = struct{}{}
-			item := api.T3ComposerOptions_Projects{
-				Id:    project.ID,
-				Title: project.Title,
-			}
-			if project.WorkspaceRoot != nil && *project.WorkspaceRoot != "" {
-				item.WorkspaceRoot = api.Ptr(*project.WorkspaceRoot)
-			}
-			if project.DefaultModelSelection != nil {
-				item.DefaultModelSelection = newT3ModelSelectionAPI(project.DefaultModelSelection)
-			}
-			projects = append(projects, item)
+	projects := make([]api.T3ComposerOptions_Projects, 0, len(projectShells))
+	for _, project := range projectShells {
+		item := api.T3ComposerOptions_Projects{
+			Id:    project.ID,
+			Title: project.Title,
 		}
+		if project.WorkspaceRoot != nil && *project.WorkspaceRoot != "" {
+			item.WorkspaceRoot = api.Ptr(*project.WorkspaceRoot)
+		}
+		if project.DefaultModelSelection != nil {
+			item.DefaultModelSelection = newT3ModelSelectionAPI(project.DefaultModelSelection)
+		}
+		projects = append(projects, item)
 	}
 	config, settings := map[string]any{}, map[string]any{}
 	_ = json.Unmarshal(configValue, &config)
@@ -236,7 +229,8 @@ func t3ModelSelectionWire(m *api.T3ModelSelection) map[string]any {
 }
 
 // WorkspaceOptions 解析项目工作区：cwd 来自上游项目 workspaceRoot（不接受
-// 前端任意路径），再在 T3 上取当前状态与引用列表。
+// 前端任意路径；项目表走 HTTP `/api/projects`，零 shell 订阅），再在 T3 上取
+// 当前状态与引用列表。
 func (s *T3ThreadsService) WorkspaceOptions(ctx context.Context, userID, envID, projectID, query string, cursor *int) (*T3WorkspaceOptions, error) {
 	if projectID == "" {
 		return nil, errs.ErrInvalidParams
@@ -256,20 +250,15 @@ func (s *T3ThreadsService) WorkspaceOptions(ctx context.Context, userID, envID, 
 	if err != nil {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
-	if status, probeErr := s.http.probeSession(ctx, env.Address, token); status != T3EnvironmentStatusOK {
-		return nil, errs.New(errs.ErrT3Upstream.Code, probeErr)
-	}
 
-	snaps, err := s.fetchShellSnapshots(ctx, env, token)
+	projectShells, err := s.http.fetchProjectSnapshot(ctx, env.Address, token)
 	if err != nil {
 		return nil, s.upstreamError(err)
 	}
 	var workspaceRoot string
-	for _, source := range [][]t3ProjectShell{snaps.Active.Projects, snaps.Archived.Projects} {
-		for _, project := range source {
-			if project.ID == projectID && project.WorkspaceRoot != nil {
-				workspaceRoot = *project.WorkspaceRoot
-			}
+	for _, project := range projectShells {
+		if project.ID == projectID && project.WorkspaceRoot != nil {
+			workspaceRoot = *project.WorkspaceRoot
 		}
 	}
 	if workspaceRoot == "" {
@@ -581,6 +570,12 @@ func t3RequestConflictError(err error) bool {
 // StopThread 按 T3 Stop 口径选择目标 run 下发 run.interrupt(holdQueue=true)：
 // 活动 run 优先；否则仍有后台工作的最近 run；都没有则视为无操作
 // （T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，故不杜撰内部命令）。
+//
+// 读取顺序（F6，恢复基线）：先读 HTTP 投影——线程真的不存在必须回到
+// 40418（投影 404 → errT3ThreadNotFound，基线语义；凭证被拒/不可达也在此
+// 按既有分类）；再取**可信活跃面**的 shell 作为运行态。运行态守卫不放松：
+// 非 Ready（Stale/Syncing）一律 50202（陈旧快照里的 idle 会把可停线程误判
+// 成无事可做）；Ready 但 shell 无此线程同样是 50202（上游快照面不一致）。
 func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, threadID string) (*T3ThreadStopResult, error) {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {
@@ -594,8 +589,16 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 	if err != nil {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
-	if status, probeErr := s.http.probeSession(ctx, env.Address, token); status != T3EnvironmentStatusOK {
-		return nil, errs.New(errs.ErrT3Upstream.Code, probeErr)
+
+	// 投影在先：404 → 40418，不被 shell 守卫拦成 50202。这里只做存在性/分类，
+	// run 选择一律基于等待之后的新鲜信息（见下方）。
+	if _, err := s.fetchProjectionForWrite(ctx, env, token, threadID); err != nil {
+		return nil, s.upstreamError(err)
+	}
+
+	shell, _, err := s.trustedShell(ctx, env, token, threadID)
+	if err != nil {
+		return nil, err
 	}
 
 	session, err := dialT3RPC(ctx, wsBaseOf(env.Address), token)
@@ -604,23 +607,18 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 	}
 	defer session.Close()
 
-	projection, err := s.fetchProjectionForWrite(ctx, env, token, threadID)
-	if err != nil {
-		return nil, s.upstreamError(err)
+	// shell.activeRunId 是新鲜的可中断活动 run（preparing/starting/running）；
+	// 为空时典型是 waiting——它只有投影里看得到，所以回读一次投影再决策。
+	// 投影在这里之后读，与运行态同一时间基准。
+	var fresh *t3ThreadProjection
+	if shell.ActiveRunID == nil || *shell.ActiveRunID == "" {
+		fetched, freshErr := s.fetchProjectionForWrite(ctx, env, token, threadID)
+		if freshErr != nil {
+			return nil, s.upstreamError(freshErr)
+		}
+		fresh = fetched
 	}
-	shell, _, shellOK := s.findTrustedShell(ctx, env, token, threadID)
-	if !shellOK {
-		return nil, errs.New(errs.ErrT3Upstream.Code, "线程运行状态不可读：shell 快照中未找到该线程")
-	}
-
-	runID := ""
-	if active := resolveT3ActiveRun(projection.Runs); active != nil {
-		runID = active.ID
-	} else if shell.LatestRunID != nil && t3HasInterruptibleBackgroundWork(shell.PendingBackgroundTasks) {
-		// 根 run 已结束但后台工作还在：T3 的 Stop 接受对最近 run 的中断。
-		// PR watch 不算可中断后台（与 interruptThreadTurn 不含 pullRequests 一致）。
-		runID = *shell.LatestRunID
-	}
+	runID := selectStopRunID(shell, fresh)
 	if runID == "" {
 		return &T3ThreadStopResult{Stopped: false}, nil
 	}
@@ -637,13 +635,29 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 	return &T3ThreadStopResult{Stopped: true, RunId: api.Ptr(runID)}, nil
 }
 
-// findTrustedShell 在活跃+归档快照中找出该线程的可信 shell（详情同一口径）。
-func (s *T3ThreadsService) findTrustedShell(ctx context.Context, env *model.T3Environment, token, threadID string) (*t3ThreadShell, map[string]string, bool) {
-	snaps, err := s.fetchShellSnapshots(ctx, env, token)
-	if err != nil {
-		return nil, nil, false
+// selectStopRunID 选择 Stop 要中断的 run（对齐官方 stopThread 的口径）：
+//   - shell.activeRunId 优先：它是可信活跃面按 isInterruptibleRunForShell
+//     （preparing/starting/running）派生的，比任何投影都新鲜；
+//   - 其次看投影里的活动 run（含 waiting——上游 shell 的可中断集合不含
+//     waiting，只有投影里能看到）；
+//   - 都没有时看 shell 的后台工作占位：根 run 已结束但后台工作仍会唤醒代理，
+//     T3 的 Stop 接受对最近 run 的中断。PR watch 不算可中断后台（与
+//     interruptThreadTurn 不含 pullRequests 一致）。
+//
+// projection 只在 shell 没有 activeRunId 时传入（调用方按需回读）。
+func selectStopRunID(shell *t3ThreadShell, projection *t3ThreadProjection) string {
+	if shell.ActiveRunID != nil && *shell.ActiveRunID != "" {
+		return *shell.ActiveRunID
 	}
-	return snaps.findThread(threadID)
+	if projection != nil {
+		if active := resolveT3ActiveRun(projection.Runs); active != nil {
+			return active.ID
+		}
+	}
+	if shell.LatestRunID != nil && t3HasInterruptibleBackgroundWork(shell.PendingBackgroundTasks) {
+		return *shell.LatestRunID
+	}
+	return ""
 }
 
 // ResumeQueue 下发 queue.resume。

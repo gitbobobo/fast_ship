@@ -103,8 +103,9 @@ func (s *T3ThreadsService) ManageThread(
 }
 
 // ThreadSettleSafe 报告线程当前是否可以安全收尾（settle 前置）：无活动运行、
-// 无待用户输入/审批、无占完成位的后台工作。找不到线程时报错（线程可能已被
-// 上游删除），由调用方按重试处理。
+// 无待用户输入/审批、无占完成位的后台工作。运行态只取 hub 可信活跃面
+// （Ready）——陈旧/同步中的快照一律 50202，由调用方按重试处理。找不到线程
+// 时同样报错（线程可能已被上游删除）。
 func (s *T3ThreadsService) ThreadSettleSafe(ctx context.Context, userID, envID, threadID string) (bool, error) {
 	env, err := s.envRepo.FindByIDAndUserID(ctx, envID, userID)
 	if err != nil {
@@ -119,19 +120,14 @@ func (s *T3ThreadsService) ThreadSettleSafe(ctx context.Context, userID, envID, 
 		return false, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, s.budgets.PerEnvironment)
+	// 等待预算用 ShellFirstSync：这里可能是在等 hub 首次同步，不是每请求
+	// 预算的放大；entry 建立后近似零成本。
+	ctx, cancel := context.WithTimeout(ctx, s.budgets.ShellFirstSync)
 	defer cancel()
 
-	if status, probeErr := s.http.probeSession(ctx, env.Address, token); status != T3EnvironmentStatusOK {
-		return false, errs.New(errs.ErrT3Upstream.Code, probeErr)
-	}
-	snaps, err := s.fetchShellSnapshots(ctx, env, token)
+	shell, _, err := s.trustedShell(ctx, env, token, threadID)
 	if err != nil {
 		return false, err
-	}
-	shell, _, ok := snaps.findThread(threadID)
-	if !ok {
-		return false, fmt.Errorf("shell 快照中未找到线程 %s", threadID)
 	}
 	switch t3ThreadStatus(shell) {
 	case api.T3ThreadSummaryStatusIdle, api.T3ThreadSummaryStatusArchived:
@@ -150,7 +146,9 @@ func (s *T3ThreadsService) CreateThreadForAutomation(ctx context.Context, userID
 }
 
 // createThread 是 CreateThread 的实现体；launchSent 报告 launchThread 请求帧
-// 是否已写出（写出后无论结果如何都视为「已进入 RPC」）。
+// 是否已写出（写出后无论结果如何都视为「已进入 RPC」）。项目表走 HTTP
+// `/api/projects`（INT-116）：不再为启动线程拉全量 shell 快照、不建 shell
+// 订阅；fetchProjectSnapshot 已分类凭证被拒，无需前置会话探测。
 func (s *T3ThreadsService) createThread(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
 	if req == nil || req.ProjectId == "" {
 		return nil, false, errs.ErrInvalidParams
@@ -175,25 +173,20 @@ func (s *T3ThreadsService) createThread(ctx context.Context, userID, envID strin
 	if err != nil {
 		return nil, false, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
-	if status, probeErr := s.http.probeSession(ctx, env.Address, token); status != T3EnvironmentStatusOK {
-		return nil, false, errs.New(errs.ErrT3Upstream.Code, probeErr)
-	}
 
-	// 一次 shell 快照：项目表（workspaceRoot/defaultModelSelection）全从这里来。
-	snaps, err := s.fetchShellSnapshots(ctx, env, token)
+	// 项目表（workspaceRoot/defaultModelSelection）全从这里来。
+	projectShells, err := s.http.fetchProjectSnapshot(ctx, env.Address, token)
 	if err != nil {
 		return nil, false, s.upstreamError(err)
 	}
 	var workspaceRoot string
 	var projectDefault *t3ModelSelection
-	for _, source := range [][]t3ProjectShell{snaps.Active.Projects, snaps.Archived.Projects} {
-		for _, project := range source {
-			if project.ID == req.ProjectId {
-				if project.WorkspaceRoot != nil {
-					workspaceRoot = *project.WorkspaceRoot
-				}
-				projectDefault = project.DefaultModelSelection
+	for _, project := range projectShells {
+		if project.ID == req.ProjectId {
+			if project.WorkspaceRoot != nil {
+				workspaceRoot = *project.WorkspaceRoot
 			}
+			projectDefault = project.DefaultModelSelection
 		}
 	}
 	if workspaceRoot == "" {

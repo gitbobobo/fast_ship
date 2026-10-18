@@ -20,7 +20,8 @@ type t3ShellSnapshot struct {
 	ArchivedThreads  []t3ThreadShell  `json:"archivedThreads"` // 真实活跃快照恒为空；归档走独立 RPC
 }
 
-// t3ArchivedShellSnapshot 是 orchestration.getArchivedShellSnapshot 的返回形状：
+// t3ArchivedShellSnapshot 是归档面全量快照的形状（orchestration
+// .subscribeArchivedShell 首个流项的 snapshot 字段，INT-116 起由归档订阅维护）：
 // 归档线程在 threads 字段（不是活跃快照的 archivedThreads）。
 type t3ArchivedShellSnapshot struct {
 	SchemaVersion    int              `json:"schemaVersion"`
@@ -205,13 +206,14 @@ type t3ShellSnapshots struct {
 	ArchiveErr error
 }
 
-// projectNames 合并两份快照的项目表。
+// projectNames 只用活跃面的项目表（F7）：项目表的权威来源只有活跃面——归档
+// 订阅只在初始快照时携带项目，常驻订阅后旧名字会一直压过活跃流的项目更新/
+// 删除且永不自愈。归档线程同样从这里取项目名；项目已删除时取不到名字
+// （显示无名），与「项目已删除」一致。
 func (snaps *t3ShellSnapshots) projectNames() map[string]string {
-	names := make(map[string]string, len(snaps.Active.Projects)+len(snaps.Archived.Projects))
-	for _, source := range [][]t3ProjectShell{snaps.Active.Projects, snaps.Archived.Projects} {
-		for _, project := range source {
-			names[project.ID] = project.Title
-		}
+	names := make(map[string]string, len(snaps.Active.Projects))
+	for _, project := range snaps.Active.Projects {
+		names[project.ID] = project.Title
 	}
 	return names
 }

@@ -55,7 +55,8 @@ type T3PairingUpdate struct {
 
 // T3EnvironmentUpdate 是一次合并更新的列集合：只写请求里出现的字段（Name
 // 非 nil 才改名、Pairing 非 nil 才覆盖配对产物），updated_at 随成功更新统一
-// 推进。一次 UPDATE 落库全部请求字段，中途失败不留下部分写入。
+// 推进。Pairing 非 nil 时 config_revision 由 SQL 自增（配置世代，见下）。
+// 一次 UPDATE 落库全部请求字段，中途失败不留下部分写入。
 type T3EnvironmentUpdate struct {
 	Name      *string
 	Pairing   *T3PairingUpdate
@@ -76,6 +77,11 @@ func (r *T3EnvironmentRepository) Update(ctx context.Context, id, userID string,
 		columns["bearer_token_encrypted"] = update.Pairing.BearerTokenEncrypted
 		columns["bearer_expires_at"] = update.Pairing.BearerExpiresAt
 		columns["bearer_scope"] = update.Pairing.BearerScope
+		// 配置世代（INT-116）：只在地址/凭证变更时自增，改名不写这一列。必须用
+		// SQL 表达式（config_revision + 1）而不是 Go 侧算值再写入——两个并发重配
+		// 在 Go 侧会算出同一个「新值」，SQL 自增则由写串行化保证各自 +1，严格
+		// 单调。shell hub 用它做 entry 准入与删除 tombstone。
+		columns["config_revision"] = gorm.Expr("config_revision + 1")
 	}
 	res := r.db.WithContext(ctx).Model(&model.T3Environment{}).
 		Where("id = ? AND user_id = ?", id, userID).

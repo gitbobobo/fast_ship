@@ -1,10 +1,11 @@
-# T3 集成：环境连接与线程客户端（INT-82 / INT-85）
+# T3 集成：环境连接与线程客户端（INT-82 / INT-85 / INT-116）
 
 Fast Ship 以 T3 客户端身份接入 T3 Code 环境：配对一个 T3 服务端，聚合展示线程，
 并支持发消息、停止、排队管理、审批/提问应答、密钥代答与图片附件。线程、队列与
 请求状态由 T3 持有——Fast Ship 不落库、不建队列库、不做任务调度器、不做第二套
-线程状态机；每次 API 调用实时转发上游（REST 表达用户操作，适配器转成 T3 一次性
-WS RPC）。
+线程状态机。读取走按环境常驻的 shell 订阅（INT-116：活跃/归档各一条长驻 WS +
+增量推送，内存组装回答）；写操作仍是 REST 表达用户操作、适配器转成 T3 一次性
+WS RPC。
 
 边界补充（INT-90 之后仍成立）：本文描述的客户端语义没有队列镜像、没有第二套
 线程状态机。INT-90 的「自动化」是**用户配置的触发调度与运行账本**（cron /
@@ -33,10 +34,12 @@ API Key 开放的 T3 只读面（不含凭证、不含线程内容）；线程�
 | 环境模型（凭证加密落库） | `server/internal/model/t3_environment.go` |
 | 环境仓库（按字段条件 UPDATE） | `server/internal/repository/t3_environment.go` |
 | 配对链接解析 | `server/internal/service/t3_pairing.go` |
-| T3 HTTP 客户端（换 token/探测/线程详情/字节转发） | `server/internal/service/t3_client.go` |
+| T3 HTTP 客户端（换 token/探测/线程详情/项目表/字节转发） | `server/internal/service/t3_client.go` |
 | T3 WS RPC 客户端（effect rpc JSON 帧） | `server/internal/service/t3_ws.go` |
+| shell 订阅纯状态（活跃/归档两面 reducer） | `server/internal/service/t3_shell_state.go` |
+| shell 订阅 hub（每环境两条长驻 WS + 增量） | `server/internal/service/t3_shell_hub.go` |
 | 会话能力（scopes/access/operate 守卫） | `server/internal/service/t3_access.go` |
-| 环境配对/改名/删除/探测 | `server/internal/service/t3_environment_service.go` |
+| 环境配对/改名/删除/探测（变更清 hub entry） | `server/internal/service/t3_environment_service.go` |
 | 线程聚合与条目补读 | `server/internal/service/t3_threads_service.go` |
 | T3 线上形状与归一化 | `server/internal/service/t3_wire.go` |
 | 交互条目（审批/提问/密钥）归一化 | `server/internal/service/t3_interact.go` |
@@ -52,8 +55,15 @@ API Key 开放的 T3 只读面（不含凭证、不含线程内容）；线程�
 未凭猜测写契约。写入协议的真相源文件：
 
 - `packages/contracts/src/orchestrationV2.ts`（命令联合 `OrchestrationV2Command`、
-  `OrchestrationV2ThreadLaunchInput`、TurnItem/RuntimeRequest/ThreadShell/投影形状）
+  `OrchestrationV2ThreadLaunchInput`、TurnItem/RuntimeRequest/ThreadShell/投影形状、
+  shell 订阅流项 `OrchestrationV2ShellStreamItem`）
 - `packages/contracts/src/rpc.ts`（WS 方法名与输入输出 schema）
+- `apps/server/src/ws.ts` + `apps/server/src/orchestration-v2/ShellStream.ts`
+  （订阅流语义：权威快照 vs enrichment 帧、`synchronized` 标记位置、活跃流只产生
+  `location:"active"` 增量、归档订阅无 afterSequence、afterSequence 失效改发全量）
+- `packages/contracts/src/environmentHttp.ts` + `apps/server/src/project/http.ts`
+  （`GET /api/projects` 项目表：无需 orchestration protocol 头、
+  要求 `orchestration:read`、返回 `{projects, updatedAt}`）
 - `packages/contracts/src/auth.ts`（scope 词表、token 兑换、scope 授予规则）
 - `packages/contracts/src/chatAttachment.ts`（图片附件边界：10MiB、四种 MIME）
 - `packages/contracts/src/secretRequest.ts`（`secrets.answerRequest` 输入与错误枚举）
@@ -132,11 +142,12 @@ trimmed string）；threadId 稳定生成使重试幂等（launchThread 会复�
 
 workspace：`root`（Current checkout，不传 branch）/ `worktree{baseRef,branch?,
 startFromOrigin?}` / `existing_worktree{worktreePath,branch?}`。`root` / `worktree`
-的 cwd 从上游 shell 快照解析（`projects[].workspaceRoot`）。`existing_worktree` 的
-`worktreePath` 原样转给 T3（UI 从 workspace-options 选），由 T3 校验路径；Fast Ship
-不另做项目目录白名单。**新 worktree 的 base_ref 默认主检出当前分支**（共识，经
-`vcs.refreshStatus` 解析；不是 T3 UI 的仓库默认分支）；`start_from_origin` 缺省取
-T3 设置 `newWorktreesStartFromOrigin`。
+的 cwd 从上游项目表解析（`GET /api/projects` 的 `projects[].workspaceRoot`，零
+shell 订阅）。`existing_worktree` 的 `worktreePath` 原样转给 T3（UI 从
+workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录白名单。
+**新 worktree 的 base_ref 默认主检出当前分支**（共识，经 `vcs.refreshStatus`
+解析；不是 T3 UI 的仓库默认分支）；`start_from_origin` 缺省取 T3 设置
+`newWorktreesStartFromOrigin`。
 
 ### 队列与活动（详情的 queue/activity）
 
@@ -161,10 +172,18 @@ T3 设置 `newWorktreesStartFromOrigin`。
 
 ### Stop 的 run 选择（对齐官方 stopThread）
 
-活动 run（同 activeRun 口径）优先；否则 shell 的 `latestRunId` 带着非空
+读取顺序恢复基线（F6）：**先读 HTTP 投影**——线程真的不存在回到 40418
+（投影 404 → `errT3ThreadNotFound`；凭证被拒/不可达按既有分类），再取 hub
+**可信活跃面**（`Ready`；未就绪/陈旧 50202，不基于陈旧快照下「无事可做」的
+结论；Ready 但 shell 无此线程也是 50202「上游快照面不一致」）。run 选择以
+**新鲜 shell** 为主：`shell.activeRunId`（上游按可中断活动 run 派生）优先——
+投影是等待之前读的，冷启动等首次同步期间新起的 run 不在里面；
+`shell.activeRunId` 为空时（典型是 waiting）才回读一次投影，保留
+「waiting/后台工作也算可停」的既有口径；再否则 shell 的 `latestRunId` 带着非空
 `pendingBackgroundTasks`（后台工作仍会唤醒代理）→ 中断最近 run；都没有 →
-`stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，
-不杜撰内部命令）。
+`stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，不杜撰
+内部命令）。自动化收尾的 `ThreadSettleSafe` 同一口径（等首次同步用
+`ShellFirstSync` 预算）。
 
 ## 配对与会话生命周期
 
@@ -188,27 +207,115 @@ T3 设置 `newWorktreesStartFromOrigin`。
 
 ## 读路径与预算
 
+### shell 订阅 hub（INT-116，列表/详情/Stop/收尾的运行态来源）
+
+每个「用户 × 环境」在 hub（`t3_shell_hub.go`）里持**两条长驻 WS 连接**：活跃面
+订阅 `orchestration.subscribeShell`（恢复时带 `afterSequence` 游标 +
+`requestCompletionMarker`，能力由 `server.getConfig.shellResumeCompletionMarker`
+决定），归档面订阅 `orchestration.subscribeArchivedShell`（无 afterSequence，重连
+即重拉全量）。两条而非一条多路复用：会话客户端是串行的，复用需自建 requestId
+派发；两条单流连接读循环无需派发，取消/重订阅互不影响。数据进纯内存 reducer
+（`t3_shell_state.go`）：活跃/归档两面独立维护，权威快照整体替换并把游标重置为
+`snapshotSequence`，增量（thread/project updated/removed）按 `sequence` 推进游标；
+带 `resolvedRepositoryIdentityRoots` 字段的帧是 enrichment/元数据帧，整体忽略。
+
+- **可信度分别标注**：活跃面（`ActiveReady`/`ActiveSynced`）与归档面
+  （`ArchiveReady`）独立判定。归档未同步完成与归档读取失败同等对待——
+  `ArchiveErr != nil`（含 `errT3ShellArchiveNotReady`），**不得据此断言线程
+  不存在**（G1），也不得声称列表完整。
+- **归档可信度随连接生灭**：归档面只维护线程（项目表见下），且归档连接的
+  **任何终止**——读错误、Ack/Ping 写失败、正常 Exit、取消，乃至探测/拨号
+  失败——都统一撤销归档可信度（清空归档线程表 + `ArchiveErr`），直到下一次
+  归档权威快照到达才恢复；凭健康连接之外的缓存宣称归档命中可信会违反 G1。
+  活跃面独立，不受归档终止影响。
+- **项目表只有活跃面一份权威来源**：归档订阅只在初始快照时携带项目，常驻
+  订阅后旧名字会一直覆盖活跃流的项目更新/删除且永不自愈，因此归档快照的
+  `Projects` 一律忽略；归档线程的项目名从活跃项目表取，项目已删除时显示
+  无名（与「项目已删除」一致）。
+- **新鲜度**：`Ready`=活跃面权威且已追平；`Syncing`=还没有权威快照；
+  `Stale`=曾有数据但连接断开/重连中/追平中（`SyncedAgo` 标注距最近一次确认
+  可信的时间）；`Failed`=从未拿到数据且首连失败（错误分类含凭证被拒）。
+  **陈旧命中不当可信运行态**：详情/Stop/收尾判定只接受 `Ready`，否则 50202——
+  陈旧快照里的 idle 会让前端停止轮询、让 Stop 无事可做。
+- **保活与恢复**：距最近完整帧超 25s 发应用层 Ping（Effect RPC `{"_tag":"Ping"}`
+  → `{"_tag":"Pong"}`，非 WS 控制帧）；单帧读 75s 到点即判死重连（x/net 超时后
+  不可续读）。重连退避 1s→2s→…→30s ±25% jitter，稳定 60s 后重置；凭证被拒走
+  5min 长退避。恢复订阅带 `afterSequence` 续传（序号失效/缺口过大时上游直接改发
+  权威快照，客户端不要求序号连续）。
+- **完成标记兼容**：只有**带游标的 resume** 才等 `synchronized` 并受 10s 预算
+  约束；预算内没等到就**不把未追平的缓存提升为 Ready**，而是置强制全量重同步
+  并结束本连接，下次重连不带 `afterSequence`，由上游权威全量快照重新建立追平
+  （期间保持 Stale/Syncing）。冷启动与强制全量重同步**不计时**，完成标志就是
+  权威全量快照本身——否则首帧比预算慢的慢环境会被反复截断、永远 Ready 不了。
+  **上游不支持 marker 时不带游标恢复**（退回权威全量）：没有完成证明就不能
+  宣称追平，否则「断线前 idle、断线期间线程已开始运行」时旧缓存会被当成可信
+  运行态；官方客户端的新 session 也是先加载权威快照、失败才退回全量，而不是
+  沿用上一会话的缓存。权威帧到达前视图保持 Stale/Syncing。
+- **空闲两级回收**：1 小时无访问先断连保值（内存快照保留，下次 View 用
+  afterSequence 增量恢复，避免「每次离开 15 分钟就重付 13s 全量快照」）；6 小时
+  无访问整条摘除。reaper 的 lastUsed 采样与 pause 决策在同一临界区完成，淘汰
+  则在摘除注册表的同一临界区（`hub.mu → entry.mu` 锁序）再复核一次 lastUsed，
+  刚被 View 使用的 entry 不会被旧采样误判；暂停期间新建立的连接会被立即取消
+  （登记 cancel 时同锁复查 paused/stopped）。连接结束时会汇合本次连接的取消
+  监听与 reader；`Close()` 返回后本 hub 启动的 goroutine 均已退出。会话层
+  `context.AfterFunc` 的取消回调（`t3_ws.go` 的 `closeOnCancel`，其 stop 按 Go
+  语义不等待已启动的回调）不在等待范围内：它只做一次 `conn.Close()`，可能在
+  `Close()` 返回后的极短时间内完成，不构成泄漏。
+- **版本守卫**：配置世代是 `t3_environments.config_revision`——只在地址/凭证
+  变更时由仓库侧 SQL 自增（`config_revision + 1`），改名不算；`updated_at` 是
+  UPDATE 前生成的墙钟时间、没有提交顺序保证（并发改名会让版本号回退），只做
+  展示，不能当世代用。entry 记建立时的世代与凭证指纹（规范化 address + token）。
+  凭证/地址变更且世代更新 → 停旧建新；否则拒绝（`errT3ShellConfigStale`），
+  调用方按可重试错误处理（「环境配置已更新，请重试」——不做内部重读重试，
+  避免同一操作前半程旧配置、后半程新配置的拼接；用户/前端重试会重新加载
+  配置，整个操作用同一份配置完成）。环境 Update（重配）落库成功后重读该行拿
+  新世代（自增发生在 SQL 里，Go 侧算不出并发安全的新值；重读失败退回
+  `旧世代+1` 这个最小可能值）调 `shellHub.Drop`；Delete 的 cutoff 用**删除前
+  读到的 revision + 1** 做 tombstone（行已不存在，在途请求最多携带删除前的
+  revision，环境 ID 不可复用）。准入语义是「**请求 revision < cutoff 即拒**」：
+  携带新世代的请求（revision == cutoff）可以重建，变更前的请求一律被拒——
+  包括并发改名后仍带着旧凭证的行（改名不递增 revision，世代与变更前相同），
+  以及「迟到请求复活已删环境」这条路径。Drop 只淘汰旧代 entry（revision 小于
+  cutoff）：若新请求已用新配置重建 entry，迟到的或幂等的重复 Drop 不会把它
+  关掉。floors 表按**记录时刻**保留 1 小时后清理（在途请求只有几十秒量级；
+  revision 值本身没有时间含义，清理只能以记录时刻为准）。
+- **生命周期**：`Close()` 等 hub 级生命周期 WaitGroup 排空——覆盖已被
+  Drop/替换/淘汰摘除的 entry 与各订阅 reader，返回后没有本 hub 启动的
+  goroutine 仍在运行。
+
+### 各读取路径
+
 - **线程列表**（GET /api/threads）：多环境**有界并行**（并行度 4），不落库。
-  每环境在单环境预算内：① 探测会话；② WS RPC `orchestration.subscribeShell`
-  取首个 Chunk 的活跃 `snapshot`（projects + threads），Ack + Interrupt（连接保留）；
-  ③ 同一连接一次性 RPC `orchestration.getArchivedShellSnapshot` 取归档线程；
-  ④ 断开。单环境失败或超时不阻塞其它环境，状态与错误保留在 `environments[]`。
-  **归档 RPC 失败是部分失败**：活跃线程照常返回，环境标 `degraded`，由 problem
-  banner 提示；只有活跃面读取失败才让该环境整体不可达。列表排除
-  `lineage.relationshipToParent=subagent` 的子代理线程（与 T3 自身列表一致）。
+  每环境 `shellHub.View`（等待预算 `ShellFirstSync` 15s），从内存组装回答：
+  活跃+归档合并（活跃优先），排除 `lineage.relationshipToParent=subagent`。
+  状态映射：`Ready` → `ok`；`Syncing` → `degraded`「正在同步 T3 线程快照，请稍后
+  刷新」；`Stale` → `degraded`「与 T3 的连接已断开（最近确认于 X 前），正在重连」
+  （线程表仍如实展示）；`Failed` → 凭证被拒 `repair`、其余 `unreachable`。
+  归档不可信是部分失败（G1）：活跃线程照常返回，环境标 `degraded`「归档线程
+  暂不可读」；其它状态优先自己的文案。列表请求不做每请求会话探测——凭证失效
+  由 hub 的重连探测异步发现。
 - **线程详情**（GET /api/environments/:id/threads/:threadId）：两段读取共享一个
-  整体 deadline（25s < 前端 35s），**先读运行态、后读时间线**。运行态取 WS 快照
-  面的可信 shell（活跃 + 归档，按线程 ID 找出，详情不过滤子代理）；时间线按
-  HTTP 投影的 `visibleTurnItems` 归一化；审批/提问条目按投影 `runtimeRequests`
-  补齐 `request_status`/`response_capability`/`decision`；另派生 `queue`/`activity`；
-  `access` 取该环境落库的 `orchestration:operate`（与环境列表同口径，不另探测）。
-  上游 404 → 40418；凭证被拒 → 50202（带「请重新配对」指引）；shell 快照无此
-  线程 → 50202（明确失败，不假 idle）。**归档面不可信时不下存在性结论**（G1）。
-- **条目正文**（GET .../items/:itemId）：先取可见时间线验证成员（40419），再从
-  可信行派生 `getTurnItem` 参数（不接受前端指定来源或 RPC 方法）。
-- **预算**（`t3RemoteBudgets`）：整轮聚合 20s、单环境 6s、线程详情 25s（写操作
-  复用同一预算位）、条目补读 25s；WS 单帧读 15s、写 10s；HTTP 响应体与 WS 帧
-  上限 64MB，读到上限 +1 字节即明确拒绝。
+  整体 deadline（25s < 前端 35s），**先读运行态、后读时间线**。运行态只取 hub
+  **可信活跃面**（`Ready`；未就绪/陈旧一律 50202「线程运行状态暂时不可读
+  （正在同步），请重试」，凭证被拒仍给「请重新配对」）；时间线按 HTTP 投影的
+  `visibleTurnItems` 归一化；审批/提问条目按投影 `runtimeRequests` 补齐；
+  另派生 `queue`/`activity`；`access` 取该环境落库的 `orchestration:operate`。
+  shell 无此线程时以投影归类：投影 404 → 40418，投影在、shell 无 → 50202；
+  归档不可信时不下存在性结论（G1）。
+- **条目正文**（GET .../items/:itemId）：不读 shell。先取可见时间线验证成员
+  （40419），再从可信行派生 `getTurnItem` 参数（不接受前端指定来源或 RPC 方法）。
+- **启动器/工作区选项/新建线程/项目发现/绑定校验**：项目表走 HTTP
+  `GET /api/projects`（`fetchProjectSnapshot`，过滤软删项），**零 shell 订阅**；
+  401/403 分类为凭证被拒（50202「请重新配对」），404 是端点缺失/版本不兼容，
+  按上游错误处理、绝不映射成 40418。项目不在该环境/缺 workspaceRoot 仍 40401。
+  不做项目表缓存——绑定校验必须实时。
+- **新建线程**：`launchThread` 受理即返回；线程经订阅流进入内存后，下一次列表
+  刷新即可见（后台同步，无需额外拉取）。
+- **预算**（`t3RemoteBudgets`）：整轮聚合 20s、单环境 HTTP（探测/项目表）6s、
+  线程详情 25s（写操作复用同一预算位）、条目补读 25s、**等 hub 首次同步 15s**
+  （`ShellFirstSync`，只用于等待首次同步，不是每请求预算的放大——entry 建立后
+  列表从内存回答）；WS 单帧读 15s（一次性会话）/75s（订阅 reader）、写 10s；
+  HTTP 响应体与 WS 帧上限 64MB，读到上限 +1 字节即明确拒绝。
 
 ### 状态映射（列表与详情共用）
 
@@ -326,11 +433,14 @@ already_answered/agent_stopped → 40916，not_found → 40419，其余 → 5020
 
 ## 已知限制
 
-- 不做实时推送：Fast Ship 侧每次调用现拉现转，T3 端新事件要刷新才可见。
+- 列表/运行态来自常驻订阅 + 增量推送（近实时）；详情的 queue/activity 取自
+  读取瞬间，返回后的变化要刷新才可见。
 - 线程列表为全量轻量快照，筛选/分页由前端处理。
+- 凭证吊销不再逐请求探测：hub 连接存活期间吊销要等下一次重连（探测 401）才
+  暴露为 `repair`；在此之前列表仍给出内存中的线程并如实标注连接状态。
+- 归档面失败/未就绪期间列表不完整（只有活跃线程），由 `degraded` banner 说明。
 - 补读正文受上游 `getTurnItem` 的 256KB 限界，截断后缀原样显示、不掩盖。
 - 文件变更永远没有 diff：上游 detail 读路径也不恢复 diff。
-- 详情的 queue/activity/运行态取自读取瞬间：返回后的变化要刷新才可见。
 - DPoP 会话不支持：只接受 `token_type=Bearer`。
 - 写操作不做乐观并发控制：commandId 每次新生成，重试可能产生重复消息
   （T3 的 commandId 冲突检测只对同 ID 重放生效）；队列类操作靠 40916 反馈。

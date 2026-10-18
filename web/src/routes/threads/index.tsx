@@ -110,7 +110,7 @@ function EnvironmentProblems({
         <p>
           {allDown
             ? "所有环境都无法读取："
-            : "部分环境暂时无法读取，其余环境的线程仍然可见："}
+            : "部分环境正在同步或暂时无法读取，其余环境的线程仍然可见："}
         </p>
         <ul className="mt-1 space-y-0.5">
           {environments.map((env) => (
@@ -171,8 +171,9 @@ export default function ThreadsPage() {
   const shown = visible.slice(0, limit);
   const noEnvironments = !!data && (environments ?? []).length === 0;
   const hasFilters = !isDefaultThreadFilters(filters);
-  // degraded 仍返回部分数据，不算「无法读取」；只有完全读不出（unreachable/
-  // repair）的环境才算 down，全部 down 才显示「所有环境都无法读取」。
+  // degraded 仍返回部分数据，不算「无法读取」（reconnect/sync 中会自行恢复）；
+  // 只有完全读不出（unreachable/repair）的环境才算 down，全部 down 才显示
+  // 「所有环境都无法读取」。
   const allDown =
     !!environments?.length &&
     environments.every((e) => e.status === "unreachable" || e.status === "repair");
@@ -346,6 +347,12 @@ export default function ThreadsPage() {
                     去重新配对
                   </Button>
                 </div>
+              ) : problems.length > 0 ? (
+                // 有环境 degraded（同步中/重连中）时列表可能只是还没长出来，
+                // 不能断言「暂无线程」。
+                <p className="py-16 text-center text-sm text-muted-foreground">
+                  环境尚未同步完成，稍后会自动显示线程。
+                </p>
               ) : (
                 <p className="py-16 text-center text-sm text-muted-foreground">
                   暂无线程

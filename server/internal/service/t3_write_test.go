@@ -229,7 +229,8 @@ func t3ThreadShellWithRuns(e *fakeT3Environment, threadID string, runs []map[str
 }
 
 // TestT3CreateThreadLaunch 覆盖 launchThread 适配：稳定 threadId、种子标题、
-// generateTitle、runtime_mode 缺省、workspace 缺省 root。
+// generateTitle、runtime_mode 缺省、workspace 缺省 root。项目表来自
+// `/api/projects`：启动路径零 shell 订阅（INT-116）。
 func TestT3CreateThreadLaunch(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -237,10 +238,9 @@ func TestT3CreateThreadLaunch(t *testing.T) {
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{map[string]any{"id": "p-1", "title": "P", "workspaceRoot": "/repo", "defaultModelSelection": map[string]any{"instanceId": "prov", "model": "m1"}}},
-		[]any{},
-	)
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "P", "workspaceRoot": "/repo", "defaultModelSelection": map[string]any{"instanceId": "prov", "model": "m1"}},
+	}})
 	e.fake.mu.Unlock()
 
 	result, err := e.th.CreateThread(ctx, userID, envID, &T3CreateThreadRequest{
@@ -359,6 +359,17 @@ func TestT3CreateThreadLaunch(t *testing.T) {
 	}); err == nil || t3ErrCode(err) != 40401 {
 		t.Fatalf("expected 40401 for foreign project, got %v", err)
 	}
+
+	// 启动路径零 shell 调用：config/settings/vcs/launch RPC 照常，订阅 absent。
+	for _, rpc := range e.fake.recordedRPC() {
+		switch rpc.method {
+		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
+			t.Fatalf("create path must not subscribe shell, got %s", rpc.method)
+		}
+	}
+	if len(e.fake.recordedRPC()) == 0 {
+		t.Fatalf("expected launch-side RPCs to be recorded")
+	}
 }
 
 // TestT3StopThreadSelection 覆盖 Stop 口径：活动 run 优先（holdQueue=true）；
@@ -416,17 +427,13 @@ func TestT3StopThreadSelection(t *testing.T) {
 		t.Fatalf("interrupt = %+v", interrupt)
 	}
 
-	// 后台工作占位的最近 run（shell.latestRunId + pendingBackgroundTasks）
-	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{map[string]any{"id": "p-1", "title": "P"}},
-		[]any{shellThread("th-bg", "后台工作", "completed", map[string]any{
-			"latestRunId":            "run-9",
-			"activeRunId":            nil,
-			"pendingBackgroundTasks": []any{map[string]any{"taskId": "bg-1", "kind": "subagent"}},
-		})},
-	)
-	e.fake.mu.Unlock()
+	// 后台工作占位的最近 run（shell.latestRunId + pendingBackgroundTasks）：
+	// shell 状态变化由订阅流推送增量驱动（INT-116）。
+	e.fake.pushThreadDelta(t, shellThread("th-bg", "后台工作", "completed", map[string]any{
+		"latestRunId":            "run-9",
+		"activeRunId":            nil,
+		"pendingBackgroundTasks": []any{map[string]any{"taskId": "bg-1", "kind": "subagent"}},
+	}))
 	result, err = e.th.StopThread(ctx, userID, envID, "th-bg")
 	if err != nil {
 		t.Fatalf("stop bg: %v", err)
@@ -436,12 +443,7 @@ func TestT3StopThreadSelection(t *testing.T) {
 	}
 
 	// 静止线程：无可停 run → stopped=false（T3 口径的无操作）
-	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{map[string]any{"id": "p-1", "title": "P"}},
-		[]any{shellThread("th-bg", "后台工作", "completed", nil)},
-	)
-	e.fake.mu.Unlock()
+	e.fake.pushThreadDelta(t, shellThread("th-bg", "后台工作", "completed", nil))
 	result, err = e.th.StopThread(ctx, userID, envID, "th-bg")
 	if err != nil {
 		t.Fatalf("stop idle: %v", err)
@@ -451,17 +453,12 @@ func TestT3StopThreadSelection(t *testing.T) {
 	}
 
 	// 只有 PR watch 的 monitor 不算可中断后台：stopped=false，不发 interrupt。
-	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{map[string]any{"id": "p-1", "title": "P"}},
-		[]any{shellThread("th-bg", "看 PR", "completed", map[string]any{
-			"latestRunId": "run-9",
-			"pendingBackgroundTasks": []any{
-				map[string]any{"taskId": "pull-request-watch:pr-1", "kind": "monitor"},
-			},
-		})},
-	)
-	e.fake.mu.Unlock()
+	e.fake.pushThreadDelta(t, shellThread("th-bg", "看 PR", "completed", map[string]any{
+		"latestRunId": "run-9",
+		"pendingBackgroundTasks": []any{
+			map[string]any{"taskId": "pull-request-watch:pr-1", "kind": "monitor"},
+		},
+	}))
 	before := len(e.fake.recordedRPC())
 	result, err = e.th.StopThread(ctx, userID, envID, "th-bg")
 	if err != nil {
@@ -474,6 +471,101 @@ func TestT3StopThreadSelection(t *testing.T) {
 		if rpc.method == "orchestration.dispatchCommand" {
 			t.Fatalf("PR watch stop must not dispatch, got %s %s", rpc.method, rpc.payload)
 		}
+	}
+
+	// R2-3：run 选择以新鲜 shell 的 activeRunId 为主。投影里没有活动 run
+	// （它早于本次 shell），但可信 shell 说 run-2 在跑 → 必须中断 run-2，
+	// 不能因为旧投影而误报「无事可做」。
+	e.fake.mu.Lock()
+	e.fake.projections["th-late"] = wireProjection(appThreadFixture("th-late", "后来启动", nil), []map[string]any{
+		{"id": "run-1", "ordinal": 1, "status": "completed", "userMessageId": "m1"},
+	})
+	e.fake.mu.Unlock()
+	e.fake.pushThreadDelta(t, shellThread("th-late", "后来启动", "running", map[string]any{
+		"latestRunId": "run-2",
+		"activeRunId": "run-2",
+	}))
+	result, err = e.th.StopThread(ctx, userID, envID, "th-late")
+	if err != nil {
+		t.Fatalf("stop late run: %v", err)
+	}
+	if !result.Stopped || apiStr(result.RunId) != "run-2" {
+		t.Fatalf("stop must target the fresh shell activeRunId, got %+v", result)
+	}
+	var lateInterrupt map[string]any
+	for _, rpc := range e.fake.recordedRPC() {
+		if rpc.method != "orchestration.dispatchCommand" {
+			continue
+		}
+		var cmd map[string]any
+		if json.Unmarshal(rpc.payload, &cmd) == nil && cmd["runId"] == "run-2" {
+			lateInterrupt = cmd
+		}
+	}
+	if lateInterrupt["type"] != "run.interrupt" {
+		t.Fatalf("expected run.interrupt for run-2, got %+v", lateInterrupt)
+	}
+
+	// F6：Stop 的错误语义恢复基线顺序——先读投影、再取可信 shell。
+	// 线程真的不存在（投影 404）→ 40418，不再被 shell 守卫拦成 50202。
+	if _, err := e.th.StopThread(ctx, userID, envID, "th-absent"); err == nil || t3ErrCode(err) != errs.ErrT3ThreadNotFound.Code {
+		t.Fatalf("stop missing thread = %v, want 40418", err)
+	}
+
+	// 投影在、两面可信但 shell 无此线程 → 50202「上游快照面不一致」。
+	e.fake.mu.Lock()
+	e.fake.projections["th-ghost"] = wireProjection(appThreadFixture("th-ghost", "幽灵", nil), nil)
+	e.fake.mu.Unlock()
+	_, err = e.th.StopThread(ctx, userID, envID, "th-ghost")
+	if err == nil || t3ErrCode(err) != errs.ErrT3Upstream.Code {
+		t.Fatalf("stop shell-missing thread = %v, want 50202", err)
+	}
+	var stopErr *errs.AppError
+	if !errors.As(err, &stopErr) || !strings.Contains(stopErr.Message, "运行状态不可读") {
+		t.Fatalf("expected shell-missing message, got %v", err)
+	}
+}
+
+// Stop 的 run 选择是纯函数，逐条锁定官方 stopThread 的口径：
+// shell 的可中断活动 run 优先；没有时看投影（含 waiting）；再否则看后台工作。
+func TestSelectStopRunID(t *testing.T) {
+	ptr := func(v string) *string { return &v }
+	shell := func(activeRunID *string, latestRunID *string, tasks ...t3PendingBackgroundTask) *t3ThreadShell {
+		return &t3ThreadShell{ID: "th-1", ActiveRunID: activeRunID, LatestRunID: latestRunID, PendingBackgroundTasks: tasks}
+	}
+	projection := func(runs ...t3Run) *t3ThreadProjection {
+		return &t3ThreadProjection{Runs: runs}
+	}
+
+	// shell 的可中断活动 run 优先于投影里的活动 run。
+	if got := selectStopRunID(shell(ptr("run-shell"), ptr("run-latest")), projection(t3Run{ID: "run-proj", Status: "running"})); got != "run-shell" {
+		t.Fatalf("activeRunId must win, got %q", got)
+	}
+
+	// 没有 activeRunId 时看投影，包含 waiting（上游 shell 的可中断集合排除它）。
+	if got := selectStopRunID(shell(nil, ptr("run-latest")), projection(t3Run{ID: "run-wait", Status: "waiting"})); got != "run-wait" {
+		t.Fatalf("projection waiting run must be interruptible, got %q", got)
+	}
+
+	// 投影里只剩已完成的 run，但 shell 有可中断后台 → 中断最近 run。
+	if got := selectStopRunID(
+		shell(nil, ptr("run-9"), t3PendingBackgroundTask{TaskID: "bg-1", Kind: "subagent"}),
+		projection(t3Run{ID: "run-9", Status: "completed"}),
+	); got != "run-9" {
+		t.Fatalf("background work must fall back to latestRunId, got %q", got)
+	}
+
+	// 只有 PR watch 的 monitor 不算可中断后台。
+	if got := selectStopRunID(
+		shell(nil, ptr("run-9"), t3PendingBackgroundTask{TaskID: "pull-request-watch:pr-1", Kind: "monitor"}),
+		projection(t3Run{ID: "run-9", Status: "completed"}),
+	); got != "" {
+		t.Fatalf("pr watch must not be interruptible, got %q", got)
+	}
+
+	// 什么都没有 → 无操作。
+	if got := selectStopRunID(shell(nil, ptr("run-9")), projection(t3Run{ID: "run-9", Status: "completed"})); got != "" {
+		t.Fatalf("idle thread must be a no-op, got %q", got)
 	}
 }
 
@@ -898,7 +990,8 @@ func TestT3AttachmentUploadAndContent(t *testing.T) {
 	}
 }
 
-// TestT3ComposerAndWorkspaceOptions 覆盖启动器/工作区选项读取。
+// TestT3ComposerAndWorkspaceOptions 覆盖启动器/工作区选项读取。项目表来自
+// `/api/projects`：两条路径都零 shell 订阅（INT-116）。
 func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -906,15 +999,9 @@ func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{map[string]any{"id": "p-1", "title": "Fast Ship 主仓库", "workspaceRoot": "/repo", "defaultModelSelection": map[string]any{"instanceId": "prov", "model": "m1"}}},
-		[]any{},
-	)
-	e.fake.archive = mustJSON(map[string]any{
-		"schemaVersion": 1, "snapshotSequence": 2,
-		"projects": []any{map[string]any{"id": "p-1", "title": "Fast Ship 主仓库", "workspaceRoot": "/repo"}},
-		"threads":  []any{},
-	})
+	e.fake.projects = mustJSON(map[string]any{"projects": []any{
+		map[string]any{"id": "p-1", "title": "Fast Ship 主仓库", "workspaceRoot": "/repo", "defaultModelSelection": map[string]any{"instanceId": "prov", "model": "m1"}},
+	}})
 	e.fake.mu.Unlock()
 
 	options, err := e.th.ComposerOptions(ctx, userID, envID)
@@ -993,6 +1080,14 @@ func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 	}
 	if followed.NextCursor != nil {
 		t.Fatalf("auto-follow should drain next_cursor, got %+v", followed.NextCursor)
+	}
+
+	// 两条路径零 shell 订阅：config/settings/vcs RPC 照常，订阅 absent。
+	for _, rpc := range e.fake.recordedRPC() {
+		switch rpc.method {
+		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
+			t.Fatalf("composer/workspace path must not subscribe shell, got %s", rpc.method)
+		}
 	}
 }
 

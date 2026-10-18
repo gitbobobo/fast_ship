@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -21,8 +20,8 @@ import (
 // 绑到某 T3 环境中的某 T3 项目——主键 (project_id, environment_id)，每个
 // 环境至多绑一个；不做路径推断，不写 Issue ↔ 线程关联。
 //
-// 发现与绑定校验复用线程只读面的读取路径（HTTP 会话探测 + WS shell 快照
-// projects，活跃 + 归档去重合并）：PUT 实时确认 T3 项目存在后才把
+// 发现与绑定校验走 HTTP `GET /api/projects`（INT-116）：项目表与归档、与
+// shell 订阅完全无关，零 shell 调用。PUT 实时确认 T3 项目存在后才把
 // t3_project_title/workspace_root 快照落库，不保存未校验的绑定；快照让
 // 绑定在环境不可达时仍可展示，与最新发现不一致即失效绑定。
 // 单环境失败只标在该环境条目上，不阻塞其它环境（与线程列表同一隔离口径）。
@@ -59,8 +58,10 @@ func (s *T3BindingService) DiscoverProjects(ctx context.Context, userID string) 
 	return items, nil
 }
 
-// discoverEnvironmentProjects 探测 + 快照读取一个环境；任何失败收敛到该条目的
+// discoverEnvironmentProjects 探测 + 项目表读取一个环境；任何失败收敛到该条目的
 // status/error，projects 保持空数组（不返回 nil slice，契约恒为数组）。
+// 探测保留：它单独回答「可达性与凭证有效性」，错误文案比项目 HTTP 的分类
+// 更友好；项目表走 `/api/projects`，与归档面完全无关（零 shell 调用）。
 func (s *T3BindingService) discoverEnvironmentProjects(ctx context.Context, env *model.T3Environment) api.T3EnvironmentProjects {
 	item := api.T3EnvironmentProjects{
 		EnvironmentId: env.ID,
@@ -80,57 +81,30 @@ func (s *T3BindingService) discoverEnvironmentProjects(ctx context.Context, env 
 		item.Error = api.NonEmpty(probeErr)
 		return item
 	}
-	snaps, err := s.t3.fetchShellSnapshots(ctx, env, token)
+	projectShells, err := s.t3.http.fetchProjectSnapshot(ctx, env.Address, token)
 	if err != nil {
 		status, msg := t3StatusFromError(err)
 		item.Status = status
 		item.Error = api.NonEmpty(msg)
 		return item
 	}
-	item.Projects = mergeT3DiscoveredProjects(snaps)
-	if snaps.ArchiveErr != nil {
-		// 归档面失败不推翻活跃面结果（G1）：活跃项目照常返回，环境标 degraded。
-		s.logger.With(zap.String("user_id", env.UserID)).Warn("t3 archived shell snapshot read failed during project discovery",
-			zap.String("environment_id", env.ID), zap.Error(snaps.ArchiveErr))
-		item.Status = T3EnvironmentStatusDegraded
-		item.Error = api.NonEmpty("归档项目暂不可读")
-		return item
-	}
+	item.Projects = t3DiscoveredProjects(projectShells)
 	item.Status = T3EnvironmentStatusOK
 	return item
 }
 
-// mergeT3DiscoveredProjects 合并活跃 + 归档两份快照的项目表，按 ID 去重
-// （与 ComposerOptions 同一合并口径：活跃优先）。
-func mergeT3DiscoveredProjects(snaps *t3ShellSnapshots) []api.T3DiscoveredProject {
-	projects := make([]api.T3DiscoveredProject, 0, len(snaps.Active.Projects)+len(snaps.Archived.Projects))
-	seen := make(map[string]struct{}, len(snaps.Active.Projects)+len(snaps.Archived.Projects))
-	for _, source := range [][]t3ProjectShell{snaps.Active.Projects, snaps.Archived.Projects} {
-		for _, project := range source {
-			if _, dup := seen[project.ID]; dup {
-				continue
-			}
-			seen[project.ID] = struct{}{}
-			item := api.T3DiscoveredProject{Id: project.ID, Title: project.Title}
-			if project.WorkspaceRoot != nil && *project.WorkspaceRoot != "" {
-				item.WorkspaceRoot = api.Ptr(*project.WorkspaceRoot)
-			}
-			projects = append(projects, item)
+// t3DiscoveredProjects 把 `/api/projects` 返回的项目表映射成发现条目
+// （HTTP 已是一份完整表，无需活跃/归档去重合并）。
+func t3DiscoveredProjects(shells []t3ProjectShell) []api.T3DiscoveredProject {
+	projects := make([]api.T3DiscoveredProject, 0, len(shells))
+	for _, project := range shells {
+		item := api.T3DiscoveredProject{Id: project.ID, Title: project.Title}
+		if project.WorkspaceRoot != nil && *project.WorkspaceRoot != "" {
+			item.WorkspaceRoot = api.Ptr(*project.WorkspaceRoot)
 		}
+		projects = append(projects, item)
 	}
 	return projects
-}
-
-// findT3Project 跨活跃 + 归档快照按 ID 找 T3 项目（与 CreateThread 同一解析路径）。
-func findT3Project(snaps *t3ShellSnapshots, projectID string) *t3ProjectShell {
-	for _, source := range [][]t3ProjectShell{snaps.Active.Projects, snaps.Archived.Projects} {
-		for i := range source {
-			if source[i].ID == projectID {
-				return &source[i]
-			}
-		}
-	}
-	return nil
 }
 
 // List GET /api/projects/:id/t3-bindings：列出项目绑定，附环境名与实时探测
@@ -184,7 +158,9 @@ func (s *T3BindingService) List(ctx context.Context, userID, projectID string) (
 
 // Upsert PUT /api/projects/:id/t3-bindings/:environmentId：实时校验 T3 项目在该
 // 环境存在后才写入快照——T3 项目不在该环境 40401，环境不存在 40417，环境不可达/
-// 凭证失效/上游错误 50202，不保存未校验的绑定。
+// 凭证失效/上游错误 50202，不保存未校验的绑定。校验走 `/api/projects`：HTTP
+// 返回的就是一份完整项目表，不存在即不存在，没有「归档不可信不下结论」的
+// 灰区（INT-116）。
 func (s *T3BindingService) Upsert(ctx context.Context, userID, projectID, envID, t3ProjectID string) (*api.ProjectT3Binding, error) {
 	if strings.TrimSpace(t3ProjectID) == "" {
 		return nil, errs.ErrInvalidParams
@@ -207,22 +183,19 @@ func (s *T3BindingService) Upsert(ctx context.Context, userID, projectID, envID,
 	if err != nil {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
-	// 与线程详情同一探测：WS 握手失败不区分状态码，先 HTTP 探明凭证状态。
-	if status, probeErr := s.t3.http.probeSession(ctx, env.Address, token); status != T3EnvironmentStatusOK {
-		return nil, errs.New(errs.ErrT3Upstream.Code, probeErr)
-	}
-	snaps, err := s.t3.fetchShellSnapshots(ctx, env, token)
+	projectShells, err := s.t3.http.fetchProjectSnapshot(ctx, env.Address, token)
 	if err != nil {
 		return nil, s.t3.upstreamError(err)
 	}
 
-	project := findT3Project(snaps, t3ProjectID)
-	if project == nil {
-		// 活跃面没有：归档读取失败时归档面等价于「没读过」，不能据此下
-		// 「项目不存在」的结论（G1），回上游错误让调用方重试。
-		if snaps.ArchiveErr != nil {
-			return nil, s.t3.upstreamError(fmt.Errorf("归档快照读取失败: %w", snaps.ArchiveErr))
+	var project *t3ProjectShell
+	for i := range projectShells {
+		if projectShells[i].ID == t3ProjectID {
+			project = &projectShells[i]
+			break
 		}
+	}
+	if project == nil {
 		return nil, errs.New(errs.ErrProjectNotFound.Code, "T3 项目不在该环境（或项目缺少 workspaceRoot）")
 	}
 	if project.WorkspaceRoot == nil || *project.WorkspaceRoot == "" {

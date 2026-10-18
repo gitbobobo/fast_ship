@@ -275,8 +275,14 @@ func main() {
 	screenshotAnnotationService := service.NewScreenshotAnnotationService(screenshotAnnotationRepo, screenshotRepo, issueRepo, projectRepo, fileStorage)
 	shipService := service.NewShipService(versionRepo, projectRepo, githubTokenRepo, artifactRepo, issueRepo, issueShipHookRepo, issueService, fileStorage, cfg, githubLogger)
 	mediaProxyService := githubmedia.NewProxyService(cfg.Upload.StoragePath)
-	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, t3Logger)
-	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, t3Logger)
+	// shell 订阅 hub（INT-116）：每环境常驻活跃/归档两条 WS，列表与运行态读取
+	// 从内存回答；环境重配/删除时由环境服务清 entry。这里注册停机钩子：当前
+	// main 进程没有优雅停机路径、defer 通常不会执行（进程被信号终止时由 OS
+	// 回收连接），留着是为了任何未来新增的停机/测试路径能统一收敛。
+	shellHub := service.NewT3ShellHub(t3Logger)
+	defer shellHub.Close()
+	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, t3Logger, shellHub)
+	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, t3Logger, shellHub)
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)

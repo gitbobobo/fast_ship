@@ -27,20 +27,22 @@ import (
 // 条件 UPDATE（WHERE id + user_id），影响 0 行即视为已被并发删除，不复活记录、
 // 不用 Save/upsert 覆盖并发写入。ctx 取消（客户端断开/预算到点）后不落库。
 type T3EnvironmentService struct {
-	repo    *repository.T3EnvironmentRepository
-	cfg     *config.Config
-	logger  *zap.Logger
-	http    *t3HTTPClient
-	budgets t3RemoteBudgets
+	repo     *repository.T3EnvironmentRepository
+	cfg      *config.Config
+	logger   *zap.Logger
+	http     *t3HTTPClient
+	shellHub *t3ShellHub
+	budgets  t3RemoteBudgets
 }
 
-func NewT3EnvironmentService(repo *repository.T3EnvironmentRepository, cfg *config.Config, logger *zap.Logger) *T3EnvironmentService {
+func NewT3EnvironmentService(repo *repository.T3EnvironmentRepository, cfg *config.Config, logger *zap.Logger, shellHub *t3ShellHub) *T3EnvironmentService {
 	return &T3EnvironmentService{
-		repo:    repo,
-		cfg:     cfg,
-		logger:  logger,
-		http:    newT3HTTPClient(),
-		budgets: defaultT3RemoteBudgets(),
+		repo:     repo,
+		cfg:      cfg,
+		logger:   logger,
+		http:     newT3HTTPClient(),
+		shellHub: shellHub,
+		budgets:  defaultT3RemoteBudgets(),
 	}
 }
 
@@ -118,7 +120,6 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 		}
 		return nil, errs.ErrInternal
 	}
-
 	newName := env.Name
 	if req.Name != nil {
 		trimmed := strings.TrimSpace(*req.Name)
@@ -175,6 +176,26 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 			env.BearerTokenEncrypted = update.Pairing.BearerTokenEncrypted
 			env.BearerExpiresAt = update.Pairing.BearerExpiresAt
 			env.BearerScope = update.Pairing.BearerScope
+			// 凭证/地址已变：清掉旧订阅 trail（INT-116）。cutoff 用落库后的
+			// config_revision（SQL 自增产生的新世代）：变更前读出的请求、以及
+			// 并发改名后仍带着旧凭证的请求（改名不递增 revision，世代与变更前
+			// 相同）一律因 revision < cutoff 被拒；携带新世代的正常请求可以重建
+			// entry。Drop 只关旧代 entry，已用新配置建好的新 entry 不会被关掉。
+			//
+			// 新世代不能在 Go 侧「算」——自增发生在 SQL 里，所以落库后重读一次。
+			fresh, reErr := s.repo.FindByIDAndUserID(ctx, id, userID)
+			if reErr != nil {
+				// 重读失败（典型是与并发 Delete 竞争）退回 env.ConfigRevision + 1：
+				// 这是本次自增后新世代的最小可能值，宁可少拒（可能放行一个过期
+				// 请求）也不能多拒（把携带新配置的正常请求挡在门外）。
+				s.logger.Warn("重配后重读 config_revision 失败，退回最小可能世代做 cutoff",
+					zap.String("environment_id", id), zap.Error(reErr))
+				env.ConfigRevision++
+				s.shellHub.Drop(userID, id, env.ConfigRevision)
+			} else {
+				env.ConfigRevision = fresh.ConfigRevision
+				s.shellHub.Drop(userID, id, env.ConfigRevision)
+			}
 		}
 	}
 
@@ -201,7 +222,10 @@ func (s *T3EnvironmentService) updateRepoError(err error) error {
 // expires_in 自行过期。因此删除是本地删除，不向上游发起吊销
 // （见 docs/internal/threads.md 的安全章节）。
 func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) error {
-	if _, err := s.repo.FindByIDAndUserID(ctx, id, userID); err != nil {
+	// 存在性检查服务于 40417 语义；顺带留下删除前读到的行——它的
+	// config_revision 用于下面的 Drop tombstone。
+	env, err := s.repo.FindByIDAndUserID(ctx, id, userID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errs.ErrT3EnvironmentNotFound
 		}
@@ -213,6 +237,11 @@ func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) er
 	if err := s.repo.Delete(ctx, id, userID); err != nil {
 		return errs.ErrInternal
 	}
+	// 删除成功后清掉该环境的订阅 trail（INT-116）。tombstone 用删除前读到的
+	// revision + 1：删除后行已不存在，任何在途请求最多携带「删除前读到的
+	// revision」（== env.ConfigRevision），< cutoff 成立即被拒；环境 ID 不可
+	// 复用，不存在携带更大 revision 的合法请求会撞上这个 tombstone。
+	s.shellHub.Drop(userID, id, env.ConfigRevision+1)
 	return nil
 }
 

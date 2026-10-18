@@ -37,9 +37,12 @@ func t3ErrCode(err error) int {
 
 // fakeT3Environment 在一个 httptest.Server 上同时模拟 T3 的 HTTP 面与 WS RPC 面，
 // 信封/方法名/路径都按真实协议（packages/contracts、apps/server/src/ws.ts）。
-// 真实语义：活跃 shell 快照的 archivedThreads 恒为空，归档线程只由
-// orchestration.getArchivedShellSnapshot 一次性 RPC 提供；线程投影按 wire
-// 形状携带 visibleTurnItems 且裁掉命令输出。
+// INT-116 语义：shell 状态来自 hub 的两条长驻订阅（活跃/归档各一条连接），
+// 所以 WS 面是「按 requestId 分派 + 逐 requestId Ack 门控」的统一读循环——
+// 同一条连接上要能先 server.getConfig 再挂订阅流，订阅注册后保持 live 等推送；
+// 归档数据由 orchestration.subscribeArchivedShell 的流式全量快照提供（真实
+// 活跃快照的 archivedThreads 恒为空）；项目表在 HTTP 面提供（GET /api/projects）。
+// 线程投影按 wire 形状携带 visibleTurnItems 且裁掉命令输出。
 type fakeT3Environment struct {
 	t  *testing.T
 	mu sync.Mutex
@@ -48,12 +51,21 @@ type fakeT3Environment struct {
 	pairingCodes    map[string]bool   // 有效配对码
 	validBearers    map[string]bool   // 有效 Bearer
 	grantScope      string            // /oauth/token 回的 scope；默认宽 scope（标准客户端授权）
-	snapshot        json.RawMessage   // subscribeShell 首块 value（活跃快照，归档为空）
-	archive         json.RawMessage   // getArchivedShellSnapshot 一次性返回值
-	archiveFail     bool              // true 时归档 RPC 回 Exit Failure（G1 降级路径）
-	dropAfterActive bool              // true 时活跃快照发出后立即断连（客户端 Ack 写失败）
+	snapshot        json.RawMessage   // subscribeShell 的权威活跃快照流项（{"kind":"snapshot",...}）
+	archive         json.RawMessage   // 归档订阅的全量快照体（无 kind 包装）
+	archiveFail     bool              // true 时归档订阅回 Exit Failure（G1 降级路径）
+	archiveGate     chan struct{}     // 非空时归档订阅先等放行再发快照（制造「归档未就绪」窗口）
+	dropAfterActive bool              // true 时活跃快照发出后立即断连
+	projects        json.RawMessage   // GET /api/projects 响应体
 	projections     map[string]string // threadId -> wire 投影 JSON
 	turnItems       map[string]string // itemId -> getTurnItem 返回的完整条目 JSON
+
+	// 订阅流句柄：hub 每条连接至多一条流，测试经这两个引用推送增量驱动状态。
+	// 多环境共用一个 fake 时以最后注册者为准（测试没有这种用法）。
+	activeStream  *fakeT3WSStream
+	archiveStream *fakeT3WSStream
+	conns         []*websocket.Conn // 已建立的 WS 连接（dropConnections 用）
+	nextSeq       int               // 推送增量的序号基线（高于所有 fixture 的 snapshotSequence）
 
 	// 写路径（INT-85）可配置响应
 	configValue    json.RawMessage   // server.getConfig 返回值
@@ -69,9 +81,48 @@ type fakeT3Environment struct {
 	deletedUploads []string          // attachments.delete 收到的 attachmentId
 
 	gotTokenForms []map[string]string
-	gotRPC        []t3RecordedRPC // WS 一次性请求（方法+payload）
+	gotRPC        []t3RecordedRPC // WS 请求（方法+payload，含订阅）
 
 	tokenGate chan struct{} // 非空时 /oauth/token 阻塞直到关闭（并发交错测试用）
+}
+
+// fakeT3WSStream 是 fake 上一条已注册的订阅流：写帧经连接级互斥串行化，
+// 每推一个 Chunk 都等服务端（被测 hub）的 Ack 才发下一块（协议门控）。
+type fakeT3WSStream struct {
+	face  string // active | archive
+	id    any    // 订阅请求 requestId
+	write func(frame any) error
+
+	mu    sync.Mutex
+	acked chan struct{} // 最近一个 Chunk 的 Ack 信号
+}
+
+// ackLatest 由连接读循环在收到匹配 requestId 的 Ack 时调用。
+func (st *fakeT3WSStream) ackLatest() {
+	st.mu.Lock()
+	if st.acked != nil {
+		close(st.acked)
+		st.acked = nil
+	}
+	st.mu.Unlock()
+}
+
+// push 推送一个 Chunk 并等待 Ack；上一块未 Ack 前不发下一块。
+func (st *fakeT3WSStream) push(values ...json.RawMessage) error {
+	st.mu.Lock()
+	if err := st.write(t3ChunkFrame(st.id, values)); err != nil {
+		st.mu.Unlock()
+		return err
+	}
+	gate := make(chan struct{})
+	st.acked = gate
+	st.mu.Unlock()
+	select {
+	case <-gate:
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("等待订阅流 Ack 超时")
+	}
 }
 
 type t3RecordedRPC struct {
@@ -85,10 +136,22 @@ func newFakeT3Environment(t *testing.T) *fakeT3Environment {
 		pairingCodes: map[string]bool{},
 		validBearers: map[string]bool{},
 		// 官方配对链接缺省授予标准客户端 scope（含 orchestration:operate）。
-		grantScope:    t3ScopeOrchestrationRead + " " + t3ScopeOrchestrationOperate,
+		grantScope: t3ScopeOrchestrationRead + " " + t3ScopeOrchestrationOperate,
+		// 空的权威活跃快照（stream item 形状）与空的归档快照体：未定制 fixture
+		// 时 hub 的订阅也能正常就绪，不会把空帧当坏帧。
+		snapshot: mustJSON(map[string]any{
+			"kind": "snapshot",
+			"snapshot": map[string]any{
+				"schemaVersion": 1, "snapshotSequence": 0,
+				"projects": []any{}, "threads": []any{}, "archivedThreads": []any{},
+			},
+		}),
+		archive:       mustJSON(map[string]any{"schemaVersion": 1, "snapshotSequence": 0, "projects": []any{}, "threads": []any{}}),
+		projects:      mustJSON(map[string]any{"projects": []any{}}),
+		nextSeq:       1000, // 高于所有 fixture 的 snapshotSequence（增量只前进不回卷）
 		projections:   map[string]string{},
 		turnItems:     map[string]string{},
-		configValue:   mustJSON(map[string]any{"providers": map[string]any{}}),
+		configValue:   mustJSON(map[string]any{"providers": map[string]any{}, "shellResumeCompletionMarker": true}),
 		settingsValue: mustJSON(map[string]any{"newWorktreesStartFromOrigin": true}),
 		vcsStatus:     mustJSON(map[string]any{"isRepo": true, "refName": "main", "hasWorkingTreeChanges": false, "hasPrimaryRemote": true}),
 		vcsRefs: mustJSON(map[string]any{
@@ -160,6 +223,88 @@ func (f *fakeT3Environment) tokenFormCount() int {
 	return len(f.gotTokenForms)
 }
 
+// ------ 订阅流驱动（推送增量 / 断连 / 计数） ------
+
+// pushActive 在最近注册的活跃订阅流上推送流项并等待 Ack。
+func (f *fakeT3Environment) pushActive(t *testing.T, values ...json.RawMessage) {
+	t.Helper()
+	f.mu.Lock()
+	st := f.activeStream
+	f.mu.Unlock()
+	if st == nil {
+		t.Fatalf("no active subscription stream to push on")
+	}
+	if err := st.push(values...); err != nil {
+		t.Fatalf("push active values: %v", err)
+	}
+}
+
+// nextPushSeq 取下一个增量序号（高于快照序号，只前进不回卷）。
+func (f *fakeT3Environment) nextPushSeq() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextSeq++
+	return f.nextSeq
+}
+
+// pushThreadDelta 推送 thread.updated{location:active} 增量：上游活跃流只产生
+// active 位置的增量（ShellStream.ts:292-320），归档/恢复由归档订阅自己驱动。
+func (f *fakeT3Environment) pushThreadDelta(t *testing.T, thread map[string]any) {
+	t.Helper()
+	value := mustJSON(map[string]any{
+		"kind": "thread.updated", "sequence": f.nextPushSeq(), "location": "active", "thread": thread,
+	})
+	f.pushActive(t, value)
+}
+
+// pushThreadRemoval 推送 thread.removed{location:active} 增量。
+func (f *fakeT3Environment) pushThreadRemoval(t *testing.T, threadID string) {
+	t.Helper()
+	value := mustJSON(map[string]any{
+		"kind": "thread.removed", "sequence": f.nextPushSeq(), "location": "active", "threadId": threadID,
+	})
+	f.pushActive(t, value)
+}
+
+// pushArchiveThread 推送归档流的 thread.updated 增量（归档快照已发出之后）。
+func (f *fakeT3Environment) pushArchiveThread(t *testing.T, thread map[string]any) {
+	t.Helper()
+	f.mu.Lock()
+	st := f.archiveStream
+	f.mu.Unlock()
+	if st == nil {
+		t.Fatalf("no archive subscription stream to push on")
+	}
+	value := mustJSON(map[string]any{"kind": "thread.updated", "sequence": f.nextPushSeq(), "thread": thread})
+	if err := st.push(value); err != nil {
+		t.Fatalf("push archive thread: %v", err)
+	}
+}
+
+// dropConnections 服务端主动断开全部 WS 连接（模拟吊销会话/进程重启后的
+// 连接死亡；hub 侧表现为读失败判死，随后按各自分类重连）。
+func (f *fakeT3Environment) dropConnections() {
+	f.mu.Lock()
+	conns := f.conns
+	f.conns = nil
+	f.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
+// subscribeShellCount 统计记录到的 subscribeShell 请求数（含恢复续订）：
+// 热路径复用断言用——多次列表只应发生一次冷启动全量订阅。
+func (f *fakeT3Environment) subscribeShellCount() int {
+	n := 0
+	for _, rpc := range f.recordedRPC() {
+		if rpc.method == t3RPCSubscribeShell {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeT3Environment) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -167,6 +312,8 @@ func (f *fakeT3Environment) handler() http.Handler {
 			f.handleToken(w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/auth/session":
 			f.handleSession(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			f.handleProjects(w, r)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/orchestration/threads/"):
 			f.handleThreadSnapshot(w, r)
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/attachments/upload/"):
@@ -304,199 +451,282 @@ func (f *fakeT3Environment) handleThreadSnapshot(w http.ResponseWriter, r *http.
 	_ = json.NewEncoder(w).Encode(map[string]any{"snapshotSequence": 1, "projection": json.RawMessage(projection)})
 }
 
+// handleProjects 模拟 GET /api/projects（启动/绑定路径的项目表，INT-116）。
+func (f *fakeT3Environment) handleProjects(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	f.mu.Lock()
+	valid := f.validBearers[token]
+	projects := f.projects
+	f.mu.Unlock()
+	if !valid {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":"auth_invalid","reason":"invalid_credential","traceId":"t-fake"}`))
+		return
+	}
+	_, _ = w.Write(projects)
+}
+
 func (f *fakeT3Environment) handleWS(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("orchestrationProtocol") != "2" {
 		w.WriteHeader(http.StatusUpgradeRequired)
 		_, _ = w.Write([]byte(`{"code":"orchestration_protocol_incompatible","message":"Update this client to one that supports orchestration protocol 2.","orchestrationProtocolVersion":2}`))
 		return
 	}
-	websocket.Handler(func(conn *websocket.Conn) {
-		defer conn.Close()
-		token := strings.TrimPrefix(conn.Request().Header.Get("Authorization"), "Bearer ")
-		f.mu.Lock()
-		valid := f.validBearers[token]
-		snapshot := f.snapshot
-		archive := f.archive
-		archiveFail := f.archiveFail
-		dropAfterActive := f.dropAfterActive
-		turnItems := make(map[string]string, len(f.turnItems))
-		for id, item := range f.turnItems {
-			turnItems[id] = item
-		}
-		f.mu.Unlock()
-		for {
-			var data []byte
-			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			if err := websocket.Message.Receive(conn, &data); err != nil {
-				return
-			}
-			var frame struct {
-				Tag     string          `json:"_tag"`
-				ID      any             `json:"id"`
-				Method  string          `json:"tag"`
-				Payload json.RawMessage `json:"payload"`
-			}
-			if err := json.Unmarshal(data, &frame); err != nil {
-				return
-			}
-			switch frame.Tag {
-			case "Request":
-				if !valid {
-					_ = sendT3Frame(conn, map[string]any{
-						"_tag":      "Exit",
-						"requestId": frame.ID,
-						"exit": map[string]any{"_tag": "Failure", "cause": []any{map[string]any{
-							"_tag": "Fail",
-							"error": map[string]any{
-								"_tag":    "EnvironmentAuthInvalidError",
-								"code":    "auth_invalid",
-								"reason":  "invalid_credential",
-								"traceId": "t-fake",
-							},
-						}}},
-					})
-					return
-				}
-				f.mu.Lock()
-				f.gotRPC = append(f.gotRPC, t3RecordedRPC{method: frame.Method, payload: frame.Payload})
-				f.mu.Unlock()
-				switch frame.Method {
-				case "orchestration.subscribeShell":
-					_ = sendT3Frame(conn, map[string]any{
-						"_tag":      "Chunk",
-						"requestId": frame.ID,
-						"values":    []json.RawMessage{snapshot},
-					})
-					// 首块无需 Ack 即可发出；Interrupt 只结束订阅流，
-					// 连接保留给同一会话上的后续一次性 RPC（真实语义）。
-					if dropAfterActive {
-						// 快照已送达后断连：客户端的 Ack/Interrupt 写会失败，
-						// 覆盖「读完整后收尾写失败不丢活跃面」的降级路径。
-						return
-					}
-					f.waitStreamEnd(conn)
-				case "orchestration.getArchivedShellSnapshot":
-					if archiveFail {
-						// 一次性 RPC 的 Exit Failure：归档面读取失败（G1 降级路径）。
-						// 连接保留，与真实失败语义一致。
-						_ = sendT3Frame(conn, exitFailureFrame(frame.ID, map[string]any{
-							"_tag":    "UnknownException",
-							"message": "archived shell snapshot unavailable",
-						}))
-						continue
-					}
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, archive))
-				case "orchestration.getTurnItem":
-					var payload struct {
-						ItemID string `json:"itemId"`
-					}
-					_ = json.Unmarshal(frame.Payload, &payload)
-					item, ok := turnItems[payload.ItemID]
-					if !ok || item == "" {
-						_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"item":null}`)))
-						continue
-					}
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"item":`+item+`}`)))
-				case "orchestration.dispatchCommand":
-					// 一次性命令受理：真实形状 {"sequence":N}。
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"sequence":1}`)))
-				case "orchestration.launchThread":
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"threadId":"th-launched","resumed":false}`)))
-				case "server.getConfig":
-					f.mu.Lock()
-					value := f.configValue
-					f.mu.Unlock()
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
-				case "server.getSettings":
-					f.mu.Lock()
-					value := f.settingsValue
-					f.mu.Unlock()
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
-				case "vcs.refreshStatus":
-					f.mu.Lock()
-					value := f.vcsStatus
-					f.mu.Unlock()
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
-				case "vcs.listRefs":
-					f.mu.Lock()
-					value := f.vcsRefs
-					if len(f.vcsRefsPages) > 0 {
-						value = f.vcsRefsPages[0]
-						f.vcsRefsPages = f.vcsRefsPages[1:]
-					}
-					f.mu.Unlock()
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, value))
-				case "attachments.createUploadUrl":
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(
-						`{"attachmentId":"att-1","relativeUrl":"/api/attachments/upload/fake-token","expiresAt":9999999999999}`)))
-				case "attachments.delete":
-					var payload struct {
-						AttachmentID string `json:"attachmentId"`
-					}
-					_ = json.Unmarshal(frame.Payload, &payload)
-					f.mu.Lock()
-					f.deletedUploads = append(f.deletedUploads, payload.AttachmentID)
-					f.mu.Unlock()
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
-				case "assets.createUrl":
-					f.mu.Lock()
-					missing := f.assetMissing
-					f.mu.Unlock()
-					if missing {
-						_ = sendT3Frame(conn, exitFailureFrame(frame.ID, map[string]any{
-							"_tag":    "AssetAttachmentNotFoundError",
-							"message": "Attachment was not found.",
-						}))
-						continue
-					}
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`{"relativeUrl":"/api/assets/att-1","expiresAt":9999999999999}`)))
-				case "secrets.answerRequest":
-					var payload map[string]any
-					_ = json.Unmarshal(frame.Payload, &payload)
-					f.mu.Lock()
-					f.secretAnswers = append(f.secretAnswers, payload)
-					failReason := f.secretFail
-					f.mu.Unlock()
-					if failReason != "" {
-						_ = sendT3Frame(conn, exitFailureFrame(frame.ID, map[string]any{
-							"_tag":    "SecretRequestError",
-							"reason":  failReason,
-							"message": "This secret request was already answered.",
-							"cause":   map[string]any{"echoed": "upstream-defect"},
-						}))
-						continue
-					}
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
-				default:
-					_ = sendT3Frame(conn, exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
-				}
-			case "Ack":
-			case "Interrupt":
-				return
-			}
-		}
-	}).ServeHTTP(w, r)
+	websocket.Handler(f.serveWS).ServeHTTP(w, r)
 }
 
-// waitStreamEnd 吃掉订阅请求的 Ack/Interrupt 帧直到流被中断；
-// 不关闭连接——同一 WS 会话还要服务后续一次性 RPC。
-func (f *fakeT3Environment) waitStreamEnd(conn *websocket.Conn) {
+// serveWS 是统一读循环：按 requestId 分派请求帧（同一连接可先 getConfig 再挂
+// 订阅流），Ack 路由到对应流的门控，订阅注册后保持 live 等推送——hub 的两条
+// 长驻连接各持一条流，一次性 RPC（详情补读/写命令）各自开新连接。
+func (f *fakeT3Environment) serveWS(conn *websocket.Conn) {
+	defer conn.Close()
+	token := strings.TrimPrefix(conn.Request().Header.Get("Authorization"), "Bearer ")
+	f.mu.Lock()
+	valid := f.validBearers[token]
+	turnItems := make(map[string]string, len(f.turnItems))
+	for id, item := range f.turnItems {
+		turnItems[id] = item
+	}
+	f.conns = append(f.conns, conn)
+	f.mu.Unlock()
+	// 连接结束只注销本连接注册的全局流引用（其它连接——hub 两条长驻连接、
+	// 一次性 RPC 连接——的引用不能被顺手清掉）。
+	var myActive, myArchive *fakeT3WSStream
+	defer func() {
+		f.mu.Lock()
+		if myActive != nil && f.activeStream == myActive {
+			f.activeStream = nil
+		}
+		if myArchive != nil && f.archiveStream == myArchive {
+			f.archiveStream = nil
+		}
+		f.mu.Unlock()
+	}()
+
+	// 连接级写互斥：订阅流推送（测试 goroutine）与一次性应答（本循环）共用一条连接。
+	var writeMu sync.Mutex
+	write := func(frame any) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return sendT3Frame(conn, frame)
+	}
+	streams := map[any]*fakeT3WSStream{} // requestId → 订阅流（同一连接至多一条）
+
 	for {
 		var data []byte
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if err := websocket.Message.Receive(conn, &data); err != nil {
-			return // 连接关闭视作结束
+			return
 		}
 		var frame struct {
-			Tag string `json:"_tag"`
+			Tag       string          `json:"_tag"`
+			ID        any             `json:"id"`
+			Method    string          `json:"tag"`
+			Payload   json.RawMessage `json:"payload"`
+			RequestID any             `json:"requestId"`
 		}
 		if err := json.Unmarshal(data, &frame); err != nil {
 			return
 		}
-		if frame.Tag == "Interrupt" {
-			return
+		switch frame.Tag {
+		case "Request":
+			if !valid {
+				_ = write(map[string]any{
+					"_tag":      "Exit",
+					"requestId": frame.ID,
+					"exit": map[string]any{"_tag": "Failure", "cause": []any{map[string]any{
+						"_tag": "Fail",
+						"error": map[string]any{
+							"_tag":    "EnvironmentAuthInvalidError",
+							"code":    "auth_invalid",
+							"reason":  "invalid_credential",
+							"traceId": "t-fake",
+						},
+					}}},
+				})
+				return
+			}
+			f.mu.Lock()
+			f.gotRPC = append(f.gotRPC, t3RecordedRPC{method: frame.Method, payload: frame.Payload})
+			f.mu.Unlock()
+			switch frame.Method {
+			case t3RPCSubscribeShell:
+				var payload struct {
+					AfterSequence *int `json:"afterSequence"`
+				}
+				_ = json.Unmarshal(frame.Payload, &payload)
+				st := &fakeT3WSStream{face: "active", id: frame.ID, write: write}
+				streams[frame.ID] = st
+				myActive = st
+				f.mu.Lock()
+				f.activeStream = st
+				f.mu.Unlock()
+				if payload.AfterSequence == nil {
+					// 冷启动：权威全量快照 + synchronized 标记（上游顺序：初始
+					// 快照之后、live 之前，ws.ts:1100-1105）。同一 Chunk 内多个
+					// value 按序应用、共享一次 Ack。
+					f.mu.Lock()
+					snapshot := f.snapshot
+					f.mu.Unlock()
+					values := []json.RawMessage{snapshot, json.RawMessage(`{"kind":"synchronized"}`)}
+					if err := write(t3ChunkFrame(frame.ID, values)); err != nil {
+						return
+					}
+					if f.dropAfterActiveFlag() {
+						// 快照已送达后断连：覆盖「快照到手后连接死亡不丢活跃面、
+						// 自动以 afterSequence 恢复」的路径。只作用于冷启动——
+						// 恢复连接不断连，否则每次续订都死循环重连。
+						return
+					}
+				} else {
+					// 恢复（afterSequence 续订）：上游回放缺口后发标记；fake 无
+					// 缺口可放，直接标记追平进入 live，游标保持不回卷。
+					if err := write(t3ChunkFrame(frame.ID, []json.RawMessage{json.RawMessage(`{"kind":"synchronized"}`)})); err != nil {
+						return
+					}
+				}
+			case t3RPCSubscribeArchivedShell:
+				f.mu.Lock()
+				gate := f.archiveGate
+				f.mu.Unlock()
+				if gate != nil {
+					// 归档未就绪窗口：订阅已受理但不发快照，等测试放行。
+					select {
+					case <-gate:
+					case <-time.After(5 * time.Second):
+						return
+					}
+				}
+				f.mu.Lock()
+				archiveFail := f.archiveFail
+				archive := f.archive
+				f.mu.Unlock()
+				if archiveFail {
+					// 订阅请求的 Exit Failure：归档面读取失败（G1 降级路径）。
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "UnknownException",
+						"message": "archived shell snapshot unavailable",
+					}))
+					continue
+				}
+				st := &fakeT3WSStream{face: "archive", id: frame.ID, write: write}
+				streams[frame.ID] = st
+				myArchive = st
+				f.mu.Lock()
+				f.archiveStream = st
+				f.mu.Unlock()
+				// 归档订阅先全量快照再增量（ws.ts:1777-1811）；快照体包装成流项。
+				item := mustJSON(map[string]any{"kind": "snapshot", "snapshot": json.RawMessage(archive)})
+				if err := write(t3ChunkFrame(frame.ID, []json.RawMessage{item})); err != nil {
+					return
+				}
+			case "orchestration.getTurnItem":
+				var payload struct {
+					ItemID string `json:"itemId"`
+				}
+				_ = json.Unmarshal(frame.Payload, &payload)
+				item, ok := turnItems[payload.ItemID]
+				if !ok || item == "" {
+					_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"item":null}`)))
+					continue
+				}
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"item":`+item+`}`)))
+			case "orchestration.dispatchCommand":
+				// 一次性命令受理：真实形状 {"sequence":N}。
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"sequence":1}`)))
+			case "orchestration.launchThread":
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"threadId":"th-launched","resumed":false}`)))
+			case "server.getConfig":
+				f.mu.Lock()
+				value := f.configValue
+				f.mu.Unlock()
+				_ = write(exitSuccessFrame(frame.ID, value))
+			case "server.getSettings":
+				f.mu.Lock()
+				value := f.settingsValue
+				f.mu.Unlock()
+				_ = write(exitSuccessFrame(frame.ID, value))
+			case "vcs.refreshStatus":
+				f.mu.Lock()
+				value := f.vcsStatus
+				f.mu.Unlock()
+				_ = write(exitSuccessFrame(frame.ID, value))
+			case "vcs.listRefs":
+				f.mu.Lock()
+				value := f.vcsRefs
+				if len(f.vcsRefsPages) > 0 {
+					value = f.vcsRefsPages[0]
+					f.vcsRefsPages = f.vcsRefsPages[1:]
+				}
+				f.mu.Unlock()
+				_ = write(exitSuccessFrame(frame.ID, value))
+			case "attachments.createUploadUrl":
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(
+					`{"attachmentId":"att-1","relativeUrl":"/api/attachments/upload/fake-token","expiresAt":9999999999999}`)))
+			case "attachments.delete":
+				var payload struct {
+					AttachmentID string `json:"attachmentId"`
+				}
+				_ = json.Unmarshal(frame.Payload, &payload)
+				f.mu.Lock()
+				f.deletedUploads = append(f.deletedUploads, payload.AttachmentID)
+				f.mu.Unlock()
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
+			case "assets.createUrl":
+				f.mu.Lock()
+				missing := f.assetMissing
+				f.mu.Unlock()
+				if missing {
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "AssetAttachmentNotFoundError",
+						"message": "Attachment was not found.",
+					}))
+					continue
+				}
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`{"relativeUrl":"/api/assets/att-1","expiresAt":9999999999999}`)))
+			case "secrets.answerRequest":
+				var payload map[string]any
+				_ = json.Unmarshal(frame.Payload, &payload)
+				f.mu.Lock()
+				f.secretAnswers = append(f.secretAnswers, payload)
+				failReason := f.secretFail
+				f.mu.Unlock()
+				if failReason != "" {
+					_ = write(exitFailureFrame(frame.ID, map[string]any{
+						"_tag":    "SecretRequestError",
+						"reason":  failReason,
+						"message": "This secret request was already answered.",
+						"cause":   map[string]any{"echoed": "upstream-defect"},
+					}))
+					continue
+				}
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
+			default:
+				_ = write(exitSuccessFrame(frame.ID, json.RawMessage(`null`)))
+			}
+		case "Ack":
+			// 逐 requestId 路由：只唤醒等这块 Ack 的流。
+			f.mu.Lock()
+			st := streams[frame.RequestID]
+			f.mu.Unlock()
+			if st != nil {
+				st.ackLatest()
+			}
+		case "Interrupt":
+			// 订阅流被中断：注销流，连接保留给同会话后续请求。
+			delete(streams, frame.RequestID)
+		case "Ping":
+			// Effect RPC 应用层心跳：回 Pong（RpcServer.ts:806）。
+			_ = write(map[string]any{"_tag": "Pong"})
 		}
 	}
+}
+
+// dropAfterActiveFlag 读取断连开关。
+func (f *fakeT3Environment) dropAfterActiveFlag() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dropAfterActive
 }
 
 // ------ 测试基建 ------
@@ -504,6 +734,7 @@ func (f *fakeT3Environment) waitStreamEnd(conn *websocket.Conn) {
 type t3TestEnv struct {
 	db   *gorm.DB
 	cfg  *config.Config
+	hub  *t3ShellHub
 	env  *T3EnvironmentService
 	th   *T3ThreadsService
 	fake *fakeT3Environment
@@ -534,13 +765,17 @@ func setupT3ServiceTest(t *testing.T) *t3TestEnv {
 		},
 	}
 	repo := repository.NewT3EnvironmentRepository(db)
-	th := NewT3ThreadsService(repo, cfg, zap.NewNop())
-	// 测试预算：毫秒级，坏环境的隔离不需要真等秒级超时。
-	th.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 2 * time.Second, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second}
+	hub := NewT3ShellHub(zap.NewNop())
+	t.Cleanup(hub.Close)
+	th := NewT3ThreadsService(repo, cfg, zap.NewNop(), hub)
+	// 测试预算：秒级封顶，坏环境的隔离不需要真等默认预算。
+	// ShellFirstSync 给足本地 fake 完成订阅的时间。
+	th.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 2 * time.Second, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second, ShellFirstSync: 2 * time.Second}
 	return &t3TestEnv{
 		db:   db,
 		cfg:  cfg,
-		env:  NewT3EnvironmentService(repo, cfg, zap.NewNop()),
+		hub:  hub,
+		env:  NewT3EnvironmentService(repo, cfg, zap.NewNop(), hub),
 		th:   th,
 		fake: fake,
 	}
@@ -927,6 +1162,27 @@ func TestT3CreateConcurrentSameName(t *testing.T) {
 
 // TestT3ThreadsAggregationAndErrorIsolation 覆盖 panel r1 #7/#8/#9：
 // 归档走独立 RPC、子代理线程排除、坏环境不拖垮健康环境。
+// listUntil 反复读列表直到条件满足。列表只等待活跃面就绪，归档面是独立订阅、
+// 稍后才到：冷启动的第一次 List 完全可能少几个归档线程、或因为归档未就绪而标
+// degraded。需要「两面都热」的断言必须先等条件成立，不能赌第一次调用的时序。
+func listUntil(t *testing.T, e *t3TestEnv, userID string, until func(*T3ThreadListResponse) bool) *T3ThreadListResponse {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		result, err := e.th.List(context.Background(), userID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if until(result) {
+			return result
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for list condition, last = %+v", result.Environments)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -988,10 +1244,11 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 	}
 	offlineServer.Close()
 
-	result, err := e.th.List(ctx, userID)
-	if err != nil {
-		t.Fatalf("list threads: %v", err)
-	}
+	// 归档线程（th-4）来自独立的归档订阅，等两面都热再断言。
+	result := listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		return len(res.Items) == 4 && len(res.Environments) == 2 &&
+			res.Environments[0].Status == T3EnvironmentStatusOK
+	})
 	// th-1 活跃、th-2 waiting、th-3 running、th-4 归档；th-5 子代理排除
 	if len(result.Items) != 4 {
 		t.Fatalf("expected 4 threads (subagent excluded), got %d: %+v", len(result.Items), result.Items)
@@ -1030,15 +1287,19 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 		t.Fatalf("subagent thread th-5 must be excluded from list")
 	}
 
-	// 归档读取走的是独立 RPC（活跃快照里归档为空）
-	var sawArchiveRPC bool
+	// 归档读取走的是归档订阅（先全量快照后增量），不再是归档一次性 RPC
+	var sawArchiveSubscribe bool
 	for _, rpc := range e.fake.recordedRPC() {
-		if rpc.method == "orchestration.getArchivedShellSnapshot" {
-			sawArchiveRPC = true
+		if rpc.method == t3RPCSubscribeArchivedShell {
+			sawArchiveSubscribe = true
 		}
 	}
-	if !sawArchiveRPC {
-		t.Fatalf("expected orchestration.getArchivedShellSnapshot one-shot RPC")
+	if !sawArchiveSubscribe {
+		t.Fatalf("expected orchestration.subscribeArchivedShell stream")
+	}
+	// 热路径复用：第一次列表只发生一次冷启动全量订阅（活跃一条连接）。
+	if got := e.fake.subscribeShellCount(); got != 1 {
+		t.Fatalf("expected exactly one cold subscribeShell, got %d", got)
 	}
 
 	// 环境数组带状态：健康环境 ok，失联环境 unreachable，单环境失败不阻塞线程返回
@@ -1056,22 +1317,32 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 		t.Fatalf("offline env status = %+v", result.Environments)
 	}
 
-	// 凭证吊销 → 该环境 repair，错误保留在 environments，items 清空
-	e.fake.revokeBearers()
-	result, err = e.th.List(ctx, userID)
+	// 第二次列表：从 hub 内存回答，不发生新的 shell 订阅，内容一致。
+	replay, err := e.th.List(ctx, userID)
 	if err != nil {
-		t.Fatalf("list threads after revoke: %v", err)
+		t.Fatalf("list threads again: %v", err)
 	}
-	if len(result.Items) != 0 {
-		t.Fatalf("expected no items after revoke, got %d", len(result.Items))
+	if len(replay.Items) != 4 {
+		t.Fatalf("expected same 4 threads on replay, got %+v", replay.Items)
 	}
-	revokedStatuses := map[string]T3EnvironmentStatus{}
-	for _, item := range result.Environments {
-		revokedStatuses[item.Id] = item.Status
+	if got := e.fake.subscribeShellCount(); got != 1 {
+		t.Fatalf("hot-path list must not resubscribe, subscribeShell count = %d", got)
 	}
-	if revokedStatuses[healthy.Id] != T3EnvironmentStatusRepair {
-		t.Fatalf("expected repair for healthy env after revoke, got %+v", result.Environments)
+	for _, rpc := range e.fake.recordedRPC() {
+		if rpc.method == "orchestration.subscribeShell" {
+			var payload map[string]any
+			if err := json.Unmarshal(rpc.payload, &payload); err != nil {
+				t.Fatalf("subscribe payload: %v", err)
+			}
+			if _, has := payload["afterSequence"]; has {
+				t.Fatalf("cold subscribe must not carry afterSequence: %+v", payload)
+			}
+		}
 	}
+
+	// 凭证吊销的列表语义见 TestT3ThreadsListCredentialRejectedSurfacesRepair
+	// （吊销发生在首次订阅之前 → Failed 分类）。entry 已就绪时吊销要等重连
+	// 才暴露，陈旧/断连语义见 TestT3ThreadsStaleAfterDisconnectNotTrusted。
 
 	// 不存在的环境
 	if _, err := e.th.Detail(ctx, userID, "no-env", "th-1"); err == nil || t3ErrCode(err) != errs.ErrT3EnvironmentNotFound.Code {
@@ -1079,8 +1350,9 @@ func TestT3ThreadsAggregationAndErrorIsolation(t *testing.T) {
 	}
 }
 
-// TestT3ThreadsSlowEnvironmentIsolated 慢环境吃满单环境预算后，
-// 健康环境结果照常返回（panel r1 #9：坏环境不拖垮健康结果）。
+// TestT3ThreadsSlowEnvironmentIsolated 慢环境吃满等待预算后，健康环境结果
+// 照常返回（坏环境不拖垮健康结果）。慢环境的 hub 首次同步等不到权威快照，
+// 按 Syncing 的新鲜度如实降级（正在同步），不再伪装成 unreachable。
 func TestT3ThreadsSlowEnvironmentIsolated(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -1102,7 +1374,7 @@ func TestT3ThreadsSlowEnvironmentIsolated(t *testing.T) {
 
 	// 慢环境：会话探测挂起，直到预算超时也不应答。
 	// 缩小环境服务预算，配对后的即时探测也在毫秒级返回。
-	e.env.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 300 * time.Millisecond, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second}
+	e.env.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 300 * time.Millisecond, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second, ShellFirstSync: 300 * time.Millisecond}
 	release := make(chan struct{})
 	slowFake := newFakeT3Environment(t)
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1118,7 +1390,7 @@ func TestT3ThreadsSlowEnvironmentIsolated(t *testing.T) {
 		t.Fatalf("create slow env: %v", err)
 	}
 
-	e.th.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 300 * time.Millisecond, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second}
+	e.th.budgets = t3RemoteBudgets{Round: 5 * time.Second, PerEnvironment: 300 * time.Millisecond, ThreadDetail: 5 * time.Second, ItemDetail: 5 * time.Second, ShellFirstSync: 300 * time.Millisecond}
 	started := time.Now()
 	result, err := e.th.List(ctx, userID)
 	if err != nil {
@@ -1131,11 +1403,17 @@ func TestT3ThreadsSlowEnvironmentIsolated(t *testing.T) {
 		t.Fatalf("healthy environment results must survive, got %+v", result.Items)
 	}
 	statuses := map[string]T3EnvironmentStatus{}
+	msgs := map[string]string{}
 	for _, item := range result.Environments {
 		statuses[item.Id] = item.Status
+		msgs[item.Id] = api.Deref(item.Error)
 	}
-	if statuses[slowEnvID(t, e, userID, "慢")] != T3EnvironmentStatusUnreachable {
-		t.Fatalf("slow env should be unreachable, got %+v", result.Environments)
+	slowID := slowEnvID(t, e, userID, "慢")
+	if statuses[slowID] != T3EnvironmentStatusDegraded {
+		t.Fatalf("slow env should degrade as syncing, got %+v", result.Environments)
+	}
+	if !strings.Contains(msgs[slowID], "正在同步") {
+		t.Fatalf("expected syncing banner, got %q", msgs[slowID])
 	}
 }
 
@@ -1421,7 +1699,8 @@ func TestT3ThreadDetailUsesTrustedShell(t *testing.T) {
 		t.Fatalf("pending-input thread status = %+v", wait.Thread)
 	}
 
-	// 同一线程两次详情：运行中（后台 run）→ 静止（idle），状态跟随 shell 而非投影
+	// 同一线程两次详情：运行中（后台 run）→ 静止（idle），状态跟随 shell 而非
+	// 投影；变化由订阅流推送增量驱动（INT-116：不再靠替换 fixture 等新连接）。
 	run, err := e.th.Detail(ctx, userID, env.Id, "th-run")
 	if err != nil {
 		t.Fatalf("running detail: %v", err)
@@ -1429,12 +1708,7 @@ func TestT3ThreadDetailUsesTrustedShell(t *testing.T) {
 	if run.Thread.Status != "running" {
 		t.Fatalf("expected running from activityRunStatus, got %+v", run.Thread)
 	}
-	e.fake.mu.Lock()
-	e.fake.snapshot = shellSnapshotFixture(
-		[]any{map[string]any{"id": "p-1", "title": "P"}},
-		[]any{shellThread("th-run", "后台跑", "idle", nil)}, // run 停了
-	)
-	e.fake.mu.Unlock()
+	e.fake.pushThreadDelta(t, shellThread("th-run", "后台跑", "idle", nil)) // run 停了
 	idle, err := e.th.Detail(ctx, userID, env.Id, "th-run")
 	if err != nil {
 		t.Fatalf("idle detail: %v", err)
@@ -1767,13 +2041,18 @@ func mustJSON(v any) json.RawMessage {
 	return data
 }
 
+// t3ChunkFrame 组装流式块帧（effect rpc：同一 requestId 的多个 value 共享一次 Ack）。
+func t3ChunkFrame(requestID any, values []json.RawMessage) map[string]any {
+	return map[string]any{"_tag": "Chunk", "requestId": requestID, "values": values}
+}
+
 func mustJSONString(v any) string {
 	return string(mustJSON(v))
 }
 
-// TestT3ThreadsSnapshotWriteFailureKeepsActive 覆盖审查 r1#3：活跃快照已经
-// 完整收下后，收尾写（Ack/Interrupt）失败不推翻活跃面——与归档 RPC 失败
-// 同一降级：活跃线程照常返回，环境标降级，错误写进 ArchiveErr。
+// TestT3ThreadsSnapshotWriteFailureKeepsActive 覆盖：快照完整收下后连接立即
+// 被服务端断开（收尾写必失败）——活跃线程不丢（先入内存），hub 以
+// afterSequence 自动恢复订阅后回到 Ready，列表继续给出线程。
 func TestT3ThreadsSnapshotWriteFailureKeepsActive(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -1791,15 +2070,62 @@ func TestT3ThreadsSnapshotWriteFailureKeepsActive(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
+	// 第一次列表：快照已到手（断连发生在快照之后），线程照常返回。
 	result, err := e.th.List(ctx, userID)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	if len(result.Items) != 1 || result.Items[0].Id != "th-1" {
-		t.Fatalf("active threads must survive post-snapshot write failure, got %+v", result.Items)
+		t.Fatalf("active threads must survive post-snapshot drop, got %+v", result.Items)
 	}
-	if len(result.Environments) != 1 || result.Environments[0].Status != T3EnvironmentStatusDegraded {
-		t.Fatalf("post-snapshot failure must mark the environment degraded, got %+v", result.Environments)
+
+	// hub 自动恢复：等服务端看到第二次订阅（带 afterSequence 的续订）。
+	deadline := time.Now().Add(3 * time.Second)
+	for e.fake.subscribeShellCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("hub did not resubscribe after the post-snapshot drop")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, rpc := range e.fake.recordedRPC() {
+		if rpc.method == t3RPCSubscribeShell && strings.Contains(string(rpc.payload), "afterSequence") {
+			var payload map[string]any
+			if err := json.Unmarshal(rpc.payload, &payload); err != nil {
+				t.Fatalf("payload: %v", err)
+			}
+			if payload["afterSequence"] != float64(1) {
+				t.Fatalf("resume afterSequence = %v, want 1", payload["afterSequence"])
+			}
+		}
+	}
+
+	// 恢复后列表照常：内存数据 + 续订都指向同一线程集。
+	recovered := waitForEnvStatus(t, func() (T3EnvironmentStatus, []T3ThreadSummary) {
+		list, err := e.th.List(ctx, userID)
+		if err != nil || len(list.Environments) == 0 {
+			return "", nil
+		}
+		return list.Environments[0].Status, list.Items
+	}, T3EnvironmentStatusOK, 3*time.Second)
+	if len(recovered) != 1 || recovered[0].Id != "th-1" {
+		t.Fatalf("threads must survive the drop across resubscribe, got %+v", recovered)
+	}
+}
+
+// waitForEnvStatus 轮询直到环境状态达到期望（hub 的恢复/重连是异步的），
+// 返回最后一次的线程列表。
+func waitForEnvStatus(t *testing.T, read func() (T3EnvironmentStatus, []T3ThreadSummary), want T3EnvironmentStatus, timeout time.Duration) []T3ThreadSummary {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		status, items := read()
+		if status == want && items != nil {
+			return items
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for env status %v, last = %v (items=%d)", want, status, len(items))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -1831,6 +2157,439 @@ func TestT3ThreadDetailRevokedCredentialHintsRepair(t *testing.T) {
 	var appErr *errs.AppError
 	if !errors.As(err, &appErr) || !strings.Contains(appErr.Message, "重新配对") {
 		t.Fatalf("expected re-pair hint in message, got %v", err)
+	}
+}
+
+// TestT3ThreadsListCredentialRejectedSurfacesRepair 覆盖 hub 的 Failed 分类：
+// 首次订阅前凭证已被吊销 → 探测 repair → View 给 Failed（凭证被拒），列表
+// 标 repair 且无线程，而不是笼统 unreachable。
+func TestT3ThreadsListCredentialRejectedSurfacesRepair(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "吊销列表机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 先吊销再列表：hub 首连探测 401 → Failed（凭证被拒）。
+	e.fake.revokeBearers()
+	result, err := e.th.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(result.Items) != 0 {
+		t.Fatalf("expected no items when credentials rejected, got %+v", result.Items)
+	}
+	if len(result.Environments) != 1 || result.Environments[0].Status != T3EnvironmentStatusRepair {
+		t.Fatalf("expected repair status, got %+v", result.Environments)
+	}
+	if msg := api.Deref(result.Environments[0].Error); !strings.Contains(msg, "重新配对") {
+		t.Fatalf("expected re-pair hint, got %q", msg)
+	}
+
+	// 详情同样给「请重新配对」指引（Failed + 凭证被拒的专用文案）。
+	_, err = e.th.Detail(ctx, userID, env.Id, "th-1")
+	if err == nil || t3ErrCode(err) != errs.ErrT3Upstream.Code {
+		t.Fatalf("expected upstream error, got %v", err)
+	}
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || !strings.Contains(appErr.Message, "重新配对") {
+		t.Fatalf("expected re-pair hint in detail error, got %v", err)
+	}
+}
+
+// 凭证在订阅存活期间被吊销：重连探测被拒时视图是 Stale（已经有权威快照），
+// 必须回到 repair 并给「请重新配对」——不能长期停在 degraded「正在重连」被
+// 反复重试（codex 云端审查 P2）。
+func TestT3ThreadsStaleCredentialRejectionSurfacesRepair(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "存活吊销机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 等热起来：活跃面到得快、归档面可能稍后（归档未就绪时列表是 degraded），
+	// 这里要的是「已有快照且健康」这个前置状态。
+	listUntil(t, e, userID, func(res *T3ThreadListResponse) bool {
+		return len(res.Items) == 1 && res.Environments[0].Status == T3EnvironmentStatusOK
+	})
+
+	// 已有快照后吊销凭证并断开连接：重连探测 401 → Stale + 凭证被拒。
+	e.fake.revokeBearers()
+	e.fake.dropConnections()
+
+	repairDeadline := time.Now().Add(8 * time.Second)
+	var status T3EnvironmentStatus
+	var msg string
+	for time.Now().Before(repairDeadline) {
+		listed, listErr := e.th.List(ctx, userID)
+		if listErr != nil {
+			t.Fatalf("list: %v", listErr)
+		}
+		status = listed.Environments[0].Status
+		msg = api.Deref(listed.Environments[0].Error)
+		if status == T3EnvironmentStatusRepair {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if status != T3EnvironmentStatusRepair {
+		t.Fatalf("stale credential rejection must map to repair, got %s (%q)", status, msg)
+	}
+	if !strings.Contains(msg, "重新配对") {
+		t.Fatalf("expected re-pair hint, got %q", msg)
+	}
+
+	// 详情同样给「请重新配对」，而不是一句笼统的「正在同步」。
+	_, err = e.th.Detail(ctx, userID, env.Id, "th-1")
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || !strings.Contains(appErr.Message, "重新配对") {
+		t.Fatalf("expected re-pair hint in detail error, got %v", err)
+	}
+}
+
+// TestT3ThreadsArchiveNotReadyDegrades 覆盖 G1 的「未就绪」半边：归档订阅已
+// 受理但全量快照未到（两条连接进度独立）时，活跃线程照常返回、环境标
+// degraded「归档线程暂不可读」；放行后归档快照到达，状态收敛为 ok。
+func TestT3ThreadsArchiveNotReadyDegrades(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.archive = mustJSON(map[string]any{
+		"schemaVersion": 1, "snapshotSequence": 2,
+		"projects": []any{map[string]any{"id": "p-1", "title": "P"}},
+		"threads":  []any{shellThread("th-2", "归档线程", "idle", map[string]any{"archivedAt": "2026-10-01T00:00:00.000Z"})},
+	})
+	gate := make(chan struct{})
+	e.fake.archiveGate = gate
+	e.fake.mu.Unlock()
+
+	if _, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "归档慢机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	result, err := e.th.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Id != "th-1" {
+		t.Fatalf("active threads must be served while archive is not ready, got %+v", result.Items)
+	}
+	if len(result.Environments) != 1 || result.Environments[0].Status != T3EnvironmentStatusDegraded {
+		t.Fatalf("archive-not-ready must degrade the environment, got %+v", result.Environments)
+	}
+	if msg := api.Deref(result.Environments[0].Error); !strings.Contains(msg, "归档") {
+		t.Fatalf("expected archive banner, got %q", msg)
+	}
+
+	// 放行归档快照 → 状态收敛 ok，归档线程出现。
+	close(gate)
+	items := waitForEnvStatus(t, func() (T3EnvironmentStatus, []T3ThreadSummary) {
+		list, err := e.th.List(ctx, userID)
+		if err != nil || len(list.Environments) == 0 {
+			return "", nil
+		}
+		return list.Environments[0].Status, list.Items
+	}, T3EnvironmentStatusOK, 3*time.Second)
+	if len(items) != 2 {
+		t.Fatalf("archived thread must appear after the snapshot arrives, got %+v", items)
+	}
+}
+
+// TestT3ThreadsStaleAfterDisconnectNotTrusted 覆盖新鲜度契约：连接断开且
+// 重连被拒（吊销）后进入 Stale——列表如实降级标注「连接已断开」；详情/Stop
+// 不用陈旧快照回答运行态（陈旧 idle 会让前端停止轮询、让 Stop 无事可做）。
+func TestT3ThreadsStaleAfterDisconnectNotTrusted(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "陈旧机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 先就绪一次（entry 建立、快照到手）。
+	result, err := e.th.List(ctx, userID)
+	if err != nil || len(result.Items) != 1 {
+		t.Fatalf("initial list must be ready, got %+v err=%v", result, err)
+	}
+
+	// 吊销凭证并断开连接：重连探测 401 → entry 有数据但连接失败 → Stale。
+	e.fake.revokeBearers()
+	e.fake.dropConnections()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		result, err = e.th.List(ctx, userID)
+		if err == nil && len(result.Environments) == 1 && result.Environments[0].Status == T3EnvironmentStatusDegraded &&
+			strings.Contains(api.Deref(result.Environments[0].Error), "连接已断开") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected stale degraded banner, last = %+v err=%v", result, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Stale 的内存线程仍如实展示。
+	if len(result.Items) != 1 || result.Items[0].Id != "th-1" {
+		t.Fatalf("stale list must keep serving in-memory threads, got %+v", result.Items)
+	}
+
+	// 详情：陈旧命中不当可信运行态 → 50202「暂时不可读」，绝不返回 running。
+	_, err = e.th.Detail(ctx, userID, env.Id, "th-1")
+	if err == nil || t3ErrCode(err) != errs.ErrT3Upstream.Code {
+		t.Fatalf("expected upstream error for stale hit, got %v", err)
+	}
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || !strings.Contains(appErr.Message, "暂时不可读") {
+		t.Fatalf("expected unreadable-runtime message, got %v", err)
+	}
+
+	// Stop 同一口径：不基于陈旧快照下「无事可做」的结论。
+	if _, err := e.th.StopThread(ctx, userID, env.Id, "th-1"); err == nil || t3ErrCode(err) != errs.ErrT3Upstream.Code {
+		t.Fatalf("expected upstream error for stale stop, got %v", err)
+	}
+}
+
+// TestT3ThreadsListReflectsPushDeltas 覆盖增量驱动：列表状态变化由订阅流
+// 推送驱动（thread.updated / thread.removed），全程不重连、不重新全量订阅。
+func TestT3ThreadsListReflectsPushDeltas(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "增量线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	if _, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "增量机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	result, err := e.th.List(ctx, userID)
+	if err != nil || len(result.Items) != 1 || result.Items[0].Status != "running" {
+		t.Fatalf("initial list = %+v err=%v", result, err)
+	}
+
+	// 推送运行态变化 → 列表跟随。
+	e.fake.pushThreadDelta(t, shellThread("th-1", "增量线程", "idle", nil))
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		result, err = e.th.List(ctx, userID)
+		if err == nil && len(result.Items) == 1 && result.Items[0].Status == "idle" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delta did not surface in list, last = %+v err=%v", result, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 推送删除 → 线程从列表消失。
+	e.fake.pushThreadRemoval(t, "th-1")
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		result, err = e.th.List(ctx, userID)
+		if err == nil && len(result.Items) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("removal did not surface in list, last = %+v err=%v", result, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 全程只发生一次冷启动全量订阅。
+	if got := e.fake.subscribeShellCount(); got != 1 {
+		t.Fatalf("push-driven updates must not resubscribe, subscribeShell count = %d", got)
+	}
+}
+
+// TestT3EnvironmentUpdateAndDeleteDropHubEntry 覆盖环境服务与 hub 的接线：
+// 重配（凭证变更）落库后 config_revision 自增、清 entry 并以新世代记 floor；
+// 携带旧世代的迟到请求被拒；删除后同样清 entry，且任何世代都被拒——
+// 后续列表用新凭证/不再复活旧订阅。
+func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "换证机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 列表建立 entry。
+	if _, err := e.th.List(ctx, userID); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	e.hub.mu.Lock()
+	entries := len(e.hub.entries)
+	e.hub.mu.Unlock()
+	if entries != 1 {
+		t.Fatalf("expected one hub entry after list, got %d", entries)
+	}
+	beforeRow, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
+	if err != nil {
+		t.Fatalf("load env before re-pair: %v", err)
+	}
+
+	// 重配（凭证变更）→ config_revision 自增、Drop：entry 被清、floor 记新世代。
+	e.fake.revokeBearers()
+	if _, err := e.env.Update(ctx, userID, env.Id, &UpdateT3EnvironmentRequest{PairingUrl: strPtr(e.fake.pairingURL(e.fake.baseURL))}); err != nil {
+		t.Fatalf("re-pair: %v", err)
+	}
+	e.hub.mu.Lock()
+	entries, floors := len(e.hub.entries), len(e.hub.floors)
+	e.hub.mu.Unlock()
+	if entries != 0 || floors == 0 {
+		t.Fatalf("re-pair must drop the hub entry and record floor, entries=%d floors=%d", entries, floors)
+	}
+	afterRow, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
+	if err != nil {
+		t.Fatalf("load env after re-pair: %v", err)
+	}
+	if afterRow.ConfigRevision != beforeRow.ConfigRevision+1 {
+		t.Fatalf("re-pair must bump config_revision exactly once: %d -> %d", beforeRow.ConfigRevision, afterRow.ConfigRevision)
+	}
+	// 携带旧世代（重配前读出的行）的迟到请求被拒，且不复活 entry。
+	stale := *beforeRow
+	staleToken, err := e.th.bearerToken(&stale)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := e.th.viewShell(ctx, &stale, staleToken); err == nil || !strings.Contains(err.Error(), "请重试") {
+		t.Fatalf("stale revision view after re-pair = %v, want retryable 请重试", err)
+	}
+	e.hub.mu.Lock()
+	entries = len(e.hub.entries)
+	e.hub.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("stale view must not resurrect the entry, entries = %d", entries)
+	}
+
+	// 新凭证列表照常（entry 以新世代重建）。
+	result, err := e.th.List(ctx, userID)
+	if err != nil || len(result.Items) != 1 {
+		t.Fatalf("list after re-pair = %+v err=%v", result, err)
+	}
+
+	// 删除 → Drop（tombstone = 删除前 revision + 1）。
+	if err := e.env.Delete(ctx, userID, env.Id); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	e.hub.mu.Lock()
+	entries = len(e.hub.entries)
+	e.hub.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("delete must drop the hub entry, entries=%d", entries)
+	}
+	// 删除后任何世代都被拒：即使带着删除前最后读出的行（最新 revision）也不得
+	// 复活订阅。
+	last := *afterRow
+	lastToken, err := e.th.bearerToken(&last)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := e.th.viewShell(ctx, &last, lastToken); err == nil || !strings.Contains(err.Error(), "请重试") {
+		t.Fatalf("view after delete = %v, want retryable 请重试", err)
+	}
+}
+
+// F5：版本守卫拒绝（errT3ShellConfigStale）不再内部重读环境重试——统一翻译
+// 成「环境配置已更新，请重试」的可重试错误，且不得借重读把 entry 复活
+// （重读会让同一操作拼成「新配置 shell + 旧配置投影/写」的跨环境错配）。
+func TestT3ThreadsStaleConfigViewIsRetryable(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "配置变更机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := e.th.List(ctx, userID); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	// 构造「配置已在别处被替换或删除（hub trail 已 Drop 到 tombstone）」的世界，
+	// 迟到请求仍拿着 tombstone 之前的行与旧凭证。改名随后落库：它不递增
+	// config_revision，改变不了任何请求携带的世代。
+	row, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
+	if err != nil {
+		t.Fatalf("load env: %v", err)
+	}
+	e.hub.Drop(userID, env.Id, row.ConfigRevision+1)
+	if err := e.env.repo.Update(ctx, env.Id, userID, &repository.T3EnvironmentUpdate{
+		Name:      api.Ptr("配置变更机-v2"),
+		UpdatedAt: row.UpdatedAt.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("rename env: %v", err)
+	}
+
+	stale := *row
+	token, err := e.th.bearerToken(&stale)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := e.th.viewShell(ctx, &stale, token); err == nil || !strings.Contains(err.Error(), "请重试") {
+		t.Fatalf("stale view error = %v, want retryable 请重试", err)
+	}
+	// 内部重读会拿到与 tombstone 之前相同的世代（改名不递增）并复活 entry——
+	// 新语义必须保持拒绝。
+	e.hub.mu.Lock()
+	entries := len(e.hub.entries)
+	e.hub.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("stale view must not resurrect the entry via internal re-read, entries = %d", entries)
 	}
 }
 
