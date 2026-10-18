@@ -124,7 +124,8 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 （手动立即执行一次）与 `dry_run` 预览（见下节）。已发布版本（v1–v5）的
 注册表都是**冻结副本**——新版本变化不得改写旧版本的字节（存量会话的
 tools_hash 失稳即前缀失稳；v1–v5 的 hash 逐字节钉死在测试基线里）。版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
-规则并递增 prompt_revision）；告知由 `maybeTellToolset` 按 `last_told_version`
+规则并递增 prompt_revision）；「首次运行」对主线与定时任务会话都适用（激活在
+冻结本次 run 的配置与会话快照之前完成）。告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
 旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
@@ -566,8 +567,10 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   由平台确认按钮兜底，不用文字列 A/B/C；只打招呼或闲聊时只回问候、不接着做
   之前的任务；不向用户转述运行时上下文与系统提示；没有新用户输入的唤醒
   （后台结果、运行时上下文）默认安静，结果符合预期最多回一句，失败或异常
-  才主动汇报。版本递增后存量机器人在进程重启或压缩边界重建提示词
-  （`activateOnProcessStart` / `activateToolsetTx`），不需要迁移数据。
+  才主动汇报。版本递增后存量机器人在进程内首次运行或压缩边界重建提示词
+  （`activateOnProcessStart` / `activateToolsetTx`），不需要迁移数据；激活在
+  `captureRunFreeze` 之前完成，主线与定时任务会话同等适用——否则重启后先跑的
+  schedule run 会一直用旧提示词与旧工具集。
 - **运行时上下文 note 分支**（`bot_context.go` 的 `buildRunContextWith`）：
   有 `pending_inputs` 时说明它们是尚未处理的新输入、要决定继续/调整/停止；
   没有时明确写「本轮没有新的用户输入」，并声明这段上下文不是新指令、不要向

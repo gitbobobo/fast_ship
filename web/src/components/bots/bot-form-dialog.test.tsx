@@ -166,14 +166,17 @@ describe("BotFormDialog 能力展示", () => {
 // INT-122：新建时人设预填默认模板，引导用户改成自己的要求；
 // 编辑仍回填已存人设，用户清空即保存为空，模板不强制补回。
 describe("BotFormDialog 人设预填", () => {
+  const createMutateAsync = vi.fn();
+  const updateMutateAsync = vi.fn();
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(useCreateBot).mockReturnValue({
-      mutateAsync: vi.fn(),
+      mutateAsync: createMutateAsync,
       isPending: false,
     } as unknown as ReturnType<typeof useCreateBot>);
     vi.mocked(useUpdateBot).mockReturnValue({
-      mutateAsync: vi.fn(),
+      mutateAsync: updateMutateAsync,
       isPending: false,
     } as unknown as ReturnType<typeof useUpdateBot>);
     vi.mocked(useTestBotConnection).mockReturnValue({
@@ -215,5 +218,46 @@ describe("BotFormDialog 人设预填", () => {
     await user.clear(textarea);
 
     expect(textarea).toHaveValue("");
+  });
+
+  it("新建模式清空人设后保存：提交空 persona_prompt", async () => {
+    createMutateAsync.mockResolvedValue(botFixture);
+    const user = userEvent.setup();
+    renderDialog(null);
+
+    await user.clear(screen.getByLabelText("人设提示词"));
+    await user.type(screen.getByLabelText("名称"), "发布助手");
+    await user.type(
+      screen.getByLabelText("API 地址"),
+      "https://api.example.com/v1",
+    );
+    await user.type(screen.getByLabelText("模型"), "deepseek-flash");
+    await user.type(screen.getByLabelText("API Key"), "sk-test-key");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(createMutateAsync).toHaveBeenCalledWith({
+      name: "发布助手",
+      persona_prompt: "",
+      base_url: "https://api.example.com/v1",
+      model: "deepseek-flash",
+      api_key: "sk-test-key",
+    });
+  });
+
+  it("编辑模式清空人设后保存：提交空 persona_prompt", async () => {
+    updateMutateAsync.mockResolvedValue(botFixture);
+    const user = userEvent.setup();
+    renderDialog({ ...botFixture, persona_prompt: "已存人设，语气冷静。" });
+
+    await user.clear(screen.getByLabelText("人设提示词"));
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    // 编辑时 api_key 留空表示保留已存密钥，不随请求发送。
+    expect(updateMutateAsync).toHaveBeenCalledWith({
+      name: "发布助手",
+      persona_prompt: "",
+      base_url: "https://api.example.com/v1/",
+      model: "deepseek-flash",
+    });
   });
 });
