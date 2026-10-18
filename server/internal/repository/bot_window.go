@@ -28,6 +28,19 @@ func (r *BotWindowRepository) FindByAddrModel(baseURL, modelName string) (*model
 	return &row, nil
 }
 
+// FindByAddrModelFold 大小写折叠命中一行缓存（LOWER(model) = LOWER(?)）：
+// 配置的模型名是 /models 条目的大小写变体时同样命中。多个变体共存时窗口值
+// 更大的行排前——失败标记（窗口 0）不得遮蔽同一模型的大小写变体成功行。
+func (r *BotWindowRepository) FindByAddrModelFold(baseURL, modelName string) (*model.BotModelWindow, error) {
+	var row model.BotModelWindow
+	if err := r.db.Where("base_url = ? AND LOWER(model) = LOWER(?)", baseURL, modelName).
+		Order(clause.OrderByColumn{Column: clause.Column{Name: "context_window"}, Desc: true}).
+		First(&row).Error; err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
 // Upsert 按 (base_url, model) 唯一索引覆盖写入：重复探测不产生第二行，
 // 旧值整体被新探测结果替换。failed_at 在赋值列里——成功写把 nil 写成 NULL，
 // 清除既有的失败退避时间。

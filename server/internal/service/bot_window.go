@@ -56,6 +56,29 @@ func botNormalizeBaseURL(raw string) string {
 	return strings.TrimRight(strings.TrimSpace(raw), "/")
 }
 
+// findWindowRow 统一缓存查找口径（第六轮复审 H1）：先按原样模型名精确查；
+// 精确未命中、或命中的是失败标记（ContextWindow = 0）时再按大小写折叠查，
+// 折叠行是成功行则优先返回它（失败标记不得遮蔽同一模型的大小写变体成功行），
+// 否则维持精确查询的结果。主模型与辅助模型、任何大小写变体都走同一口径，
+// 不再依赖 persistModelWindows 的别名落行才能命中。
+func (s *BotService) findWindowRow(baseURL, modelName string) (*model.BotModelWindow, error) {
+	row, err := s.windows.FindByAddrModel(baseURL, modelName)
+	if err == nil && row.ContextWindow > 0 {
+		return row, nil
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	folded, ferr := s.windows.FindByAddrModelFold(baseURL, modelName)
+	if ferr == nil && folded.ContextWindow > 0 {
+		return folded, nil
+	}
+	if ferr != nil && !errors.Is(ferr, gorm.ErrRecordNotFound) {
+		return nil, ferr
+	}
+	return row, err
+}
+
 // capabilityFor 按解析顺序（先命中先用）返回地址+模型的能力：
 //  1. 部署覆盖 cfg.Bots.Context.ModelWindows[model] > 0 → manual
 //  2. bot_model_windows 缓存行 ContextWindow > 0 → detected
@@ -64,17 +87,17 @@ func botNormalizeBaseURL(raw string) string {
 // manual 是字段级覆盖（INT-115 F4）：只覆盖窗口；已探测到的输出上限仍从
 // 缓存行读取——否则 inputBudgetFor 不再预留输出空间、辅助请求失去封顶。
 // 缓存无行或行内上限缺失（0）时输出上限为 0。detected 分支的窗口与输出
-// 上限都来自缓存行。
+// 上限都来自缓存行。缓存查找统一走 findWindowRow（大小写折叠口径）。
 func (s *BotService) capabilityFor(baseURL, modelName string) botModelCapability {
 	if w, ok := s.cfg.Bots.Context.ModelWindows[modelName]; ok && w > 0 {
 		cap := botModelCapability{WindowTokens: w, Source: "manual", Detail: "部署配置覆盖窗口"}
-		if row, err := s.windows.FindByAddrModel(botNormalizeBaseURL(baseURL), modelName); err == nil && row != nil && row.MaxOutputTokens > 0 {
+		if row, err := s.findWindowRow(botNormalizeBaseURL(baseURL), modelName); err == nil && row != nil && row.MaxOutputTokens > 0 {
 			cap.MaxOutputTokens = row.MaxOutputTokens
 			cap.Detail = "部署配置覆盖窗口；输出上限沿用探测缓存"
 		}
 		return cap
 	}
-	if row, err := s.windows.FindByAddrModel(botNormalizeBaseURL(baseURL), modelName); err == nil && row != nil && row.ContextWindow > 0 {
+	if row, err := s.findWindowRow(botNormalizeBaseURL(baseURL), modelName); err == nil && row != nil && row.ContextWindow > 0 {
 		cap := botModelCapability{
 			WindowTokens:    row.ContextWindow,
 			MaxOutputTokens: row.MaxOutputTokens,
@@ -485,7 +508,7 @@ func (s *BotService) refreshBotModelWindowAsync(botID string) {
 func (s *BotService) ensureModelWindow(bot *model.Bot, run *model.BotRun, apiKey string, inputEstimate int64) {
 	baseURL := botNormalizeBaseURL(runBaseURLOf(run, bot))
 	modelName := runModelOf(run, bot)
-	if row, err := s.windows.FindByAddrModel(baseURL, modelName); err == nil && row != nil {
+	if row, err := s.findWindowRow(baseURL, modelName); err == nil && row != nil {
 		now := s.now()
 		if row.ContextWindow > 0 {
 			// 成功行先看失败退避：fetched_at 过期后探测失败过，退避期内不再

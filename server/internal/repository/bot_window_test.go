@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -184,5 +185,76 @@ func TestBotWindowMarkProbeFailed(t *testing.T) {
 	}
 	if row2.Detail != "again" || row2.FailedAt == nil || row2.FailedAt.Sub(refreshAt).Abs() > time.Second {
 		t.Fatalf("失败行刷新应同时更新 failed_at: %+v", row2)
+	}
+}
+
+// 第六轮复审（INT-115）：大小写折叠查找。LOWER(model) 命中变体；失败标记与
+// 大小写变体成功行共存时成功行排前——两种落行顺序都必须成立（折叠查询多行
+// 命中的返回顺序若不确定，失败行会随机遮蔽成功行）。
+func TestBotWindowFindByAddrModelFold(t *testing.T) {
+	base := "https://api.example.com/v1"
+	seed := func(repo *BotWindowRepository, name string, window int64) {
+		t.Helper()
+		now := time.Now().UTC()
+		var err error
+		if window == 0 {
+			err = repo.UpsertFailure(&model.BotModelWindow{
+				ID: uuid.NewString(), BaseURL: base, Model: name,
+				ContextWindow: 0, Source: "detect_failed", Detail: "boom",
+				FetchedAt: now, FailedAt: &now, UpdatedAt: now,
+			})
+		} else {
+			err = repo.Upsert(&model.BotModelWindow{
+				ID: uuid.NewString(), BaseURL: base, Model: name,
+				ContextWindow: window, MaxOutputTokens: 16384,
+				Source: "detected", Detail: "GET /models",
+				FetchedAt: now, UpdatedAt: now,
+			})
+		}
+		if err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	type foldSeed struct {
+		modelName string
+		window    int64
+	}
+	for _, tc := range []struct {
+		label string
+		seeds []foldSeed // 落行顺序
+	}{
+		{"成功行先落", []foldSeed{{"M1", 65536}, {"m1", 0}}},
+		{"失败行先落", []foldSeed{{"m1", 0}, {"M1", 65536}}},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			_, repo := setupBotWindowTestDB(t)
+			for _, s := range tc.seeds {
+				seed(repo, s.modelName, s.window)
+			}
+
+			// 折叠查优先返回成功行，不受落行顺序影响。
+			row, err := repo.FindByAddrModelFold(base, "m1")
+			if err != nil || row.Model != "M1" || row.ContextWindow != 65536 {
+				t.Fatalf("失败标记不得遮蔽变体成功行: %+v err=%v", row, err)
+			}
+			// 精确查找不受影响（对照：命中 m1 失败标记本身）。
+			exact, err := repo.FindByAddrModel(base, "m1")
+			if err != nil || exact.ContextWindow != 0 {
+				t.Fatalf("精确查找应命中失败行: %+v err=%v", exact, err)
+			}
+		})
+	}
+
+	// 仅失败变体：折叠查仍返回失败行（服务层据此维持失败语义）。
+	_, repo := setupBotWindowTestDB(t)
+	seed(repo, "m2", 0)
+	frow, err := repo.FindByAddrModelFold(base, "M2")
+	if err != nil || frow.ContextWindow != 0 {
+		t.Fatalf("仅失败变体时应返回失败行: %+v err=%v", frow, err)
+	}
+	// 无行返回 ErrRecordNotFound，调用方按「缓存缺失」处理。
+	if _, err := repo.FindByAddrModelFold(base, "m3"); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("无行应返回 ErrRecordNotFound: %v", err)
 	}
 }

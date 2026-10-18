@@ -617,6 +617,35 @@ describe("useBotChat", () => {
     expect(stream.captured?.afterSeq).toBe(11);
   });
 
+  // ---- H2：指标随新模型请求刷新 ----
+
+  it("新 message_id 的首个 text_delta 触发一次快照重读，同一 id 不重复", async () => {
+    hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    const before = api.getChatSnapshot.mock.calls.length;
+
+    // 首个 text_delta 到达即重读快照：服务端对进行中的请求已返回
+    // running + input_tokens_estimate，指标随新请求切换。
+    emit("delta", { kind: "text_delta", message_id: "m-x", payload: { text: "第一段" } }, 10);
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1),
+    );
+
+    // 同一 message_id 的后续 delta 与坏帧都不再触发。
+    emit("delta", { kind: "text_delta", message_id: "m-x", payload: { text: "第二段" } }, 11);
+    act(() => {
+      stream.captured?.onEvent({ event: "delta", data: "{broken", id: 12 });
+    });
+    await act(async () => {});
+    expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1);
+
+    // 新一轮模型请求（新 message_id）再触发一次。
+    emit("delta", { kind: "text_delta", message_id: "m-y", payload: { text: "新一轮" } }, 13);
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 2),
+    );
+  });
+
   it("StrictMode 双挂载不产生重复消息", async () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },

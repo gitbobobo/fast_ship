@@ -2007,3 +2007,101 @@ func TestBotWindowDetectCachesAllModels(t *testing.T) {
 		t.Fatalf("辅助模型能力解析应命中缓存: %+v", capability)
 	}
 }
+
+// ---------- 第六轮复审 H1：大小写折叠的统一查找口径 ----------
+
+// TestBotWindowAuxModelCaseVariantHitsCache（H1）：缓存里只有列表原样名 M1
+// （主模型精确同名，别名只为主请求名而落）时，配置成大小写变体 m1 的辅助
+// 模型此前按精确名查不到、永远走 fallback。统一折叠查找后 capabilityFor 命中
+// detected（含 manual 覆盖窗口时沿用变体行的输出上限），ensureModelWindow 也
+// 视其为新鲜不再探测。
+func TestBotWindowAuxModelCaseVariantHitsCache(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200,
+		`{"data":[{"id":"M1","context_window":65536,"max_output_tokens":16384}]}`)
+	userID := createBotTestUser(t, env.db, "winauxfold")
+	bot := createBotRowAt(t, env, userID, ps.URL(), "M1")
+
+	// 主模型精确同名：只落一行 M1——后续变体查找只能靠折叠口径命中。
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "M1"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	var count int64
+	env.db.Model(&model.BotModelWindow{}).
+		Where("base_url = ?", botNormalizeBaseURL(ps.URL())).Count(&count)
+	if count != 1 {
+		t.Fatalf("精确同名探测应只有一行缓存，实得 %d", count)
+	}
+
+	// 辅助模型配置成大小写变体 m1：命中 detected，窗口/上限正确。
+	cap := env.bots.capabilityFor(ps.URL(), "m1")
+	if cap.Source != "detected" || cap.WindowTokens != 65536 || cap.MaxOutputTokens != 16384 {
+		t.Fatalf("大小写变体应命中 detected 缓存: %+v", cap)
+	}
+	// manual 覆盖窗口时，变体行里的输出上限仍生效。
+	env.cfg.Bots.Context.ModelWindows = map[string]int64{"m1": 100000}
+	if cap := env.bots.capabilityFor(ps.URL(), "m1"); cap.Source != "manual" ||
+		cap.WindowTokens != 100000 || cap.MaxOutputTokens != 16384 {
+		t.Fatalf("manual 覆盖下变体行输出上限应生效: %+v", cap)
+	}
+	delete(env.cfg.Bots.Context.ModelWindows, "m1")
+
+	// ensureModelWindow 对变体也视为新鲜：不再探测。
+	run := botFixtureRun(t, env, bot)
+	fallbackTrigger := botFloorRatio(env.bots.inputBudgetFor(bot, "m1"), env.cfg.Bots.Context.CompressionRatioV())
+	env.bots.ensureModelWindow(bot, run, "sk-x", fallbackTrigger)
+	if h := ps.hitCount(); h != 1 {
+		t.Fatalf("新鲜缓存的大小写变体不应重探，实得 %d 次探测", h)
+	}
+}
+
+// TestBotWindowFailureMarkerDoesNotShadowCaseVariantSuccess（H1）：同地址既有
+// m1 的失败标记、又有 M1 的成功缓存时，按 m1 解析能力必须优先成功行而非退回
+// fallback；M1 成功行数据过期后，新鲜度也按成功行判断（允许重探），而不是被
+// m1 失败标记的负缓存拦住。
+func TestBotWindowFailureMarkerDoesNotShadowCaseVariantSuccess(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200,
+		`{"data":[{"id":"M1","context_window":65536,"max_output_tokens":16384}]}`)
+	userID := createBotTestUser(t, env.db, "winshadow")
+	bot := createBotRowAt(t, env, userID, ps.URL(), "m1")
+	run := botFixtureRun(t, env, bot)
+
+	// M1 曾被精确探测成功；随后 m1 探测失败只落 m1 失败标记。
+	if err := env.bots.persistModelWindow(ps.URL(), "M1", &botModelCapability{
+		WindowTokens: 65536, MaxOutputTokens: 16384, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed M1: %v", err)
+	}
+	ps.setModels(500, `{"error":"boom"}`)
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
+		t.Fatalf("第二次 refresh 应失败")
+	}
+	if row := findWindowRow(t, env, ps.URL(), "m1"); row == nil || row.ContextWindow != 0 {
+		t.Fatalf("m1 失败标记应落库: %+v", row)
+	}
+
+	// 失败标记不得遮蔽变体成功行。
+	if cap := env.bots.capabilityFor(ps.URL(), "m1"); cap.Source != "detected" ||
+		cap.WindowTokens != 65536 || cap.MaxOutputTokens != 16384 {
+		t.Fatalf("失败行不得遮蔽变体成功行: %+v", cap)
+	}
+
+	// M1 成功行数据过期（fetched_at 25h 前）后：新鲜度按成功行判断，估算达到
+	// 触发阈值 → 允许重探；若被 m1 失败标记的负缓存拦住则不会发探测。
+	stale := time.Now().UTC().Add(-25 * time.Hour)
+	if err := env.bots.windows.Upsert(&model.BotModelWindow{
+		ID: uuid.NewString(), BaseURL: botNormalizeBaseURL(ps.URL()), Model: "M1",
+		ContextWindow: 65536, MaxOutputTokens: 16384,
+		Source: "detected", Detail: "GET /models",
+		FetchedAt: stale, UpdatedAt: stale,
+	}); err != nil {
+		t.Fatalf("stale M1: %v", err)
+	}
+	fallbackTrigger := botFloorRatio(env.bots.inputBudgetFor(bot, "m1"), env.cfg.Bots.Context.CompressionRatioV())
+	hits := ps.hitCount()
+	env.bots.ensureModelWindow(bot, run, "sk-x", fallbackTrigger)
+	if h := ps.hitCount(); h != hits+1 {
+		t.Fatalf("变体成功行过期后应允许重探: %d → %d", hits, h)
+	}
+}
