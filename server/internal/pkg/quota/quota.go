@@ -48,11 +48,13 @@ type Balance struct {
 	Currency string  `json:"currency"`
 }
 
-// Snapshot 是一次成功抓取的完整结果。
+// Snapshot 是一次成功抓取的完整结果。Note 是供应商特有的补充说明
+// （如「无 Design Plan 额度，按钱包计费」），空串表示无。
 type Snapshot struct {
 	PlanName  string    `json:"plan_name"`
 	Windows   []Window  `json:"windows"`
 	Balance   *Balance  `json:"balance"`
+	Note      string    `json:"note,omitempty"`
 	FetchedAt time.Time `json:"fetched_at"`
 }
 
@@ -72,7 +74,11 @@ type CredentialField struct {
 // Fetcher 拉取并解析一次额度。baseURL 是该供应商的 origin（可被配置覆盖）。
 type Fetcher func(ctx context.Context, client *http.Client, baseURL string, creds Credentials) (Snapshot, error)
 
-// Provider 是一个供应商的元数据与取数实现。
+// Provider 是一个供应商的元数据与取数实现。Validate 是可选的凭据结构校验钩子
+// （nil 表示不校验）：service 在必填检查后调用，返回非空消息以 40031 上抛
+// （空串 = 通过），让 create/update/probe 在发请求前就明确报错
+// （如 OpenDesign 的模型面密钥）。DeviceAuth 非空表示支持浏览器设备授权，
+// 协议实现在供应商自己的适配器文件里，service 只编排会话。
 type Provider struct {
 	ID               string
 	Name             string
@@ -81,7 +87,46 @@ type Provider struct {
 	Instructions     []string
 	Warning          string
 	DefaultBaseURL   string
+	DeviceAuth       *DeviceAuth
 	Fetch            Fetcher
+	Validate         func(Credentials) string
+}
+
+// DeviceAuthState 是一次设备授权轮询的统一结论，与上游具体状态词表解耦。
+type DeviceAuthState string
+
+const (
+	DeviceAuthPending  DeviceAuthState = "pending"
+	DeviceAuthApproved DeviceAuthState = "approved"
+	DeviceAuthExpired  DeviceAuthState = "expired"
+	DeviceAuthDenied   DeviceAuthState = "denied"
+	DeviceAuthInvalid  DeviceAuthState = "invalid" // 设备密钥失效/授权不存在
+)
+
+// DeviceAuthStart 是一次设备授权的上游视图（设备密钥只留在服务端内存）。
+type DeviceAuthStart struct {
+	DeviceID      string
+	DeviceSecret  string
+	UserCode      string
+	ActivationURL string
+	ExpiresAt     time.Time
+	PollInterval  time.Duration
+}
+
+// DeviceAuthPoll 是一次上游轮询的结论。Approved 时 Credentials 是按
+// provider.CredentialFields 的 key 组织好的凭据组（例如 {"control_key": ...}）；
+// Message 是终态的用户可读原因，pending 时为空。
+type DeviceAuthPoll struct {
+	State       DeviceAuthState
+	Credentials Credentials
+	Message     string
+}
+
+// DeviceAuth 是一个供应商的浏览器设备授权协议实现（发起 + 单次轮询）；
+// 上游路径、字段名、状态词表与错误语义都收在各自适配器里。
+type DeviceAuth struct {
+	Start func(ctx context.Context, client *http.Client, baseURL string) (DeviceAuthStart, error)
+	Poll  func(ctx context.Context, client *http.Client, baseURL, deviceID, deviceSecret string) (DeviceAuthPoll, error)
 }
 
 // ErrorKind 区分「凭据失效」与「接口异常」——前者提示用户换凭据，
@@ -219,6 +264,25 @@ func specs() []Provider {
 				"创建一个 API key 并复制",
 			},
 			Fetch: fetchFactory,
+		},
+		{
+			ID:             "opendesign",
+			Name:           "OpenDesign",
+			PlanHint:       "Design Plan",
+			DefaultBaseURL: "https://amr-api.open-design.ai",
+			DeviceAuth:     OpenDesignDeviceAuth(),
+			CredentialFields: []CredentialField{{
+				Key: "control_key", Label: "控制面密钥", Secret: true, Required: true,
+				Placeholder: "vela_ctrl_…",
+				Help:        "OpenDesign 控制面（amr-api.open-design.ai）的 vela_ctrl_… 密钥；网页「API Key」页给的 sk-amr-… 只能调模型，查不了额度。",
+			}},
+			Instructions: []string{
+				"点「使用浏览器授权」，在打开的页面点批准（推荐）",
+				"已有控制面密钥时可直接粘贴，它以 vela_ctrl_ 开头",
+			},
+			Warning:  "网页「API Key」页给的 sk-amr-… 是调模型用的密钥，查不了额度；填了会直接报错。",
+			Fetch:    fetchOpenDesign,
+			Validate: validateOpenDesignCredentials,
 		},
 	}
 }

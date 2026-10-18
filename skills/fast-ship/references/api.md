@@ -10006,7 +10006,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 | 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory） |
+| `id` | string | 是 | 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory / opendesign） |
 | `name` | string | 是 |  |
 | `plan_hint` | string | 是 | 可选，仅供空态提示 |
 | `credential_fields` | object[] | 是 |  |
@@ -10018,6 +10018,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `credential_fields[].help` | string | 是 |  |
 | `instructions` | string[] | 是 | 「凭据从哪里获取」分步说明，逐条一句话 |
 | `warning` | string | 是 | 会话令牌类供应商必填的过期提示；其余为空串 |
+| `device_authorization` | boolean | 是 | 该供应商是否支持浏览器设备授权获取凭据；true 时前端显示「使用浏览器授权」 |
 
 **错误**
 
@@ -10051,6 +10052,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `label` | string | 是 |  |
 | `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
 | `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `note` | string | 是 | 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无 |
 | `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
 | `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
 | `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
@@ -10113,6 +10115,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `label` | string | 是 |  |
 | `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
 | `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `note` | string | 是 | 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无 |
 | `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
 | `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
 | `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
@@ -10181,6 +10184,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `label` | string | 是 |  |
 | `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
 | `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `note` | string | 是 | 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无 |
 | `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
 | `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
 | `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
@@ -10272,6 +10276,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `label` | string | 是 |  |
 | `credential_hint` | string | 是 | 凭据尾号（形如 …ab12）；绝不回显明文 |
 | `plan_name` | string | 是 | 最近一次成功快照的套餐名；未抓取过为空串 |
+| `note` | string | 是 | 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无 |
 | `status` | string（enum: ok \| credential_invalid \| provider_error \| pending） | 是 | ok=正常；credential_invalid=凭据失效（401/403）；provider_error=接口异常；pending=暂未抓取 |
 | `last_error` | string | 是 | 最近一次失败原因（脱敏后的用户可读文本） |
 | `fetched_at` | string（date-time，可空） | 是 | 最近一次成功抓取时间（= 快照数据时间）；未成功过为 null |
@@ -10330,6 +10335,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | --- | --- | --- | --- |
 | `status` | string（enum: ok \| credential_invalid \| provider_error） | 是 |  |
 | `plan_name` | string | 是 |  |
+| `note` | string | 是 | 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无 |
 | `windows` | object[] | 是 |  |
 | `windows[].kind` | string（enum: five_hour \| daily \| weekly \| monthly \| other） | 是 |  |
 | `windows[].label` | string | 是 | 面向用户的窗口名；other 类给准确名字（如 MCP 次数） |
@@ -10352,4 +10358,135 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | 400 | 参数无效（40001）；供应商未知（40030）；凭据字段缺失或为空（40031） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/quota/device-authorizations`
+
+<!-- operationId: startQuotaDeviceAuthorization -->
+
+发起浏览器设备授权
+
+供支持设备授权的供应商（provider.device_authorization = true，目前只有 opendesign），
+在服务端向上游发起设备授权并建立内存会话，返回 pending 视图；前端拿 user_code 与
+activation_url 引导用户在浏览器批准，再按 poll_interval_seconds 轮询 GET。
+不带 account_id 时批准后自动新建额度账号；带上 account_id 则为该已有账号整组换
+凭据（账号不存在或属于他人返回 40430）。
+会话只存内存，进程重启即丢，之后 GET 返回 40431。deviceSecret 永不出现在任何响应里。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `provider` | string（长度 ≥1） | 是 | 供应商 id（GET /api/quota/providers 返回的 id）；未知返回 40030，不支持设备授权返回 40032 |
+| `label` | string（长度 1..100） | 是 | 批准后新建额度账号的名字 |
+| `account_id` | string | 否 | 可选；带上时批准后不再新建账号，而是整组替换该已有账号的凭据（为已有账号 换凭据，编辑场景使用）。账号不存在或属于他人返回 40430；目标账号必须与 provider 是同一供应商，否则返回 40001（校验在建会话之前，不触上游）。 |
+
+**成功响应**
+
+**200** 已发起（pending）；同时表示上游会话建立成功
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 会话 ID，用于后续 GET 轮询与 DELETE 取消 |
+| `provider` | string | 是 |  |
+| `status` | string（enum: pending \| approved \| expired \| denied \| invalid） | 是 | pending 等待用户批准；approved 已拿到控制面密钥并创建账号； expired 验证码过期或本地超时；denied 用户拒绝/取消； invalid 设备密钥失效（上游 401/404） |
+| `user_code` | string | 是 | 用户在批准页面输入的验证码 |
+| `activation_url` | string | 是 | 浏览器批准页面地址（前端 target=_blank 打开，不在服务端跳转） |
+| `expires_at` | string（date-time） | 是 | UTC；超过后前端可直接提示过期（服务端 GET 也会判本地超时） |
+| `poll_interval_seconds` | integer | 是 | 前端轮询节奏（上游给的值，缺省 2） |
+| `account_id` | string | 是 | approved 时新建账号的 id；其余空串 |
+| `error` | string | 是 | status 为 expired/denied/invalid 时的用户可读原因；其余空串 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 参数无效（40001，含空白标签）；供应商未知（40030）；该供应商不支持设备授权（40032） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 要换凭据的目标账号不存在或属于其他用户（40430） |
+| 500 | 服务器内部错误（50000） |
+| 502 | 额度供应商授权服务不可用或响应缺关键字段（50204） |
+
+### GET `/api/quota/device-authorizations/{id}`
+
+<!-- operationId: getQuotaDeviceAuthorization -->
+
+查询设备授权会话状态
+
+按会话 ID 查询授权进度；距上次轮询超过 poll_interval_seconds 且仍 pending 时，
+服务端代为向上游轮询一次。approved 表示已自动创建额度账号（account_id 为新账号 ID）；
+expired/denied/invalid 为终态，error 给用户可读原因，前端提示重新发起。
+会话是本人资源，他人的会话与不存在的会话一样返回 40431。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 设备授权会话 ID（POST 返回的 id） |
+
+**成功响应**
+
+**200** 会话当前状态（网络抖动或上游 5xx 时保持 pending，前端按节奏再轮询即可）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 会话 ID，用于后续 GET 轮询与 DELETE 取消 |
+| `provider` | string | 是 |  |
+| `status` | string（enum: pending \| approved \| expired \| denied \| invalid） | 是 | pending 等待用户批准；approved 已拿到控制面密钥并创建账号； expired 验证码过期或本地超时；denied 用户拒绝/取消； invalid 设备密钥失效（上游 401/404） |
+| `user_code` | string | 是 | 用户在批准页面输入的验证码 |
+| `activation_url` | string | 是 | 浏览器批准页面地址（前端 target=_blank 打开，不在服务端跳转） |
+| `expires_at` | string（date-time） | 是 | UTC；超过后前端可直接提示过期（服务端 GET 也会判本地超时） |
+| `poll_interval_seconds` | integer | 是 | 前端轮询节奏（上游给的值，缺省 2） |
+| `account_id` | string | 是 | approved 时新建账号的 id；其余空串 |
+| `error` | string | 是 | status 为 expired/denied/invalid 时的用户可读原因；其余空串 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 会话不存在、已过期或属于其他用户（40431） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/quota/device-authorizations/{id}`
+
+<!-- operationId: cancelQuotaDeviceAuthorization -->
+
+取消设备授权会话
+
+删除内存会话（前端关闭对话框 / 用户取消时调用）；不存在的会话返回 40431。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 设备授权会话 ID（POST 返回的 id） |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 会话不存在、已过期或属于其他用户（40431） |
 | 500 | 服务器内部错误（50000） |

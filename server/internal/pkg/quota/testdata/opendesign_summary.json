@@ -1,0 +1,34 @@
+{
+  "balanceUsd": "1.5000",
+  "creditsPerUsd": 10000,
+  "balances": {
+    "subscriptionCredits": "10000",
+    "rechargeCredits": "5000",
+    "totalAvailableCredits": "15000"
+  },
+  "subscriptionCreditsUsd": "1.0000",
+  "rechargeCreditsUsd": "0.5000",
+  "totalAvailableCreditsUsd": "1.5000",
+  "membershipTier": "go",
+  "billingInterval": "yearly",
+  "subscriptionStatus": "active",
+  "subscriptionEntitlementStatus": "active",
+  "latestPaidSubscriptionInvoiceId": "in_000000000000000000000000",
+  "personalSubscriptionUpgradeState": "convertible",
+  "personalSubscriptionCheckoutAllowed": true,
+  "subscriptionCancelAtPeriodEnd": false,
+  "subscriptionCurrentPeriodStart": "2026-10-18T08:55:00.000Z",
+  "subscriptionCurrentPeriodEnd": "2027-10-18T08:55:00.000Z",
+  "pendingSubscriptionChange": null,
+  "firstMonthIntroEligible": false,
+  "availableActions": [
+    "subscription_checkout",
+    "billing_portal"
+  ],
+  "totalRechargedUsd": "0.5000",
+  "totalConsumedUsd": "0.0000",
+  "todayConsumedUsd": "0.0000",
+  "rechargeCount": 1,
+  "usageCount": 1077,
+  "updatedAt": "2026-10-18T12:19:57.974Z"
+}

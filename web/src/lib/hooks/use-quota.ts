@@ -8,6 +8,7 @@ import {
   quotaApi,
   type CreateQuotaAccountInput,
   type QuotaProbeInput,
+  type StartQuotaDeviceAuthorizationInput,
   type UpdateQuotaAccountInput,
 } from "@/lib/api/quota";
 import { useAuthStore } from "@/lib/store/auth-store";
@@ -55,7 +56,7 @@ export function useQuotaAccounts() {
   });
 }
 
-function useInvalidateQuota() {
+export function useInvalidateQuota() {
   const queryClient = useQueryClient();
   const userId = useUserId();
   return () => queryClient.invalidateQueries({ queryKey: [ROOT, userId] });
@@ -99,5 +100,25 @@ export function useRefreshQuotaAccount() {
 export function useQuotaProbe() {
   return useMutation({
     mutationFn: (input: QuotaProbeInput) => quotaApi.probe(input),
+  });
+}
+
+/**
+ * 设备授权「发起」（INT-117）：POST 建会话，成功返回 pending 视图。
+ * 状态轮询由授权面板自己驱动（组件里 useQuery 按 poll_interval_seconds 拉 GET，
+ * 见 device-auth-panel.tsx）——轮询生命周期跟着面板走，不放 hook 层，
+ * 免得面板卸载后还要手动收尾。
+ */
+export function useStartQuotaDeviceAuthorization() {
+  return useMutation({
+    mutationFn: (input: StartQuotaDeviceAuthorizationInput) =>
+      quotaApi.startDeviceAuthorization(input),
+  });
+}
+
+/** 设备授权「取消」：DELETE 会话；取消/关闭/卸载时调用，失败由调用方静默。 */
+export function useCancelQuotaDeviceAuthorization() {
+  return useMutation({
+    mutationFn: (id: string) => quotaApi.cancelDeviceAuthorization(id),
   });
 }

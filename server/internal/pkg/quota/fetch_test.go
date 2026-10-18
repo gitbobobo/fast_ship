@@ -1206,6 +1206,10 @@ func TestMissingCredentialsReported(t *testing.T) {
 			_, err := fetchFactory(ctx, server.Client(), server.URL, Credentials{})
 			return err
 		}},
+		{"opendesign", func() error {
+			_, err := fetchOpenDesign(ctx, server.Client(), server.URL, Credentials{})
+			return err
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1216,8 +1220,8 @@ func TestMissingCredentialsReported(t *testing.T) {
 
 func TestRegistryProvidesAllFetchers(t *testing.T) {
 	providers := Registry(nil)
-	if len(providers) != 7 {
-		t.Fatalf("期望 7 个供应商，得到 %d", len(providers))
+	if len(providers) != 8 {
+		t.Fatalf("期望 8 个供应商，得到 %d", len(providers))
 	}
 	for _, p := range providers {
 		if p.Fetch == nil {
@@ -1316,6 +1320,10 @@ func TestErrorMessageSanitized(t *testing.T) {
 		},
 		func() error {
 			_, err := fetchFactory(ctx, server.Client(), server.URL, Credentials{"api_key": secret})
+			return err
+		},
+		func() error {
+			_, err := fetchOpenDesign(ctx, server.Client(), server.URL, Credentials{"control_key": secret})
 			return err
 		},
 	}
@@ -1915,6 +1923,7 @@ func TestRegistryCredentialFieldsMatchContract(t *testing.T) {
 		"codex":       {{Key: "access_token", Secret: true, Required: true}, {Key: "account_id"}},
 		"devin":       {{Key: "token", Secret: true, Required: true}, {Key: "org_id", Required: true}},
 		"factory":     {{Key: "api_key", Secret: true, Required: true}},
+		"opendesign":  {{Key: "control_key", Secret: true, Required: true}},
 	}
 	providers := Registry(nil)
 	if len(providers) != len(want) {
@@ -2058,5 +2067,231 @@ func TestFactoryLegacyEmptyUsageIsProviderError(t *testing.T) {
 			_, err := fetchFactory(ctx, server.Client(), server.URL, Credentials{"api_key": "fk-key"})
 			requireProviderError(t, err)
 		})
+	}
+}
+
+// ---- OpenDesign ----
+
+// 真实脱敏样本（INT-117）：workspace → preflight → summary 全链路，
+// 5 小时/每周窗口、百分比 33.2/11.1、UTC 重置时间、钱包余额与套餐名。
+func TestOpenDesignParsesPreflightAndSummary(t *testing.T) {
+	server, requests := newTestServer(t, func(r *http.Request) (int, []byte) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/current":
+			return http.StatusOK, []byte(`{"activeWorkspaceId":"ws_demo","workspaceId":"ws_fallback"}`)
+		case "/api/v1/workspaces/ws_demo/billing/preflight":
+			return http.StatusOK, readFixture(t, "opendesign_preflight.json")
+		case "/api/v1/billing/summary":
+			return http.StatusOK, readFixture(t, "opendesign_summary.json")
+		}
+		return http.StatusNotFound, []byte(`{}`)
+	})
+	ctx, cancel := fetchCtx()
+	defer cancel()
+
+	snapshot, err := fetchOpenDesign(ctx, server.Client(), server.URL, Credentials{"control_key": "vela_ctrl_test"})
+	if err != nil {
+		t.Fatalf("取数失败: %v", err)
+	}
+
+	if got := requestURLs(requests); len(got) != 3 ||
+		got[0] != "/api/v1/workspaces/current?" ||
+		got[1] != "/api/v1/workspaces/ws_demo/billing/preflight?" ||
+		got[2] != "/api/v1/billing/summary?" {
+		t.Fatalf("请求路径不符: %v", got)
+	}
+	for _, r := range *requests {
+		expectHeader(t, r, "Authorization", "Bearer vela_ctrl_test")
+		expectHeader(t, r, "Accept", "application/json")
+	}
+
+	if snapshot.PlanName != "Design Plan Go" {
+		t.Fatalf("套餐名期望 Design Plan Go，得到 %q", snapshot.PlanName)
+	}
+	if snapshot.Note != "窗口用尽后扣钱包" {
+		t.Fatalf("note 期望「窗口用尽后扣钱包」，得到 %q", snapshot.Note)
+	}
+
+	fiveHour := findWindow(t, snapshot.Windows, WindowFiveHour, "5 小时")
+	if fiveHour.UsedPercent == nil || *fiveHour.UsedPercent != 33.2 {
+		t.Fatalf("5 小时窗口期望 33.2%%（16610/50000），得到 %v", fiveHour.UsedPercent)
+	}
+	if fiveHour.Used == nil || *fiveHour.Used != 16610 || fiveHour.Limit == nil || *fiveHour.Limit != 50000 {
+		t.Fatalf("5 小时窗口 used/limit 期望 16610/50000，得到 %v/%v", fiveHour.Used, fiveHour.Limit)
+	}
+	// used/limit 是 credit 数：单位必须是 count，percent 会渲染成 16610%。
+	if fiveHour.Unit != UnitCount {
+		t.Fatalf("5 小时窗口单位期望 count，得到 %q", fiveHour.Unit)
+	}
+	if fiveHour.ResetAt == nil || !fiveHour.ResetAt.Equal(time.Date(2026, 10, 18, 13, 55, 0, 0, time.UTC)) {
+		t.Fatalf("5 小时重置时间（RFC3339 → UTC）不符: %v", fiveHour.ResetAt)
+	}
+
+	weekly := findWindow(t, snapshot.Windows, WindowWeekly, "每周")
+	if weekly.UsedPercent == nil || *weekly.UsedPercent != 11.1 {
+		t.Fatalf("每周窗口期望 11.1%%（16610/150000），得到 %v", weekly.UsedPercent)
+	}
+	if weekly.Used == nil || *weekly.Used != 16610 || weekly.Limit == nil || *weekly.Limit != 150000 {
+		t.Fatalf("每周窗口 used/limit 期望 16610/150000，得到 %v/%v", weekly.Used, weekly.Limit)
+	}
+	if weekly.Unit != UnitCount {
+		t.Fatalf("每周窗口单位期望 count，得到 %q", weekly.Unit)
+	}
+	if weekly.ResetAt == nil || !weekly.ResetAt.Equal(time.Date(2026, 10, 25, 8, 55, 0, 0, time.UTC)) {
+		t.Fatalf("每周重置时间不符: %v", weekly.ResetAt)
+	}
+
+	if snapshot.Balance == nil || snapshot.Balance.Label != "钱包余额" ||
+		snapshot.Balance.Amount != 1.5 || snapshot.Balance.Currency != "USD" {
+		t.Fatalf("钱包余额期望 1.5 USD，得到 %+v", snapshot.Balance)
+	}
+}
+
+// eligible=false：不产生窗口、note 说明按钱包计费、不报错；余额照常解析。
+func TestOpenDesignIneligiblePreflight(t *testing.T) {
+	server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/current":
+			return http.StatusOK, []byte(`{"activeWorkspaceId":"ws_demo"}`)
+		case "/api/v1/workspaces/ws_demo/billing/preflight":
+			return http.StatusOK, readFixture(t, "opendesign_preflight_ineligible.json")
+		case "/api/v1/billing/summary":
+			return http.StatusOK, readFixture(t, "opendesign_summary.json")
+		}
+		return http.StatusNotFound, []byte(`{}`)
+	})
+	ctx, cancel := fetchCtx()
+	defer cancel()
+
+	snapshot, err := fetchOpenDesign(ctx, server.Client(), server.URL, Credentials{"control_key": "vela_ctrl_test"})
+	if err != nil {
+		t.Fatalf("eligible=false 不应报错: %v", err)
+	}
+	if len(snapshot.Windows) != 0 {
+		t.Fatalf("eligible=false 应没有窗口: %+v", snapshot.Windows)
+	}
+	if snapshot.Note != "无 Design Plan 额度，按钱包计费" {
+		t.Fatalf("note 期望「无 Design Plan 额度，按钱包计费」，得到 %q", snapshot.Note)
+	}
+	if snapshot.PlanName != "Design Plan Go" {
+		t.Fatalf("套餐名期望 Design Plan Go，得到 %q", snapshot.PlanName)
+	}
+	if snapshot.Balance == nil || snapshot.Balance.Amount != 0 {
+		t.Fatalf("余额为 0 时仍应有钱包余额条目，得到 %+v", snapshot.Balance)
+	}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if !strings.Contains(string(data), `"windows":[]`) {
+		t.Fatalf("空 windows 应输出 []，得到 %s", data)
+	}
+}
+
+// summary 挂了（尽力而为）：主数据不受影响，套餐名回退 codingPlan.tier。
+func TestOpenDesignSummaryFailureFallsBackToPlanTier(t *testing.T) {
+	server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/current":
+			return http.StatusOK, []byte(`{"workspaceId":"ws_demo"}`)
+		case "/api/v1/workspaces/ws_demo/billing/preflight":
+			return http.StatusOK, []byte(`{"codingPlan":{"eligible":true,"tier":"max","windows":[
+				{"durationSeconds":18000,"usedCredits":"1","limitCredits":"4","resetsAt":1780000000}]}}`)
+		case "/api/v1/billing/summary":
+			return http.StatusInternalServerError, []byte(`{}`)
+		}
+		return http.StatusNotFound, []byte(`{}`)
+	})
+	ctx, cancel := fetchCtx()
+	defer cancel()
+
+	snapshot, err := fetchOpenDesign(ctx, server.Client(), server.URL, Credentials{"control_key": "vela_ctrl_test"})
+	if err != nil {
+		t.Fatalf("summary 失败不应影响取数: %v", err)
+	}
+	if snapshot.PlanName != "Design Plan Max" {
+		t.Fatalf("套餐名应回退 codingPlan.tier，得到 %q", snapshot.PlanName)
+	}
+	if len(snapshot.Windows) != 1 {
+		t.Fatalf("主窗口应保留: %+v", snapshot.Windows)
+	}
+}
+
+// 未知窗口长度归 other 并由时长推导中文名；时长缺失也给确定名字；
+// limit 非正数的窗口跳过不算错误。
+func TestOpenDesignUnknownAndMissingDurations(t *testing.T) {
+	body := `{"codingPlan":{"eligible":true,"windows":[
+		{"durationSeconds":3600,"usedCredits":"100","limitCredits":"400"},
+		{"durationSeconds":216000,"usedCredits":"10","limitCredits":"100"},
+		{"usedCredits":"5","limitCredits":"10"},
+		{"durationSeconds":18000,"usedCredits":"1","limitCredits":"0"}]}}`
+	server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+		switch r.URL.Path {
+		case "/api/v1/workspaces/current":
+			return http.StatusOK, []byte(`{"activeWorkspaceId":"ws_demo"}`)
+		case "/api/v1/workspaces/ws_demo/billing/preflight":
+			return http.StatusOK, []byte(body)
+		}
+		return http.StatusNotFound, []byte(`{}`)
+	})
+	ctx, cancel := fetchCtx()
+	defer cancel()
+
+	snapshot, err := fetchOpenDesign(ctx, server.Client(), server.URL, Credentials{"control_key": "vela_ctrl_test"})
+	if err != nil {
+		t.Fatalf("取数失败: %v", err)
+	}
+	hourly := findWindow(t, snapshot.Windows, WindowOther, "1 小时")
+	if hourly.UsedPercent == nil || *hourly.UsedPercent != 25 {
+		t.Fatalf("1 小时窗口期望 25%%（100/400），得到 %v", hourly.UsedPercent)
+	}
+	// 216000 秒 = 60 小时 = 2.5 天 → 不整 1440 的倍数按小时命名。
+	findWindow(t, snapshot.Windows, WindowOther, "60 小时")
+	findWindow(t, snapshot.Windows, WindowOther, "额度窗口")
+	if len(snapshot.Windows) != 3 {
+		t.Fatalf("limit=0 的窗口应被跳过，实际: %+v", snapshot.Windows)
+	}
+}
+
+// 模型面密钥（网页「API Key」页给的 sk-amr-…）必须在发请求前被拦下并明确说明。
+func TestOpenDesignModelPlaneKeyRejected(t *testing.T) {
+	provider, ok := Lookup(nil, "opendesign")
+	if !ok {
+		t.Fatalf("Lookup 应能找到 opendesign")
+	}
+	if provider.Validate == nil {
+		t.Fatalf("opendesign 应带 Validate 钩子")
+	}
+	if msg := provider.Validate(Credentials{"control_key": "  sk-amr-model-key  "}); msg == "" ||
+		!strings.Contains(msg, "调模型") || !strings.Contains(msg, "vela_ctrl_") {
+		t.Fatalf("错误消息应说明原因并指向控制面密钥: %q", msg)
+	}
+	if msg := provider.Validate(Credentials{"control_key": "vela_ctrl_ok"}); msg != "" {
+		t.Fatalf("控制面密钥应通过校验，得到 %q", msg)
+	}
+	if msg := provider.Validate(Credentials{"control_key": "sk-amr"}); msg != "" {
+		t.Fatalf("仅前缀 sk-amr- 才拦截，得到 %q", msg)
+	}
+}
+
+func TestOpenDesignUnauthorizedAndMissingWorkspace(t *testing.T) {
+	server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+		return http.StatusUnauthorized, []byte(`{}`)
+	})
+	ctx, cancel := fetchCtx()
+	defer cancel()
+	_, err := fetchOpenDesign(ctx, server.Client(), server.URL, Credentials{"control_key": "vela_ctrl_bad"})
+	requireCredentialError(t, err, http.StatusUnauthorized)
+	if !strings.Contains(err.Error(), "浏览器授权") {
+		t.Fatalf("401 应提示用浏览器授权重新获取: %v", err)
+	}
+
+	server2, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+		return http.StatusOK, []byte(`{"activeWorkspaceId":"","other":1}`)
+	})
+	_, err = fetchOpenDesign(ctx, server2.Client(), server2.URL, Credentials{"control_key": "vela_ctrl_test"})
+	requireProviderError(t, err)
+	if !strings.Contains(err.Error(), "workspace") {
+		t.Fatalf("无活动 workspace 应明确说明: %v", err)
 	}
 }

@@ -131,6 +131,15 @@ export function QuotaAccountCard({
           </p>
         )}
 
+        {account.note && (
+          <p
+            data-testid="quota-account-note"
+            className="text-xs text-muted-foreground"
+          >
+            {account.note}
+          </p>
+        )}
+
         {account.last_error && (
           <p className="text-xs text-destructive">{account.last_error}</p>
         )}

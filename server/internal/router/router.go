@@ -113,6 +113,10 @@ func Setup(
 			quotaJWT.DELETE("/accounts/:id", quotaHandler.DeleteAccount)
 			quotaJWT.POST("/accounts/:id/refresh", quotaHandler.RefreshAccount)
 			quotaJWT.POST("/test", quotaHandler.Test)
+			// 浏览器设备授权（INT-117）：会话内含 deviceSecret，仅 JWT。
+			quotaJWT.POST("/device-authorizations", quotaHandler.StartDeviceAuthorization)
+			quotaJWT.GET("/device-authorizations/:id", quotaHandler.GetDeviceAuthorization)
+			quotaJWT.DELETE("/device-authorizations/:id", quotaHandler.CancelDeviceAuthorization)
 		}
 		api.GET("/quota/accounts", middleware.RequireAuth(cfg, apiKeyRepo, authService), quotaHandler.ListAccounts)
 

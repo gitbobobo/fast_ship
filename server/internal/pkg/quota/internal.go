@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -39,6 +40,33 @@ func httpGet(ctx context.Context, client *http.Client, url string, headers map[s
 		return resp.StatusCode, nil, ProviderError("读取供应商接口响应失败。", resp.StatusCode)
 	}
 	return resp.StatusCode, body, nil
+}
+
+// httpPostJSON 用 JSON 体发起 POST，返回状态码与响应体。风格与 httpGet 一致：
+// 同一 userAgent、同一 maxBodyBytes、网络层失败统一归为 provider_error；
+// 非 2xx 的状态码原样交回调用方细分。
+func httpPostJSON(ctx context.Context, client *http.Client, url string, body any) (int, []byte, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, ProviderError("供应商请求体构造失败。", 0)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return 0, nil, ProviderError("供应商接口地址无效。", 0)
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, ProviderError("无法连接供应商接口，请稍后重试。", 0)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+	if err != nil {
+		return resp.StatusCode, nil, ProviderError("读取供应商接口响应失败。", resp.StatusCode)
+	}
+	return resp.StatusCode, data, nil
 }
 
 // requireOK 把非 2xx 的状态码映射成结构化错误：401/403 是凭据问题，其余是接口问题。

@@ -115,3 +115,42 @@ func (h *QuotaHandler) Test(c *gin.Context) {
 	}
 	response.Success(c, result)
 }
+
+// StartDeviceAuthorization 发起浏览器设备授权。上游不可用（50204）按区间表
+// 映射 HTTP 502（HandleAppError 覆盖 502xx）。
+func (h *QuotaHandler) StartDeviceAuthorization(c *gin.Context) {
+	var req service.StartQuotaDeviceAuthorizationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
+		return
+	}
+
+	userID := middleware.GetUserID(c)
+	result, err := h.quotaService.StartDeviceAuthorization(userID, &req)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// GetDeviceAuthorization 轮询授权进度；会话不存在/过期 40431 → HTTP 404。
+func (h *QuotaHandler) GetDeviceAuthorization(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	result, err := h.quotaService.GetDeviceAuthorization(userID, c.Param("id"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+// CancelDeviceAuthorization 取消会话；DELETE 成功返回 data: null。
+func (h *QuotaHandler) CancelDeviceAuthorization(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if err := h.quotaService.CancelDeviceAuthorization(userID, c.Param("id")); err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.SuccessEmpty(c)
+}

@@ -26,6 +26,7 @@ var (
 	ErrProjectPublicGitHubTokenMissing = New(40006, "该项目未配置公开仓库 Token")
 	ErrQuotaProviderUnknown            = New(40030, "未知的额度供应商")
 	ErrQuotaCredentialsInvalid         = New(40031, "凭据字段缺失或非法")
+	ErrQuotaDeviceAuthUnsupported      = New(40032, "该供应商不支持设备授权")
 )
 
 // 认证错误 40100-40199
@@ -80,6 +81,7 @@ var (
 	ErrBotAuthorizationNotFound     = New(40427, "机器人授权不存在")
 	ErrBotScheduleTaskNotFound      = New(40429, "定时任务不存在")
 	ErrQuotaAccountNotFound         = New(40430, "额度账号不存在")
+	ErrQuotaDeviceAuthNotFound      = New(40431, "授权会话不存在或已过期")
 )
 
 // 业务冲突 40900-40999
@@ -132,8 +134,9 @@ var (
 
 // GitHub API 错误 50200-50299
 var (
-	ErrGitHubAPI        = New(50200, "GitHub API 调用失败")
-	ErrAIProvider       = New(50201, "AI 服务调用失败")
-	ErrT3Upstream       = New(50202, "T3 环境调用失败")
-	ErrBotModelUpstream = New(50203, "机器人模型服务调用失败")
+	ErrGitHubAPI               = New(50200, "GitHub API 调用失败")
+	ErrAIProvider              = New(50201, "AI 服务调用失败")
+	ErrT3Upstream              = New(50202, "T3 环境调用失败")
+	ErrBotModelUpstream        = New(50203, "机器人模型服务调用失败")
+	ErrQuotaDeviceAuthUpstream = New(50204, "额度供应商授权服务不可用")
 )

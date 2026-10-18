@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "workspaceId": "ws_000000000000000000000000",
+  "workspaceMemberId": "wm_00000000000000000000000",
+  "modelId": null,
+  "generatedAt": "2026-10-18T12:20:00.298Z",
+  "balanceUsd": "0.0000",
+  "codingPlan": {
+    "workspaceId": "ws_000000000000000000000000",
+    "generatedAt": "2026-10-18T12:20:00.224Z",
+    "eligible": false,
+    "tier": "go",
+    "windows": []
+  },
+  "modelCovered": null,
+  "funding": "wallet"
+}

@@ -47,8 +47,14 @@ func fakeQuotaSnapshot() quota.Snapshot {
 }
 
 func newTestQuotaService(svc *testServices, providers ...quota.Provider) *QuotaService {
+	return newTestQuotaServiceWithLogger(svc, zap.NewNop(), providers...)
+}
+
+// newTestQuotaServiceWithLogger 允许注入带观察核的 logger（如 zaptest/observer），
+// 用于断言服务写没写某条日志。
+func newTestQuotaServiceWithLogger(svc *testServices, logger *zap.Logger, providers ...quota.Provider) *QuotaService {
 	repo := repository.NewQuotaAccountRepository(svc.db)
-	return NewQuotaService(repo, svc.cfg, zap.NewNop(), func() []quota.Provider { return providers })
+	return NewQuotaService(repo, svc.cfg, logger, func() []quota.Provider { return providers })
 }
 
 func storedQuotaAccount(t *testing.T, svc *testServices, id string) *model.QuotaAccount {
@@ -729,5 +735,66 @@ func TestQuotaScheduler_KickWakesEarlierRetry(t *testing.T) {
 			t.Fatalf("重抓后账号应为 ok，得到 %q", stored.Status)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// 网页「API Key」页的 sk-amr-… 模型面密钥在 create/update/probe 上都明确 40031（不发请求）。
+func TestQuotaService_SkAmrKeyRejectedOnCreateUpdateAndProbe(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-skamr")
+	realProvider, ok := quota.Lookup(nil, "opendesign")
+	if !ok {
+		t.Fatalf("真实注册表应含 opendesign")
+	}
+	// 保留真实的 Validate 钩子，但取数与地址换成假的：校验失败在发请求前，
+	// 而种子账号的有效凭据不应触网。
+	realProvider.Fetch = func(context.Context, *http.Client, string, quota.Credentials) (quota.Snapshot, error) {
+		return fakeQuotaSnapshot(), nil
+	}
+	realProvider.DefaultBaseURL = "https://opendesign.test.invalid"
+	service := newTestQuotaService(svc, realProvider)
+
+	_, err := service.Create(user.ID, &CreateQuotaAccountRequest{
+		Provider: "opendesign", Label: "x", Credentials: map[string]string{"control_key": "sk-amr-wrong"},
+	})
+	if code := quotaAppErrCode(t, err); code != errs.ErrQuotaCredentialsInvalid.Code {
+		t.Fatalf("create 期望 40031，得到 %v", err)
+	}
+	var appErr *errs.AppError
+	_ = errors.As(err, &appErr)
+	if !strings.Contains(appErr.Message, "调模型") {
+		t.Fatalf("create 错误消息应说明 sk-amr- 是模型面密钥: %q", appErr.Message)
+	}
+
+	probe, err := service.Probe(&TestQuotaCredentialsRequest{
+		Provider: "opendesign", Credentials: map[string]string{"control_key": "sk-amr-wrong"},
+	})
+	if code := quotaAppErrCode(t, err); code != errs.ErrQuotaCredentialsInvalid.Code {
+		t.Fatalf("probe 期望 40031，得到 %v", err)
+	}
+	if probe != nil {
+		t.Fatalf("校验失败不应返回探测结果: %+v", probe)
+	}
+
+	// update 路径（换凭据）：同样的密钥同样拦下，已有账号不被改动。
+	existing, err := service.Create(user.ID, &CreateQuotaAccountRequest{
+		Provider: "opendesign", Label: "x", Credentials: map[string]string{"control_key": "vela_ctrl_good"},
+	})
+	if err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	badCreds := api.QuotaCredentials{"control_key": "sk-amr-wrong"}
+	if _, err := service.Update(user.ID, existing.Id, &UpdateQuotaAccountRequest{Credentials: &badCreds}); quotaAppErrCode(t, err) != errs.ErrQuotaCredentialsInvalid.Code {
+		t.Fatalf("update 期望 40031，得到 %v", err)
+	}
+	if creds := decryptedQuotaCreds(t, svc, storedQuotaAccount(t, svc, existing.Id)); creds["control_key"] != "vela_ctrl_good" {
+		t.Fatalf("被拒绝的换凭据不得改动已有账号: %+v", creds)
+	}
+
+	// 除种子账号外零副作用。
+	var count int64
+	svc.db.Model(&model.QuotaAccount{}).Where("user_id = ?", user.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("被拒绝的凭据不得落库，count=%d", count)
 	}
 }

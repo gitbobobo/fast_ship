@@ -1,8 +1,9 @@
-# 订阅套餐额度（INT-109）
+# 订阅套餐额度（INT-109/INT-117）
 
 用户在页面粘贴各家 AI 编码服务的凭据，服务端定时抓取订阅额度并只读展示。
-覆盖 7 家供应商：Command Code、OpenCode Go、智谱 GLM Coding Plan、Grok、
-Codex、Devin、Factory Droid。取数与解析细节以 CodexBar（MIT）Swift 源码为准。
+覆盖 8 家供应商：Command Code、OpenCode Go、智谱 GLM Coding Plan、Grok、
+Codex、Devin、Factory Droid、OpenDesign（Design Plan）。取数与解析细节以
+CodexBar（MIT）Swift 源码为准；OpenDesign 部分另见下方专节。
 
 ## 模块边界
 
@@ -10,12 +11,16 @@ Codex、Devin、Factory Droid。取数与解析细节以 CodexBar（MIT）Swift 
   统一 `Snapshot`」。`Registry(baseURLs)` 返回固定顺序的 `Provider` 列表（元数据 +
   `Fetch`），`FetchError` 区分 `credential_invalid`（401/403，提示换凭据）与
   `provider_error`（网络/5xx/解析失败）。加密、落库、调度、HTTP 都不在这一层。
+  支持浏览器设备授权的供应商在这里实现自己的 `DeviceAuth` 协议适配器
+  （`Provider.DeviceAuth` 非空即代表有该能力；OpenDesign 的在
+  `deviceauth_opendesign.go`），上游路径、字段名与状态词表不出这个包。
 - `service/quota.go`（`QuotaService`）：凭据校验与加密、CRUD、`Probe`
   （`POST /api/quota/test`，不落库）、`Refresh`（手动刷新，冷却内 42900）、
   抓取结果落库与退避计算。`NewQuotaService(repo, cfg, logger, registry)` 的
   `registry` 是取数注入点——nil 时用 `quota.Registry(cfg.Quota.BaseURLs)`，
   测试注入假 registry。同一账号的并发抓取（手动 vs 调度）由 `fetchLocks`
-  按账号 id 串行化。
+  按账号 id 串行化。设备授权会话编排与其三个方法在 `service/quota_device.go`
+  （INT-117），会话表只在内存。
 - `repository/quota_account.go`（`QuotaAccountRepository`）：行级读写。
   单账号操作一律带 `user_id` 条件；`ListDue` / `EarliestNextRetryAt` /
   `FindByIDAny` 跨用户，仅供调度器使用。
@@ -32,7 +37,7 @@ Codex、Devin、Factory Droid。取数与解析细节以 CodexBar（MIT）Swift 
 | `provider` / `label` | 供应商 id；用户起的账号名 |
 | `credentials_encrypted` | BLOB。整组凭据 JSON `{"key":"value"}` 的 AES-256-GCM 密文（`internal/pkg/crypto`）；**不存明文指纹**——允许同用户重复添加相同凭据 |
 | `credential_hint` | 形如 `…ab12`，只存首个必填密文字段的末 4 位；不足 8 位的凭据整段打码（`…••••`）——短凭据的「末 4 位」等于全文或大半个文，而该字段会随账号列表返回 |
-| `snapshot_json` | 最近一次成功抓取的 `quota.Snapshot` JSON 原文（windows/balance/plan_name/fetched_at） |
+| `snapshot_json` | 最近一次成功抓取的 `quota.Snapshot` JSON 原文（windows/balance/plan_name/note/fetched_at） |
 | `plan_name` / `status` / `last_error` | 冗余出快照便于查询；status ∈ ok / credential_invalid / provider_error / pending |
 | `last_fetched_at` / `last_success_at` | 最近一次**成功**抓取时间（= 快照数据时间）；失败不触碰，两者等值 |
 | `failure_count` / `next_retry_at` | 连续失败数；下一次计划抓取的绝对时间。NULL 表示从未抓取过，或凭据刚被替换而清空退避（两种情形 ListDue 都视为立即到期，各自的自愈路径依赖这一点） |
@@ -103,13 +108,95 @@ quota:
 路由见 `router.go` 与 openapi `quota` tag：
 
 - 仅 JWT：`GET /api/quota/providers`、`POST/PUT/DELETE /api/quota/accounts[/{id}]`、
-  `POST /api/quota/accounts/{id}/refresh`、`POST /api/quota/test`。
+  `POST /api/quota/accounts/{id}/refresh`、`POST /api/quota/test`、
+  `POST/GET/DELETE /api/quota/device-authorizations[/{id}]`（INT-117 设备授权，见下节）。
 - JWT + API Key（只读）：`GET /api/quota/accounts`——即「机器人读取额度接口」，
   API Key 不写。响应不含凭据（只有打码后的 `credential_hint`）。
 
-错误码：40030 供应商未知；40031 凭据字段缺失或非法；40430 账号不存在
-（含他人账号）；42900 手动刷新过于频繁（HTTP 429，由 handler 显式映射——
-`HandleAppError` 的区间表不覆盖 429xx）。
+错误码：40030 供应商未知；40031 凭据字段缺失或非法（含供应商 `Validate` 钩子的
+结构校验，如 OpenDesign 的模型面密钥）；40032 该供应商不支持设备授权；
+40430 账号不存在（含他人账号）；40431 授权会话不存在或已过期；42900 手动刷新
+过于频繁（HTTP 429，由 handler 显式映射——`HandleAppError` 的区间表不覆盖
+429xx）；50204 额度供应商授权服务不可用（HTTP 502）。
+
+## OpenDesign（Design Plan，INT-117）
+
+### 两套密钥
+
+OpenDesign 有两套互不通用密钥，凭据页给的是后者、最容易填错：
+
+- **控制面密钥 `vela_ctrl_…`**：控制面 `https://amr-api.open-design.ai` 认它，
+  能查 workspace、Design Plan 额度与钱包余额。Fast Ship 只保存与使用这一把。
+- **模型面密钥 `sk-amr-…`**：模型面 `https://amr-link.open-design.ai/v1` 用它调模型；
+  控制面拿它会 401。用户从网页「API Key」页复制到的就是这把——供应商元数据的
+  `Validate` 钩子在 create/update/probe 时提前拦截（40031，说明「这是调模型用的
+  密钥，查不了额度」），`warning` 字段也在表单上提示。
+
+### 取数链路
+
+`workspaces/current` 取 `activeWorkspaceId`（缺省回退 `workspaceId`）→
+`workspaces/{id}/billing/preflight` 取 `codingPlan`（5 小时/每周窗口、
+`usedCredits/limitCredits`、`resetsAt`）与 `balanceUsd`（钱包余额）→
+`billing/summary` **尽力而为**地补套餐名（`membershipTier` → 「Design Plan Go」；
+summary 挂了回退 `codingPlan.tier`，任何失败只影响套餐名展示，不影响主数据）。
+`codingPlan.eligible=false` 时不产生窗口，`note` 写「无 Design Plan 额度，按钱包
+计费」；有额度窗口且有钱包余额时 `note` 写「窗口用尽后扣钱包」。接口异常
+（网络/5xx/解析失败）只影响该账号卡片的状态展示，不清空上次成功快照，
+也不影响其他供应商。
+
+### 设备授权（浏览器登录）
+
+与 OpenDesign 官方 CLI `vela login` 同款流程，三条路由均仅 JWT。协议实现收在
+适配器层 `internal/pkg/quota/deviceauth_opendesign.go`（上游
+`POST /api/v1/cli/device-authorizations` 建 201 授权、
+`POST …/{deviceId}/token` 代查，均无认证头；`activation_url` 的 scheme 限定
+http/https），service 只编排会话与建号：
+
+1. `POST /api/quota/device-authorizations`（provider+label，可选 `account_id`）：
+   服务端向上游建授权，内存里保存设备 id/设备密钥/有效期/轮询节奏，返回
+   pending 视图（`user_code`、`activation_url`、`poll_interval_seconds`）。
+   带上 `account_id` 表示「为已有账号换凭据」：目标账号必须存在且属于当前用户
+   （否则 40430），且必须是同一供应商（否则 40001，在校验阶段直接拒绝、不触
+   上游），批准后整组替换该账号凭据、不再新建。设备密钥永不出现在
+   任何响应与日志里。
+2. `GET /api/quota/device-authorizations/{id}`：前端按 `poll_interval_seconds`
+   轮询；服务端距上次代查超过该间隔且仍 pending 时向上游代查一次。**过期判定
+   顺序是先上游后本地**：到了轮询节奏先问一次上游（含已过本地有效期的情形），
+   上游给出终态就按终态；上游仍 pending（或无结论）且已过有效期才判
+   expired——用户在批准页待久一点再切回来，批准结果不会被作废（前端配合
+   后台标签页也轮询）。代查结论由适配器统一成五态：批准（返回凭据组）、
+   `expired|canceled|cancelled` → expired、`denied|rejected` → denied、
+   上游 401/404 → invalid、其余 2xx → pending（正常等待）；网络错误/5xx 保持
+   pending 待下次重试。批准后自动落库：
+   - 会话**预分配**账号 id 并缓存首次兑换到的凭据组，建号走
+     `createWithID`（只校验+加密+插入，同 id 行已存在视为成功）——建号失败
+     保持 pending（Warn 只带 id），重试只重跑建号、复用缓存凭据，**不再向上游
+     换取**（批准后的 token 端点大概率一次性），也不产生重复账号；
+   - rebind 场景改走 `Update` 整组换凭据（自带同步重抓）；
+   - 取消能打断进行中的轮询：DELETE 先置会话的取消标志再摘除 map，
+     进行中的 GET 在拿到凭据之后、动库之前检查该标志，已取消则不建号。
+   token 响应里的 `runtimeKey`（模型面密钥）读到即丢，不保存、不返回、不写日志。
+3. `DELETE /api/quota/device-authorizations/{id}`：取消会话（关闭对话框时调用）。
+
+**内存会话与已知取舍**：会话只存 `QuotaService` 的内存 map（`sync.Mutex` 保护；
+同一会话的 GET 由会话自己的 mutex 串行，避免并发 GET 各建一个账号）。进程重启
+即丢，之后 GET 返回 40431，前端提示重新发起——刻意不落库：设备密钥是敏感
+凭据，落库要引入新的一组加密与清理语义，而授权流程生命周期只有几分钟，重启后
+重新点一次「使用浏览器授权」成本更低。会话有效期取 `min(上游值, now+30min)`，
+避免上游给出极远时间让含设备密钥的会话长期驻留内存；过期会话在 POST/GET 时
+顺手清理（保留到有效期之后 1 小时，让前端还能读到 expired 终态）。日志只记
+session id / provider / status / account id。
+
+**真实上游样本**：2026-10-18 用真实控制面实测抓取并脱敏，放在
+`internal/pkg/quota/testdata/opendesign_device_*.json`（起始 201、pending、
+expired、401、404 五份），适配器测试直接用它们驱动状态映射。
+
+### note 字段
+
+`quota.Snapshot.Note` 是供应商特有的补充说明（目前只有 OpenDesign 会填），
+随 `QuotaAccount.note` 与 `QuotaProbe.note` 必填字段下发（空串表示无），
+前端在卡片窗口/余额下方与探测面板展示。图标不在这层：来源由前端组件内注明
+（`web/src/components/quota/provider-icons.tsx` 与 `OPENDESIGN-BRAND.md`）。
 
 ## 明确不做与已知取舍
 

@@ -74,6 +74,32 @@ func setupQuotaHandlerEnv(t *testing.T, fetch quota.Fetcher) *quotaHandlerEnv {
 		Instructions: []string{"复制 API key"},
 		Fetch:        fetch,
 	}}
+	// 设备授权（INT-117）：假控制面 + 带 device_authorization 能力的供应商。
+	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/cli/device-authorizations":
+			expiresAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"deviceId":"dev_handler","deviceSecret":"ds_secret_handler",` +
+				`"userCode":"ABCDEF","activationUrl":"https://open-design.ai/cloud/cli/activate?deviceId=dev_handler",` +
+				`"pollIntervalSeconds":0,"expiresAt":"` + expiresAt + `"}`))
+		case "/api/v1/cli/device-authorizations/dev_handler/token":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(control.Close)
+	providers = append(providers, quota.Provider{
+		ID: "opendesign", Name: "OpenDesign", PlanHint: "Design Plan",
+		DefaultBaseURL: control.URL,
+		DeviceAuth:     quota.OpenDesignDeviceAuth(),
+		CredentialFields: []quota.CredentialField{
+			{Key: "control_key", Label: "控制面密钥", Secret: true, Required: true},
+		},
+		Fetch: fetch,
+	})
 	quotaService := service.NewQuotaService(repository.NewQuotaAccountRepository(db), cfg, zap.NewNop(),
 		func() []quota.Provider { return providers })
 	h := NewQuotaHandler(quotaService)
@@ -86,6 +112,9 @@ func setupQuotaHandlerEnv(t *testing.T, fetch quota.Fetcher) *quotaHandlerEnv {
 	quotaJWT.DELETE("/accounts/:id", h.DeleteAccount)
 	quotaJWT.POST("/accounts/:id/refresh", h.RefreshAccount)
 	quotaJWT.POST("/test", h.Test)
+	quotaJWT.POST("/device-authorizations", h.StartDeviceAuthorization)
+	quotaJWT.GET("/device-authorizations/:id", h.GetDeviceAuthorization)
+	quotaJWT.DELETE("/device-authorizations/:id", h.CancelDeviceAuthorization)
 	r.GET("/api/quota/accounts", middleware.RequireAuth(cfg, apiKeyRepo, authService), h.ListAccounts)
 
 	return &quotaHandlerEnv{db: db, router: r, cfg: cfg, auth: authService, apiKeyRepo: apiKeyRepo}
@@ -168,11 +197,17 @@ func TestQuotaHandler_ListProviders(t *testing.T) {
 		t.Fatalf("providers = %d %s", w.Code, w.Body.String())
 	}
 	var providers []map[string]any
-	if err := json.Unmarshal(envResp.Data, &providers); err != nil || len(providers) != 1 {
-		t.Fatalf("providers decode: %v", err)
+	if err := json.Unmarshal(envResp.Data, &providers); err != nil || len(providers) != 2 {
+		t.Fatalf("providers decode: %v (%+v)", err, envResp.Data)
 	}
 	if providers[0]["id"] != "fake" || providers[0]["name"] != "Fake" {
 		t.Fatalf("unexpected provider meta: %+v", providers[0])
+	}
+	if providers[0]["device_authorization"] != false {
+		t.Fatalf("普通供应商 device_authorization 应为 false: %+v", providers[0])
+	}
+	if providers[1]["id"] != "opendesign" || providers[1]["device_authorization"] != true {
+		t.Fatalf("opendesign 应带 device_authorization=true: %+v", providers[1])
 	}
 	fields := providers[0]["credential_fields"].([]any)
 	if len(fields) != 1 || fields[0].(map[string]any)["key"] != "api_key" {
@@ -267,9 +302,12 @@ func TestQuotaHandler_ApiKeyReadOnly(t *testing.T) {
 		{http.MethodDelete, "/api/quota/accounts/" + accountID},
 		{http.MethodPost, "/api/quota/accounts/" + accountID + "/refresh"},
 		{http.MethodPost, "/api/quota/test"},
+		{http.MethodPost, "/api/quota/device-authorizations"},
+		{http.MethodGet, "/api/quota/device-authorizations/nonexistent"},
+		{http.MethodDelete, "/api/quota/device-authorizations/nonexistent"},
 	} {
 		var body any
-		if tc.method == http.MethodPost && tc.path == "/api/quota/accounts" {
+		if tc.method == http.MethodPost {
 			body = map[string]any{"provider": "fake", "label": "x", "credentials": map[string]string{"api_key": "k"}}
 		}
 		w, envResp = env.do(t, tc.method, tc.path, apiKey, body)
@@ -507,5 +545,82 @@ func TestQuotaHandler_Unauthenticated(t *testing.T) {
 		if w.Code != 401 {
 			t.Fatalf("%s %s unauthenticated = %d, want 401", tc.method, tc.path, w.Code)
 		}
+	}
+}
+
+// 设备授权端点（JWT only）：start 返回 pending 视图且不含 deviceSecret；
+// 未知/他人会话 40431；不支持设备授权 40032；取消后 40431。
+func TestQuotaHandler_DeviceAuthorization(t *testing.T) {
+	env := setupQuotaHandlerEnv(t, nil)
+	user := env.createUser(t)
+	stranger := env.createUser(t)
+	jwtTok := env.mintJWT(user.ID)
+
+	w, envResp := env.do(t, http.MethodPost, "/api/quota/device-authorizations", jwtTok, map[string]any{
+		"provider": "opendesign", "label": "浏览器授权",
+	})
+	if w.Code != 200 {
+		t.Fatalf("start = %d %s", w.Code, w.Body.String())
+	}
+	var session map[string]any
+	if err := json.Unmarshal(envResp.Data, &session); err != nil {
+		t.Fatalf("decode session: %v", err)
+	}
+	if session["status"] != "pending" || session["user_code"] != "ABCDEF" || session["provider"] != "opendesign" {
+		t.Fatalf("pending 视图不符: %+v", session)
+	}
+	if session["account_id"] != "" || session["error"] != "" {
+		t.Fatalf("pending 视图 account_id/error 应为空串: %+v", session)
+	}
+	if _, hasSecret := session["device_secret"]; hasSecret {
+		t.Fatalf("响应不得出现 device_secret 键: %+v", session)
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte("ds_secret_handler")) {
+		t.Fatalf("响应泄漏 deviceSecret: %s", w.Body.String())
+	}
+	if session["poll_interval_seconds"].(float64) != 2 {
+		t.Fatalf("上游未给 pollIntervalSeconds 时缺省 2: %+v", session)
+	}
+	sessionID := session["id"].(string)
+
+	// 未知会话与他人的会话一律 40431（HTTP 404）。
+	w, envResp = env.do(t, http.MethodGet, "/api/quota/device-authorizations/nonexistent", jwtTok, nil)
+	if w.Code != 404 || envResp.Code != 40431 {
+		t.Fatalf("unknown get = %d code %d, want 404/40431", w.Code, envResp.Code)
+	}
+	w, envResp = env.do(t, http.MethodGet, "/api/quota/device-authorizations/"+sessionID, env.mintJWT(stranger.ID), nil)
+	if w.Code != 404 || envResp.Code != 40431 {
+		t.Fatalf("foreign get = %d code %d, want 404/40431", w.Code, envResp.Code)
+	}
+
+	// 不支持设备授权的供应商 40032。
+	w, envResp = env.do(t, http.MethodPost, "/api/quota/device-authorizations", jwtTok, map[string]any{
+		"provider": "fake", "label": "x",
+	})
+	if w.Code != 400 || envResp.Code != 40032 {
+		t.Fatalf("unsupported provider = %d code %d, want 400/40032", w.Code, envResp.Code)
+	}
+
+	// 本人 GET 拿到 pending（轮询间隔内不代查上游）。
+	w, envResp = env.do(t, http.MethodGet, "/api/quota/device-authorizations/"+sessionID, jwtTok, nil)
+	if w.Code != 200 {
+		t.Fatalf("owner get = %d %s", w.Code, w.Body.String())
+	}
+	_ = json.Unmarshal(envResp.Data, &session)
+	if session["status"] != "pending" {
+		t.Fatalf("轮询间隔内应保持 pending: %+v", session)
+	}
+
+	// 取消 → 200 且 data 为 null；再 GET → 40431。
+	w, envResp = env.do(t, http.MethodDelete, "/api/quota/device-authorizations/"+sessionID, jwtTok, nil)
+	if w.Code != 200 || envResp.Code != 0 {
+		t.Fatalf("cancel = %d code %d, want 200/0", w.Code, envResp.Code)
+	}
+	if string(envResp.Data) != "null" {
+		t.Fatalf("cancel 的 data 应为 null，得到 %s", envResp.Data)
+	}
+	w, envResp = env.do(t, http.MethodGet, "/api/quota/device-authorizations/"+sessionID, jwtTok, nil)
+	if w.Code != 404 || envResp.Code != 40431 {
+		t.Fatalf("get after cancel = %d code %d, want 404/40431", w.Code, envResp.Code)
 	}
 }

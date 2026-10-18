@@ -99,6 +99,7 @@ describe("canProbe", () => {
     credential_fields: FIELDS,
     instructions: [],
     warning: "",
+    device_authorization: false,
   };
 
   it("requires a selected provider", () => {

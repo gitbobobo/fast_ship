@@ -746,6 +746,8 @@ interface QuotaProvider {
   instructions: string[];
   /** 会话令牌类供应商的过期警告；其余为空串 */
   warning: string;
+  /** 是否支持浏览器设备授权获取凭据；true 时前端显示「使用浏览器授权」 */
+  device_authorization: boolean;
 }
 
 /** ok 正常；credential_invalid 凭据失效；provider_error 接口异常；pending 暂未抓取 */
@@ -769,6 +771,8 @@ interface QuotaAccount {
   /** 最近一次成功快照的窗口；失败时保留旧数据 */
   windows: QuotaWindow[];
   balance: QuotaBalance | null;
+  /** 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；空串表示无 */
+  note: string;
   created_at: string;
   updated_at: string;
 }
@@ -779,8 +783,41 @@ interface QuotaProbe {
   plan_name: string;
   windows: QuotaWindow[];
   balance: QuotaBalance | null;
+  /** 供应商特有的补充说明；空串表示无 */
+  note: string;
   /** status != ok 时给用户可读原因 */
   error: string;
   /** 可选的更细诊断（HTTP 状态码等），可为空 */
   detail: string;
+}
+
+/**
+ * 设备授权会话状态（INT-117）：
+ * pending 等待用户批准；approved 已拿到控制面密钥并自动建号；
+ * expired 验证码过期/本地超时；denied 用户拒绝或取消；invalid 设备密钥失效。
+ */
+type QuotaDeviceAuthStatus =
+  | "pending"
+  | "approved"
+  | "expired"
+  | "denied"
+  | "invalid";
+
+/** /api/quota/device-authorizations 的会话视图；deviceSecret 从不下发到前端 */
+interface QuotaDeviceAuthorization {
+  id: string;
+  provider: string;
+  status: QuotaDeviceAuthStatus;
+  /** 用户在批准页面输入的验证码 */
+  user_code: string;
+  /** 浏览器批准页面地址（前端 target=_blank 打开） */
+  activation_url: string;
+  /** UTC RFC3339；过期后 GET 返回 expired */
+  expires_at: string;
+  /** 前端轮询节奏（秒），upstream 给的值，缺省 2 */
+  poll_interval_seconds: number;
+  /** approved 时新建账号的 id；其余空串 */
+  account_id: string;
+  /** expired/denied/invalid 时的用户可读原因；其余空串 */
+  error: string;
 }

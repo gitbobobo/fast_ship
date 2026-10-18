@@ -86,4 +86,39 @@ describe("quota api requests", () => {
       expect(options).toMatchObject({ timeout: 30_000, retry: 0 });
     }
   });
+
+  it("device authorization endpoints: POST 起授权、GET 轮询、DELETE 取消", async () => {
+    await quotaApi.startDeviceAuthorization({
+      provider: "opendesign",
+      label: "我的 Design",
+    });
+    // 编辑模式换凭据：account_id 透传进请求体（A5/B4）
+    await quotaApi.startDeviceAuthorization({
+      provider: "opendesign",
+      label: "我的 Design",
+      account_id: "acc-1",
+    });
+    await quotaApi.getDeviceAuthorization("sess 1");
+    await quotaApi.cancelDeviceAuthorization("sess 1");
+
+    const posts = calls(post);
+    expect(posts[0][0]).toBe("quota/device-authorizations");
+    expect(posts[0][1]?.json).toEqual({
+      provider: "opendesign",
+      label: "我的 Design",
+    });
+    expect(posts[1][1]?.json).toEqual({
+      provider: "opendesign",
+      label: "我的 Design",
+      account_id: "acc-1",
+    });
+    // 起授权与轮询都是真实上游请求：延长超时、禁重试
+    expect(posts[0][1]).toMatchObject({ timeout: 30_000, retry: 0 });
+
+    const gets = calls(get);
+    expect(gets[0][0]).toBe("quota/device-authorizations/sess%201");
+    expect(gets[0][1]).toMatchObject({ timeout: 30_000, retry: 0 });
+
+    expect(calls(del)[0][0]).toBe("quota/device-authorizations/sess%201");
+  });
 });

@@ -39,6 +39,11 @@ type QuotaService struct {
 
 	fetchLocks sync.Map // account ID → *sync.Mutex，串行化同一账号的抓取
 
+	// 设备授权会话表（INT-117）：只存内存，进程重启即丢，之后 GET 返回 40431。
+	// 上游设备密钥与兑换到的凭据只存在会话对象里，响应与日志都不出现。
+	deviceMu       sync.Mutex
+	deviceSessions map[string]*quotaDeviceSession
+
 	// kick 让后台调度器在抓取结果落库后重算等待：HTTP 侧的新建/换凭据/
 	// 手动刷新都会写更早的 next_retry_at，而调度器可能正睡一个更长的定时器。
 	// main 在启动调度前注入；测试不设时为 nil（无操作）。
@@ -61,12 +66,13 @@ func NewQuotaService(repo *repository.QuotaAccountRepository, cfg *config.Config
 		registry = func() []quota.Provider { return quota.Registry(cfg.Quota.BaseURLs) }
 	}
 	return &QuotaService{
-		repo:     repo,
-		cfg:      cfg,
-		logger:   logger,
-		registry: registry,
-		client:   &http.Client{},
-		now:      time.Now,
+		repo:           repo,
+		cfg:            cfg,
+		logger:         logger,
+		registry:       registry,
+		client:         &http.Client{},
+		now:            time.Now,
+		deviceSessions: map[string]*quotaDeviceSession{},
 	}
 }
 
@@ -80,7 +86,8 @@ func (s *QuotaService) providerByID(id string) (quota.Provider, bool) {
 }
 
 // validateCredentials 按供应商元数据校验并清洗凭据：必填字段缺失或空白 → 40031；
-// 返回只含已声明字段、各值已 trim 的凭据组（多余字段不存）。
+// 供应商自带的 Validate 钩子（如 OpenDesign 拦模型面密钥）随后执行，返回非空
+// 消息也 40031。返回只含已声明字段、各值已 trim 的凭据组（多余字段不存）。
 func (s *QuotaService) validateCredentials(provider quota.Provider, raw map[string]string) (quota.Credentials, *errs.AppError) {
 	creds := make(quota.Credentials, len(provider.CredentialFields))
 	for _, field := range provider.CredentialFields {
@@ -90,6 +97,11 @@ func (s *QuotaService) validateCredentials(provider quota.Provider, raw map[stri
 				fmt.Sprintf("凭据字段缺失或为空：%s", field.Label))
 		}
 		creds[field.Key] = value
+	}
+	if provider.Validate != nil {
+		if message := provider.Validate(creds); message != "" {
+			return nil, errs.New(errs.ErrQuotaCredentialsInvalid.Code, message)
+		}
 	}
 	return creds, nil
 }
@@ -183,6 +195,7 @@ func (s *QuotaService) ListProviders() ([]api.QuotaProvider, error) {
 		out = append(out, api.QuotaProvider{
 			Id: p.ID, Name: p.Name, PlanHint: p.PlanHint,
 			CredentialFields: fields, Instructions: instructions, Warning: p.Warning,
+			DeviceAuthorization: p.DeviceAuth != nil,
 		})
 	}
 	return out, nil
@@ -203,24 +216,36 @@ func (s *QuotaService) List(userID string) ([]api.QuotaAccount, error) {
 // Create 校验并保存新账号（初始 pending），随后同步抓取一次——抓取失败仍返回
 // 200，结果落在 status。同用户重复添加相同凭据允许（不存明文指纹，无从去重）。
 func (s *QuotaService) Create(userID string, req *CreateQuotaAccountRequest) (*api.QuotaAccount, error) {
+	id := uuid.NewString()
+	if appErr := s.createWithID(userID, id, req); appErr != nil {
+		return nil, appErr
+	}
+	s.FetchAccountNow(context.Background(), id)
+	return s.respond(id, userID)
+}
+
+// createWithID 只做「校验 + 加密 + 插入」，供普通建号与设备授权的自动建号共用。
+// 设备授权路径用它以预分配的 accountID 幂等重试：插入命中已存在的同 id 行
+// 视为成功（前次重试可能已落库但会话未推进），不产生第二个账号。
+func (s *QuotaService) createWithID(userID, accountID string, req *CreateQuotaAccountRequest) *errs.AppError {
 	provider, appErr := s.requireProvider(req.Provider)
 	if appErr != nil {
-		return nil, appErr
+		return appErr
 	}
 	label, appErr := validQuotaLabel(req.Label)
 	if appErr != nil {
-		return nil, appErr
+		return appErr
 	}
 	creds, appErr := s.validateCredentials(provider, req.Credentials)
 	if appErr != nil {
-		return nil, appErr
+		return appErr
 	}
 	encrypted, appErr := s.encryptCredentials(creds)
 	if appErr != nil {
-		return nil, appErr
+		return appErr
 	}
 	account := &model.QuotaAccount{
-		ID:             uuid.NewString(),
+		ID:             accountID,
 		UserID:         userID,
 		Provider:       provider.ID,
 		Label:          label,
@@ -230,11 +255,12 @@ func (s *QuotaService) Create(userID string, req *CreateQuotaAccountRequest) (*a
 	}
 	account.CredentialsEncrypted = encrypted
 	if err := s.repo.Create(account); err != nil {
-		return nil, errs.ErrInternal
+		if _, findErr := s.repo.FindByIDAny(accountID); findErr == nil {
+			return nil
+		}
+		return errs.ErrInternal
 	}
-
-	s.FetchAccountNow(context.Background(), account.ID)
-	return s.respond(account.ID, userID)
+	return nil
 }
 
 // Update 改标签或整组替换凭据。改标签不触发抓取；替换凭据把状态打回 pending、
@@ -375,6 +401,7 @@ func (s *QuotaService) Probe(req *TestQuotaCredentialsRequest) (*api.QuotaProbe,
 	}
 	probe.Status = api.QuotaProbeStatusOk
 	probe.PlanName = snapshot.PlanName
+	probe.Note = snapshot.Note
 	probe.Windows = snapshotWindows(snapshot)
 	probe.Balance = snapshotBalance(snapshot)
 	return probe, nil
@@ -544,6 +571,7 @@ func (s *QuotaService) toAccountResponse(account *model.QuotaAccount) api.QuotaA
 	}
 	resp.Windows = snapshotWindows(snapshot)
 	resp.Balance = snapshotBalance(snapshot)
+	resp.Note = snapshot.Note
 	return resp
 }
 
