@@ -931,6 +931,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		&model.T3Environment{},
 		&model.ProjectT3Binding{},
 		&model.Automation{},
+		&model.AutomationTrigger{},
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
 		&model.Notification{},
@@ -956,10 +957,10 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_variant ON screenshot_screens(project_id, screen_key, COALESCE(platform,''),COALESCE(locale,''),COALESCE(theme,''))")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
 	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-ON automation_runs(automation_id)
+ON automation_runs(trigger_id)
 WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
   AND (finished_at IS NULL OR post_state = 'pending')`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
@@ -1060,7 +1061,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, repository.NewProjectT3BindingRepository(db))
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
-	automationService := service.NewAutomationService(db, repository.NewAutomationRepository(db), repository.NewAutomationRunRepository(db), t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zap.NewNop())
+	automationService := service.NewAutomationService(db, repository.NewAutomationRepository(db), repository.NewAutomationTriggerRepository(db), repository.NewAutomationRunRepository(db), t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zap.NewNop())
 	automationAgentService := service.NewAutomationAgentService(db, repository.NewAutomationRunRepository(db), repository.NewAutomationRunTokenRepository(db), t3ThreadsService, notificationSink, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
 

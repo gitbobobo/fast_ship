@@ -26,8 +26,9 @@ import (
 // AutomationScheduler 自动化协调循环（INT-90）：单进程内一个每 10 秒的协调者
 // 加固定 4 个派发 worker。协调者每轮做四件事：
 //
-//  1. 到期 cron → 短事务乐观核对（enabled + 旧 next_run_at）并写运行行；
-//     停机错过的触发合并为一次，trigger_key=cron:<原计划UTC>；
+//  1. 到期 cron 触发器 → 短事务乐观核对（父行 enabled + 触发器旧 next_run_at）
+//     并写运行行（trigger_id/trigger_type 落触发器）；停机错过的触发合并为一次，
+//     trigger_key=cron:<原计划UTC>；
 //  2. 全量扫描待认领运行（status=''，含 Issue 事件在调用方事务里写的行），
 //     投递给 worker；worker 用条件 UPDATE 认领，天然幂等；
 //  3. 超时：活动运行过 deadline_at → timed_out，按 post_on_timeout 登记后置；
@@ -157,32 +158,34 @@ func (s *AutomationScheduler) tick(now time.Time) {
 	}
 }
 
-// dispatchDueCrons 步骤 1：到期 cron。短事务内核对 enabled + 旧 next_run_at
-// 未变才写运行并推进调度；两台进程（理论上单进程部署）或协调者与用户更新
-// 并发时靠这个乐观条件收敛。
+// dispatchDueCrons 步骤 1：到期 cron 触发器（INT-118 起调度单位是触发器）。
+// 短事务内核对父 automation enabled + 触发器旧 next_run_at 未变才写运行并推进
+// 调度；两台进程（理论上单进程部署）或协调者与用户更新并发时靠这个乐观条件收敛。
 func (s *AutomationScheduler) dispatchDueCrons(now time.Time) {
-	due, err := repository.ListDueCronAutTx(s.db, now, automationBatchLimit)
+	due, err := repository.ListDueCronTriggersTx(s.db, now, automationBatchLimit)
 	if err != nil {
-		s.logger.Error("查询到期自动化失败", zap.Error(err))
+		s.logger.Error("查询到期 cron 触发器失败", zap.Error(err))
 		return
 	}
 	for i := range due {
-		a := due[i]
-		if a.NextRunAt == nil {
-			continue
-		}
-		s.dispatchDueCron(&a, now)
+		s.dispatchDueCronTrigger(&due[i], now)
 	}
 }
 
-func (s *AutomationScheduler) dispatchDueCron(a *model.Automation, now time.Time) {
-	planned := *a.NextRunAt
+func (s *AutomationScheduler) dispatchDueCronTrigger(t *model.AutomationTrigger, now time.Time) {
+	planned := *t.NextRunAt
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		var current model.Automation
-		if err := tx.Where("id = ? AND enabled = ? AND trigger_type = ?",
-			a.ID, true, model.AutomationTriggerCron).First(&current).Error; err != nil {
+		var a model.Automation
+		if err := tx.Where("id = ? AND enabled = ?", t.AutomationID, true).First(&a).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil // 已被停用/删除/改类型，跳过
+				return nil // 已被停用/删除，跳过
+			}
+			return err
+		}
+		var current model.AutomationTrigger
+		if err := tx.Where("id = ?", t.ID).First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // 触发器已被删除，跳过
 			}
 			return err
 		}
@@ -202,11 +205,12 @@ func (s *AutomationScheduler) dispatchDueCron(a *model.Automation, now time.Time
 			return err
 		}
 
-		busy, err := repository.HasActiveRunTx(tx, a.ID)
+		// 忙碌判定按触发器：同一自动化的其它触发器可并行运行。
+		busy, err := repository.HasActiveRunByTriggerTx(tx, t.ID)
 		if err != nil {
 			return err
 		}
-		run := newAutomationRunRow(&current, event, contextJSON, now)
+		run := newAutomationRunRow(&a, &current, event, contextJSON, now)
 		if busy {
 			finished := now
 			run.Status = model.AutomationRunFailed
@@ -222,23 +226,24 @@ func (s *AutomationScheduler) dispatchDueCron(a *model.Automation, now time.Time
 			created = false
 		}
 		if busy && created {
-			if err := publishAutomationBusyTx(s.sink, tx, &current, run); err != nil {
+			if err := publishAutomationBusyTx(s.sink, tx, &a, run); err != nil {
 				return err
 			}
 		}
 
-		// 推进 next_run_at：以 now 为基线取下一次，停机期间错过的全部合并为
-		// 这一次触发（trigger_key 记录原计划时间，重放撞唯一约束被忽略）。
+		// 推进触发器 next_run_at：以 now 为基线取下一次，停机期间错过的全部
+		// 合并为这一次触发（trigger_key 记录原计划时间，重放撞唯一约束被忽略）。
 		_, next, err := parseAutomationCron(current.CronExpression, current.Timezone, now)
 		if err != nil {
-			// 配置损坏（如表达式被手工改库）：停调度并告警，不无限循环。
-			s.logger.With(zap.String("user_id", a.UserID)).Error("cron 表达式解析失败，暂停该自动化的后续调度",
-				zap.String("automation_id", a.ID), zap.String("user_id", a.UserID), zap.Error(err))
-			return tx.Model(&model.Automation{}).Where("id = ?", a.ID).
+			// 配置损坏（如表达式被手工改库）：停该触发器调度并告警，不无限循环。
+			s.logger.With(zap.String("user_id", a.UserID)).Error("cron 表达式解析失败，暂停该触发器的后续调度",
+				zap.String("automation_id", t.AutomationID), zap.String("trigger_id", t.ID),
+				zap.String("user_id", a.UserID), zap.Error(err))
+			return tx.Model(&model.AutomationTrigger{}).Where("id = ?", t.ID).
 				Update("next_run_at", nil).Error
 		}
-		res := tx.Model(&model.Automation{}).
-			Where("id = ? AND next_run_at = ?", a.ID, planned).
+		res := tx.Model(&model.AutomationTrigger{}).
+			Where("id = ? AND next_run_at = ?", t.ID, planned).
 			Update("next_run_at", next)
 		if res.Error != nil {
 			return res.Error
@@ -246,7 +251,8 @@ func (s *AutomationScheduler) dispatchDueCron(a *model.Automation, now time.Time
 		return nil
 	})
 	if err != nil {
-		s.logger.Error("处理到期自动化失败", zap.String("automation_id", a.ID), zap.String("user_id", a.UserID), zap.Error(err))
+		s.logger.Error("处理到期 cron 触发器失败",
+			zap.String("automation_id", t.AutomationID), zap.String("trigger_id", t.ID), zap.Error(err))
 	}
 }
 

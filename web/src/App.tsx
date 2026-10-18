@@ -44,6 +44,7 @@ const GithubTokensPage = lazy(
 );
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const AutomationsPage = lazy(() => import("@/routes/automations/index"));
+const AutomationEditorPage = lazy(() => import("@/routes/automations/editor"));
 const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
 const QuotaPage = lazy(() => import("@/routes/quota/index"));
 const BotsPage = lazy(() => import("@/routes/bots/index"));
@@ -204,6 +205,14 @@ export default function App() {
               <Route
                 path="/automations"
                 element={<LazyPage render={<AutomationsPage />} />}
+              />
+              <Route
+                path="/automations/new"
+                element={<LazyPage render={<AutomationEditorPage />} />}
+              />
+              <Route
+                path="/automations/:id"
+                element={<LazyPage render={<AutomationEditorPage />} />}
               />
               <Route
                 path="/notifications"

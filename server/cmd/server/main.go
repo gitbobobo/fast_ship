@@ -80,6 +80,7 @@ var autoMigrateModels = []interface{}{
 	&model.T3Environment{},
 	&model.ProjectT3Binding{},
 	&model.Automation{},
+	&model.AutomationTrigger{},
 	&model.AutomationRun{},
 	&model.AutomationRunToken{},
 	&model.Notification{},
@@ -241,6 +242,7 @@ func main() {
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
 	automationRepo := repository.NewAutomationRepository(db)
+	automationTriggerRepo := repository.NewAutomationTriggerRepository(db)
 	automationRunRepo := repository.NewAutomationRunRepository(db)
 	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
@@ -286,7 +288,7 @@ func main() {
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)
-	automationService := service.NewAutomationService(db, automationRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, automationLogger)
+	automationService := service.NewAutomationService(db, automationRepo, automationTriggerRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, automationLogger)
 
 	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
 	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)
@@ -500,6 +502,12 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("截图文件列准备失败: %w", err)
 	}
 
+	// 自动化触发器拆表（INT-118）的前置：旧主键的防抖账本在这里丢弃，让随后的
+	// AutoMigrate 按新主键 (trigger_id, repo, pr) 重建空表。
+	if err := dropLegacyPRDebounces(db); err != nil {
+		return fmt.Errorf("防抖账本重建失败: %w", err)
+	}
+
 	// 自动迁移
 	if err := db.AutoMigrate(autoMigrateModels...); err != nil {
 		return err
@@ -508,6 +516,13 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	// 截图库折叠迁移（INT-99）：把多版本库收敛为单文件截图。
 	if err := migrateScreenshots(db, fileStorage, logger); err != nil {
 		return fmt.Errorf("截图库迁移失败: %w", err)
+	}
+
+	// 自动化触发器拆表（INT-118）：存量 automation 行回填触发器、运行行回填
+	// trigger_id、整表重建清掉旧列。必须在 AutoMigrate 之后（依赖新表/新列）、
+	// createBootIndexes 之前（索引建在新形状上）。
+	if err := migrateAutomationTriggers(db, logger); err != nil {
+		return fmt.Errorf("自动化触发器迁移失败: %w", err)
 	}
 
 	createBootIndexes(db)
@@ -560,20 +575,25 @@ func createBootIndexes(db *gorm.DB) {
 	ON screenshot_screens(project_id, screen_key, COALESCE(platform,''), COALESCE(locale,''), COALESCE(theme,''))`)
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_environments_user_name ON t3_environments(user_id, name)")
 
-	// 自动化（INT-90）：复合/部分索引 AutoMigrate 建不了，全部手工登记。
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_enabled_trigger_next ON automations(enabled, trigger_type, next_run_at)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automations_user_trigger_project ON automations(user_id, trigger_type, issue_project_id)")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	// 自动化（INT-90/INT-118）：复合/部分索引 AutoMigrate 建不了，全部手工登记。
+	// 触发器拆表后调度/匹配索引全部落在 automation_triggers 上。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_triggers_cron_next ON automation_triggers(trigger_type, next_run_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_triggers_event ON automation_triggers(trigger_type, issue_project_id)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_triggers_automation ON automation_triggers(automation_id, position)")
+	// 触发器幂等键从 (automation_id, trigger_key) 收窄到触发器维度（INT-118）。
+	// 改动定义必须 DROP 再 CREATE：CREATE IF NOT EXISTS 不会替换已有定义。
+	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_automation_trigger")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_user_triggered ON automation_runs(user_id, triggered_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_triggered ON automation_runs(automation_id, triggered_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_active_deadline ON automation_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
-	// 同一自动化至多一个活动运行（未结束）或一个待后置运行——重入/删除约束的
-	// 数据库兜底。只约束 cron/issue 触发：GitHub PR 触发（INT-93）一轮多模型
-	// 并行 + 排队，允许同一规则多行未结束。必须 DROP 再 CREATE：
-	// CREATE IF NOT EXISTS 不会替换已有定义（INT-90 存量库升级）。
+	// 同一触发器至多一个活动运行（未结束）或一个待后置运行——重入约束的数据库
+	// 兜底（INT-118 从自动化维度收窄到触发器维度：同一自动化的不同触发器可
+	// 并行运行；删除守卫仍按自动化）。只约束 cron/issue 触发：GitHub PR 触发
+	// （INT-93）一轮多模型并行 + 排队，允许同一触发器多行未结束。
 	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-	ON automation_runs(automation_id)
+	ON automation_runs(trigger_id)
 	WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
 	  AND (finished_at IS NULL OR post_state = 'pending')`)
 	// PR 审查：按 repo+pr+sha 找同一轮运行（SHA 变化取消、轮次聚合）。

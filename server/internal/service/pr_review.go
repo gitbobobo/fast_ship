@@ -307,9 +307,10 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 		return err
 	}
 
-	// 规则匹配：trigger_type 与 action 一致且启用；issue_project_id 非空必须匹配
-	// 该项目，为空则该用户任一关联项目命中。按 automation id 只开一轮。
-	matched, err := matchPRRules(tx, triggerType, linked, now)
+	// 触发器匹配（INT-118）：trigger_type 与 action 一致且父 automation 启用；
+	// 触发器 issue_project_id 非空必须匹配该项目，为空则该用户任一关联项目命中。
+	// 每个命中的触发器各自开一轮/各挂一个防抖窗口。
+	matched, err := matchPRTriggers(tx, triggerType, linked, now)
 	if err != nil {
 		return err
 	}
@@ -319,9 +320,9 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 
 	for i := range matched {
 		rule := &matched[i]
-		if rule.a.DebounceSeconds > 0 {
+		if rule.t.DebounceSeconds > 0 {
 			err = s.debounces.UpsertTx(tx, &model.GitHubPRDebounce{
-				AutomationID:   rule.a.ID,
+				TriggerID:      rule.t.ID,
 				RepoFullName:   repoFullName,
 				PRNumber:       p.Number,
 				UserID:         rule.a.UserID,
@@ -333,7 +334,7 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 				PRURL:          p.PullRequest.HTMLURL,
 				BaseRef:        p.PullRequest.Base.Ref,
 				HeadRef:        head.Ref,
-				FireAt:         now.Add(time.Duration(rule.a.DebounceSeconds) * time.Second),
+				FireAt:         now.Add(time.Duration(rule.t.DebounceSeconds) * time.Second),
 				UpdatedAt:      now,
 			})
 			if err != nil {
@@ -342,7 +343,7 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 			continue
 		}
 		// debounce=0：本事务内直接开一轮并提升排队。
-		if err := s.openPRRoundTx(tx, rule.a, rule.projectID, p.Installation.ID, repoFullName, p, head.SHA, now); err != nil {
+		if err := s.openPRRoundTx(tx, rule.a, rule.t, rule.projectID, p.Installation.ID, repoFullName, p, head.SHA, now); err != nil {
 			return err
 		}
 	}
@@ -450,33 +451,51 @@ func currentPRHeadSHATx(tx *gorm.DB, repoFullName string, prNumber int) (string,
 	return "", err
 }
 
-// prRuleMatch 命中的规则与其宿主项目。
-type prRuleMatch struct {
+// prTriggerMatch 命中的触发器、父自动化与其宿主项目。
+type prTriggerMatch struct {
 	a         *model.Automation
+	t         *model.AutomationTrigger
 	projectID string
 }
 
-// matchPRRules 按项目集合匹配启用规则；同一 automation 只留一条。查询失败
-// 返回错误（delivery 已入账，吞掉会导致「已受理但漏开轮」且 GitHub 不再重试）。
-func matchPRRules(tx *gorm.DB, triggerType model.AutomationTriggerType, projects []model.Project, now time.Time) ([]prRuleMatch, error) {
+// matchPRTriggers 按项目集合匹配启用的 PR 触发器；同一触发器只留一条（可经多个
+// 关联项目命中）。查询失败返回错误（delivery 已入账，吞掉会导致「已受理但漏开轮」
+// 且 GitHub 不再重试）。
+func matchPRTriggers(tx *gorm.DB, triggerType model.AutomationTriggerType, projects []model.Project, now time.Time) ([]prTriggerMatch, error) {
 	seen := map[string]bool{}
-	var out []prRuleMatch
+	var out []prTriggerMatch
 	for i := range projects {
 		project := &projects[i]
-		var autos []model.Automation
-		if err := tx.
-			Where("user_id = ? AND enabled = ? AND trigger_type = ? AND (issue_project_id IS NULL OR issue_project_id = ?)",
-				project.UserID, true, triggerType, project.ID).
-			Find(&autos).Error; err != nil {
+		triggers, err := repository.ListPRTriggersTx(tx, project.UserID, triggerType, project.ID)
+		if err != nil {
 			return nil, err
 		}
+		if len(triggers) == 0 {
+			continue
+		}
+		autoIDs := make([]string, 0, len(triggers))
+		for j := range triggers {
+			autoIDs = append(autoIDs, triggers[j].AutomationID)
+		}
+		var autos []model.Automation
+		if err := tx.Where("id IN ?", autoIDs).Find(&autos).Error; err != nil {
+			return nil, err
+		}
+		autosByID := make(map[string]model.Automation, len(autos))
 		for j := range autos {
-			a := &autos[j]
-			if seen[a.ID] {
+			autosByID[autos[j].ID] = autos[j]
+		}
+		for j := range triggers {
+			t := &triggers[j]
+			if seen[t.ID] {
 				continue
 			}
-			seen[a.ID] = true
-			out = append(out, prRuleMatch{a: a, projectID: project.ID})
+			a, ok := autosByID[t.AutomationID]
+			if !ok {
+				continue // 父自动化并发删除：跳过
+			}
+			seen[t.ID] = true
+			out = append(out, prTriggerMatch{a: &a, t: t, projectID: project.ID})
 		}
 	}
 	return out, nil
@@ -524,19 +543,19 @@ type prTriggerContext struct {
 	RoundNumber int    `json:"round_number"`
 }
 
-// openPRRoundTx 开一轮：同一 SHA 复用已有轮次号，每个模型一行 queued；
-// 同一 SHA+模型被 (automation_id, trigger_key) 唯一键吃掉。零插入不推进
-// github_pr_reviews.round_number（否则同步会查到空轮并清掉 pending）。随后提升排队。
-func (s *PRReviewService) openPRRoundTx(tx *gorm.DB, a *model.Automation, projectID string, installationID int64, repoFullName string, p *gitHubPRPayload, headSHA string, now time.Time) error {
+// openPRRoundTx 开一轮（单位：触发器，INT-118）：同一 SHA 复用已有轮次号，每个
+// 模型一行 queued；同一 SHA+模型被 (trigger_id, trigger_key) 唯一键吃掉。零插入
+// 不推进 github_pr_reviews.round_number（否则同步会查到空轮并清掉 pending）。随后提升排队。
+func (s *PRReviewService) openPRRoundTx(tx *gorm.DB, a *model.Automation, t *model.AutomationTrigger, projectID string, installationID int64, repoFullName string, p *gitHubPRPayload, headSHA string, now time.Time) error {
 	round, err := repository.RoundNumberForHeadSHATx(tx, repoFullName, p.Number, headSHA)
 	if err != nil {
 		return err
 	}
-	models, err := parsePRModelSelections(a.ModelSelectionsJSON)
+	models, err := parsePRModelSelections(t.ModelSelectionsJSON)
 	if err != nil || len(models) == 0 {
-		// 配置损坏（正常路径被 CRUD 校验拦住）：跳过该规则，不阻断其它规则。
-		s.logger.Warn("PR 规则的模型选择缺失或损坏，跳过开轮",
-			zap.String("automation_id", a.ID), zap.Error(err))
+		// 配置损坏（正常路径被 CRUD 校验拦住）：跳过该触发器，不阻断其它触发器。
+		s.logger.Warn("PR 触发器的模型选择缺失或损坏，跳过开轮",
+			zap.String("automation_id", a.ID), zap.String("trigger_id", t.ID), zap.Error(err))
 		return nil
 	}
 
@@ -559,7 +578,7 @@ func (s *PRReviewService) openPRRoundTx(tx *gorm.DB, a *model.Automation, projec
 
 	inserted := 0
 	for _, sel := range models {
-		run := s.newPRRunRow(a, sel, repoFullName, p.Number, headSHA, round, installationID, ctxJSON, now)
+		run := s.newPRRunRow(a, t, sel, repoFullName, p.Number, headSHA, round, installationID, ctxJSON, now)
 		if err := tx.Create(run).Error; err != nil {
 			if !isRunDuplicateTriggerKey(err) {
 				return err
@@ -588,10 +607,10 @@ func (s *PRReviewService) openPRRoundTx(tx *gorm.DB, a *model.Automation, projec
 	return s.promoteQueuedPRRunsTx(tx, a.UserID, now)
 }
 
-// newPRRunRow 构造一个模型的排队运行：config_snapshot.model_selection 是这一个
-// 模型的单对象（现有 launch 路径无需改动），deadline 先按 triggered_at 起算，
-// 提升时重置为真正开始派发的时间 + timeout。
-func (s *PRReviewService) newPRRunRow(a *model.Automation, sel prModelSelection, repoFullName string, prNumber int, headSHA string, round int, installationID int64, ctxJSON []byte, now time.Time) *model.AutomationRun {
+// newPRRunRow 构造一个模型的排队运行（trigger_id/trigger_type 取触发器）：
+// config_snapshot.model_selection 是这一个模型的单对象（现有 launch 路径无需改动），
+// deadline 先按 triggered_at 起算，提升时重置为真正开始派发的时间 + timeout。
+func (s *PRReviewService) newPRRunRow(a *model.Automation, t *model.AutomationTrigger, sel prModelSelection, repoFullName string, prNumber int, headSHA string, round int, installationID int64, ctxJSON []byte, now time.Time) *model.AutomationRun {
 	// 快照复用 cron/issue 的构造，但 model_selection 换成这一个模型。
 	perModel := *a
 	if raw, err := json.Marshal(sel); err == nil {
@@ -601,11 +620,12 @@ func (s *PRReviewService) newPRRunRow(a *model.Automation, sel prModelSelection,
 		ID:                 uuid.NewString(),
 		UserID:             a.UserID,
 		AutomationID:       a.ID,
-		TriggerType:        a.TriggerType,
+		TriggerID:          t.ID,
+		TriggerType:        t.TriggerType,
 		TriggerKey:         prTriggerKey(repoFullName, prNumber, headSHA, sel.InstanceId, sel.Model),
 		TriggerContextJSON: string(ctxJSON),
 		TriggeredAt:        now,
-		ConfigSnapshotJSON: snapshotJSON(&perModel),
+		ConfigSnapshotJSON: snapshotJSON(&perModel, t),
 		EnvironmentID:      a.EnvironmentID,
 		T3ProjectID:        a.T3ProjectID,
 		ThreadID:           uuid.NewString(),
@@ -625,7 +645,8 @@ func (s *PRReviewService) newPRRunRow(a *model.Automation, sel prModelSelection,
 }
 
 // prTriggerKey `pr:<repo>:<number>:<sha>:<instance_id>:<model>`；同一 SHA+模型被
-// UNIQUE(automation_id, trigger_key) 吃掉（重复投递/并发开轮收敛为一行）。
+// UNIQUE(trigger_id, trigger_key) 吃掉（重复投递/并发开轮收敛为一行；
+// INT-118 起唯一性落在触发器维度，同一自动化的不同触发器各开各轮）。
 func prTriggerKey(repo string, number int, sha, instanceID, model string) string {
 	return "pr:" + url.PathEscape(repo) + ":" +
 		url.PathEscape(strconv.Itoa(number)) + ":" +
@@ -720,8 +741,8 @@ func (s *PRReviewService) ProcessDueDebounces(now time.Time) {
 func (s *PRReviewService) fireDebounce(d *model.GitHubPRDebounce, now time.Time) {
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		// 消费防抖行（条件删除：0 行=已被并发处理）。
-		res := tx.Where("automation_id = ? AND repo_full_name = ? AND pr_number = ? AND fire_at <= ?",
-			d.AutomationID, d.RepoFullName, d.PRNumber, now).
+		res := tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ? AND fire_at <= ?",
+			d.TriggerID, d.RepoFullName, d.PRNumber, now).
 			Delete(&model.GitHubPRDebounce{})
 		if res.Error != nil {
 			return res.Error
@@ -730,16 +751,28 @@ func (s *PRReviewService) fireDebounce(d *model.GitHubPRDebounce, now time.Time)
 			return nil
 		}
 
-		var a model.Automation
-		if err := tx.Where("id = ?", d.AutomationID).First(&a).Error; err != nil {
+		var t model.AutomationTrigger
+		if err := tx.Where("id = ?", d.TriggerID).First(&t).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil // 规则已删除：防抖行随之消失
+				return nil // 触发器已删除：防抖行随之消失
+			}
+			return err
+		}
+		var a model.Automation
+		if err := tx.Where("id = ?", t.AutomationID).First(&a).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // 自动化已删除：触发器经 CASCADE 一并消失
 			}
 			return err
 		}
 		triggerType, ok := TriggerTypeForAction(d.Action)
-		if !a.Enabled || !ok || a.TriggerType != triggerType {
-			return nil // 规则已停用/改类型：丢弃本次窗口
+		if !a.Enabled || !ok || t.TriggerType != triggerType {
+			return nil // 自动化已停用/触发器已改类型：丢弃本次窗口
+		}
+		// 项目范围在窗口内被改窄：旧项目匹配出来的窗口已不再适用，丢弃
+		// （否则改配后仍会按旧项目开一轮；NULL 表示全部项目，仍然放行）。
+		if t.IssueProjectID != nil && *t.IssueProjectID != d.ProjectID {
+			return nil
 		}
 
 		payload := gitHubPRPayload{
@@ -756,11 +789,11 @@ func (s *PRReviewService) fireDebounce(d *model.GitHubPRDebounce, now time.Time)
 		payload.Repository.FullName = d.RepoFullName
 		payload.Installation.ID = d.InstallationID
 
-		return s.openPRRoundTx(tx, &a, d.ProjectID, d.InstallationID, d.RepoFullName, &payload, d.HeadSHA, now)
+		return s.openPRRoundTx(tx, &a, &t, d.ProjectID, d.InstallationID, d.RepoFullName, &payload, d.HeadSHA, now)
 	})
 	if err != nil {
 		s.logger.Error("防抖开轮失败",
-			zap.String("automation_id", d.AutomationID),
+			zap.String("trigger_id", d.TriggerID),
 			zap.String("repo", d.RepoFullName),
 			zap.Int("pr", d.PRNumber), zap.Error(err))
 	}

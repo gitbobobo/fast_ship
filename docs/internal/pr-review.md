@@ -1,9 +1,10 @@
 # GitHub PR 自动评审（INT-93）
 
 在 INT-90 自动化之上：GitHub App webhook（pull_request opened/synchronize）触发
-自动 PR 评审。一条规则可选 1–10 个模型，一次触发每个模型并行开一个 T3 线程，
-结果通过机器人顶层评论 + GitHub Checks 回写到 PR。评论/check 全部以 GitHub App
-安装令牌代发，agent 线程拿不到任何 GitHub 凭证。
+自动 PR 评审。一个 PR 触发器可选 1–10 个模型，一次触发每个模型并行开一个 T3 线程
+（INT-118 起同一自动化的多个 PR 触发器各自独立开轮/防抖），结果通过机器人顶层
+评论 + GitHub Checks 回写到 PR。评论/check 全部以 GitHub App 安装令牌代发，
+agent 线程拿不到任何 GitHub 凭证。
 
 **本次（INT-93）不创建真实 GitHub App、不部署**；自测走
 `github_app.fake=true`（仅 `server.mode=debug`）+ `scripts/simulate-github-pr-webhook.sh`。
@@ -18,16 +19,20 @@
   已关联（大小写不敏感反查）且该项目绑定了公开或代码仓库 Token 的才审查。
   未关联、或只填仓库名未绑 Token → 202 忽略，不取消、不开轮。webhook 事务内
   不调 GitHub，不现场验证该 Token 对该仓的权限。
-- 规则匹配：`trigger_type` 必须与 action 一致（opened 规则不响应 synchronize，
-  反之亦然）；`issue_project_id` 非空则必须匹配该项目，为空则该用户任一关联项目
-  命中即可；同一 automation id 只开一轮。
+- 触发器匹配（INT-118 起单位是触发器）：触发器 `trigger_type` 必须与 action 一致
+  （opened 触发器不响应 synchronize，反之亦然）且父 automation 启用；触发器的
+  `issue_project_id` 非空则必须匹配该项目，为空则该用户任一关联项目命中即可；
+  每个命中的触发器各自开一轮、各挂一个防抖窗口（同一 SHA 共享轮次号）。
 
 ## 防抖与排队（`pr_review.go`）
 
-- **防抖**：规则可配 `debounce_seconds`（默认 60，0=立即，上限 86400）。
-  窗口内同一 (规则, 仓库, PR) 的新推送只更新 `github_pr_debounces` 一行的
-  head SHA 并重置 `fire_at=now+debounce`；到点由调度循环开轮，只对最新 SHA。
-  debounce=0 时在 webhook 请求事务内直接开轮。
+- **防抖**：触发器可配 `debounce_seconds`（默认 60，0=立即，上限 86400）。
+  窗口内同一 (触发器, 仓库, PR) 的新推送只更新 `github_pr_debounces` 一行的
+  head SHA 并重置 `fire_at=now+debounce`（主键 `(trigger_id, repo_full_name,
+  pr_number)`，INT-118 起按触发器隔离窗口）；到点由调度循环开轮，只对最新 SHA。
+  debounce=0 时在 webhook 请求事务内直接开轮。到点开火前复核触发器仍启用、
+  类型未改，且触发器项目范围（非 NULL 时）仍与窗口记录的命中项目一致——
+  窗口内把 `issue_project_id` 改成别的项目会让旧窗口作废。
 - **排队**：每用户 PR 触发同时最多 5 个在途运行
   （`prReviewMaxInflightPerUser=5`，常量；在途 = `''`/dispatched/running，
   queued 不占名额）。超出按 `triggered_at` 排队在 `queued` 状态，调度提升时
@@ -35,7 +40,7 @@
   开轮事务会就地提升；超时/结束/派发失败释放名额后，由调度循环
   `PromoteQueuedPRRuns` 再提升（结束回报与 failDispatch 会 kick）。
 - **SHA 变化**：新 head SHA 使该 PR 下旧 SHA 的全部在途运行（排队+进行中，
-  跨规则跨用户跨模型）一律 `cancelled`（`error_code='superseded'`），令牌消费、
+  跨触发器跨用户跨模型）一律 `cancelled`（`error_code='superseded'`），令牌消费、
   名额立即释放，并删除该 PR 下 `head_sha <> 新 SHA` 的防抖行（opened 窗口
   不能对过期提交开火）。取消前先判过期 webhook：当前 head 优先取未开火的
   防抖行，否则取评审账；已写入 `github_pr_seen_shas` 但不是当前 head 的 SHA
@@ -52,17 +57,19 @@
 
 ## 轮次与幂等
 
-- `round_number`：同一 `repo+pr+head SHA` 共享一轮（多规则并行开轮不各自
+- `round_number`：同一 `repo+pr+head SHA` 共享一轮（多触发器并行开轮不各自
   `NextRound`）；该 SHA 尚无运行时才取
   `1 + max(该 repo+pr 在 runs 与 github_pr_reviews 的轮次)`。零插入（唯一键
   吃掉重复 SHA+模型）不推进 `github_pr_reviews.round_number`。轮次号跨 SHA
   单调递增。
 - `trigger_key = pr:<PathEscape(repo)>:<number>:<sha>:<PathEscape(instance_id)>:<PathEscape(model)>`
-  —— 同一 SHA+模型被 `UNIQUE(automation_id, trigger_key)` 吃掉。
+  —— 同一 SHA+模型被 `UNIQUE(trigger_id, trigger_key)` 吃掉（INT-118 起唯一性在
+  触发器维度：同一自动化的不同触发器对同一 SHA 各开各轮）。
 - webhook 以 `X-GitHub-Delivery` 幂等：`github_webhook_deliveries` PK 冲突 →
   202 且不再开轮；delivery 行保留 7 天由调度循环清理。
 - 每个模型的运行 `config_snapshot.model_selection` 是**这一个模型**的单对象，
-  现有 launch 路径不用改；`model_selections_json` 存规则的多模型数组。
+  现有 launch 路径不用改；`model_selections_json` 存在触发器行上（INT-118），
+  开轮时读该触发器的多模型数组。
 - webhook 事务内 GitHub/T3 调用数为 0（测试断言）；提交后向调度循环发缓冲 1
   的 kick（循环仍是唯一执行者）。
 
@@ -111,7 +118,7 @@ PR 触发且 `dispatched|running`，结束/取消后令牌已消费，访问一�
   终态，置 `sync_pending` 让同步覆盖 `in_progress`。
 
 提示词额外替换 `{{repo}}` `{{pr_number}}` `{{pr_title}}` `{{pr_url}}` `{{head_sha}}`
-并附五个端点说明；工作区仍用规则上的 root/worktree，不为 PR 单独 clone。
+并附五个端点说明；工作区仍用自动化本体上的 root/worktree，不为 PR 单独 clone。
 
 ## 配置与安全
 
@@ -138,17 +145,22 @@ REST 实现，供 issue 关联 PR 的 attach/sync 使用；评审链路不读 `u
 ## 索引
 
 - `idx_automation_runs_active_once` 收窄为仅 cron/issue 触发（**必须 DROP 再
-  CREATE**，`CREATE IF NOT EXISTS` 不会替换已有定义）——PR 触发允许同一规则
-  多行未结束（一轮多模型 + 排队）；
+  CREATE**，`CREATE IF NOT EXISTS` 不会替换已有定义）——PR 触发允许同一触发器
+  多行未结束（一轮多模型 + 排队）；INT-118 起键为 `(trigger_id)`；
+- `idx_automation_runs_trigger_key(trigger_id, trigger_key)` UNIQUE——触发幂等，
+  触发器维度；
 - `idx_automation_runs_pr_head(automation_runs.repo_full_name, pr_number, head_sha)`；
 - `idx_projects_github_repo(projects.github_owner, github_repo)`；
-- `github_pr_seen_shas(repo_full_name, pr_number, head_sha)` PK——已受理 SHA。
+- `github_pr_seen_shas(repo_full_name, pr_number, head_sha)` PK——已受理 SHA；
+- `github_pr_debounces(trigger_id, repo_full_name, pr_number)` PK——防抖窗口按
+  触发器隔离（升级时旧表整表丢弃重建，见 automations.md 的升级路径）。
 
 ## 已知限制
 
 - 单进程：per-PR 锁与防抖消费都是进程内/单 DB 条件更新，多副本部署不适用。
-- cron/issue 规则的「同一自动化至多一个活动运行」语义不变；PR 规则不受
-  40919 删除守卫影响（删除守卫 `HasActiveRunTx` 保持原语义，排队中的运行
+- cron/issue 触发器的「同一触发器至多一个活动运行」语义（INT-118 收窄到触发器
+  维度，同一自动化的不同触发器可并行）；PR 触发器不受 40919 删除守卫影响
+  （删除守卫 `HasActiveRunTx` 按自动化维度保持原语义，排队中的运行
   finished_at 为空仍会拦删除）。
 - 合并 check 与按模型 check 可能混存（首个模型 403 前已建的不回收）。
 - 令牌重放窗口内（deadline+5min）结束回报可重放，PR 代发端点不行（requireLive）。

@@ -1,17 +1,15 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { vi } from "vitest";
+import { toast } from "sonner";
 import AutomationsPage from "@/routes/automations";
 import { renderWithRoute } from "@/test/render";
-import { environmentApi, threadApi } from "@/lib/api/threads";
-import { toast } from "sonner";
+import { formatDate } from "@/lib/utils/format";
 import {
   useAutomationRuns,
   useAutomations,
-  useCreateAutomation,
   useDeleteAutomation,
   useToggleAutomation,
-  useUpdateAutomation,
 } from "@/lib/hooks/use-automations";
 
 vi.mock("sonner", () => ({
@@ -28,6 +26,7 @@ vi.mock("@/lib/hooks/use-notifications", () => ({
 
 vi.mock("@/lib/hooks/use-automations", () => ({
   useAutomations: vi.fn(),
+  useAutomation: vi.fn(),
   useAutomationRuns: vi.fn(),
   useCreateAutomation: vi.fn(),
   useUpdateAutomation: vi.fn(),
@@ -35,33 +34,18 @@ vi.mock("@/lib/hooks/use-automations", () => ({
   useDeleteAutomation: vi.fn(),
 }));
 
-vi.mock("@/lib/api/threads", () => ({
-  environmentApi: {
-    list: vi.fn().mockResolvedValue({
-      data: {
-        items: [{ id: "env-1", name: "本机环境" }],
-      },
-    }),
-  },
-  threadApi: {
-    composerOptions: vi.fn().mockResolvedValue({
-      data: {
-        projects: [{ id: "proj-1", title: "示例项目" }],
-        config: {},
-        settings: {},
-      },
-    }),
-    workspaceOptions: vi.fn().mockResolvedValue({
-      data: {
-        project_id: "proj-1",
-        cwd: "/tmp",
-        is_repo: true,
-        ref_name: "main",
-        refs: [],
-      },
-    }),
-  },
-}));
+const cronTrigger = {
+  id: "t-1",
+  trigger_type: "cron",
+  cron_expression: "0 9 * * *",
+  timezone: "Asia/Shanghai",
+  next_run_at: "2026-10-15T01:00:00Z",
+  issue_project_id: null,
+  event_filter: null,
+  model_selections: [],
+  debounce_seconds: 0,
+  created_at: "2026-10-14T00:00:00Z",
+};
 
 const automation = {
   id: "a-1",
@@ -69,11 +53,7 @@ const automation = {
   enabled: false,
   environment_id: "env-1",
   t3_project_id: "proj-1",
-  trigger_type: "cron",
-  cron_expression: "0 9 * * *",
-  timezone: "Asia/Shanghai",
-  next_run_at: "2026-10-15T01:00:00Z",
-  issue_project_id: null,
+  triggers: [cronTrigger],
   prompt_template: "回报令牌",
   runtime_mode: "full-access",
   timeout_seconds: 3600,
@@ -84,8 +64,6 @@ const automation = {
 };
 
 describe("AutomationsPage", () => {
-  const createMutateAsync = vi.fn();
-  const updateMutateAsync = vi.fn();
   const toggleMutateAsync = vi.fn();
   const deleteMutateAsync = vi.fn();
 
@@ -111,14 +89,6 @@ describe("AutomationsPage", () => {
       data: [],
       isLoading: false,
     } as unknown as ReturnType<typeof useAutomationRuns>);
-    vi.mocked(useCreateAutomation).mockReturnValue({
-      mutateAsync: createMutateAsync,
-      isPending: false,
-    } as unknown as ReturnType<typeof useCreateAutomation>);
-    vi.mocked(useUpdateAutomation).mockReturnValue({
-      mutateAsync: updateMutateAsync,
-      isPending: false,
-    } as unknown as ReturnType<typeof useUpdateAutomation>);
     vi.mocked(useToggleAutomation).mockReturnValue({
       mutateAsync: toggleMutateAsync,
       isPending: false,
@@ -126,27 +96,6 @@ describe("AutomationsPage", () => {
     vi.mocked(useDeleteAutomation).mockReturnValue({
       mutateAsync: deleteMutateAsync,
     } as unknown as ReturnType<typeof useDeleteAutomation>);
-    // mockReturnValue(挂起 Promise) 的实现不会被 clearAllMocks 清掉，
-    // 每个用例开始前重放 resolved 实现，防 pending 泄漏到后续用例。
-    vi.mocked(environmentApi.list).mockResolvedValue({
-      data: { items: [{ id: "env-1", name: "本机环境" }] },
-    } as unknown as Awaited<ReturnType<typeof environmentApi.list>>);
-    vi.mocked(threadApi.composerOptions).mockResolvedValue({
-      data: {
-        projects: [{ id: "proj-1", title: "示例项目" }],
-        config: {},
-        settings: {},
-      },
-    } as unknown as Awaited<ReturnType<typeof threadApi.composerOptions>>);
-    vi.mocked(threadApi.workspaceOptions).mockResolvedValue({
-      data: {
-        project_id: "proj-1",
-        cwd: "/tmp",
-        is_repo: true,
-        ref_name: "main",
-        refs: [],
-      },
-    } as unknown as Awaited<ReturnType<typeof threadApi.workspaceOptions>>);
   });
 
   afterEach(() => {
@@ -168,8 +117,8 @@ describe("AutomationsPage", () => {
     expect(screen.getByRole("heading", { name: "自动化" })).toBeInTheDocument();
     expect(screen.getByText("暂无自动化")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "新建自动化" }),
-    ).toBeInTheDocument();
+      screen.getByRole("link", { name: "新建自动化" }),
+    ).toHaveAttribute("href", "/automations/new");
   });
 
   it("lists automations with trigger summary and post action", () => {
@@ -192,7 +141,81 @@ describe("AutomationsPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("toggles an automation with full-config PUT", async () => {
+  it("INT-118：多个触发器显示首个 + 等 N 个", () => {
+    vi.mocked(useAutomations).mockReturnValue({
+      data: [
+        {
+          ...automation,
+          triggers: [
+            cronTrigger,
+            {
+              id: "t-2",
+              trigger_type: "issue_created",
+              issue_project_id: null,
+              created_at: "2026-10-14T00:00:00Z",
+            },
+          ],
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAutomations>);
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    expect(
+      screen.getByText("定时（cron） · 每天 09:00（Asia/Shanghai） 等 2 个"),
+    ).toBeInTheDocument();
+  });
+
+  it("INT-118：无触发器显示「未配置」，下次运行为 —", () => {
+    vi.mocked(useAutomations).mockReturnValue({
+      data: [{ ...automation, triggers: [] }],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAutomations>);
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    expect(screen.getByText("未配置")).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("INT-118：下次运行取所有 cron 触发器里最早的非空 next_run_at", () => {
+    vi.mocked(useAutomations).mockReturnValue({
+      data: [
+        {
+          ...automation,
+          triggers: [
+            { ...cronTrigger, id: "t-late", next_run_at: "2026-10-16T01:00:00Z" },
+            {
+              ...cronTrigger,
+              id: "t-none",
+              cron_expression: "0 8 * * *",
+              next_run_at: null,
+            },
+            cronTrigger,
+          ],
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAutomations>);
+
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    expect(
+      screen.getByText(formatDate("2026-10-15T01:00:00Z")),
+    ).toBeInTheDocument();
+  });
+
+  it("INT-118：启用/停用只把 id 交给 hook（全量请求体由 hook 取最新详情构造）", async () => {
     toggleMutateAsync.mockResolvedValue({});
     const user = userEvent.setup();
 
@@ -204,15 +227,13 @@ describe("AutomationsPage", () => {
     await user.click(screen.getByRole("button", { name: "启用" }));
 
     await waitFor(() => expect(toggleMutateAsync).toHaveBeenCalledTimes(1));
-    const payload = toggleMutateAsync.mock.calls[0][0];
-    expect(payload.id).toBe("a-1");
-    expect(payload.data.enabled).toBe(true);
-    // 全量更新语义：必须携带完整配置。
-    expect(payload.data.prompt_template).toBe("回报令牌");
-    expect(payload.data.cron_expression).toBe("0 9 * * *");
+    // 页面不得再用列表行里的旧触发器快照组请求体（会把别处新增的触发器删掉）。
+    expect(toggleMutateAsync).toHaveBeenCalledWith("a-1");
+    expect(toggleMutateAsync.mock.calls[0]).toHaveLength(1);
   });
 
-  it("opens the create dialog with browser timezone and defaults to disabled", async () => {
+  it("启停成功后按原 enabled 给 toast", async () => {
+    toggleMutateAsync.mockResolvedValue({});
     const user = userEvent.setup();
 
     renderWithRoute(<AutomationsPage />, {
@@ -220,255 +241,20 @@ describe("AutomationsPage", () => {
       initialEntry: "/automations",
     });
 
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
+    await user.click(screen.getByRole("button", { name: "启用" }));
 
-    const dialog = await screen.findByRole("dialog");
-    expect(dialog).toBeInTheDocument();
-    expect(screen.getByText("新建默认停用；启用前需在服务端配置 public_url。")).toBeInTheDocument();
-    expect(screen.getByText("模型")).toBeInTheDocument();
-    expect(screen.getByText("工作区")).toBeInTheDocument();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("已启用"));
   });
 
-  // ---- INT-100：可视化频率 + cron 高级模式 ----
-
-  const freqSelect = () =>
-    screen.getByText("频率").closest("div")!.querySelector("[role='combobox']")!;
-  const envTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
-
-  it("新建默认「每天 09:00」，带描述与下次运行预览", async () => {
-    const user = userEvent.setup();
+  it("行内编辑链接指向 /automations/:id", () => {
     renderWithRoute(<AutomationsPage />, {
       path: "/automations",
       initialEntry: "/automations",
     });
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
-    const dialog = await screen.findByRole("dialog");
 
-    expect(freqSelect()).toHaveTextContent("每天");
-    const time = document.querySelector(
-      "input[type='time']",
-    ) as HTMLInputElement;
-    expect(time.value).toBe("09:00");
-    // 时区默认浏览器时区且可搜索，描述与预览同步展示。
     expect(
-      within(dialog).getByPlaceholderText("搜索时区…"),
-    ).toBeInTheDocument();
-    expect(
-      await within(dialog).findByText(new RegExp(`每天 09:00（${envTz()}）`)),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByText(/接下来 3 次运行时间/)).toBeInTheDocument();
-  });
-
-  it("编辑简单表达式还原为「每天」", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-    await user.click(screen.getByRole("button", { name: "编辑 每日令牌回报" }));
-    await screen.findByRole("dialog");
-    expect(freqSelect()).toHaveTextContent("每天");
-    const time = document.querySelector(
-      "input[type='time']",
-    ) as HTMLInputElement;
-    expect(time.value).toBe("09:00");
-    expect(
-      screen.getByPlaceholderText("搜索时区…"),
-    ).toHaveValue("Asia/Shanghai");
-  });
-
-  it("编辑复杂表达式落入自定义且原文保留", async () => {
-    vi.mocked(useAutomations).mockReturnValue({
-      data: [
-        { ...automation, cron_expression: "*/7 9-17 * * 1-5", timezone: "" },
-      ],
-      isLoading: false,
-    } as unknown as ReturnType<typeof useAutomations>);
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-    await user.click(
-      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
-    );
-    await screen.findByRole("dialog");
-    expect(freqSelect()).toHaveTextContent("自定义（cron 表达式）");
-    const input = screen.getByLabelText("cron 表达式") as HTMLInputElement;
-    expect(input.value).toBe("*/7 9-17 * * 1-5");
-    // 空时区按 UTC 生效并显示出来。
-    expect(screen.getByPlaceholderText("搜索时区…")).toHaveValue("UTC");
-    expect(screen.getByText(/五字段|five|分 时 日 月 周/)).toBeInTheDocument();
-  });
-
-  it("自定义模式：实时校验、示例可点击回填", { timeout: 20000 }, async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
-    const dialog = await screen.findByRole("dialog");
-
-    await user.click(freqSelect());
-    await user.click(await screen.findByText("自定义（cron 表达式）"));
-
-    const input = (await within(dialog).findByLabelText(
-      "cron 表达式",
-    )) as HTMLInputElement;
-    // 切到自定义时带入当前可视化表达式。
-    expect(input.value).toBe("0 9 * * *");
-
-    await user.clear(input);
-    await user.type(input, "61 * * * *");
-    expect(
-      await within(dialog).findByText(/分钟字段.*超出范围/),
-    ).toBeInTheDocument();
-
-    await user.click(within(dialog).getByText("工作日 18:30"));
-    expect(input.value).toBe("30 18 * * 1-5");
-  });
-
-  it("每周多选星期生成描述", { timeout: 20000 }, async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
-    const dialog = await screen.findByRole("dialog");
-
-    await user.click(freqSelect());
-    await user.click(await screen.findByText("每周"));
-    // 默认勾了周一；再勾周三。
-    await user.click(within(dialog).getByRole("button", { name: "三" }));
-    expect(
-      await within(dialog).findByText(
-        new RegExp(`每周一、周三 09:00（${envTz()}）`),
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("英文界面文案（locale=en）", async () => {
-    setLang("en-US");
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
-    const dialog = await screen.findByRole("dialog");
-
-    expect(within(dialog).getByText("Frequency")).toBeInTheDocument();
-    expect(freqSelectEn()).toHaveTextContent("Daily");
-    expect(
-      await within(dialog).findByText(
-        new RegExp(`Daily at 09:00 \\(${envTz()}\\)`),
-      ),
-    ).toBeInTheDocument();
-    expect(within(dialog).getByText(/Next 3 runs/)).toBeInTheDocument();
-  });
-
-  const freqSelectEn = () =>
-    screen.getByText("Frequency").closest("div")!.querySelector("[role='combobox']")!;
-
-  it("edit dialog shows option labels instead of raw values (INT-92)", async () => {
-    const user = userEvent.setup();
-
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-
-    await user.click(
-      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
-    );
-    await screen.findByRole("dialog");
-
-    // value "no"/"settle"/"off" 与显示文案不同，收起态必须渲染 label。
-    const postOnTimeout = screen
-      .getByText("超时后仍执行后置")
-      .closest("div")!
-      .querySelector("[role='combobox']");
-    expect(postOnTimeout).toHaveTextContent("否（默认）");
-    expect(postOnTimeout).not.toHaveTextContent(/\bno\b/);
-
-    const postAction = screen
-      .getByText("结束后置操作")
-      .closest("div")!
-      .querySelector("[role='combobox']");
-    expect(postAction).toHaveTextContent("settle（收进历史区）");
-
-    const enabled = screen
-      .getByText("启用状态")
-      .closest("div")!
-      .querySelector("[role='combobox']");
-    expect(enabled).toHaveTextContent("停用（默认）");
-    expect(enabled).not.toHaveTextContent(/\boff\b/);
-  });
-
-  it("edit dialog shows 加载中… while option queries are pending (INT-92)", async () => {
-    // 环境/项目选项异步加载期间，收起态不得闪出内部 id。
-    const { environmentApi, threadApi } = await import("@/lib/api/threads");
-    vi.mocked(environmentApi.list).mockReturnValue(new Promise(() => {}));
-    vi.mocked(threadApi.composerOptions).mockReturnValue(new Promise(() => {}));
-    const user = userEvent.setup();
-
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-
-    await user.click(
-      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
-    );
-    await screen.findByRole("dialog");
-
-    const envSelect = screen
-      .getByText("T3 环境")
-      .closest("div")!
-      .querySelector("[role='combobox']");
-    expect(envSelect).toHaveTextContent("加载中…");
-    expect(envSelect).not.toHaveTextContent("env-1");
-
-    // T3 项目是 T3ProjectPicker chip（button + aria-label），不是 combobox。
-    const projectSelect = screen.getByRole("button", { name: "T3 项目" });
-    expect(projectSelect).toHaveTextContent("加载中…");
-    expect(projectSelect).not.toHaveTextContent("proj-1");
-  });
-
-  it("已选模型但模型列表加载不出来时，仍能改回项目默认", { timeout: 20000 }, async () => {
-    vi.mocked(useAutomations).mockReturnValue({
-      data: [
-        {
-          ...automation,
-          model_selection: { instance_id: "inst-a", model: "claude-5" },
-        },
-      ],
-      isLoading: false,
-    } as unknown as ReturnType<typeof useAutomations>);
-    const user = userEvent.setup();
-
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-
-    await user.click(
-      screen.getByRole("button", { name: "编辑 每日令牌回报" }),
-    );
-    await screen.findByRole("dialog");
-
-    // composer-options 的 providers 为空：触发器仍可用，且能清除失效选择。
-    const trigger = screen.getByRole("button", { name: "模型" });
-    expect(trigger).toBeEnabled();
-    await waitFor(() => expect(trigger).toHaveTextContent("claude-5（已失效）"));
-
-    await user.click(trigger);
-    await user.click(await screen.findByRole("option", { name: "项目默认" }));
-    await user.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalledTimes(1));
-    expect(updateMutateAsync.mock.calls[0][0].data.model_selection).toBeNull();
+      screen.getByRole("link", { name: "编辑 每日令牌回报" }),
+    ).toHaveAttribute("href", "/automations/a-1");
   });
 
   it("shows runs dialog on history click", async () => {
@@ -477,6 +263,7 @@ describe("AutomationsPage", () => {
         {
           id: "r-1",
           automation_id: "a-1",
+          trigger_id: "t-1",
           trigger_type: "cron",
           trigger_key: "cron:2026-10-14T00:00:00Z",
           triggered_at: "2026-10-14T00:00:00Z",
@@ -507,178 +294,13 @@ describe("AutomationsPage", () => {
     expect(screen.getByText("已完成")).toBeInTheDocument();
   });
 
-  it("delete button is reachable per row", () => {
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-
-    expect(
-      screen.getByRole("button", { name: "删除 每日令牌回报" }),
-    ).toBeInTheDocument();
-    // fireEvent 兜底：aria-label 查询在 jsdom 下也必须可定位。
-    fireEvent.click(
-      screen.getByRole("button", { name: "删除 每日令牌回报" }),
-    );
-  });
-
-  it("PR 触发至少要选一个模型（保存被拦下）", { timeout: 20000 }, async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
-    await screen.findByRole("dialog");
-    await user.type(screen.getByLabelText(/名称/), "PR 审查");
-    await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
-
-    await user.click(screen.getAllByRole("combobox")[0]);
-    await user.click(await screen.findByText("GitHub PR 打开"));
-
-    await user.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(toast.error).toHaveBeenCalled());
-    expect(createMutateAsync).not.toHaveBeenCalled();
-  });
-
-  it("PR 触发创建携带 model_selections 与防抖默认 60", { timeout: 20000 }, async () => {
-    vi.mocked(threadApi.composerOptions).mockResolvedValue({
-      data: {
-        projects: [{ id: "proj-1", title: "示例项目" }],
-        config: {
-          providers: [
-            {
-              instanceId: "inst-a",
-              displayName: "Claude",
-              models: [{ slug: "claude-5", name: "Claude 5" }],
-            },
-            {
-              instanceId: "inst-b",
-              displayName: "GLM",
-              models: [{ slug: "glm-5", name: "GLM 5" }],
-            },
-          ],
-        },
-        settings: {},
-      },
-    } as never);
-    createMutateAsync.mockResolvedValue({});
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-
-    const selectByLabel = (label: string) =>
-      screen.getByText(label).closest("div")!.querySelector("[role='combobox']")!;
-
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
-    await screen.findByRole("dialog");
-    await user.type(screen.getByLabelText(/名称/), "PR 审查");
-    await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
-
-    await user.click(selectByLabel("T3 环境"));
-    await user.click(await screen.findByText("本机环境"));
-    // T3 项目走 T3ProjectPicker：点触发器 → 在面板列表里点项目行。
-    await user.click(screen.getByRole("button", { name: "T3 项目" }));
-    await user.click(await screen.findByRole("option", { name: /示例项目/ }));
-
-    await user.click(selectByLabel("触发方式"));
-    await user.click(await screen.findByText("GitHub PR 打开"));
-
-    // 模型多选走统一 ModelMultiPicker：点开触发器 → 在面板里点模型行。
-    await user.click(screen.getByRole("button", { name: "模型" }));
-    await user.click(await screen.findByRole("option", { name: /Claude 5/ }));
-    await user.click(screen.getByRole("button", { name: "GLM" }));
-    await user.click(await screen.findByRole("option", { name: /GLM 5/ }));
-
-    await user.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const payload = createMutateAsync.mock.calls[0][0];
-    expect(payload.trigger_type).toBe("github_pr_opened");
-    expect(payload.debounce_seconds).toBe(60);
-    expect(payload.model_selections).toEqual([
-      { instance_id: "inst-a", model: "claude-5" },
-      { instance_id: "inst-b", model: "glm-5" },
-    ]);
-  });
-
-  it("PR 触发勾选模型时带上 descriptor 默认选项", { timeout: 20000 }, async () => {
-    vi.mocked(threadApi.composerOptions).mockResolvedValue({
-      data: {
-        projects: [{ id: "proj-1", title: "示例项目" }],
-        config: {
-          providers: [
-            {
-              instanceId: "inst-a",
-              displayName: "Claude",
-              models: [
-                {
-                  slug: "claude-5",
-                  name: "Claude 5",
-                  capabilities: {
-                    optionDescriptors: [
-                      {
-                        type: "select",
-                        id: "effort",
-                        currentValue: "high",
-                        options: [
-                          { id: "low", label: "Low" },
-                          { id: "high", label: "High", isDefault: true },
-                        ],
-                      },
-                    ],
-                  },
-                },
-              ],
-            },
-          ],
-        },
-        settings: {},
-      },
-    } as never);
-    createMutateAsync.mockResolvedValue({});
-    const user = userEvent.setup();
-    renderWithRoute(<AutomationsPage />, {
-      path: "/automations",
-      initialEntry: "/automations",
-    });
-
-    const selectByLabel = (label: string) =>
-      screen.getByText(label).closest("div")!.querySelector("[role='combobox']")!;
-
-    await user.click(screen.getByRole("button", { name: "新建自动化" }));
-    await screen.findByRole("dialog");
-    await user.type(screen.getByLabelText(/名称/), "PR 审查");
-    await user.type(screen.getByLabelText("提示词模板"), "评审 {{repo}}");
-
-    await user.click(selectByLabel("T3 环境"));
-    await user.click(await screen.findByText("本机环境"));
-    await user.click(screen.getByRole("button", { name: "T3 项目" }));
-    await user.click(await screen.findByRole("option", { name: /示例项目/ }));
-
-    await user.click(selectByLabel("触发方式"));
-    await user.click(await screen.findByText("GitHub PR 打开"));
-    await user.click(screen.getByRole("button", { name: "模型" }));
-    await user.click(await screen.findByRole("option", { name: /Claude 5/ }));
-    await user.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    expect(createMutateAsync.mock.calls[0][0].model_selections).toEqual([
-      {
-        instance_id: "inst-a",
-        model: "claude-5",
-        options: [{ id: "effort", value: "high" }],
-      },
-    ]);
-  });
-
   it("运行列表显示排队/已取消、轮次与 SHA", async () => {
     vi.mocked(useAutomationRuns).mockReturnValue({
       data: [
         {
           id: "r-q",
           automation_id: "a-1",
+          trigger_id: "t-2",
           trigger_type: "github_pr_synchronize",
           trigger_key: "pr:o/h:1:s2:i:m",
           triggered_at: "2026-10-14T00:00:00Z",
@@ -698,6 +320,7 @@ describe("AutomationsPage", () => {
         {
           id: "r-c",
           automation_id: "a-1",
+          trigger_id: "t-2",
           trigger_type: "github_pr_synchronize",
           trigger_key: "pr:o/h:1:s1:i:m",
           triggered_at: "2026-10-13T00:00:00Z",
@@ -733,17 +356,39 @@ describe("AutomationsPage", () => {
     expect(screen.getByText(/abcdef1/)).toBeInTheDocument();
   });
 
+  it("delete button is reachable per row", () => {
+    renderWithRoute(<AutomationsPage />, {
+      path: "/automations",
+      initialEntry: "/automations",
+    });
+
+    expect(
+      screen.getByRole("button", { name: "删除 每日令牌回报" }),
+    ).toBeInTheDocument();
+    // fireEvent 兜底：aria-label 查询在 jsdom 下也必须可定位。
+    fireEvent.click(
+      screen.getByRole("button", { name: "删除 每日令牌回报" }),
+    );
+  });
+
   it("PR 触发的规则在列表里显示防抖摘要", () => {
     vi.mocked(useAutomations).mockReturnValue({
       data: [
         {
           ...automation,
           name: "PR 评审",
-          trigger_type: "github_pr_synchronize",
-          model_selections: [
-            { instance_id: "inst-a", model: "claude-5" },
+          triggers: [
+            {
+              id: "t-pr",
+              trigger_type: "github_pr_synchronize",
+              model_selections: [
+                { instance_id: "inst-a", model: "claude-5" },
+              ],
+              debounce_seconds: 120,
+              issue_project_id: null,
+              created_at: "2026-10-14T00:00:00Z",
+            },
           ],
-          debounce_seconds: 120,
         },
       ],
       isLoading: false,

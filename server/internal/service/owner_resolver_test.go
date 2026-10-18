@@ -213,7 +213,6 @@ func createAutomationRunForUser(t *testing.T, db *gorm.DB, userID string) *model
 		UpdatedAt:      now,
 		EnvironmentID:  env.ID,
 		T3ProjectID:    "t3-proj",
-		TriggerType:    model.AutomationTriggerIssueCreated,
 		PromptTemplate: "x",
 		RuntimeMode:    "full-access",
 		TimeoutSeconds: 3600,
@@ -222,11 +221,22 @@ func createAutomationRunForUser(t *testing.T, db *gorm.DB, userID string) *model
 	if err := db.Create(a).Error; err != nil {
 		t.Fatalf("create automation: %v", err)
 	}
+	tr := &model.AutomationTrigger{
+		ID:           uuid.NewString(),
+		AutomationID: a.ID,
+		TriggerType:  model.AutomationTriggerIssueCreated,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := db.Create(tr).Error; err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
 	run := &model.AutomationRun{
 		ID:                 uuid.NewString(),
 		UserID:             userID,
 		AutomationID:       a.ID,
-		TriggerType:        a.TriggerType,
+		TriggerID:          tr.ID,
+		TriggerType:        tr.TriggerType,
 		TriggerKey:         "event:" + uuid.NewString(),
 		TriggeredAt:        now,
 		ConfigSnapshotJSON: `{}`,

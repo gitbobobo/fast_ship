@@ -1187,35 +1187,15 @@ type AuthResponse struct {
 // Automation defines model for Automation.
 type Automation struct {
 	CreatedAt string `json:"created_at"`
-
-	// CronExpression 仅 cron 触发；五字段标准表达式
-	CronExpression *string `json:"cron_expression,omitempty"`
-
-	// DebounceSeconds 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。
-	// 0=立即；缺省 60；上限 86400。
-	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
-	Enabled         bool `json:"enabled"`
+	Enabled   bool   `json:"enabled"`
 
 	// EnvironmentId T3 环境 ID
 	EnvironmentId string `json:"environment_id"`
+	Id            string `json:"id"`
 
-	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
-	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
-	EventFilter *AutomationEventFilter `json:"event_filter,omitempty"`
-	Id          string                 `json:"id"`
-
-	// IssueProjectId 事件过滤的项目；null 表示当前用户全部项目
-	IssueProjectId *string                   `json:"issue_project_id,omitempty"`
+	// ModelSelection cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
 	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-
-	// ModelSelections GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮，
-	// 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择，
-	// 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。
-	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
-	Name            string                     `json:"name"`
-
-	// NextRunAt 下次调度时间（UTC RFC3339）；仅 cron 触发
-	NextRunAt *string `json:"next_run_at,omitempty"`
+	Name           string                    `json:"name"`
 
 	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
 	PostAction AutomationPostAction `json:"post_action"`
@@ -1235,16 +1215,10 @@ type Automation struct {
 	// TimeoutSeconds 回报截止时长（秒）；1 分钟–24 小时，缺省 3600
 	TimeoutSeconds int `json:"timeout_seconds"`
 
-	// Timezone IANA 时区名，仅 cron 触发；空表示 UTC
-	Timezone *string `json:"timezone,omitempty"`
-
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-	TriggerType AutomationTriggerType `json:"trigger_type"`
-	UpdatedAt   string                `json:"updated_at"`
-	Workspace   *AutomationWorkspace  `json:"workspace,omitempty"`
+	// Triggers 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。
+	Triggers  []AutomationTrigger  `json:"triggers"`
+	UpdatedAt string               `json:"updated_at"`
+	Workspace *AutomationWorkspace `json:"workspace,omitempty"`
 }
 
 // AutomationEventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
@@ -1329,10 +1303,13 @@ type AutomationRun struct {
 	ThreadId       string                    `json:"thread_id"`
 	TriggerContext *AutomationTriggerContext `json:"trigger_context,omitempty"`
 
-	// TriggerKey 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>`
+	// TriggerId 触发本运行的触发器 id
+	TriggerId string `json:"trigger_id"`
+
+	// TriggerKey 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>`
 	TriggerKey string `json:"trigger_key"`
 
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+	// TriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
 	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
 	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
 	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
@@ -1372,6 +1349,42 @@ type AutomationRunReportResult struct {
 // completed/failed/timed_out 为终态。回报未开始时状态可能为空。
 type AutomationRunStatus string
 
+// AutomationTrigger 自动化的一个触发器（INT-118）。各类型的专属字段之外一律为 null/缺省。
+type AutomationTrigger struct {
+	CreatedAt string `json:"created_at"`
+
+	// CronExpression 仅 cron；五字段标准表达式
+	CronExpression *string `json:"cron_expression,omitempty"`
+
+	// DebounceSeconds 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400
+	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
+
+	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
+	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
+	EventFilter *AutomationEventFilter `json:"event_filter,omitempty"`
+	Id          string                 `json:"id"`
+
+	// IssueProjectId 事件/PR 触发的项目范围；null 表示当前用户全部项目
+	IssueProjectId *string `json:"issue_project_id,omitempty"`
+
+	// ModelSelections 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮，
+	// 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择，
+	// 不能「项目默认」。
+	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
+
+	// NextRunAt 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算
+	NextRunAt *string `json:"next_run_at,omitempty"`
+
+	// Timezone IANA 时区名，仅 cron；空表示 UTC
+	Timezone *string `json:"timezone,omitempty"`
+
+	// TriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
+	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
+	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
+	TriggerType AutomationTriggerType `json:"trigger_type"`
+}
+
 // AutomationTriggerContext 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。
 type AutomationTriggerContext struct {
 	// Field 状态变化字段（state | workflow_status）
@@ -1385,7 +1398,39 @@ type AutomationTriggerContext struct {
 	To                  *string  `json:"to,omitempty"`
 }
 
-// AutomationTriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+// AutomationTriggerInput 触发器输入。全量替换语义：带 id 更新该触发器（未知 id 报参数错误），不带 id 新建；
+// 未再提交的已有触发器被删除。同一 payload 内 id 不可重复。
+type AutomationTriggerInput struct {
+	// CronExpression 仅 cron；五字段标准表达式
+	CronExpression *string `json:"cron_expression,omitempty"`
+
+	// DebounceSeconds 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
+	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
+
+	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
+	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
+	EventFilter *AutomationEventFilter `json:"event_filter,omitempty"`
+
+	// Id 可选；自动化内已存在的触发器 id
+	Id *string `json:"id,omitempty"`
+
+	// IssueProjectId 事件/PR 触发的项目范围；null 表示当前用户全部项目
+	IssueProjectId *string `json:"issue_project_id,omitempty"`
+
+	// ModelSelections 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
+	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
+
+	// Timezone IANA 时区名，仅 cron；空表示 UTC
+	Timezone *string `json:"timezone,omitempty"`
+
+	// TriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
+	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
+	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
+	TriggerType AutomationTriggerType `json:"trigger_type"`
+}
+
+// AutomationTriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
 // github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
 // GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
 // 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
@@ -1767,26 +1812,13 @@ type CreateApiKeyRequest struct {
 
 // CreateAutomationRequest defines model for CreateAutomationRequest.
 type CreateAutomationRequest struct {
-	CronExpression *string `json:"cron_expression,omitempty"`
-
-	// DebounceSeconds 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
-	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
-
-	// Enabled 缺省 false；启用时完整校验触发配置与 public_url
+	// Enabled 缺省 false；启用时至少要有一个触发器，并完整校验触发配置与 public_url
 	Enabled       *bool  `json:"enabled,omitempty"`
 	EnvironmentId string `json:"environment_id"`
 
-	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
-	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
-	EventFilter    *AutomationEventFilter `json:"event_filter,omitempty"`
-	IssueProjectId *string                `json:"issue_project_id,omitempty"`
-
 	// ModelSelection T3 模型选择（缺省回落 T3 项目默认）
 	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-
-	// ModelSelections GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
-	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
-	Name            string                     `json:"name"`
+	Name           string                    `json:"name"`
 
 	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
 	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
@@ -1797,13 +1829,9 @@ type CreateAutomationRequest struct {
 	RuntimeMode    *string `json:"runtime_mode,omitempty"`
 	T3ProjectId    string  `json:"t3_project_id"`
 	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
-	Timezone       *string `json:"timezone,omitempty"`
 
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-	TriggerType AutomationTriggerType `json:"trigger_type"`
+	// Triggers 触发器全量列表（0–20 个，可重复、可混搭）。
+	Triggers []AutomationTriggerInput `json:"triggers"`
 
 	// Workspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
 	Workspace *AutomationWorkspace `json:"workspace,omitempty"`
@@ -3780,22 +3808,12 @@ type UpdateAISettingsRequest struct {
 
 // UpdateAutomationRequest 全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
 type UpdateAutomationRequest struct {
-	CronExpression *string `json:"cron_expression,omitempty"`
+	Enabled       *bool  `json:"enabled,omitempty"`
+	EnvironmentId string `json:"environment_id"`
 
-	// DebounceSeconds 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
-	DebounceSeconds *int   `json:"debounce_seconds,omitempty"`
-	Enabled         *bool  `json:"enabled,omitempty"`
-	EnvironmentId   string `json:"environment_id"`
-
-	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
-	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
-	EventFilter    *AutomationEventFilter    `json:"event_filter,omitempty"`
-	IssueProjectId *string                   `json:"issue_project_id,omitempty"`
+	// ModelSelection cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
 	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-
-	// ModelSelections GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
-	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
-	Name            string                     `json:"name"`
+	Name           string                    `json:"name"`
 
 	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
 	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
@@ -3806,14 +3824,10 @@ type UpdateAutomationRequest struct {
 	RuntimeMode    *string `json:"runtime_mode,omitempty"`
 	T3ProjectId    string  `json:"t3_project_id"`
 	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
-	Timezone       *string `json:"timezone,omitempty"`
 
-	// TriggerType 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-	TriggerType AutomationTriggerType `json:"trigger_type"`
-	Workspace   *AutomationWorkspace  `json:"workspace,omitempty"`
+	// Triggers 触发器全量替换：带 id 更新、不带 id 新建、未提交的删除。
+	Triggers  []AutomationTriggerInput `json:"triggers"`
+	Workspace *AutomationWorkspace     `json:"workspace,omitempty"`
 }
 
 // UpdateBotRequest 指针字段表达「未提供保留」；api_key 空串拒绝（40001）

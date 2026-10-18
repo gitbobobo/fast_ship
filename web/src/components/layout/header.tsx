@@ -24,7 +24,8 @@ export function Header({
   title,
   actions,
 }: {
-  title?: string;
+  // ReactNode 支持面包屑等复合标题（自动化编辑页）；纯文本直接传字符串。
+  title?: ReactNode;
   actions?: ReactNode;
 }) {
   const navigate = useNavigate();

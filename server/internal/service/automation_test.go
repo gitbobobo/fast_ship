@@ -22,12 +22,13 @@ import (
 // （dispatchDueCrons / markTimeouts），不触网。
 
 type automationTestEnv struct {
-	db     *gorm.DB
-	svc    *AutomationService
-	sched  *AutomationScheduler
-	agent  *AutomationAgentService
-	runs   *repository.AutomationRunRepository
-	tokens *repository.AutomationRunTokenRepository
+	db       *gorm.DB
+	svc      *AutomationService
+	sched    *AutomationScheduler
+	agent    *AutomationAgentService
+	runs     *repository.AutomationRunRepository
+	tokens   *repository.AutomationRunTokenRepository
+	triggers *repository.AutomationTriggerRepository
 }
 
 func setupAutomationTestEnv(t *testing.T) *automationTestEnv {
@@ -39,15 +40,16 @@ func setupAutomationTestEnv(t *testing.T) *automationTestEnv {
 	}
 	if err := db.AutoMigrate(
 		&model.User{}, &model.Project{}, &model.T3Environment{},
-		&model.Automation{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
+		&model.Automation{}, &model.AutomationTrigger{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
 		&model.Issue{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_automation_trigger")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
 	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-ON automation_runs(automation_id)
+ON automation_runs(trigger_id)
 WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
   AND (finished_at IS NULL OR post_state = 'pending')`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
@@ -56,14 +58,15 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	cfg := &config.Config{Server: config.ServerConfig{PublicURL: "https://fs.example.com"}}
 	logger := zap.NewNop()
 	autos := repository.NewAutomationRepository(db)
+	triggers := repository.NewAutomationTriggerRepository(db)
 	runs := repository.NewAutomationRunRepository(db)
 	tokens := repository.NewAutomationRunTokenRepository(db)
 	sink := NewNotificationSink(db)
-	svc := NewAutomationService(db, autos, runs, repository.NewT3EnvironmentRepository(db),
+	svc := NewAutomationService(db, autos, triggers, runs, repository.NewT3EnvironmentRepository(db),
 		repository.NewProjectRepository(db), repository.NewIssueRepository(db), sink, cfg, logger)
 	sched := NewAutomationScheduler(db, autos, runs, tokens, nil, sink, repository.NewIssueRepository(db), cfg, logger)
 	agent := NewAutomationAgentService(db, runs, tokens, nil, sink, logger)
-	return &automationTestEnv{db: db, svc: svc, sched: sched, agent: agent, runs: runs, tokens: tokens}
+	return &automationTestEnv{db: db, svc: svc, sched: sched, agent: agent, runs: runs, tokens: tokens, triggers: triggers}
 }
 
 func (e *automationTestEnv) createUser(t *testing.T) *model.User {
@@ -100,7 +103,6 @@ func (e *automationTestEnv) createAutomation(t *testing.T, userID string, mutate
 		UpdatedAt:      now,
 		EnvironmentID:  env.ID,
 		T3ProjectID:    "t3-proj",
-		TriggerType:    model.AutomationTriggerIssueCreated,
 		PromptTemplate: "处理 {{issue_title}}",
 		RuntimeMode:    "full-access",
 		TimeoutSeconds: 3600,
@@ -115,18 +117,52 @@ func (e *automationTestEnv) createAutomation(t *testing.T, userID string, mutate
 	return a
 }
 
+// addTrigger 为自动化加一个触发器（缺省 issue_created；mutate 改类型/字段）。
+func (e *automationTestEnv) addTrigger(t *testing.T, a *model.Automation, mutate func(*model.AutomationTrigger)) *model.AutomationTrigger {
+	t.Helper()
+	now := time.Now().UTC()
+	tr := &model.AutomationTrigger{
+		ID:           uuid.NewString(),
+		AutomationID: a.ID,
+		TriggerType:  model.AutomationTriggerIssueCreated,
+		Position:     0,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if mutate != nil {
+		mutate(tr)
+	}
+	if err := e.db.Create(tr).Error; err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	return tr
+}
+
+// firstTrigger 该自动化的第一个触发器（夹具里每条自动化至少挂一个）。
+func (e *automationTestEnv) firstTrigger(t *testing.T, a *model.Automation) *model.AutomationTrigger {
+	t.Helper()
+	var tr model.AutomationTrigger
+	if err := e.db.Where("automation_id = ?", a.ID).Order("position ASC, created_at ASC").First(&tr).Error; err != nil {
+		t.Fatalf("first trigger: %v", err)
+	}
+	return &tr
+}
+
 // seedRun 直接落一条活动运行（绕过调度器），供忙碌/超时/竞态用例布置现场。
+// trigger_id/trigger_type 取该自动化的第一个触发器（mutate 可覆盖）。
 func (e *automationTestEnv) seedRun(t *testing.T, a *model.Automation, mutate func(*model.AutomationRun)) *model.AutomationRun {
 	t.Helper()
+	tr := e.firstTrigger(t, a)
 	now := time.Now().UTC()
 	run := &model.AutomationRun{
 		ID:                 uuid.NewString(),
 		UserID:             a.UserID,
 		AutomationID:       a.ID,
-		TriggerType:        a.TriggerType,
+		TriggerID:          tr.ID,
+		TriggerType:        tr.TriggerType,
 		TriggerKey:         "event:" + uuid.NewString(),
 		TriggeredAt:        now,
-		ConfigSnapshotJSON: snapshotJSON(a),
+		ConfigSnapshotJSON: snapshotJSON(a, tr),
 		EnvironmentID:      a.EnvironmentID,
 		T3ProjectID:        a.T3ProjectID,
 		ThreadID:           uuid.NewString(),
@@ -169,6 +205,7 @@ func TestEnqueueIssueEventTx_CreatesPendingRun(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	a := env.createAutomation(t, user.ID, nil)
+	tr := env.addTrigger(t, a, nil)
 
 	err := env.db.Transaction(func(tx *gorm.DB) error {
 		return env.svc.EnqueueIssueEventTx(tx, eventFor(a, "p1", "i1"))
@@ -180,6 +217,9 @@ func TestEnqueueIssueEventTx_CreatesPendingRun(t *testing.T) {
 	var run model.AutomationRun
 	if err := env.db.Where("automation_id = ?", a.ID).First(&run).Error; err != nil {
 		t.Fatalf("run not created: %v", err)
+	}
+	if run.TriggerID != tr.ID || run.TriggerType != tr.TriggerType {
+		t.Fatalf("run trigger = (%s,%s), want (%s,%s)", run.TriggerID, run.TriggerType, tr.ID, tr.TriggerType)
 	}
 	if run.Status != model.RunStatusPendingRun {
 		t.Fatalf("run status = %q, want empty (pending claim)", run.Status)
@@ -196,6 +236,7 @@ func TestEnqueueIssueEventTx_RollbackDoesNotTrigger(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, nil)
 
 	// 调用方事务回滚：事件与运行一并消失。
 	_ = env.db.Transaction(func(tx *gorm.DB) error {
@@ -217,9 +258,9 @@ func TestEnqueueIssueEventTx_FilterAndDisabled(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	disabled := env.createAutomation(t, user.ID, func(a *model.Automation) { a.Enabled = false })
-	otherProject := env.createAutomation(t, user.ID, func(a *model.Automation) {
-		a.IssueProjectID = &project.ID
-	})
+	env.addTrigger(t, disabled, nil)
+	otherProject := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, otherProject, func(tr *model.AutomationTrigger) { tr.IssueProjectID = &project.ID })
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
 		if err := env.svc.EnqueueIssueEventTx(tx, eventFor(disabled, "p1", "i1")); err != nil {
@@ -234,12 +275,36 @@ func TestEnqueueIssueEventTx_FilterAndDisabled(t *testing.T) {
 	}
 }
 
+// 同一自动化的两个触发器都命中同一事件：各自写一条运行行。
+func TestEnqueueIssueEventTx_MultipleTriggersEachFire(t *testing.T) {
+	env := setupAutomationTestEnv(t)
+	user := env.createUser(t)
+	a := env.createAutomation(t, user.ID, nil)
+	tr1 := env.addTrigger(t, a, nil)
+	tr2 := env.addTrigger(t, a, nil)
+
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return env.svc.EnqueueIssueEventTx(tx, eventFor(a, "p1", "i1"))
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if n := countRuns(t, env.db, "automation_id = ?", a.ID); n != 2 {
+		t.Fatalf("runs = %d, want 2 (one per trigger)", n)
+	}
+	for _, tr := range []*model.AutomationTrigger{tr1, tr2} {
+		if n := countRuns(t, env.db, "trigger_id = ?", tr.ID); n != 1 {
+			t.Fatalf("trigger %s runs = %d, want 1", tr.ID, n)
+		}
+	}
+}
+
 func TestEnqueueIssueEventTx_BusyRecordsFailedRun(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	a := env.createAutomation(t, user.ID, nil)
+	tr := env.addTrigger(t, a, nil)
 
-	// 已有活动运行（finished_at IS NULL）。
+	// 已有活动运行（finished_at IS NULL，占用该触发器）。
 	env.seedRun(t, a, nil)
 
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
@@ -252,11 +317,14 @@ func TestEnqueueIssueEventTx_BusyRecordsFailedRun(t *testing.T) {
 	if err := env.db.Where("automation_id = ? AND error_code = ?", a.ID, "automation_busy").First(&busy).Error; err != nil {
 		t.Fatalf("busy run not recorded: %v", err)
 	}
+	if busy.TriggerID != tr.ID {
+		t.Fatalf("busy run trigger_id = %s, want %s", busy.TriggerID, tr.ID)
+	}
 	if busy.Status != model.AutomationRunFailed || busy.FinishedAt == nil {
 		t.Fatalf("busy run status=%q finished=%v, want failed/finished", busy.Status, busy.FinishedAt)
 	}
-	// 活动运行仍是唯一活动行；部分唯一索引挡住第二条活动行。
-	if n := countRuns(t, env.db, "automation_id = ? AND finished_at IS NULL", a.ID); n != 1 {
+	// 活动运行仍是唯一活动行；部分唯一索引挡住该触发器的第二条活动行。
+	if n := countRuns(t, env.db, "trigger_id = ? AND finished_at IS NULL", tr.ID); n != 1 {
 		t.Fatalf("active runs = %d, want 1", n)
 	}
 
@@ -268,7 +336,7 @@ func TestEnqueueIssueEventTx_BusyRecordsFailedRun(t *testing.T) {
 		t.Fatal("busy notification missing title")
 	}
 
-	// 同一自动化再次忙碌：同指纹只续 last_seen，不刷第二条。
+	// 同一触发器再次忙碌：同指纹只续 last_seen，不刷第二条。
 	if err := env.db.Transaction(func(tx *gorm.DB) error {
 		return env.svc.EnqueueIssueEventTx(tx, eventFor(a, "p1", "i2"))
 	}); err != nil {
@@ -283,15 +351,43 @@ func TestEnqueueIssueEventTx_BusyRecordsFailedRun(t *testing.T) {
 	}
 }
 
+// 忙碌按触发器判定：触发器 A 忙时不影响同一自动化的触发器 B 触发。
+func TestEnqueueIssueEventTx_BusyIsPerTrigger(t *testing.T) {
+	env := setupAutomationTestEnv(t)
+	user := env.createUser(t)
+	a := env.createAutomation(t, user.ID, nil)
+	busyTr := env.addTrigger(t, a, nil)
+	freeTr := env.addTrigger(t, a, nil)
+	env.seedRun(t, a, func(r *model.AutomationRun) { r.TriggerID = busyTr.ID })
+
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return env.svc.EnqueueIssueEventTx(tx, eventFor(a, "p1", "i1"))
+	}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	// 忙碌触发器记 failed/automation_busy；空闲触发器正常写待派发行。
+	if n := countRuns(t, env.db, "trigger_id = ? AND error_code = ?", busyTr.ID, "automation_busy"); n != 1 {
+		t.Fatalf("busy trigger busy-runs = %d, want 1", n)
+	}
+	var fresh model.AutomationRun
+	if err := env.db.Where("trigger_id = ?", freeTr.ID).First(&fresh).Error; err != nil {
+		t.Fatalf("free trigger run: %v", err)
+	}
+	if fresh.Status != model.RunStatusPendingRun {
+		t.Fatalf("free trigger run status = %q, want pending claim", fresh.Status)
+	}
+}
+
 func TestScheduler_CronMergeAfterDowntime(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	// 停机错过多个周期：next_run_at 落在过去一小时前。
 	stale := time.Now().UTC().Add(-time.Hour)
-	a := env.createAutomation(t, user.ID, func(a *model.Automation) {
-		a.TriggerType = model.AutomationTriggerCron
-		a.CronExpression = "*/10 * * * *"
-		a.NextRunAt = &stale
+	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerCron
+		tr.CronExpression = "*/10 * * * *"
+		tr.NextRunAt = &stale
 	})
 
 	env.sched.dispatchDueCrons(time.Now().UTC())
@@ -307,13 +403,10 @@ func TestScheduler_CronMergeAfterDowntime(t *testing.T) {
 		t.Fatalf("trigger_key = %q, want cron:<原计划UTC> %q", run.TriggerKey, cronTriggerKey(stale))
 	}
 
-	// next_run_at 已推进到未来：同一轮再跑不再产生运行。
-	var refreshed model.Automation
-	if err := env.db.First(&refreshed, "id = ?", a.ID).Error; err != nil {
-		t.Fatalf("reload automation: %v", err)
-	}
-	if refreshed.NextRunAt == nil || !refreshed.NextRunAt.After(time.Now().UTC()) {
-		t.Fatalf("next_run_at = %v, want future", refreshed.NextRunAt)
+	// 触发器 next_run_at 已推进到未来：同一轮再跑不再产生运行。
+	tr := env.firstTrigger(t, a)
+	if tr.NextRunAt == nil || !tr.NextRunAt.After(time.Now().UTC()) {
+		t.Fatalf("trigger next_run_at = %v, want future", tr.NextRunAt)
 	}
 	env.sched.dispatchDueCrons(time.Now().UTC())
 	if n := countRuns(t, env.db, "automation_id = ?", a.ID); n != 1 {
@@ -321,10 +414,89 @@ func TestScheduler_CronMergeAfterDowntime(t *testing.T) {
 	}
 }
 
+// 停用的自动化不占调度批次：停用的触发器不推进 next_run_at，若到期查询不过滤
+// enabled，过期停用触发器（最老优先）会每轮占满 50 条批次，启用的触发器饿死。
+func TestScheduler_DisabledCronTriggersDoNotStarveBatch(t *testing.T) {
+	env := setupAutomationTestEnv(t)
+	user := env.createUser(t)
+	stale := time.Now().UTC().Add(-time.Hour)
+	older := stale.Add(-time.Hour)
+	// 55 条「停用且 next_run_at 已过期」的 cron 触发器，比启用那条更老。
+	for i := 0; i < 55; i++ {
+		a := env.createAutomation(t, user.ID, func(a *model.Automation) { a.Enabled = false })
+		env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+			tr.TriggerType = model.AutomationTriggerCron
+			tr.CronExpression = "*/10 * * * *"
+			tr.NextRunAt = &older
+		})
+	}
+	a := env.createAutomation(t, user.ID, nil)
+	enabled := env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerCron
+		tr.CronExpression = "*/10 * * * *"
+		tr.NextRunAt = &stale
+	})
+
+	env.sched.dispatchDueCrons(time.Now().UTC())
+
+	if n := countRuns(t, env.db, "trigger_id = ?", enabled.ID); n != 1 {
+		t.Fatalf("enabled trigger runs = %d, want 1 (must not starve behind disabled)", n)
+	}
+	if n := countRuns(t, env.db, "1=1"); n != 1 {
+		t.Fatalf("total runs = %d, want 1 (disabled triggers must not fire)", n)
+	}
+}
+
+// 同一自动化的两个 cron 触发器各自调度、各自推进 next_run_at。
+func TestScheduler_CronMultipleTriggersScheduleIndependently(t *testing.T) {
+	env := setupAutomationTestEnv(t)
+	user := env.createUser(t)
+	stale := time.Now().UTC().Add(-time.Hour)
+	a := env.createAutomation(t, user.ID, nil)
+	tr1 := env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerCron
+		tr.CronExpression = "*/10 * * * *"
+		tr.NextRunAt = &stale
+	})
+	tr2 := env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerCron
+		tr.CronExpression = "0 9 * * *"
+		tr.NextRunAt = &stale
+	})
+
+	env.sched.dispatchDueCrons(time.Now().UTC())
+
+	if n := countRuns(t, env.db, "automation_id = ?", a.ID); n != 2 {
+		t.Fatalf("runs = %d, want 2 (one per trigger)", n)
+	}
+	for _, tr := range []*model.AutomationTrigger{tr1, tr2} {
+		var run model.AutomationRun
+		if err := env.db.Where("trigger_id = ?", tr.ID).First(&run).Error; err != nil {
+			t.Fatalf("run for trigger %s: %v", tr.ID, err)
+		}
+		if run.TriggerKey != cronTriggerKey(stale) {
+			t.Fatalf("trigger %s key = %q, want planned key", tr.ID, run.TriggerKey)
+		}
+		var reloaded model.AutomationTrigger
+		if err := env.db.Where("id = ?", tr.ID).First(&reloaded).Error; err != nil {
+			t.Fatalf("reload trigger: %v", err)
+		}
+		if reloaded.NextRunAt == nil || !reloaded.NextRunAt.After(time.Now().UTC()) {
+			t.Fatalf("trigger %s next_run_at = %v, want future", tr.ID, reloaded.NextRunAt)
+		}
+	}
+	// 两个运行行互不挤占活动唯一索引（按 trigger_id）。
+	env.sched.dispatchDueCrons(time.Now().UTC())
+	if n := countRuns(t, env.db, "automation_id = ?", a.ID); n != 2 {
+		t.Fatalf("runs after second tick = %d, want 2", n)
+	}
+}
+
 func TestScheduler_ClaimIsConditional(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, nil)
 	run := env.seedRun(t, a, nil)
 
 	ctx := context.Background()
@@ -366,6 +538,7 @@ func TestReport_StartFinishConsumesToken(t *testing.T) {
 	a := env.createAutomation(t, user.ID, func(a *model.Automation) {
 		a.PostAction = model.AutomationPostSettle
 	})
+	env.addTrigger(t, a, nil)
 	run := env.seedRun(t, a, nil)
 	token := newAgentTestToken(t, env, run, run.DeadlineAt.Add(automationRunTokenGrace))
 	identity := &RunTokenIdentity{UserID: user.ID, RunID: run.ID}
@@ -425,6 +598,7 @@ func TestReport_FinishBeforeStart(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, nil)
 	run := env.seedRun(t, a, func(r *model.AutomationRun) { r.Status = model.AutomationRunDispatched })
 	newAgentTestToken(t, env, run, run.DeadlineAt.Add(automationRunTokenGrace))
 
@@ -442,6 +616,7 @@ func TestReport_TimeoutAndFinishRace(t *testing.T) {
 
 	t.Run("timeout first wins", func(t *testing.T) {
 		a := env.createAutomation(t, user.ID, nil)
+		env.addTrigger(t, a, nil)
 		past := time.Now().UTC().Add(-time.Minute)
 		run := env.seedRun(t, a, func(r *model.AutomationRun) {
 			r.Status = model.AutomationRunRunning
@@ -475,6 +650,7 @@ func TestReport_TimeoutAndFinishRace(t *testing.T) {
 
 	t.Run("finish first wins", func(t *testing.T) {
 		a := env.createAutomation(t, user.ID, nil)
+		env.addTrigger(t, a, nil)
 		past := time.Now().UTC().Add(-time.Minute)
 		run := env.seedRun(t, a, func(r *model.AutomationRun) {
 			r.Status = model.AutomationRunRunning
@@ -568,6 +744,7 @@ func TestPublishNotification_RequiresProblemAndStateKey(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, nil)
 	run := env.seedRun(t, a, func(r *model.AutomationRun) {
 		r.Status = model.AutomationRunRunning
 	})

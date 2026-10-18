@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,14 +51,15 @@ func setupAutomationHandlerEnv(t *testing.T) *automationHandlerEnv {
 	if err := db.AutoMigrate(
 		&model.User{}, &model.ApiKey{}, &model.T3Environment{},
 		&model.JWTBlacklist{}, &model.RefreshToken{},
-		&model.Automation{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
+		&model.Automation{}, &model.AutomationTrigger{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_automation_trigger")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
 	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-ON automation_runs(automation_id)
+ON automation_runs(trigger_id)
 WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
   AND (finished_at IS NULL OR post_state = 'pending')`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
@@ -75,7 +77,8 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	tokens := repository.NewAutomationRunTokenRepository(db)
 	sink := service.NewNotificationSink(db)
 	agent := service.NewAutomationAgentService(db, runs, tokens, nil, sink, logger)
-	automationHandler := NewAutomationHandler(service.NewAutomationService(db, autos, runs,
+	automationHandler := NewAutomationHandler(service.NewAutomationService(db, autos,
+		repository.NewAutomationTriggerRepository(db), runs,
 		repository.NewT3EnvironmentRepository(db), repository.NewProjectRepository(db),
 		repository.NewIssueRepository(db), sink, cfg, logger))
 	notificationHandler := NewNotificationHandler(service.NewNotificationService(repository.NewNotificationRepository(db)))
@@ -88,6 +91,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	r.GET("/api/automations", middleware.RequireJWT(cfg, authService), automationHandler.List)
 	r.POST("/api/automations", middleware.RequireJWT(cfg, authService), automationHandler.Create)
 	r.GET("/api/automations/:id", middleware.RequireJWT(cfg, authService), automationHandler.Get)
+	r.PUT("/api/automations/:id", middleware.RequireJWT(cfg, authService), automationHandler.Update)
 	r.DELETE("/api/automations/:id", middleware.RequireJWT(cfg, authService), automationHandler.Delete)
 	r.GET("/api/notifications", middleware.RequireJWT(cfg, authService), notificationHandler.List)
 	r.POST("/api/automation-agent/report", middleware.RequireRunToken(agent, false), agentHandler.Report)
@@ -170,22 +174,34 @@ func (e *automationHandlerEnv) seedAutomation(t *testing.T, userID string) *mode
 	a := &model.Automation{
 		ID: uuid.NewString(), UserID: userID, Name: "auto", Enabled: true,
 		CreatedAt: now, UpdatedAt: now, EnvironmentID: env.ID, T3ProjectID: "p",
-		TriggerType: model.AutomationTriggerIssueCreated, PromptTemplate: "go",
-		RuntimeMode: "full-access", TimeoutSeconds: 3600,
+		PromptTemplate: "go",
+		RuntimeMode:    "full-access", TimeoutSeconds: 3600,
 		PostAction: model.AutomationPostNone,
 	}
 	if err := e.db.Create(a).Error; err != nil {
 		t.Fatalf("create automation: %v", err)
+	}
+	tr := &model.AutomationTrigger{
+		ID: uuid.NewString(), AutomationID: a.ID,
+		TriggerType: model.AutomationTriggerIssueCreated,
+		CreatedAt:   now, UpdatedAt: now,
+	}
+	if err := e.db.Create(tr).Error; err != nil {
+		t.Fatalf("create trigger: %v", err)
 	}
 	return a
 }
 
 func (e *automationHandlerEnv) seedRunWithToken(t *testing.T, a *model.Automation) (*model.AutomationRun, string) {
 	t.Helper()
+	var tr model.AutomationTrigger
+	if err := e.db.Where("automation_id = ?", a.ID).First(&tr).Error; err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
 	now := time.Now().UTC()
 	run := &model.AutomationRun{
 		ID: uuid.NewString(), UserID: a.UserID, AutomationID: a.ID,
-		TriggerType: a.TriggerType, TriggerKey: "event:" + uuid.NewString(),
+		TriggerID: tr.ID, TriggerType: tr.TriggerType, TriggerKey: "event:" + uuid.NewString(),
 		TriggeredAt: now, ConfigSnapshotJSON: `{"prompt_template":"go","runtime_mode":"full-access","post_action":"none"}`,
 		EnvironmentID: a.EnvironmentID, T3ProjectID: a.T3ProjectID,
 		ThreadID: uuid.NewString(), LaunchCommandID: uuid.NewString(),
@@ -230,6 +246,59 @@ func decodeAutomationEnvelope(t *testing.T, rec *httptest.ResponseRecorder) (int
 		t.Fatalf("decode envelope: %v body=%s", err, rec.Body.String())
 	}
 	return envelope.Code, envelope.Message
+}
+
+// HTTP 层回归（INT-118 审查）：ShouldBindJSON 不执行 OpenAPI required，PUT 请求
+// 缺失或 null 的 triggers 会被生成类型解成 nil slice——service 边界必须拦下并
+// 返回 400，已有触发器一条不少；显式 [] 是合法清空。
+func TestAutomationEndpoints_UpdateTriggersRequired(t *testing.T) {
+	e := setupAutomationHandlerEnv(t)
+	user := e.createUser(t)
+	a := e.seedAutomation(t, user.ID)
+	token := e.mintJWT(user.ID)
+
+	fullBody := func(extra string) []byte {
+		return []byte(fmt.Sprintf(
+			`{"name":"auto","environment_id":%q,"t3_project_id":"p","prompt_template":"go"%s}`,
+			a.EnvironmentID, extra))
+	}
+	countTriggers := func() int64 {
+		var n int64
+		if err := e.db.Model(&model.AutomationTrigger{}).Where("automation_id = ?", a.ID).Count(&n).Error; err != nil {
+			t.Fatalf("count triggers: %v", err)
+		}
+		return n
+	}
+
+	// 不带 triggers 键 → 400，触发器不动。
+	rec := e.do(t, http.MethodPut, "/api/automations/"+a.ID, token, fullBody(""))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT without triggers = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if n := countTriggers(); n != 1 {
+		t.Fatalf("triggers after rejected PUT = %d, want 1", n)
+	}
+
+	// "triggers": null → 400，触发器不动。
+	rec = e.do(t, http.MethodPut, "/api/automations/"+a.ID, token, fullBody(`,"triggers":null`))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT with null triggers = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if n := countTriggers(); n != 1 {
+		t.Fatalf("triggers after null-triggers PUT = %d, want 1", n)
+	}
+
+	// "triggers": [] 且 enabled=false → 200，全部清空。
+	body := fmt.Sprintf(
+		`{"name":"auto","environment_id":%q,"t3_project_id":"p","prompt_template":"go","enabled":false,"triggers":[]}`,
+		a.EnvironmentID)
+	rec = e.do(t, http.MethodPut, "/api/automations/"+a.ID, token, []byte(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT with empty triggers = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if n := countTriggers(); n != 0 {
+		t.Fatalf("triggers after empty-array PUT = %d, want 0", n)
+	}
 }
 
 func TestAutomationEndpoints_RejectAPIKey(t *testing.T) {

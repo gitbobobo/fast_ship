@@ -39,23 +39,48 @@ export interface AutomationWorkspace {
   worktree_path?: string;
 }
 
+// 自动化触发器（INT-118）：一条自动化可挂多个触发器，数组顺序即 position。
+// 各类型只用自己的字段：cron 用 cron_expression/timezone/next_run_at，
+// Issue 事件用 event_filter，PR 用 model_selections/debounce_seconds，
+// 非 cron 触发都可配 issue_project_id 限定项目范围。
+export interface AutomationTrigger {
+  id: string;
+  trigger_type: AutomationTriggerType;
+  cron_expression?: string | null;
+  timezone?: string | null;
+  // 仅 cron，RFC3339 UTC；服务端每次保存重算。
+  next_run_at?: string | null;
+  issue_project_id?: string | null;
+  event_filter?: AutomationEventFilter | null;
+  // GitHub PR 触发的多模型选择（每个模型各开一个运行）。
+  model_selections?: AutomationModelSelection[];
+  debounce_seconds?: number;
+  created_at: string;
+}
+
+// 保存时的触发器输入：带 id 表示更新原有触发器，不带表示新建。
+export interface AutomationTriggerInput {
+  id?: string;
+  trigger_type: AutomationTriggerType;
+  cron_expression?: string | null;
+  timezone?: string | null;
+  issue_project_id?: string | null;
+  event_filter?: AutomationEventFilter | null;
+  model_selections?: AutomationModelSelection[];
+  debounce_seconds?: number;
+}
+
 export interface Automation {
   id: string;
   name: string;
   enabled: boolean;
   environment_id: string;
   t3_project_id: string;
-  trigger_type: AutomationTriggerType;
-  cron_expression: string | null;
-  timezone: string | null;
-  next_run_at: string | null;
-  issue_project_id: string | null;
-  event_filter?: AutomationEventFilter | null;
+  // 触发器列表（数组顺序 = position），可为空数组。
+  triggers: AutomationTrigger[];
   prompt_template: string;
+  // cron / Issue 事件触发的单模型缺省（PR 触发器的模型在各触发器上）。
   model_selection?: AutomationModelSelection | null;
-  // GitHub PR 触发的多模型选择（每个模型各开一个运行）。
-  model_selections?: AutomationModelSelection[];
-  debounce_seconds?: number;
   runtime_mode: string;
   workspace?: AutomationWorkspace | null;
   timeout_seconds: number;
@@ -79,6 +104,8 @@ export type AutomationPostState = "none" | "pending" | "succeeded" | "failed";
 export interface AutomationRun {
   id: string;
   automation_id: string;
+  // 产生本次运行的触发器 id（INT-118）。
+  trigger_id: string;
   trigger_type: AutomationTriggerType;
   trigger_key: string;
   trigger_context?: {
@@ -123,16 +150,10 @@ export interface AutomationInput {
   enabled: boolean;
   environment_id: string;
   t3_project_id: string;
-  trigger_type: AutomationTriggerType;
-  cron_expression?: string;
-  timezone?: string;
-  issue_project_id?: string | null;
-  event_filter?: AutomationEventFilter | null;
+  // 触发器全量替换：0–20 个；启用时服务端要求至少 1 个。
+  triggers: AutomationTriggerInput[];
   prompt_template: string;
   model_selection?: AutomationModelSelection | null;
-  // GitHub PR 触发：1–10 个模型，必须显式选择。
-  model_selections?: AutomationModelSelection[];
-  debounce_seconds?: number;
   runtime_mode?: RuntimeMode;
   workspace?: AutomationWorkspace | null;
   timeout_seconds?: number;

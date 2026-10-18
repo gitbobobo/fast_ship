@@ -11063,7 +11063,7 @@ components:
       type: string
       enum: [cron, issue_created, issue_status_changed, issue_label_added, github_pr_opened, github_pr_synchronize]
       description: |
-        触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
+        触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
         github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
         GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
         不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
@@ -11132,7 +11132,7 @@ components:
 
     Automation:
       type: object
-      required: [id, name, enabled, trigger_type, environment_id, t3_project_id, prompt_template, runtime_mode, timeout_seconds, post_action, post_on_timeout, created_at, updated_at]
+      required: [id, name, enabled, triggers, environment_id, t3_project_id, prompt_template, runtime_mode, timeout_seconds, post_action, post_on_timeout, created_at, updated_at]
       properties:
         id:
           type: string
@@ -11140,30 +11140,17 @@ components:
           type: string
         enabled:
           type: boolean
+        triggers:
+          type: array
+          description: 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。
+          items:
+            $ref: '#/components/schemas/AutomationTrigger'
         environment_id:
           type: string
           description: T3 环境 ID
         t3_project_id:
           type: string
           description: T3 项目 ID（线程开在这里）
-        trigger_type:
-          $ref: '#/components/schemas/AutomationTriggerType'
-        cron_expression:
-          type: string
-          description: 仅 cron 触发；五字段标准表达式
-        timezone:
-          type: string
-          description: IANA 时区名，仅 cron 触发；空表示 UTC
-        next_run_at:
-          type: string
-          nullable: true
-          description: 下次调度时间（UTC RFC3339）；仅 cron 触发
-        issue_project_id:
-          type: string
-          nullable: true
-          description: 事件过滤的项目；null 表示当前用户全部项目
-        event_filter:
-          $ref: '#/components/schemas/AutomationEventFilter'
         prompt_template:
           type: string
           description: 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明）
@@ -11171,19 +11158,7 @@ components:
           nullable: true
           allOf:
             - $ref: '#/components/schemas/AutomationModelSelection'
-        model_selections:
-          type: array
-          description: |
-            GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮，
-            并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择，
-            不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。
-          items:
-            $ref: '#/components/schemas/AutomationModelSelection'
-        debounce_seconds:
-          type: integer
-          description: |
-            仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。
-            0=立即；缺省 60；上限 86400。
+          description: cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
         runtime_mode:
           type: string
           description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
@@ -11204,43 +11179,107 @@ components:
         updated_at:
           type: string
 
+    AutomationTrigger:
+      type: object
+      description: 自动化的一个触发器（INT-118）。各类型的专属字段之外一律为 null/缺省。
+      required: [id, trigger_type, created_at]
+      properties:
+        id:
+          type: string
+        trigger_type:
+          $ref: '#/components/schemas/AutomationTriggerType'
+        cron_expression:
+          type: string
+          nullable: true
+          description: 仅 cron；五字段标准表达式
+        timezone:
+          type: string
+          nullable: true
+          description: IANA 时区名，仅 cron；空表示 UTC
+        next_run_at:
+          type: string
+          nullable: true
+          description: 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算
+        issue_project_id:
+          type: string
+          nullable: true
+          description: 事件/PR 触发的项目范围；null 表示当前用户全部项目
+        event_filter:
+          $ref: '#/components/schemas/AutomationEventFilter'
+        model_selections:
+          type: array
+          description: |
+            仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮，
+            并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择，
+            不能「项目默认」。
+          items:
+            $ref: '#/components/schemas/AutomationModelSelection'
+        debounce_seconds:
+          type: integer
+          description: 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400
+        created_at:
+          type: string
+
+    AutomationTriggerInput:
+      type: object
+      description: |
+        触发器输入。全量替换语义：带 id 更新该触发器（未知 id 报参数错误），不带 id 新建；
+        未再提交的已有触发器被删除。同一 payload 内 id 不可重复。
+      required: [trigger_type]
+      properties:
+        id:
+          type: string
+          description: 可选；自动化内已存在的触发器 id
+        trigger_type:
+          $ref: '#/components/schemas/AutomationTriggerType'
+        cron_expression:
+          type: string
+          nullable: true
+          description: 仅 cron；五字段标准表达式
+        timezone:
+          type: string
+          nullable: true
+          description: IANA 时区名，仅 cron；空表示 UTC
+        issue_project_id:
+          type: string
+          nullable: true
+          description: 事件/PR 触发的项目范围；null 表示当前用户全部项目
+        event_filter:
+          $ref: '#/components/schemas/AutomationEventFilter'
+        model_selections:
+          type: array
+          description: 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
+          items:
+            $ref: '#/components/schemas/AutomationModelSelection'
+        debounce_seconds:
+          type: integer
+          description: 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
+
     CreateAutomationRequest:
       type: object
-      required: [name, trigger_type, environment_id, t3_project_id, prompt_template]
+      required: [name, triggers, environment_id, t3_project_id, prompt_template]
       properties:
         name:
           type: string
           maxLength: 200
         enabled:
           type: boolean
-          description: 缺省 false；启用时完整校验触发配置与 public_url
+          description: 缺省 false；启用时至少要有一个触发器，并完整校验触发配置与 public_url
+        triggers:
+          type: array
+          minItems: 0
+          maxItems: 20
+          description: 触发器全量列表（0–20 个，可重复、可混搭）。
+          items:
+            $ref: '#/components/schemas/AutomationTriggerInput'
         environment_id:
           type: string
         t3_project_id:
           type: string
-        trigger_type:
-          $ref: '#/components/schemas/AutomationTriggerType'
-        cron_expression:
-          type: string
-        timezone:
-          type: string
-        issue_project_id:
-          type: string
-          nullable: true
-        event_filter:
-          $ref: '#/components/schemas/AutomationEventFilter'
         prompt_template:
           type: string
         model_selection:
           $ref: '#/components/schemas/AutomationModelSelection'
-        model_selections:
-          type: array
-          description: GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
-          items:
-            $ref: '#/components/schemas/AutomationModelSelection'
-        debounce_seconds:
-          type: integer
-          description: 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
         runtime_mode:
           type: string
           description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
@@ -11256,42 +11295,31 @@ components:
     UpdateAutomationRequest:
       type: object
       description: 全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
-      required: [name, trigger_type, environment_id, t3_project_id, prompt_template]
+      required: [name, triggers, environment_id, t3_project_id, prompt_template]
       properties:
         name:
           type: string
           maxLength: 200
         enabled:
           type: boolean
+        triggers:
+          type: array
+          minItems: 0
+          maxItems: 20
+          description: 触发器全量替换：带 id 更新、不带 id 新建、未提交的删除。
+          items:
+            $ref: '#/components/schemas/AutomationTriggerInput'
         environment_id:
           type: string
         t3_project_id:
           type: string
-        trigger_type:
-          $ref: '#/components/schemas/AutomationTriggerType'
-        cron_expression:
-          type: string
-        timezone:
-          type: string
-        issue_project_id:
-          type: string
-          nullable: true
-        event_filter:
-          $ref: '#/components/schemas/AutomationEventFilter'
         prompt_template:
           type: string
         model_selection:
           nullable: true
           allOf:
             - $ref: '#/components/schemas/AutomationModelSelection'
-        model_selections:
-          type: array
-          description: GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
-          items:
-            $ref: '#/components/schemas/AutomationModelSelection'
-        debounce_seconds:
-          type: integer
-          description: 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
+          description: cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
         runtime_mode:
           type: string
           description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
@@ -11321,17 +11349,20 @@ components:
 
     AutomationRun:
       type: object
-      required: [id, automation_id, trigger_type, trigger_key, triggered_at, environment_id, t3_project_id, thread_id, status, post_state, post_attempt]
+      required: [id, automation_id, trigger_id, trigger_type, trigger_key, triggered_at, environment_id, t3_project_id, thread_id, status, post_state, post_attempt]
       properties:
         id:
           type: string
         automation_id:
           type: string
+        trigger_id:
+          type: string
+          description: 触发本运行的触发器 id
         trigger_type:
           $ref: '#/components/schemas/AutomationTriggerType'
         trigger_key:
           type: string
-          description: 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>`
+          description: 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>`
         repo_full_name:
           type: string
           description: 仅 GitHub PR 触发；owner/repo
