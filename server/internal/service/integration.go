@@ -132,7 +132,10 @@ func (s *IntegrationService) Current(ctx context.Context, userID string) (GitHub
 // 评论/check 回写，不得跨身份串用。
 type WebhookCandidate struct {
 	AppUserID string
-	Secret    string // 已 TrimSpace
+	// AppID 该候选声明的 App ID（config 身份可能为空）：同一 App 的用户行与
+	// config 兜底同时验中时，handler 用它判断「用户行接管了 config 的同一个 App」。
+	AppID  string
+	Secret string // 已 TrimSpace
 }
 
 // WebhookCandidates webhook 验签候选的现取入口（每次请求调用）：始终返回全部
@@ -158,7 +161,7 @@ func (s *IntegrationService) WebhookCandidates(ctx context.Context, targetAppID 
 		if decErr != nil {
 			return nil, decErr
 		}
-		cand := WebhookCandidate{AppUserID: row.UserID, Secret: strings.TrimSpace(payload.WebhookSecret)}
+		cand := WebhookCandidate{AppUserID: row.UserID, AppID: row.AppID, Secret: strings.TrimSpace(payload.WebhookSecret)}
 		if targetAppID != "" && row.AppID == targetAppID {
 			matched = append(matched, cand)
 		} else {
@@ -167,7 +170,7 @@ func (s *IntegrationService) WebhookCandidates(ctx context.Context, targetAppID 
 	}
 	cfgID := strings.TrimSpace(s.cfg.GitHubApp.AppID)
 	if cfgID != "" || strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret) != "" {
-		cand := WebhookCandidate{AppUserID: "", Secret: strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret)}
+		cand := WebhookCandidate{AppUserID: "", AppID: cfgID, Secret: strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret)}
 		if targetAppID != "" && cfgID == targetAppID {
 			matched = append(matched, cand)
 		} else {

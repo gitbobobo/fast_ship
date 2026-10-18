@@ -81,22 +81,40 @@ func (h *GitHubWebhookHandler) Handle(c *gin.Context) {
 	// 份身份配了相同的 webhook 密钥，无法安全归属（投递可能来自其中任何一份），
 	// 拒绝；全不命中才是签名无效。
 	signature := c.GetHeader("X-Hub-Signature-256")
-	var appUserID string
-	hits := 0
+	matched := make([]service.WebhookCandidate, 0, len(candidates))
 	for i := range candidates {
 		if githubapp.VerifySignature(candidates[i].Secret, body, signature) {
-			hits++
-			appUserID = candidates[i].AppUserID
+			matched = append(matched, candidates[i])
 		}
 	}
-	if hits > 1 {
+	if len(matched) > 1 {
+		// 用户行接管部署 config 的同一个 App（首次保存收编 config 密钥）时两把
+		// 都会验中：同 App 只保留用户行，这是「从部署配置迁到个人配置」的默认
+		// 路径；不同身份仍共享同一密钥则无法安全归属，交给下面的多命中分支拒绝。
+		userAppIDs := map[string]bool{}
+		for _, cand := range matched {
+			if cand.AppUserID != "" {
+				userAppIDs[cand.AppID] = true
+			}
+		}
+		kept := matched[:0]
+		for _, cand := range matched {
+			if cand.AppUserID == "" && userAppIDs[cand.AppID] {
+				continue
+			}
+			kept = append(kept, cand)
+		}
+		matched = kept
+	}
+	if len(matched) > 1 {
 		response.Unauthorized(c, 40107, "无法确定集成身份（多个身份使用了相同的 webhook 密钥）")
 		return
 	}
-	if hits == 0 {
+	if len(matched) == 0 {
 		response.Unauthorized(c, 40107, "Webhook 签名无效或缺失")
 		return
 	}
+	appUserID := matched[0].AppUserID
 
 	delivery := strings.TrimSpace(c.GetHeader("X-GitHub-Delivery"))
 	if delivery == "" {

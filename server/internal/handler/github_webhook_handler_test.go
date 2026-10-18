@@ -539,6 +539,24 @@ func TestWebhookHandler_ConfigAndUserShareAppID(t *testing.T) {
 	}
 }
 
+// TestWebhookHandler_UserRowShadowsConfigForSameApp 用户接管部署 config 的同一个
+// App（首次保存省略密钥会把 config 密钥收编进来）：两把候选都验中时只保留用户行，
+// 不能因为「多命中」把该 App 的真实投递全部拒掉。
+func TestWebhookHandler_UserRowShadowsConfigForSameApp(t *testing.T) {
+	env := setupUserScopedWebhookEnv(t)
+	alice := createWebhookUser(t, env.db)
+	// config 与用户行同 App ID、同密钥：正是「部署配置 → 个人配置」的默认迁移结果。
+	env.cfg.GitHubApp.AppID = "777"
+	env.cfg.GitHubApp.WebhookSecret = "cfg-secret"
+	env.saveUserIntegration(t, alice.ID, "777", "cfg-secret")
+
+	body := []byte(`{"action":"opened"}`)
+	w := env.postWebhookWithAppID(t, "d-shadow-1", "pull_request", body, githubapp.SignSignature("cfg-secret", body), "777")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("user row shadows config = %d %s, want 202", w.Code, w.Body.String())
+	}
+}
+
 // TestWebhookHandler_LegacyConfigOnlySecretWithHeader 仅配 config webhook 密钥
 // 的旧部署（INT-93，无 App 身份）：真实带头投递也能验签，不能 401。
 func TestWebhookHandler_LegacyConfigOnlySecretWithHeader(t *testing.T) {
