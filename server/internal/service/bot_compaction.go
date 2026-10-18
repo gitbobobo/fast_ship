@@ -1581,6 +1581,21 @@ func (s *BotService) activateOnProcessStart(bot *model.Bot) error {
 	done := s.rt.activated[bot.ID]
 	s.rt.mu.Unlock()
 	if done {
+		// 并发 run 各自持有一份独立 bot 副本（每个 run 入口各自 Get 一次）：
+		// 首个 run 激活后置 rt.activated 并把新水位写回库里，随后启动的 run
+		// 走到这里直接早退——传入副本仍是激活前的旧行，不刷新就会冻结旧
+		// 系统提示词与旧工具集。按库里最新行只回填提示词/工具集相关字段；
+		// Model/BaseURL/APIKeyEncrypted 的冻结语义属于 captureRunFreeze，
+		// 不在此改动。
+		if fresh, err := s.bots.Get(bot.ID); err == nil {
+			bot.SystemPromptText = fresh.SystemPromptText
+			bot.PromptRevision = fresh.PromptRevision
+			bot.PlatformPromptVersion = fresh.PlatformPromptVersion
+			bot.PersonaPrompt = fresh.PersonaPrompt
+			bot.ToolsetVersion = fresh.ToolsetVersion
+		}
+		// 读库失败不阻塞 run：激活是尽力而为的升级（调用处失败只降级记日志），
+		// 副本沿用旧提示词，留待下一次重启边界重试。
 		return nil
 	}
 	if bot.ToolsetVersion >= botToolsetVersion && bot.PlatformPromptVersion >= botPlatformPromptVersion {

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -117,6 +118,94 @@ func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
 	}
 	if builtAfter.ToolsHash != builtBefore.ToolsHash {
 		t.Fatalf("仅升级平台提示词不得改变工具集: %s vs %s", builtBefore.ToolsHash, builtAfter.ToolsHash)
+	}
+}
+
+// TestBotActivateRefreshesConcurrentStaleCopy 并发重复激活：两个 run 同时启动
+// 时各持一份激活前的独立 bot 副本，首个 run 完成激活后，后走
+// activateOnProcessStart 的副本必须在「已激活」早退分支从库里刷新提示词与
+// 工具集字段，否则会带着旧系统提示词与旧工具集冻结整个 run。凭证/模型字段
+// 不属于本次刷新（冻结语义在 captureRunFreeze），必须原样保留。
+func TestBotActivateRefreshesConcurrentStaleCopy(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "concact")
+	bot := env.createBot(t, userID)
+	const oldPrompt = "旧激活前文案：不含对话风格段落"
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"toolset_version":         3,
+		"platform_prompt_version": 4,
+		"system_prompt_text":      oldPrompt,
+	}).Error; err != nil {
+		t.Fatalf("stale bot: %v", err)
+	}
+
+	env.bots.rt.mu.Lock()
+	delete(env.bots.rt.activated, bot.ID)
+	env.bots.rt.mu.Unlock()
+
+	// 两个并发 run 各自在激活前加载的独立副本。
+	a, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load a: %v", err)
+	}
+	b, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load b: %v", err)
+	}
+	if a == b {
+		t.Fatalf("两份副本必须是独立加载的")
+	}
+
+	// a 完成激活（写库 + 置 rt.activated）。
+	if err := env.bots.activateOnProcessStart(a); err != nil {
+		t.Fatalf("activate a: %v", err)
+	}
+	revAfterA := a.PromptRevision
+
+	// b 走早退分支：提示词/工具集字段应从库里刷新。
+	modelBefore, urlBefore := b.Model, b.BaseURL
+	keyBefore := append([]byte(nil), b.APIKeyEncrypted...)
+	if err := env.bots.activateOnProcessStart(b); err != nil {
+		t.Fatalf("activate b: %v", err)
+	}
+	if !strings.Contains(b.SystemPromptText, "对话风格") || strings.Contains(b.SystemPromptText, oldPrompt) {
+		t.Fatalf("b 的系统提示词应刷新为含对话风格的新文案")
+	}
+	if b.PlatformPromptVersion != botPlatformPromptVersion {
+		t.Fatalf("b 的平台提示词版本应刷新到 %d，实得 %d", botPlatformPromptVersion, b.PlatformPromptVersion)
+	}
+	if b.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("b 的工具集版本应刷新到 %d，实得 %d", botToolsetVersion, b.ToolsetVersion)
+	}
+	if b.PromptRevision != revAfterA {
+		t.Fatalf("b 的 prompt_revision 应与 a 激活后一致: %d vs %d", b.PromptRevision, revAfterA)
+	}
+	if b.Model != modelBefore || b.BaseURL != urlBefore || !bytes.Equal(b.APIKeyEncrypted, keyBefore) {
+		t.Fatalf("凭证/模型字段不得被刷新改动")
+	}
+
+	// 用 b 构建请求：冻结出去的系统消息必须是新提示词、工具集是新版本。
+	run := botFixtureRun(t, env, b)
+	built, err := env.bots.buildRunContext(b, run)
+	if err != nil {
+		t.Fatalf("build run context: %v", err)
+	}
+	raw, err := json.Marshal(built.Request.Messages[0])
+	if err != nil {
+		t.Fatalf("marshal system message: %v", err)
+	}
+	var wire struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("unmarshal system message: %v", err)
+	}
+	if wire.Role != "system" || !strings.Contains(wire.Content, "对话风格") || strings.Contains(wire.Content, oldPrompt) {
+		t.Fatalf("冻结出去的系统消息应为含对话风格的新提示词: role=%s", wire.Role)
+	}
+	if built.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("构建出的工具集版本应为 %d，实得 %d", botToolsetVersion, built.ToolsetVersion)
 	}
 }
 
