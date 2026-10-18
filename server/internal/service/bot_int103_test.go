@@ -873,47 +873,71 @@ func TestBotScheduleDeleteMissingTaskNotFound(t *testing.T) {
 
 // 已发布工具集的 wire 字节 SHA-256：改动任一版本都会让存量会话的前缀与
 // tools_hash 失稳，这里钉死。这是跨版本契约，不是实现细节；v4 自 INT-120
-// 起也已冻结，基线在 bot_int120_test.go 的 botToolsetV4FrozenHash。
+// 起冻结（基线在 bot_int120_test.go），v5 自 INT-121 起冻结（基线在下方），
+// v6 是当前发布版本。
 const (
 	botToolsetV1FrozenHash = "c1da7e95288ed681392529f68a812ec1ac403bcd53cee1414634cca28197ef06"
 	botToolsetV2FrozenHash = "4ec300f75e9aff618b820246c85cc497db6e4d8027cbce342696cc629560ca19"
 	// v3 在 INT-110 后冻结：schema 修正只进 v4，旧会话继续用旧字节。
 	botToolsetV3FrozenHash = "9e420a0b28375b39967b9080dc46b28cb876e40ad04c7a402043e8dfc9c7cd07"
+	// v5 在 INT-121 后冻结：fs_schedule 的 run/dry_run 只进 v6（冻结时 14344 字节）。
+	botToolsetV5FrozenHash = "779efef0c1086f22765374fd00fff66d2e0b31c4c5fca9283989a5882797b3b0"
 )
 
 func TestBotScheduleToolsetVersions(t *testing.T) {
 	v1 := botToolsetVersionOf(1)
 	v2 := botToolsetVersionOf(2)
 	v3 := botToolsetVersionOf(3)
-	if v1.hash == v2.hash || v2.hash == v3.hash || v1.hash == v3.hash {
-		t.Fatalf("三个版本的工具集 hash 必须互不相同")
-	}
 	v4 := botToolsetVersionOf(4)
-	// 已发布版本的 wire 字节已冻结：hash 必须与基线逐字节一致。
-	if v1.hash != botToolsetV1FrozenHash || v2.hash != botToolsetV2FrozenHash || v3.hash != botToolsetV3FrozenHash {
-		t.Fatalf("v1/v2/v3 tools_hash 偏离冻结基线: v1=%s v2=%s v3=%s", v1.hash, v2.hash, v3.hash)
+	v5 := botToolsetVersionOf(5)
+	v6 := botToolsetVersionOf(6)
+	if v1.hash == v2.hash || v2.hash == v3.hash || v3.hash == v4.hash ||
+		v4.hash == v5.hash || v5.hash == v6.hash {
+		t.Fatalf("相邻版本的工具集 hash 必须互不相同")
 	}
-	if v4.hash == v3.hash {
-		t.Fatalf("v4 应使用修正后的 schema")
+	// 已发布版本的 wire 字节已冻结：v1-v5 的 hash 必须与基线逐字节一致。
+	if v1.hash != botToolsetV1FrozenHash || v2.hash != botToolsetV2FrozenHash ||
+		v3.hash != botToolsetV3FrozenHash || v4.hash != botToolsetV4FrozenHash ||
+		v5.hash != botToolsetV5FrozenHash {
+		t.Fatalf("v1-v5 tools_hash 偏离冻结基线: v1=%s v2=%s v3=%s v4=%s v5=%s",
+			v1.hash, v2.hash, v3.hash, v4.hash, v5.hash)
 	}
-	if len(v4.schemas) != 11 || len(v3.schemas) != 11 || len(v2.schemas) != 11 || len(v1.schemas) != 10 {
-		t.Fatalf("v1/v2/v3/v4 工具数应为 10/11/11/11，实得 %d/%d/%d/%d", len(v1.schemas), len(v2.schemas), len(v3.schemas), len(v4.schemas))
+	if len(v6.schemas) != 11 || len(v5.schemas) != 11 || len(v4.schemas) != 11 ||
+		len(v3.schemas) != 11 || len(v2.schemas) != 11 || len(v1.schemas) != 10 {
+		t.Fatalf("v1-v6 工具数应为 10/11/11/11/11/11，实得 %d/%d/%d/%d/%d/%d",
+			len(v1.schemas), len(v2.schemas), len(v3.schemas), len(v4.schemas), len(v5.schemas), len(v6.schemas))
 	}
-	// v3/v4 fs_schedule：7 个同步动作。
-	sched := v4.byName["fs_schedule"]
-	if sched == nil || len(sched.Actions) != 7 {
-		t.Fatalf("v3 fs_schedule 应有 7 个动作: %+v", sched)
-	}
-	got := map[string]bool{}
-	for _, a := range sched.Actions {
-		got[a.Name] = true
-		if a.Mode != model.BotExecutionSync || a.RequiresConfirmation {
-			t.Fatalf("fs_schedule 动作应全部同步且无需确认: %s", a.Name)
+	// v4/v5 冻结的 fs_schedule：7 个同步动作、冻结参数结构体（不含 run/dry_run）。
+	for _, frozen := range []*botToolsetHolder{v4, v5} {
+		sched := frozen.byName["fs_schedule"]
+		if sched == nil || len(sched.Actions) != 7 {
+			t.Fatalf("v%d fs_schedule 应冻结为 7 个动作: %+v", frozen.version, sched)
 		}
-	}
-	for _, want := range []string{"list", "create", "update", "delete", "runs", "enable", "disable"} {
-		if !got[want] {
-			t.Fatalf("fs_schedule 缺动作 %s", want)
+		if sched.ArgsType.Name() != "botScheduleTaskArgsV5" {
+			t.Fatalf("v%d fs_schedule 应使用冻结参数结构体 botScheduleTaskArgsV5，实得 %s",
+				frozen.version, sched.ArgsType.Name())
+		}
+		got := map[string]bool{}
+		for _, a := range sched.Actions {
+			got[a.Name] = true
+			if a.Mode != model.BotExecutionSync || a.RequiresConfirmation {
+				t.Fatalf("fs_schedule 动作应全部同步且无需确认: %s", a.Name)
+			}
+		}
+		for _, want := range []string{"list", "create", "update", "delete", "runs", "enable", "disable"} {
+			if !got[want] {
+				t.Fatalf("v%d fs_schedule 缺动作 %s", frozen.version, want)
+			}
+		}
+		if got["run"] {
+			t.Fatalf("v%d fs_schedule 不应含 run 动作", frozen.version)
+		}
+		raw, _ := json.Marshal(sched.Parameters)
+		if strings.Contains(string(raw), `"run"`) {
+			t.Fatalf("v%d schema 不得出现 run 枚举: %s", frozen.version, raw)
+		}
+		if strings.Contains(string(raw), "dry_run") {
+			t.Fatalf("v%d schema 不得出现 dry_run: %s", frozen.version, raw)
 		}
 	}
 	// v1/v2 冻结的 fs_schedule 仍是 status 占位。
@@ -946,10 +970,58 @@ func TestBotScheduleToolsetVersions(t *testing.T) {
 	if err != nil || prepared.Action != "status" || prepared.Mode != model.BotExecutionSync {
 		t.Fatalf("v2 fs_schedule/status 应照常可用: %v %+v", err, prepared)
 	}
-	// v4 修正后的参数结构体：schema enum 列全 7 个动作。
-	rawSchema, _ := json.Marshal(sched.Parameters)
-	if !strings.Contains(string(rawSchema), "list") || !strings.Contains(string(rawSchema), "disable") {
-		t.Fatalf("v4 schema 应列出全部动作: %s", rawSchema)
+	// v6（当前发布版本）的 fs_schedule：8 个同步动作，含 run 与 dry_run。
+	sched6 := v6.byName["fs_schedule"]
+	if sched6 == nil || len(sched6.Actions) != 8 {
+		t.Fatalf("v6 fs_schedule 应有 8 个动作: %+v", sched6)
+	}
+	got6 := map[string]bool{}
+	for _, a := range sched6.Actions {
+		got6[a.Name] = true
+		if a.Mode != model.BotExecutionSync || a.RequiresConfirmation {
+			t.Fatalf("v6 fs_schedule 动作应全部同步且无需确认: %s", a.Name)
+		}
+	}
+	for _, want := range []string{"list", "create", "update", "delete", "runs", "run", "enable", "disable"} {
+		if !got6[want] {
+			t.Fatalf("v6 fs_schedule 缺动作 %s", want)
+		}
+	}
+	if sched6.ArgsType.Name() != "botScheduleTaskArgs" {
+		t.Fatalf("v6 fs_schedule 应使用 botScheduleTaskArgs，实得 %s", sched6.ArgsType.Name())
+	}
+	v6SchemaRaw, _ := json.Marshal(sched6.Parameters)
+	var v6Schema map[string]interface{}
+	if err := json.Unmarshal(v6SchemaRaw, &v6Schema); err != nil {
+		t.Fatalf("decode v6 schema: %v", err)
+	}
+	v6Props, _ := v6Schema["properties"].(map[string]interface{})
+	if v6Props == nil || v6Props["dry_run"] == nil {
+		t.Fatalf("v6 schema 应含 dry_run 属性: %s", v6SchemaRaw)
+	}
+	v6Action, _ := v6Props["action"].(map[string]interface{})
+	runInEnum := false
+	for _, e := range v6Action["enum"].([]interface{}) {
+		if e == "run" {
+			runInEnum = true
+		}
+	}
+	if !runInEnum {
+		t.Fatalf("v6 action 枚举应含 run: %s", v6SchemaRaw)
+	}
+	if !strings.Contains(v6Action["description"].(string), "run=task_id") {
+		t.Fatalf("v6 action 描述应注出 run 的必填字段: %v", v6Action["description"])
+	}
+	// v6 受理路径：run 必填 task_id；dry_run 可与 run 同用。
+	if _, err := botPrepareToolCall(v6, "fs_schedule", `{"action":"run"}`); err == nil {
+		t.Fatalf("run 缺 task_id 应被拒绝")
+	}
+	if p, err := botPrepareToolCall(v6, "fs_schedule", `{"action":"run","task_id":"t1","dry_run":true}`); err != nil || p.Action != "run" {
+		t.Fatalf("run+dry_run 应被受理: %v %+v", err, p)
+	}
+	// v5 会话调 run：动作未声明，拒绝（不偷执行 v6 新动作）。
+	if _, err := botPrepareToolCall(v5, "fs_schedule", `{"action":"run","task_id":"t1"}`); err == nil {
+		t.Fatalf("v5 不应接受 fs_schedule/run")
 	}
 }
 

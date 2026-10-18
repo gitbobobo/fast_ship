@@ -389,7 +389,9 @@ func TestBotCompactionSafeCutAndFold(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "compact")
 	bot := env.createBot(t, userID)
 	botRow, _ := env.bots.bots.Get(bot.ID)
-	env.cfg.Bots.Context.WindowTokens = 8000
+	// 9000：v5 工具集与平台规则变长后固定前缀更大，8000 的旧几何会误判
+	// 压缩目标不可达（INT-121 随 v5 重定标）。
+	env.cfg.Bots.Context.WindowTokens = 9000
 
 	seedBotUserMessage(t, env, bot.ID, "最早的问题")
 	bigReply := strings.Repeat("很长的工具结果", 400)

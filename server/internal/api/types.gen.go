@@ -1790,6 +1790,9 @@ type BotScheduleRun struct {
 	Summary     string  `json:"summary"`
 	TaskId      *string `json:"task_id"`
 	TotalTokens *int64  `json:"total_tokens,omitempty"`
+
+	// TriggerSource 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121）
+	TriggerSource string `json:"trigger_source"`
 }
 
 // BotScheduleTask defines model for BotScheduleTask.

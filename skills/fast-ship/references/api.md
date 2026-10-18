@@ -9420,6 +9420,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `items[].last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
 | `items[].last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `items[].last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `items[].last_run.trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `items[].last_run.error_code` | string | 否 |  |
 | `items[].last_run.error_message` | string | 否 |  |
 | `items[].last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
@@ -9479,6 +9480,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
 | `last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `last_run.trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `last_run.error_code` | string | 否 |  |
 | `last_run.error_message` | string | 否 |  |
 | `last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
@@ -9533,6 +9535,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `items[].status` | string | 是 | running / completed / failed / stopped / skipped |
 | `items[].summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `items[].silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `items[].trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `items[].error_code` | string | 否 |  |
 | `items[].error_message` | string | 否 |  |
 | `items[].scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
@@ -9603,6 +9606,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
 | `last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `last_run.trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `last_run.error_code` | string | 否 |  |
 | `last_run.error_message` | string | 否 |  |
 | `last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |

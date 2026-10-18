@@ -69,6 +69,9 @@ const (
 	BotTriggerToolResult  BotRunTrigger = "tool_result"
 	BotTriggerRecovery    BotRunTrigger = "recovery"
 	BotTriggerSchedule    BotRunTrigger = "schedule"
+	// BotTriggerManual 是手动立即触发（fs_schedule run，INT-121）：显式单次
+	// 执行，不占 cron 计划，不要求任务启用。
+	BotTriggerManual BotRunTrigger = "manual"
 )
 
 // 会话判别：主线（main）与定时任务（schedule）共用 bot_runs/bot_messages
