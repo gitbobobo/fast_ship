@@ -219,6 +219,60 @@ func waitForE2E(t *testing.T, what string, timeout time.Duration, cond func() bo
 	t.Fatalf("等待 %s 超时", what)
 }
 
+// safeRecorder 是并发安全的 SSE 记录器。`httptest.ResponseRecorder` 的 Body
+// 不是并发安全的：订阅端 goroutine 持续写入、测试端同时轮询读取，`-race` 下
+// 会报数据竞争，也可能读到撕裂的帧导致等待超时。这里用互斥锁保护状态，
+// 读走方法、写实现 http.ResponseWriter + http.Flusher（gin 的 SSE 依赖）。
+type safeRecorder struct {
+	mu      sync.Mutex
+	header  http.Header
+	body    bytes.Buffer
+	code    int
+	flushed bool
+}
+
+func newSafeRecorder() *safeRecorder {
+	return &safeRecorder{header: make(http.Header), code: http.StatusOK}
+}
+
+func (r *safeRecorder) Header() http.Header { return r.header }
+
+func (r *safeRecorder) WriteHeader(code int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.code = code
+}
+
+func (r *safeRecorder) Write(b []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.body.Write(b)
+}
+
+func (r *safeRecorder) Flush() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.flushed = true
+}
+
+func (r *safeRecorder) bodyString() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.body.String()
+}
+
+func (r *safeRecorder) statusCode() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.code
+}
+
+func (r *safeRecorder) flushSeen() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.flushed
+}
+
 // waitForE2EDump 带诊断的超时等待：失败时打印 run/消息概要。
 func (e *e2eEnv) dumpState(t *testing.T, botID string) string {
 	t.Helper()
@@ -841,7 +895,7 @@ func runSSEScenario(t *testing.T) {
 	defer cancelStream()
 	req := httptest.NewRequest(http.MethodGet, "/api/bots/"+botID+"/events", nil).WithContext(streamCtx)
 	req.Header.Set("Authorization", e.jwt)
-	rec := httptest.NewRecorder()
+	rec := newSafeRecorder()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -850,15 +904,15 @@ func runSSEScenario(t *testing.T) {
 
 	// 等订阅建立（SSE 头部写出）。
 	waitForE2E(t, "SSE 建立头", 10*time.Second, func() bool {
-		return rec.Flushed || rec.Code == http.StatusOK
+		return rec.flushSeen() || rec.statusCode() == http.StatusOK
 	})
 	e.doJSON(t, http.MethodPost, "/api/bots/"+botID+"/messages",
 		map[string]interface{}{"text": "开始流式", "client_message_id": "sse1"})
 	waitForE2E(t, "事件到齐", 20*time.Second, func() bool {
-		return strings.Contains(rec.Body.String(), "event: done")
+		return strings.Contains(rec.bodyString(), "event: done")
 	})
 
-	frames := parseSSEFrames(t, rec.Body.String())
+	frames := parseSSEFrames(t, rec.bodyString())
 	if len(frames) == 0 {
 		t.Fatalf("无 SSE 帧")
 	}
@@ -914,16 +968,16 @@ func runSSEScenario(t *testing.T) {
 	defer cancelReplay()
 	req2 := httptest.NewRequest(http.MethodGet, "/api/bots/"+botID+"/events?after_seq=0", nil).WithContext(replayCtx)
 	req2.Header.Set("Authorization", e.jwt)
-	rec2 := httptest.NewRecorder()
+	rec2 := newSafeRecorder()
 	replayDone := make(chan struct{})
 	go func() {
 		defer close(replayDone)
 		e.env.router.ServeHTTP(rec2, req2)
 	}()
 	waitForE2E(t, "重放完成", 20*time.Second, func() bool {
-		return strings.Contains(rec2.Body.String(), "event: done")
+		return strings.Contains(rec2.bodyString(), "event: done")
 	})
-	replayFrames := parseSSEFrames(t, rec2.Body.String())
+	replayFrames := parseSSEFrames(t, rec2.bodyString())
 	cancelReplay()
 	<-replayDone
 	if len(replayFrames) != len(frames) {
