@@ -1,6 +1,6 @@
 // 工具调用的本地化展示映射表：调用卡/确认卡只查表渲染，不展示原始
 // 工具标识（原始 tool.action 收进「查看原始调用」）。
-// 唯一事实源是 server/internal/service/bot_tools.go 的 botToolRegistryV4()
+// 唯一事实源是 server/internal/service/bot_tools.go 的 botToolRegistryV5()
 // 与 botReadOnlyActions——后端新增或改名工具/action 时必须同步此表；
 // effect 不能靠 requires_confirmation 推断（fs_schedule 的写操作是同步
 // 执行、不需要确认，但仍是写入）。表外条目一律安全回退：账本可能先于
@@ -49,6 +49,7 @@ const TOOL_ACTION_META: Record<string, Record<string, ToolActionMeta>> = {
     list: { label: "列出定时任务", effect: "read" },
     runs: { label: "查看任务运行记录", effect: "read" },
     status: { label: "查看调度状态", effect: "read" },
+    run: { label: "立即运行定时任务", effect: "write" },
     create: { label: "创建定时任务", effect: "write" },
     update: { label: "更新定时任务", effect: "write" },
     delete: { label: "删除定时任务", effect: "write" },
