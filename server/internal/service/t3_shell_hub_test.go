@@ -1141,9 +1141,12 @@ func TestT3ShellHub_FloorRetentionKeyedByRecordTime(t *testing.T) {
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
 
-	// 无 entry 的环境：Drop 直接记 floor，floor 版本是「很久前读出的行」。
-	oldVersion := time.Now().UTC().Add(-2 * time.Hour)
-	hub.Drop("user-2", "env-old", oldVersion)
+	// 无 entry 的环境：Drop 直接记 floor。cutoff 是「变更后的新版本」，语义是
+	// 「早于 cutoff 即拒」；这里用一个很久以后的新版本做 cutoff，再看很旧的
+	// 请求版本是否仍被守卫——floor 的保留按**记录时刻**计，不按版本值计。
+	cutoff := time.Now().UTC().Add(-2 * time.Hour)
+	oldVersion := cutoff.Add(-time.Hour)
+	hub.Drop("user-2", "env-old", cutoff)
 	hub.mu.Lock()
 	_, hasFloor := hub.floors[t3ShellHubKey("user-2", "env-old")]
 	hub.mu.Unlock()
@@ -1219,6 +1222,34 @@ func TestT3ShellHub_ColdSlowSnapshotNotInterruptedByMarkerBudget(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timed out waiting for view")
+	}
+}
+
+// 云端审查 P2：重配期间并发改名会产生一个「版本更新、但地址/凭证仍是旧的」
+// 中间版本。重配提交后用新版本做 cutoff（语义「早于 cutoff 即拒」），该中间
+// 版本的迟到 View 必须被拒，不能拿旧凭证建 entry 读旧实例的数据。
+func TestT3ShellHub_DropFencesIntermediateRenameVersion(t *testing.T) {
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+
+	base := time.Now().UTC()
+	intermediate := base.Add(time.Second) // 并发改名提交的版本（仍带旧凭证）
+	final := base.Add(2 * time.Second)    // 重配提交的版本（新凭证）
+
+	// 重配落库后用新版本做 cutoff。
+	hub.Drop("user-1", "env-1", final)
+
+	env := func(version time.Time) *model.T3Environment {
+		return &model.T3Environment{ID: "env-1", UserID: "user-1", Address: "http://127.0.0.1:1", UpdatedAt: version}
+	}
+	for name, version := range map[string]time.Time{"中间版本": intermediate, "变更前版本": base} {
+		if _, err := hub.View(context.Background(), env(version), "tok"); !errors.Is(err, errT3ShellConfigStale) {
+			t.Fatalf("%s must be fenced, err = %v", name, err)
+		}
+	}
+	// 携带新版本的正常请求不被 floor 拒（会去拨号并失败，但不是「配置已更新」）。
+	if _, err := hub.View(context.Background(), env(final), "tok"); errors.Is(err, errT3ShellConfigStale) {
+		t.Fatalf("final version must be admitted by the floor, err = %v", err)
 	}
 }
 

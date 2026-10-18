@@ -264,12 +264,14 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   调用方按可重试错误处理（「环境配置已更新，请重试」——不做内部重读重试，
   避免同一操作前半程旧配置、后半程新配置的拼接；用户/前端重试会重新加载
   配置，整个操作用同一份配置完成）。环境 Update（重配）落库成功后调
-  `shellHub.Drop`，floor 用**变更前**的 UpdatedAt；Delete 的 floor 用**删除
-  时刻**（必然晚于任何在途请求读到的版本，关闭「Delete 读到 v1、并发 Update
-  提交 v2、迟到请求带 v2 复活已删环境」的路径）。Drop 只淘汰旧代 entry：
-  若新请求已用新配置重建 entry（版本晚于 floor），迟到的 Drop 不会把它关掉。
-  floors 表按**记录时刻**保留 1 小时后清理（在途请求只有几十秒量级；不按
-  floor 值计时，否则长期未动的环境一重配 floor 就会被清掉、守卫失效）。
+  `shellHub.Drop`，cutoff 用**本次写入产生的 UpdatedAt**；Delete 的 cutoff 用
+  **删除时刻**（必然晚于任何在途请求读到的版本）。cutoff 的语义是「**早于即
+  拒**」：变更后的合法请求（版本等于 cutoff）可以重建，变更前的请求一律被拒
+  ——包括并发改名产生、仍带着旧凭证的中间版本，以及「Delete 读到 v1、并发
+  Update 提交 v2、迟到请求带 v2 复活已删环境」这条路径。Drop 只淘汰旧代
+  entry（版本早于 cutoff）：若新请求已用新配置重建 entry，迟到的 Drop 不会
+  把它关掉。floors 表按**记录时刻**保留 1 小时后清理（在途请求只有几十秒
+  量级；不按 floor 值计时，否则长期未动的环境一重配 floor 就会被清掉）。
 - **生命周期**：`Close()` 等 hub 级生命周期 WaitGroup 排空——覆盖已被
   Drop/替换/淘汰摘除的 entry 与各订阅 reader，返回后没有本 hub 启动的
   goroutine 仍在运行。

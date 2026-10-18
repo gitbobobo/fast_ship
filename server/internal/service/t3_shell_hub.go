@@ -245,7 +245,7 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 		e = nil
 	}
 	if e == nil {
-		if floor, ok := h.floors[key]; ok && !env.UpdatedAt.After(floor.version) {
+		if floor, ok := h.floors[key]; ok && env.UpdatedAt.Before(floor.version) {
 			h.mu.Unlock()
 			return nil, fmt.Errorf("%w: 环境配置已被替换或删除", errT3ShellConfigStale)
 		}
@@ -268,44 +268,44 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 // floor 一插入就被清掉、守卫失效。
 const t3ShellFloorTTL = time.Hour
 
-// t3ShellFloor 是一个环境的版本 floor：version 参与「不晚于即拒」的判定，
+// t3ShellFloor 是一个环境的版本 floor：version 是「最早可接受的新版本」，
 // at 是记录时刻（只用于过期清理）。
 type t3ShellFloor struct {
 	version time.Time
 	at      time.Time
 }
 
-// Drop 停掉环境的订阅并记版本 floor。幂等。环境 Update（凭证/地址变更）与
-// Delete 都调用它。
+// Drop 停掉环境的订阅并记版本 floor（cutoff）。幂等。环境 Update（凭证/地址
+// 变更）与 Delete 都调用它。
 //
-// floor 语义（「不晚于即拒」）：请求携带的 env.UpdatedAt 不晚于 floor 就拒绝
-// View，迟到请求不会用旧凭证/旧地址复活 entry；携带新版本的正常请求可以重建。
-//   - Update 传**变更前**的版本：floor 必须低于新版本的任何合法请求版本，若用
-//     变更后的版本做 floor，更新后的合法请求会因相等被永久拒绝。
+// floor 语义（**早于 cutoff 即拒**）：请求携带的 env.UpdatedAt 早于 cutoff 就
+// 拒绝 View。cutoff 就是「变更后的新版本」：
+//   - Update 传 update.UpdatedAt（本次写入产生的版本）：变更前读出的请求
+//     （含并发改名产生的中间版本——它带着旧凭证）全部被拒，携带新版本的正常
+//     请求（等于 cutoff）可以重建。用「早于」而不是「不晚于」，既能拒掉旧
+//     版本、又不会把变更后的合法请求本身拒掉。
 //   - Delete 传删除时刻（time.Now().UTC()）：删除必然发生在任何在途请求读出
-//     UpdatedAt 之后，因此能拒掉全部在途版本，关闭「Delete 读到 v1、并发
-//     Update 提交 v2、迟到请求带 v2 复活已删环境」的路径。
+//     UpdatedAt 之后，因此能拒掉全部在途版本。
 //
-// 只淘汰旧代 entry：entry 的版本（建立时的 env.UpdatedAt）不晚于 floor 才停。
-// 若 View 已用新配置建了新 entry（版本晚于 floor——例如重配提交后新请求先到、
-// 迟到的 Drop 后到），保留新 entry，不得把它关掉。
-func (h *t3ShellHub) Drop(userID, envID string, floorVersion time.Time) {
+// 只淘汰旧代 entry：entry 的版本（建立时的 env.UpdatedAt）**早于** cutoff 才停；
+// 若 View 已用新配置建了新 entry（版本不早于 cutoff），保留它，不得关掉。
+func (h *t3ShellHub) Drop(userID, envID string, cutoff time.Time) {
 	key := t3ShellHubKey(userID, envID)
 	h.mu.Lock()
 	now := time.Now().UTC()
-	if cur, ok := h.floors[key]; !ok || floorVersion.After(cur.version) {
-		h.floors[key] = t3ShellFloor{version: floorVersion, at: now}
+	if cur, ok := h.floors[key]; !ok || cutoff.After(cur.version) {
+		h.floors[key] = t3ShellFloor{version: cutoff, at: now}
 	}
 	// floors 防膨胀：按记录时刻清理过期 floor（见 t3ShellFloorTTL 的说明）。
-	cutoff := now.Add(-t3ShellFloorTTL)
+	gcCutoff := now.Add(-t3ShellFloorTTL)
 	for k, f := range h.floors {
-		if f.at.Before(cutoff) {
+		if f.at.Before(gcCutoff) {
 			delete(h.floors, k)
 		}
 	}
 	e := h.entries[key]
-	if e != nil && e.version.After(floorVersion) {
-		e = nil // 新代 entry：保留
+	if e != nil && !e.version.Before(cutoff) {
+		e = nil // 新代 entry（版本不早于 cutoff）：保留
 	}
 	if e != nil {
 		delete(h.entries, key)

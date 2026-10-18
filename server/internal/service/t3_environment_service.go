@@ -120,10 +120,6 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 		}
 		return nil, errs.ErrInternal
 	}
-	// 更新前的版本：重配成功后给 shellHub.Drop 做 floor 用（hub 对 floor 的
-	// 拒绝规则是「不晚于即拒」，floor 必须低于新版本的任何合法请求版本）。
-	preUpdateVersion := env.UpdatedAt
-
 	newName := env.Name
 	if req.Name != nil {
 		trimmed := strings.TrimSpace(*req.Name)
@@ -180,12 +176,12 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 			env.BearerTokenEncrypted = update.Pairing.BearerTokenEncrypted
 			env.BearerExpiresAt = update.Pairing.BearerExpiresAt
 			env.BearerScope = update.Pairing.BearerScope
-			// 凭证/地址已变：清掉旧订阅 trail（INT-116）。floor 用更新前的
-			// 版本：拿着旧版本读出的迟到 View 被拒（不会用旧凭证复活 entry），
-			// 携带新版本的正常请求（> floor）可以重建 entry；Drop 只会关掉
-			// 旧代 entry——若新请求已用新凭证建了新 entry，迟到的 Drop 不会
-			// 把它关掉（F3）。
-			s.shellHub.Drop(userID, id, preUpdateVersion)
+			// 凭证/地址已变：清掉旧订阅 trail（INT-116）。cutoff 用本次写入
+			// 产生的新版本（「早于 cutoff 即拒」）：变更前读出的请求、以及并发
+			// 改名产生而仍带着旧凭证的中间版本都会被拒；携带新版本的正常
+			// 请求（等于 cutoff）可以重建 entry。Drop 只关旧代 entry，已用新
+			// 凭证建好的新 entry 不会被关掉。
+			s.shellHub.Drop(userID, id, update.UpdatedAt)
 		}
 	}
 
