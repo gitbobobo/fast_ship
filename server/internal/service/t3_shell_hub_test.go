@@ -695,8 +695,11 @@ func mustMarshalDelta(sequence int, id, title string) json.RawMessage {
 	return data
 }
 
-// 服务端无完成标记能力：不请求 marker，恢复后不等标记立即视为追平。
-func TestT3ShellHub_NoMarkerCapabilitySyncsImmediately(t *testing.T) {
+// 服务端没有完成标记能力：无法证明恢复完成，不得乐观置追平——重连退回权威
+// 全量（不带旧游标），新权威快照落地前保持 Stale。方向审计的硬性要求：
+// 「陈旧快照不得当作可信运行态」；官方客户端的新 session 也是先加载权威快照、
+// 失败才退回全量，而不是沿用上一会话的缓存。
+func TestT3ShellHub_NoMarkerCapabilityResyncsInsteadOfTrusting(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: false, autoPong: true})
 	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
 	defer hub.Close()
@@ -710,19 +713,36 @@ func TestT3ShellHub_NoMarkerCapabilitySyncsImmediately(t *testing.T) {
 	collector := newShellConnCollector(t, srv)
 	activeConn.closeConn()
 
-	resumeSub := collector.await(false).sub
-	if _, has := resumeSub.Payload["requestCompletionMarker"]; has {
-		t.Fatalf("resume must not request marker when unsupported: %+v", resumeSub.Payload)
+	resume := collector.await(false)
+	if _, has := resume.sub.Payload["requestCompletionMarker"]; has {
+		t.Fatalf("resume must not request marker when unsupported: %+v", resume.sub.Payload)
 	}
-	if fmt.Sprint(resumeSub.Payload["afterSequence"]) != "42" {
-		t.Fatalf("afterSequence = %v, want 42", resumeSub.Payload["afterSequence"])
+	if _, has := resume.sub.Payload["afterSequence"]; has {
+		t.Fatalf("no marker capability means no verifiable catch-up: must drop the cursor, got %+v", resume.sub.Payload)
 	}
 
-	// 不发任何帧：能力不支持时立即视为追平 → View 应很快 Ready。
-	ready := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool { return v.State == t3ShellReady })
-	if len(ready.Snaps.Active.Threads) != 1 || ready.Snaps.Active.Threads[0].ID != "th-1" {
-		t.Fatalf("data must survive optimistic resume: %+v", ready.Snaps.Active.Threads)
+	// 新权威快照到达之前：旧缓存不得冒充可信运行态。
+	view, err := hub.View(context.Background(), env, "tok")
+	if err != nil {
+		t.Fatalf("view: %v", err)
 	}
+	if view.State == t3ShellReady {
+		t.Fatalf("old cache must not be trusted before the authoritative snapshot arrives")
+	}
+	if view.Snaps == nil || len(view.Snaps.Active.Threads) != 1 {
+		t.Fatalf("stale view must still carry the last known data: %+v", view.Snaps)
+	}
+
+	// 权威全量快照落地 → Ready。
+	if err := resume.conn.sendValue(resume.sub.ID, shellSnapshotValue(60, "th-1")); err != nil {
+		t.Fatalf("send resync snapshot: %v", err)
+	}
+	if !resume.conn.awaitAck(resume.sub.ID, 2*time.Second) {
+		t.Fatalf("resync snapshot not acked")
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.State == t3ShellReady && v.Snaps != nil && v.Snaps.Active.SnapshotSequence == 60
+	})
 }
 
 // 请求了标记但预算内未等到（F1）：不得把未追平的缓存提升为 Ready——超时后

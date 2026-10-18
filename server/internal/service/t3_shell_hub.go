@@ -666,6 +666,21 @@ func (h *t3ShellHub) runFaceSubscription(e *t3ShellEntry, archived bool) {
 
 		result := h.connectFaceOnce(e, archived)
 
+		// 因空闲暂停或停机而结束的连接不算失败：直接回到循环顶部（暂停时
+		// waitIfPaused 会阻塞到被唤醒），不要在这里睡退避——否则回访可能
+		// 白等整段退避（凭证类失败时最多 5min），也堵住「暂停→回访发生在
+		// 连接收尾期间」这类丢唤醒的窗口。
+		e.mu.Lock()
+		paused := e.paused
+		stopped := e.isStopped()
+		e.mu.Unlock()
+		if stopped {
+			return
+		}
+		if paused {
+			continue
+		}
+
 		// 退避：1s→2s→4s…上限 30s，±25% jitter。同步稳定超过
 		// StableResetAfter 的连接断开后从 1s 重来——长期健康的连接不应
 		// 背着历史失败的重试深度。
@@ -816,10 +831,17 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 			e.state.markActiveSynced(false)
 			e.refresh()
 		} else if st := e.state.status(); st.ActiveReady {
-			payload["afterSequence"] = st.ActiveCursor
-			resumed = true
-			// 进入追平阶段：清标记，等权威帧/标记重新置位——追平前的
-			// 窗口 View 应当是 Stale 而不是 Ready。
+			if wantMarker {
+				// 有完成标记能力才带游标恢复：上游会在回放之后发
+				// synchronized，我们据此确认追平。
+				payload["afterSequence"] = st.ActiveCursor
+				resumed = true
+			}
+			// 进入追平阶段：清标记，等权威帧/标记重新置位——追平前的窗口
+			// View 应当是 Stale 而不是 Ready。没有 marker 能力时不带游标
+			// （退回权威全量）：没有任何新数据就宣称追平会把旧缓存当成可信
+			// 运行态，违反「陈旧快照不得当作可信」——官方客户端的新 session
+			// 也是先加载权威快照、失败才退回全量，而不是直接沿用上一会话缓存。
 			e.state.markActiveSynced(false)
 			e.refresh()
 		}
@@ -834,16 +856,6 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 		return t3ShellConnResult{}
 	}
 	e.noteConnState(archived, t3ShellConnSubscribed, nil)
-
-	// 能力不支持且本次是带游标的 resume：不等标记，立即视为追平（对齐官方
-	// 客户端 shell.ts:386-398 的乐观 live）。冷启动与强制全量重同步不能乐观
-	// ——它们的完成标志是新权威全量快照本身（权威帧会自己置追平），提前置位
-	// 会把旧缓存当成可信运行态（例如强制重同步的两次连接之间能力由 true 变
-	// 为 false 时）。
-	if !archived && !wantMarker && resumed {
-		e.state.markActiveSynced(true)
-		e.refresh()
-	}
 
 	// marker 等待截止时刻：只对带游标的 resume 生效。预算内没等到
 	// synchronized 就不再假装追平，由 readStreamLoop 的 ticker 分支置强制
