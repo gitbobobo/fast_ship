@@ -37,12 +37,48 @@ func (s *AutomationAgentService) loadPRRun(ctx context.Context, runID string) (*
 	return run, nil
 }
 
-// prGitHub 返回注入的 GitHub 访问面（未配置时报错）。
-func (s *AutomationAgentService) prGitHub() (githubapi.GitHubClient, error) {
-	if s.pr == nil {
+// prGitHub 解析某个身份的 GitHub 访问面（INT-119 用户级集成）。未配置/解密
+// 失败保持 50000 原文案。
+func (s *AutomationAgentService) prGitHub(ctx context.Context, userID string) (githubapi.GitHubClient, error) {
+	if s.prFor == nil {
 		return nil, errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
 	}
-	return s.pr, nil
+	gh, err := s.prFor.ClientFor(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if gh == nil {
+		return nil, errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
+	}
+	return gh, nil
+}
+
+// prGitHubForRun 按运行行持久化的开轮身份解析 GitHub 访问面：同一轮的评论/
+// check 都由开轮身份发出；” 即部署 config 身份（ClientFor(ctx, "") 走 config
+// 兜底）。身份在开轮时已写入 AppUserID 列，这里不再反推评审账、不拿规则所有
+// 者猜。
+func (s *AutomationAgentService) prGitHubForRun(ctx context.Context, run *model.AutomationRun) (githubapi.GitHubClient, error) {
+	return s.prGitHub(ctx, s.identityForRun(ctx, run))
+}
+
+// identityForRun 运行的开轮身份：取运行行 AppUserID 列。prReview 缺席（部分
+// 单测）时同样取列值，不再有规则所有者回退。
+func (s *AutomationAgentService) identityForRun(ctx context.Context, run *model.AutomationRun) string {
+	if s.prReview != nil {
+		return s.prReview.ReviewIdentityForRun(ctx, run)
+	}
+	return run.AppUserID
+}
+
+// wrapGitHubCallError 本地配置类错误（AppError：未配置/解密失败）原样透传，
+// 只把真正的 GitHub 调用失败包装成 50200——配置问题不是上游问题，错误码
+// 不能被悄悄改写。
+func wrapGitHubCallError(prefix string, err error) error {
+	var appErr *errs.AppError
+	if errors.As(err, &appErr) {
+		return appErr
+	}
+	return errs.New(errs.ErrGitHubAPI.Code, prefix+": "+shortenGitHubError(err))
 }
 
 // AgentPullRequest GET /api/automation-agent/pull-request
@@ -51,13 +87,13 @@ func (s *AutomationAgentService) AgentPullRequest(ctx context.Context, identity 
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHub()
+	gh, err := s.prGitHubForRun(ctx, run)
 	if err != nil {
 		return nil, err
 	}
 	pr, err := gh.GetPullRequest(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR 元数据失败: "+shortenGitHubError(err))
+		return nil, wrapGitHubCallError("读取 PR 元数据失败", err)
 	}
 	return &api.AgentPullRequestDetail{
 		RepoFullName: run.RepoFullName,
@@ -78,13 +114,13 @@ func (s *AutomationAgentService) AgentPullRequestDiff(ctx context.Context, ident
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHub()
+	gh, err := s.prGitHubForRun(ctx, run)
 	if err != nil {
 		return nil, err
 	}
 	diff, err := gh.GetPullRequestDiff(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR diff 失败: "+shortenGitHubError(err))
+		return nil, wrapGitHubCallError("读取 PR diff 失败", err)
 	}
 	truncated := false
 	if len(diff) > prAgentDiffMaxBytes {
@@ -100,13 +136,13 @@ func (s *AutomationAgentService) AgentPullRequestComments(ctx context.Context, i
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHub()
+	gh, err := s.prGitHubForRun(ctx, run)
 	if err != nil {
 		return nil, err
 	}
 	comments, err := gh.ListReviewComments(ctx, run.InstallationID, run.RepoFullName, run.PRNumber)
 	if err != nil {
-		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 PR 评论失败: "+shortenGitHubError(err))
+		return nil, wrapGitHubCallError("读取 PR 评论失败", err)
 	}
 	out := make([]api.AgentPullRequestComment, 0, len(comments))
 	for i := range comments {
@@ -135,7 +171,7 @@ func (s *AutomationAgentService) AgentSubmitPullRequestReview(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHub()
+	gh, err := s.prGitHubForRun(ctx, run)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +216,7 @@ func (s *AutomationAgentService) submitReviewIfLive(ctx context.Context, gh gith
 		Body:     api.Deref(req.Body),
 		CommitID: fresh.HeadSHA,
 	}); err != nil {
-		return errs.New(errs.ErrGitHubAPI.Code, "提交 review 失败: "+shortenGitHubError(err))
+		return wrapGitHubCallError("提交 review 失败", err)
 	}
 	return nil
 }
@@ -197,7 +233,7 @@ func (s *AutomationAgentService) AgentUpdateCheck(ctx context.Context, identity 
 	if run.CheckRunID == nil {
 		return errs.New(errs.ErrRunNotPRReview.Code, "本运行的 check run 尚未创建，请稍后重试")
 	}
-	gh, err := s.prGitHub()
+	gh, err := s.prGitHubForRun(ctx, run)
 	if err != nil {
 		return err
 	}
@@ -239,7 +275,7 @@ func (s *AutomationAgentService) updateCheckIfLive(ctx context.Context, gh githu
 		in.Title = checkNameForModel(fresh.ModelName)
 	}
 	if err := gh.UpdateCheckRun(ctx, fresh.InstallationID, fresh.RepoFullName, *fresh.CheckRunID, in); err != nil {
-		return errs.New(errs.ErrGitHubAPI.Code, "更新 check 失败: "+shortenGitHubError(err))
+		return wrapGitHubCallError("更新 check 失败", err)
 	}
 	after, err := s.runs.FindByID(ctx, run.ID)
 	if err != nil {

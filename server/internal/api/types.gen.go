@@ -197,6 +197,66 @@ func (e CreateT3ThreadRequestRuntimeMode) Valid() bool {
 	}
 }
 
+// Defines values for GitHubAppIntegrationDetectionStatus.
+const (
+	GitHubAppIntegrationDetectionStatusFailed    GitHubAppIntegrationDetectionStatus = "failed"
+	GitHubAppIntegrationDetectionStatusInvalid   GitHubAppIntegrationDetectionStatus = "invalid"
+	GitHubAppIntegrationDetectionStatusOk        GitHubAppIntegrationDetectionStatus = "ok"
+	GitHubAppIntegrationDetectionStatusUnchecked GitHubAppIntegrationDetectionStatus = "unchecked"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppIntegrationDetectionStatus enum.
+func (e GitHubAppIntegrationDetectionStatus) Valid() bool {
+	switch e {
+	case GitHubAppIntegrationDetectionStatusFailed:
+		return true
+	case GitHubAppIntegrationDetectionStatusInvalid:
+		return true
+	case GitHubAppIntegrationDetectionStatusOk:
+		return true
+	case GitHubAppIntegrationDetectionStatusUnchecked:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppIntegrationProvider.
+const (
+	GithubApp GitHubAppIntegrationProvider = "github_app"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppIntegrationProvider enum.
+func (e GitHubAppIntegrationProvider) Valid() bool {
+	switch e {
+	case GithubApp:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppIntegrationSource.
+const (
+	GitHubAppIntegrationSourceConfig   GitHubAppIntegrationSource = "config"
+	GitHubAppIntegrationSourceDatabase GitHubAppIntegrationSource = "database"
+	GitHubAppIntegrationSourceNone     GitHubAppIntegrationSource = "none"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppIntegrationSource enum.
+func (e GitHubAppIntegrationSource) Valid() bool {
+	switch e {
+	case GitHubAppIntegrationSourceConfig:
+		return true
+	case GitHubAppIntegrationSourceDatabase:
+		return true
+	case GitHubAppIntegrationSourceNone:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for GitHubTokenDetectionStatus.
 const (
 	GitHubTokenDetectionStatusFailed    GitHubTokenDetectionStatus = "failed"
@@ -2113,6 +2173,49 @@ type GenerateTitleResponse struct {
 	Titles []string `json:"titles"`
 }
 
+// GitHubAppIntegration defines model for GitHubAppIntegration.
+type GitHubAppIntegration struct {
+	// AppId GitHub App ID（未配置时为空串）
+	AppId string `json:"app_id"`
+
+	// Configured 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set
+	Configured bool `json:"configured"`
+
+	// DetectedAt 最近一次检测完成时间；未检测为 null
+	DetectedAt *string `json:"detected_at"`
+
+	// DetectionDetail 给人看的补充说明（App 名称、失败原因等），不含任何密钥
+	DetectionDetail string `json:"detection_detail"`
+
+	// DetectionStatus unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
+	DetectionStatus GitHubAppIntegrationDetectionStatus `json:"detection_status"`
+
+	// PrivateKeySet 私钥是否已配置（本体永不回显）
+	PrivateKeySet bool                         `json:"private_key_set"`
+	Provider      GitHubAppIntegrationProvider `json:"provider"`
+
+	// Source 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
+	Source GitHubAppIntegrationSource `json:"source"`
+
+	// UpdatedAt 数据库配置最近保存时间；source 为 config/none 时为 null
+	UpdatedAt *string `json:"updated_at"`
+
+	// WebhookSecretSet webhook 验签密钥是否已配置（本体永不回显）
+	WebhookSecretSet bool `json:"webhook_secret_set"`
+
+	// WebhookUrl 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串
+	WebhookUrl string `json:"webhook_url"`
+}
+
+// GitHubAppIntegrationDetectionStatus unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
+type GitHubAppIntegrationDetectionStatus string
+
+// GitHubAppIntegrationProvider defines model for GitHubAppIntegration.Provider.
+type GitHubAppIntegrationProvider string
+
+// GitHubAppIntegrationSource 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
+type GitHubAppIntegrationSource string
+
 // GitHubToken defines model for GitHubToken.
 type GitHubToken struct {
 	CreatedAt string `json:"created_at"`
@@ -3936,6 +4039,18 @@ type UpdateDocumentRequest struct {
 	Title *string `json:"title,omitempty"`
 }
 
+// UpdateGitHubAppIntegrationRequest defines model for UpdateGitHubAppIntegrationRequest.
+type UpdateGitHubAppIntegrationRequest struct {
+	// AppId GitHub App ID（纯数字）
+	AppId string `json:"app_id"`
+
+	// PrivateKeyPem App 私钥 PEM（RSA）；省略或 null 表示保留已有私钥，首次配置必填
+	PrivateKeyPem *string `json:"private_key_pem,omitempty"`
+
+	// WebhookSecret webhook 验签密钥；省略或 null 表示保留已有值，空串表示清空
+	WebhookSecret *string `json:"webhook_secret,omitempty"`
+}
+
 // UpdateGitHubTokenRequest defines model for UpdateGitHubTokenRequest.
 type UpdateGitHubTokenRequest struct {
 	// Title 非空时替换标题；改标题不重新检测
@@ -5329,6 +5444,39 @@ type ReceiveGitHubWebhookParams struct {
 	XGitHubEvent     string `json:"X-GitHub-Event"`
 	XGitHubDelivery  string `json:"X-GitHub-Delivery"`
 	XHubSignature256 string `json:"X-Hub-Signature-256"`
+
+	// XGitHubHookInstallationTargetID GitHub App webhook 携带的 App ID；用它定位到配置了该 App 的用户（缺省时仅当全库唯一身份才接受）
+	XGitHubHookInstallationTargetID *string `json:"X-GitHub-Hook-Installation-Target-ID,omitempty"`
+}
+
+// GetGitHubAppIntegration200JSONResponseBody defines parameters for GetGitHubAppIntegration.
+type GetGitHubAppIntegration200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                   `json:"code"`
+	Data *GitHubAppIntegration `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateGitHubAppIntegration200JSONResponseBody defines parameters for UpdateGitHubAppIntegration.
+type UpdateGitHubAppIntegration200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                   `json:"code"`
+	Data *GitHubAppIntegration `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// TestGitHubAppIntegration200JSONResponseBody defines parameters for TestGitHubAppIntegration.
+type TestGitHubAppIntegration200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                   `json:"code"`
+	Data *GitHubAppIntegration `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
 }
 
 // GetIssuePrompts200JSONResponseBody defines parameters for GetIssuePrompts.
@@ -6777,6 +6925,9 @@ type UpdateGithubTokenJSONRequestBody = UpdateGitHubTokenRequest
 
 // ReceiveGitHubWebhookJSONRequestBody defines body for ReceiveGitHubWebhook for application/json ContentType.
 type ReceiveGitHubWebhookJSONRequestBody = ReceiveGitHubWebhookJSONBody
+
+// UpdateGitHubAppIntegrationJSONRequestBody defines body for UpdateGitHubAppIntegration for application/json ContentType.
+type UpdateGitHubAppIntegrationJSONRequestBody = UpdateGitHubAppIntegrationRequest
 
 // UpdateIssuePromptsJSONRequestBody defines body for UpdateIssuePrompts for application/json ContentType.
 type UpdateIssuePromptsJSONRequestBody UpdateIssuePromptsJSONBody

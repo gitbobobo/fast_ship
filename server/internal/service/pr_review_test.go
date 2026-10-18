@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -247,7 +248,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 		repository.NewGitHubWebhookDeliveryRepository(db),
 		repository.NewGitHubPRDebounceRepository(db),
 		repository.NewGitHubPRReviewRepository(db),
-		fake, stopper, NewNotificationSink(db), cfg, logger)
+		githubapp.StaticClients{Client: fake}, stopper, NewNotificationSink(db), cfg, logger)
 	return &prReviewTestEnv{
 		db: db, pr: pr, fake: fake, stopper: stopper,
 		runs: repository.NewAutomationRunRepository(db),
@@ -369,7 +370,15 @@ func (e *prReviewTestEnv) handleWebhook(t *testing.T, delivery, action, repo str
 func (e *prReviewTestEnv) handleWebhookAt(t *testing.T, delivery, action, repo string, number int, sha string, draft, fork bool, updatedAt time.Time) error {
 	t.Helper()
 	return e.pr.HandleGitHubWebhook(context.Background(), "pull_request", delivery,
-		webhookPayloadAt(action, repo, number, sha, draft, fork, updatedAt))
+		webhookPayloadAt(action, repo, number, sha, draft, fork, updatedAt), "")
+}
+
+// handleWebhookAs 以指定验签身份（appUserID，空串=config 身份）投递事件：
+// 用户身份场景用，模拟验签已命中该用户的候选。
+func (e *prReviewTestEnv) handleWebhookAs(t *testing.T, delivery, action, repo string, number int, sha string, appUserID string) error {
+	t.Helper()
+	return e.pr.HandleGitHubWebhook(context.Background(), "pull_request", delivery,
+		webhookPayload(action, repo, number, sha, false, false), appUserID)
 }
 
 func countDebounces(t *testing.T, db *gorm.DB) int64 {
@@ -1561,7 +1570,7 @@ func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
 	}
 	agent := NewAutomationAgentService(env.db, env.runs,
 		repository.NewAutomationRunTokenRepository(env.db), nil, NewNotificationSink(env.db), zap.NewNop())
-	agent.SetPRGitHub(blocker)
+	agent.SetPRGitHub(githubapp.StaticClients{Client: blocker})
 	agent.SetPRReview(env.pr)
 
 	body := "ok"
@@ -1584,7 +1593,7 @@ func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
 	webhookDone := make(chan error, 1)
 	go func() {
 		webhookDone <- env.pr.HandleGitHubWebhook(context.Background(), "pull_request", "d-sync",
-			webhookPayload("synchronize", "octocat/hw", 1, "sha-2", false, false))
+			webhookPayload("synchronize", "octocat/hw", 1, "sha-2", false, false), "")
 	}()
 
 	// 持锁期间 webhook 不得把 sha-1 取消掉。
@@ -1626,6 +1635,137 @@ func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
 	}
 	if still.Status != model.AutomationRunCancelled {
 		t.Fatalf("status after webhook = %s, want cancelled", still.Status)
+	}
+}
+
+// ---- INT-119 身份分区：两个用户各自开轮同一 repo+PR ----
+
+// recordingClients 记录每次 ClientFor 的身份（评审账行应按自己的验签身份解析
+// GitHub 访问面），client 恒返回同一 fake。
+type recordingClients struct {
+	mu     sync.Mutex
+	fake   *githubapp.Fake
+	called []string
+}
+
+func (r *recordingClients) ClientFor(_ context.Context, userID string) (githubapi.GitHubClient, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.called = append(r.called, userID)
+	return r.fake, nil
+}
+
+func (r *recordingClients) identities() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.called...)
+}
+
+// TestWebhook_TwoIdentitiesSamePR 各自身份对同一 repo+PR 开轮：产生两行评审账
+// （app_user_id 不同）互不覆盖；取消/评论/check 按身份解析，A 的轮不被 B 的
+// 投递取消，同步按评审账身份取 client（不再用 runs[0].UserID 猜）。
+func TestWebhook_TwoIdentitiesSamePR(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	alice, _ := env.createUserWithRepo(t, "octocat", "hw")
+	bob, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, alice, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+	env.createPRRule(t, bob, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+
+	// alice 的 App 身份开轮（payload 相同，仅验签身份不同）。
+	if err := env.handleWebhookAs(t, "d-a", "opened", "octocat/hw", 1, "sha-1", alice.ID); err != nil {
+		t.Fatalf("alice round: %v", err)
+	}
+	// bob 的 App 身份对同一 repo+PR+SHA 开轮。
+	if err := env.handleWebhookAs(t, "d-b", "opened", "octocat/hw", 1, "sha-1", bob.ID); err != nil {
+		t.Fatalf("bob round: %v", err)
+	}
+
+	var revs []model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ?", "octocat/hw").Find(&revs).Error; err != nil {
+		t.Fatalf("reviews: %v", err)
+	}
+	if len(revs) != 2 {
+		t.Fatalf("review rows = %+v, want one per identity", revs)
+	}
+	revByID := map[string]model.GitHubPRReview{}
+	for _, rev := range revs {
+		revByID[rev.AppUserID] = rev
+	}
+	if revByID[alice.ID].HeadSHA != "sha-1" || revByID[bob.ID].HeadSHA != "sha-1" {
+		t.Fatalf("review rows by identity = %+v, want sha-1 for both", revByID)
+	}
+	for _, rev := range revs {
+		if rev.HeadSHA != "sha-1" || rev.RoundNumber != 1 || !rev.SyncPending {
+			t.Fatalf("review %s = sha %s round %d pending %t", rev.AppUserID, rev.HeadSHA, rev.RoundNumber, rev.SyncPending)
+		}
+	}
+
+	// 各身份的运行归属各自用户，互不取消。
+	var aliceRuns, bobRuns []model.AutomationRun
+	if err := env.db.Where("repo_full_name = ? AND user_id = ?", "octocat/hw", alice.ID).Find(&aliceRuns).Error; err != nil {
+		t.Fatalf("alice runs: %v", err)
+	}
+	if err := env.db.Where("repo_full_name = ? AND user_id = ?", "octocat/hw", bob.ID).Find(&bobRuns).Error; err != nil {
+		t.Fatalf("bob runs: %v", err)
+	}
+	if len(aliceRuns) != 2 || len(bobRuns) != 2 {
+		t.Fatalf("runs = %d/%d, want 2/2 (one per model per identity)", len(aliceRuns), len(bobRuns))
+	}
+	for _, run := range append(append([]model.AutomationRun(nil), aliceRuns...), bobRuns...) {
+		if run.Status != model.RunStatusPendingRun {
+			t.Fatalf("run %s status = %q, want still live", run.ID, run.Status)
+		}
+	}
+
+	// 同步按评审账身份取 client：只出现 alice/bob 两个身份。
+	rc := &recordingClients{fake: env.fake}
+	identityPR := NewPRReviewService(env.db,
+		repository.NewAutomationRepository(env.db),
+		repository.NewAutomationRunRepository(env.db),
+		repository.NewProjectRepository(env.db),
+		repository.NewGitHubWebhookDeliveryRepository(env.db),
+		repository.NewGitHubPRDebounceRepository(env.db),
+		repository.NewGitHubPRReviewRepository(env.db),
+		rc, env.stopper, NewNotificationSink(env.db),
+		&config.Config{Server: config.ServerConfig{PublicURL: "https://fs.example.com"}}, zap.NewNop())
+	identityPR.SyncPendingReviews(nowUTC().Add(time.Second))
+	got := rc.identities()
+	if len(got) == 0 {
+		t.Fatal("client identities empty, want calls per review row")
+	}
+	// 每行的同步会多次取 client（逐 run 建 check、评论、check 状态），但身份
+	// 集合必须恰好是两个评审行身份，绝不能出现别人的身份。
+	seenUsers := map[string]bool{}
+	for _, id := range got {
+		seenUsers[id] = true
+	}
+	if len(seenUsers) != 2 || !seenUsers[alice.ID] || !seenUsers[bob.ID] {
+		t.Fatalf("client identities = %v, want only [%s %s]", got, alice.ID, bob.ID)
+	}
+	// 两行都同步成功清位。
+	var pending int64
+	env.db.Model(&model.GitHubPRReview{}).Where("sync_pending = ?", true).Count(&pending)
+	if pending != 0 {
+		t.Fatalf("sync_pending rows = %d, want 0", pending)
+	}
+
+	// 迟到的 alice 身份投递旧 SHA 不能动 bob 的行：取消按身份分区。
+	if err := env.handleWebhookAs(t, "d-a-late", "opened", "octocat/hw", 1, "sha-0", alice.ID); err != nil {
+		t.Fatalf("alice stale: %v", err)
+	}
+	var stillBob int64
+	env.db.Model(&model.AutomationRun{}).
+		Where("user_id = ? AND status <> ?", bob.ID, model.AutomationRunCancelled).Count(&stillBob)
+	if stillBob != 2 {
+		t.Fatalf("bob live runs after alice stale delivery = %d, want 2", stillBob)
+	}
+	// alice 的旧行不受影响（head_sha 仍是 sha-1）。
+	var revAlice model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ? AND app_user_id = ?", "octocat/hw", alice.ID).First(&revAlice).Error; err != nil {
+		t.Fatalf("reload alice review: %v", err)
+	}
+	if revAlice.HeadSHA != "sha-1" {
+		t.Fatalf("alice review sha = %s, want sha-1", revAlice.HeadSHA)
 	}
 }
 
@@ -1708,7 +1848,7 @@ func TestTimeout_WaitsForInFlightSubmitReview(t *testing.T) {
 	}
 	agent := NewAutomationAgentService(env.db, env.runs,
 		repository.NewAutomationRunTokenRepository(env.db), nil, NewNotificationSink(env.db), zap.NewNop())
-	agent.SetPRGitHub(blocker)
+	agent.SetPRGitHub(githubapp.StaticClients{Client: blocker})
 	agent.SetPRReview(env.pr)
 
 	sink := NewNotificationSink(env.db)
@@ -1881,5 +2021,315 @@ func TestWebhook_DebounceDroppedWhenProjectScopeChanged(t *testing.T) {
 	}
 	if n := countDebounces(t, env.db); n != 0 {
 		t.Fatalf("debounce rows after fire = %d, want 0 (consumed)", n)
+	}
+}
+
+// ---- INT-119 第三轮：身份持久化与按身份分区 ----
+
+// TestReviewUpsert_ScopedToIdentity 同 PR 同时存在 config/A/B 三行评审账时，
+// config 身份（AppUserID 空串）的 upsert 只推进自己的行——更新条件显式带全三
+// 列主键，GORM 不能把空串身份当零值从条件里省掉、退化成按 (repo, pr) 更新。
+func TestReviewUpsert_ScopedToIdentity(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	reviews := repository.NewGitHubPRReviewRepository(env.db)
+	now := nowUTC()
+	seed := func(appUserID string, commentID int64) model.GitHubPRReview {
+		rev := model.GitHubPRReview{
+			RepoFullName: "octocat/hw", PRNumber: 1, AppUserID: appUserID,
+			InstallationID: 1, CommentID: commentID, RoundNumber: 1, HeadSHA: "sha-1",
+			SyncEpoch: 7, UpdatedAt: now,
+		}
+		if err := env.db.Create(&rev).Error; err != nil {
+			t.Fatalf("seed %q: %v", appUserID, err)
+		}
+		return rev
+	}
+	seed("", 1)
+	a := seed("alice", 2)
+	b := seed("bob", 3)
+
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return reviews.UpsertTx(tx, &model.GitHubPRReview{
+			RepoFullName: "octocat/hw", PRNumber: 1, AppUserID: "",
+			InstallationID: 9, RoundNumber: 5, HeadSHA: "sha-9", SyncPending: true,
+			UpdatedAt: now.Add(time.Second),
+		})
+	}); err != nil {
+		t.Fatalf("config upsert: %v", err)
+	}
+
+	var cfgRow model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ? AND app_user_id = ?", "octocat/hw", "").First(&cfgRow).Error; err != nil {
+		t.Fatalf("reload config row: %v", err)
+	}
+	if cfgRow.RoundNumber != 5 || cfgRow.HeadSHA != "sha-9" || cfgRow.InstallationID != 9 ||
+		cfgRow.CommentID != 1 || cfgRow.SyncEpoch != 8 || !cfgRow.SyncPending {
+		t.Fatalf("config row not advanced: %+v", cfgRow)
+	}
+	for _, want := range []model.GitHubPRReview{a, b} {
+		var got model.GitHubPRReview
+		if err := env.db.Where("repo_full_name = ? AND app_user_id = ?", "octocat/hw", want.AppUserID).First(&got).Error; err != nil {
+			t.Fatalf("reload %s: %v", want.AppUserID, err)
+		}
+		if got.CommentID != want.CommentID || got.RoundNumber != want.RoundNumber ||
+			got.HeadSHA != want.HeadSHA || got.SyncEpoch != want.SyncEpoch ||
+			got.InstallationID != want.InstallationID || got.SyncPending {
+			t.Fatalf("row %s touched by config upsert: %+v (want %+v)", want.AppUserID, got, want)
+		}
+	}
+}
+
+// TestReviewIdentity_PersistedOnRun 开轮身份落进运行行：config 身份开轮时
+// run.user_id 是规则所有者而 AppUserID 是空串，身份解析必须返回空串（老实现
+// 反推评审账会在这里选错 App）；用户身份开轮 AppUserID 即该用户；防抖到点开轮
+// 写入防抖行记录的身份。
+func TestReviewIdentity_PersistedOnRun(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "synchronize（防抖）"
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+	})
+
+	// config 身份开轮：规则所有者是 user，身份必须仍是 config。
+	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("config round: %v", err)
+	}
+	var cfgRun model.AutomationRun
+	if err := env.db.Where("head_sha = ?", "sha-1").First(&cfgRun).Error; err != nil {
+		t.Fatalf("config run: %v", err)
+	}
+	if cfgRun.UserID != user.ID || cfgRun.AppUserID != "" {
+		t.Fatalf("config run owner=%s app=%q, want owner=user app=''", cfgRun.UserID, cfgRun.AppUserID)
+	}
+	if got := env.pr.ReviewIdentityForRun(context.Background(), &cfgRun); got != "" {
+		t.Fatalf("identity for config run = %q, want '' (must not fall back to rule owner)", got)
+	}
+
+	// 用户身份投递进防抖窗口：防抖行记录该身份；到点开轮把身份写进运行行。
+	if err := env.handleWebhookAs(t, "d-2", "synchronize", "octocat/hw", 1, "sha-2", user.ID); err != nil {
+		t.Fatalf("debounce delivery: %v", err)
+	}
+	var d model.GitHubPRDebounce
+	if err := env.db.Where("repo_full_name = ? AND pr_number = ?", "octocat/hw", 1).First(&d).Error; err != nil {
+		t.Fatalf("debounce row: %v", err)
+	}
+	if d.AppUserID != user.ID || d.HeadSHA != "sha-2" {
+		t.Fatalf("debounce row app=%q sha=%s, want %s/sha-2", d.AppUserID, d.HeadSHA, user.ID)
+	}
+	env.pr.ProcessDueDebounces(nowUTC().Add(2 * time.Minute))
+	var userRun model.AutomationRun
+	if err := env.db.Where("head_sha = ?", "sha-2").First(&userRun).Error; err != nil {
+		t.Fatalf("debounced run: %v", err)
+	}
+	if userRun.AppUserID != user.ID {
+		t.Fatalf("debounced run app_user_id = %q, want %s", userRun.AppUserID, user.ID)
+	}
+	if got := env.pr.ReviewIdentityForRun(context.Background(), &userRun); got != user.ID {
+		t.Fatalf("identity for user run = %q, want %s", got, user.ID)
+	}
+}
+
+// TestMarkPRReviewPending_OnlyTouchesOwnIdentityRow 终态/超时置位只推进本运行
+// 开轮身份的那一行，其他身份行的 pending/epoch 原样不动。
+func TestMarkPRReviewPending_OnlyTouchesOwnIdentityRow(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	now := nowUTC()
+	for _, appUserID := range []string{"", "alice", "bob"} {
+		if err := env.db.Create(&model.GitHubPRReview{
+			RepoFullName: "octocat/hw", PRNumber: 1, AppUserID: appUserID,
+			InstallationID: 1, RoundNumber: 1, HeadSHA: "sha-1", SyncEpoch: 3, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed %q: %v", appUserID, err)
+		}
+	}
+
+	run := &model.AutomationRun{
+		TriggerType:  model.AutomationTriggerGitHubPRSynchronize,
+		RepoFullName: "octocat/hw", PRNumber: 1, AppUserID: "alice",
+		InstallationID: 1, RoundNumber: 1, HeadSHA: "sha-1",
+	}
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		return markPRReviewPendingTx(tx, run, now.Add(time.Second))
+	}); err != nil {
+		t.Fatalf("mark pending: %v", err)
+	}
+
+	var aliceRow model.GitHubPRReview
+	if err := env.db.Where("app_user_id = ?", "alice").First(&aliceRow).Error; err != nil {
+		t.Fatalf("reload alice: %v", err)
+	}
+	if !aliceRow.SyncPending || aliceRow.SyncEpoch != 4 {
+		t.Fatalf("alice row pending=%t epoch=%d, want true/4", aliceRow.SyncPending, aliceRow.SyncEpoch)
+	}
+	for _, appUserID := range []string{"", "bob"} {
+		var row model.GitHubPRReview
+		if err := env.db.Where("app_user_id = ?", appUserID).First(&row).Error; err != nil {
+			t.Fatalf("reload %q: %v", appUserID, err)
+		}
+		if row.SyncPending || row.SyncEpoch != 3 {
+			t.Fatalf("row %q touched: pending=%t epoch=%d", appUserID, row.SyncPending, row.SyncEpoch)
+		}
+	}
+}
+
+// perUserClients 按身份返回各自的 fake GitHub：共享同一套规则/项目/库（远端
+// 数据同源），但评论与 check 按身份落到各自 fake——模拟按身份拒绝的远端。
+// 未登记身份（含 config）返回错误。
+type perUserClients struct {
+	byUser map[string]*githubapp.Fake
+}
+
+func (p *perUserClients) ClientFor(_ context.Context, userID string) (githubapi.GitHubClient, error) {
+	f := p.byUser[userID]
+	if f == nil {
+		return nil, fmt.Errorf("no github client for identity %q", userID)
+	}
+	return f, nil
+}
+
+// TestSync_ThreeIdentitiesIndependent config/alice/bob 三个身份对同一 repo+PR
+// 各开一轮：评论按身份独立（正文各含自己的 marker、comment_id 各指向自己
+// fake、A 的评论不被 B 找回或更新）、check 归属各自 fake；一个身份推新 SHA 只
+// 取消/推进自己的轮，其余身份的运行、评论原样不动。
+func TestSync_ThreeIdentitiesIndependent(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	alice, _ := env.createUserWithRepo(t, "octocat", "hw")
+	bob, _ := env.createUserWithRepo(t, "octocat", "hw")
+	// alice 的规则收 synchronize（她后续推新 SHA 用 synchronize 取消旧轮），
+	// bob 的规则收 opened。config 投递不带身份过滤，命中 alice 的规则即以
+	// config 身份给 alice 的规则开轮（UserID=alice、AppUserID='' 的关键形态）。
+	env.createPRRule(t, alice, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
+	})
+	env.createPRRule(t, bob, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+
+	fakeCfg, fakeA, fakeB := githubapp.NewFake(), githubapp.NewFake(), githubapp.NewFake()
+	pr := NewPRReviewService(env.db,
+		repository.NewAutomationRepository(env.db),
+		repository.NewAutomationRunRepository(env.db),
+		repository.NewProjectRepository(env.db),
+		repository.NewGitHubWebhookDeliveryRepository(env.db),
+		repository.NewGitHubPRDebounceRepository(env.db),
+		repository.NewGitHubPRReviewRepository(env.db),
+		&perUserClients{byUser: map[string]*githubapp.Fake{
+			"": fakeCfg, alice.ID: fakeA, bob.ID: fakeB,
+		}},
+		env.stopper, NewNotificationSink(env.db),
+		&config.Config{Server: config.ServerConfig{PublicURL: "https://fs.example.com"}}, zap.NewNop())
+
+	deliver := func(delivery, action, sha, appUserID string) {
+		t.Helper()
+		if err := pr.HandleGitHubWebhook(context.Background(), "pull_request", delivery,
+			webhookPayload(action, "octocat/hw", 1, sha, false, false), appUserID); err != nil {
+			t.Fatalf("delivery %s (%q): %v", delivery, appUserID, err)
+		}
+	}
+	// 各身份各用不同 SHA（同 SHA 会被 (trigger_id, trigger_key) 唯一键收敛
+	// 成一轮，与身份无关——那是既有的去重语义）：三条评审账 (repo, pr, 身份)
+	// 各自推进、各自同步。
+	deliver("d-cfg", "synchronize", "sha-c1", "")
+	deliver("d-a", "synchronize", "sha-a1", alice.ID)
+	deliver("d-b", "opened", "sha-b1", bob.ID)
+	pr.SyncPendingReviews(nowUTC().Add(time.Second))
+
+	markerCfg := prReviewCommentMarkerFor("")
+	markerA := prReviewCommentMarkerFor(alice.ID)
+	markerB := prReviewCommentMarkerFor(bob.ID)
+	bodyA, bodyB := fakeA.LastCommentBody(), fakeB.LastCommentBody()
+	if !strings.Contains(bodyA, markerA) || strings.Contains(bodyA, markerB) || strings.Contains(bodyA, markerCfg) {
+		t.Fatalf("alice comment marker wrong: %s", bodyA)
+	}
+	if !strings.Contains(bodyB, markerB) || strings.Contains(bodyB, markerA) || strings.Contains(bodyB, markerCfg) {
+		t.Fatalf("bob comment marker wrong: %s", bodyB)
+	}
+	if body := fakeCfg.LastCommentBody(); !strings.Contains(body, markerCfg) || strings.Contains(body, markerA) {
+		t.Fatalf("config comment marker wrong: %s", body)
+	}
+
+	// 各身份的评审行 comment_id 不同，且各自指向自己 fake 里的评论。
+	var revs []model.GitHubPRReview
+	if err := env.db.Where("repo_full_name = ?", "octocat/hw").Find(&revs).Error; err != nil {
+		t.Fatalf("reviews: %v", err)
+	}
+	if len(revs) != 3 {
+		t.Fatalf("review rows = %d, want 3", len(revs))
+	}
+	ids := map[string]int64{}
+	for _, rev := range revs {
+		ids[rev.AppUserID] = rev.CommentID
+		if rev.CommentID == 0 {
+			t.Fatalf("review %s comment_id not saved: %+v", rev.AppUserID, rev)
+		}
+	}
+	// 各 fake 恰好一条评论（各自的评论独立，没有身份把别人的评论找回改）。
+	for name, f := range map[string]*githubapp.Fake{"config": fakeCfg, "alice": fakeA, "bob": fakeB} {
+		if comments := f.Comments("octocat/hw", 1); len(comments) != 1 {
+			t.Fatalf("%s comments = %d, want 1 (independent per identity)", name, len(comments))
+		}
+	}
+	// 各身份的 comment_id 指向自己 fake 里的那条评论：按身份 marker 在自己 fake
+	// 上能找回，别人的 marker 找不到（评论不会跨身份被找回改）。
+	findByMarker := func(f *githubapp.Fake, marker string) (int64, bool) {
+		id, found, err := f.FindPullRequestComment(context.Background(), 1, "octocat/hw", 1, marker)
+		if err != nil {
+			t.Fatalf("find comment: %v", err)
+		}
+		return id, found
+	}
+	for name, pair := range map[string]struct {
+		fake   *githubapp.Fake
+		marker string
+		id     int64
+	}{
+		"config": {fakeCfg, markerCfg, ids[""]},
+		"alice":  {fakeA, markerA, ids[alice.ID]},
+		"bob":    {fakeB, markerB, ids[bob.ID]},
+	} {
+		id, found := findByMarker(pair.fake, pair.marker)
+		if !found || id != pair.id {
+			t.Fatalf("%s marker finds id=%d found=%t, want own comment %d", name, id, found, pair.id)
+		}
+	}
+	// 别人的 marker 在 bob 的 fake 上找不到：B 的同步不会把 A 的评论找回来改。
+	if _, found := findByMarker(fakeB, markerA); found {
+		t.Fatal("alice's comment must not be findable by bob's marker")
+	}
+	// check 归属：每个身份自己的 fake 上每模型一个 check，别人的 fake 没有额外的。
+	for name, f := range map[string]*githubapp.Fake{"config": fakeCfg, "alice": fakeA, "bob": fakeB} {
+		if checks := f.CheckRuns("octocat/hw"); len(checks) != 2 {
+			t.Fatalf("%s checks = %d, want 2 (one per model)", name, len(checks))
+		}
+	}
+
+	// alice 推新 SHA：她的旧轮取消、新轮开启、她的评论原地更新；
+	// config 与 bob 的运行、评论完全不变。
+	deliver("d-a-2", "synchronize", "sha-a2", alice.ID)
+	pr.SyncPendingReviews(nowUTC().Add(2 * time.Second))
+
+	var aliceLive, otherLive int64
+	env.db.Model(&model.AutomationRun{}).
+		Where("app_user_id = ? AND status <> ?", alice.ID, model.AutomationRunCancelled).Count(&aliceLive)
+	env.db.Model(&model.AutomationRun{}).
+		Where("app_user_id IN (?, ?) AND status <> ?", "", bob.ID, model.AutomationRunCancelled).Count(&otherLive)
+	if aliceLive != 2 {
+		t.Fatalf("alice live runs = %d, want 2 (new SHA round)", aliceLive)
+	}
+	if otherLive != 4 {
+		t.Fatalf("config+bob live runs = %d, want 4 (untouched by alice's SHA)", otherLive)
+	}
+	if comments := fakeA.Comments("octocat/hw", 1); len(comments) != 1 {
+		t.Fatalf("alice comments = %d, want 1 (updated in place)", len(comments))
+	}
+	if body := fakeA.LastCommentBody(); !strings.Contains(body, "sha-a2") || !strings.Contains(body, markerA) {
+		t.Fatalf("alice comment not advanced to sha-a2: %s", body)
+	}
+	if comments := fakeB.Comments("octocat/hw", 1); len(comments) != 1 || fakeB.LastCommentBody() != bodyB {
+		t.Fatalf("bob comment touched by alice's SHA: %d %q", len(fakeB.Comments("octocat/hw", 1)), fakeB.LastCommentBody())
+	}
+	if comments := fakeCfg.Comments("octocat/hw", 1); len(comments) != 1 {
+		t.Fatalf("config comments = %d, want 1", len(comments))
 	}
 }

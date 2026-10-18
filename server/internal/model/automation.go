@@ -221,6 +221,11 @@ type AutomationRun struct {
 	HeadSHA        string `gorm:"column:head_sha;type:text" json:"head_sha,omitempty"`
 	RoundNumber    int    `gorm:"column:round_number" json:"round_number,omitempty"`
 	InstallationID int64  `gorm:"column:installation_id" json:"installation_id,omitempty"`
+	// AppUserID 开轮的验签身份（INT-119）：非空是配置了该 GitHub App 的用户，
+	// 空串是部署 config 身份（AutoMigrate 给存量行回填 ''，即历史全局身份）。
+	// 运行行持久化身份后，agent 取 client、同步/取消分区都直接按它走，不再靠
+	// 评审账反推或拿规则所有者猜。
+	AppUserID string `gorm:"column:app_user_id;type:text;not null;default:'';index" json:"app_user_id,omitempty"`
 	// CheckRunID 本运行在 GitHub 上的 check run；NULL=尚未创建（或退回合并 check）。
 	CheckRunID *int64 `gorm:"column:check_run_id" json:"check_run_id,omitempty"`
 	// ModelInstanceID/ModelName 本运行绑定的模型（一轮多模型并行，每个模型一行）。

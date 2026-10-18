@@ -114,6 +114,9 @@ var (
 	ErrBotCallStateConflict     = New(40926, "调用状态已变化，操作未生效")
 	ErrBotDeleteConflict        = New(40927, "机器人存在进行中的运行或未终结的调用，请先停止或等待完成")
 	ErrBotRunStateConflict      = New(40928, "运行状态已变化，操作未生效")
+	// 集成（INT-119）：同 provider 下 App ID 全库唯一——webhook 验签候选逐行
+	// 验签，重复行会让创建顺序靠后者永远收不到投递。
+	ErrIntegrationAppIDTaken = New(40929, "该 App ID 已被其他用户配置")
 )
 
 // 请求过于频繁 42900-42999

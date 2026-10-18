@@ -46,13 +46,11 @@ func (s *PRReviewService) withPRLock(repo string, pr int, fn func()) {
 func itoa10(n int) string { return fmt.Sprintf("%d", n) }
 
 // SyncPendingReviews 调度步骤：把 sync_pending 的 PR 推到 GitHub（评论 + check）。
-// 失败只记 sync_error，下轮重试；不改运行终态。
+// 失败只记 sync_error，下轮重试；不改运行终态。GitHub 身份按评审账行的验签
+// 身份解析（INT-119）：某身份未配置 App 时该行的同步报错重试，不影响其他身份。
 func (s *PRReviewService) SyncPendingReviews(now time.Time) {
 	s.stopCancelledPRThreads(now)
 
-	if s.gh == nil {
-		return
-	}
 	pending, err := s.reviews.ListPendingSyncTx(s.db, prReviewSyncBatchLimit)
 	if err != nil {
 		s.logger.Error("查询待同步 PR 失败", zap.Error(err))
@@ -130,8 +128,15 @@ func (s *PRReviewService) OnLaunchCancelled(run *model.AutomationRun, now time.T
 
 // ---- 评论 + check 同步 ----
 
-// syncOnePR 同步一个 PR 的机器人评论与 check runs。展示当前 HeadSHA 的运行
-// （同一 SHA 多规则共享一轮）。
+// scopeRunsForRev 给按 (repo, pr) 查运行的查询加上评审行身份的过滤：运行的
+// app_user_id 即开轮身份（存量行回填空串即 config），config 身份只看 config
+// 开的轮，用户身份只看该身份开的轮——同一 PR 多身份的运行互不可见。
+func scopeRunsForRev(q *gorm.DB, rev *model.GitHubPRReview) *gorm.DB {
+	return q.Where("app_user_id = ?", rev.AppUserID)
+}
+
+// syncOnePR 同步一个 PR 身份行的机器人评论与 check runs。展示当前 HeadSHA 下
+// 该身份的运行（同一 SHA 多规则共享一轮）。
 func (s *PRReviewService) syncOnePR(rev *model.GitHubPRReview, now time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), automationPostCommandBudget)
 	defer cancel()
@@ -161,19 +166,23 @@ func (s *PRReviewService) syncOnePR(rev *model.GitHubPRReview, now time.Time) {
 	}
 }
 
-// pushCancelledOldSHAChecks 把历史 SHA 里已取消且已有 check 的运行推成
-// completed/cancelled（新 SHA 取代旧轮时旧 check 不能悬在 in_progress）。
+// pushCancelledOldSHAChecks 把历史 SHA 里已取消且已有 check 的运行（限本身份）
+// 推成 completed/cancelled（新 SHA 取代旧轮时旧 check 不能悬在 in_progress）。
 func (s *PRReviewService) pushCancelledOldSHAChecks(ctx context.Context, rev *model.GitHubPRReview) error {
-	var old []model.AutomationRun
-	if err := s.db.
+	q := scopeRunsForRev(s.db.
 		Where("repo_full_name = ? AND pr_number = ? AND head_sha <> ? AND status = ? AND check_run_id IS NOT NULL",
-			rev.RepoFullName, rev.PRNumber, rev.HeadSHA, model.AutomationRunCancelled).
-		Find(&old).Error; err != nil {
+			rev.RepoFullName, rev.PRNumber, rev.HeadSHA, model.AutomationRunCancelled), rev)
+	var old []model.AutomationRun
+	if err := q.Find(&old).Error; err != nil {
+		return err
+	}
+	gh, err := s.clientFor(ctx, rev.AppUserID)
+	if err != nil {
 		return err
 	}
 	for i := range old {
 		in := checkUpdateForRun(old[i])
-		if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, *old[i].CheckRunID, in); err != nil {
+		if err := gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, *old[i].CheckRunID, in); err != nil {
 			if githubapi.IsForbidden(err) {
 				s.logger.Warn("更新旧 SHA check 403，跳过其余 check",
 					zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
@@ -203,9 +212,10 @@ func (s *PRReviewService) ensureChecksAndPush(ctx context.Context, rev *model.Gi
 	return s.pushCheckStates(ctx, rev, runs)
 }
 
-// ensureCheckRuns 为缺 check 的运行创建 check run。GitHub 返回 403（Checks API
-// 未授权）时退回整轮一个 `Fast Ship review` 合并 check。合并 check 同样 403
-// 时跳过 check（不再重试同一端点），调用方仍推评论。
+// ensureCheckRuns 为缺 check 的运行创建 check run（身份取评审行的验签身份：
+// 该行的运行全部由它开轮）。GitHub 返回 403（Checks API 未授权）时退回整轮一
+// 个 `Fast Ship review` 合并 check。合并 check 同样 403 时跳过 check（不再重
+// 试同一端点），调用方仍推评论。
 func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHubPRReview, runs []model.AutomationRun) error {
 	mergedID, mergedUsed := s.roundMergedCheckID(runs)
 	var pending []model.AutomationRun
@@ -224,8 +234,12 @@ func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHub
 
 	for i := range pending {
 		run := &pending[i]
+		gh, err := s.clientFor(ctx, rev.AppUserID)
+		if err != nil {
+			return err
+		}
 		name := checkNameForModel(run.ModelName)
-		id, err := s.gh.CreateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, name, run.HeadSHA, run.ID)
+		id, err := gh.CreateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, name, run.HeadSHA, run.ID)
 		if err != nil {
 			if !githubapi.IsForbidden(err) {
 				return fmt.Errorf("创建 check run 失败: %w", err)
@@ -235,7 +249,7 @@ func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHub
 			s.logger.Warn("Checks API 403，退回整轮合并 check",
 				zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
 			if mergedID == 0 {
-				id, err := s.gh.CreateCheckRun(ctx, rev.InstallationID, rev.RepoFullName,
+				id, err := gh.CreateCheckRun(ctx, rev.InstallationID, rev.RepoFullName,
 					"Fast Ship review", run.HeadSHA, "round:"+itoa10(rev.RoundNumber))
 				if err != nil {
 					if githubapi.IsForbidden(err) {
@@ -277,13 +291,13 @@ func (s *PRReviewService) roundMergedCheckID(runs []model.AutomationRun) (int64,
 	return 0, false
 }
 
-// assignRoundCheckID 本轮全部缺 check 的运行挂到合并 check。
+// assignRoundCheckID 本轮（限本身份）全部缺 check 的运行挂到合并 check。
 func (s *PRReviewService) assignRoundCheckID(rev *model.GitHubPRReview, checkRunID int64) error {
-	var runs []model.AutomationRun
-	if err := s.db.
+	q := scopeRunsForRev(s.db.
 		Where("repo_full_name = ? AND pr_number = ? AND head_sha = ? AND check_run_id IS NULL",
-			rev.RepoFullName, rev.PRNumber, rev.HeadSHA).
-		Find(&runs).Error; err != nil {
+			rev.RepoFullName, rev.PRNumber, rev.HeadSHA), rev)
+	var runs []model.AutomationRun
+	if err := q.Find(&runs).Error; err != nil {
 		return err
 	}
 	for i := range runs {
@@ -318,10 +332,16 @@ func (s *PRReviewService) pushCheckStates(ctx context.Context, rev *model.GitHub
 	}
 	for _, id := range order {
 		group := byCheck[id]
+		// 同一 check id 的运行都由评审行身份开轮（查运行已按身份过滤），
+		// 统一按该身份解析 client。
+		gh, err := s.clientFor(ctx, rev.AppUserID)
+		if err != nil {
+			return err
+		}
 		if len(group) == 1 {
 			run := group[0]
 			in := checkUpdateForRun(run)
-			if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
+			if err := gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
 				if githubapi.IsForbidden(err) {
 					s.logger.Warn("更新 check 403，跳过其余 check",
 						zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
@@ -332,7 +352,7 @@ func (s *PRReviewService) pushCheckStates(ctx context.Context, rev *model.GitHub
 			continue
 		}
 		in := checkUpdateForGroup(group)
-		if err := s.gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
+		if err := gh.UpdateCheckRun(ctx, rev.InstallationID, rev.RepoFullName, id, in); err != nil {
 			if githubapi.IsForbidden(err) {
 				s.logger.Warn("更新合并 check 403，跳过其余 check",
 					zap.String("repo", rev.RepoFullName), zap.Int("pr", rev.PRNumber))
@@ -346,8 +366,8 @@ func (s *PRReviewService) pushCheckStates(ctx context.Context, rev *model.GitHub
 
 func (s *PRReviewService) runsForHeadSHA(rev *model.GitHubPRReview) ([]model.AutomationRun, error) {
 	var runs []model.AutomationRun
-	err := s.db.
-		Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?", rev.RepoFullName, rev.PRNumber, rev.HeadSHA).
+	err := scopeRunsForRev(s.db.
+		Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?", rev.RepoFullName, rev.PRNumber, rev.HeadSHA), rev).
 		Order("model_name ASC, id ASC").
 		Find(&runs).Error
 	return runs, err
@@ -467,46 +487,69 @@ func runStatusLabel(status model.AutomationRunStatus) string {
 	return string(status)
 }
 
-// pushComment 每 PR 一条机器人顶层评论：已保存 comment_id 则直接 PATCH；
-// 404/未保存再按隐藏标记找回，失效则创建。只展示当前 SHA。
+// prReviewCommentMarkerFor 按验签身份生成机器人评论的隐藏标记：config 身份
+// 沿用旧标记（线上已有评论仍按它找回）；用户身份追加 app 后缀——所有身份共用
+// 一个标记时，B 首次同步会把 A 的评论找回来改。
+func prReviewCommentMarkerFor(appUserID string) string {
+	if appUserID == "" {
+		return prReviewCommentMarker
+	}
+	return "<!-- fast-ship-pr-review:app:" + appUserID + " -->"
+}
+
+// pushComment 每（PR，身份）一条机器人顶层评论：已保存 comment_id 则直接
+// PATCH；404/未保存再按本身份的隐藏标记找回，失效则创建。只展示当前 SHA。评论
+// 按评审行的验签身份推送（该行的运行全部由它开轮）。
 func (s *PRReviewService) pushComment(ctx context.Context, rev *model.GitHubPRReview, runs []model.AutomationRun) error {
+	gh, err := s.clientFor(ctx, rev.AppUserID)
+	if err != nil {
+		return err
+	}
+	marker := prReviewCommentMarkerFor(rev.AppUserID)
 	body := prReviewCommentBody(rev, runs)
 	if rev.CommentID != 0 {
-		if err := s.gh.UpdatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.CommentID, body); err == nil {
+		if err := gh.UpdatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.CommentID, body); err == nil {
 			return nil
 		} else if !githubapi.IsNotFound(err) {
 			return fmt.Errorf("更新机器人评论失败: %w", err)
 		}
 	}
-	commentID, found, err := s.gh.FindPullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, prReviewCommentMarker)
+	commentID, found, err := gh.FindPullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, marker)
 	if err != nil {
 		return fmt.Errorf("查找机器人评论失败: %w", err)
 	}
 	if found {
-		if err := s.gh.UpdatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, commentID, body); err != nil {
+		if err := gh.UpdatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, commentID, body); err != nil {
 			return fmt.Errorf("更新机器人评论失败: %w", err)
 		}
 		if commentID != rev.CommentID {
-			_ = s.db.Model(&model.GitHubPRReview{}).
-				Where("repo_full_name = ? AND pr_number = ?", rev.RepoFullName, rev.PRNumber).
-				Update("comment_id", commentID).Error
+			s.saveCommentID(rev, commentID)
 		}
 		return nil
 	}
-	created, err := s.gh.CreatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, body)
+	created, err := gh.CreatePullRequestComment(ctx, rev.InstallationID, rev.RepoFullName, rev.PRNumber, body)
 	if err != nil {
 		return fmt.Errorf("创建机器人评论失败: %w", err)
 	}
-	_ = s.db.Model(&model.GitHubPRReview{}).
-		Where("repo_full_name = ? AND pr_number = ?", rev.RepoFullName, rev.PRNumber).
-		Update("comment_id", created).Error
+	s.saveCommentID(rev, created)
 	return nil
 }
 
-// prReviewCommentBody 机器人评论正文：表格展示模型、harness、状态、head SHA、轮次。
+// saveCommentID 找回/新建评论后把 ID 写回本身份的评审行（失败只留日志：下轮
+// 同步还能按标记找回）。
+func (s *PRReviewService) saveCommentID(rev *model.GitHubPRReview, commentID int64) {
+	if err := s.db.Model(&model.GitHubPRReview{}).
+		Where("repo_full_name = ? AND pr_number = ? AND app_user_id = ?", rev.RepoFullName, rev.PRNumber, rev.AppUserID).
+		Update("comment_id", commentID).Error; err != nil {
+		s.logger.Error("写回机器人评论 ID 失败", zap.String("repo", rev.RepoFullName), zap.Error(err))
+	}
+}
+
+// prReviewCommentBody 机器人评论正文：表格展示模型、harness、状态、head SHA、
+// 轮次。隐藏标记按评审行的验签身份生成（各身份的评论互不找回）。
 func prReviewCommentBody(rev *model.GitHubPRReview, runs []model.AutomationRun) string {
 	var b strings.Builder
-	b.WriteString(prReviewCommentMarker + "\n\n")
+	b.WriteString(prReviewCommentMarkerFor(rev.AppUserID) + "\n\n")
 	b.WriteString(fmt.Sprintf("## Fast Ship 自动评审（第 %d 轮）\n\n", rev.RoundNumber))
 	b.WriteString("| 模型 | Harness | 状态 | Head SHA | 轮次 |\n")
 	b.WriteString("| --- | --- | --- | --- | --- |\n")
@@ -524,22 +567,25 @@ func prReviewCommentBody(rev *model.GitHubPRReview, runs []model.AutomationRun) 
 }
 
 // markPRReviewPendingTx PR 运行状态变化后置同步标记（超时/派发失败/结束回报
-// 的事务末尾调用；非 PR 触发不置位）。
+// 的事务末尾调用；非 PR 触发不置位）。只动 (repo, pr, app_user_id) 命中本运行
+// 开轮身份的那一行——各身份行的同步只展示自己身份的运行，多余的置位只是一次
+// 冗余推送，跨身份置位则会把别人的状态算进来。行缺失（正常路径开轮时必建）时
+// 按本运行的身份与轮次补建。
 func markPRReviewPendingTx(tx *gorm.DB, run *model.AutomationRun, now time.Time) error {
 	if !run.TriggerType.IsPRTrigger() {
 		return nil
 	}
 	res := tx.Model(&model.GitHubPRReview{}).
-		Where("repo_full_name = ? AND pr_number = ?", run.RepoFullName, run.PRNumber).
+		Where("repo_full_name = ? AND pr_number = ? AND app_user_id = ?", run.RepoFullName, run.PRNumber, run.AppUserID).
 		Updates(map[string]any{"sync_pending": true, "sync_epoch": gorm.Expr("sync_epoch + 1"), "updated_at": now})
 	if res.Error != nil {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		// 行缺失（正常路径开轮时必建）：防御性补一行。
 		return tx.Create(&model.GitHubPRReview{
 			RepoFullName:   run.RepoFullName,
 			PRNumber:       run.PRNumber,
+			AppUserID:      run.AppUserID,
 			InstallationID: run.InstallationID,
 			RoundNumber:    run.RoundNumber,
 			HeadSHA:        run.HeadSHA,
@@ -552,8 +598,9 @@ func markPRReviewPendingTx(tx *gorm.DB, run *model.AutomationRun, now time.Time)
 }
 
 // markReviewPendingAfterCancelTx 取消旧 SHA 后置同步标记（无需开新轮也要把
-// 「已取消」推到评论/check）。行不存在时用被取消运行的最大轮次补建。
-func markReviewPendingAfterCancelTx(tx *gorm.DB, repoFullName string, prNumber int, cancelled []string, now time.Time) error {
+// 「已取消」推到评论/check）。被取消的运行必然属于验签身份（取消已按身份过
+// 滤），只动该身份的行；行不存在时用被取消运行的最大轮次补建。
+func markReviewPendingAfterCancelTx(tx *gorm.DB, repoFullName string, prNumber int, appUserID string, cancelled []string, now time.Time) error {
 	if len(cancelled) == 0 {
 		return nil
 	}
@@ -574,7 +621,7 @@ func markReviewPendingAfterCancelTx(tx *gorm.DB, repoFullName string, prNumber i
 		}
 	}
 	res := tx.Model(&model.GitHubPRReview{}).
-		Where("repo_full_name = ? AND pr_number = ?", repoFullName, prNumber).
+		Where("repo_full_name = ? AND pr_number = ? AND app_user_id = ?", repoFullName, prNumber, appUserID).
 		Updates(map[string]any{"sync_pending": true, "sync_epoch": gorm.Expr("sync_epoch + 1"), "updated_at": now})
 	if res.Error != nil {
 		return res.Error
@@ -583,6 +630,7 @@ func markReviewPendingAfterCancelTx(tx *gorm.DB, repoFullName string, prNumber i
 		return tx.Create(&model.GitHubPRReview{
 			RepoFullName:   repoFullName,
 			PRNumber:       prNumber,
+			AppUserID:      appUserID,
 			InstallationID: runs[0].InstallationID,
 			RoundNumber:    maxRound,
 			HeadSHA:        headSHA,
