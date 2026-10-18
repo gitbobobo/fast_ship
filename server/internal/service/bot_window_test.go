@@ -278,6 +278,30 @@ func TestBotWindowDetectFailurePaths(t *testing.T) {
 	}
 }
 
+func TestBotWindowProbeFailureKeepsSuccessfulCache(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"m1","context_window":1048576,"max_output_tokens":262144}]}`)
+	userID := createBotTestUser(t, env.db, "winkeep")
+	bot := createBotRowAt(t, env, userID, ps.URL(), "m1")
+
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err != nil {
+		t.Fatalf("首探应成功: %v", err)
+	}
+	// 上游瞬时失败 / 坏密钥：地址+模型共享一条缓存，既有成功条目不得被
+	// 0 值负缓存覆盖，否则同上游其他机器人会降级到回退预算。
+	ps.setModels(500, `{"error":"boom"}`)
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err == nil {
+		t.Fatalf("失败探测应返回 error")
+	}
+	row := findWindowRow(t, env, ps.URL(), "m1")
+	if row == nil || row.ContextWindow != 1048576 || row.MaxOutputTokens != 262144 {
+		t.Fatalf("成功缓存不得被失败标记覆盖: %+v", row)
+	}
+	if cap := env.bots.modelCapability(bot, "m1"); cap.Source != "detected" || cap.WindowTokens != 1048576 {
+		t.Fatalf("能力解析应仍用成功缓存: %+v", cap)
+	}
+}
+
 func TestBotWindowCacheHitNoNetwork(t *testing.T) {
 	env := setupBotTestEnv(t)
 	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"m1","context_window":4096}]}`)
