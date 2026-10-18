@@ -75,6 +75,13 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 	t.Helper()
 	f := &fakeModelServer{requests: make(chan fakeModelRequest, 64), shutdown: make(chan struct{}), turns: turns}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 模型窗口探测（INT-115）打 GET /models：默认 404（探测失败是
+		// best-effort 路径），且不计入 requests 通道——计入会让断言聊天请求
+		// 顺序的用例拿到探测请求。需要探测结果的用例自建服务。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		// 坏密钥：替换密钥的测试必须真的用新密钥，假服务按头拒绝。
 		if strings.Contains(r.Header.Get("Authorization"), "bad-replacement") {

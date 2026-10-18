@@ -175,6 +175,30 @@ describe("useBotChat", () => {
     expect(result.current.activeRun?.status).toBe("running");
   });
 
+  it("维护进度事件出现在 hook 返回值，done 后消失", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "delta",
+      {
+        kind: "maintenance_progress",
+        run_id: "r-1",
+        payload: { phase: "summary", message: "正在生成上下文摘要（第 3 批）…" },
+      },
+      10,
+    );
+    await waitFor(() => expect(result.current.maintenanceProgress).not.toBeNull());
+    expect(result.current.maintenanceProgress).toMatchObject({
+      runId: "r-1",
+      phase: "summary",
+      message: "正在生成上下文摘要（第 3 批）…",
+    });
+
+    emit("done", { run_id: "r-1", payload: { status: "completed" } }, 11);
+    await waitFor(() => expect(result.current.maintenanceProgress).toBeNull());
+  });
+
   it("message_discard 到达即丢弃挂出的草稿", async () => {
     const { result } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
@@ -524,6 +548,11 @@ describe("foldStreamEvent", () => {
       calls: [] as BotCall[],
       runs: [] as BotRun[],
       drafts: new Map<string, string>(),
+      maintenanceProgress: null as null | {
+        runId: string | null;
+        phase: string;
+        message: string;
+      },
     };
     return {
       state,
@@ -546,6 +575,11 @@ describe("foldStreamEvent", () => {
         },
         clearDraft: (id: string) => {
           state.drafts.delete(id);
+        },
+        setMaintenanceProgress: (
+          progress: typeof state.maintenanceProgress,
+        ) => {
+          state.maintenanceProgress = progress;
         },
       },
     };
@@ -694,5 +728,124 @@ describe("foldStreamEvent", () => {
       state.messages.map((m) => `${m.id}:${m.kind}:${m.content.task_name}`),
     ).toEqual(["m-se:schedule_event:每日汇总"]);
     expect(state.drafts.size).toBe(0);
+  });
+
+  // ---- F3：维护进度（压缩阶段/失败原因）----
+
+  it("maintenance_progress 折叠为进度状态，不落入草稿分支", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "archive", message: "正在归档上下文…" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toEqual({
+      runId: "r-1",
+      phase: "archive",
+      message: "正在归档上下文…",
+    });
+    expect(state.drafts.size).toBe(0);
+    expect(state.messages).toEqual([]);
+
+    // 最新一条替换旧阶段：摘要批次推进。
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "summary", message: "正在生成上下文摘要（第 2 批）…" },
+        }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toMatchObject({
+      phase: "summary",
+      message: "正在生成上下文摘要（第 2 批）…",
+    });
+  });
+
+  it("done 清掉该 run 的维护进度，不残留假运行状态", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "summary", message: "正在生成上下文摘要（第 1 批）…" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    foldStreamEvent(
+      { event: "done", data: JSON.stringify({ run_id: "r-1", payload: { status: "completed" } }), id: 21 },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toBeNull();
+  });
+
+  it("run_error 同样清掉维护进度", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "failed", message: "压缩目标不可达" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    foldStreamEvent(
+      {
+        event: "error",
+        data: JSON.stringify({
+          run_id: "r-1",
+          payload: { code: "target_unreachable", message: "压缩目标不可达" },
+        }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toBeNull();
+    expect(state.runs[0]?.error_code).toBe("target_unreachable");
+  });
+
+  it("新 run_started 清掉上一段维护进度", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-0",
+          payload: { phase: "failed", message: "压缩目标不可达" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({ kind: "run_started", run_id: "r-1" }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toBeNull();
+    expect(state.runs.map((r) => r.id)).toEqual(["r-1"]);
   });
 });

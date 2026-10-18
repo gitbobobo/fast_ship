@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiRequestError } from "@/lib/api/client";
 import type { Bot, BotConnectionCheck } from "@/lib/api/bots";
+import { CONTEXT_SOURCE_LABELS } from "./bot-metrics";
 import {
   useCreateBot,
   useTestBotConnection,
@@ -235,6 +236,20 @@ function BotFormDialogInner({
               onChange={(e) => patch({ model: e.target.value })}
               placeholder="例如：gpt-4o-mini"
             />
+            {editing != null &&
+              editing.context_window != null &&
+              editing.context_window > 0 && (
+                <p
+                  data-testid="bot-context-window"
+                  className="text-xs text-muted-foreground"
+                >
+                  上下文窗口 {editing.context_window.toLocaleString("en-US")}{" "}
+                  tokens
+                  {editing.context_source &&
+                    ` · 来源：${CONTEXT_SOURCE_LABELS[editing.context_source] ?? editing.context_source}`}
+                  {editing.context_detail && `（${editing.context_detail}）`}
+                </p>
+              )}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="bot-api-key">API Key</Label>

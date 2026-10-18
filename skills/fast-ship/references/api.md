@@ -8604,6 +8604,10 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 | `items[].base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `items[].model` | string | 是 |  |
 | `items[].api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `items[].context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
+| `items[].max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
+| `items[].context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `items[].context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `items[].next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
@@ -8655,6 +8659,10 @@ API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不�
 | `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `model` | string | 是 |  |
 | `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
+| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
+| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
@@ -8676,6 +8684,8 @@ API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不�
 只做最小模型探测，不写入主线。可传完整未保存配置；也可传 bot_id 使用
 已保存 key，并允许表单覆盖 base_url/model。streaming 与 tool_call 两项
 检查分别返回；HTTP 200 且 ok=false 表示配置可达性/兼容性问题。
+另同步探测 GET /models 的模型窗口元数据（INT-115）：成功写入缓存并把
+detected 值并入响应；失败回退当前解析值（manual/默认窗口），不影响 ok。
 SDK 重试显式关零，不产生隐藏重复调用。
 
 **鉴权**：仅 JWT
@@ -8706,6 +8716,10 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `checks[].name` | string | 是 | streaming / tool_call |
 | `checks[].passed` | boolean | 是 |  |
 | `checks[].detail` | string | 否 | 失败原因（截断；不含密钥） |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存； 失败回退到当前解析值（manual / 默认窗口） |
+| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅探测到时非 0 |
+| `context_source` | string | 是 | 窗口来源 manual / detected / fallback（探测失败时如实标注） |
+| `context_detail` | string | 否 | 解析口径说明；可省略 |
 
 **错误**
 
@@ -8747,6 +8761,10 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `model` | string | 是 |  |
 | `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
+| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
+| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
@@ -8808,6 +8826,10 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `model` | string | 是 |  |
 | `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
+| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
+| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
@@ -9026,6 +9048,10 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `bot.base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
 | `bot.model` | string | 是 |  |
 | `bot.api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `bot.context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
+| `bot.max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
+| `bot.context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `bot.context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `bot.next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `bot.created_at` | string（date-time） | 是 |  |
 | `bot.updated_at` | string（date-time） | 是 |  |
@@ -9084,6 +9110,25 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs[].started_at` | string（date-time，可空） | 否 |  |
 | `runs[].finished_at` | string（date-time，可空） | 否 |  |
 | `next_event_seq` | integer（int64） | 是 | 与快照同一读取点的事件账本水位（下一条的 seq） |
+| `metrics` | object（可空） | 否 | 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径； 没有主线请求时 request 缺省、窗口能力仍然可见 |
+| `metrics.context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
+| `metrics.max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
+| `metrics.context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口） |
+| `metrics.context_detail` | string | 否 | 解析口径说明；可省略 |
+| `metrics.request` | object | 否 | 最近一次主线模型请求（进行中或已结束）；没有主线请求时省略。单次主线模型请求口径；历史累计仍在 run 上，指标区不用累计值 |
+| `metrics.request.request_id` | string | 是 |  |
+| `metrics.request.run_id` | string | 是 |  |
+| `metrics.request.ordinal` | integer（int64） | 是 |  |
+| `metrics.request.status` | string | 是 | running / succeeded / failed |
+| `metrics.request.prompt_tokens` | integer（int64，可空） | 否 |  |
+| `metrics.request.completion_tokens` | integer（int64，可空） | 否 |  |
+| `metrics.request.cached_tokens` | integer（int64，可空） | 否 |  |
+| `metrics.request.usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分）；false 时计数视为不可用 |
+| `metrics.request.input_tokens_estimate` | integer（int64） | 是 | 发送前的上下文 token 估算值（口径见 input_estimator；上下文占比用估算值） |
+| `metrics.request.input_estimator` | string | 是 | 估算方式（usage_delta/3.5 或 utf8_bytes/3.5） |
+| `metrics.request.started_at` | string（date-time） | 是 |  |
+| `metrics.request.finished_at` | string（date-time，可空） | 否 |  |
+| `metrics.request.generation_ms` | integer（int64） | 是 | 首个流式正文片段到请求结束的耗时；0 表示不可用（纯工具 调用、失败请求或时长非正）。Token 输出速度 = completion_tokens / (generation_ms/1000)，仅在两者都有且 >0 时给出 |
 
 **错误**
 

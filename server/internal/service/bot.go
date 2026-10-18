@@ -35,6 +35,7 @@ type BotService struct {
 	calls      *repository.BotToolCallRepository
 	authz      *repository.BotAuthorizationRepository
 	schedTasks *repository.BotScheduleTaskRepository
+	windows    *repository.BotWindowRepository
 
 	projects *ProjectService
 	issues   *IssueService
@@ -86,6 +87,7 @@ func NewBotService(
 		calls:      repository.NewBotToolCallRepository(db),
 		authz:      repository.NewBotAuthorizationRepository(db),
 		schedTasks: repository.NewBotScheduleTaskRepository(db),
+		windows:    repository.NewBotWindowRepository(db),
 		projects:   projects,
 		issues:     issues,
 		threads:    threads,
@@ -99,6 +101,8 @@ func NewBotService(
 
 // BotResponse 管理面响应；key 全链路脱敏，只回末四位。NextEventSeq 是
 // 事件账本水位：详情页订阅以它-1 起读，与消息快照衔接（不从 0 重放）。
+// 窗口能力四字段（INT-115）按「manual > detected > fallback」解析，
+// ContextSource 如实区分来源，展示层不得把回退值说成已检测。
 type BotResponse struct {
 	ID                    string `json:"id"`
 	Name                  string `json:"name"`
@@ -110,11 +114,17 @@ type BotResponse struct {
 	Model                 string `json:"model"`
 	APIKeyLast4           string `json:"api_key_last4"`
 	NextEventSeq          int64  `json:"next_event_seq"`
+	ContextWindow         int64  `json:"context_window"`
+	MaxOutputTokens       int64  `json:"max_output_tokens"`
+	ContextSource         string `json:"context_source"` // manual|detected|known|fallback
+	ContextDetail         string `json:"context_detail,omitempty"`
 	CreatedAt             string `json:"created_at"`
 	UpdatedAt             string `json:"updated_at"`
 }
 
-func botResponseOf(b *model.Bot) BotResponse {
+// botResponseOf 是 bot 的 API 投影；需要服务解析窗口能力，因此是方法。
+func (s *BotService) botResponseOf(b *model.Bot) BotResponse {
+	cap := s.modelCapability(b, b.Model)
 	return BotResponse{
 		ID:                    b.ID,
 		Name:                  b.Name,
@@ -126,6 +136,10 @@ func botResponseOf(b *model.Bot) BotResponse {
 		Model:                 b.Model,
 		APIKeyLast4:           b.APIKeyLast4,
 		NextEventSeq:          b.NextEventSeq,
+		ContextWindow:         cap.WindowTokens,
+		MaxOutputTokens:       cap.MaxOutputTokens,
+		ContextSource:         cap.Source,
+		ContextDetail:         cap.Detail,
 		CreatedAt:             b.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt:             b.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
@@ -158,6 +172,12 @@ type ConnectionCheckResult struct {
 type TestConnectionResponse struct {
 	Ok     bool                    `json:"ok"`
 	Checks []ConnectionCheckResult `json:"checks"`
+	// 窗口能力（INT-115）：同步探测成功时为 detected 并写入缓存；探测失败
+	// 回退到 capabilityFor 的解析结果（manual / 默认窗口），来源如实标注。
+	ContextWindow   int64  `json:"context_window"`
+	MaxOutputTokens int64  `json:"max_output_tokens"`
+	ContextSource   string `json:"context_source"`
+	ContextDetail   string `json:"context_detail,omitempty"`
 }
 
 type TestConnectionRequest struct {
@@ -178,7 +198,7 @@ func (s *BotService) List(userID string) ([]BotResponse, error) {
 	}
 	out := make([]BotResponse, 0, len(bots))
 	for i := range bots {
-		out = append(out, botResponseOf(&bots[i]))
+		out = append(out, s.botResponseOf(&bots[i]))
 	}
 	return out, nil
 }
@@ -191,7 +211,7 @@ func (s *BotService) Get(userID, botID string) (*BotResponse, error) {
 		}
 		return nil, errs.ErrInternal
 	}
-	resp := botResponseOf(bot)
+	resp := s.botResponseOf(bot)
 	return &resp, nil
 }
 
@@ -203,7 +223,9 @@ func (s *BotService) Create(userID string, req *CreateBotRequest) (*BotResponse,
 	if err := s.bots.Create(bot); err != nil {
 		return nil, errs.ErrInternal
 	}
-	resp := botResponseOf(bot)
+	// 窗口探测 best-effort 后台执行：不阻塞响应，失败不影响创建结果。
+	s.refreshBotModelWindowAsync(bot.ID)
+	resp := s.botResponseOf(bot)
 	return &resp, nil
 }
 
@@ -309,7 +331,9 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 		return nil, errs.ErrInternal
 	}
 	_ = personaChanged
-	resp := botResponseOf(bot)
+	// 地址或模型可能已变：后台 best-effort 刷新窗口缓存，不阻塞响应。
+	s.refreshBotModelWindowAsync(bot.ID)
+	resp := s.botResponseOf(bot)
 	return &resp, nil
 }
 
@@ -401,7 +425,33 @@ func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (
 	// 聚合成功要求两项都过：能聊天不能调用工具的供应商跑不了工具循环，
 	// 编辑器据 ok 判定测试结果，不能给假成功。
 	ok := streamOK && toolOK
-	return &TestConnectionResponse{Ok: ok, Checks: checks}, nil
+
+	// 窗口探测同步执行并把结果并入返回；探测与持久化只发生一次——响应里的
+	// 结果与缓存里的结果同源（refreshModelWindow 的探测+持久化拆成两步后，
+	// 这里复用同一步持久化，不做第二次 /models 请求）。探测失败回退到当前
+	// 解析值并落失败标记，不冒泡为测试失败（可达性问题已由上面两项检查给出）。
+	capability := s.capabilityFor(baseURL, modelName)
+	ctx, cancel := context.WithTimeout(context.Background(), botWindowDetectTimeout)
+	det, detErr := s.detectModelWindow(ctx, baseURL, apiKey, modelName)
+	cancel()
+	if detErr == nil {
+		capability = *det
+		if err := s.persistModelWindow(baseURL, modelName, det); err != nil {
+			s.logger.Info("模型窗口缓存写入失败",
+				zap.String("model", modelName), zap.Error(err))
+		}
+	} else {
+		_ = s.persistModelWindowFailure(baseURL, modelName, detErr)
+	}
+
+	return &TestConnectionResponse{
+		Ok:              ok,
+		Checks:          checks,
+		ContextWindow:   capability.WindowTokens,
+		MaxOutputTokens: capability.MaxOutputTokens,
+		ContextSource:   capability.Source,
+		ContextDetail:   capability.Detail,
+	}, nil
 }
 
 // resolveTestTarget 解析测试目标：未保存配置 / 已保存 key + 表单覆盖。

@@ -150,6 +150,37 @@ func (s *BotService) CancelCall(userID, botID, callID string) (*BotToolCallRespo
 
 // ---------- SSE 支撑 ----------
 
+// BotRequestMetrics 是最近一次主线模型请求的单次口径。
+type BotRequestMetrics struct {
+	RequestID           string  `json:"request_id"`
+	RunID               string  `json:"run_id"`
+	Ordinal             int64   `json:"ordinal"`
+	Status              string  `json:"status"` // running|succeeded|failed
+	PromptTokens        *int64  `json:"prompt_tokens"`
+	CompletionTokens    *int64  `json:"completion_tokens"`
+	CachedTokens        *int64  `json:"cached_tokens"`
+	UsageComplete       bool    `json:"usage_complete"`
+	InputTokensEstimate int64   `json:"input_tokens_estimate"`
+	InputEstimator      string  `json:"input_estimator"`
+	StartedAt           string  `json:"started_at"`
+	FinishedAt          *string `json:"finished_at"`
+	// GenerationMs 是首个流式正文片段到请求结束的耗时；0 表示不可用
+	//（首个正文与结束时间必须都有效且差值为正）。
+	GenerationMs int64 `json:"generation_ms"`
+}
+
+// BotMetricsResponse 是聊天页指标区的一致读取：窗口能力 + 最近一次主线模型
+// 请求的口径。usage_complete 取「请求落过 usage 计数列」（缺失与零严格区分，
+// 计数列为 NULL 即视为不可用）。
+type BotMetricsResponse struct {
+	ContextWindow   int64  `json:"context_window"`
+	MaxOutputTokens int64  `json:"max_output_tokens"`
+	ContextSource   string `json:"context_source"` // manual|detected|known|fallback
+	ContextDetail   string `json:"context_detail,omitempty"`
+	// Request 是最近一次主线模型请求（进行中或已结束）；没有则为 nil。
+	Request *BotRequestMetrics `json:"request,omitempty"`
+}
+
 // BotChatSnapshot 是聊天页的初始读取：消息、调用、run 与事件水位取自同一
 // 读取点。订阅游标（next_event_seq - 1）与快照内容严格衔接——事件既不重放
 // 快照已含的内容，也不漏掉快照之后的内容（先订阅后补读兜住中间窗口）。
@@ -159,6 +190,9 @@ type BotChatSnapshot struct {
 	Calls        []BotToolCallResponse `json:"calls"`
 	Runs         []BotRunResponse      `json:"runs"`
 	NextEventSeq int64                 `json:"next_event_seq"`
+	// Metrics 是运行指标（INT-115）：窗口能力 + 最近一次主线模型请求；
+	// 没有主线请求时 Request 缺省，指标区始终可见已解析的窗口能力。
+	Metrics *BotMetricsResponse `json:"metrics,omitempty"`
 }
 
 // listAllUnfinishedCalls 分页取全本机器人未终态调用（页大小 200，按
@@ -178,12 +212,17 @@ func listAllUnfinishedCalls(tx *gorm.DB, botID string) ([]model.BotToolCall, err
 	}
 }
 
-// GetChatSnapshot 单事务一致读；messageLimit 是消息尾部页大小。
+// GetChatSnapshot 单事务一致读；messageLimit 是消息尾部页大小。bot 投影与
+// 指标里的窗口能力解析要走事务外的池根连接（单连接纪律），所以事务内只收
+// 集原始行，投影放在提交之后。
 func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*BotChatSnapshot, error) {
 	if messageLimit <= 0 || messageLimit > 200 {
 		messageLimit = 50
 	}
 	snap := &BotChatSnapshot{}
+	var botRow *model.Bot
+	var latestReq *model.BotModelRequest
+	var latestRun *model.BotRun
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		bot, err := repository.NewBotRepository(tx).FindByIDAndUser(botID, userID)
 		if err != nil {
@@ -192,7 +231,7 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 			}
 			return err
 		}
-		snap.Bot = botResponseOf(bot)
+		botRow = bot
 		snap.NextEventSeq = bot.NextEventSeq
 
 		msgs, err := repository.NewBotMessageRepository(tx).ListMainline(botID, 0, 0, messageLimit)
@@ -235,6 +274,13 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 		for i := range runRows {
 			snap.Runs = append(snap.Runs, botRunResponseOf(&runRows[i]))
 		}
+
+		if req, err := repository.NewBotModelRequestRepository(tx).LatestMainByBot(botID); err == nil {
+			latestReq = req
+			if run, err := repository.NewBotRunRepository(tx).FindByID(req.RunID); err == nil {
+				latestRun = run
+			}
+		}
 		return nil
 	})
 	if txErr != nil {
@@ -243,7 +289,58 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 		}
 		return nil, errs.ErrInternal
 	}
+	snap.Bot = s.botResponseOf(botRow)
+	// 指标始终产出（INT-115）：窗口能力即使还没有任何主线请求（全新 bot、
+	// 只有失败 build）也要可见；Request 为 nil 时前端渲染「—」。
+	snap.Metrics = s.botMetricsOf(botRow, latestRun, latestReq)
 	return snap, nil
+}
+
+// botMetricsOf 把最近一次主线模型请求与窗口能力投影成指标响应。req 为 nil 时
+// 只给窗口能力（Request 缺省）。能力解析的模型/地址成对取 run 的配置快照
+// （机器人切服务地址后，旧请求的窗口必须按它发起时的地址解析，不能拿当前
+// 地址的窗口除旧请求的估算），取不到回退 bot 当前值。
+func (s *BotService) botMetricsOf(bot *model.Bot, run *model.BotRun, req *model.BotModelRequest) *BotMetricsResponse {
+	if bot == nil {
+		return nil
+	}
+	baseURL := bot.BaseURL
+	modelName := bot.Model
+	if run != nil {
+		baseURL = runBaseURLOf(run, bot)
+		modelName = runModelOf(run, bot)
+	}
+	cap := s.capabilityFor(baseURL, modelName)
+	out := &BotMetricsResponse{
+		ContextWindow:   cap.WindowTokens,
+		MaxOutputTokens: cap.MaxOutputTokens,
+		ContextSource:   cap.Source,
+		ContextDetail:   cap.Detail,
+	}
+	if req == nil {
+		return out
+	}
+	out.Request = &BotRequestMetrics{
+		RequestID:           req.ID,
+		RunID:               req.RunID,
+		Ordinal:             req.Ordinal,
+		Status:              string(req.Status),
+		PromptTokens:        req.PromptTokens,
+		CompletionTokens:    req.CompletionTokens,
+		CachedTokens:        req.CachedTokens,
+		UsageComplete:       req.PromptTokens != nil,
+		InputTokensEstimate: req.InputTokensEstimate,
+		InputEstimator:      req.InputEstimator,
+		StartedAt:           req.StartedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:          rfc3339(req.FinishedAt),
+	}
+	if req.FinishedAt != nil && req.FirstDeltaAt != nil {
+		// 首片与结束时间都有效且为正才给出生成耗时。
+		if ms := req.FinishedAt.Sub(*req.FirstDeltaAt).Milliseconds(); ms > 0 {
+			out.Request.GenerationMs = ms
+		}
+	}
+	return out
 }
 
 // BotEventResponse 是事件的 API 投影（重放用）。

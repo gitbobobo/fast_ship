@@ -6,9 +6,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useScrollFollow } from "@/lib/hooks/use-scroll-follow";
 import { useBotChat } from "@/lib/hooks/use-bot-chat";
 import { ApiRequestError } from "@/lib/api/client";
+import { cn } from "@/lib/utils";
 import { BotBackgroundCalls } from "./bot-background-calls";
 import { BotComposer } from "./bot-composer";
 import { BotMessageView } from "./bot-message";
+import { BotMetrics } from "./bot-metrics";
 import { botActionErrorText } from "./bot-tool-card";
 
 function loadErrorText(error: unknown) {
@@ -89,6 +91,23 @@ export function BotChat({ botId }: { botId: string }) {
           {chat.stopRequested ? (
             <span className="text-xs text-muted-foreground">
               已请求停止，等待当前步骤结束
+            </span>
+          ) : chat.maintenanceProgress ? (
+            // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
+            // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
+            <span
+              data-testid="bot-maintenance-progress"
+              className={cn(
+                "text-xs",
+                chat.maintenanceProgress.phase === "failed"
+                  ? "font-medium text-amber-600 dark:text-amber-400"
+                  : "text-muted-foreground",
+              )}
+            >
+              {chat.maintenanceProgress.message ||
+                (chat.maintenanceProgress.phase === "failed"
+                  ? "上下文压缩遇到问题"
+                  : "正在整理上下文…")}
             </span>
           ) : (
             <span className="text-xs text-muted-foreground">
@@ -195,6 +214,7 @@ export function BotChat({ botId }: { botId: string }) {
           onTextChange={setText}
           onSubmit={() => void submit()}
           submitting={chat.sending}
+          actions={<BotMetrics metrics={chat.metrics} />}
           banner={
             chat.runActive && !chat.stopRequested ? (
               <p className="rounded-lg bg-primary/5 px-3 py-1.5 text-xs text-muted-foreground">

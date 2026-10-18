@@ -252,6 +252,18 @@ function streamErrorText(detail: unknown): string {
 }
 
 /**
+ * 维护进度（压缩阶段/失败原因，INT-115）：服务端以 delta +
+ * kind=maintenance_progress（payload {phase,message}，无 message_id）推送，
+ * 运行栏展示。按 run 归属；run 结束或新 run 开始时清掉，不残留成假运行状态。
+ */
+export interface BotMaintenanceProgress {
+  /** 进度所属 run；服务端无 run 场景（不会出现在主线压缩）为 null。 */
+  runId: string | null;
+  phase: string;
+  message: string;
+}
+
+/**
  * 把一条 SSE 事件折叠进缓存与草稿。事件先落库再由服务端发送（重复投递
  * 已在订阅层按 seq 去重），这里的合并都按 id 幂等，重复折叠无副作用。
  */
@@ -267,6 +279,8 @@ export function foldStreamEvent(
     refreshRuns: () => void;
     appendDraft: (messageId: string, text: string) => void;
     clearDraft: (messageId: string) => void;
+    /** 维护进度的唯一写入口；null = 清除。旧服务端不发该 kind，天然兼容。 */
+    setMaintenanceProgress: (progress: BotMaintenanceProgress | null) => void;
   },
 ) {
   let data: BotStreamEventData;
@@ -301,8 +315,21 @@ export function foldStreamEvent(
         if (message?.id) {
           sinks.setMessages(mergeMessages(sinks.getMessages(), [message]));
         }
+      } else if (data.kind === "maintenance_progress") {
+        // 压缩进度（INT-115）：{phase,message} 直接替换——最新一条即当前
+        // 阶段；无 message_id，不得落入下方草稿分支产生空块。
+        const payload = (data.payload ?? {}) as { phase?: unknown; message?: unknown };
+        if (typeof payload.phase === "string" || typeof payload.message === "string") {
+          sinks.setMaintenanceProgress({
+            runId: data.run_id ?? null,
+            phase: typeof payload.phase === "string" ? payload.phase : "",
+            message: typeof payload.message === "string" ? payload.message : "",
+          });
+        }
       } else if (data.kind === "run_started" && data.run_id) {
-        // 运行栏依赖 activeRun：run_started 到达即把 run 折叠进缓存。
+        // 运行栏依赖 activeRun：run_started 到达即把 run 折叠进缓存；
+        // 新 run 开始意味着上一段维护进度已过时，一并清掉。
+        sinks.setMaintenanceProgress(null);
         sinks.setRuns(
           mergeRun(sinks.getRuns(), { id: data.run_id, status: "running" }),
         );
@@ -337,6 +364,7 @@ export function foldStreamEvent(
       if (!data.run_id) break;
       // run_error 载荷字段是 code/message（服务端 finishFailed 的形状）。
       const payload = (data.payload ?? {}) as { code?: string; message?: string };
+      sinks.setMaintenanceProgress(null);
       sinks.setRuns(
         mergeRun(sinks.getRuns(), {
           id: data.run_id,
@@ -351,6 +379,7 @@ export function foldStreamEvent(
       if (!data.run_id) break;
       const payload = (data.payload ?? {}) as Partial<BotRun>;
       const status: BotRunStatus = payload.status ?? "completed";
+      sinks.setMaintenanceProgress(null);
       sinks.setRuns(
         mergeRun(sinks.getRuns(), {
           id: data.run_id,
@@ -379,6 +408,8 @@ export function useBotChat(botId: string) {
   const userId = useAuthStore((state) => state.user?.id ?? null);
 
   const [drafts, setDrafts] = useState<Map<string, string>>(new Map());
+  const [maintenanceProgress, setMaintenanceProgress] =
+    useState<BotMaintenanceProgress | null>(null);
   const [streamStatus, setStreamStatus] = useState<BotStreamStatus>("connecting");
   const [streamError, setStreamError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -490,6 +521,7 @@ export function useBotChat(botId: string) {
             void queryClient.invalidateQueries({ queryKey: snapshotKey }),
           appendDraft,
           clearDraft,
+          setMaintenanceProgress,
         });
         if (event.event === "done") {
           // 机器人经工具增改定时任务不进聊天事件：主线跑完就刷新任务区，
@@ -662,6 +694,10 @@ export function useBotChat(botId: string) {
     loading: Boolean(userId) && snapshotQuery.isPending,
     loadError: snapshotQuery.error,
     entries,
+    /** 输入框旁指标区的数据源；快照随 run 结束重读时随之更新。 */
+    metrics: snapshotQuery.data?.metrics,
+    /** 运行栏的维护进度（压缩阶段/失败原因）；run 结束或新 run 开始时为 null。 */
+    maintenanceProgress,
     calls: callsQuery.data ?? [],
     activeRun,
     runActive: Boolean(activeRun),

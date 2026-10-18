@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { BotCall } from "@/lib/api/bots";
 import { BotToolCard } from "./bot-tool-card";
 
@@ -19,7 +19,11 @@ function makeCall(overrides: Partial<BotCall> = {}): BotCall {
   };
 }
 
-function renderCard(call?: BotCall, fallback?: { name: string; action: string }) {
+function renderCard(
+  call?: BotCall,
+  fallback?: { name: string; action: string },
+  onCancel?: (callId: string) => void,
+) {
   return render(
     <MemoryRouter>
       <BotToolCard
@@ -27,55 +31,98 @@ function renderCard(call?: BotCall, fallback?: { name: string; action: string })
         call={call}
         fallbackName={fallback?.name}
         fallbackAction={fallback?.action}
+        onCancel={onCancel}
       />
     </MemoryRouter>,
   );
 }
 
 describe("BotToolCard", () => {
-  it("主标题是中文标签，带只读徽标与中文状态；原始标识默认折叠", () => {
-    renderCard(makeCall());
+  it("标题是中文标签，状态徽标在右侧；不展示参数 chips、原始调用与副作用徽标", () => {
+    renderCard(
+      makeCall({
+        arguments: {
+          issue_id: "abcdef1234567890",
+          project_id: "p1",
+          settled: false,
+        },
+      }),
+    );
     expect(screen.getByText("查看问题")).toBeInTheDocument();
-    expect(screen.getByText("只读")).toBeInTheDocument();
-    expect(screen.getByTestId("bot-call-status")).toHaveTextContent("已完成");
+    const status = screen.getByTestId("bot-call-status");
+    expect(status).toHaveTextContent("已完成");
+    // 状态徽标贴卡片右侧。
+    expect(status).toHaveClass("ml-auto");
+    // 参数摘要 chips（短标识、「已收合」等）、副作用徽标与原始调用入口已隐藏。
+    expect(screen.queryByText(/abcdef12/)).toBeNull();
+    expect(screen.queryByText("已收合")).toBeNull();
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.queryByText("只读")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /原始调用/ }),
+    ).toBeNull();
     expect(screen.queryByText(/fs_issue\.get/)).toBeNull();
   });
 
-  it("写操作显示写入徽标", () => {
+  it("写操作同样不显示「写入」徽标与参数，状态仍在右", () => {
     renderCard(
-      makeCall({ action: "create", status: "running", arguments: { project_id: "p1", title: "t" } }),
+      makeCall({
+        action: "create",
+        status: "running",
+        arguments: { project_id: "p1", title: "t" },
+      }),
     );
     expect(screen.getByText("创建问题")).toBeInTheDocument();
-    expect(screen.getByText("写入")).toBeInTheDocument();
-    expect(screen.getByTestId("bot-call-status")).toHaveTextContent("执行中");
+    expect(screen.queryByText("写入")).toBeNull();
+    expect(screen.queryByText("项目")).toBeNull();
+    const status = screen.getByTestId("bot-call-status");
+    expect(status).toHaveTextContent("执行中");
+    expect(status).toHaveClass("ml-auto");
   });
 
-  it("pending_confirmation 状态文案为「等待你确认」", () => {
-    renderCard(makeCall({ status: "pending_confirmation", requires_confirmation: true }));
-    expect(screen.getByTestId("bot-call-status")).toHaveTextContent("等待你确认");
+  it("pending_confirmation 状态文案为「等待你确认」，取消按钮在状态徽标之后", () => {
+    const onCancel = vi.fn();
+    renderCard(
+      makeCall({ status: "pending_confirmation", requires_confirmation: true }),
+      undefined,
+      onCancel,
+    );
+    const status = screen.getByTestId("bot-call-status");
+    expect(status).toHaveTextContent("等待你确认");
+    const cancel = screen.getByRole("button", { name: "取消" });
+    // 取消在状态徽标之后（同在卡片右侧）。
+    expect(
+      status.compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    fireEvent.click(cancel);
+    expect(onCancel).toHaveBeenCalledWith("call-1");
   });
 
-  it("「查看原始调用」展开后显示原始标识与完整参数", () => {
+  it("错误信息与副作用警示保留", () => {
     renderCard(
       makeCall({
-        arguments: { issue_id: "i1", page: 2 },
+        status: "failed",
+        error_code: "model_error",
+        error_message: "上游 502",
+        effect_may_have_occurred: true,
       }),
     );
-    fireEvent.click(screen.getByRole("button", { name: /查看原始调用/ }));
-    expect(screen.getByText(/fs_issue\.get/)).toBeInTheDocument();
-    expect(screen.getByText(/"issue_id": "i1"/)).toBeInTheDocument();
-    expect(screen.getByText(/"page": 2/)).toBeInTheDocument();
+    expect(screen.getByText(/model_error: 上游 502/)).toBeInTheDocument();
+    expect(screen.getByText(/副作用可能已经发生/)).toBeInTheDocument();
+    expect(screen.getByTestId("bot-call-status")).toHaveTextContent("失败");
   });
 
-  it("issue_id 参数渲染为可点击的短标识并链接到详情页", () => {
-    renderCard(
-      makeCall({
-        arguments: { issue_id: "abcdef1234567890", project_id: "p1" },
-      }),
-    );
-    const link = screen.getByRole("link", { name: /abcdef12…/ });
-    expect(link).toHaveAttribute("href", "/projects/p1/issues/abcdef1234567890");
-    expect(link).toHaveAttribute("title", "abcdef1234567890");
+  it("截断结果保留「查看完整结果」按需展开", () => {
+    renderCard(makeCall({ truncated: true }));
+    expect(
+      screen.getByRole("button", { name: /查看完整结果/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("不再渲染原始标识与完整参数", () => {
+    renderCard(makeCall({ arguments: { issue_id: "i1", page: 2 } }));
+    expect(screen.queryByText(/"issue_id"/)).toBeNull();
+    expect(screen.queryByText(/"page"/)).toBeNull();
   });
 
   it("未知工具回退显示原始 tool.action，不抛错", () => {
@@ -84,8 +131,8 @@ describe("BotToolCard", () => {
     );
     expect(screen.getByText("acme_thing.do")).toBeInTheDocument();
     expect(screen.getByTestId("bot-call-status")).toHaveTextContent("已排队");
-    // 未知 effect 保守按写入处理
-    expect(screen.getByText("写入")).toBeInTheDocument();
+    // 未知 effect 的保守「写入」徽标也不再展示。
+    expect(screen.queryByText("写入")).toBeNull();
   });
 
   it("账本缺卡时用 fallback 标识渲染静态形态", () => {

@@ -62,3 +62,73 @@ describe("BotMessageView schedule_event", () => {
     expect(line).toHaveTextContent("model_request_failed: 上游 502");
   });
 });
+
+// compaction_failed lifecycle（INT-115）：服务端 detail 带 code/note 等字段，
+// 渲染必须给出明确中文提示（含继续对话的指引），不能只显示英文事件名。
+
+const compactionFailed: BotMessage = {
+  id: "m-cf",
+  bot_id: "b1",
+  seq: 40,
+  kind: "lifecycle",
+  content: {
+    event: "compaction_failed",
+    detail: {
+      code: "target_unreachable",
+      message: "压缩目标不可达：固定前缀+最小摘要预算 ≥ 触发阈值",
+      note: "压缩目标不可达：固定前缀+最小摘要预算 ≥ 触发阈值",
+      generation: 0,
+      through_seq: 12,
+    },
+  },
+  created_at: "2026-10-18T02:00:00Z",
+};
+
+describe("BotMessageView compaction_failed", () => {
+  it("显示中文失败原因与继续对话指引，不显示英文事件名", () => {
+    renderMessage(compactionFailed);
+
+    const note = screen.getByTestId("bot-compaction-failed-note");
+    expect(note).toHaveTextContent("上下文压缩失败");
+    expect(note).toHaveTextContent("压缩目标不可达：固定前缀+最小摘要预算 ≥ 触发阈值");
+    expect(note).toHaveTextContent("继续发新消息");
+    expect(note).not.toHaveTextContent("compaction_failed");
+  });
+
+  it("缺 note 时回退到 message，再缺则用兜底文案", () => {
+    const { unmount } = renderMessage({
+      ...compactionFailed,
+      content: {
+        event: "compaction_failed",
+        detail: { code: "context_uncompressible", message: "上下文压缩后仍超出模型窗口" },
+      },
+    });
+    expect(screen.getByTestId("bot-compaction-failed-note")).toHaveTextContent(
+      "上下文压缩后仍超出模型窗口",
+    );
+    unmount();
+
+    renderMessage({
+      ...compactionFailed,
+      content: { event: "compaction_failed", detail: {} },
+    });
+    expect(screen.getByTestId("bot-compaction-failed-note")).toHaveTextContent(
+      "上下文压缩未成功",
+    );
+  });
+
+  it("其它 lifecycle 事件仍按 note/event 渲染，不受影响", () => {
+    renderMessage({
+      id: "m-lc",
+      bot_id: "b1",
+      seq: 41,
+      kind: "lifecycle",
+      content: {
+        event: "toolset_updated",
+        detail: { note: "工具集已升级" },
+      },
+      created_at: "2026-10-18T02:00:00Z",
+    });
+    expect(screen.getByText("工具集已升级")).toBeInTheDocument();
+  });
+});

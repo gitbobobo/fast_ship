@@ -47,6 +47,11 @@ func newE2EFakeModel(t *testing.T) *e2eFakeModel {
 	t.Helper()
 	f := &e2eFakeModel{requests: make(chan e2eCapturedRequest, 64), shutdown: make(chan struct{})}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 模型窗口探测（INT-115）不进请求通道，也不消耗 schedule。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		select {
 		case f.requests <- e2eCapturedRequest{Body: body}:

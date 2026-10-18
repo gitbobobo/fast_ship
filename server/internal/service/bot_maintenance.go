@@ -291,7 +291,7 @@ func (s *BotService) RunMemoryConsolidation(ctx context.Context, bot *model.Bot,
 	}
 
 	modelName := s.nightlyModelOf(bot)
-	auxWindow := s.cfg.Bots.Context.WindowTokensFor(modelName)
+	auxWindow := s.inputBudgetFor(bot, modelName)
 	userLimit := s.cfg.Bots.Memory.UserMaxCharsV()
 	memLimit := s.cfg.Bots.Memory.MemoryMaxCharsV()
 	sys := "你是记忆整理器。只输出 JSON。模型不能指定路径去改 daily，也不能执行工具。"

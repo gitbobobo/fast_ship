@@ -1408,11 +1408,23 @@ type Bot struct {
 	ApiKeyLast4 string `json:"api_key_last4"`
 
 	// BaseUrl OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1）
-	BaseUrl   string `json:"base_url"`
-	CreatedAt string `json:"created_at"`
-	Id        string `json:"id"`
-	Model     string `json:"model"`
-	Name      string `json:"name"`
+	BaseUrl string `json:"base_url"`
+
+	// ContextDetail 解析口径说明（探测方式或回退原因）；可省略
+	ContextDetail *string `json:"context_detail,omitempty"`
+
+	// ContextSource 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测
+	ContextSource string `json:"context_source"`
+
+	// ContextWindow 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口
+	ContextWindow int64  `json:"context_window"`
+	CreatedAt     string `json:"created_at"`
+	Id            string `json:"id"`
+
+	// MaxOutputTokens 模型输出上限；仅 detected 来源可给出，未知为 0
+	MaxOutputTokens int64  `json:"max_output_tokens"`
+	Model           string `json:"model"`
+	Name            string `json:"name"`
 
 	// NextEventSeq 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史
 	NextEventSeq int64 `json:"next_event_seq"`
@@ -1468,6 +1480,7 @@ type BotChatSnapshot struct {
 	Bot      Bot           `json:"bot"`
 	Calls    []BotToolCall `json:"calls"`
 	Messages []BotMessage  `json:"messages"`
+	Metrics  *BotMetrics   `json:"metrics,omitempty"`
 
 	// NextEventSeq 与快照同一读取点的事件账本水位（下一条的 seq）
 	NextEventSeq int64    `json:"next_event_seq"`
@@ -1477,6 +1490,18 @@ type BotChatSnapshot struct {
 // BotConnectionCheck defines model for BotConnectionCheck.
 type BotConnectionCheck struct {
 	Checks []BotConnectionCheck_Checks `json:"checks"`
+
+	// ContextDetail 解析口径说明；可省略
+	ContextDetail *string `json:"context_detail,omitempty"`
+
+	// ContextSource 窗口来源 manual / detected / fallback（探测失败时如实标注）
+	ContextSource string `json:"context_source"`
+
+	// ContextWindow 模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存； 失败回退到当前解析值（manual / 默认窗口）
+	ContextWindow int64 `json:"context_window"`
+
+	// MaxOutputTokens 模型输出上限；仅探测到时非 0
+	MaxOutputTokens int64 `json:"max_output_tokens"`
 
 	// Ok 流式检查通过即 true
 	Ok bool `json:"ok"`
@@ -1517,6 +1542,51 @@ type BotMessage struct {
 	RequestId *string `json:"request_id,omitempty"`
 	RunId     *string `json:"run_id,omitempty"`
 	Seq       int64   `json:"seq"`
+}
+
+// BotMetrics defines model for BotMetrics.
+type BotMetrics struct {
+	// ContextDetail 解析口径说明；可省略
+	ContextDetail *string `json:"context_detail,omitempty"`
+
+	// ContextSource 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）
+	ContextSource string `json:"context_source"`
+
+	// ContextWindow 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口
+	ContextWindow int64 `json:"context_window"`
+
+	// MaxOutputTokens 模型输出上限；仅 detected 来源可给出，未知为 0
+	MaxOutputTokens int64 `json:"max_output_tokens"`
+
+	// Request 单次主线模型请求口径；历史累计仍在 run 上，指标区不用累计值
+	Request *BotRequestMetrics `json:"request,omitempty"`
+}
+
+// BotRequestMetrics 单次主线模型请求口径；历史累计仍在 run 上，指标区不用累计值
+type BotRequestMetrics struct {
+	CachedTokens     *int64  `json:"cached_tokens,omitempty"`
+	CompletionTokens *int64  `json:"completion_tokens,omitempty"`
+	FinishedAt       *string `json:"finished_at,omitempty"`
+
+	// GenerationMs 首个流式正文片段到请求结束的耗时；0 表示不可用（纯工具 调用、失败请求或时长非正）。Token 输出速度 = completion_tokens / (generation_ms/1000)，仅在两者都有且 >0 时给出
+	GenerationMs int64 `json:"generation_ms"`
+
+	// InputEstimator 估算方式（usage_delta/3.5 或 utf8_bytes/3.5）
+	InputEstimator string `json:"input_estimator"`
+
+	// InputTokensEstimate 发送前的上下文 token 估算值（口径见 input_estimator；上下文占比用估算值）
+	InputTokensEstimate int64  `json:"input_tokens_estimate"`
+	Ordinal             int64  `json:"ordinal"`
+	PromptTokens        *int64 `json:"prompt_tokens,omitempty"`
+	RequestId           string `json:"request_id"`
+	RunId               string `json:"run_id"`
+	StartedAt           string `json:"started_at"`
+
+	// Status running / succeeded / failed
+	Status string `json:"status"`
+
+	// UsageComplete false 表示上游未报 usage（缺失与零严格区分）；false 时计数视为不可用
+	UsageComplete bool `json:"usage_complete"`
 }
 
 // BotRun defines model for BotRun.

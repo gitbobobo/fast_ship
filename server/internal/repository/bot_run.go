@@ -187,6 +187,21 @@ func (r *BotModelRequestRepository) ListUnfinished() ([]model.BotModelRequest, e
 	return rows, err
 }
 
+// LatestMainByBot 返回该机器人主线 run 的最新一条模型请求（进行中或已结束；
+// 按 started_at DESC, ordinal DESC），聊天页指标区用。没有返回
+// gorm.ErrRecordNotFound。
+func (r *BotModelRequestRepository) LatestMainByBot(botID string) (*model.BotModelRequest, error) {
+	var row model.BotModelRequest
+	err := r.db.Joins("JOIN bot_runs ON bot_runs.id = bot_model_requests.run_id").
+		Where("bot_runs.bot_id = ? AND bot_runs.session_kind = ?", botID, model.BotSessionKindMain).
+		Order("bot_model_requests.started_at DESC, bot_model_requests.ordinal DESC").
+		First(&row).Error
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
+}
+
 // BotEventRepository 是 SSE 持久重放账本的仓库：只追加、按 seq 读取。
 type BotEventRepository struct {
 	db *gorm.DB

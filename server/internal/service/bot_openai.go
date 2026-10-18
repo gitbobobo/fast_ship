@@ -34,6 +34,9 @@ type botModelReply struct {
 	// ProviderRequestID 是响应里的请求身份；拿不到为空。
 	ProviderRequestID string
 	FinishReason      string
+	// FirstDeltaAt 是首个非空正文片段的到达时刻（INT-115 指标口径：
+	// GenerationMs 的起点）；纯工具调用或失败请求为 nil。
+	FirstDeltaAt *time.Time
 	// Usage 可空：缺失与零必须区分，不伪造统计。
 	UsageComplete    bool
 	PromptTokens     int64
@@ -101,6 +104,11 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 				reply.FinishReason = choice.FinishReason
 			}
 			if text := choice.Delta.Content; text != "" {
+				if reply.FirstDeltaAt == nil {
+					// 只记首个非空正文片段：GenerationMs 衡量正文生成耗时。
+					now := time.Now().UTC()
+					reply.FirstDeltaAt = &now
+				}
 				reply.Text += text
 				if onDelta != nil {
 					onDelta(text)

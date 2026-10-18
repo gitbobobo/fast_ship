@@ -6773,6 +6773,8 @@ paths:
         只做最小模型探测，不写入主线。可传完整未保存配置；也可传 bot_id 使用
         已保存 key，并允许表单覆盖 base_url/model。streaming 与 tool_call 两项
         检查分别返回；HTTP 200 且 ok=false 表示配置可达性/兼容性问题。
+        另同步探测 GET /models 的模型窗口元数据（INT-115）：成功写入缓存并把
+        detected 值并入响应；失败回退当前解析值（manual/默认窗口），不影响 ok。
         SDK 重试显式关零，不产生隐藏重复调用。
       security:
         - jwtAuth: []
@@ -11702,7 +11704,7 @@ components:
 
     Bot:
       type: object
-      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, base_url, model, api_key_last4, next_event_seq, created_at, updated_at]
+      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, base_url, model, api_key_last4, next_event_seq, context_window, max_output_tokens, context_source, created_at, updated_at]
       properties:
         id:
           type: string
@@ -11729,6 +11731,24 @@ components:
         api_key_last4:
           type: string
           description: API Key 末四位；明文任何端点都不回显
+        context_window:
+          type: integer
+          format: int64
+          description: >-
+            模型上下文窗口（未扣输出空间）。解析顺序 manual > detected >
+            fallback；fallback 为部署默认窗口
+        max_output_tokens:
+          type: integer
+          format: int64
+          description: 模型输出上限；仅 detected 来源可给出，未知为 0
+        context_source:
+          type: string
+          description: >-
+            窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/
+            fallback（默认窗口）；展示层不得把回退值说成已检测
+        context_detail:
+          type: string
+          description: 解析口径说明（探测方式或回退原因）；可省略
         next_event_seq:
           type: integer
           format: int64
@@ -11763,6 +11783,88 @@ components:
           type: integer
           format: int64
           description: 与快照同一读取点的事件账本水位（下一条的 seq）
+        metrics:
+          nullable: true
+          description: 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径；
+            没有主线请求时 request 缺省、窗口能力仍然可见
+          $ref: '#/components/schemas/BotMetrics'
+
+    BotMetrics:
+      type: object
+      required: [context_window, max_output_tokens, context_source]
+      properties:
+        context_window:
+          type: integer
+          format: int64
+          description: >-
+            模型上下文窗口（未扣输出空间）。解析顺序 manual > detected >
+            fallback；fallback 为部署默认窗口
+        max_output_tokens:
+          type: integer
+          format: int64
+          description: 模型输出上限；仅 detected 来源可给出，未知为 0
+        context_source:
+          type: string
+          description: >-
+            窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/
+            fallback（默认窗口）
+        context_detail:
+          type: string
+          description: 解析口径说明；可省略
+        request:
+          description: 最近一次主线模型请求（进行中或已结束）；没有主线请求时省略
+          $ref: '#/components/schemas/BotRequestMetrics'
+
+    BotRequestMetrics:
+      type: object
+      required: [request_id, run_id, ordinal, status, usage_complete, input_tokens_estimate, input_estimator, started_at, generation_ms]
+      description: 单次主线模型请求口径；历史累计仍在 run 上，指标区不用累计值
+      properties:
+        request_id:
+          type: string
+        run_id:
+          type: string
+        ordinal:
+          type: integer
+          format: int64
+        status:
+          type: string
+          description: running / succeeded / failed
+        prompt_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        completion_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        cached_tokens:
+          type: integer
+          format: int64
+          nullable: true
+        usage_complete:
+          type: boolean
+          description: false 表示上游未报 usage（缺失与零严格区分）；false 时计数视为不可用
+        input_tokens_estimate:
+          type: integer
+          format: int64
+          description: 发送前的上下文 token 估算值（口径见 input_estimator；上下文占比用估算值）
+        input_estimator:
+          type: string
+          description: 估算方式（usage_delta/3.5 或 utf8_bytes/3.5）
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        generation_ms:
+          type: integer
+          format: int64
+          description: 首个流式正文片段到请求结束的耗时；0 表示不可用（纯工具
+            调用、失败请求或时长非正）。Token 输出速度 = completion_tokens /
+            (generation_ms/1000)，仅在两者都有且 >0 时给出
 
     CreateBotRequest:
       type: object
@@ -11811,7 +11913,7 @@ components:
 
     BotConnectionCheck:
       type: object
-      required: [ok, checks]
+      required: [ok, checks, context_window, max_output_tokens, context_source]
       properties:
         ok:
           type: boolean
@@ -11830,6 +11932,22 @@ components:
               detail:
                 type: string
                 description: 失败原因（截断；不含密钥）
+        context_window:
+          type: integer
+          format: int64
+          description: >-
+            模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存；
+            失败回退到当前解析值（manual / 默认窗口）
+        max_output_tokens:
+          type: integer
+          format: int64
+          description: 模型输出上限；仅探测到时非 0
+        context_source:
+          type: string
+          description: 窗口来源 manual / detected / fallback（探测失败时如实标注）
+        context_detail:
+          type: string
+          description: 解析口径说明；可省略
 
     BotMessage:
       type: object

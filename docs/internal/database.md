@@ -23,6 +23,8 @@ Fast Ship 自身日志（INT-94）不在本库：独立 SQLite 文件 `logging.s
 
 **唯一的例外：projects → user_github_tokens 的两个引用列（`public_github_token_id` / `code_github_token_id`）不建外键。** 原因有二：建 FK 会在删用户时与 users 的 CASCADE 冲突（同一 Token 被多项目引用时数据库无从级联）；且 CASCADE 删 Token 会连带删引用它的项目行。引用一致性由应用层保证——引用必须属于当前用户（40420），被引用禁止删除（40913），删项目不删 Token。
 
+另一类无外键的是**探测缓存表**：`bot_model_windows`（INT-115）按「规范化 API 地址 + 模型名」缓存模型窗口元数据，不指向任何 bot——多个机器人可共享同一上游，地址或模型变化后旧行自然失效（键不同），不随机器人删除级联，过期数据只影响一次多余的探测，不值得为其建引用关系。`context_window=0` 的行是探测失败的负缓存标记（`source="detect_failed"`，TTL 10 分钟，区别于成功行的 24 小时），能力解析只认 >0 的值，标记行只用于期内免白探。
+
 GORM 的坑：同一关联在 has-many/has-one（父侧）与 belongs-to（子侧）双侧声明时，生成的外键只取**父侧**字段的 `constraint` tag，belongs-to 侧写了也不生效。因此：
 
 - 双侧声明：两侧都写 `constraint:OnDelete:CASCADE`（如 `Issue.Comments` + `IssueComment.Issue`）。

@@ -8,8 +8,8 @@ import (
 )
 
 // BotModels 返回机器人的全部表模型（七张主线表 + INT-102 的压缩/记忆/维护
-// 表 + INT-103 的定时任务表），供 AutoMigrate 与测试建库共用。FTS5 虚表与
-// 触发器不在 GORM 模型体系内，由 botSchemaDDL 创建。
+// 表 + INT-103 的定时任务表 + INT-115 的模型窗口缓存表），供 AutoMigrate 与
+// 测试建库共用。FTS5 虚表与触发器不在 GORM 模型体系内，由 botSchemaDDL 创建。
 func BotModels() []interface{} {
 	return []interface{}{
 		&model.Bot{},
@@ -26,6 +26,7 @@ func BotModels() []interface{} {
 		&model.BotMaintenanceRun{},
 		&model.BotMaintenanceRequest{},
 		&model.BotScheduleTask{},
+		&model.BotModelWindow{},
 	}
 }
 
@@ -61,6 +62,9 @@ END`,
 
 	// bot_model_requests：run 内请求序号唯一。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_model_requests_run_ordinal ON bot_model_requests(run_id, ordinal)`,
+
+	// bot_model_windows（INT-115）：地址+模型唯一，重复探测覆盖同一条缓存。
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_model_windows_addr_model ON bot_model_windows(base_url, model)`,
 
 	// bot_tool_calls：协议配对唯一 + 状态检索。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_tool_calls_request_provider ON bot_tool_calls(request_id, provider_tool_call_id)`,
