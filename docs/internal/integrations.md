@@ -54,7 +54,8 @@ PUT 是整组保存：`app_id` 必填且纯数字；`private_key_pem` 省略/nul
   `ClientFor(ctx, "")` 解析到部署 config 兜底（config 身份的评审轮次用它）。
   每次调用现查一次该用户的数据库行（config 来源时还含一次 PEM 文件读取）——本地单连接库下为
   微秒级，换远程库前应先给它加短 TTL 缓存。
-- **PR 协调账按验签身份分区**：`github_pr_reviews` 主键 `(repo_full_name, pr_number, app_user_id)`、
+- **PR 协调账按验签身份分区**（运行去重键 `trigger_key` 也含身份，config App 与
+  用户 App 命中同一触发器/同一 SHA 时各开一轮）：`github_pr_reviews` 主键 `(repo_full_name, pr_number, app_user_id)`、
   `github_pr_seen_shas` 与 `github_pr_debounces` 主键都含 `app_user_id`、`automation_runs` 有
   `app_user_id` 列（空串 = config 身份）。开轮时把验签身份写进运行行，之后 agent、同步、取消、
   置 pending 全部读这一列，不再从评审账或规则所有者反推；同步的运行查询按 `app_user_id` 过滤。

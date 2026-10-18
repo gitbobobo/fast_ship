@@ -688,7 +688,7 @@ func (s *PRReviewService) newPRRunRow(a *model.Automation, t *model.AutomationTr
 		AutomationID:       a.ID,
 		TriggerID:          t.ID,
 		TriggerType:        t.TriggerType,
-		TriggerKey:         prTriggerKey(repoFullName, prNumber, headSHA, sel.InstanceId, sel.Model),
+		TriggerKey:         prTriggerKey(repoFullName, prNumber, headSHA, sel.InstanceId, sel.Model, appUserID),
 		TriggerContextJSON: string(ctxJSON),
 		TriggeredAt:        now,
 		ConfigSnapshotJSON: snapshotJSON(&perModel, t),
@@ -714,12 +714,16 @@ func (s *PRReviewService) newPRRunRow(a *model.Automation, t *model.AutomationTr
 // prTriggerKey `pr:<repo>:<number>:<sha>:<instance_id>:<model>`；同一 SHA+模型被
 // UNIQUE(trigger_id, trigger_key) 吃掉（重复投递/并发开轮收敛为一行；
 // INT-118 起唯一性落在触发器维度，同一自动化的不同触发器各开各轮）。
-func prTriggerKey(repo string, number int, sha, instanceID, model string) string {
+// prTriggerKey 运行去重键：同一 (仓库, PR, SHA, 实例, 模型) 只开一轮。开轮的
+// 验签身份也进键——部署 config App 与同一用户的 App（或不同用户）命中同一
+// 触发器/同一 SHA 时互不吞掉，各自身份都要有自己的运行与评审账。
+func prTriggerKey(repo string, number int, sha, instanceID, model, appUserID string) string {
 	return "pr:" + url.PathEscape(repo) + ":" +
 		url.PathEscape(strconv.Itoa(number)) + ":" +
 		url.PathEscape(sha) + ":" +
 		url.PathEscape(instanceID) + ":" +
-		url.PathEscape(model)
+		url.PathEscape(model) + ":" +
+		url.PathEscape(appUserID)
 }
 
 // promoteQueuedPRRunsTx 排队提升：在途数（”/dispatched/running）不足上限时按

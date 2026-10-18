@@ -829,7 +829,7 @@ func (e *prReviewTestEnv) seedPRRun(t *testing.T, a *model.Automation, repo stri
 		AutomationID:       a.ID,
 		TriggerID:          tr.ID,
 		TriggerType:        tr.TriggerType,
-		TriggerKey:         prTriggerKey(repo, prNumber, sha, "inst-"+uuid.NewString()[:8], "model-x"),
+		TriggerKey:         prTriggerKey(repo, prNumber, sha, "inst-"+uuid.NewString()[:8], "model-x", ""),
 		TriggerContextJSON: "{}",
 		TriggeredAt:        now,
 		ConfigSnapshotJSON: snapshotJSON(a, tr),
