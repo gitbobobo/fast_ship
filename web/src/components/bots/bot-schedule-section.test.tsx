@@ -47,6 +47,7 @@ const enabledTask: BotScheduleTask = {
     id: "r1",
     task_id: "t1",
     status: "completed",
+    trigger_source: "cron",
     summary: "已汇总 3 条变化",
     silent: false,
     scheduled_for: "2026-10-17T01:00:00Z",
@@ -169,6 +170,7 @@ describe("BotScheduleSection", () => {
           id: "r9",
           task_id: "t1",
           status: "failed",
+          trigger_source: "manual",
           summary: "",
           silent: false,
           error_code: "model_error",
@@ -196,6 +198,7 @@ describe("BotScheduleSection", () => {
 
     const run = within(dialog).getByTestId("bot-schedule-run");
     expect(run).toHaveTextContent("已失败");
+    expect(run).toHaveTextContent("手动触发");
     expect(run).toHaveTextContent(formatDate("2026-10-17T01:00:02Z"));
     expect(run).toHaveTextContent("2 分 8 秒");
     expect(run).toHaveTextContent("模型限流");
