@@ -1,7 +1,10 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BotFormDialog } from "@/components/bots/bot-form-dialog";
+import {
+  BotFormDialog,
+  DEFAULT_PERSONA_PROMPT,
+} from "@/components/bots/bot-form-dialog";
 import type { Bot } from "@/lib/api/bots";
 import {
   useCreateBot,
@@ -157,5 +160,60 @@ describe("BotFormDialog 能力展示", () => {
     expect(screen.getByTestId("bot-context-window")).toHaveTextContent(
       "1,048,576",
     );
+  });
+});
+
+// INT-122：新建时人设预填默认模板，引导用户改成自己的要求；
+// 编辑仍回填已存人设，用户清空即保存为空，模板不强制补回。
+describe("BotFormDialog 人设预填", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(useCreateBot).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useCreateBot>);
+    vi.mocked(useUpdateBot).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+    } as unknown as ReturnType<typeof useUpdateBot>);
+    vi.mocked(useTestBotConnection).mockReturnValue({
+      mutateAsync: vi.fn(),
+      isPending: false,
+      isError: false,
+      error: null,
+      reset: vi.fn(),
+    } as unknown as ReturnType<typeof useTestBotConnection>);
+  });
+
+  it("新建模式：人设预填默认模板", () => {
+    renderDialog(null);
+
+    expect(screen.getByLabelText("人设提示词")).toHaveValue(
+      DEFAULT_PERSONA_PROMPT,
+    );
+  });
+
+  it("编辑模式：回填已存人设而不是模板", () => {
+    renderDialog({ ...botFixture, persona_prompt: "已存人设，语气冷静。" });
+
+    const textarea = screen.getByLabelText("人设提示词");
+    expect(textarea).toHaveValue("已存人设，语气冷静。");
+    expect(textarea).not.toHaveValue(DEFAULT_PERSONA_PROMPT);
+  });
+
+  it("编辑模式已存人设为空：不回填模板", () => {
+    renderDialog({ ...botFixture, persona_prompt: "" });
+
+    expect(screen.getByLabelText("人设提示词")).toHaveValue("");
+  });
+
+  it("新建模式清空人设后不补回模板", async () => {
+    const user = userEvent.setup();
+    renderDialog(null);
+
+    const textarea = screen.getByLabelText("人设提示词");
+    await user.clear(textarea);
+
+    expect(textarea).toHaveValue("");
   });
 });
