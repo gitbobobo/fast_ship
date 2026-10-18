@@ -1576,29 +1576,38 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 
 // ---------- 工具集版本激活与告知 ----------
 
+// refreshBotPromptState 按库里最新行回填提示词/工具集相关字段（尽力而为）。
+// 并发 run 各自持有一份激活前的独立 bot 副本；激活完成（无论自己还是别的 run
+// 做的）后副本可能落后于库里的水位，不刷新就会把旧系统提示词与旧工具集冻结
+// 进整个 run。只覆盖这 5 个字段，Model/BaseURL/APIKeyEncrypted 的冻结语义
+// 属于 captureRunFreeze，不在此改动。读库失败直接返回、不阻塞 run：激活是
+// 尽力而为的升级（调用处失败只降级记日志），副本沿用旧值，留待下一次重启
+// 边界重试。
+func (s *BotService) refreshBotPromptState(bot *model.Bot) {
+	fresh, err := s.bots.Get(bot.ID)
+	if err != nil {
+		return
+	}
+	bot.SystemPromptText = fresh.SystemPromptText
+	bot.PromptRevision = fresh.PromptRevision
+	bot.PlatformPromptVersion = fresh.PlatformPromptVersion
+	bot.PersonaPrompt = fresh.PersonaPrompt
+	bot.ToolsetVersion = fresh.ToolsetVersion
+}
+
 func (s *BotService) activateOnProcessStart(bot *model.Bot) error {
+	stale := bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion
 	s.rt.mu.Lock()
 	done := s.rt.activated[bot.ID]
 	s.rt.mu.Unlock()
 	if done {
-		// 并发 run 各自持有一份独立 bot 副本（每个 run 入口各自 Get 一次）：
-		// 首个 run 激活后置 rt.activated 并把新水位写回库里，随后启动的 run
-		// 走到这里直接早退——传入副本仍是激活前的旧行，不刷新就会冻结旧
-		// 系统提示词与旧工具集。按库里最新行只回填提示词/工具集相关字段；
-		// Model/BaseURL/APIKeyEncrypted 的冻结语义属于 captureRunFreeze，
-		// 不在此改动。
-		if fresh, err := s.bots.Get(bot.ID); err == nil {
-			bot.SystemPromptText = fresh.SystemPromptText
-			bot.PromptRevision = fresh.PromptRevision
-			bot.PlatformPromptVersion = fresh.PlatformPromptVersion
-			bot.PersonaPrompt = fresh.PersonaPrompt
-			bot.ToolsetVersion = fresh.ToolsetVersion
+		// 已激活的早退：副本版本已是最新时不必读库，落后才按库里最新行补齐。
+		if stale {
+			s.refreshBotPromptState(bot)
 		}
-		// 读库失败不阻塞 run：激活是尽力而为的升级（调用处失败只降级记日志），
-		// 副本沿用旧提示词，留待下一次重启边界重试。
 		return nil
 	}
-	if bot.ToolsetVersion >= botToolsetVersion && bot.PlatformPromptVersion >= botPlatformPromptVersion {
+	if !stale {
 		s.rt.mu.Lock()
 		s.rt.activated[bot.ID] = true
 		s.rt.mu.Unlock()
@@ -1609,6 +1618,12 @@ func (s *BotService) activateOnProcessStart(bot *model.Bot) error {
 	})
 	if err != nil {
 		return err
+	}
+	// CAS 未命中：另一并发 run 已先把水位推到最新，本事务的条件更新命中 0 行、
+	// 没有回写副本（activateToolsetWithPromptTx 只在 ok=true 时写回），此处副本
+	// 仍是激活前的旧行，须按库里最新行补齐，否则本 run 会冻结旧提示词/旧工具集。
+	if bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion {
+		s.refreshBotPromptState(bot)
 	}
 	s.rt.mu.Lock()
 	s.rt.activated[bot.ID] = true
