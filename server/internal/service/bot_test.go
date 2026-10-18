@@ -1197,8 +1197,16 @@ func TestBotCancelCall(t *testing.T) {
 	waitForBot(t, "取消 run 结束", 15*time.Second, func() bool {
 		return env.botSettled(bot.ID)
 	})
-	if err := env.bots.Delete(userID, bot.ID); err != nil {
-		t.Fatalf("终态后删除应成功: %v", err)
+	// 取消唤醒的 run 可能在 botSettled 观察到「无活动 run」之后才被调度创建，
+	// 删除守卫因此仍可能瞬时返回 40927。全量套件并发下这会偶发失败（基线 flake），
+	// 所以这里按「终态后最终可删」轮询，而不是要求第一次删除就命中。
+	var deleteErr error
+	waitForBot(t, "终态后删除成功", 15*time.Second, func() bool {
+		deleteErr = env.bots.Delete(userID, bot.ID)
+		return deleteErr == nil || !errors.Is(deleteErr, errs.ErrBotDeleteConflict)
+	})
+	if deleteErr != nil {
+		t.Fatalf("终态后删除应成功: %v", deleteErr)
 	}
 }
 
