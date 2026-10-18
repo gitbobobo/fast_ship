@@ -272,47 +272,15 @@ func (s *BotService) buildBot(userID string, req *CreateBotRequest) (*model.Bot,
 
 // Update 指针字段表达「未提供保留」；key 缺省保留，空串拒绝。
 // 人设变化重建系统提示词并递增 revision。配置变化对下个 run 生效。
+// 读行、应用请求与写库收进同一短事务：生产库单连接让读-改-写与并发写者
+// 串行，不会把事务外读到的旧状态写回。人设未变时按列跳过提示词四列
+// （persona_prompt/system_prompt_text/prompt_revision/platform_prompt_version），
+// 改名/换模型/换 key 不得反向撤销并发激活写入的提示词状态。
 func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotResponse, error) {
-	bot, err := s.bots.FindByIDAndUser(botID, userID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errs.ErrBotNotFound
-		}
-		return nil, errs.ErrInternal
-	}
-
-	personaChanged := false
-	if req.Name != nil {
-		name := strings.TrimSpace(*req.Name)
-		if name == "" {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "name 不能为空")
-		}
-		bot.Name = name
-	}
-	if req.PersonaPrompt != nil && *req.PersonaPrompt != bot.PersonaPrompt {
-		bot.PersonaPrompt = *req.PersonaPrompt
-		bot.SystemPromptText = buildBotSystemPrompt(bot.PersonaPrompt)
-		bot.PromptRevision++
-		bot.PlatformPromptVersion = botPlatformPromptVersion
-		personaChanged = true
-	}
-	if req.BaseURL != nil {
-		baseURL := strings.TrimSpace(*req.BaseURL)
-		if baseURL == "" {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "base_url 不能为空")
-		}
-		if !botValidBaseURL(baseURL) {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "base_url 必须是 http(s) 地址")
-		}
-		bot.BaseURL = baseURL
-	}
-	if req.Model != nil {
-		modelName := strings.TrimSpace(*req.Model)
-		if modelName == "" {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "model 不能为空")
-		}
-		bot.Model = modelName
-	}
+	// key 加密在事务外完成：加密不打库，提前做掉，事务闭包内不引入
+	// 非事务调用。
+	var newCipher []byte
+	var newLast4 string
 	if req.APIKey != nil {
 		apiKey := strings.TrimSpace(*req.APIKey)
 		if apiKey == "" {
@@ -322,18 +290,69 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 		if err != nil {
 			return nil, err
 		}
-		bot.APIKeyEncrypted = cipher
-		bot.APIKeyLast4 = last4
+		newCipher, newLast4 = cipher, last4
 	}
 
-	bot.UpdatedAt = time.Now().UTC()
-	if err := s.bots.UpdateConfig(bot); err != nil {
-		return nil, errs.ErrInternal
+	var updated *model.Bot
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		bot, err := repository.NewBotRepository(tx).FindByIDAndUser(botID, userID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotNotFound
+			}
+			return errs.ErrInternal
+		}
+
+		personaChanged := false
+		if req.Name != nil {
+			name := strings.TrimSpace(*req.Name)
+			if name == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "name 不能为空")
+			}
+			bot.Name = name
+		}
+		if req.PersonaPrompt != nil && *req.PersonaPrompt != bot.PersonaPrompt {
+			bot.PersonaPrompt = *req.PersonaPrompt
+			bot.SystemPromptText = buildBotSystemPrompt(bot.PersonaPrompt)
+			bot.PromptRevision++
+			bot.PlatformPromptVersion = botPlatformPromptVersion
+			personaChanged = true
+		}
+		if req.BaseURL != nil {
+			baseURL := strings.TrimSpace(*req.BaseURL)
+			if baseURL == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "base_url 不能为空")
+			}
+			if !botValidBaseURL(baseURL) {
+				return errs.New(errs.ErrInvalidParams.Code, "base_url 必须是 http(s) 地址")
+			}
+			bot.BaseURL = baseURL
+		}
+		if req.Model != nil {
+			modelName := strings.TrimSpace(*req.Model)
+			if modelName == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "model 不能为空")
+			}
+			bot.Model = modelName
+		}
+		if req.APIKey != nil {
+			bot.APIKeyEncrypted = newCipher
+			bot.APIKeyLast4 = newLast4
+		}
+
+		bot.UpdatedAt = time.Now().UTC()
+		if err := repository.NewBotRepository(tx).UpdateConfigTx(tx, bot, personaChanged); err != nil {
+			return errs.ErrInternal
+		}
+		updated = bot
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
 	}
-	_ = personaChanged
 	// 地址或模型可能已变：后台 best-effort 刷新窗口缓存，不阻塞响应。
-	s.refreshBotModelWindowAsync(bot.ID)
-	resp := s.botResponseOf(bot)
+	s.refreshBotModelWindowAsync(updated.ID)
+	resp := s.botResponseOf(updated)
 	return &resp, nil
 }
 

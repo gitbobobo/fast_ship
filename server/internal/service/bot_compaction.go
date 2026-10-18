@@ -87,9 +87,16 @@ type botBoundarySnapshot struct {
 	PromptRevision         int64
 	PlatformPromptVersion  int64
 	PersonaPrompt          string
-	Generation             int64
-	NeedActivate           bool
-	AfterTokens            int64
+	// SourcePromptRevision / SourcePersonaPrompt 是构造快照时读到的库内行上的
+	// 提示词来源水位。SystemPromptText 与验收用的 AfterTokens 都由这一行派生，
+	// 是「读-建-发布」之间不可分割的负载：发布时重读行比对，来源已变（人设
+	// 编辑或并发激活）就整轮按 prompt_changed 作废，不能沿用旧快照的验收
+	// 结果覆盖库里的新提示词。
+	SourcePromptRevision int64
+	SourcePersonaPrompt  string
+	Generation           int64
+	NeedActivate         bool
+	AfterTokens          int64
 	// FixedTokens 是同一投影仅清空摘要正文后的体积（F 口径）。它与
 	// AfterTokens 出自同一次物化（见 estimateSnapshotTokensPair）。
 	FixedTokens int64
@@ -462,9 +469,42 @@ func (s *BotService) runCompactionCycle(ctx context.Context, bot *model.Bot, run
 		return compactionOut(maintRun, false, nil), errContextCompactionFailed
 	}
 
-	var newGen int64
+	newGen, publishErr := s.publishCompaction(bot, maintRun, plan, status, summaryText, manifest, foldedJSON, newThrough, snap, errCode, errMsg)
+	if publishErr != nil {
+		return compactionOut(maintRun, false, nil), publishErr
+	}
+	snap.Generation = newGen
+	s.installBoundarySnapshot(bot, snap)
+	return compactionOut(maintRun, true, snap), nil
+}
+
+// publishCompaction 把压缩结果落库并发布新投影；成功返回新 generation，冲突
+// （generation CAS 落空、提示词来源变更）按冲突失败落账并返回错误。
+//
+// 提示词快照是「读-建-发布」之间不可分割的负载：system_prompt_text 与验收用
+// 的 AfterTokens 都由快照来源行派生，发布事务内重读行比对来源水位，不一致
+// 说明来源已变（人设编辑或并发激活递增了 revision），本轮验收结果不再对应
+// 库里的提示词，按 prompt_changed 整轮作废重来——绝不沿用旧快照的验收结果
+// 覆盖新提示词。bot 副本始终按事务内行对齐，冲突时 freeze 也不会装上库里
+// 不存在的前缀。
+func (s *BotService) publishCompaction(bot *model.Bot, maintRun *model.BotMaintenanceRun, plan *botCompactionPlan,
+	status model.BotCompactionStatus, summaryText, manifest, foldedJSON string, newThrough int64,
+	snap *botBoundarySnapshot, errCode, errMsg string) (int64, error) {
 	publishAt := s.now()
+	var newGen int64
 	publishErr := s.db.Transaction(func(tx *gorm.DB) error {
+		fresh, err := repository.NewBotRepository(tx).Get(bot.ID)
+		if err != nil {
+			return err
+		}
+		bot.SystemPromptText = fresh.SystemPromptText
+		bot.PromptRevision = fresh.PromptRevision
+		bot.PlatformPromptVersion = fresh.PlatformPromptVersion
+		bot.PersonaPrompt = fresh.PersonaPrompt
+		bot.ToolsetVersion = fresh.ToolsetVersion
+		if fresh.PersonaPrompt != snap.SourcePersonaPrompt || fresh.PromptRevision != snap.SourcePromptRevision {
+			return botCompactionFail(errContextCompactionFailed, "prompt_changed", "压缩期间机器人提示词已更新，本轮压缩作废")
+		}
 		var txErr error
 		newGen, txErr = repository.NewBotContextRepository(tx).PublishTx(
 			tx, bot.ID, plan.State.Generation, newThrough, summaryText, manifest, foldedJSON, publishAt)
@@ -478,17 +518,19 @@ func (s *BotService) runCompactionCycle(ctx context.Context, bot *model.Bot, run
 		if err := s.finishMaintenanceRunTx(tx, maintRun, model.BotMaintenanceSucceeded, "", ""); err != nil {
 			return err
 		}
-		bot.PersonaPrompt = snap.PersonaPrompt
 		return s.activateToolsetWithPromptTx(tx, bot, snap.SystemPromptText, snap.PromptRevision)
 	})
 	if publishErr != nil {
-		s.finishMaintenanceRun(maintRun, model.BotMaintenanceFailed, "generation_conflict", botErrMessage(publishErr))
-		s.recordCompaction(bot, maintRun, plan, model.BotCompactionNoGain, "", "", foldedJSON, 0, "generation_conflict", botErrMessage(publishErr))
-		return compactionOut(maintRun, false, nil), publishErr
+		code, msg := "generation_conflict", botErrMessage(publishErr)
+		var ce *botCompactionError
+		if errors.As(publishErr, &ce) {
+			code, msg = ce.Code, ce.Message
+		}
+		s.finishMaintenanceRun(maintRun, model.BotMaintenanceFailed, code, msg)
+		s.recordCompaction(bot, maintRun, plan, model.BotCompactionNoGain, "", "", foldedJSON, 0, code, msg)
+		return 0, publishErr
 	}
-	snap.Generation = newGen
-	s.installBoundarySnapshot(bot, snap)
-	return compactionOut(maintRun, true, snap), nil
+	return newGen, nil
 }
 
 // planCompaction 计算压缩计划：安全切点保护最近 N 个用户轮与 assistant 块，
@@ -847,6 +889,8 @@ func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPl
 		PromptRevision:         rev,
 		PlatformPromptVersion:  plat,
 		PersonaPrompt:          persona,
+		SourcePromptRevision:   fresh.PromptRevision,
+		SourcePersonaPrompt:    fresh.PersonaPrompt,
 		Generation:             plan.State.Generation + 1,
 		NeedActivate:           needActivate,
 	}
@@ -1576,63 +1620,47 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 
 // ---------- 工具集版本激活与告知 ----------
 
-// refreshBotPromptState 按库里最新行回填提示词/工具集相关字段（尽力而为）。
-// 并发 run 各自持有一份激活前的独立 bot 副本；激活完成（无论自己还是别的 run
-// 做的）后副本可能落后于库里的水位，不刷新就会把旧系统提示词与旧工具集冻结
-// 进整个 run。只覆盖这 5 个字段，Model/BaseURL/APIKeyEncrypted 的冻结语义
-// 属于 captureRunFreeze，不在此改动。读库失败直接返回、不阻塞 run：激活是
-// 尽力而为的升级（调用处失败只降级记日志），副本沿用旧值，留待下一次重启
-// 边界重试。
-func (s *BotService) refreshBotPromptState(bot *model.Bot) {
-	fresh, err := s.bots.Get(bot.ID)
-	if err != nil {
-		return
-	}
-	bot.SystemPromptText = fresh.SystemPromptText
-	bot.PromptRevision = fresh.PromptRevision
-	bot.PlatformPromptVersion = fresh.PlatformPromptVersion
-	bot.PersonaPrompt = fresh.PersonaPrompt
-	bot.ToolsetVersion = fresh.ToolsetVersion
-}
-
-func (s *BotService) activateOnProcessStart(bot *model.Bot) error {
-	stale := bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion
-	s.rt.mu.Lock()
-	done := s.rt.activated[bot.ID]
-	s.rt.mu.Unlock()
-	if done {
-		// 已激活的早退：副本版本已是最新时不必读库，落后才按库里最新行补齐。
-		if stale {
-			s.refreshBotPromptState(bot)
+// activateBotPrompt 在 run 入口把该机器人的提示词/工具集水位推进到当前版本
+// （主线与定时任务共用）。读行 → 判 stale → 按该行人设重建提示词 → 递增
+// revision → 写回，全部收进同一个短事务；生产库 SetMaxOpenConns(1) 让事务内
+// 的读-改-写与其它写者天然串行，因此调用方持有的副本过期也写不坏库——持久
+// 化的提示词总是由事务内读到的行生成，事务结束后这份状态原样复制给本次 run
+// 的副本。每次 run 一个短事务：版本已最新时只有一次 SELECT、不写库，不再
+// 需要进程内的激活缓存与事务后按库补读。
+func (s *BotService) activateBotPrompt(bot *model.Bot) error {
+	now := s.now()
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		repo := repository.NewBotRepository(tx)
+		fresh, err := repo.Get(bot.ID)
+		if err != nil {
+			return err
 		}
+		if fresh.ToolsetVersion < botToolsetVersion || fresh.PlatformPromptVersion < botPlatformPromptVersion {
+			prompt := buildBotSystemPrompt(fresh.PersonaPrompt)
+			rev := fresh.PromptRevision + 1
+			ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
+			if err != nil {
+				return err
+			}
+			if ok {
+				fresh.SystemPromptText = prompt
+				fresh.PromptRevision = rev
+				fresh.ToolsetVersion = botToolsetVersion
+				fresh.PlatformPromptVersion = botPlatformPromptVersion
+			} else {
+				// 单连接串行下 CAS 不应落空；万一命中 0 行，重读一次以库内行为准。
+				if again, gerr := repo.Get(bot.ID); gerr == nil {
+					fresh = again
+				}
+			}
+		}
+		bot.SystemPromptText = fresh.SystemPromptText
+		bot.PromptRevision = fresh.PromptRevision
+		bot.PlatformPromptVersion = fresh.PlatformPromptVersion
+		bot.PersonaPrompt = fresh.PersonaPrompt
+		bot.ToolsetVersion = fresh.ToolsetVersion
 		return nil
-	}
-	if !stale {
-		s.rt.mu.Lock()
-		s.rt.activated[bot.ID] = true
-		s.rt.mu.Unlock()
-		return nil
-	}
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		return s.activateToolsetTx(tx, bot)
 	})
-	if err != nil {
-		return err
-	}
-	// CAS 未命中：另一并发 run 已先把水位推到最新，本事务的条件更新命中 0 行、
-	// 没有回写副本（activateToolsetWithPromptTx 只在 ok=true 时写回），此处副本
-	// 仍是激活前的旧行，须按库里最新行补齐，否则本 run 会冻结旧提示词/旧工具集。
-	if bot.ToolsetVersion < botToolsetVersion || bot.PlatformPromptVersion < botPlatformPromptVersion {
-		s.refreshBotPromptState(bot)
-	}
-	s.rt.mu.Lock()
-	s.rt.activated[bot.ID] = true
-	s.rt.mu.Unlock()
-	return nil
-}
-
-func (s *BotService) activateToolsetTx(tx *gorm.DB, bot *model.Bot) error {
-	return s.activateToolsetWithPromptTx(tx, bot, "", 0)
 }
 
 func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, bot *model.Bot, prompt string, rev int64) error {

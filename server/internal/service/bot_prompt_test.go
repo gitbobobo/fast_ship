@@ -56,8 +56,8 @@ func TestBotSystemPromptStyleSection(t *testing.T) {
 }
 
 // TestBotPlatformPromptOnlyUpgrade 平台提示词单独升级（v5）的存量机器人：
-// 工具集已是最新版本时，重启激活只重建提示词并恰好 +1 prompt_revision，
-// 工具集与版本字节不动；激活进程内幂等，重复调用不再递增。
+// 工具集已是最新版本时，激活只重建提示词并恰好 +1 prompt_revision，工具集
+// 与版本字节不动；激活按行幂等，重复调用不再递增。
 func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "ppup5")
@@ -80,12 +80,8 @@ func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
 		t.Fatalf("build before: %v", err)
 	}
 
-	env.bots.rt.mu.Lock()
-	delete(env.bots.rt.activated, bot.ID)
-	env.bots.rt.mu.Unlock()
-
 	revBefore := botRow.PromptRevision
-	if err := env.bots.activateOnProcessStart(botRow); err != nil {
+	if err := env.bots.activateBotPrompt(botRow); err != nil {
 		t.Fatalf("activate: %v", err)
 	}
 	fresh, _ := env.bots.bots.Get(bot.ID)
@@ -102,8 +98,8 @@ func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
 		t.Fatalf("系统提示词应重建为含对话风格的新文案")
 	}
 
-	// 激活进程内幂等：再次调用不再递增 revision。
-	if err := env.bots.activateOnProcessStart(fresh); err != nil {
+	// 激活幂等：版本已最新的第二次调用不写库、不再递增 revision。
+	if err := env.bots.activateBotPrompt(fresh); err != nil {
 		t.Fatalf("activate again: %v", err)
 	}
 	again, _ := env.bots.bots.Get(bot.ID)
@@ -121,196 +117,223 @@ func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
 	}
 }
 
-// TestBotActivateRefreshesConcurrentStaleCopy 并发重复激活：两个 run 同时启动
-// 时各持一份激活前的独立 bot 副本，首个 run 完成激活后，后走
-// activateOnProcessStart 的副本必须在「已激活」早退分支从库里刷新提示词与
-// 工具集字段，否则会带着旧系统提示词与旧工具集冻结整个 run。凭证/模型字段
-// 不属于本次刷新（冻结语义在 captureRunFreeze），必须原样保留。
-func TestBotActivateRefreshesConcurrentStaleCopy(t *testing.T) {
+// TestBotActivateRebuildsPromptFromLibraryRow 第 3 轮云端审查缺陷的回归：
+// 调用方副本过期时，激活必须以事务内读到的库内行为准生成并持久化提示词，
+// 而不是用副本上的人设/水位拼内容写库。场景：先持有一份人设 A 的旧副本，
+// 再用 service 的 Update 保存人设 B（递增 revision），然后用旧副本走激活——
+// 激活不得把 A 的提示词写回、不得让 revision 回退。断言对象是库内行，
+// 不是副本。凭证/模型字段不属于激活语义，必须原样保留。
+func TestBotActivateRebuildsPromptFromLibraryRow(t *testing.T) {
 	env := setupBotTestEnv(t)
-	userID := createBotTestUser(t, env.db, "concact")
-	bot := env.createBot(t, userID)
-	const oldPrompt = "旧激活前文案：不含对话风格段落"
+	userID := createBotTestUser(t, env.db, "librow")
+	const personaA = "旧人设A_MARKER_DO_NOT_RESURRECT：回答保持简短。"
+	bot, err := env.bots.Create(userID, &CreateBotRequest{
+		Name: "librow", PersonaPrompt: personaA,
+		BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-test-abcdef123456",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 库内行降级到 toolset v3 / platform v4：激活有活可干。
 	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
 		"toolset_version":         3,
 		"platform_prompt_version": 4,
-		"system_prompt_text":      oldPrompt,
 	}).Error; err != nil {
-		t.Fatalf("stale bot: %v", err)
+		t.Fatalf("stale row: %v", err)
 	}
-
-	env.bots.rt.mu.Lock()
-	delete(env.bots.rt.activated, bot.ID)
-	env.bots.rt.mu.Unlock()
-
-	// 两个并发 run 各自在激活前加载的独立副本。
-	a, err := env.bots.bots.Get(bot.ID)
+	// 激活前加载的旧副本（人设 A、旧水位）。
+	stale, err := env.bots.bots.Get(bot.ID)
 	if err != nil {
-		t.Fatalf("load a: %v", err)
+		t.Fatalf("load stale copy: %v", err)
 	}
-	b, err := env.bots.bots.Get(bot.ID)
+	if stale.PersonaPrompt != personaA {
+		t.Fatalf("旧副本应持人设 A: %q", stale.PersonaPrompt)
+	}
+	// 外部编辑：Update 写入人设 B 并递增 revision。
+	const personaB = "新人设B_MARKER_MUST_WIN：回答带上示例。"
+	updated, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{PersonaPrompt: strPtrBot(personaB)})
 	if err != nil {
-		t.Fatalf("load b: %v", err)
+		t.Fatalf("update persona: %v", err)
 	}
-	if a == b {
-		t.Fatalf("两份副本必须是独立加载的")
+	revAfterUpdate := updated.PromptRevision
+
+	// 用旧副本（人设 A）调激活：持久化内容必须来自事务内读到的 B 行。
+	modelBefore, urlBefore := stale.Model, stale.BaseURL
+	keyBefore := append([]byte(nil), stale.APIKeyEncrypted...)
+	if err := env.bots.activateBotPrompt(stale); err != nil {
+		t.Fatalf("activate: %v", err)
 	}
 
-	// a 完成激活（写库 + 置 rt.activated）。
-	if err := env.bots.activateOnProcessStart(a); err != nil {
-		t.Fatalf("activate a: %v", err)
-	}
-	revAfterA := a.PromptRevision
-
-	// b 走早退分支：提示词/工具集字段应从库里刷新。
-	modelBefore, urlBefore := b.Model, b.BaseURL
-	keyBefore := append([]byte(nil), b.APIKeyEncrypted...)
-	if err := env.bots.activateOnProcessStart(b); err != nil {
-		t.Fatalf("activate b: %v", err)
-	}
-	if !strings.Contains(b.SystemPromptText, "对话风格") || strings.Contains(b.SystemPromptText, oldPrompt) {
-		t.Fatalf("b 的系统提示词应刷新为含对话风格的新文案")
-	}
-	if b.PlatformPromptVersion != botPlatformPromptVersion {
-		t.Fatalf("b 的平台提示词版本应刷新到 %d，实得 %d", botPlatformPromptVersion, b.PlatformPromptVersion)
-	}
-	if b.ToolsetVersion != botToolsetVersion {
-		t.Fatalf("b 的工具集版本应刷新到 %d，实得 %d", botToolsetVersion, b.ToolsetVersion)
-	}
-	if b.PromptRevision != revAfterA {
-		t.Fatalf("b 的 prompt_revision 应与 a 激活后一致: %d vs %d", b.PromptRevision, revAfterA)
-	}
-	if b.Model != modelBefore || b.BaseURL != urlBefore || !bytes.Equal(b.APIKeyEncrypted, keyBefore) {
-		t.Fatalf("凭证/模型字段不得被刷新改动")
-	}
-
-	// 用 b 构建请求：冻结出去的系统消息必须是新提示词、工具集是新版本。
-	run := botFixtureRun(t, env, b)
-	built, err := env.bots.buildRunContext(b, run)
-	if err != nil {
-		t.Fatalf("build run context: %v", err)
-	}
-	raw, err := json.Marshal(built.Request.Messages[0])
-	if err != nil {
-		t.Fatalf("marshal system message: %v", err)
-	}
-	var wire struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		t.Fatalf("unmarshal system message: %v", err)
-	}
-	if wire.Role != "system" || !strings.Contains(wire.Content, "对话风格") || strings.Contains(wire.Content, oldPrompt) {
-		t.Fatalf("冻结出去的系统消息应为含对话风格的新提示词: role=%s", wire.Role)
-	}
-	if built.ToolsetVersion != botToolsetVersion {
-		t.Fatalf("构建出的工具集版本应为 %d，实得 %d", botToolsetVersion, built.ToolsetVersion)
-	}
-}
-
-// TestBotActivateCASLoserRefreshesStaleCopy 并发激活的 CAS 输家区间：两个 run
-// 都在 rt.activated 置位前进入 activateOnProcessStart，输家的 ActivateToolsetTx
-// 条件更新命中 0 行、副本不被写回，随后仍会置激活标志并冻结 run。输家必须在
-// 事务后按库里最新行补齐提示词/工具集字段，且不得再递增 prompt_revision。
-// 凭证/模型字段不属于本次刷新（冻结语义在 captureRunFreeze），必须原样保留。
-func TestBotActivateCASLoserRefreshesStaleCopy(t *testing.T) {
-	env := setupBotTestEnv(t)
-	userID := createBotTestUser(t, env.db, "casloser")
-	bot := env.createBot(t, userID)
-	const oldPrompt = "旧并发文案：不含对话风格段落"
-	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
-		"toolset_version":         3,
-		"platform_prompt_version": 4,
-		"system_prompt_text":      oldPrompt,
-	}).Error; err != nil {
-		t.Fatalf("stale bot: %v", err)
-	}
-
-	env.bots.rt.mu.Lock()
-	delete(env.bots.rt.activated, bot.ID)
-	env.bots.rt.mu.Unlock()
-
-	// 两个并发 run 各自在激活前加载的独立副本。
-	a, err := env.bots.bots.Get(bot.ID)
-	if err != nil {
-		t.Fatalf("load a: %v", err)
-	}
-	b, err := env.bots.bots.Get(bot.ID)
-	if err != nil {
-		t.Fatalf("load b: %v", err)
-	}
-
-	// a 赢得激活：写库到最新水位并置 rt.activated。
-	if err := env.bots.activateOnProcessStart(a); err != nil {
-		t.Fatalf("activate a: %v", err)
-	}
-	revAfterA := a.PromptRevision
-
-	// 模拟两个 run 都没看到激活标志就进入激活：清掉标志后让 b 重走激活路径。
-	env.bots.rt.mu.Lock()
-	delete(env.bots.rt.activated, bot.ID)
-	env.bots.rt.mu.Unlock()
-
-	modelBefore, urlBefore := b.Model, b.BaseURL
-	keyBefore := append([]byte(nil), b.APIKeyEncrypted...)
-	if err := env.bots.activateOnProcessStart(b); err != nil {
-		t.Fatalf("activate b: %v", err)
-	}
-	if !strings.Contains(b.SystemPromptText, "对话风格") || strings.Contains(b.SystemPromptText, oldPrompt) {
-		t.Fatalf("b 的系统提示词应刷新为含对话风格的新文案")
-	}
-	if b.PlatformPromptVersion != botPlatformPromptVersion {
-		t.Fatalf("b 的平台提示词版本应刷新到 %d，实得 %d", botPlatformPromptVersion, b.PlatformPromptVersion)
-	}
-	if b.ToolsetVersion != botToolsetVersion {
-		t.Fatalf("b 的工具集版本应刷新到 %d，实得 %d", botToolsetVersion, b.ToolsetVersion)
-	}
-	if b.PromptRevision != revAfterA {
-		t.Fatalf("b 的 prompt_revision 应与 a 激活后一致（CAS 输家不得递增）: %d vs %d", b.PromptRevision, revAfterA)
-	}
-	if b.Model != modelBefore || b.BaseURL != urlBefore || !bytes.Equal(b.APIKeyEncrypted, keyBefore) {
-		t.Fatalf("凭证/模型字段不得被刷新改动")
-	}
-
-	// 读库确认 revision 未被输家再次递增，且水位已是最新。
 	fresh, err := env.bots.bots.Get(bot.ID)
 	if err != nil {
 		t.Fatalf("load fresh: %v", err)
 	}
-	if fresh.PromptRevision != revAfterA {
-		t.Fatalf("库里 prompt_revision 不应再递增: %d vs %d", fresh.PromptRevision, revAfterA)
+	if fresh.PersonaPrompt != personaB {
+		t.Fatalf("库内人设应保持 B: %q", fresh.PersonaPrompt)
 	}
-	if fresh.PlatformPromptVersion != botPlatformPromptVersion || fresh.ToolsetVersion != botToolsetVersion {
-		t.Fatalf("库里水位应为最新: toolset=%d prompt=%d", fresh.ToolsetVersion, fresh.PlatformPromptVersion)
+	if want := buildBotSystemPrompt(personaB); fresh.SystemPromptText != want {
+		t.Fatalf("库内系统提示词应按人设 B 重建，不得混入 A 的标记: got=%q", fresh.SystemPromptText)
+	}
+	if strings.Contains(fresh.SystemPromptText, "DO_NOT_RESURRECT") {
+		t.Fatalf("旧副本的人设 A 不得复活进库内提示词")
+	}
+	if fresh.PromptRevision != revAfterUpdate+1 {
+		t.Fatalf("prompt_revision 应为 Update 后 +1: want %d got %d", revAfterUpdate+1, fresh.PromptRevision)
+	}
+	if fresh.ToolsetVersion != botToolsetVersion || fresh.PlatformPromptVersion != botPlatformPromptVersion {
+		t.Fatalf("库内水位应升到最新: toolset=%d platform=%d", fresh.ToolsetVersion, fresh.PlatformPromptVersion)
+	}
+	// 副本五个字段与库内行一致，冻结出去的才是库内真实状态。
+	if stale.PersonaPrompt != fresh.PersonaPrompt ||
+		stale.SystemPromptText != fresh.SystemPromptText ||
+		stale.PromptRevision != fresh.PromptRevision ||
+		stale.PlatformPromptVersion != fresh.PlatformPromptVersion ||
+		stale.ToolsetVersion != fresh.ToolsetVersion {
+		t.Fatalf("激活后副本五字段应与库内行一致: %+v vs %+v", stale, fresh)
+	}
+	if stale.Model != modelBefore || stale.BaseURL != urlBefore || !bytes.Equal(stale.APIKeyEncrypted, keyBefore) {
+		t.Fatalf("凭证/模型字段不属于激活语义，不得被改动")
+	}
+}
+
+// TestBotUpdateRenameKeepsPromptState Update 事务化后的人设列保护：激活把
+// 库内提示词推进到最新后，仅改名/换模型的保存不得把提示词四列
+// （persona_prompt/system_prompt_text/prompt_revision/platform_prompt_version）
+// 一并写回——读行-改-写在同一事务里按列跳过未变的提示词状态，反向撤销
+// 并发激活的路径被关闭。
+func TestBotUpdateRenameKeepsPromptState(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "renamerev")
+	bot, err := env.bots.Create(userID, &CreateBotRequest{
+		Name: "before-rename", PersonaPrompt: "人设保持不变。",
+		BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-test-abcdef123456",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// 降级后激活：库内提示词状态被推进（重建文案、+1 revision）。
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"toolset_version":         3,
+		"platform_prompt_version": 4,
+	}).Error; err != nil {
+		t.Fatalf("stale row: %v", err)
+	}
+	rowBefore, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load before: %v", err)
+	}
+	if err := env.bots.activateBotPrompt(rowBefore); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	activated, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load activated: %v", err)
+	}
+	if activated.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("前置：激活应把工具集推到最新, got %d", activated.ToolsetVersion)
 	}
 
-	env.bots.rt.mu.Lock()
-	activated := env.bots.rt.activated[bot.ID]
-	env.bots.rt.mu.Unlock()
-	if !activated {
-		t.Fatalf("CAS 输家也应置激活标志")
+	// 仅改名保存一次。
+	if _, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{Name: strPtrBot("after-rename")}); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	after, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load after: %v", err)
+	}
+	if after.Name != "after-rename" {
+		t.Fatalf("改名应生效: %q", after.Name)
+	}
+	if after.SystemPromptText != activated.SystemPromptText ||
+		after.PromptRevision != activated.PromptRevision ||
+		after.PlatformPromptVersion != activated.PlatformPromptVersion ||
+		after.PersonaPrompt != activated.PersonaPrompt {
+		t.Fatalf("改名不得回写提示词状态: before(rev=%d plat=%d) after(rev=%d plat=%d)",
+			activated.PromptRevision, activated.PlatformPromptVersion,
+			after.PromptRevision, after.PlatformPromptVersion)
+	}
+	if after.ToolsetVersion != activated.ToolsetVersion {
+		t.Fatalf("改名不得回写工具集水位: %d vs %d", after.ToolsetVersion, activated.ToolsetVersion)
 	}
 
-	// 用 b 构建请求：冻结出去的系统消息必须是新提示词。
-	run := botFixtureRun(t, env, b)
-	built, err := env.bots.buildRunContext(b, run)
+	// 换模型同样不碰提示词列。
+	if _, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{Model: strPtrBot("other-model")}); err != nil {
+		t.Fatalf("change model: %v", err)
+	}
+	afterModel, err := env.bots.bots.Get(bot.ID)
 	if err != nil {
-		t.Fatalf("build run context: %v", err)
+		t.Fatalf("load after model: %v", err)
 	}
-	raw, err := json.Marshal(built.Request.Messages[0])
+	if afterModel.Model != "other-model" {
+		t.Fatalf("换模型应生效: %q", afterModel.Model)
+	}
+	if afterModel.SystemPromptText != activated.SystemPromptText || afterModel.PromptRevision != activated.PromptRevision {
+		t.Fatalf("换模型不得回写提示词状态: rev %d vs %d", afterModel.PromptRevision, activated.PromptRevision)
+	}
+}
+
+// TestBotToolsetFrozenWithinRun 工具集纳入 run 冻结：主线 run 入口把库内
+// toolset_version 钉进 freeze 后，外部（并发 schedule 激活）把库推到新版本，
+// 本 run 构建上下文仍用冻结版本；只有压缩边界（acceptCompactionBoundary）
+// 携带的新快照才允许换。sessionContextOf 不再活读 bots.toolset_version。
+func TestBotToolsetFrozenWithinRun(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "tsfreeze")
+	bot := env.createBot(t, userID)
+	// 入口时库内是 v3：入口激活按行把水位与副本同步到 v3 行的语义由
+	// activateBotPrompt 覆盖；这里直接取 v3 行的副本模拟已钉死的 run。
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Update("toolset_version", 3).Error; err != nil {
+		t.Fatalf("downgrade: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
 	if err != nil {
-		t.Fatalf("marshal system message: %v", err)
+		t.Fatalf("load bot: %v", err)
 	}
-	var wire struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+	if botRow.ToolsetVersion != 3 {
+		t.Fatalf("前置：副本应钉在 v3, got %d", botRow.ToolsetVersion)
 	}
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		t.Fatalf("unmarshal system message: %v", err)
+	run := botFixtureRun(t, env, botRow)
+	freeze := captureRunFreeze(botRow, run)
+	applyRunCredentialFreeze(botRow, freeze)
+	applyRunPromptFreeze(botRow, freeze)
+
+	// 外部把库推到 v4（模拟并发 schedule 激活直接写库）。
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Update("toolset_version", botToolsetVersion).Error; err != nil {
+		t.Fatalf("external activation: %v", err)
 	}
-	if wire.Role != "system" || !strings.Contains(wire.Content, "对话风格") || strings.Contains(wire.Content, oldPrompt) {
-		t.Fatalf("冻结出去的系统消息应为含对话风格的新提示词: role=%s", wire.Role)
+	// run 内每次迭代按 freeze 恢复副本，再构建：工具集必须仍是 3。
+	applyRunPromptFreeze(botRow, freeze)
+	built, err := env.bots.buildRunContext(botRow, run)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if built.ToolsetVersion != 3 {
+		t.Fatalf("run 内工具集应冻结在 3，实得 %d", built.ToolsetVersion)
+	}
+
+	// 压缩边界：快照带 v4，接受后才换，且 freeze 一并推进。
+	snap := &botBoundarySnapshot{
+		Toolset:               botToolsetVersionOf(botToolsetVersion),
+		ToolsetVersion:        botToolsetVersion,
+		SystemPromptText:      botRow.SystemPromptText,
+		PromptRevision:        botRow.PromptRevision,
+		PlatformPromptVersion: botRow.PlatformPromptVersion,
+		PersonaPrompt:         botRow.PersonaPrompt,
+		Generation:            1,
+		MemoryVersions:        map[string]int64{},
+	}
+	env.bots.acceptCompactionBoundary(botRow, &freeze, snap)
+	if botRow.ToolsetVersion != botToolsetVersion || freeze.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("压缩边界后工具集应升级到 %d: bot=%d freeze=%d",
+			botToolsetVersion, botRow.ToolsetVersion, freeze.ToolsetVersion)
+	}
+	builtAfter, err := env.bots.buildRunContext(botRow, run)
+	if err != nil {
+		t.Fatalf("build after boundary: %v", err)
+	}
+	if builtAfter.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("压缩边界后构建应使用新工具集，实得 %d", builtAfter.ToolsetVersion)
 	}
 }
 

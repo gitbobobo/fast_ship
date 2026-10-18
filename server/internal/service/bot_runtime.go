@@ -29,8 +29,6 @@ type botRuntimeState struct {
 	// 进程重启才刷新（见 frozenMemorySnapshot）。
 	memMu    sync.Mutex
 	memSnaps map[string]*botFrozenMemory
-	// activated 标记本进程已对该机器人做过工具/提示词激活（重启后首次运行）。
-	activated map[string]bool
 
 	// usageBase 是最近一次成功主线请求的实际投影基线（进程内）：用前缀
 	// JSON 追加关系与序列化字节差做增量估算；重启或基线失效则整包回退。
@@ -50,7 +48,6 @@ func newBotRuntimeState() *botRuntimeState {
 	return &botRuntimeState{
 		active:    map[string]*botActivation{},
 		memSnaps:  map[string]*botFrozenMemory{},
-		activated: map[string]bool{},
 		usageBase: map[string]*botUsageBaseline{},
 	}
 }
