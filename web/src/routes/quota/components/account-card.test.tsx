@@ -27,6 +27,7 @@ function makeAccount(overrides: Partial<QuotaAccount> = {}): QuotaAccount {
     last_success_at: "2026-10-17T04:00:00Z",
     windows: [],
     balance: null,
+    note: "",
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
     ...overrides,
@@ -149,6 +150,39 @@ describe("QuotaAccountCard", () => {
     expect(screen.getByText("HTTP 502 上游服务异常")).toBeInTheDocument();
     // windows 为空时不渲染兜底空态文案以外的数据
     expect(screen.getByText("还没有额度数据")).toBeInTheDocument();
+  });
+
+  it("note 非空时在窗口/余额下方展示一行补充说明", () => {
+    const account = makeAccount({
+      balance: { label: "钱包余额", amount: 1.5, currency: "USD" },
+      note: "窗口用尽后扣钱包",
+    });
+    const { container } = render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+
+    const note = screen.getByTestId("quota-account-note");
+    expect(note).toHaveTextContent("窗口用尽后扣钱包");
+    expect(note).toHaveClass("text-muted-foreground");
+    // 位置在余额行之后、底部「数据时间」行之前
+    const text = container.textContent ?? "";
+    expect(text.indexOf("1.5 USD")).toBeLessThan(
+      text.indexOf("窗口用尽后扣钱包"),
+    );
+    expect(text.indexOf("窗口用尽后扣钱包")).toBeLessThan(
+      text.indexOf("数据时间"),
+    );
+  });
+
+  it("note 为空串时不渲染补充说明", () => {
+    render(
+      <QuotaAccountCard
+        account={makeAccount({ note: "" })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("quota-account-note")).toBeNull();
   });
 
   it("never renders credential plaintext", () => {

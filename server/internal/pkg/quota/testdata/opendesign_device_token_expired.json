@@ -1,0 +1,12 @@
+{
+  "deviceId": "dev_00000000000000000000000",
+  "userCode": "ABCDEF",
+  "status": "expired",
+  "cliVersion": "fast-ship",
+  "host": "fast-ship",
+  "profile": "prod",
+  "expiresAt": "2026-10-18T13:35:00.000Z",
+  "controlKey": null,
+  "runtimeKey": null,
+  "user": null
+}

@@ -20,10 +20,20 @@ export interface QuotaProbeInput {
   credentials: Record<string, string>;
 }
 
+/** POST /api/quota/device-authorizations 请求体（INT-117） */
+export interface StartQuotaDeviceAuthorizationInput {
+  provider: string;
+  label: string;
+  /** 编辑已有账号时带上：批准后整组替换该账号凭据而不是新建（A5） */
+  account_id?: string;
+}
+
 /** 探测与手动刷新会真实访问供应商接口（服务端默认 20s 超时），ky 默认 10s 不够。 */
 export const QUOTA_LIVE_REQUEST_TIMEOUT_MS = 30_000;
 
 const accountPath = (id: string) => `quota/accounts/${encodeURIComponent(id)}`;
+const deviceAuthPath = (id: string) =>
+  `quota/device-authorizations/${encodeURIComponent(id)}`;
 
 export const quotaApi = {
   listProviders: () =>
@@ -84,5 +94,34 @@ export const quotaApi = {
           retry: 0,
         })
         .json<ApiResponse<QuotaProbe>>(),
+    ),
+
+  // 设备授权（INT-117）：起授权是真实上游请求；轮询 GET 可能顺带向上游
+  // 换密钥建号，两者都沿用真实上游请求的超时与禁重试约定。
+  // DELETE 只删服务端内存会话，不碰上游，用默认超时即可。
+  startDeviceAuthorization: (input: StartQuotaDeviceAuthorizationInput) =>
+    decodeApiError(
+      api
+        .post("quota/device-authorizations", {
+          json: input,
+          timeout: QUOTA_LIVE_REQUEST_TIMEOUT_MS,
+          retry: 0,
+        })
+        .json<ApiResponse<QuotaDeviceAuthorization>>(),
+    ),
+
+  getDeviceAuthorization: (id: string) =>
+    decodeApiError(
+      api
+        .get(deviceAuthPath(id), {
+          timeout: QUOTA_LIVE_REQUEST_TIMEOUT_MS,
+          retry: 0,
+        })
+        .json<ApiResponse<QuotaDeviceAuthorization>>(),
+    ),
+
+  cancelDeviceAuthorization: (id: string) =>
+    decodeApiError(
+      api.delete(deviceAuthPath(id)).json<ApiResponse<null>>(),
     ),
 };

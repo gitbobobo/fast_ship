@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "workspaceId": "ws_000000000000000000000000",
+  "workspaceMemberId": "wm_00000000000000000000000",
+  "modelId": null,
+  "generatedAt": "2026-10-18T12:20:00.298Z",
+  "balanceUsd": "1.5000",
+  "codingPlan": {
+    "workspaceId": "ws_000000000000000000000000",
+    "generatedAt": "2026-10-18T12:20:00.224Z",
+    "eligible": true,
+    "tier": "go",
+    "windows": [
+      {
+        "policyId": "model_limit_policy_0",
+        "durationSeconds": 18000,
+        "resetMode": "anchored_recurring",
+        "usedCredits": "16610",
+        "limitCredits": "50000",
+        "remainingCredits": "33390",
+        "windowStart": "2026-10-18T08:55:00.000Z",
+        "resetsAt": "2026-10-18T13:55:00.000Z"
+      },
+      {
+        "policyId": "model_limit_policy_1",
+        "durationSeconds": 604800,
+        "resetMode": "anchored_recurring",
+        "usedCredits": "16610",
+        "limitCredits": "150000",
+        "remainingCredits": "133390",
+        "windowStart": "2026-10-18T08:55:00.000Z",
+        "resetsAt": "2026-10-25T08:55:00.000Z"
+      }
+    ]
+  },
+  "modelCovered": null,
+  "funding": "wallet"
+}

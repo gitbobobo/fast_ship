@@ -17,6 +17,7 @@ const OK_RESULT: QuotaProbe = {
     },
   ],
   balance: null,
+  note: "",
   error: "",
   detail: "",
 };
@@ -43,6 +44,19 @@ describe("ProbeResultPanel", () => {
     const panel = screen.getByTestId("quota-probe-result");
     expect(panel).toHaveTextContent("已连通，但未返回套餐名");
     expect(panel).not.toHaveTextContent("个额度窗口");
+  });
+
+  it("成功且带 note 时一并展示补充说明", () => {
+    render(
+      <ProbeResultPanel
+        result={{ ...OK_RESULT, note: "无 Design Plan 额度，按钱包计费" }}
+        error={null}
+        isError={false}
+      />,
+    );
+    const panel = screen.getByTestId("quota-probe-result");
+    expect(panel).toHaveTextContent("凭据有效");
+    expect(panel).toHaveTextContent("无 Design Plan 额度，按钱包计费");
   });
 
   it("失败时显示服务端原因与 detail 诊断", () => {

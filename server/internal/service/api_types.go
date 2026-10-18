@@ -154,12 +154,14 @@ type (
 	AutomationTriggerContext = api.AutomationTriggerContext
 
 	// quota（INT-109）
-	CreateQuotaAccountRequest   = api.CreateQuotaAccountRequest
-	UpdateQuotaAccountRequest   = api.UpdateQuotaAccountRequest
-	TestQuotaCredentialsRequest = api.TestQuotaCredentialsRequest
-	QuotaAccountResponse        = api.QuotaAccount
-	QuotaProviderResponse       = api.QuotaProvider
-	QuotaProbeResponse          = api.QuotaProbe
+	CreateQuotaAccountRequest            = api.CreateQuotaAccountRequest
+	UpdateQuotaAccountRequest            = api.UpdateQuotaAccountRequest
+	TestQuotaCredentialsRequest          = api.TestQuotaCredentialsRequest
+	QuotaAccountResponse                 = api.QuotaAccount
+	QuotaProviderResponse                = api.QuotaProvider
+	QuotaProbeResponse                   = api.QuotaProbe
+	StartQuotaDeviceAuthorizationRequest = api.StartQuotaDeviceAuthorizationRequest
+	QuotaDeviceAuthorizationResponse     = api.QuotaDeviceAuthorization
 
 	// notifications & automation agent
 	NotificationResponse       = api.Notification

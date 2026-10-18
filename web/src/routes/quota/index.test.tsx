@@ -16,6 +16,9 @@ vi.mock("@/lib/api/quota", () => ({
     deleteAccount: vi.fn(),
     refreshAccount: vi.fn(),
     probe: vi.fn(),
+    startDeviceAuthorization: vi.fn(),
+    getDeviceAuthorization: vi.fn(),
+    cancelDeviceAuthorization: vi.fn(),
   },
 }));
 
@@ -51,6 +54,7 @@ const ACCOUNT: QuotaAccount = {
     },
   ],
   balance: null,
+  note: "",
   created_at: "2026-10-01T00:00:00Z",
   updated_at: "2026-10-01T00:00:00Z",
 };

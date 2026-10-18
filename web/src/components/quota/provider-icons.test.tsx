@@ -10,10 +10,11 @@ const IDS = [
   "codex",
   "devin",
   "factory",
+  "opendesign",
 ];
 
 describe("QuotaProviderIcon", () => {
-  it("7 个供应商图标都用 currentColor 随主题着色", () => {
+  it("8 个供应商图标都用 currentColor 随主题着色", () => {
     for (const id of IDS) {
       const { container, unmount } = render(
         <QuotaProviderIcon provider={id} />,

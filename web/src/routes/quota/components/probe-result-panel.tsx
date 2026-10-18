@@ -38,6 +38,7 @@ export function ProbeResultPanel({
             {result.windows.length > 0 &&
               ` · ${result.windows.length} 个额度窗口`}
           </p>
+          {result.note && <p className="mt-0.5">{result.note}</p>}
         </>
       ) : (
         <>

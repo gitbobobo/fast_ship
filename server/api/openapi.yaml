@@ -2431,6 +2431,126 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/quota/device-authorizations:
+    post:
+      tags: [quota]
+      operationId: startQuotaDeviceAuthorization
+      summary: 发起浏览器设备授权
+      description: |
+        供支持设备授权的供应商（provider.device_authorization = true，目前只有 opendesign），
+        在服务端向上游发起设备授权并建立内存会话，返回 pending 视图；前端拿 user_code 与
+        activation_url 引导用户在浏览器批准，再按 poll_interval_seconds 轮询 GET。
+        不带 account_id 时批准后自动新建额度账号；带上 account_id 则为该已有账号整组换
+        凭据（账号不存在或属于他人返回 40430）。
+        会话只存内存，进程重启即丢，之后 GET 返回 40431。deviceSecret 永不出现在任何响应里。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartQuotaDeviceAuthorizationRequest'
+      responses:
+        '200':
+          description: 已发起（pending）；同时表示上游会话建立成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuotaDeviceAuthorization'
+        '400':
+          description: 参数无效（40001，含空白标签）；供应商未知（40030）；该供应商不支持设备授权（40032）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 要换凭据的目标账号不存在或属于其他用户（40430）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '502':
+          description: 额度供应商授权服务不可用或响应缺关键字段（50204）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/quota/device-authorizations/{id}:
+    get:
+      tags: [quota]
+      operationId: getQuotaDeviceAuthorization
+      summary: 查询设备授权会话状态
+      description: |
+        按会话 ID 查询授权进度；距上次轮询超过 poll_interval_seconds 且仍 pending 时，
+        服务端代为向上游轮询一次。approved 表示已自动创建额度账号（account_id 为新账号 ID）；
+        expired/denied/invalid 为终态，error 给用户可读原因，前端提示重新发起。
+        会话是本人资源，他人的会话与不存在的会话一样返回 40431。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/QuotaDeviceAuthorizationId'
+      responses:
+        '200':
+          description: 会话当前状态（网络抖动或上游 5xx 时保持 pending，前端按节奏再轮询即可）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/QuotaDeviceAuthorization'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 会话不存在、已过期或属于其他用户（40431）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [quota]
+      operationId: cancelQuotaDeviceAuthorization
+      summary: 取消设备授权会话
+      description: 删除内存会话（前端关闭对话框 / 用户取消时调用）；不存在的会话返回 40431。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/QuotaDeviceAuthorizationId'
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: 会话不存在、已过期或属于其他用户（40431）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/dashboard/overview:
     get:
       tags: [dashboard]
@@ -7746,6 +7866,13 @@ components:
       schema:
         type: string
       description: 额度账号 ID（UUID）
+    QuotaDeviceAuthorizationId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 设备授权会话 ID（POST 返回的 id）
     IssueId:
       name: iid
       in: path
@@ -8532,11 +8659,11 @@ components:
           type: string
     QuotaProvider:
       type: object
-      required: [id, name, plan_hint, credential_fields, instructions, warning]
+      required: [id, name, plan_hint, credential_fields, instructions, warning, device_authorization]
       properties:
         id:
           type: string
-          description: 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory）
+          description: 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory / opendesign）
         name:
           type: string
         plan_hint:
@@ -8554,6 +8681,9 @@ components:
         warning:
           type: string
           description: 会话令牌类供应商必填的过期提示；其余为空串
+        device_authorization:
+          type: boolean
+          description: 该供应商是否支持浏览器设备授权获取凭据；true 时前端显示「使用浏览器授权」
     QuotaWindow:
       type: object
       required: [kind, label, used_percent, unit]
@@ -8600,7 +8730,7 @@ components:
           type: string
     QuotaAccount:
       type: object
-      required: [id, provider, provider_name, label, credential_hint, plan_name, status, last_error, fetched_at, last_success_at, windows, balance, created_at, updated_at]
+      required: [id, provider, provider_name, label, credential_hint, plan_name, note, status, last_error, fetched_at, last_success_at, windows, balance, created_at, updated_at]
       properties:
         id:
           type: string
@@ -8617,6 +8747,9 @@ components:
         plan_name:
           type: string
           description: 最近一次成功快照的套餐名；未抓取过为空串
+        note:
+          type: string
+          description: 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无
         status:
           type: string
           enum: [ok, credential_invalid, provider_error, pending]
@@ -8695,13 +8828,16 @@ components:
           $ref: '#/components/schemas/QuotaCredentials'
     QuotaProbe:
       type: object
-      required: [status, plan_name, windows, balance, error, detail]
+      required: [status, plan_name, note, windows, balance, error, detail]
       properties:
         status:
           type: string
           enum: [ok, credential_invalid, provider_error]
         plan_name:
           type: string
+        note:
+          type: string
+          description: 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无
         windows:
           type: array
           items:
@@ -8716,6 +8852,68 @@ components:
         detail:
           type: string
           description: 可选；更细的诊断（HTTP 状态码等），可为空串
+
+    StartQuotaDeviceAuthorizationRequest:
+      type: object
+      required: [provider, label]
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          description: 供应商 id（GET /api/quota/providers 返回的 id）；未知返回 40030，不支持设备授权返回 40032
+          x-oapi-codegen-extra-tags:
+            binding: required
+        label:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 批准后新建额度账号的名字
+          x-oapi-codegen-extra-tags:
+            binding: required,min=1,max=100
+        account_id:
+          type: string
+          description: |
+            可选；带上时批准后不再新建账号，而是整组替换该已有账号的凭据（为已有账号
+            换凭据，编辑场景使用）。账号不存在或属于他人返回 40430；目标账号必须与
+            provider 是同一供应商，否则返回 40001（校验在建会话之前，不触上游）。
+          x-oapi-codegen-extra-tags:
+            binding: omitempty
+
+    QuotaDeviceAuthorization:
+      type: object
+      required: [id, provider, status, user_code, activation_url, expires_at, poll_interval_seconds, account_id, error]
+      properties:
+        id:
+          type: string
+          description: 会话 ID，用于后续 GET 轮询与 DELETE 取消
+        provider:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, expired, denied, invalid]
+          description: |
+            pending 等待用户批准；approved 已拿到控制面密钥并创建账号；
+            expired 验证码过期或本地超时；denied 用户拒绝/取消；
+            invalid 设备密钥失效（上游 401/404）
+        user_code:
+          type: string
+          description: 用户在批准页面输入的验证码
+        activation_url:
+          type: string
+          description: 浏览器批准页面地址（前端 target=_blank 打开，不在服务端跳转）
+        expires_at:
+          type: string
+          format: date-time
+          description: UTC；超过后前端可直接提示过期（服务端 GET 也会判本地超时）
+        poll_interval_seconds:
+          type: integer
+          description: 前端轮询节奏（上游给的值，缺省 2）
+        account_id:
+          type: string
+          description: approved 时新建账号的 id；其余空串
+        error:
+          type: string
+          description: status 为 expired/denied/invalid 时的用户可读原因；其余空串
 
     # ---- projects ----
     CreateProjectRequest:

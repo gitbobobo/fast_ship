@@ -311,6 +311,33 @@ func (e QuotaAccountStatus) Valid() bool {
 	}
 }
 
+// Defines values for QuotaDeviceAuthorizationStatus.
+const (
+	QuotaDeviceAuthorizationStatusApproved QuotaDeviceAuthorizationStatus = "approved"
+	QuotaDeviceAuthorizationStatusDenied   QuotaDeviceAuthorizationStatus = "denied"
+	QuotaDeviceAuthorizationStatusExpired  QuotaDeviceAuthorizationStatus = "expired"
+	QuotaDeviceAuthorizationStatusInvalid  QuotaDeviceAuthorizationStatus = "invalid"
+	QuotaDeviceAuthorizationStatusPending  QuotaDeviceAuthorizationStatus = "pending"
+)
+
+// Valid indicates whether the value is a known member of the QuotaDeviceAuthorizationStatus enum.
+func (e QuotaDeviceAuthorizationStatus) Valid() bool {
+	switch e {
+	case QuotaDeviceAuthorizationStatusApproved:
+		return true
+	case QuotaDeviceAuthorizationStatusDenied:
+		return true
+	case QuotaDeviceAuthorizationStatusExpired:
+		return true
+	case QuotaDeviceAuthorizationStatusInvalid:
+		return true
+	case QuotaDeviceAuthorizationStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for QuotaProbeStatus.
 const (
 	QuotaProbeStatusCredentialInvalid QuotaProbeStatus = "credential_invalid"
@@ -2839,6 +2866,9 @@ type QuotaAccount struct {
 	// LastSuccessAt 同 fetched_at（保留字段名便于前端区分）
 	LastSuccessAt *string `json:"last_success_at"`
 
+	// Note 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无
+	Note string `json:"note"`
+
 	// PlanName 最近一次成功快照的套餐名；未抓取过为空串
 	PlanName string `json:"plan_name"`
 	Provider string `json:"provider"`
@@ -2882,6 +2912,41 @@ type QuotaCredentialField struct {
 // QuotaCredentials 按供应商 credential_fields 的 key 组织的明文凭据（加密落库，任何响应不回显）；整组替换语义
 type QuotaCredentials map[string]string
 
+// QuotaDeviceAuthorization defines model for QuotaDeviceAuthorization.
+type QuotaDeviceAuthorization struct {
+	// AccountId approved 时新建账号的 id；其余空串
+	AccountId string `json:"account_id"`
+
+	// ActivationUrl 浏览器批准页面地址（前端 target=_blank 打开，不在服务端跳转）
+	ActivationUrl string `json:"activation_url"`
+
+	// Error status 为 expired/denied/invalid 时的用户可读原因；其余空串
+	Error string `json:"error"`
+
+	// ExpiresAt UTC；超过后前端可直接提示过期（服务端 GET 也会判本地超时）
+	ExpiresAt string `json:"expires_at"`
+
+	// Id 会话 ID，用于后续 GET 轮询与 DELETE 取消
+	Id string `json:"id"`
+
+	// PollIntervalSeconds 前端轮询节奏（上游给的值，缺省 2）
+	PollIntervalSeconds int    `json:"poll_interval_seconds"`
+	Provider            string `json:"provider"`
+
+	// Status pending 等待用户批准；approved 已拿到控制面密钥并创建账号；
+	// expired 验证码过期或本地超时；denied 用户拒绝/取消；
+	// invalid 设备密钥失效（上游 401/404）
+	Status QuotaDeviceAuthorizationStatus `json:"status"`
+
+	// UserCode 用户在批准页面输入的验证码
+	UserCode string `json:"user_code"`
+}
+
+// QuotaDeviceAuthorizationStatus pending 等待用户批准；approved 已拿到控制面密钥并创建账号；
+// expired 验证码过期或本地超时；denied 用户拒绝/取消；
+// invalid 设备密钥失效（上游 401/404）
+type QuotaDeviceAuthorizationStatus string
+
 // QuotaProbe defines model for QuotaProbe.
 type QuotaProbe struct {
 	Balance *QuotaBalance `json:"balance"`
@@ -2890,7 +2955,10 @@ type QuotaProbe struct {
 	Detail string `json:"detail"`
 
 	// Error status != ok 时给用户可读原因（已脱敏）
-	Error    string           `json:"error"`
+	Error string `json:"error"`
+
+	// Note 供应商特有的补充说明（如「无 Design Plan 额度，按钱包计费」）；为空串表示无
+	Note     string           `json:"note"`
 	PlanName string           `json:"plan_name"`
 	Status   QuotaProbeStatus `json:"status"`
 	Windows  []QuotaWindow    `json:"windows"`
@@ -2903,7 +2971,10 @@ type QuotaProbeStatus string
 type QuotaProvider struct {
 	CredentialFields []QuotaCredentialField `json:"credential_fields"`
 
-	// Id 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory）
+	// DeviceAuthorization 该供应商是否支持浏览器设备授权获取凭据；true 时前端显示「使用浏览器授权」
+	DeviceAuthorization bool `json:"device_authorization"`
+
+	// Id 供应商标识（commandcode / opencodego / zai / grok / codex / devin / factory / opendesign）
 	Id string `json:"id"`
 
 	// Instructions 「凭据从哪里获取」分步说明，逐条一句话
@@ -3319,6 +3390,20 @@ type ShipStage = model.ShipStage
 
 // ShipStatus 空串表示尚未发货（idle）
 type ShipStatus = model.ShipStatus
+
+// StartQuotaDeviceAuthorizationRequest defines model for StartQuotaDeviceAuthorizationRequest.
+type StartQuotaDeviceAuthorizationRequest struct {
+	// AccountId 可选；带上时批准后不再新建账号，而是整组替换该已有账号的凭据（为已有账号
+	// 换凭据，编辑场景使用）。账号不存在或属于他人返回 40430；目标账号必须与
+	// provider 是同一供应商，否则返回 40001（校验在建会话之前，不触上游）。
+	AccountId *string `binding:"omitempty" json:"account_id,omitempty"`
+
+	// Label 批准后新建额度账号的名字
+	Label string `binding:"required,min=1,max=100" json:"label"`
+
+	// Provider 供应商 id（GET /api/quota/providers 返回的 id）；未知返回 40030，不支持设备授权返回 40032
+	Provider string `binding:"required" json:"provider"`
+}
 
 // SteerT3QueuedRunRequest target_run_id 由服务端解析为当前活动 run，请求体保留字段以显式表达意图
 type SteerT3QueuedRunRequest = map[string]interface{}
@@ -4118,6 +4203,9 @@ type QueryToken = string
 
 // QuotaAccountId defines model for QuotaAccountId.
 type QuotaAccountId = string
+
+// QuotaDeviceAuthorizationId defines model for QuotaDeviceAuthorizationId.
+type QuotaDeviceAuthorizationId = string
 
 // RunId defines model for RunId.
 type RunId = string
@@ -6209,6 +6297,26 @@ type RefreshQuotaAccount200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// StartQuotaDeviceAuthorization200JSONResponseBody defines parameters for StartQuotaDeviceAuthorization.
+type StartQuotaDeviceAuthorization200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                       `json:"code"`
+	Data *QuotaDeviceAuthorization `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetQuotaDeviceAuthorization200JSONResponseBody defines parameters for GetQuotaDeviceAuthorization.
+type GetQuotaDeviceAuthorization200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                       `json:"code"`
+	Data *QuotaDeviceAuthorization `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListQuotaProviders200JSONResponseBody defines parameters for ListQuotaProviders.
 type ListQuotaProviders200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -6750,6 +6858,9 @@ type CreateQuotaAccountJSONRequestBody = CreateQuotaAccountRequest
 
 // UpdateQuotaAccountJSONRequestBody defines body for UpdateQuotaAccount for application/json ContentType.
 type UpdateQuotaAccountJSONRequestBody = UpdateQuotaAccountRequest
+
+// StartQuotaDeviceAuthorizationJSONRequestBody defines body for StartQuotaDeviceAuthorization for application/json ContentType.
+type StartQuotaDeviceAuthorizationJSONRequestBody = StartQuotaDeviceAuthorizationRequest
 
 // TestQuotaCredentialsJSONRequestBody defines body for TestQuotaCredentials for application/json ContentType.
 type TestQuotaCredentialsJSONRequestBody = TestQuotaCredentialsRequest

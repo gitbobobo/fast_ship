@@ -1,0 +1,12 @@
+{
+  "deviceId": "dev_00000000000000000000000",
+  "userCode": "ABCDEF",
+  "status": "pending",
+  "cliVersion": "fast-ship",
+  "host": "fast-ship",
+  "profile": "prod",
+  "expiresAt": "2026-10-18T13:15:00.000Z",
+  "deviceSecret": "device_secret_placeholder",
+  "activationUrl": "https://open-design.ai/cloud/cli/activate?deviceId=dev_00000000000000000000000&userCode=ABCDEF",
+  "pollIntervalSeconds": 2
+}
