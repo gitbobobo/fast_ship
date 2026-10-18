@@ -2419,6 +2419,60 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	}
 }
 
+// F5：版本守卫拒绝（errT3ShellConfigStale）不再内部重读环境重试——统一翻译
+// 成「环境配置已更新，请重试」的可重试错误，且不得借重读把 entry 复活
+// （重读会让同一操作拼成「新配置 shell + 旧配置投影/写」的跨环境错配）。
+func TestT3ThreadsStaleConfigViewIsRetryable(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "配置变更机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := e.th.List(ctx, userID); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+
+	// 构造「配置已在别处提交新版本（v2）且 hub trail 已被 Drop」的世界，
+	// 迟到请求仍拿着 v1 的行与旧凭证。
+	row, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
+	if err != nil {
+		t.Fatalf("load env: %v", err)
+	}
+	e.hub.Drop(userID, env.Id, row.UpdatedAt.Add(time.Second))
+	if err := e.env.repo.Update(ctx, env.Id, userID, &repository.T3EnvironmentUpdate{
+		Name:      api.Ptr("配置变更机-v2"),
+		UpdatedAt: row.UpdatedAt.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("bump env version: %v", err)
+	}
+
+	stale := *row
+	token, err := e.th.bearerToken(&stale)
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := e.th.viewShell(ctx, &stale, token); err == nil || !strings.Contains(err.Error(), "请重试") {
+		t.Fatalf("stale view error = %v, want retryable 请重试", err)
+	}
+	// 内部重读会拿到 v2 > floor 并复活 entry——新语义必须保持拒绝。
+	e.hub.mu.Lock()
+	entries := len(e.hub.entries)
+	e.hub.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("stale view must not resurrect the entry via internal re-read, entries = %d", entries)
+	}
+}
+
 // TestT3WSAuthInvalidErrorIsCredentialRejected 覆盖审查 r1#1 的第二条修法：
 // RPC 层的 EnvironmentAuthInvalidError（无 message 的旧形态）与
 // EnvironmentAuthorizationError 一样归成凭证失效。

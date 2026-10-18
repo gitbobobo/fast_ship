@@ -172,12 +172,15 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
 
 ### Stop 的 run 选择（对齐官方 stopThread）
 
-run 选择只依据 hub **可信活跃面**（`Ready`；未就绪/陈旧 50202，不基于陈旧快照
-下「无事可做」的结论）：活动 run（同 activeRun 口径）优先；否则 shell 的
-`latestRunId` 带着非空 `pendingBackgroundTasks`（后台工作仍会唤醒代理）→ 中断
-最近 run；都没有 → `stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护
-PR watch，不杜撰内部命令）。自动化收尾的 `ThreadSettleSafe` 同一口径（等首次
-同步用 `ShellFirstSync` 预算）。
+读取顺序恢复基线（F6）：**先读 HTTP 投影**——线程真的不存在回到 40418
+（投影 404 → `errT3ThreadNotFound`；凭证被拒/不可达按既有分类），再取 hub
+**可信活跃面**（`Ready`；未就绪/陈旧 50202，不基于陈旧快照下「无事可做」的
+结论；Ready 但 shell 无此线程也是 50202「上游快照面不一致」）。run 选择：
+活动 run（同 activeRun 口径）优先；否则 shell 的 `latestRunId` 带着非空
+`pendingBackgroundTasks`（后台工作仍会唤醒代理）→ 中断最近 run；都没有 →
+`stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，不杜撰
+内部命令）。自动化收尾的 `ThreadSettleSafe` 同一口径（等首次同步用
+`ShellFirstSync` 预算）。
 
 ## 配对与会话生命周期
 
@@ -215,11 +218,20 @@ PR watch，不杜撰内部命令）。自动化收尾的 `ThreadSettleSafe` 同�
 
 - **可信度分别标注**：活跃面（`ActiveReady`/`ActiveSynced`）与归档面
   （`ArchiveReady`）独立判定。归档未同步完成与归档读取失败同等对待——
-  `ArchiveErr != nil`（含 `errT3ShellArchiveNotReady`），**不得据此断言线程/项目
+  `ArchiveErr != nil`（含 `errT3ShellArchiveNotReady`），**不得据此断言线程
   不存在**（G1），也不得声称列表完整。
+- **归档可信度随连接生灭**：归档面只维护线程（项目表见下），且归档连接的
+  **任何终止**——读错误、Ack/Ping 写失败、正常 Exit、取消，乃至探测/拨号
+  失败——都统一撤销归档可信度（清空归档线程表 + `ArchiveErr`），直到下一次
+  归档权威快照到达才恢复；凭健康连接之外的缓存宣称归档命中可信会违反 G1。
+  活跃面独立，不受归档终止影响。
+- **项目表只有活跃面一份权威来源**：归档订阅只在初始快照时携带项目，常驻
+  订阅后旧名字会一直覆盖活跃流的项目更新/删除且永不自愈，因此归档快照的
+  `Projects` 一律忽略；归档线程的项目名从活跃项目表取，项目已删除时显示
+  无名（与「项目已删除」一致）。
 - **新鲜度**：`Ready`=活跃面权威且已追平；`Syncing`=还没有权威快照；
-  `Stale`=曾有数据但连接断开/重连中（`SyncedAgo` 标注距最近一次确认可信的
-  时间）；`Failed`=从未拿到数据且首连失败（错误分类含凭证被拒）。
+  `Stale`=曾有数据但连接断开/重连中/追平中（`SyncedAgo` 标注距最近一次确认
+  可信的时间）；`Failed`=从未拿到数据且首连失败（错误分类含凭证被拒）。
   **陈旧命中不当可信运行态**：详情/Stop/收尾判定只接受 `Ready`，否则 50202——
   陈旧快照里的 idle 会让前端停止轮询、让 Stop 无事可做。
 - **保活与恢复**：距最近完整帧超 25s 发应用层 Ping（Effect RPC `{"_tag":"Ping"}`
@@ -227,17 +239,31 @@ PR watch，不杜撰内部命令）。自动化收尾的 `ThreadSettleSafe` 同�
   不可续读）。重连退避 1s→2s→…→30s ±25% jitter，稳定 60s 后重置；凭证被拒走
   5min 长退避。恢复订阅带 `afterSequence` 续传（序号失效/缺口过大时上游直接改发
   权威快照，客户端不要求序号连续）。
+- **完成标记兼容**：上游不支持 marker 时不请求、立即视为追平（对齐官方客户端
+  `client-runtime/src/state/shell.ts`）。请求了但 10s 内未等到 `synchronized`
+  时**不把未追平的缓存提升为 Ready**：置强制全量重同步并结束本连接，下次重连
+  不带 `afterSequence`，由上游权威全量快照重新建立追平（期间视图保持
+  Stale/Syncing）——重连慢全量（gap 超限改发全量 >10s）期间，旧 idle 缓存
+  不得被计时兜底当成可信运行态。
 - **空闲两级回收**：1 小时无访问先断连保值（内存快照保留，下次 View 用
   afterSequence 增量恢复，避免「每次离开 15 分钟就重付 13s 全量快照」）；6 小时
-  无访问整条摘除。
+  无访问整条摘除。reaper 的 lastUsed 采样与 pause/淘汰决策在同一临界区完成，
+  刚被 View 使用的 entry 不会被旧采样误判；暂停期间新建立的连接会被立即取消
+  （登记 cancel 时同锁复查 paused/stopped）。
 - **版本守卫**：entry 记 `env.UpdatedAt` 与凭证指纹（规范化 address + token）。
   凭证/地址变更且版本更新 → 停旧建新；否则拒绝（`errT3ShellConfigStale`），
-  调用方重读环境重试。环境 Update（重配）与 Delete 落库成功后调
-  `shellHub.Drop`（floor 用**变更前**的 UpdatedAt：迟到的旧版本请求被拒，不会
-  用旧凭证复活 entry；携带新版本的正常请求可以重建）。
-- **完成标记兼容**：上游不支持 marker 时不请求、立即视为追平（对齐官方客户端
-  `client-runtime/src/state/shell.ts`）；请求了但 10s 未等到则记 warn 按追平处理
-  （防御性兜底）。
+  调用方按可重试错误处理（「环境配置已更新，请重试」——不做内部重读重试，
+  避免同一操作前半程旧配置、后半程新配置的拼接；用户/前端重试会重新加载
+  配置，整个操作用同一份配置完成）。环境 Update（重配）落库成功后调
+  `shellHub.Drop`，floor 用**变更前**的 UpdatedAt；Delete 的 floor 用**删除
+  时刻**（必然晚于任何在途请求读到的版本，关闭「Delete 读到 v1、并发 Update
+  提交 v2、迟到请求带 v2 复活已删环境」的路径）。Drop 只淘汰旧代 entry：
+  若新请求已用新配置重建 entry（版本晚于 floor），迟到的 Drop 不会把它关掉。
+  floors 表按**记录时刻**保留 1 小时后清理（在途请求只有几十秒量级；不按
+  floor 值计时，否则长期未动的环境一重配 floor 就会被清掉、守卫失效）。
+- **生命周期**：`Close()` 等 hub 级生命周期 WaitGroup 排空——覆盖已被
+  Drop/替换/淘汰摘除的 entry 与各订阅 reader，返回后没有本 hub 启动的
+  goroutine 仍在运行。
 
 ### 各读取路径
 

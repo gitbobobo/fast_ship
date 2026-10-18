@@ -275,7 +275,7 @@ func TestShellState_MarkArchiveFailedClearsArchiveFace(t *testing.T) {
 		t.Fatalf("archiveErr = %v, want wrapped input", st.ArchiveErr)
 	}
 	snaps := state.snapshots()
-	if len(snaps.Archived.Threads) != 0 || len(snaps.Archived.Projects) != 0 {
+	if len(snaps.Archived.Threads) != 0 {
 		t.Fatalf("failed archive face must be cleared, got %+v", snaps.Archived)
 	}
 	if !errors.Is(snaps.ArchiveErr, archiveErr) {
@@ -505,32 +505,48 @@ func TestShellState_EnrichmentDecodeFromWire(t *testing.T) {
 	}
 }
 
-// 归档快照与活跃快照的项目表独立维护（Archived.Projects 只来自归档流）。
-func TestShellState_ProjectsFacesIndependent(t *testing.T) {
+// F7：项目表只有活跃面一份权威来源——归档快照只维护线程，其 Projects 一律
+// 忽略：旧名字不得覆盖活跃流的项目更新，也不得复活已删除项目；项目名表
+// 只从活跃面组装。
+func TestShellState_ArchiveSnapshotIgnoresProjects(t *testing.T) {
 	state := newT3ShellState()
-	if err := state.applyActiveItem(shellTestAuthoritative(1, []t3ProjectShell{{ID: "p-1", Title: "活跃项目"}}, nil)); err != nil {
+	if err := state.applyActiveItem(shellTestAuthoritative(1,
+		[]t3ProjectShell{{ID: "p-1", Title: "旧名"}, {ID: "p-2", Title: "将删除"}},
+		shellTestThreads(shellTestThread("th-1", "一")),
+	)); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if err := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{SchemaVersion: 1, SnapshotSequence: 2, Projects: []t3ProjectShell{{ID: "p-2", Title: "归档项目"}}, Threads: shellTestThreads(shellTestThread("th-a", "归档"))}); err != nil {
+	// 活跃流项目改名。
+	seq := 2
+	if err := state.applyActiveItem(t3ShellStreamItem{Kind: "project.updated", Sequence: &seq, Project: &t3ProjectShell{ID: "p-1", Title: "新名"}}); err != nil {
+		t.Fatalf("apply project update: %v", err)
+	}
+	// 活跃流项目删除。
+	seq = 3
+	if err := state.applyActiveItem(t3ShellStreamItem{Kind: "project.removed", Sequence: &seq, ProjectID: "p-2"}); err != nil {
+		t.Fatalf("apply project removal: %v", err)
+	}
+	// 归档快照带着改名前/已删除的项目表到达：不得覆盖、不得复活。
+	if err := state.applyArchiveSnapshot(t3ArchivedShellSnapshot{
+		SchemaVersion: 1, SnapshotSequence: 2,
+		Projects: []t3ProjectShell{{ID: "p-1", Title: "旧名"}, {ID: "p-2", Title: "已删除"}},
+		Threads:  shellTestThreads(shellTestThread("th-a", "归档")),
+	}); err != nil {
 		t.Fatalf("apply archive: %v", err)
 	}
 	snaps := state.snapshots()
-	if len(snaps.Active.Projects) != 1 || snaps.Active.Projects[0].ID != "p-1" {
-		t.Fatalf("active projects = %+v", snaps.Active.Projects)
+	if len(snaps.Active.Projects) != 1 || snaps.Active.Projects[0].ID != "p-1" || snaps.Active.Projects[0].Title != "新名" {
+		t.Fatalf("archive snapshot must not overwrite active projects: %+v", snaps.Active.Projects)
 	}
-	if len(snaps.Archived.Projects) != 1 || snaps.Archived.Projects[0].ID != "p-2" {
-		t.Fatalf("archived projects = %+v", snaps.Archived.Projects)
+	if len(snaps.Archived.Projects) != 0 {
+		t.Fatalf("archive face must not maintain projects: %+v", snaps.Archived.Projects)
 	}
-	// 活跃流的 project 增量只影响活跃项目表。
-	seq := 3
-	if err := state.applyActiveItem(t3ShellStreamItem{Kind: "project.removed", Sequence: &seq, ProjectID: "p-1"}); err != nil {
-		t.Fatalf("apply project removal: %v", err)
+	// 项目名只来自活跃面：已删除项目取不到名字（与「项目已删除」一致）。
+	names := snaps.projectNames()
+	if names["p-1"] != "新名" {
+		t.Fatalf("projectNames = %+v", names)
 	}
-	snaps = state.snapshots()
-	if len(snaps.Active.Projects) != 0 {
-		t.Fatalf("active projects after removal = %+v", snaps.Active.Projects)
-	}
-	if len(snaps.Archived.Projects) != 1 {
-		t.Fatalf("archived projects must be untouched: %+v", snaps.Archived.Projects)
+	if _, ok := names["p-2"]; ok {
+		t.Fatalf("deleted project must not resurrect via archive snapshot: %+v", names)
 	}
 }

@@ -182,7 +182,9 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 			env.BearerScope = update.Pairing.BearerScope
 			// 凭证/地址已变：清掉旧订阅 trail（INT-116）。floor 用更新前的
 			// 版本：拿着旧版本读出的迟到 View 被拒（不会用旧凭证复活 entry），
-			// 携带新版本的正常请求（> floor）可以重建 entry。
+			// 携带新版本的正常请求（> floor）可以重建 entry；Drop 只会关掉
+			// 旧代 entry——若新请求已用新凭证建了新 entry，迟到的 Drop 不会
+			// 把它关掉（F3）。
 			s.shellHub.Drop(userID, id, preUpdateVersion)
 		}
 	}
@@ -210,8 +212,8 @@ func (s *T3EnvironmentService) updateRepoError(err error) error {
 // expires_in 自行过期。因此删除是本地删除，不向上游发起吊销
 // （见 docs/internal/threads.md 的安全章节）。
 func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) error {
-	env, err := s.repo.FindByIDAndUserID(ctx, id, userID)
-	if err != nil {
+	// 存在性检查只服务于 40417 语义；floor 版本不再取自该行（见下方 Drop）。
+	if _, err := s.repo.FindByIDAndUserID(ctx, id, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errs.ErrT3EnvironmentNotFound
 		}
@@ -223,9 +225,11 @@ func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) er
 	if err := s.repo.Delete(ctx, id, userID); err != nil {
 		return errs.ErrInternal
 	}
-	// 删除成功后清掉该环境的订阅 trail（INT-116）；floor 用删除前读出的版本，
-	// 迟到 View（拿着删除前的环境行）会被拒绝，不会复活 entry。
-	s.shellHub.Drop(userID, id, env.UpdatedAt)
+	// 删除成功后清掉该环境的订阅 trail（INT-116）。floor 用删除时刻（F3）：
+	// 删除必然发生在任何在途请求读到的 UpdatedAt 之后，因此能拒掉全部在途
+	// 版本；若用删除前读到的 env.UpdatedAt，Delete 与并发 Update 交错时
+	// （Delete 读到 v1、Update 提交 v2），迟到请求会带着 v2 复活已删环境。
+	s.shellHub.Drop(userID, id, time.Now().UTC())
 	return nil
 }
 

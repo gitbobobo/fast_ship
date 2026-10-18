@@ -147,10 +147,9 @@ type t3ShellFaceStatus struct {
 type t3ShellState struct {
 	mu sync.Mutex
 
-	activeProjects   t3ShellFace[t3ProjectShell]
-	activeThreads    t3ShellFace[t3ThreadShell]
-	archivedProjects t3ShellFace[t3ProjectShell]
-	archivedThreads  t3ShellFace[t3ThreadShell]
+	activeProjects  t3ShellFace[t3ProjectShell]
+	activeThreads   t3ShellFace[t3ThreadShell]
+	archivedThreads t3ShellFace[t3ThreadShell]
 
 	activeSchemaVersion   int
 	activeCursor          int
@@ -165,10 +164,9 @@ type t3ShellState struct {
 
 func newT3ShellState() *t3ShellState {
 	return &t3ShellState{
-		activeProjects:   newT3ShellFace[t3ProjectShell](),
-		activeThreads:    newT3ShellFace[t3ThreadShell](),
-		archivedProjects: newT3ShellFace[t3ProjectShell](),
-		archivedThreads:  newT3ShellFace[t3ThreadShell](),
+		activeProjects:  newT3ShellFace[t3ProjectShell](),
+		activeThreads:   newT3ShellFace[t3ThreadShell](),
+		archivedThreads: newT3ShellFace[t3ThreadShell](),
 	}
 }
 
@@ -275,10 +273,14 @@ func (s *t3ShellState) applyArchiveSnapshot(snapshot t3ArchivedShellSnapshot) er
 	return s.applyArchiveSnapshotLocked(snapshot)
 }
 
+// applyArchiveSnapshotLocked 应用归档全量快照：替换归档线程表并清除归档错误
+// ——新的全量快照意味着归档面重新可信（G1 的解除路径）。
+//
+// 快照里的 Projects 一律忽略（F7）：项目表只有活跃面一份权威来源。归档订阅
+// 只在初始快照时携带项目，常驻订阅后旧名字会一直覆盖活跃流的项目更新/删除，
+// 永不自愈；归档线程的项目名改从活跃项目表取，项目已删除时显示无名，与
+// 「项目已删除」一致。
 func (s *t3ShellState) applyArchiveSnapshotLocked(snapshot t3ArchivedShellSnapshot) error {
-	if err := s.archivedProjects.reset(snapshot.Projects, func(p *t3ProjectShell) string { return p.ID }); err != nil {
-		return fmt.Errorf("归档快照项目缺少 ID: %w", err)
-	}
 	if err := s.archivedThreads.reset(snapshot.Threads, func(t *t3ThreadShell) string { return t.ID }); err != nil {
 		return fmt.Errorf("归档快照线程缺少 ID: %w", err)
 	}
@@ -316,12 +318,12 @@ func (s *t3ShellState) applyArchiveItem(item t3ArchiveStreamItem) error {
 	}
 }
 
-// markArchiveFailed 归档面整体弃用（G1）：清空归档两表并记录错误，活跃面
-// 照常可用。之后归档快照成功到达即恢复。
+// markArchiveFailed 归档面整体弃用（G1）：清空归档线程表并记录错误，活跃面
+// 照常可用。归档连接的任何终止路径都经 hub 的 endFaceConnection 调到这里
+// （F2）——归档数据只有伴随健康连接才可信。之后归档快照成功到达即恢复。
 func (s *t3ShellState) markArchiveFailed(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.archivedProjects = newT3ShellFace[t3ProjectShell]()
 	s.archivedThreads = newT3ShellFace[t3ThreadShell]()
 	s.archiveReady = false
 	s.archiveErr = err
@@ -382,8 +384,9 @@ func (s *t3ShellState) snapshots() *t3ShellSnapshots {
 		Archived: t3ArchivedShellSnapshot{
 			SchemaVersion:    s.archivedSchemaVersion,
 			SnapshotSequence: s.archivedSeq,
-			Projects:         s.archivedProjects.list(),
-			Threads:          archivedThreads,
+			// Projects 恒空（F7）：项目表只有活跃面一份权威来源，归档面只
+			// 维护线程；projectNames 只读 Active.Projects。
+			Threads: archivedThreads,
 		},
 		ArchiveErr: archiveErr,
 	}

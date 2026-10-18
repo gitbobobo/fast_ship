@@ -570,8 +570,12 @@ func t3RequestConflictError(err error) bool {
 // StopThread 按 T3 Stop 口径选择目标 run 下发 run.interrupt(holdQueue=true)：
 // 活动 run 优先；否则仍有后台工作的最近 run；都没有则视为无操作
 // （T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，故不杜撰内部命令）。
-// run 选择只依据 hub 可信活跃面（Ready）：陈旧快照里的 idle 会把可停线程
-// 误判成无事可做，未就绪一律 50202。
+//
+// 读取顺序（F6，恢复基线）：先读 HTTP 投影——线程真的不存在必须回到
+// 40418（投影 404 → errT3ThreadNotFound，基线语义；凭证被拒/不可达也在此
+// 按既有分类）；再取**可信活跃面**的 shell 作为运行态。运行态守卫不放松：
+// 非 Ready（Stale/Syncing）一律 50202（陈旧快照里的 idle 会把可停线程误判
+// 成无事可做）；Ready 但 shell 无此线程同样是 50202（上游快照面不一致）。
 func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, threadID string) (*T3ThreadStopResult, error) {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {
@@ -586,6 +590,12 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
 
+	// 投影在先：404 → 40418，不被 shell 守卫拦成 50202。
+	projection, err := s.fetchProjectionForWrite(ctx, env, token, threadID)
+	if err != nil {
+		return nil, s.upstreamError(err)
+	}
+
 	shell, _, err := s.trustedShell(ctx, env, token, threadID)
 	if err != nil {
 		return nil, err
@@ -596,11 +606,6 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		return nil, s.upstreamError(err)
 	}
 	defer session.Close()
-
-	projection, err := s.fetchProjectionForWrite(ctx, env, token, threadID)
-	if err != nil {
-		return nil, s.upstreamError(err)
-	}
 
 	runID := ""
 	if active := resolveT3ActiveRun(projection.Runs); active != nil {

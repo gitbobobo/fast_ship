@@ -472,6 +472,25 @@ func TestT3StopThreadSelection(t *testing.T) {
 			t.Fatalf("PR watch stop must not dispatch, got %s %s", rpc.method, rpc.payload)
 		}
 	}
+
+	// F6：Stop 的错误语义恢复基线顺序——先读投影、再取可信 shell。
+	// 线程真的不存在（投影 404）→ 40418，不再被 shell 守卫拦成 50202。
+	if _, err := e.th.StopThread(ctx, userID, envID, "th-absent"); err == nil || t3ErrCode(err) != errs.ErrT3ThreadNotFound.Code {
+		t.Fatalf("stop missing thread = %v, want 40418", err)
+	}
+
+	// 投影在、两面可信但 shell 无此线程 → 50202「上游快照面不一致」。
+	e.fake.mu.Lock()
+	e.fake.projections["th-ghost"] = wireProjection(appThreadFixture("th-ghost", "幽灵", nil), nil)
+	e.fake.mu.Unlock()
+	_, err = e.th.StopThread(ctx, userID, envID, "th-ghost")
+	if err == nil || t3ErrCode(err) != errs.ErrT3Upstream.Code {
+		t.Fatalf("stop shell-missing thread = %v, want 50202", err)
+	}
+	var stopErr *errs.AppError
+	if !errors.As(err, &stopErr) || !strings.Contains(stopErr.Message, "运行状态不可读") {
+		t.Fatalf("expected shell-missing message, got %v", err)
+	}
 }
 
 // TestT3QueueOperations 覆盖队列四操作与三态附件。

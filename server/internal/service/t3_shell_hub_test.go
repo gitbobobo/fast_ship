@@ -653,23 +653,30 @@ func TestT3ShellHub_NoMarkerCapabilitySyncsImmediately(t *testing.T) {
 	}
 }
 
-// 请求了标记但预算内未等到：到点记 warn 并按追平处理（防御性兜底）。
-func TestT3ShellHub_MarkerWaitTimeoutFallsBackToSynced(t *testing.T) {
+// 请求了标记但预算内未等到（F1）：不得把未追平的缓存提升为 Ready——超时后
+// 置强制全量重同步并结束本连接，重连不带 afterSequence（上游会直接发权威
+// 全量快照），权威帧到达后才回到 Ready。
+func TestT3ShellHub_MarkerWaitTimeoutForcesFullResync(t *testing.T) {
 	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
 	cfg := hubTestConfig()
 	cfg.MarkerWaitTimeout = 300 * time.Millisecond
+	// 等 marker 的窗口长于默认测试 IdleTTL，拉长以隔离回收行为（本用例的
+	// 等待段没有 View 轮询为 entry 续命）。
+	cfg.IdleTTL = 10 * time.Second
 	hub := newT3ShellHubWithConfig(cfg, nil)
 	defer hub.Close()
 	env := hubTestEnv(url, time.Now())
 
 	_, activeConn, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
-	collector := newShellConnCollector(t, srv)
+	resumeCollector := newShellConnCollector(t, srv)
 	activeConn.closeConn()
 
-	// 新连接只发订阅、不回放不标记。
-	collector.await(false)
-
-	// 标记未到的窗口内是 Stale。
+	// 重连只发订阅、不回放不标记：预算内未追平 → Stale（不是 Ready），
+	// 旧 idle 缓存不得被计时兜底提升为可信。
+	resume := resumeCollector.await(false)
+	if got := resume.sub.Payload["afterSequence"]; fmt.Sprint(got) != "42" {
+		t.Fatalf("resume afterSequence = %v, want 42", got)
+	}
 	view, err := hub.View(context.Background(), env, "tok")
 	if err != nil {
 		t.Fatalf("view: %v", err)
@@ -677,10 +684,25 @@ func TestT3ShellHub_MarkerWaitTimeoutFallsBackToSynced(t *testing.T) {
 	if view.State != t3ShellStale {
 		t.Fatalf("state while awaiting marker = %v, want stale", view.State)
 	}
-	// 兜底到点后按追平处理 → Ready（连接仍健康）。
-	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool { return v.State == t3ShellReady })
-	if view.State != t3ShellReady {
-		t.Fatalf("state = %v", view.State)
+
+	// 兜底到点：本连接被结束，强制全量重同步的重连不带 afterSequence
+	//（marker 能力仍在，继续请求标记）。
+	resyncCollector := newShellConnCollector(t, srv)
+	resync := resyncCollector.await(false)
+	if _, has := resync.sub.Payload["afterSequence"]; has {
+		t.Fatalf("forced resync must drop afterSequence: %+v", resync.sub.Payload)
+	}
+	if resync.sub.Payload["requestCompletionMarker"] != true {
+		t.Fatalf("forced resync must still request marker: %+v", resync.sub.Payload)
+	}
+
+	// 权威全量快照到达 → applyActiveSnapshot 置追平 → Ready，游标被权威重置。
+	if err := resync.conn.sendValue(resync.sub.ID, shellSnapshotValue(77, "th-1", "th-2")); err != nil {
+		t.Fatalf("send authoritative snapshot: %v", err)
+	}
+	ready := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool { return v.State == t3ShellReady })
+	if ready.Snaps.Active.SnapshotSequence != 77 {
+		t.Fatalf("cursor = %d, want 77 (authoritative reset)", ready.Snaps.Active.SnapshotSequence)
 	}
 }
 
@@ -806,6 +828,65 @@ func TestT3ShellHub_ArchiveFailureIndependentAndResubscribes(t *testing.T) {
 	_ = activeSub
 }
 
+// F2：归档连接的任何终止（这里是无 Exit Failure、无解析错误的直接断开）
+// 都必须撤销归档面可信度——ArchiveErr 置位、归档命中不再可信、活跃面照常
+// Ready；归档重连并收到新全量快照后恢复。
+func TestT3ShellHub_ArchiveConnClosureRevokesTrust(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, time.Now())
+
+	_, activeConn, activeSub, archiveConn, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	archiveCollector := newShellConnCollector(t, srv)
+
+	archiveConn.closeConn()
+
+	var view *t3ShellView
+	var err error
+	deadline := time.After(3 * time.Second)
+	for {
+		view, err = hub.View(context.Background(), env, "tok")
+		if err != nil {
+			t.Fatalf("view: %v", err)
+		}
+		if view.Snaps.ArchiveErr != nil {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("archive trust must be revoked after the archive conn died")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if view.State != t3ShellReady {
+		t.Fatalf("active face must stay ready, state = %v", view.State)
+	}
+	if len(view.Snaps.Archived.Threads) != 0 {
+		t.Fatalf("archive face must be cleared, got %+v", view.Snaps.Archived.Threads)
+	}
+	if len(view.Snaps.Active.Threads) != 1 || view.Snaps.Active.Threads[0].ID != "th-1" {
+		t.Fatalf("active threads drifted: %+v", view.Snaps.Active.Threads)
+	}
+
+	// 归档独立重订阅（活跃连接不动）并收到新快照 → 恢复可信。
+	retry := archiveCollector.await(true)
+	if err := retry.conn.sendValue(retry.sub.ID, archiveSnapshotValue(2, "th-a")); err != nil {
+		t.Fatalf("send archive snapshot: %v", err)
+	}
+	if !retry.conn.awaitAck(retry.sub.ID, 2*time.Second) {
+		t.Fatalf("retry archive snapshot not acked")
+	}
+	view = waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.Snaps != nil && v.Snaps.ArchiveErr == nil && len(v.Snaps.Archived.Threads) == 1
+	})
+	if view.State != t3ShellReady || len(view.Snaps.Active.Threads) != 1 {
+		t.Fatalf("active face drifted after archive recovery: state=%v", view.State)
+	}
+	_ = activeSub
+	_ = activeConn
+}
+
 // 凭证失效：探测 repair → View 给 Failed 且错误可归类为凭证被拒。
 func TestT3ShellHub_CredentialRejectionSurfacesAsFailed(t *testing.T) {
 	_, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok-2", marker: true, autoPong: true})
@@ -916,6 +997,95 @@ func TestT3ShellHub_DropGuardsAgainstLateViews(t *testing.T) {
 	_, _, _, _, _ = establishBothFaces(t, hub, srv, envNew, "tok", 2, "th-1b")
 }
 
+// F3：迟到的 Drop(旧版本) 不得关掉新代 entry——重配提交后 View 已用新凭证
+// 重建 entry 时，后到的 Drop 只应记 floor，不能把新 entry 关掉。
+func TestT3ShellHub_DropKeepsNewerEntry(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+
+	v1 := time.Now()
+	env := hubTestEnv(url, v1)
+	_, oldConn, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
+
+	// floor ≥ entry 版本：旧代 entry 被关闭（原语义保持）。
+	hub.Drop("user-1", "env-1", v1)
+	if !oldConn.awaitClosed(2 * time.Second) {
+		t.Fatalf("drop with floor >= entry version must retire the entry")
+	}
+
+	// 新代 entry：View 用更高版本重建。
+	envNew := hubTestEnv(url, v1.Add(time.Second))
+	_, newConn, newSub, _, _ := establishBothFaces(t, hub, srv, envNew, "tok", 2, "th-1b")
+
+	// 迟到的 Drop(v1)：新 entry 版本晚于 floor → 保留，连接照常可用。
+	hub.Drop("user-1", "env-1", v1)
+	hub.mu.Lock()
+	e := hub.entries[t3ShellHubKey("user-1", "env-1")]
+	hub.mu.Unlock()
+	if e == nil || !e.version.Equal(envNew.UpdatedAt) {
+		t.Fatalf("late drop must keep the newer entry, got %+v", e)
+	}
+	if err := newConn.sendValue(newSub.ID, mustMarshalDelta(3, "th-1b", "仍活着")); err != nil {
+		t.Fatalf("newer entry connection must survive late drop: %v", err)
+	}
+	if !newConn.awaitAck(newSub.ID, 2*time.Second) {
+		t.Fatalf("newer entry connection must still ack after late drop")
+	}
+}
+
+// F3：Delete 用删除时刻做 floor——它晚于任何在途请求读到的版本，迟到 View
+// （哪怕带着删除前刚读出的行）一律被拒且不建 entry。
+func TestT3ShellHub_DeleteNowFloorBlocksAllInFlightVersions(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+
+	// 环境行的版本是「删除前」读出的时刻（过去）；删除发生在其后。
+	env := hubTestEnv(url, time.Now().Add(-time.Hour))
+	_, _, _, _, _ = establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
+
+	hub.Drop("user-1", "env-1", time.Now().UTC())
+	before := srv.connCount.Load()
+	if _, err := hub.View(context.Background(), env, "tok"); !errors.Is(err, errT3ShellConfigStale) {
+		t.Fatalf("view after delete = %v, want errT3ShellConfigStale", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if srv.connCount.Load() != before {
+		t.Fatalf("late view must not resurrect the entry, connCount %d → %d", before, srv.connCount.Load())
+	}
+	hub.mu.Lock()
+	entries := len(hub.entries)
+	hub.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("deleted entry must stay dropped, entries = %d", entries)
+	}
+}
+
+// F3 补充：floor 的保留按**记录时刻**计算，不按 floor 值——很久以前的版本
+// 做的 floor 也要立即生效；若按值清理（版本早于 1 小时前即清），长期未动
+// 的环境一重配 floor 就会被清掉、守卫失效。
+func TestT3ShellHub_FloorRetentionKeyedByRecordTime(t *testing.T) {
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+
+	// 无 entry 的环境：Drop 直接记 floor，floor 版本是「很久前读出的行」。
+	oldVersion := time.Now().UTC().Add(-2 * time.Hour)
+	hub.Drop("user-2", "env-old", oldVersion)
+	hub.mu.Lock()
+	_, hasFloor := hub.floors[t3ShellHubKey("user-2", "env-old")]
+	hub.mu.Unlock()
+	if !hasFloor {
+		t.Fatalf("freshly recorded floor must not be GC'd even when its version is old")
+	}
+	// env 的 user/env ID 与 Drop 的 key 一致（hubTestEnv 硬编码 user-1/env-1，
+	// 不能用）；地址不可达也无所谓——floor 守卫在任何拨号之前生效。
+	env := &model.T3Environment{ID: "env-old", UserID: "user-2", Address: "http://unused.example", UpdatedAt: oldVersion}
+	if _, err := hub.View(context.Background(), env, "tok"); !errors.Is(err, errT3ShellConfigStale) {
+		t.Fatalf("old floor must still guard, err = %v", err)
+	}
+}
+
 // 首次同步预算用尽时如实返回 Syncing 视图，而不是把慢冷启动伪装成上游错误：
 // 后台订阅继续跑，下一个请求就能拿到数据。
 func TestT3ShellHub_FirstSyncDeadlineReturnsSyncingView(t *testing.T) {
@@ -977,6 +1147,103 @@ func TestT3ShellHub_IdlePauseResumesWithAfterSequence(t *testing.T) {
 	ready := waitForView(t, hub, env, "tok", func(v *t3ShellView) bool { return v.State == t3ShellReady })
 	if len(ready.Snaps.Active.Threads) != 2 {
 		t.Fatalf("active threads after resume = %+v", ready.Snaps.Active.Threads)
+	}
+}
+
+// F4：setConnCancel 与暂停/停止交错——在已暂停（或已停止）的 entry 上登记
+// 连接必须立刻取消它，否则监督循环「过 waitIfPaused 闸后再登记」的窗口会让
+// reaper 漏掉这条连接（挂到空闲淘汰为止）。
+func TestT3ShellEntry_SetConnCancelDuringPauseOrStop(t *testing.T) {
+	assertCancelled := func(t *testing.T, name string, cancelled chan struct{}) {
+		t.Helper()
+		select {
+		case <-cancelled:
+		default:
+			t.Fatalf("%s: connection registered in this state must be cancelled immediately", name)
+		}
+	}
+
+	// 已暂停：登记即取消。
+	paused := &t3ShellEntry{wake: make(chan struct{}), stop: make(chan struct{})}
+	paused.mu.Lock()
+	paused.paused = true
+	paused.mu.Unlock()
+	cancelled := make(chan struct{})
+	paused.setConnCancel(false, func() { close(cancelled) })
+	assertCancelled(t, "paused", cancelled)
+
+	// 已停止：同样立即取消。
+	stopped := &t3ShellEntry{wake: make(chan struct{}), stop: make(chan struct{})}
+	stopped.shutdown()
+	cancelled2 := make(chan struct{})
+	stopped.setConnCancel(true, func() { close(cancelled2) })
+	assertCancelled(t, "stopped", cancelled2)
+
+	// 正常路径：活的 entry 上登记不触发取消。
+	live := &t3ShellEntry{wake: make(chan struct{}), stop: make(chan struct{})}
+	cancelled3 := make(chan struct{})
+	live.setConnCancel(false, func() { close(cancelled3) })
+	select {
+	case <-cancelled3:
+		t.Fatalf("live entry: connection must not be cancelled on registration")
+	default:
+	}
+}
+
+// F4：reaper 的决策必须使用同一临界区内采样的 lastUsed——刚被 View 刷新过
+// lastUsed 的 entry 不得被旧采样误暂停/误淘汰；确实空闲时同一决策会取消
+// 两条连接。
+func TestT3ShellHub_ReapTickRespectsFreshLastUsed(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	cfg := hubTestConfig()
+	cfg.IdleDisconnect = 50 * time.Millisecond
+	cfg.IdleTTL = 10 * time.Second
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, time.Now())
+
+	_, activeConn, activeSub, archiveConn, _ := establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
+	hub.mu.Lock()
+	var entry *t3ShellEntry
+	for _, candidate := range hub.entries {
+		entry = candidate
+	}
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("expected an entry")
+	}
+
+	// lastUsed 刚被 View 刷新（视作空闲阈值的远未来）：单次决策不暂停也不
+	// 淘汰，连接照常可用。
+	hub.mu.Lock()
+	entry.lastUsed = time.Now().Add(time.Hour)
+	hub.mu.Unlock()
+	if hub.reapTick(entry) {
+		t.Fatalf("fresh entry must not be evicted")
+	}
+	if err := activeConn.sendValue(activeSub.ID, mustMarshalDelta(2, "th-1", "still-alive")); err != nil {
+		t.Fatalf("fresh entry connection must stay alive: %v", err)
+	}
+	if !activeConn.awaitAck(activeSub.ID, 2*time.Second) {
+		t.Fatalf("fresh entry connection must still ack")
+	}
+
+	// lastUsed 拨回超过 IdleDisconnect：同一临界区决策出暂停，两条连接被取消；
+	// entry 保留（淘汰要等 IdleTTL）。
+	hub.mu.Lock()
+	entry.lastUsed = time.Now().Add(-cfg.IdleDisconnect - time.Second)
+	hub.mu.Unlock()
+	if hub.reapTick(entry) {
+		t.Fatalf("idle-disconnect tick must not evict")
+	}
+	if !activeConn.awaitClosed(2*time.Second) || !archiveConn.awaitClosed(2*time.Second) {
+		t.Fatalf("pause must cancel both connections")
+	}
+	hub.mu.Lock()
+	_, stillRegistered := hub.entries[t3ShellHubKey("user-1", "env-1")]
+	hub.mu.Unlock()
+	if !stillRegistered {
+		t.Fatalf("paused entry must stay registered until IdleTTL")
 	}
 }
 
@@ -1045,6 +1312,54 @@ func TestT3ShellHub_CloseIdempotent(t *testing.T) {
 		t.Fatalf("entry goroutines must exit after Close")
 	}
 
+	if _, err := hub.View(context.Background(), env, "tok"); err == nil {
+		t.Fatalf("view after close must fail")
+	}
+}
+
+// F8：Close 必须等到全部 goroutine 退出——含已被 Drop 摘除（不再在注册表里）
+// 的 entry 与各订阅 reader。hub 级生命周期 WaitGroup 是等待依据：Close 返回
+// 后它必须已排空，且 entry 的全部 goroutine（含 reader）都已结束。
+func TestT3ShellHub_CloseWaitsForDroppedEntryGoroutines(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	env := hubTestEnv(url, time.Now())
+
+	_, activeConn, _, archiveConn, _ := establishBothFaces(t, hub, srv, env, "tok", 1, "th-1")
+	hub.mu.Lock()
+	var entry *t3ShellEntry
+	for _, e := range hub.entries {
+		entry = e
+	}
+	hub.mu.Unlock()
+	if entry == nil {
+		t.Fatalf("expected an entry")
+	}
+
+	// 先 Drop（entry 移出注册表——旧实现 Close 就等不到它了），再 Close。
+	hub.Drop("user-1", "env-1", time.Now().Add(time.Hour))
+	hub.Close()
+
+	drained := make(chan struct{})
+	go func() {
+		hub.lifecycle.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("hub lifecycle waitgroup must be drained after Close")
+	}
+	select {
+	case <-entry.done:
+	default:
+		t.Fatalf("dropped entry goroutines must have exited after Close")
+	}
+	// 连接被关闭：reader 阻塞中的 Receive 已被解开并汇合（监督循环退出前
+	// 必先等 reader 结束，否则生命周期计数不会归零）。
+	if !activeConn.awaitClosed(2*time.Second) || !archiveConn.awaitClosed(2*time.Second) {
+		t.Fatalf("connections must be closed after Close")
+	}
 	if _, err := hub.View(context.Background(), env, "tok"); err == nil {
 		t.Fatalf("view after close must fail")
 	}

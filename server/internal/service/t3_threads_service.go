@@ -293,30 +293,21 @@ func (s *T3ThreadsService) ItemDetail(ctx context.Context, userID, envID, thread
 }
 
 // viewShell 读取环境的 shell 视图（hub）。版本守卫拒绝（errT3ShellConfigStale）
-// 说明请求读出的环境配置已被替换/删除（迟到请求）：重读一次环境再试一次；
-// 仍失败统一按「环境配置已更新」的上游错误处理——凭证被拒除外，新凭证同样
-// 可能无效，照常走 repair 分类。
+// 说明请求读出的环境配置已被替换/删除（迟到请求）：统一翻译成「环境配置已
+// 更新，请重试」的可重试上游错误返回，**不做内部重读重试**——重读会让同一
+// 操作的前半程用旧配置、后半程用新配置（新配置的 shell 命中 + 旧配置的
+// 地址/凭证去读投影/写命令，地址切换且线程 ID 重合时存在跨环境混读/误操作
+// 风险，F5）。调用方把可重试错误交还上层；用户/前端重试会重新加载环境，
+// 整个操作从头到尾用同一份配置。
 func (s *T3ThreadsService) viewShell(ctx context.Context, env *model.T3Environment, token string) (*t3ShellView, error) {
 	view, err := s.shellHub.View(ctx, env, token)
-	if err == nil {
-		return view, nil
-	}
-	if !errors.Is(err, errT3ShellConfigStale) {
+	if err != nil {
+		if errors.Is(err, errT3ShellConfigStale) {
+			return nil, fmt.Errorf("环境配置已更新，请重试")
+		}
 		return nil, err
 	}
-	fresh, findErr := s.envRepo.FindByIDAndUserID(ctx, env.ID, env.UserID)
-	if findErr != nil {
-		return nil, fmt.Errorf("环境配置已更新，请重试")
-	}
-	freshToken, tokenErr := s.bearerToken(fresh)
-	if tokenErr != nil {
-		return nil, fmt.Errorf("环境配置已更新，请重试")
-	}
-	view, err = s.shellHub.View(ctx, fresh, freshToken)
-	if err != nil && !errors.Is(err, errT3CredentialRejected) {
-		return nil, fmt.Errorf("环境配置已更新，请重试")
-	}
-	return view, err
+	return view, nil
 }
 
 // t3ShellStateMessage 把 hub 视图状态翻译成环境状态与说明文案（列表用）。
