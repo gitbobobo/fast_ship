@@ -255,7 +255,10 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   则在摘除注册表的同一临界区（`hub.mu → entry.mu` 锁序）再复核一次 lastUsed，
   刚被 View 使用的 entry 不会被旧采样误判；暂停期间新建立的连接会被立即取消
   （登记 cancel 时同锁复查 paused/stopped）。连接结束时会汇合本次连接的取消
-  监听与 reader，`Close()` 返回后没有本 hub 启动的 goroutine 仍在运行。
+  监听与 reader；`Close()` 返回后本 hub 启动的 goroutine 均已退出。会话层
+  `context.AfterFunc` 的取消回调（`t3_ws.go` 的 `closeOnCancel`，其 stop 按 Go
+  语义不等待已启动的回调）不在等待范围内：它只做一次 `conn.Close()`，可能在
+  `Close()` 返回后的极短时间内完成，不构成泄漏。
 - **版本守卫**：entry 记 `env.UpdatedAt` 与凭证指纹（规范化 address + token）。
   凭证/地址变更且版本更新 → 停旧建新；否则拒绝（`errT3ShellConfigStale`），
   调用方按可重试错误处理（「环境配置已更新，请重试」——不做内部重读重试，

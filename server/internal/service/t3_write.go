@@ -590,9 +590,9 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
 
-	// 投影在先：404 → 40418，不被 shell 守卫拦成 50202。
-	projection, err := s.fetchProjectionForWrite(ctx, env, token, threadID)
-	if err != nil {
+	// 投影在先：404 → 40418，不被 shell 守卫拦成 50202。这里只做存在性/分类，
+	// run 选择一律基于等待之后的新鲜信息（见下方）。
+	if _, err := s.fetchProjectionForWrite(ctx, env, token, threadID); err != nil {
 		return nil, s.upstreamError(err)
 	}
 
@@ -614,9 +614,10 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		// 而投影是本次等待之前读的——冷启动等 hub 首次同步期间新起的 run
 		// 不会出现在里面，用旧投影会把可停的线程误报成无事可做。
 		runID = *shell.ActiveRunID
-	} else if active := resolveT3ActiveRun(projection.Runs); active != nil {
-		// 投影说有活动 run、但 shell 的可中断集合里没有（典型是 waiting）：
-		// 投影可能早于本次等待，重读一次再决策，避免中断已经结束的旧 run。
+	} else {
+		// shell 没有可中断活动 run：投影可能已早于本次等待（典型是 waiting
+		// ——上游 shell.activeRunId 排除 waiting，只有投影里看得到），回读一次
+		// 再决策，避免中断已结束的旧 run、也避免漏掉等待期新起的 waiting。
 		fresh, freshErr := s.fetchProjectionForWrite(ctx, env, token, threadID)
 		if freshErr != nil {
 			return nil, s.upstreamError(freshErr)
@@ -624,9 +625,11 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		if current := resolveT3ActiveRun(fresh.Runs); current != nil {
 			runID = current.ID
 		}
-	} else if shell.LatestRunID != nil && t3HasInterruptibleBackgroundWork(shell.PendingBackgroundTasks) {
-		// 根 run 已结束但后台工作还在：T3 的 Stop 接受对最近 run 的中断。
-		// PR watch 不算可中断后台（与 interruptThreadTurn 不含 pullRequests 一致）。
+	}
+	// 后台工作回退独立于上面的分支：根 run 刚结束但后台工作仍在时，上面两条
+	// 都不命中，但 T3 的 Stop 仍接受对最近 run 的中断。PR watch 不算可中断
+	// 后台（与 interruptThreadTurn 不含 pullRequests 一致）。
+	if runID == "" && shell.LatestRunID != nil && t3HasInterruptibleBackgroundWork(shell.PendingBackgroundTasks) {
 		runID = *shell.LatestRunID
 	}
 	if runID == "" {

@@ -310,8 +310,14 @@ func (h *t3ShellHub) Drop(userID, envID string, floorVersion time.Time) {
 	}
 }
 
-// Close 幂等停机：取消所有 entry 并等待全部 goroutine 退出——含已被摘除的
-// entry（Drop/替换/淘汰）与各订阅 reader。等待在锁外进行。
+// Close 幂等停机：取消所有 entry 并等待本 hub 启动的 goroutine 退出——含已被
+// 摘除的 entry（Drop/替换/淘汰）、各订阅 reader 与连接取消监听。等待在锁外
+// 进行。
+//
+// 明确不纳入等待的：会话层 context.AfterFunc 取消回调（t3_ws.go 的
+// closeOnCancel，其 stop 函数按 Go 语义不等待已启动的回调），它只做一次
+// conn.Close()，可能在 Close 返回后的极短时间内完成；不影响连接已关闭这一
+// 事实，也不构成泄漏。
 func (h *t3ShellHub) Close() {
 	h.closeOnce.Do(func() {
 		h.mu.Lock()
@@ -455,14 +461,21 @@ func (e *t3ShellEntry) setForceResync() {
 	e.mu.Unlock()
 }
 
-// takeForceResync 读取并清除强制全量重同步标记（构造订阅 payload 时用：
-// 置位时本次重连不带 afterSequence）。
-func (e *t3ShellEntry) takeForceResync() bool {
+// forceResyncPending 报告是否还欠一次强制全量重同步（构造订阅 payload 时用）。
+// 只读不清：要求一直保留到权威全量快照真正落地（applyActiveValues 里清除），
+// 否则本次连接若在快照到达前断线，下一次重连会又带上旧游标并（无 marker 时）
+// 乐观追平，把旧缓存当可信。
+func (e *t3ShellEntry) forceResyncPending() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	resync := e.forceResync
+	return e.forceResync
+}
+
+// clearForceResync 在权威全量快照应用成功后清除强制重同步要求。
+func (e *t3ShellEntry) clearForceResync() {
+	e.mu.Lock()
 	e.forceResync = false
-	return resync
+	e.mu.Unlock()
 }
 
 // resumeLocked 结束暂停并唤醒监督循环。调用方持有 entry 锁。
@@ -784,7 +797,7 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 		// ——不认为追平，本次重连不带 afterSequence。上游收到无游标的订阅
 		// 会直接发权威全量快照（与序号失效回退同一语义，ws.ts:550,685,1141），
 		// 权威帧到达才重新视为追平；期间视图保持 Stale/Syncing。
-		if e.takeForceResync() {
+		if e.forceResyncPending() {
 			// 置位时已未追平，这里再显式清一次：任何交错都不得把旧缓存
 			// 在权威快照到达前当成可信。
 			e.state.markActiveSynced(false)
@@ -994,6 +1007,11 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		}
 		if err := e.state.applyActiveItem(item); err != nil {
 			return err
+		}
+		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。
+		// 元数据帧不算：它不是权威数据。
+		if item.Kind == "snapshot" && item.Snapshot != nil && len(item.ResolvedRepositoryIdentityRoots) == 0 {
+			e.clearForceResync()
 		}
 	}
 	return nil

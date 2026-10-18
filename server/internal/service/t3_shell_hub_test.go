@@ -660,11 +660,26 @@ func TestT3ShellHub_ForceResyncWithoutMarkerWaitsForSnapshot(t *testing.T) {
 		t.Fatalf("must not be Ready before the authoritative snapshot arrives")
 	}
 
+	// 快照到达之前再断一次：强制全量重同步的要求必须保留到权威快照真正落地，
+	// 下一次重连仍不得带旧游标、也不得因为无 marker 能力而乐观追平。
+	resync.conn.closeConn()
+	retry := collector.await(false)
+	if _, has := retry.sub.Payload["afterSequence"]; has {
+		t.Fatalf("forced resync must survive a disconnect: %+v", retry.sub.Payload)
+	}
+	retryView, err := hub.View(context.Background(), env, "tok")
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if retryView.State == t3ShellReady {
+		t.Fatalf("old cache must stay untrusted across the retried forced resync")
+	}
+
 	// 权威全量快照到达 → 重新可信。
-	if err := resync.conn.sendValue(resync.sub.ID, shellSnapshotValue(60, "th-1")); err != nil {
+	if err := retry.conn.sendValue(retry.sub.ID, shellSnapshotValue(60, "th-1")); err != nil {
 		t.Fatalf("send resync snapshot: %v", err)
 	}
-	if !resync.conn.awaitAck(resync.sub.ID, 2*time.Second) {
+	if !retry.conn.awaitAck(retry.sub.ID, 2*time.Second) {
 		t.Fatalf("resync snapshot not acked")
 	}
 	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
