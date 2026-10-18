@@ -183,6 +183,31 @@ interface GitHubToken {
   updated_at: string;
 }
 
+/** 集成配置来源：database=集成页保存（最优先）；config=config.yaml 兜底；none=未配置 */
+type GitHubAppIntegrationSource = "database" | "config" | "none";
+
+/** 检测状态：unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） */
+type GitHubAppDetectionStatus = "unchecked" | "ok" | "invalid" | "failed";
+
+/** 用户级 GitHub App 集成（INT-119），按当前登录用户读写；私钥与 webhook 密钥本体永不回显 */
+interface GitHubAppIntegration {
+  provider: "github_app";
+  /** 数据库或部署配置任一存在 */
+  configured: boolean;
+  source: GitHubAppIntegrationSource;
+  /** 未配置时为空串 */
+  app_id: string;
+  private_key_set: boolean;
+  webhook_secret_set: boolean;
+  /** server.public_url 未配置时为空串 */
+  webhook_url: string;
+  detection_status: GitHubAppDetectionStatus;
+  detection_detail: string;
+  detected_at: string | null;
+  /** 数据库配置最近保存时间；source 为 config/none 时为 null */
+  updated_at: string | null;
+}
+
 /** 项目表单的 Token 引用三态：缺省保留、空/null 清空、非空替换 */
 interface UpdateProjectPayload {
   name?: string;

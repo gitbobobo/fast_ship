@@ -7,6 +7,7 @@ import { watchGithubTokensIdentity } from "@/lib/hooks/use-github-tokens";
 import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
 import { watchBotsIdentity } from "@/lib/hooks/use-bots";
 import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
+import { watchIntegrationsIdentity } from "@/lib/hooks/use-integrations";
 
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
@@ -42,6 +43,7 @@ const ApiKeysPage = lazy(() => import("@/routes/settings/api-keys"));
 const GithubTokensPage = lazy(
   () => import("@/routes/settings/github-tokens"),
 );
+const IntegrationsPage = lazy(() => import("@/routes/settings/integrations"));
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const AutomationsPage = lazy(() => import("@/routes/automations/index"));
 const AutomationEditorPage = lazy(() => import("@/routes/automations/editor"));
@@ -70,11 +72,13 @@ export default function App() {
     const stopGithubTokens = watchGithubTokensIdentity(queryClient);
     const stopBots = watchBotsIdentity(queryClient);
     const stopQuota = watchQuotaIdentity(queryClient);
+    const stopIntegrations = watchIntegrationsIdentity(queryClient);
     return () => {
       stopThreads();
       stopGithubTokens();
       stopBots();
       stopQuota();
+      stopIntegrations();
     };
   }, []);
 
@@ -192,6 +196,10 @@ export default function App() {
                 <Route
                   path="github-tokens"
                   element={<LazyPage render={<GithubTokensPage />} />}
+                />
+                <Route
+                  path="integrations"
+                  element={<LazyPage render={<IntegrationsPage />} />}
                 />
                 <Route
                   path="environments"
