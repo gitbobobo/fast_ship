@@ -227,6 +227,31 @@ describe("useBotChat", () => {
     expect(result.current.maintenanceProgress).toBeNull();
   });
 
+  it("旧 run 的进度快照晚到时不回填到新 run", async () => {
+    const { client, result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // 新 run B 已经开始（run_started 把当前活动 run 记住）。
+    emit("delta", { kind: "run_started", run_id: "rB" }, 10);
+
+    // 旧 run A 期间取得的快照晚到：带 A 的进度。不得把它挂到 B 的运行栏。
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        runs: [{ ...activeRun, id: "rA" }],
+        maintenance_progress: {
+          run_id: "rA",
+          phase: "summary",
+          message: "旧 run 的进度",
+        },
+      }),
+    );
+    await act(() =>
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
+    );
+    await act(async () => {});
+    expect(result.current.maintenanceProgress).toBeNull();
+  });
+
   it("SSE 进度优先于快照旧值：迟到快照不把进度拨回去", async () => {
     api.getChatSnapshot.mockResolvedValue(
       snapshotWith({

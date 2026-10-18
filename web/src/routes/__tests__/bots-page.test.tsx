@@ -449,6 +449,28 @@ describe("BotDetailPage", () => {
     expect(failed).toHaveClass("text-amber-600");
   });
 
+  it("does not show maintenance progress owned by another run", async () => {
+    chatOverrides.current = {
+      runActive: true,
+      activeRun: {
+        id: "r2",
+        bot_id: "b1",
+        trigger_source: "user_message",
+        status: "running",
+        created_at: "2026-10-15T00:00:30Z",
+      },
+      // 旧 run 的进度：不得出现在当前 run 的运行栏。
+      maintenanceProgress: {
+        runId: "r1",
+        phase: "summary",
+        message: "旧 run 的进度",
+      },
+    };
+    renderDetail();
+    await screen.findByTestId("bot-run-bar");
+    expect(screen.queryByTestId("bot-maintenance-progress")).toBeNull();
+  });
+
   it("lists authorizations with scope and field constraints, and revokes", async () => {
     revokeMutateAsync.mockResolvedValue(undefined);
     const user = userEvent.setup();

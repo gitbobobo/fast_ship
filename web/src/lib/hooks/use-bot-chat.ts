@@ -432,6 +432,9 @@ export function useBotChat(botId: string) {
   // 纯工具调用请求没有 text_delta，用首个 tool_call（新 call_id）触发同样的
   // 指标刷新，避免指标一直停在上一个请求。
   const lastToolCallIdRef = useRef<string | null>(null);
+  // 当前活动主线 run 的 id：进度快照只能回填到同一个 run，避免「旧 run 的快照
+  // 晚到」把旧压缩阶段挂到新 run 的运行栏。
+  const activeRunIdRef = useRef<string | null>(null);
 
   // 单一水合来源：bot 详情、消息、调用与 run 全部来自同一读取点的快照，
   // 消除分离请求的竞态窗口（快照与水位同点，SSE 从水位续读不漏不重）。
@@ -456,15 +459,26 @@ export function useBotChat(botId: string) {
         mergeBotSnapshot(previous, snapshot.bot),
       );
       // 维护进度水合（INT-115）：进度事件在订阅游标之前不会经 SSE 重放，
-      // 刷新/重开聊天后由快照回填。仅本地态为空（prev === null）时初始化
-      // ——SSE 后续事件照常覆盖；done/error 清空后快照重读时服务端已无
-      // 活动 run、不再返回该字段，不会把已清空的进度写回。
+      // 刷新/重开聊天后由快照回填。只回填当前活动 run 的进度：快照可能是在
+      // 旧 run 期间取得、晚于新 run 的 run_started 才返回，按 run_id 拦下，
+      // 不把旧阶段挂到新 run。SSE 后续事件照常覆盖；done/error 清空后服务端
+      // 已无活动 run、不再返回该字段。
       setMaintenanceProgress((previous) => {
-        if (previous !== null || !snapshot.maintenance_progress) return previous;
+        const progress = snapshot.maintenance_progress;
+        if (previous !== null || !progress) return previous;
+        if (activeRunIdRef.current === null) {
+          // 本地还没有更新的 run 事件：快照是权威。进度存在意味着服务端有活动
+          // run，即使快照的 runs 列表被截断也能用它锚定。
+          activeRunIdRef.current =
+            pickActiveRun(snapshot.runs)?.id ?? progress.run_id ?? null;
+        } else if (progress.run_id && progress.run_id !== activeRunIdRef.current) {
+          // 旧 run 期间的快照晚到：不得把旧阶段挂到当前 run。
+          return previous;
+        }
         return {
-          runId: snapshot.maintenance_progress.run_id ?? null,
-          phase: snapshot.maintenance_progress.phase,
-          message: snapshot.maintenance_progress.message,
+          runId: progress.run_id ?? activeRunIdRef.current ?? null,
+          phase: progress.phase,
+          message: progress.message,
         };
       });
       return snapshot;
@@ -551,7 +565,19 @@ export function useBotChat(botId: string) {
             kind?: string;
             message_id?: string;
             call_id?: string;
+            run_id?: string;
           };
+          // 记住当前活动 run：run_started 置位，done/error 清空（不覆盖更新的 run）。
+          if (event.event === "delta" && data.kind === "run_started" && data.run_id) {
+            activeRunIdRef.current = data.run_id;
+          }
+          if (
+            (event.event === "done" || event.event === "error") &&
+            data.run_id &&
+            activeRunIdRef.current === data.run_id
+          ) {
+            activeRunIdRef.current = null;
+          }
           const newTextRequest =
             event.event === "delta" &&
             data.kind === "text_delta" &&

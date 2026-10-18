@@ -74,6 +74,13 @@ export function BotChat({ botId }: { botId: string }) {
     : chat.activeRun?.status === "queued"
       ? "排队中"
       : "运行中";
+  // 进度只属于它自己的 run：旧 run 的事件/快照不得显示在当前 run 的运行栏。
+  const activeProgress =
+    chat.maintenanceProgress &&
+    chat.activeRun &&
+    chat.maintenanceProgress.runId === chat.activeRun.id
+      ? chat.maintenanceProgress
+      : null;
 
   return (
     <div
@@ -92,20 +99,20 @@ export function BotChat({ botId }: { botId: string }) {
             <span className="text-xs text-muted-foreground">
               已请求停止，等待当前步骤结束
             </span>
-          ) : chat.maintenanceProgress ? (
+          ) : activeProgress ? (
             // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
             // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
             <span
               data-testid="bot-maintenance-progress"
               className={cn(
                 "text-xs",
-                chat.maintenanceProgress.phase === "failed"
+                activeProgress.phase === "failed"
                   ? "font-medium text-amber-600 dark:text-amber-400"
                   : "text-muted-foreground",
               )}
             >
-              {chat.maintenanceProgress.message ||
-                (chat.maintenanceProgress.phase === "failed"
+              {activeProgress.message ||
+                (activeProgress.phase === "failed"
                   ? "上下文压缩遇到问题"
                   : "正在整理上下文…")}
             </span>
