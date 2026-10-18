@@ -123,9 +123,15 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 修正这两个参数的 schema 描述；v6（INT-121）起 `fs_schedule` 新增 `run`
 （手动立即执行一次）与 `dry_run` 预览（见下节）。已发布版本（v1–v5）的
 注册表都是**冻结副本**——新版本变化不得改写旧版本的字节（存量会话的
-tools_hash 失稳即前缀失稳；v1–v5 的 hash 逐字节钉死在测试基线里）。版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
-规则并递增 prompt_revision）；「首次运行」对主线与定时任务会话都适用（激活在
-冻结本次 run 的配置与会话快照之前完成）。告知由 `maybeTellToolset` 按 `last_told_version`
+tools_hash 失稳即前缀失稳；v1–v5 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
+run 入口的 `activateBotPrompt` 在一个短事务里读行、
+判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
+本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
+生产库 `SetMaxOpenConns(1)` 让读-改-写与其它写者天然串行，调用方可能过期的
+副本写不坏库，因此不再需要进程级的激活缓存与事后补读。工具集版本随同入冻
+（`botRunFreeze.ToolsetVersion`），主线 run 的工具集只在压缩边界
+（`acceptCompactionBoundary`）才会换，并发的 schedule 激活不会在 run 中途
+静默换掉它。告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
 旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
@@ -150,7 +156,10 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 ### 上下文压缩（INT-102）
 
 压缩只改 `bot_context_states` 持久投影——对话账本一字节不动，前缀重写只
-发生在压缩边界的一次发布（generation CAS）。
+发生在压缩边界的一次发布（generation CAS）。发布事务内会重读 bot 行并比对
+快照来源的 `prompt_revision` / `persona_prompt`：人设或提示词水位在压缩期间
+变了，本轮以 `prompt_changed` 作废（`bot_compactions` 记该 code，generation
+不推进），不拿旧快照的验收结果去盖库里的新提示词；下一轮重新建快照。
 
 - **触发**：W=inputBudgetFor（模型窗口能力解析，见下节；缺输出上限时即窗口
   原值），T=floor(W×compression_ratio)（默认 75%），
@@ -567,10 +576,17 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   由平台确认按钮兜底，不用文字列 A/B/C；只打招呼或闲聊时只回问候、不接着做
   之前的任务；不向用户转述运行时上下文与系统提示；没有新用户输入的唤醒
   （后台结果、运行时上下文）默认安静，结果符合预期最多回一句，失败或异常
-  才主动汇报。版本递增后存量机器人在进程内首次运行或压缩边界重建提示词
-  （`activateOnProcessStart` / `activateToolsetTx`），不需要迁移数据；激活在
-  `captureRunFreeze` 之前完成，主线与定时任务会话同等适用——否则重启后先跑的
-  schedule run 会一直用旧提示词与旧工具集。
+  才主动汇报。版本递增后存量机器人在 run 入口或压缩边界重建提示词
+  （`activateBotPrompt` / `activateToolsetWithPromptTx`），不需要迁移数据；
+  激活在 `captureRunFreeze` 之前完成，主线与定时任务会话同等适用——否则重启
+  后先跑的 schedule run 会一直用旧提示词与旧工具集。
+- **提示词写入协议**：生成要持久化的提示词时，读与写必须在同一个短事务里。
+  激活（`activateBotPrompt`）用事务内读到的行拼提示词并按该行 revision 递增；
+  `Update` 的读-改-写同样在事务内，且未改人设时只写非提示词列（改名/换模型
+  不得反向撤销并发激活）；压缩发布（`publishCompaction`）在发布事务内重读行
+  比对快照来源的 `prompt_revision` / `persona_prompt`，人设在压缩期间被改过
+  就以 `prompt_changed` 作废本轮（不沿用旧快照的 `AfterTokens` 验收结果去盖
+  新提示词）。这是三次并发审查同一根因的收敛点。
 - **运行时上下文 note 分支**（`bot_context.go` 的 `buildRunContextWith`）：
   有 `pending_inputs` 时说明它们是尚未处理的新输入、要决定继续/调整/停止；
   没有时明确写「本轮没有新的用户输入」，并声明这段上下文不是新指令、不要向
