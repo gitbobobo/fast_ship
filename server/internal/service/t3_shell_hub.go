@@ -695,12 +695,22 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 	defer cancelConn()
 	e.setConnCancel(archived, cancelConn)
 	defer e.setConnCancel(archived, nil)
+	// 连接取消监听：entry 停止时断开本条连接。它是本连接的辅助 goroutine，
+	// 必须汇合，否则 Close 的「所有 goroutine 已退出」不成立。
+	watchDone := make(chan struct{})
 	go func() {
+		defer close(watchDone)
 		select {
 		case <-e.stop:
 			cancelConn()
 		case <-connCtx.Done():
 		}
+	}()
+	// 先取消、再等监听器退出（LIFO：本 defer 早于上面的 cancelConn 注册，
+	// 所以先执行；随后的 cancelConn 是幂等的重复调用）。
+	defer func() {
+		cancelConn()
+		<-watchDone
 	}()
 
 	// HTTP 会话探测先行：WS 握手失败不带状态码，凭证失效与网络不可达在
@@ -764,6 +774,11 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 	// 订阅。活跃面带恢复游标（有过权威快照才有意义）；归档订阅没有
 	// afterSequence，重连即重新拉全量归档快照。
 	payload := map[string]any{}
+	// resumed 表示本次带了恢复游标：只有 resume 才需要等 synchronized 追平
+	// 信号。冷启动（无游标）与强制全量重同步的完成标志是权威全量快照本身，
+	// 不对它们计时——强慢快照（>MarkerWaitTimeout）能被反复截断就永远
+	// Ready 不了（例如首帧需要 14s、ticker 每 12.5s 就判超时）。
+	resumed := false
 	if !archived {
 		// 强制全量重同步（F1）：上一条活跃连接请求了 marker 但预算内未等到
 		// ——不认为追平，本次重连不带 afterSequence。上游收到无游标的订阅
@@ -776,6 +791,7 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 			e.refresh()
 		} else if st := e.state.status(); st.ActiveReady {
 			payload["afterSequence"] = st.ActiveCursor
+			resumed = true
 			// 进入追平阶段：清标记，等权威帧/标记重新置位——追平前的
 			// 窗口 View 应当是 Stale 而不是 Ready。
 			e.state.markActiveSynced(false)
@@ -793,17 +809,22 @@ func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConn
 	}
 	e.noteConnState(archived, t3ShellConnSubscribed, nil)
 
-	if !archived && !wantMarker {
-		// 能力不支持：不等标记，立即视为追平（对齐官方客户端）。
+	// 能力不支持且本次是带游标的 resume：不等标记，立即视为追平（对齐官方
+	// 客户端 shell.ts:386-398 的乐观 live）。冷启动与强制全量重同步不能乐观
+	// ——它们的完成标志是新权威全量快照本身（权威帧会自己置追平），提前置位
+	// 会把旧缓存当成可信运行态（例如强制重同步的两次连接之间能力由 true 变
+	// 为 false 时）。
+	if !archived && !wantMarker && resumed {
 		e.state.markActiveSynced(true)
 		e.refresh()
 	}
 
-	// marker 等待截止时刻：预算内没等到 synchronized 就不再假装追平，由
-	// readStreamLoop 的 ticker 分支置强制全量重同步并结束本连接。零值表示
-	// 未请求 marker（能力不支持 / 归档面），不存在等待。
+	// marker 等待截止时刻：只对带游标的 resume 生效。预算内没等到
+	// synchronized 就不再假装追平，由 readStreamLoop 的 ticker 分支置强制
+	// 全量重同步并结束本连接。零值表示无需等待（未请求 marker / 冷启动 /
+	// 强制全量重同步 / 归档面）。
 	var markerDeadline time.Time
-	if !archived && wantMarker {
+	if !archived && wantMarker && resumed {
 		markerDeadline = time.Now().Add(h.cfg.MarkerWaitTimeout)
 	}
 
@@ -1024,9 +1045,9 @@ func (h *t3ShellHub) runIdleReaper(e *t3ShellEntry) {
 }
 
 // reapTick 执行一次空闲检查，返回 true 表示 entry 已淘汰、reaper 应退出。
-// lastUsed 的采样与 pause/淘汰决策在同一临界区内完成（F4）：决策若基于锁外
-// 采样的旧值，刚被 View 刷新过 lastUsed 的 entry 会被误暂停/误淘汰。行动
-// （注册表摘除、关连接）都在锁外进行。
+// lastUsed 的采样与 pause 决策在同一临界区内完成（F4）；淘汰还要在摘除
+// 注册表的同一临界区（hub.mu → entry.mu 锁序）复核一次 lastUsed：决策与
+// 摘除之间 View 可能刚刷新过它（回访），那时不得淘汰。行动（关连接在锁外）。
 func (h *t3ShellHub) reapTick(e *t3ShellEntry) bool {
 	e.mu.Lock()
 	idle := time.Since(e.lastUsed)
@@ -1038,19 +1059,31 @@ func (h *t3ShellHub) reapTick(e *t3ShellEntry) bool {
 	}
 	e.mu.Unlock()
 
-	if evict {
-		h.mu.Lock()
-		if h.entries[e.key] == e {
-			delete(h.entries, e.key)
+	if !evict {
+		for _, cancel := range cancels {
+			if cancel != nil {
+				cancel()
+			}
 		}
+		return false
+	}
+
+	h.mu.Lock()
+	if h.entries[e.key] != e {
+		// 已被替换或摘除：本 reaper 没有可淘汰的对象，退出。
 		h.mu.Unlock()
-		e.shutdown()
 		return true
 	}
-	for _, cancel := range cancels {
-		if cancel != nil {
-			cancel()
-		}
+	e.mu.Lock()
+	stillIdle := time.Since(e.lastUsed) > h.cfg.IdleTTL
+	if stillIdle {
+		delete(h.entries, e.key)
 	}
-	return false
+	e.mu.Unlock()
+	h.mu.Unlock()
+	if !stillIdle {
+		return false
+	}
+	e.shutdown()
+	return true
 }

@@ -615,6 +615,63 @@ func TestT3ShellHub_ResumeUsesAfterSequenceAndSyncMarker(t *testing.T) {
 	}
 }
 
+// R2-2：强制全量重同步期间 marker 能力消失时不得乐观置追平——旧缓存必须等
+// 新的权威全量快照到达才重新可信（否则会绕过陈旧快照的可信度守卫）。
+func TestT3ShellHub_ForceResyncWithoutMarkerWaitsForSnapshot(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	cfg := hubTestConfig()
+	cfg.MarkerWaitTimeout = 60 * time.Millisecond
+	cfg.IdleTTL = 30 * time.Second
+	cfg.IdleDisconnect = 0
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, time.Now())
+
+	_, activeConn, _, _, _ := establishBothFaces(t, hub, srv, env, "tok", 42, "th-1")
+	collector := newShellConnCollector(t, srv)
+
+	// 断线 → 带游标的 resume（请求 marker），但这条连接不发任何帧。
+	activeConn.closeConn()
+	resume := collector.await(false)
+	if resume.sub.Payload["requestCompletionMarker"] != true {
+		t.Fatalf("resume should request the marker: %+v", resume.sub.Payload)
+	}
+
+	// 能力在两次连接之间消失（例如上游版本回退）：marker 预算到点后会走
+	// 强制全量重同步，而此时重连已不再请求 marker。
+	srv.mu.Lock()
+	srv.marker = false
+	srv.mu.Unlock()
+
+	resync := collector.await(false)
+	if _, has := resync.sub.Payload["afterSequence"]; has {
+		t.Fatalf("forced resync must drop the cursor: %+v", resync.sub.Payload)
+	}
+	if _, has := resync.sub.Payload["requestCompletionMarker"]; has {
+		t.Fatalf("no marker capability means no marker request: %+v", resync.sub.Payload)
+	}
+
+	// 新权威快照到达前不得 Ready（旧缓存仍是旧的）。
+	view, err := hub.View(context.Background(), env, "tok")
+	if err != nil {
+		t.Fatalf("view: %v", err)
+	}
+	if view.State == t3ShellReady {
+		t.Fatalf("must not be Ready before the authoritative snapshot arrives")
+	}
+
+	// 权威全量快照到达 → 重新可信。
+	if err := resync.conn.sendValue(resync.sub.ID, shellSnapshotValue(60, "th-1")); err != nil {
+		t.Fatalf("send resync snapshot: %v", err)
+	}
+	if !resync.conn.awaitAck(resync.sub.ID, 2*time.Second) {
+		t.Fatalf("resync snapshot not acked")
+	}
+	waitForView(t, hub, env, "tok", func(v *t3ShellView) bool {
+		return v.State == t3ShellReady && v.Snaps != nil && v.Snaps.Active.SnapshotSequence == 60
+	})
+}
+
 func mustMarshalDelta(sequence int, id, title string) json.RawMessage {
 	data, _ := json.Marshal(map[string]any{
 		"kind": "thread.updated", "sequence": sequence, "location": "active",
@@ -1086,6 +1143,70 @@ func TestT3ShellHub_FloorRetentionKeyedByRecordTime(t *testing.T) {
 	}
 }
 
+// R2-1：marker 截止只对带游标的 resume 生效。冷启动（无 afterSequence）的慢
+// 全量快照不能被 marker 预算截断——否则首帧比预算慢的环境会陷入「重连 → 再被
+// 截断」的死循环，永远 Ready 不了（这正是本改动要解决的那类慢环境）。
+func TestT3ShellHub_ColdSlowSnapshotNotInterruptedByMarkerBudget(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	cfg := hubTestConfig()
+	cfg.MarkerWaitTimeout = 80 * time.Millisecond
+	cfg.IdleTTL = 30 * time.Second
+	cfg.IdleDisconnect = 0
+	hub := newT3ShellHubWithConfig(cfg, nil)
+	defer hub.Close()
+	env := hubTestEnv(url, time.Now())
+
+	viewDone := make(chan struct{})
+	var view *t3ShellView
+	var viewErr error
+	go func() {
+		defer close(viewDone)
+		view, viewErr = hub.View(context.Background(), env, "tok")
+	}()
+
+	collector := newShellConnCollector(t, srv)
+	active := collector.await(false)
+	archive := collector.await(true)
+	if err := archive.conn.sendValue(archive.sub.ID, archiveSnapshotValue(1, "th-a")); err != nil {
+		t.Fatalf("send archive snapshot: %v", err)
+	}
+	if !archive.conn.awaitAck(archive.sub.ID, 2*time.Second) {
+		t.Fatalf("archive snapshot not acked")
+	}
+
+	// 冷启动仍会请求 marker（能力支持），但此刻故意不发快照：等过 marker 预算
+	// 与若干个 tick，连接必须保持原样。
+	if active.sub.Payload["requestCompletionMarker"] != true {
+		t.Fatalf("cold subscribe should still request the marker: %+v", active.sub.Payload)
+	}
+	if _, has := active.sub.Payload["afterSequence"]; has {
+		t.Fatalf("cold subscribe must not carry afterSequence: %+v", active.sub.Payload)
+	}
+	time.Sleep(cfg.MarkerWaitTimeout + 4*(cfg.PingInterval/2))
+	if got := srv.connCount.Load(); got != 2 {
+		t.Fatalf("cold slow snapshot must not be torn down, connCount = %d", got)
+	}
+
+	// 慢快照终于到达：直接转 Ready，没有走强制重同步。
+	if err := active.conn.sendValue(active.sub.ID, shellSnapshotValue(7, "th-1")); err != nil {
+		t.Fatalf("send slow snapshot: %v", err)
+	}
+	if !active.conn.awaitAck(active.sub.ID, 2*time.Second) {
+		t.Fatalf("slow snapshot not acked")
+	}
+	select {
+	case <-viewDone:
+		if viewErr != nil {
+			t.Fatalf("view: %v", viewErr)
+		}
+		if view.State != t3ShellReady {
+			t.Fatalf("state = %v, want ready", view.State)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for view")
+	}
+}
+
 // 首次同步预算用尽时如实返回 Syncing 视图，而不是把慢冷启动伪装成上游错误：
 // 后台订阅继续跑，下一个请求就能拿到数据。
 func TestT3ShellHub_FirstSyncDeadlineReturnsSyncingView(t *testing.T) {
@@ -1215,9 +1336,9 @@ func TestT3ShellHub_ReapTickRespectsFreshLastUsed(t *testing.T) {
 
 	// lastUsed 刚被 View 刷新（视作空闲阈值的远未来）：单次决策不暂停也不
 	// 淘汰，连接照常可用。
-	hub.mu.Lock()
+	entry.mu.Lock()
 	entry.lastUsed = time.Now().Add(time.Hour)
-	hub.mu.Unlock()
+	entry.mu.Unlock()
 	if hub.reapTick(entry) {
 		t.Fatalf("fresh entry must not be evicted")
 	}
@@ -1230,9 +1351,9 @@ func TestT3ShellHub_ReapTickRespectsFreshLastUsed(t *testing.T) {
 
 	// lastUsed 拨回超过 IdleDisconnect：同一临界区决策出暂停，两条连接被取消；
 	// entry 保留（淘汰要等 IdleTTL）。
-	hub.mu.Lock()
+	entry.mu.Lock()
 	entry.lastUsed = time.Now().Add(-cfg.IdleDisconnect - time.Second)
-	hub.mu.Unlock()
+	entry.mu.Unlock()
 	if hub.reapTick(entry) {
 		t.Fatalf("idle-disconnect tick must not evict")
 	}

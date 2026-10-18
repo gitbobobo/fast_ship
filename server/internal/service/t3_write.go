@@ -608,8 +608,22 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 	defer session.Close()
 
 	runID := ""
-	if active := resolveT3ActiveRun(projection.Runs); active != nil {
-		runID = active.ID
+	if shell.ActiveRunID != nil && *shell.ActiveRunID != "" {
+		// 以新鲜 shell 的可中断活动 run 为主：`shell.activeRunId` 是上游按
+		// isInterruptibleRunForShell（preparing/starting/running）派生的，
+		// 而投影是本次等待之前读的——冷启动等 hub 首次同步期间新起的 run
+		// 不会出现在里面，用旧投影会把可停的线程误报成无事可做。
+		runID = *shell.ActiveRunID
+	} else if active := resolveT3ActiveRun(projection.Runs); active != nil {
+		// 投影说有活动 run、但 shell 的可中断集合里没有（典型是 waiting）：
+		// 投影可能早于本次等待，重读一次再决策，避免中断已经结束的旧 run。
+		fresh, freshErr := s.fetchProjectionForWrite(ctx, env, token, threadID)
+		if freshErr != nil {
+			return nil, s.upstreamError(freshErr)
+		}
+		if current := resolveT3ActiveRun(fresh.Runs); current != nil {
+			runID = current.ID
+		}
 	} else if shell.LatestRunID != nil && t3HasInterruptibleBackgroundWork(shell.PendingBackgroundTasks) {
 		// 根 run 已结束但后台工作还在：T3 的 Stop 接受对最近 run 的中断。
 		// PR watch 不算可中断后台（与 interruptThreadTurn 不含 pullRequests 一致）。

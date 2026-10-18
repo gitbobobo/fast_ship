@@ -175,8 +175,11 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
 读取顺序恢复基线（F6）：**先读 HTTP 投影**——线程真的不存在回到 40418
 （投影 404 → `errT3ThreadNotFound`；凭证被拒/不可达按既有分类），再取 hub
 **可信活跃面**（`Ready`；未就绪/陈旧 50202，不基于陈旧快照下「无事可做」的
-结论；Ready 但 shell 无此线程也是 50202「上游快照面不一致」）。run 选择：
-活动 run（同 activeRun 口径）优先；否则 shell 的 `latestRunId` 带着非空
+结论；Ready 但 shell 无此线程也是 50202「上游快照面不一致」）。run 选择以
+**新鲜 shell** 为主：`shell.activeRunId`（上游按可中断活动 run 派生）优先——
+投影是等待之前读的，冷启动等首次同步期间新起的 run 不在里面；
+`shell.activeRunId` 为空时（典型是 waiting）才回读一次投影，保留
+「waiting/后台工作也算可停」的既有口径；再否则 shell 的 `latestRunId` 带着非空
 `pendingBackgroundTasks`（后台工作仍会唤醒代理）→ 中断最近 run；都没有 →
 `stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，不杜撰
 内部命令）。自动化收尾的 `ThreadSettleSafe` 同一口径（等首次同步用
@@ -239,17 +242,20 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   不可续读）。重连退避 1s→2s→…→30s ±25% jitter，稳定 60s 后重置；凭证被拒走
   5min 长退避。恢复订阅带 `afterSequence` 续传（序号失效/缺口过大时上游直接改发
   权威快照，客户端不要求序号连续）。
-- **完成标记兼容**：上游不支持 marker 时不请求、立即视为追平（对齐官方客户端
-  `client-runtime/src/state/shell.ts`）。请求了但 10s 内未等到 `synchronized`
-  时**不把未追平的缓存提升为 Ready**：置强制全量重同步并结束本连接，下次重连
-  不带 `afterSequence`，由上游权威全量快照重新建立追平（期间视图保持
-  Stale/Syncing）——重连慢全量（gap 超限改发全量 >10s）期间，旧 idle 缓存
-  不得被计时兜底当成可信运行态。
+- **完成标记兼容**：只有**带游标的 resume** 才等 `synchronized` 并受 10s 预算
+  约束；预算内没等到就**不把未追平的缓存提升为 Ready**，而是置强制全量重同步
+  并结束本连接，下次重连不带 `afterSequence`，由上游权威全量快照重新建立追平
+  （期间保持 Stale/Syncing）。冷启动与强制全量重同步**不计时**，完成标志就是
+  权威全量快照本身——否则首帧比预算慢的慢环境会被反复截断、永远 Ready 不了。
+  上游不支持 marker 时的「立即视为追平」也只对 resume 生效（对齐官方客户端
+  `client-runtime/src/state/shell.ts`）；冷启动/强制全量始终等权威帧。
 - **空闲两级回收**：1 小时无访问先断连保值（内存快照保留，下次 View 用
   afterSequence 增量恢复，避免「每次离开 15 分钟就重付 13s 全量快照」）；6 小时
-  无访问整条摘除。reaper 的 lastUsed 采样与 pause/淘汰决策在同一临界区完成，
+  无访问整条摘除。reaper 的 lastUsed 采样与 pause 决策在同一临界区完成，淘汰
+  则在摘除注册表的同一临界区（`hub.mu → entry.mu` 锁序）再复核一次 lastUsed，
   刚被 View 使用的 entry 不会被旧采样误判；暂停期间新建立的连接会被立即取消
-  （登记 cancel 时同锁复查 paused/stopped）。
+  （登记 cancel 时同锁复查 paused/stopped）。连接结束时会汇合本次连接的取消
+  监听与 reader，`Close()` 返回后没有本 hub 启动的 goroutine 仍在运行。
 - **版本守卫**：entry 记 `env.UpdatedAt` 与凭证指纹（规范化 address + token）。
   凭证/地址变更且版本更新 → 停旧建新；否则拒绝（`errT3ShellConfigStale`），
   调用方按可重试错误处理（「环境配置已更新，请重试」——不做内部重读重试，

@@ -473,6 +473,39 @@ func TestT3StopThreadSelection(t *testing.T) {
 		}
 	}
 
+	// R2-3：run 选择以新鲜 shell 的 activeRunId 为主。投影里没有活动 run
+	// （它早于本次 shell），但可信 shell 说 run-2 在跑 → 必须中断 run-2，
+	// 不能因为旧投影而误报「无事可做」。
+	e.fake.mu.Lock()
+	e.fake.projections["th-late"] = wireProjection(appThreadFixture("th-late", "后来启动", nil), []map[string]any{
+		{"id": "run-1", "ordinal": 1, "status": "completed", "userMessageId": "m1"},
+	})
+	e.fake.mu.Unlock()
+	e.fake.pushThreadDelta(t, shellThread("th-late", "后来启动", "running", map[string]any{
+		"latestRunId": "run-2",
+		"activeRunId": "run-2",
+	}))
+	result, err = e.th.StopThread(ctx, userID, envID, "th-late")
+	if err != nil {
+		t.Fatalf("stop late run: %v", err)
+	}
+	if !result.Stopped || apiStr(result.RunId) != "run-2" {
+		t.Fatalf("stop must target the fresh shell activeRunId, got %+v", result)
+	}
+	var lateInterrupt map[string]any
+	for _, rpc := range e.fake.recordedRPC() {
+		if rpc.method != "orchestration.dispatchCommand" {
+			continue
+		}
+		var cmd map[string]any
+		if json.Unmarshal(rpc.payload, &cmd) == nil && cmd["runId"] == "run-2" {
+			lateInterrupt = cmd
+		}
+	}
+	if lateInterrupt["type"] != "run.interrupt" {
+		t.Fatalf("expected run.interrupt for run-2, got %+v", lateInterrupt)
+	}
+
 	// F6：Stop 的错误语义恢复基线顺序——先读投影、再取可信 shell。
 	// 线程真的不存在（投影 404）→ 40418，不再被 shell 守卫拦成 50202。
 	if _, err := e.th.StopThread(ctx, userID, envID, "th-absent"); err == nil || t3ErrCode(err) != errs.ErrT3ThreadNotFound.Code {
