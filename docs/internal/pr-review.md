@@ -122,14 +122,27 @@ PR 触发且 `dispatched|running`，结束/取消后令牌已消费，访问一�
 
 ## 配置与安全
 
+App 身份自 INT-119 起是**用户级配置**：每个用户在「设置 → 集成」保存自己的
+GitHub App（`integrations` 表按 `(user_id, provider)` 唯一，AES-GCM 加密落库），保存即生效、
+无需重启，PR 评审回写用该轮运行所属用户的 App 身份（详见 `docs/internal/integrations.md`）。
+下列 `config.yaml`（或环境变量）只是未保存集成配置的用户共用的**部署级兜底**，
+用户一旦保存就不再读它们。
+
 - `github_app.app_id`（`FAST_SHIP_GITHUB_APP_APP_ID`）
 - `github_app.private_key_path`（`FAST_SHIP_GITHUB_APP_PRIVATE_KEY_PATH`）——
-  PEM 文件路径；私钥不进库、不进环境变量正文、不写日志
+  PEM 文件路径；私钥不进环境变量正文、不写日志（用户保存后密文落库）
 - `github_app.webhook_secret`（`FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET`）——
-  为空时 `POST /api/github/webhooks` 一律 503，不接受未签名请求
+  为空且无用户配置时 `POST /api/github/webhooks` 一律 503，不接受未签名请求；
+  入站密钥按 `X-GitHub-Hook-Installation-Target-ID`（App ID）定位到用户配置
 - `github_app.fake`（`FAST_SHIP_GITHUB_APP_FAKE`）—— 仅 `server.mode=debug`
-  允许 true；注入内存假实现，入站 webhook 会 `SeedFakeFromWebhook`（simulate
-  脚本不必另调 SetPR），`GET /api/debug/github-review-log`（JWT）可看调用记录
+  允许 true；注入内存假实现，此时身份与 webhook 密钥都只走 config（不读数据库），
+  入站 webhook 会 `SeedFakeFromWebhook`（simulate 脚本不必另调 SetPR），
+  `GET /api/debug/github-review-log`（JWT）可看调用记录
+
+身份隔离（INT-119）：评审行主键含 `app_user_id`、已见 SHA 主键含它、防抖行与
+运行行都有该列（空串 = 部署 config 身份）；开轮时把验签身份写进运行，评论 marker
+也带身份，所以同一 PR 上不同 App 的评论/check/运行互不串扰。INT-93 旧库由
+`cmd/server/migrate_pr_identity.go` 在 AutoMigrate 前重建两张账表并回填 `''`。
 
 适配器分两层（INT-107 收拢）：seam 包 `server/internal/githubapi/` 定义
 `GitHubClient` 契约（PR 元数据/diff、review 评论、机器人顶层评论
