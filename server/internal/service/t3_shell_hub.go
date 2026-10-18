@@ -217,6 +217,12 @@ func t3ShellFingerprint(address, token string) string {
 // 请求取消不影响后台同步。等待结束条件：活跃面出现权威快照、或首次建连失败、
 // 或 ctx 结束。
 func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token string) (*t3ShellView, error) {
+	// 请求预算已到（典型是同一轮里前面的环境吃完了整轮预算）：此时不要建
+	// entry、更不要拉起两条常驻订阅——它们会一直活到空闲回收，让一次超时的
+	// 列表请求给每个排队环境都留下长驻连接，突破调用方的并发/预算意图。
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := t3ShellHubKey(env.UserID, env.ID)
 	fingerprint := t3ShellFingerprint(env.Address, token)
 
@@ -671,6 +677,9 @@ func (h *t3ShellHub) runFaceSubscription(e *t3ShellEntry, archived bool) {
 		backoff := h.backoffFor(attempts, result.credential)
 
 		timer := time.NewTimer(backoff)
+		e.mu.Lock()
+		wake := e.wake
+		e.mu.Unlock()
 		select {
 		case <-e.stop:
 			timer.Stop()
@@ -678,6 +687,10 @@ func (h *t3ShellHub) runFaceSubscription(e *t3ShellEntry, archived bool) {
 		case <-h.ctx.Done():
 			timer.Stop()
 			return
+		case <-wake:
+			// View 结束了空闲暂停：立刻重试，不必等完这段退避（否则用户回到
+			// 应用后可能白等最多 30s，凭证类失败更是 5min）。
+			timer.Stop()
 		case <-timer.C:
 		}
 	}

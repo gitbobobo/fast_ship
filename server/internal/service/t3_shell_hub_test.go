@@ -1222,6 +1222,32 @@ func TestT3ShellHub_ColdSlowSnapshotNotInterruptedByMarkerBudget(t *testing.T) {
 	}
 }
 
+// 已取消的请求不得在 hub 里建 entry 并拉起常驻订阅（云端审查 P2）：一次超时
+// 的列表请求会给每个排队环境留下长驻连接，突破调用方的并发/预算意图。
+func TestT3ShellHub_CancelledViewStartsNoSubscription(t *testing.T) {
+	srv, url := startFakeShellStreamServer(t, fakeShellServerOptions{bearer: "tok", marker: true, autoPong: true})
+	hub := newT3ShellHubWithConfig(hubTestConfig(), nil)
+	defer hub.Close()
+	env := hubTestEnv(url, time.Now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := hub.View(ctx, env, "tok"); err == nil {
+		t.Fatalf("cancelled view must fail")
+	}
+	// 给潜在的后台 goroutine 一点时间暴露问题。
+	time.Sleep(100 * time.Millisecond)
+	hub.mu.Lock()
+	entries := len(hub.entries)
+	hub.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("cancelled view must not create an entry, entries = %d", entries)
+	}
+	if got := srv.connCount.Load(); got != 0 {
+		t.Fatalf("cancelled view must not dial, connCount = %d", got)
+	}
+}
+
 // 首次同步预算用尽时如实返回 Syncing 视图，而不是把慢冷启动伪装成上游错误：
 // 后台订阅继续跑，下一个请求就能拿到数据。
 func TestT3ShellHub_FirstSyncDeadlineReturnsSyncingView(t *testing.T) {
