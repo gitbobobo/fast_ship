@@ -127,6 +127,23 @@ func newQuotaTestServer(t *testing.T, handler func(r *http.Request) (int, []byte
 	return server, &calls
 }
 
+// assertDeviceSessionReleased 断言终态会话的敏感字段引用已释放（设备密钥
+// 置空、凭据清空）；终态会话在保留期内应仍在表中、可被 GET 读到。
+func assertDeviceSessionReleased(t *testing.T, service *QuotaService, sessionID string) {
+	t.Helper()
+	service.deviceMu.Lock()
+	session := service.deviceSessions[sessionID]
+	service.deviceMu.Unlock()
+	if session == nil {
+		t.Fatal("保留期内的终态会话应仍在表中")
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.deviceKey != "" || session.creds != nil {
+		t.Fatalf("终态会话应释放敏感字段引用: deviceKey=%q creds=%v", session.deviceKey, session.creds)
+	}
+}
+
 // 四态推进：approved 自动建号（只存控制面密钥，模型面密钥丢弃）、
 // expired / denied / invalid 各给用户可读原因；设备密钥与凭据不进任何响应。
 func TestQuotaService_DeviceAuthorizationStates(t *testing.T) {
@@ -237,6 +254,8 @@ func TestQuotaService_DeviceAuthorizationStates(t *testing.T) {
 				if plane.tokenCalls != 1 {
 					t.Fatalf("终态后不应再轮询，tokenCalls=%d", plane.tokenCalls)
 				}
+				// 终态即释放敏感字段引用（设备密钥置空、凭据清空）。
+				assertDeviceSessionReleased(t, service, started.Id)
 				return
 			}
 
@@ -269,6 +288,8 @@ func TestQuotaService_DeviceAuthorizationStates(t *testing.T) {
 			if count != 1 {
 				t.Fatalf("应只建 1 个账号，得到 %d", count)
 			}
+			// approved 终态同样释放敏感字段引用（写库用完凭据之后）。
+			assertDeviceSessionReleased(t, service, started.Id)
 		})
 	}
 }
@@ -301,6 +322,8 @@ func TestQuotaService_DeviceAuthorization_LocalExpiry(t *testing.T) {
 	if plane.tokenCalls != 1 {
 		t.Fatalf("本地超时前应先向上游确认一次，tokenCalls=%d", plane.tokenCalls)
 	}
+	// 本地过期同样走统一终态收尾：设备密钥引用释放。
+	assertDeviceSessionReleased(t, service, started.Id)
 }
 
 // 会话有效期取 min(上游值, now+30min)：上游给出极远时间时封顶，避免含设备
@@ -415,6 +438,12 @@ func TestQuotaService_DeviceAuthorization_CancelDuringPoll(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("上游 token 请求未到达，无法构造阻塞场景")
 	}
+	service.deviceMu.Lock()
+	session := service.deviceSessions[started.Id]
+	service.deviceMu.Unlock()
+	if session == nil {
+		t.Fatal("会话应在表中")
+	}
 	// 上游阻塞期间取消：先置标志、摘除会话并立即返回。
 	if err := service.CancelDeviceAuthorization(user.ID, started.Id); err != nil {
 		t.Fatalf("cancel: %v", err)
@@ -431,6 +460,14 @@ func TestQuotaService_DeviceAuthorization_CancelDuringPoll(t *testing.T) {
 	// 会话已摘除：再 GET 40431。
 	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthNotFound.Code {
 		t.Fatalf("取消后 GET 期望 40431，得到 %v", err)
+	}
+	// 被取消打断的提交段就地释放敏感字段引用：设备密钥在兑换完成时已释放，
+	// 缓存凭据在提交段复查到取消时释放。
+	session.mu.Lock()
+	released := session.deviceKey == "" && session.creds == nil
+	session.mu.Unlock()
+	if !released {
+		t.Fatalf("取消打断提交段后应释放敏感字段引用")
 	}
 }
 
@@ -484,6 +521,28 @@ func TestQuotaService_DeviceAuthorization_CancelBeforeCommit(t *testing.T) {
 	}
 	if plane.tokenCalls != 1 {
 		t.Fatalf("取消后 GET 不得再触上游，tokenCalls=%d", plane.tokenCalls)
+	}
+
+	// 取消时没有 GET 在途：取消路径不等待会话锁（锁顺序约束，不在 deviceMu
+	// 下等 session.mu），出表本身不触碰会话锁保护的字段。敏感字段引用由任一
+	// 持有会话锁、再观察到出表的路径就地释放——直接驱动提交段验证这条等价
+	// 断言：复查到取消 → 放弃落库、不触上游、引用释放。
+	if err := service.pollDeviceAuthorization(session); err != nil {
+		t.Fatalf("出表后的提交段应静默放弃: %v", err)
+	}
+	if !session.canceled.Load() {
+		t.Fatal("出表的会话应已置位取消标志")
+	}
+	session.mu.Lock()
+	released := session.deviceKey == "" && session.creds == nil
+	session.mu.Unlock()
+	if !released {
+		t.Fatalf("出表后的提交段应释放敏感字段引用")
+	}
+	var recount int64
+	svc.db.Model(&model.QuotaAccount{}).Where("user_id = ?", user.ID).Count(&recount)
+	if recount != 0 {
+		t.Fatalf("出表后的提交段不得落库，得到 %d 行", recount)
 	}
 }
 
@@ -808,6 +867,8 @@ func TestQuotaService_DeviceAuthorization_Rebind(t *testing.T) {
 	if plane.tokenCalls != 1 {
 		t.Fatalf("应只向上游兑换一次，tokenCalls=%d", plane.tokenCalls)
 	}
+	// rebind approved 终态：整组替换用完凭据后释放引用。
+	assertDeviceSessionReleased(t, service, started.Id)
 }
 
 // 会话是本人资源：他人 GET/DELETE 一律 40431；取消后 GET 也 40431。
@@ -887,5 +948,211 @@ func TestQuotaService_DeviceAuthorization_StartValidation(t *testing.T) {
 		Provider: "opendesign", Label: "x",
 	}); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthUpstream.Code {
 		t.Fatalf("缺设备密钥期望 50204，得到 %v", err)
+	}
+}
+
+// 建号失败保持 pending 时必须保留缓存的凭据（幂等重试不再向上游兑换的前提），
+// 设备密钥在兑换完成时即已释放；重试成功推进 approved 后释放全部敏感字段引用。
+func TestQuotaService_DeviceAuthorization_CreateFailureKeepsCredentials(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-device-keep-creds")
+	plane := &odControlPlane{tokenBody: odApprovedTokenBody("vela_ctrl_keep_key")}
+	baseProvider := deviceAuthQuotaProvider(t, plane)
+	core, obs := observer.New(zapcore.DebugLevel)
+
+	// requireGate 为真时凭据校验必失败（缺必填字段），模拟首轮建号失败。
+	var requireGate bool
+	service := NewQuotaService(repository.NewQuotaAccountRepository(svc.db), svc.cfg, zap.New(core),
+		func() []quota.Provider {
+			p := baseProvider
+			if requireGate {
+				p.CredentialFields = append(p.CredentialFields, quota.CredentialField{Key: "gate", Label: "门", Required: true})
+			}
+			return []quota.Provider{p}
+		})
+
+	started, err := service.StartDeviceAuthorization(user.ID, &StartQuotaDeviceAuthorizationRequest{
+		Provider: "opendesign", Label: "浏览器授权",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// 首轮：兑换到凭据但建号失败 → pending，Warn 恰好一条。
+	requireGate = true
+	base := service.now()
+	service.now = func() time.Time { return base.Add(time.Minute) }
+	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); err != nil {
+		t.Fatalf("首轮 get: %v", err)
+	}
+	failed := obs.FilterLevelExact(zapcore.WarnLevel).FilterMessage("quota device auth account create failed").All()
+	if len(failed) != 1 {
+		t.Fatalf("建号失败应记一条 Warn，得到 %d 条", len(failed))
+	}
+
+	service.deviceMu.Lock()
+	session := service.deviceSessions[started.Id]
+	service.deviceMu.Unlock()
+	if session == nil {
+		t.Fatal("会话应在表中")
+	}
+	session.mu.Lock()
+	status := string(session.status)
+	creds := session.creds
+	keyReleased := session.deviceKey == ""
+	session.mu.Unlock()
+	if status != "pending" {
+		t.Fatalf("建号失败应保持 pending，得到 %q", status)
+	}
+	if creds == nil || creds["control_key"] != "vela_ctrl_keep_key" {
+		t.Fatalf("建号失败应保留缓存的凭据组: %+v", creds)
+	}
+	if !keyReleased {
+		t.Fatalf("兑换完成后设备密钥应已释放，deviceKey=%q", session.deviceKey)
+	}
+
+	// 重试：不再向上游换取（tokenCalls 不变），终态释放全部敏感字段引用。
+	requireGate = false
+	service.now = func() time.Time { return base.Add(2 * time.Minute) }
+	view, err := service.GetDeviceAuthorization(user.ID, started.Id)
+	if err != nil {
+		t.Fatalf("重试 get: %v", err)
+	}
+	if view.Status != "approved" || view.AccountId == "" {
+		t.Fatalf("重试应 approved: %+v", view)
+	}
+	if plane.tokenCalls != 1 {
+		t.Fatalf("重试不得再向上游换取，tokenCalls=%d", plane.tokenCalls)
+	}
+	assertDeviceSessionReleased(t, service, started.Id)
+}
+
+// 会话级定时回收不依赖后续设备授权流量：到期 + 保留期后由定时器回调出表
+// （测试直接驱动回调 expireDeviceSession，不等待真实的 1 小时保留期），
+// 出表的会话 GET 40431、不触上游；指针不匹配（已被取消 / 清理 / 替换）时
+// 空操作。
+func TestQuotaService_DeviceAuthorization_TimerReclaim(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-device-timer")
+	plane := &odControlPlane{}
+	service := newTestQuotaService(svc, deviceAuthQuotaProvider(t, plane))
+
+	started, err := service.StartDeviceAuthorization(user.ID, &StartQuotaDeviceAuthorizationRequest{
+		Provider: "opendesign", Label: "x",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	other, err := service.StartDeviceAuthorization(user.ID, &StartQuotaDeviceAuthorizationRequest{
+		Provider: "opendesign", Label: "y",
+	})
+	if err != nil {
+		t.Fatalf("start other: %v", err)
+	}
+	service.deviceMu.Lock()
+	session := service.deviceSessions[started.Id]
+	otherSession := service.deviceSessions[other.Id]
+	service.deviceMu.Unlock()
+	if session == nil || otherSession == nil {
+		t.Fatal("两个会话都应在表中")
+	}
+
+	// 回收第一个会话：出表 + 撤销提交资格 + GET 40431 + 不触上游。
+	service.expireDeviceSession(started.Id, session)
+	if !session.canceled.Load() {
+		t.Fatal("定时回收出表应已置位取消标志")
+	}
+	service.deviceMu.Lock()
+	_, stillThere := service.deviceSessions[started.Id]
+	service.deviceMu.Unlock()
+	if stillThere {
+		t.Fatal("定时回收后应已出表")
+	}
+	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); quotaAppErrCode(t, err) != errs.ErrQuotaDeviceAuthNotFound.Code {
+		t.Fatalf("定时回收后 GET 期望 40431，得到 %v", err)
+	}
+
+	// 指针不匹配：拿已回收会话的 id 去回收另一会话，应为空操作。
+	service.expireDeviceSession(started.Id, otherSession)
+	service.deviceMu.Lock()
+	_, otherStillThere := service.deviceSessions[other.Id]
+	service.deviceMu.Unlock()
+	if !otherStillThere {
+		t.Fatal("指针不匹配时空操作，另一会话不应被回收")
+	}
+	if _, err := service.GetDeviceAuthorization(user.ID, other.Id); err != nil {
+		t.Fatalf("未被回收的会话 GET 应正常: %v", err)
+	}
+
+	// 重复回收同一会话：已出表、指针不等，空操作。
+	service.expireDeviceSession(started.Id, session)
+
+	if plane.tokenCalls != 0 {
+		t.Fatalf("定时回收不得触上游，tokenCalls=%d", plane.tokenCalls)
+	}
+}
+
+// 过期清理摘表也撤销提交资格（复审点出的残余窗口）：会话先通过 GET 的存活
+// 复核并缓存凭据（等价「已兑换、待落库」），随后拖过保留期被 cleanup 出表；
+// 此时再运行提交段，commitMu 内复查到取消必须放弃落库并释放敏感字段引用。
+func TestQuotaService_DeviceAuthorization_CleanupRevokesCommit(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "quota-device-cleanup-commit")
+	plane := &odControlPlane{} // token 端点保持 pending：首轮轮询不产生凭据
+	service := newTestQuotaService(svc, deviceAuthQuotaProvider(t, plane))
+
+	started, err := service.StartDeviceAuthorization(user.ID, &StartQuotaDeviceAuthorizationRequest{
+		Provider: "opendesign", Label: "x",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// 走一次 pending 轮询：会话通过 GET 的存活复核，推进到「已代查、仍 pending」。
+	base := service.now()
+	service.now = func() time.Time { return base.Add(time.Minute) }
+	if _, err := service.GetDeviceAuthorization(user.ID, started.Id); err != nil {
+		t.Fatalf("pending get: %v", err)
+	}
+	service.deviceMu.Lock()
+	session := service.deviceSessions[started.Id]
+	service.deviceMu.Unlock()
+	if session == nil {
+		t.Fatal("会话应在表中")
+	}
+	// 直接缓存凭据（同 package 白盒）：模拟「已兑换、待落库」。
+	session.creds = quota.Credentials{"control_key": "vela_ctrl_never_stored"}
+
+	// 拖过「有效期 + 保留期」后由 cleanup 出表（直接调用，等价构造「出表与
+	// 提交段并发」的窗口）：出表必须同时置位取消标志。
+	service.now = func() time.Time { return base.Add(2 * time.Hour) }
+	service.cleanupDeviceSessions()
+	if !session.canceled.Load() {
+		t.Fatal("cleanup 出表应已置位取消标志")
+	}
+	service.deviceMu.Lock()
+	_, stillThere := service.deviceSessions[started.Id]
+	service.deviceMu.Unlock()
+	if stillThere {
+		t.Fatal("过保留期的会话应已出表")
+	}
+
+	// 出表后再运行提交段：放弃落库、不再触上游、就地释放敏感字段引用。
+	if err := service.pollDeviceAuthorization(session); err != nil {
+		t.Fatalf("出表后的提交段应静默放弃: %v", err)
+	}
+	session.mu.Lock()
+	released := session.deviceKey == "" && session.creds == nil
+	session.mu.Unlock()
+	if !released {
+		t.Fatalf("出表后的提交段应释放敏感字段引用")
+	}
+	if plane.tokenCalls != 1 {
+		t.Fatalf("出表后的提交段不得触上游，tokenCalls=%d", plane.tokenCalls)
+	}
+	var count int64
+	svc.db.Model(&model.QuotaAccount{}).Where("user_id = ?", user.ID).Count(&count)
+	if count != 0 {
+		t.Fatalf("出表的会话不得落库，得到 %d 行", count)
 	}
 }

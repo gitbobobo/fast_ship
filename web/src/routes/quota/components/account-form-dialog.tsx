@@ -81,8 +81,9 @@ export function QuotaAccountFormDialog({
   const authGenerationRef = useRef(0);
 
   // 只清会话 ref 与 state，不发请求。approved 路径用它：面板轮询到
-  // approved 时这里存的仍是 POST 返回的 pending 视图，若按这个 status 判断
-  // 会向一个已被服务端消费的会话发 DELETE（只会撞 404）。
+  // approved 时这里存的仍是 POST 返回的 pending 视图，按这个 status 判断
+  // 会以为还要取消、多发一次 DELETE。服务端在终态仍保留会话（只释放敏感
+  // 字段），那次 DELETE 无害但多余，没必要发。
   const clearSession = useCallback(() => {
     authSessionRef.current = null;
     setAuthSession(null);
