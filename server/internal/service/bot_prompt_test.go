@@ -54,6 +54,72 @@ func TestBotSystemPromptStyleSection(t *testing.T) {
 	}
 }
 
+// TestBotPlatformPromptOnlyUpgrade 平台提示词单独升级（v5）的存量机器人：
+// 工具集已是最新版本时，重启激活只重建提示词并恰好 +1 prompt_revision，
+// 工具集与版本字节不动；激活进程内幂等，重复调用不再递增。
+func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "ppup5")
+	bot := env.createBot(t, userID)
+	const oldPrompt = "旧平台提示：没有对话风格段落"
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"toolset_version":         botToolsetVersion,
+		"platform_prompt_version": 4,
+		"system_prompt_text":      oldPrompt,
+	}).Error; err != nil {
+		t.Fatalf("stale bot: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	run := botFixtureRun(t, env, botRow)
+	builtBefore, err := env.bots.buildRunContext(botRow, run)
+	if err != nil {
+		t.Fatalf("build before: %v", err)
+	}
+
+	env.bots.rt.mu.Lock()
+	delete(env.bots.rt.activated, bot.ID)
+	env.bots.rt.mu.Unlock()
+
+	revBefore := botRow.PromptRevision
+	if err := env.bots.activateOnProcessStart(botRow); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	fresh, _ := env.bots.bots.Get(bot.ID)
+	if fresh.PlatformPromptVersion != botPlatformPromptVersion {
+		t.Fatalf("平台提示词版本应升到 %d，实得 %d", botPlatformPromptVersion, fresh.PlatformPromptVersion)
+	}
+	if fresh.ToolsetVersion != botToolsetVersion {
+		t.Fatalf("工具集版本应保持 %d，实得 %d", botToolsetVersion, fresh.ToolsetVersion)
+	}
+	if fresh.PromptRevision != revBefore+1 {
+		t.Fatalf("prompt_revision 应恰好 +1: %d -> %d", revBefore, fresh.PromptRevision)
+	}
+	if !strings.Contains(fresh.SystemPromptText, "对话风格") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
+		t.Fatalf("系统提示词应重建为含对话风格的新文案")
+	}
+
+	// 激活进程内幂等：再次调用不再递增 revision。
+	if err := env.bots.activateOnProcessStart(fresh); err != nil {
+		t.Fatalf("activate again: %v", err)
+	}
+	again, _ := env.bots.bots.Get(bot.ID)
+	if again.PromptRevision != revBefore+1 {
+		t.Fatalf("重复激活不得递增 prompt_revision: %d", again.PromptRevision)
+	}
+
+	// 只有提示词变了：工具集未动，升级前后构建的 tools 哈希一致。
+	builtAfter, err := env.bots.buildRunContext(again, run)
+	if err != nil {
+		t.Fatalf("build after: %v", err)
+	}
+	if builtAfter.ToolsHash != builtBefore.ToolsHash {
+		t.Fatalf("仅升级平台提示词不得改变工具集: %s vs %s", builtBefore.ToolsHash, builtAfter.ToolsHash)
+	}
+}
+
 func TestBotRuntimeContextNoteBranches(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "botnote")

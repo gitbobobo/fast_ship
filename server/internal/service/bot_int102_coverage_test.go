@@ -2856,3 +2856,60 @@ func TestBotBoundarySnapshotFixedTokensSameProjection(t *testing.T) {
 		t.Fatalf("无摘要消息时 F 应等于 after: F=%d after=%d", noMsg.FixedTokens, noMsg.AfterTokens)
 	}
 }
+
+// TestBotScheduleRunActivatesStaleBot 重启后只跑定时任务（schedule 路径）：
+// 旧版本机器人重启后的第一次运行如果是 schedule run，也必须完成 v5 激活——
+// bot 行升级到新提示词，本次发出的请求就带新 system 前缀，而不是等下一次
+// 主线运行才补上。
+func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "定时汇报：已完成"})
+	userID := createBotTestUser(t, env.db, "schedact5")
+	bot := env.createBot(t, userID)
+	const oldPrompt = "旧平台提示：没有对话风格段落"
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"toolset_version":         botToolsetVersion,
+		"platform_prompt_version": 4,
+		"system_prompt_text":      oldPrompt,
+	}).Error; err != nil {
+		t.Fatalf("stale bot: %v", err)
+	}
+	env.bots.rt.mu.Lock()
+	delete(env.bots.rt.activated, bot.ID)
+	env.bots.rt.mu.Unlock()
+
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	env.bots.wakeScheduleRun(bot.ID, run.ID)
+	done := waitForScheduleRunFinished(t, env, run.ID)
+	if done.Status != model.BotRunStatusCompleted {
+		t.Fatalf("schedule run 应完成: %s %v", done.Status, done.ErrorMessage)
+	}
+	fresh, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	if fresh.PlatformPromptVersion != botPlatformPromptVersion {
+		t.Fatalf("schedule run 应激活平台提示词到 %d，实得 %d", botPlatformPromptVersion, fresh.PlatformPromptVersion)
+	}
+	if !strings.Contains(fresh.SystemPromptText, "对话风格") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
+		t.Fatalf("schedule run 后系统提示词应重建为含对话风格的新文案")
+	}
+	req := env.fake.nextRequest(t, 10*time.Second)
+	elems, _ := rawMessages(t, req.Body)
+	if len(elems) == 0 {
+		t.Fatalf("schedule 请求应含 messages")
+	}
+	var sys struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(elems[0], &sys); err != nil {
+		t.Fatalf("decode system message: %v", err)
+	}
+	if sys.Role != "system" {
+		t.Fatalf("首条消息应为 system: %s", sys.Role)
+	}
+	if !strings.Contains(sys.Content, "对话风格") || strings.Contains(sys.Content, oldPrompt) {
+		t.Fatalf("schedule 请求的 system 消息应为激活后的新提示词: %q", sys.Content)
+	}
+}

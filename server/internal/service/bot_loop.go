@@ -106,8 +106,15 @@ func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFree
 }
 
 // botLoop 单 run 主循环。主线与定时任务（INT-103）共用同一骨架：差异只有
-// 上下文构建、压缩/工具集激活（schedule 全部跳过）、记忆基线与收尾分支。
+// 上下文构建、压缩（schedule 跳过）、记忆基线与收尾分支；重启边界的版本
+// 激活两种会话都在入口执行。
 func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Context) {
+	// 重启边界的工具集/提示词激活先于冻结执行，主线与 schedule 一视同仁：
+	// freeze 捕获的才是本次 run 的最终提示词，schedule 会话也基于激活后的
+	// 工具集构建。激活进程内幂等（rt.activated），失败只降级记日志。
+	if err := s.activateOnProcessStart(bot); err != nil {
+		s.logger.Warn("激活工具集失败")
+	}
 	// 先冻结再取密钥：schedule run 的地址与密钥是派发时成对冻结的，解密必须用
 	// 冻结的那一份，否则轮换密钥后会把新密钥发往旧地址。
 	freeze := captureRunFreeze(bot, run)
@@ -162,16 +169,7 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		}
 
 		if sched == nil {
-			if err := s.activateOnProcessStart(bot); err != nil {
-				s.logger.Warn("激活工具集失败")
-			}
-			if bot.SystemPromptText != freeze.SystemPromptText {
-				// 进程首次运行的工具/提示词激活是重启边界，允许接收新前缀。
-				freeze.SystemPromptText = bot.SystemPromptText
-				freeze.PromptRevision = bot.PromptRevision
-				freeze.PlatformPromptVersion = bot.PlatformPromptVersion
-				freeze.PersonaPrompt = bot.PersonaPrompt
-			}
+			// 激活在 captureRunFreeze 之前完成，run 期间只有压缩边界会换前缀。
 			if fresh, err := s.bots.Get(bot.ID); err == nil {
 				bot.LastToldVersion = fresh.LastToldVersion
 				bot.OfferedInputSeq = fresh.OfferedInputSeq
