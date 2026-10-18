@@ -7152,32 +7152,35 @@ workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展�
 | `items[].id` | string | 是 |  |
 | `items[].name` | string | 是 |  |
 | `items[].enabled` | boolean | 是 |  |
+| `items[].triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
+| `items[].triggers[].id` | string | 是 |  |
+| `items[].triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `items[].triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
+| `items[].triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
+| `items[].triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
+| `items[].triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
+| `items[].triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
+| `items[].triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
+| `items[].triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
+| `items[].triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
+| `items[].triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
+| `items[].triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
+| `items[].triggers[].model_selections[].instance_id` | string | 是 |  |
+| `items[].triggers[].model_selections[].model` | string | 是 |  |
+| `items[].triggers[].model_selections[].options` | object[] | 否 |  |
+| `items[].triggers[].model_selections[].options[].id` | string | 否 |  |
+| `items[].triggers[].model_selections[].options[].value` | string | 否 |  |
+| `items[].triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
+| `items[].triggers[].created_at` | string | 是 |  |
 | `items[].environment_id` | string | 是 | T3 环境 ID |
 | `items[].t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `items[].cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
-| `items[].timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
-| `items[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
-| `items[].issue_project_id` | string（可空） | 否 | 事件过滤的项目；null 表示当前用户全部项目 |
-| `items[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `items[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `items[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `items[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `items[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
 | `items[].prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `items[].model_selection` | object（可空） | 否 | T3 模型选择（缺省回落 T3 项目默认） |
+| `items[].model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
 | `items[].model_selection.instance_id` | string | 是 |  |
 | `items[].model_selection.model` | string | 是 |  |
 | `items[].model_selection.options` | object[] | 否 |  |
 | `items[].model_selection.options[].id` | string | 否 |  |
 | `items[].model_selection.options[].value` | string | 否 |  |
-| `items[].model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
-| `items[].model_selections[].instance_id` | string | 是 |  |
-| `items[].model_selections[].model` | string | 是 |  |
-| `items[].model_selections[].options` | object[] | 否 |  |
-| `items[].model_selections[].options[].id` | string | 否 |  |
-| `items[].model_selections[].options[].value` | string | 否 |  |
-| `items[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `items[].runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `items[].workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `items[].workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7217,18 +7220,27 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string（长度 ≤200） | 是 |  |
-| `enabled` | boolean | 否 | 缺省 false；启用时完整校验触发配置与 public_url |
+| `enabled` | boolean | 否 | 缺省 false；启用时至少要有一个触发器，并完整校验触发配置与 public_url |
+| `triggers` | object[]（0..20 项） | 是 | 触发器全量列表（0–20 个，可重复、可混搭）。 |
+| `triggers[].id` | string | 否 | 可选；自动化内已存在的触发器 id |
+| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
+| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
+| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
+| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
+| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
+| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
+| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
+| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
+| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
+| `triggers[].model_selections[].instance_id` | string | 是 |  |
+| `triggers[].model_selections[].model` | string | 是 |  |
+| `triggers[].model_selections[].options` | object[] | 否 |  |
+| `triggers[].model_selections[].options[].id` | string | 否 |  |
+| `triggers[].model_selections[].options[].value` | string | 否 |  |
+| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
 | `environment_id` | string | 是 |  |
 | `t3_project_id` | string | 是 |  |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `cron_expression` | string | 否 |  |
-| `timezone` | string | 否 |  |
-| `issue_project_id` | string（可空） | 否 |  |
-| `event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
 | `prompt_template` | string | 是 |  |
 | `model_selection` | object | 否 | T3 模型选择（缺省回落 T3 项目默认） |
 | `model_selection.instance_id` | string | 是 |  |
@@ -7236,13 +7248,6 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
-| `model_selections` | object[] | 否 | GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
-| `model_selections[].instance_id` | string | 是 |  |
-| `model_selections[].model` | string | 是 |  |
-| `model_selections[].options` | object[] | 否 |  |
-| `model_selections[].options[].id` | string | 否 |  |
-| `model_selections[].options[].value` | string | 否 |  |
-| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
 | `runtime_mode` | string | 否 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7265,32 +7270,35 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `id` | string | 是 |  |
 | `name` | string | 是 |  |
 | `enabled` | boolean | 是 |  |
+| `triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
+| `triggers[].id` | string | 是 |  |
+| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
+| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
+| `triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
+| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
+| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
+| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
+| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
+| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
+| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
+| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
+| `triggers[].model_selections[].instance_id` | string | 是 |  |
+| `triggers[].model_selections[].model` | string | 是 |  |
+| `triggers[].model_selections[].options` | object[] | 否 |  |
+| `triggers[].model_selections[].options[].id` | string | 否 |  |
+| `triggers[].model_selections[].options[].value` | string | 否 |  |
+| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
+| `triggers[].created_at` | string | 是 |  |
 | `environment_id` | string | 是 | T3 环境 ID |
 | `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
-| `timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
-| `next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
-| `issue_project_id` | string（可空） | 否 | 事件过滤的项目；null 表示当前用户全部项目 |
-| `event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
 | `prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `model_selection` | object（可空） | 否 | T3 模型选择（缺省回落 T3 项目默认） |
+| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
 | `model_selection.instance_id` | string | 是 |  |
 | `model_selection.model` | string | 是 |  |
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
-| `model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
-| `model_selections[].instance_id` | string | 是 |  |
-| `model_selections[].model` | string | 是 |  |
-| `model_selections[].options` | object[] | 否 |  |
-| `model_selections[].options[].id` | string | 否 |  |
-| `model_selections[].options[].value` | string | 否 |  |
-| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7339,32 +7347,35 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `id` | string | 是 |  |
 | `name` | string | 是 |  |
 | `enabled` | boolean | 是 |  |
+| `triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
+| `triggers[].id` | string | 是 |  |
+| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
+| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
+| `triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
+| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
+| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
+| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
+| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
+| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
+| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
+| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
+| `triggers[].model_selections[].instance_id` | string | 是 |  |
+| `triggers[].model_selections[].model` | string | 是 |  |
+| `triggers[].model_selections[].options` | object[] | 否 |  |
+| `triggers[].model_selections[].options[].id` | string | 否 |  |
+| `triggers[].model_selections[].options[].value` | string | 否 |  |
+| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
+| `triggers[].created_at` | string | 是 |  |
 | `environment_id` | string | 是 | T3 环境 ID |
 | `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
-| `timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
-| `next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
-| `issue_project_id` | string（可空） | 否 | 事件过滤的项目；null 表示当前用户全部项目 |
-| `event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
 | `prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `model_selection` | object（可空） | 否 | T3 模型选择（缺省回落 T3 项目默认） |
+| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
 | `model_selection.instance_id` | string | 是 |  |
 | `model_selection.model` | string | 是 |  |
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
-| `model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
-| `model_selections[].instance_id` | string | 是 |  |
-| `model_selections[].model` | string | 是 |  |
-| `model_selections[].options` | object[] | 否 |  |
-| `model_selections[].options[].id` | string | 否 |  |
-| `model_selections[].options[].value` | string | 否 |  |
-| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7412,31 +7423,33 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | --- | --- | --- | --- |
 | `name` | string（长度 ≤200） | 是 |  |
 | `enabled` | boolean | 否 |  |
+| `triggers` | object[]（0..20 项） | 是 | 触发器全量替换：带 id 更新、不带 id 新建、未提交的删除。 |
+| `triggers[].id` | string | 否 | 可选；自动化内已存在的触发器 id |
+| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
+| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
+| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
+| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
+| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
+| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
+| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
+| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
+| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
+| `triggers[].model_selections[].instance_id` | string | 是 |  |
+| `triggers[].model_selections[].model` | string | 是 |  |
+| `triggers[].model_selections[].options` | object[] | 否 |  |
+| `triggers[].model_selections[].options[].id` | string | 否 |  |
+| `triggers[].model_selections[].options[].value` | string | 否 |  |
+| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
 | `environment_id` | string | 是 |  |
 | `t3_project_id` | string | 是 |  |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `cron_expression` | string | 否 |  |
-| `timezone` | string | 否 |  |
-| `issue_project_id` | string（可空） | 否 |  |
-| `event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
 | `prompt_template` | string | 是 |  |
-| `model_selection` | object（可空） | 否 | T3 模型选择（缺省回落 T3 项目默认） |
+| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
 | `model_selection.instance_id` | string | 是 |  |
 | `model_selection.model` | string | 是 |  |
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
-| `model_selections` | object[] | 否 | GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
-| `model_selections[].instance_id` | string | 是 |  |
-| `model_selections[].model` | string | 是 |  |
-| `model_selections[].options` | object[] | 否 |  |
-| `model_selections[].options[].id` | string | 否 |  |
-| `model_selections[].options[].value` | string | 否 |  |
-| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
 | `runtime_mode` | string | 否 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7459,32 +7472,35 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `id` | string | 是 |  |
 | `name` | string | 是 |  |
 | `enabled` | boolean | 是 |  |
+| `triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
+| `triggers[].id` | string | 是 |  |
+| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
+| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
+| `triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
+| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
+| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
+| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
+| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
+| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
+| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
+| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
+| `triggers[].model_selections[].instance_id` | string | 是 |  |
+| `triggers[].model_selections[].model` | string | 是 |  |
+| `triggers[].model_selections[].options` | object[] | 否 |  |
+| `triggers[].model_selections[].options[].id` | string | 否 |  |
+| `triggers[].model_selections[].options[].value` | string | 否 |  |
+| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
+| `triggers[].created_at` | string | 是 |  |
 | `environment_id` | string | 是 | T3 环境 ID |
 | `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `cron_expression` | string | 否 | 仅 cron 触发；五字段标准表达式 |
-| `timezone` | string | 否 | IANA 时区名，仅 cron 触发；空表示 UTC |
-| `next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron 触发 |
-| `issue_project_id` | string（可空） | 否 | 事件过滤的项目；null 表示当前用户全部项目 |
-| `event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
 | `prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `model_selection` | object（可空） | 否 | T3 模型选择（缺省回落 T3 项目默认） |
+| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
 | `model_selection.instance_id` | string | 是 |  |
 | `model_selection.model` | string | 是 |  |
 | `model_selection.options` | object[] | 否 |  |
 | `model_selection.options[].id` | string | 否 |  |
 | `model_selection.options[].value` | string | 否 |  |
-| `model_selections` | object[] | 否 | GitHub PR 触发的多模型选择：一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。cron/issue 触发忽略此字段，继续用单个 model_selection。 |
-| `model_selections[].instance_id` | string | 是 |  |
-| `model_selections[].model` | string | 是 |  |
-| `model_selections[].options` | object[] | 否 |  |
-| `model_selections[].options[].id` | string | 否 |  |
-| `model_selections[].options[].value` | string | 否 |  |
-| `debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，窗口内新推送重置计时，到点只对最新 SHA 开一轮。 0=立即；缺省 60；上限 86400。 |
 | `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
 | `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
 | `workspace.type` | string | 是 | root / worktree / existing_worktree |
@@ -7570,8 +7586,9 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].automation_id` | string | 是 |  |
-| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `items[].trigger_key` | string | 是 | 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
+| `items[].trigger_id` | string | 是 | 触发本运行的触发器 id |
+| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `items[].trigger_key` | string | 是 | 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
 | `items[].repo_full_name` | string | 否 | 仅 GitHub PR 触发；owner/repo |
 | `items[].pr_number` | integer | 否 | 仅 GitHub PR 触发 |
 | `items[].head_sha` | string | 否 | 仅 GitHub PR 触发；本轮审查的 head commit SHA |
@@ -7638,8 +7655,9 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `automation_id` | string | 是 |  |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `trigger_key` | string | 是 | 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
+| `trigger_id` | string | 是 | 触发本运行的触发器 id |
+| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
+| `trigger_key` | string | 是 | 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
 | `repo_full_name` | string | 否 | 仅 GitHub PR 触发；owner/repo |
 | `pr_number` | integer | 否 | 仅 GitHub PR 触发 |
 | `head_sha` | string | 否 | 仅 GitHub PR 触发；本轮审查的 head commit SHA |

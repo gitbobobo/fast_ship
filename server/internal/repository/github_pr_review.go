@@ -63,9 +63,10 @@ func (r *GitHubPRDebounceRepository) ListDueTx(db *gorm.DB, now time.Time, limit
 }
 
 // DeleteTx 消费防抖行（到点开轮后删除；条件命中 0 行=已被并发消费）。
-func (r *GitHubPRDebounceRepository) DeleteTx(tx *gorm.DB, automationID, repoFullName string, prNumber int) error {
-	return tx.Where("automation_id = ? AND repo_full_name = ? AND pr_number = ?",
-		automationID, repoFullName, prNumber).Delete(&model.GitHubPRDebounce{}).Error
+// 键按触发器（INT-118）：同一自动化的不同触发器各有自己的防抖窗口。
+func (r *GitHubPRDebounceRepository) DeleteTx(tx *gorm.DB, triggerID, repoFullName string, prNumber int) error {
+	return tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ?",
+		triggerID, repoFullName, prNumber).Delete(&model.GitHubPRDebounce{}).Error
 }
 
 // DeleteStaleSHATx 丢掉该 PR 下旧 SHA 的防抖行（opened 规则的窗口不能在

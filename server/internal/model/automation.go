@@ -88,8 +88,9 @@ const (
 	AutomationPostStateFailed    AutomationPostState = "failed"
 )
 
-// Automation 一条用户自动化配置。更新只影响后续触发；进行中的运行按
-// 创建时的 config_snapshot 执行。
+// Automation 一条用户自动化配置（INT-118 起触发器拆到 AutomationTrigger，
+// 本行只保留环境/提示词/运行参数等全自动化共享的配置）。更新只影响后续触发；
+// 进行中的运行按创建时的 config_snapshot 执行。
 type Automation struct {
 	ID        string    `gorm:"type:text;primaryKey" json:"id"`
 	UserID    string    `gorm:"type:text;not null;index:idx_automations_user_created,priority:1" json:"user_id"`
@@ -101,38 +102,64 @@ type Automation struct {
 	EnvironmentID string `gorm:"type:text;not null" json:"environment_id"`
 	T3ProjectID   string `gorm:"column:t3_project_id;type:text;not null" json:"t3_project_id"`
 
-	TriggerType    AutomationTriggerType `gorm:"type:text;not null" json:"trigger_type"`
-	CronExpression string                `gorm:"column:cron_expression;type:text" json:"cron_expression"`
-	Timezone       string                `gorm:"type:text" json:"timezone"`
-	NextRunAt      *time.Time            `gorm:"index" json:"next_run_at"`
-
-	// IssueProjectID 可选：只对单个 Fast Ship 项目的事件触发；nil 表示该项目用户的全部项目。
-	IssueProjectID *string `gorm:"column:issue_project_id;type:text" json:"issue_project_id,omitempty"`
-	// EventFilterJSON 事件过滤（状态变化 field/from/to、加标签匹配名称），无过滤为空串。
-	EventFilterJSON string `gorm:"column:event_filter_json;type:text" json:"event_filter_json,omitempty"`
-
 	PromptTemplate     string `gorm:"column:prompt_template;type:text;not null" json:"prompt_template"`
 	ModelSelectionJSON string `gorm:"column:model_selection_json;type:text" json:"model_selection_json,omitempty"`
-	// ModelSelectionsJSON GitHub PR 触发的多模型数组（元素同 model_selection 的单个对象）；
-	// cron/issue 触发为空串。
-	ModelSelectionsJSON string `gorm:"column:model_selections_json;type:text" json:"model_selections_json,omitempty"`
-	// DebounceSeconds 仅 GitHub PR 触发：防抖窗口秒数（0=立即）；service 落库时
-	// 显式给值（PR 触发缺省 60，cron/issue 恒 0），不用列默认值以便存 0。
-	DebounceSeconds int                  `gorm:"not null;default:0" json:"debounce_seconds"`
-	RuntimeMode     string               `gorm:"type:text;not null;default:full-access" json:"runtime_mode"`
-	WorkspaceJSON   string               `gorm:"column:workspace_json;type:text" json:"workspace_json,omitempty"`
-	TimeoutSeconds  int                  `gorm:"not null;default:3600" json:"timeout_seconds"`
-	PostAction      AutomationPostAction `gorm:"column:post_action;type:text;not null;default:none" json:"post_action"`
-	PostOnTimeout   bool                 `gorm:"column:post_on_timeout;not null;default:false" json:"post_on_timeout"`
+	// ModelSelectionJSON 是 cron/issue 触发的单模型缺省（触发器级别可再覆盖，
+	// PR 触发始终用触发器自己的 model_selections）。
 
-	// 外键 CASCADE：删用户/环境/项目带走自动化；进行中的运行经 runs 的
-	// automation_id CASCADE 一并清理（活动运行会先被 service 40919 拦下）。
-	User         User          `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
-	Environment  T3Environment `gorm:"foreignKey:EnvironmentID;constraint:OnDelete:CASCADE" json:"-"`
-	IssueProject *Project      `gorm:"foreignKey:IssueProjectID;constraint:OnDelete:CASCADE" json:"-"`
+	RuntimeMode    string               `gorm:"type:text;not null;default:full-access" json:"runtime_mode"`
+	WorkspaceJSON  string               `gorm:"column:workspace_json;type:text" json:"workspace_json,omitempty"`
+	TimeoutSeconds int                  `gorm:"not null;default:3600" json:"timeout_seconds"`
+	PostAction     AutomationPostAction `gorm:"column:post_action;type:text;not null;default:none" json:"post_action"`
+	PostOnTimeout  bool                 `gorm:"column:post_on_timeout;not null;default:false" json:"post_on_timeout"`
+
+	// 外键 CASCADE：删用户/环境带走自动化；触发器与进行中的运行分别经
+	// triggers/runs 的 automation_id CASCADE 一并清理（活动运行会先被
+	// service 40919 拦下）。
+	User        User          `gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE" json:"-"`
+	Environment T3Environment `gorm:"foreignKey:EnvironmentID;constraint:OnDelete:CASCADE" json:"-"`
 }
 
 func (Automation) TableName() string { return "automations" }
+
+// AutomationTrigger 一个触发器（INT-118）：一条自动化可配多个（≤20），类型/配置
+// 独立成行；「同一触发器至多一个活动运行」的并发约束落在触发器维度。
+// cron 字段仅 cron 类型有值；PR 字段仅 PR 类型有值；service 层保证交叉字段清空。
+type AutomationTrigger struct {
+	ID string `gorm:"type:text;primaryKey" json:"id"`
+	// AutomationID 不带 gorm 索引标签：(automation_id, position) 复合索引由
+	// createBootIndexes 手工登记，模型标签会让 AutoMigrate 先建单列同名索引、
+	// 使启动索引变空操作。
+	AutomationID string                `gorm:"column:automation_id;type:text;not null" json:"automation_id"`
+	TriggerType  AutomationTriggerType `gorm:"type:text;not null" json:"trigger_type"`
+	// Position 展示顺序（按 API 数组下标写入），响应数组按它排序。
+	Position int `gorm:"not null;default:0" json:"position"`
+
+	CronExpression string     `gorm:"column:cron_expression;type:text" json:"cron_expression,omitempty"`
+	Timezone       string     `gorm:"type:text" json:"timezone,omitempty"`
+	NextRunAt      *time.Time `json:"next_run_at,omitempty"`
+
+	// IssueProjectID 可选：只对单个 Fast Ship 项目的事件/PR 触发；nil 表示
+	// 该用户全部项目。
+	IssueProjectID *string `gorm:"column:issue_project_id;type:text" json:"issue_project_id,omitempty"`
+	// EventFilterJSON Issue 事件过滤（状态变化 field/from/to、加标签匹配名称），
+	// 无过滤为空串。
+	EventFilterJSON string `gorm:"column:event_filter_json;type:text" json:"event_filter_json,omitempty"`
+	// ModelSelectionsJSON GitHub PR 触发的多模型数组；非 PR 触发为空串。
+	ModelSelectionsJSON string `gorm:"column:model_selections_json;type:text" json:"model_selections_json,omitempty"`
+	// DebounceSeconds 仅 GitHub PR 触发：防抖窗口秒数（0=立即）；service 落库时
+	// 显式给值（PR 触发缺省 60，其余恒 0），不用列默认值以便存 0。
+	DebounceSeconds int       `gorm:"not null;default:0" json:"debounce_seconds"`
+	CreatedAt       time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt       time.Time `gorm:"not null" json:"updated_at"`
+
+	// 外键 CASCADE：删自动化带走全部触发器；删项目按旧语义连带删掉以它为
+	// 范围的触发器（与 automations.issue_project_id 的既有 CASCADE 一致）。
+	Automation   Automation `gorm:"foreignKey:AutomationID;constraint:OnDelete:CASCADE" json:"-"`
+	IssueProject *Project   `gorm:"foreignKey:IssueProjectID;constraint:OnDelete:CASCADE" json:"-"`
+}
+
+func (AutomationTrigger) TableName() string { return "automation_triggers" }
 
 // AutomationRun 一次触发的完整账本：触发上下文、配置快照、预分配的 T3 身份、
 // 状态回报与后置操作进度。status 为空串表示「已落库、待 worker 认领」；
@@ -142,8 +169,13 @@ type AutomationRun struct {
 	UserID       string `gorm:"type:text;not null;index" json:"user_id"`
 	AutomationID string `gorm:"column:automation_id;type:text;not null" json:"automation_id"`
 
+	// TriggerID 触发本运行的触发器（INT-118 起代码始终写入；列可空是为存量库
+	// 升级前的旧行留兼容，迁移会把旧行回填到当时的唯一触发器）。不建外键：
+	// 触发器被编辑删除后历史运行必须保留。
+	TriggerID string `gorm:"column:trigger_id;type:text" json:"trigger_id"`
+	// TriggerType 冗余自触发器（现有多处查询按触发类型过滤，不 join 触发器表）。
 	TriggerType AutomationTriggerType `gorm:"type:text;not null" json:"trigger_type"`
-	// TriggerKey 同一自动化内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`。
+	// TriggerKey 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`。
 	TriggerKey         string    `gorm:"column:trigger_key;type:text;not null" json:"trigger_key"`
 	TriggerContextJSON string    `gorm:"column:trigger_context_json;type:text" json:"trigger_context_json"`
 	TriggeredAt        time.Time `gorm:"not null" json:"triggered_at"`

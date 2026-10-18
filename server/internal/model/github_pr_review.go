@@ -15,10 +15,11 @@ type GitHubWebhookDelivery struct {
 
 func (GitHubWebhookDelivery) TableName() string { return "github_webhook_deliveries" }
 
-// GitHubPRDebounce 防抖窗口账：每个 (规则, 仓库, PR) 一行，只留最新 head SHA，
+// GitHubPRDebounce 防抖窗口账：每个 (触发器, 仓库, PR) 一行，只留最新 head SHA，
 // 窗口内新推送重置 fire_at。到点由调度循环（或 debounce=0 的请求事务）消费并删行。
+// trigger_id 是弱引用（无外键）：行是秒级瞬态账本，触发器删除后由消费路径兜底丢弃。
 type GitHubPRDebounce struct {
-	AutomationID   string    `gorm:"column:automation_id;type:text;primaryKey" json:"automation_id"`
+	TriggerID      string    `gorm:"column:trigger_id;type:text;primaryKey" json:"trigger_id"`
 	RepoFullName   string    `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
 	PRNumber       int       `gorm:"column:pr_number;primaryKey" json:"pr_number"`
 	UserID         string    `gorm:"column:user_id;type:text;not null" json:"user_id"`

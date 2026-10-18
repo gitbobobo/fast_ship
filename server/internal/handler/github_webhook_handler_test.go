@@ -51,12 +51,12 @@ func setupWebhookHandlerEnv(t *testing.T, secret string) *webhookHandlerEnv {
 	if err := db.AutoMigrate(
 		&model.User{}, &model.Project{}, &model.ApiKey{}, &model.T3Environment{},
 		&model.JWTBlacklist{}, &model.RefreshToken{},
-		&model.Automation{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
+		&model.Automation{}, &model.AutomationTrigger{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
 		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{}, &model.GitHubPRSeenSHA{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 
 	cfg := &config.Config{
@@ -158,14 +158,21 @@ func TestWebhookHandler_OpenRoundEndToEnd(t *testing.T) {
 	rule := &model.Automation{
 		ID: uuid.NewString(), UserID: user.ID, Name: "PR 评审", Enabled: true,
 		CreatedAt: now, UpdatedAt: now, EnvironmentID: envRow.ID, T3ProjectID: "t3-proj",
-		TriggerType:         model.AutomationTriggerGitHubPROpened,
-		PromptTemplate:      "评审 {{repo}} #{{pr_number}} @ {{head_sha}} {{pr_title}} {{pr_url}}",
-		ModelSelectionsJSON: string(selsJSON),
-		DebounceSeconds:     0,
-		RuntimeMode:         "full-access", TimeoutSeconds: 3600,
+		PromptTemplate: "评审 {{repo}} #{{pr_number}} @ {{head_sha}} {{pr_title}} {{pr_url}}",
+		RuntimeMode:    "full-access", TimeoutSeconds: 3600,
 	}
 	if err := env.db.Create(rule).Error; err != nil {
 		t.Fatalf("rule: %v", err)
+	}
+	ruleTrigger := &model.AutomationTrigger{
+		ID: uuid.NewString(), AutomationID: rule.ID,
+		TriggerType:         model.AutomationTriggerGitHubPROpened,
+		ModelSelectionsJSON: string(selsJSON),
+		DebounceSeconds:     0,
+		CreatedAt:           now, UpdatedAt: now,
+	}
+	if err := env.db.Create(ruleTrigger).Error; err != nil {
+		t.Fatalf("rule trigger: %v", err)
 	}
 
 	payload := []byte(`{"action":"opened","number":1,"pull_request":{"draft":false,"title":"T","head":{"sha":"s1","ref":"f","repo":{"fork":false,"full_name":"octocat/hw"}},"base":{"ref":"main","repo":{"full_name":"octocat/hw"}}},"repository":{"full_name":"octocat/hw","owner":{"login":"octocat"},"name":"hw"},"installation":{"id":7}}`)
@@ -217,13 +224,21 @@ func (e *webhookHandlerEnv) seedPRRunWithToken(t *testing.T, userID string, trig
 	hostRule := &model.Automation{
 		ID: uuid.NewString(), UserID: userID, Name: "host", Enabled: true,
 		CreatedAt: now, UpdatedAt: now, EnvironmentID: envRow.ID, T3ProjectID: "p",
-		TriggerType: triggerType, PromptTemplate: "x", RuntimeMode: "full-access", TimeoutSeconds: 3600,
+		PromptTemplate: "x", RuntimeMode: "full-access", TimeoutSeconds: 3600,
 	}
 	if err := e.db.Create(hostRule).Error; err != nil {
 		t.Fatalf("seed rule: %v", err)
 	}
+	hostTrigger := &model.AutomationTrigger{
+		ID: uuid.NewString(), AutomationID: hostRule.ID,
+		TriggerType: triggerType, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := e.db.Create(hostTrigger).Error; err != nil {
+		t.Fatalf("seed trigger: %v", err)
+	}
 	run := &model.AutomationRun{
 		ID: uuid.NewString(), UserID: userID, AutomationID: hostRule.ID,
+		TriggerID:   hostTrigger.ID,
 		TriggerType: triggerType, TriggerKey: "pr:octocat/hw:1:s1:inst-a:claude",
 		TriggerContextJSON: "{}", TriggeredAt: now,
 		ConfigSnapshotJSON: "{}",

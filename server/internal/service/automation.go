@@ -38,6 +38,9 @@ const (
 
 	automationNameMaxLen = 200
 
+	// 一条自动化的触发器数量上限（INT-118）。
+	automationTriggersMax = 20
+
 	// 后置操作窗口：正常结束先等线程可安全收尾，最多 5 分钟。
 	automationPostWindow = 5 * time.Minute
 
@@ -61,6 +64,7 @@ var automationPRPromptPlaceholders = []string{
 type AutomationService struct {
 	db          *gorm.DB
 	autos       *repository.AutomationRepository
+	triggers    *repository.AutomationTriggerRepository
 	runs        *repository.AutomationRunRepository
 	envRepo     *repository.T3EnvironmentRepository
 	projectRepo *repository.ProjectRepository
@@ -73,6 +77,7 @@ type AutomationService struct {
 func NewAutomationService(
 	db *gorm.DB,
 	autos *repository.AutomationRepository,
+	triggers *repository.AutomationTriggerRepository,
 	runs *repository.AutomationRunRepository,
 	envRepo *repository.T3EnvironmentRepository,
 	projectRepo *repository.ProjectRepository,
@@ -82,7 +87,7 @@ func NewAutomationService(
 	logger *zap.Logger,
 ) *AutomationService {
 	return &AutomationService{
-		db: db, autos: autos, runs: runs, envRepo: envRepo,
+		db: db, autos: autos, triggers: triggers, runs: runs, envRepo: envRepo,
 		projectRepo: projectRepo, issueRepo: issueRepo,
 		sink: sink, cfg: cfg, logger: logger,
 	}
@@ -98,9 +103,19 @@ func (s *AutomationService) List(ctx context.Context, userID string) ([]Automati
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
+	triggers, err := s.triggers.ListByUserIDTx(s.db.WithContext(ctx), userID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	// ListByUserIDTx 已按 automation_id + position 排序，分组后每组保持顺序。
+	byAutomation := map[string][]model.AutomationTrigger{}
+	for i := range triggers {
+		t := &triggers[i]
+		byAutomation[t.AutomationID] = append(byAutomation[t.AutomationID], *t)
+	}
 	out := make([]AutomationResponse, 0, len(items))
 	for i := range items {
-		out = append(out, newAutomationResponse(&items[i]))
+		out = append(out, newAutomationResponse(&items[i], byAutomation[items[i].ID]))
 	}
 	return out, nil
 }
@@ -113,7 +128,11 @@ func (s *AutomationService) Get(ctx context.Context, userID, id string) (*Automa
 		}
 		return nil, errs.ErrInternal
 	}
-	resp := newAutomationResponse(a)
+	triggers, err := s.triggers.ListByAutomationID(ctx, id)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := newAutomationResponse(a, triggers)
 	return &resp, nil
 }
 
@@ -148,14 +167,18 @@ func (s *AutomationService) GetRun(ctx context.Context, userID, runID string) (*
 }
 
 // Create 新建自动化（默认停用、空提示词由 handler 层 zod/必填约束保证）。启用时
-// 要求 public_url 已配置。
+// 要求 public_url 已配置且至少一个触发器。自动化与触发器同事务落库。
 func (s *AutomationService) Create(ctx context.Context, userID string, req *api.CreateAutomationRequest) (*AutomationResponse, error) {
 	built, err := s.buildAutomationConfig(userID, req)
 	if err != nil {
 		return nil, err
 	}
+	builtTriggers, err := s.buildAutomationTriggers(userID, req.Triggers, nil)
+	if err != nil {
+		return nil, err
+	}
 	if req.Enabled != nil && *req.Enabled {
-		if err := s.requirePublicURL(); err != nil {
+		if err := s.requireTriggersAndPublicURL(builtTriggers); err != nil {
 			return nil, err
 		}
 		built.Enabled = true
@@ -165,46 +188,49 @@ func (s *AutomationService) Create(ctx context.Context, userID string, req *api.
 
 	now := time.Now().UTC()
 	a := &model.Automation{
-		ID:                  uuid.NewString(),
-		UserID:              userID,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-		Enabled:             built.Enabled,
-		Name:                built.Name,
-		EnvironmentID:       built.EnvironmentID,
-		T3ProjectID:         built.T3ProjectID,
-		TriggerType:         built.TriggerType,
-		CronExpression:      built.CronExpression,
-		Timezone:            built.Timezone,
-		NextRunAt:           built.NextRunAt,
-		IssueProjectID:      built.IssueProjectID,
-		EventFilterJSON:     built.EventFilterJSON,
-		PromptTemplate:      built.PromptTemplate,
-		ModelSelectionJSON:  built.ModelSelectionJSON,
-		ModelSelectionsJSON: built.ModelSelectionsJSON,
-		DebounceSeconds:     built.DebounceSeconds,
-		RuntimeMode:         built.RuntimeMode,
-		WorkspaceJSON:       built.WorkspaceJSON,
-		TimeoutSeconds:      built.TimeoutSeconds,
-		PostAction:          built.PostAction,
-		PostOnTimeout:       built.PostOnTimeout,
+		ID:                 uuid.NewString(),
+		UserID:             userID,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		Enabled:            built.Enabled,
+		Name:               built.Name,
+		EnvironmentID:      built.EnvironmentID,
+		T3ProjectID:        built.T3ProjectID,
+		PromptTemplate:     built.PromptTemplate,
+		ModelSelectionJSON: built.ModelSelectionJSON,
+		RuntimeMode:        built.RuntimeMode,
+		WorkspaceJSON:      built.WorkspaceJSON,
+		TimeoutSeconds:     built.TimeoutSeconds,
+		PostAction:         built.PostAction,
+		PostOnTimeout:      built.PostOnTimeout,
 	}
-	if err := s.autos.Create(ctx, a); err != nil {
-		if isUniqueConstraintError(err) {
-			// 外键目标不存在在 SQLite 命名为 FOREIGN KEY constraint failed，单独判。
-			return nil, errs.ErrInternal
+	rows := make([]model.AutomationTrigger, 0, len(builtTriggers))
+	for i := range builtTriggers {
+		rows = append(rows, newTriggerRow(a.ID, &builtTriggers[i], now, now))
+	}
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.autos.CreateTx(tx, a); err != nil {
+			return err
 		}
+		for i := range rows {
+			if err := tx.Create(&rows[i]).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
 			return nil, errs.ErrT3EnvironmentNotFound
 		}
 		return nil, errs.ErrInternal
 	}
-	resp := newAutomationResponse(a)
+	resp := newAutomationResponse(a, rows)
 	return &resp, nil
 }
 
 // Update 全量更新语义：请求里给出完整配置；id 与 created_at 不可改。
-// 更新只影响后续触发，进行中的运行按 config_snapshot 执行。
+// 触发器全量替换（保留 id 的更新、未提交的删除、未知 id 报 400）与自动化本体
+// 在同一事务。更新只影响后续触发，进行中的运行按 config_snapshot 执行。
 func (s *AutomationService) Update(ctx context.Context, userID, id string, req *api.UpdateAutomationRequest) (*AutomationResponse, error) {
 	if _, err := s.autos.FindByIDAndUserID(ctx, id, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -212,13 +238,21 @@ func (s *AutomationService) Update(ctx context.Context, userID, id string, req *
 		}
 		return nil, errs.ErrInternal
 	}
+	existing, err := s.triggers.ListByAutomationID(ctx, id)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
 
 	built, err := s.buildAutomationConfig(userID, req)
 	if err != nil {
 		return nil, err
 	}
+	builtTriggers, err := s.buildAutomationTriggers(userID, req.Triggers, existing)
+	if err != nil {
+		return nil, err
+	}
 	if req.Enabled != nil && *req.Enabled {
-		if err := s.requirePublicURL(); err != nil {
+		if err := s.requireTriggersAndPublicURL(builtTriggers); err != nil {
 			return nil, err
 		}
 		built.Enabled = true
@@ -227,49 +261,39 @@ func (s *AutomationService) Update(ctx context.Context, userID, id string, req *
 	}
 
 	enabled := built.Enabled
-	triggerType := built.TriggerType
-	cronExpr := built.CronExpression
-	tz := built.Timezone
 	envID := built.EnvironmentID
 	projectID := built.T3ProjectID
-	eventFilter := built.EventFilterJSON
 	prompt := built.PromptTemplate
 	modelSel := built.ModelSelectionJSON
-	modelSels := built.ModelSelectionsJSON
-	debounce := built.DebounceSeconds
 	runtimeMode := built.RuntimeMode
 	workspace := built.WorkspaceJSON
 	postAction := built.PostAction
-	var issueProjectID *string
-	if built.IssueProjectID != nil {
-		issueProjectID = built.IssueProjectID
-	}
 	update := &repository.AutomationUpdate{
-		Name:                &built.Name,
-		Enabled:             &enabled,
-		EnvironmentID:       &envID,
-		T3ProjectID:         &projectID,
-		TriggerType:         &triggerType,
-		CronExpression:      &cronExpr,
-		Timezone:            &tz,
-		NextRunAt:           built.NextRunAt,
-		EventFilterJSON:     &eventFilter,
-		PromptTemplate:      &prompt,
-		ModelSelectionJSON:  &modelSel,
-		ModelSelectionsJSON: &modelSels,
-		DebounceSeconds:     &debounce,
-		RuntimeMode:         &runtimeMode,
-		WorkspaceJSON:       &workspace,
-		TimeoutSeconds:      &built.TimeoutSeconds,
-		PostAction:          &postAction,
-		PostOnTimeout:       &built.PostOnTimeout,
-		UpdatedAt:           time.Now().UTC(),
+		Name:               &built.Name,
+		Enabled:            &enabled,
+		EnvironmentID:      &envID,
+		T3ProjectID:        &projectID,
+		PromptTemplate:     &prompt,
+		ModelSelectionJSON: &modelSel,
+		RuntimeMode:        &runtimeMode,
+		WorkspaceJSON:      &workspace,
+		TimeoutSeconds:     &built.TimeoutSeconds,
+		PostAction:         &postAction,
+		PostOnTimeout:      &built.PostOnTimeout,
+		UpdatedAt:          time.Now().UTC(),
 	}
-	update.IssueProjectID = &issueProjectID // **string：置回可空字段（nil → NULL）
 
-	if err := s.autos.Update(ctx, id, userID, update); err != nil {
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := s.autos.UpdateTx(tx, id, userID, update); err != nil {
+			return err
+		}
+		return s.applyTriggerDiff(tx, id, builtTriggers)
+	}); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrAutomationNotFound
+		}
+		if errors.Is(err, errTriggerConcurrentlyModified) {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "触发器已被并发修改，请刷新后重试")
 		}
 		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
 			return nil, errs.ErrT3EnvironmentNotFound
@@ -313,68 +337,51 @@ func (s *AutomationService) requirePublicURL() error {
 	return nil
 }
 
-// builtAutomation 是一次配置解析的产物（create/update 共用）。
+// builtAutomation 是一次自动化本体配置解析的产物（create/update 共用）。
+// 触发器解析产物见 builtTrigger。
 type builtAutomation struct {
-	Name                string
-	Enabled             bool
-	EnvironmentID       string
-	T3ProjectID         string
-	TriggerType         model.AutomationTriggerType
-	CronExpression      string
-	Timezone            string
-	NextRunAt           *time.Time
-	IssueProjectID      *string
-	EventFilterJSON     string
-	PromptTemplate      string
-	ModelSelectionJSON  string
-	ModelSelectionsJSON string
-	DebounceSeconds     int
-	RuntimeMode         string
-	WorkspaceJSON       string
-	TimeoutSeconds      int
-	PostAction          model.AutomationPostAction
-	PostOnTimeout       bool
+	Name               string
+	Enabled            bool
+	EnvironmentID      string
+	T3ProjectID        string
+	PromptTemplate     string
+	ModelSelectionJSON string
+	RuntimeMode        string
+	WorkspaceJSON      string
+	TimeoutSeconds     int
+	PostAction         model.AutomationPostAction
+	PostOnTimeout      bool
 }
 
 // automationConfigInput 是 create/update 共用的归一化配置输入（两个请求类型
-// 字段一致，转换见 newAutomationConfigInput）。
+// 本体字段一致，转换见 newAutomationConfigInput）。触发器在 buildAutomationTriggers
+// 单独解析。
 type automationConfigInput struct {
-	Name            string
-	TriggerType     api.AutomationTriggerType
-	CronExpression  *string
-	Timezone        *string
-	EnvironmentId   string
-	T3ProjectId     string
-	IssueProjectId  *string
-	EventFilter     *api.AutomationEventFilter
-	PromptTemplate  string
-	ModelSelection  *api.AutomationModelSelection
-	ModelSelections []api.AutomationModelSelection
-	DebounceSeconds *int
-	RuntimeMode     *string
-	Workspace       *api.AutomationWorkspace
-	TimeoutSeconds  *int
-	PostAction      *api.AutomationPostAction
-	PostOnTimeout   *bool
+	Name           string
+	EnvironmentId  string
+	T3ProjectId    string
+	PromptTemplate string
+	ModelSelection *api.AutomationModelSelection
+	RuntimeMode    *string
+	Workspace      *api.AutomationWorkspace
+	TimeoutSeconds *int
+	PostAction     *api.AutomationPostAction
+	PostOnTimeout  *bool
 }
 
 func newAutomationConfigInput(req any) automationConfigInput {
 	switch r := req.(type) {
 	case *api.CreateAutomationRequest:
 		return automationConfigInput{
-			Name: r.Name, TriggerType: r.TriggerType, CronExpression: r.CronExpression,
-			Timezone: r.Timezone, EnvironmentId: r.EnvironmentId, T3ProjectId: r.T3ProjectId,
-			IssueProjectId: r.IssueProjectId, EventFilter: r.EventFilter, PromptTemplate: r.PromptTemplate,
-			ModelSelection: r.ModelSelection, ModelSelections: r.ModelSelections, DebounceSeconds: r.DebounceSeconds,
+			Name: r.Name, EnvironmentId: r.EnvironmentId, T3ProjectId: r.T3ProjectId,
+			PromptTemplate: r.PromptTemplate, ModelSelection: r.ModelSelection,
 			RuntimeMode: r.RuntimeMode, Workspace: r.Workspace,
 			TimeoutSeconds: r.TimeoutSeconds, PostAction: r.PostAction, PostOnTimeout: r.PostOnTimeout,
 		}
 	case *api.UpdateAutomationRequest:
 		return automationConfigInput{
-			Name: r.Name, TriggerType: r.TriggerType, CronExpression: r.CronExpression,
-			Timezone: r.Timezone, EnvironmentId: r.EnvironmentId, T3ProjectId: r.T3ProjectId,
-			IssueProjectId: r.IssueProjectId, EventFilter: r.EventFilter, PromptTemplate: r.PromptTemplate,
-			ModelSelection: r.ModelSelection, ModelSelections: r.ModelSelections, DebounceSeconds: r.DebounceSeconds,
+			Name: r.Name, EnvironmentId: r.EnvironmentId, T3ProjectId: r.T3ProjectId,
+			PromptTemplate: r.PromptTemplate, ModelSelection: r.ModelSelection,
 			RuntimeMode: r.RuntimeMode, Workspace: r.Workspace,
 			TimeoutSeconds: r.TimeoutSeconds, PostAction: r.PostAction, PostOnTimeout: r.PostOnTimeout,
 		}
@@ -382,17 +389,13 @@ func newAutomationConfigInput(req any) automationConfigInput {
 	return automationConfigInput{}
 }
 
-// buildAutomationConfig 校验并归一化一份自动化配置。cron 触发在此解析表达式并
-// 预排 next_run_at（存 UTC）；事件触发校验过滤结构。请求字段指针在入口解引用
-// （nil → 缺省值），实现体只处理归一后的值。
+// buildAutomationConfig 校验并归一化自动化本体配置（不含触发器）。请求字段指针
+// 在入口解引用（nil → 缺省值），实现体只处理归一后的值。
 func (s *AutomationService) buildAutomationConfig(
 	userID string, req any,
 ) (*builtAutomation, error) {
 	input := newAutomationConfigInput(req)
 	name := input.Name
-	triggerType := input.TriggerType
-	cronExpression := api.Deref(input.CronExpression)
-	timezone := api.Deref(input.Timezone)
 	runtimeMode := api.Deref(input.RuntimeMode)
 	var timeoutSeconds int
 	if input.TimeoutSeconds != nil {
@@ -411,9 +414,6 @@ func (s *AutomationService) buildAutomationConfig(
 	if input.EnvironmentId == "" || input.T3ProjectId == "" {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "必须选择 T3 环境与项目")
 	}
-	if !model.IsValidAutomationTriggerType(model.AutomationTriggerType(triggerType)) {
-		return nil, errs.New(errs.ErrInvalidParams.Code, "未知的触发类型 "+string(triggerType))
-	}
 
 	// 环境必须存在且属于该用户（跨用户一律按不存在处理）。
 	if _, err := s.envRepo.FindByIDAndUserID(context.Background(), input.EnvironmentId, userID); err != nil {
@@ -421,30 +421,6 @@ func (s *AutomationService) buildAutomationConfig(
 			return nil, errs.ErrT3EnvironmentNotFound
 		}
 		return nil, errs.ErrInternal
-	}
-
-	issueProject := (*string)(nil)
-	if input.IssueProjectId != nil && strings.TrimSpace(*input.IssueProjectId) != "" {
-		pid := strings.TrimSpace(*input.IssueProjectId)
-		if _, err := s.projectRepo.FindByID(pid, userID); err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errs.ErrProjectNotFound
-			}
-			return nil, errs.ErrInternal
-		}
-		issueProject = &pid
-	}
-
-	filterJSON := ""
-	if input.EventFilter != nil {
-		if err := validateAutomationEventFilter(model.AutomationTriggerType(triggerType), input.EventFilter); err != nil {
-			return nil, err
-		}
-		if raw, err := json.Marshal(input.EventFilter); err == nil && string(raw) != "{}" && string(raw) != "null" {
-			filterJSON = string(raw)
-		} else if err != nil {
-			return nil, errs.ErrInvalidParams
-		}
 	}
 
 	prompt := strings.TrimSpace(input.PromptTemplate)
@@ -477,6 +453,7 @@ func (s *AutomationService) buildAutomationConfig(
 		post = model.AutomationPostAction(postAction)
 	}
 
+	// 单模型缺省：cron/issue 触发落到它；PR 触发始终用触发器自己的多模型。
 	modelSelJSON := ""
 	if input.ModelSelection != nil {
 		if input.ModelSelection.InstanceId == "" || input.ModelSelection.Model == "" {
@@ -487,34 +464,6 @@ func (s *AutomationService) buildAutomationConfig(
 			return nil, errs.ErrInvalidParams
 		}
 		modelSelJSON = string(raw)
-	}
-
-	// GitHub PR 触发（INT-93）：必须显式多模型选择；cron/issue 忽略并清空。
-	modelSelsJSON := ""
-	debounceSeconds := 0
-	builtTrigger := model.AutomationTriggerType(triggerType)
-	if builtTrigger.IsPRTrigger() {
-		sels, err := normalizePRModelSelections(input.ModelSelections)
-		if err != nil {
-			return nil, err
-		}
-		raw, err := json.Marshal(sels)
-		if err != nil {
-			return nil, errs.ErrInvalidParams
-		}
-		modelSelsJSON = string(raw)
-
-		debounceSeconds = prReviewDebounceDefaultSeconds
-		if input.DebounceSeconds != nil {
-			debounceSeconds = *input.DebounceSeconds
-		}
-		if debounceSeconds < 0 || debounceSeconds > prReviewDebounceMaxSeconds {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "防抖窗口须在 0 到 86400 秒之间（0=立即）")
-		}
-		// PR 触发不做事件字段过滤；项目范围用 issue_project_id。
-		if filterJSON != "" {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发不支持事件过滤字段")
-		}
 	}
 
 	workspaceJSON := ""
@@ -531,39 +480,18 @@ func (s *AutomationService) buildAutomationConfig(
 		workspaceJSON = string(raw)
 	}
 
-	built := &builtAutomation{
-		Name:                name,
-		EnvironmentID:       input.EnvironmentId,
-		T3ProjectID:         input.T3ProjectId,
-		TriggerType:         model.AutomationTriggerType(triggerType),
-		CronExpression:      strings.TrimSpace(cronExpression),
-		Timezone:            strings.TrimSpace(timezone),
-		IssueProjectID:      issueProject,
-		EventFilterJSON:     filterJSON,
-		PromptTemplate:      prompt,
-		ModelSelectionJSON:  modelSelJSON,
-		ModelSelectionsJSON: modelSelsJSON,
-		DebounceSeconds:     debounceSeconds,
-		RuntimeMode:         mode,
-		WorkspaceJSON:       workspaceJSON,
-		TimeoutSeconds:      timeoutSeconds,
-		PostAction:          post,
-		PostOnTimeout:       postOnTimeout,
-	}
-
-	if built.TriggerType == model.AutomationTriggerCron {
-		loc, next, err := parseAutomationCron(built.CronExpression, built.Timezone, time.Now())
-		if err != nil {
-			return nil, err
-		}
-		_ = loc
-		built.NextRunAt = &next
-	} else {
-		// 事件触发不校验 cron 表达式（存了也忽略）。
-		built.CronExpression = ""
-		built.Timezone = ""
-	}
-	return built, nil
+	return &builtAutomation{
+		Name:               name,
+		EnvironmentID:      input.EnvironmentId,
+		T3ProjectID:        input.T3ProjectId,
+		PromptTemplate:     prompt,
+		ModelSelectionJSON: modelSelJSON,
+		RuntimeMode:        mode,
+		WorkspaceJSON:      workspaceJSON,
+		TimeoutSeconds:     timeoutSeconds,
+		PostAction:         post,
+		PostOnTimeout:      postOnTimeout,
+	}, nil
 }
 
 // parseAutomationCron 解析五字段 cron 表达式并计算下一次触发（UTC 存储）。
@@ -589,61 +517,6 @@ func parseAutomationCron(expression, timezone string, now time.Time) (*time.Loca
 	}
 	next := schedule.Next(now.In(loc)).UTC()
 	return loc, next, nil
-}
-
-// normalizePRModelSelections 校验 PR 触发的多模型选择：1–10 个、每个显式给出
-// instance_id/model、(instance_id, model) 不重复。必须显式选择，不能「项目默认」。
-func normalizePRModelSelections(sels []api.AutomationModelSelection) ([]api.AutomationModelSelection, error) {
-	if len(sels) < prReviewModelsMin {
-		return nil, errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发必须至少选择一个模型")
-	}
-	if len(sels) > prReviewModelsMax {
-		return nil, errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发最多选择 10 个模型")
-	}
-	seen := map[string]bool{}
-	for i := range sels {
-		sel := &sels[i]
-		if strings.TrimSpace(sel.InstanceId) == "" || strings.TrimSpace(sel.Model) == "" {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "模型选择缺少 instance_id 或 model")
-		}
-		key := sel.InstanceId + "::" + sel.Model
-		if seen[key] {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "模型选择重复："+sel.InstanceId+" / "+sel.Model)
-		}
-		seen[key] = true
-	}
-	return sels, nil
-}
-
-// validateAutomationEventFilter 校验事件过滤结构与触发类型匹配。
-func validateAutomationEventFilter(triggerType model.AutomationTriggerType, filter *api.AutomationEventFilter) error {
-	if filter == nil {
-		return nil
-	}
-	if triggerType.IsPRTrigger() {
-		// GitHub PR 触发不带事件字段过滤（开轮范围只由项目与 action 决定）。
-		return errs.New(errs.ErrInvalidParams.Code, "GitHub PR 触发不支持事件过滤字段")
-	}
-	switch triggerType {
-	case model.AutomationTriggerIssueStatusChanged:
-		if filter.Field != nil && *filter.Field != "" && *filter.Field != "state" && *filter.Field != "workflow_status" {
-			return errs.New(errs.ErrInvalidParams.Code, "状态过滤 field 只支持 state 或 workflow_status")
-		}
-		if len(filter.Labels) > 0 {
-			return errs.New(errs.ErrInvalidParams.Code, "状态变化过滤不支持 labels")
-		}
-	case model.AutomationTriggerIssueLabelAdded:
-		if filter.Field != nil && *filter.Field != "" {
-			return errs.New(errs.ErrInvalidParams.Code, "加标签过滤不支持 field/from/to")
-		}
-	case model.AutomationTriggerIssueCreated:
-		// 新建事件只支持项目范围过滤；带其它过滤字段视为参数错误。
-		if (filter.Field != nil && *filter.Field != "") || len(filter.Labels) > 0 ||
-			(filter.From != nil && *filter.From != "") || (filter.To != nil && *filter.To != "") {
-			return errs.New(errs.ErrInvalidParams.Code, "issue_created 触发不支持事件过滤字段")
-		}
-	}
-	return nil
 }
 
 // eventFilterMatches 判断事件是否通过可选过滤。没有过滤=该类型全部真实事件。
@@ -690,47 +563,29 @@ func eventFilterMatches(filterJSON string, event IssueEvent) bool {
 
 // ---- API 响应构造 ----
 
-func newAutomationResponse(a *model.Automation) AutomationResponse {
+func newAutomationResponse(a *model.Automation, triggers []model.AutomationTrigger) AutomationResponse {
 	resp := AutomationResponse{
-		Id:              a.ID,
-		Name:            a.Name,
-		Enabled:         a.Enabled,
-		EnvironmentId:   a.EnvironmentID,
-		T3ProjectId:     a.T3ProjectID,
-		TriggerType:     api.AutomationTriggerType(a.TriggerType),
-		CronExpression:  api.NonEmptyPtr(optString(a.CronExpression)),
-		Timezone:        api.NonEmptyPtr(optString(a.Timezone)),
-		TimeoutSeconds:  a.TimeoutSeconds,
-		DebounceSeconds: api.Ptr(a.DebounceSeconds),
-		PostAction:      api.AutomationPostAction(a.PostAction),
-		PostOnTimeout:   a.PostOnTimeout,
-		RuntimeMode:     a.RuntimeMode,
-		PromptTemplate:  a.PromptTemplate,
-		CreatedAt:       a.CreatedAt.UTC().Format(time.RFC3339Nano),
-		UpdatedAt:       a.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		Id:             a.ID,
+		Name:           a.Name,
+		Enabled:        a.Enabled,
+		EnvironmentId:  a.EnvironmentID,
+		T3ProjectId:    a.T3ProjectID,
+		TimeoutSeconds: a.TimeoutSeconds,
+		PostAction:     api.AutomationPostAction(a.PostAction),
+		PostOnTimeout:  a.PostOnTimeout,
+		RuntimeMode:    a.RuntimeMode,
+		PromptTemplate: a.PromptTemplate,
+		Triggers:       make([]api.AutomationTrigger, 0, len(triggers)),
+		CreatedAt:      a.CreatedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:      a.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
-	if a.NextRunAt != nil {
-		resp.NextRunAt = api.Ptr(a.NextRunAt.UTC().Format(time.RFC3339Nano))
-	}
-	if a.IssueProjectID != nil {
-		resp.IssueProjectId = api.Ptr(*a.IssueProjectID)
-	}
-	if a.EventFilterJSON != "" {
-		var filter AutomationEventFilter
-		if json.Unmarshal([]byte(a.EventFilterJSON), &filter) == nil {
-			resp.EventFilter = &filter
-		}
+	for i := range triggers {
+		resp.Triggers = append(resp.Triggers, newAutomationTriggerResponse(&triggers[i]))
 	}
 	if a.ModelSelectionJSON != "" {
 		var sel AutomationModelSelection
 		if json.Unmarshal([]byte(a.ModelSelectionJSON), &sel) == nil {
 			resp.ModelSelection = &sel
-		}
-	}
-	if a.ModelSelectionsJSON != "" {
-		var sels []AutomationModelSelection
-		if json.Unmarshal([]byte(a.ModelSelectionsJSON), &sels) == nil {
-			resp.ModelSelections = sels
 		}
 	}
 	if a.WorkspaceJSON != "" {
@@ -747,6 +602,7 @@ func newAutomationRunResponse(run *model.AutomationRun) AutomationRunResponse {
 	resp := AutomationRunResponse{
 		Id:            run.ID,
 		AutomationId:  run.AutomationID,
+		TriggerId:     run.TriggerID,
 		TriggerType:   api.AutomationTriggerType(run.TriggerType),
 		TriggerKey:    run.TriggerKey,
 		TriggeredAt:   run.TriggeredAt.UTC().Format(time.RFC3339Nano),

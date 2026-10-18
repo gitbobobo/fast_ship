@@ -102,6 +102,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.T3Environment{},
 		&model.ProjectT3Binding{},
 		&model.Automation{},
+		&model.AutomationTrigger{},
 		&model.AutomationRun{},
 		&model.AutomationRunToken{},
 		&model.Notification{},

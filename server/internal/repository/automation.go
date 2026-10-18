@@ -19,10 +19,6 @@ func NewAutomationRepository(db *gorm.DB) *AutomationRepository {
 	return &AutomationRepository{db: db}
 }
 
-func (r *AutomationRepository) Create(ctx context.Context, a *model.Automation) error {
-	return r.db.WithContext(ctx).Create(a).Error
-}
-
 func (r *AutomationRepository) FindByIDAndUserID(ctx context.Context, id, userID string) (*model.Automation, error) {
 	var a model.Automation
 	if err := r.db.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).First(&a).Error; err != nil {
@@ -41,32 +37,26 @@ func (r *AutomationRepository) ListByUserID(ctx context.Context, userID string) 
 }
 
 // AutomationUpdate 是一次配置更新的列集合：nil 字段不写（保留现值）。
-// NextRunAt 由 service 依据 cron 重算后传入。
+// INT-118 起触发器字段全部移到 automation_triggers，这里只更新自动化本体。
 type AutomationUpdate struct {
-	Name                *string
-	Enabled             *bool
-	EnvironmentID       *string
-	T3ProjectID         *string
-	TriggerType         *model.AutomationTriggerType
-	CronExpression      *string
-	Timezone            *string
-	NextRunAt           *time.Time
-	IssueProjectID      **string // 双指针：nil=不改；*nil=置 NULL；**非 nil=写入值
-	EventFilterJSON     *string
-	PromptTemplate      *string
-	ModelSelectionJSON  *string
-	ModelSelectionsJSON *string // GitHub PR 多模型（INT-93）
-	DebounceSeconds     *int
-	RuntimeMode         *string
-	WorkspaceJSON       *string
-	TimeoutSeconds      *int
-	PostAction          *model.AutomationPostAction
-	PostOnTimeout       *bool
-	UpdatedAt           time.Time
+	Name               *string
+	Enabled            *bool
+	EnvironmentID      *string
+	T3ProjectID        *string
+	PromptTemplate     *string
+	ModelSelectionJSON *string
+	RuntimeMode        *string
+	WorkspaceJSON      *string
+	TimeoutSeconds     *int
+	PostAction         *model.AutomationPostAction
+	PostOnTimeout      *bool
+	UpdatedAt          time.Time
 }
 
-// Update 条件 UPDATE（WHERE id + user_id），影响 0 行返回 gorm.ErrRecordNotFound。
-func (r *AutomationRepository) Update(ctx context.Context, id, userID string, update *AutomationUpdate) error {
+// UpdateTx 在给定事务内做条件更新（automation + 触发器全量替换必须同事务）。
+// 只保留这一个入口：automation 与触发器必须同事务落库，非事务版已删除。
+// 只保留这一个入口：automation 与触发器必须同事务落库，非事务版已删除。
+func (r *AutomationRepository) UpdateTx(tx *gorm.DB, id, userID string, update *AutomationUpdate) error {
 	columns := map[string]any{"updated_at": update.UpdatedAt}
 	if update.Name != nil {
 		columns["name"] = *update.Name
@@ -80,38 +70,11 @@ func (r *AutomationRepository) Update(ctx context.Context, id, userID string, up
 	if update.T3ProjectID != nil {
 		columns["t3_project_id"] = *update.T3ProjectID
 	}
-	if update.TriggerType != nil {
-		columns["trigger_type"] = *update.TriggerType
-	}
-	if update.CronExpression != nil {
-		columns["cron_expression"] = *update.CronExpression
-	}
-	if update.Timezone != nil {
-		columns["timezone"] = *update.Timezone
-	}
-	if update.NextRunAt != nil {
-		columns["next_run_at"] = *update.NextRunAt
-	} else if update.TriggerType != nil || update.CronExpression != nil {
-		// 触发配置变化但未给新调度时间：置空等待 service 层重算（不应发生，防御）。
-		columns["next_run_at"] = nil
-	}
-	if update.IssueProjectID != nil {
-		columns["issue_project_id"] = *update.IssueProjectID
-	}
-	if update.EventFilterJSON != nil {
-		columns["event_filter_json"] = *update.EventFilterJSON
-	}
 	if update.PromptTemplate != nil {
 		columns["prompt_template"] = *update.PromptTemplate
 	}
 	if update.ModelSelectionJSON != nil {
 		columns["model_selection_json"] = *update.ModelSelectionJSON
-	}
-	if update.ModelSelectionsJSON != nil {
-		columns["model_selections_json"] = *update.ModelSelectionsJSON
-	}
-	if update.DebounceSeconds != nil {
-		columns["debounce_seconds"] = *update.DebounceSeconds
 	}
 	if update.RuntimeMode != nil {
 		columns["runtime_mode"] = *update.RuntimeMode
@@ -128,7 +91,7 @@ func (r *AutomationRepository) Update(ctx context.Context, id, userID string, up
 	if update.PostOnTimeout != nil {
 		columns["post_on_timeout"] = *update.PostOnTimeout
 	}
-	res := r.db.WithContext(ctx).Model(&model.Automation{}).
+	res := tx.Model(&model.Automation{}).
 		Where("id = ? AND user_id = ?", id, userID).
 		Updates(columns)
 	if res.Error != nil {
@@ -140,12 +103,17 @@ func (r *AutomationRepository) Update(ctx context.Context, id, userID string, up
 	return nil
 }
 
+// CreateTx 在给定事务内写入自动化行（与触发器同事务落库）。
+func (r *AutomationRepository) CreateTx(tx *gorm.DB, a *model.Automation) error {
+	return tx.Create(a).Error
+}
+
 func (r *AutomationRepository) Delete(ctx context.Context, id, userID string) error {
 	return r.db.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).Delete(&model.Automation{}).Error
 }
 
 // HasActiveRunTx 判断自动化是否有活动运行（未结束，或后置操作还挂起）。
-// 供删除守卫与事件触发重入判定共用；必须传当前事务的 tx。
+// 自动化维度的删除守卫（任一触发器的活动运行都拦删除）；必须传当前事务的 tx。
 func HasActiveRunTx(tx *gorm.DB, automationID string) (bool, error) {
 	var n int64
 	err := tx.Model(&model.AutomationRun{}).
@@ -155,16 +123,119 @@ func HasActiveRunTx(tx *gorm.DB, automationID string) (bool, error) {
 	return n > 0, err
 }
 
-// ListDueCronAutTx 取到期的 cron 自动化（含期望的 next_run_at 供乐观核对）。
-func ListDueCronAutTx(db *gorm.DB, now time.Time, limit int) ([]model.Automation, error) {
-	var items []model.Automation
+// ---- 触发器仓储（INT-118）：触发器是独立实体，调度/事件/PR 匹配全部落在触发器行。----
+
+type AutomationTriggerRepository struct {
+	db *gorm.DB
+}
+
+func NewAutomationTriggerRepository(db *gorm.DB) *AutomationTriggerRepository {
+	return &AutomationTriggerRepository{db: db}
+}
+
+// ListByAutomationID 按展示顺序（position、创建时间）列出触发器。
+func (r *AutomationTriggerRepository) ListByAutomationID(ctx context.Context, automationID string) ([]model.AutomationTrigger, error) {
+	return ListAutomationTriggersTx(r.db.WithContext(ctx), automationID)
+}
+
+// ListByAutomationIDTx 同上，接受调用方事务（Update 全量替换在事务内读旧集合）。
+func (r *AutomationTriggerRepository) ListByAutomationIDTx(db *gorm.DB, automationID string) ([]model.AutomationTrigger, error) {
+	return ListAutomationTriggersTx(db, automationID)
+}
+
+// ListAutomationTriggersTx 按 position、创建时间排序读一条自动化的触发器。
+func ListAutomationTriggersTx(db *gorm.DB, automationID string) ([]model.AutomationTrigger, error) {
+	var items []model.AutomationTrigger
 	err := db.
-		Where("enabled = ? AND trigger_type = ? AND next_run_at IS NOT NULL AND next_run_at <= ?",
-			true, model.AutomationTriggerCron, now).
-		Order("next_run_at ASC").
-		Limit(limit).
+		Where("automation_id = ?", automationID).
+		Order("position ASC, created_at ASC, id ASC").
 		Find(&items).Error
 	return items, err
+}
+
+// ListByUserIDTx 一次取用户全部自动化的触发器（列表页组装用），按 automation + position 排序。
+func (r *AutomationTriggerRepository) ListByUserIDTx(db *gorm.DB, userID string) ([]model.AutomationTrigger, error) {
+	var items []model.AutomationTrigger
+	err := db.
+		Joins("JOIN automations ON automations.id = automation_triggers.automation_id").
+		Where("automations.user_id = ?", userID).
+		Order("automation_triggers.automation_id ASC, automation_triggers.position ASC, automation_triggers.created_at ASC").
+		Select("automation_triggers.*").
+		Find(&items).Error
+	return items, err
+}
+
+// CreateTx 事务内写入触发器。
+func (r *AutomationTriggerRepository) CreateTx(tx *gorm.DB, t *model.AutomationTrigger) error {
+	return tx.Create(t).Error
+}
+
+// DeleteTx 事务内删除触发器（编辑页全量替换里「未再提交」的触发器）。
+func (r *AutomationTriggerRepository) DeleteTx(tx *gorm.DB, id string) error {
+	return tx.Where("id = ?", id).Delete(&model.AutomationTrigger{}).Error
+}
+
+// FindByIDTx 事务内按 id 读触发器（Update 校验保留 id 的归属）。
+func (r *AutomationTriggerRepository) FindByIDTx(tx *gorm.DB, id string) (*model.AutomationTrigger, error) {
+	var t model.AutomationTrigger
+	if err := tx.Where("id = ?", id).First(&t).Error; err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// ListDueCronTriggersTx 取到期的 cron 触发器（含期望的 next_run_at 供乐观核对）。
+// 查询即过滤父 automation enabled：停用的触发器不推进 next_run_at，若进入批次，
+// 停用超过一个调度周期后会把最老优先的批次永久占满、饿死启用的触发器。
+// 事务内的父行 enabled 核对保留，兜住「查询后、派发前」的并发停用。join 只做
+// 过滤，列全部来自触发器行。
+func ListDueCronTriggersTx(db *gorm.DB, now time.Time, limit int) ([]model.AutomationTrigger, error) {
+	var items []model.AutomationTrigger
+	err := db.
+		Table("automation_triggers").
+		Joins("JOIN automations ON automations.id = automation_triggers.automation_id").
+		Where("automation_triggers.trigger_type = ? AND automation_triggers.next_run_at IS NOT NULL"+
+			" AND automation_triggers.next_run_at <= ? AND automations.enabled = ?",
+			model.AutomationTriggerCron, now, true).
+		Order("automation_triggers.next_run_at ASC").
+		Limit(limit).
+		Select("automation_triggers.*").
+		Find(&items).Error
+	return items, err
+}
+
+// ListIssueEventTriggersTx 匹配某用户某类 Issue 事件的触发器：父 automation 启用、
+// 触发器类型一致、项目范围为空或等于事件项目。join 只做过滤，列全部来自触发器行。
+func ListIssueEventTriggersTx(db *gorm.DB, userID string, eventType model.AutomationTriggerType, projectID string) ([]model.AutomationTrigger, error) {
+	var items []model.AutomationTrigger
+	err := db.
+		Table("automation_triggers").
+		Joins("JOIN automations ON automations.id = automation_triggers.automation_id").
+		Where("automations.user_id = ? AND automations.enabled = ? AND automation_triggers.trigger_type = ?"+
+			" AND (automation_triggers.issue_project_id IS NULL OR automation_triggers.issue_project_id = ?)",
+			userID, true, eventType, projectID).
+		Order("automation_triggers.position ASC, automation_triggers.created_at ASC").
+		Select("automation_triggers.*").
+		Find(&items).Error
+	return items, err
+}
+
+// ListPRTriggersTx 匹配某用户某类 GitHub PR 事件的触发器（形状同 Issue 事件匹配；
+// projectID 是命中的关联项目）。调用方按触发器 id 去重（同一触发器经多个关联项目
+// 命中只留一条）。
+func ListPRTriggersTx(db *gorm.DB, userID string, triggerType model.AutomationTriggerType, projectID string) ([]model.AutomationTrigger, error) {
+	return ListIssueEventTriggersTx(db, userID, triggerType, projectID)
+}
+
+// HasActiveRunByTriggerTx 判断触发器是否有活动运行（未结束，或后置操作还挂起）。
+// INT-118 起并发约束从自动化维度收窄到触发器维度：同一自动化的不同触发器可并行。
+func HasActiveRunByTriggerTx(tx *gorm.DB, triggerID string) (bool, error) {
+	var n int64
+	err := tx.Model(&model.AutomationRun{}).
+		Where("trigger_id = ? AND (finished_at IS NULL OR post_state = ?)", triggerID, model.AutomationPostStatePending).
+		Limit(1).
+		Count(&n).Error
+	return n > 0, err
 }
 
 type AutomationRunRepository struct {

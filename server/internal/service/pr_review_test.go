@@ -25,13 +25,18 @@ import (
 
 // ---- 步骤 1：索引与状态语义 ----
 
-// 部分唯一索引只约束 cron/issue 触发：同一规则第二条未结束 cron 行必须被拒绝。
+// 部分唯一索引只约束 cron/issue 触发：同一触发器第二条未结束 cron 行必须被拒绝。
 func TestPRIndex_RejectsSecondUnfinishedCronRun(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	a := env.createAutomation(t, user.ID, nil)
+	tr := env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerCron
+		tr.CronExpression = "*/10 * * * *"
+	})
 
 	env.seedRun(t, a, func(r *model.AutomationRun) {
+		r.TriggerID = tr.ID
 		r.TriggerType = model.AutomationTriggerCron
 		r.TriggerKey = "cron:2026-01-01T00:00:00Z"
 	})
@@ -40,10 +45,11 @@ func TestPRIndex_RejectsSecondUnfinishedCronRun(t *testing.T) {
 		ID:                 uuid.NewString(),
 		UserID:             a.UserID,
 		AutomationID:       a.ID,
+		TriggerID:          tr.ID,
 		TriggerType:        model.AutomationTriggerCron,
 		TriggerKey:         "cron:2026-01-02T00:00:00Z",
 		TriggeredAt:        time.Now().UTC(),
-		ConfigSnapshotJSON: snapshotJSON(a),
+		ConfigSnapshotJSON: snapshotJSON(a, tr),
 		EnvironmentID:      a.EnvironmentID,
 		T3ProjectID:        a.T3ProjectID,
 		ThreadID:           uuid.NewString(),
@@ -58,12 +64,39 @@ func TestPRIndex_RejectsSecondUnfinishedCronRun(t *testing.T) {
 	}
 }
 
-// PR 触发不受「同一自动化至多一个活动运行」约束：一轮多模型并行即多行未结束。
+// 同一自动化的两个 cron 触发器可以各有未结束活动行（并发约束在触发器维度）。
+func TestPRIndex_AllowsActiveRunsOnSiblingTriggers(t *testing.T) {
+	env := setupAutomationTestEnv(t)
+	user := env.createUser(t)
+	a := env.createAutomation(t, user.ID, nil)
+	tr1 := env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerCron
+		tr.CronExpression = "*/10 * * * *"
+	})
+	tr2 := env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerIssueCreated
+	})
+	env.seedRun(t, a, func(r *model.AutomationRun) {
+		r.TriggerID = tr1.ID
+		r.TriggerType = model.AutomationTriggerCron
+		r.TriggerKey = "cron:2026-01-01T00:00:00Z"
+	})
+	env.seedRun(t, a, func(r *model.AutomationRun) {
+		r.TriggerID = tr2.ID
+		r.TriggerType = model.AutomationTriggerIssueCreated
+	})
+	if n := countRuns(t, env.db, "automation_id = ? AND finished_at IS NULL", a.ID); n != 2 {
+		t.Fatalf("active runs across sibling triggers = %d, want 2", n)
+	}
+}
+
+// PR 触发不受「同一触发器至多一个活动运行」约束：一轮多模型并行即多行未结束。
 func TestPRIndex_AllowsTwoUnfinishedPRRuns(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
-	a := env.createAutomation(t, user.ID, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPROpened
+	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPROpened
 	})
 	env.seedRun(t, a, func(r *model.AutomationRun) {
 		r.TriggerType = model.AutomationTriggerGitHubPROpened
@@ -94,8 +127,9 @@ func TestPRIndex_AllowsTwoUnfinishedPRRuns(t *testing.T) {
 func TestQueued_NotClaimedByListClaimableTx(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
-	a := env.createAutomation(t, user.ID, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerIssueCreated
 	})
 	env.seedRun(t, a, func(r *model.AutomationRun) {
 		r.Status = model.AutomationRunQueued
@@ -106,7 +140,6 @@ func TestQueued_NotClaimedByListClaimableTx(t *testing.T) {
 	})
 	// 对照：空串状态可以被取走。
 	env.seedRun(t, a, func(r *model.AutomationRun) {
-		r.TriggerType = model.AutomationTriggerIssueCreated
 		r.TriggerKey = "event:" + uuid.NewString()
 	})
 
@@ -134,15 +167,16 @@ func TestCancelledStatus_Terminal(t *testing.T) {
 	}
 }
 
-// cron 忙碌路径不回退：已有活动运行时第二条 cron 触发仍记 failed/automation_busy。
+// cron 忙碌路径不回退：该触发器已有活动运行时第二次 cron 触发仍记 failed/automation_busy。
 func TestCronBusy_StillRecordsAutomationBusy(t *testing.T) {
 	env := setupAutomationTestEnv(t)
 	user := env.createUser(t)
 	stale := time.Now().UTC().Add(-time.Hour)
-	a := env.createAutomation(t, user.ID, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerCron
-		x.CronExpression = "*/10 * * * *"
-		x.NextRunAt = &stale
+	a := env.createAutomation(t, user.ID, nil)
+	env.addTrigger(t, a, func(tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerCron
+		tr.CronExpression = "*/10 * * * *"
+		tr.NextRunAt = &stale
 	})
 	env.seedRun(t, a, func(r *model.AutomationRun) {
 		r.TriggerType = model.AutomationTriggerCron
@@ -189,14 +223,14 @@ func setupPRReviewTestEnv(t *testing.T) *prReviewTestEnv {
 	}
 	if err := db.AutoMigrate(
 		&model.User{}, &model.Project{}, &model.T3Environment{},
-		&model.Automation{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
+		&model.Automation{}, &model.AutomationTrigger{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
 		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{}, &model.GitHubPRSeenSHA{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_automation_trigger ON automation_runs(automation_id, trigger_key)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
 	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-ON automation_runs(automation_id)
+ON automation_runs(trigger_id)
 WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
   AND (finished_at IS NULL OR post_state = 'pending')`)
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
@@ -243,8 +277,9 @@ func (e *prReviewTestEnv) createUserWithRepo(t *testing.T, owner, repo string) (
 	return user, project
 }
 
-// createPRRule 建 PR 触发规则（默认 opened、防抖 60、两个模型）。
-func (e *prReviewTestEnv) createPRRule(t *testing.T, user *model.User, mutate func(*model.Automation)) *model.Automation {
+// createPRRule 建 PR 触发规则（默认 opened、防抖 60、两个模型）。mutate 同时
+// 拿到自动化本体与触发器行（INT-118 起触发字段在触发器上）。
+func (e *prReviewTestEnv) createPRRule(t *testing.T, user *model.User, mutate func(a *model.Automation, tr *model.AutomationTrigger)) *model.Automation {
 	t.Helper()
 	now := time.Now().UTC()
 	env := &model.T3Environment{
@@ -261,27 +296,38 @@ func (e *prReviewTestEnv) createPRRule(t *testing.T, user *model.User, mutate fu
 	}
 	selsJSON, _ := json.Marshal(sels)
 	a := &model.Automation{
+		ID:             uuid.NewString(),
+		UserID:         user.ID,
+		Name:           "PR 评审",
+		Enabled:        true,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		EnvironmentID:  env.ID,
+		T3ProjectID:    "t3-proj",
+		PromptTemplate: "评审 {{repo}} #{{pr_number}}",
+		RuntimeMode:    "full-access",
+		TimeoutSeconds: 3600,
+		PostAction:     model.AutomationPostNone,
+	}
+	tr := &model.AutomationTrigger{
 		ID:                  uuid.NewString(),
-		UserID:              user.ID,
-		Name:                "PR 评审",
-		Enabled:             true,
-		CreatedAt:           now,
-		UpdatedAt:           now,
-		EnvironmentID:       env.ID,
-		T3ProjectID:         "t3-proj",
+		AutomationID:        a.ID,
 		TriggerType:         model.AutomationTriggerGitHubPROpened,
-		PromptTemplate:      "评审 {{repo}} #{{pr_number}}",
+		Position:            0,
 		ModelSelectionsJSON: string(selsJSON),
 		DebounceSeconds:     60,
-		RuntimeMode:         "full-access",
-		TimeoutSeconds:      3600,
-		PostAction:          model.AutomationPostNone,
+		CreatedAt:           now,
+		UpdatedAt:           now,
 	}
 	if mutate != nil {
-		mutate(a)
+		mutate(a, tr)
 	}
 	if err := e.db.Create(a).Error; err != nil {
 		t.Fatalf("create automation: %v", err)
+	}
+	tr.AutomationID = a.ID
+	if err := e.db.Create(tr).Error; err != nil {
+		t.Fatalf("create trigger: %v", err)
 	}
 	return a
 }
@@ -340,7 +386,7 @@ func countDebounces(t *testing.T, db *gorm.DB) int64 {
 func TestWebhook_DeliveryDedup(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(a *model.Automation) { a.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 
 	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
 		t.Fatalf("first delivery: %v", err)
@@ -358,7 +404,7 @@ func TestWebhook_DeliveryDedup(t *testing.T) {
 func TestWebhook_IgnoresDraftForkUnlinked(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(a *model.Automation) { a.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 
 	if err := env.handleWebhook(t, "d-draft", "opened", "octocat/hw", 1, "sha-d", true, false); err != nil {
 		t.Fatalf("draft: %v", err)
@@ -380,7 +426,7 @@ func TestWebhook_IgnoresDraftForkUnlinked(t *testing.T) {
 func TestWebhook_IgnoresRepoWithoutGitHubToken(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, project := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(a *model.Automation) { a.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	if err := env.db.Model(project).Update("public_github_token_id", "").Error; err != nil {
 		t.Fatalf("clear token: %v", err)
 	}
@@ -396,7 +442,7 @@ func TestWebhook_IgnoresRepoWithoutGitHubToken(t *testing.T) {
 func TestOnLaunchCancelled_MarksStopAttempted(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	run := env.seedPRRun(t, a, "octocat/hw", 1, "sha-1", model.AutomationRunCancelled)
 	now := nowUTC()
 	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
@@ -422,20 +468,21 @@ func TestOnLaunchCancelled_MarksStopAttempted(t *testing.T) {
 func TestWebhook_DebounceWindowMergesPushes(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
 	})
 	// opened 规则不响应 synchronize。
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.Name = "opened 规则"
-		x.TriggerType = model.AutomationTriggerGitHubPROpened
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "opened 规则"
+		tr.TriggerType = model.AutomationTriggerGitHubPROpened
 	})
+	tr := env.firstTrigger(t, a)
 
 	if err := env.handleWebhook(t, "d-1", "synchronize", "octocat/hw", 1, "sha-1", false, false); err != nil {
 		t.Fatalf("first push: %v", err)
 	}
 	var d1 model.GitHubPRDebounce
-	if err := env.db.Where("automation_id = ?", a.ID).First(&d1).Error; err != nil {
+	if err := env.db.Where("trigger_id = ?", tr.ID).First(&d1).Error; err != nil {
 		t.Fatalf("debounce row: %v", err)
 	}
 	if d1.HeadSHA != "sha-1" {
@@ -477,7 +524,7 @@ func TestWebhook_DebounceWindowMergesPushes(t *testing.T) {
 
 	// 同一 SHA+模型被唯一键吃掉：重放同一 SHA 不产生新行。
 	if err := env.db.Create(&model.GitHubPRDebounce{
-		AutomationID: a.ID, RepoFullName: "octocat/hw", PRNumber: 1,
+		TriggerID: env.firstTrigger(t, a).ID, RepoFullName: "octocat/hw", PRNumber: 1,
 		UserID: user.ID, ProjectID: "p", InstallationID: 12345,
 		Action: "synchronize", HeadSHA: "sha-2", FireAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}).Error; err != nil {
@@ -501,7 +548,7 @@ func TestWebhook_DebounceWindowMergesPushes(t *testing.T) {
 func TestWebhook_DebounceZeroOpensRoundInTx(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(a *model.Automation) { a.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 
 	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
 		t.Fatalf("webhook: %v", err)
@@ -558,7 +605,7 @@ func TestWebhook_DebounceZeroOpensRoundInTx(t *testing.T) {
 func TestPromote_InflightCapAndRelease(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 
 	// 占 4 个在途名额（手工 seed 的 PR 运行），留 1 个空位。
 	for i := 0; i < prReviewMaxInflightPerUser-1; i++ {
@@ -613,7 +660,7 @@ func TestPromote_InflightCapAndRelease(t *testing.T) {
 func TestPromote_CrossPRMarksReviewPending(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	var seed *model.AutomationRun
 	for i := 0; i < prReviewMaxInflightPerUser; i++ {
 		run := env.seedPRRun(t, a, "octocat/hw", 100+i, fmt.Sprintf("seed-sha-%d", i), model.RunStatusPendingRun)
@@ -660,19 +707,32 @@ func TestPromote_CrossPRMarksReviewPending(t *testing.T) {
 	}
 }
 
-// seedPRRun 直接落一条 PR 运行（trigger_key 带随机后缀，允许同 SHA 多行布置现场）。
+// firstTrigger 该自动化的第一个触发器（夹具里每条规则至少挂一个）。
+func (e *prReviewTestEnv) firstTrigger(t *testing.T, a *model.Automation) *model.AutomationTrigger {
+	t.Helper()
+	var tr model.AutomationTrigger
+	if err := e.db.Where("automation_id = ?", a.ID).Order("position ASC, created_at ASC").First(&tr).Error; err != nil {
+		t.Fatalf("first trigger: %v", err)
+	}
+	return &tr
+}
+
+// seedPRRun 直接落一条 PR 运行（trigger_id/trigger_type 取该规则的第一个触发器；
+// trigger_key 带随机后缀，允许同 SHA 多行布置现场）。
 func (e *prReviewTestEnv) seedPRRun(t *testing.T, a *model.Automation, repo string, prNumber int, sha string, status model.AutomationRunStatus) *model.AutomationRun {
 	t.Helper()
+	tr := e.firstTrigger(t, a)
 	now := time.Now().UTC()
 	run := &model.AutomationRun{
 		ID:                 uuid.NewString(),
 		UserID:             a.UserID,
 		AutomationID:       a.ID,
-		TriggerType:        a.TriggerType,
+		TriggerID:          tr.ID,
+		TriggerType:        tr.TriggerType,
 		TriggerKey:         prTriggerKey(repo, prNumber, sha, "inst-"+uuid.NewString()[:8], "model-x"),
 		TriggerContextJSON: "{}",
 		TriggeredAt:        now,
-		ConfigSnapshotJSON: snapshotJSON(a),
+		ConfigSnapshotJSON: snapshotJSON(a, tr),
 		EnvironmentID:      a.EnvironmentID,
 		T3ProjectID:        a.T3ProjectID,
 		ThreadID:           uuid.NewString(),
@@ -700,7 +760,7 @@ func (e *prReviewTestEnv) seedPRRun(t *testing.T, a *model.Automation, repo stri
 func TestWebhook_SupersedeCancelsOldSHARuns(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 
 	// 旧 SHA：一个排队中（未认领）。
 	queued := env.seedPRRun(t, a, "octocat/hw", 1, "sha-1", model.AutomationRunQueued)
@@ -782,9 +842,9 @@ func TestWebhook_SupersedeCancelsOldSHARuns(t *testing.T) {
 func TestWebhook_SupersedeReleasesSlots(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 0
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
 	})
 	for i := 0; i < prReviewMaxInflightPerUser; i++ {
 		env.seedPRRun(t, a, "octocat/hw", 1, "sha-1b", model.RunStatusPendingRun)
@@ -822,7 +882,7 @@ func countRunsQueued(t *testing.T, db *gorm.DB, repo string) int64 {
 func TestSync_TerminalStatesMapToChecksAndComment(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 
 	// 同一轮（repo+pr+round）三个模型运行：完成、超时、排队（覆盖三种映射）。
 	done := env.seedPRRun(t, a, "octocat/hw", 1, "sha-1", model.AutomationRunCompleted)
@@ -889,7 +949,7 @@ func TestSync_TerminalStatesMapToChecksAndComment(t *testing.T) {
 func TestTimeout_MarksPRReviewPending(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	run := env.seedPRRun(t, a, "octocat/hw", 1, "sha-1", model.AutomationRunDispatched)
 	past := nowUTC().Add(-time.Minute)
 	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
@@ -932,9 +992,9 @@ func TestTimeout_MarksPRReviewPending(t *testing.T) {
 func TestSync_OneCommentPerPRAndPerModelChecks(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
 	})
 
 	// 第一轮：开轮 + 同步。
@@ -1016,7 +1076,7 @@ type fakeCheckState struct {
 func TestSync_ChecksForbiddenFallsBackToMergedCheck(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	env.fake.ForbidChecks(true)
 
 	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
@@ -1044,7 +1104,7 @@ func TestSync_ChecksForbiddenFallsBackToMergedCheck(t *testing.T) {
 func TestSync_ChecksFullyForbiddenStillPushesComment(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	env.fake.ForbidAllChecks(true)
 
 	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
@@ -1084,9 +1144,9 @@ func TestSync_ChecksFullyForbiddenStillPushesComment(t *testing.T) {
 func TestBuildRunPrompt_PRPlaceholders(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) {
-		x.DebounceSeconds = 0
-		x.PromptTemplate = "审查 {{repo}} #{{pr_number}} {{pr_title}} {{pr_url}} @{{head_sha}}"
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.DebounceSeconds = 0
+		a.PromptTemplate = "审查 {{repo}} #{{pr_number}} {{pr_title}} {{pr_url}} @{{head_sha}}"
 	})
 
 	run := env.seedPRRun(t, a, "octocat/hw", 1, "sha-1", model.RunStatusPendingRun)
@@ -1180,7 +1240,7 @@ func TestCheckUpdateForGroup_TerminalStates(t *testing.T) {
 func TestTick_PromotesQueuedAfterInflightDrops(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	for i := 0; i < prReviewMaxInflightPerUser-1; i++ {
 		env.seedPRRun(t, a, "octocat/hw", 100+i, fmt.Sprintf("seed-sha-%d", i), model.RunStatusPendingRun)
 	}
@@ -1221,10 +1281,10 @@ func TestTick_PromotesQueuedAfterInflightDrops(t *testing.T) {
 func TestOpenRound_SameSHASharesRoundAcrossRules(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.Name = "第二条 opened"
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "第二条 opened"
+		tr.DebounceSeconds = 0
 	})
 	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
 		t.Fatalf("webhook: %v", err)
@@ -1254,9 +1314,9 @@ func TestOpenRound_SameSHASharesRoundAcrossRules(t *testing.T) {
 func TestWebhook_StaleOpenedDebounceDroppedOnNewSHA(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPROpened
-		x.DebounceSeconds = 60
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPROpened
+		tr.DebounceSeconds = 60
 	})
 	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
 		t.Fatalf("opened: %v", err)
@@ -1280,11 +1340,11 @@ func TestWebhook_StaleOpenedDebounceDroppedOnNewSHA(t *testing.T) {
 func TestWebhook_StaleOpenedDoesNotCancelNewerSHA(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.Name = "synchronize"
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "synchronize"
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
 	})
 
 	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
@@ -1315,11 +1375,11 @@ func TestWebhook_StaleOpenedDoesNotCancelNewerSHA(t *testing.T) {
 func TestWebhook_StaleSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.Name = "synchronize"
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "synchronize"
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
 	})
 
 	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
@@ -1343,14 +1403,14 @@ func TestWebhook_StaleSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 func TestWebhook_DelayedSHADoesNotDropNewerDebounce(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPROpened
-		x.DebounceSeconds = 60
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPROpened
+		tr.DebounceSeconds = 60
 	})
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.Name = "synchronize"
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 60
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "synchronize"
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 60
 	})
 
 	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
@@ -1396,14 +1456,14 @@ func TestWebhook_DelayedSHADoesNotDropNewerDebounce(t *testing.T) {
 func TestWebhook_PendingDebouncePreferredOverReviewHead(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPROpened
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPROpened
+		tr.DebounceSeconds = 0
 	})
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.Name = "synchronize"
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 60
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "synchronize"
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 60
 	})
 
 	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
@@ -1476,11 +1536,11 @@ func (b *blockingSubmitReview) SubmitReview(ctx context.Context, installationID 
 func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.Name = "synchronize"
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		a.Name = "synchronize"
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
 	})
 	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
 		t.Fatalf("opened: %v", err)
@@ -1573,9 +1633,9 @@ func TestWebhook_CancelWaitsForInFlightSubmitReview(t *testing.T) {
 func TestWebhook_OutOfOrderSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
 	})
 	t1 := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
 	t2 := t1.Add(time.Minute)
@@ -1600,9 +1660,9 @@ func TestWebhook_OutOfOrderSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 func TestWebhook_EqualTimeSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) {
-		x.TriggerType = model.AutomationTriggerGitHubPRSynchronize
-		x.DebounceSeconds = 0
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 0
 	})
 	t0 := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
 	if err := env.handleWebhookAt(t, "d-b", "synchronize", "octocat/hw", 1, "sha-2", false, false, t0); err != nil {
@@ -1623,7 +1683,7 @@ func TestWebhook_EqualTimeSynchronizeDoesNotCancelNewerSHA(t *testing.T) {
 func TestTimeout_WaitsForInFlightSubmitReview(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	if err := env.handleWebhook(t, "d-open", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
 		t.Fatalf("opened: %v", err)
 	}
@@ -1757,7 +1817,7 @@ func TestClearPendingSync_DoesNotClobberNewerPending(t *testing.T) {
 func TestPushComment_PrefersSavedCommentID(t *testing.T) {
 	env := setupPRReviewTestEnv(t)
 	user, _ := env.createUserWithRepo(t, "octocat", "hw")
-	a := env.createPRRule(t, user, func(x *model.Automation) { x.DebounceSeconds = 0 })
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
 	id, err := env.fake.CreatePullRequestComment(context.Background(), 1, "octocat/hw", 1, prReviewCommentMarker+"\n旧正文")
 	if err != nil {
 		t.Fatalf("seed comment: %v", err)
@@ -1780,5 +1840,46 @@ func TestPushComment_PrefersSavedCommentID(t *testing.T) {
 	}
 	if comment := env.fake.LastCommentBody(); !strings.Contains(comment, "完成") {
 		t.Fatalf("comment not updated: %s", comment)
+	}
+}
+
+// ---- 场景：防抖窗口内项目范围被改窄 → 旧窗口作废 ----
+
+func TestWebhook_DebounceDroppedWhenProjectScopeChanged(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, projectA := env.createUserWithRepo(t, "octocat", "hw")
+	projectB := &model.Project{
+		ID: uuid.NewString(), UserID: user.ID, Name: "p-b-" + uuid.NewString()[:8],
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := env.db.Create(projectB).Error; err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+
+	a := env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) {
+		pid := projectA.ID
+		tr.IssueProjectID = &pid
+	})
+	if err := env.handleWebhook(t, "d-1", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	var d model.GitHubPRDebounce
+	if err := env.db.Where("trigger_id = ?", env.firstTrigger(t, a).ID).First(&d).Error; err != nil {
+		t.Fatalf("debounce row: %v", err)
+	}
+
+	// 窗口内把触发器的项目范围改到 B：到点后旧项目 A 的窗口必须作废。
+	if err := env.db.Model(&model.AutomationTrigger{}).
+		Where("id = ?", d.TriggerID).
+		Update("issue_project_id", projectB.ID).Error; err != nil {
+		t.Fatalf("narrow scope: %v", err)
+	}
+	env.pr.ProcessDueDebounces(d.FireAt.Add(time.Second))
+
+	if n := countRuns(t, env.db, "repo_full_name = ?", "octocat/hw"); n != 0 {
+		t.Fatalf("runs after stale-scope fire = %d, want 0", n)
+	}
+	if n := countDebounces(t, env.db); n != 0 {
+		t.Fatalf("debounce rows after fire = %d, want 0 (consumed)", n)
 	}
 }
