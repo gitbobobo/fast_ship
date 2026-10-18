@@ -117,8 +117,11 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 29 action（`fs_memory`/`fs_schedule` 占位），v2 起 `fs_memory` 开放
 `list/read/history/create/replace/append/delete/restore`（读类同步、写类
 同步立即落库），另加 `fs_memory_search`；v3（INT-103）起 `fs_schedule`
-开放定时任务管理（见下节）。三个版本的注册表都是**独立冻结的字面量**——
-新版本变化不得改写旧版本的字节（存量会话的 tools_hash 失稳即前缀失稳）。
+开放定时任务管理（见下节）；v4（INT-110）修正 action 枚举并新增线程/Issue
+字段；v5（INT-120）让 `fs_thread list` 真正支持 `env_id`/`query` 过滤并
+修正这两个参数的 schema 描述。已发布版本（v1–v4）的注册表都是**独立冻结的
+字面量**——新版本变化不得改写旧版本的字节（存量会话的 tools_hash 失稳即
+前缀失稳）。
 版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
 规则并递增 prompt_revision）；告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
@@ -442,7 +445,7 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 一次（流式片段不改消息）。压缩进度走 delta 事件的 `kind=maintenance_progress`
 （INT-115；旧前端对未知 kind 忽略，不新增第六种事件类型）。
 
-## 读取完整性、写入保护与停止语义（INT-110）
+## 读取完整性、写入保护与停止语义（INT-110 / INT-120）
 
 工具面按「读得完整、写得安全」收敛，与共识「优先读取不丢失、详情可读、
 覆盖范围准确，再完善新输入与写入保护」一致。
@@ -456,13 +459,18 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   多数 OpenAI 兼容后端不校验 JSON Schema，条件分支只增加每请求约 700 token
   的固定开销而无强制力。
 - **列表筛选与分页**：`fs_thread list` 默认只返回未归档线程，支持
-  `project_id` / `settled` / `status` / `updated_after` 过滤与 `page` /
-  `page_size`（默认 50、上限 100）；结果带 `total_items` / `returned_items` /
-  `has_more` 与各环境的读取覆盖（`environments`，未完整读取时给
-  `incomplete_environments` 与说明）。某环境读不到不谎报为「不存在」，也不
-  宣称全部正常。
+  `env_id`（只保留该环境的线程；不在已连接环境里就报错，不静默返回空）/
+  `project_id` / `query`（线程 id/标题/项目名/项目 id/环境名，不区分大小写
+  包含）/
+  `settled` / `status` / `updated_after` 过滤与 `page` / `page_size`（默认
+  50、上限 100）；结果带 `total_items` / `returned_items` / `offset`（实际
+  切片起点）/ `has_more` 与各环境的读取覆盖（`environments`，未完整读取时
+  给 `incomplete_environments` 与说明；`env_id` 收窄时只报该环境）。某环境
+  读不到不谎报为「不存在」，也不宣称全部正常。
 - **详情可读**：`fs_issue get` 返回正文、清单、标签、`updated_at` /
-  `checklist_updated_at`（列表项保持精简）；`fs_thread get` 返回线程状态、
+  `checklist_updated_at`（`labels` / `checklist` 恒在，没有时为空数组，
+  让调用方能区分「没有」与「字段未实现」；列表项保持精简）；`fs_thread get`
+  返回线程状态、
   最近条目（含条目 id、短摘要与 `detail_available`）以及完整历史的翻页入口
   （`item_offset` / `next_item_offset`），条目正文用 `fs_thread item` 按 id
   补读。

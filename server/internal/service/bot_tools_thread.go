@@ -208,8 +208,10 @@ func botThreadPage(page, pageSize int) (int, int, error) {
 }
 
 // botSlimThreadList 过滤、稳定分页并回报覆盖范围。默认排除归档线程（归档
-// 不属于巡检范围）；include_archived=true 才纳入。过滤后按 updated_at 降序、
-// id 升序排序，保证同一 filter 下分页稳定。
+// 不属于巡检范围）；include_archived=true 才纳入。env_id 收窄到单环境（不在
+// 已连接环境里就报错，不静默返回空）；query 对线程 id/标题/项目名/项目 id/
+// 环境名做不区分大小写的包含匹配。过滤后按 updated_at 降序、id 升序排序，
+// 保证同一 filter 下分页稳定。
 func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[string]interface{}, error) {
 	page, pageSize, err := botThreadPage(args.Page, args.PageSize)
 	if err != nil {
@@ -225,9 +227,24 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 	}
 	includeArchived := args.IncludeArchived != nil && *args.IncludeArchived
 
+	envID := strings.TrimSpace(args.EnvID)
+	query := strings.ToLower(strings.TrimSpace(args.Query))
+	envNames := make(map[string]string, len(list.Environments))
+	for i := range list.Environments {
+		envNames[list.Environments[i].Id] = list.Environments[i].Name
+	}
+	if envID != "" {
+		if _, ok := envNames[envID]; !ok {
+			return nil, errs.New(errs.ErrInvalidParams.Code, "env_id 不属于已连接环境: "+envID)
+		}
+	}
+
 	filtered := make([]T3ThreadSummary, 0, len(list.Items))
 	for _, thread := range list.Items {
 		if !includeArchived && thread.Status == api.T3ThreadSummaryStatusArchived {
+			continue
+		}
+		if envID != "" && thread.EnvironmentId != envID {
 			continue
 		}
 		if args.ProjectID != "" && thread.ProjectId != args.ProjectID {
@@ -245,6 +262,9 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 				continue
 			}
 		}
+		if query != "" && !botThreadMatchesQuery(&thread, query, envNames) {
+			continue
+		}
 		filtered = append(filtered, thread)
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
@@ -255,6 +275,8 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 	})
 
 	total := len(filtered)
+	// offset = (page-1)*page_size，作为 offset 字段随响应自证实际切片起点；
+	// 排序键 updated_at 降序 + id 升序，同一 filter 下同一次调用内稳定。
 	// 防溢出：page 可能极大，(page-1)*pageSize 相加前先判断边界。
 	start := total
 	if pageSize > 0 && page-1 <= total/pageSize {
@@ -273,11 +295,14 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 	}
 
 	// 覆盖范围：某环境读不到时如实报告，不把「未读到」说成「不存在」，
-	// 也不宣称全部正常。
+	// 也不宣称全部正常。env_id 收窄时只报告该环境的覆盖。
 	coverage := make([]map[string]interface{}, 0, len(list.Environments))
 	incomplete := make([]string, 0, 2)
 	for i := range list.Environments {
 		env := &list.Environments[i]
+		if envID != "" && env.Id != envID {
+			continue
+		}
 		entry := map[string]interface{}{
 			"id":     env.Id,
 			"name":   env.Name,
@@ -298,6 +323,7 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 		"returned_items":   len(items),
 		"page":             page,
 		"page_size":        pageSize,
+		"offset":           start,
 		"has_more":         end < total,
 		"environments":     coverage,
 		"include_archived": includeArchived,
@@ -307,6 +333,24 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 		out["note"] = "部分环境未能完整读取，结果不代表全部环境的完整范围"
 	}
 	return out, nil
+}
+
+// botThreadMatchesQuery 对线程 id/标题/项目名/项目 id/环境名做不区分大小写的
+// 包含匹配；query 须已 ToLower。任一字段命中即保留该线程。
+func botThreadMatchesQuery(thread *T3ThreadSummary, query string, envNames map[string]string) bool {
+	haystacks := []string{
+		thread.Id,
+		thread.Title,
+		thread.ProjectName,
+		thread.ProjectId,
+		envNames[thread.EnvironmentId],
+	}
+	for _, hay := range haystacks {
+		if strings.Contains(strings.ToLower(hay), query) {
+			return true
+		}
+	}
+	return false
 }
 
 func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {

@@ -2,8 +2,10 @@ package service
 
 // v1/v2 冻结的工具参数结构体：存量会话在压缩/重启边界前继续用旧字节构建
 // tools 数组，`action` 枚举的历史生成结果（只列出第一个取值）必须逐字节保留。
-// v3 起使用 bot_tools.go 里的同名结构体（已修正枚举）；不要改动本文件里的
-// 任何标签，否则 v1/v2 的 tools_hash 会失稳（见 bot_int103_test.go 冻结基线）。
+// v3 起使用 bot_tools.go 里的同名结构体（已修正枚举）；v5 起活跃的 fs_thread
+// 参数标签又演进了，v4 的旧标签由本文件的 botThreadArgsV4 保留。不要改动
+// 本文件里的任何标签，否则已发布版本的 tools_hash 会失稳（见 bot_int103_test.go
+// 与 bot_int120_test.go 冻结基线）。
 
 // botProjectArgsFrozen 是 v1/v2 的 fs_project 参数。
 type botProjectArgsFrozen struct {
@@ -98,4 +100,30 @@ type botScheduleTaskArgsFrozen struct {
 	// Limit/Offset 是 runs/list 的分页参数。
 	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
 	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
+}
+
+// botThreadArgsV4 是 v4 的 fs_thread 参数（INT-110 修正枚举后的形态）。v5 起
+// fs_thread list 才真正支持 env_id/query 过滤并修正两个参数的 schema 描述；
+// v4 的 wire 字节由本冻结副本逐字节保留（见 bot_int120_test.go 冻结基线），
+// 不要改动本结构体的任何字段或标签。
+type botThreadArgsV4 struct {
+	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,required"`
+	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（get/item/composer_options/workspace_options/launch/send/stop 必填）"`
+	ThreadID  string `json:"thread_id,omitempty" jsonschema:"description=T3 线程 ID（get/item/send/stop 必填）"`
+	ItemID    string `json:"item_id,omitempty" jsonschema:"description=T3 线程条目 ID（item 必填；条目 ID 由 get 返回的 items[].id 提供）"`
+	ProjectID string `json:"project_id,omitempty" jsonschema:"description=T3 项目 ID（workspace_options/launch 必填；list 可选，只保留该项目的线程）"`
+	Query     string `json:"query,omitempty" jsonschema:"description=引用名过滤（workspace_options）"`
+	Cursor    *int   `json:"cursor,omitempty" jsonschema:"description=上一页返回的 next_cursor（workspace_options）"`
+	Text      string `json:"text,omitempty" jsonschema:"description=消息正文（launch/send 必填）"`
+	Title     string `json:"title,omitempty" jsonschema:"description=线程标题（launch 可选，缺省由 T3 生成）"`
+	// list 过滤与分页：默认只看未归档线程（归档线程不属于巡检范围）。
+	IncludeArchived *bool  `json:"include_archived,omitempty" jsonschema:"description=list 可选；true 时连归档线程一起返回（默认 false，只返回未归档线程）"`
+	Settled         *bool  `json:"settled,omitempty" jsonschema:"description=list 可选；按 settled 过滤（true 只看已收进历史区的线程）"`
+	Status          string `json:"status,omitempty" jsonschema:"description=list 可选；按运行态过滤（running/idle/waiting/archived/error 等，服务端原样比较）"`
+	UpdatedAfter    string `json:"updated_after,omitempty" jsonschema:"description=list 可选；只返回 updated_at 晚于该 RFC3339 时间的线程"`
+	Page            int    `json:"page,omitempty" jsonschema:"description=页码（从 1 起，list 用；过滤后稳定排序再切片）"`
+	PageSize        int    `json:"page_size,omitempty" jsonschema:"description=页长（1-100，list 用，默认 50；服务端强制上限，不允许一次拉全量）"`
+	// get 的条目分页：详情默认只回最近若干条，完整历史按 offset 向前读。
+	ItemLimit  int `json:"item_limit,omitempty" jsonschema:"description=get 可选；返回的线程条目条数（默认 50，上限 200）"`
+	ItemOffset int `json:"item_offset,omitempty" jsonschema:"description=get 可选；条目偏移（从 0 起，配合 item_limit 向前翻完整历史）"`
 }

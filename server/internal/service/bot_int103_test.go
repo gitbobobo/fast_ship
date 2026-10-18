@@ -872,8 +872,8 @@ func TestBotScheduleDeleteMissingTaskNotFound(t *testing.T) {
 }
 
 // 已发布工具集的 wire 字节 SHA-256：改动任一版本都会让存量会话的前缀与
-// tools_hash 失稳，这里钉死。这是跨版本契约，不是实现细节；v4 是活跃版本，
-// 允许演进，不在此钉死。
+// tools_hash 失稳，这里钉死。这是跨版本契约，不是实现细节；v4 自 INT-120
+// 起也已冻结，基线在 bot_int120_test.go 的 botToolsetV4FrozenHash。
 const (
 	botToolsetV1FrozenHash = "c1da7e95288ed681392529f68a812ec1ac403bcd53cee1414634cca28197ef06"
 	botToolsetV2FrozenHash = "4ec300f75e9aff618b820246c85cc497db6e4d8027cbce342696cc629560ca19"
