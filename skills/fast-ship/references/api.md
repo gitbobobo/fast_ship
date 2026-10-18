@@ -8193,11 +8193,12 @@ kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一�
 接收 GitHub App webhook（pull_request opened/synchronize）
 
 公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256，webhook secret）验签。
-集成（INT-119）是用户级配置：按 `X-GitHub-Hook-Installation-Target-ID`（GitHub App
-webhook 携带的 App ID）取出配了该 App 的全部候选（数据库行 + config 兜底）逐个验签，
-命中候选的用户身份贯穿后续项目/规则匹配、旧轮取消、防抖与评论/check 回写，
-不会跨用户生效；不带该头时只有全库 + config 恰好一份身份才接受（兼容自测脚本），
-多份返回 401。只处理 pull_request 的 opened/synchronize；draft 与 fork 一律 202 忽略。
+集成（INT-119）是用户级配置：验签候选是全部身份（各用户的行 + config 兜底），
+逐个比对签名并收集命中——恰好一个命中即该候选的用户身份，贯穿后续项目/规则匹配、
+旧轮取消、防抖与评论/check 回写，不会跨用户生效；多个命中（多份身份配了相同的
+webhook 密钥）返回 401「无法确定集成身份」。`X-GitHub-Hook-Installation-Target-ID`
+头只作候选排序提示、不作定位依据（GitHub 文档未保证它等于 App ID）。只处理
+pull_request 的 opened/synchronize；draft 与 fork 一律 202 忽略。
 仓库必须已和该身份的 Fast Ship 项目关联才会进入防抖/开轮。
 同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且不再开轮）。
 
@@ -8210,7 +8211,7 @@ webhook 携带的 App ID）取出配了该 App 的全部候选（数据库行 + 
 | `X-GitHub-Event` | string | 是 |  |
 | `X-GitHub-Delivery` | string | 是 |  |
 | `X-Hub-Signature-256` | string | 是 |  |
-| `X-GitHub-Hook-Installation-Target-ID` | string | 否 | GitHub App webhook 携带的 App ID；用它定位到配置了该 App 的用户（缺省时仅当全库唯一身份才接受） |
+| `X-GitHub-Hook-Installation-Target-ID` | string | 否 | GitHub webhook 携带的目标资源 ID；只作候选排序提示（GitHub 未保证 App 级投递上等于 App ID），身份归属只认验签 |
 
 **请求体**
 
@@ -8227,9 +8228,9 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | HTTP | 说明 |
 | --- | --- |
 | 400 | 请求参数无效（40001-40099） |
-| 401 | 签名不匹配（40107）、未知 App（40107）或缺 App ID 头但存在多份身份（40107） |
+| 401 | 签名不匹配（40107）或多个身份命中同一签名（40107） |
 | 500 | 服务器内部错误（50000） |
-| 503 | 该身份未配置 webhook secret（含候选密钥为空） |
+| 503 | 候选全部没有 webhook secret（含无任何候选），拒绝接受请求 |
 
 ### GET `/api/automation-agent/pull-request`
 
@@ -10512,7 +10513,8 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 webhook 密钥本体，只给「是否已配置」；不触发任何 GitHub 请求。
 `source` 说明当前用户生效的来源：`database`=本人集成页保存的配置（优先），
 `config`=config.yaml 的部署配置兜底（本人尚未保存时），`none`=未配置。
-webhook 验签按 `X-GitHub-Hook-Installation-Target-ID`（App ID）定位到对应用户的密钥；
+webhook 验签在全部身份候选（各用户的行 + config）中逐个比对签名定身份
+（`X-GitHub-Hook-Installation-Target-ID` 头只作排序提示，不作定位依据）；
 PR 评审回写使用该轮运行所属用户的 App 身份。
 
 **鉴权**：仅 JWT

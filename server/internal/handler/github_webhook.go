@@ -13,13 +13,14 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
 
-// headerGitHubAppID GitHub App webhook 携带的 App ID 头：入站没有用户上下文，
-// 靠它把验签密钥定位到配置了这个 App 的用户（INT-119 用户级集成）。
+// headerGitHubAppID GitHub App webhook 携带的目标 ID 头：只当候选排序提示，
+// 不承担正确性——GitHub 文档对它只说「创建 webhook 的资源 ID」，未保证 App 级
+// 投递上等于 App ID（仓库级投递就是仓库 ID）。身份归属只认验签结果。
 const headerGitHubAppID = "X-GitHub-Hook-Installation-Target-ID"
 
 // WebhookSecretSource 每次请求现取 webhook 验签候选（INT-119）：targetAppID
-// 取自 App ID 头，可为空（不带头部的自测调用）；实现方按它返回全部候选身份
-// （AppUserID 空串=部署 config 身份），未知 App 报 401 类错误。
+// 取自目标 ID 头、只作排序提示，可为空；实现方返回全部候选身份（AppUserID
+// 空串=部署 config 身份），由 handler 逐个验签。
 type WebhookSecretSource interface {
 	WebhookCandidates(ctx context.Context, targetAppID string) ([]service.WebhookCandidate, error)
 }
@@ -37,8 +38,8 @@ func (s StaticWebhookSecret) WebhookCandidates(context.Context, string) ([]servi
 
 type GitHubWebhookHandler struct {
 	prReview *service.PRReviewService
-	// secrets 每次请求现取候选：按 App ID 头定位到各用户的行内密钥，逐候选
-	// 验签，命中候选的身份贯穿后续处理（含为空 → 503）。
+	// secrets 每次请求现取候选：全部身份（各用户的行 + config），逐候选验签，
+	// 命中候选的身份贯穿后续处理（含为空 → 503）。
 	secrets WebhookSecretSource
 	// fake 自测模式注入的假 GitHub（server.mode=debug 且 github_app.fake 时非空，
 	// 供 /api/debug/github-review-log 观察调用记录）。
@@ -53,7 +54,7 @@ func NewGitHubWebhookHandler(prReview *service.PRReviewService, secrets WebhookS
 func (h *GitHubWebhookHandler) Handle(c *gin.Context) {
 	candidates, err := h.secrets.WebhookCandidates(c.Request.Context(), strings.TrimSpace(c.GetHeader(headerGitHubAppID)))
 	if err != nil {
-		// 未知 App（40107）、数据库密文解密失败（50000）等：原样映射，不回落 config。
+		// 数据库密文解密失败（50000）等：原样映射，不回落 config。
 		middleware.HandleAppError(c, err)
 		return
 	}
@@ -75,20 +76,24 @@ func (h *GitHubWebhookHandler) Handle(c *gin.Context) {
 		return
 	}
 
-	// 逐候选验签：同一 App ID 的候选（用户行 + config 同名身份）各用自己
-	// 的密钥试一遍，命中者的身份贯穿后续处理；全不命中才是签名无效。
-	// App ID 在保存时已按 (provider, app_id) 唯一挡重，不会有多用户同名行。
+	// 逐候选验签并收集全部命中：候选是全部身份（各用户的行 + config），密钥
+	// 互不相同的身份至多一把验中——命中恰好一个即认它的身份；命中多个说明多
+	// 份身份配了相同的 webhook 密钥，无法安全归属（投递可能来自其中任何一份），
+	// 拒绝；全不命中才是签名无效。
 	signature := c.GetHeader("X-Hub-Signature-256")
 	var appUserID string
-	verified := false
+	hits := 0
 	for i := range candidates {
 		if githubapp.VerifySignature(candidates[i].Secret, body, signature) {
-			verified = true
+			hits++
 			appUserID = candidates[i].AppUserID
-			break
 		}
 	}
-	if !verified {
+	if hits > 1 {
+		response.Unauthorized(c, 40107, "无法确定集成身份（多个身份使用了相同的 webhook 密钥）")
+		return
+	}
+	if hits == 0 {
 		response.Unauthorized(c, 40107, "Webhook 签名无效或缺失")
 		return
 	}

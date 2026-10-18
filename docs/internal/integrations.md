@@ -55,24 +55,27 @@ PUT 是整组保存：`app_id` 必填且纯数字；`private_key_pem` 省略/nul
   每次调用现查一次该用户的数据库行（config 来源时还含一次 PEM 文件读取）——本地单连接库下为
   微秒级，换远程库前应先给它加短 TTL 缓存。
 - **PR 协调账按验签身份分区**：`github_pr_reviews` 主键 `(repo_full_name, pr_number, app_user_id)`、
-  `github_pr_seen_shas` 主键含 `app_user_id`、`github_pr_debounces` / `automation_runs` 都有
+  `github_pr_seen_shas` 与 `github_pr_debounces` 主键都含 `app_user_id`、`automation_runs` 有
   `app_user_id` 列（空串 = config 身份）。开轮时把验签身份写进运行行，之后 agent、同步、取消、
   置 pending 全部读这一列，不再从评审账或规则所有者反推；同步的运行查询按 `app_user_id` 过滤。
   同一仓库+PR 可被不同身份各自开轮：评审账、评论（隐藏 marker 带身份，config 沿用旧 marker）、
   check 都按身份分开，互不串扰。
-- **升级迁移**：INT-93 已发布的 `github_pr_reviews` / `github_pr_seen_shas` 主键不含身份列，
-  SQLite 改不了主键，所以 `cmd/server/migrate_pr_identity.go` 在 AutoMigrate 之前备份式重建
-  两张表（旧行回填 `''` = 当时的全局 config 身份），重复启动幂等；`automation_runs` /
-  `github_pr_debounces` 的新列带默认值，由 AutoMigrate 补列。
+- **升级迁移**：INT-93 已发布的 `github_pr_reviews` / `github_pr_seen_shas`、INT-118 发布的
+  `github_pr_debounces` 主键都不含身份列，SQLite 改不了主键，所以 `cmd/server/migrate_pr_identity.go`
+  在 AutoMigrate 之前备份式重建三张表（旧行回填 `''` = 当时的全局 config 身份），重复启动幂等；
+  `automation_runs` 的新列带默认值，由 AutoMigrate 补列。debounces 的 INT-93 automation_id
+  旧主键表由 INT-118 的 `dropLegacyPRDebounces` 先整表丢弃，再由本迁移把 trigger_id 主键、
+  无身份列的形态重建成四列主键。
 - webhook 只有一个入口，验签用**候选列表**：
-  - 按 `X-GitHub-Hook-Installation-Target-ID`（GitHub App webhook 携带的 App ID）取出该 App 的
-    数据库行（`(provider, app_id)` 唯一，最多一行）+ config 同名身份作为**候选**，逐个用
-    `X-Hub-Signature-256` 验签；命中候选的身份就是后续处理的授权身份。用户接管 config 同名 App
-    （从部署配置迁到个人配置的正常路径）时用户行在后选首位，正是期望结果；
-  - 未知 App → 401「未知的 GitHub App」；缺少该头时，只有全库 + config 恰好一份 App 身份才接受
-    （兼容 `scripts/simulate-github-pr-webhook.sh`），多个不同 App ID → 401；
-  - 定位不到身份但部署只在 config 里配了 webhook 密钥（INT-93 旧部署）→ 仍用 config 密钥验签；
-  - 候选全部没有密钥，或命中身份密钥为空 → 503；有可用密钥但签名不匹配 → 401。
+  - 候选是**全部身份**：全部数据库行（逐行解密）+ config 兜底身份（config 配了 App ID，或
+    INT-93 以来只配了 webhook 密钥的旧部署）；不依赖 `X-GitHub-Hook-Installation-Target-ID`
+    定位——GitHub 文档对该头只说「创建 webhook 的资源 ID」，未保证 App 级投递上等于 App ID
+    （仓库级投递是仓库 ID），它只当候选排序提示（命中某行 app_id 时排最前），身份归属只认验签；
+  - 逐候选用 `X-Hub-Signature-256` 验签并收集全部命中：恰好一个命中 → 该候选的身份就是后续
+    处理的授权身份；多个命中（多份身份配了相同的 webhook 密钥，投递可能来自其中任何一份）
+    → 401「无法确定集成身份」；全不命中 → 401「Webhook 签名无效或缺失」；
+  - 候选全部没有密钥（含无任何候选）→ 503（不接受未签名请求）；任一行密文解密失败 → 50000
+    响亮失败（候选要全量解密，一行损坏会挡住全部投递，修复或重存该行即恢复）。
   
   验签规则仍是 HMAC-SHA256 常量时间比较（`pkg/githubapp/webhook.go`，空请求体一律拒绝）。
 

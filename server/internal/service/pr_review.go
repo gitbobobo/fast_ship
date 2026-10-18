@@ -807,9 +807,11 @@ func (s *PRReviewService) ProcessDueDebounces(now time.Time) {
 
 func (s *PRReviewService) fireDebounce(d *model.GitHubPRDebounce, now time.Time) {
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		// 消费防抖行（条件删除：0 行=已被并发处理）。
-		res := tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ? AND fire_at <= ?",
-			d.TriggerID, d.RepoFullName, d.PRNumber, now).
+		// 消费防抖行（条件删除：0 行=已被并发处理）。键含验签身份与 fire_at：
+		// 前者保证不误删其他身份的窗口，后者保证列表与删除之间被新推送重置
+		// （fire_at 推后）的窗口不会被本帧按旧 SHA 消费掉。
+		res := tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ? AND app_user_id = ? AND fire_at <= ?",
+			d.TriggerID, d.RepoFullName, d.PRNumber, d.AppUserID, now).
 			Delete(&model.GitHubPRDebounce{})
 		if res.Error != nil {
 			return res.Error

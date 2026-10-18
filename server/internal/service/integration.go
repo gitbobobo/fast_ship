@@ -47,8 +47,6 @@ var (
 	errGitHubAppKeyRequired   = errs.New(40001, "首次配置必须提供 App 私钥")
 	errGitHubAppNotConfigured = errs.New(40006, "尚未配置 GitHub App")
 	errGitHubAppDecrypt       = errs.New(errs.ErrInternal.Code, "GitHub App 配置解密失败")
-	errGitHubAppUnknown       = errs.New(errs.ErrWebhookSignature.Code, "未知的 GitHub App")
-	errGitHubAppAmbiguous     = errs.New(errs.ErrWebhookSignature.Code, "缺少 X-GitHub-Hook-Installation-Target-ID，无法确定集成身份")
 	errGitHubConfigKeyRead    = errs.New(errs.ErrInternal.Code, "读取部署配置的 App 私钥失败")
 )
 
@@ -137,85 +135,46 @@ type WebhookCandidate struct {
 	Secret    string // 已 TrimSpace
 }
 
-// WebhookCandidates webhook 验签候选的现取入口（每次请求调用），按目标 App ID
-// （X-GitHub-Hook-Installation-Target-ID 头）返回全部候选，由调用方逐个验签：
-//   - targetAppID 非空：该 app_id 的数据库行（(provider, app_id) 唯一，至多
-//     一行）+ config（若 config 配了同一 app_id，身份为空串）。行与 config 都
-//     没有时，从未配置 App 身份、只配了 webhook 密钥的旧部署（INT-93）仍以
-//     config 密钥兜底（真实投递带头也能验签），否则报 40107「未知的 GitHub App」。
-//   - targetAppID 为空（simulate 脚本这类不带头部的调用）：全库 + config
-//     恰好一份身份才接受（数据库行在前、config 在后）；多份报 40107「缺少
-//     X-GitHub-Hook-Installation-Target-ID…」；零份返回 config 密钥候选
-//     （可为空串，handler 仍 503）。
+// WebhookCandidates webhook 验签候选的现取入口（每次请求调用）：始终返回全部
+// 身份候选——全部数据库行（逐行解密）+ config 兜底身份——由调用方逐个验签并
+// 收集全部命中。targetAppID（X-GitHub-Hook-Installation-Target-ID 头）只当
+// 排序提示，不承担正确性：GitHub 文档对该头只说「创建 webhook 的资源 ID」，
+// 未保证 App 级投递上等于 App ID，所以身份归属只能靠验签本身；命中某行
+// app_id 时把该 App 的候选排到最前（真实投递几乎总能第一把验中，也保证确定性）。
 //
-// 所有候选密钥已 trim；任何一行解密失败原样返回 50000。
+// config 身份在 config 配了 App ID、或 INT-93 以来只配了 webhook 密钥的旧部署
+// （两者密钥都空时无候选可给）时在场；行内密钥以行为准（含为空，不回落
+// config）。任何一行解密失败原样返回 50000。
 func (s *IntegrationService) WebhookCandidates(ctx context.Context, targetAppID string) ([]WebhookCandidate, error) {
 	targetAppID = strings.TrimSpace(targetAppID)
-	if targetAppID != "" {
-		return s.webhookCandidatesForAppID(targetAppID)
-	}
-
-	ids, err := s.repo.ListAppIDs(model.IntegrationProviderGitHubApp)
+	rows, err := s.repo.ListByProvider(model.IntegrationProviderGitHubApp)
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	distinct := make([]string, 0, len(ids))
-	seen := map[string]bool{}
-	for _, id := range ids {
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		distinct = append(distinct, id)
-	}
-	cfgID := strings.TrimSpace(s.cfg.GitHubApp.AppID)
-	if cfgID != "" && !seen[cfgID] {
-		distinct = append(distinct, cfgID)
-	}
-
-	switch len(distinct) {
-	case 0:
-		// 无任何 App 身份：config 的 webhook 密钥兜底（INT-93 以来仅配密钥的
-		// 部署仍能验签）；为空则 handler 503。
-		return []WebhookCandidate{{AppUserID: "", Secret: strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret)}}, nil
-	case 1:
-		// 唯一身份：属于它的全部候选（数据库行在前、config 在后；distinct 里
-		// 的 cfgID 只在不在 seen 时追加，行集为空时即纯 config 候选）。
-		return s.webhookCandidatesForAppID(distinct[0])
-	default:
-		return nil, errGitHubAppAmbiguous
-	}
-}
-
-// webhookCandidatesForAppID 单一 App ID 的候选解析：该 app_id 的全部数据库行
-// （各行密钥以行为准，含为空，不回落 config）+ config 同名身份；都没有时按
-// 上面的旧部署兼容规则兜底或报 40107。
-func (s *IntegrationService) webhookCandidatesForAppID(targetAppID string) ([]WebhookCandidate, error) {
-	rows, err := s.repo.FindAllByAppID(targetAppID)
-	if err != nil {
-		return nil, errs.ErrInternal
-	}
-	out := make([]WebhookCandidate, 0, len(rows)+1)
+	matched := make([]WebhookCandidate, 0, len(rows)+1)
+	rest := make([]WebhookCandidate, 0, len(rows)+1)
 	for _, row := range rows {
 		payload, decErr := s.decryptRow(row)
 		if decErr != nil {
 			return nil, decErr
 		}
-		out = append(out, WebhookCandidate{AppUserID: row.UserID, Secret: strings.TrimSpace(payload.WebhookSecret)})
+		cand := WebhookCandidate{AppUserID: row.UserID, Secret: strings.TrimSpace(payload.WebhookSecret)}
+		if targetAppID != "" && row.AppID == targetAppID {
+			matched = append(matched, cand)
+		} else {
+			rest = append(rest, cand)
+		}
 	}
-	if s.cfg.GitHubApp.AppID == targetAppID {
-		out = append(out, WebhookCandidate{AppUserID: "", Secret: strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret)})
+	cfgID := strings.TrimSpace(s.cfg.GitHubApp.AppID)
+	if cfgID != "" || strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret) != "" {
+		cand := WebhookCandidate{AppUserID: "", Secret: strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret)}
+		if targetAppID != "" && cfgID == targetAppID {
+			matched = append(matched, cand)
+		} else {
+			rest = append(rest, cand)
+		}
 	}
-	if len(out) > 0 {
-		return out, nil
-	}
-	// 旧部署兼容（INT-93）：config 从未配置 App 身份、只配了 webhook 密钥——
-	// 真实投递带着 GitHub 侧的 App ID 头到达，无处按身份定位，仍以 config
-	// 密钥验签（身份为空串即部署全局）。
-	if s.cfg.GitHubApp.AppID == "" && strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret) != "" {
-		return []WebhookCandidate{{AppUserID: "", Secret: strings.TrimSpace(s.cfg.GitHubApp.WebhookSecret)}}, nil
-	}
-	return nil, errGitHubAppUnknown
+	return append(matched, rest...), nil
 }
 
 // Get GET /api/integrations/github-app 的投影：只给「是否已配置」，不触发任何

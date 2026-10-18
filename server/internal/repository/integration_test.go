@@ -73,18 +73,19 @@ func TestIntegrationRepo_UpsertScopedByUser(t *testing.T) {
 	}
 }
 
-// TestIntegrationRepo_FindAllByAppID 按明文 app_id 列出匹配行：(provider, app_id)
-// 全库唯一后，github_app 下同一 App ID 至多一行（第二个用户插行直接撞唯一
-// 索引）；其他 provider 的同 App ID 行互不影响；未知 App 返回空集。
-func TestIntegrationRepo_FindAllByAppID(t *testing.T) {
+// TestIntegrationRepo_ListByProvider 列出该 provider 全部行（webhook 候选的
+// 次序基础）：github_app 下 (provider, app_id) 全库唯一——第二个用户插同一
+// App ID 直接撞唯一索引（保存路径 409 的并发兜底）；其他 provider 的行不受影响。
+func TestIntegrationRepo_ListByProvider(t *testing.T) {
 	repo, db := integrationTestRepo(t)
 	seedIntegrationRow(t, db, "u-1", model.IntegrationProviderGitHubApp, "111", []byte("a"))
-	seedIntegrationRow(t, db, "u-2", "other_provider", "111", []byte("b"))
+	seedIntegrationRow(t, db, "u-2", model.IntegrationProviderGitHubApp, "222", []byte("b"))
+	seedIntegrationRow(t, db, "u-3", "other_provider", "111", []byte("c"))
 
 	// 唯一索引兜底：同 provider 下第二个用户插同一 App ID 被拒。
 	err := db.Create(&model.Integration{
-		ID: uuid.NewString(), UserID: "u-3", Provider: model.IntegrationProviderGitHubApp,
-		AppID: "111", ConfigEncrypted: []byte("c"),
+		ID: uuid.NewString(), UserID: "u-4", Provider: model.IntegrationProviderGitHubApp,
+		AppID: "111", ConfigEncrypted: []byte("d"),
 		DetectionStatus: model.IntegrationDetectionUnchecked,
 		CreatedAt:       time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}).Error
@@ -92,30 +93,12 @@ func TestIntegrationRepo_FindAllByAppID(t *testing.T) {
 		t.Fatalf("duplicate app_id insert = %v, want UNIQUE constraint failure", err)
 	}
 
-	rows, err := repo.FindAllByAppID("111")
-	if err != nil || len(rows) != 1 {
-		t.Fatalf("find = %v %v, want 1 github_app row", rows, err)
+	rows, err := repo.ListByProvider(model.IntegrationProviderGitHubApp)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("list = %v %v, want 2 github_app rows", rows, err)
 	}
-	if rows[0].UserID != "u-1" {
-		t.Fatalf("row = %s, want u-1", rows[0].UserID)
-	}
-	if rows, err := repo.FindAllByAppID("404"); err != nil || len(rows) != 0 {
-		t.Fatalf("missing = %v %v, want empty", rows, err)
-	}
-}
-
-func TestIntegrationRepo_ListAppIDs(t *testing.T) {
-	repo, db := integrationTestRepo(t)
-	seedIntegrationRow(t, db, "u-1", model.IntegrationProviderGitHubApp, "222", []byte("a"))
-	seedIntegrationRow(t, db, "u-2", model.IntegrationProviderGitHubApp, "111", []byte("b"))
-	seedIntegrationRow(t, db, "u-3", "other_provider", "999", []byte("c"))
-
-	ids, err := repo.ListAppIDs(model.IntegrationProviderGitHubApp)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(ids) != 2 {
-		t.Fatalf("ids = %v, want 2 github_app rows", ids)
+	if rows[0].UserID != "u-1" || rows[1].UserID != "u-2" {
+		t.Fatalf("rows = [%s %s], want creation order [u-1 u-2]", rows[0].UserID, rows[1].UserID)
 	}
 }
 

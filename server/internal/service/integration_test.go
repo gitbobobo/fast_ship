@@ -449,34 +449,40 @@ func TestIntegration_ConfigSourceFallback(t *testing.T) {
 		t.Fatalf("cleared projection = %v %v", err, out.WebhookSecretSet)
 	}
 	cands, err := svc.WebhookCandidates(ctx, "888")
-	if err != nil || len(cands) != 1 || cands[0].Secret != "" || cands[0].AppUserID != "u-1" {
-		t.Fatalf("webhook candidates = %v %v, want single empty-secret user candidate", cands, err)
+	if err != nil || len(cands) != 2 {
+		t.Fatalf("webhook candidates = %v %v, want row + config candidates", cands, err)
+	}
+	// 行内密钥为空以行为准（不回落 config 的 cfg-secret）；config 是另一份
+	// 独立候选，验签归属交给 handler。
+	if cands[0].AppUserID != "u-1" || cands[0].Secret != "" ||
+		cands[1].AppUserID != "" || cands[1].Secret != "cfg-secret" {
+		t.Fatalf("candidates = %+v, want [row empty-secret, config]", cands)
 	}
 	cur, _, _ = svc.Current(ctx, "u-1")
 	if cur.WebhookSecret != "" {
 		t.Fatalf("current secret = %q, want db empty", cur.WebhookSecret)
 	}
 
-	// 未知 App ID → 40107；config 的 App ID 命中 → config 密钥（config 身份）。
-	_, err = svc.WebhookCandidates(ctx, "31337")
-	if got := appErr(t, err); got.Code != 40107 || got.Message != "未知的 GitHub App" {
-		t.Fatalf("unknown app = [%d %s]", got.Code, got.Message)
+	// 未知 App ID 的头只是无效提示：候选仍是全部身份（行 + config）。
+	if cands, err = svc.WebhookCandidates(ctx, "31337"); err != nil || len(cands) != 2 {
+		t.Fatalf("unmatched header = %v %v, want both candidates", cands, err)
 	}
+	// config 的 App ID 命中：config 身份（密钥 cfg-secret）排最前。
 	cands, err = svc.WebhookCandidates(ctx, "777")
-	if err != nil || len(cands) != 1 || cands[0].AppUserID != "" || cands[0].Secret != "cfg-secret" {
-		t.Fatalf("config app candidates = %v %v", cands, err)
+	if err != nil || len(cands) != 2 || cands[0].AppUserID != "" || cands[0].Secret != "cfg-secret" ||
+		cands[1].AppUserID != "u-1" || cands[1].Secret != "" {
+		t.Fatalf("config app candidates = %v %v, want config first then user row", cands, err)
 	}
-	// 该用户有行（App 888）后无头调用：行 888 与 config 777 构成两份身份，
-	// 无法确定 → 40107。
-	_, err = svc.WebhookCandidates(ctx, "")
-	if got := appErr(t, err); got.Code != 40107 {
-		t.Fatalf("no-header with db+config identities = [%d %s], want 40107", got.Code, got.Message)
+	// 无头调用同样返回全部候选，不再有「多份身份无法定位」的拒绝。
+	cands, err = svc.WebhookCandidates(ctx, "")
+	if err != nil || len(cands) != 2 {
+		t.Fatalf("headless candidates = %v %v, want both", cands, err)
 	}
 }
 
-// TestIntegration_WebhookCandidates 无头时多份身份 → 40107；唯一身份 → 行内
-// 密钥（config 身份在场时一并返回）；带头时同 App ID 的多份候选逐行列出；
-// config 兜底对未见行的用户同样生效。
+// TestIntegration_WebhookCandidates 始终返回全部身份候选（全部数据库行 +
+// config 兜底）；头只当排序提示——命中某行 app_id 的候选排最前；config 只配
+// webhook 密钥的旧部署照样在候选里；候选为空也不报错（handler 503）。
 func TestIntegration_WebhookCandidates(t *testing.T) {
 	svc, _, cfg, db := integrationTestService(t)
 	ctx := context.Background()
@@ -494,48 +500,50 @@ func TestIntegration_WebhookCandidates(t *testing.T) {
 		t.Fatalf("bob: %v", err)
 	}
 
-	// 两行无头 → 无法确定身份。
-	_, err := svc.WebhookCandidates(ctx, "")
-	if got := appErr(t, err); got.Code != 40107 || got.Message != "缺少 X-GitHub-Hook-Installation-Target-ID，无法确定集成身份" {
-		t.Fatalf("ambiguous = [%d %s]", got.Code, got.Message)
+	// 全量候选：无头与带头都返回两份身份，不报「无法定位/未知 App」。
+	for _, target := range []string{"", "111", "999999"} {
+		cands, err := svc.WebhookCandidates(ctx, target)
+		if err != nil || len(cands) != 2 {
+			t.Fatalf("candidates(target=%q) = %v %v, want 2", target, cands, err)
+		}
 	}
-	// 带头各自命中（身份解析到各自用户）。
-	if cands, err := svc.WebhookCandidates(ctx, "111"); err != nil || len(cands) != 1 ||
-		cands[0].AppUserID != "alice" || cands[0].Secret != "sec-a" {
-		t.Fatalf("alice candidates = %v %v", cands, err)
+	// 头命中 alice 的 App ID：她的候选排最前（排序提示，其余次序不变）。
+	cands, err := svc.WebhookCandidates(ctx, "111")
+	if cands[0].AppUserID != "alice" || cands[0].Secret != "sec-a" ||
+		cands[1].AppUserID != "bob" || cands[1].Secret != "sec-b" {
+		t.Fatalf("hinted candidates = %+v, want alice first", cands)
 	}
-	if cands, err := svc.WebhookCandidates(ctx, "222"); err != nil || len(cands) != 1 ||
-		cands[0].AppUserID != "bob" || cands[0].Secret != "sec-b" {
-		t.Fatalf("bob candidates = %v %v", cands, err)
+	// 头是任意值（如仓库 ID 形态，真实投递可能是这种）：不改变候选集。
+	cands, err = svc.WebhookCandidates(ctx, "501337")
+	if err != nil || len(cands) != 2 || cands[0].AppUserID != "alice" {
+		t.Fatalf("repo-id-like header = %v %v, want unchanged full set", cands, err)
 	}
 
-	// 只删到剩 alice 一行：无头恢复可用。
+	// 删到剩 alice 一行：候选只剩她（config 没配身份时无兜底行）。
 	db.Where("user_id = ?", "bob").Delete(&model.Integration{})
-	if cands, err := svc.WebhookCandidates(ctx, ""); err != nil || len(cands) != 1 ||
-		cands[0].AppUserID != "alice" || cands[0].Secret != "sec-a" {
+	cands, err = svc.WebhookCandidates(ctx, "")
+	if err != nil || len(cands) != 1 || cands[0].AppUserID != "alice" || cands[0].Secret != "sec-a" {
 		t.Fatalf("single identity = %v %v", cands, err)
 	}
 
-	// 一行都没有、config 只有 webhook 密钥：回落 config（可为空）。
+	// 一行都没有、config 只配了 webhook 密钥：config 身份兜底（INT-93 旧部署）。
 	db.Where("1 = 1").Delete(&model.Integration{})
 	cfg.GitHubApp.WebhookSecret = "cfg-only"
-	if cands, err := svc.WebhookCandidates(ctx, ""); err != nil || len(cands) != 1 ||
-		cands[0].AppUserID != "" || cands[0].Secret != "cfg-only" {
+	cands, err = svc.WebhookCandidates(ctx, "")
+	if err != nil || len(cands) != 1 || cands[0].AppUserID != "" || cands[0].Secret != "cfg-only" {
 		t.Fatalf("config-only = %v %v", cands, err)
 	}
-
-	// config 只有密钥、无 App 身份：带头投递（真实 GitHub App 的 App ID 头）
-	// 也以 config 密钥兜底（INT-93 旧部署兼容）。
-	cfg.GitHubApp.AppID = ""
-	if cands, err := svc.WebhookCandidates(ctx, "424242"); err != nil || len(cands) != 1 ||
-		cands[0].AppUserID != "" || cands[0].Secret != "cfg-only" {
+	// 带头（真实 GitHub App 的 App ID 头）同样只有 config 候选。
+	cands, err = svc.WebhookCandidates(ctx, "424242")
+	if err != nil || len(cands) != 1 || cands[0].AppUserID != "" || cands[0].Secret != "cfg-only" {
 		t.Fatalf("legacy header fallback = %v %v", cands, err)
 	}
-	// config 连密钥也没有：未知 App 40107。
+
+	// config 连密钥也没有：无候选、不报错（handler 对空候选 503）。
 	cfg.GitHubApp.WebhookSecret = ""
-	_, err = svc.WebhookCandidates(ctx, "424242")
-	if got := appErr(t, err); got.Code != 40107 {
-		t.Fatalf("no secret at all = [%d %s], want 40107", got.Code, got.Message)
+	cands, err = svc.WebhookCandidates(ctx, "")
+	if err != nil || len(cands) != 0 {
+		t.Fatalf("empty deployment = %v %v, want empty candidates", cands, err)
 	}
 }
 
@@ -617,23 +625,17 @@ func TestIntegration_DecryptFailureNoFallback(t *testing.T) {
 	if got := appErr(t, err); got.Code != 50000 {
 		t.Fatalf("webhook candidates = %v", err)
 	}
-	// 去掉 config 的 App 身份后无头调用：唯一身份是该损坏行 → 解密失败 50000。
+	// 候选是全量身份：无头、带头、或提示指向别的 App，都绕不开损坏行——
+	// 解密失败响亮报 50000（不静默跳过，否则该身份的投递会被无声吞掉）。
 	cfgAppID := cfg.GitHubApp.AppID
-	cfg.GitHubApp.AppID = ""
-	_, err = svc.WebhookCandidates(ctx, "")
-	if got := appErr(t, err); got.Code != 50000 {
-		t.Fatalf("webhook candidates no-header unique corrupt = %v", err)
+	for _, target := range []string{"", "777", "999999"} {
+		cfg.GitHubApp.AppID = cfgAppID
+		_, err = svc.WebhookCandidates(ctx, target)
+		if got := appErr(t, err); got.Code != 50000 {
+			t.Fatalf("webhook candidates(target=%q) = %v, want 50000", target, err)
+		}
 	}
-	// config 身份在场时无头是两份身份 → 40107 无法定位。
 	cfg.GitHubApp.AppID = cfgAppID
-	_, err = svc.WebhookCandidates(ctx, "")
-	if got := appErr(t, err); got.Code != 40107 {
-		t.Fatalf("webhook candidates no-header ambiguous = [%d %s], want 40107", got.Code, got.Message)
-	}
-	// 其他用户不受损行影响（仍是 config 兜底）。
-	if cands, err := svc.WebhookCandidates(ctx, "777"); err != nil || len(cands) != 1 || cands[0].Secret != "cfg-secret" {
-		t.Fatalf("other user = %v %v", cands, err)
-	}
 	// PUT 也拒绝：不在损坏的行上继续写。
 	_, err = svc.Update(ctx, "u-1", &api.UpdateGitHubAppIntegrationRequest{AppId: "999"})
 	if got := appErr(t, err); got.Code != 50000 {
@@ -738,23 +740,24 @@ func TestIntegration_AppIDUniqueAcrossUsers(t *testing.T) {
 		t.Fatalf("alice re-save: %v", err)
 	}
 
-	// bob 换自己的 App ID 后：两份不同身份，无头调用无法定位 → 401。
+	// bob 换自己的 App ID 后：两份不同身份都在候选里（归属交给验签，不再
+	// 按 App ID 头裁决）。
 	if _, err := svc.Update(ctx, "bob", &api.UpdateGitHubAppIntegrationRequest{
 		AppId: "222", PrivateKeyPem: &key, WebhookSecret: api.Ptr("sec-b"),
 	}); err != nil {
 		t.Fatalf("bob own app: %v", err)
 	}
-	_, err = svc.WebhookCandidates(ctx, "")
-	if got := appErr(t, err); got.Code != 40107 {
-		t.Fatalf("headless two distinct app ids = [%d %s], want 40107", got.Code, got.Message)
+	cands, err := svc.WebhookCandidates(ctx, "")
+	if err != nil || len(cands) != 2 || cands[0].AppUserID != "alice" || cands[1].AppUserID != "bob" {
+		t.Fatalf("two distinct identities = %v %v, want [alice, bob]", cands, err)
 	}
 
-	// 删到唯一身份、config 配了同一个 App ID：无头仍接受（数据库行在前、
-	// config 在后），带头时用户行与 config 候选并存。
+	// 删到唯一身份、config 配了同一个 App ID：行在前、config 在后；带头时
+	// 提示命中也保持这个次序。
 	db.Where("user_id = ?", "bob").Delete(&model.Integration{})
 	cfg.GitHubApp.AppID = "111"
 	cfg.GitHubApp.WebhookSecret = "cfg-secret"
-	cands, err := svc.WebhookCandidates(ctx, "")
+	cands, err = svc.WebhookCandidates(ctx, "")
 	if err != nil || len(cands) != 2 {
 		t.Fatalf("headless single app id (+config) = %v %v, want accepted", cands, err)
 	}

@@ -524,9 +524,9 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("防抖账本重建失败: %w", err)
 	}
 
-	// PR 评审账身份升级（INT-119）：reviews/seen 的复合主键必须重建进
-	// app_user_id。必须先于 AutoMigrate——它只补列不改主键，重建放在它前面
-	// 才能让新主键生效。
+	// PR 评审账身份升级（INT-119）：reviews/seen/debounces 的复合主键必须重建
+	// 进 app_user_id（debounces 的 automation_id 旧主键表已在上一步整表丢弃）。
+	// 必须先于 AutoMigrate——它只补列不改主键，重建放在它前面才能让新主键生效。
 	if err := migratePRReviewIdentity(db, logger); err != nil {
 		return fmt.Errorf("PR 评审身份迁移失败: %w", err)
 	}

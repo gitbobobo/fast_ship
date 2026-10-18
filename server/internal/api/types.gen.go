@@ -5445,7 +5445,7 @@ type ReceiveGitHubWebhookParams struct {
 	XGitHubDelivery  string `json:"X-GitHub-Delivery"`
 	XHubSignature256 string `json:"X-Hub-Signature-256"`
 
-	// XGitHubHookInstallationTargetID GitHub App webhook 携带的 App ID；用它定位到配置了该 App 的用户（缺省时仅当全库唯一身份才接受）
+	// XGitHubHookInstallationTargetID GitHub webhook 携带的目标资源 ID；只作候选排序提示（GitHub 未保证 App 级投递上等于 App ID），身份归属只认验签
 	XGitHubHookInstallationTargetID *string `json:"X-GitHub-Hook-Installation-Target-ID,omitempty"`
 }
 

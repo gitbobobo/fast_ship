@@ -10,12 +10,13 @@ import (
 )
 
 // migratePRReviewIdentity（INT-119 升级）：INT-93 发布的 github_pr_reviews /
-// github_pr_seen_shas 主键不含 app_user_id，SQLite 改不了主键，必须备份式重建。
-// 必须先于 AutoMigrate：它只会补列不会改主键，补完列的旧表上同 PR 的第二身份
-// 插入仍会撞旧主键，且旧行 app_user_id 为 NULL 时 `app_user_id = ''` 查不到
-// 旧账。旧行身份统一回填 ''（= 部署 config 身份，与 INT-93 的全局身份语义
-// 一致）。与其它迁移一致：任何一步失败返回错误 → 启动失败，宁可起不来也不带
-// 错跑。整段只用传入句柄顺序执行（单连接池，不在嵌套事务里借池根）。
+// github_pr_seen_shas、INT-118 发布的 github_pr_debounces 主键都不含
+// app_user_id，SQLite 改不了主键，必须备份式重建。必须先于 AutoMigrate：它
+// 只会补列不会改主键，补完列的旧表上同 PR 的第二身份插入仍会撞旧主键，且旧行
+// app_user_id 为 NULL 时 `app_user_id = ''` 查不到旧账。旧行身份统一回填 ''
+// （= 部署 config 身份，与 INT-93 的全局身份语义一致）。与其它迁移一致：任何
+// 一步失败返回错误 → 启动失败，宁可起不来也不带错跑。整段只用传入句柄顺序
+// 执行（单连接池，不在嵌套事务里借池根）。
 
 // sqlitePKColumn PRAGMA table_info 的列名与主键序号（pk > 0 即主键列）。
 type sqlitePKColumn struct {
@@ -23,9 +24,11 @@ type sqlitePKColumn struct {
 	PK   int    `gorm:"column:pk"`
 }
 
-// migratePRReviewIdentity 按 INT-119 身份主键要求重建两张存量评审账表；
-// 全新库（表不存在）与已升级库（app_user_id 已在主键里）都是 no-op，重复启动
-// 幂等。
+// migratePRReviewIdentity 按 INT-119 身份主键要求重建三张存量账表；全新库
+// （表不存在）与已升级库（app_user_id 已在主键里）都是 no-op，重复启动幂等。
+// github_pr_debounces 依赖本文件之前已执行的 dropLegacyPRDebounces：它先把
+// automation_id 旧主键的表整表丢弃，这里负责把 INT-118 的 trigger_id 主键、
+// 无身份列的形态重建成含 app_user_id 的四列主键。
 func migratePRReviewIdentity(db *gorm.DB, logger *zap.Logger) error {
 	specs := []struct {
 		table string
@@ -33,6 +36,7 @@ func migratePRReviewIdentity(db *gorm.DB, logger *zap.Logger) error {
 	}{
 		{table: "github_pr_reviews", mdl: &model.GitHubPRReview{}},
 		{table: "github_pr_seen_shas", mdl: &model.GitHubPRSeenSHA{}},
+		{table: "github_pr_debounces", mdl: &model.GitHubPRDebounce{}},
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
 		for _, spec := range specs {

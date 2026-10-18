@@ -15,18 +15,20 @@ type GitHubWebhookDelivery struct {
 
 func (GitHubWebhookDelivery) TableName() string { return "github_webhook_deliveries" }
 
-// GitHubPRDebounce 防抖窗口账：每个 (触发器, 仓库, PR) 一行，只留最新 head SHA，
-// 窗口内新推送重置 fire_at。到点由调度循环（或 debounce=0 的请求事务）消费并删行。
-// trigger_id 是弱引用（无外键）：行是秒级瞬态账本，触发器删除后由消费路径兜底丢弃。
+// GitHubPRDebounce 防抖窗口账：每个（触发器, 仓库, PR, 验签身份）一行，只留
+// 最新 head SHA，窗口内新推送重置 fire_at。到点由调度循环（或 debounce=0 的
+// 请求事务）消费并删行。trigger_id 是弱引用（无外键）：行是秒级瞬态账本，
+// 触发器删除后由消费路径兜底丢弃。
 type GitHubPRDebounce struct {
 	TriggerID    string `gorm:"column:trigger_id;type:text;primaryKey" json:"trigger_id"`
 	RepoFullName string `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
 	PRNumber     int    `gorm:"column:pr_number;primaryKey" json:"pr_number"`
-	// AppUserID 验签身份（写入时取）：非主键（规则的归属已含它），到点开轮
-	// 按它定位评审账与 GitHub 身份；清旧 SHA 防抖行也按它分区。default:'' 让
-	// AutoMigrate 能给 INT-93 存量表加列（SQLite ADD COLUMN 带无默认值的 NOT
+	// AppUserID 验签身份（写入时取）进主键：部署 config App 与用户自己的 App
+	// 装在同一仓库、命中同一触发器时，两份投递会先后到达——身份不分账的话第二
+	// 次投递会覆盖第一行的 SHA/窗口，只有一个身份能按时开轮。default:'' 让
+	// AutoMigrate / 重建迁移能给存量表补列（SQLite ADD COLUMN 带无默认值的 NOT
 	// NULL 会被拒），旧行回填 '' 即历史 config 身份。
-	AppUserID      string    `gorm:"column:app_user_id;type:text;not null;default:''" json:"app_user_id"`
+	AppUserID      string    `gorm:"column:app_user_id;type:text;not null;default:'';primaryKey" json:"app_user_id"`
 	UserID         string    `gorm:"column:user_id;type:text;not null" json:"user_id"`
 	ProjectID      string    `gorm:"column:project_id;type:text;not null" json:"project_id"`
 	InstallationID int64     `gorm:"column:installation_id;not null" json:"installation_id"`

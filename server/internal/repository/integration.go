@@ -48,25 +48,14 @@ func (r *IntegrationRepository) AppIDTakenByOtherTx(tx *gorm.DB, provider, appID
 	return n > 0, err
 }
 
-// FindAllByAppID 列出配了某明文 app_id 的全部集成行（webhook 验签候选用），
-// 按创建先后稳定排序。多个用户配置同一 App ID 是合法状态：各自行内的 webhook
-// 密钥可能不同，验签方必须逐行尝试而不是取最早行裁决。
-func (r *IntegrationRepository) FindAllByAppID(appID string) ([]*model.Integration, error) {
+// ListByProvider 列出某 provider 的全部集成行，按创建先后稳定排序（webhook
+// 验签候选的次序基础）：验签方逐行尝试各自行内的密钥，行序只影响尝试先后，
+// 不影响归属结果。
+func (r *IntegrationRepository) ListByProvider(provider string) ([]*model.Integration, error) {
 	var rows []*model.Integration
-	err := r.db.Where("app_id = ? AND provider = ?", appID, model.IntegrationProviderGitHubApp).
+	err := r.db.Where("provider = ?", provider).
 		Order("created_at ASC, id ASC").Find(&rows).Error
 	return rows, err
-}
-
-// ListAppIDs 列出某 provider 全部行的明文 app_id（无需解密），按创建先后稳定
-// 排序；webhook 缺少 App ID 头时由调用方判定「全库是否只有一份身份」。
-func (r *IntegrationRepository) ListAppIDs(provider string) ([]string, error) {
-	var ids []string
-	err := r.db.Model(&model.Integration{}).
-		Where("provider = ?", provider).
-		Order("created_at ASC, id ASC").
-		Pluck("app_id", &ids).Error
-	return ids, err
 }
 
 // Upsert 按 (user_id, provider) 复合唯一键整组覆盖连接参数，并把检测状态重置为

@@ -242,9 +242,9 @@ func countRunsWhere(t *testing.T, db *gorm.DB, query string, args ...any) int64 
 	return n
 }
 
-// TestWebhookHandler_UserScopedSecretLocation App ID 头把验签密钥定位到用户
-// （INT-119）：命中各用户的行、未知 App 401、无头多份身份 401、删到唯一身份
-// 后无头恢复可用；真实 payload 下规则匹配与取消都按验签身份收口。
+// TestWebhookHandler_UserScopedSecretLocation 身份归属只认验签（INT-119）：
+// App ID 头只是候选排序提示——头是任意值（含仓库 ID 形态）或不带都不影响
+// 验签归属；各用户行、config 同名身份的密钥各自验各自的；签名对不上仍然 401。
 func TestWebhookHandler_UserScopedSecretLocation(t *testing.T) {
 	env := setupUserScopedWebhookEnv(t)
 	alice := createWebhookUser(t, env.db)
@@ -253,7 +253,7 @@ func TestWebhookHandler_UserScopedSecretLocation(t *testing.T) {
 	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
 
 	body := []byte(`{"action":"opened"}`)
-	// 各自的 App ID 头 + 各自的密钥：都能验过。
+	// 各自的密钥都能验过（带头值是否等于自己的 App ID 无关紧要）。
 	w := env.postWebhookWithAppID(t, "d-u1", "pull_request", body, githubapp.SignSignature("sec-a", body), "111")
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("alice code = %d body=%s", w.Code, w.Body.String())
@@ -262,29 +262,21 @@ func TestWebhookHandler_UserScopedSecretLocation(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("bob code = %d", w.Code)
 	}
-	// 交叉（用 alice 的密钥报 bob 的 App）：签名必错 → 401。
-	w = env.postWebhookWithAppID(t, "d-u3", "pull_request", body, githubapp.SignSignature("sec-a", body), "222")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("crossed secret = %d", w.Code)
-	}
-	// 未知 App ID → 401「未知的 GitHub App」。
-	w = env.postWebhookWithAppID(t, "d-u4", "pull_request", body, githubapp.SignSignature("sec-a", body), "999")
-	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "未知的 GitHub App") {
-		t.Fatalf("unknown app = %d %s", w.Code, w.Body.String())
-	}
-	// 无头且全库两份身份 → 401。
-	w = env.postWebhook(t, "d-u5", "pull_request", body, githubapp.SignSignature("sec-a", body))
-	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "缺少 X-GitHub-Hook-Installation-Target-ID") {
-		t.Fatalf("no header ambiguous = %d %s", w.Code, w.Body.String())
-	}
-
-	// 删到只剩 alice：无头恢复可用（用她的密钥）。
-	if err := env.db.Where("user_id = ?", bob.ID).Delete(&model.Integration{}).Error; err != nil {
-		t.Fatalf("delete bob row: %v", err)
-	}
-	w = env.postWebhook(t, "d-u6", "pull_request", body, githubapp.SignSignature("sec-a", body))
+	// 头是任意值（GitHub 文档未保证该头等于 App ID，仓库级投递就是仓库 ID）：
+	// 签名正确照样验签通过。
+	w = env.postWebhookWithAppID(t, "d-u3", "pull_request", body, githubapp.SignSignature("sec-a", body), "501337")
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("single identity no header = %d %s", w.Code, w.Body.String())
+		t.Fatalf("repo-id-like header = %d %s", w.Code, w.Body.String())
+	}
+	// 无头（simulate 脚本这类调用）：sec-a 只命中 alice 的候选 → 归属 alice。
+	w = env.postWebhook(t, "d-u4", "pull_request", body, githubapp.SignSignature("sec-a", body))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("no header = %d %s", w.Code, w.Body.String())
+	}
+	// 第三把密钥谁也不匹配 → 401。
+	w = env.postWebhook(t, "d-u5", "pull_request", body, githubapp.SignSignature("nope", body))
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "Webhook 签名无效或缺失") {
+		t.Fatalf("unknown secret = %d %s", w.Code, w.Body.String())
 	}
 
 	// 真实 payload：alice 的项目+规则按她的身份匹配开轮。
@@ -298,7 +290,7 @@ func TestWebhookHandler_UserScopedSecretLocation(t *testing.T) {
 		t.Fatalf("alice runs = %d, want 2 (rule matched under her identity)", n)
 	}
 
-	// bob 的身份（重新保存后）投递同一仓库的新 SHA：不能取消 alice 的在途。
+	// bob 的身份投递同一仓库的新 SHA：不能取消 alice 的在途。
 	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
 	p2 := prWebhookPayload("synchronize", "octocat/hw", 1, "sha-2")
 	w = env.postWebhookWithAppID(t, "d-r2", "pull_request", p2, githubapp.SignSignature("sec-b", p2), "222")
@@ -564,12 +556,43 @@ func TestWebhookHandler_LegacyConfigOnlySecretWithHeader(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("legacy wrong secret = %d, want 401", w.Code)
 	}
-	// config 密钥真的清空后：带头也定位不到任何身份 → 401「未知的 GitHub App」
-	// （不是签名错——候选集为空，无从验签）。
+	// config 密钥真的清空后：候选为空（全部候选密钥为空）→ 503，不是 401
+	// ——没有可验签的身份，拒绝接受请求。
 	env.cfg.GitHubApp.WebhookSecret = ""
 	w = env.postWebhookWithAppID(t, "d-l3", "pull_request", body, githubapp.SignSignature("legacy-secret", body), "999888")
-	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "未知的 GitHub App") {
-		t.Fatalf("cleared secret = %d %s, want 401 未知的 GitHub App", w.Code, w.Body.String())
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("cleared secret = %d %s, want 503", w.Code, w.Body.String())
+	}
+}
+
+// TestWebhookHandler_SameSecretTwoIdentitiesRejected 两个身份配了相同的
+// webhook 密钥：一次验签命中多份候选，无法安全归属（投递可能来自其中任何
+// 一份），拒绝而不是取第一个命中。
+func TestWebhookHandler_SameSecretTwoIdentitiesRejected(t *testing.T) {
+	env := setupUserScopedWebhookEnv(t)
+	alice := createWebhookUser(t, env.db)
+	bob := createWebhookUser(t, env.db)
+	env.saveUserIntegration(t, alice.ID, "111", "same-secret")
+	env.saveUserIntegration(t, bob.ID, "222", "same-secret")
+
+	body := []byte(`{"action":"opened"}`)
+	for _, appID := range []string{"111", "222", "501337", ""} {
+		var w *httptest.ResponseRecorder
+		if appID == "" {
+			w = env.postWebhook(t, "d-s-"+appID+"x", "pull_request", body, githubapp.SignSignature("same-secret", body))
+		} else {
+			w = env.postWebhookWithAppID(t, "d-s-"+appID, "pull_request", body, githubapp.SignSignature("same-secret", body), appID)
+		}
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "无法确定集成身份") {
+			t.Fatalf("same-secret header=%q = %d %s, want 401 无法确定集成身份", appID, w.Code, w.Body.String())
+		}
+	}
+
+	// 恢复互不相同：立刻又能各自归属（错误是候选集形状问题，不是请求问题）。
+	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
+	w := env.postWebhookWithAppID(t, "d-s-fix", "pull_request", body, githubapp.SignSignature("sec-b", body), "222")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("after dedupe = %d %s", w.Code, w.Body.String())
 	}
 }
 

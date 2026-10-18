@@ -552,6 +552,97 @@ func TestWebhook_DebounceWindowMergesPushes(t *testing.T) {
 	}
 }
 
+// 同一触发器、同一仓库+PR，两个验签身份（config 空串与用户）各占一行防抖，
+// 各自到点开轮、互不覆盖互不误删（INT-119：防抖账按验签身份分区）。
+func TestWebhook_DebouncePartitionedByIdentity(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	alice, _ := env.createUserWithRepo(t, "octocat", "hw")
+	a := env.createPRRule(t, alice, func(a *model.Automation, tr *model.AutomationTrigger) {
+		tr.TriggerType = model.AutomationTriggerGitHubPRSynchronize
+		tr.DebounceSeconds = 60
+	})
+	tr := env.firstTrigger(t, a)
+
+	// config 身份与 alice 身份先后投递同一 repo+PR：命中同一条规则（config
+	// 身份按规则归属开轮，规则是 alice 的），各写一行防抖窗口。
+	if err := env.handleWebhookAs(t, "d-cfg", "synchronize", "octocat/hw", 1, "sha-cfg", ""); err != nil {
+		t.Fatalf("config identity delivery: %v", err)
+	}
+	if err := env.handleWebhookAs(t, "d-alice", "synchronize", "octocat/hw", 1, "sha-alice", alice.ID); err != nil {
+		t.Fatalf("alice identity delivery: %v", err)
+	}
+	var rows []model.GitHubPRDebounce
+	if err := env.db.Where("trigger_id = ?", tr.ID).Find(&rows).Error; err != nil || len(rows) != 2 {
+		t.Fatalf("debounce rows = %d %v, want 2 (one per identity)", len(rows), err)
+	}
+	shaByID := map[string]string{}
+	for _, r := range rows {
+		shaByID[r.AppUserID] = r.HeadSHA
+	}
+	if shaByID[""] != "sha-cfg" || shaByID[alice.ID] != "sha-alice" {
+		t.Fatalf("debounce rows by identity = %v, want config=sha-cfg alice=sha-alice", shaByID)
+	}
+
+	// config 身份的窗口先到期：只消费 config 那行，alice 的窗口原样保留。
+	if err := env.db.Model(&model.GitHubPRDebounce{}).
+		Where("trigger_id = ? AND app_user_id = ?", tr.ID, "").
+		Update("fire_at", time.Now().UTC().Add(time.Second)).Error; err != nil {
+		t.Fatalf("rearm config window: %v", err)
+	}
+	var aliceFireAt time.Time
+	if err := env.db.Model(&model.GitHubPRDebounce{}).
+		Where("trigger_id = ? AND app_user_id = ?", tr.ID, alice.ID).
+		Select("fire_at").Scan(&aliceFireAt).Error; err != nil || aliceFireAt.IsZero() {
+		t.Fatalf("alice fire_at: %v %v", aliceFireAt, err)
+	}
+	env.pr.ProcessDueDebounces(time.Now().UTC().Add(2 * time.Second))
+	var live []model.GitHubPRDebounce
+	if err := env.db.Where("trigger_id = ?", tr.ID).Find(&live).Error; err != nil || len(live) != 1 {
+		t.Fatalf("debounce rows after config fired = %d %v, want 1 (alice's)", len(live), err)
+	}
+	if len(live) == 1 && (live[0].AppUserID != alice.ID || live[0].HeadSHA != "sha-alice") {
+		t.Fatalf("survivor = %s/%s, want alice/sha-alice", live[0].AppUserID, live[0].HeadSHA)
+	}
+	// config 开的轮按 config 身份记（运行行 app_user_id=''、SHA 是它的）。
+	var cfgRuns, aliceRuns []model.AutomationRun
+	if err := env.db.Where("repo_full_name = ? AND app_user_id = ?", "octocat/hw", "").Find(&cfgRuns).Error; err != nil || len(cfgRuns) != 2 {
+		t.Fatalf("config runs = %d %v, want 2", len(cfgRuns), err)
+	}
+	for _, run := range cfgRuns {
+		if run.HeadSHA != "sha-cfg" || run.Status == model.AutomationRunCancelled {
+			t.Fatalf("config run = %s/%s, want sha-cfg live", run.HeadSHA, run.Status)
+		}
+	}
+
+	// alice 的窗口到点：按她自己的 SHA 开轮，config 的在途不受影响。
+	if err := env.db.Model(&model.GitHubPRDebounce{}).
+		Where("trigger_id = ? AND app_user_id = ?", tr.ID, alice.ID).
+		Update("fire_at", time.Now().UTC().Add(time.Second)).Error; err != nil {
+		t.Fatalf("rearm alice window: %v", err)
+	}
+	env.pr.ProcessDueDebounces(time.Now().UTC().Add(2 * time.Second))
+	if n := countDebounces(t, env.db); n != 0 {
+		t.Fatalf("debounce rows after both fired = %d, want 0", n)
+	}
+	if err := env.db.Where("repo_full_name = ? AND app_user_id = ?", "octocat/hw", alice.ID).Find(&aliceRuns).Error; err != nil || len(aliceRuns) != 2 {
+		t.Fatalf("alice runs = %d %v, want 2", len(aliceRuns), err)
+	}
+	for _, run := range aliceRuns {
+		if run.HeadSHA != "sha-alice" || run.Status == model.AutomationRunCancelled {
+			t.Fatalf("alice run = %s/%s, want sha-alice live", run.HeadSHA, run.Status)
+		}
+	}
+	for _, run := range cfgRuns {
+		var fresh model.AutomationRun
+		if err := env.db.Where("id = ?", run.ID).First(&fresh).Error; err != nil {
+			t.Fatalf("reload config run: %v", err)
+		}
+		if fresh.Status == model.AutomationRunCancelled {
+			t.Fatalf("config run %s cancelled by alice's round", run.ID)
+		}
+	}
+}
+
 // ---- 场景 4：debounce=0 在请求事务里开轮并提升 ----
 
 func TestWebhook_DebounceZeroOpensRoundInTx(t *testing.T) {

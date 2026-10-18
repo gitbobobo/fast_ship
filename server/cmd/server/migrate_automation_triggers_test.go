@@ -246,7 +246,8 @@ func TestMigrateAutomationTriggers_BackfillsLegacyRows(t *testing.T) {
 	assertIndexPresent(t, db, "idx_automation_triggers_automation")
 	assertIndexPresent(t, db, "idx_automation_runs_trigger_key")
 
-	// 防抖账本按新主键重建（旧行丢弃、trigger_id 列存在且参与主键）。
+	// 防抖账本按新主键重建（旧行丢弃、trigger_id 列存在且参与主键；INT-119
+	// 之后新表还带 app_user_id 第四列主键，全新库由 AutoMigrate 直接建成）。
 	hasTriggerID, err := hasSQLiteColumn(db, "github_pr_debounces", "trigger_id")
 	if err != nil {
 		t.Fatalf("check debounce trigger_id: %v", err)
@@ -255,8 +256,8 @@ func TestMigrateAutomationTriggers_BackfillsLegacyRows(t *testing.T) {
 		t.Fatal("github_pr_debounces must be rebuilt with trigger_id column")
 	}
 	debouncePK := sqlitePrimaryKeyColumns(t, db, "github_pr_debounces")
-	if len(debouncePK) != 3 || debouncePK[0] != "trigger_id" {
-		t.Fatalf("debounce PK = %v, want trigger_id first", debouncePK)
+	if len(debouncePK) != 4 || debouncePK[0] != "trigger_id" || debouncePK[3] != "app_user_id" {
+		t.Fatalf("debounce PK = %v, want trigger_id first and app_user_id last", debouncePK)
 	}
 	var debounceCount int64
 	if err := db.Model(&model.GitHubPRDebounce{}).Count(&debounceCount).Error; err != nil {

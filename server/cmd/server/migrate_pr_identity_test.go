@@ -103,8 +103,14 @@ func TestRunBootMigrations_PRReviewIdentityUpgrade(t *testing.T) {
 		t.Fatalf("debounce app_user_id column = %t %v, want present", hasAppUserID, err)
 	}
 	debouncePK := sqlitePrimaryKeyColumns(t, db, "github_pr_debounces")
-	if len(debouncePK) != 3 || debouncePK[0] != "trigger_id" {
-		t.Fatalf("debounce PK = %v, want trigger_id first", debouncePK)
+	wantDebouncePK := []string{"trigger_id", "repo_full_name", "pr_number", "app_user_id"}
+	if len(debouncePK) != len(wantDebouncePK) {
+		t.Fatalf("debounce PK = %v, want %v", debouncePK, wantDebouncePK)
+	}
+	for i := range wantDebouncePK {
+		if debouncePK[i] != wantDebouncePK[i] {
+			t.Fatalf("debounce PK = %v, want %v", debouncePK, wantDebouncePK)
+		}
 	}
 
 	// 主键已含 app_user_id：同 PR 的第二身份行可插入。
@@ -140,6 +146,83 @@ func TestRunBootMigrations_PRReviewIdentityUpgrade(t *testing.T) {
 	}
 	if err := migratePRReviewIdentity(db, zap.NewNop()); err != nil {
 		t.Fatalf("migratePRReviewIdentity re-run: %v", err)
+	}
+}
+
+// TestRunBootMigrations_PRDebounceIdentityUpgrade INT-118 部署形态的防抖账
+// （trigger_id 主键、无 app_user_id 列、有数据行）升级：dropLegacyPRDebounces
+// 不丢它（有 trigger_id 列），身份迁移把它重建成含 app_user_id 的四列主键，
+// 旧行保留并回填 ”（当时的全局 config 身份），同一窗口可再写入第二身份；
+// 重复启动幂等。
+func TestRunBootMigrations_PRDebounceIdentityUpgrade(t *testing.T) {
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	// INT-118 发布形态：主键 (trigger_id, repo_full_name, pr_number)，无身份列。
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := db.Exec("CREATE TABLE `github_pr_debounces` (`trigger_id` text,`repo_full_name` text,`pr_number` integer,`user_id` text NOT NULL,`project_id` text NOT NULL,`installation_id` integer NOT NULL,`action` text NOT NULL,`head_sha` text NOT NULL,`pr_title` text,`pr_url` text,`base_ref` text,`head_ref` text,`fire_at` datetime NOT NULL,`updated_at` datetime NOT NULL,PRIMARY KEY (`trigger_id`,`repo_full_name`,`pr_number`))").Error; err != nil {
+		t.Fatalf("create INT-118 debounce table: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO github_pr_debounces (trigger_id, repo_full_name, pr_number, user_id, project_id, installation_id, action, head_sha, fire_at, updated_at)
+		VALUES ('trg-1', 'octocat/hw', 1, 'u-1', 'p-1', 7, 'synchronize', 'sha-1', ?, ?)
+	`, now, now).Error; err != nil {
+		t.Fatalf("insert in-flight debounce: %v", err)
+	}
+
+	store := storage.NewLocalStorage(t.TempDir())
+	key := []byte("12345678901234567890123456789012")
+	if err := runBootMigrations(db, store, zap.NewNop(), false, "", key); err != nil {
+		t.Fatalf("boot migrations: %v", err)
+	}
+
+	// 四列主键、身份列在末位。
+	pk := sqlitePrimaryKeyColumns(t, db, "github_pr_debounces")
+	wantPK := []string{"trigger_id", "repo_full_name", "pr_number", "app_user_id"}
+	if len(pk) != len(wantPK) {
+		t.Fatalf("debounce PK = %v, want %v", pk, wantPK)
+	}
+	for i := range wantPK {
+		if pk[i] != wantPK[i] {
+			t.Fatalf("debounce PK = %v, want %v", pk, wantPK)
+		}
+	}
+
+	// 旧行保留、身份回填 ''。
+	var d model.GitHubPRDebounce
+	if err := db.Where("trigger_id = ?", "trg-1").First(&d).Error; err != nil {
+		t.Fatalf("reload debounce: %v", err)
+	}
+	if d.AppUserID != "" || d.UserID != "u-1" || d.HeadSHA != "sha-1" || d.Action != "synchronize" {
+		t.Fatalf("upgraded debounce = %+v, want preserved row backfilled to config identity", d)
+	}
+
+	// 同窗口第二身份可写入、config 身份重复仍撞主键。
+	if err := db.Create(&model.GitHubPRDebounce{
+		TriggerID: "trg-1", RepoFullName: "octocat/hw", PRNumber: 1, AppUserID: "user-x",
+		UserID: "u-1", ProjectID: "p-1", InstallationID: 7,
+		Action: "synchronize", HeadSHA: "sha-1", FireAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("second identity debounce rejected: %v", err)
+	}
+	err = db.Create(&model.GitHubPRDebounce{
+		TriggerID: "trg-1", RepoFullName: "octocat/hw", PRNumber: 1, AppUserID: "",
+		UserID: "u-1", ProjectID: "p-1", InstallationID: 7,
+		Action: "synchronize", HeadSHA: "sha-2", FireAt: now, UpdatedAt: now,
+	}).Error
+	if err == nil {
+		t.Fatal("duplicate config identity debounce must violate the composite PK")
+	}
+
+	// 重复启动幂等：行不重不丢。
+	if err := runBootMigrations(db, store, zap.NewNop(), false, "", key); err != nil {
+		t.Fatalf("second boot migrations: %v", err)
+	}
+	var n int64
+	if err := db.Model(&model.GitHubPRDebounce{}).Count(&n).Error; err != nil || n != 2 {
+		t.Fatalf("debounces after re-run = %d %v, want 2", n, err)
 	}
 }
 

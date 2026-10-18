@@ -8,6 +8,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GitHub PR 自动评审（INT-93）支撑表的仓储。全部走调用方传入的 tx/db，
@@ -50,9 +51,20 @@ func NewGitHubPRDebounceRepository(db *gorm.DB) *GitHubPRDebounceRepository {
 }
 
 // UpsertTx 防抖行：一行只留最新 SHA，窗口内新推送重置 fire_at。
-// 全列覆盖写（PK 冲突时按 PK 更新），保证 fire_at/action/head_sha 同步推进。
+// 主键含验签身份，同一（触发器, 仓库, PR）的不同身份各占一行、互不覆盖；
+// 冲突按主键全列覆盖推进（fire_at/action/head_sha 同步前进）。显式 OnConflict
+// 而不是 Save：config 身份的 app_user_id 是空串（主键零值），Save 会把整行
+// 当「无主键」直接 INSERT，窗口内第二次推送就撞主键。
 func (r *GitHubPRDebounceRepository) UpsertTx(tx *gorm.DB, d *model.GitHubPRDebounce) error {
-	return tx.Save(d).Error
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "trigger_id"}, {Name: "repo_full_name"}, {Name: "pr_number"}, {Name: "app_user_id"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"user_id", "project_id", "installation_id", "action", "head_sha",
+			"pr_title", "pr_url", "base_ref", "head_ref", "fire_at", "updated_at",
+		}),
+	}).Create(d).Error
 }
 
 // ListDueTx 取到期待触发的防抖行。
@@ -63,10 +75,11 @@ func (r *GitHubPRDebounceRepository) ListDueTx(db *gorm.DB, now time.Time, limit
 }
 
 // DeleteTx 消费防抖行（到点开轮后删除；条件命中 0 行=已被并发消费）。
-// 键按触发器（INT-118）：同一自动化的不同触发器各有自己的防抖窗口。
-func (r *GitHubPRDebounceRepository) DeleteTx(tx *gorm.DB, triggerID, repoFullName string, prNumber int) error {
-	return tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ?",
-		triggerID, repoFullName, prNumber).Delete(&model.GitHubPRDebounce{}).Error
+// 键按（触发器, 验签身份）：同一自动化的不同触发器、同一仓库+PR 的不同身份
+// 各有自己的窗口，删除不得越界。
+func (r *GitHubPRDebounceRepository) DeleteTx(tx *gorm.DB, triggerID, repoFullName string, prNumber int, appUserID string) error {
+	return tx.Where("trigger_id = ? AND repo_full_name = ? AND pr_number = ? AND app_user_id = ?",
+		triggerID, repoFullName, prNumber, appUserID).Delete(&model.GitHubPRDebounce{}).Error
 }
 
 // DeleteStaleSHATx 丢掉该身份下旧 SHA 的防抖行（opened 规则的窗口不能在

@@ -133,16 +133,16 @@ GitHub App（`integrations` 表按 `(user_id, provider)` 唯一，AES-GCM 加密
   PEM 文件路径；私钥不进环境变量正文、不写日志（用户保存后密文落库）
 - `github_app.webhook_secret`（`FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET`）——
   为空且无用户配置时 `POST /api/github/webhooks` 一律 503，不接受未签名请求；
-  入站密钥按 `X-GitHub-Hook-Installation-Target-ID`（App ID）定位到用户配置
+  入站在全部身份候选中逐个验签定身份（该头只作排序提示，见 `docs/internal/integrations.md`）
 - `github_app.fake`（`FAST_SHIP_GITHUB_APP_FAKE`）—— 仅 `server.mode=debug`
   允许 true；注入内存假实现，此时身份与 webhook 密钥都只走 config（不读数据库），
   入站 webhook 会 `SeedFakeFromWebhook`（simulate 脚本不必另调 SetPR），
   `GET /api/debug/github-review-log`（JWT）可看调用记录
 
-身份隔离（INT-119）：评审行主键含 `app_user_id`、已见 SHA 主键含它、防抖行与
+身份隔离（INT-119）：评审行主键含 `app_user_id`、已见 SHA 与防抖行主键含它、
 运行行都有该列（空串 = 部署 config 身份）；开轮时把验签身份写进运行，评论 marker
-也带身份，所以同一 PR 上不同 App 的评论/check/运行互不串扰。INT-93 旧库由
-`cmd/server/migrate_pr_identity.go` 在 AutoMigrate 前重建两张账表并回填 `''`。
+也带身份，所以同一 PR 上不同 App 的评论/check/运行互不串扰。INT-93/INT-118 旧库由
+`cmd/server/migrate_pr_identity.go` 在 AutoMigrate 前重建三张账表并回填 `''`。
 
 适配器分两层（INT-107 收拢）：seam 包 `server/internal/githubapi/` 定义
 `GitHubClient` 契约（PR 元数据/diff、review 评论、机器人顶层评论
