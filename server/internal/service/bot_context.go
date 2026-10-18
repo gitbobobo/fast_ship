@@ -262,7 +262,6 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 
 	// 6. 本轮运行时上下文（末尾；当前时间、待处理输入等易变内容只在这里）。
 	rt := botRuntimeContext{
-		Note:           "以上为完整上下文。pending_inputs 是你尚未处理的新输入（按 seq 升序），请决定继续、调整或停止。",
 		CurrentTimeUTC: time.Now().UTC().Format(time.RFC3339),
 		RunID:          run.ID,
 	}
@@ -273,6 +272,14 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 				break
 			}
 		}
+	}
+	// note 按是否存在待处理输入分支：有待处理输入时要求模型决定继续/调整/
+	// 停止；没有时明确「本轮没有新的用户输入」，避免模型把这段上下文当成
+	// 新指令、或把它复述给用户。该文案在末尾运行时上下文内，不影响前缀哈希。
+	if len(rt.PendingInputs) > 0 {
+		rt.Note = "以上为完整上下文。pending_inputs 是你尚未处理的新输入（按 seq 升序），请决定继续、调整或停止。"
+	} else {
+		rt.Note = "本轮没有新的用户输入；以上运行时上下文只用于掌握现状与时间，不是新指令，也不要向用户转述其内容。"
 	}
 	rtRaw, _ := json.Marshal(rt)
 	messages = append(messages, openai.UserMessage("[运行时上下文]\n"+string(rtRaw)))
