@@ -485,8 +485,10 @@ func (s *BotService) runCompactionCycle(ctx context.Context, bot *model.Bot, run
 // 的 AfterTokens 都由快照来源行派生，发布事务内重读行比对来源水位，不一致
 // 说明来源已变（人设编辑或并发激活递增了 revision），本轮验收结果不再对应
 // 库里的提示词，按 prompt_changed 整轮作废重来——绝不沿用旧快照的验收结果
-// 覆盖新提示词。bot 副本始终按事务内行对齐，冲突时 freeze 也不会装上库里
-// 不存在的前缀。
+// 覆盖新提示词。事务内不写调用方的 bot 副本：失败路径（含 prompt_changed）
+// bot 保持 run 冻结状态不变，主循环本轮与下轮按同一前缀重建请求；成功路径
+// 的副本对齐由 installBoundarySnapshot 用快照统一装入（五个字段与库内写入
+// 逐字节一致）。
 func (s *BotService) publishCompaction(bot *model.Bot, maintRun *model.BotMaintenanceRun, plan *botCompactionPlan,
 	status model.BotCompactionStatus, summaryText, manifest, foldedJSON string, newThrough int64,
 	snap *botBoundarySnapshot, errCode, errMsg string) (int64, error) {
@@ -497,11 +499,6 @@ func (s *BotService) publishCompaction(bot *model.Bot, maintRun *model.BotMainte
 		if err != nil {
 			return err
 		}
-		bot.SystemPromptText = fresh.SystemPromptText
-		bot.PromptRevision = fresh.PromptRevision
-		bot.PlatformPromptVersion = fresh.PlatformPromptVersion
-		bot.PersonaPrompt = fresh.PersonaPrompt
-		bot.ToolsetVersion = fresh.ToolsetVersion
 		if fresh.PersonaPrompt != snap.SourcePersonaPrompt || fresh.PromptRevision != snap.SourcePromptRevision {
 			return botCompactionFail(errContextCompactionFailed, "prompt_changed", "压缩期间机器人提示词已更新，本轮压缩作废")
 		}
@@ -511,14 +508,15 @@ func (s *BotService) publishCompaction(bot *model.Bot, maintRun *model.BotMainte
 		if txErr != nil {
 			return txErr
 		}
-		plan.AfterTokensOverride = snap.AfterTokens
 		if err := s.recordCompactionTx(tx, bot, maintRun, plan, status, summaryText, manifest, foldedJSON, newGen, errCode, errMsg); err != nil {
 			return err
 		}
 		if err := s.finishMaintenanceRunTx(tx, maintRun, model.BotMaintenanceSucceeded, "", ""); err != nil {
 			return err
 		}
-		return s.activateToolsetWithPromptTx(tx, bot, snap.SystemPromptText, snap.PromptRevision)
+		// stale 判定传事务内读到的行水位，不用 bot 副本（理由见函数注释）。
+		return s.activateToolsetWithPromptTx(tx, bot, fresh.ToolsetVersion, fresh.PlatformPromptVersion,
+			snap.SystemPromptText, snap.PromptRevision)
 	})
 	if publishErr != nil {
 		code, msg := "generation_conflict", botErrMessage(publishErr)
@@ -1663,8 +1661,14 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	})
 }
 
-func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, bot *model.Bot, prompt string, rev int64) error {
-	if bot.ToolsetVersion >= botToolsetVersion && bot.PlatformPromptVersion >= botPlatformPromptVersion {
+// activateToolsetWithPromptTx 在事务内把工具集/平台提示词水位推进到当前版本
+// 并写入发布快照的提示词。stale 判定用 curToolset/curPlatform——调用方在同一
+// 事务里读到的行水位，而不是 bot 副本的版本字段：副本可能是 run 冻结的旧值
+// （并发 run 可能已把库激活到最新），判定与写入必须建立在同一个事实源上，
+// 否则会对已最新的行重复递增 revision。命中 CAS 时把结果同步给 bot 副本；
+// 压缩发布路径的副本对齐由 installBoundarySnapshot 统一装入。
+func (s *BotService) activateToolsetWithPromptTx(tx *gorm.DB, bot *model.Bot, curToolset, curPlatform int64, prompt string, rev int64) error {
+	if curToolset >= botToolsetVersion && curPlatform >= botPlatformPromptVersion {
 		return nil
 	}
 	if prompt == "" {

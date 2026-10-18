@@ -214,6 +214,8 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 						s.finishCompactionFailed(bot, run, built, err)
 						return
 					}
+					// prompt_changed 等冲突视为「外部正在编辑」：本 run 内不重试是
+					// 有意退让，下个 run 或上下文极限的强制路径再压缩。
 					thresholdCompactionFailed = true
 				}
 				if s.maintenanceStopped(ctx, run) {

@@ -295,7 +295,8 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 
 	var updated *model.Bot
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
-		bot, err := repository.NewBotRepository(tx).FindByIDAndUser(botID, userID)
+		repo := repository.NewBotRepository(tx)
+		bot, err := repo.FindByIDAndUser(botID, userID)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errs.ErrBotNotFound
@@ -341,14 +342,20 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 		}
 
 		bot.UpdatedAt = time.Now().UTC()
-		if err := repository.NewBotRepository(tx).UpdateConfigTx(tx, bot, personaChanged); err != nil {
+		if err := repo.UpdateConfigTx(tx, bot, personaChanged); err != nil {
 			return errs.ErrInternal
 		}
 		updated = bot
 		return nil
 	})
 	if txErr != nil {
-		return nil, txErr
+		// 已知哨兵（不存在、参数校验等业务错误）原样透出，其余按内部错误
+		// 收敛——与 SendMessage 的事务错误映射同一约定。
+		var appErr *errs.AppError
+		if errors.As(txErr, &appErr) {
+			return nil, txErr
+		}
+		return nil, errs.ErrInternal
 	}
 	// 地址或模型可能已变：后台 best-effort 刷新窗口缓存，不阻塞响应。
 	s.refreshBotModelWindowAsync(updated.ID)

@@ -382,7 +382,16 @@ func (s *BotService) executeSyncCall(bot *model.Bot, runID string, call *model.B
 	call.Status = model.BotCallStatusRunning
 	call.StartedAt = &now
 
-	content, execErr := s.botExecuteSyncTool(ctx, call)
+	// 能力查询（fs_*/status）的 available 按本 run 冻结的工具集水位判定——
+	// 与会话工具面同一事实源，在这里把 bot 副本的水位透传给执行器；其余动作
+	// 走通用分派。
+	var content string
+	var execErr error
+	if call.Action == "status" && (call.ToolName == "fs_schedule" || call.ToolName == "fs_memory") {
+		content, execErr = s.execCapabilityStatus(call, bot.ToolsetVersion)
+	} else {
+		content, execErr = s.botExecuteSyncTool(ctx, call)
+	}
 	outcome := botBuildOutcomeRaw(call.ID, content, execErr)
 	status := model.BotCallStatusSucceeded
 	if execErr != nil {

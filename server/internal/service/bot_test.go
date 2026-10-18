@@ -1287,6 +1287,12 @@ func TestBotCapabilityAndHelp(t *testing.T) {
 	bot := env.createBot(t, userID)
 
 	capabilityContent := func(tool string) string {
+		// 能力查询按本 run 冻结的工具集水位判 available：这里以库内行模拟
+		// 「本 run 冻结值」，由调用方（测试）透传，不再由执行器活读。
+		row, err := env.bots.bots.Get(bot.ID)
+		if err != nil {
+			t.Fatalf("load bot: %v", err)
+		}
 		call := &model.BotToolCall{
 			ID: uuid.NewString(), BotID: bot.ID, RequestID: "req-x",
 			ProviderToolCallID: "prov", ToolName: tool, Action: "status",
@@ -1294,7 +1300,7 @@ func TestBotCapabilityAndHelp(t *testing.T) {
 			Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
 			CreatedAt: time.Now().UTC(),
 		}
-		content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+		content, err := env.bots.execCapabilityStatus(call, row.ToolsetVersion)
 		if err != nil {
 			t.Fatalf("%s: %v", tool, err)
 		}
@@ -1311,27 +1317,24 @@ func TestBotCapabilityAndHelp(t *testing.T) {
 	if content := capabilityContent("fs_schedule"); !strings.Contains(content, `"available":true`) {
 		t.Fatalf("v3 下 fs_schedule 应可用: %s", content)
 	}
+	// fs_memory 不分版本可用。
+	if content := capabilityContent("fs_memory"); !strings.Contains(content, `"capability":"memory"`) {
+		t.Fatalf("fs_memory 回复不含 capability=memory: %s", content)
+	}
 
-	for _, tc := range []struct {
-		tool, action, args, contains string
-	}{
-		{"fs_memory", "status", `{"action":"status"}`, `"capability":"memory"`},
-		{"fs_help", "read", "{}", "工具说明"},
-	} {
-		call := &model.BotToolCall{
-			ID: uuid.NewString(), BotID: bot.ID, RequestID: "req-x",
-			ProviderToolCallID: "prov", ToolName: tc.tool, Action: tc.action,
-			ArgumentsJSON: tc.args, ArgumentsHash: "x", ExecutionMode: "sync",
-			Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
-			CreatedAt: time.Now().UTC(),
-		}
-		content, err := env.bots.botExecuteSyncTool(context.Background(), call)
-		if err != nil {
-			t.Fatalf("%s: %v", tc.tool, err)
-		}
-		if !strings.Contains(content, tc.contains) {
-			t.Fatalf("%s 回复不含 %s: %s", tc.tool, tc.contains, content)
-		}
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, RequestID: "req-x",
+		ProviderToolCallID: "prov", ToolName: "fs_help", Action: "read",
+		ArgumentsJSON: "{}", ArgumentsHash: "x", ExecutionMode: "sync",
+		Status: model.BotCallStatusQueued, ExecutionContextJSON: "{}",
+		CreatedAt: time.Now().UTC(),
+	}
+	content, err := env.bots.botExecuteSyncTool(context.Background(), call)
+	if err != nil {
+		t.Fatalf("fs_help: %v", err)
+	}
+	if !strings.Contains(content, "工具说明") {
+		t.Fatalf("fs_help 回复不含工具说明: %s", content)
 	}
 }
 
