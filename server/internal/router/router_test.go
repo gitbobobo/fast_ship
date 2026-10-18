@@ -886,7 +886,10 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)"
+	// 与生产 DSN 一致携带 busy_timeout：多连接共享缓存库上并发短事务（主线
+	// worker 写账本、窗口探测后台写缓存、HTTP 请求并发）撞锁时等待持锁事务
+	// 提交，而不是立刻报 database is locked/deadlocked。
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open test db: %v", err)

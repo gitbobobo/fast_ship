@@ -1,4 +1,10 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import BotsPage from "@/routes/bots";
@@ -393,6 +399,76 @@ describe("BotDetailPage", () => {
       within(background).getByRole("button", { name: "取消" }),
     );
     await waitFor(() => expect(chatCancel).toHaveBeenCalledWith("c1"));
+  });
+
+  it("shows maintenance progress in the run bar with distinct styling on failure", async () => {
+    chatOverrides.current = {
+      runActive: true,
+      activeRun: {
+        id: "r1",
+        bot_id: "b1",
+        trigger_source: "user_message",
+        status: "running",
+        created_at: "2026-10-15T00:00:20Z",
+      },
+      maintenanceProgress: {
+        runId: "r1",
+        phase: "summary",
+        message: "正在生成上下文摘要（第 2 批）…",
+      },
+    };
+    renderDetail();
+
+    const bar = await screen.findByTestId("bot-run-bar");
+    const progress = await screen.findByTestId("bot-maintenance-progress");
+    expect(progress).toHaveTextContent("正在生成上下文摘要（第 2 批）…");
+    // 非失败阶段是安静的说明文字。
+    expect(progress).not.toHaveClass("text-amber-600");
+    expect(within(bar).getByText("请求停止")).toBeInTheDocument();
+
+    // phase=failed 用醒目但非报错的样式：卸载当前渲染后换 override 重挂。
+    cleanup();
+    chatOverrides.current = {
+      runActive: true,
+      activeRun: {
+        id: "r1",
+        bot_id: "b1",
+        trigger_source: "user_message",
+        status: "running",
+        created_at: "2026-10-15T00:00:20Z",
+      },
+      maintenanceProgress: {
+        runId: "r1",
+        phase: "failed",
+        message: "压缩目标不可达：固定前缀+最小摘要预算 ≥ 触发阈值",
+      },
+    };
+    renderDetail();
+    const failed = await screen.findByTestId("bot-maintenance-progress");
+    expect(failed).toHaveTextContent("压缩目标不可达");
+    expect(failed).toHaveClass("text-amber-600");
+  });
+
+  it("does not show maintenance progress owned by another run", async () => {
+    chatOverrides.current = {
+      runActive: true,
+      activeRun: {
+        id: "r2",
+        bot_id: "b1",
+        trigger_source: "user_message",
+        status: "running",
+        created_at: "2026-10-15T00:00:30Z",
+      },
+      // 旧 run 的进度：不得出现在当前 run 的运行栏。
+      maintenanceProgress: {
+        runId: "r1",
+        phase: "summary",
+        message: "旧 run 的进度",
+      },
+    };
+    renderDetail();
+    await screen.findByTestId("bot-run-bar");
+    expect(screen.queryByTestId("bot-maintenance-progress")).toBeNull();
   });
 
   it("lists authorizations with scope and field constraints, and revokes", async () => {

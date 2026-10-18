@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -26,10 +27,28 @@ type openaiMessage struct {
 	Content string
 }
 
+// errAuxInputOverWindow 表示辅助请求（摘要/归档/夜间整理）的输入+输出超出
+// 模型窗口：发送边界直接拒绝，不发出注定超窗的请求。调用方用 errors.Is 把
+// 它与其余上游失败区分开（归档记 over_window、夜间整理按 over_window 收尾）。
+var errAuxInputOverWindow = errors.New("辅助请求输入+输出超出模型窗口")
+
+// auxModelRequest 是全部辅助模型请求的唯一发送关口（INT-115）：无论调用方
+// 怎么算预算，实际发出前都按同一份模型能力做最终约束——输出向探测上限封顶，
+// 序列化输入+输出超窗（窗口已知时）直接返回错误，绝不发出注定非法的请求。
+// 维护请求账本的 Model 记实际模型名不变。
 func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintRun *model.BotMaintenanceRun,
 	purpose model.BotMaintenancePurpose, modelName string, msgs []openaiMessage, maxOut int64) (*botModelReply, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	cap := s.modelCapability(bot, modelName)
+	if cap.MaxOutputTokens > 0 && maxOut > cap.MaxOutputTokens {
+		maxOut = cap.MaxOutputTokens
+	}
+	inputTokens := botSerializedInputTokens(msgs)
+	if cap.WindowTokens > 0 && inputTokens+maxOut > cap.WindowTokens {
+		return nil, fmt.Errorf("%w: model=%s input≈%d output=%d window=%d",
+			errAuxInputOverWindow, modelName, inputTokens, maxOut, cap.WindowTokens)
 	}
 	apiKey, err := s.decryptAPIKey(bot)
 	if err != nil {
@@ -291,7 +310,14 @@ func (s *BotService) RunMemoryConsolidation(ctx context.Context, bot *model.Bot,
 	}
 
 	modelName := s.nightlyModelOf(bot)
-	auxWindow := s.cfg.Bots.Context.WindowTokensFor(modelName)
+	// 与摘要同理：夜间整理也是显式限制输出的辅助请求，按完整窗口定价，
+	// 不重复扣除主模型的输出空间；输出预算同时向探测到的上限封顶（F3），
+	// MaxOutputTokens < 4096 的上游不再每晚确定性 400。
+	cap := s.modelCapability(bot, modelName)
+	auxWindow := cap.WindowTokens
+	if auxWindow <= 0 {
+		auxWindow = s.cfg.Bots.Context.WindowTokensFor(modelName)
+	}
 	userLimit := s.cfg.Bots.Memory.UserMaxCharsV()
 	memLimit := s.cfg.Bots.Memory.MemoryMaxCharsV()
 	sys := "你是记忆整理器。只输出 JSON。模型不能指定路径去改 daily，也不能执行工具。"
@@ -314,17 +340,15 @@ func (s *BotService) RunMemoryConsolidation(ctx context.Context, bot *model.Bot,
 		}
 		resident := "=== USER.md ===\n" + payload.UserMD + "\n=== MEMORY.md ===\n" + payload.MemoryMD + "\n"
 		wrap := botEstimateTokens(sys) + botEstimateTokens(instr) + botEstimateTokens(resident) + 64
-		outBudget := int64(4096)
-		room := auxWindow - wrap - outBudget
-		if room < 128 {
-			outBudget = auxWindow - wrap - 128
-			if outBudget < 256 {
-				finish(model.BotMaintenanceFailed, nil, "over_window", "整理输入超出辅助窗口")
-				return
-			}
-			room = auxWindow - wrap - outBudget
+		// 统一辅助预算：输出 4096 意向先向窗口余量、再向探测上限封顶；
+		// 输入预算（窗口−包装−输出）交给分批器。输出被压到 JSON 契约下限
+		// 256 之下或包装自身超窗时，按 over_window 干净失败。
+		reqOut, inputBudget, budgetFits := botAuxBudgets(auxWindow, cap.MaxOutputTokens, 4096, wrap)
+		if !budgetFits || reqOut < 256 {
+			finish(model.BotMaintenanceFailed, nil, "over_window", "整理输入超出辅助窗口")
+			return
 		}
-		batch, rest := takeNightlyBatch(remaining, room)
+		batch, rest := takeNightlyBatch(remaining, inputBudget)
 		if len(batch) == 0 {
 			finish(model.BotMaintenanceFailed, nil, "over_window", "单日笔记无法装入辅助窗口")
 			return
@@ -339,7 +363,7 @@ func (s *BotService) RunMemoryConsolidation(ctx context.Context, bot *model.Bot,
 			input.WriteString(d.Content + "\n")
 			batchAllowed[d.Path] = d.Version
 		}
-		if botEstimateTokens(sys)+botEstimateTokens(input.String())+outBudget > auxWindow {
+		if botEstimateTokens(sys)+botEstimateTokens(input.String())+reqOut > auxWindow {
 			finish(model.BotMaintenanceFailed, nil, "over_window", "整理请求超出辅助窗口")
 			return
 		}
@@ -347,9 +371,14 @@ func (s *BotService) RunMemoryConsolidation(ctx context.Context, bot *model.Bot,
 			modelName, []openaiMessage{
 				{Role: "system", Content: sys},
 				{Role: "user", Content: input.String()},
-			}, outBudget)
+			}, reqOut)
 		if callErr != nil {
-			finish(model.BotMaintenanceFailed, nil, "model_request_failed", botErrMessage(callErr))
+			code := "model_request_failed"
+			if errors.Is(callErr, errAuxInputOverWindow) {
+				// 发送关口拒绝：输入+输出实测超窗（序列化体积比估算大）。
+				code = "over_window"
+			}
+			finish(model.BotMaintenanceFailed, nil, code, botErrMessage(callErr))
 			return
 		}
 		if strings.EqualFold(reply.FinishReason, "length") {

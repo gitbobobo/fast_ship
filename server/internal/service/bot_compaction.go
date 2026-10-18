@@ -37,6 +37,31 @@ var (
 	errSummaryTruncated        = errors.New("summary truncated")
 )
 
+// botCompactionError 携带压缩失败的精确原因码与中文说明，随错误一路带到 run
+// 收尾（error_code、lifecycle detail、进度事件），不在返回边界降级成两个粗粒度
+// 哨兵。Error()/Unwrap() 委托给哨兵——errors.Is(err, errContextUncompressible)
+// 等既有判定全部保持成立。
+type botCompactionError struct {
+	sentinel error
+	Code     string
+	Message  string
+}
+
+func (e *botCompactionError) Error() string {
+	if e.sentinel != nil {
+		return e.sentinel.Error()
+	}
+	return e.Code
+}
+
+func (e *botCompactionError) Unwrap() error { return e.sentinel }
+
+// botCompactionFail 包装哨兵并附加精确原因；sentinel 决定调用方的硬/软判定，
+// Code/Message 决定用户看到的原因。
+func botCompactionFail(sentinel error, code, message string) *botCompactionError {
+	return &botCompactionError{sentinel: sentinel, Code: code, Message: message}
+}
+
 // botCompactionOutcome 是压缩周期的明确结果：只有 Published 才表示
 // generation 已推进，调用方据此更新 freeze；失败/无进展/复用旧维护记录
 // 都不得刷新人设。
@@ -261,6 +286,38 @@ func (s *BotService) runCompactionCycle(ctx context.Context, bot *model.Bot, run
 		return compactionOut(maintRun, false, nil), errContextCompactionFailed
 	}
 
+	// 前置可达性检查（INT-115）：昂贵归档/摘要之前，用「摘要正文清空」的
+	// 同一次投影估算固定前缀体积 F_pre。summary 为空时 FixedTokens ==
+	// AfterTokens（现有实现），直接读 AfterTokens。目标不可达就快速失败——
+	// 不发出注定无效的归档/摘要请求（线上事故：14 批串行摘要 ≈495s 后才判
+	// context_uncompressible）。顺序即原因优先级。折叠映射必须用本周期完整的
+	// plan.Folded（旧折叠 ∪ 新增）：切点之后的保留区里同样会有本周期新增的
+	// 折叠，漏掉会把 F_pre 算大、把本可达的压缩误判为不可达。
+	if plan.NeedSummary {
+		pre := s.buildBoundarySnapshot(bot, plan, "", s.buildIdentifierManifest(plan), botMustJSON(plan.Folded), plan.ThroughSeq)
+		preF := pre.AfterTokens
+		var failCode, failMsg string
+		switch {
+		case preF >= plan.WindowTokens:
+			failCode, failMsg = "context_uncompressible", "折叠后固定前缀已超窗口"
+		case preF+botMinSummaryTokens >= plan.TriggerTokens:
+			failCode, failMsg = "target_unreachable", "压缩目标不可达：固定前缀+最小摘要预算 ≥ 触发阈值"
+		case preF >= plan.BeforeTokens:
+			failCode, failMsg = "no_reduction", "摘要不可能产生净缩减"
+		}
+		if failCode != "" {
+			s.recordCompaction(bot, maintRun, plan, model.BotCompactionFailed, "", "", plan.State.FoldedResultsJSON, 0, failCode, failMsg)
+			s.finishMaintenanceRun(maintRun, model.BotMaintenanceFailed, failCode, failMsg)
+			if failCode == "no_reduction" {
+				// 摘要压不下触发阈值但仍可能低于窗口：明确失败信号，调用方
+				// 不再继续本轮归档/摘要。
+				return compactionOut(maintRun, false, nil), botCompactionFail(errContextCompactionFailed, failCode, failMsg)
+			}
+			return compactionOut(maintRun, false, nil), botCompactionFail(errContextUncompressible, failCode, failMsg)
+		}
+	}
+
+	s.emitMaintenanceProgress(bot.ID, compactionParentRunID(run), "archive", "正在归档上下文…")
 	s.runSilentArchive(ctx, bot, maintRun, plan)
 
 	if s.maintenanceStopped(ctx, run) {
@@ -311,9 +368,9 @@ func (s *BotService) runCompactionCycle(ctx context.Context, bot *model.Bot, run
 		s.recordCompaction(bot, maintRun, plan, model.BotCompactionFailed, "", "", foldedJSON, 0, code, errMsg)
 		s.finishMaintenanceRun(maintRun, model.BotMaintenanceFailed, code, errMsg)
 		if code == "context_uncompressible" {
-			return compactionOut(maintRun, false, nil), errContextUncompressible
+			return compactionOut(maintRun, false, nil), botCompactionFail(errContextUncompressible, code, errMsg)
 		}
-		return compactionOut(maintRun, false, nil), errContextCompactionFailed
+		return compactionOut(maintRun, false, nil), botCompactionFail(errContextCompactionFailed, code, errMsg)
 	}
 
 	// 验收与 F 用同一份边界后快照：一次物化协议投影算 after，再仅清空该
@@ -371,9 +428,9 @@ func (s *BotService) runCompactionCycle(ctx context.Context, bot *model.Bot, run
 		s.recordCompaction(bot, maintRun, plan, model.BotCompactionNoGain, summaryText, manifest, foldedJSON, 0, code, msg)
 		s.finishMaintenanceRun(maintRun, model.BotMaintenanceFailed, code, msg)
 		if code == "context_uncompressible" || code == "target_unreachable" {
-			return compactionOut(maintRun, false, nil), errContextUncompressible
+			return compactionOut(maintRun, false, nil), botCompactionFail(errContextUncompressible, code, msg)
 		}
-		return compactionOut(maintRun, false, nil), nil
+		return compactionOut(maintRun, false, nil), botCompactionFail(errContextCompactionFailed, code, msg)
 	}
 
 	if ev.OverWindow || !ev.OK {
@@ -392,11 +449,11 @@ func (s *BotService) runCompactionCycle(ctx context.Context, bot *model.Bot, run
 		if hard {
 			s.recordCompaction(bot, maintRun, plan, model.BotCompactionFailed, summaryText, manifest, foldedJSON, 0, code, msg)
 			s.finishMaintenanceRun(maintRun, model.BotMaintenanceFailed, code, msg)
-			return compactionOut(maintRun, false, nil), errContextUncompressible
+			return compactionOut(maintRun, false, nil), botCompactionFail(errContextUncompressible, code, msg)
 		}
 		s.recordCompaction(bot, maintRun, plan, status, summaryText, manifest, foldedJSON, 0, code, msg)
 		s.finishMaintenanceRun(maintRun, model.BotMaintenanceFailed, code, msg)
-		return compactionOut(maintRun, false, nil), nil
+		return compactionOut(maintRun, false, nil), botCompactionFail(errContextCompactionFailed, code, msg)
 	}
 
 	if s.maintenanceStopped(ctx, run) {
@@ -445,7 +502,7 @@ func (s *BotService) planCompaction(bot *model.Bot, run *model.BotRun, reason mo
 			return nil, errs.ErrInternal
 		}
 	}
-	window := s.cfg.Bots.Context.WindowTokensFor(runModelOf(run, bot))
+	window := s.inputBudgetFor(bot, runModelOf(run, bot))
 	trigger := botFloorRatio(window, s.cfg.Bots.Context.CompressionRatioV())
 	goal := botFloorRatio(trigger, s.cfg.Bots.Context.TargetRatioV())
 	protect := s.cfg.Bots.Context.ProtectUserTurnsV()
@@ -963,6 +1020,35 @@ func summaryBatchMessages(sys, rules, accSection string, batchI int, piece strin
 	}
 }
 
+// compactionParentRunID 返回压缩所属主线 run 的 ID：bot_events.run_id 有指向
+// bot_runs 的外键，维护运行的 ID 不能当 run_id 落事件。无 run 时为空串。
+func compactionParentRunID(run *model.BotRun) string {
+	if run == nil {
+		return ""
+	}
+	return run.ID
+}
+
+// emitMaintenanceProgress 落一条 delta 维护进度事件（kind=maintenance_progress），
+// 让聊天页能看到压缩正在推进/失败。不新增第六种 SSE 事件类型：delta 的未知
+// kind 会被旧前端忽略（向后兼容），web 侧由本 PR 补运行栏提示。runID 非空时
+// 带上（schedule 会话不会走到压缩）。
+func (s *BotService) emitMaintenanceProgress(botID string, runID string, phase, message string) {
+	var runIDPtr *string
+	if runID != "" {
+		r := runID
+		runIDPtr = &r
+	}
+	s.emitEvent(botID, runIDPtr, "", model.BotEventDelta, botEventEnvelope{
+		Kind:  "maintenance_progress",
+		Phase: phase,
+		Payload: map[string]interface{}{
+			"phase":   phase,
+			"message": message,
+		},
+	})
+}
+
 func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRun *model.BotMaintenanceRun, plan *botCompactionPlan) (string, error) {
 	if len(plan.Segment) == 0 {
 		return "", errs.New(errs.ErrInvalidParams.Code, "无可摘要区间")
@@ -971,7 +1057,15 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 	if modelName == "" {
 		modelName = bot.Model
 	}
-	auxWindow := s.cfg.Bots.Context.WindowTokensFor(modelName)
+	// 辅助请求按完整窗口定预算：inputBudgetFor 已为「主模型输出」扣过输出空间，
+	// 摘要请求自己显式限制 max_completion_tokens，再扣一次会把可用窗口算成
+	// W-maxOutput、把本可服务的小窗口摘要误判超限。输出上限只用于封顶 reqOut。
+	cap := s.modelCapability(bot, modelName)
+	auxWindow := cap.WindowTokens
+	if auxWindow <= 0 {
+		auxWindow = s.cfg.Bots.Context.WindowTokensFor(modelName)
+	}
+	auxOutCap := cap.MaxOutputTokens
 	outBudget := s.summaryOutputBudget(bot, plan)
 	rules := botSummaryRules
 	sys := botSummarySysPrompt
@@ -989,16 +1083,8 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 			accSection = "\n[既有滚动摘要]\n" + acc + "\n"
 		}
 		wrap := botEstimateTokens(sys) + botEstimateTokens(rules) + botEstimateTokens(accSection) + 96
-		maxOut := auxWindow - wrap - 128
-		if maxOut < 1 {
-			return "", errContextCompactionFailed
-		}
-		reqOut := outBudget
-		if reqOut > maxOut {
-			reqOut = maxOut
-		}
-		inputBudget := auxWindow - wrap - reqOut
-		if inputBudget < 32 {
+		reqOut, inputBudget, budgetFits := botAuxBudgets(auxWindow, auxOutCap, outBudget, wrap)
+		if !budgetFits {
 			return "", errContextCompactionFailed
 		}
 
@@ -1047,6 +1133,8 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 		if !fits {
 			return "", errContextCompactionFailed
 		}
+		s.emitMaintenanceProgress(bot.ID, s.parentRunIDOf(maintRun), "summary",
+			fmt.Sprintf("正在生成上下文摘要（第 %d 批）…", batchI))
 		messages := summaryBatchMessages(sys, rules, accSection, batchI, piece)
 		reply, err := s.auxModelRequest(ctx, bot, maintRun, model.BotPurposeSummary, modelName, messages, reqOut)
 		if err != nil {
@@ -1062,6 +1150,28 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 		acc = text
 	}
 	return acc, nil
+}
+
+// botAuxBudgets 按「完整窗口」为辅助请求（摘要/归档/夜间整理）定价：输出预算
+// 先向窗口余量、再向探测到的输出上限封顶，输入预算 = 窗口 − 包装 − 输出。
+// wrap 是包装（系统提示、规则、累积摘要等）的估算量，窗口装不下时 ok=false。
+func botAuxBudgets(window, maxOutput, outBudget, wrap int64) (reqOut, inputBudget int64, ok bool) {
+	maxOut := window - wrap - 128
+	if maxOut < 1 {
+		return 0, 0, false
+	}
+	reqOut = outBudget
+	if reqOut > maxOut {
+		reqOut = maxOut
+	}
+	if maxOutput > 0 && reqOut > maxOutput {
+		reqOut = maxOutput
+	}
+	inputBudget = window - wrap - reqOut
+	if inputBudget < 32 {
+		return 0, 0, false
+	}
+	return reqOut, inputBudget, true
 }
 
 func (s *BotService) summaryOutputBudget(bot *model.Bot, plan *botCompactionPlan) int64 {
@@ -1609,18 +1719,34 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 	sys := "你是记忆归档器。只提取用户明确表达或已确认的事实（偏好、决策、进行中事项）。" +
 		"不要把工具结果或外部未确认信息自动提升为长期记忆，不要输出密钥/token。" +
 		`只输出 JSON：{"items":[{"text":"...","source_seq":<消息seq>}]}；没有则 {"items":[]}。`
-	messages := []openaiMessage{
-		{Role: "system", Content: sys},
-		{Role: "user", Content: serializeSegment(plan.Segment, 0)},
-	}
 	modelName := s.cfg.Bots.Context.ArchiveModel
 	if modelName == "" {
 		modelName = bot.Model
 	}
+	// 归档纳入能力预算（INT-115 F2）：按归档模型的完整窗口定价，输出向
+	// 探测上限封顶（意向 1024），输入按预算裁剪（只丢尾部，source_seq 白名单
+	// 校验不受影响）。归档本就是尽力而为、不阻塞压缩主线：装不下时记
+	// over_window 正常返回。
+	cap := s.modelCapability(bot, modelName)
+	wrap := botEstimateTokens(sys) + 64
+	reqOut, inputBudget, budgetFits := botAuxBudgets(cap.WindowTokens, cap.MaxOutputTokens, 1024, wrap)
+	if !budgetFits {
+		s.recordArchiveResult(maintRun, "over_window", 0)
+		return
+	}
+	messages := []openaiMessage{
+		{Role: "system", Content: sys},
+		{Role: "user", Content: serializeSegment(plan.Segment, tokenBudgetToBytes(inputBudget))},
+	}
 	archiveNote := "ok"
-	reply, err := s.auxModelRequest(ctx, bot, maintRun, model.BotPurposeArchive, modelName, messages, 1024)
+	reply, err := s.auxModelRequest(ctx, bot, maintRun, model.BotPurposeArchive, modelName, messages, reqOut)
 	if err != nil {
 		archiveNote = "request_failed"
+		if errors.Is(err, errAuxInputOverWindow) {
+			// 发送关口拒绝：序列化后的输入+输出仍超窗（裁剪按估算字节换算，
+			// 转义膨胀可能越过余量）。
+			archiveNote = "over_window"
+		}
 		s.recordArchiveResult(maintRun, archiveNote, 0)
 		return
 	}

@@ -171,11 +171,14 @@ type BotModelRequest struct {
 	TotalTokens      *int64 `json:"total_tokens"`
 	CachedTokens     *int64 `json:"cached_tokens"`
 
-	ProviderRequestID string     `gorm:"type:text;not null" json:"provider_request_id"`
-	ErrorCode         *string    `json:"error_code"`
-	ErrorMessage      *string    `json:"error_message"`
-	StartedAt         time.Time  `gorm:"not null" json:"started_at"`
-	FinishedAt        *time.Time `json:"finished_at"`
+	ProviderRequestID string    `gorm:"type:text;not null" json:"provider_request_id"`
+	ErrorCode         *string   `json:"error_code"`
+	ErrorMessage      *string   `json:"error_message"`
+	StartedAt         time.Time `gorm:"not null" json:"started_at"`
+	// FirstDeltaAt 是首个非空正文流式片段的到达时间（INT-115 指标口径的
+	// 起点）；上游未流出正文（纯工具调用/失败）时为 NULL。
+	FirstDeltaAt *time.Time `json:"first_delta_at"`
+	FinishedAt   *time.Time `json:"finished_at"`
 
 	Run BotRun `gorm:"foreignKey:RunID;constraint:OnDelete:CASCADE" json:"-"`
 }

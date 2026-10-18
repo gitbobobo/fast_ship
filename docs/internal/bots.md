@@ -15,6 +15,7 @@ service/bot_prompt.go      固定平台规则与版本
 service/bot_openai.go      官方 openai-go 适配（流式聚合、usage、连接探测）
 service/bot_tools.go       固定工具注册表（v1：10 工具/29 action；v2：11/38；v3：11/44）、schema 生成、参数校验
 service/bot_compaction.go  压缩计划、安全切点、折叠、滚动摘要、工具集激活
+service/bot_window.go      模型窗口能力：/models 探测、缓存、manual>detected>fallback 解析
 service/bot_memory.go      记忆路径白名单、注入截断、归档去重
 service/bot_maintenance.go 维护模型请求、静默存档、夜间整理执行器
 service/bot_schedule.go            定时任务：schedule 会话上下文、静默哨兵、事件、工具执行、用户侧只读服务
@@ -36,13 +37,14 @@ repository/bot*.go         各表仓库；repository/bot_schema.go 建索引与�
 
 ## 数据模型
 
-十四条普通表（INT-101 的 `bots`、`bot_messages`、`bot_runs`、
+十五条普通表（INT-101 的 `bots`、`bot_messages`、`bot_runs`、
 `bot_model_requests`、`bot_tool_calls`、`bot_authorizations`、`bot_events`，
 INT-102 新增 `bot_context_states`、`bot_compactions`、`bot_memory_files`、
 `bot_memory_versions`、`bot_maintenance_runs`、`bot_maintenance_requests`，
-INT-103 新增 `bot_schedule_tasks`）
+INT-103 新增 `bot_schedule_tasks`，INT-115 新增 `bot_model_windows`）
 加一张 FTS5 虚表 `bot_memory_fts`，全部 UUID 主键、UTC 时间、不嵌软删除；
-实际外键一律 `OnDelete:CASCADE`，整机器人删除级联清理。
+实际外键一律 `OnDelete:CASCADE`，整机器人删除级联清理（`bot_model_windows`
+是探测缓存、无外键，见 database.md）。
 
 - `bot_messages` 是不可改写的对话账本：批准/拒绝/错误/恢复都追加新消息；
   SQLite 触发器 `trg_bot_messages_append_only` 拦截一切 UPDATE（级联 DELETE
@@ -145,7 +147,8 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 压缩只改 `bot_context_states` 持久投影——对话账本一字节不动，前缀重写只
 发生在压缩边界的一次发布（generation CAS）。
 
-- **触发**：W=模型窗口，T=floor(W×compression_ratio)（默认 75%），
+- **触发**：W=inputBudgetFor（模型窗口能力解析，见下节；缺输出上限时即窗口
+  原值），T=floor(W×compression_ratio)（默认 75%），
   G=floor(T×target_ratio)（默认约 0.45T，即窗口的 ~33.75%）。在实际请求
   构建之后估算：基线条件全成立且当前协议前缀是上次投影的追加时，才用上次
   prompt_tokens（含合法零）叠加新增协议消息 UTF-8 字节差/3.5；否则整包
@@ -182,9 +185,94 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   及其工具回复块（取更早起点）；另保护所有未被主模型消费的输入。切点按
   (request_id, provider_tool_call_id) 配对，不得把调用-结果块切散。
 - **静默归档**：每轮压缩前把本轮要点追加进当日 daily 笔记（段落哈希 +
-  ≥128 字符条目 shingle 相似度去重），失败不阻塞压缩。
+  ≥128 字符条目 shingle 相似度去重），失败不阻塞压缩。归档按归档模型
+  （`ArchiveModel`，空则主模型）的能力预算执行：输出意向 1024 向探测上限
+  封顶，输入按「窗口−包装−输出」的预算裁剪（只丢尾部，`source_seq` 白名单
+  校验不受影响）；装不下时记 `over_window` 正常返回——归档尽力而为，
+  不阻塞压缩主线。
 - **记账**：压缩、归档、夜间整理各走 `bot_maintenance_runs` +
   `bot_maintenance_requests` 独立账本；不伪造主线 usage。
+
+### 模型窗口能力与压缩可达性（INT-115）
+
+线上事故（v0.1.56，DeepSeek 官方 API 实际窗口 1M，部署用默认 32K）推动了
+两个改动：按「API 地址 + 模型名」自动识别模型窗口；压缩在昂贵请求之前先判
+可达，失败后不自动重跑同一批输入。
+
+- **窗口能力解析**（`bot_window.go`）：解析顺序 manual（部署
+  `model_windows` 覆盖）> detected（`bot_model_windows` 缓存，来自
+  `GET {base_url}/models` 探测）> fallback（默认窗口）。manual 是字段级
+  覆盖：只覆盖窗口，已探测到的输出上限仍从缓存行读取（缓存无行或行内缺失
+  则为 0）——否则输入预算不再预留输出空间、辅助请求失去封顶。
+  `inputBudgetFor` 在窗口之上再扣输出空间（maxOutput≤0 或 ≥window 时不
+  保留），只用于**主模型**的压缩触发与计划；摘要、归档、夜间整理按**完整
+  窗口**定价（`botAuxBudgets`）并各自封顶输出，且 `auxModelRequest` 在发送
+  边界做最终约束：输出 ≤ 探测上限、序列化输入+输出 ≤ 窗口（窗口已知时），
+  违反即干净失败、不发注定非法的请求——即使调用方漏算也不出网。缺失字段
+  保持 0，绝不当成 0 上限参与预算；`context_source` 如实区分
+  manual/detected/fallback，展示层不得把回退值说成已检测。缓存键的地址做
+  TrimSpace + 去尾部 `/` 规范化，同名模型在不同服务之间不串用。
+- **探测**：独立 `http.Client`，10s 超时，Bearer 鉴权；响应宽容解析——顶层
+  `{"data":[...]}`（OpenAI/DeepSeek 约定）、`{"models":[...]}` 或裸数组，
+  模型名取 id/model/name，窗口字段按 context_window/context_length/
+  max_context_tokens/max_input_tokens、输出按 max_output_tokens/
+  max_completion_tokens/max_tokens/output_token_limit 顺序取第一个 >0 的值
+  （数字或数字字符串都接受）；精确匹配优先，其次大小写不敏感。探测失败不
+  阻塞每轮对话，只写日志并落一行短 TTL 失败标记（见下）。探测与持久化拆成
+  `detectModelWindow` + `persistModelWindows` 两步：`TestConnection` 探测一次
+  后持久化同一份结果（响应与缓存同源，不做第二次 /models 请求）；持久化按
+  列表落**全部模型**——同一事务为列表内每个 `ContextWindow>0` 的条目 upsert
+  一行（地址相同、模型名各自），配置成列表内其他模型的 SummaryModel/
+  ArchiveModel/NightlyModel 同样能命中缓存拿到输出上限，缺失/空字段的条目
+  不落 0 行。
+- **失败负缓存**：探测失败（上游不提供窗口字段、网络失败、模型不在列表）也
+  落一行 `ContextWindow=0` 的 `detect_failed` 标记（解析层只认 >0，天然跳
+  过），TTL 10 分钟——对「本来就不返回窗口字段」的上游不再每轮白探，过期后
+  允许重试。成功行 TTL 24 小时。失败标记走 `UpsertFailure` 原子条件写
+  （`ON CONFLICT(base_url, model) DO UPDATE … WHERE context_window = 0`）：
+  无行则插入，有行仅当当前是失败/空标记才覆盖——「失败不能覆盖成功」由
+  数据库条件保证，并发下不存在先查再写的竞争窗口，有效成功行永不覆盖。
+  成功行也通过 `MarkProbeFailed` 记录失败退避时间（`failed_at`，只碰失败
+  时间、不动窗口/输出/`fetched_at`）：数据过期后探测失败时，10 分钟内不重复
+  同步探测，过期后允许重试；成功探测写入清除该时间。
+- **窗口新鲜度收敛到 `ensureModelWindow`**（run 循环里、算出输入估算之后、
+  `inputBudgetFor` 之前调用）：缓存新鲜（按行类型取 TTL）→ 直接返回；缺失/
+  过期且输入估算低于回退触发阈值 → 后台异步刷新、本轮不等网络；缺失/过期
+  且估算已达回退触发阈值（升级后的存量机器人马上要按默认小窗口做压缩判断）
+  → 5s 有界同步探测，成功落缓存、本轮即用探测值，失败继续用回退窗口、不冒
+  泡为错误——网络故障不阻塞对话，也不能因探测失败把输入误消费。Create/
+  Update 之后仍是后台 best-effort 刷新。
+- **压缩前置可达性**：需要摘要的周期在归档/摘要之前，用「摘要正文清空」的
+  同一次投影估算固定前缀 F_pre（折叠映射用本周期完整的 `plan.Folded`——切点
+  之后的保留区同样可能有本周期新增折叠，用旧折叠集合会把 F_pre 算大、把可达
+  的压缩误判为不可达）；F_pre≥窗口 → `context_uncompressible`、F_pre+最小
+  摘要预算≥触发阈值 → `target_unreachable`、F_pre≥压缩前体积 →
+  `no_reduction`。命中即快速失败——不再发出注定无效的归档/摘要请求（线上
+  事故：14 批串行摘要 ≈495s 后才得到同样结论）。失败以带 `Code`/`Message`
+  的错误类型随错误一路带到 run 收尾（不在返回边界降级成粗粒度哨兵，
+  `errors.Is` 对既有哨兵的判定不变），并经 delta 事件
+  `kind=maintenance_progress`（前端未知 kind 忽略，向后兼容）与一条去重的
+  `compaction_failed` lifecycle 消息反馈到聊天页；lifecycle detail 的
+  `note` 是渲染器直接显示的中文原因，`code` 保留供排查。
+- **失败不重试**：压缩失败的 run 收尾（阈值触发与强制两条路径）先推进
+  `offered_input_seq` 再落终态——这批输入已被「尝试处理过」，扫描器不再自动
+  拉起同一输入重复一轮无效压缩（线上事故：失败 5s 后原样重跑 ≈471s，界面
+  长期「正在处理中」）。用户再发新消息会推进水位并触发新一轮判断；若目标仍
+  不可达，由前置检查快速给结果。阈值压缩**软失败**（未发布且估算仍低于窗口
+  而放行主请求）后，同一 run 内不再重试阈值压缩——每轮工具迭代都会重新越过
+  触发阈值，不设防会把确定性失败放大成每轮一次归档+摘要；上下文极限后的
+  强制压缩不受此守卫影响（那是唯一合法的重试）。摘要请求的
+  `max_completion_tokens` 向探测到的输出上限封顶，避免上游校验上限时的
+  确定性 400。
+- **运行指标**：聊天快照 `metrics` 始终产出——窗口能力 + 最近一次主线模型
+  请求的单次口径（usage、输入估算、`generation_ms`）；能力解析的模型与地址
+  成对取 run 的配置快照（切换服务地址后，旧请求的窗口按它发起时的地址解析，
+  不拿当前地址的窗口除旧请求的估算），没有主线请求时 `request` 缺省、窗口
+  能力仍然可见。`bot_model_requests.first_delta_at` 在首个非空正文流式片段
+  时记录；`generation_ms` = finished − first_delta，两者都有效且为正才给出，
+  否则 0（纯工具调用、失败请求视为不可用）。历史累计仍在 run 上，指标区只
+  用单次口径。辅助模型（摘要/归档）的输出预算沿用「目标 − 前缀 − 附录 −
+  保留尾部」与 `MaxCompletionTokens` 传递，不因省 token 硬砍到截断。
 
 ### 长期记忆（INT-102）
 
@@ -202,7 +290,9 @@ LIKE；搜索按 `bot_id` 隔离。
 触发，`trigger_key = nightly:<当地日期>` 唯一挡重复，用可配的更便宜模型
 合并 daily 笔记到 USER.md / MEMORY.md。输出必须是完整 JSON（含正文与来源
 path+version）；只有 sources 无正文、截断或 `{}` 不算成功，不把 daily 标
-为已消费。超窗时按完整辅助请求预算（含 4096 输出、当前常驻正文与每文件
+为已消费。超窗时按完整辅助请求预算（`botAuxBudgets`：输出意向 4096 先向
+窗口余量、再向探测上限封顶，低于 JSON 契约下限 256 或包装自身超窗即按
+`over_window` 干净失败；输入预算 = 窗口−包装−输出，含当前常驻正文与每文件
 标题行）逐批动态分批，单文件按 UTF-8 字节分片并保持字符完整，逐批校验
 本批来源/版本，且本批输入的每个来源都必须被本批声明处理（同一 daily 的
 分片跨批时须逐片覆盖，全部处理完才消费该版本）。
@@ -349,7 +439,8 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 补读与订阅之间漏事件；断开只结束订阅、不取消 run；慢客户端断开后按 seq 重放。
 事件行带 `session_kind`，重放只返回 main——定时任务的流式事件不进聊天页。
 正文流式片段约 100ms 一批落事件，完整 assistant 消息只在模型调用结束时追加
-一次（流式片段不改消息）。
+一次（流式片段不改消息）。压缩进度走 delta 事件的 `kind=maintenance_progress`
+（INT-115；旧前端对未知 kind 忽略，不新增第六种事件类型）。
 
 ## 读取完整性、写入保护与停止语义（INT-110）
 

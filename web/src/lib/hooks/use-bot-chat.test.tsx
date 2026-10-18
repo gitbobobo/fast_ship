@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useBotChat, foldStreamEvent, mergeCallSnapshots } from "./use-bot-chat";
 import { botKeys } from "./use-bots";
-import type { BotCall, BotMessage, BotRun } from "@/lib/api/bots";
+import type { BotCall, BotMessage, BotRun, ChatSnapshot } from "@/lib/api/bots";
 import { signInAs, teardownAuth } from "@/test/auth";
 
 const api = vi.hoisted(() => ({
@@ -64,7 +64,7 @@ const committedMessage: BotMessage = {
 };
 
 // 快照基础形状：与 GET /api/bots/{id}/chat 响应 data 一致，按用例覆盖。
-const snapshotBase = {
+const snapshotBase: ChatSnapshot = {
   bot,
   messages: [] as BotMessage[],
   calls: [] as BotCall[],
@@ -72,7 +72,7 @@ const snapshotBase = {
   next_event_seq: 10,
 };
 
-function snapshotWith(overrides: Partial<typeof snapshotBase> = {}) {
+function snapshotWith(overrides: Partial<ChatSnapshot> = {}) {
   return { data: { ...snapshotBase, ...overrides } };
 }
 
@@ -173,6 +173,151 @@ describe("useBotChat", () => {
     await waitFor(() => expect(result.current.activeRun).not.toBeNull());
     expect(result.current.activeRun?.id).toBe("r-1");
     expect(result.current.activeRun?.status).toBe("running");
+  });
+
+  it("维护进度事件出现在 hook 返回值，done 后消失", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "delta",
+      {
+        kind: "maintenance_progress",
+        run_id: "r-1",
+        payload: { phase: "summary", message: "正在生成上下文摘要（第 3 批）…" },
+      },
+      10,
+    );
+    await waitFor(() => expect(result.current.maintenanceProgress).not.toBeNull());
+    expect(result.current.maintenanceProgress).toMatchObject({
+      runId: "r-1",
+      phase: "summary",
+      message: "正在生成上下文摘要（第 3 批）…",
+    });
+
+    emit("done", { run_id: "r-1", payload: { status: "completed" } }, 11);
+    await waitFor(() => expect(result.current.maintenanceProgress).toBeNull());
+  });
+
+  // ---- 快照水合：进度事件在快照游标之前不重放，刷新后由快照回填 ----
+
+  it("快照携带 maintenance_progress 时水合进 hook 返回值", async () => {
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        maintenance_progress: {
+          run_id: "r-1",
+          phase: "archive",
+          message: "正在归档上下文…",
+        },
+      }),
+    );
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(result.current.maintenanceProgress).not.toBeNull());
+    expect(result.current.maintenanceProgress).toEqual({
+      runId: "r-1",
+      phase: "archive",
+      message: "正在归档上下文…",
+    });
+  });
+
+  it("快照无维护进度时维持 null", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.maintenanceProgress).toBeNull();
+  });
+
+  it("旧 run 的进度快照晚到时不回填到新 run", async () => {
+    const { client, result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // 新 run B 已经开始（run_started 把当前活动 run 记住）。
+    emit("delta", { kind: "run_started", run_id: "rB" }, 10);
+
+    // 旧 run A 期间取得的快照晚到：带 A 的进度。不得把它挂到 B 的运行栏。
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        runs: [{ ...activeRun, id: "rA" }],
+        maintenance_progress: {
+          run_id: "rA",
+          phase: "summary",
+          message: "旧 run 的进度",
+        },
+      }),
+    );
+    await act(() =>
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
+    );
+    await act(async () => {});
+    expect(result.current.maintenanceProgress).toBeNull();
+  });
+
+  it("SSE 进度优先于快照旧值：迟到快照不把进度拨回去", async () => {
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        maintenance_progress: {
+          run_id: "r-1",
+          phase: "archive",
+          message: "正在归档上下文…",
+        },
+      }),
+    );
+    const { client, result } = hook();
+    await waitFor(() =>
+      expect(result.current.maintenanceProgress?.phase).toBe("archive"),
+    );
+
+    emit(
+      "delta",
+      {
+        kind: "maintenance_progress",
+        run_id: "r-1",
+        payload: { phase: "summary", message: "正在生成上下文摘要（第 2 批）…" },
+      },
+      10,
+    );
+    await waitFor(() =>
+      expect(result.current.maintenanceProgress?.phase).toBe("summary"),
+    );
+
+    // in-flight 旧快照（仍带 archive）重读安装后，本地已折叠的新阶段胜出。
+    await act(() =>
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
+    );
+    expect(result.current.maintenanceProgress?.phase).toBe("summary");
+  });
+
+  it("done 清空后快照重读（无活动 run、不带进度）不写回", async () => {
+    api.getChatSnapshot
+      .mockResolvedValueOnce(
+        snapshotWith({
+          runs: [activeRun],
+          maintenance_progress: {
+            run_id: "r1",
+            phase: "summary",
+            message: "正在生成上下文摘要（第 1 批）…",
+          },
+        }),
+      )
+      .mockResolvedValue(
+        snapshotWith({
+          runs: [
+            { ...activeRun, status: "completed", finished_at: "2026-10-15T00:05:00Z" },
+          ],
+        }),
+      );
+    const { client, result } = hook();
+    await waitFor(() =>
+      expect(result.current.maintenanceProgress?.phase).toBe("summary"),
+    );
+
+    emit("done", { run_id: "r1", payload: { status: "completed" } }, 30);
+    await waitFor(() => expect(result.current.maintenanceProgress).toBeNull());
+
+    await act(() =>
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
+    );
+    expect(result.current.maintenanceProgress).toBeNull();
   });
 
   it("message_discard 到达即丢弃挂出的草稿", async () => {
@@ -497,6 +642,71 @@ describe("useBotChat", () => {
     expect(stream.captured?.afterSeq).toBe(11);
   });
 
+  // ---- H2：指标随新模型请求刷新 ----
+
+  it("新 message_id 的首个 text_delta 触发一次快照重读，同一 id 不重复", async () => {
+    hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    const before = api.getChatSnapshot.mock.calls.length;
+
+    // 首个 text_delta 到达即重读快照：服务端对进行中的请求已返回
+    // running + input_tokens_estimate，指标随新请求切换。
+    emit("delta", { kind: "text_delta", message_id: "m-x", payload: { text: "第一段" } }, 10);
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1),
+    );
+
+    // 同一 message_id 的后续 delta 与坏帧都不再触发。
+    emit("delta", { kind: "text_delta", message_id: "m-x", payload: { text: "第二段" } }, 11);
+    act(() => {
+      stream.captured?.onEvent({ event: "delta", data: "{broken", id: 12 });
+    });
+    await act(async () => {});
+    expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1);
+
+    // 新一轮模型请求（新 message_id）再触发一次。
+    emit("delta", { kind: "text_delta", message_id: "m-y", payload: { text: "新一轮" } }, 13);
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 2),
+    );
+  });
+
+  it("tool-only 模型请求（新 call_id 的 tool_call）也触发一次快照重读", async () => {
+    hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    const before = api.getChatSnapshot.mock.calls.length;
+
+    // 纯工具调用请求没有 text_delta：首个 tool_call 到达即重读快照，
+    // 指标随这个进行中的请求切换。
+    emit(
+      "tool_call",
+      { call_id: "c-1", phase: "proposed", payload: { id: "c-1" } },
+      20,
+    );
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1),
+    );
+
+    // 同一 call_id 的后续阶段不重复。
+    emit(
+      "tool_call",
+      { call_id: "c-1", phase: "running", payload: { id: "c-1" } },
+      21,
+    );
+    await act(async () => {});
+    expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1);
+
+    // 下一个调用的新 call_id 再触发一次。
+    emit(
+      "tool_call",
+      { call_id: "c-2", phase: "proposed", payload: { id: "c-2" } },
+      22,
+    );
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 2),
+    );
+  });
+
   it("StrictMode 双挂载不产生重复消息", async () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -524,6 +734,11 @@ describe("foldStreamEvent", () => {
       calls: [] as BotCall[],
       runs: [] as BotRun[],
       drafts: new Map<string, string>(),
+      maintenanceProgress: null as null | {
+        runId: string | null;
+        phase: string;
+        message: string;
+      },
     };
     return {
       state,
@@ -546,6 +761,11 @@ describe("foldStreamEvent", () => {
         },
         clearDraft: (id: string) => {
           state.drafts.delete(id);
+        },
+        setMaintenanceProgress: (
+          progress: typeof state.maintenanceProgress,
+        ) => {
+          state.maintenanceProgress = progress;
         },
       },
     };
@@ -694,5 +914,124 @@ describe("foldStreamEvent", () => {
       state.messages.map((m) => `${m.id}:${m.kind}:${m.content.task_name}`),
     ).toEqual(["m-se:schedule_event:每日汇总"]);
     expect(state.drafts.size).toBe(0);
+  });
+
+  // ---- F3：维护进度（压缩阶段/失败原因）----
+
+  it("maintenance_progress 折叠为进度状态，不落入草稿分支", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "archive", message: "正在归档上下文…" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toEqual({
+      runId: "r-1",
+      phase: "archive",
+      message: "正在归档上下文…",
+    });
+    expect(state.drafts.size).toBe(0);
+    expect(state.messages).toEqual([]);
+
+    // 最新一条替换旧阶段：摘要批次推进。
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "summary", message: "正在生成上下文摘要（第 2 批）…" },
+        }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toMatchObject({
+      phase: "summary",
+      message: "正在生成上下文摘要（第 2 批）…",
+    });
+  });
+
+  it("done 清掉该 run 的维护进度，不残留假运行状态", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "summary", message: "正在生成上下文摘要（第 1 批）…" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    foldStreamEvent(
+      { event: "done", data: JSON.stringify({ run_id: "r-1", payload: { status: "completed" } }), id: 21 },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toBeNull();
+  });
+
+  it("run_error 同样清掉维护进度", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-1",
+          payload: { phase: "failed", message: "压缩目标不可达" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    foldStreamEvent(
+      {
+        event: "error",
+        data: JSON.stringify({
+          run_id: "r-1",
+          payload: { code: "target_unreachable", message: "压缩目标不可达" },
+        }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toBeNull();
+    expect(state.runs[0]?.error_code).toBe("target_unreachable");
+  });
+
+  it("新 run_started 清掉上一段维护进度", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "maintenance_progress",
+          run_id: "r-0",
+          payload: { phase: "failed", message: "压缩目标不可达" },
+        }),
+        id: 20,
+      },
+      sinksObj,
+    );
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({ kind: "run_started", run_id: "r-1" }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.maintenanceProgress).toBeNull();
+    expect(state.runs.map((r) => r.id)).toEqual(["r-1"]);
   });
 });

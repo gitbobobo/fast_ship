@@ -325,6 +325,11 @@ func TestBotAutoCompaction(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	env.cfg.Bots.Context.WindowTokens = 8000
+	// 归档输入是整段原文：本场景单个大工具结果（≈27k token）装不进主模型
+	// 8000 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
+	// 请求。归档模型配置成更大窗口的模型——这正是 ArchiveModel 的用法。
+	env.cfg.Bots.Context.ArchiveModel = "arch-big"
+	env.cfg.Bots.Context.ModelWindows = map[string]int64{"arch-big": 131072}
 	seedBotUserMessage(t, env, bot.ID, "最早自动压缩问题")
 	seedBotAssistantToolBlock(t, env, bot.ID, "call-old-huge", "fs_issue", strings.Repeat("很长的工具结果", 8000))
 	for i := 1; i <= 3; i++ {
@@ -1001,6 +1006,11 @@ func TestBotContextLimitRetrySecondFails(t *testing.T) {
 func TestBotContextLimitNotOn429(t *testing.T) {
 	var n int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 窗口探测（INT-115）不计入模型请求数。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -1030,6 +1040,11 @@ func TestBotContextLimitNotOn429(t *testing.T) {
 func TestBotContextLimitNotOnMaxTokens400(t *testing.T) {
 	var n int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 窗口探测（INT-115）不计入模型请求数。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		n++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -1117,6 +1132,11 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	// 用自定义服务让摘要 HTTP 失败：覆盖 bots.BaseURL 需重建 bot。
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 窗口探测（INT-115）不计入维护请求数。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		hits++
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprint(w, `{"error":{"message":"boom"}}`)
@@ -1200,7 +1220,6 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 		fakeModelTurn{Text: "第一批摘要"},
 		fakeModelTurn{Text: "", FinishReason: "length"},
 	)
-	// strict：摘要在第 2 批因 length 截断后不得再发任何请求（脚本耗尽即 500）。
 	envMid.fake.strict = true
 	uM := createBotTestUser(t, envMid.db, "summid")
 	bM := envMid.createBot(t, uM)
@@ -1224,33 +1243,23 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	var midReqs []model.BotMaintenanceRequest
 	envMid.db.Where("maintenance_run_id IN (SELECT id FROM bot_maintenance_runs WHERE bot_id = ?)", bM.ID).
 		Order("started_at ASC").Find(&midReqs)
-	var summaryReqs []model.BotMaintenanceRequest
-	for _, r := range midReqs {
-		if r.Purpose == model.BotPurposeSummary {
-			summaryReqs = append(summaryReqs, r)
-		}
-	}
-	// 固定请求序列：归档 1 次 + 摘要恰好 2 次（成功→截断失败），多一批都
-	// 说明截断后仍在空转。
-	if len(midReqs) != 3 || len(summaryReqs) != 2 {
-		t.Fatalf("请求序列应固定为归档1+摘要2，实得 %d 条（摘要 %d）", len(midReqs), len(summaryReqs))
-	}
-	if summaryReqs[0].Status != model.BotModelRequestSucceeded {
-		t.Fatalf("第一次摘要应成功，实得 %s", summaryReqs[0].Status)
-	}
-	if summaryReqs[1].Status != model.BotModelRequestSucceeded {
-		t.Fatalf("第二次摘要是 length 截断，HTTP 层应成功，实得 %s", summaryReqs[1].Status)
+	// INT-115 前置可达性检查：2048 的窗口低于平台固定投影（系统提示+工具
+	// 约 5.2k token），固定前缀自身已超窗——归档/摘要发出之前就快速失败，
+	// 零维护请求（旧行为会先烧掉归档1+摘要2 才得到同样结论；length 截断的
+	// 精确请求序列契约由本测试窗口 8000 的第一段场景继续覆盖）。
+	if len(midReqs) != 0 {
+		t.Fatalf("固定前缀已超窗应零维护请求快速失败，实得 %d 条", len(midReqs))
 	}
 	var midRow model.BotCompaction
 	envMid.db.Where("bot_id = ?", bM.ID).Order("created_at DESC").First(&midRow)
 	if midRow.Status != model.BotCompactionFailed {
-		t.Fatalf("截断回退不得发布成功: %s", midRow.Status)
+		t.Fatalf("快速失败不得发布成功: %s", midRow.Status)
 	}
 	if midRow.ErrorCode == nil || *midRow.ErrorCode != "context_uncompressible" {
-		t.Fatalf("截断后折叠投影仍超窗应记 context_uncompressible，实得 %v", midRow.ErrorCode)
+		t.Fatalf("固定前缀超窗应记 context_uncompressible，实得 %v", midRow.ErrorCode)
 	}
-	if midRow.ErrorMessage == nil || !strings.Contains(*midRow.ErrorMessage, "summary truncated") {
-		t.Fatalf("失败消息应指向 length 截断，实得 %v", midRow.ErrorMessage)
+	if midRow.ErrorMessage == nil || !strings.Contains(*midRow.ErrorMessage, "固定前缀") {
+		t.Fatalf("失败消息应指向固定前缀超窗，实得 %v", midRow.ErrorMessage)
 	}
 
 	envOver := setupBotTestEnv(t,

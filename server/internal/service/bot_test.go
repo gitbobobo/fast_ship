@@ -75,6 +75,13 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 	t.Helper()
 	f := &fakeModelServer{requests: make(chan fakeModelRequest, 64), shutdown: make(chan struct{}), turns: turns}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 模型窗口探测（INT-115）打 GET /models：默认 404（探测失败是
+		// best-effort 路径），且不计入 requests 通道——计入会让断言聊天请求
+		// 顺序的用例拿到探测请求。需要探测结果的用例自建服务。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		// 坏密钥：替换密钥的测试必须真的用新密钥，假服务按头拒绝。
 		if strings.Contains(r.Header.Get("Authorization"), "bad-replacement") {
@@ -1911,6 +1918,10 @@ func TestBotChatSnapshotConsistent(t *testing.T) {
 	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "快照", ClientMessageID: "snap-1"}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
+	// 等后台 run 结算再快照：否则 run 的 run_started/提交事件可能在快照之后
+	// 落库，让「事件全落在水位之前」的断言周期性失败（快照与 run 并发写
+	// 同一账本，水位读取点观察不到竞态窗口内的新事件）。
+	waitForBot(t, "run 结算", 15*time.Second, func() bool { return env.botSettled(bot.ID) })
 
 	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
 	if err != nil {
@@ -1919,12 +1930,19 @@ func TestBotChatSnapshotConsistent(t *testing.T) {
 	if snap.Bot.ID != bot.ID {
 		t.Fatalf("bot 不符: %+v", snap.Bot)
 	}
-	if len(snap.Messages) != 1 {
-		t.Fatalf("消息数不符: %+v", snap.Messages)
+	var userMsg *BotMessageResponse
+	for i := range snap.Messages {
+		if snap.Messages[i].Kind == string(model.BotMessageKindUser) {
+			userMsg = &snap.Messages[i]
+			break
+		}
+	}
+	if userMsg == nil {
+		t.Fatalf("快照应含 user 消息: %+v", snap.Messages)
 	}
 	var uc botUserContent
-	if err := json.Unmarshal(snap.Messages[0].Content, &uc); err != nil || uc.Text != "快照" {
-		t.Fatalf("消息不符: %+v", snap.Messages[0])
+	if err := json.Unmarshal(userMsg.Content, &uc); err != nil || uc.Text != "快照" {
+		t.Fatalf("消息不符: %+v", userMsg)
 	}
 	// 水位必须不小于快照内任何事件重放所需的下界：游标从 next_event_seq-1
 	// 续读不能重放快照已含内容。

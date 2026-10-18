@@ -54,10 +54,26 @@ export function BotMessageView({
 
   if (message.kind === "lifecycle") {
     // detail 是服务端附加的任意 JSON；已知恢复通知带 note 字段。
-    const note = (message.content.detail as { note?: string } | undefined)?.note;
+    const detail = (message.content.detail ?? {}) as {
+      note?: string;
+      message?: string;
+    };
+    if (message.content.event === "compaction_failed") {
+      // 压缩失败（INT-115）：note 是服务端给的中文原因。不能只显示英文
+      // 事件名——要告诉用户发生了什么、以及可以直接继续发新消息。
+      const reason = detail.note || detail.message || "上下文压缩未成功";
+      return (
+        <p
+          data-testid="bot-compaction-failed-note"
+          className="mx-auto max-w-[85%] rounded-lg bg-muted/40 px-3 py-1.5 text-center text-xs text-muted-foreground"
+        >
+          上下文压缩失败：{reason}。这条消息已停止自动重试，直接继续发新消息即可。
+        </p>
+      );
+    }
     return (
       <p className="text-center text-xs text-muted-foreground">
-        {note || message.content.event || ""}
+        {detail.note || message.content.event || ""}
       </p>
     );
   }

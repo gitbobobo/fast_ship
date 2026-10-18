@@ -14,6 +14,13 @@ export interface Bot {
   /** 消息/事件账本水位（下一条的 seq）；订阅游标取 next_event_seq - 1。 */
   next_message_seq?: number;
   next_event_seq: number;
+  /** 模型上下文窗口；缺失或 0 = 未知，展示层不得当成 0 上限。 */
+  context_window?: number;
+  /** 单次输出上限；缺失或 0 = 未知。 */
+  max_output_tokens?: number;
+  /** context_window 的来源：manual|detected|known|fallback。 */
+  context_source?: string;
+  context_detail?: string;
   created_at: string;
   updated_at: string;
 }
@@ -46,6 +53,11 @@ export interface BotConnectionTestResult {
   ok: boolean;
   /** 流式、工具调用兼容性等逐项检查结果。 */
   checks: BotConnectionCheck[];
+  /** 本次探测到的模型能力（探测失败时为回退值，来源如实标注）。 */
+  context_window?: number;
+  max_output_tokens?: number;
+  context_source?: string;
+  context_detail?: string;
 }
 
 /** 可传未保存配置直接测试；或传 bot_id 复用已存 key，表单字段可覆盖地址/模型。 */
@@ -206,6 +218,51 @@ export interface BotAuthorization {
 }
 
 /**
+ * 最近一次主线模型请求的指标口径；进行中或 usage 未收齐时
+ * token 计数字段为 null，展示层必须区分缺失与 0。
+ */
+export interface BotRequestMetrics {
+  request_id: string;
+  run_id: string;
+  ordinal: number;
+  status: "running" | "succeeded" | "failed";
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  cached_tokens: number | null;
+  /** false = usage 计数不完整，token 计数一律视为不可用。 */
+  usage_complete: boolean;
+  /** 服务端估算的本次输入体积（估算口径见 input_estimator），非精确值。 */
+  input_tokens_estimate: number;
+  input_estimator: string;
+  started_at: string;
+  finished_at: string | null;
+  /** 首个流式正文片段到请求结束的毫秒数；0 = 不可用，不是 0ms。 */
+  generation_ms: number;
+}
+
+/** 聊天页指标区的一致读取：窗口能力 + 最近一次主线模型请求口径。 */
+export interface BotMetrics {
+  context_window: number;
+  max_output_tokens: number;
+  context_source: "manual" | "detected" | "known" | "fallback";
+  context_detail?: string;
+  /** 最近一次主线模型请求（进行中或已结束）；没有则缺省。 */
+  request?: BotRequestMetrics | null;
+}
+
+/**
+ * 活动主线 run 最近一条维护进度（压缩阶段/失败原因）：与 SSE 的
+ * kind=maintenance_progress delta 事件同源，快照随取随带，刷新后运行栏
+ * 不丢反馈。无活动主线 run 或尚无进度事件时整体缺省。
+ */
+export interface BotMaintenanceProgress {
+  /** 进度所属主线 run；服务端无 run 场景缺省。 */
+  run_id?: string;
+  phase: string;
+  message: string;
+}
+
+/**
  * 聊天页一致快照：bot、消息尾部页、调用、run 与事件水位取自服务端
  * 同一读取点。订阅游标取 next_event_seq - 1，与快照内容严格衔接，
  * 既不重放快照已含的事件也不漏掉其后的事件。
@@ -218,6 +275,10 @@ export interface ChatSnapshot {
   runs: BotRun[];
   /** 与快照同一读取点的事件账本水位（下一条的 seq）。 */
   next_event_seq: number;
+  /** 指标区数据源；服务端未上线该字段时整体缺省。 */
+  metrics?: BotMetrics;
+  /** 活动 run 的维护进度；SSE 后续事件优先，done/error 清空后不再出现。 */
+  maintenance_progress?: BotMaintenanceProgress;
 }
 
 export interface SendBotMessageInput {

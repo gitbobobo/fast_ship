@@ -541,6 +541,11 @@ func TestBotContextLimitRetryOnce(t *testing.T) {
 	// 第二次仍超限则 run 落 failed，不再第三次重试。
 	var reqCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 窗口探测（INT-115）不计入模型请求数。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		_ = body
 		reqCount++
@@ -593,6 +598,11 @@ func TestBotOrdinaryErrorNoRetry(t *testing.T) {
 	// 普通 400（非上下文超限）不触发压缩与重试。
 	var reqCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 窗口探测（INT-115）不计入模型请求数。
+		if r.URL.Path == "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		reqCount++
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -132,6 +133,11 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 
 	var calls []*model.BotToolCall
 	contextLimitRetried := false
+	// thresholdCompactionFailed 是阈值压缩的 run 内一次性守卫（F8）：阈值
+	// 压缩软失败（未发布且估算仍低于窗口）后，本轮不再重试——每轮工具迭代
+	// 都会重新越过触发阈值，不设防会把确定性失败放大成每轮一次归档+摘要。
+	// 上下文极限后的强制压缩不受此守卫影响（那是唯一合法的重试）。
+	thresholdCompactionFailed := false
 	for {
 		if input := s.safePoint(run); input.StopRequested {
 			s.closeUnstartedSyncCalls(calls, "stop_requested")
@@ -187,16 +193,22 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		}
 		// schedule 会话不做 INT-102 压缩：独立会话天然短，且压缩会改写
 		// bot_context_states 持久投影（主线专属状态）。
-		if sched == nil {
-			window := s.cfg.Bots.Context.WindowTokensFor(runModelOf(run, bot))
+		if sched == nil && !thresholdCompactionFailed {
+			// 窗口新鲜度只在真正要按窗口做压缩决策时收敛（INT-115）：输入
+			// 估算达到回退触发阈值才做有界同步探测，其余情况非阻塞。探测
+			// 成功落缓存后，下面的 inputBudgetFor 立即用探测值——升级后的
+			// 存量机器人不会先按默认小窗口误判超限、误消费输入。
+			s.ensureModelWindow(bot, run, key, built.InputTokensEstimate)
+			window := s.inputBudgetFor(bot, runModelOf(run, bot))
 			trigger := botFloorRatio(window, s.cfg.Bots.Context.CompressionRatioV())
 			if built.InputTokensEstimate >= trigger {
 				outcome, err := s.runCompactionCycle(ctx, bot, run, model.BotCompactionThreshold)
 				if err != nil {
 					if errors.Is(err, errContextUncompressible) || built.InputTokensEstimate >= window {
-						s.finishFailed(bot, run, compactionFailCode(err), err)
+						s.finishCompactionFailed(bot, run, built, err)
 						return
 					}
+					thresholdCompactionFailed = true
 				}
 				if s.maintenanceStopped(ctx, run) {
 					s.finishStopped(bot, run)
@@ -240,11 +252,11 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 				contextLimitRetried = true
 				outcome, compErr := s.runCompactionCycle(ctx, bot, run, model.BotCompactionForced)
 				if compErr != nil {
-					s.finishFailed(bot, run, compactionFailCode(compErr), compErr)
+					s.finishCompactionFailed(bot, run, built, compErr)
 					return
 				}
 				if outcome == nil || !outcome.Published {
-					s.finishFailed(bot, run, "context_uncompressible", errContextUncompressible)
+					s.finishCompactionFailed(bot, run, built, errContextUncompressible)
 					return
 				}
 				if s.maintenanceStopped(ctx, run) {
@@ -528,6 +540,9 @@ func (s *BotService) finishModelRequest(row *model.BotModelRequest, reply *botMo
 		cols["status"] = model.BotModelRequestSucceeded
 		if row != nil && reply != nil {
 			cols["provider_request_id"] = reply.ProviderRequestID
+			if reply.FirstDeltaAt != nil {
+				cols["first_delta_at"] = *reply.FirstDeltaAt
+			}
 			if reply.UsageComplete {
 				cols["prompt_tokens"] = reply.PromptTokens
 				cols["completion_tokens"] = reply.CompletionTokens
@@ -556,11 +571,84 @@ func (s *BotService) accumulateRunUsage(run *model.BotRun, reply *botModelReply)
 	run.UsageComplete = true
 }
 
-func compactionFailCode(err error) string {
-	if err != nil && (errors.Is(err, errContextUncompressible) || strings.Contains(err.Error(), "context_uncompressible")) {
-		return "context_uncompressible"
+// compactionFailDetail 提取压缩失败的精确原因码与中文说明：带类型的
+// botCompactionError 原样透出（B1 前置检查的 target_unreachable /
+// no_reduction 等不再丢失），其余按哨兵给出固定中文映射。
+func compactionFailDetail(err error) (code, message string) {
+	var ce *botCompactionError
+	if errors.As(err, &ce) {
+		return ce.Code, ce.Message
 	}
-	return "context_compaction_failed"
+	if errors.Is(err, errContextUncompressible) {
+		return "context_uncompressible", "上下文压缩后仍超出模型窗口"
+	}
+	return "context_compaction_failed", "上下文压缩未成功"
+}
+
+// finishCompactionFailed 压缩失败后的 run 收尾（INT-115）。三步都在落终态
+// 之前完成，且都不改变终态判定：
+//  1. 推进输入水位——这批输入已被「尝试处理过」，扫描器不再自动拉起同一
+//     输入重复一轮无效压缩（线上事故：失败 5s 后原样重跑 ≈471s）；用户再发
+//     新消息会推进水位并触发新一轮判断。
+//  2. 发 failed 维护进度事件——聊天页运行栏立即看到精确的中文失败原因。
+//  3. 追加去重的 lifecycle 失败消息——run 结束后 run 栏消失，仅 error 事件
+//     看不见，时间线需要一条可见记录。
+func (s *BotService) finishCompactionFailed(bot *model.Bot, run *model.BotRun, built *botBuiltContext, cause error) {
+	code, message := compactionFailDetail(cause)
+	s.advanceInputWatermarks(run, built.InputThroughSeq)
+	s.emitMaintenanceProgress(bot.ID, compactionParentRunID(run), "failed", message)
+	s.appendCompactionFailedNotice(bot.ID, built.ContextGeneration, built.InputThroughSeq, code, message)
+	s.finishFailed(bot, run, code, errors.New(message))
+}
+
+// appendCompactionFailedNotice 追加一条压缩失败 lifecycle 消息（幂等）并发布
+// 事件；dedup key 按「投影代数:输入水位」，同一条件下不重复追加。detail 的
+// note 是现有渲染器直接显示的中文原因，code 保留供排查。
+func (s *BotService) appendCompactionFailedNotice(botID string, generation, throughSeq int64, code, message string) {
+	detail := botMustJSON(map[string]interface{}{
+		"code":        code,
+		"message":     message,
+		"note":        message,
+		"generation":  generation,
+		"through_seq": throughSeq,
+	})
+	content := botLifecycleContent{Event: "compaction_failed", Detail: json.RawMessage(detail)}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		txMsgs := repository.NewBotMessageRepository(tx)
+		dedup := fmt.Sprintf("compaction_failed:%d:%d", generation, throughSeq)
+		if _, err := txMsgs.FindByDedupKey(botID, dedup); err == nil {
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		seq, err := s.bots.NextMessageSeqTx(tx, botID)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(content)
+		if err != nil {
+			return err
+		}
+		msgID := uuid.NewString()
+		msg := &model.BotMessage{
+			ID: msgID, BotID: botID, Seq: seq,
+			Kind: model.BotMessageKindLifecycle, ContentJSON: string(raw),
+			DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+		}
+		if err := txMsgs.AppendTx(tx, msg); err != nil {
+			return err
+		}
+		return s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
+			Kind:    "lifecycle",
+			Payload: map[string]interface{}{"event": "compaction_failed", "message_id": msgID},
+		})
+	})
+	if err != nil {
+		// 消息追加失败不改变 run 终态，只记日志。
+		s.logger.Warn("追加压缩失败消息失败", zap.String("bot_id", botID), zap.Error(err))
+		return
+	}
+	s.publishEvent(botID)
 }
 
 func addToPtr(p *int64, v int64) *int64 {
