@@ -2105,3 +2105,40 @@ func TestBotWindowFailureMarkerDoesNotShadowCaseVariantSuccess(t *testing.T) {
 		t.Fatalf("变体成功行过期后应允许重探: %d → %d", hits, h)
 	}
 }
+
+// TestBotEnsureModelWindowCaseFoldedBackoff 覆盖 case-folded 成功行的失败退避：
+// 配置 m1、缓存成功行只以列表原名 M1 存在时，探测失败必须给 M1 行记上退避，
+// 否则折叠查找继续选中无退避的成功行，每个高上下文工具轮重复同步探测。
+func TestBotEnsureModelWindowCaseFoldedBackoff(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"M1","context_window":1048576,"max_output_tokens":262144}]}`)
+	userID := createBotTestUser(t, env.db, "winfoldbackoff")
+	bot := createBotRowAt(t, env, userID, ps.URL(), "m1")
+	run := botFixtureRun(t, env, bot)
+
+	stale := time.Now().UTC().Add(-25 * time.Hour)
+	if err := env.bots.windows.Upsert(&model.BotModelWindow{
+		ID: uuid.NewString(), BaseURL: botNormalizeBaseURL(ps.URL()), Model: "M1",
+		ContextWindow: 1048576, MaxOutputTokens: 262144,
+		Source: "detected", Detail: "GET /models",
+		FetchedAt: stale, UpdatedAt: stale,
+	}); err != nil {
+		t.Fatalf("seed stale M1 row: %v", err)
+	}
+
+	// 探测失败 + 输入达到回退触发阈值 → 走有界同步探测分支。
+	ps.setModels(500, `{"error":"boom"}`)
+	estimate := env.bots.inputBudgetFor(bot, "m1") + 1
+	env.bots.ensureModelWindow(bot, run, "sk-x", estimate)
+
+	folded, err := env.bots.windows.FindByAddrModel(botNormalizeBaseURL(ps.URL()), "M1")
+	if err != nil || folded.FailedAt == nil {
+		t.Fatalf("折叠成功行应记录失败退避: %+v err=%v", folded, err)
+	}
+	// 退避期内不再同步探测。
+	hits := ps.hitCount()
+	env.bots.ensureModelWindow(bot, run, "sk-x", estimate)
+	if ps.hitCount() != hits {
+		t.Fatalf("退避期内不应再同步探测: %d → %d", hits, ps.hitCount())
+	}
+}

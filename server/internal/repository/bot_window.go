@@ -58,11 +58,13 @@ func (r *BotWindowRepository) Upsert(row *model.BotModelWindow) error {
 
 // MarkProbeFailed 在已有成功行（context_window > 0）上记录失败退避时间：
 // 只碰 failed_at/updated_at，不改窗口、输出与原始 fetched_at——成功数据保持
-// 原值，新鲜度仍按 FetchedAt 判断。命中成功行返回 true；失败行与无行返回
+// 原值，新鲜度仍按 FetchedAt 判断。模型名按大小写折叠匹配：配置 `m1`、缓存
+// 成功行只以 `M1` 存在时同样能记上退避（否则折叠查找仍选中无退避的成功行，
+// 每个高上下文工具轮重复同步探测）。命中成功行返回 true；失败行与无行返回
 // false（它们由 UpsertFailure 插入或刷新，那里也记失败时间）。
 func (r *BotWindowRepository) MarkProbeFailed(baseURL, modelName string, at time.Time) (bool, error) {
 	res := r.db.Model(&model.BotModelWindow{}).
-		Where("base_url = ? AND model = ? AND context_window > 0", baseURL, modelName).
+		Where("base_url = ? AND LOWER(model) = LOWER(?) AND context_window > 0", baseURL, modelName).
 		Updates(map[string]interface{}{"failed_at": at, "updated_at": at})
 	return res.RowsAffected > 0, res.Error
 }
