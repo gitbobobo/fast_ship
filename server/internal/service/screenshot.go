@@ -29,8 +29,11 @@ const maxScreenshotTitleRunes = 200
 // 维度过滤的「未标注」桶哨兵值：URL 与批量 filter 里的 NULL 语义
 const screenshotDimensionNone = "__none__"
 
-// 上传事务在唯一索引冲突/锁竞争下的最大重试次数（与 LogRepository.UploadRunTx 一致）
-const maxUploadTxAttempts = 5
+// 上传事务在唯一索引冲突/锁竞争下的最大重试次数（与 LogRepository.UploadRunTx 一致）。
+// 5 次（总等待 200ms）在并发首传时不够：延迟事务在 SELECT 后升级写会拿到
+// SQLITE_LOCKED/database is deadlocked，得等对手提交后才能成功，实测 6 路并发下
+// 约 10% 超出预算而回 50000。放宽到 20 次并封顶单次等待，给死锁一方留出兑现时间。
+const maxUploadTxAttempts = 20
 
 // 截图库只收位图格式；mime 以内容嗅探（http.DetectContentType）为准，不信任客户端声明
 var screenshotAllowedMimeTypes = map[string]struct{}{
@@ -276,7 +279,7 @@ func (s *ScreenshotService) Upload(input *ScreenshotUploadInput) (*ScreenshotUpl
 			_ = s.storage.Delete(tempPath)
 			break
 		}
-		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+		time.Sleep(time.Duration(min(20*(attempt+1), 60)) * time.Millisecond)
 	}
 	// 客户端错误（如省略维度无法唯一定位变体的 40001）原样透传；
 	// 其余事务错误对调用方一律是内部错误。
