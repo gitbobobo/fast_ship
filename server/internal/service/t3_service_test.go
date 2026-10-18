@@ -2185,6 +2185,67 @@ func TestT3ThreadsListCredentialRejectedSurfacesRepair(t *testing.T) {
 	}
 }
 
+// 凭证在订阅存活期间被吊销：重连探测被拒时视图是 Stale（已经有权威快照），
+// 必须回到 repair 并给「请重新配对」——不能长期停在 degraded「正在重连」被
+// 反复重试（codex 云端审查 P2）。
+func TestT3ThreadsStaleCredentialRejectionSurfacesRepair(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	ctx := context.Background()
+
+	e.fake.mu.Lock()
+	e.fake.snapshot = shellSnapshotFixture(
+		[]any{map[string]any{"id": "p-1", "title": "P"}},
+		[]any{shellThread("th-1", "活跃线程", "running", nil)},
+	)
+	e.fake.mu.Unlock()
+
+	env, err := e.env.Create(ctx, userID, &CreateT3EnvironmentRequest{Name: "存活吊销机", PairingUrl: e.fake.pairingURL(e.fake.baseURL)})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	first, err := e.th.List(ctx, userID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(first.Items) != 1 || first.Environments[0].Status != T3EnvironmentStatusOK {
+		t.Fatalf("warm list = %+v", first.Environments)
+	}
+
+	// 已有快照后吊销凭证并断开连接：重连探测 401 → Stale + 凭证被拒。
+	e.fake.revokeBearers()
+	e.fake.dropConnections()
+
+	deadline := time.Now().Add(8 * time.Second)
+	var status T3EnvironmentStatus
+	var msg string
+	for time.Now().Before(deadline) {
+		listed, listErr := e.th.List(ctx, userID)
+		if listErr != nil {
+			t.Fatalf("list: %v", listErr)
+		}
+		status = listed.Environments[0].Status
+		msg = api.Deref(listed.Environments[0].Error)
+		if status == T3EnvironmentStatusRepair {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if status != T3EnvironmentStatusRepair {
+		t.Fatalf("stale credential rejection must map to repair, got %s (%q)", status, msg)
+	}
+	if !strings.Contains(msg, "重新配对") {
+		t.Fatalf("expected re-pair hint, got %q", msg)
+	}
+
+	// 详情同样给「请重新配对」，而不是一句笼统的「正在同步」。
+	_, err = e.th.Detail(ctx, userID, env.Id, "th-1")
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || !strings.Contains(appErr.Message, "重新配对") {
+		t.Fatalf("expected re-pair hint in detail error, got %v", err)
+	}
+}
+
 // TestT3ThreadsArchiveNotReadyDegrades 覆盖 G1 的「未就绪」半边：归档订阅已
 // 受理但全量快照未到（两条连接进度独立）时，活跃线程照常返回、环境标
 // degraded「归档线程暂不可读」；放行后归档快照到达，状态收敛为 ok。

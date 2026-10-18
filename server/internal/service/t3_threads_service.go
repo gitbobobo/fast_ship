@@ -163,7 +163,9 @@ func (s *T3ThreadsService) Detail(ctx context.Context, userID, envID, threadID s
 	if err != nil {
 		return nil, s.upstreamError(err)
 	}
-	if view.State == t3ShellFailed && errors.Is(view.Err, errT3CredentialRejected) {
+	// 凭证被拒不限 Failed：陈旧命中（Stale）里的凭证错误同样是「请重新配对」，
+	// 不能降级成一句笼统的「正在同步」。
+	if errors.Is(view.Err, errT3CredentialRejected) {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "T3 环境拒绝凭证（可能已过期或被吊销），请重新配对")
 	}
 	if view.State != t3ShellReady || view.Snaps == nil {
@@ -315,6 +317,12 @@ func (s *T3ThreadsService) viewShell(ctx context.Context, env *model.T3Environme
 // 时间；归档面不可信（读取失败或尚未同步完成）是部分失败：只在活跃面 Ready
 // 时改写文案，其它状态优先自己的原因说明（G1）。
 func t3ShellStateMessage(view *t3ShellView) (T3EnvironmentStatus, string) {
+	// 凭证被拒优先于新鲜度文案：已拿到过快照的环境在重连探测里被拒时视图是
+	// Stale（ActiveReady 仍为真），若只按 Stale 报 degraded，被吊销的凭证会
+	// 一直停在「正在重连」被反复重试，用户永远看不到「请重新配对」。
+	if errors.Is(view.Err, errT3CredentialRejected) {
+		return T3EnvironmentStatusRepair, "凭证已失效，请重新配对"
+	}
 	switch view.State {
 	case t3ShellFailed:
 		return t3StatusFromError(view.Err)
@@ -378,7 +386,7 @@ func (s *T3ThreadsService) trustedShell(ctx context.Context, env *model.T3Enviro
 	if err != nil {
 		return nil, nil, s.upstreamError(err)
 	}
-	if view.State == t3ShellFailed && errors.Is(view.Err, errT3CredentialRejected) {
+	if errors.Is(view.Err, errT3CredentialRejected) {
 		return nil, nil, errs.New(errs.ErrT3Upstream.Code, "T3 环境拒绝凭证（可能已过期或被吊销），请重新配对")
 	}
 	if view.State != t3ShellReady || view.Snaps == nil {
