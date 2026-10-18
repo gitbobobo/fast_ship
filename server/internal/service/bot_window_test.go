@@ -227,6 +227,46 @@ func TestBotWindowKeyedByAddrAndModel(t *testing.T) {
 	}
 }
 
+// 大小写不敏感兜底命中后，缓存必须按「配置的原样模型名」也能查到：否则
+// 探测成功也永远走 fallback，且大输入每轮同步重探（第四轮复审 G1）。
+func TestBotWindowPersistAliasForRequestedCaseVariant(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200,
+		`{"data":[{"id":"M1","context_window":65536,"max_output_tokens":16384}]}`)
+
+	// 配置 m1、列表只返回 M1：别名行让按原名的精确查询命中。
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	row := findWindowRow(t, env, ps.URL(), "m1")
+	if row == nil {
+		t.Fatalf("配置名 m1 应有缓存行（列表条目 M1 的大小写别名）")
+	}
+	if row.ContextWindow != 65536 || row.MaxOutputTokens != 16384 {
+		t.Fatalf("别名行元数据应与列表条目一致: %+v", row)
+	}
+	if cap := env.bots.capabilityFor(ps.URL(), "m1"); cap.Source != "detected" || cap.WindowTokens != 65536 {
+		t.Fatalf("capabilityFor 按配置名应命中 detected: %+v", cap)
+	}
+
+	// 精确同名不产生多余别名：全新地址上列表名与配置名完全一致，探测后该
+	// 地址只有列表条目这一行。
+	psExact := newWindowProbeServer(t, 200,
+		`{"data":[{"id":"m1","context_window":131072,"max_output_tokens":2048}]}`)
+	if err := env.bots.refreshModelWindow(context.Background(), psExact.URL(), "sk-x", "m1"); err != nil {
+		t.Fatalf("refresh exact: %v", err)
+	}
+	var count int64
+	env.db.Model(&model.BotModelWindow{}).
+		Where("base_url = ?", botNormalizeBaseURL(psExact.URL())).Count(&count)
+	if count != 1 {
+		t.Fatalf("精确同名探测应只有一行缓存，实得 %d", count)
+	}
+	if row := findWindowRow(t, env, psExact.URL(), "m1"); row == nil || row.ContextWindow != 131072 {
+		t.Fatalf("精确同名行应正常落缓存: %+v", row)
+	}
+}
+
 func TestBotWindowManualOverridesCache(t *testing.T) {
 	env := setupBotTestEnv(t)
 	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"m1","context_window":1048576}]}`)
@@ -836,6 +876,63 @@ func TestBotChatSnapshotMetricsAbsentOrDegenerate(t *testing.T) {
 	}
 	if r.UsageComplete || r.PromptTokens != nil || r.GenerationMs != 0 {
 		t.Fatalf("缺 usage/首片时口径应为不可用: %+v", r)
+	}
+}
+
+// 活动主线 run 的最近一条维护进度随快照返回（第四轮复审 G2）：进度事件在
+// 快照游标之前不会经 SSE 重放，刷新/重开聊天后由快照水合运行栏。
+func TestBotChatSnapshotMaintenanceProgress(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "winmaint")
+	bot := env.createBot(t, userID)
+
+	// 无活动 run：无进度。
+	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if snap.MaintenanceProgress != nil {
+		t.Fatalf("无活动 run 不应有进度: %+v", snap.MaintenanceProgress)
+	}
+
+	// 活动主线 run + 两条进度事件：取最近一条（phase/ message 齐全）。
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "maint-snap",
+		Status: model.BotRunStatusRunning, SessionKind: model.BotSessionKindMain,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	env.bots.emitMaintenanceProgress(bot.ID, run.ID, "archive", "正在归档上下文…")
+	env.bots.emitMaintenanceProgress(bot.ID, run.ID, "summary", "正在生成上下文摘要（第 2 批）…")
+
+	snap, err = env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot 2: %v", err)
+	}
+	if snap.MaintenanceProgress == nil {
+		t.Fatalf("活动 run 应带最近一条维护进度")
+	}
+	p := snap.MaintenanceProgress
+	if p.RunID != run.ID || p.Phase != "summary" || p.Message != "正在生成上下文摘要（第 2 批）…" {
+		t.Fatalf("应取 seq 最大的一条进度: %+v", p)
+	}
+
+	// run 结束后不再返回——已终结 run 的进度不应显示为进行中。
+	finished := time.Now().UTC()
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Updates(map[string]interface{}{"finished_at": finished, "status": model.BotRunStatusCompleted}).Error; err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+	snap, err = env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot 3: %v", err)
+	}
+	if snap.MaintenanceProgress != nil {
+		t.Fatalf("run 结束后不应再返回进度: %+v", snap.MaintenanceProgress)
 	}
 }
 

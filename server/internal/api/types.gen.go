@@ -1477,10 +1477,13 @@ type BotCallResult struct {
 
 // BotChatSnapshot defines model for BotChatSnapshot.
 type BotChatSnapshot struct {
-	Bot      Bot           `json:"bot"`
-	Calls    []BotToolCall `json:"calls"`
-	Messages []BotMessage  `json:"messages"`
-	Metrics  *BotMetrics   `json:"metrics,omitempty"`
+	Bot   Bot           `json:"bot"`
+	Calls []BotToolCall `json:"calls"`
+
+	// MaintenanceProgress 活动主线 run 的最近一条维护进度；与 SSE 的 kind=maintenance_progress delta 事件同源，供刷新后运行栏水合
+	MaintenanceProgress *BotMaintenanceProgress `json:"maintenance_progress,omitempty"`
+	Messages            []BotMessage            `json:"messages"`
+	Metrics             *BotMetrics             `json:"metrics,omitempty"`
 
 	// NextEventSeq 与快照同一读取点的事件账本水位（下一条的 seq）
 	NextEventSeq int64    `json:"next_event_seq"`
@@ -1525,6 +1528,18 @@ type BotEvent struct {
 	// Payload 统一形状 {bot_id, run_id?, message_id?, call_id?, kind, phase?, payload}
 	Payload map[string]interface{} `json:"payload"`
 	Seq     int64                  `json:"seq"`
+}
+
+// BotMaintenanceProgress 活动主线 run 的最近一条维护进度；与 SSE 的 kind=maintenance_progress delta 事件同源，供刷新后运行栏水合
+type BotMaintenanceProgress struct {
+	// Message 人类可读的进度或失败说明
+	Message string `json:"message"`
+
+	// Phase 压缩阶段（archive / summary / failed 等）
+	Phase string `json:"phase"`
+
+	// RunId 进度所属主线 run；服务端无 run 场景省略
+	RunId *string `json:"run_id,omitempty"`
 }
 
 // BotMessage 不可改写的主线账本；批准/拒绝/错误/恢复都是追加新消息

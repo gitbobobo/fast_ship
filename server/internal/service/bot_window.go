@@ -348,7 +348,12 @@ func (s *BotService) persistModelWindow(baseURL, modelName string, cap *botModel
 // 输出上限，而不是永远走 fallback。只落 ContextWindow > 0 的条目：缺失/空
 // 字段的条目不得落成 0 行参与预算（失败负缓存只经
 // recordModelWindowProbeFailure 走目标模型）。
-func (s *BotService) persistModelWindows(baseURL string, entries []botModelWindowEntry) error {
+//
+// requestedModel 是本次请求的原样模型名：探测允许大小写不敏感兜底（配置
+// m1、列表返回 M1），此时为配置名再落一行别名（同一份窗口/输出元数据），
+// capabilityFor 之后按精确名查询才能命中，否则探测成功也永远走 fallback 且
+// 每轮重探。精确同名只落一行，不产生多余行。
+func (s *BotService) persistModelWindows(baseURL, requestedModel string, entries []botModelWindowEntry) error {
 	now := s.now()
 	normalized := botNormalizeBaseURL(baseURL)
 	return s.db.Transaction(func(tx *gorm.DB) error {
@@ -370,6 +375,14 @@ func (s *BotService) persistModelWindows(baseURL string, entries []botModelWindo
 			}
 			if err := repo.Upsert(row); err != nil {
 				return err
+			}
+			if requestedModel != "" && e.Model != requestedModel && strings.EqualFold(e.Model, requestedModel) {
+				alias := *row
+				alias.ID = uuid.NewString()
+				alias.Model = requestedModel
+				if err := repo.Upsert(&alias); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -423,7 +436,7 @@ func (s *BotService) refreshModelWindow(ctx context.Context, baseURL, apiKey, mo
 		s.recordModelWindowProbeFailure(baseURL, modelName, err)
 		return err
 	}
-	return s.persistModelWindows(baseURL, det.Entries)
+	return s.persistModelWindows(baseURL, modelName, det.Entries)
 }
 
 // refreshBotModelWindowAsync 后台探测并缓存该机器人当前模型的窗口元数据。

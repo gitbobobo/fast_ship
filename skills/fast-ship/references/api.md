@@ -9129,6 +9129,10 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `metrics.request.started_at` | string（date-time） | 是 |  |
 | `metrics.request.finished_at` | string（date-time，可空） | 否 |  |
 | `metrics.request.generation_ms` | integer（int64） | 是 | 首个流式正文片段到请求结束的耗时；0 表示不可用（纯工具 调用、失败请求或时长非正）。Token 输出速度 = completion_tokens / (generation_ms/1000)，仅在两者都有且 >0 时给出 |
+| `maintenance_progress` | object（可空） | 否 | 当前活动主线 run 最近一条维护进度（压缩阶段/失败原因）； 无活动主线 run 或尚无进度事件时省略——已结束 run 的进度不再返回。活动主线 run 的最近一条维护进度；与 SSE 的 kind=maintenance_progress delta 事件同源，供刷新后运行栏水合 |
+| `maintenance_progress.run_id` | string | 否 | 进度所属主线 run；服务端无 run 场景省略 |
+| `maintenance_progress.phase` | string | 是 | 压缩阶段（archive / summary / failed 等） |
+| `maintenance_progress.message` | string | 是 | 人类可读的进度或失败说明 |
 
 **错误**
 

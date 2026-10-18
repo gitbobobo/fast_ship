@@ -11788,6 +11788,27 @@ components:
           description: 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径；
             没有主线请求时 request 缺省、窗口能力仍然可见
           $ref: '#/components/schemas/BotMetrics'
+        maintenance_progress:
+          nullable: true
+          description: 当前活动主线 run 最近一条维护进度（压缩阶段/失败原因）；
+            无活动主线 run 或尚无进度事件时省略——已结束 run 的进度不再返回
+          $ref: '#/components/schemas/BotMaintenanceProgress'
+
+    BotMaintenanceProgress:
+      type: object
+      required: [phase, message]
+      description: 活动主线 run 的最近一条维护进度；与 SSE 的
+        kind=maintenance_progress delta 事件同源，供刷新后运行栏水合
+      properties:
+        run_id:
+          type: string
+          description: 进度所属主线 run；服务端无 run 场景省略
+        phase:
+          type: string
+          description: 压缩阶段（archive / summary / failed 等）
+        message:
+          type: string
+          description: 人类可读的进度或失败说明
 
     BotMetrics:
       type: object

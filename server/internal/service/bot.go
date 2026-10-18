@@ -438,7 +438,7 @@ func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (
 	cancel()
 	if detErr == nil {
 		capability = *det.Target
-		if err := s.persistModelWindows(baseURL, det.Entries); err != nil {
+		if err := s.persistModelWindows(baseURL, modelName, det.Entries); err != nil {
 			s.logger.Info("模型窗口缓存写入失败",
 				zap.String("model", modelName), zap.Error(err))
 		}

@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useBotChat, foldStreamEvent, mergeCallSnapshots } from "./use-bot-chat";
 import { botKeys } from "./use-bots";
-import type { BotCall, BotMessage, BotRun } from "@/lib/api/bots";
+import type { BotCall, BotMessage, BotRun, ChatSnapshot } from "@/lib/api/bots";
 import { signInAs, teardownAuth } from "@/test/auth";
 
 const api = vi.hoisted(() => ({
@@ -64,7 +64,7 @@ const committedMessage: BotMessage = {
 };
 
 // 快照基础形状：与 GET /api/bots/{id}/chat 响应 data 一致，按用例覆盖。
-const snapshotBase = {
+const snapshotBase: ChatSnapshot = {
   bot,
   messages: [] as BotMessage[],
   calls: [] as BotCall[],
@@ -72,7 +72,7 @@ const snapshotBase = {
   next_event_seq: 10,
 };
 
-function snapshotWith(overrides: Partial<typeof snapshotBase> = {}) {
+function snapshotWith(overrides: Partial<ChatSnapshot> = {}) {
   return { data: { ...snapshotBase, ...overrides } };
 }
 
@@ -197,6 +197,102 @@ describe("useBotChat", () => {
 
     emit("done", { run_id: "r-1", payload: { status: "completed" } }, 11);
     await waitFor(() => expect(result.current.maintenanceProgress).toBeNull());
+  });
+
+  // ---- 快照水合：进度事件在快照游标之前不重放，刷新后由快照回填 ----
+
+  it("快照携带 maintenance_progress 时水合进 hook 返回值", async () => {
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        maintenance_progress: {
+          run_id: "r-1",
+          phase: "archive",
+          message: "正在归档上下文…",
+        },
+      }),
+    );
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(result.current.maintenanceProgress).not.toBeNull());
+    expect(result.current.maintenanceProgress).toEqual({
+      runId: "r-1",
+      phase: "archive",
+      message: "正在归档上下文…",
+    });
+  });
+
+  it("快照无维护进度时维持 null", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.maintenanceProgress).toBeNull();
+  });
+
+  it("SSE 进度优先于快照旧值：迟到快照不把进度拨回去", async () => {
+    api.getChatSnapshot.mockResolvedValue(
+      snapshotWith({
+        maintenance_progress: {
+          run_id: "r-1",
+          phase: "archive",
+          message: "正在归档上下文…",
+        },
+      }),
+    );
+    const { client, result } = hook();
+    await waitFor(() =>
+      expect(result.current.maintenanceProgress?.phase).toBe("archive"),
+    );
+
+    emit(
+      "delta",
+      {
+        kind: "maintenance_progress",
+        run_id: "r-1",
+        payload: { phase: "summary", message: "正在生成上下文摘要（第 2 批）…" },
+      },
+      10,
+    );
+    await waitFor(() =>
+      expect(result.current.maintenanceProgress?.phase).toBe("summary"),
+    );
+
+    // in-flight 旧快照（仍带 archive）重读安装后，本地已折叠的新阶段胜出。
+    await act(() =>
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
+    );
+    expect(result.current.maintenanceProgress?.phase).toBe("summary");
+  });
+
+  it("done 清空后快照重读（无活动 run、不带进度）不写回", async () => {
+    api.getChatSnapshot
+      .mockResolvedValueOnce(
+        snapshotWith({
+          runs: [activeRun],
+          maintenance_progress: {
+            run_id: "r1",
+            phase: "summary",
+            message: "正在生成上下文摘要（第 1 批）…",
+          },
+        }),
+      )
+      .mockResolvedValue(
+        snapshotWith({
+          runs: [
+            { ...activeRun, status: "completed", finished_at: "2026-10-15T00:05:00Z" },
+          ],
+        }),
+      );
+    const { client, result } = hook();
+    await waitFor(() =>
+      expect(result.current.maintenanceProgress?.phase).toBe("summary"),
+    );
+
+    emit("done", { run_id: "r1", payload: { status: "completed" } }, 30);
+    await waitFor(() => expect(result.current.maintenanceProgress).toBeNull());
+
+    await act(() =>
+      client.refetchQueries({ queryKey: botKeys.snapshot("A", "b1") }),
+    );
+    expect(result.current.maintenanceProgress).toBeNull();
   });
 
   it("message_discard 到达即丢弃挂出的草稿", async () => {

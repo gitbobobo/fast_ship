@@ -449,6 +449,18 @@ export function useBotChat(botId: string) {
       queryClient.setQueryData<Bot>(botKeys.detail(userId, botId), (previous) =>
         mergeBotSnapshot(previous, snapshot.bot),
       );
+      // 维护进度水合（INT-115）：进度事件在订阅游标之前不会经 SSE 重放，
+      // 刷新/重开聊天后由快照回填。仅本地态为空（prev === null）时初始化
+      // ——SSE 后续事件照常覆盖；done/error 清空后快照重读时服务端已无
+      // 活动 run、不再返回该字段，不会把已清空的进度写回。
+      setMaintenanceProgress((previous) => {
+        if (previous !== null || !snapshot.maintenance_progress) return previous;
+        return {
+          runId: snapshot.maintenance_progress.run_id ?? null,
+          phase: snapshot.maintenance_progress.phase,
+          message: snapshot.maintenance_progress.message,
+        };
+      });
       return snapshot;
     },
     enabled: Boolean(userId && botId),

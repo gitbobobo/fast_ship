@@ -251,6 +251,18 @@ export interface BotMetrics {
 }
 
 /**
+ * 活动主线 run 最近一条维护进度（压缩阶段/失败原因）：与 SSE 的
+ * kind=maintenance_progress delta 事件同源，快照随取随带，刷新后运行栏
+ * 不丢反馈。无活动主线 run 或尚无进度事件时整体缺省。
+ */
+export interface BotMaintenanceProgress {
+  /** 进度所属主线 run；服务端无 run 场景缺省。 */
+  run_id?: string;
+  phase: string;
+  message: string;
+}
+
+/**
  * 聊天页一致快照：bot、消息尾部页、调用、run 与事件水位取自服务端
  * 同一读取点。订阅游标取 next_event_seq - 1，与快照内容严格衔接，
  * 既不重放快照已含的事件也不漏掉其后的事件。
@@ -265,6 +277,8 @@ export interface ChatSnapshot {
   next_event_seq: number;
   /** 指标区数据源；服务端未上线该字段时整体缺省。 */
   metrics?: BotMetrics;
+  /** 活动 run 的维护进度；SSE 后续事件优先，done/error 清空后不再出现。 */
+  maintenance_progress?: BotMaintenanceProgress;
 }
 
 export interface SendBotMessageInput {

@@ -181,6 +181,15 @@ type BotMetricsResponse struct {
 	Request *BotRequestMetrics `json:"request,omitempty"`
 }
 
+// BotMaintenanceProgress 是当前活动主线 run 最近一条维护进度（压缩阶段/失败
+// 原因）。进度事件只经 SSE 推送且在快照游标之前不会重放，快照随取随带一份，
+// 刷新/重开聊天后运行栏不丢反馈；run 结束后不再返回。
+type BotMaintenanceProgress struct {
+	RunID   string `json:"run_id,omitempty"`
+	Phase   string `json:"phase"`
+	Message string `json:"message"`
+}
+
 // BotChatSnapshot 是聊天页的初始读取：消息、调用、run 与事件水位取自同一
 // 读取点。订阅游标（next_event_seq - 1）与快照内容严格衔接——事件既不重放
 // 快照已含的内容，也不漏掉快照之后的内容（先订阅后补读兜住中间窗口）。
@@ -193,6 +202,9 @@ type BotChatSnapshot struct {
 	// Metrics 是运行指标（INT-115）：窗口能力 + 最近一次主线模型请求；
 	// 没有主线请求时 Request 缺省，指标区始终可见已解析的窗口能力。
 	Metrics *BotMetricsResponse `json:"metrics,omitempty"`
+	// MaintenanceProgress 是活动主线 run 的最近一条维护进度；无活动 run 或
+	// 尚无进度事件时缺省（已结束 run 的进度不应再显示）。
+	MaintenanceProgress *BotMaintenanceProgress `json:"maintenance_progress,omitempty"`
 }
 
 // listAllUnfinishedCalls 分页取全本机器人未终态调用（页大小 200，按
@@ -210,6 +222,33 @@ func listAllUnfinishedCalls(tx *gorm.DB, botID string) ([]model.BotToolCall, err
 			return all, nil
 		}
 	}
+}
+
+// latestMaintenanceProgressTx 在事务内取该 run 最近一条维护进度事件（delta +
+// kind=maintenance_progress，payload {phase,message}），按 seq 倒序首个即最新。
+// LIKE 只做候选预过滤（维护进度远稀于流式正文），归属与形状由解包后的 kind
+// 判定；找不到或解析失败返回 nil，调用方按「尚无进度」处理。
+func latestMaintenanceProgressTx(tx *gorm.DB, run *model.BotRun) *BotMaintenanceProgress {
+	if run == nil {
+		return nil
+	}
+	var rows []model.BotEvent
+	if err := tx.Where("bot_id = ? AND run_id = ? AND event_type = ? AND payload_json LIKE ?",
+		run.BotID, run.ID, model.BotEventDelta, "%maintenance_progress%").
+		Order("seq DESC").Limit(5).Find(&rows).Error; err != nil {
+		return nil
+	}
+	for i := range rows {
+		var env botEventEnvelope
+		if json.Unmarshal([]byte(rows[i].PayloadJSON), &env) != nil || env.Kind != "maintenance_progress" {
+			continue
+		}
+		payload, _ := env.Payload.(map[string]interface{})
+		phase, _ := payload["phase"].(string)
+		message, _ := payload["message"].(string)
+		return &BotMaintenanceProgress{RunID: run.ID, Phase: phase, Message: message}
+	}
+	return nil
 }
 
 // GetChatSnapshot 单事务一致读；messageLimit 是消息尾部页大小。bot 投影与
@@ -280,6 +319,13 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 			if run, err := repository.NewBotRunRepository(tx).FindByID(req.RunID); err == nil {
 				latestRun = run
 			}
+		}
+
+		// 活动主线 run 的最近一条维护进度：进度事件在快照游标之前不会经 SSE
+		// 重放，刷新/重开聊天后由快照补齐。run 已结束（含失败收尾）则不返回
+		// ——已终结 run 的进度不应再显示为进行中。
+		if activeRun, err := repository.NewBotRunRepository(tx).FindActiveByBot(botID); err == nil {
+			snap.MaintenanceProgress = latestMaintenanceProgressTx(tx, activeRun)
 		}
 		return nil
 	})
