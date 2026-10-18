@@ -91,6 +91,27 @@ func TestOpenDesignDeviceAuthStartPollIntervalDefault(t *testing.T) {
 	}
 }
 
+// userCode 是用户要输入的验证码：上游 201 但缺失（或置空）时必须报接口变更，
+// 而不是下发空 user_code 让用户干等到过期。
+func TestOpenDesignDeviceAuthStartRejectsEmptyUserCode(t *testing.T) {
+	cases := []string{
+		`{"deviceId":"dev_x","deviceSecret":"ds_x","activationUrl":"https://open-design.ai/activate"}`,
+		`{"deviceId":"dev_x","deviceSecret":"ds_x","userCode":"","activationUrl":"https://open-design.ai/activate"}`,
+	}
+	for _, body := range cases {
+		server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+			return http.StatusCreated, []byte(body)
+		})
+		ctx, cancel := fetchCtx()
+		_, err := OpenDesignDeviceAuth().Start(ctx, server.Client(), server.URL)
+		cancel()
+		requireProviderError(t, err)
+		if !strings.Contains(err.Error(), "授权码为空") {
+			t.Fatalf("缺 userCode 应报「授权码为空」，得到 %v", err)
+		}
+	}
+}
+
 // activation_url 限定 http/https：前端 target=_blank 直接打开，
 // 上游被劫持或接口变更时不能把用户带去任意 scheme。
 func TestOpenDesignDeviceAuthStartRejectsUnsafeActivationURL(t *testing.T) {

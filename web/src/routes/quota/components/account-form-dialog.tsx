@@ -112,6 +112,17 @@ export function QuotaAccountFormDialog({
     resetStartAuth();
   }, [open, account, resetProbe, resetStartAuth, discardSession]);
 
+  // 卸载专用收尾（离开路由/组件销毁）：递增代次作废在途的发起响应，
+  // pending 会话 DELETE 通知服务端销毁。discardSession 是稳定引用，
+  // 这个 cleanup 只在真正卸载时跑——open/account 变化的收尾仍由上面
+  // effect 里的 discardSession() 负责，不会重复发 DELETE。
+  useEffect(() => {
+    return () => {
+      authGenerationRef.current += 1;
+      discardSession();
+    };
+  }, [discardSession]);
+
   const provider: QuotaProvider | undefined = useMemo(() => {
     const id = editing ? account.provider : providerId;
     return providers?.find((item) => item.id === id);

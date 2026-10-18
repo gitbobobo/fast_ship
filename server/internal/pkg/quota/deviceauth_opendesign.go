@@ -63,6 +63,11 @@ func openDesignDeviceAuthStart(ctx context.Context, client *http.Client, baseURL
 	if start.PollInterval <= 0 {
 		start.PollInterval = openDesignDeviceAuthPollIntervalDefault
 	}
+	// userCode 是用户在激活页要输入的验证码：缺失时授权流程等于不可用，
+	// 直接报接口变更，而不是下发空 user_code 让用户干等到过期。
+	if start.UserCode == "" {
+		return DeviceAuthStart{}, ProviderError("OpenDesign 返回的授权码为空，接口可能已变更。", 0)
+	}
 	// activationUrl 由前端 target=_blank 直接打开：scheme 必须限定 http/https，
 	// 否则上游被劫持或接口变更时会把用户带去任意 scheme。
 	if u, err := url.Parse(start.ActivationURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {

@@ -506,10 +506,11 @@ describe("QuotaAccountFormDialog 设备授权", () => {
     expect(
       await screen.findByRole("button", { name: "保存" }),
     ).toBeInTheDocument();
-    // 面板卸载后对 pending 会话发 DELETE（失败静默）
+    // 面板卸载后对 pending 会话发 DELETE（失败静默），且只发一次
     await waitFor(() =>
       expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledWith("da-1"),
     );
+    expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledTimes(1);
   });
 
   it("轮询到 approved：toast、关对话框、invalidate 额度数据，不发 DELETE", async () => {
@@ -601,6 +602,78 @@ describe("QuotaAccountFormDialog 设备授权", () => {
     await waitFor(() =>
       expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledWith("da-1"),
     );
+    // 关闭路径的 DELETE 只发一次（卸载 cleanup 不重复发）
+    expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledTimes(1);
+  });
+
+  it("组件卸载（离开路由）也对 pending 会话发 DELETE", async () => {
+    vi.mocked(quotaApi.startDeviceAuthorization).mockResolvedValue({
+      code: 0,
+      message: "",
+      data: AUTH,
+    });
+    const user = userEvent.setup();
+    const { unmount } = renderWithRoute(<Harness />, {
+      path: "/",
+      initialEntry: "/",
+    });
+    await user.click(screen.getByRole("button", { name: "打开对话框" }));
+
+    await selectProvider(user, "OpenDesign");
+    await user.type(screen.getByLabelText("标签"), "我的 Design");
+    await user.click(
+      screen.getByRole("button", { name: "使用浏览器授权" }),
+    );
+    expect(await screen.findByTestId("device-auth-panel")).toBeInTheDocument();
+
+    // 不关对话框直接卸载整棵树（路由跳转）：pending 会话收到 DELETE
+    act(() => unmount());
+    await waitFor(() =>
+      expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledTimes(1),
+    );
+    expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledWith("da-1");
+  });
+
+  it("在途 POST 未回就卸载：代次作废，响应落地后立刻 DELETE", async () => {
+    let resolveStart!: (value: {
+      code: number;
+      message: string;
+      data: QuotaDeviceAuthorization;
+    }) => void;
+    vi.mocked(quotaApi.startDeviceAuthorization).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    const { unmount } = renderWithRoute(<Harness />, {
+      path: "/",
+      initialEntry: "/",
+    });
+    await user.click(screen.getByRole("button", { name: "打开对话框" }));
+
+    await selectProvider(user, "OpenDesign");
+    await user.type(screen.getByLabelText("标签"), "我的 Design");
+    await user.click(
+      screen.getByRole("button", { name: "使用浏览器授权" }),
+    );
+    await waitFor(() =>
+      expect(quotaApi.startDeviceAuthorization).toHaveBeenCalledTimes(1),
+    );
+
+    // 响应未回就卸载：还没有会话 id 可删，此刻不应发 DELETE
+    act(() => unmount());
+    expect(quotaApi.cancelDeviceAuthorization).not.toHaveBeenCalled();
+
+    // 迟到的响应因代次不匹配被丢弃，拿到的会话立刻 DELETE 收尾
+    await act(async () => {
+      resolveStart({ code: 0, message: "", data: AUTH });
+    });
+    await waitFor(() =>
+      expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledTimes(1),
+    );
+    expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledWith("da-1");
   });
 
   it("发起响应迟到且对话框已重开：丢弃旧会话并 DELETE，不进入授权面板（B2）", async () => {
@@ -640,6 +713,8 @@ describe("QuotaAccountFormDialog 设备授权", () => {
     await waitFor(() =>
       expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledWith("da-1"),
     );
+    // 关闭+重开路径只触发这一次 DELETE，不重复发
+    expect(quotaApi.cancelDeviceAuthorization).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId("device-auth-panel")).toBeNull();
     expect(
       screen.getByRole("button", { name: "保存" }),
