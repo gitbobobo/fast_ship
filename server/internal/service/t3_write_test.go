@@ -526,6 +526,49 @@ func TestT3StopThreadSelection(t *testing.T) {
 	}
 }
 
+// Stop 的 run 选择是纯函数，逐条锁定官方 stopThread 的口径：
+// shell 的可中断活动 run 优先；没有时看投影（含 waiting）；再否则看后台工作。
+func TestSelectStopRunID(t *testing.T) {
+	ptr := func(v string) *string { return &v }
+	shell := func(activeRunID *string, latestRunID *string, tasks ...t3PendingBackgroundTask) *t3ThreadShell {
+		return &t3ThreadShell{ID: "th-1", ActiveRunID: activeRunID, LatestRunID: latestRunID, PendingBackgroundTasks: tasks}
+	}
+	projection := func(runs ...t3Run) *t3ThreadProjection {
+		return &t3ThreadProjection{Runs: runs}
+	}
+
+	// shell 的可中断活动 run 优先于投影里的活动 run。
+	if got := selectStopRunID(shell(ptr("run-shell"), ptr("run-latest")), projection(t3Run{ID: "run-proj", Status: "running"})); got != "run-shell" {
+		t.Fatalf("activeRunId must win, got %q", got)
+	}
+
+	// 没有 activeRunId 时看投影，包含 waiting（上游 shell 的可中断集合排除它）。
+	if got := selectStopRunID(shell(nil, ptr("run-latest")), projection(t3Run{ID: "run-wait", Status: "waiting"})); got != "run-wait" {
+		t.Fatalf("projection waiting run must be interruptible, got %q", got)
+	}
+
+	// 投影里只剩已完成的 run，但 shell 有可中断后台 → 中断最近 run。
+	if got := selectStopRunID(
+		shell(nil, ptr("run-9"), t3PendingBackgroundTask{TaskID: "bg-1", Kind: "subagent"}),
+		projection(t3Run{ID: "run-9", Status: "completed"}),
+	); got != "run-9" {
+		t.Fatalf("background work must fall back to latestRunId, got %q", got)
+	}
+
+	// 只有 PR watch 的 monitor 不算可中断后台。
+	if got := selectStopRunID(
+		shell(nil, ptr("run-9"), t3PendingBackgroundTask{TaskID: "pull-request-watch:pr-1", Kind: "monitor"}),
+		projection(t3Run{ID: "run-9", Status: "completed"}),
+	); got != "" {
+		t.Fatalf("pr watch must not be interruptible, got %q", got)
+	}
+
+	// 什么都没有 → 无操作。
+	if got := selectStopRunID(shell(nil, ptr("run-9")), projection(t3Run{ID: "run-9", Status: "completed"})); got != "" {
+		t.Fatalf("idle thread must be a no-op, got %q", got)
+	}
+}
+
 // TestT3QueueOperations 覆盖队列四操作与三态附件。
 func TestT3QueueOperations(t *testing.T) {
 	e := setupT3ServiceTest(t)

@@ -607,31 +607,18 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 	}
 	defer session.Close()
 
-	runID := ""
-	if shell.ActiveRunID != nil && *shell.ActiveRunID != "" {
-		// 以新鲜 shell 的可中断活动 run 为主：`shell.activeRunId` 是上游按
-		// isInterruptibleRunForShell（preparing/starting/running）派生的，
-		// 而投影是本次等待之前读的——冷启动等 hub 首次同步期间新起的 run
-		// 不会出现在里面，用旧投影会把可停的线程误报成无事可做。
-		runID = *shell.ActiveRunID
-	} else {
-		// shell 没有可中断活动 run：投影可能已早于本次等待（典型是 waiting
-		// ——上游 shell.activeRunId 排除 waiting，只有投影里看得到），回读一次
-		// 再决策，避免中断已结束的旧 run、也避免漏掉等待期新起的 waiting。
-		fresh, freshErr := s.fetchProjectionForWrite(ctx, env, token, threadID)
+	// shell.activeRunId 是新鲜的可中断活动 run（preparing/starting/running）；
+	// 为空时典型是 waiting——它只有投影里看得到，所以回读一次投影再决策。
+	// 投影在这里之后读，与运行态同一时间基准。
+	var fresh *t3ThreadProjection
+	if shell.ActiveRunID == nil || *shell.ActiveRunID == "" {
+		fetched, freshErr := s.fetchProjectionForWrite(ctx, env, token, threadID)
 		if freshErr != nil {
 			return nil, s.upstreamError(freshErr)
 		}
-		if current := resolveT3ActiveRun(fresh.Runs); current != nil {
-			runID = current.ID
-		}
+		fresh = fetched
 	}
-	// 后台工作回退独立于上面的分支：根 run 刚结束但后台工作仍在时，上面两条
-	// 都不命中，但 T3 的 Stop 仍接受对最近 run 的中断。PR watch 不算可中断
-	// 后台（与 interruptThreadTurn 不含 pullRequests 一致）。
-	if runID == "" && shell.LatestRunID != nil && t3HasInterruptibleBackgroundWork(shell.PendingBackgroundTasks) {
-		runID = *shell.LatestRunID
-	}
+	runID := selectStopRunID(shell, fresh)
 	if runID == "" {
 		return &T3ThreadStopResult{Stopped: false}, nil
 	}
@@ -646,6 +633,31 @@ func (s *T3ThreadsService) StopThread(ctx context.Context, userID, envID, thread
 		return nil, err
 	}
 	return &T3ThreadStopResult{Stopped: true, RunId: api.Ptr(runID)}, nil
+}
+
+// selectStopRunID 选择 Stop 要中断的 run（对齐官方 stopThread 的口径）：
+//   - shell.activeRunId 优先：它是可信活跃面按 isInterruptibleRunForShell
+//     （preparing/starting/running）派生的，比任何投影都新鲜；
+//   - 其次看投影里的活动 run（含 waiting——上游 shell 的可中断集合不含
+//     waiting，只有投影里能看到）；
+//   - 都没有时看 shell 的后台工作占位：根 run 已结束但后台工作仍会唤醒代理，
+//     T3 的 Stop 接受对最近 run 的中断。PR watch 不算可中断后台（与
+//     interruptThreadTurn 不含 pullRequests 一致）。
+//
+// projection 只在 shell 没有 activeRunId 时传入（调用方按需回读）。
+func selectStopRunID(shell *t3ThreadShell, projection *t3ThreadProjection) string {
+	if shell.ActiveRunID != nil && *shell.ActiveRunID != "" {
+		return *shell.ActiveRunID
+	}
+	if projection != nil {
+		if active := resolveT3ActiveRun(projection.Runs); active != nil {
+			return active.ID
+		}
+	}
+	if shell.LatestRunID != nil && t3HasInterruptibleBackgroundWork(shell.PendingBackgroundTasks) {
+		return *shell.LatestRunID
+	}
+	return ""
 }
 
 // ResumeQueue 下发 queue.resume。
