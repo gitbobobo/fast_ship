@@ -646,6 +646,42 @@ describe("useBotChat", () => {
     );
   });
 
+  it("tool-only 模型请求（新 call_id 的 tool_call）也触发一次快照重读", async () => {
+    hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    const before = api.getChatSnapshot.mock.calls.length;
+
+    // 纯工具调用请求没有 text_delta：首个 tool_call 到达即重读快照，
+    // 指标随这个进行中的请求切换。
+    emit(
+      "tool_call",
+      { call_id: "c-1", phase: "proposed", payload: { id: "c-1" } },
+      20,
+    );
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1),
+    );
+
+    // 同一 call_id 的后续阶段不重复。
+    emit(
+      "tool_call",
+      { call_id: "c-1", phase: "running", payload: { id: "c-1" } },
+      21,
+    );
+    await act(async () => {});
+    expect(api.getChatSnapshot.mock.calls.length).toBe(before + 1);
+
+    // 下一个调用的新 call_id 再触发一次。
+    emit(
+      "tool_call",
+      { call_id: "c-2", phase: "proposed", payload: { id: "c-2" } },
+      22,
+    );
+    await waitFor(() =>
+      expect(api.getChatSnapshot.mock.calls.length).toBe(before + 2),
+    );
+  });
+
   it("StrictMode 双挂载不产生重复消息", async () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },

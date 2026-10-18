@@ -429,6 +429,9 @@ export function useBotChat(botId: string) {
   // 已触发过指标刷新的 assistant message_id：每个模型请求对应新 id，首个
   // text_delta 刷新一次快照；同一 id 的后续 delta 不重复（H2）。
   const lastDeltaMessageIdRef = useRef<string | null>(null);
+  // 纯工具调用请求没有 text_delta，用首个 tool_call（新 call_id）触发同样的
+  // 指标刷新，避免指标一直停在上一个请求。
+  const lastToolCallIdRef = useRef<string | null>(null);
 
   // 单一水合来源：bot 详情、消息、调用与 run 全部来自同一读取点的快照，
   // 消除分离请求的竞态窗口（快照与水位同点，SSE 从水位续读不漏不重）。
@@ -538,19 +541,29 @@ export function useBotChat(botId: string) {
           clearDraft,
           setMaintenanceProgress,
         });
-        // 新模型请求的首个 text_delta 触发一次快照重读（H2）：metrics 只读
-        // 快照，而服务端对进行中的请求已返回 status=running +
-        // input_tokens_estimate，刷新后指标随新请求切换，不必等 done。
+        // 新模型请求开始即刷新一次快照（H2）：metrics 只读快照，而服务端对
+        // 进行中的请求已返回 status=running + input_tokens_estimate，刷新后
+        // 指标随新请求切换，不必等 done。文本请求看新 message_id 的首个
+        // text_delta；纯工具调用请求没有正文，看新 call_id 的首个 tool_call。
         // 解析失败忽略，不影响事件折叠。
         try {
-          const data = JSON.parse(event.data) as { kind?: string; message_id?: string };
-          if (
+          const data = JSON.parse(event.data) as {
+            kind?: string;
+            message_id?: string;
+            call_id?: string;
+          };
+          const newTextRequest =
             event.event === "delta" &&
             data.kind === "text_delta" &&
-            data.message_id &&
-            lastDeltaMessageIdRef.current !== data.message_id
-          ) {
-            lastDeltaMessageIdRef.current = data.message_id;
+            !!data.message_id &&
+            lastDeltaMessageIdRef.current !== data.message_id;
+          const newToolOnlyRequest =
+            event.event === "tool_call" &&
+            !!data.call_id &&
+            lastToolCallIdRef.current !== data.call_id;
+          if (newTextRequest) lastDeltaMessageIdRef.current = data.message_id!;
+          if (newToolOnlyRequest) lastToolCallIdRef.current = data.call_id!;
+          if (newTextRequest || newToolOnlyRequest) {
             void queryClient.invalidateQueries({ queryKey: snapshotKey });
           }
         } catch {
