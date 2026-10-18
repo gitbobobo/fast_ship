@@ -315,7 +315,8 @@ func TestBotInt121DryRunRejectedOnNonRunActions(t *testing.T) {
 		{"disable", `{"action":"disable","task_id":"t1","dry_run":%s}`},
 	}
 	for _, tc := range cases {
-		for _, flag := range []string{"true", "false"} {
+		// null 也算「携带」：归一化会把它变回未提供，受理层必须按原始参数拒。
+		for _, flag := range []string{"true", "false", "null"} {
 			args := fmt.Sprintf(tc.tmpl, flag)
 			_, err := botPrepareToolCall(v6, "fs_schedule", args)
 			var appErr *errs.AppError
@@ -342,7 +343,8 @@ func TestBotInt121DryRunDirectExecHasNoWrites(t *testing.T) {
 		tk.Name = "守卫任务"
 	})
 
-	for _, flag := range []string{"true", "false"} {
+	// null 也拒：执行器按原始参数判断字段是否存在。
+	for _, flag := range []string{"true", "false", "null"} {
 		for _, args := range []string{
 			`{"action":"delete","task_id":"` + task.ID + `","dry_run":` + flag + `}`,
 			`{"action":"update","task_id":"` + task.ID + `","name":"不该改名","dry_run":` + flag + `}`,

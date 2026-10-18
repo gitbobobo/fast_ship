@@ -696,9 +696,16 @@ func (s *BotService) execScheduleTool(call *model.BotToolCall) (string, error) {
 	}
 	// dry_run 只配合 run（与 botActionRules 的 Forbidden 同一规则，这里兜底
 	// 执行器直接调用的路径）：其它分支不读 dry_run，若放行，带预览标记的
-	// delete/update 等请求仍会产生真实写入。
-	if args.Action != "run" && args.DryRun != nil {
-		return "", errs.New(errs.ErrInvalidParams.Code, "fs_schedule 只有 run 动作接受 dry_run")
+	// delete/update 等请求仍会产生真实写入。按原始参数判存在（含 null），
+	// 归一化会把 null 变回「未提供」。
+	if args.Action != "run" {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &raw); err != nil {
+			return "", errs.ErrInvalidParams
+		}
+		if _, ok := raw["dry_run"]; ok {
+			return "", errs.New(errs.ErrInvalidParams.Code, "fs_schedule 只有 run 动作接受 dry_run")
+		}
 	}
 	switch args.Action {
 	case "list":

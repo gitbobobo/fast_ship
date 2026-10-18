@@ -83,7 +83,7 @@ type botScheduleTaskArgs struct {
 	// DryRun 只配合 run 使用：true 时只预览任务与下次计划、不建运行记录不执行；
 	// 任务忙碌时回执标 busy=true。其它动作不接受该字段（显式 false 也拒绝），
 	// 避免「带预览标记仍写入」的误用。
-	DryRun *bool `json:"dry_run,omitempty" jsonschema:"description=只配合 run：true 时只预览（任务信息、指令与下次计划），不建运行记录、不执行；任务已有未结束运行时 busy=true；其它动作携带 dry_run 会被拒绝（显式 false 亦然）"`
+	DryRun *bool `json:"dry_run,omitempty" jsonschema:"description=只配合 run：true 时只预览（任务信息、指令与下次计划），不建运行记录、不执行；任务已有未结束运行时 busy=true；其它动作携带 dry_run 即被拒绝（显式 false / null 亦然）"`
 	// Limit/Offset 是 runs/list 的分页参数。
 	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
 	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
@@ -1020,7 +1020,9 @@ type botRequiredField struct {
 }
 
 // botActionRule 描述一个工具动作的字段约束：Required 是服务端校验与 v3
-// 起的 schema 描述共同的事实源；Forbidden 是明确禁止出现的字段。
+// 起的 schema 描述共同的事实源；Forbidden 是明确禁止出现的字段——只要出现在
+// 原始参数里就拒（包括显式 null：归一化会把 null 变回「未提供」，不能让带预览
+// 标记的调用在归一化后看起来没带）。
 type botActionRule struct {
 	Required  []botRequiredField
 	Forbidden []string
@@ -1137,7 +1139,10 @@ func botValidateActionFields(toolName, action string, raw map[string]json.RawMes
 		}
 	}
 	for _, field := range rule.Forbidden {
-		if has(field) {
+		// 存在即拒（含 null）：Forbidden 表达的是「这个动作不接受该字段」，
+		// 不是「该字段不得有值」。归一化会丢弃 null，按 has() 判断会把
+		// {"dry_run":null} 这类调用放行成真实写入。
+		if _, ok := raw[field]; ok {
 			return bad(toolName + " " + action + " 不接受 " + field)
 		}
 	}
