@@ -321,23 +321,28 @@ func (s *BotService) persistModelWindowFailure(baseURL, modelName string, cause 
 	})
 }
 
-// refreshModelWindow 探测并持久化：成功写结果行；失败时不覆盖已知成功缓存
-// （地址+模型共享一条记录，一次瞬时 /models 失败或一个用错密钥的机器人就能把
-// 同上游所有机器人降到回退预算），只有不存在有效窗口时才落短 TTL 失败标记，
-// 让「本来就不返回窗口字段」的上游不再每轮白探。两种行都让 ensureModelWindow
-// 的 TTL 判断在期内不再打网络。
+// recordModelWindowProbeFailure 记录一次探测失败：地址+模型共享一条缓存，
+// 已有有效窗口（ContextWindow>0）时保留原条目（一次瞬时失败或一个用错密钥的
+// 机器人不得把同上游所有机器人降到回退预算），只在没有可用窗口时才落短 TTL
+// 负缓存标记，让「本来就不返回窗口字段」的上游不再每轮白探。
+func (s *BotService) recordModelWindowProbeFailure(baseURL, modelName string, cause error) {
+	if existing, ferr := s.windows.FindByAddrModel(botNormalizeBaseURL(baseURL), modelName); ferr == nil &&
+		existing != nil && existing.ContextWindow > 0 {
+		return
+	}
+	if perr := s.persistModelWindowFailure(baseURL, modelName, cause); perr != nil {
+		s.logger.Info("模型窗口失败标记写入失败",
+			zap.String("model", modelName), zap.Error(perr))
+	}
+}
+
+// refreshModelWindow 探测并持久化：成功写结果行；失败时经
+// recordModelWindowProbeFailure 处理（不覆盖已知成功缓存）。成功行的 24h TTL
+// 与失败标记的短 TTL 都让 ensureModelWindow 在期内不再打网络。
 func (s *BotService) refreshModelWindow(ctx context.Context, baseURL, apiKey, modelName string) error {
 	cap, err := s.detectModelWindow(ctx, baseURL, apiKey, modelName)
 	if err != nil {
-		if existing, ferr := s.windows.FindByAddrModel(botNormalizeBaseURL(baseURL), modelName); ferr == nil &&
-			existing != nil && existing.ContextWindow > 0 {
-			// 保留既有成功条目：负缓存只用于「没有可用窗口」的情况。
-			return err
-		}
-		if perr := s.persistModelWindowFailure(baseURL, modelName, err); perr != nil {
-			s.logger.Info("模型窗口失败标记写入失败",
-				zap.String("model", modelName), zap.Error(perr))
-		}
+		s.recordModelWindowProbeFailure(baseURL, modelName, err)
 		return err
 	}
 	return s.persistModelWindow(baseURL, modelName, cap)

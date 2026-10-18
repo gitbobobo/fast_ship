@@ -291,7 +291,12 @@ func (s *BotService) RunMemoryConsolidation(ctx context.Context, bot *model.Bot,
 	}
 
 	modelName := s.nightlyModelOf(bot)
-	auxWindow := s.inputBudgetFor(bot, modelName)
+	// 与摘要同理：夜间整理也是显式限制输出的辅助请求，按完整窗口定价，
+	// 不重复扣除主模型的输出空间。
+	auxWindow := s.modelCapability(bot, modelName).WindowTokens
+	if auxWindow <= 0 {
+		auxWindow = s.cfg.Bots.Context.WindowTokensFor(modelName)
+	}
 	userLimit := s.cfg.Bots.Memory.UserMaxCharsV()
 	memLimit := s.cfg.Bots.Memory.MemoryMaxCharsV()
 	sys := "你是记忆整理器。只输出 JSON。模型不能指定路径去改 daily，也不能执行工具。"

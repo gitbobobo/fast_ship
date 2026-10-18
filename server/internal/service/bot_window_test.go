@@ -302,6 +302,51 @@ func TestBotWindowProbeFailureKeepsSuccessfulCache(t *testing.T) {
 	}
 }
 
+func TestBotConnectionFailureKeepsSuccessfulCache(t *testing.T) {
+	env := setupBotTestEnv(t)
+	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"m1","context_window":1048576,"max_output_tokens":262144}]}`)
+	userID := createBotTestUser(t, env.db, "winconnkeep")
+	if err := env.bots.refreshModelWindow(context.Background(), ps.URL(), "sk-x", "m1"); err != nil {
+		t.Fatalf("首探应成功: %v", err)
+	}
+	// 测试连接用坏密钥触发上游失败：不得把共享的成功缓存覆盖成 0 值标记。
+	ps.setModels(500, `{"error":"boom"}`)
+	res, err := env.bots.TestConnection(userID, &TestConnectionRequest{
+		BaseURL: strPtrBot(ps.URL()), Model: strPtrBot("m1"), APIKey: strPtrBot("sk-bad"),
+	})
+	if err != nil {
+		t.Fatalf("test connection: %v", err)
+	}
+	if res.ContextSource != "detected" || res.ContextWindow != 1048576 || res.MaxOutputTokens != 262144 {
+		t.Fatalf("测试连接应沿用既有成功缓存: %+v", res)
+	}
+	row := findWindowRow(t, env, ps.URL(), "m1")
+	if row == nil || row.ContextWindow != 1048576 || row.MaxOutputTokens != 262144 {
+		t.Fatalf("成功缓存不得被测试连接的失败标记覆盖: %+v", row)
+	}
+}
+
+func TestBotAuxBudgetsAvoidsDoubleReservation(t *testing.T) {
+	// 窗口 8192、输出上限 8000、包装 200：完整窗口定价仍能发出一个小摘要；
+	// 若先扣输出空间（得到 192 的伪窗口）会在发请求前就判失败。
+	reqOut, inputBudget, ok := botAuxBudgets(8192, 8000, 100000, 200)
+	if !ok {
+		t.Fatalf("小窗口应能容纳小摘要")
+	}
+	if reqOut != 7864 || inputBudget != 128 {
+		t.Fatalf("输出应向窗口余量封顶: reqOut=%d input=%d", reqOut, inputBudget)
+	}
+	// 窗口余量高于探测输出上限时，输出封顶到上限。
+	reqOut, inputBudget, ok = botAuxBudgets(100000, 8192, 50000, 200)
+	if !ok || reqOut != 8192 || inputBudget != 100000-200-8192 {
+		t.Fatalf("输出应向上限封顶: reqOut=%d input=%d ok=%v", reqOut, inputBudget, ok)
+	}
+	// 包装本身超出窗口：干净失败。
+	if _, _, ok := botAuxBudgets(300, 0, 1000, 200); ok {
+		t.Fatalf("包装超窗应返回 false")
+	}
+}
+
 func TestBotWindowCacheHitNoNetwork(t *testing.T) {
 	env := setupBotTestEnv(t)
 	ps := newWindowProbeServer(t, 200, `{"data":[{"id":"m1","context_window":4096}]}`)

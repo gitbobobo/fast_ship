@@ -1057,9 +1057,13 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 	if modelName == "" {
 		modelName = bot.Model
 	}
-	auxWindow := s.inputBudgetFor(bot, modelName)
-	// 探测到的输出上限是上游会校验的硬限制：超过它的 max_completion_tokens
-	// 会得到确定性 400、摘要必败，输出预算必须向它封顶（0 = 未知，不封）。
+	// 辅助请求按完整窗口定预算：inputBudgetFor 已为「主模型输出」扣过输出空间，
+	// 摘要请求自己显式限制 max_completion_tokens，再扣一次会把可用窗口算成
+	// W-maxOutput、把本可服务的小窗口摘要误判超限。输出上限只用于封顶 reqOut。
+	auxWindow := s.modelCapability(bot, modelName).WindowTokens
+	if auxWindow <= 0 {
+		auxWindow = s.cfg.Bots.Context.WindowTokensFor(modelName)
+	}
 	auxOutCap := s.modelCapability(bot, modelName).MaxOutputTokens
 	outBudget := s.summaryOutputBudget(bot, plan)
 	rules := botSummaryRules
@@ -1078,19 +1082,8 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 			accSection = "\n[既有滚动摘要]\n" + acc + "\n"
 		}
 		wrap := botEstimateTokens(sys) + botEstimateTokens(rules) + botEstimateTokens(accSection) + 96
-		maxOut := auxWindow - wrap - 128
-		if maxOut < 1 {
-			return "", errContextCompactionFailed
-		}
-		reqOut := outBudget
-		if reqOut > maxOut {
-			reqOut = maxOut
-		}
-		if auxOutCap > 0 && reqOut > auxOutCap {
-			reqOut = auxOutCap
-		}
-		inputBudget := auxWindow - wrap - reqOut
-		if inputBudget < 32 {
+		reqOut, inputBudget, budgetFits := botAuxBudgets(auxWindow, auxOutCap, outBudget, wrap)
+		if !budgetFits {
 			return "", errContextCompactionFailed
 		}
 
@@ -1156,6 +1149,28 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 		acc = text
 	}
 	return acc, nil
+}
+
+// botAuxBudgets 按「完整窗口」为辅助请求（摘要/归档/夜间整理）定价：输出预算
+// 先向窗口余量、再向探测到的输出上限封顶，输入预算 = 窗口 − 包装 − 输出。
+// wrap 是包装（系统提示、规则、累积摘要等）的估算量，窗口装不下时 ok=false。
+func botAuxBudgets(window, maxOutput, outBudget, wrap int64) (reqOut, inputBudget int64, ok bool) {
+	maxOut := window - wrap - 128
+	if maxOut < 1 {
+		return 0, 0, false
+	}
+	reqOut = outBudget
+	if reqOut > maxOut {
+		reqOut = maxOut
+	}
+	if maxOutput > 0 && reqOut > maxOutput {
+		reqOut = maxOutput
+	}
+	inputBudget = window - wrap - reqOut
+	if inputBudget < 32 {
+		return 0, 0, false
+	}
+	return reqOut, inputBudget, true
 }
 
 func (s *BotService) summaryOutputBudget(bot *model.Bot, plan *botCompactionPlan) int64 {

@@ -441,7 +441,7 @@ func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (
 				zap.String("model", modelName), zap.Error(err))
 		}
 	} else {
-		_ = s.persistModelWindowFailure(baseURL, modelName, detErr)
+		s.recordModelWindowProbeFailure(baseURL, modelName, detErr)
 	}
 
 	return &TestConnectionResponse{
