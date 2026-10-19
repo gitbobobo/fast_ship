@@ -19,12 +19,71 @@ function formatSpeed(tokensPerSecond: number): string {
     : tokensPerSecond.toFixed(1);
 }
 
+// 双环几何：圆心 (20,20)，外环缓存命中率（r=17）、内环上下文占比（r=10），
+// 环间留 3px 间隙；弧从顶部起画（rotate -90）。
+const RINGS = {
+  cache: { r: 17, circumference: 2 * Math.PI * 17 },
+  context: { r: 10, circumference: 2 * Math.PI * 10 },
+};
+
+/** 估算可能超出窗口，占比按 0–100 夹紧，避免画出过量弧。 */
+const clampPct = (pct: number) => Math.min(100, Math.max(0, pct));
+
 /**
- * 发送按钮旁的模型指标：生成速度、上下文占比估算、缓存命中率。
- * 口径都是快照里「最近一次主线模型请求」；任何一项缺失渲染「—」，
- * 绝不把缺失当成 0。usage 未收齐时 token 计数不可用；上下文占比是
- * 服务端估算值（≠精确 token 数）。所有尺寸都可见（需求四），小屏只藏
- * 「速度/上下文/缓存」标签文字、保留数值，紧凑排布不挤压输入与发送按钮。
+ * 单个进度环：实线轨道 + 进度弧。pct 为 null（缺失）时轨道画虚线并
+ * 半透明，与「真实 0%」（实线轨道、无弧）视觉可区分；0% 也不画弧——
+ * round linecap 会在零长度弧上画出圆点，看起来像有进度。
+ */
+function MetricRing({
+  testId,
+  radius,
+  circumference,
+  pct,
+  title,
+  arcClassName,
+}: {
+  testId: string;
+  radius: number;
+  circumference: number;
+  pct: number | null;
+  title: string;
+  arcClassName: string;
+}) {
+  return (
+    <g data-testid={testId}>
+      <title>{title}</title>
+      <circle
+        cx={20}
+        cy={20}
+        r={radius}
+        fill="none"
+        strokeWidth={4}
+        className={pct != null ? "stroke-muted" : "stroke-muted opacity-60"}
+        strokeDasharray={pct != null ? undefined : "3 3"}
+      />
+      {pct != null && pct > 0 && (
+        <circle
+          cx={20}
+          cy={20}
+          r={radius}
+          fill="none"
+          strokeWidth={4}
+          strokeLinecap="round"
+          className={arcClassName}
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - pct / 100)}
+          transform="rotate(-90 20 20)"
+        />
+      )}
+    </g>
+  );
+}
+
+/**
+ * 发送按钮旁的模型指标：双环进度圆（外环缓存命中率、内环上下文占比）
+ * + 右侧速度数值。口径都是快照里「最近一次主线模型请求」；任何一项
+ * 缺失渲染「—」或不画弧，绝不把缺失当成 0。usage 未收齐时 token 计数
+ * 不可用；上下文占比是服务端估算值（≠精确 token 数）。
  */
 export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
   const request = metrics?.request ?? null;
@@ -38,14 +97,18 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
     request.generation_ms > 0
       ? `${formatSpeed(request.completion_tokens / (request.generation_ms / 1000))} tok/s`
       : null;
+  const speedTitle =
+    speed != null
+      ? "Token 输出速度 = completion_tokens ÷ 生成耗时（首个流式片段到请求结束）· 最近一次模型请求"
+      : "暂无 Token 输出速度：最近一次请求的 usage 或生成耗时不可用";
 
   const window = metrics?.context_window ?? 0;
   const estimate = request?.input_tokens_estimate;
-  // 估算为 0 等同于「还没有可展示的估算」（无请求/失败请求），显示「—」
-  // 而不是「≈0%」。
+  // 估算为 0 等同于「还没有可展示的估算」（无请求/失败请求），不画弧
+  // 也不显示「≈0%」。
   const contextPct =
     window > 0 && estimate != null && estimate > 0
-      ? Math.round((estimate / window) * 100)
+      ? clampPct(Math.round((estimate / window) * 100))
       : null;
   const sourceLabel =
     metrics?.context_source != null
@@ -53,7 +116,7 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       : null;
   const contextTitle =
     contextPct != null && estimate != null
-      ? `上下文占比为估算值：约 ${formatTokens(estimate)} / ${formatTokens(window)} tokens` +
+      ? `上下文占比 ≈${contextPct}%（估算）：约 ${formatTokens(estimate)} / ${formatTokens(window)} tokens` +
         ` · 估算口径 ${request?.input_estimator || "未知"}` +
         `${sourceLabel ? ` · 窗口来源：${sourceLabel}` : ""}` +
         `${metrics?.context_detail ? `（${metrics.context_detail}）` : ""}`
@@ -64,42 +127,46 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
     request?.prompt_tokens != null &&
     request.prompt_tokens > 0 &&
     request.cached_tokens != null
-      ? Math.round((request.cached_tokens / request.prompt_tokens) * 100)
+      ? clampPct(Math.round((request.cached_tokens / request.prompt_tokens) * 100))
       : null;
+  const cacheTitle =
+    cachePct != null
+      ? `缓存命中率 ${cachePct}% = cached_tokens / prompt_tokens · 最近一次模型请求`
+      : "暂无缓存命中率：最近一次请求的 usage 不可用";
 
   return (
     <div
       data-testid="bot-metrics"
       aria-label="模型指标"
-      className="flex min-w-0 items-center gap-2 overflow-hidden text-xs whitespace-nowrap text-muted-foreground sm:gap-2.5"
+      className="flex min-w-0 items-center gap-2 overflow-hidden text-xs whitespace-nowrap text-muted-foreground"
     >
-      <span
-        data-testid="bot-metric-speed"
-        title={
-          speed != null
-            ? "Token 输出速度 = completion_tokens ÷ 生成耗时（首个流式片段到请求结束）· 最近一次模型请求"
-            : "暂无 Token 输出速度：最近一次请求的 usage 或生成耗时不可用"
-        }
+      <svg
+        viewBox="0 0 40 40"
+        width={40}
+        height={40}
+        className="shrink-0"
+        role="img"
+        aria-label={`模型指标：${cachePct != null ? `缓存命中率 ${cachePct}%` : "缓存命中率不可用"}，${contextPct != null ? `上下文占比 ≈${contextPct}%` : "上下文占比不可用"}`}
       >
-        <span className="hidden sm:inline">速度 </span>
+        <MetricRing
+          testId="bot-metric-cache"
+          radius={RINGS.cache.r}
+          circumference={RINGS.cache.circumference}
+          pct={cachePct}
+          title={cacheTitle}
+          arcClassName="stroke-emerald-500 dark:stroke-emerald-400"
+        />
+        <MetricRing
+          testId="bot-metric-context"
+          radius={RINGS.context.r}
+          circumference={RINGS.context.circumference}
+          pct={contextPct}
+          title={contextTitle}
+          arcClassName="stroke-sky-500 dark:stroke-sky-400"
+        />
+      </svg>
+      <span data-testid="bot-metric-speed" title={speedTitle}>
         <span className="font-mono">{speed ?? "—"}</span>
-      </span>
-      <span data-testid="bot-metric-context" title={contextTitle}>
-        <span className="hidden sm:inline">上下文 </span>
-        <span className="font-mono">
-          {contextPct != null ? `≈${contextPct}%` : "—"}
-        </span>
-      </span>
-      <span
-        data-testid="bot-metric-cache"
-        title={
-          cachePct != null
-            ? "缓存命中率 = cached_tokens / prompt_tokens · 最近一次模型请求"
-            : "暂无缓存命中率：最近一次请求的 usage 不可用"
-        }
-      >
-        <span className="hidden sm:inline">缓存 </span>
-        <span className="font-mono">{cachePct != null ? `${cachePct}%` : "—"}</span>
       </span>
     </div>
   );

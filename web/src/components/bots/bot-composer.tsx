@@ -5,8 +5,12 @@ import { Textarea } from "@/components/ui/textarea";
 
 /**
  * 机器人主线输入框：运行中不锁输入——新消息随时可发，由服务端在
- * 安全点交给机器人（提示通过 banner 呈现）。提交走表单（按钮或
- * Cmd/Ctrl+Enter）；回车只换行，避免输入法选词时误发。
+ * 安全点交给机器人（提示通过 banner 呈现）。Enter 发送、Shift+Enter
+ * 换行；输入法组合中（isComposing / keyCode 229）的 Enter 不拦截，
+ * 避免选词时误发。与线程输入框（thread-composer 的 Cmd/Ctrl+Enter
+ * 发送、回车换行）刻意不同：机器人主线是单线快问快答，按聊天软件
+ * 习惯回车直发。Cmd/Ctrl+Enter 落在同一分支同样发送；表单提交
+ * （发送按钮）保留。
  */
 export function BotComposer({
   text,
@@ -37,8 +41,15 @@ export function BotComposer({
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
-      submit(e);
+    // Enter（含 Cmd/Ctrl 修饰）直接发送；Shift+Enter 与输入法组合中的
+    // Enter 不拦截，走浏览器默认换行，避免选词时误发。
+    if (
+      e.key === "Enter" &&
+      !e.shiftKey &&
+      !(e.nativeEvent.isComposing || e.keyCode === 229)
+    ) {
+      e.preventDefault();
+      if (canSubmit) onSubmit();
     }
   };
 

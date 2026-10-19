@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,12 +30,31 @@ export function BotChat({ botId }: { botId: string }) {
   const chat = useBotChat(botId);
   const [text, setText] = useState("");
   const anchorRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
+  // 浮层实高，写入等高 spacer：滚到底时把最后一条消息顶出浮层遮挡区。
+  const [composerHeight, setComposerHeight] = useState(0);
   const last = chat.entries[chat.entries.length - 1];
+  // version 里带上浮层实高：等高 spacer 在首次量到之前是不存在的，若只按消息内容
+  // 判定，scroll-follow 会在 spacer 长出来之前完成贴底，之后不再跟——首屏就停在
+  // 「最后一条消息被浮层压住」的位置（距离超过阈值还会被当成用户上翻）。高度变化
+  // 时重跑一次 follow，次序上早于滚动事件，atBottom 仍成立。
   useScrollFollow(
     anchorRef,
-    `${chat.entries.length}|${last?.message.id ?? ""}|${last?.message.content.text?.length ?? 0}`,
+    `${chat.entries.length}|${last?.message.id ?? ""}|${last?.message.content.text?.length ?? 0}|${composerHeight}`,
     !chat.loading,
   );
+
+  // 浮层容器本身 h-0，真正有高度的是内部绝对定位层，所以观察它。
+  // 首帧常处于 loading/error（浮层尚未挂载），结束后重新挂载时要补测一次。
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    const measure = () => setComposerHeight(el.offsetHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [chat.loading, chat.loadError]);
 
   const submit = async () => {
     const value = text.trim();
@@ -84,163 +103,180 @@ export function BotChat({ botId }: { botId: string }) {
 
   return (
     // 滚动容器由工作台中栏提供（useScrollFollow 找最近的可滚动祖先）；
-    // min-h-full + mt-auto 保证消息少时输入框仍贴在栏底；shrink-0 让
-    // 盒子高度始终覆盖全部内容（useScrollFollow 监听的正是这个盒子，
-    // 盒子被压缩时工具卡展开等高度变化不再触发跟随）。
+    // min-h-full + shrink-0 保证消息少时栏内仍有富余高度（浮层才能贴栏底），
+    // 且盒子高度始终覆盖全部内容（useScrollFollow 监听的正是这个盒子）。
     <div
       ref={anchorRef}
-      className="mx-auto flex min-h-full w-full max-w-3xl min-w-0 shrink-0 flex-col gap-4 px-4 py-4 md:px-6"
+      className="mx-auto flex min-h-full w-full max-w-3xl min-w-0 shrink-0 flex-col px-4 pt-4 md:px-6"
     >
-      {chat.runActive && (
-        <div
-          data-testid="bot-run-bar"
-          className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-sm"
-        >
-          <Badge variant="secondary" data-testid="bot-run-status">
-            {runBadge}
-          </Badge>
-          {chat.stopRequested ? (
-            <span className="text-xs text-muted-foreground">
-              已请求停止，等待当前步骤结束
-            </span>
-          ) : activeProgress ? (
-            // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
-            // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
-            <span
-              data-testid="bot-maintenance-progress"
-              className={cn(
-                "text-xs",
-                activeProgress.phase === "failed"
-                  ? "font-medium text-amber-600 dark:text-amber-400"
-                  : "text-muted-foreground",
-              )}
+      {/* 输入框之外的全部内容：flex-1 保证消息少时它撑满栏高、浮层贴底。 */}
+      <div className="flex flex-1 flex-col gap-4">
+        {chat.runActive && (
+          <div
+            data-testid="bot-run-bar"
+            className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-sm"
+          >
+            <Badge variant="secondary" data-testid="bot-run-status">
+              {runBadge}
+            </Badge>
+            {chat.stopRequested ? (
+              <span className="text-xs text-muted-foreground">
+                已请求停止，等待当前步骤结束
+              </span>
+            ) : activeProgress ? (
+              // 压缩阶段/失败原因（INT-115）：phase=failed 用醒目但非报错的
+              // 样式——压缩会继续在安全点重试或最终给出明确失败，不是致命错误。
+              <span
+                data-testid="bot-maintenance-progress"
+                className={cn(
+                  "text-xs",
+                  activeProgress.phase === "failed"
+                    ? "font-medium text-amber-600 dark:text-amber-400"
+                    : "text-muted-foreground",
+                )}
+              >
+                {activeProgress.message ||
+                  (activeProgress.phase === "failed"
+                    ? "上下文压缩遇到问题"
+                    : "正在整理上下文…")}
+              </span>
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                新消息将在安全点交给机器人
+              </span>
+            )}
+            {chat.activeRun?.usage_complete && chat.activeRun.total_tokens != null && (
+              <span className="ml-auto text-xs text-muted-foreground">
+                {chat.activeRun.total_tokens} tokens
+              </span>
+            )}
+            <Button
+              type="button"
+              size="xs"
+              variant="destructive"
+              className="ml-auto"
+              disabled={chat.stopping || chat.stopRequested}
+              aria-label={stopLabel}
+              title="向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行"
+              onClick={() => void chat.stopRun()}
             >
-              {activeProgress.message ||
-                (activeProgress.phase === "failed"
-                  ? "上下文压缩遇到问题"
-                  : "正在整理上下文…")}
-            </span>
-          ) : (
-            <span className="text-xs text-muted-foreground">
-              新消息将在安全点交给机器人
-            </span>
-          )}
-          {chat.activeRun?.usage_complete && chat.activeRun.total_tokens != null && (
-            <span className="ml-auto text-xs text-muted-foreground">
-              {chat.activeRun.total_tokens} tokens
-            </span>
-          )}
-          <Button
-            type="button"
-            size="xs"
-            variant="destructive"
-            className="ml-auto"
-            disabled={chat.stopping || chat.stopRequested}
-            aria-label={stopLabel}
-            title="向机器人发送一条「停止」消息，由它结合上下文决定是否结束运行"
-            onClick={() => void chat.stopRun()}
-          >
-            {chat.stopping && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
-            <Square className="mr-1 h-3 w-3 fill-current" />
-            请求停止
-          </Button>
-        </div>
-      )}
+              {chat.stopping && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+              <Square className="mr-1 h-3 w-3 fill-current" />
+              请求停止
+            </Button>
+          </div>
+        )}
 
-      {chat.hasMoreHistory && chat.entries.length > 0 && (
-        <div className="text-center">
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost"
-            className="text-muted-foreground"
-            disabled={chat.loadingOlder}
-            onClick={() => void chat.loadOlder()}
-          >
-            {chat.loadingOlder ? "加载中…" : "加载更早消息"}
-          </Button>
-          {chat.olderError != null && (
-            <p role="alert" className="text-xs text-destructive">
-              {botActionErrorText(chat.olderError, "更早消息加载失败")}
-            </p>
-          )}
-        </div>
-      )}
-
-      {chat.entries.length === 0 ? (
-        <p className="py-12 text-center text-sm text-muted-foreground">
-          和机器人打个招呼吧——它能查项目、改 Issue、开 T3 线程。
-        </p>
-      ) : (
-        <div className="space-y-3">
-          {chat.entries.map((entry) => (
-            <BotMessageView
-              key={`${entry.message.id}:${entry.draft ? "draft" : "msg"}`}
-              botId={botId}
-              message={entry.message}
-              draft={entry.draft}
-              calls={chat.calls}
-              busyCallId={chat.busyCallId}
-              callActionError={chat.callActionError}
-              onDecide={(callId, decision) =>
-                void chat.decide(callId, decision)
-              }
-              onCancelCall={(callId) => void chat.cancelCall(callId)}
-            />
-          ))}
-        </div>
-      )}
-
-      {chat.streamStatus === "reconnecting" && (
-        <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-          <RefreshCw className="h-3 w-3 animate-spin" />
-          实时连接中断，正在按序号补读…
-        </p>
-      )}
-      {chat.streamStatus === "error" && (
-        <p className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
-          实时连接已断开{chat.streamError ? `（${chat.streamError}）` : ""}
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            onClick={chat.resumeStream}
-          >
-            重连
-          </Button>
-        </p>
-      )}
-
-      <BotBackgroundCalls
-        botId={botId}
-        calls={chat.backgroundCalls}
-        busyCallId={chat.busyCallId}
-        actionError={chat.callActionError}
-        onCancel={(callId) => void chat.cancelCall(callId)}
-      />
-
-      <div className="sticky bottom-0 mt-auto -mx-1 bg-background/95 px-1 pt-2 pb-3 backdrop-blur">
-        <BotComposer
-          text={text}
-          onTextChange={setText}
-          onSubmit={() => void submit()}
-          submitting={chat.sending}
-          actions={<BotMetrics metrics={chat.metrics} />}
-          banner={
-            chat.runActive && !chat.stopRequested ? (
-              <p className="rounded-lg bg-primary/5 px-3 py-1.5 text-xs text-muted-foreground">
-                机器人正在处理中——现在发送的消息将在安全点交给机器人
+        {chat.hasMoreHistory && chat.entries.length > 0 && (
+          <div className="text-center">
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              className="text-muted-foreground"
+              disabled={chat.loadingOlder}
+              onClick={() => void chat.loadOlder()}
+            >
+              {chat.loadingOlder ? "加载中…" : "加载更早消息"}
+            </Button>
+            {chat.olderError != null && (
+              <p role="alert" className="text-xs text-destructive">
+                {botActionErrorText(chat.olderError, "更早消息加载失败")}
               </p>
-            ) : undefined
-          }
-          error={
-            chat.sendError != null
-              ? botActionErrorText(chat.sendError, "发送失败")
-              : chat.stopError != null
-                ? botActionErrorText(chat.stopError, "停止失败")
-                : undefined
-          }
+            )}
+          </div>
+        )}
+
+        {chat.entries.length === 0 ? (
+          <p className="py-12 text-center text-sm text-muted-foreground">
+            和机器人打个招呼吧——它能查项目、改 Issue、开 T3 线程。
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {chat.entries.map((entry) => (
+              <BotMessageView
+                key={`${entry.message.id}:${entry.draft ? "draft" : "msg"}`}
+                botId={botId}
+                message={entry.message}
+                draft={entry.draft}
+                calls={chat.calls}
+                busyCallId={chat.busyCallId}
+                callActionError={chat.callActionError}
+                onDecide={(callId, decision) =>
+                  void chat.decide(callId, decision)
+                }
+                onCancelCall={(callId) => void chat.cancelCall(callId)}
+              />
+            ))}
+          </div>
+        )}
+
+        {chat.streamStatus === "reconnecting" && (
+          <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+            <RefreshCw className="h-3 w-3 animate-spin" />
+            实时连接中断，正在按序号补读…
+          </p>
+        )}
+        {chat.streamStatus === "error" && (
+          <p className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+            实时连接已断开{chat.streamError ? `（${chat.streamError}）` : ""}
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={chat.resumeStream}
+            >
+              重连
+            </Button>
+          </p>
+        )}
+
+        <BotBackgroundCalls
+          botId={botId}
+          calls={chat.backgroundCalls}
+          busyCallId={chat.busyCallId}
+          actionError={chat.callActionError}
+          onCancel={(callId) => void chat.cancelCall(callId)}
         />
+      </div>
+
+      {/* 等高滚动余量：高度等于浮层实高（上方 ResizeObserver 实测）。滚到底
+          时它把最后一条消息顶出浮层遮挡区；滚动途中则留出空间，让消息从浮层
+          （半透明 + 模糊背景）下方穿过，而不是被硬截断。 */}
+      <div aria-hidden className="shrink-0" style={{ height: composerHeight }} />
+
+      {/* 输入框浮层：外层 h-0 只提供 sticky 贴底定位，不占内容高度；真正有
+          高度的是内部绝对定位层。空白区 pointer-events-none，不挡下方消息的
+          选择等交互，BotComposer 外再包 pointer-events-auto 恢复可点。 */}
+      <div className="sticky bottom-0 z-10 h-0">
+        <div
+          ref={composerRef}
+          className="pointer-events-none absolute inset-x-0 bottom-0 -mx-1 bg-background/95 px-1 pt-2 pb-3 backdrop-blur"
+        >
+          <div className="pointer-events-auto">
+            <BotComposer
+              text={text}
+              onTextChange={setText}
+              onSubmit={() => void submit()}
+              submitting={chat.sending}
+              actions={<BotMetrics metrics={chat.metrics} />}
+              banner={
+                chat.runActive && !chat.stopRequested ? (
+                  <p className="rounded-lg bg-primary/5 px-3 py-1.5 text-xs text-muted-foreground">
+                    机器人正在处理中——现在发送的消息将在安全点交给机器人
+                  </p>
+                ) : undefined
+              }
+              error={
+                chat.sendError != null
+                  ? botActionErrorText(chat.sendError, "发送失败")
+                  : chat.stopError != null
+                    ? botActionErrorText(chat.stopError, "停止失败")
+                    : undefined
+              }
+            />
+          </div>
+        </div>
       </div>
     </div>
   );
