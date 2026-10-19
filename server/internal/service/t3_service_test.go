@@ -2647,3 +2647,30 @@ func TestT3WSAuthInvalidErrorIsCredentialRejected(t *testing.T) {
 		t.Fatalf("EnvironmentAuthInvalidError must classify as credential rejected, got %v", err)
 	}
 }
+
+// 环境增删改本身不产生线程级增量：必须显式发布用户级全局刷新，否则去掉
+// 轮询后别的标签页会一直显示已删除/已新增的环境（Codex review P2）。
+func TestT3EnvironmentCRUDPublishesUserRefresh(t *testing.T) {
+	e := setupT3ServiceTest(t)
+	userID := e.createUser(t)
+	sub := e.hub.Subscribe(userID)
+	defer sub.Close()
+
+	isGlobal := func(ev T3ShellEvent) bool {
+		return ev.Full && ev.EnvironmentID == ""
+	}
+
+	envID := pairWritable(t, e, userID, "推送机")
+	awaitShellEvent(t, sub, isGlobal)
+
+	renamed := "推送机（改名）"
+	if _, err := e.env.Update(context.Background(), userID, envID, &UpdateT3EnvironmentRequest{Name: &renamed}); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	awaitShellEvent(t, sub, isGlobal)
+
+	if err := e.env.Delete(context.Background(), userID, envID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	awaitShellEvent(t, sub, isGlobal)
+}

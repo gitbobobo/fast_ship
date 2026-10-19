@@ -86,6 +86,8 @@ func (s *T3EnvironmentService) Create(ctx context.Context, userID string, req *C
 	// 落库即预热（INT-132）：新环境立即建立常驻订阅，不等第一次读取。失败只
 	// 记日志——订阅预热不影响创建结果，下次读取路径会照常准入。
 	s.ensureShellSubscription(env, "创建环境后")
+	// 环境列表也是推送驱动：其它标签页需要知道多了一个环境（INT-132）。
+	s.shellHub.PublishUserRefresh(userID)
 	return resp, nil
 }
 
@@ -215,6 +217,9 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 		}
 		env.Name = newName
 		env.UpdatedAt = update.UpdatedAt
+		// 改名/重配都会改变环境列表与线程页的展示（INT-132：列表不再轮询）：
+		// 让该用户的浏览器整棵线程子树刷新一次。
+		s.shellHub.PublishUserRefresh(userID)
 		if update.Pairing != nil {
 			env.Address = update.Pairing.Address
 			env.BearerTokenEncrypted = update.Pairing.BearerTokenEncrypted
@@ -293,6 +298,9 @@ func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) er
 	// 迟到的 Ensure（同代指纹可通过）——哨兵不给这类交错留窗口。环境 ID 不可
 	// 复用，永久拒绝正是该语义的正确表达。
 	s.shellHub.Drop(userID, id, math.MaxInt64)
+	// Drop 在 entry 处于重连退避时不会发出任何连接状态事件（监督循环直接
+	// 退出），别的标签页会一直显示已删除的环境；补一次全局失效（INT-132）。
+	s.shellHub.PublishUserRefresh(userID)
 	return nil
 }
 

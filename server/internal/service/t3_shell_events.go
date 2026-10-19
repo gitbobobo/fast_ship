@@ -237,3 +237,12 @@ func (b *t3ShellEventBatch) observeArchive(item *t3ArchiveStreamItem) {
 		b.full = true
 	}
 }
+
+// PublishUserRefresh 让该用户的浏览器整棵线程子树失效一次（Full 且不带
+// environment_id，前端按「全局刷新」处理）。环境增删改本身不产生线程级
+// 增量：删除时 entry 若正处在重连退避里，Drop 不会经 endFaceConnection
+// 发出任何事件；其它标签页就会一直显示已删除的环境，直到聚焦/手动刷新。
+// 环境 CRUD 成功后由 T3EnvironmentService 调用。
+func (h *t3ShellHub) PublishUserRefresh(userID string) {
+	h.publishToUser(userID, T3ShellEvent{Full: true})
+}

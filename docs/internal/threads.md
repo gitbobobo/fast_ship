@@ -297,7 +297,10 @@ hub 在数据路径上发布轻量事件（`t3_shell_events.go`），消费方�
 - 事件形状 `{environment_id, thread_ids[], full, state}`：`thread.updated/removed`
   带线程 ID；权威快照、项目增删、归档面失效与合并超限（>256 个线程 ID）置
   `full`（整环境重拉）；`state`（syncing/ready/stale/failed）表示连接状态翻转，
-  stale/failed 下失败原因文案变化同样发布。
+  stale/failed 下失败原因文案变化同样发布。环境创建/改名/重配/删除成功后再发
+  一条**无 environment_id 的 `full`**（用户级全局刷新）：这些操作不产生线程
+  增量，删除时 entry 若正在重连退避更不会发出任何连接事件，其它标签页否则会
+  一直显示已删除的环境。
 - 发布只做内存合并（同环境：`full` 逻辑或、线程 ID 并集、state 取最新）与非阻塞
   唤醒，绝不写网络、不持 entry/hub 锁；订阅注册表用独立的 `subsMu`，锁序
   `subsMu → 订阅锁`，不与 `hub.mu → entry.mu` 交叉。慢客户端不会反压订阅流：
