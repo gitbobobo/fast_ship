@@ -643,6 +643,64 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   的触发阈值，相关测试窗口上调到 8400（断言语义不变）。再改提示词文案时需要
   重新核对这批窗口余量（8400 下约 230 token）。
 
+## 机器人列表最近消息预览（INT-125）
+
+`GET /api/bots` 的每个 `Bot` 带 `last_message`（`{kind, text}` 或
+null），给三栏工作台的左侧列表当预览列。语义与约束：
+
+- **选取规则**：该机器人主线（`session_kind='main'`）`kind IN ('user',
+  'assistant')` 消息里 seq 最大的一条**正文 trim 后非空**者；正文取
+  `bot_messages.content_json`（json tag `content`）的 `text` 字段。正文纯空白
+  （只带 `tool_calls` 的 assistant、text 为空或全是换行/空格的模型输出）、
+  content 坏 JSON 的消息跳过并继续往前找；坏 JSON 经 `json_valid` 防护按
+  「没有正文」处理，不让列表查询失败。查询是单条 SQL（`repository.bot.go` 的
+  `LastMessagesByBotIDs`）：每个机器人沿 `(bot_id, session_kind, seq)` 复合
+  索引倒序找第一条命中即停，早退、无窗口函数全分区物化；整批一次往返，无
+  N+1。
+- **定时任务会话绝不参与**：`session_kind='schedule'` 的消息再新也不入选。
+- **仅列表端点返回**：`GET /api/bots/{id}` 与聊天快照等其它端点该字段恒为
+  null（`BotResponse.LastMessage` 无 omitempty，nil 序列化为显式 null，前端
+  按 null 处理）。openapi 标 nullable。
+- **text 不截断**：服务端返回完整正文，截断展示由前端负责；契约只含
+  `kind`/`text` 两个字段，不带回消息时间（左栏只读 `text`，`kind` 用于区分
+  「你：」前缀，`created_at` 无消费者故不进契约）。
+
+## 机器人三栏工作台（INT-125）
+
+`/bots` 与 `/bots/:botId` 不再是「表格列表页 + 独立详情页」，而是同一个
+三栏工作台（`web/src/components/bots/bot-workspace.tsx`）：左栏机器人列表、
+中栏主线聊天、右栏机器人详情。列表端点带 `last_message`，给左栏当预览列
+（选取规则见上节）。
+
+- **左栏**（`bot-list-panel.tsx`）：头像按名称 hash 取确定性颜色（无头像图，
+  `bot-avatar.tsx`），名称 + `last_message` 单行截断（user 消息加 muted 的
+  「你：」前缀）；选中项 `aria-current` 并高亮；新建入口是列头的「+」图标按钮。
+  移动端在选中机器人后隐藏，页头固定提供显式的「机器人列表」回列表入口
+  （不看历史栈——书签/新标签页深链时全局的「返回」是灰的）。
+- **中栏**：复用 `BotChat`，聊天逻辑不动。滚动容器由中栏自己提供（
+  `useScrollFollow` 找最近的可滚动祖先），`BotChat` 只负责 `min-h-full` +
+  `shrink-0`（盒子高度覆盖全部内容，跟随用的 ResizeObserver 才看得到工具卡
+  展开一类的高度变化）+ 输入框 `mt-auto` 贴底；未选机器人时是「从左侧选择
+  一个机器人」空状态。
+- **右栏**（`bot-detail-panel.tsx`，纯展示）：身份 + 「编辑」「授权管理」+ 定时任务
+  （默认展开，只读 + 启停）+ 配置摘要（模型/地址/Key 末四位/窗口/创建时间）
+  + 删除入口；桌面由可隐藏的 `aside` 承载，移动端由右侧 `Sheet` 承载（带
+  sr-only `SheetTitle`，辅助技术拿得到名字），`onHide` 由宿主决定语义
+  （隐藏右栏 / 关闭 Sheet）。两个宿主各挂一份展示面板，但编辑/授权/删除/
+  任务详情弹窗与定时任务展开态都在工作台持有**唯一一份**——与 issue 详情页
+  侧栏的既有约定一致；右栏随 `botId` 挂载而非详情数据（详情未回来时是
+  `bot-detail-skeleton`），切机器人时中栏宽度与页头标题都不跳。
+- **预览实时性**：`last_message` 只在列表端点取一次，之后由主线消息提交
+  （SSE `message_commit` / `user_message`，以及 REST 发送成功）**就地写进列表
+  缓存**（`use-bot-chat.ts` 的 `updateListPreview`）——不重取整表，用户自己的
+  消息立即显示为「你：…」。
+- **状态**：桌面「隐藏详情」（`panelHidden`，默认显示）与移动 Sheet
+  （`sheetOpen`，默认关闭）是两份互不影响的状态；隐藏状态不持久化，刷新
+  后回到默认显示。
+- **刻意没做的**：参考截图里的「添加标签」「资料库 / 电脑」tab 没有对应数据
+  模型，不实现；定时任务仍是只读 + 启停，不新增任务增删改入口（服务端只有
+  `enabled` 写端点）。
+
 ## 边界与决策
 
 - **身份**：机器人继承归属人身份（userID 恒取机器人归属人），全部端点仅
