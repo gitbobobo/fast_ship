@@ -10,7 +10,7 @@ import {
 import type { ThreadSummary } from "@/lib/api/threads";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { ProviderIcon } from "./provider-icon";
-import { ProjectBadge } from "./thread-card";
+import { ProjectBadge } from "./project-badge";
 
 function Row({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   return (
@@ -23,7 +23,11 @@ function Row({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   );
 }
 
-/** 详情页右侧信息卡（对齐 T3 右侧栏）：线程的环境、项目、分支、模型等元数据。 */
+/**
+ * 详情页右侧信息卡（对齐 T3 右侧栏）：线程的环境、项目、分支、模型等元数据。
+ * 显示与否跟随右栏容器宽度（@container，见 threads/layout.tsx）而非视口，
+ * 避免中等视口下把聊天区挤窄。
+ */
 export function ThreadInfoCard({
   thread,
   environmentId,
@@ -37,7 +41,7 @@ export function ThreadInfoCard({
     <aside
       data-testid="thread-info-card"
       aria-label="线程信息"
-      className="sticky top-20 mt-4 hidden w-64 shrink-0 self-start md:mt-6 lg:block xl:w-72"
+      className="sticky top-20 mt-4 hidden w-64 shrink-0 self-start md:mt-6 @4xl:block @5xl:w-72"
     >
       <div className="divide-y rounded-2xl border bg-card py-1 text-sm shadow-xs">
         <div className="py-1">

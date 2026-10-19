@@ -47,7 +47,8 @@ export function itemStatusLabel(status: string) {
 
 /** status 为空表示默认视图：除已归档外的全部线程。 */
 export interface ThreadFilters {
-  environmentIds: string[];
+  /** 环境单选，空串 = 全部环境。 */
+  environmentId: string;
   /** projectKey 值，空表示全部项目。 */
   project: string;
   status: ThreadStatus | "";
@@ -57,7 +58,7 @@ export interface ThreadFilters {
 }
 
 export const DEFAULT_THREAD_FILTERS: ThreadFilters = {
-  environmentIds: [],
+  environmentId: "",
   project: "",
   status: "",
   settled: "",
@@ -66,7 +67,7 @@ export const DEFAULT_THREAD_FILTERS: ThreadFilters = {
 
 export function isDefaultThreadFilters(filters: ThreadFilters) {
   return (
-    filters.environmentIds.length === 0 &&
+    !filters.environmentId &&
     !filters.project &&
     !filters.status &&
     !filters.settled &&
@@ -102,10 +103,7 @@ export function filterThreads(
     if (filters.settled && thread.settled !== (filters.settled === "settled")) {
       return false;
     }
-    if (
-      filters.environmentIds.length > 0 &&
-      !filters.environmentIds.includes(thread.environment_id)
-    ) {
+    if (filters.environmentId && thread.environment_id !== filters.environmentId) {
       return false;
     }
     if (filters.project && projectKey(thread) !== filters.project) {
@@ -113,6 +111,58 @@ export function filterThreads(
     }
     return !query || thread.title.toLowerCase().includes(query);
   });
+}
+
+/**
+ * 按线程状态分桶的计数。total 即该集合条数（= 各桶之和），与列表里可见的条数
+ * 一致：status 筛选为空时归档线程不计入任何桶。
+ */
+export interface ThreadStatusCounts {
+  running: number;
+  waiting: number;
+  idle: number;
+  archived: number;
+  total: number;
+}
+
+export interface EnvironmentCounts {
+  /** 「全部环境」行的按状态计数。 */
+  all: ThreadStatusCounts;
+  /** 每个环境的按状态计数；没有命中的环境不出现在表里。 */
+  byEnvironment: Map<string, ThreadStatusCounts>;
+}
+
+/**
+ * 侧栏环境分面计数：忽略 environmentId 这一项（选了环境也要看到其它环境还剩
+ * 多少），其余筛选照常叠加。每个环境（与整体）都按状态分桶。
+ */
+export function countThreadsByEnvironment(
+  threads: ThreadSummary[],
+  filters: ThreadFilters,
+): EnvironmentCounts {
+  const matched = filterThreads(threads, { ...filters, environmentId: "" });
+  const all: ThreadStatusCounts = {
+    running: 0,
+    waiting: 0,
+    idle: 0,
+    archived: 0,
+    total: 0,
+  };
+  const byEnvironment = new Map<string, ThreadStatusCounts>();
+  const bump = (bucket: ThreadStatusCounts, status: ThreadStatus) => {
+    bucket[status] += 1;
+    bucket.total += 1;
+  };
+  for (const t of matched) {
+    bump(all, t.status);
+    let bucket = byEnvironment.get(t.environment_id);
+    if (!bucket) {
+      bucket = { running: 0, waiting: 0, idle: 0, archived: 0, total: 0 };
+      byEnvironment.set(t.environment_id, bucket);
+    }
+    bump(bucket, t.status);
+  }
+  return { all, byEnvironment };
 }
 
 /** 项目筛选的稳定身份：环境 + 项目 id，不随项目改名或同名项目而变。 */

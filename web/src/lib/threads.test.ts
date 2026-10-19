@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ThreadSummary } from "@/lib/api/threads";
 import {
   DEFAULT_THREAD_FILTERS,
+  countThreadsByEnvironment,
   filterThreads,
   formatRunMinutes,
   isDefaultThreadFilters,
@@ -67,12 +68,9 @@ describe("filterThreads", () => {
     ).toEqual(["2"]);
   });
 
-  it("combines multi-environment, project, status and case-insensitive title filters", () => {
+  it("combines environment, project, status and case-insensitive title filters", () => {
     expect(
-      filterThreads(threads, { ...DEFAULT_THREAD_FILTERS, environmentIds: ["e1", "e2"] }),
-    ).toHaveLength(2);
-    expect(
-      filterThreads(threads, { ...DEFAULT_THREAD_FILTERS, environmentIds: ["e2"] }).map((t) => t.id),
+      filterThreads(threads, { ...DEFAULT_THREAD_FILTERS, environmentId: "e2" }).map((t) => t.id),
     ).toEqual(["3"]);
     expect(
       filterThreads(threads, {
@@ -101,6 +99,147 @@ describe("filterThreads", () => {
     expect(ids({ settled: "unsettled", status: "archived" })).toEqual(["d"]);
     expect(ids({ settled: "unsettled", status: "running" })).toEqual(["b"]);
     expect(ids({ settled: "settled", status: "running" })).toEqual([]);
+  });
+});
+
+describe("countThreadsByEnvironment", () => {
+  const threads = [
+    thread({ id: "1", title: "Login" }),
+    thread({ id: "2", status: "archived", title: "Old" }),
+    thread({ id: "3", environment_id: "e2", environment_name: "Linux", title: "Deploy" }),
+    thread({ id: "4", environment_id: "e2", environment_name: "Linux", status: "running", title: "Ship it" }),
+  ];
+
+  it("counts matched threads per status, per environment and in total", () => {
+    const counts = countThreadsByEnvironment(threads, DEFAULT_THREAD_FILTERS);
+    expect(counts.all).toEqual({
+      running: 1,
+      waiting: 0,
+      idle: 2,
+      archived: 0,
+      total: 3,
+    });
+    expect(counts.byEnvironment.get("e1")).toEqual({
+      running: 0,
+      waiting: 0,
+      idle: 1,
+      archived: 0,
+      total: 1,
+    });
+    expect(counts.byEnvironment.get("e2")).toEqual({
+      running: 1,
+      waiting: 0,
+      idle: 1,
+      archived: 0,
+      total: 2,
+    });
+  });
+
+  it("keeps total consistent with the per-status buckets and the visible list", () => {
+    const list = [thread({ id: "w", status: "waiting" }), ...threads];
+    const counts = countThreadsByEnvironment(list, DEFAULT_THREAD_FILTERS);
+    const { total, ...buckets } = counts.all;
+    expect(Object.values(buckets).reduce((sum, n) => sum + n, 0)).toBe(total);
+    expect(total).toBe(
+      filterThreads(list, { ...DEFAULT_THREAD_FILTERS, environmentId: "" })
+        .length,
+    );
+    expect(counts.all.waiting).toBe(1);
+  });
+
+  it("ignores the environment selection so other environments stay countable", () => {
+    const filters = { ...DEFAULT_THREAD_FILTERS, environmentId: "e2" };
+    const counts = countThreadsByEnvironment(threads, filters);
+    expect(counts.all.total).toBe(3);
+    expect(counts.byEnvironment.get("e1")?.total).toBe(1);
+    expect(counts.byEnvironment.get("e2")?.total).toBe(2);
+  });
+
+  it("stacks the remaining filters (query, status) into the counts", () => {
+    const byStatus = countThreadsByEnvironment(threads, {
+      ...DEFAULT_THREAD_FILTERS,
+      status: "running",
+    });
+    expect(byStatus.byEnvironment.get("e2")).toEqual({
+      running: 1,
+      waiting: 0,
+      idle: 0,
+      archived: 0,
+      total: 1,
+    });
+    expect(byStatus.all.total).toBe(1);
+    const byQuery = countThreadsByEnvironment(threads, {
+      ...DEFAULT_THREAD_FILTERS,
+      query: "login",
+    });
+    expect(byQuery.all.total).toBe(1);
+    expect(byQuery.byEnvironment.get("e1")?.idle).toBe(1);
+    expect(byQuery.byEnvironment.has("e2")).toBe(false);
+  });
+
+  it("does not count archived threads unless archived status is selected", () => {
+    const counts = countThreadsByEnvironment(threads, DEFAULT_THREAD_FILTERS);
+    expect(counts.all.archived).toBe(0);
+    expect(counts.byEnvironment.get("e1")?.total).toBe(1);
+    const archived = countThreadsByEnvironment(threads, {
+      ...DEFAULT_THREAD_FILTERS,
+      status: "archived",
+    });
+    expect(archived.all).toEqual({
+      running: 0,
+      waiting: 0,
+      idle: 0,
+      archived: 1,
+      total: 1,
+    });
+    expect(archived.byEnvironment.get("e1")?.archived).toBe(1);
+    expect(archived.byEnvironment.has("e2")).toBe(false);
+  });
+
+  it("counts settled threads into the environment buckets (they live in the collapsed section)", () => {
+    const mixed = [
+      thread({ id: "open", environment_id: "e1" }),
+      thread({ id: "done-1", environment_id: "e1", settled: true }),
+      thread({ id: "done-2", environment_id: "e1", settled: true }),
+    ];
+    const counts = countThreadsByEnvironment(mixed, DEFAULT_THREAD_FILTERS);
+    // 默认视图里这 3 条都命中（2 条已完结收在折叠区），pill 数字按命中数算。
+    expect(counts.byEnvironment.get("e1")).toEqual({
+      running: 0,
+      waiting: 0,
+      idle: 3,
+      archived: 0,
+      total: 3,
+    });
+    // 选了「未完结」后已完结不再计入。
+    const unsettled = countThreadsByEnvironment(mixed, {
+      ...DEFAULT_THREAD_FILTERS,
+      settled: "unsettled",
+    });
+    expect(unsettled.byEnvironment.get("e1")?.total).toBe(1);
+  });
+
+  it("folds project and settled filters into the counts", () => {
+    const scoped = [
+      thread({ id: "a", project_id: "p2", project_name: "Beta" }),
+      thread({ id: "b" }),
+      thread({ id: "c", environment_id: "e2", project_id: "p2", project_name: "Beta" }),
+      thread({ id: "d", project_id: "p3", project_name: "Gamma", settled: true }),
+    ];
+    const byProject = countThreadsByEnvironment(scoped, {
+      ...DEFAULT_THREAD_FILTERS,
+      project: "e1:p1",
+    });
+    expect(byProject.all.total).toBe(1);
+    expect(byProject.byEnvironment.get("e1")?.total).toBe(1);
+    expect(byProject.byEnvironment.has("e2")).toBe(false);
+
+    const settled = countThreadsByEnvironment(scoped, {
+      ...DEFAULT_THREAD_FILTERS,
+      settled: "settled",
+    });
+    expect(settled.all.total).toBe(1);
+    expect(settled.byEnvironment.get("e1")?.total).toBe(1);
   });
 });
 

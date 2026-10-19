@@ -62,6 +62,7 @@ const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
 const QuotaPage = lazy(() => import("@/routes/quota/index"));
 const BotsPage = lazy(() => import("@/routes/bots/index"));
 const BotDetailPage = lazy(() => import("@/routes/bots/$botId"));
+const ThreadsLayout = lazy(() => import("@/routes/threads/layout"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
 const NewThreadPage = lazy(() => import("@/routes/threads/new"));
 const ThreadDetailPage = lazy(
@@ -146,18 +147,21 @@ export default function App() {
                 path="/documents"
                 element={<LazyPage render={<DocumentsPage />} />}
               />
-              <Route
-                path="/threads"
-                element={<LazyPage render={<ThreadsPage />} />}
-              />
+              {/* 新建页保持整页，不套 /threads 的主从两栏 */}
               <Route
                 path="/threads/new"
                 element={<LazyPage render={<NewThreadPage />} />}
               />
               <Route
-                path="/threads/:environmentId/:threadId"
-                element={<LazyPage render={<ThreadDetailPage />} />}
-              />
+                path="/threads"
+                element={<LazyPage render={<ThreadsLayout />} />}
+              >
+                <Route index element={<LazyPage render={<ThreadsPage />} />} />
+                <Route
+                  path=":environmentId/:threadId"
+                  element={<LazyPage render={<ThreadDetailPage />} />}
+                />
+              </Route>
               <Route
                 path="/board"
                 element={<LazyPage render={<BoardPage />} />}
