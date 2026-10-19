@@ -525,37 +525,48 @@ func (s *BotService) deleteScheduleTask(botID, taskID string) error {
 
 // BotScheduleRunResponse 是定时任务运行记录的 API 投影。
 type BotScheduleRunResponse struct {
-	ID           string  `json:"id"`
-	TaskID       *string `json:"task_id"`
-	Status       string  `json:"status"`
-	Summary      string  `json:"summary"`
-	Silent       bool    `json:"silent"`
-	ErrorCode    *string `json:"error_code,omitempty"`
-	ErrorMessage *string `json:"error_message,omitempty"`
-	ScheduledFor *string `json:"scheduled_for"`
-	StartedAt    *string `json:"started_at"`
-	FinishedAt   *string `json:"finished_at"`
-	DurationMS   *int64  `json:"duration_ms"`
-	PromptTokens *int64  `json:"prompt_tokens,omitempty"`
-	Completion   *int64  `json:"completion_tokens,omitempty"`
-	TotalTokens  *int64  `json:"total_tokens,omitempty"`
+	ID            string  `json:"id"`
+	TaskID        *string `json:"task_id"`
+	Status        string  `json:"status"`
+	Summary       string  `json:"summary"`
+	Silent        bool    `json:"silent"`
+	TriggerSource string  `json:"trigger_source"`
+	ErrorCode     *string `json:"error_code,omitempty"`
+	ErrorMessage  *string `json:"error_message,omitempty"`
+	ScheduledFor  *string `json:"scheduled_for"`
+	StartedAt     *string `json:"started_at"`
+	FinishedAt    *string `json:"finished_at"`
+	DurationMS    *int64  `json:"duration_ms"`
+	PromptTokens  *int64  `json:"prompt_tokens,omitempty"`
+	Completion    *int64  `json:"completion_tokens,omitempty"`
+	TotalTokens   *int64  `json:"total_tokens,omitempty"`
+}
+
+// botTriggerSourceLabel 把触发来源投影为 API 标签：定时任务的运行只会来自
+// cron 派发或手动触发（INT-121）；runs 动作与用户 REST 列表共用这一投影。
+func botTriggerSourceLabel(src model.BotRunTrigger) string {
+	if src == model.BotTriggerManual {
+		return "manual"
+	}
+	return "cron"
 }
 
 func botScheduleRunResponseOf(run *model.BotRun) BotScheduleRunResponse {
 	resp := BotScheduleRunResponse{
-		ID:           run.ID,
-		TaskID:       run.ScheduleTaskID,
-		Status:       string(run.Status),
-		Summary:      run.Summary,
-		Silent:       run.Silent,
-		ErrorCode:    run.ErrorCode,
-		ErrorMessage: run.ErrorMessage,
-		ScheduledFor: rfc3339(run.ScheduledFor),
-		StartedAt:    rfc3339(run.StartedAt),
-		FinishedAt:   rfc3339(run.FinishedAt),
-		PromptTokens: run.PromptTokens,
-		Completion:   run.CompletionTokens,
-		TotalTokens:  run.TotalTokens,
+		ID:            run.ID,
+		TaskID:        run.ScheduleTaskID,
+		Status:        string(run.Status),
+		Summary:       run.Summary,
+		Silent:        run.Silent,
+		TriggerSource: botTriggerSourceLabel(run.TriggerSource),
+		ErrorCode:     run.ErrorCode,
+		ErrorMessage:  run.ErrorMessage,
+		ScheduledFor:  rfc3339(run.ScheduledFor),
+		StartedAt:     rfc3339(run.StartedAt),
+		FinishedAt:    rfc3339(run.FinishedAt),
+		PromptTokens:  run.PromptTokens,
+		Completion:    run.CompletionTokens,
+		TotalTokens:   run.TotalTokens,
 	}
 	if run.StartedAt != nil && run.FinishedAt != nil {
 		ms := run.FinishedAt.Sub(*run.StartedAt).Milliseconds()
@@ -683,6 +694,19 @@ func (s *BotService) execScheduleTool(call *model.BotToolCall) (string, error) {
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
 	}
+	// dry_run 只配合 run（与 botActionRules 的 Forbidden 同一规则，这里兜底
+	// 执行器直接调用的路径）：其它分支不读 dry_run，若放行，带预览标记的
+	// delete/update 等请求仍会产生真实写入。按原始参数判存在（含 null），
+	// 归一化会把 null 变回「未提供」。
+	if args.Action != "run" {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &raw); err != nil {
+			return "", errs.ErrInvalidParams
+		}
+		if _, ok := raw["dry_run"]; ok {
+			return "", errs.New(errs.ErrInvalidParams.Code, "fs_schedule 只有 run 动作接受 dry_run")
+		}
+	}
 	switch args.Action {
 	case "list":
 		return s.execScheduleList(call, &args)
@@ -694,10 +718,146 @@ func (s *BotService) execScheduleTool(call *model.BotToolCall) (string, error) {
 		return s.execScheduleDelete(call, &args)
 	case "runs":
 		return s.execScheduleRuns(call, &args)
+	case "run":
+		return s.execScheduleRun(call, &args)
 	case "enable", "disable":
 		return s.execScheduleEnable(call, &args, args.Action == "enable")
 	}
 	return "", errs.New(errs.ErrInvalidParams.Code, "不支持的 fs_schedule 动作: "+args.Action)
+}
+
+// execScheduleRun 立即手动触发一次任务（INT-121）。dry_run=true 是只读预览：
+// 返回任务配置与从 now 起算的下次计划，标注 busy，不建运行记录、不执行。
+// 真触发回执只表示「已受理」：执行在独立 schedule 会话里异步进行，终态用
+// runs 查询。
+func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
+	taskID := strings.TrimSpace(args.TaskID)
+	task, err := s.schedTasks.FindByIDAndBot(taskID, call.BotID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errs.ErrBotScheduleTaskNotFound
+		}
+		return "", errs.ErrInternal
+	}
+	if args.DryRunBool() {
+		busy, err := s.runs.CountUnfinishedByScheduleTaskTx(s.db, call.BotID, taskID)
+		if err != nil {
+			return "", errs.ErrInternal
+		}
+		out := map[string]interface{}{
+			"ok": true, "dry_run": true, "task_id": task.ID, "name": task.Name,
+			"instruction": task.Instruction, "cron_expression": task.CronExpression,
+			"timezone": task.Timezone, "enabled": task.Enabled,
+			"needs_report": task.NeedsReport, "busy": busy > 0,
+			"note": "预览：未创建运行记录、未执行指令；busy=true 表示当前已有未结束的运行",
+		}
+		// 预览始终给出有效模型（任务覆盖优先，否则机器人当前模型）：真实运行
+		// 建 run 时会按同一优先级冻结模型，调用方要能核对会用哪个。只读查询、
+		// 不进事务，预览保持零副作用。
+		effectiveModel := task.Model
+		if effectiveModel == "" {
+			botRow, err := s.bots.Get(call.BotID)
+			if err != nil {
+				return "", errs.ErrInternal
+			}
+			effectiveModel = botRow.Model
+		}
+		out["model"] = effectiveModel
+		// 下次计划从 now 起算（与启用/修改任务同一解析路径）：停用任务的
+		// next_run_at 是空的，这里仍给出「若启用会何时触发」。
+		if _, next, parseErr := parseAutomationCron(task.CronExpression, task.Timezone, time.Now().UTC()); parseErr == nil {
+			loc := timeOrUTC(task.Timezone)
+			out["next_run_at"] = next.In(loc).Format("2006-01-02 15:04:05 MST")
+			out["next_run_at_utc"] = next.UTC().Format(time.RFC3339)
+		}
+		return botMarshalResult(out)
+	}
+	// 显式手动触发就是一次执行：不要求任务 enabled（停用任务只是不再按 cron
+	// 触发，手动单跑是用户的明确意图）。
+	run, err := s.manuallyStartScheduleRun(call.BotID, task)
+	if err != nil {
+		return "", err
+	}
+	return botMarshalResult(map[string]interface{}{
+		"ok": true, "accepted": true,
+		"run_id": run.ID, "task_id": task.ID,
+		"status":         string(run.Status),
+		"trigger_source": "manual",
+		"note":           "已受理并在独立 schedule 会话中执行；回执只表示已开始，用 action=runs task_id=" + task.ID + " 查询终态与产出",
+	})
+}
+
+// manuallyStartScheduleRun 为手动触发建一条 schedule run：忙碌检查与建 run
+// 在同一事务里（MaxOpenConns(1) 下事务即串行化，检查通过即无并发窗口）；
+// 同一任务已有未结束运行（cron 或手动）时返回 ErrBotScheduleRunBusy，不排队。
+// 配置快照与密钥密文按 cron 派发同一方式在事务内冻结；提交后由调用方唤醒
+// 执行槽（wakeScheduleRun），执行路径与 cron 触发完全相同。
+func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotScheduleTask) (*model.BotRun, error) {
+	now := time.Now().UTC()
+	var run *model.BotRun
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		// 事务内重读任务：工具层查到的快照可能已过期（改指令/删任务与触发
+		// 并发时，按库里的最新配置执行）。
+		taskRepo := repository.NewBotScheduleTaskRepository(tx)
+		current, err := taskRepo.FindByIDAndBot(task.ID, botID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotScheduleTaskNotFound
+			}
+			return err
+		}
+		busy, err := repository.NewBotRunRepository(tx).CountUnfinishedByScheduleTaskTx(tx, botID, current.ID)
+		if err != nil {
+			return err
+		}
+		if busy > 0 {
+			return errs.ErrBotScheduleRunBusy
+		}
+		var botRow model.Bot
+		if err := tx.Where("id = ?", botID).First(&botRow).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotNotFound
+			}
+			return err
+		}
+		// 冻结有效配置：任务可覆盖模型；密钥密文与 base_url 成对冻结，
+		// 语义与 dispatchDueScheduleTask 一致。
+		snap := botSnapshotOf(&botRow)
+		if current.Model != "" {
+			snap.Model = current.Model
+		}
+		started := now
+		taskID := current.ID
+		run = &model.BotRun{
+			ID: uuid.NewString(), BotID: botID,
+			TriggerSource: model.BotTriggerManual,
+			// 手动触发没有计划时间可幂等：用新 UUID 保证同一任务可重复手动
+			// 触发，唯一 (bot_id, trigger_key) 只挡重复投递。
+			TriggerKey:              "manual:" + taskID + ":" + uuid.NewString(),
+			Status:                  model.BotRunStatusRunning,
+			SessionKind:             model.BotSessionKindSchedule,
+			Summary:                 "",
+			ScheduleTaskID:          &taskID,
+			StartedAt:               &started,
+			ConfigSnapshotJSON:      marshalJSONString(snap),
+			APIKeyEncryptedSnapshot: append([]byte(nil), botRow.APIKeyEncrypted...),
+			TriggerContextJSON: marshalJSONString(map[string]interface{}{
+				"task_id": current.ID, "task_name": current.Name,
+				"needs_report": current.NeedsReport, "trigger": "manual",
+			}),
+			CreatedAt: now,
+		}
+		return repository.NewBotRunRepository(tx).CreateTx(tx, run)
+	})
+	if txErr != nil {
+		if appErr, ok := txErr.(*errs.AppError); ok {
+			return nil, appErr
+		}
+		return nil, errs.ErrInternal
+	}
+	// 提交后补唤醒：执行槽载入失败还有 5s 扫描兜底，这里让启动更快。
+	s.wakeScheduleRun(botID, run.ID)
+	return run, nil
 }
 
 // execScheduleList 分页列出任务：total 是真实总数，has_more 提示还有更旧的

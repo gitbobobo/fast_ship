@@ -9004,7 +9004,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `run` | object | 否 |  |
 | `run.id` | string | 是 |  |
 | `run.bot_id` | string | 是 |  |
-| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `run.trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `run.trigger_key` | string | 是 |  |
 | `run.status` | string | 是 | queued / running / completed / failed / stopped |
 | `run.config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9119,7 +9119,7 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs` | object[] | 是 |  |
 | `runs[].id` | string | 是 |  |
 | `runs[].bot_id` | string | 是 |  |
-| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `runs[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `runs[].trigger_key` | string | 是 |  |
 | `runs[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `runs[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9247,7 +9247,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].bot_id` | string | 是 |  |
-| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `items[].trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `items[].trigger_key` | string | 是 |  |
 | `items[].status` | string | 是 | queued / running / completed / failed / stopped |
 | `items[].config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9297,7 +9297,7 @@ done 携带 run 终态，error 携带 code/message（顺序固定 error → done
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9351,7 +9351,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | --- | --- | --- | --- |
 | `id` | string | 是 |  |
 | `bot_id` | string | 是 |  |
-| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
 | `trigger_key` | string | 是 |  |
 | `status` | string | 是 | queued / running / completed / failed / stopped |
 | `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
@@ -9420,6 +9420,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `items[].last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
 | `items[].last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `items[].last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `items[].last_run.trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `items[].last_run.error_code` | string | 否 |  |
 | `items[].last_run.error_message` | string | 否 |  |
 | `items[].last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
@@ -9479,6 +9480,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
 | `last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `last_run.trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `last_run.error_code` | string | 否 |  |
 | `last_run.error_message` | string | 否 |  |
 | `last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
@@ -9533,6 +9535,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `items[].status` | string | 是 | running / completed / failed / stopped / skipped |
 | `items[].summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `items[].silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `items[].trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `items[].error_code` | string | 否 |  |
 | `items[].error_message` | string | 否 |  |
 | `items[].scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
@@ -9603,6 +9606,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
 | `last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
 | `last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `last_run.trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
 | `last_run.error_code` | string | 否 |  |
 | `last_run.error_message` | string | 否 |  |
 | `last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |

@@ -127,3 +127,29 @@ type botThreadArgsV4 struct {
 	ItemLimit  int `json:"item_limit,omitempty" jsonschema:"description=get 可选；返回的线程条目条数（默认 50，上限 200）"`
 	ItemOffset int `json:"item_offset,omitempty" jsonschema:"description=get 可选；条目偏移（从 0 起，配合 item_limit 向前翻完整历史）"`
 }
+
+// botScheduleTaskArgsV5 是 v5（INT-120）的 fs_schedule 参数：7 个管理动作、
+// 无 dry_run。INT-121 的 run/dry_run 只进 v6，本副本与 v5 发布时逐标签一致，
+// 保证 v3/v4/v5 冻结会话的 tools_hash 不回退（基线见 bot_int103_test.go 与
+// bot_int120_test.go）。不要改动本结构体的任何标签。
+type botScheduleTaskArgsV5 struct {
+	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=enable,enum=disable,required"`
+	// TaskID 是任务 ID（update/delete/runs/enable/disable 必填；create 禁止）。
+	TaskID string `json:"task_id,omitempty" jsonschema:"description=任务 ID（update/delete/runs/enable/disable 必填）"`
+	// Name 任务名（create 必填；update 提供即改）。
+	Name string `json:"name,omitempty" jsonschema:"description=任务名（create 必填；update 可改）"`
+	// Cron 标准五字段表达式 分 时 日 月 周（create 必填；update 提供即改）。
+	Cron string `json:"cron,omitempty" jsonschema:"description=cron 表达式，标准五字段（分 时 日 月 周；create 必填；update 提供即改）"`
+	// Timezone 是 IANA 名称；空串=UTC。update 传空保持原值，显式换时区传 UTC。
+	Timezone string `json:"timezone,omitempty" jsonschema:"description=时区，IANA 名称如 Asia/Shanghai（可选，默认 UTC；update 提供即改）"`
+	// Instruction 是每次运行交给机器人的任务指令（create 必填；update 提供即改）。
+	Instruction string `json:"instruction,omitempty" jsonschema:"description=任务指令：每次运行交给你的目标说明（create 必填；update 可改）"`
+	// Model 可选：省略则保持原值（update）/用机器人当前模型（create）；
+	// 显式传空串清除覆盖，回到机器人当前模型。
+	Model *string `json:"model,omitempty" jsonschema:"description=运行使用的模型名（可选；省略则保持不变或跟随机器人当前模型，传空串清除覆盖）"`
+	// NeedsReport 标记成功且非静默的运行是否也追加事件进主线。
+	NeedsReport *bool `json:"needs_report,omitempty" jsonschema:"description=运行是否需要汇报（可选；true 时成功且非静默的运行也会通知主线）"`
+	// Limit/Offset 是 runs/list 的分页参数。
+	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
+	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
+}

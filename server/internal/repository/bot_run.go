@@ -89,6 +89,17 @@ func (r *BotRunRepository) LatestByScheduleTask(botID, taskID string) (*model.Bo
 	return &run, nil
 }
 
+// CountUnfinishedByScheduleTaskTx 统计任务未结束的运行（cron 与手动触发共用）。
+// 手动触发（INT-121）的忙碌检查与建 run 必须在同一事务里调用（MaxOpenConns(1)
+// 下事务即串行化）；只读预览可传根连接。
+func (r *BotRunRepository) CountUnfinishedByScheduleTaskTx(tx *gorm.DB, botID, taskID string) (int64, error) {
+	var n int64
+	err := tx.Model(&model.BotRun{}).
+		Where("bot_id = ? AND schedule_task_id = ? AND finished_at IS NULL", botID, taskID).
+		Count(&n).Error
+	return n, err
+}
+
 func (r *BotRunRepository) ListActive() ([]model.BotRun, error) {
 	var rows []model.BotRun
 	err := r.db.Where("finished_at IS NULL").Find(&rows).Error

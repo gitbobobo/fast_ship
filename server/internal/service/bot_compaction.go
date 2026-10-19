@@ -1677,6 +1677,13 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	if to >= 6 && from < 6 {
+		note := "工具集已升级：fs_schedule 新增 run 动作（立即手动执行一次，dry_run=true 只预览；同一任务已有未结束运行时拒绝，手动触发不要求任务启用），运行记录新增 trigger_source 区分 cron/manual"
+		if from < 5 {
+			note += "；fs_thread list 支持 env_id/query 过滤，分页响应新增 offset（实际切片起点）；fs_issue get 的 labels/checklist 恒返回数组（没有时为空数组）"
+		}
+		return note
+	}
 	if to >= 5 && from < 5 {
 		return "工具集已升级：fs_thread list 支持 env_id/query 过滤，分页响应新增 offset（实际切片起点）；fs_issue get 的 labels/checklist 恒返回数组（没有时为空数组）"
 	}

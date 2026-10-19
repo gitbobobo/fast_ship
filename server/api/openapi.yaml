@@ -12455,7 +12455,7 @@ components:
           type: string
         trigger_source:
           type: string
-          description: user_message / tool_result / recovery / schedule
+          description: user_message / tool_result / recovery / schedule / manual
         trigger_key:
           type: string
         status:
@@ -12550,7 +12550,7 @@ components:
 
     BotScheduleRun:
       type: object
-      required: [id, task_id, status, summary, silent, scheduled_for, started_at, finished_at, duration_ms]
+      required: [id, task_id, status, summary, silent, trigger_source, scheduled_for, started_at, finished_at, duration_ms]
       properties:
         id:
           type: string
@@ -12566,6 +12566,9 @@ components:
         silent:
           type: boolean
           description: true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报
+        trigger_source:
+          type: string
+          description: 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121）
         error_code:
           type: string
         error_message:

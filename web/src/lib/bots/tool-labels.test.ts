@@ -18,6 +18,7 @@ describe("toolActionLabel", () => {
     expect(toolActionLabel("fs_thread", "launch")).toBe("启动线程");
     expect(toolActionLabel("fs_thread", "send")).toBe("向线程发送消息");
     expect(toolActionLabel("fs_schedule", "create")).toBe("创建定时任务");
+    expect(toolActionLabel("fs_schedule", "run")).toBe("立即运行定时任务");
     expect(toolActionLabel("fs_memory", "append")).toBe("追加记忆内容");
   });
 
@@ -35,6 +36,7 @@ describe("toolActionEffect", () => {
     // fs_schedule 的写是同步执行、不需确认，但仍是写入。
     expect(toolActionEffect("fs_schedule", "delete")).toBe("write");
     expect(toolActionEffect("fs_schedule", "runs")).toBe("read");
+    expect(toolActionEffect("fs_schedule", "run")).toBe("write");
     expect(toolActionEffect("fs_memory", "restore")).toBe("write");
     expect(toolActionEffect("fs_result", "read")).toBe("read");
     expect(toolActionEffect("fs_cancel", "cancel")).toBe("write");

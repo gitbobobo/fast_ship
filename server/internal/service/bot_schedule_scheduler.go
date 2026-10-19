@@ -301,7 +301,7 @@ func (s *BotService) wakeScheduleRun(botID, runID string) {
 		return
 	}
 	slot := botScheduleSlotKey(runID)
-	if s.rt.acquire(slot, &botWake{Trigger: model.BotTriggerSchedule, Key: run.TriggerKey}) == nil {
+	if s.rt.acquire(slot, &botWake{Trigger: run.TriggerSource, Key: run.TriggerKey}) == nil {
 		return
 	}
 	go s.runScheduleSlot(botID, runID)

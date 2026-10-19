@@ -119,10 +119,10 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 同步立即落库），另加 `fs_memory_search`；v3（INT-103）起 `fs_schedule`
 开放定时任务管理（见下节）；v4（INT-110）修正 action 枚举并新增线程/Issue
 字段；v5（INT-120）让 `fs_thread list` 真正支持 `env_id`/`query` 过滤并
-修正这两个参数的 schema 描述。已发布版本（v1–v4）的注册表都是**独立冻结的
-字面量**——新版本变化不得改写旧版本的字节（存量会话的 tools_hash 失稳即
-前缀失稳）。
-版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
+修正这两个参数的 schema 描述；v6（INT-121）起 `fs_schedule` 新增 `run`
+（手动立即执行一次）与 `dry_run` 预览（见下节）。已发布版本（v1–v5）的
+注册表都是**冻结副本**——新版本变化不得改写旧版本的字节（存量会话的
+tools_hash 失稳即前缀失稳；v1–v5 的 hash 逐字节钉死在测试基线里）。版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
 规则并递增 prompt_revision）；告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
@@ -379,20 +379,37 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
 - **静默约定**：运行时上下文明确要求「无话可说只回复一行 `[[SILENT]]`」。
   收尾取本 run 最后一条 assistant 正文，去尾部空白与句号后等于哨兵即
   `silent=true`，summary 记空串；否则 summary 取正文并截断到 2000 字符。
-- **工具**：`fs_schedule`（v3）动作固定 7 个：`list/create/update/delete/
-  runs/enable/disable`，全部同步执行、立即生效。create/update 校验 cron 五
-  字段与时区，结果带 `next_run_at` 与 cron/时区原文，让模型能在回复里用中文
-  说明执行时间。update 省略字段即保留；`model` 用指针区分「未提供」与「空串」
+- **工具**：`fs_schedule`（v3 起）动作 v6 为 8 个：`list/create/update/
+  delete/runs/run/enable/disable`，全部同步执行、立即生效。create/update 校验
+  cron 五字段与时区，结果带 `next_run_at` 与 cron/时区原文，让模型能在回复里用
+  中文说明执行时间。update 省略字段即保留；`model` 用指针区分「未提供」与「空串」
   ——传空串明确清除模型覆盖、回到机器人当前模型。`list` 支持 `limit`/`offset`
   分页（默认且最多 200），返回真实 `total` 与 `has_more`：把截断结果当总量会让
   旧任务不可达、也就无从管理。旧占位动作 `fs_schedule/status` 走改名映射回结构化提示
   （冻结在 v1/v2 的会话仍可用 status 查询可用性）。
+- **手动立即触发（INT-121，v6 的 `run` 动作）**：动机——新建或修改任务后只能
+  等下一个 cron 时点才能验证效果，手动复述不等于调度器真的跑通，也不产生
+  runs 记录。`run`（`task_id` 必填）在同一事务里核对忙碌并建 run
+  （MaxOpenConns(1) 下事务即串行化）：同一任务已有未结束运行（cron 或手动）
+  时返回 40930 `ErrBotScheduleRunBusy` 明确拒绝——**不排队**，排队的「手动跑一次
+  验证」会变成不知何时执行的第二跑。显式手动触发就是一次执行，**不要求任务
+  enabled**（停用只停止 cron 触发）。`trigger_source=manual`、`trigger_key =
+  manual:<task_id>:<新 UUID>`（可重复触发且唯一）、`scheduled_for` 为 nil；
+  配置快照与密钥密文按 cron 派发同一方式在事务内冻结，提交后 `wakeScheduleRun`
+  载入执行槽——执行路径与 cron 完全相同（复用 `botLoop`，不另写执行路径）。
+  回执只表示「已受理」（`accepted:true` + `status:running`），终态与产出用
+  `runs` 查询。`dry_run=true` 是只读预览：返回任务名、指令全文、cron、时区、
+  模型、enabled、从 now 起算解析的下次计划与 `busy` 标记，**零副作用**（不建
+  run、不执行）；忙碌时 `busy:true`。cron 触发的并发行为不变（同一任务仍可能
+  被 cron 重复触发，见已知限制）。v5 及更早的冻结会话不认识 `run`（工具集
+  逐字节冻结，hash 见测试基线）。
 - **REST（仅 JWT，接口形状已与前端冻结）**：
   `GET /api/bots/{id}/schedule-tasks`、`GET .../{taskId}`、
   `GET .../{taskId}/runs?limit=&offset=`、
   `PUT .../{taskId}/enabled`（body 只接受 `{"enabled":bool}`，其它字段 400）。
   没有任何创建/编辑/删除端点。`BotScheduleTask` 含 `last_run`；
-  `BotScheduleRun` 含 `status/summary/silent/scheduled_for/duration_ms/usage`。
+  `BotScheduleRun` 含 `status/summary/silent/trigger_source/scheduled_for/
+  duration_ms/usage`（`trigger_source`：`cron`/`manual`，INT-121 起）。
 - **删除任务**：同一事务里给该任务未完成的运行置 `stop_requested_at` 再删任务
   ——运行记录只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住
   机器人删除；已跑了很久的运行不受影响，会在下一个安全点收尾为 `stopped`。
@@ -400,8 +417,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   上下文限制显式失败）；错过不补跑；无用户侧任务编辑。**同一任务在一次运行
   还没结束时仍会按 cron 再次触发**（多个 run 并行、各自默认放行写操作）——
   这是产品决定：不限制任务运行的并发，与「运行内不限制工具调用次数/并发/费用」
-  一致；运行之间靠 `session_kind` + `run_id` 隔离，互不看见对方的输入。另外：
-  重启或 `async_calls_unsettled`
+  一致；运行之间靠 `session_kind` + `run_id` 隔离，互不看见对方的输入。
+  INT-121 后手动触发（`run`）在运行中被明确拒绝（40930，不排队），cron 触发
+  的并发行为不变。另外：重启或 `async_calls_unsettled`
   失败后，该 run 已受理的排队异步写仍会执行，结果落在已终态的 schedule 会话
   里，主线不可见也不上报；`schedule_event` 唤醒主线靠 5s 扫描（非即时）；
   同一机器人的多个定时任务同刻到时会并行起多个 run，模型调用并发无上限
@@ -555,8 +573,8 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   维护，用户侧只有查看与开关，不新增任务编辑 REST。记忆仍只经模型工具面
   访问。
 - **未来扩展面**：`Wake(botID, source, triggerKey, payload)` 已以 `botWake`
-  形态存在；schedule 触发源已随 INT-103 落地，后续触发类型（如事件驱动）
-  只需新增触发源与会话判别。
+  形态存在；schedule（INT-103）与手动（INT-121 的 `fs_schedule/run`）触发源
+  已落地，后续触发类型（如事件驱动）只需新增触发源与会话判别。
 - 契约真相源是 `server/api/openapi.yaml`；`make api-types` 生成
   `internal/api/types.gen.go`，`make api-docs` 生成
   `skills/fast-ship/references/api.md`。

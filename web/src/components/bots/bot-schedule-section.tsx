@@ -43,6 +43,11 @@ function statusVariant(status: BotScheduleRun["status"]) {
   return "secondary" as const;
 }
 
+/** 触发来源：cron 到点触发，manual 为机器人经 fs_schedule.run 手动触发。 */
+function triggerText(run: BotScheduleRun) {
+  return run.trigger_source === "manual" ? "手动触发" : "定时触发";
+}
+
 /** 最近一次结果的一行摘要：状态 + 摘要或错误；从未运行如实标注。 */
 function lastRunText(run: BotScheduleRun | null) {
   if (!run) return "尚未运行";
@@ -287,6 +292,9 @@ function ScheduleTaskDialog({
                           <Badge variant={statusVariant(run.status)}>
                             {botScheduleRunStatusLabel(run.status)}
                           </Badge>
+                          <span className="text-xs text-muted-foreground">
+                            {triggerText(run)}
+                          </span>
                           <span className="text-xs text-muted-foreground">
                             {runTime(run)}
                           </span>

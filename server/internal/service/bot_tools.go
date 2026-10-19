@@ -51,18 +51,21 @@ type botToolDef struct {
 type botNoArgs struct{}
 
 // botScheduleArgs 是 fs_schedule/fs_memory 在 v1/v2 冻结注册表里的占位参数
-// 结构体；v3 起 fs_schedule 使用独立的 botScheduleTaskArgs，此结构体只为
-// 存量会话的前缀稳定保留，不得复用或修改。
+// 结构体；v3 起 fs_schedule 使用独立的参数结构体（v3/v4 冻结副本与 v5 当前
+// 版本见 bot_args_frozen.go 与下方），此结构体只为存量会话的前缀稳定保留，
+// 不得复用或修改。
 type botScheduleArgs struct {
 	Action string `json:"action" jsonschema:"enum=status,required"`
 }
 
-// botScheduleTaskArgs 是 v3 fs_schedule 的参数超集：schema 描述并集，服务端
-// 按 action 校验必填/禁止字段。全部动作同步执行、立即生效。
+// botScheduleTaskArgs 是当前（v6）fs_schedule 的参数超集：schema 描述并集，
+// 服务端按 action 校验必填/禁止字段。全部动作同步执行、立即生效。INT-121 起
+// 新增 run（手动立即执行一次）与 dry_run（只预览）；v5 及更早的冻结副本在
+// bot_args_frozen.go（botScheduleTaskArgsV5）与 botScheduleTaskArgsFrozen。
 type botScheduleTaskArgs struct {
-	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=enable,enum=disable,required"`
-	// TaskID 是任务 ID（update/delete/runs/enable/disable 必填；create 禁止）。
-	TaskID string `json:"task_id,omitempty" jsonschema:"description=任务 ID（update/delete/runs/enable/disable 必填）"`
+	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=run,enum=enable,enum=disable,required"`
+	// TaskID 是任务 ID（update/delete/runs/run/enable/disable 必填；create 禁止）。
+	TaskID string `json:"task_id,omitempty" jsonschema:"description=任务 ID（update/delete/runs/run/enable/disable 必填）"`
 	// Name 任务名（create 必填；update 提供即改）。
 	Name string `json:"name,omitempty" jsonschema:"description=任务名（create 必填；update 可改）"`
 	// Cron 标准五字段表达式 分 时 日 月 周（create 必填；update 提供即改）。
@@ -77,6 +80,10 @@ type botScheduleTaskArgs struct {
 	Model *string `json:"model,omitempty" jsonschema:"description=运行使用的模型名（可选；省略则保持不变或跟随机器人当前模型，传空串清除覆盖）"`
 	// NeedsReport 标记成功且非静默的运行是否也追加事件进主线。
 	NeedsReport *bool `json:"needs_report,omitempty" jsonschema:"description=运行是否需要汇报（可选；true 时成功且非静默的运行也会通知主线）"`
+	// DryRun 只配合 run 使用：true 时只预览任务与下次计划、不建运行记录不执行；
+	// 任务忙碌时回执标 busy=true。其它动作不接受该字段（显式 false 也拒绝），
+	// 避免「带预览标记仍写入」的误用。
+	DryRun *bool `json:"dry_run,omitempty" jsonschema:"description=只配合 run：true 时只预览（任务信息、指令与下次计划），不建运行记录、不执行；任务已有未结束运行时 busy=true；其它动作携带 dry_run 即被拒绝（显式 false / null 亦然）"`
 	// Limit/Offset 是 runs/list 的分页参数。
 	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
 	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
@@ -85,6 +92,11 @@ type botScheduleTaskArgs struct {
 // NeedsReportBool 是 needs_report 的缺省读取（缺省 false）。
 func (a *botScheduleTaskArgs) NeedsReportBool() bool {
 	return a.NeedsReport != nil && *a.NeedsReport
+}
+
+// DryRunBool 是 dry_run 的缺省读取（缺省 false）。
+func (a *botScheduleTaskArgs) DryRunBool() bool {
+	return a.DryRun != nil && *a.DryRun
 }
 
 // botMemoryArgs 是 fs_memory 的参数超集（v2 起可用）。
@@ -269,7 +281,7 @@ func botToolRegistryV4Literal() []*botToolDef {
 		{
 			Name:        "fs_schedule",
 			Description: "管理本机器人绑定的定时任务：list/create/update/delete/runs/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。",
-			ArgsType:    reflect.TypeOf(botScheduleTaskArgs{}),
+			ArgsType:    reflect.TypeOf(botScheduleTaskArgsV5{}),
 			Actions: []botActionDef{
 				{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
 				{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
@@ -337,6 +349,32 @@ func botToolRegistryV4Literal() []*botToolDef {
 			},
 		},
 	}
+}
+
+// botToolRegistryV6 是当前发布注册表：在 v5（INT-120）之上，fs_schedule 自
+// INT-121 起新增 run（手动立即执行一次，支持 dry_run 预览），全部同步执行。
+// v5 及更早版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）不得
+// 影响它们，否则存量会话的前缀/tools_hash 失稳。
+func botToolRegistryV6() []*botToolDef {
+	tools := botToolRegistryV4Literal()
+	for _, tool := range tools {
+		if tool.Name != "fs_schedule" {
+			continue
+		}
+		tool.Description = "管理本机器人绑定的定时任务：list/create/update/delete/runs/run/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。"
+		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgs{})
+		tool.Actions = []botActionDef{
+			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
+			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
+			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）", Mode: model.BotExecutionSync},
+			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
+			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；回执只表示已受理；已有未结束运行时拒绝；dry_run=true 只预览）", Mode: model.BotExecutionSync},
+			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
+		}
+	}
+	return tools
 }
 
 // botToolRegistryV3 是 INT-103 冻结的 v3 注册表。工具/动作/描述与 v4 完全
@@ -651,8 +689,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV3()
 	case 4:
 		tools = botToolRegistryV4()
-	default:
+	case 5:
 		tools = botToolRegistryV5()
+	default:
+		tools = botToolRegistryV6()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -686,7 +726,7 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 			panic(fmt.Sprintf("bot tool schema %s: %v", tool.Name, err))
 		}
 		if version >= botConditionalSchemaVersion {
-			botAnnotateActionRequirements(tool.Name, parsed)
+			botAnnotateActionRequirements(tool, parsed)
 		}
 		tool.Parameters = shared.FunctionParameters(parsed)
 		holder.byName[tool.Name] = tool
@@ -765,15 +805,25 @@ var botReadOnlyActions = map[string]bool{
 
 // botAnnotateActionRequirements 把各动作的必填字段写进 action 字段的 schema
 // 描述里（服务端校验的事实源是 botActionRules，这里只是同一份规则的机器可读
-// 投影）。不用 allOf/if-then 的原因：不少 OpenAI 兼容后端根本不校验 JSON
-// Schema，条件分支只带来每请求约 700 token 的固定开销，没有实际强制力；真正
-// 的强制在服务端。描述按 action 名排序，保证 wire 字节稳定（tools_hash）。
-func botAnnotateActionRequirements(toolName string, schema map[string]interface{}) {
-	prefix := toolName + "/"
+// 投影）。只注解该工具当前声明的动作：botActionRules 是全局事实源、会先于
+// schema 发布新动作（如 v5 的 fs_schedule/run），冻结版本声明里没有的动作
+// 不能被注出来，否则其 wire 字节失稳。不用 allOf/if-then 的原因：不少
+// OpenAI 兼容后端根本不校验 JSON Schema，条件分支只带来每请求约 700 token
+// 的固定开销，没有实际强制力；真正的强制在服务端。描述按 action 名排序，
+// 保证 wire 字节稳定（tools_hash）。
+func botAnnotateActionRequirements(tool *botToolDef, schema map[string]interface{}) {
+	prefix := tool.Name + "/"
+	declared := map[string]bool{}
+	for i := range tool.Actions {
+		declared[tool.Actions[i].Name] = true
+	}
 	actions := make([]string, 0, 8)
 	for key, rule := range botActionRules {
-		if strings.HasPrefix(key, prefix) && len(rule.Required) > 0 {
-			actions = append(actions, strings.TrimPrefix(key, prefix))
+		if !strings.HasPrefix(key, prefix) || len(rule.Required) == 0 {
+			continue
+		}
+		if action := strings.TrimPrefix(key, prefix); declared[action] {
+			actions = append(actions, action)
 		}
 	}
 	if len(actions) == 0 {
@@ -970,7 +1020,9 @@ type botRequiredField struct {
 }
 
 // botActionRule 描述一个工具动作的字段约束：Required 是服务端校验与 v3
-// 起的 schema 描述共同的事实源；Forbidden 是明确禁止出现的字段。
+// 起的 schema 描述共同的事实源；Forbidden 是明确禁止出现的字段——只要出现在
+// 原始参数里就拒（包括显式 null：归一化会把 null 变回「未提供」，不能让带预览
+// 标记的调用在归一化后看起来没带）。
 type botActionRule struct {
 	Required  []botRequiredField
 	Forbidden []string
@@ -1022,14 +1074,18 @@ var botActionRules = map[string]botActionRule{
 	"fs_environment/list":     {},
 	"fs_environment/projects": {},
 
-	"fs_schedule/status":  {},
-	"fs_schedule/list":    {},
-	"fs_schedule/create":  {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id"}},
-	"fs_schedule/update":  {Required: req("task_id")},
-	"fs_schedule/delete":  {Required: req("task_id")},
-	"fs_schedule/runs":    {Required: req("task_id")},
-	"fs_schedule/enable":  {Required: req("task_id")},
-	"fs_schedule/disable": {Required: req("task_id")},
+	// dry_run 只配合 run（INT-121 审查修正）：预览标记被其它动作的分支忽略
+	// 时，模型会误以为带了标记就没副作用。显式 false 也拒绝——语义是「这个
+	// 动作不接受 dry_run」，而不是「按不预览执行」。
+	"fs_schedule/status":  {Forbidden: []string{"dry_run"}},
+	"fs_schedule/list":    {Forbidden: []string{"dry_run"}},
+	"fs_schedule/create":  {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run"}},
+	"fs_schedule/update":  {Required: req("task_id"), Forbidden: []string{"dry_run"}},
+	"fs_schedule/delete":  {Required: req("task_id"), Forbidden: []string{"dry_run"}},
+	"fs_schedule/runs":    {Required: req("task_id"), Forbidden: []string{"dry_run"}},
+	"fs_schedule/run":     {Required: req("task_id")},
+	"fs_schedule/enable":  {Required: req("task_id"), Forbidden: []string{"dry_run"}},
+	"fs_schedule/disable": {Required: req("task_id"), Forbidden: []string{"dry_run"}},
 
 	"fs_memory/status":  {},
 	"fs_memory/list":    {},
@@ -1083,7 +1139,10 @@ func botValidateActionFields(toolName, action string, raw map[string]json.RawMes
 		}
 	}
 	for _, field := range rule.Forbidden {
-		if has(field) {
+		// 存在即拒（含 null）：Forbidden 表达的是「这个动作不接受该字段」，
+		// 不是「该字段不得有值」。归一化会丢弃 null，按 has() 判断会把
+		// {"dry_run":null} 这类调用放行成真实写入。
+		if _, ok := raw[field]; ok {
 			return bad(toolName + " " + action + " 不接受 " + field)
 		}
 	}
@@ -1105,8 +1164,10 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 	case "fs_environment/list", "fs_environment/projects":
 		return s.execEnvironmentRead(ctx, call)
 	case "fs_schedule/list", "fs_schedule/create", "fs_schedule/update",
-		"fs_schedule/delete", "fs_schedule/runs", "fs_schedule/enable", "fs_schedule/disable":
-		// 定时任务管理（INT-103）：全部同步、立即生效，与 fs_memory 写同类。
+		"fs_schedule/delete", "fs_schedule/runs", "fs_schedule/run",
+		"fs_schedule/enable", "fs_schedule/disable":
+		// 定时任务管理（INT-103，INT-121 加 run）：全部同步、立即生效，与
+		// fs_memory 写同类。
 		return s.execScheduleTool(call)
 	case "fs_schedule/status", "fs_memory/status":
 		return s.execCapabilityStatus(call)

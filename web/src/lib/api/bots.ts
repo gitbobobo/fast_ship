@@ -181,7 +181,13 @@ export type BotRunStatus =
   | "failed"
   | "stopped";
 
-export type BotRunTrigger = "user_message" | "tool_result" | "recovery";
+// generic run 端点按 run 原值返回：定时任务触发的 run 是 schedule，手动触发是 manual。
+export type BotRunTrigger =
+  | "user_message"
+  | "tool_result"
+  | "recovery"
+  | "schedule"
+  | "manual";
 
 export interface BotRun {
   id: string;
@@ -307,6 +313,8 @@ export interface BotScheduleRun {
   id: string;
   task_id: string;
   status: BotScheduleRunStatus;
+  /** 触发来源：cron 到点触发，manual 为工具 fs_schedule.run 手动触发。 */
+  trigger_source: "cron" | "manual";
   summary: string;
   /** 静默运行（结果不回报到对话）。 */
   silent: boolean;
