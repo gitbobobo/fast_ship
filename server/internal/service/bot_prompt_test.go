@@ -16,8 +16,8 @@ import (
 // 规则之后、人设之前；运行时上下文 note 按是否存在待处理输入分支。
 
 func TestBotSystemPromptStyleSection(t *testing.T) {
-	if botPlatformPromptVersion != 6 {
-		t.Fatalf("提示词版本应递增到 6: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 7 {
+		t.Fatalf("提示词版本应递增到 7: %d", botPlatformPromptVersion)
 	}
 	full := buildBotSystemPrompt("回复要更短。")
 	// 关键词锚点覆盖风格段每条要求，不钉全文。

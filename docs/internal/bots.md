@@ -201,9 +201,21 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 - **静默归档**：每轮压缩前把本轮要点追加进当日 daily 笔记（段落哈希 +
   ≥128 字符条目 shingle 相似度去重），失败不阻塞压缩。归档按归档模型
   （`ArchiveModel`，空则主模型）的能力预算执行：输出意向 1024 向探测上限
-  封顶，输入按「窗口−包装−输出」的预算裁剪（只丢尾部，`source_seq` 白名单
-  校验不受影响）；装不下时记 `over_window` 正常返回——归档尽力而为，
-  不阻塞压缩主线。
+  封顶，输入按「窗口−包装−输出」的预算裁剪（只丢尾部）；装不下时记
+  `over_window` 正常返回——归档尽力而为，不阻塞压缩主线。归档按
+  `bots.memory_archive_seq` 水位幂等（INT-124）：只把未归档尾部
+  （seq > 水位）发给模型，整段已在水位下则记 `already_archived`、不发归档
+  请求；归档对象独立于摘要水位，直接从账本读「水位之后、本周期切点之内」，
+  不从压缩 plan 的 Segment 里挑——预算截尾后摘要仍覆盖到切点，下一周期的
+  Segment 从更晚处开始，只按 Segment 挑会让被截掉的段尾永久漏归档。
+  输入被预算截尾时，水位 `MAX` 推进到**实际发出的最大 seq** 而非整段
+  尾部——未发出的段尾保持未归档，重试会重新入队补发；`source_seq` 白名单
+  与写事务内的权威水位二次过滤都同时排除「水位以下」与「超出本次发送前缀」
+  的条目。整个推进与 `result_json` 同一事务：只有真写了 daily 才推进，
+  `bad_output`/`request_failed`/`empty` 等失败不推进、保持重试语义——同一批
+  消息第二次问归档模型措辞必然不同，仅靠文本去重会重复追加 daily；条目
+  全部与既有 daily 判重时记 `all_duplicate` 并照常推进水位（模型确实看过
+  并处理了这段，重试不再重复发请求）。
 - **记账**：压缩、归档、夜间整理各走 `bot_maintenance_runs` +
   `bot_maintenance_requests` 独立账本；不伪造主线 usage。
 
@@ -300,19 +312,42 @@ expected_version CAS + operation_key 幂等，历史保 50 版，`restore` 回�
 走 SQLite FTS5 trigram——≥3 字符查询用 MATCH（含引号短语），1–2 字符退
 LIKE；搜索按 `bot_id` 隔离。
 
+只读动作对「不存在」返回空结果而不是报错（INT-124）：`read`（不带
+version）在路径不存在或处于删除墓碑时成功返回
+`{path, exists:false, deleted:<是否有墓碑>, content:"", version:0, …}`，
+`history` 同理返回 `{path, exists:false, versions:[], …}`——模型先读后写
+的探测不再产生界面上的红色失败；文件存在时返回体带 `exists:true` 向后
+兼容。墓碑读不到正文；read/history 的 `exists` 统一表示「有存活文件」，
+history 对墓碑记 `exists:false, deleted:true` 但历史版本仍照常列出。
+显式 `read version=N` 的 `exists` 与 head/history 同义（当前有存活文件），
+`deleted` 是被读版本自身的删除标记：如 v1 创建、v2 删除后，读 v1 得
+`exists:false, deleted:false`，读 v2 得 `exists:false, deleted:true`，两版
+正文都保留可读。`version<=0` 先于文件查找判非法参数——缺失路径 + version≤0
+与存在路径同判；缺失路径 + 合法 version 与写入类动作（create 之外的
+replace/append/delete/restore）对缺失路径仍按非法操作报错。
+
 夜间整理是内置协调器（非 AutomationScheduler）：按配置时区在当地 03:00
-触发，`trigger_key = nightly:<当地日期>` 唯一挡重复，用可配的更便宜模型
-合并 daily 笔记到 USER.md / MEMORY.md。输出必须是完整 JSON（含正文与来源
-path+version）；只有 sources 无正文、截断或 `{}` 不算成功，不把 daily 标
-为已消费。超窗时按完整辅助请求预算（`botAuxBudgets`：输出意向 4096 先向
-窗口余量、再向探测上限封顶，低于 JSON 契约下限 256 或包装自身超窗即按
-`over_window` 干净失败；输入预算 = 窗口−包装−输出，含当前常驻正文与每文件
-标题行）逐批动态分批，单文件按 UTF-8 字节分片并保持字符完整，逐批校验
-本批来源/版本，且本批输入的每个来源都必须被本批声明处理（同一 daily 的
-分片跨批时须逐片覆盖，全部处理完才消费该版本）。
+触发，用可配的更便宜模型合并 daily 笔记到 USER.md / MEMORY.md。触发键
+（INT-124 起）在无未消费 daily 时是 `nightly:<当地日期>`（保持每天至多
+一条 nothing_to_consume 记录）；有未消费内容时附加内容签名
+`nightly:<当地日期>:<sha256 前 16 hex>`（未消费 daily 的 path@version
+集合排序拼接后哈希）——daily 晚于固定时刻写出后签名变化，下一次 60s
+扫描即以新键补跑，同一内容状态重复扫描由 trigger_key 唯一性挡掉。输出
+必须是完整 JSON（含正文与来源 path+version）；只有 sources 无正文、截断
+或 `{}` 不算成功，不把 daily 标为已消费。超窗时按完整辅助请求预算
+（`botAuxBudgets`：输出意向 4096 先向窗口余量、再向探测上限封顶，低于
+JSON 契约下限 256 或包装自身超窗即按 `over_window` 干净失败；输入预算 =
+窗口−包装−输出，含当前常驻正文与每文件标题行）逐批动态分批，单文件按
+UTF-8 字节分片并保持字符完整，逐批校验本批来源/版本，且本批输入的每个
+来源都必须被本批声明处理（同一 daily 的分片跨批时须逐片覆盖，全部处理完
+才消费该版本）。
 已消费水位聚合历次成功运行的最高
 path→version，无新笔记的空成功不会让次日重跑全部 daily。恢复中断的压缩
 周期会补一条失败的最终压缩记录。
+
+平台提示词 v7（INT-124）：规则 9 明确用户表达稳定偏好或确认重要事实时
+应主动写入 USER.md/MEMORY.md，不必等用户要求；规则 10 的守门（禁止把
+工具结果/外部未确认信息整段写入、禁止机密）不变。
 
 ### 定时任务（INT-103）
 

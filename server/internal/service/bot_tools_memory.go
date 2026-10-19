@@ -83,19 +83,33 @@ func (s *BotService) execMemoryList(call *model.BotToolCall, args *botMemoryArgs
 
 func (s *BotService) execMemoryRead(call *model.BotToolCall, args *botMemoryArgs) (string, error) {
 	repo := repository.NewBotMemoryRepository(s.db)
+	// version 合法性先于文件查找：缺失路径 + version<=0 与存在路径同判
+	// 非法参数，不得落进「记忆文件不存在」。
+	if args.Version != nil && *args.Version <= 0 {
+		return "", errs.ErrInvalidParams
+	}
 	file, err := repo.FindFile(call.BotID, args.Path)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errs.ErrInternal
+		}
+		// 只读对「不存在」返回空结果而不是报错（INT-124）：先读后写的探测
+		// 不再产生红色失败。显式读历史版本仍是非法操作，保持报错。
+		if args.Version != nil {
 			return "", errs.New(errs.ErrInvalidParams.Code, "记忆文件不存在: "+args.Path)
 		}
-		return "", errs.ErrInternal
+		return botMarshalResult(map[string]interface{}{
+			"path": args.Path, "exists": false, "deleted": false,
+			"content": "", "version": int64(0), "total_chars": int64(0),
+			"offset": int64(0), "has_more": false,
+		})
 	}
 	var content string
 	var version int64
+	// deleted 描述被读对象自身：head 读取永远是存活文件（墓碑已提前返回），
+	// 显式历史版本则取该版本自己的删除标记。
+	deleted := false
 	if args.Version != nil {
-		if *args.Version <= 0 {
-			return "", errs.ErrInvalidParams
-		}
 		var ver *model.BotMemoryVersion
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			var txErr error
@@ -110,9 +124,15 @@ func (s *BotService) execMemoryRead(call *model.BotToolCall, args *botMemoryArgs
 		}
 		content = ver.Content
 		version = ver.Version
+		deleted = ver.Deleted
 	} else {
 		if file.DeletedAt != nil {
-			return "", errs.New(errs.ErrInvalidParams.Code, "记忆文件已删除：可用 read version=N 读旧版本或 restore 恢复")
+			// 墓碑不算存在：exists=false + deleted=true，不吐墓碑正文。
+			return botMarshalResult(map[string]interface{}{
+				"path": file.Path, "exists": false, "deleted": true,
+				"content": "", "version": int64(0), "total_chars": int64(0),
+				"offset": int64(0), "has_more": false,
+			})
 		}
 		content = file.Content
 		version = file.CurrentVersion
@@ -138,7 +158,10 @@ func (s *BotService) execMemoryRead(call *model.BotToolCall, args *botMemoryArgs
 		end = total
 	}
 	return botMarshalResult(map[string]interface{}{
-		"path": file.Path, "version": version, "total_chars": total,
+		// exists 与 head/history 同义：当前是否有存活文件；deleted 是被读
+		// 版本自身的删除标记（历史版本行）。
+		"path": file.Path, "exists": file.DeletedAt == nil, "deleted": deleted,
+		"version": version, "total_chars": total,
 		"offset": offset, "content": string(runes[offset:end]), "has_more": end < total,
 	})
 }
@@ -256,7 +279,11 @@ func (s *BotService) execMemoryHistory(call *model.BotToolCall, args *botMemoryA
 	file, err := repository.NewBotMemoryRepository(s.db).FindFile(call.BotID, args.Path)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", errs.New(errs.ErrInvalidParams.Code, "记忆文件不存在: "+args.Path)
+			// 只读对「不存在」返回空结果而不是报错（INT-124）。
+			return botMarshalResult(map[string]interface{}{
+				"path": args.Path, "exists": false, "current_version": int64(0),
+				"deleted": false, "versions": []interface{}{}, "has_more": false,
+			})
 		}
 		return "", errs.ErrInternal
 	}
@@ -294,8 +321,10 @@ func (s *BotService) execMemoryHistory(call *model.BotToolCall, args *botMemoryA
 			"created_at": v.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}
+	// exists 与 read 同义，表示「有存活文件」：墓碑记 exists=false +
+	// deleted=true，历史版本仍照常列出（INT-124）。
 	out := map[string]interface{}{
-		"path": file.Path, "current_version": file.CurrentVersion,
+		"path": file.Path, "exists": file.DeletedAt == nil, "current_version": file.CurrentVersion,
 		"deleted": file.DeletedAt != nil, "versions": items, "has_more": hasMore,
 	}
 	return botMarshalResult(out)

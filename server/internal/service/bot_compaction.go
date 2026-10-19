@@ -1429,15 +1429,22 @@ func serializeMessage(row model.BotMessage) string {
 	return b.String()
 }
 
-func serializeSegment(rows []model.BotMessage, maxChars int) string {
+// serializeSegment 按预算逐条序列化，超预算即停：返回正文与实际写进请求的
+// 最大 seq——预算截尾丢掉的只是尾部，水位只能推进到发出过的部分（INT-124）。
+// 一条都没写（rows 为空或 seq 全 0）时 sentMaxSeq 为 0。
+func serializeSegment(rows []model.BotMessage, maxChars int) (string, int64) {
 	var b strings.Builder
+	var sentMaxSeq int64
 	for i := range rows {
 		b.WriteString(serializeMessage(rows[i]))
+		if rows[i].Seq > sentMaxSeq {
+			sentMaxSeq = rows[i].Seq
+		}
 		if maxChars > 0 && b.Len() > maxChars {
 			break
 		}
 	}
-	return b.String()
+	return b.String(), sentMaxSeq
 }
 
 func truncateRunes(s string, n int) string {
@@ -1782,6 +1789,26 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 	if len(plan.Segment) == 0 {
 		return
 	}
+	// 水位读新鲜的 bot 行：入参副本可能带着过期值。
+	freshBot, err := s.bots.Get(bot.ID)
+	if err != nil {
+		s.recordArchiveResult(maintRun, "read_failed", 0)
+		return
+	}
+	// 归档对象从账本读「水位之后、本周期切点之内」（after 开区间、seq 升序），
+	// 不从 plan.Segment 里挑：预算截尾后摘要仍会覆盖到 ThroughSeq，下一周期
+	// 的 Segment 从更晚的 seq 开始，被截掉的段尾不会再出现在任何 Segment 里，
+	// 只按 Segment 挑会永久漏归档。水位已覆盖的区间不再发归档请求——同一批
+	// 事实第二次问模型措辞必然不同，文本去重挡不住，daily 会重复追加。
+	pending, err := s.listMessagesThrough(bot.ID, model.BotSessionKindMain, "", freshBot.MemoryArchiveSeq, plan.ThroughSeq)
+	if err != nil {
+		s.recordArchiveResult(maintRun, "read_failed", 0)
+		return
+	}
+	if len(pending) == 0 {
+		s.recordArchiveResult(maintRun, "already_archived", 0)
+		return
+	}
 	sys := "你是记忆归档器。只提取用户明确表达或已确认的事实（偏好、决策、进行中事项）。" +
 		"不要把工具结果或外部未确认信息自动提升为长期记忆，不要输出密钥/token。" +
 		`只输出 JSON：{"items":[{"text":"...","source_seq":<消息seq>}]}；没有则 {"items":[]}。`
@@ -1800,9 +1827,17 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 		s.recordArchiveResult(maintRun, "over_window", 0)
 		return
 	}
+	// 截尾只可能发生在尾部：按预算序列化后取实际发出的最大 seq，水位推进、
+	// source_seq 白名单都以它为界——没发给模型的消息不得被标记为已归档，
+	// 否则重试整段会直接 already_archived、这些消息永远失去归档机会。
+	input, sentMaxSeq := serializeSegment(pending, tokenBudgetToBytes(inputBudget))
+	if sentMaxSeq == 0 {
+		s.recordArchiveResult(maintRun, "over_window", 0)
+		return
+	}
 	messages := []openaiMessage{
 		{Role: "system", Content: sys},
-		{Role: "user", Content: serializeSegment(plan.Segment, tokenBudgetToBytes(inputBudget))},
+		{Role: "user", Content: input},
 	}
 	archiveNote := "ok"
 	reply, err := s.auxModelRequest(ctx, bot, maintRun, model.BotPurposeArchive, modelName, messages, reqOut)
@@ -1822,10 +1857,12 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 		return
 	}
 	allowed := map[int64]model.BotMessageKind{}
-	for i := range plan.Segment {
-		allowed[plan.Segment[i].Seq] = plan.Segment[i].Kind
+	for i := range pending {
+		if pending[i].Seq <= sentMaxSeq {
+			allowed[pending[i].Seq] = pending[i].Kind
+		}
 	}
-	var texts []string
+	var keep []botArchiveItem
 	for _, it := range payload.Items {
 		kind, ok := allowed[it.SourceSeq]
 		if !ok || strings.TrimSpace(it.Text) == "" {
@@ -1834,9 +1871,13 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 		if kind == model.BotMessageKindToolReply || kind == model.BotMessageKindBackgroundResult {
 			continue
 		}
-		texts = append(texts, it.Text)
+		if it.SourceSeq <= freshBot.MemoryArchiveSeq {
+			// 模型重放了水位以下的消息：丢弃，不重复写 daily（写前过滤）。
+			continue
+		}
+		keep = append(keep, it)
 	}
-	if len(texts) == 0 {
+	if len(keep) == 0 {
 		s.recordArchiveResult(maintRun, "empty", 0)
 		return
 	}
@@ -1849,6 +1890,13 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 	writeAt := now
 	writeErr := s.db.Transaction(func(tx *gorm.DB) error {
 		txRepo := repository.NewBotMemoryRepository(tx)
+		// 事务内权威水位：并发周期可能在模型请求期间推进过水位，二次过滤
+		// 与水位推进都以它为准。
+		var authoritative int64
+		if err := tx.Model(&model.Bot{}).Where("id = ?", bot.ID).
+			Select("memory_archive_seq").Scan(&authoritative).Error; err != nil {
+			return err
+		}
 		var existing string
 		var expected *int64
 		op := model.BotMemoryOpCreate
@@ -1860,9 +1908,27 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 		} else if ferr != nil && !errors.Is(ferr, gorm.ErrRecordNotFound) {
 			return ferr
 		}
+		texts := make([]string, 0, len(keep))
+		for _, it := range keep {
+			// 二次过滤与白名单同界：水位以下（含并发周期推进过的）与超出本次
+			// 发送前缀的条目都丢弃。
+			if it.SourceSeq <= authoritative || it.SourceSeq > sentMaxSeq {
+				continue
+			}
+			texts = append(texts, it.Text)
+		}
 		accepted := botFilterArchiveItems(existing, texts)
 		if len(accepted) == 0 {
-			return nil
+			// 全部判重：模型确实看过并处理了这段，同样与 result_json 同一事务
+			// 留痕并把水位推进到发送前缀——重试同段不再重复发归档请求。
+			if err := tx.Model(&model.Bot{}).Where("id = ?", bot.ID).
+				Update("memory_archive_seq", gorm.Expr("MAX(memory_archive_seq, ?)", sentMaxSeq)).Error; err != nil {
+				return err
+			}
+			raw, _ := json.Marshal(map[string]interface{}{"archive": "all_duplicate", "items": 0})
+			_, err := repository.NewBotMaintenanceRepository(tx).UpdateColumnsTx(tx, maintRun.ID, nil,
+				map[string]interface{}{"result_json": string(raw)})
+			return err
 		}
 		block := "- " + strings.Join(accepted, "\n- ")
 		newContent := block
@@ -1878,6 +1944,14 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 			maintRun.ID, writeAt)
 		if werr != nil {
 			return werr
+		}
+		// 只有真写了 daily 才推进水位（与 result_json 同一事务）：失败路径
+		// 不推进、保持重试语义；推进上限是实际发出的最大 seq 而非整段尾部，
+		// 被预算截掉的消息保持未归档、重试时重新入队；MAX 兜底并发推进，
+		// 不回退更高的既有水位。
+		if err := tx.Model(&model.Bot{}).Where("id = ?", bot.ID).
+			Update("memory_archive_seq", gorm.Expr("MAX(memory_archive_seq, ?)", sentMaxSeq)).Error; err != nil {
+			return err
 		}
 		raw, _ := json.Marshal(map[string]interface{}{"archive": "ok", "items": len(accepted)})
 		_, err := repository.NewBotMaintenanceRepository(tx).UpdateColumnsTx(tx, maintRun.ID, nil,

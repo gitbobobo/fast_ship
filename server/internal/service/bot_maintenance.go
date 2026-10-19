@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -175,13 +176,40 @@ func (s *BotService) scanNightlyOnce() {
 	if now.Before(todayClock) {
 		return
 	}
-	triggerKey := "nightly:" + now.Format("2006-01-02")
+	date := now.Format("2006-01-02")
 	for _, botID := range ids {
 		select {
-		case s.maintJobs <- botMaintJob{botID: botID, triggerKey: triggerKey}:
+		case s.maintJobs <- botMaintJob{botID: botID, triggerKey: s.nightlyTriggerKey(botID, date)}:
 		default:
 		}
 	}
+}
+
+// nightlyTriggerKey 计算某机器人当天的夜间整理触发键（INT-124 补跑）：
+// 没有未消费 daily 时用日期键，保持每天至多一条 nothing_to_consume 记录的
+// 既有行为；有未消费内容时附加内容签名（path@version 集合排序后取 sha256
+// 前 16 hex）——daily 晚于固定时刻写出后签名变化，下一次 60s 扫描即可补跑，
+// 同一内容状态重复扫描由 trigger_key 唯一性挡掉。
+func (s *BotService) nightlyTriggerKey(botID, date string) string {
+	base := "nightly:" + date
+	dailies, err := repository.NewBotMemoryRepository(s.db).ListDailyFilesTx(s.db, botID)
+	if err != nil || len(dailies) == 0 {
+		return base
+	}
+	consumed := s.lastNightlyConsumed(botID)
+	parts := make([]string, 0, len(dailies))
+	for _, d := range dailies {
+		if ver, ok := consumed[d.Path]; ok && d.CurrentVersion <= ver {
+			continue
+		}
+		parts = append(parts, d.Path+"@"+itoa64(d.CurrentVersion))
+	}
+	if len(parts) == 0 {
+		return base
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return base + ":" + hex.EncodeToString(sum[:])[:16]
 }
 
 func (s *BotService) runNightlyForBot(botID, triggerKey string) {
