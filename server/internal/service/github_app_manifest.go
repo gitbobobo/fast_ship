@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
@@ -95,10 +96,7 @@ func (s *GitHubAppManifestService) Create(ctx context.Context, adminUserID strin
 	}
 
 	// App 名称带 host 尾注：多套部署（本地/生产）在同一账号下创建时肉眼可分。
-	name := "Fast Ship"
-	if host := hostOf(publicURL); host != "" {
-		name = "Fast Ship (" + host + ")"
-	}
+	name := manifestAppName(publicURL)
 
 	state := uuid.NewString()
 	now := s.now()
@@ -283,4 +281,35 @@ func hostOf(raw string) string {
 		return ""
 	}
 	return u.Host
+}
+
+// githubAppNameMaxRunes GitHub 对 App 名称的长度上限（注册文档：34 个字符）。
+// 超长时 GitHub 的预填表单会直接不合规，管理员得手动改名——一键创建就断了。
+const githubAppNameMaxRunes = 34
+
+// manifestAppName 拼「Fast Ship (<host>)」。超过长度上限就从 host 尾部截断
+// 并加 `~` 标记，保留前缀（子域从左向左读更有区分度）。
+func manifestAppName(publicURL string) string {
+	const base = "Fast Ship"
+	host := hostOf(publicURL)
+	if host == "" {
+		return base
+	}
+	build := func(h string, truncated bool) string {
+		if truncated {
+			return base + " (" + h + "~)"
+		}
+		return base + " (" + h + ")"
+	}
+	if name := build(host, false); utf8.RuneCountInString(name) <= githubAppNameMaxRunes {
+		return name
+	}
+	runes := []rune(host)
+	for len(runes) > 0 && utf8.RuneCountInString(build(string(runes), true)) > githubAppNameMaxRunes {
+		runes = runes[:len(runes)-1]
+	}
+	if len(runes) == 0 {
+		return base
+	}
+	return build(string(runes), true)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/api"
@@ -379,5 +380,36 @@ func TestManifest_CompleteRejectsIncompleteConversion(t *testing.T) {
 				t.Fatalf("payload changed: id(%q) secret(%q)", payload.AppID, payload.WebhookSecret)
 			}
 		})
+	}
+}
+
+// GitHub 对 App 名称有 34 字符上限：超长会让预填表单不合规，一键创建变成手动改名。
+func TestManifestAppNameFitsGitHubLimit(t *testing.T) {
+	cases := map[string]string{
+		"https://fs.example.com":                                         "Fast Ship (fs.example.com)",
+		"http://127.0.0.1:5088":                                          "Fast Ship (127.0.0.1:5088)",
+		"https://fast-ship.example.company.com":                          "Fast Ship (fast-ship.example.com~)",
+		"https://a-very-long-subdomain-name.example-corp.internal.tools": "Fast Ship (a-very-long-subdomain~)",
+		"": "Fast Ship",
+	}
+	for in, want := range cases {
+		got := manifestAppName(in)
+		if n := utf8.RuneCountInString(got); n > githubAppNameMaxRunes {
+			t.Fatalf("%q -> %q is %d runes, want <= %d", in, got, n, githubAppNameMaxRunes)
+		}
+		if got != want {
+			t.Fatalf("manifestAppName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// 非 ASCII host（url.Parse 不做 punycode）也按字符数截断，不切坏多字节字符。
+func TestManifestAppNameTruncatesByRune(t *testing.T) {
+	got := manifestAppName("https://例子.测试.一个很长的域名.工具.本地")
+	if n := utf8.RuneCountInString(got); n > githubAppNameMaxRunes {
+		t.Fatalf("%q is %d runes, want <= %d", got, n, githubAppNameMaxRunes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated name is not valid UTF-8: %q", got)
 	}
 }
