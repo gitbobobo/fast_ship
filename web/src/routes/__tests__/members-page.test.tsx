@@ -245,6 +245,19 @@ describe("MembersPage admin view", () => {
     await waitFor(() => expect(createButton).toBeEnabled());
   });
 
+  it("keeps 创建邀请 disabled when the deployment settings query failed", async () => {
+    // 查询重试用尽后 isLoading 变 false 但 data 仍为空：这时不能放行，
+    // 否则一次性邀请会用当前站点源拼链接。
+    getSettings.mockRejectedValue(new Error("settings unavailable"));
+    listMembers.mockResolvedValue(membersPage([member("admin-1", "admin")]));
+    renderPage();
+
+    await screen.findByText("admin-1");
+    const createButton = screen.getByRole("button", { name: "创建邀请" });
+    await waitFor(() => expect(createButton).toBeDisabled());
+    expect(createInvite).not.toHaveBeenCalled();
+  });
+
   it("revokes an active invite after confirmation", async () => {
     listMembers.mockResolvedValue(membersPage([member("admin-1", "admin")]));
     listInvites.mockResolvedValue(invitesPage([invite()]));

@@ -161,11 +161,13 @@ function InvitesSection() {
   const createInvite = useCreateInvite();
   const revokeInvite = useRevokeInvite();
   // 邀请链接优先用部署 public_url（新成员从外网打开），未配置再回落当前站点源。
-  // public_url 还在查（或查询失败）时不能创建：token 只回一次，用当前站点源拼出
-  // 的链接对走内网/代理访问的管理员可能是收件人打不开的地址。
-  const { data: settings, isLoading: settingsLoading } = useDeploymentSettings();
+  // public_url 还没成功拿到时不能创建（加载中或查询已失败）：token 只回一次，用当前
+  // 站点源拼出的链接对走内网/代理访问的管理员可能是收件人打不开的地址。
+  const { data: settings } = useDeploymentSettings();
   const inviteOrigin = settings?.public_url || window.location.origin;
-  const canCreate = !settingsLoading;
+  // 以「拿到部署设置」为准而不是 !isLoading：查询重试用尽后 isLoading 会变 false
+  // 但 data 仍为空，那时不能放行。
+  const canCreate = Boolean(settings);
   const [expiresHours, setExpiresHours] = useState<string>("72");
   // 明文 token 只在创建响应里出现一次：创建成功后立即展示链接供复制。
   const [created, setCreated] = useState<{
