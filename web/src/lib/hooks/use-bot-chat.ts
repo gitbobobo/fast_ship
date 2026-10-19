@@ -198,12 +198,15 @@ export function mergeBotSnapshot(previous: Bot | undefined, incoming: Bot): Bot 
 }
 
 /**
- * 预览列与主线同步：消息提交时把该机器人的 last_message 就地写进
- * 列表缓存——零网络、立即生效，不走 invalidateQueries 重取整表。
- * 口径与服务端一致：只收 user/assistant 且正文非空（空正文或纯
- * tool_calls 的 assistant 提交不改预览）；列表未加载时不动。
+ * 预览列与主线同步：消息提交时让机器人列表失效重取，不在客户端就地拼
+ * last_message。列表端点是预览的唯一事实来源：重取一定包含这条消息，
+ * 也就不会出现「晚到的 REST 响应」「已经在飞的列表请求」用旧数据盖掉
+ * 新预览、或者列表还没加载时无处可写——这些顺序问题都得靠客户端自己维护
+ * 一份影子状态才能补上，代价明显高于一次沿索引命中的列表请求。
+ * 口径与服务端一致：只收 user/assistant 且正文非空（空正文或纯 tool_calls
+ * 的 assistant 提交不动预览）。
  */
-function updateListPreview(
+function refreshListPreview(
   queryClient: QueryClient,
   userId: string | null,
   message: BotMessage,
@@ -211,12 +214,7 @@ function updateListPreview(
   if (message.kind !== "user" && message.kind !== "assistant") return;
   const text = message.content.text;
   if (typeof text !== "string" || !text.trim()) return;
-  const last_message = { kind: message.kind, text };
-  queryClient.setQueryData<Bot[]>(botKeys.list(userId), (previous) =>
-    previous?.map((b) =>
-      b.id === message.bot_id ? { ...b, last_message } : b,
-    ),
-  );
+  void queryClient.invalidateQueries({ queryKey: botKeys.list(userId) });
 }
 
 // ---- 主线时间线装配 ----
@@ -307,7 +305,7 @@ export function foldStreamEvent(
     clearDraft: (messageId: string) => void;
     /** 维护进度的唯一写入口；null = 清除。旧服务端不发该 kind，天然兼容。 */
     setMaintenanceProgress: (progress: BotMaintenanceProgress | null) => void;
-    /** 完整消息提交进账本时同步左栏预览（就地写列表缓存，不重取）。 */
+    /** 完整消息提交进账本时刷新左栏预览（让列表重取，不就地拼）。 */
     syncListPreview: (message: BotMessage) => void;
   },
 ) {
@@ -584,9 +582,9 @@ export function useBotChat(botId: string) {
           appendDraft,
           clearDraft,
           setMaintenanceProgress,
-          // 左栏预览与主线同一份缓存写入：就地更新、不触发列表重取。
+          // 左栏预览与主线同步：让列表重取，服务端是唯一事实来源。
           syncListPreview: (message) =>
-            updateListPreview(queryClient, userId, message),
+            refreshListPreview(queryClient, userId, message),
         });
         // 新模型请求开始即刷新一次快照（H2）：metrics 只读快照，而服务端对
         // 进行中的请求已返回 status=running + input_tokens_estimate，刷新后

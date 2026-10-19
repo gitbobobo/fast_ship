@@ -577,9 +577,9 @@ describe("useBotChat", () => {
     expect(api.send.mock.calls[2][1].client_message_id).not.toBe(first);
   });
 
-  // ---- 左栏预览就地同步：提交写列表缓存，不重取 /api/bots ----
+  // ---- 左栏预览：提交只让列表重取，客户端不维护影子状态 ----
 
-  it("message_commit 把该机器人的预览就地写进列表缓存，不重取列表", async () => {
+  it("message_commit 让机器人列表失效重取，而不是就地拼预览", async () => {
     const { client } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
@@ -599,20 +599,20 @@ describe("useBotChat", () => {
     );
 
     const list = client.getQueryData<Bot[]>(botKeys.list("A"));
-    expect(list?.[0]?.last_message).toEqual({
-      kind: "assistant",
-      text: "已收到，我来处理。",
-    });
-    // 其它机器人的预览不受影响。
+    // 列表端点算出预览（服务端是唯一事实来源）：这里只要求重取，缓存内容不动。
+    await waitFor(() =>
+      expect(client.getQueryState(botKeys.list("A"))?.isInvalidated).toBe(
+        true,
+      ),
+    );
+    expect(list?.[0]?.last_message).toBeNull();
     expect(list?.[1]?.last_message).toEqual({
       kind: "user",
       text: "旧预览",
     });
-    // 就地写缓存：不发起列表请求。
-    expect(api.list).not.toHaveBeenCalled();
   });
 
-  it("空正文的 assistant 提交不改写预览（服务端口径：纯 tool_calls 跳过）", async () => {
+  it("空正文的 assistant 提交不触发列表重取（服务端口径：纯 tool_calls 跳过）", async () => {
     const { client, result } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
@@ -646,16 +646,14 @@ describe("useBotChat", () => {
       10,
     );
 
-    // 消息本身照常进主线，预览不覆盖。
+    // 消息本身照常进主线，预览不重取。
     await waitFor(() =>
       expect(result.current.entries.map((e) => e.message.id)).toContain("m-t"),
     );
-    expect(
-      client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
-    ).toBeNull();
+    expect(client.getQueryState(botKeys.list("A"))?.isInvalidated).toBeFalsy();
   });
 
-  it("user_message 事件同样就地更新预览", async () => {
+  it("user_message 事件同样触发列表重取", async () => {
     const { client } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
@@ -678,16 +676,17 @@ describe("useBotChat", () => {
       10,
     );
 
-    expect(
-      client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
-    ).toEqual({ kind: "user", text: "来自另一个标签页的消息" });
-    expect(api.list).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(client.getQueryState(botKeys.list("A"))?.isInvalidated).toBe(
+        true,
+      ),
+    );
   });
 
-  it("sendMessage 不写预览：预览只由按 seq 到达的 user_message 事件写", async () => {
-    // 两个写点会引入竞态：模型回得快时 assistant 的 message_commit 已写入更新的
-    // 预览，晚到的 REST 响应会用更旧的 user 消息盖回去。发送方同样会收到自己的
-    // user_message 事件（下一条用例），所以这里只断言 REST 路径不碰预览。
+  it("sendMessage 不碰预览：REST 路径只写消息缓存", async () => {
+    // 发送方也会收到自己的 user_message 事件（上一条用例），扫尾由那条事件负责；
+    // REST 响应再写一次会让两个写点竞争（晚到的响应可能用更旧的 user 消息盖掉
+    // 已经到达的 assistant 预览）。
     const { client, result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
     client.setQueryData<Bot[]>(botKeys.list("A"), [
