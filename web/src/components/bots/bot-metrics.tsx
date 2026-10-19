@@ -19,13 +19,15 @@ function formatSpeed(tokensPerSecond: number): string {
     : tokensPerSecond.toFixed(1);
 }
 
-// 双环几何：圆心 (12,12)，尺寸与输入框那一行文字相称；环半径是外层 10、内层
-// 5.5，环间留 2px 间隙，弧从顶部起画（rotate -90）。
-const RING_CENTER = 12;
-const RING_STROKE = 2.5;
+// 双环几何：尺寸与输入框那一行文字相称，不抢发送按钮的注意力；圆心（盒中心，
+// 由 viewBox 决定），外环半径 8、内环 4.5，环间留 1.5px 间隙，弧从顶部起画
+// （rotate -90）。
+const RING_VIEWBOX = 20;
+const RING_CENTER = RING_VIEWBOX / 2;
+const RING_STROKE = 2;
 const RINGS = {
-  cache: { r: 10, circumference: 2 * Math.PI * 10 },
-  context: { r: 5.5, circumference: 2 * Math.PI * 5.5 },
+  cache: { r: 8, circumference: 2 * Math.PI * 8 },
+  context: { r: 4.5, circumference: 2 * Math.PI * 4.5 },
 };
 
 /** 估算可能超出窗口，占比按 0–100 夹紧，避免画出过量弧。 */
@@ -83,7 +85,7 @@ function MetricRing({
 
 /**
  * 发送按钮旁的模型指标：双环进度圆（外环缓存命中率、内环上下文占比，都用
- * 主题中性色，靠明暗而非色相区分）+ 右侧速度数值。口径都是快照里「最近一次主线模型请求」；任何一项
+ * 浅灰中性色，靠明暗而非色相区分）+ 右侧速度数值。口径都是快照里「最近一次主线模型请求」；任何一项
  * 缺失渲染「—」或不画弧，绝不把缺失当成 0。usage 未收齐时 token 计数
  * 不可用；上下文占比是服务端估算值（≠精确 token 数）。
  */
@@ -143,9 +145,9 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       className="flex min-w-0 items-center gap-2 overflow-hidden text-xs whitespace-nowrap text-muted-foreground"
     >
       <svg
-        viewBox="0 0 24 24"
-        width={24}
-        height={24}
+        viewBox={`0 0 ${RING_VIEWBOX} ${RING_VIEWBOX}`}
+        width={RING_VIEWBOX}
+        height={RING_VIEWBOX}
         className="shrink-0"
         role="img"
         aria-label={`模型指标：${cachePct != null ? `缓存命中率 ${cachePct}%` : "缓存命中率不可用"}，${contextPct != null ? `上下文占比 ≈${contextPct}%` : "上下文占比不可用"}`}
@@ -156,7 +158,7 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
           circumference={RINGS.cache.circumference}
           pct={cachePct}
           title={cacheTitle}
-          arcClassName="stroke-foreground"
+          arcClassName="stroke-muted-foreground/70"
         />
         <MetricRing
           testId="bot-metric-context"
@@ -164,7 +166,7 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
           circumference={RINGS.context.circumference}
           pct={contextPct}
           title={contextTitle}
-          arcClassName="stroke-muted-foreground"
+          arcClassName="stroke-muted-foreground/45"
         />
       </svg>
       <span data-testid="bot-metric-speed" title={speedTitle}>
