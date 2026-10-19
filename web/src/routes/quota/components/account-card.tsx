@@ -1,43 +1,134 @@
-import { Pencil, RefreshCw, Trash2, Zap } from "lucide-react";
+import { useMemo } from "react";
+import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  PreviewCard,
+  PreviewCardContent,
+  PreviewCardTrigger,
+} from "@/components/ui/preview-card";
 import { QuotaProviderIcon } from "@/components/quota/provider-icons";
 import { QuotaWindowProgress } from "./window-progress";
+import { QuotaAccountMenu } from "./account-menu";
+import { useNow } from "@/lib/hooks/use-now";
+import { useRefreshQuotaAccount } from "@/lib/hooks/use-quota";
 import {
-  useDeleteQuotaAccount,
-  useRefreshQuotaAccount,
-} from "@/lib/hooks/use-quota";
-import { errorText } from "@/lib/quota";
+  defaultQuotaPool,
+  errorText,
+  formatQuotaAmount,
+  formatResetCountdown,
+  quotaPools,
+  quotaWindowUsageText,
+  type QuotaPool,
+} from "@/lib/quota";
 import { formatRelativeTime } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 
-// 状态徽标与 GitHub Token 检测状态同套配色约定。
-const STATUS_META: Record<
-  QuotaAccountStatus,
-  { label: string; variant: "default" | "secondary" | "destructive" | "outline" }
-> = {
-  ok: { label: "正常", variant: "default" },
-  credential_invalid: { label: "凭据失效", variant: "destructive" },
-  provider_error: { label: "接口异常", variant: "secondary" },
-  pending: { label: "暂未抓取", variant: "outline" },
-};
+/**
+ * 悬浮面板里的窗口明细行：名称（受限窗口标出）| 已用% | used/limit（有则显示）
+ * | 重置倒计时。只在面板打开时挂载，倒计时按 30s 自走。
+ */
+function QuotaWindowDetail({
+  window: w,
+  limiting,
+}: {
+  window: QuotaWindow;
+  limiting: boolean;
+}) {
+  const now = useNow(30_000, Boolean(w.reset_at));
+  const usage = quotaWindowUsageText(w);
+  return (
+    <div
+      className={cn("flex items-baseline gap-2", limiting && "font-medium")}
+    >
+      <span className="min-w-0 flex-1 truncate">
+        {w.label}
+        {limiting && (
+          <span className="ml-1 font-normal text-muted-foreground">受限</span>
+        )}
+      </span>
+      <span className="shrink-0 tabular-nums">
+        {w.used_percent == null
+          ? "—"
+          : formatQuotaAmount(w.used_percent, "percent")}
+      </span>
+      {usage && (
+        <span className="shrink-0 tabular-nums text-muted-foreground">
+          {usage}
+        </span>
+      )}
+      <span className="shrink-0 text-muted-foreground">
+        {w.reset_at ? formatResetCountdown(w.reset_at, now) : ""}
+      </span>
+    </div>
+  );
+}
 
 /**
- * 单个额度账号卡片：窗口进度条 + 余额 + 最近错误 + 数据时间；
- * 测试（重贴凭据探测）/ 刷新（立即抓取）/ 编辑 / 删除。
+ * 卡片悬浮详情：账号全部窗口按池分组（多池时池名作小标题，带用尽/消耗中
+ * 状态），受限窗口标「受限」；余额与备注收在最末。
+ */
+function QuotaAccountDetails({
+  account,
+  pools,
+}: {
+  account: QuotaAccount;
+  pools: QuotaPool[];
+}) {
+  return (
+    <div className="space-y-2.5 text-xs">
+      {pools.map((pool) => (
+        <div key={pool.name ?? ""} className="space-y-1">
+          {pools.length > 1 && (
+            <p className="flex items-center justify-between gap-2 font-medium">
+              <span className="truncate">{pool.name ?? "默认"}</span>
+              <span className="shrink-0 font-normal text-muted-foreground">
+                {pool.exhausted ? "已用尽" : "消耗中"}
+              </span>
+            </p>
+          )}
+          {pool.windows.map((w, index) => (
+            <QuotaWindowDetail
+              key={`${w.kind}-${w.label}-${index}`}
+              window={w}
+              limiting={w === pool.limiting}
+            />
+          ))}
+        </div>
+      ))}
+      {(account.balance || account.note) && (
+        <div className="space-y-1 border-t border-foreground/10 pt-2">
+          {account.balance && (
+            <p>
+              <span className="text-muted-foreground">
+                {account.balance.label}：
+              </span>
+              <span className="font-medium tabular-nums">
+                {account.balance.amount} {account.balance.currency}
+              </span>
+            </p>
+          )}
+          {account.note && (
+            <p
+              data-testid="quota-account-note"
+              className="text-muted-foreground"
+            >
+              {account.note}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 可用账号卡片：正文固定一行——受限窗口进度条（无窗口有余额时退化为余额
+ * 文本行），与窗口数/池数无关以保证卡片等高；多池时池选择器收进 header
+ * 「数据时间」行右侧（整行固定 h-7，双池卡片不因选择器变高）。
+ * 全部窗口明细、余额、备注收进正文触发的悬浮面板。
+ * 操作只留「刷新」主按钮，编辑 / 测试凭据 / 删除收进 ··· 菜单。
  */
 export function QuotaAccountCard({
   account,
@@ -49,8 +140,16 @@ export function QuotaAccountCard({
   onEdit: (account: QuotaAccount) => void;
 }) {
   const refresh = useRefreshQuotaAccount();
-  const deleteAccount = useDeleteQuotaAccount();
-  const statusMeta = STATUS_META[account.status] ?? STATUS_META.pending;
+  const pools = useMemo(() => quotaPools(account.windows), [account.windows]);
+  // 卡片只展示「正在消耗」的池（第一个未用尽），不提供切换：其它池的窗口在悬浮面板里。
+  const active = defaultQuotaPool(pools);
+  // 只标记「当前看的是哪个池」，不给切换入口：多池账号才需要这行说明。
+  const poolLabel =
+    pools.length > 1 && active?.name
+      ? `${active.name}${/[A-Za-z0-9]$/.test(active.name) ? " " : ""}池`
+      : null;
+  // 正文始终只有一根进度条：受限窗口；全窗口算不出百分比时退回首个窗口占位。
+  const rowWindow = active?.limiting ?? active?.windows[0] ?? null;
 
   const handleRefresh = async () => {
     try {
@@ -66,25 +165,23 @@ export function QuotaAccountCard({
     }
   };
 
-  const handleDelete = async () => {
-    try {
-      await deleteAccount.mutateAsync(account.id);
-      toast.success("账号已删除");
-    } catch (err) {
-      toast.error(errorText(err, "删除失败，请稍后重试"));
-    }
-  };
+  const pending = account.status === "pending";
+  const hasWindows = account.windows.length > 0;
+  // 没有窗口也可能有可看的东西：OpenDesign 无 Design Plan 额度时只给钱包余额
+  // 和「按钱包计费」的说明，不能因为窗口为空就把余额丢掉。
+  const hasBalanceOrNote = account.balance != null || account.note !== "";
+  const showDetail = !pending && (hasWindows || hasBalanceOrNote);
 
   return (
     <Card>
       <CardHeader className="pb-0 pt-4">
         <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
             <QuotaProviderIcon
               provider={account.provider}
               className="size-6 text-foreground"
             />
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <CardTitle className="truncate text-sm">
                 {account.provider_name}
                 {account.plan_name && (
@@ -98,68 +195,17 @@ export function QuotaAccountCard({
                 {account.label}
                 {account.credential_hint && ` · ${account.credential_hint}`}
               </p>
+              <p className="truncate text-xs text-muted-foreground">
+                {account.fetched_at
+                  ? `数据时间 ${formatRelativeTime(account.fetched_at)}`
+                  : "尚未抓取"}
+                {poolLabel && (
+                  <span data-testid="quota-pool-label"> · {poolLabel}</span>
+                )}
+              </p>
             </div>
           </div>
-          <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3 p-4 pt-3">
-        {account.windows.length === 0 && !account.balance ? (
-          <p className="text-xs text-muted-foreground">
-            还没有额度数据
-            {account.status === "pending" && "，等待后台抓取"}
-          </p>
-        ) : (
-          <div className="space-y-2.5">
-            {account.windows.map((w, index) => (
-              <QuotaWindowProgress
-                key={`${w.kind}-${w.label}-${index}`}
-                window={w}
-              />
-            ))}
-          </div>
-        )}
-
-        {account.balance && (
-          <p className="text-xs">
-            <span className="text-muted-foreground">
-              {account.balance.label}：
-            </span>
-            <span className="font-medium tabular-nums">
-              {account.balance.amount} {account.balance.currency}
-            </span>
-          </p>
-        )}
-
-        {account.note && (
-          <p
-            data-testid="quota-account-note"
-            className="text-xs text-muted-foreground"
-          >
-            {account.note}
-          </p>
-        )}
-
-        {account.last_error && (
-          <p className="text-xs text-destructive">{account.last_error}</p>
-        )}
-
-        <div className="flex items-center justify-between gap-2 pt-1">
-          <span className="text-xs text-muted-foreground">
-            {account.fetched_at
-              ? `数据时间 ${formatRelativeTime(account.fetched_at)}`
-              : "尚未抓取"}
-          </span>
           <div className="flex shrink-0 gap-0.5">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`测试 ${account.label}`}
-              title="重新粘贴凭据测试连通性"
-              onClick={() => onTest(account)}
-            >
-              <Zap className="h-3.5 w-3.5" />
-            </Button>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -172,46 +218,58 @@ export function QuotaAccountCard({
                 className={cn("h-3.5 w-3.5", refresh.isPending && "animate-spin")}
               />
             </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`编辑 ${account.label}`}
-              onClick={() => onEdit(account)}
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </Button>
-            <AlertDialog>
-              <AlertDialogTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label={`删除 ${account.label}`}
-                  />
-                }
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>删除额度账号？</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    将删除「{account.label}」及其已存凭据与额度快照，无法恢复。
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>取消</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={() => void handleDelete()}
-                    disabled={deleteAccount.isPending}
-                  >
-                    确认删除
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
+            <QuotaAccountMenu
+              account={account}
+              onEdit={onEdit}
+              onTest={onTest}
+            />
           </div>
         </div>
+      </CardHeader>
+      <CardContent className="p-4 pt-3">
+        {!showDetail ? (
+          <p className="text-xs text-muted-foreground">
+            还没有额度数据
+            {pending && "，等待后台抓取"}
+          </p>
+        ) : (
+          <PreviewCard>
+            {/* 触发区 = 正文唯一一行：受限窗口进度条（无窗口时为余额文本行），
+                悬浮或键盘聚焦弹出全部明细。负 margin + 等量 padding 让触发
+                区域外扩一圈而不多占行高，卡片高度仍与窗口数、池数无关。 */}
+            <PreviewCardTrigger
+              delay={150}
+              render={
+                <div
+                  tabIndex={0}
+                  aria-label={`查看 ${account.label} 的额度详情`}
+                  className="-m-1.5 rounded-md p-1.5 outline-none focus-visible:outline-2 focus-visible:outline-ring"
+                />
+              }
+            >
+              {rowWindow ? (
+                <QuotaWindowProgress
+                  window={rowWindow}
+                  limited={rowWindow === active?.limiting}
+                />
+              ) : (
+                <p className="flex items-baseline justify-between gap-2 text-xs">
+                  <span className="min-w-0 truncate text-muted-foreground">
+                    {account.balance?.label ?? account.note}
+                  </span>
+                  {account.balance && (
+                    <span className="shrink-0 font-medium tabular-nums">
+                      ${account.balance.amount}
+                    </span>
+                  )}
+                </p>
+              )}
+            </PreviewCardTrigger>
+            <PreviewCardContent data-testid="quota-account-detail-panel">
+              <QuotaAccountDetails account={account} pools={pools} />
+            </PreviewCardContent>
+          </PreviewCard>
+        )}
       </CardContent>
     </Card>
   );

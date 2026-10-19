@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QuotaAccountCard } from "./account-card";
@@ -34,6 +34,24 @@ function makeAccount(overrides: Partial<QuotaAccount> = {}): QuotaAccount {
   };
 }
 
+function makeWindow(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
+  return {
+    kind: "monthly",
+    label: "每月",
+    used_percent: null,
+    used: null,
+    limit: null,
+    unit: "percent",
+    reset_at: null,
+    ...overrides,
+  };
+}
+
+/** 正文触发区 = 单行额度区块（进度条或余额行；池选择器在 header，不在其中）。 */
+function bodyTrigger(label = "我的 Pro") {
+  return screen.getByLabelText(`查看 ${label} 的额度详情`);
+}
+
 describe("QuotaAccountCard", () => {
   beforeEach(() => {
     vi.mocked(useRefreshQuotaAccount).mockReturnValue({
@@ -46,7 +64,7 @@ describe("QuotaAccountCard", () => {
     } as unknown as ReturnType<typeof useDeleteQuotaAccount>);
   });
 
-  it("renders identity, plan, status badge and windows with tone", () => {
+  it("renders identity, fetched time and only the limiting window row", () => {
     // 多留 45s 缓冲，渲染到断言之间的一两秒漂移不会把分钟降 1
     const resetAt = new Date(
       Date.now() + 3 * 3600_000 + 12 * 60_000 + 45_000,
@@ -54,7 +72,7 @@ describe("QuotaAccountCard", () => {
     const account = makeAccount({
       balance: { label: "剩余额度", amount: 12.5, currency: "USD" },
       windows: [
-        {
+        makeWindow({
           kind: "five_hour",
           label: "5 小时",
           used_percent: 97,
@@ -62,25 +80,20 @@ describe("QuotaAccountCard", () => {
           limit: 10,
           unit: "count",
           reset_at: resetAt,
-        },
-        {
+        }),
+        makeWindow({
           kind: "weekly",
           label: "每周",
           used_percent: 82,
-          used: null,
-          limit: null,
-          unit: "percent",
           reset_at: null,
-        },
-        {
-          kind: "monthly",
+        }),
+        makeWindow({
           label: "每月",
           used_percent: 38,
           used: 38,
           limit: 100,
           unit: "usd",
-          reset_at: null,
-        },
+        }),
       ],
     });
     render(
@@ -90,98 +103,372 @@ describe("QuotaAccountCard", () => {
     expect(screen.getByText("Factory Droid")).toBeInTheDocument();
     expect(screen.getByText("· Pro")).toBeInTheDocument();
     expect(screen.getByText("我的 Pro · …ab12")).toBeInTheDocument();
-    expect(screen.getByText("正常")).toBeInTheDocument();
-    expect(screen.getByText("剩余额度：")).toBeInTheDocument();
-    expect(screen.getByText("12.5 USD")).toBeInTheDocument();
+    // 「正常」徽标已移除，数据时间在标题副行
+    expect(screen.queryByText("正常")).toBeNull();
     expect(screen.getByText(/数据时间/)).toBeInTheDocument();
 
-    const windows = screen.getAllByTestId("quota-window");
-    expect(windows).toHaveLength(3);
-    expect(windows[0]).toHaveAttribute("data-tone", "danger");
-    expect(windows[1]).toHaveAttribute("data-tone", "warning");
-    expect(windows[2]).toHaveAttribute("data-tone", "normal");
+    // 正文没有大号剩余数字与「剩余 · 受…限制」文案——它和进度条的
+    // 「已用%」是同一件事的两种说法，只保留进度条一行
+    const trigger = bodyTrigger();
+    expect(screen.queryByTestId("quota-remaining")).toBeNull();
+    expect(trigger.querySelector(".text-3xl")).toBeNull();
+    expect(trigger.textContent).not.toContain("剩余");
 
-    expect(screen.getByText("97%")).toHaveClass("text-destructive");
-    expect(screen.getByText("82%")).toHaveClass("text-amber-700");
-    expect(screen.getByText("9.7 / 10")).toBeInTheDocument();
+    // 正文只渲染受限窗口一根进度条，其余窗口不进正文
+    const windows = screen.getAllByTestId("quota-window");
+    expect(windows).toHaveLength(1);
+    expect(windows[0]).toHaveAttribute("data-tone", "danger");
+    expect(screen.getByText("5 小时")).toBeInTheDocument();
+    expect(screen.queryByText("每周")).toBeNull();
+    expect(screen.queryByText("每月")).toBeNull();
+    expect(screen.getAllByRole("progressbar")).toHaveLength(1);
+
+    // 97% 还没用尽 → 琥珀色提示；只有 100%（等重置）才转中性色，红只留给需处理
+    expect(screen.getByText("97%")).toHaveClass("text-amber-700");
     expect(screen.getByText("3 小时 12 分后重置")).toBeInTheDocument();
+
+    // used/limit 明细、余额不进正文——都在悬浮面板里
+    expect(screen.queryByText("9.7 / 10")).toBeNull();
+    expect(screen.queryByText("剩余额度：")).toBeNull();
   });
 
-  it("shows pending copy and imminent reset wording", () => {
+  it("悬浮正文打开详情面板：列出全部窗口、used/limit、余额与备注", async () => {
+    const user = userEvent.setup();
     const account = makeAccount({
-      plan_name: "",
-      status: "pending",
-      fetched_at: null,
-      last_success_at: null,
+      balance: { label: "剩余额度", amount: 12.5, currency: "USD" },
+      note: "窗口用尽后扣钱包",
       windows: [
-        {
-          kind: "daily",
-          label: "每天",
-          used_percent: null,
-          used: null,
-          limit: null,
-          unit: "percent",
-          reset_at: "2000-01-01T00:00:00Z",
-        },
+        makeWindow({
+          kind: "five_hour",
+          label: "5 小时",
+          used_percent: 97,
+          used: 9.7,
+          limit: 10,
+          unit: "count",
+        }),
+        makeWindow({ kind: "weekly", label: "每周", used_percent: 82 }),
+        makeWindow({
+          label: "每月",
+          used_percent: 38,
+          used: 38,
+          limit: 100,
+          unit: "usd",
+        }),
       ],
     });
     render(
       <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
     );
 
-    expect(screen.getByText("暂未抓取")).toBeInTheDocument();
-    expect(screen.getByText("—")).toBeInTheDocument();
-    expect(screen.getByTestId("quota-window-reset")).toHaveTextContent(
-      "即将重置",
-    );
-    expect(screen.getByText("尚未抓取")).toBeInTheDocument();
+    await user.hover(bodyTrigger());
+    const panel = await screen.findByTestId("quota-account-detail-panel");
+
+    // 正文没显示的两个窗口也要在面板里；受限窗口标出
+    expect(panel.textContent).toContain("每周");
+    expect(panel.textContent).toContain("每月");
+    expect(panel.textContent).toContain("5 小时");
+    expect(panel.textContent).toContain("受限");
+    expect(panel.textContent).toContain("9.7 / 10");
+    expect(panel.textContent).toContain("$38 / $100");
+    expect(panel.textContent).toContain("剩余额度：");
+    expect(panel.textContent).toContain("12.5 USD");
+    expect(panel.textContent).toContain("窗口用尽后扣钱包");
   });
 
-  it("surfaces provider_error with last_error and destructive badge", () => {
+  it("键盘聚焦正文触发区同样打开详情面板", async () => {
+    const user = userEvent.setup();
     const account = makeAccount({
-      status: "provider_error",
-      last_error: "HTTP 502 上游服务异常",
+      windows: [
+        makeWindow({ label: "每月", used_percent: 38 }),
+        makeWindow({ kind: "weekly", label: "每周", used_percent: 82 }),
+      ],
     });
     render(
       <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
     );
 
-    expect(screen.getByText("接口异常")).toBeInTheDocument();
-    expect(screen.getByText("HTTP 502 上游服务异常")).toBeInTheDocument();
-    // windows 为空时不渲染兜底空态文案以外的数据
-    expect(screen.getByText("还没有额度数据")).toBeInTheDocument();
+    // 真实键盘路径：Tab 依次经过刷新、··· 菜单，第三站是正文触发区
+    const trigger = bodyTrigger();
+    expect(trigger).toHaveAttribute("tabindex", "0");
+    await user.tab();
+    await user.tab();
+    await user.tab();
+    expect(document.activeElement).toBe(trigger);
+
+    const panel = await screen.findByTestId("quota-account-detail-panel");
+    expect(panel.textContent).toContain("每月");
+    expect(panel.textContent).toContain("每周");
   });
 
-  it("note 非空时在窗口/余额下方展示一行补充说明", () => {
+  it("正文结构与窗口数无关：一根受限进度条 + 一个触发区", () => {
+    const { container, rerender } = render(
+      <QuotaAccountCard
+        account={makeAccount({
+          windows: [
+            makeWindow({ kind: "daily", label: "每天", used_percent: 30 }),
+          ],
+        })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    const content = container.querySelector('[data-slot="card-content"]');
+    expect(screen.getAllByRole("progressbar")).toHaveLength(1);
+    // 触发区是 content 下唯一的布局块（面板走 portal，不占正文高度）
+    expect(content?.children).toHaveLength(1);
+
+    rerender(
+      <QuotaAccountCard
+        account={makeAccount({
+          windows: [
+            makeWindow({ kind: "daily", label: "每天", used_percent: 30 }),
+            makeWindow({ kind: "weekly", label: "每周", used_percent: 82 }),
+            makeWindow({ label: "每月", used_percent: 97 }),
+          ],
+        })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByRole("progressbar")).toHaveLength(1);
+    expect(content?.children).toHaveLength(1);
+    // 受限窗口随数据换成 97% 的每月
+    expect(screen.getByText("每月")).toBeInTheDocument();
+    expect(screen.getByTestId("quota-window")).toHaveAttribute(
+      "data-tone",
+      "danger",
+    );
+  });
+
+  it("多池账号在「数据时间」行标记当前看的池，不给切换入口", () => {
     const account = makeAccount({
-      balance: { label: "钱包余额", amount: 1.5, currency: "USD" },
-      note: "窗口用尽后扣钱包",
+      windows: [
+        makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
+        makeWindow({
+          kind: "five_hour",
+          label: "5 小时",
+          pool: "Core",
+          used_percent: 87,
+        }),
+      ],
     });
     const { container } = render(
       <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
     );
 
-    const note = screen.getByTestId("quota-account-note");
-    expect(note).toHaveTextContent("窗口用尽后扣钱包");
-    expect(note).toHaveClass("text-muted-foreground");
-    // 位置在余额行之后、底部「数据时间」行之前
-    const text = container.textContent ?? "";
-    expect(text.indexOf("1.5 USD")).toBeLessThan(
-      text.indexOf("窗口用尽后扣钱包"),
-    );
-    expect(text.indexOf("窗口用尽后扣钱包")).toBeLessThan(
-      text.indexOf("数据时间"),
+    // 标准池已用尽 → 卡片展示正在消耗的 Core 池，标记是纯文字、跟数据时间同一行
+    const label = screen.getByTestId("quota-pool-label");
+    expect(label).toHaveTextContent("Core 池");
+    const timeRow = screen.getByText(/数据时间/);
+    expect(timeRow).toContainElement(label);
+    // 不再有池选择器（tab），标记也不在正文触发区里
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    expect(bodyTrigger()).not.toContainElement(label);
+
+    // 正文仍是单行：Core 池的受限窗口
+    expect(screen.getByText("5 小时")).toBeInTheDocument();
+    expect(screen.getByText("87%")).toBeInTheDocument();
+    expect(screen.getAllByTestId("quota-window")).toHaveLength(1);
+    expect(container.querySelector('[data-slot="card-content"]')?.children).toHaveLength(
+      1,
     );
   });
 
-  it("note 为空串时不渲染补充说明", () => {
+  it("单池账号不显示池标记", () => {
     render(
       <QuotaAccountCard
-        account={makeAccount({ note: "" })}
+        account={makeAccount({ windows: [makeWindow({ used_percent: 38 })] })}
         onTest={vi.fn()}
         onEdit={vi.fn()}
       />,
     );
+    expect(screen.queryByTestId("quota-pool-label")).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
+  });
+
+  it("池状态变化后标记与正文行跟着「正在消耗的池」走", () => {
+    const { rerender } = render(
+      <QuotaAccountCard
+        account={makeAccount({
+          windows: [
+            makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
+            makeWindow({
+              kind: "five_hour",
+              label: "5 小时",
+              pool: "Core",
+              used_percent: 87,
+            }),
+          ],
+        })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("quota-pool-label")).toHaveTextContent("Core 池");
+    expect(screen.getByText("5 小时")).toBeInTheDocument();
+
+    // 标准池重置后重新可用（每月 40%）→ 默认池变回标准，标记与正文一起换
+    rerender(
+      <QuotaAccountCard
+        account={makeAccount({
+          windows: [
+            makeWindow({ label: "每月", pool: "标准", used_percent: 40 }),
+            makeWindow({
+              kind: "five_hour",
+              label: "5 小时",
+              pool: "Core",
+              used_percent: 87,
+            }),
+          ],
+        })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("quota-pool-label")).toHaveTextContent("标准池");
+    expect(screen.getByText("每月")).toBeInTheDocument();
+    expect(screen.getByText("40%")).toBeInTheDocument();
+    expect(screen.queryByText("5 小时")).toBeNull();
+  });
+
+  it("hides the pool label when the account has a single pool", () => {
+    const account = makeAccount({
+      windows: [makeWindow({ used_percent: 38 })],
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+    expect(screen.queryByTestId("quota-pool-label")).toBeNull();
+  });
+
+  it("悬浮面板按池分组：池名标题带用尽/消耗中状态，含全部池的窗口", async () => {
+    const user = userEvent.setup();
+    const account = makeAccount({
+      windows: [
+        makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
+        makeWindow({
+          kind: "five_hour",
+          label: "5 小时",
+          pool: "Core",
+          used_percent: 87,
+        }),
+      ],
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+
+    await user.hover(bodyTrigger());
+    const panel = await screen.findByTestId("quota-account-detail-panel");
+
+    expect(panel.textContent).toContain("标准");
+    expect(panel.textContent).toContain("已用尽");
+    expect(panel.textContent).toContain("Core");
+    expect(panel.textContent).toContain("消耗中");
+    // 两池窗口都在：正文只显示 Core 的 5 小时，标准池的每月只出现在面板
+    expect(panel.textContent).toContain("每月");
+    expect(panel.textContent).toContain("5 小时");
+  });
+
+  it("pending 或没有窗口数据时显示等待抓取提示，不渲染窗口结构", () => {
+    const account = makeAccount({
+      plan_name: "",
+      status: "pending",
+      fetched_at: null,
+      last_success_at: null,
+      windows: [
+        makeWindow({
+          kind: "daily",
+          label: "每天",
+          reset_at: "2000-01-01T00:00:00Z",
+        }),
+      ],
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+
+    expect(screen.getByText("尚未抓取")).toBeInTheDocument();
+    expect(
+      screen.getByText("还没有额度数据，等待后台抓取"),
+    ).toBeInTheDocument();
+    // 这种卡片本来无法等高，不渲染单行额度结构
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(
+      screen.queryByLabelText("查看 我的 Pro 的额度详情"),
+    ).toBeNull();
+  });
+
+  // OpenDesign 无 Design Plan 额度时只会给钱包余额 + 「按钱包计费」说明，没有窗口。
+  // 这种卡片不能因为窗口为空就只剩「还没有额度数据」，否则余额与计费说明完全看不到。
+  it("没有窗口但有余额时，正文一行显示余额，悬浮面板仍可看到说明", async () => {
+    const user = userEvent.setup();
+    const account = makeAccount({
+      provider: "opendesign",
+      provider_name: "OpenDesign",
+      label: "设计稿账号",
+      status: "ok",
+      windows: [],
+      balance: { label: "钱包余额", amount: 1.03, currency: "USD" },
+      note: "无 Design Plan 额度，按钱包计费",
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+
+    expect(screen.queryByText(/还没有额度数据/)).toBeNull();
+    // 正文唯一一行是纯文本余额：「钱包余额  $1.03」，没有进度条
+    const trigger = bodyTrigger("设计稿账号");
+    expect(within(trigger).getByText("钱包余额")).toBeInTheDocument();
+    expect(within(trigger).getByText("$1.03")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+
+    await user.hover(trigger);
+    const panel = await screen.findByTestId("quota-account-detail-panel");
+    expect(within(panel).getByText(/无 Design Plan 额度/)).toBeInTheDocument();
+    expect(within(panel).getByText(/1\.03/)).toBeInTheDocument();
+  });
+
+  it("余额与备注只出现在悬浮面板，不进正文", async () => {
+    const user = userEvent.setup();
+    const account = makeAccount({
+      balance: { label: "钱包余额", amount: 1.5, currency: "USD" },
+      note: "窗口用尽后扣钱包",
+      windows: [makeWindow({ used_percent: 38 })],
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+
+    expect(screen.queryByTestId("quota-account-note")).toBeNull();
+    expect(screen.queryByText("1.5 USD")).toBeNull();
+
+    await user.hover(bodyTrigger());
+    const panel = await screen.findByTestId("quota-account-detail-panel");
+    const note = within(panel).getByTestId("quota-account-note");
+    expect(note).toHaveTextContent("窗口用尽后扣钱包");
+    expect(note).toHaveClass("text-muted-foreground");
+    expect(panel.textContent).toContain("1.5 USD");
+    // 余额在备注之前
+    const text = panel.textContent ?? "";
+    expect(text.indexOf("1.5 USD")).toBeLessThan(
+      text.indexOf("窗口用尽后扣钱包"),
+    );
+  });
+
+  it("note 为空串时面板里不渲染补充说明", async () => {
+    const user = userEvent.setup();
+    const account = makeAccount({
+      note: "",
+      windows: [makeWindow({ used_percent: 38 })],
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+
+    await user.hover(bodyTrigger());
+    await screen.findByTestId("quota-account-detail-panel");
     expect(screen.queryByTestId("quota-account-note")).toBeNull();
   });
 
@@ -197,7 +484,7 @@ describe("QuotaAccountCard", () => {
     expect(container.textContent).not.toContain("fk-secret-value");
   });
 
-  it("invokes test and edit callbacks", async () => {
+  it("invokes edit and test callbacks from the ··· menu", async () => {
     const user = userEvent.setup();
     const onTest = vi.fn();
     const onEdit = vi.fn();
@@ -206,9 +493,18 @@ describe("QuotaAccountCard", () => {
       <QuotaAccountCard account={account} onTest={onTest} onEdit={onEdit} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "测试 我的 Pro" }));
-    expect(onTest).toHaveBeenCalledWith(account);
-    await user.click(screen.getByRole("button", { name: "编辑 我的 Pro" }));
+    await user.click(
+      screen.getByRole("button", { name: "更多操作 我的 Pro" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "编辑" }));
     expect(onEdit).toHaveBeenCalledWith(account);
+
+    await user.click(
+      screen.getByRole("button", { name: "更多操作 我的 Pro" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "测试凭据" }),
+    );
+    expect(onTest).toHaveBeenCalledWith(account);
   });
 });

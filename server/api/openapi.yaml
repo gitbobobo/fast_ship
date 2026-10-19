@@ -9592,6 +9592,9 @@ components:
           format: date-time
           nullable: true
           description: UTC；窗口重置时间
+        pool:
+          type: string
+          description: 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」
     QuotaBalance:
       type: object
       required: [label, amount, currency]

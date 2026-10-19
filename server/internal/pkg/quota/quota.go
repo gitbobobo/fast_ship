@@ -31,6 +31,9 @@ const (
 )
 
 // Window 是一个额度窗口。UsedPercent 允许为空（供应商没给百分比也算不出时）。
+// Pool 是窗口所属额度池的展示名，只有同一账号存在多个并行额度池的供应商才填
+// （如 Factory Droid 的「标准」/「Core」），前端据此分组展示；空串表示该供应商
+// 只有单一额度、无需分组，omitempty 使该字段在 JSON 里整个缺省。
 type Window struct {
 	Kind        string     `json:"kind"`
 	Label       string     `json:"label"`
@@ -39,6 +42,7 @@ type Window struct {
 	Limit       *float64   `json:"limit,omitempty"`
 	Unit        string     `json:"unit"`
 	ResetAt     *time.Time `json:"reset_at,omitempty"`
+	Pool        string     `json:"pool,omitempty"`
 }
 
 // Balance 是可选的余额 / 剩余额度（如美元）。

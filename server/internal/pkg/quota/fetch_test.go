@@ -96,6 +96,19 @@ func findWindow(t *testing.T, windows []Window, kind, label string) Window {
 	return Window{}
 }
 
+// findPoolWindow 按 kind+label+pool 找窗口：Factory 新接口的标准池与 core 池
+// 窗口同名（label 相同），必须用 pool 区分。
+func findPoolWindow(t *testing.T, windows []Window, kind, label, pool string) Window {
+	t.Helper()
+	for _, w := range windows {
+		if w.Kind == kind && w.Label == label && w.Pool == pool {
+			return w
+		}
+	}
+	t.Fatalf("找不到窗口 kind=%s label=%s pool=%s，实际 %+v", kind, label, pool, windows)
+	return Window{}
+}
+
 func expectHeader(t *testing.T, r *http.Request, key, want string) {
 	t.Helper()
 	if got := r.Header.Get(key); got != want {
@@ -970,8 +983,83 @@ func TestFactoryTokenRateLimitsPath(t *testing.T) {
 	if monthly.UsedPercent == nil || *monthly.UsedPercent != 56 {
 		t.Fatalf("每月窗口期望 56%%，得到 %v", monthly.UsedPercent)
 	}
+	for _, w := range []Window{fiveHour, weekly, monthly} {
+		if w.Pool != "标准" {
+			t.Fatalf("标准池窗口 Pool 期望「标准」，得到 %q", w.Pool)
+		}
+	}
 	if snapshot.Balance == nil || snapshot.Balance.Amount != 5 {
 		t.Fatalf("Extra 余额期望 5（500 美分），得到 %+v", snapshot.Balance)
+	}
+}
+
+// INT-130：标准池与 core 池窗口同名，靠 pool 区分；core 窗口 label 不带
+// 「Core 」前缀，池名由 pool 表达，序列化后两池都能看到各自的 pool 值。
+func TestFactoryPoolWindowsSeparatedByPool(t *testing.T) {
+	body := `{"usesTokenRateLimitsBilling":true,"limits":{
+		"standard":{
+			"fiveHour":{"usedPercent":10,"secondsRemaining":600},
+			"weekly":{"usedPercent":20,"secondsRemaining":600}},
+		"core":{
+			"fiveHour":{"usedPercent":30,"secondsRemaining":600},
+			"monthly":{"usedPercent":40,"secondsRemaining":600}}}}`
+	server, _ := newTestServer(t, func(r *http.Request) (int, []byte) {
+		switch r.URL.Path {
+		case "/api/app/auth/me":
+			return http.StatusOK, []byte(`{}`)
+		case "/api/billing/limits":
+			return http.StatusOK, []byte(body)
+		}
+		return http.StatusNotFound, []byte(`{}`)
+	})
+	ctx, cancel := fetchCtx()
+	defer cancel()
+
+	snapshot, err := fetchFactory(ctx, server.Client(), server.URL, Credentials{"api_key": "fk-key"})
+	if err != nil {
+		t.Fatalf("取数失败: %v", err)
+	}
+
+	stdFiveHour := findPoolWindow(t, snapshot.Windows, WindowFiveHour, "5 小时", "标准")
+	coreFiveHour := findPoolWindow(t, snapshot.Windows, WindowFiveHour, "5 小时", "Core")
+	coreMonthly := findPoolWindow(t, snapshot.Windows, WindowMonthly, "每月", "Core")
+	if stdFiveHour.UsedPercent == nil || *stdFiveHour.UsedPercent != 10 {
+		t.Fatalf("标准 5 小时窗口期望 10%%，得到 %v", stdFiveHour.UsedPercent)
+	}
+	if coreFiveHour.Label != "5 小时" || strings.Contains(coreFiveHour.Label, "Core") {
+		t.Fatalf("core 窗口 label 不应带「Core 」前缀，得到 %q", coreFiveHour.Label)
+	}
+	if coreMonthly.Label != "每月" {
+		t.Fatalf("core 月度窗口 label 期望「每月」，得到 %q", coreMonthly.Label)
+	}
+	if coreFiveHour.UsedPercent == nil || *coreFiveHour.UsedPercent != 30 {
+		t.Fatalf("core 5 小时窗口期望 30%%，得到 %v", coreFiveHour.UsedPercent)
+	}
+
+	// 同类型窗口稳定排序下标准池在前、core 池在后，前端可直接按 pool 分组。
+	wantOrder := []struct{ kind, pool string }{
+		{WindowFiveHour, "标准"}, {WindowFiveHour, "Core"},
+		{WindowWeekly, "标准"}, {WindowMonthly, "Core"},
+	}
+	if len(snapshot.Windows) != len(wantOrder) {
+		t.Fatalf("期望 %d 个窗口，得到 %d 个: %+v", len(wantOrder), len(snapshot.Windows), snapshot.Windows)
+	}
+	for i, want := range wantOrder {
+		w := snapshot.Windows[i]
+		if w.Kind != want.kind || w.Pool != want.pool {
+			t.Fatalf("窗口 %d 期望 kind=%s pool=%s，得到 kind=%s pool=%q label=%q",
+				i, want.kind, want.pool, w.Kind, w.Pool, w.Label)
+		}
+	}
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	for _, pool := range []string{"标准", "Core"} {
+		if !strings.Contains(string(data), `"pool":"`+pool+`"`) {
+			t.Fatalf("序列化结果应含 %q 的 pool 字段: %s", pool, data)
+		}
 	}
 }
 
@@ -1008,6 +1096,19 @@ func TestFactoryLegacyFallback(t *testing.T) {
 	}
 	if standard.ResetAt == nil || !standard.ResetAt.Equal(*unixTime(1_702_678_400)) {
 		t.Fatalf("账期结束时间（毫秒时间戳）不符: %v", standard.ResetAt)
+	}
+	// 旧版接口的 standard/premium 是两个独立额度池，各自填 pool：前端按池算
+	// 有效剩余与是否用尽，混成一个池时「标准用尽 + 高级还有额度」会被误判。
+	if standard.Pool != "标准" || premium.Pool != "高级" {
+		t.Fatalf("旧版窗口池名期望 标准/高级，得到 %q/%q", standard.Pool, premium.Pool)
+	}
+	legacy, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	if !strings.Contains(string(legacy), `"pool":"标准"`) ||
+		!strings.Contains(string(legacy), `"pool":"高级"`) {
+		t.Fatalf("旧版快照应带两个池名: %s", legacy)
 	}
 	if snapshot.Balance != nil {
 		t.Fatalf("旧版响应不应有余额: %+v", snapshot.Balance)
@@ -1651,7 +1752,7 @@ func TestFactoryCorePoolZeroValuesStillHasData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("取数失败: %v", err)
 	}
-	core := findWindow(t, snapshot.Windows, WindowFiveHour, "Core 5 小时")
+	core := findPoolWindow(t, snapshot.Windows, WindowFiveHour, "5 小时", "Core")
 	if core.UsedPercent == nil || *core.UsedPercent != 0 {
 		t.Fatalf("core 池 0 值也算有数据，期望 0%%，得到 %v", core.UsedPercent)
 	}
@@ -2031,7 +2132,7 @@ func TestFactoryCorePoolZeroUsedPercentAloneIsData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("取数失败: %v", err)
 	}
-	core := findWindow(t, snapshot.Windows, WindowFiveHour, "Core 5 小时")
+	core := findPoolWindow(t, snapshot.Windows, WindowFiveHour, "5 小时", "Core")
 	if core.UsedPercent == nil || *core.UsedPercent != 0 {
 		t.Fatalf("usedPercent=0 单独出现也算有数据，期望 0%%，得到 %v", core.UsedPercent)
 	}

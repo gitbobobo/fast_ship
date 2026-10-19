@@ -92,29 +92,30 @@ func buildFactoryRateLimitSnapshot(root, limits, standard, authInfo map[string]a
 	now := time.Now().UTC()
 	var windows []Window
 
-	if w := factoryPoolWindow(standard["fiveHour"], WindowFiveHour, "5 小时", now); w != nil {
+	if w := factoryPoolWindow(standard["fiveHour"], WindowFiveHour, "5 小时", "标准", now); w != nil {
 		windows = append(windows, *w)
 	}
-	if w := factoryPoolWindow(standard["weekly"], WindowWeekly, "每周", now); w != nil {
+	if w := factoryPoolWindow(standard["weekly"], WindowWeekly, "每周", "标准", now); w != nil {
 		windows = append(windows, *w)
 	}
-	if w := factoryPoolWindow(standard["monthly"], WindowMonthly, "每月", now); w != nil {
+	if w := factoryPoolWindow(standard["monthly"], WindowMonthly, "每月", "标准", now); w != nil {
 		windows = append(windows, *w)
 	}
 	if len(windows) == 0 {
 		return Snapshot{}, ProviderError("Factory 响应缺少用量窗口。", 0)
 	}
 
-	// core 池是叠加在标准池上的独立额度，只在有数据时展示。
+	// core 池是叠加在标准池上的独立额度，只在有数据时展示。池名由 Pool 表达，
+	// 两个池的窗口同名，label 不再带「Core 」前缀。
 	if core, ok := asObject(limits["core"]); ok && factoryPoolHasData(core) {
 		coreWindows := []Window{}
-		if w := factoryPoolWindow(core["fiveHour"], WindowFiveHour, "Core 5 小时", now); w != nil {
+		if w := factoryPoolWindow(core["fiveHour"], WindowFiveHour, "5 小时", "Core", now); w != nil {
 			coreWindows = append(coreWindows, *w)
 		}
-		if w := factoryPoolWindow(core["weekly"], WindowWeekly, "Core 每周", now); w != nil {
+		if w := factoryPoolWindow(core["weekly"], WindowWeekly, "每周", "Core", now); w != nil {
 			coreWindows = append(coreWindows, *w)
 		}
-		if w := factoryPoolWindow(core["monthly"], WindowMonthly, "Core 每月", now); w != nil {
+		if w := factoryPoolWindow(core["monthly"], WindowMonthly, "每月", "Core", now); w != nil {
 			coreWindows = append(coreWindows, *w)
 		}
 		windows = append(windows, coreWindows...)
@@ -129,10 +130,11 @@ func buildFactoryRateLimitSnapshot(root, limits, standard, authInfo map[string]a
 	}, nil
 }
 
-// factoryPoolWindow 解析一个窗口池条目。usedPercent 为必需字段；
+// factoryPoolWindow 解析一个窗口池条目，pool 是该条目所属额度池的展示名
+// （写入 Window.Pool）。usedPercent 为必需字段；
 // 重置时间取 secondsRemaining（相对秒），否则取 windowEnd（仅在未来时有效）。
 // 滚动窗口已过期（有 windowEnd 但没有任何剩余秒数）时按已重置处理，显示 0%。
-func factoryPoolWindow(value any, kind, label string, now time.Time) *Window {
+func factoryPoolWindow(value any, kind, label, pool string, now time.Time) *Window {
 	obj, ok := asObject(value)
 	if !ok {
 		return nil
@@ -160,6 +162,7 @@ func factoryPoolWindow(value any, kind, label string, now time.Time) *Window {
 		usedPercent = 0
 	}
 	w := percentWindow(kind, label, usedPercent, resetAt)
+	w.Pool = pool
 	return &w
 }
 
@@ -214,6 +217,10 @@ func fetchFactoryLegacyUsage(ctx context.Context, client *http.Client, base stri
 	return snapshot, nil
 }
 
+// buildFactoryLegacySnapshot 解析旧版 usage 接口。它的 standard/premium 是两个
+// 互相独立的额度池，所以同样要填 Window.Pool（标准 / 高级）：
+// 前端按池算有效剩余与是否用尽，没有 pool 会把两个池当成一个——标准池用尽而
+// 高级池还有额度时，账号会被误判为已用尽。
 func buildFactoryLegacySnapshot(authInfo, usageRoot map[string]any) Snapshot {
 	usage, _ := asObject(usageRoot["usage"])
 
@@ -224,9 +231,11 @@ func buildFactoryLegacySnapshot(authInfo, usageRoot map[string]any) Snapshot {
 			periodEnd = &end
 		}
 		if w := factoryLegacyWindow(usage["standard"], "标准额度", periodEnd); w != nil {
+			w.Pool = "标准"
 			windows = append(windows, *w)
 		}
 		if w := factoryLegacyWindow(usage["premium"], "高级额度", periodEnd); w != nil {
+			w.Pool = "高级"
 			windows = append(windows, *w)
 		}
 	}

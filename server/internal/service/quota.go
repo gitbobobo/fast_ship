@@ -419,7 +419,7 @@ func (s *QuotaService) Probe(req *TestQuotaCredentialsRequest) (*api.QuotaProbe,
 	probe.Status = api.QuotaProbeStatusOk
 	probe.PlanName = snapshot.PlanName
 	probe.Note = snapshot.Note
-	probe.Windows = snapshotWindows(snapshot)
+	probe.Windows = snapshotWindows(provider.ID, snapshot)
 	probe.Balance = snapshotBalance(snapshot)
 	return probe, nil
 }
@@ -586,15 +586,19 @@ func (s *QuotaService) toAccountResponse(account *model.QuotaAccount) api.QuotaA
 		s.logger.Warn("quota snapshot_json unreadable", zap.String("account_id", account.ID), zap.Error(err))
 		return resp
 	}
-	resp.Windows = snapshotWindows(snapshot)
+	resp.Windows = snapshotWindows(account.Provider, snapshot)
 	resp.Balance = snapshotBalance(snapshot)
 	resp.Note = snapshot.Note
 	return resp
 }
 
-func snapshotWindows(snapshot quota.Snapshot) []api.QuotaWindow {
-	windows := make([]api.QuotaWindow, 0, len(snapshot.Windows))
-	for _, w := range snapshot.Windows {
+// snapshotWindows 把快照窗口投影成契约窗口。providerID 用于给早于 pool 字段的
+// 历史快照补池名（见 quota.BackfillWindowPools）——没有它，老快照里的 Factory
+// 双池会被前端并成一个池，把「标准用尽 + 高级可用」误判成已用尽。
+func snapshotWindows(providerID string, snapshot quota.Snapshot) []api.QuotaWindow {
+	source := quota.BackfillWindowPools(providerID, snapshot.Windows)
+	windows := make([]api.QuotaWindow, 0, len(source))
+	for _, w := range source {
 		windows = append(windows, api.QuotaWindow{
 			Kind:        api.QuotaWindowKind(w.Kind),
 			Label:       w.Label,
@@ -603,9 +607,19 @@ func snapshotWindows(snapshot quota.Snapshot) []api.QuotaWindow {
 			Limit:       w.Limit,
 			Unit:        api.QuotaWindowUnit(w.Unit),
 			ResetAt:     api.JSONTimePtr(w.ResetAt),
+			Pool:        poolPtr(w.Pool),
 		})
 	}
 	return windows
+}
+
+// poolPtr 只把非空的池名带进响应：单池供应商的窗口不该出现该字段
+// （api.QuotaWindow.Pool 是可选的 *string，nil 时 JSON 里整个缺省）。
+func poolPtr(pool string) *string {
+	if pool == "" {
+		return nil
+	}
+	return &pool
 }
 
 func snapshotBalance(snapshot quota.Snapshot) *api.QuotaBalance {
