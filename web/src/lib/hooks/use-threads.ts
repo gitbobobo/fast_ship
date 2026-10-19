@@ -1,8 +1,10 @@
+import { useEffect } from "react";
 import {
   useMutation,
   useQuery,
   useQueryClient,
   type QueryClient,
+  type QueryFilters,
 } from "@tanstack/react-query";
 import {
   environmentApi,
@@ -13,18 +15,12 @@ import {
   type SendMessageInput,
   type ChatAttachment,
 } from "@/lib/api/threads";
-import { shouldPollThread } from "@/lib/threads-compose";
+import {
+  subscribeThreadStream,
+  type ThreadStreamEvent,
+} from "@/lib/thread-stream";
 import { useAuthStore } from "@/lib/store/auth-store";
 import { useThreadListStore } from "@/lib/store/thread-list-store";
-
-export const THREAD_DETAIL_POLL_MS = 3000;
-
-/**
- * 有环境处于 degraded（冷启动同步中、断线重连中、归档面暂不可读）时的列表轮询间隔。
- * 服务端此刻从内存快照回答，代价接近零；一旦所有环境回到 ok 就停止轮询。
- * unreachable / repair 不轮询——那需要用户去环境设置处理。
- */
-export const THREAD_LIST_DEGRADED_POLL_MS = 15000;
 
 /**
  * 本功能的所有查询都挂在 [ROOT, userId, ...] 下：缓存按用户身份隔离，
@@ -134,8 +130,69 @@ export function useDeleteEnvironment() {
 }
 
 /**
- * 列表在打开、窗口重新聚焦、手动刷新时更新；仅当有环境处于 degraded（同步中/
- * 断线重连）时按固定间隔重读，等它自行收敛，其余情况不做定时轮询。
+ * 先取消在飞请求、再失效。TanStack Query 5.96 的 cancelRefetch 只在「已有
+ * data」时取消重写；首次加载（data 仍为 undefined）会复用原 promise，成功
+ * 响应又把 isInvalidated 清回 false——服务端取旧快照、返回前推送到达时，
+ * 这次失效会被吞掉，页面停在旧数据上。先取消再失效才能保证推送不丢。
+ */
+function refreshThreadQueries(queryClient: QueryClient, filters: QueryFilters) {
+  void queryClient
+    .cancelQueries(filters)
+    .then(() => queryClient.invalidateQueries(filters));
+}
+
+/**
+ * SSE 事件 → 查询失效的映射。纯函数便于单测；只用 invalidateQueries，
+ * removeQueries 会让已打开页面闪白。
+ * - 无 environment_id：全局刷新（含连接建立首帧的 full），整个用户子树失效。
+ * - 有 environment_id：列表总是失效；full 或带 state（连接状态翻转，可能
+ *   与同环境的线程增量合并在同一条事件里）时该环境全部详情失效；否则只失效
+ *   thread_ids 命中的详情，不碰无关环境。thread_ids 缺失按全量处理。
+ */
+export function applyThreadStreamEvent(
+  queryClient: QueryClient,
+  userId: string,
+  event: ThreadStreamEvent,
+) {
+  if (!event.environment_id) {
+    refreshThreadQueries(queryClient, { queryKey: [ROOT, userId] });
+    return;
+  }
+  const environmentId = event.environment_id;
+  refreshThreadQueries(queryClient, { queryKey: keys.threads(userId) });
+  const detailPrefix = [ROOT, userId, "thread", environmentId];
+  // state 变化说明连接刚恢复/断开：断连期间失败的详情重读要全部重试，
+  // 不能因为同一事件里还合进了别的线程增量就只刷那一两个线程。
+  if (event.full || event.state) {
+    refreshThreadQueries(queryClient, { queryKey: detailPrefix });
+    return;
+  }
+  refreshThreadQueries(queryClient, {
+    queryKey: detailPrefix,
+    predicate: (query) =>
+      !event.thread_ids?.length ||
+      event.thread_ids.includes(String(query.queryKey[4])),
+  });
+}
+
+/**
+ * 订阅线程壳 SSE（应用根部挂一次）：登录期间保持连接，服务端推送经
+ * applyThreadStreamEvent 失效对应查询并触发重读；卸载、登出、换用户都关闭订阅。
+ */
+export function useThreadStream(queryClient: QueryClient) {
+  const userId = useUserId();
+  useEffect(() => {
+    if (!userId) return;
+    const subscription = subscribeThreadStream({
+      onEvent: (event) => applyThreadStreamEvent(queryClient, userId, event),
+    });
+    return () => subscription.close();
+  }, [queryClient, userId]);
+}
+
+/**
+ * 列表在打开、窗口重新聚焦、手动刷新时更新；运行中的变化由线程壳 SSE
+ * 推送失效（见 useThreadStream），不做定时轮询。
  */
 export function useThreads() {
   const userId = useUserId();
@@ -145,17 +202,12 @@ export function useThreads() {
     enabled: Boolean(userId),
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
-    refetchInterval: (query) =>
-      query.state.data?.environments.some((env) => env.status === "degraded")
-        ? THREAD_LIST_DEGRADED_POLL_MS
-        : false,
   });
 }
 
 /**
- * 详情在线程有进展时每隔几秒轮询：运行中、停止中、有待作答请求、
- * 未暂停且队列有待推进项（见 shouldPollThread）。读取失败后自动停止，
- * 保留旧内容并由页面标陈旧，用户手动重试恢复；窗口重新聚焦时刷新。
+ * 详情在打开、窗口重新聚焦、写操作结算与 SSE 推送失效时重读，不做定时轮询。
+ * 读取失败保留旧内容并由页面标陈旧，用户手动重试恢复。
  */
 export function useThreadDetail(environmentId: string, threadId: string) {
   const userId = useUserId();
@@ -166,10 +218,6 @@ export function useThreadDetail(environmentId: string, threadId: string) {
     enabled: Boolean(userId && environmentId && threadId),
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
-    refetchInterval: (query) =>
-      query.state.status !== "error" && shouldPollThread(query.state.data)
-        ? THREAD_DETAIL_POLL_MS
-        : false,
   });
 }
 

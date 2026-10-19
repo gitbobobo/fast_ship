@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"time"
 
@@ -82,7 +83,52 @@ func (s *T3EnvironmentService) Create(ctx context.Context, userID string, req *C
 		resp.Status = status
 		resp.Error = api.Ptr(probeErr)
 	}
+	// 落库即预热（INT-132）：新环境立即建立常驻订阅，不等第一次读取。失败只
+	// 记日志——订阅预热不影响创建结果，下次读取路径会照常准入。
+	s.ensureShellSubscription(env, "创建环境后")
+	// 环境列表也是推送驱动：其它标签页需要知道多了一个环境（INT-132）。
+	s.shellHub.PublishUserRefresh(userID)
 	return resp, nil
+}
+
+// PrewarmShellSubscriptions 启动预热：为全部已配置环境建立常驻 shell 订阅
+// （INT-132）。读取从「读请求驱动」改为「环境常驻连接 + 推送」后，订阅跟
+// 环境走、不跟请求走，启动时逐个 Ensure。单个环境失败（解密失败=坏数据、
+// 配置被并发替换=迟到请求）只记 warn，不阻塞启动。
+func (s *T3EnvironmentService) PrewarmShellSubscriptions(ctx context.Context) {
+	envs, err := s.repo.ListAll(ctx)
+	if err != nil {
+		s.logger.Warn("预热 shell 订阅：读取环境列表失败", zap.Error(err))
+		return
+	}
+	for i := range envs {
+		s.ensureShellSubscription(&envs[i], "启动预热")
+	}
+}
+
+// bearerToken 解密环境凭证。与 T3ThreadsService 同名方法同语义；环境服务侧
+// （预热/创建/重配后重建订阅）用它。
+func (s *T3EnvironmentService) bearerToken(env *model.T3Environment) (string, error) {
+	plain, err := crypto.Decrypt(env.BearerTokenEncrypted, []byte(s.cfg.Encryption.Key))
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+// ensureShellSubscription 解密凭证并 Ensure。解密/准入失败记 warn，不影响
+// 调用方结果。
+func (s *T3EnvironmentService) ensureShellSubscription(env *model.T3Environment, scene string) {
+	token, err := s.bearerToken(env)
+	if err != nil {
+		s.logger.Warn("预热 shell 订阅：凭证解密失败，跳过该环境",
+			zap.String("environment_id", env.ID), zap.String("scene", scene), zap.Error(err))
+		return
+	}
+	if err := s.shellHub.Ensure(env, token); err != nil {
+		s.logger.Warn("预热 shell 订阅失败",
+			zap.String("environment_id", env.ID), zap.String("scene", scene), zap.Error(err))
+	}
 }
 
 func (s *T3EnvironmentService) List(ctx context.Context, userID string) ([]T3EnvironmentResponse, error) {
@@ -171,6 +217,9 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 		}
 		env.Name = newName
 		env.UpdatedAt = update.UpdatedAt
+		// 改名/重配都会改变环境列表与线程页的展示（INT-132：列表不再轮询）：
+		// 让该用户的浏览器整棵线程子树刷新一次。
+		s.shellHub.PublishUserRefresh(userID)
 		if update.Pairing != nil {
 			env.Address = update.Pairing.Address
 			env.BearerTokenEncrypted = update.Pairing.BearerTokenEncrypted
@@ -188,6 +237,10 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 				// 重读失败（典型是与并发 Delete 竞争）退回 env.ConfigRevision + 1：
 				// 这是本次自增后新世代的最小可能值，宁可少拒（可能放行一个过期
 				// 请求）也不能多拒（把携带新配置的正常请求挡在门外）。
+				//
+				// 此时**不重建订阅**：用本次请求内存里的旧 address/凭证拼装 Ensure
+				// 会把旧凭证标成新世代，随后到达的正确凭证（真正的新世代、同代
+				// 指纹）反而会被指纹守卫拒绝——宁可让下一次读取路径按新行自建。
 				s.logger.Warn("重配后重读 config_revision 失败，退回最小可能世代做 cutoff",
 					zap.String("environment_id", id), zap.Error(reErr))
 				env.ConfigRevision++
@@ -195,6 +248,9 @@ func (s *T3EnvironmentService) Update(ctx context.Context, userID, id string, re
 			} else {
 				env.ConfigRevision = fresh.ConfigRevision
 				s.shellHub.Drop(userID, id, env.ConfigRevision)
+				// 用重读出的完整行（新地址+新凭证+新世代）重建常驻订阅（INT-132）：
+				// 重配后订阅必须立即跟上新配置，不等下一次读取。
+				s.ensureShellSubscription(fresh, "重配后")
 			}
 		}
 	}
@@ -222,10 +278,8 @@ func (s *T3EnvironmentService) updateRepoError(err error) error {
 // expires_in 自行过期。因此删除是本地删除，不向上游发起吊销
 // （见 docs/internal/threads.md 的安全章节）。
 func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) error {
-	// 存在性检查服务于 40417 语义；顺带留下删除前读到的行——它的
-	// config_revision 用于下面的 Drop tombstone。
-	env, err := s.repo.FindByIDAndUserID(ctx, id, userID)
-	if err != nil {
+	// 存在性检查服务于 40417 语义；删除 cutoff 不再依赖行内容（MaxInt64 哨兵）。
+	if _, err := s.repo.FindByIDAndUserID(ctx, id, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errs.ErrT3EnvironmentNotFound
 		}
@@ -237,11 +291,16 @@ func (s *T3EnvironmentService) Delete(ctx context.Context, userID, id string) er
 	if err := s.repo.Delete(ctx, id, userID); err != nil {
 		return errs.ErrInternal
 	}
-	// 删除成功后清掉该环境的订阅 trail（INT-116）。tombstone 用删除前读到的
-	// revision + 1：删除后行已不存在，任何在途请求最多携带「删除前读到的
-	// revision」（== env.ConfigRevision），< cutoff 成立即被拒；环境 ID 不可
-	// 复用，不存在携带更大 revision 的合法请求会撞上这个 tombstone。
-	s.shellHub.Drop(userID, id, env.ConfigRevision+1)
+	// 删除成功后清掉该环境的订阅 trail。cutoff 用 math.MaxInt64 哨兵（INT-132）：
+	// 淘汰条件 e.configRevision < cutoff 恒真，entry 无条件关闭；floor 同为
+	// MaxInt64，之后任何迟到的 Ensure/View 都被拒。不能传「删除前 revision + 1」：
+	// 并发重配先升到 r+1 再被删除时，旧 cutoff=r+1 会保留同代 entry 并放行
+	// 迟到的 Ensure（同代指纹可通过）——哨兵不给这类交错留窗口。环境 ID 不可
+	// 复用，永久拒绝正是该语义的正确表达。
+	s.shellHub.Drop(userID, id, math.MaxInt64)
+	// Drop 在 entry 处于重连退避时不会发出任何连接状态事件（监督循环直接
+	// 退出），别的标签页会一直显示已删除的环境；补一次全局失效（INT-132）。
+	s.shellHub.PublishUserRefresh(userID)
 	return nil
 }
 

@@ -44,6 +44,14 @@ func (r *T3EnvironmentRepository) ListByUserID(ctx context.Context, userID strin
 	return envs, err
 }
 
+// ListAll 全部环境（不分用户）：启动预热 shell 订阅用（INT-132）。按创建
+// 时间升序，与 ListByUserID 同序。
+func (r *T3EnvironmentRepository) ListAll(ctx context.Context) ([]model.T3Environment, error) {
+	var envs []model.T3Environment
+	err := r.db.WithContext(ctx).Order("created_at ASC").Find(&envs).Error
+	return envs, err
+}
+
 // T3PairingUpdate 是一次重新配对产出的列集合（地址+凭证），不含 name 等
 // 其它列——重配与改名各写各的列，互不覆盖。
 type T3PairingUpdate struct {

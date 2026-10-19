@@ -2,14 +2,19 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/service"
 )
+
+// t3StreamHeartbeat 是线程事件流的心跳周期，与 bot SSE 一致。
+const t3StreamHeartbeat = 15 * time.Second
 
 // parseOptionalCursorQuery 解析可选的非负整数游标；空串返回 nil。
 // queuedEditText 排队编辑的 text 必填：缺省会把已有正文清成空串。
@@ -117,6 +122,76 @@ func (h *T3EnvironmentHandler) ListThreads(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+// StreamThreadEvents GET /api/threads/stream（INT-132）：shell 变更推送。
+//
+// 流程与 bot SSE（bot_stream.go）一致：先注册订阅再写流，请求期间不重新校验
+// JWT（长连接与 bot 流同策略，不做额外 DB 检查）。首帧是无 environment_id 的
+// 全量刷新信号；之后逐条转发 hub 发布的合并事件（Drain 摘取）。只有当前
+// goroutine 写 ResponseWriter；每次写前设写超时（writer 不支持就跳过），
+// 写失败立即退出——断开的客户端不能拖住 handler。
+func (h *T3EnvironmentHandler) StreamThreadEvents(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	// 先注册订阅：注册与首帧之间产生的发布由订阅缓冲兜住，不会丢。
+	sub := h.threadsService.SubscribeShellEvents(userID)
+	defer sub.Close()
+
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	controller := http.NewResponseController(c.Writer)
+	writeFrame := func(frame string) bool {
+		// 写超时防止「客户端保持连接但停止读取」把 handler 与订阅永久挂住。
+		// 生产环境的 RequestLog 包装已透传 Unwrap，deadline 才能落到真实连接上。
+		// 不支持的 writer（如测试里的 recorder）只能靠请求 ctx 兜底，跳过即可。
+		_ = controller.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if _, err := fmt.Fprint(c.Writer, frame); err != nil {
+			return false
+		}
+		if err := controller.Flush(); err != nil {
+			return false
+		}
+		return true
+	}
+
+	// 首帧：全局刷新信号（无 environment_id），浏览器据此拉一次全量列表。
+	if !writeFrame("event: shell\ndata: {\"full\":true}\n\n") {
+		return
+	}
+
+	heartbeat := time.NewTicker(t3StreamHeartbeat)
+	defer heartbeat.Stop()
+	requestCtx := c.Request.Context()
+
+	for {
+		select {
+		case <-requestCtx.Done():
+			return
+		case <-heartbeat.C:
+			// SSE 注释心跳：穿透反向代理的空闲超时，不算事件。
+			if !writeFrame(": ping\n\n") {
+				return
+			}
+		case <-sub.C():
+			events := sub.Drain()
+			if events == nil {
+				// 订阅已关闭（hub 停机）：nil 区别于「无事件」的空切片。
+				return
+			}
+			for i := range events {
+				payload, err := json.Marshal(events[i])
+				if err != nil {
+					continue // 纯数据结构，编码失败只可能来自内部错误，跳过该条
+				}
+				if !writeFrame("event: shell\ndata: " + string(payload) + "\n\n") {
+					return
+				}
+			}
+		}
+	}
 }
 
 // GetThread GET /api/environments/:id/threads/:threadId

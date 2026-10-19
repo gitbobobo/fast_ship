@@ -224,3 +224,12 @@ func (w *statusCaptureWriter) WriteString(s string) (int, error) {
 	}
 	return w.ResponseWriter.WriteString(s)
 }
+
+// Unwrap 把包装层透明给 http.NewResponseController：生产环境是这层包装
+// 让 ResponseController 拿不到真实连接，SSE 的写超时（handler 里的
+// SetWriteDeadline）会静默退化为 ErrNotSupported。注意嵌入的是
+// gin.ResponseWriter **接口**，接口本身没有 Unwrap，方法不会被提升，
+// 必须显式透传；内层 *gin.responseWriter 自带 Unwrap，链路到此畅通。
+func (w *statusCaptureWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}

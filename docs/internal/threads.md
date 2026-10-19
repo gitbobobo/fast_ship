@@ -4,7 +4,8 @@ Fast Ship 以 T3 客户端身份接入 T3 Code 环境：配对一个 T3 服务�
 并支持发消息、停止、排队管理、审批/提问应答、密钥代答与图片附件。线程、队列与
 请求状态由 T3 持有——Fast Ship 不落库、不建队列库、不做任务调度器、不做第二套
 线程状态机。读取走按环境常驻的 shell 订阅（INT-116：活跃/归档各一条长驻 WS +
-增量推送，内存组装回答）；写操作仍是 REST 表达用户操作、适配器转成 T3 一次性
+增量推送，内存组装回答；INT-132 起订阅跟环境走、不跟读请求走，变更经 SSE 推给
+浏览器，前端不再定时轮询）；写操作仍是 REST 表达用户操作、适配器转成 T3 一次性
 WS RPC。
 
 边界补充（INT-90 之后仍成立）：本文描述的客户端语义没有队列镜像、没有第二套
@@ -37,7 +38,9 @@ API Key 开放的 T3 只读面（不含凭证、不含线程内容）；线程�
 | T3 HTTP 客户端（换 token/探测/线程详情/项目表/字节转发） | `server/internal/service/t3_client.go` |
 | T3 WS RPC 客户端（effect rpc JSON 帧） | `server/internal/service/t3_ws.go` |
 | shell 订阅纯状态（活跃/归档两面 reducer） | `server/internal/service/t3_shell_state.go` |
-| shell 订阅 hub（每环境两条长驻 WS + 增量） | `server/internal/service/t3_shell_hub.go` |
+| shell 订阅 hub（每环境两条常驻 WS + 增量 + 变更通知） | `server/internal/service/t3_shell_hub.go` |
+| shell 变更事件与按用户订阅 | `server/internal/service/t3_shell_events.go` |
+| 浏览器 SSE 订阅与查询失效 | `server/internal/handler/t3_environment.go`（`/api/threads/stream`）、`web/src/lib/thread-stream.ts`、`web/src/lib/hooks/use-threads.ts` |
 | 会话能力（scopes/access/operate 守卫） | `server/internal/service/t3_access.go` |
 | 环境配对/改名/删除/探测（变更清 hub entry） | `server/internal/service/t3_environment_service.go` |
 | 线程聚合与条目补读 | `server/internal/service/t3_threads_service.go` |
@@ -236,7 +239,7 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   `Stale`=曾有数据但连接断开/重连中/追平中（`SyncedAgo` 标注距最近一次确认
   可信的时间）；`Failed`=从未拿到数据且首连失败（错误分类含凭证被拒）。
   **陈旧命中不当可信运行态**：详情/Stop/收尾判定只接受 `Ready`，否则 50202——
-  陈旧快照里的 idle 会让前端停止轮询、让 Stop 无事可做。
+  陈旧快照里的 idle 会把旧数据当成可信运行态、让 Stop 无事可做。
 - **保活与恢复**：距最近完整帧超 25s 发应用层 Ping（Effect RPC `{"_tag":"Ping"}`
   → `{"_tag":"Pong"}`，非 WS 控制帧）；单帧读 75s 到点即判死重连（x/net 超时后
   不可续读）。重连退避 1s→2s→…→30s ±25% jitter，稳定 60s 后重置；凭证被拒走
@@ -251,16 +254,15 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   宣称追平，否则「断线前 idle、断线期间线程已开始运行」时旧缓存会被当成可信
   运行态；官方客户端的新 session 也是先加载权威快照、失败才退回全量，而不是
   沿用上一会话的缓存。权威帧到达前视图保持 Stale/Syncing。
-- **空闲两级回收**：1 小时无访问先断连保值（内存快照保留，下次 View 用
-  afterSequence 增量恢复，避免「每次离开 15 分钟就重付 13s 全量快照」）；6 小时
-  无访问整条摘除。reaper 的 lastUsed 采样与 pause 决策在同一临界区完成，淘汰
-  则在摘除注册表的同一临界区（`hub.mu → entry.mu` 锁序）再复核一次 lastUsed，
-  刚被 View 使用的 entry 不会被旧采样误判；暂停期间新建立的连接会被立即取消
-  （登记 cancel 时同锁复查 paused/stopped）。连接结束时会汇合本次连接的取消
-  监听与 reader；`Close()` 返回后本 hub 启动的 goroutine 均已退出。会话层
-  `context.AfterFunc` 的取消回调（`t3_ws.go` 的 `closeOnCancel`，其 stop 按 Go
-  语义不等待已启动的回调）不在等待范围内：它只做一次 `conn.Close()`，可能在
-  `Close()` 返回后的极短时间内完成，不构成泄漏。
+- **生命周期跟环境走（INT-132）**：服务启动预热时为每个已配对环境建立 entry
+  （`PrewarmShellSubscriptions` → `hub.Ensure`），环境创建/重新配对后重建，
+  删除即关闭（`Drop` 传 `math.MaxInt64` tombstone：淘汰恒成立、迟到请求恒被拒）。
+  不再有基于 View 的空闲断开或空闲回收；`View` 只取用已有 entry 并等待首次同步，
+  读请求不决定连接生灭。连接结束时会汇合本次连接的取消监听与 reader；
+  `Close()` 返回后本 hub 启动的 goroutine 均已退出。会话层 `context.AfterFunc`
+  的取消回调（`t3_ws.go` 的 `closeOnCancel`，其 stop 按 Go 语义不等待已启动的
+  回调）不在等待范围内：它只做一次 `conn.Close()`，可能在 `Close()` 返回后的
+  极短时间内完成，不构成泄漏。
 - **版本守卫**：配置世代是 `t3_environments.config_revision`——只在地址/凭证
   变更时由仓库侧 SQL 自增（`config_revision + 1`），改名不算；`updated_at` 是
   UPDATE 前生成的墙钟时间、没有提交顺序保证（并发改名会让版本号回退），只做
@@ -270,9 +272,14 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   避免同一操作前半程旧配置、后半程新配置的拼接；用户/前端重试会重新加载
   配置，整个操作用同一份配置完成）。环境 Update（重配）落库成功后重读该行拿
   新世代（自增发生在 SQL 里，Go 侧算不出并发安全的新值；重读失败退回
-  `旧世代+1` 这个最小可能值）调 `shellHub.Drop`；Delete 的 cutoff 用**删除前
-  读到的 revision + 1** 做 tombstone（行已不存在，在途请求最多携带删除前的
-  revision，环境 ID 不可复用）。准入语义是「**请求 revision < cutoff 即拒**」：
+  `旧世代+1` 这个最小可能值）调 `shellHub.Drop`；Delete 的 cutoff 用
+  `math.MaxInt64` 哨兵：淘汰条件 `entry.revision < cutoff` 恒真，entry 无条件
+  关闭；floor 同为哨兵，任何迟到请求（世代必然有限）都被拒。不用「删除前
+  revision + 1」——并发重配先把世代升到 r+1 再被删除时，旧 cutoff=r+1 会保留
+  同代 entry 并放行迟到的 Ensure。环境 ID 不可复用，永久拒绝正是该语义；floor
+  按记录时刻 1 小时后清理也无碍（环境行已删，预热与读写路径都不会再为它建
+  entry，能撞上 floor 的只剩分钟级在途请求）。准入语义是「**请求 revision <
+  cutoff 即拒**」：
   携带新世代的请求（revision == cutoff）可以重建，变更前的请求一律被拒——
   包括并发改名后仍带着旧凭证的行（改名不递增 revision，世代与变更前相同），
   以及「迟到请求复活已删环境」这条路径。Drop 只淘汰旧代 entry（revision 小于
@@ -282,6 +289,32 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
 - **生命周期**：`Close()` 等 hub 级生命周期 WaitGroup 排空——覆盖已被
   Drop/替换/淘汰摘除的 entry 与各订阅 reader，返回后没有本 hub 启动的
   goroutine 仍在运行。
+
+### 变更推送到浏览器（SSE，INT-132）
+
+hub 在数据路径上发布轻量事件（`t3_shell_events.go`），消费方按用户订阅：
+
+- 事件形状 `{environment_id, thread_ids[], full, state}`：`thread.updated/removed`
+  带线程 ID；权威快照、项目增删、归档面失效与合并超限（>256 个线程 ID）置
+  `full`（整环境重拉）；`state`（syncing/ready/stale/failed）表示连接状态翻转，
+  stale/failed 下失败原因文案变化同样发布。环境创建/改名/重配/删除成功后再发
+  一条**无 environment_id 的 `full`**（用户级全局刷新）：这些操作不产生线程
+  增量，删除时 entry 若正在重连退避更不会发出任何连接事件，其它标签页否则会
+  一直显示已删除的环境。
+- 发布只做内存合并（同环境：`full` 逻辑或、线程 ID 并集、state 取最新）与非阻塞
+  唤醒，绝不写网络、不持 entry/hub 锁；订阅注册表用独立的 `subsMu`，锁序
+  `subsMu → 订阅锁`，不与 `hub.mu → entry.mu` 交叉。慢客户端不会反压订阅流：
+  信号 channel 容量 1，合并缓冲由消费方一次 `Drain` 取空。
+- 端点 `GET /api/threads/stream`（仅 JWT）：SSE，帧名 `shell`，连接建立先发一帧
+  全局 `{"full":true}`（无 environment_id）表示「全量刷新一次」；15s 心跳注释
+  `: ping`。handler 单 goroutine 写全部帧并检查写错误，断开即退订。
+- 前端 `web/src/lib/thread-stream.ts` 用 fetch + ReadableStream 订阅（EventSource
+  不能带 Bearer 头），指数退避无限重连；`applyThreadStreamEvent` 把事件映射成
+  TanStack Query 失效：无 environment_id 失效整个线程子树；有环境时列表必失效，
+  `full` 失效该环境全部详情，否则只失效命中的线程详情。`useThreads` /
+  `useThreadDetail` 因此删除固定间隔轮询（保留挂载/聚焦/写操作后的重读）。
+- 自动化等后台消费者的通知源就是 `hub.Subscribe(userID)`：同一个 hub 事件流，
+  不需要各自去问 T3；跨用户隔离由按用户分组的注册表保证。
 
 ### 各读取路径
 
@@ -293,7 +326,8 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   （线程表仍如实展示）；`Failed` → 凭证被拒 `repair`、其余 `unreachable`。
   归档不可信是部分失败（G1）：活跃线程照常返回，环境标 `degraded`「归档线程
   暂不可读」；其它状态优先自己的文案。列表请求不做每请求会话探测——凭证失效
-  由 hub 的重连探测异步发现。
+  由 hub 的重连探测异步发现。前端列表由 SSE 事件驱动失效（见上），不再按固定
+  间隔轮询 degraded 环境。
 - **线程详情**（GET /api/environments/:id/threads/:threadId）：两段读取共享一个
   整体 deadline（25s < 前端 35s），**先读运行态、后读时间线**。运行态只取 hub
   **可信活跃面**（`Ready`；未就绪/陈旧一律 50202「线程运行状态暂时不可读
@@ -301,7 +335,8 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
   `visibleTurnItems` 归一化；审批/提问条目按投影 `runtimeRequests` 补齐；
   另派生 `queue`/`activity`；`access` 取该环境落库的 `orchestration:operate`。
   shell 无此线程时以投影归类：投影 404 → 40418，投影在、shell 无 → 50202；
-  归档不可信时不下存在性结论（G1）。
+  归档不可信时不下存在性结论（G1）。前端详情只在收到本线程（或本环境 full）
+  的 SSE 事件后重读，不再按运行态每 3s 轮询。
 - **条目正文**（GET .../items/:itemId）：不读 shell。先取可见时间线验证成员
   （40419），再从可信行派生 `getTurnItem` 参数（不接受前端指定来源或 RPC 方法）。
 - **启动器/工作区选项/新建线程/项目发现/绑定校验**：项目表走 HTTP

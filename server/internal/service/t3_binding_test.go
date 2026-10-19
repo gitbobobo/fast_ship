@@ -122,6 +122,9 @@ func TestT3BindingDiscoverProjects(t *testing.T) {
 	e.fake.mu.Unlock()
 	okEnvID := e.pairFakeEnv(t, ctx, userID, "健康机")
 	deadEnv := createT3TestEnv(t, e.db, userID, "坏机")
+	// Create 已预热常驻订阅（INT-132）：等它稳定， discovery 的断言窗口从
+	// 这里起算，预热流量不进窗口。
+	before := awaitPrewarmSubscriptions(t, e.fake)
 
 	items, err := e.bind.DiscoverProjects(ctx, userID)
 	if err != nil {
@@ -147,8 +150,8 @@ func TestT3BindingDiscoverProjects(t *testing.T) {
 	if okItem.Projects[1].WorkspaceRoot != nil {
 		t.Fatalf("expected omitted workspace_root for p-2, got: %#v", okItem.Projects[1])
 	}
-	// 项目发现零 shell 调用（INT-116）：订阅类 RPC 不出现。
-	for _, rpc := range e.fake.recordedRPC() {
+	// 项目发现零 shell 调用（INT-116）：订阅类 RPC 不出现在发现窗口里。
+	for _, rpc := range e.fake.recordedRPC()[before:] {
 		switch rpc.method {
 		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
 			t.Fatalf("discovery must not subscribe shell, got %s", rpc.method)

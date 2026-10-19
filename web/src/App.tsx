@@ -4,7 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { watchGithubTokensIdentity } from "@/lib/hooks/use-github-tokens";
-import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
+import {
+  useThreadStream,
+  watchThreadsIdentity,
+} from "@/lib/hooks/use-threads";
 import { watchBotsIdentity } from "@/lib/hooks/use-bots";
 import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
 import { watchDeploymentIdentity } from "@/lib/hooks/use-deployment";
@@ -75,6 +78,9 @@ const queryClient = new QueryClient({
 });
 
 export default function App() {
+  // 线程壳 SSE：登录期间由服务端推送失效线程查询，取代轮询。
+  useThreadStream(queryClient);
+
   useEffect(() => {
     const stopThreads = watchThreadsIdentity(queryClient);
     const stopGithubTokens = watchGithubTokensIdentity(queryClient);

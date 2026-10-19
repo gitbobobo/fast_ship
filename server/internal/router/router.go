@@ -273,6 +273,9 @@ func Setup(
 			t3.GET("/environments/:id/threads/:threadId", t3EnvironmentHandler.GetThread)
 			t3.GET("/environments/:id/threads/:threadId/items/:itemId", t3EnvironmentHandler.GetThreadItem)
 			t3.GET("/threads", t3EnvironmentHandler.ListThreads)
+			// shell 变更推送（INT-132）：SSE 长连接，登录后订阅本用户全部环境
+			// 的线程/状态变化事件。
+			t3.GET("/threads/stream", t3EnvironmentHandler.StreamThreadEvents)
 
 			// T3 客户端（INT-85）：启动器/工作区选项与全部写操作。
 			// 只读会话（缺 orchestration:operate）在 service 层统一 40300。
