@@ -183,6 +183,8 @@ describe("BotsPage", () => {
     const dialog = await screen.findByRole("dialog");
 
     await user.type(within(dialog).getByLabelText("名称"), "发布助手");
+    // 新建时人设预填默认模板：先清空再写，提交值就是用户自己的文字。
+    await user.clear(within(dialog).getByLabelText("人设提示词"));
     await user.type(within(dialog).getByLabelText("人设提示词"), "盯发布");
     await user.type(
       within(dialog).getByLabelText("API 地址"),

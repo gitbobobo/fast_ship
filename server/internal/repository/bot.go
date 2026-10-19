@@ -23,22 +23,27 @@ func (r *BotRepository) Create(bot *model.Bot) error {
 	return r.db.Create(bot).Error
 }
 
-// UpdateConfig 只写配置类列，不碰水位；调用方先加载再改。toolset_version
-// 是运行时激活水位（只在压缩/重启边界切换），这里不回写——并发编辑不得把
-// 已激活的新版本覆盖回旧值（INT-102）。
-func (r *BotRepository) UpdateConfig(bot *model.Bot) error {
-	return r.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
-		"name":                    bot.Name,
-		"persona_prompt":          bot.PersonaPrompt,
-		"system_prompt_text":      bot.SystemPromptText,
-		"prompt_revision":         bot.PromptRevision,
-		"platform_prompt_version": bot.PlatformPromptVersion,
-		"base_url":                bot.BaseURL,
-		"model":                   bot.Model,
-		"api_key_encrypted":       bot.APIKeyEncrypted,
-		"api_key_last4":           bot.APIKeyLast4,
-		"updated_at":              bot.UpdatedAt,
-	}).Error
+// UpdateConfigTx 在事务内按列写配置，不碰水位；toolset_version 是运行时
+// 激活水位（只在压缩/重启边界切换），这里不回写——并发编辑不得把已激活的
+// 新版本覆盖回旧值（INT-102）。includePrompt=false 表示人设未变：persona_prompt
+// 与提示词状态三列一并不写，改名/换模型/换 key 不得把读行时的旧提示词状态
+// 写回、反向撤销并发的提示词激活。
+func (r *BotRepository) UpdateConfigTx(tx *gorm.DB, bot *model.Bot, includePrompt bool) error {
+	cols := map[string]interface{}{
+		"name":              bot.Name,
+		"base_url":          bot.BaseURL,
+		"model":             bot.Model,
+		"api_key_encrypted": bot.APIKeyEncrypted,
+		"api_key_last4":     bot.APIKeyLast4,
+		"updated_at":        bot.UpdatedAt,
+	}
+	if includePrompt {
+		cols["persona_prompt"] = bot.PersonaPrompt
+		cols["system_prompt_text"] = bot.SystemPromptText
+		cols["prompt_revision"] = bot.PromptRevision
+		cols["platform_prompt_version"] = bot.PlatformPromptVersion
+	}
+	return tx.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(cols).Error
 }
 
 // ActivateToolsetTx 在事务内把激活水位推进到目标工具/平台版本并按当前人设

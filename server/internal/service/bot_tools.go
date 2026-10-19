@@ -1151,8 +1151,9 @@ func botValidateActionFields(toolName, action string, raw map[string]json.RawMes
 
 // ---------- 执行 ----------
 
-// botExecuteSyncTool 在主线循环内执行同步工具：读取类、能力查询、帮助、
-// 结果续读、停止与取消。返回进入协议回复的内容（JSON 字符串）。
+// botExecuteSyncTool 在主线循环内执行同步工具：读取类、帮助、结果续读、停止
+// 与取消。能力查询（fs_*/status）由 executeSyncCall 分派：available 需要本
+// run 冻结的工具集水位，通用分派里拿不到。返回进入协议回复的内容（JSON 字符串）。
 func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotToolCall) (string, error) {
 	switch call.ToolName + "/" + call.Action {
 	case "fs_project/list", "fs_project/get":
@@ -1169,8 +1170,6 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 		// 定时任务管理（INT-103，INT-121 加 run）：全部同步、立即生效，与
 		// fs_memory 写同类。
 		return s.execScheduleTool(call)
-	case "fs_schedule/status", "fs_memory/status":
-		return s.execCapabilityStatus(call)
 	case "fs_memory/list", "fs_memory/read", "fs_memory/create", "fs_memory/replace",
 		"fs_memory/append", "fs_memory/delete", "fs_memory/history", "fs_memory/restore":
 		return s.execMemoryTool(call)

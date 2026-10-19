@@ -101,7 +101,8 @@ Completions 的工具定义实际在顶层 `tools`，不伪造 tools 消息；�
 （`memSnaps` 缓存），只有压缩边界或重启才重新注入——普通请求的记忆段
 逐字节不变，写入立即可经工具读回但模型视图保持冻结。
 
-系统提示词在创建或用户明确编辑人设时重建并递增 `prompt_revision`；工具
+系统提示词在创建或用户明确编辑人设时重建并递增 `prompt_revision`；拼装
+顺序固定为 平台规则 → 对话风格 → 人设（INT-122）。工具
 schema 进程内生成一次（invopop/jsonschema，去掉 `$id/$schema/$defs`），不按
 机器人权限删减排序。usage 启用 `stream_options.include_usage`，finish_reason
 之后继续读 usage chunk；缺失与零严格区分（`usage_complete` 标记 + 可空计数），
@@ -122,8 +123,15 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 修正这两个参数的 schema 描述；v6（INT-121）起 `fs_schedule` 新增 `run`
 （手动立即执行一次）与 `dry_run` 预览（见下节）。已发布版本（v1–v5）的
 注册表都是**冻结副本**——新版本变化不得改写旧版本的字节（存量会话的
-tools_hash 失稳即前缀失稳；v1–v5 的 hash 逐字节钉死在测试基线里）。版本只在压缩边界或进程重启后首次运行由 `activateToolsetTx` 推进（重建平台
-规则并递增 prompt_revision）；告知由 `maybeTellToolset` 按 `last_told_version`
+tools_hash 失稳即前缀失稳；v1–v5 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
+run 入口的 `activateBotPrompt` 在一个短事务里读行、
+判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
+本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
+生产库 `SetMaxOpenConns(1)` 让读-改-写与其它写者天然串行，调用方可能过期的
+副本写不坏库，因此不再需要进程级的激活缓存与事后补读。工具集版本随同入冻
+（`botRunFreeze.ToolsetVersion`），主线 run 的工具集只在压缩边界
+（`acceptCompactionBoundary`）才会换，并发的 schedule 激活不会在 run 中途
+静默换掉它。告知由 `maybeTellToolset` 按 `last_told_version`
 单独补发 lifecycle 系统事件。普通请求期间钉死；请求行记录实际使用的版本号，
 `tools_hash` 取完整 tools 数组实际 wire 字节。模型误用
 旧 action 名（如 `fs_memory/search`、v3 里的 `fs_schedule/status`）会命中
@@ -148,7 +156,10 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 ### 上下文压缩（INT-102）
 
 压缩只改 `bot_context_states` 持久投影——对话账本一字节不动，前缀重写只
-发生在压缩边界的一次发布（generation CAS）。
+发生在压缩边界的一次发布（generation CAS）。发布事务内会重读 bot 行并比对
+快照来源的 `prompt_revision` / `persona_prompt`：人设或提示词水位在压缩期间
+变了，本轮以 `prompt_changed` 作废（`bot_compactions` 记该 code，generation
+不推进），不拿旧快照的验收结果去盖库里的新提示词；下一轮重新建快照。
 
 - **触发**：W=inputBudgetFor（模型窗口能力解析，见下节；缺输出上限时即窗口
   原值），T=floor(W×compression_ratio)（默认 75%），
@@ -549,6 +560,53 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   确认但仍是写入。后端新增/改名工具或 action 时必须同步更新此表；
   表外条目按「未知」回退：标签显示原始 `tool.action`、effect 保守按
   写入、chips 走通用字段集，不抛错（账本可能先于界面升级）。
+
+## 对话风格、过程折叠与人设模板（INT-122）
+
+线上观察（v0.1.57 后的真实对话）：用户一条约 20 字，机器人最终回复平均
+1000～2000 字；每轮先发 2～4 段过程旁白；把「运行时只发了上下文提示」这类
+内部信息讲给用户；压缩摘要沉淀了自我批评式教训后每轮重提；意图明确的低风险
+写操作也要先列 A/B/C 让用户选。
+
+- **平台提示词「对话风格」段**（`bot_prompt.go` 的 `botPlatformStyleRules`，
+  `botPlatformPromptVersion` 5 → 6）：要求像同事聊天、先给结论、一般 1～3 句；
+  只有列表数据多于 3 行才用表格，不写标题与小节；调用工具前不讲旁白，带
+  `tool_calls` 的回合不写中间说明文字（工具与结果由界面呈现）；不复述用户的
+  话、不评价用户、不罗列「下一步可选项」；意图明确且低风险时直接做，写操作
+  由平台确认按钮兜底，不用文字列 A/B/C；只打招呼或闲聊时只回问候、不接着做
+  之前的任务；不向用户转述运行时上下文与系统提示；没有新用户输入的唤醒
+  （后台结果、运行时上下文）默认安静，结果符合预期最多回一句，失败或异常
+  才主动汇报。版本递增后存量机器人在 run 入口或压缩边界重建提示词
+  （`activateBotPrompt` / `activateToolsetWithPromptTx`），不需要迁移数据；
+  激活在 `captureRunFreeze` 之前完成，主线与定时任务会话同等适用——否则重启
+  后先跑的 schedule run 会一直用旧提示词与旧工具集。
+- **提示词写入协议**：生成要持久化的提示词时，读与写必须在同一个短事务里。
+  激活（`activateBotPrompt`）用事务内读到的行拼提示词并按该行 revision 递增；
+  `Update` 的读-改-写同样在事务内，且未改人设时只写非提示词列（改名/换模型
+  不得反向撤销并发激活）；压缩发布（`publishCompaction`）在发布事务内重读行
+  比对快照来源的 `prompt_revision` / `persona_prompt`，人设在压缩期间被改过
+  就以 `prompt_changed` 作废本轮（不沿用旧快照的 `AfterTokens` 验收结果去盖
+  新提示词）。这是三次并发审查同一根因的收敛点。
+- **运行时上下文 note 分支**（`bot_context.go` 的 `buildRunContextWith`）：
+  有 `pending_inputs` 时说明它们是尚未处理的新输入、要决定继续/调整/停止；
+  没有时明确写「本轮没有新的用户输入」，并声明这段上下文不是新指令、不要向
+  用户转述。note 只出现在末尾运行时上下文里，不参与 `prefix_hash`。
+- **摘要只记事实与决定**（`bot_compaction.go` 的 `botSummaryRules`）：显式
+  排除自我批评、教训与方法论总结，避免压缩把一次性的复盘结论固化成之后每轮
+  都要重复的口头禅；标识符、已确认/被拒绝的操作与未决事项仍按原规则保留。
+- **前端过程折叠**（`web/src/components/bots/bot-message.tsx` 的
+  `ProcessNarration`）：带 `tool_calls` 且正文非空的 assistant 消息，正文折叠
+  成一行「过程」入口（默认收起、组件本地 state、不持久化），展开后是 muted
+  小字 Markdown；工具卡与确认卡在折叠之外始终可见——确认卡是用户唯一的批准
+  入口。没有 `tool_calls` 的最终回复仍是正常气泡，流式草稿不折叠。
+- **人设默认模板**（`web/src/components/bots/bot-form-dialog.tsx` 的
+  `DEFAULT_PERSONA_PROMPT`）：新建机器人预填「简短、口语化、先给结论、
+  1～3 句」的模板，引导用户改成自己的要求；编辑回填已存人设，用户清空后
+  保存就是空人设，不强制补回模板。
+- **注意**：固定前缀体积对提示词文案敏感。INT-102 的压缩测试用固定窗口标定
+  种子内容，本次约 390 字的风格段把 `固定前缀 + 最小摘要预算` 顶过 8000 窗口
+  的触发阈值，相关测试窗口上调到 8400（断言语义不变）。再改提示词文案时需要
+  重新核对这批窗口余量（8400 下约 230 token）。
 
 ## 边界与决策
 

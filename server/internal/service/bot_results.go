@@ -204,10 +204,12 @@ func (s *BotService) execResultRead(call *model.BotToolCall) (string, error) {
 
 // ---------- 能力查询 / 帮助 / 停止 / 取消 ----------
 
-// execCapabilityStatus 返回能力状态：fs_memory 自 INT-102 起可用；
-// fs_schedule 自 INT-103（v3）起可用——冻结在 v1/v2 工具集的会话工具面里
-// 还没有任务管理动作，按激活边界（压缩或重启）升级后开放。
-func (s *BotService) execCapabilityStatus(call *model.BotToolCall) (string, error) {
+// execCapabilityStatus 返回能力状态：fs_memory 自 INT-102 起可用；fs_schedule
+// 自 INT-103（v3）起可用。available 按调用方透传的本 run 冻结 toolsetVersion
+// 判定（与会话工具面同一事实源，同 sessionContextOf 的约定），不读 bots 行
+// 活值：本 run 入口激活失败而并发 run 激活成功时，活值已是 v3+，但本会话的
+// 工具面里没有 fs_schedule 动作，答可用会诱导模型调用必然失败的动作。
+func (s *BotService) execCapabilityStatus(call *model.BotToolCall, toolsetVersion int64) (string, error) {
 	capability := "schedule"
 	available := false
 	note := ""
@@ -215,9 +217,7 @@ func (s *BotService) execCapabilityStatus(call *model.BotToolCall) (string, erro
 		capability = "memory"
 		available = true
 	} else {
-		live := int64(0)
-		_ = s.db.Raw(`SELECT toolset_version FROM bots WHERE id = ?`, call.BotID).Scan(&live).Error
-		available = live >= 3
+		available = toolsetVersion >= 3
 		if !available {
 			note = "定时任务在工具集 v3 开放；当前会话冻结在旧版本，压缩或重启边界后升级"
 		}

@@ -30,9 +30,15 @@ interface BotFormState {
   api_key: string;
 }
 
+/** 新建机器人的人设预填模板：示范「像同事聊天、先给结论」的写法，
+ * 引导用户改成自己的要求。只在创建时预填——编辑回填已存人设，
+ * 用户清空后保存就是空人设，模板不会强制补回。 */
+export const DEFAULT_PERSONA_PROMPT =
+  "像同事一样说话，简短、口语化，先给结论再补必要细节。回答控制在 1～3 句；不确定就直说不确定，不要编造。";
+
 const emptyForm: BotFormState = {
   name: "",
-  persona_prompt: "",
+  persona_prompt: DEFAULT_PERSONA_PROMPT,
   base_url: "",
   model: "",
   api_key: "",

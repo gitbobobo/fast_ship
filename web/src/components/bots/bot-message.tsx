@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import type {
   BotCall,
   BotCallDecision,
@@ -15,6 +17,38 @@ const DECISION_LABELS: Record<string, string> = {
   reject: "已拒绝",
   always_allow: "已设为始终允许",
 };
+
+/**
+ * 中间回合的过程旁白：带 tool_calls 的 assistant 正文只是调用前的
+ * 碎碎念，不是最终答复——折叠成一行「过程」入口默认收起，展开后用
+ * 安静的 muted 小字呈现，与最终回复的气泡拉开层级。折叠状态只留在
+ * 组件本地，不持久化。
+ */
+function ProcessNarration({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+      >
+        {open ? (
+          <ChevronUp className="h-3 w-3" />
+        ) : (
+          <ChevronDown className="h-3 w-3" />
+        )}
+        过程
+      </button>
+      {open && (
+        <div className="mt-1 border-l-2 pl-2.5 text-xs text-muted-foreground">
+          <BotMarkdown text={text} />
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * 主线单条消息：用户右对齐、机器人左对齐；assistant 消息内联渲染
@@ -146,23 +180,30 @@ export function BotMessageView({
     );
   }
 
-  // assistant
+  // assistant：带 tool_calls 的是中间回合，正文只是过程旁白，折叠成
+  // 「过程」入口，把视觉重心留给最终回复；工具卡与确认卡是操作入口，
+  // 必须在折叠之外始终可见。草稿（draft）保持流式气泡不折叠。
+  const toolCalls = message.content.tool_calls ?? [];
   return (
     <div className="space-y-2">
-      {(text || draft) && (
-        <div
-          className={cn(
-            "inline-block max-w-[85%] min-w-0 rounded-2xl rounded-bl-sm bg-muted px-3.5 py-2 text-sm",
-            draft && "opacity-80",
-          )}
-        >
-          <BotMarkdown text={text ?? ""} streaming={draft} />
-          {draft && (
-            <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-foreground/60 align-middle" />
-          )}
-        </div>
+      {!draft && toolCalls.length > 0 && text ? (
+        <ProcessNarration text={text} />
+      ) : (
+        (text || draft) && (
+          <div
+            className={cn(
+              "inline-block max-w-[85%] min-w-0 rounded-2xl rounded-bl-sm bg-muted px-3.5 py-2 text-sm",
+              draft && "opacity-80",
+            )}
+          >
+            <BotMarkdown text={text ?? ""} streaming={draft} />
+            {draft && (
+              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-foreground/60 align-middle" />
+            )}
+          </div>
+        )
       )}
-      {(message.content.tool_calls ?? []).map((tc) => {
+      {toolCalls.map((tc) => {
         const call = calls.find((c) => c.id === tc.call_id);
         if (call?.status === "pending_confirmation" && call.requires_confirmation) {
           return (

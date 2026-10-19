@@ -1949,14 +1949,11 @@ func TestBotToolsetUpgradeBoundary(t *testing.T) {
 	if oldBytes <= 0 || oldBytes != int64(len(oldWire)) {
 		t.Fatalf("旧 holder 记录的字节数应等于 v1 schema 重新序列化长度 oldBytes=%d wire=%d", oldBytes, len(oldWire))
 	}
-	env.bots.rt.mu.Lock()
-	delete(env.bots.rt.activated, bot.ID)
-	env.bots.rt.mu.Unlock()
 	env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
 		"toolset_version": 1, "platform_prompt_version": 1,
 	})
 	stale, _ := env.bots.bots.Get(bot.ID)
-	if err := env.bots.activateOnProcessStart(stale); err != nil {
+	if err := env.bots.activateBotPrompt(stale); err != nil {
 		t.Fatalf("restart activate: %v", err)
 	}
 	again, _ := env.bots.bots.Get(bot.ID)
@@ -1994,7 +1991,7 @@ func TestBotToolsetUpgradeBoundary(t *testing.T) {
 		"toolset_version": 1, "platform_prompt_version": 1,
 	})
 	stale2, _ = env.bots.bots.Get(bot.ID)
-	if err := freshSvc.activateOnProcessStart(stale2); err != nil {
+	if err := freshSvc.activateBotPrompt(stale2); err != nil {
 		t.Fatalf("新实例激活: %v", err)
 	}
 	latest, _ := env.bots.bots.Get(bot.ID)
@@ -2854,5 +2851,260 @@ func TestBotBoundarySnapshotFixedTokensSameProjection(t *testing.T) {
 	noMsg := env.bots.buildBoundarySnapshot(botRow, plan, summary, manifest, foldedJSON, 0)
 	if noMsg.FixedTokens != noMsg.AfterTokens {
 		t.Fatalf("无摘要消息时 F 应等于 after: F=%d after=%d", noMsg.FixedTokens, noMsg.AfterTokens)
+	}
+}
+
+// TestBotScheduleRunActivatesStaleBot 重启后只跑定时任务（schedule 路径）：
+// 旧版本机器人重启后的第一次运行如果是 schedule run，也必须完成 v5 激活——
+// bot 行升级到新提示词，本次发出的请求就带新 system 前缀，而不是等下一次
+// 主线运行才补上。
+func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "定时汇报：已完成"})
+	userID := createBotTestUser(t, env.db, "schedact5")
+	bot := env.createBot(t, userID)
+	const oldPrompt = "旧平台提示：没有对话风格段落"
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"toolset_version":         botToolsetVersion,
+		"platform_prompt_version": 4,
+		"system_prompt_text":      oldPrompt,
+	}).Error; err != nil {
+		t.Fatalf("stale bot: %v", err)
+	}
+
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+	env.bots.wakeScheduleRun(bot.ID, run.ID)
+	done := waitForScheduleRunFinished(t, env, run.ID)
+	if done.Status != model.BotRunStatusCompleted {
+		t.Fatalf("schedule run 应完成: %s %v", done.Status, done.ErrorMessage)
+	}
+	fresh, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	if fresh.PlatformPromptVersion != botPlatformPromptVersion {
+		t.Fatalf("schedule run 应激活平台提示词到 %d，实得 %d", botPlatformPromptVersion, fresh.PlatformPromptVersion)
+	}
+	if !strings.Contains(fresh.SystemPromptText, "对话风格") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
+		t.Fatalf("schedule run 后系统提示词应重建为含对话风格的新文案")
+	}
+	req := env.fake.nextRequest(t, 10*time.Second)
+	elems, _ := rawMessages(t, req.Body)
+	if len(elems) == 0 {
+		t.Fatalf("schedule 请求应含 messages")
+	}
+	var sys struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(elems[0], &sys); err != nil {
+		t.Fatalf("decode system message: %v", err)
+	}
+	if sys.Role != "system" {
+		t.Fatalf("首条消息应为 system: %s", sys.Role)
+	}
+	if !strings.Contains(sys.Content, "对话风格") || strings.Contains(sys.Content, oldPrompt) {
+		t.Fatalf("schedule 请求的 system 消息应为激活后的新提示词: %q", sys.Content)
+	}
+}
+
+// TestBotCompactionPublishPromptChanged 压缩发布的提示词来源校验：提示词快照
+// 是「读-建-发布」之间不可分割的负载（system_prompt_text 与验收用的
+// AfterTokens 都由来源行派生）。快照构造后、发布前人设被外部编辑时，发布
+// 必须按 prompt_changed 冲突失败：库内提示词保持新人设、generation 不推进、
+// 压缩账本与维护运行记录该错误码——绝不能拿旧快照的验收结果覆盖新提示词。
+// 冲突失败还不得污染 run 冻结副本：主循环要按它重建请求，被改成库内新状态
+// 会让本轮与下轮的前缀/tools_hash 来回翻转。
+func TestBotCompactionPublishPromptChanged(t *testing.T) {
+	hold := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		s := string(body)
+		switch {
+		case strings.Contains(s, "记忆归档器"):
+			<-hold
+			writeFakeChatSSE(w, `{"items":[]}`)
+		case strings.Contains(s, "上下文压缩器"):
+			writeFakeChatSSE(w, "滚动摘要：来源冲突回归。")
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":{"message":"unexpected_request"}}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "pubconf")
+	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "pubconf", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	env.cfg.Bots.Context.WindowTokens = 8400
+	env.cfg.Bots.Context.ArchiveModel = "arch-big"
+	env.cfg.Bots.Context.ModelWindows = map[string]int64{"arch-big": 131072}
+	seedBotUserMessage(t, env, bot.ID, "最早的来源冲突问题")
+	seedBotAssistantToolBlock(t, env, bot.ID, "call-old-conflict", "fs_issue", strings.Repeat("很长的工具结果", 8000))
+	for i := 1; i <= 3; i++ {
+		seedBotUserMessage(t, env, bot.ID, fmt.Sprintf("保护轮%d", i))
+		seedBotAssistantToolBlock(t, env, bot.ID, fmt.Sprintf("call-pc%d", i), "fs_issue", "小结果")
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	run := botFixtureRun(t, env, botRow)
+	markHistoryConsumed(t, env, botRow, run)
+
+	// T1：按库内当前行构造快照与计划（对应「读-建」阶段）。
+	plan, err := env.bots.planCompaction(botRow, run, model.BotCompactionThreshold)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !plan.NeedSummary || len(plan.Segment) == 0 {
+		t.Fatalf("场景应需要摘要: needSummary=%v seg=%d", plan.NeedSummary, len(plan.Segment))
+	}
+	summary := "滚动摘要：来源冲突回归。"
+	manifest := env.bots.buildIdentifierManifest(plan)
+	foldedJSON := botMustJSON(plan.Folded)
+	snap := env.bots.buildBoundarySnapshot(botRow, plan, summary, manifest, foldedJSON, plan.ThroughSeq)
+	if snap.SourcePersonaPrompt != botRow.PersonaPrompt || snap.SourcePromptRevision != botRow.PromptRevision {
+		t.Fatalf("快照来源应等于构造时读到的行: %+v vs rev=%d persona=%q",
+			snap.SourcePromptRevision, botRow.PromptRevision, botRow.PersonaPrompt)
+	}
+
+	// T2：外部（另一写者）在发布前改人设——快照来源已失效。
+	newPersona := "UNIQUE_NEW_PERSONA_AFTER_SNAPSHOT"
+	if _, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{PersonaPrompt: &newPersona}); err != nil {
+		t.Fatalf("update persona: %v", err)
+	}
+	afterUpdate, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load after update: %v", err)
+	}
+
+	// T3：按旧快照发布——必须按 prompt_changed 冲突失败并落账。
+	now := time.Now().UTC()
+	maintRun := &model.BotMaintenanceRun{
+		ID: uuid.NewString(), BotID: bot.ID, Kind: model.BotMaintenanceCompaction,
+		TriggerKey: fmt.Sprintf("compaction:threshold:g%d:s%d", plan.State.Generation, plan.MaxSeq),
+		Status:     model.BotMaintenanceRunning, ConfigSnapshotJSON: "{}",
+		InputSnapshotJSON: "{}", ResultJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.db.Create(maintRun).Error; err != nil {
+		t.Fatalf("seed maintenance run: %v", err)
+	}
+	// 发布前冻结 run 副本的五个提示词/工具集字段：失败路径不得改动它们。
+	frozenCopy := botRunFreeze{
+		SystemPromptText:      botRow.SystemPromptText,
+		PromptRevision:        botRow.PromptRevision,
+		PlatformPromptVersion: botRow.PlatformPromptVersion,
+		PersonaPrompt:         botRow.PersonaPrompt,
+		ToolsetVersion:        botRow.ToolsetVersion,
+	}
+	_, publishErr := env.bots.publishCompaction(botRow, maintRun, plan, model.BotCompactionSucceeded,
+		summary, manifest, foldedJSON, plan.ThroughSeq, snap, "", "")
+	var ce *botCompactionError
+	if !errors.As(publishErr, &ce) || ce.Code != "prompt_changed" {
+		t.Fatalf("发布应返回 prompt_changed，实得 %v", publishErr)
+	}
+
+	// 库内提示词仍是新人设、水位未被旧快照覆盖。
+	fresh, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load fresh: %v", err)
+	}
+	if fresh.PersonaPrompt != newPersona {
+		t.Fatalf("库内人设应保持新人设: %q", fresh.PersonaPrompt)
+	}
+	if fresh.PromptRevision != afterUpdate.PromptRevision {
+		t.Fatalf("库内 revision 不得被旧快照覆盖: %d vs %d", fresh.PromptRevision, afterUpdate.PromptRevision)
+	}
+	if fresh.SystemPromptText != buildBotSystemPrompt(newPersona) {
+		t.Fatalf("库内系统提示词应仍是按新人设构建的版本")
+	}
+	// generation 未推进。
+	state, stateErr := repository.NewBotContextRepository(env.db).Find(bot.ID)
+	if stateErr == nil && state.Generation != plan.State.Generation {
+		t.Fatalf("冲突发布不得推进 generation: %d vs %d", state.Generation, plan.State.Generation)
+	}
+	// 压缩账本与维护运行都记录 prompt_changed。
+	var row model.BotCompaction
+	if err := env.db.Where("bot_id = ?", bot.ID).Order("created_at DESC").First(&row).Error; err != nil {
+		t.Fatalf("load compaction row: %v", err)
+	}
+	if row.ErrorCode == nil || *row.ErrorCode != "prompt_changed" {
+		t.Fatalf("bot_compactions 应记录 prompt_changed，实得 %v", row.ErrorCode)
+	}
+	if row.Status != model.BotCompactionNoGain {
+		t.Fatalf("冲突发布应按无进展落账，实得 %s", row.Status)
+	}
+	var mr model.BotMaintenanceRun
+	if err := env.db.Where("id = ?", maintRun.ID).First(&mr).Error; err != nil {
+		t.Fatalf("load maintenance run: %v", err)
+	}
+	if mr.Status != model.BotMaintenanceFailed || mr.ErrorCode == nil || *mr.ErrorCode != "prompt_changed" {
+		t.Fatalf("维护运行应失败且记录 prompt_changed: %s %v", mr.Status, mr.ErrorCode)
+	}
+	// 失败发布不得污染 run 副本：五个提示词/工具集字段与失败前逐字段相同
+	//（事务回滚后 bot 保持 run 冻结状态，成功路径才由 installBoundarySnapshot
+	// 按快照对齐）。
+	if botRow.SystemPromptText != frozenCopy.SystemPromptText || botRow.PromptRevision != frozenCopy.PromptRevision ||
+		botRow.PlatformPromptVersion != frozenCopy.PlatformPromptVersion || botRow.PersonaPrompt != frozenCopy.PersonaPrompt ||
+		botRow.ToolsetVersion != frozenCopy.ToolsetVersion {
+		t.Fatalf("失败发布不得改动 run 冻结副本: prompt=%q rev=%d plat=%d persona=%q toolset=%d",
+			botRow.SystemPromptText, botRow.PromptRevision, botRow.PlatformPromptVersion,
+			botRow.PersonaPrompt, botRow.ToolsetVersion)
+	}
+	close(hold)
+}
+
+// TestBotCapabilityStatusFrozenToolset 能力查询按调用方透传的本 run 冻结工具集
+// 水位判 available，不读 bots 行活值：冻结 v2 的会话即使库里已被并发 run 激活
+// 到 v3+ 也答不可用（本会话工具面里没有 fs_schedule 动作）；当前版本答可用；
+// fs_memory 不分版本可用。
+func TestBotCapabilityStatusFrozenToolset(t *testing.T) {
+	env := setupBotTestEnv(t)
+	sched := &model.BotToolCall{BotID: "cap", ToolName: "fs_schedule", Action: "status"}
+
+	raw, err := env.bots.execCapabilityStatus(sched, 2)
+	if err != nil {
+		t.Fatalf("v2 status: %v", err)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v, _ := out["available"].(bool); v {
+		t.Fatalf("冻结 v2 的会话应答 available=false: %v", out)
+	}
+	if note, _ := out["note"].(string); note == "" {
+		t.Fatalf("不可用时应带升级提示 note: %v", out)
+	}
+
+	raw, err = env.bots.execCapabilityStatus(sched, botToolsetVersion)
+	if err != nil {
+		t.Fatalf("v%d status: %v", botToolsetVersion, err)
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v, _ := out["available"].(bool); !v {
+		t.Fatalf("当前版本会话应答 available=true: %v", out)
+	}
+
+	mem := &model.BotToolCall{BotID: "cap", ToolName: "fs_memory", Action: "status"}
+	raw, err = env.bots.execCapabilityStatus(mem, 1)
+	if err != nil {
+		t.Fatalf("memory status: %v", err)
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v, _ := out["available"].(bool); !v {
+		t.Fatalf("fs_memory 不分版本应可用: %v", out)
+	}
+	if cap, _ := out["capability"].(string); cap != "memory" {
+		t.Fatalf("fs_memory 的 capability 应为 memory: %v", out)
 	}
 }

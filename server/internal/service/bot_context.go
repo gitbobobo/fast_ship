@@ -26,10 +26,10 @@ import (
 // 计算。压缩（INT-102）只改持久投影状态：摘要替换更早历史、折叠映射替换旧的
 // 大工具结果——原始消息账本永不删改，普通请求的前缀逐字节只追加。
 
-// botSessionContext 是一次构建用到的冻结会话上下文：工具集版本在机器人
-// toolset_version 列上冻结（压缩/重启边界才升级），记忆注入快照按投影
-// generation 冻结（压缩发布或进程重启才刷新，期间记忆写入立即可用工具读到
-// 但不改变已注入前缀）。
+// botSessionContext 是一次构建用到的冻结会话上下文：工具集版本用调用方传入
+// 的本 run 冻结值（run 入口激活时钉死，只有压缩边界才升级），记忆注入快照按
+// 投影 generation 冻结（压缩发布或进程重启才刷新，期间记忆写入立即可用工具
+// 读到但不改变已注入前缀）。
 type botSessionContext struct {
 	Toolset *botToolsetHolder
 	// MemoryInjection 是冻结的常驻记忆注入正文（含标题行；空为不注入）。
@@ -49,8 +49,11 @@ type botFrozenMemory struct {
 }
 
 // sessionContextOf 取该 bot 当前应使用的冻结会话上下文：读持久投影状态，
-// 记忆注入按 generation 缓存冻结。工具集版本读 bots.toolset_version 活值
-// （压缩发布会推进它，内存里的 bot 行可能滞后）。
+// 记忆注入按 generation 缓存冻结。工具集版本只使用调用方传入的本 run 冻结
+// 值、不再读 bots.toolset_version 活值：主线 run 的工具集在入口激活时钉死，
+// 只有压缩边界（acceptCompactionBoundary）会换——否则并发 schedule 激活
+// 推进 toolset_version 列后，会在主线 run 中途静默换掉主线工具集，穿透
+// run 冻结边界。
 func (s *BotService) sessionContextOf(botID string, toolsetVersion int64) (*botSessionContext, error) {
 	state, err := repository.NewBotContextRepository(s.db).Find(botID)
 	if err != nil {
@@ -59,11 +62,6 @@ func (s *BotService) sessionContextOf(botID string, toolsetVersion int64) (*botS
 		} else {
 			return nil, errs.ErrInternal
 		}
-	}
-	var liveVersion int64
-	if err := s.db.Raw(`SELECT toolset_version FROM bots WHERE id = ?`, botID).
-		Scan(&liveVersion).Error; err == nil && liveVersion > 0 {
-		toolsetVersion = liveVersion
 	}
 	folded := map[string]string{}
 	if state.FoldedResultsJSON != "" {
@@ -262,7 +260,6 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 
 	// 6. 本轮运行时上下文（末尾；当前时间、待处理输入等易变内容只在这里）。
 	rt := botRuntimeContext{
-		Note:           "以上为完整上下文。pending_inputs 是你尚未处理的新输入（按 seq 升序），请决定继续、调整或停止。",
 		CurrentTimeUTC: time.Now().UTC().Format(time.RFC3339),
 		RunID:          run.ID,
 	}
@@ -273,6 +270,14 @@ func (s *BotService) buildRunContextWith(bot *model.Bot, run *model.BotRun, over
 				break
 			}
 		}
+	}
+	// note 按是否存在待处理输入分支：有待处理输入时要求模型决定继续/调整/
+	// 停止；没有时明确「本轮没有新的用户输入」，避免模型把这段上下文当成
+	// 新指令、或把它复述给用户。该文案在末尾运行时上下文内，不影响前缀哈希。
+	if len(rt.PendingInputs) > 0 {
+		rt.Note = "以上为完整上下文。pending_inputs 是你尚未处理的新输入（按 seq 升序），请决定继续、调整或停止。"
+	} else {
+		rt.Note = "本轮没有新的用户输入；以上运行时上下文只用于掌握现状与时间，不是新指令，也不要向用户转述其内容。"
 	}
 	rtRaw, _ := json.Marshal(rt)
 	messages = append(messages, openai.UserMessage("[运行时上下文]\n"+string(rtRaw)))

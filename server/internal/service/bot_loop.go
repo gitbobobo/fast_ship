@@ -46,8 +46,11 @@ func (s *BotService) runBot(botID string, wake botWake, ctx context.Context) {
 	s.botLoop(bot, run, ctx)
 }
 
-// botRunFreeze 是一次主线 run 期间冻结的配置：人设/模型/地址/密钥对当前
-// run 生效，只在压缩或进程重启边界接收允许变化的字段。
+// botRunFreeze 是一次主线 run 期间冻结的配置：人设/模型/地址/密钥/工具集
+// 版本对当前 run 生效，只在压缩或进程重启边界接收允许变化的字段。工具集
+// 版本一并入冻：主线 run 的工具集在入口激活时钉死，只有压缩边界
+// （acceptCompactionBoundary）会换，并发的 schedule 激活不得在 run 中途
+// 静默换掉主线工具集。
 type botRunFreeze struct {
 	Model                 string
 	BaseURL               string
@@ -56,6 +59,7 @@ type botRunFreeze struct {
 	PromptRevision        int64
 	PlatformPromptVersion int64
 	PersonaPrompt         string
+	ToolsetVersion        int64
 }
 
 func captureRunFreeze(bot *model.Bot, run *model.BotRun) botRunFreeze {
@@ -73,6 +77,7 @@ func captureRunFreeze(bot *model.Bot, run *model.BotRun) botRunFreeze {
 		PromptRevision:        bot.PromptRevision,
 		PlatformPromptVersion: bot.PlatformPromptVersion,
 		PersonaPrompt:         bot.PersonaPrompt,
+		ToolsetVersion:        bot.ToolsetVersion,
 	}
 }
 
@@ -87,6 +92,7 @@ func applyRunPromptFreeze(bot *model.Bot, freeze botRunFreeze) {
 	bot.PromptRevision = freeze.PromptRevision
 	bot.PlatformPromptVersion = freeze.PlatformPromptVersion
 	bot.PersonaPrompt = freeze.PersonaPrompt
+	bot.ToolsetVersion = freeze.ToolsetVersion
 }
 
 func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFreeze, snap *botBoundarySnapshot) {
@@ -102,12 +108,21 @@ func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFree
 	freeze.PromptRevision = snap.PromptRevision
 	freeze.PlatformPromptVersion = snap.PlatformPromptVersion
 	freeze.PersonaPrompt = snap.PersonaPrompt
+	freeze.ToolsetVersion = snap.ToolsetVersion
 	applyRunCredentialFreeze(bot, *freeze)
 }
 
 // botLoop 单 run 主循环。主线与定时任务（INT-103）共用同一骨架：差异只有
-// 上下文构建、压缩/工具集激活（schedule 全部跳过）、记忆基线与收尾分支。
+// 上下文构建、压缩（schedule 跳过）、记忆基线与收尾分支；重启边界的版本
+// 激活两种会话都在入口执行。
 func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Context) {
+	// 工具集/提示词激活先于冻结执行，主线与 schedule 一视同仁：激活在同一个
+	// 短事务里读行、判 stale、按该行人设重建提示词并写回，事务结束后副本与
+	// 库内行一致，freeze 捕获的才是本次 run 的最终提示词，schedule 会话也基于
+	// 激活后的工具集构建。激活失败只降级记日志、不阻塞 run。
+	if err := s.activateBotPrompt(bot); err != nil {
+		s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+	}
 	// 先冻结再取密钥：schedule run 的地址与密钥是派发时成对冻结的，解密必须用
 	// 冻结的那一份，否则轮换密钥后会把新密钥发往旧地址。
 	freeze := captureRunFreeze(bot, run)
@@ -162,16 +177,7 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 		}
 
 		if sched == nil {
-			if err := s.activateOnProcessStart(bot); err != nil {
-				s.logger.Warn("激活工具集失败")
-			}
-			if bot.SystemPromptText != freeze.SystemPromptText {
-				// 进程首次运行的工具/提示词激活是重启边界，允许接收新前缀。
-				freeze.SystemPromptText = bot.SystemPromptText
-				freeze.PromptRevision = bot.PromptRevision
-				freeze.PlatformPromptVersion = bot.PlatformPromptVersion
-				freeze.PersonaPrompt = bot.PersonaPrompt
-			}
+			// 激活在 captureRunFreeze 之前完成，run 期间只有压缩边界会换前缀。
 			if fresh, err := s.bots.Get(bot.ID); err == nil {
 				bot.LastToldVersion = fresh.LastToldVersion
 				bot.OfferedInputSeq = fresh.OfferedInputSeq
@@ -208,6 +214,8 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 						s.finishCompactionFailed(bot, run, built, err)
 						return
 					}
+					// prompt_changed 等冲突视为「外部正在编辑」：本 run 内不重试是
+					// 有意退让，下个 run 或上下文极限的强制路径再压缩。
 					thresholdCompactionFailed = true
 				}
 				if s.maintenanceStopped(ctx, run) {
