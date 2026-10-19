@@ -7,7 +7,8 @@ import { watchGithubTokensIdentity } from "@/lib/hooks/use-github-tokens";
 import { watchThreadsIdentity } from "@/lib/hooks/use-threads";
 import { watchBotsIdentity } from "@/lib/hooks/use-bots";
 import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
-import { watchIntegrationsIdentity } from "@/lib/hooks/use-integrations";
+import { watchDeploymentIdentity } from "@/lib/hooks/use-deployment";
+import { watchMembersIdentity } from "@/lib/hooks/use-members";
 
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
@@ -44,6 +45,13 @@ const GithubTokensPage = lazy(
   () => import("@/routes/settings/github-tokens"),
 );
 const IntegrationsPage = lazy(() => import("@/routes/settings/integrations"));
+const SettingsDeploymentPage = lazy(
+  () => import("@/routes/settings/deployment"),
+);
+const SettingsMembersPage = lazy(() => import("@/routes/settings/members"));
+const GitHubCallbackPage = lazy(
+  () => import("@/routes/settings/github-callback"),
+);
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const AutomationsPage = lazy(() => import("@/routes/automations/index"));
 const AutomationEditorPage = lazy(() => import("@/routes/automations/editor"));
@@ -72,13 +80,15 @@ export default function App() {
     const stopGithubTokens = watchGithubTokensIdentity(queryClient);
     const stopBots = watchBotsIdentity(queryClient);
     const stopQuota = watchQuotaIdentity(queryClient);
-    const stopIntegrations = watchIntegrationsIdentity(queryClient);
+    const stopDeployment = watchDeploymentIdentity(queryClient);
+    const stopMembers = watchMembersIdentity(queryClient);
     return () => {
       stopThreads();
       stopGithubTokens();
       stopBots();
       stopQuota();
-      stopIntegrations();
+      stopDeployment();
+      stopMembers();
     };
   }, []);
 
@@ -200,6 +210,18 @@ export default function App() {
                 <Route
                   path="integrations"
                   element={<LazyPage render={<IntegrationsPage />} />}
+                />
+                <Route
+                  path="integrations/github/callback"
+                  element={<LazyPage render={<GitHubCallbackPage />} />}
+                />
+                <Route
+                  path="deployment"
+                  element={<LazyPage render={<SettingsDeploymentPage />} />}
+                />
+                <Route
+                  path="members"
+                  element={<LazyPage render={<SettingsMembersPage />} />}
                 />
                 <Route
                   path="environments"

@@ -42,6 +42,7 @@ const authState = {
     username: "godbobo",
     email: "godbobo@example.com",
     avatar_url: "",
+    role: "admin" as const,
     created_at: "2026-04-06T10:00:00Z",
     updated_at: "2026-04-06T10:00:00Z",
   },

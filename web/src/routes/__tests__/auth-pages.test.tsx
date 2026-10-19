@@ -23,6 +23,7 @@ vi.mock("@/lib/api/auth", () => ({
   authApi: {
     login: vi.fn(),
     register: vi.fn(),
+    validateInvite: vi.fn(),
   },
 }));
 
@@ -135,6 +136,7 @@ describe("AuthPages", () => {
         username: "godbobo",
         email: "godbobo@example.com",
         password: "Password123",
+        invite_token: undefined,
       }),
     );
     expect(setAuth).toHaveBeenCalledWith("jwt-token", "refresh-token", fakeUser);
@@ -158,7 +160,7 @@ describe("AuthPages", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText("注册失败，用户名或邮箱可能已存在"),
+        screen.getByText("注册失败，请稍后重试"),
       ).toBeInTheDocument(),
     );
     expect(setAuth).not.toHaveBeenCalled();

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod/v4";
-import { Copy, RefreshCw } from "lucide-react";
+import { Copy, ExternalLink, RefreshCw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -15,11 +16,12 @@ import { GithubIcon } from "@/components/ui/github-icon";
 import { HeaderActions } from "@/components/layout/header-actions";
 import { SettingsPageShell } from "@/routes/settings/layout";
 import {
-  useGitHubAppIntegration,
-  useTestGitHubAppIntegration,
-  useUpdateGitHubAppIntegration,
-} from "@/lib/hooks/use-integrations";
-import type { UpdateGitHubAppIntegrationInput } from "@/lib/api/integrations";
+  useCreateGitHubAppManifest,
+  useGitHubAppDeployment,
+  useTestGitHubAppDeployment,
+  useUpdateGitHubAppDeployment,
+} from "@/lib/hooks/use-deployment";
+import { useAuthStore } from "@/lib/store/auth-store";
 import { copyWithToast } from "@/lib/copy";
 import { formatDate } from "@/lib/utils/format";
 
@@ -36,7 +38,7 @@ const githubAppFormSchema = z.object({
 type GitHubAppFormInput = z.infer<typeof githubAppFormSchema>;
 
 // 状态徽章映射：未配置优先于检测状态（没配置谈不上检测）；已保存未验证是兜底。
-function statusBadge(data: GitHubAppIntegration): {
+function statusBadge(data: GitHubAppDeployment): {
   label: string;
   variant: "secondary" | "destructive" | "outline";
   className?: string;
@@ -68,11 +70,78 @@ function errorText(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
-export default function IntegrationsPage() {
-  const { data, isLoading, isError, isFetching, refetch } =
-    useGitHubAppIntegration();
-  const updateIntegration = useUpdateGitHubAppIntegration();
-  const testIntegration = useTestGitHubAppIntegration();
+// GitHub App Manifest 流程要求浏览器 POST 跳转：动态构造隐藏表单提交，
+// manifest 整体 JSON.stringify，state 单独一个字段。
+function submitManifestToGitHub(res: GitHubAppManifestResponse) {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = res.action_url;
+  form.style.display = "none";
+
+  const manifestInput = document.createElement("input");
+  manifestInput.type = "hidden";
+  manifestInput.name = "manifest";
+  manifestInput.value = JSON.stringify(res.manifest);
+  form.appendChild(manifestInput);
+
+  const stateInput = document.createElement("input");
+  stateInput.type = "hidden";
+  stateInput.name = "state";
+  stateInput.value = res.state;
+  form.appendChild(stateInput);
+
+  document.body.appendChild(form);
+  form.submit();
+}
+
+function StatusCard({ data }: { data: GitHubAppDeployment }) {
+  const status = statusBadge(data);
+  return (
+    <div className="flex items-start gap-3 border-b p-4">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-foreground">
+        <GithubIcon className="h-4 w-4" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="font-medium">GitHub App</p>
+          <Badge variant={status.variant} className={status.className}>
+            {status.label}
+          </Badge>
+        </div>
+        {data.app_slug && (
+          <p className="text-xs text-muted-foreground">
+            App：<code className="font-mono">{data.app_slug}</code>
+          </p>
+        )}
+        {data.detection_detail && (
+          <p className="text-xs text-muted-foreground">
+            {data.detection_detail}
+          </p>
+        )}
+        {data.detected_at && (
+          <p className="text-xs text-muted-foreground">
+            最近检测于 {formatDate(data.detected_at)}
+          </p>
+        )}
+      </div>
+      {data.install_url && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="shrink-0"
+          onClick={() => window.open(data.install_url, "_blank", "noopener")}
+        >
+          <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+          安装到仓库
+        </Button>
+      )}
+    </div>
+  );
+}
+
+// 管理员：三字段手动配置收进折叠区，保存按钮随表单走。
+function ManualConfigSection({ data }: { data: GitHubAppDeployment }) {
+  const updateDeployment = useUpdateGitHubAppDeployment();
   // 「清空已存密钥」是表单外状态：勾选后提交 webhook_secret: ""，与留空保留区分。
   const [clearSecret, setClearSecret] = useState(false);
 
@@ -97,22 +166,22 @@ export default function IntegrationsPage() {
 
   const onSubmit = async (values: GitHubAppFormInput) => {
     const pem = values.private_key_pem?.trim() ?? "";
-    if (!data?.private_key_set && !pem) {
+    if (!data.private_key_set && !pem) {
       setError("private_key_pem", { message: "首次配置必须提供 App 私钥" });
       return;
     }
     const secret = values.webhook_secret?.trim() ?? "";
-    const payload: UpdateGitHubAppIntegrationInput = {
+    const payload: UpdateGitHubAppDeploymentRequest = {
       app_id: values.app_id.trim(),
     };
     if (pem) payload.private_key_pem = pem;
-    if (clearSecret && data?.webhook_secret_set) {
+    if (clearSecret && data.webhook_secret_set) {
       payload.webhook_secret = "";
     } else if (secret) {
       payload.webhook_secret = secret;
     }
     try {
-      const res = await updateIntegration.mutateAsync(payload);
+      const res = await updateDeployment.mutateAsync(payload);
       reset({
         app_id: res.data.app_id,
         private_key_pem: "",
@@ -125,9 +194,104 @@ export default function IntegrationsPage() {
     }
   };
 
+  const saving = isSubmitting || updateDeployment.isPending;
+
+  return (
+    <details className="rounded-lg border">
+      <summary className="cursor-pointer select-none px-3 py-2.5 text-sm font-medium">
+        手动配置（已有 App）
+      </summary>
+      <form
+        id="github-app-manual-form"
+        onSubmit={handleSubmit(onSubmit)}
+        className="space-y-4 border-t p-4"
+      >
+        <div className="space-y-2">
+          <Label htmlFor="github-app-id">App ID</Label>
+          <Input
+            id="github-app-id"
+            inputMode="numeric"
+            placeholder="例如 123456"
+            autoComplete="off"
+            {...register("app_id")}
+          />
+          {errors.app_id && (
+            <p className="text-xs text-destructive">{errors.app_id.message}</p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="github-app-private-key">App 私钥（PEM）</Label>
+          <Textarea
+            id="github-app-private-key"
+            className="font-mono text-xs"
+            rows={6}
+            placeholder="-----BEGIN RSA PRIVATE KEY-----"
+            autoComplete="off"
+            spellCheck={false}
+            {...register("private_key_pem")}
+          />
+          {errors.private_key_pem ? (
+            <p className="text-xs text-destructive">
+              {errors.private_key_pem.message}
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {data.private_key_set
+                ? "已配置，留空则保持不变"
+                : "首次配置必填；仅在后端加密存储，不会回显到网页"}
+            </p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="github-app-webhook-secret">Webhook 密钥</Label>
+          <Input
+            id="github-app-webhook-secret"
+            type="password"
+            autoComplete="off"
+            disabled={clearSecret}
+            {...register("webhook_secret")}
+          />
+          <p className="text-xs text-muted-foreground">
+            {data.webhook_secret_set
+              ? "已配置，留空则保持不变"
+              : "与 GitHub App 设置中的 Webhook secret 一致，用于校验事件来源"}
+          </p>
+          {data.webhook_secret_set && (
+            <Label className="flex items-center gap-2 text-sm font-normal">
+              <input
+                type="checkbox"
+                checked={clearSecret}
+                onChange={(event) => setClearSecret(event.target.checked)}
+                className="h-4 w-4 rounded border-input accent-primary"
+              />
+              清空已存密钥
+            </Label>
+          )}
+        </div>
+
+        <div className="flex justify-end">
+          <Button type="submit" size="sm" disabled={saving}>
+            {saving ? "保存中..." : "保存"}
+          </Button>
+        </div>
+      </form>
+    </details>
+  );
+}
+
+function AdminView({ data }: { data: GitHubAppDeployment }) {
+  const testDeployment = useTestGitHubAppDeployment();
+  const createManifest = useCreateGitHubAppManifest();
+  const [org, setOrg] = useState("");
+  // public_url 未配置时 webhook_url 为空串：manifest 创建必失败（41202），
+  // 直接禁用创建按钮并指向部署页。
+  const publicUrlMissing = !data.webhook_url;
+
   const handleTest = async () => {
     try {
-      const res = await testIntegration.mutateAsync();
+      const res = await testDeployment.mutateAsync();
       const result = res.data;
       if (result.detection_status === "ok") {
         toast.success(result.detection_detail || "连接正常");
@@ -139,9 +303,18 @@ export default function IntegrationsPage() {
     }
   };
 
-  const saving = isSubmitting || updateIntegration.isPending;
-  const webhookDisplay = data?.webhook_url || "/api/github/webhooks";
-  const status = data ? statusBadge(data) : null;
+  const handleCreate = async () => {
+    try {
+      const res = await createManifest.mutateAsync(
+        org.trim() ? { org: org.trim() } : {},
+      );
+      submitManifestToGitHub(res.data);
+    } catch (error) {
+      toast.error(errorText(error, "创建失败"));
+    }
+  };
+
+  const webhookDisplay = data.webhook_url || "/api/github/webhooks";
 
   return (
     <SettingsPageShell
@@ -149,12 +322,12 @@ export default function IntegrationsPage() {
         <HeaderActions
           primary={
             <Button
-              type="submit"
-              form="github-app-integration-form"
               size="sm"
-              disabled={saving || isLoading}
+              disabled={createManifest.isPending || publicUrlMissing}
+              onClick={handleCreate}
             >
-              {saving ? "保存中..." : "保存"}
+              <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+              {createManifest.isPending ? "创建中..." : "在 GitHub 上创建 App"}
             </Button>
           }
           secondary={[
@@ -162,203 +335,178 @@ export default function IntegrationsPage() {
               key="test"
               variant="outline"
               size="sm"
-              disabled={!data?.configured || testIntegration.isPending}
+              disabled={!data.configured || testDeployment.isPending}
               onClick={handleTest}
             >
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              {testIntegration.isPending ? "检测中..." : "测试连接"}
+              {testDeployment.isPending ? "检测中..." : "测试连接"}
             </Button>,
           ]}
         />
       }
     >
       <div className="space-y-6">
-        <div>
-          <h2 className="text-lg font-medium">集成</h2>
-          <p className="text-sm text-muted-foreground">
-            集中配置你自己的外部服务连接，保存后立即生效。
-          </p>
-        </div>
+        <IntegrationsIntro />
+        <div className="rounded-xl border">
+          <StatusCard data={data} />
 
-        {isLoading ? (
-          <div className="space-y-3">
-            <Skeleton className="h-16 rounded-xl" />
-            <Skeleton className="h-72 rounded-xl" />
-          </div>
-        ) : isError || !data ? (
-          <div
-            role="alert"
-            className="rounded-lg border bg-muted/40 py-12 text-center"
-          >
-            <p className="text-sm text-muted-foreground">集成配置加载失败</p>
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-3"
-              onClick={() => refetch()}
-              disabled={isFetching}
-            >
-              重试
-            </Button>
-          </div>
-        ) : (
-          <div className="rounded-xl border">
-            <div className="flex items-start gap-3 border-b p-4">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-foreground">
-                <GithubIcon className="h-4 w-4" />
-              </div>
-              <div className="min-w-0 flex-1 space-y-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="font-medium">GitHub App</p>
-                  {status && (
-                    <Badge variant={status.variant} className={status.className}>
-                      {status.label}
-                    </Badge>
-                  )}
-                </div>
-                {data.detection_detail && (
-                  <p className="text-xs text-muted-foreground">
-                    {data.detection_detail}
-                  </p>
-                )}
-                {data.detected_at && (
-                  <p className="text-xs text-muted-foreground">
-                    最近检测于 {formatDate(data.detected_at)}
-                  </p>
-                )}
-              </div>
+          <div className="space-y-5 p-4">
+            <div className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+              GitHub App 为整部署共享，由管理员统一配置，所有成员触发的
+              自动化与 PR 评审流都使用它。
             </div>
-
-            <div className="space-y-5 p-4">
+            {data.source === "config" && (
               <div className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                这里的配置只属于你的账号，只影响你自己触发的自动化与 PR 评审流。
+                当前生效的是部署配置（config.yaml 兜底），保存后将改用网页配置。
               </div>
-              {data.source === "config" && (
-                <div className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                  当前生效的是部署配置（config.yaml 兜底），保存后将改用你自己的配置。
-                </div>
-              )}
-              {data.source === "none" && (
-                <div className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                  尚未配置，填写后保存即可用你自己的 GitHub App 参与 PR 评审与 webhook。
-                </div>
-              )}
+            )}
 
-              <div className="space-y-2">
-                <p className="text-sm font-medium">Webhook URL</p>
-                <div className="flex items-center gap-2">
-                  <code className="min-w-0 flex-1 truncate rounded-lg border bg-muted/30 px-2.5 py-1.5 font-mono text-xs">
-                    {webhookDisplay}
-                  </code>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      void copyWithToast(webhookDisplay, "已复制 Webhook URL")
-                    }
-                  >
-                    <Copy className="mr-1.5 h-3.5 w-3.5" />
-                    复制
-                  </Button>
-                </div>
+            <div className="space-y-2">
+              <p className="text-sm font-medium">一键创建（推荐）</p>
+              <p className="text-xs text-muted-foreground">
+                点击右上角「在 GitHub 上创建 App」，在 GitHub
+                确认后自动完成配置，无需手动粘贴私钥；创建完成请记得把 App
+                安装到需要参与评审的仓库。
+              </p>
+              <div className="flex items-center gap-2">
+                <Input
+                  id="github-app-org"
+                  className="max-w-xs"
+                  placeholder="组织名（可选，留空建在个人账号下）"
+                  aria-label="组织名（可选）"
+                  autoComplete="off"
+                  value={org}
+                  onChange={(event) => setOrg(event.target.value)}
+                />
+              </div>
+              {publicUrlMissing && (
                 <p className="text-xs text-muted-foreground">
-                  Webhook URL 是本部署的统一入口，把它与下面的验签密钥填进你自己的
-                  GitHub App。
+                  尚未配置对外访问地址，请先在「
+                  <Link
+                    to="/settings/deployment"
+                    className="text-primary hover:underline"
+                  >
+                    设置 → 部署
+                  </Link>
+                  」填写 public_url 后再创建。
                 </p>
-                {!data.webhook_url && (
-                  <p className="text-xs text-muted-foreground">
-                    部署未配置 server.public_url，请自行拼接对外地址
-                  </p>
-                )}
-              </div>
-
-              <form
-                id="github-app-integration-form"
-                onSubmit={handleSubmit(onSubmit)}
-                className="space-y-4"
-              >
-                <div className="space-y-2">
-                  <Label htmlFor="github-app-id">App ID</Label>
-                  <Input
-                    id="github-app-id"
-                    inputMode="numeric"
-                    placeholder="例如 123456"
-                    autoComplete="off"
-                    {...register("app_id")}
-                  />
-                  {errors.app_id && (
-                    <p className="text-xs text-destructive">
-                      {errors.app_id.message}
-                    </p>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="github-app-private-key">App 私钥（PEM）</Label>
-                  <Textarea
-                    id="github-app-private-key"
-                    className="font-mono text-xs"
-                    rows={6}
-                    placeholder="-----BEGIN RSA PRIVATE KEY-----"
-                    autoComplete="off"
-                    spellCheck={false}
-                    {...register("private_key_pem")}
-                  />
-                  {errors.private_key_pem ? (
-                    <p className="text-xs text-destructive">
-                      {errors.private_key_pem.message}
-                    </p>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      {data.private_key_set
-                        ? "已配置，留空则保持不变"
-                        : "首次配置必填；仅在后端加密存储，不会回显到网页"}
-                    </p>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="github-app-webhook-secret">Webhook 密钥</Label>
-                  <Input
-                    id="github-app-webhook-secret"
-                    type="password"
-                    autoComplete="off"
-                    disabled={clearSecret}
-                    {...register("webhook_secret")}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {data.webhook_secret_set
-                      ? "已配置，留空则保持不变"
-                      : "与 GitHub App 设置中的 Webhook secret 一致，用于校验事件来源"}
-                  </p>
-                  {data.webhook_secret_set && (
-                    <Label className="flex items-center gap-2 text-sm font-normal">
-                      <input
-                        type="checkbox"
-                        checked={clearSecret}
-                        onChange={(event) =>
-                          setClearSecret(event.target.checked)
-                        }
-                        className="h-4 w-4 rounded border-input accent-primary"
-                      />
-                      清空已存密钥
-                    </Label>
-                  )}
-                </div>
-              </form>
+              )}
             </div>
+
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Webhook URL</p>
+              <div className="flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded-lg border bg-muted/30 px-2.5 py-1.5 font-mono text-xs">
+                  {webhookDisplay}
+                </code>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    void copyWithToast(webhookDisplay, "已复制 Webhook URL")
+                  }
+                >
+                  <Copy className="mr-1.5 h-3.5 w-3.5" />
+                  复制
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Webhook URL 是本部署的统一入口，创建 App 时会自动填入，手动配置时
+                把它与验签密钥填进 GitHub App。
+              </p>
+            </div>
+
+            <ManualConfigSection data={data} />
           </div>
-        )}
+        </div>
 
         <div className="rounded-xl border bg-muted/30 p-4">
           <p className="text-sm font-medium">接入步骤</p>
           <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
-            <li>在 GitHub 组织设置（Developer settings → GitHub Apps）创建 App</li>
-            <li>填入上方 Webhook URL 与验签密钥，订阅 pull_request 事件</li>
-            <li>把 App ID 与生成的私钥（PEM）粘贴到此处保存</li>
+            <li>点击「在 GitHub 上创建 App」，在 GitHub 页面确认创建</li>
+            <li>创建后自动回到本页完成配置，无需手动填写密钥</li>
+            <li>点击「安装到仓库」，把 App 安装到需要参与评审的仓库</li>
           </ol>
         </div>
       </div>
     </SettingsPageShell>
   );
+}
+
+// 成员视角：只看状态与安装入口，没有任何配置/测试/创建入口。
+function MemberView({ data }: { data: GitHubAppDeployment }) {
+  return (
+    <SettingsPageShell>
+      <div className="space-y-6">
+        <IntegrationsIntro />
+        <div className="rounded-xl border">
+          <StatusCard data={data} />
+          <div className="space-y-5 p-4">
+            {data.configured ? (
+              <div className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                GitHub App 由管理员统一配置。如需在更多仓库启用评审能力，点击
+                「安装到仓库」，或联系管理员调整配置。
+              </div>
+            ) : (
+              <div className="rounded-lg bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                尚未配置 GitHub App，自动化与 PR 评审流不可用。请联系管理员在
+                「设置 → 集成」中完成创建与配置。
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </SettingsPageShell>
+  );
+}
+
+function IntegrationsIntro() {
+  return (
+    <div>
+      <h2 className="text-lg font-medium">集成</h2>
+      <p className="text-sm text-muted-foreground">
+        部署级 GitHub App，用于 PR 评审与 webhook 事件。
+      </p>
+    </div>
+  );
+}
+
+export default function IntegrationsPage() {
+  const isAdmin = useAuthStore((state) => state.user?.role === "admin");
+  const { data, isLoading, isError, isFetching, refetch } =
+    useGitHubAppDeployment();
+
+  if (isLoading || isError || !data) {
+    return (
+      <SettingsPageShell>
+        <div className="space-y-6">
+          <IntegrationsIntro />
+          {isLoading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-16 rounded-xl" />
+              <Skeleton className="h-72 rounded-xl" />
+            </div>
+          ) : (
+            <div
+              role="alert"
+              className="rounded-lg border bg-muted/40 py-12 text-center"
+            >
+              <p className="text-sm text-muted-foreground">集成配置加载失败</p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => refetch()}
+                disabled={isFetching}
+              >
+                重试
+              </Button>
+            </div>
+          )}
+        </div>
+      </SettingsPageShell>
+    );
+  }
+
+  return isAdmin ? <AdminView data={data} /> : <MemberView data={data} />;
 }
