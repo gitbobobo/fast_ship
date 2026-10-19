@@ -27,9 +27,12 @@ App 的四个列与 `public_url` 同表：它们都是「这套部署」的身�
 `created_by`、`expires_at`、`revoked_at`、`used_by`、`used_at`。
 `users.role` 与邀请的语义见 `auth.md`。
 
-`integrations` 表（INT-119 的用户级 App 身份）在 INT-129 删除：本项目从未有人
-配置过每用户 App，没有数据要迁移，`cmd/server/migrate_drop_integrations.go`
-在启动时直接 `DROP TABLE`。`automation_runs.app_user_id` 等列按原样保留、
+`integrations` 表（INT-119 的用户级 App 身份）在 INT-129 删除：本仓库的部署从未有人
+配置过每用户 App，启动迁移直接 `DROP TABLE`（`cmd/server/migrate_drop_integrations.go`）。
+表里还有行时该迁移**拒绝启动**：删表会不可逆地丢掉别人的加密私钥与 webhook 密钥，
+而「多个用户各配一个 App 时该用谁」属于产品决策，不在升级里替用户选。运维备份数据库、
+确认改由「设置 → 集成」重新配置后，设 `FAST_SHIP_DROP_USER_INTEGRATIONS=1` 重启即可。
+`automation_runs.app_user_id` 等列按原样保留、
 一律写空串（`docs/internal/pr-review.md`），避免再做一次 SQLite 重建主键的迁移。
 
 ## public_url：唯一读取入口

@@ -48,8 +48,10 @@ INT-129 新增两处：
 
 - `migrateUserRoles`（AutoMigrate 与手工索引之后）：`users.role` 列由 AutoMigrate 补齐（存量行落默认 `member`），
   存量部署因此可能一个 admin 都没有；把 `created_at` 最早的用户提为 admin，幂等。
-- `migrateDropIntegrations`（B 轮）：INT-119 的用户级 `integrations` 表整表 `DROP`（从未有人配置过，
-  无数据要迁）；模型与手工索引同步删除，不交给 AutoMigrate。
+- `migrateDropIntegrations`（B 轮）：INT-119 的用户级 `integrations` 表整表 `DROP`（本仓库部署从未有人配置过）。
+  表里还有行时**拒绝启动**，要求设 `FAST_SHIP_DROP_USER_INTEGRATIONS=1` 才删：一套部署只能有一个
+  App 身份，多个用户各配一个时该选谁属于产品决策，升级不替用户挑；确认后重新配置的量级就是
+  「在 GitHub 上创建 App」点一下。模型与手工索引同步删除，不交给 AutoMigrate。
 
 纠偏失败回滚事务后 `log.Fatalf` 退出——宁可起不来也不带错跑，与其他迁移一致。
 

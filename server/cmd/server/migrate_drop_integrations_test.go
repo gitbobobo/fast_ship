@@ -8,8 +8,10 @@ import (
 	"go.uber.org/zap"
 )
 
-// integrations 表存在则被整表删除；不存在时不动；重复执行幂等。
+// 表里有行时默认拒绝启动（升级会不可逆地丢掉加密凭证）；显式设置
+// dropUserIntegrationsEnv=1 后才整表删除；表不存在或为空时直接通过；幂等。
 func TestMigrateDropIntegrations(t *testing.T) {
+	t.Setenv(dropUserIntegrationsEnv, "")
 	db, err := openMigrationTestDB(t)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
@@ -51,8 +53,16 @@ func TestMigrateDropIntegrations(t *testing.T) {
 		t.Fatalf("seed row: %v", err)
 	}
 
+	if err := migrateDropIntegrations(db, zap.NewNop()); err == nil {
+		t.Fatal("non-empty integrations table must refuse to migrate without opt-in")
+	}
+	if exists, err := sqliteTableExists(db, "integrations"); err != nil || !exists {
+		t.Fatalf("refused migration must keep the table = %t %v", exists, err)
+	}
+
+	t.Setenv(dropUserIntegrationsEnv, "1")
 	if err := migrateDropIntegrations(db, zap.NewNop()); err != nil {
-		t.Fatalf("migrate: %v", err)
+		t.Fatalf("migrate with opt-in: %v", err)
 	}
 	if exists, err := sqliteTableExists(db, "integrations"); err != nil || exists {
 		t.Fatalf("integrations table still exists after migrate = %t %v", exists, err)
