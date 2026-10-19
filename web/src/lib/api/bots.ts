@@ -352,6 +352,10 @@ export interface BotScheduleTask {
   needs_report: boolean;
   enabled: boolean;
   next_run_at: string | null;
+  /** 跨运行保留的持久小状态（INT-123）：任意 JSON 值，无状态为 null。 */
+  state: unknown;
+  /** 状态最后写入时间（RFC3339）；无状态为 null。 */
+  state_updated_at: string | null;
   created_at: string;
   updated_at: string;
   last_run: BotScheduleRun | null;
@@ -559,7 +563,18 @@ export const botApi = {
         .json<ApiResponse<{ items: BotScheduleRun[] }>>(),
     ),
 
-  /** 用户侧唯一写操作：任务的增删改由机器人经工具完成。 */
+  /**
+   * 清空任务的持久小状态；幂等，返回清空后的任务。
+   * 与启停一样是用户侧仅有的写操作：任务的增删改由机器人经工具完成。
+   */
+  clearScheduleTaskState: (botId: string, taskId: string) =>
+    write(
+      api
+        .delete(`${scheduleTaskPath(botId, taskId)}/state`, options())
+        .json<ApiResponse<BotScheduleTask>>(),
+    ),
+
+  /** 启停任务；enabled 与 last_run/next_run_at 在响应里一并返回。 */
   setScheduleTaskEnabled: (botId: string, taskId: string, enabled: boolean) =>
     write(
       api

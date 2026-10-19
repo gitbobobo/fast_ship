@@ -220,6 +220,20 @@ export function useBotScheduleTaskRuns(botId: string, taskId: string | null) {
   });
 }
 
+/** 清空状态后任务行整体失效：state/state_updated_at 与列表一并刷新。 */
+export function useClearBotScheduleTaskState(botId: string) {
+  const queryClient = useQueryClient();
+  const userId = useUserId();
+  return useMutation({
+    mutationFn: (taskId: string) =>
+      botApi.clearScheduleTaskState(botId, taskId),
+    onSettled: () =>
+      queryClient.invalidateQueries({
+        queryKey: botKeys.scheduleTasks(userId, botId),
+      }),
+  });
+}
+
 /** 启停成功后任务行整体失效：enabled 与 last_run/next_run_at 一并刷新。 */
 export function useSetBotScheduleTaskEnabled(botId: string) {
   const queryClient = useQueryClient();
