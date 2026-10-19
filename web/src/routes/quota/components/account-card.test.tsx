@@ -440,6 +440,35 @@ describe("QuotaAccountCard", () => {
     ).toBeNull();
   });
 
+  // OpenDesign 无 Design Plan 额度时只会给钱包余额 + 「按钱包计费」说明，没有窗口。
+  // 这种卡片不能因为窗口为空就只剩「还没有额度数据」，否则余额与计费说明完全看不到。
+  it("没有窗口但有余额时，正文用余额代替剩余，悬浮面板仍可看到说明", async () => {
+    const user = userEvent.setup();
+    const account = makeAccount({
+      provider: "opendesign",
+      provider_name: "OpenDesign",
+      label: "设计稿账号",
+      status: "ok",
+      windows: [],
+      balance: { label: "钱包余额", amount: 1.03, currency: "USD" },
+      note: "无 Design Plan 额度，按钱包计费",
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+
+    expect(screen.queryByText(/还没有额度数据/)).toBeNull();
+    expect(screen.getByTestId("quota-remaining")).toHaveTextContent("$1.03");
+    expect(screen.getByText("钱包余额")).toBeInTheDocument();
+    // 没有窗口就没有进度条，但正文仍可悬浮看详情
+    expect(screen.queryByRole("progressbar")).toBeNull();
+
+    await user.hover(bodyTrigger("设计稿账号"));
+    const panel = await screen.findByTestId("quota-account-detail-panel");
+    expect(within(panel).getByText(/无 Design Plan 额度/)).toBeInTheDocument();
+    expect(within(panel).getByText(/1\.03/)).toBeInTheDocument();
+  });
+
   it("余额与备注只出现在悬浮面板，不进正文", async () => {
     const user = userEvent.setup();
     const account = makeAccount({

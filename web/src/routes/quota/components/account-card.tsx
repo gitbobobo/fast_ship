@@ -167,6 +167,10 @@ export function QuotaAccountCard({
 
   const pending = account.status === "pending";
   const hasWindows = account.windows.length > 0;
+  // 没有窗口也可能有可看的东西：OpenDesign 无 Design Plan 额度时只给钱包余额
+  // 和「按钱包计费」的说明，不能因为窗口为空就把余额丢掉。
+  const hasBalanceOrNote = account.balance != null || account.note !== "";
+  const showDetail = !pending && (hasWindows || hasBalanceOrNote);
 
   return (
     <Card>
@@ -220,7 +224,7 @@ export function QuotaAccountCard({
         </div>
       </CardHeader>
       <CardContent className="p-4 pt-3">
-        {pending || !hasWindows ? (
+        {!showDetail ? (
           <p className="text-xs text-muted-foreground">
             还没有额度数据
             {pending && "，等待后台抓取"}
@@ -252,12 +256,22 @@ export function QuotaAccountCard({
                   >
                     {active?.remaining != null
                       ? formatQuotaAmount(active.remaining, "percent")
-                      : "—"}
+                      : account.balance
+                        ? `$${account.balance.amount}`
+                        : "—"}
                   </span>
                   <span className="min-w-0 truncate text-xs text-muted-foreground">
-                    剩余
-                    {active?.limiting &&
-                      ` · 受「${active.limiting.label}」限制`}
+                    {active?.remaining != null ? (
+                      <>
+                        剩余
+                        {active.limiting &&
+                          ` · 受「${active.limiting.label}」限制`}
+                      </>
+                    ) : account.balance ? (
+                      account.balance.label
+                    ) : (
+                      "还没有额度数据"
+                    )}
                   </span>
                 </div>
                 {pools.length > 1 && (
