@@ -29,6 +29,18 @@ func migrateReviewTables(db *gorm.DB, logger *zap.Logger) error {
 	}
 	logger.Info("已删除通用自动化与旧 PR 评审遗留表", zap.Strings("tables", legacyTables))
 
+	// 站内通知表保留，但旧自动化的通知 kind 已不再合法（只留三类审查故障），
+	// 升级后这些行的文案与目标（automation_runs 等）都已失效：直接清掉。
+	// 首次建库时 notifications 还没被 AutoMigrate 建出来，跳过。
+	if exists, err := sqliteTableExists(db, "notifications"); err != nil {
+		return err
+	} else if exists {
+		if err := db.Exec(`DELETE FROM notifications WHERE kind IN (
+			'automation_dispatch_failed','automation_run_timeout','automation_post_failed','automation_busy','agent')`).Error; err != nil {
+			return fmt.Errorf("清理旧自动化通知失败: %w", err)
+		}
+	}
+
 	// 仓库键归一小写（INT-135 修复轮）：旧实现可能带着 GitHub 规范大小写
 	// 写库，与 rerun 侧的用户输入大小写形成两套账本。幂等 UPDATE；表不
 	// 存在（首次建库，AutoMigrate 尚未跑）时跳过。
@@ -37,13 +49,11 @@ func migrateReviewTables(db *gorm.DB, logger *zap.Logger) error {
 		"review_pull_requests", "review_assets", "project_review_settings",
 	}
 	for _, table := range repoTables {
-		var exists int64
-		if err := db.Raw(
-			"SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", table,
-		).Scan(&exists).Error; err != nil {
-			return fmt.Errorf("检查表 %s 失败: %w", table, err)
+		exists, err := sqliteTableExists(db, table)
+		if err != nil {
+			return err
 		}
-		if exists == 0 {
+		if !exists {
 			continue
 		}
 		if err := db.Exec(fmt.Sprintf(

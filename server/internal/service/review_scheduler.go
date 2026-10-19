@@ -155,17 +155,26 @@ func (s *ReviewService) promoteQueuedRuns(now time.Time) {
 	}
 }
 
+// reviewDispatchClaimTimeout 认领后超过这个时长仍未确认建线程（进程在
+// 认领与派发之间退出/崩溃）的运行允许重新认领：CreateThread 以运行行预分配
+// 的 threadId/commandId 幂等，重试不会建出第二个线程。
+const reviewDispatchClaimTimeout = 5 * time.Minute
+
 // dispatchRuns 认领未启动的 dispatched 行并事务外 launchRun。
 func (s *ReviewService) dispatchRuns(now time.Time) {
+	reclaimBefore := now.Add(-reviewDispatchClaimTimeout)
 	var runs []model.ReviewRun
-	if err := s.db.Where("status = ? AND dispatch_started_at IS NULL", model.ReviewRunDispatched).
+	if err := s.db.
+		Where("status = ? AND (dispatch_started_at IS NULL OR (dispatched_at IS NULL AND dispatch_started_at < ?))",
+			model.ReviewRunDispatched, reclaimBefore).
 		Order("created_at ASC").Limit(reviewDispatchBatch).Find(&runs).Error; err != nil {
 		s.logger.Error("查询待派发运行失败", zap.Error(err))
 		return
 	}
 	for _, run := range runs {
 		res := s.db.Model(&model.ReviewRun{}).
-			Where("id = ? AND status = ? AND dispatch_started_at IS NULL", run.ID, model.ReviewRunDispatched).
+			Where("id = ? AND status = ? AND (dispatch_started_at IS NULL OR (dispatched_at IS NULL AND dispatch_started_at < ?))",
+				run.ID, model.ReviewRunDispatched, reclaimBefore).
 			Updates(map[string]any{"dispatch_started_at": now, "updated_at": now})
 		if res.Error != nil || res.RowsAffected == 0 {
 			continue

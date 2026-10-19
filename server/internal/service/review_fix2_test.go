@@ -297,3 +297,40 @@ func TestReviewCleanupCancelledNoDelete(t *testing.T) {
 		t.Fatalf("RemoveWorktree 不得被调用，removed = %v", t3.removed)
 	}
 }
+
+// TestDispatchReclaimsStaleClaim 进程在认领后、建线程前退出时，运行会停在
+// dispatched + dispatch_started_at 非空、dispatched_at 为空；超过认领窗口后
+// 调度阶段必须重新认领（CreateThread 按预分配 ID 幂等），不能只等超时。
+func TestDispatchReclaimsStaleClaim(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	now := time.Now().UTC()
+	run := &model.ReviewRun{
+		ID: "run-stale-claim", UserID: e.user.ID, ProjectID: e.project.ID,
+		Kind: model.ReviewKindCode, RepoFullName: "o/r", PRNumber: 7,
+		HeadSHA: "sha", RoundNumber: 1,
+		EnvironmentID: "env-1", InstanceID: "claude", Model: "m",
+		ThreadID: "th", LaunchCommandID: "lc", InitialMessageID: "im",
+		Status: model.ReviewRunDispatched,
+	}
+	claimed := now.Add(-2 * reviewDispatchClaimTimeout)
+	run.DispatchStartedAt = &claimed
+	run.DeadlineAt = now.Add(time.Hour)
+	run.CreatedAt, run.UpdatedAt = now, now
+	if err := e.svc.db.Create(run).Error; err != nil {
+		t.Fatalf("create stale run: %v", err)
+	}
+
+	e.review.dispatchRuns(now)
+
+	var got model.ReviewRun
+	if err := e.svc.db.Where("id = ?", run.ID).First(&got).Error; err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+	if got.DispatchStartedAt == nil || !got.DispatchStartedAt.After(claimed) {
+		t.Fatalf("dispatch_started_at 未被重新认领: %+v", got.DispatchStartedAt)
+	}
+	// 测试环境没有 T3 访问面：重新认领后派发按预期失败落终态。
+	if got.Status != model.ReviewRunFailed || got.ErrorCode != "dispatch_failed" {
+		t.Fatalf("status = %s/%s, want failed/dispatch_failed", got.Status, got.ErrorCode)
+	}
+}

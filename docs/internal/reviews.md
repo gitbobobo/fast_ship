@@ -90,7 +90,10 @@ seen SHA、取消旧轮全部失效）。
 1. **到期防抖**：查 `fire_at<=now` 的防抖行，逐行短事务条件删除后复核——
    项目仍启用、仓库仍属该项目、触发条件仍勾选——成立才开一轮；顺带清理
    超龄 delivery 幂等账（保留 7 天）。
-2. **排队提升**：每用户最多 **5 个在途**（dispatched/running），其余
+2. **派发认领**：`dispatched` 且未确认建线程的运行在认领后超过 5 分钟仍
+   `dispatched_at IS NULL`（进程在认领与建线程之间退出）时允许重新认领——
+   `CreateThread` 以运行行预分配的 threadId/commandId 幂等，不会建出第二个线程。
+3. **排队提升**：每用户最多 **5 个在途**（dispatched/running），其余
    `queued` 按 `created_at` 依序提升为 `dispatched`，`deadline_at` 重置为
    提升时刻 + 超时（超时从真正开始派发算，不占排队时间）。超时固定
    **代码审查 1h、视觉审查 30min**，常量，不提供配置。
