@@ -218,8 +218,9 @@ func fetchFactoryLegacyUsage(ctx context.Context, client *http.Client, base stri
 }
 
 // buildFactoryLegacySnapshot 解析旧版 usage 接口。它的 standard/premium 是两个
-// 独立窗口且窗口名已自含池信息（标准额度/高级额度），不填 Window.Pool——Pool
-// 只用于新接口里 standard/core 同名窗口的分组。
+// 互相独立的额度池，所以同样要填 Window.Pool（标准 / 高级）：
+// 前端按池算有效剩余与是否用尽，没有 pool 会把两个池当成一个——标准池用尽而
+// 高级池还有额度时，账号会被误判为已用尽。
 func buildFactoryLegacySnapshot(authInfo, usageRoot map[string]any) Snapshot {
 	usage, _ := asObject(usageRoot["usage"])
 
@@ -230,9 +231,11 @@ func buildFactoryLegacySnapshot(authInfo, usageRoot map[string]any) Snapshot {
 			periodEnd = &end
 		}
 		if w := factoryLegacyWindow(usage["standard"], "标准额度", periodEnd); w != nil {
+			w.Pool = "标准"
 			windows = append(windows, *w)
 		}
 		if w := factoryLegacyWindow(usage["premium"], "高级额度", periodEnd); w != nil {
+			w.Pool = "高级"
 			windows = append(windows, *w)
 		}
 	}

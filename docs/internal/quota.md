@@ -303,7 +303,10 @@ expired、401、404 五份），适配器测试直接用它们驱动状态映射
   Factory Droid 是双池：新计费接口（`/api/billing/limits`）把 standard/core
   两个池的窗口平铺在同一 `windows` 数组里，标准池填「标准」、core 池填「Core」，
   两池窗口同名，core 的 label 不再带「Core 」前缀（池名已由 `pool` 表达）；
-  旧版 usage 接口的窗口名自含池信息（标准额度/高级额度），不填该字段。
+  旧版 usage 接口（`/api/organization/subscription/usage`）的 standard/premium
+  同样是两个独立额度池，分别填「标准」/「高级」——**不能因为窗口名已自含池
+  信息就不填**：前端按池算有效剩余与是否用尽，混成一个池时「标准用尽而高级
+  还有额度」会被误判成已用尽。
 - **数值类型一律 float64**：契约里 `used_percent`/`used`/`limit`/`amount`
   在 openapi 显式标 `format: double`（生成 `float64`/`*float64`）。金额与
   百分比不降 float32 是显式决定——`10.1` 降精度会变成 `10.100000381469727`。

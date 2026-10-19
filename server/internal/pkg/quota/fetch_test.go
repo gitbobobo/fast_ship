@@ -1097,17 +1097,18 @@ func TestFactoryLegacyFallback(t *testing.T) {
 	if standard.ResetAt == nil || !standard.ResetAt.Equal(*unixTime(1_702_678_400)) {
 		t.Fatalf("账期结束时间（毫秒时间戳）不符: %v", standard.ResetAt)
 	}
-	// 旧版接口的窗口名已自含池信息（标准额度/高级额度），不填 pool；omitempty
-	// 让整个字段在 JSON 里缺省，前端不会把旧版窗口误当成新接口的池分组。
-	if standard.Pool != "" || premium.Pool != "" {
-		t.Fatalf("旧版窗口不应填 Pool，得到 %q/%q", standard.Pool, premium.Pool)
+	// 旧版接口的 standard/premium 是两个独立额度池，各自填 pool：前端按池算
+	// 有效剩余与是否用尽，混成一个池时「标准用尽 + 高级还有额度」会被误判。
+	if standard.Pool != "标准" || premium.Pool != "高级" {
+		t.Fatalf("旧版窗口池名期望 标准/高级，得到 %q/%q", standard.Pool, premium.Pool)
 	}
 	legacy, err := json.Marshal(snapshot)
 	if err != nil {
 		t.Fatalf("序列化失败: %v", err)
 	}
-	if strings.Contains(string(legacy), `"pool"`) {
-		t.Fatalf("旧版快照不应出现 pool 字段: %s", legacy)
+	if !strings.Contains(string(legacy), `"pool":"标准"`) ||
+		!strings.Contains(string(legacy), `"pool":"高级"`) {
+		t.Fatalf("旧版快照应带两个池名: %s", legacy)
 	}
 	if snapshot.Balance != nil {
 		t.Fatalf("旧版响应不应有余额: %+v", snapshot.Balance)
