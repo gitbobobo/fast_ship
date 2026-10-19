@@ -362,3 +362,20 @@ func TestCreateInviteExpiresHoursValidation(t *testing.T) {
 		}
 	}
 }
+
+// ConsumeTx 的谓词带 expires_at：调用方读到「没过期」到真正写入之间过去的时间
+// 也在生效（否则会出现过期后仍被消费的注册）。
+func TestInviteConsumeRejectsExpiredAtCommitTime(t *testing.T) {
+	s := setupMemberTestServices(t)
+	admin := s.createAdmin(t, "admin-1")
+	invite := mustCreateInvite(t, s, admin.ID, 1)
+
+	// 写时点已经超过有效期（读到与写入之间过期）：谓词必须不命中。
+	consumed, err := s.inviteRepo.ConsumeTx(s.db, invite.Id, "u-1", time.Now().Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if consumed {
+		t.Fatal("expired invite must not be consumed at commit time")
+	}
+}

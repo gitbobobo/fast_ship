@@ -224,6 +224,27 @@ describe("MembersPage admin view", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps 创建邀请 disabled until the deployment public_url is known", async () => {
+    // public_url 未就绪时创建会用一个可能对收件人不可达的地址，而 token 只回一次。
+    let resolveSettings: (value: unknown) => void = () => {};
+    getSettings.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSettings = resolve;
+      }),
+    );
+    listMembers.mockResolvedValue(membersPage([member("admin-1", "admin")]));
+    renderPage();
+
+    await screen.findByText("admin-1");
+    const createButton = screen.getByRole("button", { name: "创建邀请" });
+    await waitFor(() => expect(createButton).toBeDisabled());
+
+    resolveSettings({
+      data: { public_url: "", public_url_source: "none", updated_at: null },
+    });
+    await waitFor(() => expect(createButton).toBeEnabled());
+  });
+
   it("revokes an active invite after confirmation", async () => {
     listMembers.mockResolvedValue(membersPage([member("admin-1", "admin")]));
     listInvites.mockResolvedValue(invitesPage([invite()]));

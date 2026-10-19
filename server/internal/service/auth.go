@@ -166,7 +166,12 @@ func (s *AuthService) resolveInviteRole(tx *gorm.DB, token, userID string) (stri
 		return "", err
 	}
 	if !consumed {
-		// 读时可用、条件更新未命中：并发注册抢先消费了同一邀请。
+		// 读时可用、条件更新未命中：并发注册抢先消费，或者刚好在读到写入之间过期。
+		// 重读一次分清两者——过期一律 40432，不把它当成「已使用」。
+		fresh, readErr := s.invites.FindByTokenHashTx(tx, HashApiKey(token))
+		if readErr == nil && fresh.UsedAt == nil && !time.Now().Before(fresh.ExpiresAt) {
+			return "", errs.ErrInviteNotFound
+		}
 		return "", errs.ErrInviteUsed
 	}
 	return model.UserRoleMember, nil

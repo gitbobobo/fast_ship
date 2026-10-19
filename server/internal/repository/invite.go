@@ -73,7 +73,9 @@ func (r *InviteRepository) Revoke(id string, now time.Time) error {
 // revoked_at IS NULL，未命中（已被并发使用/撤销）返回 false，调用方整体回滚。
 func (r *InviteRepository) ConsumeTx(tx *gorm.DB, id, userID string, now time.Time) (bool, error) {
 	res := tx.Model(&model.Invite{}).
-		Where("id = ? AND used_at IS NULL AND revoked_at IS NULL", id).
+		// expires_at 也在谓词里：调用方读到「还没过期」到真正写入之间会过去一段时间，
+		// 只在 Go 侧判过期会给出「过期后仍被消费」的注册。
+		Where("id = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?", id, now).
 		Updates(map[string]any{
 			"used_by":    userID,
 			"used_at":    now,
