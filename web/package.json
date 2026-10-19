@@ -6,7 +6,7 @@
   "packageManager": "pnpm@10.23.0",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm typecheck && vite build",
+    "build": "pnpm typecheck && NODE_OPTIONS=--disable-warning=DEP0205 vite build",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings 0",
     "check": "pnpm lint && pnpm typecheck",

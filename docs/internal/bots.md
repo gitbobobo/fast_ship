@@ -596,6 +596,44 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   表外条目按「未知」回退：标签显示原始 `tool.action`、effect 保守按
   写入、chips 走通用字段集，不抛错（账本可能先于界面升级）。
 
+## 输入框与模型指标（INT-126）
+
+- **输入框浮动固定底部**（`web/src/components/bots/bot-chat.tsx` +
+  `web/src/routes/bots/$botId.tsx`）：输入框从流内 sticky（占位、消息多时
+  挤占内容、消息少时不贴视口底）改为 overlay——聊天内容包进
+  `flex flex-1 flex-col gap-4` 的内容容器，其后是等高 spacer（高度 =
+  浮层实高），最后是 `sticky bottom-0 h-0` 的浮层容器、内部绝对定位贴底。
+  浮层高度由 `ResizeObserver` 对那个绝对定位层实测（外层 h-0 没有高度，
+  不能测它；首帧 loading/error 时浮层未挂载，结束后补测）。spacer 与
+  浮层同源同高：滚到底时把最后一条消息顶出浮层遮挡区，滚动途中则让消息
+  从浮层（`bg-background/95` + backdrop-blur）下方穿过。浮层空白区
+  `pointer-events-none`、输入框外包一层 `pointer-events-auto`，不挡下方
+  消息的选择等交互。页面外层补 `flex-1`，消息少时输入框也贴视口底部；
+  `_layout.tsx` 的 main 仍是唯一滚动容器（scroll-follow 自行定位），未改。
+  浮层实高同时进 scroll-follow 的 version：首帧 spacer 还没量出来，只按消息
+  内容判定会在 spacer 长出来之前完成贴底、之后不再跟，首屏最后一条消息被浮层
+  压住；高度变化时重跑一次 follow，次序上早于滚动事件，`atBottom` 仍成立。
+- **Enter 发送 / Shift+Enter 换行**（`web/src/components/bots/bot-composer.tsx`）：
+  Enter 直接发送，Shift+Enter 走浏览器默认换行；输入法组合中的 Enter
+  （`isComposing` / `keyCode === 229`）不拦截，避免选词时误发。与线程输入
+  框（`thread-composer.tsx`：Cmd/Ctrl+Enter 发送、回车换行）刻意不同——
+  机器人主线是单线快问快答，按聊天软件习惯回车直发；Cmd/Ctrl+Enter 落在
+  同一分支同样发送。发送按钮（表单提交）保留，两个入口共用 `canSubmit`
+  （非空白文本、非 submitting/disabled）。
+- **双环模型指标**（`web/src/components/bots/bot-metrics.tsx`）：速度 /
+  上下文 / 缓存三个文本指标改为一个双环进度圆 + 右侧速度数值。尺寸 20×20
+  （不抢发送按钮的注意力），圆心 (10,10)，外环 = 缓存命中率（r=8、strokeWidth
+  2），内环 = 上下文占比（r=4.5、strokeWidth 2），环间 1.5px 间隙，
+  `rotate(-90)` 从顶部起画，占比夹紧 0–100（估算可能超出窗口）。两环都用浅灰
+  中性色（外环 `stroke-muted-foreground/70`、内环 `stroke-muted-foreground/45`），
+  靠明暗而非色相区分——不用品牌色/状态色，避免和工具卡的成功/失败配色抢语义。
+  缺失（usage 未收齐、估算为 0、窗口未知）不画进度弧、轨道画虚线 +
+  半透明，与「真实 0%」（实线轨道、无弧）视觉可区分——「缺失 ≠ 0」原则
+  不变；0% 也不画弧，因为 round linecap 会在零长度弧上画出圆点。每环
+  `<title>` 带口径与可读数值（如「缓存命中率 80%」「上下文占比 ≈25%」），
+  svg `aria-label` 汇总两项可用值。速度只显示数值与单位（`40.0 tok/s`），
+  去掉「速度」文案，缺失仍显示「—」。
+
 ## 对话风格、过程折叠与人设模板（INT-122）
 
 线上观察（v0.1.57 后的真实对话）：用户一条约 20 字，机器人最终回复平均
