@@ -38,6 +38,9 @@ type Bot struct {
 	// OfferedInputSeq 是已经交给某次模型请求的输入水位：run 失败后同一批输入
 	// 不会无限自动重试。
 	OfferedInputSeq int64 `gorm:"not null" json:"offered_input_seq"`
+	// MemoryArchiveSeq 是压缩前静默存档已处理的消息 seq 水位（INT-124）：
+	// 同一 seq 区间的重复压缩不再把消息重复交给归档模型，daily 不重复追加。
+	MemoryArchiveSeq int64 `gorm:"not null;default:0" json:"-"`
 
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
