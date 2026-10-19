@@ -181,3 +181,13 @@ REST 实现，供 issue 关联 PR 的 attach/sync 使用；评审链路不读 `u
   finished_at 为空仍会拦删除）。
 - 合并 check 与按模型 check 可能混存（首个模型 403 前已建的不回收）。
 - 令牌重放窗口内（deadline+5min）结束回报可重放，PR 代发端点不行（requireLive）。
+- **仓库授权靠项目自填**：新增项目时只校验 Token 记录的归属，不验证该 Token（以及
+  GitHub App 安装）能否访问 `github_owner/repo`；webhook 事务内不调 GitHub，无法现场
+  核对。INT-129 把 App 身份改成部署级后，这件事的边界从「成员自己的 App 安装范围」
+  变成「本部署 App 的安装范围」：一个成员可以把项目指向部署 App 能访问的任意仓库，
+  让共享 App 在那个仓上发评论/check。部署内的成员视为可信同事，故未在本期收紧；
+  要收紧就得在项目/触发器写入时调一次 GitHub 校验 Token 对该仓的权限，会引入新的
+  失败面与写入延迟，作为后续任务。
+- **INT-119 遗留的在途运行**：`app_user_id` 非空的行属于已停用的用户级 App。升级后
+  webhook 只取消空身份，拦不住它们，因此代发端点（`loadPRRun`）一律拒签这类运行，
+  交给调度超时收尾。

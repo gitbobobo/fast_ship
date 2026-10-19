@@ -34,6 +34,14 @@ func (s *AutomationAgentService) loadPRRun(ctx context.Context, runID string) (*
 		(run.Status != model.AutomationRunDispatched && run.Status != model.AutomationRunRunning) {
 		return nil, errs.ErrRunNotPRReview
 	}
+	// INT-119 开轮的行带着用户级 App 身份（非空）。那个身份自 INT-129 起已不存在，
+	// 而代发客户端现在恒为部署级 App：若放行，一个本该随旧 App 一起失效的在途运行
+	// 会拿部署 App 的安装令牌继续发 review/check（新 webhook 只取消空身份，拦不住它）。
+	// 这类运行一律拒绝，交给调度超时收尾。
+	if run.AppUserID != "" {
+		return nil, errs.New(errs.ErrRunNotPRReview.Code,
+			"该运行属于已停用的用户级 GitHub App，无法再用部署级 App 代发")
+	}
 	return run, nil
 }
 

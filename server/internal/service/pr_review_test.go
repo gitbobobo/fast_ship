@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/config"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
@@ -2031,5 +2033,53 @@ func TestMarkPRReviewPending_OnlyTouchesOwnIdentityRow(t *testing.T) {
 		if row.SyncPending || row.SyncEpoch != 3 {
 			t.Fatalf("row %q touched: pending=%t epoch=%d", appUserID, row.SyncPending, row.SyncEpoch)
 		}
+	}
+}
+
+// ---- INT-129：带旧用户级 App 身份的在途运行不得用部署级 App 代发 ----
+
+// TestAgentPR_LegacyIdentityRunRejected 升级后被遗留的 INT-119 运行（app_user_id
+// 非空）仍处于 dispatched，且新 webhook 只取消空身份拦不住它。它的旧 App 已不存在，
+// 代发客户端恒为部署级 App——必须拒绝，否则它能拿共享 App 的安装令牌继续发 review。
+func TestAgentPR_LegacyIdentityRunRejected(t *testing.T) {
+	env := setupPRReviewTestEnv(t)
+	user, _ := env.createUserWithRepo(t, "octocat", "hw")
+	env.createPRRule(t, user, func(a *model.Automation, tr *model.AutomationTrigger) { tr.DebounceSeconds = 0 })
+	if err := env.handleWebhook(t, "d-legacy", "opened", "octocat/hw", 1, "sha-1", false, false); err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+
+	var run model.AutomationRun
+	if err := env.db.Where("head_sha = ?", "sha-1").First(&run).Error; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// 伪装成升级前的行：身份非空 + 已派发。
+	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).Updates(map[string]any{
+		"app_user_id": "legacy-user",
+		"status":      model.AutomationRunDispatched,
+	}).Error; err != nil {
+		t.Fatalf("make legacy: %v", err)
+	}
+
+	agent := NewAutomationAgentService(env.db, env.runs,
+		repository.NewAutomationRunTokenRepository(env.db), nil, NewNotificationSink(env.db), zap.NewNop())
+	agent.SetPRGitHub(githubapp.StaticClients{Client: env.fake})
+
+	identity := &RunTokenIdentity{UserID: run.UserID, RunID: run.ID}
+	if _, err := agent.AgentPullRequest(context.Background(), identity); err == nil {
+		t.Fatal("legacy identity run must be rejected")
+	} else {
+		var appErr *errs.AppError
+		if !errors.As(err, &appErr) || appErr.Code != errs.ErrRunNotPRReview.Code {
+			t.Fatalf("err = %v, want 40920", err)
+		}
+	}
+	body := "ok"
+	if _, err := agent.AgentSubmitPullRequestReview(context.Background(), identity,
+		&api.AgentPullRequestReviewRequest{Event: api.COMMENT, Body: &body}); err == nil {
+		t.Fatal("legacy identity run must not submit a review")
+	}
+	if env.fake.TotalCalls() != 0 {
+		t.Fatalf("legacy run reached GitHub: %d calls", env.fake.TotalCalls())
 	}
 }
