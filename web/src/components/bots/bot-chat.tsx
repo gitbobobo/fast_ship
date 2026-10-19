@@ -83,9 +83,13 @@ export function BotChat({ botId }: { botId: string }) {
       : null;
 
   return (
+    // 滚动容器由工作台中栏提供（useScrollFollow 找最近的可滚动祖先）；
+    // min-h-full + mt-auto 保证消息少时输入框仍贴在栏底；shrink-0 让
+    // 盒子高度始终覆盖全部内容（useScrollFollow 监听的正是这个盒子，
+    // 盒子被压缩时工具卡展开等高度变化不再触发跟随）。
     <div
       ref={anchorRef}
-      className="mx-auto flex w-full max-w-3xl min-w-0 flex-1 flex-col gap-4 px-4 py-4 md:px-6"
+      className="mx-auto flex min-h-full w-full max-w-3xl min-w-0 shrink-0 flex-col gap-4 px-4 py-4 md:px-6"
     >
       {chat.runActive && (
         <div
@@ -215,7 +219,7 @@ export function BotChat({ botId }: { botId: string }) {
         onCancel={(callId) => void chat.cancelCall(callId)}
       />
 
-      <div className="sticky bottom-0 -mx-1 bg-background/95 px-1 pt-2 pb-3 backdrop-blur">
+      <div className="sticky bottom-0 mt-auto -mx-1 bg-background/95 px-1 pt-2 pb-3 backdrop-blur">
         <BotComposer
           text={text}
           onTextChange={setText}

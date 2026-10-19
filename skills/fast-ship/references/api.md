@@ -8635,6 +8635,9 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 | `items[].context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
 | `items[].context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `items[].next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `items[].last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
+| `items[].last_message.kind` | string | 是 | 消息角色 user / assistant |
+| `items[].last_message.text` | string | 是 | 完整正文；服务端不截断，截断展示由前端负责 |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 
@@ -8690,6 +8693,9 @@ API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不�
 | `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
 | `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
+| `last_message.kind` | string | 是 | 消息角色 user / assistant |
+| `last_message.text` | string | 是 | 完整正文；服务端不截断，截断展示由前端负责 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -8792,6 +8798,9 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
 | `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
+| `last_message.kind` | string | 是 | 消息角色 user / assistant |
+| `last_message.text` | string | 是 | 完整正文；服务端不截断，截断展示由前端负责 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -8857,6 +8866,9 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
 | `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
+| `last_message.kind` | string | 是 | 消息角色 user / assistant |
+| `last_message.text` | string | 是 | 完整正文；服务端不截断，截断展示由前端负责 |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -9079,6 +9091,9 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `bot.context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
 | `bot.context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `bot.next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
+| `bot.last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
+| `bot.last_message.kind` | string | 是 | 消息角色 user / assistant |
+| `bot.last_message.text` | string | 是 | 完整正文；服务端不截断，截断展示由前端负责 |
 | `bot.created_at` | string（date-time） | 是 |  |
 | `bot.updated_at` | string（date-time） | 是 |  |
 | `messages` | object[] | 是 |  |

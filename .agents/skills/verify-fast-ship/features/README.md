@@ -46,3 +46,4 @@ Keep implementation details out of the map. Name only user paths, stable handles
 - [Issue detail](./issue-detail.md) covers creating an internal issue, editing, comments, checklist, and the collaboration area.
 - [API keys](./api-keys.md) covers creating, copying, listing, and deleting API keys.
 - [GitHub tokens](./github-tokens.md) covers the token library, detection status, replacement with reference confirmation, delete guarding, and project-form token references.
+- [Bots](./bots.md) covers the three-column `/bots` workspace: the left bot list with latest-message previews, the middle mainline chat, and the hideable right detail column with edit/authorize entries, schedule tasks, and the config summary.

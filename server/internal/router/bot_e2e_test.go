@@ -434,7 +434,10 @@ func TestBotE2E(t *testing.T) {
 			}
 			return false
 		})
-		// 后台结果唤醒模型继续。
+		// 后台结果唤醒模型继续。先等后台结果消息落地：worker 落后台结果与「第
+		// 一轮结束」是两个时刻（唤醒可能重建 run，也可能落到仍在活动的那轮），
+		// 只看 runFinished 会与这条消息竞速——机器负载高时旧写法会偶发失败。
+		waitForE2E(t, "后台结果", 30*time.Second, func() bool { return findKind("background_result", nil) })
 		waitForE2E(t, "run finished", 30*time.Second, func() bool { return e.runFinished(t, botID) })
 		var bgCall string
 		if !findKind("background_result", &bgCall) {

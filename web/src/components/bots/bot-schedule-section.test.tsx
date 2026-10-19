@@ -1,8 +1,12 @@
+import { useState } from "react";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
-import { BotScheduleSection } from "./bot-schedule-section";
+import {
+  BotScheduleSection,
+  BotScheduleTaskDialog,
+} from "./bot-schedule-section";
 import { renderWithRoute } from "@/test/render";
 import { ApiRequestError } from "@/lib/api/client";
 import type { BotScheduleTask } from "@/lib/api/bots";
@@ -78,14 +82,31 @@ const setLang = (lang: string) => {
   });
 };
 
-const renderSection = () =>
-  renderWithRoute(<BotScheduleSection botId="b1" />);
+// 与生产同一结构：展开态与详情选择由宿主持有，弹窗只挂一份。
+function Harness() {
+  const [expanded, setExpanded] = useState(true);
+  const [taskId, setTaskId] = useState<string | null>(null);
+  return (
+    <>
+      <BotScheduleSection
+        botId="b1"
+        expanded={expanded}
+        onExpandedChange={setExpanded}
+        onOpenDetail={setTaskId}
+      />
+      <BotScheduleTaskDialog
+        botId="b1"
+        taskId={taskId}
+        onClose={() => setTaskId(null)}
+      />
+    </>
+  );
+}
 
-const expandSection = async (user: ReturnType<typeof userEvent.setup>) => {
-  const section = screen.getByTestId("bot-schedule-section");
-  await user.click(within(section).getByRole("button", { name: /定时任务/ }));
-  return section;
-};
+const renderSection = () => renderWithRoute(<Harness />);
+
+// 详情右栏版默认展开，无需先点标题。
+const getSection = () => screen.getByTestId("bot-schedule-section");
 
 beforeEach(() => {
   setLang("zh-CN");
@@ -106,7 +127,7 @@ afterEach(() => {
 });
 
 describe("BotScheduleSection", () => {
-  it("默认折叠，展开后显示空状态", async () => {
+  it("默认展开显示空状态，点击标题可折叠", async () => {
     const user = userEvent.setup();
     renderSection();
 
@@ -114,14 +135,16 @@ describe("BotScheduleSection", () => {
     const header = within(section).getByRole("button", {
       name: /定时任务 · 0 个/,
     });
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(section).getByText("让机器人帮你创建"),
+    ).toBeInTheDocument();
+
+    await user.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "false");
     expect(
       within(section).queryByText("让机器人帮你创建"),
     ).not.toBeInTheDocument();
-
-    await user.click(header);
-    expect(
-      await within(section).findByText("让机器人帮你创建"),
-    ).toBeInTheDocument();
   });
 
   it("列出任务的名称、计划、下次运行、最近结果与开关", async () => {
@@ -129,9 +152,8 @@ describe("BotScheduleSection", () => {
       data: [enabledTask, disabledTask],
       isLoading: false,
     } as never);
-    const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     expect(
       within(section).getByRole("button", { name: /定时任务 · 2 个/ }),
@@ -185,7 +207,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(within(section).getByText("每日汇总"));
 
@@ -212,7 +234,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(
       within(section).getByRole("switch", { name: "停用 每日汇总" }),
@@ -236,7 +258,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(
       within(section).getByRole("switch", { name: "停用 每日汇总" }),
@@ -253,7 +275,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     expect(
       within(section).queryByRole("button", {

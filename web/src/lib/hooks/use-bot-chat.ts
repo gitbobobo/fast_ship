@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import {
   botApi,
   type Bot,
@@ -193,6 +197,30 @@ export function mergeBotSnapshot(previous: Bot | undefined, incoming: Bot): Bot 
   };
 }
 
+/**
+ * 预览列与主线同步：消息提交时让机器人列表失效重取，不在客户端就地拼
+ * last_message。列表端点是预览的唯一事实来源：重取拿到的就是提交后的值，
+ * 客户端不必自己判断新旧，也不存在「列表还没加载时写到哪」的问题——
+ * 那些都得靠客户端维护一份影子状态，代价高于一次沿索引命中的列表请求。
+ * 唯一要额外处理的是重取时机：先取消在飞请求（见下），否则首载会复用它。
+ * 「哪些消息算预览」的资格判断只在服务端：客户端不复制正文规则——
+ * Go 的 unicode.IsSpace 与 JS trim 的空白字符集不一致（如 U+FEFF），
+ * 复制一份会漏刷新。这里只按角色（user/assistant）筛选。
+ */
+async function refreshListPreview(
+  queryClient: QueryClient,
+  userId: string | null,
+  message: BotMessage,
+) {
+  if (message.kind !== "user" && message.kind !== "assistant") return;
+  const key = botKeys.list(userId);
+  // 先取消在飞的列表请求再失效：Query.fetch 只在已有 data 时才按
+  // cancelRefetch 取消当前请求，首次加载（还没有 data）会直接复用旧
+  // promise，提交前发出的旧快照照样安装，预览停在旧消息且不会自愈。
+  await queryClient.cancelQueries({ queryKey: key });
+  await queryClient.invalidateQueries({ queryKey: key });
+}
+
 // ---- 主线时间线装配 ----
 
 export interface BotChatEntry {
@@ -281,6 +309,8 @@ export function foldStreamEvent(
     clearDraft: (messageId: string) => void;
     /** 维护进度的唯一写入口；null = 清除。旧服务端不发该 kind，天然兼容。 */
     setMaintenanceProgress: (progress: BotMaintenanceProgress | null) => void;
+    /** 完整消息提交进账本时刷新左栏预览（让列表重取，不就地拼）。 */
+    syncListPreview: (message: BotMessage) => void;
   },
 ) {
   let data: BotStreamEventData;
@@ -296,6 +326,7 @@ export function foldStreamEvent(
         const message = data.payload as BotMessage | undefined;
         if (message?.id) {
           sinks.setMessages(mergeMessages(sinks.getMessages(), [message]));
+          sinks.syncListPreview(message);
         }
         const draftId = data.message_id ?? message?.id;
         if (draftId) sinks.clearDraft(draftId);
@@ -307,6 +338,7 @@ export function foldStreamEvent(
         const message = data.payload as BotMessage | undefined;
         if (message?.id) {
           sinks.setMessages(mergeMessages(sinks.getMessages(), [message]));
+          sinks.syncListPreview(message);
         }
       } else if (data.kind === "schedule_event") {
         // 完整 schedule_event 投影：payload 是消息本体，直接并入时间线，
@@ -554,6 +586,9 @@ export function useBotChat(botId: string) {
           appendDraft,
           clearDraft,
           setMaintenanceProgress,
+          // 左栏预览与主线同步：让列表重取，服务端是唯一事实来源。
+          syncListPreview: (message) =>
+            void refreshListPreview(queryClient, userId, message),
         });
         // 新模型请求开始即刷新一次快照（H2）：metrics 只读快照，而服务端对
         // 进行中的请求已返回 status=running + input_tokens_estimate，刷新后
@@ -647,6 +682,10 @@ export function useBotChat(botId: string) {
           botKeys.messages(userId, botId),
           (previous) => mergeMessages(previous ?? [], [result.message]),
         );
+        // REST 发送路径不碰预览：发送方也会从 SSE 收到自己的 user_message
+        // （服务端在同一事务追加该事件，重连按 seq 补读），预览刷新只由
+        // 提交点统一触发（取消并重取列表），这里不补第二个写点——模型回得
+        // 快时晚到的 REST 响应会用更旧的 user 消息盖掉 assistant 预览。
         if (result.run) {
           queryClient.setQueryData<BotRun[]>(
             botKeys.runs(userId, botId),

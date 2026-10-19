@@ -86,6 +86,15 @@ export function watchBotsIdentity(queryClient: QueryClient) {
   });
 }
 
+/**
+ * 左栏列表的轮询间隔：预览（last_message）由服务端计算，而客户端只订阅
+ * 当前选中机器人的主线流——停在别的机器人上时，另一个机器人跑完的回合没有
+ * 任何事件通知我们（换机器人、多标签页同理），左栏那条预览会停在旧消息。
+ * 与定时任务区同一节奏轮询，让列表自己跟上；查询已沿
+ * (bot_id, session_kind, seq) 索引早退，一次轮询很便宜。
+ */
+export const BOT_LIST_POLL_MS = 15_000;
+
 export function useBots() {
   const userId = useUserId();
   return useQuery({
@@ -93,6 +102,8 @@ export function useBots() {
     queryFn: async ({ signal }) => (await botApi.list(signal)).data.items,
     enabled: Boolean(userId),
     refetchOnMount: "always",
+    // 预览只能由服务端算，轮询补上「没订阅到的那些机器人」的变化。
+    refetchInterval: BOT_LIST_POLL_MS,
   });
 }
 
