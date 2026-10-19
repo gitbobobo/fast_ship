@@ -603,9 +603,19 @@ func snapshotWindows(snapshot quota.Snapshot) []api.QuotaWindow {
 			Limit:       w.Limit,
 			Unit:        api.QuotaWindowUnit(w.Unit),
 			ResetAt:     api.JSONTimePtr(w.ResetAt),
+			Pool:        poolPtr(w.Pool),
 		})
 	}
 	return windows
+}
+
+// poolPtr 只把非空的池名带进响应：单池供应商的窗口不该出现该字段
+// （api.QuotaWindow.Pool 是可选的 *string，nil 时 JSON 里整个缺省）。
+func poolPtr(pool string) *string {
+	if pool == "" {
+		return nil
+	}
+	return &pool
 }
 
 func snapshotBalance(snapshot quota.Snapshot) *api.QuotaBalance {

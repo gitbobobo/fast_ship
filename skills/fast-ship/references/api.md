@@ -10217,6 +10217,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `windows[].limit` | number（double，可空） | 否 |  |
 | `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
 | `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `windows[].pool` | string | 否 | 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」 |
 | `balance` | object（可空） | 是 |  |
 | `balance.label` | string | 是 |  |
 | `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
@@ -10280,6 +10281,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `windows[].limit` | number（double，可空） | 否 |  |
 | `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
 | `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `windows[].pool` | string | 否 | 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」 |
 | `balance` | object（可空） | 是 |  |
 | `balance.label` | string | 是 |  |
 | `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
@@ -10349,6 +10351,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `windows[].limit` | number（double，可空） | 否 |  |
 | `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
 | `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `windows[].pool` | string | 否 | 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」 |
 | `balance` | object（可空） | 是 |  |
 | `balance.label` | string | 是 |  |
 | `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
@@ -10441,6 +10444,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `windows[].limit` | number（double，可空） | 否 |  |
 | `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
 | `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `windows[].pool` | string | 否 | 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」 |
 | `balance` | object（可空） | 是 |  |
 | `balance.label` | string | 是 |  |
 | `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |
@@ -10496,6 +10500,7 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | `windows[].limit` | number（double，可空） | 否 |  |
 | `windows[].unit` | string（enum: percent \| usd \| count） | 是 |  |
 | `windows[].reset_at` | string（date-time，可空） | 否 | UTC；窗口重置时间 |
+| `windows[].pool` | string | 否 | 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」 |
 | `balance` | object（可空） | 是 |  |
 | `balance.label` | string | 是 |  |
 | `balance.amount` | number（double） | 是 | 金额；显式 double，不降 float32 |

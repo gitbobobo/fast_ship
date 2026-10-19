@@ -449,6 +449,30 @@ var (
 	_ *float64 = api.QuotaWindow{}.Limit
 )
 
+// snapshotWindows 必须把窗口的 pool 带到响应里，且单池窗口（pool 为空）不带该
+// 字段——前端靠「有没有 pool」判断要不要出池 tab。
+func TestQuotaService_SnapshotWindowsCarriesPool(t *testing.T) {
+	snapshot := quota.Snapshot{Windows: []quota.Window{
+		{Kind: quota.WindowWeekly, Label: "每周", UsedPercent: quota.PercentPtr(45.0), Unit: quota.UnitPercent, Pool: "标准"},
+		{Kind: quota.WindowWeekly, Label: "每周", UsedPercent: quota.PercentPtr(13.0), Unit: quota.UnitPercent, Pool: "Core"},
+		{Kind: quota.WindowDaily, Label: "每日", UsedPercent: quota.PercentPtr(2.0), Unit: quota.UnitPercent},
+	}}
+
+	windows := snapshotWindows(snapshot)
+	if len(windows) != 3 {
+		t.Fatalf("expected 3 windows, got %d", len(windows))
+	}
+	if windows[0].Pool == nil || *windows[0].Pool != "标准" {
+		t.Fatalf("标准池窗口 pool = %v, want 标准", windows[0].Pool)
+	}
+	if windows[1].Pool == nil || *windows[1].Pool != "Core" {
+		t.Fatalf("core 池窗口 pool = %v, want Core", windows[1].Pool)
+	}
+	if windows[2].Pool != nil {
+		t.Fatalf("单池窗口不该带 pool，得到 %q", *windows[2].Pool)
+	}
+}
+
 // B1：健康账号的 next_retry_at 成功后必须落绝对时间（now+interval），
 // 不能是 NULL——否则失败账号每次退避唤醒都会把它一起重抓。
 func TestQuotaScheduler_HealthyNotAmplifiedByFailures(t *testing.T) {

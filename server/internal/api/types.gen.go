@@ -3392,6 +3392,9 @@ type QuotaWindow struct {
 	Label string   `json:"label"`
 	Limit *float64 `json:"limit,omitempty"`
 
+	// Pool 窗口所属额度池的展示名；只有同账号存在多个并行额度池时才出现，如 Factory Droid 的「标准」/「Core」
+	Pool *string `json:"pool,omitempty"`
+
 	// ResetAt UTC；窗口重置时间
 	ResetAt *string         `json:"reset_at,omitempty"`
 	Unit    QuotaWindowUnit `json:"unit"`
