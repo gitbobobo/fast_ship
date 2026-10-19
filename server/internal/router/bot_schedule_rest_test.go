@@ -217,3 +217,93 @@ func TestBotScheduleRESTRunsProjection(t *testing.T) {
 		t.Fatalf("主线 runs 不应包含 schedule run: %v", body)
 	}
 }
+
+// 定时任务小状态（INT-123）REST：任务投影带 state/state_updated_at；DELETE
+// .../state 是用户对该状态唯一的操作，幂等、归属校验、返回任务投影。
+func TestBotScheduleRESTStateProjectionAndClear(t *testing.T) {
+	e := setupE2E(t)
+	botID := e.createBot(t)
+	task := seedScheduleTaskRow(t, e, botID)
+	updated := time.Now().UTC().Add(-time.Minute)
+	if err := e.env.db.Model(&model.BotScheduleTask{}).Where("id = ?", task.ID).
+		Updates(map[string]interface{}{
+			"state_json":       `{"last_id":"abc-9"}`,
+			"state_updated_at": updated,
+		}).Error; err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	// 列表与详情投影带 state（原始 JSON 文本）与 state_updated_at（RFC3339）。
+	code, body := e.doJSON(t, http.MethodGet, "/api/bots/"+botID+"/schedule-tasks", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list: %d %v", code, body)
+	}
+	item := envelopeItems(body)[0].(map[string]interface{})
+	if item["state"] != `{"last_id":"abc-9"}` {
+		t.Fatalf("列表投影应带状态原文: %v", item)
+	}
+	if _, ok := item["state_updated_at"].(string); !ok {
+		t.Fatalf("列表投影应带 state_updated_at: %v", item)
+	}
+	code, body = e.doJSON(t, http.MethodGet, "/api/bots/"+botID+"/schedule-tasks/"+task.ID, nil)
+	if code != http.StatusOK {
+		t.Fatalf("get: %d %v", code, body)
+	}
+	if data := envelopeData(body); data["state"] != `{"last_id":"abc-9"}` {
+		t.Fatalf("详情投影应带状态原文: %v", data)
+	}
+
+	// DELETE .../state：清空并返回清空后的任务投影。
+	code, body = e.doJSON(t, http.MethodDelete, "/api/bots/"+botID+"/schedule-tasks/"+task.ID+"/state", nil)
+	if code != http.StatusOK {
+		t.Fatalf("delete state: %d %v", code, body)
+	}
+	data := envelopeData(body)
+	if data["id"] != task.ID {
+		t.Fatalf("应返回任务投影: %v", data)
+	}
+	if data["state"] != nil {
+		t.Fatalf("清空后 state 应为 null: %v", data["state"])
+	}
+	if data["state_updated_at"] != nil {
+		t.Fatalf("清空后 state_updated_at 应为 null: %v", data["state_updated_at"])
+	}
+	var row model.BotScheduleTask
+	if err := e.env.db.Where("id = ?", task.ID).First(&row).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if row.StateJSON != "" || row.StateUpdatedAt != nil {
+		t.Fatalf("库里应已清空: %+v", row)
+	}
+
+	// 幂等：无状态时再次清空同样 200。
+	code, body = e.doJSON(t, http.MethodDelete, "/api/bots/"+botID+"/schedule-tasks/"+task.ID+"/state", nil)
+	if code != http.StatusOK {
+		t.Fatalf("repeat delete: %d %v", code, body)
+	}
+	if data := envelopeData(body); data["state"] != nil {
+		t.Fatalf("重复清空后 state 仍应为 null: %v", data)
+	}
+
+	// 不存在的任务 → 40429。
+	code, body = e.doJSON(t, http.MethodDelete, "/api/bots/"+botID+"/schedule-tasks/"+uuid.NewString()+"/state", nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("missing task: %d %v", code, body)
+	}
+	if got, _ := body["code"].(float64); got != 40429 {
+		t.Fatalf("missing task 错误码应为 40429: %v", body)
+	}
+
+	// 归属校验：他人机器人一律 404（机器人不存在）。
+	other := registerAndLoginRouterUser(t, e.env.router, "bote2e-other", "bote2e-other@example.com", "Password123")
+	jwt := e.jwt
+	e.jwt = "Bearer " + other.Token
+	code, body = e.doJSON(t, http.MethodDelete, "/api/bots/"+botID+"/schedule-tasks/"+task.ID+"/state", nil)
+	e.jwt = jwt
+	if code != http.StatusNotFound {
+		t.Fatalf("他人机器人应 404: %d %v", code, body)
+	}
+	if got, _ := body["code"].(float64); got != 40424 {
+		t.Fatalf("他人机器人错误码应为 40424: %v", body)
+	}
+}

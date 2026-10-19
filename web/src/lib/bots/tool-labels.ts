@@ -50,6 +50,8 @@ const TOOL_ACTION_META: Record<string, Record<string, ToolActionMeta>> = {
     runs: { label: "查看任务运行记录", effect: "read" },
     status: { label: "查看调度状态", effect: "read" },
     run: { label: "立即运行定时任务", effect: "write" },
+    state_get: { label: "读取任务状态", effect: "read" },
+    state_set: { label: "写入任务状态", effect: "write" },
     create: { label: "创建定时任务", effect: "write" },
     update: { label: "更新定时任务", effect: "write" },
     delete: { label: "删除定时任务", effect: "write" },

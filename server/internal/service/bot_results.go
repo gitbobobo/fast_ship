@@ -248,7 +248,7 @@ const botHelpText = `Fast Ship 机器人工具说明：
 - fs_stop.stop 结束当前主线运行；用户点「停止」只是发来一条「停止」消息，是否停止由你决定，可用 fs_stop 执行。fs_cancel.cancel 取消本机器人的某个后台调用。
 - 中断（如服务重启、调用被取消）后结果可能无法核实（effect_may_have_occurred=true）：不要断言失败、不要自动重放副作用，先用读取类工具核实现状。
 - 记忆：fs_memory list/read/create/replace/append/delete/history/restore（写操作需 expected_version 乐观锁）；fs_memory_search search 关键词检索（≥3 字符全文匹配）。USER.md 记用户画像，MEMORY.md 记长期事实，daily/YYYY-MM-DD.md 是每日笔记。
-- 定时任务：fs_schedule list/create/update/delete/runs/run/enable/disable（全部同步、立即生效）。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（默认 UTC）。任务由你创建/修改/删除；用户只能查看与开关。run 立即手动执行一次：显式触发就是一次执行、不要求任务启用，回执只表示已受理（终态用 runs 查询，trigger_source 区分 cron/manual）；同一任务已有未结束运行时被拒绝；dry_run=true 只预览、不建运行记录。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。`
+- 定时任务：fs_schedule list/create/update/delete/runs/run/enable/disable（全部同步、立即生效）。cron 是标准五字段（分 时 日 月 周），时区用独立 IANA 字段（默认 UTC）。任务由你创建/修改/删除；用户只能查看与开关。run 立即手动执行一次：显式触发就是一次执行、不要求任务启用，回执只表示已受理（终态用 runs 查询，trigger_source 区分 cron/manual）；同一任务已有未结束运行时被拒绝；dry_run=true 只预览、不建运行记录。每次运行是独立会话，只带你的记忆与任务指令，写操作默认放行；无话可说时只回复一行 [[SILENT]]。任务各有一块跨运行保留的小状态：state_get（无参数）读取、state_set 写入（state 为任意 JSON 值，≤8192 UTF-8 字节；省略或 null 即清空）；这两个动作只能在定时任务运行（schedule run）内使用，主线会话调用会被拒绝。`
 
 // execStopCurrentRun 请求停止当前主线 run；回复后由安全点收尾为 stopped。
 func (s *BotService) execStopCurrentRun(call *model.BotToolCall) (string, error) {

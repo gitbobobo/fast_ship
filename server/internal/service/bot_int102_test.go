@@ -389,9 +389,9 @@ func TestBotCompactionSafeCutAndFold(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "compact")
 	bot := env.createBot(t, userID)
 	botRow, _ := env.bots.bots.Get(bot.ID)
-	// 9000：v5 工具集与平台规则变长后固定前缀更大，8000 的旧几何会误判
-	// 压缩目标不可达（INT-121 随 v5 重定标）。
-	env.cfg.Bots.Context.WindowTokens = 9000
+	// 9500：v7 工具集与规则 8 变长后固定前缀更大，9000 的旧几何会误判
+	// 压缩目标不可达（INT-123 随 v7 重定标）。
+	env.cfg.Bots.Context.WindowTokens = 9500
 
 	seedBotUserMessage(t, env, bot.ID, "最早的问题")
 	bigReply := strings.Repeat("很长的工具结果", 400)
@@ -672,9 +672,9 @@ func TestBotToolsetUpgradeOnCompactionBoundary(t *testing.T) {
 		"toolset_version": 1, "last_told_version": 1, "platform_prompt_version": 1,
 	})
 	botRow, _ := env.bots.bots.Get(bot.ID)
-	// 9000：v6 工具集 + 平台规则与对话风格段变长后固定前缀更大，8000 的旧
-	// 几何会误判压缩不可达（INT-122 重定标）。
-	env.cfg.Bots.Context.WindowTokens = 9000
+	// 9500：v7 工具集 + 规则 8 变长后固定前缀更大，9000 的旧
+	// 几何会误判压缩不可达（INT-123 重定标）。
+	env.cfg.Bots.Context.WindowTokens = 9500
 	seedBotUserMessage(t, env, bot.ID, strings.Repeat("旧历史需要被摘要。", 400))
 	for i := 1; i <= 3; i++ {
 		seedBotUserMessage(t, env, bot.ID, fmt.Sprintf("u%d", i))

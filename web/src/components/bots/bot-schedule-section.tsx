@@ -1,6 +1,7 @@
-import { CalendarClock, ChevronRight } from "lucide-react";
+import { CalendarClock, ChevronRight, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -19,6 +20,7 @@ import {
   BOT_SCHEDULE_RUNS_PAGE,
   useBotScheduleTaskRuns,
   useBotScheduleTasks,
+  useClearBotScheduleTaskState,
   useSetBotScheduleTaskEnabled,
 } from "@/lib/hooks/use-bots";
 import { describeCronExpression, uiLocale } from "@/lib/cron-frequency";
@@ -70,6 +72,23 @@ function formatDuration(ms: number | null) {
 function runTime(run: BotScheduleRun) {
   const at = run.started_at ?? run.scheduled_for;
   return at ? formatDate(at) : "—";
+}
+
+/**
+ * 任务状态以原始 JSON 文本下发（服务端刻意保留数字字面量）。展示优先美化；
+ * JSON.parse 会把 >2^53 的整数折成 double，无法无损往返时退回原文，避免界面
+ * 显示与库里不一致的数值。
+ */
+function prettyStateText(raw: string): { text: string; rawFallback: boolean } {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (JSON.stringify(parsed) === raw) {
+      return { text: JSON.stringify(parsed, null, 2), rawFallback: false };
+    }
+  } catch {
+    // 非合法 JSON 直接原文展示
+  }
+  return { text: raw, rawFallback: true };
 }
 
 /**
@@ -243,6 +262,21 @@ export function BotScheduleTaskDialog({
     botId,
     task?.id ?? null,
   );
+  const clearState = useClearBotScheduleTaskState(botId);
+  const stateView = task?.state != null ? prettyStateText(task.state) : null;
+
+  const handleClearState = async (taskId: string) => {
+    try {
+      await clearState.mutateAsync(taskId);
+      toast.success("状态已清空");
+    } catch (err) {
+      toast.error(
+        err instanceof ApiRequestError && err.message
+          ? err.message
+          : "清空失败",
+      );
+    }
+  };
 
   return (
     <Dialog
@@ -271,6 +305,44 @@ export function BotScheduleTaskDialog({
               <p className="whitespace-pre-wrap rounded-lg bg-muted/50 px-3 py-2 text-sm">
                 {task.instruction || "—"}
               </p>
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2">
+                <h4 className="text-xs font-medium text-muted-foreground">
+                  任务状态
+                </h4>
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  className="ml-auto text-destructive"
+                  disabled={task.state == null || clearState.isPending}
+                  onClick={() => void handleClearState(task.id)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  清空状态
+                </Button>
+              </div>
+              {task.state == null ? (
+                <p className="py-4 text-center text-sm text-muted-foreground">
+                  暂无状态
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  <pre
+                    data-testid="bot-schedule-task-state"
+                    className="max-h-64 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/50 px-3 py-2 font-mono text-xs"
+                  >
+                    {stateView?.text}
+                  </pre>
+                  <p className="text-xs text-muted-foreground">
+                    {stateView?.rawFallback &&
+                      "含大整数等，按原始 JSON 显示；"}
+                    {task.state_updated_at &&
+                      `更新于 ${formatDate(task.state_updated_at)}`}
+                  </p>
+                </div>
+              )}
             </div>
             <div className="space-y-1.5">
               <h4 className="text-xs font-medium text-muted-foreground">

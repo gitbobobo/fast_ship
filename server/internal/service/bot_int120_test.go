@@ -239,8 +239,9 @@ func TestBotInt120IssueDetailAlwaysHasLabelsAndChecklist(t *testing.T) {
 const botToolsetV4FrozenHash = "fdbaa8166785ac0a8c782c60d47f09a188287a0225c80979a2730bb4c009e989"
 
 func TestBotInt120ToolsetV5FreezesV4(t *testing.T) {
-	if botToolsetVersion != 6 {
-		t.Fatalf("当前工具集版本应为 6，实得 %d", botToolsetVersion)
+	// INT-123 起当前版本是 v7；本用例关心的是 v4/v5 的冻结基线不被破坏。
+	if botToolsetVersion < 5 {
+		t.Fatalf("当前工具集版本应不低于 5，实得 %d", botToolsetVersion)
 	}
 	// 已发布版本的 wire 字节冻结：v1–v4 的 hash 必须与基线逐字节一致，任何
 	// 不等都说明冻结被破坏。

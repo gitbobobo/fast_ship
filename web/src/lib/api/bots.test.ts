@@ -133,6 +133,7 @@ describe("bot api requests", () => {
     await botApi.scheduleTask("b 1", "t/1", signal);
     await botApi.scheduleTaskRuns("b 1", "t 1", { limit: 20, offset: 40 }, signal);
     await botApi.setScheduleTaskEnabled("b 1", "t 1", false);
+    await botApi.clearScheduleTaskState("b 1", "t/1");
 
     expect(calls(get).map(([path]) => path)).toEqual([
       "bots/b%201/schedule-tasks",
@@ -144,6 +145,9 @@ describe("bot api requests", () => {
     ).toEqual({ limit: "20", offset: "40" });
     expect(calls(put).map(([path]) => path)).toEqual([
       "bots/b%201/schedule-tasks/t%201/enabled",
+    ]);
+    expect(calls(del).map(([path]) => path)).toEqual([
+      "bots/b%201/schedule-tasks/t%2F1/state",
     ]);
   });
 

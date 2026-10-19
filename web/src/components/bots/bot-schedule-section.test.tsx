@@ -20,8 +20,9 @@ vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
-const { setEnabledMutateAsync } = vi.hoisted(() => ({
+const { setEnabledMutateAsync, clearStateMutateAsync } = vi.hoisted(() => ({
   setEnabledMutateAsync: vi.fn(),
+  clearStateMutateAsync: vi.fn(),
 }));
 
 vi.mock("@/lib/hooks/use-bots", async (importOriginal) => ({
@@ -30,6 +31,10 @@ vi.mock("@/lib/hooks/use-bots", async (importOriginal) => ({
   useBotScheduleTaskRuns: vi.fn(() => ({ data: [], isLoading: false })),
   useSetBotScheduleTaskEnabled: vi.fn(() => ({
     mutateAsync: setEnabledMutateAsync,
+    isPending: false,
+  })),
+  useClearBotScheduleTaskState: vi.fn(() => ({
+    mutateAsync: clearStateMutateAsync,
     isPending: false,
   })),
 }));
@@ -45,6 +50,8 @@ const enabledTask: BotScheduleTask = {
   needs_report: true,
   enabled: true,
   next_run_at: "2026-10-18T01:00:00Z",
+  state: '{"seen_ids":["i-1","i-2"],"last_seq":41}',
+  state_updated_at: "2026-10-17T01:02:10Z",
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
   last_run: {
@@ -67,6 +74,8 @@ const disabledTask: BotScheduleTask = {
   name: "周报",
   enabled: false,
   next_run_at: null,
+  state: null,
+  state_updated_at: null,
   last_run: null,
 };
 
@@ -263,6 +272,122 @@ describe("BotScheduleSection", () => {
     await user.click(
       within(section).getByRole("switch", { name: "停用 每日汇总" }),
     );
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("服务器错误"),
+    );
+  });
+
+  it("详情弹窗展示美化 JSON 状态与更新时间", async () => {
+    vi.mocked(useBotScheduleTasks).mockReturnValue({
+      data: [enabledTask],
+      isLoading: false,
+    } as never);
+    const user = userEvent.setup();
+    renderSection();
+    const section = getSection();
+
+    await user.click(within(section).getByText("每日汇总"));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(dialog).toHaveTextContent("任务状态");
+    const state = within(dialog).getByTestId("bot-schedule-task-state");
+    expect(state.textContent).toBe(
+      JSON.stringify(JSON.parse(enabledTask.state!), null, 2),
+    );
+    expect(dialog).toHaveTextContent(
+      `更新于 ${formatDate("2026-10-17T01:02:10Z")}`,
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "清空状态" }),
+    ).toBeEnabled();
+  });
+
+  it("含大整数时退回原始 JSON，避免展示精度失真", async () => {
+    const bigIntTask: BotScheduleTask = {
+      ...enabledTask,
+      id: "t3",
+      name: "大整数状态",
+      state: '{"n":12345678901234567890}',
+    };
+    vi.mocked(useBotScheduleTasks).mockReturnValue({
+      data: [bigIntTask],
+      isLoading: false,
+    } as never);
+    const user = userEvent.setup();
+    renderSection();
+    const section = getSection();
+
+    await user.click(within(section).getByText("大整数状态"));
+    const dialog = await screen.findByRole("dialog");
+
+    const state = within(dialog).getByTestId("bot-schedule-task-state");
+    expect(state.textContent).toBe('{"n":12345678901234567890}');
+    expect(dialog).toHaveTextContent("含大整数等，按原始 JSON 显示");
+  });
+
+  it("无状态时展示空态且清空按钮不可用", async () => {
+    vi.mocked(useBotScheduleTasks).mockReturnValue({
+      data: [disabledTask],
+      isLoading: false,
+    } as never);
+    const user = userEvent.setup();
+    renderSection();
+    const section = getSection();
+
+    await user.click(within(section).getByText("周报"));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(dialog).toHaveTextContent("暂无状态");
+    expect(
+      within(dialog).queryByTestId("bot-schedule-task-state"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("button", { name: "清空状态" }),
+    ).toBeDisabled();
+  });
+
+  it("清空状态调用接口并给出成功反馈", async () => {
+    clearStateMutateAsync.mockResolvedValue({});
+    vi.mocked(useBotScheduleTasks).mockReturnValue({
+      data: [enabledTask],
+      isLoading: false,
+    } as never);
+    const user = userEvent.setup();
+    renderSection();
+    const section = getSection();
+
+    await user.click(within(section).getByText("每日汇总"));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "清空状态" }),
+    );
+
+    await waitFor(() =>
+      expect(clearStateMutateAsync).toHaveBeenCalledWith("t1"),
+    );
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith("状态已清空"),
+    );
+  });
+
+  it("清空状态失败给出可见反馈", async () => {
+    clearStateMutateAsync.mockRejectedValue(
+      new ApiRequestError(500, null, "服务器错误"),
+    );
+    vi.mocked(useBotScheduleTasks).mockReturnValue({
+      data: [enabledTask],
+      isLoading: false,
+    } as never);
+    const user = userEvent.setup();
+    renderSection();
+    const section = getSection();
+
+    await user.click(within(section).getByText("每日汇总"));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "清空状态" }),
+    );
+
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith("服务器错误"),
     );

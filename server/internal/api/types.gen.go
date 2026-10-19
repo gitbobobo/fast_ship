@@ -1831,6 +1831,12 @@ type BotScheduleTask struct {
 	// NextRunAt 下一次计划触发时间（UTC）；停用或调度暂停时为 null
 	NextRunAt *string `json:"next_run_at"`
 
+	// State 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空
+	State *string `json:"state"`
+
+	// StateUpdatedAt 状态最近一次写入时间（UTC）；无状态为 null
+	StateUpdatedAt *string `json:"state_updated_at"`
+
 	// Timezone IANA 时区名称；空串 = UTC
 	Timezone  string `json:"timezone"`
 	UpdatedAt string `json:"updated_at"`
@@ -5099,6 +5105,16 @@ type ListBotScheduleTaskRuns200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                                              `json:"code"`
 	Data *ListBotScheduleTaskRuns200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ClearBotScheduleTaskState200JSONResponseBody defines parameters for ClearBotScheduleTaskState.
+type ClearBotScheduleTaskState200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *BotScheduleTask `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`

@@ -324,11 +324,11 @@ func TestBotAutoCompaction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// 9000：v5 工具集与平台规则变长后固定前缀更大，8000 的旧几何会让
-	// 「固定前缀+最小摘要预算 ≥ 触发阈值」误判不可达（INT-121 随 v5 重定标）。
-	env.cfg.Bots.Context.WindowTokens = 9000
+	// 9500：v7 工具集与平台规则变长后固定前缀更大，9000 的旧几何会让
+	// 「固定前缀+最小摘要预算 ≥ 触发阈值」误判不可达（INT-123 随 v7 重定标）。
+	env.cfg.Bots.Context.WindowTokens = 9500
 	// 归档输入是整段原文：本场景单个大工具结果（≈27k token）装不进主模型
-	// 9000 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
+	// 9500 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
 	// 请求。归档模型配置成更大窗口的模型——这正是 ArchiveModel 的用法。
 	env.cfg.Bots.Context.ArchiveModel = "arch-big"
 	env.cfg.Bots.Context.ModelWindows = map[string]int64{"arch-big": 131072}
@@ -438,7 +438,7 @@ func TestBotSummaryPreservesIdentifiers(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ids")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	uid := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 	seedBotUserMessage(t, env, bot.ID, "处理 Issue INT-102 和 "+uid)
 	args := `{"action":"read","thread_id":"thr_keep_me","issue_id":"iss_raw_Case"}`
@@ -478,7 +478,7 @@ func TestBotCompactionPreservesLedger(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ledger")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	seedCompactableLedger(t, env, bot.ID, "账本保持")
 	var before []model.BotMessage
 	env.db.Where("bot_id = ?", bot.ID).Order("seq ASC").Find(&before)
@@ -487,6 +487,15 @@ func TestBotCompactionPreservesLedger(t *testing.T) {
 	markHistoryConsumed(t, env, botRow, run)
 	if _, err := env.bots.runCompactionCycle(context.Background(), botRow, run, model.BotCompactionThreshold); err != nil {
 		t.Fatalf("compact: %v", err)
+	}
+	// 正向断言：本轮确实发布了压缩投影（水位前进），「消息没被删改」不得
+	// 因压缩没跑而空洞通过。
+	state, err := repository.NewBotContextRepository(env.db).Find(bot.ID)
+	if err != nil {
+		t.Fatalf("压缩应发布投影状态: %v", err)
+	}
+	if state.Generation == 0 && state.SummaryThroughSeq == 0 {
+		t.Fatalf("应发布压缩投影（generation 或摘要水位前进）: %+v", state)
 	}
 	var after []model.BotMessage
 	env.db.Where("bot_id = ?", bot.ID).Order("seq ASC").Find(&after)
@@ -505,7 +514,7 @@ func TestBotFoldedResultRead(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "foldreal")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	seedBotUserMessage(t, env, bot.ID, "q")
 	big := strings.Repeat("完整结果正文XY", 800)
 	_, tr := seedBotAssistantToolBlock(t, env, bot.ID, "call-real-fold", "fs_issue", big)
@@ -1085,7 +1094,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "sumfail")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	seedCompactableLedger(t, env, bot.ID, "失败回退")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)
@@ -1149,7 +1158,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	envHTTP.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	envHTTP.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	seedCompactableLedger(t, envHTTP, b3.ID, "http失败")
 	row3, _ := envHTTP.bots.bots.Get(b3.ID)
 	run3 := botFixtureRun(t, envHTTP, row3)
@@ -1184,7 +1193,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	envEmpty.fake.strict = true
 	uE := createBotTestUser(t, envEmpty.db, "sumempty")
 	bE := envEmpty.createBot(t, uE)
-	envEmpty.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	envEmpty.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	seedCompactableLedger(t, envEmpty, bE.ID, "空输出")
 	rowE, _ := envEmpty.bots.bots.Get(bE.ID)
 	runE := botFixtureRun(t, envEmpty, rowE)
@@ -1346,7 +1355,7 @@ func TestBotMemorySnapshotFrozen(t *testing.T) {
 	if !strings.Contains(string(raw), "夜间写入不应刷新注入") {
 		t.Fatalf("服务重建后应加载最新快照")
 	}
-	env.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	seedCompactableLedger(t, env, bot.ID, "压缩刷新")
 	botRow, _ = env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, run)
@@ -1503,7 +1512,7 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "arch")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 9000 // v5 固定前缀变大，8000 旧几何会误判压缩不可达（INT-121 重定标）
+	env.cfg.Bots.Context.WindowTokens = 9500 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123 重定标）
 	seedCompactableLedger(t, env, bot.ID, "用户叫 Bobo")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, nil)

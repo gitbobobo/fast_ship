@@ -58,12 +58,14 @@ type botScheduleArgs struct {
 	Action string `json:"action" jsonschema:"enum=status,required"`
 }
 
-// botScheduleTaskArgs 是当前（v6）fs_schedule 的参数超集：schema 描述并集，
+// botScheduleTaskArgs 是当前（v7）fs_schedule 的参数超集：schema 描述并集，
 // 服务端按 action 校验必填/禁止字段。全部动作同步执行、立即生效。INT-121 起
-// 新增 run（手动立即执行一次）与 dry_run（只预览）；v5 及更早的冻结副本在
-// bot_args_frozen.go（botScheduleTaskArgsV5）与 botScheduleTaskArgsFrozen。
+// 新增 run（手动立即执行一次）与 dry_run（只预览）；INT-123 起新增
+// state_get/state_set 与 state 参数（任务小状态，只有 state_set 接受它）。
+// v6 及更早的冻结副本在 bot_args_frozen.go（botScheduleTaskArgsV5/V6）与
+// botScheduleTaskArgsFrozen。
 type botScheduleTaskArgs struct {
-	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=run,enum=enable,enum=disable,required"`
+	Action string `json:"action" jsonschema:"enum=list,enum=create,enum=update,enum=delete,enum=runs,enum=run,enum=enable,enum=disable,enum=state_get,enum=state_set,required"`
 	// TaskID 是任务 ID（update/delete/runs/run/enable/disable 必填；create 禁止）。
 	TaskID string `json:"task_id,omitempty" jsonschema:"description=任务 ID（update/delete/runs/run/enable/disable 必填）"`
 	// Name 任务名（create 必填；update 提供即改）。
@@ -84,6 +86,10 @@ type botScheduleTaskArgs struct {
 	// 任务忙碌时回执标 busy=true。其它动作不接受该字段（显式 false 也拒绝），
 	// 避免「带预览标记仍写入」的误用。
 	DryRun *bool `json:"dry_run,omitempty" jsonschema:"description=只配合 run：true 时只预览（任务信息、指令与下次计划），不建运行记录、不执行；任务已有未结束运行时 busy=true；其它动作携带 dry_run 即被拒绝（显式 false / null 亦然）"`
+	// State 只配合 state_set（INT-123）：要写入任务小状态的任意 JSON 值，
+	// 省略或 null 表示清空；其它动作不接受该字段。原始 JSON 字节在归一化后
+	// 原样保留，避免大整数精度丢失。
+	State *json.RawMessage `json:"state,omitempty" jsonschema:"description=只配合 state_set：要写入任务小状态的任意 JSON 值（≤8192 UTF-8 字节）；省略或 null 表示清空；其它动作携带 state 即被拒绝"`
 	// Limit/Offset 是 runs/list 的分页参数。
 	Limit  int `json:"limit,omitempty" jsonschema:"description=条数上限（runs 默认 20 上限 100；list 默认且最多 200）"`
 	Offset int `json:"offset,omitempty" jsonschema:"description=分页偏移（runs/list，默认 0）"`
@@ -351,10 +357,12 @@ func botToolRegistryV4Literal() []*botToolDef {
 	}
 }
 
-// botToolRegistryV6 是当前发布注册表：在 v5（INT-120）之上，fs_schedule 自
-// INT-121 起新增 run（手动立即执行一次，支持 dry_run 预览），全部同步执行。
-// v5 及更早版本是冻结副本——本注册表的任何变化（含共享工具的描述调整）不得
-// 影响它们，否则存量会话的前缀/tools_hash 失稳。
+// botToolRegistryV6 是 INT-123 起冻结的 v6 注册表：在 v5（INT-120）之上，
+// fs_schedule 自 INT-121 起新增 run（手动立即执行一次，支持 dry_run 预览），
+// 全部同步执行。v5 及更早版本是冻结副本——本注册表的任何变化（含共享工具的
+// 描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。fs_schedule
+// 参数用冻结副本 botScheduleTaskArgsV6：INT-123 的 state_get/state_set 只进
+// v7，本版 wire 字节逐字节保留。
 func botToolRegistryV6() []*botToolDef {
 	tools := botToolRegistryV4Literal()
 	for _, tool := range tools {
@@ -362,6 +370,34 @@ func botToolRegistryV6() []*botToolDef {
 			continue
 		}
 		tool.Description = "管理本机器人绑定的定时任务：list/create/update/delete/runs/run/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。"
+		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgsV6{})
+		tool.Actions = []botActionDef{
+			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
+			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
+			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）", Mode: model.BotExecutionSync},
+			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
+			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；回执只表示已受理；已有未结束运行时拒绝；dry_run=true 只预览）", Mode: model.BotExecutionSync},
+			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
+		}
+	}
+	return tools
+}
+
+// botToolRegistryV7 是当前发布注册表（INT-123）：在 v6 之上，fs_schedule 新增
+// state_get/state_set（任务跨运行保留的小状态）与 state 参数、更新工具描述，
+// 共 10 个动作，全部同步执行。任务小状态只在 schedule run 内可用（执行器按
+// 本次 run 判别，不收 task_id 参数）。v6 及更早版本是冻结副本——本注册表的
+// 任何变化（含共享工具的描述调整）不得影响它们，否则存量会话的前缀/tools_hash
+// 失稳。
+func botToolRegistryV7() []*botToolDef {
+	tools := botToolRegistryV4Literal()
+	for _, tool := range tools {
+		if tool.Name != "fs_schedule" {
+			continue
+		}
+		tool.Description = "管理本机器人绑定的定时任务：list/create/update/delete/runs/run/enable/disable，全部同步执行、立即生效。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空，适合存「上次已报的 ID」这类去重集合。"
 		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgs{})
 		tool.Actions = []botActionDef{
 			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
@@ -372,6 +408,8 @@ func botToolRegistryV6() []*botToolDef {
 			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；回执只表示已受理；已有未结束运行时拒绝；dry_run=true 只预览）", Mode: model.BotExecutionSync},
 			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
 			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "state_get", Description: "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
+			{Name: "state_set", Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
 		}
 	}
 	return tools
@@ -691,8 +729,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV4()
 	case 5:
 		tools = botToolRegistryV5()
-	default:
+	case 6:
 		tools = botToolRegistryV6()
+	default:
+		tools = botToolRegistryV7()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -798,7 +838,9 @@ var botReadOnlyActions = map[string]bool{
 	"fs_thread/composer_options": true, "fs_thread/workspace_options": true,
 	"fs_environment/list": true, "fs_environment/projects": true,
 	"fs_schedule/list": true, "fs_schedule/runs": true, "fs_schedule/status": true,
-	"fs_memory/status": true, "fs_memory/list": true, "fs_memory/read": true, "fs_memory/history": true,
+	// state_get 是任务小状态的只读动作（INT-123）；state_set 是同步写，不列。
+	"fs_schedule/state_get": true,
+	"fs_memory/status":      true, "fs_memory/list": true, "fs_memory/read": true, "fs_memory/history": true,
 	"fs_memory_search/search": true,
 	"fs_help/read":            true, "fs_result/read": true,
 }
@@ -1077,15 +1119,20 @@ var botActionRules = map[string]botActionRule{
 	// dry_run 只配合 run（INT-121 审查修正）：预览标记被其它动作的分支忽略
 	// 时，模型会误以为带了标记就没副作用。显式 false 也拒绝——语义是「这个
 	// 动作不接受 dry_run」，而不是「按不预览执行」。
-	"fs_schedule/status":  {Forbidden: []string{"dry_run"}},
-	"fs_schedule/list":    {Forbidden: []string{"dry_run"}},
-	"fs_schedule/create":  {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run"}},
-	"fs_schedule/update":  {Required: req("task_id"), Forbidden: []string{"dry_run"}},
-	"fs_schedule/delete":  {Required: req("task_id"), Forbidden: []string{"dry_run"}},
-	"fs_schedule/runs":    {Required: req("task_id"), Forbidden: []string{"dry_run"}},
-	"fs_schedule/run":     {Required: req("task_id")},
-	"fs_schedule/enable":  {Required: req("task_id"), Forbidden: []string{"dry_run"}},
-	"fs_schedule/disable": {Required: req("task_id"), Forbidden: []string{"dry_run"}},
+	// state 只配合 state_set（INT-123）：其它动作携带即拒（含 null），避免
+	// 「带状态参数仍被当成管理动作」的误用；state_get/state_set 的任务由本次
+	// schedule run 隐式决定，不收 task_id。
+	"fs_schedule/status":    {Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/list":      {Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/create":    {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"}},
+	"fs_schedule/update":    {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/delete":    {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/runs":      {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/run":       {Required: req("task_id"), Forbidden: []string{"state"}},
+	"fs_schedule/enable":    {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/disable":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/state_get": {Forbidden: []string{"task_id", "dry_run", "state"}},
+	"fs_schedule/state_set": {Forbidden: []string{"task_id", "dry_run"}},
 
 	"fs_memory/status":  {},
 	"fs_memory/list":    {},
@@ -1166,9 +1213,10 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 		return s.execEnvironmentRead(ctx, call)
 	case "fs_schedule/list", "fs_schedule/create", "fs_schedule/update",
 		"fs_schedule/delete", "fs_schedule/runs", "fs_schedule/run",
-		"fs_schedule/enable", "fs_schedule/disable":
-		// 定时任务管理（INT-103，INT-121 加 run）：全部同步、立即生效，与
-		// fs_memory 写同类。
+		"fs_schedule/enable", "fs_schedule/disable",
+		"fs_schedule/state_get", "fs_schedule/state_set":
+		// 定时任务管理（INT-103，INT-121 加 run，INT-123 加任务小状态）：
+		// 全部同步、立即生效，与 fs_memory 写同类。
 		return s.execScheduleTool(call)
 	case "fs_memory/list", "fs_memory/read", "fs_memory/create", "fs_memory/replace",
 		"fs_memory/append", "fs_memory/delete", "fs_memory/history", "fs_memory/restore":
