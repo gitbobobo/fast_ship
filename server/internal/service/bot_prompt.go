@@ -11,9 +11,10 @@ import (
 // 重连或项目列表变化而重新拼接。
 const (
 	botPlatformPromptVersion int64 = 4
-	// botToolsetVersion 是当前发布的工具集版本（v3 开放 fs_schedule 定时
-	// 任务管理）；存量对话线冻结在旧版本，只在压缩/重启边界升级。
-	botToolsetVersion int64 = 4
+	// botToolsetVersion 是当前发布的工具集版本（v5 = INT-120：fs_thread list
+	// 支持 env_id/query 过滤并修正 schema 描述）；存量对话线冻结在旧版本，
+	// 只在压缩/重启边界升级。
+	botToolsetVersion int64 = 5
 )
 
 // botPlatformPromptRules 是固定平台规则：边界与恢复策略写死在提示词里，

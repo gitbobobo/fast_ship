@@ -1677,6 +1677,9 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	if to >= 5 && from < 5 {
+		return "工具集已升级：fs_thread list 支持 env_id/query 过滤，分页响应新增 offset（实际切片起点）；fs_issue get 的 labels/checklist 恒返回数组（没有时为空数组）"
+	}
 	if to >= 4 && from < 4 {
 		return "工具集已升级：参数 schema 修正 action 枚举、补齐各动作必填字段，fs_thread list/get 支持筛选分页与详情条目，fs_issue get 返回正文/清单/标签，fs_issue update/replace_checklist 支持写入保护"
 	}

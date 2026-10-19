@@ -174,14 +174,15 @@ type botIssueArgs struct {
 	ExpectedChecklistUpdatedAt string `json:"expected_checklist_updated_at,omitempty" jsonschema:"description=写入前读到的 internal_meta.checklist_updated_at（RFC3339，replace_checklist 可选）；不符即拒绝静默覆盖"`
 }
 
-// botThreadArgs 是 fs_thread 的参数超集。
+// botThreadArgs 是 fs_thread 的参数超集。v5（INT-120）起 list 真正支持
+// env_id/query 过滤；v4 的旧标签由 bot_args_frozen.go 的 botThreadArgsV4 冻结。
 type botThreadArgs struct {
 	Action    string `json:"action" jsonschema:"enum=list,enum=get,enum=item,enum=composer_options,enum=workspace_options,enum=launch,enum=send,enum=stop,required"`
-	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（get/item/composer_options/workspace_options/launch/send/stop 必填）"`
+	EnvID     string `json:"env_id,omitempty" jsonschema:"description=T3 环境 ID（get/item/composer_options/workspace_options/launch/send/stop 必填；list 可选，只保留该环境的线程）"`
 	ThreadID  string `json:"thread_id,omitempty" jsonschema:"description=T3 线程 ID（get/item/send/stop 必填）"`
 	ItemID    string `json:"item_id,omitempty" jsonschema:"description=T3 线程条目 ID（item 必填；条目 ID 由 get 返回的 items[].id 提供）"`
 	ProjectID string `json:"project_id,omitempty" jsonschema:"description=T3 项目 ID（workspace_options/launch 必填；list 可选，只保留该项目的线程）"`
-	Query     string `json:"query,omitempty" jsonschema:"description=引用名过滤（workspace_options）"`
+	Query     string `json:"query,omitempty" jsonschema:"description=关键词过滤（list 可选：线程 id/标题/项目名/项目 id/环境名，不区分大小写包含匹配；workspace_options 为引用名过滤）"`
 	Cursor    *int   `json:"cursor,omitempty" jsonschema:"description=上一页返回的 next_cursor（workspace_options）"`
 	Text      string `json:"text,omitempty" jsonschema:"description=消息正文（launch/send 必填）"`
 	Title     string `json:"title,omitempty" jsonschema:"description=线程标题（launch 可选，缺省由 T3 生成）"`
@@ -203,12 +204,16 @@ type botEnvironmentArgs struct {
 
 // 各版本注册表按固定顺序独立冻结为字面量；顺序即协议 tools 数组顺序。
 // v1/v2 是历史版本的冻结副本——v3 变化（含 fs_schedule 及任何共享工具的
-// 描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+// 描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。v3/v4/v5
+// 都从 botToolRegistryV4Literal 构造（每次调用返回新分配的对象），差异只在
+// fs_thread 的参数结构体。
 
-// botToolRegistryV4 是当前发布注册表：fs_schedule 自 INT-103 起开放
-// list/create/update/delete/runs/enable/disable，全部同步执行。INT-110 起
-// 参数 schema 修正 action 枚举并新增线程/Issue 字段。
-func botToolRegistryV4() []*botToolDef {
+// botToolRegistryV4Literal 是工具面字面量：v3/v4/v5 共用同一份工具、动作与
+// 描述，差异只在 fs_thread 的参数结构体（由各版本包装函数决定）。fs_schedule
+// 自 INT-103 起开放 list/create/update/delete/runs/enable/disable，全部同步
+// 执行；INT-110 修正 action 枚举并新增线程/Issue 字段。不要在此改工具级
+// Description（它进 wire 字节，会让 v3/v4 的 tools_hash 失稳）。
+func botToolRegistryV4Literal() []*botToolDef {
 	return []*botToolDef{
 		{
 			Name:        "fs_project",
@@ -338,9 +343,25 @@ func botToolRegistryV4() []*botToolDef {
 // 相同，只有参数结构体不同：用冻结副本，保证已发布 v3 会话的 tools_hash 不
 // 因 INT-110 的 schema 修正而回退。
 func botToolRegistryV3() []*botToolDef {
-	tools := botToolRegistryV4()
+	tools := botToolRegistryV4Literal()
 	botUseFrozenArgs(3, tools)
 	return tools
+}
+
+// botToolRegistryV4 是 INT-120 起冻结的 v4 注册表：工具/动作与 v5 相同，
+// fs_thread 用 INT-110 时的冻结参数结构体（env_id/query 的 list 语义与描述
+// 是 v5 才修正的），保证已发布 v4 会话的 tools_hash 不回退。
+func botToolRegistryV4() []*botToolDef {
+	tools := botToolRegistryV4Literal()
+	botUseFrozenArgs(4, tools)
+	return tools
+}
+
+// botToolRegistryV5 是当前发布注册表（INT-120）：工具/动作与 v4 相同，只有
+// fs_thread 的参数结构体演进为最新形态（env_id/query 支持 list 过滤、描述
+// 修正）。v4 自己的冻结副本由 botUseFrozenArgs(4) 换上，两者互不影响。
+func botToolRegistryV5() []*botToolDef {
+	return botToolRegistryV4Literal()
 }
 
 // botToolRegistryV2 是 INT-102 冻结的 v2 注册表：fs_schedule 仍是 status
@@ -628,8 +649,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV2()
 	case 3:
 		tools = botToolRegistryV3()
-	default:
+	case 4:
 		tools = botToolRegistryV4()
+	default:
+		tools = botToolRegistryV5()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -693,9 +716,10 @@ func botBuildToolset(version int64, tools []*botToolDef) *botToolsetHolder {
 	return holder
 }
 
-// botUseFrozenArgs 把 v1/v2/v3 的 schema 参数换回冻结结构体：这些结构体在
-// v4 修正枚举、新增字段后字节会变，冻结副本保证已发布版本的 tools_hash 不
-// 回退。v1 的 fs_memory 是 status 占位（用 botScheduleArgs），不在此替换。
+// botUseFrozenArgs 把已发布版本的 schema 参数换回冻结结构体：活跃版本演进
+// 后（v4 修正枚举、v5 修正 fs_thread 的 list 语义与描述），冻结副本保证已
+// 发布版本的 tools_hash 不回退。v1 的 fs_memory 是 status 占位（用
+// botScheduleArgs），不在此替换；v5 是当前版本，直接用最新结构体。
 func botUseFrozenArgs(version int64, tools []*botToolDef) {
 	frozen := map[string]reflect.Type{
 		"fs_project":     reflect.TypeOf(botProjectArgsFrozen{}),
@@ -703,11 +727,17 @@ func botUseFrozenArgs(version int64, tools []*botToolDef) {
 		"fs_thread":      reflect.TypeOf(botThreadArgsFrozen{}),
 		"fs_environment": reflect.TypeOf(botEnvironmentArgsFrozen{}),
 	}
-	if version >= 2 {
+	switch version {
+	case 2:
 		frozen["fs_memory"] = reflect.TypeOf(botMemoryArgsFrozen{})
-	}
-	if version >= 3 {
+	case 3:
+		frozen["fs_memory"] = reflect.TypeOf(botMemoryArgsFrozen{})
 		frozen["fs_schedule"] = reflect.TypeOf(botScheduleTaskArgsFrozen{})
+	case 4:
+		// v4 已含 INT-110 修正后的枚举与字段，其余结构体与 v5 一致，只冻结
+		// v5 改过标签的 fs_thread。再往后冻结时要在上面各自的 case 里显式
+		// 列出与当前版本的差异——这里没有 default 兜底。
+		frozen = map[string]reflect.Type{"fs_thread": reflect.TypeOf(botThreadArgsV4{})}
 	}
 	for _, tool := range tools {
 		if typ, ok := frozen[tool.Name]; ok {

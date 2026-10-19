@@ -99,8 +99,9 @@ func botSlimIssueListItem(i *IssueResponse) map[string]interface{} {
 }
 
 // botSlimIssueDetail 是 get 的详情投影：正文、清单、标签等做决策所需的完整
-// 信息（列表不携带）。updated_at / checklist_updated_at 是后续写操作的
-// 写入保护基准，必须原样给出。
+// 信息（列表不携带）。labels/checklist 恒在——没有就是空数组，让调用方能
+// 区分「没有清单/标签」和「字段没实现」。updated_at / checklist_updated_at
+// 是后续写操作的写入保护基准，必须原样给出。
 func botSlimIssueDetail(i *IssueResponse) map[string]interface{} {
 	out := botSlimIssueListItem(i)
 	out["reference"] = i.Reference
@@ -109,6 +110,8 @@ func botSlimIssueDetail(i *IssueResponse) map[string]interface{} {
 	out["author"] = i.Author.Login
 	out["updated_at"] = i.UpdatedAt
 	out["created_at"] = i.CreatedAt
+	out["labels"] = []api.IssueLabel{}
+	out["checklist"] = []api.IssueChecklistItem{}
 	if i.InternalMeta != nil {
 		if len(i.InternalMeta.Labels) > 0 {
 			out["labels"] = i.InternalMeta.Labels
