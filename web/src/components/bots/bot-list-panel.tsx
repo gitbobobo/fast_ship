@@ -14,8 +14,8 @@ import { BotAvatar } from "./bot-avatar";
 
 /**
  * 工作台左栏：机器人列表。选中项高亮并标 aria-current；每项显示
- * 确定性颜色头像、名称与最近一条消息预览（last_message 由列表端点
- * 提供真实值，聊天提交后由主线缓存就地同步）。
+ * 确定性颜色头像、名称与最近一条消息预览（last_message 的唯一事实
+ * 来源是列表端点，消息提交后由列表重取更新）。
  * 未选机器人时移动端铺满宽度，选中后移动端只留中栏（回列表走页头入口）。
  */
 export function BotListPanel({

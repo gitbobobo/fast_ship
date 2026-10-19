@@ -690,10 +690,16 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   任务详情弹窗与定时任务展开态都在工作台持有**唯一一份**——与 issue 详情页
   侧栏的既有约定一致；右栏随 `botId` 挂载而非详情数据（详情未回来时是
   `bot-detail-skeleton`），切机器人时中栏宽度与页头标题都不跳。
-- **预览实时性**：`last_message` 只在列表端点取一次，之后由主线消息提交
-  （SSE `message_commit` / `user_message`，以及 REST 发送成功）**就地写进列表
-  缓存**（`use-bot-chat.ts` 的 `updateListPreview`）——不重取整表，用户自己的
-  消息立即显示为「你：…」。
+- **预览的唯一事实来源是列表端点**：`last_message` 由 `GET /api/bots` 计算，
+  客户端不拼、不合并、不判断「哪条正文算预览」。主线有完整消息提交时
+  （SSE `message_commit` / `user_message` 两个点）由
+  `use-bot-chat.ts` 的 `refreshListPreview` 让 `botKeys.list` 重取：先
+  `cancelQueries` 再 `invalidateQueries`。先取消是必要的——TanStack Query
+  只在查询已有 `data` 时才按 `cancelRefetch` 取消在飞请求，首次加载（还没
+  data）会复用旧 promise，冷启动时提交前的快照会随后落地、把预览钉在旧
+  消息上。REST 发送成功路径不碰预览（发送方同样会收到自己的 `user_message`）。
+  「预览跟着对话走」不等于「不请求列表」；每次提交多一次沿索引命中的列表
+  请求，换掉客户端自己维护顺序与资格判断。
 - **状态**：桌面「隐藏详情」（`panelHidden`，默认显示）与移动 Sheet
   （`sheetOpen`，默认关闭）是两份互不影响的状态；隐藏状态不持久化，刷新
   后回到默认显示。

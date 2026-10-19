@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useBotChat, foldStreamEvent, mergeCallSnapshots } from "./use-bot-chat";
-import { botKeys } from "./use-bots";
+import { botKeys, useBots } from "./use-bots";
 import type {
   Bot,
   BotCall,
@@ -612,7 +612,7 @@ describe("useBotChat", () => {
     });
   });
 
-  it("空正文的 assistant 提交不触发列表重取（服务端口径：纯 tool_calls 跳过）", async () => {
+  it("空正文的 assistant 提交也触发列表重取（资格判断只在服务端）", async () => {
     const { client, result } = hook();
     await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
     client.setQueryData<Bot[]>(botKeys.list("A"), [
@@ -646,11 +646,140 @@ describe("useBotChat", () => {
       10,
     );
 
-    // 消息本身照常进主线，预览不重取。
+    // 消息本身照常进主线；纯 tool_calls 提交算不算预览由服务端裁决，
+    // 客户端一律重取列表。
     await waitFor(() =>
       expect(result.current.entries.map((e) => e.message.id)).toContain("m-t"),
     );
-    expect(client.getQueryState(botKeys.list("A"))?.isInvalidated).toBeFalsy();
+    await waitFor(() =>
+      expect(client.getQueryState(botKeys.list("A"))?.isInvalidated).toBe(
+        true,
+      ),
+    );
+  });
+
+  it("正文为 U+FEFF 的 assistant 提交也触发列表重取", async () => {
+    // JS trim 判 U+FEFF 为空、Go unicode.IsSpace 判非空：客户端若复制
+    // 正文资格判断会在这里漏掉服务端会选成预览的消息。
+    const { client } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    client.setQueryData<Bot[]>(botKeys.list("A"), [
+      { ...bot, last_message: null },
+    ]);
+
+    emit(
+      "delta",
+      {
+        kind: "message_commit",
+        message_id: "m-feff",
+        payload: {
+          id: "m-feff",
+          bot_id: "b1",
+          seq: 13,
+          kind: "assistant",
+          content: { text: "\uFEFF" },
+          created_at: "2026-10-15T00:03:30Z",
+        },
+      },
+      10,
+    );
+
+    await waitFor(() =>
+      expect(client.getQueryState(botKeys.list("A"))?.isInvalidated).toBe(
+        true,
+      ),
+    );
+  });
+
+  it("首载列表请求在飞时提交不被旧快照钉住（先取消再重取）", async () => {
+    let resolveFirst!: (value: { data: { items: Bot[] } }) => void;
+    const firstRequest = new Promise<{ data: { items: Bot[] } }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    api.list
+      .mockImplementationOnce(() => firstRequest)
+      .mockResolvedValue({
+        data: {
+          items: [
+            { ...bot, last_message: { kind: "assistant", text: "新预览" } },
+          ],
+        },
+      });
+    const { client, wrapper } = setup();
+    const render = renderHook(
+      () => ({ chat: useBotChat("b1"), bots: useBots() }),
+      { wrapper },
+    );
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    // 首载还在飞、尚无 data：此时若只 invalidate，Query.fetch 会复用
+    // 旧 promise 而不发新请求，旧快照装进去后预览停住。
+    expect(api.list).toHaveBeenCalledTimes(1);
+    expect(render.result.current.bots.data).toBeUndefined();
+
+    emit(
+      "delta",
+      { kind: "message_commit", message_id: "m-a", payload: committedMessage },
+      10,
+    );
+
+    // 取消在飞请求后 invalidate 才能发起真正的第二次请求。
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+
+    // 提交前发出的旧快照此刻才返回：已被取消，不得装进缓存。
+    resolveFirst({
+      data: {
+        items: [{ ...bot, last_message: { kind: "user", text: "旧快照" } }],
+      },
+    });
+
+    await waitFor(() =>
+      expect(render.result.current.bots.data?.[0]?.last_message?.text).toBe(
+        "新预览",
+      ),
+    );
+    expect(
+      client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message?.text,
+    ).toBe("新预览");
+  });
+
+  it("已有列表缓存时提交触发重取并安装新预览", async () => {
+    api.list
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ ...bot, last_message: { kind: "user", text: "旧预览" } }],
+        },
+      })
+      .mockResolvedValue({
+        data: {
+          items: [
+            { ...bot, last_message: { kind: "assistant", text: "新预览" } },
+          ],
+        },
+      });
+    const { wrapper } = setup();
+    const render = renderHook(
+      () => ({ chat: useBotChat("b1"), bots: useBots() }),
+      { wrapper },
+    );
+    await waitFor(() =>
+      expect(render.result.current.bots.data?.[0]?.last_message?.text).toBe(
+        "旧预览",
+      ),
+    );
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    emit(
+      "delta",
+      { kind: "message_commit", message_id: "m-a", payload: committedMessage },
+      10,
+    );
+
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(render.result.current.bots.data?.[0]?.last_message?.text).toBe(
+        "新预览",
+      ),
+    );
   });
 
   it("user_message 事件同样触发列表重取", async () => {
