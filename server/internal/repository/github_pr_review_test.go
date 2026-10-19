@@ -92,3 +92,30 @@ func TestPRDebounce_DeleteTxScopedToIdentity(t *testing.T) {
 		t.Fatalf("survivor = %s/%s, want user-b/sha-b", rows[0].AppUserID, rows[0].HeadSHA)
 	}
 }
+
+// INT-119 遗留的非空身份行不得进入同步批次：它们的 App 已不存在，同步会用现在的
+// 部署级 App 去发评论/check；同时不能靠「循环里跳过」——遗留行会占满每轮批次。
+func TestListPendingSyncSkipsLegacyIdentity(t *testing.T) {
+	db := debounceTestDB(t)
+	if err := db.AutoMigrate(&model.GitHubPRReview{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	now := time.Now().UTC()
+	rows := []model.GitHubPRReview{
+		{RepoFullName: "octocat/hw", PRNumber: 1, AppUserID: "", HeadSHA: "sha-1", RoundNumber: 1, SyncPending: true, UpdatedAt: now},
+		{RepoFullName: "octocat/hw", PRNumber: 2, AppUserID: "legacy", HeadSHA: "sha-2", RoundNumber: 1, SyncPending: true, UpdatedAt: now},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	got, err := NewGitHubPRReviewRepository(db).ListPendingSyncTx(db, 50)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].AppUserID != "" || got[0].PRNumber != 1 {
+		t.Fatalf("pending = %+v, want only the deployment identity row", got)
+	}
+}

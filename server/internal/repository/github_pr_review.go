@@ -135,7 +135,11 @@ func (r *GitHubPRReviewRepository) UpsertTx(tx *gorm.DB, rev *model.GitHubPRRevi
 // ListPendingSyncTx 取待同步的 PR（调度循环事务外逐个同步评论/check）。
 func (r *GitHubPRReviewRepository) ListPendingSyncTx(db *gorm.DB, limit int) ([]model.GitHubPRReview, error) {
 	var items []model.GitHubPRReview
-	err := db.Where("sync_pending = ?", true).Order("updated_at ASC").Limit(limit).Find(&items).Error
+	// 只取空身份（= 部署级 App）：INT-119 遗留的非空身份行属于已停用的用户级 App，
+	// 同步会用现在的共享 App 去发它们的评论/check。在查询里排除而不是在循环里跳过——
+	// 否则一堆遗留行会占满每轮批次，正常行永远轮不到。
+	err := db.Where("sync_pending = ? AND app_user_id = ?", true, "").
+		Order("updated_at ASC").Limit(limit).Find(&items).Error
 	return items, err
 }
 

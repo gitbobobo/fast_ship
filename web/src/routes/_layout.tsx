@@ -54,7 +54,12 @@ export default function AppLayout() {
   }, [logout, setUser, shouldBootstrapUser]);
 
   if (!token) {
-    return <Navigate to="/login" replace />;
+    // 带上当前深链接（含 query）：登录后回到原页。GitHub App Manifest 回跳页靠
+    // 它保住一次性的 code/state——管理员可能从另一个 origin（内网/代理）发起创建，
+    // 而 GitHub 只按 public_url 回跳，那个 origin 上没有这份会话。
+    const next = `${location.pathname}${location.search}`;
+    const suffix = next && next !== "/" ? `?next=${encodeURIComponent(next)}` : "";
+    return <Navigate to={`/login${suffix}`} replace />;
   }
 
   if (isBootstrapping) {
