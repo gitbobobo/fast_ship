@@ -102,7 +102,7 @@ describe("ProjectsPage", () => {
     expect(screen.getByText("未创建版本")).toBeInTheDocument();
   });
 
-  it("sorts project cards by issue count descending, missing counts last", () => {
+  it("按 useProjects 给出的顺序展示卡片，并显示问题总数", () => {
     vi.mocked(useProjects).mockReturnValue({
       data: {
         items: [
@@ -154,7 +154,9 @@ describe("ProjectsPage", () => {
     const names = screen
       .getAllByRole("heading", { level: 3 })
       .map((heading) => heading.textContent);
-    expect(names).toEqual(["Many Issues", "Few Issues", "No Count"]);
+    // 排序由 useProjects 统一提供（Issue 总数降序，含已关闭），页面不再自己排：
+    // 传进来什么顺序就渲染什么顺序
+    expect(names).toEqual(["Few Issues", "Many Issues", "No Count"]);
     // 卡片显示问题数，让排序依据可见；计数缺失显示 0
     expect(screen.getByText("30 个问题")).toBeInTheDocument();
     expect(screen.getByText("2 个问题")).toBeInTheDocument();
