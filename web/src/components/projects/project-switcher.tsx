@@ -12,13 +12,8 @@ const WORKFLOW_COUNT_SEGMENTS = [
   { key: "done", label: "已完成", dot: "bg-emerald-600" },
 ] as const;
 
-// 卡片按开启状态 Issue 数排序：issue_workflow_counts 仅统计 state=open，
-// 四段合计即开启总数；缺省按 0
-const openIssueCount = (project: Project) =>
-  WORKFLOW_COUNT_SEGMENTS.reduce(
-    (sum, segment) => sum + (project.issue_workflow_counts?.[segment.key] ?? 0),
-    0,
-  );
+// 卡片第二行展示开启口径（state=open）的内部状态分布，只用于展示，不参与排序：
+// 项目顺序统一由 useProjects 按 Issue 总数（含已关闭）降序给出。
 
 interface ProjectSwitcherProps {
   projects: Project[];
@@ -44,16 +39,15 @@ export function ProjectSwitcher({
   const inputRef = useRef<HTMLInputElement>(null);
   const activeProject = projects.find((project) => project.id === value);
   const search = query.trim().toLowerCase();
-  // 按开启状态 Issue 数降序展示；计数缺失按 0，同计数靠稳定排序保持服务端顺序
-  const filteredProjects = projects
-    .filter((project) => {
-      const fields = [project.name, project.description ?? ""];
-      if (project.github_owner && project.github_repo) {
-        fields.push(`${project.github_owner}/${project.github_repo}`);
-      }
-      return fields.some((field) => field.toLowerCase().includes(search));
-    })
-    .sort((a, b) => openIssueCount(b) - openIssueCount(a));
+  // 顺序由 useProjects 统一提供（Issue 总数降序，含已关闭）；这里只按搜索词过滤，
+  // 过滤不改变先后。卡片第二行仍展示开启口径的状态分布。
+  const filteredProjects = projects.filter((project) => {
+    const fields = [project.name, project.description ?? ""];
+    if (project.github_owner && project.github_repo) {
+      fields.push(`${project.github_owner}/${project.github_repo}`);
+    }
+    return fields.some((field) => field.toLowerCase().includes(search));
+  });
 
   // 已选中项只关闭面板，不重复回调
   const handleSelect = (project: Project) => {

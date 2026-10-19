@@ -113,7 +113,7 @@ describe("ProjectSwitcher", () => {
     }
   });
 
-  it("按开启状态 Issue 数降序排列卡片，缺省按 0 且同计数保持传入顺序", async () => {
+  it("卡片顺序与传入顺序一致，不再按开启数重排", async () => {
     const user = userEvent.setup();
     const counts = (n: Partial<NonNullable<Project["issue_workflow_counts"]>>) => ({
       unset: 0,
@@ -122,27 +122,28 @@ describe("ProjectSwitcher", () => {
       done: 0,
       ...n,
     });
-    // few 的 issue_count 总数虽高，但开启的只有 1 条——排序只看开启口径
-    const unsorted: Project[] = [
-      { ...projects[0], id: "few", name: "Few", issue_count: 99, issue_workflow_counts: counts({ unset: 1 }) },
+    // 顺序由 useProjects 统一裁决（Issue 总数降序，含已关闭）：few 的总数虽低于 many，
+    // 但切换器拿到什么顺序就展示什么顺序，只按开启口径排序会把它推到最后
+    const ordered: Project[] = [
+      { ...projects[0], id: "few", name: "Few", issue_count: 1, issue_workflow_counts: counts({ unset: 1 }) },
       { ...projects[1], id: "none", name: "No Count", issue_workflow_counts: undefined },
-      { ...projects[0], id: "many", name: "Many", issue_count: 7, issue_workflow_counts: counts({ todo: 3, in_progress: 4 }) },
+      { ...projects[0], id: "many", name: "Many", issue_count: 99, issue_workflow_counts: counts({ todo: 3, in_progress: 4 }) },
       { ...projects[1], id: "zero", name: "Zero", issue_workflow_counts: counts({}) },
     ];
     render(
-      <ProjectSwitcher projects={unsorted} value="" onValueChange={vi.fn()} />,
+      <ProjectSwitcher projects={ordered} value="" onValueChange={vi.fn()} />,
     );
 
     await user.click(screen.getByRole("button", { name: "切换项目：请选择项目" }));
     const popup = await screen.findByRole("dialog", { name: "切换项目" });
     expect(within(popup).getAllByRole("button").map((card) => card.textContent)).toEqual([
-      expect.stringContaining("Many"),
       expect.stringContaining("Few"),
       expect.stringContaining("No Count"),
+      expect.stringContaining("Many"),
       expect.stringContaining("Zero"),
     ]);
     // 排序不得原地修改 props 数组
-    expect(unsorted.map((p) => p.id)).toEqual(["few", "none", "many", "zero"]);
+    expect(ordered.map((p) => p.id)).toEqual(["few", "none", "many", "zero"]);
   });
 
   it("名称行括注优先显示描述，无描述时回退仓库地址", async () => {
@@ -170,21 +171,24 @@ describe("ProjectSwitcher", () => {
     ).toBeInTheDocument();
   });
 
-  it("搜索命中多个项目时回车选中计数最高者", async () => {
+  it("搜索命中多个项目时回车选中传入顺序的首个", async () => {
     const user = userEvent.setup();
     const onValueChange = vi.fn();
+    // 顺序已由 useProjects 裁决，回车只取过滤后的第一项
     const matched: Project[] = [
-      {
-        ...projects[0],
-        id: "low",
-        name: "Match Low",
-        issue_workflow_counts: { unset: 1, todo: 0, in_progress: 0, done: 0 },
-      },
       {
         ...projects[1],
         id: "high",
         name: "Match High",
+        issue_count: 5,
         issue_workflow_counts: { unset: 0, todo: 4, in_progress: 0, done: 0 },
+      },
+      {
+        ...projects[0],
+        id: "low",
+        name: "Match Low",
+        issue_count: 1,
+        issue_workflow_counts: { unset: 1, todo: 0, in_progress: 0, done: 0 },
       },
     ];
     render(<ProjectSwitcher projects={matched} value="" onValueChange={onValueChange} />);

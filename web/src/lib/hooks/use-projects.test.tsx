@@ -13,7 +13,7 @@ vi.mock("@/lib/api/projects", () => ({
 
 const listMock = vi.mocked(projectApi.list);
 
-function makeProject(id: string): Project {
+function makeProject(id: string, issueCount?: number): Project {
   return {
     id,
     user_id: "user-1",
@@ -23,6 +23,7 @@ function makeProject(id: string): Project {
     github_repo: "",
     public_github_token_id: "",
     code_github_token_id: "",
+    ...(issueCount === undefined ? {} : { issue_count: issueCount }),
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
   };
@@ -89,5 +90,49 @@ describe("useProjects", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.items).toHaveLength(101);
     expect(listMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("合并分页后按 Issue 总数降序排列，缺省按 0 且不原地修改响应数组", async () => {
+    // 服务端按 created_at DESC 分页返回，排序只在合并后做一次：
+    // 否则跨页的大计数项目会被埋在后面的页里
+    const firstPage = [makeProject("old-empty"), makeProject("old-few", 2)];
+    listMock
+      .mockResolvedValueOnce(page(1, firstPage, 3))
+      .mockResolvedValueOnce(page(2, [makeProject("new-busy", 9)], 3));
+    const { result } = renderUseProjects();
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.items.map((p) => p.id)).toEqual([
+      "new-busy",
+      "old-few",
+      "old-empty",
+    ]);
+    // 排的是副本：响应页数组保持服务端返回顺序
+    expect(firstPage.map((p) => p.id)).toEqual(["old-empty", "old-few"]);
+  });
+
+  it("同计数保持服务端顺序，显式 0 与计数缺失并列", async () => {
+    // 计数并列（含缺失与显式 0）时不引入第二排序键，稳定排序保持服务端顺序
+    listMock.mockResolvedValueOnce(
+      page(
+        1,
+        [
+          makeProject("tie-first", 2),
+          makeProject("missing"),
+          makeProject("zero", 0),
+          makeProject("tie-second", 2),
+        ],
+        4,
+      ),
+    );
+    const { result } = renderUseProjects();
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.items.map((p) => p.id)).toEqual([
+      "tie-first",
+      "tie-second",
+      "missing",
+      "zero",
+    ]);
   });
 });

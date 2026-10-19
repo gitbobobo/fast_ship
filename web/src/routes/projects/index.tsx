@@ -75,19 +75,17 @@ export default function ProjectsPage() {
     );
   }, [isLoading, projects, searchParams, setSearchParams]);
 
-  // 按 Issue 总数降序展示；计数缺失按 0，同计数靠稳定排序保持服务端顺序
-  const filteredProjects = projects
-    .filter((project) => {
-      const slug = repoSlug(project);
-      const matchesSearch =
-        deferredSearch.length === 0 ||
-        project.name.toLowerCase().includes(deferredSearch) ||
-        project.description?.toLowerCase().includes(deferredSearch) ||
-        slug.toLowerCase().includes(deferredSearch);
+  // 顺序由 useProjects 统一提供（Issue 总数降序），这里只按搜索词过滤
+  const filteredProjects = projects.filter((project) => {
+    const slug = repoSlug(project);
+    const matchesSearch =
+      deferredSearch.length === 0 ||
+      project.name.toLowerCase().includes(deferredSearch) ||
+      project.description?.toLowerCase().includes(deferredSearch) ||
+      slug.toLowerCase().includes(deferredSearch);
 
-      return matchesSearch;
-    })
-    .sort((a, b) => (b.issue_count ?? 0) - (a.issue_count ?? 0));
+    return matchesSearch;
+  });
 
   const handleDelete = async () => {
     if (!deleteTarget) return;

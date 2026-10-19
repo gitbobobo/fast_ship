@@ -1,6 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { projectApi } from "@/lib/api/projects";
 
+// 项目列表的统一顺序：按 Issue 总数（含已关闭）降序，计数缺失按 0；
+// 同计数（含并列 0）保持服务端顺序（created_at DESC）。
+// 所有出现 Fast Ship 项目列表的界面都从这里取顺序，组件不再各排一套。
+const compareByIssueCount = (a: Project, b: Project) =>
+  (b.issue_count ?? 0) - (a.issue_count ?? 0);
+
 export function useProjects() {
   return useQuery({
     queryKey: ["projects"],
@@ -15,7 +21,7 @@ export function useProjects() {
         items.push(...res.data.items);
         if (res.data.items.length < pageSize) break;
       }
-      return { ...first.data, items };
+      return { ...first.data, items: items.sort(compareByIssueCount) };
     },
   });
 }
