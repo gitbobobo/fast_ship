@@ -222,9 +222,13 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			}
 			if needCompaction {
 				outcome, err := s.runCompactionCycle(ctx, bot, run, reason)
-				// 一次性语义：本 run 已尝试过压缩（无论 published / no_gain /
-				// 失败），推进风格水位，不在后续 run 重复尝试。
-				s.markStyleCompactionDone(bot)
+				// 一次性语义：只有风格压缩的尝试才消费风格水位（无论 published /
+				// no_gain / 失败）。阈值压缩可能是 fold-only（折叠后不需要摘要），
+				// 此时旧风格的长回复仍在投影里，水位必须留给后续 run 的
+				// style_upgrade——否则需求要的「收进摘要」就永久丢了。
+				if reason == model.BotCompactionStyle {
+					s.markStyleCompactionDone(bot)
+				}
 				if err != nil {
 					if reason == model.BotCompactionStyle {
 						// 风格压缩只为收进旧长回复：不可达/无净缩减/失败都

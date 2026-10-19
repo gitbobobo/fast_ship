@@ -820,3 +820,105 @@ func TestBotCreateProviderCheckedInSameTx(t *testing.T) {
 		t.Fatalf("失败创建不得留下 bot 行")
 	}
 }
+
+// TestBotStyleWatermarkSurvivesThresholdCompaction INT-133（Codex P2）：阈值压缩
+// 可能是 fold-only、旧长回复仍在投影里，因此它不得消费风格水位；只有真正走过
+// style_upgrade 的那一轮才推进水位，后续低负载 run 仍能补上风格摘要。
+func TestBotStyleWatermarkSurvivesThresholdCompaction(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "stythresh9")
+	bot := env.createBot(t, userID)
+	env.cfg.Bots.Context.WindowTokens = 60000
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"platform_prompt_version":  botStylePromptVersion - 1,
+		"toolset_version":          botToolsetVersion,
+		"style_compaction_version": 0,
+	}).Error; err != nil {
+		t.Fatalf("stale bot: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+
+	// 首轮历史落在压缩阈值之上：run 里必然先走 threshold 压缩。
+	seedBotUserMessage(t, env, bot.ID, "最早的问题")
+	probeRun := botFixtureRun(t, env, botRow)
+	base := env.bots.estimateProjectionTokens(botRow, probeRun, nil)
+	env.db.Where("id = ?", probeRun.ID).Delete(&model.BotRun{})
+	window := env.bots.inputBudgetFor(botRow, "fake-model")
+	trigger := botFloorRatio(window, env.cfg.Bots.Context.CompressionRatioV())
+	bigTokens := trigger + (window-trigger)/2 - base
+	if bigTokens < 1000 {
+		t.Fatalf("几何异常：base=%d trigger=%d window=%d", base, trigger, window)
+	}
+	seedBotUserMessage(t, env, bot.ID, strings.Repeat("很长的历史内容。", int(bigTokens*7/48)+1))
+	seedBotUserMessage(t, env, bot.ID, "保护轮A")
+	seedBotUserMessage(t, env, bot.ID, "保护轮B")
+	seedBotUserMessage(t, env, bot.ID, "保护轮C")
+	markHistoryConsumed(t, env, botRow, nil)
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{
+		Text: "继续", ClientMessageID: "sty-th-1",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForBot(t, "阈值 run 收尾", 30*time.Second, func() bool {
+		return completedMainRuns(t, env, bot.ID) >= 1 && env.botSettled(bot.ID)
+	})
+
+	var first model.BotCompaction
+	if err := env.db.Where("bot_id = ?", bot.ID).Order("created_at DESC").First(&first).Error; err != nil {
+		t.Fatalf("首轮应产生压缩记录: %v", err)
+	}
+	if first.Reason != model.BotCompactionThreshold {
+		t.Fatalf("首轮压缩 reason 应为 %q，实得 %q", model.BotCompactionThreshold, first.Reason)
+	}
+	if wm := styleWatermarkOf(t, env, bot.ID); wm != 0 {
+		t.Fatalf("阈值压缩不得消费风格水位，实得 %d", wm)
+	}
+
+	// 第二轮负载已降下来：风格水位仍欠账，必须补一次 style_upgrade。
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{
+		Text: "再来一次", ClientMessageID: "sty-th-2",
+	}); err != nil {
+		t.Fatalf("send again: %v", err)
+	}
+	// 后台 run 先创建再收尾：以「完成的 run 数 + 无活动 run」为界，避免抢跑。
+	waitForBot(t, "第二轮收尾", 30*time.Second, func() bool {
+		return completedMainRuns(t, env, bot.ID) >= 2 && env.botSettled(bot.ID)
+	})
+	var styleCount int64
+	if err := env.db.Model(&model.BotCompaction{}).
+		Where("bot_id = ? AND reason = ?", bot.ID, model.BotCompactionStyle).Count(&styleCount).Error; err != nil {
+		t.Fatalf("count style compactions: %v", err)
+	}
+	if styleCount != 1 {
+		t.Fatalf("阈值压缩后仍应补一次风格压缩，实得 %d 次", styleCount)
+	}
+	if wm := styleWatermarkOf(t, env, bot.ID); wm != botStylePromptVersion {
+		t.Fatalf("风格压缩后水位应推进到 %d，实得 %d", botStylePromptVersion, wm)
+	}
+}
+
+// completedMainRuns 统计该机器人已完成的主线 run 数（用于等待后台 run 收尾）。
+func completedMainRuns(t *testing.T, env *botTestEnv, botID string) int64 {
+	t.Helper()
+	var n int64
+	if err := env.db.Model(&model.BotRun{}).
+		Where("bot_id = ? AND session_kind = ? AND finished_at IS NOT NULL", botID, model.BotSessionKindMain).
+		Count(&n).Error; err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	return n
+}
+
+// styleWatermarkOf 读取库内的风格压缩水位。
+func styleWatermarkOf(t *testing.T, env *botTestEnv, botID string) int64 {
+	t.Helper()
+	var wm int64
+	if err := env.db.Raw("SELECT style_compaction_version FROM bots WHERE id = ?", botID).Scan(&wm).Error; err != nil {
+		t.Fatalf("read watermark: %v", err)
+	}
+	return wm
+}
