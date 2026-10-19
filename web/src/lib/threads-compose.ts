@@ -220,6 +220,8 @@ export function previousWorktreeLabel(seed: PreviousWorktree) {
 export interface ModelChoice {
   slug: string;
   name: string;
+  /** 上游子 provider（如 pi 的 commandcode/opendesign）；只有部分 provider 带。 */
+  subProvider?: string;
   isDefault: boolean;
   descriptors: EffortDescriptor[];
 }
@@ -283,6 +285,7 @@ export function parseProviders(config: ComposerOptions["config"] | undefined) {
             {
               slug: str(m.slug),
               name: str(m.name) || str(m.slug),
+              subProvider: str(m.subProvider) || undefined,
               isDefault: m.isDefault === true,
               descriptors: parseDescriptors(m.capabilities),
             },

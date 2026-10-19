@@ -220,6 +220,35 @@ describe("model selection", () => {
     expect(providers[0].models[0].descriptors.map((d) => d.id)).toEqual(["effort"]);
   });
 
+  it("keeps subProvider only when the upstream model carries one", () => {
+    const providers = parseProviders({
+      providers: [
+        {
+          instanceId: "pi",
+          displayName: "Pi",
+          enabled: true,
+          installed: true,
+          models: [
+            { slug: "default", name: "Pi default" },
+            { slug: "commandcode/deepseek", name: "DeepSeek", subProvider: "commandcode" },
+            { slug: "blank", name: "Blank", subProvider: "" },
+            { slug: "null", name: "Null", subProvider: null },
+            { slug: "number", name: "Number", subProvider: 7 },
+            { slug: "object", name: "Object", subProvider: { nested: true } },
+          ],
+        },
+      ],
+    });
+    expect(providers[0].models.map((m) => m.subProvider)).toEqual([
+      undefined,
+      "commandcode",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
   it("emits options as an [{id,value}] array, not an object", () => {
     const providers = parseProviders(config);
     const resolved = resolveModel(providers, undefined, {

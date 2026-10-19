@@ -69,6 +69,28 @@ function modelPickOf(item: FlatModel): ModelPick {
   };
 }
 
+/**
+ * 行内副标题：provider 名，带上游子 provider 时补 ` · <subProvider>`
+ * （如 `Pi · commandcode`），对齐 T3 Code。搜索命中同一字符串。
+ *
+ * 子 provider 名本身读作「provider 名 + 限定词」时（OpenCode / OpenCode Zen）
+ * 只显示子 provider——拼起来会变成「OpenCode · OpenCode Zen」。判据与 T3 的
+ * `providerIconUtils.getProviderRowLabel` 一致。
+ */
+function modelSubtitle(provider: ProviderChoice, model: ModelChoice) {
+  const sub = model.subProvider?.trim();
+  if (!sub) return provider.name;
+  const name = provider.name.trim();
+  if (name && new RegExp(`^${escapeRegExp(name)}\\s+\\S`, "i").test(sub)) {
+    return sub;
+  }
+  return `${provider.name} · ${sub}`;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export interface ModelPickerProps {
   providers: ProviderChoice[];
   resolved: ResolvedModel;
@@ -278,7 +300,7 @@ function ModelPickerPanel({
       return flat.filter(
         ({ provider, model }) =>
           model.name.toLowerCase().includes(q) ||
-          provider.name.toLowerCase().includes(q),
+          modelSubtitle(provider, model).toLowerCase().includes(q),
       );
     }
     if (rail === FAVORITES_RAIL) {
@@ -408,7 +430,7 @@ function ModelPickerPanel({
               className="size-3"
             />
             <span className="truncate text-xs leading-snug text-muted-foreground">
-              {item.provider.name}
+              {modelSubtitle(item.provider, item.model)}
             </span>
           </div>
         </div>
