@@ -29,9 +29,9 @@ vi.mock("@/lib/hooks/use-notifications", async (importOriginal) => {
 
 const notification = {
   id: "n-1",
-  kind: "automation_run_timeout",
-  title: "自动化运行超时",
-  body: "「夜间回报」的运行超时",
+  kind: "review_run_timeout",
+  title: "审查运行超时",
+  body: "「夜间回报」的审查运行超时",
   environment_id: "env-1",
   thread_id: "th-1",
   run_id: "run-1",
@@ -79,7 +79,7 @@ describe("NotificationBell", () => {
 
     await user.click(screen.getByRole("button", { name: /通知（2 条未读）/ }));
 
-    expect(await screen.findByText("自动化运行超时")).toBeInTheDocument();
+    expect(await screen.findByText("审查运行超时")).toBeInTheDocument();
     const markAll = screen.getByRole("button", { name: "全部已读" });
     await user.click(markAll);
     expect(markAllMutate).toHaveBeenCalledTimes(1);
@@ -138,9 +138,9 @@ describe("NotificationsPage", () => {
       initialEntry: "/notifications",
     });
 
-    expect(screen.getByText("自动化运行超时")).toBeInTheDocument();
+    expect(screen.getByText("审查运行超时")).toBeInTheDocument();
     expect(screen.getByText("Agent 汇报")).toBeInTheDocument();
-    expect(screen.getByText("运行超时")).toBeInTheDocument();
+    expect(screen.getByText("审查超时")).toBeInTheDocument();
     expect(screen.getByText("Agent")).toBeInTheDocument();
     expect(screen.getByText("标记已读")).toBeInTheDocument();
     expect(screen.getByText("已读")).toBeInTheDocument();
@@ -167,6 +167,6 @@ describe("NotificationsPage", () => {
     await user.click(screen.getByRole("button", { name: "只看未读" }));
 
     expect(screen.queryByText("Agent 汇报")).not.toBeInTheDocument();
-    expect(screen.getByText("自动化运行超时")).toBeInTheDocument();
+    expect(screen.getByText("审查运行超时")).toBeInTheDocument();
   });
 });

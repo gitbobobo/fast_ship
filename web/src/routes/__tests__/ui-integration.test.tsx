@@ -275,12 +275,12 @@ describe("UI Integration Tests", () => {
       expect(logLink).toHaveAttribute("aria-current", "page");
     });
 
-    it("renders automations and notifications as top-level sidebar items", () => {
-      renderWithProviders(<Sidebar />, { initialEntry: "/automations" });
+    it("renders reviews and notifications as top-level sidebar items", () => {
+      renderWithProviders(<Sidebar />, { initialEntry: "/reviews" });
 
-      const automations = screen.getByRole("link", { name: "自动化" });
-      expect(automations).toHaveAttribute("href", "/automations");
-      expect(automations).toHaveAttribute("aria-current", "page");
+      const reviews = screen.getByRole("link", { name: "审查" });
+      expect(reviews).toHaveAttribute("href", "/reviews");
+      expect(reviews).toHaveAttribute("aria-current", "page");
 
       const notifications = screen.getByRole("link", { name: "通知" });
       expect(notifications).toHaveAttribute("href", "/notifications");
@@ -328,7 +328,7 @@ describe("UI Integration Tests", () => {
       expect(screen.getAllByText("AI 配置").length).toBeGreaterThan(0);
       expect(screen.getAllByText("API Keys").length).toBeGreaterThan(0);
       expect(
-        screen.queryByRole("link", { name: "自动化" }),
+        screen.queryByRole("link", { name: "审查" }),
       ).not.toBeInTheDocument();
     });
 

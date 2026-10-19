@@ -12,7 +12,7 @@ import {
   Images,
   MessagesSquare,
   Bot,
-  Workflow,
+  GitPullRequest,
   Bell,
   Gauge,
 } from "lucide-react";
@@ -38,7 +38,7 @@ const navItems = [
   { to: "/board", label: "看板", icon: Kanban, end: true },
   { to: "/threads", label: "线程", icon: MessagesSquare, end: false },
   { to: "/bots", label: "机器人", icon: Bot, end: false },
-  { to: "/automations", label: "自动化", icon: Workflow, end: true },
+  { to: "/reviews", label: "审查", icon: GitPullRequest, end: false },
   { to: "/quota", label: "套餐额度", icon: Gauge, end: true },
   { to: "/notifications", label: "通知", icon: Bell, end: true },
   { to: "/versions", label: "版本", icon: Tags, end: true },

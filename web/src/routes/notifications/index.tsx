@@ -61,7 +61,7 @@ export default function NotificationsPage() {
       <div className="mx-auto w-full max-w-4xl space-y-4 p-4 md:p-6">
         <div className="flex items-center justify-between">
           <p className="text-sm text-muted-foreground">
-            自动化运行结果与 Agent 发布的站内通知。
+            审查系统故障与 Agent 发布的站内通知。
           </p>
           <Button
             size="sm"
