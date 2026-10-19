@@ -154,15 +154,16 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		// 派发时冻结有效配置：同事务读一次机器人记下当时的 model/base_url，
 		// wakeScheduleRun 之后（载入执行槽才 Get 机器人）即使配置被编辑，
 		// 这次运行仍按快照执行——与主线 ensureRun 的 botSnapshotOf 同语义。
-		// 只做一次主键查询，不发网络调用。
-		var botRow model.Bot
-		if err := tx.Where("id = ?", current.BotID).First(&botRow).Error; err != nil {
+		// 只做一次主键查询，不发网络调用。经仓库层读取：provider 派生的
+		// 地址与密钥在读取时补齐（INT-133）。
+		botRow, err := repository.NewBotRepository(tx).Get(current.BotID)
+		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil // 机器人已删除（任务会级联删除），跳过
 			}
 			return err
 		}
-		snap := botSnapshotOf(&botRow)
+		snap := botSnapshotOf(botRow)
 		if current.Model != "" {
 			snap.Model = current.Model
 		}

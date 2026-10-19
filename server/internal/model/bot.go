@@ -24,12 +24,25 @@ type Bot struct {
 	ToolsetVersion  int64 `gorm:"not null" json:"toolset_version"`
 	LastToldVersion int64 `gorm:"not null;default:1" json:"last_told_version"`
 
-	BaseURL string `gorm:"type:text;not null" json:"base_url"`
+	// ProviderID 是所属 AI 提供商（INT-133）：必须属于同一 user（服务层保证）。
+	// 列只存引用；BaseURL / 密钥 / last4 从 provider 派生，密钥只在 provider
+	// 行存一份——轮换密钥后引用它的机器人在下一个 run 生效。
+	ProviderID string `gorm:"type:text;not null;default:''" json:"provider_id"`
+
+	// BaseURL 及以下三个派生字段不持久化（gorm:"-"）：由仓库层在读取 bot 时
+	// 从 provider join/补齐，写路径不写这些列。BaseURL 是冻结地址与密钥语义
+	// （INT-102/INT-103）的来源之一；任何 Find 返回的 bot 都必须带全派生值，
+	// 否则运行时空地址。
+	BaseURL string `gorm:"-" json:"base_url"`
 	// Model 列存模型名；列名 model 不是 SQLite 保留字，GORM 会加引号。
 	Model string `gorm:"column:model;type:text;not null" json:"model"`
-	// APIKeyEncrypted 密文（AES-GCM）；任何响应与日志只允许出现 APIKeyLast4。
-	APIKeyEncrypted []byte `gorm:"type:blob;not null" json:"-"`
-	APIKeyLast4     string `gorm:"type:text;not null" json:"api_key_last4"`
+	// APIKeyEncrypted 派生自 provider 的密文（AES-GCM）；任何响应与日志只允许
+	// 出现 APIKeyLast4。
+	APIKeyEncrypted []byte `gorm:"-" json:"-"`
+	APIKeyLast4     string `gorm:"-" json:"api_key_last4"`
+	// ProviderName / CatalogID 同为 provider 派生的展示与目录解析字段。
+	ProviderName string `gorm:"-" json:"provider_name"`
+	CatalogID    string `gorm:"-" json:"catalog_id"`
 
 	// NextMessageSeq / NextEventSeq 是两条账本的水位（下一条的 seq）；
 	// 取号只允许在短事务内完成。

@@ -60,6 +60,9 @@ type botRunFreeze struct {
 	PlatformPromptVersion int64
 	PersonaPrompt         string
 	ToolsetVersion        int64
+	// StyleUpgradePending 表示本次激活跨过了最近一次说话方式变化：下一个
+	// 压缩边界强制压缩一次，把旧风格的长回复收进摘要（INT-133）。
+	StyleUpgradePending bool
 }
 
 func captureRunFreeze(bot *model.Bot, run *model.BotRun) botRunFreeze {
@@ -120,12 +123,15 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 	// 短事务里读行、判 stale、按该行人设重建提示词并写回，事务结束后副本与
 	// 库内行一致，freeze 捕获的才是本次 run 的最终提示词，schedule 会话也基于
 	// 激活后的工具集构建。激活失败只降级记日志、不阻塞 run。
-	if err := s.activateBotPrompt(bot); err != nil {
+	styleUpgraded, err := s.activateBotPromptWithStyle(bot)
+	if err != nil {
 		s.logger.Warn("激活工具集失败", zap.String("bot_id", bot.ID), zap.Error(err))
+		styleUpgraded = false
 	}
 	// 先冻结再取密钥：schedule run 的地址与密钥是派发时成对冻结的，解密必须用
 	// 冻结的那一份，否则轮换密钥后会把新密钥发往旧地址。
 	freeze := captureRunFreeze(bot, run)
+	freeze.StyleUpgradePending = styleUpgraded
 	applyRunCredentialFreeze(bot, freeze)
 	applyRunPromptFreeze(bot, freeze)
 	key, err := s.decryptAPIKey(bot)
@@ -207,8 +213,17 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			s.ensureModelWindow(bot, run, key, built.InputTokensEstimate)
 			window := s.inputBudgetFor(bot, runModelOf(run, bot))
 			trigger := botFloorRatio(window, s.cfg.Bots.Context.CompressionRatioV())
-			if built.InputTokensEstimate >= trigger {
-				outcome, err := s.runCompactionCycle(ctx, bot, run, model.BotCompactionThreshold)
+			reason := model.BotCompactionThreshold
+			needCompaction := built.InputTokensEstimate >= trigger
+			if !needCompaction && freeze.StyleUpgradePending {
+				// INT-133：说话方式升级后的存量会话即使未达阈值，也在本边界强制
+				// 压缩一次，把旧风格的长回复收进摘要（下次 run 激活已是最新，
+				// 不会再触发）。
+				needCompaction = true
+				reason = model.BotCompactionStyle
+			}
+			if needCompaction {
+				outcome, err := s.runCompactionCycle(ctx, bot, run, reason)
 				if err != nil {
 					if errors.Is(err, errContextUncompressible) || built.InputTokensEstimate >= window {
 						s.finishCompactionFailed(bot, run, built, err)
@@ -226,6 +241,9 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 					s.acceptCompactionBoundary(bot, &freeze, outcome.Snapshot)
 					s.clearUsageBaseline(bot.ID)
 				}
+				// 一次性语义：尝试过就算消费，失败不阻塞对话，也不会在后续 run
+				// 反复重试（与阈值路径同样退让）。
+				freeze.StyleUpgradePending = false
 				built, err = s.buildRunContext(bot, run)
 				if err != nil {
 					s.finishFailed(bot, run, "context_build_failed", err)

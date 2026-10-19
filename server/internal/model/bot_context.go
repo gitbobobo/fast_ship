@@ -46,6 +46,10 @@ type BotCompactionReason string
 const (
 	BotCompactionThreshold BotCompactionReason = "threshold"
 	BotCompactionForced    BotCompactionReason = "context_limit"
+	// BotCompactionStyle 是「说话方式升级后的一次性压缩」（INT-133）：存量
+	// 会话激活跨过 botStylePromptVersion 后，在下一个 run 边界强制压缩一次，
+	// 把旧风格的长回复收进摘要，避免模型继续模仿自己的历史回复。
+	BotCompactionStyle BotCompactionReason = "style_upgrade"
 )
 
 // BotCompaction 是一个压缩周期的最终记录；禁止 UPDATE（append-only）。

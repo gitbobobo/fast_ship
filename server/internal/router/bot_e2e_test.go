@@ -164,6 +164,12 @@ func setupE2E(t *testing.T) *e2eEnv {
 
 func (e *e2eEnv) doJSON(t *testing.T, method, path string, body interface{}) (int, map[string]interface{}) {
 	t.Helper()
+	return e.doJSONAs(t, e.jwt, method, path, body)
+}
+
+// doJSONAs 以指定身份（可空 = 匿名）调用路由，供隔离/鉴权用例复用。
+func (e *e2eEnv) doJSONAs(t *testing.T, jwt, method, path string, body interface{}) (int, map[string]interface{}) {
+	t.Helper()
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -173,7 +179,9 @@ func (e *e2eEnv) doJSON(t *testing.T, method, path string, body interface{}) (in
 		reader = bytes.NewReader(raw)
 	}
 	req := httptest.NewRequest(method, path, reader)
-	req.Header.Set("Authorization", e.jwt)
+	if jwt != "" {
+		req.Header.Set("Authorization", jwt)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -184,10 +192,23 @@ func (e *e2eEnv) doJSON(t *testing.T, method, path string, body interface{}) (in
 	return rec.Code, envelope
 }
 
+// createProviderAt 经 REST 在该用户下落一条指向指定地址的 AI 提供商（INT-133）。
+func (e *e2eEnv) createProviderAt(t *testing.T, baseURL, apiKey string) string {
+	t.Helper()
+	code, body := e.doJSON(t, http.MethodPost, "/api/ai-providers", map[string]interface{}{
+		"catalog_id": "custom", "base_url": baseURL, "api_key": apiKey,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("create provider: %d %v", code, body)
+	}
+	data := body["data"].(map[string]interface{})
+	return data["id"].(string)
+}
+
 func (e *e2eEnv) createBot(t *testing.T) string {
 	t.Helper()
 	code, body := e.doJSON(t, http.MethodPost, "/api/bots", map[string]interface{}{
-		"name": "e2e-bot", "base_url": e.fake.URL(), "model": "e2e-model", "api_key": "sk-e2e-8888",
+		"name": "e2e-bot", "provider_id": e.createProviderAt(t, e.fake.URL(), "sk-e2e-8888"), "model": "e2e-model",
 	})
 	if code != http.StatusOK {
 		t.Fatalf("create bot: %d %v", code, body)

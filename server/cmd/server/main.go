@@ -315,6 +315,9 @@ func main() {
 
 	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
 	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)
+	// AI 提供商（INT-133）：按用户隔离的 provider 配置与内置模型目录。
+	aiProviderService := service.NewAIProviderService(db, cfg, zapLogger.With(zap.String("module", "bot")))
+	aiProviderHandler := handler.NewAIProviderHandler(aiProviderService)
 
 	// GitHub App（INT-93；INT-129 起部署级身份）：debug 自测 fake 仍完全走
 	// config（恒返回 fake 的解析器）；其余一律经 githubapp.Clients 现取部署
@@ -480,7 +483,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。
@@ -579,6 +582,13 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	// createBootIndexes 之前（索引建在新形状上）。
 	if err := migrateAutomationTriggers(db, logger); err != nil {
 		return fmt.Errorf("自动化触发器迁移失败: %w", err)
+	}
+
+	// AI 提供商聚合（INT-133）：存量 bots 的地址+密钥去重建 provider、回填
+	// provider_id 并删除旧列。必须在 AutoMigrate 之后（依赖 ai_providers 与
+	// provider_id 列）、EnsureBotSchema 之前（索引建在新形状上）。
+	if err := migrateBotAIProviders(db, logger); err != nil {
+		return fmt.Errorf("AI 提供商迁移失败: %w", err)
 	}
 
 	createBootIndexes(db)

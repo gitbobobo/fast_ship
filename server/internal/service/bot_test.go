@@ -256,13 +256,34 @@ func createBotTestUser(t *testing.T, db *gorm.DB, name string) string {
 	return createTestUser(t, db, name).ID
 }
 
+// createProviderAt 在该用户下落一条指向指定地址的 AI 提供商（INT-133）。
+func (e *botTestEnv) createProviderAt(t *testing.T, userID, baseURL, apiKey string) string {
+	t.Helper()
+	svc := NewAIProviderService(e.db, e.cfg, zap.NewNop())
+	p, err := svc.Create(userID, &CreateAIProviderRequest{
+		CatalogID: "custom",
+		BaseURL:   baseURL,
+		APIKey:    apiKey,
+	})
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	return p.ID
+}
+
+// createProvider 在该用户下落一条指向假模型的 AI 提供商（INT-133）：
+// key 末四位必须以 last4 断言，测试密钥统一以四位数字收尾。
+func (e *botTestEnv) createProvider(t *testing.T, userID, apiKey string) string {
+	t.Helper()
+	return e.createProviderAt(t, userID, e.fake.URL(), apiKey)
+}
+
 func (e *botTestEnv) createBot(t *testing.T, userID string) *BotResponse {
 	t.Helper()
 	bot, err := e.bots.Create(userID, &CreateBotRequest{
-		Name:    "bot-" + uuid.NewString()[:8],
-		BaseURL: e.fake.URL(),
-		Model:   "fake-model",
-		APIKey:  "sk-test-abcdef123456",
+		Name:       "bot-" + uuid.NewString()[:8],
+		ProviderID: e.createProvider(t, userID, "sk-test-abcdef123456"),
+		Model:      "fake-model",
 	})
 	if err != nil {
 		t.Fatalf("create bot: %v", err)
@@ -372,7 +393,7 @@ func TestBotConfigLifecycle(t *testing.T) {
 
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
 		Name: "我的机器人", PersonaPrompt: "简洁回答。",
-		BaseURL: env.fake.URL(), Model: "m1", APIKey: "sk-live-99998888",
+		ProviderID: env.createProvider(t, userID, "sk-live-99998888"), Model: "m1",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -383,7 +404,7 @@ func TestBotConfigLifecycle(t *testing.T) {
 
 	// 产品决策不要求机器人名称唯一：同名可建。
 	if _, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "我的机器人", BaseURL: env.fake.URL(), Model: "m1", APIKey: "sk-x-1111",
+		Name: "我的机器人", ProviderID: bot.ProviderID, Model: "m1",
 	}); err != nil {
 		t.Fatalf("同名机器人应允许创建: %v", err)
 	}
@@ -405,16 +426,22 @@ func TestBotConfigLifecycle(t *testing.T) {
 	if updated.APIKeyLast4 != "8888" {
 		t.Fatalf("key 应保留: %+v", updated)
 	}
-	if _, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{APIKey: strPtrBot("")}); err == nil {
+	// 密钥在 provider 上（INT-133）：provider 端拒绝空串；轮换经 provider 更新，
+	// 引用它的机器人在下一次读取生效。
+	providerSvc := NewAIProviderService(env.db, env.cfg, zap.NewNop())
+	if _, err := providerSvc.Update(userID, bot.ProviderID, &UpdateAIProviderRequest{APIKey: strPtrBot("")}); err == nil {
 		t.Fatalf("空串 key 应被拒绝")
 	}
-	rotated, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{APIKey: strPtrBot("sk-new-7777")})
+	if _, err := providerSvc.Update(userID, bot.ProviderID, &UpdateAIProviderRequest{APIKey: strPtrBot("sk-new-7777")}); err != nil {
+		t.Fatalf("provider key rotate: %v", err)
+	}
+	rotated, err := env.bots.Get(userID, bot.ID)
 	if err != nil || rotated.APIKeyLast4 != "7777" {
 		t.Fatalf("key rotate: %v %+v", err, rotated)
 	}
 
-	if _, err := env.bots.Create(userID, &CreateBotRequest{Name: "x", BaseURL: env.fake.URL(), Model: "m", APIKey: ""}); err == nil {
-		t.Fatalf("缺 api_key 应拒绝")
+	if _, err := env.bots.Create(userID, &CreateBotRequest{Name: "x", ProviderID: "", Model: "m"}); err == nil {
+		t.Fatalf("缺 provider_id 应拒绝")
 	}
 
 	items, err := env.bots.List(userID)
@@ -434,8 +461,9 @@ func TestBotKeyNotLeaked(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "botkey")
 	plain := "sk-supersecret-4242"
+	providerID := env.createProvider(t, userID, plain)
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "k", BaseURL: env.fake.URL(), Model: "m", APIKey: plain,
+		Name: "k", ProviderID: providerID, Model: "m",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -452,9 +480,10 @@ func TestBotKeyNotLeaked(t *testing.T) {
 			t.Fatalf("列表泄露明文 key")
 		}
 	}
-	var row model.Bot
-	if err := env.db.Where("id = ?", bot.ID).First(&row).Error; err != nil {
-		t.Fatalf("load row: %v", err)
+	// 密文只在 provider 行（INT-133）：bots 行不再存地址与密钥。
+	var row model.AIProvider
+	if err := env.db.Where("id = ?", providerID).First(&row).Error; err != nil {
+		t.Fatalf("load provider row: %v", err)
 	}
 	if strings.Contains(string(row.APIKeyEncrypted), plain) {
 		t.Fatalf("库里出现明文 key")
@@ -462,15 +491,39 @@ func TestBotKeyNotLeaked(t *testing.T) {
 	if string(row.APIKeyEncrypted) == plain {
 		t.Fatalf("key 未加密")
 	}
+	var botRow model.Bot
+	if err := env.db.Where("id = ?", bot.ID).First(&botRow).Error; err != nil {
+		t.Fatalf("load bot row: %v", err)
+	}
+	_ = botRow
+	// 全新建库路径下 bots 表也不得再有地址/密钥列（存量迁移路径由 cmd/server
+	// 的迁移测试钉住）。
+	var columns []struct{ Name string }
+	if err := env.db.Raw("PRAGMA table_info(bots)").Scan(&columns).Error; err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	for _, c := range columns {
+		if c.Name == "base_url" || c.Name == "api_key_encrypted" || c.Name == "api_key_last4" {
+			t.Fatalf("bots 表不得再有 %s 列", c.Name)
+		}
+	}
 }
 
 func TestBotConnection(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "botconn")
 
-	res, err := env.bots.TestConnection(userID, &TestConnectionRequest{
-		BaseURL: strPtrBot(env.fake.URL()), Model: strPtrBot("fake-model"), APIKey: strPtrBot("sk-conn-1"),
+	// 未保存配置的测试通道移到 provider 端点（INT-133）：bots test-connection
+	// 的地址与密钥一律取 provider。
+	providerID := env.createProvider(t, userID, "sk-conn-1")
+
+	bot, err := env.bots.Create(userID, &CreateBotRequest{
+		Name: "c", ProviderID: providerID, Model: "fake-model",
 	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	res, err := env.bots.TestConnection(userID, &TestConnectionRequest{ProviderID: providerID, Model: strPtrBot("fake-model")})
 	if err != nil || !res.Ok {
 		t.Fatalf("test connection: %v %+v", err, res)
 	}
@@ -480,9 +533,12 @@ func TestBotConnection(t *testing.T) {
 		}
 	}
 
-	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{
-		BaseURL: strPtrBot("http://127.0.0.1:1"), Model: strPtrBot("m"), APIKey: strPtrBot("sk-secret-7777"),
-	})
+	// 指向不可达地址的 provider：返回检查结果而不是报错，密钥不进错误详情。
+	badProviderID := env.createProvider(t, userID, "sk-secret-7777")
+	if _, err := NewAIProviderService(env.db, env.cfg, zap.NewNop()).Update(userID, badProviderID, &UpdateAIProviderRequest{BaseURL: strPtrBot("http://127.0.0.1:1")}); err != nil {
+		t.Fatalf("provider update: %v", err)
+	}
+	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{ProviderID: badProviderID, Model: strPtrBot("m")})
 	if err != nil {
 		t.Fatalf("坏地址应返回检查结果而不是报错: %v", err)
 	}
@@ -493,20 +549,14 @@ func TestBotConnection(t *testing.T) {
 		t.Fatalf("错误详情泄露 key")
 	}
 
-	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "c", BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-saved-3131",
-	})
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{BotID: &bot.ID})
+	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{ProviderID: providerID, BotID: &bot.ID})
 	if err != nil || !res.Ok {
 		t.Fatalf("bot_id connection: %v %+v", err, res)
 	}
 
 	// 聚合成功要求流式与工具调用都过：能聊天不能调工具的供应商跑不了
 	// 工具循环，不能给假成功。
-	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{BotID: &bot.ID,
+	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{ProviderID: providerID, BotID: &bot.ID,
 		Model: strPtrBot("no-tools-model")})
 	if err != nil {
 		t.Fatalf("tool probe: %v", err)
@@ -520,18 +570,11 @@ func TestBotConnection(t *testing.T) {
 		}
 	}
 
-	// 表单填了替换密钥就测新密钥：坏的新密钥不得被旧密钥救活。
-	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{BotID: &bot.ID,
-		APIKey: strPtrBot("sk-bad-replacement-9999")})
-	if err != nil {
-		t.Fatalf("replacement key: %v", err)
-	}
-	if res.Ok || res.Checks[0].Passed {
-		t.Fatalf("坏替换密钥应测试失败（不得回退已存密钥）: %+v", res)
-	}
-
 	if _, err := env.bots.TestConnection(userID, &TestConnectionRequest{}); err == nil {
-		t.Fatalf("无配置且无 bot_id 应 40001")
+		t.Fatalf("缺 provider_id 应 40001")
+	}
+	if _, err := env.bots.TestConnection(userID, &TestConnectionRequest{ProviderID: "missing-provider"}); err == nil {
+		t.Fatalf("不存在的 provider 应 40433")
 	}
 }
 
@@ -541,7 +584,7 @@ func TestBotOwnership(t *testing.T) {
 	stranger := createBotTestUser(t, env.db, "botstranger")
 
 	bot, err := env.bots.Create(owner, &CreateBotRequest{
-		Name: "o", BaseURL: env.fake.URL(), Model: "m", APIKey: "sk-owner-1111",
+		Name: "o", ProviderID: env.createProvider(t, owner, "sk-owner-1111"), Model: "m",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)

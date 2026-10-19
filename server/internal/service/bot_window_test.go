@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/catalog"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
@@ -69,6 +70,7 @@ func (w *windowProbeSrv) setModels(code int, body string) {
 }
 
 // createBotRowAt 直接落一行 bot（绕过 Create 的后台刷新，避免与断言竞速）。
+// 地址与密钥落在 AI 提供商行（INT-133），bot 行只存引用。
 func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName string) *model.Bot {
 	t.Helper()
 	cipher, last4, err := env.bots.encryptAPIKey("sk-window-4321")
@@ -76,6 +78,15 @@ func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName st
 		t.Fatalf("encrypt: %v", err)
 	}
 	now := time.Now().UTC()
+	provider := &model.AIProvider{
+		ID: uuid.NewString(), UserID: userID, CatalogID: "custom",
+		Name: "win-provider", BaseURL: botNormalizeBaseURL(baseURL),
+		APIKeyEncrypted: cipher, APIKeyLast4: last4,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := env.db.Create(provider).Error; err != nil {
+		t.Fatalf("create provider row: %v", err)
+	}
 	bot := &model.Bot{
 		ID: uuid.NewString(), UserID: userID, Name: "win-" + uuid.NewString()[:6],
 		SystemPromptText:      buildBotSystemPrompt("简洁回答。"),
@@ -83,15 +94,42 @@ func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName st
 		PlatformPromptVersion: botPlatformPromptVersion,
 		ToolsetVersion:        botToolsetVersion,
 		LastToldVersion:       botToolsetVersion,
-		BaseURL:               baseURL, Model: modelName,
-		APIKeyEncrypted: cipher, APIKeyLast4: last4,
+		ProviderID:            provider.ID, Model: modelName,
 		NextMessageSeq: 1, NextEventSeq: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := env.bots.bots.Create(bot); err != nil {
 		t.Fatalf("create bot row: %v", err)
 	}
+	// 调用方持有的是这份内存副本：派生字段按 provider 行回填，语义与仓库层
+	// 读取一致（直接 db.Create 不会走补齐逻辑）。
+	bot.BaseURL = provider.BaseURL
+	bot.APIKeyEncrypted = append([]byte(nil), provider.APIKeyEncrypted...)
+	bot.APIKeyLast4 = provider.APIKeyLast4
+	bot.ProviderName = provider.Name
+	bot.CatalogID = provider.CatalogID
 	return bot
+}
+
+// createProviderRowAt 直接落一行 AI 提供商（供 TestConnection 指定探测地址
+// 与密钥，INT-133 后地址与密钥只存在于 provider 行）。
+func createProviderRowAt(t *testing.T, env *botTestEnv, userID, baseURL, apiKey string) string {
+	t.Helper()
+	cipher, last4, err := env.bots.encryptAPIKey(apiKey)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	now := time.Now().UTC()
+	provider := &model.AIProvider{
+		ID: uuid.NewString(), UserID: userID, CatalogID: "custom",
+		Name: "probe-provider", BaseURL: botNormalizeBaseURL(baseURL),
+		APIKeyEncrypted: cipher, APIKeyLast4: last4,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := env.db.Create(provider).Error; err != nil {
+		t.Fatalf("create provider row: %v", err)
+	}
+	return provider.ID
 }
 
 func findWindowRow(t *testing.T, env *botTestEnv, baseURL, modelName string) *model.BotModelWindow {
@@ -222,7 +260,7 @@ func TestBotWindowKeyedByAddrAndModel(t *testing.T) {
 		t.Fatalf("地址 B 不得串用地址 A 的缓存: %+v", cap)
 	}
 	// 带尾部斜杠的同一地址归一化后命中。
-	if cap := env.bots.capabilityFor(psA.URL()+"/", "m1"); cap.Source != "detected" {
+	if cap := env.bots.capabilityFor("", psA.URL()+"/", "m1"); cap.Source != "detected" {
 		t.Fatalf("地址应规范化后命中: %+v", cap)
 	}
 }
@@ -245,7 +283,7 @@ func TestBotWindowPersistAliasForRequestedCaseVariant(t *testing.T) {
 	if row.ContextWindow != 65536 || row.MaxOutputTokens != 16384 {
 		t.Fatalf("别名行元数据应与列表条目一致: %+v", row)
 	}
-	if cap := env.bots.capabilityFor(ps.URL(), "m1"); cap.Source != "detected" || cap.WindowTokens != 65536 {
+	if cap := env.bots.capabilityFor("", ps.URL(), "m1"); cap.Source != "detected" || cap.WindowTokens != 65536 {
 		t.Fatalf("capabilityFor 按配置名应命中 detected: %+v", cap)
 	}
 
@@ -356,7 +394,7 @@ func TestBotConnectionFailureKeepsSuccessfulCache(t *testing.T) {
 	// 测试连接用坏密钥触发上游失败：不得把共享的成功缓存覆盖成 0 值标记。
 	ps.setModels(500, `{"error":"boom"}`)
 	res, err := env.bots.TestConnection(userID, &TestConnectionRequest{
-		BaseURL: strPtrBot(ps.URL()), Model: strPtrBot("m1"), APIKey: strPtrBot("sk-bad"),
+		ProviderID: createProviderRowAt(t, env, userID, ps.URL(), "sk-bad"), Model: strPtrBot("m1"),
 	})
 	if err != nil {
 		t.Fatalf("test connection: %v", err)
@@ -417,7 +455,7 @@ func TestBotWindowCreateUpdateTriggerRefresh(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "wincrud")
 
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "crud", BaseURL: ps.URL(), Model: "m1", APIKey: "sk-x-9999",
+		Name: "crud", ProviderID: createProviderRowAt(t, env, userID, ps.URL(), "sk-x-9999"), Model: "m1",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -476,7 +514,7 @@ func TestBotConnectionDetectsWindow(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "winconn")
 
 	res, err := env.bots.TestConnection(userID, &TestConnectionRequest{
-		BaseURL: strPtrBot(ps.URL()), Model: strPtrBot("deepseek-flash"), APIKey: strPtrBot("sk-x-7777"),
+		ProviderID: createProviderRowAt(t, env, userID, ps.URL(), "sk-x-7777"), Model: strPtrBot("deepseek-flash"),
 	})
 	if err != nil || !res.Ok {
 		t.Fatalf("test connection: %v %+v", err, res)
@@ -496,7 +534,7 @@ func TestBotConnectionDetectsWindow(t *testing.T) {
 	// 探测失败：来源如实回退，不影响 ok；失败标记落库。
 	psFail := newWindowProbeServer(t, 500, `{}`)
 	res, err = env.bots.TestConnection(userID, &TestConnectionRequest{
-		BaseURL: strPtrBot(psFail.URL()), Model: strPtrBot("m1"), APIKey: strPtrBot("sk-x-7777"),
+		ProviderID: createProviderRowAt(t, env, userID, psFail.URL(), "sk-x-7777"), Model: strPtrBot("m1"),
 	})
 	if err != nil || !res.Ok {
 		t.Fatalf("探测失败不应影响连接结果: %v %+v", err, res)
@@ -1488,7 +1526,7 @@ func TestBotThresholdCompactionSoftFailNotRetried(t *testing.T) {
 
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "softfail")
-	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "soft", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "soft", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -2035,13 +2073,13 @@ func TestBotWindowAuxModelCaseVariantHitsCache(t *testing.T) {
 	}
 
 	// 辅助模型配置成大小写变体 m1：命中 detected，窗口/上限正确。
-	cap := env.bots.capabilityFor(ps.URL(), "m1")
+	cap := env.bots.capabilityFor("", ps.URL(), "m1")
 	if cap.Source != "detected" || cap.WindowTokens != 65536 || cap.MaxOutputTokens != 16384 {
 		t.Fatalf("大小写变体应命中 detected 缓存: %+v", cap)
 	}
 	// manual 覆盖窗口时，变体行里的输出上限仍生效。
 	env.cfg.Bots.Context.ModelWindows = map[string]int64{"m1": 100000}
-	if cap := env.bots.capabilityFor(ps.URL(), "m1"); cap.Source != "manual" ||
+	if cap := env.bots.capabilityFor("", ps.URL(), "m1"); cap.Source != "manual" ||
 		cap.WindowTokens != 100000 || cap.MaxOutputTokens != 16384 {
 		t.Fatalf("manual 覆盖下变体行输出上限应生效: %+v", cap)
 	}
@@ -2083,7 +2121,7 @@ func TestBotWindowFailureMarkerDoesNotShadowCaseVariantSuccess(t *testing.T) {
 	}
 
 	// 失败标记不得遮蔽变体成功行。
-	if cap := env.bots.capabilityFor(ps.URL(), "m1"); cap.Source != "detected" ||
+	if cap := env.bots.capabilityFor("", ps.URL(), "m1"); cap.Source != "detected" ||
 		cap.WindowTokens != 65536 || cap.MaxOutputTokens != 16384 {
 		t.Fatalf("失败行不得遮蔽变体成功行: %+v", cap)
 	}
@@ -2141,5 +2179,84 @@ func TestBotEnsureModelWindowCaseFoldedBackoff(t *testing.T) {
 	env.bots.ensureModelWindow(bot, run, "sk-x", estimate)
 	if ps.hitCount() != hits {
 		t.Fatalf("退避期内不应再同步探测: %d → %d", hits, ps.hitCount())
+	}
+}
+
+// ---------- INT-133：catalog 一级 ----------
+
+// 窗口解析新增 catalog 一级：manual > detected > catalog > fallback。
+// Source 如实标 catalog，窗口与输出上限来自目录条目；-1/缺失按未知处理，
+// 绝不当 0 上限参与预算。
+func TestBotWindowCatalogTier(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "wincatalog")
+
+	// 选一个真实目录条目作为夹具：zai 的第一个模型。
+	zai, ok := catalog.FindProvider("zai")
+	if !ok || len(zai.Models) == 0 {
+		t.Fatalf("内置目录应含 zai 模型")
+	}
+	catalogModel := zai.Models[0]
+	if catalogModel.ContextWindow <= 0 {
+		t.Fatalf("夹具模型应有正窗口")
+	}
+
+	ps := newWindowProbeServer(t, 404, `{}`)
+	bot := createBotRowAt(t, env, userID, ps.URL(), catalogModel.ID)
+	// 让该 bot 的 provider 指向目录：createBotRowAt 落的是 custom。
+	if err := env.db.Model(&model.AIProvider{}).Where("id = ?", bot.ProviderID).
+		Update("catalog_id", "zai").Error; err != nil {
+		t.Fatalf("set catalog_id: %v", err)
+	}
+	fresh, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("reload bot: %v", err)
+	}
+
+	// catalog 一级：目录未覆盖缓存的模型 → Source=catalog，窗口/输出取目录。
+	cap := env.bots.capabilityFor("zai", ps.URL(), catalogModel.ID)
+	if cap.Source != "catalog" {
+		t.Fatalf("无探测缓存时应解析到 catalog 一级: %+v", cap)
+	}
+	if cap.WindowTokens != catalogModel.ContextWindow || cap.MaxOutputTokens != catalogModel.MaxOutputTokens {
+		t.Fatalf("catalog 窗口/输出应取目录条目: %+v vs %+v", cap, catalogModel)
+	}
+	if env.bots.modelCapability(fresh, catalogModel.ID).Source != "catalog" {
+		t.Fatalf("bot 视角解析应带 provider 的目录归属: %+v", env.bots.modelCapability(fresh, catalogModel.ID))
+	}
+
+	// detected 优先于 catalog：写入探测缓存后应命中缓存而不是目录。
+	if err := env.bots.persistModelWindow(ps.URL(), catalogModel.ID, &botModelCapability{
+		WindowTokens: 12345, MaxOutputTokens: 678, Source: "detected", Detail: "GET /models",
+	}); err != nil {
+		t.Fatalf("seed detected row: %v", err)
+	}
+	if cap := env.bots.capabilityFor("zai", ps.URL(), catalogModel.ID); cap.Source != "detected" || cap.WindowTokens != 12345 {
+		t.Fatalf("detected 应优先于 catalog: %+v", cap)
+	}
+
+	// manual 优先于一切。
+	env.cfg.Bots.Context.ModelWindows = map[string]int64{catalogModel.ID: 999}
+	if cap := env.bots.capabilityFor("zai", ps.URL(), catalogModel.ID); cap.Source != "manual" || cap.WindowTokens != 999 {
+		t.Fatalf("manual 应最优先: %+v", cap)
+	}
+	delete(env.cfg.Bots.Context.ModelWindows, catalogModel.ID)
+
+	// 目录未覆盖的模型 → fallback；custom（无目录归属）→ 直接 fallback
+	// （换一个无缓存行的地址，避免撞上前面 seeded 的 detected 行）。
+	if cap := env.bots.capabilityFor("zai", ps.URL(), "no-such-model"); cap.Source != "fallback" {
+		t.Fatalf("目录未覆盖应 fallback: %+v", cap)
+	}
+	if cap := env.bots.capabilityFor("custom", "https://custom-unrelated.example.com/v1", catalogModel.ID); cap.Source != "fallback" {
+		t.Fatalf("custom 不得走 catalog 一级: %+v", cap)
+	}
+
+	// inputBudget 预留输出空间：catalog 的输出上限参与预算。
+	env.db.Where("base_url = ?", botNormalizeBaseURL(ps.URL())).Delete(&model.BotModelWindow{})
+	budget := env.bots.inputBudgetFor(fresh, catalogModel.ID)
+	if catalogModel.MaxOutputTokens > 0 && catalogModel.MaxOutputTokens < catalogModel.ContextWindow {
+		if budget != catalogModel.ContextWindow-catalogModel.MaxOutputTokens {
+			t.Fatalf("catalog 输出上限应参与预算: %d", budget)
+		}
 	}
 }

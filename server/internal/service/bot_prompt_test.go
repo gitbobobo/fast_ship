@@ -12,58 +12,114 @@ import (
 	"github.com/google/uuid"
 )
 
-// INT-122：内置机器人对话风格收敛。风格段排在平台规则之后、人设之前；
-// 运行时上下文 note 按是否存在待处理输入分支。平台提示词版本随规则变化递增
-// （v7 = INT-124 规则 9，v8 = INT-123 规则 8 补任务小状态读写说明）。
-
+// INT-133：默认人设（身份与说话方式）系统自动注入、拼在最前；用户人设追加
+// 在后，可以覆盖默认语气。它替代了 INT-122 的「对话风格」段，规则 8/9/13 的
+// 「告知/汇报」统一改为「简要说明结果」，升级通知限定为内部信息。
 func TestBotSystemPromptStyleSection(t *testing.T) {
-	if botPlatformPromptVersion != 8 {
-		t.Fatalf("提示词版本应递增到 8: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 9 {
+		t.Fatalf("提示词版本应递增到 9: %d", botPlatformPromptVersion)
+	}
+	if botStylePromptVersion != 9 {
+		t.Fatalf("说话方式版本应为 9: %d", botStylePromptVersion)
 	}
 	full := buildBotSystemPrompt("回复要更短。")
-	// 关键词锚点覆盖风格段每条要求，不钉全文。
+	// 关键词锚点覆盖默认人设的每条原则，不钉全文。
 	for _, kw := range []string{
-		"对话风格",
-		// 结论先行、篇幅收口、表格与标题约束。
-		"像同事聊天", "先给结论", "1～3 句", "不写标题", "不做小节", "多于 3 行时才用表格",
-		// 不复述/不评价/不列选项；低风险直接做。
-		"不复述用户的话", "不评价用户", "下一步可选项", "直接去做", "确认按钮", "A/B/C",
-		// 工具回合无旁白，核实不必说出口。
-		"不讲旁白", "tool_calls", "不需要向用户说出来",
-		// 闲聊不接任务；内部信息不外漏。
-		"打招呼或闲聊", "只回问候", "不向用户转述运行时上下文",
-		// 无新输入的唤醒默认安静。
-		"没有新用户输入", "最多回一句", "失败或异常",
+		"说话方式：",
+		"篇幅跟信息量匹配", "简单问题简短回答", "确实需要时可以展开",
+		"先给结论",
+		"只有内容确实需要时才用标题和表格",
+		"只在需要用户决策时提问", "不为客套追问",
+		"调用工具前不讲旁白",
+		"不自我表功",
 	} {
 		if !strings.Contains(full, kw) {
-			t.Fatalf("风格段缺少关键词 %q", kw)
+			t.Fatalf("默认人设缺少关键词 %q", kw)
 		}
 	}
-	// 拼装顺序：平台规则 → 对话风格 → 人设。
-	ir := strings.Index(full, "你是 Fast Ship 内置机器人")
-	is := strings.Index(full, "对话风格：")
-	ip := strings.Index(full, "人设（由机器人主人配置）：")
-	if ir < 0 || is < 0 || ip < 0 || ir > is || is > ip {
-		t.Fatalf("拼装顺序应为 平台规则→对话风格→人设: %d %d %d", ir, is, ip)
+	// 默认人设只写原则、不写反例：旧风格段的长清单不应洇回来。
+	for _, gone := range []string{"对话风格：", "像同事聊天", "A/B/C", "下一步可选项"} {
+		if strings.Contains(full, gone) {
+			t.Fatalf("默认人设不宜再出现旧句式 %q", gone)
+		}
 	}
-	// 无 persona 时不拼人设段，但风格段保留。
+	// 规则 8/9/13 的告知语义统一为「简要说明结果」。
+	for _, kw := range []string{
+		"用一句中文说明任务名与执行时间",
+		"记忆写入成功后用一句话说明记住了什么",
+		"并简要说明结果",
+		"恢复后继续核实并说明结果",
+	} {
+		if !strings.Contains(full, kw) {
+			t.Fatalf("规则文案缺少关键词 %q", kw)
+		}
+	}
+	if !strings.Contains(full, "升级通知属于内部信息") {
+		t.Fatalf("规则 14 应把升级通知限定为内部信息")
+	}
+	// 拼装顺序：身份与说话方式（默认人设）→ 平台规则 → 用户人设。
+	iid := strings.Index(full, "你是 Fast Ship 内置机器人")
+	is := strings.Index(full, "说话方式：")
+	ir := strings.Index(full, "平台规则：")
+	ip := strings.Index(full, "用户人设（追加，可以覆盖上面的默认语气）：")
+	if iid < 0 || is < 0 || ir < 0 || ip < 0 || iid > is || is > ir || ir > ip {
+		t.Fatalf("拼装顺序应为 默认人设→平台规则→用户人设: %d %d %d %d", iid, is, ir, ip)
+	}
+	// 无 persona 时不拼人设段，但默认人设保留。
 	bare := buildBotSystemPrompt("   ")
-	if strings.Contains(bare, "人设（由机器人主人配置）") {
+	if strings.Contains(bare, "用户人设（追加") {
 		t.Fatalf("空白 persona 不应有人设段")
 	}
-	if !strings.Contains(bare, "对话风格：") {
-		t.Fatalf("空白 persona 也应含对话风格段")
+	if !strings.Contains(bare, "说话方式：") {
+		t.Fatalf("空白 persona 也应含默认人设段")
 	}
 }
 
-// TestBotPlatformPromptOnlyUpgrade 平台提示词单独升级（v5）的存量机器人：
+// TestBotStyleUpgradeTriggersOneCompaction INT-133：存量会话（平台提示词低于
+// botStylePromptVersion）在激活时上报 styleUpgraded，已是最新的不再上报；
+// 一次性压缩的 reason 也按风格升级归档。
+func TestBotStyleUpgradeTriggersOneCompaction(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "styup9")
+	bot := env.createBot(t, userID)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"toolset_version":         botToolsetVersion,
+		"platform_prompt_version": botStylePromptVersion - 1,
+	}).Error; err != nil {
+		t.Fatalf("stale bot: %v", err)
+	}
+	stale, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	upgraded, err := env.bots.activateBotPromptWithStyle(stale)
+	if err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	if !upgraded {
+		t.Fatalf("跨过说话方式版本的激活应上报 styleUpgraded")
+	}
+	fresh, _ := env.bots.bots.Get(bot.ID)
+	again, err := env.bots.activateBotPromptWithStyle(fresh)
+	if err != nil {
+		t.Fatalf("activate again: %v", err)
+	}
+	if again {
+		t.Fatalf("已是最新版本不得重复上报 styleUpgraded")
+	}
+	if model.BotCompactionStyle != "style_upgrade" {
+		t.Fatalf("风格升级压缩的 reason 应为 style_upgrade: %q", model.BotCompactionStyle)
+	}
+}
+
+// TestBotPlatformPromptOnlyUpgrade 平台提示词单独升级的存量机器人：
 // 工具集已是最新版本时，激活只重建提示词并恰好 +1 prompt_revision，工具集
 // 与版本字节不动；激活按行幂等，重复调用不再递增。
 func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "ppup5")
 	bot := env.createBot(t, userID)
-	const oldPrompt = "旧平台提示：没有对话风格段落"
+	const oldPrompt = "旧平台提示：没有默认人设段落"
 	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
 		"toolset_version":         botToolsetVersion,
 		"platform_prompt_version": 4,
@@ -95,8 +151,8 @@ func TestBotPlatformPromptOnlyUpgrade(t *testing.T) {
 	if fresh.PromptRevision != revBefore+1 {
 		t.Fatalf("prompt_revision 应恰好 +1: %d -> %d", revBefore, fresh.PromptRevision)
 	}
-	if !strings.Contains(fresh.SystemPromptText, "对话风格") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
-		t.Fatalf("系统提示词应重建为含对话风格的新文案")
+	if !strings.Contains(fresh.SystemPromptText, "说话方式") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
+		t.Fatalf("系统提示词应重建为含默认人设的新文案")
 	}
 
 	// 激活幂等：版本已最新的第二次调用不写库、不再递增 revision。
@@ -130,7 +186,7 @@ func TestBotActivateRebuildsPromptFromLibraryRow(t *testing.T) {
 	const personaA = "旧人设A_MARKER_DO_NOT_RESURRECT：回答保持简短。"
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
 		Name: "librow", PersonaPrompt: personaA,
-		BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-test-abcdef123456",
+		ProviderID: env.createProvider(t, userID, "sk-test-abcdef123456"), Model: "fake-model",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -207,7 +263,7 @@ func TestBotUpdateRenameKeepsPromptState(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "renamerev")
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
 		Name: "before-rename", PersonaPrompt: "人设保持不变。",
-		BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-test-abcdef123456",
+		ProviderID: env.createProvider(t, userID, "sk-test-abcdef123456"), Model: "fake-model",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -438,5 +494,77 @@ func TestBotRuntimeContextNoteBranches(t *testing.T) {
 	}
 	if strings.Contains(rtQuiet.Note, "pending_inputs") {
 		t.Fatalf("无待处理输入时 note 不应提 pending_inputs: %q", rtQuiet.Note)
+	}
+}
+
+// TestBotStyleUpgradeCompactsAtNextBoundary INT-133：说话方式升级后的存量会话
+// 即使输入未达压缩阈值，也在下一个 run 边界强制压缩一次（reason=style_upgrade），
+// 之后不再重复。
+func TestBotStyleUpgradeCompactsAtNextBoundary(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "stybound9")
+	bot := env.createBot(t, userID)
+	env.cfg.Bots.Context.WindowTokens = 60000
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"platform_prompt_version": botStylePromptVersion - 1,
+		"toolset_version":         botToolsetVersion,
+	}).Error; err != nil {
+		t.Fatalf("stale bot: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+
+	// 历史体积落在 (压缩目标, 触发阈值) 之间：不达阈值不会自然触发压缩，
+	// 但确实有值得收进摘要的长内容。
+	seedBotUserMessage(t, env, bot.ID, "最早的问题")
+	probeRun := botFixtureRun(t, env, botRow)
+	base := env.bots.estimateProjectionTokens(botRow, probeRun, nil)
+	env.db.Where("id = ?", probeRun.ID).Delete(&model.BotRun{})
+	window := env.bots.inputBudgetFor(botRow, "fake-model")
+	trigger := botFloorRatio(window, env.cfg.Bots.Context.CompressionRatioV())
+	goal := botFloorRatio(trigger, env.cfg.Bots.Context.TargetRatioV())
+	bigTokens := goal + (trigger-goal)/2 - base
+	if bigTokens < 1000 {
+		t.Fatalf("几何异常：base=%d goal=%d trigger=%d", base, goal, trigger)
+	}
+	seedBotUserMessage(t, env, bot.ID, strings.Repeat("很长的历史内容。", int(bigTokens*7/48)+1))
+	seedBotUserMessage(t, env, bot.ID, "保护轮A")
+	seedBotUserMessage(t, env, bot.ID, "保护轮B")
+	seedBotUserMessage(t, env, bot.ID, "保护轮C")
+	markHistoryConsumed(t, env, botRow, nil)
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{
+		Text: "继续", ClientMessageID: "sty-1",
+	}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForBot(t, "run 收尾", 30*time.Second, func() bool { return env.botSettled(bot.ID) })
+
+	var comp model.BotCompaction
+	if err := env.db.Where("bot_id = ?", bot.ID).Order("created_at DESC").First(&comp).Error; err != nil {
+		t.Fatalf("升级后的边界应产生一次压缩: %v", err)
+	}
+	if comp.Reason != model.BotCompactionStyle {
+		t.Fatalf("压缩 reason 应为 %q，实得 %q", model.BotCompactionStyle, comp.Reason)
+	}
+	if comp.Status == model.BotCompactionFailed {
+		t.Fatalf("风格升级压缩不应失败: %s", comp.Status)
+	}
+
+	// 一次性：下一次 run 不再产生 style_upgrade 压缩。
+	var before int64
+	env.db.Model(&model.BotCompaction{}).Where("bot_id = ?", bot.ID).Count(&before)
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{
+		Text: "再来一次", ClientMessageID: "sty-2",
+	}); err != nil {
+		t.Fatalf("send again: %v", err)
+	}
+	waitForBot(t, "第二轮收尾", 30*time.Second, func() bool { return env.botSettled(bot.ID) })
+	var after int64
+	env.db.Model(&model.BotCompaction{}).Where("bot_id = ? AND reason = ?", bot.ID, model.BotCompactionStyle).Count(&after)
+	if after != 1 {
+		t.Fatalf("风格升级压缩只应发生一次，实得 %d 次", after)
 	}
 }

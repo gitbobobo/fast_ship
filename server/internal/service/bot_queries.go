@@ -352,11 +352,12 @@ func (s *BotService) botMetricsOf(bot *model.Bot, run *model.BotRun, req *model.
 	}
 	baseURL := bot.BaseURL
 	modelName := bot.Model
+	catalogID := bot.CatalogID
 	if run != nil {
 		baseURL = runBaseURLOf(run, bot)
 		modelName = runModelOf(run, bot)
 	}
-	cap := s.capabilityFor(baseURL, modelName)
+	cap := s.capabilityFor(catalogID, baseURL, modelName)
 	out := &BotMetricsResponse{
 		ContextWindow:   cap.WindowTokens,
 		MaxOutputTokens: cap.MaxOutputTokens,

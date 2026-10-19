@@ -567,7 +567,7 @@ func TestBotContextLimitRetryOnce(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "limitretry")
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "retry-bot", BaseURL: srv.URL, Model: "m", APIKey: "sk-x",
+		Name: "retry-bot", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -614,7 +614,7 @@ func TestBotOrdinaryErrorNoRetry(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "noretry")
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "e400", BaseURL: srv.URL, Model: "m", APIKey: "sk-x",
+		Name: "e400", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)

@@ -1633,9 +1633,13 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 // 时副本保持原值，「事务内绝不改 run 副本」是这里的硬不变量（否则 commit 失败
 // 时 run 会冻结一份库里从未持久化的提示词）。每次 run 一个短事务：版本已最新
 // 时只有一次 SELECT、不写库，不再需要进程内的激活缓存与事务后按库补读。
-func (s *BotService) activateBotPrompt(bot *model.Bot) error {
+//
+// 返回 styleUpgraded：本行在激活前低于 botStylePromptVersion，即本次激活
+// 跨过了最近一次说话方式变化，调用方据此在下一个边界触发一次性压缩（INT-133）。
+func (s *BotService) activateBotPromptWithStyle(bot *model.Bot) (bool, error) {
 	now := s.now()
 	var state model.Bot
+	styleUpgraded := false
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		repo := repository.NewBotRepository(tx)
 		fresh, err := repo.Get(bot.ID)
@@ -1643,6 +1647,7 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 			return err
 		}
 		if fresh.ToolsetVersion < botToolsetVersion || fresh.PlatformPromptVersion < botPlatformPromptVersion {
+			styleUpgraded = fresh.PlatformPromptVersion < botStylePromptVersion
 			prompt := buildBotSystemPrompt(fresh.PersonaPrompt)
 			rev := fresh.PromptRevision + 1
 			ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
@@ -1663,14 +1668,21 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	bot.SystemPromptText = state.SystemPromptText
 	bot.PromptRevision = state.PromptRevision
 	bot.PlatformPromptVersion = state.PlatformPromptVersion
 	bot.PersonaPrompt = state.PersonaPrompt
 	bot.ToolsetVersion = state.ToolsetVersion
-	return nil
+	return styleUpgraded, nil
+}
+
+// activateBotPrompt 是 activateBotPromptWithStyle 的包装：不关心说话方式版本
+// 跳变的调用方（定时任务、测试）继续用错误返回值。
+func (s *BotService) activateBotPrompt(bot *model.Bot) error {
+	_, err := s.activateBotPromptWithStyle(bot)
+	return err
 }
 
 // activateToolsetWithPromptTx 在事务内把工具集/平台提示词水位推进到当前版本
@@ -1714,6 +1726,8 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 		return err
 	}
 	note := botToolsetChangeNote(from, botToolsetVersion)
+	// INT-133：升级通知只作为内部信息，模型不需要向用户转述或逐项验证。
+	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
 	content := botLifecycleContent{
 		Event: "toolset_updated",
 		Detail: json.RawMessage(fmt.Sprintf(
