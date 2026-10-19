@@ -269,6 +269,11 @@ func (s *ReviewService) validateCombinations(ctx context.Context, userID, projec
 		if err != nil {
 			return reviewComboError("审查环境 %s 不存在或不属于当前用户", c.EnvironmentId)
 		}
+		// 只读会话（缺 orchestration:operate）无法建线程；保存时就拒绝，
+		// 否则每次派发都会落 dispatch_failed。
+		if !t3HasOperateScope(env.BearerScope) {
+			return reviewComboError("审查环境 %s 是只读会话，重新配对后才能用于审查", env.Name)
+		}
 		var binding model.ProjectT3Binding
 		err = s.db.WithContext(ctx).
 			Where("project_id = ? AND environment_id = ?", projectID, c.EnvironmentId).
@@ -421,6 +426,10 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 		var env model.T3Environment
 		if err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", c.EnvironmentId, project.UserID).First(&env).Error; err != nil {
 			envDetail = fmt.Sprintf("环境 %s 不存在或不属于当前用户", c.EnvironmentId)
+			break
+		}
+		if !t3HasOperateScope(env.BearerScope) {
+			envDetail = fmt.Sprintf("环境 %s 是只读会话，不能用于审查", env.Name)
 			break
 		}
 		var n int64

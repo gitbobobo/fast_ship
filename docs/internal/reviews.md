@@ -293,7 +293,7 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 | --- | --- | --- |
 | GET | `/api/reviews` | 审查总览：每项目一行（开关、组合数、最近 code/visual status、`last_review_at`）；同仓库被占用时 `taken_by` 带占用者登录名且 `can_manage=false`。 |
 | GET | `/api/projects/{id}/review-settings` | 设置 + `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
-| PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
+| PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001（只读会话的环境同样拒绝）；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
 | GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、时间）与每轮 `code_runs[]`/`visual_runs[]`。`?limit=` 默认 20、上限 100。 |
 | POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。返回 `{accepted, head_sha, round_number}`。 |
 
@@ -314,6 +314,10 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 组合本身在 service 边界校验（一律 40001）：`environment_id/instance_id/model`
 必填；代码 1–5 个、视觉 0–3 个；按 `environment_id+instance_id+model+
 options canonical JSON` 判重（同一搭配不同思考强度算不同组合）。
+
+**环境能力**：组合里的环境必须是可写会话（具备 `orchestration:operate`）；
+只读会话在保存时直接 400，前置条件也会把它标成缺项——否则每次派发都只会落
+`dispatch_failed`。
 
 **同仓库唯一**：整个部署内同一仓库只允许一个项目 `enabled=true`（大小写
 不敏感）；其他用户的同仓库项目在 `GET`/`PUT` 里得到 `taken_by`（占用者
@@ -344,7 +348,7 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
   Code Bot 时代的评论不会进入上下文；升级前的历史轮次视为没有历史。
 - **已派发未确认的运行**：`dispatched` 且 `dispatched_at` 为空表示启动 RPC
   结果未确认——账本如实等超时判 `timed_out`，不回捞「线程其实起来了」。
-- **改仓库 URL 不刷新设置快照**：项目的 `github_owner/github_repo` 变了，
-  `project_review_settings.repo_full_name` 快照不随之更新——旧仓库继续占着
-  同仓库唯一索引，需要重新保存一次审查设置（落新快照）才能在新仓库上开启
-  并让 webhook 找到项目。
+- **改仓库 URL 会自动停用审查**：项目更新仓库地址时，同一个事务里把
+  `project_review_settings` 置 `enabled=false` 并把 `repo_full_name` 快照改成
+  新仓库——避免旧仓库继续占着唯一索引、新仓库与别的已启用项目重复。用户需要
+  在新仓库上重新开启（前置条件都按新仓库重算）。

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -159,33 +160,57 @@ func (r *ProjectRepository) GetIssueCounts(projectIDs []string) (map[string]Proj
 }
 
 func (r *ProjectRepository) Update(project *model.Project) error {
-	pred, args := ownedTokenWritePredicate(project.UserID, project.PublicGitHubTokenID, project.CodeGitHubTokenID)
-	res := r.db.Model(&model.Project{}).
-		Where("id = ? AND user_id = ?", project.ID, project.UserID).
-		Where(pred, args...).
-		Updates(map[string]interface{}{
-			"name":                   project.Name,
-			"description":            project.Description,
-			"github_owner":           project.GithubOwner,
-			"github_repo":            project.GithubRepo,
-			"public_github_token_id": project.PublicGitHubTokenID,
-			"code_github_token_id":   project.CodeGitHubTokenID,
-			"updated_at":             time.Now().UTC(),
-		})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected > 0 {
-		return nil
-	}
-	var n int64
-	if err := r.db.Model(&model.Project{}).Where("id = ? AND user_id = ?", project.ID, project.UserID).Count(&n).Error; err != nil {
-		return err
-	}
-	if n == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	return ErrGitHubTokenMissing
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// 仓库归属变更后，项目审查设置里缓存的 repo_full_name 必须跟着走：
+		// 否则旧仓库的设置会继续占着唯一索引，而新仓库可能和另一个已启用
+		// 项目重复（webhook 按 live 字段反查会出现两个启用项目）。
+		// 仓库变了就停用审查并刷新缓存键，由用户按新仓库重新开启。
+		var before model.Project
+		if err := tx.Select("github_owner", "github_repo").
+			Where("id = ? AND user_id = ?", project.ID, project.UserID).
+			First(&before).Error; err != nil {
+			return err
+		}
+		pred, args := ownedTokenWritePredicate(project.UserID, project.PublicGitHubTokenID, project.CodeGitHubTokenID)
+		res := tx.Model(&model.Project{}).
+			Where("id = ? AND user_id = ?", project.ID, project.UserID).
+			Where(pred, args...).
+			Updates(map[string]interface{}{
+				"name":                   project.Name,
+				"description":            project.Description,
+				"github_owner":           project.GithubOwner,
+				"github_repo":            project.GithubRepo,
+				"public_github_token_id": project.PublicGitHubTokenID,
+				"code_github_token_id":   project.CodeGitHubTokenID,
+				"updated_at":             time.Now().UTC(),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected > 0 {
+			if !strings.EqualFold(before.GithubOwner+"/"+before.GithubRepo,
+				project.GithubOwner+"/"+project.GithubRepo) {
+				if err := tx.Model(&model.ProjectReviewSettings{}).
+					Where("project_id = ?", project.ID).
+					Updates(map[string]interface{}{
+						"enabled":        false,
+						"repo_full_name": strings.ToLower(project.GithubOwner + "/" + project.GithubRepo),
+						"updated_at":     time.Now().UTC(),
+					}).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		var n int64
+		if err := tx.Model(&model.Project{}).Where("id = ? AND user_id = ?", project.ID, project.UserID).Count(&n).Error; err != nil {
+			return err
+		}
+		if n == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return ErrGitHubTokenMissing
+	})
 }
 
 func (r *ProjectRepository) Delete(id, userID string) error {

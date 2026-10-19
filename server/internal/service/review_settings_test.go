@@ -143,6 +143,12 @@ func TestUpdateSettings_InvalidCombinations_Returns400(t *testing.T) {
 	project := createTestProject(t, svc.db, user.ID)
 	env := createT3TestEnv(t, svc.db, user.ID, "env1")
 	env2 := createT3TestEnv(t, svc.db, user.ID, "env2")
+	readOnlyEnv := createT3TestEnv(t, svc.db, user.ID, "read-only-env")
+	if err := svc.db.Model(&model.T3Environment{}).Where("id = ?", readOnlyEnv.ID).
+		Update("bearer_scope", "orchestration:read").Error; err != nil {
+		t.Fatalf("set read-only scope: %v", err)
+	}
+	createTestT3Binding(t, svc.db, project.ID, readOnlyEnv.ID, "t3-ro")
 	otherEnv := createT3TestEnv(t, svc.db, other.ID, "other-env")
 	createTestT3Binding(t, svc.db, project.ID, env.ID, "t3-1")
 
@@ -178,6 +184,9 @@ func TestUpdateSettings_InvalidCombinations_Returns400(t *testing.T) {
 		}},
 		{name: "环境不存在", mutate: func(in *api.ReviewSettingsInput) {
 			in.CodeCombinations = []api.ReviewCombination{testCombo(uuid.NewString())}
+		}},
+		{name: "环境是只读会话", mutate: func(in *api.ReviewSettingsInput) {
+			in.CodeCombinations = []api.ReviewCombination{testCombo(readOnlyEnv.ID)}
 		}},
 		{name: "组合缺 model", mutate: func(in *api.ReviewSettingsInput) {
 			c := testCombo(env.ID)
