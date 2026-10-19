@@ -304,6 +304,10 @@ func main() {
 	defer shellHub.Close()
 	t3EnvironmentService := service.NewT3EnvironmentService(t3EnvironmentRepo, cfg, t3Logger, shellHub)
 	t3ThreadsService := service.NewT3ThreadsService(t3EnvironmentRepo, cfg, t3Logger, shellHub)
+	// 环境常驻订阅预热（INT-132）：Ensure 不等待同步（订阅在后台建立），这里
+	// 同步跑完只是一次列表读取加每环境一次内存准入；库迁移（runBootMigrations）
+	// 早已完成，读到的就是落库的全部环境。
+	t3EnvironmentService.PrewarmShellSubscriptions(context.Background())
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)

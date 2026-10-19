@@ -18,7 +18,9 @@ import (
 
 // T3 shell 订阅复用 hub（INT-116）：每个「用户 × 环境」持两条长驻 WS 连接
 // （活跃 / 归档各一条），把原来每个请求一次的全量 shell 快照拉取摊销成
-// 常驻订阅 + 增量推送。设计见 INT-116 v2：
+// 常驻订阅 + 增量推送。INT-132 起订阅跟环境走（启动预热、环境增删改时增删），
+// 不再按读请求的生灭做空闲回收；变更经 t3_shell_events.go 推给浏览器。
+// 设计见 INT-116 v2：
 //   - 两条连接而非一条多路复用：t3RPCSession 是串行客户端（call 会吞掉其他
 //     requestId 的帧），复用一条需自建 requestId 派发；两条单流连接读循环
 //     无需派发，取消/重订阅互不影响。代价是每环境两条 WS，可接受。
@@ -31,7 +33,9 @@ import (
 //     不是 WS 控制帧。
 //
 // 锁边界：hub 锁只护 entry 注册表与 floor；entry 锁只护 state/游标/标记/
-// 通知与连接状态。网络 I/O、Close、等 goroutine 退出全部在锁外。锁序恒为
+// 通知与连接状态；subsMu 只护事件订阅注册表（INT-132），发布点全部在 entry
+// 锁之外调用且绝不拿 hub.mu——现有锁序 hub.mu → entry.mu，任何反向持锁都会
+// 死锁。网络 I/O、Close、等 goroutine 退出全部在锁外。锁序恒为
 // entry.mu → state.mu（state 方法内部自带锁），不存在反向。
 
 const (
@@ -68,14 +72,6 @@ type t3ShellHubConfig struct {
 	MarkerWaitTimeout time.Duration
 	// DialBudget 建连独立预算（不由任何请求 ctx 决定）。
 	DialBudget time.Duration
-	// IdleCheckInterval 空闲回收 ticker 周期（每 entry 一个 goroutine）。
-	IdleCheckInterval time.Duration
-	// IdleDisconnect 距最近一次 View 超过该时长就先断开两条连接、保留内存
-	// 快照（下次 View 用 afterSequence 增量恢复，不必重付全量快照）。
-	// <= 0 表示不暂停，只按 IdleTTL 整条回收。
-	IdleDisconnect time.Duration
-	// IdleTTL 距最近一次 View 超过该时长即自停并摘除（连内存快照一起释放）。
-	IdleTTL time.Duration
 }
 
 func defaultT3ShellHubConfig() t3ShellHubConfig {
@@ -89,11 +85,6 @@ func defaultT3ShellHubConfig() t3ShellHubConfig {
 		CredentialBackoff: 5 * time.Minute,
 		MarkerWaitTimeout: 10 * time.Second,
 		DialBudget:        15 * time.Second,
-		IdleCheckInterval: 30 * time.Second,
-		// 空闲 1 小时先断连保值（千级线程环境重连走增量，远比全量快照便宜）；
-		// 空闲 6 小时再整条淘汰，避免给长期不用的环境一直挂连接。
-		IdleDisconnect: 60 * time.Minute,
-		IdleTTL:        6 * time.Hour,
 	}
 }
 
@@ -156,10 +147,17 @@ type t3ShellHub struct {
 	floors  map[string]t3ShellFloor
 	closed  bool
 
+	// 事件订阅注册表（INT-132）：按用户分组的订阅者集合。subsMu 独立于
+	// hub.mu：发布发生在 entry 数据路径上，若与 entry 锁共用一把锁，一条
+	// 流帧的合并就要和 View 准入互斥；独立锁让发布只与其它发布互斥。
+	subsMu      sync.Mutex
+	subsStopped bool
+	subs        map[string]map[*T3ShellEventSubscription]struct{}
+
 	// lifecycle 是 hub 级生命周期在飞计数：每个 entry Add(1)，entry 的全部
 	// goroutine（监督循环在退出前汇合各自的订阅 reader）退出后 Done。Close
-	// 等它排空——只遍历注册表会漏掉已被 Drop/凭证替换/空闲淘汰摘除、但
-	// goroutine 还没退干净的 entry。
+	// 等它排空——只遍历注册表会漏掉已被 Drop/凭证替换摘除、但 goroutine
+	// 还没退干净的 entry。
 	lifecycle sync.WaitGroup
 
 	ctx       context.Context
@@ -184,6 +182,7 @@ func newT3ShellHubWithConfig(cfg t3ShellHubConfig, logger *zap.Logger) *t3ShellH
 		http:    newT3HTTPClient(),
 		entries: map[string]*t3ShellEntry{},
 		floors:  map[string]t3ShellFloor{},
+		subs:    map[string]map[*T3ShellEventSubscription]struct{}{},
 		ctx:     ctx,
 		cancel:  cancel,
 		done:    make(chan struct{}),
@@ -206,7 +205,9 @@ func t3ShellFingerprint(address, token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// View 读取环境的 shell 状态，必要时建 entry 并等待活跃面出现权威快照。
+// admitEntry 是 entry 的统一准入：closed 检查、指纹+世代停旧建新、floor 拒绝、
+// 不存在则建。View 与 Ensure 共用，保证「读」与「预热」对同一环境只会得到
+// 同一个 entry，不会各自建一套订阅。
 //
 // 版本守卫（世代 = t3_environments.config_revision，只在地址/凭证变更时 SQL
 // 自增、改名不递增）：entry 记建立时的世代与凭证指纹。指纹不一致且请求世代
@@ -214,29 +215,18 @@ func t3ShellFingerprint(address, token string) string {
 // 的旧世代不得替换新 entry。entry 不存在但 floor[key] 高于请求世代时同样拒绝
 // （请求 revision < cutoff 即拒）——防「删除前读出的请求在 Drop 之后把 entry
 // 复活」。
-//
-// ctx 只用于取消等待，不参与建连：entry 的订阅跑在 hub 的服务生命周期 ctx 上，
-// 请求取消不影响后台同步。等待结束条件：活跃面出现权威快照、或首次建连失败、
-// 或 ctx 结束。
-func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token string) (*t3ShellView, error) {
-	// 请求预算已到（典型是同一轮里前面的环境吃完了整轮预算）：此时不要建
-	// entry、更不要拉起两条常驻订阅——它们会一直活到空闲回收，让一次超时的
-	// 列表请求给每个排队环境都留下长驻连接，突破调用方的并发/预算意图。
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
+func (h *t3ShellHub) admitEntry(env *model.T3Environment, token string) (*t3ShellEntry, error) {
 	key := t3ShellHubKey(env.UserID, env.ID)
 	fingerprint := t3ShellFingerprint(env.Address, token)
 
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.closed {
-		h.mu.Unlock()
 		return nil, fmt.Errorf("t3 shell hub 已关闭")
 	}
 	e := h.entries[key]
 	if e != nil && e.fingerprint != fingerprint {
 		if env.ConfigRevision <= e.configRevision {
-			h.mu.Unlock()
 			return nil, fmt.Errorf("%w: 环境凭证或地址正在变更", errT3ShellConfigStale)
 		}
 		// 凭证/地址已变且世代更高：新 entry 先注册占住 key，旧 entry 异步自停
@@ -248,19 +238,39 @@ func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token s
 	}
 	if e == nil {
 		if floor, ok := h.floors[key]; ok && env.ConfigRevision < floor.revision {
-			h.mu.Unlock()
 			return nil, fmt.Errorf("%w: 环境配置已被替换或删除", errT3ShellConfigStale)
 		}
 		e = h.newEntryLocked(key, env, token)
 	}
-	e.mu.Lock()
-	e.lastUsed = time.Now()
-	e.resumeLocked()
-	notify := e.notify
-	e.mu.Unlock()
-	h.mu.Unlock()
+	return e, nil
+}
 
-	return e.waitView(ctx, notify)
+// Ensure 确保环境的常驻订阅 entry 存在，不等待同步（INT-132）：订阅在后台
+// 建立，首个权威快照到达前 View 照常回答 Syncing，语义不变。启动预热、环境
+// 落库后调用——读取路径从「读请求驱动建连」改为「环境常驻连接 + 推送」后，
+// entry 的生命周期跟环境走，不再跟随请求出现与消失。
+func (h *t3ShellHub) Ensure(env *model.T3Environment, token string) error {
+	_, err := h.admitEntry(env, token)
+	return err
+}
+
+// View 读取环境的 shell 状态，必要时建 entry 并等待活跃面出现权威快照。
+//
+// ctx 只用于取消等待，不参与建连：entry 的订阅跑在 hub 的服务生命周期 ctx 上，
+// 请求取消不影响后台同步。等待结束条件：活跃面出现权威快照、或首次建连失败、
+// 或 ctx 结束。
+func (h *t3ShellHub) View(ctx context.Context, env *model.T3Environment, token string) (*t3ShellView, error) {
+	// 请求预算已到（典型是同一轮里前面的环境吃完了整轮预算）：此时不要建
+	// entry、更不要拉起两条常驻订阅——它们是跟环境走的常驻资源，一次取消的
+	// 请求没有资格决定建与不建。
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	e, err := h.admitEntry(env, token)
+	if err != nil {
+		return nil, err
+	}
+	return e.waitView(ctx)
 }
 
 // t3ShellFloorTTL 是配置世代 floor 的保留时长。floor 的用途是拒掉「配置变更前
@@ -283,13 +293,19 @@ type t3ShellFloor struct {
 //   - Update 传落库后重读出的 config_revision（本次 SQL 自增产生的值）：变更前
 //     读出的请求全部被拒——包括并发改名后仍带着旧凭证的行，改名不递增 revision，
 //     它们的世代与变更前相同，同样小于 cutoff。
-//   - Delete 传删除前读到的 revision + 1：删除后行已不存在，任何在途请求最多
-//     携带删除前读到的 revision，< cutoff 成立即被拒；环境 ID 不可复用，不会有
-//     携带更大 revision 的合法请求撞上这个 tombstone。
+//   - Delete 传 math.MaxInt64 哨兵：淘汰条件 e.configRevision < cutoff 恒真，
+//     entry 无条件关闭；floor 也记 MaxInt64，之后任何迟到的 Ensure/View（在途
+//     请求携带的世代必然有限）都被拒。环境 ID 不可复用，永久拒绝正是该语义的
+//     正确表达。不能传「删除前 revision + 1」：并发重配先把世代升到 r+1 再被
+//     删除时，旧 cutoff=r+1 会保留同代 entry，迟到的 Ensure 也能借同代指纹
+//     通过——用哨兵不给这类交错留窗口。floor 过期后（记录时刻起 1 小时）被
+//     GC 无碍：环境行已删，预热（ListAll）与读写路径都不会再为它建 entry，
+//     能撞上 floor 的只剩几分钟生命周期的在途请求。
 //
 // 只淘汰旧代 entry：entry 的世代（建立时的 env.ConfigRevision）小于 cutoff 才
 // 停；已用新配置建立的同代 entry（revision == cutoff）保留，不得关掉——真实
-// 流程里「重配 Drop 后新请求重建 entry，又一次幂等 Drop」就是这个形状。
+// 流程里「重配 Drop 后新请求重建 entry，又一次幂等 Drop」就是这个形状。哨兵
+// cutoff（MaxInt64）恒大于任何世代，delete 必然发生，是该规则的自然特例。
 func (h *t3ShellHub) Drop(userID, envID string, cutoffRevision int64) {
 	key := t3ShellHubKey(userID, envID)
 	h.mu.Lock()
@@ -335,6 +351,23 @@ func (h *t3ShellHub) Close() {
 		h.entries = map[string]*t3ShellEntry{}
 		h.mu.Unlock()
 
+		// 事件订阅全部关闭：消费方（SSE handler）以信号 channel 关闭为退出
+		// 条件。先在 subsMu 内摘空注册表，再在锁外逐个 Close——sub.Close 会
+		// 回调 unsubscribe（拿 subsMu），锁内直接调会自锁。
+		h.subsMu.Lock()
+		subs := make([]*T3ShellEventSubscription, 0)
+		for _, set := range h.subs {
+			for sub := range set {
+				subs = append(subs, sub)
+			}
+		}
+		h.subs = map[string]map[*T3ShellEventSubscription]struct{}{}
+		h.subsStopped = true
+		h.subsMu.Unlock()
+		for _, sub := range subs {
+			sub.Close()
+		}
+
 		h.cancel()
 		close(h.done)
 		for _, e := range entries {
@@ -346,13 +379,13 @@ func (h *t3ShellHub) Close() {
 	})
 }
 
-// newEntryLocked 创建 entry 并启动三条 goroutine（活跃/归档监督循环 + 空闲
-// 回收 ticker）。只做内存操作与 go 语句，网络 I/O 都在 goroutine 内、锁外。
-// 调用方持有 hub 锁。
+// newEntryLocked 创建 entry 并启动两条监督 goroutine（活跃/归档各一条）。
+// 只做内存操作与 go 语句，网络 I/O 都在 goroutine 内、锁外。调用方持有 hub 锁。
 func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token string) *t3ShellEntry {
 	e := &t3ShellEntry{
 		hub:            h,
 		key:            key,
+		userID:         env.UserID,
 		envID:          env.ID,
 		configRevision: env.ConfigRevision,
 		fingerprint:    t3ShellFingerprint(env.Address, token),
@@ -361,8 +394,6 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 		token:      token,
 		state:      newT3ShellState(),
 		notify:     make(chan struct{}),
-		wake:       make(chan struct{}),
-		lastUsed:   time.Now(),
 		activeConn: t3ShellConnConnecting,
 		stop:       make(chan struct{}),
 		done:       make(chan struct{}),
@@ -372,7 +403,7 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	// 生命周期计数：entry 的全部 goroutine（监督循环经 readStreamLoop 退出前
 	// 会汇合各自的订阅 reader）退出后释放。
 	h.lifecycle.Add(1)
-	e.wg.Add(3)
+	e.wg.Add(2)
 	go func() {
 		defer e.wg.Done()
 		h.runFaceSubscription(e, false)
@@ -380,10 +411,6 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 	go func() {
 		defer e.wg.Done()
 		h.runFaceSubscription(e, true)
-	}()
-	go func() {
-		defer e.wg.Done()
-		h.runIdleReaper(e)
 	}()
 	// done 在全部监督 goroutine 退出后关闭，供测试汇合；同时释放 hub 的
 	// 生命周期计数（Close 经它等待已被摘除的 entry）。
@@ -399,8 +426,10 @@ func (h *t3ShellHub) newEntryLocked(key string, env *model.T3Environment, token 
 type t3ShellEntry struct {
 	hub *t3ShellHub
 	key string
-	// envID 只用于日志。
-	envID string
+	// userID 是发布事件时的订阅注册表键（key 的 \x00 前段）；envID 除进 key
+	// 外还进事件负载与日志。
+	userID string
+	envID  string
 
 	// 以下四项在 entry 生命周期内不变（凭证/地址变更走停旧建新）。世代取建立
 	// 时的 env.ConfigRevision：与请求世代比对决定停旧建新与 Drop 的淘汰范围。
@@ -413,13 +442,18 @@ type t3ShellEntry struct {
 	// state 的锁在 t3ShellState 内部；锁序恒为 mu → state.mu。
 	state        *t3ShellState
 	notify       chan struct{} // 关闭并替换以广播状态变化，View select 等待
-	lastUsed     time.Time
 	activeConn   t3ShellConnState
 	activeErr    error
 	obsReady     bool
 	obsSynced    bool
 	obsConn      t3ShellConnState
 	lastSyncedAt time.Time
+
+	// 已发布的事件状态缓存（INT-132）：publishStateIfChanged 在 entry 锁内
+	// 比较，只有翻转才对外发布；errText 一并缓存，stale/failed 下失败原因
+	// 的变化（如「网络不可达」→「凭证被拒」）对用户是不同的提示，也要触发。
+	publishedState string
+	publishedErr   string
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -431,34 +465,6 @@ type t3ShellEntry struct {
 	// 权威全量快照重新建立追平。同一时刻只有一条活跃连接（监督循环串行），
 	// entry 锁足以保护。
 	forceResync bool
-
-	// 空闲暂停：paused 期间两条监督循环停在 waitIfPaused，wake 关闭并替换
-	// 即唤醒（与 notify 同一「关旧换新」模式）。activeCancel/archivedCancel
-	// 是当前在飞连接的取消函数，暂停时用它断开连接但保住内存快照。
-	paused         bool
-	wake           chan struct{}
-	activeCancel   context.CancelFunc
-	archivedCancel context.CancelFunc
-}
-
-// setConnCancel 登记/清除当前连接取消函数。调用方不得持有 entry 锁。
-//
-// 竞态守卫（F4）：监督循环先过 waitIfPaused 再登记 cancel，reaper 可能恰在
-// 这两步之间置暂停——若登记时不复查，这条连接会漏掉取消、一直挂到空闲淘汰。
-// 因此在同一把 entry 锁内复查 paused/isStopped，已暂停或已停止就立刻取消
-// 刚登记的这条连接（cancel 调用在锁外，关连接的等待不持锁）。
-func (e *t3ShellEntry) setConnCancel(archived bool, cancel context.CancelFunc) {
-	e.mu.Lock()
-	if archived {
-		e.archivedCancel = cancel
-	} else {
-		e.activeCancel = cancel
-	}
-	mustCancel := cancel != nil && (e.paused || e.isStopped())
-	e.mu.Unlock()
-	if mustCancel {
-		cancel()
-	}
 }
 
 // setForceResync 置强制全量重同步标记（F1：marker 预算耗尽仍未追平时）。
@@ -483,50 +489,6 @@ func (e *t3ShellEntry) clearForceResync() {
 	e.mu.Lock()
 	e.forceResync = false
 	e.mu.Unlock()
-}
-
-// resumeLocked 结束暂停并唤醒监督循环。调用方持有 entry 锁。
-func (e *t3ShellEntry) resumeLocked() {
-	if !e.paused {
-		return
-	}
-	e.paused = false
-	close(e.wake)
-	e.wake = make(chan struct{})
-}
-
-// pauseLocked 置暂停标记并收走当前两条连接的取消函数。调用方持有 entry 锁，
-// 且「lastUsed 采样 → 暂停决策 → 置标记」必须在同一临界区内完成——决策若
-// 基于锁外旧采样，刚被 View 刷新过 lastUsed 的 entry 会被误暂停（F4）。返回
-// 的取消函数由调用方在锁外逐个调用（关连接的等待不持锁）。
-func (e *t3ShellEntry) pauseLocked() []context.CancelFunc {
-	e.paused = true
-	return []context.CancelFunc{e.activeCancel, e.archivedCancel}
-}
-
-// waitIfPaused 在空闲暂停期间阻塞。返回 false 表示 entry 已停止或 hub 已关闭，
-// 监督循环应当退出。
-func (e *t3ShellEntry) waitIfPaused() bool {
-	for {
-		e.mu.Lock()
-		paused := e.paused
-		wake := e.wake
-		stopped := e.isStopped()
-		e.mu.Unlock()
-		if stopped {
-			return false
-		}
-		if !paused {
-			return true
-		}
-		select {
-		case <-wake:
-		case <-e.stop:
-			return false
-		case <-e.hub.ctx.Done():
-			return false
-		}
-	}
 }
 
 func (e *t3ShellEntry) shutdown() {
@@ -569,7 +531,8 @@ func (e *t3ShellEntry) refreshLocked() {
 }
 
 // noteConnState 更新指定面的连接状态并检查翻转。connErr 只在非空时覆盖：
-// 停机取消产生的空错误不抹掉上一次的真实失败原因。
+// 停机取消产生的空错误不抹掉上一次的真实失败原因。状态事件在锁外发布
+// （发布路径不持 entry 锁，见锁边界说明）。
 func (e *t3ShellEntry) noteConnState(archived bool, state t3ShellConnState, connErr error) {
 	e.mu.Lock()
 	if !archived {
@@ -579,46 +542,88 @@ func (e *t3ShellEntry) noteConnState(archived bool, state t3ShellConnState, conn
 		}
 	}
 	e.refreshLocked()
+	newState, changed := e.publishStateIfChanged()
 	e.mu.Unlock()
+	if changed {
+		e.hub.publishState(e, newState)
+	}
 }
 
-// refresh 在状态可能变化后（应用增量/标记翻转）从锁外调用。
+// refresh 在状态可能变化后（应用增量/标记翻转）从锁外调用。绝大多数帧不翻转
+// 状态，发布在锁内被比较短路，开销只是一次小结构拷贝。
 func (e *t3ShellEntry) refresh() {
 	e.mu.Lock()
 	e.refreshLocked()
+	newState, changed := e.publishStateIfChanged()
 	e.mu.Unlock()
+	if changed {
+		e.hub.publishState(e, newState)
+	}
+}
+
+// stateLocked 只推导视图状态，不组装快照。viewLocked 与事件发布的比较共用，
+// 保证对「当前状态」的判定永不漂移；事件发布每帧都跑，绝不能为此整份拷贝
+// 快照。调用方持有 entry 锁。
+func (e *t3ShellEntry) stateLocked() t3ShellViewState {
+	st := e.state.status()
+	switch {
+	case !st.ActiveReady:
+		if e.activeConn == t3ShellConnFailed {
+			return t3ShellFailed
+		}
+		return t3ShellSyncing
+	case e.activeConn == t3ShellConnSubscribed && st.ActiveSynced:
+		return t3ShellReady
+	default:
+		return t3ShellStale
+	}
+}
+
+// publishStateIfChanged 比较当前视图状态与已发布缓存，翻转则更新缓存并返回
+// (新状态, true)。调用方持有 entry 锁。stale/failed 下失败原因文案一并缓存：
+// 同状态下的 Err 变化（如「网络不可达」→「凭证被拒」）对用户是不同的提示，
+// 也要触发发布。
+func (e *t3ShellEntry) publishStateIfChanged() (string, bool) {
+	state := e.stateLocked().String()
+	errText := ""
+	if state == t3ShellStale.String() || state == t3ShellFailed.String() {
+		if e.activeErr != nil {
+			errText = e.activeErr.Error()
+		}
+	}
+	if state == e.publishedState && errText == e.publishedErr {
+		return "", false
+	}
+	e.publishedState = state
+	e.publishedErr = errText
+	return state, true
 }
 
 // viewLocked 组装当前视图。调用方持有 entry 锁。
 func (e *t3ShellEntry) viewLocked() *t3ShellView {
-	st := e.state.status()
-	view := &t3ShellView{}
-	switch {
-	case !st.ActiveReady:
-		if e.activeConn == t3ShellConnFailed {
-			view.State = t3ShellFailed
-			view.Err = e.activeErr
-		} else {
-			view.State = t3ShellSyncing
-		}
-	case e.activeConn == t3ShellConnSubscribed && st.ActiveSynced:
-		view.State = t3ShellReady
-		view.Snaps = e.state.snapshots()
-	default:
-		view.State = t3ShellStale
+	view := &t3ShellView{State: e.stateLocked()}
+	switch view.State {
+	case t3ShellFailed:
+		view.Err = e.activeErr
+	case t3ShellStale:
 		view.Snaps = e.state.snapshots()
 		view.Err = e.activeErr
 		if !e.lastSyncedAt.IsZero() {
 			view.SyncedAgo = time.Since(e.lastSyncedAt)
+		}
+	default:
+		// Ready：带快照；Syncing：无数据。
+		if view.State == t3ShellReady {
+			view.Snaps = e.state.snapshots()
 		}
 	}
 	return view
 }
 
 // waitView 等到可回答（有权威快照 / 首次建连失败 / entry 已停止 / ctx 或 hub
-// 结束）后返回视图。notify 是进入等待前抓住的广播 channel，状态翻转后 entry
-// 会关闭它唤醒全部等待者。
-func (e *t3ShellEntry) waitView(ctx context.Context, notify chan struct{}) (*t3ShellView, error) {
+// 结束）后返回视图。状态翻转后 entry 会关闭并替换 notify 唤醒全部等待者；
+// 每轮循环重新读取，保证抓到最新的广播 channel。
+func (e *t3ShellEntry) waitView(ctx context.Context) (*t3ShellView, error) {
 	for {
 		e.mu.Lock()
 		view := e.viewLocked()
@@ -644,6 +649,10 @@ func (e *t3ShellEntry) waitView(ctx context.Context, notify chan struct{}) (*t3S
 				return view, nil
 			}
 			return nil, ctx.Err()
+		case <-e.stop:
+			// Drop/替换：监督循环在退避窗口里直接退出，不会再经
+			// refreshLocked 广播 notify；不监听 stop 就会挂到 ctx 预算耗尽
+			// （列表 15s、详情 25s）才作答。回到循环头顶以 stopped 视图返回。
 		case <-e.hub.done:
 			return nil, fmt.Errorf("t3 shell hub 已关闭")
 		}
@@ -661,25 +670,16 @@ type t3ShellConnResult struct {
 func (h *t3ShellHub) runFaceSubscription(e *t3ShellEntry, archived bool) {
 	attempts := 0
 	for {
-		if !e.waitIfPaused() {
-			return
-		}
-
 		result := h.connectFaceOnce(e, archived)
 
-		// 因空闲暂停或停机而结束的连接不算失败：直接回到循环顶部（暂停时
-		// waitIfPaused 会阻塞到被唤醒），不要在这里睡退避——否则回访可能
-		// 白等整段退避（凭证类失败时最多 5min），也堵住「暂停→回访发生在
-		// 连接收尾期间」这类丢唤醒的窗口。
-		e.mu.Lock()
-		paused := e.paused
-		stopped := e.isStopped()
-		e.mu.Unlock()
-		if stopped {
+		// 停机（Drop/替换/Close）结束的连接直接退出；hub 关闭同理。
+		if e.isStopped() {
 			return
 		}
-		if paused {
-			continue
+		select {
+		case <-h.ctx.Done():
+			return
+		default:
 		}
 
 		// 退避：1s→2s→4s…上限 30s，±25% jitter。同步稳定超过
@@ -693,9 +693,6 @@ func (h *t3ShellHub) runFaceSubscription(e *t3ShellEntry, archived bool) {
 		backoff := h.backoffFor(attempts, result.credential)
 
 		timer := time.NewTimer(backoff)
-		e.mu.Lock()
-		wake := e.wake
-		e.mu.Unlock()
 		select {
 		case <-e.stop:
 			timer.Stop()
@@ -703,10 +700,6 @@ func (h *t3ShellHub) runFaceSubscription(e *t3ShellEntry, archived bool) {
 		case <-h.ctx.Done():
 			timer.Stop()
 			return
-		case <-wake:
-			// View 结束了空闲暂停：立刻重试，不必等完这段退避（否则用户回到
-			// 应用后可能白等最多 30s，凭证类失败更是 5min）。
-			timer.Stop()
 		case <-timer.C:
 		}
 	}
@@ -735,8 +728,6 @@ func (h *t3ShellHub) backoffFor(attempts int, credential bool) time.Duration {
 func (h *t3ShellHub) connectFaceOnce(e *t3ShellEntry, archived bool) t3ShellConnResult {
 	connCtx, cancelConn := context.WithCancel(h.ctx)
 	defer cancelConn()
-	e.setConnCancel(archived, cancelConn)
-	defer e.setConnCancel(archived, nil)
 	// 连接取消监听：entry 停止时断开本条连接。它是本连接的辅助 goroutine，
 	// 必须汇合，否则 Close 的「所有 goroutine 已退出」不成立。
 	watchDone := make(chan struct{})
@@ -920,8 +911,8 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 	for {
 		select {
 		case <-connCtx.Done():
-			// 停机/暂停取消：归档面同样终止（F2 统一撤销归档可信度），
-			// err 为 nil 时记「未就绪」而不抹掉既有失败原因。
+			// 停机取消：归档面同样终止（F2 统一撤销归档可信度），err 为 nil
+			// 时记「未就绪」而不抹掉既有失败原因。
 			h.endFaceConnection(e, archived, nil)
 			return t3ShellConnResult{syncedAt: e.syncConfirmedAt()}
 
@@ -1000,12 +991,14 @@ func (h *t3ShellHub) readStreamLoop(e *t3ShellEntry, session *t3RPCSession, conn
 // endFaceConnection 收尾连接状态。归档面（F2）：任何终止路径——读错误/写
 // 失败/正常 Exit/取消/探测或拨号失败——统一撤销归档面可信度（清空归档两表 +
 // ArchiveErr），直到下一次归档权威快照到达才恢复；归档数据只有伴随健康连接
-// 才可信，凭缓存继续宣称归档命中可信会违反 G1。err 为 nil（停机/暂停取消）
-// 时记「未就绪」。活跃面只更新连接状态与失败分类：单面终止不推翻活跃数据
+// 才可信，凭缓存继续宣称归档命中可信会违反 G1。归档失效同时发布一次 Full
+// 事件：列表需要把「归档线程暂不可读」呈现出来。err 为 nil（停机取消）时记
+// 「未就绪」。活跃面只更新连接状态与失败分类：单面终止不推翻活跃数据
 // （G1），View 的 Stale 判定用得上最近一次真实失败原因。
 func (h *t3ShellHub) endFaceConnection(e *t3ShellEntry, archived bool, connErr error) {
 	if archived {
 		e.state.markArchiveFailed(connErr)
+		h.publishThreadEvent(e, nil, true)
 	}
 	e.noteConnState(archived, t3ShellConnFailed, connErr)
 	if connErr != nil {
@@ -1024,8 +1017,11 @@ func (e *t3ShellEntry) syncConfirmedAt() time.Time {
 	return time.Time{}
 }
 
-// applyActiveValues 把活跃流 Chunk 的全部 value 依次解码并应用到状态。
+// applyActiveValues 把活跃流 Chunk 的全部 value 依次解码并应用到状态，应用
+// 成功后把本批变化发布给该用户的订阅者。应用失败（坏帧）整条流失败重连，
+// 不发布线程事件——紧随其后的连接终止会发布状态事件，浏览器据此整面刷新。
 func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage) error {
+	batch := t3ShellEventBatch{}
 	for _, raw := range values {
 		var item t3ShellStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
@@ -1034,17 +1030,21 @@ func (h *t3ShellHub) applyActiveValues(e *t3ShellEntry, values []json.RawMessage
 		if err := e.state.applyActiveItem(item); err != nil {
 			return err
 		}
+		batch.observeActive(&item)
 		// 权威全量快照落地（无 enrichment 标记）→ 强制重同步要求到此结束。
 		// 元数据帧不算：它不是权威数据。
 		if item.Kind == "snapshot" && item.Snapshot != nil && len(item.ResolvedRepositoryIdentityRoots) == 0 {
 			e.clearForceResync()
 		}
 	}
+	h.publishThreadEvent(e, batch.ids, batch.full)
 	return nil
 }
 
-// applyArchiveValues 把归档流 Chunk 的全部 value 依次解码并应用到状态。
+// applyArchiveValues 把归档流 Chunk 的全部 value 依次解码并应用到状态，发布
+// 语义同活跃面（归档线程同样出现在列表里）。
 func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessage) error {
+	batch := t3ShellEventBatch{}
 	for _, raw := range values {
 		var item t3ArchiveStreamItem
 		if err := json.Unmarshal(raw, &item); err != nil {
@@ -1053,7 +1053,9 @@ func (h *t3ShellHub) applyArchiveValues(e *t3ShellEntry, values []json.RawMessag
 		if err := e.state.applyArchiveItem(item); err != nil {
 			return err
 		}
+		batch.observeArchive(&item)
 	}
+	h.publishThreadEvent(e, batch.ids, batch.full)
 	return nil
 }
 
@@ -1067,67 +1069,4 @@ func (h *t3ShellHub) logFaceFailure(e *t3ShellEntry, archived bool, err error) {
 		zap.String("environment_id", e.envID),
 		zap.String("face", face),
 		zap.Error(err))
-}
-
-// runIdleReaper 每 entry 一个轻量 ticker：超过 IdleDisconnect 先断连保值，
-// 超过 IdleTTL 自停并从 hub 摘除（仅当注册表里仍是本 entry）。不做独立 janitor。
-func (h *t3ShellHub) runIdleReaper(e *t3ShellEntry) {
-	ticker := time.NewTicker(h.cfg.IdleCheckInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-e.stop:
-			return
-		case <-h.ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		if h.reapTick(e) {
-			return
-		}
-	}
-}
-
-// reapTick 执行一次空闲检查，返回 true 表示 entry 已淘汰、reaper 应退出。
-// lastUsed 的采样与 pause 决策在同一临界区内完成（F4）；淘汰还要在摘除
-// 注册表的同一临界区（hub.mu → entry.mu 锁序）复核一次 lastUsed：决策与
-// 摘除之间 View 可能刚刷新过它（回访），那时不得淘汰。行动（关连接在锁外）。
-func (h *t3ShellHub) reapTick(e *t3ShellEntry) bool {
-	e.mu.Lock()
-	idle := time.Since(e.lastUsed)
-	evict := idle > h.cfg.IdleTTL
-	var cancels []context.CancelFunc
-	pause := !evict && h.cfg.IdleDisconnect > 0 && !e.paused && idle > h.cfg.IdleDisconnect
-	if pause {
-		cancels = e.pauseLocked()
-	}
-	e.mu.Unlock()
-
-	if !evict {
-		for _, cancel := range cancels {
-			if cancel != nil {
-				cancel()
-			}
-		}
-		return false
-	}
-
-	h.mu.Lock()
-	if h.entries[e.key] != e {
-		// 已被替换或摘除：本 reaper 没有可淘汰的对象，退出。
-		h.mu.Unlock()
-		return true
-	}
-	e.mu.Lock()
-	stillIdle := time.Since(e.lastUsed) > h.cfg.IdleTTL
-	if stillIdle {
-		delete(h.entries, e.key)
-	}
-	e.mu.Unlock()
-	h.mu.Unlock()
-	if !stillIdle {
-		return false
-	}
-	e.shutdown()
-	return true
 }

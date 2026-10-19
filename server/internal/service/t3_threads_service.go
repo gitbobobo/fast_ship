@@ -36,7 +36,7 @@ import (
 //     pendingRuntimeRequest。shell 在活跃+归档两份快照中按线程 ID 找出
 //     （不过滤子代理，详情可进入子线程），找不到时明确失败，不假 idle；
 //     归档面不可信时不得断言线程不存在（G1）。陈旧/同步中的快照一律不当
-//     可信运行态（50202），陈旧 idle 会让前端停止轮询、让 Stop 无事可做。
+//     可信运行态（50202），陈旧 idle 会让 Stop 无事可做。
 //     条目 ID 由 sourceThreadId + 原始 id 合成。
 //   - 条目正文：命令输出/工具输出/subagent 结果在 wire 投影中被上游裁剪，
 //     展开时经 WS RPC `orchestration.getTurnItem` 补读，参数从可见行本身派生。
@@ -91,6 +91,13 @@ func NewT3ThreadsService(envRepo *repository.T3EnvironmentRepository, cfg *confi
 	}
 }
 
+// SubscribeShellEvents 注册当前用户的 shell 变更订阅（INT-132，SSE 推送用）。
+// handler 不直接持有 hub；订阅关闭（hub 停机或消费方主动 Close）以信号
+// channel 关闭表达，Drain 返回 nil 即退出。
+func (s *T3ThreadsService) SubscribeShellEvents(userID string) *T3ShellEventSubscription {
+	return s.shellHub.Subscribe(userID)
+}
+
 func (s *T3ThreadsService) List(ctx context.Context, userID string) (*T3ThreadListResponse, error) {
 	envs, err := s.envRepo.ListByUserID(ctx, userID)
 	if err != nil {
@@ -133,11 +140,11 @@ func (s *T3ThreadsService) List(ctx context.Context, userID string) (*T3ThreadLi
 //
 // 运行态取 hub 可信活跃面的 ThreadShell（投影 thread 是 AppThread，无运行态
 // 字段）；HTTP 投影供时间线。先读运行态、后读 HTTP 投影：两读之间运行
-// 结束时拼出的是「idle 运行态 + 更新的时间线」，前端停止轮询也不会漏掉最终
-// 消息——反过来先读投影则会留下「旧时间线 + idle」的错位。两段读取共享一个
+// 结束时拼出的是「idle 运行态 + 更新的时间线」，不会漏掉最终消息——反过来
+// 先读投影则会留下「旧时间线 + idle」的错位。两段读取共享一个
 // 整体 deadline（< 前端 35s 超时），ctx 取消即刻中止。hub 视图未就绪（首次
 // 同步中）或只剩陈旧快照（断连重连中）时一律 50202——陈旧快照里的 idle 会让
-// 前端停止轮询、让 Stop 无事可做，不得当可信运行态回答。shell 读不到时以
+// Stop 无事可做，不得当可信运行态回答。shell 读不到时以
 // HTTP 投影归类：投影 404 → 40418（线程真的不存在），投影在、shell 无 →
 // 50202（上游快照面不一致，明确失败）。归档面不可信时只信活跃面（G1）：
 // 活跃命中照常返回详情；活跃没有则回上游错误重试——归档不可信，不能借它把

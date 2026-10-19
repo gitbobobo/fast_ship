@@ -410,3 +410,29 @@ func TestRequestLogBindsRunIDForRunTokenAuth(t *testing.T) {
 func fakeSecret(prefix, suffix string) string {
 	return prefix + suffix
 }
+
+// statusCaptureWriter 必须把 Unwrap 透传出去：SSE 流用
+// http.NewResponseController(c.Writer).SetWriteDeadline 防慢客户端永久挂住，
+// 而它嵌入的是 gin.ResponseWriter 接口（接口没有 Unwrap 方法），漏写这层
+// 透传会让生产环境的写超时静默退化为 ErrNotSupported。
+func TestRequestLogWriterSupportsResponseControllerDeadline(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(RequestLog(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	var deadlineErr error
+	router.GET("/probe", func(c *gin.Context) {
+		deadlineErr = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(time.Second))
+		c.String(http.StatusOK, "ok")
+	})
+	srv := httptest.NewServer(router)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/probe")
+	if err != nil {
+		t.Fatalf("probe request: %v", err)
+	}
+	defer resp.Body.Close()
+	if deadlineErr != nil {
+		t.Fatalf("SetWriteDeadline under RequestLog = %v, want nil (Unwrap missing?)", deadlineErr)
+	}
+}

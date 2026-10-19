@@ -276,8 +276,8 @@ func t3ThreadStatus(shell *t3ThreadShell) T3ThreadSummaryStatus {
 	// 代理继续（上游 backgroundWorkHoldsCompletion，orchestrationV2PendingBackgroundWork.ts：
 	// kind=command 不占完成位——dev server 之类可长跑数小时；其余一切 kind
 	// 含未知都占；kind 缺省按 background_task 加载，故空串同样占位）。
-	// 存在占位工作 → running：线程还有会唤醒代理的工作，详情保持轮询——
-	// 不是「等待输入或审批」。判定置于 pendingRuntimeRequest 与
+	// 存在占位工作 → running：线程还有会唤醒代理的工作，状态徽标不能提前
+	// 落成 idle——不是「等待输入或审批」。判定置于 pendingRuntimeRequest 与
 	// activityRunStatus 之后、shell.status 兜底之前。
 	for _, task := range shell.PendingBackgroundTasks {
 		if task.Kind != "command" {

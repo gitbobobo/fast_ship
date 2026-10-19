@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ThreadDetail, ThreadItem, ThreadSummary, WorkspaceOptions } from "@/lib/api/threads";
-import { makeActivity, makeQueue } from "@/test/threads";
+import type { ThreadItem, ThreadSummary, WorkspaceOptions } from "@/lib/api/threads";
 import {
   approvalOptions,
   buildModelSelection,
@@ -13,7 +12,6 @@ import {
   reorderTarget,
   resolveModel,
   resolvePreviousWorktree,
-  shouldPollThread,
 } from "./threads-compose";
 
 const item = (over: Partial<ThreadItem>): ThreadItem => ({
@@ -29,32 +27,6 @@ describe("access", () => {
     expect(canOperate({ access: "operate" })).toBe(true);
     expect(canOperate({ access: "read-only" })).toBe(false);
     expect(canOperate(undefined)).toBe(false);
-  });
-});
-
-describe("shouldPollThread", () => {
-  const detail = (over: Partial<ThreadDetail>) =>
-    ({
-      thread: { status: "idle" },
-      items: [],
-      queue: makeQueue(),
-      activity: makeActivity(),
-      ...over,
-    }) as ThreadDetail;
-
-  it("polls for running, stopping, pending requests, and an unheld queue", () => {
-    expect(shouldPollThread(detail({ thread: { status: "running" } as ThreadDetail["thread"] }))).toBe(true);
-    expect(shouldPollThread(detail({ activity: makeActivity({ stopping: true }) }))).toBe(true);
-    expect(shouldPollThread(detail({ activity: makeActivity({ has_pending_requests: true }) }))).toBe(true);
-    const items = [{ run_id: "r", message_id: "m", text: "t" }];
-    expect(shouldPollThread(detail({ queue: makeQueue({ items }) }))).toBe(true);
-  });
-
-  it("stops when idle, or only a held queue remains", () => {
-    expect(shouldPollThread(detail({}))).toBe(false);
-    const items = [{ run_id: "r", message_id: "m", text: "t" }];
-    expect(shouldPollThread(detail({ queue: makeQueue({ held: true, items }) }))).toBe(false);
-    expect(shouldPollThread(undefined)).toBe(false);
   });
 });
 

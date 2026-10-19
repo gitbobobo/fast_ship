@@ -235,6 +235,9 @@ func TestT3CreateThreadLaunch(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
 	envID := pairWritable(t, e, userID, "启动机")
+	// Create 已预热常驻订阅（INT-132）：等它稳定，启动路径的断言窗口从
+	// 这里起算，预热流量不进窗口。
+	before := awaitPrewarmSubscriptions(t, e.fake)
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
@@ -360,14 +363,15 @@ func TestT3CreateThreadLaunch(t *testing.T) {
 		t.Fatalf("expected 40401 for foreign project, got %v", err)
 	}
 
-	// 启动路径零 shell 调用：config/settings/vcs/launch RPC 照常，订阅 absent。
-	for _, rpc := range e.fake.recordedRPC() {
+	// 启动路径零 shell 调用：config/settings/vcs/launch RPC 照常，订阅 absent
+	// （断言窗口从预热稳定后起算，Create 预热的流量不进窗口）。
+	for _, rpc := range e.fake.recordedRPC()[before:] {
 		switch rpc.method {
 		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
 			t.Fatalf("create path must not subscribe shell, got %s", rpc.method)
 		}
 	}
-	if len(e.fake.recordedRPC()) == 0 {
+	if len(e.fake.recordedRPC()) <= before {
 		t.Fatalf("expected launch-side RPCs to be recorded")
 	}
 }
@@ -996,6 +1000,9 @@ func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
 	envID := pairWritable(t, e, userID, "选项机")
+	// Create 已预热常驻订阅（INT-132）：等它稳定，两条选项路径的断言窗口
+	// 从这里起算，预热流量不进窗口。
+	before := awaitPrewarmSubscriptions(t, e.fake)
 	ctx := context.Background()
 
 	e.fake.mu.Lock()
@@ -1082,8 +1089,9 @@ func TestT3ComposerAndWorkspaceOptions(t *testing.T) {
 		t.Fatalf("auto-follow should drain next_cursor, got %+v", followed.NextCursor)
 	}
 
-	// 两条路径零 shell 订阅：config/settings/vcs RPC 照常，订阅 absent。
-	for _, rpc := range e.fake.recordedRPC() {
+	// 两条路径零 shell 订阅：config/settings/vcs RPC 照常，订阅 absent
+	// （断言窗口从预热稳定后起算，Create 预热的流量不进窗口）。
+	for _, rpc := range e.fake.recordedRPC()[before:] {
 		switch rpc.method {
 		case t3RPCSubscribeShell, t3RPCSubscribeArchivedShell:
 			t.Fatalf("composer/workspace path must not subscribe shell, got %s", rpc.method)

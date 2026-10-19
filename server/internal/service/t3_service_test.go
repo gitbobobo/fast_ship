@@ -305,6 +305,33 @@ func (f *fakeT3Environment) subscribeShellCount() int {
 	return n
 }
 
+// awaitPrewarmSubscriptions 等环境的常驻订阅（INT-132：Create 落库即预热）
+// 完成两条订阅，返回当前 RPC 记录条数。调用方以它圈出「被测调用」的观察
+// 窗口，让「该路径不订阅」的断言不被预热流量污染。
+func awaitPrewarmSubscriptions(t *testing.T, f *fakeT3Environment) int {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		shell, archived := false, false
+		for _, rpc := range f.recordedRPC() {
+			switch rpc.method {
+			case t3RPCSubscribeShell:
+				shell = true
+			case t3RPCSubscribeArchivedShell:
+				archived = true
+			}
+		}
+		if shell && archived {
+			return len(f.recordedRPC())
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("prewarm subscriptions never settled")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 func (f *fakeT3Environment) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -2322,7 +2349,7 @@ func TestT3ThreadsArchiveNotReadyDegrades(t *testing.T) {
 
 // TestT3ThreadsStaleAfterDisconnectNotTrusted 覆盖新鲜度契约：连接断开且
 // 重连被拒（吊销）后进入 Stale——列表如实降级标注「连接已断开」；详情/Stop
-// 不用陈旧快照回答运行态（陈旧 idle 会让前端停止轮询、让 Stop 无事可做）。
+// 不用陈旧快照回答运行态（陈旧 idle 会让 Stop 无事可做，也会把旧数据当可信）。
 func TestT3ThreadsStaleAfterDisconnectNotTrusted(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -2440,9 +2467,10 @@ func TestT3ThreadsListReflectsPushDeltas(t *testing.T) {
 }
 
 // TestT3EnvironmentUpdateAndDeleteDropHubEntry 覆盖环境服务与 hub 的接线：
-// 重配（凭证变更）落库后 config_revision 自增、清 entry 并以新世代记 floor；
-// 携带旧世代的迟到请求被拒；删除后同样清 entry，且任何世代都被拒——
-// 后续列表用新凭证/不再复活旧订阅。
+// 重配（凭证变更）落库后 config_revision 自增、Drop 旧代 entry 并立即用重读
+// 出的新行重建常驻订阅（INT-132），floor 记新世代；携带旧世代的迟到请求被拒
+// 且不替换新代 entry；删除后 entry 无条件清掉（MaxInt64 哨兵），且任何世代
+// 都被拒。
 func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	e := setupT3ServiceTest(t)
 	userID := e.createUser(t)
@@ -2475,16 +2503,12 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 		t.Fatalf("load env before re-pair: %v", err)
 	}
 
-	// 重配（凭证变更）→ config_revision 自增、Drop：entry 被清、floor 记新世代。
+	// 重配（凭证变更）→ config_revision 自增、Drop 旧代后立即以重读出的新行
+	// 重建常驻订阅（INT-132）：entry 跟环境走，重配后不落后于新配置；floor
+	// 记新世代，迟到请求仍被拒。
 	e.fake.revokeBearers()
 	if _, err := e.env.Update(ctx, userID, env.Id, &UpdateT3EnvironmentRequest{PairingUrl: strPtr(e.fake.pairingURL(e.fake.baseURL))}); err != nil {
 		t.Fatalf("re-pair: %v", err)
-	}
-	e.hub.mu.Lock()
-	entries, floors := len(e.hub.entries), len(e.hub.floors)
-	e.hub.mu.Unlock()
-	if entries != 0 || floors == 0 {
-		t.Fatalf("re-pair must drop the hub entry and record floor, entries=%d floors=%d", entries, floors)
 	}
 	afterRow, err := e.env.repo.FindByIDAndUserID(ctx, env.Id, userID)
 	if err != nil {
@@ -2493,7 +2517,20 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	if afterRow.ConfigRevision != beforeRow.ConfigRevision+1 {
 		t.Fatalf("re-pair must bump config_revision exactly once: %d -> %d", beforeRow.ConfigRevision, afterRow.ConfigRevision)
 	}
-	// 携带旧世代（重配前读出的行）的迟到请求被拒，且不复活 entry。
+	e.hub.mu.Lock()
+	entries, floors := len(e.hub.entries), len(e.hub.floors)
+	var entryRevision int64
+	for _, en := range e.hub.entries {
+		entryRevision = en.configRevision
+	}
+	e.hub.mu.Unlock()
+	if entries != 1 || floors == 0 {
+		t.Fatalf("re-pair must rebuild the hub entry and record floor, entries=%d floors=%d", entries, floors)
+	}
+	if entryRevision != afterRow.ConfigRevision {
+		t.Fatalf("rebuilt entry must carry the new generation, entry=%d want=%d", entryRevision, afterRow.ConfigRevision)
+	}
+	// 携带旧世代（重配前读出的行）的迟到请求被拒，且不替换重建出的新代 entry。
 	stale := *beforeRow
 	staleToken, err := e.th.bearerToken(&stale)
 	if err != nil {
@@ -2505,8 +2542,8 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 	e.hub.mu.Lock()
 	entries = len(e.hub.entries)
 	e.hub.mu.Unlock()
-	if entries != 0 {
-		t.Fatalf("stale view must not resurrect the entry, entries = %d", entries)
+	if entries != 1 {
+		t.Fatalf("stale view must not disturb the rebuilt entry, entries = %d", entries)
 	}
 
 	// 新凭证列表照常（entry 以新世代重建）。
@@ -2515,7 +2552,7 @@ func TestT3EnvironmentUpdateAndDeleteDropHubEntry(t *testing.T) {
 		t.Fatalf("list after re-pair = %+v err=%v", result, err)
 	}
 
-	// 删除 → Drop（tombstone = 删除前 revision + 1）。
+	// 删除 → Drop（MaxInt64 哨兵：entry 无条件关闭，floor 拒绝任何世代）。
 	if err := e.env.Delete(ctx, userID, env.Id); err != nil {
 		t.Fatalf("delete: %v", err)
 	}

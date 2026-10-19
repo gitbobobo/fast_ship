@@ -27,21 +27,6 @@ export function isThreadActive(detail: ThreadDetail) {
   return detail.thread.status === "running" || Boolean(detail.activity?.active_run_id);
 }
 
-/**
- * 需要继续轮询详情的状态：运行中、停止中、有待作答请求、
- * 以及未暂停且队列还有待推进项。仅 held 且无活动/待答时可停。
- */
-export function shouldPollThread(detail?: ThreadDetail) {
-  if (!detail) return false;
-  const { thread, activity, queue } = detail;
-  return (
-    thread.status === "running" ||
-    Boolean(activity?.stopping) ||
-    Boolean(activity?.has_pending_requests) ||
-    (!queue?.held && (queue?.items.length ?? 0) > 0)
-  );
-}
-
 export interface SendIds {
   command_id: string;
   message_id: string;
