@@ -352,8 +352,8 @@ export interface BotScheduleTask {
   needs_report: boolean;
   enabled: boolean;
   next_run_at: string | null;
-  /** 跨运行保留的持久小状态（INT-123）：任意 JSON 值，无状态为 null。 */
-  state: unknown;
+  /** 跨运行保留的持久小状态（INT-123）：原始 JSON 文本，无状态为 null。用文本而不是解好的值，避免浏览器把大整数折成 double。 */
+  state: string | null;
   /** 状态最后写入时间（RFC3339）；无状态为 null。 */
   state_updated_at: string | null;
   created_at: string;

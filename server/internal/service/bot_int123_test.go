@@ -164,18 +164,13 @@ func TestBotInt123StateRoundTripPersistsAcrossRuns(t *testing.T) {
 		t.Fatalf("run2 应有 state_get 的协议回复: %+v", replies)
 	}
 
-	// 用户 REST 投影：state 是 JSON 原文（RawMessage 逐字透传）、state_updated_at
-	// 是 RFC3339。
+	// 用户 REST 投影：state 是原始 JSON 文本（无损）、state_updated_at 是 RFC3339。
 	resp, err := env.bots.GetScheduleTask(userID, bot.ID, task.ID)
 	if err != nil {
 		t.Fatalf("get task: %v", err)
 	}
-	stateRaw, err := json.Marshal(resp.State)
-	if err != nil {
-		t.Fatalf("marshal state: %v", err)
-	}
-	if string(stateRaw) != `{"last_id":"abc-1","seen":["x"]}` {
-		t.Fatalf("REST 投影应逐字带状态原文: %s", stateRaw)
+	if resp.State == nil || *resp.State != `{"last_id":"abc-1","seen":["x"]}` {
+		t.Fatalf("REST 投影应逐字带状态原文: %v", resp.State)
 	}
 	if resp.StateUpdatedAt == nil {
 		t.Fatalf("REST 投影应带 state_updated_at")
@@ -282,13 +277,12 @@ func TestBotInt123StateJSONFidelityPreservesNumberLiterals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get task: %v", err)
 	}
-	stateRaw, err := json.Marshal(resp.State)
-	if err != nil {
-		t.Fatalf("marshal state: %v", err)
+	if resp.State == nil {
+		t.Fatalf("REST 投影应带状态原文")
 	}
 	for _, want := range []string{bigInt, "1e400"} {
-		if !strings.Contains(string(stateRaw), want) {
-			t.Fatalf("REST 投影应逐字保留数字字面量 %s: %s", want, stateRaw)
+		if !strings.Contains(*resp.State, want) {
+			t.Fatalf("REST 投影应逐字保留数字字面量 %s: %s", want, *resp.State)
 		}
 	}
 	_ = userID

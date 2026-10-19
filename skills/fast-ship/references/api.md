@@ -9427,7 +9427,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `items[].needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
 | `items[].enabled` | boolean | 是 |  |
 | `items[].next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
-| `items[].state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `items[].state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `items[].state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
@@ -9489,7 +9489,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
 | `enabled` | boolean | 是 |  |
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
-| `state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
@@ -9617,7 +9617,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
 | `enabled` | boolean | 是 |  |
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
-| `state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
@@ -9684,7 +9684,7 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
 | `enabled` | boolean | 是 |  |
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
-| `state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `state` | string（可空） | 是 | 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
 | `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |

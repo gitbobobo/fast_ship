@@ -50,7 +50,7 @@ const enabledTask: BotScheduleTask = {
   needs_report: true,
   enabled: true,
   next_run_at: "2026-10-18T01:00:00Z",
-  state: { seen_ids: ["i-1", "i-2"], last_seq: 41 },
+  state: '{"seen_ids":["i-1","i-2"],"last_seq":41}',
   state_updated_at: "2026-10-17T01:02:10Z",
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
@@ -292,7 +292,7 @@ describe("BotScheduleSection", () => {
     expect(dialog).toHaveTextContent("任务状态");
     const state = within(dialog).getByTestId("bot-schedule-task-state");
     expect(state.textContent).toBe(
-      JSON.stringify(enabledTask.state, null, 2),
+      JSON.stringify(JSON.parse(enabledTask.state!), null, 2),
     );
     expect(dialog).toHaveTextContent(
       `更新于 ${formatDate("2026-10-17T01:02:10Z")}`,
@@ -300,6 +300,29 @@ describe("BotScheduleSection", () => {
     expect(
       within(dialog).getByRole("button", { name: "清空状态" }),
     ).toBeEnabled();
+  });
+
+  it("含大整数时退回原始 JSON，避免展示精度失真", async () => {
+    const bigIntTask: BotScheduleTask = {
+      ...enabledTask,
+      id: "t3",
+      name: "大整数状态",
+      state: '{"n":12345678901234567890}',
+    };
+    vi.mocked(useBotScheduleTasks).mockReturnValue({
+      data: [bigIntTask],
+      isLoading: false,
+    } as never);
+    const user = userEvent.setup();
+    renderSection();
+    const section = await expandSection(user);
+
+    await user.click(within(section).getByText("大整数状态"));
+    const dialog = await screen.findByRole("dialog");
+
+    const state = within(dialog).getByTestId("bot-schedule-task-state");
+    expect(state.textContent).toBe('{"n":12345678901234567890}');
+    expect(dialog).toHaveTextContent("含大整数等，按原始 JSON 显示");
   });
 
   it("无状态时展示空态且清空按钮不可用", async () => {

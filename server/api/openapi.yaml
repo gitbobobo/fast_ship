@@ -12596,7 +12596,9 @@ components:
           nullable: true
           description: 下一次计划触发时间（UTC）；停用或调度暂停时为 null
         state:
-          description: 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空
+          type: string
+          nullable: true
+          description: 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空
         state_updated_at:
           type: string
           format: date-time

@@ -1831,8 +1831,8 @@ type BotScheduleTask struct {
 	// NextRunAt 下一次计划触发时间（UTC）；停用或调度暂停时为 null
 	NextRunAt *string `json:"next_run_at"`
 
-	// State 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空
-	State interface{} `json:"state"`
+	// State 任务小状态的原始 JSON 文本（INT-123，无损；无状态为 null）。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空
+	State *string `json:"state"`
 
 	// StateUpdatedAt 状态最近一次写入时间（UTC）；无状态为 null
 	StateUpdatedAt *string `json:"state_updated_at"`

@@ -620,8 +620,9 @@ func botScheduleRunResponseOf(run *model.BotRun) BotScheduleRunResponse {
 }
 
 // BotScheduleTaskResponse 是定时任务的 API 投影；last_run 是最近一次运行。
-// state 是任务的小状态原文（INT-123，json.RawMessage 逐字透传，无状态时零值
-// 序列化为 null），用户只能经 DELETE .../state 清空。
+// state 是任务的小状态原文（INT-123，原始 JSON 文本，无状态时零值序列化为 null），
+// 用文本而不是解好的 JSON 值：浏览器的 JSON.parse 会把 >2^53 的整数折成 double，
+// 返回原文才能无损展示。用户只能经 DELETE .../state 清空。
 type BotScheduleTaskResponse struct {
 	ID             string                  `json:"id"`
 	BotID          string                  `json:"bot_id"`
@@ -633,7 +634,7 @@ type BotScheduleTaskResponse struct {
 	NeedsReport    bool                    `json:"needs_report"`
 	Enabled        bool                    `json:"enabled"`
 	NextRunAt      *string                 `json:"next_run_at"`
-	State          json.RawMessage         `json:"state"`
+	State          *string                 `json:"state"`
 	StateUpdatedAt *string                 `json:"state_updated_at"`
 	CreatedAt      string                  `json:"created_at"`
 	UpdatedAt      string                  `json:"updated_at"`
@@ -651,8 +652,10 @@ func (s *BotService) scheduleTaskResponseOf(task *model.BotScheduleTask) BotSche
 		UpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if task.StateJSON != "" {
-		// 状态原文直接透传：数字字面量（大整数等）逐字保留，不走 float64 往返。
-		resp.State = json.RawMessage(task.StateJSON)
+		// 状态原文直接透传（字符串）：数字字面量（大整数等）逐字保留，
+		// 由展示层决定是否美化，不在这里解成 float64。
+		raw := task.StateJSON
+		resp.State = &raw
 		resp.StateUpdatedAt = rfc3339(task.StateUpdatedAt)
 	}
 	if run, err := s.runs.LatestByScheduleTask(task.BotID, task.ID); err == nil {

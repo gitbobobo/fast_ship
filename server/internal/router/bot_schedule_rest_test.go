@@ -233,14 +233,14 @@ func TestBotScheduleRESTStateProjectionAndClear(t *testing.T) {
 		t.Fatalf("seed state: %v", err)
 	}
 
-	// 列表与详情投影带 state（JSON 值）与 state_updated_at（RFC3339）。
+	// 列表与详情投影带 state（原始 JSON 文本）与 state_updated_at（RFC3339）。
 	code, body := e.doJSON(t, http.MethodGet, "/api/bots/"+botID+"/schedule-tasks", nil)
 	if code != http.StatusOK {
 		t.Fatalf("list: %d %v", code, body)
 	}
 	item := envelopeItems(body)[0].(map[string]interface{})
-	if item["state"].(map[string]interface{})["last_id"] != "abc-9" {
-		t.Fatalf("列表投影应带状态值: %v", item)
+	if item["state"] != `{"last_id":"abc-9"}` {
+		t.Fatalf("列表投影应带状态原文: %v", item)
 	}
 	if _, ok := item["state_updated_at"].(string); !ok {
 		t.Fatalf("列表投影应带 state_updated_at: %v", item)
@@ -249,8 +249,8 @@ func TestBotScheduleRESTStateProjectionAndClear(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("get: %d %v", code, body)
 	}
-	if data := envelopeData(body); data["state"].(map[string]interface{})["last_id"] != "abc-9" {
-		t.Fatalf("详情投影应带状态值: %v", data)
+	if data := envelopeData(body); data["state"] != `{"last_id":"abc-9"}` {
+		t.Fatalf("详情投影应带状态原文: %v", data)
 	}
 
 	// DELETE .../state：清空并返回清空后的任务投影。
