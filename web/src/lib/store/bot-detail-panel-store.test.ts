@@ -21,8 +21,14 @@ describe("机器人右栏展开状态", () => {
 
   it("空存储时默认收起", async () => {
     stubStored(null);
-    await useBotDetailPanelStore.persist.rehydrate();
-    expect(useBotDetailPanelStore.getState().expanded).toBe(false);
+    // 单独拿一份新建的模块实例：共享单例可能被其它用例改过（默认值回归会被
+    // afterEach 的复位掩盖），只有刚创建的 store 才能证明初始默认值。
+    vi.resetModules();
+    const { useBotDetailPanelStore: freshStore } = await import(
+      "./bot-detail-panel-store"
+    );
+    await freshStore.persist.rehydrate();
+    expect(freshStore.getState().expanded).toBe(false);
   });
 
   it("展开写回存储，重新水合后恢复展开", async () => {
