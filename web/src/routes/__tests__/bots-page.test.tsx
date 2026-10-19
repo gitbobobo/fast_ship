@@ -467,7 +467,7 @@ describe("BotDetailPage", () => {
     await waitFor(() => expect(chatCancel).toHaveBeenCalledWith("c1"));
   });
 
-  it("回复中把等侍动画放在内容底部，输入框里不再有文字提示", async () => {
+  it("回复中把等待动画放在内容最底部，输入框里不再有文字提示", async () => {
     chatOverrides.current = {
       runActive: true,
       entries: [
@@ -491,11 +491,31 @@ describe("BotDetailPage", () => {
         status: "running",
         created_at: "2026-10-15T00:00:20Z",
       },
+      // 后台调用面板和活动 run 可以同时在场：等待动画必须在它之后，
+      // 贴底时才不会被面板顶出可见区。
+      backgroundCalls: [
+        {
+          id: "c1",
+          bot_id: "b1",
+          tool_name: "fs_issue",
+          action: "comment",
+          arguments: {},
+          execution_mode: "async",
+          requires_confirmation: false,
+          status: "queued",
+          created_at: "2026-10-15T00:00:30Z",
+        },
+      ],
     };
     renderDetail();
 
     const indicator = await screen.findByTestId("bot-typing-indicator");
     expect(indicator).toHaveAccessibleName("机器人正在回复");
+    const background = await screen.findByTestId("bot-background-calls");
+    expect(
+      background.compareDocumentPosition(indicator) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     // 提示从输入框里挑走了：表单内不再有那句长文案。
     const composer = screen.getByRole("form", { name: "机器人消息输入" });
     expect(composer).not.toHaveTextContent("机器人正在处理中");

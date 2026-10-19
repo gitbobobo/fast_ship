@@ -214,9 +214,6 @@ export function BotChat({ botId }: { botId: string }) {
           </div>
         )}
 
-        {/* 回复中的等待指示贴在内容最底部（原来是输入框里的一行提示文字）。 */}
-        {chat.runActive && <BotTypingIndicator />}
-
         {chat.streamStatus === "reconnecting" && (
           <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
             <RefreshCw className="h-3 w-3 animate-spin" />
@@ -244,6 +241,11 @@ export function BotChat({ botId }: { botId: string }) {
           actionError={chat.callActionError}
           onCancel={(callId) => void chat.cancelCall(callId)}
         />
+
+        {/* 回复中的等待指示贴在内容最底部（原来是输入框里的一行提示文字）。
+            放在后台调用面板之后、等高 spacer 之前：贴底后它一定落在可见区，
+            不会被上方的后台调用面板顶出视口。 */}
+        {chat.runActive && <BotTypingIndicator />}
       </div>
 
       {/* 等高滚动余量：高度等于浮层实高（上方 ResizeObserver 实测）。滚到底
