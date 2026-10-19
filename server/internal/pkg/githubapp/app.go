@@ -143,6 +143,12 @@ func apiBase(configured string) string {
 	return "https://api.github.com"
 }
 
+// APIBase 归一 GitHub API base 配置（去尾部 /；空取官方）。Manifest 换凭证等
+// 包外调用方与包内 Verify / 安装令牌换新共用同一套默认值。
+func APIBase(configured string) string {
+	return apiBase(configured)
+}
+
 // Bearer 返回该安装的可用令牌；缓存未命中或临过期时换新。换新请求跟调用方 ctx。
 // 满足 githubapi.AuthProvider。
 func (s *InstallationTokenStore) Bearer(ctx context.Context, installationID int64) (string, error) {

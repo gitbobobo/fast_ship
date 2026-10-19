@@ -129,8 +129,8 @@ func (s *PRReviewService) OnLaunchCancelled(run *model.AutomationRun, now time.T
 // ---- 评论 + check 同步 ----
 
 // scopeRunsForRev 给按 (repo, pr) 查运行的查询加上评审行身份的过滤：运行的
-// app_user_id 即开轮身份（存量行回填空串即 config），config 身份只看 config
-// 开的轮，用户身份只看该身份开的轮——同一 PR 多身份的运行互不可见。
+// app_user_id 即开轮身份（INT-129 起恒为空串，存量行同值）——同键过滤保留，
+// 存量多身份行不会被部署身份的同步误碰。
 func scopeRunsForRev(q *gorm.DB, rev *model.GitHubPRReview) *gorm.DB {
 	return q.Where("app_user_id = ?", rev.AppUserID)
 }
@@ -176,7 +176,7 @@ func (s *PRReviewService) pushCancelledOldSHAChecks(ctx context.Context, rev *mo
 	if err := q.Find(&old).Error; err != nil {
 		return err
 	}
-	gh, err := s.clientFor(ctx, rev.AppUserID)
+	gh, err := s.clientFor(ctx)
 	if err != nil {
 		return err
 	}
@@ -234,7 +234,7 @@ func (s *PRReviewService) ensureCheckRuns(ctx context.Context, rev *model.GitHub
 
 	for i := range pending {
 		run := &pending[i]
-		gh, err := s.clientFor(ctx, rev.AppUserID)
+		gh, err := s.clientFor(ctx)
 		if err != nil {
 			return err
 		}
@@ -332,9 +332,9 @@ func (s *PRReviewService) pushCheckStates(ctx context.Context, rev *model.GitHub
 	}
 	for _, id := range order {
 		group := byCheck[id]
-		// 同一 check id 的运行都由评审行身份开轮（查运行已按身份过滤），
-		// 统一按该身份解析 client。
-		gh, err := s.clientFor(ctx, rev.AppUserID)
+		// 同一 check id 的运行都由同一评审行开轮（查运行已按身份过滤），
+		// 统一用部署唯一的 client。
+		gh, err := s.clientFor(ctx)
 		if err != nil {
 			return err
 		}
@@ -501,7 +501,7 @@ func prReviewCommentMarkerFor(appUserID string) string {
 // PATCH；404/未保存再按本身份的隐藏标记找回，失效则创建。只展示当前 SHA。评论
 // 按评审行的验签身份推送（该行的运行全部由它开轮）。
 func (s *PRReviewService) pushComment(ctx context.Context, rev *model.GitHubPRReview, runs []model.AutomationRun) error {
-	gh, err := s.clientFor(ctx, rev.AppUserID)
+	gh, err := s.clientFor(ctx)
 	if err != nil {
 		return err
 	}

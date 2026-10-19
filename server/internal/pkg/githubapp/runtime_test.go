@@ -15,7 +15,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 )
 
-// Clients「按用户保存即生效」与检测映射（INT-119）定向测试。
+// Clients「部署级单身份、保存即生效」与检测映射（INT-129）定向测试。
 
 // mustKeyPEM 生成一把测试用 RSA 私钥 PEM。
 func mustKeyPEM(t *testing.T) []byte {
@@ -48,14 +48,18 @@ func TestVerify_MapsOutcomes(t *testing.T) {
 		t.Fatalf("bad pem = %+v", got)
 	}
 
-	// 200 → ok，detail 取 name（缺 name 回落 slug）。
+	// 200 → ok，detail 取 name（缺 name 回落 slug），slug 原样带回。
 	named := startAppServer(t, http.StatusOK, `{"name":"fast-ship","slug":"fast-ship-bot"}`)
-	if got := Verify(context.Background(), "123", key, named.URL); got.Status != DetectionOK || got.Detail != "已连接 GitHub App：fast-ship" {
+	if got := Verify(context.Background(), "123", key, named.URL); got.Status != DetectionOK || got.Detail != "已连接 GitHub App：fast-ship" || got.Slug != "fast-ship-bot" {
 		t.Fatalf("ok = %+v", got)
 	}
 	slugged := startAppServer(t, http.StatusOK, `{"name":"","slug":"fast-ship-bot"}`)
-	if got := Verify(context.Background(), "123", key, slugged.URL); got.Status != DetectionOK || got.Detail != "已连接 GitHub App：fast-ship-bot" {
+	if got := Verify(context.Background(), "123", key, slugged.URL); got.Status != DetectionOK || got.Detail != "已连接 GitHub App：fast-ship-bot" || got.Slug != "fast-ship-bot" {
 		t.Fatalf("slug = %+v", got)
+	}
+	noSlug := startAppServer(t, http.StatusOK, `{"name":"fast-ship"}`)
+	if got := Verify(context.Background(), "123", key, noSlug.URL); got.Slug != "" {
+		t.Fatalf("missing slug = %+v, want empty Slug", got)
 	}
 
 	// 401 → invalid（凭证问题）；其他状态码 → failed。
@@ -78,10 +82,10 @@ func TestVerify_MapsOutcomes(t *testing.T) {
 }
 
 func TestClients_NotConfigured(t *testing.T) {
-	c := NewClients(func(ctx context.Context, userID string) (RuntimeConfig, bool, error) {
+	c := NewClients(func(ctx context.Context) (RuntimeConfig, bool, error) {
 		return RuntimeConfig{}, false, nil
 	})
-	_, err := c.ClientFor(context.Background(), "u-1")
+	_, err := c.ClientFor(context.Background())
 	var appErr *errs.AppError
 	if !errors.As(err, &appErr) || appErr.Code != errs.ErrInternal.Code || appErr.Message != "GitHub App 未配置" {
 		t.Fatalf("err = %v, want 50000 GitHub App 未配置", err)
@@ -89,18 +93,18 @@ func TestClients_NotConfigured(t *testing.T) {
 
 	// 来源报错（如解密失败）原样透传。
 	want := errs.New(errs.ErrInternal.Code, "GitHub App 配置解密失败")
-	c2 := NewClients(func(ctx context.Context, userID string) (RuntimeConfig, bool, error) {
+	c2 := NewClients(func(ctx context.Context) (RuntimeConfig, bool, error) {
 		return RuntimeConfig{}, false, want
 	})
-	if _, err := c2.ClientFor(context.Background(), "u-1"); !errors.Is(err, want) {
+	if _, err := c2.ClientFor(context.Background()); !errors.Is(err, want) {
 		t.Fatalf("err = %v, want source error passthrough", err)
 	}
 
 	// 身份缺私钥同样视为未配置。
-	c3 := NewClients(func(ctx context.Context, userID string) (RuntimeConfig, bool, error) {
+	c3 := NewClients(func(ctx context.Context) (RuntimeConfig, bool, error) {
 		return RuntimeConfig{AppID: "111"}, true, nil
 	})
-	_, err = c3.ClientFor(context.Background(), "u-1")
+	_, err = c3.ClientFor(context.Background())
 	if !errors.As(err, &appErr) || appErr.Message != "GitHub App 未配置" {
 		t.Fatalf("missing pem err = %v", err)
 	}
@@ -154,8 +158,8 @@ func recordIssuerServer(t *testing.T) (*httptest.Server, func() []string) {
 	}
 }
 
-// TestClients_RebuildsOnFingerprintChange 同一用户换 App 身份（含只换私钥）后
-// 下一次调用重建 client；配置不变时命中缓存不再换新令牌。
+// TestClients_RebuildsOnFingerprintChange 部署换 App 身份（含只换私钥）后下一
+// 次调用重建 client；配置不变时命中缓存不再换新令牌。
 func TestClients_RebuildsOnFingerprintChange(t *testing.T) {
 	key1 := mustKeyPEM(t)
 	key2 := mustKeyPEM(t)
@@ -163,86 +167,39 @@ func TestClients_RebuildsOnFingerprintChange(t *testing.T) {
 	ts, issuers := recordIssuerServer(t)
 
 	current := RuntimeConfig{AppID: "111", PrivateKeyPEM: key1}
-	c := NewClients(func(ctx context.Context, userID string) (RuntimeConfig, bool, error) {
+	c := NewClients(func(ctx context.Context) (RuntimeConfig, bool, error) {
 		return current, current.AppID != "", nil
 	})
-	c.apiBase = ts.URL
+	c.SetAPIBase(ts.URL)
 	ctx := context.Background()
 
 	// ClientFor 只建不调：真正发起请求才验证换新令牌的 issuer。
-	call := func(userID string) {
+	call := func() {
 		t.Helper()
-		gh, err := c.ClientFor(ctx, userID)
+		gh, err := c.ClientFor(ctx)
 		if err != nil {
-			t.Fatalf("ClientFor(%s): %v", userID, err)
+			t.Fatalf("ClientFor: %v", err)
 		}
 		if _, err := gh.GetPullRequest(ctx, 7, "octocat/hw", 1); err != nil {
-			t.Fatalf("GetPullRequest(%s): %v", userID, err)
+			t.Fatalf("GetPullRequest: %v", err)
 		}
 	}
 
-	call("u-1")
+	call()
 	// 换私钥（App ID 不变）：指纹变化，下一次调用自动重建，不带旧缓存。
 	current = RuntimeConfig{AppID: "111", PrivateKeyPEM: key2}
-	call("u-1")
+	call()
 	// 同一配置再调用：命中缓存，不再换新令牌。
-	call("u-1")
+	call()
 	if got := issuers(); len(got) != 2 || got[0] != "111" || got[1] != "111" {
 		t.Fatalf("issuers = %v, want [111 111] then cache hit", got)
 	}
 
 	// 换 App ID 同样触发重建。
 	current = RuntimeConfig{AppID: "222", PrivateKeyPEM: key2}
-	call("u-1")
+	call()
 	if got := issuers(); len(got) != 3 || got[2] != "222" {
 		t.Fatalf("issuers after app change = %v", got)
-	}
-}
-
-// TestClients_PerUserIndependence 不同用户各自解析自己的身份，client 与缓存
-// 互不共享；某用户未配置不影响其他用户。
-func TestClients_PerUserIndependence(t *testing.T) {
-	keyA := mustKeyPEM(t)
-	keyB := mustKeyPEM(t)
-
-	ts, issuers := recordIssuerServer(t)
-
-	configs := map[string]RuntimeConfig{
-		"alice": {AppID: "111", PrivateKeyPEM: keyA},
-		"bob":   {AppID: "222", PrivateKeyPEM: keyB},
-	}
-	c := NewClients(func(ctx context.Context, userID string) (RuntimeConfig, bool, error) {
-		cfg, ok := configs[userID]
-		return cfg, ok, nil
-	})
-	c.apiBase = ts.URL
-	ctx := context.Background()
-
-	call := func(userID string) {
-		t.Helper()
-		gh, err := c.ClientFor(ctx, userID)
-		if err != nil {
-			t.Fatalf("ClientFor(%s): %v", userID, err)
-		}
-		if _, err := gh.GetPullRequest(ctx, 7, "octocat/hw", 1); err != nil {
-			t.Fatalf("GetPullRequest(%s): %v", userID, err)
-		}
-	}
-
-	call("alice")
-	call("bob")
-	// alice 的配置变化不应影响 bob 的缓存（bob 不重建）。
-	configs["alice"] = RuntimeConfig{AppID: "333", PrivateKeyPEM: keyA}
-	call("alice")
-	call("bob")
-	// 未配置的用户报 50000，不影响其他人。
-	if _, err := c.ClientFor(ctx, "carol"); err == nil {
-		t.Fatal("carol should fail unconfigured")
-	}
-
-	got := issuers()
-	if len(got) != 3 || got[0] != "111" || got[1] != "222" || got[2] != "333" {
-		t.Fatalf("issuers = %v, want [111 222 333] with bob cache hit", got)
 	}
 }
 
@@ -250,7 +207,7 @@ func TestClients_PerUserIndependence(t *testing.T) {
 func TestStaticClients(t *testing.T) {
 	key := mustKeyPEM(t)
 	want := NewClient(NewInstallationTokenStore(&AppCredentials{AppID: "1", PrivateKeyPEM: key}))
-	got, err := StaticClients{Client: want}.ClientFor(context.Background(), "any-user")
+	got, err := StaticClients{Client: want}.ClientFor(context.Background())
 	if err != nil || got != want {
 		t.Fatalf("static = %v %v", got, err)
 	}

@@ -5,6 +5,7 @@ package service
 // 与 automation_triggers_test.go 对应。
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -19,11 +20,11 @@ import (
 
 // requireTriggersAndPublicURL 启用自动化的前置条件：至少一个触发器（400）与
 // public_url 已配置（41202）。
-func (s *AutomationService) requireTriggersAndPublicURL(built []builtTrigger) error {
+func (s *AutomationService) requireTriggersAndPublicURL(ctx context.Context, built []builtTrigger) error {
 	if len(built) == 0 {
 		return errs.New(errs.ErrInvalidParams.Code, "启用自动化至少需要一个触发器")
 	}
-	return s.requirePublicURL()
+	return s.requirePublicURL(ctx)
 }
 
 // errTriggerConcurrentlyModified 按 id 更新触发器命中 0 行：id 归属校验之后、

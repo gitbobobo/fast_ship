@@ -26,8 +26,8 @@ type AutomationAgentService struct {
 	sink    *NotificationSink
 	logger  *zap.Logger
 
-	// prFor PR 代发端点的 GitHub 访问面解析器（INT-93/INT-119）：按运行所属
-	// 用户取其 App 身份；nil 时 PR 端点报「GitHub App 未配置」。
+	// prFor PR 代发端点的 GitHub 访问面解析器（INT-93；INT-129 起为部署级
+	// 唯一身份）；nil 时 PR 端点报「GitHub App 未配置」。
 	prFor PRGitHubClients
 	// prReview 与取消/同步共用 per-PR 锁；可 nil（单测不注入时只做重读校验）。
 	prReview *PRReviewService

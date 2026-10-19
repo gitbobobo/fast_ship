@@ -72,6 +72,9 @@ type AutomationService struct {
 	sink        *NotificationSink
 	cfg         *config.Config
 	logger      *zap.Logger
+	// publicURLSrc 部署 public_url 读取入口（INT-129）：main 注入
+	// DeploymentSettingsService；缺省只读 config，保持既有构造与测试行为。
+	publicURLSrc PublicURLSource
 }
 
 func NewAutomationService(
@@ -90,12 +93,18 @@ func NewAutomationService(
 		db: db, autos: autos, triggers: triggers, runs: runs, envRepo: envRepo,
 		projectRepo: projectRepo, issueRepo: issueRepo,
 		sink: sink, cfg: cfg, logger: logger,
+		publicURLSrc: configPublicURLSource{cfg: cfg},
 	}
 }
 
+// SetPublicURLSource 注入部署 public_url 读取入口（INT-129，main 调用一次）。
+func (s *AutomationService) SetPublicURLSource(src PublicURLSource) {
+	s.publicURLSrc = src
+}
+
 // PublicURLOK 自动化回报端点依赖对外可达的基址；启用/派发前必须已配置。
-func (s *AutomationService) PublicURLOK() bool {
-	return strings.TrimSpace(s.cfg.Server.PublicURL) != ""
+func (s *AutomationService) PublicURLOK(ctx context.Context) bool {
+	return s.publicURLSrc.PublicURL(ctx) != ""
 }
 
 func (s *AutomationService) List(ctx context.Context, userID string) ([]AutomationResponse, error) {
@@ -178,7 +187,7 @@ func (s *AutomationService) Create(ctx context.Context, userID string, req *api.
 		return nil, err
 	}
 	if req.Enabled != nil && *req.Enabled {
-		if err := s.requireTriggersAndPublicURL(builtTriggers); err != nil {
+		if err := s.requireTriggersAndPublicURL(ctx, builtTriggers); err != nil {
 			return nil, err
 		}
 		built.Enabled = true
@@ -252,7 +261,7 @@ func (s *AutomationService) Update(ctx context.Context, userID, id string, req *
 		return nil, err
 	}
 	if req.Enabled != nil && *req.Enabled {
-		if err := s.requireTriggersAndPublicURL(builtTriggers); err != nil {
+		if err := s.requireTriggersAndPublicURL(ctx, builtTriggers); err != nil {
 			return nil, err
 		}
 		built.Enabled = true
@@ -330,8 +339,8 @@ func (s *AutomationService) Delete(ctx context.Context, userID, id string) error
 }
 
 // requirePublicURL 启用自动化的前置条件（41202）。
-func (s *AutomationService) requirePublicURL() error {
-	if !s.PublicURLOK() {
+func (s *AutomationService) requirePublicURL(ctx context.Context) error {
+	if !s.PublicURLOK(ctx) {
 		return errs.ErrPublicURLMissing
 	}
 	return nil

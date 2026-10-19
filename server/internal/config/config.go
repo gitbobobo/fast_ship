@@ -102,12 +102,16 @@ func (c LoggingConfig) SelfLogCleanupInterval() time.Duration {
 	return time.Duration(c.CleanupIntervalMinutes) * time.Minute
 }
 
-// GitHubAppConfig GitHub App 身份（INT-93）。私钥只给 PEM 文件路径——私钥本体
-// 不进库、不进环境变量正文；webhook_secret 为空时 webhook 端点 503。
+// GitHubAppConfig GitHub App 身份（INT-93；INT-129 起为部署级兜底）。私钥只给
+// PEM 文件路径——私钥本体不进库、不进环境变量正文；webhook_secret 为空且部署
+// 设置行也没有密钥时 webhook 端点 503。
 type GitHubAppConfig struct {
 	AppID          string `mapstructure:"app_id"`
 	PrivateKeyPath string `mapstructure:"private_key_path"`
 	WebhookSecret  string `mapstructure:"webhook_secret"`
+	// APIBaseURL GitHub API base；留空取官方 https://api.github.com。
+	// 本地端到端可指向 mock GitHub 服务。
+	APIBaseURL string `mapstructure:"api_base_url"`
 	// Fake 仅 server.mode=debug 时允许 true：注入假 GitHub 实现，本地自测评审链路。
 	Fake bool `mapstructure:"fake"`
 }
@@ -335,6 +339,7 @@ func Load(path string) (*Config, error) {
 	_ = viper.BindEnv("github_app.app_id", "FAST_SHIP_GITHUB_APP_APP_ID")
 	_ = viper.BindEnv("github_app.private_key_path", "FAST_SHIP_GITHUB_APP_PRIVATE_KEY_PATH")
 	_ = viper.BindEnv("github_app.webhook_secret", "FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET")
+	_ = viper.BindEnv("github_app.api_base_url", "FAST_SHIP_GITHUB_APP_API_BASE_URL")
 	_ = viper.BindEnv("github_app.fake", "FAST_SHIP_GITHUB_APP_FAKE")
 	_ = viper.BindEnv("bots.context.window_tokens", "FAST_SHIP_BOTS_CONTEXT_WINDOW_TOKENS")
 	_ = viper.BindEnv("bots.context.compression_ratio", "FAST_SHIP_BOTS_CONTEXT_COMPRESSION_RATIO")

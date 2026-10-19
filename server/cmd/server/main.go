@@ -88,7 +88,11 @@ var autoMigrateModels = []interface{}{
 	&model.GitHubPRReview{},
 	&model.GitHubPRSeenSHA{},
 	&model.QuotaAccount{},
-	&model.Integration{},
+	// 部署级 App 与邀请注册（INT-129）：邀请表、部署设置单行表；users.role 列
+	// 随 model.User 迁移，存量角色回填见 migrateUserRoles。用户级 integrations
+	// 表在 B 轮删除，见 migrateDropIntegrations。
+	&model.Invite{},
+	&model.DeploymentSettings{},
 }
 
 func init() {
@@ -247,7 +251,9 @@ func main() {
 	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
 	quotaAccountRepo := repository.NewQuotaAccountRepository(db)
-	integrationRepo := repository.NewIntegrationRepository(db)
+	// 部署级 App 与邀请注册（INT-129）。
+	inviteRepo := repository.NewInviteRepository(db)
+	deploymentSettingsRepo := repository.NewDeploymentSettingsRepository(db)
 
 	// 业务库就绪后再注入归属解析器：注入前的入库日志只能是启动类（显式 system_scope）。
 	selfLogPipeline.SetOwnerResolver(service.NewSelfLogOwnerResolver(db))
@@ -260,13 +266,22 @@ func main() {
 
 	// 初始化 Service
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, appLogger.With(slog.String("module", "auth")))
+	// 邀请注册（INT-129）：可选依赖，注入后「已有用户时凭邀请注册」才生效。
+	authService.SetInviteRepository(inviteRepo)
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zapLogger.With(zap.String("module", "ai")))
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo, appLogger.With(slog.String("module", "api_key")))
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, githubLogger)
-	// 集成（INT-119）：用户级外部服务连接（当前 GitHub App），每个用户配置自己
-	// 的 App 身份，集中配置、保存即生效。
-	integrationService := service.NewIntegrationService(integrationRepo, cfg, githubLogger)
+	// 部署设置（INT-129）：public_url 网页配置的唯一读取入口；三处既有读取点
+	// （automation / automation_scheduler / integration）统一改经它解析。
+	deploymentSettingsService := service.NewDeploymentSettingsService(deploymentSettingsRepo, cfg)
+	// 集成（INT-129）：部署级 GitHub App 身份，管理员配置、保存即生效。
+	integrationService := service.NewIntegrationService(deploymentSettingsRepo, cfg, githubLogger)
+	integrationService.SetPublicURLSource(deploymentSettingsService)
+	// Manifest 一键创建（INT-129）：state 与换凭证的流程面，落库后的读取/验签
+	// 仍走 integrationService。
+	manifestService := service.NewGitHubAppManifestService(deploymentSettingsRepo, deploymentSettingsService, cfg, githubLogger)
+	memberService := service.NewMemberService(userRepo, inviteRepo, appLogger.With(slog.String("module", "member")))
 	dashboardService := service.NewDashboardService(dashboardRepo)
 	projectService := service.NewProjectService(projectRepo, versionRepo, issueSyncStateRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
 	versionService := service.NewVersionService(versionRepo, projectRepo, githubTokenRepo, fileStorage, cfg, githubLogger)
@@ -297,11 +312,11 @@ func main() {
 	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
 	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)
 
-	// GitHub App（INT-93/INT-119）：debug 自测 fake 仍完全走 config（恒返回 fake
-	// 的解析器）；其余一律经 githubapp.Clients 按运行所属用户现取生效配置（该
-	// 用户的数据库行 > config.yaml > 未配置），集成页保存后立即生效，无需重启。
-	// 未配置时 PR 代发端点报「GitHub App 未配置」，webhook 端点按 App ID 头定位
-	// 用户密钥（未知 App 401，密钥为空 503）。
+	// GitHub App（INT-93；INT-129 起部署级身份）：debug 自测 fake 仍完全走
+	// config（恒返回 fake 的解析器）；其余一律经 githubapp.Clients 现取部署
+	// 生效配置（部署设置行 > config.yaml > 未配置），集成页保存后立即生效，
+	// 无需重启。未配置时 PR 代发端点报「GitHub App 未配置」，webhook 端点
+	// 密钥为空 503。
 	var ghPR service.PRGitHubClients
 	var ghFake *githubapp.Fake
 	if cfg.GitHubApp.Fake && cfg.Server.Mode == "debug" {
@@ -309,18 +324,23 @@ func main() {
 		ghPR = githubapp.StaticClients{Client: ghFake}
 		zapLogger.Info("GitHub App fake 模式（debug 自测）")
 	} else {
-		ghPR = githubapp.NewClients(func(ctx context.Context, userID string) (githubapp.RuntimeConfig, bool, error) {
-			appCfg, ok, err := integrationService.Current(ctx, userID)
+		clients := githubapp.NewClients(func(ctx context.Context) (githubapp.RuntimeConfig, bool, error) {
+			appCfg, ok, err := integrationService.Current(ctx)
 			if err != nil || !ok {
 				return githubapp.RuntimeConfig{}, false, err
 			}
 			return githubapp.RuntimeConfig{AppID: appCfg.AppID, PrivateKeyPEM: appCfg.PrivateKeyPEM}, true, nil
 		})
+		// 本地端到端可把 GitHub API 指向 mock（github_app.api_base_url）。
+		clients.SetAPIBase(cfg.GitHubApp.APIBaseURL)
+		ghPR = clients
 	}
 	automationAgentService := service.NewAutomationAgentService(db, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, automationLogger)
 	automationAgentService.SetPRGitHub(ghPR)
 	automationScheduler := service.NewAutomationScheduler(db, automationRepo, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, issueRepo, cfg, automationLogger)
 	automationAgentService.SetKick(automationScheduler.Kick)
+	automationService.SetPublicURLSource(deploymentSettingsService)
+	automationScheduler.SetPublicURLSource(deploymentSettingsService)
 
 	// 订阅套餐额度（INT-109）：凭据加密落库 + 定时抓取；quota.enabled=false 时
 	// 接口仍可用（手动刷新正常），只是没有后台轮。
@@ -368,15 +388,17 @@ func main() {
 	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
 	botHandler := handler.NewBotHandler(botService)
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
-	// webhook 密钥来源：fake 自测路径完全走 config；其余每次请求按 App ID 头
-	// 现取（定位到用户行，行内为空仍 503，未知 App 401），集成页保存后立即生效。
+	// webhook 密钥来源：fake 自测路径完全走 config；其余每次请求现取部署唯一
+	// 密钥（部署设置行 > config 兜底，行内为空仍 503），集成页保存后立即生效。
 	var webhookSecrets handler.WebhookSecretSource = integrationService
 	if ghFake != nil {
 		webhookSecrets = handler.StaticWebhookSecret(cfg.GitHubApp.WebhookSecret)
 	}
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(prReviewService, webhookSecrets, ghFake)
 	quotaHandler := handler.NewQuotaHandler(quotaService)
-	integrationHandler := handler.NewIntegrationHandler(integrationService)
+	deploymentGitHubAppHandler := handler.NewDeploymentGitHubAppHandler(integrationService, manifestService)
+	memberHandler := handler.NewMemberHandler(memberService)
+	deploymentSettingsHandler := handler.NewDeploymentSettingsHandler(deploymentSettingsService)
 
 	cleanAuthArtifacts := func() {
 		if err := jwtBlacklistRepo.CleanExpired(); err != nil {
@@ -454,7 +476,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, integrationHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。
@@ -531,6 +553,13 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("PR 评审身份迁移失败: %w", err)
 	}
 
+	// 用户级 integrations 表删除（INT-129 B 轮）：GitHub App 身份改为部署级
+	// （deployment_settings），用户级配置已确认无存量数据，整表丢弃。必须先于
+	// AutoMigrate——模型已从清单移除，留着只会带着悬空外键与旧索引。
+	if err := migrateDropIntegrations(db, logger); err != nil {
+		return fmt.Errorf("integrations 表删除迁移失败: %w", err)
+	}
+
 	// 自动迁移
 	if err := db.AutoMigrate(autoMigrateModels...); err != nil {
 		return err
@@ -549,6 +578,12 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	}
 
 	createBootIndexes(db)
+
+	// 用户角色（INT-129）：AutoMigrate 补齐 users.role 后，存量库可能一个
+	// admin 都没有——把最早创建的用户提为 admin（幂等）。
+	if err := migrateUserRoles(db, logger); err != nil {
+		return fmt.Errorf("用户角色迁移失败: %w", err)
+	}
 
 	if err := dropLegacyCollabTables(db, logger); err != nil {
 		return fmt.Errorf("协作区数据迁移失败: %w", err)
@@ -624,14 +659,6 @@ func createBootIndexes(db *gorm.DB) {
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")
-
-	// 集成（INT-119）：(user_id, provider) 复合唯一索引（模型 tag 也会建，这里
-	// 幂等兜底）。
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_user_provider ON integrations(user_id, provider)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_integrations_app_id ON integrations(app_id)")
-	// App ID 全库唯一（INT-119）：webhook 验签候选逐行验签，同 provider 下的
-	// 重复 App ID 行会让创建顺序靠后者永远收不到投递；保存路径另有应用层 409。
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_integrations_provider_app_id ON integrations(provider, app_id)")
 }
 
 // selfLogMinLevel 把配置中的级别名转为 slog 级别；未知取值按 INFO。

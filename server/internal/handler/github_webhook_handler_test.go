@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +20,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/godbobo/fast_ship/server/internal/service"
@@ -30,9 +28,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// GitHub webhook 与 PR 代发端点（INT-93/INT-119）定向测试：503/401/202 语义、
-// 按 App ID 头定位用户密钥、幂等、运行令牌边界（结束后 40106、fsk_ 40304、
-// 非 PR 运行 40920）。
+// GitHub webhook 与 PR 代发端点（INT-93；INT-129 起部署级单密钥）定向测试：
+// 503/401/202 语义、部署设置的密钥优先级、幂等、运行令牌边界（结束后 40106、
+// fsk_ 40304、非 PR 运行 40920）。
 
 type webhookHandlerEnv struct {
 	db     *gorm.DB
@@ -42,8 +40,8 @@ type webhookHandlerEnv struct {
 	runs   *repository.AutomationRunRepository
 	tokens *repository.AutomationRunTokenRepository
 	cfg    *config.Config
-	// integrationSvc 用户级集成服务：setupWebhookEnv 总是创建，用户级验签
-	// 场景把它接成 webhook 的密钥来源。
+	// integrationSvc 部署级集成服务：setupWebhookEnv 总是创建，数据库来源的
+	// 验签场景把它接成 webhook 的密钥来源。
 	integrationSvc *service.IntegrationService
 }
 
@@ -51,9 +49,9 @@ func setupWebhookHandlerEnv(t *testing.T, secret string) *webhookHandlerEnv {
 	return setupWebhookEnv(t, StaticWebhookSecret(secret))
 }
 
-// setupUserScopedWebhookEnv 验签密钥走真实集成服务：按 X-GitHub-Hook-
-// Installation-Target-ID 头定位到用户行（INT-119 生产形态）。
-func setupUserScopedWebhookEnv(t *testing.T) *webhookHandlerEnv {
+// setupDeploymentWebhookEnv 验签密钥走真实集成服务：部署设置行 > config 兜底
+// （INT-129 生产形态）。
+func setupDeploymentWebhookEnv(t *testing.T) *webhookHandlerEnv {
 	return setupWebhookEnv(t, nil)
 }
 
@@ -71,7 +69,7 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 		&model.JWTBlacklist{}, &model.RefreshToken{},
 		&model.Automation{}, &model.AutomationTrigger{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
 		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{}, &model.GitHubPRSeenSHA{},
-		&model.Integration{},
+		&model.DeploymentSettings{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -98,7 +96,7 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 	agent.SetPRGitHub(githubapp.StaticClients{Client: fake})
 	agent.SetPRReview(prReview)
 
-	integrationSvc := service.NewIntegrationService(repository.NewIntegrationRepository(db), cfg, logger)
+	integrationSvc := service.NewIntegrationService(repository.NewDeploymentSettingsRepository(db), cfg, logger)
 	integrationSvc.SetVerify(func(ctx context.Context, appID string, keyPEM []byte, apiBaseURL string) githubapp.Detection {
 		return githubapp.Detection{Status: githubapp.DetectionOK, Detail: "已连接 GitHub App：test"}
 	})
@@ -120,11 +118,6 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 
 // postWebhook 签名并投递 payload。
 func (e *webhookHandlerEnv) postWebhook(t *testing.T, delivery, event string, body []byte, signature string) *httptest.ResponseRecorder {
-	return e.postWebhookWithAppID(t, delivery, event, body, signature, "")
-}
-
-// postWebhookWithAppID 带可选 X-GitHub-Hook-Installation-Target-ID 头投递。
-func (e *webhookHandlerEnv) postWebhookWithAppID(t *testing.T, delivery, event string, body []byte, signature, appID string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/github/webhooks", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -132,9 +125,6 @@ func (e *webhookHandlerEnv) postWebhookWithAppID(t *testing.T, delivery, event s
 	req.Header.Set("X-GitHub-Delivery", delivery)
 	if signature != "" {
 		req.Header.Set("X-Hub-Signature-256", signature)
-	}
-	if appID != "" {
-		req.Header.Set(headerGitHubAppID, appID)
 	}
 	w := httptest.NewRecorder()
 	e.router.ServeHTTP(w, req)
@@ -151,17 +141,17 @@ func createWebhookUser(t *testing.T, db *gorm.DB) *model.User {
 	return user
 }
 
-// saveUserIntegration 以真实集成服务保存某用户的 GitHub App 配置（检测已 stub）。
-func (e *webhookHandlerEnv) saveUserIntegration(t *testing.T, userID, appID, secret string) {
+// saveDeploymentIntegration 以真实集成服务保存部署级 GitHub App 配置（检测已 stub）。
+func (e *webhookHandlerEnv) saveDeploymentIntegration(t *testing.T, appID, secret string) {
 	t.Helper()
 	pem, err := githubapp.GenerateAppKeyPEM()
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	if _, err := e.integrationSvc.Update(context.Background(), userID, &api.UpdateGitHubAppIntegrationRequest{
+	if _, err := e.integrationSvc.Update(context.Background(), &api.UpdateGitHubAppDeploymentRequest{
 		AppId: appID, PrivateKeyPem: api.Ptr(string(pem)), WebhookSecret: api.Ptr(secret),
 	}); err != nil {
-		t.Fatalf("save integration: %v", err)
+		t.Fatalf("save deployment integration: %v", err)
 	}
 }
 
@@ -242,385 +232,81 @@ func countRunsWhere(t *testing.T, db *gorm.DB, query string, args ...any) int64 
 	return n
 }
 
-// TestWebhookHandler_UserScopedSecretLocation 身份归属只认验签（INT-119）：
-// App ID 头只是候选排序提示——头是任意值（含仓库 ID 形态）或不带都不影响
-// 验签归属；各用户行、config 同名身份的密钥各自验各自的；签名对不上仍然 401。
-func TestWebhookHandler_UserScopedSecretLocation(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	alice := createWebhookUser(t, env.db)
-	bob := createWebhookUser(t, env.db)
-	env.saveUserIntegration(t, alice.ID, "111", "sec-a")
-	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
+// TestWebhookHandler_DeploymentSecret 部署级单密钥验签：数据库行的密钥生效；
+// 签名对不上 401；行内密钥为空 503（拒绝接受请求，而不是 401）。
+func TestWebhookHandler_DeploymentSecret(t *testing.T) {
+	env := setupDeploymentWebhookEnv(t)
+	env.saveDeploymentIntegration(t, "111", "sec-a")
 
 	body := []byte(`{"action":"opened"}`)
-	// 各自的密钥都能验过（带头值是否等于自己的 App ID 无关紧要）。
-	w := env.postWebhookWithAppID(t, "d-u1", "pull_request", body, githubapp.SignSignature("sec-a", body), "111")
+	// 行内密钥验签通过（GitHub App ID 头对本部署的验签没有意义，带了也不看）。
+	w := env.postWebhook(t, "d-u1", "pull_request", body, githubapp.SignSignature("sec-a", body))
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("alice code = %d body=%s", w.Code, w.Body.String())
+		t.Fatalf("row secret = %d %s", w.Code, w.Body.String())
 	}
-	w = env.postWebhookWithAppID(t, "d-u2", "pull_request", body, githubapp.SignSignature("sec-b", body), "222")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("bob code = %d", w.Code)
-	}
-	// 头是任意值（GitHub 文档未保证该头等于 App ID，仓库级投递就是仓库 ID）：
-	// 签名正确照样验签通过。
-	w = env.postWebhookWithAppID(t, "d-u3", "pull_request", body, githubapp.SignSignature("sec-a", body), "501337")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("repo-id-like header = %d %s", w.Code, w.Body.String())
-	}
-	// 无头（simulate 脚本这类调用）：sec-a 只命中 alice 的候选 → 归属 alice。
-	w = env.postWebhook(t, "d-u4", "pull_request", body, githubapp.SignSignature("sec-a", body))
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("no header = %d %s", w.Code, w.Body.String())
-	}
-	// 第三把密钥谁也不匹配 → 401。
-	w = env.postWebhook(t, "d-u5", "pull_request", body, githubapp.SignSignature("nope", body))
+	// 错误密钥 401。
+	w = env.postWebhook(t, "d-u2", "pull_request", body, githubapp.SignSignature("nope", body))
 	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "Webhook 签名无效或缺失") {
-		t.Fatalf("unknown secret = %d %s", w.Code, w.Body.String())
+		t.Fatalf("wrong secret = %d %s", w.Code, w.Body.String())
 	}
 
-	// 真实 payload：alice 的项目+规则按她的身份匹配开轮。
-	env.createWebhookPRSite(t, alice.ID, "octocat", "hw")
-	p1 := prWebhookPayload("opened", "octocat/hw", 1, "sha-1")
-	w = env.postWebhookWithAppID(t, "d-r1", "pull_request", p1, githubapp.SignSignature("sec-a", p1), "111")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("alice real payload = %d %s", w.Code, w.Body.String())
-	}
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ?", alice.ID, "sha-1"); n != 2 {
-		t.Fatalf("alice runs = %d, want 2 (rule matched under her identity)", n)
-	}
-
-	// bob 的身份投递同一仓库的新 SHA：不能取消 alice 的在途。
-	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
-	p2 := prWebhookPayload("synchronize", "octocat/hw", 1, "sha-2")
-	w = env.postWebhookWithAppID(t, "d-r2", "pull_request", p2, githubapp.SignSignature("sec-b", p2), "222")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("bob cross-identity sync = %d %s", w.Code, w.Body.String())
-	}
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ? AND status <> ?",
-		alice.ID, "sha-1", model.AutomationRunCancelled); n != 2 {
-		t.Fatalf("alice live runs after bob delivery = %d, want 2 (cancel scoped to identity)", n)
-	}
-	if n := countRunsWhere(t, env.db, "1=1"); n != 2 {
-		t.Fatalf("total runs after bob delivery = %d, want 2 (no round for bob)", n)
-	}
-
-	// alice 自己的新 SHA 才会取消她的旧轮并开新一轮。
-	w = env.postWebhookWithAppID(t, "d-r3", "pull_request", p2, githubapp.SignSignature("sec-a", p2), "111")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("alice own sync = %d %s", w.Code, w.Body.String())
-	}
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ? AND status = ?",
-		alice.ID, "sha-1", model.AutomationRunCancelled); n != 2 {
-		t.Fatalf("alice cancelled old runs = %d, want 2", n)
-	}
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ? AND status <> ?",
-		alice.ID, "sha-2", model.AutomationRunCancelled); n != 2 {
-		t.Fatalf("alice new round = %d, want 2", n)
-	}
-}
-
-// TestWebhookHandler_ForgedDeliveryStaysInOwnIdentity 伪造投递不越权：alice 的
-// App/密钥签一个指向 bob 项目仓库的 payload，验签通过也只落在 alice 身份上——
-// 不取消 bob 的在途运行、不为 bob 开轮、bob 的评审账不变。
-func TestWebhookHandler_ForgedDeliveryStaysInOwnIdentity(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	alice := createWebhookUser(t, env.db)
-	bob := createWebhookUser(t, env.db)
-	env.saveUserIntegration(t, alice.ID, "111", "sec-a")
-	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
-	env.createWebhookPRSite(t, bob.ID, "octocat", "hw")
-
-	// bob 自己身份的正常投递：开一轮（2 个模型）。
-	p1 := prWebhookPayload("opened", "octocat/hw", 1, "sha-1")
-	w := env.postWebhookWithAppID(t, "d-b1", "pull_request", p1, githubapp.SignSignature("sec-b", p1), "222")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("bob round = %d %s", w.Code, w.Body.String())
-	}
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ?", bob.ID, "sha-1"); n != 2 {
-		t.Fatalf("bob runs = %d, want 2", n)
-	}
-
-	// 伪造：alice 的 App ID + alice 的密钥，payload 指向 bob 的仓库、新 SHA。
-	forged := prWebhookPayload("synchronize", "octocat/hw", 1, "sha-2")
-	w = env.postWebhookWithAppID(t, "d-forge", "pull_request", forged, githubapp.SignSignature("sec-a", forged), "111")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("forged delivery = %d %s", w.Code, w.Body.String())
-	}
-	// bob 的在途不被取消、没有新运行、评审账只有 bob 一行且未动。
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ? AND status <> ?",
-		bob.ID, "sha-1", model.AutomationRunCancelled); n != 2 {
-		t.Fatalf("bob live runs after forged delivery = %d, want 2", n)
-	}
-	if n := countRunsWhere(t, env.db, "1=1"); n != 2 {
-		t.Fatalf("total runs = %d, want 2", n)
-	}
-	var revs []model.GitHubPRReview
-	if err := env.db.Find(&revs).Error; err != nil {
-		t.Fatalf("reviews: %v", err)
-	}
-	if len(revs) != 1 || revs[0].AppUserID != bob.ID || revs[0].HeadSHA != "sha-1" {
-		t.Fatalf("review rows = %+v, want single bob row at sha-1", revs)
-	}
-}
-
-// TestWebhookHandler_DuplicateAppIDRejected 同一 App ID 全库唯一：第二个用户
-// 保存被 409 拒绝、库里仍只有第一用户的行，投递候选也只剩该用户——「同 App ID
-// 多行互相遮蔽、创建顺序靠后者永远收不到投递」被挡在保存时。
-func TestWebhookHandler_DuplicateAppIDRejected(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	alice := createWebhookUser(t, env.db)
-	bob := createWebhookUser(t, env.db)
-	env.saveUserIntegration(t, alice.ID, "555", "sec-alice")
-
-	// bob 保存同一 App ID → 40929（service 层断言，保存被整体拒绝）。
-	pem, err := githubapp.GenerateAppKeyPEM()
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	_, err = env.integrationSvc.Update(context.Background(), bob.ID, &api.UpdateGitHubAppIntegrationRequest{
-		AppId: "555", PrivateKeyPem: api.Ptr(string(pem)), WebhookSecret: api.Ptr("sec-bob"),
-	})
-	var appErr *errs.AppError
-	if !errors.As(err, &appErr) || appErr.Code != errs.ErrIntegrationAppIDTaken.Code {
-		t.Fatalf("bob duplicate save = %v, want [%d]", err, errs.ErrIntegrationAppIDTaken.Code)
-	}
-	var rows []model.Integration
-	if err := env.db.Find(&rows).Error; err != nil || len(rows) != 1 || rows[0].UserID != alice.ID {
-		t.Fatalf("rows = %+v %v, want single alice row", rows, err)
-	}
-
-	// 候选只剩 alice 一份（App ID 头 555 不会被别人遮蔽）。
-	cands, err := env.integrationSvc.WebhookCandidates(context.Background(), "555")
-	if err != nil || len(cands) != 1 || cands[0].AppUserID != alice.ID || cands[0].Secret != "sec-alice" {
-		t.Fatalf("candidates = %v %v, want single alice candidate", cands, err)
-	}
-}
-
-// TestWebhookHandler_SameRepoTwoIdentitiesIsolated 同仓库两个身份的投递各自
-// 归各自的账：bob 先开轮（含在途运行、已签发令牌、待触发防抖），alice 也关联
-// 同仓库后推新 SHA——只有 alice 自己的旧轮被取消、新轮开启；bob 的运行、令牌、
-// 防抖与评审账完全不变。
-func TestWebhookHandler_SameRepoTwoIdentitiesIsolated(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	alice := createWebhookUser(t, env.db)
-	bob := createWebhookUser(t, env.db)
-	env.saveUserIntegration(t, alice.ID, "111", "sec-a")
-	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
-	env.createWebhookPRSite(t, alice.ID, "octocat", "hw")
-	env.createWebhookPRSite(t, bob.ID, "octocat", "hw")
-
-	// bob 以自己身份开轮（2 个模型）。
-	pb := prWebhookPayload("opened", "octocat/hw", 1, "sha-1")
-	w := env.postWebhookWithAppID(t, "d-b1", "pull_request", pb, githubapp.SignSignature("sec-b", pb), "222")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("bob round = %d %s", w.Code, w.Body.String())
-	}
-	var bobRuns []model.AutomationRun
-	if err := env.db.Where("user_id = ?", bob.ID).Find(&bobRuns).Error; err != nil || len(bobRuns) != 2 {
-		t.Fatalf("bob runs = %d %v, want 2", len(bobRuns), err)
-	}
-	// 给 bob 布置一张已签发令牌与一条待触发防抖（他的另一个 SHA 窗口）。
-	now := time.Now().UTC()
-	if err := env.db.Create(&model.AutomationRunToken{
-		RunID: bobRuns[0].ID, TokenHash: "hash-bob", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
-	}).Error; err != nil {
-		t.Fatalf("seed token: %v", err)
-	}
-	var bobSyncTrigger model.AutomationTrigger
-	if err := env.db.Joins("JOIN automations ON automations.id = automation_triggers.automation_id").
-		Where("automations.user_id = ? AND automation_triggers.trigger_type = ?",
-			bob.ID, model.AutomationTriggerGitHubPRSynchronize).
-		First(&bobSyncTrigger).Error; err != nil {
-		t.Fatalf("bob synchronize trigger: %v", err)
-	}
-	if err := env.db.Create(&model.GitHubPRDebounce{
-		TriggerID: bobSyncTrigger.ID, RepoFullName: "octocat/hw", PRNumber: 1,
-		AppUserID: bob.ID, UserID: bob.ID, ProjectID: "p", InstallationID: 7,
-		Action: "synchronize", HeadSHA: "sha-1", FireAt: now.Add(time.Hour), UpdatedAt: now,
-	}).Error; err != nil {
-		t.Fatalf("seed debounce: %v", err)
-	}
-
-	// alice 也投递同一仓库的新 SHA：她的旧轮取消、新轮开启。
-	pa1 := prWebhookPayload("opened", "octocat/hw", 1, "sha-1")
-	w = env.postWebhookWithAppID(t, "d-a1", "pull_request", pa1, githubapp.SignSignature("sec-a", pa1), "111")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("alice round 1 = %d %s", w.Code, w.Body.String())
-	}
-	pa2 := prWebhookPayload("synchronize", "octocat/hw", 1, "sha-2")
-	w = env.postWebhookWithAppID(t, "d-a2", "pull_request", pa2, githubapp.SignSignature("sec-a", pa2), "111")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("alice round 2 = %d %s", w.Code, w.Body.String())
-	}
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ? AND status = ?",
-		alice.ID, "sha-1", model.AutomationRunCancelled); n != 2 {
-		t.Fatalf("alice cancelled old runs = %d, want 2", n)
-	}
-	if n := countRunsWhere(t, env.db, "user_id = ? AND head_sha = ? AND status <> ?",
-		alice.ID, "sha-2", model.AutomationRunCancelled); n != 2 {
-		t.Fatalf("alice new round = %d, want 2", n)
-	}
-
-	// bob 的运行、令牌、防抖、评审账完全不变。
-	for _, run := range bobRuns {
-		var fresh model.AutomationRun
-		if err := env.db.Where("id = ?", run.ID).First(&fresh).Error; err != nil {
-			t.Fatalf("reload bob run: %v", err)
-		}
-		if fresh.Status == model.AutomationRunCancelled {
-			t.Fatalf("bob run %s cancelled by alice's delivery", run.ID)
-		}
-	}
-	var token model.AutomationRunToken
-	if err := env.db.Where("run_id = ?", bobRuns[0].ID).First(&token).Error; err != nil {
-		t.Fatalf("reload token: %v", err)
-	}
-	if token.ConsumedAt != nil {
-		t.Fatal("bob token must stay unconsumed")
-	}
-	var d model.GitHubPRDebounce
-	if err := env.db.Where("app_user_id = ?", bob.ID).First(&d).Error; err != nil {
-		t.Fatalf("reload debounce: %v", err)
-	}
-	if d.HeadSHA != "sha-1" {
-		t.Fatalf("bob debounce sha = %s, want sha-1", d.HeadSHA)
-	}
-	var bobRev model.GitHubPRReview
-	if err := env.db.Where("app_user_id = ?", bob.ID).First(&bobRev).Error; err != nil {
-		t.Fatalf("reload bob review: %v", err)
-	}
-	if bobRev.HeadSHA != "sha-1" {
-		t.Fatalf("bob review sha = %s, want sha-1", bobRev.HeadSHA)
-	}
-	// alice 的评审账独立成行（app_user_id=alice，已推进到新 SHA）。
-	var aliceRev model.GitHubPRReview
-	if err := env.db.Where("app_user_id = ?", alice.ID).First(&aliceRev).Error; err != nil {
-		t.Fatalf("reload alice review: %v", err)
-	}
-	if aliceRev.HeadSHA != "sha-2" {
-		t.Fatalf("alice review sha = %s, want sha-2", aliceRev.HeadSHA)
-	}
-}
-
-// TestWebhookHandler_ConfigAndUserShareAppID 用户行与 config 配同一 App ID：
-// 用户行不遮蔽 config 候选，config 密钥仍能验签且身份为空串（部署身份）。
-func TestWebhookHandler_ConfigAndUserShareAppID(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	alice := createWebhookUser(t, env.db)
-	env.saveUserIntegration(t, alice.ID, "777", "sec-alice")
-	env.cfg.GitHubApp.AppID = "777"
-	env.cfg.GitHubApp.WebhookSecret = "cfg-secret"
-
-	cands, err := env.integrationSvc.WebhookCandidates(context.Background(), "777")
-	if err != nil || len(cands) != 2 {
-		t.Fatalf("candidates = %v %v, want user row + config", cands, err)
-	}
-	if cands[0].AppUserID != alice.ID || cands[0].Secret != "sec-alice" ||
-		cands[1].AppUserID != "" || cands[1].Secret != "cfg-secret" {
-		t.Fatalf("candidates = %+v, want [alice row, config]", cands)
-	}
-
-	body := []byte(`{"action":"opened"}`)
-	// config 密钥不被用户行遮蔽。
-	w := env.postWebhookWithAppID(t, "d-c1", "pull_request", body, githubapp.SignSignature("cfg-secret", body), "777")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("config secret = %d %s", w.Code, w.Body.String())
-	}
-	// 用户行密钥同样可用。
-	w = env.postWebhookWithAppID(t, "d-c2", "pull_request", body, githubapp.SignSignature("sec-alice", body), "777")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("user secret = %d %s", w.Code, w.Body.String())
-	}
-	// 第三把密钥 401。
-	w = env.postWebhookWithAppID(t, "d-c3", "pull_request", body, githubapp.SignSignature("nope", body), "777")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong secret = %d, want 401", w.Code)
-	}
-}
-
-// TestWebhookHandler_UserRowShadowsConfigForSameApp 用户接管部署 config 的同一个
-// App（首次保存省略密钥会把 config 密钥收编进来）：两把候选都验中时只保留用户行，
-// 不能因为「多命中」把该 App 的真实投递全部拒掉。
-func TestWebhookHandler_UserRowShadowsConfigForSameApp(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	alice := createWebhookUser(t, env.db)
-	// config 与用户行同 App ID、同密钥：正是「部署配置 → 个人配置」的默认迁移结果。
-	env.cfg.GitHubApp.AppID = "777"
-	env.cfg.GitHubApp.WebhookSecret = "cfg-secret"
-	env.saveUserIntegration(t, alice.ID, "777", "cfg-secret")
-
-	body := []byte(`{"action":"opened"}`)
-	w := env.postWebhookWithAppID(t, "d-shadow-1", "pull_request", body, githubapp.SignSignature("cfg-secret", body), "777")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("user row shadows config = %d %s, want 202", w.Code, w.Body.String())
-	}
-}
-
-// TestWebhookHandler_LegacyConfigOnlySecretWithHeader 仅配 config webhook 密钥
-// 的旧部署（INT-93，无 App 身份）：真实带头投递也能验签，不能 401。
-func TestWebhookHandler_LegacyConfigOnlySecretWithHeader(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	env.cfg.GitHubApp.WebhookSecret = "legacy-secret"
-
-	body := prWebhookPayload("opened", "octocat/hw", 1, "sha-1")
-	// GitHub App 真实投递必带的 App ID 头（部署 config 没配身份也照收）。
-	w := env.postWebhookWithAppID(t, "d-l1", "pull_request", body, githubapp.SignSignature("legacy-secret", body), "999888")
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("legacy header delivery = %d %s", w.Code, w.Body.String())
-	}
-	// 密钥不对仍然 401。
-	w = env.postWebhookWithAppID(t, "d-l2", "pull_request", body, githubapp.SignSignature("other", body), "999888")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("legacy wrong secret = %d, want 401", w.Code)
-	}
-	// config 密钥真的清空后：候选为空（全部候选密钥为空）→ 503，不是 401
-	// ——没有可验签的身份，拒绝接受请求。
-	env.cfg.GitHubApp.WebhookSecret = ""
-	w = env.postWebhookWithAppID(t, "d-l3", "pull_request", body, githubapp.SignSignature("legacy-secret", body), "999888")
+	// 换成空密钥：保存后立即生效 → 503（没有可验签的身份）。
+	env.saveDeploymentIntegration(t, "111", "")
+	w = env.postWebhook(t, "d-u3", "pull_request", body, githubapp.SignSignature("sec-a", body))
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("cleared secret = %d %s, want 503", w.Code, w.Body.String())
 	}
 }
 
-// TestWebhookHandler_SameSecretTwoIdentitiesRejected 两个身份配了相同的
-// webhook 密钥：一次验签命中多份候选，无法安全归属（投递可能来自其中任何
-// 一份），拒绝而不是取第一个命中。
-func TestWebhookHandler_SameSecretTwoIdentitiesRejected(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	alice := createWebhookUser(t, env.db)
-	bob := createWebhookUser(t, env.db)
-	env.saveUserIntegration(t, alice.ID, "111", "same-secret")
-	env.saveUserIntegration(t, bob.ID, "222", "same-secret")
+// TestWebhookHandler_ConfigFallbackSecret 部署设置行没有 App 身份时回落 config
+// 的 webhook 密钥（INT-93 以来仅配 webhook 的旧部署仍能收投递）。
+func TestWebhookHandler_ConfigFallbackSecret(t *testing.T) {
+	env := setupDeploymentWebhookEnv(t)
+	env.cfg.GitHubApp.WebhookSecret = "legacy-secret"
 
-	body := []byte(`{"action":"opened"}`)
-	for _, appID := range []string{"111", "222", "501337", ""} {
-		var w *httptest.ResponseRecorder
-		if appID == "" {
-			w = env.postWebhook(t, "d-s-"+appID+"x", "pull_request", body, githubapp.SignSignature("same-secret", body))
-		} else {
-			w = env.postWebhookWithAppID(t, "d-s-"+appID, "pull_request", body, githubapp.SignSignature("same-secret", body), appID)
-		}
-		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "无法确定集成身份") {
-			t.Fatalf("same-secret header=%q = %d %s, want 401 无法确定集成身份", appID, w.Code, w.Body.String())
-		}
-	}
-
-	// 恢复互不相同：立刻又能各自归属（错误是候选集形状问题，不是请求问题）。
-	env.saveUserIntegration(t, bob.ID, "222", "sec-b")
-	w := env.postWebhookWithAppID(t, "d-s-fix", "pull_request", body, githubapp.SignSignature("sec-b", body), "222")
+	body := prWebhookPayload("opened", "octocat/hw", 1, "sha-1")
+	w := env.postWebhook(t, "d-l1", "pull_request", body, githubapp.SignSignature("legacy-secret", body))
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("after dedupe = %d %s", w.Code, w.Body.String())
+		t.Fatalf("legacy secret = %d %s", w.Code, w.Body.String())
+	}
+	// 密钥不对仍然 401。
+	w = env.postWebhook(t, "d-l2", "pull_request", body, githubapp.SignSignature("other", body))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("legacy wrong secret = %d, want 401", w.Code)
+	}
+	// config 密钥清空后：503，不是 401——没有可验签的身份，拒绝接受请求。
+	env.cfg.GitHubApp.WebhookSecret = ""
+	w = env.postWebhook(t, "d-l3", "pull_request", body, githubapp.SignSignature("legacy-secret", body))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("cleared secret = %d %s, want 503", w.Code, w.Body.String())
 	}
 }
 
-// TestWebhookHandler_StaticSecretTrimmed 静态密钥来源（config/fake 路径）返回
-// 单候选且已 trim：trim 后的密钥能验签，原串不能。
+// TestWebhookHandler_CorruptedCipherRejected 部署行密文损坏：webhook 原样映射
+// 50000（不静默回落 config，否则投递会被无声吞掉）。
+func TestWebhookHandler_CorruptedCipherRejected(t *testing.T) {
+	env := setupDeploymentWebhookEnv(t)
+	env.saveDeploymentIntegration(t, "111", "sec-a")
+	env.cfg.GitHubApp.WebhookSecret = "cfg-secret"
+
+	if err := env.db.Model(&model.DeploymentSettings{}).
+		Where("app_id = ?", "111").
+		Update("config_encrypted", []byte("corrupted-ciphertext")).Error; err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	body := []byte(`{"action":"opened"}`)
+	w := env.postWebhook(t, "d-f1", "pull_request", body, githubapp.SignSignature("sec-a", body))
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "50000") {
+		t.Fatalf("corrupt row = %d %s, want 500/50000", w.Code, w.Body.String())
+	}
+}
+
+// TestWebhookHandler_StaticSecretTrimmed 静态密钥来源（config/fake 路径）已
+// trim：trim 后的密钥能验签，原串不能。
 func TestWebhookHandler_StaticSecretTrimmed(t *testing.T) {
-	src := StaticWebhookSecret("  whsec  ")
-	cands, err := src.WebhookCandidates(context.Background(), "")
-	if err != nil || len(cands) != 1 || cands[0].AppUserID != "" || cands[0].Secret != "whsec" {
-		t.Fatalf("static candidates = %v %v, want trimmed config candidate", cands, err)
+	secret, err := StaticWebhookSecret("  whsec  ").WebhookSecret(context.Background())
+	if err != nil || secret != "whsec" {
+		t.Fatalf("static secret = %q %v, want trimmed whsec", secret, err)
 	}
 
 	env := setupWebhookHandlerEnv(t, "  whsec  ")
@@ -635,43 +321,20 @@ func TestWebhookHandler_StaticSecretTrimmed(t *testing.T) {
 	}
 }
 
-// TestWebhookHandler_UserScopedSecretFailures 行内密钥为空 → 503；行密文损坏
-// （解密失败）→ 500/50000。
-func TestWebhookHandler_UserScopedSecretFailures(t *testing.T) {
-	env := setupUserScopedWebhookEnv(t)
-	user := createWebhookUser(t, env.db)
-	env.saveUserIntegration(t, user.ID, "111", "")
-
-	body := []byte(`{"action":"opened"}`)
-	w := env.postWebhookWithAppID(t, "d-f1", "pull_request", body, "sha256=whatever", "111")
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("empty row secret = %d, want 503", w.Code)
-	}
-
-	if err := env.db.Model(&model.Integration{}).Where("app_id = ?", "111").
-		Update("config_encrypted", []byte("corrupted-ciphertext")).Error; err != nil {
-		t.Fatalf("corrupt: %v", err)
-	}
-	w = env.postWebhookWithAppID(t, "d-f2", "pull_request", body, "sha256=whatever", "111")
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "50000") {
-		t.Fatalf("corrupt row = %d %s, want 500/50000", w.Code, w.Body.String())
-	}
-}
-
 // TestWebhookHandler_SignatureEnforcement 503（secret 空）与 401（签名错）。
 func TestWebhookHandler_SignatureEnforcement(t *testing.T) {
 	noSecret := setupWebhookHandlerEnv(t, "")
 	body := []byte(`{"action":"opened"}`)
 	w := noSecret.postWebhook(t, "d-1", "pull_request", body, "sha256=anything")
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("empty secret code = %d, want 503", w.Code)
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "50300") {
+		t.Fatalf("empty secret = %d %s, want 503/50300", w.Code, w.Body.String())
 	}
 
 	env := setupWebhookHandlerEnv(t, "whsec")
-	// 错误签名 401。
+	// 错误签名 401（40107）。
 	w = env.postWebhook(t, "d-2", "pull_request", body, "sha256=deadbeef")
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("bad signature code = %d, want 401", w.Code)
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "40107") {
+		t.Fatalf("bad signature = %d %s, want 401/40107", w.Code, w.Body.String())
 	}
 	// 缺头 401。
 	w = env.postWebhook(t, "d-3", "pull_request", body, "")
@@ -685,7 +348,8 @@ func TestWebhookHandler_SignatureEnforcement(t *testing.T) {
 	}
 }
 
-// TestWebhookHandler_OpenRoundEndToEnd debounce=0 的规则在请求事务里开轮。
+// TestWebhookHandler_OpenRoundEndToEnd debounce=0 的规则在请求事务里开轮，
+// 运行按部署身份（app_user_id=”）落库。
 func TestWebhookHandler_OpenRoundEndToEnd(t *testing.T) {
 	env := setupWebhookHandlerEnv(t, "whsec")
 
@@ -739,6 +403,12 @@ func TestWebhookHandler_OpenRoundEndToEnd(t *testing.T) {
 	}
 	if len(runs) != 2 {
 		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	// 部署级身份：开轮恒为空串。
+	for _, run := range runs {
+		if run.AppUserID != "" {
+			t.Fatalf("run app_user_id = %q, want ''", run.AppUserID)
+		}
 	}
 	// 幂等：同 delivery 再投不重复开轮。
 	w = env.postWebhook(t, "d-e2e", "pull_request", payload, githubapp.SignSignature("whsec", payload))

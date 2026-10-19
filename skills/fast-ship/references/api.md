@@ -21,7 +21,14 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 
 <!-- operationId: register -->
 
-注册新用户
+注册新用户（首个用户成为管理员；之后需有效邀请）
+
+INT-129 起公开注册按部署状态区分：
+- 库里还没有任何用户：本次注册创建**第一个用户**，`role=admin`，`invite_token` 即使携带也被忽略；
+- 库里已有用户：必须携带有效 `invite_token`（未使用、未撤销、未过期），新用户固定 `role=member`，
+  邀请在注册同一事务内置为已使用（并发重复使用会整体失败，40932）。
+无邀请（或邀请无效/已过期/已撤销）时返回 40306 / 40432。注册页可先调
+`POST /api/auth/invites/validate` 校验（token 在请求体，不进 URL）。
 
 **鉴权**：公开
 
@@ -34,10 +41,11 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 | `username` | string（长度 2..50） | 是 | 用户名，2-50 字符，全局唯一 |
 | `email` | string（email） | 是 | 邮箱，全局唯一 |
 | `password` | string（长度 ≥8） | 是 | 密码，≥8 字符 |
+| `invite_token` | string | 否 | 邀请明文 token（/register?invite= 携带）；部署还没有用户时被忽略（首个用户直接成为 admin），已有用户时必须有效 |
 
 **成功响应**
 
-**200** 注册成功，返回 token 与用户信息
+**200** 注册成功，返回 token 与用户信息（首个用户 role=admin，其余 role=member）
 
 `data`：
 
@@ -50,6 +58,7 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 | `user.username` | string | 是 |  |
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
+| `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -58,7 +67,48 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 | HTTP | 说明 |
 | --- | --- |
 | 400 | 请求参数无效（40001-40099） |
-| 409 | 业务冲突（40900-40999） |
+| 403 | 已有用户且未携带邀请，公开注册关闭（40306） |
+| 404 | 邀请无效或已过期（40432；不存在/已过期/已撤销统一此码） |
+| 409 | 用户名已存在（40900）/ 邮箱已存在（40901）/ 邀请已被使用（40932） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/auth/invites/validate`
+
+<!-- operationId: validateInvite -->
+
+校验注册邀请是否可用（公开，注册页提前显示状态）
+
+供 `/register?invite=<token>` 页面在渲染表单前调用。token 走请求体、
+不落 URL 路径，避免明文被请求日志（selflog 记录 path）记下后被读回复用。
+有效返回过期时间；不存在、已过期、已撤销、已被使用统一返回 40432，
+不区分具体原因。
+
+**鉴权**：公开
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `token` | string | 是 | 邀请链接中的明文 token；走请求体，不进 URL 路径 |
+
+**成功响应**
+
+**200** 邀请可用
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `expires_at` | string（date-time） | 是 | 邀说过期时间 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 404 | 邀请无效或已过期（40432；不存在/已过期/已撤销/已使用/请求体缺 token 统一此码） |
 | 500 | 服务器内部错误（50000） |
 
 ### POST `/api/auth/login`
@@ -93,6 +143,7 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 | `user.username` | string | 是 |  |
 | `user.email` | string | 是 |  |
 | `user.avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
+| `user.role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
 | `user.created_at` | string（date-time） | 是 |  |
 | `user.updated_at` | string（date-time） | 是 |  |
 
@@ -188,6 +239,7 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 | `username` | string | 是 |  |
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
+| `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -228,6 +280,7 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 | `username` | string | 是 |  |
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
+| `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -306,6 +359,7 @@ SPA 静态资源与 NoRoute 回退（`web.go`）不在本文档范围。
 | `username` | string | 是 |  |
 | `email` | string | 是 |  |
 | `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
+| `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 
@@ -8192,15 +8246,15 @@ kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一�
 
 接收 GitHub App webhook（pull_request opened/synchronize）
 
-公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256，webhook secret）验签。
-集成（INT-119）是用户级配置：验签候选是全部身份（各用户的行 + config 兜底），
-逐个比对签名并收集命中——恰好一个命中即该候选的用户身份，贯穿后续项目/规则匹配、
-旧轮取消、防抖与评论/check 回写，不会跨用户生效；多个命中（多份身份配了相同的
-webhook 密钥）返回 401「无法确定集成身份」。`X-GitHub-Hook-Installation-Target-ID`
-头只作候选排序提示、不作定位依据（GitHub 文档未保证它等于 App ID）。只处理
-pull_request 的 opened/synchronize；draft 与 fork 一律 202 忽略。
-仓库必须已和该身份的 Fast Ship 项目关联才会进入防抖/开轮。
-同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且不再开轮）。
+公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256）按部署唯一的
+webhook 密钥验签。验签密钥取部署级 GitHub App 身份（INT-129：每套部署
+一个 App，没有用户级候选集）——以 `deployment_settings` 行内的密钥为准，
+行为空即视为未配置、不回落 config；仅当部署没有数据库 App 身份时用
+`github_app.webhook_secret` 兜底。密钥为空 → 503（50300）拒收；签名缺失
+或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize；
+draft 与 fork 一律 202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
+才会进入防抖/开轮。同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且
+不再开轮）。
 
 **鉴权**：公开
 
@@ -8211,7 +8265,6 @@ pull_request 的 opened/synchronize；draft 与 fork 一律 202 忽略。
 | `X-GitHub-Event` | string | 是 |  |
 | `X-GitHub-Delivery` | string | 是 |  |
 | `X-Hub-Signature-256` | string | 是 |  |
-| `X-GitHub-Hook-Installation-Target-ID` | string | 否 | GitHub webhook 携带的目标资源 ID；只作候选排序提示（GitHub 未保证 App 级投递上等于 App ID），身份归属只认验签 |
 
 **请求体**
 
@@ -8228,9 +8281,9 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | HTTP | 说明 |
 | --- | --- |
 | 400 | 请求参数无效（40001-40099） |
-| 401 | 签名不匹配（40107）或多个身份命中同一签名（40107） |
+| 401 | 签名缺失或不匹配（40107） |
 | 500 | 服务器内部错误（50000） |
-| 503 | 候选全部没有 webhook secret（含无任何候选），拒绝接受请求 |
+| 503 | 部署未配置 webhook 验签密钥（50300），拒绝接受请求 |
 
 ### GET `/api/automation-agent/pull-request`
 
@@ -10590,41 +10643,325 @@ expired/denied/invalid 为终态，error 给用户可读原因，前端提示重
 | 404 | 会话不存在、已过期或属于其他用户（40431） |
 | 500 | 服务器内部错误（50000） |
 
-## integrations
+## members
 
-外部服务集成（INT-119，仅 JWT）：每个用户配置自己的外部服务连接。本期只有 GitHub App（App ID / 私钥 / webhook 密钥），保存后即时生效；密钥只写不读，响应只回「是否已配置」
+成员与邀请管理（INT-129，仅管理员 = JWT + RequireAdmin，40305）：成员列表与改角色、邀请的创建/列表/撤销；公开侧的邀请校验在 auth 组
 
-### GET `/api/integrations/github-app`
+### GET `/api/members`
 
-<!-- operationId: getGitHubAppIntegration -->
+<!-- operationId: listMembers -->
 
-读取当前用户的 GitHub App 集成配置
+列出全部成员
 
-按当前 JWT 用户读取的 GitHub App 配置，用户之间互不影响。响应不回显私钥与
-webhook 密钥本体，只给「是否已配置」；不触发任何 GitHub 请求。
-`source` 说明当前用户生效的来源：`database`=本人集成页保存的配置（优先），
-`config`=config.yaml 的部署配置兜底（本人尚未保存时），`none`=未配置。
-webhook 验签在全部身份候选（各用户的行 + config）中逐个比对签名定身份
-（`X-GitHub-Hook-Installation-Target-ID` 头只作排序提示，不作定位依据）；
-PR 评审回写使用该轮运行所属用户的 App 身份。
+仅管理员（JWT + RequireAdmin，非管理员 40305；API Key 一律 40301）。
+返回全部用户，按 `created_at` 升序（首个用户=最早的 admin 排最前）。
+形状与 `User` 一致，含 `role`。
 
 **鉴权**：仅 JWT
 
 **成功响应**
 
-**200** 当前用户生效的 GitHub App 配置
+**200** 成员列表（created_at 升序）
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `provider` | string（enum: github_app） | 是 |  |
-| `configured` | boolean | 是 | 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set |
-| `source` | string（enum: database \| config \| none） | 是 | 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].username` | string | 是 |  |
+| `items[].email` | string | 是 |  |
+| `items[].avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
+| `items[].role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/members/{uid}/role`
+
+<!-- operationId: updateMemberRole -->
+
+修改成员角色
+
+仅管理员。`role` 只接受 `admin` / `member`（其他值 40001）。
+把最后一个管理员降级为 member 返回 40931（判定在事务内：
+`count(role='admin')=1` 且目标当前是 admin）。目标不存在 40400。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `uid` | string | 是 | 目标用户 ID |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+
+**成功响应**
+
+**200** 修改后的成员
+
+`data`：
+
+成员（/api/members 的元素），形状与 User 完全一致
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `username` | string | 是 |  |
+| `email` | string | 是 |  |
+| `avatar_url` | string | 是 | 形如 /api/avatars/:uid/:filename，未设置为空串 |
+| `role` | string（enum: admin \| member） | 是 | 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | role 取值非法（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 404 | 用户不存在（40400） |
+| 409 | 不能降级最后一个管理员（40931） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/invites`
+
+<!-- operationId: listInvites -->
+
+列出全部邀请
+
+仅管理员。返回全部邀请，按 `created_at` 倒序；不返回 token 明文，
+只回状态（撤销/使用时间）。明文 token 只在创建响应里出现一次。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 邀请列表（created_at 倒序，不含 token）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].created_by` | string | 是 | 签发邀请的管理员用户 ID |
+| `items[].expires_at` | string（date-time） | 是 | 过期时间 |
+| `items[].revoked_at` | string（date-time，可空） | 是 | 撤销时间；未撤销为 null |
+| `items[].used_at` | string（date-time，可空） | 是 | 被使用（注册消费）时间；未使用为 null |
+| `items[].used_by` | string（可空） | 是 | 使用该邀请注册的用户 ID；未使用为 null |
+| `items[].created_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/invites`
+
+<!-- operationId: createInvite -->
+
+创建注册邀请
+
+仅管理员。签发一次性邀请：明文 token（`GenerateApiKeyRaw` 随机串）只在
+本次响应返回一次，库里只存 SHA-256；`url` 由前端用 public_url 或
+`window.location.origin` 自行拼接（`/register?invite=<token>`），服务端不回 url。
+`expires_in_hours` 省略时默认 72，允许 1..720，越界 40001。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `expires_in_hours` | integer（1..720） | 否 | 有效期（小时），省略默认 72；越界 40001 |
+
+**成功响应**
+
+**200** 创建成功，返回邀请与一次性 token 明文
+
+`data`：
+
+新建邀请（Invite 全部字段 + 一次性 token 明文）。邀请投影，不含 token 明文（明文只在创建响应里出现一次）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `created_by` | string | 是 | 签发邀请的管理员用户 ID |
+| `expires_at` | string（date-time） | 是 | 过期时间 |
+| `revoked_at` | string（date-time，可空） | 是 | 撤销时间；未撤销为 null |
+| `used_at` | string（date-time，可空） | 是 | 被使用（注册消费）时间；未使用为 null |
+| `used_by` | string（可空） | 是 | 使用该邀请注册的用户 ID；未使用为 null |
+| `created_at` | string（date-time） | 是 |  |
+| `token` | string | 是 | 邀请明文 token，只在本次响应出现一次；前端拼 /register?invite=<token> |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | expires_in_hours 越界（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/invites/{id}`
+
+<!-- operationId: revokeInvite -->
+
+撤销邀请
+
+仅管理员。置 `revoked_at`；幂等——已撤销的邀请再次撤销仍返回 200。
+邀请 ID 不存在返回 40432。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | 邀请 ID |
+
+**成功响应**
+
+**200** 操作成功（data 为 null）
+
+`data` 为 null。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 404 | 邀请不存在（40432） |
+| 500 | 服务器内部错误（50000） |
+
+## deployment
+
+部署设置（INT-129）：public_url 网页配置（GET 仅 JWT，PUT 仅管理员）与部署级 GitHub App（B 轮实现：每套部署一个 App、Manifest 一键创建；GET 所有登录用户，其余仅管理员）
+
+### GET `/api/deployment/settings`
+
+<!-- operationId: getDeploymentSettings -->
+
+读取部署设置（当前生效的 public_url 及来源）
+
+仅 JWT（所有登录用户可读）。`public_url` 是当前生效值（trim 且去尾部 `/`）；
+`public_url_source` 说明它的来源：`database`=部署设置里保存的值（优先），
+`config`=config.yaml 的 `server.public_url` 兜底（数据库值为空串时），
+`none`=两处都没有。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 部署设置
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `public_url` | string | 是 | 当前生效的对外访问基址（trim 且去尾部 /）；两处都没有时为空串 |
+| `public_url_source` | string（enum: database \| config \| none） | 是 | public_url 来源：database=部署设置保存的值（优先）；config=config.yaml 的 server.public_url 兜底；none=未配置 |
+| `updated_at` | string（date-time，可空） | 是 | 部署设置最近保存时间；数据库从未保存过该行为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/deployment/settings`
+
+<!-- operationId: updateDeploymentSettings -->
+
+保存部署设置（public_url）
+
+仅管理员。校验规则：空串表示清空数据库值（回落 config）；
+其余必须是 http(s) 绝对 URL、host 非空、不能带 query 或 fragment，
+末尾 `/` 会被去掉；不合法返回 40001。写入数据库后回读返回。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `public_url` | string | 是 | 对外访问基址；空串=清空数据库值回落 config；其余必须是 http(s) 绝对 URL、host 非空、不带 query/fragment，末尾 / 自动去掉 |
+
+**成功响应**
+
+**200** 保存后的部署设置（回读）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `public_url` | string | 是 | 当前生效的对外访问基址（trim 且去尾部 /）；两处都没有时为空串 |
+| `public_url_source` | string（enum: database \| config \| none） | 是 | public_url 来源：database=部署设置保存的值（优先）；config=config.yaml 的 server.public_url 兜底；none=未配置 |
+| `updated_at` | string（date-time，可空） | 是 | 部署设置最近保存时间；数据库从未保存过该行为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | public_url 不合法（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/deployment/github-app`
+
+<!-- operationId: getGitHubAppDeployment -->
+
+读取部署级 GitHub App 配置（所有登录用户）
+
+INT-129 B 轮实现。返回本部署当前生效的 GitHub App 身份投影：
+是否已配置、来源（数据库 > config > 未配置）、webhook URL 与安装链接等；
+私钥与 webhook 密钥本体永不回显，只回「是否已设置」。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 部署级 GitHub App 配置
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `configured` | boolean | 是 | 本部署是否有 App 身份配置来源（部署设置行或 config 兜底）；私钥是否真的可读看 private_key_set |
+| `source` | string（enum: database \| config \| none） | 是 | 当前生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
 | `app_id` | string | 是 | GitHub App ID（未配置时为空串） |
+| `app_slug` | string | 是 | GitHub App slug（拼 install_url 用；未配置时为空串） |
 | `private_key_set` | boolean | 是 | 私钥是否已配置（本体永不回显） |
 | `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
-| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串 |
+| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（{public_url}/api/github/webhooks）；public_url 未配置时为空串 |
+| `install_url` | string | 是 | 安装到仓库入口（https://github.com/apps/{slug}/installations/new）；slug 为空时为空串 |
 | `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） |
 | `detection_detail` | string | 是 | 给人看的补充说明（App 名称、失败原因等），不含任何密钥 |
 | `detected_at` | string（date-time，可空） | 是 | 最近一次检测完成时间；未检测为 null |
@@ -10638,17 +10975,15 @@ PR 评审回写使用该轮运行所属用户的 App 身份。
 | 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### PUT `/api/integrations/github-app`
+### PUT `/api/deployment/github-app`
 
-<!-- operationId: updateGitHubAppIntegration -->
+<!-- operationId: updateGitHubAppDeployment -->
 
-保存当前用户的 GitHub App 集成配置
+手动配置部署级 GitHub App
 
-整组保存到当前用户名下（App ID + 私钥 + webhook 密钥），只影响本人；
-写入后运行中的进程立即改用新配置，无需重启。
-私钥与 webhook 密钥加密落库，不入日志。保存成功后同步做一次只读检测
-（用 App JWT 调 `GET /app`）；检测失败或凭证无效仍然保存，响应中
-`detection_status` 为 `failed` / `invalid`，HTTP 状态仍是 200。
+仅管理员（B 轮实现）：「手动配置（已有 App）」折叠区的保存入口。
+app_id 必填；private_key_pem / webhook_secret 省略表示保留已有值，
+首次配置必须提供私钥。凭证加密落库；保存后立即生效，无需重启。
 
 **鉴权**：仅 JWT
 
@@ -10664,19 +10999,20 @@ PR 评审回写使用该轮运行所属用户的 App 身份。
 
 **成功响应**
 
-**200** 保存后的配置（含本次检测结果）
+**200** 保存后的配置
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `provider` | string（enum: github_app） | 是 |  |
-| `configured` | boolean | 是 | 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set |
-| `source` | string（enum: database \| config \| none） | 是 | 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
+| `configured` | boolean | 是 | 本部署是否有 App 身份配置来源（部署设置行或 config 兜底）；私钥是否真的可读看 private_key_set |
+| `source` | string（enum: database \| config \| none） | 是 | 当前生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
 | `app_id` | string | 是 | GitHub App ID（未配置时为空串） |
+| `app_slug` | string | 是 | GitHub App slug（拼 install_url 用；未配置时为空串） |
 | `private_key_set` | boolean | 是 | 私钥是否已配置（本体永不回显） |
 | `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
-| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串 |
+| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（{public_url}/api/github/webhooks）；public_url 未配置时为空串 |
+| `install_url` | string | 是 | 安装到仓库入口（https://github.com/apps/{slug}/installations/new）；slug 为空时为空串 |
 | `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） |
 | `detection_detail` | string | 是 | 给人看的补充说明（App 名称、失败原因等），不含任何密钥 |
 | `detected_at` | string（date-time，可空） | 是 | 最近一次检测完成时间；未检测为 null |
@@ -10688,20 +11024,18 @@ PR 评审回写使用该轮运行所属用户的 App 身份。
 | --- | --- |
 | 400 | App ID 缺失或非数字（40001）、私钥不是有效 RSA PEM（40001） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
-| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 403 | 非管理员（40305） |
 | 500 | 服务器内部错误（50000） |
 
-### POST `/api/integrations/github-app/test`
+### POST `/api/deployment/github-app/test`
 
-<!-- operationId: testGitHubAppIntegration -->
+<!-- operationId: testGitHubAppDeployment -->
 
-测试当前用户的 GitHub App 连接
+测试部署级 GitHub App 连接（仅管理员）
 
-对当前用户生效的配置做一次只读检测：用 App 私钥签 JWT 调 `GET /app`。
-不创建任何 GitHub 资源、不改配置，只刷新检测状态与说明；
-`ok`=认证成功，`invalid`=GitHub 拒绝该 App 身份（401），
-`failed`=网络/限流/GitHub 5xx（不是凭证无效）。
-未配置时返回 40006。
+B 轮实现。对本部署生效的 App 身份做一次只读检测（用 App 私钥签 JWT 调
+`GET /app`）：`ok`=认证成功，`invalid`=GitHub 拒绝该身份（401），
+`failed`=网络/限流/GitHub 5xx。未配置时返回 40006。
 
 **鉴权**：仅 JWT
 
@@ -10713,13 +11047,14 @@ PR 评审回写使用该轮运行所属用户的 App 身份。
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `provider` | string（enum: github_app） | 是 |  |
-| `configured` | boolean | 是 | 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set |
-| `source` | string（enum: database \| config \| none） | 是 | 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
+| `configured` | boolean | 是 | 本部署是否有 App 身份配置来源（部署设置行或 config 兜底）；私钥是否真的可读看 private_key_set |
+| `source` | string（enum: database \| config \| none） | 是 | 当前生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
 | `app_id` | string | 是 | GitHub App ID（未配置时为空串） |
+| `app_slug` | string | 是 | GitHub App slug（拼 install_url 用；未配置时为空串） |
 | `private_key_set` | boolean | 是 | 私钥是否已配置（本体永不回显） |
 | `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
-| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串 |
+| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（{public_url}/api/github/webhooks）；public_url 未配置时为空串 |
+| `install_url` | string | 是 | 安装到仓库入口（https://github.com/apps/{slug}/installations/new）；slug 为空时为空串 |
 | `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） |
 | `detection_detail` | string | 是 | 给人看的补充说明（App 名称、失败原因等），不含任何密钥 |
 | `detected_at` | string（date-time，可空） | 是 | 最近一次检测完成时间；未检测为 null |
@@ -10731,5 +11066,114 @@ PR 评审回写使用该轮运行所属用户的 App 身份。
 | --- | --- |
 | 400 | 尚未配置 GitHub App（40006） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
-| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 403 | 非管理员（40305） |
 | 500 | 服务器内部错误（50000） |
+
+### POST `/api/deployment/github-app/manifest`
+
+<!-- operationId: createGitHubAppManifest -->
+
+生成 GitHub App Manifest（仅管理员）
+
+B 轮实现。「在 GitHub 上创建 App」主按钮的第一步：服务端按本部署的
+public_url 组装 manifest（原样 POST 给 GitHub 的形状），返回 GitHub
+创建页地址、防 CSRF 的 state 与 manifest 本体；前端以表单 POST 跳转
+`action_url`。填了 `org` 时创建页指向该组织的 Apps 设置。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `org` | string | 否 | 目标组织；填了则创建页指向该组织的 Apps 设置，省略为个人 App |
+
+**成功响应**
+
+**200** Manifest 与跳转信息
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `action_url` | string | 是 | GitHub 创建页；默认 https://github.com/settings/apps/new，填了 org 时 https://github.com/organizations/{org}/settings/apps/new |
+| `state` | string | 是 | 防 CSRF 的一次性 state，GitHub 回跳时原样带回 |
+| `manifest` | object | 是 | 原样 POST 给 GitHub 的 App Manifest（形状由 GitHub Manifest 流程约定） |
+| `manifest.name` | string | 是 | App 名称（取自部署，如 Fast Ship） |
+| `manifest.url` | string | 是 | 主页地址 = public_url |
+| `manifest.hook_attributes` | object | 是 |  |
+| `manifest.hook_attributes.url` | string | 是 | Webhook URL = {public_url}/api/github/webhooks |
+| `manifest.hook_attributes.active` | boolean | 是 | 恒为 true（不用 enum[true]：oapi-codegen 会生成与 api.True 撞名的常量） |
+| `manifest.redirect_url` | string | 是 | 创建完成回跳地址 = {public_url}/settings/integrations/github/callback |
+| `manifest.setup_url` | string | 是 | 安装后跳转地址 = {public_url}/settings/integrations |
+| `manifest.public` | boolean | 是 | 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量） |
+| `manifest.default_events` | string[]（enum: pull_request） | 是 |  |
+| `manifest.default_permissions` | object | 是 | PR 评审所需的最小权限集 |
+| `manifest.default_permissions.pull_requests` | string（enum: write） | 是 |  |
+| `manifest.default_permissions.issues` | string（enum: write） | 是 |  |
+| `manifest.default_permissions.checks` | string（enum: write） | 是 |  |
+| `manifest.default_permissions.contents` | string（enum: read） | 是 |  |
+| `manifest.default_permissions.metadata` | string（enum: read） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 412 | 尚未配置 public_url，无法组装 Manifest（41202） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/deployment/github-app/manifest/complete`
+
+<!-- operationId: completeGitHubAppManifest -->
+
+完成 Manifest 创建（GitHub 回跳后换取凭证，仅管理员）
+
+B 轮实现。GitHub 创建 App 后回跳 `/settings/integrations/github/callback?code&state`，
+前端带 JWT 把 code/state 交给本端点：服务端用 code 向 GitHub 换 App 凭证，
+加密落库为部署级身份并返回配置投影。失败时前端显示明确文案与「重新创建」。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `code` | string | 是 | GitHub 回跳携带的一次性 code，用于换取 App 凭证 |
+| `state` | string | 是 | 发起创建时签发的 state，服务端核对一致才继续 |
+
+**成功响应**
+
+**200** 完成后的部署级 GitHub App 配置
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `configured` | boolean | 是 | 本部署是否有 App 身份配置来源（部署设置行或 config 兜底）；私钥是否真的可读看 private_key_set |
+| `source` | string（enum: database \| config \| none） | 是 | 当前生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置 |
+| `app_id` | string | 是 | GitHub App ID（未配置时为空串） |
+| `app_slug` | string | 是 | GitHub App slug（拼 install_url 用；未配置时为空串） |
+| `private_key_set` | boolean | 是 | 私钥是否已配置（本体永不回显） |
+| `webhook_secret_set` | boolean | 是 | webhook 验签密钥是否已配置（本体永不回显） |
+| `webhook_url` | string | 是 | 填进 GitHub App 的 Webhook URL（{public_url}/api/github/webhooks）；public_url 未配置时为空串 |
+| `install_url` | string | 是 | 安装到仓库入口（https://github.com/apps/{slug}/installations/new）；slug 为空时为空串 |
+| `detection_status` | string（enum: unchecked \| ok \| invalid \| failed） | 是 | unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） |
+| `detection_detail` | string | 是 | 给人看的补充说明（App 名称、失败原因等），不含任何密钥 |
+| `detected_at` | string（date-time，可空） | 是 | 最近一次检测完成时间；未检测为 null |
+| `updated_at` | string（date-time，可空） | 是 | 数据库配置最近保存时间；source 为 config/none 时为 null |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 创建流程已过期或已失效（40009，state 不存在/过期/重放/换管理员）；GitHub 授权码已过期或已被使用（40010） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 非管理员（40305） |
+| 500 | 服务器内部错误（50000） |
+| 502 | GitHub App Manifest 转换失败（50205） |

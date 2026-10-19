@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -56,6 +55,9 @@ type AutomationScheduler struct {
 	issueRepo *repository.IssueRepository
 	cfg       *config.Config
 	logger    *zap.Logger
+	// publicURLSrc 部署 public_url 读取入口（INT-129）：main 注入
+	// DeploymentSettingsService；缺省只读 config，保持既有构造与测试行为。
+	publicURLSrc PublicURLSource
 
 	// prReview GitHub PR 评审的协调面（INT-93）；可 nil（测试/未启用）。
 	prReview *PRReviewService
@@ -84,11 +86,17 @@ func NewAutomationScheduler(
 		db: db, autos: autos, runs: runs, tokens: tokens,
 		threads: threads, sink: sink, issueRepo: issueRepo,
 		cfg: cfg, logger: logger,
+		publicURLSrc:  configPublicURLSource{cfg: cfg},
 		dispatchQueue: make(chan string, automationDispatchQueue),
 		kickCh:        make(chan struct{}, 1),
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
 	}
+}
+
+// SetPublicURLSource 注入部署 public_url 读取入口（INT-129，main 调用一次）。
+func (s *AutomationScheduler) SetPublicURLSource(src PublicURLSource) {
+	s.publicURLSrc = src
 }
 
 // UsePRReview 挂接 GitHub PR 评审协调面（INT-93）；调度循环负责驱动它的两个
@@ -541,9 +549,9 @@ func (s *AutomationScheduler) dispatchRun(runID string) {
 func (s *AutomationScheduler) launchThreadForRun(ctx context.Context, run *model.AutomationRun) {
 	snap := parseAutomationSnapshot(run.ConfigSnapshotJSON)
 
-	publicURL := strings.TrimSpace(s.cfg.Server.PublicURL)
+	publicURL := s.publicURLSrc.PublicURL(ctx)
 	if publicURL == "" {
-		s.failDispatch(run, "dispatch_public_url_missing", "server.public_url 未配置，无法派发", nowUTC())
+		s.failDispatch(run, "dispatch_public_url_missing", "public_url 未配置，无法派发", nowUTC())
 		return
 	}
 

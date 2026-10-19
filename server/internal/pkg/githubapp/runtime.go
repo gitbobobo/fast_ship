@@ -15,28 +15,28 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 )
 
-// RuntimeConfig 当前生效的 GitHub App 明文身份：集成页保存的数据库配置解密
+// RuntimeConfig 当前生效的 GitHub App 明文身份：部署设置里保存的数据库配置解密
 // 结果，或 config.yaml 兜底。只在内存短暂存在，不写日志。
 type RuntimeConfig struct {
 	AppID         string
 	PrivateKeyPEM []byte
 }
 
-// UserConfigSource 按用户每次调用提供当前生效身份；ok=false 表示该用户未配置。
-// 集成页保存后下一次取值即生效，无需重启。
-type UserConfigSource func(ctx context.Context, userID string) (RuntimeConfig, bool, error)
+// ConfigSource 每次调用提供当前生效的部署级身份（INT-129：每套部署一个 App）；
+// ok=false 表示未配置。集成页保存后下一次取值即生效，无需重启。
+type ConfigSource func(ctx context.Context) (RuntimeConfig, bool, error)
 
-// Clients 按用户解析 githubapi.GitHubClient（INT-119 用户级集成）：ClientFor
-// 向 source 现取该用户身份，按（用户, AppID+PEM 指纹）缓存安装令牌仓库与共享
-// REST 客户端；同一用户指纹变化后下一次调用自动重建，不同用户的 client 互不
-// 共享。未配置时返回 50000「GitHub App 未配置」。
+// Clients 解析部署唯一的 githubapi.GitHubClient：ClientFor 向 source 现取当前
+// 身份，按（AppID+PEM 指纹）缓存安装令牌仓库与共享 REST 客户端；指纹变化后下一
+// 次调用自动重建。未配置时返回 50000「GitHub App 未配置」。
 type Clients struct {
-	source UserConfigSource
-	// apiBase 安装令牌换新与 REST 共用的 API base（空取官方）；测试注入 httptest 用。
+	source ConfigSource
+	// apiBase 安装令牌换新与 REST 共用的 API base（空取官方）；main 按
+	// github_app.api_base_url 注入，测试注入 httptest 用。
 	apiBase string
 
 	mu    sync.Mutex
-	cache map[string]clientsEntry
+	cache clientsEntry
 }
 
 type clientsEntry struct {
@@ -44,13 +44,20 @@ type clientsEntry struct {
 	client      githubapi.GitHubClient
 }
 
-func NewClients(source UserConfigSource) *Clients {
-	return &Clients{source: source, cache: map[string]clientsEntry{}}
+func NewClients(source ConfigSource) *Clients {
+	return &Clients{source: source}
 }
 
-// ClientFor 返回该用户当前生效的客户端；同一用户同一配置复用缓存实例。
-func (c *Clients) ClientFor(ctx context.Context, userID string) (githubapi.GitHubClient, error) {
-	cfgApp, ok, err := c.source(ctx, userID)
+// SetAPIBase 注入 GitHub API base（main 按 github_app.api_base_url 调一次）。
+func (c *Clients) SetAPIBase(apiBase string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.apiBase = apiBase
+}
+
+// ClientFor 返回当前部署生效的客户端；同一配置复用缓存实例。
+func (c *Clients) ClientFor(ctx context.Context) (githubapi.GitHubClient, error) {
+	cfgApp, ok, err := c.source(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -62,11 +69,11 @@ func (c *Clients) ClientFor(ctx context.Context, userID string) (githubapi.GitHu
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry, ok := c.cache[userID]
-	if !ok || entry.client == nil || fp != entry.fingerprint {
+	entry := c.cache
+	if entry.client == nil || fp != entry.fingerprint {
 		creds := &AppCredentials{AppID: cfgApp.AppID, PrivateKeyPEM: cfgApp.PrivateKeyPEM, APIBaseURL: c.apiBase}
 		entry = clientsEntry{fingerprint: fp, client: NewClient(NewInstallationTokenStore(creds))}
-		c.cache[userID] = entry
+		c.cache = entry
 	}
 	return entry.client, nil
 }
@@ -77,15 +84,17 @@ type StaticClients struct {
 	Client githubapi.GitHubClient
 }
 
-func (s StaticClients) ClientFor(context.Context, string) (githubapi.GitHubClient, error) {
+func (s StaticClients) ClientFor(context.Context) (githubapi.GitHubClient, error) {
 	return s.Client, nil
 }
 
 // Detection 一次连接检测的结论：status 为 ok / invalid / failed，detail 是给人
-// 看的固定文案（不拼底层错误串，不含任何密钥）。
+// 看的固定文案（不拼底层错误串，不含任何密钥）；slug 带回 GitHub 响应里的
+// App slug（手填或 config 配置的 App 也能生成安装链接）。
 type Detection struct {
 	Status string
 	Detail string
+	Slug   string
 }
 
 const (
@@ -141,7 +150,7 @@ func Verify(ctx context.Context, appID string, keyPEM []byte, apiBaseURL string)
 			label = app.Slug
 		}
 		if label != "" {
-			return Detection{Status: DetectionOK, Detail: "已连接 GitHub App：" + label}
+			return Detection{Status: DetectionOK, Detail: "已连接 GitHub App：" + label, Slug: app.Slug}
 		}
 		return Detection{Status: DetectionOK, Detail: "已连接 GitHub App"}
 	case resp.StatusCode == http.StatusUnauthorized:

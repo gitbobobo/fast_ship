@@ -142,3 +142,75 @@ func (r *UserRepository) ExistsByEmail(email string) (bool, error) {
 	err := r.db.Model(&model.User{}).Where("email = ?", email).Count(&count).Error
 	return count > 0, err
 }
+
+// Transaction 以短事务执行 fn（INT-129：注册的角色判定与邀请消费、改角色的
+// 最后管理员判定都必须整体提交或回滚）。闭包内只用 tx 句柄与显式收句柄的
+// Tx 方法，不得触碰池根——单连接池下再借第二条连接会永久自锁，
+// 见 docs/internal/database.md。
+func (r *UserRepository) Transaction(fn func(tx *gorm.DB) error) error {
+	return r.db.Transaction(fn)
+}
+
+// Count 全库用户数：注册路径用「库里还没有用户」判定首个用户（首个 = admin）。
+func (r *UserRepository) Count() (int64, error) {
+	return r.CountTx(r.db)
+}
+
+func (r *UserRepository) CountTx(tx *gorm.DB) (int64, error) {
+	var count int64
+	err := tx.Model(&model.User{}).Count(&count).Error
+	return count, err
+}
+
+// ListAll 全部成员，按 created_at 升序（首个用户=最早的 admin 排最前）。
+func (r *UserRepository) ListAll() ([]model.User, error) {
+	var users []model.User
+	err := r.db.Order("created_at ASC, id ASC").Find(&users).Error
+	return users, err
+}
+
+func (r *UserRepository) FindByIDTx(tx *gorm.DB, id string) (*model.User, error) {
+	var user model.User
+	if err := tx.Where("id = ?", id).First(&user).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (r *UserRepository) CreateTx(tx *gorm.DB, user *model.User) error {
+	return tx.Create(user).Error
+}
+
+// UpdateRole 改单个用户的角色；调用方负责最后一个管理员的业务判定。
+func (r *UserRepository) UpdateRole(id, role string) error {
+	return r.UpdateRoleTx(r.db, id, role)
+}
+
+func (r *UserRepository) UpdateRoleTx(tx *gorm.DB, id, role string) error {
+	return tx.Model(&model.User{}).Where("id = ?", id).Update("role", role).Error
+}
+
+// CountAdmins 当前管理员数量：改角色的最后管理员判定、升级迁移的幂等条件。
+func (r *UserRepository) CountAdmins() (int64, error) {
+	return r.CountAdminsTx(r.db)
+}
+
+func (r *UserRepository) CountAdminsTx(tx *gorm.DB) (int64, error) {
+	var count int64
+	err := tx.Model(&model.User{}).Where("role = ?", model.UserRoleAdmin).Count(&count).Error
+	return count, err
+}
+
+// EarliestCreatedID created_at 最早的用户 ID（升级迁移把既有部署的最早用户
+// 置为 admin）；无用户时返回 gorm.ErrRecordNotFound。
+func (r *UserRepository) EarliestCreatedID() (string, error) {
+	return r.EarliestCreatedIDTx(r.db)
+}
+
+func (r *UserRepository) EarliestCreatedIDTx(tx *gorm.DB) (string, error) {
+	var user model.User
+	if err := tx.Order("created_at ASC, id ASC").First(&user).Error; err != nil {
+		return "", err
+	}
+	return user.ID, nil
+}

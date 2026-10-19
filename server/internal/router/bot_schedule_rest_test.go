@@ -294,8 +294,9 @@ func TestBotScheduleRESTStateProjectionAndClear(t *testing.T) {
 		t.Fatalf("missing task 错误码应为 40429: %v", body)
 	}
 
-	// 归属校验：他人机器人一律 404（机器人不存在）。
-	other := registerAndLoginRouterUser(t, e.env.router, "bote2e-other", "bote2e-other@example.com", "Password123")
+	// 归属校验：他人机器人一律 404（机器人不存在）。公开注册关闭后（INT-129）
+	// 第二个用户凭邀请注册。
+	other := registerAndLoginInvitedRouterUser(t, e.env.router, e.auth.Token, "bote2e-other", "bote2e-other@example.com", "Password123")
 	jwt := e.jwt
 	e.jwt = "Bearer " + other.Token
 	code, body = e.doJSON(t, http.MethodDelete, "/api/bots/"+botID+"/schedule-tasks/"+task.ID+"/state", nil)
