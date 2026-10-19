@@ -24,6 +24,13 @@ type BotScheduleTask struct {
 	// NextRunAt 是下一次计划触发时间（UTC）；nil 表示停用或配置损坏暂停。
 	NextRunAt *time.Time `json:"next_run_at"`
 
+	// StateJSON 是任务跨运行保留的小状态（INT-123）：JSON 文本，空串 = 无状态。
+	// 与长期记忆无关——不写 bot_memory_*、不产生记忆版本；随任务删除而删除
+	// （同表列，天然级联），改任务指令/开关/模型不触碰它。
+	StateJSON string `gorm:"type:text;not null;default:''" json:"state_json"`
+	// StateUpdatedAt 是状态最近一次写入时间；无状态时为 NULL。
+	StateUpdatedAt *time.Time `json:"state_updated_at"`
+
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -43,6 +44,10 @@ const (
 	// 建得比看得见还多的话，用户唯一的任务管理面（列表 + 开关）就管不到那些
 	// 看不见的任务。
 	botScheduleTasksMaxPerBot = botScheduleTasksListLimit
+	// botScheduleStateMaxBytes 是任务小状态（INT-123）的 UTF-8 字节上限：
+	// 「上次已报的 ID 集合」量级的去重数据，超限显式拒绝而不是悄悄截断——
+	// 截断后的去重集合会漏报。
+	botScheduleStateMaxBytes = 8192
 )
 
 // botScheduleSession 是一次 schedule run 冻结的会话上下文：任务快照、工具集
@@ -84,7 +89,8 @@ func (s *BotService) newScheduleSession(bot *model.Bot, run *model.BotRun) (*bot
 }
 
 // botScheduleRuntimeContext 是 schedule 会话末尾的运行时上下文：任务指令、
-// 静默约定与放行说明只出现在这里。
+// 静默约定与放行说明只出现在这里。last_run_* 是上一次已结束运行（INT-123），
+// 没有上一次运行时整体省略。
 type botScheduleRuntimeContext struct {
 	Note           string `json:"note"`
 	CurrentTimeUTC string `json:"current_time_utc"`
@@ -95,6 +101,9 @@ type botScheduleRuntimeContext struct {
 	Cron           string `json:"cron,omitempty"`
 	Timezone       string `json:"timezone,omitempty"`
 	ScheduledFor   string `json:"scheduled_for,omitempty"`
+	LastRunAt      string `json:"last_run_at,omitempty"`
+	LastRunStatus  string `json:"last_run_status,omitempty"`
+	LastRunSummary string `json:"last_run_summary,omitempty"`
 }
 
 // buildScheduleRunContext 把 schedule run 投影为协议请求：同一份系统提示与
@@ -117,11 +126,18 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 	}
 	messages = append(messages, projected...)
 
+	// 状态句只在本次冻结工具集声明了 state_get/state_set 时拼入：激活失败
+	// 降级的 v6 会话没有这两个动作，宣传会诱导模型调用必然失败的动作。
+	note := "以上为本次定时任务的完整上下文。这是一次 schedule run：独立会话，" +
+		"结束后不会与用户对话，用户只会看到你在最终回复里汇报的内容。" +
+		"若没有需要告知用户的内容，只回复一行 " + botScheduleSentinel + "；" +
+		"否则用简洁中文汇报执行结果。本次运行继承用户权限，业务写操作默认放行（不弹确认）。"
+	if _, ok := sess.toolset.byAction["fs_schedule/state_get"]; ok {
+		note += "本任务有一块跨运行保留的小状态，用 fs_schedule 的 state_get/state_set 读写，" +
+			"适合存「上次已报的 ID」这类去重集合。"
+	}
 	rt := botScheduleRuntimeContext{
-		Note: "以上为本次定时任务的完整上下文。这是一次 schedule run：独立会话，" +
-			"结束后不会与用户对话，用户只会看到你在最终回复里汇报的内容。" +
-			"若没有需要告知用户的内容，只回复一行 " + botScheduleSentinel + "；" +
-			"否则用简洁中文汇报执行结果。本次运行继承用户权限，业务写操作默认放行（不弹确认）。",
+		Note:           note,
 		CurrentTimeUTC: time.Now().UTC().Format(time.RFC3339),
 		RunID:          run.ID,
 		TaskID:         sess.task.ID,
@@ -132,6 +148,13 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 	}
 	if run.ScheduledFor != nil {
 		rt.ScheduledFor = run.ScheduledFor.UTC().Format(time.RFC3339)
+	}
+	// 上一次已结束运行的时间/状态/摘要：没有则整体省略；当前 run 自己还在
+	// 进行中，不会被选中。
+	if last, err := s.runs.LatestFinishedByScheduleTask(bot.ID, sess.task.ID); err == nil && last.FinishedAt != nil {
+		rt.LastRunAt = last.FinishedAt.UTC().Format(time.RFC3339)
+		rt.LastRunStatus = string(last.Status)
+		rt.LastRunSummary = last.Summary
 	}
 	rtRaw, _ := json.Marshal(rt)
 	messages = append(messages, openai.UserMessage("[运行时上下文]\n"+string(rtRaw)))
@@ -186,13 +209,34 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 }
 
 // botScheduleFoldMap 是 schedule 会话的确定性折叠：超阈值的 tool_reply 正文
-// 替换为一行 fs_result.read 引用。无状态、只依赖账本内容——同一 run 内任何
-// 一次重放结果一致（前缀稳定），原文仍在账本与调用结果里。
+// 替换为一行 fs_result.read 引用。state_get 的回执豁免折叠（INT-123）——其正文
+// 就是任务状态本体，折成引用后模型拿不到内容（续读同样是大块）。豁免集直接从
+// 同一份账本 rows 的 assistant 工具调用解出，不额外查库：结果仍只由 rows 决定，
+// 确定性不变，也不存在查询失败的回退路径。
 func botScheduleFoldMap(rows []model.BotMessage) map[string]string {
+	exempt := map[string]bool{}
+	for i := range rows {
+		if rows[i].Kind != model.BotMessageKindAssistant {
+			continue
+		}
+		var content botAssistantContent
+		if err := json.Unmarshal([]byte(rows[i].ContentJSON), &content); err != nil {
+			continue
+		}
+		for j := range content.ToolCalls {
+			tc := content.ToolCalls[j]
+			if tc.ToolName == "fs_schedule" && tc.Action == "state_get" {
+				exempt[tc.CallID] = true
+			}
+		}
+	}
 	folded := map[string]string{}
 	for i := range rows {
 		row := &rows[i]
 		if row.Kind != model.BotMessageKindToolReply || row.CallID == nil {
+			continue
+		}
+		if exempt[*row.CallID] {
 			continue
 		}
 		var content botToolReplyContent
@@ -576,6 +620,8 @@ func botScheduleRunResponseOf(run *model.BotRun) BotScheduleRunResponse {
 }
 
 // BotScheduleTaskResponse 是定时任务的 API 投影；last_run 是最近一次运行。
+// state 是任务的小状态原文（INT-123，json.RawMessage 逐字透传，无状态时零值
+// 序列化为 null），用户只能经 DELETE .../state 清空。
 type BotScheduleTaskResponse struct {
 	ID             string                  `json:"id"`
 	BotID          string                  `json:"bot_id"`
@@ -587,6 +633,8 @@ type BotScheduleTaskResponse struct {
 	NeedsReport    bool                    `json:"needs_report"`
 	Enabled        bool                    `json:"enabled"`
 	NextRunAt      *string                 `json:"next_run_at"`
+	State          json.RawMessage         `json:"state"`
+	StateUpdatedAt *string                 `json:"state_updated_at"`
 	CreatedAt      string                  `json:"created_at"`
 	UpdatedAt      string                  `json:"updated_at"`
 	LastRun        *BotScheduleRunResponse `json:"last_run"`
@@ -601,6 +649,11 @@ func (s *BotService) scheduleTaskResponseOf(task *model.BotScheduleTask) BotSche
 		NextRunAt: rfc3339(task.NextRunAt),
 		CreatedAt: task.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if task.StateJSON != "" {
+		// 状态原文直接透传：数字字面量（大整数等）逐字保留，不走 float64 往返。
+		resp.State = json.RawMessage(task.StateJSON)
+		resp.StateUpdatedAt = rfc3339(task.StateUpdatedAt)
 	}
 	if run, err := s.runs.LatestByScheduleTask(task.BotID, task.ID); err == nil {
 		out := botScheduleRunResponseOf(run)
@@ -681,6 +734,47 @@ func (s *BotService) SetScheduleTaskEnabled(userID, botID, taskID string, enable
 	return &resp, nil
 }
 
+// ClearScheduleTaskState 清空任务的小状态（INT-123，用户唯一的状态操作）：
+// state_json 置空串、state_updated_at 置 NULL，幂等（无状态时同样成功），
+// 返回清空后的任务投影。状态写入仍只经机器人 state_set。读+写在同一事务里
+// 是为了区分 40429 与内部错误；响应用事务内读到的行直接抹掉状态字段构造，
+// 不提交后再重读——并发的 schedule run 可能在提交后又写回状态，重读会让
+// 「已清空」的响应与库里再次不一致。updated_at 同样显式保持原值。
+func (s *BotService) ClearScheduleTaskState(userID, botID, taskID string) (*BotScheduleTaskResponse, error) {
+	if err := s.checkOwnership(userID, botID); err != nil {
+		return nil, err
+	}
+	var task *model.BotScheduleTask
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		repo := repository.NewBotScheduleTaskRepository(tx)
+		row, err := repo.FindByIDAndBot(taskID, botID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errs.ErrBotScheduleTaskNotFound
+			}
+			return err
+		}
+		ok, err := repo.UpdateColumns(taskID, nil, map[string]interface{}{
+			"state_json": "", "state_updated_at": nil, "updated_at": gorm.Expr("updated_at"),
+		})
+		if err != nil || !ok {
+			return errs.ErrInternal
+		}
+		row.StateJSON = ""
+		row.StateUpdatedAt = nil
+		task = row
+		return nil
+	})
+	if txErr != nil {
+		if appErr, ok := txErr.(*errs.AppError); ok {
+			return nil, appErr
+		}
+		return nil, errs.ErrInternal
+	}
+	resp := s.scheduleTaskResponseOf(task)
+	return &resp, nil
+}
+
 // SetScheduleTaskEnabledRequest 是开关请求体：enabled 是唯一可写字段，
 // 其它字段在 handler 层拒绝（400）。
 type SetScheduleTaskEnabledRequest struct {
@@ -722,8 +816,94 @@ func (s *BotService) execScheduleTool(call *model.BotToolCall) (string, error) {
 		return s.execScheduleRun(call, &args)
 	case "enable", "disable":
 		return s.execScheduleEnable(call, &args, args.Action == "enable")
+	case "state_get":
+		return s.execScheduleStateGet(call)
+	case "state_set":
+		return s.execScheduleStateSet(call, &args)
 	}
 	return "", errs.New(errs.ErrInvalidParams.Code, "不支持的 fs_schedule 动作: "+args.Action)
+}
+
+// scheduleRunTaskOf 解出调用所属 schedule run 的任务：state_get/state_set 只在
+// 定时任务运行里可用，任务由本次运行隐式决定（不收 task_id 参数）。主线会话、
+// 缺调用账本关联或任务已删除一律按 40001 拒绝，不给模型「换个参数再试」的
+// 错觉。
+func (s *BotService) scheduleRunTaskOf(call *model.BotToolCall) (*model.BotScheduleTask, error) {
+	reject := errs.New(errs.ErrInvalidParams.Code, "state_get/state_set 只能在定时任务运行中使用")
+	runID := s.runIDOfCall(call)
+	if runID == "" {
+		return nil, reject
+	}
+	run, err := s.runs.FindByID(runID)
+	if err != nil || run.SessionKind != model.BotSessionKindSchedule || run.ScheduleTaskID == nil {
+		return nil, reject
+	}
+	task, err := s.schedTasks.FindByIDAndBot(*run.ScheduleTaskID, call.BotID)
+	if err != nil {
+		return nil, reject
+	}
+	return task, nil
+}
+
+// execScheduleStateGet 读取本任务的小状态（INT-123）：state 为 JSON 值（无状态
+// 为 null），state_updated_at 为 RFC3339 或 null。state 用 json.RawMessage 原文
+// 透传，不解成 interface{}：数字字面量（大整数、1e400）逐字保留，不走 float64
+// 往返。
+func (s *BotService) execScheduleStateGet(call *model.BotToolCall) (string, error) {
+	task, err := s.scheduleRunTaskOf(call)
+	if err != nil {
+		return "", err
+	}
+	out := map[string]interface{}{
+		"ok": true, "task_id": task.ID, "state": nil, "state_updated_at": nil,
+		"max_bytes": botScheduleStateMaxBytes,
+	}
+	if task.StateJSON != "" {
+		out["state"] = json.RawMessage(task.StateJSON)
+		if task.StateUpdatedAt != nil {
+			out["state_updated_at"] = task.StateUpdatedAt.UTC().Format(time.RFC3339)
+		}
+	}
+	return botMarshalResult(out)
+}
+
+// execScheduleStateSet 写入本任务的小状态（INT-123）：state 省略或 null 表示
+// 清空，否则写入其紧凑 JSON（保留原始字节，避免大整数精度丢失）；超过
+// botScheduleStateMaxBytes 显式拒绝并在消息里给出当前字节数与上限。状态写入
+// 与长期记忆无关——不写 bot_memory_*、不产生记忆版本。
+func (s *BotService) execScheduleStateSet(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
+	task, err := s.scheduleRunTaskOf(call)
+	if err != nil {
+		return "", err
+	}
+	// updated_at 显式保持原值：GORM 的 Updates 会隐式 autoUpdateTime 改写
+	// updated_at，而状态有独立的 state_updated_at，配置时间不应被状态写入推动。
+	cols := map[string]interface{}{
+		"state_json": "", "state_updated_at": nil, "updated_at": gorm.Expr("updated_at"),
+	}
+	stateBytes := 0
+	if args.State != nil && string(*args.State) != "null" {
+		var compacted bytes.Buffer
+		if err := json.Compact(&compacted, *args.State); err != nil {
+			return "", errs.New(errs.ErrInvalidParams.Code, "state 必须是有效的 JSON 值")
+		}
+		if compacted.Len() > botScheduleStateMaxBytes {
+			return "", errs.New(errs.ErrInvalidParams.Code, fmt.Sprintf(
+				"任务状态过大：%d 字节（上限 %d 字节）", compacted.Len(), botScheduleStateMaxBytes))
+		}
+		cols["state_json"] = compacted.String()
+		cols["state_updated_at"] = time.Now().UTC()
+		stateBytes = compacted.Len()
+	}
+	// 单条 UpdateColumns 没有业务错误码要区分，不需要事务包裹。
+	ok, err := s.schedTasks.UpdateColumns(task.ID, nil, cols)
+	if err != nil || !ok {
+		return "", errs.ErrInternal
+	}
+	return botMarshalResult(map[string]interface{}{
+		"ok": true, "task_id": task.ID, "bytes": stateBytes,
+		"max_bytes": botScheduleStateMaxBytes, "cleared": stateBytes == 0,
+	})
 }
 
 // execScheduleRun 立即手动触发一次任务（INT-121）。dry_run=true 是只读预览：
@@ -896,13 +1076,14 @@ func (s *BotService) execScheduleList(call *model.BotToolCall, args *botSchedule
 }
 
 // scheduleTaskSlim 是工具结果里的任务投影：带 next_run_at 与 cron/时区原文，
-// 让模型能在回复里用中文说明执行时间。
+// 让模型能在回复里用中文说明执行时间；has_state 标记任务有没有小状态
+// （INT-123），状态正文只在 state_get 里给，避免 list 结果膨胀。
 func (s *BotService) scheduleTaskSlim(task *model.BotScheduleTask) map[string]interface{} {
 	out := map[string]interface{}{
 		"id": task.ID, "name": task.Name,
 		"cron_expression": task.CronExpression, "timezone": task.Timezone,
 		"instruction": task.Instruction, "needs_report": task.NeedsReport,
-		"enabled": task.Enabled,
+		"enabled": task.Enabled, "has_state": task.StateJSON != "",
 	}
 	if task.Model != "" {
 		out["model"] = task.Model

@@ -121,9 +121,10 @@ SDK 重试显式关零（`option.WithMaxRetries(0)`）：连接测试与被中�
 开放定时任务管理（见下节）；v4（INT-110）修正 action 枚举并新增线程/Issue
 字段；v5（INT-120）让 `fs_thread list` 真正支持 `env_id`/`query` 过滤并
 修正这两个参数的 schema 描述；v6（INT-121）起 `fs_schedule` 新增 `run`
-（手动立即执行一次）与 `dry_run` 预览（见下节）。已发布版本（v1–v5）的
-注册表都是**冻结副本**——新版本变化不得改写旧版本的字节（存量会话的
-tools_hash 失稳即前缀失稳；v1–v5 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
+（手动立即执行一次）与 `dry_run` 预览；v7（INT-123）起 `fs_schedule` 新增
+`state_get`/`state_set` 与 `state` 参数（任务小状态，见下节）。已发布
+版本（v1–v6）的注册表都是**冻结副本**——新版本变化不得改写旧版本的字节
+（存量会话的 tools_hash 失稳即前缀失稳；v1–v6 的 hash 逐字节钉死在测试基线里）。版本只在 run 入口或压缩边界推进（重建平台规则并递增 prompt_revision）：
 run 入口的 `activateBotPrompt` 在一个短事务里读行、
 判 stale、按**该行**人设重建提示词并写回，主线与定时任务会话都适用（在冻结
 本次 run 的配置与会话快照之前完成）；提示词始终由事务内读到的行生成——
@@ -360,12 +361,41 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   清空（不补跑过期计划）。每机器人任务数上限 200，与列表读取上限一致——建得比
   看得见还多的话，用户唯一的任务管理面（列表 + 开关）就管不到那些任务；计数与
   插入在同一事务内（任务允许并行运行，分开读会让并发创建都通过检查）。
+- **任务小状态（INT-123）**：`state_json`（JSON 文本，空串=无状态）+
+  `state_updated_at`（无状态为 NULL）。这是每个任务一块跨运行保留的小状态，
+  供「仅新增时提醒」这类跨运行去重使用；上限 8192 UTF-8 字节，超限显式 40001
+  （消息含当前字节数与上限）——截断会让去重集合漏报，宁可不写。状态在投影与
+  回执里都用 `json.RawMessage` 原文透传，数字字面量（大整数等）逐字保留
+  （浏览器 JSON 解析会把 >2^53 的整数折成 double、界面展示可能失真；权威值看
+  `state_get` 回执与账本）。
+  状态与长期记忆无关：不写 `bot_memory_*`、不产生记忆版本、不进主线模型输入；
+  但 schedule 会话的工具调用（含 state 参数/结果）与其它 schedule 工具调用
+  一样会落 `bot_tool_calls` 账本。改任务指令/开关/模型不触碰状态（状态写入与
+  清空也不推动任务的 `updated_at`，状态有独立的 `state_updated_at`）；随任务
+  删除一并删除（同表列）。写入只经 `fs_schedule` 的 `state_set`（只在
+  schedule run 内可用，任务由本次 run 隐式决定，不收 task_id；省略或 null 即
+  清空），读取经 `state_get`（无参数，计入只读动作；其回执豁免 schedule 会话
+  的确定性折叠——折叠成 fs_result.read 引用会让模型拿不到状态内容）；主线
+  会话调用一律 40001。用户侧唯一的状态操作是
+  `DELETE /api/bots/{id}/schedule-tasks/{taskId}/state`（幂等，返回清空后的
+  任务投影）。`fs_schedule` 的任务瘦身投影带 `has_state`（状态正文只在
+  state_get 里给，避免 list 结果膨胀）。v6 及更早的冻结会话不认识
+  state_get/state_set（工具集逐字节冻结，hash 见测试基线；运行时上下文的
+  note 只在本次冻结工具集声明了这两个动作时才宣传它们）。**并发语义**：状态
+  是整块覆盖写（last-write-wins），同一任务允许并行运行且读改写不原子，并行
+  时去重集合可能丢更新；要并发可靠去重需外部协调（如在状态里记运行水位并由
+  单一 run 语义保证，或落到外部存储）。
 - **会话隔离**：schedule run 复用 `bot_runs`/`bot_messages`/`bot_events`，
   以 `session_kind='schedule'` 判别；每次运行是独立会话，只带同一份系统提示
   + 冻结记忆注入（run 开始现读一次、run 内冻结）+ 冻结工具集 + 只含本 run
-  的消息 + 末尾运行时上下文（任务名/指令/cron/静默约定）。主线一切读取面
-  （`FindActiveByBot`、/runs、`ListMainline`、聊天快照、SSE 重放、
-  `HasModelInputSince`）按 `session_kind='main'` 收窄；`offered_input_seq`
+  的消息 + 末尾运行时上下文（任务名/指令/cron/静默约定；INT-123 起带上一次
+  已结束运行的 `last_run_at/last_run_status/last_run_summary`——没有则整体
+  省略——与任务小状态的用法说明）。主线读取面里 messages/`ListMainline`、/runs、
+  `FindActiveByBot`、SSE 重放、`HasModelInputSince` 按 `session_kind='main'` 收窄；
+  `/calls` 与聊天快照的 `calls[]` 是 bot 级调用账本视角，仍含 schedule 调用
+  （因此也含 `state` 参数与 state_get 回执；前端只在主线 assistant 消息引用时把
+  调用渲染成工具卡，同步的 state_get/state_set 不会出现在主线消息里，但未终态的
+  schedule 异步调用仍可能出现在后台调用面板——既有行为）。`offered_input_seq`
   只由主线推进。run 的模型/地址取配置快照（任务可指定模型覆盖）；密钥密文
   （`bot_runs.api_key_encrypted_snapshot`，不进任何 API 投影）与 `base_url`
   在派发时成对冻结——轮换密钥又换地址时，不能把新密钥发往旧地址。schedule
@@ -373,8 +403,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   后台结果不算自己的输入。
 - **不做压缩**：schedule 会话不读写 `bot_context_states`/`bot_compactions`、
   不跑压缩周期、不发工具集告知。折叠是**无状态、确定性**的：tool_reply 正文
-  超过 6000 字符即替换为一行 `fs_result.read` 引用——同一 run 内任何一次投影
-  结果一致（前缀稳定），原文仍在账本与调用结果里。这与主线「压缩驱动折叠」
+  超过 6000 字符即替换为一行 `fs_result.read` 引用；唯一例外是 INT-123 的
+  `state_get` 回执（其正文就是任务状态本体，折掉模型就读不到；豁免集由同一份
+  账本的 assistant 工具调用解出，仍是账本内容的纯函数）——同一 run 内任何一次
+  投影结果一致（前缀稳定），原文仍在账本与调用结果里。这与主线「压缩驱动折叠」
   （大结果换引用、写入持久投影、按窗口与门槛裁剪）不同：schedule 会话生命
   只有一次运行，没有跨请求的水位需要维护，确定性规则即可保证不漂移。
 - **调度**：`bot_schedule_scheduler.go` 单进程 10s ticker（与 Automation
@@ -425,8 +457,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
 - **静默约定**：运行时上下文明确要求「无话可说只回复一行 `[[SILENT]]`」。
   收尾取本 run 最后一条 assistant 正文，去尾部空白与句号后等于哨兵即
   `silent=true`，summary 记空串；否则 summary 取正文并截断到 2000 字符。
-- **工具**：`fs_schedule`（v3 起）动作 v6 为 8 个：`list/create/update/
-  delete/runs/run/enable/disable`，全部同步执行、立即生效。create/update 校验
+- **工具**：`fs_schedule`（v3 起）动作 v7 为 10 个：`list/create/update/
+  delete/runs/run/enable/disable/state_get/state_set`，全部同步执行、立即生效。
+  create/update 校验
   cron 五字段与时区，结果带 `next_run_at` 与 cron/时区原文，让模型能在回复里用
   中文说明执行时间。update 省略字段即保留；`model` 用指针区分「未提供」与「空串」
   ——传空串明确清除模型覆盖、回到机器人当前模型。`list` 支持 `limit`/`offset`
@@ -452,8 +485,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
 - **REST（仅 JWT，接口形状已与前端冻结）**：
   `GET /api/bots/{id}/schedule-tasks`、`GET .../{taskId}`、
   `GET .../{taskId}/runs?limit=&offset=`、
-  `PUT .../{taskId}/enabled`（body 只接受 `{"enabled":bool}`，其它字段 400）。
-  没有任何创建/编辑/删除端点。`BotScheduleTask` 含 `last_run`；
+  `PUT .../{taskId}/enabled`（body 只接受 `{"enabled":bool}`，其它字段 400）、
+  `DELETE .../{taskId}/state`（清空任务小状态，INT-123 起，幂等）。
+  没有任何创建/编辑端点。`BotScheduleTask` 含 `last_run` 与
+  `state`/`state_updated_at`（INT-123 起，无状态为 null）；
   `BotScheduleRun` 含 `status/summary/silent/trigger_source/scheduled_for/
   duration_ms/usage`（`trigger_source`：`cron`/`manual`，INT-121 起）。
 - **删除任务**：同一事务里给该任务未完成的运行置 `stop_requested_at` 再删任务
@@ -676,10 +711,14 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   `DEFAULT_PERSONA_PROMPT`）：新建机器人预填「简短、口语化、先给结论、
   1～3 句」的模板，引导用户改成自己的要求；编辑回填已存人设，用户清空后
   保存就是空人设，不强制补回模板。
-- **注意**：固定前缀体积对提示词文案敏感。INT-102 的压缩测试用固定窗口标定
-  种子内容，本次约 390 字的风格段把 `固定前缀 + 最小摘要预算` 顶过 8000 窗口
-  的触发阈值，相关测试窗口上调到 8400（断言语义不变）。再改提示词文案时需要
-  重新核对这批窗口余量（8400 下约 230 token）。
+- **注意**：固定前缀体积对提示词文案敏感，INT-102 的压缩测试用固定窗口标定
+  种子内容。INT-122 的风格段把窗口从 8000 提到 8400；INT-123 的 v7 提示词/
+  工具集变长（规则 8 补任务小状态、fs_schedule 扩到 10 动作）后再次重定标：
+  压缩测试窗口 9500、压缩前置检查窗口 6800（触发阈值 5100）。压缩前置检查的
+  固定前缀按 bytes/3.5 统一估算：系统提示 5307 字节 + 工具集 schema 15922 字节
+  ≈ 6.1k token（工具集的 `ToolsTokensEstimate` 展示字段另按 chars/4 记约 3980），
+  9500 窗口下余量约 700 token。断言语义不变；再改提示词文案或工具集后需要重新
+  核对这批窗口余量。
 
 ## 机器人列表最近消息预览（INT-125）
 

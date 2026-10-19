@@ -7617,6 +7617,43 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/bots/{id}/schedule-tasks/{taskId}/state:
+    delete:
+      tags: [bots]
+      operationId: clearBotScheduleTaskState
+      summary: 清空定时任务状态
+      description: |
+        清空任务跨运行保留的小状态（INT-123）。幂等：无状态时同样返回 200。
+        状态的写入只经机器人 fs_schedule 的 state_set，这是用户对该状态唯一的
+        操作；随任务删除一并清除。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 清空后的任务详情（state 与 state_updated_at 为 null）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotScheduleTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/bots/{id}/calls:
     get:
       tags: [bots]
@@ -12528,7 +12565,7 @@ components:
 
     BotScheduleTask:
       type: object
-      required: [id, bot_id, name, cron_expression, timezone, instruction, model, needs_report, enabled, next_run_at, created_at, updated_at, last_run]
+      required: [id, bot_id, name, cron_expression, timezone, instruction, model, needs_report, enabled, next_run_at, state, state_updated_at, created_at, updated_at, last_run]
       properties:
         id:
           type: string
@@ -12558,6 +12595,13 @@ components:
           format: date-time
           nullable: true
           description: 下一次计划触发时间（UTC）；停用或调度暂停时为 null
+        state:
+          description: 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空
+        state_updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 状态最近一次写入时间（UTC）；无状态为 null
         created_at:
           type: string
           format: date-time

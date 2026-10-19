@@ -322,6 +322,17 @@ func (h *BotHandler) SetScheduleTaskEnabled(c *gin.Context) {
 	response.Success(c, result)
 }
 
+// ClearScheduleTaskState 清空定时任务的小状态（INT-123）：幂等，返回清空后
+// 的任务投影。
+func (h *BotHandler) ClearScheduleTaskState(c *gin.Context) {
+	result, err := h.bots.ClearScheduleTaskState(middleware.GetUserID(c), c.Param("id"), c.Param("taskId"))
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 // ---------- 授权 ----------
 
 func (h *BotHandler) ListAuthorizations(c *gin.Context) {

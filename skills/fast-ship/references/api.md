@@ -9427,6 +9427,8 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `items[].needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
 | `items[].enabled` | boolean | 是 |  |
 | `items[].next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
+| `items[].state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `items[].state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
 | `items[].created_at` | string（date-time） | 是 |  |
 | `items[].updated_at` | string（date-time） | 是 |  |
 | `items[].last_run` | object（可空） | 是 |  |
@@ -9487,6 +9489,8 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
 | `enabled` | boolean | 是 |  |
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
+| `state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 | `last_run` | object（可空） | 是 |  |
@@ -9613,6 +9617,8 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
 | `enabled` | boolean | 是 |  |
 | `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
+| `state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
 | `created_at` | string（date-time） | 是 |  |
 | `updated_at` | string（date-time） | 是 |  |
 | `last_run` | object（可空） | 是 |  |
@@ -9637,6 +9643,72 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | HTTP | 说明 |
 | --- | --- |
 | 400 | 请求体携带未知字段或缺 enabled（40001） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/bots/{id}/schedule-tasks/{taskId}/state`
+
+<!-- operationId: clearBotScheduleTaskState -->
+
+清空定时任务状态
+
+清空任务跨运行保留的小状态（INT-123）。幂等：无状态时同样返回 200。
+状态的写入只经机器人 fs_schedule 的 state_set，这是用户对该状态唯一的
+操作；随任务删除一并清除。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+
+**成功响应**
+
+**200** 清空后的任务详情（state 与 state_updated_at 为 null）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `bot_id` | string | 是 |  |
+| `name` | string | 是 |  |
+| `cron_expression` | string | 是 | 标准五字段 cron（分 时 日 月 周） |
+| `timezone` | string | 是 | IANA 时区名称；空串 = UTC |
+| `instruction` | string | 是 | 每次运行交给机器人的任务指令 |
+| `model` | string | 是 | 运行使用的模型；空串用机器人当前模型 |
+| `needs_report` | boolean | 是 | true 时成功且非静默的运行也追加事件进主线 |
+| `enabled` | boolean | 是 |  |
+| `next_run_at` | string（date-time，可空） | 是 | 下一次计划触发时间（UTC）；停用或调度暂停时为 null |
+| `state` | any | 是 | 任务跨运行保留的小状态（INT-123，任意 JSON 值）；无状态为 null。写入只经机器人 fs_schedule 的 state_set，用户只能经 DELETE .../state 清空 |
+| `state_updated_at` | string（date-time，可空） | 是 | 状态最近一次写入时间（UTC）；无状态为 null |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+| `last_run` | object（可空） | 是 |  |
+| `last_run.id` | string | 是 |  |
+| `last_run.task_id` | string（可空） | 是 |  |
+| `last_run.status` | string | 是 | running / completed / failed / stopped / skipped |
+| `last_run.summary` | string | 是 | 结果摘要（截断到 2000 字符）；skipped 记跳过原因，静默运行记空串 |
+| `last_run.silent` | boolean | 是 | true 表示运行以 [[SILENT]] 哨兵结束，无事可汇报 |
+| `last_run.trigger_source` | string | 是 | 触发来源：cron=按计划自动触发，manual=机器人经 fs_schedule run 手动立即触发（INT-121） |
+| `last_run.error_code` | string | 否 |  |
+| `last_run.error_message` | string | 否 |  |
+| `last_run.scheduled_for` | string（date-time，可空） | 是 | 本 run 对应的计划时间（UTC） |
+| `last_run.started_at` | string（date-time，可空） | 是 |  |
+| `last_run.finished_at` | string（date-time，可空） | 是 |  |
+| `last_run.duration_ms` | integer（int64，可空） | 是 |  |
+| `last_run.prompt_tokens` | integer（int64） | 否 |  |
+| `last_run.completion_tokens` | integer（int64） | 否 |  |
+| `last_run.total_tokens` | integer（int64） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |

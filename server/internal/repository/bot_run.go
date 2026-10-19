@@ -89,6 +89,18 @@ func (r *BotRunRepository) LatestByScheduleTask(botID, taskID string) (*model.Bo
 	return &run, nil
 }
 
+// LatestFinishedByScheduleTask 返回任务最近一条已结束的运行记录，供 schedule
+// 运行时上下文取「上一次运行」的时间/状态/摘要（进行中的当前 run 不会选中
+// 自己）；没有返回 gorm.ErrRecordNotFound。
+func (r *BotRunRepository) LatestFinishedByScheduleTask(botID, taskID string) (*model.BotRun, error) {
+	var run model.BotRun
+	if err := r.db.Where("bot_id = ? AND schedule_task_id = ? AND finished_at IS NOT NULL", botID, taskID).
+		Order("finished_at DESC, created_at DESC, id DESC").First(&run).Error; err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 // CountUnfinishedByScheduleTaskTx 统计任务未结束的运行（cron 与手动触发共用）。
 // 手动触发（INT-121）的忙碌检查与建 run 必须在同一事务里调用（MaxOpenConns(1)
 // 下事务即串行化）；只读预览可传根连接。

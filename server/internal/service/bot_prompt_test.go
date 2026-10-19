@@ -12,12 +12,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// INT-122：内置机器人对话风格收敛。提示词版本递增到 5，风格段排在平台
-// 规则之后、人设之前；运行时上下文 note 按是否存在待处理输入分支。
+// INT-122：内置机器人对话风格收敛。风格段排在平台规则之后、人设之前；
+// 运行时上下文 note 按是否存在待处理输入分支。平台提示词版本随规则变化递增
+// （v7 = INT-124 规则 9，v8 = INT-123 规则 8 补任务小状态读写说明）。
 
 func TestBotSystemPromptStyleSection(t *testing.T) {
-	if botPlatformPromptVersion != 7 {
-		t.Fatalf("提示词版本应递增到 7: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 8 {
+		t.Fatalf("提示词版本应递增到 8: %d", botPlatformPromptVersion)
 	}
 	full := buildBotSystemPrompt("回复要更短。")
 	// 关键词锚点覆盖风格段每条要求，不钉全文。
