@@ -199,6 +199,82 @@ describe("ModelPicker", () => {
     await waitFor(() => expect(screen.queryByRole("listbox")).toBeNull());
   });
 
+  it("行内副标题带 provider 的上游 subProvider，搜索也能命中", async () => {
+    const onPick = vi.fn();
+    const user = userEvent.setup();
+    const providers: ProviderChoice[] = [
+      {
+        instanceId: "pi",
+        name: "Pi",
+        models: [
+          { slug: "default", name: "Pi default", isDefault: true, descriptors: [] },
+          {
+            slug: "commandcode/deepseek",
+            name: "DeepSeek V4.1 Flash",
+            subProvider: "commandcode",
+            isDefault: false,
+            descriptors: [],
+          },
+          {
+            slug: "opendesign/deepseek",
+            name: "DeepSeek V4.1 Flash",
+            subProvider: "opendesign",
+            isDefault: false,
+            descriptors: [],
+          },
+        ],
+      },
+    ];
+    render(
+      <ModelPicker providers={providers} resolved={{ efforts: {} }} onPick={onPick} />,
+    );
+    const listbox = await openPanel(user);
+    const options = within(listbox).getAllByRole("option");
+    expect(options).toHaveLength(3);
+    // 无 subProvider 的行副标题就是 provider 名本身。
+    expect(within(options[0]).getByText("Pi")).toBeInTheDocument();
+    expect(within(options[1]).getByText("Pi · commandcode")).toBeInTheDocument();
+    expect(within(options[2]).getByText("Pi · opendesign")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("搜索模型"), "opendesign");
+    const filtered = within(screen.getByRole("listbox")).getAllByRole("option");
+    expect(filtered).toHaveLength(1);
+    expect(within(filtered[0]).getByText("Pi · opendesign")).toBeInTheDocument();
+    // 命中的确实是 opendesign 那一行，不是同名模型里的另一条。
+    await user.click(filtered[0]);
+    expect(onPick).toHaveBeenCalledWith({
+      instanceId: "pi",
+      model: "opendesign/deepseek",
+      efforts: {},
+    });
+  });
+
+  it("子 provider 名以 provider 名开头时只显示子 provider", async () => {
+    const user = userEvent.setup();
+    const providers: ProviderChoice[] = [
+      {
+        instanceId: "opencode",
+        name: "OpenCode",
+        models: [
+          {
+            slug: "zen",
+            name: "Zen",
+            subProvider: "  OpenCode Zen  ",
+            isDefault: true,
+            descriptors: [],
+          },
+          { slug: "blank", name: "Blank", subProvider: "   ", isDefault: false, descriptors: [] },
+        ],
+      },
+    ];
+    render(
+      <ModelPicker providers={providers} resolved={{ efforts: {} }} onPick={vi.fn()} />,
+    );
+    const options = within(await openPanel(user)).getAllByRole("option");
+    expect(within(options[0]).getByText("OpenCode Zen")).toBeInTheDocument();
+    // 纯空白 subProvider 等同于没有。
+    expect(within(options[1]).getByText("OpenCode")).toBeInTheDocument();
+  });
+
   it("收藏切换后模型出现在「收藏」rail", async () => {
     const user = userEvent.setup();
     render(

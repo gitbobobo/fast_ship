@@ -24,6 +24,11 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
 - 面板复用 `web/src/components/ui/popover.tsx` 的 `Popover`（Base UI
   `@base-ui/react/popover` 封装）；触发器样式复用 `thread-chips.tsx`
   导出的 `CHIP` 常量；provider 图标一律 `ProviderIcon`。
+- 模型行副标题默认是 provider 名；上游模型带 `subProvider`（pi 的
+  `commandcode`/`opendesign` 等）时补成 `provider · subProvider`，与 T3 Code
+  一致（同 provider 下同名模型靠它区分）。子 provider 名以 provider 名开头时
+  （`OpenCode` / `OpenCode Zen`）只显示子 provider，纯空白视同没有；搜索命中
+  模型名与这条副标题全文。
 - ACP registry 接入的 harness 按实例后缀取官方图标：`acpRegistry_devin` →
   devin、`acpRegistry_factory_droid` → `factory-droid`（注册表 agent id 把
   `-` 换成 `_`）。图标全量内联在 `acp-registry-icons.ts`（生成文件，快照自
