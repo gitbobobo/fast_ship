@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { CalendarClock, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -74,16 +73,26 @@ function runTime(run: BotScheduleRun) {
 }
 
 /**
- * 机器人详情页的「定时任务」区：默认折叠成一行（标题 + 数量），
- * 展开列出任务；点击行看指令与运行记录，右侧开关是唯一操作。
+ * 详情右栏的「定时任务」区：默认展开列出任务（标题 + 数量，可再折叠）；
+ * 点击行看指令与运行记录，右侧开关是唯一操作。
+ * 展开态与详情选择由宿主持有：桌面 aside 与移动 Sheet 会各挂一份本组件，
+ * 共享同一份状态、共用同一个 BotScheduleTaskDialog（弹窗只渲染一份）。
  */
-export function BotScheduleSection({ botId }: { botId: string }) {
+export function BotScheduleSection({
+  botId,
+  expanded,
+  onExpandedChange,
+  onOpenDetail,
+}: {
+  botId: string;
+  /** 区块展开态；宿主统一持有，多个挂载点共享同一份。 */
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
+  /** 点击任务行请求打开详情弹窗；弹窗由宿主统一渲染。 */
+  onOpenDetail: (taskId: string) => void;
+}) {
   const { data: tasks, isLoading } = useBotScheduleTasks(botId);
   const toggle = useSetBotScheduleTaskEnabled(botId);
-  const [expanded, setExpanded] = useState(false);
-  const [detailId, setDetailId] = useState<string | null>(null);
-  // 弹窗展示实时数据（启停后刷新即同步）；任务被机器人删掉时自动关上。
-  const detailTask = tasks?.find((t) => t.id === detailId) ?? null;
 
   const handleToggle = async (task: BotScheduleTask) => {
     try {
@@ -101,15 +110,12 @@ export function BotScheduleSection({ botId }: { botId: string }) {
   };
 
   return (
-    <section
-      data-testid="bot-schedule-section"
-      className="mx-auto w-full max-w-3xl px-4 pt-4 md:px-6"
-    >
+    <section data-testid="bot-schedule-section" className="w-full">
       <div className="rounded-xl border bg-card">
         <button
           type="button"
           aria-expanded={expanded}
-          onClick={() => setExpanded((v) => !v)}
+          onClick={() => onExpandedChange(!expanded)}
           className="flex w-full items-center gap-1.5 px-3.5 py-2.5 text-left text-xs font-medium text-muted-foreground"
         >
           <ChevronRight
@@ -143,7 +149,7 @@ export function BotScheduleSection({ botId }: { botId: string }) {
                   <button
                     type="button"
                     className="min-w-0 flex-1 space-y-1 text-left"
-                    onClick={() => setDetailId(task.id)}
+                    onClick={() => onOpenDetail(task.id)}
                   >
                     <span className="flex items-center gap-2">
                       <span className="truncate text-sm font-medium">
@@ -174,12 +180,6 @@ export function BotScheduleSection({ botId }: { botId: string }) {
             </ul>
           ))}
       </div>
-
-      <ScheduleTaskDialog
-        botId={botId}
-        task={detailTask}
-        onClose={() => setDetailId(null)}
-      />
     </section>
   );
 }
@@ -223,16 +223,22 @@ function EnabledSwitch({
   );
 }
 
-/** 详情弹窗：指令全文 + 最近一页运行记录（只读，无编辑入口）。 */
-function ScheduleTaskDialog({
+/**
+ * 详情弹窗：指令全文 + 最近一页运行记录（只读，无编辑入口）。
+ * 宿主只挂一份（工作台）：弹窗自身按 taskId 从任务列表解析任务，
+ * 启停后刷新即同步；任务被机器人删掉时自动关上。
+ */
+export function BotScheduleTaskDialog({
   botId,
-  task,
+  taskId,
   onClose,
 }: {
   botId: string;
-  task: BotScheduleTask | null;
+  taskId: string | null;
   onClose: () => void;
 }) {
+  const { data: tasks } = useBotScheduleTasks(botId);
+  const task = tasks?.find((t) => t.id === taskId) ?? null;
   const { data: runs, isLoading } = useBotScheduleTaskRuns(
     botId,
     task?.id ?? null,

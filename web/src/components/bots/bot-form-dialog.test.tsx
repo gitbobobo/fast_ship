@@ -38,6 +38,7 @@ const botFixture: Bot = {
   max_output_tokens: 262144,
   context_source: "detected",
   context_detail: "GET /models",
+  last_message: null,
   created_at: "2026-10-01T00:00:00Z",
   updated_at: "2026-10-01T00:00:00Z",
 };

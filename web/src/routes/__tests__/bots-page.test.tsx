@@ -12,7 +12,7 @@ import BotDetailPage from "@/routes/bots/$botId";
 import App from "@/App";
 import { renderWithRoute } from "@/test/render";
 import type { Bot } from "@/lib/api/bots";
-import { useBots } from "@/lib/hooks/use-bots";
+import { useBot, useBots } from "@/lib/hooks/use-bots";
 
 const {
   createMutateAsync,
@@ -45,6 +45,10 @@ const fakeBot: Bot = {
   api_key_last4: "1234",
   next_message_seq: 2,
   next_event_seq: 10,
+  last_message: {
+    kind: "assistant",
+    text: "已帮你盯好这次发布",
+  },
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
 };
@@ -135,43 +139,59 @@ beforeEach(() => {
     data: [fakeBot],
     isLoading: false,
   } as never);
+  vi.mocked(useBot).mockReturnValue({
+    data: fakeBot,
+    isLoading: false,
+  } as never);
 });
 
 describe("BotsPage", () => {
-  it("renders bot rows with masked key and entry points", () => {
+  it("左栏渲染机器人名称、最近消息预览与新建入口", () => {
     renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
 
-    expect(screen.getByRole("heading", { name: "机器人" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "发布助手" })).toHaveAttribute(
-      "href",
-      "/bots/b1",
-    );
-    expect(screen.getByText("gpt-test")).toBeInTheDocument();
-    expect(screen.getByText("···1234")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: "发布助手" });
+    expect(link).toHaveAttribute("href", "/bots/b1");
+    expect(within(link).getByText("已帮你盯好这次发布")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "新建机器人" }),
-    ).toBeInTheDocument();
-    // 对话入口用 render={<Link/>}，渲染为链接而非按钮。
-    expect(
-      screen.getByRole("link", { name: "对话 发布助手" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "编辑 发布助手" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "删除 发布助手" }),
-    ).toBeInTheDocument();
+      screen.getAllByRole("button", { name: "新建机器人" }).length,
+    ).toBeGreaterThan(0);
+    // 未选机器人：中栏是空状态。
+    expect(screen.getByText("从左侧选择一个机器人")).toBeInTheDocument();
   });
 
-  it("shows the empty state when no bots exist", async () => {
+  it("无机器人时左栏显示空状态", async () => {
     const { useBots } = await import("@/lib/hooks/use-bots");
     vi.mocked(useBots).mockReturnValue({ data: [], isLoading: false } as never);
     renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
 
     expect(screen.getByText("还没有机器人")).toBeInTheDocument();
-    expect(
-      screen.getByText(/填入 OpenAI 兼容接口的地址与 Key/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/点击右上角/)).toBeInTheDocument();
+  });
+
+  it("用户消息的预览带「你：」前缀，assistant 不加", async () => {
+    vi.mocked(useBots).mockReturnValue({
+      data: [
+        {
+          ...fakeBot,
+          last_message: { kind: "user", text: "帮我汇总一下" },
+        },
+        {
+          ...fakeBot,
+          id: "b2",
+          name: "巡检",
+          last_message: { kind: "assistant", text: "全部正常" },
+        },
+      ],
+      isLoading: false,
+    } as never);
+    renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
+
+    // 前缀只影响视觉文本，可访问名仍是机器人名称。
+    const mine = screen.getByRole("link", { name: "发布助手" });
+    expect(mine).toHaveTextContent("你：帮我汇总一下");
+    const other = screen.getByRole("link", { name: "巡检" });
+    expect(other).toHaveTextContent("全部正常");
+    expect(other.textContent).not.toContain("你：");
   });
 
   it("creates a bot with name, persona, endpoint, model and key", async () => {
@@ -179,7 +199,8 @@ describe("BotsPage", () => {
     const user = userEvent.setup();
     renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
 
-    await user.click(screen.getByRole("button", { name: "新建机器人" }));
+    // 左栏图标钮与中栏空状态按钮同名，点其一即可。
+    await user.click(screen.getAllByRole("button", { name: "新建机器人" })[0]);
     const dialog = await screen.findByRole("dialog");
 
     await user.type(within(dialog).getByLabelText("名称"), "发布助手");
@@ -203,60 +224,6 @@ describe("BotsPage", () => {
       api_key: "sk-live-1",
     });
   });
-
-  it("edit dialog keeps the key empty and only shows its last four digits", async () => {
-    const user = userEvent.setup();
-    renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
-
-    await user.click(screen.getByRole("button", { name: "编辑 发布助手" }));
-    const dialog = await screen.findByRole("dialog");
-
-    const keyInput = within(dialog).getByLabelText("API Key") as HTMLInputElement;
-    expect(keyInput).toHaveValue("");
-    expect(within(dialog).getByText(/末四位 1234/)).toBeInTheDocument();
-    // 已存配置不回填到表单。
-    expect(within(dialog).getByLabelText("名称")).toHaveValue("发布助手");
-  });
-
-  it("tests connection against the stored key with form overrides", async () => {
-    testConnectionMutateAsync.mockResolvedValue({
-      ok: true,
-      checks: [{ name: "streaming", passed: true }],
-    });
-    const user = userEvent.setup();
-    renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
-
-    await user.click(screen.getByRole("button", { name: "编辑 发布助手" }));
-    const dialog = await screen.findByRole("dialog");
-    await user.click(
-      within(dialog).getByRole("button", { name: "测试连接" }),
-    );
-
-    await waitFor(() =>
-      expect(testConnectionMutateAsync).toHaveBeenCalledWith({
-        bot_id: "b1",
-        base_url: "https://api.example.com/v1",
-        model: "gpt-test",
-      }),
-    );
-    // 逐项检查结果渲染出来。
-    expect(
-      await screen.findByTestId("bot-connection-checks"),
-    ).toBeInTheDocument();
-  });
-
-  it("delete asks for confirmation and hits the endpoint", async () => {
-    deleteMutateAsync.mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
-
-    await user.click(screen.getByRole("button", { name: "删除 发布助手" }));
-    const dialog = await screen.findByRole("alertdialog");
-    await user.click(
-      within(dialog).getByRole("button", { name: "确认删除" }),
-    );
-    await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("b1"));
-  });
 });
 
 describe("BotDetailPage", () => {
@@ -275,6 +242,81 @@ describe("BotDetailPage", () => {
     expect(
       screen.getByRole("textbox", { name: "机器人消息内容" }),
     ).toBeInTheDocument();
+  });
+
+  it("左栏选中项带 aria-current", async () => {
+    renderDetail();
+    expect(
+      await screen.findByRole("link", { name: "发布助手" }),
+    ).toHaveAttribute("aria-current", "page");
+  });
+
+  it("右栏展示配置摘要与定时任务区", async () => {
+    renderDetail();
+    const panel = await screen.findByTestId("bot-detail-panel");
+
+    expect(panel).toHaveTextContent("发布助手");
+    expect(within(panel).getAllByText("gpt-test").length).toBeGreaterThan(0);
+    expect(panel).toHaveTextContent("https://api.example.com/v1");
+    expect(panel).toHaveTextContent("···1234");
+    expect(panel).toHaveTextContent("创建时间");
+    expect(
+      within(panel).getByTestId("bot-schedule-section"),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole("button", { name: "删除机器人" }),
+    ).toBeInTheDocument();
+  });
+
+  it("详情未加载时右栏不卸载：骨架占位，页头用列表名不回跳", async () => {
+    // 切换机器人时详情查询重新加载：右栏保持挂载、中栏宽度不变。
+    vi.mocked(useBot).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    } as never);
+    renderDetail();
+
+    expect(
+      await screen.findByTestId("bot-detail-skeleton"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("bot-detail-panel")).toBeNull();
+    // 标题取列表缓存里的名字，不掉回「机器人」。
+    expect(
+      screen.getByRole("heading", { name: "发布助手" }),
+    ).toBeInTheDocument();
+  });
+
+  it("「详情」打开 Sheet：有可访问名，与右栏是同一份面板", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+
+    await user.click(screen.getByRole("button", { name: "详情" }));
+    const sheet = await screen.findByRole("dialog", { name: "发布助手详情" });
+    expect(
+      within(sheet).getByTestId("bot-detail-panel"),
+    ).toBeInTheDocument();
+    // 桌面 aside 与 Sheet 各挂一份面板，但共享工作台的弹窗与状态。
+    expect(screen.getAllByTestId("bot-detail-panel")).toHaveLength(2);
+  });
+
+  it("移动端有明确的回列表入口", async () => {
+    renderDetail();
+    expect(
+      await screen.findByRole("link", { name: "机器人列表" }),
+    ).toHaveAttribute("href", "/bots");
+  });
+
+  it("「隐藏详情」移除右栏，「显示详情」恢复", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    const panel = await screen.findByTestId("bot-detail-panel");
+
+    // 页头切换钮与面板右上角 X 同名，点面板上的那个。
+    await user.click(within(panel).getByRole("button", { name: "隐藏详情" }));
+    expect(screen.queryByTestId("bot-detail-panel")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "显示详情" }));
+    expect(await screen.findByTestId("bot-detail-panel")).toBeInTheDocument();
   });
 
   it("sends a message from the composer", async () => {
@@ -478,9 +520,8 @@ describe("BotDetailPage", () => {
     const user = userEvent.setup();
     renderDetail();
 
-    await user.click(
-      await screen.findByRole("button", { name: "授权管理" }),
-    );
+    const panel = await screen.findByTestId("bot-detail-panel");
+    await user.click(within(panel).getByRole("button", { name: "授权管理" }));
     const dialog = await screen.findByRole("dialog");
     const item = await within(dialog).findByTestId("bot-authorization-item");
     expect(item).toHaveTextContent("fs_issue.update");
@@ -493,15 +534,73 @@ describe("BotDetailPage", () => {
     await waitFor(() => expect(revokeMutateAsync).toHaveBeenCalledWith("auth-1"));
   });
 
-  it("opens the edit dialog from the detail header", async () => {
+  it("opens the edit dialog from the detail panel", async () => {
     const user = userEvent.setup();
     renderDetail();
 
-    await user.click(
-      await screen.findByRole("button", { name: "编辑" }),
-    );
+    const panel = await screen.findByTestId("bot-detail-panel");
+    await user.click(within(panel).getByRole("button", { name: "编辑" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("名称")).toHaveValue("发布助手");
+  });
+
+  it("edit dialog keeps the key empty and only shows its last four digits", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+
+    const panel = await screen.findByTestId("bot-detail-panel");
+    await user.click(within(panel).getByRole("button", { name: "编辑" }));
+    const dialog = await screen.findByRole("dialog");
+
+    const keyInput = within(dialog).getByLabelText("API Key") as HTMLInputElement;
+    expect(keyInput).toHaveValue("");
+    expect(within(dialog).getByText(/末四位 1234/)).toBeInTheDocument();
+    // 已存配置不回填到表单。
+    expect(within(dialog).getByLabelText("名称")).toHaveValue("发布助手");
+  });
+
+  it("tests connection against the stored key with form overrides", async () => {
+    testConnectionMutateAsync.mockResolvedValue({
+      ok: true,
+      checks: [{ name: "streaming", passed: true }],
+    });
+    const user = userEvent.setup();
+    renderDetail();
+
+    const panel = await screen.findByTestId("bot-detail-panel");
+    await user.click(within(panel).getByRole("button", { name: "编辑" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "测试连接" }),
+    );
+
+    await waitFor(() =>
+      expect(testConnectionMutateAsync).toHaveBeenCalledWith({
+        bot_id: "b1",
+        base_url: "https://api.example.com/v1",
+        model: "gpt-test",
+      }),
+    );
+    // 逐项检查结果渲染出来。
+    expect(
+      await screen.findByTestId("bot-connection-checks"),
+    ).toBeInTheDocument();
+  });
+
+  it("delete asks for confirmation and hits the endpoint", async () => {
+    deleteMutateAsync.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderDetail();
+
+    const panel = await screen.findByTestId("bot-detail-panel");
+    await user.click(
+      within(panel).getByRole("button", { name: "删除机器人" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "确认删除" }),
+    );
+    await waitFor(() => expect(deleteMutateAsync).toHaveBeenCalledWith("b1"));
   });
 });
 

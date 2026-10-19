@@ -5,7 +5,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useBotChat, foldStreamEvent, mergeCallSnapshots } from "./use-bot-chat";
 import { botKeys } from "./use-bots";
-import type { BotCall, BotMessage, BotRun, ChatSnapshot } from "@/lib/api/bots";
+import type {
+  Bot,
+  BotCall,
+  BotMessage,
+  BotRun,
+  ChatSnapshot,
+} from "@/lib/api/bots";
 import { signInAs, teardownAuth } from "@/test/auth";
 
 const api = vi.hoisted(() => ({
@@ -15,6 +21,7 @@ const api = vi.hoisted(() => ({
   stopRun: vi.fn(),
   decide: vi.fn(),
   cancelCall: vi.fn(),
+  list: vi.fn(),
 }));
 
 vi.mock("@/lib/api/bots", async (importOriginal) => ({
@@ -41,7 +48,7 @@ vi.mock("@/lib/bot-stream", () => ({
   },
 }));
 
-const bot = {
+const bot: Bot = {
   id: "b1",
   name: "盯板机器人",
   persona_prompt: "",
@@ -50,6 +57,7 @@ const bot = {
   api_key_last4: "1234",
   next_message_seq: 5,
   next_event_seq: 10,
+  last_message: null,
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
 };
@@ -569,6 +577,140 @@ describe("useBotChat", () => {
     expect(api.send.mock.calls[2][1].client_message_id).not.toBe(first);
   });
 
+  // ---- 左栏预览就地同步：提交写列表缓存，不重取 /api/bots ----
+
+  it("message_commit 把该机器人的预览就地写进列表缓存，不重取列表", async () => {
+    const { client } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    client.setQueryData<Bot[]>(botKeys.list("A"), [
+      { ...bot, last_message: null },
+      {
+        ...bot,
+        id: "b2",
+        name: "另一个机器人",
+        last_message: { kind: "user", text: "旧预览" },
+      },
+    ]);
+
+    emit(
+      "delta",
+      { kind: "message_commit", message_id: "m-a", payload: committedMessage },
+      10,
+    );
+
+    const list = client.getQueryData<Bot[]>(botKeys.list("A"));
+    expect(list?.[0]?.last_message).toEqual({
+      kind: "assistant",
+      text: "已收到，我来处理。",
+    });
+    // 其它机器人的预览不受影响。
+    expect(list?.[1]?.last_message).toEqual({
+      kind: "user",
+      text: "旧预览",
+    });
+    // 就地写缓存：不发起列表请求。
+    expect(api.list).not.toHaveBeenCalled();
+  });
+
+  it("空正文的 assistant 提交不改写预览（服务端口径：纯 tool_calls 跳过）", async () => {
+    const { client, result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    client.setQueryData<Bot[]>(botKeys.list("A"), [
+      { ...bot, last_message: null },
+    ]);
+
+    emit(
+      "delta",
+      {
+        kind: "message_commit",
+        message_id: "m-t",
+        payload: {
+          id: "m-t",
+          bot_id: "b1",
+          seq: 12,
+          kind: "assistant",
+          content: {
+            text: "",
+            tool_calls: [
+              {
+                call_id: "c9",
+                tool_name: "fs_issue",
+                action: "update",
+                arguments: "{}",
+              },
+            ],
+          },
+          created_at: "2026-10-15T00:03:00Z",
+        },
+      },
+      10,
+    );
+
+    // 消息本身照常进主线，预览不覆盖。
+    await waitFor(() =>
+      expect(result.current.entries.map((e) => e.message.id)).toContain("m-t"),
+    );
+    expect(
+      client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
+    ).toBeNull();
+  });
+
+  it("user_message 事件同样就地更新预览", async () => {
+    const { client } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+    client.setQueryData<Bot[]>(botKeys.list("A"), [
+      { ...bot, last_message: null },
+    ]);
+
+    emit(
+      "delta",
+      {
+        kind: "user_message",
+        payload: {
+          id: "m-u2",
+          bot_id: "b1",
+          seq: 21,
+          kind: "user",
+          content: { text: "来自另一个标签页的消息" },
+          created_at: "2026-10-15T00:04:00Z",
+        },
+      },
+      10,
+    );
+
+    expect(
+      client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
+    ).toEqual({ kind: "user", text: "来自另一个标签页的消息" });
+    expect(api.list).not.toHaveBeenCalled();
+  });
+
+  it("sendMessage 成功后把 user 消息写进列表预览", async () => {
+    // 发送方不一定收到自己的 user_message 事件：REST 成功路径也写预览。
+    const { client, result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    client.setQueryData<Bot[]>(botKeys.list("A"), [
+      { ...bot, last_message: null },
+    ]);
+    api.send.mockResolvedValue({
+      message: {
+        id: "m-u",
+        bot_id: "b1",
+        seq: 20,
+        kind: "user",
+        content: { text: "帮我看看问题" },
+        created_at: "2026-10-15T00:02:00Z",
+      },
+      run: null,
+      queued: false,
+    });
+
+    await act(() => result.current.sendMessage("帮我看看问题"));
+
+    expect(
+      client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
+    ).toEqual({ kind: "user", text: "帮我看看问题" });
+  });
+
   it("sends a stop request without touching background calls", async () => {
     api.getChatSnapshot.mockResolvedValue(snapshotWith({ runs: [activeRun] }));
     const { result } = hook();
@@ -767,6 +909,7 @@ describe("foldStreamEvent", () => {
         ) => {
           state.maintenanceProgress = progress;
         },
+        syncListPreview: () => undefined,
       },
     };
   };

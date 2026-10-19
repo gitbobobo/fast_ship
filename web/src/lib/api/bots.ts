@@ -3,6 +3,12 @@ import { api, decodeApiError } from "./client";
 // 内置机器人（INT-101）：类型与端点按设计第 4 节冻结的形状手写，
 // 明文与密文形式的 API Key 任何响应都不回传，仅返回末四位。
 
+/** 最近一条主线消息预览：kind 区分消息来自用户还是机器人。 */
+export interface BotLastMessage {
+  kind: "user" | "assistant";
+  text: string;
+}
+
 export interface Bot {
   id: string;
   name: string;
@@ -21,6 +27,8 @@ export interface Bot {
   /** context_window 的来源：manual|detected|known|fallback。 */
   context_source?: string;
   context_detail?: string;
+  /** 最近一条对话预览：列表端点返回真实值，详情/快照等其它端点恒为 null。 */
+  last_message: BotLastMessage | null;
   created_at: string;
   updated_at: string;
 }
