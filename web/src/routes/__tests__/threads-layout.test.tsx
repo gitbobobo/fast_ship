@@ -198,6 +198,28 @@ describe("ThreadsLayout", () => {
     ).toBeInTheDocument();
   });
 
+  it("refreshes the list when the same thread id is opened in another environment", async () => {
+    const user = userEvent.setup();
+    mockThreads(
+      [
+        thread(1),
+        thread(1, { environment_id: "e2", environment_name: "Linux" }),
+      ],
+      [env(), env({ id: "e2", name: "Linux" })],
+    );
+    renderPage("/threads/e1/t1");
+    // 首次挂载不额外重读（useThreads 自己会取一次）。
+    expect(refetch).not.toHaveBeenCalled();
+
+    // 同 ID、不同环境：详情 key 变了，列表也要补一次重读。
+    const other = screen
+      .getAllByTestId("thread-card")
+      .find((row) => row.getAttribute("href") === "/threads/e2/t1");
+    await user.click(other!);
+    await screen.findByTestId("thread-detail-slot");
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the thread list in its own scroll container", () => {
     mockThreads([thread(1)]);
     renderPage();

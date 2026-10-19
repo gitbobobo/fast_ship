@@ -25,8 +25,10 @@ import { cn } from "@/lib/utils";
  * 窄于 lg 时只显示一栏：开着线程就只显详情，否则只显列表。
  */
 export default function ThreadsLayout() {
-  const { threadId } = useParams();
+  const { environmentId, threadId } = useParams();
   const threadOpen = Boolean(threadId);
+  // 同 ID 线程可能存在于不同环境，切换判定必须带上环境。
+  const threadKey = `${environmentId ?? ""}/${threadId ?? ""}`;
   const { data, isLoading, isError, isFetching, refetch } = useThreads();
   const {
     filters,
@@ -38,14 +40,14 @@ export default function ThreadsLayout() {
     loadMore,
   } = useThreadListStore();
 
-  // 列表在常驻 layout 里不随导航重挂载，切线程时补一次重读（详情轮询会
+  // 列表在常驻 layout 里不随导航重挂载，切线程时补一次重读（详情重读会
   // 顺带把当前线程摘要回写列表，但其它线程的要靠自己刷新）。
-  const lastThreadId = useRef(threadId);
+  const lastThreadKey = useRef(threadKey);
   useEffect(() => {
-    if (lastThreadId.current === threadId) return;
-    lastThreadId.current = threadId;
+    if (lastThreadKey.current === threadKey) return;
+    lastThreadKey.current = threadKey;
     void refetch();
-  }, [threadId, refetch]);
+  }, [threadKey, refetch]);
 
   const environments = data?.environments;
   const allThreads = data?.items;

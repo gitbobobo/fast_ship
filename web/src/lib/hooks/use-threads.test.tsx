@@ -504,7 +504,7 @@ describe("useThreadDetail list sync", () => {
 });
 
 describe("mergeThreadSummary", () => {
-  it("writes the polled detail summary back into the cached list", () => {
+  it("writes the fetched detail summary back into the cached list", () => {
     const { client } = setup();
     const threadsKey = ["t3-threads", "u1", "threads"];
     client.setQueryData(threadsKey, {

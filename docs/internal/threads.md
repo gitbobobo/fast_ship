@@ -507,7 +507,8 @@ already_answered/agent_stopped → 40916，not_found → 40419，其余 → 5020
   回默认视图；筛选控件由 `ThreadSidebar`/`ThreadFilterControls` 承载
   （`components/threads/thread-sidebar.tsx`）。
 - 列表在常驻 layout 里不会随导航重挂载，所以新鲜度靠两处补：切线程时 layout
-  重读一次列表；详情每次轮询把最新 `ThreadSummary` 回写列表缓存
+  重读一次列表；详情每次重读（挂载、聚焦、SSE 失效、写操作结算）把最新
+  `ThreadSummary` 回写列表缓存
   （`mergeThreadSummary`），避免「右栏已结束、左栏还显示运行中」以及排序/计数
   滞后。
 - 详情页信息卡（`ThreadInfoCard`）按**右栏容器宽度**而非视口显隐：右栏是
