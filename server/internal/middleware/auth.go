@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/godbobo/fast_ship/server/internal/config"
+	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/response"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -92,6 +93,26 @@ func extractBearerToken(c *gin.Context) string {
 		return ""
 	}
 	return parts[1]
+}
+
+// RequireAdmin 管理员守卫（INT-129）：必须挂在 RequireJWT 之后使用。角色只存
+// 库、每请求经 authService.RoleOf 现判——不缓存、不写 JWT，角色被改立即生效，
+// 撤销管理员无需等待令牌过期。非 admin 返回 40305。
+func RequireAdmin(authService *service.AuthService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, err := authService.RoleOf(c.Request.Context(), GetUserID(c))
+		if err != nil {
+			response.InternalError(c, "服务器内部错误")
+			c.Abort()
+			return
+		}
+		if role != model.UserRoleAdmin {
+			response.Forbidden(c, errs.ErrAdminRequired.Code, errs.ErrAdminRequired.Message)
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 func handleJWTAuth(c *gin.Context, tokenString string, cfg *config.Config, authService *service.AuthService) {

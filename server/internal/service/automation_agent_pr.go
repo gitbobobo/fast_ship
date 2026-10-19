@@ -34,16 +34,24 @@ func (s *AutomationAgentService) loadPRRun(ctx context.Context, runID string) (*
 		(run.Status != model.AutomationRunDispatched && run.Status != model.AutomationRunRunning) {
 		return nil, errs.ErrRunNotPRReview
 	}
+	// INT-119 开轮的行带着用户级 App 身份（非空）。那个身份自 INT-129 起已不存在，
+	// 而代发客户端现在恒为部署级 App：若放行，一个本该随旧 App 一起失效的在途运行
+	// 会拿部署 App 的安装令牌继续发 review/check（新 webhook 只取消空身份，拦不住它）。
+	// 这类运行一律拒绝，交给调度超时收尾。
+	if run.AppUserID != "" {
+		return nil, errs.New(errs.ErrRunNotPRReview.Code,
+			"该运行属于已停用的用户级 GitHub App，无法再用部署级 App 代发")
+	}
 	return run, nil
 }
 
-// prGitHub 解析某个身份的 GitHub 访问面（INT-119 用户级集成）。未配置/解密
-// 失败保持 50000 原文案。
-func (s *AutomationAgentService) prGitHub(ctx context.Context, userID string) (githubapi.GitHubClient, error) {
+// prGitHub 解析部署唯一的 GitHub 访问面（INT-129 部署级身份：同一部署的评论/
+// check 都由同一个 App 发出）。未配置/解密失败保持 50000 原文案。
+func (s *AutomationAgentService) prGitHub(ctx context.Context) (githubapi.GitHubClient, error) {
 	if s.prFor == nil {
 		return nil, errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
 	}
-	gh, err := s.prFor.ClientFor(ctx, userID)
+	gh, err := s.prFor.ClientFor(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -51,23 +59,6 @@ func (s *AutomationAgentService) prGitHub(ctx context.Context, userID string) (g
 		return nil, errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
 	}
 	return gh, nil
-}
-
-// prGitHubForRun 按运行行持久化的开轮身份解析 GitHub 访问面：同一轮的评论/
-// check 都由开轮身份发出；” 即部署 config 身份（ClientFor(ctx, "") 走 config
-// 兜底）。身份在开轮时已写入 AppUserID 列，这里不再反推评审账、不拿规则所有
-// 者猜。
-func (s *AutomationAgentService) prGitHubForRun(ctx context.Context, run *model.AutomationRun) (githubapi.GitHubClient, error) {
-	return s.prGitHub(ctx, s.identityForRun(ctx, run))
-}
-
-// identityForRun 运行的开轮身份：取运行行 AppUserID 列。prReview 缺席（部分
-// 单测）时同样取列值，不再有规则所有者回退。
-func (s *AutomationAgentService) identityForRun(ctx context.Context, run *model.AutomationRun) string {
-	if s.prReview != nil {
-		return s.prReview.ReviewIdentityForRun(ctx, run)
-	}
-	return run.AppUserID
 }
 
 // wrapGitHubCallError 本地配置类错误（AppError：未配置/解密失败）原样透传，
@@ -87,7 +78,7 @@ func (s *AutomationAgentService) AgentPullRequest(ctx context.Context, identity 
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHubForRun(ctx, run)
+	gh, err := s.prGitHub(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +105,7 @@ func (s *AutomationAgentService) AgentPullRequestDiff(ctx context.Context, ident
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHubForRun(ctx, run)
+	gh, err := s.prGitHub(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +127,7 @@ func (s *AutomationAgentService) AgentPullRequestComments(ctx context.Context, i
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHubForRun(ctx, run)
+	gh, err := s.prGitHub(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +162,7 @@ func (s *AutomationAgentService) AgentSubmitPullRequestReview(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
-	gh, err := s.prGitHubForRun(ctx, run)
+	gh, err := s.prGitHub(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +224,7 @@ func (s *AutomationAgentService) AgentUpdateCheck(ctx context.Context, identity 
 	if run.CheckRunID == nil {
 		return errs.New(errs.ErrRunNotPRReview.Code, "本运行的 check run 尚未创建，请稍后重试")
 	}
-	gh, err := s.prGitHubForRun(ctx, run)
+	gh, err := s.prGitHub(ctx)
 	if err != nil {
 		return err
 	}

@@ -65,8 +65,10 @@ tags:
     description: 内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位
   - name: quota
     description: 订阅套餐额度（INT-109）：粘贴凭据后服务端定时抓取各 AI 编码服务订阅额度并只读展示。管理端点仅 JWT；GET /api/quota/accounts 对 JWT 与 API Key 均开放（只读，机器人取数通道）
-  - name: integrations
-    description: 外部服务集成（INT-119，仅 JWT）：每个用户配置自己的外部服务连接。本期只有 GitHub App（App ID / 私钥 / webhook 密钥），保存后即时生效；密钥只写不读，响应只回「是否已配置」
+  - name: members
+    description: 成员与邀请管理（INT-129，仅管理员 = JWT + RequireAdmin，40305）：成员列表与改角色、邀请的创建/列表/撤销；公开侧的邀请校验在 auth 组
+  - name: deployment
+    description: 部署设置（INT-129）：public_url 网页配置（GET 仅 JWT，PUT 仅管理员）与部署级 GitHub App（B 轮实现：每套部署一个 App、Manifest 一键创建；GET 所有登录用户，其余仅管理员）
 
 paths:
   /api/environments:
@@ -1286,8 +1288,15 @@ paths:
     post:
       tags: [auth]
       operationId: register
-      summary: 注册新用户
+      summary: 注册新用户（首个用户成为管理员；之后需有效邀请）
       security: []
+      description: |
+        INT-129 起公开注册按部署状态区分：
+        - 库里还没有任何用户：本次注册创建**第一个用户**，`role=admin`，`invite_token` 即使携带也被忽略；
+        - 库里已有用户：必须携带有效 `invite_token`（未使用、未撤销、未过期），新用户固定 `role=member`，
+          邀请在注册同一事务内置为已使用（并发重复使用会整体失败，40932）。
+        无邀请（或邀请无效/已过期/已撤销）时返回 40306 / 40432。注册页可先调
+        `POST /api/auth/invites/validate` 校验（token 在请求体，不进 URL）。
       requestBody:
         required: true
         content:
@@ -1296,7 +1305,7 @@ paths:
               $ref: '#/components/schemas/RegisterRequest'
       responses:
         '200':
-          description: 注册成功，返回 token 与用户信息
+          description: 注册成功，返回 token 与用户信息（首个用户 role=admin，其余 role=member）
           content:
             application/json:
               schema:
@@ -1308,8 +1317,69 @@ paths:
                         $ref: '#/components/schemas/AuthResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '403':
+          description: 已有用户且未携带邀请，公开注册关闭（40306）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 邀请无效或已过期（40432；不存在/已过期/已撤销统一此码）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: 用户名已存在（40900）/ 邮箱已存在（40901）/ 邀请已被使用（40932）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/auth/invites/validate:
+    post:
+      tags: [auth]
+      operationId: validateInvite
+      summary: 校验注册邀请是否可用（公开，注册页提前显示状态）
+      security: []
+      description: |
+        供 `/register?invite=<token>` 页面在渲染表单前调用。token 走请求体、
+        不落 URL 路径，避免明文被请求日志（selflog 记录 path）记下后被读回复用。
+        有效返回过期时间；不存在、已过期、已撤销、已被使用统一返回 40432，
+        不区分具体原因。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidateInviteRequest'
+      responses:
+        '200':
+          description: 邀请可用
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [expires_at]
+                        properties:
+                          expires_at:
+                            type: string
+                            format: date-time
+                            description: 邀说过期时间
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: 邀请无效或已过期（40432；不存在/已过期/已撤销/已使用/请求体缺 token 统一此码）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
   /api/auth/login:
@@ -2181,24 +2251,20 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/integrations/github-app:
+  /api/members:
     get:
-      tags: [integrations]
-      operationId: getGitHubAppIntegration
-      summary: 读取当前用户的 GitHub App 集成配置
+      tags: [members]
+      operationId: listMembers
+      summary: 列出全部成员
       description: |
-        按当前 JWT 用户读取的 GitHub App 配置，用户之间互不影响。响应不回显私钥与
-        webhook 密钥本体，只给「是否已配置」；不触发任何 GitHub 请求。
-        `source` 说明当前用户生效的来源：`database`=本人集成页保存的配置（优先），
-        `config`=config.yaml 的部署配置兜底（本人尚未保存时），`none`=未配置。
-        webhook 验签在全部身份候选（各用户的行 + config）中逐个比对签名定身份
-        （`X-GitHub-Hook-Installation-Target-ID` 头只作排序提示，不作定位依据）；
-        PR 评审回写使用该轮运行所属用户的 App 身份。
+        仅管理员（JWT + RequireAdmin，非管理员 40305；API Key 一律 40301）。
+        返回全部用户，按 `created_at` 升序（首个用户=最早的 admin 排最前）。
+        形状与 `User` 一致，含 `role`。
       security:
         - jwtAuth: []
       responses:
         '200':
-          description: 当前用户生效的 GitHub App 配置
+          description: 成员列表（created_at 升序）
           content:
             application/json:
               schema:
@@ -2207,23 +2273,134 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/GitHubAppIntegration'
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Member'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/members/{uid}/role:
     put:
-      tags: [integrations]
-      operationId: updateGitHubAppIntegration
-      summary: 保存当前用户的 GitHub App 集成配置
+      tags: [members]
+      operationId: updateMemberRole
+      summary: 修改成员角色
       description: |
-        整组保存到当前用户名下（App ID + 私钥 + webhook 密钥），只影响本人；
-        写入后运行中的进程立即改用新配置，无需重启。
-        私钥与 webhook 密钥加密落库，不入日志。保存成功后同步做一次只读检测
-        （用 App JWT 调 `GET /app`）；检测失败或凭证无效仍然保存，响应中
-        `detection_status` 为 `failed` / `invalid`，HTTP 状态仍是 200。
+        仅管理员。`role` 只接受 `admin` / `member`（其他值 40001）。
+        把最后一个管理员降级为 member 返回 40931（判定在事务内：
+        `count(role='admin')=1` 且目标当前是 admin）。目标不存在 40400。
+      security:
+        - jwtAuth: []
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 目标用户 ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMemberRoleRequest'
+      responses:
+        '200':
+          description: 修改后的成员
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Member'
+        '400':
+          description: role 取值非法（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 用户不存在（40400）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: 不能降级最后一个管理员（40931）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/invites:
+    get:
+      tags: [members]
+      operationId: listInvites
+      summary: 列出全部邀请
+      description: |
+        仅管理员。返回全部邀请，按 `created_at` 倒序；不返回 token 明文，
+        只回状态（撤销/使用时间）。明文 token 只在创建响应里出现一次。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 邀请列表（created_at 倒序，不含 token）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Invite'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [members]
+      operationId: createInvite
+      summary: 创建注册邀请
+      description: |
+        仅管理员。签发一次性邀请：明文 token（`GenerateApiKeyRaw` 随机串）只在
+        本次响应返回一次，库里只存 SHA-256；`url` 由前端用 public_url 或
+        `window.location.origin` 自行拼接（`/register?invite=<token>`），服务端不回 url。
+        `expires_in_hours` 省略时默认 72，允许 1..720，越界 40001。
       security:
         - jwtAuth: []
       requestBody:
@@ -2231,10 +2408,10 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UpdateGitHubAppIntegrationRequest'
+              $ref: '#/components/schemas/CreateInviteRequest'
       responses:
         '200':
-          description: 保存后的配置（含本次检测结果）
+          description: 创建成功，返回邀请与一次性 token 明文
           content:
             application/json:
               schema:
@@ -2243,7 +2420,191 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/GitHubAppIntegration'
+                        $ref: '#/components/schemas/CreatedInvite'
+        '400':
+          description: expires_in_hours 越界（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/invites/{id}:
+    delete:
+      tags: [members]
+      operationId: revokeInvite
+      summary: 撤销邀请
+      description: |
+        仅管理员。置 `revoked_at`；幂等——已撤销的邀请再次撤销仍返回 200。
+        邀请 ID 不存在返回 40432。
+      security:
+        - jwtAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 邀请 ID
+      responses:
+        '200':
+          $ref: '#/components/responses/EmptySuccess'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: 邀请不存在（40432）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/deployment/settings:
+    get:
+      tags: [deployment]
+      operationId: getDeploymentSettings
+      summary: 读取部署设置（当前生效的 public_url 及来源）
+      description: |
+        仅 JWT（所有登录用户可读）。`public_url` 是当前生效值（trim 且去尾部 `/`）；
+        `public_url_source` 说明它的来源：`database`=部署设置里保存的值（优先），
+        `config`=config.yaml 的 `server.public_url` 兜底（数据库值为空串时），
+        `none`=两处都没有。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 部署设置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DeploymentSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [deployment]
+      operationId: updateDeploymentSettings
+      summary: 保存部署设置（public_url）
+      description: |
+        仅管理员。校验规则：空串表示清空数据库值（回落 config）；
+        其余必须是 http(s) 绝对 URL、host 非空、不能带 query 或 fragment，
+        末尾 `/` 会被去掉；不合法返回 40001。写入数据库后回读返回。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDeploymentSettingsRequest'
+      responses:
+        '200':
+          description: 保存后的部署设置（回读）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DeploymentSettings'
+        '400':
+          description: public_url 不合法（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/deployment/github-app:
+    get:
+      tags: [deployment]
+      operationId: getGitHubAppDeployment
+      summary: 读取部署级 GitHub App 配置（所有登录用户）
+      description: |
+        INT-129 B 轮实现。返回本部署当前生效的 GitHub App 身份投影：
+        是否已配置、来源（数据库 > config > 未配置）、webhook URL 与安装链接等；
+        私钥与 webhook 密钥本体永不回显，只回「是否已设置」。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 部署级 GitHub App 配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubAppDeployment'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [deployment]
+      operationId: updateGitHubAppDeployment
+      summary: 手动配置部署级 GitHub App
+      description: |
+        仅管理员（B 轮实现）：「手动配置（已有 App）」折叠区的保存入口。
+        app_id 必填；private_key_pem / webhook_secret 省略表示保留已有值，
+        首次配置必须提供私钥。凭证加密落库；保存后立即生效，无需重启。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGitHubAppDeploymentRequest'
+      responses:
+        '200':
+          description: 保存后的配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubAppDeployment'
         '400':
           description: App ID 缺失或非数字（40001）、私钥不是有效 RSA PEM（40001）
           content:
@@ -2253,20 +2614,22 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
-  /api/integrations/github-app/test:
+  /api/deployment/github-app/test:
     post:
-      tags: [integrations]
-      operationId: testGitHubAppIntegration
-      summary: 测试当前用户的 GitHub App 连接
+      tags: [deployment]
+      operationId: testGitHubAppDeployment
+      summary: 测试部署级 GitHub App 连接（仅管理员）
       description: |
-        对当前用户生效的配置做一次只读检测：用 App 私钥签 JWT 调 `GET /app`。
-        不创建任何 GitHub 资源、不改配置，只刷新检测状态与说明；
-        `ok`=认证成功，`invalid`=GitHub 拒绝该 App 身份（401），
-        `failed`=网络/限流/GitHub 5xx（不是凭证无效）。
-        未配置时返回 40006。
+        B 轮实现。对本部署生效的 App 身份做一次只读检测（用 App 私钥签 JWT 调
+        `GET /app`）：`ok`=认证成功，`invalid`=GitHub 拒绝该身份（401），
+        `failed`=网络/限流/GitHub 5xx。未配置时返回 40006。
       security:
         - jwtAuth: []
       responses:
@@ -2280,7 +2643,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/GitHubAppIntegration'
+                        $ref: '#/components/schemas/GitHubAppDeployment'
         '400':
           description: 尚未配置 GitHub App（40006）
           content:
@@ -2290,9 +2653,111 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
-          $ref: '#/components/responses/Forbidden'
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/deployment/github-app/manifest:
+    post:
+      tags: [deployment]
+      operationId: createGitHubAppManifest
+      summary: 生成 GitHub App Manifest（仅管理员）
+      description: |
+        B 轮实现。「在 GitHub 上创建 App」主按钮的第一步：服务端按本部署的
+        public_url 组装 manifest（原样 POST 给 GitHub 的形状），返回 GitHub
+        创建页地址、防 CSRF 的 state 与 manifest 本体；前端以表单 POST 跳转
+        `action_url`。填了 `org` 时创建页指向该组织的 Apps 设置。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GitHubAppManifestRequest'
+      responses:
+        '200':
+          description: Manifest 与跳转信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubAppManifestResponse'
+        '412':
+          description: 尚未配置 public_url，无法组装 Manifest（41202）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/deployment/github-app/manifest/complete:
+    post:
+      tags: [deployment]
+      operationId: completeGitHubAppManifest
+      summary: 完成 Manifest 创建（GitHub 回跳后换取凭证，仅管理员）
+      description: |
+        B 轮实现。GitHub 创建 App 后回跳 `/settings/integrations/github/callback?code&state`，
+        前端带 JWT 把 code/state 交给本端点：服务端用 code 向 GitHub 换 App 凭证，
+        加密落库为部署级身份并返回配置投影。失败时前端显示明确文案与「重新创建」。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteGitHubAppManifestRequest'
+      responses:
+        '200':
+          description: 完成后的部署级 GitHub App 配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/GitHubAppDeployment'
+        '400':
+          description: 创建流程已过期或已失效（40009，state 不存在/过期/重放/换管理员）；GitHub 授权码已过期或已被使用（40010）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 非管理员（40305）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '502':
+          description: GitHub App Manifest 转换失败（50205）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 
   /api/quota/providers:
     get:
@@ -6708,15 +7173,15 @@ paths:
       operationId: receiveGitHubWebhook
       summary: 接收 GitHub App webhook（pull_request opened/synchronize）
       description: |
-        公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256，webhook secret）验签。
-        集成（INT-119）是用户级配置：验签候选是全部身份（各用户的行 + config 兜底），
-        逐个比对签名并收集命中——恰好一个命中即该候选的用户身份，贯穿后续项目/规则匹配、
-        旧轮取消、防抖与评论/check 回写，不会跨用户生效；多个命中（多份身份配了相同的
-        webhook 密钥）返回 401「无法确定集成身份」。`X-GitHub-Hook-Installation-Target-ID`
-        头只作候选排序提示、不作定位依据（GitHub 文档未保证它等于 App ID）。只处理
-        pull_request 的 opened/synchronize；draft 与 fork 一律 202 忽略。
-        仓库必须已和该身份的 Fast Ship 项目关联才会进入防抖/开轮。
-        同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且不再开轮）。
+        公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256）按部署唯一的
+        webhook 密钥验签。验签密钥取部署级 GitHub App 身份（INT-129：每套部署
+        一个 App，没有用户级候选集）——以 `deployment_settings` 行内的密钥为准，
+        行为空即视为未配置、不回落 config；仅当部署没有数据库 App 身份时用
+        `github_app.webhook_secret` 兜底。密钥为空 → 503（50300）拒收；签名缺失
+        或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize；
+        draft 与 fork 一律 202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
+        才会进入防抖/开轮。同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且
+        不再开轮）。
       security: []
       parameters:
         - name: X-GitHub-Event
@@ -6734,12 +7199,6 @@ paths:
           required: true
           schema:
             type: string
-        - name: X-GitHub-Hook-Installation-Target-ID
-          in: header
-          required: false
-          description: GitHub webhook 携带的目标资源 ID；只作候选排序提示（GitHub 未保证 App 级投递上等于 App ID），身份归属只认验签
-          schema:
-            type: string
       requestBody:
         required: true
         content:
@@ -6753,7 +7212,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          description: 签名不匹配（40107）或多个身份命中同一签名（40107）
+          description: 签名缺失或不匹配（40107）
           content:
             application/json:
               schema:
@@ -6761,7 +7220,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
-          description: 候选全部没有 webhook secret（含无任何候选），拒绝接受请求
+          description: 部署未配置 webhook 验签密钥（50300），拒绝接受请求
           content:
             application/json:
               schema:
@@ -8492,6 +8951,9 @@ components:
           description: 密码，≥8 字符
           x-oapi-codegen-extra-tags:
             binding: required,min=8
+        invite_token:
+          type: string
+          description: 邀请明文 token（/register?invite= 携带）；部署还没有用户时被忽略（首个用户直接成为 admin），已有用户时必须有效
     LoginRequest:
       type: object
       required: [login, password]
@@ -8563,7 +9025,7 @@ components:
           type: string
     User:
       type: object
-      required: [id, username, email, avatar_url, created_at, updated_at]
+      required: [id, username, email, avatar_url, role, created_at, updated_at]
       properties:
         id:
           type: string
@@ -8574,14 +9036,257 @@ components:
         avatar_url:
           type: string
           description: 形如 /api/avatars/:uid/:filename，未设置为空串
+        role:
+          $ref: '#/components/schemas/UserRole'
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+    UserRole:
+      type: string
+      enum: [admin, member]
+      description: 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
+    # ---- members & invites（INT-129）----
+    Member:
+      type: object
+      description: 成员（/api/members 的元素），形状与 User 完全一致
+      allOf:
+        - $ref: '#/components/schemas/User'
+    Invite:
+      type: object
+      required: [id, created_by, expires_at, revoked_at, used_at, used_by, created_at]
+      properties:
+        id:
+          type: string
+        created_by:
+          type: string
+          description: 签发邀请的管理员用户 ID
+        expires_at:
+          type: string
+          format: date-time
+          description: 过期时间
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 撤销时间；未撤销为 null
+        used_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 被使用（注册消费）时间；未使用为 null
+        used_by:
+          type: string
+          nullable: true
+          description: 使用该邀请注册的用户 ID；未使用为 null
+        created_at:
+          type: string
+          format: date-time
+      description: 邀请投影，不含 token 明文（明文只在创建响应里出现一次）
+    CreatedInvite:
+      type: object
+      description: 新建邀请（Invite 全部字段 + 一次性 token 明文）
+      allOf:
+        - $ref: '#/components/schemas/Invite'
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: 邀请明文 token，只在本次响应出现一次；前端拼 /register?invite=<token>
+    CreateInviteRequest:
+      type: object
+      properties:
+        expires_in_hours:
+          type: integer
+          minimum: 1
+          maximum: 720
+          description: 有效期（小时），省略默认 72；越界 40001
+    ValidateInviteRequest:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          description: 邀请链接中的明文 token；走请求体，不进 URL 路径
+    UpdateMemberRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          $ref: '#/components/schemas/UserRole'
+    # ---- deployment（INT-129）----
+    DeploymentSettings:
+      type: object
+      required: [public_url, public_url_source, updated_at]
+      properties:
+        public_url:
+          type: string
+          description: 当前生效的对外访问基址（trim 且去尾部 /）；两处都没有时为空串
+        public_url_source:
+          type: string
+          enum: [database, config, none]
+          description: public_url 来源：database=部署设置保存的值（优先）；config=config.yaml 的 server.public_url 兜底；none=未配置
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 部署设置最近保存时间；数据库从未保存过该行为 null
+    UpdateDeploymentSettingsRequest:
+      type: object
+      required: [public_url]
+      properties:
+        public_url:
+          type: string
+          description: 对外访问基址；空串=清空数据库值回落 config；其余必须是 http(s) 绝对 URL、host 非空、不带 query/fragment，末尾 / 自动去掉
+    GitHubAppDeployment:
+      type: object
+      required: [configured, source, app_id, app_slug, private_key_set, webhook_secret_set, webhook_url, install_url, detection_status, detection_detail, detected_at, updated_at]
+      properties:
+        configured:
+          type: boolean
+          description: 本部署是否有 App 身份配置来源（部署设置行或 config 兜底）；私钥是否真的可读看 private_key_set
+        source:
+          type: string
+          enum: [database, config, none]
+          description: 当前生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
+        app_id:
+          type: string
+          description: GitHub App ID（未配置时为空串）
+        app_slug:
+          type: string
+          description: GitHub App slug（拼 install_url 用；未配置时为空串）
+        private_key_set:
+          type: boolean
+          description: 私钥是否已配置（本体永不回显）
+        webhook_secret_set:
+          type: boolean
+          description: webhook 验签密钥是否已配置（本体永不回显）
+        webhook_url:
+          type: string
+          description: 填进 GitHub App 的 Webhook URL（{public_url}/api/github/webhooks）；public_url 未配置时为空串
+        install_url:
+          type: string
+          description: 安装到仓库入口（https://github.com/apps/{slug}/installations/new）；slug 为空时为空串
+        detection_status:
+          type: string
+          enum: [unchecked, ok, invalid, failed]
+          description: unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
+        detection_detail:
+          type: string
+          description: 给人看的补充说明（App 名称、失败原因等），不含任何密钥
+        detected_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 最近一次检测完成时间；未检测为 null
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 数据库配置最近保存时间；source 为 config/none 时为 null
+    UpdateGitHubAppDeploymentRequest:
+      type: object
+      required: [app_id]
+      properties:
+        app_id:
+          type: string
+          description: GitHub App ID（纯数字）
+        private_key_pem:
+          type: string
+          nullable: true
+          description: App 私钥 PEM（RSA）；省略或 null 表示保留已有私钥，首次配置必填
+        webhook_secret:
+          type: string
+          nullable: true
+          description: webhook 验签密钥；省略或 null 表示保留已有值，空串表示清空
+    GitHubAppManifest:
+      type: object
+      description: 原样 POST 给 GitHub 的 App Manifest（形状由 GitHub Manifest 流程约定）
+      required: [name, url, hook_attributes, redirect_url, setup_url, public, default_events, default_permissions]
+      properties:
+        name:
+          type: string
+          description: App 名称（取自部署，如 Fast Ship）
+        url:
+          type: string
+          description: 主页地址 = public_url
+        hook_attributes:
+          type: object
+          required: [url, active]
+          properties:
+            url:
+              type: string
+              description: Webhook URL = {public_url}/api/github/webhooks
+            active:
+              type: boolean
+              description: 恒为 true（不用 enum[true]：oapi-codegen 会生成与 api.True 撞名的常量）
+        redirect_url:
+          type: string
+          description: 创建完成回跳地址 = {public_url}/settings/integrations/github/callback
+        setup_url:
+          type: string
+          description: 安装后跳转地址 = {public_url}/settings/integrations
+        public:
+          type: boolean
+          description: 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量）
+        default_events:
+          type: array
+          items:
+            type: string
+            enum: [pull_request]
+        default_permissions:
+          type: object
+          description: PR 评审所需的最小权限集
+          required: [pull_requests, issues, checks, contents, metadata]
+          properties:
+            pull_requests:
+              type: string
+              enum: [write]
+            issues:
+              type: string
+              enum: [write]
+            checks:
+              type: string
+              enum: [write]
+            contents:
+              type: string
+              enum: [read]
+            metadata:
+              type: string
+              enum: [read]
+    GitHubAppManifestRequest:
+      type: object
+      properties:
+        org:
+          type: string
+          description: 目标组织；填了则创建页指向该组织的 Apps 设置，省略为个人 App
+    GitHubAppManifestResponse:
+      type: object
+      required: [action_url, state, manifest]
+      properties:
+        action_url:
+          type: string
+          description: GitHub 创建页；默认 https://github.com/settings/apps/new，填了 org 时 https://github.com/organizations/{org}/settings/apps/new
+        state:
+          type: string
+          description: 防 CSRF 的一次性 state，GitHub 回跳时原样带回
+        manifest:
+          $ref: '#/components/schemas/GitHubAppManifest'
+    CompleteGitHubAppManifestRequest:
+      type: object
+      required: [code, state]
+      properties:
+        code:
+          type: string
+          description: GitHub 回跳携带的一次性 code，用于换取 App 凭证
+        state:
+          type: string
+          description: 发起创建时签发的 state，服务端核对一致才继续
 
-    # ---- ai ----
+
     AISettings:
       type: object
       required: [api_host, model, configured]
@@ -8803,66 +9508,6 @@ components:
           type: string
         name:
           type: string
-
-    # ---- integrations（INT-119）----
-    GitHubAppIntegration:
-      type: object
-      required: [provider, configured, source, app_id, private_key_set, webhook_secret_set, webhook_url, detection_status, detection_detail, detected_at, updated_at]
-      properties:
-        provider:
-          type: string
-          enum: [github_app]
-        configured:
-          type: boolean
-          description: 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set
-        source:
-          type: string
-          enum: [database, config, none]
-          description: 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
-        app_id:
-          type: string
-          description: GitHub App ID（未配置时为空串）
-        private_key_set:
-          type: boolean
-          description: 私钥是否已配置（本体永不回显）
-        webhook_secret_set:
-          type: boolean
-          description: webhook 验签密钥是否已配置（本体永不回显）
-        webhook_url:
-          type: string
-          description: 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串
-        detection_status:
-          type: string
-          enum: [unchecked, ok, invalid, failed]
-          description: unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
-        detection_detail:
-          type: string
-          description: 给人看的补充说明（App 名称、失败原因等），不含任何密钥
-        detected_at:
-          type: string
-          format: date-time
-          nullable: true
-          description: 最近一次检测完成时间；未检测为 null
-        updated_at:
-          type: string
-          format: date-time
-          nullable: true
-          description: 数据库配置最近保存时间；source 为 config/none 时为 null
-    UpdateGitHubAppIntegrationRequest:
-      type: object
-      required: [app_id]
-      properties:
-        app_id:
-          type: string
-          description: GitHub App ID（纯数字）
-        private_key_pem:
-          type: string
-          nullable: true
-          description: App 私钥 PEM（RSA）；省略或 null 表示保留已有私钥，首次配置必填
-        webhook_secret:
-          type: string
-          nullable: true
-          description: webhook 验签密钥；省略或 null 表示保留已有值，空串表示清空
 
     # ---- quota（INT-109）----
     QuotaCredentials:

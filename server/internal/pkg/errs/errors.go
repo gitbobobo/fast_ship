@@ -27,6 +27,10 @@ var (
 	ErrQuotaProviderUnknown            = New(40030, "未知的额度供应商")
 	ErrQuotaCredentialsInvalid         = New(40031, "凭据字段缺失或非法")
 	ErrQuotaDeviceAuthUnsupported      = New(40032, "该供应商不支持设备授权")
+	// 部署级 GitHub App Manifest（INT-129 B 轮）：state 一次性且进程内，过期/
+	// 重放/换管理员一律要求重新发起；GitHub 侧 code 404/422 同理。
+	ErrGitHubManifestStateInvalid = New(40009, "创建流程已过期或已失效，请重新创建 App")
+	ErrGitHubManifestCodeInvalid  = New(40010, "GitHub 授权码已过期或已被使用，请重新创建 App")
 )
 
 // 认证错误 40100-40199
@@ -48,6 +52,9 @@ var (
 	ErrNotOwner             = New(40302, "非资源所有者")
 	ErrApiKeyRequired       = New(40303, "该操作仅限 API Key 调用")
 	ErrCredentialNotAllowed = New(40304, "该端点不允许此凭证类型")
+	// 管理员角色与邀请注册（INT-129）。
+	ErrAdminRequired      = New(40305, "需要管理员权限")
+	ErrRegistrationClosed = New(40306, "公开注册已关闭，请联系管理员获取邀请链接")
 )
 
 // 资源不存在 40400-40499
@@ -82,6 +89,8 @@ var (
 	ErrBotScheduleTaskNotFound      = New(40429, "定时任务不存在")
 	ErrQuotaAccountNotFound         = New(40430, "额度账号不存在")
 	ErrQuotaDeviceAuthNotFound      = New(40431, "授权会话不存在或已过期")
+	// 邀请（INT-129）：不存在/已过期/已撤销统一此码，不向注册页泄漏具体状态。
+	ErrInviteNotFound = New(40432, "邀请链接无效或已过期")
 )
 
 // 业务冲突 40900-40999
@@ -114,12 +123,13 @@ var (
 	ErrBotCallStateConflict     = New(40926, "调用状态已变化，操作未生效")
 	ErrBotDeleteConflict        = New(40927, "机器人存在进行中的运行或未终结的调用，请先停止或等待完成")
 	ErrBotRunStateConflict      = New(40928, "运行状态已变化，操作未生效")
-	// 集成（INT-119）：同 provider 下 App ID 全库唯一——webhook 验签候选逐行
-	// 验签，重复行会让创建顺序靠后者永远收不到投递。
-	ErrIntegrationAppIDTaken = New(40929, "该 App ID 已被其他用户配置")
 	// 定时任务手动触发（INT-121）：同一任务已有未结束运行时拒绝重复触发，
 	// 不排队——排队会让「手动跑一次验证」的意图变成不知何时执行的第二跑。
 	ErrBotScheduleRunBusy = New(40930, "该定时任务已有一次运行未结束，请等待结束后再手动触发")
+	// 管理员与邀请（INT-129）：最后一个管理员不可降级；邀请条件更新未命中
+	// （并发重复使用）按已使用拒绝。
+	ErrLastAdmin  = New(40931, "不能降级最后一个管理员")
+	ErrInviteUsed = New(40932, "邀请链接已被使用")
 )
 
 // 请求过于频繁 42900-42999
@@ -130,7 +140,8 @@ var (
 // 前置条件未满足 41200-41299
 var (
 	ErrBatchCloseTooMany = New(41201, "匹配问题数量过多，请缩小关闭范围后重试")
-	ErrPublicURLMissing  = New(41202, "启用自动化前需配置 server.public_url（FAST_SHIP_SERVER_PUBLIC_URL）")
+	// INT-129 起 public_url 可在网页「设置 → 部署」配置，文案指向那里。
+	ErrPublicURLMissing = New(41202, "尚未配置 public_url，请先在「设置 → 部署」填写对外访问地址")
 )
 
 // 服务器内部错误 50000-50099
@@ -145,4 +156,6 @@ var (
 	ErrT3Upstream              = New(50202, "T3 环境调用失败")
 	ErrBotModelUpstream        = New(50203, "机器人模型服务调用失败")
 	ErrQuotaDeviceAuthUpstream = New(50204, "额度供应商授权服务不可用")
+	// 部署级 GitHub App Manifest 转换（INT-129 B 轮）。
+	ErrGitHubManifestFailed = New(50205, "GitHub App Manifest 转换失败")
 )

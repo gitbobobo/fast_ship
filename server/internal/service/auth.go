@@ -30,6 +30,10 @@ type AuthService struct {
 	refreshTokenRepo *repository.RefreshTokenRepository
 	cfg              *config.Config
 	logger           *slog.Logger
+	// invites 可选依赖（INT-129）：注册时消费邀请用。不注入时注册只认「库里
+	// 还没有用户」的首个用户，之后一律拒绝（等同没有邀请可用）；仅 main 注入，
+	// 测试可自行注入，避免改动既有构造调用。
+	invites *repository.InviteRepository
 }
 
 func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repository.JWTBlacklistRepository, refreshTokenRepo *repository.RefreshTokenRepository, cfg *config.Config, logger *slog.Logger) *AuthService {
@@ -45,6 +49,11 @@ func NewAuthService(userRepo *repository.UserRepository, jwtBlacklistRepo *repos
 	}
 }
 
+// SetInviteRepository 注入邀请仓储（INT-129，main 在建表后调用一次）。
+func (s *AuthService) SetInviteRepository(repo *repository.InviteRepository) {
+	s.invites = repo
+}
+
 func (s *AuthService) log(ctx context.Context) *slog.Logger {
 	l := selflog.LoggerOr(ctx, s.logger)
 	if selflog.LoggerFromContext(ctx) != nil {
@@ -53,6 +62,12 @@ func (s *AuthService) log(ctx context.Context) *slog.Logger {
 	return l
 }
 
+// Register 注册新用户（INT-129 语义）：
+//   - 库里还没有用户：创建首个用户并授予 admin，invite_token 即使携带也忽略；
+//   - 已有用户：必须携带有效邀请（未使用、未撤销、未过期），新用户固定 member，
+//     邀请在同一事务内置为已使用（条件更新未命中即整体失败，防并发重复使用）。
+//
+// 用户名/邮箱冲突仍在事务外先查给 40900/40901；角色判定与邀请消费在事务内完成。
 func (s *AuthService) Register(ctx context.Context, req *RegisterRequest) (*AuthResponse, error) {
 	exists, err := s.userRepo.ExistsByUsername(req.Username)
 	if err != nil {
@@ -82,7 +97,25 @@ func (s *AuthService) Register(ctx context.Context, req *RegisterRequest) (*Auth
 		PasswordHash: string(hashedPassword),
 	}
 
-	if err := s.userRepo.Create(user); err != nil {
+	if err := s.userRepo.Transaction(func(tx *gorm.DB) error {
+		if n, err := s.userRepo.CountTx(tx); err != nil {
+			return err
+		} else if n == 0 {
+			// 首个用户 = 管理员，忽略邀请参数。
+			user.Role = model.UserRoleAdmin
+		} else {
+			role, err := s.resolveInviteRole(tx, api.Deref(req.InviteToken), user.ID)
+			if err != nil {
+				return err
+			}
+			user.Role = role
+		}
+		return s.userRepo.CreateTx(tx, user)
+	}); err != nil {
+		var appErr *errs.AppError
+		if errors.As(err, &appErr) {
+			return nil, appErr
+		}
 		return nil, errs.ErrInternal
 	}
 
@@ -96,12 +129,52 @@ func (s *AuthService) Register(ctx context.Context, req *RegisterRequest) (*Auth
 		return nil, errs.ErrInternal
 	}
 
-	s.log(ctx).Info("用户注册", slog.String("user_id", user.ID), slog.String("username", user.Username))
+	s.log(ctx).Info("用户注册", slog.String("user_id", user.ID), slog.String("username", user.Username), slog.String("role", user.Role))
 	return &AuthResponse{
 		Token:        token,
 		RefreshToken: refreshToken,
 		User:         s.toUserResponse(user),
 	}, nil
+}
+
+// resolveInviteRole 校验邀请并消费（注册事务内调用），返回新用户应得的角色
+// （恒为 member）。无效邀请按状态分型：不存在/过期/撤销统一 40432（不泄漏
+// 状态）；已被使用 40932。未携带 token 或未注入邀请仓储时按注册关闭拒绝。
+func (s *AuthService) resolveInviteRole(tx *gorm.DB, token, userID string) (string, error) {
+	if strings.TrimSpace(token) == "" || s.invites == nil {
+		return "", errs.ErrRegistrationClosed
+	}
+	invite, err := s.invites.FindByTokenHashTx(tx, HashApiKey(token))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", errs.ErrInviteNotFound
+		}
+		return "", err
+	}
+	now := time.Now()
+	if invite.RevokedAt != nil {
+		return "", errs.ErrInviteNotFound
+	}
+	if invite.UsedAt != nil {
+		return "", errs.ErrInviteUsed
+	}
+	if !now.Before(invite.ExpiresAt) {
+		return "", errs.ErrInviteNotFound
+	}
+	consumed, err := s.invites.ConsumeTx(tx, invite.ID, userID, now)
+	if err != nil {
+		return "", err
+	}
+	if !consumed {
+		// 读时可用、条件更新未命中：并发注册抢先消费，或者刚好在读到写入之间过期。
+		// 重读一次分清两者——过期一律 40432，不把它当成「已使用」。
+		fresh, readErr := s.invites.FindByTokenHashTx(tx, HashApiKey(token))
+		if readErr == nil && fresh.UsedAt == nil && !time.Now().Before(fresh.ExpiresAt) {
+			return "", errs.ErrInviteNotFound
+		}
+		return "", errs.ErrInviteUsed
+	}
+	return model.UserRoleMember, nil
 }
 
 func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*AuthResponse, error) {
@@ -338,14 +411,20 @@ func (s *AuthService) generateToken(user *model.User) (string, error) {
 }
 
 func (s *AuthService) toUserResponse(user *model.User) UserResponse {
-	return UserResponse{
-		Id:        user.ID,
-		Username:  user.Username,
-		Email:     user.Email,
-		AvatarUrl: user.AvatarURL,
-		CreatedAt: api.JSONTime(user.CreatedAt),
-		UpdatedAt: api.JSONTime(user.UpdatedAt),
+	return newUserResponse(user)
+}
+
+// RoleOf 查用户角色（INT-129）：管理员守卫每请求调用，不缓存。用户已删除时
+// 返回空串（调用方按非 admin 处理）。
+func (s *AuthService) RoleOf(ctx context.Context, userID string) (string, error) {
+	user, err := s.userRepo.FindByID(userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
 	}
+	return user.Role, nil
 }
 
 // GenerateApiKeyRaw 生成 API Key 原始值（Base62 编码的随机字节）

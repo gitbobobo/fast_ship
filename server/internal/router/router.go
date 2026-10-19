@@ -40,7 +40,9 @@ func Setup(
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
 	quotaHandler *handler.QuotaHandler,
-	integrationHandler *handler.IntegrationHandler,
+	deploymentGitHubAppHandler *handler.DeploymentGitHubAppHandler,
+	memberHandler *handler.MemberHandler,
+	deploymentSettingsHandler *handler.DeploymentSettingsHandler,
 	authService *service.AuthService,
 	apiKeyRepo *repository.ApiKeyRepository,
 ) {
@@ -57,6 +59,9 @@ func Setup(
 			auth.POST("/register", authHandler.Register)
 			auth.POST("/login", authHandler.Login)
 			auth.POST("/refresh", authHandler.Refresh)
+			// 邀请注册前校验（INT-129）：公开，注册页提前显示邀请状态。
+			// POST + 请求体：token 不落 URL 路径，避免被请求日志记下明文。
+			auth.POST("/invites/validate", memberHandler.ValidateInvite)
 		}
 
 		// JWT 必须 — 用户信息
@@ -121,14 +126,9 @@ func Setup(
 		}
 		api.GET("/quota/accounts", middleware.RequireAuth(cfg, apiKeyRepo, authService), quotaHandler.ListAccounts)
 
-		// JWT 必须 — 集成（INT-119）：用户级外部服务连接（当前 GitHub App），
-		// 每个用户只读写自己名下的配置。
-		integrations := api.Group("/integrations", middleware.RequireJWT(cfg, authService))
-		{
-			integrations.GET("/github-app", integrationHandler.Get)
-			integrations.PUT("/github-app", integrationHandler.Update)
-			integrations.POST("/github-app/test", integrationHandler.Test)
-		}
+		// JWT 必须 — 部署级 GitHub App 读取（INT-129）：所有登录用户可读
+		// （成员页也显示安装入口）；写入/检测/Manifest 在下方管理员组。
+		api.GET("/deployment/github-app", middleware.RequireJWT(cfg, authService), deploymentGitHubAppHandler.Get)
 
 		// JWT 必须 — 项目写操作
 		projectWrite := api.Group("/projects", middleware.RequireJWT(cfg, authService))
@@ -300,6 +300,27 @@ func Setup(
 		api.GET("/projects/:id/t3-bindings", middleware.RequireAuth(cfg, apiKeyRepo, authService), t3BindingHandler.ListBindings)
 		api.PUT("/projects/:id/t3-bindings/:environmentId", middleware.RequireAuth(cfg, apiKeyRepo, authService), t3BindingHandler.UpsertBinding)
 		api.DELETE("/projects/:id/t3-bindings/:environmentId", middleware.RequireAuth(cfg, apiKeyRepo, authService), t3BindingHandler.DeleteBinding)
+
+		// JWT 必须 — 部署设置读取（INT-129）：public_url 当前生效值与来源，
+		// 所有登录用户可读；写入在下方管理员组。
+		api.GET("/deployment/settings", middleware.RequireJWT(cfg, authService), deploymentSettingsHandler.Get)
+
+		// 管理员（INT-129）：JWT + RequireAdmin，角色每请求查库现判，API Key
+		// 在 RequireJWT 已被 40301 拒绝。成员与邀请、部署设置写入、部署级
+		// GitHub App 的配置与 Manifest 创建。
+		admin := api.Group("", middleware.RequireJWT(cfg, authService), middleware.RequireAdmin(authService))
+		{
+			admin.GET("/members", memberHandler.List)
+			admin.PUT("/members/:uid/role", memberHandler.UpdateRole)
+			admin.GET("/invites", memberHandler.ListInvites)
+			admin.POST("/invites", memberHandler.CreateInvite)
+			admin.DELETE("/invites/:id", memberHandler.RevokeInvite)
+			admin.PUT("/deployment/settings", deploymentSettingsHandler.Update)
+			admin.PUT("/deployment/github-app", deploymentGitHubAppHandler.Update)
+			admin.POST("/deployment/github-app/test", deploymentGitHubAppHandler.Test)
+			admin.POST("/deployment/github-app/manifest", deploymentGitHubAppHandler.CreateManifest)
+			admin.POST("/deployment/github-app/manifest/complete", deploymentGitHubAppHandler.CompleteManifest)
+		}
 	}
 
 	// JWT 必须 — 自动化配置与运行记录（INT-90）

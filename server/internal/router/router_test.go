@@ -942,6 +942,9 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		&model.AutomationRunToken{},
 		&model.Notification{},
 		&model.QuotaAccount{},
+		// 成员与邀请（INT-129）：router 测试的邀请注册通道需要 invites 表。
+		&model.Invite{},
+		&model.DeploymentSettings{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)
 	}
@@ -1037,6 +1040,8 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	}
 
 	authService := service.NewAuthService(userRepo, jwtBlacklistRepo, refreshTokenRepo, cfg, loggerOrNil(appLogger, "auth"))
+	// 邀请注册（INT-129）：router 测试覆盖「第二个用户凭邀请注册」通道。
+	authService.SetInviteRepository(repository.NewInviteRepository(db))
 	aiService := service.NewAIService(userAISettingRepo, issueRepo, issueCommentRepo, projectRepo, cfg, zap.NewNop())
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo, loggerOrNil(appLogger, "api_key"))
@@ -1097,7 +1102,13 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	botHandler := handler.NewBotHandler(botService)
 	githubWebhookHandler := handler.NewGitHubWebhookHandler(nil, handler.StaticWebhookSecret(""), nil)
 	quotaHandler := handler.NewQuotaHandler(service.NewQuotaService(repository.NewQuotaAccountRepository(db), cfg, zap.NewNop(), nil))
-	integrationHandler := handler.NewIntegrationHandler(service.NewIntegrationService(repository.NewIntegrationRepository(db), cfg, zap.NewNop()))
+	deploymentSettingsRepo := repository.NewDeploymentSettingsRepository(db)
+	deploymentSettingsService := service.NewDeploymentSettingsService(deploymentSettingsRepo, cfg)
+	integrationService := service.NewIntegrationService(deploymentSettingsRepo, cfg, zap.NewNop())
+	manifestService := service.NewGitHubAppManifestService(deploymentSettingsRepo, deploymentSettingsService, cfg, zap.NewNop())
+	deploymentGitHubAppHandler := handler.NewDeploymentGitHubAppHandler(integrationService, manifestService)
+	memberHandler := handler.NewMemberHandler(service.NewMemberService(userRepo, repository.NewInviteRepository(db), nil))
+	deploymentSettingsHandler := handler.NewDeploymentSettingsHandler(deploymentSettingsService)
 
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 
@@ -1105,7 +1116,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, integrationHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,
@@ -1318,6 +1329,130 @@ func registerAndLoginRouterUser(t *testing.T, r *gin.Engine, username, email, pa
 	return routerAuthResult{
 		UserID: registerResp.User.ID,
 		Token:  resp.Token,
+	}
+}
+
+// registerAndLoginInvitedRouterUser 公开注册关闭后（INT-129）的第二个用户注册
+// 通道：先以 admin JWT 建邀请，再凭邀请 token 注册并登录。
+func registerAndLoginInvitedRouterUser(t *testing.T, r *gin.Engine, adminToken, username, email, password string) routerAuthResult {
+	t.Helper()
+
+	inviteReq := httptest.NewRequest(http.MethodPost, "/api/invites", bytes.NewReader([]byte(`{}`)))
+	inviteReq.Header.Set("Content-Type", "application/json")
+	inviteReq.Header.Set("Authorization", "Bearer "+adminToken)
+	inviteRec := httptest.NewRecorder()
+	r.ServeHTTP(inviteRec, inviteReq)
+	if inviteRec.Code != http.StatusOK {
+		t.Fatalf("create invite failed: %d %s", inviteRec.Code, inviteRec.Body.String())
+	}
+	var inviteResp struct {
+		Token string `json:"token"`
+	}
+	decodeRouterEnvelope(t, inviteRec, &inviteResp)
+
+	registerBody := []byte(`{"username":"` + username + `","email":"` + email + `","password":"` + password + `","invite_token":"` + inviteResp.Token + `"}`)
+	registerReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(registerBody))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerRec := httptest.NewRecorder()
+	r.ServeHTTP(registerRec, registerReq)
+	if registerRec.Code != http.StatusOK {
+		t.Fatalf("invited register failed: %d %s", registerRec.Code, registerRec.Body.String())
+	}
+	var registerResp struct {
+		User struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+		} `json:"user"`
+	}
+	decodeRouterEnvelope(t, registerRec, &registerResp)
+	if registerResp.User.Role != "member" {
+		t.Fatalf("expected invited user role=member, got %q", registerResp.User.Role)
+	}
+
+	loginBody := []byte(`{"login":"` + email + `","password":"` + password + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Token string `json:"token"`
+	}
+	decodeRouterEnvelope(t, rec, &resp)
+	return routerAuthResult{
+		UserID: registerResp.User.ID,
+		Token:  resp.Token,
+	}
+}
+
+// TestRouterValidateInviteEndpoint 邀请校验走 POST /api/auth/invites/validate
+// （token 进请求体，不落 URL 路径，避免被请求日志记下明文）：有效回过期时间；
+// 无效与请求体缺 token 统一 40432。
+func TestRouterValidateInviteEndpoint(t *testing.T) {
+	env := setupRouterTestEnv(t)
+
+	// 首个用户即管理员，用它的 JWT 建一枚邀请。
+	registerBody := []byte(`{"username":"inv-admin","email":"inv-admin@example.com","password":"Password123"}`)
+	registerReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", bytes.NewReader(registerBody))
+	registerReq.Header.Set("Content-Type", "application/json")
+	registerRec := httptest.NewRecorder()
+	env.router.ServeHTTP(registerRec, registerReq)
+	if registerRec.Code != http.StatusOK {
+		t.Fatalf("register failed: %d %s", registerRec.Code, registerRec.Body.String())
+	}
+	var registerResp struct {
+		Token string `json:"token"`
+	}
+	decodeRouterEnvelope(t, registerRec, &registerResp)
+
+	inviteReq := httptest.NewRequest(http.MethodPost, "/api/invites", bytes.NewReader([]byte(`{}`)))
+	inviteReq.Header.Set("Content-Type", "application/json")
+	inviteReq.Header.Set("Authorization", "Bearer "+registerResp.Token)
+	inviteRec := httptest.NewRecorder()
+	env.router.ServeHTTP(inviteRec, inviteReq)
+	if inviteRec.Code != http.StatusOK {
+		t.Fatalf("create invite failed: %d %s", inviteRec.Code, inviteRec.Body.String())
+	}
+	var inviteResp struct {
+		Token string `json:"token"`
+	}
+	decodeRouterEnvelope(t, inviteRec, &inviteResp)
+
+	// 有效 token：200 + expires_at。
+	validateBody := []byte(`{"token":"` + inviteResp.Token + `"}`)
+	validateReq := httptest.NewRequest(http.MethodPost, "/api/auth/invites/validate", bytes.NewReader(validateBody))
+	validateReq.Header.Set("Content-Type", "application/json")
+	validateRec := httptest.NewRecorder()
+	env.router.ServeHTTP(validateRec, validateReq)
+	if validateRec.Code != http.StatusOK {
+		t.Fatalf("validate failed: %d %s", validateRec.Code, validateRec.Body.String())
+	}
+	var validateResp struct {
+		ExpiresAt string `json:"expires_at"`
+	}
+	decodeRouterEnvelope(t, validateRec, &validateResp)
+	if validateResp.ExpiresAt == "" {
+		t.Fatal("expected expires_at in validate response")
+	}
+
+	// 无效 token → 40432。
+	badReq := httptest.NewRequest(http.MethodPost, "/api/auth/invites/validate", bytes.NewReader([]byte(`{"token":"no-such-token"}`)))
+	badReq.Header.Set("Content-Type", "application/json")
+	badRec := httptest.NewRecorder()
+	env.router.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusNotFound {
+		t.Fatalf("bad token = %d, want 404: %s", badRec.Code, badRec.Body.String())
+	}
+
+	// 请求体缺 token（空串）→ 40432。
+	emptyReq := httptest.NewRequest(http.MethodPost, "/api/auth/invites/validate", bytes.NewReader([]byte(`{"token":""}`)))
+	emptyReq.Header.Set("Content-Type", "application/json")
+	emptyRec := httptest.NewRecorder()
+	env.router.ServeHTTP(emptyRec, emptyReq)
+	if emptyRec.Code != http.StatusNotFound {
+		t.Fatalf("empty token = %d, want 404: %s", emptyRec.Code, emptyRec.Body.String())
 	}
 }
 

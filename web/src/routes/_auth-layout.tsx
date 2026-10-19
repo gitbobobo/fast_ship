@@ -1,12 +1,22 @@
-import { Navigate, Outlet } from "react-router";
+import { Navigate, Outlet, useSearchParams } from "react-router";
 import { FastShipLogo } from "@/components/ui/fast-ship-logo";
 import { useAuthStore } from "@/lib/store/auth-store";
+import { DEFAULT_POST_LOGIN_PATH, safeNextPath } from "@/lib/utils/safe-next";
 
 export default function AuthLayout() {
   const token = useAuthStore((s) => s.token);
+  const [searchParams] = useSearchParams();
 
   if (token) {
-    return <Navigate to="/dashboard" replace />;
+    // 登录页刚 setAuth 时也会走到这里：必须和登录页用同一个目标，否则这个
+    // 重定向会抢在 navigate(next) 之前把用户送回 /dashboard（一次性 code/state
+    // 就是这么丢的）。
+    return (
+      <Navigate
+        to={safeNextPath(searchParams.get("next")) ?? DEFAULT_POST_LOGIN_PATH}
+        replace
+      />
+    );
   }
 
   return (

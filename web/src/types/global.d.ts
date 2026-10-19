@@ -1,12 +1,58 @@
 declare const __APP_VERSION__: string;
 
+/** 用户角色：admin=管理员（可管成员/邀请/部署设置）；member=普通成员 */
+type UserRole = "admin" | "member";
+
 interface User {
   id: string;
   username: string;
   email: string;
   avatar_url: string;
+  role: UserRole;
   created_at: string;
   updated_at: string;
+}
+
+/** 成员列表项（GET /api/members）：与 User 同形，按 created_at 升序 */
+type Member = User;
+
+/** 列表端点统一 `{items}` 信封，与 /api/environments 同形 */
+interface MemberListData {
+  items: Member[];
+}
+
+/** 邀请记录；明文 token 只在创建响应（CreatedInvite）里出现一次 */
+interface Invite {
+  id: string;
+  expires_at: string;
+  revoked_at: string | null;
+  used_at: string | null;
+  used_by: string | null;
+  created_at: string;
+}
+
+/** 列表端点统一 `{items}` 信封，与 /api/environments 同形 */
+interface InviteListData {
+  items: Invite[];
+}
+
+interface CreatedInvite extends Invite {
+  /** 明文 token，仅此一次下发；邀请链接由前端拼 /register?invite= */
+  token: string;
+}
+
+interface CreateInviteRequest {
+  /** 有效期（小时），缺省 72，允许 1..720 */
+  expires_in_hours?: number;
+}
+
+interface UpdateMemberRoleRequest {
+  role: UserRole;
+}
+
+/** POST /api/auth/invites/validate 的校验结果；无效邀请返回 40432 */
+interface InviteValidation {
+  expires_at: string;
 }
 
 interface Project {
@@ -183,29 +229,89 @@ interface GitHubToken {
   updated_at: string;
 }
 
-/** 集成配置来源：database=集成页保存（最优先）；config=config.yaml 兜底；none=未配置 */
-type GitHubAppIntegrationSource = "database" | "config" | "none";
+/** 部署级配置来源：database=网页保存（最优先）；config=config.yaml 兜底；none=未配置 */
+type DeploymentSource = "database" | "config" | "none";
 
 /** 检测状态：unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效） */
 type GitHubAppDetectionStatus = "unchecked" | "ok" | "invalid" | "failed";
 
-/** 用户级 GitHub App 集成（INT-119），按当前登录用户读写；私钥与 webhook 密钥本体永不回显 */
-interface GitHubAppIntegration {
-  provider: "github_app";
+/** 部署设置（GET /api/deployment/settings）；PUT 仅管理员 */
+interface DeploymentSettings {
+  /** 对外访问地址；空串表示未在数据库保存，回落部署配置 */
+  public_url: string;
+  public_url_source: DeploymentSource;
+  /** 数据库值最近保存时间；source 为 config/none 时为 null */
+  updated_at: string | null;
+}
+
+interface UpdateDeploymentSettingsRequest {
+  /** http(s) 绝对 URL；空串表示清空数据库值、回落 config */
+  public_url: string;
+}
+
+/**
+ * 部署级 GitHub App（INT-129），整部署一份，读写见 /api/deployment/github-app；
+ * 私钥与 webhook 密钥本体永不回显
+ */
+interface GitHubAppDeployment {
   /** 数据库或部署配置任一存在 */
   configured: boolean;
-  source: GitHubAppIntegrationSource;
+  source: DeploymentSource;
   /** 未配置时为空串 */
   app_id: string;
+  /** App 的 URL slug；未配置时为空串 */
+  app_slug: string;
   private_key_set: boolean;
   webhook_secret_set: boolean;
-  /** server.public_url 未配置时为空串 */
+  /** {public_url}/api/github/webhooks；public_url 未配置时为空串 */
   webhook_url: string;
+  /** https://github.com/apps/{slug}/installations/new；slug 为空时为空串 */
+  install_url: string;
   detection_status: GitHubAppDetectionStatus;
   detection_detail: string;
   detected_at: string | null;
   /** 数据库配置最近保存时间；source 为 config/none 时为 null */
   updated_at: string | null;
+}
+
+interface UpdateGitHubAppDeploymentRequest {
+  app_id: string;
+  /** 省略或 null 保留已存值 */
+  private_key_pem?: string | null;
+  /** 省略或 null 保留已存值；空串清空 */
+  webhook_secret?: string | null;
+}
+
+/** 原样 POST 给 GitHub 的 App Manifest（见 GitHub App Manifest 创建流程） */
+interface GitHubAppManifest {
+  name: string;
+  /** public_url */
+  url: string;
+  hook_attributes: { url: string; active: boolean };
+  /** {public_url}/settings/integrations/github/callback */
+  redirect_url: string;
+  /** {public_url}/settings/integrations */
+  setup_url: string;
+  public: boolean;
+  default_events: string[];
+  default_permissions: Record<string, string>;
+}
+
+interface GitHubAppManifestRequest {
+  /** 填了则在指定组织下创建，否则建在个人账号下 */
+  org?: string;
+}
+
+interface GitHubAppManifestResponse {
+  /** https://github.com/settings/apps/new 或 .../organizations/{org}/settings/apps/new */
+  action_url: string;
+  state: string;
+  manifest: GitHubAppManifest;
+}
+
+interface CompleteGitHubAppManifestRequest {
+  code: string;
+  state: string;
 }
 
 /** 项目表单的 Token 引用三态：缺省保留、空/null 清空、非空替换 */

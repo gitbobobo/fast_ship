@@ -42,7 +42,16 @@ main.go 依次：
 2. `repairLegacyForeignKeys`：存量库外键纠偏，**必须在 AutoMigrate 之前**。AutoMigrate 发现缺失外键会隐式整表重建（SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`），悬空行还在就直接失败；先清行再重建，AutoMigrate 才会把各表视为已合规而跳过。
 3. `db.AutoMigrate(autoMigrateModels...)`。
 4. 手工索引（`CREATE INDEX IF NOT EXISTS`）：放在纠偏与 AutoMigrate 之后，保证落在最终表上；表被重建时旧索引随旧表删除，这里的 `IF NOT EXISTS` 会重新创建。
-5. 各数据回填函数（`backfillIssueSourceModel` 等）。
+5. 各数据回填/收尾迁移（`migrateUserRoles`、`migrateProjectGitHubTokens`、`backfillIssueSourceModel` 等）。
+
+INT-129 新增两处：
+
+- `migrateUserRoles`（AutoMigrate 与手工索引之后）：`users.role` 列由 AutoMigrate 补齐（存量行落默认 `member`），
+  存量部署因此可能一个 admin 都没有；把 `created_at` 最早的用户提为 admin，幂等。
+- `migrateDropIntegrations`（B 轮）：INT-119 的用户级 `integrations` 表整表 `DROP`（本仓库部署从未有人配置过）。
+  表里还有行时**拒绝启动**，要求设 `FAST_SHIP_DROP_USER_INTEGRATIONS=1` 才删：一套部署只能有一个
+  App 身份，多个用户各配一个时该选谁属于产品决策，升级不替用户挑；确认后重新配置的量级就是
+  「在 GitHub 上创建 App」点一下。模型与手工索引同步删除，不交给 AutoMigrate。
 
 纠偏失败回滚事务后 `log.Fatalf` 退出——宁可起不来也不带错跑，与其他迁移一致。
 

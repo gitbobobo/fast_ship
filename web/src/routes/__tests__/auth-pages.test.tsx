@@ -23,6 +23,7 @@ vi.mock("@/lib/api/auth", () => ({
   authApi: {
     login: vi.fn(),
     register: vi.fn(),
+    validateInvite: vi.fn(),
   },
 }));
 
@@ -87,6 +88,59 @@ describe("AuthPages", () => {
     expect(mockNavigate).toHaveBeenCalledWith("/dashboard", { replace: true });
   });
 
+  // 深链接被踢到登录页时（如 GitHub App Manifest 回跳），登录后要回到原地址：
+  // 一次性 code/state 不能随登录跳转丢掉。
+  it("returns to the deep link carried in ?next after login", async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      data: {
+        token: "jwt-token",
+        refresh_token: "refresh-token",
+        user: fakeUser,
+      },
+    } as Awaited<ReturnType<typeof authApi.login>>);
+
+    const user = userEvent.setup();
+    const target =
+      "/settings/integrations/github/callback?code=abc&state=def";
+
+    renderWithRoute(<LoginPage />, {
+      path: "/login",
+      initialEntry: `/login?next=${encodeURIComponent(target)}`,
+    });
+
+    await user.type(screen.getByLabelText("用户名或邮箱"), "godbobo");
+    await user.type(screen.getByLabelText("密码"), "Password123");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    await waitFor(() =>
+      expect(mockNavigate).toHaveBeenCalledWith(target, { replace: true }),
+    );
+  });
+
+  it("ignores an off-site ?next value", async () => {
+    vi.mocked(authApi.login).mockResolvedValue({
+      data: {
+        token: "jwt-token",
+        refresh_token: "refresh-token",
+        user: fakeUser,
+      },
+    } as Awaited<ReturnType<typeof authApi.login>>);
+
+    const user = userEvent.setup();
+    renderWithRoute(<LoginPage />, {
+      path: "/login",
+      initialEntry: "/login?next=//evil.example.com/x",
+    });
+
+    await user.type(screen.getByLabelText("用户名或邮箱"), "godbobo");
+    await user.type(screen.getByLabelText("密码"), "Password123");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    await waitFor(() =>
+      expect(mockNavigate).toHaveBeenCalledWith("/dashboard", { replace: true }),
+    );
+  });
+
   it("shows login error when credentials are invalid", async () => {
     vi.mocked(authApi.login).mockRejectedValue(new Error("login failed"));
 
@@ -135,6 +189,7 @@ describe("AuthPages", () => {
         username: "godbobo",
         email: "godbobo@example.com",
         password: "Password123",
+        invite_token: undefined,
       }),
     );
     expect(setAuth).toHaveBeenCalledWith("jwt-token", "refresh-token", fakeUser);
@@ -158,7 +213,7 @@ describe("AuthPages", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText("注册失败，用户名或邮箱可能已存在"),
+        screen.getByText("注册失败，请稍后重试"),
       ).toBeInTheDocument(),
     );
     expect(setAuth).not.toHaveBeenCalled();

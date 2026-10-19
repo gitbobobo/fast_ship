@@ -2,6 +2,7 @@ import { createContext, useContext, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { NavLink, Outlet, Navigate, useLocation } from "react-router";
 import { Header } from "@/components/layout/header";
+import { useAuthStore } from "@/lib/store/auth-store";
 import {
   User,
   KeyRound,
@@ -12,9 +13,18 @@ import {
   Copy,
   Plug,
   Server,
+  Globe,
+  Users,
+  type LucideIcon,
 } from "lucide-react";
 
-const settingsNavItems = [
+// adminOnly 项仅管理员可见（部署/成员，INT-129）；页面自身也做无权限空态兜底。
+const settingsNavItems: {
+  to: string;
+  label: string;
+  icon: LucideIcon;
+  adminOnly?: boolean;
+}[] = [
   { to: "/settings/general", label: "通用", icon: SlidersHorizontal },
   { to: "/settings/profile", label: "个人信息", icon: User },
   { to: "/settings/password", label: "修改密码", icon: KeyRound },
@@ -24,13 +34,21 @@ const settingsNavItems = [
   { to: "/settings/integrations", label: "集成", icon: Plug },
   { to: "/settings/api-keys", label: "API Keys", icon: Key },
   { to: "/settings/environments", label: "环境", icon: Server },
+  { to: "/settings/deployment", label: "部署", icon: Globe, adminOnly: true },
+  { to: "/settings/members", label: "成员", icon: Users, adminOnly: true },
 ];
 
+function useSettingsNavItems() {
+  const isAdmin = useAuthStore((state) => state.user?.role === "admin");
+  return settingsNavItems.filter((item) => !item.adminOnly || isAdmin);
+}
+
 function SettingsSidebar() {
+  const items = useSettingsNavItems();
   return (
     <aside className="hidden lg:flex lg:w-56 lg:flex-col lg:border-r lg:bg-sidebar h-[calc(100vh-3.5rem)]">
       <nav className="flex-1 space-y-1 p-3">
-        {settingsNavItems.map((item) => (
+        {items.map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -53,9 +71,10 @@ function SettingsSidebar() {
 }
 
 function SettingsMobileNav() {
+  const items = useSettingsNavItems();
   return (
     <nav className="flex lg:hidden border-b bg-sidebar p-2 overflow-x-auto">
-      {settingsNavItems.map((item) => (
+      {items.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}

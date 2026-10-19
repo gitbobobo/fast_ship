@@ -47,11 +47,11 @@ const (
 // prModelSelection 多模型规则的元素形状（与单个 model_selection 一致）。
 type prModelSelection = api.AutomationModelSelection
 
-// PRGitHubClients 按用户解析评审链路的 GitHub App 访问面（INT-119 用户级集成）：
-// PR 的运行可能分属不同用户，每次调用用运行所属用户的 App 身份。生产实现为
-// githubapp.Clients；fake 自测与测试注入恒返回同一 client 的静态实现。
+// PRGitHubClients 解析评审链路的 GitHub App 访问面（INT-129 部署级身份：每套
+// 部署一个 App，所有运行共用）。生产实现为 githubapp.Clients；fake 自测与测试
+// 注入恒返回同一 client 的静态实现。
 type PRGitHubClients interface {
-	ClientFor(ctx context.Context, userID string) (githubapi.GitHubClient, error)
+	ClientFor(ctx context.Context) (githubapi.GitHubClient, error)
 }
 
 // prTriggerTypes PR 触发类型清单（查询过滤用）。
@@ -87,8 +87,8 @@ type PRReviewService struct {
 	cfg        *config.Config
 	logger     *zap.Logger
 
-	// ghFor 评审链路的 GitHub 访问面解析器：按运行所属用户取其 App 身份
-	// （真实 githubapp.Clients 或测试/自测 fake 包装）。
+	// ghFor 评审链路的 GitHub 访问面解析器：部署级身份（真实 githubapp.Clients
+	// 或测试/自测 fake 包装）。
 	ghFor PRGitHubClients
 	// threads 取消路径的中断出口（StopThread 同口径）；可 nil（单测）。
 	threads prThreadStopper
@@ -122,13 +122,13 @@ func NewPRReviewService(
 	}
 }
 
-// clientFor 解析某个验签身份的 GitHub 访问面：空串是部署 config 身份（走
-// config 兜底），非空是该用户的 App；同一轮内调用方应复用返回的 client。
-func (s *PRReviewService) clientFor(ctx context.Context, userID string) (githubapi.GitHubClient, error) {
+// clientFor 解析部署唯一的 GitHub 访问面（INT-129 部署级身份）；同一轮内调用
+// 方应复用返回的 client。
+func (s *PRReviewService) clientFor(ctx context.Context) (githubapi.GitHubClient, error) {
 	if s.ghFor == nil {
 		return nil, errs.New(errs.ErrInternal.Code, "GitHub App 未配置")
 	}
-	gh, err := s.ghFor.ClientFor(ctx, userID)
+	gh, err := s.ghFor.ClientFor(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +142,8 @@ func (s *PRReviewService) clientFor(ctx context.Context, userID string) (githuba
 func (s *PRReviewService) SetKick(fn func()) { s.kick = fn }
 
 // ReviewIdentityForRun 运行所属评审账的验签身份：开轮时已把身份写进运行行的
-// AppUserID 列，这里直接返回它——不再查评审账反推（config 为 A 开轮、A 自己
-// 也有身份行时会选错 App），也不拿规则所有者猜。空串即部署 config 身份。
+// AppUserID 列，这里直接返回它，不拿规则所有者猜。INT-129 起开轮身份恒为
+// 空串（部署级 App），列与查询保留是为兼容存量行。
 func (s *PRReviewService) ReviewIdentityForRun(_ context.Context, run *model.AutomationRun) string {
 	return run.AppUserID
 }
@@ -211,13 +211,12 @@ func webhookPRKey(p *gitHubPRPayload) (repo string, pr int) {
 	return repo, p.Number
 }
 
-// HandleGitHubWebhook webhook 入口（appUserID 是验签命中的候选身份：空串=
-// 部署 config 身份，非空=配置了该 GitHub App 的用户）：一个事务内完成幂等
-// 登记、按身份过滤、取消旧轮、防抖/立即开轮；事务内 GitHub 调用数为 0。重复
-// 投递返回 ErrDeliveryDuplicated（handler 仍回 202）。能解析出仓库+PR 时先拿
-// per-PR 锁再开事务，与 agent 代发（SubmitReview / UpdateCheck）串行，避免
-// 「取消已提交、审查仍发出」。
-func (s *PRReviewService) HandleGitHubWebhook(ctx context.Context, event, deliveryID string, body []byte, appUserID string) error {
+// HandleGitHubWebhook webhook 入口（INT-129 起部署级单一身份，验签命中即本
+// 部署 App）：一个事务内完成幂等登记、取消旧轮、防抖/立即开轮；事务内 GitHub
+// 调用数为 0。重复投递返回 ErrDeliveryDuplicated（handler 仍回 202）。能解析
+// 出仓库+PR 时先拿 per-PR 锁再开事务，与 agent 代发（SubmitReview /
+// UpdateCheck）串行，避免「取消已提交、审查仍发出」。
+func (s *PRReviewService) HandleGitHubWebhook(ctx context.Context, event, deliveryID string, body []byte) error {
 	var payload gitHubPRPayload
 	// payload 解析失败按忽略处理（已验签说明来自 GitHub，格式异常不重试）。
 	_ = json.Unmarshal(body, &payload)
@@ -225,7 +224,7 @@ func (s *PRReviewService) HandleGitHubWebhook(ctx context.Context, event, delive
 	now := nowUTC()
 	runTx := func() error {
 		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			return s.handleWebhookTx(tx, event, deliveryID, &payload, now, appUserID)
+			return s.handleWebhookTx(tx, event, deliveryID, &payload, now)
 		})
 	}
 
@@ -257,7 +256,11 @@ func (s *PRReviewService) notifyLoop() {
 	}
 }
 
-func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string, p *gitHubPRPayload, now time.Time, appUserID string) error {
+func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string, p *gitHubPRPayload, now time.Time) error {
+	// 开轮身份：INT-129 起部署级单一 App，验签命中即本部署，恒为空串。按
+	// app_user_id 过滤/去重的查询全部保留（存量行与防抖/评审账仍按它分区）。
+	appUserID := ""
+
 	// 幂等账：重复投递直接短路。
 	inserted, err := s.deliveries.InsertTx(tx, &model.GitHubWebhookDelivery{
 		DeliveryID: deliveryID,
@@ -300,24 +303,13 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 	if err != nil {
 		return err
 	}
-	if appUserID != "" {
-		// 用户身份的投递只匹配该用户自己的项目：验签通过只证明「投递来自该
-		// 用户的 App」，不能借它影响别人项目上的运行。
-		own := linked[:0]
-		for i := range linked {
-			if linked[i].UserID == appUserID {
-				own = append(own, linked[i])
-			}
-		}
-		linked = own
-	}
 	if len(linked) == 0 {
 		return nil // 不关联不取消、不开轮
 	}
 
 	// 迟到的 opened/synchronize 可能带着已被更新 head 取代的 SHA。先判过期再
 	// 取消：否则 delayed opened(A) 会把当前 B 的在途运行取消并重开 A。时序账
-	// 按验签身份分区，各身份互不干扰。
+	// 按开轮身份分区（INT-129 起恒为部署空串身份，与存量行同区）。
 	prUpdatedAt := parseGitHubTime(p.PullRequest.UpdatedAt)
 	stale, err := isStalePRHeadTx(tx, repoFullName, p.Number, head.SHA, p.Action, prUpdatedAt, appUserID)
 	if err != nil {
@@ -335,9 +327,10 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 		return err
 	}
 
-	// SHA 变化：该身份下旧 SHA 的在途运行一律取消（跨规则跨模型；config 身份
-	// 跨用户），名额随终态释放；不登记 settle/archive。顺带丢掉旧 SHA 的防抖
-	// 行——opened 规则的窗口不能在 synchronize 新 SHA 之后再开火。
+	// SHA 变化：本身份下旧 SHA 的在途运行一律取消（跨规则跨模型、跨用户——
+	// 部署级身份是全部署共用的一把），名额随终态释放；不登记 settle/archive。
+	// 顺带丢掉旧 SHA 的防抖行——opened 规则的窗口不能在 synchronize 新 SHA
+	// 之后再开火。
 	cancelled, err := s.runs.CancelSupersededPRRunsTx(tx, repoFullName, p.Number, head.SHA, appUserID, now)
 	if err != nil {
 		return err
@@ -359,17 +352,6 @@ func (s *PRReviewService) handleWebhookTx(tx *gorm.DB, event, deliveryID string,
 	matched, err := matchPRTriggers(tx, triggerType, linked, now)
 	if err != nil {
 		return err
-	}
-	if appUserID != "" {
-		// 项目已按身份过滤，这里再按规则所有者收一道口：规则绝不能被别人的
-		// 身份开轮。
-		own := matched[:0]
-		for i := range matched {
-			if matched[i].a.UserID == appUserID {
-				own = append(own, matched[i])
-			}
-		}
-		matched = own
 	}
 	if len(matched) == 0 {
 		return nil
@@ -462,7 +444,7 @@ func isStalePRHeadTx(tx *gorm.DB, repoFullName string, prNumber int, sha, action
 		return false, nil
 	}
 	// 兜底：该 SHA 曾开过轮（seen 行缺失时）也视为旧 SHA。按开轮身份分区——
-	// 身份持久化在运行行上（存量行回填 '' 即 config），各身份的时序账互不干扰。
+	// 身份持久化在运行行上（INT-129 起开轮身份恒为空串，存量行同值）。
 	var n int64
 	if err := tx.Model(&model.AutomationRun{}).
 		Where("repo_full_name = ? AND pr_number = ? AND head_sha = ? AND app_user_id = ?",
@@ -609,7 +591,7 @@ type prTriggerContext struct {
 // openPRRoundTx 开一轮（单位：触发器，INT-118）：同一 SHA 复用已有轮次号，每个
 // 模型一行 queued；同一 SHA+模型被 (trigger_id, trigger_key) 唯一键吃掉。零插入
 // 不推进 github_pr_reviews.round_number（否则同步会查到空轮并清掉 pending）。
-// 评审账行以验签身份为主键的一列（appUserID，空串=config 身份）。随后提升排队。
+// 评审账行以开轮身份为主键的一列（appUserID，INT-129 起恒为空串）。随后提升排队。
 func (s *PRReviewService) openPRRoundTx(tx *gorm.DB, a *model.Automation, t *model.AutomationTrigger, projectID string, installationID int64, repoFullName string, p *gitHubPRPayload, headSHA string, appUserID string, now time.Time) error {
 	round, err := repository.RoundNumberForHeadSHATx(tx, repoFullName, p.Number, headSHA)
 	if err != nil {
@@ -675,7 +657,7 @@ func (s *PRReviewService) openPRRoundTx(tx *gorm.DB, a *model.Automation, t *mod
 // newPRRunRow 构造一个模型的排队运行（trigger_id/trigger_type 取触发器）：
 // config_snapshot.model_selection 是这一个模型的单对象（现有 launch 路径无需改动），
 // deadline 先按 triggered_at 起算，提升时重置为真正开始派发的时间 + timeout。
-// appUserID 是开轮的验签身份（空串=config），落进运行行供 agent/同步/取消按身份分区。
+// appUserID 是开轮身份（INT-129 起恒为空串），落进运行行供 agent/同步/取消按身份分区。
 func (s *PRReviewService) newPRRunRow(a *model.Automation, t *model.AutomationTrigger, sel prModelSelection, repoFullName string, prNumber int, headSHA string, round int, installationID int64, appUserID string, ctxJSON []byte, now time.Time) *model.AutomationRun {
 	// 快照复用 cron/issue 的构造，但 model_selection 换成这一个模型。
 	perModel := *a
@@ -711,12 +693,11 @@ func (s *PRReviewService) newPRRunRow(a *model.Automation, t *model.AutomationTr
 	}
 }
 
-// prTriggerKey `pr:<repo>:<number>:<sha>:<instance_id>:<model>`；同一 SHA+模型被
-// UNIQUE(trigger_id, trigger_key) 吃掉（重复投递/并发开轮收敛为一行；
-// INT-118 起唯一性落在触发器维度，同一自动化的不同触发器各开各轮）。
-// prTriggerKey 运行去重键：同一 (仓库, PR, SHA, 实例, 模型) 只开一轮。开轮的
-// 验签身份也进键——部署 config App 与同一用户的 App（或不同用户）命中同一
-// 触发器/同一 SHA 时互不吞掉，各自身份都要有自己的运行与评审账。
+// prTriggerKey `pr:<repo>:<number>:<sha>:<instance_id>:<model>:<app_user_id>`；
+// 同一 SHA+模型被 UNIQUE(trigger_id, trigger_key) 吃掉（重复投递/并发开轮收敛
+// 为一行；INT-118 起唯一性落在触发器维度，同一自动化的不同触发器各开各轮）。
+// 开轮身份也进键（INT-129 起恒为空串）：保留段位让存量行与未来可能的身份
+// 恢复同形，不做键格式迁移。
 func prTriggerKey(repo string, number int, sha, instanceID, model, appUserID string) string {
 	return "pr:" + url.PathEscape(repo) + ":" +
 		url.PathEscape(strconv.Itoa(number)) + ":" +
@@ -862,8 +843,8 @@ func (s *PRReviewService) fireDebounce(d *model.GitHubPRDebounce, now time.Time)
 		payload.Repository.FullName = d.RepoFullName
 		payload.Installation.ID = d.InstallationID
 
-		// 开轮用写入防抖行时的验签身份（d.AppUserID），不是规则所有者——
-		// config 身份开的轮（规则所有者是真实用户）也按 config 走。
+		// 开轮用写入防抖行时的身份（d.AppUserID，INT-129 起恒为空串），不拿
+		// 规则所有者猜——存量行为与新行为同形。
 		return s.openPRRoundTx(tx, &a, &t, d.ProjectID, d.InstallationID, d.RepoFullName, &payload, d.HeadSHA, d.AppUserID, now)
 	})
 	if err != nil {

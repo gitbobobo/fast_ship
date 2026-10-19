@@ -168,4 +168,15 @@ type (
 	AutomationRunReportRequest = api.AutomationRunReportRequest
 	AutomationRunReportResult  = api.AutomationRunReportResult
 	AgentNotificationRequest   = api.AgentNotificationRequest
+
+	// members & invites（INT-129）
+	MemberResponse          = api.Member
+	UpdateMemberRoleRequest = api.UpdateMemberRoleRequest
+	InviteResponse          = api.Invite
+	CreatedInviteResponse   = api.CreatedInvite
+	CreateInviteRequest     = api.CreateInviteRequest
+
+	// deployment（INT-129）
+	DeploymentSettingsResponse      = api.DeploymentSettings
+	UpdateDeploymentSettingsRequest = api.UpdateDeploymentSettingsRequest
 )

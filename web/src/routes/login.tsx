@@ -1,4 +1,4 @@
-import { Link } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,13 +8,17 @@ import { Label } from "@/components/ui/label";
 import { loginSchema, type LoginInput } from "@/lib/utils/validators";
 import { authApi } from "@/lib/api/auth";
 import { useAuthStore } from "@/lib/store/auth-store";
-import { useNavigate } from "react-router";
+import { DEFAULT_POST_LOGIN_PATH, safeNextPath } from "@/lib/utils/safe-next";
 import { useState } from "react";
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const setAuth = useAuthStore((s) => s.setAuth);
   const [error, setError] = useState("");
+  // AppLayout 把未登录的深链接带过来（如 GitHub App Manifest 回调）：登录后回去，
+  // 否则一次性 code/state 会随登录跳转一起丢掉。
+  const next = safeNextPath(searchParams.get("next"));
 
   const {
     register,
@@ -27,7 +31,7 @@ export default function LoginPage() {
     try {
       const res = await authApi.login(data);
       setAuth(res.data.token, res.data.refresh_token, res.data.user);
-      navigate("/dashboard", { replace: true });
+      navigate(next ?? DEFAULT_POST_LOGIN_PATH, { replace: true });
     } catch {
       setError("用户名/邮箱或密码错误");
     }

@@ -2,12 +2,13 @@ import { act, cleanup } from "@testing-library/react";
 import { useAuthStore } from "@/lib/store/auth-store";
 
 /** 以指定用户登录真实的 auth store，页面/hook 测试不绕过身份。 */
-export function signInAs(id: string) {
+export function signInAs(id: string, role: UserRole = "member") {
   useAuthStore.getState().setAuth(`token-${id}`, `refresh-${id}`, {
     id,
     username: id,
     email: `${id}@example.com`,
     avatar_url: "",
+    role,
     created_at: "2026-10-01T00:00:00Z",
     updated_at: "2026-10-01T00:00:00Z",
   });

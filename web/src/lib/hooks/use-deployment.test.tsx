@@ -3,11 +3,11 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  useGitHubAppIntegration,
-  useTestGitHubAppIntegration,
-  useUpdateGitHubAppIntegration,
-  watchIntegrationsIdentity,
-} from "@/lib/hooks/use-integrations";
+  useGitHubAppDeployment,
+  useTestGitHubAppDeployment,
+  useUpdateGitHubAppDeployment,
+  watchDeploymentIdentity,
+} from "@/lib/hooks/use-deployment";
 import { signInAs, signOut, teardownAuth } from "@/test/auth";
 
 const { getGitHubApp, updateGitHubApp, testGitHubApp } = vi.hoisted(() => ({
@@ -16,20 +16,21 @@ const { getGitHubApp, updateGitHubApp, testGitHubApp } = vi.hoisted(() => ({
   testGitHubApp: vi.fn(),
 }));
 
-vi.mock("@/lib/api/integrations", () => ({
-  integrationApi: { getGitHubApp, updateGitHubApp, testGitHubApp },
+vi.mock("@/lib/api/deployment", () => ({
+  deploymentApi: { getGitHubApp, updateGitHubApp, testGitHubApp },
 }));
 
-function integration(appId: string): { data: GitHubAppIntegration } {
+function deployment(appId: string): { data: GitHubAppDeployment } {
   return {
     data: {
-      provider: "github_app",
       configured: true,
       source: "database",
       app_id: appId,
+      app_slug: "fast-ship",
       private_key_set: true,
       webhook_secret_set: false,
       webhook_url: "",
+      install_url: "https://github.com/apps/fast-ship/installations/new",
       detection_status: "ok",
       detection_detail: "",
       detected_at: "2026-10-01T00:00:00Z",
@@ -54,15 +55,15 @@ afterEach(() => {
   testGitHubApp.mockReset();
 });
 
-describe("useGitHubAppIntegration identity", () => {
-  it("never shows user A's integration to user B, even when B's request fails", async () => {
+describe("useGitHubAppDeployment identity", () => {
+  it("never shows user A's deployment to user B, even when B's request fails", async () => {
     const { client, wrapper } = setup();
-    const stop = watchIntegrationsIdentity(client);
-    getGitHubApp.mockResolvedValueOnce(integration("A-APP-ID"));
+    const stop = watchDeploymentIdentity(client);
+    getGitHubApp.mockResolvedValueOnce(deployment("A-APP-ID"));
     const seen: Array<string | undefined> = [];
     const { result } = renderHook(
       () => {
-        const query = useGitHubAppIntegration();
+        const query = useGitHubAppDeployment();
         seen.push(query.data?.app_id);
         return query;
       },
@@ -83,9 +84,9 @@ describe("useGitHubAppIntegration identity", () => {
 
   it("clears the cache on logout", async () => {
     const { client, wrapper } = setup();
-    const stop = watchIntegrationsIdentity(client);
-    getGitHubApp.mockResolvedValue(integration("A-APP-ID"));
-    const { result } = renderHook(() => useGitHubAppIntegration(), { wrapper });
+    const stop = watchDeploymentIdentity(client);
+    getGitHubApp.mockResolvedValue(deployment("A-APP-ID"));
+    const { result } = renderHook(() => useGitHubAppDeployment(), { wrapper });
     await waitFor(() => expect(result.current.data?.app_id).toBe("A-APP-ID"));
 
     act(() => signOut());
@@ -100,11 +101,11 @@ describe("useGitHubAppIntegration identity", () => {
   });
 });
 
-describe("integration mutations stay with the requester", () => {
+describe("deployment mutations stay with the requester", () => {
   it("writes the save response into the requesting user's cache", async () => {
     const { client, wrapper } = setup();
-    updateGitHubApp.mockResolvedValue(integration("654321"));
-    const { result } = renderHook(() => useUpdateGitHubAppIntegration(), {
+    updateGitHubApp.mockResolvedValue(deployment("654321"));
+    const { result } = renderHook(() => useUpdateGitHubAppDeployment(), {
       wrapper,
     });
 
@@ -113,19 +114,23 @@ describe("integration mutations stay with the requester", () => {
     });
 
     expect(
-      client.getQueryData<GitHubAppIntegration>(["integrations", "A"])?.app_id,
+      client.getQueryData<GitHubAppDeployment>([
+        "deployment",
+        "A",
+        "github-app",
+      ])?.app_id,
     ).toBe("654321");
   });
 
   // 挂起的 GET：B 的缓存只能由 mutation 回写产生，断言确定。
   function hangingFetch() {
-    return new Promise<{ data: GitHubAppIntegration }>(() => {});
+    return new Promise<{ data: GitHubAppDeployment }>(() => {});
   }
 
   it("drops user A's slow save response after switching to user B", async () => {
     const { client, wrapper } = setup();
-    const stop = watchIntegrationsIdentity(client);
-    let resolveUpdate!: (value: { data: GitHubAppIntegration }) => void;
+    const stop = watchDeploymentIdentity(client);
+    let resolveUpdate!: (value: { data: GitHubAppDeployment }) => void;
     updateGitHubApp.mockImplementation(
       () => new Promise((resolve) => (resolveUpdate = resolve)),
     );
@@ -134,13 +139,13 @@ describe("integration mutations stay with the requester", () => {
     // mutation 的回调换成新 userId 闭包，context 必须绑定的是发起时的人。
     const { result } = renderHook(
       () => ({
-        query: useGitHubAppIntegration(),
-        mutation: useUpdateGitHubAppIntegration(),
+        query: useGitHubAppDeployment(),
+        mutation: useUpdateGitHubAppDeployment(),
       }),
       { wrapper },
     );
 
-    let pending!: Promise<ApiResponse<GitHubAppIntegration>>;
+    let pending!: Promise<ApiResponse<GitHubAppDeployment>>;
     act(() => {
       pending = result.current.mutation.mutateAsync({ app_id: "654321" });
     });
@@ -149,33 +154,37 @@ describe("integration mutations stay with the requester", () => {
     act(() => signOut());
     act(() => signInAs("B"));
     await act(async () => {
-      resolveUpdate(integration("A-APP-ID"));
+      resolveUpdate(deployment("A-APP-ID"));
       await pending;
     });
 
     await waitFor(() => expect(result.current.mutation.isSuccess).toBe(true));
-    expect(client.getQueryData(["integrations", "A"])).toBeUndefined();
-    expect(client.getQueryData(["integrations", "B"])).toBeUndefined();
+    expect(
+      client.getQueryData(["deployment", "A", "github-app"]),
+    ).toBeUndefined();
+    expect(
+      client.getQueryData(["deployment", "B", "github-app"]),
+    ).toBeUndefined();
     stop();
   });
 
   it("drops user A's slow test response after switching to user B", async () => {
     const { client, wrapper } = setup();
-    const stop = watchIntegrationsIdentity(client);
-    let resolveTest!: (value: { data: GitHubAppIntegration }) => void;
+    const stop = watchDeploymentIdentity(client);
+    let resolveTest!: (value: { data: GitHubAppDeployment }) => void;
     testGitHubApp.mockImplementation(
       () => new Promise((resolve) => (resolveTest = resolve)),
     );
     getGitHubApp.mockImplementation(hangingFetch);
     const { result } = renderHook(
       () => ({
-        query: useGitHubAppIntegration(),
-        mutation: useTestGitHubAppIntegration(),
+        query: useGitHubAppDeployment(),
+        mutation: useTestGitHubAppDeployment(),
       }),
       { wrapper },
     );
 
-    let pending!: Promise<ApiResponse<GitHubAppIntegration>>;
+    let pending!: Promise<ApiResponse<GitHubAppDeployment>>;
     act(() => {
       pending = result.current.mutation.mutateAsync();
     });
@@ -183,13 +192,17 @@ describe("integration mutations stay with the requester", () => {
     act(() => signOut());
     act(() => signInAs("B"));
     await act(async () => {
-      resolveTest(integration("A-APP-ID"));
+      resolveTest(deployment("A-APP-ID"));
       await pending;
     });
 
     await waitFor(() => expect(result.current.mutation.isSuccess).toBe(true));
-    expect(client.getQueryData(["integrations", "A"])).toBeUndefined();
-    expect(client.getQueryData(["integrations", "B"])).toBeUndefined();
+    expect(
+      client.getQueryData(["deployment", "A", "github-app"]),
+    ).toBeUndefined();
+    expect(
+      client.getQueryData(["deployment", "B", "github-app"]),
+    ).toBeUndefined();
     stop();
   });
 });

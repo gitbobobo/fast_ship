@@ -112,7 +112,8 @@ func TestSelfLogsAuthMatrix(t *testing.T) {
 func TestSelfLogsListFiltersVisibilityAndCursor(t *testing.T) {
 	env := setupRouterTestEnv(t)
 	alice := registerAndLoginRouterUser(t, env.router, "alice-log", "alice-log@example.com", "Password123")
-	bob := registerAndLoginRouterUser(t, env.router, "bob-log", "bob-log@example.com", "Password123")
+	// 公开注册关闭后（INT-129）第二个用户凭邀请注册。
+	bob := registerAndLoginInvitedRouterUser(t, env.router, alice.Token, "bob-log", "bob-log@example.com", "Password123")
 
 	now := time.Now().UTC()
 	seedSelfLog(t, env, []selflog.Entry{

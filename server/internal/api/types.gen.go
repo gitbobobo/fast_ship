@@ -197,60 +197,156 @@ func (e CreateT3ThreadRequestRuntimeMode) Valid() bool {
 	}
 }
 
-// Defines values for GitHubAppIntegrationDetectionStatus.
+// Defines values for DeploymentSettingsPublicUrlSource.
 const (
-	GitHubAppIntegrationDetectionStatusFailed    GitHubAppIntegrationDetectionStatus = "failed"
-	GitHubAppIntegrationDetectionStatusInvalid   GitHubAppIntegrationDetectionStatus = "invalid"
-	GitHubAppIntegrationDetectionStatusOk        GitHubAppIntegrationDetectionStatus = "ok"
-	GitHubAppIntegrationDetectionStatusUnchecked GitHubAppIntegrationDetectionStatus = "unchecked"
+	DeploymentSettingsPublicUrlSourceConfig   DeploymentSettingsPublicUrlSource = "config"
+	DeploymentSettingsPublicUrlSourceDatabase DeploymentSettingsPublicUrlSource = "database"
+	DeploymentSettingsPublicUrlSourceNone     DeploymentSettingsPublicUrlSource = "none"
 )
 
-// Valid indicates whether the value is a known member of the GitHubAppIntegrationDetectionStatus enum.
-func (e GitHubAppIntegrationDetectionStatus) Valid() bool {
+// Valid indicates whether the value is a known member of the DeploymentSettingsPublicUrlSource enum.
+func (e DeploymentSettingsPublicUrlSource) Valid() bool {
 	switch e {
-	case GitHubAppIntegrationDetectionStatusFailed:
+	case DeploymentSettingsPublicUrlSourceConfig:
 		return true
-	case GitHubAppIntegrationDetectionStatusInvalid:
+	case DeploymentSettingsPublicUrlSourceDatabase:
 		return true
-	case GitHubAppIntegrationDetectionStatusOk:
-		return true
-	case GitHubAppIntegrationDetectionStatusUnchecked:
+	case DeploymentSettingsPublicUrlSourceNone:
 		return true
 	default:
 		return false
 	}
 }
 
-// Defines values for GitHubAppIntegrationProvider.
+// Defines values for GitHubAppDeploymentDetectionStatus.
 const (
-	GithubApp GitHubAppIntegrationProvider = "github_app"
+	GitHubAppDeploymentDetectionStatusFailed    GitHubAppDeploymentDetectionStatus = "failed"
+	GitHubAppDeploymentDetectionStatusInvalid   GitHubAppDeploymentDetectionStatus = "invalid"
+	GitHubAppDeploymentDetectionStatusOk        GitHubAppDeploymentDetectionStatus = "ok"
+	GitHubAppDeploymentDetectionStatusUnchecked GitHubAppDeploymentDetectionStatus = "unchecked"
 )
 
-// Valid indicates whether the value is a known member of the GitHubAppIntegrationProvider enum.
-func (e GitHubAppIntegrationProvider) Valid() bool {
+// Valid indicates whether the value is a known member of the GitHubAppDeploymentDetectionStatus enum.
+func (e GitHubAppDeploymentDetectionStatus) Valid() bool {
 	switch e {
-	case GithubApp:
+	case GitHubAppDeploymentDetectionStatusFailed:
+		return true
+	case GitHubAppDeploymentDetectionStatusInvalid:
+		return true
+	case GitHubAppDeploymentDetectionStatusOk:
+		return true
+	case GitHubAppDeploymentDetectionStatusUnchecked:
 		return true
 	default:
 		return false
 	}
 }
 
-// Defines values for GitHubAppIntegrationSource.
+// Defines values for GitHubAppDeploymentSource.
 const (
-	GitHubAppIntegrationSourceConfig   GitHubAppIntegrationSource = "config"
-	GitHubAppIntegrationSourceDatabase GitHubAppIntegrationSource = "database"
-	GitHubAppIntegrationSourceNone     GitHubAppIntegrationSource = "none"
+	GitHubAppDeploymentSourceConfig   GitHubAppDeploymentSource = "config"
+	GitHubAppDeploymentSourceDatabase GitHubAppDeploymentSource = "database"
+	GitHubAppDeploymentSourceNone     GitHubAppDeploymentSource = "none"
 )
 
-// Valid indicates whether the value is a known member of the GitHubAppIntegrationSource enum.
-func (e GitHubAppIntegrationSource) Valid() bool {
+// Valid indicates whether the value is a known member of the GitHubAppDeploymentSource enum.
+func (e GitHubAppDeploymentSource) Valid() bool {
 	switch e {
-	case GitHubAppIntegrationSourceConfig:
+	case GitHubAppDeploymentSourceConfig:
 		return true
-	case GitHubAppIntegrationSourceDatabase:
+	case GitHubAppDeploymentSourceDatabase:
 		return true
-	case GitHubAppIntegrationSourceNone:
+	case GitHubAppDeploymentSourceNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppManifestDefaultEvents.
+const (
+	PullRequest GitHubAppManifestDefaultEvents = "pull_request"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultEvents enum.
+func (e GitHubAppManifestDefaultEvents) Valid() bool {
+	switch e {
+	case PullRequest:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppManifestDefaultPermissionsChecks.
+const (
+	GitHubAppManifestDefaultPermissionsChecksWrite GitHubAppManifestDefaultPermissionsChecks = "write"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultPermissionsChecks enum.
+func (e GitHubAppManifestDefaultPermissionsChecks) Valid() bool {
+	switch e {
+	case GitHubAppManifestDefaultPermissionsChecksWrite:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppManifestDefaultPermissionsContents.
+const (
+	GitHubAppManifestDefaultPermissionsContentsRead GitHubAppManifestDefaultPermissionsContents = "read"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultPermissionsContents enum.
+func (e GitHubAppManifestDefaultPermissionsContents) Valid() bool {
+	switch e {
+	case GitHubAppManifestDefaultPermissionsContentsRead:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppManifestDefaultPermissionsIssues.
+const (
+	GitHubAppManifestDefaultPermissionsIssuesWrite GitHubAppManifestDefaultPermissionsIssues = "write"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultPermissionsIssues enum.
+func (e GitHubAppManifestDefaultPermissionsIssues) Valid() bool {
+	switch e {
+	case GitHubAppManifestDefaultPermissionsIssuesWrite:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppManifestDefaultPermissionsMetadata.
+const (
+	GitHubAppManifestDefaultPermissionsMetadataRead GitHubAppManifestDefaultPermissionsMetadata = "read"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultPermissionsMetadata enum.
+func (e GitHubAppManifestDefaultPermissionsMetadata) Valid() bool {
+	switch e {
+	case GitHubAppManifestDefaultPermissionsMetadataRead:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppManifestDefaultPermissionsPullRequests.
+const (
+	GitHubAppManifestDefaultPermissionsPullRequestsWrite GitHubAppManifestDefaultPermissionsPullRequests = "write"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultPermissionsPullRequests enum.
+func (e GitHubAppManifestDefaultPermissionsPullRequests) Valid() bool {
+	switch e {
+	case GitHubAppManifestDefaultPermissionsPullRequestsWrite:
 		return true
 	default:
 		return false
@@ -767,6 +863,24 @@ func (e UpdateScreenshotScreenRequestTheme) Valid() bool {
 	case UpdateScreenshotScreenRequestThemeEmpty:
 		return true
 	case UpdateScreenshotScreenRequestThemeLight:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UserRole.
+const (
+	UserRoleAdmin  UserRole = "admin"
+	UserRoleMember UserRole = "member"
+)
+
+// Valid indicates whether the value is a known member of the UserRole enum.
+func (e UserRole) Valid() bool {
+	switch e {
+	case UserRoleAdmin:
+		return true
+	case UserRoleMember:
 		return true
 	default:
 		return false
@@ -1913,6 +2027,15 @@ type Branch struct {
 // CollabAuthorKind defines model for CollabAuthorKind.
 type CollabAuthorKind = model.CollabAuthorKind
 
+// CompleteGitHubAppManifestRequest defines model for CompleteGitHubAppManifestRequest.
+type CompleteGitHubAppManifestRequest struct {
+	// Code GitHub 回跳携带的一次性 code，用于换取 App 凭证
+	Code string `json:"code"`
+
+	// State 发起创建时签发的 state，服务端核对一致才继续
+	State string `json:"state"`
+}
+
 // CreateApiKeyRequest defines model for CreateApiKeyRequest.
 type CreateApiKeyRequest struct {
 	Name string `binding:"required,min=1,max=100" json:"name"`
@@ -1974,6 +2097,12 @@ type CreateGitHubTokenRequest struct {
 
 	// Token GitHub PAT 明文（加密存储，任何响应都不回显）
 	Token string `binding:"required,min=1" json:"token"`
+}
+
+// CreateInviteRequest defines model for CreateInviteRequest.
+type CreateInviteRequest struct {
+	// ExpiresInHours 有效期（小时），省略默认 72；越界 40001
+	ExpiresInHours *int `json:"expires_in_hours,omitempty"`
 }
 
 // CreateIssueRequest defines model for CreateIssueRequest.
@@ -2100,6 +2229,30 @@ type CreateVersionRequest struct {
 	VersionNumber string `binding:"required" json:"version_number"`
 }
 
+// CreatedInvite 新建邀请（Invite 全部字段 + 一次性 token 明文）
+type CreatedInvite struct {
+	CreatedAt string `json:"created_at"`
+
+	// CreatedBy 签发邀请的管理员用户 ID
+	CreatedBy string `json:"created_by"`
+
+	// ExpiresAt 过期时间
+	ExpiresAt string `json:"expires_at"`
+	Id        string `json:"id"`
+
+	// RevokedAt 撤销时间；未撤销为 null
+	RevokedAt *string `json:"revoked_at"`
+
+	// Token 邀请明文 token，只在本次响应出现一次；前端拼 /register?invite=<token>
+	Token string `json:"token"`
+
+	// UsedAt 被使用（注册消费）时间；未使用为 null
+	UsedAt *string `json:"used_at"`
+
+	// UsedBy 使用该邀请注册的用户 ID；未使用为 null
+	UsedBy *string `json:"used_by"`
+}
+
 // DashboardDailyResolvedPoint defines model for DashboardDailyResolvedPoint.
 type DashboardDailyResolvedPoint struct {
 	// Date YYYY-MM-DD
@@ -2136,6 +2289,21 @@ type DeferIssueRecommendationRequest struct {
 	// Note 延后备注，trim 后 ≤500 rune；缺省或空串表示无备注
 	Note *string `json:"note,omitempty"`
 }
+
+// DeploymentSettings defines model for DeploymentSettings.
+type DeploymentSettings struct {
+	// PublicUrl 当前生效的对外访问基址（trim 且去尾部 /）；两处都没有时为空串
+	PublicUrl string `json:"public_url"`
+
+	// PublicUrlSource public_url 来源：database=部署设置保存的值（优先）；config=config.yaml 的 server.public_url 兜底；none=未配置
+	PublicUrlSource DeploymentSettingsPublicUrlSource `json:"public_url_source"`
+
+	// UpdatedAt 部署设置最近保存时间；数据库从未保存过该行为 null
+	UpdatedAt *string `json:"updated_at"`
+}
+
+// DeploymentSettingsPublicUrlSource public_url 来源：database=部署设置保存的值（优先）；config=config.yaml 的 server.public_url 兜底；none=未配置
+type DeploymentSettingsPublicUrlSource string
 
 // Document defines model for Document.
 type Document struct {
@@ -2194,12 +2362,15 @@ type GenerateTitleResponse struct {
 	Titles []string `json:"titles"`
 }
 
-// GitHubAppIntegration defines model for GitHubAppIntegration.
-type GitHubAppIntegration struct {
+// GitHubAppDeployment defines model for GitHubAppDeployment.
+type GitHubAppDeployment struct {
 	// AppId GitHub App ID（未配置时为空串）
 	AppId string `json:"app_id"`
 
-	// Configured 当前用户是否有 App 身份配置来源（本人数据库行或 config 兜底）；私钥是否真的可读看 private_key_set
+	// AppSlug GitHub App slug（拼 install_url 用；未配置时为空串）
+	AppSlug string `json:"app_slug"`
+
+	// Configured 本部署是否有 App 身份配置来源（部署设置行或 config 兜底）；私钥是否真的可读看 private_key_set
 	Configured bool `json:"configured"`
 
 	// DetectedAt 最近一次检测完成时间；未检测为 null
@@ -2209,14 +2380,16 @@ type GitHubAppIntegration struct {
 	DetectionDetail string `json:"detection_detail"`
 
 	// DetectionStatus unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
-	DetectionStatus GitHubAppIntegrationDetectionStatus `json:"detection_status"`
+	DetectionStatus GitHubAppDeploymentDetectionStatus `json:"detection_status"`
+
+	// InstallUrl 安装到仓库入口（https://github.com/apps/{slug}/installations/new）；slug 为空时为空串
+	InstallUrl string `json:"install_url"`
 
 	// PrivateKeySet 私钥是否已配置（本体永不回显）
-	PrivateKeySet bool                         `json:"private_key_set"`
-	Provider      GitHubAppIntegrationProvider `json:"provider"`
+	PrivateKeySet bool `json:"private_key_set"`
 
-	// Source 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
-	Source GitHubAppIntegrationSource `json:"source"`
+	// Source 当前生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
+	Source GitHubAppDeploymentSource `json:"source"`
 
 	// UpdatedAt 数据库配置最近保存时间；source 为 config/none 时为 null
 	UpdatedAt *string `json:"updated_at"`
@@ -2224,18 +2397,93 @@ type GitHubAppIntegration struct {
 	// WebhookSecretSet webhook 验签密钥是否已配置（本体永不回显）
 	WebhookSecretSet bool `json:"webhook_secret_set"`
 
-	// WebhookUrl 填进 GitHub App 的 Webhook URL（本部署统一入口）；server.public_url 未配置时为空串
+	// WebhookUrl 填进 GitHub App 的 Webhook URL（{public_url}/api/github/webhooks）；public_url 未配置时为空串
 	WebhookUrl string `json:"webhook_url"`
 }
 
-// GitHubAppIntegrationDetectionStatus unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
-type GitHubAppIntegrationDetectionStatus string
+// GitHubAppDeploymentDetectionStatus unchecked=未检测；ok=App 身份认证成功；invalid=GitHub 拒绝凭证（401）；failed=检测失败（网络/限流/5xx，不是凭证无效）
+type GitHubAppDeploymentDetectionStatus string
 
-// GitHubAppIntegrationProvider defines model for GitHubAppIntegration.Provider.
-type GitHubAppIntegrationProvider string
+// GitHubAppDeploymentSource 当前生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
+type GitHubAppDeploymentSource string
 
-// GitHubAppIntegrationSource 当前用户生效来源；database 优先，config 是 config.yaml 兜底，none 为未配置
-type GitHubAppIntegrationSource string
+// GitHubAppManifest 原样 POST 给 GitHub 的 App Manifest（形状由 GitHub Manifest 流程约定）
+type GitHubAppManifest struct {
+	DefaultEvents []GitHubAppManifestDefaultEvents `json:"default_events"`
+
+	// DefaultPermissions PR 评审所需的最小权限集
+	DefaultPermissions GitHubAppManifest_DefaultPermissions `json:"default_permissions"`
+	HookAttributes     GitHubAppManifest_HookAttributes     `json:"hook_attributes"`
+
+	// Name App 名称（取自部署，如 Fast Ship）
+	Name string `json:"name"`
+
+	// Public 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量）
+	Public bool `json:"public"`
+
+	// RedirectUrl 创建完成回跳地址 = {public_url}/settings/integrations/github/callback
+	RedirectUrl string `json:"redirect_url"`
+
+	// SetupUrl 安装后跳转地址 = {public_url}/settings/integrations
+	SetupUrl string `json:"setup_url"`
+
+	// Url 主页地址 = public_url
+	Url string `json:"url"`
+}
+
+// GitHubAppManifestDefaultEvents defines model for GitHubAppManifest.DefaultEvents.
+type GitHubAppManifestDefaultEvents string
+
+// GitHubAppManifestDefaultPermissionsChecks defines model for GitHubAppManifest.DefaultPermissions.Checks.
+type GitHubAppManifestDefaultPermissionsChecks string
+
+// GitHubAppManifestDefaultPermissionsContents defines model for GitHubAppManifest.DefaultPermissions.Contents.
+type GitHubAppManifestDefaultPermissionsContents string
+
+// GitHubAppManifestDefaultPermissionsIssues defines model for GitHubAppManifest.DefaultPermissions.Issues.
+type GitHubAppManifestDefaultPermissionsIssues string
+
+// GitHubAppManifestDefaultPermissionsMetadata defines model for GitHubAppManifest.DefaultPermissions.Metadata.
+type GitHubAppManifestDefaultPermissionsMetadata string
+
+// GitHubAppManifestDefaultPermissionsPullRequests defines model for GitHubAppManifest.DefaultPermissions.PullRequests.
+type GitHubAppManifestDefaultPermissionsPullRequests string
+
+// GitHubAppManifest_DefaultPermissions PR 评审所需的最小权限集
+type GitHubAppManifest_DefaultPermissions struct {
+	Checks       GitHubAppManifestDefaultPermissionsChecks       `json:"checks"`
+	Contents     GitHubAppManifestDefaultPermissionsContents     `json:"contents"`
+	Issues       GitHubAppManifestDefaultPermissionsIssues       `json:"issues"`
+	Metadata     GitHubAppManifestDefaultPermissionsMetadata     `json:"metadata"`
+	PullRequests GitHubAppManifestDefaultPermissionsPullRequests `json:"pull_requests"`
+}
+
+// GitHubAppManifest_HookAttributes defines model for GitHubAppManifest.HookAttributes.
+type GitHubAppManifest_HookAttributes struct {
+	// Active 恒为 true（不用 enum[true]：oapi-codegen 会生成与 api.True 撞名的常量）
+	Active bool `json:"active"`
+
+	// Url Webhook URL = {public_url}/api/github/webhooks
+	Url string `json:"url"`
+}
+
+// GitHubAppManifestRequest defines model for GitHubAppManifestRequest.
+type GitHubAppManifestRequest struct {
+	// Org 目标组织；填了则创建页指向该组织的 Apps 设置，省略为个人 App
+	Org *string `json:"org,omitempty"`
+}
+
+// GitHubAppManifestResponse defines model for GitHubAppManifestResponse.
+type GitHubAppManifestResponse struct {
+	// ActionUrl GitHub 创建页；默认 https://github.com/settings/apps/new，填了 org 时 https://github.com/organizations/{org}/settings/apps/new
+	ActionUrl string `json:"action_url"`
+
+	// Manifest 原样 POST 给 GitHub 的 App Manifest（形状由 GitHub Manifest 流程约定）
+	Manifest GitHubAppManifest `json:"manifest"`
+
+	// State 防 CSRF 的一次性 state，GitHub 回跳时原样带回
+	State string `json:"state"`
+}
 
 // GitHubToken defines model for GitHubToken.
 type GitHubToken struct {
@@ -2279,6 +2527,27 @@ type GitHubTokenDetectionTokenType string
 type GitHubTokenProjectRef struct {
 	Id   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// Invite 邀请投影，不含 token 明文（明文只在创建响应里出现一次）
+type Invite struct {
+	CreatedAt string `json:"created_at"`
+
+	// CreatedBy 签发邀请的管理员用户 ID
+	CreatedBy string `json:"created_by"`
+
+	// ExpiresAt 过期时间
+	ExpiresAt string `json:"expires_at"`
+	Id        string `json:"id"`
+
+	// RevokedAt 撤销时间；未撤销为 null
+	RevokedAt *string `json:"revoked_at"`
+
+	// UsedAt 被使用（注册消费）时间；未使用为 null
+	UsedAt *string `json:"used_at"`
+
+	// UsedBy 使用该邀请注册的用户 ID；未使用为 null
+	UsedBy *string `json:"used_by"`
 }
 
 // Issue defines model for Issue.
@@ -2872,6 +3141,9 @@ type LoginRequest struct {
 	Password string `binding:"required" json:"password"`
 }
 
+// Member 成员（/api/members 的元素），形状与 User 完全一致
+type Member = User
+
 // Notification defines model for Notification.
 type Notification struct {
 	Body          string           `json:"body"`
@@ -3181,6 +3453,9 @@ type RefreshResponse struct {
 type RegisterRequest struct {
 	// Email 邮箱，全局唯一
 	Email string `binding:"required,email" json:"email"`
+
+	// InviteToken 邀请明文 token（/register?invite= 携带）；部署还没有用户时被忽略（首个用户直接成为 admin），已有用户时必须有效
+	InviteToken *string `json:"invite_token,omitempty"`
 
 	// Password 密码，≥8 字符
 	Password string `binding:"required,min=8" json:"password"`
@@ -4048,6 +4323,12 @@ type UpdateBotRequest struct {
 	PersonaPrompt *string `json:"persona_prompt,omitempty"`
 }
 
+// UpdateDeploymentSettingsRequest defines model for UpdateDeploymentSettingsRequest.
+type UpdateDeploymentSettingsRequest struct {
+	// PublicUrl 对外访问基址；空串=清空数据库值回落 config；其余必须是 http(s) 绝对 URL、host 非空、不带 query/fragment，末尾 / 自动去掉
+	PublicUrl string `json:"public_url"`
+}
+
 // UpdateDocumentRequest title/body/parent_id 至少传一个
 type UpdateDocumentRequest struct {
 	// Body ≤200000 rune
@@ -4060,8 +4341,8 @@ type UpdateDocumentRequest struct {
 	Title *string `json:"title,omitempty"`
 }
 
-// UpdateGitHubAppIntegrationRequest defines model for UpdateGitHubAppIntegrationRequest.
-type UpdateGitHubAppIntegrationRequest struct {
+// UpdateGitHubAppDeploymentRequest defines model for UpdateGitHubAppDeploymentRequest.
+type UpdateGitHubAppDeploymentRequest struct {
 	// AppId GitHub App ID（纯数字）
 	AppId string `json:"app_id"`
 
@@ -4098,6 +4379,12 @@ type UpdateIssueRequest struct {
 
 // UpdateIssueRequestStateReason 仅 JWT；closed→completed|not_planned，open→reopened；置 open 且 reason 为空会清空
 type UpdateIssueRequestStateReason string
+
+// UpdateMemberRoleRequest defines model for UpdateMemberRoleRequest.
+type UpdateMemberRoleRequest struct {
+	// Role 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
+	Role UserRole `json:"role"`
+}
 
 // UpdatePasswordRequest defines model for UpdatePasswordRequest.
 type UpdatePasswordRequest struct {
@@ -4263,8 +4550,20 @@ type User struct {
 	CreatedAt string `json:"created_at"`
 	Email     string `json:"email"`
 	Id        string `json:"id"`
-	UpdatedAt string `json:"updated_at"`
-	Username  string `json:"username"`
+
+	// Role 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
+	Role      UserRole `json:"role"`
+	UpdatedAt string   `json:"updated_at"`
+	Username  string   `json:"username"`
+}
+
+// UserRole 用户角色（INT-129）：admin 可管理成员、邀请与部署设置；member 只能使用自己的资源。角色只存库，服务端每请求查库判定，不写进 JWT
+type UserRole string
+
+// ValidateInviteRequest defines model for ValidateInviteRequest.
+type ValidateInviteRequest struct {
+	// Token 邀请链接中的明文 token；走请求体，不进 URL 路径
+	Token string `json:"token"`
 }
 
 // Version defines model for Version.
@@ -4540,6 +4839,22 @@ type UploadAvatar200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int   `json:"code"`
 	Data *User `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ValidateInvite200JSONResponseBody_Data defines parameters for ValidateInvite.
+type ValidateInvite200JSONResponseBody_Data struct {
+	// ExpiresAt 邀说过期时间
+	ExpiresAt string `json:"expires_at"`
+}
+
+// ValidateInvite200JSONResponseBody defines parameters for ValidateInvite.
+type ValidateInvite200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                     `json:"code"`
+	Data *ValidateInvite200JSONResponseBody_Data `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -5130,6 +5445,76 @@ type DashboardOverview200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// GetGitHubAppDeployment200JSONResponseBody defines parameters for GetGitHubAppDeployment.
+type GetGitHubAppDeployment200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                  `json:"code"`
+	Data *GitHubAppDeployment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateGitHubAppDeployment200JSONResponseBody defines parameters for UpdateGitHubAppDeployment.
+type UpdateGitHubAppDeployment200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                  `json:"code"`
+	Data *GitHubAppDeployment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateGitHubAppManifest200JSONResponseBody defines parameters for CreateGitHubAppManifest.
+type CreateGitHubAppManifest200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                        `json:"code"`
+	Data *GitHubAppManifestResponse `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CompleteGitHubAppManifest200JSONResponseBody defines parameters for CompleteGitHubAppManifest.
+type CompleteGitHubAppManifest200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                  `json:"code"`
+	Data *GitHubAppDeployment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// TestGitHubAppDeployment200JSONResponseBody defines parameters for TestGitHubAppDeployment.
+type TestGitHubAppDeployment200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                  `json:"code"`
+	Data *GitHubAppDeployment `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetDeploymentSettings200JSONResponseBody defines parameters for GetDeploymentSettings.
+type GetDeploymentSettings200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                 `json:"code"`
+	Data *DeploymentSettings `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateDeploymentSettings200JSONResponseBody defines parameters for UpdateDeploymentSettings.
+type UpdateDeploymentSettings200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                 `json:"code"`
+	Data *DeploymentSettings `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // GetDocument200JSONResponseBody defines parameters for GetDocument.
 type GetDocument200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -5475,36 +5860,30 @@ type ReceiveGitHubWebhookParams struct {
 	XGitHubEvent     string `json:"X-GitHub-Event"`
 	XGitHubDelivery  string `json:"X-GitHub-Delivery"`
 	XHubSignature256 string `json:"X-Hub-Signature-256"`
-
-	// XGitHubHookInstallationTargetID GitHub webhook 携带的目标资源 ID；只作候选排序提示（GitHub 未保证 App 级投递上等于 App ID），身份归属只认验签
-	XGitHubHookInstallationTargetID *string `json:"X-GitHub-Hook-Installation-Target-ID,omitempty"`
 }
 
-// GetGitHubAppIntegration200JSONResponseBody defines parameters for GetGitHubAppIntegration.
-type GetGitHubAppIntegration200JSONResponseBody struct {
+// ListInvites200JSONResponseBody_Data defines parameters for ListInvites.
+type ListInvites200JSONResponseBody_Data struct {
+	Items []Invite `json:"items"`
+}
+
+// ListInvites200JSONResponseBody defines parameters for ListInvites.
+type ListInvites200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
-	Code int                   `json:"code"`
-	Data *GitHubAppIntegration `json:"data,omitempty"`
+	Code int                                  `json:"code"`
+	Data *ListInvites200JSONResponseBody_Data `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
 }
 
-// UpdateGitHubAppIntegration200JSONResponseBody defines parameters for UpdateGitHubAppIntegration.
-type UpdateGitHubAppIntegration200JSONResponseBody struct {
+// CreateInvite200JSONResponseBody defines parameters for CreateInvite.
+type CreateInvite200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
-	Code int                   `json:"code"`
-	Data *GitHubAppIntegration `json:"data,omitempty"`
+	Code int `json:"code"`
 
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// TestGitHubAppIntegration200JSONResponseBody defines parameters for TestGitHubAppIntegration.
-type TestGitHubAppIntegration200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                   `json:"code"`
-	Data *GitHubAppIntegration `json:"data,omitempty"`
+	// Data 新建邀请（Invite 全部字段 + 一次性 token 明文）
+	Data *CreatedInvite `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -5833,6 +6212,33 @@ type ListIssueTimeline200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                                        `json:"code"`
 	Data *ListIssueTimeline200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListMembers200JSONResponseBody_Data defines parameters for ListMembers.
+type ListMembers200JSONResponseBody_Data struct {
+	Items []Member `json:"items"`
+}
+
+// ListMembers200JSONResponseBody defines parameters for ListMembers.
+type ListMembers200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                  `json:"code"`
+	Data *ListMembers200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateMemberRole200JSONResponseBody defines parameters for UpdateMemberRole.
+type UpdateMemberRole200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data 成员（/api/members 的元素），形状与 User 完全一致
+	Data *Member `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -6864,6 +7270,9 @@ type CreateApiKeyJSONRequestBody = CreateApiKeyRequest
 // UploadAvatarMultipartRequestBody defines body for UploadAvatar for multipart/form-data ContentType.
 type UploadAvatarMultipartRequestBody UploadAvatarMultipartBody
 
+// ValidateInviteJSONRequestBody defines body for ValidateInvite for application/json ContentType.
+type ValidateInviteJSONRequestBody = ValidateInviteRequest
+
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
 type LoginJSONRequestBody = LoginRequest
 
@@ -6918,6 +7327,18 @@ type SendBotMessageJSONRequestBody = SendBotMessageRequest
 // SetBotScheduleTaskEnabledJSONRequestBody defines body for SetBotScheduleTaskEnabled for application/json ContentType.
 type SetBotScheduleTaskEnabledJSONRequestBody SetBotScheduleTaskEnabledJSONBody
 
+// UpdateGitHubAppDeploymentJSONRequestBody defines body for UpdateGitHubAppDeployment for application/json ContentType.
+type UpdateGitHubAppDeploymentJSONRequestBody = UpdateGitHubAppDeploymentRequest
+
+// CreateGitHubAppManifestJSONRequestBody defines body for CreateGitHubAppManifest for application/json ContentType.
+type CreateGitHubAppManifestJSONRequestBody = GitHubAppManifestRequest
+
+// CompleteGitHubAppManifestJSONRequestBody defines body for CompleteGitHubAppManifest for application/json ContentType.
+type CompleteGitHubAppManifestJSONRequestBody = CompleteGitHubAppManifestRequest
+
+// UpdateDeploymentSettingsJSONRequestBody defines body for UpdateDeploymentSettings for application/json ContentType.
+type UpdateDeploymentSettingsJSONRequestBody = UpdateDeploymentSettingsRequest
+
 // UpdateDocumentJSONRequestBody defines body for UpdateDocument for application/json ContentType.
 type UpdateDocumentJSONRequestBody = UpdateDocumentRequest
 
@@ -6957,8 +7378,8 @@ type UpdateGithubTokenJSONRequestBody = UpdateGitHubTokenRequest
 // ReceiveGitHubWebhookJSONRequestBody defines body for ReceiveGitHubWebhook for application/json ContentType.
 type ReceiveGitHubWebhookJSONRequestBody = ReceiveGitHubWebhookJSONBody
 
-// UpdateGitHubAppIntegrationJSONRequestBody defines body for UpdateGitHubAppIntegration for application/json ContentType.
-type UpdateGitHubAppIntegrationJSONRequestBody = UpdateGitHubAppIntegrationRequest
+// CreateInviteJSONRequestBody defines body for CreateInvite for application/json ContentType.
+type CreateInviteJSONRequestBody = CreateInviteRequest
 
 // UpdateIssuePromptsJSONRequestBody defines body for UpdateIssuePrompts for application/json ContentType.
 type UpdateIssuePromptsJSONRequestBody UpdateIssuePromptsJSONBody
@@ -7001,6 +7422,9 @@ type DeferIssueRecommendationJSONRequestBody = DeferIssueRecommendationRequest
 
 // UpsertShipHookJSONRequestBody defines body for UpsertShipHook for application/json ContentType.
 type UpsertShipHookJSONRequestBody = UpsertShipHookRequest
+
+// UpdateMemberRoleJSONRequestBody defines body for UpdateMemberRole for application/json ContentType.
+type UpdateMemberRoleJSONRequestBody = UpdateMemberRoleRequest
 
 // CreateProjectJSONRequestBody defines body for CreateProject for application/json ContentType.
 type CreateProjectJSONRequestBody = CreateProjectRequest

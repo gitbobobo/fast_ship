@@ -1,4 +1,4 @@
-import { api, ROTATION_OWNER_HEADER } from "./client";
+import { api, decodeApiError, ROTATION_OWNER_HEADER } from "./client";
 
 interface LoginRequest {
   login: string;
@@ -9,6 +9,8 @@ interface RegisterRequest {
   username: string;
   email: string;
   password: string;
+  /** 邀请注册的明文 token（INT-129）；库里无用户的首个注册可省略 */
+  invite_token?: string;
 }
 
 interface AuthResponse {
@@ -26,10 +28,21 @@ export const authApi = {
   login: (data: LoginRequest) =>
     api.post("auth/login", { json: data }).json<ApiResponse<AuthResponse>>(),
 
+  // decodeApiError：注册失败文案必须来自服务端 message（40306 公开注册已关闭、
+  // 40432 邀请失效、40900/40901 用户名/邮箱重复等），不能前端写死。
   register: (data: RegisterRequest) =>
-    api
-      .post("auth/register", { json: data })
-      .json<ApiResponse<AuthResponse>>(),
+    decodeApiError(
+      api.post("auth/register", { json: data }).json<ApiResponse<AuthResponse>>(),
+    ),
+
+  // 公开端点（未登录可调）：校验邀请能否用于注册；无效/过期/撤销/已用统一 40432。
+  // token 放请求体、不进 URL 路径，避免被请求日志记下明文。
+  validateInvite: (token: string) =>
+    decodeApiError(
+      api
+        .post("auth/invites/validate", { json: { token } })
+        .json<ApiResponse<InviteValidation>>(),
+    ),
 
   logout: (refreshToken?: string) =>
     api
