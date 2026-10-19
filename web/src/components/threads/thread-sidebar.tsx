@@ -102,18 +102,18 @@ export function EnvironmentFilterItem({
       aria-label={envFilterLabel(name, counts)}
       onClick={onSelect}
       className={cn(
-        "flex w-full flex-col gap-1 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors",
+        "flex min-w-0 flex-col gap-1.5 rounded-lg border px-2.5 py-2 text-left text-sm transition-colors",
         selected
-          ? "bg-accent text-accent-foreground"
-          : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+          ? "border-foreground/25 bg-accent text-accent-foreground"
+          : "border-border text-muted-foreground hover:border-foreground/20 hover:bg-accent/40 hover:text-foreground",
       )}
     >
-      <span className="flex min-w-0 items-center gap-2">
+      <span className="flex min-w-0 items-center gap-1.5">
         {dot}
         <span className="min-w-0 flex-1 truncate">{name}</span>
       </span>
       {counts.total > 0 && (
-        <span className="flex items-center gap-2.5 text-xs tabular-nums">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs tabular-nums">
           {COUNT_ORDER.map((s) =>
             counts[s] > 0 ? (
               <span
@@ -243,7 +243,7 @@ export function ThreadSidebar({
     <div className="shrink-0 space-y-2 px-3 py-3">
       <nav
         aria-label="环境筛选"
-        className="max-h-[min(15rem,34vh)] space-y-0.5 overflow-y-auto"
+        className="grid max-h-[min(16rem,36vh)] grid-cols-2 content-start gap-2 overflow-y-auto"
       >
         <EnvironmentFilterItem
           name="全部环境"

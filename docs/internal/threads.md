@@ -479,9 +479,9 @@ already_answered/agent_stopped → 40916，not_found → 40419，其余 → 5020
 - 窄于 `lg` 时只显示一栏：由子路由是否有 `threadId` 决定（`useParams`）——
   开着线程就只显详情，否则只显左栏；不引入 JS 断点 hook。
 - 环境筛选为**单选**：`ThreadFilters.environmentId`（空串 = 全部环境），替代早期
-  的多选数组。侧栏每个环境行是两行式：第一行健康点 + 名称，第二行一排
-  「彩点 + 数量」pill，只显示计数非 0 的状态（固定 running/waiting/idle/
-  archived 顺序）。计数来自分面计数 `countThreadsByEnvironment`：忽略
+  的多选数组。侧栏环境是两列卡片（「全部环境」+ 每个环境一格，窄栏里
+  一行两张）：卡片第一行健康点 + 名称，第二行一排「彩点 + 数量」pill，
+  只显示计数非 0 的状态（固定 running/waiting/idle/archived 顺序）。计数来自分面计数 `countThreadsByEnvironment`：忽略
   environmentId 这一项，搜索/项目/状态/完结照常叠加，每个环境（与「全部
   环境」汇总行）返回按状态分桶的 `ThreadStatusCounts`（含 total）；
   status 为空时归档不计入，数字与命中条数（含收进折叠区的已完结线程）一致。
