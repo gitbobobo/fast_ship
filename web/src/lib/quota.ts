@@ -26,6 +26,18 @@ export function formatQuotaAmount(value: number, unit: QuotaWindow["unit"]): str
   return text;
 }
 
+/**
+ * 窗口用量明细（悬浮详情面板用）：「9.7 / 10」；只有 limit 时显示
+ * 「限额 10」；used 单独存在无法说明占比，与行内版一致不展示，返回 null。
+ */
+export function quotaWindowUsageText(w: QuotaWindow): string | null {
+  if (w.used != null && w.limit != null) {
+    return `${formatQuotaAmount(w.used, w.unit)} / ${formatQuotaAmount(w.limit, w.unit)}`;
+  }
+  if (w.limit != null) return `限额 ${formatQuotaAmount(w.limit, w.unit)}`;
+  return null;
+}
+
 function formatCountdown(resetAt: string, now: number, verb: string): string {
   const diffMs = new Date(resetAt).getTime() - now;
   if (Number.isNaN(diffMs) || diffMs <= 0) return `即将${verb}`;

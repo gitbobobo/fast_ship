@@ -16,7 +16,7 @@ function makeWindow(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
 }
 
 describe("QuotaWindowProgress", () => {
-  it("used/limit 明细行的 tooltip trigger 可聚焦且有可访问名称", () => {
+  it("是纯展示行：不渲染 tooltip，行本身也不可聚焦（明细由卡片悬浮面板承担）", () => {
     const { container } = render(
       <QuotaWindowProgress
         window={makeWindow({
@@ -30,24 +30,12 @@ describe("QuotaWindowProgress", () => {
       />,
     );
 
-    // 明细从正文移进 tooltip 后，trigger 必须键盘可达：
-    // 可聚焦 + 窗口名与明细组成可访问名称
-    const trigger = container.querySelector('[data-slot="tooltip-trigger"]');
-    expect(trigger).not.toBeNull();
-    expect(trigger).toHaveAttribute("tabindex", "0");
-    expect(trigger).toHaveAttribute("aria-label", "5 小时：9.7 / 10");
-
-    (trigger as HTMLElement).focus();
-    expect(document.activeElement).toBe(trigger);
-  });
-
-  it("没有 used/limit 明细的行不渲染 tooltip，也不需要可聚焦", () => {
-    const { container } = render(
-      <QuotaWindowProgress window={makeWindow({ used_percent: 38 })} />,
-    );
     expect(
       container.querySelector('[data-slot="tooltip-trigger"]'),
     ).toBeNull();
+    expect(container.querySelector("[tabindex]")).toBeNull();
+    // used/limit 明细不进正文行
+    expect(container.textContent).not.toContain("9.7 / 10");
   });
 
   it("used_percent 为 null 时省略 aria-valuenow，不谎报 0%", () => {
@@ -63,6 +51,25 @@ describe("QuotaWindowProgress", () => {
       "aria-valuenow",
       "42",
     );
+  });
+
+  it("受限窗口整行加粗，普通窗口不加粗", () => {
+    const { container, rerender } = render(
+      <QuotaWindowProgress
+        window={makeWindow({ used_percent: 82 })}
+        limited
+      />,
+    );
+    expect(
+      container.querySelector('[data-testid="quota-window"] > div'),
+    ).toHaveClass("font-medium");
+
+    rerender(
+      <QuotaWindowProgress window={makeWindow({ used_percent: 82 })} />,
+    );
+    expect(
+      container.querySelector('[data-testid="quota-window"] > div'),
+    ).not.toHaveClass("font-medium");
   });
 
   it("标签列自适应、进度条固定宽度：长标签不再被 56px 截掉", () => {

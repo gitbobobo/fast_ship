@@ -13,6 +13,7 @@ import {
   quotaAccountGroup,
   quotaPools,
   quotaUsageTone,
+  quotaWindowUsageText,
   sortExhaustedAccounts,
   sortUsableAccounts,
 } from "./quota";
@@ -462,5 +463,28 @@ describe("formatRecoveryCountdown", () => {
       "即将恢复",
     );
     expect(formatRecoveryCountdown("not-a-date", now)).toBe("即将恢复");
+  });
+});
+
+describe("quotaWindowUsageText", () => {
+  it("used/limit 齐全时输出「9.7 / 10」，按 unit 带单位", () => {
+    expect(
+      quotaWindowUsageText(
+        makeWindow({ used: 9.7, limit: 10, unit: "count" }),
+      ),
+    ).toBe("9.7 / 10");
+    expect(
+      quotaWindowUsageText(
+        makeWindow({ used: 38, limit: 100, unit: "usd" }),
+      ),
+    ).toBe("$38 / $100");
+  });
+
+  it("只有 limit 时输出「限额 N」，两者都缺或只有 used 时为 null", () => {
+    expect(
+      quotaWindowUsageText(makeWindow({ limit: 400, unit: "count" })),
+    ).toBe("限额 400");
+    expect(quotaWindowUsageText(makeWindow({ used: 9.7 }))).toBeNull();
+    expect(quotaWindowUsageText(makeWindow())).toBeNull();
   });
 });
