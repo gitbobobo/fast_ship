@@ -10,6 +10,7 @@ import {
   type TestAIProviderInput,
   type UpdateAIProviderInput,
 } from "@/lib/api/ai-providers";
+import { BOTS_ROOT } from "@/lib/hooks/use-bots";
 import { useAuthStore } from "@/lib/store/auth-store";
 
 /**
@@ -76,12 +77,22 @@ export function useCreateAIProvider() {
   });
 }
 
+/**
+ * 更新后 bot 响应里的 provider_name（详情面板展示）随 provider 变化：
+ * bots 聚合（列表/详情/快照）一并失效。与 use-bots 的互引见
+ * useInvalidateBots 注释。
+ */
 export function useUpdateAIProvider(providerId: string) {
   const invalidate = useInvalidateAIProviders();
+  const queryClient = useQueryClient();
+  const userId = useUserId();
   return useMutation({
     mutationFn: (input: UpdateAIProviderInput) =>
       aiProviderApi.update(providerId, input),
-    onSuccess: invalidate,
+    onSuccess: () => {
+      invalidate();
+      void queryClient.invalidateQueries({ queryKey: [BOTS_ROOT, userId] });
+    },
   });
 }
 

@@ -16,10 +16,11 @@ export interface Bot {
   persona_prompt: string;
   /** 引用的 ai_providers.id；地址与密钥以提供商为准。 */
   provider_id: string;
-  /** 提供商名与目录 id 随响应带出，省一次 join 查询。 */
+  /** 提供商名随响应带出，省一次 join 查询（详情面板展示用）。 */
   provider_name: string;
+  /** 服务端派生字段，当前无 UI 消费，保留供调试/后续使用。 */
   catalog_id: string;
-  /** provider 派生值（保留字段，只读展示用）。 */
+  /** 服务端派生字段，当前无 UI 消费，保留供调试/后续使用。 */
   base_url: string;
   model: string;
   /** provider 密钥的末四位；空串表示尚未配置。 */

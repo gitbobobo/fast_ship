@@ -125,6 +125,22 @@ describe("AIProvidersPage", () => {
     expect(screen.getByText("还没有配置 AI 提供商")).toBeInTheDocument();
   });
 
+  it("列表查询失败：错误条 + 重试，不渲染成空态", async () => {
+    const refetch = vi.fn();
+    vi.mocked(useAIProviders).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch,
+    } as unknown as ReturnType<typeof useAIProviders>);
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(screen.queryByText("还没有配置 AI 提供商")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+
   it("新建流程：搜索选目录提供商 → 填 key → 测试连接 → 保存", async () => {
     testMutateAsync.mockResolvedValue({
       ok: true,
@@ -168,6 +184,79 @@ describe("AIProvidersPage", () => {
         api_key: "sk-live-1",
       }),
     );
+  });
+
+  it("目录选项键盘可达：Tab 进入列表、Enter 选中", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "添加提供商" }));
+    const dialog = await screen.findByRole("dialog");
+
+    // 搜索框之后第一个可聚焦元素就是「自定义」选项行。
+    within(dialog).getByLabelText("提供商").focus();
+    await user.tab();
+    const custom = within(dialog).getByRole("option", { name: /^自定义/ });
+    expect(custom).toHaveFocus();
+
+    await user.tab();
+    const deepseek = within(dialog).getByRole("option", { name: /^DeepSeek/ });
+    expect(deepseek).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    // Enter 激活选中目录提供商：出现 API Key 字段，不出现 custom 的地址输入。
+    expect(within(dialog).getByLabelText("API Key")).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("API 地址")).toBeNull();
+  });
+
+  it("目录加载失败：不显示「没有匹配的提供商」，给错误条与重试", async () => {
+    const refetch = vi.fn();
+    vi.mocked(useAIProviderCatalog).mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch,
+    } as unknown as ReturnType<typeof useAIProviderCatalog>);
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "添加提供商" }));
+    const dialog = await screen.findByRole("dialog");
+
+    expect(within(dialog).queryByText("没有匹配的提供商")).toBeNull();
+    const panel = within(dialog).getByTestId("provider-catalog-error");
+    expect(panel).toHaveTextContent("目录加载失败");
+    await user.click(within(panel).getByRole("button", { name: "重试" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("测试连接结果随被测目标失效：改 API Key 后检查结果隐藏", async () => {
+    testMutateAsync.mockResolvedValue({
+      ok: true,
+      checks: [{ name: "models", passed: true }],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "添加提供商" }));
+    const dialog = await screen.findByRole("dialog");
+    const list = within(dialog).getByRole("listbox", { name: "提供商目录" });
+    await user.click(within(list).getByRole("option", { name: /DeepSeek/ }));
+
+    const keyInput = within(dialog).getByLabelText("API Key");
+    await user.type(keyInput, "sk-live-1");
+    await user.click(
+      within(dialog).getByRole("button", { name: "测试连接" }),
+    );
+    expect(
+      await within(dialog).findByTestId("provider-connection-checks"),
+    ).toBeInTheDocument();
+
+    // 目标字段再变，旧结果即隐藏。
+    await user.type(keyInput, "-rotated");
+    expect(
+      within(dialog).queryByTestId("provider-connection-checks"),
+    ).toBeNull();
   });
 
   it("选「自定义」才显示地址与模型输入，保存带 base_url", async () => {
@@ -241,8 +330,46 @@ describe("AIProvidersPage", () => {
     );
   });
 
-  it("删除经确认框调用删除端点", async () => {
-    deleteMutateAsync.mockResolvedValue(undefined);
+  it("编辑自定义提供商：改模型后旧检查结果隐藏", async () => {
+    vi.mocked(useAIProviders).mockReturnValue({
+      data: [
+        {
+          ...providerFixture,
+          id: "ap-9",
+          catalog_id: "custom",
+          name: "自建网关",
+          base_url: "https://gw.internal/v1",
+          bot_count: 0,
+        },
+      ],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAIProviders>);
+    testMutateAsync.mockResolvedValue({
+      ok: true,
+      checks: [{ name: "chat", passed: true }],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "编辑 自建网关" }));
+    const dialog = await screen.findByRole("dialog");
+    const modelInput = within(dialog).getByLabelText("模型（用于测试连接）");
+    await user.type(modelInput, "m1");
+    await user.type(within(dialog).getByLabelText("API Key"), "sk-1");
+    await user.click(
+      within(dialog).getByRole("button", { name: "测试连接" }),
+    );
+    expect(
+      await within(dialog).findByTestId("provider-connection-checks"),
+    ).toBeInTheDocument();
+
+    await user.type(modelInput, "2");
+    expect(
+      within(dialog).queryByTestId("provider-connection-checks"),
+    ).toBeNull();
+  });
+
+  it("被机器人引用的提供商：确认框只给「知道了」，不给破坏性按钮", async () => {
     const user = userEvent.setup();
     renderPage();
 
@@ -251,6 +378,30 @@ describe("AIProvidersPage", () => {
     );
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent("仍被 2 个机器人引用");
+    expect(
+      within(dialog).queryByRole("button", { name: "确认删除" }),
+    ).toBeNull();
+
+    await user.click(
+      within(dialog).getByRole("button", { name: "知道了" }),
+    );
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("未被引用的提供商：确认框给确认删除，调用删除端点", async () => {
+    vi.mocked(useAIProviders).mockReturnValue({
+      data: [{ ...providerFixture, bot_count: 0 }],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useAIProviders>);
+    deleteMutateAsync.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(
+      screen.getByRole("button", { name: "删除 DeepSeek 主号" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog).toHaveTextContent("删除后无法恢复");
     await user.click(
       within(dialog).getByRole("button", { name: "确认删除" }),
     );

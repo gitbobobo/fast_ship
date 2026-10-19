@@ -103,6 +103,11 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** 服务端错误展示 ApiResponse.message（如 42900 的冷却说明），其余回退通用文案。 */
+export function errorText(err: unknown, fallback: string): string {
+  return err instanceof ApiRequestError && err.message ? err.message : fallback;
+}
+
 export async function decodeApiError<T>(promise: Promise<T>): Promise<T> {
   try {
     return await promise;

@@ -241,7 +241,7 @@ describe("BotsPage", () => {
     expect(other.textContent).not.toContain("你：");
   });
 
-  it("creates a bot with name, persona and a picked provider model", async () => {
+  it("creates a bot with name and a picked provider model", async () => {
     createMutateAsync.mockResolvedValue(fakeBot);
     const user = userEvent.setup();
     renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
@@ -251,9 +251,8 @@ describe("BotsPage", () => {
     const dialog = await screen.findByRole("dialog");
 
     await user.type(within(dialog).getByLabelText("名称"), "发布助手");
-    // 新建时人设预填默认模板：先清空再写，提交值就是用户自己的文字。
-    await user.clear(within(dialog).getByLabelText("人设提示词"));
-    await user.type(within(dialog).getByLabelText("人设提示词"), "盯发布");
+    // 新建不预填人设：留空即提交空 persona_prompt（默认人设由服务端注入）。
+    expect(within(dialog).getByLabelText("人设提示词")).toHaveValue("");
     // 模型走 ModelPicker：面板 portal 到 body，行 role=option。
     await user.click(within(dialog).getByRole("button", { name: "模型" }));
     const listbox = await screen.findByRole("listbox");
@@ -265,7 +264,7 @@ describe("BotsPage", () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     expect(createMutateAsync.mock.calls[0][0]).toEqual({
       name: "发布助手",
-      persona_prompt: "盯发布",
+      persona_prompt: "",
       provider_id: "ap-1",
       model: "gpt-pro",
     });

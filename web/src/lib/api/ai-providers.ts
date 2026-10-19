@@ -4,6 +4,9 @@ import { api, decodeApiError } from "./client";
 // 密钥任何响应都不回传，仅返回末四位；catalog 来自 models.dev 内置子集，
 // 由服务端随二进制发布，前端只读不写。
 
+/** 自定义提供商的 catalog_id 哨兵值，与契约一致（自定义不出现在内置目录里）。 */
+export const AI_PROVIDER_CUSTOM_ID = "custom";
+
 export interface AIProvider {
   id: string;
   /** models.dev 提供商 id；自定义固定为 "custom"。 */
