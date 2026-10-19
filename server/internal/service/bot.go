@@ -118,8 +118,22 @@ type BotResponse struct {
 	MaxOutputTokens       int64  `json:"max_output_tokens"`
 	ContextSource         string `json:"context_source"` // manual|detected|known|fallback
 	ContextDetail         string `json:"context_detail,omitempty"`
-	CreatedAt             string `json:"created_at"`
-	UpdatedAt             string `json:"updated_at"`
+	// LastMessage 是主线最近一条正文 trim 后非空的 user/assistant 消息预览
+	// （INT-125）。仅 GET /api/bots 列表端点填充；详情与聊天快照等其它端点保持
+	// nil，无 omitempty 让 null 显式出现，前端按 null 处理。
+	LastMessage *BotLastMessage `json:"last_message"`
+	CreatedAt   string          `json:"created_at"`
+	UpdatedAt   string          `json:"updated_at"`
+}
+
+// BotLastMessage 是机器人列表端点的最近消息预览：主线（不含定时任务会话）
+// 最近一条正文 trim 后非空的 user/assistant 消息，按 seq 最大取。契约只有
+// kind/text 两个字段（左栏只读 text，kind 用于区分「你：」前缀），不带回消息
+// 时间。Text 返回完整正文，截断展示由前端负责。
+type BotLastMessage struct {
+	// Kind user / assistant。
+	Kind string `json:"kind"`
+	Text string `json:"text"`
 }
 
 // botResponseOf 是 bot 的 API 投影；需要服务解析窗口能力，因此是方法。
@@ -196,9 +210,23 @@ func (s *BotService) List(userID string) ([]BotResponse, error) {
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
+	// 最近消息预览一次批量取（INT-125），只在本列表端点填充；未命中的机器人
+	// 保持 nil，序列化为显式 null。
+	ids := make([]string, 0, len(bots))
+	for i := range bots {
+		ids = append(ids, bots[i].ID)
+	}
+	lasts, err := s.bots.LastMessagesByBotIDs(ids)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
 	out := make([]BotResponse, 0, len(bots))
 	for i := range bots {
-		out = append(out, s.botResponseOf(&bots[i]))
+		resp := s.botResponseOf(&bots[i])
+		if row, ok := lasts[bots[i].ID]; ok {
+			resp.LastMessage = &BotLastMessage{Kind: row.Kind, Text: row.Text}
+		}
+		out = append(out, resp)
 	}
 	return out, nil
 }

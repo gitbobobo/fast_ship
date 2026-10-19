@@ -12177,12 +12177,32 @@ components:
           format: int64
           description: 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq，
             与详情快照衔接，不从 0 重放历史
+        last_message:
+          nullable: true
+          description: >-
+            主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）；
+            正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。
+            没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值；
+            详情与聊天快照等其它端点恒为 null
+          $ref: '#/components/schemas/BotLastMessage'
         created_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+
+    BotLastMessage:
+      type: object
+      required: [kind, text]
+      description: 机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用
+      properties:
+        kind:
+          type: string
+          description: 消息角色 user / assistant
+        text:
+          type: string
+          description: 完整正文；服务端不截断，截断展示由前端负责
 
     BotChatSnapshot:
       type: object

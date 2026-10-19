@@ -1553,6 +1553,9 @@ type Bot struct {
 	CreatedAt     string `json:"created_at"`
 	Id            string `json:"id"`
 
+	// LastMessage 机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用
+	LastMessage *BotLastMessage `json:"last_message,omitempty"`
+
 	// MaxOutputTokens 模型输出上限；仅 detected 来源可给出，未知为 0
 	MaxOutputTokens int64  `json:"max_output_tokens"`
 	Model           string `json:"model"`
@@ -1660,6 +1663,15 @@ type BotEvent struct {
 	// Payload 统一形状 {bot_id, run_id?, message_id?, call_id?, kind, phase?, payload}
 	Payload map[string]interface{} `json:"payload"`
 	Seq     int64                  `json:"seq"`
+}
+
+// BotLastMessage 机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用
+type BotLastMessage struct {
+	// Kind 消息角色 user / assistant
+	Kind string `json:"kind"`
+
+	// Text 完整正文；服务端不截断，截断展示由前端负责
+	Text string `json:"text"`
 }
 
 // BotMaintenanceProgress 活动主线 run 的最近一条维护进度；与 SSE 的 kind=maintenance_progress delta 事件同源，供刷新后运行栏水合

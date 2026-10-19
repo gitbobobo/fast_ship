@@ -100,6 +100,70 @@ func (r *BotRepository) ListByUser(userID string) ([]model.Bot, error) {
 	return bots, nil
 }
 
+// BotLastMessageRow 是机器人列表「最近消息」预览的仓储投影：主线最近一条
+// 正文 trim 后非空的 user/assistant 消息，键为 bot_id。
+type BotLastMessageRow struct {
+	BotID string
+	Kind  string
+	Text  string
+}
+
+// botMessageTextExpr 抽取 bot_messages 的 content_json 列（JSON 列，json tag
+// 为 content）里的 text 正文。坏 JSON 时经 jsonColumnOr 回落 '{}'，json_extract
+// 得 NULL——坏数据按「没有正文」处理，不得让整条列表查询失败，与 issue.go 的
+// JSON 防护同一约定。
+func botMessageTextExpr(column string) string {
+	return "json_extract(" + jsonColumnOr(column, "{}") + ", '$.text')"
+}
+
+// botTrimWhitespaceExpr 是 SQL trim 的字符集参数：ASCII 空白全集（空格、制表、
+// 换行、垂直制表、换页、回车）。SQLite 的单参 trim 只去空格，挡不住模型输出里
+// 纯 "\n\n" 的正文，必须显式给字符集才能与 Go 侧 strings.TrimSpace 的判定对齐；
+// 更宽的 Unicode 空白现实里不会整条正文只有它，不做逐字符枚举。
+const botTrimWhitespaceExpr = "char(9)||char(10)||char(11)||char(12)||char(13)||' '"
+
+// botLastMessagesSQL 构造最近消息预览的选取语句：bots 表列出全部目标机器人，
+// 每个机器人经相关子查询沿 (bot_id, session_kind, seq) 复合索引倒序找第一条
+// 正文 trim 后非空的主线 user/assistant 消息即停——早退，不必物化整个分区、
+// 不必对每条消息算一遍 json_extract；子查询无命中时 JOIN 落空，该机器人自然
+// 不出现在结果里。全部机器人合在一条语句里一次往返取回，不是逐机器人发查询。
+func botLastMessagesSQL() string {
+	textExpr := botMessageTextExpr("m.content_json")
+	subTextExpr := botMessageTextExpr("m2.content_json")
+	return "SELECT b.id AS bot_id, m.kind AS kind, " + textExpr + " AS text" +
+		" FROM bots b" +
+		" JOIN bot_messages m ON m.id = (" +
+		"SELECT m2.id FROM bot_messages m2" +
+		" WHERE m2.bot_id = b.id AND m2.session_kind = ? AND m2.kind IN (?, ?)" +
+		" AND trim(COALESCE(" + subTextExpr + ", ''), " + botTrimWhitespaceExpr + ") <> ''" +
+		" ORDER BY m2.seq DESC LIMIT 1)" +
+		" WHERE b.id IN (?)"
+}
+
+// LastMessagesByBotIDs 一次查询批量返回每个机器人的最近消息预览，供机器人
+// 列表端点填充 last_message。选取范围是主线（session_kind='main'）user/
+// assistant 消息里 seq 最大的一条正文 trim 后非空者：正文纯空白（只带
+// tool_calls、text 为空或全是换行/空格的 assistant）、content 坏 JSON 的消息
+// 跳过并继续往前找；定时任务会话绝不参与选取。没有符合条件消息的机器人不在
+// 返回 map 里，由上层按 null 处理。
+func (r *BotRepository) LastMessagesByBotIDs(botIDs []string) (map[string]BotLastMessageRow, error) {
+	out := make(map[string]BotLastMessageRow, len(botIDs))
+	if len(botIDs) == 0 {
+		return out, nil
+	}
+	var rows []BotLastMessageRow
+	err := r.db.Raw(botLastMessagesSQL(),
+		model.BotSessionKindMain, model.BotMessageKindUser, model.BotMessageKindAssistant, botIDs,
+	).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		out[row.BotID] = row
+	}
+	return out, nil
+}
+
 func (r *BotRepository) Delete(id string) error {
 	res := r.db.Where("id = ?", id).Delete(&model.Bot{})
 	if res.Error != nil {
