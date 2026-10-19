@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,6 @@ import {
   PreviewCardContent,
   PreviewCardTrigger,
 } from "@/components/ui/preview-card";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { QuotaProviderIcon } from "@/components/quota/provider-icons";
 import { QuotaWindowProgress } from "./window-progress";
 import { QuotaAccountMenu } from "./account-menu";
@@ -142,13 +141,13 @@ export function QuotaAccountCard({
 }) {
   const refresh = useRefreshQuotaAccount();
   const pools = useMemo(() => quotaPools(account.windows), [account.windows]);
-  // 用户切过的池（按池名，匿名池为 ""）；null = 自动（第一个未用尽 = 正在消耗的池）。
-  // 不用下标：窗口增减会改变池顺序，下标仍合法时会静默切到另一个池。
-  const [pickedName, setPickedName] = useState<string | null>(null);
-  const active =
-    (pickedName != null
-      ? pools.find((pool) => (pool.name ?? "") === pickedName)
-      : undefined) ?? defaultQuotaPool(pools);
+  // 卡片只展示「正在消耗」的池（第一个未用尽），不提供切换：其它池的窗口在悬浮面板里。
+  const active = defaultQuotaPool(pools);
+  // 只标记「当前看的是哪个池」，不给切换入口：多池账号才需要这行说明。
+  const poolLabel =
+    pools.length > 1 && active?.name
+      ? `${active.name}${/[A-Za-z0-9]$/.test(active.name) ? " " : ""}池`
+      : null;
   // 正文始终只有一根进度条：受限窗口；全窗口算不出百分比时退回首个窗口占位。
   const rowWindow = active?.limiting ?? active?.windows[0] ?? null;
 
@@ -196,44 +195,14 @@ export function QuotaAccountCard({
                 {account.label}
                 {account.credential_hint && ` · ${account.credential_hint}`}
               </p>
-              {/* 数据时间行固定 h-7：池选择器放右侧而不是另占一行，双池卡片
-                  才不会比单池卡片高，同行卡片底边才能齐平 */}
-              <div className="flex h-7 items-center justify-between gap-2">
-                <p className="min-w-0 truncate text-xs text-muted-foreground">
-                  {account.fetched_at
-                    ? `数据时间 ${formatRelativeTime(account.fetched_at)}`
-                    : "尚未抓取"}
-                </p>
-                {pools.length > 1 && (
-                  <Tabs
-                    value={active?.name ?? ""}
-                    onValueChange={(value) => setPickedName(value)}
-                    className="shrink-0"
-                  >
-                    <TabsList className="h-7">
-                      {pools.map((pool) => {
-                        const name = pool.name ?? "默认";
-                        return (
-                          <TabsTrigger
-                            key={name}
-                            value={pool.name ?? ""}
-                            title={pool.exhausted ? `${name}（已用尽）` : name}
-                            aria-label={
-                              pool.exhausted ? `${name}（已用尽）` : name
-                            }
-                            className={cn(
-                              "px-1.5 text-xs",
-                              pool.exhausted && "text-muted-foreground",
-                            )}
-                          >
-                            {name}
-                          </TabsTrigger>
-                        );
-                      })}
-                    </TabsList>
-                  </Tabs>
+              <p className="truncate text-xs text-muted-foreground">
+                {account.fetched_at
+                  ? `数据时间 ${formatRelativeTime(account.fetched_at)}`
+                  : "尚未抓取"}
+                {poolLabel && (
+                  <span data-testid="quota-pool-label"> · {poolLabel}</span>
                 )}
-              </div>
+              </p>
             </div>
           </div>
           <div className="flex shrink-0 gap-0.5">

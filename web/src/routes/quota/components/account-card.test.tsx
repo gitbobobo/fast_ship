@@ -240,8 +240,7 @@ describe("QuotaAccountCard", () => {
     );
   });
 
-  it("多池账号在「数据时间」行右侧显示池选择器，默认选中消耗中的池", async () => {
-    const user = userEvent.setup();
+  it("多池账号在「数据时间」行标记当前看的池，不给切换入口", () => {
     const account = makeAccount({
       windows: [
         makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
@@ -257,38 +256,90 @@ describe("QuotaAccountCard", () => {
       <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
     );
 
-    const standardTab = screen.getByRole("tab", { name: "标准（已用尽）" });
-    const coreTab = screen.getByRole("tab", { name: "Core" });
-    // 选择器只显示池名，用尽状态进 aria-label/title
-    expect(standardTab).toHaveTextContent("标准");
-    expect(standardTab).not.toHaveTextContent("用尽");
-    expect(standardTab).toHaveAttribute("title", "标准（已用尽）");
-    expect(coreTab).toHaveTextContent("Core");
-    // 选择器与「数据时间」同一行（同一父容器），整行固定 h-7——双池卡片因此
-    // 与单池卡片等高；选择器在 header，不属于正文悬浮触发区
-    const timeRow = screen.getByText(/数据时间/).parentElement;
-    expect(timeRow).toHaveClass("h-7");
-    expect(timeRow).toContainElement(standardTab);
-    expect(timeRow).toContainElement(coreTab);
-    expect(bodyTrigger()).not.toContainElement(standardTab);
-    // 正文仍是单行区块，多一个选择器没有让正文多出行
-    expect(
-      container.querySelector('[data-slot="card-content"]')?.children,
-    ).toHaveLength(1);
+    // 标准池已用尽 → 卡片展示正在消耗的 Core 池，标记是纯文字、跟数据时间同一行
+    const label = screen.getByTestId("quota-pool-label");
+    expect(label).toHaveTextContent("Core 池");
+    const timeRow = screen.getByText(/数据时间/);
+    expect(timeRow).toContainElement(label);
+    // 不再有池选择器（tab），标记也不在正文触发区里
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    expect(bodyTrigger()).not.toContainElement(label);
 
-    // 标准池用尽 → 默认打开正在消耗的 Core 池，正文行是它的受限窗口
-    expect(coreTab).toHaveAttribute("aria-selected", "true");
+    // 正文仍是单行：Core 池的受限窗口
     expect(screen.getByText("5 小时")).toBeInTheDocument();
     expect(screen.getByText("87%")).toBeInTheDocument();
     expect(screen.getAllByTestId("quota-window")).toHaveLength(1);
+    expect(container.querySelector('[data-slot="card-content"]')?.children).toHaveLength(
+      1,
+    );
+  });
 
-    await user.click(standardTab);
-    expect(standardTab).toHaveAttribute("aria-selected", "true");
-    // 切到已用尽的标准池后，正文那一行换成该池的受限窗口
+  it("单池账号不显示池标记", () => {
+    render(
+      <QuotaAccountCard
+        account={makeAccount({ windows: [makeWindow({ used_percent: 38 })] })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("quota-pool-label")).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
+  });
+
+  it("池状态变化后标记与正文行跟着「正在消耗的池」走", () => {
+    const { rerender } = render(
+      <QuotaAccountCard
+        account={makeAccount({
+          windows: [
+            makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
+            makeWindow({
+              kind: "five_hour",
+              label: "5 小时",
+              pool: "Core",
+              used_percent: 87,
+            }),
+          ],
+        })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("quota-pool-label")).toHaveTextContent("Core 池");
+    expect(screen.getByText("5 小时")).toBeInTheDocument();
+
+    // 标准池重置后重新可用（每月 40%）→ 默认池变回标准，标记与正文一起换
+    rerender(
+      <QuotaAccountCard
+        account={makeAccount({
+          windows: [
+            makeWindow({ label: "每月", pool: "标准", used_percent: 40 }),
+            makeWindow({
+              kind: "five_hour",
+              label: "5 小时",
+              pool: "Core",
+              used_percent: 87,
+            }),
+          ],
+        })}
+        onTest={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("quota-pool-label")).toHaveTextContent("标准池");
     expect(screen.getByText("每月")).toBeInTheDocument();
-    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("40%")).toBeInTheDocument();
     expect(screen.queryByText("5 小时")).toBeNull();
-    expect(screen.getAllByTestId("quota-window")).toHaveLength(1);
+  });
+
+  it("hides the pool label when the account has a single pool", () => {
+    const account = makeAccount({
+      windows: [makeWindow({ used_percent: 38 })],
+    });
+    render(
+      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
+    );
+    expect(screen.queryByTestId("quota-pool-label")).toBeNull();
   });
 
   it("悬浮面板按池分组：池名标题带用尽/消耗中状态，含全部池的窗口", async () => {
@@ -318,105 +369,6 @@ describe("QuotaAccountCard", () => {
     // 两池窗口都在：正文只显示 Core 的 5 小时，标准池的每月只出现在面板
     expect(panel.textContent).toContain("每月");
     expect(panel.textContent).toContain("5 小时");
-  });
-
-  it("池集合变化后按池名保持选中，不随下标漂移", async () => {
-    const user = userEvent.setup();
-    const account = makeAccount({
-      windows: [
-        makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
-        makeWindow({
-          kind: "five_hour",
-          label: "5 小时",
-          pool: "Core",
-          used_percent: 87,
-        }),
-      ],
-    });
-    const { rerender } = render(
-      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
-    );
-
-    await user.click(screen.getByRole("tab", { name: "标准（已用尽）" }));
-    expect(screen.getByText("每月")).toBeInTheDocument();
-
-    // 刷新后池顺序变了：Core 排到标准前面，标准的下标从 0 变 1
-    rerender(
-      <QuotaAccountCard
-        account={makeAccount({
-          windows: [
-            makeWindow({
-              kind: "five_hour",
-              label: "5 小时",
-              pool: "Core",
-              used_percent: 87,
-            }),
-            makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
-          ],
-        })}
-        onTest={vi.fn()}
-        onEdit={vi.fn()}
-      />,
-    );
-
-    expect(
-      screen.getByRole("tab", { name: "标准（已用尽）" }),
-    ).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("每月")).toBeInTheDocument();
-    expect(screen.queryByText("5 小时")).toBeNull();
-  });
-
-  it("选中的池消失时回退到默认池", async () => {
-    const user = userEvent.setup();
-    const account = makeAccount({
-      windows: [
-        makeWindow({ label: "每月", pool: "标准", used_percent: 100 }),
-        makeWindow({
-          kind: "five_hour",
-          label: "5 小时",
-          pool: "Core",
-          used_percent: 87,
-        }),
-      ],
-    });
-    const { rerender } = render(
-      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
-    );
-
-    await user.click(screen.getByRole("tab", { name: "标准（已用尽）" }));
-    expect(screen.getByText("每月")).toBeInTheDocument();
-
-    // 标准池的窗口不再下发，只剩 Core 单池
-    rerender(
-      <QuotaAccountCard
-        account={makeAccount({
-          windows: [
-            makeWindow({
-              kind: "five_hour",
-              label: "5 小时",
-              pool: "Core",
-              used_percent: 87,
-            }),
-          ],
-        })}
-        onTest={vi.fn()}
-        onEdit={vi.fn()}
-      />,
-    );
-
-    expect(screen.queryByRole("tab")).toBeNull();
-    expect(screen.getByText("5 小时")).toBeInTheDocument();
-    expect(screen.getByText("87%")).toBeInTheDocument();
-  });
-
-  it("hides pool tabs when the account has a single pool", () => {
-    const account = makeAccount({
-      windows: [makeWindow({ used_percent: 38 })],
-    });
-    render(
-      <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
-    );
-    expect(screen.queryByRole("tab")).toBeNull();
   });
 
   it("pending 或没有窗口数据时显示等待抓取提示，不渲染窗口结构", () => {
