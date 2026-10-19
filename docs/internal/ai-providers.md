@@ -41,15 +41,19 @@ AutoMigrate 之后执行，幂等：
 
 1. `PRAGMA table_info(bots)` 检测 `base_url` 列；没有即整体跳过（第二次启动
    无副作用）。
-2. 同一事务内按（用户 + 规范化地址 + 密钥密文字节）去重聚合存量机器人，每个
+2. 同一事务内按（用户 + 规范化地址 + 明文密钥）去重聚合存量机器人，每个
    组合建一条 provider：`catalog_id` 用目录按 `api` 地址反查，匹配不到为
    `custom`；名称用目录名或「自定义」/「自定义 2」…（按排序后的分组键稳定
-   编号）。
+   编号）。AES-GCM 每次加密取随机 nonce，同明文在两行上密文不同——按密文
+   字节分组会把同一 key 拆成多条 provider，所以分组前先以迁移配置的加密
+   key 逐行解密，分组键只放 `sha256(明文)` 的哈希（明文不持久化、不进
+   日志）；解密失败（例如历史轮换过密钥）回退为按密文字节分组，单行
+   不可解不中断迁移。每组只保留组内第一条密文写入 provider。
 3. 回填 `bots.provider_id`，再 `ALTER TABLE bots DROP COLUMN` 三列。
 4. 任何一步失败即启动退出，绝不带半迁移状态运行（与 `EnsureBotSchema` 的
    约定一致）。
 
-迁移只搬运既有密文，不解密、不重加密，因此密钥不会丢；历史
+迁移只搬运既有密文、不重加密，因此密钥不会丢；历史
 `bot_runs.api_key_encrypted_snapshot` 与 `bot_model_windows` 缓存都不受影响。
 
 ## 内置目录（models.dev）

@@ -585,9 +585,10 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	}
 
 	// AI 提供商聚合（INT-133）：存量 bots 的地址+密钥去重建 provider、回填
-	// provider_id 并删除旧列。必须在 AutoMigrate 之后（依赖 ai_providers 与
+	// provider_id 并删除旧列。去重按解密后的明文密钥聚合（密文因随机 nonce
+	// 各不相同），需要加密配置。必须在 AutoMigrate 之后（依赖 ai_providers 与
 	// provider_id 列）、EnsureBotSchema 之前（索引建在新形状上）。
-	if err := migrateBotAIProviders(db, logger); err != nil {
+	if err := migrateBotAIProviders(db, logger, encryptionKey); err != nil {
 		return fmt.Errorf("AI 提供商迁移失败: %w", err)
 	}
 

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -213,7 +215,7 @@ func TestMigrateBotAIProvidersAggregatesAndDrops(t *testing.T) {
 	}
 
 	// 第二次启动：检测不到旧列，整体跳过且不产生新 provider、不动既有引用。
-	if err := migrateBotAIProviders(db, zap.NewNop()); err != nil {
+	if err := migrateBotAIProviders(db, zap.NewNop(), []byte(migrateTestKey)); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
 	var count int64
@@ -243,8 +245,75 @@ func TestMigrateBotAIProvidersSkipsFreshDB(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("全新库不应有 provider: %d", count)
 	}
-	if err := migrateBotAIProviders(db, zap.NewNop()); err != nil {
+	if err := migrateBotAIProviders(db, zap.NewNop(), []byte(migrateTestKey)); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
 	_ = uuid.NewString
+}
+
+// TestMigrateBotAIProvidersDedupByPlaintextKey 明文去重的回归：AES-GCM 每次
+// 随机 nonce，同一明文两次加密密文不同；两条同明文（不同密文）的旧 bot 必须
+// 聚成 1 条 provider 并共同指向它。明文不同的行各自成条；密文损坏（解密
+// 失败）的行不中断启动且仍被回填（按密文字节自成一组）。
+func TestMigrateBotAIProvidersDedupByPlaintextKey(t *testing.T) {
+	key := []byte(migrateTestKey)
+	enc := func(plain string) []byte {
+		c, err := crypto.Encrypt([]byte(plain), key)
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+		return c
+	}
+	cipherA1 := enc("sk-shared-key-0001")
+	cipherA2 := enc("sk-shared-key-0001")
+	if bytes.Equal(cipherA1, cipherA2) {
+		t.Fatalf("同一明文两次加密不得产生相同密文")
+	}
+	cipherB := enc("sk-other-key-2222")
+	// 短于 GCM nonce，解密必然失败。
+	corrupt := []byte("bad")
+
+	legacy := func(id, base string, cipher []byte, last4 string) legacyBot {
+		return legacyBot{ID: id, UserID: "u-a", Name: id, SystemPromptText: "s",
+			PromptRevision: 1, PlatformPromptVersion: 8, ToolsetVersion: 7, LastToldVersion: 7,
+			BaseURL: base, Model: "m", APIKeyEncrypted: cipher, APIKeyLast4: last4,
+			NextMessageSeq: 1, NextEventSeq: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	}
+	db := setupLegacyBotsDB(t,
+		legacy("bot-d1", "https://api.deepseek.com", cipherA1, "0001"),
+		legacy("bot-d2", "https://api.deepseek.com", cipherA2, "0001"),
+		legacy("bot-d3", "https://api.deepseek.com", cipherB, "2222"),
+		legacy("bot-d4", "https://api.deepseek.com", corrupt, "zzzz"),
+	)
+
+	runBootMigrationsFor(t, db)
+
+	// 4 条旧机器人聚成 3 条 provider：d1/d2 同明文共享，d3 明文不同，d4 密文
+	// 损坏自成一组。
+	var count int64
+	db.Model(&model.AIProvider{}).Count(&count)
+	if count != 3 {
+		t.Fatalf("同明文应聚合为一条 provider，实得 %d 条", count)
+	}
+	p1 := botProviderIDOf(t, db, "bot-d1")
+	p2 := botProviderIDOf(t, db, "bot-d2")
+	p3 := botProviderIDOf(t, db, "bot-d3")
+	p4 := botProviderIDOf(t, db, "bot-d4")
+	if p1 == "" || p1 != p2 {
+		t.Fatalf("同明文的两条机器人应共享 provider: %q vs %q", p1, p2)
+	}
+	if p3 == "" || p3 == p1 || p3 == p4 {
+		t.Fatalf("明文不同的机器人应有独立 provider: %q", p3)
+	}
+	if p4 == "" || p4 == p1 {
+		t.Fatalf("解密失败的行仍应回填自己的 provider: %q", p4)
+	}
+	// 共享 provider 的密文是组内第一条密文原样搬运（不重新加密）。
+	var shared model.AIProvider
+	if err := db.Where("id = ?", p1).First(&shared).Error; err != nil {
+		t.Fatalf("load shared provider: %v", err)
+	}
+	if !bytes.Equal(shared.APIKeyEncrypted, cipherA1) && !bytes.Equal(shared.APIKeyEncrypted, cipherA2) {
+		t.Fatalf("provider 密文应来自组内既有行")
+	}
 }

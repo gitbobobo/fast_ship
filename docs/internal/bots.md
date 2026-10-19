@@ -303,10 +303,11 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   `max_completion_tokens` 向探测到的输出上限封顶，避免上游校验上限时的
   确定性 400。
 - **运行指标**：聊天快照 `metrics` 始终产出——窗口能力 + 最近一次主线模型
-  请求的单次口径（usage、输入估算、`generation_ms`）；能力解析的模型与地址
-  成对取 run 的配置快照（切换服务地址后，旧请求的窗口按它发起时的地址解析，
-  不拿当前地址的窗口除旧请求的估算），没有主线请求时 `request` 缺省、窗口
-  能力仍然可见。`bot_model_requests.first_delta_at` 在首个非空正文流式片段
+  请求的单次口径（usage、输入估算、`generation_ms`）；能力解析的目录归属、
+  模型与地址成组取 run 的配置快照（`catalog_id` 也进快照：切 provider 后
+  旧请求的窗口按它发起时的目录身份解析；INT-133 之前落的旧快照没有该
+  字段，读取方回退 bot 当前 `catalog_id`），没有主线请求时 `request`
+  缺省、窗口能力仍然可见。`bot_model_requests.first_delta_at` 在首个非空正文流式片段
   时记录；`generation_ms` = finished − first_delta，两者都有效且为正才给出，
   否则 0（纯工具调用、失败请求视为不可用）。历史累计仍在 run 上，指标区只
   用单次口径。辅助模型（摘要/归档）的输出预算沿用「目标 − 前缀 − 附录 −
@@ -751,13 +752,18 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   不需要向用户转述，也不需要逐项验证」；`tellToolsetTx` 写入 lifecycle
   通知时也在 note 前加同样的内部信息标注。
 - **风格升级的一次性压缩**：`botStylePromptVersion` 是最新一次「说话方式」
-  变化的版本号（当前 9）。`activateBotPromptWithStyle` 在激活事务里判断该行
-  激活前是否低于这个水位并返回 `styleUpgraded`；`botLoop` 把它放进
-  `botRunFreeze.StyleUpgradePending`，本 run 的压缩边界即使未达阈值也强制
-  走一轮压缩（reason=`style_upgrade`，新增的 `model.BotCompactionStyle`），
-  把旧风格的长回复收进摘要，避免模型继续模仿历史。尝试过即消费，失败不
-  阻塞对话、也不在后续 run 重复尝试（与阈值路径同样的退让语义）。不提供
-  「开新对话」入口。
+  变化的版本号（当前 9）。待压缩状态由持久水位 `bots.style_compaction_version`
+  表达（不是内存布尔，跨激活提交与进程重启都不丢）：存量行 AutoMigrate
+  后默认 0 = 待压缩，新建机器人直接写当前版本（没有旧风格历史要收）。
+  主线 run 在压缩决策处读到水位低于 `botStylePromptVersion` 时，即使未达
+  阈值也强制走一轮压缩（reason=`style_upgrade`，`model.BotCompactionStyle`），
+  把旧风格的长回复收进摘要，避免模型继续模仿历史——压缩计划的摘要闸门对
+  `style_upgrade` 同样放开：只要安全切点存在就发摘要请求，不因「折叠后已
+  低于目标」跳过（不可达/无净缩减仍按非致命路径记录，不套阈值路径的硬
+  失败）。尝试过即把水位 CAS
+  推进到当前版本（published / no_gain / 失败都消费），失败不阻塞对话、也
+  不在后续 run 重复尝试。schedule run 完全不读不写这个水位——升级后先
+  跑定时任务不会把主线的一次性资格偷走。不提供「开新对话」入口。
 - **提示词文案体积**：默认人设 + 平台规则合计 4855 字节（v8 时代 5307），
   固定前缀 4855 + 工具集 schema 15922 ≈ 20777 字节 ≈ 5.9k token。
 

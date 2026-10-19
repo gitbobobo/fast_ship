@@ -54,6 +54,12 @@ type Bot struct {
 	// MemoryArchiveSeq 是压缩前静默存档已处理的消息 seq 水位（INT-124）：
 	// 同一 seq 区间的重复压缩不再把消息重复交给归档模型，daily 不重复追加。
 	MemoryArchiveSeq int64 `gorm:"not null;default:0" json:"-"`
+	// StyleCompactionVersion 是「说话方式升级后一次性压缩」的持久水位
+	// （INT-133）：低于 botStylePromptVersion 表示还欠一次风格压缩，主线
+	// run 在压缩决策处强制一轮 style_upgrade 压缩后 CAS 推进。存量行默认
+	// 0 = 待压缩；新建机器人写入当前版本（没有旧风格历史）。定时任务会话
+	// 不读也不写这个水位。
+	StyleCompactionVersion int64 `gorm:"not null;default:0" json:"-"`
 
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`

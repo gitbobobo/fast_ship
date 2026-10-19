@@ -1,22 +1,28 @@
 package main
 
 import (
+	"crypto/sha256"
 	"sort"
 	"strconv"
 
 	"github.com/godbobo/fast_ship/server/internal/catalog"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/crypto"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-// AI 提供商迁移（INT-133）：存量 bots 行按「用户 + 规范化地址 + 密钥密文字节」
+// AI 提供商迁移（INT-133）：存量 bots 行按「用户 + 规范化地址 + 明文密钥」
 // 去重聚合成 ai_providers，回填 provider_id，最后 DROP bots 的 base_url /
-// api_key_encrypted / api_key_last4 三列。幂等：检测不到 base_url 列即整体
-// 跳过，第二次启动无副作用。建 provider、回填与删列收进同一个事务，任何一步
-// 失败即启动退出（与 EnsureBotSchema 的约定一致），绝不带半迁移状态运行。
-func migrateBotAIProviders(db *gorm.DB, logger *zap.Logger) error {
+// api_key_encrypted / api_key_last4 三列。AES-GCM 每次随机 nonce，同一明文
+// 在不同 bot 行上密文不同——分组键必须先解密取明文再哈希，不能按密文字节，
+// 否则同 key 的存量机器人会各建一条 provider。单行解密失败（历史密钥轮换过）
+// 回退到按该行的密文字节分组，不中断启动；明文只活在局部变量里，分组键与
+// 日志都只携带哈希与数量。幂等：检测不到 base_url 列即整体跳过，第二次启动
+// 无副作用。建 provider、回填与删列收进同一个事务，任何一步失败即启动退出
+// （与 EnsureBotSchema 的约定一致），绝不带半迁移状态运行。
+func migrateBotAIProviders(db *gorm.DB, logger *zap.Logger, encryptionKey []byte) error {
 	hasOld, err := hasSQLiteColumn(db, "bots", "base_url")
 	if err != nil {
 		return err
@@ -36,8 +42,11 @@ func migrateBotAIProviders(db *gorm.DB, logger *zap.Logger) error {
 			return err
 		}
 
-		// 去重聚合：同用户内 (规范化地址, 密文) 相同的机器人共用一条 provider。
-		// 分组键含 user_id：provider 按用户隔离，不同用户不得跨界共享。
+		// 去重聚合：同用户内 (规范化地址, 明文密钥) 相同的机器人共用一条
+		// provider。分组键含 user_id：provider 按用户隔离，不同用户不得跨界
+		// 共享。解密成功的行按 sha256(明文) 分组——密文因随机 nonce 各不相同；
+		// 解密失败的行（密文损坏/历史轮换密钥）退回按密文字节分组，宁可多建
+		// 一条也不丢机器人。
 		type group struct {
 			userID  string
 			baseURL string
@@ -47,8 +56,17 @@ func migrateBotAIProviders(db *gorm.DB, logger *zap.Logger) error {
 		}
 		groups := make(map[string]*group)
 		order := []string{}
+		undecryptable := 0
 		for _, row := range rows {
-			key := row.UserID + "\x00" + catalog.NormalizeBaseURL(row.BaseURL) + "\x00" + string(row.APIKeyEncrypted)
+			keyPart := ""
+			if plain, derr := crypto.Decrypt(row.APIKeyEncrypted, encryptionKey); derr == nil {
+				sum := sha256.Sum256(plain)
+				keyPart = "p:" + string(sum[:])
+			} else {
+				keyPart = "c:" + string(row.APIKeyEncrypted)
+				undecryptable++
+			}
+			key := row.UserID + "\x00" + catalog.NormalizeBaseURL(row.BaseURL) + "\x00" + keyPart
 			g, ok := groups[key]
 			if !ok {
 				g = &group{
@@ -110,7 +128,8 @@ func migrateBotAIProviders(db *gorm.DB, logger *zap.Logger) error {
 		}
 		logger.Info("存量机器人配置已聚合为 AI 提供商",
 			zap.Int("providers", len(order)),
-			zap.Int("bots", len(rows)))
+			zap.Int("bots", len(rows)),
+			zap.Int("undecryptable_keys", undecryptable))
 		return nil
 	})
 }

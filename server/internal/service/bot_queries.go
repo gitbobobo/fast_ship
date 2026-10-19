@@ -343,9 +343,9 @@ func (s *BotService) GetChatSnapshot(userID, botID string, messageLimit int) (*B
 }
 
 // botMetricsOf 把最近一次主线模型请求与窗口能力投影成指标响应。req 为 nil 时
-// 只给窗口能力（Request 缺省）。能力解析的模型/地址成对取 run 的配置快照
-// （机器人切服务地址后，旧请求的窗口必须按它发起时的地址解析，不能拿当前
-// 地址的窗口除旧请求的估算），取不到回退 bot 当前值。
+// 只给窗口能力（Request 缺省）。能力解析的目录归属/模型/地址成组取 run 的
+// 配置快照（机器人切 provider 后，旧请求的窗口必须按它发起时的目录与地址
+// 解析，不能拿当前 provider 的窗口除旧请求的估算），取不到回退 bot 当前值。
 func (s *BotService) botMetricsOf(bot *model.Bot, run *model.BotRun, req *model.BotModelRequest) *BotMetricsResponse {
 	if bot == nil {
 		return nil
@@ -356,6 +356,7 @@ func (s *BotService) botMetricsOf(bot *model.Bot, run *model.BotRun, req *model.
 	if run != nil {
 		baseURL = runBaseURLOf(run, bot)
 		modelName = runModelOf(run, bot)
+		catalogID = runCatalogIDOf(run, bot)
 	}
 	cap := s.capabilityFor(catalogID, baseURL, modelName)
 	out := &BotMetricsResponse{

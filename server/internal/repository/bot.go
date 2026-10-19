@@ -279,3 +279,15 @@ func (r *BotRepository) SetOfferedInputSeq(botID string, seq int64) error {
 	return r.db.Model(&model.Bot{}).Where("id = ?", botID).
 		Update("offered_input_seq", seq).Error
 }
+
+// AdvanceStyleCompaction CAS 推进风格压缩水位（只升不降）：一次性语义，
+// 已推进过的并发写者落空。返回是否命中（INT-133）。
+func (r *BotRepository) AdvanceStyleCompaction(botID string, toVersion int64) (bool, error) {
+	res := r.db.Model(&model.Bot{}).
+		Where("id = ? AND style_compaction_version < ?", botID, toVersion).
+		Update("style_compaction_version", toVersion)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}

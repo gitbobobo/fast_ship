@@ -71,13 +71,17 @@ func buildBotSystemPrompt(persona string) string {
 	return b.String()
 }
 
-// botConfigSnapshot 是 run 的配置快照（不含明文 key）。
+// botConfigSnapshot 是 run 的配置快照（不含明文 key）。catalog_id 与
+// base_url 成对记录：机器人换 provider 后，旧 run 的窗口仍按派发时的
+// 目录归属解析（INT-133）；INT-133 之前的快照没有该字段，读取方回退
+// bot 当前值。
 type botConfigSnapshot struct {
 	PromptRevision        int64  `json:"prompt_revision"`
 	PlatformPromptVersion int64  `json:"platform_prompt_version"`
 	ToolsetVersion        int64  `json:"toolset_version"`
 	BaseURL               string `json:"base_url"`
 	Model                 string `json:"model"`
+	CatalogID             string `json:"catalog_id"`
 }
 
 func botSnapshotOf(b *model.Bot) botConfigSnapshot {
@@ -87,5 +91,6 @@ func botSnapshotOf(b *model.Bot) botConfigSnapshot {
 		ToolsetVersion:        b.ToolsetVersion,
 		BaseURL:               b.BaseURL,
 		Model:                 b.Model,
+		CatalogID:             b.CatalogID,
 	}
 }

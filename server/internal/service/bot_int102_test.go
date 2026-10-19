@@ -94,6 +94,29 @@ func seedBotAssistantToolBlockArgs(t *testing.T, env *botTestEnv, botID, callID,
 	return a, tr
 }
 
+// seedBotAssistantText 落一条纯文本 assistant 回复（无 tool_calls）——模拟
+// 旧风格的冗长回复，作为风格升级压缩的可摘要段。
+func seedBotAssistantText(t *testing.T, env *botTestEnv, botID, text string) *model.BotMessage {
+	t.Helper()
+	var msg *model.BotMessage
+	if err := env.db.Transaction(func(tx *gorm.DB) error {
+		seq, err := env.bots.bots.NextMessageSeqTx(tx, botID)
+		if err != nil {
+			return err
+		}
+		raw, _ := json.Marshal(botAssistantContent{Text: text})
+		msg = &model.BotMessage{
+			ID: uuid.NewString(), BotID: botID, Seq: seq,
+			Kind: model.BotMessageKindAssistant, ContentJSON: string(raw),
+			CreatedAt: time.Now().UTC(),
+		}
+		return repository.NewBotMessageRepository(tx).AppendTx(tx, msg)
+	}); err != nil {
+		t.Fatalf("seed assistant text: %v", err)
+	}
+	return msg
+}
+
 func botFixtureRun(t *testing.T, env *botTestEnv, bot *model.Bot) *model.BotRun {
 	t.Helper()
 	now := time.Now().UTC()

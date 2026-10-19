@@ -94,7 +94,9 @@ func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName st
 		PlatformPromptVersion: botPlatformPromptVersion,
 		ToolsetVersion:        botToolsetVersion,
 		LastToldVersion:       botToolsetVersion,
-		ProviderID:            provider.ID, Model: modelName,
+		// 新机器人直接站在当前说话方式版本上（无旧风格历史要压缩）。
+		StyleCompactionVersion: botStylePromptVersion,
+		ProviderID:             provider.ID, Model: modelName,
 		NextMessageSeq: 1, NextEventSeq: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -2258,5 +2260,96 @@ func TestBotWindowCatalogTier(t *testing.T) {
 		if budget != catalogModel.ContextWindow-catalogModel.MaxOutputTokens {
 			t.Fatalf("catalog 输出上限应参与预算: %d", budget)
 		}
+	}
+}
+
+// TestBotMetricsUsesRunSnapshotCatalog INT-133(5)：指标的窗口解析成组取 run
+// 配置快照，目录身份也来自快照。目录 provider 的 run 落账后机器人换成
+// custom provider，历史 run 的 context_source 仍按派发时的目录解析——
+// 若用当前 bot 的 catalog_id（custom），窗口会按错误归属解析。
+func TestBotMetricsUsesRunSnapshotCatalog(t *testing.T) {
+	env := setupBotTestEnv(t)
+	providerSvc := newProviderTestService(t, env)
+	userID := createBotTestUser(t, env.db, "snapcat")
+	catProvider, err := providerSvc.Create(userID, &CreateAIProviderRequest{
+		CatalogID: "deepseek", APIKey: "sk-cat-1234",
+	})
+	if err != nil {
+		t.Fatalf("create catalog provider: %v", err)
+	}
+	bot, err := env.bots.Create(userID, &CreateBotRequest{
+		Name: "snapcat", ProviderID: catProvider.ID, Model: "deepseek-flash",
+	})
+	if err != nil {
+		t.Fatalf("create bot: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	if botRow.CatalogID != "deepseek" {
+		t.Fatalf("派生目录归属应为 deepseek: %q", botRow.CatalogID)
+	}
+
+	// 历史 run：配置快照含目录身份；一条已结束的主线模型请求让 metrics 有
+	// run 可取。
+	snapJSON, err := json.Marshal(botSnapshotOf(botRow))
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	now := time.Now().UTC()
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource: model.BotTriggerUserMessage, TriggerKey: "snapcat",
+		Status: model.BotRunStatusCompleted, SessionKind: model.BotSessionKindMain,
+		ConfigSnapshotJSON: string(snapJSON),
+		CreatedAt:          now, StartedAt: &now, FinishedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	req := &model.BotModelRequest{
+		ID: uuid.NewString(), RunID: run.ID, Ordinal: 1,
+		Status:    model.BotModelRequestSucceeded,
+		StartedAt: now, FinishedAt: &now,
+		PrefixHash: "x", ToolsHash: "x", RequestHash: "x",
+		TokenEstimator: "chars/4", PromptRevision: 1, ToolsetVersion: botRow.ToolsetVersion,
+	}
+	if err := env.bots.requests.CreateTx(env.db, req); err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+
+	// 机器人换到 custom provider：当前 catalog_id 变成 custom。
+	customProvider, err := providerSvc.Create(userID, &CreateAIProviderRequest{
+		CatalogID: "custom", Name: "自建网关",
+		BaseURL: env.fake.URL(), APIKey: "sk-cust-9999",
+	})
+	if err != nil {
+		t.Fatalf("create custom provider: %v", err)
+	}
+	if _, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{ProviderID: &customProvider.ID}); err != nil {
+		t.Fatalf("switch provider: %v", err)
+	}
+	switched, _ := env.bots.bots.Get(bot.ID)
+	if switched.CatalogID != "custom" {
+		t.Fatalf("切换后目录归属应为 custom: %q", switched.CatalogID)
+	}
+
+	snap, err := env.bots.GetChatSnapshot(userID, bot.ID, 50)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if snap.Metrics == nil {
+		t.Fatalf("应产出 metrics")
+	}
+	if snap.Metrics.ContextSource != "catalog" {
+		t.Fatalf("历史 run 的窗口来源应仍按快照目录解析为 catalog，实得 %q", snap.Metrics.ContextSource)
+	}
+	catModel, ok := catalog.FindModel("deepseek", "deepseek-flash")
+	if !ok {
+		t.Fatalf("目录应覆盖 deepseek-flash")
+	}
+	if snap.Metrics.ContextWindow != catModel.ContextWindow {
+		t.Fatalf("窗口应来自快照目录: want %d got %d", catModel.ContextWindow, snap.Metrics.ContextWindow)
 	}
 }

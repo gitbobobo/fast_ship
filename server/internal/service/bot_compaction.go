@@ -632,7 +632,11 @@ func (s *BotService) planCompaction(bot *model.Bot, run *model.BotRun, reason mo
 		IdentifierManifestJSON: state.IdentifierManifestJSON,
 		Folded:                 folded,
 	})
-	needSummary := len(segment) > 0 && (afterFold > goal || reason == model.BotCompactionForced)
+	// needSummary：有可摘要段且（折叠后仍超目标 / 强制 / 风格升级）。风格压缩
+	// （INT-133）的目的就是把历史长回复收进摘要——历史低于目标时若只折叠
+	// 不发摘要，旧长回复会原样留在投影里。style 不套 context_limit 的硬
+	// 失败语义：不可达/无净缩减仍走非致命路径记录，不阻塞对话。
+	needSummary := len(segment) > 0 && (afterFold > goal || reason == model.BotCompactionForced || reason == model.BotCompactionStyle)
 
 	return &botCompactionPlan{
 		State: state, Reason: reason, FromSeq: state.SummaryThroughSeq, ThroughSeq: cut.ThroughSeq,
@@ -1634,12 +1638,12 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 // 时 run 会冻结一份库里从未持久化的提示词）。每次 run 一个短事务：版本已最新
 // 时只有一次 SELECT、不写库，不再需要进程内的激活缓存与事务后按库补读。
 //
-// 返回 styleUpgraded：本行在激活前低于 botStylePromptVersion，即本次激活
-// 跨过了最近一次说话方式变化，调用方据此在下一个边界触发一次性压缩（INT-133）。
-func (s *BotService) activateBotPromptWithStyle(bot *model.Bot) (bool, error) {
+// 说话方式升级的一次性压缩不挂在激活的返回值上：那是瞬时判定，跨不过重启、
+// 也挡不住 schedule run 先激活的情形。待办改由持久水位
+// bots.style_compaction_version 表达，主线 run 的压缩决策处读取（INT-133）。
+func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	now := s.now()
 	var state model.Bot
-	styleUpgraded := false
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		repo := repository.NewBotRepository(tx)
 		fresh, err := repo.Get(bot.ID)
@@ -1647,7 +1651,6 @@ func (s *BotService) activateBotPromptWithStyle(bot *model.Bot) (bool, error) {
 			return err
 		}
 		if fresh.ToolsetVersion < botToolsetVersion || fresh.PlatformPromptVersion < botPlatformPromptVersion {
-			styleUpgraded = fresh.PlatformPromptVersion < botStylePromptVersion
 			prompt := buildBotSystemPrompt(fresh.PersonaPrompt)
 			rev := fresh.PromptRevision + 1
 			ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
@@ -1668,21 +1671,14 @@ func (s *BotService) activateBotPromptWithStyle(bot *model.Bot) (bool, error) {
 		return nil
 	})
 	if err != nil {
-		return false, err
+		return err
 	}
 	bot.SystemPromptText = state.SystemPromptText
 	bot.PromptRevision = state.PromptRevision
 	bot.PlatformPromptVersion = state.PlatformPromptVersion
 	bot.PersonaPrompt = state.PersonaPrompt
 	bot.ToolsetVersion = state.ToolsetVersion
-	return styleUpgraded, nil
-}
-
-// activateBotPrompt 是 activateBotPromptWithStyle 的包装：不关心说话方式版本
-// 跳变的调用方（定时任务、测试）继续用错误返回值。
-func (s *BotService) activateBotPrompt(bot *model.Bot) error {
-	_, err := s.activateBotPromptWithStyle(bot)
-	return err
+	return nil
 }
 
 // activateToolsetWithPromptTx 在事务内把工具集/平台提示词水位推进到当前版本

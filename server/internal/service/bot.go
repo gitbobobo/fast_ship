@@ -253,12 +253,27 @@ func (s *BotService) Get(userID, botID string) (*BotResponse, error) {
 	return &resp, nil
 }
 
+// Create 把 provider 归属校验与 bot 插入收进同一个短事务：与 provider 删除
+// （检查+删除同事务）交错时，校验离开事务可能放进一条指向已删除 provider
+// 的 bot——派生字段为空，运行期解密失败。生产单连接让校验与插入天然串行。
 func (s *BotService) Create(userID string, req *CreateBotRequest) (*BotResponse, error) {
-	bot, err := s.buildBot(userID, req)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.bots.Create(bot); err != nil {
+	var bot *model.Bot
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		b, err := s.buildBot(tx, userID, req)
+		if err != nil {
+			return err
+		}
+		if err := repository.NewBotRepository(tx).Create(b); err != nil {
+			return errs.ErrInternal
+		}
+		bot = b
+		return nil
+	})
+	if txErr != nil {
+		var appErr *errs.AppError
+		if errors.As(txErr, &appErr) {
+			return nil, txErr
+		}
 		return nil, errs.ErrInternal
 	}
 	// 窗口探测 best-effort 后台执行：不阻塞响应，失败不影响创建结果。
@@ -273,15 +288,16 @@ func (s *BotService) Create(userID string, req *CreateBotRequest) (*BotResponse,
 }
 
 // buildBot 校验并装配新机器人配置：provider 必须存在且属于同一 user；密钥在
-// provider 上，bot 行只存引用（INT-133）。
-func (s *BotService) buildBot(userID string, req *CreateBotRequest) (*model.Bot, error) {
+// provider 上，bot 行只存引用（INT-133）。归属校验走传入的 tx：校验与随后的
+// 插入必须落在同一事务（见 Create），不得退回调用方持有的非事务连接。
+func (s *BotService) buildBot(tx *gorm.DB, userID string, req *CreateBotRequest) (*model.Bot, error) {
 	name := strings.TrimSpace(req.Name)
 	modelName := strings.TrimSpace(req.Model)
 	providerID := strings.TrimSpace(req.ProviderID)
 	if name == "" || modelName == "" || providerID == "" {
 		return nil, errs.ErrInvalidParams
 	}
-	if _, err := s.providers.FindByIDAndUser(providerID, userID); err != nil {
+	if _, err := repository.NewAIProviderRepository(tx).FindByIDAndUser(providerID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, errs.ErrAIProviderNotFound
 		}
@@ -304,8 +320,11 @@ func (s *BotService) buildBot(userID string, req *CreateBotRequest) (*model.Bot,
 		NextMessageSeq:        1,
 		NextEventSeq:          1,
 		OfferedInputSeq:       0,
-		CreatedAt:             now,
-		UpdatedAt:             now,
+		// 新机器人没有旧风格历史：风格压缩水位直接落在当前版本，不触发
+		// 一次性 style_upgrade 压缩（INT-133）。
+		StyleCompactionVersion: botStylePromptVersion,
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 	return bot, nil
 }
