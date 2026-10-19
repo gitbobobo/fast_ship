@@ -44,7 +44,8 @@ AutoMigrate 之后执行，幂等：
 2. 同一事务内按（用户 + 规范化地址 + 明文密钥）去重聚合存量机器人，每个
    组合建一条 provider：`catalog_id` 用目录按 `api` 地址反查，匹配不到为
    `custom`；名称用目录名或「自定义」/「自定义 2」…（按排序后的分组键稳定
-   编号）。AES-GCM 每次加密取随机 nonce，同明文在两行上密文不同——按密文
+   编号，序号只在同一用户内递增——名称只在该用户的 provider 列表里有意义，
+   一个账号的迁移不得给另一个账号改名）。AES-GCM 每次加密取随机 nonce，同明文在两行上密文不同——按密文
    字节分组会把同一 key 拆成多条 provider，所以分组前先以迁移配置的加密
    key 逐行解密，分组键只放 `sha256(明文)` 的哈希（明文不持久化、不进
    日志）；解密失败（例如历史轮换过密钥）回退为按密文字节分组，单行
@@ -114,7 +115,9 @@ GET    /api/ai-providers/catalog     -> {items:[CatalogProvider]}
 - `catalog_id` 创建后不可改（换目录归属等于换提供商，应新建一条）；
   `api_key` 缺省保留、空串拒绝（与机器人旧 key 三态语义一致）。
 - `/test` 不落库、不写窗口缓存：`streaming` + `tool_call` 两项检查，另尽力
-  返回 `/models` 拉到的模型 id 列表。`model` 缺省用目录第一个模型，custom
+  返回 `/models` 拉到的模型 id 列表。三项探测相互独立，**并行发起**：总耗时
+  受单次探测超时（`botProbeTimeout` 30s）约束而不是串行相加，web 侧 35s 的
+  客户端超时能覆盖最坏情况并拿到逐项结果。`model` 缺省用目录第一个模型，custom
   必填。
 - `/catalog` 返回全量目录（约 1.2 MB，前端一次拉取后 `staleTime: Infinity`）；
   目录提供商 `models` 供 ModelPicker 分组渲染。

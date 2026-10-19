@@ -83,7 +83,9 @@ func migrateBotAIProviders(db *gorm.DB, logger *zap.Logger, encryptionKey []byte
 		// 稳定顺序创建：同名冲突的序号（自定义 2）不依赖 map 遍历顺序。
 		sort.Strings(order)
 
-		usedNames := map[string]bool{}
+		// 名称只在用户自己的 provider 列表里有意义（provider 按用户隔离），
+		// 去重集合按用户分段：一个账号的迁移不得给另一个账号改名。
+		usedNamesByUser := map[string]map[string]bool{}
 		for _, key := range order {
 			g := groups[key]
 			catalogID := catalog.CustomCatalogID
@@ -93,6 +95,11 @@ func migrateBotAIProviders(db *gorm.DB, logger *zap.Logger, encryptionKey []byte
 				if p, ok := catalog.FindProvider(id); ok {
 					name = p.Name
 				}
+			}
+			usedNames := usedNamesByUser[g.userID]
+			if usedNames == nil {
+				usedNames = map[string]bool{}
+				usedNamesByUser[g.userID] = usedNames
 			}
 			name = uniqueProviderName(usedNames, name)
 			usedNames[name] = true

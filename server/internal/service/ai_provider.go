@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/catalog"
@@ -367,13 +368,31 @@ func (s *AIProviderService) Test(req *TestAIProviderRequest) (*ProviderTestResul
 	}
 
 	checks := make([]ConnectionCheckResult, 0, 2)
-	streamOK, streamDetail := botProbeStreaming(baseURL, modelName, apiKey)
+	// 三项探测相互独立且都是网络往返：并行发起，总耗时受单次探测超时（
+	// botProbeTimeout 30s）约束，而不是串行相加——web 侧对测试连接的总超时
+	// 是 35s，串行会先被客户端 abort、拿不到逐项结果（Codex 复审 P2）。
+	var streamOK, toolOK bool
+	var streamDetail, toolDetail string
+	var models []string
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		streamOK, streamDetail = botProbeStreaming(baseURL, modelName, apiKey)
+	}()
+	go func() {
+		defer wg.Done()
+		toolOK, toolDetail = botProbeToolCall(baseURL, modelName, apiKey)
+	}()
+	go func() {
+		defer wg.Done()
+		// models 列表尽力拉取：可达性已由上面两项检查给出，这里失败不追加
+		// 检查项。
+		models = providerProbeModelIDs(baseURL, apiKey)
+	}()
+	wg.Wait()
 	checks = append(checks, ConnectionCheckResult{Name: "streaming", Passed: streamOK, Detail: streamDetail})
-	toolOK, toolDetail := botProbeToolCall(baseURL, modelName, apiKey)
 	checks = append(checks, ConnectionCheckResult{Name: "tool_call", Passed: toolOK, Detail: toolDetail})
-
-	// models 列表尽力拉取：可达性已由上面两项检查给出，这里失败不追加检查项。
-	models := providerProbeModelIDs(baseURL, apiKey)
 
 	return &ProviderTestResult{Ok: streamOK && toolOK, Checks: checks, Models: models}, nil
 }

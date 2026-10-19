@@ -355,9 +355,10 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 }
 
 // markStyleCompactionDone 把风格压缩水位 CAS 推进到当前说话方式版本：
-// 本 run 的一次压缩尝试（无论成败）即消费掉升级后的一次性额度，已推进
-// 过的并发写者落空，副本只在 CAS 命中时对齐。水位只在主线压缩决策后
-// 推进——schedule 会话不读也不写它（INT-133）。
+// 本 run 的一次风格压缩尝试（无论成败）即消费掉升级后的一次性额度，已
+// 推进过的并发写者落空，副本只在 CAS 命中时对齐。只有 reason=style_upgrade
+// 的尝试才推进水位——阈值与 context_limit 压缩不消费它；schedule 会话
+// 不读也不写它（INT-133）。
 func (s *BotService) markStyleCompactionDone(bot *model.Bot) {
 	if bot.StyleCompactionVersion >= botStylePromptVersion {
 		return

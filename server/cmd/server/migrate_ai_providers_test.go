@@ -317,3 +317,48 @@ func TestMigrateBotAIProvidersDedupByPlaintextKey(t *testing.T) {
 		t.Fatalf("provider 密文应来自组内既有行")
 	}
 }
+
+// TestMigrateBotAIProvidersNamesScopedPerUser（Codex 复审 P2）：provider 名称只在
+// 用户自己的列表里有意义，迁移的同名去重必须按用户分段——一个账号的迁移不能
+// 给另一个账号的 provider 加序号。
+func TestMigrateBotAIProvidersNamesScopedPerUser(t *testing.T) {
+	key := []byte(migrateTestKey)
+	enc := func(plain string) []byte {
+		c, err := crypto.Encrypt([]byte(plain), key)
+		if err != nil {
+			t.Fatalf("encrypt: %v", err)
+		}
+		return c
+	}
+	legacy := func(id, user, cipherPlain string) legacyBot {
+		return legacyBot{ID: id, UserID: user, Name: id, SystemPromptText: "s",
+			PromptRevision: 1, PlatformPromptVersion: 8, ToolsetVersion: 7, LastToldVersion: 7,
+			BaseURL: "https://api.deepseek.com", Model: "m",
+			APIKeyEncrypted: enc(cipherPlain), APIKeyLast4: "0001",
+			NextMessageSeq: 1, NextEventSeq: 1, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	}
+	db := setupLegacyBotsDB(t,
+		legacy("bot-a1", "u-a", "sk-a-0001"),
+		legacy("bot-a2", "u-a", "sk-a-0002"),
+		legacy("bot-b1", "u-b", "sk-b-0003"),
+	)
+
+	runBootMigrationsFor(t, db)
+
+	nameOf := func(botID string) string {
+		t.Helper()
+		pid := botProviderIDOf(t, db, botID)
+		var p model.AIProvider
+		if err := db.Where("id = ?", pid).First(&p).Error; err != nil {
+			t.Fatalf("load provider for %s: %v", botID, err)
+		}
+		return p.Name
+	}
+	a1, a2, b1 := nameOf("bot-a1"), nameOf("bot-a2"), nameOf("bot-b1")
+	if a1 == a2 {
+		t.Fatalf("同一用户内同名 provider 应加序号区分: %q / %q", a1, a2)
+	}
+	if b1 != a1 {
+		t.Fatalf("跨用户不得互相改名：u-b 的 provider 应仍为 %q，实得 %q", a1, b1)
+	}
+}

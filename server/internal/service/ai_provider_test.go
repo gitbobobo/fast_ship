@@ -2,8 +2,13 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/catalog"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -253,4 +258,55 @@ func TestAIProviderTestValidation(t *testing.T) {
 		t.Fatalf("测试结果泄露 key")
 	}
 	_ = uuid.NewString
+}
+
+// TestAIProviderTestProbesRunConcurrently（Codex 复审 P2）：三项探测并行发起，
+// 总耗时受单次探测超时约束而不是串行相加——串行在慢/黑洞提供商上会超过 web
+// 侧 35s 的客户端超时，用户在拿到逐项结果前就被 abort。用一个「三个请求都到
+// 齐才响应」的屏障服务器证明并行：串行执行时第一个请求会卡满屏障超时。
+func TestAIProviderTestProbesRunConcurrently(t *testing.T) {
+	var mu sync.Mutex
+	arrived := 0
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		arrived++
+		n := arrived
+		mu.Unlock()
+		if n == 3 {
+			once.Do(func() { close(release) })
+		}
+		select {
+		case <-release:
+		case <-time.After(3 * time.Second):
+		}
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"object":"list","data":[{"id":"demo-model"}]}`)
+			return
+		}
+		writeFakeChatSSE(w, "pong")
+	}))
+	t.Cleanup(srv.Close)
+
+	env := setupBotTestEnv(t)
+	svc := NewAIProviderService(env.db, env.cfg, zap.NewNop())
+	start := time.Now()
+	res, err := svc.Test(&TestAIProviderRequest{
+		CatalogID: strPtrBot(catalog.CustomCatalogID),
+		BaseURL:   strPtrBot(srv.URL + "/v1"),
+		APIKey:    strPtrBot("sk-test-concurrent-0001"),
+		Model:     strPtrBot("demo-model"),
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("test: %v", err)
+	}
+	if !res.Ok || len(res.Checks) != 2 {
+		t.Fatalf("两项检查都应通过: %+v", res)
+	}
+	if elapsed > 2500*time.Millisecond {
+		t.Fatalf("三项探测应并行发起，实得耗时 %s（串行会卡满屏障超时）", elapsed)
+	}
 }
