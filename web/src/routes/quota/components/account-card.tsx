@@ -125,9 +125,10 @@ function QuotaAccountDetails({
 }
 
 /**
- * 可用账号卡片：主视觉是「有效剩余」大号数字（= 100 − 受限窗口已用%），
- * 正文固定两行——剩余数字行（多池时右侧带池选择器）+ 受限窗口进度条，
- * 与窗口数/池数无关以保证卡片等高；全部窗口明细、余额、备注收进悬浮面板。
+ * 可用账号卡片：正文固定一行——受限窗口进度条（无窗口有余额时退化为余额
+ * 文本行），与窗口数/池数无关以保证卡片等高；多池时池选择器收进 header
+ * 「数据时间」行右侧（整行固定 h-7，双池卡片不因选择器变高）。
+ * 全部窗口明细、余额、备注收进正文触发的悬浮面板。
  * 操作只留「刷新」主按钮，编辑 / 测试凭据 / 删除收进 ··· 菜单。
  */
 export function QuotaAccountCard({
@@ -148,7 +149,7 @@ export function QuotaAccountCard({
     (pickedName != null
       ? pools.find((pool) => (pool.name ?? "") === pickedName)
       : undefined) ?? defaultQuotaPool(pools);
-  // 第二行始终只有一根进度条：受限窗口；全窗口算不出百分比时退回首个窗口占位。
+  // 正文始终只有一根进度条：受限窗口；全窗口算不出百分比时退回首个窗口占位。
   const rowWindow = active?.limiting ?? active?.windows[0] ?? null;
 
   const handleRefresh = async () => {
@@ -176,12 +177,12 @@ export function QuotaAccountCard({
     <Card>
       <CardHeader className="pb-0 pt-4">
         <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
             <QuotaProviderIcon
               provider={account.provider}
               className="size-6 text-foreground"
             />
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <CardTitle className="truncate text-sm">
                 {account.provider_name}
                 {account.plan_name && (
@@ -195,11 +196,44 @@ export function QuotaAccountCard({
                 {account.label}
                 {account.credential_hint && ` · ${account.credential_hint}`}
               </p>
-              <p className="truncate text-xs text-muted-foreground">
-                {account.fetched_at
-                  ? `数据时间 ${formatRelativeTime(account.fetched_at)}`
-                  : "尚未抓取"}
-              </p>
+              {/* 数据时间行固定 h-7：池选择器放右侧而不是另占一行，双池卡片
+                  才不会比单池卡片高，同行卡片底边才能齐平 */}
+              <div className="flex h-7 items-center justify-between gap-2">
+                <p className="min-w-0 truncate text-xs text-muted-foreground">
+                  {account.fetched_at
+                    ? `数据时间 ${formatRelativeTime(account.fetched_at)}`
+                    : "尚未抓取"}
+                </p>
+                {pools.length > 1 && (
+                  <Tabs
+                    value={active?.name ?? ""}
+                    onValueChange={(value) => setPickedName(value)}
+                    className="shrink-0"
+                  >
+                    <TabsList className="h-7">
+                      {pools.map((pool) => {
+                        const name = pool.name ?? "默认";
+                        return (
+                          <TabsTrigger
+                            key={name}
+                            value={pool.name ?? ""}
+                            title={pool.exhausted ? `${name}（已用尽）` : name}
+                            aria-label={
+                              pool.exhausted ? `${name}（已用尽）` : name
+                            }
+                            className={cn(
+                              "px-1.5 text-xs",
+                              pool.exhausted && "text-muted-foreground",
+                            )}
+                          >
+                            {name}
+                          </TabsTrigger>
+                        );
+                      })}
+                    </TabsList>
+                  </Tabs>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex shrink-0 gap-0.5">
@@ -231,84 +265,35 @@ export function QuotaAccountCard({
           </p>
         ) : (
           <PreviewCard>
-            {/* 触发区 = 正文两行（剩余数字行 + 受限窗口进度条），鼠标悬浮或键盘聚焦
-                弹出全部明细。池选择器放在第一行右侧而不是另占一行，否则双池卡片
-                会比单池卡片高一行，同行卡片底边就对不齐。 */}
+            {/* 触发区 = 正文唯一一行：受限窗口进度条（无窗口时为余额文本行），
+                悬浮或键盘聚焦弹出全部明细。负 margin + 等量 padding 让触发
+                区域外扩一圈而不多占行高，卡片高度仍与窗口数、池数无关。 */}
             <PreviewCardTrigger
               delay={150}
               render={
                 <div
                   tabIndex={0}
                   aria-label={`查看 ${account.label} 的额度详情`}
-                  className="space-y-1.5 rounded-md outline-none focus-visible:outline-2 focus-visible:outline-ring"
+                  className="-m-1.5 rounded-md p-1.5 outline-none focus-visible:outline-2 focus-visible:outline-ring"
                 />
               }
             >
-              {/* 固定行高：双池卡片的池选择器不把这一行撑高，同行卡片底边才能齐平 */}
-              <div className="flex h-9 items-center justify-between gap-2">
-                <div className="flex min-w-0 items-baseline gap-2">
-                  <span
-                    data-testid="quota-remaining"
-                    className={cn(
-                      "text-3xl leading-none font-semibold tabular-nums",
-                      active?.remaining === 0 && "text-muted-foreground",
-                    )}
-                  >
-                    {active?.remaining != null
-                      ? formatQuotaAmount(active.remaining, "percent")
-                      : account.balance
-                        ? `$${account.balance.amount}`
-                        : "—"}
-                  </span>
-                  <span className="min-w-0 truncate text-xs text-muted-foreground">
-                    {active?.remaining != null ? (
-                      <>
-                        剩余
-                        {active.limiting &&
-                          ` · 受「${active.limiting.label}」限制`}
-                      </>
-                    ) : account.balance ? (
-                      account.balance.label
-                    ) : (
-                      "还没有额度数据"
-                    )}
-                  </span>
-                </div>
-                {pools.length > 1 && (
-                  <Tabs
-                    value={active?.name ?? ""}
-                    onValueChange={(value) => setPickedName(value)}
-                    className="shrink-0"
-                  >
-                    <TabsList className="h-7">
-                      {pools.map((pool) => {
-                        const name = pool.name ?? "默认";
-                        return (
-                          <TabsTrigger
-                            key={name}
-                            value={pool.name ?? ""}
-                            title={pool.exhausted ? `${name}（已用尽）` : name}
-                            aria-label={
-                              pool.exhausted ? `${name}（已用尽）` : name
-                            }
-                            className={cn(
-                              "px-1.5 text-xs",
-                              pool.exhausted && "text-muted-foreground",
-                            )}
-                          >
-                            {name}
-                          </TabsTrigger>
-                        );
-                      })}
-                    </TabsList>
-                  </Tabs>
-                )}
-              </div>
-              {rowWindow && (
+              {rowWindow ? (
                 <QuotaWindowProgress
                   window={rowWindow}
                   limited={rowWindow === active?.limiting}
                 />
+              ) : (
+                <p className="flex items-baseline justify-between gap-2 text-xs">
+                  <span className="min-w-0 truncate text-muted-foreground">
+                    {account.balance?.label ?? account.note}
+                  </span>
+                  {account.balance && (
+                    <span className="shrink-0 font-medium tabular-nums">
+                      ${account.balance.amount}
+                    </span>
+                  )}
+                </p>
               )}
             </PreviewCardTrigger>
             <PreviewCardContent data-testid="quota-account-detail-panel">

@@ -47,7 +47,7 @@ function makeWindow(overrides: Partial<QuotaWindow> = {}): QuotaWindow {
   };
 }
 
-/** 正文触发区 = 大号剩余数字所在的两行区块（池选择器不在其中）。 */
+/** 正文触发区 = 单行额度区块（进度条或余额行；池选择器在 header，不在其中）。 */
 function bodyTrigger(label = "我的 Pro") {
   return screen.getByLabelText(`查看 ${label} 的额度详情`);
 }
@@ -64,7 +64,7 @@ describe("QuotaAccountCard", () => {
     } as unknown as ReturnType<typeof useDeleteQuotaAccount>);
   });
 
-  it("renders identity, fetched time, remaining number and only the limiting window row", () => {
+  it("renders identity, fetched time and only the limiting window row", () => {
     // 多留 45s 缓冲，渲染到断言之间的一两秒漂移不会把分钟降 1
     const resetAt = new Date(
       Date.now() + 3 * 3600_000 + 12 * 60_000 + 45_000,
@@ -107,20 +107,24 @@ describe("QuotaAccountCard", () => {
     expect(screen.queryByText("正常")).toBeNull();
     expect(screen.getByText(/数据时间/)).toBeInTheDocument();
 
-    // 有效剩余 = 100 − max(97) = 3%；受限窗口是 5 小时
-    expect(screen.getByTestId("quota-remaining")).toHaveTextContent("3%");
-    expect(screen.getByText(/受「5 小时」限制/)).toBeInTheDocument();
+    // 正文没有大号剩余数字与「剩余 · 受…限制」文案——它和进度条的
+    // 「已用%」是同一件事的两种说法，只保留进度条一行
+    const trigger = bodyTrigger();
+    expect(screen.queryByTestId("quota-remaining")).toBeNull();
+    expect(trigger.querySelector(".text-3xl")).toBeNull();
+    expect(trigger.textContent).not.toContain("剩余");
 
     // 正文只渲染受限窗口一根进度条，其余窗口不进正文
     const windows = screen.getAllByTestId("quota-window");
     expect(windows).toHaveLength(1);
     expect(windows[0]).toHaveAttribute("data-tone", "danger");
+    expect(screen.getByText("5 小时")).toBeInTheDocument();
     expect(screen.queryByText("每周")).toBeNull();
     expect(screen.queryByText("每月")).toBeNull();
     expect(screen.getAllByRole("progressbar")).toHaveLength(1);
 
-    // >=95 的窗口进度条/百分比用中性色，红色只留给需处理
-    expect(screen.getByText("97%")).toHaveClass("text-muted-foreground");
+    // 97% 还没用尽 → 琥珀色提示；只有 100%（等重置）才转中性色，红只留给需处理
+    expect(screen.getByText("97%")).toHaveClass("text-amber-700");
     expect(screen.getByText("3 小时 12 分后重置")).toBeInTheDocument();
 
     // used/limit 明细、余额不进正文——都在悬浮面板里
@@ -236,7 +240,7 @@ describe("QuotaAccountCard", () => {
     );
   });
 
-  it("多池账号在剩余数字同行显示池选择器，默认选中消耗中的池", async () => {
+  it("多池账号在「数据时间」行右侧显示池选择器，默认选中消耗中的池", async () => {
     const user = userEvent.setup();
     const account = makeAccount({
       windows: [
@@ -249,35 +253,40 @@ describe("QuotaAccountCard", () => {
         }),
       ],
     });
-    render(
+    const { container } = render(
       <QuotaAccountCard account={account} onTest={vi.fn()} onEdit={vi.fn()} />,
     );
 
     const standardTab = screen.getByRole("tab", { name: "标准（已用尽）" });
     const coreTab = screen.getByRole("tab", { name: "Core" });
-    // 选择器只显示池名，用尽状态进 aria-label/title，不占正文行
+    // 选择器只显示池名，用尽状态进 aria-label/title
     expect(standardTab).toHaveTextContent("标准");
     expect(standardTab).not.toHaveTextContent("用尽");
     expect(standardTab).toHaveAttribute("title", "标准（已用尽）");
     expect(coreTab).toHaveTextContent("Core");
-    // 选择器与剩余数字同一行（同一父容器），不额外占一行——双池卡片因此与
-    // 单池卡片等高
-    const numberRow = screen.getByTestId("quota-remaining").closest("div")
-      ?.parentElement;
-    expect(numberRow).not.toBeNull();
-    expect(numberRow).toContainElement(standardTab);
-    expect(numberRow).toContainElement(screen.getByTestId("quota-remaining"));
+    // 选择器与「数据时间」同一行（同一父容器），整行固定 h-7——双池卡片因此
+    // 与单池卡片等高；选择器在 header，不属于正文悬浮触发区
+    const timeRow = screen.getByText(/数据时间/).parentElement;
+    expect(timeRow).toHaveClass("h-7");
+    expect(timeRow).toContainElement(standardTab);
+    expect(timeRow).toContainElement(coreTab);
+    expect(bodyTrigger()).not.toContainElement(standardTab);
+    // 正文仍是单行区块，多一个选择器没有让正文多出行
+    expect(
+      container.querySelector('[data-slot="card-content"]')?.children,
+    ).toHaveLength(1);
 
-    // 标准池用尽 → 默认打开正在消耗的 Core 池，主数字 = 13%
+    // 标准池用尽 → 默认打开正在消耗的 Core 池，正文行是它的受限窗口
     expect(coreTab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("quota-remaining")).toHaveTextContent("13%");
     expect(screen.getByText("5 小时")).toBeInTheDocument();
+    expect(screen.getByText("87%")).toBeInTheDocument();
     expect(screen.getAllByTestId("quota-window")).toHaveLength(1);
 
     await user.click(standardTab);
     expect(standardTab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("quota-remaining")).toHaveTextContent("0%");
+    // 切到已用尽的标准池后，正文那一行换成该池的受限窗口
     expect(screen.getByText("每月")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
     expect(screen.queryByText("5 小时")).toBeNull();
     expect(screen.getAllByTestId("quota-window")).toHaveLength(1);
   });
@@ -397,7 +406,7 @@ describe("QuotaAccountCard", () => {
 
     expect(screen.queryByRole("tab")).toBeNull();
     expect(screen.getByText("5 小时")).toBeInTheDocument();
-    expect(screen.getByTestId("quota-remaining")).toHaveTextContent("13%");
+    expect(screen.getByText("87%")).toBeInTheDocument();
   });
 
   it("hides pool tabs when the account has a single pool", () => {
@@ -432,9 +441,8 @@ describe("QuotaAccountCard", () => {
     expect(
       screen.getByText("还没有额度数据，等待后台抓取"),
     ).toBeInTheDocument();
-    // 这种卡片本来无法等高，不渲染两行结构
+    // 这种卡片本来无法等高，不渲染单行额度结构
     expect(screen.queryByRole("progressbar")).toBeNull();
-    expect(screen.queryByTestId("quota-remaining")).toBeNull();
     expect(
       screen.queryByLabelText("查看 我的 Pro 的额度详情"),
     ).toBeNull();
@@ -442,7 +450,7 @@ describe("QuotaAccountCard", () => {
 
   // OpenDesign 无 Design Plan 额度时只会给钱包余额 + 「按钱包计费」说明，没有窗口。
   // 这种卡片不能因为窗口为空就只剩「还没有额度数据」，否则余额与计费说明完全看不到。
-  it("没有窗口但有余额时，正文用余额代替剩余，悬浮面板仍可看到说明", async () => {
+  it("没有窗口但有余额时，正文一行显示余额，悬浮面板仍可看到说明", async () => {
     const user = userEvent.setup();
     const account = makeAccount({
       provider: "opendesign",
@@ -458,12 +466,13 @@ describe("QuotaAccountCard", () => {
     );
 
     expect(screen.queryByText(/还没有额度数据/)).toBeNull();
-    expect(screen.getByTestId("quota-remaining")).toHaveTextContent("$1.03");
-    expect(screen.getByText("钱包余额")).toBeInTheDocument();
-    // 没有窗口就没有进度条，但正文仍可悬浮看详情
+    // 正文唯一一行是纯文本余额：「钱包余额  $1.03」，没有进度条
+    const trigger = bodyTrigger("设计稿账号");
+    expect(within(trigger).getByText("钱包余额")).toBeInTheDocument();
+    expect(within(trigger).getByText("$1.03")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).toBeNull();
 
-    await user.hover(bodyTrigger("设计稿账号"));
+    await user.hover(trigger);
     const panel = await screen.findByTestId("quota-account-detail-panel");
     expect(within(panel).getByText(/无 Design Plan 额度/)).toBeInTheDocument();
     expect(within(panel).getByText(/1\.03/)).toBeInTheDocument();

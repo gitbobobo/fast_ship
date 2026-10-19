@@ -7,19 +7,25 @@ import {
 } from "@/lib/quota";
 import { cn } from "@/lib/utils";
 
-// >=95 的窗口多半在等重置而不是出了错：进度条与百分比用中性色，
-// 红色只留给「需处理」横幅；80~95 仍用琥珀色提示快见底。
+// 配色按「还剩多少」而不是「是不是报错」：
+// - 用尽（100%）是「等重置」，用中性色，别把它读成故障；
+// - 95~99% 还没用尽但马上就要用尽，仍用琥珀色提示（否则中性色会被读成「空了」）；
+// - 红色只留给「需处理」横幅，进度条永远不红。
 const BAR_CLASS: Record<QuotaUsageTone, string> = {
   normal: "bg-primary",
   warning: "bg-amber-500 dark:bg-amber-400",
-  danger: "bg-muted-foreground",
+  danger: "bg-amber-500 dark:bg-amber-400",
 };
 
 const TEXT_CLASS: Record<QuotaUsageTone, string> = {
   normal: "text-foreground",
   warning: "text-amber-700 dark:text-amber-400",
-  danger: "text-muted-foreground",
+  danger: "text-amber-700 dark:text-amber-400",
 };
+
+// 用尽窗口专用的中性配色。
+const EXHAUSTED_BAR_CLASS = "bg-muted-foreground/60";
+const EXHAUSTED_TEXT_CLASS = "text-muted-foreground";
 
 /**
  * 单个额度窗口压成一行：名称（自适应，长名截断） | 进度条（固定宽） |
@@ -37,6 +43,7 @@ export function QuotaWindowProgress({
   const now = useNow(30_000, Boolean(w.reset_at));
   const tone = quotaUsageTone(w.used_percent);
   const percent = w.used_percent;
+  const exhausted = percent != null && percent >= 100;
   const width = percent == null ? 0 : Math.min(100, Math.max(0, percent));
 
   return (
@@ -49,7 +56,7 @@ export function QuotaWindowProgress({
       >
         <span
           className={cn(
-            "min-w-0 flex-1 truncate",
+            "min-w-0 max-w-[45%] shrink-0 truncate",
             limited ? "text-foreground" : "text-muted-foreground",
           )}
         >
@@ -61,13 +68,13 @@ export function QuotaWindowProgress({
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={percent ?? undefined}
-          className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-muted"
+          className="h-1.5 min-w-8 flex-1 overflow-hidden rounded-full bg-muted"
         >
           <div
             data-testid="quota-window-bar"
             className={cn(
               "h-full rounded-full transition-[width]",
-              BAR_CLASS[tone],
+              exhausted ? EXHAUSTED_BAR_CLASS : BAR_CLASS[tone],
             )}
             style={{ width: `${width}%` }}
           />
@@ -76,7 +83,7 @@ export function QuotaWindowProgress({
           data-testid="quota-window-percent"
           className={cn(
             "w-10 shrink-0 text-right tabular-nums",
-            TEXT_CLASS[tone],
+            exhausted ? EXHAUSTED_TEXT_CLASS : TEXT_CLASS[tone],
           )}
         >
           {percent == null ? "—" : formatQuotaAmount(percent, "percent")}

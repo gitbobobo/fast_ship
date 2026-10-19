@@ -72,15 +72,36 @@ describe("QuotaWindowProgress", () => {
     ).not.toHaveClass("font-medium");
   });
 
-  it("标签列自适应、进度条固定宽度：长标签不再被 56px 截掉", () => {
+  it("标签不截短，进度条吃掉剩余宽度成为视觉主体", () => {
     render(
       <QuotaWindowProgress window={makeWindow({ label: "Token 额度" })} />,
     );
     const label = screen.getByText("Token 额度");
     // 回归点：标签曾固定 w-14（56px）截掉「Token 额度」「Credit 额度」
-    expect(label).toHaveClass("min-w-0", "flex-1", "truncate");
+    expect(label).toHaveClass("min-w-0", "max-w-[45%]", "shrink-0", "truncate");
     expect(label).not.toHaveClass("w-14");
-    // 进度条改固定宽度，窄卡片里不被长标签挤没
-    expect(screen.getByRole("progressbar")).toHaveClass("w-16", "shrink-0");
+    // 正文只剩这一行，进度条自适应占宽（有 min-w-8 兜底，不会被长标签挤没）
+    expect(screen.getByRole("progressbar")).toHaveClass(
+      "min-w-8",
+      "flex-1",
+    );
+  });
+
+  it("用尽用中性色、95~99% 仍用琥珀色提示「马上用尽」", () => {
+    const { rerender } = render(
+      <QuotaWindowProgress window={makeWindow({ used_percent: 97 })} />,
+    );
+    expect(screen.getByTestId("quota-window-bar")).toHaveClass("bg-amber-500");
+    expect(screen.getByTestId("quota-window-percent")).toHaveClass(
+      "text-amber-700",
+    );
+
+    rerender(<QuotaWindowProgress window={makeWindow({ used_percent: 100 })} />);
+    expect(screen.getByTestId("quota-window-bar")).toHaveClass(
+      "bg-muted-foreground/60",
+    );
+    expect(screen.getByTestId("quota-window-percent")).toHaveClass(
+      "text-muted-foreground",
+    );
   });
 });

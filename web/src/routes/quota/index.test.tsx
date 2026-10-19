@@ -117,13 +117,16 @@ describe("QuotaPage", () => {
 
     expect(await screen.findByText("Factory Droid")).toBeInTheDocument();
     expect(screen.getByText("我的 Pro · …ab12")).toBeInTheDocument();
-    // 顶部常驻说明不再出现；「正常」徽标已移除
+    // 顶部常驻说明不再出现；「正常」徽标已移除，大号剩余数字也已移除
     expect(screen.queryByText(/任何位置不回显明文/)).toBeNull();
     expect(screen.queryByText("正常")).toBeNull();
-    expect(screen.getByTestId("quota-remaining")).toHaveTextContent("62%");
+    expect(screen.queryByTestId("quota-remaining")).toBeNull();
     expect(screen.getByTestId("quota-window")).toHaveAttribute(
       "data-tone",
       "normal",
+    );
+    expect(screen.getByTestId("quota-window-percent")).toHaveTextContent(
+      "38%",
     );
 
     expect(screen.getByTestId("quota-chip-usable")).toHaveTextContent("可用1");
@@ -178,10 +181,10 @@ describe("QuotaPage", () => {
     expect(banner).toHaveTextContent("凭据已过期");
     expect(banner).toHaveTextContent("失效号");
 
-    // 可用段：富余号(90%) 在 紧张号(10%) 之前
-    const remaining = screen.getAllByTestId("quota-remaining");
-    expect(remaining[0]).toHaveTextContent("90%");
-    expect(remaining[1]).toHaveTextContent("10%");
+    // 可用段按有效剩余降序：富余号(已用 10%) 在 紧张号(已用 90%) 之前
+    const percents = screen.getAllByTestId("quota-window-percent");
+    expect(percents[0]).toHaveTextContent("10%");
+    expect(percents[1]).toHaveTextContent("90%");
 
     // 已用尽收成单行，显示恢复时间
     const exhaustedRow = screen.getByTestId("quota-exhausted-row");
@@ -189,7 +192,8 @@ describe("QuotaPage", () => {
     expect(exhaustedRow).toHaveTextContent("3 天后恢复");
 
     // 视觉顺序：横幅 → 可用卡片 → 已用尽行
-    const firstCard = remaining[0].closest('[data-slot="card"]');
+    const firstCard = percents[0].closest('[data-slot="card"]');
+    expect(firstCard).toHaveTextContent("富余号");
     expect(
       banner.compareDocumentPosition(firstCard as Element) &
         Node.DOCUMENT_POSITION_FOLLOWING,
