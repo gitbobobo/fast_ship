@@ -9,6 +9,7 @@ import {
   watchThreadsIdentity,
 } from "@/lib/hooks/use-threads";
 import { watchBotsIdentity } from "@/lib/hooks/use-bots";
+import { watchAIProvidersIdentity } from "@/lib/hooks/use-ai-providers";
 import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
 import { watchDeploymentIdentity } from "@/lib/hooks/use-deployment";
 import { watchMembersIdentity } from "@/lib/hooks/use-members";
@@ -40,6 +41,7 @@ const SettingsGeneralPage = lazy(() => import("@/routes/settings/general"));
 const SettingsProfilePage = lazy(() => import("@/routes/settings/profile"));
 const SettingsPasswordPage = lazy(() => import("@/routes/settings/password"));
 const SettingsAIPage = lazy(() => import("@/routes/settings/ai"));
+const AIProvidersPage = lazy(() => import("@/routes/settings/ai-providers"));
 const SettingsIssuePromptsPage = lazy(
   () => import("@/routes/settings/issue-prompts"),
 );
@@ -85,6 +87,7 @@ export default function App() {
     const stopThreads = watchThreadsIdentity(queryClient);
     const stopGithubTokens = watchGithubTokensIdentity(queryClient);
     const stopBots = watchBotsIdentity(queryClient);
+    const stopAIProviders = watchAIProvidersIdentity(queryClient);
     const stopQuota = watchQuotaIdentity(queryClient);
     const stopDeployment = watchDeploymentIdentity(queryClient);
     const stopMembers = watchMembersIdentity(queryClient);
@@ -92,6 +95,7 @@ export default function App() {
       stopThreads();
       stopGithubTokens();
       stopBots();
+      stopAIProviders();
       stopQuota();
       stopDeployment();
       stopMembers();
@@ -200,6 +204,10 @@ export default function App() {
                 <Route
                   path="ai"
                   element={<LazyPage render={<SettingsAIPage />} />}
+                />
+                <Route
+                  path="ai-providers"
+                  element={<LazyPage render={<AIProvidersPage />} />}
                 />
                 <Route
                   path="issue-prompts"

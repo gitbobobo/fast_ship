@@ -133,7 +133,11 @@ export function ModelPicker({
         aria-label={ariaLabel ?? "模型"}
         disabled={disabled}
       >
-        <ProviderIcon providerInstanceId={resolved.provider?.instanceId ?? ""} />
+        <ProviderIcon
+          providerInstanceId={
+            resolved.provider?.iconId ?? resolved.provider?.instanceId ?? ""
+          }
+        />
         <span className="truncate">{label}</span>
         <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
       </PopoverTrigger>
@@ -197,6 +201,9 @@ export function ModelMultiPicker({
       ? "选择模型"
       : names.slice(0, 2).join("、") +
         (names.length > 2 ? ` +${names.length - 2}` : "");
+  const firstProvider = providers.find(
+    (p) => p.instanceId === selected[0]?.instanceId,
+  );
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
@@ -204,7 +211,11 @@ export function ModelMultiPicker({
         aria-label={ariaLabel ?? "模型"}
         disabled={disabled}
       >
-        <ProviderIcon providerInstanceId={selected[0]?.instanceId ?? ""} />
+        <ProviderIcon
+          providerInstanceId={
+            firstProvider?.iconId ?? firstProvider?.instanceId ?? ""
+          }
+        />
         <span className="truncate">{label}</span>
         <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
       </PopoverTrigger>
@@ -426,7 +437,9 @@ function ModelPickerPanel({
           </div>
           <div className="mt-0.5 flex items-center gap-1.5">
             <ProviderIcon
-              providerInstanceId={item.provider.instanceId}
+              providerInstanceId={
+                item.provider.iconId ?? item.provider.instanceId
+              }
               className="size-3"
             />
             <span className="truncate text-xs leading-snug text-muted-foreground">
@@ -483,7 +496,7 @@ function ModelPickerPanel({
             provider.instanceId,
             provider.name,
             <ProviderIcon
-              providerInstanceId={provider.instanceId}
+              providerInstanceId={provider.iconId ?? provider.instanceId}
               className="size-5"
             />,
           ),

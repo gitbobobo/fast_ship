@@ -1,7 +1,8 @@
 import { api, decodeApiError } from "./client";
 
-// 内置机器人（INT-101）：类型与端点按设计第 4 节冻结的形状手写，
-// 明文与密文形式的 API Key 任何响应都不回传，仅返回末四位。
+// 内置机器人（INT-101，INT-133 起地址/密钥改由统一 AI 提供商派生）：
+// 类型与端点按契约冻结的形状手写，明文与密文形式的 API Key 任何响应都不
+// 回传，仅返回末四位。
 
 /** 最近一条主线消息预览：kind 区分消息来自用户还是机器人。 */
 export interface BotLastMessage {
@@ -13,9 +14,15 @@ export interface Bot {
   id: string;
   name: string;
   persona_prompt: string;
+  /** 引用的 ai_providers.id；地址与密钥以提供商为准。 */
+  provider_id: string;
+  /** 提供商名与目录 id 随响应带出，省一次 join 查询。 */
+  provider_name: string;
+  catalog_id: string;
+  /** provider 派生值（保留字段，只读展示用）。 */
   base_url: string;
   model: string;
-  /** 已配置密钥的末四位；空串表示尚未配置。 */
+  /** provider 密钥的末四位；空串表示尚未配置。 */
   api_key_last4: string;
   /** 消息/事件账本水位（下一条的 seq）；订阅游标取 next_event_seq - 1。 */
   next_message_seq?: number;
@@ -24,7 +31,7 @@ export interface Bot {
   context_window?: number;
   /** 单次输出上限；缺失或 0 = 未知。 */
   max_output_tokens?: number;
-  /** context_window 的来源：manual|detected|known|fallback。 */
+  /** context_window 的来源：manual|detected|catalog|known|fallback。 */
   context_source?: string;
   context_detail?: string;
   /** 最近一条对话预览：列表端点返回真实值，详情/快照等其它端点恒为 null。 */
@@ -36,18 +43,16 @@ export interface Bot {
 export interface CreateBotInput {
   name: string;
   persona_prompt: string;
-  base_url: string;
+  provider_id: string;
   model: string;
-  api_key: string;
 }
 
-/** 更新为指针语义：出现才更新；api_key 省略保留已存值，空串会被服务端拒绝。 */
+/** 更新为指针语义：出现才更新；provider_id 必须属于当前用户。 */
 export interface UpdateBotInput {
   name?: string;
   persona_prompt?: string;
-  base_url?: string;
+  provider_id?: string;
   model?: string;
-  api_key?: string;
 }
 
 export interface BotConnectionCheck {
@@ -68,12 +73,11 @@ export interface BotConnectionTestResult {
   context_detail?: string;
 }
 
-/** 可传未保存配置直接测试；或传 bot_id 复用已存 key，表单字段可覆盖地址/模型。 */
+/** 地址与密钥一律取 provider；bot_id 让服务端沿用已存机器人的上下文。 */
 export interface BotConnectionTestInput {
   bot_id?: string;
-  base_url?: string;
-  model?: string;
-  api_key?: string;
+  provider_id: string;
+  model: string;
 }
 
 export type BotMessageKind =
@@ -258,7 +262,7 @@ export interface BotRequestMetrics {
 export interface BotMetrics {
   context_window: number;
   max_output_tokens: number;
-  context_source: "manual" | "detected" | "known" | "fallback";
+  context_source: "manual" | "detected" | "catalog" | "known" | "fallback";
   context_detail?: string;
   /** 最近一次主线模型请求（进行中或已结束）；没有则缺省。 */
   request?: BotRequestMetrics | null;

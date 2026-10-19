@@ -71,28 +71,30 @@ describe("bot api requests", () => {
     await botApi.create({
       name: "助手",
       persona_prompt: "帮我盯 Issue",
-      base_url: "https://api.example.com/v1",
+      provider_id: "ap-1",
       model: "gpt-test",
-      api_key: "sk-live",
     });
-    await botApi.update("b1", { model: "gpt-next", api_key: "sk-new" });
-    await botApi.testConnection({ bot_id: "b1", base_url: "https://x", model: "m" });
+    await botApi.update("b1", { model: "gpt-next", provider_id: "ap-2" });
+    await botApi.testConnection({ bot_id: "b1", provider_id: "ap-1", model: "m" });
 
     expect(calls(post)[0][1].json).toEqual({
       name: "助手",
       persona_prompt: "帮我盯 Issue",
-      base_url: "https://api.example.com/v1",
+      provider_id: "ap-1",
       model: "gpt-test",
-      api_key: "sk-live",
     });
     expect(calls(post)[1][0]).toBe("bots/test-connection");
+    // 测试连接的地址与密钥一律取 provider，不再随请求发。
     expect(calls(post)[1][1].json).toEqual({
       bot_id: "b1",
-      base_url: "https://x",
+      provider_id: "ap-1",
       model: "m",
     });
     // 更新是指针语义：未提供的字段不出现在请求体里。
-    expect(calls(put)[0][1].json).toEqual({ model: "gpt-next", api_key: "sk-new" });
+    expect(calls(put)[0][1].json).toEqual({
+      model: "gpt-next",
+      provider_id: "ap-2",
+    });
   });
 
   it("omits undefined query params instead of stringifying them", async () => {
