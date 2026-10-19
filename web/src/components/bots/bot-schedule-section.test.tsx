@@ -284,7 +284,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(within(section).getByText("每日汇总"));
     const dialog = await screen.findByRole("dialog");
@@ -315,7 +315,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(within(section).getByText("大整数状态"));
     const dialog = await screen.findByRole("dialog");
@@ -332,7 +332,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(within(section).getByText("周报"));
     const dialog = await screen.findByRole("dialog");
@@ -354,7 +354,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(within(section).getByText("每日汇总"));
     const dialog = await screen.findByRole("dialog");
@@ -380,7 +380,7 @@ describe("BotScheduleSection", () => {
     } as never);
     const user = userEvent.setup();
     renderSection();
-    const section = await expandSection(user);
+    const section = getSection();
 
     await user.click(within(section).getByText("每日汇总"));
     const dialog = await screen.findByRole("dialog");

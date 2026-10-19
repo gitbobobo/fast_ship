@@ -429,11 +429,12 @@ func TestInt124NightlyCatchUp(t *testing.T) {
 	}
 }
 
-// TestInt124PlatformPromptProactiveMemory 平台提示词 v7：规则 9 明确稳定偏好
-// 与重要事实应主动沉淀；规则 10 的守门文案保持不变。
+// TestInt124PlatformPromptProactiveMemory 平台提示词：规则 9（v7 引入）明确稳定
+// 偏好与重要事实应主动沉淀；规则 10 的守门文案保持不变。当前版本 8（INT-123
+// 在规则 8 补任务小状态读写说明）。
 func TestInt124PlatformPromptProactiveMemory(t *testing.T) {
-	if botPlatformPromptVersion != 7 {
-		t.Fatalf("平台提示词版本应为 7: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 8 {
+		t.Fatalf("平台提示词版本应为 8: %d", botPlatformPromptVersion)
 	}
 	full := buildBotSystemPrompt("")
 	for _, kw := range []string{"主动写入", "不必等用户要求", "稳定偏好"} {

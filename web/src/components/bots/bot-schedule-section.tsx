@@ -69,23 +69,6 @@ function formatDuration(ms: number | null) {
   return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`;
 }
 
-/**
- * 任务状态以原始 JSON 文本下发（服务端刻意保留数字字面量）。展示优先美化；
- * JSON.parse 会把 >2^53 的整数折成 double，无法无损往返时退回原文，避免界面
- * 显示与库里不一致的数值。
- */
-function prettyStateText(raw: string): { text: string; rawFallback: boolean } {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (JSON.stringify(parsed) === raw) {
-      return { text: JSON.stringify(parsed, null, 2), rawFallback: false };
-    }
-  } catch {
-    // 非合法 JSON 直接原文展示
-  }
-  return { text: raw, rawFallback: true };
-}
-
 function runTime(run: BotScheduleRun) {
   const at = run.started_at ?? run.scheduled_for;
   return at ? formatDate(at) : "—";
