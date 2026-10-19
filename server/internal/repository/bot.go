@@ -116,11 +116,18 @@ func botMessageTextExpr(column string) string {
 	return "json_extract(" + jsonColumnOr(column, "{}") + ", '$.text')"
 }
 
-// botTrimWhitespaceExpr 是 SQL trim 的字符集参数：ASCII 空白全集（空格、制表、
-// 换行、垂直制表、换页、回车）。SQLite 的单参 trim 只去空格，挡不住模型输出里
-// 纯 "\n\n" 的正文，必须显式给字符集才能与 Go 侧 strings.TrimSpace 的判定对齐；
-// 更宽的 Unicode 空白现实里不会整条正文只有它，不做逐字符枚举。
-const botTrimWhitespaceExpr = "char(9)||char(10)||char(11)||char(12)||char(13)||' '"
+// botTrimWhitespaceExpr 是 SQL trim 的字符集参数，覆盖 Go strings.TrimSpace
+// （unicode.IsSpace）认定的全部空白：ASCII 的空格、制表、换行、垂直制表、
+// 换页、回车，以及 U+0085、U+00A0、U+1680、U+2000–U+200A、U+2028、U+2029、
+// U+202F、U+205F、U+3000。SQLite 的单参 trim 只去空格，挡不住纯 "\n\n" 或
+// 用全角空格（U+3000）、不换行空格（U+00A0）凑出来的正文，必须显式给字符集
+// 才能与 Go 侧 strings.TrimSpace 的判定对齐；trim 只用于过滤，返回的 text
+// 保持原文不改写。
+const botTrimWhitespaceExpr = "char(9)||char(10)||char(11)||char(12)||char(13)||char(32)" +
+	"||char(133)||char(160)||char(5760)" +
+	"||char(8192)||char(8193)||char(8194)||char(8195)||char(8196)" +
+	"||char(8197)||char(8198)||char(8199)||char(8200)||char(8201)||char(8202)" +
+	"||char(8232)||char(8233)||char(8239)||char(8287)||char(12288)"
 
 // botLastMessagesSQL 构造最近消息预览的选取语句：bots 表列出全部目标机器人，
 // 每个机器人经相关子查询沿 (bot_id, session_kind, seq) 复合索引倒序找第一条

@@ -680,8 +680,10 @@ export function useBotChat(botId: string) {
           botKeys.messages(userId, botId),
           (previous) => mergeMessages(previous ?? [], [result.message]),
         );
-        // REST 成功路径同样写预览：发送方不一定收到自己的 user_message 事件。
-        updateListPreview(queryClient, userId, result.message);
+        // 预览不在这里写：发送方也会从 SSE 收到自己的 user_message（服务端在同
+        // 一事务追加该事件，重连按 seq 补读），由那条有顺序的流统一写预览。
+        // 两个写点会增加竞态：模型回得快时 assistant 的 message_commit 已经写
+        // 入新预览，这个晚到的 REST 响应会用更旧的 user 消息盖回去。
         if (result.run) {
           queryClient.setQueryData<BotRun[]>(
             botKeys.runs(userId, botId),

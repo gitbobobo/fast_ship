@@ -86,14 +86,16 @@ func TestBotLastMessagesByBotIDsPicksLastNonEmptyMainline(t *testing.T) {
 	db, repo := setupBotLastMessageTestDB(t)
 	base := time.Now().UTC().Add(-time.Hour)
 
-	// Bot A：最后一条是纯空白正文的 assistant（模型只回了换行和空格）→ trim
-	// 后为空跳过；再往前是只带 tool_calls、text 为空的 assistant → 也跳过；
-	// 取更早的 user 正文。
+	// Bot A：最后一条是纯 Unicode 空白的 assistant（全角空格 + 不换行空格 +
+	// 全角空格，模型输出里真的会出现）→ 同样跳过；再往前是纯 ASCII 空白的
+	// assistant → 跳过；再往前是只带 tool_calls、text 为空的 assistant →
+	// 也跳过；取更早的 user 正文。
 	botA := createBotLastMessageBot(t, db, "user-a")
 	appendBotLastMessage(t, db, botA.ID, 1, model.BotMessageKindUser, model.BotSessionKindMain, userTextJSON(t, "第一条"), base)
 	appendBotLastMessage(t, db, botA.ID, 2, model.BotMessageKindAssistant, model.BotSessionKindMain, `{"text":"","tool_calls":[{"call_id":"c1"}]}`, base.Add(time.Minute))
 	appendBotLastMessage(t, db, botA.ID, 3, model.BotMessageKindUser, model.BotSessionKindMain, userTextJSON(t, "最后一条"), base.Add(2*time.Minute))
 	appendBotLastMessage(t, db, botA.ID, 4, model.BotMessageKindAssistant, model.BotSessionKindMain, `{"text":"\n\n  \t"}`, base.Add(3*time.Minute))
+	appendBotLastMessage(t, db, botA.ID, 5, model.BotMessageKindAssistant, model.BotSessionKindMain, `{"text":"\u3000\u00a0\u2003"}`, base.Add(4*time.Minute))
 
 	// Bot B：主线之后插了更晚 seq 的定时任务会话消息 → 绝不参与，取主线
 	// 最后一条 assistant 正文。
@@ -119,7 +121,7 @@ func TestBotLastMessagesByBotIDsPicksLastNonEmptyMainline(t *testing.T) {
 		t.Fatalf("bot A 应有最近消息")
 	}
 	if a.Kind != string(model.BotMessageKindUser) || a.Text != "最后一条" {
-		t.Fatalf("bot A 应跳过纯空白与空正文取最后一条 user 正文: %+v", a)
+		t.Fatalf("bot A 应跳过 ASCII/Unicode 纯空白与空正文取最后一条 user 正文: %+v", a)
 	}
 
 	b, ok := got[botB.ID]

@@ -684,8 +684,10 @@ describe("useBotChat", () => {
     expect(api.list).not.toHaveBeenCalled();
   });
 
-  it("sendMessage 成功后把 user 消息写进列表预览", async () => {
-    // 发送方不一定收到自己的 user_message 事件：REST 成功路径也写预览。
+  it("sendMessage 不写预览：预览只由按 seq 到达的 user_message 事件写", async () => {
+    // 两个写点会引入竞态：模型回得快时 assistant 的 message_commit 已写入更新的
+    // 预览，晚到的 REST 响应会用更旧的 user 消息盖回去。发送方同样会收到自己的
+    // user_message 事件（下一条用例），所以这里只断言 REST 路径不碰预览。
     const { client, result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
     client.setQueryData<Bot[]>(botKeys.list("A"), [
@@ -708,7 +710,7 @@ describe("useBotChat", () => {
 
     expect(
       client.getQueryData<Bot[]>(botKeys.list("A"))?.[0]?.last_message,
-    ).toEqual({ kind: "user", text: "帮我看看问题" });
+    ).toBeNull();
   });
 
   it("sends a stop request without touching background calls", async () => {
