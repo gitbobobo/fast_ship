@@ -569,7 +569,7 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
 写操作也要先列 A/B/C 让用户选。
 
 - **平台提示词「对话风格」段**（`bot_prompt.go` 的 `botPlatformStyleRules`，
-  `botPlatformPromptVersion = 5`）：要求像同事聊天、先给结论、一般 1～3 句；
+  `botPlatformPromptVersion` 5 → 6）：要求像同事聊天、先给结论、一般 1～3 句；
   只有列表数据多于 3 行才用表格，不写标题与小节；调用工具前不讲旁白，带
   `tool_calls` 的回合不写中间说明文字（工具与结果由界面呈现）；不复述用户的
   话、不评价用户、不罗列「下一步可选项」；意图明确且低风险时直接做，写操作
