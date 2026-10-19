@@ -847,6 +847,8 @@ interface QuotaWindow {
   unit: "percent" | "usd" | "count";
   /** UTC RFC3339；无重置时间为 null */
   reset_at: string | null;
+  /** 并行额度池名（INT-130）：仅同一账号有多个池时才下发（如 Factory「标准」/「Core」），其它供应商缺省 */
+  pool?: string;
 }
 
 interface QuotaBalance {

@@ -263,7 +263,7 @@ export function QuotaAccountFormDialog({
           <DialogDescription>
             {editing
               ? `凭据加密保存，不回显明文（当前 ${account.credential_hint || "未保存"}）；留空表示不修改`
-              : "凭据加密保存，不回显明文；保存后服务端定时拉取额度"}
+              : "粘贴供应商账号凭据后，服务端会定时拉取额度并在此展示；凭据加密保存，不回显明文"}
           </DialogDescription>
         </DialogHeader>
         {authSession ? (
