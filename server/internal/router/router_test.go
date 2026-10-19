@@ -886,14 +886,20 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	// 与生产 DSN 一致携带 busy_timeout：多连接共享缓存库上并发短事务（主线
-	// worker 写账本、窗口探测后台写缓存、HTTP 请求并发）撞锁时等待持锁事务
-	// 提交，而不是立刻报 database is locked/deadlocked。
+	// 与生产 DSN 一致携带 busy_timeout；并发纪律也同生产：单连接池
+	// （docs/internal/database.md）。共享缓存内存库在多连接下，两个并发短事务
+	// 各自持读锁再升写锁会直接返回 SQLITE_DEADLOCK（extended 6），busy_timeout
+	// 等不到持锁方提交，机器人主线/worker/决定并发就会随机 500。
 	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sql.DB: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
 
 	if err := db.AutoMigrate(
 		&model.User{},

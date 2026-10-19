@@ -2,6 +2,8 @@
 
 SQLite（glebarez/modernc 驱动，纯 Go 无 CGO），单文件 `database.path`。连接固定一个（`SetMaxOpenConns(1)`），靠 `busy_timeout` 串行化竞争。
 
+测试侧不是全量单连接，按需要显式声明：`router` 公共测试库（`setupRouterTestEnvMaybeLogs`）与 `service` 的机器人测试、序号/单连接回归测试都调 `SetMaxOpenConns(1)`；`service` 的通用 `setupTestServices` 仍是默认连接池。共享缓存内存库放开多连接时，两个并发短事务各自持读锁再升写锁会直接返回 `SQLITE_DEADLOCK`（extended 6），`busy_timeout` 等不到持锁方提交，机器人主线/worker/决定并发就会随机 500——所以从机器人侧起测试的库必须跟随生产纪律。
+
 ## 硬性规则：事务闭包内只能用事务句柄
 
 `SetMaxOpenConns(1)` 意味着全局只有一条连接。`Transaction(func(tx) {...})` 会借走这唯一的连接开事务；闭包内再调用任何走池根的方法（`r.db`/`s.db`/`repo` 的非 Tx 方法），等于向空池借第二条连接——`database/sql.(*DB).conn` 的借连接等待**没有超时**，`busy_timeout` 只覆盖 SQLite 锁等待，管不到池级等待。结果是 goroutine 永久挂起、事务永不提交，此后所有查库请求排队，**服务整体冻结**（INT-97 生产事故）。
