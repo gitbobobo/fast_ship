@@ -37,8 +37,8 @@ function makeMetrics(
 }
 
 // 与 bot-metrics.tsx 的 RINGS 同一几何：外环缓存、内环上下文。
-const CACHE_C = 2 * Math.PI * 17;
-const CONTEXT_C = 2 * Math.PI * 10;
+const CACHE_C = 2 * Math.PI * 10;
+const CONTEXT_C = 2 * Math.PI * 5.5;
 
 /** 进度弧：带 stroke-dashoffset 的 circle；缺失 / 0% 时不渲染。 */
 function arcOf(testId: string) {
@@ -69,11 +69,11 @@ describe("BotMetrics", () => {
     expect(speed.textContent).not.toContain("速度");
     expect(screen.getByTestId("bot-metrics")).not.toHaveTextContent("速度");
 
-    // 外环 = 缓存命中率：r=17、emerald 弧，80% → offset = C × 0.2。
-    expect(trackOf("bot-metric-cache")?.getAttribute("r")).toBe("17");
+    // 外环 = 缓存命中率：r=10、中性色弧，80% → offset = C × 0.2。
+    expect(trackOf("bot-metric-cache")?.getAttribute("r")).toBe("10");
     const cacheArc = arcOf("bot-metric-cache");
     expect(cacheArc).not.toBeNull();
-    expect(cacheArc?.getAttribute("class")).toContain("stroke-emerald-500");
+    expect(cacheArc?.getAttribute("class")).toContain("stroke-foreground");
     expect(Number(cacheArc?.getAttribute("stroke-dashoffset"))).toBeCloseTo(
       CACHE_C * 0.2,
       6,
@@ -83,12 +83,12 @@ describe("BotMetrics", () => {
       "cached_tokens / prompt_tokens",
     );
 
-    // 内环 = 上下文占比：r=10、sky 弧，25% → offset = C × 0.75；
+    // 内环 = 上下文占比：r=5.5、中性色弧，25% → offset = C × 0.75；
     // title 保留完整口径（估算、tokens 数、估算口径、窗口来源、细节）。
-    expect(trackOf("bot-metric-context")?.getAttribute("r")).toBe("10");
+    expect(trackOf("bot-metric-context")?.getAttribute("r")).toBe("5.5");
     const contextArc = arcOf("bot-metric-context");
     expect(contextArc).not.toBeNull();
-    expect(contextArc?.getAttribute("class")).toContain("stroke-sky-500");
+    expect(contextArc?.getAttribute("class")).toContain("stroke-muted-foreground");
     expect(Number(contextArc?.getAttribute("stroke-dashoffset"))).toBeCloseTo(
       CONTEXT_C * 0.75,
       6,
@@ -100,6 +100,11 @@ describe("BotMetrics", () => {
     expect(title).toContain("usage_delta/3.5");
     expect(title).toContain("自动检测");
     expect(title).toContain("GET /models");
+
+    // 尺寸与输入框那一行文字相称，不把输入框撑高。
+    const svg = screen.getByTestId("bot-metrics").querySelector("svg");
+    expect(svg).toHaveAttribute("width", "24");
+    expect(svg).toHaveAttribute("height", "24");
   });
 
   it("usage 未收齐时缓存与速度不可用：虚线轨道、无进度弧，上下文不受影响", () => {

@@ -19,11 +19,13 @@ function formatSpeed(tokensPerSecond: number): string {
     : tokensPerSecond.toFixed(1);
 }
 
-// 双环几何：圆心 (20,20)，外环缓存命中率（r=17）、内环上下文占比（r=10），
-// 环间留 3px 间隙；弧从顶部起画（rotate -90）。
+// 双环几何：圆心 (12,12)，尺寸与输入框那一行文字相称；环半径是外层 10、内层
+// 5.5，环间留 2px 间隙，弧从顶部起画（rotate -90）。
+const RING_CENTER = 12;
+const RING_STROKE = 2.5;
 const RINGS = {
-  cache: { r: 17, circumference: 2 * Math.PI * 17 },
-  context: { r: 10, circumference: 2 * Math.PI * 10 },
+  cache: { r: 10, circumference: 2 * Math.PI * 10 },
+  context: { r: 5.5, circumference: 2 * Math.PI * 5.5 },
 };
 
 /** 估算可能超出窗口，占比按 0–100 夹紧，避免画出过量弧。 */
@@ -53,26 +55,26 @@ function MetricRing({
     <g data-testid={testId}>
       <title>{title}</title>
       <circle
-        cx={20}
-        cy={20}
+        cx={RING_CENTER}
+        cy={RING_CENTER}
         r={radius}
         fill="none"
-        strokeWidth={4}
+        strokeWidth={RING_STROKE}
         className={pct != null ? "stroke-muted" : "stroke-muted opacity-60"}
         strokeDasharray={pct != null ? undefined : "3 3"}
       />
       {pct != null && pct > 0 && (
         <circle
-          cx={20}
-          cy={20}
+          cx={RING_CENTER}
+          cy={RING_CENTER}
           r={radius}
           fill="none"
-          strokeWidth={4}
+          strokeWidth={RING_STROKE}
           strokeLinecap="round"
           className={arcClassName}
           strokeDasharray={circumference}
           strokeDashoffset={circumference * (1 - pct / 100)}
-          transform="rotate(-90 20 20)"
+          transform={`rotate(-90 ${RING_CENTER} ${RING_CENTER})`}
         />
       )}
     </g>
@@ -80,8 +82,8 @@ function MetricRing({
 }
 
 /**
- * 发送按钮旁的模型指标：双环进度圆（外环缓存命中率、内环上下文占比）
- * + 右侧速度数值。口径都是快照里「最近一次主线模型请求」；任何一项
+ * 发送按钮旁的模型指标：双环进度圆（外环缓存命中率、内环上下文占比，都用
+ * 主题中性色，靠明暗而非色相区分）+ 右侧速度数值。口径都是快照里「最近一次主线模型请求」；任何一项
  * 缺失渲染「—」或不画弧，绝不把缺失当成 0。usage 未收齐时 token 计数
  * 不可用；上下文占比是服务端估算值（≠精确 token 数）。
  */
@@ -141,9 +143,9 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
       className="flex min-w-0 items-center gap-2 overflow-hidden text-xs whitespace-nowrap text-muted-foreground"
     >
       <svg
-        viewBox="0 0 40 40"
-        width={40}
-        height={40}
+        viewBox="0 0 24 24"
+        width={24}
+        height={24}
         className="shrink-0"
         role="img"
         aria-label={`模型指标：${cachePct != null ? `缓存命中率 ${cachePct}%` : "缓存命中率不可用"}，${contextPct != null ? `上下文占比 ≈${contextPct}%` : "上下文占比不可用"}`}
@@ -154,7 +156,7 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
           circumference={RINGS.cache.circumference}
           pct={cachePct}
           title={cacheTitle}
-          arcClassName="stroke-emerald-500 dark:stroke-emerald-400"
+          arcClassName="stroke-foreground"
         />
         <MetricRing
           testId="bot-metric-context"
@@ -162,7 +164,7 @@ export function BotMetrics({ metrics }: { metrics?: BotMetricsData | null }) {
           circumference={RINGS.context.circumference}
           pct={contextPct}
           title={contextTitle}
-          arcClassName="stroke-sky-500 dark:stroke-sky-400"
+          arcClassName="stroke-muted-foreground"
         />
       </svg>
       <span data-testid="bot-metric-speed" title={speedTitle}>
