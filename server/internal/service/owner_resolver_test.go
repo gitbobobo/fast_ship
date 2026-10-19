@@ -105,7 +105,7 @@ func TestPipelineConflictingKeysStayOwnerless(t *testing.T) {
 	alice := createTestUser(t, svc.db, "alice-conflict")
 	bob := createTestUser(t, svc.db, "bob-conflict")
 	aliceProj := createTestProject(t, svc.db, alice.ID)
-	bobRun := createAutomationRunForUser(t, svc.db, bob.ID)
+	bobRun := createReviewRunForUser(t, svc.db, bob.ID)
 
 	p, store := startResolvedPipeline(t, NewSelfLogOwnerResolver(svc.db))
 	slog.New(p.Handler()).Info("两键冲突",
@@ -188,69 +188,31 @@ func TestPipelineMisMarkedSystemScopeWithAssociationIsNotPublic(t *testing.T) {
 	}
 }
 
-func createAutomationRunForUser(t *testing.T, db *gorm.DB, userID string) *model.AutomationRun {
+// createReviewRunForUser 造一条归属 userID 的审查运行，供 run_id 归属解析测试使用。
+func createReviewRunForUser(t *testing.T, db *gorm.DB, userID string) *model.ReviewRun {
 	t.Helper()
 	now := time.Now().UTC()
-	env := &model.T3Environment{
-		ID:                   uuid.NewString(),
-		UserID:               userID,
-		Name:                 "env-" + uuid.NewString()[:8],
-		Address:              "https://t3.example.com",
-		BearerTokenEncrypted: []byte("x"),
-		BearerExpiresAt:      now.Add(time.Hour),
-		CreatedAt:            now,
-		UpdatedAt:            now,
-	}
-	if err := db.Create(env).Error; err != nil {
-		t.Fatalf("create env: %v", err)
-	}
-	a := &model.Automation{
-		ID:             uuid.NewString(),
-		UserID:         userID,
-		Name:           "run-owner",
-		Enabled:        true,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		EnvironmentID:  env.ID,
-		T3ProjectID:    "t3-proj",
-		PromptTemplate: "x",
-		RuntimeMode:    "full-access",
-		TimeoutSeconds: 3600,
-		PostAction:     model.AutomationPostNone,
-	}
-	if err := db.Create(a).Error; err != nil {
-		t.Fatalf("create automation: %v", err)
-	}
-	tr := &model.AutomationTrigger{
-		ID:           uuid.NewString(),
-		AutomationID: a.ID,
-		TriggerType:  model.AutomationTriggerIssueCreated,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	if err := db.Create(tr).Error; err != nil {
-		t.Fatalf("create trigger: %v", err)
-	}
-	run := &model.AutomationRun{
-		ID:                 uuid.NewString(),
-		UserID:             userID,
-		AutomationID:       a.ID,
-		TriggerID:          tr.ID,
-		TriggerType:        tr.TriggerType,
-		TriggerKey:         "event:" + uuid.NewString(),
-		TriggeredAt:        now,
-		ConfigSnapshotJSON: `{}`,
-		EnvironmentID:      env.ID,
-		T3ProjectID:        a.T3ProjectID,
-		ThreadID:           uuid.NewString(),
-		LaunchCommandID:    uuid.NewString(),
-		InitialMessageID:   uuid.NewString(),
-		Status:             model.RunStatusPendingRun,
-		DeadlineAt:         now.Add(time.Hour),
-		PostState:          model.AutomationPostStateNone,
+	project := createTestProject(t, db, userID)
+	run := &model.ReviewRun{
+		ID:               uuid.NewString(),
+		UserID:           userID,
+		ProjectID:        project.ID,
+		Kind:             model.ReviewKindCode,
+		RepoFullName:     "acme/repo",
+		PRNumber:         1,
+		HeadSHA:          "deadbeef",
+		RoundNumber:      1,
+		EnvironmentID:    uuid.NewString(),
+		InstanceID:       "inst",
+		Model:            "model",
+		ThreadID:         uuid.NewString(),
+		LaunchCommandID:  uuid.NewString(),
+		InitialMessageID: uuid.NewString(),
+		Status:           model.ReviewRunQueued,
+		DeadlineAt:       now.Add(time.Hour),
 	}
 	if err := db.Create(run).Error; err != nil {
-		t.Fatalf("create run: %v", err)
+		t.Fatalf("create review run: %v", err)
 	}
 	return run
 }

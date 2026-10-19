@@ -143,16 +143,6 @@ type (
 	ScreenshotAnnotationBatchRequest  = api.ScreenshotAnnotationBatchRequest
 	ScreenshotAnnotationBatchResult   = api.ScreenshotAnnotationBatchResult
 
-	// automations（INT-90）
-	CreateAutomationRequest  = api.CreateAutomationRequest
-	UpdateAutomationRequest  = api.UpdateAutomationRequest
-	AutomationResponse       = api.Automation
-	AutomationEventFilter    = api.AutomationEventFilter
-	AutomationModelSelection = api.AutomationModelSelection
-	AutomationWorkspace      = api.AutomationWorkspace
-	AutomationRunResponse    = api.AutomationRun
-	AutomationTriggerContext = api.AutomationTriggerContext
-
 	// quota（INT-109）
 	CreateQuotaAccountRequest            = api.CreateQuotaAccountRequest
 	UpdateQuotaAccountRequest            = api.UpdateQuotaAccountRequest
@@ -163,11 +153,8 @@ type (
 	StartQuotaDeviceAuthorizationRequest = api.StartQuotaDeviceAuthorizationRequest
 	QuotaDeviceAuthorizationResponse     = api.QuotaDeviceAuthorization
 
-	// notifications & automation agent
-	NotificationResponse       = api.Notification
-	AutomationRunReportRequest = api.AutomationRunReportRequest
-	AutomationRunReportResult  = api.AutomationRunReportResult
-	AgentNotificationRequest   = api.AgentNotificationRequest
+	// notifications
+	NotificationResponse = api.Notification
 
 	// members & invites（INT-129）
 	MemberResponse          = api.Member
@@ -179,4 +166,14 @@ type (
 	// deployment（INT-129）
 	DeploymentSettingsResponse      = api.DeploymentSettings
 	UpdateDeploymentSettingsRequest = api.UpdateDeploymentSettingsRequest
+
+	// reviews（INT-135）
+	ReviewSettings          = api.ReviewSettings
+	ReviewSettingsInput     = api.ReviewSettingsInput
+	ReviewCombination       = api.ReviewCombination
+	ReviewPrerequisite      = api.ReviewPrerequisite
+	ReviewProjectSummary    = api.ReviewProjectSummary
+	ReviewPullRequestRecord = api.ReviewPullRequestRecord
+	ReviewRoundRecord       = api.ReviewRoundRecord
+	ReviewRunSummary        = api.ReviewRunSummary
 )

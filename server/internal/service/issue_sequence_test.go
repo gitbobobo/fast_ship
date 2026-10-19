@@ -10,7 +10,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	ghclient "github.com/godbobo/fast_ship/server/internal/pkg/github"
 	gh "github.com/google/go-github/v62/github"
-	"gorm.io/gorm"
 )
 
 // INT-96 回归：sequence_number 的 MAX+1 取号必须与 INSERT 同事务。生产
@@ -80,13 +79,11 @@ func TestIssueMirrorUpsert_ConcurrentWithManualCreate(t *testing.T) {
 }
 
 // 同一 GitHub issue 并发首见：事务外的 meta 查询只是快照，并发方可能已抢先
-// 落库——事务内必须复核身份转更新路径，否则留下无 meta 的孤儿行并双发事件。
+// 落库——事务内必须复核身份转更新路径，否则留下无 meta 的孤儿行。
 func TestIssueMirrorUpsert_ConcurrentSameGitHubIssueIsDeduplicated(t *testing.T) {
 	svc := setupTestServices(t)
 	limitPoolToSingleConn(t, svc)
 	user := createTestUser(t, svc.db, "user-seq-same")
-	sink := &countingIssueEventSink{}
-	svc.issueService.SetIssueEventSink(sink)
 
 	const rounds = 6
 	for r := 0; r < rounds; r++ {
@@ -141,30 +138,6 @@ func TestIssueMirrorUpsert_ConcurrentSameGitHubIssueIsDeduplicated(t *testing.T)
 			t.Fatalf("round %d: sole issue has sequence_number %d, want 1", r, issue.SequenceNumber)
 		}
 	}
-
-	if got := sink.createdCount(); got != rounds {
-		t.Fatalf("expected %d issue_created events (one per project), got %d", rounds, got)
-	}
-}
-
-type countingIssueEventSink struct {
-	mu      sync.Mutex
-	created int
-}
-
-func (s *countingIssueEventSink) EnqueueIssueEventTx(_ *gorm.DB, event IssueEvent) error {
-	if event.Type == model.AutomationTriggerIssueCreated {
-		s.mu.Lock()
-		s.created++
-		s.mu.Unlock()
-	}
-	return nil
-}
-
-func (s *countingIssueEventSink) createdCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.created
 }
 
 // runConcurrently 用统一起点栅栏把 n 个任务尽量压到同一时刻发出，按任务序号收错。

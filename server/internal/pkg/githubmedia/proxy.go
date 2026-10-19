@@ -194,7 +194,20 @@ func (s *ProxyService) GetCached(rawURL string) (*CachedMedia, bool, error) {
 	return s.getCachedNormalized(normalized)
 }
 
+// FetchAndCache 匿名拉取并缓存（公开附件）。私有仓库附件用
+// FetchAndCacheWithBearer。
 func (s *ProxyService) FetchAndCache(ctx context.Context, rawURL string) (*CachedMedia, error) {
+	return s.fetchAndCache(ctx, rawURL, "")
+}
+
+// FetchAndCacheWithBearer 同 FetchAndCache，但请求带 Authorization: Bearer：
+// 私有仓库的 user-attachments 需要 App 安装令牌才拉得到。bearer 只进请求头，
+// 不进缓存键，与匿名路径共用同一份缓存。
+func (s *ProxyService) FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer string) (*CachedMedia, error) {
+	return s.fetchAndCache(ctx, rawURL, bearer)
+}
+
+func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string) (*CachedMedia, error) {
 	normalized, err := s.normalize(rawURL)
 	if err != nil {
 		return nil, err
@@ -220,6 +233,9 @@ func (s *ProxyService) FetchAndCache(ctx context.Context, rawURL string) (*Cache
 	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "fast-ship-media-proxy/1.0")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

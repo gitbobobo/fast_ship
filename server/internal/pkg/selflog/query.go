@@ -28,7 +28,6 @@ type Filter struct {
 	UserID        string
 	ProjectID     string
 	IssueID       string
-	AutomationID  string
 	RunID         string
 	ThreadID      string
 	Keyword       string // 包含（匹配 message 与 extra）
@@ -239,13 +238,12 @@ func applyFilter(db *gorm.DB, f Filter) *gorm.DB {
 		db = db.Where("module IN ?", f.Modules)
 	}
 	eq := map[string]string{
-		"request_id":    f.RequestID,
-		"user_id":       f.UserID,
-		"project_id":    f.ProjectID,
-		"issue_id":      f.IssueID,
-		"automation_id": f.AutomationID,
-		"run_id":        f.RunID,
-		"thread_id":     f.ThreadID,
+		"request_id": f.RequestID,
+		"user_id":    f.UserID,
+		"project_id": f.ProjectID,
+		"issue_id":   f.IssueID,
+		"run_id":     f.RunID,
+		"thread_id":  f.ThreadID,
 	}
 	for col, val := range eq {
 		if val != "" {
@@ -267,7 +265,7 @@ func applyFilter(db *gorm.DB, f Filter) *gorm.DB {
 	}
 	if f.VisibleUserID != "" {
 		db = db.Where(
-			"user_id = ? OR (system_scope = 1 AND user_id = '' AND project_id = '' AND issue_id = '' AND automation_id = '' AND run_id = '' AND thread_id = '')",
+			"user_id = ? OR (system_scope = 1 AND user_id = '' AND project_id = '' AND issue_id = '' AND run_id = '' AND thread_id = '')",
 			f.VisibleUserID,
 		)
 	}
@@ -315,19 +313,18 @@ func recordToEntry(r Record) Entry {
 		extra = *r.Extra
 	}
 	return Entry{
-		ID:           r.ID,
-		Time:         time.Unix(0, r.TimeUnix).UTC(),
-		Level:        r.Level,
-		Module:       r.Module,
-		Message:      r.Message,
-		RequestID:    r.RequestID,
-		UserID:       r.UserID,
-		ProjectID:    r.ProjectID,
-		IssueID:      r.IssueID,
-		AutomationID: r.AutomationID,
-		RunID:        r.RunID,
-		ThreadID:     r.ThreadID,
-		Extra:        extra,
-		SystemScope:  r.SystemScope != 0,
+		ID:          r.ID,
+		Time:        time.Unix(0, r.TimeUnix).UTC(),
+		Level:       r.Level,
+		Module:      r.Module,
+		Message:     r.Message,
+		RequestID:   r.RequestID,
+		UserID:      r.UserID,
+		ProjectID:   r.ProjectID,
+		IssueID:     r.IssueID,
+		RunID:       r.RunID,
+		ThreadID:    r.ThreadID,
+		Extra:       extra,
+		SystemScope: r.SystemScope != 0,
 	}
 }

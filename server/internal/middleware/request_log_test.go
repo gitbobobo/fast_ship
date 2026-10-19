@@ -377,12 +377,12 @@ func TestRequestLogBindsRunIDForRunTokenAuth(t *testing.T) {
 		BindRequestUser(c)
 		c.Next()
 	})
-	env.router.POST("/api/automation-agent/report", func(c *gin.Context) {
+	env.router.POST("/api/review-agent/report", func(c *gin.Context) {
 		LoggerFrom(c).Info("Agent 回报", slog.String("thread_id", "th-1"))
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
-	env.do(t, http.MethodPost, "/api/automation-agent/report", map[string]string{RequestIDHeader: "req-run"})
+	env.do(t, http.MethodPost, "/api/review-agent/report", map[string]string{RequestIDHeader: "req-run"})
 	entries := env.traceByRequestID(t, "req-run")
 	var completion *selflog.Entry
 	for i := range entries {

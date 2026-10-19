@@ -95,16 +95,24 @@ func (stubGitHubClient) UpdatePullRequestComment(context.Context, int64, string,
 	return stubErr("UpdatePullRequestComment")
 }
 
-func (stubGitHubClient) CreateCheckRun(context.Context, int64, string, string, string, string) (int64, error) {
-	return 0, stubErr("CreateCheckRun")
+func (stubGitHubClient) SubmitReview(context.Context, int64, string, int, githubapi.ReviewInput) (int64, error) {
+	return 0, stubErr("SubmitReview")
 }
 
-func (stubGitHubClient) UpdateCheckRun(context.Context, int64, string, int64, githubapi.CheckUpdate) error {
-	return stubErr("UpdateCheckRun")
+func (stubGitHubClient) CreateCommitStatus(context.Context, int64, string, string, string, string, string, string) error {
+	return stubErr("CreateCommitStatus")
 }
 
-func (stubGitHubClient) SubmitReview(context.Context, int64, string, int, githubapi.ReviewInput) error {
-	return stubErr("SubmitReview")
+func (stubGitHubClient) GetRepository(context.Context, int64, string) error {
+	return stubErr("GetRepository")
+}
+
+func (stubGitHubClient) ResolveInstallation(context.Context, string) (int64, error) {
+	return 0, stubErr("ResolveInstallation")
+}
+
+func (stubGitHubClient) ListIssueCommentsForPR(context.Context, int64, string, int) ([]githubapi.IssueComment, error) {
+	return nil, stubErr("ListIssueCommentsForPR")
 }
 
 // 编译期钉住 stub 自身满足两个 seam 接口。

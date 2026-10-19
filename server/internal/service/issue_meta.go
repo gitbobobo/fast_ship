@@ -2,12 +2,12 @@ package service
 
 import (
 	"errors"
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
-	"time"
 )
 
 func (s *IssueService) ReplaceChecklist(issueID, userID string, req ReplaceIssueChecklistRequest, actor string) (*IssueInternalMetaResponse, error) {
@@ -107,22 +107,10 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 			CreatedAt: now,
 		}
 	}
-	prevWorkflowStatus := meta.WorkflowStatus
-
 	meta.WorkflowStatus = workflowStatus
 	meta.UpdatedByUserID = userID
 	meta.UpdatedAt = now
 	applyExplicitWorkflowStatus(meta, workflowStatus, now)
-
-	// 事件归属用户在事务外解析：单连接池下闭包内再借连接会永久自锁（INT-97）。
-	ownerID := issue.AuthorUserID
-	if workflowStatus != prevWorkflowStatus && ownerID == "" {
-		project, err := s.projectRepo.FindByIDGlobal(issue.ProjectID)
-		if err != nil {
-			return nil, errs.ErrInternal
-		}
-		ownerID = project.UserID
-	}
 
 	// 同步刷新 issues 主表的 updated_at（仅此一列），使看板按 updated_at DESC 排序时能反映状态变更。
 	if err := s.issueRepo.Transaction(func(tx *gorm.DB) error {
@@ -136,25 +124,6 @@ func (s *IssueService) UpdateInternalMeta(issueID, userID string, workflowStatus
 		}
 		if err := s.issueRepo.TouchUpdatedAt(tx, issue.ID, now); err != nil {
 			return err
-		}
-		// 自动化事件（INT-90）：workflow_status 变化与 state 变化是两类事件，
-		// 无变化（重复设置同一状态）不触发。
-		if workflowStatus != prevWorkflowStatus {
-			if err := s.emitIssueEventTx(tx, IssueEvent{
-				Type:                model.AutomationTriggerIssueStatusChanged,
-				UserID:              ownerID,
-				ProjectID:           issue.ProjectID,
-				IssueID:             issue.ID,
-				TriggerKey:          "event:" + uuid.NewString(),
-				StatusField:         "workflow_status",
-				From:                string(prevWorkflowStatus),
-				To:                  string(workflowStatus),
-				IssueSequenceNumber: issue.SequenceNumber,
-				IssueTitle:          issue.Title,
-				OccurredAt:          now,
-			}); err != nil {
-				return err
-			}
 		}
 		return nil
 	}); err != nil {
@@ -220,56 +189,4 @@ func (s *IssueService) BatchUpdateInternalMeta(userID string, items []BatchUpdat
 		zap.Int64("elapsed_ms", resp.ElapsedMs),
 	)
 	return resp, nil
-}
-
-// emitInternalUpdateEventsTx 内部 issue 更新（UpdateInternalIssue）的自动化事件：
-// state 变化发状态事件，标签只对新增集合发一次事件。无变化不触发。
-// internalMeta 为 nil 表示本次未改标签。ownerID 由调用方在事务外解析传入——
-// 闭包内调任何走池根的方法都会在单连接池下自锁（INT-97）。
-func (s *IssueService) emitInternalUpdateEventsTx(
-	tx *gorm.DB,
-	ownerID string,
-	issue *model.Issue,
-	req UpdateInternalIssueRequest,
-	prevState model.IssueState,
-	prevLabels []string,
-	internalMeta *model.IssueInternalMeta,
-) error {
-	now := time.Now().UTC()
-	if req.State != nil && issue.State != prevState {
-		if err := s.emitIssueEventTx(tx, IssueEvent{
-			Type:                model.AutomationTriggerIssueStatusChanged,
-			UserID:              ownerID,
-			ProjectID:           issue.ProjectID,
-			IssueID:             issue.ID,
-			TriggerKey:          "event:" + uuid.NewString(),
-			StatusField:         "state",
-			From:                string(prevState),
-			To:                  string(issue.State),
-			IssueSequenceNumber: issue.SequenceNumber,
-			IssueTitle:          issue.Title,
-			OccurredAt:          now,
-		}); err != nil {
-			return err
-		}
-	}
-	if internalMeta != nil {
-		added := missingLabels(parseLabelsJSON(internalMeta.LabelsJSON), prevLabels)
-		if len(added) > 0 {
-			if err := s.emitIssueEventTx(tx, IssueEvent{
-				Type:                model.AutomationTriggerIssueLabelAdded,
-				UserID:              ownerID,
-				ProjectID:           issue.ProjectID,
-				IssueID:             issue.ID,
-				TriggerKey:          "event:" + uuid.NewString(),
-				LabelsAdded:         added,
-				IssueSequenceNumber: issue.SequenceNumber,
-				IssueTitle:          issue.Title,
-				OccurredAt:          now,
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }

@@ -16,8 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// NotificationSink 站内通知写入端（INT-90）。系统通知（派发失败/超时/后置失败）
-// 与 Agent 通知共用一套 dedup 语义：
+// NotificationSink 站内通知写入端（INT-90）。审查系统故障通知共用一套 dedup 语义：
 //
 //	dedup_key        = hash(environment_id, thread_id, kind, problem_key)
 //	state_fingerprint = hash(state_key)
@@ -34,7 +33,7 @@ func NewNotificationSink(db *gorm.DB) *NotificationSink {
 }
 
 // NotificationInput 一次通知发布的内容。ProblemKey 缺省用 run_id，
-// StateKey 缺省用 title+body（Agent 通知没有明确状态机的场合）。
+// StateKey 缺省用 title+body。
 type NotificationInput struct {
 	UserID        string
 	Kind          model.NotificationKind
@@ -106,7 +105,7 @@ func (s *NotificationSink) PublishTx(tx *gorm.DB, in NotificationInput) error {
 		}).Error
 }
 
-// Publish 非 事务入口：Agent 通知等独立小事务场景。
+// Publish 非事务入口：独立小事务场景。
 func (s *NotificationSink) Publish(in NotificationInput) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		return s.PublishTx(tx, in)
@@ -126,11 +125,9 @@ func notificationHash(parts ...string) string {
 
 func isValidNotificationKind(kind model.NotificationKind) bool {
 	switch kind {
-	case model.NotificationAgent,
-		model.NotificationAutomationDispatchFailed,
-		model.NotificationAutomationRunTimeout,
-		model.NotificationAutomationPostFailed,
-		model.NotificationAutomationBusy:
+	case model.NotificationReviewDispatchFailed,
+		model.NotificationReviewRunTimeout,
+		model.NotificationReviewCleanupFailed:
 		return true
 	}
 	return false

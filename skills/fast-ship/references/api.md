@@ -7182,71 +7182,42 @@ workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展�
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 项目不存在（40401） |
 
-## automations
+## reviews
 
-用户可配置的自动化（cron / 内部 Issue 事件触发 T3 线程；仅 JWT，INT-90）
+PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查记录查询
 
-### GET `/api/automations`
+### GET `/api/reviews`
 
-<!-- operationId: listAutomations -->
+<!-- operationId: listReviewProjects -->
 
-列出当前用户的自动化
+列出当前用户的审查总览
+
+返回当前用户所有已关联 GitHub 仓库的项目。同仓库已被其他项目开启审查时，
+该行 `taken_by` 返回占用者登录名且 `can_manage=false`。
 
 **鉴权**：仅 JWT
 
 **成功响应**
 
-**200** 自动化列表（按创建时间倒序）
+**200** 审查总览
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `items` | object[] | 是 |  |
-| `items[].id` | string | 是 |  |
-| `items[].name` | string | 是 |  |
+| `items[].project_id` | string | 是 |  |
+| `items[].project_name` | string | 是 |  |
+| `items[].github_owner` | string | 是 |  |
+| `items[].github_repo` | string | 是 |  |
 | `items[].enabled` | boolean | 是 |  |
-| `items[].triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
-| `items[].triggers[].id` | string | 是 |  |
-| `items[].triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `items[].triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
-| `items[].triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
-| `items[].triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
-| `items[].triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
-| `items[].triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `items[].triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `items[].triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `items[].triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `items[].triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
-| `items[].triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
-| `items[].triggers[].model_selections[].instance_id` | string | 是 |  |
-| `items[].triggers[].model_selections[].model` | string | 是 |  |
-| `items[].triggers[].model_selections[].options` | object[] | 否 |  |
-| `items[].triggers[].model_selections[].options[].id` | string | 否 |  |
-| `items[].triggers[].model_selections[].options[].value` | string | 否 |  |
-| `items[].triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
-| `items[].triggers[].created_at` | string | 是 |  |
-| `items[].environment_id` | string | 是 | T3 环境 ID |
-| `items[].t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `items[].prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `items[].model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
-| `items[].model_selection.instance_id` | string | 是 |  |
-| `items[].model_selection.model` | string | 是 |  |
-| `items[].model_selection.options` | object[] | 否 |  |
-| `items[].model_selection.options[].id` | string | 否 |  |
-| `items[].model_selection.options[].value` | string | 否 |  |
-| `items[].runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
-| `items[].workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
-| `items[].workspace.type` | string | 是 | root / worktree / existing_worktree |
-| `items[].workspace.base_ref` | string | 否 |  |
-| `items[].workspace.branch` | string | 否 |  |
-| `items[].workspace.start_from_origin` | boolean | 否 |  |
-| `items[].workspace.worktree_path` | string | 否 |  |
-| `items[].timeout_seconds` | integer | 是 | 回报截止时长（秒）；1 分钟–24 小时，缺省 3600 |
-| `items[].post_action` | string（enum: none \| settle \| archive） | 是 | 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。 |
-| `items[].post_on_timeout` | boolean | 是 | 超时后是否仍执行后置操作；缺省 false |
-| `items[].created_at` | string | 是 |  |
-| `items[].updated_at` | string | 是 |  |
+| `items[].code_combination_count` | integer | 是 |  |
+| `items[].visual_combination_count` | integer | 是 |  |
+| `items[].code_status` | string（可空） | 否 | 最近一次代码审查结论（success/failure/error/pending） |
+| `items[].visual_status` | string（可空） | 否 |  |
+| `items[].last_review_at` | string（可空） | 否 |  |
+| `items[].taken_by` | string（可空） | 否 |  |
+| `items[].can_manage` | boolean | 是 |  |
 
 **错误**
 
@@ -7255,132 +7226,13 @@ workspace_root 是绑定成功那一刻的快照：环境不可达时仍可展�
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 500 | 服务器内部错误（50000） |
 
-### POST `/api/automations`
+### GET `/api/projects/{id}/review-settings`
 
-<!-- operationId: createAutomation -->
+<!-- operationId: getProjectReviewSettings -->
 
-创建自动化（默认停用）
+读取项目审查设置
 
-cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支持 `@every` 与表达式内时区前缀）；
-时区为独立 IANA 名称字段，缺省 UTC。启用自动化前服务端必须已配置 `server.public_url`（41202）。
-新建默认停用；启用时校验完整触发配置。
-
-**鉴权**：公开
-
-**请求体**
-
-`application/json`，必填。
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `name` | string（长度 ≤200） | 是 |  |
-| `enabled` | boolean | 否 | 缺省 false；启用时至少要有一个触发器，并完整校验触发配置与 public_url |
-| `triggers` | object[]（0..20 项） | 是 | 触发器全量列表（0–20 个，可重复、可混搭）。 |
-| `triggers[].id` | string | 否 | 可选；自动化内已存在的触发器 id |
-| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
-| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
-| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
-| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
-| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
-| `triggers[].model_selections[].instance_id` | string | 是 |  |
-| `triggers[].model_selections[].model` | string | 是 |  |
-| `triggers[].model_selections[].options` | object[] | 否 |  |
-| `triggers[].model_selections[].options[].id` | string | 否 |  |
-| `triggers[].model_selections[].options[].value` | string | 否 |  |
-| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
-| `environment_id` | string | 是 |  |
-| `t3_project_id` | string | 是 |  |
-| `prompt_template` | string | 是 |  |
-| `model_selection` | object | 否 | T3 模型选择（缺省回落 T3 项目默认） |
-| `model_selection.instance_id` | string | 是 |  |
-| `model_selection.model` | string | 是 |  |
-| `model_selection.options` | object[] | 否 |  |
-| `model_selection.options[].id` | string | 否 |  |
-| `model_selection.options[].value` | string | 否 |  |
-| `runtime_mode` | string | 否 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
-| `workspace` | object | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
-| `workspace.type` | string | 是 | root / worktree / existing_worktree |
-| `workspace.base_ref` | string | 否 |  |
-| `workspace.branch` | string | 否 |  |
-| `workspace.start_from_origin` | boolean | 否 |  |
-| `workspace.worktree_path` | string | 否 |  |
-| `timeout_seconds` | integer | 否 |  |
-| `post_action` | string（enum: none \| settle \| archive） | 否 | 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。 |
-| `post_on_timeout` | boolean | 否 |  |
-
-**成功响应**
-
-**200** 创建成功
-
-`data`：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `id` | string | 是 |  |
-| `name` | string | 是 |  |
-| `enabled` | boolean | 是 |  |
-| `triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
-| `triggers[].id` | string | 是 |  |
-| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
-| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
-| `triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
-| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
-| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
-| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
-| `triggers[].model_selections[].instance_id` | string | 是 |  |
-| `triggers[].model_selections[].model` | string | 是 |  |
-| `triggers[].model_selections[].options` | object[] | 否 |  |
-| `triggers[].model_selections[].options[].id` | string | 否 |  |
-| `triggers[].model_selections[].options[].value` | string | 否 |  |
-| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
-| `triggers[].created_at` | string | 是 |  |
-| `environment_id` | string | 是 | T3 环境 ID |
-| `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
-| `model_selection.instance_id` | string | 是 |  |
-| `model_selection.model` | string | 是 |  |
-| `model_selection.options` | object[] | 否 |  |
-| `model_selection.options[].id` | string | 否 |  |
-| `model_selection.options[].value` | string | 否 |  |
-| `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
-| `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
-| `workspace.type` | string | 是 | root / worktree / existing_worktree |
-| `workspace.base_ref` | string | 否 |  |
-| `workspace.branch` | string | 否 |  |
-| `workspace.start_from_origin` | boolean | 否 |  |
-| `workspace.worktree_path` | string | 否 |  |
-| `timeout_seconds` | integer | 是 | 回报截止时长（秒）；1 分钟–24 小时，缺省 3600 |
-| `post_action` | string（enum: none \| settle \| archive） | 是 | 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。 |
-| `post_on_timeout` | boolean | 是 | 超时后是否仍执行后置操作；缺省 false |
-| `created_at` | string | 是 |  |
-| `updated_at` | string | 是 |  |
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 400 | 请求参数无效（40001-40099） |
-| 401 | 未提供或提供无效凭证（40100-40199） |
-| 404 | 环境或项目不存在（40417 / 40401） |
-| 412 | 未配置 server.public_url（41202） |
-| 500 | 服务器内部错误（50000） |
-
-### GET `/api/automations/{id}`
-
-<!-- operationId: getAutomation -->
-
-获取自动化详情
+`prerequisites` 逐条列出开启审查的前置条件，`missing=true` 的项不允许开启。
 
 **鉴权**：仅 JWT
 
@@ -7388,60 +7240,47 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 | 自动化 ID（UUID，归属当前用户，跨用户一律 404） |
+| `id` | string | 是 | 项目 ID（UUID） |
 
 **成功响应**
 
-**200** 自动化详情
+**200** 审查设置
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 |  |
-| `name` | string | 是 |  |
+| `project_id` | string | 是 |  |
 | `enabled` | boolean | 是 |  |
-| `triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
-| `triggers[].id` | string | 是 |  |
-| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
-| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
-| `triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
-| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
-| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
-| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
-| `triggers[].model_selections[].instance_id` | string | 是 |  |
-| `triggers[].model_selections[].model` | string | 是 |  |
-| `triggers[].model_selections[].options` | object[] | 否 |  |
-| `triggers[].model_selections[].options[].id` | string | 否 |  |
-| `triggers[].model_selections[].options[].value` | string | 否 |  |
-| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
-| `triggers[].created_at` | string | 是 |  |
-| `environment_id` | string | 是 | T3 环境 ID |
-| `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
-| `model_selection.instance_id` | string | 是 |  |
-| `model_selection.model` | string | 是 |  |
-| `model_selection.options` | object[] | 否 |  |
-| `model_selection.options[].id` | string | 否 |  |
-| `model_selection.options[].value` | string | 否 |  |
-| `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
-| `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
-| `workspace.type` | string | 是 | root / worktree / existing_worktree |
-| `workspace.base_ref` | string | 否 |  |
-| `workspace.branch` | string | 否 |  |
-| `workspace.start_from_origin` | boolean | 否 |  |
-| `workspace.worktree_path` | string | 否 |  |
-| `timeout_seconds` | integer | 是 | 回报截止时长（秒）；1 分钟–24 小时，缺省 3600 |
-| `post_action` | string（enum: none \| settle \| archive） | 是 | 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。 |
-| `post_on_timeout` | boolean | 是 | 超时后是否仍执行后置操作；缺省 false |
-| `created_at` | string | 是 |  |
-| `updated_at` | string | 是 |  |
+| `trigger_opened` | boolean | 是 |  |
+| `trigger_synchronize` | boolean | 是 |  |
+| `trigger_ready_for_review` | boolean | 是 |  |
+| `trigger_reopened` | boolean | 是 |  |
+| `code_combinations` | object[]（≤5 项） | 是 |  |
+| `code_combinations[].environment_id` | string | 是 |  |
+| `code_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
+| `code_combinations[].model` | string | 是 |  |
+| `code_combinations[].options` | object[] | 否 | 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3 |
+| `code_combinations[].options[].id` | string | 是 |  |
+| `code_combinations[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `code_combinations[].environment_name` | string | 否 | 仅响应；环境当前名称 |
+| `code_combinations[].t3_project_id` | string | 否 | 仅响应；绑定的 T3 项目 id（保存时快照） |
+| `visual_combinations` | object[]（≤3 项） | 是 |  |
+| `visual_combinations[].environment_id` | string | 是 |  |
+| `visual_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
+| `visual_combinations[].model` | string | 是 |  |
+| `visual_combinations[].options` | object[] | 否 | 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3 |
+| `visual_combinations[].options[].id` | string | 是 |  |
+| `visual_combinations[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `visual_combinations[].environment_name` | string | 否 | 仅响应；环境当前名称 |
+| `visual_combinations[].t3_project_id` | string | 否 | 仅响应；绑定的 T3 项目 id（保存时快照） |
+| `prerequisites` | object[] | 是 |  |
+| `prerequisites[].code` | string（enum: github_app \| github_app_installation \| public_url \| github_token \| environment_binding） | 是 |  |
+| `prerequisites[].label` | string | 是 |  |
+| `prerequisites[].missing` | boolean | 是 |  |
+| `prerequisites[].detail` | string | 否 |  |
+| `taken_by` | string（可空） | 否 | 同仓库已开启审查的其他项目占用者登录名（只读） |
+| `can_manage` | boolean | 否 |  |
 
 **错误**
 
@@ -7451,13 +7290,15 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
-### PUT `/api/automations/{id}`
+### PUT `/api/projects/{id}/review-settings`
 
-<!-- operationId: updateAutomation -->
+<!-- operationId: updateProjectReviewSettings -->
 
-更新自动化（只影响后续触发）
+保存项目审查设置（全量替换）
 
-进行中的运行按创建时的配置快照执行，更新不中断已有运行。
+启用时必须满足全部前置条件、绑定 Token、所选环境属于当前用户且已绑定该项目，
+代码审查组合 1–5 个、视觉审查组合 0–3 个，同一组合不得重复。
+同一仓库已被其他项目开启时返回 40922。
 
 **鉴权**：仅 JWT
 
@@ -7465,108 +7306,77 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 | 自动化 ID（UUID，归属当前用户，跨用户一律 404） |
+| `id` | string | 是 | 项目 ID（UUID） |
 
 **请求体**
 
 `application/json`，必填。
 
-全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
-
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `name` | string（长度 ≤200） | 是 |  |
-| `enabled` | boolean | 否 |  |
-| `triggers` | object[]（0..20 项） | 是 | 触发器全量替换：带 id 更新、不带 id 新建、未提交的删除。 |
-| `triggers[].id` | string | 否 | 可选；自动化内已存在的触发器 id |
-| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
-| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
-| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
-| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
-| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。 |
-| `triggers[].model_selections[].instance_id` | string | 是 |  |
-| `triggers[].model_selections[].model` | string | 是 |  |
-| `triggers[].model_selections[].options` | object[] | 否 |  |
-| `triggers[].model_selections[].options[].id` | string | 否 |  |
-| `triggers[].model_selections[].options[].value` | string | 否 |  |
-| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。 |
-| `environment_id` | string | 是 |  |
-| `t3_project_id` | string | 是 |  |
-| `prompt_template` | string | 是 |  |
-| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
-| `model_selection.instance_id` | string | 是 |  |
-| `model_selection.model` | string | 是 |  |
-| `model_selection.options` | object[] | 否 |  |
-| `model_selection.options[].id` | string | 否 |  |
-| `model_selection.options[].value` | string | 否 |  |
-| `runtime_mode` | string | 否 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
-| `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
-| `workspace.type` | string | 是 | root / worktree / existing_worktree |
-| `workspace.base_ref` | string | 否 |  |
-| `workspace.branch` | string | 否 |  |
-| `workspace.start_from_origin` | boolean | 否 |  |
-| `workspace.worktree_path` | string | 否 |  |
-| `timeout_seconds` | integer | 否 |  |
-| `post_action` | string（enum: none \| settle \| archive） | 否 | 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。 |
-| `post_on_timeout` | boolean | 否 |  |
+| `enabled` | boolean | 是 |  |
+| `trigger_opened` | boolean | 是 |  |
+| `trigger_synchronize` | boolean | 是 |  |
+| `trigger_ready_for_review` | boolean | 是 |  |
+| `trigger_reopened` | boolean | 是 |  |
+| `code_combinations` | object[]（≤5 项） | 是 |  |
+| `code_combinations[].environment_id` | string | 是 |  |
+| `code_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
+| `code_combinations[].model` | string | 是 |  |
+| `code_combinations[].options` | object[] | 否 | 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3 |
+| `code_combinations[].options[].id` | string | 是 |  |
+| `code_combinations[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `code_combinations[].environment_name` | string | 否 | 仅响应；环境当前名称 |
+| `code_combinations[].t3_project_id` | string | 否 | 仅响应；绑定的 T3 项目 id（保存时快照） |
+| `visual_combinations` | object[]（≤3 项） | 是 |  |
+| `visual_combinations[].environment_id` | string | 是 |  |
+| `visual_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
+| `visual_combinations[].model` | string | 是 |  |
+| `visual_combinations[].options` | object[] | 否 | 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3 |
+| `visual_combinations[].options[].id` | string | 是 |  |
+| `visual_combinations[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `visual_combinations[].environment_name` | string | 否 | 仅响应；环境当前名称 |
+| `visual_combinations[].t3_project_id` | string | 否 | 仅响应；绑定的 T3 项目 id（保存时快照） |
 
 **成功响应**
 
-**200** 更新后的自动化
+**200** 保存后的设置
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 |  |
-| `name` | string | 是 |  |
+| `project_id` | string | 是 |  |
 | `enabled` | boolean | 是 |  |
-| `triggers` | object[] | 是 | 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。 |
-| `triggers[].id` | string | 是 |  |
-| `triggers[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `triggers[].cron_expression` | string（可空） | 否 | 仅 cron；五字段标准表达式 |
-| `triggers[].timezone` | string（可空） | 否 | IANA 时区名，仅 cron；空表示 UTC |
-| `triggers[].next_run_at` | string（可空） | 否 | 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算 |
-| `triggers[].issue_project_id` | string（可空） | 否 | 事件/PR 触发的项目范围；null 表示当前用户全部项目 |
-| `triggers[].event_filter` | object | 否 | Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state\|workflow_status）； issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。 |
-| `triggers[].event_filter.field` | string（enum: state \| workflow_status） | 否 |  |
-| `triggers[].event_filter.from` | string | 否 | 变化前值；空表示任意 |
-| `triggers[].event_filter.to` | string | 否 | 变化后值；空表示任意 |
-| `triggers[].event_filter.labels` | string[] | 否 | 匹配任一新加标签名；空数组表示全部加标签事件 |
-| `triggers[].model_selections` | object[] | 否 | 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮， 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择， 不能「项目默认」。 |
-| `triggers[].model_selections[].instance_id` | string | 是 |  |
-| `triggers[].model_selections[].model` | string | 是 |  |
-| `triggers[].model_selections[].options` | object[] | 否 |  |
-| `triggers[].model_selections[].options[].id` | string | 否 |  |
-| `triggers[].model_selections[].options[].value` | string | 否 |  |
-| `triggers[].debounce_seconds` | integer | 否 | 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400 |
-| `triggers[].created_at` | string | 是 |  |
-| `environment_id` | string | 是 | T3 环境 ID |
-| `t3_project_id` | string | 是 | T3 项目 ID（线程开在这里） |
-| `prompt_template` | string | 是 | 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明） |
-| `model_selection` | object（可空） | 否 | cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）。T3 模型选择（缺省回落 T3 项目默认） |
-| `model_selection.instance_id` | string | 是 |  |
-| `model_selection.model` | string | 是 |  |
-| `model_selection.options` | object[] | 否 |  |
-| `model_selection.options[].id` | string | 否 |  |
-| `model_selection.options[].value` | string | 否 |  |
-| `runtime_mode` | string | 是 | 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access |
-| `workspace` | object（可空） | 否 | 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照） |
-| `workspace.type` | string | 是 | root / worktree / existing_worktree |
-| `workspace.base_ref` | string | 否 |  |
-| `workspace.branch` | string | 否 |  |
-| `workspace.start_from_origin` | boolean | 否 |  |
-| `workspace.worktree_path` | string | 否 |  |
-| `timeout_seconds` | integer | 是 | 回报截止时长（秒）；1 分钟–24 小时，缺省 3600 |
-| `post_action` | string（enum: none \| settle \| archive） | 是 | 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。 |
-| `post_on_timeout` | boolean | 是 | 超时后是否仍执行后置操作；缺省 false |
-| `created_at` | string | 是 |  |
-| `updated_at` | string | 是 |  |
+| `trigger_opened` | boolean | 是 |  |
+| `trigger_synchronize` | boolean | 是 |  |
+| `trigger_ready_for_review` | boolean | 是 |  |
+| `trigger_reopened` | boolean | 是 |  |
+| `code_combinations` | object[]（≤5 项） | 是 |  |
+| `code_combinations[].environment_id` | string | 是 |  |
+| `code_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
+| `code_combinations[].model` | string | 是 |  |
+| `code_combinations[].options` | object[] | 否 | 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3 |
+| `code_combinations[].options[].id` | string | 是 |  |
+| `code_combinations[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `code_combinations[].environment_name` | string | 否 | 仅响应；环境当前名称 |
+| `code_combinations[].t3_project_id` | string | 否 | 仅响应；绑定的 T3 项目 id（保存时快照） |
+| `visual_combinations` | object[]（≤3 项） | 是 |  |
+| `visual_combinations[].environment_id` | string | 是 |  |
+| `visual_combinations[].instance_id` | string | 是 | T3 provider 实例 id（harness 维度） |
+| `visual_combinations[].model` | string | 是 |  |
+| `visual_combinations[].options` | object[] | 否 | 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3 |
+| `visual_combinations[].options[].id` | string | 是 |  |
+| `visual_combinations[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `visual_combinations[].environment_name` | string | 否 | 仅响应；环境当前名称 |
+| `visual_combinations[].t3_project_id` | string | 否 | 仅响应；绑定的 T3 项目 id（保存时快照） |
+| `prerequisites` | object[] | 是 |  |
+| `prerequisites[].code` | string（enum: github_app \| github_app_installation \| public_url \| github_token \| environment_binding） | 是 |  |
+| `prerequisites[].label` | string | 是 |  |
+| `prerequisites[].missing` | boolean | 是 |  |
+| `prerequisites[].detail` | string | 否 |  |
+| `taken_by` | string（可空） | 否 | 同仓库已开启审查的其他项目占用者登录名（只读） |
+| `can_manage` | boolean | 否 |  |
 
 **错误**
 
@@ -7575,16 +7385,17 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | 400 | 请求参数无效（40001-40099） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
-| 412 | 未配置 server.public_url（41202） |
+| 409 | 同一仓库已被其他项目开启（40922） |
+| 412 | 前置条件缺失（41202），message 内含逐条缺项 |
 | 500 | 服务器内部错误（50000） |
 
-### DELETE `/api/automations/{id}`
+### GET `/api/projects/{id}/review-records`
 
-<!-- operationId: deleteAutomation -->
+<!-- operationId: listProjectReviewRecords -->
 
-删除自动化
+列出项目审查记录
 
-有活动运行（运行中或后置操作待执行）时返回 409（40919）；删除会级联清理历史运行记录。
+按最近更新时间倒序列出 PR，每个 PR 内嵌轮次与各组合运行（可跳 T3 线程）。
 
 **鉴权**：仅 JWT
 
@@ -7592,90 +7403,75 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 | 自动化 ID（UUID，归属当前用户，跨用户一律 404） |
-
-**成功响应**
-
-**200** 操作成功（data 为 null）
-
-`data` 为 null。
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 401 | 未提供或提供无效凭证（40100-40199） |
-| 404 | 资源不存在（40400-40499） |
-| 409 | 有活动运行（40919） |
-| 500 | 服务器内部错误（50000） |
-
-### GET `/api/automations/{id}/runs`
-
-<!-- operationId: listAutomationRuns -->
-
-列出自动化的运行记录
-
-**鉴权**：仅 JWT
-
-**路径参数**
-
-| 名称 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `id` | string | 是 | 自动化 ID（UUID，归属当前用户，跨用户一律 404） |
+| `id` | string | 是 | 项目 ID（UUID） |
 
 **Query 参数**
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `limit` | integer（1..100，默认 50） | 否 |  |
+| `limit` | integer（1..100，默认 20） | 否 | 返回的 PR 数量上限 |
 
 **成功响应**
 
-**200** 运行记录（按触发时间倒序）
+**200** 审查记录
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `items` | object[] | 是 |  |
-| `items[].id` | string | 是 |  |
-| `items[].automation_id` | string | 是 |  |
-| `items[].trigger_id` | string | 是 | 触发本运行的触发器 id |
-| `items[].trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `items[].trigger_key` | string | 是 | 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
-| `items[].repo_full_name` | string | 否 | 仅 GitHub PR 触发；owner/repo |
-| `items[].pr_number` | integer | 否 | 仅 GitHub PR 触发 |
-| `items[].head_sha` | string | 否 | 仅 GitHub PR 触发；本轮审查的 head commit SHA |
-| `items[].round_number` | integer | 否 | 仅 GitHub PR 触发；同一 PR 内递增的轮次（从 1 起，同一轮各模型共享） |
-| `items[].model_instance_id` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型 instance_id |
-| `items[].model_name` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型名 |
-| `items[].trigger_context` | object（可空） | 否 | 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。 |
-| `items[].trigger_context.project_id` | string | 否 |  |
-| `items[].trigger_context.issue_id` | string | 否 |  |
-| `items[].trigger_context.issue_sequence_number` | integer | 否 |  |
-| `items[].trigger_context.issue_title` | string | 否 |  |
-| `items[].trigger_context.field` | string | 否 | 状态变化字段（state \| workflow_status） |
-| `items[].trigger_context.from` | string | 否 |  |
-| `items[].trigger_context.to` | string | 否 |  |
-| `items[].trigger_context.labels_added` | string[] | 否 |  |
-| `items[].triggered_at` | string | 是 |  |
-| `items[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled，可空） | 是 | queued=PR 审查排队（用户并发上限内不占在途名额，等调度提升）； dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始； cancelled=被新 head SHA 取代或规则改动后废弃（终态）； completed/failed/timed_out 为终态。回报未开始时状态可能为空。 |
-| `items[].dispatch_started_at` | string（可空） | 否 | worker 认领并开始派发的时间 |
-| `items[].environment_id` | string | 是 |  |
-| `items[].t3_project_id` | string | 是 |  |
-| `items[].thread_id` | string | 是 |  |
-| `items[].dispatched_at` | string（可空） | 否 | 启动 RPC 结果确认时间；为空表示线程是否建成未确认（此类运行不执行后置） |
-| `items[].started_at` | string（可空） | 否 |  |
-| `items[].finished_at` | string（可空） | 否 |  |
-| `items[].deadline_at` | string | 否 |  |
-| `items[].error_code` | string（可空） | 否 |  |
-| `items[].error_message` | string（可空） | 否 |  |
-| `items[].summary` | string（可空） | 否 |  |
-| `items[].post_state` | string（enum: none \| pending \| succeeded \| failed） | 是 |  |
-| `items[].post_attempt` | integer | 是 |  |
-| `items[].post_next_attempt_at` | string（可空） | 否 |  |
-| `items[].post_deadline_at` | string（可空） | 否 |  |
-| `items[].post_error` | string（可空） | 否 |  |
+| `items[].repo_full_name` | string | 是 |  |
+| `items[].pr_number` | integer | 是 |  |
+| `items[].pr_title` | string | 是 |  |
+| `items[].pr_url` | string | 是 |  |
+| `items[].head_sha` | string | 是 |  |
+| `items[].code_status` | string（可空） | 否 |  |
+| `items[].visual_status` | string（可空） | 否 |  |
+| `items[].updated_at` | string | 是 |  |
+| `items[].rounds` | object[] | 是 |  |
+| `items[].rounds[].round_number` | integer | 是 |  |
+| `items[].rounds[].head_sha` | string | 是 |  |
+| `items[].rounds[].created_at` | string | 是 |  |
+| `items[].rounds[].code_runs` | object[] | 是 |  |
+| `items[].rounds[].code_runs[].id` | string | 是 |  |
+| `items[].rounds[].code_runs[].kind` | string（enum: code \| visual） | 是 |  |
+| `items[].rounds[].code_runs[].environment_id` | string | 是 |  |
+| `items[].rounds[].code_runs[].environment_name` | string | 否 |  |
+| `items[].rounds[].code_runs[].instance_id` | string | 是 |  |
+| `items[].rounds[].code_runs[].model` | string | 是 |  |
+| `items[].rounds[].code_runs[].options` | object[] | 否 |  |
+| `items[].rounds[].code_runs[].options[].id` | string | 是 |  |
+| `items[].rounds[].code_runs[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `items[].rounds[].code_runs[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled） | 是 |  |
+| `items[].rounds[].code_runs[].thread_id` | string | 是 |  |
+| `items[].rounds[].code_runs[].summary` | string | 否 |  |
+| `items[].rounds[].code_runs[].error_code` | string | 否 |  |
+| `items[].rounds[].code_runs[].error_message` | string | 否 |  |
+| `items[].rounds[].code_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `items[].rounds[].code_runs[].ui_changed` | boolean | 否 |  |
+| `items[].rounds[].code_runs[].worktree_state` | string（可空） | 否 |  |
+| `items[].rounds[].code_runs[].started_at` | string（可空） | 否 |  |
+| `items[].rounds[].code_runs[].finished_at` | string（可空） | 否 |  |
+| `items[].rounds[].visual_runs` | object[] | 是 |  |
+| `items[].rounds[].visual_runs[].id` | string | 是 |  |
+| `items[].rounds[].visual_runs[].kind` | string（enum: code \| visual） | 是 |  |
+| `items[].rounds[].visual_runs[].environment_id` | string | 是 |  |
+| `items[].rounds[].visual_runs[].environment_name` | string | 否 |  |
+| `items[].rounds[].visual_runs[].instance_id` | string | 是 |  |
+| `items[].rounds[].visual_runs[].model` | string | 是 |  |
+| `items[].rounds[].visual_runs[].options` | object[] | 否 |  |
+| `items[].rounds[].visual_runs[].options[].id` | string | 是 |  |
+| `items[].rounds[].visual_runs[].options[].value` | any | 是 | 选项值（字符串或布尔） |
+| `items[].rounds[].visual_runs[].status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled） | 是 |  |
+| `items[].rounds[].visual_runs[].thread_id` | string | 是 |  |
+| `items[].rounds[].visual_runs[].summary` | string | 否 |  |
+| `items[].rounds[].visual_runs[].error_code` | string | 否 |  |
+| `items[].rounds[].visual_runs[].error_message` | string | 否 |  |
+| `items[].rounds[].visual_runs[].findings_count` | integer | 否 | P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数 |
+| `items[].rounds[].visual_runs[].ui_changed` | boolean | 否 |  |
+| `items[].rounds[].visual_runs[].worktree_state` | string（可空） | 否 |  |
+| `items[].rounds[].visual_runs[].started_at` | string（可空） | 否 |  |
+| `items[].rounds[].visual_runs[].finished_at` | string（可空） | 否 |  |
 
 **错误**
 
@@ -7685,11 +7481,14 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/automation-runs/{id}`
+### POST `/api/projects/{id}/reviews/rerun`
 
-<!-- operationId: getAutomationRun -->
+<!-- operationId: rerunProjectReview -->
 
-获取运行记录详情
+对 PR 的实时 HEAD 重跑代码审查
+
+用 GitHub App 令牌实时取 PR 当前 head；旧 SHA 未终态运行一律取消。
+项目未开启审查时返回 40923。
 
 **鉴权**：仅 JWT
 
@@ -7697,66 +7496,41 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 | 自动化运行 ID（UUID，归属当前用户，跨用户一律 404） |
+| `id` | string | 是 | 项目 ID（UUID） |
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `pr_number` | integer（≥1） | 是 |  |
 
 **成功响应**
 
-**200** 运行记录
+**200** 已受理
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `id` | string | 是 |  |
-| `automation_id` | string | 是 |  |
-| `trigger_id` | string | 是 | 触发本运行的触发器 id |
-| `trigger_type` | string（enum: cron \| issue_created \| issue_status_changed \| issue_label_added \| github_pr_opened \| github_pr_synchronize） | 是 | 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件； github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。 GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行）， 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。 |
-| `trigger_key` | string | 是 | 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>` |
-| `repo_full_name` | string | 否 | 仅 GitHub PR 触发；owner/repo |
-| `pr_number` | integer | 否 | 仅 GitHub PR 触发 |
-| `head_sha` | string | 否 | 仅 GitHub PR 触发；本轮审查的 head commit SHA |
-| `round_number` | integer | 否 | 仅 GitHub PR 触发；同一 PR 内递增的轮次（从 1 起，同一轮各模型共享） |
-| `model_instance_id` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型 instance_id |
-| `model_name` | string | 否 | 仅 GitHub PR 触发；本运行绑定的模型名 |
-| `trigger_context` | object（可空） | 否 | 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。 |
-| `trigger_context.project_id` | string | 否 |  |
-| `trigger_context.issue_id` | string | 否 |  |
-| `trigger_context.issue_sequence_number` | integer | 否 |  |
-| `trigger_context.issue_title` | string | 否 |  |
-| `trigger_context.field` | string | 否 | 状态变化字段（state \| workflow_status） |
-| `trigger_context.from` | string | 否 |  |
-| `trigger_context.to` | string | 否 |  |
-| `trigger_context.labels_added` | string[] | 否 |  |
-| `triggered_at` | string | 是 |  |
-| `status` | string（enum: queued \| dispatched \| running \| completed \| failed \| timed_out \| cancelled，可空） | 是 | queued=PR 审查排队（用户并发上限内不占在途名额，等调度提升）； dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始； cancelled=被新 head SHA 取代或规则改动后废弃（终态）； completed/failed/timed_out 为终态。回报未开始时状态可能为空。 |
-| `dispatch_started_at` | string（可空） | 否 | worker 认领并开始派发的时间 |
-| `environment_id` | string | 是 |  |
-| `t3_project_id` | string | 是 |  |
-| `thread_id` | string | 是 |  |
-| `dispatched_at` | string（可空） | 否 | 启动 RPC 结果确认时间；为空表示线程是否建成未确认（此类运行不执行后置） |
-| `started_at` | string（可空） | 否 |  |
-| `finished_at` | string（可空） | 否 |  |
-| `deadline_at` | string | 否 |  |
-| `error_code` | string（可空） | 否 |  |
-| `error_message` | string（可空） | 否 |  |
-| `summary` | string（可空） | 否 |  |
-| `post_state` | string（enum: none \| pending \| succeeded \| failed） | 是 |  |
-| `post_attempt` | integer | 是 |  |
-| `post_next_attempt_at` | string（可空） | 否 |  |
-| `post_deadline_at` | string（可空） | 否 |  |
-| `post_error` | string（可空） | 否 |  |
+| `accepted` | boolean | 是 |  |
+| `head_sha` | string | 是 |  |
+| `round_number` | integer | 是 |  |
 
 **错误**
 
 | HTTP | 说明 |
 | --- | --- |
+| 400 | 请求参数无效（40001-40099） |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
+| 409 | 项目未开启审查（40923） |
 | 500 | 服务器内部错误（50000） |
 
 ## notifications
 
-站内通知（自动化运行结果与 Agent 发布；仅 JWT）
+站内通知（只用于审查系统故障：派发失败、超时、工作区回收失败；仅 JWT）
 
 ### GET `/api/notifications`
 
@@ -7783,7 +7557,7 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | --- | --- | --- | --- |
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
-| `items[].kind` | string（enum: agent \| automation_dispatch_failed \| automation_run_timeout \| automation_post_failed \| automation_busy） | 是 |  |
+| `items[].kind` | string（enum: review_dispatch_failed \| review_run_timeout \| review_cleanup_failed） | 是 |  |
 | `items[].title` | string | 是 |  |
 | `items[].body` | string | 是 |  |
 | `items[].environment_id` | string（可空） | 否 |  |
@@ -7875,383 +7649,22 @@ cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 500 | 服务器内部错误（50000） |
 
-## automation-agent
+## review-agent
 
-自动化运行令牌专用的 Agent 回报与读取端点（仅 runTokenAuth，INT-90）
-
-### POST `/api/automation-agent/report`
-
-<!-- operationId: reportAutomationRun -->
-
-自动化运行回报（started / finished）
-
-仅运行令牌。开始回报幂等；结束回报在同一事务内消费令牌并登记后置操作，
-允许结束先于开始；线程超时后首次结束不能把状态改成 completed。
-结束后仅重放完全相同的结束回报（直到 expires_at），其它回报返回 409（40917）。
-
-**鉴权**：runTokenAuth
-
-**请求体**
-
-`application/json`，必填。
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `phase` | string（enum: started \| finished） | 是 |  |
-| `summary` | string | 否 | 仅 finished；一句话结果摘要 |
-| `error_code` | string | 否 | 仅 finished；非空表示运行失败（状态记 failed） |
-| `error_message` | string | 否 | 仅 finished |
-
-**成功响应**
-
-**200** 回报受理
-
-`data`：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `run_id` | string | 是 |  |
-| `status` | string | 是 | 回报后的运行状态 |
-| `replay` | boolean | 是 | true 表示这是一次完全相同结束回报的重放 |
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 401 | 运行令牌无效/过期（40106） |
-| 403 | 凭证类型不允许（40304） |
-| 409 | 回报冲突（40917） |
-| 500 | 服务器内部错误（50000） |
-
-### GET `/api/automation-agent/threads`
-
-<!-- operationId: listAgentThreads -->
-
-读取用户 T3 线程列表（可按环境/项目/状态过滤）
-
-**鉴权**：runTokenAuth
-
-**Query 参数**
-
-| 名称 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `environment_id` | string | 否 |  |
-| `project_id` | string | 否 | T3 项目 ID |
-| `status` | string | 否 | 过滤线程状态（running / waiting / idle / archived） |
-| `settled` | boolean | 否 |  |
-
-**成功响应**
-
-**200** 线程列表与各环境诊断（口径同 GET /api/threads，仅追加过滤）
-
-`data`：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `items` | object[] | 是 |  |
-| `items[].id` | string | 是 | T3 threadId |
-| `items[].environment_id` | string | 是 |  |
-| `items[].environment_name` | string | 是 |  |
-| `items[].project_id` | string | 是 |  |
-| `items[].project_name` | string | 是 | 来自 WS shell 快照项目表，列表和详情均使用该来源 |
-| `items[].title` | string | 是 |  |
-| `items[].status` | string（enum: running \| waiting \| idle \| archived） | 是 | 由 T3 归一化（对齐 T3 Sidebar 的判定顺序）： archivedAt 非空 → archived；其次 pendingRuntimeRequest 非空（等用户审批/输入）→ waiting； 再看 activityRunStatus（后台 run 未停时 shell.status 可能已是 completed/idle）： preparing/starting/running → running、waiting → waiting； 最后 shell.status 兜底（preparing/queued/starting/running → running、 waiting → waiting、其余 → idle） |
-| `items[].branch` | string | 是 | 工作分支；T3 侧为 null 时为空串 |
-| `items[].provider` | string | 是 | T3 providerInstanceId |
-| `items[].model` | string | 是 |  |
-| `items[].updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
-| `items[].settled` | boolean | 是 | 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含 |
-| `items[].run_started_at` | string | 否 | 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省 |
-| `items[].pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
-| `items[].parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
-| `environments` | object[] | 是 |  |
-| `environments[].id` | string | 是 |  |
-| `environments[].name` | string | 是 |  |
-| `environments[].address` | string | 是 | 从配对链接解析出的 T3 服务端基址（规范化 origin，如 https://host） |
-| `environments[].status` | string（enum: ok \| unreachable \| repair \| degraded） | 是 | 探测状态：ok=Bearer 会话有效；unreachable=网络不可达/超时/5xx； repair=可达但凭证失效（Bearer 过期或被吊销），需重新配对； degraded=可达且凭证有效，但部分数据读取失败（如归档线程快照）， 其余数据仍返回 |
-| `environments[].scopes` | string[] | 是 | 该环境会话实际授予的 T3 scope 列表（配对时服务端授予，原样落库） |
-| `environments[].access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
-| `environments[].error` | string | 否 | 最近一次探测失败的说明；成功时省略 |
-| `environments[].updated_at` | string（date-time） | 是 |  |
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
-| 500 | 服务器内部错误（50000） |
-
-### GET `/api/automation-agent/environments/{id}/threads/{threadId}`
-
-<!-- operationId: getAgentThread -->
-
-读取单个 T3 线程详情（items 分页，默认最后 50 条）
-
-与 JWT 端点同一线程详情口径，另加 items 分页：页内按时间正序；
-`before_item_id` 取该条目之前的上一页；引用的边界条目已消失时返回 409（40918）。
-
-**鉴权**：runTokenAuth
-
-**路径参数**
-
-| 名称 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
-| `threadId` | string | 是 |  |
-
-**Query 参数**
-
-| 名称 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `limit` | integer（1..100，默认 50） | 否 |  |
-| `before_item_id` | string | 否 |  |
-
-**成功响应**
-
-**200** 线程详情（items 为分页后的窗口）
-
-`data`：
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `thread` | object | 是 |  |
-| `thread.id` | string | 是 | T3 threadId |
-| `thread.environment_id` | string | 是 |  |
-| `thread.environment_name` | string | 是 |  |
-| `thread.project_id` | string | 是 |  |
-| `thread.project_name` | string | 是 | 来自 WS shell 快照项目表，列表和详情均使用该来源 |
-| `thread.title` | string | 是 |  |
-| `thread.status` | string（enum: running \| waiting \| idle \| archived） | 是 | 由 T3 归一化（对齐 T3 Sidebar 的判定顺序）： archivedAt 非空 → archived；其次 pendingRuntimeRequest 非空（等用户审批/输入）→ waiting； 再看 activityRunStatus（后台 run 未停时 shell.status 可能已是 completed/idle）： preparing/starting/running → running、waiting → waiting； 最后 shell.status 兜底（preparing/queued/starting/running → running、 waiting → waiting、其余 → idle） |
-| `thread.branch` | string | 是 | 工作分支；T3 侧为 null 时为空串 |
-| `thread.provider` | string | 是 | T3 providerInstanceId |
-| `thread.model` | string | 是 |  |
-| `thread.updated_at` | string | 是 | T3 原样返回的 ISO-8601 时间 |
-| `thread.settled` | boolean | 是 | 上游 settledOverride=="settled" 原样透传：用户在 T3 把线程收进了历史区。归档判定看 status=archived，与 settled 互不蕴含 |
-| `thread.run_started_at` | string | 否 | 最近 run 的 startedAt（上游 latestRunStartedAt）原样透传，供「运行中 N 分钟」计时；无线程运行记录时缺省 |
-| `thread.pull_request_count` | integer | 是 | 关联 PR 数（pullRequests 数组长度；缺失时按 linkedPullRequest/branchPullRequest 计） |
-| `thread.parent_thread_id` | string | 否 | 仅详情且该线程为子代理线程时给出（lineage.relationshipToParent=subagent 的 parentThreadId）；列表与父线程缺省 |
-| `items` | object[] | 是 |  |
-| `items[].id` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分） |
-| `items[].inherited` | boolean | 否 | 是否为 fork 继承前缀行（visibility=inherited）；继承的审批/提问/密钥只展示，不能在本线程作答 |
-| `items[].source_thread_id` | string | 否 | 该条目所在来源线程；继承行指向来源，本地行等于当前线程 |
-| `items[].type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error \| approval_request \| user_input_request \| secret_request） | 是 |  |
-| `items[].text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；审批=缺省时为空；展开后的完整正文经 items/{itemId} 获取） |
-| `items[].summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名、审批/提问=提示或问题首行 |
-| `items[].status` | string | 否 | T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略 |
-| `items[].updated_at` | string | 否 | 上游条目自带的 updatedAt（RFC3339）原样透传，作为条目版本；上游省略时本字段缺省 |
-| `items[].child_thread_id` | string | 否 | 仅 subagent；子线程 ID |
-| `items[].detail_available` | boolean | 否 | 条目在快照之外还有正文，可经 items/{itemId} 补读： 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉 输出/结果，file_change 上游 detail 也无 diff 故为 false）；补读响应恒为 false。缺省即 false。 |
-| `items[].attachments` | object[] | 否 | 仅 user_message；随消息发送的图片附件元数据 |
-| `items[].attachments[].type` | string（enum: image） | 是 |  |
-| `items[].attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
-| `items[].attachments[].name` | string（长度 ≤255） | 是 |  |
-| `items[].attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
-| `items[].attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
-| `items[].request_id` | string | 否 | 仅 approval_request/user_input_request；T3 运行时请求 ID（respond/dismiss 端点使用） |
-| `items[].request_kind` | string | 否 | 仅 approval_request；请求类型（command/file-read/file-change/mcp-elicitation/permission） |
-| `items[].prompt` | string | 否 | 仅 approval_request；审批提示（上游缺省时为空） |
-| `items[].app_name` | string | 否 | 仅 approval_request；发起审批的应用（mcp-elicitation 等）；上游缺省时缺省 |
-| `items[].options` | object[] | 否 | 仅 approval_request；审批可选项（上游自带，按序展示） |
-| `items[].options[].decision` | string | 是 | T3 ProviderApprovalDecision（accept/acceptForSession/acceptAlways/decline/cancel） |
-| `items[].options[].label` | string | 是 |  |
-| `items[].options[].warning` | string | 否 | 提供方给出的警示（如提示注入警告）；上游缺省时缺省 |
-| `items[].decision` | string | 否 | 仅 approval_request；已做出的决定（accept/acceptForSession/acceptAlways/decline/cancel），来自运行时请求记录 |
-| `items[].questions` | object[] | 否 | 仅 user_input_request；问题列表 |
-| `items[].questions[].id` | string | 是 |  |
-| `items[].questions[].header` | string | 是 |  |
-| `items[].questions[].question` | string | 是 |  |
-| `items[].questions[].options` | object[] | 是 |  |
-| `items[].questions[].options[].label` | string | 是 |  |
-| `items[].questions[].options[].description` | string | 是 |  |
-| `items[].questions[].options[].value` | string | 否 | 上游缺省时缺省（提交 answers 时以 label 为值） |
-| `items[].questions[].multi_select` | boolean | 否 | 上游缺省时缺省（视为单选） |
-| `items[].questions[].allow_custom_answer` | boolean | 否 | 上游缺省时缺省 |
-| `items[].questions[].initial_answer` | string | 否 | 可编辑的初始文本；上游缺省时缺省 |
-| `items[].questions[].required` | boolean | 否 | 上游缺省时缺省 |
-| `items[].answers` | object | 否 | 仅 user_input_request；已提交的答案（questionId → 答案值，原样透传） |
-| `items[].response_mode` | string | 否 | 仅 user_input_request；应答通道（message=经消息应答） |
-| `items[].response_capability` | string | 否 | 仅 approval_request/user_input_request；该请求当前的应答通道（live/message/not_resumable，运行时请求记录） |
-| `items[].request_status` | string | 否 | 仅 approval_request/user_input_request；运行时请求状态（pending/resolved/expired/cancelled；pending 才可应答） |
-| `items[].label` | string | 否 | 仅 secret_request；请求的密钥名称 |
-| `items[].reason` | string | 否 | 仅 secret_request；为什么需要该密钥 |
-| `items[].placeholder` | string | 否 | 仅 secret_request；输入框占位文本；上游缺省时缺省 |
-| `items[].secret_status` | string | 否 | 仅 secret_request；密钥请求状态（pending/saved/declined/cancelled；绝不携带密钥值本身） |
-| `queue` | object | 是 | 线程排队消息工作流，口径对齐 T3 `deriveThreadQueueWorkflowState`： items 为用户消息产生的排队 run（自动完成/通知 run 不在内），按 queuePosition（缺省 ordinal）升序。 |
-| `queue.held` | boolean | 是 | 队列被挂起（Stop 或重启恢复后等待用户手动恢复） |
-| `queue.can_reorder` | boolean | 是 | provider 会话能力支持排队消息（排序/编辑/取消可用） |
-| `queue.can_steer` | boolean | 是 | provider 会话能力支持把排队消息上浮为活动运行的转向输入 |
-| `queue.items` | object[] | 是 |  |
-| `queue.items[].run_id` | string | 是 |  |
-| `queue.items[].message_id` | string | 是 |  |
-| `queue.items[].text` | string | 是 | 消息正文；上游投影缺消息时为「Queued message」 |
-| `queue.items[].attachments` | object[] | 否 | 随消息的图片附件元数据；上游缺省时为空数组 |
-| `queue.items[].attachments[].type` | string（enum: image） | 是 |  |
-| `queue.items[].attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
-| `queue.items[].attachments[].name` | string（长度 ≤255） | 是 |  |
-| `queue.items[].attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
-| `queue.items[].attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
-| `activity` | object | 是 | 线程当前活动摘要（活动 run 来自投影 runs，与 queue 同一来源） |
-| `activity.active_run_id` | string | 否 | 活动 run（preparing/starting/running/waiting 的最近一个）；静止时缺省 |
-| `activity.active_run_status` | string | 否 | 活动 run 状态；静止时缺省 |
-| `activity.stopping` | boolean | 是 | 停止请求已下发且尚未落定：活动 run 的最近一条 run_interrupt_request 条目晚于同 run 的最近一条 run_interrupt_result |
-| `activity.has_pending_requests` | boolean | 是 | 有等待用户处理的运行时请求（审批/提问/代答 secret） |
-| `activity.pending_background_task_count` | integer | 是 | 根 run 结束后仍在跑的后台工作条数（command 类不占完成位；上游缺省时为 0） |
-| `access` | string（enum: read-only \| operate） | 是 | 会话能力：仅当精确持有 `orchestration:operate` scope 时为 `operate`， 否则 `read-only`。唯一判定依据是精确 token 的 scope 列； `read-only` 环境调用任何写入口返回 40300（重新配对后可操作） |
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
-| 404 | 环境/线程不存在（40417 / 40418） |
-| 409 | 分页边界失效（40918） |
-| 500 | 服务器内部错误（50000） |
-
-### GET `/api/automation-agent/environments/{id}/threads/{threadId}/items/{itemId}`
-
-<!-- operationId: getAgentThreadItem -->
-
-读取单个线程条目完整正文
-
-**鉴权**：runTokenAuth
-
-**路径参数**
-
-| 名称 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `id` | string | 是 | T3 环境 ID（UUID，归属当前用户，跨用户一律 40417） |
-| `threadId` | string | 是 |  |
-| `itemId` | string | 是 |  |
-
-**成功响应**
-
-**200** 线程条目
-
-`data`：
-
-归一化线程条目。映射规则：user_message（含 attachments 图片元数据）/
-assistant_message/reasoning 原样带快照文本；proposed_plan →
-assistant_message；command_execution（text=命令，summary=命令首行，
-输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
-dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
-上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
-结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
-交互类条目：approval_request（审批，request_id 关联运行时请求）/
-user_input_request（提问）/ secret_request（密钥，绝不携带密钥值）。
-结构性事件（checkpoint、handoff、notification、system_notice 等）丢弃；
-未知类型前向兼容地跳过。正文不额外截断。
-继承行（fork 前缀，visibility=inherited）只展示历史：inherited=true，
-不能在本线程原地应答；source_thread_id 指向来源线程。
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `id` | string | 是 | Fast Ship 条目 ID（sourceThreadId + "::" + T3 原始条目 id；继承行与本地行的原始 id 可能重复，靠来源线程区分） |
-| `inherited` | boolean | 否 | 是否为 fork 继承前缀行（visibility=inherited）；继承的审批/提问/密钥只展示，不能在本线程作答 |
-| `source_thread_id` | string | 否 | 该条目所在来源线程；继承行指向来源，本地行等于当前线程 |
-| `type` | string（enum: user_message \| assistant_message \| reasoning \| command_execution \| dynamic_tool \| file_change \| subagent \| error \| approval_request \| user_input_request \| secret_request） | 是 |  |
-| `text` | string | 是 | 正文，不额外截断（命令=命令文本；文件=元数据；审批=缺省时为空；展开后的完整正文经 items/{itemId} 获取） |
-| `summary` | string | 是 | 单行概要（折叠态显示，rune 安全截断）；命令/子代理=首行、文件=文件名 ±行数、工具=工具名、审批/提问=提示或问题首行 |
-| `status` | string | 否 | T3 侧条目状态（idle/pending/running/waiting/completed/failed/cancelled/interrupted）；可能省略 |
-| `updated_at` | string | 否 | 上游条目自带的 updatedAt（RFC3339）原样透传，作为条目版本；上游省略时本字段缺省 |
-| `child_thread_id` | string | 否 | 仅 subagent；子线程 ID |
-| `detail_available` | boolean | 否 | 条目在快照之外还有正文，可经 items/{itemId} 补读： 快照里 command_execution/dynamic_tool/subagent 为 true（wire 投影裁掉 输出/结果，file_change 上游 detail 也无 diff 故为 false）；补读响应恒为 false。缺省即 false。 |
-| `attachments` | object[] | 否 | 仅 user_message；随消息发送的图片附件元数据 |
-| `attachments[].type` | string（enum: image） | 是 |  |
-| `attachments[].id` | string | 是 | T3 附件 ID（createUploadUrl 产出的 attachmentId） |
-| `attachments[].name` | string（长度 ≤255） | 是 |  |
-| `attachments[].mime_type` | string | 是 | 仅支持 image/png、image/jpeg、image/gif、image/webp |
-| `attachments[].size_bytes` | integer | 是 | 字节数；单图上限 10MiB |
-| `request_id` | string | 否 | 仅 approval_request/user_input_request；T3 运行时请求 ID（respond/dismiss 端点使用） |
-| `request_kind` | string | 否 | 仅 approval_request；请求类型（command/file-read/file-change/mcp-elicitation/permission） |
-| `prompt` | string | 否 | 仅 approval_request；审批提示（上游缺省时为空） |
-| `app_name` | string | 否 | 仅 approval_request；发起审批的应用（mcp-elicitation 等）；上游缺省时缺省 |
-| `options` | object[] | 否 | 仅 approval_request；审批可选项（上游自带，按序展示） |
-| `options[].decision` | string | 是 | T3 ProviderApprovalDecision（accept/acceptForSession/acceptAlways/decline/cancel） |
-| `options[].label` | string | 是 |  |
-| `options[].warning` | string | 否 | 提供方给出的警示（如提示注入警告）；上游缺省时缺省 |
-| `decision` | string | 否 | 仅 approval_request；已做出的决定（accept/acceptForSession/acceptAlways/decline/cancel），来自运行时请求记录 |
-| `questions` | object[] | 否 | 仅 user_input_request；问题列表 |
-| `questions[].id` | string | 是 |  |
-| `questions[].header` | string | 是 |  |
-| `questions[].question` | string | 是 |  |
-| `questions[].options` | object[] | 是 |  |
-| `questions[].options[].label` | string | 是 |  |
-| `questions[].options[].description` | string | 是 |  |
-| `questions[].options[].value` | string | 否 | 上游缺省时缺省（提交 answers 时以 label 为值） |
-| `questions[].multi_select` | boolean | 否 | 上游缺省时缺省（视为单选） |
-| `questions[].allow_custom_answer` | boolean | 否 | 上游缺省时缺省 |
-| `questions[].initial_answer` | string | 否 | 可编辑的初始文本；上游缺省时缺省 |
-| `questions[].required` | boolean | 否 | 上游缺省时缺省 |
-| `answers` | object | 否 | 仅 user_input_request；已提交的答案（questionId → 答案值，原样透传） |
-| `response_mode` | string | 否 | 仅 user_input_request；应答通道（message=经消息应答） |
-| `response_capability` | string | 否 | 仅 approval_request/user_input_request；该请求当前的应答通道（live/message/not_resumable，运行时请求记录） |
-| `request_status` | string | 否 | 仅 approval_request/user_input_request；运行时请求状态（pending/resolved/expired/cancelled；pending 才可应答） |
-| `label` | string | 否 | 仅 secret_request；请求的密钥名称 |
-| `reason` | string | 否 | 仅 secret_request；为什么需要该密钥 |
-| `placeholder` | string | 否 | 仅 secret_request；输入框占位文本；上游缺省时缺省 |
-| `secret_status` | string | 否 | 仅 secret_request；密钥请求状态（pending/saved/declined/cancelled；绝不携带密钥值本身） |
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
-| 404 | 环境/线程/条目不存在（40417 / 40418 / 40419） |
-| 500 | 服务器内部错误（50000） |
-
-### POST `/api/automation-agent/notifications`
-
-<!-- operationId: publishAgentNotification -->
-
-以运行身份发布站内通知
-
-kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一问题键相同状态只刷新 last_seen_at。
-
-**鉴权**：runTokenAuth
-
-**请求体**
-
-`application/json`，必填。
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `title` | string（长度 ≤200） | 是 |  |
-| `body` | string（长度 ≤4000） | 否 |  |
-| `problem_key` | string（长度 ≤200） | 是 | 去重身份；同一线程同类问题用同一 key |
-| `state_key` | string（长度 ≤500） | 是 | 状态指纹；同 problem_key 下状态变化才刷新通知 |
-| `environment_id` | string | 否 | 可选；缺省用运行的环境 |
-| `thread_id` | string | 否 | 可选；缺省用运行的线程 |
-
-**成功响应**
-
-**200** 操作成功（data 为 null）
-
-`data` 为 null。
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 400 | 请求参数无效（40001-40099） |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
-| 500 | 服务器内部错误（50000） |
+审查运行令牌专用的 Agent 读取与结论提交端点（仅 runTokenAuth，INT-135）
 
 ### POST `/api/github/webhooks`
 
 <!-- operationId: receiveGitHubWebhook -->
 
-接收 GitHub App webhook（pull_request opened/synchronize）
+接收 GitHub App webhook（pull_request opened/synchronize/ready_for_review/reopened）
 
 公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256）按部署唯一的
 webhook 密钥验签。验签密钥取部署级 GitHub App 身份（INT-129：每套部署
 一个 App，没有用户级候选集）——以 `deployment_settings` 行内的密钥为准，
 行为空即视为未配置、不回落 config；仅当部署没有数据库 App 身份时用
 `github_app.webhook_secret` 兜底。密钥为空 → 503（50300）拒收；签名缺失
-或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize；
+或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize/ready_for_review/reopened；
 draft 与 fork 一律 202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
 才会进入防抖/开轮。同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且
 不再开轮）。
@@ -8285,14 +7698,13 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | 500 | 服务器内部错误（50000） |
 | 503 | 部署未配置 webhook 验签密钥（50300），拒绝接受请求 |
 
-### GET `/api/automation-agent/pull-request`
+### GET `/api/review-agent/pull-request`
 
-<!-- operationId: getAgentPullRequest -->
+<!-- operationId: reviewAgentPullRequest -->
 
-读取本运行的 PR 元数据
+本运行审查的 PR 元数据
 
-仅运行令牌；owner/repo/PR 号由运行行给出，不接受请求参数。
-运行必须是 GitHub PR 触发且处于 dispatched/running；结束后（含取消）令牌访问一律 40106。
+只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。
 
 **鉴权**：runTokenAuth
 
@@ -8302,96 +7714,153 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 
 `data`：
 
-本运行审查的 PR 元数据（从运行行与 GitHub 读取；不接受请求参数）
-
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `repo_full_name` | string | 是 |  |
 | `pr_number` | integer | 是 |  |
-| `head_sha` | string | 是 | 本运行绑定的 head commit SHA |
+| `head_sha` | string | 是 |  |
 | `title` | string | 是 |  |
-| `body` | string（可空） | 否 |  |
+| `body` | string | 是 |  |
 | `html_url` | string | 是 |  |
-| `base_ref` | string | 否 |  |
-| `head_ref` | string | 否 |  |
-| `draft` | boolean | 否 |  |
+| `base_ref` | string | 是 |  |
+| `head_ref` | string | 是 |  |
 
 **错误**
 
 | HTTP | 说明 |
 | --- | --- |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/automation-agent/pull-request/diff`
+### GET `/api/review-agent/pull-request/diff`
 
-<!-- operationId: getAgentPullRequestDiff -->
+<!-- operationId: reviewAgentPullRequestDiff -->
 
-读取本运行 PR 的 diff
+本运行的 PR diff
 
-超过 1MB 截断并在 returned 字段标明 truncated。
+超过 1MB 截断并标记 truncated。
 
 **鉴权**：runTokenAuth
 
 **成功响应**
 
-**200** diff 内容
+**200** diff
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `content` | string | 是 | 统一 diff 文本 |
-| `truncated` | boolean | 是 | 超过 1MB 截断时为 true |
+| `content` | string | 是 |  |
+| `truncated` | boolean | 是 |  |
 
 **错误**
 
 | HTTP | 说明 |
 | --- | --- |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### GET `/api/automation-agent/pull-request/comments`
+### GET `/api/review-agent/history`
 
-<!-- operationId: listAgentPullRequestComments -->
+<!-- operationId: reviewAgentHistory -->
 
-读取本运行 PR 的 review 评论列表
+历史处置上下文（系统生成 Markdown）
+
+代码审查：上一轮各组合的结构化发现 + 上一轮结论之后的新评论/行内回复；首次审查给全部讨论。
+视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。
 
 **鉴权**：runTokenAuth
 
 **成功响应**
 
-**200** review 评论列表
+**200** 历史上下文
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `content` | string | 是 | Markdown 文本；没有历史时为空串 |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/review-agent/screenshots`
+
+<!-- operationId: reviewAgentScreenshots -->
+
+视觉审查截图清单
+
+只有视觉审查运行可调用；图片本体走下面的图片端点。
+
+**鉴权**：runTokenAuth
+
+**成功响应**
+
+**200** 截图清单
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `items` | object[] | 是 |  |
-| `items[].id` | integer | 是 |  |
-| `items[].user` | string | 是 |  |
-| `items[].body` | string | 是 |  |
-| `items[].in_reply_to_id` | integer（可空） | 否 |  |
-| `items[].path` | string（可空） | 否 |  |
-| `items[].created_at` | string | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].label` | string | 是 |  |
+| `items[].url` | string | 是 | 指向本端点的图片路径（相对 server.public_url） |
+| `changed` | boolean | 是 | 截图集合相对上一轮视觉审查是否有变化 |
 
 **错误**
 
 | HTTP | 说明 |
 | --- | --- |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 500 | 服务器内部错误（50000） |
 
-### POST `/api/automation-agent/pull-request/review`
+### GET `/api/review-agent/screenshots/{assetId}`
 
-<!-- operationId: submitAgentPullRequestReview -->
+<!-- operationId: reviewAgentScreenshotImage -->
 
-提交 PR review（COMMENT / APPROVE / REQUEST_CHANGES）
+截图图片本体
 
-commit_id 由服务端取本运行的 head SHA，不接受请求传入。
+按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。
+
+**鉴权**：runTokenAuth
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `assetId` | string | 是 |  |
+
+**成功响应**
+
+**200** 图片字节
+
+二进制内容（image/gif、image/jpeg、image/png、image/webp），无 JSON 信封。
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 404 | 资源不存在（40400-40499） |
+
+### POST `/api/review-agent/result`
+
+<!-- operationId: reviewAgentSubmitResult -->
+
+提交结构化审查结论
+
+请求体按运行类型二选一：代码审查 `ReviewCodeResult`、视觉审查 `ReviewVisualResult`（字段校验失败返回 400，
+提示修正重交；PR HEAD 与运行绑定 SHA 不一致返回 40920 并作废本轮）。
 
 **鉴权**：runTokenAuth
 
@@ -8399,65 +7868,68 @@ commit_id 由服务端取本运行的 head SHA，不接受请求传入。
 
 `application/json`，必填。
 
+二选一，各分支结构如下：
+
+方案 1
+
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `event` | string（enum: COMMENT \| APPROVE \| REQUEST_CHANGES） | 是 | 审查结论；commit_id 由服务端取本运行 head SHA |
-| `body` | string | 否 | review 正文（APPROVE 时可空） |
+| `summary` | string | 是 |  |
+| `findings` | object[] | 是 |  |
+| `findings[].level` | string（enum: P0 \| P1 \| P2 \| Note） | 是 |  |
+| `findings[].file` | string | 是 |  |
+| `findings[].line` | integer（≥1，可空） | 否 | 当前 HEAD 右侧代码行号；可为空 |
+| `findings[].body` | string | 是 |  |
+| `prior` | object[] | 是 |  |
+| `prior[].level` | string | 否 | 原发现的分级（P0/P1/P2/Note 或 blocker/worth_fixing/minor） |
+| `prior[].file` | string（可空） | 否 |  |
+| `prior[].line` | integer（可空） | 否 |  |
+| `prior[].body` | string | 是 | 原发现的正文摘要 |
+| `prior[].status` | string（enum: fixed \| rejected \| open） | 是 |  |
+| `prior[].reason` | string | 否 | rejected 时必须写明理由 |
+| `ui_changed` | boolean | 是 |  |
+| `ui_changed_since_last_visual` | boolean | 是 |  |
+
+方案 2
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `summary` | string | 是 |  |
+| `findings` | object[] | 是 |  |
+| `findings[].severity` | string（enum: blocker \| worth_fixing \| minor） | 是 |  |
+| `findings[].screenshot` | string | 是 | 截图标签（来自 screenshots 端点的 label） |
+| `findings[].dimension` | string（enum: hierarchy \| spacing \| typography \| color \| interaction \| copy \| accessibility） | 是 |  |
+| `findings[].body` | string | 是 |  |
+| `findings[].fix` | string | 是 |  |
+| `prior` | object[] | 是 |  |
+| `prior[].level` | string | 否 | 原发现的分级（P0/P1/P2/Note 或 blocker/worth_fixing/minor） |
+| `prior[].file` | string（可空） | 否 |  |
+| `prior[].line` | integer（可空） | 否 |  |
+| `prior[].body` | string | 是 | 原发现的正文摘要 |
+| `prior[].status` | string（enum: fixed \| rejected \| open） | 是 |  |
+| `prior[].reason` | string | 否 | rejected 时必须写明理由 |
+| `unmeasurable` | object[] | 是 |  |
+| `unmeasurable[].screenshot` | string | 是 |  |
+| `unmeasurable[].reason` | string | 是 |  |
 
 **成功响应**
 
-**200** review 已提交
+**200** 已受理
 
 `data`：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `submitted` | boolean | 是 |  |
+| `accepted` | boolean | 是 |  |
 
 **错误**
 
 | HTTP | 说明 |
 | --- | --- |
 | 400 | 请求参数无效（40001-40099） |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
-| 500 | 服务器内部错误（50000） |
-
-### POST `/api/automation-agent/pull-request/check`
-
-<!-- operationId: updateAgentPullRequestCheck -->
-
-更新本运行 check run 的标题与说明（结论由运行终态决定）
-
-请求不接受 check run id；服务端只更新本运行绑定的 check。
-
-**鉴权**：runTokenAuth
-
-**请求体**
-
-`application/json`，必填。
-
-只更新本运行 check run 的标题与说明；结论（conclusion）由运行终态决定，不接受传入。
-
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `title` | string（长度 ≤200） | 否 |  |
-| `summary` | string（长度 ≤8000） | 否 |  |
-| `text` | string（长度 ≤40000） | 否 |  |
-
-**成功响应**
-
-**200** 操作成功（data 为 null）
-
-`data` 为 null。
-
-**错误**
-
-| HTTP | 说明 |
-| --- | --- |
-| 400 | 请求参数无效（40001-40099） |
-| 401 | 运行令牌无效/过期/已消费（40106） |
-| 403 | 凭证类型不允许（40304） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
+| 409 | PR HEAD 已变化（40920），本轮作废 |
 | 500 | 服务器内部错误（50000） |
 
 ## self-logs
@@ -8486,13 +7958,12 @@ next_cursor 为 null 表示没有更多。
 | `end_time` | string（date-time） | 否 | 结束时间（含），RFC3339 |
 | `level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 精确级别过滤 |
 | `min_level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准） |
-| `modules` | string | 否 | 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段 |
+| `modules` | string | 否 | 模块过滤，逗号分隔多值（如 `http,review`）；模块取值见条目 module 字段 |
 | `request_id` | string | 否 | 按请求 ID 过滤（响应头 X-Request-Id 的值） |
 | `user_id` | string | 否 | 按归属用户过滤；仅限本人，他人 ID 只会得到空结果 |
 | `project_id` | string | 否 | 按关联项目 ID 过滤 |
 | `issue_id` | string | 否 | 按关联 Issue ID 过滤 |
-| `automation_id` | string | 否 | 按关联自动化 ID 过滤 |
-| `run_id` | string | 否 | 按关联自动化运行 ID 过滤 |
+| `run_id` | string | 否 | 按关联审查运行 ID 过滤（review_runs.id） |
 | `thread_id` | string | 否 | 按关联 T3 线程 ID 过滤 |
 | `extra_eq` | string | 否 | 附加字段等值过滤，可重复，格式 `key=value`（json_extract 后 CAST 为文本再比较，数字值如 status=200 也可匹配） |
 | `keyword` | string | 否 | 关键词包含过滤（匹配 message 与 extra） |
@@ -8516,13 +7987,12 @@ next_cursor 为 null 表示没有更多。
 | `items[].id` | integer（int64） | 是 | 存储行 ID；与时间联合构成游标定位 |
 | `items[].time` | string（date-time） | 是 |  |
 | `items[].level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 是 |  |
-| `items[].module` | string | 否 | 产生日志的模块（http / automation / t3 / github / auth / api_key 等） |
+| `items[].module` | string | 否 | 产生日志的模块（http / review / t3 / github / auth / api_key 等） |
 | `items[].message` | string | 是 |  |
 | `items[].request_id` | string | 否 |  |
 | `items[].user_id` | string | 否 |  |
 | `items[].project_id` | string | 否 |  |
 | `items[].issue_id` | string | 否 |  |
-| `items[].automation_id` | string | 否 |  |
 | `items[].run_id` | string | 否 |  |
 | `items[].thread_id` | string | 否 |  |
 | `items[].extra` | object | 否 | 其余结构化字段（JSON 对象）；未选入 fields 时省略 |
@@ -8560,13 +8030,12 @@ next_cursor 为 null 表示没有更多。
 | `end_time` | string（date-time） | 否 | 结束时间（含），RFC3339 |
 | `level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 精确级别过滤 |
 | `min_level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 否 | 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准） |
-| `modules` | string | 否 | 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段 |
+| `modules` | string | 否 | 模块过滤，逗号分隔多值（如 `http,review`）；模块取值见条目 module 字段 |
 | `request_id` | string | 否 | 按请求 ID 过滤（响应头 X-Request-Id 的值） |
 | `user_id` | string | 否 | 按归属用户过滤；仅限本人，他人 ID 只会得到空结果 |
 | `project_id` | string | 否 | 按关联项目 ID 过滤 |
 | `issue_id` | string | 否 | 按关联 Issue ID 过滤 |
-| `automation_id` | string | 否 | 按关联自动化 ID 过滤 |
-| `run_id` | string | 否 | 按关联自动化运行 ID 过滤 |
+| `run_id` | string | 否 | 按关联审查运行 ID 过滤（review_runs.id） |
 | `thread_id` | string | 否 | 按关联 T3 线程 ID 过滤 |
 | `extra_eq` | string | 否 | 附加字段等值过滤，可重复，格式 `key=value`（json_extract 后 CAST 为文本再比较，数字值如 status=200 也可匹配） |
 | `keyword` | string | 否 | 关键词包含过滤（匹配 message 与 extra） |
@@ -8615,7 +8084,7 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 | 名称 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `request_id` | string | 否 | 按请求 ID 过滤（响应头 X-Request-Id 的值） |
-| `run_id` | string | 否 | 按关联自动化运行 ID 过滤 |
+| `run_id` | string | 否 | 按关联审查运行 ID 过滤（review_runs.id） |
 | `fields` | string | 否 | 返回字段选择，逗号分隔（如 `module,message,extra`）；id/time/level/message 始终返回，其余未选字段在条目中省略。未知字段名返回 40001 |
 
 **成功响应**
@@ -8632,13 +8101,12 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 | `items[].id` | integer（int64） | 是 | 存储行 ID；与时间联合构成游标定位 |
 | `items[].time` | string（date-time） | 是 |  |
 | `items[].level` | string（enum: DEBUG \| INFO \| WARN \| ERROR） | 是 |  |
-| `items[].module` | string | 否 | 产生日志的模块（http / automation / t3 / github / auth / api_key 等） |
+| `items[].module` | string | 否 | 产生日志的模块（http / review / t3 / github / auth / api_key 等） |
 | `items[].message` | string | 是 |  |
 | `items[].request_id` | string | 否 |  |
 | `items[].user_id` | string | 否 |  |
 | `items[].project_id` | string | 否 |  |
 | `items[].issue_id` | string | 否 |  |
-| `items[].automation_id` | string | 否 |  |
 | `items[].run_id` | string | 否 |  |
 | `items[].thread_id` | string | 否 |  |
 | `items[].extra` | object | 否 | 其余结构化字段（JSON 对象）；未选入 fields 时省略 |
@@ -11115,10 +10583,10 @@ public_url 组装 manifest（原样 POST 给 GitHub 的形状），返回 GitHub
 | `manifest.setup_url` | string | 是 | 安装后跳转地址 = {public_url}/settings/integrations |
 | `manifest.public` | boolean | 是 | 恒为 false（非公开 App；同上不用 enum[false] 避免生成撞名常量） |
 | `manifest.default_events` | string[]（enum: pull_request） | 是 |  |
-| `manifest.default_permissions` | object | 是 | PR 评审所需的最小权限集 |
+| `manifest.default_permissions` | object | 是 | PR 审查所需的最小权限集（结论用 commit status，不用 Checks API） |
 | `manifest.default_permissions.pull_requests` | string（enum: write） | 是 |  |
 | `manifest.default_permissions.issues` | string（enum: write） | 是 |  |
-| `manifest.default_permissions.checks` | string（enum: write） | 是 |  |
+| `manifest.default_permissions.statuses` | string（enum: write） | 是 |  |
 | `manifest.default_permissions.contents` | string（enum: read） | 是 |  |
 | `manifest.default_permissions.metadata` | string（enum: read） | 是 |  |
 

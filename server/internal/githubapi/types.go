@@ -37,44 +37,33 @@ type ReviewComment struct {
 	CreatedAt   time.Time
 }
 
+// IssueComment 是 PR 会话页的顶层评论（含机器人与人工，按时间正序过滤由调用方负责）。
+type IssueComment struct {
+	ID        int64
+	User      string
+	Body      string
+	CreatedAt time.Time
+}
+
+// ReviewInlineComment 随 review 一起提交的行内评论（GitHub reviews.comments[]）。
+type ReviewInlineComment struct {
+	Path string
+	Line int
+	// Side 评论所在侧；行内审查只用 RIGHT（当前 HEAD 右侧行号）。
+	Side string
+	Body string
+}
+
 // ReviewInput 一次 review 提交。Event ∈ COMMENT | APPROVE | REQUEST_CHANGES；
-// CommitID 由调用方取运行绑定的 head SHA。
+// CommitID 由调用方取运行绑定的 head SHA。Comments 为行内评论列表。
 type ReviewInput struct {
 	Event    string
 	Body     string
 	CommitID string
+	Comments []ReviewInlineComment
 }
 
-// CheckState check run 的运行态；Completed 时看 Conclusion。
-type CheckState string
-
-const (
-	CheckQueued     CheckState = "queued"
-	CheckInProgress CheckState = "in_progress"
-	CheckCompleted  CheckState = "completed"
-)
-
-// CheckConclusion 终态结论（GitHub 官方枚举子集）。
-type CheckConclusion string
-
-const (
-	ConclusionSuccess   CheckConclusion = "success"
-	ConclusionFailure   CheckConclusion = "failure"
-	ConclusionCancelled CheckConclusion = "cancelled"
-)
-
-// CheckUpdate 一次 check run 更新的全部字段；Status=Completed 时必须给 Conclusion。
-type CheckUpdate struct {
-	Status     CheckState
-	Conclusion CheckConclusion
-	// Title 同时作为 check run 名称与 output 标题。
-	Title   string
-	Summary string
-	Text    string
-}
-
-// ErrForbidden GitHub 返回 403（如 Checks API 未授权）：调用方据此退回合并 check；
-// 合并 check 同样 403 则跳过 check、仍同步评论。
+// ErrForbidden GitHub 返回 403（App 未获该操作权限，例如缺 statuses:write）。
 var ErrForbidden = errors.New("githubapi: forbidden")
 
 // StatusError 非 2xx 响应。

@@ -4,174 +4,12 @@
 package api
 
 import (
+	"encoding/json"
+
 	model "github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/oapi-codegen/runtime"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
-
-// Defines values for AgentPullRequestReviewRequestEvent.
-const (
-	APPROVE        AgentPullRequestReviewRequestEvent = "APPROVE"
-	COMMENT        AgentPullRequestReviewRequestEvent = "COMMENT"
-	REQUESTCHANGES AgentPullRequestReviewRequestEvent = "REQUEST_CHANGES"
-)
-
-// Valid indicates whether the value is a known member of the AgentPullRequestReviewRequestEvent enum.
-func (e AgentPullRequestReviewRequestEvent) Valid() bool {
-	switch e {
-	case APPROVE:
-		return true
-	case COMMENT:
-		return true
-	case REQUESTCHANGES:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for AutomationEventFilterField.
-const (
-	State          AutomationEventFilterField = "state"
-	WorkflowStatus AutomationEventFilterField = "workflow_status"
-)
-
-// Valid indicates whether the value is a known member of the AutomationEventFilterField enum.
-func (e AutomationEventFilterField) Valid() bool {
-	switch e {
-	case State:
-		return true
-	case WorkflowStatus:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for AutomationPostAction.
-const (
-	AutomationPostActionArchive AutomationPostAction = "archive"
-	AutomationPostActionNone    AutomationPostAction = "none"
-	AutomationPostActionSettle  AutomationPostAction = "settle"
-)
-
-// Valid indicates whether the value is a known member of the AutomationPostAction enum.
-func (e AutomationPostAction) Valid() bool {
-	switch e {
-	case AutomationPostActionArchive:
-		return true
-	case AutomationPostActionNone:
-		return true
-	case AutomationPostActionSettle:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for AutomationPostState.
-const (
-	AutomationPostStateFailed    AutomationPostState = "failed"
-	AutomationPostStateNone      AutomationPostState = "none"
-	AutomationPostStatePending   AutomationPostState = "pending"
-	AutomationPostStateSucceeded AutomationPostState = "succeeded"
-)
-
-// Valid indicates whether the value is a known member of the AutomationPostState enum.
-func (e AutomationPostState) Valid() bool {
-	switch e {
-	case AutomationPostStateFailed:
-		return true
-	case AutomationPostStateNone:
-		return true
-	case AutomationPostStatePending:
-		return true
-	case AutomationPostStateSucceeded:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for AutomationRunReportRequestPhase.
-const (
-	Finished AutomationRunReportRequestPhase = "finished"
-	Started  AutomationRunReportRequestPhase = "started"
-)
-
-// Valid indicates whether the value is a known member of the AutomationRunReportRequestPhase enum.
-func (e AutomationRunReportRequestPhase) Valid() bool {
-	switch e {
-	case Finished:
-		return true
-	case Started:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for AutomationRunStatus.
-const (
-	AutomationRunStatusCancelled  AutomationRunStatus = "cancelled"
-	AutomationRunStatusCompleted  AutomationRunStatus = "completed"
-	AutomationRunStatusDispatched AutomationRunStatus = "dispatched"
-	AutomationRunStatusFailed     AutomationRunStatus = "failed"
-	AutomationRunStatusQueued     AutomationRunStatus = "queued"
-	AutomationRunStatusRunning    AutomationRunStatus = "running"
-	AutomationRunStatusTimedOut   AutomationRunStatus = "timed_out"
-)
-
-// Valid indicates whether the value is a known member of the AutomationRunStatus enum.
-func (e AutomationRunStatus) Valid() bool {
-	switch e {
-	case AutomationRunStatusCancelled:
-		return true
-	case AutomationRunStatusCompleted:
-		return true
-	case AutomationRunStatusDispatched:
-		return true
-	case AutomationRunStatusFailed:
-		return true
-	case AutomationRunStatusQueued:
-		return true
-	case AutomationRunStatusRunning:
-		return true
-	case AutomationRunStatusTimedOut:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for AutomationTriggerType.
-const (
-	Cron                AutomationTriggerType = "cron"
-	GithubPrOpened      AutomationTriggerType = "github_pr_opened"
-	GithubPrSynchronize AutomationTriggerType = "github_pr_synchronize"
-	IssueCreated        AutomationTriggerType = "issue_created"
-	IssueLabelAdded     AutomationTriggerType = "issue_label_added"
-	IssueStatusChanged  AutomationTriggerType = "issue_status_changed"
-)
-
-// Valid indicates whether the value is a known member of the AutomationTriggerType enum.
-func (e AutomationTriggerType) Valid() bool {
-	switch e {
-	case Cron:
-		return true
-	case GithubPrOpened:
-		return true
-	case GithubPrSynchronize:
-		return true
-	case IssueCreated:
-		return true
-	case IssueLabelAdded:
-		return true
-	case IssueStatusChanged:
-		return true
-	default:
-		return false
-	}
-}
 
 // Defines values for CreateT3ThreadRequestRuntimeMode.
 const (
@@ -278,21 +116,6 @@ func (e GitHubAppManifestDefaultEvents) Valid() bool {
 	}
 }
 
-// Defines values for GitHubAppManifestDefaultPermissionsChecks.
-const (
-	GitHubAppManifestDefaultPermissionsChecksWrite GitHubAppManifestDefaultPermissionsChecks = "write"
-)
-
-// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultPermissionsChecks enum.
-func (e GitHubAppManifestDefaultPermissionsChecks) Valid() bool {
-	switch e {
-	case GitHubAppManifestDefaultPermissionsChecksWrite:
-		return true
-	default:
-		return false
-	}
-}
-
 // Defines values for GitHubAppManifestDefaultPermissionsContents.
 const (
 	GitHubAppManifestDefaultPermissionsContentsRead GitHubAppManifestDefaultPermissionsContents = "read"
@@ -347,6 +170,21 @@ const (
 func (e GitHubAppManifestDefaultPermissionsPullRequests) Valid() bool {
 	switch e {
 	case GitHubAppManifestDefaultPermissionsPullRequestsWrite:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GitHubAppManifestDefaultPermissionsStatuses.
+const (
+	GitHubAppManifestDefaultPermissionsStatusesWrite GitHubAppManifestDefaultPermissionsStatuses = "write"
+)
+
+// Valid indicates whether the value is a known member of the GitHubAppManifestDefaultPermissionsStatuses enum.
+func (e GitHubAppManifestDefaultPermissionsStatuses) Valid() bool {
+	switch e {
+	case GitHubAppManifestDefaultPermissionsStatusesWrite:
 		return true
 	default:
 		return false
@@ -418,25 +256,19 @@ func (e IssueRecommendationStatus) Valid() bool {
 
 // Defines values for NotificationKind.
 const (
-	Agent                    NotificationKind = "agent"
-	AutomationBusy           NotificationKind = "automation_busy"
-	AutomationDispatchFailed NotificationKind = "automation_dispatch_failed"
-	AutomationPostFailed     NotificationKind = "automation_post_failed"
-	AutomationRunTimeout     NotificationKind = "automation_run_timeout"
+	ReviewCleanupFailed  NotificationKind = "review_cleanup_failed"
+	ReviewDispatchFailed NotificationKind = "review_dispatch_failed"
+	ReviewRunTimeout     NotificationKind = "review_run_timeout"
 )
 
 // Valid indicates whether the value is a known member of the NotificationKind enum.
 func (e NotificationKind) Valid() bool {
 	switch e {
-	case Agent:
+	case ReviewCleanupFailed:
 		return true
-	case AutomationBusy:
+	case ReviewDispatchFailed:
 		return true
-	case AutomationDispatchFailed:
-		return true
-	case AutomationPostFailed:
-		return true
-	case AutomationRunTimeout:
+	case ReviewRunTimeout:
 		return true
 	default:
 		return false
@@ -581,6 +413,183 @@ func (e RespondT3ThreadRequestType) Valid() bool {
 	}
 }
 
+// Defines values for ReviewCodeFindingLevel.
+const (
+	Note ReviewCodeFindingLevel = "Note"
+	P0   ReviewCodeFindingLevel = "P0"
+	P1   ReviewCodeFindingLevel = "P1"
+	P2   ReviewCodeFindingLevel = "P2"
+)
+
+// Valid indicates whether the value is a known member of the ReviewCodeFindingLevel enum.
+func (e ReviewCodeFindingLevel) Valid() bool {
+	switch e {
+	case Note:
+		return true
+	case P0:
+		return true
+	case P1:
+		return true
+	case P2:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewPrerequisiteCode.
+const (
+	EnvironmentBinding    ReviewPrerequisiteCode = "environment_binding"
+	GithubApp             ReviewPrerequisiteCode = "github_app"
+	GithubAppInstallation ReviewPrerequisiteCode = "github_app_installation"
+	GithubToken           ReviewPrerequisiteCode = "github_token"
+	PublicUrl             ReviewPrerequisiteCode = "public_url"
+)
+
+// Valid indicates whether the value is a known member of the ReviewPrerequisiteCode enum.
+func (e ReviewPrerequisiteCode) Valid() bool {
+	switch e {
+	case EnvironmentBinding:
+		return true
+	case GithubApp:
+		return true
+	case GithubAppInstallation:
+		return true
+	case GithubToken:
+		return true
+	case PublicUrl:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewPriorDecisionStatus.
+const (
+	ReviewPriorDecisionStatusFixed    ReviewPriorDecisionStatus = "fixed"
+	ReviewPriorDecisionStatusOpen     ReviewPriorDecisionStatus = "open"
+	ReviewPriorDecisionStatusRejected ReviewPriorDecisionStatus = "rejected"
+)
+
+// Valid indicates whether the value is a known member of the ReviewPriorDecisionStatus enum.
+func (e ReviewPriorDecisionStatus) Valid() bool {
+	switch e {
+	case ReviewPriorDecisionStatusFixed:
+		return true
+	case ReviewPriorDecisionStatusOpen:
+		return true
+	case ReviewPriorDecisionStatusRejected:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewRunSummaryKind.
+const (
+	Code   ReviewRunSummaryKind = "code"
+	Visual ReviewRunSummaryKind = "visual"
+)
+
+// Valid indicates whether the value is a known member of the ReviewRunSummaryKind enum.
+func (e ReviewRunSummaryKind) Valid() bool {
+	switch e {
+	case Code:
+		return true
+	case Visual:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewRunSummaryStatus.
+const (
+	ReviewRunSummaryStatusCancelled  ReviewRunSummaryStatus = "cancelled"
+	ReviewRunSummaryStatusCompleted  ReviewRunSummaryStatus = "completed"
+	ReviewRunSummaryStatusDispatched ReviewRunSummaryStatus = "dispatched"
+	ReviewRunSummaryStatusFailed     ReviewRunSummaryStatus = "failed"
+	ReviewRunSummaryStatusQueued     ReviewRunSummaryStatus = "queued"
+	ReviewRunSummaryStatusRunning    ReviewRunSummaryStatus = "running"
+	ReviewRunSummaryStatusTimedOut   ReviewRunSummaryStatus = "timed_out"
+)
+
+// Valid indicates whether the value is a known member of the ReviewRunSummaryStatus enum.
+func (e ReviewRunSummaryStatus) Valid() bool {
+	switch e {
+	case ReviewRunSummaryStatusCancelled:
+		return true
+	case ReviewRunSummaryStatusCompleted:
+		return true
+	case ReviewRunSummaryStatusDispatched:
+		return true
+	case ReviewRunSummaryStatusFailed:
+		return true
+	case ReviewRunSummaryStatusQueued:
+		return true
+	case ReviewRunSummaryStatusRunning:
+		return true
+	case ReviewRunSummaryStatusTimedOut:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewVisualFindingDimension.
+const (
+	Accessibility ReviewVisualFindingDimension = "accessibility"
+	Color         ReviewVisualFindingDimension = "color"
+	Copy          ReviewVisualFindingDimension = "copy"
+	Hierarchy     ReviewVisualFindingDimension = "hierarchy"
+	Interaction   ReviewVisualFindingDimension = "interaction"
+	Spacing       ReviewVisualFindingDimension = "spacing"
+	Typography    ReviewVisualFindingDimension = "typography"
+)
+
+// Valid indicates whether the value is a known member of the ReviewVisualFindingDimension enum.
+func (e ReviewVisualFindingDimension) Valid() bool {
+	switch e {
+	case Accessibility:
+		return true
+	case Color:
+		return true
+	case Copy:
+		return true
+	case Hierarchy:
+		return true
+	case Interaction:
+		return true
+	case Spacing:
+		return true
+	case Typography:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReviewVisualFindingSeverity.
+const (
+	Blocker     ReviewVisualFindingSeverity = "blocker"
+	Minor       ReviewVisualFindingSeverity = "minor"
+	WorthFixing ReviewVisualFindingSeverity = "worth_fixing"
+)
+
+// Valid indicates whether the value is a known member of the ReviewVisualFindingSeverity enum.
+func (e ReviewVisualFindingSeverity) Valid() bool {
+	switch e {
+	case Blocker:
+		return true
+	case Minor:
+		return true
+	case WorthFixing:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ScreenshotAnnotationBatchRequestAction.
 const (
 	Confirm ScreenshotAnnotationBatchRequestAction = "confirm"
@@ -622,16 +631,16 @@ func (e ScreenshotAnnotationBatchRequestFilterTheme) Valid() bool {
 
 // Defines values for ScreenshotAnnotationStatus.
 const (
-	Open     ScreenshotAnnotationStatus = "open"
-	Resolved ScreenshotAnnotationStatus = "resolved"
+	ScreenshotAnnotationStatusOpen     ScreenshotAnnotationStatus = "open"
+	ScreenshotAnnotationStatusResolved ScreenshotAnnotationStatus = "resolved"
 )
 
 // Valid indicates whether the value is a known member of the ScreenshotAnnotationStatus enum.
 func (e ScreenshotAnnotationStatus) Valid() bool {
 	switch e {
-	case Open:
+	case ScreenshotAnnotationStatusOpen:
 		return true
-	case Resolved:
+	case ScreenshotAnnotationStatusResolved:
 		return true
 	default:
 		return false
@@ -1238,82 +1247,6 @@ type AISettings struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
-// AgentCheckUpdateRequest 只更新本运行 check run 的标题与说明；结论（conclusion）由运行终态决定，不接受传入。
-type AgentCheckUpdateRequest struct {
-	Summary *string `json:"summary,omitempty"`
-	Text    *string `json:"text,omitempty"`
-	Title   *string `json:"title,omitempty"`
-}
-
-// AgentNotificationRequest defines model for AgentNotificationRequest.
-type AgentNotificationRequest struct {
-	Body *string `json:"body,omitempty"`
-
-	// EnvironmentId 可选；缺省用运行的环境
-	EnvironmentId *string `json:"environment_id,omitempty"`
-
-	// ProblemKey 去重身份；同一线程同类问题用同一 key
-	ProblemKey string `json:"problem_key"`
-
-	// StateKey 状态指纹；同 problem_key 下状态变化才刷新通知
-	StateKey string `json:"state_key"`
-
-	// ThreadId 可选；缺省用运行的线程
-	ThreadId *string `json:"thread_id,omitempty"`
-	Title    string  `json:"title"`
-}
-
-// AgentPullRequestComment defines model for AgentPullRequestComment.
-type AgentPullRequestComment struct {
-	Body        string  `json:"body"`
-	CreatedAt   string  `json:"created_at"`
-	Id          int     `json:"id"`
-	InReplyToId *int    `json:"in_reply_to_id,omitempty"`
-	Path        *string `json:"path,omitempty"`
-	User        string  `json:"user"`
-}
-
-// AgentPullRequestDetail 本运行审查的 PR 元数据（从运行行与 GitHub 读取；不接受请求参数）
-type AgentPullRequestDetail struct {
-	BaseRef *string `json:"base_ref,omitempty"`
-	Body    *string `json:"body,omitempty"`
-	Draft   *bool   `json:"draft,omitempty"`
-	HeadRef *string `json:"head_ref,omitempty"`
-
-	// HeadSha 本运行绑定的 head commit SHA
-	HeadSha      string `json:"head_sha"`
-	HtmlUrl      string `json:"html_url"`
-	PrNumber     int    `json:"pr_number"`
-	RepoFullName string `json:"repo_full_name"`
-	Title        string `json:"title"`
-}
-
-// AgentPullRequestDiff defines model for AgentPullRequestDiff.
-type AgentPullRequestDiff struct {
-	// Content 统一 diff 文本
-	Content string `json:"content"`
-
-	// Truncated 超过 1MB 截断时为 true
-	Truncated bool `json:"truncated"`
-}
-
-// AgentPullRequestReviewRequest defines model for AgentPullRequestReviewRequest.
-type AgentPullRequestReviewRequest struct {
-	// Body review 正文（APPROVE 时可空）
-	Body *string `json:"body,omitempty"`
-
-	// Event 审查结论；commit_id 由服务端取本运行 head SHA
-	Event AgentPullRequestReviewRequestEvent `json:"event"`
-}
-
-// AgentPullRequestReviewRequestEvent 审查结论；commit_id 由服务端取本运行 head SHA
-type AgentPullRequestReviewRequestEvent string
-
-// AgentPullRequestReviewResult defines model for AgentPullRequestReviewResult.
-type AgentPullRequestReviewResult struct {
-	Submitted bool `json:"submitted"`
-}
-
 // AnswerT3SecretRequest 密钥应答联合；save 携带密钥值（仅此一次经过，不落库不回显）
 type AnswerT3SecretRequest struct {
 	// Secret 仅 type=save；密钥值
@@ -1383,269 +1316,6 @@ type AuthResponse struct {
 	// Token JWT access token（HS256，有效期见服务端 jwt.expire_hours，默认 24h）
 	Token string `json:"token"`
 	User  User   `json:"user"`
-}
-
-// Automation defines model for Automation.
-type Automation struct {
-	CreatedAt string `json:"created_at"`
-	Enabled   bool   `json:"enabled"`
-
-	// EnvironmentId T3 环境 ID
-	EnvironmentId string `json:"environment_id"`
-	Id            string `json:"id"`
-
-	// ModelSelection cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
-	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-	Name           string                    `json:"name"`
-
-	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
-	PostAction AutomationPostAction `json:"post_action"`
-
-	// PostOnTimeout 超时后是否仍执行后置操作；缺省 false
-	PostOnTimeout bool `json:"post_on_timeout"`
-
-	// PromptTemplate 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明）
-	PromptTemplate string `json:"prompt_template"`
-
-	// RuntimeMode 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
-	RuntimeMode string `json:"runtime_mode"`
-
-	// T3ProjectId T3 项目 ID（线程开在这里）
-	T3ProjectId string `json:"t3_project_id"`
-
-	// TimeoutSeconds 回报截止时长（秒）；1 分钟–24 小时，缺省 3600
-	TimeoutSeconds int `json:"timeout_seconds"`
-
-	// Triggers 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。
-	Triggers  []AutomationTrigger  `json:"triggers"`
-	UpdatedAt string               `json:"updated_at"`
-	Workspace *AutomationWorkspace `json:"workspace,omitempty"`
-}
-
-// AutomationEventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
-// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
-type AutomationEventFilter struct {
-	Field *AutomationEventFilterField `json:"field,omitempty"`
-
-	// From 变化前值；空表示任意
-	From *string `json:"from,omitempty"`
-
-	// Labels 匹配任一新加标签名；空数组表示全部加标签事件
-	Labels []string `json:"labels,omitempty"`
-
-	// To 变化后值；空表示任意
-	To *string `json:"to,omitempty"`
-}
-
-// AutomationEventFilterField defines model for AutomationEventFilter.Field.
-type AutomationEventFilterField string
-
-// AutomationModelSelection T3 模型选择（缺省回落 T3 项目默认）
-type AutomationModelSelection struct {
-	InstanceId string                             `json:"instance_id"`
-	Model      string                             `json:"model"`
-	Options    []AutomationModelSelection_Options `json:"options,omitempty"`
-}
-
-// AutomationModelSelection_Options defines model for AutomationModelSelection.Options.
-type AutomationModelSelection_Options struct {
-	Id    *string `json:"id,omitempty"`
-	Value *string `json:"value,omitempty"`
-}
-
-// AutomationPostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
-type AutomationPostAction string
-
-// AutomationPostState defines model for AutomationPostState.
-type AutomationPostState string
-
-// AutomationRun defines model for AutomationRun.
-type AutomationRun struct {
-	AutomationId string  `json:"automation_id"`
-	DeadlineAt   *string `json:"deadline_at,omitempty"`
-
-	// DispatchStartedAt worker 认领并开始派发的时间
-	DispatchStartedAt *string `json:"dispatch_started_at,omitempty"`
-
-	// DispatchedAt 启动 RPC 结果确认时间；为空表示线程是否建成未确认（此类运行不执行后置）
-	DispatchedAt  *string `json:"dispatched_at,omitempty"`
-	EnvironmentId string  `json:"environment_id"`
-	ErrorCode     *string `json:"error_code,omitempty"`
-	ErrorMessage  *string `json:"error_message,omitempty"`
-	FinishedAt    *string `json:"finished_at,omitempty"`
-
-	// HeadSha 仅 GitHub PR 触发；本轮审查的 head commit SHA
-	HeadSha *string `json:"head_sha,omitempty"`
-	Id      string  `json:"id"`
-
-	// ModelInstanceId 仅 GitHub PR 触发；本运行绑定的模型 instance_id
-	ModelInstanceId *string `json:"model_instance_id,omitempty"`
-
-	// ModelName 仅 GitHub PR 触发；本运行绑定的模型名
-	ModelName         *string             `json:"model_name,omitempty"`
-	PostAttempt       int                 `json:"post_attempt"`
-	PostDeadlineAt    *string             `json:"post_deadline_at,omitempty"`
-	PostError         *string             `json:"post_error,omitempty"`
-	PostNextAttemptAt *string             `json:"post_next_attempt_at,omitempty"`
-	PostState         AutomationPostState `json:"post_state"`
-
-	// PrNumber 仅 GitHub PR 触发
-	PrNumber *int `json:"pr_number,omitempty"`
-
-	// RepoFullName 仅 GitHub PR 触发；owner/repo
-	RepoFullName *string `json:"repo_full_name,omitempty"`
-
-	// RoundNumber 仅 GitHub PR 触发；同一 PR 内递增的轮次（从 1 起，同一轮各模型共享）
-	RoundNumber    *int                      `json:"round_number,omitempty"`
-	StartedAt      *string                   `json:"started_at,omitempty"`
-	Status         *AutomationRunStatus      `json:"status"`
-	Summary        *string                   `json:"summary,omitempty"`
-	T3ProjectId    string                    `json:"t3_project_id"`
-	ThreadId       string                    `json:"thread_id"`
-	TriggerContext *AutomationTriggerContext `json:"trigger_context,omitempty"`
-
-	// TriggerId 触发本运行的触发器 id
-	TriggerId string `json:"trigger_id"`
-
-	// TriggerKey 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>`
-	TriggerKey string `json:"trigger_key"`
-
-	// TriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-	TriggerType AutomationTriggerType `json:"trigger_type"`
-	TriggeredAt string                `json:"triggered_at"`
-}
-
-// AutomationRunReportRequest defines model for AutomationRunReportRequest.
-type AutomationRunReportRequest struct {
-	// ErrorCode 仅 finished；非空表示运行失败（状态记 failed）
-	ErrorCode *string `json:"error_code,omitempty"`
-
-	// ErrorMessage 仅 finished
-	ErrorMessage *string                         `json:"error_message,omitempty"`
-	Phase        AutomationRunReportRequestPhase `json:"phase"`
-
-	// Summary 仅 finished；一句话结果摘要
-	Summary *string `json:"summary,omitempty"`
-}
-
-// AutomationRunReportRequestPhase defines model for AutomationRunReportRequest.Phase.
-type AutomationRunReportRequestPhase string
-
-// AutomationRunReportResult defines model for AutomationRunReportResult.
-type AutomationRunReportResult struct {
-	// Replay true 表示这是一次完全相同结束回报的重放
-	Replay bool   `json:"replay"`
-	RunId  string `json:"run_id"`
-
-	// Status 回报后的运行状态
-	Status string `json:"status"`
-}
-
-// AutomationRunStatus queued=PR 审查排队（用户并发上限内不占在途名额，等调度提升）；
-// dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；
-// cancelled=被新 head SHA 取代或规则改动后废弃（终态）；
-// completed/failed/timed_out 为终态。回报未开始时状态可能为空。
-type AutomationRunStatus string
-
-// AutomationTrigger 自动化的一个触发器（INT-118）。各类型的专属字段之外一律为 null/缺省。
-type AutomationTrigger struct {
-	CreatedAt string `json:"created_at"`
-
-	// CronExpression 仅 cron；五字段标准表达式
-	CronExpression *string `json:"cron_expression,omitempty"`
-
-	// DebounceSeconds 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400
-	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
-
-	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
-	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
-	EventFilter *AutomationEventFilter `json:"event_filter,omitempty"`
-	Id          string                 `json:"id"`
-
-	// IssueProjectId 事件/PR 触发的项目范围；null 表示当前用户全部项目
-	IssueProjectId *string `json:"issue_project_id,omitempty"`
-
-	// ModelSelections 仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮，
-	// 并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择，
-	// 不能「项目默认」。
-	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
-
-	// NextRunAt 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算
-	NextRunAt *string `json:"next_run_at,omitempty"`
-
-	// Timezone IANA 时区名，仅 cron；空表示 UTC
-	Timezone *string `json:"timezone,omitempty"`
-
-	// TriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-	TriggerType AutomationTriggerType `json:"trigger_type"`
-}
-
-// AutomationTriggerContext 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。
-type AutomationTriggerContext struct {
-	// Field 状态变化字段（state | workflow_status）
-	Field               *string  `json:"field,omitempty"`
-	From                *string  `json:"from,omitempty"`
-	IssueId             *string  `json:"issue_id,omitempty"`
-	IssueSequenceNumber *int     `json:"issue_sequence_number,omitempty"`
-	IssueTitle          *string  `json:"issue_title,omitempty"`
-	LabelsAdded         []string `json:"labels_added,omitempty"`
-	ProjectId           *string  `json:"project_id,omitempty"`
-	To                  *string  `json:"to,omitempty"`
-}
-
-// AutomationTriggerInput 触发器输入。全量替换语义：带 id 更新该触发器（未知 id 报参数错误），不带 id 新建；
-// 未再提交的已有触发器被删除。同一 payload 内 id 不可重复。
-type AutomationTriggerInput struct {
-	// CronExpression 仅 cron；五字段标准表达式
-	CronExpression *string `json:"cron_expression,omitempty"`
-
-	// DebounceSeconds 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
-	DebounceSeconds *int `json:"debounce_seconds,omitempty"`
-
-	// EventFilter Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
-	// issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
-	EventFilter *AutomationEventFilter `json:"event_filter,omitempty"`
-
-	// Id 可选；自动化内已存在的触发器 id
-	Id *string `json:"id,omitempty"`
-
-	// IssueProjectId 事件/PR 触发的项目范围；null 表示当前用户全部项目
-	IssueProjectId *string `json:"issue_project_id,omitempty"`
-
-	// ModelSelections 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
-	ModelSelections []AutomationModelSelection `json:"model_selections,omitempty"`
-
-	// Timezone IANA 时区名，仅 cron；空表示 UTC
-	Timezone *string `json:"timezone,omitempty"`
-
-	// TriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-	// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-	// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-	// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-	TriggerType AutomationTriggerType `json:"trigger_type"`
-}
-
-// AutomationTriggerType 触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-// github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-// GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-// 不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-type AutomationTriggerType string
-
-// AutomationWorkspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
-type AutomationWorkspace struct {
-	BaseRef         *string `json:"base_ref,omitempty"`
-	Branch          *string `json:"branch,omitempty"`
-	StartFromOrigin *bool   `json:"start_from_origin,omitempty"`
-
-	// Type root / worktree / existing_worktree
-	Type         string  `json:"type"`
-	WorktreePath *string `json:"worktree_path,omitempty"`
 }
 
 // Bot defines model for Bot.
@@ -2041,33 +1711,6 @@ type CreateApiKeyRequest struct {
 	Name string `binding:"required,min=1,max=100" json:"name"`
 }
 
-// CreateAutomationRequest defines model for CreateAutomationRequest.
-type CreateAutomationRequest struct {
-	// Enabled 缺省 false；启用时至少要有一个触发器，并完整校验触发配置与 public_url
-	Enabled       *bool  `json:"enabled,omitempty"`
-	EnvironmentId string `json:"environment_id"`
-
-	// ModelSelection T3 模型选择（缺省回落 T3 项目默认）
-	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-	Name           string                    `json:"name"`
-
-	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
-	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
-	PostOnTimeout  *bool                 `json:"post_on_timeout,omitempty"`
-	PromptTemplate string                `json:"prompt_template"`
-
-	// RuntimeMode 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
-	RuntimeMode    *string `json:"runtime_mode,omitempty"`
-	T3ProjectId    string  `json:"t3_project_id"`
-	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
-
-	// Triggers 触发器全量列表（0–20 个，可重复、可混搭）。
-	Triggers []AutomationTriggerInput `json:"triggers"`
-
-	// Workspace 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
-	Workspace *AutomationWorkspace `json:"workspace,omitempty"`
-}
-
 // CreateBotRequest defines model for CreateBotRequest.
 type CreateBotRequest struct {
 	// ApiKey OpenAI 兼容 API Key；加密落库，仅创建/更新时提交
@@ -2411,7 +2054,7 @@ type GitHubAppDeploymentSource string
 type GitHubAppManifest struct {
 	DefaultEvents []GitHubAppManifestDefaultEvents `json:"default_events"`
 
-	// DefaultPermissions PR 评审所需的最小权限集
+	// DefaultPermissions PR 审查所需的最小权限集（结论用 commit status，不用 Checks API）
 	DefaultPermissions GitHubAppManifest_DefaultPermissions `json:"default_permissions"`
 	HookAttributes     GitHubAppManifest_HookAttributes     `json:"hook_attributes"`
 
@@ -2434,9 +2077,6 @@ type GitHubAppManifest struct {
 // GitHubAppManifestDefaultEvents defines model for GitHubAppManifest.DefaultEvents.
 type GitHubAppManifestDefaultEvents string
 
-// GitHubAppManifestDefaultPermissionsChecks defines model for GitHubAppManifest.DefaultPermissions.Checks.
-type GitHubAppManifestDefaultPermissionsChecks string
-
 // GitHubAppManifestDefaultPermissionsContents defines model for GitHubAppManifest.DefaultPermissions.Contents.
 type GitHubAppManifestDefaultPermissionsContents string
 
@@ -2449,13 +2089,16 @@ type GitHubAppManifestDefaultPermissionsMetadata string
 // GitHubAppManifestDefaultPermissionsPullRequests defines model for GitHubAppManifest.DefaultPermissions.PullRequests.
 type GitHubAppManifestDefaultPermissionsPullRequests string
 
-// GitHubAppManifest_DefaultPermissions PR 评审所需的最小权限集
+// GitHubAppManifestDefaultPermissionsStatuses defines model for GitHubAppManifest.DefaultPermissions.Statuses.
+type GitHubAppManifestDefaultPermissionsStatuses string
+
+// GitHubAppManifest_DefaultPermissions PR 审查所需的最小权限集（结论用 commit status，不用 Checks API）
 type GitHubAppManifest_DefaultPermissions struct {
-	Checks       GitHubAppManifestDefaultPermissionsChecks       `json:"checks"`
 	Contents     GitHubAppManifestDefaultPermissionsContents     `json:"contents"`
 	Issues       GitHubAppManifestDefaultPermissionsIssues       `json:"issues"`
 	Metadata     GitHubAppManifestDefaultPermissionsMetadata     `json:"metadata"`
 	PullRequests GitHubAppManifestDefaultPermissionsPullRequests `json:"pull_requests"`
+	Statuses     GitHubAppManifestDefaultPermissionsStatuses     `json:"statuses"`
 }
 
 // GitHubAppManifest_HookAttributes defines model for GitHubAppManifest.HookAttributes.
@@ -3489,6 +3132,238 @@ type RespondT3ThreadRequest struct {
 // RespondT3ThreadRequestType defines model for RespondT3ThreadRequest.Type.
 type RespondT3ThreadRequestType string
 
+// ReviewAgentDiff defines model for ReviewAgentDiff.
+type ReviewAgentDiff struct {
+	Content   string `json:"content"`
+	Truncated bool   `json:"truncated"`
+}
+
+// ReviewAgentPullRequest defines model for ReviewAgentPullRequest.
+type ReviewAgentPullRequest struct {
+	BaseRef      string `json:"base_ref"`
+	Body         string `json:"body"`
+	HeadRef      string `json:"head_ref"`
+	HeadSha      string `json:"head_sha"`
+	HtmlUrl      string `json:"html_url"`
+	PrNumber     int    `json:"pr_number"`
+	RepoFullName string `json:"repo_full_name"`
+	Title        string `json:"title"`
+}
+
+// ReviewAgentScreenshot defines model for ReviewAgentScreenshot.
+type ReviewAgentScreenshot struct {
+	Id    string `json:"id"`
+	Label string `json:"label"`
+
+	// Url 指向本端点的图片路径（相对 server.public_url）
+	Url string `json:"url"`
+}
+
+// ReviewCodeFinding defines model for ReviewCodeFinding.
+type ReviewCodeFinding struct {
+	Body  string                 `json:"body"`
+	File  string                 `json:"file"`
+	Level ReviewCodeFindingLevel `json:"level"`
+
+	// Line 当前 HEAD 右侧代码行号；可为空
+	Line *int `json:"line,omitempty"`
+}
+
+// ReviewCodeFindingLevel defines model for ReviewCodeFinding.Level.
+type ReviewCodeFindingLevel string
+
+// ReviewCodeResult defines model for ReviewCodeResult.
+type ReviewCodeResult struct {
+	Findings                 []ReviewCodeFinding   `json:"findings"`
+	Prior                    []ReviewPriorDecision `json:"prior"`
+	Summary                  string                `json:"summary"`
+	UiChanged                bool                  `json:"ui_changed"`
+	UiChangedSinceLastVisual bool                  `json:"ui_changed_since_last_visual"`
+}
+
+// ReviewCombination 一个审查组合：环境 + harness（instance_id）+ 模型 + 选项（思考强度等）
+type ReviewCombination struct {
+	EnvironmentId string `json:"environment_id"`
+
+	// EnvironmentName 仅响应；环境当前名称
+	EnvironmentName *string `json:"environment_name,omitempty"`
+
+	// InstanceId T3 provider 实例 id（harness 维度）
+	InstanceId string `json:"instance_id"`
+	Model      string `json:"model"`
+
+	// Options 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3
+	Options []ReviewModelOption `json:"options,omitempty"`
+
+	// T3ProjectId 仅响应；绑定的 T3 项目 id（保存时快照）
+	T3ProjectId *string `json:"t3_project_id,omitempty"`
+}
+
+// ReviewModelOption 模型选项（与 T3 modelSelection.options 同形，值可为字符串或布尔）
+type ReviewModelOption struct {
+	Id string `json:"id"`
+
+	// Value 选项值（字符串或布尔）
+	Value interface{} `json:"value"`
+}
+
+// ReviewPrerequisite defines model for ReviewPrerequisite.
+type ReviewPrerequisite struct {
+	Code    ReviewPrerequisiteCode `json:"code"`
+	Detail  *string                `json:"detail,omitempty"`
+	Label   string                 `json:"label"`
+	Missing bool                   `json:"missing"`
+}
+
+// ReviewPrerequisiteCode defines model for ReviewPrerequisite.Code.
+type ReviewPrerequisiteCode string
+
+// ReviewPriorDecision defines model for ReviewPriorDecision.
+type ReviewPriorDecision struct {
+	// Body 原发现的正文摘要
+	Body string  `json:"body"`
+	File *string `json:"file,omitempty"`
+
+	// Level 原发现的分级（P0/P1/P2/Note 或 blocker/worth_fixing/minor）
+	Level *string `json:"level,omitempty"`
+	Line  *int    `json:"line,omitempty"`
+
+	// Reason rejected 时必须写明理由
+	Reason *string                   `json:"reason,omitempty"`
+	Status ReviewPriorDecisionStatus `json:"status"`
+}
+
+// ReviewPriorDecisionStatus defines model for ReviewPriorDecision.Status.
+type ReviewPriorDecisionStatus string
+
+// ReviewProjectSummary defines model for ReviewProjectSummary.
+type ReviewProjectSummary struct {
+	CanManage            bool `json:"can_manage"`
+	CodeCombinationCount int  `json:"code_combination_count"`
+
+	// CodeStatus 最近一次代码审查结论（success/failure/error/pending）
+	CodeStatus             *string `json:"code_status,omitempty"`
+	Enabled                bool    `json:"enabled"`
+	GithubOwner            string  `json:"github_owner"`
+	GithubRepo             string  `json:"github_repo"`
+	LastReviewAt           *string `json:"last_review_at,omitempty"`
+	ProjectId              string  `json:"project_id"`
+	ProjectName            string  `json:"project_name"`
+	TakenBy                *string `json:"taken_by,omitempty"`
+	VisualCombinationCount int     `json:"visual_combination_count"`
+	VisualStatus           *string `json:"visual_status,omitempty"`
+}
+
+// ReviewPullRequestRecord defines model for ReviewPullRequestRecord.
+type ReviewPullRequestRecord struct {
+	CodeStatus   *string             `json:"code_status,omitempty"`
+	HeadSha      string              `json:"head_sha"`
+	PrNumber     int                 `json:"pr_number"`
+	PrTitle      string              `json:"pr_title"`
+	PrUrl        string              `json:"pr_url"`
+	RepoFullName string              `json:"repo_full_name"`
+	Rounds       []ReviewRoundRecord `json:"rounds"`
+	UpdatedAt    string              `json:"updated_at"`
+	VisualStatus *string             `json:"visual_status,omitempty"`
+}
+
+// ReviewRoundRecord defines model for ReviewRoundRecord.
+type ReviewRoundRecord struct {
+	CodeRuns    []ReviewRunSummary `json:"code_runs"`
+	CreatedAt   string             `json:"created_at"`
+	HeadSha     string             `json:"head_sha"`
+	RoundNumber int                `json:"round_number"`
+	VisualRuns  []ReviewRunSummary `json:"visual_runs"`
+}
+
+// ReviewRunSummary defines model for ReviewRunSummary.
+type ReviewRunSummary struct {
+	EnvironmentId   string  `json:"environment_id"`
+	EnvironmentName *string `json:"environment_name,omitempty"`
+	ErrorCode       *string `json:"error_code,omitempty"`
+	ErrorMessage    *string `json:"error_message,omitempty"`
+
+	// FindingsCount P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数
+	FindingsCount *int                   `json:"findings_count,omitempty"`
+	FinishedAt    *string                `json:"finished_at,omitempty"`
+	Id            string                 `json:"id"`
+	InstanceId    string                 `json:"instance_id"`
+	Kind          ReviewRunSummaryKind   `json:"kind"`
+	Model         string                 `json:"model"`
+	Options       []ReviewModelOption    `json:"options,omitempty"`
+	StartedAt     *string                `json:"started_at,omitempty"`
+	Status        ReviewRunSummaryStatus `json:"status"`
+	Summary       *string                `json:"summary,omitempty"`
+	ThreadId      string                 `json:"thread_id"`
+	UiChanged     *bool                  `json:"ui_changed,omitempty"`
+	WorktreeState *string                `json:"worktree_state,omitempty"`
+}
+
+// ReviewRunSummaryKind defines model for ReviewRunSummary.Kind.
+type ReviewRunSummaryKind string
+
+// ReviewRunSummaryStatus defines model for ReviewRunSummary.Status.
+type ReviewRunSummaryStatus string
+
+// ReviewSettings defines model for ReviewSettings.
+type ReviewSettings struct {
+	CanManage        *bool                `json:"can_manage,omitempty"`
+	CodeCombinations []ReviewCombination  `json:"code_combinations"`
+	Enabled          bool                 `json:"enabled"`
+	Prerequisites    []ReviewPrerequisite `json:"prerequisites"`
+	ProjectId        string               `json:"project_id"`
+
+	// TakenBy 同仓库已开启审查的其他项目占用者登录名（只读）
+	TakenBy               *string             `json:"taken_by,omitempty"`
+	TriggerOpened         bool                `json:"trigger_opened"`
+	TriggerReadyForReview bool                `json:"trigger_ready_for_review"`
+	TriggerReopened       bool                `json:"trigger_reopened"`
+	TriggerSynchronize    bool                `json:"trigger_synchronize"`
+	VisualCombinations    []ReviewCombination `json:"visual_combinations"`
+}
+
+// ReviewSettingsInput defines model for ReviewSettingsInput.
+type ReviewSettingsInput struct {
+	CodeCombinations      []ReviewCombination `json:"code_combinations"`
+	Enabled               bool                `json:"enabled"`
+	TriggerOpened         bool                `json:"trigger_opened"`
+	TriggerReadyForReview bool                `json:"trigger_ready_for_review"`
+	TriggerReopened       bool                `json:"trigger_reopened"`
+	TriggerSynchronize    bool                `json:"trigger_synchronize"`
+	VisualCombinations    []ReviewCombination `json:"visual_combinations"`
+}
+
+// ReviewUnmeasurable defines model for ReviewUnmeasurable.
+type ReviewUnmeasurable struct {
+	Reason     string `json:"reason"`
+	Screenshot string `json:"screenshot"`
+}
+
+// ReviewVisualFinding defines model for ReviewVisualFinding.
+type ReviewVisualFinding struct {
+	Body      string                       `json:"body"`
+	Dimension ReviewVisualFindingDimension `json:"dimension"`
+	Fix       string                       `json:"fix"`
+
+	// Screenshot 截图标签（来自 screenshots 端点的 label）
+	Screenshot string                      `json:"screenshot"`
+	Severity   ReviewVisualFindingSeverity `json:"severity"`
+}
+
+// ReviewVisualFindingDimension defines model for ReviewVisualFinding.Dimension.
+type ReviewVisualFindingDimension string
+
+// ReviewVisualFindingSeverity defines model for ReviewVisualFinding.Severity.
+type ReviewVisualFindingSeverity string
+
+// ReviewVisualResult defines model for ReviewVisualResult.
+type ReviewVisualResult struct {
+	Findings     []ReviewVisualFinding `json:"findings"`
+	Prior        []ReviewPriorDecision `json:"prior"`
+	Summary      string                `json:"summary"`
+	Unmeasurable []ReviewUnmeasurable  `json:"unmeasurable"`
+}
+
 // ScreenshotAnnotation 挂在某张截图上的「矩形框 + 文字」标注；坐标以图片宽高比例（0~1）存储
 type ScreenshotAnnotation struct {
 	// Body 标注文字
@@ -3685,8 +3560,6 @@ type SelfLogAggregateRow struct {
 
 // SelfLogEntry Fast Ship 自身日志条目（入库前已脱敏：token/密钥/密码/Authorization 一律不落明文）
 type SelfLogEntry struct {
-	AutomationId *string `json:"automation_id,omitempty"`
-
 	// Extra 其余结构化字段（JSON 对象）；未选入 fields 时省略
 	Extra map[string]interface{} `json:"extra,omitempty"`
 
@@ -3696,7 +3569,7 @@ type SelfLogEntry struct {
 	Level   SelfLogEntryLevel `json:"level"`
 	Message string            `json:"message"`
 
-	// Module 产生日志的模块（http / automation / t3 / github / auth / api_key 等）
+	// Module 产生日志的模块（http / review / t3 / github / auth / api_key 等）
 	Module    *string `json:"module,omitempty"`
 	ProjectId *string `json:"project_id,omitempty"`
 	RequestId *string `json:"request_id,omitempty"`
@@ -4293,30 +4166,6 @@ type UpdateAISettingsRequest struct {
 	Model *string `json:"model,omitempty"`
 }
 
-// UpdateAutomationRequest 全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
-type UpdateAutomationRequest struct {
-	Enabled       *bool  `json:"enabled,omitempty"`
-	EnvironmentId string `json:"environment_id"`
-
-	// ModelSelection cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
-	ModelSelection *AutomationModelSelection `json:"model_selection,omitempty"`
-	Name           string                    `json:"name"`
-
-	// PostAction 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
-	PostAction     *AutomationPostAction `json:"post_action,omitempty"`
-	PostOnTimeout  *bool                 `json:"post_on_timeout,omitempty"`
-	PromptTemplate string                `json:"prompt_template"`
-
-	// RuntimeMode 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
-	RuntimeMode    *string `json:"runtime_mode,omitempty"`
-	T3ProjectId    string  `json:"t3_project_id"`
-	TimeoutSeconds *int    `json:"timeout_seconds,omitempty"`
-
-	// Triggers 触发器全量替换：带 id 更新、不带 id 新建、未提交的删除。
-	Triggers  []AutomationTriggerInput `json:"triggers"`
-	Workspace *AutomationWorkspace     `json:"workspace,omitempty"`
-}
-
 // UpdateBotRequest 指针字段表达「未提供保留」；api_key 空串拒绝（40001）
 type UpdateBotRequest struct {
 	ApiKey        *string `json:"api_key,omitempty"`
@@ -4603,12 +4452,6 @@ type VersionShipHooksStatus string
 // VersionStatus defines model for VersionStatus.
 type VersionStatus = model.VersionStatus
 
-// AutomationId defines model for AutomationId.
-type AutomationId = string
-
-// AutomationRunId defines model for AutomationRunId.
-type AutomationRunId = string
-
 // DocId defines model for DocId.
 type DocId = string
 
@@ -4653,9 +4496,6 @@ type ScreenshotAnnotationId = string
 
 // ScreenshotScreenId defines model for ScreenshotScreenId.
 type ScreenshotScreenId = string
-
-// SelfLogAutomationID defines model for SelfLogAutomationID.
-type SelfLogAutomationID = string
 
 // SelfLogCursor defines model for SelfLogCursor.
 type SelfLogCursor = string
@@ -4924,202 +4764,6 @@ type Register200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int           `json:"code"`
 	Data *AuthResponse `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// GetAgentThreadParams defines parameters for GetAgentThread.
-type GetAgentThreadParams struct {
-	Limit        *int    `form:"limit,omitempty" json:"limit,omitempty"`
-	BeforeItemId *string `form:"before_item_id,omitempty" json:"before_item_id,omitempty"`
-}
-
-// GetAgentThread200JSONResponseBody defines parameters for GetAgentThread.
-type GetAgentThread200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int             `json:"code"`
-	Data *T3ThreadDetail `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// GetAgentThreadItem200JSONResponseBody defines parameters for GetAgentThreadItem.
-type GetAgentThreadItem200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int `json:"code"`
-
-	// Data 归一化线程条目。映射规则：user_message（含 attachments 图片元数据）/
-	// assistant_message/reasoning 原样带快照文本；proposed_plan →
-	// assistant_message；command_execution（text=命令，summary=命令首行，
-	// 输出经 items/{itemId} 补读）；dynamic_tool/file_search/web_search/todo_list →
-	// dynamic_tool；file_change（真实元数据：文件名/增删行数/子操作，summary=文件名 ±行数，
-	// 上游 detail 无 diff，不调用 diff 读路径）；subagent（child_thread_id 带出，
-	// 结果经 items/{itemId} 补读）；error（text=失败信息，summary=失败类别）。
-	// 交互类条目：approval_request（审批，request_id 关联运行时请求）/
-	// user_input_request（提问）/ secret_request（密钥，绝不携带密钥值）。
-	// 结构性事件（checkpoint、handoff、notification、system_notice 等）丢弃；
-	// 未知类型前向兼容地跳过。正文不额外截断。
-	// 继承行（fork 前缀，visibility=inherited）只展示历史：inherited=true，
-	// 不能在本线程原地应答；source_thread_id 指向来源线程。
-	Data *T3ThreadItem `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// GetAgentPullRequest200JSONResponseBody defines parameters for GetAgentPullRequest.
-type GetAgentPullRequest200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int `json:"code"`
-
-	// Data 本运行审查的 PR 元数据（从运行行与 GitHub 读取；不接受请求参数）
-	Data *AgentPullRequestDetail `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// ListAgentPullRequestComments200JSONResponseBody_Data defines parameters for ListAgentPullRequestComments.
-type ListAgentPullRequestComments200JSONResponseBody_Data struct {
-	Items []AgentPullRequestComment `json:"items"`
-}
-
-// ListAgentPullRequestComments200JSONResponseBody defines parameters for ListAgentPullRequestComments.
-type ListAgentPullRequestComments200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                                                   `json:"code"`
-	Data *ListAgentPullRequestComments200JSONResponseBody_Data `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// GetAgentPullRequestDiff200JSONResponseBody defines parameters for GetAgentPullRequestDiff.
-type GetAgentPullRequestDiff200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                   `json:"code"`
-	Data *AgentPullRequestDiff `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// SubmitAgentPullRequestReview200JSONResponseBody defines parameters for SubmitAgentPullRequestReview.
-type SubmitAgentPullRequestReview200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                           `json:"code"`
-	Data *AgentPullRequestReviewResult `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// ReportAutomationRun200JSONResponseBody defines parameters for ReportAutomationRun.
-type ReportAutomationRun200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                        `json:"code"`
-	Data *AutomationRunReportResult `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// ListAgentThreadsParams defines parameters for ListAgentThreads.
-type ListAgentThreadsParams struct {
-	EnvironmentId *string `form:"environment_id,omitempty" json:"environment_id,omitempty"`
-	ProjectId     *string `form:"project_id,omitempty" json:"project_id,omitempty"`
-	Status        *string `form:"status,omitempty" json:"status,omitempty"`
-	Settled       *bool   `form:"settled,omitempty" json:"settled,omitempty"`
-}
-
-// ListAgentThreads200JSONResponseBody_Data defines parameters for ListAgentThreads.
-type ListAgentThreads200JSONResponseBody_Data struct {
-	Environments []T3Environment   `json:"environments"`
-	Items        []T3ThreadSummary `json:"items"`
-}
-
-// ListAgentThreads200JSONResponseBody defines parameters for ListAgentThreads.
-type ListAgentThreads200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                                       `json:"code"`
-	Data *ListAgentThreads200JSONResponseBody_Data `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// GetAutomationRun200JSONResponseBody defines parameters for GetAutomationRun.
-type GetAutomationRun200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int            `json:"code"`
-	Data *AutomationRun `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// ListAutomations200JSONResponseBody_Data defines parameters for ListAutomations.
-type ListAutomations200JSONResponseBody_Data struct {
-	Items []Automation `json:"items"`
-}
-
-// ListAutomations200JSONResponseBody defines parameters for ListAutomations.
-type ListAutomations200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                                      `json:"code"`
-	Data *ListAutomations200JSONResponseBody_Data `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// CreateAutomation200JSONResponseBody defines parameters for CreateAutomation.
-type CreateAutomation200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int         `json:"code"`
-	Data *Automation `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// GetAutomation200JSONResponseBody defines parameters for GetAutomation.
-type GetAutomation200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int         `json:"code"`
-	Data *Automation `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// UpdateAutomation200JSONResponseBody defines parameters for UpdateAutomation.
-type UpdateAutomation200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int         `json:"code"`
-	Data *Automation `json:"data,omitempty"`
-
-	// Message 人类可读信息；成功时为 "success"
-	Message string `json:"message"`
-}
-
-// ListAutomationRunsParams defines parameters for ListAutomationRuns.
-type ListAutomationRunsParams struct {
-	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
-}
-
-// ListAutomationRuns200JSONResponseBody_Data defines parameters for ListAutomationRuns.
-type ListAutomationRuns200JSONResponseBody_Data struct {
-	Items []AutomationRun `json:"items"`
-}
-
-// ListAutomationRuns200JSONResponseBody defines parameters for ListAutomationRuns.
-type ListAutomationRuns200JSONResponseBody struct {
-	// Code 业务错误码；0 表示成功
-	Code int                                         `json:"code"`
-	Data *ListAutomationRuns200JSONResponseBody_Data `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
@@ -6664,6 +6308,69 @@ type UploadLogs200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ListProjectReviewRecordsParams defines parameters for ListProjectReviewRecords.
+type ListProjectReviewRecordsParams struct {
+	// Limit 返回的 PR 数量上限
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// ListProjectReviewRecords200JSONResponseBody_Data defines parameters for ListProjectReviewRecords.
+type ListProjectReviewRecords200JSONResponseBody_Data struct {
+	Items []ReviewPullRequestRecord `json:"items"`
+}
+
+// ListProjectReviewRecords200JSONResponseBody defines parameters for ListProjectReviewRecords.
+type ListProjectReviewRecords200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                               `json:"code"`
+	Data *ListProjectReviewRecords200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetProjectReviewSettings200JSONResponseBody defines parameters for GetProjectReviewSettings.
+type GetProjectReviewSettings200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int             `json:"code"`
+	Data *ReviewSettings `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateProjectReviewSettings200JSONResponseBody defines parameters for UpdateProjectReviewSettings.
+type UpdateProjectReviewSettings200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int             `json:"code"`
+	Data *ReviewSettings `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// RerunProjectReviewJSONBody defines parameters for RerunProjectReview.
+type RerunProjectReviewJSONBody struct {
+	PrNumber int `json:"pr_number"`
+}
+
+// RerunProjectReview200JSONResponseBody_Data defines parameters for RerunProjectReview.
+type RerunProjectReview200JSONResponseBody_Data struct {
+	Accepted    bool   `json:"accepted"`
+	HeadSha     string `json:"head_sha"`
+	RoundNumber int    `json:"round_number"`
+}
+
+// RerunProjectReview200JSONResponseBody defines parameters for RerunProjectReview.
+type RerunProjectReview200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                         `json:"code"`
+	Data *RerunProjectReview200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // ListScreenshotAnnotationsParams defines parameters for ListScreenshotAnnotations.
 type ListScreenshotAnnotationsParams struct {
 	// Status 按状态过滤；缺省返回全部状态
@@ -6946,6 +6653,94 @@ type ListIssueRecommendations200JSONResponseBody struct {
 	Message string `json:"message"`
 }
 
+// ReviewAgentHistory200JSONResponseBody_Data defines parameters for ReviewAgentHistory.
+type ReviewAgentHistory200JSONResponseBody_Data struct {
+	// Content Markdown 文本；没有历史时为空串
+	Content string `json:"content"`
+}
+
+// ReviewAgentHistory200JSONResponseBody defines parameters for ReviewAgentHistory.
+type ReviewAgentHistory200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                         `json:"code"`
+	Data *ReviewAgentHistory200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ReviewAgentPullRequest200JSONResponseBody defines parameters for ReviewAgentPullRequest.
+type ReviewAgentPullRequest200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                     `json:"code"`
+	Data *ReviewAgentPullRequest `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ReviewAgentPullRequestDiff200JSONResponseBody defines parameters for ReviewAgentPullRequestDiff.
+type ReviewAgentPullRequestDiff200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int              `json:"code"`
+	Data *ReviewAgentDiff `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ReviewAgentSubmitResultJSONBody defines parameters for ReviewAgentSubmitResult.
+type ReviewAgentSubmitResultJSONBody struct {
+	union json.RawMessage
+}
+
+// ReviewAgentSubmitResult200JSONResponseBody_Data defines parameters for ReviewAgentSubmitResult.
+type ReviewAgentSubmitResult200JSONResponseBody_Data struct {
+	Accepted bool `json:"accepted"`
+}
+
+// ReviewAgentSubmitResult200JSONResponseBody defines parameters for ReviewAgentSubmitResult.
+type ReviewAgentSubmitResult200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                              `json:"code"`
+	Data *ReviewAgentSubmitResult200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ReviewAgentScreenshots200JSONResponseBody_Data defines parameters for ReviewAgentScreenshots.
+type ReviewAgentScreenshots200JSONResponseBody_Data struct {
+	// Changed 截图集合相对上一轮视觉审查是否有变化
+	Changed bool                    `json:"changed"`
+	Items   []ReviewAgentScreenshot `json:"items"`
+}
+
+// ReviewAgentScreenshots200JSONResponseBody defines parameters for ReviewAgentScreenshots.
+type ReviewAgentScreenshots200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                             `json:"code"`
+	Data *ReviewAgentScreenshots200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListReviewProjects200JSONResponseBody_Data defines parameters for ListReviewProjects.
+type ListReviewProjects200JSONResponseBody_Data struct {
+	Items []ReviewProjectSummary `json:"items"`
+}
+
+// ListReviewProjects200JSONResponseBody defines parameters for ListReviewProjects.
+type ListReviewProjects200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                         `json:"code"`
+	Data *ListReviewProjects200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
 // UpdateScreenshotAnnotation200JSONResponseBody defines parameters for UpdateScreenshotAnnotation.
 type UpdateScreenshotAnnotation200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
@@ -7020,7 +6815,7 @@ type ListSelfLogsParams struct {
 	// MinLevel 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准）
 	MinLevel *ListSelfLogsParamsMinLevel `form:"min_level,omitempty" json:"min_level,omitempty"`
 
-	// Modules 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段
+	// Modules 模块过滤，逗号分隔多值（如 `http,review`）；模块取值见条目 module 字段
 	Modules *SelfLogModules `form:"modules,omitempty" json:"modules,omitempty"`
 
 	// RequestId 按请求 ID 过滤（响应头 X-Request-Id 的值）
@@ -7035,10 +6830,7 @@ type ListSelfLogsParams struct {
 	// IssueId 按关联 Issue ID 过滤
 	IssueId *SelfLogIssueID `form:"issue_id,omitempty" json:"issue_id,omitempty"`
 
-	// AutomationId 按关联自动化 ID 过滤
-	AutomationId *SelfLogAutomationID `form:"automation_id,omitempty" json:"automation_id,omitempty"`
-
-	// RunId 按关联自动化运行 ID 过滤
+	// RunId 按关联审查运行 ID 过滤（review_runs.id）
 	RunId *SelfLogRunID `form:"run_id,omitempty" json:"run_id,omitempty"`
 
 	// ThreadId 按关联 T3 线程 ID 过滤
@@ -7107,7 +6899,7 @@ type AggregateSelfLogsParams struct {
 	// MinLevel 不低于该级别的过滤（与 level 互斥，同时提供时以 level 为准）
 	MinLevel *AggregateSelfLogsParamsMinLevel `form:"min_level,omitempty" json:"min_level,omitempty"`
 
-	// Modules 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段
+	// Modules 模块过滤，逗号分隔多值（如 `http,review`）；模块取值见条目 module 字段
 	Modules *SelfLogModules `form:"modules,omitempty" json:"modules,omitempty"`
 
 	// RequestId 按请求 ID 过滤（响应头 X-Request-Id 的值）
@@ -7122,10 +6914,7 @@ type AggregateSelfLogsParams struct {
 	// IssueId 按关联 Issue ID 过滤
 	IssueId *SelfLogIssueID `form:"issue_id,omitempty" json:"issue_id,omitempty"`
 
-	// AutomationId 按关联自动化 ID 过滤
-	AutomationId *SelfLogAutomationID `form:"automation_id,omitempty" json:"automation_id,omitempty"`
-
-	// RunId 按关联自动化运行 ID 过滤
+	// RunId 按关联审查运行 ID 过滤（review_runs.id）
 	RunId *SelfLogRunID `form:"run_id,omitempty" json:"run_id,omitempty"`
 
 	// ThreadId 按关联 T3 线程 ID 过滤
@@ -7167,7 +6956,7 @@ type TraceSelfLogsParams struct {
 	// RequestId 按请求 ID 过滤（响应头 X-Request-Id 的值）
 	RequestId *SelfLogRequestID `form:"request_id,omitempty" json:"request_id,omitempty"`
 
-	// RunId 按关联自动化运行 ID 过滤
+	// RunId 按关联审查运行 ID 过滤（review_runs.id）
 	RunId *SelfLogRunID `form:"run_id,omitempty" json:"run_id,omitempty"`
 
 	// Fields 返回字段选择，逗号分隔（如 `module,message,extra`）；id/time/level/message 始终返回，其余未选字段在条目中省略。未知字段名返回 40001
@@ -7293,24 +7082,6 @@ type RefreshTokenJSONRequestBody = RefreshRequest
 
 // RegisterJSONRequestBody defines body for Register for application/json ContentType.
 type RegisterJSONRequestBody = RegisterRequest
-
-// PublishAgentNotificationJSONRequestBody defines body for PublishAgentNotification for application/json ContentType.
-type PublishAgentNotificationJSONRequestBody = AgentNotificationRequest
-
-// UpdateAgentPullRequestCheckJSONRequestBody defines body for UpdateAgentPullRequestCheck for application/json ContentType.
-type UpdateAgentPullRequestCheckJSONRequestBody = AgentCheckUpdateRequest
-
-// SubmitAgentPullRequestReviewJSONRequestBody defines body for SubmitAgentPullRequestReview for application/json ContentType.
-type SubmitAgentPullRequestReviewJSONRequestBody = AgentPullRequestReviewRequest
-
-// ReportAutomationRunJSONRequestBody defines body for ReportAutomationRun for application/json ContentType.
-type ReportAutomationRunJSONRequestBody = AutomationRunReportRequest
-
-// CreateAutomationJSONRequestBody defines body for CreateAutomation for application/json ContentType.
-type CreateAutomationJSONRequestBody = CreateAutomationRequest
-
-// UpdateAutomationJSONRequestBody defines body for UpdateAutomation for application/json ContentType.
-type UpdateAutomationJSONRequestBody = UpdateAutomationRequest
 
 // CreateBotJSONRequestBody defines body for CreateBot for application/json ContentType.
 type CreateBotJSONRequestBody = CreateBotRequest
@@ -7450,6 +7221,12 @@ type BatchCloseDoneIssuesJSONRequestBody BatchCloseDoneIssuesJSONBody
 // UploadLogsJSONRequestBody defines body for UploadLogs for application/json ContentType.
 type UploadLogsJSONRequestBody = UploadLogsRequest
 
+// UpdateProjectReviewSettingsJSONRequestBody defines body for UpdateProjectReviewSettings for application/json ContentType.
+type UpdateProjectReviewSettingsJSONRequestBody = ReviewSettingsInput
+
+// RerunProjectReviewJSONRequestBody defines body for RerunProjectReview for application/json ContentType.
+type RerunProjectReviewJSONRequestBody RerunProjectReviewJSONBody
+
 // BatchScreenshotAnnotationsJSONRequestBody defines body for BatchScreenshotAnnotations for application/json ContentType.
 type BatchScreenshotAnnotationsJSONRequestBody = ScreenshotAnnotationBatchRequest
 
@@ -7474,6 +7251,9 @@ type StartQuotaDeviceAuthorizationJSONRequestBody = StartQuotaDeviceAuthorizatio
 // TestQuotaCredentialsJSONRequestBody defines body for TestQuotaCredentials for application/json ContentType.
 type TestQuotaCredentialsJSONRequestBody = TestQuotaCredentialsRequest
 
+// ReviewAgentSubmitResultJSONRequestBody defines body for ReviewAgentSubmitResult for application/json ContentType.
+type ReviewAgentSubmitResultJSONRequestBody ReviewAgentSubmitResultJSONBody
+
 // UpdateScreenshotAnnotationJSONRequestBody defines body for UpdateScreenshotAnnotation for application/json ContentType.
 type UpdateScreenshotAnnotationJSONRequestBody = UpdateScreenshotAnnotationRequest
 
@@ -7488,3 +7268,65 @@ type UpdateVersionJSONRequestBody = UpdateVersionRequest
 
 // UploadArtifactMultipartRequestBody defines body for UploadArtifact for multipart/form-data ContentType.
 type UploadArtifactMultipartRequestBody UploadArtifactMultipartBody
+
+// AsReviewCodeResult returns the union data inside the ReviewAgentSubmitResultJSONBody as a ReviewCodeResult
+func (t ReviewAgentSubmitResultJSONBody) AsReviewCodeResult() (ReviewCodeResult, error) {
+	var body ReviewCodeResult
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromReviewCodeResult overwrites any union data inside the ReviewAgentSubmitResultJSONBody as the provided ReviewCodeResult
+func (t *ReviewAgentSubmitResultJSONBody) FromReviewCodeResult(v ReviewCodeResult) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeReviewCodeResult performs a merge with any union data inside the ReviewAgentSubmitResultJSONBody, using the provided ReviewCodeResult
+func (t *ReviewAgentSubmitResultJSONBody) MergeReviewCodeResult(v ReviewCodeResult) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsReviewVisualResult returns the union data inside the ReviewAgentSubmitResultJSONBody as a ReviewVisualResult
+func (t ReviewAgentSubmitResultJSONBody) AsReviewVisualResult() (ReviewVisualResult, error) {
+	var body ReviewVisualResult
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromReviewVisualResult overwrites any union data inside the ReviewAgentSubmitResultJSONBody as the provided ReviewVisualResult
+func (t *ReviewAgentSubmitResultJSONBody) FromReviewVisualResult(v ReviewVisualResult) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeReviewVisualResult performs a merge with any union data inside the ReviewAgentSubmitResultJSONBody, using the provided ReviewVisualResult
+func (t *ReviewAgentSubmitResultJSONBody) MergeReviewVisualResult(v ReviewVisualResult) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t ReviewAgentSubmitResultJSONBody) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *ReviewAgentSubmitResultJSONBody) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}

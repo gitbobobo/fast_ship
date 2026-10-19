@@ -30,7 +30,7 @@ func (s StaticWebhookSecret) WebhookSecret(context.Context) (string, error) {
 // 以 X-Hub-Signature-256 按部署唯一密钥验签；密钥未配置一律 503（不接受未签名
 // 请求），签名对不上 401。
 type GitHubWebhookHandler struct {
-	prReview *service.PRReviewService
+	review *service.ReviewService
 	// secrets 每次请求现取密钥（部署设置行或 config 兜底），保存后立即生效。
 	secrets WebhookSecretSource
 	// fake 自测模式注入的假 GitHub（server.mode=debug 且 github_app.fake 时非空，
@@ -38,8 +38,8 @@ type GitHubWebhookHandler struct {
 	fake *githubapp.Fake
 }
 
-func NewGitHubWebhookHandler(prReview *service.PRReviewService, secrets WebhookSecretSource, fake *githubapp.Fake) *GitHubWebhookHandler {
-	return &GitHubWebhookHandler{prReview: prReview, secrets: secrets, fake: fake}
+func NewGitHubWebhookHandler(review *service.ReviewService, secrets WebhookSecretSource, fake *githubapp.Fake) *GitHubWebhookHandler {
+	return &GitHubWebhookHandler{review: review, secrets: secrets, fake: fake}
 }
 
 // Handle POST /api/github/webhooks
@@ -77,7 +77,7 @@ func (h *GitHubWebhookHandler) Handle(c *gin.Context) {
 		githubapp.SeedFakeFromWebhook(h.fake, body)
 	}
 
-	if err := h.prReview.HandleGitHubWebhook(c.Request.Context(), event, delivery, body); err != nil {
+	if err := h.review.HandleGitHubWebhook(c.Request.Context(), event, delivery, body); err != nil {
 		if errors.Is(err, service.ErrDeliveryDuplicated) {
 			// 幂等重复投递：受理但不重复处理。
 			c.Status(202)

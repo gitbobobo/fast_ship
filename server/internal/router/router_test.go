@@ -936,11 +936,15 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 		&model.ScreenshotAnnotation{},
 		&model.T3Environment{},
 		&model.ProjectT3Binding{},
-		&model.Automation{},
-		&model.AutomationTrigger{},
-		&model.AutomationRun{},
-		&model.AutomationRunToken{},
 		&model.Notification{},
+		&model.GitHubWebhookDelivery{},
+		&model.ProjectReviewSettings{},
+		&model.ReviewRun{},
+		&model.ReviewRunToken{},
+		&model.ReviewPullRequest{},
+		&model.ReviewAsset{},
+		&model.ReviewDebounce{},
+		&model.ReviewSeenSHA{},
 		&model.QuotaAccount{},
 		// 成员与邀请（INT-129）：router 测试的邀请注册通道需要 invites 表。
 		&model.Invite{},
@@ -966,13 +970,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_log_entries_run_timestamp ON log_entries(log_run_id, timestamp ASC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_documents_project_parent ON documents(project_id, parent_id)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_screenshot_screens_variant ON screenshot_screens(project_id, screen_key, COALESCE(platform,''),COALESCE(locale,''),COALESCE(theme,''))")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
-	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-ON automation_runs(trigger_id)
-WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
-  AND (finished_at IS NULL OR post_state = 'pending')`)
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_review_runs_combination ON review_runs(project_id, repo_full_name, pr_number, head_sha, kind, instance_id, model, model_options_json)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 
 	cfg := &config.Config{
@@ -1072,8 +1070,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, repository.NewProjectT3BindingRepository(db))
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
-	automationService := service.NewAutomationService(db, repository.NewAutomationRepository(db), repository.NewAutomationTriggerRepository(db), repository.NewAutomationRunRepository(db), t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zap.NewNop())
-	automationAgentService := service.NewAutomationAgentService(db, repository.NewAutomationRunRepository(db), repository.NewAutomationRunTokenRepository(db), t3ThreadsService, notificationSink, zap.NewNop())
+	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
@@ -1096,11 +1093,11 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
 	t3BindingHandler := handler.NewT3BindingHandler(t3BindingService)
-	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
-	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
+	reviewHandler := handler.NewReviewHandler(reviewService)
+	reviewAgentHandler := handler.NewReviewAgentHandler(reviewService)
 	botHandler := handler.NewBotHandler(botService)
-	githubWebhookHandler := handler.NewGitHubWebhookHandler(nil, handler.StaticWebhookSecret(""), nil)
+	githubWebhookHandler := handler.NewGitHubWebhookHandler(reviewService, handler.StaticWebhookSecret(""), nil)
 	quotaHandler := handler.NewQuotaHandler(service.NewQuotaService(repository.NewQuotaAccountRepository(db), cfg, zap.NewNop(), nil))
 	deploymentSettingsRepo := repository.NewDeploymentSettingsRepository(db)
 	deploymentSettingsService := service.NewDeploymentSettingsService(deploymentSettingsRepo, cfg)
@@ -1116,7 +1113,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,

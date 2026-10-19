@@ -521,6 +521,22 @@ func allBinary(sp *spec, content *yaml.Node, types []string) bool {
 }
 
 func writeSchema(b *strings.Builder, sch schema, asData bool) {
+	if len(sch.variants) > 0 {
+		// oneOf/anyOf：每个分支一份独立字段表，前加方案编号便于对照。
+		word := "二选一"
+		if sch.composition == "anyOf" {
+			word = "任一组合"
+		}
+		b.WriteString(word)
+		b.WriteString("，各分支结构如下：\n\n")
+		for i, v := range sch.variants {
+			b.WriteString("方案 ")
+			b.WriteString(strconv.Itoa(i + 1))
+			b.WriteString("\n\n")
+			writeSchema(b, v, false)
+		}
+		return
+	}
 	if isNullData(sch) {
 		if asData {
 			b.WriteString("`data` 为 null。\n\n")

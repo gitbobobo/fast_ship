@@ -358,7 +358,7 @@ func (s *ScreenshotAnnotationService) Update(annotationID, userID string, req *U
 	}
 	if isAPIKey {
 		if req.Body != nil || req.IssueId != nil || req.Status == nil ||
-			*req.Status != api.Resolved {
+			*req.Status != api.ScreenshotAnnotationStatusResolved {
 			return nil, errs.ErrApiKeyForbidden
 		}
 	}
@@ -388,7 +388,7 @@ func (s *ScreenshotAnnotationService) Update(annotationID, userID string, req *U
 	if req.Status != nil {
 		fields["status"] = string(*req.Status)
 		annotation.Status = string(*req.Status)
-		if *req.Status == api.Resolved {
+		if *req.Status == api.ScreenshotAnnotationStatusResolved {
 			fields["resolved_at"] = now
 			annotation.ResolvedAt = &now
 			// 已解决即无需确认；从 outdated 恢复成 resolved 不残留过期标记

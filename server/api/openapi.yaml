@@ -53,12 +53,12 @@ tags:
     description: 项目截图库（每变体一张图，覆盖上传即替换文件，只保留最新版）
   - name: environments
     description: T3 环境连接与 T3 客户端操作（配对、线程读取/发消息/停止/队列、审批与提问应答、图片附件；仅 JWT，INT-82/INT-85）。例外：t3-projects 发现与项目 t3-bindings 对 API Key 开放（INT-89）
-  - name: automations
-    description: 用户可配置的自动化（cron / 内部 Issue 事件触发 T3 线程；仅 JWT，INT-90）
+  - name: reviews
+    description: PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查记录查询
   - name: notifications
-    description: 站内通知（自动化运行结果与 Agent 发布；仅 JWT）
-  - name: automation-agent
-    description: 自动化运行令牌专用的 Agent 回报与读取端点（仅 runTokenAuth，INT-90）
+    description: 站内通知（只用于审查系统故障：派发失败、超时、工作区回收失败；仅 JWT）
+  - name: review-agent
+    description: 审查运行令牌专用的 Agent 读取与结论提交端点（仅 runTokenAuth，INT-135）
   - name: self-logs
     description: Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人归属及显式系统行（无主行默认不可见）；供代理排查 Fast Ship 自身问题
   - name: bots
@@ -6393,16 +6393,19 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automations:
+  /api/reviews:
     get:
-      tags: [automations]
-      operationId: listAutomations
-      summary: 列出当前用户的自动化
+      tags: [reviews]
+      operationId: listReviewProjects
+      summary: 列出当前用户的审查总览
+      description: |
+        返回当前用户所有已关联 GitHub 仓库的项目。同仓库已被其他项目开启审查时，
+        该行 `taken_by` 返回占用者登录名且 `can_manage=false`。
       security:
         - jwtAuth: []
       responses:
         '200':
-          description: 自动化列表（按创建时间倒序）
+          description: 审查总览
           content:
             application/json:
               schema:
@@ -6417,68 +6420,26 @@ paths:
                           items:
                             type: array
                             items:
-                              $ref: '#/components/schemas/Automation'
+                              $ref: '#/components/schemas/ReviewProjectSummary'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalError'
-    post:
-      tags: [automations]
-      operationId: createAutomation
-      summary: 创建自动化（默认停用）
-      description: |
-        cron 触发必须提供五字段标准 cron 表达式（不含秒字段、不支持 `@every` 与表达式内时区前缀）；
-        时区为独立 IANA 名称字段，缺省 UTC。启用自动化前服务端必须已配置 `server.public_url`（41202）。
-        新建默认停用；启用时校验完整触发配置。
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateAutomationRequest'
-      responses:
-        '200':
-          description: 创建成功
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Envelope'
-                  - type: object
-                    properties:
-                      data:
-                        $ref: '#/components/schemas/Automation'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          description: 环境或项目不存在（40417 / 40401）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '412':
-          description: 未配置 server.public_url（41202）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automations/{id}:
+  /api/projects/{id}/review-settings:
     get:
-      tags: [automations]
-      operationId: getAutomation
-      summary: 获取自动化详情
+      tags: [reviews]
+      operationId: getProjectReviewSettings
+      summary: 读取项目审查设置
+      description: |
+        `prerequisites` 逐条列出开启审查的前置条件，`missing=true` 的项不允许开启。
       security:
         - jwtAuth: []
       parameters:
-        - $ref: '#/components/parameters/AutomationId'
+        - $ref: '#/components/parameters/ProjectId'
       responses:
         '200':
-          description: 自动化详情
+          description: 审查设置
           content:
             application/json:
               schema:
@@ -6487,7 +6448,7 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/Automation'
+                        $ref: '#/components/schemas/ReviewSettings'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -6495,23 +6456,26 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
     put:
-      tags: [automations]
-      operationId: updateAutomation
-      summary: 更新自动化（只影响后续触发）
-      description: 进行中的运行按创建时的配置快照执行，更新不中断已有运行。
+      tags: [reviews]
+      operationId: updateProjectReviewSettings
+      summary: 保存项目审查设置（全量替换）
+      description: |
+        启用时必须满足全部前置条件、绑定 Token、所选环境属于当前用户且已绑定该项目，
+        代码审查组合 1–5 个、视觉审查组合 0–3 个，同一组合不得重复。
+        同一仓库已被其他项目开启时返回 40922。
       security:
         - jwtAuth: []
       parameters:
-        - $ref: '#/components/parameters/AutomationId'
+        - $ref: '#/components/parameters/ProjectId'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/UpdateAutomationRequest'
+              $ref: '#/components/schemas/ReviewSettingsInput'
       responses:
         '200':
-          description: 更新后的自动化
+          description: 保存后的设置
           content:
             application/json:
               schema:
@@ -6520,39 +6484,21 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/Automation'
+                        $ref: '#/components/schemas/ReviewSettings'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-        '412':
-          description: 未配置 server.public_url（41202）
+        '409':
+          description: 同一仓库已被其他项目开启（40922）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
-        '500':
-          $ref: '#/components/responses/InternalError'
-    delete:
-      tags: [automations]
-      operationId: deleteAutomation
-      summary: 删除自动化
-      description: 有活动运行（运行中或后置操作待执行）时返回 409（40919）；删除会级联清理历史运行记录。
-      security:
-        - jwtAuth: []
-      parameters:
-        - $ref: '#/components/parameters/AutomationId'
-      responses:
-        '200':
-          $ref: '#/components/responses/EmptySuccess'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          description: 有活动运行（40919）
+        '412':
+          description: 前置条件缺失（41202），message 内含逐条缺项
           content:
             application/json:
               schema:
@@ -6560,25 +6506,29 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automations/{id}/runs:
+  /api/projects/{id}/review-records:
     get:
-      tags: [automations]
-      operationId: listAutomationRuns
-      summary: 列出自动化的运行记录
+      tags: [reviews]
+      operationId: listProjectReviewRecords
+      summary: 列出项目审查记录
+      description: |
+        按最近更新时间倒序列出 PR，每个 PR 内嵌轮次与各组合运行（可跳 T3 线程）。
       security:
         - jwtAuth: []
       parameters:
-        - $ref: '#/components/parameters/AutomationId'
+        - $ref: '#/components/parameters/ProjectId'
         - name: limit
           in: query
+          required: false
           schema:
             type: integer
             minimum: 1
             maximum: 100
-            default: 50
+            default: 20
+          description: 返回的 PR 数量上限
       responses:
         '200':
-          description: 运行记录（按触发时间倒序）
+          description: 审查记录
           content:
             application/json:
               schema:
@@ -6593,7 +6543,7 @@ paths:
                           items:
                             type: array
                             items:
-                              $ref: '#/components/schemas/AutomationRun'
+                              $ref: '#/components/schemas/ReviewPullRequestRecord'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -6601,18 +6551,32 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automation-runs/{id}:
-    get:
-      tags: [automations]
-      operationId: getAutomationRun
-      summary: 获取运行记录详情
+  /api/projects/{id}/reviews/rerun:
+    post:
+      tags: [reviews]
+      operationId: rerunProjectReview
+      summary: 对 PR 的实时 HEAD 重跑代码审查
+      description: |
+        用 GitHub App 令牌实时取 PR 当前 head；旧 SHA 未终态运行一律取消。
+        项目未开启审查时返回 40923。
       security:
         - jwtAuth: []
       parameters:
-        - $ref: '#/components/parameters/AutomationRunId'
+        - $ref: '#/components/parameters/ProjectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pr_number]
+              properties:
+                pr_number:
+                  type: integer
+                  minimum: 1
       responses:
         '200':
-          description: 运行记录
+          description: 已受理
           content:
             application/json:
               schema:
@@ -6621,13 +6585,30 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/AutomationRun'
+                        type: object
+                        required: [accepted, head_sha, round_number]
+                        properties:
+                          accepted:
+                            type: boolean
+                          head_sha:
+                            type: string
+                          round_number:
+                            type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: 项目未开启审查（40923）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
+
 
   /api/notifications:
     get:
@@ -6734,272 +6715,6 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automation-agent/report:
-    post:
-      tags: [automation-agent]
-      operationId: reportAutomationRun
-      summary: 自动化运行回报（started / finished）
-      description: |
-        仅运行令牌。开始回报幂等；结束回报在同一事务内消费令牌并登记后置操作，
-        允许结束先于开始；线程超时后首次结束不能把状态改成 completed。
-        结束后仅重放完全相同的结束回报（直到 expires_at），其它回报返回 409（40917）。
-      security:
-        - runTokenAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AutomationRunReportRequest'
-      responses:
-        '200':
-          description: 回报受理
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Envelope'
-                  - type: object
-                    properties:
-                      data:
-                        $ref: '#/components/schemas/AutomationRunReportResult'
-        '401':
-          description: 运行令牌无效/过期（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '409':
-          description: 回报冲突（40917）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /api/automation-agent/threads:
-    get:
-      tags: [automation-agent]
-      operationId: listAgentThreads
-      summary: 读取用户 T3 线程列表（可按环境/项目/状态过滤）
-      security:
-        - runTokenAuth: []
-      parameters:
-        - name: environment_id
-          in: query
-          schema:
-            type: string
-        - name: project_id
-          in: query
-          schema:
-            type: string
-            description: T3 项目 ID
-        - name: status
-          in: query
-          schema:
-            type: string
-            description: 过滤线程状态（running / waiting / idle / archived）
-        - name: settled
-          in: query
-          schema:
-            type: boolean
-      responses:
-        '200':
-          description: 线程列表与各环境诊断（口径同 GET /api/threads，仅追加过滤）
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Envelope'
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        required: [items, environments]
-                        properties:
-                          items:
-                            type: array
-                            items:
-                              $ref: '#/components/schemas/T3ThreadSummary'
-                          environments:
-                            type: array
-                            items:
-                              $ref: '#/components/schemas/T3Environment'
-        '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /api/automation-agent/environments/{id}/threads/{threadId}:
-    get:
-      tags: [automation-agent]
-      operationId: getAgentThread
-      summary: 读取单个 T3 线程详情（items 分页，默认最后 50 条）
-      description: |
-        与 JWT 端点同一线程详情口径，另加 items 分页：页内按时间正序；
-        `before_item_id` 取该条目之前的上一页；引用的边界条目已消失时返回 409（40918）。
-      security:
-        - runTokenAuth: []
-      parameters:
-        - $ref: '#/components/parameters/T3EnvironmentId'
-        - name: threadId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 50
-        - name: before_item_id
-          in: query
-          schema:
-            type: string
-      responses:
-        '200':
-          description: 线程详情（items 为分页后的窗口）
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Envelope'
-                  - type: object
-                    properties:
-                      data:
-                        $ref: '#/components/schemas/T3ThreadDetail'
-        '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '404':
-          description: 环境/线程不存在（40417 / 40418）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '409':
-          description: 分页边界失效（40918）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /api/automation-agent/environments/{id}/threads/{threadId}/items/{itemId}:
-    get:
-      tags: [automation-agent]
-      operationId: getAgentThreadItem
-      summary: 读取单个线程条目完整正文
-      security:
-        - runTokenAuth: []
-      parameters:
-        - $ref: '#/components/parameters/T3EnvironmentId'
-        - name: threadId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: itemId
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: 线程条目
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Envelope'
-                  - type: object
-                    properties:
-                      data:
-                        $ref: '#/components/schemas/T3ThreadItem'
-        '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '404':
-          description: 环境/线程/条目不存在（40417 / 40418 / 40419）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
-  /api/automation-agent/notifications:
-    post:
-      tags: [automation-agent]
-      operationId: publishAgentNotification
-      summary: 以运行身份发布站内通知
-      description: kind 固定为 `agent`，不能冒充系统派发失败等系统 kind；同一问题键相同状态只刷新 last_seen_at。
-      security:
-        - runTokenAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AgentNotificationRequest'
-      responses:
-        '200':
-          $ref: '#/components/responses/EmptySuccess'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
   /api/self-logs:
     get:
       tags: [self-logs]
@@ -7024,7 +6739,6 @@ paths:
         - $ref: '#/components/parameters/SelfLogUserID'
         - $ref: '#/components/parameters/SelfLogProjectID'
         - $ref: '#/components/parameters/SelfLogIssueID'
-        - $ref: '#/components/parameters/SelfLogAutomationID'
         - $ref: '#/components/parameters/SelfLogRunID'
         - $ref: '#/components/parameters/SelfLogThreadID'
         - $ref: '#/components/parameters/SelfLogExtraEq'
@@ -7095,7 +6809,6 @@ paths:
         - $ref: '#/components/parameters/SelfLogUserID'
         - $ref: '#/components/parameters/SelfLogProjectID'
         - $ref: '#/components/parameters/SelfLogIssueID'
-        - $ref: '#/components/parameters/SelfLogAutomationID'
         - $ref: '#/components/parameters/SelfLogRunID'
         - $ref: '#/components/parameters/SelfLogThreadID'
         - $ref: '#/components/parameters/SelfLogExtraEq'
@@ -7169,16 +6882,16 @@ paths:
 
   /api/github/webhooks:
     post:
-      tags: [automation-agent]
+      tags: [review-agent]
       operationId: receiveGitHubWebhook
-      summary: 接收 GitHub App webhook（pull_request opened/synchronize）
+      summary: 接收 GitHub App webhook（pull_request opened/synchronize/ready_for_review/reopened）
       description: |
         公开端点（无 JWT），以 `X-Hub-Signature-256`（HMAC-SHA256）按部署唯一的
         webhook 密钥验签。验签密钥取部署级 GitHub App 身份（INT-129：每套部署
         一个 App，没有用户级候选集）——以 `deployment_settings` 行内的密钥为准，
         行为空即视为未配置、不回落 config；仅当部署没有数据库 App 身份时用
         `github_app.webhook_secret` 兜底。密钥为空 → 503（50300）拒收；签名缺失
-        或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize；
+        或不匹配 → 401（40107）。只处理 pull_request 的 opened/synchronize/ready_for_review/reopened；
         draft 与 fork 一律 202 忽略。仓库必须已与本部署的 Fast Ship 项目关联
         才会进入防抖/开轮。同一 `X-GitHub-Delivery` 幂等（重复投递返回 202 且
         不再开轮）。
@@ -7226,14 +6939,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
 
-  /api/automation-agent/pull-request:
+  /api/review-agent/pull-request:
     get:
-      tags: [automation-agent]
-      operationId: getAgentPullRequest
-      summary: 读取本运行的 PR 元数据
-      description: |
-        仅运行令牌；owner/repo/PR 号由运行行给出，不接受请求参数。
-        运行必须是 GitHub PR 触发且处于 dispatched/running；结束后（含取消）令牌访问一律 40106。
+      tags: [review-agent]
+      operationId: reviewAgentPullRequest
+      summary: 本运行审查的 PR 元数据
+      description: 只接受运行令牌；PR 身份全部取自运行行，不接受请求参数。
       security:
         - runTokenAuth: []
       responses:
@@ -7247,33 +6958,25 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/AgentPullRequestDetail'
+                        $ref: '#/components/schemas/ReviewAgentPullRequest'
         '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Unauthorized'
         '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automation-agent/pull-request/diff:
+  /api/review-agent/pull-request/diff:
     get:
-      tags: [automation-agent]
-      operationId: getAgentPullRequestDiff
-      summary: 读取本运行 PR 的 diff
-      description: 超过 1MB 截断并在 returned 字段标明 truncated。
+      tags: [review-agent]
+      operationId: reviewAgentPullRequestDiff
+      summary: 本运行的 PR diff
+      description: 超过 1MB 截断并标记 truncated。
       security:
         - runTokenAuth: []
       responses:
         '200':
-          description: diff 内容
+          description: diff
           content:
             application/json:
               schema:
@@ -7282,32 +6985,27 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/AgentPullRequestDiff'
+                        $ref: '#/components/schemas/ReviewAgentDiff'
         '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Unauthorized'
         '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automation-agent/pull-request/comments:
+  /api/review-agent/history:
     get:
-      tags: [automation-agent]
-      operationId: listAgentPullRequestComments
-      summary: 读取本运行 PR 的 review 评论列表
+      tags: [review-agent]
+      operationId: reviewAgentHistory
+      summary: 历史处置上下文（系统生成 Markdown）
+      description: |
+        代码审查：上一轮各组合的结构化发现 + 上一轮结论之后的新评论/行内回复；首次审查给全部讨论。
+        视觉审查：上一轮视觉发现与 unmeasurable。只识别本系统自己发的结论。
       security:
         - runTokenAuth: []
       responses:
         '200':
-          description: review 评论列表
+          description: 历史上下文
           content:
             application/json:
               schema:
@@ -7317,44 +7015,29 @@ paths:
                     properties:
                       data:
                         type: object
-                        required: [items]
+                        required: [content]
                         properties:
-                          items:
-                            type: array
-                            items:
-                              $ref: '#/components/schemas/AgentPullRequestComment'
+                          content:
+                            type: string
+                            description: Markdown 文本；没有历史时为空串
         '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Unauthorized'
         '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automation-agent/pull-request/review:
-    post:
-      tags: [automation-agent]
-      operationId: submitAgentPullRequestReview
-      summary: 提交 PR review（COMMENT / APPROVE / REQUEST_CHANGES）
-      description: commit_id 由服务端取本运行的 head SHA，不接受请求传入。
+  /api/review-agent/screenshots:
+    get:
+      tags: [review-agent]
+      operationId: reviewAgentScreenshots
+      summary: 视觉审查截图清单
+      description: 只有视觉审查运行可调用；图片本体走下面的图片端点。
       security:
         - runTokenAuth: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/AgentPullRequestReviewRequest'
       responses:
         '200':
-          description: review 已提交
+          description: 截图清单
           content:
             application/json:
               schema:
@@ -7363,30 +7046,72 @@ paths:
                   - type: object
                     properties:
                       data:
-                        $ref: '#/components/schemas/AgentPullRequestReviewResult'
-        '400':
-          $ref: '#/components/responses/BadRequest'
+                        type: object
+                        required: [items, changed]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/ReviewAgentScreenshot'
+                          changed:
+                            type: boolean
+                            description: 截图集合相对上一轮视觉审查是否有变化
         '401':
-          description: 运行令牌无效/过期/已消费（40106）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Unauthorized'
         '403':
-          description: 凭证类型不允许（40304）
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /api/automation-agent/pull-request/check:
+  /api/review-agent/screenshots/{assetId}:
+    get:
+      tags: [review-agent]
+      operationId: reviewAgentScreenshotImage
+      summary: 截图图片本体
+      description: 按运行所属 PR/SHA 校验；返回原始字节与 Content-Type。
+      security:
+        - runTokenAuth: []
+      parameters:
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 图片字节
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/gif:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/review-agent/result:
     post:
-      tags: [automation-agent]
-      operationId: updateAgentPullRequestCheck
-      summary: 更新本运行 check run 的标题与说明（结论由运行终态决定）
-      description: 请求不接受 check run id；服务端只更新本运行绑定的 check。
+      tags: [review-agent]
+      operationId: reviewAgentSubmitResult
+      summary: 提交结构化审查结论
+      description: |
+        请求体按运行类型二选一：代码审查 `ReviewCodeResult`、视觉审查 `ReviewVisualResult`（字段校验失败返回 400，
+        提示修正重交；PR HEAD 与运行绑定 SHA 不一致返回 40920 并作废本轮）。
       security:
         - runTokenAuth: []
       requestBody:
@@ -7394,26 +7119,40 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/AgentCheckUpdateRequest'
+              oneOf:
+                - $ref: '#/components/schemas/ReviewCodeResult'
+                - $ref: '#/components/schemas/ReviewVisualResult'
       responses:
         '200':
-          $ref: '#/components/responses/EmptySuccess'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          description: 运行令牌无效/过期/已消费（40106）
+          description: 已受理
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorEnvelope'
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [accepted]
+                        properties:
+                          accepted:
+                            type: boolean
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
-          description: 凭证类型不允许（40304）
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: PR HEAD 已变化（40920），本轮作废
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
+
   /api/bots:
     get:
       tags: [bots]
@@ -8397,9 +8136,9 @@ components:
       type: http
       scheme: bearer
       description: |
-        自动化运行令牌，`fsr_` 开头，由 Fast Ship 在派发自动化线程时写进提示词（INT-90）。
+        审查运行令牌，`fsr_` 开头，由 Fast Ship 在派发审查线程时写进提示词（INT-135）。
         仅接受 `Authorization: Bearer`（不支持 query 凭证）；一次运行一个令牌，结束回报时消费。
-        令牌过期前允许重放完全相同的结束回报；读线程/发通知端点在令牌消费后立即拒绝（40106）。
+        令牌过期前允许重放完全相同的结论提交；读端点在令牌消费后立即拒绝（40106）。
         携带 `fsk_` API Key 或 JWT 调用返回 403（40304）。
 
   parameters:
@@ -8417,20 +8156,6 @@ components:
       schema:
         type: string
       description: T3 环境 ID（UUID，归属当前用户，跨用户一律 40417）
-    AutomationId:
-      name: id
-      in: path
-      required: true
-      schema:
-        type: string
-      description: 自动化 ID（UUID，归属当前用户，跨用户一律 404）
-    AutomationRunId:
-      name: id
-      in: path
-      required: true
-      schema:
-        type: string
-      description: 自动化运行 ID（UUID，归属当前用户，跨用户一律 404）
     NotificationId:
       name: id
       in: path
@@ -8626,7 +8351,7 @@ components:
       required: false
       schema:
         type: string
-      description: 模块过滤，逗号分隔多值（如 `http,automation`）；模块取值见条目 module 字段
+      description: 模块过滤，逗号分隔多值（如 `http,review`）；模块取值见条目 module 字段
     SelfLogRequestID:
       name: request_id
       in: query
@@ -8655,20 +8380,13 @@ components:
       schema:
         type: string
       description: 按关联 Issue ID 过滤
-    SelfLogAutomationID:
-      name: automation_id
-      in: query
-      required: false
-      schema:
-        type: string
-      description: 按关联自动化 ID 过滤
     SelfLogRunID:
       name: run_id
       in: query
       required: false
       schema:
         type: string
-      description: 按关联自动化运行 ID 过滤
+      description: 按关联审查运行 ID 过滤（review_runs.id）
     SelfLogThreadID:
       name: thread_id
       in: query
@@ -9239,8 +8957,8 @@ components:
             enum: [pull_request]
         default_permissions:
           type: object
-          description: PR 评审所需的最小权限集
-          required: [pull_requests, issues, checks, contents, metadata]
+          description: PR 审查所需的最小权限集（结论用 commit status，不用 Checks API）
+          required: [pull_requests, issues, statuses, contents, metadata]
           properties:
             pull_requests:
               type: string
@@ -9248,7 +8966,7 @@ components:
             issues:
               type: string
               enum: [write]
-            checks:
+            statuses:
               type: string
               enum: [write]
             contents:
@@ -12136,407 +11854,6 @@ components:
           type: integer
           description: 过滤后的引用总数
 
-    AutomationTriggerType:
-      type: string
-      enum: [cron, issue_created, issue_status_changed, issue_label_added, github_pr_opened, github_pr_synchronize]
-      description: |
-        触发类型（触发器级别字段）。cron 按五字段标准表达式调度；issue_* 为内部 Issue 事件；
-        github_pr_* 由 GitHub webhook（pull_request opened/synchronize）经防抖后触发。
-        GitHub PR 触发要求显式 model_selections（至少 1 个模型，每个模型各开一个运行），
-        不做 draft / fork，同一 head SHA 变化会取消该 PR 全部在途运行。
-
-    AutomationPostAction:
-      type: string
-      enum: [none, settle, archive]
-      description: 运行结束后的线程操作。settle 收进历史区（等线程安全收尾）；archive 归档（可终止活动线程）。
-
-    AutomationEventFilter:
-      type: object
-      description: |
-        Issue 事件可选过滤。issue_status_changed 用 field/from/to（field ∈ state|workflow_status）；
-        issue_label_added 用 labels（数组，匹配任一名称）；不传或留空表示该类型全部真实事件。
-      properties:
-        field:
-          type: string
-          enum: [state, workflow_status]
-        from:
-          type: string
-          description: 变化前值；空表示任意
-        to:
-          type: string
-          description: 变化后值；空表示任意
-        labels:
-          type: array
-          items:
-            type: string
-          description: 匹配任一新加标签名；空数组表示全部加标签事件
-
-    AutomationModelSelection:
-      type: object
-      required: [instance_id, model]
-      description: T3 模型选择（缺省回落 T3 项目默认）
-      properties:
-        instance_id:
-          type: string
-        model:
-          type: string
-        options:
-          type: array
-          items:
-            type: object
-            properties:
-              id:
-                type: string
-              value:
-                type: string
-
-    AutomationWorkspace:
-      type: object
-      required: [type]
-      description: 新线程工作区（同 T3ThreadWorkspace，持久化为 JSON 快照）
-      properties:
-        type:
-          type: string
-          description: root / worktree / existing_worktree
-        base_ref:
-          type: string
-        branch:
-          type: string
-        start_from_origin:
-          type: boolean
-        worktree_path:
-          type: string
-
-    Automation:
-      type: object
-      required: [id, name, enabled, triggers, environment_id, t3_project_id, prompt_template, runtime_mode, timeout_seconds, post_action, post_on_timeout, created_at, updated_at]
-      properties:
-        id:
-          type: string
-        name:
-          type: string
-        enabled:
-          type: boolean
-        triggers:
-          type: array
-          description: 触发器列表（数组顺序 = position）。同一条自动化可配 0–20 个，可重复、可混搭。
-          items:
-            $ref: '#/components/schemas/AutomationTrigger'
-        environment_id:
-          type: string
-          description: T3 环境 ID
-        t3_project_id:
-          type: string
-          description: T3 项目 ID（线程开在这里）
-        prompt_template:
-          type: string
-          description: 提示词模板（支持 {{issue_id}}/{{issue_title}}/{{issue_body}} 占位，事件触发时替换；服务端会追加回报说明）
-        model_selection:
-          nullable: true
-          allOf:
-            - $ref: '#/components/schemas/AutomationModelSelection'
-          description: cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
-        runtime_mode:
-          type: string
-          description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
-        workspace:
-          nullable: true
-          allOf:
-            - $ref: '#/components/schemas/AutomationWorkspace'
-        timeout_seconds:
-          type: integer
-          description: 回报截止时长（秒）；1 分钟–24 小时，缺省 3600
-        post_action:
-          $ref: '#/components/schemas/AutomationPostAction'
-        post_on_timeout:
-          type: boolean
-          description: 超时后是否仍执行后置操作；缺省 false
-        created_at:
-          type: string
-        updated_at:
-          type: string
-
-    AutomationTrigger:
-      type: object
-      description: 自动化的一个触发器（INT-118）。各类型的专属字段之外一律为 null/缺省。
-      required: [id, trigger_type, created_at]
-      properties:
-        id:
-          type: string
-        trigger_type:
-          $ref: '#/components/schemas/AutomationTriggerType'
-        cron_expression:
-          type: string
-          nullable: true
-          description: 仅 cron；五字段标准表达式
-        timezone:
-          type: string
-          nullable: true
-          description: IANA 时区名，仅 cron；空表示 UTC
-        next_run_at:
-          type: string
-          nullable: true
-          description: 下次调度时间（UTC RFC3339）；仅 cron。每次保存从当时时间重算
-        issue_project_id:
-          type: string
-          nullable: true
-          description: 事件/PR 触发的项目范围；null 表示当前用户全部项目
-        event_filter:
-          $ref: '#/components/schemas/AutomationEventFilter'
-        model_selections:
-          type: array
-          description: |
-            仅 GitHub PR 触发：多模型选择，一次触发每个模型各开一个运行（同一 head SHA 一轮，
-            并行）。至少 1 个、最多 10 个，(instance_id, model) 不可重复；必须显式选择，
-            不能「项目默认」。
-          items:
-            $ref: '#/components/schemas/AutomationModelSelection'
-        debounce_seconds:
-          type: integer
-          description: 仅 GitHub PR 触发：防抖窗口秒数，0=立即，缺省 60，上限 86400
-        created_at:
-          type: string
-
-    AutomationTriggerInput:
-      type: object
-      description: |
-        触发器输入。全量替换语义：带 id 更新该触发器（未知 id 报参数错误），不带 id 新建；
-        未再提交的已有触发器被删除。同一 payload 内 id 不可重复。
-      required: [trigger_type]
-      properties:
-        id:
-          type: string
-          description: 可选；自动化内已存在的触发器 id
-        trigger_type:
-          $ref: '#/components/schemas/AutomationTriggerType'
-        cron_expression:
-          type: string
-          nullable: true
-          description: 仅 cron；五字段标准表达式
-        timezone:
-          type: string
-          nullable: true
-          description: IANA 时区名，仅 cron；空表示 UTC
-        issue_project_id:
-          type: string
-          nullable: true
-          description: 事件/PR 触发的项目范围；null 表示当前用户全部项目
-        event_filter:
-          $ref: '#/components/schemas/AutomationEventFilter'
-        model_selections:
-          type: array
-          description: 仅 GitHub PR 触发必填：1–10 个模型，(instance_id, model) 不可重复。
-          items:
-            $ref: '#/components/schemas/AutomationModelSelection'
-        debounce_seconds:
-          type: integer
-          description: 仅 GitHub PR 触发；0=立即，缺省 60，上限 86400。
-
-    CreateAutomationRequest:
-      type: object
-      required: [name, triggers, environment_id, t3_project_id, prompt_template]
-      properties:
-        name:
-          type: string
-          maxLength: 200
-        enabled:
-          type: boolean
-          description: 缺省 false；启用时至少要有一个触发器，并完整校验触发配置与 public_url
-        triggers:
-          type: array
-          minItems: 0
-          maxItems: 20
-          description: 触发器全量列表（0–20 个，可重复、可混搭）。
-          items:
-            $ref: '#/components/schemas/AutomationTriggerInput'
-        environment_id:
-          type: string
-        t3_project_id:
-          type: string
-        prompt_template:
-          type: string
-        model_selection:
-          $ref: '#/components/schemas/AutomationModelSelection'
-        runtime_mode:
-          type: string
-          description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
-        workspace:
-          $ref: '#/components/schemas/AutomationWorkspace'
-        timeout_seconds:
-          type: integer
-        post_action:
-          $ref: '#/components/schemas/AutomationPostAction'
-        post_on_timeout:
-          type: boolean
-
-    UpdateAutomationRequest:
-      type: object
-      description: 全量更新语义；字段缺省视为清空/回落默认（id、created_at 不可改）。
-      required: [name, triggers, environment_id, t3_project_id, prompt_template]
-      properties:
-        name:
-          type: string
-          maxLength: 200
-        enabled:
-          type: boolean
-        triggers:
-          type: array
-          minItems: 0
-          maxItems: 20
-          description: 触发器全量替换：带 id 更新、不带 id 新建、未提交的删除。
-          items:
-            $ref: '#/components/schemas/AutomationTriggerInput'
-        environment_id:
-          type: string
-        t3_project_id:
-          type: string
-        prompt_template:
-          type: string
-        model_selection:
-          nullable: true
-          allOf:
-            - $ref: '#/components/schemas/AutomationModelSelection'
-          description: cron/issue 触发的单模型缺省（PR 触发用触发器自己的 model_selections）
-        runtime_mode:
-          type: string
-          description: 缺省 full-access；可选 approval-required / auto-accept-edits / auto / full-access
-        workspace:
-          nullable: true
-          allOf:
-            - $ref: '#/components/schemas/AutomationWorkspace'
-        timeout_seconds:
-          type: integer
-        post_action:
-          $ref: '#/components/schemas/AutomationPostAction'
-        post_on_timeout:
-          type: boolean
-
-    AutomationRunStatus:
-      type: string
-      enum: [queued, dispatched, running, completed, failed, timed_out, cancelled]
-      description: |
-        queued=PR 审查排队（用户并发上限内不占在途名额，等调度提升）；
-        dispatched=已向 T3 发起（结果可能未确认）；running=agent 已回报开始；
-        cancelled=被新 head SHA 取代或规则改动后废弃（终态）；
-        completed/failed/timed_out 为终态。回报未开始时状态可能为空。
-
-    AutomationPostState:
-      type: string
-      enum: [none, pending, succeeded, failed]
-
-    AutomationRun:
-      type: object
-      required: [id, automation_id, trigger_id, trigger_type, trigger_key, triggered_at, environment_id, t3_project_id, thread_id, status, post_state, post_attempt]
-      properties:
-        id:
-          type: string
-        automation_id:
-          type: string
-        trigger_id:
-          type: string
-          description: 触发本运行的触发器 id
-        trigger_type:
-          $ref: '#/components/schemas/AutomationTriggerType'
-        trigger_key:
-          type: string
-          description: 同一触发器内唯一：cron 为 `cron:<原计划UTC>`，Issue 事件为 `event:<事件UUID>`，GitHub PR 为 `pr:<repo>:<number>:<sha>:<instance_id>:<model>`
-        repo_full_name:
-          type: string
-          description: 仅 GitHub PR 触发；owner/repo
-        pr_number:
-          type: integer
-          description: 仅 GitHub PR 触发
-        head_sha:
-          type: string
-          description: 仅 GitHub PR 触发；本轮审查的 head commit SHA
-        round_number:
-          type: integer
-          description: 仅 GitHub PR 触发；同一 PR 内递增的轮次（从 1 起，同一轮各模型共享）
-        model_instance_id:
-          type: string
-          description: 仅 GitHub PR 触发；本运行绑定的模型 instance_id
-        model_name:
-          type: string
-          description: 仅 GitHub PR 触发；本运行绑定的模型名
-        trigger_context:
-          nullable: true
-          allOf:
-            - $ref: '#/components/schemas/AutomationTriggerContext'
-        triggered_at:
-          type: string
-        status:
-          nullable: true
-          allOf:
-            - $ref: '#/components/schemas/AutomationRunStatus'
-        dispatch_started_at:
-          type: string
-          nullable: true
-          description: worker 认领并开始派发的时间
-        environment_id:
-          type: string
-        t3_project_id:
-          type: string
-        thread_id:
-          type: string
-        dispatched_at:
-          type: string
-          nullable: true
-          description: 启动 RPC 结果确认时间；为空表示线程是否建成未确认（此类运行不执行后置）
-        started_at:
-          type: string
-          nullable: true
-        finished_at:
-          type: string
-          nullable: true
-        deadline_at:
-          type: string
-        error_code:
-          type: string
-          nullable: true
-        error_message:
-          type: string
-          nullable: true
-        summary:
-          type: string
-          nullable: true
-        post_state:
-          $ref: '#/components/schemas/AutomationPostState'
-        post_attempt:
-          type: integer
-        post_next_attempt_at:
-          type: string
-          nullable: true
-        post_deadline_at:
-          type: string
-          nullable: true
-        post_error:
-          type: string
-          nullable: true
-
-    AutomationTriggerContext:
-      type: object
-      description: 触发上下文（issue 事件时含项目/issue/变化内容；不落 issue 正文）。
-      properties:
-        project_id:
-          type: string
-        issue_id:
-          type: string
-        issue_sequence_number:
-          type: integer
-        issue_title:
-          type: string
-        field:
-          type: string
-          description: 状态变化字段（state | workflow_status）
-        from:
-          type: string
-        to:
-          type: string
-        labels_added:
-          type: array
-          items:
-            type: string
-
     Notification:
       type: object
       required: [id, kind, title, body, created_at, updated_at, last_seen_at]
@@ -12545,7 +11862,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [agent, automation_dispatch_failed, automation_run_timeout, automation_post_failed, automation_busy]
+          enum: [review_dispatch_failed, review_run_timeout, review_cleanup_failed]
         title:
           type: string
         body:
@@ -12569,60 +11886,6 @@ components:
           type: string
           nullable: true
 
-    AutomationRunReportRequest:
-      type: object
-      required: [phase]
-      properties:
-        phase:
-          type: string
-          enum: [started, finished]
-        summary:
-          type: string
-          description: 仅 finished；一句话结果摘要
-        error_code:
-          type: string
-          description: 仅 finished；非空表示运行失败（状态记 failed）
-        error_message:
-          type: string
-          description: 仅 finished
-
-    AutomationRunReportResult:
-      type: object
-      required: [run_id, status, replay]
-      properties:
-        run_id:
-          type: string
-        status:
-          type: string
-          description: 回报后的运行状态
-        replay:
-          type: boolean
-          description: true 表示这是一次完全相同结束回报的重放
-
-    AgentNotificationRequest:
-      type: object
-      required: [title, problem_key, state_key]
-      properties:
-        title:
-          type: string
-          maxLength: 200
-        body:
-          type: string
-          maxLength: 4000
-        problem_key:
-          type: string
-          maxLength: 200
-          description: 去重身份；同一线程同类问题用同一 key
-        state_key:
-          type: string
-          maxLength: 500
-          description: 状态指纹；同 problem_key 下状态变化才刷新通知
-        environment_id:
-          type: string
-          description: 可选；缺省用运行的环境
-        thread_id:
-          type: string
-          description: 可选；缺省用运行的线程
     SelfLogEntry:
       type: object
       description: Fast Ship 自身日志条目（入库前已脱敏：token/密钥/密码/Authorization 一律不落明文）
@@ -12640,7 +11903,7 @@ components:
           enum: [DEBUG, INFO, WARN, ERROR]
         module:
           type: string
-          description: 产生日志的模块（http / automation / t3 / github / auth / api_key 等）
+          description: 产生日志的模块（http / review / t3 / github / auth / api_key 等）
         message:
           type: string
         request_id:
@@ -12650,8 +11913,6 @@ components:
         project_id:
           type: string
         issue_id:
-          type: string
-        automation_id:
           type: string
         run_id:
           type: string
@@ -12721,10 +11982,289 @@ components:
           description: 超过单次链路上限（1000 条）被截断；保留的是最新 1000 条
 
 
-    AgentPullRequestDetail:
+    ReviewCombination:
       type: object
-      required: [repo_full_name, pr_number, head_sha, title, html_url]
-      description: 本运行审查的 PR 元数据（从运行行与 GitHub 读取；不接受请求参数）
+      required: [environment_id, instance_id, model]
+      description: 一个审查组合：环境 + harness（instance_id）+ 模型 + 选项（思考强度等）
+      properties:
+        environment_id:
+          type: string
+        instance_id:
+          type: string
+          description: T3 provider 实例 id（harness 维度）
+        model:
+          type: string
+        options:
+          type: array
+          description: 模型选项（如思考强度），canonical `[{id,value}]` 形式，原样交给 T3
+          items:
+            $ref: '#/components/schemas/ReviewModelOption'
+        environment_name:
+          type: string
+          description: 仅响应；环境当前名称
+        t3_project_id:
+          type: string
+          description: 仅响应；绑定的 T3 项目 id（保存时快照）
+
+    ReviewModelOption:
+      type: object
+      required: [id, value]
+      description: 模型选项（与 T3 modelSelection.options 同形，值可为字符串或布尔）
+      properties:
+        id:
+          type: string
+        value:
+          description: 选项值（字符串或布尔）
+
+    ReviewPrerequisite:
+      type: object
+      required: [code, label, missing]
+      properties:
+        code:
+          type: string
+          enum:
+            - github_app
+            - github_app_installation
+            - public_url
+            - github_token
+            - environment_binding
+        label:
+          type: string
+        missing:
+          type: boolean
+        detail:
+          type: string
+
+    ReviewSettings:
+      type: object
+      required:
+        - project_id
+        - enabled
+        - trigger_opened
+        - trigger_synchronize
+        - trigger_ready_for_review
+        - trigger_reopened
+        - code_combinations
+        - visual_combinations
+        - prerequisites
+      properties:
+        project_id:
+          type: string
+        enabled:
+          type: boolean
+        trigger_opened:
+          type: boolean
+        trigger_synchronize:
+          type: boolean
+        trigger_ready_for_review:
+          type: boolean
+        trigger_reopened:
+          type: boolean
+        code_combinations:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/ReviewCombination'
+        visual_combinations:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/ReviewCombination'
+        prerequisites:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewPrerequisite'
+        taken_by:
+          type: string
+          nullable: true
+          description: 同仓库已开启审查的其他项目占用者登录名（只读）
+        can_manage:
+          type: boolean
+
+    ReviewSettingsInput:
+      type: object
+      required:
+        - enabled
+        - trigger_opened
+        - trigger_synchronize
+        - trigger_ready_for_review
+        - trigger_reopened
+        - code_combinations
+        - visual_combinations
+      properties:
+        enabled:
+          type: boolean
+        trigger_opened:
+          type: boolean
+        trigger_synchronize:
+          type: boolean
+        trigger_ready_for_review:
+          type: boolean
+        trigger_reopened:
+          type: boolean
+        code_combinations:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/ReviewCombination'
+        visual_combinations:
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/ReviewCombination'
+
+    ReviewProjectSummary:
+      type: object
+      required:
+        - project_id
+        - project_name
+        - github_owner
+        - github_repo
+        - enabled
+        - code_combination_count
+        - visual_combination_count
+        - can_manage
+      properties:
+        project_id:
+          type: string
+        project_name:
+          type: string
+        github_owner:
+          type: string
+        github_repo:
+          type: string
+        enabled:
+          type: boolean
+        code_combination_count:
+          type: integer
+        visual_combination_count:
+          type: integer
+        code_status:
+          type: string
+          nullable: true
+          description: 最近一次代码审查结论（success/failure/error/pending）
+        visual_status:
+          type: string
+          nullable: true
+        last_review_at:
+          type: string
+          nullable: true
+        taken_by:
+          type: string
+          nullable: true
+        can_manage:
+          type: boolean
+
+    ReviewRunSummary:
+      type: object
+      required:
+        - id
+        - kind
+        - environment_id
+        - instance_id
+        - model
+        - status
+        - thread_id
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [code, visual]
+        environment_id:
+          type: string
+        environment_name:
+          type: string
+        instance_id:
+          type: string
+        model:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewModelOption'
+        status:
+          type: string
+          enum: [queued, dispatched, running, completed, failed, timed_out, cancelled]
+        thread_id:
+          type: string
+        summary:
+          type: string
+        error_code:
+          type: string
+        error_message:
+          type: string
+        findings_count:
+          type: integer
+          description: P0/P1/P2（代码）或 blocker/worth fixing（视觉）的条目数
+        ui_changed:
+          type: boolean
+        worktree_state:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          nullable: true
+        finished_at:
+          type: string
+          nullable: true
+
+    ReviewRoundRecord:
+      type: object
+      required: [round_number, head_sha, created_at, code_runs, visual_runs]
+      properties:
+        round_number:
+          type: integer
+        head_sha:
+          type: string
+        created_at:
+          type: string
+        code_runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewRunSummary'
+        visual_runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewRunSummary'
+
+    ReviewPullRequestRecord:
+      type: object
+      required:
+        - repo_full_name
+        - pr_number
+        - pr_title
+        - pr_url
+        - head_sha
+        - updated_at
+        - rounds
+      properties:
+        repo_full_name:
+          type: string
+        pr_number:
+          type: integer
+        pr_title:
+          type: string
+        pr_url:
+          type: string
+        head_sha:
+          type: string
+        code_status:
+          type: string
+          nullable: true
+        visual_status:
+          type: string
+          nullable: true
+        updated_at:
+          type: string
+        rounds:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewRoundRecord'
+
+    ReviewAgentPullRequest:
+      type: object
+      required: [repo_full_name, pr_number, head_sha, title, html_url, base_ref, head_ref, body]
       properties:
         repo_full_name:
           type: string
@@ -12732,83 +12272,142 @@ components:
           type: integer
         head_sha:
           type: string
-          description: 本运行绑定的 head commit SHA
         title:
           type: string
         body:
           type: string
-          nullable: true
         html_url:
           type: string
         base_ref:
           type: string
         head_ref:
           type: string
-        draft:
-          type: boolean
 
-    AgentPullRequestDiff:
+    ReviewAgentDiff:
       type: object
       required: [content, truncated]
       properties:
         content:
           type: string
-          description: 统一 diff 文本
         truncated:
           type: boolean
-          description: 超过 1MB 截断时为 true
 
-    AgentPullRequestComment:
+    ReviewAgentScreenshot:
       type: object
-      required: [id, user, body, created_at]
+      required: [id, label, url]
       properties:
         id:
-          type: integer
-        user:
           type: string
+        label:
+          type: string
+        url:
+          type: string
+          description: 指向本端点的图片路径（相对 server.public_url）
+
+    ReviewCodeFinding:
+      type: object
+      required: [level, file, body]
+      properties:
+        level:
+          type: string
+          enum: [P0, P1, P2, Note]
+        file:
+          type: string
+        line:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: 当前 HEAD 右侧代码行号；可为空
         body:
           type: string
-        in_reply_to_id:
+
+    ReviewPriorDecision:
+      type: object
+      required: [status, body]
+      properties:
+        level:
+          type: string
+          description: 原发现的分级（P0/P1/P2/Note 或 blocker/worth_fixing/minor）
+        file:
+          type: string
+          nullable: true
+        line:
           type: integer
           nullable: true
-        path:
-          type: string
-          nullable: true
-        created_at:
-          type: string
-
-    AgentPullRequestReviewRequest:
-      type: object
-      required: [event]
-      properties:
-        event:
-          type: string
-          enum: [COMMENT, APPROVE, REQUEST_CHANGES]
-          description: 审查结论；commit_id 由服务端取本运行 head SHA
         body:
           type: string
-          description: review 正文（APPROVE 时可空）
-
-    AgentPullRequestReviewResult:
-      type: object
-      required: [submitted]
-      properties:
-        submitted:
-          type: boolean
-
-    AgentCheckUpdateRequest:
-      type: object
-      description: 只更新本运行 check run 的标题与说明；结论（conclusion）由运行终态决定，不接受传入。
-      properties:
-        title:
+          description: 原发现的正文摘要
+        status:
           type: string
-          maxLength: 200
+          enum: [fixed, rejected, open]
+        reason:
+          type: string
+          description: rejected 时必须写明理由
+
+    ReviewVisualFinding:
+      type: object
+      required: [severity, screenshot, dimension, body, fix]
+      properties:
+        severity:
+          type: string
+          enum: [blocker, worth_fixing, minor]
+        screenshot:
+          type: string
+          description: 截图标签（来自 screenshots 端点的 label）
+        dimension:
+          type: string
+          enum: [hierarchy, spacing, typography, color, interaction, copy, accessibility]
+        body:
+          type: string
+        fix:
+          type: string
+
+    ReviewUnmeasurable:
+      type: object
+      required: [screenshot, reason]
+      properties:
+        screenshot:
+          type: string
+        reason:
+          type: string
+
+    ReviewCodeResult:
+      type: object
+      required: [summary, findings, prior, ui_changed, ui_changed_since_last_visual]
+      properties:
         summary:
           type: string
-          maxLength: 8000
-        text:
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewCodeFinding'
+        prior:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewPriorDecision'
+        ui_changed:
+          type: boolean
+        ui_changed_since_last_visual:
+          type: boolean
+
+    ReviewVisualResult:
+      type: object
+      required: [summary, findings, prior, unmeasurable]
+      properties:
+        summary:
           type: string
-          maxLength: 40000
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewVisualFinding'
+        prior:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewPriorDecision'
+        unmeasurable:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewUnmeasurable'
 
     Bot:
       type: object
