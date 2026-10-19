@@ -30,3 +30,42 @@ Web 侧镜像约束：改密响应落地前旧凭证已死、新凭证未写回�
 ## 事务边界
 
 改密事务内创建新 refresh token 是刻意的：先改密后补发凭证会留下「密码已换但无会话可用」的中间态。单连接池规则（见 database.md）要求闭包内只用 `tx` 句柄，该方法的所有读写都走 `tx`。
+
+## 角色与邀请注册（INT-129）
+
+`users.role` 只有两个取值：`admin` / `member`（`model.UserRoleAdmin` / `UserRoleMember`，列默认 `member`）。
+它**不写进 JWT**：`/api/auth/me` 返回 `role` 供前端隐藏入口，服务端每次请求现查数据库
+（`middleware.RequireAdmin` 挂在 `RequireJWT` 之后，用 `AuthService.RoleOf` 查一次，非 admin 返回
+40305）。把角色放进令牌会让「刚被降级的管理员」在令牌过期前继续有效。
+
+首次开通：
+
+- 全新库：第一个注册成功的用户 `role = admin`（注册事务内 `count(users) == 0` 判定）。
+- 存量库升级：`cmd/server/migrate_user_roles.go` 在 AutoMigrate 之后跑一次，没有任何 admin
+  时把 `created_at` 最早的用户提为 admin；幂等，重复启动无副作用。
+
+### 关闭公开注册，改为仅管理员邀请
+
+库里已有用户后，`POST /api/auth/register` 必须携带有效的 `invite_token`：
+
+- 邀请只有 `MemberService.CreateInvite` 的返回值里出现一次明文，库里存 SHA-256（`token_hash` 唯一）。
+- 有效期缺省 72 小时，可传 1..720（越界 40001）。管理员可随时撤销。
+- 角色与邀请消费在**同一事务**内完成：`resolveInviteRole` 校验（不存在/过期/撤销统一 40432，
+  不泄漏状态；已被使用 40932），再用 `ConsumeTx`（`WHERE used_at IS NULL AND revoked_at IS NULL`）
+  条件置为已使用。条件更新未命中说明并发注册抢先消费了同一邀请，返回 40932 并整体回滚。
+- 没有令牌或没有可用邀请 → 40306「公开注册已关闭，请联系管理员获取邀请链接」。
+- 被邀请人固定 `role = member`。
+- `POST /api/auth/invites/validate`（体 `{token}`）供注册页提前显示邀请状态（有效 → 200；无效/过期/撤销/已用 → 40432）。
+  token 走请求体而不是 URL 路径：请求日志会原样记录 `URL.Path`，而邀请明文是无前缀随机串，
+  凭证脱敏规则匹配不到，放路径里等于把可用邀请写进日志库。
+
+### 成员管理
+
+`GET /api/members`、`PUT /api/members/{uid}/role`、`GET|POST /api/invites`、`DELETE /api/invites/{id}`
+全部要求管理员（`RequireJWT` + `RequireAdmin`）。改角色在事务内判定「最后一个管理员不能降级」
+（`count(role='admin') == 1` 且目标当前是 admin → 40931）：系统里永远至少留一个能管理部署配置的人。
+
+管理员的边界：成员管理、部署设置（`public_url`）、GitHub App 的保存/测试/manifest 创建。
+读侧（`GET /api/deployment/settings`、`GET /api/deployment/github-app`）对全部登录用户开放，
+成员需要看到 App 状态与安装链接。
+

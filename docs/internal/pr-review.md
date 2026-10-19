@@ -122,27 +122,31 @@ PR 触发且 `dispatched|running`，结束/取消后令牌已消费，访问一�
 
 ## 配置与安全
 
-App 身份自 INT-119 起是**用户级配置**：每个用户在「设置 → 集成」保存自己的
-GitHub App（`integrations` 表按 `(user_id, provider)` 唯一，AES-GCM 加密落库），保存即生效、
-无需重启，PR 评审回写用该轮运行所属用户的 App 身份（详见 `docs/internal/integrations.md`）。
-下列 `config.yaml`（或环境变量）只是未保存集成配置的用户共用的**部署级兜底**，
-用户一旦保存就不再读它们。
+App 身份自 INT-129 起是**部署级配置**：一套部署一个 GitHub App，由管理员在
+「设置 → 集成」创建或手工配置（`deployment_settings` 单行表，AES-GCM 加密落库），
+保存即生效、无需重启；PR 评审与 PR 代发一律用这一份身份
+（详见 `docs/internal/integrations.md` 与 `docs/internal/deployment-settings.md`）。
+INT-119 的每用户 App、多身份验签与 `integrations` 表已删除。
+下列 `config.yaml`（或环境变量）是尚未配置数据库身份时的**部署级兜底**：
 
 - `github_app.app_id`（`FAST_SHIP_GITHUB_APP_APP_ID`）
 - `github_app.private_key_path`（`FAST_SHIP_GITHUB_APP_PRIVATE_KEY_PATH`）——
-  PEM 文件路径；私钥不进环境变量正文、不写日志（用户保存后密文落库）
+  PEM 文件路径；私钥不进环境变量正文、不写日志（页面上保存后密文落库）
 - `github_app.webhook_secret`（`FAST_SHIP_GITHUB_APP_WEBHOOK_SECRET`）——
-  为空且无用户配置时 `POST /api/github/webhooks` 一律 503，不接受未签名请求；
-  入站在全部身份候选中逐个验签定身份（该头只作排序提示，见 `docs/internal/integrations.md`）
+  为空且数据库身份也没有密钥时 `POST /api/github/webhooks` 一律 503，不接受未签名请求；
+  现在只有一把密钥，验签不再需要按候选身份逐个尝试
+- `github_app.api_base_url`（`FAST_SHIP_GITHUB_APP_API_BASE_URL`）——默认空 =
+  `https://api.github.com`；本地端到端把检测/安装令牌/manifest 转换指向 mock GitHub
 - `github_app.fake`（`FAST_SHIP_GITHUB_APP_FAKE`）—— 仅 `server.mode=debug`
   允许 true；注入内存假实现，此时身份与 webhook 密钥都只走 config（不读数据库），
   入站 webhook 会 `SeedFakeFromWebhook`（simulate 脚本不必另调 SetPR），
   `GET /api/debug/github-review-log`（JWT）可看调用记录
 
-身份隔离（INT-119）：评审行主键含 `app_user_id`、已见 SHA 与防抖行主键含它、
-运行行都有该列（空串 = 部署 config 身份）；开轮时把验签身份写进运行，评论 marker
-也带身份，所以同一 PR 上不同 App 的评论/check/运行互不串扰。INT-93/INT-118 旧库由
-`cmd/server/migrate_pr_identity.go` 在 AutoMigrate 前重建三张账表并回填 `''`。
+身份隔离：评审行主键含 `app_user_id`、已见 SHA 与防抖行主键含它、运行行都有该列。
+INT-129 起这套分区**保留但恒为空串**（不再按 App 身份分叉）——删列要重建 SQLite 主键，
+不值得为「恒为空」再迁一次；开轮、同步、取消、agent 代发全部沿用同一套 SQL。
+INT-93/INT-118 旧库由 `cmd/server/migrate_pr_identity.go` 在 AutoMigrate 前重建三张账表
+并回填 `''`。
 
 适配器分两层（INT-107 收拢）：seam 包 `server/internal/githubapi/` 定义
 `GitHubClient` 契约（PR 元数据/diff、review 评论、机器人顶层评论
