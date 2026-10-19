@@ -11,6 +11,7 @@ import { BotBackgroundCalls } from "./bot-background-calls";
 import { BotComposer } from "./bot-composer";
 import { BotMessageView } from "./bot-message";
 import { BotMetrics } from "./bot-metrics";
+import { BotTypingIndicator } from "./bot-typing-indicator";
 import { botActionErrorText } from "./bot-tool-card";
 
 function loadErrorText(error: unknown) {
@@ -38,12 +39,11 @@ export function BotChat({ botId }: { botId: string }) {
   // 判定，scroll-follow 会在 spacer 长出来之前完成贴底，之后不再跟——首屏就停在
   // 「最后一条消息被浮层压住」的位置（距离超过阈值还会被当成用户上翻）。高度变化
   // 时重跑一次 follow，次序上早于滚动事件，atBottom 仍成立。
-  useScrollFollow(
+  const scrollToBottom = useScrollFollow(
     anchorRef,
     `${chat.entries.length}|${last?.message.id ?? ""}|${last?.message.content.text?.length ?? 0}|${composerHeight}`,
     !chat.loading,
   );
-
   // 浮层容器本身 h-0，真正有高度的是内部绝对定位层，所以观察它。
   // 首帧常处于 loading/error（浮层尚未挂载），结束后重新挂载时要补测一次。
   useLayoutEffect(() => {
@@ -60,6 +60,9 @@ export function BotChat({ botId }: { botId: string }) {
     const value = text.trim();
     if (!value || chat.sending) return;
     setText("");
+    // 发送即贴底：用户可能正在上翻读历史，新消息与随之开始的回复都要落在
+    // 视线内；随后条目增高仍由 scroll-follow 继续跟随。
+    scrollToBottom();
     const ok = await chat.sendMessage(value);
     // 发送失败把草稿还回来，避免用户输入丢失（sendError 是渲染期快照，
     // 不能作为恢复依据）。
@@ -211,6 +214,9 @@ export function BotChat({ botId }: { botId: string }) {
           </div>
         )}
 
+        {/* 回复中的等待指示贴在内容最底部（原来是输入框里的一行提示文字）。 */}
+        {chat.runActive && <BotTypingIndicator />}
+
         {chat.streamStatus === "reconnecting" && (
           <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
             <RefreshCw className="h-3 w-3 animate-spin" />
@@ -260,13 +266,6 @@ export function BotChat({ botId }: { botId: string }) {
               onSubmit={() => void submit()}
               submitting={chat.sending}
               actions={<BotMetrics metrics={chat.metrics} />}
-              banner={
-                chat.runActive && !chat.stopRequested ? (
-                  <p className="rounded-lg bg-primary/5 px-3 py-1.5 text-xs text-muted-foreground">
-                    机器人正在处理中——现在发送的消息将在安全点交给机器人
-                  </p>
-                ) : undefined
-              }
               error={
                 chat.sendError != null
                   ? botActionErrorText(chat.sendError, "发送失败")
