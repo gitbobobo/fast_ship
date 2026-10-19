@@ -449,18 +449,17 @@ var (
 	_ *float64 = api.QuotaWindow{}.Limit
 )
 
-// snapshotWindows 必须把窗口的 pool 带到响应里，且单池窗口（pool 为空）不带该
-// 字段——前端靠「有没有 pool」判断要不要出池 tab。
+// snapshotWindows 必须把窗口的 pool 带到响应里，且非多池供应商的单池窗口不带该
+// 字段——前端靠「有没有 pool」判断要不要出池选择器。
 func TestQuotaService_SnapshotWindowsCarriesPool(t *testing.T) {
 	snapshot := quota.Snapshot{Windows: []quota.Window{
 		{Kind: quota.WindowWeekly, Label: "每周", UsedPercent: quota.PercentPtr(45.0), Unit: quota.UnitPercent, Pool: "标准"},
 		{Kind: quota.WindowWeekly, Label: "每周", UsedPercent: quota.PercentPtr(13.0), Unit: quota.UnitPercent, Pool: "Core"},
-		{Kind: quota.WindowDaily, Label: "每日", UsedPercent: quota.PercentPtr(2.0), Unit: quota.UnitPercent},
 	}}
 
-	windows := snapshotWindows(snapshot)
-	if len(windows) != 3 {
-		t.Fatalf("expected 3 windows, got %d", len(windows))
+	windows := snapshotWindows("factory", snapshot)
+	if len(windows) != 2 {
+		t.Fatalf("expected 2 windows, got %d", len(windows))
 	}
 	if windows[0].Pool == nil || *windows[0].Pool != "标准" {
 		t.Fatalf("标准池窗口 pool = %v, want 标准", windows[0].Pool)
@@ -468,8 +467,37 @@ func TestQuotaService_SnapshotWindowsCarriesPool(t *testing.T) {
 	if windows[1].Pool == nil || *windows[1].Pool != "Core" {
 		t.Fatalf("core 池窗口 pool = %v, want Core", windows[1].Pool)
 	}
-	if windows[2].Pool != nil {
-		t.Fatalf("单池窗口不该带 pool，得到 %q", *windows[2].Pool)
+
+	single := quota.Snapshot{Windows: []quota.Window{
+		{Kind: quota.WindowWeekly, Label: "每周", UsedPercent: quota.PercentPtr(2.0), Unit: quota.UnitPercent},
+	}}
+	if singleWindows := snapshotWindows("devin", single); singleWindows[0].Pool != nil {
+		t.Fatalf("单池窗口不该带 pool，得到 %q", *singleWindows[0].Pool)
+	}
+}
+
+// 早于 pool 字段落库的历史快照（label 带池信息）必须被补上池名，否则前端把
+// Factory 双池并成一个池，「标准用尽 + 高级可用」会被误判成已用尽。
+func TestQuotaService_SnapshotWindowsBackfillsLegacyPools(t *testing.T) {
+	snapshot := quota.Snapshot{Windows: []quota.Window{
+		{Kind: quota.WindowFiveHour, Label: "Core 5 小时", UsedPercent: quota.PercentPtr(100.0), Unit: quota.UnitPercent},
+		{Kind: quota.WindowOther, Label: "标准额度", UsedPercent: quota.PercentPtr(100.0), Unit: quota.UnitPercent},
+		{Kind: quota.WindowOther, Label: "高级额度", UsedPercent: quota.PercentPtr(0.0), Unit: quota.UnitPercent},
+	}}
+
+	windows := snapshotWindows("factory", snapshot)
+	want := []struct{ label, pool string }{
+		{"5 小时", "Core"},
+		{"标准额度", "标准"},
+		{"高级额度", "高级"},
+	}
+	for i, w := range want {
+		if windows[i].Label != w.label {
+			t.Fatalf("窗口 %d label = %q, want %q", i, windows[i].Label, w.label)
+		}
+		if windows[i].Pool == nil || *windows[i].Pool != w.pool {
+			t.Fatalf("窗口 %d pool = %v, want %q", i, windows[i].Pool, w.pool)
+		}
 	}
 }
 

@@ -306,7 +306,9 @@ expired、401、404 五份），适配器测试直接用它们驱动状态映射
   旧版 usage 接口（`/api/organization/subscription/usage`）的 standard/premium
   同样是两个独立额度池，分别填「标准」/「高级」——**不能因为窗口名已自含池
   信息就不填**：前端按池算有效剩余与是否用尽，混成一个池时「标准用尽而高级
-  还有额度」会被误判成已用尽。
+  还有额度」会被误判成已用尽。早于该字段落库的历史快照不重写库：读路径在
+  投影成响应前用 `quota.BackfillWindowPools` 按 label 补池名（「Core x」→ Core、
+  标准额度/高级额度→标准/高级），下一次成功抓取会自然写回新格式。
 - **数值类型一律 float64**：契约里 `used_percent`/`used`/`limit`/`amount`
   在 openapi 显式标 `format: double`（生成 `float64`/`*float64`）。金额与
   百分比不降 float32 是显式决定——`10.1` 降精度会变成 `10.100000381469727`。
