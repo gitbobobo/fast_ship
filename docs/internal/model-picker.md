@@ -59,11 +59,12 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
 - 新建线程表单（`new-thread-form.tsx`）、从 issue 启动线程
   （`launch-issue-thread-dialog.tsx`）、从截图标注启动线程
   （`launch-annotation-thread-dialog.tsx`）：单选 `ModelPicker`。
-- 自动化编辑弹窗（`automations/editor-dialog.tsx`）：PR 触发用
-  `ModelMultiPicker`（保留「最多 10 个」限制，`model_selections` 经
-  `resolveModel` + `buildModelSelection` 带上 descriptor 默认项）；其他
-  触发用 `ModelPicker`，`leadingOption` = 「项目默认」，已选模型失效时
-  `triggerLabel` 传 `` `${model}（已失效）` ``。
+- 审查组合行（`components/reviews/combination-row.tsx`，INT-135）：单选
+  `ModelPicker`，provider rail 即 harness 实例；每个选项描述符再配一个
+  `EffortChip` 组成一行。`triggerLabel` 覆盖「先选环境」/「加载中…」/
+  「加载失败，请重试」/「xx（已失效）」；选值经 `resolveModel` +
+  `buildModelSelection` 落成 canonical `options` 数组。
+  `ModelMultiPicker` 目前没有调用点（多选需求随通用自动化一起移除）。
 
 ## 测试注意
 

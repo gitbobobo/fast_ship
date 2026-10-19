@@ -161,7 +161,7 @@ spec 的 security 经常同时写 JWT 和 API Key，真正的拒绝在 handler �
 
 ### 自身日志不是项目日志
 
-`GET /api/self-logs`、`/aggregate`、`/trace` 查的是 Fast Ship 服务端自己的 slog（INT-94）。项目运行日志仍走 `/api/projects/{id}/logs`。`fsr_` 令牌查自身日志返回 40301。失败请求用响应头 `X-Request-Id` 调 `/trace?request_id=`；自动化用 `run_id`。
+`GET /api/self-logs`、`/aggregate`、`/trace` 查的是 Fast Ship 服务端自己的 slog（INT-94）。项目运行日志仍走 `/api/projects/{id}/logs`。`fsr_` 令牌查自身日志返回 40301。失败请求用响应头 `X-Request-Id` 调 `/trace?request_id=`；审查运行链路用 `run_id`。
 
 ### checklist 是整组替换
 

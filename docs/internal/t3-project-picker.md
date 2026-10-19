@@ -60,12 +60,11 @@ picker 内自带同一份 chip 样式字符串；对齐时若样式要改需同�
 
 - 新建线程表单（`new-thread-form.tsx`）：`ariaLabel="项目"`，
   `disabled` 沿用原项目 chip 的条件；无项目时 `triggerLabel` 传
-  「加载中…」/「无可用项目」。
-- 自动化编辑弹窗（`automations/editor-dialog.tsx`）：替换 T3 项目的
-  OptionSelect，`ariaLabel="T3 项目"`、`className="w-full max-w-none"`
-  占满一行；`onValueChange` 沿用原有联动清空（`model_selection`、
-  `model_selections`、`workspace` 置空）；`triggerLabel` 覆盖
-  「加载中…」/「加载失败，请重试」/`xx（已失效）`。
+  「加载中…」/「无可用项目」——目前是组件的唯一调用点。
+- 审查组合行（`components/reviews/combination-row.tsx`，INT-135）**不用**
+  本组件：环境只能选已绑定的 Fast Ship 环境（`OptionSelect`），T3 项目由
+  环境绑定（`project_t3_bindings`）隐式决定、保存时快照进组合，界面上没有
+  T3 项目维度可选。
 
 ## 测试注意
 

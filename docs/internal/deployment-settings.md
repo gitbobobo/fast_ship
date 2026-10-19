@@ -32,8 +32,6 @@ App 的四个列与 `public_url` 同表：它们都是「这套部署」的身�
 表里还有行时该迁移**拒绝启动**：删表会不可逆地丢掉别人的加密私钥与 webhook 密钥，
 而「多个用户各配一个 App 时该用谁」属于产品决策，不在升级里替用户选。运维备份数据库、
 确认改由「设置 → 集成」重新配置后，设 `FAST_SHIP_DROP_USER_INTEGRATIONS=1` 重启即可。
-`automation_runs.app_user_id` 等列按原样保留、
-一律写空串（`docs/internal/pr-review.md`），避免再做一次 SQLite 重建主键的迁移。
 
 ## public_url：唯一读取入口
 
@@ -45,8 +43,8 @@ App 的四个列与 `public_url` 同表：它们都是「这套部署」的身�
 
 | 消费点 | 用途 |
 | --- | --- |
-| `AutomationService.PublicURLOK` / `requirePublicURL` | 启用自动化的前置条件（41202） |
-| `AutomationScheduler.launchThreadForRun` | 自动化运行提示词里的回报端点 |
+| `ReviewService` 设置面（`reviewPrerequisites`） | 启用 PR 审查的前置条件之一（`public_url` 项，41202） |
+| `ReviewService` 派发路径 | 审查提示词里的 `/api/review-agent/*` 基址（不从 Host 推断） |
 | `IntegrationService.project` | `webhook_url` 与 manifest 里的各个 URL |
 
 未注入时各 service 用默认实现（只读 config），既有测试与构造调用因此不需要改。
@@ -144,6 +142,6 @@ webhook 多候选验签、用户行与 config 的裁决、`(provider, app_id)` �
 
 ## 已知限制
 
-- `state` 存进程内：多副本部署不适用（本项目一直是单进程，见 `pr-review.md` 已知限制）。
+- `state` 存进程内：多副本部署不适用（本项目一直是单进程，见 `reviews.md` 已知限制）。
 - manifest 流程依赖 GitHub 真实页面，无头环境只能截到「创建中 / 失败」与 mock 下的成功路径，
   真实创建无法自动化验证。

@@ -1,7 +1,7 @@
 # GitHub App 身份（INT-93 → INT-119 → INT-129）
 
-Fast Ship 用 GitHub App 身份代发 PR 评审评论、更新 check run，并接收 App 的
-webhook 投递。INT-119 曾把身份做成**用户级**（每个用户自己建 App），INT-129 收回
+Fast Ship 用 GitHub App 身份代发 PR 审查评论与行内 review、写 commit status，
+并接收 App 的 webhook 投递。INT-119 曾把身份做成**用户级**（每个用户自己建 App），INT-129 收回
 **部署级**：一套部署一个 App，管理员在网页上配置，成员只看状态。
 
 部署地址（`public_url`）与 manifest 一键创建的完整流程见
@@ -41,7 +41,7 @@ PUT 是整组保存：`app_id` 必填且纯数字；`private_key_pem` 省略/nul
 
 ## 保存即生效
 
-`githubapp.Clients.ClientFor(ctx)` 是 PR 评审与 PR 代发链路取客户端的唯一入口：按
+`githubapp.Clients.ClientFor(ctx)` 是 PR 审查链路取客户端的唯一入口：按
 `app_id + PEM` 的 sha256 指纹缓存**一份** `InstallationTokenStore + REST client`，
 配置变化后下一次调用自动重建。未配置时返回 50000「GitHub App 未配置」。
 `StaticClients` 恒返回同一 client，供 fake 自测与测试注入。
@@ -55,15 +55,12 @@ INT-119 的「按用户缓存、按用户解析」在 INT-129 全部删除：一
 
 - 当前生效密钥为空 → 503（50300，不接受未签名请求）
 - 签名缺失/不匹配 → 401（40107）
-- 通过 → 202，事件交给 `PRReviewService.HandleGitHubWebhook`
+- 通过 → 202，事件交给 `ReviewService.HandleGitHubWebhook`
 
 `X-GitHub-Hook-Installation-Target-ID` 不再参与身份归属（只有一份身份），
 只当无意义的头忽略。INT-119 的多候选验签、同 App 用户行接管 config、多命中拒绝
-（「无法确定集成身份」）随用户级身份一起删除。
-
-`automation_runs.app_user_id` 等列按原样保留、一律写 `''`：评审账/已见 SHA/防抖表
-的主键仍含它，删列要重建 SQLite 主键，不值得为「恒为空」再迁一次。开轮、同步、取消、
-agent 代发全部沿用这套按身份分区的 SQL，只是分区值恒为空串。
+（「无法确定集成身份」）随用户级身份一起删除。INT-135 的新审查表
+（`review_runs` 等）直接不带身份分区列——一套部署只有一份身份。
 
 ## 检测
 
@@ -79,6 +76,15 @@ detail 用固定文案，不拼底层 `err.Error()`，不含任何密钥。
 
 `github_app.api_base_url`（`FAST_SHIP_GITHUB_APP_API_BASE_URL`）把检测、安装令牌换新与
 manifest conversions 的 API base 指到别处；默认空 = `https://api.github.com`。
+
+## 权限
+
+manifest 一键创建申请的权限：`pull_requests: write`（行内 review）、
+`issues: write`（顶层评论）、`statuses: write`（commit status——
+`代码审查`/`视觉审查` 两个 context 由它支撑，**不是** checks）、
+`contents: read`、`metadata: read`。GitHub 对权限变更是显式确认制：
+新装安装或在 manifest 之后升级过权限的 App，已有安装需要在
+GitHub 上「Review request / 重新接受权限」后新权限才生效。
 
 ## 接口
 

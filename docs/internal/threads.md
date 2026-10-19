@@ -8,11 +8,11 @@ Fast Ship 以 T3 客户端身份接入 T3 Code 环境：配对一个 T3 服务�
 浏览器，前端不再定时轮询）；写操作仍是 REST 表达用户操作、适配器转成 T3 一次性
 WS RPC。
 
-边界补充（INT-90 之后仍成立）：本文描述的客户端语义没有队列镜像、没有第二套
-线程状态机。INT-90 的「自动化」是**用户配置的触发调度与运行账本**（cron /
-Issue 事件 → 开线程 → 令牌回报 → settle/archive 后置），不是线程系统的一部分：
-它只在触发与收尾两个时刻调用本文的 launch/settle/archive 适配器，运行态始终以
-T3 为准。详见 `docs/internal/automations.md`。
+边界补充：本文描述的客户端语义没有队列镜像、没有第二套线程状态机。INT-135
+的「PR 审查」是**项目级触发的运行账本**（webhook → 防抖/排队 → 开线程 →
+运行令牌回报 → 工作区回收），不是线程系统的一部分：它只在派发与回收两个
+时刻调用本文的 launch/archive 适配器，运行态始终以 T3 为准。详见
+`docs/internal/reviews.md`。
 
 架构边界（INT-85 共识）：**复杂性留在适配器**。REST 外层 snake_case，T3 的
 camelCase 留在适配器内；不暴露通用 /rpc 或任意 dispatchCommand 转发端点，
@@ -185,8 +185,7 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
 「waiting/后台工作也算可停」的既有口径；再否则 shell 的 `latestRunId` 带着非空
 `pendingBackgroundTasks`（后台工作仍会唤醒代理）→ 中断最近 run；都没有 →
 `stopped=false`（T3 此场景只做 PR unwatch，Fast Ship 不维护 PR watch，不杜撰
-内部命令）。自动化收尾的 `ThreadSettleSafe` 同一口径（等首次同步用
-`ShellFirstSync` 预算）。
+内部命令）。
 
 ## 配对与会话生命周期
 
@@ -210,7 +209,7 @@ workspace-options 选），由 T3 校验路径；Fast Ship 不另做项目目录
 
 ## 读路径与预算
 
-### shell 订阅 hub（INT-116，列表/详情/Stop/收尾的运行态来源）
+### shell 订阅 hub（INT-116，列表/详情/Stop 的运行态来源）
 
 每个「用户 × 环境」在 hub（`t3_shell_hub.go`）里持**两条长驻 WS 连接**：活跃面
 订阅 `orchestration.subscribeShell`（恢复时带 `afterSequence` 游标 +
@@ -313,8 +312,8 @@ hub 在数据路径上发布轻量事件（`t3_shell_events.go`），消费方�
   TanStack Query 失效：无 environment_id 失效整个线程子树；有环境时列表必失效，
   `full` 失效该环境全部详情，否则只失效命中的线程详情。`useThreads` /
   `useThreadDetail` 因此删除固定间隔轮询（保留挂载/聚焦/写操作后的重读）。
-- 自动化等后台消费者的通知源就是 `hub.Subscribe(userID)`：同一个 hub 事件流，
-  不需要各自去问 T3；跨用户隔离由按用户分组的注册表保证。
+- 浏览器 SSE 通道是 `hub.Subscribe(userID)` 的唯一消费者：同一个 hub 事件流
+  按用户订阅，不需要各自去问 T3；跨用户隔离由按用户分组的注册表保证。
 
 ### 各读取路径
 
