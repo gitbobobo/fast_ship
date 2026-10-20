@@ -73,9 +73,16 @@ func (s *ReviewService) syncTargetStillCurrent(ledger *model.ReviewPullRequest, 
 		return errReviewSyncAbandoned
 	}
 	var settings model.ProjectReviewSettings
-	if err := s.db.Select("repo_full_name").
-		Where("project_id = ? AND enabled", ledger.ProjectID).First(&settings).Error; err != nil {
+	err = s.db.Select("repo_full_name").
+		Where("project_id = ? AND enabled", ledger.ProjectID).First(&settings).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 设置行没了（项目被删/从未启用）：不再属于本轮。
 		return errReviewSyncAbandoned
+	case err != nil:
+		// DB 故障不是「目标失效」：与上面的 epoch 复核同口径往外抛，让同步
+		// 记 sync_error 下轮重试，不要静默吞掉一个真正的错误。
+		return err
 	}
 	if settings.RepoFullName != ledger.RepoFullName {
 		return errReviewSyncAbandoned
