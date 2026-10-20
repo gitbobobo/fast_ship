@@ -44,35 +44,72 @@ func TestMigrateReviewTablesPurgesLegacyNotifications(t *testing.T) {
 
 // 本 PR 新增的七张审查表尚未发布：结构演进一律 DROP 后由 AutoMigrate 按
 // 最新模型重建——迁移必须把旧形态表与数据一起删掉。
-func TestMigrateReviewTablesDropsNewReviewTables(t *testing.T) {
+// 迁移每次启动都会跑：已经是新结构时必须原地保留数据，不能每次重启清空。
+func TestMigrateReviewTablesKeepsCurrentSchema(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	if err := db.AutoMigrate(
-		&model.ProjectReviewSettings{}, &model.ReviewRun{}, &model.ReviewRunToken{},
-		&model.ReviewPullRequest{}, &model.ReviewAsset{}, &model.ReviewDebounce{},
-		&model.ReviewSeenSHA{},
-	); err != nil {
+	if err := db.AutoMigrate(&model.ProjectReviewSettings{}, &model.ReviewPullRequest{}, &model.ReviewSeenSHA{}); err != nil {
 		t.Fatalf("migrate review tables: %v", err)
 	}
-	if err := db.Create(&model.ReviewSeenSHA{
-		ProjectID: "p", RepoFullName: "o/r", PRNumber: 1, HeadSHA: "s",
-		AcceptedAt: time.Now().UTC(),
+	now := time.Now().UTC()
+	if err := db.Create(&model.ReviewPullRequest{
+		ProjectID: "p1", RepoFullName: "o/r", PRNumber: 1, UserID: "u1", UpdatedAt: now,
 	}).Error; err != nil {
-		t.Fatalf("seed seen sha: %v", err)
+		t.Fatalf("seed ledger: %v", err)
+	}
+	if err := db.Create(&model.ProjectReviewSettings{
+		ProjectID: "p1", UserID: "u1", RepoFullName: "o/r", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed settings: %v", err)
 	}
 
-	if err := migrateReviewTables(db, zap.NewNop()); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	for _, table := range []string{
-		"review_runs", "review_run_tokens", "review_pull_requests", "review_assets",
-		"review_debounces", "review_seen_shas", "project_review_settings",
-	} {
-		if exists, err := sqliteTableExists(db, table); err != nil || exists {
-			t.Fatalf("表 %s 迁移后应已删除 (exists=%v err=%v)", table, exists, err)
+	for i := 0; i < 2; i++ {
+		if err := migrateReviewTables(db, zap.NewNop()); err != nil {
+			t.Fatalf("migrate #%d: %v", i, err)
 		}
+	}
+
+	var ledgers, settings int64
+	if err := db.Model(&model.ReviewPullRequest{}).Count(&ledgers).Error; err != nil {
+		t.Fatalf("count ledger: %v", err)
+	}
+	if err := db.Model(&model.ProjectReviewSettings{}).Count(&settings).Error; err != nil {
+		t.Fatalf("count settings: %v", err)
+	}
+	if ledgers != 1 || settings != 1 {
+		t.Fatalf("重启后数据被清空: ledgers=%d settings=%d", ledgers, settings)
+	}
+}
+
+// 旧结构（主键缺 project_id）必须被识别并重建一次。
+func TestReviewTablesNeedRebuildDetectsLegacySchema(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE review_pull_requests (
+		repo_full_name text, pr_number integer, project_id text NOT NULL,
+		user_id text NOT NULL, updated_at datetime NOT NULL,
+		PRIMARY KEY (repo_full_name, pr_number))`).Error; err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	needs, err := reviewTablesNeedRebuild(db)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !needs {
+		t.Fatal("旧主键结构应触发重建")
+	}
+	if err := migrateReviewTables(db, zap.NewNop()); err != nil {
+		t.Fatalf("migrate legacy: %v", err)
+	}
+	exists, err := sqliteTableExists(db, "review_pull_requests")
+	if err != nil {
+		t.Fatalf("exists: %v", err)
+	}
+	if exists {
+		t.Fatal("旧结构表应被删除，等待 AutoMigrate 重建")
 	}
 }

@@ -14,7 +14,9 @@
 `cmd/server/migrate_review.go` 在 AutoMigrate 前直接 DROP，不迁数据。本 PR
 新增的七张审查表（`review_runs`/`review_run_tokens`/`review_pull_requests`/
 `review_assets`/`review_debounces`/`review_seen_shas`/`project_review_settings`）
-同样由该迁移整表 DROP——功能尚未发布，结构演进一律重建不做数据迁移。
+在开发期结构演进过一次（账本按项目分区），迁移只在检测到旧结构
+（`review_pull_requests` 主键缺 `project_id`）时整表重建；新结构的库每次启动
+原样保留，不清数据。
 审查的流程类机制（触发、防抖、排队、工作区、历史、评论、状态、视觉衔接）由
 系统写死保证，提示词只保留审查判断本身，不给用户自由发挥。不做评论命令、
 不做 Checks API、不审 draft 与 fork PR。站内通知保留但只用于审查系统故障
