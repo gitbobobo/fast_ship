@@ -854,3 +854,34 @@ func TestBotInt136AcceptMissingTaskRejected(t *testing.T) {
 		t.Fatalf("应回 40429（任务不存在）: %+v", calls[0])
 	}
 }
+
+// 范围解析失败（目标不存在）时，被拒调用仍要带上已被校验的元数据：否则界面和
+// 审计只能看到一条 tool_name/action 为空的泛化失败，查不出是哪个动作触发的 40429。
+func TestBotInt136ScopeFailureKeepsCallMetadata(t *testing.T) {
+	env := setupBotTestEnv(t,
+		fakeModelTurn{ToolCalls: []fakeModelToolCall{{
+			ID: "call-scope-fail", Name: "fs_schedule", Args: `{"action":"delete","task_id":"missing"}`,
+		}}},
+		fakeModelTurn{Text: "好"},
+	)
+	userID := createBotTestUser(t, env.db, "int136meta")
+	bot := env.createBot(t, userID)
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "删了它", ClientMessageID: "s1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForBot(t, "调用失败", 15*time.Second, func() bool {
+		calls, _ := env.bots.ListCalls(userID, bot.ID, nil, 5)
+		return len(calls) == 1 && calls[0].Status == "failed"
+	})
+	calls, _ := env.bots.ListCalls(userID, bot.ID, nil, 5)
+	call := calls[0]
+	if call.ToolName != "fs_schedule" || call.Action != "delete" {
+		t.Fatalf("被拒调用应保留工具与动作: %+v", call)
+	}
+	if call.ExecutionMode != "async" || !call.RequiresConfirmation {
+		t.Fatalf("被拒调用应保留执行模式与确认标记: %+v", call)
+	}
+	if call.ErrorCode == nil || *call.ErrorCode != "e40429" {
+		t.Fatalf("应回 40429: %+v", call.ErrorCode)
+	}
+}

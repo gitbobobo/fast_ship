@@ -70,6 +70,15 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
 		} else {
 			entry.prepared = prepared
+			// 已通过校验的元数据先落进调用账本：后面任何一步（schedule 会话
+			// 拦截、范围解析）拒绝这次调用时，账本仍能说清「被拒的是哪个动作」，
+			// 而不是一条 tool_name/action 为空的泛化失败。
+			entry.call.ToolName = prepared.ToolName
+			entry.call.Action = prepared.Action
+			entry.call.ArgumentsJSON = prepared.ArgumentsJSON
+			entry.call.ArgumentsHash = prepared.ArgumentsHash
+			entry.call.ExecutionMode = string(prepared.Mode)
+			entry.call.RequiresConfirmation = prepared.RequiresConfirmation
 			// 定时任务会话禁止管理任务（INT-136）：schedule 会话默认放行写
 			// 操作，受理端直接拦截 create/update/run，防止造出递归绕过确认的
 			// 会话。命中按校验失败同路径处理（failed + 40001 + 同步失败回复）。
@@ -125,12 +134,6 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 		}
 		if entry.prepared != nil {
 			call := entry.call
-			call.ToolName = entry.prepared.ToolName
-			call.Action = entry.prepared.Action
-			call.ArgumentsJSON = entry.prepared.ArgumentsJSON
-			call.ArgumentsHash = entry.prepared.ArgumentsHash
-			call.ExecutionMode = string(entry.prepared.Mode)
-			call.RequiresConfirmation = entry.prepared.RequiresConfirmation
 			call.ExecutionContextJSON = marshalExecContext(entry.execCtx)
 			switch {
 			case entry.prepared.Mode == model.BotExecutionSync:
