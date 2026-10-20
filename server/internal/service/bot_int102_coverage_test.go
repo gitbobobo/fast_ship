@@ -326,7 +326,7 @@ func TestBotAutoCompaction(t *testing.T) {
 	}
 	// 9900：v10 提示词 + nonce 前缀后固定前缀再涨约 0.6k，旧几何会让
 	// 「固定前缀+最小摘要预算 ≥ 触发阈值」误判不可达（INT-123→INT-136 重定标）。
-	env.cfg.Bots.Context.WindowTokens = 10100
+	env.cfg.Bots.Context.WindowTokens = 10800
 	// 归档输入是整段原文：本场景单个大工具结果（≈27k token）装不进主模型
 	// 9900 窗口的归档输入预算，auxModelRequest 发送关口会按 INT-115 拒绝这种
 	// 请求。归档模型配置成更大窗口的模型——这正是 ArchiveModel 的用法。
@@ -438,7 +438,7 @@ func TestBotSummaryPreservesIdentifiers(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ids")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 10100 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
+	env.cfg.Bots.Context.WindowTokens = 10800 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
 	uid := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 	seedBotUserMessage(t, env, bot.ID, "处理 Issue INT-102 和 "+uid)
 	args := `{"action":"read","thread_id":"thr_keep_me","issue_id":"iss_raw_Case"}`
@@ -478,7 +478,7 @@ func TestBotCompactionPreservesLedger(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "ledger")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 10100 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
+	env.cfg.Bots.Context.WindowTokens = 10800 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
 	seedCompactableLedger(t, env, bot.ID, "账本保持")
 	var before []model.BotMessage
 	env.db.Where("bot_id = ?", bot.ID).Order("seq ASC").Find(&before)
@@ -514,7 +514,7 @@ func TestBotFoldedResultRead(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "foldreal")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 10100 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
+	env.cfg.Bots.Context.WindowTokens = 10800 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
 	seedBotUserMessage(t, env, bot.ID, "q")
 	big := strings.Repeat("完整结果正文XY", 800)
 	_, tr := seedBotAssistantToolBlock(t, env, bot.ID, "call-real-fold", "fs_issue", big)
@@ -1094,7 +1094,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "sumfail")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 10100 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
+	env.cfg.Bots.Context.WindowTokens = 10800 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
 	seedCompactableLedger(t, env, bot.ID, "失败回退")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)
@@ -1158,7 +1158,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	envHTTP.cfg.Bots.Context.WindowTokens = 10100 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
+	envHTTP.cfg.Bots.Context.WindowTokens = 10800 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
 	seedCompactableLedger(t, envHTTP, b3.ID, "http失败")
 	row3, _ := envHTTP.bots.bots.Get(b3.ID)
 	run3 := botFixtureRun(t, envHTTP, row3)
@@ -1193,7 +1193,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	envEmpty.fake.strict = true
 	uE := createBotTestUser(t, envEmpty.db, "sumempty")
 	bE := envEmpty.createBot(t, uE)
-	envEmpty.cfg.Bots.Context.WindowTokens = 10100 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
+	envEmpty.cfg.Bots.Context.WindowTokens = 10800 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
 	seedCompactableLedger(t, envEmpty, bE.ID, "空输出")
 	rowE, _ := envEmpty.bots.bots.Get(bE.ID)
 	runE := botFixtureRun(t, envEmpty, rowE)
@@ -1514,7 +1514,8 @@ func TestBotPreCompactionArchive(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "arch")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 10100 // v7 工具集与规则 8 变长后固定前缀更大，9000 旧几何会误判压缩不可达（INT-123→INT-136 重定标）
+	// 出口围栏与摘要/附录围栏让固定前缀再涨，窗口给足避免误判不可达。
+	env.cfg.Bots.Context.WindowTokens = 10800
 	seedCompactableLedger(t, env, bot.ID, "用户叫 Bobo")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	markHistoryConsumed(t, env, botRow, nil)
