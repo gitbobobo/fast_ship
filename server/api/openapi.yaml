@@ -12312,7 +12312,11 @@ components:
           type: string
         url:
           type: string
-          description: 指向本端点的图片路径（相对 server.public_url）
+          description: 指向本端点的图片路径（相对 server.public_url）；下载失败时为空串
+        error:
+          type: string
+          nullable: true
+          description: 下载/不可用原因；非空时 url 为空，审查员应记入 unmeasurable
 
     ReviewCodeFinding:
       type: object

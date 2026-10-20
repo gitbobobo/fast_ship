@@ -3152,10 +3152,12 @@ type ReviewAgentPullRequest struct {
 
 // ReviewAgentScreenshot defines model for ReviewAgentScreenshot.
 type ReviewAgentScreenshot struct {
-	Id    string `json:"id"`
-	Label string `json:"label"`
+	// Error 下载/不可用原因；非空时 url 为空，审查员应记入 unmeasurable
+	Error *string `json:"error,omitempty"`
+	Id    string  `json:"id"`
+	Label string  `json:"label"`
 
-	// Url 指向本端点的图片路径（相对 server.public_url）
+	// Url 指向本端点的图片路径（相对 server.public_url）；下载失败时为空串
 	Url string `json:"url"`
 }
 

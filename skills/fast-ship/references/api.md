@@ -7814,7 +7814,8 @@ GitHub 官方 pull_request 事件 payload（原样验签，服务端只取 owner
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
 | `items[].label` | string | 是 |  |
-| `items[].url` | string | 是 | 指向本端点的图片路径（相对 server.public_url） |
+| `items[].url` | string | 是 | 指向本端点的图片路径（相对 server.public_url）；下载失败时为空串 |
+| `items[].error` | string（可空） | 否 | 下载/不可用原因；非空时 url 为空，审查员应记入 unmeasurable |
 | `changed` | boolean | 是 | 截图集合相对上一轮视觉审查是否有变化 |
 
 **错误**

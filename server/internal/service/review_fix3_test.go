@@ -1042,7 +1042,10 @@ func TestAgentScreenshotsSkipFailedAssets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AgentScreenshots: %v", err)
 	}
-	if len(items) != 0 {
-		t.Fatalf("items = %+v, 下载失败的截图不应列给审查员", items)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, 下载失败的截图应列出并带 error", items)
+	}
+	if items[0].Error == nil || *items[0].Error == "" || items[0].Url != "" {
+		t.Fatalf("failed asset = %+v, want error 非空且 url 为空", items[0])
 	}
 }
