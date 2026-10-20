@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"gorm.io/gorm"
 )
 
 // PR 审查记录查询（INT-135 1b）：只读，不做任何 GitHub/T3 调用。
@@ -54,38 +56,43 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 		settingsByProject[row.ProjectID] = row
 	}
 
-	// 最新一条 PR 记录（updated_at 最大）给状态字段。只认项目**当前**审查
-	// 仓库的账本：项目换过仓库后，旧仓库的历史记录不能当成新仓库的最近状态
-	// 展示。
+	// 最新一条 PR 记录（updated_at 最大）给状态字段。按设置行的
+	// repo_full_name（审查仓库的判定键，与 webhook 反查/同步过滤同口径）挑账本：
+	// 项目换过仓库后，旧仓库的历史记录不能当成当前仓库的最近状态展示。
+	// 没有设置行的项目不可能有账本（开轮要求设置行存在），直接跳过。
 	repoByProject := map[string]string{}
 	repoSet := map[string]struct{}{}
 	for i := range projects {
 		p := &projects[i]
-		repo := strings.ToLower(p.CodeRepoFullName())
-		repoByProject[p.ID] = repo
-		repoSet[repo] = struct{}{}
-	}
-	repos := make([]string, 0, len(repoSet))
-	for repo := range repoSet {
-		repos = append(repos, repo)
-	}
-	var prs []model.ReviewPullRequest
-	if err := s.db.WithContext(ctx).
-		Where("project_id IN ? AND repo_full_name IN ?", projectIDs, repos).
-		Order("updated_at DESC").
-		Find(&prs).Error; err != nil {
-		return nil, errs.ErrInternal
-	}
-	latestByProject := map[string]model.ReviewPullRequest{}
-	for _, pr := range prs {
-		if repoByProject[pr.ProjectID] != pr.RepoFullName {
+		row, ok := settingsByProject[p.ID]
+		if !ok || row.RepoFullName == "" {
 			continue
 		}
-		if _, ok := latestByProject[pr.ProjectID]; !ok {
-			latestByProject[pr.ProjectID] = pr
+		repoByProject[p.ID] = row.RepoFullName
+		repoSet[row.RepoFullName] = struct{}{}
+	}
+	latestByProject := map[string]model.ReviewPullRequest{}
+	if len(repoSet) > 0 {
+		repos := make([]string, 0, len(repoSet))
+		for repo := range repoSet {
+			repos = append(repos, repo)
+		}
+		var prs []model.ReviewPullRequest
+		if err := s.db.WithContext(ctx).
+			Where("project_id IN ? AND repo_full_name IN ?", projectIDs, repos).
+			Order("updated_at DESC").
+			Find(&prs).Error; err != nil {
+			return nil, errs.ErrInternal
+		}
+		for _, pr := range prs {
+			if repoByProject[pr.ProjectID] != pr.RepoFullName {
+				continue
+			}
+			if _, ok := latestByProject[pr.ProjectID]; !ok {
+				latestByProject[pr.ProjectID] = pr
+			}
 		}
 	}
-
 	// 同仓库占用：别的项目 enabled 且审查仓库（小写）相同 → 占用者登录名。
 	occupierByRepo, err := s.reviewOccupiers(ctx, projects)
 	if err != nil {
@@ -177,11 +184,20 @@ func reviewRepoKey(owner, repo string) string {
 // ListReviewRecords 项目审查记录：PR 按 updated_at DESC，每 PR 内嵌轮次
 // （round_number DESC），轮内 code_runs/visual_runs 按创建时间正序。
 func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID string, limit int) ([]api.ReviewPullRequestRecord, error) {
-	project, err := s.ownedProject(userID, projectID)
-	if err != nil {
+	if _, err := s.ownedProject(userID, projectID); err != nil {
 		return nil, err
 	}
-	currentRepo := strings.ToLower(project.CodeRepoFullName())
+	// can_rerun 的判定键是设置行的 repo_full_name（审查仓库，与 rerun 接口
+	// 同口径），不按 enabled 过滤——停用只影响开轮授权，不影响记录能否重跑
+	// （接口会返回 40923）。没有设置行的项目不可能有账本。
+	currentRepo := ""
+	var settings model.ProjectReviewSettings
+	switch err := s.db.WithContext(ctx).Where("project_id = ?", projectID).First(&settings).Error; {
+	case err == nil:
+		currentRepo = settings.RepoFullName
+	case !errors.Is(err, gorm.ErrRecordNotFound):
+		return nil, errs.ErrInternal
+	}
 	if limit <= 0 {
 		limit = reviewRecordsDefaultLimit
 	}
@@ -246,9 +262,9 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 			RepoFullName: pr.RepoFullName,
 			HeadSha:      pr.HeadSHA,
 			UpdatedAt:    pr.UpdatedAt.UTC().Format(time.RFC3339Nano),
-			// 项目改过仓库后，旧仓库的记录只能查看：rerun 会按项目当前仓库
+			// 项目改过仓库后，旧仓库的记录只能查看：rerun 会按当前审查仓库
 			// 取 PR，同号的无关 PR 会被误审。
-			CanRerun: strings.EqualFold(pr.RepoFullName, currentRepo),
+			CanRerun: currentRepo != "" && strings.EqualFold(pr.RepoFullName, currentRepo),
 			Rounds:   []api.ReviewRoundRecord{},
 		}
 		if pr.CodeStatus != "" {

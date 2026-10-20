@@ -32,8 +32,14 @@ func (p *Project) IsGitHubConfigured() bool {
 	return p.GithubOwner != "" && p.GithubRepo != ""
 }
 
-// CodeRepo 返回 PR 审查使用的代码仓库：两个 code 字段都非空时用显式配置，
-// 否则回落公开仓库。审查链路只经它取仓库。
+// CodeRepo 返回 PR 审查仓库的候选值：两个 code 字段都非空时用显式配置，
+// 否则回落公开仓库。它是「这个项目会审查哪个仓库」的唯一来源——写入审查
+// 设置时用它生成 project_review_settings.repo_full_name 快照。
+//
+// 运行侧判定（触发反查、同步过滤、rerun、记录列表）读的是设置行的快照：
+// 同仓库唯一索引就建在那一列上，判定与约束必须用同一列。两者的读取口径见
+// docs/internal/reviews.md「审查仓库的读取口径」，并由
+// service.TestReviewChainReadsReviewRepoFromSettingsSnapshot 机器校验。
 func (p *Project) CodeRepo() (owner, repo string) {
 	if p.CodeGithubOwner != "" && p.CodeGithubRepo != "" {
 		return p.CodeGithubOwner, p.CodeGithubRepo

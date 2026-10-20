@@ -30,12 +30,28 @@
 
 **审查仓库 = 代码仓库**：项目可以单独配置代码仓库
 （`projects.code_github_owner/code_github_repo`，musiver 场景：公开仓库放
-Issue 与 Release、无代码；代码在另一仓库）。审查链路取仓库一律走
-`project.CodeRepo()`：两个 code 字段都非空时用显式配置，否则回落公开仓库；
-Issue 同步/发版/发货仍只走公开仓库，两者互不影响。所有「当前审查仓库」的
-判定（触发反查、同仓库唯一、同步过滤）都不回读项目行的 live 字段，只认
-`project_review_settings.repo_full_name` 快照（小写）——改仓库时该快照由
-`ProjectRepository.Update` 同事务刷新，是唯一真相来源。
+Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 表达的是
+「这个项目审查哪个仓库」的候选值：两个 code 字段都非空时用显式配置，否则
+回落公开仓库；Issue 同步/发版/发货仍只走公开仓库，两者互不影响。
+
+### 审查仓库的读取口径
+
+同一个事实存了两份：项目行的 `CodeRepo()`（候选值）与设置行的
+`repo_full_name`（生效值，小写）。两条写入路径保证它们恒等：项目改仓库时
+`ProjectRepository.Update` 同事务停用审查并刷新快照（disabled 行也刷新），
+保存审查设置时 `UpdateSettings` 用 `CodeRepo()` 写入快照并在事务内复核。
+因此**不需要**在两者之间做「谁更可信」的兜底，需要的是按用途选列：
+
+| 用途 | 读什么 | 允许出现的位置 |
+| --- | --- | --- |
+| 写入侧：生成快照、以及必须等于「即将写入的键」的预占预判 | `CodeRepo()` | `UpdateSettings`、`ProjectRepository.Update`、`reviewPrerequisites`、`reviewTakenBy`、`reviewOccupiers` |
+| 运行侧：基于已有状态做判定 | 设置行 `repo_full_name`（不按 `enabled` 过滤，除非该判定本身要求已启用） | 触发反查、防抖复核、同步过滤/准入、rerun、记录与总览的「当前仓库」 |
+| 展示：保留用户输入的原样大小写 | `CodeRepo()` | 总览的 owner/repo、`GetSettings.repo_full_name` |
+
+`service` 包里的 `TestReviewChainReadsReviewRepoFromSettingsSnapshot` 用 AST
+扫描把这条规则钉死：`review_*.go` 里出现未列入白名单的 `CodeRepo()` 读取即
+失败。新增判定点时按上表选列，不要回读 live 字段，也不要给运行侧加 fallback
+（没有设置行的项目不可能有账本/运行/防抖行）。
 
 ## 数据模型
 

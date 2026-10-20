@@ -436,6 +436,7 @@ func TestUpdateSettingsTakeoverCleansUpOtherProjects(t *testing.T) {
 func TestRerunRejectsHistoricalRepo(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.enableReview(t)
+	// 直改项目行（绕开 Update，保留旧快照）：历史上换过仓库、设置行仍停在旧仓库。
 	e.project.GithubOwner, e.project.GithubRepo = "newowner", "newrepo"
 	if err := e.svc.db.Model(e.project).Updates(map[string]any{
 		"github_owner": "newowner", "github_repo": "newrepo"}).Error; err != nil {
@@ -451,7 +452,8 @@ func TestRerunRejectsHistoricalRepo(t *testing.T) {
 	}
 }
 
-// 记录页的 can_rerun 随项目仓库判断：历史仓库的记录为 false。
+// 记录页的 can_rerun 判定键是设置行的 repo_full_name 快照（与 rerun 接口同口径）：
+// 换仓库后快照被刷新，旧仓库的记录为 false。
 func TestReviewRecordsCanRerunTracksProjectRepo(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	e.enableReview(t)
@@ -463,9 +465,10 @@ func TestReviewRecordsCanRerunTracksProjectRepo(t *testing.T) {
 	if err := e.svc.db.Create(&rows).Error; err != nil {
 		t.Fatalf("seed ledgers: %v", err)
 	}
+	// 走真实写路径换仓库：repository.Update 会在同事务里停用审查并刷新设置行的
+	// repo_full_name 快照（can_rerun 的判定键就是这列）。
 	e.project.GithubOwner, e.project.GithubRepo = "newowner", "newrepo"
-	if err := e.svc.db.Model(e.project).Updates(map[string]any{
-		"github_owner": "newowner", "github_repo": "newrepo"}).Error; err != nil {
+	if err := e.svc.projectRepo.Update(e.project); err != nil {
 		t.Fatalf("update project repo: %v", err)
 	}
 	records, err := e.review.ListReviewRecords(context.Background(), e.user.ID, e.project.ID, 10)

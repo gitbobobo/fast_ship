@@ -243,9 +243,9 @@ func (s *ReviewService) findEnabledProjectByRepoTx(tx *gorm.DB, repoFullName str
 }
 
 // findEnabledReviewProjectTx 按仓库全名（大小写不敏感）找到启用审查的项目
-// 及其设置；无命中返回 (nil, nil, nil)。只按设置行的 repo_full_name 快照反查
-// ——enabled 行的快照列是唯一真相（项目行改仓库会刷新它），代码仓库与公开
-// 仓库分离后项目行的 live 字段不再可靠。
+// 及其设置；无命中返回 (nil, nil, nil)。按设置行的 repo_full_name 快照反查：
+// 同仓库唯一索引建在这一列上，判定与约束用同一列；快照与项目行 live 值由
+// ProjectRepository.Update 同事务保持一致（读取口径见 docs/internal/reviews.md）。
 func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName string) (*model.Project, *model.ProjectReviewSettings, error) {
 	owner, repo, ok := strings.Cut(repoFullName, "/")
 	if !ok || owner == "" || repo == "" {

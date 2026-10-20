@@ -210,6 +210,14 @@ func TestListReviewProjects_TakenBy(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
+	// 我的项目没有开启（停用）但保存过设置：最近状态按这条设置行的快照挑账本。
+	if err := svc.db.Create(&model.ProjectReviewSettings{
+		ProjectID: myProject.ID, UserID: me.ID, RepoFullName: "octo/repo", Enabled: false,
+		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
+		CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
 	createTestReviewPR(t, svc.db, me.ID, myProject.ID, "octo/repo", 7, 1)
 
 	rs, _ := readyReviewService(t, svc)
@@ -248,6 +256,14 @@ func TestListReviewProjects_StatusIgnoresHistoricalRepo(t *testing.T) {
 		p.GithubRepo = "new"
 	})
 	now := time.Now().UTC()
+	// 当前审查仓库由设置行的 repo_full_name 决定（停用也保留设置行）。
+	if err := svc.db.Create(&model.ProjectReviewSettings{
+		ProjectID: project.ID, UserID: me.ID, RepoFullName: "octo/new", Enabled: false,
+		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
+		CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
 	// 旧仓库的记录更新时间更晚，也不能被选中。
 	if err := svc.db.Create(&model.ReviewPullRequest{
 		ProjectID: project.ID, RepoFullName: "octo/old", PRNumber: 1, UserID: me.ID,
@@ -276,5 +292,29 @@ func TestListReviewProjects_StatusIgnoresHistoricalRepo(t *testing.T) {
 	}
 	if got.VisualStatus != nil {
 		t.Fatalf("visual_status = %v, 旧仓库记录不应参与展示", *got.VisualStatus)
+	}
+}
+
+// 总览的最近状态只按设置行快照挑账本：没有设置行的项目不可能有账本（开轮要求
+// 设置行存在），即使库里有残留账本也不拿来当最近状态。
+func TestListReviewProjects_StatusRequiresSettingsRow(t *testing.T) {
+	svc := setupTestServices(t)
+	me := createTestUser(t, svc.db, "overview-no-settings")
+	project := createTestProject(t, svc.db, me.ID, func(p *model.Project) {
+		p.GithubOwner = "octo"
+		p.GithubRepo = "repo"
+	})
+	createTestReviewPR(t, svc.db, me.ID, project.ID, "octo/repo", 3, 1)
+
+	rs, _ := readyReviewService(t, svc)
+	items, err := rs.ListReviewProjects(context.Background(), me.ID)
+	if err != nil {
+		t.Fatalf("ListReviewProjects: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	if got := items[0]; got.CodeStatus != nil || got.LastReviewAt != nil {
+		t.Fatalf("无设置行时最近状态应留空, got %+v", got)
 	}
 }
