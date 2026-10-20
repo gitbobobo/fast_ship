@@ -807,3 +807,50 @@ func TestBotInt136RunRejectedWhenTaskChangedAfterAccept(t *testing.T) {
 		t.Fatalf("任务已改时不应启动运行，实得 %d", n)
 	}
 }
+
+// delete 的修订冲突要原样透传业务错误（40001「任务在确认期间被修改」），不能
+// 被事务收尾折成内部错误——否则用户看不到「请重新查看后再操作」。
+func TestBotInt136DeleteRevisionConflictPropagates(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136delrev")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	stale := task.UpdatedAt.UTC().Format(time.RFC3339Nano)
+	// 改动任务，制造「受理之后被改过」。
+	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", "改过的指令", nil, nil, ""); err != nil {
+		t.Fatalf("update task: %v", err)
+	}
+	err := env.bots.deleteScheduleTask(bot.ID, task.ID, stale)
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code ||
+		!strings.Contains(appErr.Message, "确认期间被修改") {
+		t.Fatalf("删除的修订冲突应透传 40001: %v", err)
+	}
+	// 未删除。
+	if _, err := env.bots.schedTasks.FindByID(task.ID); err != nil {
+		t.Fatalf("冲突时不应删除任务: %v", err)
+	}
+}
+
+// 受理时目标任务读不到（不存在）要精确报 40429，并让调用失败、不建确认卡。
+func TestBotInt136AcceptMissingTaskRejected(t *testing.T) {
+	env := setupBotTestEnv(t,
+		fakeModelTurn{ToolCalls: []fakeModelToolCall{{
+			ID: "call-missing-run", Name: "fs_schedule", Args: `{"action":"run","task_id":"missing"}`,
+		}}},
+		fakeModelTurn{Text: "好"},
+	)
+	userID := createBotTestUser(t, env.db, "int136missing")
+	bot := env.createBot(t, userID)
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "跑一下", ClientMessageID: "m1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForBot(t, "调用失败", 15*time.Second, func() bool {
+		calls, _ := env.bots.ListCalls(userID, bot.ID, nil, 5)
+		return len(calls) == 1 && calls[0].Status == "failed"
+	})
+	calls, _ := env.bots.ListCalls(userID, bot.ID, nil, 5)
+	if calls[0].ErrorCode == nil || *calls[0].ErrorCode != "e40429" {
+		t.Fatalf("应回 40429（任务不存在）: %+v", calls[0])
+	}
+}

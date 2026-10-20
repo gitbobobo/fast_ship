@@ -339,6 +339,11 @@ describe("BotConfirmationCard", () => {
       expect(
         within(card).queryByRole("button", { name: "始终允许" }),
       ).not.toBeInTheDocument();
+      // 提示文案里的动作名要跟着动作走（enable/delete 不能写成「修改」）。
+      const label = action === "enable" ? "启用" : "删除";
+      expect(
+        summary.getByText(new RegExp(`${label}任务不支持「始终允许」`)),
+      ).toBeInTheDocument();
     },
   );
 

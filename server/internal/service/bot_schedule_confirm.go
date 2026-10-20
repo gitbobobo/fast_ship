@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"gorm.io/gorm"
 )
 
 // fs_schedule 的确认受理（INT-136）：哪些动作需要确认、受理期校验、确认卡的
@@ -148,7 +150,7 @@ type botScheduleCallPreview struct {
 // 受理与执行之间任务被删的，执行期会以 40429 失败）。update 的预览按「未提供
 // 则保留原值」合并 cron/timezone/model 后计算，让用户在卡上看到的是生效后的
 // 配置而不是增量。list/delete/runs/enable/disable 等同步动作不设范围与预览。
-func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage) {
+func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedCall, raw map[string]json.RawMessage) error {
 	switch prepared.Action {
 	case "create":
 		prepared.ScopeKind = botScopeScheduleTaskCollection
@@ -158,9 +160,9 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 	case "update":
 		prepared.ScopeKind = botScopeScheduleTask
 		prepared.FieldsConstraint = presentFields(raw, "name", "cron", "timezone", "instruction", "model", "needs_report")
-		task, err := s.schedTasks.FindByIDAndBot(rawString(raw["task_id"]), bot.ID)
+		task, err := s.scheduleTargetTask(bot, rawString(raw["task_id"]))
 		if err != nil {
-			return
+			return err
 		}
 		prepared.ScopeID = task.ID
 		prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{
@@ -171,23 +173,32 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 			ModelPtr:       rawStringPtr(raw["model"]),
 			NeedsReportPtr: rawBoolPtr(raw["needs_report"]),
 		}, task)
-	case "run", "enable":
+	case "run", "enable", "delete":
+		// 这三个动作执行时只按 task_id 读库里的任务，确认卡展示的是那一刻的
+		// 配置；目标读不到（含瞬时读库错误）就当场失败，不留一张指向未知
+		// 目标、或把瞬时错误说成「任务不存在」的确认卡。
 		prepared.ScopeKind = botScopeScheduleTask
-		task, err := s.schedTasks.FindByIDAndBot(rawString(raw["task_id"]), bot.ID)
+		task, err := s.scheduleTargetTask(bot, rawString(raw["task_id"]))
 		if err != nil {
-			return
+			return err
 		}
 		prepared.ScopeID = task.ID
 		prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
-	case "delete":
-		// delete 也要范围（确认卡与授权都按单个任务绑定），但不给预览：
-		// 按钮批下去就是删掉这个任务，没有「生效配置」可看。
-		prepared.ScopeKind = botScopeScheduleTask
-		if task, err := s.schedTasks.FindByIDAndBot(rawString(raw["task_id"]), bot.ID); err == nil {
-			prepared.ScopeID = task.ID
-			prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
-		}
 	}
+	return nil
+}
+
+// scheduleTargetTask 取确认动作的目标任务：不存在回 40429，其它读库错误回
+// 内部错误（不合并成「目标不存在」）。
+func (s *BotService) scheduleTargetTask(bot *model.Bot, taskID string) (*model.BotScheduleTask, error) {
+	task, err := s.schedTasks.FindByIDAndBot(taskID, bot.ID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrBotScheduleTaskNotFound
+		}
+		return nil, errs.ErrInternal
+	}
+	return task, nil
 }
 
 // schedulePreviewInput 是 create/update 预览的参数增量：空串表示未提供（保留

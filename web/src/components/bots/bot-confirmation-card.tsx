@@ -11,6 +11,14 @@ const SCHEDULE_CONFIRM_ACTIONS = new Set(["create", "update", "run", "enable", "
 // 只有 run 可以「始终允许」（按任务绑定）；create/update/enable/delete 服务端
 // 也会拒绝，见 bot_authorization.go。
 const SCHEDULE_ALWAYS_ALLOW_ACTIONS = new Set(["run"]);
+// 授权提示里的动作名要与服务端口径一致（创建/修改/启用/删除），否则 enable/
+// delete 的卡片会写成「修改任务不支持始终允许」。
+const SCHEDULE_ACTION_LABELS: Record<string, string> = {
+  create: "创建",
+  update: "修改",
+  enable: "启用",
+  delete: "删除",
+};
 
 /**
  * fs_schedule 确认卡的生效配置摘要：任务一经批准，之后每次运行默认放行
@@ -88,7 +96,7 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
       <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
         批准即授权该任务以后每次运行默认放行写操作；任务运行中的写操作不会再向你确认。
         {!isRun &&
-          `${call.action === "create" ? "创建" : "修改"}任务不支持「始终允许」，每次都要确认。`}
+          `${SCHEDULE_ACTION_LABELS[call.action] ?? "修改"}任务不支持「始终允许」，每次都要确认。`}
       </p>
     </div>
   );

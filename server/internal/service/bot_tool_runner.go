@@ -87,7 +87,16 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			}
 		}
 		if entry.prepared != nil {
-			s.resolveCallScope(bot, prepared, tc.Arguments, &entry.execCtx)
+			if err := s.resolveCallScope(bot, prepared, tc.Arguments, &entry.execCtx); err != nil {
+				entry.invalidErr = err
+				entry.call.Status = model.BotCallStatusFailed
+				entry.call.FinishedAt = &now
+				entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
+				entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
+				entry.prepared = nil
+			}
+		}
+		if entry.prepared != nil {
 			if prepared.RequiresConfirmation {
 				// schedule 会话默认放行（INT-103）：直接排队执行，不建授权
 				// 记录、不等待确认；范围仍要求可解析（目标不明的调用按失败
@@ -283,7 +292,7 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 }
 
 // resolveCallScope 在受理时解析写操作范围并填充执行上下文；读操作不设范围。
-func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall, rawArguments string, execCtx *botCallExecContext) {
+func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall, rawArguments string, execCtx *botCallExecContext) error {
 	var raw map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(rawArguments), &raw)
 	execCtx.ScopeKind = prepared.ScopeKind
@@ -303,7 +312,9 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 			execCtx.EnvID = *prepared.EnvironmentID
 		}
 	case "fs_schedule":
-		s.resolveScheduleScope(bot, prepared, raw)
+		if err := s.resolveScheduleScope(bot, prepared, raw); err != nil {
+			return err
+		}
 	}
 	// scope 解析可能回填（issue→project），同步回执行上下文。
 	execCtx.ScopeKind = prepared.ScopeKind
@@ -311,6 +322,7 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 	execCtx.Fields = prepared.FieldsConstraint
 	execCtx.Param = prepared.ParamConstraint
 	execCtx.Schedule = prepared.SchedulePreview
+	return nil
 }
 
 // botRequireScope 写操作必须有可展示的具体范围，否则建卡失败。

@@ -586,6 +586,11 @@ func (s *BotService) deleteScheduleTask(botID, taskID, expectedUpdatedAt string)
 		return repository.NewBotScheduleTaskRepository(tx).Delete(botID, taskID)
 	})
 	if txErr != nil {
+		// 修订冲突（确认期间任务被改过）是正常业务拒绝，原样透传 40001，
+		// 不要收成内部错误——否则用户看不到「请重新查看后再操作」。
+		if appErr, ok := txErr.(*errs.AppError); ok {
+			return appErr
+		}
 		if errors.Is(txErr, gorm.ErrRecordNotFound) {
 			return errs.ErrBotScheduleTaskNotFound
 		}
