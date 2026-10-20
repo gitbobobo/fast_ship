@@ -459,21 +459,21 @@ func TestInt124SerializeSegmentSentPrefix(t *testing.T) {
 	rows := []model.BotMessage{mk(1, "第一条"), mk(2, "第二条"), mk(3, "第三条")}
 
 	// 不限预算：整段发出，max seq = 3。
-	full, maxSeq := serializeSegment(rows, 0)
+	full, maxSeq := serializeSegment(rows, 0, "")
 	if maxSeq != 3 || !strings.Contains(full, "第三条") {
 		t.Fatalf("不限预算应整段发出: maxSeq=%d full=%q", maxSeq, full)
 	}
 	// 每条序列化约 24 字节（"[seq N] user: 第一条\n"）：40 字节预算越过阈值时
 	// 第二条已写入、第三条未写入——发出的最大 seq 是 2。
-	text, sent := serializeSegment(rows, 40)
+	text, sent := serializeSegment(rows, 40, "")
 	if sent != 2 || !strings.Contains(text, "第二条") || strings.Contains(text, "第三条") {
 		t.Fatalf("40 字节预算应发出前两条: sent=%d text=%q", sent, text)
 	}
-	text, sent = serializeSegment(rows, 20)
+	text, sent = serializeSegment(rows, 20, "")
 	if sent != 1 || !strings.Contains(text, "第一条") || strings.Contains(text, "第二条") {
 		t.Fatalf("20 字节预算应只发出第一条: sent=%d text=%q", sent, text)
 	}
-	if text, sent := serializeSegment(nil, 100); text != "" || sent != 0 {
+	if text, sent := serializeSegment(nil, 100, ""); text != "" || sent != 0 {
 		t.Fatalf("空段应返回空正文与 0: %q %d", text, sent)
 	}
 }

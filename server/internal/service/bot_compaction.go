@@ -517,6 +517,11 @@ func (s *BotService) publishCompaction(bot *model.Bot, maintRun *model.BotMainte
 		if err := s.finishMaintenanceRunTx(tx, maintRun, model.BotMaintenanceSucceeded, "", ""); err != nil {
 			return err
 		}
+		// 快照放弃激活（例如 nonce 自愈失败）时不要在这里补激活：否则会把旧
+		// 提示词标成当前版本，规则 15 内嵌空 nonce、围栏渲染同时被关掉。
+		if !snap.NeedActivate && snap.PlatformPromptVersion < botPlatformPromptVersion {
+			return nil
+		}
 		// stale 判定传事务内读到的行水位，不用 bot 副本（理由见函数注释）。
 		return s.activateToolsetWithPromptTx(tx, bot.ID, fresh.ToolsetVersion, fresh.PlatformPromptVersion,
 			snap.SystemPromptText, snap.PromptRevision, publishAt)
@@ -840,7 +845,7 @@ func (s *BotService) estimatePlanTokens(bot *model.Bot, state *model.BotContextS
 			n += int64(len(ref))
 			continue
 		}
-		n += int64(len(serializeMessage(rows[i])))
+		n += int64(len(serializeMessage(rows[i], botProjectionNonce(bot))))
 	}
 	return botEstimateBytes(n)
 }
@@ -1152,7 +1157,7 @@ func (s *BotService) requestSummary(ctx context.Context, bot *model.Bot, maintRu
 	outBudget := s.summaryOutputBudget(bot, plan)
 	rules := botSummaryRules
 	sys := botSummarySysPrompt
-	blocks := summaryProtocolBlocks(plan.Segment)
+	blocks := summaryProtocolBlocks(plan.Segment, botProjectionNonce(bot))
 	acc := plan.State.SummaryText
 	bi := 0
 	var pending []string
@@ -1273,7 +1278,7 @@ func (s *BotService) summaryOutputBudget(bot *model.Bot, plan *botCompactionPlan
 	var tail int64
 	for i := range plan.AllRows {
 		if plan.AllRows[i].Seq > plan.ThroughSeq {
-			tail += int64(len(serializeMessage(plan.AllRows[i])))
+			tail += int64(len(serializeMessage(plan.AllRows[i], botProjectionNonce(bot))))
 		}
 	}
 	budget := plan.GoalTokens - botEstimateBytes(prefix+int64(len(manifest))+tail)
@@ -1283,7 +1288,7 @@ func (s *BotService) summaryOutputBudget(bot *model.Bot, plan *botCompactionPlan
 	return budget
 }
 
-func summaryProtocolBlocks(rows []model.BotMessage) []string {
+func summaryProtocolBlocks(rows []model.BotMessage, nonce string) []string {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -1317,7 +1322,7 @@ func summaryProtocolBlocks(rows []model.BotMessage) []string {
 				}
 			}
 		}
-		cur.WriteString(serializeMessage(rows[i]))
+		cur.WriteString(serializeMessage(rows[i], nonce))
 		if len(open) == 0 {
 			flushBlock()
 		}
@@ -1438,7 +1443,11 @@ var (
 	botIssueKeyRe = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,15}-\d+\b`)
 )
 
-func serializeMessage(row model.BotMessage) string {
+// serializeMessage 把一条账本消息序列化成辅助模型（摘要/归档）的输入文本。
+// nonce 非空时按模型输入出口的同一规则围栏：工具结果、后台结果与定时任务事件
+// 都是回流/外部文本，摘要模型也不该把它们当指令（否则一次注入可以借摘要进入
+// 主线上下文）。平台自有回执的豁免与工具结果一致。
+func serializeMessage(row model.BotMessage, nonce string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[seq %d] %s: ", row.Seq, string(row.Kind))
 	var text string
@@ -1459,7 +1468,14 @@ func serializeMessage(row model.BotMessage) string {
 	case model.BotMessageKindToolReply:
 		var c botToolReplyContent
 		if json.Unmarshal([]byte(row.ContentJSON), &c) == nil {
-			text = fmt.Sprintf("tool %s status=%s call_id=%s: %s", c.ToolName, c.Status, c.CallID, c.Content)
+			text = fmt.Sprintf("tool %s status=%s call_id=%s: %s",
+				c.ToolName, c.Status, c.CallID, botFenceToolResult(nonce, c.ToolName, c.Action, c.Content))
+		}
+	case model.BotMessageKindBackgroundResult, model.BotMessageKindScheduleEvent:
+		if nonce != "" {
+			text = botFenceUntrusted(nonce, "aux_input", row.ContentJSON)
+		} else {
+			text = row.ContentJSON
 		}
 	default:
 		text = row.ContentJSON
@@ -1472,11 +1488,11 @@ func serializeMessage(row model.BotMessage) string {
 // serializeSegment 按预算逐条序列化，超预算即停：返回正文与实际写进请求的
 // 最大 seq——预算截尾丢掉的只是尾部，水位只能推进到发出过的部分（INT-124）。
 // 一条都没写（rows 为空或 seq 全 0）时 sentMaxSeq 为 0。
-func serializeSegment(rows []model.BotMessage, maxChars int) (string, int64) {
+func serializeSegment(rows []model.BotMessage, maxChars int, nonce string) (string, int64) {
 	var b strings.Builder
 	var sentMaxSeq int64
 	for i := range rows {
-		b.WriteString(serializeMessage(rows[i]))
+		b.WriteString(serializeMessage(rows[i], nonce))
 		if rows[i].Seq > sentMaxSeq {
 			sentMaxSeq = rows[i].Seq
 		}
@@ -1820,7 +1836,7 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 
 func botToolsetChangeNote(from, to int64) string {
 	if to >= 8 && from < 8 {
-		note := "工具集已升级：fs_schedule 的 create、改动 instruction/needs_report/model 的 update、非 dry_run 的 run 需要用户确认并异步执行；批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；定时任务运行中不能 create/update/run 任务"
+		note := "工具集已升级：fs_schedule 的 create、改动 instruction/needs_report/model 的 update、非 dry_run 的 run、enable、delete 需要用户确认并异步执行（批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；enable 等于重新启用一个默认放行写操作的任务，delete 不可逆）；定时任务运行中不能 create/update/run/enable/disable/delete 任务"
 		if from < 7 {
 			note += "；fs_schedule 新增 state_get/state_set（任务跨运行保留的小状态，仅定时任务运行内可用，≤8192 UTF-8 字节，省略 state 即清空）"
 		}
@@ -1932,7 +1948,7 @@ func (s *BotService) runSilentArchive(ctx context.Context, bot *model.Bot, maint
 	// 截尾只可能发生在尾部：按预算序列化后取实际发出的最大 seq，水位推进、
 	// source_seq 白名单都以它为界——没发给模型的消息不得被标记为已归档，
 	// 否则重试整段会直接 already_archived、这些消息永远失去归档机会。
-	input, sentMaxSeq := serializeSegment(pending, tokenBudgetToBytes(inputBudget))
+	input, sentMaxSeq := serializeSegment(pending, tokenBudgetToBytes(inputBudget), botProjectionNonce(bot))
 	if sentMaxSeq == 0 {
 		s.recordArchiveResult(maintRun, "over_window", 0)
 		return

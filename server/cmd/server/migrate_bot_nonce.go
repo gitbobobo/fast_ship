@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/google/uuid"
@@ -40,7 +41,9 @@ func migrateBotUntrustedNonce(db *gorm.DB, logger *zap.Logger) error {
 func botMigrationNonce() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return uuid.NewString()
+		// 与 service.botNewNonce 同规格：32 位 hex（uuid 的连字符要去掉，
+		// 否则「32 位 hex」的口径在回退路径上漂移）。
+		return strings.ReplaceAll(uuid.NewString(), "-", "")
 	}
 	return hex.EncodeToString(b[:])
 }

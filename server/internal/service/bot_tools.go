@@ -1183,24 +1183,25 @@ var botActionRules = map[string]botActionRule{
 	"fs_schedule/status": {Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/list":   {Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/create": {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"}},
-	"fs_schedule/update": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/update": {Required: req("task_id"), Forbidden: []string{"dry_run", "state", "limit", "offset"}},
 	// delete 与 run/enable 同一口径：执行器只按 task_id 删，配置字段不生效，
 	// 放行会让确认卡的原始参数与审计账本出现一段从未生效的「指令」。
 	"fs_schedule/delete": {Required: req("task_id"), Forbidden: []string{
-		"dry_run", "state", "name", "cron", "timezone", "instruction", "model", "needs_report",
+		"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
 	}},
 	"fs_schedule/runs": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/run": {Required: req("task_id"), Forbidden: []string{
-		"state", "name", "cron", "timezone", "instruction", "model", "needs_report",
+		"state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
 	}},
 	// enable/delete 只按 task_id 改开关或删除，配置字段一概不生效——放行会让
 	// 确认卡展示一份无害配置、实际按库里的另一份执行（与 run 同一理由）。
 	"fs_schedule/enable": {Required: req("task_id"), Forbidden: []string{
-		"dry_run", "state", "name", "cron", "timezone", "instruction", "model", "needs_report",
+		"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
 	}},
-	"fs_schedule/disable":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/state_get": {Forbidden: []string{"task_id", "dry_run", "state"}},
-	"fs_schedule/state_set": {Forbidden: []string{"task_id", "dry_run"}},
+	"fs_schedule/disable":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state", "limit", "offset"}},
+	"fs_schedule/state_get": {Forbidden: []string{"task_id", "dry_run", "state", "limit", "offset"}},
+	// state_set 只收 state（其余字段——含分页——一律视为误用）。
+	"fs_schedule/state_set": {Forbidden: []string{"task_id", "dry_run", "limit", "offset"}},
 
 	"fs_memory/status":  {},
 	"fs_memory/list":    {},

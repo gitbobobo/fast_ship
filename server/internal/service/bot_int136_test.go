@@ -151,8 +151,11 @@ func TestBotInt136CreateConfirmedAsyncEndToEnd(t *testing.T) {
 	req3 := env.fake.nextRequest(t, 10*time.Second)
 	_ = req1
 	_ = req2
-	if !strings.Contains(string(req3.Body), "INT136晨报") || !strings.Contains(string(req3.Body), `"fs_schedule"`) {
-		t.Fatalf("确认后的模型请求应带后台结果: %.400s", req3.Body)
+	// 按 call_id 定位这条调用的后台终态消息：任务名/工具名在历史与工具定义里
+	// 本来就有，不能证明后台结果真的进了上下文。
+	body := string(req3.Body)
+	if !strings.Contains(body, callID) || !strings.Contains(body, "background_result") {
+		t.Fatalf("确认后的模型请求应带该调用的后台结果: %.600s", body)
 	}
 	waitForBot(t, "主线收尾", 15*time.Second, func() bool { return env.botSettled(bot.ID) })
 }
@@ -883,5 +886,46 @@ func TestBotInt136ScopeFailureKeepsCallMetadata(t *testing.T) {
 	}
 	if call.ErrorCode == nil || *call.ErrorCode != "e40429" {
 		t.Fatalf("应回 40429: %+v", call.ErrorCode)
+	}
+}
+
+// 分页参数对「只按 task_id 的动作」同样不生效：放行会让确认卡的原始参数里出现
+// 从未生效的字段（INT-136 不变量审计）。
+func TestBotInt136PagingParamsRejectedWhereIgnored(t *testing.T) {
+	ts := botToolsetVersionOf(8)
+	for _, action := range []string{"run", "enable", "delete", "update", "disable", "state_get", "state_set"} {
+		args := `{"action":"` + action + `","task_id":"t1","limit":10}`
+		if _, err := botPrepareToolCall(ts, "fs_schedule", args); err == nil {
+			t.Fatalf("%s 带 limit 应被拒绝: %s", action, args)
+		}
+		args = `{"action":"` + action + `","task_id":"t1","offset":1}`
+		if _, err := botPrepareToolCall(ts, "fs_schedule", args); err == nil {
+			t.Fatalf("%s 带 offset 应被拒绝: %s", action, args)
+		}
+	}
+	// list/runs 的分页仍然有效。
+	if _, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"list","limit":10,"offset":5}`); err != nil {
+		t.Fatalf("list 应接受分页: %v", err)
+	}
+	if _, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"runs","task_id":"t1","limit":10}`); err != nil {
+		t.Fatalf("runs 应接受分页: %v", err)
+	}
+}
+
+// dry_run 预览是只读：新输入到达时它应当执行完，而不是被标成 not_executed。
+func TestBotInt136DryRunIsReadOnly(t *testing.T) {
+	dry := &model.BotToolCall{
+		ToolName: "fs_schedule", Action: "run",
+		ExecutionMode: string(model.BotExecutionSync), ArgumentsJSON: `{"action":"run","task_id":"t1","dry_run":true}`,
+	}
+	if !botCallIsReadOnly(dry) {
+		t.Fatalf("dry_run 预览应视为只读")
+	}
+	real := &model.BotToolCall{
+		ToolName: "fs_schedule", Action: "run",
+		ExecutionMode: string(model.BotExecutionSync), ArgumentsJSON: `{"action":"run","task_id":"t1"}`,
+	}
+	if botCallIsReadOnly(real) {
+		t.Fatalf("真实 run 不应视为只读")
 	}
 }

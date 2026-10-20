@@ -208,7 +208,7 @@ func expectedSummaryBatchesForPlan(t *testing.T, env *botTestEnv, botRow *model.
 	}
 	auxWindow := env.cfg.Bots.Context.WindowTokensFor(modelName)
 	outBudget := env.bots.summaryOutputBudget(botRow, plan)
-	blocks := summaryProtocolBlocks(plan.Segment)
+	blocks := summaryProtocolBlocks(plan.Segment, "")
 	sys, rules := botSummarySysPrompt, botSummaryRules
 	acc := plan.State.SummaryText
 	bi := 0
@@ -2532,7 +2532,7 @@ func TestBotSummarySerializedCostShrink(t *testing.T) {
 	if inputBudget < 32 {
 		t.Fatalf("本场景 inputBudget 过小: %d", inputBudget)
 	}
-	blocks := summaryProtocolBlocks(plan.Segment)
+	blocks := summaryProtocolBlocks(plan.Segment, "")
 	fullPiece := shardSummaryBlock(blocks[0], inputBudget)[0]
 	over0 := botSerializedInputTokens(summaryBatchMessages(botSummarySysPrompt, botSummaryRules, accSection, 1, fullPiece)) + reqOut - auxWindow
 	if over0 <= inputBudget {

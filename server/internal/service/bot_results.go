@@ -165,16 +165,12 @@ func (s *BotService) execResultRead(call *model.BotToolCall) (string, error) {
 	if end > total {
 		end = total
 	}
-	// 续读切片按同一出口规则围栏（INT-136）：结果正文是工具回流的文本，切片
-	// 单独进上下文时同样必须标明「只是数据」，不能靠「原结果里有没有围栏」来
-	// 嗅探。豁免与工具结果一致（fs_result 自己在这条通道上）。nonce 读不到就
-	// 失败，不降级成裸文本。
+	// 续读切片一律包围栏（INT-136）：结果正文是工具回流的文本，切片单独进
+	// 上下文时同样必须标明「只是数据」——不按目标工具豁免，否则再次续读某个
+	// 已保存结果时能切出没有完整内层围栏的裸文本。nonce 读不到就失败，不降级。
 	fenceNonce, nonceErr := s.botNonceOf(call.BotID)
 	if nonceErr != nil {
 		return "", nonceErr
-	}
-	if botResultFenceExemptTools[target.ToolName+"/"+target.Action] {
-		fenceNonce = ""
 	}
 	// 读取体必须整体落在预算内：否则它自己会被通用截断逻辑再截一次，
 	// 而模型按 next_offset 继续读时就会跳过一段永远没人看过的内容。

@@ -483,8 +483,16 @@ func TestBotInt136FenceCompactionPublishActivates(t *testing.T) {
 		t.Fatalf("rebuild: %v", err)
 	}
 	raw, _ := json.Marshal(built.Request.Messages)
-	if !strings.Contains(string(raw), "nonce="+nonce) {
-		t.Fatalf("同一 run 内应已换用带 nonce 的新渲染")
+	var elems []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		t.Fatalf("decode messages: %v", err)
+	}
+	runtime := elems[len(elems)-1].Content
+	if !strings.HasPrefix(runtime, "[运行时上下文 nonce="+nonce+"]\n") {
+		t.Fatalf("同一 run 的运行时上下文应已换用带 nonce 的前缀: %q", runtime)
 	}
 }
 
@@ -621,7 +629,8 @@ func TestBotInt136FenceResultContinuation(t *testing.T) {
 		t.Fatalf("切片内容与说明不符: %+v", payload)
 	}
 
-	// 豁免动作（记忆读取）的续读保持原样。
+	// 续读切片一律包围栏：不按目标工具豁免，否则再次续读某个已保存结果时
+	// 能切出没有完整内层围栏的裸文本。记忆读取的续读同样包围栏。
 	mem := `{"content":"笔记内容"}`
 	_, memCallID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusSucceeded, string(model.BotExecutionSync))
 	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", memCallID).
@@ -641,8 +650,9 @@ func TestBotInt136FenceResultContinuation(t *testing.T) {
 	if err := json.Unmarshal([]byte(out2), &payload2); err != nil {
 		t.Fatalf("decode2: %v %s", err, out2)
 	}
-	if payload2.Content != mem[:8] {
-		t.Fatalf("豁免动作的续读不应被包装: %q", payload2.Content)
+	memFence := `<untrusted_data nonce="` + nonce + `" source="result_continuation">` + mem[:8] + `</untrusted_data>`
+	if payload2.Content != memFence {
+		t.Fatalf("续读切片应一律包围栏: %q", payload2.Content)
 	}
 }
 
@@ -652,23 +662,34 @@ func TestBotInt136FenceNonceLookupFailsClosed(t *testing.T) {
 	if _, err := env.bots.botNonceOf("missing-bot"); err == nil {
 		t.Fatalf("读不到机器人时 botNonceOf 应报错")
 	}
-	// 续读通道用同一个 helper：读不到 nonce 时 execResultRead 返回错误而不是
-	// 裸切片（结果正文来自工具回流，不能降级）。
+	// nonce 为空的行（迁移未跑到的过渡态）按「围栏未启用」渲染：续读返回裸
+	// 切片，与渲染闸门一致；这是显式断言，不是「成功失败都过」。
 	userID := createBotTestUser(t, env.db, "int136nofence")
 	bot := env.createBot(t, userID)
-	env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Update("untrusted_nonce", "")
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).
+		Update("untrusted_nonce", "").Error; err != nil {
+		t.Fatalf("clear nonce: %v", err)
+	}
 	_, callID := seedBotCallFixture(t, env, bot.ID, model.BotCallStatusSucceeded, string(model.BotExecutionSync))
 	if err := env.db.Model(&model.BotToolCall{}).Where("id = ?", callID).
 		Update("result_json", `{"body":"外部正文"}`).Error; err != nil {
 		t.Fatalf("seed result: %v", err)
 	}
-	if _, err := env.bots.execResultRead(&model.BotToolCall{
+	out, err := env.bots.execResultRead(&model.BotToolCall{
 		ID: uuid.NewString(), BotID: bot.ID,
 		ArgumentsJSON: `{"action":"read","call_id":"` + callID + `","offset":0,"limit":10}`,
-	}); err != nil {
-		// nonce 为空字符串时 helper 返回空 nonce（未回填）而不是错误，续读按
-		// 未启用渲染——这是迁移未跑到的状态，与渲染闸门一致。
-		t.Logf("nonce 为空时续读按未启用渲染: %v", err)
+	})
+	if err != nil {
+		t.Fatalf("空 nonce 时续读应按未启用渲染: %v", err)
+	}
+	var page struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(out), &page); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if strings.Contains(page.Content, "<untrusted_data") {
+		t.Fatalf("空 nonce 时不应包围栏: %q", page.Content)
 	}
 }
 

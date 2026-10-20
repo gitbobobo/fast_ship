@@ -357,6 +357,8 @@ describe("BotConfirmationCard", () => {
             name: "每日巡检",
             cron_expression: "0 9 * * *",
             timezone: "Asia/Shanghai",
+            instruction: "检查各项目未关闭的问题，逐条用中文汇报。",
+            needs_report: false,
             next_run_at: "2026-10-21 09:00:00 CST",
             next_run_at_utc: "2026-10-21T01:00:00Z",
             effective_model: "gpt-5.1",
@@ -374,14 +376,19 @@ describe("BotConfirmationCard", () => {
       within(summary).getByText("2026-10-21 09:00:00 CST"),
     ).toBeInTheDocument();
     expect(within(summary).getByText("gpt-5.1")).toBeInTheDocument();
-    // run 没有 instruction 字段行；needs_report 快照没给时占位。
-    expect(within(summary).queryByText("指令")).not.toBeInTheDocument();
-    expect(within(summary).getByText("需要汇报")).toBeInTheDocument();
+    // run 的指令来自服务端任务快照（就是这次要执行的内容），必须展示。
+    expect(within(summary).getByText("指令")).toBeInTheDocument();
     expect(
-      within(summary).getByText(
-        /批准即授权该任务以后每次运行默认放行写操作/,
-      ),
+      within(summary).getByText("检查各项目未关闭的问题，逐条用中文汇报。"),
     ).toBeInTheDocument();
+    expect(within(summary).getByText("需要汇报")).toBeInTheDocument();
+    // run 只执行一次：文案说清「这一次运行」而不是「以后每次运行」。
+    expect(
+      within(summary).getByText(/批准即立即执行一次该任务；这次运行里的写操作默认放行/),
+    ).toBeInTheDocument();
+    expect(
+      within(summary).queryByText(/以后每次运行默认放行/),
+    ).not.toBeInTheDocument();
     expect(
       within(summary).queryByText(/不支持「始终允许」/),
     ).not.toBeInTheDocument();

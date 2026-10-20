@@ -72,6 +72,14 @@ func (s *BotService) newScheduleSession(bot *model.Bot, run *model.BotRun) (*bot
 		}
 		return nil, errs.ErrInternal
 	}
+	// 手动 run 的确认卡批准的是受理时那一版：建 run 与加载会话之间若任务又被
+	// 改过，就按 task_changed 失败，避免拿旧授权跑新指令（cron 触发按最新配置
+	// 执行是预期语义，不受此限）。
+	if run.TriggerSource == model.BotTriggerManual {
+		if err := botScheduleRunRevisionChanged(run, task); err != nil {
+			return nil, err
+		}
+	}
 	var memory string
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		var txErr error
@@ -86,6 +94,26 @@ func (s *BotService) newScheduleSession(bot *model.Bot, run *model.BotRun) (*bot
 		toolset: botToolsetVersionOf(bot.ToolsetVersion),
 		memory:  memory,
 	}, nil
+}
+
+// botScheduleRunRevisionChanged 核对手动 run 的任务修订是否仍是受理时那一版。
+// 修订水位在建 run 的事务里写进 trigger context，与确认卡的 task_updated_at
+// 同源；两处不一致说明任务在受理之后被改过。
+func botScheduleRunRevisionChanged(run *model.BotRun, task *model.BotScheduleTask) error {
+	if run == nil || task == nil {
+		return nil
+	}
+	var ctx struct {
+		TaskUpdatedAt string `json:"task_updated_at"`
+	}
+	if err := json.Unmarshal([]byte(run.TriggerContextJSON), &ctx); err != nil || ctx.TaskUpdatedAt == "" {
+		return nil
+	}
+	if task.UpdatedAt.UTC().Format(time.RFC3339Nano) != ctx.TaskUpdatedAt {
+		return errs.New(errs.ErrInvalidParams.Code,
+			"任务在确认期间被修改，本次未执行：请重新查看任务配置后再操作")
+	}
+	return nil
 }
 
 // botScheduleRuntimeContext 是 schedule 会话末尾的运行时上下文：任务指令、
@@ -1077,6 +1105,8 @@ func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotSched
 			TriggerContextJSON: marshalJSONString(map[string]interface{}{
 				"task_id": current.ID, "task_name": current.Name,
 				"needs_report": current.NeedsReport, "trigger": "manual",
+				// 冻结受理时的任务修订：会话加载时核对，防止旧授权跑新指令。
+				"task_updated_at": current.UpdatedAt.UTC().Format(time.RFC3339Nano),
 			}),
 			CreatedAt: now,
 		}

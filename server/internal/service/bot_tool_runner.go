@@ -538,7 +538,18 @@ func botCallIsReadOnly(call *model.BotToolCall) bool {
 	if call.ExecutionMode != string(model.BotExecutionSync) {
 		return false
 	}
-	return botReadOnlyActions[call.ToolName+"/"+call.Action]
+	if botReadOnlyActions[call.ToolName+"/"+call.Action] {
+		return true
+	}
+	// fs_schedule/run 的 dry_run=true 是只读预览（不建运行、不执行），参数决定
+	// 语义：新输入到达时它应当执行完，而不是被标成 not_executed。
+	if call.ToolName == "fs_schedule" && call.Action == "run" {
+		var args botScheduleTaskArgs
+		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err == nil && args.DryRunBool() {
+			return true
+		}
+	}
+	return false
 }
 
 // botNotExecutedReplyText 是「调用未执行」的模型回复：与参数校验失败（40001）

@@ -20,6 +20,20 @@ const SCHEDULE_ACTION_LABELS: Record<string, string> = {
   delete: "删除",
 };
 
+// 每种动作批准后的后果不同：run 只执行一次、enable/创建/修改会授权以后的每次
+// 运行、delete 不可逆。卡片按动作说清后果，不要一句「以后每次运行都放行」套到
+// 所有动作上。
+const SCHEDULE_APPROVAL_HINTS: Record<string, string> = {
+  create:
+    "批准即授权该任务以后每次运行默认放行写操作；任务运行中的写操作不会再向你确认。",
+  update:
+    "批准即按上面的配置更新任务，之后每次运行默认放行写操作；任务运行中的写操作不会再向你确认。",
+  enable:
+    "批准即重新启用该任务：之后的每次运行都默认放行写操作，不会再向你确认。",
+  delete: "批准即删除该任务，不可逆（运行记录保留）。",
+  run: "批准即立即执行一次该任务；这次运行里的写操作默认放行，不会再向你确认。",
+};
+
 /**
  * fs_schedule 确认卡的生效配置摘要：任务一经批准，之后每次运行默认放行
  * 写操作，确认前必须看清指令全文与运行配置。
@@ -94,8 +108,9 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
         </div>
       )}
       <p className="text-xs font-medium text-amber-700 dark:text-amber-400">
-        批准即授权该任务以后每次运行默认放行写操作；任务运行中的写操作不会再向你确认。
-        {!isRun &&
+        {SCHEDULE_APPROVAL_HINTS[call.action] ??
+          "批准即按上面的配置生效，请确认无误。"}
+        {!SCHEDULE_ALWAYS_ALLOW_ACTIONS.has(call.action) &&
           `${SCHEDULE_ACTION_LABELS[call.action] ?? "修改"}任务不支持「始终允许」，每次都要确认。`}
       </p>
     </div>
