@@ -647,5 +647,16 @@ func cancelProjectReviewRunsTx(tx *gorm.DB, projectID, code string, now time.Tim
 			return err
 		}
 	}
-	return tx.Where("project_id = ?", projectID).Delete(&model.ReviewDebounce{}).Error
+	if err := tx.Where("project_id = ?", projectID).Delete(&model.ReviewDebounce{}).Error; err != nil {
+		return err
+	}
+	// 推进 epoch 并清 pending：停用/换仓库时若同步正在进行，旧快照不能在
+	// 停用之后继续发布或创建视觉运行。
+	return tx.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ?", projectID).
+		Updates(map[string]any{
+			"sync_pending": false,
+			"sync_epoch":   gorm.Expr("sync_epoch + 1"),
+			"updated_at":   now,
+		}).Error
 }

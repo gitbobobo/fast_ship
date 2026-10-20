@@ -601,10 +601,17 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 review 列表失败: "+err.Error())
 	}
-	posted := map[string]int64{} // summary -> review id
+	posted := map[string][]int64{} // summary -> review ids（旧评论没有运行标记时的兜底）
+	postedByRun := map[string]int64{}
 	for _, rev := range existing {
-		if strings.EqualFold(rev.CommitID, ledger.HeadSHA) && rev.Body != "" {
-			posted[rev.Body] = rev.ID
+		if !strings.EqualFold(rev.CommitID, ledger.HeadSHA) {
+			continue
+		}
+		if id := reviewRunMarkerID(rev.Body); id != "" {
+			postedByRun[id] = rev.ID
+		}
+		if rev.Body != "" {
+			posted[rev.Body] = append(posted[rev.Body], rev.ID)
 		}
 	}
 	diff, err := client.GetPullRequestDiff(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
@@ -637,10 +644,25 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 				})
 			}
 		}
-		if id, ok := posted[r.Summary]; ok && r.Summary != "" {
+		if id, ok := postedByRun[r.ID]; ok {
 			s.db.Model(&model.ReviewRun{}).Where("id = ?", r.ID).
 				Updates(map[string]any{"posted_at": now, "review_id": id, "updated_at": now})
 			continue
+		}
+		// 兼容没有运行标记的旧 review：同一 summary 只对应一条待发运行时才认领，
+		// 否则无法区分是哪个组合的（宁可重发也不吞掉另一个组合的意见）。
+		if ids := posted[r.Summary]; r.Summary != "" && len(ids) == 1 {
+			pendingWithSummary := 0
+			for _, other := range pending {
+				if other.Summary == r.Summary {
+					pendingWithSummary++
+				}
+			}
+			if pendingWithSummary == 1 {
+				s.db.Model(&model.ReviewRun{}).Where("id = ?", r.ID).
+					Updates(map[string]any{"posted_at": now, "review_id": ids[0], "updated_at": now})
+				continue
+			}
 		}
 		var reviewID int64
 		if len(comments) > 0 {
@@ -652,7 +674,10 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 				return nil
 			}
 			id, err := client.SubmitReview(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber,
-				githubapi.ReviewInput{Event: "COMMENT", Body: r.Summary, CommitID: ledger.HeadSHA, Comments: comments})
+				githubapi.ReviewInput{
+					Event: "COMMENT", CommitID: ledger.HeadSHA, Comments: comments,
+					Body: r.Summary + reviewRunMarker(r.ID),
+				})
 			if err != nil {
 				return errs.New(errs.ErrGitHubAPI.Code, "提交行内 review 失败: "+err.Error())
 			}
@@ -662,6 +687,27 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 			Updates(map[string]any{"posted_at": now, "review_id": reviewID, "updated_at": now})
 	}
 	return nil
+}
+
+// reviewRunMarker 行内 review 的运行标记：响应丢失后下一轮按运行 id 对账，
+// 避免同 summary 的多个组合互相吞掉。
+func reviewRunMarker(runID string) string {
+	return "\n\n<!-- fast-ship-review-run:" + runID + " -->"
+}
+
+// reviewRunMarkerID 从 review 正文里取运行 id；没有标记返回空串。
+func reviewRunMarkerID(body string) string {
+	const prefix = "<!-- fast-ship-review-run:"
+	start := strings.Index(body, prefix)
+	if start < 0 {
+		return ""
+	}
+	rest := body[start+len(prefix):]
+	end := strings.Index(rest, " -->")
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // parseDiffRightLines 解析 unified diff：返回每个文件在 HEAD 右侧可被行内

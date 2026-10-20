@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -628,7 +629,7 @@ func TestReviewInlineReviewReconcilesLostResponse(t *testing.T) {
 		RepoFullName: repo, Number: 72, HeadSHA: "sha-r",
 		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
 	})
-	e.fake.SetDiff("@@ -1,1 +1,2 @@\n a\n+b\n")
+	e.fake.SetDiff("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,1 +1,2 @@\n a\n+b\n")
 	run := e.seedRunWithFindings(t, repo, 72, "sha-r", now)
 	// 模拟上一轮已提交同一 review，但 posted_at 没写回。
 	if _, err := e.fake.SubmitReview(context.Background(), 1, repo, 72, githubapi.ReviewInput{
@@ -654,5 +655,141 @@ func TestReviewInlineReviewReconcilesLostResponse(t *testing.T) {
 	e.svc.db.First(&after, "id = ?", run.ID)
 	if after.PostedAt == nil || after.ReviewID == 0 {
 		t.Fatalf("posted_at/review_id = %v/%d, want 已认领", after.PostedAt, after.ReviewID)
+	}
+}
+
+// 记录页运行按 (repo, pr) 精确匹配：项目换仓库后 A/B 同号 PR 不混轮次。
+func TestListReviewRecordsScopesRunsByRepo(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	now := time.Now().UTC()
+	for _, repo := range []string{"oldowner/repo", "newowner/repo"} {
+		if err := e.svc.db.Create(&model.ReviewPullRequest{
+			ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 1,
+			UserID: e.user.ID, HeadSHA: "sha-" + repo, RoundNumber: 1, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed ledger: %v", err)
+		}
+		e.seedRun(t, repo, 1, "sha-"+repo, model.ReviewRunCompleted, now)
+	}
+	records, err := e.review.ListReviewRecords(context.Background(), e.user.ID, e.project.ID, 10)
+	if err != nil {
+		t.Fatalf("list records: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2", len(records))
+	}
+	for _, rec := range records {
+		for _, round := range rec.Rounds {
+			for _, run := range append(append([]api.ReviewRunSummary{}, round.CodeRuns...), round.VisualRuns...) {
+				if run.EnvironmentId == "" {
+					t.Fatalf("run 缺少环境: %+v", run)
+				}
+			}
+		}
+		// 每个记录的运行仓库必须与记录一致。
+		var count int64
+		e.svc.db.Model(&model.ReviewRun{}).
+			Where("repo_full_name = ? AND pr_number = ?", rec.RepoFullName, rec.PrNumber).
+			Count(&count)
+		if count != 1 {
+			t.Fatalf("record %s runs = %d, want 1（不应混入另一仓库）", rec.RepoFullName, count)
+		}
+	}
+}
+
+// disableOnPRClient 在读 PR 时停用审查：模拟同步进行中用户关闭开关。
+type disableOnPRClient struct {
+	githubapi.GitHubClient
+	db        *gorm.DB
+	projectID string
+	done      bool
+}
+
+func (c *disableOnPRClient) GetPullRequest(ctx context.Context, inst int64, repo string, number int) (*githubapi.PullRequest, error) {
+	if !c.done {
+		c.done = true
+		if err := c.db.Model(&model.ProjectReviewSettings{}).
+			Where("project_id = ?", c.projectID).Update("enabled", false).Error; err != nil {
+			return nil, err
+		}
+	}
+	return c.GitHubClient.GetPullRequest(ctx, inst, repo, number)
+}
+
+// 同步进行中被停用：不再创建视觉运行。
+func TestCreateVisualRunsStopsWhenDisabled(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 81, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 81, HeadSHA: "sha-v",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	combos, _ := marshalCombinations([]api.ReviewCombination{testCombo("env-v")})
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = combos
+	})
+	run := e.seedRun(t, repo, 81, "sha-v", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Update("summary", "干净")
+	e.svc.db.Model(run).Update("result_json",
+		`{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`)
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 81, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-v", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+	review := NewReviewService(e.svc.db, e.svc.projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
+		NewNotificationSink(e.svc.db),
+		githubapp.StaticClients{Client: &disableOnPRClient{GitHubClient: e.fake, db: e.svc.db, projectID: e.project.ID}},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"),
+		nil, nil, nil, e.svc.cfg, zap.NewNop())
+	review.syncPendingPRs(now)
+
+	var visual int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("kind = ?", model.ReviewKindVisual).Count(&visual)
+	if visual != 0 {
+		t.Fatalf("停用后不应创建视觉运行，got %d", visual)
+	}
+}
+
+// 同 summary 的两个组合对账按运行标记区分：只认领属于自己的 review。
+func TestReviewInlineReviewReconcileByRunMarker(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 82, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 82, HeadSHA: "sha-m",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.fake.SetDiff("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,1 +1,2 @@\n a\n+b\n")
+	run1 := e.seedRunWithFindings(t, repo, 82, "sha-m", now)
+	run2 := e.seedRunWithFindings(t, repo, 82, "sha-m", now)
+	// 上一轮成功提交了 run1 的 review（带标记），但 posted_at 没写回。
+	if _, err := e.fake.SubmitReview(context.Background(), 1, repo, 82, githubapi.ReviewInput{
+		Event: "COMMENT", CommitID: "sha-m",
+		Body:     "有发现" + reviewRunMarker(run1.ID),
+		Comments: []githubapi.ReviewInlineComment{{Path: "a", Line: 2, Side: "RIGHT", Body: "P1：问题"}},
+	}); err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	e.svc.db.Model(run1).Update("posted_at", nil)
+	e.svc.db.Model(run2).Update("posted_at", nil)
+	e.enableReview(t)
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 82, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-m", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+
+	e.review.syncPendingPRs(now)
+
+	if got := len(e.fake.ReviewEvents(repo)); got != 2 {
+		var r1, r2 model.ReviewRun
+		e.svc.db.First(&r1, "id = ?", run1.ID)
+		e.svc.db.First(&r2, "id = ?", run2.ID)
+		t.Fatalf("reviews = %d, want 2（另一组合仍要提交自己的行内意见）r1=%v/%v/%q r2=%v/%v/%q inputs=%d",
+			got, r1.PostedAt, r1.ReviewID, r1.ResultJSON, r2.PostedAt, r2.ReviewID, r2.ResultJSON, len(e.fake.ReviewInputs()))
 	}
 }

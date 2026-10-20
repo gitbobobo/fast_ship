@@ -201,13 +201,15 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 		return out, nil
 	}
 
-	prNumbers := make([]int, 0, len(prs))
+	// 运行按 (repo, pr) 精确匹配：项目换过仓库时，A 与 B 可能有同号 PR，
+	// 只按 pr_number 取运行会把两个仓库的轮次/线程混进同一条记录。
+	keys := make([]string, 0, len(prs))
 	for _, pr := range prs {
-		prNumbers = append(prNumbers, pr.PRNumber)
+		keys = append(keys, pr.RepoFullName+"#"+strconv.Itoa(pr.PRNumber))
 	}
 	var runs []model.ReviewRun
 	if err := s.db.WithContext(ctx).
-		Where("project_id = ? AND pr_number IN ?", projectID, prNumbers).
+		Where("project_id = ? AND (repo_full_name || '#' || pr_number) IN ?", projectID, keys).
 		Order("created_at ASC").
 		Find(&runs).Error; err != nil {
 		return nil, errs.ErrInternal
