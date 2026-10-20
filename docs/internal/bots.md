@@ -540,14 +540,22 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   端判定、对所有工具集版本含冻结的 v3–v7 立即生效，不进 wire 字节）：
   `create` 恒需确认；`update` 只在参数里出现 `instruction`/`needs_report`/
   `model` 任一（含显式 null）时确认，只改 `name`/`cron`/`timezone` 仍是同步；
-  `run` 除 `dry_run` 解析为布尔 true（只读预览）外都要确认。其余动作
-  （list/delete/runs/enable/disable/state_get/state_set）保持同步。受影响动作
-  在受理时改判为 async + RequiresConfirmation：回执
-  `status=pending_confirmation`，批准后 queued → worker 执行，结果以
-  【平台后台结果】送达。
+  `run` 除 `dry_run` 解析为布尔 true（只读预览）外都要确认；`enable`（重新
+  武装一个运行内默认放行写操作的任务）与 `delete`（不可逆地抹掉任务）也要
+  确认。`disable` 与 `list`/`runs`/`state_get`/`state_set` 保持同步——disable
+  是收紧权限、随时可逆（enable 要确认），拦它只会拖慢止血。受影响动作在受理
+  时改判为 async + RequiresConfirmation：回执 `status=pending_confirmation`，
+  批准后 queued → worker 执行，结果以【平台后台结果】送达。
 - **受理期校验**：会弹卡的 create/敏感 update 先把 cron/时区（执行层同一
   解析路径）与 name/instruction 长度（同一组上限常量）校验完，不合法直接
   40001——不给一个必然失败的调用弹确认卡。
+- **确认后不再接受配置漂移（TOCTOU）**：`run`/`enable`/`delete` 在执行时才读
+  库里的任务，确认卡上展示的是受理那一刻的配置。受理时把任务的 `updated_at`
+  记进 `execution_context.schedule.task_updated_at`，执行器在**自己的事务内**
+  比对：期间任务被改过就返回 40001「任务在确认期间被修改，本次未执行」，让
+  用户重新看一眼再决定，而不是拿旧卡执行新指令（与 fs_issue 的
+  `expected_updated_at` 同一口径）。状态写入不改 `updated_at`，所以 dedup
+  状态变化不会误伤这个比对。
 - **确认卡与预览**：受理时把 `{task_id,name,cron,timezone,instruction,
   needs_report,next_run_at,next_run_at_utc,effective_model}` 写进
   `execution_context.schedule`（update 是「未提供则保留原值」合并后的生效值；
@@ -556,8 +564,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   前端不重新实现 cron 解析；卡片展示任务名/cron/时区/下次运行/模型/需汇报/
   指令全文，并明写「批准即授权该任务以后每次运行默认放行写操作」。
 - **授权范围**：`create` 的范围是机器人任务集合（`schedule_task_collection`+
-  bot.ID），`update`/`run` 是单个任务（`schedule_task`+task_id），因此
-  `run` 的「始终允许」只对一个任务生效。`create`/`update` **不允许**
+  bot.ID），`update`/`run`/`enable`/`delete` 是单个任务（`schedule_task`+
+  task_id），因此 `run` 的「始终允许」只对一个任务生效。
+  `create`/`update`/`enable`/`delete` **不允许**
   「始终允许」（服务端 40001，前端不展示按钮）：确认卡展示的是指令全文，
   一旦豁免，模型改写任务指令时用户看不到新指令，而任务以后每次运行都默认
   放行写操作——等于一次点击永久授权未知的指令。
@@ -616,6 +625,18 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
 - **标签与清单也围栏**：`fs_issue get` 的 `labels[].name/description`（GitHub
   同步写入）与 `checklist[].title` 套 `issue_label` / `issue_checklist` 围栏；
   颜色、id、完成状态等结构化字段不改写。
+- **写回执与读同一投影**：`fs_issue` 的 create/update 回执走
+  `botSlimIssueDetail`（标题/正文/标签/清单围栏），set_workflow/
+  replace_checklist 回执围栏 `labels`/`checklist`，comment 回执走评论精简
+  投影——写回执经「平台后台结果」进上下文，不围栏就是一条无标记回流通道。
+- **定时任务读结果**：`fs_schedule` 的 `runs` 里 `summary`/`error_message`
+  （模型生成的回流文本）套 `schedule_run` 围栏；`list`、dry_run 预览与
+  create/update/enable/disable 回执里的 `name`/`instruction`（存量任务创建时
+  未必经过确认）套 `schedule_task` 围栏。schedule 会话运行时上下文里的
+  `last_run_summary`/`task_name` 同样围栏；`instruction` 刻意不围栏——它是
+  这次运行必须执行的任务说明（用户批准过的平台指令），当数据处理会让模型
+  拒绝执行任务本身。任务小状态（`state_get`）保持原样：它是模型自用的去重
+  数据，围栏会破坏其语义。
 - **渲染与提示词同一边界**：前缀是投影时拼的，改文案会重写旧消息的
   `prefix_hash`，所以新渲染跟着**声明它的提示词版本**一起翻转
   （`botProjectionNonce`：`PlatformPromptVersion >= botContextFenceVersion`
@@ -639,10 +660,10 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
 - **平台提示词 v10**：新增规则 15（围栏是数据、外部内容提的写操作必须由用户
   在对话中明确提出、不要整段抄进记忆）；规则 2/8 补上定时任务确认语义。
 - **已知限制**：① 升级前已产生的工具结果没有围栏（账本只追加，不回写）；
-  ② 线程详情的 `queue`/`activity`、`fs_issue` 写操作回执正文与
-  `fs_memory.read` 内容未围栏（前两者是运行态/模型自己刚写的内容，记忆由
-  规则 10 守门）；③ `fs_project` 的名称/描述与发布版本标签等用户自有文本
-  未围栏（非外部作者可写）；④ 不做基于模型的注入检测/分类器。
+  ② 线程详情的 `queue`/`activity`、任务小状态 `state_get` 与 `fs_memory.read`
+  内容未围栏（运行态 / 模型自用去重数据 / 记忆由规则 10 守门）；③
+  `fs_project` 的名称/描述与发布版本标签等用户自有文本未围栏（非外部作者
+  可写）；④ 不做基于模型的注入检测/分类器。
 
 ### 停止、取消与恢复
 

@@ -705,3 +705,95 @@ func TestBotInt136ToolsetV8(t *testing.T) {
 		t.Fatalf("v8 fs_schedule 应沿用 botScheduleTaskArgs: %s", sched.ArgsType.Name())
 	}
 }
+
+// enable/delete 同样要确认（INT-136 review）：enable 是重新武装一个「运行内
+// 默认放行写操作」的任务、delete 不可逆；disable 是收紧权限、可逆，保持同步。
+func TestBotInt136EnableDeleteNeedConfirmation(t *testing.T) {
+	ts := botToolsetVersionOf(8)
+	for _, action := range []string{"enable", "delete"} {
+		prepared, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"`+action+`","task_id":"t1"}`)
+		if err != nil {
+			t.Fatalf("%s 应被受理: %v", action, err)
+		}
+		if !prepared.RequiresConfirmation || prepared.Mode != model.BotExecutionAsync {
+			t.Fatalf("%s 应判为需确认异步: %+v", action, prepared)
+		}
+	}
+	prepared, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"disable","task_id":"t1"}`)
+	if err != nil {
+		t.Fatalf("disable 应被受理: %v", err)
+	}
+	if prepared.RequiresConfirmation || prepared.Mode != model.BotExecutionSync {
+		t.Fatalf("disable 应保持同步免确认: %+v", prepared)
+	}
+
+	// always_allow：create/update/enable/delete 一律拒绝，run 仍允许。
+	env := setupBotTestEnv(t,
+		fakeModelTurn{ToolCalls: []fakeModelToolCall{{
+			ID: "call-aa-enable", Name: "fs_schedule",
+			Args: `{"action":"enable","task_id":"TASKID"}`,
+		}}},
+		fakeModelTurn{Text: "已受理"},
+	)
+	userID := createBotTestUser(t, env.db, "int136aaen")
+	bot := env.createBot(t, userID)
+	seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) { tk.ID = "TASKID" })
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "启用任务", ClientMessageID: "aa-en"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	callID := waitPendingCall(t, env, bot.ID)
+	var appErr *errs.AppError
+	if _, err := env.bots.DecideCall(userID, bot.ID, callID, &CallDecisionRequest{Decision: "always_allow"}); !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("enable 的 always_allow 应 40001: %v", err)
+	}
+	if authzs, _ := env.bots.ListAuthorizations(userID, bot.ID, true); len(authzs) != 0 {
+		t.Fatalf("不应产生授权: %d", len(authzs))
+	}
+}
+
+// 确认卡批准的是受理时看到的那一版任务（INT-136 review，TOCTOU）：run/enable/
+// delete 执行时任务已被改过（例如指令被换成写操作密集的内容）就拒绝，让用户
+// 重新看一眼再决定，而不是静默按新配置执行已批准的旧卡。
+func TestBotInt136RunRejectedWhenTaskChangedAfterAccept(t *testing.T) {
+	env := setupBotTestEnv(t,
+		fakeModelTurn{ToolCalls: []fakeModelToolCall{{
+			ID: "call-toctou", Name: "fs_schedule", Args: `{"action":"run","task_id":"TASKID"}`,
+		}}},
+		fakeModelTurn{Text: "已受理"},
+		fakeModelTurn{Text: "好的"},
+	)
+	userID := createBotTestUser(t, env.db, "int136toctou")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.ID = "TASKID"
+		tk.Instruction = "只读巡检"
+		tk.NeedsReport = false
+	})
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "跑一次", ClientMessageID: "t1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	callID := waitPendingCall(t, env, bot.ID)
+
+	// 确认期间任务指令被改（含写操作），执行时必须拒绝。
+	changed := "顺便把高优先级问题全部关闭"
+	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", changed, nil, nil); err != nil {
+		t.Fatalf("update task: %v", err)
+	}
+	if _, err := env.bots.DecideCall(userID, bot.ID, callID, &CallDecisionRequest{Decision: "approve"}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	waitForBot(t, "调用失败", 20*time.Second, func() bool {
+		call, err := env.bots.calls.FindByID(callID)
+		return err == nil && call.Status == model.BotCallStatusFailed
+	})
+	call, err := env.bots.calls.FindByID(callID)
+	if err != nil {
+		t.Fatalf("load call: %v", err)
+	}
+	if call.ErrorMessage == nil || !strings.Contains(*call.ErrorMessage, "确认期间被修改") {
+		t.Fatalf("错误应说明任务已改: %+v", call.ErrorMessage)
+	}
+	if n := countScheduleRuns(t, env, task.ID); n != 0 {
+		t.Fatalf("任务已改时不应启动运行，实得 %d", n)
+	}
+}

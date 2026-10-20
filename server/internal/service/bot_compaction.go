@@ -869,15 +869,25 @@ func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPl
 		if nonce == "" {
 			// 压缩发布可能先于 activateBotPrompt 跑到：这里同样要自愈空
 			// nonce，否则重建的提示词会内嵌空值、围栏永不生效。
-			if healed, herr := botHealUntrustedNonce(s.db, fresh.ID); herr == nil {
+			healed, herr := botHealUntrustedNonce(s.db, fresh.ID)
+			if herr != nil {
+				// 自愈失败就不能发布带围栏规则的新提示词：那会让规则 15 要求
+				// 信任一个不存在的 nonce，同时 `botProjectionNonce` 因 nonce
+				// 为空关闭全部围栏渲染——一次 DB 抖动就把 fail-closed 设计降级
+				// 成无围栏。保持旧版本，下一轮激活再试（与 activateBotPrompt
+				// 自愈失败即返回同一口径）。
+				needActivate = false
+			} else {
 				nonce = healed
 				fresh.UntrustedNonce = healed
 			}
 		}
-		prompt = buildBotSystemPrompt(persona, nonce)
-		rev = fresh.PromptRevision + 1
-		plat = botPlatformPromptVersion
-		toolVer = botToolsetVersion
+		if needActivate {
+			prompt = buildBotSystemPrompt(persona, nonce)
+			rev = fresh.PromptRevision + 1
+			plat = botPlatformPromptVersion
+			toolVer = botToolsetVersion
+		}
 	}
 	var memText string
 	var memVer map[string]int64

@@ -23,8 +23,11 @@ import (
 // 冻结在 v3–v7 的会话同样生效，wire 字节里没有该信息，不影响 tools_hash。
 // 规则：create 恒需确认；update 出现 instruction/needs_report/model 任一
 // （含 null，出现即算）需确认，只改 name/cron/timezone 保持同步；run 在
-// dry_run 解析为布尔 true 时免确认（只读预览），否则需确认。返回的 error 是
-// 受理期参数校验（cron/时区），避免为一个必然执行失败的调用弹确认卡。
+// dry_run 解析为布尔 true 时免确认（只读预览），否则需确认；enable（重新
+// 武装一个用户已停用、运行内默认放行写操作的任务）与 delete（不可逆地抹掉
+// 任务）也要确认。disable 保持同步：它是收紧权限、随时可逆（enable 要确认），
+// 阻止它是净损失。返回的 error 是受理期参数校验，避免为一个必然执行失败的
+// 调用弹确认卡。
 func botScheduleConfirmation(action string, raw map[string]json.RawMessage) (bool, error) {
 	switch action {
 	case "create":
@@ -54,6 +57,8 @@ func botScheduleConfirmation(action string, raw map[string]json.RawMessage) (boo
 			_ = json.Unmarshal(v, &dryRun)
 		}
 		return !dryRun, nil
+	case "enable", "delete":
+		return true, nil
 	}
 	return false, nil
 }
@@ -131,6 +136,10 @@ type botScheduleCallPreview struct {
 	NextRunAtUTC string `json:"next_run_at_utc,omitempty"`
 	// EffectiveModel 是任务覆盖优先、否则机器人当前模型。
 	EffectiveModel string `json:"effective_model,omitempty"`
+	// TaskUpdatedAt 是受理时任务的 updated_at（RFC3339Nano，只对 run/enable/
+	// delete 这类「按库里配置执行」的动作填）：确认卡批准的是当时看到的配置，
+	// 执行器在事务内比对同一水位，期间任务被改过就拒绝执行（TOCTOU）。
+	TaskUpdatedAt string `json:"task_updated_at,omitempty"`
 }
 
 // resolveScheduleScope 建卡前解析 fs_schedule 写操作的范围与确认卡预览。
@@ -162,7 +171,7 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 			ModelPtr:       rawStringPtr(raw["model"]),
 			NeedsReportPtr: rawBoolPtr(raw["needs_report"]),
 		}, task)
-	case "run":
+	case "run", "enable":
 		prepared.ScopeKind = botScopeScheduleTask
 		task, err := s.schedTasks.FindByIDAndBot(rawString(raw["task_id"]), bot.ID)
 		if err != nil {
@@ -170,6 +179,14 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 		}
 		prepared.ScopeID = task.ID
 		prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
+	case "delete":
+		// delete 也要范围（确认卡与授权都按单个任务绑定），但不给预览：
+		// 按钮批下去就是删掉这个任务，没有「生效配置」可看。
+		prepared.ScopeKind = botScopeScheduleTask
+		if task, err := s.schedTasks.FindByIDAndBot(rawString(raw["task_id"]), bot.ID); err == nil {
+			prepared.ScopeID = task.ID
+			prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
+		}
 	}
 }
 
@@ -224,6 +241,7 @@ func (s *BotService) schedulePreviewFromTask(bot *model.Bot, in schedulePreviewI
 	}
 	if task != nil {
 		preview.TaskID = task.ID
+		preview.TaskUpdatedAt = task.UpdatedAt.UTC().Format(time.RFC3339Nano)
 	}
 	if _, next, parseErr := parseScheduleCron(merged.CronExpression, merged.Timezone, time.Now().UTC()); parseErr == nil {
 		loc := timeOrUTC(merged.Timezone)
@@ -231,6 +249,37 @@ func (s *BotService) schedulePreviewFromTask(bot *model.Bot, in schedulePreviewI
 		preview.NextRunAtUTC = next.UTC().Format(time.RFC3339)
 	}
 	return preview
+}
+
+// botScheduleAcceptedRevision 取受理时记下的任务修订水位（确认卡上展示的那一版）；
+// 没有（旧调用或非确认动作）时为空串，表示不做修订比对。
+func botScheduleAcceptedRevision(call *model.BotToolCall) string {
+	var execCtx botCallExecContext
+	if call.ExecutionContextJSON == "" {
+		return ""
+	}
+	if err := json.Unmarshal([]byte(call.ExecutionContextJSON), &execCtx); err != nil {
+		return ""
+	}
+	if execCtx.Schedule == nil {
+		return ""
+	}
+	return execCtx.Schedule.TaskUpdatedAt
+}
+
+// botScheduleRevisionChanged 在事务内比对任务修订：确认卡批准的是受理时看到
+// 的配置，run/enable/delete 执行时任务已被改过就拒绝（TOCTOU，与 fs_issue 的
+// expected_updated_at 同一口径），让用户重新看一眼再决定，而不是静默按新配置
+// 执行已批准的旧卡。
+func botScheduleRevisionChanged(task *model.BotScheduleTask, expected string) error {
+	if expected == "" || task == nil {
+		return nil
+	}
+	if task.UpdatedAt.UTC().Format(time.RFC3339Nano) != expected {
+		return errs.New(errs.ErrInvalidParams.Code,
+			"任务在确认期间被修改，本次未执行：请重新查看任务配置后再操作")
+	}
+	return nil
 }
 
 // rawStringPtr 解出字符串指针：字段未出现返回 nil（「未提供」与「显式空串」
@@ -264,10 +313,10 @@ func rawBoolPtr(raw json.RawMessage) *bool {
 // 返回 json.RawMessage 让 botBuildOutcome 原样透传 execScheduleTool 的结果。
 func (s *BotService) runScheduleWrite(ctx context.Context, call *model.BotToolCall) (interface{}, error) {
 	switch call.Action {
-	case "create", "update", "run":
+	case "create", "update", "run", "enable", "delete":
 	default:
 		return nil, errs.New(errs.ErrInvalidParams.Code,
-			"fs_schedule 只有 create/update/run 走异步确认路径: "+call.Action)
+			"fs_schedule 只有 create/update/run/enable/delete 走异步确认路径: "+call.Action)
 	}
 	out, err := s.execScheduleTool(call)
 	if err != nil {

@@ -1185,7 +1185,7 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 	bot := env.createBot(t, userID)
 	task := seedScheduleTask(t, env, bot.ID, nil)
 
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 	off, _ := env.bots.schedTasks.FindByID(task.ID)
@@ -1204,7 +1204,7 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 		t.Fatalf("库里的停用任务不应有计划时间: %+v", persisted)
 	}
 	// 重新启用才重算。
-	on, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	on, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "")
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -1720,7 +1720,7 @@ func TestBotScheduleDeleteStopsUnfinishedRuns(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, nil)
 	run := seedScheduleRun(t, env, bot.ID, task.ID)
 
-	if err := env.bots.deleteScheduleTask(bot.ID, task.ID); err != nil {
+	if err := env.bots.deleteScheduleTask(bot.ID, task.ID, ""); err != nil {
 		t.Fatalf("delete task: %v", err)
 	}
 	fresh := mustFindRun(t, env, run.ID)
@@ -1783,7 +1783,7 @@ func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
 		tk.NextRunAt = &due
 	})
-	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "")
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -1791,10 +1791,10 @@ func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
 		t.Fatalf("已启用任务再启用应保留待派发的计划，实得 %+v", got.NextRunAt)
 	}
 	// 停用后再启用才重算。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	back, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true)
+	back, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "")
 	if err != nil {
 		t.Fatalf("re-enable: %v", err)
 	}

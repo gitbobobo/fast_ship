@@ -1272,14 +1272,13 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 	case "fs_environment/list", "fs_environment/projects":
 		return s.execEnvironmentRead(ctx, call)
 	case "fs_schedule/list", "fs_schedule/update",
-		"fs_schedule/delete", "fs_schedule/runs",
-		"fs_schedule/enable", "fs_schedule/disable",
+		"fs_schedule/runs", "fs_schedule/disable",
 		"fs_schedule/state_get", "fs_schedule/state_set":
 		// 定时任务管理（INT-103，INT-121 加 run，INT-123 加任务小状态）：
-		// 同步动作立即生效，与 fs_memory 写同类。INT-136 起 create 与非
-		// dry_run 的 run 只能走异步确认路径（runAsyncTool → runScheduleWrite），
-		// 改动 instruction/needs_report/model 的 update 同理；这里保留 update
-		// 的同步分支（只改 name/cron/timezone 仍同步）。
+		// 同步动作立即生效，与 fs_memory 写同类。INT-136 起 create、非 dry_run
+		// 的 run、enable/delete 与改动 instruction/needs_report/model 的 update
+		// 只能走异步确认路径（runAsyncTool → runScheduleWrite）；这里保留
+		// update 的同步分支（只改 name/cron/timezone 仍同步）与 disable。
 		return s.execScheduleTool(call)
 	case "fs_schedule/run":
 		// dry_run=true 的 run 是只读预览，保持同步返回（受理判定对它免确认）；

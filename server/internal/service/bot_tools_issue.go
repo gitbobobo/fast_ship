@@ -188,6 +188,27 @@ func botSlimIssueComments(items []IssueCommentResponse, nonce string) []map[stri
 	return out
 }
 
+// botSlimIssueComment 是单条评论的精简投影（写回执用），与列表同一形状。
+func botSlimIssueComment(c *IssueCommentResponse, nonce string) map[string]interface{} {
+	items := botSlimIssueComments([]IssueCommentResponse{*c}, nonce)
+	return items[0]
+}
+
+// botFenceIssueMeta 围栏 Issue 元数据响应里的标签/清单（set_workflow /
+// replace_checklist 的回执会带回它们，与外部内容同源）；其余字段原样保留。
+func botFenceIssueMeta(meta *IssueInternalMetaResponse, nonce string) IssueInternalMetaResponse {
+	if meta == nil || nonce == "" {
+		if meta == nil {
+			return IssueInternalMetaResponse{}
+		}
+		return *meta
+	}
+	out := *meta
+	out.Labels = botFenceIssueLabels(meta.Labels, nonce)
+	out.Checklist = botFenceIssueChecklist(meta.Checklist, nonce)
+	return out
+}
+
 // botSlimIssueTimeline 是 timeline 的精简投影：不再整包透出
 // api.IssueTimelineEvent；summary/body 是外部内容，进不可信围栏（INT-136）。
 // 空串字段省略，投影保持轻量。
@@ -233,6 +254,13 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return nil, errs.ErrInvalidParams
 	}
+	// 写回执也会带上 Issue 的标题/正文/标签/清单（外部可写的同一批字段），
+	// 它们经「平台后台结果」进模型上下文，必须与读路径同一投影（INT-136）。
+	// 读不到 nonce 就失败：结果会固化进账本，事后不补围栏。
+	nonce, nonceErr := s.botNonceOf(call.BotID)
+	if nonceErr != nil {
+		return nil, nonceErr
+	}
 	switch call.Action {
 	case "create":
 		req := CreateInternalIssueRequest{
@@ -241,10 +269,18 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		}
 		source := strings.TrimSpace(args.Source)
 		if source == "" || source == "internal" {
-			return s.issues.CreateInternalIssue(args.ProjectID, userID, req)
+			created, err := s.issues.CreateInternalIssue(args.ProjectID, userID, req)
+			if err != nil {
+				return nil, err
+			}
+			return botSlimIssueDetail(created, nonce), nil
 		}
 		if source == "github" {
-			return s.issues.CreateGitHubIssueContext(ctx, args.ProjectID, userID, req)
+			created, err := s.issues.CreateGitHubIssueContext(ctx, args.ProjectID, userID, req)
+			if err != nil {
+				return nil, err
+			}
+			return botSlimIssueDetail(created, nonce), nil
 		}
 		return nil, errs.New(errs.ErrInvalidParams.Code, "source 只支持 internal/github")
 	case "update":
@@ -255,10 +291,6 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 				return nil, err
 			}
 			if strings.TrimSpace(current.UpdatedAt) != expected {
-				nonce, nonceErr := s.botNonceOf(call.BotID)
-				if nonceErr != nil {
-					return nil, nonceErr
-				}
 				return botIssueConflictResult("issue_updated", current, nonce), nil
 			}
 		}
@@ -282,10 +314,18 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 			state := model.IssueState(args.State)
 			req.State = &state
 		}
-		return s.issues.UpdateInternalIssueContext(ctx, args.IssueID, userID, req)
+		updated, err := s.issues.UpdateInternalIssueContext(ctx, args.IssueID, userID, req)
+		if err != nil {
+			return nil, err
+		}
+		return botSlimIssueDetail(updated, nonce), nil
 	case "set_workflow":
 		status := model.IssueWorkflowStatus(strings.TrimSpace(args.WorkflowStatus))
-		return s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
+		meta, err := s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
+		if err != nil {
+			return nil, err
+		}
+		return botFenceIssueMeta(meta, nonce), nil
 	case "replace_checklist":
 		// 写入保护：清单整组替换前核对上次读到的清单版本。
 		if expected := strings.TrimSpace(args.ExpectedChecklistUpdatedAt); expected != "" {
@@ -298,19 +338,23 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 				currentVersion = strings.TrimSpace(*current.InternalMeta.ChecklistUpdatedAt)
 			}
 			if currentVersion != expected {
-				nonce, nonceErr := s.botNonceOf(call.BotID)
-				if nonceErr != nil {
-					return nil, nonceErr
-				}
 				return botIssueConflictResult("checklist_updated", current, nonce), nil
 			}
 		}
 		req := ReplaceIssueChecklistRequest{Items: args.Items}
-		return s.issues.ReplaceChecklist(args.IssueID, userID, req, botIssueActor)
+		meta, err := s.issues.ReplaceChecklist(args.IssueID, userID, req, botIssueActor)
+		if err != nil {
+			return nil, err
+		}
+		return botFenceIssueMeta(meta, nonce), nil
 	case "comment":
 		req := CreateInternalIssueCommentRequest{Body: args.CommentBody}
 		// 复用已有幂等入口；幂等键是服务端调用 ID，不让模型指定。
-		return s.issues.CreateInternalCommentIdempotentContext(ctx, args.IssueID, userID, req, botIssueActor, call.ID)
+		comment, err := s.issues.CreateInternalCommentIdempotentContext(ctx, args.IssueID, userID, req, botIssueActor, call.ID)
+		if err != nil {
+			return nil, err
+		}
+		return botSlimIssueComment(comment, nonce), nil
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该写动作")
 }

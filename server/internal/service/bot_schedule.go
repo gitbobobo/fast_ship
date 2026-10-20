@@ -148,20 +148,24 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 		CurrentTimeUTC: time.Now().UTC().Format(time.RFC3339),
 		RunID:          run.ID,
 		TaskID:         sess.task.ID,
-		TaskName:       sess.task.Name,
-		Instruction:    sess.task.Instruction,
-		Cron:           sess.task.CronExpression,
-		Timezone:       sess.task.Timezone,
+		// Instruction 是这次运行要执行的任务说明（用户批准过的平台指令），
+		// 不能当数据处理；TaskName 只是展示用文本，下面统一进围栏。
+		TaskName:    sess.task.Name,
+		Instruction: sess.task.Instruction,
+		Cron:        sess.task.CronExpression,
+		Timezone:    sess.task.Timezone,
 	}
 	if run.ScheduledFor != nil {
 		rt.ScheduledFor = run.ScheduledFor.UTC().Format(time.RFC3339)
 	}
 	// 上一次已结束运行的时间/状态/摘要：没有则整体省略；当前 run 自己还在
-	// 进行中，不会被选中。
+	// 进行中，不会被选中。摘要/任务名是模型生成或任务里存的回流文本，而这条
+	// 运行时上下文本身带平台 nonce——不围栏就等于给伪造前缀背书（INT-136）。
+	rt.TaskName = botFenceUntrusted(nonce, "schedule_task", rt.TaskName)
 	if last, err := s.runs.LatestFinishedByScheduleTask(bot.ID, sess.task.ID); err == nil && last.FinishedAt != nil {
 		rt.LastRunAt = last.FinishedAt.UTC().Format(time.RFC3339)
 		rt.LastRunStatus = string(last.Status)
-		rt.LastRunSummary = last.Summary
+		rt.LastRunSummary = botFenceUntrusted(nonce, "schedule_run", last.Summary)
 	}
 	rtRaw, _ := json.Marshal(rt)
 	messages = append(messages, openai.UserMessage(botPlatformPrefix(nonce, "运行时上下文")+"\n"+string(rtRaw)))
@@ -482,7 +486,7 @@ func applyScheduleTaskUpdate(task *model.BotScheduleTask, name, cronExpr, timezo
 
 // setScheduleTaskEnabled 开关任务：重新启用时 next_run_at 重算为 now 之后的
 // 下一次（不补跑过期计划）；停用后不再触发。
-func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool) (*model.BotScheduleTask, error) {
+func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, expectedUpdatedAt string) (*model.BotScheduleTask, error) {
 	now := time.Now().UTC()
 	var task *model.BotScheduleTask
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -492,6 +496,9 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool) 
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errs.ErrBotScheduleTaskNotFound
 			}
+			return err
+		}
+		if err := botScheduleRevisionChanged(task, expectedUpdatedAt); err != nil {
 			return err
 		}
 		cols := map[string]interface{}{"enabled": enabled, "updated_at": now}
@@ -537,9 +544,23 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool) 
 // deleteScheduleTask 删除任务，并在同一事务里请求停止它未完成的运行：运行记录
 // 只能按任务查询，任务一删这些 run 就既查不到也停不了，却仍会挡住机器人删除。
 // 已跑了很久的 run 不受影响，会在下一个安全点收尾为 stopped。
-func (s *BotService) deleteScheduleTask(botID, taskID string) error {
+func (s *BotService) deleteScheduleTask(botID, taskID, expectedUpdatedAt string) error {
 	var stoppedRunIDs []string
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		if expectedUpdatedAt != "" {
+			// delete 同样按「确认时看到的那一版」执行：期间被改过（例如指令被
+			// 换成写操作密集的内容）就拒绝，让用户重新看一眼再决定。
+			current, err := repository.NewBotScheduleTaskRepository(tx).FindByIDAndBot(taskID, botID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return errs.ErrBotScheduleTaskNotFound
+				}
+				return err
+			}
+			if err := botScheduleRevisionChanged(current, expectedUpdatedAt); err != nil {
+				return err
+			}
+		}
 		var runs []model.BotRun
 		if err := tx.Where("bot_id = ? AND schedule_task_id = ? AND finished_at IS NULL", botID, taskID).
 			Find(&runs).Error; err != nil {
@@ -736,7 +757,8 @@ func (s *BotService) SetScheduleTaskEnabled(userID, botID, taskID string, enable
 	if err := s.checkOwnership(userID, botID); err != nil {
 		return nil, err
 	}
-	task, err := s.setScheduleTaskEnabled(botID, taskID, enabled)
+	// 用户侧 REST 没有确认卡这一步，不做修订比对。
+	task, err := s.setScheduleTaskEnabled(botID, taskID, enabled, "")
 	if err != nil {
 		return nil, err
 	}
@@ -935,10 +957,16 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 		if err != nil {
 			return "", errs.ErrInternal
 		}
+		nonce, nonceErr := s.botNonceOf(call.BotID)
+		if nonceErr != nil {
+			return "", nonceErr
+		}
 		out := map[string]interface{}{
-			"ok": true, "dry_run": true, "task_id": task.ID, "name": task.Name,
-			"instruction": task.Instruction, "cron_expression": task.CronExpression,
-			"timezone": task.Timezone, "enabled": task.Enabled,
+			"ok": true, "dry_run": true, "task_id": task.ID,
+			"name":            botFenceUntrusted(nonce, "schedule_task", task.Name),
+			"instruction":     botFenceUntrusted(nonce, "schedule_task", task.Instruction),
+			"cron_expression": task.CronExpression,
+			"timezone":        task.Timezone, "enabled": task.Enabled,
 			"needs_report": task.NeedsReport, "busy": busy > 0,
 			"note": "预览：未创建运行记录、未执行指令；busy=true 表示当前已有未结束的运行",
 		}
@@ -965,7 +993,7 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 	}
 	// 显式手动触发就是一次执行：不要求任务 enabled（停用任务只是不再按 cron
 	// 触发，手动单跑是用户的明确意图）。
-	run, err := s.manuallyStartScheduleRun(call.BotID, task)
+	run, err := s.manuallyStartScheduleRun(call.BotID, task, botScheduleAcceptedRevision(call))
 	if err != nil {
 		return "", err
 	}
@@ -983,7 +1011,7 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 // 同一任务已有未结束运行（cron 或手动）时返回 ErrBotScheduleRunBusy，不排队。
 // 配置快照与密钥密文按 cron 派发同一方式在事务内冻结；提交后由调用方唤醒
 // 执行槽（wakeScheduleRun），执行路径与 cron 触发完全相同。
-func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotScheduleTask) (*model.BotRun, error) {
+func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotScheduleTask, expectedUpdatedAt string) (*model.BotRun, error) {
 	now := time.Now().UTC()
 	var run *model.BotRun
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -995,6 +1023,9 @@ func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotSched
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errs.ErrBotScheduleTaskNotFound
 			}
+			return err
+		}
+		if err := botScheduleRevisionChanged(current, expectedUpdatedAt); err != nil {
 			return err
 		}
 		busy, err := repository.NewBotRunRepository(tx).CountUnfinishedByScheduleTaskTx(tx, botID, current.ID)
@@ -1074,9 +1105,13 @@ func (s *BotService) execScheduleList(call *model.BotToolCall, args *botSchedule
 	if err != nil {
 		return "", errs.ErrInternal
 	}
+	nonce, err := s.botNonceOf(call.BotID)
+	if err != nil {
+		return "", err
+	}
 	items := make([]map[string]interface{}, 0, len(tasks))
 	for i := range tasks {
-		items = append(items, s.scheduleTaskSlim(&tasks[i]))
+		items = append(items, s.scheduleTaskSlim(&tasks[i], nonce))
 	}
 	out := map[string]interface{}{
 		"items": items, "total": total, "limit": limit, "offset": offset,
@@ -1090,12 +1125,15 @@ func (s *BotService) execScheduleList(call *model.BotToolCall, args *botSchedule
 // scheduleTaskSlim 是工具结果里的任务投影：带 next_run_at 与 cron/时区原文，
 // 让模型能在回复里用中文说明执行时间；has_state 标记任务有没有小状态
 // （INT-123），状态正文只在 state_get 里给，避免 list 结果膨胀。
-func (s *BotService) scheduleTaskSlim(task *model.BotScheduleTask) map[string]interface{} {
+// name/instruction 是任务里存的文本（存量任务创建时未必经确认、也可能被诱导
+// 写入伪造前缀），与其它外部来源一样进围栏（INT-136）。
+func (s *BotService) scheduleTaskSlim(task *model.BotScheduleTask, nonce string) map[string]interface{} {
 	out := map[string]interface{}{
-		"id": task.ID, "name": task.Name,
+		"id": task.ID, "name": botFenceUntrusted(nonce, "schedule_task", task.Name),
 		"cron_expression": task.CronExpression, "timezone": task.Timezone,
-		"instruction": task.Instruction, "needs_report": task.NeedsReport,
-		"enabled": task.Enabled, "has_state": task.StateJSON != "",
+		"instruction":  botFenceUntrusted(nonce, "schedule_task", task.Instruction),
+		"needs_report": task.NeedsReport, "enabled": task.Enabled,
+		"has_state": task.StateJSON != "",
 	}
 	if task.Model != "" {
 		out["model"] = task.Model
@@ -1129,7 +1167,11 @@ func (s *BotService) execScheduleCreate(call *model.BotToolCall, args *botSchedu
 	if err != nil {
 		return "", err
 	}
-	out := s.scheduleTaskSlim(task)
+	nonce, nonceErr := s.botNonceOf(call.BotID)
+	if nonceErr != nil {
+		return "", nonceErr
+	}
+	out := s.scheduleTaskSlim(task, nonce)
 	out["ok"] = true
 	out["note"] = "任务已创建并启用；请在对话里用中文告知用户任务名与执行时间"
 	return botMarshalResult(out)
@@ -1141,14 +1183,18 @@ func (s *BotService) execScheduleUpdate(call *model.BotToolCall, args *botSchedu
 	if err != nil {
 		return "", err
 	}
-	out := s.scheduleTaskSlim(updated)
+	nonce, nonceErr := s.botNonceOf(call.BotID)
+	if nonceErr != nil {
+		return "", nonceErr
+	}
+	out := s.scheduleTaskSlim(updated, nonce)
 	out["ok"] = true
 	out["note"] = "任务已更新；请在对话里用中文告知用户任务名与新的执行时间"
 	return botMarshalResult(out)
 }
 
 func (s *BotService) execScheduleDelete(call *model.BotToolCall, args *botScheduleTaskArgs) (string, error) {
-	if err := s.deleteScheduleTask(call.BotID, strings.TrimSpace(args.TaskID)); err != nil {
+	if err := s.deleteScheduleTask(call.BotID, strings.TrimSpace(args.TaskID), botScheduleAcceptedRevision(call)); err != nil {
 		return "", err
 	}
 	return botMarshalResult(map[string]interface{}{
@@ -1180,9 +1226,21 @@ func (s *BotService) execScheduleRuns(call *model.BotToolCall, args *botSchedule
 	if err != nil {
 		return "", errs.ErrInternal
 	}
+	nonce, err := s.botNonceOf(call.BotID)
+	if err != nil {
+		return "", err
+	}
 	items := make([]BotScheduleRunResponse, 0, len(rows))
 	for i := range rows {
-		items = append(items, botScheduleRunResponseOf(&rows[i]))
+		item := botScheduleRunResponseOf(&rows[i])
+		// 运行摘要是 schedule 会话里模型生成的回流文本（与 schedule_event
+		// 正文的 summary 同一信道），进围栏后才能交给主线模型（INT-136）。
+		item.Summary = botFenceUntrusted(nonce, "schedule_run", item.Summary)
+		if item.ErrorMessage != nil {
+			fenced := botFenceUntrusted(nonce, "schedule_run", *item.ErrorMessage)
+			item.ErrorMessage = &fenced
+		}
+		items = append(items, item)
 	}
 	return botMarshalResult(map[string]interface{}{
 		"items": items, "task_id": taskID, "limit": limit, "offset": offset,
@@ -1190,11 +1248,15 @@ func (s *BotService) execScheduleRuns(call *model.BotToolCall, args *botSchedule
 }
 
 func (s *BotService) execScheduleEnable(call *model.BotToolCall, args *botScheduleTaskArgs, enabled bool) (string, error) {
-	task, err := s.setScheduleTaskEnabled(call.BotID, strings.TrimSpace(args.TaskID), enabled)
+	task, err := s.setScheduleTaskEnabled(call.BotID, strings.TrimSpace(args.TaskID), enabled, botScheduleAcceptedRevision(call))
 	if err != nil {
 		return "", err
 	}
-	out := s.scheduleTaskSlim(task)
+	nonce, nonceErr := s.botNonceOf(call.BotID)
+	if nonceErr != nil {
+		return "", nonceErr
+	}
+	out := s.scheduleTaskSlim(task, nonce)
 	out["ok"] = true
 	out["note"] = "任务已" + map[bool]string{true: "启用", false: "停用"}[enabled] +
 		"；请在对话里用中文告知用户"

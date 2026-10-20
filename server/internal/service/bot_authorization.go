@@ -209,13 +209,17 @@ func (s *BotService) DecideCall(userID, botID, callID string, req *CallDecisionR
 	// always_allow 的精确授权值：同一事务中建立并批准当前调用。
 	var newAuthz *model.BotAuthorization
 	if decision == model.BotDecisionAlwaysAllow {
-		// 创建/修改定时任务不支持「始终允许」（INT-136）：确认卡展示的指令
-		// 全文每次都可能不同，一旦豁免，模型改写任务指令时用户没有看过新
-		// 指令，而任务以后每次运行都默认放行写操作，等于一次点击永久授权
-		// 未知的指令。run 允许：范围=单个任务 ID，用户此前已确认过该任务。
-		if call.ToolName == "fs_schedule" && (call.Action == "create" || call.Action == "update") {
-			return nil, errs.New(errs.ErrInvalidParams.Code,
-				"创建/修改定时任务不支持「始终允许」：每次都要看到指令全文后确认")
+		// 创建/修改/启用/删除定时任务不支持「始终允许」（INT-136）：确认卡展示
+		// 的指令全文每次都可能不同，一旦豁免，模型改写任务指令时用户没有看过
+		// 新指令，而任务以后每次运行都默认放行写操作，等于一次点击永久授权
+		// 未知的指令；enable 是重新武装，delete 不可逆，同样不能一次点完永久
+		// 生效。run 允许：范围=单个任务 ID，用户此前已确认过该任务。
+		if call.ToolName == "fs_schedule" {
+			switch call.Action {
+			case "create", "update", "enable", "delete":
+				return nil, errs.New(errs.ErrInvalidParams.Code,
+					"创建/修改/启用/删除定时任务不支持「始终允许」：每次都要确认")
+			}
 		}
 		newAuthz = s.buildAlwaysAllowValue(botID, call)
 	}

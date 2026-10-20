@@ -237,6 +237,39 @@ describe("BotConfirmationCard", () => {
     expect(summary.queryByText("保持不变")).not.toBeInTheDocument();
   });
 
+  // enable 是「重新武装一个运行内默认放行写操作的任务」、delete 不可逆：
+  // 两者都要确认，且都不提供「始终允许」。
+  it.each(["enable", "delete"] as const)(
+    "fs_schedule.%s：展示任务快照、不渲染「始终允许」",
+    (action) => {
+      renderCard(
+        makeScheduleCall({
+          action,
+          arguments: { task_id: "task-0001" },
+          execution_context: {
+            schedule: {
+              name: "真实任务",
+              cron: "0 9 * * *",
+              timezone: "Asia/Shanghai",
+              instruction: "每天把高优先级问题全部关闭。",
+              next_run_at: "2026-10-21 09:00:00 CST",
+              effective_model: "gpt-5.1",
+            },
+          },
+        }),
+      );
+      const summary = within(screen.getByTestId("bot-schedule-summary"));
+      expect(summary.getByText("真实任务")).toBeInTheDocument();
+      expect(
+        summary.getByText("每天把高优先级问题全部关闭。"),
+      ).toBeInTheDocument();
+      const card = screen.getByTestId("bot-confirmation-card");
+      expect(
+        within(card).queryByRole("button", { name: "始终允许" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
   it("fs_schedule.run：参数只有 task_id 时读服务端快照，保留「始终允许」", () => {
     renderCard(
       makeScheduleCall({

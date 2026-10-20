@@ -344,10 +344,10 @@ func TestBotInt123StateSurvivesUpdateAndToggle(t *testing.T) {
 		t.Fatalf("update: %v", err)
 	}
 	// 开关启停。
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, ""); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true); err != nil {
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, ""); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 
@@ -546,7 +546,9 @@ func TestBotInt123RuntimeContextLastRunAndStateNote(t *testing.T) {
 	if rt2.LastRunStatus != string(model.BotRunStatusCompleted) {
 		t.Fatalf("last_run_status 应为 completed: %+v", rt2)
 	}
-	if rt2.LastRunSummary != "上次汇总：2 条新增" {
+	// 摘要进不可信围栏（INT-136）：它是任务会话里模型生成的回流文本，而这条
+	// 运行时上下文本身带平台 nonce，不围栏等于给伪造前缀背书。
+	if want := botFenceUntrusted(botNonce(t, env, bot.ID), "schedule_run", "上次汇总：2 条新增"); rt2.LastRunSummary != want {
 		t.Fatalf("last_run_summary 不符: %q", rt2.LastRunSummary)
 	}
 	if _, err := time.Parse(time.RFC3339, rt2.LastRunAt); err != nil {

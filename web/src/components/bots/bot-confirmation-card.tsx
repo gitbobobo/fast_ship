@@ -4,6 +4,14 @@ import type { BotCall, BotCallDecision } from "@/lib/api/bots";
 import { toolActionLabel, toolParamChips } from "@/lib/bots/tool-labels";
 import { botActionErrorText, ParamChips } from "./bot-tool-card";
 
+// fs_schedule 里需要确认的动作（与 server 的 botScheduleConfirmation 对齐）：
+// create、敏感字段 update、非 dry_run run、enable、delete。disable 与
+// name/cron/timezone-only update 仍同步免确认，不会出现在确认卡上。
+const SCHEDULE_CONFIRM_ACTIONS = new Set(["create", "update", "run", "enable", "delete"]);
+// 只有 run 可以「始终允许」（按任务绑定）；create/update/enable/delete 服务端
+// 也会拒绝，见 bot_authorization.go。
+const SCHEDULE_ALWAYS_ALLOW_ACTIONS = new Set(["run"]);
+
 /**
  * fs_schedule 确认卡的生效配置摘要：任务一经批准，之后每次运行默认放行
  * 写操作，确认前必须看清指令全文与运行配置。
@@ -122,14 +130,11 @@ export function BotConfirmationCard({
   const chips = toolParamChips(call.tool_name, call.arguments);
   const isScheduleCall =
     call.tool_name === "fs_schedule" &&
-    (call.action === "create" ||
-      call.action === "update" ||
-      call.action === "run");
+    SCHEDULE_CONFIRM_ACTIONS.has(call.action);
   // fs_schedule 的 create/update 被服务端拒绝「始终允许」（指令要逐次过目），
   // 不再渲染该按钮与其说明；run 仍可按任务维度建立授权。
   const canAlwaysAllow = !(
-    call.tool_name === "fs_schedule" &&
-    (call.action === "create" || call.action === "update")
+    call.tool_name === "fs_schedule" && !SCHEDULE_ALWAYS_ALLOW_ACTIONS.has(call.action)
   );
   const argPretty = (() => {
     try {
