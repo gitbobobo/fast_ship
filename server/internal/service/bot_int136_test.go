@@ -1057,3 +1057,29 @@ func TestBotInt136PreviewMarksInheritedModel(t *testing.T) {
 		t.Fatalf("指定模型时不应标为继承: %+v", fixed)
 	}
 }
+
+// 没有生效配置的确认等于没有确认：预览算不出来（存量配置不合法）时受理端直接
+// 拒绝，不建一张没有配置、修订比对也会被跳过的确认卡。
+func TestBotInt136AcceptRejectsTaskWithoutPreview(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136nopreview")
+	bot := env.createBot(t, userID)
+	// 存量脏数据：指令为空（会让人设校验失败，算不出生效配置）。
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Instruction = "   "
+	})
+	prepared, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule",
+		`{"action":"run","task_id":"`+task.ID+`"}`)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	err = env.bots.resolveCallScope(botRow, prepared, `{"action":"run","task_id":"`+task.ID+`"}`, &botCallExecContext{})
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("没有生效配置时应拒绝受理: %v", err)
+	}
+}

@@ -176,6 +176,12 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 			ModelPtr:       rawStringPtr(raw["model"]),
 			NeedsReportPtr: rawBoolPtr(raw["needs_report"]),
 		}, task)
+		// 合并/校验失败时没有生效配置：不建确认卡（没有配置的确认等于没有确认，
+		// 修订比对也会因为缺少受理水位被跳过）。
+		if prepared.SchedulePreview == nil {
+			return errs.New(errs.ErrInvalidParams.Code,
+				"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
+		}
 	case "run", "enable", "delete":
 		// 这三个动作执行时只按 task_id 读库里的任务，确认卡展示的是那一刻的
 		// 配置；目标读不到（含瞬时读库错误）就当场失败，不留一张指向未知
@@ -187,6 +193,10 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 		}
 		prepared.ScopeID = task.ID
 		prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
+		if prepared.SchedulePreview == nil {
+			return errs.New(errs.ErrInvalidParams.Code,
+				"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
+		}
 	}
 	return nil
 }
