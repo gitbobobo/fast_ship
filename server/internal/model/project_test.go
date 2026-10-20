@@ -58,3 +58,71 @@ func TestIsGitHubConfigured(t *testing.T) {
 		})
 	}
 }
+
+// CodeRepo 是 PR 审查的仓库取值入口：两个 code 字段都非空时用显式配置，
+// 否则回落公开仓库；半配置（只填一个）同样回落，避免拼出不存在的仓库。
+func TestCodeRepo(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        Project
+		wantOwner    string
+		wantRepo     string
+		wantFullName string
+	}{
+		{
+			name:         "fallback to public repo when code fields empty",
+			input:        Project{GithubOwner: "pub", GithubRepo: "Proj"},
+			wantOwner:    "pub",
+			wantRepo:     "Proj",
+			wantFullName: "pub/Proj",
+		},
+		{
+			name: "explicit code repo wins",
+			input: Project{
+				GithubOwner: "pub", GithubRepo: "proj",
+				CodeGithubOwner: "gitbobobo", CodeGithubRepo: "musiver",
+			},
+			wantOwner:    "gitbobobo",
+			wantRepo:     "musiver",
+			wantFullName: "gitbobobo/musiver",
+		},
+		{
+			name: "half configured falls back",
+			input: Project{
+				GithubOwner: "pub", GithubRepo: "proj",
+				CodeGithubOwner: "lonely",
+			},
+			wantOwner:    "pub",
+			wantRepo:     "proj",
+			wantFullName: "pub/proj",
+		},
+		{
+			name: "code repo configured without public repo",
+			input: Project{
+				CodeGithubOwner: "gitbobobo", CodeGithubRepo: "musiver",
+			},
+			wantOwner:    "gitbobobo",
+			wantRepo:     "musiver",
+			wantFullName: "gitbobobo/musiver",
+		},
+		{
+			name:         "nothing configured",
+			input:        Project{},
+			wantOwner:    "",
+			wantRepo:     "",
+			wantFullName: "/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, repo := tt.input.CodeRepo()
+			if owner != tt.wantOwner || repo != tt.wantRepo {
+				t.Errorf("CodeRepo() = %q/%q, want %q/%q", owner, repo, tt.wantOwner, tt.wantRepo)
+			}
+			if got := tt.input.CodeRepoFullName(); got != tt.wantFullName {
+				t.Errorf("CodeRepoFullName() = %q, want %q", got, tt.wantFullName)
+			}
+		})
+	}
+}

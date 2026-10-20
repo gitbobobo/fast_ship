@@ -604,9 +604,9 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if prNumber < 1 {
 		return nil, errs.ErrInvalidParams
 	}
-	// 记录所属仓库是历史仓库时不重跑：项目当前的 GitHub 字段才是取 PR 的依据，
-	// 同号的无关 PR 不能被当成本项目的 PR。
-	if repoFullName != "" && !strings.EqualFold(repoFullName, project.GithubOwner+"/"+project.GithubRepo) {
+	// 记录所属仓库是历史仓库时不重跑：项目当前的审查仓库（代码仓库，未单独
+	// 配置即公开仓库）才是取 PR 的依据，同号的无关 PR 不能被当成本项目的 PR。
+	if repoFullName != "" && !strings.EqualFold(repoFullName, project.CodeRepoFullName()) {
 		return nil, errs.New(errs.ErrInvalidParams.Code,
 			"该审查记录属于历史仓库，项目仓库已变更，不能重跑")
 	}
@@ -614,7 +614,8 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if err := s.db.WithContext(ctx).Where("project_id = ? AND enabled", projectID).First(&settings).Error; err != nil {
 		return nil, errs.ErrReviewNotEnabled
 	}
-	if project.GithubOwner == "" || project.GithubRepo == "" {
+	rOwner, rRepo := project.CodeRepo()
+	if rOwner == "" || rRepo == "" {
 		return nil, errs.ErrProjectGitHubNotConfigured
 	}
 	client, err := s.ghClient(ctx)
@@ -622,7 +623,7 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 		return nil, err
 	}
 	// 写库键与 webhook 侧同口径小写（GitHub API 本身大小写不敏感）。
-	repo := strings.ToLower(project.GithubOwner + "/" + project.GithubRepo)
+	repo := strings.ToLower(project.CodeRepoFullName())
 	// rerun 没有 webhook installation 快照：先解析真实安装 id，再取 PR；
 	// 解析不支持/失败时不得拿 0 当安装 id 继续写库。
 	installationID, err := client.ResolveInstallation(ctx, repo)
@@ -640,14 +641,15 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	now := time.Now().UTC()
 	var round int
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核，
-		// 否则会用旧快照开一轮（甚至取消新 head 的运行）。
+		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核（审查
+		// 仓库 = CodeRepo，未单独配置即公开仓库），否则会用旧快照开一轮
+		// （甚至取消新 head 的运行）。
 		var current model.Project
-		if err := tx.Select("github_owner", "github_repo").
+		if err := tx.Select("id", "github_owner", "github_repo", "code_github_owner", "code_github_repo").
 			Where("id = ? AND user_id = ?", project.ID, userID).First(&current).Error; err != nil {
 			return errs.ErrProjectNotFound
 		}
-		if !strings.EqualFold(current.GithubOwner+"/"+current.GithubRepo, repo) {
+		if !strings.EqualFold(current.CodeRepoFullName(), repo) {
 			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
 		}
 		var enabled int64

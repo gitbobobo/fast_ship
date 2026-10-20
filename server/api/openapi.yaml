@@ -9772,6 +9772,9 @@ components:
         repository_url:
           type: string
           description: GitHub 仓库链接（owner/repo 或完整 URL）；不再要求同时提供 Token
+        code_repository_url:
+          type: string
+          description: 代码仓库链接（owner/repo 或完整 URL），供 PR 审查使用；空 = 与公开仓库相同
         public_github_token_id:
           type: string
           description: 公开仓库 Token（Token 库记录 id）引用；用于 Issue 同步与 GitHub 写、分支查询、发货。可空；必须属于当前用户，否则 40420
@@ -9793,6 +9796,10 @@ components:
         repository_url:
           type: string
           description: 同创建；不再要求项目已配 Token
+        code_repository_url:
+          type: string
+          nullable: true
+          description: 三态——key 缺省保留现值；显式 null 或空串清空（回落公开仓库）；非空替换（owner/repo 或完整 URL；与公开仓库相同则归一为空）
         public_github_token_id:
           type: string
           nullable: true
@@ -9803,7 +9810,7 @@ components:
           description: 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
     Project:
       type: object
-      required: [id, name, description, github_owner, github_repo, public_github_token_id, code_github_token_id, created_at, updated_at]
+      required: [id, name, description, github_owner, github_repo, code_github_owner, code_github_repo, public_github_token_id, code_github_token_id, created_at, updated_at]
       properties:
         id:
           type: string
@@ -9815,6 +9822,12 @@ components:
           type: string
         github_repo:
           type: string
+        code_github_owner:
+          type: string
+          description: 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同
+        code_github_repo:
+          type: string
+          description: 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同
         public_github_token_id:
           type: string
           description: 公开仓库 Token 引用；未配置为空串
@@ -12282,6 +12295,7 @@ components:
       type: object
       required:
         - project_id
+        - repo_full_name
         - enabled
         - trigger_opened
         - trigger_synchronize
@@ -12293,6 +12307,9 @@ components:
       properties:
         project_id:
           type: string
+        repo_full_name:
+          type: string
+          description: 该审查实际使用的代码仓库（owner/repo，原样大小写；未单独配置代码仓库时即公开仓库）
         enabled:
           type: boolean
         trigger_opened:
@@ -12374,8 +12391,10 @@ components:
           type: string
         github_owner:
           type: string
+          description: 实际审查的代码仓库 owner（未单独配置代码仓库时即公开仓库）
         github_repo:
           type: string
+          description: 实际审查的代码仓库 repo 名（未单独配置代码仓库时即公开仓库）
         enabled:
           type: boolean
         code_combination_count:

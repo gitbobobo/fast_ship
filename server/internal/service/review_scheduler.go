@@ -152,12 +152,13 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if err := tx.Where("project_id = ?", row.ProjectID).First(&settings).Error; err != nil {
 			return err
 		}
-		// 复核：仍启用、动作仍勾选、仓库仍归属该项目。
+		// 复核：仍启用、动作仍勾选、仓库（代码仓库，未单独配置即公开仓库）
+		// 仍归属该项目。
 		if !settings.Enabled || !reviewTriggerEnabled(&settings, row.Action) {
 			return nil
 		}
-		owner, repoName := splitRepoName(row.RepoFullName)
-		if owner == "" || !equalFoldStr(project.GithubOwner, owner) || !equalFoldStr(project.GithubRepo, repoName) {
+		owner, _ := splitRepoName(row.RepoFullName)
+		if owner == "" || !equalFoldStr(project.CodeRepoFullName(), row.RepoFullName) {
 			return nil
 		}
 		_, err := s.openRoundTx(tx, &project, &settings,

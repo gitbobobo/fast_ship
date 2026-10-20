@@ -199,10 +199,11 @@ func TestListReviewProjects_TakenBy(t *testing.T) {
 		p.GithubRepo = ""
 	})
 
-	// 我的项目未开启，对方项目已开启同仓库。
+	// 我的项目未开启，对方项目已开启同仓库（占用判定按设置行的
+	// repo_full_name 快照，与大写无关）。
 	now := time.Now().UTC()
 	if err := svc.db.Create(&model.ProjectReviewSettings{
-		ProjectID: otherProject.ID, UserID: other.ID, Enabled: true,
+		ProjectID: otherProject.ID, UserID: other.ID, RepoFullName: "octo/repo", Enabled: true,
 		TriggerOpened: true, TriggerSynchronize: true,
 		CodeCombinationsJSON: `[{"environment_id":"e1","instance_id":"i","model":"m","t3_project_id":"t3p"}]`,
 		CreatedAt:            now, UpdatedAt: now,

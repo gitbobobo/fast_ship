@@ -37,6 +37,8 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 		project.Description,
 		project.GithubOwner,
 		project.GithubRepo,
+		project.CodeGithubOwner,
+		project.CodeGithubRepo,
 		project.PublicGitHubTokenID,
 		project.CodeGitHubTokenID,
 		project.CreatedAt,
@@ -45,9 +47,10 @@ func (r *ProjectRepository) Create(project *model.Project) error {
 	res := r.db.Exec(`
 		INSERT INTO projects (
 			id, user_id, name, description, github_owner, github_repo,
+			code_github_owner, code_github_repo,
 			public_github_token_id, code_github_token_id, created_at, updated_at
 		)
-		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		WHERE `+pred, args...)
 	if res.Error != nil {
 		return res.Error
@@ -161,12 +164,13 @@ func (r *ProjectRepository) GetIssueCounts(projectIDs []string) (map[string]Proj
 
 func (r *ProjectRepository) Update(project *model.Project) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		// 仓库归属变更后，项目审查设置里缓存的 repo_full_name 必须跟着走：
-		// 否则旧仓库的设置会继续占着唯一索引，而新仓库可能和另一个已启用
-		// 项目重复（webhook 按 live 字段反查会出现两个启用项目）。
-		// 仓库变了就停用审查并刷新缓存键，由用户按新仓库重新开启。
+		// 代码仓库（CodeRepo()，未单独配置即公开仓库）归属变更后，项目审查
+		// 设置里缓存的 repo_full_name 必须跟着走：否则旧仓库的设置会继续占着
+		// 唯一索引，而新仓库可能和另一个已启用项目重复。审查仓库变了就停用
+		// 审查并刷新缓存键，由用户按新仓库重新开启；只改公开仓库（代码仓库
+		// 显式配置时）不影响审查。
 		var before model.Project
-		if err := tx.Select("github_owner", "github_repo").
+		if err := tx.Select("github_owner", "github_repo", "code_github_owner", "code_github_repo").
 			Where("id = ? AND user_id = ?", project.ID, project.UserID).
 			First(&before).Error; err != nil {
 			return err
@@ -180,6 +184,8 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 				"description":            project.Description,
 				"github_owner":           project.GithubOwner,
 				"github_repo":            project.GithubRepo,
+				"code_github_owner":      project.CodeGithubOwner,
+				"code_github_repo":       project.CodeGithubRepo,
 				"public_github_token_id": project.PublicGitHubTokenID,
 				"code_github_token_id":   project.CodeGitHubTokenID,
 				"updated_at":             time.Now().UTC(),
@@ -188,14 +194,14 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 			return res.Error
 		}
 		if res.RowsAffected > 0 {
-			if !strings.EqualFold(before.GithubOwner+"/"+before.GithubRepo,
-				project.GithubOwner+"/"+project.GithubRepo) {
+			if !strings.EqualFold(before.CodeRepoFullName(), project.CodeRepoFullName()) {
+				reviewOwner, reviewRepo := project.CodeRepo()
 				now := time.Now().UTC()
 				if err := tx.Model(&model.ProjectReviewSettings{}).
 					Where("project_id = ?", project.ID).
 					Updates(map[string]interface{}{
 						"enabled":        false,
-						"repo_full_name": strings.ToLower(project.GithubOwner + "/" + project.GithubRepo),
+						"repo_full_name": strings.ToLower(reviewOwner + "/" + reviewRepo),
 						"updated_at":     now,
 					}).Error; err != nil {
 					return err

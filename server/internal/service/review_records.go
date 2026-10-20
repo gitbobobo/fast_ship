@@ -22,13 +22,14 @@ const (
 	reviewRecordsMaxLimit     = 100
 )
 
-// ListReviewProjects 当前用户所有已关联 GitHub 仓库的项目审查总览：
-// 开关与组合数取设置行，最近状态取最新 review_pull_requests 行；
-// 同仓库被其他项目启用时 taken_by 非空且 can_manage=false。
+// ListReviewProjects 当前用户所有已关联仓库（公开或代码仓库任一）的项目审查
+// 总览：开关与组合数取设置行，最近状态取最新 review_pull_requests 行；
+// 同仓库被其他项目启用时 taken_by 非空且 can_manage=false。仓库字段展示
+// 实际审查的代码仓库（未单独配置即公开仓库）。
 func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) ([]api.ReviewProjectSummary, error) {
 	var projects []model.Project
 	if err := s.db.WithContext(ctx).
-		Where("user_id = ? AND github_owner <> '' AND github_repo <> ''", userID).
+		Where("user_id = ? AND ((github_owner <> '' AND github_repo <> '') OR (code_github_owner <> '' AND code_github_repo <> ''))", userID).
 		Order("created_at ASC").
 		Find(&projects).Error; err != nil {
 		return nil, errs.ErrInternal
@@ -53,12 +54,14 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 		settingsByProject[row.ProjectID] = row
 	}
 
-	// 最新一条 PR 记录（updated_at 最大）给状态字段。只认项目**当前**仓库的
-	// 账本：项目换过仓库后，旧仓库的历史记录不能当成新仓库的最近状态展示。
+	// 最新一条 PR 记录（updated_at 最大）给状态字段。只认项目**当前**审查
+	// 仓库的账本：项目换过仓库后，旧仓库的历史记录不能当成新仓库的最近状态
+	// 展示。
 	repoByProject := map[string]string{}
 	repoSet := map[string]struct{}{}
-	for _, p := range projects {
-		repo := strings.ToLower(p.GithubOwner + "/" + p.GithubRepo)
+	for i := range projects {
+		p := &projects[i]
+		repo := strings.ToLower(p.CodeRepoFullName())
 		repoByProject[p.ID] = repo
 		repoSet[repo] = struct{}{}
 	}
@@ -83,18 +86,20 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 		}
 	}
 
-	// 同仓库占用：别的项目 enabled 且 owner/repo（小写）相同 → 占用者登录名。
+	// 同仓库占用：别的项目 enabled 且审查仓库（小写）相同 → 占用者登录名。
 	occupierByRepo, err := s.reviewOccupiers(ctx, projects)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, p := range projects {
+	for i := range projects {
+		p := &projects[i]
+		owner, repo := p.CodeRepo()
 		item := api.ReviewProjectSummary{
 			ProjectId:   p.ID,
 			ProjectName: p.Name,
-			GithubOwner: p.GithubOwner,
-			GithubRepo:  p.GithubRepo,
+			GithubOwner: owner,
+			GithubRepo:  repo,
 			CanManage:   true,
 		}
 		if row, ok := settingsByProject[p.ID]; ok {
@@ -115,7 +120,7 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 			}
 			item.LastReviewAt = api.Ptr(pr.UpdatedAt.UTC().Format(time.RFC3339Nano))
 		}
-		repoKey := reviewRepoKey(p.GithubOwner, p.GithubRepo)
+		repoKey := reviewRepoKey(owner, repo)
 		if login, taken := occupierByRepo[repoKey][p.ID]; taken {
 			item.TakenBy = api.Ptr(login)
 			item.CanManage = false
@@ -126,38 +131,34 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 }
 
 // reviewOccupiers 返回 repoKey → (占用 projectID → 登录名) 的映射：
-// 对给定项目集合，查同仓库 enabled 的其他项目。键外层是 repo，内层项目 id
-// 只用于排除「自己占自己」——取值时取任一非本项目的占用者。
+// 对给定项目集合，查同仓库 enabled 的其他项目。占用判定只读设置行的
+// repo_full_name 快照（enabled 行的唯一真相），联 users 取登录名。
+// 键外层是 repo，内层项目 id 只用于排除「自己占自己」。
 func (s *ReviewService) reviewOccupiers(ctx context.Context, projects []model.Project) (map[string]map[string]string, error) {
 	type row struct {
-		ProjectID string
-		Owner     string
-		Repo      string
-		Login     string
+		ProjectID    string
+		RepoFullName string
+		Login        string
 	}
 	var rows []row
 	if err := s.db.WithContext(ctx).
 		Table("project_review_settings AS s").
-		Joins("JOIN projects p ON p.id = s.project_id").
-		Joins("JOIN users u ON u.id = p.user_id").
+		Joins("JOIN users u ON u.id = s.user_id").
 		Where("s.enabled").
-		Select("s.project_id, p.github_owner AS owner, p.github_repo AS repo, u.username AS login").
+		Select("s.project_id, s.repo_full_name, u.username AS login").
 		Scan(&rows).Error; err != nil {
 		return nil, errs.ErrInternal
-	}
-	enabled := map[string]row{}
-	for _, r := range rows {
-		enabled[r.ProjectID] = r
 	}
 
 	out := map[string]map[string]string{}
 	for _, p := range projects {
-		key := reviewRepoKey(p.GithubOwner, p.GithubRepo)
+		owner, repo := p.CodeRepo()
+		key := reviewRepoKey(owner, repo)
 		for _, r := range rows {
 			if r.ProjectID == p.ID {
 				continue
 			}
-			if reviewRepoKey(r.Owner, r.Repo) != key {
+			if r.RepoFullName != key {
 				continue
 			}
 			if out[key] == nil {
@@ -180,7 +181,7 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 	if err != nil {
 		return nil, err
 	}
-	currentRepo := strings.ToLower(project.GithubOwner + "/" + project.GithubRepo)
+	currentRepo := strings.ToLower(project.CodeRepoFullName())
 	if limit <= 0 {
 		limit = reviewRecordsDefaultLimit
 	}

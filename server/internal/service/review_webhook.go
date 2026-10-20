@@ -254,7 +254,9 @@ func (s *ReviewService) findEnabledProjectByRepoTx(tx *gorm.DB, repoFullName str
 }
 
 // findEnabledReviewProjectTx 按仓库全名（大小写不敏感）找到启用审查的项目
-// 及其设置；无命中返回 (nil, nil, nil)。联查 projects 保证仓库归属仍有效。
+// 及其设置；无命中返回 (nil, nil, nil)。只按设置行的 repo_full_name 快照反查
+// ——enabled 行的快照列是唯一真相（项目行改仓库会刷新它），代码仓库与公开
+// 仓库分离后项目行的 live 字段不再可靠。
 func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName string) (*model.Project, *model.ProjectReviewSettings, error) {
 	owner, repo, ok := strings.Cut(repoFullName, "/")
 	if !ok || owner == "" || repo == "" {
@@ -262,9 +264,8 @@ func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName str
 	}
 	var rows []model.ProjectReviewSettings
 	if err := tx.
-		Joins("JOIN projects p ON p.id = project_review_settings.project_id").
-		Where("project_review_settings.enabled AND lower(p.github_owner) = ? AND lower(p.github_repo) = ?",
-			strings.ToLower(owner), strings.ToLower(repo)).
+		Where("project_review_settings.enabled AND project_review_settings.repo_full_name = ?",
+			strings.ToLower(repoFullName)).
 		Limit(1).Find(&rows).Error; err != nil {
 		return nil, nil, err
 	}

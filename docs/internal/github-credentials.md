@@ -7,6 +7,26 @@ GitHub Token 不再存在项目行上。`user_github_tokens` 是用户级 Token 
 - **公开仓库 Token**（原 Access Token）：Issue 同步与 GitHub Issue 写、分支查询、创建 Tag、发布 Release、上传安装包。
 - **代码仓库 Token**（原 PR 访问 Token）：仅用于读取关联 PR（含其他仓库）。
 
+## 公开仓库与代码仓库各管什么
+
+项目有两个独立的仓库字段对，各自服务不同链路：
+
+- **公开仓库**（`projects.github_owner/github_repo`）：Issue 同步、发版
+  （Tag/Release/安装包）、分支查询、发货的仓库。`IsGitHubConfigured()` 只判
+  它。
+- **代码仓库**（`projects.code_github_owner/code_github_repo`，可选）：PR
+  审查实际使用的仓库。两个 code 列都非空才算显式配置；审查链路取仓库一律
+  经 `project.CodeRepo()`——code 列为空时回落公开仓库，因此未单独配置的
+  项目行为与原先完全一致（musiver 场景：公开 `liuyincs/musiver` 放 Issue
+  与 Release，代码在 `gitbobobo/musiver`）。
+
+两个仓库字段与两个 Token 引用（`public_github_token_id`/
+`code_github_token_id`）**各自独立、互不推导**：配了代码仓库不要求配代码
+Token（App 安装令牌承担审查的 GitHub 写），配了公开仓库 Token 也不暗示代码
+仓库与公开仓库相同。写侧规范化：创建/更新时 `code_repository_url` 解析成
+owner/repo，与公开仓库大小写不敏感相同则归一为空串（空 = 同公开仓库）；
+PR 审查链路的仓库判定细节见 docs/internal/reviews.md。
+
 两个用途**互不兜底**：未配公开仓库 Token 不做 Issue 同步（后台跳过、手动同步与 GitHub 写返回 40006），不能借代码仓库 Token；未配代码仓库 Token 时匿名读公共 PR，不借公开仓库 Token。凭证解密失败/引用行缺失一律 50000 明确报错，不换另一把、不降级匿名。
 
 ## 模块划分
@@ -16,7 +36,7 @@ GitHub Token 不再存在项目行上。`user_github_tokens` 是用户级 Token 
 - `pkg/github/detector.go`（`TokenDetector`）：只读检测。`GET https://api.github.com/user`；401 → `invalid`，超时/网络错误/限流/5xx → `failed`（网络失败不能判成凭证无效）；200 → `ok`，`X-OAuth-Scopes` 非空 → `classic` + scopes，空 scopes 且前缀 `github_pat_` → `fine_grained`（detail 写明「无法自动获取完整授权」），否则 `unknown`。`detection_detail` 使用固定文案，不拼接底层 `err.Error()`。不创建任何 GitHub 资源、不用写操作试探权限。测试经 service 的 `detect` 字段注入 fake。
 - REST API：`/api/github-tokens`（仅 JWT），见 openapi `github-tokens` tag。创建/替换后服务端同步检测一次，检测失败仍 200 保存（状态落在 `detection_status`）；列表不触发 GitHub 请求。
 
-项目凭证的写侧（create/update 引用解析）归 `ProjectService`：create 直接校验引用归属，update 用 `TokenRefUpdate` 三态（key 缺省保留、显式 null/空串清空、非空替换）。
+项目凭证的写侧（create/update 引用解析）归 `ProjectService`：create 直接校验引用归属，update 用 `OptionalStringUpdate` 三态（key 缺省保留、显式 null/空串清空、非空替换；旧名 `TokenRefUpdate` 保留为别名）。代码仓库链接 `code_repository_url` 走同一个三态。
 
 ## 读侧语义
 

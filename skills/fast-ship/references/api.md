@@ -1005,6 +1005,8 @@ API Key 管理（仅 JWT）
 | `items[].description` | string | 是 |  |
 | `items[].github_owner` | string | 是 |  |
 | `items[].github_repo` | string | 是 |  |
+| `items[].code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `items[].code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `items[].public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `items[].code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `items[].latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -1054,6 +1056,7 @@ API Key 管理（仅 JWT）
 | `name` | string（长度 1..100） | 是 | 项目名，当前用户下唯一 |
 | `description` | string | 否 |  |
 | `repository_url` | string | 否 | GitHub 仓库链接（owner/repo 或完整 URL）；不再要求同时提供 Token |
+| `code_repository_url` | string | 否 | 代码仓库链接（owner/repo 或完整 URL），供 PR 审查使用；空 = 与公开仓库相同 |
 | `public_github_token_id` | string | 否 | 公开仓库 Token（Token 库记录 id）引用；用于 Issue 同步与 GitHub 写、分支查询、发货。可空；必须属于当前用户，否则 40420 |
 | `code_github_token_id` | string | 否 | 代码仓库 Token（Token 库记录 id）引用；仅用于读取关联 PR（含其他仓库）。可空；必须属于当前用户，否则 40420 |
 
@@ -1070,6 +1073,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -1130,6 +1135,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -1183,6 +1190,7 @@ API Key 管理（仅 JWT）
 | `name` | string（长度 1..100） | 否 |  |
 | `description` | string | 否 | 缺省或 null 保留现值；显式空串清空；非空替换 |
 | `repository_url` | string | 否 | 同创建；不再要求项目已配 Token |
+| `code_repository_url` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空（回落公开仓库）；非空替换（owner/repo 或完整 URL；与公开仓库相同则归一为空） |
 | `public_github_token_id` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420） |
 | `code_github_token_id` | string（可空） | 否 | 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420） |
 
@@ -1199,6 +1207,8 @@ API Key 管理（仅 JWT）
 | `description` | string | 是 |  |
 | `github_owner` | string | 是 |  |
 | `github_repo` | string | 是 |  |
+| `code_github_owner` | string | 是 | 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 |
+| `code_github_repo` | string | 是 | 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同 |
 | `public_github_token_id` | string | 是 | 公开仓库 Token 引用；未配置为空串 |
 | `code_github_token_id` | string | 是 | 代码仓库 Token 引用；未配置为空串 |
 | `latest_version` | object | 否 | omitempty，仅在列表项中出现 |
@@ -7208,8 +7218,8 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items` | object[] | 是 |  |
 | `items[].project_id` | string | 是 |  |
 | `items[].project_name` | string | 是 |  |
-| `items[].github_owner` | string | 是 |  |
-| `items[].github_repo` | string | 是 |  |
+| `items[].github_owner` | string | 是 | 实际审查的代码仓库 owner（未单独配置代码仓库时即公开仓库） |
+| `items[].github_repo` | string | 是 | 实际审查的代码仓库 repo 名（未单独配置代码仓库时即公开仓库） |
 | `items[].enabled` | boolean | 是 |  |
 | `items[].code_combination_count` | integer | 是 |  |
 | `items[].visual_combination_count` | integer | 是 |  |
@@ -7251,6 +7261,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `project_id` | string | 是 |  |
+| `repo_full_name` | string | 是 | 该审查实际使用的代码仓库（owner/repo，原样大小写；未单独配置代码仓库时即公开仓库） |
 | `enabled` | boolean | 是 |  |
 | `trigger_opened` | boolean | 是 |  |
 | `trigger_synchronize` | boolean | 是 |  |
@@ -7347,6 +7358,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `project_id` | string | 是 |  |
+| `repo_full_name` | string | 是 | 该审查实际使用的代码仓库（owner/repo，原样大小写；未单独配置代码仓库时即公开仓库） |
 | `enabled` | boolean | 是 |  |
 | `trigger_opened` | boolean | 是 |  |
 | `trigger_synchronize` | boolean | 是 |  |

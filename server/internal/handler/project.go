@@ -32,6 +32,7 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 		Name:                input.Name,
 		Description:         api.NonEmpty(input.Description),
 		RepositoryUrl:       api.NonEmpty(input.RepositoryURL),
+		CodeRepositoryUrl:   api.NonEmpty(input.CodeRepositoryURL),
 		PublicGithubTokenId: api.NonEmpty(input.PublicGithubTokenID),
 		CodeGithubTokenId:   api.NonEmpty(input.CodeGithubTokenID),
 	})
@@ -78,13 +79,14 @@ func (h *ProjectHandler) List(c *gin.Context) {
 }
 
 // createProjectInput / updateProjectInput 保留手写绑定，原因同 updateMeInput：
-// 生成类型的指针字段把显式 null 折成 nil，而 Token 引用字段的三态语义
-// （key 缺省保留 / 显式 null 或空串清空 / 非空替换）依赖「JSON key 是否出现」的
-// presence 判定。create 无保留语义，引用字段仍可走 string + api.NonEmpty。
+// 生成类型的指针字段把显式 null 折成 nil，而 Token 引用与代码仓库字段的三态
+// 语义（key 缺省保留 / 显式 null 或空串清空 / 非空替换）依赖「JSON key 是否
+// 出现」的 presence 判定。create 无保留语义，可选项仍可走 string + api.NonEmpty。
 type createProjectInput struct {
 	Name                string `json:"name" binding:"required,min=1,max=100"`
 	Description         string `json:"description"`
 	RepositoryURL       string `json:"repository_url"`
+	CodeRepositoryURL   string `json:"code_repository_url"`
 	PublicGithubTokenID string `json:"public_github_token_id"`
 	CodeGithubTokenID   string `json:"code_github_token_id"`
 }
@@ -93,25 +95,26 @@ type updateProjectInput struct {
 	Name                string          `json:"name" binding:"omitempty,min=1,max=100"`
 	Description         *string         `json:"description"`
 	RepositoryURL       string          `json:"repository_url"`
+	CodeRepositoryURL   json.RawMessage `json:"code_repository_url"`
 	PublicGithubTokenID json.RawMessage `json:"public_github_token_id"`
 	CodeGithubTokenID   json.RawMessage `json:"code_github_token_id"`
 }
 
-// decodeTokenRefUpdate 按 presence 语义解析 Token 引用字段：
-// key 缺省 → Set=false（保留现值）；显式 null 或空串 → Set=true、空值（清空）；
-// 非空字符串 → Set=true（替换）。类型不符返回错误。
-func decodeTokenRefUpdate(raw json.RawMessage) (service.TokenRefUpdate, error) {
+// decodeOptionalStringUpdate 按 presence 语义解析可选字符串字段（Token 引用、
+// 代码仓库链接）：key 缺省 → Set=false（保留现值）；显式 null 或空串 →
+// Set=true、空值（清空）；非空字符串 → Set=true（替换）。类型不符返回错误。
+func decodeOptionalStringUpdate(raw json.RawMessage) (service.OptionalStringUpdate, error) {
 	if len(raw) == 0 {
-		return service.TokenRefUpdate{}, nil
+		return service.OptionalStringUpdate{}, nil
 	}
 	var value *string
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return service.TokenRefUpdate{}, errors.New("类型无效")
+		return service.OptionalStringUpdate{}, errors.New("类型无效")
 	}
 	if value == nil {
-		return service.TokenRefUpdate{Set: true}, nil
+		return service.OptionalStringUpdate{Set: true}, nil
 	}
-	return service.TokenRefUpdate{Set: true, Value: *value}, nil
+	return service.OptionalStringUpdate{Set: true, Value: *value}, nil
 }
 
 func (h *ProjectHandler) Update(c *gin.Context) {
@@ -122,14 +125,19 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 		return
 	}
 
-	publicTokenRef, err := decodeTokenRefUpdate(input.PublicGithubTokenID)
+	publicTokenRef, err := decodeOptionalStringUpdate(input.PublicGithubTokenID)
 	if err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: public_github_token_id 类型无效")
 		return
 	}
-	codeTokenRef, err := decodeTokenRefUpdate(input.CodeGithubTokenID)
+	codeTokenRef, err := decodeOptionalStringUpdate(input.CodeGithubTokenID)
 	if err != nil {
 		response.BadRequest(c, 40001, "请求参数无效: code_github_token_id 类型无效")
+		return
+	}
+	codeRepoRef, err := decodeOptionalStringUpdate(input.CodeRepositoryURL)
+	if err != nil {
+		response.BadRequest(c, 40001, "请求参数无效: code_repository_url 类型无效")
 		return
 	}
 
@@ -138,6 +146,7 @@ func (h *ProjectHandler) Update(c *gin.Context) {
 		Name:                api.NonEmpty(input.Name),
 		Description:         input.Description,
 		RepositoryUrl:       api.NonEmpty(input.RepositoryURL),
+		CodeRepositoryUrl:   codeRepoRef,
 		PublicGithubTokenId: publicTokenRef,
 		CodeGithubTokenId:   codeTokenRef,
 	})

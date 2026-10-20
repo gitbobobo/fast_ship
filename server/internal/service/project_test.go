@@ -662,3 +662,209 @@ func TestProjectServiceUpdate_Description(t *testing.T) {
 		t.Fatalf("expected cleared description, got resp=%q stored=%q", resp.Description, storedDesc())
 	}
 }
+
+// 创建带 code_repository_url：单独配置的代码仓库原样落库并回显；
+// 与公开仓库大小写不敏感相同 → 归一为空串（空 = 同公开仓库）。
+func TestProjectServiceCreate_CodeRepoURL(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-code-repo")
+	projectSvc := newTestProjectService(svc)
+
+	created, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "code-repo-project",
+		RepositoryUrl:     api.Ptr("https://github.com/liuyincs/musiver"),
+		CodeRepositoryUrl: api.Ptr("gitbobobo/musiver"),
+	})
+	if err != nil {
+		t.Fatalf("create with code repo: %v", err)
+	}
+	if created.CodeGithubOwner != "gitbobobo" || created.CodeGithubRepo != "musiver" {
+		t.Fatalf("code repo = %q/%q, want gitbobobo/musiver", created.CodeGithubOwner, created.CodeGithubRepo)
+	}
+	var stored model.Project
+	if err := svc.db.First(&stored, "id = ?", created.Id).Error; err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if stored.CodeGithubOwner != "gitbobobo" || stored.CodeGithubRepo != "musiver" {
+		t.Fatalf("stored code repo = %q/%q", stored.CodeGithubOwner, stored.CodeGithubRepo)
+	}
+
+	// code 仓库与公开仓库相同（大小写不同）→ 归一为空串。
+	same, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "code-repo-same",
+		RepositoryUrl:     api.Ptr("liuyincs/Musiver"),
+		CodeRepositoryUrl: api.Ptr("https://github.com/LIUYINCS/musiver.git"),
+	})
+	if err != nil {
+		t.Fatalf("create same repo: %v", err)
+	}
+	if same.CodeGithubOwner != "" || same.CodeGithubRepo != "" {
+		t.Fatalf("same repo should normalize to empty, got %q/%q", same.CodeGithubOwner, same.CodeGithubRepo)
+	}
+
+	// 非法格式 → 40001。
+	if _, err := projectSvc.Create(user.ID, &CreateProjectRequest{
+		Name:              "code-repo-bad",
+		CodeRepositoryUrl: api.Ptr("git bobo/musiver"),
+	}); appErrorCode(t, err) != errs.ErrInvalidParams.Code {
+		t.Fatalf("invalid code repo code = %d, want %d", appErrorCode(t, err), errs.ErrInvalidParams.Code)
+	}
+}
+
+// 更新 code_repository_url 三态：key 缺省保留、显式空清空（回落公开仓库）、
+// 非空替换；替换成与公开仓库相同的值归一为空串；失败请求不留半改动。
+func TestProjectServiceUpdate_CodeRepoURLThreeStates(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-code-repo-upd")
+	projectSvc := newTestProjectService(svc)
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = "liuyincs"
+		p.GithubRepo = "musiver"
+		p.CodeGithubOwner = "gitbobobo"
+		p.CodeGithubRepo = "musiver"
+	})
+
+	storedCode := func() (string, string) {
+		var stored model.Project
+		if err := svc.db.First(&stored, "id = ?", project.ID).Error; err != nil {
+			t.Fatalf("reload project: %v", err)
+		}
+		return stored.CodeGithubOwner, stored.CodeGithubRepo
+	}
+
+	// key 缺省：保留现值。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		Description: api.Ptr("code repo untouched"),
+	}); err != nil {
+		t.Fatalf("update without code repo: %v", err)
+	}
+	if owner, repo := storedCode(); owner != "gitbobobo" || repo != "musiver" {
+		t.Fatalf("expected code repo preserved, got %q/%q", owner, repo)
+	}
+
+	// 非空替换。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "https://github.com/other/code.git"},
+	}); err != nil {
+		t.Fatalf("update replace code repo: %v", err)
+	}
+	if owner, repo := storedCode(); owner != "other" || repo != "code" {
+		t.Fatalf("expected other/code, got %q/%q", owner, repo)
+	}
+
+	// 替换成与公开仓库相同的值（大小写不同）→ 归一为空串。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "LIUYINCS/MUSIVER"},
+	}); err != nil {
+		t.Fatalf("update same-as-public code repo: %v", err)
+	}
+	if owner, repo := storedCode(); owner != "" || repo != "" {
+		t.Fatalf("same-as-public should normalize to empty, got %q/%q", owner, repo)
+	}
+
+	// 显式空串清空（代码仓库本就为空时仍是合法三态操作）。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "again/repo"},
+	}); err != nil {
+		t.Fatalf("set again: %v", err)
+	}
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true},
+	}); err != nil {
+		t.Fatalf("update clear code repo: %v", err)
+	}
+	if owner, repo := storedCode(); owner != "" || repo != "" {
+		t.Fatalf("expected cleared code repo, got %q/%q", owner, repo)
+	}
+
+	// 非法格式 → 40001，且不改动现值。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "bad repo"},
+	}); appErrorCode(t, err) != errs.ErrInvalidParams.Code {
+		t.Fatalf("invalid code repo code = %d, want %d", appErrorCode(t, err), errs.ErrInvalidParams.Code)
+	}
+	if owner, repo := storedCode(); owner != "" || repo != "" {
+		t.Fatalf("failed update must leave value unchanged, got %q/%q", owner, repo)
+	}
+}
+
+// 改代码仓库会停用审查并刷新 repo_full_name 快照（新的 CodeRepo 小写）；
+// 代码仓库已显式配置时，只改公开仓库不停用审查——审查仓库未变。
+func TestProjectRepoUpdate_CodeRepoSyncsReviewSettings(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-code-repo-sync")
+
+	seedEnabled := func(projectID string, repo string) {
+		t.Helper()
+		now := time.Now().UTC()
+		if err := svc.db.Create(&model.ProjectReviewSettings{
+			ProjectID: projectID, UserID: user.ID, RepoFullName: repo, Enabled: true,
+			CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
+			CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed settings: %v", err)
+		}
+	}
+
+	// 只改代码仓库：停用 + 快照刷新为新代码仓库。
+	withCode := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = "pub"
+		p.GithubRepo = "proj"
+	})
+	seedEnabled(withCode.ID, "pub/proj")
+	withCode.CodeGithubOwner = "gitbobobo"
+	withCode.CodeGithubRepo = "musiver"
+	if err := svc.projectRepo.Update(withCode); err != nil {
+		t.Fatalf("update code repo: %v", err)
+	}
+	var gotCode model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", withCode.ID).First(&gotCode).Error; err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if gotCode.Enabled {
+		t.Fatal("改代码仓库后审查设置应停用")
+	}
+	if gotCode.RepoFullName != "gitbobobo/musiver" {
+		t.Fatalf("repo_full_name = %q, want gitbobobo/musiver", gotCode.RepoFullName)
+	}
+
+	// 只改公开仓库（代码仓库显式配置）：审查不停用、快照不变。
+	codeOnly := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = "pub"
+		p.GithubRepo = "proj"
+		p.CodeGithubOwner = "gitbobobo"
+		p.CodeGithubRepo = "musiver"
+	})
+	seedEnabled(codeOnly.ID, "gitbobobo/musiver")
+	codeOnly.GithubOwner = "AnotherPub"
+	codeOnly.GithubRepo = "AnotherProj"
+	if err := svc.projectRepo.Update(codeOnly); err != nil {
+		t.Fatalf("update public repo only: %v", err)
+	}
+	var gotCodeOnly model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", codeOnly.ID).First(&gotCodeOnly).Error; err != nil {
+		t.Fatalf("load settings 2: %v", err)
+	}
+	if !gotCodeOnly.Enabled || gotCodeOnly.RepoFullName != "gitbobobo/musiver" {
+		t.Fatalf("只改公开仓库不应影响审查: enabled=%v repo=%q", gotCodeOnly.Enabled, gotCodeOnly.RepoFullName)
+	}
+
+	// 未配置代码仓库时改公开仓库：行为与现状一致（停用 + 刷新）。
+	fallback := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = "old"
+		p.GithubRepo = "repo"
+	})
+	seedEnabled(fallback.ID, "old/repo")
+	fallback.GithubOwner = "new"
+	fallback.GithubRepo = "Repo"
+	if err := svc.projectRepo.Update(fallback); err != nil {
+		t.Fatalf("update public repo fallback: %v", err)
+	}
+	var gotFallback model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", fallback.ID).First(&gotFallback).Error; err != nil {
+		t.Fatalf("load settings 3: %v", err)
+	}
+	if gotFallback.Enabled || gotFallback.RepoFullName != "new/repo" {
+		t.Fatalf("fallback 项目改公开仓库应停用并刷新: enabled=%v repo=%q", gotFallback.Enabled, gotFallback.RepoFullName)
+	}
+}
