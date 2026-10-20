@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -639,6 +640,31 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	now := time.Now().UTC()
 	var round int
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核，
+		// 否则会用旧快照开一轮（甚至取消新 head 的运行）。
+		var current model.Project
+		if err := tx.Select("github_owner", "github_repo").
+			Where("id = ? AND user_id = ?", project.ID, userID).First(&current).Error; err != nil {
+			return errs.ErrProjectNotFound
+		}
+		if !strings.EqualFold(current.GithubOwner+"/"+current.GithubRepo, repo) {
+			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
+		}
+		var enabled int64
+		if err := tx.Model(&model.ProjectReviewSettings{}).
+			Where("project_id = ? AND enabled", project.ID).Count(&enabled).Error; err != nil {
+			return err
+		}
+		if enabled == 0 {
+			return errs.ErrReviewNotEnabled
+		}
+		latest, err := s.currentAcceptedHeadTx(tx, project.ID, repo, prNumber)
+		if err != nil {
+			return err
+		}
+		if latest != "" && !strings.EqualFold(latest, pr.HeadSHA) {
+			return errs.ErrReviewHeadMoved
+		}
 		if err := s.supersedePRRunsTx(tx, project.ID, repo, prNumber, now); err != nil {
 			return err
 		}
@@ -647,12 +673,19 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}
-		var err error
-		round, err = s.openRoundTx(tx, project, &settings, repo, prNumber,
+		var openErr error
+		round, openErr = s.openRoundTx(tx, project, &settings, repo, prNumber,
 			pr.HeadSHA, "manual", pr.Title, pr.HTMLURL, pr.BaseRef, pr.HeadRef, installationID, now)
-		return err
+		return openErr
 	})
 	if err != nil {
+		if errors.Is(err, errs.ErrReviewNotEnabled) || errors.Is(err, errs.ErrReviewHeadMoved) ||
+			errors.Is(err, errs.ErrProjectNotFound) {
+			return nil, err
+		}
+		if appErr := (*errs.AppError)(nil); errors.As(err, &appErr) {
+			return nil, err
+		}
 		return nil, errs.ErrInternal
 	}
 	s.notifyReviewLoop()

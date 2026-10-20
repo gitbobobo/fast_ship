@@ -821,3 +821,79 @@ func TestReviewWebhookClosedCancelsWork(t *testing.T) {
 		t.Fatalf("debounce rows = %d, want 0", got)
 	}
 }
+
+// rerun 事务内复核：取 PR 之后被停用 → 拒绝重跑。
+func TestRerunRejectsWhenDisabledMidFlight(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	e.fake.SetPR(repo, 92, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 92, HeadSHA: "sha-rr",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.enableReview(t)
+	client := &disableOnFetchClient{GitHubClient: e.fake, db: e.svc.db, projectID: e.project.ID}
+	review := NewReviewService(e.svc.db, e.svc.projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
+		NewNotificationSink(e.svc.db),
+		githubapp.StaticClients{Client: client},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"),
+		nil, nil, nil, e.svc.cfg, zap.NewNop())
+
+	_, err := review.RerunReview(context.Background(), e.user.ID, e.project.ID, 92, "")
+	if err == nil {
+		t.Fatal("停用后重跑应被拒绝")
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("被拒绝的重跑不应创建运行，runs=%d", runs)
+	}
+}
+
+// disableOnFetchClient 在解析完 PR 后停用审查（模拟取数与开轮之间的并发停用）。
+type disableOnFetchClient struct {
+	githubapi.GitHubClient
+	db        *gorm.DB
+	projectID string
+	done      bool
+}
+
+func (c *disableOnFetchClient) GetPullRequest(ctx context.Context, inst int64, repo string, number int) (*githubapi.PullRequest, error) {
+	pr, err := c.GitHubClient.GetPullRequest(ctx, inst, repo, number)
+	if err == nil && !c.done {
+		c.done = true
+		if err := c.db.Model(&model.ProjectReviewSettings{}).
+			Where("project_id = ?", c.projectID).Update("enabled", false).Error; err != nil {
+			return nil, err
+		}
+	}
+	return pr, err
+}
+
+// rerun 取到旧 head、但账本已被新 webhook 推进：拒绝，不取消新 head 的运行。
+func TestRerunRejectsWhenHeadMoved(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 93, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 93, HeadSHA: "sha-old",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.enableReview(t)
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 93, UserID: e.user.ID,
+		HeadSHA: "sha-new", RoundNumber: 2, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	_, err := e.review.RerunReview(context.Background(), e.user.ID, e.project.ID, 93, "")
+	if err == nil {
+		t.Fatal("实测 head 落后于账本时应拒绝重跑")
+	}
+	var runs int64
+	e.svc.db.Model(&model.ReviewRun{}).Count(&runs)
+	if runs != 0 {
+		t.Fatalf("被拒绝的重跑不应创建运行，runs=%d", runs)
+	}
+}

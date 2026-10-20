@@ -119,6 +119,7 @@ var (
 	// PR 审查（INT-135）：整个部署内同一仓库只允许一个项目开启审查；
 	// 冲突时 service 用 New(40922, ...) 在消息里带上占用者登录名。
 	ErrReviewRepoTaken = New(40922, "该仓库已被其他项目开启审查")
+	ErrReviewHeadMoved = New(40924, "PR 已更新，请刷新后重试")
 	// ErrReviewHeadChanged 回报结果时 PR HEAD 已前进（INT-135）：本轮作废。
 	ErrReviewHeadChanged = New(40920, "PR HEAD 已变化，本轮审查作废")
 	// ErrReviewNotEnabled 手动重跑时项目未开启审查（INT-135）。
