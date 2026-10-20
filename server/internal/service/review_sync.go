@@ -259,6 +259,23 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			}
 		default:
 			visualPending = false
+			// 截图没变、无需重启视觉审查：上一轮视觉已通过时把 success 带到
+			// 新 head（开轮清空了 visual_status），否则新提交会没有视觉结论。
+			if len(priorVisuals) > 0 && !priorVisualFailure(priorVisuals) {
+				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
+					ledger.HeadSHA, "success", reviewVisualStatusContext,
+					statusDesc("审查通过（沿用上一轮，截图未变化）"), targetURL); err != nil {
+					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
+				}
+				ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_status": "success"})
+				if err != nil {
+					return errs.ErrInternal
+				}
+				if !ok {
+					return nil
+				}
+				ledger.VisualStatus = "success"
+			}
 		}
 	} else {
 		visualPending = false
@@ -860,6 +877,16 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 		}
 	}
 	return decideVisual(in), fingerprint, priorRuns, nil
+}
+
+// priorVisualFailure 上一轮视觉运行是否含 blocker/worth_fixing。
+func priorVisualFailure(runs []model.ReviewRun) bool {
+	for i := range runs {
+		if runs[i].Status == model.ReviewRunCompleted && visualResultHasFailure(runs[i].ResultJSON) {
+			return true
+		}
+	}
+	return false
 }
 
 // visualResultHasFailure 视觉结论是否含 blocker/worth_fixing。

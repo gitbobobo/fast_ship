@@ -897,3 +897,82 @@ func TestRerunRejectsWhenHeadMoved(t *testing.T) {
 		t.Fatalf("被拒绝的重跑不应创建运行，runs=%d", runs)
 	}
 }
+
+// Agent 先鉴权（已写 dispatched_at）时，launch 仍需补 t3_project_id/workspace_root。
+func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-agent-first")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	var runID string
+	t3 := &fakeReviewT3{
+		listQueue: [][]string{{}, {"/ws/wt-af"}},
+		createFn: func(_ context.Context, _, _ string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
+			// Agent 先读了端点：dispatched_at 已被补写。
+			if err := e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", runID).
+				Update("dispatched_at", now).Error; err != nil {
+				return nil, false, err
+			}
+			return &T3ThreadLaunchResult{ThreadId: *req.ThreadId}, true, nil
+		},
+	}
+	review := e.withT3(t3, nil, nil)
+	run := e.seedRun(t, repo, 95, "sha-af", model.ReviewRunDispatched, now)
+	runID = run.ID
+	e.svc.db.Model(run).Update("environment_id", env.ID)
+
+	review.launchRun(context.Background(), run.ID, now)
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorkspaceRoot != "/ws" || after.T3ProjectID != "t3p" {
+		t.Fatalf("workspace_root/t3_project_id = %q/%q, want /ws/t3p", after.WorkspaceRoot, after.T3ProjectID)
+	}
+	if after.WorktreePath != "/ws/wt-af" {
+		t.Fatalf("worktree_path = %q", after.WorktreePath)
+	}
+}
+
+// 重跑同一 SHA、截图未变且上一轮视觉通过：新 head 应带上 success 视觉结论。
+func TestVisualCarrySuccessOnRerun(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "截图：![shot](https://github.com/user-attachments/assets/abc)"
+	e.fake.SetPR(repo, 96, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 96, HeadSHA: "sha-vs", Body: body,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	visualCombos, _ := marshalCombinations([]api.ReviewCombination{testCombo("env-vc")})
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	// 上一轮视觉通过。
+	prior := e.seedRun(t, repo, 96, "sha-prev", model.ReviewRunCompleted, now.Add(-time.Hour))
+	e.svc.db.Model(prior).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1,
+		"result_json": `{"summary":"通过","findings":[],"prior":[],"unmeasurable":[]}`,
+	})
+	// 本轮代码通过、有 UI 改动，截图未变。
+	run := e.seedRun(t, repo, 96, "sha-vs", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"round_number": 2, "summary": "干净",
+		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
+	})
+	fp := screenshotFingerprint(collectScreenshotURLs(body))
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 96, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-vs", RoundNumber: 2,
+		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	e.review.syncPendingPRs(now)
+
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 96", repo)
+	if ledger.VisualStatus != "success" {
+		t.Fatalf("visual_status = %q, want success（沿用上一轮通过）", ledger.VisualStatus)
+	}
+}

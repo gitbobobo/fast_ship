@@ -147,19 +147,24 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	}
 
 	// 线程确实建成了：不论运行是否在启动准备期间被新 SHA 取消/超时，都要把
-	// dispatched_at 与 thread_id 落库——归档与工作区回收都以「线程已确认」
-	// 为前提，丢掉这条证据会留下未归档线程与未删除的工作区。
-	res := s.db.Model(&model.ReviewRun{}).
-		Where("id = ? AND dispatched_at IS NULL", run.ID).
+	// launch 目标与工作区根目录落库——归档与工作区回收都以「线程已确认」为
+	// 前提。Agent 可能先鉴权把 dispatched_at 写上了，所以元数据按「字段仍为
+	// 空」单独更新，dispatched_at 只在为空时补。
+	if err := s.db.Model(&model.ReviewRun{}).
+		Where("id = ? AND workspace_root = ''", run.ID).
 		Updates(map[string]any{
-			"dispatched_at":  now,
 			"t3_project_id":  binding.T3ProjectID,
 			"thread_id":      result.ThreadId,
 			"workspace_root": binding.WorkspaceRoot,
 			"updated_at":     now,
-		})
-	if res.Error != nil {
-		s.logger.Error("更新审查运行派发状态失败", zap.String("run", run.ID), zap.Error(res.Error))
+		}).Error; err != nil {
+		s.logger.Error("更新审查运行 launch 快照失败", zap.String("run", run.ID), zap.Error(err))
+		return
+	}
+	if err := s.db.Model(&model.ReviewRun{}).
+		Where("id = ? AND dispatched_at IS NULL", run.ID).
+		Updates(map[string]any{"dispatched_at": now, "updated_at": now}).Error; err != nil {
+		s.logger.Error("更新审查运行派发状态失败", zap.String("run", run.ID), zap.Error(err))
 		return
 	}
 
