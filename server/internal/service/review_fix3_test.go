@@ -70,8 +70,11 @@ func TestReviewLedgerPartitionedByProject(t *testing.T) {
 		e.project.ID, repo).First(&ownLedger).Error; err != nil {
 		t.Fatalf("本项目总账应已创建: %v", err)
 	}
-	if !ownLedger.SyncPending {
-		t.Fatal("本项目总账应置 sync_pending")
+	if ownLedger.HeadSHA != "sha-x" {
+		t.Fatalf("本项目总账 head = %q, want sha-x", ownLedger.HeadSHA)
+	}
+	if ownLedger.SyncPending {
+		t.Fatal("webhook 不置 sync_pending；开轮后才置")
 	}
 	e.svc.db.First(&otherLedger, "project_id = ? AND repo_full_name = ? AND pr_number = 55",
 		other.ID, repo)

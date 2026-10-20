@@ -154,8 +154,11 @@ func TestReviewWebhookTriggerAndFiltering(t *testing.T) {
 	if err := e.svc.db.Where("repo_full_name = ? AND pr_number = 7", repo).First(&ledger).Error; err != nil {
 		t.Fatalf("expected ledger row: %v", err)
 	}
-	if !ledger.SyncPending {
-		t.Fatal("ledger sync_pending should be set")
+	if ledger.HeadSHA != "sha-a" {
+		t.Fatalf("ledger head = %q, want sha-a", ledger.HeadSHA)
+	}
+	if ledger.SyncPending {
+		t.Fatal("webhook 不置 sync_pending（开轮时才置，避免拿空运行集发布）")
 	}
 
 	// draft / fork / 不支持 action / 非 pull_request 事件：全部忽略。

@@ -2,7 +2,6 @@ package service
 
 import (
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -72,12 +71,10 @@ func (s *ReviewService) openRoundTx(
 		installationID = ledger.InstallationID
 	}
 	ledger.InstallationID = installationID
-	// commit status 按 SHA 归属：head/轮次推进后，旧 SHA 的已发布结论不再是
-	// 新 SHA 的去重依据，清空让同步重新发 pending。
-	if !strings.EqualFold(ledger.HeadSHA, headSHA) || ledger.RoundNumber != round {
-		ledger.CodeStatus = ""
-		ledger.VisualStatus = ""
-	}
+	// commit status 按 SHA 归属：开新轮后旧轮发布的结论不再是新轮的去重依据，
+	// 无条件清空，让同步重新发 pending/结论。
+	ledger.CodeStatus = ""
+	ledger.VisualStatus = ""
 	ledger.HeadSHA = headSHA
 	ledger.RoundNumber = round
 	ledger.SyncPending = true

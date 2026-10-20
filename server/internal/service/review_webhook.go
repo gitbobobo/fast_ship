@@ -143,8 +143,10 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 		return err
 	}
 
-	// 新 head ≠ 当前 head：取消该 PR 全部未终态运行并消费令牌、删防抖行、
-	// 置总账 sync_pending（无行则建）。
+	// 新 head ≠ 当前 head：取消该 PR 全部未终态运行并消费令牌、删防抖行，并把
+	// 总账 head 立刻推进到新 SHA（清掉旧轮残留的 pending 并 epoch+1）。防抖窗口
+	// 内不再同步旧轮：否则调度会拿新 head 的 PR 描述给旧 SHA 建视觉运行，而
+	// 这些运行不会被随后开轮的新 SHA 取消。
 	if headSHA != currentHead {
 		if err := s.supersedePRRunsTx(tx, project.ID, repo, prNumber, now); err != nil {
 			return err
@@ -154,16 +156,18 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}
+		if err := s.advancePRHeadTx(tx, project, repo, prNumber, headSHA, p.Installation.ID, now); err != nil {
+			return err
+		}
 	}
+
 	// 未勾选的动作不开新轮、也不发 GitHub 产出：只登记 seen、取消旧运行、
-	// 删防抖，并把总账 head 推进到新 SHA（否则同 SHA 的下一次已勾选动作会被
-	// 「该 SHA 已受理但非当前 head」当成 force-push 回旧 SHA 而忽略）。
+	// 删防抖、推进 head（同 SHA 的下一次已勾选动作不会被当成回旧 SHA 忽略）。
 	if !reviewTriggerEnabled(settings, p.Action) {
-		return s.advancePRHeadTx(tx, project, repo, prNumber, headSHA, p.Installation.ID, now)
+		return nil
 	}
-	if err := s.markPRSyncPendingTx(tx, project, repo, prNumber, headSHA, p.Installation.ID, now); err != nil {
-		return err
-	}
+	// sync_pending 由开轮（防抖到期后的 openRoundTx）置位：此刻还没有新轮的
+	// 运行，提前标 pending 会让调度拿空运行集写「审查中」。
 
 	// 写/更新防抖行：窗口内新推送覆盖 head/action/meta 并推后 fire_at。
 	debounce := &model.ReviewDebounce{
@@ -324,45 +328,6 @@ func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, rep
 	}
 	if installationID != 0 {
 		updates["installation_id"] = installationID
-	}
-	return tx.Model(&model.ReviewPullRequest{}).
-		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-			project.ID, repo, prNumber).
-		Updates(updates).Error
-}
-
-// markPRSyncPendingTx upsert 总账行并置 sync_pending（epoch+1）；无行时创建
-// 最小行（project/user/installation），head/round 由开轮推进。
-// headSHA 是新受理的 head：与总账现 head 不同（head 前进）时顺带清空
-// code/visual_status——commit status 按 SHA 归属，旧 SHA 的结论不再是新
-// SHA 的去重依据。
-func (s *ReviewService) markPRSyncPendingTx(tx *gorm.DB, project *model.Project, repo string, prNumber int, headSHA string, installationID int64, now time.Time) error {
-	var ledger model.ReviewPullRequest
-	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
-		project.ID, repo, prNumber).First(&ledger).Error
-	switch {
-	case errors.Is(err, gorm.ErrRecordNotFound):
-		return tx.Create(&model.ReviewPullRequest{
-			RepoFullName: repo, PRNumber: prNumber,
-			ProjectID: project.ID, UserID: project.UserID,
-			InstallationID: installationID,
-			SyncPending:    true, SyncEpoch: 1, UpdatedAt: now,
-		}).Error
-	case err != nil:
-		return err
-	}
-	updates := map[string]any{
-		"sync_pending": true,
-		"sync_epoch":   gorm.Expr("sync_epoch + 1"),
-		"updated_at":   now,
-	}
-	// payload 未带 installation.id 时（0）不覆盖总账已知的安装 id。
-	if installationID != 0 {
-		updates["installation_id"] = installationID
-	}
-	if ledger.HeadSHA != "" && !strings.EqualFold(ledger.HeadSHA, headSHA) {
-		updates["code_status"] = ""
-		updates["visual_status"] = ""
 	}
 	return tx.Model(&model.ReviewPullRequest{}).
 		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",

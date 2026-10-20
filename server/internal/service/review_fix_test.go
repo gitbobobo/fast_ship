@@ -261,8 +261,8 @@ func TestReviewStatusResetOnNewHead(t *testing.T) {
 	}
 	var ledger model.ReviewPullRequest
 	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 41", repo)
-	if ledger.CodeStatus != "" || ledger.VisualStatus != "" {
-		t.Fatalf("statuses after new sha = %q/%q, want cleared", ledger.CodeStatus, ledger.VisualStatus)
+	if ledger.HeadSHA != "sha-2" {
+		t.Fatalf("ledger head = %q, want sha-2（webhook 立刻推进 head）", ledger.HeadSHA)
 	}
 
 	// 防抖消费开轮 + 同步：新 head 应重新发 pending。
@@ -272,6 +272,9 @@ func TestReviewStatusResetOnNewHead(t *testing.T) {
 	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 41", repo)
 	if ledger.HeadSHA != "sha-2" {
 		t.Fatalf("ledger head = %q, want sha-2", ledger.HeadSHA)
+	}
+	if ledger.CodeStatus != "" || ledger.VisualStatus != "" {
+		t.Fatalf("statuses after open round = %q/%q, want cleared", ledger.CodeStatus, ledger.VisualStatus)
 	}
 	e.review.syncPendingPRs(now.Add(2 * time.Second))
 	statuses := e.fake.StatusesForContext("代码审查")
