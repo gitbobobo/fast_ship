@@ -221,6 +221,12 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			if aborted {
 				return nil // 快照已被推进（新 webhook/重跑/取消），放弃本轮同步
 			}
+			if len(created) == 0 {
+				// 没有真正建出视觉运行（例如同步期间被停用/组合为空）：
+				// 不能发「视觉审查中」，交给下一轮重新决策。
+				visualPending = false
+				break
+			}
 			visualRuns = created
 			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
 				ledger.HeadSHA, "pending", reviewVisualStatusContext, statusDesc("视觉审查中"), targetURL); err != nil {

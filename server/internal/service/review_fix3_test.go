@@ -752,6 +752,9 @@ func TestCreateVisualRunsStopsWhenDisabled(t *testing.T) {
 	if visual != 0 {
 		t.Fatalf("停用后不应创建视觉运行，got %d", visual)
 	}
+	if got := e.fake.StatusesForContext(reviewVisualStatusContext); len(got) != 0 {
+		t.Fatalf("没有视觉运行时不应发 visual pending，got %v", got)
+	}
 }
 
 // 同 summary 的两个组合对账按运行标记区分：只认领属于自己的 review。
