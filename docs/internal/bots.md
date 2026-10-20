@@ -621,8 +621,8 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
 - **不可信数据围栏（出口级、默认拒绝）**：判定放在**模型输入的出口**，不是
   各处投影里逐字段列清单。`botFenceToolResult` 把整条工具结果（JSON 原样）
   包进 `<untrusted_data nonce="…" source="tool_result:<tool>">…</untrusted_data>`，
-  判定只看 tool/action 是否在 `botResultFenceExemptTools`（记忆、帮助、续读、
-  停止/取消、任务小状态这类平台自有回执）。新增工具、新增字段、嵌套对象、
+  判定只看 tool/action 是否在 `botResultFenceExemptTools`（记忆、帮助、
+  停止/取消与 `state_set` 的 ack 这类平台自有回执）。新增工具、新增字段、嵌套对象、
   远端错误文本都自动落在围栏内——**漏列只会过围，不会漏围**；以前逐字段
   列举是 fail-open，每轮审查都能再找出一个漏掉的字段。投影仍负责瘦身与
   脱敏（围栏不替代字段裁剪）。

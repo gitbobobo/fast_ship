@@ -996,14 +996,10 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 		if err != nil {
 			return "", errs.ErrInternal
 		}
-		nonce, nonceErr := s.botNonceOf(call.BotID)
-		if nonceErr != nil {
-			return "", nonceErr
-		}
 		out := map[string]interface{}{
 			"ok": true, "dry_run": true, "task_id": task.ID,
-			"name":            botFenceUntrusted(nonce, "schedule_task", task.Name),
-			"instruction":     botFenceUntrusted(nonce, "schedule_task", task.Instruction),
+			"name":            task.Name,
+			"instruction":     task.Instruction,
 			"cron_expression": task.CronExpression,
 			"timezone":        task.Timezone, "enabled": task.Enabled,
 			"needs_report": task.NeedsReport, "busy": busy > 0,

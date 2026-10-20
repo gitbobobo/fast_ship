@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
-	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/google/uuid"
 )
 
@@ -87,10 +86,8 @@ var botResultFenceExemptTools = map[string]bool{
 	"fs_memory/append": true, "fs_memory/delete": true, "fs_memory/restore": true,
 	"fs_memory_search/search": true,
 	"fs_help/read":            true,
-	"fs_result/read":          true,
 	"fs_stop/stop":            true,
 	"fs_cancel/cancel":        true,
-	"fs_schedule/state_get":   true,
 	"fs_schedule/state_set":   true,
 }
 
@@ -158,20 +155,4 @@ func botProjectionNonce(bot *model.Bot) string {
 		return ""
 	}
 	return bot.UntrustedNonce
-}
-
-// botNonceOf 读取机器人当前的围栏 nonce（工具结果围栏在执行时用）。结果在
-// 执行时写入账本、不走投影重渲染，因此直接用 UntrustedNonce，不看压缩水位
-// （nonce 为空说明迁移/激活还没跑到，保持旧结果形态）。
-//
-// 读库失败必须向上报错、不能返回空串：空 nonce 会让围栏整段消失，而工具结果
-// 在执行时就固化进账本（之后不会补围栏），安全保护不能静默降级。
-func (s *BotService) botNonceOf(botID string) (string, error) {
-	bot, err := s.bots.Get(botID)
-	if err != nil || bot == nil {
-		return "", errs.ErrInternal
-	}
-	// 与投影同一闸门：提示词还没到带围栏规则的版本时不启用围栏，否则同一份
-	// 上下文里会出现「工具结果带 nonce、平台前缀不带」的混合渲染。
-	return botProjectionNonce(bot), nil
 }

@@ -173,14 +173,11 @@ func TestBotInt121DryRunHasNoSideEffects(t *testing.T) {
 	if parsed["dry_run"] != true || parsed["ok"] != true {
 		t.Fatalf("回执应标 dry_run: %s", out)
 	}
-	// 预览里的任务名/指令进不可信围栏（INT-136）：存量任务创建时未必经确认、
-	// 也可能被诱导写入伪造前缀。
-	nonce := botNonce(t, env, bot.ID)
-	if parsed["instruction"] != botFenceUntrusted(nonce, "schedule_task", "预览指令-WSX 每日整理") {
+	// 预览字段本身不围栏：整条工具结果由模型输入出口统一包（INT-136）。
+	if parsed["instruction"] != "预览指令-WSX 每日整理" {
 		t.Fatalf("预览应含指令全文: %s", out)
 	}
-	if parsed["name"] != botFenceUntrusted(nonce, "schedule_task", task.Name) ||
-		parsed["cron_expression"] != task.CronExpression {
+	if parsed["name"] != task.Name || parsed["cron_expression"] != task.CronExpression {
 		t.Fatalf("预览应含任务名与 cron: %s", out)
 	}
 	if parsed["enabled"] != false {
