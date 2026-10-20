@@ -70,6 +70,23 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 			entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
 		} else {
 			entry.prepared = prepared
+			// 定时任务会话禁止管理任务（INT-136）：schedule 会话默认放行写
+			// 操作，受理端直接拦截 create/update/run，防止造出递归绕过确认的
+			// 会话。命中按校验失败同路径处理（failed + 40001 + 同步失败回复）。
+			if run.SessionKind == model.BotSessionKindSchedule {
+				if err := botScheduleManageDenied(prepared); err != nil {
+					entry.invalidErr = err
+					entry.call.ToolName = tc.Name
+					entry.call.Action = prepared.Action
+					entry.call.Status = model.BotCallStatusFailed
+					entry.call.FinishedAt = &now
+					entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
+					entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
+					entry.prepared = nil
+				}
+			}
+		}
+		if entry.prepared != nil {
 			s.resolveCallScope(bot, prepared, tc.Arguments, &entry.execCtx)
 			if prepared.RequiresConfirmation {
 				// schedule 会话默认放行（INT-103）：直接排队执行，不建授权
@@ -285,12 +302,15 @@ func (s *BotService) resolveCallScope(bot *model.Bot, prepared *botPreparedCall,
 		if prepared.EnvironmentID != nil {
 			execCtx.EnvID = *prepared.EnvironmentID
 		}
+	case "fs_schedule":
+		s.resolveScheduleScope(bot, prepared, raw)
 	}
 	// scope 解析可能回填（issue→project），同步回执行上下文。
 	execCtx.ScopeKind = prepared.ScopeKind
 	execCtx.ScopeID = prepared.ScopeID
 	execCtx.Fields = prepared.FieldsConstraint
 	execCtx.Param = prepared.ParamConstraint
+	execCtx.Schedule = prepared.SchedulePreview
 }
 
 // botRequireScope 写操作必须有可展示的具体范围，否则建卡失败。
@@ -657,6 +677,9 @@ func (s *BotService) runAsyncTool(ctx context.Context, call *model.BotToolCall) 
 		return s.runIssueWrite(ctx, call)
 	case "fs_thread":
 		return s.runThreadWrite(ctx, call)
+	case "fs_schedule":
+		// INT-136：create/update 敏感字段/run 在确认后由 worker 执行。
+		return s.runScheduleWrite(ctx, call)
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "工具没有异步实现: "+call.ToolName)
 }

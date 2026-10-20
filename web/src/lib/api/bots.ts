@@ -177,6 +177,8 @@ export interface BotCall {
   decided_at?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  /** 服务端生成的执行身份与授权范围；fs_schedule 确认卡的预览在 execution_context.schedule。 */
+  execution_context?: Record<string, unknown> | null;
   /** 副作用可能已发生（取消竞速、重启恢复等）；如实展示，不声称已回滚。 */
   effect_may_have_occurred?: boolean;
   /** 进入模型上下文的受限结果预览；完整结果经 result 端点按需读取。 */

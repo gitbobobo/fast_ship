@@ -1,10 +1,12 @@
 // 工具调用的本地化展示映射表：调用卡/确认卡只查表渲染，不展示原始
 // 工具标识（原始 tool.action 收进「查看原始调用」）。
-// 唯一事实源是 server/internal/service/bot_tools.go 的 botToolRegistryV5()
-// 与 botReadOnlyActions——后端新增或改名工具/action 时必须同步此表；
-// effect 不能靠 requires_confirmation 推断（fs_schedule 的写操作是同步
-// 执行、不需要确认，但仍是写入）。表外条目一律安全回退：账本可能先于
-// 界面升级，展示层不得抛错。
+// 唯一事实源是 server/internal/service/bot_tools.go 的 botToolRegistryV8()
+// 与 botReadOnlyActions——后端新增或改名工具/action 时必须同步此表。
+// fs_schedule 的 create、涉及 instruction/needs_report/model 的 update 与
+// run（dry_run=true 预览除外）自 v8 起为异步受理、需用户确认，其余动作
+// （delete/enable/disable/state_set 等）仍是同步执行；同步不等于只读，
+// effect 不能靠 requires_confirmation 推断。表外条目一律安全回退：账本
+// 可能先于界面升级，展示层不得抛错。
 
 export type ToolEffect = "read" | "write";
 

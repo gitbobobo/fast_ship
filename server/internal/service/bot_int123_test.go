@@ -512,7 +512,7 @@ func TestBotInt123RuntimeContextLastRunAndStateNote(t *testing.T) {
 		if err := json.Unmarshal(raw, &wire); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		const prefix = "[运行时上下文]\n"
+		prefix := botPlatformPrefix(botProjectionNonce(botRow), "运行时上下文") + "\n"
 		if !strings.HasPrefix(wire.Content, prefix) {
 			t.Fatalf("末条消息应为运行时上下文: %q", wire.Content)
 		}
@@ -653,7 +653,8 @@ func TestBotInt123StateNoteFollowsFrozenToolset(t *testing.T) {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		var rt botScheduleRuntimeContext
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(wire.Content, "[运行时上下文]\n")), &rt); err != nil {
+		rtPrefix := botPlatformPrefix(botProjectionNonce(botRow), "运行时上下文") + "\n"
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(wire.Content, rtPrefix)), &rt); err != nil {
 			t.Fatalf("unmarshal rt: %v", err)
 		}
 		return rt.Note
@@ -719,14 +720,16 @@ func TestBotInt123HelpTextMentionsStateActions(t *testing.T) {
 // ---------- 8. 平台提示词规则 8 ----------
 
 func TestBotInt123PlatformPromptMentionsState(t *testing.T) {
-	full := buildBotSystemPrompt("")
+	full := buildBotSystemPrompt("", "t-nonce")
 	for _, kw := range []string{"state_get", "state_set", "跨运行保留的小状态", "仅新增时提醒"} {
 		if !strings.Contains(full, kw) {
 			t.Fatalf("平台提示词应说明任务小状态（缺 %q）", kw)
 		}
 	}
-	if botToolsetVersion != 7 {
-		t.Fatalf("工具集版本应升到 7: %d", botToolsetVersion)
+	// INT-123 把工具集版本升到 7；后续版本（INT-136 起 v8）只增不减，
+	// 这里钉下限保护 state 动作不被回退。
+	if botToolsetVersion < 7 {
+		t.Fatalf("工具集版本应不低于 7: %d", botToolsetVersion)
 	}
 }
 

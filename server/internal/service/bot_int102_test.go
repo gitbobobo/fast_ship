@@ -414,7 +414,7 @@ func TestBotCompactionSafeCutAndFold(t *testing.T) {
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	// 9500：v7 工具集与规则 8 变长后固定前缀更大，9000 的旧几何会误判
 	// 压缩目标不可达（INT-123 随 v7 重定标）。
-	env.cfg.Bots.Context.WindowTokens = 9500
+	env.cfg.Bots.Context.WindowTokens = 9900
 
 	seedBotUserMessage(t, env, bot.ID, "最早的问题")
 	bigReply := strings.Repeat("很长的工具结果", 400)

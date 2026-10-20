@@ -433,10 +433,10 @@ func TestInt124NightlyCatchUp(t *testing.T) {
 // 偏好与重要事实应主动沉淀；规则 10 的守门文案保持不变。当前版本 9（INT-133
 // 把默认人设前置、收紧告知语义）。
 func TestInt124PlatformPromptProactiveMemory(t *testing.T) {
-	if botPlatformPromptVersion != 9 {
-		t.Fatalf("平台提示词版本应为 9: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 10 {
+		t.Fatalf("平台提示词版本应为 10: %d", botPlatformPromptVersion)
 	}
-	full := buildBotSystemPrompt("")
+	full := buildBotSystemPrompt("", "t-nonce")
 	for _, kw := range []string{"主动写入", "不必等用户要求", "稳定偏好"} {
 		if !strings.Contains(full, kw) {
 			t.Fatalf("规则 9 应含主动沉淀指引 %q", kw)

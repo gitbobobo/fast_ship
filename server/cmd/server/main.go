@@ -580,6 +580,12 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("AI 提供商迁移失败: %w", err)
 	}
 
+	// 机器人围栏 nonce（INT-136）：只为空值行生成一次，已有的 nonce 永不
+	// 改写。必须在 AutoMigrate 之后（依赖 bots.untrusted_nonce 列）。
+	if err := migrateBotUntrustedNonce(db, logger); err != nil {
+		return fmt.Errorf("机器人围栏 nonce 迁移失败: %w", err)
+	}
+
 	createBootIndexes(db)
 
 	// 用户角色（INT-129）：AutoMigrate 补齐 users.role 后，存量库可能一个

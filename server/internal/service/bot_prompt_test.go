@@ -18,13 +18,13 @@ import (
 // 在后，可以覆盖默认语气。它替代了 INT-122 的「对话风格」段，规则 8/9/13 的
 // 「告知/汇报」统一改为「简要说明结果」，升级通知限定为内部信息。
 func TestBotSystemPromptStyleSection(t *testing.T) {
-	if botPlatformPromptVersion != 9 {
-		t.Fatalf("提示词版本应递增到 9: %d", botPlatformPromptVersion)
+	if botPlatformPromptVersion != 10 {
+		t.Fatalf("提示词版本应递增到 10: %d", botPlatformPromptVersion)
 	}
 	if botStylePromptVersion != 9 {
 		t.Fatalf("说话方式版本应为 9: %d", botStylePromptVersion)
 	}
-	full := buildBotSystemPrompt("回复要更短。")
+	full := buildBotSystemPrompt("回复要更短。", "t-nonce")
 	// 关键词锚点覆盖默认人设的每条原则，不钉全文。
 	for _, kw := range []string{
 		"说话方式：",
@@ -68,7 +68,7 @@ func TestBotSystemPromptStyleSection(t *testing.T) {
 		t.Fatalf("拼装顺序应为 默认人设→平台规则→用户人设: %d %d %d %d", iid, is, ir, ip)
 	}
 	// 无 persona 时不拼人设段，但默认人设保留。
-	bare := buildBotSystemPrompt("   ")
+	bare := buildBotSystemPrompt("   ", "t-nonce")
 	if strings.Contains(bare, "用户人设（追加") {
 		t.Fatalf("空白 persona 不应有人设段")
 	}
@@ -237,7 +237,7 @@ func TestBotActivateRebuildsPromptFromLibraryRow(t *testing.T) {
 	if fresh.PersonaPrompt != personaB {
 		t.Fatalf("库内人设应保持 B: %q", fresh.PersonaPrompt)
 	}
-	if want := buildBotSystemPrompt(personaB); fresh.SystemPromptText != want {
+	if want := buildBotSystemPrompt(personaB, fresh.UntrustedNonce); fresh.SystemPromptText != want {
 		t.Fatalf("库内系统提示词应按人设 B 重建，不得混入 A 的标记: got=%q", fresh.SystemPromptText)
 	}
 	if strings.Contains(fresh.SystemPromptText, "DO_NOT_RESURRECT") {
@@ -460,7 +460,7 @@ func TestBotRuntimeContextNoteBranches(t *testing.T) {
 		if wire.Role != "user" {
 			t.Fatalf("末条消息应为 user: %s", wire.Role)
 		}
-		const prefix = "[运行时上下文]\n"
+		prefix := botPlatformPrefix(botProjectionNonce(botRow), "运行时上下文") + "\n"
 		if !strings.HasPrefix(wire.Content, prefix) {
 			t.Fatalf("末条消息应以运行时上下文开头: %q", wire.Content)
 		}

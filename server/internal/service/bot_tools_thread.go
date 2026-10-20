@@ -19,6 +19,12 @@ import (
 
 func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall) (string, error) {
 	userID := s.botUserIDOf(call.BotID)
+	// 外部文本字段进不可信围栏（INT-136）：nonce 为空（未启用）时按原样投影。
+	// 读不到 nonce 就失败：围栏是安全保护，不能静默降级成裸文本。
+	nonce, err := s.botNonceOf(call.BotID)
+	if err != nil {
+		return "", err
+	}
 	var args botThreadArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
@@ -29,7 +35,7 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		result, err := botSlimThreadList(list, &args)
+		result, err := botSlimThreadList(list, &args, nonce)
 		if err != nil {
 			return "", err
 		}
@@ -39,7 +45,7 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		result, err := botSlimThreadDetail(detail, &args)
+		result, err := botSlimThreadDetail(detail, &args, nonce)
 		if err != nil {
 			return "", err
 		}
@@ -49,7 +55,7 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		return botMarshalResult(botSlimThreadItem(item))
+		return botMarshalResult(botSlimThreadItem(item, nonce))
 	case "composer_options":
 		opts, err := s.threads.ComposerOptions(ctx, userID, args.EnvID)
 		if err != nil {
@@ -149,6 +155,9 @@ type botCallExecContext struct {
 	// Param 与授权规则的参数值级约束一致（如 source=github）：always-allow
 	// 重建规则时必须有它，否则后续调用哈希永远对不上。
 	Param string `json:"param,omitempty"`
+	// Schedule 是 fs_schedule 确认卡的服务端预览（受理时算好，避免前端重复
+	// 实现 cron 解析）。
+	Schedule *botScheduleCallPreview `json:"schedule,omitempty"`
 }
 
 func botThreadMessage(text string) api.CreateT3ThreadRequest_Message {
@@ -212,7 +221,7 @@ func botThreadPage(page, pageSize int) (int, int, error) {
 // 已连接环境里就报错，不静默返回空）；query 对线程 id/标题/项目名/项目 id/
 // 环境名做不区分大小写的包含匹配。过滤后按 updated_at 降序、id 升序排序，
 // 保证同一 filter 下分页稳定。
-func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[string]interface{}, error) {
+func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs, nonce string) (map[string]interface{}, error) {
 	page, pageSize, err := botThreadPage(args.Page, args.PageSize)
 	if err != nil {
 		return nil, err
@@ -291,7 +300,7 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[str
 	}
 	items := make([]map[string]interface{}, 0, end-start)
 	for i := start; i < end; i++ {
-		items = append(items, botSlimThreadSummary(&filtered[i]))
+		items = append(items, botSlimThreadSummary(&filtered[i], nonce))
 	}
 
 	// 覆盖范围：某环境读不到时如实报告，不把「未读到」说成「不存在」，
@@ -353,10 +362,12 @@ func botThreadMatchesQuery(thread *T3ThreadSummary, query string, envNames map[s
 	return false
 }
 
-func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
+// botSlimThreadSummary 是线程摘要投影：title 是 T3 侧外部内容，进不可信
+// 围栏（INT-136）。列表项与详情的 thread 字段共用。
+func botSlimThreadSummary(t *T3ThreadSummary, nonce string) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":             t.Id,
-		"title":          t.Title,
+		"title":          botFenceUntrusted(nonce, "thread_title", t.Title),
 		"status":         string(t.Status),
 		"settled":        t.Settled,
 		"updated_at":     t.UpdatedAt,
@@ -374,7 +385,7 @@ func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
 
 // botSlimThreadDetail 返回线程详情：运行态/元数据 + 最近条目（带 item id）
 // + 完整历史的分页入口。条目正文用 fs_thread item 按 id 补读。
-func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs) (map[string]interface{}, error) {
+func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs, nonce string) (map[string]interface{}, error) {
 	itemLimit := args.ItemLimit
 	if itemLimit <= 0 {
 		itemLimit = botThreadItemDefault
@@ -403,10 +414,10 @@ func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs) (map[strin
 	}
 	items := make([]map[string]interface{}, 0, end-start)
 	for i := start; i < end; i++ {
-		items = append(items, botSlimThreadItemSummary(&all[i]))
+		items = append(items, botSlimThreadItemSummary(&all[i], nonce))
 	}
 	return map[string]interface{}{
-		"thread":           botSlimThreadSummary(&detail.Thread),
+		"thread":           botSlimThreadSummary(&detail.Thread, nonce),
 		"queue":            detail.Queue,
 		"activity":         detail.Activity,
 		"access":           string(detail.Access),
@@ -421,8 +432,9 @@ func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs) (map[strin
 }
 
 // botSlimThreadItemSummary 是详情内条目列表的精简形状：给 id 与短摘要，
-// 正文（text）走 fs_thread item 按需补读。
-func botSlimThreadItemSummary(item *T3ThreadItem) map[string]interface{} {
+// 正文（text）走 fs_thread item 按需补读。summary/text_preview 是外部内容，
+// 进不可信围栏（INT-136）。
+func botSlimThreadItemSummary(item *T3ThreadItem, nonce string) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         item.Id,
 		"type":       string(item.Type),
@@ -430,7 +442,7 @@ func botSlimThreadItemSummary(item *T3ThreadItem) map[string]interface{} {
 		"updated_at": item.UpdatedAt,
 	}
 	if item.Summary != "" {
-		out["summary"] = item.Summary
+		out["summary"] = botFenceUntrusted(nonce, "thread_item_summary", item.Summary)
 	}
 	if item.DetailAvailable != nil && *item.DetailAvailable {
 		out["detail_available"] = true
@@ -439,7 +451,7 @@ func botSlimThreadItemSummary(item *T3ThreadItem) map[string]interface{} {
 		out["inherited"] = true
 	}
 	if item.Text != "" {
-		out["text_preview"] = truncateBotRunes(item.Text, botThreadTextPreview)
+		out["text_preview"] = botFenceUntrusted(nonce, "thread_item_text", truncateBotRunes(item.Text, botThreadTextPreview))
 	}
 	return out
 }
@@ -455,7 +467,9 @@ func truncateBotRunes(s string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
+// botSlimThreadItem 是条目正文投影：summary/text 是外部内容，进不可信围栏
+// （INT-136）。
+func botSlimThreadItem(item *T3ThreadItem, nonce string) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         item.Id,
 		"type":       string(item.Type),
@@ -463,10 +477,10 @@ func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
 		"updated_at": item.UpdatedAt,
 	}
 	if item.Summary != "" {
-		out["summary"] = item.Summary
+		out["summary"] = botFenceUntrusted(nonce, "thread_item_summary", item.Summary)
 	}
 	if item.Text != "" {
-		out["text"] = item.Text
+		out["text"] = botFenceUntrusted(nonce, "thread_item_text", item.Text)
 	}
 	return out
 }

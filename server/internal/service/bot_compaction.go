@@ -96,7 +96,10 @@ type botBoundarySnapshot struct {
 	SourcePersonaPrompt  string
 	Generation           int64
 	NeedActivate         bool
-	AfterTokens          int64
+	// UntrustedNonce 是「发布后口径」的围栏 nonce（INT-136）：快照里的平台
+	// 提示词版本决定发布后是否启用围栏渲染，验收按同一口径估算。
+	UntrustedNonce string
+	AfterTokens    int64
 	// FixedTokens 是同一投影仅清空摘要正文后的体积（F 口径）。它与
 	// AfterTokens 出自同一次物化（见 estimateSnapshotTokensPair）。
 	FixedTokens int64
@@ -862,7 +865,16 @@ func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPl
 	toolVer := fresh.ToolsetVersion
 	needActivate := toolVer < botToolsetVersion || plat < botPlatformPromptVersion
 	if needActivate {
-		prompt = buildBotSystemPrompt(persona)
+		nonce := fresh.UntrustedNonce
+		if nonce == "" {
+			// 压缩发布可能先于 activateBotPrompt 跑到：这里同样要自愈空
+			// nonce，否则重建的提示词会内嵌空值、围栏永不生效。
+			if healed, herr := botHealUntrustedNonce(s.db, fresh.ID); herr == nil {
+				nonce = healed
+				fresh.UntrustedNonce = healed
+			}
+		}
+		prompt = buildBotSystemPrompt(persona, nonce)
 		rev = fresh.PromptRevision + 1
 		plat = botPlatformPromptVersion
 		toolVer = botToolsetVersion
@@ -895,6 +907,7 @@ func (s *BotService) buildBoundarySnapshot(bot *model.Bot, plan *botCompactionPl
 		SourcePersonaPrompt:    fresh.PersonaPrompt,
 		Generation:             plan.State.Generation + 1,
 		NeedActivate:           needActivate,
+		UntrustedNonce:         fresh.UntrustedNonce,
 	}
 	snap.AfterTokens, snap.FixedTokens = s.estimateSnapshotTokensPair(bot, plan, snap)
 	return snap
@@ -917,6 +930,14 @@ func (s *BotService) estimateSnapshotTokensPair(bot *model.Bot, plan *botCompact
 		Toolset:                snap.Toolset,
 		SystemPromptText:       &snap.SystemPromptText,
 	}
+	// 验收口径要对齐发布后的渲染：快照水位达标时投影会带 nonce 前缀与
+	// 新文案，多出的字节必须计入 after/F（INT-136），否则验收数字会
+	// 相对真实投影漂移几十字节。
+	var fenceNonce string
+	if snap.PlatformPromptVersion >= botContextFenceVersion {
+		fenceNonce = snap.UntrustedNonce
+	}
+	over.FenceNonce = &fenceNonce
 	if plan != nil && plan.Run != nil && bot != nil {
 		probe := *bot
 		probe.SystemPromptText = snap.SystemPromptText
@@ -971,6 +992,11 @@ func (s *BotService) installBoundarySnapshot(bot *model.Bot, snap *botBoundarySn
 	bot.SystemPromptText = snap.SystemPromptText
 	bot.PromptRevision = snap.PromptRevision
 	bot.PersonaPrompt = snap.PersonaPrompt
+	// 围栏 nonce 同步到副本：发布后提示词可能已升到带围栏的版本，同一 run
+	// 内据此立即按新渲染投影（INT-136）。
+	if snap.UntrustedNonce != "" {
+		bot.UntrustedNonce = snap.UntrustedNonce
+	}
 	s.rt.memMu.Lock()
 	s.rt.memSnaps[bot.ID] = &botFrozenMemory{
 		Generation: snap.Generation,
@@ -1650,8 +1676,17 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 		if err != nil {
 			return err
 		}
+		// 自愈空 nonce（INT-136）：迁移没跑到的存量行在激活前补齐，保证
+		// 重建的提示词内嵌真实 nonce、平台前缀与围栏同值。
+		if fresh.UntrustedNonce == "" {
+			healed, err := botHealUntrustedNonce(tx, bot.ID)
+			if err != nil {
+				return err
+			}
+			fresh.UntrustedNonce = healed
+		}
 		if fresh.ToolsetVersion < botToolsetVersion || fresh.PlatformPromptVersion < botPlatformPromptVersion {
-			prompt := buildBotSystemPrompt(fresh.PersonaPrompt)
+			prompt := buildBotSystemPrompt(fresh.PersonaPrompt, fresh.UntrustedNonce)
 			rev := fresh.PromptRevision + 1
 			ok, err := repo.ActivateToolsetTx(tx, bot.ID, botToolsetVersion, botPlatformPromptVersion, prompt, rev, now)
 			if err != nil {
@@ -1678,7 +1713,31 @@ func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	bot.PlatformPromptVersion = state.PlatformPromptVersion
 	bot.PersonaPrompt = state.PersonaPrompt
 	bot.ToolsetVersion = state.ToolsetVersion
+	bot.UntrustedNonce = state.UntrustedNonce
 	return nil
+}
+
+// botHealUntrustedNonce 给空 nonce 的机器人补一次围栏 nonce（INT-136）：
+// 只写空值行（CAS），并发写者落空后回读库内值，保证提示词与平台前缀永远
+// 共用同一个 nonce。返回行内最终生效的 nonce。
+func botHealUntrustedNonce(db *gorm.DB, botID string) (string, error) {
+	nonce := botNewNonce()
+	res := db.Model(&model.Bot{}).
+		Where("id = ? AND untrusted_nonce = ''", botID).
+		Update("untrusted_nonce", nonce)
+	if res.Error != nil {
+		return "", res.Error
+	}
+	if res.RowsAffected == 0 {
+		// 已有人补过（并发激活/迁移）：以库内值为准。
+		var v string
+		if err := db.Model(&model.Bot{}).Where("id = ?", botID).
+			Pluck("untrusted_nonce", &v).Error; err != nil {
+			return "", err
+		}
+		return v, nil
+	}
+	return nonce, nil
 }
 
 // activateToolsetWithPromptTx 在事务内把工具集/平台提示词水位推进到当前版本
@@ -1750,6 +1809,19 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 }
 
 func botToolsetChangeNote(from, to int64) string {
+	if to >= 8 && from < 8 {
+		note := "工具集已升级：fs_schedule 的 create、改动 instruction/needs_report/model 的 update、非 dry_run 的 run 需要用户确认并异步执行；批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；定时任务运行中不能 create/update/run 任务"
+		if from < 7 {
+			note += "；fs_schedule 新增 state_get/state_set（任务跨运行保留的小状态，仅定时任务运行内可用，≤8192 UTF-8 字节，省略 state 即清空）"
+		}
+		if from < 6 {
+			note += "；fs_schedule 新增 run 动作（立即手动执行一次，dry_run=true 只预览；同一任务已有未结束运行时拒绝，手动触发不要求任务启用），运行记录新增 trigger_source 区分 cron/manual"
+		}
+		if from < 5 {
+			note += "；fs_thread list 支持 env_id/query 过滤，分页响应新增 offset（实际切片起点）；fs_issue get 的 labels/checklist 恒返回数组（没有时为空数组）"
+		}
+		return note
+	}
 	if to >= 7 && from < 7 {
 		note := "工具集已升级：fs_schedule 新增 state_get/state_set（任务跨运行保留的小状态，仅定时任务运行内可用，≤8192 UTF-8 字节，省略 state 即清空）"
 		if from < 6 {

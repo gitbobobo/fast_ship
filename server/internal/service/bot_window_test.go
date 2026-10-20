@@ -87,16 +87,19 @@ func createBotRowAt(t *testing.T, env *botTestEnv, userID, baseURL, modelName st
 	if err := env.db.Create(provider).Error; err != nil {
 		t.Fatalf("create provider row: %v", err)
 	}
+	nonce := botNewNonce()
 	bot := &model.Bot{
 		ID: uuid.NewString(), UserID: userID, Name: "win-" + uuid.NewString()[:6],
-		SystemPromptText:      buildBotSystemPrompt("简洁回答。"),
+		SystemPromptText:      buildBotSystemPrompt("简洁回答。", nonce),
 		PromptRevision:        1,
 		PlatformPromptVersion: botPlatformPromptVersion,
 		ToolsetVersion:        botToolsetVersion,
 		LastToldVersion:       botToolsetVersion,
 		// 新机器人直接站在当前说话方式版本上（无旧风格历史要压缩）。
 		StyleCompactionVersion: botStylePromptVersion,
-		ProviderID:             provider.ID, Model: modelName,
+		// 新机器人默认启用围栏（INT-136），窗口估算按真实投影口径。
+		UntrustedNonce: nonce,
+		ProviderID:     provider.ID, Model: modelName,
 		NextMessageSeq: 1, NextEventSeq: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -552,9 +555,9 @@ func TestBotConnectionDetectsWindow(t *testing.T) {
 // ---------- B：压缩前置检查、失败不重试、进度事件 ----------
 
 // compactionPrecheckEnv 构造一个「固定前缀 + 最小摘要预算 ≥ 触发阈值」的
-// 场景：v7 固定投影约 6.4k+ token（INT-123 实测已越过 6400 的旧窗口），
-// 窗口取 6800（触发阈值 5100）即可命中 target_unreachable 且不命中
-// 「已超窗口」。
+// 场景：固定投影约 7.0k token（INT-136 后提示词 v10 + nonce 前缀再涨约
+// 0.6k），窗口取 7400（触发阈值 5550）即可命中 target_unreachable 且不
+// 命中「已超窗口」。
 func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun) {
 	env := setupBotTestEnv(t,
 		fakeModelTurn{Text: `{"items":[]}`},
@@ -563,7 +566,7 @@ func compactionPrecheckEnv(t *testing.T) (*botTestEnv, *model.Bot, *model.BotRun
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "precheck")
 	bot := env.createBot(t, userID)
-	env.cfg.Bots.Context.WindowTokens = 6800
+	env.cfg.Bots.Context.WindowTokens = 7400
 	seedCompactableLedger(t, env, bot.ID, "旧轮次")
 	botRow, _ := env.bots.bots.Get(bot.ID)
 	run := botFixtureRun(t, env, botRow)

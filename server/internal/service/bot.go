@@ -305,12 +305,13 @@ func (s *BotService) buildBot(tx *gorm.DB, userID string, req *CreateBotRequest)
 	}
 
 	now := time.Now().UTC()
+	nonce := botNewNonce()
 	bot := &model.Bot{
 		ID:                    uuid.NewString(),
 		UserID:                userID,
 		Name:                  name,
 		PersonaPrompt:         req.PersonaPrompt,
-		SystemPromptText:      buildBotSystemPrompt(req.PersonaPrompt),
+		SystemPromptText:      buildBotSystemPrompt(req.PersonaPrompt, nonce),
 		PromptRevision:        1,
 		PlatformPromptVersion: botPlatformPromptVersion,
 		ToolsetVersion:        botToolsetVersion,
@@ -323,8 +324,10 @@ func (s *BotService) buildBot(tx *gorm.DB, userID string, req *CreateBotRequest)
 		// 新机器人没有旧风格历史：风格压缩水位直接落在当前版本，不触发
 		// 一次性 style_upgrade 压缩（INT-133）。
 		StyleCompactionVersion: botStylePromptVersion,
-		CreatedAt:              now,
-		UpdatedAt:              now,
+		// 新机器人没有旧投影包袱：首个请求就走带 nonce 的前缀（INT-136）。
+		UntrustedNonce: nonce,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	return bot, nil
 }
@@ -358,7 +361,7 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 		}
 		if req.PersonaPrompt != nil && *req.PersonaPrompt != bot.PersonaPrompt {
 			bot.PersonaPrompt = *req.PersonaPrompt
-			bot.SystemPromptText = buildBotSystemPrompt(bot.PersonaPrompt)
+			bot.SystemPromptText = buildBotSystemPrompt(bot.PersonaPrompt, bot.UntrustedNonce)
 			bot.PromptRevision++
 			bot.PlatformPromptVersion = botPlatformPromptVersion
 			personaChanged = true

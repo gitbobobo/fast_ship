@@ -22,8 +22,9 @@ import (
 
 // 白名单工具：v3 固定 11 个工具、44 个 action（v2 为 11/38，v1 为 10/29，
 // 均为独立冻结副本供存量会话在压缩边界前使用）。业务写操作为
-// async + 用户确认/已有授权；同步读取与 fs_schedule（INT-103，全部同步）
-// 也记调用账本。不做反射调用 service、不提供任意 RPC。参数使用专用结构体，
+// async + 用户确认/已有授权；同步读取与 fs_schedule 的同步动作（INT-103 起
+// 记账，INT-136 起 create/敏感字段 update/非 dry_run run 改走异步确认）也记
+// 调用账本。不做反射调用 service、不提供任意 RPC。参数使用专用结构体，
 // action 在 schema 中列 enum，服务端再校验该 action 的必填、禁止字段。
 
 type botActionDef struct {
@@ -415,6 +416,39 @@ func botToolRegistryV7() []*botToolDef {
 	return tools
 }
 
+// botToolRegistryV8 是当前发布注册表（INT-136）：在 v7 之上只改 fs_schedule
+// 的工具与动作描述，说明确认语义——create、改动 instruction/needs_report/model
+// 的 update、非 dry_run 的 run 需要用户确认、异步受理、结果以后台结果送达；
+// 批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；定时任务运行中
+// 不能 create/update/run。动作清单与参数结构体不变（仍 10 个动作、共用
+// botScheduleTaskArgs）。确认判定的事实源是 botScheduleConfirmation（版本
+// 无关、在受理端生效），动作定义里的 Mode/RequiresConfirmation 不进 wire
+// 字节、保持原样，v7 及更早版本是冻结副本——本注册表的任何变化（含共享工具
+// 的描述调整）不得影响它们，否则存量会话的前缀/tools_hash 失稳。
+func botToolRegistryV8() []*botToolDef {
+	tools := botToolRegistryV4Literal()
+	for _, tool := range tools {
+		if tool.Name != "fs_schedule" {
+			continue
+		}
+		tool.Description = "管理本机器人绑定的定时任务：list/delete/runs/enable/disable 同步执行、立即生效；create、update 中改动 instruction/needs_report/model 与 run（dry_run=true 预览除外）需要用户确认：调用先受理（回执 status=pending_confirmation），用户批准后在后台执行，结果以「平台后台结果」消息送达，不要把受理当成已执行。批准创建或修改任务等于授权该任务以后每次运行默认放行写操作。定时任务运行中不能 create/update/run 任务（会被拒绝），请在主线对话里操作。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；非 dry_run 的 run 同样需要确认，回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空，适合存「上次已报的 ID」这类去重集合。"
+		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgs{})
+		tool.Actions = []botActionDef{
+			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
+			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）。需要用户确认：受理后等待批准，批准即授权该任务以后每次运行默认放行写操作", Mode: model.BotExecutionSync},
+			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）。只改 name/cron/timezone 同步生效；改动 instruction/needs_report/model 需要用户确认并异步受理，批准即授权该任务以后每次运行默认放行写操作", Mode: model.BotExecutionSync},
+			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
+			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；已有未结束运行时拒绝）。dry_run=true 只预览（同步返回）；非 dry_run 需要用户确认、异步受理，结果以后台结果送达", Mode: model.BotExecutionSync},
+			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "state_get", Description: "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
+			{Name: "state_set", Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
+		}
+	}
+	return tools
+}
+
 // botToolRegistryV3 是 INT-103 冻结的 v3 注册表。工具/动作/描述与 v4 完全
 // 相同，只有参数结构体不同：用冻结副本，保证已发布 v3 会话的 tools_hash 不
 // 因 INT-110 的 schema 修正而回退。
@@ -731,8 +765,10 @@ func botToolsetVersionOf(version int64) *botToolsetHolder {
 		tools = botToolRegistryV5()
 	case 6:
 		tools = botToolRegistryV6()
-	default:
+	case 7:
 		tools = botToolRegistryV7()
+	default:
+		tools = botToolRegistryV8()
 	}
 	holder := botBuildToolset(version, tools)
 	botToolsetsByID[version] = holder
@@ -954,6 +990,10 @@ type botPreparedCall struct {
 	// ParamConstraint 是参数值级约束（如 source=github）：同一动作不同参数
 	// 值的副作用不同，「总是允许」必须按值绑定，不能只看字段集合。
 	ParamConstraint string
+	// SchedulePreview 是 fs_schedule 确认卡的服务端预览（create/update/run
+	// 受理时算好下次运行与生效模型）；resolveCallScope 把它镜像进执行上下文，
+	// 不进 wire 字节。
+	SchedulePreview *botScheduleCallPreview
 }
 
 // botPrepareToolCall 解析并校验一次模型工具调用；ts 是该会话冻结的工具集
@@ -1034,6 +1074,21 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 
 	if err := botValidateActionFields(toolName, prepared.Action, rawMap); err != nil {
 		return nil, err
+	}
+	if toolName == "fs_schedule" {
+		// 受理端判定 fs_schedule 确认（INT-136）：规则不随工具集版本变化，
+		// 冻结在 v3–v7 的会话同样立即生效（RequiresConfirmation/Mode 不在
+		// wire 字节里，不影响已冻结的 tools_hash）。
+		needs, err := botScheduleConfirmation(prepared.Action, rawMap)
+		if err != nil {
+			return nil, err
+		}
+		if needs {
+			// 平台只有异步路径存在确认：改判为异步待确认，执行结果以后台
+			// 结果送达模型。
+			prepared.Mode = model.BotExecutionAsync
+			prepared.RequiresConfirmation = true
+		}
 	}
 	return prepared, nil
 }
@@ -1122,13 +1177,18 @@ var botActionRules = map[string]botActionRule{
 	// state 只配合 state_set（INT-123）：其它动作携带即拒（含 null），避免
 	// 「带状态参数仍被当成管理动作」的误用；state_get/state_set 的任务由本次
 	// schedule run 隐式决定，不收 task_id。
-	"fs_schedule/status":    {Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/list":      {Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/create":    {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"}},
-	"fs_schedule/update":    {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/delete":    {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/runs":      {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/run":       {Required: req("task_id"), Forbidden: []string{"state"}},
+	// run 只接受 task_id/dry_run（INT-136 审查）：执行器按 task_id 读库里的
+	// 任务配置，模型传的 name/instruction/needs_report 等一概不生效——若放行，
+	// 确认卡可以展示一份无害指令、实际跑的却是任务里存的另一份。
+	"fs_schedule/status": {Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/list":   {Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/create": {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"}},
+	"fs_schedule/update": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/delete": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/runs":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	"fs_schedule/run": {Required: req("task_id"), Forbidden: []string{
+		"state", "name", "cron", "timezone", "instruction", "model", "needs_report",
+	}},
 	"fs_schedule/enable":    {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/disable":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/state_get": {Forbidden: []string{"task_id", "dry_run", "state"}},
@@ -1211,12 +1271,23 @@ func (s *BotService) botExecuteSyncTool(ctx context.Context, call *model.BotTool
 		return s.execThreadRead(ctx, call)
 	case "fs_environment/list", "fs_environment/projects":
 		return s.execEnvironmentRead(ctx, call)
-	case "fs_schedule/list", "fs_schedule/create", "fs_schedule/update",
-		"fs_schedule/delete", "fs_schedule/runs", "fs_schedule/run",
+	case "fs_schedule/list", "fs_schedule/update",
+		"fs_schedule/delete", "fs_schedule/runs",
 		"fs_schedule/enable", "fs_schedule/disable",
 		"fs_schedule/state_get", "fs_schedule/state_set":
 		// 定时任务管理（INT-103，INT-121 加 run，INT-123 加任务小状态）：
-		// 全部同步、立即生效，与 fs_memory 写同类。
+		// 同步动作立即生效，与 fs_memory 写同类。INT-136 起 create 与非
+		// dry_run 的 run 只能走异步确认路径（runAsyncTool → runScheduleWrite），
+		// 改动 instruction/needs_report/model 的 update 同理；这里保留 update
+		// 的同步分支（只改 name/cron/timezone 仍同步）。
+		return s.execScheduleTool(call)
+	case "fs_schedule/run":
+		// dry_run=true 的 run 是只读预览，保持同步返回（受理判定对它免确认）；
+		// 非 dry_run 的 run 走到这里说明绕过了受理判定，显式拒绝而不是触发。
+		var runArgs botScheduleTaskArgs
+		if err := json.Unmarshal([]byte(call.ArgumentsJSON), &runArgs); err != nil || !runArgs.DryRunBool() {
+			return "", errs.New(errs.ErrInvalidParams.Code, "非 dry_run 的 run 需要用户确认，只能异步执行；预览请显式携带 dry_run=true")
+		}
 		return s.execScheduleTool(call)
 	case "fs_memory/list", "fs_memory/read", "fs_memory/create", "fs_memory/replace",
 		"fs_memory/append", "fs_memory/delete", "fs_memory/history", "fs_memory/restore":
