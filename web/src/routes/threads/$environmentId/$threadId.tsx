@@ -60,25 +60,28 @@ function ThreadDetailView({
     <>
       <Header
         title={thread?.title || "线程详情"}
+        backTo="/threads"
         actions={
-          thread && (
-            <>
-              {/* 宽屏时父线程入口在右侧信息卡；窄屏没有信息卡，这里补一个 */}
-              {thread.parent_thread_id && (
-                <Link
-                  to={`/threads/${encodeURIComponent(environmentId)}/${encodeURIComponent(thread.parent_thread_id)}`}
-                  className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground lg:hidden"
-                >
-                  <ArrowLeft className="size-4" />
-                  父线程
-                </Link>
-              )}
-              <ThreadStatusBadge
-                status={thread.status}
-                runStartedAt={thread.run_started_at}
-              />
-            </>
-          )
+          <>
+            {thread && (
+              <>
+                {/* 右栏够宽时父线程入口在信息卡（@4xl 起显示）；信息卡缺席时这里补一个 */}
+                {thread.parent_thread_id && (
+                  <Link
+                    to={`/threads/${encodeURIComponent(environmentId)}/${encodeURIComponent(thread.parent_thread_id)}`}
+                    className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground @4xl:hidden"
+                  >
+                    <ArrowLeft className="size-4" />
+                    父线程
+                  </Link>
+                )}
+                <ThreadStatusBadge
+                  status={thread.status}
+                  runStartedAt={thread.run_started_at}
+                />
+              </>
+            )}
+          </>
         }
       />
       <div className="flex w-full flex-1 gap-6 px-4 md:px-6">

@@ -18,10 +18,11 @@ const geometry = { scrollHeight: 1000, clientHeight: 400 };
 
 function Chat({ version, ready = true }: { version: string; ready?: boolean }) {
   const anchor = useRef<HTMLDivElement>(null);
-  useScrollFollow(anchor, version, ready);
+  const scrollToBottom = useScrollFollow(anchor, version, ready);
   return (
     <div data-testid="scroller" style={{ overflowY: "auto" }}>
       <div ref={anchor}>content</div>
+      <button onClick={scrollToBottom}>force</button>
     </div>
   );
 }
@@ -81,5 +82,26 @@ describe("useScrollFollow", () => {
     geometry.scrollHeight = 1400;
     view.rerender(<Chat version="3" />);
     expect(scroller.scrollTop).toBe(1400);
+  });
+
+  it("scrollToBottom 把上翻的用户拉回底部，并恢复后续跟随", () => {
+    geometry.scrollHeight = 1000;
+    const { view, scroller } = setup();
+    view.rerender(<Chat version="1" />);
+    act(() => {
+      scroller.scrollTop = 200;
+      fireEvent.scroll(scroller);
+    });
+
+    // 发送消息时显式贴底（即使正上翻读历史）。
+    act(() => {
+      screen.getByRole("button", { name: "force" }).click();
+    });
+    expect(scroller.scrollTop).toBe(1000);
+
+    // 贴底后随后的内容增长继续跟随（回复流式增长）。
+    geometry.scrollHeight = 1200;
+    view.rerender(<Chat version="2" />);
+    expect(scroller.scrollTop).toBe(1200);
   });
 });

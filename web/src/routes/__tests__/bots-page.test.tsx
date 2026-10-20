@@ -13,6 +13,7 @@ import App from "@/App";
 import { renderWithRoute } from "@/test/render";
 import type { Bot } from "@/lib/api/bots";
 import { useBot, useBots } from "@/lib/hooks/use-bots";
+import { useBotDetailPanelStore } from "@/lib/store/bot-detail-panel-store";
 
 const {
   createMutateAsync,
@@ -278,6 +279,26 @@ describe("BotDetailPage", () => {
       initialEntry: "/bots/b1",
     });
 
+  // 右栏默认收起（INT-134），展开状态持久化在 store 里。需要看右栏内容的
+  // 用例显式展开；默认收起的用例自己把它设回去。
+  beforeEach(() => {
+    useBotDetailPanelStore.setState({ expanded: true });
+  });
+
+  it("右栏默认收起，展开后记住选择", async () => {
+    const user = userEvent.setup();
+    useBotDetailPanelStore.setState({ expanded: false });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: "发布助手" });
+    expect(screen.queryByTestId("bot-detail-panel")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "显示详情" }));
+    expect(await screen.findByTestId("bot-detail-panel")).toBeInTheDocument();
+    // 展开状态落在持久化的 store 里，刷新后沿用。
+    expect(useBotDetailPanelStore.getState().expanded).toBe(true);
+  });
+
   it("shows the bot name in the header and the empty main line", async () => {
     renderDetail();
     expect(
@@ -359,6 +380,7 @@ describe("BotDetailPage", () => {
     // 页头切换钮与面板右上角 X 同名，点面板上的那个。
     await user.click(within(panel).getByRole("button", { name: "隐藏详情" }));
     expect(screen.queryByTestId("bot-detail-panel")).toBeNull();
+    expect(useBotDetailPanelStore.getState().expanded).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "显示详情" }));
     expect(await screen.findByTestId("bot-detail-panel")).toBeInTheDocument();
@@ -488,6 +510,60 @@ describe("BotDetailPage", () => {
       within(background).getByRole("button", { name: "取消" }),
     );
     await waitFor(() => expect(chatCancel).toHaveBeenCalledWith("c1"));
+  });
+
+  it("回复中把等待动画放在内容最底部，输入框里不再有文字提示", async () => {
+    chatOverrides.current = {
+      runActive: true,
+      entries: [
+        {
+          message: {
+            id: "m1",
+            bot_id: "b1",
+            session_kind: "main",
+            seq: 1,
+            role: "user",
+            kind: "user",
+            content: { text: "把定时任务重启一下" },
+            created_at: "2026-10-15T00:00:20Z",
+          },
+        },
+      ],
+      activeRun: {
+        id: "r1",
+        bot_id: "b1",
+        trigger_source: "user_message",
+        status: "running",
+        created_at: "2026-10-15T00:00:20Z",
+      },
+      // 后台调用面板和活动 run 可以同时在场：等待动画必须在它之后，
+      // 贴底时才不会被面板顶出可见区。
+      backgroundCalls: [
+        {
+          id: "c1",
+          bot_id: "b1",
+          tool_name: "fs_issue",
+          action: "comment",
+          arguments: {},
+          execution_mode: "async",
+          requires_confirmation: false,
+          status: "queued",
+          created_at: "2026-10-15T00:00:30Z",
+        },
+      ],
+    };
+    renderDetail();
+
+    const indicator = await screen.findByTestId("bot-typing-indicator");
+    expect(indicator).toHaveAccessibleName("机器人正在回复");
+    const background = await screen.findByTestId("bot-background-calls");
+    expect(
+      background.compareDocumentPosition(indicator) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // 提示从输入框里挑走了：表单内不再有那句长文案。
+    const composer = screen.getByRole("form", { name: "机器人消息输入" });
+    expect(composer).not.toHaveTextContent("机器人正在处理中");
   });
 
   it("shows maintenance progress in the run bar with distinct styling on failure", async () => {

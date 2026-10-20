@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useLocation, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import { MobileNav } from "./sidebar";
 import { NotificationBell } from "./notification-bell";
 import { Button } from "@/components/ui/button";
@@ -23,10 +23,13 @@ function hasPreviousRouterEntry(locationKey: string): boolean {
 export function Header({
   title,
   actions,
+  backTo,
 }: {
   // ReactNode 支持面包屑等复合标题（自动化编辑页）；纯文本直接传字符串。
   title?: ReactNode;
   actions?: ReactNode;
+  /** 给定上级路径时返回按钮改成指向它的链接（深链进入也有确定的返回目标）。 */
+  backTo?: string;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -59,16 +62,28 @@ export function Header({
           <TooltipContent>{collapsed ? "展开侧边栏" : "折叠侧边栏"}</TooltipContent>
         </Tooltip>
       </TooltipProvider>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-8 w-8"
-        disabled={!canGoBack}
-        onClick={() => navigate(-1)}
-        aria-label="返回"
-      >
-        <ChevronLeft className="h-4 w-4" />
-      </Button>
+      {backTo ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          render={<Link to={backTo} />}
+          aria-label="返回"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+      ) : (
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8"
+          disabled={!canGoBack}
+          onClick={() => navigate(-1)}
+          aria-label="返回"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+      )}
       {title && (
         <h1 className="text-base font-semibold truncate flex-1 min-w-0">{title}</h1>
       )}
