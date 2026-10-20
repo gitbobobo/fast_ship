@@ -1068,18 +1068,29 @@ func TestBotInt136AcceptRejectsTaskWithoutPreview(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
 		tk.Instruction = "   "
 	})
-	prepared, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule",
-		`{"action":"run","task_id":"`+task.ID+`"}`)
-	if err != nil {
-		t.Fatalf("prepare: %v", err)
-	}
 	botRow, err := env.bots.bots.Get(bot.ID)
 	if err != nil {
 		t.Fatalf("load bot: %v", err)
 	}
-	err = env.bots.resolveCallScope(botRow, prepared, `{"action":"run","task_id":"`+task.ID+`"}`, &botCallExecContext{})
+	runPrep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule",
+		`{"action":"run","task_id":"`+task.ID+`"}`)
+	if err != nil {
+		t.Fatalf("prepare run: %v", err)
+	}
 	var appErr *errs.AppError
-	if !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code {
-		t.Fatalf("没有生效配置时应拒绝受理: %v", err)
+	if err := env.bots.resolveCallScope(botRow, runPrep, `{"action":"run","task_id":"`+task.ID+`"}`, &botCallExecContext{}); !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("没有生效配置时应拒绝 run: %v", err)
+	}
+	// delete 是清理坏任务的唯一出口：允许受理，但要保留目标与修订水位。
+	delPrep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule",
+		`{"action":"delete","task_id":"`+task.ID+`"}`)
+	if err != nil {
+		t.Fatalf("prepare delete: %v", err)
+	}
+	if err := env.bots.resolveCallScope(botRow, delPrep, `{"action":"delete","task_id":"`+task.ID+`"}`, &botCallExecContext{}); err != nil {
+		t.Fatalf("delete 应仍可受理: %v", err)
+	}
+	if delPrep.SchedulePreview == nil || delPrep.SchedulePreview.TaskUpdatedAt == "" {
+		t.Fatalf("delete 预览应保留目标与修订水位: %+v", delPrep.SchedulePreview)
 	}
 }

@@ -969,8 +969,10 @@ func (s *BotService) estimateSnapshotTokensPair(bot *model.Bot, plan *botCompact
 		fixed := after
 		if snap.SummaryText != "" && built.SummaryMessageIdx >= 0 && built.SummaryMessageIdx < len(built.Request.Messages) {
 			fixedMsgs := append([]openai.ChatCompletionMessageParamUnion(nil), built.Request.Messages...)
+			// F 口径必须用与 after 同一份渲染条件（含激活后的 nonce），否则
+			// 摘要前缀的围栏/声明会被算进差值、验收数字偏小。
 			fixedMsgs[built.SummaryMessageIdx] = openai.SystemMessage(
-				botSummaryMessageText(botProjectionNonce(bot), "", snap.IdentifierManifestJSON))
+				botSummaryMessageText(fenceNonce, "", snap.IdentifierManifestJSON))
 			fixedRaw, _ := json.Marshal(fixedMsgs)
 			fixed = botEstimateBytes(int64(len(fixedRaw) + int(built.ToolsSchemaBytes)))
 		}

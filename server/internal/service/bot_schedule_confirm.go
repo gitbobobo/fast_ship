@@ -194,8 +194,16 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 		prepared.ScopeID = task.ID
 		prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
 		if prepared.SchedulePreview == nil {
-			return errs.New(errs.ErrInvalidParams.Code,
-				"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
+			if prepared.Action != "delete" {
+				return errs.New(errs.ErrInvalidParams.Code,
+					"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
+			}
+			// delete 是清理坏任务的唯一出口：配置不合并不出预览时仍允许删除，
+			// 只保留目标与修订水位（确认卡按动作说明后果，不需要完整配置）。
+			prepared.SchedulePreview = &botScheduleCallPreview{
+				TaskID:        task.ID,
+				TaskUpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			}
 		}
 	}
 	return nil
