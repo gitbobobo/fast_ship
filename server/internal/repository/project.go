@@ -230,6 +230,17 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 					Delete(&model.ReviewDebounce{}).Error; err != nil {
 					return err
 				}
+				// 推进 epoch 并清 pending：正在进行的同步（已持有旧账本快照）
+				// 会因 epoch 不符停止，不能再向旧仓库发布状态/评论。
+				if err := tx.Model(&model.ReviewPullRequest{}).
+					Where("project_id = ?", project.ID).
+					Updates(map[string]interface{}{
+						"sync_pending": false,
+						"sync_epoch":   gorm.Expr("sync_epoch + 1"),
+						"updated_at":   now,
+					}).Error; err != nil {
+					return err
+				}
 			}
 			return nil
 		}

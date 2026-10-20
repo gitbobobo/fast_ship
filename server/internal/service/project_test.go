@@ -339,6 +339,22 @@ func TestProjectRepoUpdate_RepoSyncsReviewSettings(t *testing.T) {
 	if got.RepoFullName != "newowner/newrepo" {
 		t.Fatalf("repo_full_name = %q, want newowner/newrepo", got.RepoFullName)
 	}
+	// 换仓库要推进 epoch 并清 pending：在途同步不能再向旧仓库发布。
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: project.ID, RepoFullName: "oldowner/oldrepo", PRNumber: 1,
+		UserID: user.ID, HeadSHA: "sha", SyncPending: true, SyncEpoch: 4, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	project.GithubOwner, project.GithubRepo = "Another", "Repo"
+	if err := svc.projectRepo.Update(project); err != nil {
+		t.Fatalf("update project 2: %v", err)
+	}
+	svc.db.First(&ledger, "project_id = ? AND pr_number = 1", project.ID)
+	if ledger.SyncPending || ledger.SyncEpoch != 5 {
+		t.Fatalf("ledger pending/epoch = %v/%d, want false/5", ledger.SyncPending, ledger.SyncEpoch)
+	}
 }
 
 func TestProjectRepo_NullTokenRefsScanAsEmpty(t *testing.T) {
