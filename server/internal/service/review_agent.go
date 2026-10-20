@@ -54,9 +54,17 @@ func (s *ReviewService) ResolveRunToken(ctx context.Context, raw string, require
 		return nil, errs.ErrRunTokenInvalid
 	}
 	// 首次成功鉴权：dispatched → running（条件更新，失败即并发状态已变）。
+	// 顺带补 dispatched_at：令牌只经启动提示词交给线程，Agent 能出示即证明
+	// 线程已建成——即使启动 RPC 结果没确认。归档阶段以 dispatched_at 非空
+	// 为前提，这里不补会漏归档。
 	s.db.WithContext(ctx).Model(&model.ReviewRun{}).
 		Where("id = ? AND status = ?", run.ID, model.ReviewRunDispatched).
-		Updates(map[string]any{"status": model.ReviewRunRunning, "started_at": now, "updated_at": now})
+		Updates(map[string]any{
+			"status":        model.ReviewRunRunning,
+			"started_at":    now,
+			"dispatched_at": gorm.Expr("COALESCE(dispatched_at, ?)", now),
+			"updated_at":    now,
+		})
 	return &RunTokenIdentity{UserID: run.UserID, RunID: run.ID}, nil
 }
 
@@ -240,11 +248,11 @@ func (s *ReviewService) appendNewDiscussion(ctx context.Context, run *model.Revi
 // visualHistory 视觉审查历史：上一轮视觉运行的 findings + unmeasurable。
 func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun) (string, error) {
 	// 最近一轮「确有视觉运行」的轮次：中间轮可能只跑了代码审查，
-	// round-1 会拿到空历史。
+	// round-1 会拿到空历史。历史只在本项目账本内取。
 	var prevRound *int
 	if err := s.db.WithContext(ctx).Model(&model.ReviewRun{}).
-		Where("repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
-			run.RepoFullName, run.PRNumber, model.ReviewKindVisual, run.RoundNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
+			run.ProjectID, run.RepoFullName, run.PRNumber, model.ReviewKindVisual, run.RoundNumber).
 		Select("MAX(round_number)").Scan(&prevRound).Error; err != nil {
 		return "", errs.ErrInternal
 	}
@@ -283,15 +291,15 @@ func (s *ReviewService) visualHistory(ctx context.Context, run *model.ReviewRun)
 	return strings.TrimRight(b.String(), "\n"), nil
 }
 
-// runsAtRound 取同 PR 指定轮次、指定 kind 的运行（按创建序）。
+// runsAtRound 取本项目同 PR 指定轮次、指定 kind 的运行（按创建序）。
 func (s *ReviewService) runsAtRound(ctx context.Context, run *model.ReviewRun, round int, kind model.ReviewKind) ([]model.ReviewRun, error) {
 	if round < 1 {
 		return nil, nil
 	}
 	var runs []model.ReviewRun
 	if err := s.db.WithContext(ctx).
-		Where("repo_full_name = ? AND pr_number = ? AND round_number = ? AND kind = ?",
-			run.RepoFullName, run.PRNumber, round, kind).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND round_number = ? AND kind = ?",
+			run.ProjectID, run.RepoFullName, run.PRNumber, round, kind).
 		Order("created_at ASC").Find(&runs).Error; err != nil {
 		return nil, errs.ErrInternal
 	}
@@ -412,7 +420,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			tx.Model(&model.ReviewRunToken{}).
 				Where("run_id = ? AND consumed_at IS NULL", run.ID).
 				Update("consumed_at", now)
-			return s.markPRSyncPendingByRepoTx(tx, run.RepoFullName, run.PRNumber, now)
+			return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
 		return errs.ErrReviewHeadChanged
 	}
@@ -461,7 +469,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 						Update("consumed_at", now).Error; err != nil {
 						return err
 					}
-					if err := s.markPRSyncPendingByRepoTx(tx, run.RepoFullName, run.PRNumber, now); err != nil {
+					if err := s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now); err != nil {
 						return err
 					}
 					notifyTimeout = true
@@ -476,7 +484,7 @@ func (s *ReviewService) AgentSubmitResult(ctx context.Context, runID string, bod
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	if err != nil {
 		return err
@@ -625,10 +633,11 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	now := time.Now().UTC()
 	var round int
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := s.supersedePRRunsTx(tx, repo, prNumber, now); err != nil {
+		if err := s.supersedePRRunsTx(tx, project.ID, repo, prNumber, now); err != nil {
 			return err
 		}
-		if err := tx.Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			project.ID, repo, prNumber).
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}

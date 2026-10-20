@@ -65,10 +65,14 @@ func (s *ReviewService) lockForPR(repo string, prNumber int) *sync.Mutex {
 	return lock
 }
 
-// syncPendingPRs 逐行处理 sync_pending 的 PR 总账。
+// syncPendingPRs 逐行处理 sync_pending 的 PR 总账。只处理项目设置仍 enabled
+// 的账本行：被接管/停用项目的残留行不再发 GitHub 产出——同一仓库的
+// 状态与评论由当前 enabled 项目独占。
 func (s *ReviewService) syncPendingPRs(now time.Time) {
 	var rows []model.ReviewPullRequest
-	if err := s.db.Where("sync_pending").Order("updated_at ASC").Limit(reviewStageBatch).
+	if err := s.db.Where(`sync_pending AND project_id IN (
+		SELECT project_id FROM project_review_settings WHERE enabled)`).
+		Order("updated_at ASC").Limit(reviewStageBatch).
 		Find(&rows).Error; err != nil {
 		s.logger.Error("查询待同步 PR 失败", zap.Error(err))
 		return
@@ -100,8 +104,8 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	defer cancel()
 
 	var cur model.ReviewPullRequest
-	if err := s.db.Where("repo_full_name = ? AND pr_number = ?",
-		ledger.RepoFullName, ledger.PRNumber).First(&cur).Error; err != nil {
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).First(&cur).Error; err != nil {
 		return
 	}
 	epoch := cur.SyncEpoch
@@ -110,16 +114,16 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	syncErr := s.doSyncPR(ctx, &cur, epoch, now)
 	if syncErr != nil {
 		s.db.Model(&model.ReviewPullRequest{}).
-			Where("repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-				cur.RepoFullName, cur.PRNumber, epoch).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
+				cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
 			Updates(map[string]any{"sync_error": syncErr.Error(), "updated_at": now})
 		s.logger.Warn("PR 审查同步失败（下轮重试）",
 			zap.String("repo", cur.RepoFullName), zap.Int("pr", cur.PRNumber), zap.Error(syncErr))
 		return
 	}
 	s.db.Model(&model.ReviewPullRequest{}).
-		Where("repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-			cur.RepoFullName, cur.PRNumber, epoch).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
+			cur.ProjectID, cur.RepoFullName, cur.PRNumber, epoch).
 		Updates(map[string]any{"sync_pending": false, "sync_error": "", "updated_at": now})
 }
 
@@ -145,13 +149,13 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	}
 
 	var codeRuns, visualRuns []model.ReviewRun
-	if err := s.db.Where("repo_full_name = ? AND pr_number = ? AND head_sha = ? AND round_number = ? AND kind = ?",
-		ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindCode).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND round_number = ? AND kind = ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindCode).
 		Order("created_at ASC").Find(&codeRuns).Error; err != nil {
 		return errs.ErrInternal
 	}
-	if err := s.db.Where("repo_full_name = ? AND pr_number = ? AND head_sha = ? AND round_number = ? AND kind = ?",
-		ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindVisual).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND round_number = ? AND kind = ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA, ledger.RoundNumber, model.ReviewKindVisual).
 		Order("created_at ASC").Find(&visualRuns).Error; err != nil {
 		return errs.ErrInternal
 	}
@@ -275,8 +279,8 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 // 不命中说明同步期间总账被推进（epoch 已变），本次快照作废，调用方应中止。
 func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch int, fields map[string]any) (bool, error) {
 	res := s.db.Model(&model.ReviewPullRequest{}).
-		Where("repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
-			ledger.RepoFullName, ledger.PRNumber, epoch).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, epoch).
 		Updates(fields)
 	if res.Error != nil {
 		return false, res.Error
@@ -327,7 +331,8 @@ func (s *ReviewService) upsertPRComment(ctx context.Context, client githubapi.Gi
 		commentID = newID
 	}
 	s.db.Model(&model.ReviewPullRequest{}).
-		Where("repo_full_name = ? AND pr_number = ?", ledger.RepoFullName, ledger.PRNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
 		Update(idColumn, commentID)
 	return nil
 }
@@ -695,10 +700,11 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	fingerprint := screenshotFingerprint(refs)
 	in.ScreensChanged = fingerprint != ledger.VisualScreensFingerprint
 
-	// 上一轮（更早 round）视觉运行是否带 blocker/worth_fixing。
+	// 上一轮（更早 round）视觉运行是否带 blocker/worth_fixing。历史只看
+	// 本项目账本——其他项目同仓库的残留运行不构成「上一轮」。
 	var allPrior []model.ReviewRun
-	if err := s.db.Where("repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
-		ledger.RepoFullName, ledger.PRNumber, model.ReviewKindVisual, ledger.RoundNumber).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, model.ReviewKindVisual, ledger.RoundNumber).
 		Order("round_number DESC, created_at ASC").Find(&allPrior).Error; err != nil {
 		return visualNone, "", nil, errs.ErrInternal
 	}
@@ -778,7 +784,8 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 	aborted := false
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		var cur model.ReviewPullRequest
-		if err := tx.Where("repo_full_name = ? AND pr_number = ?", ledger.RepoFullName, ledger.PRNumber).
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
 			First(&cur).Error; err != nil {
 			return err
 		}
@@ -789,8 +796,8 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 		}
 		var cancelled int64
 		if err := tx.Model(&model.ReviewRun{}).
-			Where("repo_full_name = ? AND pr_number = ? AND head_sha = ? AND kind = ? AND status = ?",
-				ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA,
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ? AND kind = ? AND status = ?",
+				ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, ledger.HeadSHA,
 				model.ReviewKindCode, model.ReviewRunCancelled).
 			Count(&cancelled).Error; err != nil {
 			return err

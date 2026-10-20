@@ -623,7 +623,10 @@ func createBootIndexes(db *gorm.DB) {
 
 	// PR 审查（INT-135）：轮次/SHA 反查、用户时间序、在途截止、组合幂等唯一。
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_pr_round ON review_runs(project_id, repo_full_name, pr_number, round_number)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_pr_head ON review_runs(repo_full_name, pr_number, head_sha)")
+	// head 反查的主读路径已带上 project_id（账本按项目分区），索引前缀对齐；
+	// 旧的无 project_id 同名索引 DROP 重建。
+	db.Exec("DROP INDEX IF EXISTS idx_review_runs_pr_head")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_pr_head ON review_runs(project_id, repo_full_name, pr_number, head_sha)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_user_created ON review_runs(user_id, created_at DESC)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_active_deadline ON review_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
 	// 组合幂等唯一索引列定义历经两次演变（补 round_number、补 environment_id），

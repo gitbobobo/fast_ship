@@ -11,12 +11,20 @@
 + 自由提示词，INT-90/93/118），后者整体删除：旧七张表
 （`automations`/`automation_triggers`/`automation_runs`/`automation_run_tokens`/
 `github_pr_reviews`/`github_pr_debounces`/`github_pr_seen_shas`）由
-`cmd/server/migrate_review.go` 在 AutoMigrate 前直接 DROP，不迁数据；同一
-迁移顺带把既有 `repo_full_name` 统一 lower 归一（幂等，表不存在跳过）。
+`cmd/server/migrate_review.go` 在 AutoMigrate 前直接 DROP，不迁数据。本 PR
+新增的七张审查表（`review_runs`/`review_run_tokens`/`review_pull_requests`/
+`review_assets`/`review_debounces`/`review_seen_shas`/`project_review_settings`）
+同样由该迁移整表 DROP——功能尚未发布，结构演进一律重建不做数据迁移。
 审查的流程类机制（触发、防抖、排队、工作区、历史、评论、状态、视觉衔接）由
 系统写死保证，提示词只保留审查判断本身，不给用户自由发挥。不做评论命令、
 不做 Checks API、不审 draft 与 fork PR。站内通知保留但只用于审查系统故障
 （派发失败、超时、工作区回收失败），审查发现不发通知。单进程部署假设。
+
+**账本按项目分区**：GitHub 产出（commit status、顶层评论、行内 review、
+每 PR 进程锁）按仓库归一——同一仓库任一时刻只有一个项目 enabled。但执行态
+（运行、令牌、防抖、seen SHA、PR 总账）全部按 `project_id` 分区：项目换成
+另一个项目接管同一仓库时各记一本账，互不吞事件、不混结果。接管语义见
+「开启前置与同仓库唯一」。
 
 ## 数据模型
 
@@ -25,12 +33,12 @@
 | 表 | 关键列 | 说明 |
 | --- | --- | --- |
 | `project_review_settings` | PK `project_id`；`user_id`；`enabled`；`trigger_opened/synchronize/ready_for_review/reopened`；`code_combinations_json`/`visual_combinations_json` | 项目级开关与组合。组合元素：`environment_id`、`instance_id`（harness/provider 实例）、`model`、`options`（canonical `[{id,value}]` 数组，思考强度等）、`t3_project_id`（保存时由 `project_t3_bindings` 快照，不信任客户端回传）。代码组合启用时 1–5 个必填；视觉组合 0–3 个，0 个即从不启动视觉审查。 |
-| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`dispatched_at` 仅在启动 RPC 结果确认时写入，为空 = 线程是否建成未确认。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
+| `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
-| `review_pull_requests` | PK `(repo_full_name, pr_number)`；`project_id/user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。 |
-| `review_assets` | `(repo_full_name, pr_number, head_sha, position)`；`label`；`source_url`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经媒体代理下载后本地落盘。 |
+| `review_pull_requests` | PK `(project_id, repo_full_name, pr_number)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id`：同仓库换项目接管后各一本账。 |
+| `review_assets` | `(repo_full_name, pr_number, head_sha, position)`；`label`；`source_url`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经媒体代理下载后本地落盘。内容是仓库归一的共享产物（同一 head 同一批截图），不按项目分区。 |
 | `review_debounces` | PK `(project_id, repo_full_name, pr_number)`；`head_sha/action/installation_id/pr_title/pr_url/base_ref/head_ref`；`fire_at` | 防抖窗口。窗口内新推送只更新 head 并推后 `fire_at`；固定 60s，不提供配置。 |
-| `review_seen_shas` | PK `(repo_full_name, pr_number, head_sha)`；`pr_updated_at`；`accepted_at` | 已受理过的 head SHA（部署级，无用户维度）：force-push 回旧 SHA 不再开轮。 |
+| `review_seen_shas` | PK `(project_id, repo_full_name, pr_number, head_sha)`；`pr_updated_at`；`accepted_at` | 某项目已受理过的 head SHA：force-push 回旧 SHA 不再开轮。按项目分区——接管后新项目对同仓库同一 SHA 重新受理。 |
 
 外键：`project_review_settings` → `projects`/`users` CASCADE；
 `review_run_tokens.run_id` → `review_runs` CASCADE；`review_runs` →
@@ -46,7 +54,8 @@ seen SHA、取消旧轮全部失效）。
 
 - `review_runs(project_id, repo_full_name, pr_number, round_number)` —— 审查
   记录按轮聚合；
-- `review_runs(repo_full_name, pr_number, head_sha)` —— 按轮与 SHA 查运行；
+- `review_runs(project_id, repo_full_name, pr_number, head_sha)` —— 按轮与
+  SHA 查运行（读路径已带 project_id 前缀）；
 - `review_runs(user_id, created_at DESC)` —— 用户维度队列；
 - `review_runs(deadline_at) WHERE status IN ('dispatched','running')` —— 超时扫描；
 - `review_runs` UNIQUE —— 同 head 同轮同组合的重复插入被吃掉（轮次入键，
@@ -70,15 +79,17 @@ seen SHA、取消旧轮全部失效）。
    `project_review_settings.enabled=true` 的那一行（一个部署内最多一个，
    见「同仓库唯一」）。没开启 → 忽略，不取消、不开轮。
 4. action 未被该项目触发条件勾选 → 忽略（不取消、不改 seen）。
-5. 过期 SHA 判定（按 repo+pr）：当前 head 优先取未开火的防抖行，否则取
+5. 过期 SHA 判定（全部按 `project_id + repo + pr`，其他项目的同仓库残留行
+   不进入判定）：当前 head 优先取未开火的防抖行，否则取本项目
    `review_pull_requests.head_sha`；payload `pull_request.updated_at` ≤ 已受理
-   head 的 `pr_updated_at` → 忽略；该 SHA 已在 `review_seen_shas` 但不是当前
-   head → 忽略；`action=opened` 且当前 head 非空 → 忽略；该 SHA 已有运行 →
-   忽略。force-push 回已见过的 SHA 不再开轮。
-6. 写 `review_seen_shas`（含 `pr_updated_at`）。
-7. 新 head ≠ 当前 head：把该 PR 下所有未终态运行置 `cancelled`、
-   `error_code='superseded'`、`finished_at=now`，消费其令牌；删除该 PR 的
-   防抖行（旧 SHA 不得开火）；置 `review_pull_requests.sync_pending=true`。
+   head 的 `pr_updated_at` → 忽略；该 SHA 已在本项目 `review_seen_shas` 但不是
+   当前 head → 忽略；`action=opened` 且当前 head 非空 → 忽略；该 SHA 本项目
+   已有运行 → 忽略。force-push 回已见过的 SHA 不再开轮。
+6. 写 `review_seen_shas`（含 `project_id` 与 `pr_updated_at`）。
+7. 新 head ≠ 当前 head：把该 PR 下**本项目**所有未终态运行置 `cancelled`、
+   `error_code='superseded'`、`finished_at=now`，消费其令牌；删除该 PR 本项目的
+   防抖行（旧 SHA 不得开火）；置本项目总账 `sync_pending=true`（其他项目的
+   残留由各自停用/接管路径收敛，webhook 不动）。
 8. 写/更新防抖行（同一 (project, repo, pr) 只一行），`fire_at=now+60s`。
 
 事务内零 GitHub/T3 调用；提交后非阻塞 kick 调度循环。
@@ -90,9 +101,13 @@ seen SHA、取消旧轮全部失效）。
 1. **到期防抖**：查 `fire_at<=now` 的防抖行，逐行短事务条件删除后复核——
    项目仍启用、仓库仍属该项目、触发条件仍勾选——成立才开一轮；顺带清理
    超龄 delivery 幂等账（保留 7 天）。
-2. **派发认领**：`dispatched` 且未确认建线程的运行在认领后超过 5 分钟仍
-   `dispatched_at IS NULL`（进程在认领与建线程之间退出）时允许重新认领——
+2. **派发认领**：`dispatched` 且未确认建线程、**且从未签发过运行令牌**的
+   运行，在认领后超过 5 分钟仍 `dispatched_at IS NULL` 时允许重新认领——
    `CreateThread` 以运行行预分配的 threadId/commandId 幂等，不会建出第二个线程。
+   **已签发令牌的运行不再重认领**：令牌是随机值、库中只存 SHA-256，进程
+   重启后无法恢复原值；令牌存在即证明 `launchRun` 至少走到过签发点，重签
+   会覆盖旧哈希让已建成线程的令牌失效。这类运行保留 `dispatched` 等
+   `deadline_at` 超时兜底，不自动重试。
 3. **排队提升**：每用户最多 **5 个在途**（dispatched/running），其余
    `queued` 按 `created_at` 依序提升为 `dispatched`，`deadline_at` 重置为
    提升时刻 + 超时（超时从真正开始派发算，不占排队时间）。超时固定
@@ -102,7 +117,8 @@ seen SHA、取消旧轮全部失效）。
 4. **超时**：`dispatched/running` 过 `deadline_at` → `timed_out`
    （`error_code='timeout'`），消费令牌、置 `sync_pending`、写
    `review_run_timeout` 通知。
-5. **GitHub 同步**：见「GitHub 产出」。
+5. **GitHub 同步**：见「GitHub 产出」。只处理项目设置仍 `enabled` 的总账
+   行——被接管/停用项目的 `sync_pending` 残留不再发 GitHub 产出。
 6. **工作区回收**：见「工作区回收」。
 7. 取消运行的线程中断：`cancelled` 且已派发且 `stop_attempted_at` 为空 →
    先条件占标记，再 `StopThread`（`run.interrupt`，每运行只尝试一次）。
@@ -111,8 +127,9 @@ seen SHA、取消旧轮全部失效）。
 
 ### 开轮
 
-- `round_number`：同一 (repo, pr, head_sha) 已有运行则复用该轮次（代码与
-  视觉同轮号）；否则 `1 + max(round_number)`。手动重新审查（
+- `round_number`：同一 (project, repo, pr, head_sha) 已有运行则复用该轮次
+  （代码与视觉同轮号）；否则 `1 + max(round_number)`——轮次只在项目内分配，
+  接管后新项目从 1 起算，不受旧项目已跑轮次影响。手动重新审查（
   `trigger_action=manual`）恒开新轮——同 head 也要 `max+1`，否则会被
   组合唯一索引吃掉。
 - 同事务 upsert `review_pull_requests`（project/user/installation/round/head、
@@ -136,6 +153,10 @@ seen SHA、取消旧轮全部失效）。
   `t3_thread_launch.go` 的 `createThread` 与 launchSent 语义——启动 RPC
   请求帧未写出 → `failed/dispatch_failed` + `review_dispatch_failed` 通知；
   已发出但结果未确认 → 保持 `dispatched` 等超时，不自动重试。
+- **启动请求不可变重放**：`thread_id/launch_command_id/initial_message_id`
+  在运行行上预分配（开轮时刻写入），重试重放同一请求不建第二个线程；运行
+  令牌只在运行从未签发过时才新签（令牌存在 = `launchRun` 到达过签发点）。
+  `dispatch_started_at` 是认领时刻、`dispatched_at` 是建线程确认时刻。
 - 提示词系统写死（`review_prompts.go` 常量）：代码审查要求自查证（git diff
   + 读文件）、以找 bug 为主、P0/P1/P2/Note 分级、历史处置规则、判断
   `ui_changed` 与 `ui_changed_since_last_visual`；视觉审查按层级/间距/排版/
@@ -149,7 +170,9 @@ seen SHA、取消旧轮全部失效）。
 （`middleware.RequireRunToken`）：只允许 `fsr_`，`fsk_` API Key 一律
 **40304**，无令牌/无效/过期/已消费一律 **40106**。运行必须 `kind` 匹配
 端点且 `status ∈ {dispatched, running}`；首次成功鉴权把 `dispatched→running`
-落库（`started_at`），运行进终态后所有端点 40106。
+落库（`started_at`），**并补 `dispatched_at`**——令牌只经启动提示词交给
+线程，Agent 能出示即证明线程已建成（即使启动 RPC 结果未确认），归档阶段
+以 `dispatched_at` 非空为前提。运行进终态后所有端点 40106。
 
 | 端点 | 说明 |
 | --- | --- |
@@ -180,13 +203,15 @@ seen SHA、取消旧轮全部失效）。
 
 ## GitHub 产出（`review_sync.go`）
 
-每 PR 一把进程内锁（同步完摘除条目，防 map 随历史 PR 数增长），逐行处理
-`review_pull_requests.sync_pending`；全部走 App 安装令牌。失败只记
-`sync_error` 下轮重试，不改运行终态；成功后按开始同步时的 `sync_epoch`
-条件清 pending（同步期间的新 pending 不会被误清）。中段写回
-（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
+每 PR 一把进程内锁（按 repo+pr 键控，同步完摘除条目，防 map 随历史 PR 数
+增长——锁刻意保持仓库归一，同 PR 的 GitHub 写入串行），逐行处理
+`review_pull_requests.sync_pending` 中项目设置仍 `enabled` 的行；全部走
+App 安装令牌。失败只记 `sync_error` 下轮重试，不改运行终态；成功后按开始
+同步时的 `sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
+中段写回（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
 `sync_epoch` 条件：同步期间总账被新 webhook/rerun 推进时不命中，直接放弃
-本轮落库——陈旧快照的结论不得写回。
+本轮落库——陈旧快照的结论不得写回。汇总运行、视觉沿用判定、评论写回等
+所有账本读写都按 `project_id + repo + pr`。
 
 ### commit status（不用 Checks API）
 
@@ -324,7 +349,27 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
 
 **同仓库唯一**：整个部署内同一仓库只允许一个项目 `enabled=true`（大小写
 不敏感）；其他用户的同仓库项目在 `GET`/`PUT` 里得到 `taken_by`（占用者
-登录名），开启返回 40922。
+登录名），开启返回 40922。写入路径双保险：保存事务内先查占用者，部分
+唯一索引 `idx_project_review_settings_repo` 兜并发竞态。
+
+**保存并发复核**：`PUT` 写入事务内会重读 `projects.github_owner/
+github_repo`，与事务外校验用的项目快照不一致 → 400「项目仓库已变更，请
+刷新后重试」（并发改仓库时把 enabled 落到旧快照上会写错唯一占用键与
+账本分区键）。项目侧改仓库走 `ProjectRepository.Update`——同事务停用
+审查并刷新 `repo_full_name` 快照。
+
+**接管**：某项目成功 `enabled=true` 保存时，同一事务内对同仓库其他项目
+做收尾（唯一占用保证此时没有其他 enabled 项目，残留来自曾开启后停用或
+换仓库的项目）：
+
+- 其未终态运行（queued/dispatched/running）全部置 `cancelled`、
+  `error_code='taken_over'`、`finished_at=now`，运行令牌一并消费；线程
+  中断由调度循环照常补发（`stop_attempted_at` 一次）。
+- 其 `review_debounces` 行删除（旧 SHA 不再开火）。
+- 其 `review_pull_requests.sync_pending` 清掉——旧项目的待同步残留不再
+  发 GitHub 产出；配合 `syncPendingPRs` 的 enabled 过滤是双保险。
+- 其 `review_seen_shas` 保留：已受理账是项目自己的历史记录，新项目重新
+  受理同 SHA 不需要也不应该沿用旧项目的已见集合。
 
 ## 通知
 
@@ -351,6 +396,10 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
   Code Bot 时代的评论不会进入上下文；升级前的历史轮次视为没有历史。
 - **已派发未确认的运行**：`dispatched` 且 `dispatched_at` 为空表示启动 RPC
   结果未确认——账本如实等超时判 `timed_out`，不回捞「线程其实起来了」。
+  重认领窗口只覆盖**签发令牌之前**的崩溃缝隙（认领→issueRunToken 之间）；
+  令牌一旦签发即不再重认领（随机原值不可恢复，重签会让已建成线程的令牌
+  失效），这类运行靠 `deadline_at` 超时兜底；已建线程若存活，首次鉴权
+  会补 `dispatched_at` 并照常进入 running/归档路径。
 - **改仓库 URL 会自动停用审查**：项目更新仓库地址时，同一个事务里把
   `project_review_settings` 置 `enabled=false` 并把 `repo_full_name` 快照改成
   新仓库——避免旧仓库继续占着唯一索引、新仓库与别的已启用项目重复。用户需要

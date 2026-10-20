@@ -252,7 +252,7 @@ func TestReviewStatusResetOnNewHead(t *testing.T) {
 		CodeStatus: "success", VisualStatus: "failure", UpdatedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewSeenSHA{
-		RepoFullName: repo, PRNumber: 41, HeadSHA: "sha-1", AcceptedAt: now,
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 41, HeadSHA: "sha-1", AcceptedAt: now,
 	})
 
 	if err := e.review.HandleGitHubWebhook(context.Background(), "pull_request", "d-new",

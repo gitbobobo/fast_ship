@@ -89,10 +89,12 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	}
 
 	// 过期 SHA 判定：payload.updated_at ≤ 已受理 head 的 pr_updated_at → 忽略。
+	// 账本按项目分区：seen/总账/运行一律带 project_id，其他项目的同仓库
+	// 残留行不进入本项目判定。
 	if currentHead != "" {
 		var accepted model.ReviewSeenSHA
-		err := tx.Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?",
-			repo, prNumber, currentHead).First(&accepted).Error
+		err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+			project.ID, repo, prNumber, currentHead).First(&accepted).Error
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
@@ -106,7 +108,8 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	if headSHA != currentHead {
 		var n int64
 		if err := tx.Model(&model.ReviewSeenSHA{}).
-			Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?", repo, prNumber, headSHA).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+				project.ID, repo, prNumber, headSHA).
 			Count(&n).Error; err != nil {
 			return err
 		}
@@ -121,7 +124,8 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	// 该 SHA 已有运行 → 忽略。
 	var runCount int64
 	if err := tx.Model(&model.ReviewRun{}).
-		Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?", repo, prNumber, headSHA).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+			project.ID, repo, prNumber, headSHA).
 		Count(&runCount).Error; err != nil {
 		return err
 	}
@@ -131,6 +135,7 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 
 	// 受理：登记 seen SHA（重复防御交给主键冲突）。
 	seen := &model.ReviewSeenSHA{
+		ProjectID:    project.ID,
 		RepoFullName: repo, PRNumber: prNumber, HeadSHA: headSHA,
 		PRUpdatedAt: p.PR.UpdatedAt, AcceptedAt: now,
 	}
@@ -141,10 +146,11 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	// 新 head ≠ 当前 head：取消该 PR 全部未终态运行并消费令牌、删防抖行、
 	// 置总账 sync_pending（无行则建）。
 	if headSHA != currentHead {
-		if err := s.supersedePRRunsTx(tx, repo, prNumber, now); err != nil {
+		if err := s.supersedePRRunsTx(tx, project.ID, repo, prNumber, now); err != nil {
 			return err
 		}
-		if err := tx.Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			project.ID, repo, prNumber).
 			Delete(&model.ReviewDebounce{}).Error; err != nil {
 			return err
 		}
@@ -250,7 +256,8 @@ func (s *ReviewService) currentAcceptedHeadTx(tx *gorm.DB, projectID, repo strin
 		return "", err
 	}
 	var ledger model.ReviewPullRequest
-	err = tx.Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).First(&ledger).Error
+	err = tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		projectID, repo, prNumber).First(&ledger).Error
 	switch {
 	case err == nil:
 		return ledger.HeadSHA, nil
@@ -263,11 +270,13 @@ func (s *ReviewService) currentAcceptedHeadTx(tx *gorm.DB, projectID, repo strin
 
 // supersedePRRunsTx 取消该 PR 全部未终态运行（含 queued/dispatched/running），
 // error_code=superseded；运行令牌一并消费。线程中断由调度阶段补发。
-func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, repo string, prNumber int, now time.Time) error {
+// 只动本项目的运行——账本分区后其他项目的同仓库运行由各自的接管/超时收敛。
+func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, projectID, repo string, prNumber int, now time.Time) error {
 	active := []model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}
 	var runIDs []string
 	if err := tx.Model(&model.ReviewRun{}).
-		Where("repo_full_name = ? AND pr_number = ? AND status IN ?", repo, prNumber, active).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND status IN ?",
+			projectID, repo, prNumber, active).
 		Pluck("id", &runIDs).Error; err != nil {
 		return err
 	}
@@ -296,7 +305,8 @@ func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, repo string, prNumber int
 // SHA 的去重依据。
 func (s *ReviewService) markPRSyncPendingTx(tx *gorm.DB, project *model.Project, repo string, prNumber int, headSHA string, installationID int64, now time.Time) error {
 	var ledger model.ReviewPullRequest
-	err := tx.Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).First(&ledger).Error
+	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		project.ID, repo, prNumber).First(&ledger).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return tx.Create(&model.ReviewPullRequest{
@@ -322,6 +332,7 @@ func (s *ReviewService) markPRSyncPendingTx(tx *gorm.DB, project *model.Project,
 		updates["visual_status"] = ""
 	}
 	return tx.Model(&model.ReviewPullRequest{}).
-		Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			project.ID, repo, prNumber).
 		Updates(updates).Error
 }

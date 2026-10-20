@@ -189,11 +189,13 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		return nil, false, err
 	}
 
-	// changed：本轮指纹与上一轮视觉运行（更早 round）绑定 head 的资产指纹比较。
+	// changed：本轮指纹与上一轮视觉运行（更早 round）绑定 head 的资产指纹
+	// 比较。上一轮运行只在本项目账本内找——资产本身是仓库归一的共享产物，
+	// 「何时做过视觉审查」属于执行态，按项目分区。
 	changed := true
 	var prevRuns []model.ReviewRun
-	if err := s.db.Where("repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
-		run.RepoFullName, run.PRNumber, model.ReviewKindVisual, run.RoundNumber).
+	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND kind = ? AND round_number < ?",
+		run.ProjectID, run.RepoFullName, run.PRNumber, model.ReviewKindVisual, run.RoundNumber).
 		Order("round_number DESC").Limit(1).Find(&prevRuns).Error; err != nil {
 		return nil, false, errs.ErrInternal
 	}

@@ -170,11 +170,14 @@ type ReviewRunToken struct {
 func (ReviewRunToken) TableName() string { return "review_run_tokens" }
 
 // ReviewPullRequest 一个 PR 的审查总账（评论落点、状态汇总、视觉审核进度）。
+// 主键 (project_id, repo_full_name, pr_number)：执行态按项目分区——同一仓库
+// 换项目接管后各自一本账，互不吞事件、不混结果；GitHub 产出（评论、状态、
+// 行内 review）仍按仓库归一（同一仓库只允许一个项目 enabled）。
 type ReviewPullRequest struct {
+	ProjectID    string `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
 	RepoFullName string `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
 	PRNumber     int    `gorm:"column:pr_number;primaryKey" json:"pr_number"`
 
-	ProjectID      string `gorm:"column:project_id;type:text;not null;index" json:"project_id"`
 	UserID         string `gorm:"column:user_id;type:text;not null;index" json:"user_id"`
 	InstallationID int64  `gorm:"column:installation_id" json:"installation_id"`
 
@@ -243,8 +246,11 @@ type ReviewDebounce struct {
 
 func (ReviewDebounce) TableName() string { return "review_debounces" }
 
-// ReviewSeenSHA 已受理过的 head SHA（force-push 回旧 SHA 不再开轮）。
+// ReviewSeenSHA 某项目已受理过的 head SHA（force-push 回旧 SHA 不再开轮）。
+// 主键含 project_id：接管后新项目对同仓库同一 SHA 重新受理（各项目一本
+// 已受理账，旧项目的已见集合不沿用）。
 type ReviewSeenSHA struct {
+	ProjectID    string     `gorm:"column:project_id;type:text;primaryKey" json:"project_id"`
 	RepoFullName string     `gorm:"column:repo_full_name;type:text;primaryKey" json:"repo_full_name"`
 	PRNumber     int        `gorm:"column:pr_number;primaryKey" json:"pr_number"`
 	HeadSHA      string     `gorm:"column:head_sha;type:text;primaryKey" json:"head_sha"`

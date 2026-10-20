@@ -113,6 +113,7 @@ func (c *epochBumpClient) CreateCommitStatus(ctx context.Context, inst int64, re
 // 总账，sync_pending 保留给新 epoch 的下轮重试。
 func TestReviewSyncEpochGuard(t *testing.T) {
 	e := newReviewEngineEnv(t)
+	e.enableReview(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	now := time.Now().UTC()
 	e.fake.SetPR(repo, 77, &githubapi.PullRequest{
@@ -195,7 +196,7 @@ func TestReviewWebhookNoInstallationID(t *testing.T) {
 		InstallationID: 42, HeadSHA: "sha-old-i", RoundNumber: 1, UpdatedAt: now,
 	})
 	e.svc.db.Create(&model.ReviewSeenSHA{
-		RepoFullName: repo, PRNumber: 66, HeadSHA: "sha-old-i",
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 66, HeadSHA: "sha-old-i",
 		AcceptedAt: now,
 	})
 

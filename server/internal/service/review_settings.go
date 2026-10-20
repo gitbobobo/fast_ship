@@ -209,6 +209,18 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	// 同仓库占用（此前那次在事务外，两个并发保存可能都通过），并由部分唯一
 	// 索引 idx_project_review_settings_repo 兜底。
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 事务内复核项目仓库：此前前置条件校验用的是事务外的项目快照，
+		// 并发改仓库可能让 enabled 落到旧仓库上（唯一占用与账本分区都按
+		// 旧键写错）。事务时刻与快照不一致一律 400，让用户刷新重来。
+		var fresh model.Project
+		if err := tx.Select("id", "github_owner", "github_repo").
+			Where("id = ?", projectID).First(&fresh).Error; err != nil {
+			return err
+		}
+		if !strings.EqualFold(fresh.GithubOwner+"/"+fresh.GithubRepo,
+			project.GithubOwner+"/"+project.GithubRepo) {
+			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
+		}
 		if row.Enabled {
 			var otherID string
 			err := tx.Model(&model.ProjectReviewSettings{}).
@@ -219,6 +231,13 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 			}
 			if otherID != "" {
 				return errs.ErrReviewRepoTaken
+			}
+			// 接管收尾：唯一占用保证没有其他 enabled 项目，这里清的是曾
+			// 开启过该仓库的其他项目留下的执行态——未终态运行置
+			// cancelled/taken_over 并消费令牌、删防抖、清总账
+			// sync_pending（不让旧项目继续发 GitHub 产出）。
+			if err := s.takeoverRepoTx(tx, row.RepoFullName, projectID, now); err != nil {
+				return err
 			}
 		}
 		var existing model.ProjectReviewSettings
@@ -234,14 +253,58 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 		return tx.Save(&row).Error
 	})
 	if err != nil {
-		if errors.Is(err, errs.ErrReviewRepoTaken) || strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		var appErr *errs.AppError
+		switch {
+		case errors.Is(err, errs.ErrReviewRepoTaken) || strings.Contains(err.Error(), "UNIQUE constraint failed"):
 			return nil, errs.New(errs.ErrReviewRepoTaken.Code,
 				"该仓库已被其他项目开启审查")
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			return nil, errs.ErrProjectNotFound
+		case errors.As(err, &appErr):
+			return nil, appErr
 		}
 		s.logger.Error("保存审查设置失败", zap.Error(err))
 		return nil, errs.ErrInternal
 	}
 	return s.GetSettings(ctx, userID, projectID)
+}
+
+// takeoverRepoTx 启用某仓库时的接管收尾：同仓库其他项目残留的未终态运行
+// 全部 cancelled/taken_over 并消费令牌、删除防抖行、清掉总账 sync_pending。
+// 调用前已由部分唯一索引语义保证没有其他 enabled 项目——残留行来自曾
+// 开启后停用、或换过仓库的项目。
+func (s *ReviewService) takeoverRepoTx(tx *gorm.DB, repo, projectID string, now time.Time) error {
+	active := []model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}
+	var runIDs []string
+	if err := tx.Model(&model.ReviewRun{}).
+		Where("repo_full_name = ? AND project_id <> ? AND status IN ?", repo, projectID, active).
+		Pluck("id", &runIDs).Error; err != nil {
+		return err
+	}
+	if len(runIDs) > 0 {
+		if err := tx.Model(&model.ReviewRun{}).
+			Where("id IN ? AND status IN ?", runIDs, active).
+			Updates(map[string]any{
+				"status":      model.ReviewRunCancelled,
+				"error_code":  "taken_over",
+				"finished_at": now,
+				"updated_at":  now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&model.ReviewRunToken{}).
+			Where("run_id IN ? AND consumed_at IS NULL", runIDs).
+			Update("consumed_at", now).Error; err != nil {
+			return err
+		}
+	}
+	if err := tx.Where("repo_full_name = ? AND project_id <> ?", repo, projectID).
+		Delete(&model.ReviewDebounce{}).Error; err != nil {
+		return err
+	}
+	return tx.Model(&model.ReviewPullRequest{}).
+		Where("repo_full_name = ? AND project_id <> ? AND sync_pending", repo, projectID).
+		Updates(map[string]any{"sync_pending": false, "updated_at": now}).Error
 }
 
 // ownedProject 读项目并要求归属当前用户；不存在/不属于统一 40401。

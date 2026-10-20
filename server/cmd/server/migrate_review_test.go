@@ -41,3 +41,38 @@ func TestMigrateReviewTablesPurgesLegacyNotifications(t *testing.T) {
 		t.Fatalf("剩余通知 = %+v, 只应保留审查故障行", rows)
 	}
 }
+
+// 本 PR 新增的七张审查表尚未发布：结构演进一律 DROP 后由 AutoMigrate 按
+// 最新模型重建——迁移必须把旧形态表与数据一起删掉。
+func TestMigrateReviewTablesDropsNewReviewTables(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&model.ProjectReviewSettings{}, &model.ReviewRun{}, &model.ReviewRunToken{},
+		&model.ReviewPullRequest{}, &model.ReviewAsset{}, &model.ReviewDebounce{},
+		&model.ReviewSeenSHA{},
+	); err != nil {
+		t.Fatalf("migrate review tables: %v", err)
+	}
+	if err := db.Create(&model.ReviewSeenSHA{
+		ProjectID: "p", RepoFullName: "o/r", PRNumber: 1, HeadSHA: "s",
+		AcceptedAt: time.Now().UTC(),
+	}).Error; err != nil {
+		t.Fatalf("seed seen sha: %v", err)
+	}
+
+	if err := migrateReviewTables(db, zap.NewNop()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	for _, table := range []string{
+		"review_runs", "review_run_tokens", "review_pull_requests", "review_assets",
+		"review_debounces", "review_seen_shas", "project_review_settings",
+	} {
+		if exists, err := sqliteTableExists(db, table); err != nil || exists {
+			t.Fatalf("表 %s 迁移后应已删除 (exists=%v err=%v)", table, exists, err)
+		}
+	}
+}

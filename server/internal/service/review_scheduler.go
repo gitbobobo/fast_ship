@@ -156,25 +156,32 @@ func (s *ReviewService) promoteQueuedRuns(now time.Time) {
 }
 
 // reviewDispatchClaimTimeout 认领后超过这个时长仍未确认建线程（进程在
-// 认领与派发之间退出/崩溃）的运行允许重新认领：CreateThread 以运行行预分配
-// 的 threadId/commandId 幂等，重试不会建出第二个线程。
+// 认领与派发之间退出/崩溃）的运行允许重新认领。窗口只覆盖从未签发过令牌
+// 的运行：令牌是随机值、库中只存 SHA-256 哈希，进程重启后无法恢复原值；
+// 令牌存在即证明 launchRun 至少走到过签发点，已建线程持有的旧令牌一旦
+// 被新签发覆盖就再也鉴权不上——这类运行不再重试，交给 deadline 超时兜底。
 const reviewDispatchClaimTimeout = 5 * time.Minute
 
 // dispatchRuns 认领未启动的 dispatched 行并事务外 launchRun。
+// 启动请求不可变重放：threadId/commandId/messageId 在运行行上预分配，
+// 重试重放同一请求不会建出第二个线程；令牌只在运行从未签发过时才新签。
 func (s *ReviewService) dispatchRuns(now time.Time) {
 	reclaimBefore := now.Add(-reviewDispatchClaimTimeout)
+	// 认领条件：dispatched 且未认领，或认领超窗仍未确认建线程，且从未签发
+	// 令牌（NOT EXISTS）。令牌存在的不重认领——见上面常量注释。
+	const pending = `status = ?
+		AND (dispatch_started_at IS NULL OR (dispatched_at IS NULL AND dispatch_started_at < ?))
+		AND NOT EXISTS (SELECT 1 FROM review_run_tokens t WHERE t.run_id = review_runs.id)`
 	var runs []model.ReviewRun
 	if err := s.db.
-		Where("status = ? AND (dispatch_started_at IS NULL OR (dispatched_at IS NULL AND dispatch_started_at < ?))",
-			model.ReviewRunDispatched, reclaimBefore).
+		Where(pending, model.ReviewRunDispatched, reclaimBefore).
 		Order("created_at ASC").Limit(reviewDispatchBatch).Find(&runs).Error; err != nil {
 		s.logger.Error("查询待派发运行失败", zap.Error(err))
 		return
 	}
 	for _, run := range runs {
 		res := s.db.Model(&model.ReviewRun{}).
-			Where("id = ? AND status = ? AND (dispatch_started_at IS NULL OR (dispatched_at IS NULL AND dispatch_started_at < ?))",
-				run.ID, model.ReviewRunDispatched, reclaimBefore).
+			Where("id = ? AND "+pending, run.ID, model.ReviewRunDispatched, reclaimBefore).
 			Updates(map[string]any{"dispatch_started_at": now, "updated_at": now})
 		if res.Error != nil || res.RowsAffected == 0 {
 			continue
@@ -218,7 +225,7 @@ func (s *ReviewService) markTimeouts(now time.Time) {
 				Update("consumed_at", now).Error; err != nil {
 				return err
 			}
-			return s.markPRSyncPendingByRepoTx(tx, run.RepoFullName, run.PRNumber, now)
+			return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 		})
 		if err != nil {
 			s.logger.Error("标记审查超时失败", zap.String("run", run.ID), zap.Error(err))

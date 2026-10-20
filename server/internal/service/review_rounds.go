@@ -34,7 +34,7 @@ func reviewTimeout(kind model.ReviewKind) time.Duration {
 // openRoundTx 在一个事务里开一轮代码审查（视觉运行不在此创建——它们由代码
 // 全部干净落地后的视觉衔接阶段按条件创建）。
 // 轮次：manual 恒新轮（同 head 也要新轮，否则去重索引吃掉）；其余情况同
-// (repo,pr,head) 已有运行沿其 round_number，否则 1+max(round)。
+// (project,repo,pr,head) 已有运行沿其 round_number，否则 1+max(round)。
 // meta 由防抖行/rerun 传入的 PR 快照字段。
 func (s *ReviewService) openRoundTx(
 	tx *gorm.DB,
@@ -45,14 +45,16 @@ func (s *ReviewService) openRoundTx(
 	installationID int64,
 	now time.Time,
 ) (int, error) {
-	round, err := nextReviewRoundTx(tx, repo, prNumber, headSHA, action)
+	round, err := nextReviewRoundTx(tx, project.ID, repo, prNumber, headSHA, action)
 	if err != nil {
 		return 0, err
 	}
 
-	// 总账推进到本轮 head/round 并置 sync_pending（无行则建）。
+	// 总账推进到本轮 head/round 并置 sync_pending（无行则建）。总账按项目
+	// 分区：只读本项目行，其他项目的同仓库账本不受影响。
 	var ledger model.ReviewPullRequest
-	err = tx.Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).First(&ledger).Error
+	err = tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		project.ID, repo, prNumber).First(&ledger).Error
 	switch {
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		return 0, err
@@ -81,12 +83,13 @@ func (s *ReviewService) openRoundTx(
 	ledger.SyncPending = true
 	ledger.SyncEpoch = ledger.SyncEpoch + 1
 	ledger.UpdatedAt = now
-	// 主键 (repo,pr) 存在即更新，否则插入——Save 两种情况都覆盖。
+	// 主键 (project_id,repo,pr) 存在即更新，否则插入——Save 两种情况都覆盖。
 	if err := tx.Save(&ledger).Error; err != nil {
 		return 0, err
 	}
 
-	// 每个代码组合一行运行；唯一索引 (repo,pr,head,round,kind,组合) 吃掉重复。
+	// 每个代码组合一行运行；唯一索引 (project_id,repo,pr,head,round,kind,组合)
+	// 吃掉重复。
 	combos, err := parseCombinations(settings.CodeCombinationsJSON)
 	if err != nil {
 		return 0, err
@@ -135,13 +138,15 @@ func (s *ReviewService) openRoundTx(
 	return round, s.promoteQueuedRunsTx(tx, project.UserID, now)
 }
 
-// nextReviewRoundTx 轮次分配：manual 恒 1+max；其余同 (repo,pr,head) 已有运行
-// 沿其 round_number，否则 1+max。
-func nextReviewRoundTx(tx *gorm.DB, repo string, prNumber int, headSHA, action string) (int, error) {
+// nextReviewRoundTx 轮次分配：manual 恒 1+max；其余同 (project,repo,pr,head)
+// 已有运行沿其 round_number，否则 1+max。轮次只在项目内分配——接管后新项目
+// 不受旧项目已跑轮次的影响。
+func nextReviewRoundTx(tx *gorm.DB, projectID, repo string, prNumber int, headSHA, action string) (int, error) {
 	if action != "manual" {
 		var rounds []int
 		if err := tx.Model(&model.ReviewRun{}).
-			Where("repo_full_name = ? AND pr_number = ? AND head_sha = ?", repo, prNumber, headSHA).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND head_sha = ?",
+				projectID, repo, prNumber, headSHA).
 			Limit(1).Pluck("round_number", &rounds).Error; err != nil {
 			return 0, err
 		}
@@ -151,7 +156,8 @@ func nextReviewRoundTx(tx *gorm.DB, repo string, prNumber int, headSHA, action s
 	}
 	var maxRound *int
 	if err := tx.Model(&model.ReviewRun{}).
-		Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			projectID, repo, prNumber).
 		Select("MAX(round_number)").Scan(&maxRound).Error; err != nil {
 		return 0, err
 	}

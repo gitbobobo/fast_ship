@@ -24,8 +24,10 @@ import (
 // reviewTokenGrace 运行令牌在运行 deadline 之后的缓冲（回报可能踩点到达）。
 const reviewTokenGrace = 5 * time.Minute
 
-// issueRunToken 生成 fsr_ 令牌并把 SHA-256 落库；重复派发（理论上不发生）
-// 覆盖旧哈希——旧线程持有的令牌随之失效。
+// issueRunToken 生成 fsr_ 令牌并把 SHA-256 落库。调度认领面已保证同一运行
+// 只走到一次签发点（已签发的运行不再被重认领，见 dispatchRuns 的
+// NOT EXISTS 条件）；这里的 upsert 只作兜底——真发生重复派发时旧令牌失效，
+// 由超时兜底，绝不静默放行两套令牌。
 func (s *ReviewService) issueRunToken(run *model.ReviewRun, now time.Time) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -269,15 +271,16 @@ func (s *ReviewService) failRunDispatch(runID, code, msg string, now time.Time) 
 			Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		return s.markPRSyncPendingByRepoTx(tx, run.RepoFullName, run.PRNumber, now)
+		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	s.publishReviewNotification(&run, model.NotificationReviewDispatchFailed, msg, now)
 }
 
-// markPRSyncPendingByRepoTx 总账置 sync_pending（不重取项目——行已存在）。
-func (s *ReviewService) markPRSyncPendingByRepoTx(tx *gorm.DB, repo string, prNumber int, now time.Time) error {
+// markPRSyncPendingByRepoTx 本项目总账置 sync_pending（不重取项目——行已
+// 存在）。主键含 project_id：其他项目的同仓库账本不置。
+func (s *ReviewService) markPRSyncPendingByRepoTx(tx *gorm.DB, projectID, repo string, prNumber int, now time.Time) error {
 	return tx.Model(&model.ReviewPullRequest{}).
-		Where("repo_full_name = ? AND pr_number = ?", repo, prNumber).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?", projectID, repo, prNumber).
 		Updates(map[string]any{
 			"sync_pending": true,
 			"sync_epoch":   gorm.Expr("sync_epoch + 1"),
