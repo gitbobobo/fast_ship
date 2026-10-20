@@ -37,6 +37,7 @@ function setup() {
 
 const settings = {
   project_id: "p1",
+  repo_full_name: "acme/alpha",
   enabled: false,
   trigger_opened: true,
   trigger_synchronize: true,

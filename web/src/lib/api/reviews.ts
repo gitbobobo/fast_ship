@@ -38,6 +38,8 @@ export interface ReviewPrerequisite {
 
 export interface ReviewSettings {
   project_id: string;
+  /** 仅响应；审查实际使用的仓库（owner/repo，原样大小写）。 */
+  repo_full_name: string;
   enabled: boolean;
   trigger_opened: boolean;
   trigger_synchronize: boolean;

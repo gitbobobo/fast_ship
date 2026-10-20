@@ -107,6 +107,8 @@ describe("ProjectAndVersionForms", () => {
         description: "old desc",
         github_owner: "old-owner",
         github_repo: "old-repo",
+        code_github_owner: "code-owner",
+        code_github_repo: "code-repo",
         created_at: "2026-04-06T10:00:00Z",
         updated_at: "2026-04-06T10:00:00Z",
       },
@@ -252,6 +254,109 @@ describe("ProjectAndVersionForms", () => {
     expect(payload.public_github_token_id).toBeUndefined();
     expect(payload.code_github_token_id).toBeUndefined();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("submits create project form with a separate code repository", async () => {
+    createProjectMutateAsync.mockResolvedValue({
+      data: { id: "proj-99" },
+    });
+
+    const user = userEvent.setup();
+
+    renderWithRoute(
+      <ProjectFormDialog open={true} onOpenChange={vi.fn()} mode="create" />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
+
+    await user.type(screen.getByLabelText("项目名称"), "musiver");
+    await user.type(
+      screen.getByLabelText("仓库链接（可选）"),
+      "liuyincs/musiver",
+    );
+    await user.type(
+      screen.getByLabelText("代码仓库（可选，默认同公开仓库）"),
+      "gitbobobo/musiver",
+    );
+    await user.click(screen.getByRole("button", { name: "创建项目" }));
+
+    await waitFor(() =>
+      expect(createProjectMutateAsync).toHaveBeenCalledWith({
+        name: "musiver",
+        repository_url: "liuyincs/musiver",
+        code_repository_url: "gitbobobo/musiver",
+      }),
+    );
+  });
+
+  it("edit form prefills the code repository and clearing it sends null", async () => {
+    const user = userEvent.setup();
+
+    renderWithRoute(
+      <ProjectFormDialog
+        open={true}
+        onOpenChange={vi.fn()}
+        mode="edit"
+        projectId="proj-1"
+      />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
+
+    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
+    expect(input).toHaveValue("https://github.com/code-owner/code-repo");
+
+    await user.clear(input);
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateProjectMutateAsync).toHaveBeenCalled());
+    expect(
+      updateProjectMutateAsync.mock.calls[0][0].code_repository_url,
+    ).toBeNull();
+  });
+
+  it("edit form leaves code repository out of payload when untouched", async () => {
+    const user = userEvent.setup();
+
+    renderWithRoute(
+      <ProjectFormDialog
+        open={true}
+        onOpenChange={vi.fn()}
+        mode="edit"
+        projectId="proj-1"
+      />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateProjectMutateAsync).toHaveBeenCalled());
+    expect(
+      updateProjectMutateAsync.mock.calls[0][0],
+    ).not.toHaveProperty("code_repository_url");
+  });
+
+  it("edit form treats a rewritten-but-equal code repository as unchanged", async () => {
+    const user = userEvent.setup();
+
+    renderWithRoute(
+      <ProjectFormDialog
+        open={true}
+        onOpenChange={vi.fn()}
+        mode="edit"
+        projectId="proj-1"
+      />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
+
+    // 解析后 owner/repo 相同（大小写、写法不同）不算变更，不产生多余提交。
+    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
+    await user.clear(input);
+    await user.type(input, "CODE-OWNER/Code-Repo");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateProjectMutateAsync).toHaveBeenCalled());
+    expect(
+      updateProjectMutateAsync.mock.calls[0][0],
+    ).not.toHaveProperty("code_repository_url");
   });
 
   it("shows owner-aware github token guidance for fine-grained tokens", async () => {

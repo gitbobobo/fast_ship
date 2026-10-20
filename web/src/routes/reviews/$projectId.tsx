@@ -130,6 +130,13 @@ export default function ReviewProjectPage() {
             <TabsTrigger value="records">审查记录</TabsTrigger>
           </TabsList>
           <TabsContent value="settings">
+            {/* 审查实际盯的仓库：可与公开 Issue 仓库不同（项目设置里单独配代码仓库）。 */}
+            <p className="mb-4 text-sm text-muted-foreground">
+              审查仓库：
+              <span className="font-mono text-foreground">
+                {settings.repo_full_name || "—"}
+              </span>
+            </p>
             {/* key 固定项目 id：保存后的 refetch 不重挂载表单、不清输入。 */}
             <ReviewSettingsForm
               key={settings.project_id}

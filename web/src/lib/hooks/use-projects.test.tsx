@@ -21,6 +21,8 @@ function makeProject(id: string, issueCount?: number): Project {
     description: "",
     github_owner: "",
     github_repo: "",
+    code_github_owner: "",
+    code_github_repo: "",
     public_github_token_id: "",
     code_github_token_id: "",
     ...(issueCount === undefined ? {} : { issue_count: issueCount }),

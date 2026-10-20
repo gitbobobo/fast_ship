@@ -82,6 +82,7 @@ const environments: Environment[] = [
 function baseSettings(overrides: Partial<ReviewSettings> = {}): ReviewSettings {
   return {
     project_id: "p1",
+    repo_full_name: "acme/alpha",
     enabled: true,
     trigger_opened: true,
     trigger_synchronize: true,
@@ -331,6 +332,15 @@ describe("ReviewProjectPage 设置", () => {
       isLoading: false,
     } as unknown as ReturnType<typeof useReviewRecords>);
     mockDetailDeps();
+  });
+
+  it("设置页展示实际审查的仓库名", () => {
+    mockSettings(baseSettings({ repo_full_name: "gitbobobo/musiver" }));
+
+    renderDetail();
+
+    expect(screen.getByText(/审查仓库：/)).toBeInTheDocument();
+    expect(screen.getByText("gitbobobo/musiver")).toBeInTheDocument();
   });
 
   it("前置条件缺项 + enabled=false：开关不可开启但保存可用", async () => {
