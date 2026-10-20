@@ -151,6 +151,13 @@ func TestReviewSyncEpochGuard(t *testing.T) {
 	if got := e.fake.StatusesForContext("代码审查"); len(got) != 1 {
 		t.Fatalf("code status calls = %d, want 1", len(got))
 	}
+	// epoch 推进后，旧快照的顶层评论与行内 review 都不应再发。
+	if comments := e.fake.Comments(repo, 77); len(comments) != 0 {
+		t.Fatalf("comments = %v, 旧 epoch 不应再发顶层评论", comments)
+	}
+	if reviews := e.fake.ReviewEvents(repo); len(reviews) != 0 {
+		t.Fatalf("reviews = %v, 旧 epoch 不应再发 review", reviews)
+	}
 }
 
 // TestStatusDescUTF8 W3：长中文描述按 rune 截断——产物是合法 UTF-8 且总长

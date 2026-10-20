@@ -238,19 +238,35 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		visualPending = false
 	}
 
-	// 3. 代码顶层评论（含视觉待办/遗留提示）。
+	// 3. 代码顶层评论（含视觉待办/遗留提示）。写之前复核 epoch：同步期间
+	// 有新 SHA 进来时，旧快照的评论与行内 review 都不应再发。
+	if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
+		return errs.ErrInternal
+	} else if !ok {
+		return nil
+	}
 	codeBody := buildCodeComment(codeRuns, visualPending, visualCarry)
 	if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
 		return err
 	}
 
 	// 4. 行内 review：每个 completed 且未 posted 的代码运行，有效行发 review。
+	if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
+		return errs.ErrInternal
+	} else if !ok {
+		return nil
+	}
 	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, now); err != nil {
 		return err
 	}
 
 	// 5. 视觉运行存在时的状态与评论。
 	if len(visualRuns) > 0 {
+		if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
+			return errs.ErrInternal
+		} else if !ok {
+			return nil
+		}
 		vs, vdesc := summarizeVisualRuns(visualRuns)
 		if vs != ledger.VisualStatus {
 			if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
@@ -277,6 +293,20 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 
 // updateLedgerEpoch 同步中段的总账写回：sync_epoch 守卫——命中返回 true；
 // 不命中说明同步期间总账被推进（epoch 已变），本次快照作废，调用方应中止。
+// ledgerEpochCurrent 同步中途复核总账 epoch：新 webhook 推进过就停止本次
+// 剩余的 GitHub 写（评论/行内 review/视觉状态），避免把被取代 SHA 的结论
+// 继续写出去。
+func (s *ReviewService) ledgerEpochCurrent(ledger *model.ReviewPullRequest, epoch int) (bool, error) {
+	var cur int
+	if err := s.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
+		Select("sync_epoch").Scan(&cur).Error; err != nil {
+		return false, err
+	}
+	return cur == epoch, nil
+}
+
 func (s *ReviewService) updateLedgerEpoch(ledger *model.ReviewPullRequest, epoch int, fields map[string]any) (bool, error) {
 	res := s.db.Model(&model.ReviewPullRequest{}).
 		Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
@@ -544,6 +574,16 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 	}
 	valid := parseDiffRightLines(diff)
 	for _, r := range pending {
+		// 复核运行仍是 completed：同步期间新 SHA 会把旧运行置 cancelled，
+		// 内存里的 codeRuns 是快照，不能据此继续发旧结论。
+		var status model.ReviewRunStatus
+		if err := s.db.Model(&model.ReviewRun{}).Where("id = ?", r.ID).
+			Pluck("status", &status).Error; err != nil {
+			return errs.ErrInternal
+		}
+		if status != model.ReviewRunCompleted {
+			continue
+		}
 		var result api.ReviewCodeResult
 		_ = json.Unmarshal([]byte(r.ResultJSON), &result)
 		var comments []githubapi.ReviewInlineComment
