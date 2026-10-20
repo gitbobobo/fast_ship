@@ -179,3 +179,53 @@ func (s *ReviewService) bumpWorktreeTries(runID string) int {
 	s.worktreeTries[runID]++
 	return s.worktreeTries[runID]
 }
+
+// CleanupBeforeProjectDelete 删除项目前尽力清理远端资源：项目删除会 CASCADE
+// 掉审查运行行，调度之后再也发现不了这些线程/工作区。这里只做 best-effort
+// （失败只记日志，不阻断删除），与正常回收的「先归档后删除」顺序一致。
+func (s *ReviewService) CleanupBeforeProjectDelete(ctx context.Context, projectID string) {
+	if s.t3 == nil {
+		return
+	}
+	var runs []model.ReviewRun
+	if err := s.db.Where("project_id = ?", projectID).Find(&runs).Error; err != nil {
+		s.logger.Warn("删除项目前查询审查运行失败", zap.String("project", projectID), zap.Error(err))
+		return
+	}
+	for i := range runs {
+		run := &runs[i]
+		if run.DispatchedAt == nil || run.ThreadID == "" {
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if run.Status.Active() {
+			if _, err := s.t3.StopThread(callCtx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
+				s.logger.Warn("删除项目前停止审查线程失败", zap.String("run", run.ID), zap.Error(err))
+			}
+		}
+		if err := s.t3.ArchiveThread(callCtx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
+			s.logger.Warn("删除项目前归档审查线程失败", zap.String("run", run.ID), zap.Error(err))
+		}
+		if run.Kind == model.ReviewKindCode && run.WorktreePath != "" {
+			binding := s.bindingFor(run)
+			cwd := ""
+			if binding != nil {
+				cwd = binding.WorkspaceRoot
+				if cwd == "" {
+					cwd = binding.T3ProjectID
+				}
+			}
+			if cwd != "" {
+				if err := s.t3.RemoveWorktree(callCtx, run.UserID, run.EnvironmentID, cwd, run.WorktreePath, true); err != nil {
+					s.logger.Warn("删除项目前回收审查工作区失败", zap.String("run", run.ID), zap.Error(err))
+				}
+			}
+		}
+		cancel()
+	}
+	// 防抖行没有远端资源，直接清掉（防抖行 FK 到项目，删除时会一起走，这里
+	// 只是避免删除前的窗口里被开轮）。
+	if err := s.db.Where("project_id = ?", projectID).Delete(&model.ReviewDebounce{}).Error; err != nil {
+		s.logger.Warn("删除项目前清理防抖行失败", zap.String("project", projectID), zap.Error(err))
+	}
+}

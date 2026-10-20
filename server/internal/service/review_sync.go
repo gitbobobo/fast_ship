@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -26,6 +27,10 @@ import (
 // commit status（代码审查/视觉审查两个固定 context）、一条合并顶层评论、
 // 每组合一条行内 review、视觉衔接。失败只写 sync_error 下轮重试；
 // 成功后按起始 epoch 条件清 sync_pending。
+
+// errReviewSyncDeferred 表示本轮同步主动让路（例如远端 head 已前进、等 webhook
+// 推进账本）：不改写 sync_error，也不清 sync_pending。
+var errReviewSyncDeferred = errors.New("review: sync deferred")
 
 const (
 	reviewCodeStatusContext   = "代码审查"
@@ -150,6 +155,15 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	pr, err := client.GetPullRequest(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR 失败: "+err.Error())
+	}
+	// GitHub 上已经前进、但 webhook 还没处理时，账本与运行仍是旧 SHA：此时
+	// 不能拿新 PR 描述/SHA 去发布旧轮结论或建视觉运行。保留 pending 等 webhook
+	// 推进（webhook 会清 pending 并推进 head）。
+	if ledger.HeadSHA != "" && pr.HeadSHA != "" && !strings.EqualFold(pr.HeadSHA, ledger.HeadSHA) {
+		s.logger.Info("PR head 已前进但 webhook 未处理，跳过本次同步",
+			zap.String("repo", ledger.RepoFullName), zap.Int("pr", ledger.PRNumber),
+			zap.String("ledger", ledger.HeadSHA), zap.String("remote", pr.HeadSHA))
+		return errReviewSyncDeferred
 	}
 	targetURL := pr.HTMLURL
 	if targetURL == "" {

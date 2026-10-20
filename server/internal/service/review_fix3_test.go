@@ -487,3 +487,35 @@ func TestReviewSyncSkipsHistoricalRepoLedger(t *testing.T) {
 		t.Fatalf("历史仓库账本不应发 GitHub 产出，calls = %d（current=%s）", got, current)
 	}
 }
+
+// GitHub 已前进但 webhook 未处理时，同步不能拿新 head 的 PR 去发布旧轮结论。
+func TestReviewSyncSkipsWhenRemoteHeadAdvanced(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	// 远端已经是 sha-new，账本/运行还是 sha-old。
+	e.fake.SetPR(repo, 88, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 88, HeadSHA: "sha-new",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 88, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-old", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+	e.enableReview(t)
+	e.seedRun(t, repo, 88, "sha-old", model.ReviewRunCompleted, now)
+
+	e.review.syncPendingPRs(now)
+	if got := len(e.fake.StatusesForContext("代码审查")); got != 0 {
+		t.Fatalf("远端 head 已前进时不应写 commit status，calls = %d", got)
+	}
+	if got := e.fake.Comments(repo, 88); len(got) != 0 {
+		t.Fatalf("远端 head 已前进时不应写评论，comments = %v", got)
+	}
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 88", repo)
+	if !ledger.SyncPending {
+		t.Fatal("sync_pending 应保留，等 webhook 推进 head")
+	}
+}

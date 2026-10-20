@@ -390,3 +390,38 @@ func TestReviewLaunchCancelledDuringPrepareStillRecordsThread(t *testing.T) {
 		t.Fatalf("worktree_path = %q, want /ws/wt-race（取消后也要能回收）", after.WorktreePath)
 	}
 }
+
+// 删除项目前必须尽力停线程、归档并回收工作区（之后运行行会被 CASCADE 删掉，
+// 调度再也发现不了这些远端资源）。
+func TestCleanupBeforeProjectDelete(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := strings.ToLower(e.project.GithubOwner + "/" + e.project.GithubRepo)
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-del")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	finished := now.Add(-time.Minute)
+	active := e.seedRun(t, repo, 51, "sha-del", model.ReviewRunRunning, now)
+	e.svc.db.Model(active).Updates(map[string]any{
+		"environment_id": env.ID, "dispatch_started_at": now, "dispatched_at": now,
+	})
+	done := e.seedRun(t, repo, 52, "sha-done", model.ReviewRunCompleted, finished)
+	e.svc.db.Model(done).Updates(map[string]any{
+		"environment_id": env.ID, "dispatch_started_at": finished, "dispatched_at": finished,
+		"worktree_path": "/ws/wt-del", "worktree_state": model.ReviewWorktreeNone,
+	})
+
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
+
+	if len(t3.stopped) != 1 || t3.stopped[0] != active.ThreadID {
+		t.Fatalf("stopped = %v, want [%s]", t3.stopped, active.ThreadID)
+	}
+	if len(t3.archived) != 2 {
+		t.Fatalf("archived = %v, want 2 个线程", t3.archived)
+	}
+	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-del" {
+		t.Fatalf("removed = %v, want [/ws/wt-del]", t3.removed)
+	}
+}

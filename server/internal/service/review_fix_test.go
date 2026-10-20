@@ -23,6 +23,7 @@ type fakeReviewT3 struct {
 	worktrees  []string
 	listErr    error
 	listQueue  [][]string
+	stopped    []string
 	removed    []string
 	removeErr  error
 	archived   []string
@@ -39,7 +40,8 @@ func (f *fakeReviewT3) CreateThreadForAgent(ctx context.Context, userID, envID s
 	return nil, false, errors.New("not implemented in test")
 }
 
-func (f *fakeReviewT3) StopThread(context.Context, string, string, string) (*T3ThreadStopResult, error) {
+func (f *fakeReviewT3) StopThread(_ context.Context, _, _, threadID string) (*T3ThreadStopResult, error) {
+	f.stopped = append(f.stopped, threadID)
 	return &T3ThreadStopResult{}, nil
 }
 

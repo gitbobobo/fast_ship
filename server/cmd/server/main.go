@@ -365,6 +365,8 @@ func main() {
 	}
 	reviewService := service.NewReviewService(db, projectRepo, webhookDeliveryRepo, notificationSink,
 		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, mediaProxyService, mediaBearer, cfg, reviewLogger)
+	// 删除项目会 CASCADE 掉审查运行行，先让审查服务尽力停线程/归档/回收工作区。
+	projectService.SetReviewCleaner(reviewService)
 	reviewService.Start()
 
 	// 初始化 Handler
