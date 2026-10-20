@@ -692,3 +692,35 @@ func TestBotInt136FenceToolNameSanitized(t *testing.T) {
 		t.Fatalf("工具名应限长: %d", len(got))
 	}
 }
+
+// 人设编辑路径同样会重建提示词并把版本推到当前：空 nonce 要先自愈，否则规则 15
+// 会内嵌空值、围栏渲染同时被关掉（与 activateBotPrompt 同口径）。
+func TestBotInt136FencePersonaUpdateHealsEmptyNonce(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136persona")
+	bot := env.createBot(t, userID)
+	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
+		"untrusted_nonce":         "",
+		"platform_prompt_version": int64(9),
+	}).Error; err != nil {
+		t.Fatalf("simulate legacy row: %v", err)
+	}
+	persona := "回答更短。"
+	updated, err := env.bots.Update(userID, bot.ID, &UpdateBotRequest{PersonaPrompt: &persona})
+	if err != nil {
+		t.Fatalf("update persona: %v", err)
+	}
+	row, err := env.bots.bots.Get(updated.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if len(row.UntrustedNonce) != 32 {
+		t.Fatalf("人设编辑应自愈空 nonce: %q", row.UntrustedNonce)
+	}
+	if !strings.Contains(row.SystemPromptText, "nonce="+row.UntrustedNonce) {
+		t.Fatalf("重建提示词应内嵌自愈出的 nonce")
+	}
+	if row.PlatformPromptVersion != botPlatformPromptVersion {
+		t.Fatalf("人设编辑应把提示词版本推到当前: %d", row.PlatformPromptVersion)
+	}
+}

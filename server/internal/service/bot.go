@@ -361,6 +361,15 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 		}
 		if req.PersonaPrompt != nil && *req.PersonaPrompt != bot.PersonaPrompt {
 			bot.PersonaPrompt = *req.PersonaPrompt
+			// 人设编辑也会把提示词推到当前版本（含围栏规则）：与 activateBotPrompt
+			// 同口径，先自愈空 nonce，否则规则 15 会内嵌空值、围栏渲染同时被关掉。
+			if bot.UntrustedNonce == "" {
+				healed, herr := botHealUntrustedNonce(tx, bot.ID)
+				if herr != nil {
+					return errs.ErrInternal
+				}
+				bot.UntrustedNonce = healed
+			}
 			bot.SystemPromptText = buildBotSystemPrompt(bot.PersonaPrompt, bot.UntrustedNonce)
 			bot.PromptRevision++
 			bot.PlatformPromptVersion = botPlatformPromptVersion
