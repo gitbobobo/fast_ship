@@ -26,7 +26,7 @@ func NewSelfLogHandler(selfLogService *service.SelfLogService) *SelfLogHandler {
 var selfLogFieldNames = map[string]bool{
 	"id": true, "time": true, "level": true, "message": true,
 	"module": true, "request_id": true, "user_id": true, "project_id": true,
-	"issue_id": true, "automation_id": true, "run_id": true, "thread_id": true,
+	"issue_id": true, "run_id": true, "thread_id": true,
 	"extra": true,
 }
 
@@ -184,7 +184,6 @@ func parseSelfLogFilter(c *gin.Context) (*selflog.Filter, []string, error) {
 	filter.UserID = strings.TrimSpace(c.Query("user_id"))
 	filter.ProjectID = strings.TrimSpace(c.Query("project_id"))
 	filter.IssueID = strings.TrimSpace(c.Query("issue_id"))
-	filter.AutomationID = strings.TrimSpace(c.Query("automation_id"))
 	filter.RunID = strings.TrimSpace(c.Query("run_id"))
 	filter.ThreadID = strings.TrimSpace(c.Query("thread_id"))
 	filter.Keyword = c.Query("keyword")

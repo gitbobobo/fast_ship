@@ -119,7 +119,7 @@ func TestSelfLogsListFiltersVisibilityAndCursor(t *testing.T) {
 	seedSelfLog(t, env, []selflog.Entry{
 		{Time: now.Add(-3 * time.Hour), Level: selflog.LevelInfo, Module: "http", Message: "请求完成", RequestID: "req-a", UserID: alice.UserID, Extra: `{"status":200,"method":"GET"}`},
 		{Time: now.Add(-2 * time.Hour), Level: selflog.LevelWarn, Module: "http", Message: "请求慢", RequestID: "req-b", UserID: alice.UserID},
-		{Time: now.Add(-1 * time.Hour), Level: selflog.LevelError, Module: "automation", Message: "自动化派发失败", RunID: "run-a", UserID: alice.UserID, AutomationID: "auto-a"},
+		{Time: now.Add(-1 * time.Hour), Level: selflog.LevelError, Module: "automation", Message: "自动化派发失败", RunID: "run-a", UserID: alice.UserID},
 		{Time: now, Level: selflog.LevelError, Module: "automation", Message: "自动化超时", RunID: "run-b", UserID: bob.UserID},
 	})
 

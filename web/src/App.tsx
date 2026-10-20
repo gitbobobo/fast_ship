@@ -13,6 +13,7 @@ import { watchAIProvidersIdentity } from "@/lib/hooks/use-ai-providers";
 import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
 import { watchDeploymentIdentity } from "@/lib/hooks/use-deployment";
 import { watchMembersIdentity } from "@/lib/hooks/use-members";
+import { watchReviewsIdentity } from "@/lib/hooks/use-reviews";
 
 import AppLayout from "@/routes/_layout";
 import AuthLayout from "@/routes/_auth-layout";
@@ -58,8 +59,8 @@ const GitHubCallbackPage = lazy(
   () => import("@/routes/settings/github-callback"),
 );
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
-const AutomationsPage = lazy(() => import("@/routes/automations/index"));
-const AutomationEditorPage = lazy(() => import("@/routes/automations/editor"));
+const ReviewsPage = lazy(() => import("@/routes/reviews/index"));
+const ReviewProjectPage = lazy(() => import("@/routes/reviews/$projectId"));
 const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
 const QuotaPage = lazy(() => import("@/routes/quota/index"));
 const BotsPage = lazy(() => import("@/routes/bots/index"));
@@ -92,6 +93,7 @@ export default function App() {
     const stopQuota = watchQuotaIdentity(queryClient);
     const stopDeployment = watchDeploymentIdentity(queryClient);
     const stopMembers = watchMembersIdentity(queryClient);
+    const stopReviews = watchReviewsIdentity(queryClient);
     return () => {
       stopThreads();
       stopGithubTokens();
@@ -100,6 +102,7 @@ export default function App() {
       stopQuota();
       stopDeployment();
       stopMembers();
+      stopReviews();
     };
   }, []);
 
@@ -247,20 +250,12 @@ export default function App() {
                 />
               </Route>
               <Route
-                path="/settings/automations"
-                element={<Navigate to="/automations" replace />}
+                path="/reviews"
+                element={<LazyPage render={<ReviewsPage />} />}
               />
               <Route
-                path="/automations"
-                element={<LazyPage render={<AutomationsPage />} />}
-              />
-              <Route
-                path="/automations/new"
-                element={<LazyPage render={<AutomationEditorPage />} />}
-              />
-              <Route
-                path="/automations/:id"
-                element={<LazyPage render={<AutomationEditorPage />} />}
+                path="/reviews/:projectId"
+                element={<LazyPage render={<ReviewProjectPage />} />}
               />
               <Route
                 path="/notifications"

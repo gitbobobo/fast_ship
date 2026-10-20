@@ -463,7 +463,7 @@ func truncateT3Title(text string) string {
 // 项目与 cwd 从上游 shell 快照解析：模型缺省回落项目默认，worktree 的
 // base_ref 缺省取主检出当前分支。
 //
-// 实现在 createThread（t3_automation.go）：自动化派发复用同一实现并额外读取
+// 实现在 createThread（t3_thread_launch.go）：agent 派发复用同一实现并额外读取
 // 「launch RPC 是否已发出」；本入口丢弃该信息，REST 语义不变（INT-85）。
 func (s *T3ThreadsService) CreateThread(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, error) {
 	result, _, err := s.createThread(ctx, userID, envID, req)

@@ -152,9 +152,6 @@ func SelfLogEntryToAPI(e selflog.Entry, fields []string) api.SelfLogEntry {
 	if selected("issue_id") && e.IssueID != "" {
 		entry.IssueId = api.Ptr(e.IssueID)
 	}
-	if selected("automation_id") && e.AutomationID != "" {
-		entry.AutomationId = api.Ptr(e.AutomationID)
-	}
 	if selected("run_id") && e.RunID != "" {
 		entry.RunId = api.Ptr(e.RunID)
 	}

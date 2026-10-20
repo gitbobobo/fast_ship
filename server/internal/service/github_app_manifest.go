@@ -124,7 +124,7 @@ func (s *GitHubAppManifestService) Create(ctx context.Context, adminUserID strin
 			DefaultPermissions: api.GitHubAppManifest_DefaultPermissions{
 				PullRequests: api.GitHubAppManifestDefaultPermissionsPullRequests("write"),
 				Issues:       api.GitHubAppManifestDefaultPermissionsIssues("write"),
-				Checks:       api.GitHubAppManifestDefaultPermissionsChecks("write"),
+				Statuses:     api.GitHubAppManifestDefaultPermissionsStatuses("write"),
 				Contents:     api.GitHubAppManifestDefaultPermissionsContents("read"),
 				Metadata:     api.GitHubAppManifestDefaultPermissionsMetadata("read"),
 			},

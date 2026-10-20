@@ -301,6 +301,62 @@ func TestProjectRepoUpdate_RejectsDeletedToken(t *testing.T) {
 	}
 }
 
+// 项目仓库地址变更时，审查设置必须停用并刷新缓存的 repo_full_name：
+// 否则旧仓库占着唯一索引，而新仓库可能与另一个已启用项目重复。
+func TestProjectRepoUpdate_RepoSyncsReviewSettings(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "user-repo-review-sync")
+	project := createTestProject(t, svc.db, user.ID, func(p *model.Project) {
+		p.GithubOwner = "oldowner"
+		p.GithubRepo = "oldrepo"
+	})
+	now := time.Now().UTC()
+	row := &model.ProjectReviewSettings{
+		ProjectID:              project.ID,
+		UserID:                 user.ID,
+		RepoFullName:           "oldowner/oldrepo",
+		Enabled:                true,
+		CodeCombinationsJSON:   "[]",
+		VisualCombinationsJSON: "[]",
+		CreatedAt:              now,
+		UpdatedAt:              now,
+	}
+	if err := svc.db.Create(row).Error; err != nil {
+		t.Fatalf("create review settings: %v", err)
+	}
+	project.GithubOwner = "NewOwner"
+	project.GithubRepo = "NewRepo"
+	if err := svc.projectRepo.Update(project); err != nil {
+		t.Fatalf("update project: %v", err)
+	}
+	var got model.ProjectReviewSettings
+	if err := svc.db.Where("project_id = ?", project.ID).First(&got).Error; err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("repo 变更后审查设置应停用")
+	}
+	if got.RepoFullName != "newowner/newrepo" {
+		t.Fatalf("repo_full_name = %q, want newowner/newrepo", got.RepoFullName)
+	}
+	// 换仓库要推进 epoch 并清 pending：在途同步不能再向旧仓库发布。
+	var ledger model.ReviewPullRequest
+	if err := svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: project.ID, RepoFullName: "oldowner/oldrepo", PRNumber: 1,
+		UserID: user.ID, HeadSHA: "sha", SyncPending: true, SyncEpoch: 4, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	project.GithubOwner, project.GithubRepo = "Another", "Repo"
+	if err := svc.projectRepo.Update(project); err != nil {
+		t.Fatalf("update project 2: %v", err)
+	}
+	svc.db.First(&ledger, "project_id = ? AND pr_number = 1", project.ID)
+	if ledger.SyncPending || ledger.SyncEpoch != 5 {
+		t.Fatalf("ledger pending/epoch = %v/%d, want false/5", ledger.SyncPending, ledger.SyncEpoch)
+	}
+}
+
 func TestProjectRepo_NullTokenRefsScanAsEmpty(t *testing.T) {
 	svc := setupTestServices(t)
 	user := createTestUser(t, svc.db, "user-null-token-scan")

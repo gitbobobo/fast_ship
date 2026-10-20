@@ -339,7 +339,7 @@ history 对墓碑记 `exists:false, deleted:true` 但历史版本仍照常列出
 与存在路径同判；缺失路径 + 合法 version 与写入类动作（create 之外的
 replace/append/delete/restore）对缺失路径仍按非法操作报错。
 
-夜间整理是内置协调器（非 AutomationScheduler）：按配置时区在当地 03:00
+夜间整理是内置协调器：按配置时区在当地 03:00
 触发，用可配的更便宜模型合并 daily 笔记到 USER.md / MEMORY.md。触发键
 （INT-124 起）在无未消费 daily 时是 `nightly:<当地日期>`（保持每天至多
 一条 nothing_to_consume 记录）；有未消费内容时附加内容签名
@@ -421,8 +421,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   投影结果一致（前缀稳定），原文仍在账本与调用结果里。这与主线「压缩驱动折叠」
   （大结果换引用、写入持久投影、按窗口与门槛裁剪）不同：schedule 会话生命
   只有一次运行，没有跨请求的水位需要维护，确定性规则即可保证不漂移。
-- **调度**：`bot_schedule_scheduler.go` 单进程 10s ticker（与 Automation
-  同纪律：事务内绝不发网络调用）。每 tick 短事务逐任务核对 `enabled` + 旧
+- **调度**：`bot_schedule_scheduler.go` 单进程 10s ticker（与审查调度
+  `review_scheduler.go` 同纪律：事务内绝不发网络调用）。每 tick 短事务逐任务核对 `enabled` + 旧
   `next_run_at` 未变，建 run 并在同一事务内 CAS 推进 `next_run_at` 到严格晚
   于 now 的下一次（0 行 = 被并发抢走）。触发幂等靠 `UNIQUE(bot_id,
   trigger_key)`，`trigger_key = schedule:<task_id>:<计划时间 UTC RFC3339>`。
@@ -434,8 +434,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   重启不重复触发（trigger_key 唯一 + 不在启动时补跑），未完成的 schedule
   run 由启动恢复统一置 failed（`server_restarted`）并照常追加主线事件。
   同一计划时间已有运行记录时仍推进 `next_run_at`（否则任务会永远停在到期集合里
-  空转）。cron 解析复用 automation 的五字段 parser 与时区校验
-  （`parseAutomationCron` 同一函数），解析失败暂停该任务（`next_run_at` 置空且
+  空转）。cron 解析用 bot 自己的五字段 parser 与时区校验
+  （`parseScheduleCron`，`bot_schedule.go`），解析失败暂停该任务（`next_run_at` 置空且
   `enabled=false`，不留「开着但不再跑」）。对已启用、且这次计划还在宽限内等着
   派发的任务再点「启用」不会重算计划（不吞掉这次触发）；只有原本停用或没有下次
   计划时才重算。
@@ -868,15 +868,12 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   （`botValidatePage` 等）；T3 的 scope/operate 守卫继续由既有 service 执行。
 - **T3 幂等身份**：command/thread/message ID 受理时由服务端生成存
   `execution_context`，不让模型指定。`fs_thread.launch` 复用
-  `CreateThreadForAutomation` 的 launchSent 语义——结果只表示启动 RPC 受理，
+  `CreateThreadForAgent` 的 launchSent 语义——结果只表示启动 RPC 受理，
   远端是否完成用 get/item 查询。
 - **Issue 写路径 context 化**：`CreateGitHubIssueContext` /
   `UpdateInternalIssueContext` / `CreateInternalCommentIdempotentContext` 为
   新增 Context 版本，旧方法委托，网络调用透传 worker context；短本地事务一旦
   完成仍不回滚。
-- **既有自动化边界**：`AutomationService` 是调度与账本，不是机器人的执行器；
-  机器人调用 Issue service 时既有 Issue 事件自动化仍可能正常触发（确认说明
-  应反映这一点）。
 - **仍不做**：环境配对/删除/密钥代答；不设人为 token/费用/步数上限，上游
   上下文不足时明确失败并记录错误。记忆与摘要/自动压缩已于 INT-102 落地
   （见上两节）；定时任务已于 INT-103 落地（见上节）——任务由机器人工具面

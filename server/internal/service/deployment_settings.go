@@ -13,8 +13,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// PublicURLSource 部署 public_url 的统一读取入口（INT-129）：automation、
-// automation scheduler 与 integration 三处经它取值，main 统一注入
+// PublicURLSource 部署 public_url 的统一读取入口（INT-129）：integration 与
+// 审查派发（INT-135，1c 阶段接入）经它取值，main 统一注入
 // DeploymentSettingsService；测试与既有构造路径不注入时由各 service 的
 // 默认实现（只读 config）兜底。
 type PublicURLSource interface {

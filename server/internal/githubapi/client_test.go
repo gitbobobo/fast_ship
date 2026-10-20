@@ -159,6 +159,48 @@ func TestSplitRepo(t *testing.T) {
 	}
 }
 
+// TestFindPullRequestComment_PaginatesToPage2 marker 在第 2 页才出现：
+// 首页满页时继续翻页，命中即停。
+func TestFindPullRequestComment_PaginatesToPage2(t *testing.T) {
+	var pages []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/octocat/hw/issues/7/comments" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		pages = append(pages, r.URL.Query().Get("page"))
+		switch r.URL.Query().Get("page") {
+		case "1":
+			wire := make([]map[string]any, 0, reviewCommentPageSize)
+			for i := 0; i < reviewCommentPageSize; i++ {
+				wire = append(wire, map[string]any{
+					"id": 1000 + i, "body": "regular comment",
+					"user": map[string]any{"login": "someone", "type": "User"},
+				})
+			}
+			writeJSON(t, w, http.StatusOK, wire)
+		default:
+			writeJSON(t, w, http.StatusOK, []map[string]any{
+				{"id": 42, "body": "<!-- fast-ship-code-review --> conclusion",
+					"user": map[string]any{"login": "fast-ship[bot]", "type": "Bot"}},
+			})
+		}
+	}))
+	defer ts.Close()
+
+	auth := &fakeAuth{token: "tok"}
+	c := NewClient(auth, ts.URL)
+	id, found, err := c.FindPullRequestComment(context.Background(), 1, "octocat/hw", 7, "<!-- fast-ship-code-review -->")
+	if err != nil {
+		t.Fatalf("FindPullRequestComment: %v", err)
+	}
+	if !found || id != 42 {
+		t.Fatalf("id/found = %d/%v, want 42/true", id, found)
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Fatalf("pages = %v, want [1 2]", pages)
+	}
+}
+
 func writeJSON(t *testing.T, w http.ResponseWriter, status int, payload any) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")

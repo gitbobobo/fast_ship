@@ -25,7 +25,8 @@ CodexBar（MIT）Swift 源码为准；OpenDesign 部分另见下方专节。
   单账号操作一律带 `user_id` 条件；`ListDue` / `EarliestNextRetryAt` /
   `FindByIDAny` 跨用户，仅供调度器使用。
 - `service/quota_scheduler.go`（`QuotaScheduler`）：后台循环。`Start`/`Stop`
-  与 `automationScheduler` 同款；`main.go` 在 `quota.enabled` 为真时启动。
+  与审查调度（`ReviewService.Start`/`Stop`）同款；`main.go` 在
+  `quota.enabled` 为真时启动。
 
 ## 存储与加密
 

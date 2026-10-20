@@ -18,10 +18,13 @@ func New(code int, message string) *AppError {
 
 // 参数校验错误 40001-40099
 var (
-	ErrInvalidParams                   = New(40001, "请求参数无效")
-	ErrTargetBranchNotFound            = New(40002, "目标分支不存在")
-	ErrProjectGitHubNotConfigured      = New(40003, "该项目尚未关联 GitHub 仓库")
-	ErrScreenshotImageTooLarge         = New(40004, "截图尺寸超出可处理范围")
+	ErrInvalidParams              = New(40001, "请求参数无效")
+	ErrTargetBranchNotFound       = New(40002, "目标分支不存在")
+	ErrProjectGitHubNotConfigured = New(40003, "该项目尚未关联 GitHub 仓库")
+	ErrScreenshotImageTooLarge    = New(40004, "截图尺寸超出可处理范围")
+	// ErrReviewResultInvalid 审查 Agent 结果字段非法（INT-135）：同码 40004，
+	// 校验失败由 service 用 New(40004, ...) 在消息里写明具体字段。
+	ErrReviewResultInvalid             = New(40004, "审查结论字段非法")
 	ErrPairingURLInvalid               = New(40005, "配对链接无效或缺少配对码")
 	ErrProjectPublicGitHubTokenMissing = New(40006, "该项目未配置公开仓库 Token")
 	ErrQuotaProviderUnknown            = New(40030, "未知的额度供应商")
@@ -79,8 +82,6 @@ var (
 	ErrT3ThreadNotFound             = New(40418, "T3 线程不存在")
 	ErrT3ThreadItemNotFound         = New(40419, "T3 线程条目不存在")
 	ErrGitHubTokenNotFound          = New(40420, "GitHub Token 不存在")
-	ErrAutomationNotFound           = New(40421, "自动化不存在")
-	ErrAutomationRunNotFound        = New(40422, "自动化运行不存在")
 	ErrNotificationNotFound         = New(40423, "通知不存在")
 	ErrBotNotFound                  = New(40424, "机器人不存在")
 	ErrBotRunNotFound               = New(40425, "机器人运行不存在")
@@ -111,14 +112,19 @@ var (
 	ErrT3EnvironmentNameExists  = New(40912, "环境名称在当前用户下已存在")
 	ErrGitHubTokenInUse         = New(40913, "该 Token 仍被项目引用，请先解除或更换引用")
 	// 消息不含目标记录信息；替换撞指纹时由 service 用 New 追加已有记录的 title/id。
-	ErrGitHubTokenDuplicate        = New(40914, "相同的 Token 已存在")
-	ErrGitHubTokenConflict         = New(40915, "GitHub Token 已被其他请求更新")
-	ErrT3StateConflict             = New(40916, "T3 状态冲突")
-	ErrAutomationRunReportConflict = New(40917, "运行回报冲突：运行已结束或回报与已受理的结束回报不一致")
-	ErrPageBoundaryInvalid         = New(40918, "分页边界条目已不存在，请从头重新拉取")
-	ErrAutomationActive            = New(40919, "自动化有进行中的运行（或后置操作待执行），暂不能删除")
-	ErrRunNotPRReview              = New(40920, "运行不是进行中的 GitHub PR 审查，无法使用 PR 端点")
-	ErrScreenshotVariantExists     = New(40921, "相同界面标识与平台/语言/亮度组合的截图已存在")
+	ErrGitHubTokenDuplicate    = New(40914, "相同的 Token 已存在")
+	ErrGitHubTokenConflict     = New(40915, "GitHub Token 已被其他请求更新")
+	ErrT3StateConflict         = New(40916, "T3 状态冲突")
+	ErrPageBoundaryInvalid     = New(40918, "分页边界条目已不存在，请从头重新拉取")
+	ErrScreenshotVariantExists = New(40921, "相同界面标识与平台/语言/亮度组合的截图已存在")
+	// PR 审查（INT-135）：整个部署内同一仓库只允许一个项目开启审查；
+	// 冲突时 service 用 New(40922, ...) 在消息里带上占用者登录名。
+	ErrReviewRepoTaken = New(40922, "该仓库已被其他项目开启审查")
+	ErrReviewHeadMoved = New(40924, "PR 已更新，请刷新后重试")
+	// ErrReviewHeadChanged 回报结果时 PR HEAD 已前进（INT-135）：本轮作废。
+	ErrReviewHeadChanged = New(40920, "PR HEAD 已变化，本轮审查作废")
+	// ErrReviewNotEnabled 手动重跑时项目未开启审查（INT-135）。
+	ErrReviewNotEnabled = New(40923, "该项目未开启 PR 审查")
 	// 机器人（INT-101）：幂等键冲突、状态机冲突、删除前置条件与决定互斥。
 	ErrBotClientMessageConflict = New(40925, "相同 client_message_id 已用于不同正文")
 	ErrBotCallStateConflict     = New(40926, "调用状态已变化，操作未生效")
@@ -145,6 +151,9 @@ var (
 	ErrBatchCloseTooMany = New(41201, "匹配问题数量过多，请缩小关闭范围后重试")
 	// INT-129 起 public_url 可在网页「设置 → 部署」配置，文案指向那里。
 	ErrPublicURLMissing = New(41202, "尚未配置 public_url，请先在「设置 → 部署」填写对外访问地址")
+	// PR 审查启用前置条件缺失（INT-135）：同码 41202，service 用
+	// New(41202, ...) 把逐条缺项写进消息。
+	ErrReviewPrerequisitesMissing = New(41202, "PR 审查前置条件未满足")
 )
 
 // 服务器内部错误 50000-50099

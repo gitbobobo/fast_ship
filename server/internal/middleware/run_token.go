@@ -14,13 +14,14 @@ const (
 	AuthTypeRunToken = "run_token"
 )
 
-// RequireRunToken 自动化 Agent 端点专用：仅接受 Bearer 运行令牌（fsr_）。
+// RequireRunToken 审查 Agent 端点专用：仅接受 Bearer 运行令牌（fsr_）。
 // 不支持 query 凭证（令牌出现在 URL 里会被代理/日志记录）；fsk_ API Key 明确
 // 40304（API Key 不因此获得任何 Agent 能力），其余一律 40106。
 //
 // requireLive=true 的端点在运行结束后立即拒绝（令牌已消费）；
 // requireLive=false 仅供回报端点：结束后仍允许完全相同的结束回报重放。
-func RequireRunToken(agent *service.AutomationAgentService, requireLive bool) gin.HandlerFunc {
+// resolver 由 ReviewService 实现（INT-135，/api/review-agent 端点在 1c 接入）。
+func RequireRunToken(resolver service.RunTokenResolver, requireLive bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw := runTokenFromHeader(c)
 		if raw == "" {
@@ -33,7 +34,7 @@ func RequireRunToken(agent *service.AutomationAgentService, requireLive bool) gi
 			c.Abort()
 			return
 		}
-		identity, err := agent.ResolveRunToken(c.Request.Context(), raw, requireLive)
+		identity, err := resolver.ResolveRunToken(c.Request.Context(), raw, requireLive)
 		if err != nil {
 			HandleAppError(c, err)
 			c.Abort()

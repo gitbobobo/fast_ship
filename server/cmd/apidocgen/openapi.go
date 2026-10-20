@@ -134,6 +134,10 @@ type schema struct {
 	required    []string
 	props       []prop
 	items       *schema
+	// variants/composition 承接 oneOf/anyOf：各分支独立成表渲染（如审查结论
+	// 提交按运行类型二选一），不再当不支持的组合报错。
+	variants    []schema
+	composition string
 }
 
 type prop struct {
@@ -160,7 +164,7 @@ func (s *spec) resolve(n *yaml.Node, stack map[string]bool) schema {
 		s.fail("schema at line %d is not a mapping", n.Line)
 		return schema{}
 	}
-	if child(n, "oneOf") != nil || child(n, "anyOf") != nil || child(n, "not") != nil {
+	if child(n, "not") != nil {
 		s.fail("unsupported schema composition at line %d", n.Line)
 		return schema{}
 	}
@@ -183,7 +187,27 @@ func (s *spec) resolve(n *yaml.Node, stack map[string]bool) schema {
 	if all := child(n, "allOf"); all != nil {
 		out = mergeSchema(out, s.mergeAllOf(all, stack))
 	}
+	for _, key := range []string{"oneOf", "anyOf"} {
+		if seq := child(n, key); seq != nil {
+			out.composition = key
+			out.variants = s.resolveVariants(seq, stack)
+		}
+	}
 	s.applyLocal(n, &out, stack)
+	return out
+}
+
+// resolveVariants 展开 oneOf/anyOf 的每个分支；非序列报错（写入 s.err）。
+func (s *spec) resolveVariants(seq *yaml.Node, stack map[string]bool) []schema {
+	seq = derefAlias(seq)
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		s.fail("oneOf/anyOf is not a sequence")
+		return nil
+	}
+	out := make([]schema, 0, len(seq.Content))
+	for _, item := range seq.Content {
+		out = append(out, s.resolve(item, stack))
+	}
 	return out
 }
 
@@ -423,6 +447,13 @@ func cleanText(s string) string {
 }
 
 func (s schema) typeLabel() string {
+	if len(s.variants) > 0 {
+		label := "二选一"
+		if s.composition == "anyOf" {
+			label = "任一组合"
+		}
+		return label + s.annotation(false)
+	}
 	if s.isArray() {
 		itemAnn := ""
 		inner := "any"

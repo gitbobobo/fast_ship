@@ -283,7 +283,7 @@ func TestQueryFilterCombinations(t *testing.T) {
 	seed := []Entry{
 		{Time: now.Add(-3 * time.Hour), Level: LevelInfo, Module: "http", Message: "请求完成", RequestID: "req-1", UserID: "u-1", Extra: `{"status":200}`},
 		{Time: now.Add(-2 * time.Hour), Level: LevelWarn, Module: "http", Message: "请求慢", RequestID: "req-2", UserID: "u-1"},
-		{Time: now.Add(-1 * time.Hour), Level: LevelError, Module: "automation", Message: "调度失败", AutomationID: "auto-1", RunID: "run-9", UserID: "u-2"},
+		{Time: now.Add(-1 * time.Hour), Level: LevelError, Module: "automation", Message: "调度失败", RunID: "run-9", UserID: "u-2"},
 		{Time: now.Add(-30 * time.Minute), Level: LevelInfo, Module: "t3", Message: "线程启动", ThreadID: "th-1"},
 		{Time: now, Level: LevelError, Module: "github", Message: "同步失败 token=" + fakeSecret("ghp_", "AbCdEfGhIjKlMnOpQrSt") + "", UserID: "u-1"},
 		{Time: now.Add(time.Second), Level: LevelInfo, Module: "app", Message: "服务启动", SystemScope: true},

@@ -15,8 +15,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// 定时任务调度（INT-103）：单进程一个 10s ticker，与 AutomationScheduler 同一
-// 纪律——数据库是事实来源，MaxOpenConns(1) 下事务内绝不发网络调用。每个
+// 定时任务调度（INT-103）：单进程一个 10s ticker，与审查调度同一纪律——
+// 数据库是事实来源，MaxOpenConns(1) 下事务内绝不发网络调用。每个
 // tick 短事务内逐任务处理：到期 →（错过超宽限记 skipped | 建运行行）→ CAS
 // 推进 next_run_at；随后事务外唤醒执行槽。重启不补跑：错过的计划时间按
 // 「跳过并记录」处理，未完成的 schedule run 由启动恢复统一置 failed。
@@ -209,7 +209,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 				s.logger.Warn("定时任务的计划时间已有运行记录，跳过重复创建并推进计划",
 					zap.String("task_id", current.ID),
 					zap.Time("planned", planned))
-				_, next, parseErr := parseAutomationCron(current.CronExpression, current.Timezone, now)
+				_, next, parseErr := parseScheduleCron(current.CronExpression, current.Timezone, now)
 				if parseErr != nil {
 					return repository.NewBotScheduleTaskRepository(tx).PauseTx(tx, current.ID)
 				}
@@ -231,7 +231,7 @@ func (s *BotService) dispatchDueScheduleTask(task *model.BotScheduleTask, now ti
 		}
 
 		// CAS 推进 next_run_at 到严格晚于 now 的下一次；0 行 = 被并发抢走。
-		_, next, err := parseAutomationCron(current.CronExpression, current.Timezone, now)
+		_, next, err := parseScheduleCron(current.CronExpression, current.Timezone, now)
 		if err != nil {
 			// 配置损坏（如表达式被手工改库）：暂停调度并告警，不无限循环。
 			s.logger.Error("定时任务 cron 解析失败，暂停调度",

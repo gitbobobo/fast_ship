@@ -34,7 +34,7 @@ func seedScheduleTask(t *testing.T, env *botTestEnv, botID string, mutate func(*
 		mutate(task)
 	}
 	if task.NextRunAt == nil {
-		_, next, err := parseAutomationCron(task.CronExpression, task.Timezone, time.Now().UTC())
+		_, next, err := parseScheduleCron(task.CronExpression, task.Timezone, time.Now().UTC())
 		if err != nil {
 			t.Fatalf("parse cron: %v", err)
 		}

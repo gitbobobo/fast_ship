@@ -1,13 +1,12 @@
 import { api } from "./client";
 
-// 站内通知（INT-90）：自动化运行结果与 Agent 发布。
+// 站内通知（INT-135）：审查系统故障与 Agent 发布。
 
 export type NotificationKind =
   | "agent"
-  | "automation_dispatch_failed"
-  | "automation_run_timeout"
-  | "automation_post_failed"
-  | "automation_busy";
+  | "review_dispatch_failed"
+  | "review_run_timeout"
+  | "review_cleanup_failed";
 
 export interface Notification {
   id: string;
@@ -45,13 +44,11 @@ export function notificationKindLabel(kind: NotificationKind): string {
   switch (kind) {
     case "agent":
       return "Agent";
-    case "automation_dispatch_failed":
-      return "启动失败";
-    case "automation_run_timeout":
-      return "运行超时";
-    case "automation_post_failed":
-      return "后置失败";
-    case "automation_busy":
-      return "触发跳过";
+    case "review_dispatch_failed":
+      return "审查派发失败";
+    case "review_run_timeout":
+      return "审查超时";
+    case "review_cleanup_failed":
+      return "工作区回收失败";
   }
 }

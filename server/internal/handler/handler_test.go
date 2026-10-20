@@ -86,10 +86,8 @@ func setupHandlerTestEnv(t *testing.T) *handlerTestEnv {
 		&model.ScreenshotAnnotation{},
 		&model.T3Environment{},
 		&model.ProjectT3Binding{},
-		&model.Automation{},
-		&model.AutomationRun{},
-		&model.AutomationRunToken{},
 		&model.Notification{},
+		&model.GitHubWebhookDelivery{},
 		&model.QuotaAccount{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)

@@ -121,7 +121,7 @@ func TestManifest_Create(t *testing.T) {
 		t.Fatalf("events = %v", events)
 	}
 	perms := out.Manifest.DefaultPermissions
-	if string(perms.PullRequests) != "write" || string(perms.Issues) != "write" || string(perms.Checks) != "write" ||
+	if string(perms.PullRequests) != "write" || string(perms.Issues) != "write" || string(perms.Statuses) != "write" ||
 		string(perms.Contents) != "read" || string(perms.Metadata) != "read" {
 		t.Fatalf("permissions = %+v", perms)
 	}

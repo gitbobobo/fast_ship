@@ -28,15 +28,29 @@ type GitHubClient interface {
 	GetPullRequest(ctx context.Context, installationID int64, repoFullName string, number int) (*PullRequest, error)
 	GetPullRequestDiff(ctx context.Context, installationID int64, repoFullName string, number int) (string, error)
 	ListReviewComments(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewComment, error)
+	// ListIssueCommentsForPR PR 会话评论（review 行内之外的顶层讨论，INT-135
+	// 历史上下文用；不与 pkg/github 的同名方法同形，命名特意带 ForPR）。
+	ListIssueCommentsForPR(ctx context.Context, installationID int64, repoFullName string, number int) ([]IssueComment, error)
 	// 机器人顶层评论（每 PR 一条）
 	FindPullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, marker string) (commentID int64, found bool, err error)
 	CreatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (commentID int64, err error)
 	UpdatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error
-	// check run
-	CreateCheckRun(ctx context.Context, installationID int64, repoFullName, name, headSHA, externalID string) (checkRunID int64, err error)
-	UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in CheckUpdate) error
 	// review
-	SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) error
+	// ListReviews 列出 PR 上已提交的 review（对账用；每页 100，最多 10 页）。
+	ListReviews(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewSummary, error)
+	// SubmitReview 返回创建的 review id（事件 COMMENT 时才有行内评论落点）。
+	SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) (reviewID int64, err error)
+	// commit status（INT-135）：POST /repos/{o}/{r}/statuses/{sha}；
+	// state ∈ error/failure/pending/success，context 是固定检查名（代码审查/视觉审查）。
+	CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error
+	// 仓库级检查（INT-135）：GET /repos/{owner}/{repo}，nil 表示可访问；
+	// 403/404 经 *StatusError 返回。installationID=0 表示调用方未知安装 id，
+	// 由 App 侧实现先解析仓库所属安装（静态 token 实现忽略该参数）。
+	GetRepository(ctx context.Context, installationID int64, repoFullName string) error
+	// ResolveInstallation 按仓库名解析 App 安装 id（GET /repos/{o}/{r}/installation
+	// 的 id 字段）：rerun 等没有 webhook installation 快照的路径用。
+	// 静态 token / 匿名实现不支持解析，返回错误（调用方不得把 0 当安装 id 继续）。
+	ResolveInstallation(ctx context.Context, repoFullName string) (int64, error)
 }
 
 // githubHTTP GitHub 调用的共享客户端。Timeout 是 ctx 缺失时的兜底；调用方
@@ -283,26 +297,68 @@ type issueCommentWire struct {
 	ID   int64 `json:"id"`
 	User struct {
 		Login string `json:"login"`
+		Type  string `json:"type"`
 	} `json:"user"`
-	Body string `json:"body"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
+// ListIssueCommentsForPR PR 会话评论（issues comments API，分页上限与行内评论一致）。
+func (c *restClient) ListIssueCommentsForPR(ctx context.Context, installationID int64, repoFullName string, number int) ([]IssueComment, error) {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return nil, err
+	}
+	var out []IssueComment
+	for page := 1; page <= reviewCommentMaxPages; page++ {
+		var wire []issueCommentWire
+		err = c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=%d&page=%d",
+					owner, name, number, reviewCommentPageSize, page),
+				bearer, nil, &wire)
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, w := range wire {
+			out = append(out, IssueComment{ID: w.ID, User: w.User.Login, Body: w.Body, CreatedAt: w.CreatedAt})
+		}
+		if len(wire) < reviewCommentPageSize {
+			break
+		}
+	}
+	return out, nil
+}
+
+// FindPullRequestComment 按 marker 找机器人顶层评论：分页翻查（上限
+// reviewCommentMaxPages），命中即停；单页请求会让藏在第 2 页以后的评论
+// 找不到而重复发帖。
 func (c *restClient) FindPullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, marker string) (int64, bool, error) {
 	owner, name, err := splitRepo(repoFullName)
 	if err != nil {
 		return 0, false, err
 	}
-	var wire []issueCommentWire
-	err = c.withToken(ctx, installationID, func(bearer string) error {
-		return c.h.doJSON(ctx, http.MethodGet,
-			fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100", owner, name, number), bearer, nil, &wire)
-	})
-	if err != nil {
-		return 0, false, err
-	}
-	for _, w := range wire {
-		if strings.Contains(w.Body, marker) {
+	for page := 1; page <= reviewCommentMaxPages; page++ {
+		var wire []issueCommentWire
+		err = c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=%d&page=%d",
+					owner, name, number, reviewCommentPageSize, page),
+				bearer, nil, &wire)
+		})
+		if err != nil {
+			return 0, false, err
+		}
+		for _, w := range wire {
+			// 只认机器人自己发的结论：用户评论里引用 marker 不能劫持落点。
+			if w.User.Type != "Bot" || !strings.HasPrefix(strings.TrimSpace(w.Body), marker) {
+				continue
+			}
 			return w.ID, true, nil
+		}
+		if len(wire) < reviewCommentPageSize {
+			break
 		}
 	}
 	return 0, false, nil
@@ -337,62 +393,10 @@ func (c *restClient) UpdatePullRequestComment(ctx context.Context, installationI
 	})
 }
 
-type checkRunWire struct {
-	ID int64 `json:"id"`
-}
-
-func (c *restClient) CreateCheckRun(ctx context.Context, installationID int64, repoFullName, checkName, headSHA, externalID string) (int64, error) {
+func (c *restClient) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) (int64, error) {
 	owner, name, err := splitRepo(repoFullName)
 	if err != nil {
 		return 0, err
-	}
-	var out checkRunWire
-	err = c.withToken(ctx, installationID, func(bearer string) error {
-		return c.h.doJSON(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/check-runs", owner, name), bearer, map[string]any{
-			"name":        checkName,
-			"head_sha":    headSHA,
-			"status":      string(CheckQueued),
-			"external_id": externalID,
-		}, &out)
-	})
-	if err != nil {
-		return 0, err
-	}
-	return out.ID, nil
-}
-
-func (c *restClient) UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in CheckUpdate) error {
-	owner, name, err := splitRepo(repoFullName)
-	if err != nil {
-		return err
-	}
-	payload := map[string]any{
-		"status": string(in.Status),
-	}
-	if in.Title != "" {
-		payload["name"] = in.Title
-	}
-	if in.Summary != "" || in.Text != "" {
-		payload["output"] = map[string]any{
-			"title":   in.Title,
-			"summary": in.Summary,
-			"text":    in.Text,
-		}
-	}
-	if in.Status == CheckCompleted {
-		payload["conclusion"] = string(in.Conclusion)
-		payload["completed_at"] = time.Now().UTC().Format(time.RFC3339)
-	}
-	return c.withToken(ctx, installationID, func(bearer string) error {
-		return c.h.doJSON(ctx, http.MethodPatch,
-			fmt.Sprintf("/repos/%s/%s/check-runs/%d", owner, name, checkRunID), bearer, payload, nil)
-	})
-}
-
-func (c *restClient) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) error {
-	owner, name, err := splitRepo(repoFullName)
-	if err != nil {
-		return err
 	}
 	payload := map[string]any{
 		"event":     in.Event,
@@ -401,8 +405,102 @@ func (c *restClient) SubmitReview(ctx context.Context, installationID int64, rep
 	if in.Body != "" {
 		payload["body"] = in.Body
 	}
+	if len(in.Comments) > 0 {
+		comments := make([]map[string]any, 0, len(in.Comments))
+		for _, c := range in.Comments {
+			side := c.Side
+			if side == "" {
+				side = "RIGHT"
+			}
+			comments = append(comments, map[string]any{
+				"path": c.Path, "line": c.Line, "side": side, "body": c.Body,
+			})
+		}
+		payload["comments"] = comments
+	}
+	var wire struct {
+		ID int64 `json:"id"`
+	}
+	err = c.withToken(ctx, installationID, func(bearer string) error {
+		return c.h.doJSON(ctx, http.MethodPost,
+			fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, name, number), bearer, payload, &wire)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return wire.ID, nil
+}
+
+// ListReviews 列出 PR 已有的 review：提交成功后响应丢失时，下一次同步据此
+// 认定 review 已存在，避免重复提交同一批行内评论。
+func (c *restClient) ListReviews(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewSummary, error) {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return nil, err
+	}
+	var out []ReviewSummary
+	for page := 1; page <= reviewCommentMaxPages; page++ {
+		var wire []struct {
+			ID          int64     `json:"id"`
+			CommitID    string    `json:"commit_id"`
+			Body        string    `json:"body"`
+			State       string    `json:"state"`
+			SubmittedAt time.Time `json:"submitted_at"`
+		}
+		err = c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d",
+					owner, name, number, reviewCommentPageSize, page),
+				bearer, nil, &wire)
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, w := range wire {
+			out = append(out, ReviewSummary{
+				ID: w.ID, CommitID: w.CommitID, Body: w.Body, State: w.State, CreatedAt: w.SubmittedAt,
+			})
+		}
+		if len(wire) < reviewCommentPageSize {
+			break
+		}
+	}
+	return out, nil
+}
+
+// CreateCommitStatus 提交 commit status（INT-135 审查状态输出）。
+// GetRepository 仓库可访问性检查（Installation 校验）：成功返回 nil，
+// 403/404 由 statusErr 转 *StatusError。
+func (c *restClient) GetRepository(ctx context.Context, installationID int64, repoFullName string) error {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return err
+	}
+	return c.withToken(ctx, installationID, func(bearer string) error {
+		return c.h.doJSON(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s", owner, name), bearer, nil, nil)
+	})
+}
+
+// ResolveInstallation 共享 REST 实现拿不到 App JWT，无法解析仓库所属安装；
+// 需要解析的调用方应使用 githubapp.Client（它覆盖本方法）。
+func (c *restClient) ResolveInstallation(ctx context.Context, repoFullName string) (int64, error) {
+	return 0, fmt.Errorf("githubapi: 该客户端不支持 installation 解析")
+}
+
+func (c *restClient) CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return err
+	}
+	payload := map[string]any{"state": state, "context": statusContext}
+	if description != "" {
+		payload["description"] = description
+	}
+	if targetURL != "" {
+		payload["target_url"] = targetURL
+	}
 	return c.withToken(ctx, installationID, func(bearer string) error {
 		return c.h.doJSON(ctx, http.MethodPost,
-			fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, name, number), bearer, payload, nil)
+			fmt.Sprintf("/repos/%s/%s/statuses/%s", owner, name, sha), bearer, payload, nil)
 	})
 }

@@ -21,6 +21,12 @@ import (
 
 var repoNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
+// ProjectReviewCleaner 删除项目前清理审查远端资源（线程/工作区）的出口；
+// 由 ReviewService 实现，main 注入。nil 时跳过（测试与未启用审查的部署）。
+type ProjectReviewCleaner interface {
+	CleanupBeforeProjectDelete(ctx context.Context, projectID string)
+}
+
 type ProjectService struct {
 	projectRepo   *repository.ProjectRepository
 	versionRepo   *repository.VersionRepository
@@ -28,7 +34,11 @@ type ProjectService struct {
 	storage       storage.Storage
 	credentials   *ProjectCredentials
 	newClient     ghclient.ClientFactory
+	reviewCleaner ProjectReviewCleaner
 }
+
+// SetReviewCleaner 绑定删除项目前的审查远端清理（main.go 注入）。
+func (s *ProjectService) SetReviewCleaner(c ProjectReviewCleaner) { s.reviewCleaner = c }
 
 func NewProjectService(
 	projectRepo *repository.ProjectRepository,
@@ -246,6 +256,11 @@ func (s *ProjectService) Delete(id, userID string) error {
 		return errs.ErrInternal
 	}
 
+	// 项目删除会 CASCADE 掉审查运行行；先尽力停掉远端线程并回收工作区，
+	// 否则这些线程/工作区再也不会被调度发现（归档与回收都按运行行驱动）。
+	if s.reviewCleaner != nil {
+		s.reviewCleaner.CleanupBeforeProjectDelete(context.Background(), project.ID)
+	}
 	if err := s.projectRepo.Delete(id, userID); err != nil {
 		return errs.ErrInternal
 	}

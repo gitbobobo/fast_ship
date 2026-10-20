@@ -119,7 +119,7 @@ func (s *BotService) runThreadWrite(ctx context.Context, call *model.BotToolCall
 			req.ThreadId = &execCtx.ThreadID
 		}
 		// 复用 launchSent 语义：结果只表示启动 RPC 的结果，不代表远端完成。
-		result, _, err := s.threads.CreateThreadForAutomation(ctx, userID, args.EnvID, req)
+		result, _, err := s.threads.CreateThreadForAgent(ctx, userID, args.EnvID, req)
 		return result, err
 	case "send":
 		req := &T3SendMessageRequest{Text: args.Text}

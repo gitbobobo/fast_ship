@@ -125,7 +125,7 @@ func TestScreenshotAnnotationServiceCreate_AssemblesResponse(t *testing.T) {
 
 	resp := createTestAnnotation(t, svc, uploaded.Screen.Id, user.ID, validAnnotationRequest())
 
-	if resp.Status != api.Open || resp.Body != "按钮偏左" || resp.CreatedBy != "Web 用户" {
+	if resp.Status != api.ScreenshotAnnotationStatusOpen || resp.Body != "按钮偏左" || resp.CreatedBy != "Web 用户" {
 		t.Fatalf("unexpected annotation payload: %+v", resp)
 	}
 	if resp.ProjectId != project.ID || resp.ScreenId != uploaded.Screen.Id {
@@ -266,7 +266,7 @@ func TestScreenshotAnnotationServiceList_FiltersAndOrdering(t *testing.T) {
 	a2req.IssueId = api.Ptr(issue.ID)
 	a2 := createTestAnnotation(t, svc, home.Screen.Id, user.ID, a2req)
 	a3 := createTestAnnotation(t, svc, login.Screen.Id, user.ID, validAnnotationRequest())
-	if _, err := svc.annotationService.Update(a3.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.Resolved)}, false); err != nil {
+	if _, err := svc.annotationService.Update(a3.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.ScreenshotAnnotationStatusResolved)}, false); err != nil {
 		t.Fatalf("resolve a3: %v", err)
 	}
 
@@ -379,7 +379,7 @@ func TestScreenshotAnnotationService_OutdatedLifecycle(t *testing.T) {
 	resolvedReq := validAnnotationRequest()
 	resolvedReq.Body = "已修"
 	resolved := createTestAnnotation(t, svc, uploaded.Screen.Id, user.ID, resolvedReq)
-	if _, err := svc.annotationService.Update(resolved.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.Resolved)}, false); err != nil {
+	if _, err := svc.annotationService.Update(resolved.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.ScreenshotAnnotationStatusResolved)}, false); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 
@@ -513,14 +513,14 @@ func TestScreenshotAnnotationServiceBatch_StatusIntersectsOpen(t *testing.T) {
 	uploaded := uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "a.png", makeTestPNG(t, 100, 50))
 	a1 := createTestAnnotation(t, svc, uploaded.Screen.Id, user.ID, validAnnotationRequest())
 	a2 := createTestAnnotation(t, svc, uploaded.Screen.Id, user.ID, validAnnotationRequest())
-	if _, err := svc.annotationService.Update(a2.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.Resolved)}, false); err != nil {
+	if _, err := svc.annotationService.Update(a2.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.ScreenshotAnnotationStatusResolved)}, false); err != nil {
 		t.Fatalf("resolve a2: %v", err)
 	}
 
 	res, err := svc.annotationService.Batch(project.ID, user.ID, &ScreenshotAnnotationBatchRequest{
 		Action: api.Resolve,
 		Filter: &api.ScreenshotAnnotationBatchRequest_Filter{
-			Status: api.Ptr(api.Resolved),
+			Status: api.Ptr(api.ScreenshotAnnotationStatusResolved),
 		},
 	})
 	if err != nil {
@@ -545,7 +545,7 @@ func TestScreenshotAnnotationServiceBatch_StatusIntersectsOpen(t *testing.T) {
 	res, err = svc.annotationService.Batch(project.ID, user.ID, &ScreenshotAnnotationBatchRequest{
 		Action: api.Confirm,
 		Filter: &api.ScreenshotAnnotationBatchRequest_Filter{
-			Status: api.Ptr(api.Resolved),
+			Status: api.Ptr(api.ScreenshotAnnotationStatusResolved),
 		},
 	})
 	if err != nil || res.Updated != 0 {
@@ -566,13 +566,13 @@ func TestScreenshotAnnotationServiceBatch_ResolvedOnlyConfirmLeavesOutdatedOpen(
 		t.Fatalf("mark outdated: %v", err)
 	}
 	resolvedAnn := createTestAnnotation(t, svc, uploaded.Screen.Id, user.ID, validAnnotationRequest())
-	if _, err := svc.annotationService.Update(resolvedAnn.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.Resolved)}, false); err != nil {
+	if _, err := svc.annotationService.Update(resolvedAnn.Id, user.ID, &UpdateScreenshotAnnotationRequest{Status: api.Ptr(api.ScreenshotAnnotationStatusResolved)}, false); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 
 	res, err := svc.annotationService.Batch(project.ID, user.ID, &ScreenshotAnnotationBatchRequest{
 		Action: api.Confirm,
-		Filter: &api.ScreenshotAnnotationBatchRequest_Filter{Status: api.Ptr(api.Resolved)},
+		Filter: &api.ScreenshotAnnotationBatchRequest_Filter{Status: api.Ptr(api.ScreenshotAnnotationStatusResolved)},
 	})
 	if err != nil || res.Updated != 0 {
 		t.Fatalf("resolved-only confirm: %+v err=%v", res, err)
@@ -716,23 +716,23 @@ func TestScreenshotAnnotationServiceUpdate_PointerSemantics(t *testing.T) {
 	updated, err := svc.annotationService.Update(annotation.Id, user.ID, &UpdateScreenshotAnnotationRequest{
 		Body: api.Ptr("改成新文案"),
 	}, false)
-	if err != nil || updated.Body != "改成新文案" || updated.Status != api.Open {
+	if err != nil || updated.Body != "改成新文案" || updated.Status != api.ScreenshotAnnotationStatusOpen {
 		t.Fatalf("body update: %+v err=%v", updated, err)
 	}
 
 	// status → resolved 置 resolved_at
 	updated, err = svc.annotationService.Update(annotation.Id, user.ID, &UpdateScreenshotAnnotationRequest{
-		Status: api.Ptr(api.Resolved),
+		Status: api.Ptr(api.ScreenshotAnnotationStatusResolved),
 	}, false)
-	if err != nil || updated.Status != api.Resolved || updated.ResolvedAt == nil {
+	if err != nil || updated.Status != api.ScreenshotAnnotationStatusResolved || updated.ResolvedAt == nil {
 		t.Fatalf("resolve: %+v err=%v", updated, err)
 	}
 
 	// status → open 清空 resolved_at
 	updated, err = svc.annotationService.Update(annotation.Id, user.ID, &UpdateScreenshotAnnotationRequest{
-		Status: api.Ptr(api.Open),
+		Status: api.Ptr(api.ScreenshotAnnotationStatusOpen),
 	}, false)
-	if err != nil || updated.Status != api.Open || updated.ResolvedAt != nil {
+	if err != nil || updated.Status != api.ScreenshotAnnotationStatusOpen || updated.ResolvedAt != nil {
 		t.Fatalf("reopen: %+v err=%v", updated, err)
 	}
 
@@ -774,7 +774,7 @@ func TestScreenshotAnnotationServiceUpdate_ClearsOutdatedOnResolve(t *testing.T)
 	uploadImageScreenshot(t, svc, project.ID, user.ID, "home", "shot2.png", makeTestPNG(t, 100, 50))
 
 	updated, err := svc.annotationService.Update(annotation.Id, user.ID, &UpdateScreenshotAnnotationRequest{
-		Status: api.Ptr(api.Resolved),
+		Status: api.Ptr(api.ScreenshotAnnotationStatusResolved),
 	}, false)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -793,17 +793,17 @@ func TestScreenshotAnnotationServiceUpdate_APIKeyRestriction(t *testing.T) {
 
 	// API Key 只允许整包 {status:"resolved"}
 	resolved, err := svc.annotationService.Update(annotation.Id, user.ID, &UpdateScreenshotAnnotationRequest{
-		Status: api.Ptr(api.Resolved),
+		Status: api.Ptr(api.ScreenshotAnnotationStatusResolved),
 	}, true)
-	if err != nil || resolved.Status != api.Resolved {
+	if err != nil || resolved.Status != api.ScreenshotAnnotationStatusResolved {
 		t.Fatalf("api key resolve: %+v err=%v", resolved, err)
 	}
 
 	for name, req := range map[string]*UpdateScreenshotAnnotationRequest{
-		"reopen":        {Status: api.Ptr(api.Open)},
+		"reopen":        {Status: api.Ptr(api.ScreenshotAnnotationStatusOpen)},
 		"body":          {Body: api.Ptr("x")},
 		"issue":         {IssueId: api.Ptr("some-issue")},
-		"resolved+body": {Status: api.Ptr(api.Resolved), Body: api.Ptr("x")},
+		"resolved+body": {Status: api.Ptr(api.ScreenshotAnnotationStatusResolved), Body: api.Ptr("x")},
 	} {
 		if _, err := svc.annotationService.Update(annotation.Id, user.ID, req, true); err != errs.ErrApiKeyForbidden {
 			t.Fatalf("api key %s: expected ErrApiKeyForbidden, got %v", name, err)

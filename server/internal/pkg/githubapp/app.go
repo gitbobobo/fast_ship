@@ -218,6 +218,50 @@ func (s *InstallationTokenStore) exchangeInstallToken(ctx context.Context, jwtTo
 	return out, nil
 }
 
+// InstallationForRepo 解析仓库所属安装：GET /repos/{owner}/{repo}/installation
+// 用 App JWT（非安装令牌——此时还不知道安装 id）。返回 installation.id；
+// App 未装到该仓库（403/404）或身份无效时返回错误，由调用方按「未安装」处理。
+func (s *InstallationTokenStore) InstallationForRepo(ctx context.Context, repoFullName string) (int64, error) {
+	owner, name, ok := strings.Cut(repoFullName, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return 0, fmt.Errorf("githubapp: 仓库名须为 owner/name，得到 %q", repoFullName)
+	}
+	jwtTok, err := s.creds.appJWT(time.Now())
+	if err != nil {
+		return 0, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	path := fmt.Sprintf("/repos/%s/%s/installation", owner, name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("Authorization", "Bearer "+jwtTok)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, err
+	}
+	if resp.StatusCode >= 300 {
+		return 0, &githubapi.StatusError{StatusCode: resp.StatusCode, Method: http.MethodGet, URL: path, Body: string(raw)}
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil || out.ID == 0 {
+		return 0, fmt.Errorf("githubapp: 解析仓库安装响应失败 %s", path)
+	}
+	return out.ID, nil
+}
+
 // Invalidate 使某安装的缓存失效（401 时由共享 REST 实现调用，避免拿着坏令牌
 // 继续用满一小时）。
 func (s *InstallationTokenStore) Invalidate(installationID int64) {

@@ -78,15 +78,19 @@ var autoMigrateModels = []interface{}{
 	&model.ScreenshotPendingDelete{},
 	&model.T3Environment{},
 	&model.ProjectT3Binding{},
-	&model.Automation{},
-	&model.AutomationTrigger{},
-	&model.AutomationRun{},
-	&model.AutomationRunToken{},
 	&model.Notification{},
 	&model.GitHubWebhookDelivery{},
-	&model.GitHubPRDebounce{},
-	&model.GitHubPRReview{},
-	&model.GitHubPRSeenSHA{},
+	// PR 审查（INT-135）：项目级开关 + 审查运行/令牌/PR 总账/截图资产/防抖/已见 SHA。
+	// 旧 automation_* 与 github_pr_* 表由 migrateReviewTables 在 AutoMigrate 前整表删除。
+	&model.ProjectReviewSettings{},
+	&model.ReviewRun{},
+	&model.ReviewRunToken{},
+	&model.ReviewPullRequest{},
+	&model.ReviewAsset{},
+	&model.ReviewDebounce{},
+	&model.ReviewSeenSHA{},
+	// 通用自动化下线时在途旧线程的墓碑（处理完即删行）。
+	&model.LegacyAutomationThread{},
 	&model.QuotaAccount{},
 	// 部署级 App 与邀请注册（INT-129）：邀请表、部署设置单行表；users.role 列
 	// 随 model.User 迁移，存量角色回填见 migrateUserRoles。用户级 integrations
@@ -245,11 +249,8 @@ func main() {
 	projectT3BindingRepo := repository.NewProjectT3BindingRepository(db)
 	jwtBlacklistRepo := repository.NewJWTBlacklistRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(db)
-	automationRepo := repository.NewAutomationRepository(db)
-	automationTriggerRepo := repository.NewAutomationTriggerRepository(db)
-	automationRunRepo := repository.NewAutomationRunRepository(db)
-	automationRunTokenRepo := repository.NewAutomationRunTokenRepository(db)
 	notificationRepo := repository.NewNotificationRepository(db)
+	webhookDeliveryRepo := repository.NewGitHubWebhookDeliveryRepository(db)
 	quotaAccountRepo := repository.NewQuotaAccountRepository(db)
 	// 部署级 App 与邀请注册（INT-129）。
 	inviteRepo := repository.NewInviteRepository(db)
@@ -261,7 +262,7 @@ func main() {
 	// 模块化日志（INT-94）：按模块打上 module 字段，便于自身日志按模块检索。
 	githubLogger := zapLogger.With(zap.String("module", "github"))
 	t3Logger := zapLogger.With(zap.String("module", "t3"))
-	automationLogger := zapLogger.With(zap.String("module", "automation"))
+	reviewLogger := zapLogger.With(zap.String("module", "review"))
 	quotaLogger := zapLogger.With(zap.String("module", "quota"))
 
 	// 初始化 Service
@@ -272,8 +273,8 @@ func main() {
 	issuePromptService := service.NewIssuePromptService(userIssuePromptRepo, t3EnvironmentRepo)
 	apiKeyService := service.NewApiKeyService(apiKeyRepo, appLogger.With(slog.String("module", "api_key")))
 	githubTokenService := service.NewGitHubTokenService(githubTokenRepo, cfg, githubLogger)
-	// 部署设置（INT-129）：public_url 网页配置的唯一读取入口；三处既有读取点
-	// （automation / automation_scheduler / integration）统一改经它解析。
+	// 部署设置（INT-129）：public_url 网页配置的唯一读取入口；既有读取点
+	// 统一改经它解析。
 	deploymentSettingsService := service.NewDeploymentSettingsService(deploymentSettingsRepo, cfg)
 	// 集成（INT-129）：部署级 GitHub App 身份，管理员配置、保存即生效。
 	integrationService := service.NewIntegrationService(deploymentSettingsRepo, cfg, githubLogger)
@@ -311,7 +312,6 @@ func main() {
 	t3BindingService := service.NewT3BindingService(t3ThreadsService, projectRepo, projectT3BindingRepo)
 	notificationSink := service.NewNotificationSink(db)
 	notificationService := service.NewNotificationService(notificationRepo)
-	automationService := service.NewAutomationService(db, automationRepo, automationTriggerRepo, automationRunRepo, t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, automationLogger)
 
 	// 内置机器人（INT-101）：管理、主线循环、后台执行与 SSE。
 	botService := service.NewBotService(db, cfg, zapLogger.With(zap.String("module", "bot")), projectService, issueService, t3ThreadsService, t3BindingService)
@@ -342,12 +342,6 @@ func main() {
 		clients.SetAPIBase(cfg.GitHubApp.APIBaseURL)
 		ghPR = clients
 	}
-	automationAgentService := service.NewAutomationAgentService(db, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, automationLogger)
-	automationAgentService.SetPRGitHub(ghPR)
-	automationScheduler := service.NewAutomationScheduler(db, automationRepo, automationRunRepo, automationRunTokenRepo, t3ThreadsService, notificationSink, issueRepo, cfg, automationLogger)
-	automationAgentService.SetKick(automationScheduler.Kick)
-	automationService.SetPublicURLSource(deploymentSettingsService)
-	automationScheduler.SetPublicURLSource(deploymentSettingsService)
 
 	// 订阅套餐额度（INT-109）：凭据加密落库 + 定时抓取；quota.enabled=false 时
 	// 接口仍可用（手动刷新正常），只是没有后台轮。
@@ -356,18 +350,29 @@ func main() {
 	// HTTP 侧新建/换凭据/手动刷新写入更早的 next_retry_at 时，叫醒可能在睡长定时器的调度器。
 	quotaService.SetKick(quotaScheduler.Kick)
 
-	// PR 评审协调面（INT-93）：webhook 事务、防抖开轮、排队提升、评论/check 同步。
-	prReviewService := service.NewPRReviewService(db,
-		automationRepo, automationRunRepo, projectRepo,
-		repository.NewGitHubWebhookDeliveryRepository(db),
-		repository.NewGitHubPRDebounceRepository(db),
-		repository.NewGitHubPRReviewRepository(db),
-		ghPR, t3ThreadsService, notificationSink, cfg, zapLogger)
-	automationScheduler.UsePRReview(prReviewService)
-	automationAgentService.SetPRReview(prReviewService)
-
-	// Issue 写路径接入事件出口：事务内匹配自动化并预写运行（INT-90）。
-	issueService.SetIssueEventSink(automationService)
+	// PR 审查（INT-135）：webhook 幂等入口 + 审查调度循环（防抖/排队/派发/
+	// 超时/同步/工作区清理）。ghPR 是 App 访问面，App 身份与 public_url
+	// 分别取部署集成与部署设置服务；T3 线程/工作区与截图缓存复用现有服务。
+	// 截图下载的 App 令牌来源：真实客户端经 InstallationTokenStore 取安装
+	// bearer；fake/不支持凭证的实现保持匿名（返回空串）。
+	mediaBearer := func(ctx context.Context, installationID int64) (string, error) {
+		client, err := ghPR.ClientFor(ctx)
+		if err != nil {
+			return "", err
+		}
+		source, ok := client.(interface {
+			Bearer(context.Context, int64) (string, error)
+		})
+		if !ok {
+			return "", nil
+		}
+		return source.Bearer(ctx, installationID)
+	}
+	reviewService := service.NewReviewService(db, projectRepo, webhookDeliveryRepo, notificationSink,
+		ghPR, integrationService, deploymentSettingsService, t3ThreadsService, mediaProxyService, mediaBearer, cfg, reviewLogger)
+	// 删除项目会 CASCADE 掉审查运行行，先让审查服务尽力停线程/归档/回收工作区。
+	projectService.SetReviewCleaner(reviewService)
+	reviewService.Start()
 
 	// 初始化 Handler
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
@@ -390,9 +395,9 @@ func main() {
 	mediaProxyHandler := handler.NewGitHubMediaProxyHandler(mediaProxyService)
 	t3EnvironmentHandler := handler.NewT3EnvironmentHandler(t3EnvironmentService, t3ThreadsService)
 	t3BindingHandler := handler.NewT3BindingHandler(t3BindingService)
-	automationHandler := handler.NewAutomationHandler(automationService)
 	notificationHandler := handler.NewNotificationHandler(notificationService)
-	automationAgentHandler := handler.NewAutomationAgentHandler(automationAgentService)
+	reviewHandler := handler.NewReviewHandler(reviewService)
+	reviewAgentHandler := handler.NewReviewAgentHandler(reviewService)
 	botHandler := handler.NewBotHandler(botService)
 	selfLogHandler := handler.NewSelfLogHandler(service.NewSelfLogService(selfLogStore))
 	// webhook 密钥来源：fake 自测路径完全走 config；其余每次请求现取部署唯一
@@ -401,7 +406,7 @@ func main() {
 	if ghFake != nil {
 		webhookSecrets = handler.StaticWebhookSecret(cfg.GitHubApp.WebhookSecret)
 	}
-	githubWebhookHandler := handler.NewGitHubWebhookHandler(prReviewService, webhookSecrets, ghFake)
+	githubWebhookHandler := handler.NewGitHubWebhookHandler(reviewService, webhookSecrets, ghFake)
 	quotaHandler := handler.NewQuotaHandler(quotaService)
 	deploymentGitHubAppHandler := handler.NewDeploymentGitHubAppHandler(integrationService, manifestService)
 	memberHandler := handler.NewMemberHandler(memberService)
@@ -461,9 +466,6 @@ func main() {
 		}()
 	}
 
-	// 自动化协调循环（INT-90）：到期 cron、待认领运行、超时与后置统一由它推进。
-	automationScheduler.Start()
-
 	if cfg.Quota.Enabled {
 		quotaScheduler.Start()
 	}
@@ -483,7 +485,7 @@ func main() {
 	r.MaxMultipartMemory = uploadMultipartMemoryLimit(cfg.Upload.MaxFileSize)
 
 	// 注册路由
-	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
+	router.Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
 
 	// 启动服务。ReadHeaderTimeout 挡慢速请求头长期占连接；不设 Read/WriteTimeout
 	// 保住上传/下载/媒体代理等长传输；IdleTimeout 回收 keep-alive 空闲连接。
@@ -547,17 +549,10 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 		return fmt.Errorf("截图文件列准备失败: %w", err)
 	}
 
-	// 自动化触发器拆表（INT-118）的前置：旧主键的防抖账本在这里丢弃，让随后的
-	// AutoMigrate 按新主键 (trigger_id, repo, pr) 重建空表。
-	if err := dropLegacyPRDebounces(db); err != nil {
-		return fmt.Errorf("防抖账本重建失败: %w", err)
-	}
-
-	// PR 评审账身份升级（INT-119）：reviews/seen/debounces 的复合主键必须重建
-	// 进 app_user_id（debounces 的 automation_id 旧主键表已在上一步整表丢弃）。
-	// 必须先于 AutoMigrate——它只补列不改主键，重建放在它前面才能让新主键生效。
-	if err := migratePRReviewIdentity(db, logger); err != nil {
-		return fmt.Errorf("PR 评审身份迁移失败: %w", err)
+	// 通用自动化与旧 PR 评审账整表删除（INT-135）：拍板不迁移旧数据，
+	// 必须在 AutoMigrate 之前执行，避免旧模型外键/索引干扰新表。
+	if err := migrateReviewTables(db, logger); err != nil {
+		return fmt.Errorf("审查表切换迁移失败: %w", err)
 	}
 
 	// 用户级 integrations 表删除（INT-129 B 轮）：GitHub App 身份改为部署级
@@ -575,13 +570,6 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	// 截图库折叠迁移（INT-99）：把多版本库收敛为单文件截图。
 	if err := migrateScreenshots(db, fileStorage, logger); err != nil {
 		return fmt.Errorf("截图库迁移失败: %w", err)
-	}
-
-	// 自动化触发器拆表（INT-118）：存量 automation 行回填触发器、运行行回填
-	// trigger_id、整表重建清掉旧列。必须在 AutoMigrate 之后（依赖新表/新列）、
-	// createBootIndexes 之前（索引建在新形状上）。
-	if err := migrateAutomationTriggers(db, logger); err != nil {
-		return fmt.Errorf("自动化触发器迁移失败: %w", err)
 	}
 
 	// AI 提供商聚合（INT-133）：存量 bots 的地址+密钥去重建 provider、回填
@@ -648,29 +636,30 @@ func createBootIndexes(db *gorm.DB) {
 	ON screenshot_screens(project_id, screen_key, COALESCE(platform,''), COALESCE(locale,''), COALESCE(theme,''))`)
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_t3_environments_user_name ON t3_environments(user_id, name)")
 
-	// 自动化（INT-90/INT-118）：复合/部分索引 AutoMigrate 建不了，全部手工登记。
-	// 触发器拆表后调度/匹配索引全部落在 automation_triggers 上。
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_triggers_cron_next ON automation_triggers(trigger_type, next_run_at)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_triggers_event ON automation_triggers(trigger_type, issue_project_id)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_triggers_automation ON automation_triggers(automation_id, position)")
-	// 触发器幂等键从 (automation_id, trigger_key) 收窄到触发器维度（INT-118）。
-	// 改动定义必须 DROP 再 CREATE：CREATE IF NOT EXISTS 不会替换已有定义。
-	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_automation_trigger")
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_user_triggered ON automation_runs(user_id, triggered_at DESC, id)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_triggered ON automation_runs(automation_id, triggered_at DESC, id)")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_active_deadline ON automation_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
-	// 同一触发器至多一个活动运行（未结束）或一个待后置运行——重入约束的数据库
-	// 兜底（INT-118 从自动化维度收窄到触发器维度：同一自动化的不同触发器可
-	// 并行运行；删除守卫仍按自动化）。只约束 cron/issue 触发：GitHub PR 触发
-	// （INT-93）一轮多模型并行 + 排队，允许同一触发器多行未结束。
-	db.Exec("DROP INDEX IF EXISTS idx_automation_runs_active_once")
-	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_active_once
-	ON automation_runs(trigger_id)
-	WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_label_added')
-	  AND (finished_at IS NULL OR post_state = 'pending')`)
-	// PR 审查：按 repo+pr+sha 找同一轮运行（SHA 变化取消、轮次聚合）。
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_automation_runs_pr_head ON automation_runs(repo_full_name, pr_number, head_sha)")
+	// PR 审查（INT-135）：轮次/SHA 反查、用户时间序、在途截止、组合幂等唯一。
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_pr_round ON review_runs(project_id, repo_full_name, pr_number, round_number)")
+	// head 反查的主读路径已带上 project_id（账本按项目分区），索引前缀对齐；
+	// 旧的无 project_id 同名索引 DROP 重建。
+	db.Exec("DROP INDEX IF EXISTS idx_review_runs_pr_head")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_pr_head ON review_runs(project_id, repo_full_name, pr_number, head_sha)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_user_created ON review_runs(user_id, created_at DESC)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_runs_active_deadline ON review_runs(deadline_at) WHERE status IN ('dispatched', 'running')")
+	// 组合幂等唯一索引列定义历经两次演变（补 round_number、补 environment_id），
+	// 只能 DROP 重建：同模型不同环境是合法的不同组合，旧键缺 environment_id
+	// 会把它们静默吞掉（DoNothing 当幂等命中）。
+	db.Exec("DROP INDEX IF EXISTS idx_review_runs_combination")
+	db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_review_runs_combination
+	ON review_runs(project_id, repo_full_name, pr_number, head_sha, round_number, kind, environment_id, instance_id, model, model_options_json)`)
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_pull_requests_project_updated ON review_pull_requests(project_id, updated_at DESC)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_pull_requests_sync_pending ON review_pull_requests(sync_pending) WHERE sync_pending = 1")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_debounces_fire ON review_debounces(fire_at)")
+	db.Exec("CREATE INDEX IF NOT EXISTS idx_project_review_settings_user ON project_review_settings(user_id)")
+	// 同一仓库只允许一个项目开启审查（开轮/同步按仓库反查唯一项目的前提）：
+	// 设置保存时先在事务内检查并返回 40922，这条部分唯一索引兜并发竞态。
+	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_project_review_settings_repo ON project_review_settings(repo_full_name) WHERE enabled = 1")
+	// 截图源地址唯一索引由 model.ReviewAsset 的 uniqueIndex 标签随 AutoMigrate
+	// 建出（idx_review_assets_source）；按 (repo, pr, head) 的查询也走它的前缀。
+	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")

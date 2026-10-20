@@ -19,38 +19,36 @@ const (
 
 // 关联字段是 Entry 的固定列；其余 slog 属性统一进 Extra JSON。
 const (
-	AttrModule       = "module"
-	AttrRequestID    = "request_id"
-	AttrUserID       = "user_id"
-	AttrProjectID    = "project_id"
-	AttrIssueID      = "issue_id"
-	AttrAutomationID = "automation_id"
-	AttrRunID        = "run_id"
-	AttrThreadID     = "thread_id"
-	AttrSystemScope  = "system_scope"
+	AttrModule      = "module"
+	AttrRequestID   = "request_id"
+	AttrUserID      = "user_id"
+	AttrProjectID   = "project_id"
+	AttrIssueID     = "issue_id"
+	AttrRunID       = "run_id"
+	AttrThreadID    = "thread_id"
+	AttrSystemScope = "system_scope"
 )
 
 // CorrelationFields 列出可作等值过滤与链路查询的关联字段名（供 handler 校验 fields 参数）。
 var CorrelationFields = []string{
 	AttrModule, AttrRequestID, AttrUserID, AttrProjectID,
-	AttrIssueID, AttrAutomationID, AttrRunID, AttrThreadID,
+	AttrIssueID, AttrRunID, AttrThreadID,
 }
 
 // Entry 是一条自身日志的内存表示，与存储列一一对应。
 type Entry struct {
-	ID           int64     `json:"id"`
-	Time         time.Time `json:"time"`
-	Level        string    `json:"level"`
-	Module       string    `json:"module,omitempty"`
-	Message      string    `json:"message"`
-	RequestID    string    `json:"request_id,omitempty"`
-	UserID       string    `json:"user_id,omitempty"`
-	ProjectID    string    `json:"project_id,omitempty"`
-	IssueID      string    `json:"issue_id,omitempty"`
-	AutomationID string    `json:"automation_id,omitempty"`
-	RunID        string    `json:"run_id,omitempty"`
-	ThreadID     string    `json:"thread_id,omitempty"`
-	Extra        string    `json:"extra,omitempty"`
+	ID        int64     `json:"id"`
+	Time      time.Time `json:"time"`
+	Level     string    `json:"level"`
+	Module    string    `json:"module,omitempty"`
+	Message   string    `json:"message"`
+	RequestID string    `json:"request_id,omitempty"`
+	UserID    string    `json:"user_id,omitempty"`
+	ProjectID string    `json:"project_id,omitempty"`
+	IssueID   string    `json:"issue_id,omitempty"`
+	RunID     string    `json:"run_id,omitempty"`
+	ThreadID  string    `json:"thread_id,omitempty"`
+	Extra     string    `json:"extra,omitempty"`
 	// SystemScope 为 true 表示显式系统行（仅进程级启动日志）。带 user_id 或
 	// 任一业务关联列时写入侧强制为 false，避免误标公开业务日志。
 	SystemScope bool `json:"-"`
@@ -60,7 +58,7 @@ type Entry struct {
 
 // HasAssociation 表示该行带业务关联列（不含 request_id）。有关联列的行不能作为系统行公开。
 func (e Entry) HasAssociation() bool {
-	return e.ProjectID != "" || e.IssueID != "" || e.AutomationID != "" || e.RunID != "" || e.ThreadID != ""
+	return e.ProjectID != "" || e.IssueID != "" || e.RunID != "" || e.ThreadID != ""
 }
 
 // allowsSystemScope 仅当无归属且无业务关联列时允许 system_scope=1。

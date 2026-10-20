@@ -45,7 +45,7 @@ func (r *SelfLogOwnerResolver) ResolveOwners(ctx context.Context, rows []selflog
 		return out
 	}
 
-	var projectIDs, issueIDs, autoIDs, runIDs, threadIDs []string
+	var projectIDs, issueIDs, runIDs, threadIDs []string
 	eligible := make([]bool, len(rows))
 	for i, e := range rows {
 		if e.UserID != "" || e.SystemScope || !e.HasAssociation() {
@@ -54,7 +54,6 @@ func (r *SelfLogOwnerResolver) ResolveOwners(ctx context.Context, rows []selflog
 		eligible[i] = true
 		projectIDs = appendID(projectIDs, e.ProjectID)
 		issueIDs = appendID(issueIDs, e.IssueID)
-		autoIDs = appendID(autoIDs, e.AutomationID)
 		runIDs = appendID(runIDs, e.RunID)
 		threadIDs = appendID(threadIDs, e.ThreadID)
 	}
@@ -66,10 +65,10 @@ func (r *SelfLogOwnerResolver) ResolveOwners(ctx context.Context, rows []selflog
 
 	projects := r.lookupUsers(ctx, "project", uniqueIDs(projectIDs),
 		&model.Project{}, "id")
-	autos := r.lookupUsers(ctx, "automation", uniqueIDs(autoIDs),
-		&model.Automation{}, "id")
+	// run_id/thread_id 归属查审查运行账（INT-135：原 automation_runs 已删，
+	// 审查运行是唯一还产生运行级日志的来源）。
 	runs := r.lookupUsers(ctx, "run", uniqueIDs(runIDs),
-		&model.AutomationRun{}, "id")
+		&model.ReviewRun{}, "id")
 	threads := r.lookupThreadUsers(ctx, uniqueIDs(threadIDs))
 
 	for i, e := range rows {
@@ -90,7 +89,6 @@ func (r *SelfLogOwnerResolver) ResolveOwners(ctx context.Context, rows []selflog
 			owners[uid] = struct{}{}
 		}
 		add(e.RunID, runs)
-		add(e.AutomationID, autos)
 		add(e.ProjectID, projects)
 		add(e.ThreadID, threads)
 		if e.IssueID != "" {
@@ -181,7 +179,7 @@ func (r *SelfLogOwnerResolver) lookupThreadUsers(ctx context.Context, ids []stri
 		ThreadID string
 		UserID   string
 	}
-	err := r.db.WithContext(ctx).Model(&model.AutomationRun{}).
+	err := r.db.WithContext(ctx).Model(&model.ReviewRun{}).
 		Select("thread_id, user_id").
 		Where("thread_id IN ?", need).
 		Find(&rows).Error

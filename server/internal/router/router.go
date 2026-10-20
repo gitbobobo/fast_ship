@@ -33,9 +33,10 @@ func Setup(
 	mediaProxyHandler *handler.GitHubMediaProxyHandler,
 	t3EnvironmentHandler *handler.T3EnvironmentHandler,
 	t3BindingHandler *handler.T3BindingHandler,
-	automationHandler *handler.AutomationHandler,
 	notificationHandler *handler.NotificationHandler,
-	automationAgentHandler *handler.AutomationAgentHandler,
+	reviewHandler *handler.ReviewHandler,
+	reviewAgentHandler *handler.ReviewAgentHandler,
+	reviewResolver service.RunTokenResolver,
 	botHandler *handler.BotHandler,
 	aiProviderHandler *handler.AIProviderHandler,
 	selfLogHandler *handler.SelfLogHandler,
@@ -327,23 +328,18 @@ func Setup(
 		}
 	}
 
-	// JWT 必须 — 自动化配置与运行记录（INT-90）
-	automations := api.Group("/automations", middleware.RequireJWT(cfg, authService))
-	{
-		automations.GET("", automationHandler.List)
-		automations.POST("", automationHandler.Create)
-		automations.GET("/:id", automationHandler.Get)
-		automations.PUT("/:id", automationHandler.Update)
-		automations.DELETE("/:id", automationHandler.Delete)
-		automations.GET("/:id/runs", automationHandler.ListRuns)
-	}
-	api.GET("/automation-runs/:id", middleware.RequireJWT(cfg, authService), automationHandler.GetRun)
-
 	// JWT 必须 — 站内通知（read-all 为静态段，优先于 :id 匹配）
 	api.GET("/notifications", middleware.RequireJWT(cfg, authService), notificationHandler.List)
 	api.GET("/notifications/unread-count", middleware.RequireJWT(cfg, authService), notificationHandler.UnreadCount)
 	api.POST("/notifications/read-all", middleware.RequireJWT(cfg, authService), notificationHandler.MarkAllRead)
 	api.POST("/notifications/:id/read", middleware.RequireJWT(cfg, authService), notificationHandler.MarkRead)
+
+	// JWT 必须 — PR 审查（INT-135）：审查总览、项目审查设置与记录。
+	api.GET("/reviews", middleware.RequireJWT(cfg, authService), reviewHandler.ListProjects)
+	api.GET("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.GetSettings)
+	api.PUT("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.UpdateSettings)
+	api.GET("/projects/:id/review-records", middleware.RequireJWT(cfg, authService), reviewHandler.ListRecords)
+	api.POST("/projects/:id/reviews/rerun", middleware.RequireJWT(cfg, authService), reviewHandler.Rerun)
 
 	// AI 提供商（INT-133）：内置目录读取与按用户隔离的 CRUD/测试连接，全部
 	// 仅 JWT；test/catalog 为静态段，优先于 :id 匹配。
@@ -392,19 +388,21 @@ func Setup(
 		bots.DELETE("/:id/schedule-tasks/:taskId/state", botHandler.ClearScheduleTaskState)
 	}
 
-	// 仅运行令牌 — 自动化 Agent 回报与读取（INT-90）。
-	// report 允许结束后重放完全相同的结束回报（requireLive=false）；
-	// 其余端点令牌消费即失效（requireLive=true）。API Key 一律 40304。
-	api.POST("/automation-agent/report",
-		middleware.RequireRunToken(automationAgentHandler.Agent(), false), automationAgentHandler.Report)
-	api.GET("/automation-agent/threads",
-		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.ListThreads)
-	api.GET("/automation-agent/environments/:id/threads/:threadId",
-		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.GetThread)
-	api.GET("/automation-agent/environments/:id/threads/:threadId/items/:itemId",
-		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.GetThreadItem)
-	api.POST("/automation-agent/notifications",
-		middleware.RequireRunToken(automationAgentHandler.Agent(), true), automationAgentHandler.PublishNotification)
+	// 审查 Agent 端点（/api/review-agent，INT-135）：仅 Bearer 运行令牌
+	// （fsr_）。读/上下文端点 requireLive（运行终态即拒）；result 允许
+	// 结束后完全相同正文的结束回报重放。
+	reviewAgent := api.Group("/review-agent")
+	{
+		live := reviewAgent.Group("", middleware.RequireRunToken(reviewResolver, true))
+		{
+			live.GET("/pull-request", reviewAgentHandler.PullRequest)
+			live.GET("/pull-request/diff", reviewAgentHandler.Diff)
+			live.GET("/history", reviewAgentHandler.History)
+			live.GET("/screenshots", reviewAgentHandler.Screenshots)
+			live.GET("/screenshots/:assetId", reviewAgentHandler.ScreenshotImage)
+		}
+		reviewAgent.POST("/result", middleware.RequireRunToken(reviewResolver, false), reviewAgentHandler.SubmitResult)
+	}
 
 	// Fast Ship 自身日志查询（INT-94，只读）：JWT（Web 管理员）与 fsk_ API Key
 	// （代理）可查本人及系统级日志；fsr_ 令牌 40301。
@@ -413,18 +411,6 @@ func Setup(
 		selfLogs.GET("", selfLogHandler.ListSelfLogs)
 		selfLogs.GET("/aggregate", selfLogHandler.AggregateSelfLogs)
 		selfLogs.GET("/trace", selfLogHandler.TraceSelfLogs)
-	}
-
-	// 仅运行令牌 — GitHub PR 评审代发（INT-93）。owner/repo/PR/SHA 取自运行行；
-	// 运行结束/取消后令牌消费，访问一律 40106。
-	prReview := api.Group("/automation-agent/pull-request",
-		middleware.RequireRunToken(automationAgentHandler.Agent(), true))
-	{
-		prReview.GET("", automationAgentHandler.GetPullRequest)
-		prReview.GET("/diff", automationAgentHandler.GetPullRequestDiff)
-		prReview.GET("/comments", automationAgentHandler.ListPullRequestComments)
-		prReview.POST("/review", automationAgentHandler.SubmitPullRequestReview)
-		prReview.POST("/check", automationAgentHandler.UpdatePullRequestCheck)
 	}
 
 	// GitHub App webhook 入站（INT-93）：公开端点，X-Hub-Signature-256 验签。

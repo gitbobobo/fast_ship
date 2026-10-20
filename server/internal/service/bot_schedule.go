@@ -332,7 +332,7 @@ func botValidateScheduleTaskFields(name, cronExpr, timezone, instruction string)
 	if utf8.RuneCountInString(instruction) > botScheduleInstructionMaxLen {
 		return errs.New(errs.ErrInvalidParams.Code, "任务指令过长（最多 8000 字符）")
 	}
-	_, _, err := parseAutomationCron(cronExpr, timezone, time.Now().UTC())
+	_, _, err := parseScheduleCron(cronExpr, timezone, time.Now().UTC())
 	return err
 }
 
@@ -345,7 +345,7 @@ func (s *BotService) createScheduleTask(botID, name, cronExpr, timezone, instruc
 		return nil, err
 	}
 	now := time.Now().UTC()
-	_, next, err := parseAutomationCron(cronExpr, timezone, now)
+	_, next, err := parseScheduleCron(cronExpr, timezone, now)
 	if err != nil {
 		return nil, err
 	}
@@ -463,7 +463,7 @@ func applyScheduleTaskUpdate(task *model.BotScheduleTask, name, cronExpr, timezo
 			// 一个永远不会触发的未来时间（重新启用时才重算）。
 			task.NextRunAt = nil
 		} else {
-			_, next, err := parseAutomationCron(task.CronExpression, task.Timezone, time.Now().UTC())
+			_, next, err := parseScheduleCron(task.CronExpression, task.Timezone, time.Now().UTC())
 			if err != nil {
 				return nil, err
 			}
@@ -493,7 +493,7 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool) 
 			// 就在宽限内等着派发的任务，再点一次「启用」不该吃掉这一次触发。
 			recompute := !task.Enabled || task.NextRunAt == nil
 			if recompute {
-				_, next, parseErr := parseAutomationCron(task.CronExpression, task.Timezone, now)
+				_, next, parseErr := parseScheduleCron(task.CronExpression, task.Timezone, now)
 				if parseErr != nil {
 					return parseErr
 				}
@@ -948,7 +948,7 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 		out["model"] = effectiveModel
 		// 下次计划从 now 起算（与启用/修改任务同一解析路径）：停用任务的
 		// next_run_at 是空的，这里仍给出「若启用会何时触发」。
-		if _, next, parseErr := parseAutomationCron(task.CronExpression, task.Timezone, time.Now().UTC()); parseErr == nil {
+		if _, next, parseErr := parseScheduleCron(task.CronExpression, task.Timezone, time.Now().UTC()); parseErr == nil {
 			loc := timeOrUTC(task.Timezone)
 			out["next_run_at"] = next.In(loc).Format("2006-01-02 15:04:05 MST")
 			out["next_run_at_utc"] = next.UTC().Format(time.RFC3339)

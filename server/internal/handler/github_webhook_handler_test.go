@@ -3,22 +3,16 @@ package handler
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/config"
-	"github.com/godbobo/fast_ship/server/internal/githubapi"
-	"github.com/godbobo/fast_ship/server/internal/middleware"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -28,17 +22,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// GitHub webhook 与 PR 代发端点（INT-93；INT-129 起部署级单密钥）定向测试：
-// 503/401/202 语义、部署设置的密钥优先级、幂等、运行令牌边界（结束后 40106、
-// fsk_ 40304、非 PR 运行 40920）。
+// GitHub webhook 端点（INT-93；INT-129 起部署级单密钥）定向测试：
+// 503/401/202 语义、部署设置的密钥优先级、投递幂等。
 
 type webhookHandlerEnv struct {
 	db     *gorm.DB
 	router *gin.Engine
 	fake   *githubapp.Fake
-	agent  *service.AutomationAgentService
-	runs   *repository.AutomationRunRepository
-	tokens *repository.AutomationRunTokenRepository
 	cfg    *config.Config
 	// integrationSvc 部署级集成服务：setupWebhookEnv 总是创建，数据库来源的
 	// 验签场景把它接成 webhook 的密钥来源。
@@ -65,15 +55,15 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 		t.Fatalf("open db: %v", err)
 	}
 	if err := db.AutoMigrate(
-		&model.User{}, &model.Project{}, &model.ApiKey{}, &model.T3Environment{},
-		&model.JWTBlacklist{}, &model.RefreshToken{},
-		&model.Automation{}, &model.AutomationTrigger{}, &model.AutomationRun{}, &model.AutomationRunToken{}, &model.Notification{},
-		&model.GitHubWebhookDelivery{}, &model.GitHubPRDebounce{}, &model.GitHubPRReview{}, &model.GitHubPRSeenSHA{},
+		&model.User{}, &model.Project{}, &model.Notification{},
+		&model.GitHubWebhookDelivery{},
+		&model.ProjectReviewSettings{}, &model.ReviewRun{}, &model.ReviewRunToken{},
+		&model.ReviewPullRequest{}, &model.ReviewAsset{}, &model.ReviewDebounce{},
+		&model.ReviewSeenSHA{},
 		&model.DeploymentSettings{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_runs_trigger_key ON automation_runs(trigger_id, trigger_key)")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 
 	cfg := &config.Config{
@@ -83,18 +73,10 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 	}
 	logger := zap.NewNop()
 	fake := githubapp.NewFake()
-	autos := repository.NewAutomationRepository(db)
-	runs := repository.NewAutomationRunRepository(db)
-	tokens := repository.NewAutomationRunTokenRepository(db)
 	sink := service.NewNotificationSink(db)
-	prReview := service.NewPRReviewService(db, autos, runs, repository.NewProjectRepository(db),
-		repository.NewGitHubWebhookDeliveryRepository(db),
-		repository.NewGitHubPRDebounceRepository(db),
-		repository.NewGitHubPRReviewRepository(db),
-		githubapp.StaticClients{Client: fake}, nil, sink, cfg, logger)
-	agent := service.NewAutomationAgentService(db, runs, tokens, nil, sink, logger)
-	agent.SetPRGitHub(githubapp.StaticClients{Client: fake})
-	agent.SetPRReview(prReview)
+	review := service.NewReviewService(db, repository.NewProjectRepository(db),
+		repository.NewGitHubWebhookDeliveryRepository(db), sink,
+		githubapp.StaticClients{Client: fake}, nil, nil, nil, nil, nil, cfg, logger)
 
 	integrationSvc := service.NewIntegrationService(repository.NewDeploymentSettingsRepository(db), cfg, logger)
 	integrationSvc.SetVerify(func(ctx context.Context, appID string, keyPEM []byte, apiBaseURL string) githubapp.Detection {
@@ -104,16 +86,11 @@ func setupWebhookEnv(t *testing.T, secrets WebhookSecretSource) *webhookHandlerE
 		secrets = integrationSvc
 	}
 
-	webhookHandler := NewGitHubWebhookHandler(prReview, secrets, fake)
-	agentHandler := NewAutomationAgentHandler(agent)
+	webhookHandler := NewGitHubWebhookHandler(review, secrets, fake)
 
 	r := gin.New()
 	r.POST("/api/github/webhooks", webhookHandler.Handle)
-	r.GET("/api/automation-agent/pull-request", middleware.RequireRunToken(agent, true), agentHandler.GetPullRequest)
-	r.GET("/api/automation-agent/pull-request/diff", middleware.RequireRunToken(agent, true), agentHandler.GetPullRequestDiff)
-	r.POST("/api/automation-agent/pull-request/review", middleware.RequireRunToken(agent, true), agentHandler.SubmitPullRequestReview)
-	r.POST("/api/automation-agent/pull-request/check", middleware.RequireRunToken(agent, true), agentHandler.UpdatePullRequestCheck)
-	return &webhookHandlerEnv{db: db, router: r, fake: fake, agent: agent, runs: runs, tokens: tokens, cfg: cfg, integrationSvc: integrationSvc}
+	return &webhookHandlerEnv{db: db, router: r, fake: fake, cfg: cfg, integrationSvc: integrationSvc}
 }
 
 // postWebhook 签名并投递 payload。
@@ -131,16 +108,6 @@ func (e *webhookHandlerEnv) postWebhook(t *testing.T, delivery, event string, bo
 	return w
 }
 
-// createWebhookUser 建一个测试用户。
-func createWebhookUser(t *testing.T, db *gorm.DB) *model.User {
-	t.Helper()
-	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
-	if err := db.Create(user).Error; err != nil {
-		t.Fatalf("user: %v", err)
-	}
-	return user
-}
-
 // saveDeploymentIntegration 以真实集成服务保存部署级 GitHub App 配置（检测已 stub）。
 func (e *webhookHandlerEnv) saveDeploymentIntegration(t *testing.T, appID, secret string) {
 	t.Helper()
@@ -152,56 +119,6 @@ func (e *webhookHandlerEnv) saveDeploymentIntegration(t *testing.T, appID, secre
 		AppId: appID, PrivateKeyPem: api.Ptr(string(pem)), WebhookSecret: api.Ptr(secret),
 	}); err != nil {
 		t.Fatalf("save deployment integration: %v", err)
-	}
-}
-
-// createWebhookPRSite 给用户建关联项目 + T3 环境 + debounce=0 的 opened 与
-// synchronize 双模型规则各一条：opened/synchronize 投递都能在请求事务里开轮。
-func (e *webhookHandlerEnv) createWebhookPRSite(t *testing.T, userID, owner, repo string) {
-	t.Helper()
-	now := time.Now().UTC()
-	project := &model.Project{
-		ID: uuid.NewString(), UserID: userID, Name: "p-" + uuid.NewString()[:8],
-		GithubOwner: owner, GithubRepo: repo, PublicGitHubTokenID: "tok-pr-review",
-		CreatedAt: now, UpdatedAt: now,
-	}
-	if err := e.db.Create(project).Error; err != nil {
-		t.Fatalf("project: %v", err)
-	}
-	envRow := &model.T3Environment{
-		ID: uuid.NewString(), UserID: userID, Name: "env-" + uuid.NewString()[:8],
-		Address: "https://t3.example.com", BearerTokenEncrypted: []byte("x"),
-		BearerExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
-	}
-	if err := e.db.Create(envRow).Error; err != nil {
-		t.Fatalf("env: %v", err)
-	}
-	selsJSON, _ := json.Marshal([]map[string]string{
-		{"instance_id": "inst-a", "model": "claude"},
-		{"instance_id": "inst-b", "model": "glm"},
-	})
-	for _, trigger := range []model.AutomationTriggerType{
-		model.AutomationTriggerGitHubPROpened, model.AutomationTriggerGitHubPRSynchronize,
-	} {
-		rule := &model.Automation{
-			ID: uuid.NewString(), UserID: userID, Name: "PR 评审 " + string(trigger), Enabled: true,
-			CreatedAt: now, UpdatedAt: now, EnvironmentID: envRow.ID, T3ProjectID: "t3-proj",
-			PromptTemplate: "评审 {{repo}} #{{pr_number}}",
-			RuntimeMode:    "full-access", TimeoutSeconds: 3600,
-		}
-		if err := e.db.Create(rule).Error; err != nil {
-			t.Fatalf("rule: %v", err)
-		}
-		ruleTrigger := &model.AutomationTrigger{
-			ID: uuid.NewString(), AutomationID: rule.ID,
-			TriggerType:         trigger,
-			ModelSelectionsJSON: string(selsJSON),
-			DebounceSeconds:     0,
-			CreatedAt:           now, UpdatedAt: now,
-		}
-		if err := e.db.Create(ruleTrigger).Error; err != nil {
-			t.Fatalf("rule trigger: %v", err)
-		}
 	}
 }
 
@@ -222,12 +139,11 @@ func prWebhookPayload(action, repo string, number int, sha string) []byte {
 	}`, action, number, repo, number, sha, repo, repo, repo, owner, name))
 }
 
-// countRunsWhere 统计满足条件的运行行数。
-func countRunsWhere(t *testing.T, db *gorm.DB, query string, args ...any) int64 {
+func (e *webhookHandlerEnv) deliveryCount(t *testing.T, delivery string) int64 {
 	t.Helper()
 	var n int64
-	if err := db.Model(&model.AutomationRun{}).Where(query, args...).Count(&n).Error; err != nil {
-		t.Fatalf("count runs: %v", err)
+	if err := e.db.Model(&model.GitHubWebhookDelivery{}).Where("delivery_id = ?", delivery).Count(&n).Error; err != nil {
+		t.Fatalf("count deliveries: %v", err)
 	}
 	return n
 }
@@ -348,355 +264,25 @@ func TestWebhookHandler_SignatureEnforcement(t *testing.T) {
 	}
 }
 
-// TestWebhookHandler_OpenRoundEndToEnd debounce=0 的规则在请求事务里开轮，
-// 运行按部署身份（app_user_id=”）落库。
-func TestWebhookHandler_OpenRoundEndToEnd(t *testing.T) {
+// TestWebhookHandler_DeliveryIdempotent 同一 delivery_id 重复投递：两次都 202，
+// 但只记一行，不重复处理。
+func TestWebhookHandler_DeliveryIdempotent(t *testing.T) {
 	env := setupWebhookHandlerEnv(t, "whsec")
+	body := prWebhookPayload("opened", "octocat/hw", 1, "s1")
 
-	// 用户 + 关联项目 + 规则（debounce=0，双模型）。
-	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
-	if err := env.db.Create(user).Error; err != nil {
-		t.Fatalf("user: %v", err)
-	}
-	project := &model.Project{ID: uuid.NewString(), UserID: user.ID, Name: "p", GithubOwner: "octocat", GithubRepo: "hw", PublicGitHubTokenID: "tok-pr-review", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	if err := env.db.Create(project).Error; err != nil {
-		t.Fatalf("project: %v", err)
-	}
-	now := time.Now().UTC()
-	envRow := &model.T3Environment{ID: uuid.NewString(), UserID: user.ID, Name: "env", Address: "https://t3.example.com", BearerTokenEncrypted: []byte("x"), BearerExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now}
-	if err := env.db.Create(envRow).Error; err != nil {
-		t.Fatalf("env: %v", err)
-	}
-	selsJSON, _ := json.Marshal([]map[string]string{
-		{"instance_id": "inst-a", "model": "claude"},
-		{"instance_id": "inst-b", "model": "glm"},
-	})
-	rule := &model.Automation{
-		ID: uuid.NewString(), UserID: user.ID, Name: "PR 评审", Enabled: true,
-		CreatedAt: now, UpdatedAt: now, EnvironmentID: envRow.ID, T3ProjectID: "t3-proj",
-		PromptTemplate: "评审 {{repo}} #{{pr_number}} @ {{head_sha}} {{pr_title}} {{pr_url}}",
-		RuntimeMode:    "full-access", TimeoutSeconds: 3600,
-	}
-	if err := env.db.Create(rule).Error; err != nil {
-		t.Fatalf("rule: %v", err)
-	}
-	ruleTrigger := &model.AutomationTrigger{
-		ID: uuid.NewString(), AutomationID: rule.ID,
-		TriggerType:         model.AutomationTriggerGitHubPROpened,
-		ModelSelectionsJSON: string(selsJSON),
-		DebounceSeconds:     0,
-		CreatedAt:           now, UpdatedAt: now,
-	}
-	if err := env.db.Create(ruleTrigger).Error; err != nil {
-		t.Fatalf("rule trigger: %v", err)
-	}
-
-	payload := []byte(`{"action":"opened","number":1,"pull_request":{"draft":false,"title":"T","head":{"sha":"s1","ref":"f","repo":{"fork":false,"full_name":"octocat/hw"}},"base":{"ref":"main","repo":{"full_name":"octocat/hw"}}},"repository":{"full_name":"octocat/hw","owner":{"login":"octocat"},"name":"hw"},"installation":{"id":7}}`)
-	w := env.postWebhook(t, "d-e2e", "pull_request", payload, githubapp.SignSignature("whsec", payload))
+	w := env.postWebhook(t, "d-idem", "pull_request", body, githubapp.SignSignature("whsec", body))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("code = %d, want 202; body=%s", w.Code, w.Body.String())
 	}
+	if n := env.deliveryCount(t, "d-idem"); n != 1 {
+		t.Fatalf("deliveries = %d, want 1", n)
+	}
 
-	var runs []model.AutomationRun
-	if err := env.db.Where("repo_full_name = ?", "octocat/hw").Find(&runs).Error; err != nil {
-		t.Fatalf("runs: %v", err)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("runs = %d, want 2", len(runs))
-	}
-	// 部署级身份：开轮恒为空串。
-	for _, run := range runs {
-		if run.AppUserID != "" {
-			t.Fatalf("run app_user_id = %q, want ''", run.AppUserID)
-		}
-	}
-	// 幂等：同 delivery 再投不重复开轮。
-	w = env.postWebhook(t, "d-e2e", "pull_request", payload, githubapp.SignSignature("whsec", payload))
+	w = env.postWebhook(t, "d-idem", "pull_request", body, githubapp.SignSignature("whsec", body))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("dup code = %d, want 202", w.Code)
 	}
-	var n int64
-	env.db.Model(&model.AutomationRun{}).Where("repo_full_name = ?", "octocat/hw").Count(&n)
-	if n != 2 {
-		t.Fatalf("runs after dup = %d, want 2", n)
-	}
-
-	pr, err := env.fake.GetPullRequest(context.Background(), 7, "octocat/hw", 1)
-	if err != nil {
-		t.Fatalf("fake PR not seeded from webhook: %v", err)
-	}
-	if pr.HeadSHA != "s1" || pr.Title != "T" {
-		t.Fatalf("fake PR = %+v, want title=T sha=s1", pr)
-	}
-}
-
-// seedPRRunWithToken 造一个进行中的 PR 运行并存明文令牌（返回令牌）。
-func (e *webhookHandlerEnv) seedPRRunWithToken(t *testing.T, userID string, triggerType model.AutomationTriggerType, status model.AutomationRunStatus) (string, *model.AutomationRun) {
-	t.Helper()
-	now := time.Now().UTC()
-	// 运行行有 automation_id 外键，规则又有 environment 外键：逐一落真行。
-	envRow := &model.T3Environment{
-		ID: uuid.NewString(), UserID: userID, Name: "env-" + uuid.NewString()[:8],
-		Address: "https://t3.example.com", BearerTokenEncrypted: []byte("x"),
-		BearerExpiresAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
-	}
-	if err := e.db.Create(envRow).Error; err != nil {
-		t.Fatalf("seed env: %v", err)
-	}
-	hostRule := &model.Automation{
-		ID: uuid.NewString(), UserID: userID, Name: "host", Enabled: true,
-		CreatedAt: now, UpdatedAt: now, EnvironmentID: envRow.ID, T3ProjectID: "p",
-		PromptTemplate: "x", RuntimeMode: "full-access", TimeoutSeconds: 3600,
-	}
-	if err := e.db.Create(hostRule).Error; err != nil {
-		t.Fatalf("seed rule: %v", err)
-	}
-	hostTrigger := &model.AutomationTrigger{
-		ID: uuid.NewString(), AutomationID: hostRule.ID,
-		TriggerType: triggerType, CreatedAt: now, UpdatedAt: now,
-	}
-	if err := e.db.Create(hostTrigger).Error; err != nil {
-		t.Fatalf("seed trigger: %v", err)
-	}
-	run := &model.AutomationRun{
-		ID: uuid.NewString(), UserID: userID, AutomationID: hostRule.ID,
-		TriggerID:   hostTrigger.ID,
-		TriggerType: triggerType, TriggerKey: "pr:octocat/hw:1:s1:inst-a:claude",
-		TriggerContextJSON: "{}", TriggeredAt: now,
-		ConfigSnapshotJSON: "{}",
-		EnvironmentID:      envRow.ID, T3ProjectID: "p", ThreadID: uuid.NewString(),
-		LaunchCommandID: uuid.NewString(), InitialMessageID: uuid.NewString(),
-		Status: status, DeadlineAt: now.Add(time.Hour),
-		RepoFullName: "octocat/hw", PRNumber: 1, HeadSHA: "s1", RoundNumber: 1,
-		InstallationID: 7, ModelInstanceID: "inst-a", ModelName: "claude",
-	}
-	if err := e.db.Create(run).Error; err != nil {
-		t.Fatalf("seed run: %v", err)
-	}
-	token := "fsr_" + uuid.NewString()
-	sum := sha256.Sum256([]byte(token))
-	if err := e.db.Create(&model.AutomationRunToken{
-		RunID: run.ID, TokenHash: hex.EncodeToString(sum[:]),
-		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
-	}).Error; err != nil {
-		t.Fatalf("seed token: %v", err)
-	}
-	return token, run
-}
-
-func (e *webhookHandlerEnv) getWithToken(path, token string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	w := httptest.NewRecorder()
-	e.router.ServeHTTP(w, req)
-	return w
-}
-
-func (e *webhookHandlerEnv) postJSONWithToken(path, token string, body []byte) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	e.router.ServeHTTP(w, req)
-	return w
-}
-
-// TestAgentPR_TokenLifecycle 进行中的 PR 运行可读元数据/diff；结束后令牌 40106；
-// fsk_ API Key 40304；非 PR 运行 40920。
-func TestAgentPR_TokenLifecycle(t *testing.T) {
-	env := setupWebhookHandlerEnv(t, "whsec")
-	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
-	if err := env.db.Create(user).Error; err != nil {
-		t.Fatalf("user: %v", err)
-	}
-	env.fake.SetPR("octocat/hw", 1, &githubapi.PullRequest{Title: "T", HTMLURL: "https://github.com/octocat/hw/pull/1", HeadSHA: "s1"})
-
-	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
-
-	// 进行中：读取 OK。
-	w := env.getWithToken("/api/automation-agent/pull-request", token)
-	if w.Code != http.StatusOK {
-		t.Fatalf("get PR code = %d, want 200; body=%s", w.Code, w.Body.String())
-	}
-	var detail struct {
-		Data struct {
-			RepoFullName string `json:"repo_full_name"`
-			HeadSha      string `json:"head_sha"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil || detail.Data.RepoFullName != "octocat/hw" || detail.Data.HeadSha != "s1" {
-		t.Fatalf("detail = %s (err=%v)", w.Body.String(), err)
-	}
-	w = env.getWithToken("/api/automation-agent/pull-request/diff", token)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "diff --git") {
-		t.Fatalf("diff = %d %s", w.Code, w.Body.String())
-	}
-
-	// fsk_ API Key 明确 40304。
-	req := httptest.NewRequest(http.MethodGet, "/api/automation-agent/pull-request", nil)
-	req.Header.Set("Authorization", "Bearer fsk_dummy")
-	w = httptest.NewRecorder()
-	env.router.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "40304") {
-		t.Fatalf("fsk_ = %d %s, want 403/40304", w.Code, w.Body.String())
-	}
-
-	// 结束回报消费令牌（等价于 finished 被受理）：之后一切 PR 端点 40106。
-	if err := env.db.Model(&model.AutomationRunToken{}).Where("run_id = ?", run.ID).
-		Update("consumed_at", time.Now().UTC()).Error; err != nil {
-		t.Fatalf("consume: %v", err)
-	}
-	w = env.getWithToken("/api/automation-agent/pull-request", token)
-	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "40106") {
-		t.Fatalf("after finish = %d %s, want 401/40106", w.Code, w.Body.String())
-	}
-}
-
-// TestAgentPR_NonPRRunRejected cron 运行的令牌访问 PR 端点 → 40920。
-func TestAgentPR_NonPRRunRejected(t *testing.T) {
-	env := setupWebhookHandlerEnv(t, "whsec")
-	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
-	if err := env.db.Create(user).Error; err != nil {
-		t.Fatalf("user: %v", err)
-	}
-	token, _ := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerCron, model.AutomationRunDispatched)
-
-	w := env.getWithToken("/api/automation-agent/pull-request", token)
-	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "40920") {
-		t.Fatalf("non-PR run = %d %s, want 409/40920", w.Code, w.Body.String())
-	}
-}
-
-func (e *webhookHandlerEnv) seedCheckForRun(t *testing.T, run *model.AutomationRun) int64 {
-	t.Helper()
-	checkID, err := e.fake.CreateCheckRun(context.Background(), run.InstallationID, run.RepoFullName, "Fast Ship review (claude)", run.HeadSHA, run.ID)
-	if err != nil {
-		t.Fatalf("create check: %v", err)
-	}
-	if err := e.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).Update("check_run_id", checkID).Error; err != nil {
-		t.Fatalf("bind check: %v", err)
-	}
-	return checkID
-}
-
-// TestAgentPR_UpdateCheckRejectsCancelledRun 取消后即使令牌未消费也不再把 check
-// 打回 in_progress。
-func TestAgentPR_UpdateCheckRejectsCancelledRun(t *testing.T) {
-	env := setupWebhookHandlerEnv(t, "whsec")
-	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
-	if err := env.db.Create(user).Error; err != nil {
-		t.Fatalf("user: %v", err)
-	}
-	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
-	env.seedCheckForRun(t, run)
-
-	w := env.postJSONWithToken("/api/automation-agent/pull-request/check", token, []byte(`{"title":"评审中","summary":"s"}`))
-	if w.Code != http.StatusOK {
-		t.Fatalf("live check = %d %s", w.Code, w.Body.String())
-	}
-	before := env.fake.CallCounts()["UpdateCheckRun"]
-
-	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
-		Updates(map[string]any{
-			"status":      model.AutomationRunCancelled,
-			"finished_at": time.Now().UTC(),
-			"error_code":  "superseded",
-		}).Error; err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
-	w = env.postJSONWithToken("/api/automation-agent/pull-request/check", token, []byte(`{"title":"仍在写","summary":"s"}`))
-	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "40106") {
-		t.Fatalf("cancelled check = %d %s, want 401/40106", w.Code, w.Body.String())
-	}
-	if after := env.fake.CallCounts()["UpdateCheckRun"]; after != before {
-		t.Fatalf("UpdateCheckRun after cancel = %d, want %d", after, before)
-	}
-}
-
-type cancelAfterCheckUpdate struct {
-	githubapi.GitHubClient
-	after func()
-}
-
-func (c *cancelAfterCheckUpdate) UpdateCheckRun(ctx context.Context, installationID int64, repoFullName string, checkRunID int64, in githubapi.CheckUpdate) error {
-	err := c.GitHubClient.UpdateCheckRun(ctx, installationID, repoFullName, checkRunID, in)
-	if c.after != nil {
-		c.after()
-	}
-	return err
-}
-
-// TestAgentPR_UpdateCheckMarksPendingIfCancelledDuringWrite PATCH 之后才变成终态
-// 时置 sync_pending，让同步覆盖 in_progress。
-func TestAgentPR_UpdateCheckMarksPendingIfCancelledDuringWrite(t *testing.T) {
-	env := setupWebhookHandlerEnv(t, "whsec")
-	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
-	if err := env.db.Create(user).Error; err != nil {
-		t.Fatalf("user: %v", err)
-	}
-	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
-	env.seedCheckForRun(t, run)
-	now := time.Now().UTC()
-	if err := env.db.Create(&model.GitHubPRReview{
-		RepoFullName: run.RepoFullName, PRNumber: run.PRNumber, InstallationID: run.InstallationID,
-		RoundNumber: 1, HeadSHA: run.HeadSHA, SyncPending: false, UpdatedAt: now,
-	}).Error; err != nil {
-		t.Fatalf("review: %v", err)
-	}
-
-	env.agent.SetPRGitHub(githubapp.StaticClients{Client: &cancelAfterCheckUpdate{
-		GitHubClient: env.fake,
-		after: func() {
-			_ = env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
-				Updates(map[string]any{
-					"status":      model.AutomationRunCancelled,
-					"finished_at": time.Now().UTC(),
-					"error_code":  "superseded",
-				}).Error
-		},
-	}})
-
-	w := env.postJSONWithToken("/api/automation-agent/pull-request/check", token, []byte(`{"title":"评审中","summary":"s"}`))
-	if w.Code != http.StatusOK {
-		t.Fatalf("check = %d %s", w.Code, w.Body.String())
-	}
-	var rev model.GitHubPRReview
-	if err := env.db.Where("repo_full_name = ? AND pr_number = ?", run.RepoFullName, run.PRNumber).First(&rev).Error; err != nil {
-		t.Fatalf("reload review: %v", err)
-	}
-	if !rev.SyncPending {
-		t.Fatal("expected sync_pending after cancel-during-write")
-	}
-}
-
-// TestAgentPR_SubmitReviewRejectsCancelledRun 取消后不再提交 superseded SHA 的 review。
-func TestAgentPR_SubmitReviewRejectsCancelledRun(t *testing.T) {
-	env := setupWebhookHandlerEnv(t, "whsec")
-	user := &model.User{ID: uuid.NewString(), Username: "u-" + uuid.NewString()[:8], Email: uuid.NewString()[:8] + "@t", PasswordHash: "x"}
-	if err := env.db.Create(user).Error; err != nil {
-		t.Fatalf("user: %v", err)
-	}
-	token, run := env.seedPRRunWithToken(t, user.ID, model.AutomationTriggerGitHubPROpened, model.AutomationRunDispatched)
-
-	w := env.postJSONWithToken("/api/automation-agent/pull-request/review", token, []byte(`{"event":"COMMENT","body":"ok"}`))
-	if w.Code != http.StatusOK {
-		t.Fatalf("live review = %d %s", w.Code, w.Body.String())
-	}
-	before := env.fake.CallCounts()["SubmitReview"]
-
-	if err := env.db.Model(&model.AutomationRun{}).Where("id = ?", run.ID).
-		Updates(map[string]any{
-			"status":      model.AutomationRunCancelled,
-			"finished_at": time.Now().UTC(),
-			"error_code":  "superseded",
-		}).Error; err != nil {
-		t.Fatalf("cancel: %v", err)
-	}
-	w = env.postJSONWithToken("/api/automation-agent/pull-request/review", token, []byte(`{"event":"REQUEST_CHANGES","body":"stale"}`))
-	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), "40106") {
-		t.Fatalf("cancelled review = %d %s, want 401/40106", w.Code, w.Body.String())
-	}
-	if after := env.fake.CallCounts()["SubmitReview"]; after != before {
-		t.Fatalf("SubmitReview after cancel = %d, want %d", after, before)
+	if n := env.deliveryCount(t, "d-idem"); n != 1 {
+		t.Fatalf("deliveries after dup = %d, want 1", n)
 	}
 }

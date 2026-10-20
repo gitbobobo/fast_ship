@@ -7,7 +7,6 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/storage"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
-	"gorm.io/gorm"
 	"regexp"
 	"time"
 )
@@ -48,22 +47,6 @@ type IssueService struct {
 	// newPRClient 构造关联 PR 读取客户端（attach/sync）；测试注入替身的缝。
 	newPRClient func(token string) githubapi.GitHubClient
 	mirror      *issueMirror
-	eventSink   IssueEventSink
-}
-
-// SetIssueEventSink 注入自动化事件出口（INT-90，由 main 装配；测试可不注入）。
-// 事件在调用方事务内匹配并预写运行行：事务回滚则触发一并消失。
-func (s *IssueService) SetIssueEventSink(sink IssueEventSink) {
-	s.eventSink = sink
-	s.mirror.eventSink = sink
-}
-
-// emitIssueEventTx 出口未装配时为 no-op。
-func (s *IssueService) emitIssueEventTx(tx *gorm.DB, event IssueEvent) error {
-	if s.eventSink == nil {
-		return nil
-	}
-	return s.eventSink.EnqueueIssueEventTx(tx, event)
 }
 
 type IssueListFilters struct {

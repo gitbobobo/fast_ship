@@ -16,18 +16,17 @@ import (
 // Record 是 self_logs 表的行模型。时间存 UnixNano 整数：RFC3339 文本的
 // 变长小数秒破坏字典序，无法做 (time, id) 键集分页。
 type Record struct {
-	ID           int64  `gorm:"primaryKey;autoIncrement"`
-	TimeUnix     int64  `gorm:"not null;index:idx_self_logs_time_id,priority:1"`
-	Level        string `gorm:"type:text;not null;index"`
-	Module       string `gorm:"type:text;not null;default:'';index"`
-	Message      string `gorm:"type:text;not null"`
-	RequestID    string `gorm:"type:text;not null;default:'';index"`
-	UserID       string `gorm:"type:text;not null;default:'';index"`
-	ProjectID    string `gorm:"type:text;not null;default:''"`
-	IssueID      string `gorm:"type:text;not null;default:''"`
-	AutomationID string `gorm:"type:text;not null;default:'';index"`
-	RunID        string `gorm:"type:text;not null;default:'';index"`
-	ThreadID     string `gorm:"type:text;not null;default:''"`
+	ID        int64  `gorm:"primaryKey;autoIncrement"`
+	TimeUnix  int64  `gorm:"not null;index:idx_self_logs_time_id,priority:1"`
+	Level     string `gorm:"type:text;not null;index"`
+	Module    string `gorm:"type:text;not null;default:'';index"`
+	Message   string `gorm:"type:text;not null"`
+	RequestID string `gorm:"type:text;not null;default:'';index"`
+	UserID    string `gorm:"type:text;not null;default:'';index"`
+	ProjectID string `gorm:"type:text;not null;default:''"`
+	IssueID   string `gorm:"type:text;not null;default:''"`
+	RunID     string `gorm:"type:text;not null;default:'';index"`
+	ThreadID  string `gorm:"type:text;not null;default:''"`
 	// SystemScope 1=显式系统行（无归属且无业务关联列）。默认 0；存量空归属行不回填。
 	SystemScope int `gorm:"column:system_scope;not null;default:0"`
 	// Extra 指针语义：nil 存 NULL，供 json_extract 直接跳过（空串不是合法 JSON）。
@@ -81,17 +80,16 @@ func (s *Store) Add(ctx context.Context, entries []Entry) error {
 	for i, e := range entries {
 		// Extra 留 nil 而非空串：json_extract 对空串报 malformed JSON。
 		rec := Record{
-			TimeUnix:     e.Time.UnixNano(),
-			Level:        e.Level,
-			Module:       e.Module,
-			Message:      e.Message,
-			RequestID:    e.RequestID,
-			UserID:       e.UserID,
-			ProjectID:    e.ProjectID,
-			IssueID:      e.IssueID,
-			AutomationID: e.AutomationID,
-			RunID:        e.RunID,
-			ThreadID:     e.ThreadID,
+			TimeUnix:  e.Time.UnixNano(),
+			Level:     e.Level,
+			Module:    e.Module,
+			Message:   e.Message,
+			RequestID: e.RequestID,
+			UserID:    e.UserID,
+			ProjectID: e.ProjectID,
+			IssueID:   e.IssueID,
+			RunID:     e.RunID,
+			ThreadID:  e.ThreadID,
 		}
 		// 带 user_id 或任一关联列时拒绝系统行：误标不得把业务日志公开给所有认证用户。
 		if e.SystemScope && e.allowsSystemScope() {

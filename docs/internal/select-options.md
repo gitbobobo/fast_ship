@@ -44,4 +44,5 @@ Base UI 的 `Select` 在收起态由 `Select.Value` 渲染当前值：它先找�
   处理；其他动态表达式静态无法求证，默认信任。已知边界：数据层的
   `{value: ""}` 选项数组 lint 无法覆盖，靠本约定 + 评审把关。
 - `src/components/ui/option-select.test.tsx` 断言收起态渲染 label 而非
-  value；页面级回归见 `src/routes/__tests__/automations-page.test.tsx`。
+  value；页面级回归见 `src/routes/__tests__/reviews-page.test.tsx`
+  （审查组合行的环境 `OptionSelect`）。

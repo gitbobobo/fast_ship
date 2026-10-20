@@ -284,8 +284,6 @@ func (h *pipelineHandler) Handle(ctx context.Context, r slog.Record) error {
 			entry.ProjectID = sanitizeString(asString(value))
 		case AttrIssueID:
 			entry.IssueID = sanitizeString(asString(value))
-		case AttrAutomationID:
-			entry.AutomationID = sanitizeString(asString(value))
 		case AttrRunID:
 			entry.RunID = sanitizeString(asString(value))
 		case AttrThreadID:

@@ -59,8 +59,8 @@ describe("App routing defaults", () => {
     );
   });
 
-  it("registers the automations route", async () => {
-    browserEntries.splice(0, browserEntries.length, "/automations");
+  it("registers the reviews route", async () => {
+    browserEntries.splice(0, browserEntries.length, "/reviews");
 
     render(<App />);
 
