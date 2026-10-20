@@ -212,17 +212,6 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	return tx.Save(debounce).Error
 }
 
-// splitRepoName "owner/name" → 两段；不合法返回空串。
-func splitRepoName(full string) (string, string) {
-	owner, name, ok := strings.Cut(full, "/")
-	if !ok {
-		return "", ""
-	}
-	return owner, name
-}
-
-func equalFoldStr(a, b string) bool { return strings.EqualFold(a, b) }
-
 // reviewTriggerableAction 只有这四种 action 会进入判定。
 func reviewTriggerableAction(action string) bool {
 	switch action {

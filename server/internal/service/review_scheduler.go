@@ -152,13 +152,14 @@ func (s *ReviewService) consumeDebounce(row *model.ReviewDebounce, now time.Time
 		if err := tx.Where("project_id = ?", row.ProjectID).First(&settings).Error; err != nil {
 			return err
 		}
-		// 复核：仍启用、动作仍勾选、仓库（代码仓库，未单独配置即公开仓库）
-		// 仍归属该项目。
+		// 复核：仍启用、动作仍勾选、仓库（enabled 设置行的 repo_full_name 快照，
+		// 与 webhook 反查、syncOnePR 准入复核同口径）仍是该防抖行对应的仓库。
+		// 两个键写库时都是小写，直接等值比较；不回读项目行的 live 仓库字段——
+		// 快照是本项目审查仓库的唯一真相。
 		if !settings.Enabled || !reviewTriggerEnabled(&settings, row.Action) {
 			return nil
 		}
-		owner, _ := splitRepoName(row.RepoFullName)
-		if owner == "" || !equalFoldStr(project.CodeRepoFullName(), row.RepoFullName) {
+		if settings.RepoFullName != row.RepoFullName {
 			return nil
 		}
 		_, err := s.openRoundTx(tx, &project, &settings,

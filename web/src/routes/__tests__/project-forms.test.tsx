@@ -313,6 +313,32 @@ describe("ProjectAndVersionForms", () => {
     ).toBeNull();
   });
 
+  it("edit form sends unparseable code repository to the server instead of dropping it", async () => {
+    const user = userEvent.setup();
+
+    renderWithRoute(
+      <ProjectFormDialog
+        open={true}
+        onOpenChange={vi.fn()}
+        mode="edit"
+        projectId="proj-1"
+      />,
+      { path: "/projects", initialEntry: "/projects" },
+    );
+
+    // 宽松解析会得到空 owner/repo：不能当成「未改动」而省略 key（否则服务端
+    // 的格式校验被绕过，输入被静默丢弃），必须原样发出去交给服务端报 40001。
+    const input = screen.getByLabelText("代码仓库（可选，默认同公开仓库）");
+    await user.clear(input);
+    await user.type(input, "https://github.com/");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(updateProjectMutateAsync).toHaveBeenCalled());
+    expect(
+      updateProjectMutateAsync.mock.calls[0][0].code_repository_url,
+    ).toBe("https://github.com/");
+  });
+
   it("edit form leaves code repository out of payload when untouched", async () => {
     const user = userEvent.setup();
 

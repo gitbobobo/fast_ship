@@ -118,8 +118,9 @@ seen SHA、取消旧轮全部失效）。
 单进程一个循环（10s tick + 缓冲 1 的 kick），每 tick 顺序：
 
 1. **到期防抖**：查 `fire_at<=now` 的防抖行，逐行短事务条件删除后复核——
-   项目仍启用、审查仓库（`CodeRepo()`，未单独配置即公开仓库）仍与防抖行
-   `repo_full_name` 一致、触发条件仍勾选——成立才开一轮；顺带清理
+   项目仍启用、`project_review_settings.repo_full_name` 快照仍与防抖行
+   `repo_full_name` 一致（与 webhook 反查、同步准入同口径，不回读项目行
+   live 仓库字段）、触发条件仍勾选——成立才开一轮；顺带清理
    超龄 delivery 幂等账（保留 7 天）。
 2. **派发认领**：`dispatched` 且未确认建线程、**且从未签发过运行令牌**的
    运行，在认领后超过 5 分钟仍 `dispatched_at IS NULL` 时允许重新认领——

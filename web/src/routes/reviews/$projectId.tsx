@@ -74,8 +74,7 @@ export default function ReviewProjectPage() {
       </Link>
       <span className="shrink-0 text-muted-foreground">/</span>
       <span className="truncate">
-        {project?.name ??
-          (project ? `${project.github_owner}/${project.github_repo}` : projectId)}
+        {project?.name || settings?.repo_full_name || projectId}
       </span>
     </span>
   );

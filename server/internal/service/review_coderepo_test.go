@@ -462,3 +462,29 @@ func TestSyncPendingPRsUsesSnapshotNotLiveCodeRepo(t *testing.T) {
 		t.Fatal("快照匹配的账本行应产生 GitHub 调用")
 	}
 }
+
+// 防抖到期复核只信设置行快照：项目 live 代码仓库被改走（快照仍是本仓库）时，
+// 快照仓库的防抖行照常开轮（回读 live CodeRepo 的变体会把这一轮丢掉）。
+func TestReviewDebounceConsumeUsesSnapshotNotLiveCodeRepo(t *testing.T) {
+	e := newCodeRepoEnv(t)
+	divergeLiveCodeRepo(t, e.svc.db, e.project.ID)
+	now := time.Now().UTC()
+	if err := e.svc.db.Create(&model.ReviewDebounce{
+		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 22,
+		HeadSHA: "sha-snap", Action: "synchronize", InstallationID: 42,
+		FireAt: now.Add(-time.Second), UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed debounce: %v", err)
+	}
+
+	e.review.processDueDebounces(now)
+
+	var runs []model.ReviewRun
+	if err := e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = 22",
+		e.project.ID, e.codeRepo).Find(&runs).Error; err != nil {
+		t.Fatalf("runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("快照仓库的防抖行应开一轮, runs = %d", len(runs))
+	}
+}

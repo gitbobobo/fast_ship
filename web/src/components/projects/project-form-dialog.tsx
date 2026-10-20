@@ -205,17 +205,27 @@ export function ProjectFormDialog({
           payload.description = data.description;
         }
         if (data.repository_url) payload.repository_url = data.repository_url;
-        // 代码仓库同 Token 引用走三态：与现值等价（按解析出的 owner/repo
-        // 大小写不敏感比较）则不携带 key，清空传 null 回落公开仓库。
+        // 代码仓库同 Token 引用走三态：与现值等价则不携带 key，清空传 null
+        // 回落公开仓库。等价判定只认解析出非空 owner/repo 的输入——parseRepoUrl
+        // 很宽松（"https://github.com/" 也是空 owner/repo），拿它跟空的现值比较
+        // 会把非法输入判成「未改动」而静默丢弃；这类输入一律原样发出去交给
+        // 服务端校验（40001），失败语义与公开仓库链接一致。
         if (project && data.code_repository_url !== undefined) {
-          const next = parseRepoUrl(data.code_repository_url || "");
+          const raw = (data.code_repository_url || "").trim();
+          const current =
+            (project.code_github_owner || "") +
+            "/" +
+            (project.code_github_repo || "");
+          const next = parseRepoUrl(raw);
+          const parsed = next.owner !== "" && next.repo !== "";
           const unchanged =
-            (project.code_github_owner || "").toLowerCase() ===
-              next.owner.toLowerCase() &&
-            (project.code_github_repo || "").toLowerCase() ===
-              next.repo.toLowerCase();
+            raw === ""
+              ? current === "/" // 输入空、当前也没配（"owner/repo" 为 "/"）= 未改动
+              : parsed &&
+                current.toLowerCase() ===
+                  (next.owner + "/" + next.repo).toLowerCase();
           if (!unchanged) {
-            payload.code_repository_url = data.code_repository_url || null;
+            payload.code_repository_url = raw || null;
           }
         }
         if (project && data.public_github_token_id !== undefined) {
