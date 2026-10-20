@@ -7425,6 +7425,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | `items[].pr_title` | string | 是 |  |
 | `items[].pr_url` | string | 是 |  |
 | `items[].head_sha` | string | 是 |  |
+| `items[].can_rerun` | boolean | 是 | 该记录是否属于项目当前仓库；跨仓库的历史记录只能查看，不能重跑。 |
 | `items[].code_status` | string（可空） | 否 |  |
 | `items[].visual_status` | string（可空） | 否 |  |
 | `items[].updated_at` | string | 是 |  |
@@ -7505,6 +7506,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `pr_number` | integer（≥1） | 是 |  |
+| `repo_full_name` | string | 否 | 记录所属仓库（审查记录里回传）。项目仓库改过之后，历史记录会属于 旧仓库；带上它可避免把同号的无关 PR 当成本项目的 PR 重跑。 与项目当前仓库不一致时返回 400。 |
 
 **成功响应**
 

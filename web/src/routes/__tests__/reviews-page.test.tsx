@@ -149,6 +149,7 @@ const prRecord: ReviewPullRequestRecord = {
   code_status: "failure",
   visual_status: null,
   updated_at: "2026-10-20T00:00:00Z",
+  can_rerun: true,
   rounds: [
     {
       round_number: 1,
@@ -508,6 +509,17 @@ describe("ReviewProjectPage 审查记录", () => {
     expect(threadLinks[1]).toHaveAttribute("href", "/threads/env-1/th-2");
   });
 
+  it("历史仓库的记录禁用重新审查", async () => {
+    vi.mocked(useReviewRecords).mockReturnValue({
+      data: [{ ...prRecord, repo_full_name: "acme/old", can_rerun: false }],
+      isLoading: false,
+    } as unknown as ReturnType<typeof useReviewRecords>);
+    renderDetail("/reviews/p1?tab=records");
+
+    const button = await screen.findByRole("button", { name: "重新审查 PR #12" });
+    expect(button).toBeDisabled();
+  });
+
   it("点「重新审查」调用 rerun API 并 toast", async () => {
     const user = userEvent.setup();
     renderDetail("/reviews/p1?tab=records");
@@ -516,7 +528,9 @@ describe("ReviewProjectPage 审查记录", () => {
       screen.getByRole("button", { name: "重新审查 PR #12" }),
     );
 
-    await waitFor(() => expect(rerun).toHaveBeenCalledWith(12));
+    await waitFor(() =>
+      expect(rerun).toHaveBeenCalledWith({ prNumber: 12, repoFullName: "acme/alpha" }),
+    );
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith(
         expect.stringContaining("第 2 轮"),

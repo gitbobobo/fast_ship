@@ -595,13 +595,19 @@ func validatePrior(prior []api.ReviewPriorDecision) error {
 
 // RerunReview POST /api/projects/:id/reviews/rerun：用 App 令牌取实时 head，
 // 旧 SHA 未终态运行全部取消，恒开新轮（manual）。
-func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID string, prNumber int) (*RerunReviewResult, error) {
+func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID string, prNumber int, repoFullName string) (*RerunReviewResult, error) {
 	project, err := s.ownedProject(userID, projectID)
 	if err != nil {
 		return nil, err
 	}
 	if prNumber < 1 {
 		return nil, errs.ErrInvalidParams
+	}
+	// 记录所属仓库是历史仓库时不重跑：项目当前的 GitHub 字段才是取 PR 的依据，
+	// 同号的无关 PR 不能被当成本项目的 PR。
+	if repoFullName != "" && !strings.EqualFold(repoFullName, project.GithubOwner+"/"+project.GithubRepo) {
+		return nil, errs.New(errs.ErrInvalidParams.Code,
+			"该审查记录属于历史仓库，项目仓库已变更，不能重跑")
 	}
 	var settings model.ProjectReviewSettings
 	if err := s.db.WithContext(ctx).Where("project_id = ? AND enabled", projectID).First(&settings).Error; err != nil {

@@ -8,6 +8,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // 升级后旧自动化的通知 kind 已不合法，迁移要把这些行清掉（表本身保留）。
@@ -111,5 +112,44 @@ func TestReviewTablesNeedRebuildDetectsLegacySchema(t *testing.T) {
 	}
 	if exists {
 		t.Fatal("旧结构表应被删除，等待 AutoMigrate 重建")
+	}
+}
+
+// 并发下载同一截图源时只能留一行：唯一索引 (repo,pr,head,source_url) + 冲突目标。
+func TestReviewAssetsUniquePerSource(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.AutoMigrate(&model.ReviewAsset{}); err != nil {
+		t.Fatalf("migrate assets: %v", err)
+	}
+	createBootIndexes(db)
+	now := time.Now().UTC()
+	insert := func(id string) {
+		asset := &model.ReviewAsset{
+			ID: id, RepoFullName: "o/r", PRNumber: 1, HeadSHA: "sha",
+			Position: 0, Label: "截图 1", SourceURL: "https://example.com/a.png",
+			CreatedAt: now,
+		}
+		err := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "repo_full_name"}, {Name: "pr_number"},
+				{Name: "head_sha"}, {Name: "source_url"},
+			},
+			DoNothing: true,
+		}).Create(asset).Error
+		if err != nil {
+			t.Fatalf("insert %s: %v", id, err)
+		}
+	}
+	insert("a1")
+	insert("a2")
+	var n int64
+	if err := db.Model(&model.ReviewAsset{}).Count(&n).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("assets = %d, want 1（同一源地址只留一行）", n)
 	}
 }

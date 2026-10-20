@@ -208,14 +208,16 @@ func (ReviewPullRequest) TableName() string { return "review_pull_requests" }
 // ReviewAsset 视觉审查用的截图（从 PR 描述里的图片链接下载后本地保存，
 // 私有仓库的 user-attachments 走 App 令牌取）。
 type ReviewAsset struct {
-	ID           string `gorm:"type:text;primaryKey" json:"id"`
-	RepoFullName string `gorm:"column:repo_full_name;type:text;not null" json:"repo_full_name"`
-	PRNumber     int    `gorm:"column:pr_number;not null" json:"pr_number"`
-	HeadSHA      string `gorm:"column:head_sha;type:text;not null" json:"head_sha"`
+	ID string `gorm:"type:text;primaryKey" json:"id"`
+	// 同一 (repo, pr, head, 源地址) 只允许一行：并发视觉运行时两个 Agent
+	// 都会先读到空列表，随机 id 不会撞，必须靠唯一索引兜住重复。
+	RepoFullName string `gorm:"column:repo_full_name;type:text;not null;uniqueIndex:idx_review_assets_source,priority:1" json:"repo_full_name"`
+	PRNumber     int    `gorm:"column:pr_number;not null;uniqueIndex:idx_review_assets_source,priority:2" json:"pr_number"`
+	HeadSHA      string `gorm:"column:head_sha;type:text;not null;uniqueIndex:idx_review_assets_source,priority:3" json:"head_sha"`
 
 	Position    int    `gorm:"not null" json:"position"`
 	Label       string `gorm:"type:text" json:"label"`
-	SourceURL   string `gorm:"column:source_url;type:text;not null" json:"source_url"`
+	SourceURL   string `gorm:"column:source_url;type:text;not null;uniqueIndex:idx_review_assets_source,priority:4" json:"source_url"`
 	StoragePath string `gorm:"column:storage_path;type:text;not null" json:"storage_path"`
 	MimeType    string `gorm:"column:mime_type;type:text" json:"mime_type"`
 	SizeBytes   int64  `gorm:"column:size_bytes" json:"size_bytes"`

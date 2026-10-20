@@ -126,6 +126,8 @@ export interface ReviewPullRequestRecord {
   code_status?: string | null;
   visual_status?: string | null;
   updated_at: string;
+  /** 记录是否属于项目当前仓库；跨仓库的历史记录只能查看。 */
+  can_rerun: boolean;
   rounds: ReviewRoundRecord[];
 }
 
@@ -170,12 +172,12 @@ export const reviewApi = {
         .json<ApiResponse<{ items: ReviewPullRequestRecord[] }>>(),
     ),
 
-  /** 对 PR 的实时 HEAD 重跑代码审查。 */
-  rerun: (projectId: string, prNumber: number) =>
+  /** 对 PR 的实时 HEAD 重跑代码审查；带上记录所属仓库，服务端据此拒绝历史仓库。 */
+  rerun: (projectId: string, prNumber: number, repoFullName: string) =>
     decodeApiError(
       api
         .post(`${projectPath(projectId)}/reviews/rerun`, {
-          json: { pr_number: prNumber },
+          json: { pr_number: prNumber, repo_full_name: repoFullName },
         })
         .json<ApiResponse<ReviewRerunResult>>(),
     ),

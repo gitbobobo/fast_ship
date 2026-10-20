@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
+	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -408,5 +410,54 @@ func TestUpdateSettingsTakeoverCleansUpOtherProjects(t *testing.T) {
 	out, err := rs.GetSettings(context.Background(), owner.ID, pA.ID)
 	if err != nil || !out.Enabled {
 		t.Fatalf("A 的启用未生效: %v %+v", err, out)
+	}
+}
+
+// 项目换过仓库后，历史仓库的记录不能重跑：request 里带旧仓库时 400。
+func TestRerunRejectsHistoricalRepo(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	e.project.GithubOwner, e.project.GithubRepo = "newowner", "newrepo"
+	if err := e.svc.db.Model(e.project).Updates(map[string]any{
+		"github_owner": "newowner", "github_repo": "newrepo"}).Error; err != nil {
+		t.Fatalf("update project repo: %v", err)
+	}
+	_, err := e.review.RerunReview(context.Background(), e.user.ID, e.project.ID, 7, "oldowner/oldrepo")
+	if err == nil {
+		t.Fatal("旧仓库记录的重跑应被拒绝")
+	}
+	var appErr *errs.AppError
+	if !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("err = %v, want 40001", err)
+	}
+}
+
+// 记录页的 can_rerun 随项目仓库判断：历史仓库的记录为 false。
+func TestReviewRecordsCanRerunTracksProjectRepo(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	now := time.Now().UTC()
+	rows := []model.ReviewPullRequest{
+		{ProjectID: e.project.ID, RepoFullName: "oldowner/oldrepo", PRNumber: 1, UserID: e.user.ID, UpdatedAt: now},
+		{ProjectID: e.project.ID, RepoFullName: "newowner/newrepo", PRNumber: 2, UserID: e.user.ID, UpdatedAt: now},
+	}
+	if err := e.svc.db.Create(&rows).Error; err != nil {
+		t.Fatalf("seed ledgers: %v", err)
+	}
+	e.project.GithubOwner, e.project.GithubRepo = "newowner", "newrepo"
+	if err := e.svc.db.Model(e.project).Updates(map[string]any{
+		"github_owner": "newowner", "github_repo": "newrepo"}).Error; err != nil {
+		t.Fatalf("update project repo: %v", err)
+	}
+	records, err := e.review.ListReviewRecords(context.Background(), e.user.ID, e.project.ID, 10)
+	if err != nil {
+		t.Fatalf("list records: %v", err)
+	}
+	got := map[int]bool{}
+	for _, r := range records {
+		got[r.PrNumber] = r.CanRerun
+	}
+	if got[1] || !got[2] {
+		t.Fatalf("can_rerun = %+v, want 旧仓库 false / 新仓库 true", got)
 	}
 }

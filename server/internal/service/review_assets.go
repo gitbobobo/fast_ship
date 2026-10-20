@@ -150,8 +150,15 @@ func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber 
 			Error:        errText,
 			CreatedAt:    now,
 		}
-		// 并发/重入安全：同 (repo,pr,head,source_url) 只保留先到的行。
-		res := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(asset)
+		// 并发/重入安全：同 (repo,pr,head,source_url) 只保留先到的行
+		// （唯一索引 idx_review_assets_source 是冲突目标）。
+		res := s.db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "repo_full_name"}, {Name: "pr_number"},
+				{Name: "head_sha"}, {Name: "source_url"},
+			},
+			DoNothing: true,
+		}).Create(asset)
 		if res.Error != nil {
 			return "", nil, errs.ErrInternal
 		}

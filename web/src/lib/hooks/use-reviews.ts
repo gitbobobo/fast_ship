@@ -97,7 +97,8 @@ export function useUpdateReviewSettings(projectId: string) {
 export function useRerunReview(projectId: string) {
   const invalidate = useInvalidateReviews();
   return useMutation({
-    mutationFn: (prNumber: number) => reviewApi.rerun(projectId, prNumber),
+    mutationFn: (input: { prNumber: number; repoFullName: string }) =>
+      reviewApi.rerun(projectId, input.prNumber, input.repoFullName),
     onSuccess: invalidate,
   });
 }

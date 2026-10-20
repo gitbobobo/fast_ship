@@ -6574,6 +6574,12 @@ paths:
                 pr_number:
                   type: integer
                   minimum: 1
+                repo_full_name:
+                  type: string
+                  description: |
+                    记录所属仓库（审查记录里回传）。项目仓库改过之后，历史记录会属于
+                    旧仓库；带上它可避免把同号的无关 PR 当成本项目的 PR 重跑。
+                    与项目当前仓库不一致时返回 400。
       responses:
         '200':
           description: 已受理
@@ -12238,6 +12244,7 @@ components:
         - head_sha
         - updated_at
         - rounds
+        - can_rerun
       properties:
         repo_full_name:
           type: string
@@ -12249,6 +12256,9 @@ components:
           type: string
         head_sha:
           type: string
+        can_rerun:
+          type: boolean
+          description: 该记录是否属于项目当前仓库；跨仓库的历史记录只能查看，不能重跑。
         code_status:
           type: string
           nullable: true

@@ -161,9 +161,11 @@ func reviewRepoKey(owner, repo string) string {
 // ListReviewRecords 项目审查记录：PR 按 updated_at DESC，每 PR 内嵌轮次
 // （round_number DESC），轮内 code_runs/visual_runs 按创建时间正序。
 func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID string, limit int) ([]api.ReviewPullRequestRecord, error) {
-	if _, err := s.ownedProject(userID, projectID); err != nil {
+	project, err := s.ownedProject(userID, projectID)
+	if err != nil {
 		return nil, err
 	}
+	currentRepo := strings.ToLower(project.GithubOwner + "/" + project.GithubRepo)
 	if limit <= 0 {
 		limit = reviewRecordsDefaultLimit
 	}
@@ -226,7 +228,10 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 			RepoFullName: pr.RepoFullName,
 			HeadSha:      pr.HeadSHA,
 			UpdatedAt:    pr.UpdatedAt.UTC().Format(time.RFC3339Nano),
-			Rounds:       []api.ReviewRoundRecord{},
+			// 项目改过仓库后，旧仓库的记录只能查看：rerun 会按项目当前仓库
+			// 取 PR，同号的无关 PR 会被误审。
+			CanRerun: strings.EqualFold(pr.RepoFullName, currentRepo),
+			Rounds:   []api.ReviewRoundRecord{},
 		}
 		if pr.CodeStatus != "" {
 			rec.CodeStatus = api.Ptr(pr.CodeStatus)

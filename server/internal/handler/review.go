@@ -57,13 +57,14 @@ func (h *ReviewHandler) UpdateSettings(c *gin.Context) {
 // Rerun POST /api/projects/:id/reviews/rerun
 func (h *ReviewHandler) Rerun(c *gin.Context) {
 	var req struct {
-		PRNumber int `json:"pr_number"`
+		PRNumber     int    `json:"pr_number"`
+		RepoFullName string `json:"repo_full_name"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.PRNumber < 1 {
 		response.BadRequest(c, 40001, "pr_number 必须是 >=1 的整数")
 		return
 	}
-	out, err := h.reviewService.RerunReview(c.Request.Context(), middleware.GetUserID(c), c.Param("id"), req.PRNumber)
+	out, err := h.reviewService.RerunReview(c.Request.Context(), middleware.GetUserID(c), c.Param("id"), req.PRNumber, req.RepoFullName)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

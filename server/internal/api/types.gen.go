@@ -3256,6 +3256,8 @@ type ReviewProjectSummary struct {
 
 // ReviewPullRequestRecord defines model for ReviewPullRequestRecord.
 type ReviewPullRequestRecord struct {
+	// CanRerun 该记录是否属于项目当前仓库；跨仓库的历史记录只能查看，不能重跑。
+	CanRerun     bool                `json:"can_rerun"`
 	CodeStatus   *string             `json:"code_status,omitempty"`
 	HeadSha      string              `json:"head_sha"`
 	PrNumber     int                 `json:"pr_number"`
@@ -6352,6 +6354,11 @@ type UpdateProjectReviewSettings200JSONResponseBody struct {
 // RerunProjectReviewJSONBody defines parameters for RerunProjectReview.
 type RerunProjectReviewJSONBody struct {
 	PrNumber int `json:"pr_number"`
+
+	// RepoFullName 记录所属仓库（审查记录里回传）。项目仓库改过之后，历史记录会属于
+	// 旧仓库；带上它可避免把同号的无关 PR 当成本项目的 PR 重跑。
+	// 与项目当前仓库不一致时返回 400。
+	RepoFullName *string `json:"repo_full_name,omitempty"`
 }
 
 // RerunProjectReview200JSONResponseBody_Data defines parameters for RerunProjectReview.

@@ -642,7 +642,9 @@ func createBootIndexes(db *gorm.DB) {
 	// 同一仓库只允许一个项目开启审查（开轮/同步按仓库反查唯一项目的前提）：
 	// 设置保存时先在事务内检查并返回 40922，这条部分唯一索引兜并发竞态。
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_project_review_settings_repo ON project_review_settings(repo_full_name) WHERE enabled = 1")
-	db.Exec("CREATE INDEX IF NOT EXISTS idx_review_assets_pr_head ON review_assets(repo_full_name, pr_number, head_sha, position)")
+	// 截图源地址唯一索引由 model.ReviewAsset 的 uniqueIndex 标签随 AutoMigrate
+	// 建出（idx_review_assets_source）；按 (repo, pr, head) 的查询也走它的前缀。
+	db.Exec("DROP INDEX IF EXISTS idx_review_assets_pr_head")
 	db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_user_dedup ON notifications(user_id, dedup_key)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_user_updated ON notifications(user_id, updated_at DESC, id)")
 	db.Exec("CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, updated_at DESC) WHERE read_at IS NULL")

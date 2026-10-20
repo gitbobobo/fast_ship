@@ -508,9 +508,9 @@ function ReviewRecordsPanel({ projectId }: { projectId: string }) {
       return next;
     });
 
-  const handleRerun = async (prNumber: number) => {
+  const handleRerun = async (prNumber: number, repoFullName: string) => {
     try {
-      const res = await rerun.mutateAsync(prNumber);
+      const res = await rerun.mutateAsync({ prNumber, repoFullName });
       toast.success(
         `已受理，第 ${res.data.round_number} 轮审查已排队`,
       );
@@ -548,11 +548,11 @@ function ReviewRecordsPanel({ projectId }: { projectId: string }) {
     <div className="space-y-2">
       {records.map((pr) => (
         <PullRequestRecord
-          key={pr.pr_number}
+          key={`${pr.repo_full_name}#${pr.pr_number}`}
           record={pr}
           expanded={expanded.has(pr.pr_number)}
           onToggle={() => toggle(pr.pr_number)}
-          onRerun={() => void handleRerun(pr.pr_number)}
+          onRerun={() => void handleRerun(pr.pr_number, pr.repo_full_name)}
           rerunning={rerun.isPending}
         />
       ))}
@@ -609,8 +609,13 @@ function PullRequestRecord({
         <Button
           variant="outline"
           size="sm"
-          disabled={rerunning}
+          disabled={rerunning || !record.can_rerun}
           onClick={onRerun}
+          title={
+            record.can_rerun
+              ? undefined
+              : "该记录属于历史仓库（项目仓库已变更），不能重跑"
+          }
           aria-label={`重新审查 PR #${record.pr_number}`}
         >
           <RotateCw className="mr-1.5 h-3.5 w-3.5" />

@@ -594,7 +594,7 @@ func TestReviewRerun(t *testing.T) {
 	now := time.Now().UTC()
 
 	// 未开启 → 40923。
-	_, err := e.review.RerunReview(context.Background(), e.user.ID, e.project.ID, 1)
+	_, err := e.review.RerunReview(context.Background(), e.user.ID, e.project.ID, 1, "")
 	assertErrCode(t, err, 40923)
 
 	e.enableReview(t)
@@ -604,7 +604,7 @@ func TestReviewRerun(t *testing.T) {
 	})
 	old := e.seedRun(t, repo, 2, "sha-rr", model.ReviewRunRunning, now)
 
-	out, err := e.review.RerunReview(context.Background(), e.user.ID, e.project.ID, 2)
+	out, err := e.review.RerunReview(context.Background(), e.user.ID, e.project.ID, 2, "")
 	if err != nil {
 		t.Fatalf("rerun: %v", err)
 	}

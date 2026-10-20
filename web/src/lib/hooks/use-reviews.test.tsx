@@ -137,9 +137,11 @@ describe("use-reviews invalidate", () => {
     const invalidate = vi.spyOn(client, "invalidateQueries");
     const { result } = renderHook(() => useRerunReview("p1"), { wrapper });
 
-    await act(() => result.current.mutateAsync(12));
+    await act(() =>
+      result.current.mutateAsync({ prNumber: 12, repoFullName: "acme/alpha" }),
+    );
 
-    expect(api.rerun).toHaveBeenCalledWith("p1", 12);
+    expect(api.rerun).toHaveBeenCalledWith("p1", 12, "acme/alpha");
     expect(invalidate).toHaveBeenCalledWith({
       queryKey: ["reviews", "A"],
     });
