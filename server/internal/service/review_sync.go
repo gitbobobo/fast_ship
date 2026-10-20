@@ -125,6 +125,10 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	now := time.Now().UTC()
 
 	syncErr := s.doSyncPR(ctx, &cur, epoch, now)
+	if errors.Is(syncErr, errReviewSyncDeferred) {
+		// 主动让路（远端 head 已前进、等 webhook）：不算同步失败，不清 pending。
+		return
+	}
 	if syncErr != nil {
 		s.db.Model(&model.ReviewPullRequest{}).
 			Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
@@ -278,7 +282,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	} else if !ok {
 		return nil
 	}
-	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, now); err != nil {
+	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, epoch, now); err != nil {
 		return err
 	}
 
@@ -580,7 +584,7 @@ func buildVisualComment(visualRuns, priorRuns []model.ReviewRun, carried bool) s
 // postInlineReviews 每个 completed 且 posted_at IS NULL 的代码运行：
 // P0–P2 且行号落在 diff 右侧有效行内 → SubmitReview；posted_at=now。
 func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.GitHubClient,
-	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, now time.Time) error {
+	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, epoch int, now time.Time) error {
 	var pending []model.ReviewRun
 	for _, r := range codeRuns {
 		if r.Status == model.ReviewRunCompleted && r.PostedAt == nil {
@@ -622,6 +626,13 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 		}
 		var reviewID int64
 		if len(comments) > 0 {
+			// 读 diff 是慢调用：提交前再复核一次 epoch，避免把旧 SHA 的
+			// 发现作为新 review 发出去（supersede 不会把已完成的运行改状态）。
+			if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
+				return errs.ErrInternal
+			} else if !ok {
+				return nil
+			}
 			id, err := client.SubmitReview(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber,
 				githubapi.ReviewInput{Event: "COMMENT", Body: r.Summary, CommitID: ledger.HeadSHA, Comments: comments})
 			if err != nil {

@@ -11,13 +11,26 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
+	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
 // INT-135 第三轮结构修复测试：账本按项目分区、启用接管收尾、启动请求
 // 不可变重放（已签发令牌不重认领）、首次鉴权补 dispatched_at、设置保存
 // 事务内仓库复核。
+
+// seedRunWithFindings 完成态代码运行，带一条落在 diff 有效行上的 P1。
+func (e *reviewEngineEnv) seedRunWithFindings(t *testing.T, repo string, pr int, sha string, now time.Time) *model.ReviewRun {
+	t.Helper()
+	run := e.seedRun(t, repo, pr, sha, model.ReviewRunCompleted, now)
+	result := `{"summary":"有发现","findings":[{"level":"P1","file":"a","line":2,"body":"问题"}],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`
+	if err := e.svc.db.Model(run).Update("result_json", result).Error; err != nil {
+		t.Fatalf("update result: %v", err)
+	}
+	return run
+}
 
 // TestReviewLedgerPartitionedByProject A：同仓库另一个项目（已停用）的残留
 // 账本行不进本项目的 webhook 判定——其 seen/运行/防抖/总账各自独立，新
@@ -517,5 +530,60 @@ func TestReviewSyncSkipsWhenRemoteHeadAdvanced(t *testing.T) {
 	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 88", repo)
 	if !ledger.SyncPending {
 		t.Fatal("sync_pending 应保留，等 webhook 推进 head")
+	}
+	if ledger.SyncError != "" {
+		t.Fatalf("deferred 不算同步失败，sync_error = %q", ledger.SyncError)
+	}
+}
+
+// epochBumpOnDiffClient 在读 diff 时推进 epoch：模拟最慢的一次调用期间新
+// webhook 抢先进来；行内 review 提交前必须再复核 epoch。
+type epochBumpOnDiffClient struct {
+	githubapi.GitHubClient
+	db   *gorm.DB
+	repo string
+	pr   int
+	done bool
+}
+
+func (c *epochBumpOnDiffClient) GetPullRequestDiff(ctx context.Context, inst int64, repo string, number int) (string, error) {
+	if !c.done {
+		c.done = true
+		if err := c.db.Model(&model.ReviewPullRequest{}).
+			Where("repo_full_name = ? AND pr_number = ?", c.repo, c.pr).
+			Update("sync_epoch", gorm.Expr("sync_epoch + 1")).Error; err != nil {
+			return "", err
+		}
+	}
+	return c.GitHubClient.GetPullRequestDiff(ctx, inst, repo, number)
+}
+
+func TestReviewInlineReviewRechecksEpoch(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 99, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 99, HeadSHA: "sha-i",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.fake.SetDiff("@@ -1,1 +1,2 @@\n a\n+b\n")
+	e.seedRunWithFindings(t, repo, 99, "sha-i", now)
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 99, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-i", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+	e.enableReview(t)
+	review := NewReviewService(e.svc.db, e.svc.projectRepo,
+		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
+		NewNotificationSink(e.svc.db),
+		githubapp.StaticClients{Client: &epochBumpOnDiffClient{GitHubClient: e.fake, db: e.svc.db, repo: repo, pr: 99}},
+		fakeReviewAppSource{ok: true},
+		fakeReviewPublicURL("https://fs.example.com"),
+		nil, nil, nil, e.svc.cfg, zap.NewNop())
+	review.syncPendingPRs(now)
+
+	if got := e.fake.ReviewEvents(repo); len(got) != 0 {
+		t.Fatalf("epoch 推进后不应提交行内 review，events = %v", got)
 	}
 }
