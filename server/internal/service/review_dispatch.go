@@ -142,8 +142,11 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		return
 	}
 
+	// 线程确实建成了：不论运行是否在启动准备期间被新 SHA 取消/超时，都要把
+	// dispatched_at 与 thread_id 落库——归档与工作区回收都以「线程已确认」
+	// 为前提，丢掉这条证据会留下未归档线程与未删除的工作区。
 	res := s.db.Model(&model.ReviewRun{}).
-		Where("id = ? AND status = ?", run.ID, model.ReviewRunDispatched).
+		Where("id = ? AND dispatched_at IS NULL", run.ID).
 		Updates(map[string]any{
 			"dispatched_at": now,
 			"t3_project_id": binding.T3ProjectID,
@@ -154,12 +157,9 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		s.logger.Error("更新审查运行派发状态失败", zap.String("run", run.ID), zap.Error(res.Error))
 		return
 	}
-	if res.RowsAffected == 0 {
-		s.releaseWorktreeState(run.ID) // 运行已被取消/超时，基线不再用
-		return
-	}
 
-	// 代码审查：launch 确认后的有界窗口内解析本次工作区路径。
+	// 代码审查：launch 确认后有界窗口内解析本次工作区路径（被取消的运行也要
+	// 解析，否则回收阶段无法证明归属、只能记失败）。
 	if run.Kind == model.ReviewKindCode {
 		s.resolveWorktreePath(ctx, &run, binding.T3ProjectID)
 	}

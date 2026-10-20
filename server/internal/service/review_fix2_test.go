@@ -342,3 +342,51 @@ func TestDispatchReclaimsStaleClaim(t *testing.T) {
 		t.Fatalf("status = %s/%s, want failed/dispatch_failed", got.Status, got.ErrorCode)
 	}
 }
+
+// 启动准备期间运行被新 SHA 取消：线程仍建成，必须落 dispatched_at 与
+// thread_id，让归档/工作区回收有依据，而不是当成「从未启动」丢掉。
+func TestReviewLaunchCancelledDuringPrepareStillRecordsThread(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-cancel-race")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	var runID string
+	t3 := &fakeReviewT3{
+		listQueue: [][]string{{}, {"/ws/wt-race"}},
+		createFn: func(_ context.Context, _, _ string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
+			// 模拟启动 RPC 期间新 webhook 取消了这个运行。
+			if err := e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", runID).
+				Updates(map[string]any{
+					"status": model.ReviewRunCancelled, "error_code": "superseded",
+					"finished_at": now, "updated_at": now,
+				}).Error; err != nil {
+				return nil, false, err
+			}
+			return &T3ThreadLaunchResult{ThreadId: *req.ThreadId}, true, nil
+		},
+	}
+	review := e.withT3(t3, nil, nil)
+	run := e.seedRun(t, repo, 34, "sha-race", model.ReviewRunDispatched, now)
+	runID = run.ID
+	e.svc.db.Model(run).Update("environment_id", env.ID)
+
+	review.launchRun(context.Background(), run.ID, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCancelled {
+		t.Fatalf("status = %q, want cancelled", after.Status)
+	}
+	if after.DispatchedAt == nil {
+		t.Fatal("线程已建成：dispatched_at 必须落库，否则归档/回收会把运行当成从未启动")
+	}
+	if after.ThreadID != run.ThreadID {
+		t.Fatalf("thread_id = %q, want %q", after.ThreadID, run.ThreadID)
+	}
+	if after.WorktreePath != "/ws/wt-race" {
+		t.Fatalf("worktree_path = %q, want /ws/wt-race（取消后也要能回收）", after.WorktreePath)
+	}
+}
