@@ -36,7 +36,7 @@ PR 审查链路的仓库判定细节见 docs/internal/reviews.md。
 - `pkg/github/detector.go`（`TokenDetector`）：只读检测。`GET https://api.github.com/user`；401 → `invalid`，超时/网络错误/限流/5xx → `failed`（网络失败不能判成凭证无效）；200 → `ok`，`X-OAuth-Scopes` 非空 → `classic` + scopes，空 scopes 且前缀 `github_pat_` → `fine_grained`（detail 写明「无法自动获取完整授权」），否则 `unknown`。`detection_detail` 使用固定文案，不拼接底层 `err.Error()`。不创建任何 GitHub 资源、不用写操作试探权限。测试经 service 的 `detect` 字段注入 fake。
 - REST API：`/api/github-tokens`（仅 JWT），见 openapi `github-tokens` tag。创建/替换后服务端同步检测一次，检测失败仍 200 保存（状态落在 `detection_status`）；列表不触发 GitHub 请求。
 
-项目凭证的写侧（create/update 引用解析）归 `ProjectService`：create 直接校验引用归属，update 用 `OptionalStringUpdate` 三态（key 缺省保留、显式 null/空串清空、非空替换；旧名 `TokenRefUpdate` 保留为别名）。代码仓库链接 `code_repository_url` 走同一个三态。
+项目凭证的写侧（create/update 引用解析）归 `ProjectService`：create 直接校验引用归属，update 用 `OptionalStringUpdate` 三态（key 缺省保留、显式 null/空串清空、非空替换；旧名 `TokenRefUpdate` 保留为别名）。代码仓库链接 `code_repository_url` 走同一个三态，归一（code 与公开仓库大小写不敏感相同则清空 code）在应用完全部仓库字段后统一做一次。如实说明一个既有限制：项目更新是整行读改写，并发编辑同一项目时后写者胜（含两个仓库字段与两个 Token 引用），不做字段级合并；该形态不在当前修复范围内。
 
 ## 读侧语义
 

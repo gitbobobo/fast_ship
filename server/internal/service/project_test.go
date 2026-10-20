@@ -786,6 +786,85 @@ func TestProjectServiceUpdate_CodeRepoURLThreeStates(t *testing.T) {
 	if owner, repo := storedCode(); owner != "" || repo != "" {
 		t.Fatalf("failed update must leave value unchanged, got %q/%q", owner, repo)
 	}
+
+	// —— 归一收敛为「应用完仓库字段后的最后一步」的回归 ——
+
+	seedEnabled := func(repo string) {
+		t.Helper()
+		now := time.Now().UTC()
+		if err := svc.db.Where("project_id = ?", project.ID).
+			Delete(&model.ProjectReviewSettings{}).Error; err != nil {
+			t.Fatalf("clear settings: %v", err)
+		}
+		if err := svc.db.Create(&model.ProjectReviewSettings{
+			ProjectID: project.ID, UserID: user.ID, RepoFullName: repo, Enabled: true,
+			CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
+			CreatedAt: now, UpdatedAt: now,
+		}).Error; err != nil {
+			t.Fatalf("seed settings: %v", err)
+		}
+	}
+	loadSettings := func() model.ProjectReviewSettings {
+		t.Helper()
+		var row model.ProjectReviewSettings
+		if err := svc.db.Where("project_id = ?", project.ID).First(&row).Error; err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		return row
+	}
+
+	// 同一请求里公开与代码仓库指向同一仓库（大小写不同）→ code 归一为空、
+	// 审查停用且快照刷新为新公开仓库。
+	seedEnabled("liuyincs/musiver") // 此时代码仓库为空，审查仓库回落公开仓库
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		RepositoryUrl:     api.Ptr("new/pub"),
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "NEW/Pub"},
+	}); err != nil {
+		t.Fatalf("update both repos: %v", err)
+	}
+	if owner, repo := storedCode(); owner != "" || repo != "" {
+		t.Fatalf("同一请求 code=公开（大小写不同）应归一为空, got %q/%q", owner, repo)
+	}
+	if row := loadSettings(); row.Enabled || row.RepoFullName != "new/pub" {
+		t.Fatalf("审查应停用且快照刷新为 new/pub: enabled=%v repo=%q", row.Enabled, row.RepoFullName)
+	}
+
+	// code 仓库等于旧公开仓库、同时公开仓库改走：code 按请求显式落库，
+	// 不被误清空（归一只清「改完之后两者相同」的情形）。
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		RepositoryUrl:     api.Ptr("another/pub2"),
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "liuyincs/musiver"},
+	}); err != nil {
+		t.Fatalf("update code to old public: %v", err)
+	}
+	if owner, repo := storedCode(); owner != "liuyincs" || repo != "musiver" {
+		t.Fatalf("code 应按请求显式落库, got %q/%q", owner, repo)
+	}
+	if row := loadSettings(); row.RepoFullName != "liuyincs/musiver" {
+		t.Fatalf("审查仓库已变为 liuyincs/musiver, snapshot = %q", row.RepoFullName)
+	}
+
+	// 只改公开仓库使其等于存量显式代码仓库：归一成空；审查仓库没变
+	// （liuyincs/musiver → liuyincs/musiver），不停用、快照保持正确。
+	seedEnabled("liuyincs/musiver")
+	if _, err := projectSvc.Update(project.ID, user.ID, &UpdateProjectRequest{
+		RepositoryUrl: api.Ptr("LIUYINCS/Musiver"),
+	}); err != nil {
+		t.Fatalf("update public onto code repo: %v", err)
+	}
+	if owner, repo := storedCode(); owner != "" || repo != "" {
+		t.Fatalf("公开仓库撞存量 code 仓库应归一为空, got %q/%q", owner, repo)
+	}
+	if row := loadSettings(); !row.Enabled || row.RepoFullName != "liuyincs/musiver" {
+		t.Fatalf("审查仓库未变不应停用: enabled=%v repo=%q", row.Enabled, row.RepoFullName)
+	}
+	var storedPublic model.Project
+	if err := svc.db.First(&storedPublic, "id = ?", project.ID).Error; err != nil {
+		t.Fatalf("reload project: %v", err)
+	}
+	if storedPublic.GithubOwner != "LIUYINCS" || storedPublic.GithubRepo != "Musiver" {
+		t.Fatalf("公开仓库应原样落库, got %q/%q", storedPublic.GithubOwner, storedPublic.GithubRepo)
+	}
 }
 
 // 改代码仓库会停用审查并刷新 repo_full_name 快照（新的 CodeRepo 小写）；

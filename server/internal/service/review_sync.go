@@ -96,8 +96,11 @@ func (s *ReviewService) syncPendingPRs(now time.Time) {
 	}
 }
 
-// syncOnePR 一个 PR 的 GitHub 同步（同 PR 串行）。
-// epoch 快照自进入时；失败写 sync_error（epoch 守卫），成功按 epoch 清 pending。
+// syncOnePR 一个 PR 的 GitHub 同步（同 PR 串行）。重读账本后先做准入复核
+// （pending 未清、epoch 未推进、项目 enabled 设置行的快照仍是本仓库）：从
+// syncPendingPRs 选出到执行之间项目可能已换审查仓库或停用审查，不再属于
+// 本轮的活直接放弃，不发任何 GitHub 请求也不写库；通过后 epoch 即重读值，
+// 失败写 sync_error（epoch 守卫），成功按 epoch 清 pending。
 func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	key := ledger.RepoFullName + "#" + strconv.Itoa(ledger.PRNumber)
 	lock := s.lockForPR(ledger.RepoFullName, ledger.PRNumber)
@@ -120,6 +123,18 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	var cur model.ReviewPullRequest
 	if err := s.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
 		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).First(&cur).Error; err != nil {
+		return
+	}
+	// 准入复核：项目换仓库/停用审查会同事务清 pending、推进 epoch、刷新设置行
+	// 快照，任一不成立说明本行已被移出本轮，直接放弃（这是放弃，不是让路）。
+	var settings model.ProjectReviewSettings
+	if err := s.db.Select("repo_full_name").
+		Where("project_id = ? AND enabled", cur.ProjectID).
+		First(&settings).Error; err != nil {
+		return
+	}
+	if !cur.SyncPending || cur.SyncEpoch != ledger.SyncEpoch ||
+		settings.RepoFullName != cur.RepoFullName {
 		return
 	}
 	epoch := cur.SyncEpoch

@@ -76,10 +76,17 @@ func (s *ReviewService) GetSettings(ctx context.Context, userID, projectID strin
 		return nil, err
 	}
 
+	// 未关联仓库（owner/repo 任一为空）时不回显 "/"：CodeRepoFullName() 会把
+	// 两个空串拼成 "/"，响应里归一为空串；反查/同步路径已有空值守卫。
+	repoFullName := ""
+	if owner, repo := project.CodeRepo(); owner != "" && repo != "" {
+		repoFullName = owner + "/" + repo
+	}
+
 	// 未保存过的行采用模型默认触发项（opened/synchronize 开）。
 	out := &api.ReviewSettings{
 		ProjectId:             projectID,
-		RepoFullName:          project.CodeRepoFullName(),
+		RepoFullName:          repoFullName,
 		Enabled:               false,
 		TriggerOpened:         true,
 		TriggerSynchronize:    true,

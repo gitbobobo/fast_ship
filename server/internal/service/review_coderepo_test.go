@@ -12,6 +12,7 @@ import (
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubapp"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 // 代码仓库与公开仓库分离（musiver 场景）：公开仓库放 Issue/Release、代码仓库
@@ -273,5 +274,191 @@ func TestRerunReviewUsesCodeRepo(t *testing.T) {
 	}
 	if run.TriggerAction != "manual" {
 		t.Fatalf("trigger_action = %q, want manual", run.TriggerAction)
+	}
+}
+
+// syncOnePR 准入复核（回归）：账本行被选出后项目经 ProjectService.Update 改了
+// 代码仓库（真实路径：同事务停用审查、刷新快照、清 pending、epoch+1），重读到
+// 的旧行不得再向旧仓库发任何 GitHub 请求，也不写脏 sync_error。
+func TestSyncOnePRGivesUpAfterRepoChanged(t *testing.T) {
+	e := newCodeRepoEnv(t)
+	now := time.Now().UTC()
+	e.fake.SetPR(e.codeRepo, 71, &githubapi.PullRequest{
+		RepoFullName: e.codeRepo, Number: 71, HeadSHA: "sha-stale",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	ledger := &model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 71, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-stale", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}
+	if err := e.svc.db.Create(ledger).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	selected := *ledger // syncPendingPRs 选出时刻的快照
+
+	// 模拟「选出之后项目改代码仓库」，走 ProjectService.Update 真实路径。
+	projectSvc := newTestProjectService(e.svc)
+	if _, err := projectSvc.Update(e.project.ID, e.user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "new/repository"},
+	}); err != nil {
+		t.Fatalf("update code repo: %v", err)
+	}
+
+	e.review.syncOnePR(&selected)
+
+	if e.fake.TotalCalls() != 0 {
+		t.Fatalf("换仓库后旧账本行不得再发 GitHub 请求: %v", e.fake.CallCounts())
+	}
+	var cur model.ReviewPullRequest
+	if err := e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = 71",
+		e.project.ID, e.codeRepo).First(&cur).Error; err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	if cur.SyncPending || cur.SyncEpoch != 2 || cur.SyncError != "" {
+		t.Fatalf("账本应保持换仓库时的收尾态（pending=false epoch=2 error=空）, got pending=%v epoch=%d error=%q",
+			cur.SyncPending, cur.SyncEpoch, cur.SyncError)
+	}
+}
+
+// divergeLiveCodeRepo 直接改项目行的 code 字段，构造「live 代码仓库 ≠ 设置行
+// 快照」的状态：真实写路径会刷新快照并停用审查，这里绕开写侧，专门锁住读侧
+// 「只信快照、不回联 projects」的语义。
+func divergeLiveCodeRepo(t *testing.T, db *gorm.DB, projectID string) {
+	t.Helper()
+	if err := db.Model(&model.Project{}).Where("id = ?", projectID).
+		Updates(map[string]any{"code_github_owner": "octo", "code_github_repo": "other"}).Error; err != nil {
+		t.Fatalf("diverge live code repo: %v", err)
+	}
+}
+
+// webhook 反查只信设置行快照：live 代码仓库被改走后，快照仓库的事件仍能
+// 反查到项目，live 仓库的事件找不到（回联 live 字段的变体会两个都错）。
+func TestReviewWebhookResolvesBySnapshotNotLiveCodeRepo(t *testing.T) {
+	e := newCodeRepoEnv(t)
+	divergeLiveCodeRepo(t, e.svc.db, e.project.ID)
+	ctx := context.Background()
+
+	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-snap",
+		prPayload("opened", e.codeRepo, 51, "sha-s1", false, false)); err != nil {
+		t.Fatalf("snapshot repo webhook: %v", err)
+	}
+	var debounce model.ReviewDebounce
+	if err := e.svc.db.Where("project_id = ? AND repo_full_name = ?", e.project.ID, e.codeRepo).
+		First(&debounce).Error; err != nil {
+		t.Fatalf("快照仓库事件应反查到项目: %v", err)
+	}
+
+	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-live",
+		prPayload("opened", "octo/other", 52, "sha-l1", false, false)); err != nil {
+		t.Fatalf("live repo webhook: %v", err)
+	}
+	var n int64
+	e.svc.db.Model(&model.ReviewDebounce{}).
+		Where("project_id = ? AND repo_full_name = ?", e.project.ID, "octo/other").Count(&n)
+	if n != 0 {
+		t.Fatalf("live 代码仓库的事件不应反查到项目, got %d 条防抖行", n)
+	}
+}
+
+// 同仓库占用只信快照：占用项目的 live 代码仓库已改走（只剩快照还是
+// octo/shared），本项目仍被判为被占用（GET taken_by/can_manage、总览、
+// PUT 40922 一致）。
+func TestReviewTakenBySnapshotNotLiveCodeRepo(t *testing.T) {
+	svc := setupTestServices(t)
+	me := createTestUser(t, svc.db, "me-snap")
+	other := createTestUser(t, svc.db, "other-snap")
+
+	mine := createTestProject(t, svc.db, me.ID, func(p *model.Project) {
+		p.GithubOwner = "pub"
+		p.GithubRepo = "mine"
+		p.CodeGithubOwner = "octo"
+		p.CodeGithubRepo = "shared"
+	})
+	occupied := createTestProject(t, svc.db, other.ID, func(p *model.Project) {
+		p.GithubOwner = "pub"
+		p.GithubRepo = "theirs"
+		p.CodeGithubOwner = "octo"
+		p.CodeGithubRepo = "shared"
+	})
+	now := time.Now().UTC()
+	if err := svc.db.Create(&model.ProjectReviewSettings{
+		ProjectID: occupied.ID, UserID: other.ID, RepoFullName: "octo/shared", Enabled: true,
+		CodeCombinationsJSON: "[]", VisualCombinationsJSON: "[]",
+		CreatedAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	// 占用项目的 live 代码仓库后来被改走，只剩 enabled 快照仍占 octo/shared。
+	divergeLiveCodeRepo(t, svc.db, occupied.ID)
+
+	rs, _ := readyReviewService(t, svc)
+	ctx := context.Background()
+
+	settings, err := rs.GetSettings(ctx, me.ID, mine.ID)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if settings.TakenBy == nil || *settings.TakenBy != "user_other-snap" {
+		t.Fatalf("taken_by = %v, want user_other-snap（占用判定只信快照）", settings.TakenBy)
+	}
+	if settings.CanManage == nil || *settings.CanManage {
+		t.Fatal("can_manage 应为 false")
+	}
+
+	items, err := rs.ListReviewProjects(ctx, me.ID)
+	if err != nil {
+		t.Fatalf("ListReviewProjects: %v", err)
+	}
+	var mineItem *api.ReviewProjectSummary
+	for i := range items {
+		if items[i].ProjectId == mine.ID {
+			mineItem = &items[i]
+		}
+	}
+	if mineItem == nil {
+		t.Fatal("总览应包含本项目")
+	}
+	if mineItem.TakenBy == nil || *mineItem.TakenBy != "user_other-snap" || mineItem.CanManage {
+		t.Fatalf("总览占用判定 = %+v, want taken_by=user_other-snap can_manage=false", mineItem)
+	}
+
+	env := createT3TestEnv(t, svc.db, me.ID, "env-snap")
+	createTestT3Binding(t, svc.db, mine.ID, env.ID, "t3-snap")
+	if _, err := rs.UpdateSettings(ctx, me.ID, mine.ID, validSettingsInput(env.ID)); err == nil {
+		t.Fatal("快照占用下开启审查应失败")
+	} else if code := appErrorCode(t, err); code != 40922 {
+		t.Fatalf("code = %d, want 40922", code)
+	}
+}
+
+// 同步过滤只信快照：快照匹配的 pending 账本行照常同步（清 pending），
+// live 代码仓库偏离不影响。
+func TestSyncPendingPRsUsesSnapshotNotLiveCodeRepo(t *testing.T) {
+	e := newCodeRepoEnv(t)
+	divergeLiveCodeRepo(t, e.svc.db, e.project.ID)
+	now := time.Now().UTC()
+	e.fake.SetPR(e.codeRepo, 61, &githubapi.PullRequest{
+		RepoFullName: e.codeRepo, Number: 61, HeadSHA: "sha-snap",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 61, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-snap", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+
+	e.review.syncPendingPRs(now.Add(time.Second))
+
+	var ledger model.ReviewPullRequest
+	if err := e.svc.db.Where("project_id = ? AND repo_full_name = ? AND pr_number = 61",
+		e.project.ID, e.codeRepo).First(&ledger).Error; err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	if ledger.SyncPending {
+		t.Fatal("快照匹配的 pending 行应照常同步（清 pending）")
+	}
+	if e.fake.TotalCalls() == 0 {
+		t.Fatal("快照匹配的账本行应产生 GitHub 调用")
 	}
 }
