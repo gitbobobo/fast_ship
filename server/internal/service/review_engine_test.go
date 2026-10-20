@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,13 +78,20 @@ func (e *reviewEngineEnv) enableReview(t *testing.T, opts ...func(*model.Project
 	}
 }
 
+// prPayloadSeq 给测试 payload 生成单调递增的 updated_at。
+var prPayloadSeq atomic.Int64
+
 // prPayload 组一个 pull_request webhook body。
 func prPayload(action, repo string, number int, headSHA string, draft, fork bool) []byte {
 	headRepo := repo
 	if fork {
 		headRepo = "someone-else/" + strings.SplitN(repo, "/", 2)[1]
 	}
-	updatedAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Hour)
+	// 每次调用递增一秒：真实投递的 pull_request.updated_at 单调递增，
+	// 固定时间戳会让「同一 SHA 的后续事件」被当成迟到投递而忽略。
+	prPayloadSeq.Add(1)
+	updatedAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).
+		Add(time.Duration(prPayloadSeq.Load()) * time.Second)
 	payload := map[string]any{
 		"action": action,
 		"number": number,

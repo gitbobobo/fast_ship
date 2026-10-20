@@ -155,14 +155,14 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 			return err
 		}
 	}
+	// 未勾选的动作不开新轮、也不发 GitHub 产出：只登记 seen、取消旧运行、
+	// 删防抖，并把总账 head 推进到新 SHA（否则同 SHA 的下一次已勾选动作会被
+	// 「该 SHA 已受理但非当前 head」当成 force-push 回旧 SHA 而忽略）。
+	if !reviewTriggerEnabled(settings, p.Action) {
+		return s.advancePRHeadTx(tx, project, repo, prNumber, headSHA, p.Installation.ID, now)
+	}
 	if err := s.markPRSyncPendingTx(tx, project, repo, prNumber, headSHA, p.Installation.ID, now); err != nil {
 		return err
-	}
-
-	// 未勾选的动作不开新轮：seen/取消/删防抖/置 pending 已做（SHA 推进与
-	// 旧运行收敛照旧发生），只是不写防抖行。
-	if !reviewTriggerEnabled(settings, p.Action) {
-		return nil
 	}
 
 	// 写/更新防抖行：窗口内新推送覆盖 head/action/meta 并推后 fire_at。
@@ -296,6 +296,32 @@ func (s *ReviewService) supersedePRRunsTx(tx *gorm.DB, projectID, repo string, p
 	return tx.Model(&model.ReviewRunToken{}).
 		Where("run_id IN ? AND consumed_at IS NULL", runIDs).
 		Update("consumed_at", now).Error
+}
+
+// advancePRHeadTx 只推进总账 head（不置 sync_pending）：动作未勾选时不该
+// 发布旧轮结论，但 head 必须前进，供后续已勾选动作按同一 SHA 正常开轮。
+func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, repo string, prNumber int, headSHA string, installationID int64, now time.Time) error {
+	var ledger model.ReviewPullRequest
+	err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		project.ID, repo, prNumber).First(&ledger).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return tx.Create(&model.ReviewPullRequest{
+			ProjectID: project.ID, RepoFullName: repo, PRNumber: prNumber,
+			UserID: project.UserID, InstallationID: installationID,
+			HeadSHA: headSHA, UpdatedAt: now,
+		}).Error
+	case err != nil:
+		return err
+	}
+	updates := map[string]any{"head_sha": headSHA, "updated_at": now}
+	if installationID != 0 {
+		updates["installation_id"] = installationID
+	}
+	return tx.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			project.ID, repo, prNumber).
+		Updates(updates).Error
 }
 
 // markPRSyncPendingTx upsert 总账行并置 sync_pending（epoch+1）；无行时创建

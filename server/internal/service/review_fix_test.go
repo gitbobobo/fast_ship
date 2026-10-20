@@ -355,11 +355,29 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 	if err := e.svc.db.Where("repo_full_name = ? AND pr_number = 61", repo).First(&ledger).Error; err != nil {
 		t.Fatalf("ledger: %v", err)
 	}
-	if !ledger.SyncPending {
-		t.Fatal("未勾选也要置 sync_pending")
+	if ledger.HeadSHA != "sha-new" {
+		t.Fatalf("ledger head = %q, want sha-new（未勾选也要推进 head）", ledger.HeadSHA)
+	}
+	if ledger.SyncPending {
+		t.Fatal("未勾选不应置 sync_pending（不应发布旧轮结论）")
 	}
 	if got := e.debounceCount(t); got != 0 {
 		t.Fatalf("debounce rows = %d, want 0（未勾选不开轮）", got)
+	}
+
+	// 同一 SHA 上随后勾选的动作仍应正常开轮（head 已推进，不会被当成回旧 SHA）。
+	// 把已受理 head 的 pr_updated_at 改旧，模拟真实的「后续事件时间更晚」。
+	e.svc.db.Model(&model.ReviewSeenSHA{}).
+		Where("head_sha = 'sha-new'").
+		Update("pr_updated_at", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	e.svc.db.Model(&model.ProjectReviewSettings{}).Where("project_id = ?", e.project.ID).
+		Update("trigger_ready_for_review", true)
+	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-u2",
+		prPayload("ready_for_review", repo, 61, "sha-new", false, false)); err != nil {
+		t.Fatalf("webhook 2: %v", err)
+	}
+	if got := e.debounceCount(t); got != 1 {
+		t.Fatalf("debounce rows = %d, want 1（同一 SHA 的已勾选动作应开轮）", got)
 	}
 }
 
