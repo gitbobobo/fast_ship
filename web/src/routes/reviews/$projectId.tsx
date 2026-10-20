@@ -498,13 +498,15 @@ function ReviewSettingsForm({
 function ReviewRecordsPanel({ projectId }: { projectId: string }) {
   const { data: records, isLoading } = useReviewRecords(projectId);
   const rerun = useRerunReview(projectId);
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // 展开状态按 repo + PR 号区分：一个项目可能同时保留多个仓库的历史记录，
+  // 同名 PR 号不唯一。
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  const toggle = (prNumber: number) =>
+  const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(prNumber)) next.delete(prNumber);
-      else next.add(prNumber);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
 
@@ -550,8 +552,8 @@ function ReviewRecordsPanel({ projectId }: { projectId: string }) {
         <PullRequestRecord
           key={`${pr.repo_full_name}#${pr.pr_number}`}
           record={pr}
-          expanded={expanded.has(pr.pr_number)}
-          onToggle={() => toggle(pr.pr_number)}
+          expanded={expanded.has(`${pr.repo_full_name}#${pr.pr_number}`)}
+          onToggle={() => toggle(`${pr.repo_full_name}#${pr.pr_number}`)}
           onRerun={() => void handleRerun(pr.pr_number, pr.repo_full_name)}
           rerunning={rerun.isPending}
         />

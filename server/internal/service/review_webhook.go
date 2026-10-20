@@ -314,7 +314,14 @@ func (s *ReviewService) advancePRHeadTx(tx *gorm.DB, project *model.Project, rep
 	case err != nil:
 		return err
 	}
-	updates := map[string]any{"head_sha": headSHA, "updated_at": now}
+	// 前进 head 时清掉可能残留的 pending 并推进 epoch：旧轮的重试不能拿新
+	// head 去发布（此时还没有新轮的运行），在途同步也会因 epoch 不符中止。
+	updates := map[string]any{
+		"head_sha":     headSHA,
+		"sync_pending": false,
+		"sync_epoch":   gorm.Expr("sync_epoch + 1"),
+		"updated_at":   now,
+	}
 	if installationID != 0 {
 		updates["installation_id"] = installationID
 	}

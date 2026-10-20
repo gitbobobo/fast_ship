@@ -335,6 +335,14 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
+	// 先制造一条 pending 的旧账本：未勾选的新 head 必须把它清掉。
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 61,
+		UserID: e.user.ID, HeadSHA: "sha-old", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 3, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
 	old := e.seedRun(t, repo, 61, "sha-old", model.ReviewRunRunning, now)
 	if err := e.review.HandleGitHubWebhook(ctx, "pull_request", "d-u1",
 		prPayload("synchronize", repo, 61, "sha-new", false, false)); err != nil {
@@ -360,6 +368,14 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 	}
 	if ledger.SyncPending {
 		t.Fatal("未勾选不应置 sync_pending（不应发布旧轮结论）")
+	}
+	// 旧轮残留的 pending 必须被清掉，否则调度会拿新 head 按旧轮发布。
+	var epoch int
+	e.svc.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND pr_number = 61", e.project.ID).
+		Select("sync_epoch").Scan(&epoch)
+	if epoch == 0 {
+		t.Fatal("前进 head 时 sync_epoch 应递增（中止在途同步）")
 	}
 	if got := e.debounceCount(t); got != 0 {
 		t.Fatalf("debounce rows = %d, want 0（未勾选不开轮）", got)
