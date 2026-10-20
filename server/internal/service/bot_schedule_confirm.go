@@ -194,12 +194,14 @@ func (s *BotService) resolveScheduleScope(bot *model.Bot, prepared *botPreparedC
 		prepared.ScopeID = task.ID
 		prepared.SchedulePreview = s.schedulePreviewFromTask(bot, schedulePreviewInput{}, task)
 		if prepared.SchedulePreview == nil {
-			if prepared.Action != "delete" {
+			if prepared.Action == "enable" {
+				// enable 要按 cron 重算下次计划：配置不合法就必须先修。
 				return errs.New(errs.ErrInvalidParams.Code,
 					"无法计算任务的生效配置（现有配置不合法），请先修正任务后再操作")
 			}
-			// delete 是清理坏任务的唯一出口：配置不合并不出预览时仍允许删除，
-			// 只保留目标与修订水位（确认卡按动作说明后果，不需要完整配置）。
+			// run/delete 的执行不解析 cron（run 只冻结任务快照、delete 只按 id
+			// 删除），存量非法配置时仍允许受理，只保留目标与修订水位；确认卡
+			// 按动作说明后果，不需要完整配置。
 			prepared.SchedulePreview = &botScheduleCallPreview{
 				TaskID:        task.ID,
 				TaskUpdatedAt: task.UpdatedAt.UTC().Format(time.RFC3339Nano),

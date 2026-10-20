@@ -1072,14 +1072,27 @@ func TestBotInt136AcceptRejectsTaskWithoutPreview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load bot: %v", err)
 	}
+	// enable 要按 cron 重算下次计划：配置不合法必须拒绝。
+	enablePrep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule",
+		`{"action":"enable","task_id":"`+task.ID+`"}`)
+	if err != nil {
+		t.Fatalf("prepare enable: %v", err)
+	}
+	var appErr *errs.AppError
+	if err := env.bots.resolveCallScope(botRow, enablePrep, `{"action":"enable","task_id":"`+task.ID+`"}`, &botCallExecContext{}); !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code {
+		t.Fatalf("没有生效配置时应拒绝 enable: %v", err)
+	}
+	// run 不解析 cron、只冻结任务快照：同样允许受理（保留修订水位）。
 	runPrep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule",
 		`{"action":"run","task_id":"`+task.ID+`"}`)
 	if err != nil {
 		t.Fatalf("prepare run: %v", err)
 	}
-	var appErr *errs.AppError
-	if err := env.bots.resolveCallScope(botRow, runPrep, `{"action":"run","task_id":"`+task.ID+`"}`, &botCallExecContext{}); !errors.As(err, &appErr) || appErr.Code != errs.ErrInvalidParams.Code {
-		t.Fatalf("没有生效配置时应拒绝 run: %v", err)
+	if err := env.bots.resolveCallScope(botRow, runPrep, `{"action":"run","task_id":"`+task.ID+`"}`, &botCallExecContext{}); err != nil {
+		t.Fatalf("run 应仍可受理: %v", err)
+	}
+	if runPrep.SchedulePreview == nil || runPrep.SchedulePreview.TaskUpdatedAt == "" {
+		t.Fatalf("run 预览应保留修订水位: %+v", runPrep.SchedulePreview)
 	}
 	// delete 是清理坏任务的唯一出口：允许受理，但要保留目标与修订水位。
 	delPrep, err := botPrepareToolCall(botToolsetVersionOf(8), "fs_schedule",
