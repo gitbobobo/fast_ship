@@ -126,6 +126,16 @@ describe("ThreadDetailPage", () => {
     expect(screen.getByText("这个线程还没有内容")).toBeInTheDocument();
   });
 
+  it("returns to the thread list instead of relying on history", async () => {
+    mockDetail([]);
+    await renderPage();
+    // 深链进入没有历史时也能回列表。
+    expect(screen.getByRole("link", { name: "返回" })).toHaveAttribute(
+      "href",
+      "/threads",
+    );
+  });
+
   it("renders full markdown for messages and never shows images", async () => {
     const longTail = "END-OF-LONG-MESSAGE";
     mockDetail([

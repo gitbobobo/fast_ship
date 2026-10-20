@@ -332,6 +332,8 @@ func (s *BotService) recordInterruptedCompaction(mr model.BotMaintenanceRun, now
 	reason := model.BotCompactionThreshold
 	if strings.Contains(mr.TriggerKey, string(model.BotCompactionForced)) {
 		reason = model.BotCompactionForced
+	} else if strings.Contains(mr.TriggerKey, string(model.BotCompactionStyle)) {
+		reason = model.BotCompactionStyle
 	}
 	row := &model.BotCompaction{
 		ID:                uuid.NewString(),

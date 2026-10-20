@@ -13,6 +13,7 @@ import App from "@/App";
 import { renderWithRoute } from "@/test/render";
 import type { Bot } from "@/lib/api/bots";
 import { useBot, useBots } from "@/lib/hooks/use-bots";
+import { useBotDetailPanelStore } from "@/lib/store/bot-detail-panel-store";
 
 const {
   createMutateAsync,
@@ -40,7 +41,10 @@ const fakeBot: Bot = {
   id: "b1",
   name: "发布助手",
   persona_prompt: "帮我盯发布",
-  base_url: "https://api.example.com/v1",
+  provider_id: "ap-1",
+  provider_name: "DeepSeek 主号",
+  catalog_id: "deepseek",
+  base_url: "https://api.deepseek.com/v1",
   model: "gpt-test",
   api_key_last4: "1234",
   next_message_seq: 2,
@@ -52,6 +56,50 @@ const fakeBot: Bot = {
   created_at: "2026-10-15T00:00:00Z",
   updated_at: "2026-10-15T00:00:00Z",
 };
+
+// 机器人表单经统一 AI 提供商选模型：提供商与目录数据在这里钉死。
+const fakeAIProvider = {
+  id: "ap-1",
+  catalog_id: "deepseek",
+  name: "DeepSeek 主号",
+  base_url: "https://api.deepseek.com/v1",
+  api_key_last4: "1234",
+  bot_count: 1,
+  created_at: "2026-10-15T00:00:00Z",
+  updated_at: "2026-10-15T00:00:00Z",
+};
+
+const fakeCatalogProvider = {
+  id: "deepseek",
+  name: "DeepSeek",
+  api: "https://api.deepseek.com/v1",
+  models: [
+    {
+      id: "gpt-test",
+      name: "GPT Test",
+      context_window: 131072,
+      max_output_tokens: 8192,
+    },
+    {
+      id: "gpt-pro",
+      name: "GPT Pro",
+      context_window: 262144,
+      max_output_tokens: 16384,
+    },
+  ],
+};
+
+vi.mock("@/lib/hooks/use-ai-providers", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hooks/use-ai-providers")>()),
+  useAIProviders: vi.fn(() => ({
+    data: [fakeAIProvider],
+    isLoading: false,
+  })),
+  useAIProviderCatalog: vi.fn(() => ({
+    data: [fakeCatalogProvider],
+    isLoading: false,
+  })),
+}));
 
 vi.mock("@/lib/hooks/use-bots", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hooks/use-bots")>()),
@@ -194,7 +242,7 @@ describe("BotsPage", () => {
     expect(other.textContent).not.toContain("你：");
   });
 
-  it("creates a bot with name, persona, endpoint, model and key", async () => {
+  it("creates a bot with name and a picked provider model", async () => {
     createMutateAsync.mockResolvedValue(fakeBot);
     const user = userEvent.setup();
     renderWithRoute(<BotsPage />, { path: "/bots", initialEntry: "/bots" });
@@ -204,24 +252,22 @@ describe("BotsPage", () => {
     const dialog = await screen.findByRole("dialog");
 
     await user.type(within(dialog).getByLabelText("名称"), "发布助手");
-    // 新建时人设预填默认模板：先清空再写，提交值就是用户自己的文字。
-    await user.clear(within(dialog).getByLabelText("人设提示词"));
-    await user.type(within(dialog).getByLabelText("人设提示词"), "盯发布");
-    await user.type(
-      within(dialog).getByLabelText("API 地址"),
-      "https://api.example.com/v1",
+    // 新建不预填人设：留空即提交空 persona_prompt（默认人设由服务端注入）。
+    expect(within(dialog).getByLabelText("人设提示词")).toHaveValue("");
+    // 模型走 ModelPicker：面板 portal 到 body，行 role=option。
+    await user.click(within(dialog).getByRole("button", { name: "模型" }));
+    const listbox = await screen.findByRole("listbox");
+    await user.click(
+      within(listbox).getByRole("option", { name: /GPT Pro/ }),
     );
-    await user.type(within(dialog).getByLabelText("模型"), "gpt-test");
-    await user.type(within(dialog).getByLabelText("API Key"), "sk-live-1");
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     expect(createMutateAsync.mock.calls[0][0]).toEqual({
       name: "发布助手",
-      persona_prompt: "盯发布",
-      base_url: "https://api.example.com/v1",
-      model: "gpt-test",
-      api_key: "sk-live-1",
+      persona_prompt: "",
+      provider_id: "ap-1",
+      model: "gpt-pro",
     });
   });
 });
@@ -232,6 +278,26 @@ describe("BotDetailPage", () => {
       path: "/bots/:botId",
       initialEntry: "/bots/b1",
     });
+
+  // 右栏默认收起（INT-134），展开状态持久化在 store 里。需要看右栏内容的
+  // 用例显式展开；默认收起的用例自己把它设回去。
+  beforeEach(() => {
+    useBotDetailPanelStore.setState({ expanded: true });
+  });
+
+  it("右栏默认收起，展开后记住选择", async () => {
+    const user = userEvent.setup();
+    useBotDetailPanelStore.setState({ expanded: false });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: "发布助手" });
+    expect(screen.queryByTestId("bot-detail-panel")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "显示详情" }));
+    expect(await screen.findByTestId("bot-detail-panel")).toBeInTheDocument();
+    // 展开状态落在持久化的 store 里，刷新后沿用。
+    expect(useBotDetailPanelStore.getState().expanded).toBe(true);
+  });
 
   it("shows the bot name in the header and the empty main line", async () => {
     renderDetail();
@@ -257,7 +323,7 @@ describe("BotDetailPage", () => {
 
     expect(panel).toHaveTextContent("发布助手");
     expect(within(panel).getAllByText("gpt-test").length).toBeGreaterThan(0);
-    expect(panel).toHaveTextContent("https://api.example.com/v1");
+    expect(panel).toHaveTextContent("DeepSeek 主号");
     expect(panel).toHaveTextContent("···1234");
     expect(panel).toHaveTextContent("创建时间");
     expect(
@@ -314,6 +380,7 @@ describe("BotDetailPage", () => {
     // 页头切换钮与面板右上角 X 同名，点面板上的那个。
     await user.click(within(panel).getByRole("button", { name: "隐藏详情" }));
     expect(screen.queryByTestId("bot-detail-panel")).toBeNull();
+    expect(useBotDetailPanelStore.getState().expanded).toBe(false);
 
     await user.click(screen.getByRole("button", { name: "显示详情" }));
     expect(await screen.findByTestId("bot-detail-panel")).toBeInTheDocument();
@@ -445,6 +512,60 @@ describe("BotDetailPage", () => {
     await waitFor(() => expect(chatCancel).toHaveBeenCalledWith("c1"));
   });
 
+  it("回复中把等待动画放在内容最底部，输入框里不再有文字提示", async () => {
+    chatOverrides.current = {
+      runActive: true,
+      entries: [
+        {
+          message: {
+            id: "m1",
+            bot_id: "b1",
+            session_kind: "main",
+            seq: 1,
+            role: "user",
+            kind: "user",
+            content: { text: "把定时任务重启一下" },
+            created_at: "2026-10-15T00:00:20Z",
+          },
+        },
+      ],
+      activeRun: {
+        id: "r1",
+        bot_id: "b1",
+        trigger_source: "user_message",
+        status: "running",
+        created_at: "2026-10-15T00:00:20Z",
+      },
+      // 后台调用面板和活动 run 可以同时在场：等待动画必须在它之后，
+      // 贴底时才不会被面板顶出可见区。
+      backgroundCalls: [
+        {
+          id: "c1",
+          bot_id: "b1",
+          tool_name: "fs_issue",
+          action: "comment",
+          arguments: {},
+          execution_mode: "async",
+          requires_confirmation: false,
+          status: "queued",
+          created_at: "2026-10-15T00:00:30Z",
+        },
+      ],
+    };
+    renderDetail();
+
+    const indicator = await screen.findByTestId("bot-typing-indicator");
+    expect(indicator).toHaveAccessibleName("机器人正在回复");
+    const background = await screen.findByTestId("bot-background-calls");
+    expect(
+      background.compareDocumentPosition(indicator) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // 提示从输入框里挑走了：表单内不再有那句长文案。
+    const composer = screen.getByRole("form", { name: "机器人消息输入" });
+    expect(composer).not.toHaveTextContent("机器人正在处理中");
+  });
+
   it("shows maintenance progress in the run bar with distinct styling on failure", async () => {
     chatOverrides.current = {
       runActive: true,
@@ -544,7 +665,7 @@ describe("BotDetailPage", () => {
     expect(within(dialog).getByLabelText("名称")).toHaveValue("发布助手");
   });
 
-  it("edit dialog keeps the key empty and only shows its last four digits", async () => {
+  it("edit dialog prefills provider+model via the model picker", async () => {
     const user = userEvent.setup();
     renderDetail();
 
@@ -552,14 +673,16 @@ describe("BotDetailPage", () => {
     await user.click(within(panel).getByRole("button", { name: "编辑" }));
     const dialog = await screen.findByRole("dialog");
 
-    const keyInput = within(dialog).getByLabelText("API Key") as HTMLInputElement;
-    expect(keyInput).toHaveValue("");
-    expect(within(dialog).getByText(/末四位 1234/)).toBeInTheDocument();
-    // 已存配置不回填到表单。
+    // 密钥/地址在提供商侧管理，机器人表单不再出现这些字段。
+    expect(within(dialog).queryByLabelText("API Key")).toBeNull();
+    expect(within(dialog).queryByLabelText("API 地址")).toBeNull();
     expect(within(dialog).getByLabelText("名称")).toHaveValue("发布助手");
+    expect(
+      within(dialog).getByRole("button", { name: "模型" }),
+    ).toHaveTextContent("GPT Test");
   });
 
-  it("tests connection against the stored key with form overrides", async () => {
+  it("tests connection against the picked provider and model", async () => {
     testConnectionMutateAsync.mockResolvedValue({
       ok: true,
       checks: [{ name: "streaming", passed: true }],
@@ -577,7 +700,7 @@ describe("BotDetailPage", () => {
     await waitFor(() =>
       expect(testConnectionMutateAsync).toHaveBeenCalledWith({
         bot_id: "b1",
-        base_url: "https://api.example.com/v1",
+        provider_id: "ap-1",
         model: "gpt-test",
       }),
     );

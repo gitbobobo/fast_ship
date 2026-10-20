@@ -10,6 +10,7 @@ import type {
 } from "@/lib/api/threads";
 import {
   applyThreadStreamEvent,
+  mergeThreadSummary,
   useCreateThread,
   useThreadDetail,
   useThreadItemDetail,
@@ -470,5 +471,192 @@ describe("useThreadItemDetail body isolation", () => {
 
     await act(async () => resolve(body("OUT-v2")));
     await waitFor(() => expect(result.current.data?.text).toBe("OUT-v2"));
+  });
+});
+
+describe("useThreadDetail list sync", () => {
+  it("writes the fetched thread summary into the list cache", async () => {
+    const { client, wrapper } = setup();
+    const threadsKey = ["t3-threads", "A", "threads"];
+    client.setQueryData(threadsKey, {
+      items: [{ id: "t1", environment_id: "e1", status: "running" }],
+      environments: [],
+    });
+    detail.mockResolvedValue({
+      data: {
+        ...response("idle").data,
+        thread: {
+          id: "t1",
+          environment_id: "e1",
+          status: "idle",
+        } as ThreadDetail["thread"],
+      },
+    });
+
+    const { result } = renderHook(() => useThreadDetail("e1", "t1"), { wrapper });
+    await waitFor(() => expect(result.current.data?.thread.status).toBe("idle"));
+
+    const list = client.getQueryData<{ items: { id: string; status: string }[] }>(
+      threadsKey,
+    );
+    expect(list?.items[0]).toMatchObject({ id: "t1", status: "idle" });
+  });
+});
+
+describe("mergeThreadSummary", () => {
+  it("writes the fetched detail summary back into the cached list", () => {
+    const { client } = setup();
+    const threadsKey = ["t3-threads", "u1", "threads"];
+    client.setQueryData(threadsKey, {
+      items: [
+        { id: "t1", environment_id: "e1", status: "running", updated_at: "1" },
+        { id: "t2", environment_id: "e1", status: "idle", updated_at: "2" },
+      ],
+      environments: [],
+    });
+
+    mergeThreadSummary(client, "u1", {
+      id: "t1",
+      environment_id: "e1",
+      status: "idle",
+      updated_at: "3",
+    } as ThreadDetail["thread"]);
+
+    const list = client.getQueryData<{ items: ThreadDetail["thread"][] }>(threadsKey);
+    expect(list?.items[0]).toMatchObject({ id: "t1", status: "idle", updated_at: "3" });
+    // 其它线程原样保留。
+    expect(list?.items[1]).toMatchObject({ id: "t2", status: "idle", updated_at: "2" });
+  });
+
+  it("does not let an older detail summary overwrite a newer list item", () => {
+    const { client } = setup();
+    const threadsKey = ["t3-threads", "u1", "threads"];
+    client.setQueryData(threadsKey, {
+      items: [
+        { id: "t1", environment_id: "e1", status: "running", updated_at: "2026-10-19T10:00:00Z" },
+      ],
+      environments: [],
+    });
+
+    // 迟到/更旧的详情快照（例如详情读的是更早的 shell 快照）。
+    mergeThreadSummary(client, "u1", {
+      id: "t1",
+      environment_id: "e1",
+      status: "idle",
+      updated_at: "2026-10-19T09:59:00Z",
+    } as ThreadDetail["thread"]);
+    expect(
+      client.getQueryData<{ items: ThreadDetail["thread"][] }>(threadsKey)?.items[0]
+        .status,
+    ).toBe("running");
+
+    // 同一时刻或更新时正常覆盖。
+    mergeThreadSummary(client, "u1", {
+      id: "t1",
+      environment_id: "e1",
+      status: "idle",
+      updated_at: "2026-10-19T10:00:00Z",
+    } as ThreadDetail["thread"]);
+    expect(
+      client.getQueryData<{ items: ThreadDetail["thread"][] }>(threadsKey)?.items[0]
+        .status,
+    ).toBe("idle");
+  });
+
+  it("ignores threads from another environment and a missing list cache", () => {
+    const { client } = setup();
+    const threadsKey = ["t3-threads", "u1", "threads"];
+    client.setQueryData(threadsKey, {
+      items: [{ id: "t1", environment_id: "e1", status: "running" }],
+      environments: [],
+    });
+
+    mergeThreadSummary(client, "u1", {
+      id: "t1",
+      environment_id: "e2",
+      status: "idle",
+    } as ThreadDetail["thread"]);
+    expect(
+      client.getQueryData<{ items: ThreadDetail["thread"][] }>(threadsKey)?.items[0]
+        .status,
+    ).toBe("running");
+
+    expect(() =>
+      mergeThreadSummary(client, "u2", {
+        id: "t1",
+        environment_id: "e1",
+        status: "idle",
+      } as ThreadDetail["thread"]),
+    ).not.toThrow();
+  });
+});
+
+describe("useThreads detail overlay", () => {
+  it("keeps a newer cached detail summary when the list response is older", async () => {
+    const { client, wrapper } = setup();
+    // 详情已经拿到「空闲」的较新摘要
+    client.setQueryData(["t3-threads", "A", "thread", "e1", "t1"], {
+      thread: {
+        id: "t1",
+        environment_id: "e1",
+        status: "idle",
+        updated_at: "2026-10-19T10:05:00Z",
+      },
+      items: [],
+      queue: makeQueue(),
+      activity: makeActivity(),
+      access: "operate",
+    });
+    // 列表响应是状态变化前的快照（updated_at 更早）
+    list.mockResolvedValue({
+      data: {
+        items: [
+          {
+            id: "t1",
+            environment_id: "e1",
+            status: "running",
+            updated_at: "2026-10-19T10:00:00Z",
+          },
+        ],
+        environments: [],
+      },
+    });
+
+    const { result } = renderHook(() => useThreads(), { wrapper });
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(1));
+    expect(result.current.data?.items[0].status).toBe("idle");
+  });
+
+  it("leaves the list response alone when the cached detail is older", async () => {
+    const { client, wrapper } = setup();
+    client.setQueryData(["t3-threads", "A", "thread", "e1", "t1"], {
+      thread: {
+        id: "t1",
+        environment_id: "e1",
+        status: "idle",
+        updated_at: "2026-10-19T09:59:00Z",
+      },
+      items: [],
+      queue: makeQueue(),
+      activity: makeActivity(),
+      access: "operate",
+    });
+    list.mockResolvedValue({
+      data: {
+        items: [
+          {
+            id: "t1",
+            environment_id: "e1",
+            status: "running",
+            updated_at: "2026-10-19T10:00:00Z",
+          },
+        ],
+        environments: [],
+      },
+    });
+
+    const { result } = renderHook(() => useThreads(), { wrapper });
+    await waitFor(() => expect(result.current.data?.items).toHaveLength(1));
+    expect(result.current.data?.items[0].status).toBe("running");
   });
 });

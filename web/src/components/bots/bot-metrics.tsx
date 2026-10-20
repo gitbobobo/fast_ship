@@ -4,6 +4,7 @@ import type { BotMetrics as BotMetricsData } from "@/lib/api/bots";
 export const CONTEXT_SOURCE_LABELS: Record<string, string> = {
   manual: "部署覆盖",
   detected: "自动检测",
+  catalog: "内置目录",
   known: "已知模型",
   fallback: "默认值",
 };

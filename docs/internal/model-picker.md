@@ -29,6 +29,9 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
   一致（同 provider 下同名模型靠它区分）。子 provider 名以 provider 名开头时
   （`OpenCode` / `OpenCode Zen`）只显示子 provider，纯空白视同没有；搜索命中
   模型名与这条副标题全文。
+- `ProviderChoice` 可带 `iconId`（INT-133）：图标解析键与实例 id 不一致时用它
+  （机器人表单把 AI 提供商的 `catalog_id` 当图标键，`instanceId` 仍是
+  `ai_providers.id`）；缺省回落 `instanceId`。
 - ACP registry 接入的 harness 按实例后缀取官方图标：`acpRegistry_devin` →
   devin、`acpRegistry_factory_droid` → `factory-droid`（注册表 agent id 把
   `-` 换成 `_`）。图标全量内联在 `acp-registry-icons.ts`（生成文件，快照自
@@ -65,6 +68,10 @@ rail（第一项「收藏」星标），右侧搜索框 + 模型列表。
   「加载失败，请重试」/「xx（已失效）」；选值经 `resolveModel` +
   `buildModelSelection` 落成 canonical `options` 数组。
   `ModelMultiPicker` 目前没有调用点（多选需求随通用自动化一起移除）。
+- 机器人表单（`bots/bot-form-dialog.tsx`，INT-133）：把已配置的 AI 提供商
+  映射成 `ProviderChoice`（`provider-choices.ts`），模型清单来自内置
+  models.dev 目录；目录里没有模型清单的提供商（`custom`）不进 picker，由
+  表单另给手填模型输入框。选中回调的 `instanceId` 就是 `provider_id`。
 
 ## 测试注意
 

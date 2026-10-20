@@ -320,7 +320,7 @@ func TestBotAutoCompaction(t *testing.T) {
 
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "autocomp")
-	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "auto", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "auto", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -987,7 +987,7 @@ func TestBotContextLimitRetrySecondFails(t *testing.T) {
 	t.Cleanup(srv.Close)
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "lim2")
-	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "b", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "b", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1030,7 +1030,7 @@ func TestBotContextLimitNotOn429(t *testing.T) {
 	t.Cleanup(srv.Close)
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "r429")
-	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "b", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "b", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1064,7 +1064,7 @@ func TestBotContextLimitNotOnMaxTokens400(t *testing.T) {
 	t.Cleanup(srv.Close)
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "mt400")
-	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "b", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "b", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -1154,7 +1154,7 @@ func TestBotSummaryFailureFallback(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	u3 := createBotTestUser(t, envHTTP.db, "sumhttp")
-	b3, err := envHTTP.bots.Create(u3, &CreateBotRequest{Name: "h", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	b3, err := envHTTP.bots.Create(u3, &CreateBotRequest{Name: "h", ProviderID: envHTTP.createProviderAt(t, u3, srv.URL, "sk-x0000"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -2131,7 +2131,7 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 	t.Cleanup(srvC.Close)
 	envC := setupBotTestEnv(t)
 	uC := createBotTestUser(t, envC.db, "personac")
-	botC, err := envC.bots.Create(uC, &CreateBotRequest{Name: "pc", BaseURL: srvC.URL, Model: "m", APIKey: "sk-test-abcdef123456"})
+	botC, err := envC.bots.Create(uC, &CreateBotRequest{Name: "pc", ProviderID: envC.createProviderAt(t, uC, srvC.URL, "sk-test-abcdef123456"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create compact freeze: %v", err)
 	}
@@ -2160,9 +2160,11 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 	if _, err := envC.bots.Update(uC, botC.ID, &UpdateBotRequest{PersonaPrompt: &markerC}); err != nil {
 		t.Fatalf("update persona during compact: %v", err)
 	}
+	// 密钥在 provider 上（INT-133）：压缩并发期轮换 provider 密钥，
+	// 活动 run 仍按冻结密文发完本轮。
 	badKey := "sk-bad-replacement-xxxx"
-	if _, err := envC.bots.Update(uC, botC.ID, &UpdateBotRequest{APIKey: &badKey}); err != nil {
-		t.Fatalf("update key during compact: %v", err)
+	if _, err := NewAIProviderService(envC.db, envC.cfg, zap.NewNop()).Update(uC, botC.ProviderID, &UpdateAIProviderRequest{APIKey: &badKey}); err != nil {
+		t.Fatalf("update provider key during compact: %v", err)
 	}
 	close(holdC)
 	waitForBot(t, "persona compact fail", 20*time.Second, func() bool { return envC.botSettled(botC.ID) })
@@ -2242,7 +2244,7 @@ func TestBotPersonaFrozenDuringHold(t *testing.T) {
 	t.Cleanup(srvD.Close)
 	envD := setupBotTestEnv(t)
 	uD := createBotTestUser(t, envD.db, "personad")
-	botD, err := envD.bots.Create(uD, &CreateBotRequest{Name: "pd", BaseURL: srvD.URL, Model: "m", APIKey: "sk-test-abcdef123456"})
+	botD, err := envD.bots.Create(uD, &CreateBotRequest{Name: "pd", ProviderID: envD.createProviderAt(t, uD, srvD.URL, "sk-test-abcdef123456"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create no_gain: %v", err)
 	}
@@ -2477,7 +2479,7 @@ func TestBotSummarySerializedCostShrink(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "escsum")
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "esc", BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-test-abcdef123456",
+		Name: "esc", ProviderID: env.createProvider(t, userID, "sk-test-abcdef123456"), Model: "fake-model",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -2693,7 +2695,7 @@ func TestBotSummaryShrinkFitsMinimalPiece(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "minpiece")
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "min", BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-test-abcdef123456",
+		Name: "min", ProviderID: env.createProvider(t, userID, "sk-test-abcdef123456"), Model: "fake-model",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -2769,7 +2771,7 @@ func TestBotSummaryShrinkWrapperOverWindow(t *testing.T) {
 	env.fake.strict = true
 	userID := createBotTestUser(t, env.db, "wrapover")
 	bot, err := env.bots.Create(userID, &CreateBotRequest{
-		Name: "wrap", BaseURL: env.fake.URL(), Model: "fake-model", APIKey: "sk-test-abcdef123456",
+		Name: "wrap", ProviderID: env.createProvider(t, userID, "sk-test-abcdef123456"), Model: "fake-model",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -2871,7 +2873,7 @@ func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
 	env := setupBotTestEnv(t, fakeModelTurn{Text: "定时汇报：已完成"})
 	userID := createBotTestUser(t, env.db, "schedact5")
 	bot := env.createBot(t, userID)
-	const oldPrompt = "旧平台提示：没有对话风格段落"
+	const oldPrompt = "旧平台提示：没有默认人设段落"
 	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
 		"toolset_version":         botToolsetVersion,
 		"platform_prompt_version": 4,
@@ -2894,8 +2896,8 @@ func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
 	if fresh.PlatformPromptVersion != botPlatformPromptVersion {
 		t.Fatalf("schedule run 应激活平台提示词到 %d，实得 %d", botPlatformPromptVersion, fresh.PlatformPromptVersion)
 	}
-	if !strings.Contains(fresh.SystemPromptText, "对话风格") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
-		t.Fatalf("schedule run 后系统提示词应重建为含对话风格的新文案")
+	if !strings.Contains(fresh.SystemPromptText, "说话方式") || strings.Contains(fresh.SystemPromptText, oldPrompt) {
+		t.Fatalf("schedule run 后系统提示词应重建为含默认人设的新文案")
 	}
 	req := env.fake.nextRequest(t, 10*time.Second)
 	elems, _ := rawMessages(t, req.Body)
@@ -2912,7 +2914,7 @@ func TestBotScheduleRunActivatesStaleBot(t *testing.T) {
 	if sys.Role != "system" {
 		t.Fatalf("首条消息应为 system: %s", sys.Role)
 	}
-	if !strings.Contains(sys.Content, "对话风格") || strings.Contains(sys.Content, oldPrompt) {
+	if !strings.Contains(sys.Content, "说话方式") || strings.Contains(sys.Content, oldPrompt) {
 		t.Fatalf("schedule 请求的 system 消息应为激活后的新提示词: %q", sys.Content)
 	}
 }
@@ -2945,7 +2947,7 @@ func TestBotCompactionPublishPromptChanged(t *testing.T) {
 
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "pubconf")
-	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "pubconf", BaseURL: srv.URL, Model: "m", APIKey: "sk-x"})
+	bot, err := env.bots.Create(userID, &CreateBotRequest{Name: "pubconf", ProviderID: env.createProviderAt(t, userID, srv.URL, "sk-x0000"), Model: "m"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

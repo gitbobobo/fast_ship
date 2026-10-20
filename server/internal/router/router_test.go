@@ -1072,6 +1072,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	notificationService := service.NewNotificationService(repository.NewNotificationRepository(db))
 	reviewService := service.NewReviewService(db, projectRepo, repository.NewGitHubWebhookDeliveryRepository(db), notificationSink, nil, nil, nil, nil, nil, nil, cfg, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
+	aiProviderHandler := handler.NewAIProviderHandler(service.NewAIProviderService(db, cfg, zap.NewNop()))
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
 	aiHandler := handler.NewAIHandler(aiService)
@@ -1113,7 +1114,7 @@ func setupRouterTestEnvMaybeLogs(t *testing.T, captureLogs bool, opts ...routerC
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, notificationHandler, reviewHandler, reviewAgentHandler, reviewService, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,

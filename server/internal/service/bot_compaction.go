@@ -632,7 +632,11 @@ func (s *BotService) planCompaction(bot *model.Bot, run *model.BotRun, reason mo
 		IdentifierManifestJSON: state.IdentifierManifestJSON,
 		Folded:                 folded,
 	})
-	needSummary := len(segment) > 0 && (afterFold > goal || reason == model.BotCompactionForced)
+	// needSummary：有可摘要段且（折叠后仍超目标 / 强制 / 风格升级）。风格压缩
+	// （INT-133）的目的就是把历史长回复收进摘要——历史低于目标时若只折叠
+	// 不发摘要，旧长回复会原样留在投影里。style 不套 context_limit 的硬
+	// 失败语义：不可达/无净缩减仍走非致命路径记录，不阻塞对话。
+	needSummary := len(segment) > 0 && (afterFold > goal || reason == model.BotCompactionForced || reason == model.BotCompactionStyle)
 
 	return &botCompactionPlan{
 		State: state, Reason: reason, FromSeq: state.SummaryThroughSeq, ThroughSeq: cut.ThroughSeq,
@@ -1633,6 +1637,10 @@ func (s *BotService) finishMaintenanceRunTx(tx *gorm.DB, maintRun *model.BotMain
 // 时副本保持原值，「事务内绝不改 run 副本」是这里的硬不变量（否则 commit 失败
 // 时 run 会冻结一份库里从未持久化的提示词）。每次 run 一个短事务：版本已最新
 // 时只有一次 SELECT、不写库，不再需要进程内的激活缓存与事务后按库补读。
+//
+// 说话方式升级的一次性压缩不挂在激活的返回值上：那是瞬时判定，跨不过重启、
+// 也挡不住 schedule run 先激活的情形。待办改由持久水位
+// bots.style_compaction_version 表达，主线 run 的压缩决策处读取（INT-133）。
 func (s *BotService) activateBotPrompt(bot *model.Bot) error {
 	now := s.now()
 	var state model.Bot
@@ -1714,6 +1722,8 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 		return err
 	}
 	note := botToolsetChangeNote(from, botToolsetVersion)
+	// INT-133：升级通知只作为内部信息，模型不需要向用户转述或逐项验证。
+	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
 	content := botLifecycleContent{
 		Event: "toolset_updated",
 		Detail: json.RawMessage(fmt.Sprintf(

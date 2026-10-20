@@ -8126,7 +8126,7 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 
 ## bots
 
-内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位
+内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位。INT-133 起地址与密钥改存到 AI 提供商，bot 只存引用
 
 ### GET `/api/bots`
 
@@ -8151,12 +8151,15 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 | `items[].prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
 | `items[].platform_prompt_version` | integer（int64） | 是 |  |
 | `items[].toolset_version` | integer（int64） | 是 |  |
-| `items[].base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `items[].provider_id` | string | 是 | 所属 AI 提供商（INT-133）；地址与密钥都在提供商上 |
+| `items[].provider_name` | string | 是 | 提供商名称（展示用，派生自 provider） |
+| `items[].catalog_id` | string | 是 | 提供商的目录 id（models.dev id 或 custom，派生自 provider） |
+| `items[].base_url` | string | 是 | OpenAI 兼容 API 基址；INT-133 起为 provider 的派生值（提供商轮换后下一次读取生效） |
 | `items[].model` | string | 是 |  |
-| `items[].api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
-| `items[].context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
-| `items[].max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
-| `items[].context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `items[].api_key_last4` | string | 是 | API Key 末四位（provider 的派生值）；明文任何端点都不回显 |
+| `items[].context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口 |
+| `items[].max_output_tokens` | integer（int64） | 是 | 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0 |
+| `items[].context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）； 展示层不得把回退值说成已检测 |
 | `items[].context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `items[].next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `items[].last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
@@ -8178,8 +8181,9 @@ request_id 与 run_id 必须二选一；同请求的响应头 X-Request-Id 即�
 
 创建机器人
 
-人设与平台规则在创建时拼成系统提示词并生成 prompt_revision=1；
-API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不做唯一约束。
+provider_id 必填且属于当前用户（INT-133）：地址与密钥都在 AI 提供商上，
+bot 只存引用，同一 provider 可被多个机器人共用。人设与平台规则在创建时
+拼成系统提示词并生成 prompt_revision=1。同名机器人不做唯一约束。
 
 **鉴权**：仅 JWT
 
@@ -8191,9 +8195,8 @@ API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不�
 | --- | --- | --- | --- |
 | `name` | string（长度 ≥1） | 是 |  |
 | `persona_prompt` | string | 否 |  |
-| `base_url` | string | 是 |  |
-| `model` | string | 是 |  |
-| `api_key` | string | 是 | OpenAI 兼容 API Key；加密落库，仅创建/更新时提交 |
+| `provider_id` | string | 是 | 必填且属于当前用户（40433）；地址与密钥都在提供商上 |
+| `model` | string | 是 | 模型名，不带 provider 前缀 |
 
 **成功响应**
 
@@ -8209,12 +8212,15 @@ API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不�
 | `prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
 | `platform_prompt_version` | integer（int64） | 是 |  |
 | `toolset_version` | integer（int64） | 是 |  |
-| `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `provider_id` | string | 是 | 所属 AI 提供商（INT-133）；地址与密钥都在提供商上 |
+| `provider_name` | string | 是 | 提供商名称（展示用，派生自 provider） |
+| `catalog_id` | string | 是 | 提供商的目录 id（models.dev id 或 custom，派生自 provider） |
+| `base_url` | string | 是 | OpenAI 兼容 API 基址；INT-133 起为 provider 的派生值（提供商轮换后下一次读取生效） |
 | `model` | string | 是 |  |
-| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
-| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
-| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
-| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `api_key_last4` | string | 是 | API Key 末四位（provider 的派生值）；明文任何端点都不回显 |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口 |
+| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0 |
+| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）； 展示层不得把回退值说成已检测 |
 | `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
@@ -8237,12 +8243,14 @@ API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不�
 
 测试模型连接（流式与工具调用兼容性）
 
-只做最小模型探测，不写入主线。可传完整未保存配置；也可传 bot_id 使用
-已保存 key，并允许表单覆盖 base_url/model。streaming 与 tool_call 两项
-检查分别返回；HTTP 200 且 ok=false 表示配置可达性/兼容性问题。
-另同步探测 GET /models 的模型窗口元数据（INT-115）：成功写入缓存并把
-detected 值并入响应；失败回退当前解析值（manual/默认窗口），不影响 ok。
-SDK 重试显式关零，不产生隐藏重复调用。
+只做最小模型探测，不写入主线。地址与密钥一律取 provider_id 对应的
+AI 提供商（INT-133），不接受请求体里的 base_url/api_key；model 显式
+提供时优先，否则沿用 bot_id 对应机器人的已保存模型（两者都没有时 400）。
+streaming 与 tool_call 两项检查分别返回；HTTP 200 且 ok=false 表示
+配置可达性/兼容性问题。另同步探测 GET /models 的模型窗口元数据
+（INT-115）：成功写入缓存并把 detected 值并入响应；失败回退当前解析值
+（manual/catalog/默认窗口），不影响 ok。SDK 重试显式关零，不产生隐藏
+重复调用。测试保存中的新密钥请用 POST /api/ai-providers/test。
 
 **鉴权**：仅 JWT
 
@@ -8250,14 +8258,13 @@ SDK 重试显式关零，不产生隐藏重复调用。
 
 `application/json`，必填。
 
-未保存配置时必须提供 base_url/model/api_key；给 bot_id 时用已保存 key 并允许表单覆盖地址/模型
+地址与密钥一律取 provider（INT-133）；model 显式提供时优先，否则沿用 bot_id 的已保存模型（两者都没有时 40001）
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `bot_id` | string | 否 |  |
-| `base_url` | string | 否 |  |
+| `provider_id` | string | 是 |  |
+| `bot_id` | string | 否 | 可选；给出时 model 缺省沿用该机器人的已保存模型 |
 | `model` | string | 否 |  |
-| `api_key` | string | 否 |  |
 
 **成功响应**
 
@@ -8272,9 +8279,9 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `checks[].name` | string | 是 | streaming / tool_call |
 | `checks[].passed` | boolean | 是 |  |
 | `checks[].detail` | string | 否 | 失败原因（截断；不含密钥） |
-| `context_window` | integer（int64） | 是 | 模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存； 失败回退到当前解析值（manual / 默认窗口） |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存； 失败回退到当前解析值（manual / catalog / 默认窗口） |
 | `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅探测到时非 0 |
-| `context_source` | string | 是 | 窗口来源 manual / detected / fallback（探测失败时如实标注） |
+| `context_source` | string | 是 | 窗口来源 manual / detected / catalog / fallback（探测失败时如实标注） |
 | `context_detail` | string | 否 | 解析口径说明；可省略 |
 
 **错误**
@@ -8314,12 +8321,15 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
 | `platform_prompt_version` | integer（int64） | 是 |  |
 | `toolset_version` | integer（int64） | 是 |  |
-| `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `provider_id` | string | 是 | 所属 AI 提供商（INT-133）；地址与密钥都在提供商上 |
+| `provider_name` | string | 是 | 提供商名称（展示用，派生自 provider） |
+| `catalog_id` | string | 是 | 提供商的目录 id（models.dev id 或 custom，派生自 provider） |
+| `base_url` | string | 是 | OpenAI 兼容 API 基址；INT-133 起为 provider 的派生值（提供商轮换后下一次读取生效） |
 | `model` | string | 是 |  |
-| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
-| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
-| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
-| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `api_key_last4` | string | 是 | API Key 末四位（provider 的派生值）；明文任何端点都不回显 |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口 |
+| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0 |
+| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）； 展示层不得把回退值说成已检测 |
 | `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
@@ -8342,7 +8352,8 @@ SDK 重试显式关零，不产生隐藏重复调用。
 
 更新机器人配置
 
-指针字段表达「未提供保留」；api_key 缺省保留原 key，空串拒绝（40001）。
+指针字段表达「未提供保留」。provider_id 变更时新提供商必须属于当前用户，
+否则 40433；地址与密钥随提供商（INT-133），轮换密钥请更新 provider。
 人设变化重建系统提示词并递增 prompt_revision。配置变化对下个 run 生效，
 当前 run 使用开始时的快照与已创建的客户端。
 
@@ -8358,15 +8369,14 @@ SDK 重试显式关零，不产生隐藏重复调用。
 
 `application/json`，必填。
 
-指针字段表达「未提供保留」；api_key 空串拒绝（40001）
+指针字段表达「未提供保留」；INT-133 起不再接受 base_url / api_key，密钥轮换经 AI 提供商端点
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string | 否 |  |
 | `persona_prompt` | string | 否 |  |
-| `base_url` | string | 否 |  |
+| `provider_id` | string | 否 | 更换所属提供商；必须属于当前用户（40433） |
 | `model` | string | 否 |  |
-| `api_key` | string | 否 |  |
 
 **成功响应**
 
@@ -8382,12 +8392,15 @@ SDK 重试显式关零，不产生隐藏重复调用。
 | `prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
 | `platform_prompt_version` | integer（int64） | 是 |  |
 | `toolset_version` | integer（int64） | 是 |  |
-| `base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `provider_id` | string | 是 | 所属 AI 提供商（INT-133）；地址与密钥都在提供商上 |
+| `provider_name` | string | 是 | 提供商名称（展示用，派生自 provider） |
+| `catalog_id` | string | 是 | 提供商的目录 id（models.dev id 或 custom，派生自 provider） |
+| `base_url` | string | 是 | OpenAI 兼容 API 基址；INT-133 起为 provider 的派生值（提供商轮换后下一次读取生效） |
 | `model` | string | 是 |  |
-| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
-| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
-| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
-| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `api_key_last4` | string | 是 | API Key 末四位（provider 的派生值）；明文任何端点都不回显 |
+| `context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口 |
+| `max_output_tokens` | integer（int64） | 是 | 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0 |
+| `context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）； 展示层不得把回退值说成已检测 |
 | `context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
@@ -8607,12 +8620,15 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `bot.prompt_revision` | integer（int64） | 是 | 人设/平台规则版本；用户明确编辑人设时递增 |
 | `bot.platform_prompt_version` | integer（int64） | 是 |  |
 | `bot.toolset_version` | integer（int64） | 是 |  |
-| `bot.base_url` | string | 是 | OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1） |
+| `bot.provider_id` | string | 是 | 所属 AI 提供商（INT-133）；地址与密钥都在提供商上 |
+| `bot.provider_name` | string | 是 | 提供商名称（展示用，派生自 provider） |
+| `bot.catalog_id` | string | 是 | 提供商的目录 id（models.dev id 或 custom，派生自 provider） |
+| `bot.base_url` | string | 是 | OpenAI 兼容 API 基址；INT-133 起为 provider 的派生值（提供商轮换后下一次读取生效） |
 | `bot.model` | string | 是 |  |
-| `bot.api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
-| `bot.context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
-| `bot.max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
-| `bot.context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测 |
+| `bot.api_key_last4` | string | 是 | API Key 末四位（provider 的派生值）；明文任何端点都不回显 |
+| `bot.context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口 |
+| `bot.max_output_tokens` | integer（int64） | 是 | 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0 |
+| `bot.context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）； 展示层不得把回退值说成已检测 |
 | `bot.context_detail` | string | 否 | 解析口径说明（探测方式或回退原因）；可省略 |
 | `bot.next_event_seq` | integer（int64） | 是 | 事件账本水位（下一条的 seq）；详情订阅以此-1 为 afterSeq， 与详情快照衔接，不从 0 重放历史 |
 | `bot.last_message` | object（可空） | 否 | 主线最近一条正文 trim 后非空的 user/assistant 消息预览（按 seq 最大取）； 正文纯空白或 content 坏 JSON 的消息跳过继续往前找，定时任务会话不参与。 没有符合条件消息时为 null。仅 GET /api/bots 列表端点返回真实值； 详情与聊天快照等其它端点恒为 null。机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用 |
@@ -8676,9 +8692,9 @@ client_message_id 必填（幂等键）：同键同正文返回已有消息；�
 | `runs[].finished_at` | string（date-time，可空） | 否 |  |
 | `next_event_seq` | integer（int64） | 是 | 与快照同一读取点的事件账本水位（下一条的 seq） |
 | `metrics` | object（可空） | 否 | 运行指标（INT-115）：窗口能力 + 最近一次主线模型请求口径； 没有主线请求时 request 缺省、窗口能力仍然可见 |
-| `metrics.context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口 |
-| `metrics.max_output_tokens` | integer（int64） | 是 | 模型输出上限；仅 detected 来源可给出，未知为 0 |
-| `metrics.context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口） |
+| `metrics.context_window` | integer（int64） | 是 | 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口 |
+| `metrics.max_output_tokens` | integer（int64） | 是 | 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0 |
+| `metrics.context_source` | string | 是 | 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口） |
 | `metrics.context_detail` | string | 否 | 解析口径说明；可省略 |
 | `metrics.request` | object | 否 | 最近一次主线模型请求（进行中或已结束）；没有主线请求时省略。单次主线模型请求口径；历史累计仍在 run 上，指标区不用累计值 |
 | `metrics.request.request_id` | string | 是 |  |
@@ -9605,6 +9621,313 @@ effect_may_have_occurred=true（不声称回滚）。已终结调用幂等返回
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
 | 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+## ai-providers
+
+AI 提供商（INT-133，仅 JWT）：按用户隔离的「地址 + 密钥」配置，可被多个机器人引用；内置 models.dev 目录（OpenAI 兼容 + 有 api 地址 + 模型支持 tool_call 的子集，随发版刷新）用于选择提供商与模型。key 全链路脱敏只回末四位
+
+### GET `/api/ai-providers`
+
+<!-- operationId: listAIProviders -->
+
+列出当前用户的 AI 提供商（含被引用计数）
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 提供商列表
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].catalog_id` | string | 是 | models.dev 提供商 id，或 custom |
+| `items[].name` | string | 是 |  |
+| `items[].base_url` | string | 是 | 规范化存储（TrimSpace + 去尾部 /）；目录提供商由目录决定，custom 由用户提供 |
+| `items[].api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `items[].bot_count` | integer | 是 | 当前引用该提供商的机器人数量 |
+| `items[].created_at` | string（date-time） | 是 |  |
+| `items[].updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/ai-providers`
+
+<!-- operationId: createAIProvider -->
+
+新增 AI 提供商
+
+catalog_id 为目录 id 或 `custom`。目录提供商的 base_url 由目录决定
+（请求里的 base_url 忽略）；custom 必须给 http/https 地址，存储前
+规范化（TrimSpace + 去尾部 /）。name 缺省用目录名（custom 用「自定义」）。
+api_key 加密落库（AES-GCM），响应只回末四位。同一 catalog 允许配多份
+不同 key。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `catalog_id` | string | 是 | models.dev 提供商 id，或 custom |
+| `name` | string | 否 | 缺省用目录名（custom 用「自定义」） |
+| `base_url` | string | 否 | 仅 custom 接受；必须是 http/https，存储前规范化。目录提供商的地址由目录决定，此字段忽略 |
+| `api_key` | string | 是 | 加密落库；空串/空白拒绝（40001） |
+
+**成功响应**
+
+**200** 创建成功
+
+`data`：
+
+AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `catalog_id` | string | 是 | models.dev 提供商 id，或 custom |
+| `name` | string | 是 |  |
+| `base_url` | string | 是 | 规范化存储（TrimSpace + 去尾部 /）；目录提供商由目录决定，custom 由用户提供 |
+| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `bot_count` | integer | 是 | 当前引用该提供商的机器人数量 |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### POST `/api/ai-providers/test`
+
+<!-- operationId: testAIProvider -->
+
+测试提供商连接（保存前/保存后均可）
+
+与机器人 test-connection 同一检查项（streaming / tool_call），HTTP 200
+且 ok=false 表示可达性/兼容性问题。目录提供商的地址由目录决定；
+custom 必须给 base_url 与 model；目录提供商缺省用目录里第一个模型。
+models 为 /models 列表尽力拉取的模型 id（拉取失败不填充，不影响 ok）。
+
+**鉴权**：仅 JWT
+
+**请求体**
+
+`application/json`，必填。
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `catalog_id` | string | 否 | 缺省按 custom 处理 |
+| `base_url` | string | 否 | custom / 缺省 catalog_id 时必填 |
+| `api_key` | string | 是 |  |
+| `model` | string | 否 | 缺省用目录里第一个模型；custom 必须提供 |
+
+**成功响应**
+
+**200** 检查结果（ok=false 时检查项中带失败详情）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `ok` | boolean | 是 | streaming 与 tool_call 都通过才 true |
+| `checks` | object[] | 是 |  |
+| `checks[].name` | string | 是 | streaming / tool_call |
+| `checks[].passed` | boolean | 是 |  |
+| `checks[].detail` | string | 否 | 失败原因（截断；不含密钥） |
+| `models` | string[] | 否 | /models 列表尽力拉取的模型 id；拉取失败省略（不影响 ok） |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/ai-providers/catalog`
+
+<!-- operationId: listAIProviderCatalog -->
+
+读取内置 models.dev 目录（OpenAI 兼容子集）
+
+随二进制发布的静态目录（运行时不联网，发版时刷新）：OpenAI 兼容协议、
+提供 api 地址且模型支持 tool_call 的提供商子集。模型窗口/输出上限缺失
+时为 0（未知）。
+
+**鉴权**：仅 JWT
+
+**成功响应**
+
+**200** 目录提供商列表（按 id 排序）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `items` | object[] | 是 |  |
+| `items[].id` | string | 是 |  |
+| `items[].name` | string | 是 |  |
+| `items[].api` | string | 是 | 官方 OpenAI 兼容端点 |
+| `items[].models` | object[] | 是 |  |
+| `items[].models[].id` | string | 是 |  |
+| `items[].models[].name` | string | 是 |  |
+| `items[].models[].context_window` | integer（int64） | 是 |  |
+| `items[].models[].max_output_tokens` | integer（int64） | 是 |  |
+| `items[].models[].reasoning` | boolean | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 500 | 服务器内部错误（50000） |
+
+### GET `/api/ai-providers/{id}`
+
+<!-- operationId: getAIProvider -->
+
+读取 AI 提供商
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 提供商配置
+
+`data`：
+
+AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `catalog_id` | string | 是 | models.dev 提供商 id，或 custom |
+| `name` | string | 是 |  |
+| `base_url` | string | 是 | 规范化存储（TrimSpace + 去尾部 /）；目录提供商由目录决定，custom 由用户提供 |
+| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `bot_count` | integer | 是 | 当前引用该提供商的机器人数量 |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### PUT `/api/ai-providers/{id}`
+
+<!-- operationId: updateAIProvider -->
+
+更新 AI 提供商（轮换密钥 / 改名 / custom 改地址）
+
+指针字段表达「未提供保留」；api_key 缺省保留原 key，空串拒绝（40001）。
+catalog_id 不可改（更换目录归属等于换提供商，应新建一条）；目录提供商
+的 base_url 由目录决定，请求里的 base_url 忽略。更新后引用它的机器人在
+下一个 run 生效。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**请求体**
+
+`application/json`，必填。
+
+指针字段表达「未提供保留」；catalog_id 不可改；目录提供商的 base_url 由目录决定（请求忽略）
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | 否 |  |
+| `base_url` | string | 否 | 仅 custom 生效 |
+| `api_key` | string | 否 | 空串拒绝（40001）；缺省保留原 key |
+
+**成功响应**
+
+**200** 更新成功
+
+`data`：
+
+AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `catalog_id` | string | 是 | models.dev 提供商 id，或 custom |
+| `name` | string | 是 |  |
+| `base_url` | string | 是 | 规范化存储（TrimSpace + 去尾部 /）；目录提供商由目录决定，custom 由用户提供 |
+| `api_key_last4` | string | 是 | API Key 末四位；明文任何端点都不回显 |
+| `bot_count` | integer | 是 | 当前引用该提供商的机器人数量 |
+| `created_at` | string（date-time） | 是 |  |
+| `updated_at` | string（date-time） | 是 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 400 | 请求参数无效（40001-40099） |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 500 | 服务器内部错误（50000） |
+
+### DELETE `/api/ai-providers/{id}`
+
+<!-- operationId: deleteAIProvider -->
+
+删除 AI 提供商
+
+仍被机器人引用时返回 409（40933），先更换或删除相关机器人。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+
+**成功响应**
+
+**200** 删除成功
+
+`data`：any
+
+响应负载；形状随端点而变，由 allOf 组合的兄弟 schema 收窄
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 仍被机器人引用（40933） |
 | 500 | 服务器内部错误（50000） |
 
 ## quota

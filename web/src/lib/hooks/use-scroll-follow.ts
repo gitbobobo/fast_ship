@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type RefObject,
+} from "react";
 
 /** 距底部不超过该像素数仍视为「在底部」。 */
 export const BOTTOM_THRESHOLD_PX = 100;
@@ -22,6 +28,9 @@ function findScrollParent(anchor: HTMLElement | null) {
  * 只有用户原本在底部附近才继续跟随，已经上翻则不打扰。
  * 「是否在底」由 scroll 事件记录——内容增长之后再量距离会把增长算成上翻。
  * anchorRef 指向聊天内容容器，用来定位滚动容器并观察其尺寸。
+ *
+ * 返回的 `scrollToBottom` 供显式动作（如发送消息）强制贴底：它把内部状态标回
+ * 「在底部」，随后的内容增长继续跟随，用户上翻阅读历史时发消息也能立刻回到底。
  */
 export function useScrollFollow(
   anchorRef: RefObject<HTMLElement | null>,
@@ -30,6 +39,14 @@ export function useScrollFollow(
 ) {
   const atBottom = useRef(true);
   const started = useRef(false);
+
+  const scrollToBottom = useCallback(() => {
+    const container = findScrollParent(anchorRef.current);
+    if (!container) return;
+    atBottom.current = true;
+    started.current = true;
+    container.scrollTop = container.scrollHeight;
+  }, [anchorRef]);
 
   useEffect(() => {
     if (!ready) return;
@@ -61,4 +78,6 @@ export function useScrollFollow(
     observer.observe(anchor);
     return () => observer.disconnect();
   }, [anchorRef, ready, version]);
+
+  return scrollToBottom;
 }

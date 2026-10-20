@@ -8,8 +8,11 @@ import {
 interface ThreadListState {
   filters: ThreadFilters;
   limit: number;
+  /** 「已完结」折叠区是否展开；默认收起，resetFilters 不动它。 */
+  settledOpen: boolean;
   setFilters: (patch: Partial<ThreadFilters>) => void;
   resetFilters: () => void;
+  setSettledOpen: (open: boolean) => void;
   loadMore: () => void;
 }
 
@@ -20,6 +23,7 @@ interface ThreadListState {
 export const useThreadListStore = create<ThreadListState>()((set) => ({
   filters: DEFAULT_THREAD_FILTERS,
   limit: THREAD_PAGE_SIZE,
+  settledOpen: false,
   setFilters: (patch) =>
     set((state) => ({
       filters: { ...state.filters, ...patch },
@@ -27,6 +31,7 @@ export const useThreadListStore = create<ThreadListState>()((set) => ({
     })),
   resetFilters: () =>
     set({ filters: DEFAULT_THREAD_FILTERS, limit: THREAD_PAGE_SIZE }),
+  setSettledOpen: (open) => set({ settledOpen: open }),
   loadMore: () =>
     set((state) => ({ limit: state.limit + THREAD_PAGE_SIZE })),
 }));

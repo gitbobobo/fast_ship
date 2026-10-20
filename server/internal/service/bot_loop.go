@@ -178,9 +178,12 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 
 		if sched == nil {
 			// 激活在 captureRunFreeze 之前完成，run 期间只有压缩边界会换前缀。
+			// 风格压缩水位随读行刷新：判定以库内值为准，调度会话与外部写入
+			// 都不会替主线消费它。
 			if fresh, err := s.bots.Get(bot.ID); err == nil {
 				bot.LastToldVersion = fresh.LastToldVersion
 				bot.OfferedInputSeq = fresh.OfferedInputSeq
+				bot.StyleCompactionVersion = fresh.StyleCompactionVersion
 			}
 			applyRunCredentialFreeze(bot, freeze)
 			applyRunPromptFreeze(bot, freeze)
@@ -207,16 +210,39 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 			s.ensureModelWindow(bot, run, key, built.InputTokensEstimate)
 			window := s.inputBudgetFor(bot, runModelOf(run, bot))
 			trigger := botFloorRatio(window, s.cfg.Bots.Context.CompressionRatioV())
-			if built.InputTokensEstimate >= trigger {
-				outcome, err := s.runCompactionCycle(ctx, bot, run, model.BotCompactionThreshold)
+			reason := model.BotCompactionThreshold
+			needCompaction := built.InputTokensEstimate >= trigger
+			if !needCompaction && bot.StyleCompactionVersion < botStylePromptVersion {
+				// INT-133：风格压缩水位低于当前说话方式版本表示该会话还欠一次
+				// 升级压缩——即使未达阈值也强制一轮，把旧风格的长回复收进
+				// 摘要。水位是持久列，schedule run 不读不写，主线压缩尝试后
+				// CAS 推进（见下），激活、重启与人设编辑都不会弄丢这个待办。
+				needCompaction = true
+				reason = model.BotCompactionStyle
+			}
+			if needCompaction {
+				outcome, err := s.runCompactionCycle(ctx, bot, run, reason)
+				// 一次性语义：只有风格压缩的尝试才消费风格水位（无论 published /
+				// no_gain / 失败）。阈值压缩可能是 fold-only（折叠后不需要摘要），
+				// 此时旧风格的长回复仍在投影里，水位必须留给后续 run 的
+				// style_upgrade——否则需求要的「收进摘要」就永久丢了。
+				if reason == model.BotCompactionStyle {
+					s.markStyleCompactionDone(bot)
+				}
 				if err != nil {
-					if errors.Is(err, errContextUncompressible) || built.InputTokensEstimate >= window {
+					if reason == model.BotCompactionStyle {
+						// 风格压缩只为收进旧长回复：不可达/无净缩减/失败都
+						// 不阻塞对话（输入本来低于触发阈值），本 run 内不再
+						// 自动重试，与阈值路径同样退让。
+						thresholdCompactionFailed = true
+					} else if errors.Is(err, errContextUncompressible) || built.InputTokensEstimate >= window {
 						s.finishCompactionFailed(bot, run, built, err)
 						return
+					} else {
+						// prompt_changed 等冲突视为「外部正在编辑」：本 run 内不重试是
+						// 有意退让，下个 run 或上下文极限的强制路径再压缩。
+						thresholdCompactionFailed = true
 					}
-					// prompt_changed 等冲突视为「外部正在编辑」：本 run 内不重试是
-					// 有意退让，下个 run 或上下文极限的强制路径再压缩。
-					thresholdCompactionFailed = true
 				}
 				if s.maintenanceStopped(ctx, run) {
 					s.finishStopped(bot, run)
@@ -328,6 +354,25 @@ func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Cont
 	}
 }
 
+// markStyleCompactionDone 把风格压缩水位 CAS 推进到当前说话方式版本：
+// 本 run 的一次风格压缩尝试（无论成败）即消费掉升级后的一次性额度，已
+// 推进过的并发写者落空，副本只在 CAS 命中时对齐。只有 reason=style_upgrade
+// 的尝试才推进水位——阈值与 context_limit 压缩不消费它；schedule 会话
+// 不读也不写它（INT-133）。
+func (s *BotService) markStyleCompactionDone(bot *model.Bot) {
+	if bot.StyleCompactionVersion >= botStylePromptVersion {
+		return
+	}
+	ok, err := s.bots.AdvanceStyleCompaction(bot.ID, botStylePromptVersion)
+	if err != nil {
+		s.logger.Warn("推进风格压缩水位失败", zap.String("bot_id", bot.ID), zap.Error(err))
+		return
+	}
+	if ok {
+		bot.StyleCompactionVersion = botStylePromptVersion
+	}
+}
+
 // runBaseURLOf run 期间的地址：优先配置快照。
 func runBaseURLOf(run *model.BotRun, bot *model.Bot) string {
 	var snap botConfigSnapshot
@@ -335,6 +380,17 @@ func runBaseURLOf(run *model.BotRun, bot *model.Bot) string {
 		return snap.BaseURL
 	}
 	return bot.BaseURL
+}
+
+// runCatalogIDOf run 期间的目录归属：优先配置快照（与快照里的 base_url 成对，
+// 机器人换 provider 后旧 run 的窗口仍按派发时的目录解析）。INT-133 之前的
+// 快照没有 catalog_id 字段——空值回退 bot 当前派生值，兼容旧数据。
+func runCatalogIDOf(run *model.BotRun, bot *model.Bot) string {
+	var snap botConfigSnapshot
+	if err := json.Unmarshal([]byte(run.ConfigSnapshotJSON), &snap); err == nil && snap.CatalogID != "" {
+		return snap.CatalogID
+	}
+	return bot.CatalogID
 }
 
 // botInputRunID 解析 run 的新输入判定范围：schedule 会话按 run 隔离（同一

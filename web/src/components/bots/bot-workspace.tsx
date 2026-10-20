@@ -29,6 +29,7 @@ import { HeaderActions } from "@/components/layout/header-actions";
 import { ApiRequestError } from "@/lib/api/client";
 import type { Bot } from "@/lib/api/bots";
 import { useBot, useBots, useDeleteBot } from "@/lib/hooks/use-bots";
+import { useBotDetailPanelStore } from "@/lib/store/bot-detail-panel-store";
 import { cn } from "@/lib/utils";
 import { BotAuthorizationsDialog } from "./bot-authorizations-dialog";
 import { BotChat } from "./bot-chat";
@@ -45,8 +46,9 @@ import { BotScheduleTaskDialog } from "./bot-schedule-section";
  * 机器人三栏工作台（INT-125）：左栏列表 / 中栏主线聊天 / 右栏详情。
  * 桌面（lg+）整页不滚动、三栏各自滚动；移动端 /bots 只显示列表、
  * /bots/:botId 只显示聊天，详情改由右侧 Sheet 打开。
- * 「隐藏详情」（桌面）与「详情 Sheet」（移动）是两份互不影响的状态，
- * 但编辑/授权/删除/任务详情弹窗只在这一层各持有一份——桌面 aside 与
+ * 「展开详情」（桌面）与「详情 Sheet」（移动）是两份互不影响的状态：
+ * 桌面默认收起且把展开状态持久化（刷新后沿用），Sheet 不持久化、每次关闭。
+ * 编辑/授权/删除/任务详情弹窗只在这一层各持有一份——桌面 aside 与
  * 移动 Sheet 里的两份面板共享同一份状态（约定同 issue 详情页侧栏）。
  */
 export function BotWorkspace({ botId }: { botId?: string }) {
@@ -54,7 +56,8 @@ export function BotWorkspace({ botId }: { botId?: string }) {
   const { data: bot } = useBot(botId ?? "");
   const { data: bots } = useBots();
   const deleteBot = useDeleteBot();
-  const [panelHidden, setPanelHidden] = useState(false);
+  const panelExpanded = useBotDetailPanelStore((state) => state.expanded);
+  const setPanelExpanded = useBotDetailPanelStore((state) => state.setExpanded);
   const [sheetOpen, setSheetOpen] = useState(false);
   // 新建（editing=null）与编辑（打开时捕获的 bot）共用同一个表单弹窗。
   const [formOpen, setFormOpen] = useState(false);
@@ -147,13 +150,13 @@ export function BotWorkspace({ botId }: { botId?: string }) {
                     variant="ghost"
                     size="icon-sm"
                     className="hidden lg:inline-flex"
-                    aria-label={panelHidden ? "显示详情" : "隐藏详情"}
-                    onClick={() => setPanelHidden((v) => !v)}
+                    aria-label={panelExpanded ? "隐藏详情" : "显示详情"}
+                    onClick={() => setPanelExpanded(!panelExpanded)}
                   >
-                    {panelHidden ? (
-                      <PanelRightOpen className="h-4 w-4" />
-                    ) : (
+                    {panelExpanded ? (
                       <PanelRightClose className="h-4 w-4" />
+                    ) : (
+                      <PanelRightOpen className="h-4 w-4" />
                     )}
                   </Button>
                 </div>
@@ -196,10 +199,10 @@ export function BotWorkspace({ botId }: { botId?: string }) {
         </div>
 
         {/* 右栏随 botId 挂载而非详情数据：切换机器人时骨架占位，
-            中栏宽度与页头不回跳。 */}
-        {botId && !panelHidden && (
+            中栏宽度与页头不回跳。默认收起，展开状态跨刷新记住。 */}
+        {botId && panelExpanded && (
           <aside className="hidden h-full w-80 shrink-0 border-l lg:block">
-            {detailPanel(() => setPanelHidden(true))}
+            {detailPanel(() => setPanelExpanded(false))}
           </aside>
         )}
       </div>

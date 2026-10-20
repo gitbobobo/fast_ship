@@ -14,6 +14,9 @@ import {
   type RespondInput,
   type SendMessageInput,
   type ChatAttachment,
+  type ThreadDetail,
+  type ThreadList,
+  type ThreadSummary,
 } from "@/lib/api/threads";
 import {
   subscribeThreadStream,
@@ -196,9 +199,13 @@ export function useThreadStream(queryClient: QueryClient) {
  */
 export function useThreads() {
   const userId = useUserId();
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: keys.threads(userId),
-    queryFn: async ({ signal }) => (await threadApi.list(signal)).data,
+    // 详情与列表是两条查询：推送/刷新交错时，列表响应可能是更早的快照，
+    // 落盘前用缓存里「不更旧」的详情摘要覆盖，避免迟到的列表把新状态冲掉。
+    queryFn: async ({ signal }) =>
+      overlayCachedDetails(queryClient, userId, (await threadApi.list(signal)).data),
     enabled: Boolean(userId),
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
@@ -211,14 +218,72 @@ export function useThreads() {
  */
 export function useThreadDetail(environmentId: string, threadId: string) {
   const userId = useUserId();
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: keys.detail(userId, environmentId, threadId),
-    queryFn: async ({ signal }) =>
-      (await threadApi.detail(environmentId, threadId, signal)).data,
+    queryFn: async ({ signal }) => {
+      const detail = (await threadApi.detail(environmentId, threadId, signal)).data;
+      mergeThreadSummary(queryClient, userId, detail.thread);
+      return detail;
+    },
     enabled: Boolean(userId && environmentId && threadId),
     refetchOnMount: "always",
     refetchOnWindowFocus: true,
   });
+}
+
+/**
+ * 详情拿到的最新线程摘要回写列表缓存：左栏在常驻 layout 里不会随导航重挂载，
+ * 不这样同步就会出现「右栏已结束、左栏还显示运行中」以及排序/计数滞后。
+ * 列表与详情可能交错读取（推送、聚焦刷新、手动刷新），只让「不更旧」的摘要
+ * 覆盖缓存，避免迟到的旧快照冲掉新状态。
+ */
+export function mergeThreadSummary(
+  queryClient: QueryClient,
+  userId: string | null,
+  thread: ThreadSummary,
+) {
+  queryClient.setQueryData<ThreadList>(keys.threads(userId), (previous) => {
+    if (!previous) return previous;
+    const merged = mergeIntoItems(previous.items, thread);
+    return merged.changed ? { ...previous, items: merged.items } : previous;
+  });
+}
+
+/** 线程摘要替换同环境同 ID 的条目；比缓存旧的不覆盖（返回原引用）。 */
+function mergeIntoItems(items: ThreadSummary[], thread: ThreadSummary) {
+  let changed = false;
+  const next = items.map((item) => {
+    if (item.id !== thread.id || item.environment_id !== thread.environment_id) {
+      return item;
+    }
+    const incoming = Date.parse(thread.updated_at ?? "");
+    const cached = Date.parse(item.updated_at ?? "");
+    if (!Number.isNaN(incoming) && !Number.isNaN(cached) && incoming < cached) {
+      return item;
+    }
+    changed = true;
+    return { ...item, ...thread };
+  });
+  return { items: changed ? next : items, changed };
+}
+
+/** 列表响应落盘前，把已缓存的详情摘要按同一「不更旧」规则叠上去。 */
+function overlayCachedDetails(
+  queryClient: QueryClient,
+  userId: string | null,
+  list: ThreadList,
+) {
+  const details = queryClient.getQueriesData<ThreadDetail>({
+    queryKey: [ROOT, userId, "thread"],
+  });
+  let items = list.items;
+  for (const [, detail] of details) {
+    if (!detail?.thread) continue;
+    const merged = mergeIntoItems(items, detail.thread);
+    items = merged.items;
+  }
+  return items === list.items ? list : { ...list, items };
 }
 
 /** 新建页用：启动器选项（项目表 + provider 配置），只在需要时读取。 */

@@ -9,6 +9,7 @@ import {
   watchThreadsIdentity,
 } from "@/lib/hooks/use-threads";
 import { watchBotsIdentity } from "@/lib/hooks/use-bots";
+import { watchAIProvidersIdentity } from "@/lib/hooks/use-ai-providers";
 import { watchQuotaIdentity } from "@/lib/hooks/use-quota";
 import { watchDeploymentIdentity } from "@/lib/hooks/use-deployment";
 import { watchMembersIdentity } from "@/lib/hooks/use-members";
@@ -41,6 +42,7 @@ const SettingsGeneralPage = lazy(() => import("@/routes/settings/general"));
 const SettingsProfilePage = lazy(() => import("@/routes/settings/profile"));
 const SettingsPasswordPage = lazy(() => import("@/routes/settings/password"));
 const SettingsAIPage = lazy(() => import("@/routes/settings/ai"));
+const AIProvidersPage = lazy(() => import("@/routes/settings/ai-providers"));
 const SettingsIssuePromptsPage = lazy(
   () => import("@/routes/settings/issue-prompts"),
 );
@@ -63,6 +65,7 @@ const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
 const QuotaPage = lazy(() => import("@/routes/quota/index"));
 const BotsPage = lazy(() => import("@/routes/bots/index"));
 const BotDetailPage = lazy(() => import("@/routes/bots/$botId"));
+const ThreadsLayout = lazy(() => import("@/routes/threads/layout"));
 const ThreadsPage = lazy(() => import("@/routes/threads/index"));
 const NewThreadPage = lazy(() => import("@/routes/threads/new"));
 const ThreadDetailPage = lazy(
@@ -86,6 +89,7 @@ export default function App() {
     const stopThreads = watchThreadsIdentity(queryClient);
     const stopGithubTokens = watchGithubTokensIdentity(queryClient);
     const stopBots = watchBotsIdentity(queryClient);
+    const stopAIProviders = watchAIProvidersIdentity(queryClient);
     const stopQuota = watchQuotaIdentity(queryClient);
     const stopDeployment = watchDeploymentIdentity(queryClient);
     const stopMembers = watchMembersIdentity(queryClient);
@@ -94,6 +98,7 @@ export default function App() {
       stopThreads();
       stopGithubTokens();
       stopBots();
+      stopAIProviders();
       stopQuota();
       stopDeployment();
       stopMembers();
@@ -149,18 +154,21 @@ export default function App() {
                 path="/documents"
                 element={<LazyPage render={<DocumentsPage />} />}
               />
-              <Route
-                path="/threads"
-                element={<LazyPage render={<ThreadsPage />} />}
-              />
+              {/* 新建页保持整页，不套 /threads 的主从两栏 */}
               <Route
                 path="/threads/new"
                 element={<LazyPage render={<NewThreadPage />} />}
               />
               <Route
-                path="/threads/:environmentId/:threadId"
-                element={<LazyPage render={<ThreadDetailPage />} />}
-              />
+                path="/threads"
+                element={<LazyPage render={<ThreadsLayout />} />}
+              >
+                <Route index element={<LazyPage render={<ThreadsPage />} />} />
+                <Route
+                  path=":environmentId/:threadId"
+                  element={<LazyPage render={<ThreadDetailPage />} />}
+                />
+              </Route>
               <Route
                 path="/board"
                 element={<LazyPage render={<BoardPage />} />}
@@ -203,6 +211,10 @@ export default function App() {
                 <Route
                   path="ai"
                   element={<LazyPage render={<SettingsAIPage />} />}
+                />
+                <Route
+                  path="ai-providers"
+                  element={<LazyPage render={<AIProvidersPage />} />}
                 />
                 <Route
                   path="issue-prompts"

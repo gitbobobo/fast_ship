@@ -8,10 +8,12 @@ import (
 )
 
 // BotModels 返回机器人的全部表模型（七张主线表 + INT-102 的压缩/记忆/维护
-// 表 + INT-103 的定时任务表 + INT-115 的模型窗口缓存表），供 AutoMigrate 与
-// 测试建库共用。FTS5 虚表与触发器不在 GORM 模型体系内，由 botSchemaDDL 创建。
+// 表 + INT-103 的定时任务表 + INT-115 的模型窗口缓存表 + INT-133 的 AI 提供
+// 商表），供 AutoMigrate 与测试建库共用。FTS5 虚表与触发器不在 GORM 模型体系
+// 内，由 botSchemaDDL 创建。
 func BotModels() []interface{} {
 	return []interface{}{
+		&model.AIProvider{},
 		&model.Bot{},
 		&model.BotMessage{},
 		&model.BotRun{},
@@ -36,6 +38,11 @@ func BotModels() []interface{} {
 var botSchemaDDL = []string{
 	// bots：按用户列表；不唯一机器人名称（产品决策）。
 	`CREATE INDEX IF NOT EXISTS idx_bots_user_created ON bots(user_id, created_at DESC, id)`,
+	// bots：按提供商反查引用（INT-133，删除提供商的引用检查与列表计数）。
+	`CREATE INDEX IF NOT EXISTS idx_bots_provider ON bots(provider_id)`,
+
+	// ai_providers（INT-133）：按用户列表。
+	`CREATE INDEX IF NOT EXISTS idx_ai_providers_user_created ON ai_providers(user_id, created_at DESC, id)`,
 
 	// bot_messages：账本正序读、幂等键、去重键、来源反查与会话隔离读。
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_bot_messages_bot_seq ON bot_messages(bot_id, seq)`,

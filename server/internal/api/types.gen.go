@@ -1232,6 +1232,46 @@ func (e AggregateSelfLogsParamsMinLevel) Valid() bool {
 	}
 }
 
+// AIProvider AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+type AIProvider struct {
+	// ApiKeyLast4 API Key 末四位；明文任何端点都不回显
+	ApiKeyLast4 string `json:"api_key_last4"`
+
+	// BaseUrl 规范化存储（TrimSpace + 去尾部 /）；目录提供商由目录决定，custom 由用户提供
+	BaseUrl string `json:"base_url"`
+
+	// BotCount 当前引用该提供商的机器人数量
+	BotCount int `json:"bot_count"`
+
+	// CatalogId models.dev 提供商 id，或 custom
+	CatalogId string `json:"catalog_id"`
+	CreatedAt string `json:"created_at"`
+	Id        string `json:"id"`
+	Name      string `json:"name"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// AIProviderTestResult defines model for AIProviderTestResult.
+type AIProviderTestResult struct {
+	Checks []AIProviderTestResult_Checks `json:"checks"`
+
+	// Models /models 列表尽力拉取的模型 id；拉取失败省略（不影响 ok）
+	Models []string `json:"models,omitempty"`
+
+	// Ok streaming 与 tool_call 都通过才 true
+	Ok bool `json:"ok"`
+}
+
+// AIProviderTestResult_Checks defines model for AIProviderTestResult.Checks.
+type AIProviderTestResult_Checks struct {
+	// Detail 失败原因（截断；不含密钥）
+	Detail *string `json:"detail,omitempty"`
+
+	// Name streaming / tool_call
+	Name   string `json:"name"`
+	Passed bool   `json:"passed"`
+}
+
 // AISettings defines model for AISettings.
 type AISettings struct {
 	// ApiHost 默认 https://api.minimaxi.com
@@ -1320,19 +1360,22 @@ type AuthResponse struct {
 
 // Bot defines model for Bot.
 type Bot struct {
-	// ApiKeyLast4 API Key 末四位；明文任何端点都不回显
+	// ApiKeyLast4 API Key 末四位（provider 的派生值）；明文任何端点都不回显
 	ApiKeyLast4 string `json:"api_key_last4"`
 
-	// BaseUrl OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1）
+	// BaseUrl OpenAI 兼容 API 基址；INT-133 起为 provider 的派生值（提供商轮换后下一次读取生效）
 	BaseUrl string `json:"base_url"`
+
+	// CatalogId 提供商的目录 id（models.dev id 或 custom，派生自 provider）
+	CatalogId string `json:"catalog_id"`
 
 	// ContextDetail 解析口径说明（探测方式或回退原因）；可省略
 	ContextDetail *string `json:"context_detail,omitempty"`
 
-	// ContextSource 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）；展示层不得把回退值说成已检测
+	// ContextSource 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）； 展示层不得把回退值说成已检测
 	ContextSource string `json:"context_source"`
 
-	// ContextWindow 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口
+	// ContextWindow 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口
 	ContextWindow int64  `json:"context_window"`
 	CreatedAt     string `json:"created_at"`
 	Id            string `json:"id"`
@@ -1340,7 +1383,7 @@ type Bot struct {
 	// LastMessage 机器人主线最近一条可见消息的预览（INT-125），机器人列表端点专用
 	LastMessage *BotLastMessage `json:"last_message,omitempty"`
 
-	// MaxOutputTokens 模型输出上限；仅 detected 来源可给出，未知为 0
+	// MaxOutputTokens 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0
 	MaxOutputTokens int64  `json:"max_output_tokens"`
 	Model           string `json:"model"`
 	Name            string `json:"name"`
@@ -1353,7 +1396,13 @@ type Bot struct {
 	PlatformPromptVersion int64  `json:"platform_prompt_version"`
 
 	// PromptRevision 人设/平台规则版本；用户明确编辑人设时递增
-	PromptRevision int64  `json:"prompt_revision"`
+	PromptRevision int64 `json:"prompt_revision"`
+
+	// ProviderId 所属 AI 提供商（INT-133）；地址与密钥都在提供商上
+	ProviderId string `json:"provider_id"`
+
+	// ProviderName 提供商名称（展示用，派生自 provider）
+	ProviderName   string `json:"provider_name"`
 	ToolsetVersion int64  `json:"toolset_version"`
 	UpdatedAt      string `json:"updated_at"`
 }
@@ -1416,10 +1465,10 @@ type BotConnectionCheck struct {
 	// ContextDetail 解析口径说明；可省略
 	ContextDetail *string `json:"context_detail,omitempty"`
 
-	// ContextSource 窗口来源 manual / detected / fallback（探测失败时如实标注）
+	// ContextSource 窗口来源 manual / detected / catalog / fallback（探测失败时如实标注）
 	ContextSource string `json:"context_source"`
 
-	// ContextWindow 模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存； 失败回退到当前解析值（manual / 默认窗口）
+	// ContextWindow 模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存； 失败回退到当前解析值（manual / catalog / 默认窗口）
 	ContextWindow int64 `json:"context_window"`
 
 	// MaxOutputTokens 模型输出上限；仅探测到时非 0
@@ -1492,13 +1541,13 @@ type BotMetrics struct {
 	// ContextDetail 解析口径说明；可省略
 	ContextDetail *string `json:"context_detail,omitempty"`
 
-	// ContextSource 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ fallback（默认窗口）
+	// ContextSource 窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/ catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）
 	ContextSource string `json:"context_source"`
 
-	// ContextWindow 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > fallback；fallback 为部署默认窗口
+	// ContextWindow 模型上下文窗口（未扣输出空间）。解析顺序 manual > detected > catalog > fallback；fallback 为部署默认窗口
 	ContextWindow int64 `json:"context_window"`
 
-	// MaxOutputTokens 模型输出上限；仅 detected 来源可给出，未知为 0
+	// MaxOutputTokens 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0
 	MaxOutputTokens int64 `json:"max_output_tokens"`
 
 	// Request 单次主线模型请求口径；历史累计仍在 run 上，指标区不用累计值
@@ -1694,6 +1743,24 @@ type Branch struct {
 	Sha     string `json:"sha"`
 }
 
+// CatalogProvider 内置 models.dev 目录里的一个提供商（OpenAI 兼容 + 有 api 地址 + 模型支持 tool_call）
+type CatalogProvider struct {
+	// Api 官方 OpenAI 兼容端点
+	Api    string                 `json:"api"`
+	Id     string                 `json:"id"`
+	Models []CatalogProviderModel `json:"models"`
+	Name   string                 `json:"name"`
+}
+
+// CatalogProviderModel 内置目录里的一个模型；窗口/输出缺失为 0（未知）
+type CatalogProviderModel struct {
+	ContextWindow   int64  `json:"context_window"`
+	Id              string `json:"id"`
+	MaxOutputTokens int64  `json:"max_output_tokens"`
+	Name            string `json:"name"`
+	Reasoning       bool   `json:"reasoning"`
+}
+
 // CollabAuthorKind defines model for CollabAuthorKind.
 type CollabAuthorKind = model.CollabAuthorKind
 
@@ -1706,6 +1773,21 @@ type CompleteGitHubAppManifestRequest struct {
 	State string `json:"state"`
 }
 
+// CreateAIProviderRequest defines model for CreateAIProviderRequest.
+type CreateAIProviderRequest struct {
+	// ApiKey 加密落库；空串/空白拒绝（40001）
+	ApiKey string `json:"api_key"`
+
+	// BaseUrl 仅 custom 接受；必须是 http/https，存储前规范化。目录提供商的地址由目录决定，此字段忽略
+	BaseUrl *string `json:"base_url,omitempty"`
+
+	// CatalogId models.dev 提供商 id，或 custom
+	CatalogId string `json:"catalog_id"`
+
+	// Name 缺省用目录名（custom 用「自定义」）
+	Name *string `json:"name,omitempty"`
+}
+
 // CreateApiKeyRequest defines model for CreateApiKeyRequest.
 type CreateApiKeyRequest struct {
 	Name string `binding:"required,min=1,max=100" json:"name"`
@@ -1713,12 +1795,13 @@ type CreateApiKeyRequest struct {
 
 // CreateBotRequest defines model for CreateBotRequest.
 type CreateBotRequest struct {
-	// ApiKey OpenAI 兼容 API Key；加密落库，仅创建/更新时提交
-	ApiKey        string  `json:"api_key"`
-	BaseUrl       string  `json:"base_url"`
+	// Model 模型名，不带 provider 前缀
 	Model         string  `json:"model"`
 	Name          string  `json:"name"`
 	PersonaPrompt *string `json:"persona_prompt,omitempty"`
+
+	// ProviderId 必填且属于当前用户（40433）；地址与密钥都在提供商上
+	ProviderId string `json:"provider_id"`
 }
 
 // CreateDocumentRequest defines model for CreateDocumentRequest.
@@ -4141,12 +4224,26 @@ type T3WorkspaceRef struct {
 	WorktreePath *string `json:"worktree_path,omitempty"`
 }
 
-// TestBotConnectionRequest 未保存配置时必须提供 base_url/model/api_key；给 bot_id 时用已保存 key 并允许表单覆盖地址/模型
-type TestBotConnectionRequest struct {
-	ApiKey  *string `json:"api_key,omitempty"`
+// TestAIProviderRequest defines model for TestAIProviderRequest.
+type TestAIProviderRequest struct {
+	ApiKey string `json:"api_key"`
+
+	// BaseUrl custom / 缺省 catalog_id 时必填
 	BaseUrl *string `json:"base_url,omitempty"`
-	BotId   *string `json:"bot_id,omitempty"`
-	Model   *string `json:"model,omitempty"`
+
+	// CatalogId 缺省按 custom 处理
+	CatalogId *string `json:"catalog_id,omitempty"`
+
+	// Model 缺省用目录里第一个模型；custom 必须提供
+	Model *string `json:"model,omitempty"`
+}
+
+// TestBotConnectionRequest 地址与密钥一律取 provider（INT-133）；model 显式提供时优先，否则沿用 bot_id 的已保存模型（两者都没有时 40001）
+type TestBotConnectionRequest struct {
+	// BotId 可选；给出时 model 缺省沿用该机器人的已保存模型
+	BotId      *string `json:"bot_id,omitempty"`
+	Model      *string `json:"model,omitempty"`
+	ProviderId string  `json:"provider_id"`
 }
 
 // TestQuotaCredentialsRequest defines model for TestQuotaCredentialsRequest.
@@ -4156,6 +4253,16 @@ type TestQuotaCredentialsRequest struct {
 
 	// Provider 供应商 id；未知返回 40030
 	Provider string `binding:"required" json:"provider"`
+}
+
+// UpdateAIProviderRequest 指针字段表达「未提供保留」；catalog_id 不可改；目录提供商的 base_url 由目录决定（请求忽略）
+type UpdateAIProviderRequest struct {
+	// ApiKey 空串拒绝（40001）；缺省保留原 key
+	ApiKey *string `json:"api_key,omitempty"`
+
+	// BaseUrl 仅 custom 生效
+	BaseUrl *string `json:"base_url,omitempty"`
+	Name    *string `json:"name,omitempty"`
 }
 
 // UpdateAISettingsRequest defines model for UpdateAISettingsRequest.
@@ -4170,13 +4277,14 @@ type UpdateAISettingsRequest struct {
 	Model *string `json:"model,omitempty"`
 }
 
-// UpdateBotRequest 指针字段表达「未提供保留」；api_key 空串拒绝（40001）
+// UpdateBotRequest 指针字段表达「未提供保留」；INT-133 起不再接受 base_url / api_key，密钥轮换经 AI 提供商端点
 type UpdateBotRequest struct {
-	ApiKey        *string `json:"api_key,omitempty"`
-	BaseUrl       *string `json:"base_url,omitempty"`
 	Model         *string `json:"model,omitempty"`
 	Name          *string `json:"name,omitempty"`
 	PersonaPrompt *string `json:"persona_prompt,omitempty"`
+
+	// ProviderId 更换所属提供商；必须属于当前用户（40433）
+	ProviderId *string `json:"provider_id,omitempty"`
 }
 
 // UpdateDeploymentSettingsRequest defines model for UpdateDeploymentSettingsRequest.
@@ -4606,6 +4714,82 @@ type NotFound = ErrorEnvelope
 
 // Unauthorized 错误响应信封
 type Unauthorized = ErrorEnvelope
+
+// ListAIProviders200JSONResponseBody_Data defines parameters for ListAIProviders.
+type ListAIProviders200JSONResponseBody_Data struct {
+	Items []AIProvider `json:"items"`
+}
+
+// ListAIProviders200JSONResponseBody defines parameters for ListAIProviders.
+type ListAIProviders200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                      `json:"code"`
+	Data *ListAIProviders200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// CreateAIProvider200JSONResponseBody defines parameters for CreateAIProvider.
+type CreateAIProvider200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+	Data *AIProvider `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// ListAIProviderCatalog200JSONResponseBody_Data defines parameters for ListAIProviderCatalog.
+type ListAIProviderCatalog200JSONResponseBody_Data struct {
+	Items []CatalogProvider `json:"items"`
+}
+
+// ListAIProviderCatalog200JSONResponseBody defines parameters for ListAIProviderCatalog.
+type ListAIProviderCatalog200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                                            `json:"code"`
+	Data *ListAIProviderCatalog200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// TestAIProvider200JSONResponseBody defines parameters for TestAIProvider.
+type TestAIProvider200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int                   `json:"code"`
+	Data *AIProviderTestResult `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// GetAIProvider200JSONResponseBody defines parameters for GetAIProvider.
+type GetAIProvider200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+	Data *AIProvider `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// UpdateAIProvider200JSONResponseBody defines parameters for UpdateAIProvider.
+type UpdateAIProvider200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int `json:"code"`
+
+	// Data AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+	Data *AIProvider `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
 
 // GenerateIssueTitleJSONBody defines parameters for GenerateIssueTitle.
 type GenerateIssueTitleJSONBody struct {
@@ -7058,6 +7242,15 @@ type ShipCheck200JSONResponseBody struct {
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`
 }
+
+// CreateAIProviderJSONRequestBody defines body for CreateAIProvider for application/json ContentType.
+type CreateAIProviderJSONRequestBody = CreateAIProviderRequest
+
+// TestAIProviderJSONRequestBody defines body for TestAIProvider for application/json ContentType.
+type TestAIProviderJSONRequestBody = TestAIProviderRequest
+
+// UpdateAIProviderJSONRequestBody defines body for UpdateAIProvider for application/json ContentType.
+type UpdateAIProviderJSONRequestBody = UpdateAIProviderRequest
 
 // GenerateIssueTitleJSONRequestBody defines body for GenerateIssueTitle for application/json ContentType.
 type GenerateIssueTitleJSONRequestBody GenerateIssueTitleJSONBody

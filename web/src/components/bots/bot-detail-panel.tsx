@@ -49,8 +49,12 @@ export function BotDetailPanel({
       : "未知";
 
   const configRows: { label: string; value: string; title?: string }[] = [
+    {
+      label: "提供商",
+      value: bot.provider_name || "—",
+      title: bot.provider_name,
+    },
     { label: "模型", value: bot.model || "—", title: bot.model },
-    { label: "API 地址", value: bot.base_url || "—", title: bot.base_url },
     {
       label: "API Key",
       value: bot.api_key_last4 ? `···${bot.api_key_last4}` : "未配置",

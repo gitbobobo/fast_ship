@@ -10,6 +10,7 @@ import {
   type CreateBotInput,
   type UpdateBotInput,
 } from "@/lib/api/bots";
+import { aiProviderKeys } from "@/lib/hooks/use-ai-providers";
 import { useAuthStore } from "@/lib/store/auth-store";
 
 /**
@@ -117,10 +118,18 @@ export function useBot(botId: string) {
   });
 }
 
+/**
+ * 机器人增删改都会改 ai_providers.bot_count（含换绑 provider 的两侧计数），
+ * 与 bots 自身缓存一并失效。两个聚合的 key 常量互相引用是刻意的——
+ * 模块级绑定只在回调里取值，循环引用不会读到半成品。
+ */
 function useInvalidateBots() {
   const queryClient = useQueryClient();
   const userId = useUserId();
-  return () => queryClient.invalidateQueries({ queryKey: [BOTS_ROOT, userId] });
+  return () => {
+    void queryClient.invalidateQueries({ queryKey: [BOTS_ROOT, userId] });
+    void queryClient.invalidateQueries({ queryKey: aiProviderKeys.list(userId) });
+  };
 }
 
 export function useCreateBot() {

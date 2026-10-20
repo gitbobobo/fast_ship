@@ -465,6 +465,57 @@ already_answered/agent_stopped → 40916，not_found → 40419，其余 → 5020
 - **写请求每条一条 WS 会话**：无跨请求的连接状态；成员校验（投影读）与命令
   下发之间存在固有竞窗，上游的同构校验兜底（40916/40419 映射见错误码表）。
 
+## 线程列表页（前端）
+
+- `/threads` 是主从两栏（`routes/threads/layout.tsx`）：左栏 320px
+  （`lg:w-80`）= 顶栏（移动端导航/刷新/新建）+ 环境单选列表 + 搜索行
+  （搜索框 + 「筛选线程」按钮，项目/状态/完结三个下拉收在按钮后的面板里，
+  有筛选时按钮上留一个点）+ 可独立滚动的线程列表（`components/threads/
+  thread-list.tsx`，用 `usePersistedScroll` 记住滚动位置）；右栏经 `<Outlet/>` 渲染子路由——`/threads` 是「从
+  左侧选择一个线程查看详情」空态（`routes/threads/index.tsx`），
+  `/threads/:environmentId/:threadId` 是详情页。点左栏条目只换右栏内容，
+  列表不重挂载、滚动不丢。`/threads/new` 是独立平级路由，不套两栏。
+- 窄于 `lg` 时只显示一栏：由子路由是否有 `threadId` 决定（`useParams`）——
+  开着线程就只显详情，否则只显左栏；不引入 JS 断点 hook。
+- 环境筛选为**单选**：`ThreadFilters.environmentId`（空串 = 全部环境），替代早期
+  的多选数组。侧栏环境是两列卡片（「全部环境」+ 每个环境一格，窄栏里
+  一行两张）：卡片第一行健康点 + 名称，第二行一排「彩点 + 数量」pill，
+  只显示计数非 0 的状态（固定 running/waiting/idle/archived 顺序）。计数来自分面计数 `countThreadsByEnvironment`：忽略
+  environmentId 这一项，搜索/项目/状态/完结照常叠加，每个环境（与「全部
+  环境」汇总行）返回按状态分桶的 `ThreadStatusCounts`（含 total）；
+  status 为空时归档不计入，数字与命中条数（含收进折叠区的已完结线程）一致。
+- 已完结折叠区：仅当 `filters.settled === ""` 且 `filters.status === ""`
+  （默认视图，搜索/环境/项目筛选不影响分组）时，列表底部渲染
+  「已完结 · N」折叠条，默认收起（`thread-list-store` 的 `settledOpen`，
+  离开页面保持、刷新复位）；展开后已完结行接在未完结行之后，同一个
+  `thread-grid` 内。选了完结或状态筛选时是平铺列表、无折叠条。分页的
+  `limit` 只作用于未完结行（「加载更多（还有 N 条）」不含已完结数），
+  展开后已完结行一次性全部渲染；只有已完结线程时列表区只有折叠条，
+  不显示「暂无线程」空态。
+- 列表条目是三行式（`components/threads/thread-row.tsx`，`data-testid="thread-card"`）：
+  第一行项目徽章+名称与状态（运行中带时长），第二行 `line-clamp-2` 标题，
+  第三行分支 + PR 数/相对时间；右栏正在显示的线程整行 `bg-accent` 高亮并带
+  `aria-current="page"`；等待输入用左侧 2px 琥珀竖条，已完结整行
+  opacity-60（hover/focus 恢复）。hover/focus 由 `ui/preview-card.tsx`
+  （Base UI PreviewCard，portal 定位）展开 `ThreadPreviewContent`，承载完整
+  标题、环境、模型、绝对时间、PR 数等；卡片在列表**右侧**展开
+  （`side="right"`，`sideOffset` 10，不遮挡列表；窄屏无右侧空间时由
+  floating-ui 自动翻转），按可用宽高收缩（`--available-width/height`），
+  超高时内部滚动。
+- 每页 60 条、筛选状态存内存 store（`lib/store/thread-list-store.ts`），刷新页面
+  回默认视图；筛选控件由 `ThreadSidebar`/`ThreadFilterControls` 承载
+  （`components/threads/thread-sidebar.tsx`）。
+- 列表在常驻 layout 里不会随导航重挂载，所以新鲜度靠两处补：切线程时 layout
+  重读一次列表；详情每次重读（挂载、聚焦、SSE 失效、写操作结算）把最新
+  `ThreadSummary` 回写列表缓存
+  （`mergeThreadSummary`），避免「右栏已结束、左栏还显示运行中」以及排序/计数
+  滞后。
+- 详情页信息卡（`ThreadInfoCard`）按**右栏容器宽度**而非视口显隐：右栏是
+  `@container`，卡片 `@4xl` 起出现、`@5xl` 加宽，中等视口下不再把聊天区
+  挤窄；顶栏的父线程入口同步用 `@4xl` 断点与信息卡互补。
+- `ProjectBadge` 已独立到 `components/threads/project-badge.tsx`，旧
+  `thread-card.tsx`（大卡片）已删除。
+
 ## 已知限制
 
 - 列表/运行态来自常驻订阅 + 增量推送（近实时）；详情的 queue/activity 取自

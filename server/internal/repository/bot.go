@@ -26,16 +26,14 @@ func (r *BotRepository) Create(bot *model.Bot) error {
 // UpdateConfigTx 在事务内按列写配置，不碰水位；toolset_version 是运行时
 // 激活水位（只在压缩/重启边界切换），这里不回写——并发编辑不得把已激活的
 // 新版本覆盖回旧值（INT-102）。includePrompt=false 表示人设未变：persona_prompt
-// 与提示词状态三列一并不写，改名/换模型/换 key 不得把读行时的旧提示词状态
-// 写回、反向撤销并发的提示词激活。
+// 与提示词状态三列一并不写，改名/换模型/换 provider 不得把读行时的旧提示词
+// 状态写回、反向撤销并发的提示词激活。
 func (r *BotRepository) UpdateConfigTx(tx *gorm.DB, bot *model.Bot, includePrompt bool) error {
 	cols := map[string]interface{}{
-		"name":              bot.Name,
-		"base_url":          bot.BaseURL,
-		"model":             bot.Model,
-		"api_key_encrypted": bot.APIKeyEncrypted,
-		"api_key_last4":     bot.APIKeyLast4,
-		"updated_at":        bot.UpdatedAt,
+		"name":        bot.Name,
+		"provider_id": bot.ProviderID,
+		"model":       bot.Model,
+		"updated_at":  bot.UpdatedAt,
 	}
 	if includePrompt {
 		cols["persona_prompt"] = bot.PersonaPrompt
@@ -76,9 +74,65 @@ func (r *BotRepository) TellToolsetVersionTx(tx *gorm.DB, botID string, fromVers
 	return res.RowsAffected > 0, nil
 }
 
+// fillProviderDerived 把 provider 派生字段补进一批 bot（INT-133）：BaseURL /
+// 密钥密文 / last4 / 提供商名 / 目录 ID 全部来自 ai_providers 行——密钥只在
+// provider 行存一份，轮换后所有引用它的机器人在下一次读取生效。同一批内重复
+// 的 provider 合并为一次查询。provider 行缺失（理论不可达：删除有引用检查）
+// 时该 bot 的派生字段保持空值，调用方按「配置已失效」处理。
+func (r *BotRepository) fillProviderDerived(db *gorm.DB, bots []*model.Bot) error {
+	ids := make([]string, 0, len(bots))
+	seen := make(map[string]bool, len(bots))
+	for _, b := range bots {
+		if b.ProviderID != "" && !seen[b.ProviderID] {
+			seen[b.ProviderID] = true
+			ids = append(ids, b.ProviderID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var providers []model.AIProvider
+	if err := db.Where("id IN (?)", ids).Find(&providers).Error; err != nil {
+		return err
+	}
+	byID := make(map[string]model.AIProvider, len(providers))
+	for _, p := range providers {
+		byID[p.ID] = p
+	}
+	for _, b := range bots {
+		p, ok := byID[b.ProviderID]
+		if !ok {
+			continue
+		}
+		b.BaseURL = p.BaseURL
+		b.APIKeyEncrypted = append([]byte(nil), p.APIKeyEncrypted...)
+		b.APIKeyLast4 = p.APIKeyLast4
+		b.ProviderName = p.Name
+		b.CatalogID = p.CatalogID
+	}
+	return nil
+}
+
+// withDerived 查回 bot 后统一补齐派生字段：任何 Find 返回的 bot 都带
+// provider 派生的 BaseURL/密钥/last4，调用方（含 run 冻结与 schedule 派发）
+// 不必各自再查 provider。
+func (r *BotRepository) withDerived(rows []model.Bot) ([]model.Bot, error) {
+	pointers := make([]*model.Bot, len(rows))
+	for i := range rows {
+		pointers[i] = &rows[i]
+	}
+	if err := r.fillProviderDerived(r.db, pointers); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 func (r *BotRepository) Get(id string) (*model.Bot, error) {
 	var bot model.Bot
 	if err := r.db.Where("id = ?", id).First(&bot).Error; err != nil {
+		return nil, err
+	}
+	if err := r.fillProviderDerived(r.db, []*model.Bot{&bot}); err != nil {
 		return nil, err
 	}
 	return &bot, nil
@@ -89,12 +143,19 @@ func (r *BotRepository) FindByIDAndUser(id, userID string) (*model.Bot, error) {
 	if err := r.db.Where("id = ? AND user_id = ?", id, userID).First(&bot).Error; err != nil {
 		return nil, err
 	}
+	if err := r.fillProviderDerived(r.db, []*model.Bot{&bot}); err != nil {
+		return nil, err
+	}
 	return &bot, nil
 }
 
 func (r *BotRepository) ListByUser(userID string) ([]model.Bot, error) {
 	var bots []model.Bot
 	if err := r.db.Where("user_id = ?", userID).Order("created_at DESC, id DESC").Find(&bots).Error; err != nil {
+		return nil, err
+	}
+	bots, err := r.withDerived(bots)
+	if err != nil {
 		return nil, err
 	}
 	return bots, nil
@@ -217,4 +278,16 @@ func (r *BotRepository) NextEventSeqTx(tx *gorm.DB, botID string) (int64, error)
 func (r *BotRepository) SetOfferedInputSeq(botID string, seq int64) error {
 	return r.db.Model(&model.Bot{}).Where("id = ?", botID).
 		Update("offered_input_seq", seq).Error
+}
+
+// AdvanceStyleCompaction CAS 推进风格压缩水位（只升不降）：一次性语义，
+// 已推进过的并发写者落空。返回是否命中（INT-133）。
+func (r *BotRepository) AdvanceStyleCompaction(botID string, toVersion int64) (bool, error) {
+	res := r.db.Model(&model.Bot{}).
+		Where("id = ? AND style_compaction_version < ?", botID, toVersion).
+		Update("style_compaction_version", toVersion)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }

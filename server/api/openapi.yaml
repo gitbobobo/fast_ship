@@ -62,7 +62,9 @@ tags:
   - name: self-logs
     description: Fast Ship 自身日志查询（只读，INT-94）：slog 结构化采集、独立 SQLite 日志库存储，JWT 与 fsk_ API Key 可查本人归属及显式系统行（无主行默认不可见）；供代理排查 Fast Ship 自身问题
   - name: bots
-    description: 内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位
+    description: 内置机器人（智能体，INT-101，仅 JWT）：用户自带 OpenAI 兼容 key，机器人经白名单工具操作项目/Issue/已连接环境与线程。管理、主线消息、运行、调用、确认授权与 SSE 全部仅 JWT；key 全链路脱敏只回末四位。INT-133 起地址与密钥改存到 AI 提供商，bot 只存引用
+  - name: ai-providers
+    description: AI 提供商（INT-133，仅 JWT）：按用户隔离的「地址 + 密钥」配置，可被多个机器人引用；内置 models.dev 目录（OpenAI 兼容 + 有 api 地址 + 模型支持 tool_call 的子集，随发版刷新）用于选择提供商与模型。key 全链路脱敏只回末四位
   - name: quota
     description: 订阅套餐额度（INT-109）：粘贴凭据后服务端定时抓取各 AI 编码服务订阅额度并只读展示。管理端点仅 JWT；GET /api/quota/accounts 对 JWT 与 API Key 均开放（只读，机器人取数通道）
   - name: members
@@ -7158,6 +7160,237 @@ paths:
                 $ref: '#/components/schemas/ErrorEnvelope'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/ai-providers:
+    get:
+      tags: [ai-providers]
+      operationId: listAIProviders
+      summary: 列出当前用户的 AI 提供商（含被引用计数）
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 提供商列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/AIProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      tags: [ai-providers]
+      operationId: createAIProvider
+      summary: 新增 AI 提供商
+      description: |
+        catalog_id 为目录 id 或 `custom`。目录提供商的 base_url 由目录决定
+        （请求里的 base_url 忽略）；custom 必须给 http/https 地址，存储前
+        规范化（TrimSpace + 去尾部 /）。name 缺省用目录名（custom 用「自定义」）。
+        api_key 加密落库（AES-GCM），响应只回末四位。同一 catalog 允许配多份
+        不同 key。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAIProviderRequest'
+      responses:
+        '200':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AIProvider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ai-providers/test:
+    post:
+      tags: [ai-providers]
+      operationId: testAIProvider
+      summary: 测试提供商连接（保存前/保存后均可）
+      description: |
+        与机器人 test-connection 同一检查项（streaming / tool_call），HTTP 200
+        且 ok=false 表示可达性/兼容性问题。目录提供商的地址由目录决定；
+        custom 必须给 base_url 与 model；目录提供商缺省用目录里第一个模型。
+        models 为 /models 列表尽力拉取的模型 id（拉取失败不填充，不影响 ok）。
+      security:
+        - jwtAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestAIProviderRequest'
+      responses:
+        '200':
+          description: 检查结果（ok=false 时检查项中带失败详情）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AIProviderTestResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ai-providers/catalog:
+    get:
+      tags: [ai-providers]
+      operationId: listAIProviderCatalog
+      summary: 读取内置 models.dev 目录（OpenAI 兼容子集）
+      description: |
+        随二进制发布的静态目录（运行时不联网，发版时刷新）：OpenAI 兼容协议、
+        提供 api 地址且模型支持 tool_call 的提供商子集。模型窗口/输出上限缺失
+        时为 0（未知）。
+      security:
+        - jwtAuth: []
+      responses:
+        '200':
+          description: 目录提供商列表（按 id 排序）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [items]
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/CatalogProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/ai-providers/{id}:
+    get:
+      tags: [ai-providers]
+      operationId: getAIProvider
+      summary: 读取 AI 提供商
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          description: 提供商配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AIProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags: [ai-providers]
+      operationId: updateAIProvider
+      summary: 更新 AI 提供商（轮换密钥 / 改名 / custom 改地址）
+      description: |
+        指针字段表达「未提供保留」；api_key 缺省保留原 key，空串拒绝（40001）。
+        catalog_id 不可改（更换目录归属等于换提供商，应新建一条）；目录提供商
+        的 base_url 由目录决定，请求里的 base_url 忽略。更新后引用它的机器人在
+        下一个 run 生效。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAIProviderRequest'
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AIProvider'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags: [ai-providers]
+      operationId: deleteAIProvider
+      summary: 删除 AI 提供商
+      description: 仍被机器人引用时返回 409（40933），先更换或删除相关机器人。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 仍被机器人引用（40933）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /api/bots:
     get:
@@ -7193,8 +7426,9 @@ paths:
       operationId: createBot
       summary: 创建机器人
       description: |
-        人设与平台规则在创建时拼成系统提示词并生成 prompt_revision=1；
-        API Key 加密落库（AES-GCM），响应只回末四位。同名机器人不做唯一约束。
+        provider_id 必填且属于当前用户（INT-133）：地址与密钥都在 AI 提供商上，
+        bot 只存引用，同一 provider 可被多个机器人共用。人设与平台规则在创建时
+        拼成系统提示词并生成 prompt_revision=1。同名机器人不做唯一约束。
       security:
         - jwtAuth: []
       requestBody:
@@ -7228,12 +7462,14 @@ paths:
       operationId: testBotConnection
       summary: 测试模型连接（流式与工具调用兼容性）
       description: |
-        只做最小模型探测，不写入主线。可传完整未保存配置；也可传 bot_id 使用
-        已保存 key，并允许表单覆盖 base_url/model。streaming 与 tool_call 两项
-        检查分别返回；HTTP 200 且 ok=false 表示配置可达性/兼容性问题。
-        另同步探测 GET /models 的模型窗口元数据（INT-115）：成功写入缓存并把
-        detected 值并入响应；失败回退当前解析值（manual/默认窗口），不影响 ok。
-        SDK 重试显式关零，不产生隐藏重复调用。
+        只做最小模型探测，不写入主线。地址与密钥一律取 provider_id 对应的
+        AI 提供商（INT-133），不接受请求体里的 base_url/api_key；model 显式
+        提供时优先，否则沿用 bot_id 对应机器人的已保存模型（两者都没有时 400）。
+        streaming 与 tool_call 两项检查分别返回；HTTP 200 且 ok=false 表示
+        配置可达性/兼容性问题。另同步探测 GET /models 的模型窗口元数据
+        （INT-115）：成功写入缓存并把 detected 值并入响应；失败回退当前解析值
+        （manual/catalog/默认窗口），不影响 ok。SDK 重试显式关零，不产生隐藏
+        重复调用。测试保存中的新密钥请用 POST /api/ai-providers/test。
       security:
         - jwtAuth: []
       requestBody:
@@ -7295,7 +7531,8 @@ paths:
       operationId: updateBot
       summary: 更新机器人配置
       description: |
-        指针字段表达「未提供保留」；api_key 缺省保留原 key，空串拒绝（40001）。
+        指针字段表达「未提供保留」。provider_id 变更时新提供商必须属于当前用户，
+        否则 40433；地址与密钥随提供商（INT-133），轮换密钥请更新 provider。
         人设变化重建系统提示词并递增 prompt_revision。配置变化对下个 run 生效，
         当前 run 使用开始时的快照与已创建的客户端。
       security:
@@ -12425,7 +12662,7 @@ components:
 
     Bot:
       type: object
-      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, base_url, model, api_key_last4, next_event_seq, context_window, max_output_tokens, context_source, created_at, updated_at]
+      required: [id, name, persona_prompt, prompt_revision, platform_prompt_version, toolset_version, provider_id, provider_name, catalog_id, base_url, model, api_key_last4, next_event_seq, context_window, max_output_tokens, context_source, created_at, updated_at]
       properties:
         id:
           type: string
@@ -12444,29 +12681,39 @@ components:
         toolset_version:
           type: integer
           format: int64
+        provider_id:
+          type: string
+          description: 所属 AI 提供商（INT-133）；地址与密钥都在提供商上
+        provider_name:
+          type: string
+          description: 提供商名称（展示用，派生自 provider）
+        catalog_id:
+          type: string
+          description: 提供商的目录 id（models.dev id 或 custom，派生自 provider）
         base_url:
           type: string
-          description: OpenAI 兼容 API 基址（http/https，按用户提供处理，不追加 /v1）
+          description: OpenAI 兼容 API 基址；INT-133 起为 provider 的派生值（提供商轮换后下一次读取生效）
         model:
           type: string
         api_key_last4:
           type: string
-          description: API Key 末四位；明文任何端点都不回显
+          description: API Key 末四位（provider 的派生值）；明文任何端点都不回显
         context_window:
           type: integer
           format: int64
           description: >-
             模型上下文窗口（未扣输出空间）。解析顺序 manual > detected >
-            fallback；fallback 为部署默认窗口
+            catalog > fallback；fallback 为部署默认窗口
         max_output_tokens:
           type: integer
           format: int64
-          description: 模型输出上限；仅 detected 来源可给出，未知为 0
+          description: 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0
         context_source:
           type: string
           description: >-
             窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/
-            fallback（默认窗口）；展示层不得把回退值说成已检测
+            catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）；
+            展示层不得把回退值说成已检测
         context_detail:
           type: string
           description: 解析口径说明（探测方式或回退原因）；可省略
@@ -12560,16 +12807,16 @@ components:
           format: int64
           description: >-
             模型上下文窗口（未扣输出空间）。解析顺序 manual > detected >
-            fallback；fallback 为部署默认窗口
+            catalog > fallback；fallback 为部署默认窗口
         max_output_tokens:
           type: integer
           format: int64
-          description: 模型输出上限；仅 detected 来源可给出，未知为 0
+          description: 模型输出上限；detected（探测缓存）与 catalog（内置目录）来源可给出，未知为 0
         context_source:
           type: string
           description: >-
             窗口来源：manual（部署覆盖）/ detected（GET /models 探测缓存）/
-            fallback（默认窗口）
+            catalog（内置 models.dev 目录，INT-133）/ fallback（默认窗口）
         context_detail:
           type: string
           description: 解析口径说明；可省略
@@ -12630,47 +12877,45 @@ components:
 
     CreateBotRequest:
       type: object
-      required: [name, base_url, model, api_key]
+      required: [name, provider_id, model]
       properties:
         name:
           type: string
           minLength: 1
         persona_prompt:
           type: string
-        base_url:
+        provider_id:
           type: string
+          description: 必填且属于当前用户（40433）；地址与密钥都在提供商上
         model:
           type: string
-        api_key:
-          type: string
-          description: OpenAI 兼容 API Key；加密落库，仅创建/更新时提交
+          description: 模型名，不带 provider 前缀
 
     UpdateBotRequest:
       type: object
-      description: 指针字段表达「未提供保留」；api_key 空串拒绝（40001）
+      description: 指针字段表达「未提供保留」；INT-133 起不再接受 base_url / api_key，密钥轮换经 AI 提供商端点
       properties:
         name:
           type: string
         persona_prompt:
           type: string
-        base_url:
+        provider_id:
           type: string
+          description: 更换所属提供商；必须属于当前用户（40433）
         model:
-          type: string
-        api_key:
           type: string
 
     TestBotConnectionRequest:
       type: object
-      description: 未保存配置时必须提供 base_url/model/api_key；给 bot_id 时用已保存 key 并允许表单覆盖地址/模型
+      required: [provider_id]
+      description: 地址与密钥一律取 provider（INT-133）；model 显式提供时优先，否则沿用 bot_id 的已保存模型（两者都没有时 40001）
       properties:
+        provider_id:
+          type: string
         bot_id:
           type: string
-        base_url:
-          type: string
+          description: 可选；给出时 model 缺省沿用该机器人的已保存模型
         model:
-          type: string
-        api_key:
           type: string
 
     BotConnectionCheck:
@@ -12699,17 +12944,153 @@ components:
           format: int64
           description: >-
             模型上下文窗口：GET /models 同步探测成功时为探测值并写入缓存；
-            失败回退到当前解析值（manual / 默认窗口）
+            失败回退到当前解析值（manual / catalog / 默认窗口）
         max_output_tokens:
           type: integer
           format: int64
           description: 模型输出上限；仅探测到时非 0
         context_source:
           type: string
-          description: 窗口来源 manual / detected / fallback（探测失败时如实标注）
+          description: 窗口来源 manual / detected / catalog / fallback（探测失败时如实标注）
         context_detail:
           type: string
           description: 解析口径说明；可省略
+
+    AIProvider:
+      type: object
+      required: [id, catalog_id, name, base_url, api_key_last4, bot_count, created_at, updated_at]
+      description: AI 提供商（INT-133）：按用户隔离的地址 + 密钥配置，key 只回末四位
+      properties:
+        id:
+          type: string
+        catalog_id:
+          type: string
+          description: models.dev 提供商 id，或 custom
+        name:
+          type: string
+        base_url:
+          type: string
+          description: 规范化存储（TrimSpace + 去尾部 /）；目录提供商由目录决定，custom 由用户提供
+        api_key_last4:
+          type: string
+          description: API Key 末四位；明文任何端点都不回显
+        bot_count:
+          type: integer
+          description: 当前引用该提供商的机器人数量
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CatalogProviderModel:
+      type: object
+      required: [id, name, context_window, max_output_tokens, reasoning]
+      description: 内置目录里的一个模型；窗口/输出缺失为 0（未知）
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        context_window:
+          type: integer
+          format: int64
+        max_output_tokens:
+          type: integer
+          format: int64
+        reasoning:
+          type: boolean
+
+    CatalogProvider:
+      type: object
+      required: [id, name, api, models]
+      description: 内置 models.dev 目录里的一个提供商（OpenAI 兼容 + 有 api 地址 + 模型支持 tool_call）
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        api:
+          type: string
+          description: 官方 OpenAI 兼容端点
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogProviderModel'
+
+    CreateAIProviderRequest:
+      type: object
+      required: [catalog_id, api_key]
+      properties:
+        catalog_id:
+          type: string
+          description: models.dev 提供商 id，或 custom
+        name:
+          type: string
+          description: 缺省用目录名（custom 用「自定义」）
+        base_url:
+          type: string
+          description: 仅 custom 接受；必须是 http/https，存储前规范化。目录提供商的地址由目录决定，此字段忽略
+        api_key:
+          type: string
+          description: 加密落库；空串/空白拒绝（40001）
+
+    UpdateAIProviderRequest:
+      type: object
+      description: 指针字段表达「未提供保留」；catalog_id 不可改；目录提供商的 base_url 由目录决定（请求忽略）
+      properties:
+        name:
+          type: string
+        base_url:
+          type: string
+          description: 仅 custom 生效
+        api_key:
+          type: string
+          description: 空串拒绝（40001）；缺省保留原 key
+
+    TestAIProviderRequest:
+      type: object
+      required: [api_key]
+      properties:
+        catalog_id:
+          type: string
+          description: 缺省按 custom 处理
+        base_url:
+          type: string
+          description: custom / 缺省 catalog_id 时必填
+        api_key:
+          type: string
+        model:
+          type: string
+          description: 缺省用目录里第一个模型；custom 必须提供
+
+    AIProviderTestResult:
+      type: object
+      required: [ok, checks]
+      properties:
+        ok:
+          type: boolean
+          description: streaming 与 tool_call 都通过才 true
+        checks:
+          type: array
+          items:
+            type: object
+            required: [name, passed]
+            properties:
+              name:
+                type: string
+                description: streaming / tool_call
+              passed:
+                type: boolean
+              detail:
+                type: string
+                description: 失败原因（截断；不含密钥）
+        models:
+          type: array
+          description: /models 列表尽力拉取的模型 id；拉取失败省略（不影响 ok）
+          items:
+            type: string
 
     BotMessage:
       type: object

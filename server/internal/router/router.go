@@ -38,6 +38,7 @@ func Setup(
 	reviewAgentHandler *handler.ReviewAgentHandler,
 	reviewResolver service.RunTokenResolver,
 	botHandler *handler.BotHandler,
+	aiProviderHandler *handler.AIProviderHandler,
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
 	quotaHandler *handler.QuotaHandler,
@@ -333,13 +334,25 @@ func Setup(
 	api.POST("/notifications/read-all", middleware.RequireJWT(cfg, authService), notificationHandler.MarkAllRead)
 	api.POST("/notifications/:id/read", middleware.RequireJWT(cfg, authService), notificationHandler.MarkRead)
 
-	// JWT 必须 — PR 审查（INT-135）：审查总览、项目审查设置与记录；
-	// reviews/rerun 与 review-agent 运行令牌端点在 1c 接入。
+	// JWT 必须 — PR 审查（INT-135）：审查总览、项目审查设置与记录。
 	api.GET("/reviews", middleware.RequireJWT(cfg, authService), reviewHandler.ListProjects)
 	api.GET("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.GetSettings)
 	api.PUT("/projects/:id/review-settings", middleware.RequireJWT(cfg, authService), reviewHandler.UpdateSettings)
 	api.GET("/projects/:id/review-records", middleware.RequireJWT(cfg, authService), reviewHandler.ListRecords)
 	api.POST("/projects/:id/reviews/rerun", middleware.RequireJWT(cfg, authService), reviewHandler.Rerun)
+
+	// AI 提供商（INT-133）：内置目录读取与按用户隔离的 CRUD/测试连接，全部
+	// 仅 JWT；test/catalog 为静态段，优先于 :id 匹配。
+	aiProviders := api.Group("/ai-providers", middleware.RequireJWT(cfg, authService))
+	{
+		aiProviders.GET("", aiProviderHandler.List)
+		aiProviders.POST("", aiProviderHandler.Create)
+		aiProviders.POST("/test", aiProviderHandler.TestConnection)
+		aiProviders.GET("/catalog", aiProviderHandler.Catalog)
+		aiProviders.GET("/:id", aiProviderHandler.Get)
+		aiProviders.PUT("/:id", aiProviderHandler.Update)
+		aiProviders.DELETE("/:id", aiProviderHandler.Delete)
+	}
 
 	// JWT 必须 — 内置机器人（INT-101）：管理、主线、运行、调用、确认授权与
 	// SSE 全部仅 JWT；test-connection 为静态段，优先于 :id 匹配。
