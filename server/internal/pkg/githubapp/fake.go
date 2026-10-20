@@ -268,11 +268,25 @@ func (f *Fake) FindPullRequestComment(ctx context.Context, installationID int64,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, c := range f.comments[fakeRepoKey(repoFullName)][number] {
-		if strings.Contains(c.Body, marker) {
-			return c.ID, true, nil
+		if !strings.HasSuffix(c.User, "[bot]") || !strings.HasPrefix(strings.TrimSpace(c.Body), marker) {
+			continue
 		}
+		return c.ID, true, nil
 	}
 	return 0, false, nil
+}
+
+// SeedIssueComment 落一条任意作者的 issue 评论（测试「用户引用 marker」用）。
+func (f *Fake) SeedIssueComment(repoFullName string, number int, user, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fakeRepoKey(repoFullName)
+	if f.comments[key] == nil {
+		f.comments[key] = map[int][]fakeComment{}
+	}
+	f.nextID++
+	f.comments[key][number] = append(f.comments[key][number],
+		fakeComment{ID: f.nextID, User: user, Body: body, CreatedAt: time.Now().UTC()})
 }
 
 func (f *Fake) CreatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (int64, error) {

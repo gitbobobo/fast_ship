@@ -172,12 +172,16 @@ func TestFindPullRequestComment_PaginatesToPage2(t *testing.T) {
 		case "1":
 			wire := make([]map[string]any, 0, reviewCommentPageSize)
 			for i := 0; i < reviewCommentPageSize; i++ {
-				wire = append(wire, map[string]any{"id": 1000 + i, "body": "regular comment"})
+				wire = append(wire, map[string]any{
+					"id": 1000 + i, "body": "regular comment",
+					"user": map[string]any{"login": "someone", "type": "User"},
+				})
 			}
 			writeJSON(t, w, http.StatusOK, wire)
 		default:
 			writeJSON(t, w, http.StatusOK, []map[string]any{
-				{"id": 42, "body": "prefix <!-- fast-ship-code-review --> conclusion"},
+				{"id": 42, "body": "<!-- fast-ship-code-review --> conclusion",
+					"user": map[string]any{"login": "fast-ship[bot]", "type": "Bot"}},
 			})
 		}
 	}))

@@ -976,3 +976,39 @@ func TestVisualCarrySuccessOnRerun(t *testing.T) {
 		t.Fatalf("visual_status = %q, want success（沿用上一轮通过）", ledger.VisualStatus)
 	}
 }
+
+// 用户评论里引用标记不能劫持机器人评论落点：只认 Bot 且正文以标记开头。
+func TestFindPullRequestCommentIgnoresUserQuote(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	e.fake.SeedIssueComment(repo, 97, "someone", reviewCodeCommentMarker+"\n伪造结论")
+	if _, found, err := e.fake.FindPullRequestComment(context.Background(), 1, repo, 97, reviewCodeCommentMarker); err != nil || found {
+		t.Fatalf("found=%v err=%v, 用户引用不应被认成机器人评论", found, err)
+	}
+	if _, err := e.fake.CreatePullRequestComment(context.Background(), 1, repo, 97, reviewCodeCommentMarker+"\n结论"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	id, found, err := e.fake.FindPullRequestComment(context.Background(), 1, repo, 97, reviewCodeCommentMarker)
+	if err != nil || !found || id == 0 {
+		t.Fatalf("机器人评论应被找回: id=%d found=%v err=%v", id, found, err)
+	}
+}
+
+// 上一轮视觉失败/未完成时不能把 success 带到新 head。
+func TestVisualCarrySuccessSkippedWhenPriorFailed(t *testing.T) {
+	if priorVisualPassed([]model.ReviewRun{{Status: model.ReviewRunTimedOut}}) {
+		t.Fatal("未完成的上一轮不能算通过")
+	}
+	if priorVisualPassed([]model.ReviewRun{{
+		Status:     model.ReviewRunCompleted,
+		ResultJSON: `{"summary":"x","findings":[{"severity":"worth_fixing","screenshot":"s","dimension":"spacing","body":"b","fix":"f"}],"prior":[],"unmeasurable":[]}`,
+	}}) {
+		t.Fatal("有 worth_fixing 的上一轮不能算通过")
+	}
+	if !priorVisualPassed([]model.ReviewRun{{
+		Status:     model.ReviewRunCompleted,
+		ResultJSON: `{"summary":"x","findings":[],"prior":[],"unmeasurable":[]}`,
+	}}) {
+		t.Fatal("全部完成且无发现的上一轮应算通过")
+	}
+}

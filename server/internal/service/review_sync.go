@@ -261,7 +261,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			visualPending = false
 			// 截图没变、无需重启视觉审查：上一轮视觉已通过时把 success 带到
 			// 新 head（开轮清空了 visual_status），否则新提交会没有视觉结论。
-			if len(priorVisuals) > 0 && !priorVisualFailure(priorVisuals) {
+			if len(priorVisuals) > 0 && priorVisualPassed(priorVisuals) {
 				if err := client.CreateCommitStatus(ctx, ledger.InstallationID, ledger.RepoFullName,
 					ledger.HeadSHA, "success", reviewVisualStatusContext,
 					statusDesc("审查通过（沿用上一轮，截图未变化）"), targetURL); err != nil {
@@ -877,6 +877,20 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 		}
 	}
 	return decideVisual(in), fingerprint, priorRuns, nil
+}
+
+// priorVisualPassed 上一轮视觉运行是否全部成功完成且无 blocker/worth_fixing
+// ——只有这种结果才能沿用到新 head；失败/超时/取消的轮次不能当通过。
+func priorVisualPassed(runs []model.ReviewRun) bool {
+	for i := range runs {
+		if runs[i].Status != model.ReviewRunCompleted {
+			return false
+		}
+		if visualResultHasFailure(runs[i].ResultJSON) {
+			return false
+		}
+	}
+	return len(runs) > 0
 }
 
 // priorVisualFailure 上一轮视觉运行是否含 blocker/worth_fixing。

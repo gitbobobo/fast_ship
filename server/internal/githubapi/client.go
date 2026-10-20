@@ -297,6 +297,7 @@ type issueCommentWire struct {
 	ID   int64 `json:"id"`
 	User struct {
 		Login string `json:"login"`
+		Type  string `json:"type"`
 	} `json:"user"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`
@@ -350,9 +351,11 @@ func (c *restClient) FindPullRequestComment(ctx context.Context, installationID 
 			return 0, false, err
 		}
 		for _, w := range wire {
-			if strings.Contains(w.Body, marker) {
-				return w.ID, true, nil
+			// 只认机器人自己发的结论：用户评论里引用 marker 不能劫持落点。
+			if w.User.Type != "Bot" || !strings.HasPrefix(strings.TrimSpace(w.Body), marker) {
+				continue
 			}
+			return w.ID, true, nil
 		}
 		if len(wire) < reviewCommentPageSize {
 			break
