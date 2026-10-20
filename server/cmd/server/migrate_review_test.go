@@ -153,3 +153,33 @@ func TestReviewAssetsUniquePerSource(t *testing.T) {
 		t.Fatalf("assets = %d, want 1（同一源地址只留一行）", n)
 	}
 }
+
+// 删 automation_runs 前要把在途线程登记成墓碑，供新服务停线程/归档。
+func TestMigrateReviewTablesKeepsLegacyThreadTombs(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.Exec(`CREATE TABLE automation_runs (
+		id text PRIMARY KEY, user_id text, environment_id text, thread_id text,
+		status text, finished_at datetime)`).Error; err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO automation_runs (id,user_id,environment_id,thread_id,status,finished_at)
+		VALUES ('r1','u1','e1','th-running','running',NULL),
+		       ('r2','u1','e1','th-done','completed','2026-01-01 00:00:00'),
+		       ('r3','u2','e2','th-dispatched','dispatched',NULL)`).Error; err != nil {
+		t.Fatalf("seed legacy runs: %v", err)
+	}
+
+	if err := migrateReviewTables(db, zap.NewNop()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	var tombs []model.LegacyAutomationThread
+	if err := db.Order("thread_id ASC").Find(&tombs).Error; err != nil {
+		t.Fatalf("load tombs: %v", err)
+	}
+	if len(tombs) != 2 || tombs[0].ThreadID != "th-dispatched" || tombs[1].ThreadID != "th-running" {
+		t.Fatalf("tombs = %+v, want 仅在途的两条", tombs)
+	}
+}

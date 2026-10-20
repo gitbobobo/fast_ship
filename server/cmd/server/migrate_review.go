@@ -22,6 +22,30 @@ func migrateReviewTables(db *gorm.DB, logger *zap.Logger) error {
 		"github_pr_debounces",
 		"github_pr_seen_shas",
 	}
+	// 删表前先给在途的旧自动化线程留墓碑：旧调度器与 agent 端点都已删除，
+	// 没有墓碑就再也没有路径停掉/归档这些远端线程（见 ReviewService 的
+	// cleanupLegacyThreads）。表由 AutoMigrate 负责正式 DDL，这里先建最小结构。
+	if exists, err := sqliteTableExists(db, "automation_runs"); err != nil {
+		return err
+	} else if exists {
+		if err := db.Exec(`CREATE TABLE IF NOT EXISTS legacy_automation_threads (
+			id integer PRIMARY KEY AUTOINCREMENT,
+			user_id text NOT NULL,
+			environment_id text NOT NULL,
+			thread_id text NOT NULL,
+			attempts integer NOT NULL DEFAULT 0,
+			created_at datetime NOT NULL
+		)`).Error; err != nil {
+			return fmt.Errorf("创建旧自动化线程墓碑表失败: %w", err)
+		}
+		if err := db.Exec(`INSERT INTO legacy_automation_threads
+			(user_id, environment_id, thread_id, attempts, created_at)
+			SELECT user_id, environment_id, thread_id, 0, CURRENT_TIMESTAMP
+			FROM automation_runs
+			WHERE thread_id <> '' AND (finished_at IS NULL OR status IN ('dispatched','running'))`).Error; err != nil {
+			return fmt.Errorf("登记在途旧自动化线程失败: %w", err)
+		}
+	}
 	for _, table := range legacyTables {
 		if err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %q", table)).Error; err != nil {
 			return fmt.Errorf("删除遗留表 %s 失败: %w", table, err)

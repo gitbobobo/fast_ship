@@ -75,6 +75,41 @@ func (s *ReviewService) reviewTick(now time.Time) {
 	s.syncPendingPRs(now)
 	s.archiveRuns(now)
 	s.cleanupWorktrees(now)
+	s.cleanupLegacyThreads(now)
+}
+
+// cleanupLegacyThreads 处理通用自动化下线时留下的在途线程墓碑：停线程、
+// 归档，成功即删行；失败有限重试后放弃（只留日志），避免墓碑无限累积。
+func (s *ReviewService) cleanupLegacyThreads(now time.Time) {
+	if s.t3 == nil {
+		return
+	}
+	var rows []model.LegacyAutomationThread
+	if err := s.db.Order("id ASC").Limit(reviewStageBatch).Find(&rows).Error; err != nil {
+		s.logger.Error("查询旧自动化线程墓碑失败", zap.Error(err))
+		return
+	}
+	for _, row := range rows {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_, stopErr := s.t3.StopThread(ctx, row.UserID, row.EnvironmentID, row.ThreadID)
+		var archiveErr error
+		if stopErr == nil {
+			archiveErr = s.t3.ArchiveThread(ctx, row.UserID, row.EnvironmentID, row.ThreadID)
+		}
+		cancel()
+		if stopErr != nil || archiveErr != nil {
+			if row.Attempts+1 >= reviewWorktreeMaxTries {
+				s.logger.Warn("旧自动化线程清理失败，放弃墓碑",
+					zap.String("thread", row.ThreadID), zap.Error(stopErr), zap.Error(archiveErr))
+				s.db.Where("id = ?", row.ID).Delete(&model.LegacyAutomationThread{})
+				continue
+			}
+			s.db.Model(&model.LegacyAutomationThread{}).Where("id = ?", row.ID).
+				Update("attempts", row.Attempts+1)
+			continue
+		}
+		s.db.Where("id = ?", row.ID).Delete(&model.LegacyAutomationThread{})
+	}
 }
 
 // processDueDebounces 到期防抖行逐行短事务消费：条件删除（fire_at 未推后、

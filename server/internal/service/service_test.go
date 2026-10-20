@@ -110,6 +110,7 @@ func setupTestServices(t *testing.T) *testServices {
 		&model.ReviewAsset{},
 		&model.ReviewDebounce{},
 		&model.ReviewSeenSHA{},
+		&model.LegacyAutomationThread{},
 		&model.QuotaAccount{},
 	); err != nil {
 		t.Fatalf("migrate test db: %v", err)

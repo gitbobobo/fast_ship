@@ -418,8 +418,14 @@ func TestCleanupBeforeProjectDelete(t *testing.T) {
 	review := e.withT3(t3, nil, nil)
 	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
 
-	if len(t3.stopped) != 1 || t3.stopped[0] != active.ThreadID {
-		t.Fatalf("stopped = %v, want [%s]", t3.stopped, active.ThreadID)
+	stoppedActive := false
+	for _, id := range t3.stopped {
+		if id == active.ThreadID {
+			stoppedActive = true
+		}
+	}
+	if !stoppedActive {
+		t.Fatalf("stopped = %v, want 包含在途运行 %s", t3.stopped, active.ThreadID)
 	}
 	if len(t3.archived) != 2 {
 		t.Fatalf("archived = %v, want 2 个线程", t3.archived)
@@ -456,5 +462,31 @@ func TestCleanupUsesLaunchWorkspaceRoot(t *testing.T) {
 	}
 	if len(t3.removedCwd) != 1 || t3.removedCwd[0] != "/launch-time-root" {
 		t.Fatalf("removed cwd = %v, want [/launch-time-root]", t3.removedCwd)
+	}
+}
+
+// 旧自动化下线留下的墓碑：调度停线程、归档后删行；失败有限重试。
+func TestCleanupLegacyThreads(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+	now := time.Now().UTC()
+	if err := e.svc.db.Create(&model.LegacyAutomationThread{
+		UserID: e.user.ID, EnvironmentID: "env-old", ThreadID: "legacy-th", CreatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed tomb: %v", err)
+	}
+
+	review.cleanupLegacyThreads(now)
+	if len(t3.stopped) != 1 || t3.stopped[0] != "legacy-th" {
+		t.Fatalf("stopped = %v, want [legacy-th]", t3.stopped)
+	}
+	if len(t3.archived) != 1 || t3.archived[0] != "legacy-th" {
+		t.Fatalf("archived = %v, want [legacy-th]", t3.archived)
+	}
+	var n int64
+	e.svc.db.Model(&model.LegacyAutomationThread{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("墓碑应处理完即删，剩余 %d", n)
 	}
 }

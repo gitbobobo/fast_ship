@@ -89,6 +89,8 @@ var autoMigrateModels = []interface{}{
 	&model.ReviewAsset{},
 	&model.ReviewDebounce{},
 	&model.ReviewSeenSHA{},
+	// 通用自动化下线时在途旧线程的墓碑（处理完即删行）。
+	&model.LegacyAutomationThread{},
 	&model.QuotaAccount{},
 	// 部署级 App 与邀请注册（INT-129）：邀请表、部署设置单行表；users.role 列
 	// 随 model.User 迁移，存量角色回填见 migrateUserRoles。用户级 integrations

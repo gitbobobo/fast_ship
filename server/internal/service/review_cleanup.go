@@ -191,6 +191,33 @@ func (s *ReviewService) CleanupBeforeProjectDelete(ctx context.Context, projectI
 	if s.t3 == nil {
 		return
 	}
+	// 与 launchRun 互斥：等在途启动结束，再把非终态运行一律取消，避免
+	// 清理之后又有新线程被建出来（运行行随后会被 CASCADE 删掉）。
+	unlock := s.lockProject(projectID)
+	defer unlock()
+	now := time.Now().UTC()
+	active := []model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}
+	var activeIDs []string
+	if err := s.db.Model(&model.ReviewRun{}).
+		Where("project_id = ? AND status IN ?", projectID, active).
+		Pluck("id", &activeIDs).Error; err != nil {
+		s.logger.Warn("删除项目前查询在途审查失败", zap.String("project", projectID), zap.Error(err))
+	}
+	if len(activeIDs) > 0 {
+		if err := s.db.Model(&model.ReviewRun{}).
+			Where("id IN ? AND status IN ?", activeIDs, active).
+			Updates(map[string]any{
+				"status": model.ReviewRunCancelled, "error_code": "project_deleted",
+				"finished_at": now, "updated_at": now,
+			}).Error; err != nil {
+			s.logger.Warn("删除项目前取消在途审查失败", zap.String("project", projectID), zap.Error(err))
+		}
+		if err := s.db.Model(&model.ReviewRunToken{}).
+			Where("run_id IN ? AND consumed_at IS NULL", activeIDs).
+			Update("consumed_at", now).Error; err != nil {
+			s.logger.Warn("删除项目前消费审查令牌失败", zap.String("project", projectID), zap.Error(err))
+		}
+	}
 	var runs []model.ReviewRun
 	if err := s.db.Where("project_id = ?", projectID).Find(&runs).Error; err != nil {
 		s.logger.Warn("删除项目前查询审查运行失败", zap.String("project", projectID), zap.Error(err))
@@ -202,10 +229,10 @@ func (s *ReviewService) CleanupBeforeProjectDelete(ctx context.Context, projectI
 			continue
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		if run.Status.Active() {
-			if _, err := s.t3.StopThread(callCtx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
-				s.logger.Warn("删除项目前停止审查线程失败", zap.String("run", run.ID), zap.Error(err))
-			}
+		// 无条件尝试停止：终态线程的 StopThread 是幂等空操作，而刚刚被本函数
+		// 取消的在途运行必须真的停掉。
+		if _, err := s.t3.StopThread(callCtx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
+			s.logger.Warn("删除项目前停止审查线程失败", zap.String("run", run.ID), zap.Error(err))
 		}
 		if err := s.t3.ArchiveThread(callCtx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
 			s.logger.Warn("删除项目前归档审查线程失败", zap.String("run", run.ID), zap.Error(err))

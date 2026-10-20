@@ -84,6 +84,11 @@ type ReviewService struct {
 	// prLocks 每 PR 一把进程内锁：同一 PR 的 GitHub 同步串行，避免并发重复写。
 	prLocksMu sync.Mutex
 	prLocks   map[string]*sync.Mutex
+
+	// projectLocks 每项目一把进程内锁：删除项目的清理与 launchRun 互斥，
+	// 避免「清理时线程还没确认、清理后线程才建成」的孤儿线程。
+	projectLocksMu sync.Mutex
+	projectLocks   map[string]*sync.Mutex
 }
 
 func NewReviewService(
@@ -108,6 +113,7 @@ func NewReviewService(
 		worktreeBaseline: map[string][]string{},
 		worktreeTries:    map[string]int{},
 		prLocks:          map[string]*sync.Mutex{},
+		projectLocks:     map[string]*sync.Mutex{},
 	}
 }
 
@@ -141,6 +147,19 @@ func (s *ReviewService) HandleGitHubWebhook(ctx context.Context, event, delivery
 	// 事务提交后踢调度循环（循环未启动时为 no-op）。
 	s.notifyReviewLoop()
 	return nil
+}
+
+// lockProject 项目级互斥：launchRun 与删除项目的清理互斥。返回解锁函数。
+func (s *ReviewService) lockProject(projectID string) func() {
+	s.projectLocksMu.Lock()
+	mu, ok := s.projectLocks[projectID]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.projectLocks[projectID] = mu
+	}
+	s.projectLocksMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
 }
 
 // notifyReviewLoop 非阻塞踢一轮调度 tick。

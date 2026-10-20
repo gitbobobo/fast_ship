@@ -53,6 +53,10 @@ func (s *ReviewService) issueRunToken(run *model.ReviewRun, now time.Time) (stri
 // launchRun 一次运行的事务外派发。任何先决失败都把运行落成
 // failed/dispatch_failed + 通知；RPC 发出但结果未达保持 dispatched 等超时。
 func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Time) {
+	// 与删除项目的清理互斥：删除会先取消非终态运行并停线程，启动不能在
+	// 清理之后才把线程建成（那时运行行已被 CASCADE 删掉）。
+	unlock := s.lockProject(projectIDForRun(s.db, runID))
+	defer unlock()
 	var run model.ReviewRun
 	if err := s.db.Where("id = ?", runID).First(&run).Error; err != nil {
 		return
@@ -218,6 +222,13 @@ func (s *ReviewService) releaseWorktreeState(runID string) {
 	defer s.worktreeMu.Unlock()
 	delete(s.worktreeBaseline, runID)
 	delete(s.worktreeTries, runID)
+}
+
+// projectIDForRun 读运行所属项目（读取失败返回空串，锁退化为按空串串行）。
+func projectIDForRun(db *gorm.DB, runID string) string {
+	var projectID string
+	_ = db.Model(&model.ReviewRun{}).Where("id = ?", runID).Select("project_id").Scan(&projectID).Error
+	return projectID
 }
 
 // diffWorktreePath 计算 launch 后新增的唯一 worktree 路径；无新增或多个返回空。
