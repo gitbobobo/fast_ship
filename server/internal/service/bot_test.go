@@ -1437,8 +1437,16 @@ func TestBotResultTruncation(t *testing.T) {
 	if err := json.Unmarshal([]byte(content), &page); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if page.Offset != botResultBudgetChars || len([]rune(page.Content)) != 10 || !page.HasMore {
+	// 续读切片按出口规则包围栏（INT-136）：长度按围栏内的切片算。
+	nonce := botNonce(t, env, bot.ID)
+	fenceOpen := `<untrusted_data nonce="` + nonce + `" source="result_continuation">`
+	if page.Offset != botResultBudgetChars || !page.HasMore ||
+		!strings.HasPrefix(page.Content, fenceOpen) || !strings.HasSuffix(page.Content, "</untrusted_data>") {
 		t.Fatalf("续读结果不符: %+v", page)
+	}
+	slice := strings.TrimSuffix(strings.TrimPrefix(page.Content, fenceOpen), "</untrusted_data>")
+	if len([]rune(slice)) != 10 {
+		t.Fatalf("续读切片长度不符: %q", slice)
 	}
 	if page.NextOffset != page.Offset+10 {
 		t.Fatalf("next_offset 应为切片结束位置: %+v", page)
@@ -1471,7 +1479,10 @@ func TestBotResultTruncation(t *testing.T) {
 	if err := json.Unmarshal([]byte(fullContent), &fullPage); err != nil {
 		t.Fatalf("decode full: %v", err)
 	}
-	if fullPage.NextOffset != int64(len([]rune(fullPage.Content))) {
+	// 续读切片包裹栏后，next_offset 仍指向原结果里本次交付的字符边界
+	// （围栏本身不计入 offset）。
+	delivered := strings.TrimSuffix(strings.TrimPrefix(fullPage.Content, fenceOpen), "</untrusted_data>")
+	if fullPage.NextOffset != int64(len([]rune(delivered))) {
 		t.Fatalf("next_offset 应等于本次交付的字符边界: %+v", fullPage)
 	}
 	if !fullPage.HasMore {

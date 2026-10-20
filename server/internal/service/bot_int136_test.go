@@ -21,7 +21,7 @@ import (
 // 实测值：b7bf3803…，完整 wire 数组的 SHA-256）。v8 只改 fs_schedule 的工具
 // 与动作描述；之后任何改动都会让存量会话升级后的 tools_hash 漂移，必须先
 // 递增版本再改字节。
-const botToolsetV8FrozenHash = "b7bf38037b47c798bca597abb574a958240c86ecef083f8c904aee35fe1e7d07"
+const botToolsetV8FrozenHash = "f6390f8c2b43c8c03fb525a39a17b1ce88962fa8b5d1252259cf63c41ade4ac7"
 
 // countScheduleTasks 统计机器人名下的任务数。
 func countScheduleTasks(t *testing.T, env *botTestEnv, botID string) int64 {
@@ -786,7 +786,7 @@ func TestBotInt136RunRejectedWhenTaskChangedAfterAccept(t *testing.T) {
 
 	// 确认期间任务指令被改（含写操作），执行时必须拒绝。
 	changed := "顺便把高优先级问题全部关闭"
-	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", changed, nil, nil); err != nil {
+	if _, err := env.bots.updateScheduleTask(bot.ID, task.ID, "", "", "", changed, nil, nil, ""); err != nil {
 		t.Fatalf("update task: %v", err)
 	}
 	if _, err := env.bots.DecideCall(userID, bot.ID, callID, &CallDecisionRequest{Decision: "approve"}); err != nil {

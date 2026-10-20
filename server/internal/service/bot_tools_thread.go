@@ -19,12 +19,6 @@ import (
 
 func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall) (string, error) {
 	userID := s.botUserIDOf(call.BotID)
-	// 外部文本字段进不可信围栏（INT-136）：nonce 为空（未启用）时按原样投影。
-	// 读不到 nonce 就失败：围栏是安全保护，不能静默降级成裸文本。
-	nonce, err := s.botNonceOf(call.BotID)
-	if err != nil {
-		return "", err
-	}
 	var args botThreadArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
@@ -35,7 +29,7 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		result, err := botSlimThreadList(list, &args, nonce)
+		result, err := botSlimThreadList(list, &args)
 		if err != nil {
 			return "", err
 		}
@@ -45,7 +39,7 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		result, err := botSlimThreadDetail(detail, &args, nonce)
+		result, err := botSlimThreadDetail(detail, &args)
 		if err != nil {
 			return "", err
 		}
@@ -55,7 +49,7 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		return botMarshalResult(botSlimThreadItem(item, nonce))
+		return botMarshalResult(botSlimThreadItem(item))
 	case "composer_options":
 		opts, err := s.threads.ComposerOptions(ctx, userID, args.EnvID)
 		if err != nil {
@@ -63,14 +57,14 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		}
 		// 只透出启动器需要的项目与模型选择，不透传 T3 全量配置；项目标题来自
 		// 配对的 T3 服务/仓库，进围栏（INT-136）。
-		return botMarshalResult(map[string]interface{}{"projects": botFenceComposerProjects(opts.Projects, nonce)})
+		return botMarshalResult(map[string]interface{}{"projects": opts.Projects})
 	case "workspace_options":
 		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
 		if err != nil {
 			return "", err
 		}
 		// 远程 VCS 引用名与工作树路径同属仓库侧可控文本，进围栏（INT-136）。
-		return botMarshalResult(botFenceWorkspaceOptions(opts, nonce))
+		return botMarshalResult(opts)
 	}
 	return "", errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该读取动作")
 }
@@ -223,7 +217,7 @@ func botThreadPage(page, pageSize int) (int, int, error) {
 // 已连接环境里就报错，不静默返回空）；query 对线程 id/标题/项目名/项目 id/
 // 环境名做不区分大小写的包含匹配。过滤后按 updated_at 降序、id 升序排序，
 // 保证同一 filter 下分页稳定。
-func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs, nonce string) (map[string]interface{}, error) {
+func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs) (map[string]interface{}, error) {
 	page, pageSize, err := botThreadPage(args.Page, args.PageSize)
 	if err != nil {
 		return nil, err
@@ -302,7 +296,7 @@ func botSlimThreadList(list *T3ThreadListResponse, args *botThreadArgs, nonce st
 	}
 	items := make([]map[string]interface{}, 0, end-start)
 	for i := start; i < end; i++ {
-		items = append(items, botSlimThreadSummary(&filtered[i], nonce))
+		items = append(items, botSlimThreadSummary(&filtered[i]))
 	}
 
 	// 覆盖范围：某环境读不到时如实报告，不把「未读到」说成「不存在」，
@@ -364,12 +358,11 @@ func botThreadMatchesQuery(thread *T3ThreadSummary, query string, envNames map[s
 	return false
 }
 
-// botSlimThreadSummary 是线程摘要投影：title 是 T3 侧外部内容，进不可信
-// 围栏（INT-136）。列表项与详情的 thread 字段共用。
-func botSlimThreadSummary(t *T3ThreadSummary, nonce string) map[string]interface{} {
+// botSlimThreadSummary 是线程摘要投影：列表项与详情的 thread 字段共用。
+func botSlimThreadSummary(t *T3ThreadSummary) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":             t.Id,
-		"title":          botFenceUntrusted(nonce, "thread_title", t.Title),
+		"title":          t.Title,
 		"status":         string(t.Status),
 		"settled":        t.Settled,
 		"updated_at":     t.UpdatedAt,
@@ -387,7 +380,7 @@ func botSlimThreadSummary(t *T3ThreadSummary, nonce string) map[string]interface
 
 // botSlimThreadDetail 返回线程详情：运行态/元数据 + 最近条目（带 item id）
 // + 完整历史的分页入口。条目正文用 fs_thread item 按 id 补读。
-func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs, nonce string) (map[string]interface{}, error) {
+func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs) (map[string]interface{}, error) {
 	itemLimit := args.ItemLimit
 	if itemLimit <= 0 {
 		itemLimit = botThreadItemDefault
@@ -416,10 +409,10 @@ func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs, nonce stri
 	}
 	items := make([]map[string]interface{}, 0, end-start)
 	for i := start; i < end; i++ {
-		items = append(items, botSlimThreadItemSummary(&all[i], nonce))
+		items = append(items, botSlimThreadItemSummary(&all[i]))
 	}
 	return map[string]interface{}{
-		"thread":           botSlimThreadSummary(&detail.Thread, nonce),
+		"thread":           botSlimThreadSummary(&detail.Thread),
 		"queue":            detail.Queue,
 		"activity":         detail.Activity,
 		"access":           string(detail.Access),
@@ -436,7 +429,7 @@ func botSlimThreadDetail(detail *T3ThreadDetail, args *botThreadArgs, nonce stri
 // botSlimThreadItemSummary 是详情内条目列表的精简形状：给 id 与短摘要，
 // 正文（text）走 fs_thread item 按需补读。summary/text_preview 是外部内容，
 // 进不可信围栏（INT-136）。
-func botSlimThreadItemSummary(item *T3ThreadItem, nonce string) map[string]interface{} {
+func botSlimThreadItemSummary(item *T3ThreadItem) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         item.Id,
 		"type":       string(item.Type),
@@ -444,7 +437,7 @@ func botSlimThreadItemSummary(item *T3ThreadItem, nonce string) map[string]inter
 		"updated_at": item.UpdatedAt,
 	}
 	if item.Summary != "" {
-		out["summary"] = botFenceUntrusted(nonce, "thread_item_summary", item.Summary)
+		out["summary"] = item.Summary
 	}
 	if item.DetailAvailable != nil && *item.DetailAvailable {
 		out["detail_available"] = true
@@ -453,50 +446,9 @@ func botSlimThreadItemSummary(item *T3ThreadItem, nonce string) map[string]inter
 		out["inherited"] = true
 	}
 	if item.Text != "" {
-		out["text_preview"] = botFenceUntrusted(nonce, "thread_item_text", truncateBotRunes(item.Text, botThreadTextPreview))
+		out["text_preview"] = truncateBotRunes(item.Text, botThreadTextPreview)
 	}
 	return out
-}
-
-// botFenceComposerProjects 围栏启动器项目标题：配对 T3 服务上的项目标题是
-// 外部可写文本，模型用它选择目标项目，不能当平台指令读（INT-136）。
-func botFenceComposerProjects(projects []api.T3ComposerOptions_Projects, nonce string) []api.T3ComposerOptions_Projects {
-	if nonce == "" {
-		return projects
-	}
-	out := make([]api.T3ComposerOptions_Projects, 0, len(projects))
-	for _, p := range projects {
-		p.Title = botFenceUntrusted(nonce, "thread_project", p.Title)
-		out = append(out, p)
-	}
-	return out
-}
-
-// botFenceWorkspaceOptions 围栏工作区选项里的仓库侧文本：引用名、工作树路径
-// 与主检出路径由仓库内容决定（外部可写），模型据此选择工作区（INT-136）。
-func botFenceWorkspaceOptions(opts *T3WorkspaceOptions, nonce string) *T3WorkspaceOptions {
-	if opts == nil || nonce == "" {
-		return opts
-	}
-	out := *opts
-	out.Cwd = botFenceUntrusted(nonce, "thread_workspace", opts.Cwd)
-	if opts.RefName != nil && *opts.RefName != "" {
-		name := botFenceUntrusted(nonce, "thread_workspace", *opts.RefName)
-		out.RefName = &name
-	}
-	if len(opts.Refs) > 0 {
-		refs := make([]api.T3WorkspaceRef, 0, len(opts.Refs))
-		for _, ref := range opts.Refs {
-			ref.Name = botFenceUntrusted(nonce, "thread_workspace", ref.Name)
-			if ref.WorktreePath != nil && *ref.WorktreePath != "" {
-				path := botFenceUntrusted(nonce, "thread_workspace", *ref.WorktreePath)
-				ref.WorktreePath = &path
-			}
-			refs = append(refs, ref)
-		}
-		out.Refs = refs
-	}
-	return &out
 }
 
 func truncateBotRunes(s string, limit int) string {
@@ -510,9 +462,8 @@ func truncateBotRunes(s string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-// botSlimThreadItem 是条目正文投影：summary/text 是外部内容，进不可信围栏
-// （INT-136）。
-func botSlimThreadItem(item *T3ThreadItem, nonce string) map[string]interface{} {
+// botSlimThreadItem 是条目正文投影。
+func botSlimThreadItem(item *T3ThreadItem) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         item.Id,
 		"type":       string(item.Type),
@@ -520,10 +471,10 @@ func botSlimThreadItem(item *T3ThreadItem, nonce string) map[string]interface{} 
 		"updated_at": item.UpdatedAt,
 	}
 	if item.Summary != "" {
-		out["summary"] = botFenceUntrusted(nonce, "thread_item_summary", item.Summary)
+		out["summary"] = item.Summary
 	}
 	if item.Text != "" {
-		out["text"] = botFenceUntrusted(nonce, "thread_item_text", item.Text)
+		out["text"] = item.Text
 	}
 	return out
 }

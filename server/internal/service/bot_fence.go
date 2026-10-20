@@ -3,7 +3,6 @@ package service
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"strings"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -79,35 +78,37 @@ func botHasFenceTag(text string) bool {
 	return false
 }
 
-// botResultHasFence 报告已序列化的工具结果里是否含不可信围栏。结果在账本里
-// 是 JSON 文本（`<` 会被转义成 `\u003c`），所以按标记名判断，不按尖括号。
-func botResultHasFence(text string) bool {
-	return strings.Contains(text, "untrusted_data")
+// botResultFenceExemptTools 是不进围栏的工具动作：结果要么是平台内部数据
+// （记忆、帮助、停止/取消回执），要么自带处理通道（fs_result 续读自己包围栏、
+// 任务小状态是模型自用的去重 JSON）。键是 tool/action；新工具/动作默认进围栏。
+var botResultFenceExemptTools = map[string]bool{
+	"fs_memory/status": true, "fs_memory/list": true, "fs_memory/read": true,
+	"fs_memory/history": true, "fs_memory/create": true, "fs_memory/replace": true,
+	"fs_memory/append": true, "fs_memory/delete": true, "fs_memory/restore": true,
+	"fs_memory_search/search": true,
+	"fs_help/read":            true,
+	"fs_result/read":          true,
+	"fs_stop/stop":            true,
+	"fs_cancel/cancel":        true,
+	"fs_schedule/state_get":   true,
+	"fs_schedule/state_set":   true,
 }
 
-// botFenceScheduleEventContent 把定时任务运行事件正文里模型生成的文本字段
-// （任务名/摘要/错误）包进围栏后再序列化：nonce 写在系统提示词里、模型自己
-// 看得到，被注入的 schedule run 能在自己的正文里写出真的 nonce 前缀骗取信任，
-// 所以这些回流文本不能与平台前缀同等可信。标识与状态码原样保留；解不开就
-// 整段当数据处理。
-func botFenceScheduleEventContent(raw, nonce string) string {
-	if nonce == "" {
-		return raw
+// botFenceToolResult 把**整条**工具结果包进一层不可信围栏（INT-136 重构）：
+// 判定放在模型输入的出口，默认拒绝——新增工具、新增字段、嵌套对象、远端错误
+// 文本都自动落在围栏内，不需要在每处投影里逐字段列清单（那样是 fail-open：
+// 漏列就是裸文本）。调用方的投影仍然负责瘦身与脱敏，两者互补。
+// 平台自有的控制性回执（记忆、帮助、续读、停止/取消、任务小状态）按
+// botResultFenceExemptTools 豁免；payload 里的围栏标签先转义，无法提前闭合。
+func botFenceToolResult(nonce, toolName, action, payload string) string {
+	if nonce == "" || payload == "" || botResultFenceExemptTools[toolName+"/"+action] {
+		return payload
 	}
-	var content botScheduleEventContent
-	if err := json.Unmarshal([]byte(raw), &content); err != nil {
-		return botFenceUntrusted(nonce, "schedule_event", raw)
+	source := "tool_result"
+	if toolName != "" {
+		source = "tool_result:" + toolName
 	}
-	content.TaskName = botFenceUntrusted(nonce, "schedule_event", content.TaskName)
-	content.Summary = botFenceUntrusted(nonce, "schedule_event", content.Summary)
-	if content.ErrorMessage != "" {
-		content.ErrorMessage = botFenceUntrusted(nonce, "schedule_event", content.ErrorMessage)
-	}
-	rawOut, err := json.Marshal(content)
-	if err != nil {
-		return botFenceUntrusted(nonce, "schedule_event", raw)
-	}
-	return string(rawOut)
+	return botFenceUntrusted(nonce, source, payload)
 }
 
 // botFenceTagAt 报告 s[i:] 是否以开或闭围栏标签开头；只做 ASCII 大小写

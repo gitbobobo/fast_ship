@@ -27,7 +27,7 @@ func TestBotInt120ThreadListQueryAndEnvFilters(t *testing.T) {
 	}
 
 	// 零匹配：total_items 必须是 0，不能回退成不过滤。
-	out, err := botSlimThreadList(list, &botThreadArgs{Query: "__nonexistent_probe__"}, "")
+	out, err := botSlimThreadList(list, &botThreadArgs{Query: "__nonexistent_probe__"})
 	if err != nil {
 		t.Fatalf("query 零匹配: %v", err)
 	}
@@ -39,7 +39,7 @@ func TestBotInt120ThreadListQueryAndEnvFilters(t *testing.T) {
 	}
 
 	// query 命中标题（大小写不敏感）。
-	out, err = botSlimThreadList(list, &botThreadArgs{Query: "ALPHA"}, "")
+	out, err = botSlimThreadList(list, &botThreadArgs{Query: "ALPHA"})
 	if err != nil {
 		t.Fatalf("query 标题: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestBotInt120ThreadListQueryAndEnvFilters(t *testing.T) {
 	}
 
 	// query 命中项目名。
-	out, err = botSlimThreadList(list, &botThreadArgs{Query: "side project"}, "")
+	out, err = botSlimThreadList(list, &botThreadArgs{Query: "side project"})
 	if err != nil {
 		t.Fatalf("query 项目名: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestBotInt120ThreadListQueryAndEnvFilters(t *testing.T) {
 	}
 
 	// query 命中环境名。
-	out, err = botSlimThreadList(list, &botThreadArgs{Query: "home"}, "")
+	out, err = botSlimThreadList(list, &botThreadArgs{Query: "home"})
 	if err != nil {
 		t.Fatalf("query 环境名: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestBotInt120ThreadListQueryAndEnvFilters(t *testing.T) {
 	}
 
 	// env_id 收窄：所有条目都属于该环境，total 收窄，覆盖范围只剩该环境。
-	out, err = botSlimThreadList(list, &botThreadArgs{EnvID: "e1"}, "")
+	out, err = botSlimThreadList(list, &botThreadArgs{EnvID: "e1"})
 	if err != nil {
 		t.Fatalf("env_id 过滤: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestBotInt120ThreadListQueryAndEnvFilters(t *testing.T) {
 	}
 
 	// env_id + query 组合取交集，覆盖范围仍只报该环境。
-	out, err = botSlimThreadList(list, &botThreadArgs{EnvID: "e1", Query: "alpha"}, "")
+	out, err = botSlimThreadList(list, &botThreadArgs{EnvID: "e1", Query: "alpha"})
 	if err != nil {
 		t.Fatalf("env_id+query: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestBotInt120ThreadListQueryAndEnvFilters(t *testing.T) {
 	}
 
 	// 未知 env_id：报错，不静默返回空。
-	if _, err := botSlimThreadList(list, &botThreadArgs{EnvID: "e-missing"}, ""); err == nil {
+	if _, err := botSlimThreadList(list, &botThreadArgs{EnvID: "e-missing"}); err == nil {
 		t.Fatalf("未知 env_id 应报错")
 	}
 }
@@ -137,7 +137,7 @@ func TestBotInt120ThreadListPagingNoOverlap(t *testing.T) {
 	seen := map[string]bool{}
 	page := 1
 	for start := 0; start < len(expected); start += 3 {
-		out, err := botSlimThreadList(list, &botThreadArgs{Page: page, PageSize: 3}, "")
+		out, err := botSlimThreadList(list, &botThreadArgs{Page: page, PageSize: 3})
 		if err != nil {
 			t.Fatalf("page %d: %v", page, err)
 		}
@@ -173,7 +173,7 @@ func TestBotInt120ThreadListPagingNoOverlap(t *testing.T) {
 	}
 
 	// 越界页：items 为空，offset 收敛到 total，has_more=false。
-	out, err := botSlimThreadList(list, &botThreadArgs{Page: 4, PageSize: 3}, "")
+	out, err := botSlimThreadList(list, &botThreadArgs{Page: 4, PageSize: 3})
 	if err != nil {
 		t.Fatalf("越界页: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestBotInt120ThreadListPagingNoOverlap(t *testing.T) {
 func TestBotInt120IssueDetailAlwaysHasLabelsAndChecklist(t *testing.T) {
 	// InternalMeta 为 nil：labels/checklist 也要序列化成 []，不是 null 或缺省，
 	// 让调用方能区分「没有清单」和「字段没实现」。
-	raw, err := json.Marshal(botSlimIssueDetail(&IssueResponse{}, ""))
+	raw, err := json.Marshal(botSlimIssueDetail(&IssueResponse{}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestBotInt120IssueDetailAlwaysHasLabelsAndChecklist(t *testing.T) {
 			Checklist: []api.IssueChecklistItem{{Id: "c1", Title: "验收项", IsCompleted: true, SortOrder: 1}},
 		},
 	}
-	rawFull, err := json.Marshal(botSlimIssueDetail(detail, ""))
+	rawFull, err := json.Marshal(botSlimIssueDetail(detail))
 	if err != nil {
 		t.Fatalf("marshal full: %v", err)
 	}

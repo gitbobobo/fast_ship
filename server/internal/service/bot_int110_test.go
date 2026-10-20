@@ -145,7 +145,7 @@ func TestBotInt110ThreadListFiltersPagingCoverage(t *testing.T) {
 		},
 	}
 
-	out, err := botSlimThreadList(list, &botThreadArgs{}, "")
+	out, err := botSlimThreadList(list, &botThreadArgs{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestBotInt110ThreadListFiltersPagingCoverage(t *testing.T) {
 	}
 
 	// 项目过滤 + 分页。
-	page, err := botSlimThreadList(list, &botThreadArgs{ProjectID: "p1", Page: 2, PageSize: 1}, "")
+	page, err := botSlimThreadList(list, &botThreadArgs{ProjectID: "p1", Page: 2, PageSize: 1})
 	if err != nil {
 		t.Fatalf("list page: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestBotInt110ThreadListFiltersPagingCoverage(t *testing.T) {
 	}
 
 	// 归档可选纳入 + settled 过滤。
-	withArchived, err := botSlimThreadList(list, &botThreadArgs{IncludeArchived: api.Ptr(true), Settled: api.Ptr(false)}, "")
+	withArchived, err := botSlimThreadList(list, &botThreadArgs{IncludeArchived: api.Ptr(true), Settled: api.Ptr(false)})
 	if err != nil {
 		t.Fatalf("list archived: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestBotInt110ThreadListFiltersPagingCoverage(t *testing.T) {
 	}
 
 	// updated_after 过滤。
-	recent, err := botSlimThreadList(list, &botThreadArgs{UpdatedAfter: "2026-10-09T00:00:00Z"}, "")
+	recent, err := botSlimThreadList(list, &botThreadArgs{UpdatedAfter: "2026-10-09T00:00:00Z"})
 	if err != nil {
 		t.Fatalf("list updated_after: %v", err)
 	}
@@ -200,10 +200,10 @@ func TestBotInt110ThreadListFiltersPagingCoverage(t *testing.T) {
 	}
 
 	// 非法时间与超大 page_size 都要明确报错。
-	if _, err := botSlimThreadList(list, &botThreadArgs{UpdatedAfter: "not-a-time"}, ""); err == nil {
+	if _, err := botSlimThreadList(list, &botThreadArgs{UpdatedAfter: "not-a-time"}); err == nil {
 		t.Fatalf("非法 updated_after 应报错")
 	}
-	if _, err := botSlimThreadList(list, &botThreadArgs{PageSize: 1000}, ""); err == nil {
+	if _, err := botSlimThreadList(list, &botThreadArgs{PageSize: 1000}); err == nil {
 		t.Fatalf("page_size 超上限应报错")
 	}
 }
@@ -228,7 +228,7 @@ func TestBotInt110ThreadDetailItemsWindow(t *testing.T) {
 		Items:  items,
 		Access: api.Operate,
 	}
-	out, err := botSlimThreadDetail(detail, &botThreadArgs{ItemLimit: 2}, "")
+	out, err := botSlimThreadDetail(detail, &botThreadArgs{ItemLimit: 2})
 	if err != nil {
 		t.Fatalf("detail: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestBotInt110ThreadDetailItemsWindow(t *testing.T) {
 	}
 
 	// 向前翻页拿到更早的条目。
-	older, err := botSlimThreadDetail(detail, &botThreadArgs{ItemLimit: 2, ItemOffset: 2}, "")
+	older, err := botSlimThreadDetail(detail, &botThreadArgs{ItemLimit: 2, ItemOffset: 2})
 	if err != nil {
 		t.Fatalf("detail older: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestBotInt110IssueUpdateWriteProtection(t *testing.T) {
 	}
 
 	// 详情投影必须带写入保护基准与决策信息。
-	slim := botSlimIssueDetail(fresh, "")
+	slim := botSlimIssueDetail(fresh)
 	if slim["updated_at"] == "" || slim["body"] != original {
 		t.Fatalf("详情应含 updated_at 与 body: %+v", slim)
 	}
@@ -338,7 +338,7 @@ func TestBotInt110ThreadPageOverflowNoPanic(t *testing.T) {
 		},
 	}
 	// 极大 page 不得让 (page-1)*pageSize 溢出成负下标。
-	out, err := botSlimThreadList(list, &botThreadArgs{Page: math.MaxInt, PageSize: 100}, "")
+	out, err := botSlimThreadList(list, &botThreadArgs{Page: math.MaxInt, PageSize: 100})
 	if err != nil {
 		t.Fatalf("huge page: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestBotInt110ThreadPageOverflowNoPanic(t *testing.T) {
 		Thread: T3ThreadSummary{Id: "thr", Status: api.T3ThreadSummaryStatusIdle, UpdatedAt: "2026-10-02T00:00:00Z"},
 		Items:  []T3ThreadItem{{Id: "i1", Type: api.UserMessage, Text: "hi"}},
 	}
-	dOut, err := botSlimThreadDetail(detail, &botThreadArgs{ItemOffset: math.MaxInt, ItemLimit: 5}, "")
+	dOut, err := botSlimThreadDetail(detail, &botThreadArgs{ItemOffset: math.MaxInt, ItemLimit: 5})
 	if err != nil {
 		t.Fatalf("huge item_offset: %v", err)
 	}

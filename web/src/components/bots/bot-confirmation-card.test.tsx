@@ -50,6 +50,12 @@ function makeScheduleCall(overrides: Partial<BotCall> = {}): BotCall {
     },
     execution_context: {
       schedule: {
+        task_id: "task-0001",
+        name: "每日巡检",
+        cron: "0 9 * * *",
+        timezone: "Asia/Shanghai",
+        instruction: "检查各项目未关闭的问题，\n逐条用中文汇报。",
+        needs_report: true,
         next_run_at: "2026-10-21 09:00:00 CST",
         next_run_at_utc: "2026-10-21T01:00:00Z",
         effective_model: "gpt-5.1",
@@ -114,10 +120,8 @@ describe("BotConfirmationCard", () => {
     expect(
       within(summary).getByText("2026-10-21 09:00:00 CST"),
     ).toBeInTheDocument();
-    // model 为空串 = 跟随机器人当前模型，不回退 effective_model。
-    expect(
-      within(summary).getByText("跟随机器人当前模型"),
-    ).toBeInTheDocument();
+    // 生效模型取服务端快照（参数里的空串在卡片上不再二次解释）。
+    expect(within(summary).getByText("gpt-5.1")).toBeInTheDocument();
     expect(within(summary).getByText("需要汇报")).toBeInTheDocument();
     expect(within(summary).getByText("是")).toBeInTheDocument();
     // 指令全文原样展示，不截断。
@@ -142,7 +146,7 @@ describe("BotConfirmationCard", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("fs_schedule.update：未提供字段显示保持不变，同样不渲染「始终允许」", () => {
+  it("fs_schedule.update：展示服务端合并后的生效配置，不渲染「始终允许」", () => {
     renderCard(
       makeScheduleCall({
         action: "update",
@@ -150,15 +154,29 @@ describe("BotConfirmationCard", () => {
           task_id: "task-0001",
           instruction: "改成只看高优先级问题。",
         },
+        execution_context: {
+          schedule: {
+            task_id: "task-0001",
+            name: "每日巡检",
+            cron: "0 9 * * *",
+            timezone: "Asia/Shanghai",
+            instruction: "改成只看高优先级问题。",
+            needs_report: false,
+            next_run_at: "2026-10-21 09:00:00 CST",
+            effective_model: "gpt-5.1",
+          },
+        },
       }),
     );
     const card = screen.getByTestId("bot-confirmation-card");
     const summary = within(card).getByTestId("bot-schedule-summary");
 
-    // 任务名/cron/时区未提供 → 保持不变；needs_report 未提供 → —；
-    // 模型未提供 → 回退服务端算好的 effective_model。
-    expect(within(summary).getAllByText("保持不变")).toHaveLength(3);
+    // 未提供的字段由服务端合并后给出实际生效值，卡片只渲染快照。
+    expect(within(summary).getByText("每日巡检")).toBeInTheDocument();
+    expect(within(summary).getByText("0 9 * * *")).toBeInTheDocument();
+    expect(within(summary).getByText("Asia/Shanghai")).toBeInTheDocument();
     expect(within(summary).getByText("gpt-5.1")).toBeInTheDocument();
+    expect(within(summary).getByText("否")).toBeInTheDocument();
     expect(
       within(summary).getByText("2026-10-21 09:00:00 CST"),
     ).toBeInTheDocument();

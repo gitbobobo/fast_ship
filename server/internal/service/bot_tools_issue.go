@@ -17,12 +17,6 @@ const botIssueActor = "bot"
 
 func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall) (string, error) {
 	userID := s.botUserIDOf(call.BotID)
-	// 外部文本字段进不可信围栏（INT-136）：nonce 为空（未启用）时按原样投影。
-	// 读不到 nonce 就失败：围栏是安全保护，不能静默降级成裸文本。
-	nonce, err := s.botNonceOf(call.BotID)
-	if err != nil {
-		return "", err
-	}
 	var args botIssueArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return "", errs.ErrInvalidParams
@@ -45,7 +39,7 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 		if err != nil {
 			return "", err
 		}
-		return botMarshalResult(botSlimPage("issues", botSlimIssues(items, nonce), total, page, pageSize))
+		return botMarshalResult(botSlimPage("issues", botSlimIssues(items), total, page, pageSize))
 	case "get", "comments", "timeline":
 		switch call.Action {
 		case "get":
@@ -53,7 +47,7 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 			if err != nil {
 				return "", err
 			}
-			return botMarshalResult(botSlimIssueDetail(issue, nonce))
+			return botMarshalResult(botSlimIssueDetail(issue))
 		case "comments":
 			page, pageSize, pageErr := botValidatePage(args.Page, args.PageSize)
 			if pageErr != nil {
@@ -63,7 +57,7 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 			if err != nil {
 				return "", err
 			}
-			return botMarshalResult(botSlimPage("comments", botSlimIssueComments(items, nonce), total, page, pageSize))
+			return botMarshalResult(botSlimPage("comments", botSlimIssueComments(items), total, page, pageSize))
 		default:
 			page, pageSize, pageErr := botValidatePage(args.Page, args.PageSize)
 			if pageErr != nil {
@@ -73,28 +67,28 @@ func (s *BotService) execIssueRead(ctx context.Context, call *model.BotToolCall)
 			if err != nil {
 				return "", err
 			}
-			return botMarshalResult(botSlimPage("timeline", botSlimIssueTimeline(items, nonce), total, page, pageSize))
+			return botMarshalResult(botSlimPage("timeline", botSlimIssueTimeline(items), total, page, pageSize))
 		}
 	}
 	return "", errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该读取动作")
 }
 
 // botSlimIssues 列表投影：保工具决策所需的最小字段。
-func botSlimIssues(items []IssueResponse, nonce string) []map[string]interface{} {
+func botSlimIssues(items []IssueResponse) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(items))
 	for i := range items {
-		out = append(out, botSlimIssueListItem(&items[i], nonce))
+		out = append(out, botSlimIssueListItem(&items[i]))
 	}
 	return out
 }
 
 // botSlimIssueListItem 是列表项的精简形状：列表保持轻量，详情走 get。
-// title 是外部内容（GitHub 同步或用户填写），进不可信围栏（INT-136）。
-func botSlimIssueListItem(i *IssueResponse, nonce string) map[string]interface{} {
+// 外部文本由模型输入的出口统一围栏（botFenceToolResult），这里只负责瘦身。
+func botSlimIssueListItem(i *IssueResponse) map[string]interface{} {
 	out := map[string]interface{}{
 		"id":         i.Id,
 		"seq":        i.SequenceNumber,
-		"title":      botFenceUntrusted(nonce, "issue_title", i.Title),
+		"title":      i.Title,
 		"state":      string(i.State),
 		"source":     string(i.Source),
 		"project_id": i.ProjectId,
@@ -108,12 +102,11 @@ func botSlimIssueListItem(i *IssueResponse, nonce string) map[string]interface{}
 // botSlimIssueDetail 是 get 的详情投影：正文、清单、标签等做决策所需的完整
 // 信息（列表不携带）。labels/checklist 恒在——没有就是空数组，让调用方能
 // 区分「没有清单/标签」和「字段没实现」。updated_at / checklist_updated_at
-// 是后续写操作的写入保护基准，必须原样给出。title/body 是外部内容，进不
-// 可信围栏（INT-136）。
-func botSlimIssueDetail(i *IssueResponse, nonce string) map[string]interface{} {
-	out := botSlimIssueListItem(i, nonce)
+// 是后续写操作的写入保护基准，必须原样给出。
+func botSlimIssueDetail(i *IssueResponse) map[string]interface{} {
+	out := botSlimIssueListItem(i)
 	out["reference"] = i.Reference
-	out["body"] = botFenceUntrusted(nonce, "issue_body", i.Body)
+	out["body"] = i.Body
 	out["state_reason"] = i.StateReason
 	out["author"] = i.Author.Login
 	out["updated_at"] = i.UpdatedAt
@@ -122,10 +115,10 @@ func botSlimIssueDetail(i *IssueResponse, nonce string) map[string]interface{} {
 	out["checklist"] = []api.IssueChecklistItem{}
 	if i.InternalMeta != nil {
 		if len(i.InternalMeta.Labels) > 0 {
-			out["labels"] = botFenceIssueLabels(i.InternalMeta.Labels, nonce)
+			out["labels"] = i.InternalMeta.Labels
 		}
 		if len(i.InternalMeta.Checklist) > 0 {
-			out["checklist"] = botFenceIssueChecklist(i.InternalMeta.Checklist, nonce)
+			out["checklist"] = i.InternalMeta.Checklist
 		}
 		if i.InternalMeta.ProgressPercent != nil {
 			out["progress_percent"] = *i.InternalMeta.ProgressPercent
@@ -140,40 +133,9 @@ func botSlimIssueDetail(i *IssueResponse, nonce string) map[string]interface{} {
 	return out
 }
 
-// botFenceIssueLabels 围栏标签名与描述（INT-136）：标签由 GitHub 同步写入，
-// 与 Issue 正文同一注入信道（仓库协作者可写）；颜色原样保留。
-func botFenceIssueLabels(labels []api.IssueLabel, nonce string) []api.IssueLabel {
-	if nonce == "" {
-		return labels
-	}
-	out := make([]api.IssueLabel, 0, len(labels))
-	for _, label := range labels {
-		label.Name = botFenceUntrusted(nonce, "issue_label", label.Name)
-		if label.Description != "" {
-			label.Description = botFenceUntrusted(nonce, "issue_label", label.Description)
-		}
-		out = append(out, label)
-	}
-	return out
-}
-
-// botFenceIssueChecklist 围栏清单标题（INT-136）：清单整组替换、内容可经外部
-// 内容诱导填写，与正文同属上下文里的未标记文本。
-func botFenceIssueChecklist(items []api.IssueChecklistItem, nonce string) []api.IssueChecklistItem {
-	if nonce == "" {
-		return items
-	}
-	out := make([]api.IssueChecklistItem, 0, len(items))
-	for _, item := range items {
-		item.Title = botFenceUntrusted(nonce, "issue_checklist", item.Title)
-		out = append(out, item)
-	}
-	return out
-}
-
 // botSlimIssueComments 是 comments 的精简投影：只给模型决策所需的字段，
 // 不再整包透出 api.IssueComment；body 是外部内容，进不可信围栏（INT-136）。
-func botSlimIssueComments(items []IssueCommentResponse, nonce string) []map[string]interface{} {
+func botSlimIssueComments(items []IssueCommentResponse) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(items))
 	for i := range items {
 		c := &items[i]
@@ -181,38 +143,17 @@ func botSlimIssueComments(items []IssueCommentResponse, nonce string) []map[stri
 			"id":         c.Id,
 			"source":     string(c.Source),
 			"author":     c.Author.Login,
-			"body":       botFenceUntrusted(nonce, "issue_comment", c.Body),
+			"body":       c.Body,
 			"created_at": c.CreatedAt,
 		})
 	}
 	return out
 }
 
-// botSlimIssueComment 是单条评论的精简投影（写回执用），与列表同一形状。
-func botSlimIssueComment(c *IssueCommentResponse, nonce string) map[string]interface{} {
-	items := botSlimIssueComments([]IssueCommentResponse{*c}, nonce)
-	return items[0]
-}
-
-// botFenceIssueMeta 围栏 Issue 元数据响应里的标签/清单（set_workflow /
-// replace_checklist 的回执会带回它们，与外部内容同源）；其余字段原样保留。
-func botFenceIssueMeta(meta *IssueInternalMetaResponse, nonce string) IssueInternalMetaResponse {
-	if meta == nil || nonce == "" {
-		if meta == nil {
-			return IssueInternalMetaResponse{}
-		}
-		return *meta
-	}
-	out := *meta
-	out.Labels = botFenceIssueLabels(meta.Labels, nonce)
-	out.Checklist = botFenceIssueChecklist(meta.Checklist, nonce)
-	return out
-}
-
 // botSlimIssueTimeline 是 timeline 的精简投影：不再整包透出
 // api.IssueTimelineEvent；summary/body 是外部内容，进不可信围栏（INT-136）。
 // 空串字段省略，投影保持轻量。
-func botSlimIssueTimeline(items []IssueTimelineEventResponse, nonce string) []map[string]interface{} {
+func botSlimIssueTimeline(items []IssueTimelineEventResponse) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(items))
 	for i := range items {
 		e := &items[i]
@@ -225,10 +166,10 @@ func botSlimIssueTimeline(items []IssueTimelineEventResponse, nonce string) []ma
 			item["actor"] = e.Actor.Login
 		}
 		if e.Summary != "" {
-			item["summary"] = botFenceUntrusted(nonce, "issue_timeline", e.Summary)
+			item["summary"] = e.Summary
 		}
 		if e.Body != "" {
-			item["body"] = botFenceUntrusted(nonce, "issue_timeline", e.Body)
+			item["body"] = e.Body
 		}
 		out = append(out, item)
 	}
@@ -238,12 +179,12 @@ func botSlimIssueTimeline(items []IssueTimelineEventResponse, nonce string) []ma
 // botIssueConflictResult 把「他人已改动，本次未执行」回给模型：带上目标最新
 // 内容，便于重新读取并保留双方修改后再提交，而不是静默覆盖。current 与
 // get 同一投影，外部字段同样进围栏（INT-136）。
-func botIssueConflictResult(reason string, current *IssueResponse, nonce string) map[string]interface{} {
+func botIssueConflictResult(reason string, current *IssueResponse) map[string]interface{} {
 	return map[string]interface{}{
 		"conflict": true,
 		"reason":   reason,
 		"note":     "目标已被他人改动，本次未执行；请基于下面的最新内容重新读取，保留双方修改后再提交",
-		"current":  botSlimIssueDetail(current, nonce),
+		"current":  botSlimIssueDetail(current),
 	}
 }
 
@@ -253,13 +194,6 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 	var args botIssueArgs
 	if err := json.Unmarshal([]byte(call.ArgumentsJSON), &args); err != nil {
 		return nil, errs.ErrInvalidParams
-	}
-	// 写回执也会带上 Issue 的标题/正文/标签/清单（外部可写的同一批字段），
-	// 它们经「平台后台结果」进模型上下文，必须与读路径同一投影（INT-136）。
-	// 读不到 nonce 就失败：结果会固化进账本，事后不补围栏。
-	nonce, nonceErr := s.botNonceOf(call.BotID)
-	if nonceErr != nil {
-		return nil, nonceErr
 	}
 	switch call.Action {
 	case "create":
@@ -273,14 +207,14 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 			if err != nil {
 				return nil, err
 			}
-			return botSlimIssueDetail(created, nonce), nil
+			return botSlimIssueDetail(created), nil
 		}
 		if source == "github" {
 			created, err := s.issues.CreateGitHubIssueContext(ctx, args.ProjectID, userID, req)
 			if err != nil {
 				return nil, err
 			}
-			return botSlimIssueDetail(created, nonce), nil
+			return botSlimIssueDetail(created), nil
 		}
 		return nil, errs.New(errs.ErrInvalidParams.Code, "source 只支持 internal/github")
 	case "update":
@@ -291,7 +225,7 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 				return nil, err
 			}
 			if strings.TrimSpace(current.UpdatedAt) != expected {
-				return botIssueConflictResult("issue_updated", current, nonce), nil
+				return botIssueConflictResult("issue_updated", current), nil
 			}
 		}
 		req := UpdateInternalIssueRequest{}
@@ -318,14 +252,14 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		if err != nil {
 			return nil, err
 		}
-		return botSlimIssueDetail(updated, nonce), nil
+		return botSlimIssueDetail(updated), nil
 	case "set_workflow":
 		status := model.IssueWorkflowStatus(strings.TrimSpace(args.WorkflowStatus))
 		meta, err := s.issues.UpdateInternalMeta(args.IssueID, userID, status, botIssueActor)
 		if err != nil {
 			return nil, err
 		}
-		return botFenceIssueMeta(meta, nonce), nil
+		return meta, nil
 	case "replace_checklist":
 		// 写入保护：清单整组替换前核对上次读到的清单版本。
 		if expected := strings.TrimSpace(args.ExpectedChecklistUpdatedAt); expected != "" {
@@ -338,7 +272,7 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 				currentVersion = strings.TrimSpace(*current.InternalMeta.ChecklistUpdatedAt)
 			}
 			if currentVersion != expected {
-				return botIssueConflictResult("checklist_updated", current, nonce), nil
+				return botIssueConflictResult("checklist_updated", current), nil
 			}
 		}
 		req := ReplaceIssueChecklistRequest{Items: args.Items}
@@ -346,7 +280,7 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		if err != nil {
 			return nil, err
 		}
-		return botFenceIssueMeta(meta, nonce), nil
+		return meta, nil
 	case "comment":
 		req := CreateInternalIssueCommentRequest{Body: args.CommentBody}
 		// 复用已有幂等入口；幂等键是服务端调用 ID，不让模型指定。
@@ -354,7 +288,7 @@ func (s *BotService) runIssueWrite(ctx context.Context, call *model.BotToolCall)
 		if err != nil {
 			return nil, err
 		}
-		return botSlimIssueComment(comment, nonce), nil
+		return comment, nil
 	}
 	return nil, errs.New(errs.ErrInvalidParams.Code, "fs_issue 不支持该写动作")
 }

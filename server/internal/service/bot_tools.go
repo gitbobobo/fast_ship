@@ -293,9 +293,9 @@ func botToolRegistryV4Literal() []*botToolDef {
 				{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
 				{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
 				{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）", Mode: model.BotExecutionSync},
-				{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+				{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）。需要用户确认：删除不可逆", Mode: model.BotExecutionSync},
 				{Name: "runs", Description: "查看任务最近运行记录（task_id 必填）", Mode: model.BotExecutionSync},
-				{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+				{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）。需要用户确认：启用等于重新武装一个以后每次运行默认放行写操作的任务", Mode: model.BotExecutionSync},
 				{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
 			},
 		},
@@ -376,10 +376,10 @@ func botToolRegistryV6() []*botToolDef {
 			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
 			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
 			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）", Mode: model.BotExecutionSync},
-			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）。需要用户确认：删除不可逆", Mode: model.BotExecutionSync},
 			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
 			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；回执只表示已受理；已有未结束运行时拒绝；dry_run=true 只预览）", Mode: model.BotExecutionSync},
-			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）。需要用户确认：启用等于重新武装一个以后每次运行默认放行写操作的任务", Mode: model.BotExecutionSync},
 			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
 		}
 	}
@@ -404,10 +404,10 @@ func botToolRegistryV7() []*botToolDef {
 			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
 			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）", Mode: model.BotExecutionSync},
 			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）", Mode: model.BotExecutionSync},
-			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）。需要用户确认：删除不可逆", Mode: model.BotExecutionSync},
 			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
 			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；回执只表示已受理；已有未结束运行时拒绝；dry_run=true 只预览）", Mode: model.BotExecutionSync},
-			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）。需要用户确认：启用等于重新武装一个以后每次运行默认放行写操作的任务", Mode: model.BotExecutionSync},
 			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
 			{Name: "state_get", Description: "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
 			{Name: "state_set", Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
@@ -431,16 +431,16 @@ func botToolRegistryV8() []*botToolDef {
 		if tool.Name != "fs_schedule" {
 			continue
 		}
-		tool.Description = "管理本机器人绑定的定时任务：list/delete/runs/enable/disable 同步执行、立即生效；create、update 中改动 instruction/needs_report/model 与 run（dry_run=true 预览除外）需要用户确认：调用先受理（回执 status=pending_confirmation），用户批准后在后台执行，结果以「平台后台结果」消息送达，不要把受理当成已执行。批准创建或修改任务等于授权该任务以后每次运行默认放行写操作。定时任务运行中不能 create/update/run 任务（会被拒绝），请在主线对话里操作。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；非 dry_run 的 run 同样需要确认，回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空，适合存「上次已报的 ID」这类去重集合。"
+		tool.Description = "管理本机器人绑定的定时任务：list/runs/disable 与只改 name/cron/timezone 的 update、dry_run=true 的 run 同步执行、立即生效；create、update 中改动 instruction/needs_report/model、run（dry_run=true 预览除外）、enable、delete 需要用户确认：调用先受理（回执 status=pending_confirmation），用户批准后在后台执行，结果以「平台后台结果」消息送达，不要把受理当成已执行。批准创建或修改任务等于授权该任务以后每次运行默认放行写操作；enable 等于重新启用一个以后每次运行都默认放行写操作的任务，delete 不可逆。定时任务运行中不能管理任务（create/update/run/enable/disable/delete 都会拒绝），请在主线对话里操作。每次运行是独立会话，只带你的记忆与本任务指令，写操作默认放行（不弹确认）。用户只能查看与开关任务，创建/修改由你负责；创建或修改后要在对话里用中文告知用户任务名与执行时间。run 立即手动执行一次任务：显式触发就是一次执行、不要求任务启用；非 dry_run 的 run 同样需要确认，回执只表示已受理，终态与产出用 runs 查询；同一任务已有未结束运行时会被明确拒绝（不排队）；dry_run=true 只预览、不执行也不建运行记录。state_get/state_set 读写本任务跨运行保留的小状态（≤8192 UTF-8 字节）：只能在定时任务运行中使用、由本次运行的任务隐式决定，省略 state 即清空，适合存「上次已报的 ID」这类去重集合。"
 		tool.ArgsType = reflect.TypeOf(botScheduleTaskArgs{})
 		tool.Actions = []botActionDef{
 			{Name: "list", Description: "列出本机器人的定时任务", Mode: model.BotExecutionSync},
 			{Name: "create", Description: "创建定时任务（name/cron/instruction 必填；时区可选默认 UTC）。需要用户确认：受理后等待批准，批准即授权该任务以后每次运行默认放行写操作", Mode: model.BotExecutionSync},
 			{Name: "update", Description: "修改定时任务（task_id 必填；提供即改）。只改 name/cron/timezone 同步生效；改动 instruction/needs_report/model 需要用户确认并异步受理，批准即授权该任务以后每次运行默认放行写操作", Mode: model.BotExecutionSync},
-			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）", Mode: model.BotExecutionSync},
+			{Name: "delete", Description: "删除定时任务（task_id 必填；运行记录保留）。需要用户确认：删除不可逆", Mode: model.BotExecutionSync},
 			{Name: "runs", Description: "查看任务最近运行记录（task_id 必填；trigger_source 区分 cron/manual）", Mode: model.BotExecutionSync},
 			{Name: "run", Description: "立即手动执行一次任务（task_id 必填；不要求任务启用；已有未结束运行时拒绝）。dry_run=true 只预览（同步返回）；非 dry_run 需要用户确认、异步受理，结果以后台结果送达", Mode: model.BotExecutionSync},
-			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）", Mode: model.BotExecutionSync},
+			{Name: "enable", Description: "启用任务并重算下次运行时间（task_id 必填）。需要用户确认：启用等于重新武装一个以后每次运行默认放行写操作的任务", Mode: model.BotExecutionSync},
 			{Name: "disable", Description: "停用任务，不再触发（task_id 必填）", Mode: model.BotExecutionSync},
 			{Name: "state_get", Description: "读取本任务跨运行保留的小状态（无参数；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},
 			{Name: "state_set", Description: "写入本任务的小状态（state 为任意 JSON 值，省略或 null 表示清空；只能在定时任务运行中使用）", Mode: model.BotExecutionSync},

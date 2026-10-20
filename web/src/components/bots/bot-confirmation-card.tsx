@@ -16,27 +16,22 @@ const SCHEDULE_ALWAYS_ALLOW_ACTIONS = new Set(["run"]);
  * fs_schedule 确认卡的生效配置摘要：任务一经批准，之后每次运行默认放行
  * 写操作，确认前必须看清指令全文与运行配置。
  *
- * 取值以服务端受理时算好的 `execution_context.schedule` 为准：
- * - run 的执行器只按 task_id 读库里的任务，模型传来的配置字段一概不生效，
- *   所以这里**只看快照**（否则模型可以拿无害参数遮住任务里真正的指令）；
- * - update 是「提供即改」，展示本次提供的值，未提供的行回退到快照里的现值
- *   （仅改 needs_report/model 时也能看到任务原来的完整指令）；
- * - create 快照与参数同源。
+ * 取值一律只看服务端受理时算好的 `execution_context.schedule`（生效配置）：
+ * 前端不重新解释参数、不自己实现合并规则——模型参数对部分动作不生效
+ * （run/enable/delete 只按 task_id 读库），对 update 又是「未提供则保留原值」，
+ * 两套真值放在一起就会互相遮住（例如空白 instruction、model:null）。
+ * 参数只在下面的原始调用 JSON 里原样展示，用于核对改了什么。
  */
 function ScheduleConfirmSummary({ call }: { call: BotCall }) {
-  const args = call.arguments ?? {};
   const sched = (() => {
     const ctx = call.execution_context?.schedule;
     return ctx !== null && typeof ctx === "object" && !Array.isArray(ctx)
       ? (ctx as Record<string, unknown>)
       : {};
   })();
-  const isUpdate = call.action === "update";
   const isRun = call.action === "run";
 
-  // 空白串按「未提供」处理：服务端 applyScheduleTaskUpdate 对 TrimSpace 后为
-  // 空的字段一律视为保留原值，卡片必须同一口径，否则模型传一个空格就能让
-  // 卡片显示空指令、实际仍按原指令运行。
+  // 空白串按「未提供」处理（服务端 TrimSpace 语义），避免把空白当成有效配置。
   const str = (v: unknown) =>
     typeof v === "string" && v.trim() !== "" ? v : undefined;
   const schedStr = (...keys: string[]) => {
@@ -46,36 +41,19 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
     }
     return undefined;
   };
-  // 本次调用真正生效的值：只有 create/update 会应用参数；run/enable/delete
-  // 的执行器只按 task_id 读库里配置，卡片必须只看快照（否则模型附带的参数能
-  // 遮住真正的执行内容）。
-  const usesArgs = call.action === "create" || isUpdate;
-  const effective = (argKey: string, ...snapKeys: string[]) => {
-    if (usesArgs) {
-      const argValue = str(args[argKey]);
-      if (argValue !== undefined) return argValue;
-    }
-    return schedStr(...snapKeys);
-  };
 
-  const name = effective("name", "name", "task_name") ?? (isUpdate ? "保持不变" : "—");
-  const cron =
-    effective("cron", "cron", "cron_expression") ?? (isUpdate ? "保持不变" : "—");
-  // 时区空串在服务端语义是 UTC；update 未提供且快照缺失才是「保持不变」。
-  const timezone =
-    effective("timezone", "timezone") ?? (isUpdate ? "保持不变" : isRun ? "—" : "UTC");
+  // 生效配置一律只看服务端受理时算好的快照：前端不重新解释参数、不自己实现
+  // 合并规则。模型参数对部分动作不生效（run/enable/delete 只按 task_id 读库），
+  // 对 update 又是「未提供则保留原值」——两套真值放在一起就会互相遮住（空白
+  // instruction、model:null 都是这么漏出去的）。参数只在原始调用 JSON 里看。
+  const name = schedStr("name", "task_name") ?? "—";
+  const cron = schedStr("cron", "cron_expression") ?? "—";
+  const timezone = schedStr("timezone") ?? (isRun ? "—" : "UTC");
   const nextRun = schedStr("next_run_at") ?? "—";
-  const model = usesArgs
-    ? args.model !== undefined
-      ? (str(args.model) ?? "跟随机器人当前模型")
-      : (schedStr("effective_model") ?? "—")
-    : (schedStr("effective_model") ?? "—");
-  const reportFlag = (() => {
-    if (usesArgs && typeof args.needs_report === "boolean") return args.needs_report;
-    if (typeof sched.needs_report === "boolean") return sched.needs_report;
-    return undefined;
-  })();
-  const instruction = effective("instruction", "instruction");
+  const model = schedStr("effective_model") ?? "—";
+  const reportFlag =
+    typeof sched.needs_report === "boolean" ? sched.needs_report : undefined;
+  const instruction = schedStr("instruction");
 
   const rows: [string, string][] = [
     ["任务名", name],

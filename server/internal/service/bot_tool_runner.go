@@ -346,6 +346,9 @@ func botErrCodeOf(err error) string {
 
 // appendToolReplyTx 追加唯一的 tool 角色回复（dedup terminal/receipt）。
 func (s *BotService) appendToolReplyTx(tx *gorm.DB, botID, runID, requestID string, call *model.BotToolCall, content botToolReplyContent, now time.Time) error {
+	// 出口围栏按 tool/action 判豁免，reply 正文必须带上动作（构造点分散在
+	// 受理、终态、恢复三处，统一在这里补齐）。
+	content.Action = call.Action
 	txMsgs := repository.NewBotMessageRepository(tx)
 	dedup := "receipt:" + call.ID
 	if call.Status.IsTerminal() {
