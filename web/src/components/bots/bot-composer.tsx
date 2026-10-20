@@ -5,11 +5,11 @@ import { Textarea } from "@/components/ui/textarea";
 
 /**
  * 机器人主线输入框：运行中不锁输入——新消息随时可发，由服务端在
- * 安全点交给机器人（提示通过 banner 呈现）。Enter 发送、Shift+Enter
- * 换行；输入法组合中（isComposing / keyCode 229）的 Enter 不拦截，
- * 避免选词时误发。与线程输入框（thread-composer 的 Cmd/Ctrl+Enter
- * 发送、回车换行）刻意不同：机器人主线是单线快问快答，按聊天软件
- * 习惯回车直发。Cmd/Ctrl+Enter 落在同一分支同样发送；表单提交
+ * 安全点交给机器人（回复中的等待指示在聊天内容底部，不在输入框里）。
+ * Enter 发送、Shift+Enter 换行；输入法组合中（isComposing / keyCode 229）
+ * 的 Enter 不拦截，避免选词时误发。与线程输入框（thread-composer 的
+ * Cmd/Ctrl+Enter 发送、回车换行）刻意不同：机器人主线是单线快问快答，按
+ * 聊天软件习惯回车直发。Cmd/Ctrl+Enter 落在同一分支同样发送；表单提交
  * （发送按钮）保留。
  */
 export function BotComposer({
@@ -18,7 +18,6 @@ export function BotComposer({
   onSubmit,
   submitting,
   disabled,
-  banner,
   actions,
   error,
   placeholder = "发消息给机器人…",
@@ -28,7 +27,6 @@ export function BotComposer({
   onSubmit: () => void;
   submitting?: boolean;
   disabled?: boolean;
-  banner?: ReactNode;
   actions?: ReactNode;
   error?: string;
   placeholder?: string;
@@ -59,7 +57,6 @@ export function BotComposer({
       aria-label="机器人消息输入"
       className="flex flex-col gap-1.5 rounded-3xl border bg-card px-3.5 pt-3 pb-2.5 shadow-xs"
     >
-      {banner}
       <Textarea
         value={text}
         onChange={(e) => onTextChange(e.target.value)}
