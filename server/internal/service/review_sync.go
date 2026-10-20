@@ -70,8 +70,16 @@ func (s *ReviewService) lockForPR(repo string, prNumber int) *sync.Mutex {
 // 状态与评论由当前 enabled 项目独占。
 func (s *ReviewService) syncPendingPRs(now time.Time) {
 	var rows []model.ReviewPullRequest
-	if err := s.db.Where(`sync_pending AND project_id IN (
-		SELECT project_id FROM project_review_settings WHERE enabled)`).
+	// 三重要求：pending、所属项目仍启用、且账本仓库就是项目**当前**仓库。
+	// 项目换过仓库后旧仓库的 ledger 可能因旧运行收尾再次置 pending，不能在
+	// 新仓库的项目上把它同步出去。
+	if err := s.db.Where(`sync_pending
+		AND project_id IN (SELECT project_id FROM project_review_settings WHERE enabled)
+		AND EXISTS (
+			SELECT 1 FROM projects p
+			WHERE p.id = review_pull_requests.project_id
+			  AND lower(p.github_owner || '/' || p.github_repo) = review_pull_requests.repo_full_name
+		)`).
 		Order("updated_at ASC").Limit(reviewStageBatch).
 		Find(&rows).Error; err != nil {
 		s.logger.Error("查询待同步 PR 失败", zap.Error(err))

@@ -461,3 +461,26 @@ func TestReviewRecordsCanRerunTracksProjectRepo(t *testing.T) {
 		t.Fatalf("can_rerun = %+v, want 旧仓库 false / 新仓库 true", got)
 	}
 }
+
+// 项目换仓库后，旧仓库的 pending 账本不能被新仓库的启用设置带出去同步。
+func TestReviewSyncSkipsHistoricalRepoLedger(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	now := time.Now().UTC()
+	current := strings.ToLower(e.project.GithubOwner + "/" + e.project.GithubRepo)
+	historical := "oldowner/oldrepo"
+	e.fake.SetPR(historical, 77, &githubapi.PullRequest{
+		RepoFullName: historical, Number: 77, HeadSHA: "sha-h",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: historical, PRNumber: 77, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-h", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+	e.enableReview(t) // 项目当前仓库 enabled
+
+	e.review.syncPendingPRs(now)
+	if got := e.fake.TotalCalls(); got != 0 {
+		t.Fatalf("历史仓库账本不应发 GitHub 产出，calls = %d（current=%s）", got, current)
+	}
+}
