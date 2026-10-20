@@ -278,6 +278,22 @@ func botScheduleAcceptedRevision(call *model.BotToolCall) string {
 	return execCtx.Schedule.TaskUpdatedAt
 }
 
+// botScheduleAcceptedModel 取受理时确认卡上展示的生效模型（任务无覆盖时是当时
+// 的机器人模型）；没有预览（旧调用）时为空串，执行时跟随当前配置。
+func botScheduleAcceptedModel(call *model.BotToolCall) string {
+	var execCtx botCallExecContext
+	if call.ExecutionContextJSON == "" {
+		return ""
+	}
+	if err := json.Unmarshal([]byte(call.ExecutionContextJSON), &execCtx); err != nil {
+		return ""
+	}
+	if execCtx.Schedule == nil {
+		return ""
+	}
+	return execCtx.Schedule.EffectiveModel
+}
+
 // botScheduleRevisionChanged 在事务内比对任务修订：确认卡批准的是受理时看到
 // 的配置，run/enable/delete 执行时任务已被改过就拒绝（TOCTOU，与 fs_issue 的
 // expected_updated_at 同一口径），让用户重新看一眼再决定，而不是静默按新配置

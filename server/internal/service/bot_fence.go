@@ -77,18 +77,18 @@ func botHasFenceTag(text string) bool {
 	return false
 }
 
-// botResultFenceExemptTools 是不进围栏的工具动作：结果要么是平台内部数据
-// （记忆、帮助、停止/取消回执），要么自带处理通道（fs_result 续读自己包围栏、
-// 任务小状态是模型自用的去重 JSON）。键是 tool/action；新工具/动作默认进围栏。
+// botResultFenceExemptTools 是不进围栏的工具动作：只有平台完全自有的元数据/回执
+// 才豁免（记忆的路径与版本列表、帮助、停止/取消回执、state_set 的 ack）。
+// 带正文的读取一律走围栏：记忆内容与检索片段可能是模型抄进来的外部文本，
+// 续读结果也由出口统一包。键是 tool/action；新工具/动作默认进围栏。
 var botResultFenceExemptTools = map[string]bool{
-	"fs_memory/status": true, "fs_memory/list": true, "fs_memory/read": true,
-	"fs_memory/history": true, "fs_memory/create": true, "fs_memory/replace": true,
-	"fs_memory/append": true, "fs_memory/delete": true, "fs_memory/restore": true,
-	"fs_memory_search/search": true,
-	"fs_help/read":            true,
-	"fs_stop/stop":            true,
-	"fs_cancel/cancel":        true,
-	"fs_schedule/state_set":   true,
+	"fs_memory/status": true, "fs_memory/list": true, "fs_memory/history": true,
+	"fs_memory/create": true, "fs_memory/replace": true, "fs_memory/append": true,
+	"fs_memory/delete": true, "fs_memory/restore": true,
+	"fs_help/read":          true,
+	"fs_stop/stop":          true,
+	"fs_cancel/cancel":      true,
+	"fs_schedule/state_set": true,
 }
 
 // botFenceToolResult 把**整条**工具结果包进一层不可信围栏（INT-136 重构）：

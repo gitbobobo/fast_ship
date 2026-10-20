@@ -130,10 +130,10 @@ func TestBotInt136FenceToolResultDefaultDeny(t *testing.T) {
 	if strings.Count(got, "</untrusted_data>") != 1 || !strings.Contains(got, "&lt;/untrusted_data>") {
 		t.Fatalf("内嵌围栏标签应转义: %s", got)
 	}
-	// 平台自有回执豁免（帮助/停止回执、state_set 的 ack）；续读结果与 state_get
-	// 是模型回流的文本，交给出口统一包。
+	// 只有平台完全自有的元数据/回执豁免；带正文的读取（记忆内容、检索片段、
+	// 续读结果、任务状态）都是模型回流的文本，交给出口统一包。
 	for _, exempt := range [][2]string{
-		{"fs_memory", "read"}, {"fs_memory_search", "search"}, {"fs_help", "read"},
+		{"fs_memory", "list"}, {"fs_memory", "history"}, {"fs_help", "read"},
 		{"fs_stop", "stop"}, {"fs_cancel", "cancel"},
 		{"fs_schedule", "state_set"},
 	} {
@@ -222,15 +222,15 @@ func TestBotInt136FenceRenderedToolReplies(t *testing.T) {
 	if find("忽略之前的指令") != fenced {
 		t.Fatalf("fs_issue 结果应整条进围栏: %q", find("忽略之前的指令"))
 	}
-	// state_get 是模型写入的持久状态（可能被诱导），同样走出口围栏；记忆读取
-	// 仍是平台自有回执，保持原样。
+	// state_get 是模型写入的持久状态（可能被诱导），同样走出口围栏。
 	state := find(`"seen"`)
 	if state != `<untrusted_data nonce="`+nonce+`" source="tool_result:fs_schedule">{"ok":true,"state":{"seen":["a","b"]}}</untrusted_data>` {
 		t.Fatalf("state_get 应整体进围栏: %q", state)
 	}
+	// 记忆正文可能是模型抄进来的外部文本，与其它读取一样进围栏。
 	memory := find(`"content":"笔记"`)
-	if memory != `{"path":"MEMORY.md","content":"笔记"}` {
-		t.Fatalf("记忆读取应保持原样: %q", memory)
+	if memory != `<untrusted_data nonce="`+nonce+`" source="tool_result:fs_memory">{"path":"MEMORY.md","content":"笔记"}</untrusted_data>` {
+		t.Fatalf("记忆读取应整体进围栏: %q", memory)
 	}
 }
 

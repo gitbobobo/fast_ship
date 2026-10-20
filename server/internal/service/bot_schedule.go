@@ -196,7 +196,8 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 		rt.LastRunStatus = string(last.Status)
 		rt.LastRunSummary = botFenceUntrusted(nonce, "schedule_run", last.Summary)
 	}
-	rtRaw, _ := json.Marshal(rt)
+	// 同主线：不转义 HTML，运行时上下文里的围栏标签要字面可见。
+	rtRaw := botMarshalNoHTMLEscape(rt)
 	messages = append(messages, openai.UserMessage(botPlatformPrefix(nonce, "运行时上下文")+"\n"+string(rtRaw)))
 
 	ts := sess.toolset
@@ -1028,7 +1029,7 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 	}
 	// 显式手动触发就是一次执行：不要求任务 enabled（停用任务只是不再按 cron
 	// 触发，手动单跑是用户的明确意图）。
-	run, err := s.manuallyStartScheduleRun(call.BotID, task, botScheduleAcceptedRevision(call))
+	run, err := s.manuallyStartScheduleRun(call.BotID, task, botScheduleAcceptedRevision(call), botScheduleAcceptedModel(call))
 	if err != nil {
 		return "", err
 	}
@@ -1046,7 +1047,7 @@ func (s *BotService) execScheduleRun(call *model.BotToolCall, args *botScheduleT
 // 同一任务已有未结束运行（cron 或手动）时返回 ErrBotScheduleRunBusy，不排队。
 // 配置快照与密钥密文按 cron 派发同一方式在事务内冻结；提交后由调用方唤醒
 // 执行槽（wakeScheduleRun），执行路径与 cron 触发完全相同。
-func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotScheduleTask, expectedUpdatedAt string) (*model.BotRun, error) {
+func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotScheduleTask, expectedUpdatedAt, acceptedModel string) (*model.BotRun, error) {
 	now := time.Now().UTC()
 	var run *model.BotRun
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -1083,6 +1084,11 @@ func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotSched
 		snap := botSnapshotOf(botRow)
 		if current.Model != "" {
 			snap.Model = current.Model
+		} else if acceptedModel != "" {
+			// 任务没有自己的模型覆盖时，确认卡上展示的是受理那一刻的机器人
+			// 模型：手动 run 按卡上那版执行，避免受理后用户改机器人模型导致
+			// 「批准的模型」与「实际模型」不一致（cron 仍跟随最新配置）。
+			snap.Model = acceptedModel
 		}
 		started := now
 		taskID := current.ID

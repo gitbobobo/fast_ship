@@ -976,3 +976,89 @@ func TestBotInt136StateSetKeepsTaskRevision(t *testing.T) {
 		t.Fatalf("状态应写入: %+v", after)
 	}
 }
+
+// 运行时上下文里的围栏标签要字面可见：默认的 json.Marshal 会把 < 转义成
+// \u003c，模型就看不到数据边界了。
+func TestBotInt136RuntimeContextKeepsLiteralFence(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136rt")
+	bot := env.createBot(t, userID)
+	nonce := botNonce(t, env, bot.ID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Name = "任务名"
+		tk.NeedsReport = false
+	})
+	// 造一条已结束运行，让 last_run_summary 带上围栏。
+	now := time.Now().UTC()
+	finished := now
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID, TriggerSource: model.BotTriggerSchedule,
+		TriggerKey: "schedule:" + task.ID + ":" + uuid.NewString(),
+		Status:     model.BotRunStatusCompleted, SessionKind: model.BotSessionKindSchedule,
+		ScheduleTaskID: &task.ID, Summary: "上次摘要", ConfigSnapshotJSON: "{}",
+		TriggerContextJSON: "{}", CreatedAt: now, StartedAt: &now, FinishedAt: &finished,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	current := seedScheduleRun(t, env, bot.ID, task.ID)
+	botRow, err := env.bots.bots.Get(bot.ID)
+	if err != nil {
+		t.Fatalf("load bot: %v", err)
+	}
+	sess, err := env.bots.newScheduleSession(botRow, current)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	built, err := env.bots.buildScheduleRunContext(botRow, current, sess)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	raw, _ := json.Marshal(built.Request.Messages)
+	var elems []struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &elems); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 模型解析完协议 JSON 后看到的是这条消息正文：围栏标签必须字面出现
+	// （json.Marshal 默认会把 < 转义成 \u003c，模型就看不到数据边界了）。
+	text := elems[len(elems)-1].Content
+	// 围栏在 JSON 字符串值里，引号是转义的；尖括号必须是字面量。
+	if !strings.Contains(text, `<untrusted_data nonce=\"`+nonce+`\" source=\"schedule_run\">`) {
+		t.Fatalf("运行时上下文里的摘要围栏标签应字面可见: %s", text)
+	}
+	if strings.Contains(text, `\u003c`) {
+		t.Fatalf("消息正文里不应有 JSON 转义的尖括号: %s", text)
+	}
+}
+
+// 手动 run 按确认卡上展示的模型执行：任务没有模型覆盖时，受理后用户改机器人
+// 模型不应让「批准的模型」与「实际模型」不一致（cron 仍跟随最新配置）。
+func TestBotInt136ManualRunUsesAcceptedModel(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136model")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.NeedsReport = false
+	})
+	preview := schedPreviewJSON(t, "旧模型")
+	run, err := env.bots.manuallyStartScheduleRun(bot.ID, task, "", "旧模型")
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	snap := &botConfigSnapshot{}
+	if err := json.Unmarshal([]byte(run.ConfigSnapshotJSON), snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if snap.Model != "旧模型" {
+		t.Fatalf("手动 run 应冻结确认卡上的模型: %q (preview=%s)", snap.Model, preview)
+	}
+}
+
+// schedPreviewJSON 只用于可读的调试输出，失败信息里带上模板。
+func schedPreviewJSON(t *testing.T, model string) string {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]string{"effective_model": model})
+	return string(raw)
+}
