@@ -72,7 +72,14 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
   const cron = schedStr("cron", "cron_expression") ?? "—";
   const timezone = schedStr("timezone") ?? (isRun ? "—" : "UTC");
   const nextRun = schedStr("next_run_at") ?? "—";
-  const model = schedStr("effective_model") ?? "—";
+  // 模型来源要如实说清：任务固定覆盖 vs 跟随机器人（换模型后下次运行会变）。
+  const modelName = schedStr("effective_model") ?? "—";
+  const model =
+    sched.model_inherited === true
+      ? `跟随机器人模型（目前 ${modelName}）`
+      : modelName === "—"
+        ? "—"
+        : `${modelName}（任务指定）`;
   const reportFlag =
     typeof sched.needs_report === "boolean" ? sched.needs_report : undefined;
   const instruction = schedStr("instruction");

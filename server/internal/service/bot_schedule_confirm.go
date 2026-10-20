@@ -138,6 +138,9 @@ type botScheduleCallPreview struct {
 	NextRunAtUTC string `json:"next_run_at_utc,omitempty"`
 	// EffectiveModel 是任务覆盖优先、否则机器人当前模型。
 	EffectiveModel string `json:"effective_model,omitempty"`
+	// ModelInherited 标记生效模型来自「跟随机器人」而不是任务固定覆盖：
+	// 卡片据此说明继承语义（机器人换模型后，下次运行会跟着变）。
+	ModelInherited bool `json:"model_inherited,omitempty"`
 	// TaskUpdatedAt 是受理时任务的 updated_at（RFC3339Nano，只对 run/enable/
 	// delete 这类「按库里配置执行」的动作填）：确认卡批准的是当时看到的配置，
 	// 执行器在事务内比对同一水位，期间任务被改过就拒绝执行（TOCTOU）。
@@ -249,6 +252,7 @@ func (s *BotService) schedulePreviewFromTask(bot *model.Bot, in schedulePreviewI
 		Name: merged.Name, Cron: merged.CronExpression, Timezone: merged.Timezone,
 		Instruction: merged.Instruction, NeedsReport: &report,
 		EffectiveModel: effective,
+		ModelInherited: strings.TrimSpace(merged.Model) == "",
 	}
 	if task != nil {
 		preview.TaskID = task.ID
@@ -276,22 +280,6 @@ func botScheduleAcceptedRevision(call *model.BotToolCall) string {
 		return ""
 	}
 	return execCtx.Schedule.TaskUpdatedAt
-}
-
-// botScheduleAcceptedModel 取受理时确认卡上展示的生效模型（任务无覆盖时是当时
-// 的机器人模型）；没有预览（旧调用）时为空串，执行时跟随当前配置。
-func botScheduleAcceptedModel(call *model.BotToolCall) string {
-	var execCtx botCallExecContext
-	if call.ExecutionContextJSON == "" {
-		return ""
-	}
-	if err := json.Unmarshal([]byte(call.ExecutionContextJSON), &execCtx); err != nil {
-		return ""
-	}
-	if execCtx.Schedule == nil {
-		return ""
-	}
-	return execCtx.Schedule.EffectiveModel
 }
 
 // botScheduleRevisionChanged 在事务内比对任务修订：确认卡批准的是受理时看到

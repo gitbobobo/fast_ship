@@ -59,6 +59,7 @@ function makeScheduleCall(overrides: Partial<BotCall> = {}): BotCall {
         next_run_at: "2026-10-21 09:00:00 CST",
         next_run_at_utc: "2026-10-21T01:00:00Z",
         effective_model: "gpt-5.1",
+        model_inherited: true,
       },
     },
     ...overrides,
@@ -120,8 +121,10 @@ describe("BotConfirmationCard", () => {
     expect(
       within(summary).getByText("2026-10-21 09:00:00 CST"),
     ).toBeInTheDocument();
-    // 生效模型取服务端快照（参数里的空串在卡片上不再二次解释）。
-    expect(within(summary).getByText("gpt-5.1")).toBeInTheDocument();
+    // 生效模型取服务端快照，并说明来源（跟随机器人 / 任务指定）。
+    expect(
+      within(summary).getByText("跟随机器人模型（目前 gpt-5.1）"),
+    ).toBeInTheDocument();
     expect(within(summary).getByText("需要汇报")).toBeInTheDocument();
     expect(within(summary).getByText("是")).toBeInTheDocument();
     // 指令全文原样展示，不截断。
@@ -164,6 +167,7 @@ describe("BotConfirmationCard", () => {
             needs_report: false,
             next_run_at: "2026-10-21 09:00:00 CST",
             effective_model: "gpt-5.1",
+            model_inherited: false,
           },
         },
       }),
@@ -175,7 +179,7 @@ describe("BotConfirmationCard", () => {
     expect(within(summary).getByText("每日巡检")).toBeInTheDocument();
     expect(within(summary).getByText("0 9 * * *")).toBeInTheDocument();
     expect(within(summary).getByText("Asia/Shanghai")).toBeInTheDocument();
-    expect(within(summary).getByText("gpt-5.1")).toBeInTheDocument();
+    expect(within(summary).getByText("gpt-5.1（任务指定）")).toBeInTheDocument();
     expect(within(summary).getByText("否")).toBeInTheDocument();
     expect(
       within(summary).getByText("2026-10-21 09:00:00 CST"),
@@ -362,6 +366,7 @@ describe("BotConfirmationCard", () => {
             next_run_at: "2026-10-21 09:00:00 CST",
             next_run_at_utc: "2026-10-21T01:00:00Z",
             effective_model: "gpt-5.1",
+            model_inherited: true,
           },
         },
       }),
@@ -375,7 +380,9 @@ describe("BotConfirmationCard", () => {
     expect(
       within(summary).getByText("2026-10-21 09:00:00 CST"),
     ).toBeInTheDocument();
-    expect(within(summary).getByText("gpt-5.1")).toBeInTheDocument();
+    expect(
+      within(summary).getByText("跟随机器人模型（目前 gpt-5.1）"),
+    ).toBeInTheDocument();
     // run 的指令来自服务端任务快照（就是这次要执行的内容），必须展示。
     expect(within(summary).getByText("指令")).toBeInTheDocument();
     expect(

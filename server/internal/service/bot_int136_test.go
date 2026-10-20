@@ -1033,32 +1033,27 @@ func TestBotInt136RuntimeContextKeepsLiteralFence(t *testing.T) {
 	}
 }
 
-// 手动 run 按确认卡上展示的模型执行：任务没有模型覆盖时，受理后用户改机器人
-// 模型不应让「批准的模型」与「实际模型」不一致（cron 仍跟随最新配置）。
-func TestBotInt136ManualRunUsesAcceptedModel(t *testing.T) {
+// 生效模型是「跟随机器人」而不是任务固定覆盖时，预览必须标出来：卡片据此
+// 说明继承语义（机器人换模型后下次运行会跟着变），而不是承诺一个具体模型。
+func TestBotInt136PreviewMarksInheritedModel(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "int136model")
 	bot := env.createBot(t, userID)
-	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
-		tk.NeedsReport = false
-	})
-	preview := schedPreviewJSON(t, "旧模型")
-	run, err := env.bots.manuallyStartScheduleRun(bot.ID, task, "", "旧模型")
+	botRow, err := env.bots.bots.Get(bot.ID)
 	if err != nil {
-		t.Fatalf("start: %v", err)
+		t.Fatalf("load bot: %v", err)
 	}
-	snap := &botConfigSnapshot{}
-	if err := json.Unmarshal([]byte(run.ConfigSnapshotJSON), snap); err != nil {
-		t.Fatalf("decode snapshot: %v", err)
+	inherited := env.bots.schedulePreviewFromTask(botRow, schedulePreviewInput{
+		Name: "n", Cron: "0 9 * * *", Instruction: "i",
+	}, nil)
+	if inherited == nil || !inherited.ModelInherited || inherited.EffectiveModel != botRow.Model {
+		t.Fatalf("未指定模型时应标为继承: %+v", inherited)
 	}
-	if snap.Model != "旧模型" {
-		t.Fatalf("手动 run 应冻结确认卡上的模型: %q (preview=%s)", snap.Model, preview)
+	fixedModel := "task-model"
+	fixed := env.bots.schedulePreviewFromTask(botRow, schedulePreviewInput{
+		Name: "n", Cron: "0 9 * * *", Instruction: "i", ModelPtr: &fixedModel,
+	}, nil)
+	if fixed == nil || fixed.ModelInherited || fixed.EffectiveModel != fixedModel {
+		t.Fatalf("指定模型时不应标为继承: %+v", fixed)
 	}
-}
-
-// schedPreviewJSON 只用于可读的调试输出，失败信息里带上模板。
-func schedPreviewJSON(t *testing.T, model string) string {
-	t.Helper()
-	raw, _ := json.Marshal(map[string]string{"effective_model": model})
-	return string(raw)
 }
