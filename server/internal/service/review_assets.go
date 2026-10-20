@@ -222,6 +222,11 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 
 	items := make([]api.ReviewAgentScreenshot, 0, len(assets))
 	for _, a := range assets {
+		// 下载失败的资产不给 URL：图片端点对它只会 404，列出来会让审查员
+		// 误以为能看。缺失的截图在 unmeasurable 里由审查员按「拿不到图」处理。
+		if a.StoragePath == "" {
+			continue
+		}
 		items = append(items, api.ReviewAgentScreenshot{
 			Id:    a.ID,
 			Label: a.Label,

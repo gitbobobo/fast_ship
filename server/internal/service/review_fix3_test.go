@@ -1015,3 +1015,34 @@ func TestVisualCarrySuccessSkippedWhenPriorFailed(t *testing.T) {
 		t.Fatal("全部完成且无发现的上一轮应算通过")
 	}
 }
+
+// 截图下载失败（storage_path 为空）时不要列给审查员：图片端点只会 404。
+func TestAgentScreenshotsSkipFailedAssets(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![a](https://github.com/user-attachments/assets/fail1)"
+	e.fake.SetPR(repo, 98, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 98, HeadSHA: "sha-af2",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature", Body: body,
+	})
+	run := e.seedRun(t, repo, 98, "sha-af2", model.ReviewRunRunning, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "dispatch_started_at": now, "dispatched_at": now,
+	})
+	media := &fakeReviewMedia{
+		anonErr:   errors.New("anon forbidden"),
+		bearerErr: errors.New("bearer forbidden"),
+	}
+	review := e.withT3(nil, media, func(context.Context, int64) (string, error) {
+		return "tok", nil
+	})
+
+	items, _, err := review.AgentScreenshots(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("AgentScreenshots: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("items = %+v, 下载失败的截图不应列给审查员", items)
+	}
+}
