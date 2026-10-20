@@ -171,5 +171,7 @@ func (s *BotService) botNonceOf(botID string) (string, error) {
 	if err != nil || bot == nil {
 		return "", errs.ErrInternal
 	}
-	return bot.UntrustedNonce, nil
+	// 与投影同一闸门：提示词还没到带围栏规则的版本时不启用围栏，否则同一份
+	// 上下文里会出现「工具结果带 nonce、平台前缀不带」的混合渲染。
+	return botProjectionNonce(bot), nil
 }

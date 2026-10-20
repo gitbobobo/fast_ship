@@ -9,6 +9,7 @@ import (
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
+	"github.com/google/uuid"
 )
 
 // 定时任务写确认（INT-136）服务层测试：fs_schedule create/敏感字段 update/
@@ -927,5 +928,51 @@ func TestBotInt136DryRunIsReadOnly(t *testing.T) {
 	}
 	if botCallIsReadOnly(real) {
 		t.Fatalf("真实 run 不应视为只读")
+	}
+}
+
+// 任务小状态写入不是配置变更：state_set 不能推动 updated_at，否则一次运行里的
+// 状态写入会让在途的确认卡被误判成「任务在确认期间被修改」。
+func TestBotInt136StateSetKeepsTaskRevision(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "int136state")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, nil)
+	before, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	run := seedScheduleRun(t, env, bot.ID, task.ID)
+
+	call := &model.BotToolCall{
+		ID: uuid.NewString(), BotID: bot.ID, Action: "state_set",
+		ArgumentsJSON: `{"action":"state_set","state":{"seen":["a"]}}`,
+	}
+	// state_set 只允许在 schedule run 内：把调用挂到这次 run 的请求上。
+	env.db.Model(&model.BotToolCall{}).Where("id = ?", call.ID)
+	reqRow := &model.BotModelRequest{
+		ID: uuid.NewString(), RunID: run.ID, Ordinal: 1, Status: model.BotModelRequestRunning,
+		InputThroughSeq: 0, PrefixHash: "x", ToolsHash: "x", RequestHash: "x",
+		TokenEstimator: "bytes/3.5", StartedAt: time.Now().UTC(),
+	}
+	if err := env.bots.requests.CreateTx(env.db, reqRow); err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+	call.RequestID = reqRow.ID
+	if err := env.bots.calls.CreateTx(env.db, call); err != nil {
+		t.Fatalf("seed call: %v", err)
+	}
+	if _, err := env.bots.execScheduleTool(call); err != nil {
+		t.Fatalf("state_set: %v", err)
+	}
+	after, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("state_set 不应推动 updated_at: %v -> %v", before.UpdatedAt, after.UpdatedAt)
+	}
+	if after.StateJSON == "" || after.StateUpdatedAt == nil {
+		t.Fatalf("状态应写入: %+v", after)
 	}
 }

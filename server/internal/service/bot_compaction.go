@@ -970,7 +970,7 @@ func (s *BotService) estimateSnapshotTokensPair(bot *model.Bot, plan *botCompact
 		if snap.SummaryText != "" && built.SummaryMessageIdx >= 0 && built.SummaryMessageIdx < len(built.Request.Messages) {
 			fixedMsgs := append([]openai.ChatCompletionMessageParamUnion(nil), built.Request.Messages...)
 			fixedMsgs[built.SummaryMessageIdx] = openai.SystemMessage(
-				botSummaryMessageText("", snap.IdentifierManifestJSON))
+				botSummaryMessageText(botProjectionNonce(bot), "", snap.IdentifierManifestJSON))
 			fixedRaw, _ := json.Marshal(fixedMsgs)
 			fixed = botEstimateBytes(int64(len(fixedRaw) + int(built.ToolsSchemaBytes)))
 		}
