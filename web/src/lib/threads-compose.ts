@@ -221,6 +221,8 @@ export interface EffortDescriptor {
 export interface ProviderChoice {
   instanceId: string;
   name: string;
+  /** 图标解析键（如 models.dev 目录 id）；缺省用 instanceId 解析图标。 */
+  iconId?: string;
   models: ModelChoice[];
 }
 

@@ -90,7 +90,8 @@ var (
 	ErrQuotaAccountNotFound         = New(40430, "额度账号不存在")
 	ErrQuotaDeviceAuthNotFound      = New(40431, "授权会话不存在或已过期")
 	// 邀请（INT-129）：不存在/已过期/已撤销统一此码，不向注册页泄漏具体状态。
-	ErrInviteNotFound = New(40432, "邀请链接无效或已过期")
+	ErrInviteNotFound     = New(40432, "邀请链接无效或已过期")
+	ErrAIProviderNotFound = New(40433, "AI 提供商不存在")
 )
 
 // 业务冲突 40900-40999
@@ -130,6 +131,8 @@ var (
 	// （并发重复使用）按已使用拒绝。
 	ErrLastAdmin  = New(40931, "不能降级最后一个管理员")
 	ErrInviteUsed = New(40932, "邀请链接已被使用")
+	// AI 提供商（INT-133）：仍被机器人引用时不可删除，先解除或更换引用。
+	ErrAIProviderInUse = New(40933, "该 AI 提供商仍被机器人引用，请先更换或删除相关机器人")
 )
 
 // 请求过于频繁 42900-42999

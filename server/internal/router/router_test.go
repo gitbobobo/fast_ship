@@ -1075,6 +1075,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	automationService := service.NewAutomationService(db, repository.NewAutomationRepository(db), repository.NewAutomationTriggerRepository(db), repository.NewAutomationRunRepository(db), t3EnvironmentRepo, projectRepo, issueRepo, notificationSink, cfg, zap.NewNop())
 	automationAgentService := service.NewAutomationAgentService(db, repository.NewAutomationRunRepository(db), repository.NewAutomationRunTokenRepository(db), t3ThreadsService, notificationSink, zap.NewNop())
 	botService := service.NewBotService(db, cfg, zap.NewNop(), projectService, issueService, t3ThreadsService, t3BindingService)
+	aiProviderHandler := handler.NewAIProviderHandler(service.NewAIProviderService(db, cfg, zap.NewNop()))
 
 	authHandler := handler.NewAuthHandler(authService, fileStorage, cfg)
 	aiHandler := handler.NewAIHandler(aiService)
@@ -1116,7 +1117,7 @@ WHERE trigger_type IN ('cron','issue_created','issue_status_changed','issue_labe
 	if captureLogs && appLogger != nil {
 		r.Use(middleware.RequestLog(appLogger))
 	}
-	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
+	Setup(r, cfg, authHandler, aiHandler, issuePromptHandler, apiKeyHandler, githubTokenHandler, dashboardHandler, projectHandler, versionHandler, issueHandler, issueCollabHandler, recommendationHandler, logHandler, documentHandler, artifactHandler, issueAttachmentHandler, screenshotHandler, screenshotAnnotationHandler, mediaProxyHandler, t3EnvironmentHandler, t3BindingHandler, automationHandler, notificationHandler, automationAgentHandler, botHandler, aiProviderHandler, selfLogHandler, githubWebhookHandler, quotaHandler, deploymentGitHubAppHandler, memberHandler, deploymentSettingsHandler, authService, apiKeyRepo)
 
 	return &routerTestEnv{
 		router:          r,

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godbobo/fast_ship/server/internal/catalog"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/repository"
 	"github.com/google/uuid"
@@ -40,13 +41,13 @@ const (
 var botWindowSyncProbeTimeout = 5 * time.Second
 
 // botModelCapability 是一次模型能力解析的完整结果。Source 明确区分「已检测」
-// 与「回退/猜测」：manual 是部署配置覆盖，detected 来自上游 /models，known
-// 预留给内置已知模型表（当前未用），fallback 是默认窗口。展示层不得把回退
+// 与「回退/猜测」：manual 是部署配置覆盖，detected 来自上游 /models，catalog
+// 来自内置 models.dev 目录（INT-133），fallback 是默认窗口。展示层不得把回退
 // 值说成已检测。
 type botModelCapability struct {
 	WindowTokens    int64
 	MaxOutputTokens int64
-	Source          string // manual | detected | known | fallback
+	Source          string // manual | detected | catalog | fallback
 	Detail          string
 	Detected        bool // Source == "detected"
 }
@@ -79,16 +80,19 @@ func (s *BotService) findWindowRow(baseURL, modelName string) (*model.BotModelWi
 	return row, err
 }
 
-// capabilityFor 按解析顺序（先命中先用）返回地址+模型的能力：
+// capabilityFor 按解析顺序（先命中先用）返回目录+地址+模型的能力：
 //  1. 部署覆盖 cfg.Bots.Context.ModelWindows[model] > 0 → manual
 //  2. bot_model_windows 缓存行 ContextWindow > 0 → detected
-//  3. cfg.Bots.Context.WindowTokens（默认 32768）→ fallback
+//  3. 内置目录（需要 provider 的 catalog_id）→ catalog
+//  4. cfg.Bots.Context.WindowTokens（默认 32768）→ fallback
 //
 // manual 是字段级覆盖（INT-115 F4）：只覆盖窗口；已探测到的输出上限仍从
 // 缓存行读取——否则 inputBudgetFor 不再预留输出空间、辅助请求失去封顶。
 // 缓存无行或行内上限缺失（0）时输出上限为 0。detected 分支的窗口与输出
 // 上限都来自缓存行。缓存查找统一走 findWindowRow（大小写折叠口径）。
-func (s *BotService) capabilityFor(baseURL, modelName string) botModelCapability {
+// catalog 分支（INT-133）：窗口与输出上限都来自目录条目；辅助模型沿用机器人
+// 的 provider，因此同一条解析链生效。catalogID 为空（custom）时直接跳过。
+func (s *BotService) capabilityFor(catalogID, baseURL, modelName string) botModelCapability {
 	if w, ok := s.cfg.Bots.Context.ModelWindows[modelName]; ok && w > 0 {
 		cap := botModelCapability{WindowTokens: w, Source: "manual", Detail: "部署配置覆盖窗口"}
 		if row, err := s.findWindowRow(botNormalizeBaseURL(baseURL), modelName); err == nil && row != nil && row.MaxOutputTokens > 0 {
@@ -107,6 +111,9 @@ func (s *BotService) capabilityFor(baseURL, modelName string) botModelCapability
 		cap.Detected = cap.Source == "detected"
 		return cap
 	}
+	if cap, ok := catalogCapability(catalogID, modelName); ok {
+		return cap
+	}
 	return botModelCapability{
 		WindowTokens: s.cfg.Bots.Context.WindowTokensFor(modelName),
 		Source:       "fallback",
@@ -114,14 +121,36 @@ func (s *BotService) capabilityFor(baseURL, modelName string) botModelCapability
 	}
 }
 
-// modelCapability 是 bot 视角的模型能力解析（地址取 bot 当前值；run 期间
-// 调用方传入的 bot 已应用冻结地址）。
+// catalogCapability 从内置 models.dev 目录解析模型能力（INT-133）：窗口与
+// 输出上限来自目录条目，Source 如实标 catalog。目录缺失字段按 0（未知）落库，
+// 生成侧已把 -1/非正数归零，这里继续防御：窗口 <= 0 视为目录未覆盖，放行到
+// fallback，绝不当 0 上限参与预算。
+func catalogCapability(catalogID, modelName string) (botModelCapability, bool) {
+	if catalogID == "" || catalogID == catalog.CustomCatalogID || modelName == "" {
+		return botModelCapability{}, false
+	}
+	m, ok := catalog.FindModel(catalogID, modelName)
+	if !ok || m.ContextWindow <= 0 {
+		return botModelCapability{}, false
+	}
+	return botModelCapability{
+		WindowTokens:    m.ContextWindow,
+		MaxOutputTokens: m.MaxOutputTokens,
+		Source:          "catalog",
+		Detail:          "内置模型目录（models.dev）",
+	}, true
+}
+
+// modelCapability 是 bot 视角的模型能力解析（地址与目录归属取 bot 当前派生
+// 值；run 期间调用方传入的 bot 已应用冻结地址）。
 func (s *BotService) modelCapability(bot *model.Bot, modelName string) botModelCapability {
+	catalogID := ""
 	baseURL := ""
 	if bot != nil {
 		baseURL = bot.BaseURL
+		catalogID = bot.CatalogID
 	}
-	return s.capabilityFor(baseURL, modelName)
+	return s.capabilityFor(catalogID, baseURL, modelName)
 }
 
 // inputBudgetFor 返回考虑了输出空间后的输入预算：window - maxOutput
@@ -178,9 +207,22 @@ type botModelDetection struct {
 // （精确匹配优先，其次大小写不敏感；找不到或缺窗口字段时报错），Entries
 // 是列表内全部有名条目（含缺失字段的——落缓存前由调用方过滤）。
 func (s *BotService) detectModelWindows(ctx context.Context, baseURL, apiKey, modelName string) (*botModelDetection, error) {
+	det, err := botDetectModelWindows(ctx, baseURL, apiKey, modelName)
+	if err != nil {
+		return nil, err
+	}
+	if modelName != "" && det.Target == nil {
+		return nil, errors.New("模型列表中未找到 " + modelName)
+	}
+	return det, nil
+}
+
+// botDetectModelWindows 是 /models 探测的包级实现（机器人窗口探测与 AI 提供商
+// 测试连接共用）：modelName 为空时只拉列表、不挑目标（Target 为 nil）。
+func botDetectModelWindows(ctx context.Context, baseURL, apiKey, modelName string) (*botModelDetection, error) {
 	baseURL = botNormalizeBaseURL(baseURL)
-	if baseURL == "" || modelName == "" {
-		return nil, errors.New("探测目标缺失：base_url 与 model 必填")
+	if baseURL == "" {
+		return nil, errors.New("探测目标缺失：base_url 必填")
 	}
 	if ctx == nil {
 		var cancel context.CancelFunc
@@ -209,6 +251,9 @@ func (s *BotService) detectModelWindows(ctx context.Context, baseURL, apiKey, mo
 	entries, err := botParseAllModelEntries(body)
 	if err != nil {
 		return nil, err
+	}
+	if modelName == "" {
+		return &botModelDetection{Entries: entries}, nil
 	}
 	picked, err := botPickModelEntry(entries, modelName)
 	if err != nil {

@@ -37,6 +37,7 @@ func Setup(
 	notificationHandler *handler.NotificationHandler,
 	automationAgentHandler *handler.AutomationAgentHandler,
 	botHandler *handler.BotHandler,
+	aiProviderHandler *handler.AIProviderHandler,
 	selfLogHandler *handler.SelfLogHandler,
 	githubWebhookHandler *handler.GitHubWebhookHandler,
 	quotaHandler *handler.QuotaHandler,
@@ -343,6 +344,19 @@ func Setup(
 	api.GET("/notifications/unread-count", middleware.RequireJWT(cfg, authService), notificationHandler.UnreadCount)
 	api.POST("/notifications/read-all", middleware.RequireJWT(cfg, authService), notificationHandler.MarkAllRead)
 	api.POST("/notifications/:id/read", middleware.RequireJWT(cfg, authService), notificationHandler.MarkRead)
+
+	// AI 提供商（INT-133）：内置目录读取与按用户隔离的 CRUD/测试连接，全部
+	// 仅 JWT；test/catalog 为静态段，优先于 :id 匹配。
+	aiProviders := api.Group("/ai-providers", middleware.RequireJWT(cfg, authService))
+	{
+		aiProviders.GET("", aiProviderHandler.List)
+		aiProviders.POST("", aiProviderHandler.Create)
+		aiProviders.POST("/test", aiProviderHandler.TestConnection)
+		aiProviders.GET("/catalog", aiProviderHandler.Catalog)
+		aiProviders.GET("/:id", aiProviderHandler.Get)
+		aiProviders.PUT("/:id", aiProviderHandler.Update)
+		aiProviders.DELETE("/:id", aiProviderHandler.Delete)
+	}
 
 	// JWT 必须 — 内置机器人（INT-101）：管理、主线、运行、调用、确认授权与
 	// SSE 全部仅 JWT；test-connection 为静态段，优先于 :id 匹配。

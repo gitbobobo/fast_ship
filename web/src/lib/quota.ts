@@ -1,12 +1,8 @@
 // 套餐额度（INT-109/INT-130）的纯展示逻辑：
 // 有效剩余、额度池分组、账号三段分组与排序、用量分档配色与重置/恢复倒计时文案。
 
-import { ApiRequestError } from "@/lib/api/client";
-
-/** 服务端错误展示 ApiResponse.message（如 42900 的冷却说明），其余回退通用文案。 */
-export function errorText(err: unknown, fallback: string): string {
-  return err instanceof ApiRequestError && err.message ? err.message : fallback;
-}
+// errorText 的实现在 api/client.ts（ApiRequestError 旁边），这里沿用既有导出入口。
+export { errorText } from "@/lib/api/client";
 
 export type QuotaUsageTone = "normal" | "warning" | "danger";
 

@@ -28,6 +28,7 @@ type BotService struct {
 	logger *zap.Logger
 
 	bots       *repository.BotRepository
+	providers  *repository.AIProviderRepository
 	messages   *repository.BotMessageRepository
 	events     *repository.BotEventRepository
 	runs       *repository.BotRunRepository
@@ -80,6 +81,7 @@ func NewBotService(
 		cfg:        cfg,
 		logger:     logger,
 		bots:       repository.NewBotRepository(db),
+		providers:  repository.NewAIProviderRepository(db),
 		messages:   repository.NewBotMessageRepository(db),
 		events:     repository.NewBotEventRepository(db),
 		runs:       repository.NewBotRunRepository(db),
@@ -101,8 +103,10 @@ func NewBotService(
 
 // BotResponse 管理面响应；key 全链路脱敏，只回末四位。NextEventSeq 是
 // 事件账本水位：详情页订阅以它-1 起读，与消息快照衔接（不从 0 重放）。
-// 窗口能力四字段（INT-115）按「manual > detected > fallback」解析，
+// 窗口能力四字段（INT-115）按「manual > detected > catalog > fallback」解析，
 // ContextSource 如实区分来源，展示层不得把回退值说成已检测。
+// base_url / api_key_last4 是 provider 的派生值（INT-133 起 bots 不再直接存
+// 地址与密钥），provider 轮换后下一次读取生效。
 type BotResponse struct {
 	ID                    string `json:"id"`
 	Name                  string `json:"name"`
@@ -110,13 +114,16 @@ type BotResponse struct {
 	PromptRevision        int64  `json:"prompt_revision"`
 	PlatformPromptVersion int64  `json:"platform_prompt_version"`
 	ToolsetVersion        int64  `json:"toolset_version"`
+	ProviderID            string `json:"provider_id"`
+	ProviderName          string `json:"provider_name"`
+	CatalogID             string `json:"catalog_id"`
 	BaseURL               string `json:"base_url"`
 	Model                 string `json:"model"`
 	APIKeyLast4           string `json:"api_key_last4"`
 	NextEventSeq          int64  `json:"next_event_seq"`
 	ContextWindow         int64  `json:"context_window"`
 	MaxOutputTokens       int64  `json:"max_output_tokens"`
-	ContextSource         string `json:"context_source"` // manual|detected|known|fallback
+	ContextSource         string `json:"context_source"` // manual|detected|catalog|fallback
 	ContextDetail         string `json:"context_detail,omitempty"`
 	// LastMessage 是主线最近一条正文 trim 后非空的 user/assistant 消息预览
 	// （INT-125）。仅 GET /api/bots 列表端点填充；详情与聊天快照等其它端点保持
@@ -137,6 +144,7 @@ type BotLastMessage struct {
 }
 
 // botResponseOf 是 bot 的 API 投影；需要服务解析窗口能力，因此是方法。
+// BaseURL/APIKeyLast4/ProviderName/CatalogID 由仓库层从 provider 派生。
 func (s *BotService) botResponseOf(b *model.Bot) BotResponse {
 	cap := s.modelCapability(b, b.Model)
 	return BotResponse{
@@ -146,6 +154,9 @@ func (s *BotService) botResponseOf(b *model.Bot) BotResponse {
 		PromptRevision:        b.PromptRevision,
 		PlatformPromptVersion: b.PlatformPromptVersion,
 		ToolsetVersion:        b.ToolsetVersion,
+		ProviderID:            b.ProviderID,
+		ProviderName:          b.ProviderName,
+		CatalogID:             b.CatalogID,
 		BaseURL:               b.BaseURL,
 		Model:                 b.Model,
 		APIKeyLast4:           b.APIKeyLast4,
@@ -162,18 +173,16 @@ func (s *BotService) botResponseOf(b *model.Bot) BotResponse {
 type CreateBotRequest struct {
 	Name          string `json:"name"`
 	PersonaPrompt string `json:"persona_prompt"`
-	BaseURL       string `json:"base_url"`
-	Model         string `json:"model"`
-	APIKey        string `json:"api_key"`
+	// ProviderID 必填且属于当前用户；模型与密钥都在 provider 上（INT-133）。
+	ProviderID string `json:"provider_id"`
+	Model      string `json:"model"`
 }
 
 type UpdateBotRequest struct {
 	Name          *string `json:"name,omitempty"`
 	PersonaPrompt *string `json:"persona_prompt,omitempty"`
-	BaseURL       *string `json:"base_url,omitempty"`
+	ProviderID    *string `json:"provider_id,omitempty"`
 	Model         *string `json:"model,omitempty"`
-	// APIKey 指针三态：缺省保留原 key；空串拒绝（避免误清空）；非空替换。
-	APIKey *string `json:"api_key,omitempty"`
 }
 
 // ConnectionCheckResult 是测试连接的单项检查结果。
@@ -195,12 +204,13 @@ type TestConnectionResponse struct {
 }
 
 type TestConnectionRequest struct {
-	// BotID 可选：给定时用已保存配置测试；同时给 BotID 与表单字段时以表单
-	// 覆盖地址/模型（key 仍用已保存的）。
-	BotID   *string `json:"bot_id,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
-	Model   *string `json:"model,omitempty"`
-	APIKey  *string `json:"api_key,omitempty"`
+	// ProviderID 必填：地址与密钥一律取 provider（INT-133），不接受请求体里
+	// 的 base_url / api_key——密钥只在 provider 上存一份。
+	ProviderID string `json:"provider_id"`
+	// BotID 可选：给定时/已有机器人测试时，model 缺省沿用已保存配置；
+	// model 显式提供时以请求为准。
+	BotID *string `json:"bot_id,omitempty"`
+	Model *string `json:"model,omitempty"`
 }
 
 // ---------- 管理 CRUD ----------
@@ -243,40 +253,59 @@ func (s *BotService) Get(userID, botID string) (*BotResponse, error) {
 	return &resp, nil
 }
 
+// Create 把 provider 归属校验与 bot 插入收进同一个短事务：与 provider 删除
+// （检查+删除同事务）交错时，校验离开事务可能放进一条指向已删除 provider
+// 的 bot——派生字段为空，运行期解密失败。生产单连接让校验与插入天然串行。
 func (s *BotService) Create(userID string, req *CreateBotRequest) (*BotResponse, error) {
-	bot, err := s.buildBot(userID, req)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.bots.Create(bot); err != nil {
+	var bot *model.Bot
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		b, err := s.buildBot(tx, userID, req)
+		if err != nil {
+			return err
+		}
+		if err := repository.NewBotRepository(tx).Create(b); err != nil {
+			return errs.ErrInternal
+		}
+		bot = b
+		return nil
+	})
+	if txErr != nil {
+		var appErr *errs.AppError
+		if errors.As(txErr, &appErr) {
+			return nil, txErr
+		}
 		return nil, errs.ErrInternal
 	}
 	// 窗口探测 best-effort 后台执行：不阻塞响应，失败不影响创建结果。
 	s.refreshBotModelWindowAsync(bot.ID)
-	resp := s.botResponseOf(bot)
+	// 派生字段在插入前是空值：读一次库行（仓库层补齐 provider 派生值）再投影。
+	fresh, err := s.bots.Get(bot.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	resp := s.botResponseOf(fresh)
 	return &resp, nil
 }
 
-// buildBot 校验并装配新机器人配置；key 加密落库，任何路径不落明文。
-func (s *BotService) buildBot(userID string, req *CreateBotRequest) (*model.Bot, error) {
+// buildBot 校验并装配新机器人配置：provider 必须存在且属于同一 user；密钥在
+// provider 上，bot 行只存引用（INT-133）。归属校验走传入的 tx：校验与随后的
+// 插入必须落在同一事务（见 Create），不得退回调用方持有的非事务连接。
+func (s *BotService) buildBot(tx *gorm.DB, userID string, req *CreateBotRequest) (*model.Bot, error) {
 	name := strings.TrimSpace(req.Name)
-	baseURL := strings.TrimSpace(req.BaseURL)
 	modelName := strings.TrimSpace(req.Model)
-	apiKey := strings.TrimSpace(req.APIKey)
-	if name == "" || baseURL == "" || modelName == "" || apiKey == "" {
+	providerID := strings.TrimSpace(req.ProviderID)
+	if name == "" || modelName == "" || providerID == "" {
 		return nil, errs.ErrInvalidParams
 	}
-	if !botValidBaseURL(baseURL) {
-		return nil, errs.New(errs.ErrInvalidParams.Code, "base_url 必须是 http(s) 地址")
-	}
-
-	cipher, last4, err := s.encryptAPIKey(apiKey)
-	if err != nil {
-		return nil, err
+	if _, err := repository.NewAIProviderRepository(tx).FindByIDAndUser(providerID, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errs.ErrAIProviderNotFound
+		}
+		return nil, errs.ErrInternal
 	}
 
 	now := time.Now().UTC()
-	return &model.Bot{
+	bot := &model.Bot{
 		ID:                    uuid.NewString(),
 		UserID:                userID,
 		Name:                  name,
@@ -286,41 +315,28 @@ func (s *BotService) buildBot(userID string, req *CreateBotRequest) (*model.Bot,
 		PlatformPromptVersion: botPlatformPromptVersion,
 		ToolsetVersion:        botToolsetVersion,
 		LastToldVersion:       botToolsetVersion,
-		BaseURL:               baseURL,
+		ProviderID:            providerID,
 		Model:                 modelName,
-		APIKeyEncrypted:       cipher,
-		APIKeyLast4:           last4,
 		NextMessageSeq:        1,
 		NextEventSeq:          1,
 		OfferedInputSeq:       0,
-		CreatedAt:             now,
-		UpdatedAt:             now,
-	}, nil
+		// 新机器人没有旧风格历史：风格压缩水位直接落在当前版本，不触发
+		// 一次性 style_upgrade 压缩（INT-133）。
+		StyleCompactionVersion: botStylePromptVersion,
+		CreatedAt:              now,
+		UpdatedAt:              now,
+	}
+	return bot, nil
 }
 
-// Update 指针字段表达「未提供保留」；key 缺省保留，空串拒绝。
-// 人设变化重建系统提示词并递增 revision。配置变化对下个 run 生效。
-// 读行、应用请求与写库收进同一短事务：生产库单连接让读-改-写与并发写者
-// 串行，不会把事务外读到的旧状态写回。人设未变时按列跳过提示词四列
-// （persona_prompt/system_prompt_text/prompt_revision/platform_prompt_version），
-// 改名/换模型/换 key 不得反向撤销并发激活写入的提示词状态。
+// Update 指针字段表达「未提供保留」。人设变化重建系统提示词并递增 revision。
+// 配置变化对下个 run 生效。读行、应用请求与写库收进同一短事务：生产库单连接
+// 让读-改-写与并发写者串行，不会把事务外读到的旧状态写回。人设未变时按列
+// 跳过提示词四列（persona_prompt/system_prompt_text/prompt_revision/
+// platform_prompt_version），改名/换模型/换 provider 不得反向撤销并发激活
+// 写入的提示词状态。地址与密钥随 provider（INT-133）：这里只换引用，
+// 轮换密钥由 provider 端点负责。
 func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotResponse, error) {
-	// key 加密在事务外完成：加密不打库，提前做掉，事务闭包内不引入
-	// 非事务调用。
-	var newCipher []byte
-	var newLast4 string
-	if req.APIKey != nil {
-		apiKey := strings.TrimSpace(*req.APIKey)
-		if apiKey == "" {
-			return nil, errs.New(errs.ErrInvalidParams.Code, "api_key 不能为空串；不提供该字段即保留原 key")
-		}
-		cipher, last4, err := s.encryptAPIKey(apiKey)
-		if err != nil {
-			return nil, err
-		}
-		newCipher, newLast4 = cipher, last4
-	}
-
 	var updated *model.Bot
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		repo := repository.NewBotRepository(tx)
@@ -347,15 +363,21 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 			bot.PlatformPromptVersion = botPlatformPromptVersion
 			personaChanged = true
 		}
-		if req.BaseURL != nil {
-			baseURL := strings.TrimSpace(*req.BaseURL)
-			if baseURL == "" {
-				return errs.New(errs.ErrInvalidParams.Code, "base_url 不能为空")
+		if req.ProviderID != nil {
+			providerID := strings.TrimSpace(*req.ProviderID)
+			if providerID == "" {
+				return errs.New(errs.ErrInvalidParams.Code, "provider_id 不能为空")
 			}
-			if !botValidBaseURL(baseURL) {
-				return errs.New(errs.ErrInvalidParams.Code, "base_url 必须是 http(s) 地址")
+			if providerID != bot.ProviderID {
+				// 新 provider 必须属于同一 user；不存在/非本人一律 404。
+				if _, err := repository.NewAIProviderRepository(tx).FindByIDAndUser(providerID, userID); err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						return errs.ErrAIProviderNotFound
+					}
+					return errs.ErrInternal
+				}
 			}
-			bot.BaseURL = baseURL
+			bot.ProviderID = providerID
 		}
 		if req.Model != nil {
 			modelName := strings.TrimSpace(*req.Model)
@@ -363,10 +385,6 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 				return errs.New(errs.ErrInvalidParams.Code, "model 不能为空")
 			}
 			bot.Model = modelName
-		}
-		if req.APIKey != nil {
-			bot.APIKeyEncrypted = newCipher
-			bot.APIKeyLast4 = newLast4
 		}
 
 		bot.UpdatedAt = time.Now().UTC()
@@ -386,8 +404,14 @@ func (s *BotService) Update(userID, botID string, req *UpdateBotRequest) (*BotRe
 		return nil, errs.ErrInternal
 	}
 	// 地址或模型可能已变：后台 best-effort 刷新窗口缓存，不阻塞响应。
-	s.refreshBotModelWindowAsync(updated.ID)
-	resp := s.botResponseOf(updated)
+	// provider_id 可能在事务内被换过，读行时派生字段按读取时刻补齐——
+	// 这里重读一次拿最新派生值再投影。
+	fresh, err := s.bots.Get(updated.ID)
+	if err != nil {
+		return nil, errs.ErrInternal
+	}
+	s.refreshBotModelWindowAsync(fresh.ID)
+	resp := s.botResponseOf(fresh)
 	return &resp, nil
 }
 
@@ -462,8 +486,9 @@ func (s *BotService) Delete(userID, botID string) error {
 // ---------- 测试连接 ----------
 
 // TestConnection 只做最小模型探测，不写入主线。流式与工具调用兼容性分别返回。
+// 地址与密钥一律取 provider（INT-133）：测试已保存配置等价于测试其 provider。
 func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (*TestConnectionResponse, error) {
-	baseURL, modelName, apiKey, err := s.resolveTestTarget(userID, req)
+	baseURL, modelName, apiKey, catalogID, err := s.resolveTestTarget(userID, req)
 	if err != nil {
 		return nil, err
 	}
@@ -486,7 +511,7 @@ func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (
 	// 落列表内全部模型（同一事务批量），配置的辅助模型同样能拿到输出上限。
 	// 探测失败回退到当前解析值并落失败标记，不冒泡为测试失败（可达性问题
 	// 已由上面两项检查给出）。
-	capability := s.capabilityFor(baseURL, modelName)
+	capability := s.capabilityFor(catalogID, baseURL, modelName)
 	ctx, cancel := context.WithTimeout(context.Background(), botWindowDetectTimeout)
 	det, detErr := s.detectModelWindows(ctx, baseURL, apiKey, modelName)
 	cancel()
@@ -510,42 +535,42 @@ func (s *BotService) TestConnection(userID string, req *TestConnectionRequest) (
 	}, nil
 }
 
-// resolveTestTarget 解析测试目标：未保存配置 / 已保存 key + 表单覆盖。
-func (s *BotService) resolveTestTarget(userID string, req *TestConnectionRequest) (baseURL, modelName, apiKey string, err error) {
-	if req.BotID == nil || *req.BotID == "" {
-		if req.BaseURL == nil || req.Model == nil || req.APIKey == nil {
-			return "", "", "", errs.New(errs.ErrInvalidParams.Code, "未保存配置时必须提供 base_url、model 与 api_key")
-		}
-		return strings.TrimSpace(*req.BaseURL), strings.TrimSpace(*req.Model), strings.TrimSpace(*req.APIKey), nil
+// resolveTestTarget 解析测试目标：provider 提供地址与密钥；model 显式提供
+// 时优先，否则沿用 bot 已保存配置（bot 未给时必填）。
+func (s *BotService) resolveTestTarget(userID string, req *TestConnectionRequest) (baseURL, modelName, apiKey, catalogID string, err error) {
+	providerID := strings.TrimSpace(req.ProviderID)
+	if providerID == "" {
+		return "", "", "", "", errs.New(errs.ErrInvalidParams.Code, "provider_id 必填")
 	}
-
-	bot, err := s.bots.FindByIDAndUser(*req.BotID, userID)
+	provider, err := s.providers.FindByIDAndUser(providerID, userID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", "", "", errs.ErrBotNotFound
+			return "", "", "", "", errs.ErrAIProviderNotFound
 		}
-		return "", "", "", errs.ErrInternal
+		return "", "", "", "", errs.ErrInternal
 	}
-	plain, err := s.decryptAPIKey(bot)
+	plain, err := s.decryptProviderKey(provider)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
-	// 表单里填了替换密钥就测新密钥：旧密钥有效不代表替换后能用，测试
-	// 连接必须反映将要保存的配置。
-	if req.APIKey != nil && strings.TrimSpace(*req.APIKey) != "" {
-		plain = strings.TrimSpace(*req.APIKey)
-	}
-	if req.BaseURL != nil && strings.TrimSpace(*req.BaseURL) != "" {
-		baseURL = strings.TrimSpace(*req.BaseURL)
-	} else {
-		baseURL = bot.BaseURL
-	}
-	if req.Model != nil && strings.TrimSpace(*req.Model) != "" {
-		modelName = strings.TrimSpace(*req.Model)
-	} else {
+	baseURL = provider.BaseURL
+	catalogID = provider.CatalogID
+
+	modelName = strings.TrimSpace(derefOr(req.Model))
+	if modelName == "" && req.BotID != nil && strings.TrimSpace(*req.BotID) != "" {
+		bot, botErr := s.bots.FindByIDAndUser(strings.TrimSpace(*req.BotID), userID)
+		if botErr != nil {
+			if errors.Is(botErr, gorm.ErrRecordNotFound) {
+				return "", "", "", "", errs.ErrBotNotFound
+			}
+			return "", "", "", "", errs.ErrInternal
+		}
 		modelName = bot.Model
 	}
-	return baseURL, modelName, plain, nil
+	if modelName == "" {
+		return "", "", "", "", errs.New(errs.ErrInvalidParams.Code, "model 必填（未指定 bot_id 时没有可沿用的已保存模型）")
+	}
+	return baseURL, modelName, plain, catalogID, nil
 }
 
 // ---------- 密钥 ----------
@@ -566,17 +591,21 @@ func (s *BotService) decryptAPIKey(bot *model.Bot) (string, error) {
 	return string(plain), nil
 }
 
+// decryptProviderKey 解密 provider 行上的密钥（密文不出 provider 表）。
+func (s *BotService) decryptProviderKey(p *model.AIProvider) (string, error) {
+	plain, err := crypto.Decrypt(p.APIKeyEncrypted, []byte(s.cfg.Encryption.Key))
+	if err != nil {
+		return "", errs.ErrInternal
+	}
+	return string(plain), nil
+}
+
 // botKeyLast4 只保留末四位用于展示；任何日志、错误、快照禁止出现明文。
 func botKeyLast4(plain string) string {
 	if len(plain) <= 4 {
 		return plain
 	}
 	return plain[len(plain)-4:]
-}
-
-// botValidBaseURL 允许 http/https（自托管、内网地址都允许），不追加 /v1。
-func botValidBaseURL(raw string) bool {
-	return strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://")
 }
 
 // ---------- 发消息 ----------

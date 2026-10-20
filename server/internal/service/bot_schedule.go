@@ -996,8 +996,9 @@ func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotSched
 		if busy > 0 {
 			return errs.ErrBotScheduleRunBusy
 		}
-		var botRow model.Bot
-		if err := tx.Where("id = ?", botID).First(&botRow).Error; err != nil {
+		// 经仓库层读取：provider 派生的地址与密钥在读取时补齐（INT-133）。
+		botRow, err := repository.NewBotRepository(tx).Get(botID)
+		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errs.ErrBotNotFound
 			}
@@ -1005,7 +1006,7 @@ func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotSched
 		}
 		// 冻结有效配置：任务可覆盖模型；密钥密文与 base_url 成对冻结，
 		// 语义与 dispatchDueScheduleTask 一致。
-		snap := botSnapshotOf(&botRow)
+		snap := botSnapshotOf(botRow)
 		if current.Model != "" {
 			snap.Model = current.Model
 		}

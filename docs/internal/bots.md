@@ -37,15 +37,24 @@ repository/bot*.go         各表仓库；repository/bot_schema.go 建索引与�
 
 ## 数据模型
 
-十五条普通表（INT-101 的 `bots`、`bot_messages`、`bot_runs`、
+十六条普通表（INT-101 的 `bots`、`bot_messages`、`bot_runs`、
 `bot_model_requests`、`bot_tool_calls`、`bot_authorizations`、`bot_events`，
 INT-102 新增 `bot_context_states`、`bot_compactions`、`bot_memory_files`、
 `bot_memory_versions`、`bot_maintenance_runs`、`bot_maintenance_requests`，
-INT-103 新增 `bot_schedule_tasks`，INT-115 新增 `bot_model_windows`）
+INT-103 新增 `bot_schedule_tasks`，INT-115 新增 `bot_model_windows`，
+INT-133 新增 `ai_providers`）
 加一张 FTS5 虚表 `bot_memory_fts`，全部 UUID 主键、UTC 时间、不嵌软删除；
 实际外键一律 `OnDelete:CASCADE`，整机器人删除级联清理（`bot_model_windows`
 是探测缓存、无外键，见 database.md）。
 
+- **提供商引用（INT-133）**：`bots` 不再存 `base_url` / `api_key_encrypted` /
+  `api_key_last4`，只存 `provider_id` 引用 `ai_providers`（按用户隔离，见
+  `ai-providers.md`）。地址、密钥密文与末四位改为 `model.Bot` 上的
+  `gorm:"-"` 派生字段，由仓库层在每次读取时从 provider 行补齐——run 入口、
+  压缩边界与 schedule 派发的「冻结地址与密钥」语义不变，只是来源变成
+  provider；密钥只存一份，轮换后所有引用它的机器人在下一个 run 生效。
+  迁移：AutoMigrate 后按（用户 + 规范化地址 + 密文）去重聚合成 provider、
+  回填 `provider_id`、再 DROP 旧三列；幂等，检测不到旧列即整体跳过。
 - `bot_messages` 是不可改写的对话账本：批准/拒绝/错误/恢复都追加新消息；
   SQLite 触发器 `trg_bot_messages_append_only` 拦截一切 UPDATE（级联 DELETE
   不受影响）。幂等与去重靠唯一索引：`(bot_id, client_message_id)`、
@@ -102,7 +111,7 @@ Completions 的工具定义实际在顶层 `tools`，不伪造 tools 消息；�
 逐字节不变，写入立即可经工具读回但模型视图保持冻结。
 
 系统提示词在创建或用户明确编辑人设时重建并递增 `prompt_revision`；拼装
-顺序固定为 平台规则 → 对话风格 → 人设（INT-122）。工具
+顺序固定为 身份与说话方式（默认人设）→ 平台规则 → 用户人设（INT-133）。工具
 schema 进程内生成一次（invopop/jsonschema，去掉 `$id/$schema/$defs`），不按
 机器人权限删减排序。usage 启用 `stream_options.include_usage`，finish_reason
 之后继续读 usage chunk；缺失与零严格区分（`usage_complete` 标记 + 可空计数），
@@ -228,7 +237,9 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
 
 - **窗口能力解析**（`bot_window.go`）：解析顺序 manual（部署
   `model_windows` 覆盖）> detected（`bot_model_windows` 缓存，来自
-  `GET {base_url}/models` 探测）> fallback（默认窗口）。manual 是字段级
+  `GET {base_url}/models` 探测）> catalog（内置 models.dev 目录，按 provider 的
+  `catalog_id` + 模型名取 `limit.context`/`limit.output`，INT-133）> fallback
+  （默认窗口）。manual 是字段级
   覆盖：只覆盖窗口，已探测到的输出上限仍从缓存行读取（缓存无行或行内缺失
   则为 0）——否则输入预算不再预留输出空间、辅助请求失去封顶。
   `inputBudgetFor` 在窗口之上再扣输出空间（maxOutput≤0 或 ≥window 时不
@@ -237,7 +248,7 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   边界做最终约束：输出 ≤ 探测上限、序列化输入+输出 ≤ 窗口（窗口已知时），
   违反即干净失败、不发注定非法的请求——即使调用方漏算也不出网。缺失字段
   保持 0，绝不当成 0 上限参与预算；`context_source` 如实区分
-  manual/detected/fallback，展示层不得把回退值说成已检测。缓存键的地址做
+  manual/detected/catalog/fallback，展示层不得把回退值说成已检测。缓存键的地址做
   TrimSpace + 去尾部 `/` 规范化，同名模型在不同服务之间不串用。
 - **探测**：独立 `http.Client`，10s 超时，Bearer 鉴权；响应宽容解析——顶层
   `{"data":[...]}`（OpenAI/DeepSeek 约定）、`{"models":[...]}` 或裸数组，
@@ -292,10 +303,11 @@ next_offset}`；`fs_result.read` 按 Unicode 字符续读，不切断 UTF-8。
   `max_completion_tokens` 向探测到的输出上限封顶，避免上游校验上限时的
   确定性 400。
 - **运行指标**：聊天快照 `metrics` 始终产出——窗口能力 + 最近一次主线模型
-  请求的单次口径（usage、输入估算、`generation_ms`）；能力解析的模型与地址
-  成对取 run 的配置快照（切换服务地址后，旧请求的窗口按它发起时的地址解析，
-  不拿当前地址的窗口除旧请求的估算），没有主线请求时 `request` 缺省、窗口
-  能力仍然可见。`bot_model_requests.first_delta_at` 在首个非空正文流式片段
+  请求的单次口径（usage、输入估算、`generation_ms`）；能力解析的目录归属、
+  模型与地址成组取 run 的配置快照（`catalog_id` 也进快照：切 provider 后
+  旧请求的窗口按它发起时的目录身份解析；INT-133 之前落的旧快照没有该
+  字段，读取方回退 bot 当前 `catalog_id`），没有主线请求时 `request`
+  缺省、窗口能力仍然可见。`bot_model_requests.first_delta_at` 在首个非空正文流式片段
   时记录；`generation_ms` = finished − first_delta，两者都有效且为正才给出，
   否则 0（纯工具调用、失败请求视为不可用）。历史累计仍在 run 上，指标区只
   用单次口径。辅助模型（摘要/归档）的输出预算沿用「目标 − 前缀 − 附录 −
@@ -692,7 +704,7 @@ INT-134 的四条里，「输入框浮动在对话内容上方」已由 INT-126 
   与面板右上角 X 都写回该 store，刷新后沿用；移动 Sheet 仍不持久化。
   右栏收起时中栏自然拿满宽度，不再需要每次进页面手动关掉。
 
-## 对话风格、过程折叠与人设模板（INT-122）
+## 对话风格、过程折叠与人设模板（INT-122，默认人设部分已被 INT-133 取代）
 
 线上观察（v0.1.57 后的真实对话）：用户一条约 20 字，机器人最终回复平均
 1000～2000 字；每轮先发 2～4 段过程旁白；把「运行时只发了上下文提示」这类
@@ -730,18 +742,56 @@ INT-134 的四条里，「输入框浮动在对话内容上方」已由 INT-126 
   成一行「过程」入口（默认收起、组件本地 state、不持久化），展开后是 muted
   小字 Markdown；工具卡与确认卡在折叠之外始终可见——确认卡是用户唯一的批准
   入口。没有 `tool_calls` 的最终回复仍是正常气泡，流式草稿不折叠。
-- **人设默认模板**（`web/src/components/bots/bot-form-dialog.tsx` 的
-  `DEFAULT_PERSONA_PROMPT`）：新建机器人预填「简短、口语化、先给结论、
-  1～3 句」的模板，引导用户改成自己的要求；编辑回填已存人设，用户清空后
-  保存就是空人设，不强制补回模板。
+- **人设不再预填**（`web/src/components/bots/bot-form-dialog.tsx`）：INT-133 起
+  默认说话方式由服务端系统自动注入，新建机器人的人设输入框留空，只有占位
+  文案说明默认语气（篇幅跟信息量匹配、先给结论、只在需要时用标题和表格）；
+  人设改为「追加、可以覆盖默认语气」的补充，编辑回填已存值，清空即保存为空。
 - **注意**：固定前缀体积对提示词文案敏感，INT-102 的压缩测试用固定窗口标定
   种子内容。INT-122 的风格段把窗口从 8000 提到 8400；INT-123 的 v7 提示词/
   工具集变长（规则 8 补任务小状态、fs_schedule 扩到 10 动作）后再次重定标：
   压缩测试窗口 9500、压缩前置检查窗口 6800（触发阈值 5100）。压缩前置检查的
-  固定前缀按 bytes/3.5 统一估算：系统提示 5307 字节 + 工具集 schema 15922 字节
-  ≈ 6.1k token（工具集的 `ToolsTokensEstimate` 展示字段另按 chars/4 记约 3980），
-  9500 窗口下余量约 700 token。断言语义不变；再改提示词文案或工具集后需要重新
-  核对这批窗口余量。
+  固定前缀按 bytes/3.5 统一估算：系统提示 4855 字节（INT-133 收紧默认人设后
+  由 5307 降到 4855）+ 工具集 schema 15922 字节 ≈ 5.9k token（工具集的
+  `ToolsTokensEstimate` 展示字段另按 chars/4 记约 3980），9500 窗口下余量约
+  900 token。断言语义不变；再改提示词文案或工具集后需要重新核对这批窗口余量。
+
+## 默认人设、告知语义与风格升级压缩（INT-133）
+
+线上观察（v0.1.58 的 qnap-nas 机器人）：系统提示词已含 INT-122 的对话风格段，
+但升级后 12 条回复平均 419 字，多条用 `##` 标题 + 表格（最长约 2000 字），
+出现工具调用前的旁白，5 条长回复里 4 条以「要我跑吗/要我改吗」结尾，还有
+自我表功段落；`toolset_updated` 升级通知还诱导出一篇长复盘。归因是：平台规则
+8/9/13 的「告知/汇报」与风格段冲突，风格段排在最后且口气偏软；该机器人从未
+压缩，245+ 条长篇 Markdown 历史留在上下文里，模型在模仿自己的历史回复。
+
+- **默认人设前置**（`bot_prompt.go` 的 `botIdentityRules`）：系统自动注入、
+  不需要用户配置。拼装顺序改为 身份与说话方式（默认人设）→ 平台规则 →
+  用户人设（追加，可以覆盖默认语气）。默认人设只写 6 条原则、不写反例：
+  篇幅跟信息量匹配、先给结论、只有内容确实需要时才用标题和表格、只在需要
+  用户决策时提问、调用工具前不讲旁白、不自我表功。旧 `botPlatformStyleRules`
+  （INT-122 的长清单）已删除，它的存活语义由这 6 条原则承载。
+- **告知语义收敛**：平台规则 3/8/9/13 的「汇报/告知/告诉用户」统一改为
+  「简要说明结果」，新增规则 14 声明「工具集与平台升级通知属于内部信息，
+  不需要向用户转述，也不需要逐项验证」；`tellToolsetTx` 写入 lifecycle
+  通知时也在 note 前加同样的内部信息标注。
+- **风格升级的一次性压缩**：`botStylePromptVersion` 是最新一次「说话方式」
+  变化的版本号（当前 9）。待压缩状态由持久水位 `bots.style_compaction_version`
+  表达（不是内存布尔，跨激活提交与进程重启都不丢）：存量行 AutoMigrate
+  后默认 0 = 待压缩，新建机器人直接写当前版本（没有旧风格历史要收）。
+  主线 run 在压缩决策处读到水位低于 `botStylePromptVersion` 时，即使未达
+  阈值也强制走一轮压缩（reason=`style_upgrade`，`model.BotCompactionStyle`），
+  把旧风格的长回复收进摘要，避免模型继续模仿历史——压缩计划的摘要闸门对
+  `style_upgrade` 同样放开：只要安全切点存在就发摘要请求，不因「折叠后已
+  低于目标」跳过（不可达/无净缩减仍按非致命路径记录，不套阈值路径的硬
+  失败）。只有 `style_upgrade` 这一种 reason 的尝试会把水位 CAS
+  推进到当前版本（published / no_gain / 失败都消费）；阈值与 `context_limit`
+  压缩不消费——阈值周期可能是 fold-only（历史里只有大工具结果被折叠、旧
+  风格的长 assistant 回复仍留在投影里），提前消费会让后续 run 再也不做风格
+  摘要。风格压缩失败不阻塞对话、也不在后续 run 重复尝试。schedule run 完全
+  不读不写这个水位——升级后先跑定时任务不会把主线的一次性资格偷走。不提供
+  「开新对话」入口。
+- **提示词文案体积**：默认人设 + 平台规则合计 4855 字节（v8 时代 5307），
+  固定前缀 4855 + 工具集 schema 15922 ≈ 20777 字节 ≈ 5.9k token。
 
 ## 机器人列表最近消息预览（INT-125）
 
@@ -783,7 +833,8 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   展开一类的高度变化）+ 输入框 `mt-auto` 贴底；未选机器人时是「从左侧选择
   一个机器人」空状态。
 - **右栏**（`bot-detail-panel.tsx`，纯展示）：身份 + 「编辑」「授权管理」+ 定时任务
-  （默认展开，只读 + 启停）+ 配置摘要（模型/地址/Key 末四位/窗口/创建时间）
+  （默认展开，只读 + 启停）+ 配置摘要（提供商/模型/Key 末四位/窗口/创建时间；
+  INT-133 起不再是「模型/地址/Key」，地址属于提供商）
   + 删除入口；桌面由可隐藏的 `aside` 承载，移动端由右侧 `Sheet` 承载（带
   sr-only `SheetTitle`，辅助技术拿得到名字），`onHide` 由宿主决定语义
   （隐藏右栏 / 关闭 Sheet）。两个宿主各挂一份展示面板，但编辑/授权/删除/

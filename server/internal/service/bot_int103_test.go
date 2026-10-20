@@ -243,10 +243,12 @@ func TestBotScheduleDispatchFreezesConfigSnapshot(t *testing.T) {
 		t.Fatalf("快照应冻结派发时的密钥密文")
 	}
 
-	// 派发后、执行前编辑机器人：这次运行仍按快照执行（执行槽载入时即使
-	// 读到编辑后的机器人，快照值优先）。
+	// 派发后、执行前编辑机器人（换 provider + 换模型）：这次运行仍按快照执行
+	// （执行槽载入时即使读到编辑后的机器人，快照值优先）。地址在 provider 上
+	// （INT-133），这里新建一条指向不可达地址的 provider 并把 bot 的引用切过去。
+	editedProviderID := env.createProviderAt(t, userID, "http://edited.invalid", "sk-edited-0000")
 	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
-		"model": "edited-model", "base_url": "http://edited.invalid",
+		"model": "edited-model", "provider_id": editedProviderID,
 	}).Error; err != nil {
 		t.Fatalf("edit bot: %v", err)
 	}
@@ -1238,12 +1240,14 @@ func TestBotScheduleFrozenCredentialPairing(t *testing.T) {
 		t.Fatalf("seed run: %v", err)
 	}
 
-	// 派发之后轮换密钥、换地址：新密钥不得发往旧地址。
-	if err := env.db.Model(&model.Bot{}).Where("id = ?", bot.ID).Updates(map[string]interface{}{
-		"api_key_encrypted": []byte("rotated-cipher-not-decryptable"),
-		"base_url":          "http://edited.invalid/v1",
-	}).Error; err != nil {
-		t.Fatalf("rotate bot: %v", err)
+	// 派发之后轮换 provider 密钥、换地址（地址与密钥都在 provider 行上，
+	// INT-133）：新密钥不得发往旧地址，run 仍按派发时成对冻结的快照执行。
+	if err := env.db.Model(&model.AIProvider{}).Where("id = ?", botRow.ProviderID).
+		Updates(map[string]interface{}{
+			"api_key_encrypted": []byte("rotated-cipher-not-decryptable"),
+			"base_url":          "http://edited.invalid/v1",
+		}).Error; err != nil {
+		t.Fatalf("rotate provider: %v", err)
 	}
 	env.bots.wakeScheduleRun(bot.ID, run.ID)
 	done := waitForScheduleRunFinished(t, env, run.ID)

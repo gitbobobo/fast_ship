@@ -143,13 +143,25 @@ const PREFIX_KEYS: [string, ProviderIconKey][] = [
   ["muse", "muse"],
 ];
 
+// models.dev 目录 id → 内置图标键：只补品牌相同但 id 与前缀规则对不上的
+// 条目（anthropic→claude、xai→grok）；openai、opencode 等由前缀规则覆盖。
+// 目录里没有对应图标的提供商照旧回落通用 glyph。
+const CATALOG_ID_ICONS: Record<string, ProviderIconKey> = {
+  anthropic: "claude",
+  xai: "grok",
+  azure: "codex",
+  "azure-openai": "codex",
+};
+
 /**
  * 把 provider 实例 ID（如 `claudeAgent`、`acpRegistry_devin`、`codex_work`）
- * 归一到内置图标键；ACP 接入的实例在这里一律回落通用 `acp`，专属图标由
- * `resolveProviderIcon` 从注册表图标表里取。
+ * 或 models.dev 目录 id 归一到内置图标键；ACP 接入的实例在这里一律回落
+ * 通用 `acp`，专属图标由 `resolveProviderIcon` 从注册表图标表里取。
  */
 export function providerIconKey(instanceId: string): ProviderIconKey | undefined {
-  const name = /^[a-z]+/.exec(instanceId.trim().toLowerCase())?.[0] ?? "";
+  const id = instanceId.trim().toLowerCase();
+  if (CATALOG_ID_ICONS[id]) return CATALOG_ID_ICONS[id];
+  const name = /^[a-z]+/.exec(id)?.[0] ?? "";
   if (name === "pi") return "pi";
   return PREFIX_KEYS.find(([prefix]) => name.startsWith(prefix))?.[1];
 }
