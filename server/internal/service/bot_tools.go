@@ -1184,8 +1184,12 @@ var botActionRules = map[string]botActionRule{
 	"fs_schedule/list":   {Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/create": {Required: req("name", "cron", "instruction"), Forbidden: []string{"task_id", "dry_run", "state"}},
 	"fs_schedule/update": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/delete": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
-	"fs_schedule/runs":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	// delete 与 run/enable 同一口径：执行器只按 task_id 删，配置字段不生效，
+	// 放行会让确认卡的原始参数与审计账本出现一段从未生效的「指令」。
+	"fs_schedule/delete": {Required: req("task_id"), Forbidden: []string{
+		"dry_run", "state", "name", "cron", "timezone", "instruction", "model", "needs_report",
+	}},
+	"fs_schedule/runs": {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/run": {Required: req("task_id"), Forbidden: []string{
 		"state", "name", "cron", "timezone", "instruction", "model", "needs_report",
 	}},

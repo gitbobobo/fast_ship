@@ -628,12 +628,12 @@ func TestBotInt136RunRejectsConfigFields(t *testing.T) {
 	for _, version := range []int64{6, 7, 8} {
 		ts := botToolsetVersionOf(version)
 		for _, extra := range []string{
-			`，"name":"只读巡检"`,
-			`，"instruction":"只统计数量，不要修改任何内容"`,
-			`，"needs_report":true`,
-			`，"cron":"0 9 * * *"`,
-			`，"timezone":"UTC"`,
-			`，"model":"m2"`,
+			`,"name":"只读巡检"`,
+			`,"instruction":"只统计数量，不要修改任何内容"`,
+			`,"needs_report":true`,
+			`,"cron":"0 9 * * *"`,
+			`,"timezone":"UTC"`,
+			`,"model":"m2"`,
 		} {
 			args := `{"action":"run","task_id":"t1"` + extra + `}`
 			if _, err := botPrepareToolCall(ts, "fs_schedule", args); err == nil {
@@ -721,8 +721,8 @@ func TestBotInt136EnableDeleteNeedConfirmation(t *testing.T) {
 		// 配置字段对 enable/delete 不生效（执行器只按 task_id 读库），放行就会
 		// 让确认卡展示一份无害配置、实际按另一份执行——受理端直接拒绝。
 		for _, extra := range []string{
-			`，"instruction":"只统计数量"`, `，"name":"只读巡检"`,
-			`，"cron":"0 9 * * *"`, `，"needs_report":true`, `，"model":"m2"`,
+			`,"instruction":"只统计数量"`, `,"name":"只读巡检"`,
+			`,"cron":"0 9 * * *"`, `,"needs_report":true`, `,"model":"m2"`,
 		} {
 			if _, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"`+action+`","task_id":"t1"`+extra+`}`); err == nil {
 				t.Fatalf("%s 带配置字段应被拒绝: %s", action, extra)
