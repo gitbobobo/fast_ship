@@ -20,15 +20,16 @@ import (
 var _ githubapi.GitHubClient = (*Fake)(nil)
 
 type Fake struct {
-	mu           sync.Mutex
-	prs          map[string]map[int]*githubapi.PullRequest // repo -> number -> PR
-	comments     map[string]map[int][]fakeComment          // repo -> number -> issue comments
-	reviews      map[string][]fakeComment                  // repo -> review comments
-	statuses     []fakeStatus                              // CreateCommitStatus 记录（提交序）
-	reviewInputs []githubapi.ReviewInput                   // SubmitReview 的完整入参
-	repoErrs     map[string]error                          // repo -> GetRepository 注入的错误（nil=可访问）
-	nextID       int64
-	diffText     string
+	mu               sync.Mutex
+	prs              map[string]map[int]*githubapi.PullRequest // repo -> number -> PR
+	comments         map[string]map[int][]fakeComment          // repo -> number -> issue comments
+	reviews          map[string][]fakeComment                  // repo -> review comments
+	statuses         []fakeStatus                              // CreateCommitStatus 记录（提交序）
+	reviewInputs     []githubapi.ReviewInput                   // SubmitReview 的完整入参
+	submittedReviews []githubapi.ReviewSummary                 // 已提交 review（对账用）
+	repoErrs         map[string]error                          // repo -> GetRepository 注入的错误（nil=可访问）
+	nextID           int64
+	diffText         string
 
 	// InstallationID ResolveInstallation 返回的固定安装 id（默认 1）；
 	// 置 <=0 表示不支持解析（返回错误）。
@@ -311,7 +312,18 @@ func (f *Fake) SubmitReview(ctx context.Context, installationID int64, repoFullN
 	defer f.mu.Unlock()
 	f.reviewInputs = append(f.reviewInputs, in)
 	f.nextID++
+	f.submittedReviews = append(f.submittedReviews, githubapi.ReviewSummary{
+		ID: f.nextID, CommitID: in.CommitID, Body: in.Body, State: in.Event, CreatedAt: time.Now().UTC(),
+	})
 	return f.nextID, nil
+}
+
+func (f *Fake) ListReviews(_ context.Context, _ int64, _ string, _ int) ([]githubapi.ReviewSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]githubapi.ReviewSummary, len(f.submittedReviews))
+	copy(out, f.submittedReviews)
+	return out, nil
 }
 
 func (f *Fake) CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error {

@@ -36,6 +36,8 @@ type GitHubClient interface {
 	CreatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (commentID int64, err error)
 	UpdatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error
 	// review
+	// ListReviews 列出 PR 上已提交的 review（对账用；每页 100，最多 10 页）。
+	ListReviews(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewSummary, error)
 	// SubmitReview 返回创建的 review id（事件 COMMENT 时才有行内评论落点）。
 	SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in ReviewInput) (reviewID int64, err error)
 	// commit status（INT-135）：POST /repos/{o}/{r}/statuses/{sha}；
@@ -424,6 +426,43 @@ func (c *restClient) SubmitReview(ctx context.Context, installationID int64, rep
 		return 0, err
 	}
 	return wire.ID, nil
+}
+
+// ListReviews 列出 PR 已有的 review：提交成功后响应丢失时，下一次同步据此
+// 认定 review 已存在，避免重复提交同一批行内评论。
+func (c *restClient) ListReviews(ctx context.Context, installationID int64, repoFullName string, number int) ([]ReviewSummary, error) {
+	owner, name, err := splitRepo(repoFullName)
+	if err != nil {
+		return nil, err
+	}
+	var out []ReviewSummary
+	for page := 1; page <= reviewCommentMaxPages; page++ {
+		var wire []struct {
+			ID          int64     `json:"id"`
+			CommitID    string    `json:"commit_id"`
+			Body        string    `json:"body"`
+			State       string    `json:"state"`
+			SubmittedAt time.Time `json:"submitted_at"`
+		}
+		err = c.withToken(ctx, installationID, func(bearer string) error {
+			return c.h.doJSON(ctx, http.MethodGet,
+				fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews?per_page=%d&page=%d",
+					owner, name, number, reviewCommentPageSize, page),
+				bearer, nil, &wire)
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, w := range wire {
+			out = append(out, ReviewSummary{
+				ID: w.ID, CommitID: w.CommitID, Body: w.Body, State: w.State, CreatedAt: w.SubmittedAt,
+			})
+		}
+		if len(wire) < reviewCommentPageSize {
+			break
+		}
+	}
+	return out, nil
 }
 
 // CreateCommitStatus 提交 commit status（INT-135 审查状态输出）。

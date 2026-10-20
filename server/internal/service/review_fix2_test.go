@@ -290,12 +290,14 @@ func TestReviewCleanupCancelledNoDelete(t *testing.T) {
 
 	// superseded 取消：派发已起步但 launch 未确认（无 dispatched_at/路径）。
 	run := e.seedRun(t, repo, 34, "sha-cx", model.ReviewRunCancelled, now)
+	// 启动结果未确认的运行现在也会先进归档阶段（可能已建成线程），归档完成后
+	// 才轮到工作区回收：这里直接给 archived_at 模拟归档已完成。
 	e.svc.db.Model(run).Updates(map[string]any{
-		"dispatch_started_at": now, "finished_at": now,
+		"dispatch_started_at": now, "finished_at": now, "archived_at": now,
 		"error_code": "superseded", "environment_id": env.ID,
 	})
-	run.DispatchStartedAt, run.FinishedAt, run.ErrorCode, run.EnvironmentID =
-		&now, &now, "superseded", env.ID
+	run.DispatchStartedAt, run.FinishedAt, run.ArchivedAt, run.ErrorCode, run.EnvironmentID =
+		&now, &now, &now, "superseded", env.ID
 
 	review.cleanupRunWorktree(run, now)
 

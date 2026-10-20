@@ -21,15 +21,18 @@ import (
 // reviewWorktreeMaxTries 归档等回收动作的有限重试次数（tick 数）。
 const reviewWorktreeMaxTries = 3
 
-// archiveRuns 调度阶段：挑终态、dispatched_at 非空、archived_at 为空的运行
-// 逐条归档（代码与视觉运行都归档——视觉只归档，无工作区）。
+// archiveRuns 调度阶段：挑线程「可能已建成」的终态运行逐条归档——
+// dispatch_started_at 非空即可能已发出启动，包括 dispatched_at 为空
+// （请求已发出但响应丢失、随后超时）的运行：这些线程同样需要停掉/归档，
+// 否则会永久游离。明确 dispatch_failed（请求帧未发出）的跳过。
 func (s *ReviewService) archiveRuns(now time.Time) {
 	if s.t3 == nil {
 		return
 	}
 	var runs []model.ReviewRun
 	if err := s.db.
-		Where("dispatched_at IS NOT NULL AND archived_at IS NULL AND status IN ?",
+		Where(`dispatch_started_at IS NOT NULL AND archived_at IS NULL AND status IN ?
+			AND error_code <> 'dispatch_failed'`,
 			[]model.ReviewRunStatus{model.ReviewRunCompleted, model.ReviewRunFailed,
 				model.ReviewRunTimedOut, model.ReviewRunCancelled}).
 		Order("finished_at ASC").Limit(reviewStageBatch).Find(&runs).Error; err != nil {
@@ -48,6 +51,13 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// 启动结果未确认（dispatched_at 为空）但可能已建成线程：先尽力停掉。
+	if run.DispatchedAt == nil {
+		if _, err := s.t3.StopThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
+			s.logger.Info("未确认启动的运行停止线程未成功（继续尝试归档）",
+				zap.String("run", run.ID), zap.Error(err))
+		}
+	}
 	if err := s.t3.ArchiveThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err == nil {
 		s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
 			Updates(map[string]any{"archived_at": now, "updated_at": now})
@@ -117,9 +127,9 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 		finish(model.ReviewWorktreeRemoved, "", false)
 		return
 	}
-	// 归档前置：线程已确认但归档未完成时等 archiveRuns 阶段；归档最终失败
-	// 已由该阶段把本行置 failed，不会走到这里。
-	if run.DispatchedAt != nil && run.ArchivedAt == nil {
+	// 归档前置：线程可能已建成的运行要等 archiveRuns 阶段归档完成；归档最终
+	// 失败已由该阶段把本行置 failed，不会走到这里。
+	if run.ArchivedAt == nil {
 		return
 	}
 	// worktree_path 为空：不再差集猜路径——无法证明归属，不删任何路径。

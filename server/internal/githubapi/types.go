@@ -54,6 +54,16 @@ type ReviewInlineComment struct {
 	Body string
 }
 
+// ReviewSummary 已提交的 PR review（用于对账：POST 成功但响应丢失时，
+// 下一次同步能认出这条 review 已经存在）。
+type ReviewSummary struct {
+	ID        int64
+	CommitID  string
+	Body      string
+	State     string
+	CreatedAt time.Time
+}
+
 // ReviewInput 一次 review 提交。Event ∈ COMMENT | APPROVE | REQUEST_CHANGES；
 // CommitID 由调用方取运行绑定的 head SHA。Comments 为行内评论列表。
 type ReviewInput struct {

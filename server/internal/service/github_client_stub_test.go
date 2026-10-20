@@ -99,6 +99,10 @@ func (stubGitHubClient) SubmitReview(context.Context, int64, string, int, github
 	return 0, stubErr("SubmitReview")
 }
 
+func (stubGitHubClient) ListReviews(context.Context, int64, string, int) ([]githubapi.ReviewSummary, error) {
+	return nil, stubErr("ListReviews")
+}
+
 func (stubGitHubClient) CreateCommitStatus(context.Context, int64, string, string, string, string, string, string) error {
 	return stubErr("CreateCommitStatus")
 }

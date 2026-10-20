@@ -195,7 +195,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 		}
 		ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"code_status": codeState})
 		if err != nil {
-			return errs.ErrInternal
+			return errs.New(errs.ErrInternal.Code, "更新代码审查状态失败: "+err.Error())
 		}
 		if !ok {
 			return nil
@@ -267,7 +267,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	// 3. 代码顶层评论（含视觉待办/遗留提示）。写之前复核 epoch：同步期间
 	// 有新 SHA 进来时，旧快照的评论与行内 review 都不应再发。
 	if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
-		return errs.ErrInternal
+		return errs.New(errs.ErrInternal.Code, "复核同步 epoch 失败: "+err.Error())
 	} else if !ok {
 		return nil
 	}
@@ -278,7 +278,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 
 	// 4. 行内 review：每个 completed 且未 posted 的代码运行，有效行发 review。
 	if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
-		return errs.ErrInternal
+		return errs.New(errs.ErrInternal.Code, "复核同步 epoch 失败: "+err.Error())
 	} else if !ok {
 		return nil
 	}
@@ -594,6 +594,19 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 	if len(pending) == 0 {
 		return nil
 	}
+	// 对账：上一轮可能已经成功提交 review、但响应丢失（posted_at 没写回）。
+	// 先拉一次已有 review，命中「同 commit + 同 summary」就认领为已发布，
+	// 避免同一批行内意见每轮重复提交。
+	existing, err := client.ListReviews(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
+	if err != nil {
+		return errs.New(errs.ErrGitHubAPI.Code, "读取 review 列表失败: "+err.Error())
+	}
+	posted := map[string]int64{} // summary -> review id
+	for _, rev := range existing {
+		if strings.EqualFold(rev.CommitID, ledger.HeadSHA) && rev.Body != "" {
+			posted[rev.Body] = rev.ID
+		}
+	}
 	diff, err := client.GetPullRequestDiff(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
@@ -604,8 +617,8 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 		// 内存里的 codeRuns 是快照，不能据此继续发旧结论。
 		var status model.ReviewRunStatus
 		if err := s.db.Model(&model.ReviewRun{}).Where("id = ?", r.ID).
-			Pluck("status", &status).Error; err != nil {
-			return errs.ErrInternal
+			Select("status").Scan(&status).Error; err != nil {
+			return errs.New(errs.ErrInternal.Code, "复核运行状态失败: "+err.Error())
 		}
 		if status != model.ReviewRunCompleted {
 			continue
@@ -623,6 +636,11 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 					Body: fmt.Sprintf("%s：%s", f.Level, f.Body),
 				})
 			}
+		}
+		if id, ok := posted[r.Summary]; ok && r.Summary != "" {
+			s.db.Model(&model.ReviewRun{}).Where("id = ?", r.ID).
+				Updates(map[string]any{"posted_at": now, "review_id": id, "updated_at": now})
+			continue
 		}
 		var reviewID int64
 		if len(comments) > 0 {

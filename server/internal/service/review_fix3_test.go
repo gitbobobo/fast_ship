@@ -26,7 +26,9 @@ func (e *reviewEngineEnv) seedRunWithFindings(t *testing.T, repo string, pr int,
 	t.Helper()
 	run := e.seedRun(t, repo, pr, sha, model.ReviewRunCompleted, now)
 	result := `{"summary":"有发现","findings":[{"level":"P1","file":"a","line":2,"body":"问题"}],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`
-	if err := e.svc.db.Model(run).Update("result_json", result).Error; err != nil {
+	if err := e.svc.db.Model(run).Updates(map[string]any{
+		"result_json": result, "summary": "有发现",
+	}).Error; err != nil {
 		t.Fatalf("update result: %v", err)
 	}
 	return run
@@ -585,5 +587,72 @@ func TestReviewInlineReviewRechecksEpoch(t *testing.T) {
 
 	if got := e.fake.ReviewEvents(repo); len(got) != 0 {
 		t.Fatalf("epoch 推进后不应提交行内 review，events = %v", got)
+	}
+}
+
+// 启动响应丢失（dispatched_at 为空）后超时：线程可能已建成，归档阶段要
+// 先停线程再归档，并写入 archived_at。
+func TestArchiveRunsStopsUnconfirmedLaunch(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-unconf")
+	run := e.seedRun(t, repo, 71, "sha-u", model.ReviewRunTimedOut, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"environment_id": env.ID, "dispatch_started_at": now, "dispatched_at": nil,
+	})
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+	review.archiveRuns(now)
+
+	if len(t3.stopped) != 1 || t3.stopped[0] != run.ThreadID {
+		t.Fatalf("stopped = %v, want [%s]", t3.stopped, run.ThreadID)
+	}
+	if len(t3.archived) != 1 || t3.archived[0] != run.ThreadID {
+		t.Fatalf("archived = %v, want [%s]", t3.archived, run.ThreadID)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.ArchivedAt == nil {
+		t.Fatal("归档成功应写入 archived_at")
+	}
+}
+
+// SubmitReview 成功但响应丢失：下一轮同步对账到同 commit+summary 的 review，
+// 不再重复提交行内意见。
+func TestReviewInlineReviewReconcilesLostResponse(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	e.fake.SetPR(repo, 72, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 72, HeadSHA: "sha-r",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	e.fake.SetDiff("@@ -1,1 +1,2 @@\n a\n+b\n")
+	run := e.seedRunWithFindings(t, repo, 72, "sha-r", now)
+	// 模拟上一轮已提交同一 review，但 posted_at 没写回。
+	if _, err := e.fake.SubmitReview(context.Background(), 1, repo, 72, githubapi.ReviewInput{
+		Event: "COMMENT", Body: "有发现", CommitID: "sha-r",
+		Comments: []githubapi.ReviewInlineComment{{Path: "a", Line: 2, Side: "RIGHT", Body: "P1：问题"}},
+	}); err != nil {
+		t.Fatalf("seed review: %v", err)
+	}
+	e.svc.db.Model(run).Update("posted_at", nil)
+	e.enableReview(t)
+	e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 72, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-r", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	})
+
+	e.review.syncPendingPRs(now)
+
+	if got := len(e.fake.ReviewEvents(repo)); got != 1 {
+		t.Fatalf("reviews = %d, want 1（对账后不应重复提交）", got)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.PostedAt == nil || after.ReviewID == 0 {
+		t.Fatalf("posted_at/review_id = %v/%d, want 已认领", after.PostedAt, after.ReviewID)
 	}
 }
