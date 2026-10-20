@@ -608,6 +608,12 @@ func runBootMigrations(db *gorm.DB, fileStorage storage.Storage, logger *zap.Log
 	if err := migrateProjectGitHubTokens(db, encryptionKey, logger); err != nil {
 		return fmt.Errorf("项目 GitHub Token 迁移失败: %w", err)
 	}
+
+	// 项目代码仓库列（INT-140）：AutoMigrate 给存量库加出的两列是 NULL，
+	// 回填空串以保持「空 = 与公开仓库相同」的不变量（幂等）。
+	if err := backfillProjectCodeRepo(db, logger); err != nil {
+		return fmt.Errorf("项目代码仓库列回填失败: %w", err)
+	}
 	return nil
 }
 

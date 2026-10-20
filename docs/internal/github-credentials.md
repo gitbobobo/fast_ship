@@ -27,6 +27,10 @@ Token（App 安装令牌承担审查的 GitHub 写），配了公开仓库 Token
 owner/repo，与公开仓库大小写不敏感相同则归一为空串（空 = 同公开仓库）；
 PR 审查链路的仓库判定细节见 docs/internal/reviews.md。
 
+存量库升级：AutoMigrate 给已有 `projects` 行加出的 `code_github_owner/code_github_repo`
+是 NULL，启动时 `backfillProjectCodeRepo` 会把它们回填成空串（幂等），保持
+「空 = 与公开仓库相同」不再依赖驱动的 NULL 折零行为。
+
 两个用途**互不兜底**：未配公开仓库 Token 不做 Issue 同步（后台跳过、手动同步与 GitHub 写返回 40006），不能借代码仓库 Token；未配代码仓库 Token 时匿名读公共 PR，不借公开仓库 Token。凭证解密失败/引用行缺失一律 50000 明确报错，不换另一把、不降级匿名。
 
 ## 模块划分
