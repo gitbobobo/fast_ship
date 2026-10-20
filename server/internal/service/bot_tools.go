@@ -1198,7 +1198,11 @@ var botActionRules = map[string]botActionRule{
 	"fs_schedule/enable": {Required: req("task_id"), Forbidden: []string{
 		"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
 	}},
-	"fs_schedule/disable":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state", "limit", "offset"}},
+	// disable 与 run/enable/delete 同一口径：执行器只按 task_id 改开关，其它配置
+	// 字段一律拒绝（放行会被静默丢弃，模型却以为改成功了）。
+	"fs_schedule/disable": {Required: req("task_id"), Forbidden: []string{
+		"dry_run", "state", "limit", "offset", "name", "cron", "timezone", "instruction", "model", "needs_report",
+	}},
 	"fs_schedule/state_get": {Forbidden: []string{"task_id", "dry_run", "state", "limit", "offset"}},
 	// state_set 只收 state（其余字段——含分页——一律视为误用）。
 	"fs_schedule/state_set": {Forbidden: []string{"task_id", "dry_run", "limit", "offset"}},

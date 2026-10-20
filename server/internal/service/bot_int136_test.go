@@ -904,6 +904,12 @@ func TestBotInt136PagingParamsRejectedWhereIgnored(t *testing.T) {
 			t.Fatalf("%s 带 offset 应被拒绝: %s", action, args)
 		}
 	}
+	// disable 也拒绝配置字段（执行器只按 task_id 改开关）。
+	for _, field := range []string{`"name":"n"`, `"cron":"0 9 * * *"`, `"instruction":"i"`, `"model":"m"`, `"needs_report":true`} {
+		if _, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"disable","task_id":"t1",`+field+`}`); err == nil {
+			t.Fatalf("disable 带配置字段应被拒绝: %s", field)
+		}
+	}
 	// list/runs 的分页仍然有效。
 	if _, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"list","limit":10,"offset":5}`); err != nil {
 		t.Fatalf("list 应接受分页: %v", err)
