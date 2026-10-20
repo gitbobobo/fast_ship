@@ -25,6 +25,7 @@ type fakeReviewT3 struct {
 	listQueue  [][]string
 	stopped    []string
 	removed    []string
+	removedCwd []string
 	removeErr  error
 	archived   []string
 	archiveErr error
@@ -54,8 +55,9 @@ func (f *fakeReviewT3) ListWorktreePaths(context.Context, string, string, string
 	return f.worktrees, f.listErr
 }
 
-func (f *fakeReviewT3) RemoveWorktree(_ context.Context, _, _, _, path string, _ bool) error {
+func (f *fakeReviewT3) RemoveWorktree(_ context.Context, _, _, cwd, path string, _ bool) error {
 	f.removed = append(f.removed, path)
+	f.removedCwd = append(f.removedCwd, cwd)
 	return f.removeErr
 }
 

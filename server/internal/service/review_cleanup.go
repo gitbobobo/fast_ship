@@ -146,15 +146,19 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 		finish(model.ReviewWorktreeFailed, "工作区归属核验未通过，未执行删除", true)
 		return
 	}
-	// 删除 worktree：cwd 用项目绑定里快照的 workspace_root。
-	binding := s.bindingFor(run)
-	if binding == nil {
-		finish(model.ReviewWorktreeFailed, "环境绑定缺失，无法定位工作区", true)
-		return
-	}
-	cwd := binding.WorkspaceRoot
+	// 删除 worktree：cwd 优先用 launch 时快照的 workspace_root——绑定之后被
+	// 删/改时，当前绑定不能代表当时的工作区根目录。
+	cwd := run.WorkspaceRoot
 	if cwd == "" {
-		cwd = binding.T3ProjectID
+		binding := s.bindingFor(run)
+		if binding == nil {
+			finish(model.ReviewWorktreeFailed, "环境绑定缺失，无法定位工作区", true)
+			return
+		}
+		cwd = binding.WorkspaceRoot
+		if cwd == "" {
+			cwd = binding.T3ProjectID
+		}
 	}
 	if err := s.t3.RemoveWorktree(ctx, run.UserID, run.EnvironmentID, cwd, path, true); err != nil {
 		finish(model.ReviewWorktreeFailed, "删除工作区失败: "+err.Error(), true)
@@ -207,12 +211,13 @@ func (s *ReviewService) CleanupBeforeProjectDelete(ctx context.Context, projectI
 			s.logger.Warn("删除项目前归档审查线程失败", zap.String("run", run.ID), zap.Error(err))
 		}
 		if run.Kind == model.ReviewKindCode && run.WorktreePath != "" {
-			binding := s.bindingFor(run)
-			cwd := ""
-			if binding != nil {
-				cwd = binding.WorkspaceRoot
-				if cwd == "" {
-					cwd = binding.T3ProjectID
+			cwd := run.WorkspaceRoot
+			if cwd == "" {
+				if binding := s.bindingFor(run); binding != nil {
+					cwd = binding.WorkspaceRoot
+					if cwd == "" {
+						cwd = binding.T3ProjectID
+					}
 				}
 			}
 			if cwd != "" {

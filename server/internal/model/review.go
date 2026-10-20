@@ -136,7 +136,10 @@ type ReviewRun struct {
 	PostedAt *time.Time `gorm:"column:posted_at" json:"posted_at,omitempty"`
 
 	// WorktreePath/State 代码审查工作区回收；视觉审查恒为 none。
-	WorktreePath  string              `gorm:"column:worktree_path;type:text" json:"worktree_path,omitempty"`
+	WorktreePath string `gorm:"column:worktree_path;type:text" json:"worktree_path,omitempty"`
+	// WorkspaceRoot launch 时项目绑定的主检出根目录快照：回收工作区要用它当
+	// cwd，绑定之后被删/改也不能用当前绑定去猜。
+	WorkspaceRoot string              `gorm:"column:workspace_root;type:text" json:"workspace_root,omitempty"`
 	WorktreeState ReviewWorktreeState `gorm:"column:worktree_state;type:text;not null;default:none" json:"worktree_state"`
 	WorktreeError string              `gorm:"column:worktree_error;type:text" json:"worktree_error,omitempty"`
 

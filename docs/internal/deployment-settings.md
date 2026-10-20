@@ -95,8 +95,8 @@ App 的四个列与 `public_url` 同表：它们都是「这套部署」的身�
 manifest 内容（`name` 里的 host 取自 `public_url`）：`hook_attributes.url = {public_url}/api/github/webhooks`、
 `redirect_url = {public_url}/settings/integrations/github/callback`、
 `setup_url = {public_url}/settings/integrations`、`public: false`、
-`default_events: [pull_request]`、权限 `pull_requests/issues/checks: write` 与
-`contents/metadata: read`。
+`default_events: [pull_request]`、权限 `pull_requests/issues/statuses: write` 与
+`contents/metadata: read`（审查结论用 commit status，不用 Checks API）。
 
 ### 读取与保存的权限分层
 

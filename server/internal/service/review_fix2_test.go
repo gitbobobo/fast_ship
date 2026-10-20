@@ -262,6 +262,9 @@ func TestReviewLaunchRunSuccess(t *testing.T) {
 	if after.WorktreePath != "/ws/wt-new" {
 		t.Fatalf("worktree_path = %q, want /ws/wt-new", after.WorktreePath)
 	}
+	if after.WorkspaceRoot != "/ws" {
+		t.Fatalf("workspace_root = %q, want /ws（launch 时快照）", after.WorkspaceRoot)
+	}
 	if after.T3ProjectID != "t3p" || after.ThreadID != threadID {
 		t.Fatalf("t3_project_id/thread_id = %q/%q", after.T3ProjectID, after.ThreadID)
 	}
@@ -423,5 +426,35 @@ func TestCleanupBeforeProjectDelete(t *testing.T) {
 	}
 	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-del" {
 		t.Fatalf("removed = %v, want [/ws/wt-del]", t3.removed)
+	}
+}
+
+// 回收用 launch 时快照的 workspace_root：绑定被删/改后仍能删对工作区。
+func TestCleanupUsesLaunchWorkspaceRoot(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := strings.ToLower(e.project.GithubOwner + "/" + e.project.GithubRepo)
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-ws")
+	binding := createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	finished := now.Add(-time.Minute)
+	run := e.seedRun(t, repo, 61, "sha-ws", model.ReviewRunCompleted, finished)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"environment_id": env.ID, "dispatch_started_at": finished, "dispatched_at": finished,
+		"worktree_path": "/ws/wt-snap", "worktree_state": model.ReviewWorktreeNone,
+		"workspace_root": "/launch-time-root", "archived_at": finished,
+	})
+	// 绑定在回收前被删掉（例如用户改了项目绑定）。
+	e.svc.db.Where("project_id = ? AND environment_id = ?", e.project.ID, binding.EnvironmentID).
+		Delete(&model.ProjectT3Binding{})
+
+	t3 := &fakeReviewT3{}
+	review := e.withT3(t3, nil, nil)
+	review.cleanupWorktrees(now)
+
+	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-snap" {
+		t.Fatalf("removed = %v, want [/ws/wt-snap]", t3.removed)
+	}
+	if len(t3.removedCwd) != 1 || t3.removedCwd[0] != "/launch-time-root" {
+		t.Fatalf("removed cwd = %v, want [/launch-time-root]", t3.removedCwd)
 	}
 }

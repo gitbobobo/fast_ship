@@ -148,10 +148,11 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	res := s.db.Model(&model.ReviewRun{}).
 		Where("id = ? AND dispatched_at IS NULL", run.ID).
 		Updates(map[string]any{
-			"dispatched_at": now,
-			"t3_project_id": binding.T3ProjectID,
-			"thread_id":     result.ThreadId,
-			"updated_at":    now,
+			"dispatched_at":  now,
+			"t3_project_id":  binding.T3ProjectID,
+			"thread_id":      result.ThreadId,
+			"workspace_root": binding.WorkspaceRoot,
+			"updated_at":     now,
 		})
 	if res.Error != nil {
 		s.logger.Error("更新审查运行派发状态失败", zap.String("run", run.ID), zap.Error(res.Error))
