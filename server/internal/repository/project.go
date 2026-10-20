@@ -190,13 +190,44 @@ func (r *ProjectRepository) Update(project *model.Project) error {
 		if res.RowsAffected > 0 {
 			if !strings.EqualFold(before.GithubOwner+"/"+before.GithubRepo,
 				project.GithubOwner+"/"+project.GithubRepo) {
+				now := time.Now().UTC()
 				if err := tx.Model(&model.ProjectReviewSettings{}).
 					Where("project_id = ?", project.ID).
 					Updates(map[string]interface{}{
 						"enabled":        false,
 						"repo_full_name": strings.ToLower(project.GithubOwner + "/" + project.GithubRepo),
-						"updated_at":     time.Now().UTC(),
+						"updated_at":     now,
 					}).Error; err != nil {
+					return err
+				}
+				// 停用后调度按 status 挑选，非终态运行会继续开线程：取消并
+				// 消费令牌、清防抖。
+				active := []model.ReviewRunStatus{
+					model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning,
+				}
+				var runIDs []string
+				if err := tx.Model(&model.ReviewRun{}).
+					Where("project_id = ? AND status IN ?", project.ID, active).
+					Pluck("id", &runIDs).Error; err != nil {
+					return err
+				}
+				if len(runIDs) > 0 {
+					if err := tx.Model(&model.ReviewRun{}).
+						Where("id IN ? AND status IN ?", runIDs, active).
+						Updates(map[string]interface{}{
+							"status": model.ReviewRunCancelled, "error_code": "repo_changed",
+							"finished_at": now, "updated_at": now,
+						}).Error; err != nil {
+						return err
+					}
+					if err := tx.Model(&model.ReviewRunToken{}).
+						Where("run_id IN ? AND consumed_at IS NULL", runIDs).
+						Update("consumed_at", now).Error; err != nil {
+						return err
+					}
+				}
+				if err := tx.Where("project_id = ?", project.ID).
+					Delete(&model.ReviewDebounce{}).Error; err != nil {
 					return err
 				}
 			}

@@ -361,3 +361,61 @@ func TestGetSettings_Prerequisites_MissingApp(t *testing.T) {
 		t.Fatalf("未配置 App 不应调用 GetRepository: %+v", fake.CallCounts())
 	}
 }
+
+// 停用审查时取消在途/排队运行并清防抖：调度只按 status 挑选，留着会继续
+// 开线程。
+func TestUpdateSettingsDisableCancelsRuns(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "disable-cancel")
+	project := createTestProject(t, svc.db, user.ID)
+	env := createT3TestEnv(t, svc.db, user.ID, "env-disable")
+	createTestT3Binding(t, svc.db, project.ID, env.ID, "t3-1")
+	now := time.Now().UTC()
+
+	queued := &model.ReviewRun{
+		ID: uuid.NewString(), UserID: user.ID, ProjectID: project.ID,
+		Kind: model.ReviewKindCode, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha",
+		RoundNumber: 1, EnvironmentID: env.ID, InstanceID: "i", Model: "m",
+		ThreadID: uuid.NewString(), LaunchCommandID: uuid.NewString(), InitialMessageID: uuid.NewString(),
+		Status: model.ReviewRunQueued, DeadlineAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := svc.db.Create(queued).Error; err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	if err := svc.db.Create(&model.ReviewRunToken{
+		RunID: queued.ID, TokenHash: "hash", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}).Error; err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if err := svc.db.Create(&model.ReviewDebounce{
+		ProjectID: project.ID, RepoFullName: "o/r", PRNumber: 3, HeadSHA: "sha2",
+		Action: "synchronize", FireAt: now.Add(time.Hour), UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed debounce: %v", err)
+	}
+
+	rs, _ := readyReviewService(t, svc)
+	input := validSettingsInput(env.ID)
+	input.Enabled = false
+	if _, err := rs.UpdateSettings(context.Background(), user.ID, project.ID, input); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	var run model.ReviewRun
+	if err := svc.db.First(&run, "id = ?", queued.ID).Error; err != nil {
+		t.Fatalf("load run: %v", err)
+	}
+	if run.Status != model.ReviewRunCancelled || run.ErrorCode != "disabled" {
+		t.Fatalf("run = %s/%s, want cancelled/disabled", run.Status, run.ErrorCode)
+	}
+	var token model.ReviewRunToken
+	svc.db.First(&token, "run_id = ?", queued.ID)
+	if token.ConsumedAt == nil {
+		t.Fatal("停用后运行令牌应已消费")
+	}
+	var debounces int64
+	svc.db.Model(&model.ReviewDebounce{}).Where("project_id = ?", project.ID).Count(&debounces)
+	if debounces != 0 {
+		t.Fatalf("debounce rows = %d, want 0", debounces)
+	}
+}

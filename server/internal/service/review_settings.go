@@ -240,6 +240,13 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 				return err
 			}
 		}
+		// 停用审查时把在途/排队的运行一并取消：调度按 status 挑选，留着
+		// queued/dispatched 会在停用之后继续开线程。
+		if !row.Enabled {
+			if err := cancelProjectReviewRunsTx(tx, projectID, "disabled", now); err != nil {
+				return err
+			}
+		}
 		var existing model.ProjectReviewSettings
 		findErr := tx.Where("project_id = ?", projectID).First(&existing).Error
 		switch {
@@ -611,4 +618,34 @@ func (s *ReviewService) fillEnvironmentNames(ctx context.Context, userID string,
 			}
 		}
 	}
+}
+
+// cancelProjectReviewRunsTx 取消项目下所有非终态审查运行、消费令牌并清掉
+// 防抖行。停用审查、项目换仓库、删除项目都用这条路径。
+func cancelProjectReviewRunsTx(tx *gorm.DB, projectID, code string, now time.Time) error {
+	active := []model.ReviewRunStatus{
+		model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning,
+	}
+	var runIDs []string
+	if err := tx.Model(&model.ReviewRun{}).
+		Where("project_id = ? AND status IN ?", projectID, active).
+		Pluck("id", &runIDs).Error; err != nil {
+		return err
+	}
+	if len(runIDs) > 0 {
+		if err := tx.Model(&model.ReviewRun{}).
+			Where("id IN ? AND status IN ?", runIDs, active).
+			Updates(map[string]any{
+				"status": model.ReviewRunCancelled, "error_code": code,
+				"finished_at": now, "updated_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&model.ReviewRunToken{}).
+			Where("run_id IN ? AND consumed_at IS NULL", runIDs).
+			Update("consumed_at", now).Error; err != nil {
+			return err
+		}
+	}
+	return tx.Where("project_id = ?", projectID).Delete(&model.ReviewDebounce{}).Error
 }
