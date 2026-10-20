@@ -554,8 +554,12 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   记进 `execution_context.schedule.task_updated_at`，执行器在**自己的事务内**
   比对：期间任务被改过就返回 40001「任务在确认期间被修改，本次未执行」，让
   用户重新看一眼再决定，而不是拿旧卡执行新指令（与 fs_issue 的
-  `expected_updated_at` 同一口径）。状态写入不改 `updated_at`，所以 dedup
-  状态变化不会误伤这个比对。
+  `expected_updated_at` 同一口径）。`updated_at` 只表示配置修订：状态写入与
+  调度推进 `next_run_at` 都显式保持原值（`gorm.Expr("updated_at")`），一次
+  cron 触发不会被算成「任务被改过」。
+- **`run`/`enable`/`delete` 只收 `task_id`**：执行器按 `task_id` 读库里的任务
+  配置，模型传的 `name`/`cron`/`timezone`/`instruction`/`model`/`needs_report`
+  一概不生效，受理端直接拒绝，避免确认卡被参数遮住真正执行的那份配置。
 - **确认卡与预览**：受理时把 `{task_id,name,cron,timezone,instruction,
   needs_report,next_run_at,next_run_at_utc,effective_model}` 写进
   `execution_context.schedule`（update 是「未提供则保留原值」合并后的生效值；
@@ -570,11 +574,11 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   「始终允许」（服务端 40001，前端不展示按钮）：确认卡展示的是指令全文，
   一旦豁免，模型改写任务指令时用户看不到新指令，而任务以后每次运行都默认
   放行写操作——等于一次点击永久授权未知的指令。
-- **`run` 只收 `task_id`/`dry_run`**：执行器按 `task_id` 读库里的任务配置，
-  模型传的 `name`/`instruction`/`needs_report` 等一概不生效，因此在受理端
-  直接拒绝（`botActionRules` 的 Forbidden）——否则确认卡可以展示一份无害
-  指令、实际跑的是任务里存的另一份。确认卡的生效配置一律以服务端快照为准，
-  run 不看参数。
+- **`run` 只收 `task_id`/`dry_run`**（`enable`/`delete` 同理，只收 `task_id`）：
+  执行器按 `task_id` 读库里的任务配置，模型传的 `name`/`instruction`/
+  `needs_report` 等一概不生效，因此在受理端直接拒绝（`botActionRules` 的
+  Forbidden）——否则确认卡可以展示一份无害指令、实际跑的是任务里存的另一份。
+  确认卡的生效配置一律以服务端快照为准，这三个动作不看参数。
 - **残余风险（已知限制）**：只改 `cron` 的 update 不弹卡，能把已有任务的
   触发频率改得更密（如每分钟），叠加运行内默认放行会放大副作用；任务本身
   的创建/指令仍经过确认。若要收紧，把 `cron`/`timezone` 也纳入确认字段即可。

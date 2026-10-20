@@ -61,14 +61,16 @@ func (s *BotService) execThreadRead(ctx context.Context, call *model.BotToolCall
 		if err != nil {
 			return "", err
 		}
-		// 只透出启动器需要的项目与模型选择，不透传 T3 全量配置。
-		return botMarshalResult(map[string]interface{}{"projects": opts.Projects})
+		// 只透出启动器需要的项目与模型选择，不透传 T3 全量配置；项目标题来自
+		// 配对的 T3 服务/仓库，进围栏（INT-136）。
+		return botMarshalResult(map[string]interface{}{"projects": botFenceComposerProjects(opts.Projects, nonce)})
 	case "workspace_options":
 		opts, err := s.threads.WorkspaceOptions(ctx, userID, args.EnvID, args.ProjectID, args.Query, args.Cursor)
 		if err != nil {
 			return "", err
 		}
-		return botMarshalResult(opts)
+		// 远程 VCS 引用名与工作树路径同属仓库侧可控文本，进围栏（INT-136）。
+		return botMarshalResult(botFenceWorkspaceOptions(opts, nonce))
 	}
 	return "", errs.New(errs.ErrInvalidParams.Code, "fs_thread 不支持该读取动作")
 }
@@ -454,6 +456,47 @@ func botSlimThreadItemSummary(item *T3ThreadItem, nonce string) map[string]inter
 		out["text_preview"] = botFenceUntrusted(nonce, "thread_item_text", truncateBotRunes(item.Text, botThreadTextPreview))
 	}
 	return out
+}
+
+// botFenceComposerProjects 围栏启动器项目标题：配对 T3 服务上的项目标题是
+// 外部可写文本，模型用它选择目标项目，不能当平台指令读（INT-136）。
+func botFenceComposerProjects(projects []api.T3ComposerOptions_Projects, nonce string) []api.T3ComposerOptions_Projects {
+	if nonce == "" {
+		return projects
+	}
+	out := make([]api.T3ComposerOptions_Projects, 0, len(projects))
+	for _, p := range projects {
+		p.Title = botFenceUntrusted(nonce, "thread_project", p.Title)
+		out = append(out, p)
+	}
+	return out
+}
+
+// botFenceWorkspaceOptions 围栏工作区选项里的仓库侧文本：引用名、工作树路径
+// 与主检出路径由仓库内容决定（外部可写），模型据此选择工作区（INT-136）。
+func botFenceWorkspaceOptions(opts *T3WorkspaceOptions, nonce string) *T3WorkspaceOptions {
+	if opts == nil || nonce == "" {
+		return opts
+	}
+	out := *opts
+	out.Cwd = botFenceUntrusted(nonce, "thread_workspace", opts.Cwd)
+	if opts.RefName != nil && *opts.RefName != "" {
+		name := botFenceUntrusted(nonce, "thread_workspace", *opts.RefName)
+		out.RefName = &name
+	}
+	if len(opts.Refs) > 0 {
+		refs := make([]api.T3WorkspaceRef, 0, len(opts.Refs))
+		for _, ref := range opts.Refs {
+			ref.Name = botFenceUntrusted(nonce, "thread_workspace", ref.Name)
+			if ref.WorktreePath != nil && *ref.WorktreePath != "" {
+				path := botFenceUntrusted(nonce, "thread_workspace", *ref.WorktreePath)
+				ref.WorktreePath = &path
+			}
+			refs = append(refs, ref)
+		}
+		out.Refs = refs
+	}
+	return &out
 }
 
 func truncateBotRunes(s string, limit int) string {

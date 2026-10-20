@@ -1884,3 +1884,41 @@ func TestBotScheduleSkippedEventPublishesToSubscribers(t *testing.T) {
 		t.Fatalf("跳过事件追加后应发布一次事件通知")
 	}
 }
+
+// 调度推进不是配置变更（INT-136）：确认卡用 updated_at 当任务修订水位，
+// cron 触发推进 next_run_at 时若顺带改写 updated_at，待确认的 run/enable/delete
+// 卡片会被误判成「任务在确认期间被修改」。
+func TestBotScheduleAdvanceKeepsUpdatedAt(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "[[SILENT]]"})
+	userID := createBotTestUser(t, env.db, "schedadv")
+	bot := env.createBot(t, userID)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) { tk.NeedsReport = false })
+
+	before, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("load task: %v", err)
+	}
+	due := time.Now().UTC().Add(-3 * time.Second)
+	env.db.Model(&model.BotScheduleTask{}).Where("id = ?", task.ID).Update("next_run_at", due)
+	before, err = env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	env.bots.scheduleTick(time.Now().UTC())
+	var run model.BotRun
+	if err := env.db.Where("schedule_task_id = ?", task.ID).Order("created_at ASC").First(&run).Error; err != nil {
+		t.Fatalf("dispatch should create run: %v", err)
+	}
+	waitForScheduleRunFinished(t, env, run.ID)
+
+	after, err := env.bots.schedTasks.FindByID(task.ID)
+	if err != nil {
+		t.Fatalf("reload after: %v", err)
+	}
+	if after.NextRunAt == nil || before.NextRunAt == nil || !after.NextRunAt.After(*before.NextRunAt) {
+		t.Fatalf("next_run_at 应被推进: %v -> %v", before.NextRunAt, after.NextRunAt)
+	}
+	if !after.UpdatedAt.Equal(before.UpdatedAt) {
+		t.Fatalf("调度推进不应改写 updated_at: %v -> %v", before.UpdatedAt, after.UpdatedAt)
+	}
+}

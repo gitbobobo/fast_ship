@@ -718,6 +718,16 @@ func TestBotInt136EnableDeleteNeedConfirmation(t *testing.T) {
 		if !prepared.RequiresConfirmation || prepared.Mode != model.BotExecutionAsync {
 			t.Fatalf("%s 应判为需确认异步: %+v", action, prepared)
 		}
+		// 配置字段对 enable/delete 不生效（执行器只按 task_id 读库），放行就会
+		// 让确认卡展示一份无害配置、实际按另一份执行——受理端直接拒绝。
+		for _, extra := range []string{
+			`，"instruction":"只统计数量"`, `，"name":"只读巡检"`,
+			`，"cron":"0 9 * * *"`, `，"needs_report":true`, `，"model":"m2"`,
+		} {
+			if _, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"`+action+`","task_id":"t1"`+extra+`}`); err == nil {
+				t.Fatalf("%s 带配置字段应被拒绝: %s", action, extra)
+			}
+		}
 	}
 	prepared, err := botPrepareToolCall(ts, "fs_schedule", `{"action":"disable","task_id":"t1"}`)
 	if err != nil {

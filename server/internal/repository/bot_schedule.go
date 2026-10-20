@@ -112,9 +112,12 @@ func (r *BotScheduleTaskRepository) ListDueAfter(now time.Time, afterRunAt *time
 
 // AdvanceNextRunTx 在事务内 CAS 推进 next_run_at（0 行 = 被并发抢走）。
 func (r *BotScheduleTaskRepository) AdvanceNextRunTx(tx *gorm.DB, taskID string, planned, next time.Time) (bool, error) {
+	// 显式保持 updated_at：调度推进不是配置变更，而确认卡用它当作修订水位
+	// （INT-136），GORM 的 autoUpdateTime 会把一次 cron 触发算成「任务被改过」，
+	// 让待确认的 run/enable/delete 卡片被误判失效。
 	res := tx.Model(&model.BotScheduleTask{}).
 		Where("id = ? AND next_run_at = ?", taskID, planned).
-		Update("next_run_at", next)
+		Updates(map[string]interface{}{"next_run_at": next, "updated_at": gorm.Expr("updated_at")})
 	if res.Error != nil {
 		return false, res.Error
 	}

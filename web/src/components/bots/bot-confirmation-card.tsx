@@ -34,8 +34,11 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
   const isUpdate = call.action === "update";
   const isRun = call.action === "run";
 
+  // 空白串按「未提供」处理：服务端 applyScheduleTaskUpdate 对 TrimSpace 后为
+  // 空的字段一律视为保留原值，卡片必须同一口径，否则模型传一个空格就能让
+  // 卡片显示空指令、实际仍按原指令运行。
   const str = (v: unknown) =>
-    typeof v === "string" && v !== "" ? v : undefined;
+    typeof v === "string" && v.trim() !== "" ? v : undefined;
   const schedStr = (...keys: string[]) => {
     for (const key of keys) {
       const v = str(sched[key]);
@@ -43,9 +46,12 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
     }
     return undefined;
   };
-  // 本次调用真正生效的值：run 不看参数；update/create 优先本次提供的值。
+  // 本次调用真正生效的值：只有 create/update 会应用参数；run/enable/delete
+  // 的执行器只按 task_id 读库里配置，卡片必须只看快照（否则模型附带的参数能
+  // 遮住真正的执行内容）。
+  const usesArgs = call.action === "create" || isUpdate;
   const effective = (argKey: string, ...snapKeys: string[]) => {
-    if (!isRun) {
+    if (usesArgs) {
       const argValue = str(args[argKey]);
       if (argValue !== undefined) return argValue;
     }
@@ -59,13 +65,13 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
   const timezone =
     effective("timezone", "timezone") ?? (isUpdate ? "保持不变" : isRun ? "—" : "UTC");
   const nextRun = schedStr("next_run_at") ?? "—";
-  const model = isRun
-    ? (schedStr("effective_model") ?? "—")
-    : args.model !== undefined
+  const model = usesArgs
+    ? args.model !== undefined
       ? (str(args.model) ?? "跟随机器人当前模型")
-      : (schedStr("effective_model") ?? "—");
+      : (schedStr("effective_model") ?? "—")
+    : (schedStr("effective_model") ?? "—");
   const reportFlag = (() => {
-    if (!isRun && typeof args.needs_report === "boolean") return args.needs_report;
+    if (usesArgs && typeof args.needs_report === "boolean") return args.needs_report;
     if (typeof sched.needs_report === "boolean") return sched.needs_report;
     return undefined;
   })();

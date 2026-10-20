@@ -1189,7 +1189,11 @@ var botActionRules = map[string]botActionRule{
 	"fs_schedule/run": {Required: req("task_id"), Forbidden: []string{
 		"state", "name", "cron", "timezone", "instruction", "model", "needs_report",
 	}},
-	"fs_schedule/enable":    {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
+	// enable/delete 只按 task_id 改开关或删除，配置字段一概不生效——放行会让
+	// 确认卡展示一份无害配置、实际按库里的另一份执行（与 run 同一理由）。
+	"fs_schedule/enable": {Required: req("task_id"), Forbidden: []string{
+		"dry_run", "state", "name", "cron", "timezone", "instruction", "model", "needs_report",
+	}},
 	"fs_schedule/disable":   {Required: req("task_id"), Forbidden: []string{"dry_run", "state"}},
 	"fs_schedule/state_get": {Forbidden: []string{"task_id", "dry_run", "state"}},
 	"fs_schedule/state_set": {Forbidden: []string{"task_id", "dry_run"}},

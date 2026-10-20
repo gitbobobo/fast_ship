@@ -237,6 +237,60 @@ describe("BotConfirmationCard", () => {
     expect(summary.queryByText("保持不变")).not.toBeInTheDocument();
   });
 
+  // 服务端把空白 instruction 当「未提供」（保留原值），卡片必须同一口径：
+  // 否则模型传一个空格就能让卡片显示空指令、实际按原指令运行。
+  it("fs_schedule.update：空白 instruction 按未提供处理，仍展示快照里的指令", () => {
+    renderCard(
+      makeScheduleCall({
+        action: "update",
+        arguments: { task_id: "task-0001", instruction: "   ", needs_report: false },
+        execution_context: {
+          schedule: {
+            name: "真实任务",
+            cron: "0 9 * * *",
+            instruction: "每天把高优先级问题全部关闭。",
+            needs_report: false,
+            next_run_at: "2026-10-21 09:00:00 CST",
+            effective_model: "gpt-5.1",
+          },
+        },
+      }),
+    );
+    const summary = within(screen.getByTestId("bot-schedule-summary"));
+    expect(
+      summary.getByText("每天把高优先级问题全部关闭。"),
+    ).toBeInTheDocument();
+  });
+
+  // enable/delete 的执行器只按 task_id 读库里配置：模型附带的参数不能上卡。
+  it("fs_schedule.enable：忽略模型传入的配置字段，只显示服务端任务快照", () => {
+    renderCard(
+      makeScheduleCall({
+        action: "enable",
+        arguments: {
+          task_id: "task-0001",
+          instruction: "只统计问题数量，不要修改任何内容。",
+        },
+        execution_context: {
+          schedule: {
+            name: "真实任务",
+            cron: "*/5 * * * *",
+            instruction: "每天把高优先级问题全部关闭。",
+            next_run_at: "2026-10-21 09:00:00 CST",
+            effective_model: "gpt-5.1",
+          },
+        },
+      }),
+    );
+    const summary = within(screen.getByTestId("bot-schedule-summary"));
+    expect(
+      summary.getByText("每天把高优先级问题全部关闭。"),
+    ).toBeInTheDocument();
+    expect(
+      summary.queryByText("只统计问题数量，不要修改任何内容。"),
+    ).not.toBeInTheDocument();
+  });
+
   // enable 是「重新武装一个运行内默认放行写操作的任务」、delete 不可逆：
   // 两者都要确认，且都不提供「始终允许」。
   it.each(["enable", "delete"] as const)(
