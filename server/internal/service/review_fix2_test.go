@@ -415,22 +415,29 @@ func TestCleanupBeforeProjectDelete(t *testing.T) {
 		"environment_id": env.ID, "dispatch_started_at": finished, "dispatched_at": finished,
 		"worktree_path": "/ws/wt-del", "worktree_state": model.ReviewWorktreeNone,
 	})
+	// 启动响应丢失（dispatched_at 为空）但线程可能已建成的运行也要停。
+	unconfirmed := e.seedRun(t, repo, 53, "sha-unconf", model.ReviewRunDispatched, now)
+	e.svc.db.Model(unconfirmed).Updates(map[string]any{
+		"environment_id": env.ID, "dispatch_started_at": now, "dispatched_at": nil,
+	})
 
 	t3 := &fakeReviewT3{}
 	review := e.withT3(t3, nil, nil)
 	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
 
-	stoppedActive := false
-	for _, id := range t3.stopped {
-		if id == active.ThreadID {
-			stoppedActive = true
+	for _, want := range []string{active.ThreadID, unconfirmed.ThreadID} {
+		found := false
+		for _, id := range t3.stopped {
+			if id == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("stopped = %v, want 包含 %s", t3.stopped, want)
 		}
 	}
-	if !stoppedActive {
-		t.Fatalf("stopped = %v, want 包含在途运行 %s", t3.stopped, active.ThreadID)
-	}
-	if len(t3.archived) != 2 {
-		t.Fatalf("archived = %v, want 2 个线程", t3.archived)
+	if len(t3.archived) != 3 {
+		t.Fatalf("archived = %v, want 3 个线程", t3.archived)
 	}
 	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-del" {
 		t.Fatalf("removed = %v, want [/ws/wt-del]", t3.removed)

@@ -235,7 +235,7 @@ func (s *ReviewService) CleanupBeforeProjectDelete(ctx context.Context, projectI
 	}
 	for i := range runs {
 		run := &runs[i]
-		if run.DispatchedAt == nil || run.ThreadID == "" {
+		if run.ThreadID == "" {
 			continue
 		}
 		callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

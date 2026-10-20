@@ -62,6 +62,31 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	if p.Number <= 0 || p.Repository.FullName == "" || p.PR.Head.SHA == "" {
 		return nil
 	}
+	// PR 关闭/合并：取消该 PR 的防抖与在途运行（含排队），不再开轮。关闭事件
+	// 不区分触发条件——继续审一个已关闭的 PR 没有意义。
+	if p.Action == "closed" {
+		project, err := s.findEnabledProjectByRepoTx(tx, p.Repository.FullName)
+		if err != nil || project == nil {
+			return err
+		}
+		repo := strings.ToLower(p.Repository.FullName)
+		if err := s.supersedePRRunsTx(tx, project.ID, repo, p.Number, now); err != nil {
+			return err
+		}
+		if err := tx.Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			project.ID, repo, p.Number).Delete(&model.ReviewDebounce{}).Error; err != nil {
+			return err
+		}
+		// 保留账本 head（记录页仍显示最后审过的提交），只清 pending 并推进
+		// epoch，让在途同步停下。
+		return tx.Model(&model.ReviewPullRequest{}).
+			Where("project_id = ? AND repo_full_name = ? AND pr_number = ?", project.ID, repo, p.Number).
+			Updates(map[string]any{
+				"sync_pending": false,
+				"sync_epoch":   gorm.Expr("sync_epoch + 1"),
+				"updated_at":   now,
+			}).Error
+	}
 	if !reviewTriggerableAction(p.Action) {
 		return nil
 	}
@@ -220,6 +245,12 @@ func reviewTriggerEnabled(s *model.ProjectReviewSettings, action string) bool {
 		return s.TriggerReopened
 	}
 	return false
+}
+
+// findEnabledProjectByRepoTx 只取启用审查的项目（关闭事件不需要设置内容）。
+func (s *ReviewService) findEnabledProjectByRepoTx(tx *gorm.DB, repoFullName string) (*model.Project, error) {
+	project, _, err := s.findEnabledReviewProjectTx(tx, repoFullName)
+	return project, err
 }
 
 // findEnabledReviewProjectTx 按仓库全名（大小写不敏感）找到启用审查的项目

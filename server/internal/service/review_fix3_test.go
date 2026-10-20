@@ -793,3 +793,31 @@ func TestReviewInlineReviewReconcileByRunMarker(t *testing.T) {
 			got, r1.PostedAt, r1.ReviewID, r1.ResultJSON, r2.PostedAt, r2.ReviewID, r2.ResultJSON, len(e.fake.ReviewInputs()))
 	}
 }
+
+// PR 关闭/合并：取消防抖与在途运行，不再开轮。
+func TestReviewWebhookClosedCancelsWork(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	e.enableReview(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	run := e.seedRun(t, repo, 91, "sha-c", model.ReviewRunRunning, now)
+	if err := e.svc.db.Create(&model.ReviewDebounce{
+		ProjectID: e.project.ID, RepoFullName: strings.ToLower(repo), PRNumber: 91,
+		HeadSHA: "sha-c2", Action: "synchronize", FireAt: now.Add(time.Hour), UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed debounce: %v", err)
+	}
+
+	if err := e.review.HandleGitHubWebhook(context.Background(), "pull_request", "d-close",
+		prPayload("closed", repo, 91, "sha-c2", false, false)); err != nil {
+		t.Fatalf("webhook closed: %v", err)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.Status != model.ReviewRunCancelled {
+		t.Fatalf("run = %s, want cancelled", after.Status)
+	}
+	if got := e.debounceCount(t); got != 0 {
+		t.Fatalf("debounce rows = %d, want 0", got)
+	}
+}
