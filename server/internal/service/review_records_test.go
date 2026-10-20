@@ -236,3 +236,44 @@ func TestListReviewProjects_TakenBy(t *testing.T) {
 		t.Fatalf("visual_status 未取到: %+v", got)
 	}
 }
+
+// 总览的最近状态只认项目当前仓库：换过仓库后，旧仓库的历史记录不能冒充
+// 新仓库的最近审查状态。
+func TestListReviewProjects_StatusIgnoresHistoricalRepo(t *testing.T) {
+	svc := setupTestServices(t)
+	me := createTestUser(t, svc.db, "overview-history")
+	project := createTestProject(t, svc.db, me.ID, func(p *model.Project) {
+		p.GithubOwner = "octo"
+		p.GithubRepo = "new"
+	})
+	now := time.Now().UTC()
+	// 旧仓库的记录更新时间更晚，也不能被选中。
+	if err := svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: project.ID, RepoFullName: "octo/old", PRNumber: 1, UserID: me.ID,
+		HeadSHA: "sha-old", CodeStatus: "failure", VisualStatus: "failure", UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed old ledger: %v", err)
+	}
+	if err := svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: project.ID, RepoFullName: "octo/new", PRNumber: 2, UserID: me.ID,
+		HeadSHA: "sha-new", CodeStatus: "success", UpdatedAt: now.Add(-time.Hour),
+	}).Error; err != nil {
+		t.Fatalf("seed new ledger: %v", err)
+	}
+
+	rs, _ := readyReviewService(t, svc)
+	items, err := rs.ListReviewProjects(context.Background(), me.ID)
+	if err != nil {
+		t.Fatalf("ListReviewProjects: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %d, want 1", len(items))
+	}
+	got := items[0]
+	if got.CodeStatus == nil || *got.CodeStatus != "success" {
+		t.Fatalf("code_status = %v, want success（新仓库的账本）", got.CodeStatus)
+	}
+	if got.VisualStatus != nil {
+		t.Fatalf("visual_status = %v, 旧仓库记录不应参与展示", *got.VisualStatus)
+	}
+}

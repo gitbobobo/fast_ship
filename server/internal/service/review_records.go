@@ -53,16 +53,31 @@ func (s *ReviewService) ListReviewProjects(ctx context.Context, userID string) (
 		settingsByProject[row.ProjectID] = row
 	}
 
-	// 最新一条 PR 记录（updated_at 最大）给状态字段。
+	// 最新一条 PR 记录（updated_at 最大）给状态字段。只认项目**当前**仓库的
+	// 账本：项目换过仓库后，旧仓库的历史记录不能当成新仓库的最近状态展示。
+	repoByProject := map[string]string{}
+	repoSet := map[string]struct{}{}
+	for _, p := range projects {
+		repo := strings.ToLower(p.GithubOwner + "/" + p.GithubRepo)
+		repoByProject[p.ID] = repo
+		repoSet[repo] = struct{}{}
+	}
+	repos := make([]string, 0, len(repoSet))
+	for repo := range repoSet {
+		repos = append(repos, repo)
+	}
 	var prs []model.ReviewPullRequest
 	if err := s.db.WithContext(ctx).
-		Where("project_id IN ?", projectIDs).
+		Where("project_id IN ? AND repo_full_name IN ?", projectIDs, repos).
 		Order("updated_at DESC").
 		Find(&prs).Error; err != nil {
 		return nil, errs.ErrInternal
 	}
 	latestByProject := map[string]model.ReviewPullRequest{}
 	for _, pr := range prs {
+		if repoByProject[pr.ProjectID] != pr.RepoFullName {
+			continue
+		}
 		if _, ok := latestByProject[pr.ProjectID]; !ok {
 			latestByProject[pr.ProjectID] = pr
 		}
