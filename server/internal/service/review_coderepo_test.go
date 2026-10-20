@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -486,5 +487,104 @@ func TestReviewDebounceConsumeUsesSnapshotNotLiveCodeRepo(t *testing.T) {
 	}
 	if len(runs) != 1 {
 		t.Fatalf("快照仓库的防抖行应开一轮, runs = %d", len(runs))
+	}
+}
+
+// rerun 也按设置行快照取仓库：live 代码仓库被改走后，快照仓库的记录仍可重跑，
+// live 仓库的记录被视为「历史仓库」拒绝（回读 live 的版本正好相反）。
+func TestRerunReviewUsesSnapshotNotLiveCodeRepo(t *testing.T) {
+	e := newCodeRepoEnv(t)
+	divergeLiveCodeRepo(t, e.svc.db, e.project.ID)
+	ctx := context.Background()
+
+	if _, err := e.review.RerunReview(ctx, e.user.ID, e.project.ID, 7, "octo/other"); err == nil {
+		t.Fatal("live 仓库的记录应视为历史仓库拒绝")
+	}
+
+	e.fake.SetPR(e.codeRepo, 7, &githubapi.PullRequest{
+		RepoFullName: e.codeRepo, Number: 7, HeadSHA: "sha-snap-rerun",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	got, err := e.review.RerunReview(ctx, e.user.ID, e.project.ID, 7, e.codeRepo)
+	if err != nil {
+		t.Fatalf("按快照仓库重跑: %v", err)
+	}
+	if !got.Accepted || got.HeadSHA != "sha-snap-rerun" {
+		t.Fatalf("rerun result = %+v", got)
+	}
+}
+
+// 同步写前守卫：远端副作用发出去收不回来，所以每次 GitHub 写之前复核本轮仍
+// 有效；换仓库后守卫拦下写，且不产生任何 GitHub 调用。
+func TestGuardedSyncClientBlocksWritesAfterRepoChanged(t *testing.T) {
+	e := newCodeRepoEnv(t)
+	now := time.Now().UTC()
+	ledger := &model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 81, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-guard", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}
+	if err := e.svc.db.Create(ledger).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	client := guardedSyncClient{
+		GitHubClient: e.fake,
+		check:        func() error { return e.review.syncTargetStillCurrent(ledger, 1) },
+	}
+	ctx := context.Background()
+	if err := client.CreateCommitStatus(ctx, 1, e.codeRepo, "sha-guard", "success", "代码审查", "", ""); err != nil {
+		t.Fatalf("目标仍有效时写应放行: %v", err)
+	}
+	before := e.fake.TotalCalls()
+
+	projectSvc := newTestProjectService(e.svc)
+	if _, err := projectSvc.Update(e.project.ID, e.user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "new/repository"},
+	}); err != nil {
+		t.Fatalf("update code repo: %v", err)
+	}
+
+	if err := client.CreateCommitStatus(ctx, 1, e.codeRepo, "sha-guard", "success", "代码审查", "", ""); !errors.Is(err, errReviewSyncAbandoned) {
+		t.Fatalf("换仓库后写应被拦, err = %v", err)
+	}
+	if e.fake.TotalCalls() != before {
+		t.Fatalf("被拦的写不应产生 GitHub 调用（before=%d after=%d）", before, e.fake.TotalCalls())
+	}
+}
+
+// doSyncPR 在首次远端写之前复核：项目换仓库后直接进入同步主体，只允许发生
+// 只读的 GetPullRequest，任何写调用都不应发出。
+func TestDoSyncPRStopsBeforeFirstWriteAfterRepoChanged(t *testing.T) {
+	e := newCodeRepoEnv(t)
+	now := time.Now().UTC()
+	ledger := &model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: e.codeRepo, PRNumber: 91, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-dsync", RoundNumber: 1,
+		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}
+	if err := e.svc.db.Create(ledger).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	e.fake.SetPR(e.codeRepo, 91, &githubapi.PullRequest{
+		RepoFullName: e.codeRepo, Number: 91, HeadSHA: "sha-dsync",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+
+	projectSvc := newTestProjectService(e.svc)
+	if _, err := projectSvc.Update(e.project.ID, e.user.ID, &UpdateProjectRequest{
+		CodeRepositoryUrl: OptionalStringUpdate{Set: true, Value: "new/repository"},
+	}); err != nil {
+		t.Fatalf("update code repo: %v", err)
+	}
+
+	err := e.review.doSyncPR(context.Background(), ledger, 1, now)
+	if !errors.Is(err, errReviewSyncAbandoned) {
+		t.Fatalf("err = %v, want errReviewSyncAbandoned", err)
+	}
+	for name, n := range e.fake.CallCounts() {
+		if strings.HasPrefix(name, "Create") || strings.HasPrefix(name, "Update") || name == "SubmitReview" {
+			t.Fatalf("换仓库后不应发出写调用: %s=%d", name, n)
+		}
 	}
 }

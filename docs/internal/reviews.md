@@ -64,7 +64,7 @@ Issue 同步/发版/发货仍只走公开仓库，两者互不影响。所有「
 该快照。
 
 所有表的 `repo_full_name` 一律小写：webhook 侧取 payload 规范名、rerun 侧
-取项目 `CodeRepo()`，写库前统一 `strings.ToLower`——GitHub
+取启用设置行的 `repo_full_name` 快照，写库前统一 `strings.ToLower`——GitHub
 API 本身大小写不敏感，但 SQLite BINARY 比较会把两种大小写当两本账（防抖、
 seen SHA、取消旧轮全部失效）。
 
@@ -227,7 +227,9 @@ seen SHA、取消旧轮全部失效）。
 每 PR 一把进程内锁（按 repo+pr 键控，同步完摘除条目，防 map 随历史 PR 数
 增长——锁刻意保持仓库归一，同 PR 的 GitHub 写入串行），逐行处理
 `review_pull_requests.sync_pending` 中项目设置仍 `enabled` 且账本
-`repo_full_name` 与该项目 enabled 设置行快照一致的行；全部走
+`repo_full_name` 与该项目 enabled 设置行快照一致的行（选中后还要过一次准入
+复核：pending 未清、epoch 未推进、快照仍是本仓库；通过后每次 GitHub 写之前
+再复核一次，避免同步期间改仓库把产出写到旧仓库）；全部走
 App 安装令牌。失败只记 `sync_error` 下轮重试，不改运行终态；成功后按开始
 同步时的 `sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
 中段写回（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
