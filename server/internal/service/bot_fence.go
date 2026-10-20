@@ -104,11 +104,27 @@ func botFenceToolResult(nonce, toolName, action, payload string) string {
 	if nonce == "" || payload == "" || botResultFenceExemptTools[toolName+"/"+action] {
 		return payload
 	}
-	source := "tool_result"
-	if toolName != "" {
-		source = "tool_result:" + toolName
+	// 工具名来自模型（未知工具也会走到这里），进围栏属性前先收紧成安全字符，
+	// 否则一个带引号的伪造工具名可以在 opener 里注入额外属性。
+	return botFenceUntrusted(nonce, "tool_result:"+botFenceSourceToken(toolName), payload)
+}
+
+// botFenceSourceToken 把模型可控的名字收敛成围栏属性安全的形式：只留
+// [a-z0-9_.-]，小写、限长；空则回退 "unknown"。
+func botFenceSourceToken(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 64 {
+			break
+		}
 	}
-	return botFenceUntrusted(nonce, source, payload)
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 // botFenceTagAt 报告 s[i:] 是否以开或闭围栏标签开头；只做 ASCII 大小写
