@@ -2854,8 +2854,8 @@ func TestBotBoundarySnapshotFixedTokensSameProjection(t *testing.T) {
 	if snap.FixedTokens != indep.AfterTokens {
 		t.Fatalf("F 应等于独立复核: F=%d indep=%d", snap.FixedTokens, indep.AfterTokens)
 	}
-	// after−F 恰为摘要正文转义后的字节开销（转义开销不得计入 F）。
-	escRaw, _ := json.Marshal(summary)
+	// after−F 恰为「摘要正文（含围栏）」转义后的字节开销（转义开销不得计入 F）。
+	escRaw, _ := json.Marshal(botFenceUntrusted(botNonce(t, env, bot.ID), "summary", summary))
 	escTokens := botEstimateBytes(int64(len(escRaw) - 2))
 	if d := snap.AfterTokens - snap.FixedTokens; d < escTokens-1 || d > escTokens {
 		t.Fatalf("after−F 应≈正文转义开销: d=%d esc=%d", d, escTokens)
