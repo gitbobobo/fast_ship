@@ -323,6 +323,8 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 			continue
 		}
 		if runs[i].Status.Terminal() {
+			// 已有终态说明这一段至少开始过，不能再整段标成「排队中」。
+			allQueued = false
 			continue
 		}
 		active = true
@@ -412,14 +414,18 @@ func buildPullRequestActivity(pr *model.ReviewPullRequest, projectName string,
 		}
 	}
 
+	// 进度分母只看仍有效的运行：cancelled 组合不会完成，计进 total 会让
+	// 「N/M 完成」永远到不了 M。
+	codeForStage := reviewNonCancelled(codeRuns)
+	visualForStage := reviewNonCancelled(visualRuns)
 	codeStage := api.ReviewStageProgress{
 		Kind:      api.ReviewStageProgressKindCode,
-		Total:     len(codeRuns),
-		Completed: reviewCompletedCount(codeRuns),
-		Status:    reviewStageStatus(codeRuns),
+		Total:     len(codeForStage),
+		Completed: reviewCompletedCount(codeForStage),
+		Status:    reviewStageStatus(codeForStage),
 	}
 	stages := []api.ReviewStageProgress{codeStage}
-	if visualStage, ok := reviewVisualStage(visualRuns, visualComboCount, &codeStage, pr, &findings, handoff); ok {
+	if visualStage, ok := reviewVisualStage(visualForStage, visualComboCount, &codeStage, pr, &findings, handoff); ok {
 		stages = append(stages, visualStage)
 	}
 
@@ -533,20 +539,40 @@ func reviewRunIssue(r *model.ReviewRun, kind api.ReviewActivityIssueKind) api.Re
 	}
 }
 
-// reviewStageStatus 一段运行的聚合状态（先活动、后终态）：任一
-// dispatched/running → running；任一 queued → queued；空 → pending；
-// 任一 failed/timed_out → failed；全部 completed → completed；其它（如全
-// cancelled）→ pending。
-func reviewStageStatus(runs []model.ReviewRun) api.ReviewStageProgressStatus {
+// reviewNonCancelled 过滤掉系统取消的运行（不计入进度分母）。
+func reviewNonCancelled(runs []model.ReviewRun) []model.ReviewRun {
+	out := make([]model.ReviewRun, 0, len(runs))
 	for _, r := range runs {
-		if r.Status == model.ReviewRunDispatched || r.Status == model.ReviewRunRunning {
-			return api.ReviewStageProgressStatusRunning
+		if r.Status != model.ReviewRunCancelled {
+			out = append(out, r)
 		}
 	}
+	return out
+}
+
+// reviewStageStatus 一段运行的聚合状态：任一 dispatched/running → running；
+// 全部 queued → queued；有终态又有排队 → running（这一段已经开始）；空 →
+// pending；任一 failed/timed_out → failed；全部 completed → completed。
+func reviewStageStatus(runs []model.ReviewRun) api.ReviewStageProgressStatus {
+	hasActive, hasQueued, hasTerminal := false, false, false
 	for _, r := range runs {
-		if r.Status == model.ReviewRunQueued {
-			return api.ReviewStageProgressStatusQueued
+		switch r.Status {
+		case model.ReviewRunDispatched, model.ReviewRunRunning:
+			hasActive = true
+		case model.ReviewRunQueued:
+			hasQueued = true
+		default:
+			hasTerminal = true
 		}
+	}
+	if hasActive {
+		return api.ReviewStageProgressStatusRunning
+	}
+	if hasQueued {
+		if hasTerminal {
+			return api.ReviewStageProgressStatusRunning
+		}
+		return api.ReviewStageProgressStatusQueued
 	}
 	if len(runs) == 0 {
 		return api.ReviewStageProgressStatusPending
@@ -554,11 +580,6 @@ func reviewStageStatus(runs []model.ReviewRun) api.ReviewStageProgressStatus {
 	for _, r := range runs {
 		if r.Status == model.ReviewRunFailed || r.Status == model.ReviewRunTimedOut {
 			return api.ReviewStageProgressStatusFailed
-		}
-	}
-	for _, r := range runs {
-		if r.Status != model.ReviewRunCompleted {
-			return api.ReviewStageProgressStatusPending
 		}
 	}
 	return api.ReviewStageProgressStatusCompleted

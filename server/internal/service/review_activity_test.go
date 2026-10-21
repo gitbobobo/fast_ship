@@ -968,3 +968,60 @@ func TestListPullRequestActivity_FindingsWithCancelledNeedsAction(t *testing.T) 
 		t.Fatalf("应进需要处理: %+v %+v", page.Counts, page.Items[0].Findings)
 	}
 }
+
+// 一段里已有 completed、其余仍在 queued：不能整段标成「排队中」。
+func TestListPullRequestActivity_CompletedWithQueuedIsReviewing(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	repo := "octo/repo"
+	createActivitySettings(t, svc.db, user.ID, project.ID, repo, 2, 0, true)
+	clean := `{"summary":"s","findings":[],"prior":[],"ui_changed":false,"ui_changed_since_last_visual":false}`
+	createTestReviewPR(t, svc.db, user.ID, project.ID, repo, 1, 1, func(p *model.ReviewPullRequest) {
+		p.VisualStatus = ""
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.ResultJSON = clean
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.Status = model.ReviewRunQueued
+	})
+
+	rs, _ := readyReviewService(t, svc)
+	page := listActivity(t, rs, user.ID, "", 0, 0)
+	item := page.Items[0]
+	if item.Stage == nil || *item.Stage != api.ReviewPullRequestActivityStageReviewing {
+		t.Fatalf("stage = %+v, want reviewing", item.Stage)
+	}
+	if len(item.Stages) == 0 || item.Stages[0].Total != 2 || item.Stages[0].Completed != 1 ||
+		item.Stages[0].Status != api.ReviewStageProgressStatusRunning {
+		t.Fatalf("进度错误: %+v", item.Stages)
+	}
+}
+
+// cancelled 不计入进度分母：一条 running + 一条 cancelled → 1 条在跑，
+// 显示 0/1 而不是永远到不了的 0/2。
+func TestListPullRequestActivity_StageTotalExcludesCancelled(t *testing.T) {
+	svc := setupTestServices(t)
+	user := createTestUser(t, svc.db, "u1")
+	project := createTestProject(t, svc.db, user.ID)
+	repo := "octo/repo"
+	createActivitySettings(t, svc.db, user.ID, project.ID, repo, 2, 0, true)
+	createTestReviewPR(t, svc.db, user.ID, project.ID, repo, 1, 1, func(p *model.ReviewPullRequest) {
+		p.VisualStatus = ""
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.Status = model.ReviewRunRunning
+	})
+	createActivityRun(t, svc.db, user.ID, project.ID, repo, 1, func(r *model.ReviewRun) {
+		r.Status = model.ReviewRunCancelled
+		r.ErrorCode = "superseded"
+	})
+
+	rs, _ := readyReviewService(t, svc)
+	page := listActivity(t, rs, user.ID, "", 0, 0)
+	item := page.Items[0]
+	if len(item.Stages) == 0 || item.Stages[0].Total != 1 || item.Stages[0].Completed != 0 {
+		t.Fatalf("cancelled 不应计入进度分母: %+v", item.Stages)
+	}
+}
