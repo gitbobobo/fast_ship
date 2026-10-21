@@ -221,8 +221,11 @@ export function BotConfirmationCard({
         </p>
       )}
       {error !== undefined && error !== null && (
-        <p role="alert" className="text-xs text-destructive">
-          {botActionErrorText(error)}
+        <p
+          role="alert"
+          className="text-xs text-destructive [unicode-bidi:isolate]"
+        >
+          {bidiSafeText(botActionErrorText(error))}
         </p>
       )}
     </section>

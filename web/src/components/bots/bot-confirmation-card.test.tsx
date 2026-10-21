@@ -183,6 +183,27 @@ describe("BotConfirmationCard", () => {
     expect(screen.getByTestId("bot-confirmation-card")).not.toHaveTextContent("‮");
   });
 
+  it("fs_schedule：多行指令的换行/制表保留（行结构本身是被批准的内容）", () => {
+    renderCard(
+      makeScheduleCall({
+        execution_context: {
+          schedule: {
+            name: "巡检",
+            cron: "0 9 * * *",
+            timezone: "Asia/Shanghai",
+            instruction: "第一行汇报\n\t第二行执行写操作\r覆盖行",
+            needs_report: true,
+            next_run_at: "2026-10-21 09:00:00 CST",
+          },
+        },
+      }),
+    );
+    const summary = screen.getByTestId("bot-schedule-summary");
+    const pre = summary.querySelector("pre");
+    // \n 与 \t 保留；\r 行覆盖符被剥。
+    expect(pre?.textContent).toBe("第一行汇报\n\t第二行执行写操作覆盖行");
+  });
+
   it("fs_schedule.update：展示服务端合并后的生效配置，不渲染「始终允许」", () => {
     renderCard(
       makeScheduleCall({

@@ -110,11 +110,17 @@ export const TOOL_EFFECT_BADGE: Record<ToolEffect, string> = {
   write: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
 };
 
-// 模型可写文本进批准/展示界面时剥掉控制与格式字符（Cc/Cf，如 U+202E
-// 双向覆盖）：不剥的话确认卡/chips 上的文本会被重排成与执行内容相反
-// 的顺序。与服务端 legacyNoticeTaskName 同口径。
+// 模型可写文本进批准/展示界面时剥掉格式字符（Cf，如 U+202E 双向覆盖）
+// 与除换行/制表外的控制字符：不剥的话确认卡/chips 上的文本会被重排成
+// 与执行内容相反的顺序，或夹带不可见字符。\n 与 \t 保留——多行任务指令
+// 的行结构本身就是被批准的内容，剥了会让用户看到折成一行的指令；\r 是
+// 行覆盖符，剥掉（服务端 legacyNoticeTaskName 剥全部 Cc/Cf 是因为它只
+// 处理单行任务名）。
+const BIDI_UNSAFE_CHAR = /\p{Cc}|\p{Cf}/u;
 export const bidiSafeText = (v: string) =>
-  v.replace(/[\p{Cc}\p{Cf}]/gu, "");
+  [...v]
+    .filter((ch) => ch === "\n" || ch === "\t" || !BIDI_UNSAFE_CHAR.test(ch))
+    .join("");
 
 export interface ToolParamChip {
   /** 参数名（同时当渲染 key）。 */
