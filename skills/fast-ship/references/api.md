@@ -7572,7 +7572,7 @@ PR 审查（INT-135，仅 JWT）：项目级审查设置、审查总览与审查
 | --- | --- | --- | --- |
 | `items` | object[] | 是 |  |
 | `items[].id` | string | 是 |  |
-| `items[].kind` | string（enum: review_dispatch_failed \| review_run_timeout \| review_cleanup_failed） | 是 |  |
+| `items[].kind` | string（enum: review_dispatch_failed \| review_run_timeout \| review_cleanup_failed \| review_redelivery_failed） | 是 |  |
 | `items[].title` | string | 是 |  |
 | `items[].body` | string | 是 |  |
 | `items[].environment_id` | string（可空） | 否 |  |

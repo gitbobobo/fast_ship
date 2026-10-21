@@ -80,6 +80,7 @@ var autoMigrateModels = []interface{}{
 	&model.ProjectT3Binding{},
 	&model.Notification{},
 	&model.GitHubWebhookDelivery{},
+	&model.GitHubWebhookRedelivery{}, // INT-146 的 webhook 重投次数账。
 	// PR 审查（INT-135）：项目级开关 + 审查运行/令牌/PR 总账/截图资产/防抖/已见 SHA。
 	// 旧 automation_* 与 github_pr_* 表由 migrateReviewTables 在 AutoMigrate 前整表删除。
 	&model.ProjectReviewSettings{},

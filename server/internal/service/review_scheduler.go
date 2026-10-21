@@ -11,7 +11,9 @@ import (
 
 // PR 审查调度循环（INT-135）：单进程一个 10s tick + 非阻塞 kick。
 // 每轮依次：到期防抖消费并开轮 → 排队提升 → 派发 → 超时 → 取消运行的线程
-// 中断 → GitHub 同步 → 工作区清理。各阶段独立容错；网络调用都在事务外。
+// 中断 → GitHub 同步 → 归档 → 工作区清理 → 旧线程墓碑清理。各阶段独立容错；
+// 网络调用都在事务外。投递失败对账在独立 goroutine 里低频跑，见
+// review_redelivery.go。
 
 const reviewSchedulerInterval = 10 * time.Second
 
@@ -35,6 +37,7 @@ func (s *ReviewService) Start() {
 	s.kickCh = kickCh
 	s.mu.Unlock()
 	go s.reviewLoop(cancel, kickCh)
+	go s.redeliveryLoop(cancel)
 }
 
 // Stop 停止调度循环；幂等，未启动时为空操作。
@@ -64,8 +67,27 @@ func (s *ReviewService) reviewLoop(cancel <-chan struct{}, kickCh <-chan struct{
 	}
 }
 
-// reviewTick 每轮顺序执行八个阶段；各阶段内部逐条容错，互不打断。
-// 归档在工作区清理之前：删除必须以归档完成为前提。
+// redeliveryLoop 投递失败对账的独立低频循环：不与 10s 调度 tick 抢执行权
+// （GitHub 变慢时对账会长时间占住网络调用，不能拖住防抖消费/派发/超时）。
+// 启动即先跑一轮（进程刚起来时最需要补上停机期间漏掉的投递），之后每
+// reviewRedeliverySweepEvery 一轮。与 reviewLoop 共用同一个 cancel。
+func (s *ReviewService) redeliveryLoop(cancel <-chan struct{}) {
+	ticker := time.NewTicker(reviewRedeliverySweepEvery)
+	defer ticker.Stop()
+	s.reconcileWebhookDeliveries(time.Now().UTC())
+	for {
+		select {
+		case <-cancel:
+			return
+		case now := <-ticker.C:
+			s.reconcileWebhookDeliveries(now.UTC())
+		}
+	}
+}
+
+// reviewTick 每轮顺序执行：到期防抖消费并开轮 → 排队提升 → 派发 → 超时 →
+// 取消运行的线程中断 → GitHub 同步 → 归档 → 工作区清理 → 旧线程墓碑清理。
+// 各阶段独立容错，互不打断。归档在工作区清理之前：删除必须以归档完成为前提。
 func (s *ReviewService) reviewTick(now time.Time) {
 	s.processDueDebounces(now)
 	s.promoteQueuedRuns(now)
@@ -129,6 +151,11 @@ func (s *ReviewService) processDueDebounces(now time.Time) {
 		_, err := s.deliveries.DeleteOlderThanTx(tx, now.Add(-reviewDeliveryRetention))
 		return err
 	})
+	// 重投次数账（INT-146）按同一保留期清理；guid 账只在重投后短期内有意义，
+	// 丢了顶多按投递列表重新推近期次数。
+	if _, err := s.redeliveries.DeleteOlderThan(s.db, now.Add(-reviewDeliveryRetention)); err != nil {
+		s.logger.Error("清理 webhook 重投次数账失败", zap.Error(err))
+	}
 }
 
 // consumeDebounce 一行防抖的消费事务：条件删除防重入，复核后同事务开轮。

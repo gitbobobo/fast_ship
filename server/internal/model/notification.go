@@ -15,6 +15,9 @@ const (
 	NotificationReviewRunTimeout NotificationKind = "review_run_timeout"
 	// NotificationReviewCleanupFailed 审查工作区清理失败（不影响审查结论）。
 	NotificationReviewCleanupFailed NotificationKind = "review_cleanup_failed"
+	// NotificationReviewRedeliveryFailed webhook 投递重投在上限内仍未送达
+	// （审查系统故障：这次推送不会被审查）。
+	NotificationReviewRedeliveryFailed NotificationKind = "review_redelivery_failed"
 )
 
 type Notification struct {

@@ -127,7 +127,8 @@ func isValidNotificationKind(kind model.NotificationKind) bool {
 	switch kind {
 	case model.NotificationReviewDispatchFailed,
 		model.NotificationReviewRunTimeout,
-		model.NotificationReviewCleanupFailed:
+		model.NotificationReviewCleanupFailed,
+		model.NotificationReviewRedeliveryFailed:
 		return true
 	}
 	return false
