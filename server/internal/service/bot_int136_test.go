@@ -447,6 +447,11 @@ func TestBotInt136ScheduleSessionCannotManageTasks(t *testing.T) {
 		if call.ErrorMessage == nil || !strings.Contains(*call.ErrorMessage, "定时任务运行中不能") {
 			t.Fatalf("错误应说明原因与出路: %+v", call.ErrorMessage)
 		}
+		// 受理端同步拒绝从未进异步队列：账本模式必须记 sync，否则排查
+		// 时会被误导成异步执行失败。
+		if call.ExecutionMode != string(model.BotExecutionSync) {
+			t.Fatalf("%s/%s 同步拒绝应记 sync，实得 %q", call.ToolName, call.Action, call.ExecutionMode)
+		}
 	}
 
 	// 数据库无变化：没有新任务、任务字段未动、没有第二次运行。

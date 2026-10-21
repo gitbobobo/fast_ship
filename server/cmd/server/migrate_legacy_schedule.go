@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/repository"
@@ -51,7 +52,13 @@ func migrateLegacyScheduleNotice(db *gorm.DB, logger *zap.Logger) error {
 		tasks := byBot[botID]
 		err := db.Transaction(func(tx *gorm.DB) error {
 			dedup := legacyScheduleReviewDedup
-			if existing, err := repository.NewBotMessageRepository(tx).FindByDedupKey(botID, dedup); err == nil && existing != nil {
+			existing, err := repository.NewBotMessageRepository(tx).FindByDedupKey(botID, dedup)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				// dedup_key 没有唯一索引兜底，瞬时读库错误不能吞：吞了会
+				// 重复插入提示，重启重跑还会再加一条。回滚让下次启动重试。
+				return err
+			}
+			if existing != nil {
 				return nil
 			}
 			seq, err := repository.NewBotRepository(tx).NextMessageSeqTx(tx, botID)
@@ -105,7 +112,7 @@ func legacyScheduleReviewDetail(tasks []model.BotScheduleTask) map[string]interf
 	}
 	names := make([]string, 0, len(listed))
 	for _, t := range listed {
-		names = append(names, "「"+t.Name+"」")
+		names = append(names, "「"+legacyNoticeTaskName(t.Name)+"」")
 	}
 	var note string
 	switch {
@@ -126,6 +133,27 @@ func legacyScheduleReviewDetail(tasks []model.BotScheduleTask) map[string]interf
 		"enabled_count":  len(enabled),
 		"disabled_count": disabled,
 	}
+}
+
+// legacyNoticeTaskName 收敛模型可写的存量任务名给人看：剥掉控制字符/
+// 换行与「」（夹带的「」能伪造提示文案的边界），截断 40 字符，全空白
+// 退回占位名。detail.tasks 里给模型引用的原名不受影响（模型侧已围栏）。
+func legacyNoticeTaskName(name string) string {
+	out := make([]rune, 0, len(name))
+	for _, r := range name {
+		if len(out) >= 40 {
+			break
+		}
+		if unicode.IsControl(r) || r == '「' || r == '」' {
+			continue
+		}
+		out = append(out, r)
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return "（未命名任务）"
+	}
+	return trimmed
 }
 
 // joinTaskNames 拼任务名清单；超出展示上限时以「等 N 个」收尾。

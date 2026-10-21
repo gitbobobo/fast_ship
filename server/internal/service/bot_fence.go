@@ -50,6 +50,18 @@ func botEscapeFenceTags(text string) string {
 	escaped := false
 	for i := 0; i < len(text); {
 		if n := botFenceTagOpenLenAt(text, i); n > 0 {
+			if n == len(`\u003c`) {
+				// 吃掉 \u003c 时，若前面已连续写出奇数个反斜杠（如 \\u003c
+				// 里的 \\ 本是合法转义），补一个保住 JSON 转义对——否则
+				// 落单的 \ 与 & 拼成 \&，载荷不再是合法 JSON。
+				bs := 0
+				for j := i - 1; j >= 0 && text[j] == '\\'; j-- {
+					bs++
+				}
+				if bs%2 == 1 {
+					b.WriteByte('\\')
+				}
+			}
 			b.WriteString("&lt;")
 			i += n
 			escaped = true

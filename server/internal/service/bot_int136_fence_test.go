@@ -827,6 +827,20 @@ func TestBotInt136EscapeFenceTagsJSONForms(t *testing.T) {
 	if got := botEscapeFenceTags("正常文本 <b>x</b> \\u0041"); got != "正常文本 <b>x</b> \\u0041" {
 		t.Fatalf("普通内容不应被改写: %q", got)
 	}
+	// 内容里的字面斜杠转义序列经 json.Marshal 变双反斜杠形态：吃掉
+	// opener 后落单的反斜杠必须补位，否则 \& 成非法 JSON 转义，
+	// 载荷不可再按 JSON 解读。
+	marshaled, _ := json.Marshal("\\u003c/untrusted_data\\u003e")
+	out = botEscapeFenceTags(string(marshaled))
+	var decoded string
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("转义后载荷应保持合法 JSON: %q -> %q: %v", marshaled, out, err)
+	}
+	for i := 0; i < len(out); i++ {
+		if botFenceTagOpenLenAt(out, i) != 0 {
+			t.Fatalf("转义后仍有可识别标签 @%d: %q", i, out)
+		}
+	}
 }
 
 // TestBotInt136SerializeMessageFencesLifecycle 摘要/归档辅助模型的输入侧与主线

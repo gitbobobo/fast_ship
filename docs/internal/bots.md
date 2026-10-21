@@ -466,7 +466,8 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   不建不改不执行。理由：schedule 会话默认放行写操作，允许它建/改任务等于
   允许无确认地造出一个以后每次运行都放行写操作的会话；允许它 enable 等于能
   静默重新武装用户已停用的任务，delete 能抹掉全部任务。state_get/state_set
-  仍只在这个会话内可用。
+  仍只在这个会话内可用。被拒调用是受理端同步拒绝、从未进异步队列，账本
+  `execution_mode` 记回 `sync` 以免被误读成异步执行失败。
 - **事件进主线**：与 run 终态同一事务追加消息 kind `schedule_event`
   （`session_kind='main'`、`run_id=NULL`，正文 JSON 含 task_id/task_name/
   run_id/status/summary/error_code/error_message）。时机：**failed 必报**；
@@ -615,9 +616,12 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   置位；REST 停用、disable、免确认 update 不改写）；存量行默认 false。
   `migrateLegacyScheduleNotice` 启动迁移对每个有未复核任务的机器人主线发
   一条 `legacy_schedule_review` lifecycle 提示（幂等键
-  `legacy_schedule_review:int136`），列出仍在武装的任务名请用户复核/停用
-  ——只提示不阻断；detail 里的任务名属存量模型可写文本，投影时整条走
-  `source="lifecycle"` 围栏，不借平台前缀取得指令权。
+  `legacy_schedule_review:int136`，dedup_key 无唯一索引，读库非
+  RecordNotFound 错误必须回滚重试而非吞掉），列出仍在武装的任务名请
+  用户复核/停用——只提示不阻断。任务名属存量模型可写文本：note 里给
+  人看的名字经 `legacyNoticeTaskName` 收敛（剥控制字符与「」、截断
+  40 字）；模型侧投影则把整条 detail 走 `source="lifecycle"` 围栏，
+  不借平台前缀取得指令权。
   **未复核任务不允许经 REST 面板开关启用**（`setScheduleTaskEnabled` 内部
   门槛：启用且本次调用未经确认卡、任务又未复核时回 40934）——否则右栏
   一键开关就能把未审指令重新武装到默认放行写操作的计划上，且幂等键已
@@ -676,7 +680,9 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
   与 JSON 转义形态（`\u003c`、斜杠的 `/`/`\u002f`/`\/`，标签名逐字符的
   `\u00XX` 写法也算、解码后按同一大小写折叠比较），不区分 ASCII
   大小写——载荷多是 `json.Marshal` 产物，正文里的闭合标签常以 `\u003c`
-  形态存在，模型按转义还原后同样能闭合围栏。
+  形态存在，模型按转义还原后同样能闭合围栏。吃掉一个 `\u003c` 形态时
+  若其前已连续写出奇数个反斜杠（`\\u003c` 里 `\\` 是合法转义），补一
+  个反斜杠保住 JSON 转义对——落单的 `\` 会让载荷变非法 JSON。
   围栏在**渲染时**加在账本原文上，所以升级前的旧工具结果也会被围上。
 - **平台前缀带 nonce**：后台结果 `[平台后台结果 nonce=…]`、记忆快照
   `[记忆快照 nonce=…]`、摘要 `[会话摘要 nonce=…]`、生命周期

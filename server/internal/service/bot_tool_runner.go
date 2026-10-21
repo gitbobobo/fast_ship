@@ -91,6 +91,9 @@ func (s *BotService) commitAssistantTurn(bot *model.Bot, run *model.BotRun, requ
 					entry.call.FinishedAt = &now
 					entry.call.ErrorCode = botStrPtr(botErrCodeOf(err))
 					entry.call.ErrorMessage = botStrPtr(botErrMessage(err))
+					// 这是受理端同步拒绝（从未进异步队列），账本记回 sync，
+					// 避免排查时误以为是异步执行失败。
+					entry.call.ExecutionMode = string(model.BotExecutionSync)
 					entry.prepared = nil
 				}
 			}
