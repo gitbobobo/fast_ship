@@ -14,6 +14,7 @@ require (
 	github.com/openai/openai-go/v2 v2.7.1
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/spf13/viper v1.21.0
+	github.com/yuin/goldmark v1.8.6
 	go.uber.org/zap v1.27.1
 	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/crypto v0.57.0

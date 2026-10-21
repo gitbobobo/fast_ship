@@ -6,17 +6,23 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"path"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
 	"github.com/godbobo/fast_ship/server/internal/pkg/githubmedia"
 	"github.com/google/uuid"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/text"
 	"go.uber.org/zap"
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 	"gorm.io/gorm/clause"
 )
 
@@ -30,123 +36,232 @@ type screenshotRef struct {
 	Label string
 }
 
-var (
-	// Markdown 图片 ![alt](url)（允许 title）。
-	mdImageRe = regexp.MustCompile(`!\[([^\]]*)\]\(\s*<?([^\s>)]+)>?[^)]*\)`)
-	// HTML <img src="...">。
-	htmlImgRe = regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*>`)
-	// 裸链接（用户直接粘贴、没有图片语法）：任意 https URL 粗筛。排除 # 与
-	// 紧贴链接的中文/全角句读（。，、）——fragment 不是资源本身，句读会破
-	// 坏扩展名判定；# 在粗筛排除，三个来源的引用再由 normalizeRefURL 统一剥
-	// 一次兜底（md/HTML 的捕获正则不排除 #）。其余句尾标点不能放进排除类
-	// ——? : ! 等可能合法出现在 URL 中段/查询串里——由 normalizeRefURL 在
-	// 匹配之后规整。裸链没有图片语法背书，收集时额外按「GitHub 附件形态 ∪
-	// 位图扩展名」准入（见 collectScreenshotURLs 内注），三来源共用的结构
-	// 准入见 admitScreenshotURL。
-	bareURLRe = regexp.MustCompile(`https://[^\s)<>"'\]#。，、）]+`)
+// refSource 候选来源。准入按来源分策略：显式声明的图（Markdown 图片 /
+// HTML <img>）只做结构准入；裸链没有图片语法背书，还要求「GitHub 附件
+// 形态 ∪ 位图扩展名」。
+type refSource int
+
+const (
+	refSourceMarkdownImage refSource = iota
+	refSourceHTMLImage
+	refSourceBareLink
 )
 
-// trimTrailingPunct 剥掉引用匹配尾部粘住的标点：半角句尾标点（. , ; : ! ?）
-// 与全角句读（；：！？…）、右侧引号、反引号与中文直角引号（代码/引用包
-// 法）、Markdown 强调符（*）会跟着正则一起被吃进匹配——位图扩展名带尾标点
-// 判 false 漏收（HasScreenshots=false → 视觉轮静默不开），GitHub 附件形态带
-// 尾标点发请求 404 误写「截图无法下载」。这些字符可能合法出现在 URL 中段，
-// 不能进 bareURLRe 的排除类，只裁尾部不动中段；带查询串的正常链接结尾不是
-// 标点，不受影响。
+// prBodyMarkdown PR 描述的 Markdown 解析器（GFM 含 Linkify）。收集走 AST：
+// 「URL 到哪结束」是 GFM 规范已定义的问题——行内代码/围栏代码块不产链接
+// 节点、括号配对与 ASCII 尾标点剥离有规范行为、引用式与尖括号目的地都解析
+// 成同一个 Destination——逐字符正则重建它每轮审查都会漏一种包法。
+var prBodyMarkdown = goldmark.New(
+	goldmark.WithExtensions(extension.GFM, extension.Linkify),
+)
+
+// trimTrailingPunct 裸链候选的尾标点兜底裁剪。Linkify 已按 GFM 剥过一轮
+// ASCII 尾标点并做了括号配对，但中文句读、直角引号等非 GFM 字符不归它管
+// ——位图扩展名带尾标点判 false 漏收（HasScreenshots=false → 视觉轮静默
+// 不开），GitHub 附件形态带尾标点发请求 404 误写「截图无法下载」。裁剪只
+// 作用于尾部：这些字符可能合法出现在 URL 中段/查询串里，不能按类别整段
+// 排除。显式声明的图（![a](u) / <img src>）一律不裁——URL 写在括号/引号
+// 里边界明确，裁尾反而会吃掉合法字符（如 ?token=abc! 结尾的 !）。
 func trimTrailingPunct(u string) string {
-	const cutset = ".,;:!?。，、）；：！？…”’\"'`」』*"
-	return strings.TrimRight(u, cutset)
+	u = strings.TrimRightFunc(u, func(r rune) bool {
+		switch {
+		case strings.ContainsRune(`?!.,:*_'~`, r):
+			return true // GFM 尾标点集
+		case unicode.Is(unicode.Pe, r), unicode.Is(unicode.Pf, r):
+			return true // 右闭合符号（）》』】等）与右引号（’”等）
+		case strings.ContainsRune("。，、；：！？…", r):
+			return true // 中文句读（Unicode 类别归不进 Pe/Pf 的部分）
+		}
+		return false
+	})
+	// 括号配对兜底：`)` 多于 `(` 时剥掉尾部多余的 `)`（GFM 语义，Linkify
+	// 已做过一轮，这里补它漏掉的边角）。
+	for strings.HasSuffix(u, ")") && strings.Count(u, ")") > strings.Count(u, "(") {
+		u = strings.TrimSuffix(u, ")")
+	}
+	return u
 }
 
-// normalizeRefURL 收集层的引用 URL 规整，三个来源统一：先剥 #fragment（不是
-// 资源本身——下载面 normalize 会拒 fragment，IsGitHubMediaURL 也因此判
-// false，私有附件带 fragment 时 bearer 重试失效），再裁掉匹配尾部粘住的标
-// 点。收集结果与后续指纹都用规整后的 URL。
-func normalizeRefURL(u string) string {
+// normalizeRefURL 收集层的引用 URL 规整：先剥 #fragment（不是资源本身——
+// 下载面 normalize 会拒 fragment，IsGitHubMediaURL 也因此判 false，私有附
+// 件带 fragment 时 bearer 重试失效）；裸链再裁掉尾部粘住的句读/引号。收集
+// 结果与后续指纹都用规整后的 URL。
+func normalizeRefURL(u string, bare bool) string {
 	if head, _, ok := strings.Cut(u, "#"); ok {
 		u = head
 	}
-	return trimTrailingPunct(u)
+	if bare {
+		u = trimTrailingPunct(u)
+	}
+	return u
 }
 
-// admitScreenshotURL 结构准入，三个来源统一过一遍（只排除「下载面必然拒
-// 绝」的形态）：scheme 必须 https 且 host 非空（http、data:、相对路径发不
-// 出请求，下载面 normalize 同样要求）；路径带扩展名时必须是位图扩展名（集
-// 合与下载面 imagesOnly 同源，svg/视频/网页不收），无扩展名保留——可能是
-// image/* 直链，GitHub 附件直链本就没有扩展名。![]()/<img> 此前无差别收集，
-// 描述里只有 svg 徽章 / http 图 / data: URI / 网页链接时探测必然全败，每次
-// 同步都写一次「截图无法下载」failure，永远收敛不到「没有截图」。
+// admitScreenshotURL 结构准入，三个来源统一过一遍：严格镜像下载面
+// normalizeAllowedURL 的拒绝集——scheme 必须 https（截图面只走 https，
+// http、data:、相对路径发不出去）、host 非空、不能带 userinfo（下载面拒
+// User != nil，漏了会把 admin:pw@… 送去吃一个必拒）。不按扩展名拒绝：显式
+// 声明的图（![]()/<img>）交给探测的 Content-Type 裁决——render.php?id=1
+// 这类无扩展名直链可能是真图，扩展名误判会漏收（视觉轮静默不开）；「全部
+// 不是图」由探测三态收敛成 visualNone，不会每个同步事件刷「截图无法下载」。
 func admitScreenshotURL(u string) bool {
 	parsed, err := url.Parse(u)
 	if err != nil || parsed == nil {
 		return false
 	}
-	if parsed.Scheme != "https" || parsed.Host == "" {
-		return false
+	return parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+}
+
+// htmlImgSources 从一段 HTML literal 里取所有 <img src>。用 golang.org/x/net/html
+// 解析而不是正则：实体（&amp;）由解析器解码（旧正则会把 &amp; 原样收进
+// URL），注释 <!-- --> 与代码里的 img 不产元素节点，不会误收。
+func htmlImgSources(fragment string) []string {
+	root := &html.Node{Type: html.ElementNode, DataAtom: atom.Div, Data: "div"}
+	nodes, err := html.ParseFragment(strings.NewReader(fragment), root)
+	if err != nil {
+		return nil
 	}
-	if path.Ext(parsed.Path) == "" {
-		return true
+	var urls []string
+	var walkHTML func(*html.Node)
+	walkHTML = func(n *html.Node) {
+		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "img") {
+			for _, a := range n.Attr {
+				if strings.EqualFold(a.Key, "src") {
+					if v := strings.TrimSpace(a.Val); v != "" {
+						urls = append(urls, v)
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walkHTML(c)
+		}
 	}
-	return githubmedia.HasBitmapExtension(u)
+	for _, n := range nodes {
+		walkHTML(n)
+	}
+	return urls
+}
+
+// imageLabelText 图片的 alt 文本：子节点 Text 拼接（含行内格式时只取纯文本）。
+func imageLabelText(n *ast.Image, source []byte) string {
+	var b strings.Builder
+	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		if t, ok := c.(*ast.Text); ok {
+			b.Write(t.Segment.Value(source))
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // collectScreenshotURLs 按出现顺序提取 PR 描述里的图片引用；同 URL 只取首次，
-// 标签取 alt 文本，缺省回退文件名。
+// 标签取 alt 文本，缺省回退「截图 N」。三个来源（walk 顺序即文档序）：
+// ![alt](url)（含引用式与尖括号目的地）、HTML <img src>（行内与整行 HTML
+// 块）、裸链（Linkify 自动链接）。围栏代码/行内代码/HTML 注释不产链接节点，
+// 自然不收集。
 func collectScreenshotURLs(body string) []screenshotRef {
-	type hit struct {
-		pos int
-		ref screenshotRef
+	if strings.TrimSpace(body) == "" {
+		return nil
 	}
-	var hits []hit
-	for _, m := range mdImageRe.FindAllStringSubmatchIndex(body, -1) {
-		url := normalizeRefURL(strings.TrimSpace(body[m[4]:m[5]]))
-		label := strings.TrimSpace(body[m[2]:m[3]])
-		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url, Label: label}})
+	type candidate struct {
+		ref    screenshotRef
+		source refSource
 	}
-	for _, m := range htmlImgRe.FindAllStringSubmatchIndex(body, -1) {
-		url := normalizeRefURL(strings.TrimSpace(body[m[2]:m[3]]))
-		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})
+	var candidates []candidate
+	source := []byte(body)
+	doc := prBodyMarkdown.Parser().Parse(text.NewReader(source))
+	err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n := n.(type) {
+		case *ast.Image:
+			// 目的地由 goldmark 填充：行内、尖括号（![a](<u(1).png>)）、引用
+			// 式（![a][id] + 定义行）解析成同一个 Destination；没有定义的引
+			// 用不产 Image 节点，自然不收集。显式声明的 URL 不裁尾。
+			candidates = append(candidates, candidate{
+				ref: screenshotRef{
+					URL:   normalizeRefURL(string(n.Destination), false),
+					Label: imageLabelText(n, source),
+				},
+				source: refSourceMarkdownImage,
+			})
+		case *ast.AutoLink:
+			// Linkify/尖括号自动链接 → 裸链候选：URL 边界由 GFM 定义（ASCII
+			// 尾标点与括号配对已剥），中文句读等非 GFM 字符再兜底裁一次。
+			if n.AutoLinkType != ast.AutoLinkURL {
+				return ast.WalkContinue, nil
+			}
+			candidates = append(candidates, candidate{
+				ref:    screenshotRef{URL: normalizeRefURL(string(n.URL(source)), true)},
+				source: refSourceBareLink,
+			})
+		case *ast.RawHTML:
+			for _, u := range htmlImgSources(string(n.Segments.Value(source))) {
+				candidates = append(candidates, candidate{
+					ref:    screenshotRef{URL: normalizeRefURL(u, false)},
+					source: refSourceHTMLImage,
+				})
+			}
+		case *ast.HTMLBlock:
+			for i := 0; i < n.Lines().Len(); i++ {
+				line := n.Lines().At(i)
+				for _, u := range htmlImgSources(string(line.Value(source))) {
+					candidates = append(candidates, candidate{
+						ref:    screenshotRef{URL: normalizeRefURL(u, false)},
+						source: refSourceHTMLImage,
+					})
+				}
+			}
+		}
+		return ast.WalkContinue, nil
+	})
+	if err != nil {
+		return nil
 	}
-	for _, m := range bareURLRe.FindAllStringIndex(body, -1) {
-		url := normalizeRefURL(body[m[0]:m[1]])
+
+	seen := map[string]struct{}{}
+	var refs []screenshotRef
+	for _, c := range candidates {
+		// 结构准入在去重前对三来源统一过一遍：下载面必然拒绝的形态不进收
+		// 集结果。同 URL 带/不带 fragment 规整后也按同一张去重。
+		if c.ref.URL == "" || !admitScreenshotURL(c.ref.URL) {
+			continue
+		}
 		// 裸链没有图片语法背书，在结构准入之外额外要求「GitHub 附件形态
 		// （附件直链无扩展名）∪ 位图扩展名」：无扩展名的任意 https 链接都
 		// 收会把描述里每个网页链接当成截图（按扩展名结尾判定，接受这个启
 		// 发式的误收）。
-		if !githubmedia.IsGitHubAttachmentURL(url) && !githubmedia.HasBitmapExtension(url) {
+		if c.source == refSourceBareLink &&
+			!githubmedia.IsGitHubAttachmentURL(c.ref.URL) && !githubmedia.HasBitmapExtension(c.ref.URL) {
 			continue
 		}
-		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})
-	}
-	// 三个来源按原文位置合并排序（HTML 与 Markdown 混用时顺序不乱）。
-	for i := 1; i < len(hits); i++ {
-		for j := i; j > 0 && hits[j-1].pos > hits[j].pos; j-- {
-			hits[j-1], hits[j] = hits[j], hits[j-1]
-		}
-	}
-	seen := map[string]struct{}{}
-	var refs []screenshotRef
-	for _, h := range hits {
-		if h.ref.URL == "" {
+		if _, dup := seen[c.ref.URL]; dup {
 			continue
 		}
-		// 结构准入在去重前对三来源统一过一遍：下载面必然拒绝的形态不进收
-		// 集结果——否则探测必然全败，每次同步都写「截图无法下载」failure；
-		// 准入后 refs 为空 → HasScreenshots=false → visualNone。同 URL 带/
-		// 不带 fragment 规整后也按同一张去重。
-		if !admitScreenshotURL(h.ref.URL) {
-			continue
+		seen[c.ref.URL] = struct{}{}
+		if c.ref.Label == "" {
+			c.ref.Label = fmt.Sprintf("截图 %d", len(refs)+1)
 		}
-		if _, dup := seen[h.ref.URL]; dup {
-			continue
-		}
-		seen[h.ref.URL] = struct{}{}
-		if h.ref.Label == "" {
-			h.ref.Label = fmt.Sprintf("截图 %d", len(refs)+1)
-		}
-		refs = append(refs, h.ref)
+		refs = append(refs, c.ref)
 	}
 	return refs
+}
+
+// logURLRe 日志脱敏的 URL 匹配：http(s) 序列，到空白/引号/尖括号为止。
+var logURLRe = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
+// scrubLogURLs 日志脱敏：把文本里的 http(s) URL 剥掉 query/fragment/userinfo，
+// 只留 scheme://host/path。失败日志里的 URL 可能带预签名 query——重定向后
+// 的 *url.Error 内嵌的是最终请求的完整地址，原样落日志会把凭证写进排查记录。
+// 解析不了的序列原样保留。
+func scrubLogURLs(s string) string {
+	return logURLRe.ReplaceAllStringFunc(s, func(m string) string {
+		parsed, err := url.Parse(m)
+		if err != nil || parsed == nil {
+			return m
+		}
+		return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: parsed.Path}).String()
+	})
 }
 
 // errReviewMediaUnconfigured 部署没有配置截图下载面（s.media == nil）。与
@@ -267,8 +382,11 @@ func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber 
 		var storagePath, mime, errText string
 		var size int64
 		if cached, err := s.downloadScreenshot(ctx, installationID, ref.URL); err != nil {
-			// 原始错误（含网络层英文文案）只进日志，落库的是中文可读原因。
-			s.logger.Warn("截图下载失败", zap.String("url", ref.URL), zap.Error(err))
+			// 原始错误（含网络层英文文案）只进日志，落库的是中文可读原因；
+			// URL 与错误文本先脱敏——*url.Error 内嵌重定向后的完整地址，预签
+			// 名 query 不落日志。
+			s.logger.Warn("截图下载失败", zap.String("url", scrubLogURLs(ref.URL)),
+				zap.String("error", scrubLogURLs(err.Error())))
 			errText = screenshotErrorText(err)
 		} else {
 			storagePath = cached.Path
@@ -333,20 +451,45 @@ var screenshotProbeTimeout = 30 * time.Second
 // 顺序重复同一张挂死图。var 是为了让测试缩短等待。
 var screenshotProbeAttemptTimeout = 10 * time.Second
 
+// screenshotProbeResult 探测三态：ready 至少一张可下载；none 全部「不是图」
+// （内容/地址形态被下载面拒）；unavailable 拉不到（网络故障、超时、预算耗
+// 尽）。成败两态表达不了「全部不是图」——那该收敛到 visualNone，而不是每次
+// 同步都刷一条「截图无法下载」failure。
+type screenshotProbeResult int
+
+const (
+	probeReady screenshotProbeResult = iota
+	probeNone
+	probeUnavailable
+)
+
+// isNotAnImageError 失败是否属于「不是图」：下载面对内容/地址形态的确定性
+// 拒绝（ErrUnsupportedUpstreamMedia=内容不是位图、ErrInvalidMediaURL=地址
+// 形态不支持），换网络/令牌都不会变。其余一切（网络、超时、缓存、预算）都
+// 是「拉不到」。
+func isNotAnImageError(err error) bool {
+	return errors.Is(err, githubmedia.ErrUnsupportedUpstreamMedia) ||
+		errors.Is(err, githubmedia.ErrInvalidMediaURL)
+}
+
 // probeScreenshots 试下载 PR 描述里的截图，第一张成功即停：成功图已落盘缓存
-// （视觉运行时直接命中），全部失败返回第一条失败原因（可能为空串，由调用方
-// 兜底文案）。探测不写 review_assets——资产行仍由视觉运行时的 ensureAssets
-// 落账，这里不按资产行计数，避免「已不在描述里的陈旧资产」被当成可用截图。
-// 单张下载失败只累计原因不外抛：downloadScreenshot 的错误已被
-// screenshotErrorText 归纳成中文文案，对调用方没有额外的错误信息。
-func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int64, prBody string) (bool, string) {
+// （视觉运行时直接命中）。逐 ref 分类失败：「不是图」与「拉不到」（见
+// isNotAnImageError）。任一成功 → probeReady；全部探完且全部「不是图」→
+// probeNone；其余（任一拉不到、或总预算耗尽未探完）→ probeUnavailable，
+// reason 取第一条「拉不到」类原因，没有再取第一条失败原因。探测不写
+// review_assets——资产行仍由视觉运行时的 ensureAssets 落账，这里不按资产
+// 行计数，避免「已不在描述里的陈旧资产」被当成可用截图。
+func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int64, prBody string) (screenshotProbeResult, string) {
 	refs := collectScreenshotURLs(prBody)
 	if len(refs) == 0 {
-		return false, ""
+		return probeNone, ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, screenshotProbeTimeout)
 	defer cancel()
-	reason := ""
+	firstReason := ""
+	firstFetchFailReason := ""
+	fetchFailed := false
+	completed := true
 	for _, ref := range refs {
 		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
 		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
@@ -354,21 +497,36 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 		_, err := s.downloadScreenshot(attemptCtx, installationID, ref.URL)
 		cancel()
 		if err == nil {
-			return true, ""
+			return probeReady, ""
 		}
 		text := screenshotErrorText(err)
-		if reason == "" {
-			reason = text
+		if firstReason == "" {
+			firstReason = text
+		}
+		if !isNotAnImageError(err) {
+			fetchFailed = true
+			if firstFetchFailReason == "" {
+				firstFetchFailReason = text
+			}
 		}
 		// 逐张失败记日志：status 只带第一条原因，其余各张的失败（含网络层
-		// 原始英文文案）只有这里能留下排查线索。
-		s.logger.Warn("截图探测失败", zap.String("url", ref.URL),
-			zap.String("reason", text), zap.Error(err))
+		// 原始英文文案）只有这里能留下排查线索；URL 与错误文本先脱敏。
+		s.logger.Warn("截图探测失败", zap.String("url", scrubLogURLs(ref.URL)),
+			zap.String("reason", text), zap.String("error", scrubLogURLs(err.Error())))
 		if ctx.Err() != nil {
+			// 总预算耗尽没探完：不能下「全部不是图」的结论（后面的引用可能
+			// 还有图），按拉不到收敛，下轮同步事件再试。
+			completed = false
 			break
 		}
 	}
-	return false, reason
+	if fetchFailed {
+		return probeUnavailable, firstFetchFailReason
+	}
+	if !completed {
+		return probeUnavailable, firstReason
+	}
+	return probeNone, ""
 }
 
 // AgentScreenshots GET /api/review-agent/screenshots：仅视觉运行可用。
@@ -419,8 +577,18 @@ func (s *ReviewService) AgentScreenshots(ctx context.Context, runID string) ([]a
 		changed = screenshotFingerprint(prevRefs) != fingerprint
 	}
 
+	// 陈旧行过滤：规整/准入口径演进后，同一 head 可能残留旧口径的资产行
+	// （URL 规整形态不同、或按旧准入本不该收的）。只把 SourceURL 仍在当前
+	// 描述收集结果里的行交给审查员，残留行不再展示。
+	currentURLs := map[string]struct{}{}
+	for _, ref := range collectScreenshotURLs(pr.Body) {
+		currentURLs[ref.URL] = struct{}{}
+	}
 	items := make([]api.ReviewAgentScreenshot, 0, len(assets))
 	for _, a := range assets {
+		if _, current := currentURLs[a.SourceURL]; !current {
+			continue
+		}
 		item := api.ReviewAgentScreenshot{Id: a.ID, Label: a.Label}
 		if a.StoragePath == "" {
 			// 下载失败：给出原因但不给 URL（图片端点只会 404），审查员据此

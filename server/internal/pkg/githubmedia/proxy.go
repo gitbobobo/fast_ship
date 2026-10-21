@@ -698,9 +698,9 @@ func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, boo
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, false, nil
 		}
-		// 其余本地读失败（权限、目录损坏）同样打标；ErrNotExist（缓存未命中）
-		// 保持 (nil, false, nil) 的既有语义，不算失败。
-		return nil, false, markLocalCacheErr(err)
+		// 其余读失败（权限、目录损坏）降级：best-effort 清掉这一条，清得掉按
+		// miss 走重下，清不掉才上报（见 discardCacheEntry）。
+		return s.discardCacheEntry(metaPath, cachePath)
 	}
 
 	var entry cacheEntry
@@ -722,7 +722,9 @@ func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, boo
 			_ = os.Remove(metaPath)
 			return nil, false, nil
 		}
-		return nil, false, markLocalCacheErr(err)
+		// meta 在而 data 读不到（权限、损坏）：同样降级重下，不把一次可自愈
+		// 的单条损坏上报成目录级故障。
+		return s.discardCacheEntry(metaPath, cachePath)
 	}
 
 	entry.Size = info.Size()
@@ -730,6 +732,19 @@ func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, boo
 		Metadata: entry,
 		Path:     cachePath,
 	}, true, nil
+}
+
+// discardCacheEntry 单条缓存不可读时的降级清理：best-effort 删除 meta 与 data，
+// 都清得掉（或本就不在）按 miss 返回，让本次请求走重下；清理失败说明是目录级
+// 故障（权限/磁盘），才以 ErrLocalCache 上报——降级不了的现场必须留错误，否
+// 则每次请求都静默重复同一失败且无法自愈。
+func (s *ProxyService) discardCacheEntry(metaPath, cachePath string) (*CachedMedia, bool, error) {
+	for _, err := range []error{os.Remove(metaPath), os.Remove(cachePath)} {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, false, markLocalCacheErr(err)
+		}
+	}
+	return nil, false, nil
 }
 
 // acquireDownloadLock 返回该 URL 的下载闸（容量 1 信号量）：发送成功即持有，
@@ -866,7 +881,9 @@ func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) b
 
 	baseType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
 	if s.imagesOnly {
-		if baseType == "image/svg+xml" {
+		// svg 即使标着 image/* 也不收：image/svg+xml 是标准写法，image/svg
+		// （不带 +xml）是上游会用到的非标准变体，一并按前缀拒。
+		if strings.HasPrefix(baseType, "image/svg") {
 			return false
 		}
 		return strings.HasPrefix(baseType, "image/") ||
