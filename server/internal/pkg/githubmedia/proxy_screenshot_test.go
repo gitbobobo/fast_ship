@@ -2,6 +2,7 @@ package githubmedia
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -325,6 +326,70 @@ func TestFetchAndCacheBearerScopeIsolation(t *testing.T) {
 	}
 	if hits != hitsAfterFetch+2 {
 		t.Fatalf("hits = %d, want install:1 仍命中自己的条目", hits)
+	}
+}
+
+// 存量缓存清场：scope 进键之前写下的旧条目（meta 无 Scope、键=纯 URL）来源
+// 不可辨——可能装着安装令牌拉的私有附件。服务构造时清一次，之后 GetCached
+// 不再命中旧键，请求穿透到上游重拉。
+func TestLegacyCacheEntriesPurgedOnStart(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png"))
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	cfg := serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	}
+	root := t.TempDir()
+	u := upstream.URL + "/x.png"
+
+	// 老服务写入一条匿名条目（旧格式：meta 无 Scope）。
+	svcOld := newService(root, cfg)
+	if _, err := svcOld.FetchAndCache(context.Background(), u); err != nil {
+		t.Fatalf("legacy fetch: %v", err)
+	}
+	var entry cacheEntry
+	meta, err := os.ReadFile(svcOld.metaPath(u, ""))
+	if err != nil || json.Unmarshal(meta, &entry) != nil || entry.Scope != "" {
+		t.Fatalf("seed legacy entry: %v %+v", err, entry)
+	}
+	if cached, ok, err := svcOld.getCachedNormalized(u, ""); err != nil || !ok || cached == nil {
+		t.Fatalf("legacy entry should be readable before upgrade: ok=%v err=%v", ok, err)
+	}
+	// 模拟升级前部署：摘掉版本标记（老代码不写它）。
+	if err := os.Remove(filepath.Join(svcOld.cacheDir, legacyScopeMarker)); err != nil {
+		t.Fatalf("drop marker: %v", err)
+	}
+
+	// 新服务构造即清场：旧条目全删，同 URL 再请求穿透到上游重拉。
+	svc := newService(root, cfg)
+	if _, ok, err := svc.getCachedNormalized(u, ""); err != nil || ok {
+		t.Fatalf("getCachedNormalized ok=%v err=%v, want 存量条目已清、按 miss", ok, err)
+	}
+	if _, err := svc.FetchAndCache(context.Background(), u); err != nil {
+		t.Fatalf("refetch: %v", err)
+	}
+	if hits != 2 {
+		t.Fatalf("hits = %d, want 旧条目不可用、真重拉", hits)
+	}
+	// 重拉后的新条目带 Scope 字段（匿名=""也显式记录由键区分），正常命中。
+	if cached, ok, err := svc.getCachedNormalized(u, ""); err != nil || !ok || cached == nil {
+		t.Fatalf("new entry should hit: ok=%v err=%v", ok, err)
+	}
+	// 再构造一次不清场：新条目仍在。
+	svcAgain := newService(root, cfg)
+	if _, ok, err := svcAgain.getCachedNormalized(u, ""); err != nil || !ok {
+		t.Fatalf("second construction must not wipe v2 entries: ok=%v err=%v", ok, err)
 	}
 }
 

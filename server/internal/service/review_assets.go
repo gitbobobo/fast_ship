@@ -37,14 +37,15 @@ type screenshotRef struct {
 }
 
 // refSource 候选来源。准入按来源分策略：显式声明的图（Markdown 图片 /
-// HTML <img>）只做结构准入；裸链没有图片语法背书，还要求「GitHub 附件
-// 形态 ∪ 位图扩展名」。
+// HTML <img>）只做结构准入；裸链与普通链接目的地（[label](u)、<a href>）
+// 没有图片语法背书，还要求「GitHub 附件形态 ∪ 位图扩展名」。
 type refSource int
 
 const (
 	refSourceMarkdownImage refSource = iota
 	refSourceHTMLImage
 	refSourceBareLink
+	refSourceLink // 普通链接目的地（ast.Link 与 <a href>）
 )
 
 // prBodyMarkdown PR 描述的 Markdown 解析器（GFM 含 Linkify）。收集走 AST：
@@ -111,23 +112,38 @@ func admitScreenshotURL(u string) bool {
 	return parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
 }
 
-// htmlImgSources 从一段 HTML literal 里取所有 <img src>。用 golang.org/x/net/html
+// htmlMediaSources 从一段 HTML literal 里取所有 <img src> 与 <a href>。
+// 用 golang.org/x/net/html
 // 解析而不是正则：实体（&amp;）由解析器解码（旧正则会把 &amp; 原样收进
-// URL），注释 <!-- --> 与代码里的 img 不产元素节点，不会误收。
-func htmlImgSources(fragment string) []string {
+// URL），注释 <!-- --> 与代码里的元素不产节点，不会误收。`<a href>` 与
+// `<img src>` 同段一次解析取出：链接目的地交给「链接」准入口径（GitHub
+// 附件形态 ∪ 位图扩展名）。
+func htmlMediaSources(fragment string) (imgs, links []string) {
 	root := &html.Node{Type: html.ElementNode, DataAtom: atom.Div, Data: "div"}
 	nodes, err := html.ParseFragment(strings.NewReader(fragment), root)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	var urls []string
 	var walkHTML func(*html.Node)
 	walkHTML = func(n *html.Node) {
-		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "img") {
-			for _, a := range n.Attr {
-				if strings.EqualFold(a.Key, "src") {
-					if v := strings.TrimSpace(a.Val); v != "" {
-						urls = append(urls, v)
+		if n.Type == html.ElementNode {
+			var attr string
+			switch {
+			case strings.EqualFold(n.Data, "img"):
+				attr = "src"
+			case strings.EqualFold(n.Data, "a"):
+				attr = "href"
+			}
+			if attr != "" {
+				for _, a := range n.Attr {
+					if strings.EqualFold(a.Key, attr) {
+						if v := strings.TrimSpace(a.Val); v != "" {
+							if attr == "src" {
+								imgs = append(imgs, v)
+							} else {
+								links = append(links, v)
+							}
+						}
 					}
 				}
 			}
@@ -139,12 +155,13 @@ func htmlImgSources(fragment string) []string {
 	for _, n := range nodes {
 		walkHTML(n)
 	}
-	return urls
+	return imgs, links
 }
 
-// imageLabelText 图片的 alt 文本：递归收集所有后代 Text（`![**登录页**](u)`
-// 这类带行内格式的 alt 套在 Emphasis 等节点下，只看直接子节点会丢成空串）。
-func imageLabelText(n *ast.Image, source []byte) string {
+// imageLabelText 图片 alt / 链接 label 文本：递归收集所有后代 Text（
+// `![**登录页**](u)` 这类带行内格式的文本套在 Emphasis 等节点下，只看直接
+// 子节点会丢成空串）。
+func imageLabelText(n ast.Node, source []byte) string {
 	var b strings.Builder
 	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
 		if entering {
@@ -195,15 +212,39 @@ func collectScreenshotURLs(body string) []screenshotRef {
 			if n.AutoLinkType != ast.AutoLinkURL {
 				return ast.WalkContinue, nil
 			}
+			u := string(n.URL(source))
+			// www. 前缀裸链的 scheme 是 Linkify 按 GFM 补的 http://——作者没
+			// 写协议，GitHub 渲染同款可点链接；下载面只收 https，按 https 准
+			// 入。显式写 http:// 的裸链原样保留（准入照常拒收）。
+			if strings.HasPrefix(string(n.Text(source)), "www.") {
+				u = "https://" + strings.TrimPrefix(u, "http://")
+			}
 			candidates = append(candidates, candidate{
-				ref:    screenshotRef{URL: normalizeRefURL(string(n.URL(source)), true)},
+				ref:    screenshotRef{URL: normalizeRefURL(u, true)},
 				source: refSourceBareLink,
 			})
+		case *ast.Link:
+			// 普通链接的目的地也可能是 GitHub 附件/位图直链（旧 bareAttachRe
+			// 的覆盖面）：边界由 goldmark 精确给出不裁尾，准入走「链接」口径。
+			candidates = append(candidates, candidate{
+				ref: screenshotRef{
+					URL:   normalizeRefURL(string(n.Destination), false),
+					Label: imageLabelText(n, source),
+				},
+				source: refSourceLink,
+			})
 		case *ast.RawHTML:
-			for _, u := range htmlImgSources(string(n.Segments.Value(source))) {
+			imgs, links := htmlMediaSources(string(n.Segments.Value(source)))
+			for _, u := range imgs {
 				candidates = append(candidates, candidate{
 					ref:    screenshotRef{URL: normalizeRefURL(u, false)},
 					source: refSourceHTMLImage,
+				})
+			}
+			for _, u := range links {
+				candidates = append(candidates, candidate{
+					ref:    screenshotRef{URL: normalizeRefURL(u, false)},
+					source: refSourceLink,
 				})
 			}
 		case *ast.HTMLBlock:
@@ -214,10 +255,17 @@ func collectScreenshotURLs(body string) []screenshotRef {
 				line := n.Lines().At(i)
 				buf.Write(line.Value(source))
 			}
-			for _, u := range htmlImgSources(buf.String()) {
+			imgs, links := htmlMediaSources(buf.String())
+			for _, u := range imgs {
 				candidates = append(candidates, candidate{
 					ref:    screenshotRef{URL: normalizeRefURL(u, false)},
 					source: refSourceHTMLImage,
+				})
+			}
+			for _, u := range links {
+				candidates = append(candidates, candidate{
+					ref:    screenshotRef{URL: normalizeRefURL(u, false)},
+					source: refSourceLink,
 				})
 			}
 		}
@@ -235,11 +283,11 @@ func collectScreenshotURLs(body string) []screenshotRef {
 		if c.ref.URL == "" || !admitScreenshotURL(c.ref.URL) {
 			continue
 		}
-		// 裸链没有图片语法背书，在结构准入之外额外要求「GitHub 附件形态
-		// （附件直链无扩展名）∪ 位图扩展名」：无扩展名的任意 https 链接都
-		// 收会把描述里每个网页链接当成截图（按扩展名结尾判定，接受这个启
-		// 发式的误收）。
-		if c.source == refSourceBareLink &&
+		// 裸链与普通链接目的地都没有图片语法背书，在结构准入之外额外要求
+		// 「GitHub 附件形态（附件直链无扩展名）∪ 位图扩展名」：无扩展名的
+		// 任意 https 链接都收会把描述里每个网页链接当成截图（按扩展名结尾
+		// 判定，接受这个启发式的误收）。
+		if (c.source == refSourceBareLink || c.source == refSourceLink) &&
 			!githubmedia.IsGitHubAttachmentURL(c.ref.URL) && !githubmedia.HasBitmapExtension(c.ref.URL) {
 			continue
 		}

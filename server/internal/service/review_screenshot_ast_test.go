@@ -122,6 +122,51 @@ func TestCollectScreenshotURLsBareTrailingNonGFM(t *testing.T) {
 	}
 }
 
+// 普通链接目的地回归：旧 bareAttachRe 会收 `[label](github-attach-url)` 与
+// <a href> 里的附件直链——AST 走 ast.Link / a[href] 补齐，准入同裸链口径
+// （GitHub 附件形态 ∪ 位图扩展名），普通网页链接不误收。
+func TestCollectScreenshotURLsMarkdownAndAnchorLinks(t *testing.T) {
+	attach := "https://github.com/user-attachments/assets/9f0c8b7a-1111-2222-3333-444455556666"
+	refs := collectScreenshotURLs("见 [附件](" + attach + ") 与 <a href=\"" + attach + "?v=2\">大图</a>")
+	if len(refs) != 2 {
+		t.Fatalf("refs = %+v, want 链接目的地（md + a[href]）都收集", refs)
+	}
+	if refs[0].URL != attach || refs[0].Label != "附件" {
+		t.Fatalf("refs[0] = %+v, want md 链接目的地 + label 文本", refs[0])
+	}
+	if refs[1].URL != attach+"?v=2" {
+		t.Fatalf("refs[1] = %+v, want <a href> 目的地", refs[1])
+	}
+	// 位图扩展名的普通链接也收（链接语义下它多半就是图）。
+	refs = collectScreenshotURLs("[界面](https://uiv.example.cn/f/shot.png)")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.example.cn/f/shot.png" || refs[0].Label != "界面" {
+		t.Fatalf("refs = %+v, want 位图扩展名链接收集 + label", refs)
+	}
+	// 无图片形状兜底的普通链接不收——否则描述里每个网页链接都成截图。
+	for _, body := range []string{
+		"[文档](https://example.com/docs/page)",
+		"<a href=\"https://example.com/docs/page\">文档</a>",
+		"[www 站](https://example.com/)",
+	} {
+		if refs := collectScreenshotURLs(body); len(refs) != 0 {
+			t.Fatalf("body %q: refs = %+v, want 普通网页链接不收集", body, refs)
+		}
+	}
+}
+
+// www. 前缀裸链：Linkify 按 GFM 补 http:// scheme（作者没写协议），收集时
+// 升级 https 进准入——否则 GitHub 渲染成可点链接的图地址被我们静默丢掉。
+// 显式写 http:// 的裸链不升级，准入照常拒收。
+func TestCollectScreenshotURLsWWWPrefixUpgrade(t *testing.T) {
+	refs := collectScreenshotURLs("see www.uiv.example.cn/f/a.png end")
+	if len(refs) != 1 || refs[0].URL != "https://www.uiv.example.cn/f/a.png" {
+		t.Fatalf("refs = %+v, want www. 裸链升级 https 收集", refs)
+	}
+	if refs := collectScreenshotURLs("see http://uiv.example.cn/f/a.png end"); len(refs) != 0 {
+		t.Fatalf("refs = %+v, want 显式 http:// 裸链仍被拒收", refs)
+	}
+}
+
 // 探测三态：全部「不是图」→ probeNone（收敛 visualNone，不刷「截图无法下
 // 载」）；「不是图」与「拉不到」混合 → probeUnavailable 且 reason 取拉不到
 // 那条。

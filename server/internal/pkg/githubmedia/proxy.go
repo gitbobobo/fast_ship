@@ -113,7 +113,8 @@ type cacheEntry struct {
 	// Scope 写入该条目所用的授权域（如安装 id）；空串 = 匿名拉取的公开内容。
 	// 带 scope 的条目只对同 scope 的请求命中——私有附件被某安装令牌拉进缓存
 	// 后，匿名或其他安装的请求不得直接命中（否则知道 URL 就能跨安装取到私
-	// 有内容）。旧条目无此字段按匿名处理。
+	// 有内容）。无此字段的旧条目不可信（来源不可辨），服务启动时由
+	// purgeLegacyCacheEntries 一次性清掉。
 	Scope string `json:"scope,omitempty"`
 }
 
@@ -215,7 +216,7 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 	if cfg.client == nil {
 		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress)
 	}
-	return &ProxyService{
+	s := &ProxyService{
 		client:            cfg.client,
 		cacheDir:          filepath.Join(cacheRoot, cfg.cacheSubdir),
 		cacheTTL:          cfg.cacheTTL,
@@ -225,6 +226,34 @@ func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
 		imagesOnly:        cfg.imagesOnly,
 		download:          make(map[string]chan struct{}),
 	}
+	s.purgeLegacyCacheEntries()
+	return s
+}
+
+// legacyScopeMarker scope 进缓存键之前的存量条目不可信标记：老条目的 meta
+// 没有 Scope 字段，无法区分是匿名拉取的公开内容还是安装令牌拉取的私有附
+// 件——后者若继续按匿名键命中，知道 URL 就能经 /api/github/media-proxy 跨
+// 安装取到私有内容。构造服务时清一次：标记缺失则删光目录下的缓存文件，
+// 公开内容重拉即可，私有内容宁可重拉不可误给。
+const legacyScopeMarker = ".cache-scope-v2"
+
+func (s *ProxyService) purgeLegacyCacheEntries() {
+	if _, err := os.Stat(filepath.Join(s.cacheDir, legacyScopeMarker)); err == nil {
+		return
+	}
+	if err := os.MkdirAll(s.cacheDir, 0o750); err != nil {
+		return
+	}
+	if entries, err := os.ReadDir(s.cacheDir); err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasSuffix(name, ".bin") || strings.HasSuffix(name, ".json") {
+				_ = os.Remove(filepath.Join(s.cacheDir, name))
+			}
+		}
+	}
+	// 标记写失败也接受：下次启动重清一遍空目录而已，不会因此泄漏。
+	_ = os.WriteFile(filepath.Join(s.cacheDir, legacyScopeMarker), []byte("scope-v2\n"), 0o640)
 }
 
 // newProxyService 旧内部构造（GitHub 媒体面语义：允许 http/https、图片视频
