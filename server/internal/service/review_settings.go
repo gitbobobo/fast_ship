@@ -76,9 +76,17 @@ func (s *ReviewService) GetSettings(ctx context.Context, userID, projectID strin
 		return nil, err
 	}
 
+	// 未关联仓库（owner/repo 任一为空）时不回显 "/"：CodeRepoFullName() 会把
+	// 两个空串拼成 "/"，响应里归一为空串；反查/同步路径已有空值守卫。
+	repoFullName := ""
+	if owner, repo := project.CodeRepo(); owner != "" && repo != "" {
+		repoFullName = owner + "/" + repo
+	}
+
 	// 未保存过的行采用模型默认触发项（opened/synchronize 开）。
 	out := &api.ReviewSettings{
 		ProjectId:             projectID,
+		RepoFullName:          repoFullName,
 		Enabled:               false,
 		TriggerOpened:         true,
 		TriggerSynchronize:    true,
@@ -125,7 +133,7 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	}
 
 	if input.Enabled {
-		if project.GithubOwner == "" || project.GithubRepo == "" {
+		if cOwner, cRepo := project.CodeRepo(); cOwner == "" || cRepo == "" {
 			return nil, errs.ErrProjectGitHubNotConfigured
 		}
 		if n := len(codeCombos); n < 1 || n > reviewMaxCodeCombinations {
@@ -195,7 +203,7 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	row := model.ProjectReviewSettings{
 		ProjectID:              projectID,
 		UserID:                 userID,
-		RepoFullName:           strings.ToLower(project.GithubOwner + "/" + project.GithubRepo),
+		RepoFullName:           strings.ToLower(project.CodeRepoFullName()),
 		Enabled:                input.Enabled,
 		TriggerOpened:          input.TriggerOpened,
 		TriggerSynchronize:     input.TriggerSynchronize,
@@ -209,16 +217,16 @@ func (s *ReviewService) UpdateSettings(ctx context.Context, userID, projectID st
 	// 同仓库占用（此前那次在事务外，两个并发保存可能都通过），并由部分唯一
 	// 索引 idx_project_review_settings_repo 兜底。
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 事务内复核项目仓库：此前前置条件校验用的是事务外的项目快照，
-		// 并发改仓库可能让 enabled 落到旧仓库上（唯一占用与账本分区都按
-		// 旧键写错）。事务时刻与快照不一致一律 400，让用户刷新重来。
+		// 事务内复核项目仓库（代码仓库，未单独配置即公开仓库）：此前前置条件
+		// 校验用的是事务外的项目快照，并发改仓库可能让 enabled 落到旧仓库上
+		// （唯一占用与账本分区都按旧键写错）。事务时刻与快照不一致一律 400，
+		// 让用户刷新重来。
 		var fresh model.Project
-		if err := tx.Select("id", "github_owner", "github_repo").
+		if err := tx.Select("id", "github_owner", "github_repo", "code_github_owner", "code_github_repo").
 			Where("id = ?", projectID).First(&fresh).Error; err != nil {
 			return err
 		}
-		if !strings.EqualFold(fresh.GithubOwner+"/"+fresh.GithubRepo,
-			project.GithubOwner+"/"+project.GithubRepo) {
+		if !strings.EqualFold(fresh.CodeRepoFullName(), project.CodeRepoFullName()) {
 			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
 		}
 		if row.Enabled {
@@ -446,8 +454,9 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 	}
 	add(api.GithubApp, "部署已配置 GitHub App", !appConfigured, appDetail)
 
-	repoFullName := project.GithubOwner + "/" + project.GithubRepo
-	repoLinked := project.GithubOwner != "" && project.GithubRepo != ""
+	repoOwner, repoName := project.CodeRepo()
+	repoFullName := repoOwner + "/" + repoName
+	repoLinked := repoOwner != "" && repoName != ""
 
 	// 2. App 已安装到该仓库：保存/读取前实时调一次 GitHub（安装令牌
 	// GetRepository），失败即缺项。部署未配置 App 时不发起调用。
@@ -516,18 +525,19 @@ func (s *ReviewService) reviewPrerequisites(ctx context.Context, project *model.
 }
 
 // reviewTakenBy 查同仓库已启用审查的其他项目，返回其拥有者登录名；
-// 无占用返回空串。
+// 无占用返回空串。占用判定只看设置行的 repo_full_name 快照（enabled 行的
+// 唯一真相，项目行改仓库会刷新它），不再回联 projects。
 func (s *ReviewService) reviewTakenBy(ctx context.Context, project *model.Project) (string, error) {
-	if project.GithubOwner == "" || project.GithubRepo == "" {
+	repoOwner, repoName := project.CodeRepo()
+	if repoOwner == "" || repoName == "" {
 		return "", nil
 	}
 	var logins []string
 	err := s.db.WithContext(ctx).
 		Table("project_review_settings AS s").
-		Joins("JOIN projects p ON p.id = s.project_id").
-		Joins("JOIN users u ON u.id = p.user_id").
-		Where("s.enabled AND s.project_id <> ? AND lower(p.github_owner) = ? AND lower(p.github_repo) = ?",
-			project.ID, strings.ToLower(project.GithubOwner), strings.ToLower(project.GithubRepo)).
+		Joins("JOIN users u ON u.id = s.user_id").
+		Where("s.enabled AND s.project_id <> ? AND s.repo_full_name = ?",
+			project.ID, strings.ToLower(repoOwner+"/"+repoName)).
 		Limit(1).
 		Pluck("u.username", &logins).Error
 	if err != nil {

@@ -62,6 +62,10 @@ interface Project {
   description: string;
   github_owner: string;
   github_repo: string;
+  /** 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同 */
+  code_github_owner: string;
+  /** 代码仓库（PR 审查用）repo；未单独配置为空串，表示与公开仓库相同 */
+  code_github_repo: string;
   /** 公开仓库 Token 引用（Token 库记录 id）；未配置为空串 */
   public_github_token_id: string;
   /** 代码仓库 Token 引用；未配置为空串 */
@@ -319,6 +323,8 @@ interface UpdateProjectPayload {
   name?: string;
   description?: string;
   repository_url?: string;
+  /** 代码仓库；三态同 Token 引用：缺省保留、空/null 清空（回落公开仓库）、非空替换 */
+  code_repository_url?: string | null;
   public_github_token_id?: string | null;
   code_github_token_id?: string | null;
 }

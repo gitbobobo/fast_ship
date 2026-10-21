@@ -212,17 +212,6 @@ func (s *ReviewService) handleWebhookTx(tx *gorm.DB, event string, body []byte, 
 	return tx.Save(debounce).Error
 }
 
-// splitRepoName "owner/name" → 两段；不合法返回空串。
-func splitRepoName(full string) (string, string) {
-	owner, name, ok := strings.Cut(full, "/")
-	if !ok {
-		return "", ""
-	}
-	return owner, name
-}
-
-func equalFoldStr(a, b string) bool { return strings.EqualFold(a, b) }
-
 // reviewTriggerableAction 只有这四种 action 会进入判定。
 func reviewTriggerableAction(action string) bool {
 	switch action {
@@ -254,7 +243,9 @@ func (s *ReviewService) findEnabledProjectByRepoTx(tx *gorm.DB, repoFullName str
 }
 
 // findEnabledReviewProjectTx 按仓库全名（大小写不敏感）找到启用审查的项目
-// 及其设置；无命中返回 (nil, nil, nil)。联查 projects 保证仓库归属仍有效。
+// 及其设置；无命中返回 (nil, nil, nil)。按设置行的 repo_full_name 快照反查：
+// 同仓库唯一索引建在这一列上，判定与约束用同一列；快照与项目行 live 值由
+// ProjectRepository.Update 同事务保持一致（读取口径见 docs/internal/reviews.md）。
 func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName string) (*model.Project, *model.ProjectReviewSettings, error) {
 	owner, repo, ok := strings.Cut(repoFullName, "/")
 	if !ok || owner == "" || repo == "" {
@@ -262,9 +253,8 @@ func (s *ReviewService) findEnabledReviewProjectTx(tx *gorm.DB, repoFullName str
 	}
 	var rows []model.ProjectReviewSettings
 	if err := tx.
-		Joins("JOIN projects p ON p.id = project_review_settings.project_id").
-		Where("project_review_settings.enabled AND lower(p.github_owner) = ? AND lower(p.github_repo) = ?",
-			strings.ToLower(owner), strings.ToLower(repo)).
+		Where("project_review_settings.enabled AND project_review_settings.repo_full_name = ?",
+			strings.ToLower(repoFullName)).
 		Limit(1).Find(&rows).Error; err != nil {
 		return nil, nil, err
 	}

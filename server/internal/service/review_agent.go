@@ -604,25 +604,33 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	if prNumber < 1 {
 		return nil, errs.ErrInvalidParams
 	}
-	// 记录所属仓库是历史仓库时不重跑：项目当前的 GitHub 字段才是取 PR 的依据，
-	// 同号的无关 PR 不能被当成本项目的 PR。
-	if repoFullName != "" && !strings.EqualFold(repoFullName, project.GithubOwner+"/"+project.GithubRepo) {
+	// 审查仓库取设置行的 repo_full_name 快照（小写），与 webhook 反查、同步
+	// 过滤、防抖复核同口径；不回读项目行 live 字段。这里先不按 enabled 过滤：
+	// 「记录属于历史仓库」的拒绝要先于「未开启」返回，否则用户拿到的是 40923
+	// 而不是真正的原因。
+	var settings model.ProjectReviewSettings
+	rowErr := s.db.WithContext(ctx).Where("project_id = ?", projectID).First(&settings).Error
+	if rowErr != nil && !errors.Is(rowErr, gorm.ErrRecordNotFound) {
+		return nil, errs.ErrInternal
+	}
+	// 记录所属仓库是历史仓库时不重跑：同号的无关 PR 不能被当成本项目的 PR。
+	if rowErr == nil && repoFullName != "" && settings.RepoFullName != "" &&
+		!strings.EqualFold(repoFullName, settings.RepoFullName) {
 		return nil, errs.New(errs.ErrInvalidParams.Code,
 			"该审查记录属于历史仓库，项目仓库已变更，不能重跑")
 	}
-	var settings model.ProjectReviewSettings
-	if err := s.db.WithContext(ctx).Where("project_id = ? AND enabled", projectID).First(&settings).Error; err != nil {
+	if rowErr != nil || !settings.Enabled {
 		return nil, errs.ErrReviewNotEnabled
 	}
-	if project.GithubOwner == "" || project.GithubRepo == "" {
+	// 写库键因此天然是小写（GitHub API 本身大小写不敏感）。
+	repo := settings.RepoFullName
+	if repo == "" || repo == "/" {
 		return nil, errs.ErrProjectGitHubNotConfigured
 	}
 	client, err := s.ghClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// 写库键与 webhook 侧同口径小写（GitHub API 本身大小写不敏感）。
-	repo := strings.ToLower(project.GithubOwner + "/" + project.GithubRepo)
 	// rerun 没有 webhook installation 快照：先解析真实安装 id，再取 PR；
 	// 解析不支持/失败时不得拿 0 当安装 id 继续写库。
 	installationID, err := client.ResolveInstallation(ctx, repo)
@@ -640,23 +648,18 @@ func (s *ReviewService) RerunReview(ctx context.Context, userID, projectID strin
 	now := time.Now().UTC()
 	var round int
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核，
-		// 否则会用旧快照开一轮（甚至取消新 head 的运行）。
-		var current model.Project
-		if err := tx.Select("github_owner", "github_repo").
-			Where("id = ? AND user_id = ?", project.ID, userID).First(&current).Error; err != nil {
-			return errs.ErrProjectNotFound
-		}
-		if !strings.EqualFold(current.GithubOwner+"/"+current.GithubRepo, repo) {
-			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
-		}
-		var enabled int64
-		if err := tx.Model(&model.ProjectReviewSettings{}).
-			Where("project_id = ? AND enabled", project.ID).Count(&enabled).Error; err != nil {
-			return err
-		}
-		if enabled == 0 {
+		// 取 PR 与开轮之间可能发生停用/换仓库/新 webhook：事务内复核设置行的
+		// 仓库快照与启用状态，否则会用旧快照开一轮（甚至取消新 head 的运行）。
+		var fresh model.ProjectReviewSettings
+		if err := tx.Select("repo_full_name", "enabled").
+			Where("project_id = ?", project.ID).First(&fresh).Error; err != nil {
 			return errs.ErrReviewNotEnabled
+		}
+		if !fresh.Enabled {
+			return errs.ErrReviewNotEnabled
+		}
+		if !strings.EqualFold(fresh.RepoFullName, repo) {
+			return errs.New(errs.ErrInvalidParams.Code, "项目仓库已变更，请刷新后重试")
 		}
 		latest, err := s.currentAcceptedHeadTx(tx, project.ID, repo, prNumber)
 		if err != nil {

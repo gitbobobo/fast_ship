@@ -1848,6 +1848,9 @@ type CreateIssueRequest struct {
 type CreateProjectRequest struct {
 	// CodeGithubTokenId 代码仓库 Token（Token 库记录 id）引用；仅用于读取关联 PR（含其他仓库）。可空；必须属于当前用户，否则 40420
 	CodeGithubTokenId *string `json:"code_github_token_id,omitempty"`
+
+	// CodeRepositoryUrl 代码仓库链接（owner/repo 或完整 URL），供 PR 审查使用；空 = 与公开仓库相同
+	CodeRepositoryUrl *string `json:"code_repository_url,omitempty"`
 	Description       *string `json:"description,omitempty"`
 
 	// Name 项目名，当前用户下唯一
@@ -2916,6 +2919,12 @@ type PendingIssueHook struct {
 
 // Project defines model for Project.
 type Project struct {
+	// CodeGithubOwner 代码仓库（PR 审查用）owner；未单独配置为空串，表示与公开仓库相同
+	CodeGithubOwner string `json:"code_github_owner"`
+
+	// CodeGithubRepo 代码仓库（PR 审查用）repo 名；未单独配置为空串，表示与公开仓库相同
+	CodeGithubRepo string `json:"code_github_repo"`
+
 	// CodeGithubTokenId 代码仓库 Token 引用；未配置为空串
 	CodeGithubTokenId string `json:"code_github_token_id"`
 	CreatedAt         string `json:"created_at"`
@@ -3327,9 +3336,13 @@ type ReviewProjectSummary struct {
 	CodeCombinationCount int  `json:"code_combination_count"`
 
 	// CodeStatus 最近一次代码审查结论（success/failure/error/pending）
-	CodeStatus             *string `json:"code_status,omitempty"`
-	Enabled                bool    `json:"enabled"`
-	GithubOwner            string  `json:"github_owner"`
+	CodeStatus *string `json:"code_status,omitempty"`
+	Enabled    bool    `json:"enabled"`
+
+	// GithubOwner 实际审查的代码仓库 owner（未单独配置代码仓库时即公开仓库）
+	GithubOwner string `json:"github_owner"`
+
+	// GithubRepo 实际审查的代码仓库 repo 名（未单独配置代码仓库时即公开仓库）
 	GithubRepo             string  `json:"github_repo"`
 	LastReviewAt           *string `json:"last_review_at,omitempty"`
 	ProjectId              string  `json:"project_id"`
@@ -3399,6 +3412,9 @@ type ReviewSettings struct {
 	Enabled          bool                 `json:"enabled"`
 	Prerequisites    []ReviewPrerequisite `json:"prerequisites"`
 	ProjectId        string               `json:"project_id"`
+
+	// RepoFullName 该审查实际使用的代码仓库（owner/repo，原样大小写；未单独配置代码仓库时即公开仓库）
+	RepoFullName string `json:"repo_full_name"`
 
 	// TakenBy 同仓库已开启审查的其他项目占用者登录名（只读）
 	TakenBy               *string             `json:"taken_by,omitempty"`
@@ -4369,6 +4385,9 @@ type UpdateProfileRequest struct {
 type UpdateProjectRequest struct {
 	// CodeGithubTokenId 三态——key 缺省保留现值；显式 null 或空串清空该用途引用；非空替换（须属于当前用户，否则 40420）
 	CodeGithubTokenId *string `json:"code_github_token_id,omitempty"`
+
+	// CodeRepositoryUrl 三态——key 缺省保留现值；显式 null 或空串清空（回落公开仓库）；非空替换（owner/repo 或完整 URL；与公开仓库相同则归一为空）
+	CodeRepositoryUrl *string `json:"code_repository_url,omitempty"`
 
 	// Description 缺省或 null 保留现值；显式空串清空；非空替换
 	Description *string `json:"description,omitempty"`

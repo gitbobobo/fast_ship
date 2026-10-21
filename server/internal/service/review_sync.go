@@ -57,6 +57,75 @@ func statusDesc(s string) string {
 	return s[:cut] + "..."
 }
 
+// errReviewSyncAbandoned 同步期间目标已不是本轮的活（账本 epoch 被推进，或项目
+// 停用审查/换走审查仓库）：静默放弃本轮，不发 GitHub 产出、不写 sync_error——
+// 与「让路」（errReviewSyncDeferred）不同，本行不再属于这次同步。
+var errReviewSyncAbandoned = errors.New("review sync abandoned: target changed")
+
+// syncTargetStillCurrent 同步中途复核本轮仍有效：账本 epoch 未被推进，且项目
+// enabled 设置行的仓库快照仍是本仓库（项目改仓库/停用审查会同事务改这两处）。
+func (s *ReviewService) syncTargetStillCurrent(ledger *model.ReviewPullRequest, epoch int) error {
+	current, err := s.ledgerEpochCurrent(ledger, epoch)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return errReviewSyncAbandoned
+	}
+	var settings model.ProjectReviewSettings
+	err = s.db.Select("repo_full_name").
+		Where("project_id = ? AND enabled", ledger.ProjectID).First(&settings).Error
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 设置行没了（项目被删/从未启用）：不再属于本轮。
+		return errReviewSyncAbandoned
+	case err != nil:
+		// DB 故障不是「目标失效」：与上面的 epoch 复核同口径往外抛，让同步
+		// 记 sync_error 下轮重试，不要静默吞掉一个真正的错误。
+		return err
+	}
+	if settings.RepoFullName != ledger.RepoFullName {
+		return errReviewSyncAbandoned
+	}
+	return nil
+}
+
+// guardedSyncClient 在每次 GitHub 写之前复核本轮仍有效：远端副作用无法回滚，
+// 复核只能放在写之前。读操作原样透传（Embedding 提供），只有会改变 GitHub
+// 状态的四个方法被拦。
+type guardedSyncClient struct {
+	githubapi.GitHubClient
+	check func() error
+}
+
+func (c guardedSyncClient) CreateCommitStatus(ctx context.Context, installationID int64, repoFullName, sha, state, statusContext, description, targetURL string) error {
+	if err := c.check(); err != nil {
+		return err
+	}
+	return c.GitHubClient.CreateCommitStatus(ctx, installationID, repoFullName, sha, state, statusContext, description, targetURL)
+}
+
+func (c guardedSyncClient) CreatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, number int, body string) (int64, error) {
+	if err := c.check(); err != nil {
+		return 0, err
+	}
+	return c.GitHubClient.CreatePullRequestComment(ctx, installationID, repoFullName, number, body)
+}
+
+func (c guardedSyncClient) UpdatePullRequestComment(ctx context.Context, installationID int64, repoFullName string, commentID int64, body string) error {
+	if err := c.check(); err != nil {
+		return err
+	}
+	return c.GitHubClient.UpdatePullRequestComment(ctx, installationID, repoFullName, commentID, body)
+}
+
+func (c guardedSyncClient) SubmitReview(ctx context.Context, installationID int64, repoFullName string, number int, in githubapi.ReviewInput) (int64, error) {
+	if err := c.check(); err != nil {
+		return 0, err
+	}
+	return c.GitHubClient.SubmitReview(ctx, installationID, repoFullName, number, in)
+}
+
 // lockForPR 每 PR 一把进程内锁。
 func (s *ReviewService) lockForPR(repo string, prNumber int) *sync.Mutex {
 	key := repo + "#" + strconv.Itoa(prNumber)
@@ -75,15 +144,16 @@ func (s *ReviewService) lockForPR(repo string, prNumber int) *sync.Mutex {
 // 状态与评论由当前 enabled 项目独占。
 func (s *ReviewService) syncPendingPRs(now time.Time) {
 	var rows []model.ReviewPullRequest
-	// 三重要求：pending、所属项目仍启用、且账本仓库就是项目**当前**仓库。
-	// 项目换过仓库后旧仓库的 ledger 可能因旧运行收尾再次置 pending，不能在
-	// 新仓库的项目上把它同步出去。
+	// 三重要求：pending、所属项目仍启用、且账本仓库就是该项目 enabled 设置行
+	// 的 repo_full_name 快照（审查仓库的唯一真相）。项目换过仓库后旧仓库的
+	// ledger 可能因旧运行收尾再次置 pending，不能在新仓库的项目上把它同步
+	// 出去；公开仓库 ≠ 代码仓库时，公开仓库的账本行同样不再同步。
 	if err := s.db.Where(`sync_pending
-		AND project_id IN (SELECT project_id FROM project_review_settings WHERE enabled)
 		AND EXISTS (
-			SELECT 1 FROM projects p
-			WHERE p.id = review_pull_requests.project_id
-			  AND lower(p.github_owner || '/' || p.github_repo) = review_pull_requests.repo_full_name
+			SELECT 1 FROM project_review_settings s
+			WHERE s.project_id = review_pull_requests.project_id
+			  AND s.enabled
+			  AND s.repo_full_name = review_pull_requests.repo_full_name
 		)`).
 		Order("updated_at ASC").Limit(reviewStageBatch).
 		Find(&rows).Error; err != nil {
@@ -95,8 +165,11 @@ func (s *ReviewService) syncPendingPRs(now time.Time) {
 	}
 }
 
-// syncOnePR 一个 PR 的 GitHub 同步（同 PR 串行）。
-// epoch 快照自进入时；失败写 sync_error（epoch 守卫），成功按 epoch 清 pending。
+// syncOnePR 一个 PR 的 GitHub 同步（同 PR 串行）。重读账本后先做准入复核
+// （pending 未清、epoch 未推进、项目 enabled 设置行的快照仍是本仓库）：从
+// syncPendingPRs 选出到执行之间项目可能已换审查仓库或停用审查，不再属于
+// 本轮的活直接放弃，不发任何 GitHub 请求也不写库；通过后 epoch 即重读值，
+// 失败写 sync_error（epoch 守卫），成功按 epoch 清 pending。
 func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 	key := ledger.RepoFullName + "#" + strconv.Itoa(ledger.PRNumber)
 	lock := s.lockForPR(ledger.RepoFullName, ledger.PRNumber)
@@ -121,12 +194,28 @@ func (s *ReviewService) syncOnePR(ledger *model.ReviewPullRequest) {
 		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).First(&cur).Error; err != nil {
 		return
 	}
+	// 准入复核：项目换仓库/停用审查会同事务清 pending、推进 epoch、刷新设置行
+	// 快照，任一不成立说明本行已被移出本轮，直接放弃（这是放弃，不是让路）。
+	var settings model.ProjectReviewSettings
+	if err := s.db.Select("repo_full_name").
+		Where("project_id = ? AND enabled", cur.ProjectID).
+		First(&settings).Error; err != nil {
+		return
+	}
+	if !cur.SyncPending || cur.SyncEpoch != ledger.SyncEpoch ||
+		settings.RepoFullName != cur.RepoFullName {
+		return
+	}
 	epoch := cur.SyncEpoch
 	now := time.Now().UTC()
 
 	syncErr := s.doSyncPR(ctx, &cur, epoch, now)
 	if errors.Is(syncErr, errReviewSyncDeferred) {
 		// 主动让路（远端 head 已前进、等 webhook）：不算同步失败，不清 pending。
+		return
+	}
+	if errors.Is(syncErr, errReviewSyncAbandoned) {
+		// 同步中途目标失效：静默放弃，不写 sync_error（本行已不属这次同步）。
 		return
 	}
 	if syncErr != nil {
@@ -156,9 +245,20 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	if err != nil {
 		return err
 	}
+	// 每次 GitHub 写之前复核本轮仍有效（账本 epoch 未推进、项目审查仓库仍是
+	// 本仓库）：同步可能持续数十秒，期间项目改仓库/停用审查不该把产出写到
+	// 已切换掉的旧仓库，而远端副作用发出去就收不回来。
+	client = guardedSyncClient{
+		GitHubClient: client,
+		check:        func() error { return s.syncTargetStillCurrent(ledger, epoch) },
+	}
 	pr, err := client.GetPullRequest(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
 	if err != nil {
 		return errs.New(errs.ErrGitHubAPI.Code, "读取 PR 失败: "+err.Error())
+	}
+	// 首次远端写之前的复核（读 PR 是只读，不算产出）。
+	if err := s.syncTargetStillCurrent(ledger, epoch); err != nil {
+		return err
 	}
 	// GitHub 上已经前进、但 webhook 还没处理时，账本与运行仍是旧 SHA：此时
 	// 不能拿新 PR 描述/SHA 去发布旧轮结论或建视觉运行。保留 pending 等 webhook

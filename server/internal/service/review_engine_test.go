@@ -52,6 +52,7 @@ func newReviewEngineEnv(t *testing.T) *reviewEngineEnv {
 }
 
 // enableReview 直接落启用设置（绕过绑定校验——执行路径只读落库 JSON）。
+// repo_full_name 快照按项目当前审查仓库落小写：触发反查只认快照列。
 func (e *reviewEngineEnv) enableReview(t *testing.T, opts ...func(*model.ProjectReviewSettings)) {
 	t.Helper()
 	code, err := marshalCombinations([]api.ReviewCombination{testCombo("env-1")})
@@ -61,6 +62,7 @@ func (e *reviewEngineEnv) enableReview(t *testing.T, opts ...func(*model.Project
 	settings := &model.ProjectReviewSettings{
 		ProjectID:             e.project.ID,
 		UserID:                e.user.ID,
+		RepoFullName:          strings.ToLower(e.project.CodeRepoFullName()),
 		Enabled:               true,
 		TriggerOpened:         true,
 		TriggerSynchronize:    true,

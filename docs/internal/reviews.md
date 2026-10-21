@@ -28,6 +28,31 @@
 另一个项目接管同一仓库时各记一本账，互不吞事件、不混结果。接管语义见
 「开启前置与同仓库唯一」。
 
+**审查仓库 = 代码仓库**：项目可以单独配置代码仓库
+（`projects.code_github_owner/code_github_repo`，musiver 场景：公开仓库放
+Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 表达的是
+「这个项目审查哪个仓库」的候选值：两个 code 字段都非空时用显式配置，否则
+回落公开仓库；Issue 同步/发版/发货仍只走公开仓库，两者互不影响。
+
+### 审查仓库的读取口径
+
+同一个事实存了两份：项目行的 `CodeRepo()`（候选值）与设置行的
+`repo_full_name`（生效值，小写）。两条写入路径保证它们恒等：项目改仓库时
+`ProjectRepository.Update` 同事务停用审查并刷新快照（disabled 行也刷新），
+保存审查设置时 `UpdateSettings` 用 `CodeRepo()` 写入快照并在事务内复核。
+因此**不需要**在两者之间做「谁更可信」的兜底，需要的是按用途选列：
+
+| 用途 | 读什么 | 允许出现的位置 |
+| --- | --- | --- |
+| 写入侧：生成快照、以及必须等于「即将写入的键」的预占预判 | `CodeRepo()` | `UpdateSettings`、`ProjectRepository.Update`、`reviewPrerequisites`、`reviewTakenBy`、`reviewOccupiers` |
+| 运行侧：基于已有状态做判定 | 设置行 `repo_full_name`（不按 `enabled` 过滤，除非该判定本身要求已启用） | 触发反查、防抖复核、同步过滤/准入、rerun、记录与总览的「当前仓库」 |
+| 展示：保留用户输入的原样大小写 | `CodeRepo()` | 总览的 owner/repo、`GetSettings.repo_full_name` |
+
+`service` 包里的 `TestReviewChainReadsReviewRepoFromSettingsSnapshot` 用 AST
+扫描把这条规则钉死：`review_*.go` 里出现未列入白名单的 `CodeRepo()` 读取即
+失败。新增判定点时按上表选列，不要回读 live 字段，也不要给运行侧加 fallback
+（没有设置行的项目不可能有账本/运行/防抖行）。
+
 ## 数据模型
 
 七张表（`server/internal/model/review.go`，ID=UUID，时间一律 UTC）：
@@ -47,8 +72,15 @@
 `users`/`projects` CASCADE。T3 项目/线程/命令 ID 不建 FK（远端生命周期
 不由本库管理）。
 
+`project_review_settings.repo_full_name` 是项目**实际审查的代码仓库**快照
+（`project.CodeRepo()` 小写，未单独配置代码仓库即公开仓库）：同仓库唯一
+占用、webhook 反查、同步过滤都只认它。项目行新增
+`code_github_owner/code_github_repo` 两列（空 = 与公开仓库相同），
+`ProjectRepository.Update` 检测到 `CodeRepo()` 变更时同事务停用审查并刷新
+该快照。
+
 所有表的 `repo_full_name` 一律小写：webhook 侧取 payload 规范名、rerun 侧
-取项目 `github_owner/github_repo`，写库前统一 `strings.ToLower`——GitHub
+取启用设置行的 `repo_full_name` 快照，写库前统一 `strings.ToLower`——GitHub
 API 本身大小写不敏感，但 SQLite BINARY 比较会把两种大小写当两本账（防抖、
 seen SHA、取消旧轮全部失效）。
 
@@ -77,9 +109,10 @@ seen SHA、取消旧轮全部失效）。
 1. 只处理 `pull_request` 的 `opened` / `synchronize` / `ready_for_review` /
    `reopened`；其余事件与 action 忽略。
 2. draft、fork（head repo ≠ base repo）忽略。
-3. 反查项目：`LOWER(github_owner)=? AND LOWER(github_repo)=?`，取存在
-   `project_review_settings.enabled=true` 的那一行（一个部署内最多一个，
-   见「同仓库唯一」）。没开启 → 忽略，不取消、不开轮。
+3. 反查项目：`project_review_settings.enabled AND repo_full_name = LOWER(?)`
+   （只按设置行的仓库快照，一个部署内最多一个，见「同仓库唯一」）。没开启
+   → 忽略，不取消、不开轮。公开仓库 ≠ 代码仓库时，只有代码仓库的事件能
+   反查到项目；公开仓库的事件静默忽略。
 4. action 未被该项目触发条件勾选 → 忽略（不取消、不改 seen）。
 5. 过期 SHA 判定（全部按 `project_id + repo + pr`，其他项目的同仓库残留行
    不进入判定）：当前 head 优先取未开火的防抖行，否则取本项目
@@ -101,7 +134,9 @@ seen SHA、取消旧轮全部失效）。
 单进程一个循环（10s tick + 缓冲 1 的 kick），每 tick 顺序：
 
 1. **到期防抖**：查 `fire_at<=now` 的防抖行，逐行短事务条件删除后复核——
-   项目仍启用、仓库仍属该项目、触发条件仍勾选——成立才开一轮；顺带清理
+   项目仍启用、`project_review_settings.repo_full_name` 快照仍与防抖行
+   `repo_full_name` 一致（与 webhook 反查、同步准入同口径，不回读项目行
+   live 仓库字段）、触发条件仍勾选——成立才开一轮；顺带清理
    超龄 delivery 幂等账（保留 7 天）。
 2. **派发认领**：`dispatched` 且未确认建线程、**且从未签发过运行令牌**的
    运行，在认领后超过 5 分钟仍 `dispatched_at IS NULL` 时允许重新认领——
@@ -207,7 +242,10 @@ seen SHA、取消旧轮全部失效）。
 
 每 PR 一把进程内锁（按 repo+pr 键控，同步完摘除条目，防 map 随历史 PR 数
 增长——锁刻意保持仓库归一，同 PR 的 GitHub 写入串行），逐行处理
-`review_pull_requests.sync_pending` 中项目设置仍 `enabled` 的行；全部走
+`review_pull_requests.sync_pending` 中项目设置仍 `enabled` 且账本
+`repo_full_name` 与该项目 enabled 设置行快照一致的行（选中后还要过一次准入
+复核：pending 未清、epoch 未推进、快照仍是本仓库；通过后每次 GitHub 写之前
+再复核一次，避免同步期间改仓库把产出写到旧仓库）；全部走
 App 安装令牌。失败只记 `sync_error` 下轮重试，不改运行终态；成功后按开始
 同步时的 `sync_epoch` 条件清 pending（同步期间的新 pending 不会被误清）。
 中段写回（`code_status`/`visual_status`/`visual_screens_fingerprint`）同样带
@@ -302,7 +340,8 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 ## 页面
 
 - 侧边栏「审查」`/reviews`（`web/src/routes/reviews/index.tsx`）：当前用户
-  所有已关联 GitHub 仓库的项目列表——项目名、仓库、开关、代码/视觉组合数、
+  所有已关联仓库（公开或代码仓库任一）的项目列表——项目名、仓库（实际审查
+  的代码仓库，未单独配置即公开仓库）、开关、代码/视觉组合数、
   最近一次代码/视觉审查结论与时间；同仓库已被其他项目开启的行只读并显示
   占用者登录名。旧 `/automations` 路由直接删除，不做重定向。
 - `/reviews/:projectId`（`web/src/routes/reviews/$projectId.tsx`）：单路由
@@ -321,8 +360,8 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/reviews` | 审查总览：每项目一行（开关、组合数、最近 code/visual status、`last_review_at`）；同仓库被占用时 `taken_by` 带占用者登录名且 `can_manage=false`。 |
-| GET | `/api/projects/{id}/review-settings` | 设置 + `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
+| GET | `/api/reviews` | 审查总览：每项目一行（仓库 = 实际审查的代码仓库、开关、组合数、最近 code/visual status、`last_review_at`）；同仓库被占用时 `taken_by` 带占用者登录名且 `can_manage=false`。 |
+| GET | `/api/projects/{id}/review-settings` | 设置 + `repo_full_name`（实际审查的代码仓库，原样大小写）+ `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
 | PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001（只读会话的环境同样拒绝）；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
 | GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、时间）与每轮 `code_runs[]`/`visual_runs[]`。`?limit=` 默认 20、上限 100。 |
 | POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。返回 `{accepted, head_sha, round_number}`。 |
@@ -330,7 +369,8 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 ## 开启前置与同仓库唯一
 
 启用时五项前置条件必须全部满足（`review_settings.go` 的
-`reviewPrerequisites`；`GET` 每次实时计算，缺哪项逐条列出）：
+`reviewPrerequisites`；`GET` 每次实时计算，缺哪项逐条列出）。仓库相关判定
+一律按实际审查的代码仓库（`project.CodeRepo()`，未单独配置即公开仓库）：
 
 1. 部署 GitHub App 已配置（`deployment_settings` 的 App 身份；
    `github_app.fake` + `server.mode=debug` 视为已配置）。
@@ -341,6 +381,9 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 5. 每个组合的环境属于当前用户，且经 `project_t3_bindings` 绑定了该项目
    （绑定的 `t3_project_id` 快照进组合）。
 
+「项目已关联仓库」（`repoLinked`，不满足时 `github_app_installation` 标缺）
+同样按代码仓库判定；未配置代码仓库的项目行为与原先完全一致。
+
 组合本身在 service 边界校验（一律 40001）：`environment_id/instance_id/model`
 必填；代码 1–5 个、视觉 0–3 个；按 `environment_id+instance_id+model+
 options canonical JSON` 判重（同一搭配不同思考强度算不同组合）。
@@ -349,16 +392,18 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
 只读会话在保存时直接 400，前置条件也会把它标成缺项——否则每次派发都只会落
 `dispatch_failed`。
 
-**同仓库唯一**：整个部署内同一仓库只允许一个项目 `enabled=true`（大小写
-不敏感）；其他用户的同仓库项目在 `GET`/`PUT` 里得到 `taken_by`（占用者
-登录名），开启返回 40922。写入路径双保险：保存事务内先查占用者，部分
-唯一索引 `idx_project_review_settings_repo` 兜并发竞态。
+**同仓库唯一**：整个部署内同一**代码仓库**（`repo_full_name` 快照，大小写
+不敏感）只允许一个项目 `enabled=true`；其他用户的同仓库项目在 `GET`/`PUT`
+里得到 `taken_by`（占用者登录名），开启返回 40922。占用判定只读 enabled
+设置行的快照列（联 `users` 取登录名），不回联项目的 live 仓库字段。写入
+路径双保险：保存事务内先查占用者，部分唯一索引
+`idx_project_review_settings_repo` 兜并发竞态。
 
-**保存并发复核**：`PUT` 写入事务内会重读 `projects.github_owner/
-github_repo`，与事务外校验用的项目快照不一致 → 400「项目仓库已变更，请
+**保存并发复核**：`PUT` 写入事务内会重读项目的审查仓库（`CodeRepo()`，
+含 code 两列），与事务外校验用的项目快照不一致 → 400「项目仓库已变更，请
 刷新后重试」（并发改仓库时把 enabled 落到旧快照上会写错唯一占用键与
-账本分区键）。项目侧改仓库走 `ProjectRepository.Update`——同事务停用
-审查并刷新 `repo_full_name` 快照。
+账本分区键）。项目侧改**代码仓库**走 `ProjectRepository.Update`——同事务
+停用审查并刷新 `repo_full_name` 快照。
 
 **接管**：某项目成功 `enabled=true` 保存时，同一事务内对同仓库其他项目
 做收尾（唯一占用保证此时没有其他 enabled 项目，残留来自曾开启后停用或
@@ -402,7 +447,9 @@ github_repo`，与事务外校验用的项目快照不一致 → 400「项目仓
   令牌一旦签发即不再重认领（随机原值不可恢复，重签会让已建成线程的令牌
   失效），这类运行靠 `deadline_at` 超时兜底；已建线程若存活，首次鉴权
   会补 `dispatched_at` 并照常进入 running/归档路径。
-- **改仓库 URL 会自动停用审查**：项目更新仓库地址时，同一个事务里把
+- **改代码仓库 URL 会自动停用审查**：项目更新**代码仓库**地址（未单独配置
+  代码仓库时，改公开仓库等同改代码仓库）时，同一个事务里把
   `project_review_settings` 置 `enabled=false` 并把 `repo_full_name` 快照改成
-  新仓库——避免旧仓库继续占着唯一索引、新仓库与别的已启用项目重复。用户需要
-  在新仓库上重新开启（前置条件都按新仓库重算）。
+  新审查仓库——避免旧仓库继续占着唯一索引、新仓库与别的已启用项目重复。
+  代码仓库已显式配置时只改公开仓库不影响审查。用户需要在
+  新仓库上重新开启（前置条件都按新仓库重算）。
