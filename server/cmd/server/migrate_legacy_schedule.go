@@ -110,11 +110,11 @@ func legacyScheduleReviewDetail(tasks []model.BotScheduleTask) map[string]interf
 	var note string
 	switch {
 	case len(enabled) == 0:
-		note = fmt.Sprintf("安全提示：本机器人的 %d 个已停用定时任务创建于「写操作确认」上线之前，其指令未经确认卡复核；重新启用时会先弹确认卡核对指令，无需立即处理。", disabled)
+		note = fmt.Sprintf("安全提示：本机器人的 %d 个已停用定时任务创建于「写操作确认」上线之前，其指令未经确认卡复核；如需启用，请通过对话让本机器人启用，确认卡会展示完整指令供核对。", disabled)
 	case disabled == 0:
 		note = fmt.Sprintf("安全提示：本机器人的 %d 个定时任务创建于「写操作确认」上线之前，其指令从未经确认卡复核，目前仍按计划触发：%s。请核对任务指令，不认识的任务请停用或删除。", len(enabled), joinTaskNames(names, len(enabled)))
 	default:
-		note = fmt.Sprintf("安全提示：本机器人的 %d 个定时任务创建于「写操作确认」上线之前，其指令从未经确认卡复核，目前仍按计划触发：%s。请核对任务指令，不认识的任务请停用或删除；另有 %d 个已停用任务未经复核，重新启用时会先弹确认卡。", len(enabled), joinTaskNames(names, len(enabled)), disabled)
+		note = fmt.Sprintf("安全提示：本机器人的 %d 个定时任务创建于「写操作确认」上线之前，其指令从未经确认卡复核，目前仍按计划触发：%s。请核对任务指令，不认识的任务请停用或删除；另有 %d 个已停用任务未经复核，重新启用同样需经确认卡核对。", len(enabled), joinTaskNames(names, len(enabled)), disabled)
 	}
 	items := make([]map[string]interface{}, 0, len(tasks))
 	for _, t := range tasks {

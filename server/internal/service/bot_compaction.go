@@ -1446,9 +1446,11 @@ var (
 )
 
 // serializeMessage 把一条账本消息序列化成辅助模型（摘要/归档）的输入文本。
-// nonce 非空时按模型输入出口的同一规则围栏：工具结果、后台结果与定时任务事件
-// 都是回流/外部文本，摘要模型也不该把它们当指令（否则一次注入可以借摘要进入
-// 主线上下文）。平台自有回执的豁免与工具结果一致。
+// nonce 非空时按模型输入出口的同一规则围栏：工具结果、后台结果、定时任务
+// 事件与 lifecycle 都是回流/外部文本（lifecycle 的 detail 可携带模型可写
+// 数据，如 legacy_schedule_review 的存量任务名），摘要模型也不该把它们当
+// 指令——一次注入可以借摘要进入主线上下文。未列出的种类默认走同一围栏，
+// 不给新增消息类型留裸送通道；平台自有回执的豁免与工具结果一致。
 func serializeMessage(row model.BotMessage, nonce string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[seq %d] %s: ", row.Seq, string(row.Kind))
@@ -1473,14 +1475,14 @@ func serializeMessage(row model.BotMessage, nonce string) string {
 			text = fmt.Sprintf("tool %s status=%s call_id=%s: %s",
 				c.ToolName, c.Status, c.CallID, botFenceToolResult(nonce, c.ToolName, c.Action, c.Content))
 		}
-	case model.BotMessageKindBackgroundResult, model.BotMessageKindScheduleEvent:
+	default:
+		// background_result / schedule_event / lifecycle / approval_decision 与
+		// 将来新增的种类一律围栏：正文可能携带模型可写或外部来源的数据。
 		if nonce != "" {
 			text = botFenceUntrusted(nonce, "aux_input", row.ContentJSON)
 		} else {
 			text = row.ContentJSON
 		}
-	default:
-		text = row.ContentJSON
 	}
 	b.WriteString(text)
 	b.WriteString("\n")

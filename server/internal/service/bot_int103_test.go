@@ -1183,7 +1183,9 @@ func TestBotScheduleUpdateDisabledKeepsNoNextRun(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "scheddis")
 	bot := env.createBot(t, userID)
-	task := seedScheduleTask(t, env, bot.ID, nil)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Confirmed = true
+	})
 
 	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, false, "", false); err != nil {
 		t.Fatalf("disable: %v", err)
@@ -1782,6 +1784,7 @@ func TestBotScheduleEnableKeepsPendingDueRun(t *testing.T) {
 	due := time.Now().UTC().Add(-5 * time.Second)
 	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
 		tk.NextRunAt = &due
+		tk.Confirmed = true
 	})
 	got, err := env.bots.setScheduleTaskEnabled(bot.ID, task.ID, true, "", false)
 	if err != nil {

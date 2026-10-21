@@ -335,7 +335,9 @@ func TestBotInt123StateSurvivesUpdateAndToggle(t *testing.T) {
 	env := setupBotTestEnv(t)
 	userID := createBotTestUser(t, env.db, "schedstatekeep")
 	bot := env.createBot(t, userID)
-	task := seedScheduleTask(t, env, bot.ID, nil)
+	task := seedScheduleTask(t, env, bot.ID, func(tk *model.BotScheduleTask) {
+		tk.Confirmed = true
+	})
 	run := seedScheduleRun(t, env, bot.ID, task.ID)
 	mustStateCall(t, env, run, `{"action":"state_set","state":{"since":"2026-01-01"}}`)
 

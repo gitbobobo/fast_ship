@@ -545,6 +545,13 @@ func (s *BotService) setScheduleTaskEnabled(botID, taskID string, enabled bool, 
 		if err := botScheduleRevisionChanged(task, expectedUpdatedAt); err != nil {
 			return err
 		}
+		if enabled && !confirmed && !task.Confirmed {
+			// 未复核任务不得绕过确认卡直接武装（REST 面板与任何不经确认的
+			// 启用路径都过这里）：指令从未展示给用户核对，一键启用等于把未审
+			// 指令恢复到默认放行写操作的计划上。经确认卡的 enable 自带
+			// confirmed=true 放行并把任务标记为已复核；停用不受限。
+			return errs.ErrBotScheduleTaskUnconfirmed
+		}
 		cols := map[string]interface{}{"enabled": enabled, "updated_at": now}
 		if confirmed {
 			// 经确认卡的 enable 已把任务整份配置（含指令全文）展示给用户
@@ -810,6 +817,9 @@ func (s *BotService) ListScheduleTaskRuns(userID, botID, taskID string, limit, o
 }
 
 // SetScheduleTaskEnabled 是用户对任务唯一的写操作。
+// 未复核任务（confirmed=false，确认机制上线前的存量行）不能从这里启用：
+// REST 没有确认卡，面板一键启用会绕过指令核对——40934 的文案把用户引到
+// 主线 enable 的确认卡流程；停用不受限（降低权限、可逆）。
 func (s *BotService) SetScheduleTaskEnabled(userID, botID, taskID string, enabled bool) (*BotScheduleTaskResponse, error) {
 	if err := s.checkOwnership(userID, botID); err != nil {
 		return nil, err

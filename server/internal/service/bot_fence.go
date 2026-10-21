@@ -40,41 +40,28 @@ func botFenceUntrusted(nonce, source, text string) string {
 	return `<untrusted_data nonce="` + nonce + `" source="` + source + `">` + text + `</untrusted_data>`
 }
 
-// 围栏标签的两种写法；比较时不区分 ASCII 大小写——外部内容用
-// </UNTRUSTED_DATA> 之类的写法同样会提前闭合围栏，只拦小写等于没拦。
-const (
-	botFenceOpenTag  = "<untrusted_data"
-	botFenceCloseTag = "</untrusted_data"
-)
-
 // botEscapeFenceTags 把内容里出现的围栏标签转义成 HTML 实体（只替换标签的
 // 起始 `<`，其余字节原样保留，正文里的普通 HTML/Markdown 不受影响）。
+// 载荷大多是 json.Marshal 产物：正文里的 < 早已是 \u003c 形态，模型按 JSON
+// 转义还原后等于围栏内留了未转义的闭合标签——所以字面的 < 与 \u003c、
+// 斜杠的 / 与 \u002f、乃至标签名里逐字符的 \u00XX 写法都要识别。
 func botEscapeFenceTags(text string) string {
-	if !botHasFenceTag(text) {
-		return text
-	}
 	var b strings.Builder
-	b.Grow(len(text) + len(text)/8)
+	escaped := false
 	for i := 0; i < len(text); {
-		if text[i] == '<' && botFenceTagAt(text, i) {
+		if n := botFenceTagOpenLenAt(text, i); n > 0 {
 			b.WriteString("&lt;")
-			i++
+			i += n
+			escaped = true
 			continue
 		}
 		b.WriteByte(text[i])
 		i++
 	}
-	return b.String()
-}
-
-// botHasFenceTag 报告文本里是否出现围栏标签（不区分 ASCII 大小写）。
-func botHasFenceTag(text string) bool {
-	for i := 0; i < len(text); i++ {
-		if text[i] == '<' && botFenceTagAt(text, i) {
-			return true
-		}
+	if !escaped {
+		return text
 	}
-	return false
+	return b.String()
 }
 
 // botResultFenceExemptTools 是不进围栏的工具动作：只有平台完全自有的元数据/回执
@@ -124,13 +111,83 @@ func botFenceSourceToken(name string) string {
 	return b.String()
 }
 
-// botFenceTagAt 报告 s[i:] 是否以开或闭围栏标签开头；只做 ASCII 大小写
-// 折叠，不依赖 strings.ToLower（后者会改变部分非 ASCII 字符的字节长度）。
-func botFenceTagAt(s string, i int) bool {
-	return botFenceTagPrefixAt(s, i, botFenceOpenTag) || botFenceTagPrefixAt(s, i, botFenceCloseTag)
+// botFenceTagName 是围栏标签名；匹配时不区分 ASCII 大小写——外部内容用
+// </UNTRUSTED_DATA> 之类的写法同样会提前闭合围栏，只拦小写等于没拦。
+const botFenceTagName = "untrusted_data"
+
+// botFenceTagOpenLenAt 报告 s[i:] 是否以开或闭围栏标签开头，是则返回起始
+// `<` 等价物占的字节数（字面 < 为 1，\u003c 为 6），否则 0。标签名允许
+// 逐字符写成 \u00XX 转义——只按字面匹配等于给绕过留了编码通道。
+func botFenceTagOpenLenAt(s string, i int) int {
+	open := 0
+	switch {
+	case i < len(s) && s[i] == '<':
+		open = 1
+	case botFoldPrefixAt(s, i, `\u003c`):
+		open = len(`\u003c`)
+	default:
+		return 0
+	}
+	j := i + open
+	if j < len(s) && s[j] == '/' {
+		j++
+	} else if botFoldPrefixAt(s, j, `\u002f`) {
+		j += len(`\u002f`)
+	}
+	if !botFenceTagNameAt(s, j) {
+		return 0
+	}
+	return open
 }
 
-func botFenceTagPrefixAt(s string, i int, needle string) bool {
+// botFenceTagNameAt 报告 s[i:] 是否以围栏标签名开头；每个字符取字面
+// （ASCII 大小写折叠）或其 \u00XX 转义两种形态之一。
+func botFenceTagNameAt(s string, i int) bool {
+	for k := 0; k < len(botFenceTagName); k++ {
+		want := botFenceTagName[k]
+		if i < len(s) && s[i] == want {
+			i++
+			continue
+		}
+		if i < len(s) && s[i] >= 'A' && s[i] <= 'Z' && s[i]+'a'-'A' == want {
+			i++
+			continue
+		}
+		if botFoldPrefixAt(s, i, `\u00`) && i+6 <= len(s) && botUnhexByte(s[i+4], s[i+5]) == want {
+			i += 6
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// botUnhexByte 把两个 hex 字符解码成字节；非法字符返回 0xFF（必不等于任何
+// 目标字符，调用处按不匹配处理）。
+func botUnhexByte(a, b byte) byte {
+	hi, ok1 := botHexVal(a)
+	lo, ok2 := botHexVal(b)
+	if !ok1 || !ok2 {
+		return 0xFF
+	}
+	return hi<<4 | lo
+}
+
+func botHexVal(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+// botFoldPrefixAt 报告 s[i:] 是否以 needle 开头；只做 ASCII 大小写折叠，
+// 不依赖 strings.ToLower（后者会改变部分非 ASCII 字符的字节长度）。
+func botFoldPrefixAt(s string, i int, needle string) bool {
 	if i+len(needle) > len(s) {
 		return false
 	}

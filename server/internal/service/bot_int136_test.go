@@ -1314,3 +1314,51 @@ func TestBotInt136ConfirmedFlagLifecycle(t *testing.T) {
 		t.Fatalf("经确认卡的 enable 应启用并标记已复核: %+v", afterEnable)
 	}
 }
+
+// TestBotInt136UnconfirmedEnableBlocked 未复核任务（confirmed=false，确认机制
+// 上线前的存量行）不得绕过确认卡直接启用：内部 helper 是收口，REST 面板与
+// 任何不经确认的启用路径都被拒；经确认卡的 enable 自带 confirmed 放行；
+// 停用与已复核任务的启停不受影响。
+func TestBotInt136UnconfirmedEnableBlocked(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "legacygate")
+	bot := env.createBot(t, userID)
+	legacy := seedScheduleTask(t, env, bot.ID, nil)
+	// Enabled 带 default:true，Create 会吞掉 false 零值，停用要显式 UPDATE。
+	if err := env.db.Model(&model.BotScheduleTask{}).Where("id = ?", legacy.ID).Update("enabled", false).Error; err != nil {
+		t.Fatalf("disable seed: %v", err)
+	}
+
+	// 不经确认的启用被拒（REST 面板走的正是这条路径）。
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, legacy.ID, true, "", false); err == nil {
+		t.Fatalf("未复核任务不经确认的启用应被拒")
+	} else if appErr, ok := err.(*errs.AppError); !ok || appErr.Code != 40934 {
+		t.Fatalf("错误码应为 40934: %v", err)
+	}
+	if _, err := env.bots.SetScheduleTaskEnabled(userID, bot.ID, legacy.ID, true); err == nil {
+		t.Fatalf("REST 包装路径同样应被拒")
+	}
+	reloaded := reloadScheduleTask(t, env, legacy.ID)
+	if reloaded.Enabled || reloaded.Confirmed {
+		t.Fatalf("被拒的启用不得改库: %+v", reloaded)
+	}
+
+	// 停用不受限。
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, legacy.ID, false, "", false); err != nil {
+		t.Fatalf("停用未复核任务不应受限: %v", err)
+	}
+	// 经确认卡的 enable 放行并置位 confirmed；此后普通启停不再受限。
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, legacy.ID, true, "", true); err != nil {
+		t.Fatalf("经确认卡的启用应放行: %v", err)
+	}
+	reloaded = reloadScheduleTask(t, env, legacy.ID)
+	if !reloaded.Enabled || !reloaded.Confirmed {
+		t.Fatalf("确认卡启用应启用并标记已复核: %+v", reloaded)
+	}
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, legacy.ID, false, "", false); err != nil {
+		t.Fatalf("已复核任务停用: %v", err)
+	}
+	if _, err := env.bots.setScheduleTaskEnabled(bot.ID, legacy.ID, true, "", false); err != nil {
+		t.Fatalf("已复核任务普通启用不应受限: %v", err)
+	}
+}
