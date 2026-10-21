@@ -261,6 +261,73 @@ func TestScreenshotServiceDownloadsPublicImages(t *testing.T) {
 	}
 }
 
+// 令牌拉取的条目按授权域隔离：scope 不匹配（匿名或其他安装）一律按未命中
+// 处理——知道私有附件 URL 不能经共享缓存取到内容；同 scope 的带令牌请求
+// 正常命中。（令牌是否外发由 GitHub 媒体主机白名单另测，这里只测缓存键的
+// 授权域维度——上游恒定 200，靠请求计数判断命中/穿透。）
+func TestFetchAndCacheBearerScopeIsolation(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("private-png"))
+	}))
+	defer upstream.Close()
+
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream url: %v", err)
+	}
+	svc := newService(t.TempDir(), serviceConfig{
+		cacheSubdir: "review-screenshot-cache",
+		allowURL:    func(u *url.URL) bool { return u.Host == parsed.Host },
+		imagesOnly:  true,
+		client:      upstream.Client(),
+	})
+	u := upstream.URL + "/private.png"
+	ctx := context.Background()
+
+	// install:1 令牌拉到并落缓存（scope 标记）。
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-A", "install:1"); err != nil {
+		t.Fatalf("bearer fetch: %v", err)
+	}
+	hitsAfterFetch := hits
+	// 同 scope 命中缓存，不再发请求。
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-A", "install:1"); err != nil {
+		t.Fatalf("same-scope refetch: %v", err)
+	}
+	if hits != hitsAfterFetch {
+		t.Fatalf("hits %d → %d, want 同 scope 命中缓存", hitsAfterFetch, hits)
+	}
+	// 匿名请求不得命中 scope 条目：穿透到上游。
+	if _, err := svc.FetchAndCache(ctx, u); err != nil {
+		t.Fatalf("anonymous fetch: %v", err)
+	}
+	if hits != hitsAfterFetch+1 {
+		t.Fatalf("hits = %d, want 匿名请求穿透到上游（scope 条目未命中）", hits)
+	}
+	// 匿名这次 200 会以 scope="" 落缓存——匿名读取现在命中的是自己的条目。
+	if _, err := svc.FetchAndCache(ctx, u); err != nil {
+		t.Fatalf("anonymous refetch: %v", err)
+	}
+	if hits != hitsAfterFetch+1 {
+		t.Fatalf("hits = %d, want 匿名命中自己的条目，不穿透", hits)
+	}
+	// 其他安装不得命中 install:1 的条目：穿透且不覆写。
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-B", "install:2"); err != nil {
+		t.Fatalf("other-scope bearer fetch: %v", err)
+	}
+	if hits != hitsAfterFetch+2 {
+		t.Fatalf("hits = %d, want install:2 穿透到上游", hits)
+	}
+	if _, err := svc.FetchAndCacheWithBearer(ctx, u, "tok-A", "install:1"); err != nil {
+		t.Fatalf("scope-A entry must survive install:2's fetch: %v", err)
+	}
+	if hits != hitsAfterFetch+2 {
+		t.Fatalf("hits = %d, want install:1 仍命中自己的条目", hits)
+	}
+}
+
 // F27 回归：上游没有 Content-Type 时按位图扩展名回退——位图扩展名收，
 // 非位图扩展名拒（ErrUnsupportedUpstreamMedia）。响应头里真没有 Content-Type
 // 的写法是把头置 nil：Go 服务器只在头不存在时做内容嗅探补头，置 nil 既压掉
@@ -454,7 +521,7 @@ func TestFetchWithBearerNeverSendsTokenToExternalHost(t *testing.T) {
 		imagesOnly:  true,
 		client:      upstream.Client(),
 	})
-	if _, err := svc.FetchAndCacheWithBearer(context.Background(), upstream.URL+"/x.png", "secret-token"); err != nil {
+	if _, err := svc.FetchAndCacheWithBearer(context.Background(), upstream.URL+"/x.png", "secret-token", "install:1"); err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
 	if gotAuth != "" {

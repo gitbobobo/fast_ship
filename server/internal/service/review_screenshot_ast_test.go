@@ -78,6 +78,23 @@ func TestCollectScreenshotURLsHTMLImgEntityAndComment(t *testing.T) {
 	}
 }
 
+// 跨行 <img>：HTMLBlock 整块拼接后解析，标签拆开多行照样收集（逐行解析会
+// 把每个 fragment 都看成不完整元素而漏掉）。
+func TestCollectScreenshotURLsMultilineImg(t *testing.T) {
+	refs := collectScreenshotURLs("<div>\n<img\n  src=\"https://uiv.example.cn/f/shot.png\">\n</div>\n\n正文")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.example.cn/f/shot.png" {
+		t.Fatalf("refs = %+v, want 跨行 <img> 收集到完整 src", refs)
+	}
+}
+
+// 带行内格式的 alt：文本套在 Emphasis 等节点下，递归收集后代文本做 label。
+func TestCollectScreenshotURLsFormattedAltLabel(t *testing.T) {
+	refs := collectScreenshotURLs("![**登录页** v1](https://uiv.example.cn/f/a.png)")
+	if len(refs) != 1 || refs[0].Label != "登录页 v1" {
+		t.Fatalf("refs = %+v, want 格式化 alt 拼成 label", refs)
+	}
+}
+
 // Markdown 目的地不解码实体是 CommonMark 行为（goldmark 原样保留 &amp;），
 // 与 HTML 来源（解码）口径不同——接受这个边界，标签/指纹都按收集结果算。
 func TestCollectScreenshotURLsMarkdownEntityBoundary(t *testing.T) {
@@ -266,6 +283,70 @@ func TestVisualSyncCarryMessageWhenAllNotImages(t *testing.T) {
 		Where("kind = ? AND head_sha = ?", model.ReviewKindVisual, "sha-cm").Count(&visual)
 	if visual != 0 {
 		t.Fatalf("visual runs = %d, want 0（全部不是图不开视觉轮）", visual)
+	}
+}
+
+// probeNone 的收敛：全部「不是图」判定后指纹入账——后续同步事件（含手动
+// 重跑）ScreensChanged=false 不再重探这些地址；集合变化（指纹变）自然恢复。
+func TestVisualSyncProbeNoneSettlesFingerprint(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	badge := "https://img.shields.io/badge/x.svg"
+	newBody := "![badge](" + badge + ")"
+	e.fake.SetPR(repo, 96, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 96, HeadSHA: "sha-pn", Body: newBody,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	visualCombos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-pn")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	run := e.seedRun(t, repo, 96, "sha-pn", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"round_number": 1, "summary": "干净",
+		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":true}`,
+	})
+	ledger := &model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 96, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-pn", RoundNumber: 1,
+		// 账本指纹是旧集合的：新描述只有徽章 → 指纹不同 → 探测发生。
+		VisualScreensFingerprint: "old-set-fp", SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}
+	if err := e.svc.db.Create(ledger).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+	e.media.failURLs = map[string]error{badge: githubmedia.ErrUnsupportedUpstreamMedia}
+
+	e.review.syncPendingPRs(now)
+
+	var cur model.ReviewPullRequest
+	if err := e.svc.db.First(&cur, "project_id = ? AND repo_full_name = ? AND pr_number = ?",
+		ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).Error; err != nil {
+		t.Fatalf("reload ledger: %v", err)
+	}
+	want := settledNonePrefix + screenshotFingerprint(collectScreenshotURLs(newBody))
+	if cur.VisualScreensFingerprint != want {
+		t.Fatalf("fingerprint = %q, want %q（全部不是图判定后以结清态入账）", cur.VisualScreensFingerprint, want)
+	}
+	if e.media.anonCalls == 0 {
+		t.Fatal("第一次同步应真实探测过")
+	}
+
+	// 再来一次同步事件（同一截图集合）：探测不再发生。
+	if err := e.svc.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber).
+		Updates(map[string]any{"sync_pending": true, "sync_epoch": 2}).Error; err != nil {
+		t.Fatalf("re-arm ledger: %v", err)
+	}
+	callsBefore := e.media.anonCalls
+	e.review.syncPendingPRs(now.Add(time.Minute))
+	if e.media.anonCalls != callsBefore {
+		t.Fatalf("anonCalls %d → %d, want 同一集合不重探", callsBefore, e.media.anonCalls)
 	}
 }
 

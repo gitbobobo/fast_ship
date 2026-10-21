@@ -448,7 +448,7 @@ func (f *fakeReviewMedia) FetchAndCache(ctx context.Context, url string) (*githu
 	return f.cached, nil
 }
 
-func (f *fakeReviewMedia) FetchAndCacheWithBearer(_ context.Context, _, bearer string) (*githubmedia.CachedMedia, error) {
+func (f *fakeReviewMedia) FetchAndCacheWithBearer(_ context.Context, _, bearer, _ string) (*githubmedia.CachedMedia, error) {
 	f.bearerCalls++
 	f.lastBearer = bearer
 	if f.bearerErr != nil {

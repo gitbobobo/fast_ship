@@ -42,7 +42,7 @@ type reviewT3 interface {
 // Bearer 两路。
 type reviewMedia interface {
 	FetchAndCache(ctx context.Context, rawURL string) (*githubmedia.CachedMedia, error)
-	FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer string) (*githubmedia.CachedMedia, error)
+	FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer, scope string) (*githubmedia.CachedMedia, error)
 }
 
 // ReviewService PR 审查协调面：webhook 事务（幂等登记与防抖写库）与调度循环

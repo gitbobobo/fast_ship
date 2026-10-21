@@ -419,7 +419,9 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 			// 新 head（开轮清空了 visual_status），否则新提交会没有视觉结论。
 			// 「截图未变化」只在截图集合确实没变时才写——描述删光了截图或全
 			// 部不是图同样落进本分支（HasScreenshots=false），那句文案不再成立，
-			// 改用通用沿用文案。
+			// 改用通用沿用文案。ScreensSettled 时把指纹一并入账（none: 前缀标
+			// 记结清态）：同一集合后续同步事件不再重探。
+			fields := map[string]any{}
 			if len(outcome.PriorRuns) > 0 && priorVisualPassed(outcome.PriorRuns) {
 				desc := "审查通过（沿用上一轮）"
 				if outcome.HasScreenshots && !outcome.ScreensChanged {
@@ -430,14 +432,25 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 					statusDesc(desc), targetURL); err != nil {
 					return errs.New(errs.ErrGitHubAPI.Code, "写视觉审查状态失败: "+err.Error())
 				}
-				ok, err := s.updateLedgerEpoch(ledger, epoch, map[string]any{"visual_status": "success"})
+				fields["visual_status"] = "success"
+			}
+			if outcome.ScreensSettled {
+				fields["visual_screens_fingerprint"] = settledNonePrefix + outcome.Fingerprint
+			}
+			if len(fields) > 0 {
+				ok, err := s.updateLedgerEpoch(ledger, epoch, fields)
 				if err != nil {
 					return errs.ErrInternal
 				}
 				if !ok {
 					return nil
 				}
-				ledger.VisualStatus = "success"
+				if _, ok := fields["visual_status"]; ok {
+					ledger.VisualStatus = "success"
+				}
+				if outcome.ScreensSettled {
+					ledger.VisualScreensFingerprint = settledNonePrefix + outcome.Fingerprint
+				}
 			}
 		}
 	} else {
@@ -1010,11 +1023,15 @@ func decideVisual(in visualDecisionInput) visualDecision {
 // 两个事实（本轮是否仍有截图引用、截图集合是否变化）。
 type visualDecisionOutcome struct {
 	Decision                 visualDecision
-	Fingerprint              string // 本次截图指纹（visualStart 时入账）
+	Fingerprint              string // 本次截图指纹（visualStart / 集合已判无时入账）
 	ScreensUnavailableReason string
 	HasScreenshots           bool // 规整/准入/探测后仍成立的截图引用
 	ScreensChanged           bool
-	PriorRuns                []model.ReviewRun // 最近一轮视觉运行（沿用场景用）
+	// ScreensSettled 本截图集合已判定「没有可服务的截图」（描述里没有可准入
+	// 引用、或探测全部「不是图」）——指纹入账收敛：同一集合不再重探。
+	// 「拉不到」不置位（探测就为重试存在）。
+	ScreensSettled bool
+	PriorRuns      []model.ReviewRun // 最近一轮视觉运行（沿用场景用）
 }
 
 // decideVisualForPR 组装真实输入并调 decideVisual。
@@ -1057,7 +1074,17 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	refs := collectScreenshotURLs(pr.Body)
 	in.HasScreenshots = len(refs) > 0
 	fingerprint := screenshotFingerprint(refs)
-	in.ScreensChanged = fingerprint != ledger.VisualScreensFingerprint
+	// 已结清的「没有可服务截图」集合以 none: 前缀入账，与「有图集合的指
+	// 纹」区分开：同一集合（指纹相同）后续同步事件直接判无截图、不再重
+	// 探；集合变化（指纹不同）自动恢复探测。
+	storedFP, settledNone := splitSettledFingerprint(ledger.VisualScreensFingerprint)
+	in.ScreensChanged = fingerprint != storedFP
+	screensSettled := !in.HasScreenshots
+	judgedNone := settledNone && !in.ScreensChanged
+	if judgedNone {
+		in.HasScreenshots = false
+		screensSettled = true
+	}
 
 	// 截图能否下载只在「本轮真的要开视觉」时才探测（ScreensChanged 或
 	// AnyUIChangedSinceLastVisual 成立，决策才可能走到 visualStart）：指纹
@@ -1067,13 +1094,14 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 	// 与「描述里没有截图」同收敛（visualNone，不刷「截图无法下载」）；
 	// 拉不到时不建视觉运行（决策改报 visualScreensUnavailable），且指纹不
 	// 入账——下次同步事件指纹仍不同，会重新尝试下载。
-	if in.CodeAllTerminalOK && in.HasVisualCombos && in.AnyUIChanged && in.HasScreenshots &&
+	if !judgedNone && in.CodeAllTerminalOK && in.HasVisualCombos && in.AnyUIChanged && in.HasScreenshots &&
 		(in.ScreensChanged || in.AnyUIChangedSinceLastVisual) {
 		probe, reason := s.probeScreenshots(ctx, ledger.InstallationID, pr.Body)
 		switch probe {
 		case probeReady:
 		case probeNone:
 			in.HasScreenshots = false
+			screensSettled = true
 		case probeUnavailable:
 			in.ScreensUnavailable = true
 			in.ScreensUnavailableReason = reason
@@ -1108,6 +1136,7 @@ func (s *ReviewService) decideVisualForPR(ctx context.Context, ledger *model.Rev
 		ScreensUnavailableReason: in.ScreensUnavailableReason,
 		HasScreenshots:           in.HasScreenshots,
 		ScreensChanged:           in.ScreensChanged,
+		ScreensSettled:           screensSettled,
 		PriorRuns:                priorRuns,
 	}, nil
 }
@@ -1264,6 +1293,18 @@ func (s *ReviewService) createVisualRuns(ledger *model.ReviewPullRequest,
 		return nil, false, errs.ErrInternal
 	}
 	return runs, aborted, nil
+}
+
+// settledNonePrefix 「已判无可服务截图」的集合在指纹列里的前缀：同一集合
+// 不再重探（含 UI 又变了的同步事件），集合变化则前缀与指纹都不匹配、自然
+// 恢复探测。
+const settledNonePrefix = "none:"
+
+func splitSettledFingerprint(stored string) (fp string, settledNone bool) {
+	if strings.HasPrefix(stored, settledNonePrefix) {
+		return strings.TrimPrefix(stored, settledNonePrefix), true
+	}
+	return stored, false
 }
 
 // screenshotFingerprint 排序后 URL 列表的 SHA-256 前 16 位（hex）。

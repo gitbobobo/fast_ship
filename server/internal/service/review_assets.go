@@ -142,14 +142,18 @@ func htmlImgSources(fragment string) []string {
 	return urls
 }
 
-// imageLabelText 图片的 alt 文本：子节点 Text 拼接（含行内格式时只取纯文本）。
+// imageLabelText 图片的 alt 文本：递归收集所有后代 Text（`![**登录页**](u)`
+// 这类带行内格式的 alt 套在 Emphasis 等节点下，只看直接子节点会丢成空串）。
 func imageLabelText(n *ast.Image, source []byte) string {
 	var b strings.Builder
-	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
-		if t, ok := c.(*ast.Text); ok {
-			b.Write(t.Segment.Value(source))
+	_ = ast.Walk(n, func(c ast.Node, entering bool) (ast.WalkStatus, error) {
+		if entering {
+			if t, ok := c.(*ast.Text); ok {
+				b.Write(t.Segment.Value(source))
+			}
 		}
-	}
+		return ast.WalkContinue, nil
+	})
 	return strings.TrimSpace(b.String())
 }
 
@@ -203,14 +207,18 @@ func collectScreenshotURLs(body string) []screenshotRef {
 				})
 			}
 		case *ast.HTMLBlock:
+			// 整块拼接后再解析：`<img\n src=...>` 跨行时逐行解析会把每个
+			// fragment 都看成不完整的元素而漏收。
+			var buf strings.Builder
 			for i := 0; i < n.Lines().Len(); i++ {
 				line := n.Lines().At(i)
-				for _, u := range htmlImgSources(string(line.Value(source))) {
-					candidates = append(candidates, candidate{
-						ref:    screenshotRef{URL: normalizeRefURL(u, false)},
-						source: refSourceHTMLImage,
-					})
-				}
+				buf.Write(line.Value(source))
+			}
+			for _, u := range htmlImgSources(buf.String()) {
+				candidates = append(candidates, candidate{
+					ref:    screenshotRef{URL: normalizeRefURL(u, false)},
+					source: refSourceHTMLImage,
+				})
 			}
 		}
 		return ast.WalkContinue, nil
@@ -300,7 +308,9 @@ func (s *ReviewService) downloadScreenshot(ctx context.Context, installationID i
 	if berr != nil || bearer == "" {
 		return nil, err
 	}
-	return s.media.FetchAndCacheWithBearer(ctx, url, bearer)
+	// scope 用安装 id：令牌拉进缓存的私有附件条目只对同一安装命中（见
+	// cacheEntry.Scope）。
+	return s.media.FetchAndCacheWithBearer(ctx, url, bearer, fmt.Sprintf("install:%d", installationID))
 }
 
 // screenshotErrorText 用户可见的下载失败原因。网络层原始错误（*url.Error 的
@@ -463,10 +473,12 @@ const (
 	probeUnavailable
 )
 
-// isNotAnImageError 失败是否属于「不是图」：下载面对内容/地址形态的确定性
-// 拒绝（ErrUnsupportedUpstreamMedia=内容不是位图、ErrInvalidMediaURL=地址
-// 形态不支持），换网络/令牌都不会变。其余一切（网络、超时、缓存、预算）都
-// 是「拉不到」。
+// isNotAnImageError 失败是否属于「不是图」——上游证明候选不是可服务的位图：
+// ErrUnsupportedUpstreamMedia（Content-Type 不是位图、octet-stream 且非位图
+// 扩展名）、ErrInvalidMediaURL（地址不是可请求的媒体形态）。内网/保留地址、
+// 超限、空响应虽是本次请求必败，但指向的确实可能是图（内网图床、换小文件、
+// 补 body 都可能自愈），归「拉不到」如实报 failure，不静默归「没有截图」。
+// 其余一切（网络、超时、缓存、预算）同样是「拉不到」。
 func isNotAnImageError(err error) bool {
 	return errors.Is(err, githubmedia.ErrUnsupportedUpstreamMedia) ||
 		errors.Is(err, githubmedia.ErrInvalidMediaURL)

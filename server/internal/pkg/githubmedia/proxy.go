@@ -110,6 +110,11 @@ type cacheEntry struct {
 	Size         int64     `json:"size"`
 	CachedAt     time.Time `json:"cached_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
+	// Scope 写入该条目所用的授权域（如安装 id）；空串 = 匿名拉取的公开内容。
+	// 带 scope 的条目只对同 scope 的请求命中——私有附件被某安装令牌拉进缓存
+	// 后，匿名或其他安装的请求不得直接命中（否则知道 URL 就能跨安装取到私
+	// 有内容）。旧条目无此字段按匿名处理。
+	Scope string `json:"scope,omitempty"`
 }
 
 func (e cacheEntry) expired(now time.Time) bool {
@@ -497,23 +502,25 @@ func (s *ProxyService) GetCached(rawURL string) (*CachedMedia, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	return s.getCachedNormalized(normalized)
+	return s.getCachedNormalized(normalized, "")
 }
 
 // FetchAndCache 匿名拉取并缓存（公开附件）。私有仓库附件用
 // FetchAndCacheWithBearer。
 func (s *ProxyService) FetchAndCache(ctx context.Context, rawURL string) (*CachedMedia, error) {
-	return s.fetchAndCache(ctx, rawURL, "")
+	return s.fetchAndCache(ctx, rawURL, "", "")
 }
 
 // FetchAndCacheWithBearer 同 FetchAndCache，但请求带 Authorization: Bearer：
 // 私有仓库的 user-attachments 需要 App 安装令牌才拉得到。bearer 只进请求头，
-// 不进缓存键，与匿名路径共用同一份缓存。
-func (s *ProxyService) FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer string) (*CachedMedia, error) {
-	return s.fetchAndCache(ctx, rawURL, bearer)
+// 不进缓存；scope 是该令牌的授权域（调用方给安装 id 之类的不透明串），进
+// 缓存键且记入 meta——不同域各是各的条目，匿名与其他 scope 一律按未命中
+// 处理，防止私有内容经共享 URL 缓存跨授权域泄漏。
+func (s *ProxyService) FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer, scope string) (*CachedMedia, error) {
+	return s.fetchAndCache(ctx, rawURL, bearer, scope)
 }
 
-func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string) (*CachedMedia, error) {
+func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer, scope string) (*CachedMedia, error) {
 	normalized, err := s.normalize(rawURL)
 	if err != nil {
 		return nil, err
@@ -529,7 +536,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	}
 	defer func() { <-lock }()
 
-	if cached, ok, err := s.getCachedNormalized(normalized); err != nil {
+	if cached, ok, err := s.getCachedNormalized(normalized, scope); err != nil {
 		return nil, err
 	} else if ok {
 		return cached, nil
@@ -606,6 +613,7 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	now := time.Now().UTC()
 	entry := cacheEntry{
 		URL:          normalized,
+		Scope:        scope,
 		ContentType:  contentType,
 		CacheControl: buildCacheControl(s.cacheTTL),
 		ETag:         strings.TrimSpace(resp.Header.Get("ETag")),
@@ -615,8 +623,8 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 		ExpiresAt:    now.Add(s.cacheTTL),
 	}
 
-	cachePath := s.dataPath(normalized)
-	metaPath := s.metaPath(normalized)
+	cachePath := s.dataPath(normalized, scope)
+	metaPath := s.metaPath(normalized, scope)
 
 	if err := os.Rename(tempFile.Name(), cachePath); err != nil {
 		return nil, markLocalCacheErr(err) // *os.LinkError 也统一打标
@@ -689,9 +697,9 @@ func (s *ProxyService) normalize(rawURL string) (string, error) {
 	return normalized, nil
 }
 
-func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, bool, error) {
-	metaPath := s.metaPath(normalized)
-	cachePath := s.dataPath(normalized)
+func (s *ProxyService) getCachedNormalized(normalized, scope string) (*CachedMedia, bool, error) {
+	metaPath := s.metaPath(normalized, scope)
+	cachePath := s.dataPath(normalized, scope)
 
 	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -707,6 +715,12 @@ func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, boo
 	if err := json.Unmarshal(metaBytes, &entry); err != nil {
 		_ = os.Remove(metaPath)
 		_ = os.Remove(cachePath)
+		return nil, false, nil
+	}
+
+	// 授权域不匹配的兜底检查：scope 已进缓存键，正常不会同键撞域；meta 里
+	// 的 Scope 字段是双保险（如旧格式条目或键派生变化时仍不误命中）。
+	if entry.Scope != scope {
 		return nil, false, nil
 	}
 
@@ -762,12 +776,22 @@ func (s *ProxyService) acquireDownloadLock(key string) chan struct{} {
 	return lock
 }
 
-func (s *ProxyService) dataPath(normalized string) string {
-	return filepath.Join(s.cacheDir, cacheKey(normalized)+".bin")
+func (s *ProxyService) dataPath(normalized, scope string) string {
+	return filepath.Join(s.cacheDir, cacheKey(scopedCacheID(normalized, scope))+".bin")
 }
 
-func (s *ProxyService) metaPath(normalized string) string {
-	return filepath.Join(s.cacheDir, cacheKey(normalized)+".json")
+func (s *ProxyService) metaPath(normalized, scope string) string {
+	return filepath.Join(s.cacheDir, cacheKey(scopedCacheID(normalized, scope))+".json")
+}
+
+// scopedCacheID 缓存键底材：令牌拉取的私有内容按授权域分键，不同安装/匿名
+// 各是各的条目，不会互相命中或覆写；匿名（scope=""）保持纯 URL 键，存量缓
+// 存不受影响。
+func scopedCacheID(normalized, scope string) string {
+	if scope == "" {
+		return normalized
+	}
+	return scope + "\x1f" + normalized
 }
 
 func cloneRelevantHeaders(header http.Header) http.Header {

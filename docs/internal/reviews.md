@@ -321,6 +321,12 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 完）→ `unavailable`，reason 取第一条「拉不到」类原因，没有再取第一条失败
 原因。
 
+判定为 `none` 的集合会**结清**：指纹以 `none:` 前缀写入
+`visual_screens_fingerprint`，与「有图集合的指纹」区分开——同一集合（指
+纹相同）之后任何同步事件（含 UI 又改动、手动重跑）直接判无截图、不再重
+探；集合变化（指纹不同）自动恢复探测。无引用（描述里没有截图）同样结清。
+`unavailable` 不写指纹：拉不到是暂时性的，下次同步重试。
+
 「拉不到」时**不建视觉运行**，`视觉审查` 写一条明确的 failure（「截图无法
 下载，未做视觉审查：<原因>」，原因为中文可读文案，网络层英文报错只进日志，
 且 URL 与错误文本先脱敏——`*url.Error` 内嵌重定向后的完整地址，预签名
@@ -351,12 +357,14 @@ Linkify；去重保序，label 取 alt 或「截图 N」）。收集走 AST 而�
 法。认三个来源，按文档序（walk 顺序）合并：
 
 - `![alt](url)`（ast.Image）：行内、尖括号目的地 `![](<u(1).png>)`、引用式
-  `![a][id]` + 定义行都由 goldmark 填充同一个 Destination，label 取 alt 文
-  本；没有定义的引用不产节点，自然不收集。Markdown 目的地不解码 HTML 实体
+  `![a][id]` + 定义行都由 goldmark 填充同一个 Destination，label 递归取 alt
+  里的全部文本节点（`![**登录页** v1](u)` 这类带行内格式的也拼得出来）；
+  没有定义的引用不产节点，自然不收集。Markdown 目的地不解码 HTML 实体
   （CommonMark 行为，`&amp;` 原样保留），与 HTML 来源口径不同，接受该边界。
-- HTML `<img src>`（ast.RawHTML 行内段 / ast.HTMLBlock 整行块）：literal 交
-  给 `golang.org/x/net/html` 解析取 src，实体由解析器解码（`&amp;` → `&`，
-  修正旧正则原样收进 URL 的问题）。
+- HTML `<img src>`（ast.RawHTML 行内段 / ast.HTMLBlock 块）：块先按行拼接
+  成完整 literal（`<img\n src=...>` 跨行写法的各个 fragment 都不是完整元素，
+  逐行解析会漏收），再交给 `golang.org/x/net/html` 解析取 src，实体由解析器
+  解码（`&amp;` → `&`，修正旧正则原样收进 URL 的问题）。
 - 裸链（ast.AutoLink，Linkify 产出）：URL 边界由 GFM 定义——ASCII 尾标点
   `?!.,:*_~` 与括号配对、结尾 `&xxx;` 实体由 Linkify 剥；URL 前面必须是空
   白/行首/`*`/`_`/`~`/`(` 才触发自动链接（cmark-gfm 同款，GitHub 渲染同款：
@@ -401,7 +409,12 @@ https** 主机，内容只收位图：`image/*`（svg 即使标着 `image/svg+xm
 重定向目标与 DNS 重绑定的每次建连同样被拦。App 安装令牌（bearer）只发往
 GitHub 媒体域、且只在匿名被 401/403/404 拒时重试一次（私有附件对匿名请求
 正是回这两个码）：外部图床匿名失败即止，协议不支持、不是图片、超限、内网
-地址这类确定性失败也不重试。指纹 = 排序后 URL 列表的
+地址这类确定性失败也不重试。
+
+缓存按授权域分键：令牌拉取的条目键里带 `install:<id>` 授权域——私有附件
+URL 即使被第三方知道，匿名或其他安装的请求也命中不了这条缓存（各是各的
+条目，互不覆写）；bearer 本身不落盘。匿名条目照旧是纯 URL 键，公开附件
+照常共享。指纹 = 排序后 URL 列表的
 SHA-256 前 16 位。
 
 ## 工作区回收

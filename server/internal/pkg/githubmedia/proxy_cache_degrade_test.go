@@ -30,7 +30,7 @@ func seedCacheMeta(t *testing.T, svc *ProxyService, normalized string) string {
 	if err != nil {
 		t.Fatalf("marshal entry: %v", err)
 	}
-	metaPath := svc.metaPath(normalized)
+	metaPath := svc.metaPath(normalized, "")
 	if err := os.WriteFile(metaPath, data, 0o640); err != nil {
 		t.Fatalf("write meta: %v", err)
 	}
@@ -54,18 +54,18 @@ func TestGetCachedDegradesUnreadableMetaToMiss(t *testing.T) {
 		t.Fatalf("chmod meta: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(metaPath, 0o640) })
-	if err := os.WriteFile(svc.dataPath(normalized), []byte("png"), 0o640); err != nil {
+	if err := os.WriteFile(svc.dataPath(normalized, ""), []byte("png"), 0o640); err != nil {
 		t.Fatalf("write data: %v", err)
 	}
 
-	cached, ok, err := svc.getCachedNormalized(normalized)
+	cached, ok, err := svc.getCachedNormalized(normalized, "")
 	if ok || err != nil || cached != nil {
 		t.Fatalf("cached = %+v ok = %v err = %v, want miss 不报错（降级重下）", cached, ok, err)
 	}
 	if _, statErr := os.Stat(metaPath); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("meta stat = %v, want 已被降级清理", statErr)
 	}
-	if _, statErr := os.Stat(svc.dataPath(normalized)); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Stat(svc.dataPath(normalized, "")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("data stat = %v, want 已被降级清理", statErr)
 	}
 }
@@ -84,16 +84,16 @@ func TestGetCachedDegradesUnstatableDataToMiss(t *testing.T) {
 	}
 	seedCacheMeta(t, svc, normalized)
 	// 指向自身的符号链接：os.Stat 跟随链接即 ELOOP（非 ErrNotExist）。
-	dataPath := svc.dataPath(normalized)
+	dataPath := svc.dataPath(normalized, "")
 	if err := os.Symlink(dataPath, dataPath); err != nil {
 		t.Fatalf("symlink loop: %v", err)
 	}
 
-	cached, ok, err := svc.getCachedNormalized(normalized)
+	cached, ok, err := svc.getCachedNormalized(normalized, "")
 	if ok || err != nil || cached != nil {
 		t.Fatalf("cached = %+v ok = %v err = %v, want miss 不报错（降级重下）", cached, ok, err)
 	}
-	if _, statErr := os.Stat(svc.metaPath(normalized)); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Stat(svc.metaPath(normalized, "")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("meta stat = %v, want 已被降级清理", statErr)
 	}
 }
@@ -124,7 +124,7 @@ func TestGetCachedReportsLocalCacheErrWhenDiscardFails(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(svc.cacheDir, 0o750) })
 
-	if _, _, err := svc.getCachedNormalized(normalized); !errors.Is(err, ErrLocalCache) {
+	if _, _, err := svc.getCachedNormalized(normalized, ""); !errors.Is(err, ErrLocalCache) {
 		t.Fatalf("err = %v, want ErrLocalCache（降级也失败=目录级故障）", err)
 	}
 }
