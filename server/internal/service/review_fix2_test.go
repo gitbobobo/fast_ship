@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -439,6 +440,7 @@ func TestCleanupBeforeProjectDelete(t *testing.T) {
 
 	t3 := &fakeReviewT3{
 		threadWorktrees: map[string]T3ThreadWorktree{
+			done.ThreadID:       {Path: "/ws/wt-del"},
 			unresolved.ThreadID: {Path: "/ws/wt-thread", Branch: "br-del"},
 		},
 		// 项目删除入口同样要过归属核验：两条路径都得登记在案才可删。
@@ -493,16 +495,34 @@ func TestCleanupBeforeProjectDeleteVerifiesOwnership(t *testing.T) {
 	e.svc.db.Model(stale).Update("worktree_state", model.ReviewWorktreeRemoved)
 	released := e.seedDispatchedRun(t, repo, 59, model.ReviewKindCode, model.ReviewRunCompleted, "/ws/wt-free", true, now)
 	e.svc.db.Model(released).Update("environment_id", env.ID)
+	// 线程投影读不到 / 与行内路径冲突：无法证明归属 → 不删。
+	unreadable := e.seedDispatchedRun(t, repo, 60, model.ReviewKindCode, model.ReviewRunCompleted, "/ws/wt-unreadable", true, now)
+	e.svc.db.Model(unreadable).Update("environment_id", env.ID)
+	conflict := e.seedDispatchedRun(t, repo, 61, model.ReviewKindCode, model.ReviewRunCompleted, "/ws/wt-old", true, now)
+	e.svc.db.Model(conflict).Update("environment_id", env.ID)
 
-	t3 := &fakeReviewT3{worktrees: []T3Worktree{
-		{Path: "/ws/wt-claimed"},
-		{Path: "/ws/wt-free"},
-	}}
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			gone.ThreadID:     {Path: "/ws/wt-gone"},
+			claimed.ThreadID:  {Path: "/ws/wt-claimed"},
+			released.ThreadID: {Path: "/ws/wt-free"},
+			conflict.ThreadID: {Path: "/ws/wt-new"},
+		},
+		// 这条运行的线程投影读不到：项目删除入口必须跳过删除，不能降级成
+		// 「行内路径 + 空分支」强删。
+		threadWorktreeErrs: map[string]error{unreadable.ThreadID: errors.New("upstream down")},
+		worktrees: []T3Worktree{
+			{Path: "/ws/wt-claimed"},
+			{Path: "/ws/wt-free"},
+			{Path: "/ws/wt-unreadable"},
+			{Path: "/ws/wt-old"},
+		},
+	}
 	review := e.withT3(t3, nil, nil)
 	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
 
 	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-free" {
-		t.Fatalf("removed = %v, want 仅 [/ws/wt-free]（gone/mismatch 不删）", t3.removed)
+		t.Fatalf("removed = %v, want 仅 [/ws/wt-free]（gone/mismatch/读取失败/路径冲突都不删）", t3.removed)
 	}
 }
 

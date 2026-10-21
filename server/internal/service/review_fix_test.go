@@ -18,27 +18,28 @@ import (
 )
 
 // fakeReviewT3 线程/工作区执行面的内存桩：记录调用、可注入错误。
-// ThreadWorktree 按 threadID 查 threadWorktrees，未命中回 threadWTDefault；
-// threadWTErrs 按调用次序出队（优先），取完后回 threadWTErr。createFn 非空时
-// 代替默认桩。
+// ThreadWorktree 按 threadID 查 threadWorktreeErrs（单线程错误优先）、
+// threadWorktrees（未命中回 threadWTDefault）；全局 threadWTErrs 按调用次序
+// 出队，取完后回 threadWTErr。createFn 非空时代替默认桩。
 type fakeReviewT3 struct {
-	threadWorktrees map[string]T3ThreadWorktree
-	threadWTDefault T3ThreadWorktree
-	threadWTErrs    []error
-	threadWTErr     error
-	threadWTCalls   []string
-	worktrees       []T3Worktree
-	listErr         error
-	listCalls       int
-	listCwds        []string
-	stopped         []string
-	removed         []string
-	removedCwd      []string
-	removeErr       error
-	archived        []string
-	archiveErr      error
-	createFn        func(context.Context, string, string, *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
-	created         []*T3CreateThreadRequest
+	threadWorktrees    map[string]T3ThreadWorktree
+	threadWorktreeErrs map[string]error
+	threadWTDefault    T3ThreadWorktree
+	threadWTErrs       []error
+	threadWTErr        error
+	threadWTCalls      []string
+	worktrees          []T3Worktree
+	listErr            error
+	listCalls          int
+	listCwds           []string
+	stopped            []string
+	removed            []string
+	removedCwd         []string
+	removeErr          error
+	archived           []string
+	archiveErr         error
+	createFn           func(context.Context, string, string, *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
+	created            []*T3CreateThreadRequest
 }
 
 func (f *fakeReviewT3) CreateThreadForAgent(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
@@ -56,6 +57,9 @@ func (f *fakeReviewT3) StopThread(_ context.Context, _, _, threadID string) (*T3
 
 func (f *fakeReviewT3) ThreadWorktree(_ context.Context, _, _, threadID string) (*T3ThreadWorktree, error) {
 	f.threadWTCalls = append(f.threadWTCalls, threadID)
+	if err, ok := f.threadWorktreeErrs[threadID]; ok {
+		return nil, err
+	}
 	if len(f.threadWTErrs) > 0 {
 		err := f.threadWTErrs[0]
 		f.threadWTErrs = f.threadWTErrs[1:]
@@ -959,5 +963,45 @@ func TestCleanupTriesPerReason(t *testing.T) {
 	}
 	if e.cleanupFailedCount(t) != 1 {
 		t.Fatal("到上限应发一次失败通知")
+	}
+}
+
+// TestCleanupNotFoundCounterResetsAfterSuccess 404 计数按「连续失败」语义：
+// 中途成功读到线程投影就清零。否则「404 → 成功（但登记读失败）→ 404 → …」
+// 的交错序列会让累计 404 提前命中上限，把已确认存在的工作区静默标 removed。
+func TestCleanupNotFoundCounterResetsAfterSuccess(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-404reset")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	run := e.seedCleanableRun(t, repo, 66, env, model.ReviewRunCompleted, "", now)
+
+	t3 := &fakeReviewT3{
+		threadWTErrs: []error{errT3ThreadNotFound, errT3ThreadNotFound},
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/404-reset", Branch: "br-404"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/404-reset", RefNames: []string{"br-404"}}},
+		listErr:   errors.New("registry down"),
+	}
+	review := e.withT3(t3, nil, nil)
+
+	// tick1/2：两个 404（累计 2，未到上限）。
+	review.cleanupRunWorktree(run, now)
+	review.cleanupRunWorktree(run, now)
+	// tick3：成功读到线程投影（404 计数应清零），登记读取失败进入 registry 重试。
+	review.cleanupRunWorktree(run, now)
+	// tick4：再一个 404。若 404 计数没随成功清零，这里就是第 3 次 → removed。
+	t3.threadWTErrs = []error{errT3ThreadNotFound}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeNone {
+		t.Fatalf("worktree_state = %q, want none（成功读取后 404 计数必须清零）", after.WorktreeState)
+	}
+	if len(t3.removed) != 0 {
+		t.Fatalf("不得删除，removed = %v", t3.removed)
 	}
 }

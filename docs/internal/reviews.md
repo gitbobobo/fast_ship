@@ -338,10 +338,11 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
   `projection.thread.worktreePath` / `.branch`，已归档线程同样可读）：
   launch 确认时 T3 往往还没建好 worktree，启动前后做差集推断必然歧义，
   该方案已废弃，`launchRun` 不再解析路径。
-  - 线程 404、读线程失败、线程 `worktreePath` 为空（T3 仍在准备）各自独立
-    计数、有限重试（3 个 tick）：404 连续 3 次都读不到才 `removed`（T3 删
-    线程后的磁盘工作区归 T3 生命周期管）；读线程失败到上限 → `failed` +
-    通知；空路径到上限 → `removed`（无工作区）。
+  - 线程 404、读线程失败、线程 `worktreePath` 为空（T3 仍在准备）、登记读取
+    失败各自独立计数、有限重试（3 个 tick），成功一次即清零该原因的计数
+    （按「连续失败」而非累计）：404 连续 3 次都读不到才 `removed`（T3 删线程
+    后的磁盘工作区归 T3 生命周期管）；读线程失败到上限 → `failed` + 通知；
+    空路径到上限 → `removed`（无工作区）。
   - 行内旧 `worktree_path` 与线程真值不一致 → `failed` + 通知，不删。
   - 读到的路径写回运行行，然后逐项核验（核验与删除用**同一个 cwd**，即
     launch 快照的 `workspace_root`；绑定/项目表变化不改变证明对象）：行快照
@@ -355,9 +356,9 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
   - 核验通过才 `vcs.removeWorktree{cwd: launch 时快照的 workspace_root,
     path: worktree_path, force:true}`（T3 WS RPC，`git worktree remove
     --force`），成功 `removed`。任何不确定都不删，不影响审查结论。
-- 删除项目时的 best-effort 回收与常规回收共用同一套归属核验，核验不过只
-  记日志跳过（项目行 CASCADE 后不再有调度机会；未走到回收阶段的运行按
-  线程投影取路径，避免把工作区一起漏掉）。
+- 删除项目时的 best-effort 回收与常规回收共用同一套归属核验：只有线程投影
+  成功读到、且与行内快照一致时才继续，读不到/路径冲突/核验不过都只记日志
+  跳过——项目行 CASCADE 后没有重试机会，宁缺毋滥。
 - 视觉运行 `worktree_state` 恒 `none`，只归档线程、无工作区可删。
 
 ## 页面

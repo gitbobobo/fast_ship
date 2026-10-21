@@ -323,11 +323,19 @@ func reviewShortSHA(sha string) string {
 // ——只截选项串自身；实例名是分节标题里最有用的部分，不参与截断。
 const reviewOptionsMaxRunes = 80
 
+// singleLine 把可能来自配置/上游的显示文本压成一行：换行会拆开标题、表格和
+// 评论结构，统一换成空格后由各消费点再做自己的转义（表格转义竖线等）。
+func singleLine(s string) string {
+	s = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
+	return strings.TrimSpace(s)
+}
+
 // runCombinationLabel 组合显示名：模型 · 实例。不拼选项也不截断——选项另有
 // runCombinationOptions 单独展示（评论 <sub> 小字、历史标题纯文本），避免
-// 整体截断后把信息量最低的模型名前缀留下、最有用的实例名被截掉。
+// 整体截断后把信息量最低的模型名前缀留下、最有用的实例名被截掉。模型/实例
+// 来自项目配置，可能含换行，压成单行后再拼。
 func runCombinationLabel(run *model.ReviewRun) string {
-	return run.Model + " · " + run.InstanceID
+	return singleLine(run.Model) + " · " + singleLine(run.InstanceID)
 }
 
 // runCombinationOptions 组合选项串：k=v · k=v。值取 JSON 解码后的原生形态：

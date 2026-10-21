@@ -233,4 +233,23 @@ func TestBuildCodeCommentEscaping(t *testing.T) {
 	if !strings.Contains(body, "<sub>tag=&lt;b&gt;&amp;amp; · off=null</sub>") {
 		t.Fatalf("sub options not escaped: %s", body)
 	}
+	// 分节标题同样要压成单行（组合名里的换行不能把标题拆开）。
+	if !strings.Contains(body, "### m|odel second · in\"stance\n") {
+		t.Fatalf("section heading not single-lined: %s", body)
+	}
+	if strings.Contains(body, "\nsecond · in") {
+		t.Fatalf("section heading leaked a line break: %s", body)
+	}
+}
+
+// TestMarkdownTableCellEscapesBackslash 表格单元格必须先把反斜杠转义，否则
+// 输入里的 `\|` 会变成 `\\|`，GFM 把 `\\` 当字面反斜杠、`|` 仍是裸分隔符。
+func TestMarkdownTableCellEscapesBackslash(t *testing.T) {
+	if got, want := markdownTableCell(`a\|b`), `a\\\|b`; got != want {
+		t.Fatalf("markdownTableCell = %q, want %q", got, want)
+	}
+	// 换行（含 CRLF）都换成空格；多个空格在 GFM 渲染里会折叠，不必归一。
+	if got := markdownTableCell("a\r\nb"); got != "a  b" {
+		t.Fatalf("markdownTableCell newline = %q, want a  b", got)
+	}
 }

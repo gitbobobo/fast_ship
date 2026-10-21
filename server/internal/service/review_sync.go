@@ -656,8 +656,10 @@ func markdownLinkText(s string) string {
 }
 
 // markdownTableCell 把任意值放进 Markdown 表格单元格：换行会拆行破坏表格，
-// 先换成空格；`|` 会拆列，转义之。
+// 先换成空格；`|` 会拆列，转义之。反斜杠必须先转义——否则输入里的 `\|`
+// 会变成 `\\|`，GFM 把 `\\` 当字面反斜杠、后面的 `|` 仍是裸分隔符。
 func markdownTableCell(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.ReplaceAll(s, "|", "\\|")
@@ -815,7 +817,8 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 				}
 			}
 		case r.Status.Terminal():
-			fmt.Fprintf(&b, "本组合未完成（%s）：%s\n", stats[i].status, r.ErrorMessage)
+			// 上游错误文本可能含换行：压成单行，别让它拆开评论结构。
+			fmt.Fprintf(&b, "本组合未完成（%s）：%s\n", stats[i].status, singleLine(r.ErrorMessage))
 		default:
 			b.WriteString("审查中…\n")
 		}
