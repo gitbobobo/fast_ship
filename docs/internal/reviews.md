@@ -63,7 +63,7 @@ Issue 与 Release、无代码；代码在另一仓库）。`project.CodeRepo()` 
 | `review_runs` | `kind(code\|visual)`、`repo_full_name/pr_number/head_sha/round_number`、`installation_id`、`trigger_action`、`pr_title/pr_url/base_ref/head_ref`、组合列 `environment_id/t3_project_id/instance_id/model/model_options_json`、预分配 `thread_id/launch_command_id/initial_message_id`、`status(queued\|dispatched\|running\|completed\|failed\|timed_out\|cancelled)`、`dispatch_started_at/dispatched_at/started_at/finished_at/deadline_at`、`error_code/error_message`、`summary/result_json`、`review_id/posted_at`、`worktree_path/worktree_state/worktree_error`、`stop_attempted_at`、`archived_at` | 一次审查运行 = 一轮 × 一个组合。同一 (repo, pr, head_sha) 的代码与视觉运行共享 `round_number`（视觉是同一轮内的第二段）。`dispatched_at` 在启动 RPC 结果确认或 Agent 首次持令牌鉴权时写入，为空 = 线程是否建成未确认。`archived_at` 是终态后线程归档写回的时刻；归档有限重试超限后也写入（不再重试），失败原因见 `worktree_error` 与 `review_cleanup_failed` 通知。 |
 | `review_run_tokens` | PK `run_id`；`token_hash`（UNIQUE）；`expires_at`；`consumed_at` | 每次运行一个 `fsr_` 令牌，只存完整令牌的 SHA-256。 |
 | `review_pull_requests` | PK `(project_id, repo_full_name, pr_number)`；`user_id/installation_id`；`round_number/head_sha`；`code_comment_id/visual_comment_id`；`code_status/visual_status`；`visual_screens_fingerprint`；`sync_pending/sync_epoch/sync_error` | 一个 PR 的审查总账：评论落点、最近一次推送的 commit status 结论、视觉截图指纹、事务外同步标记（置 pending 时 epoch+1，清标记按开始时 epoch 条件写）。主键含 `project_id`：同仓库换项目接管后各一本账。 |
-| `review_assets` | `(repo_full_name, pr_number, head_sha, position)`；`label`；`source_url`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经媒体代理下载后本地落盘。内容是仓库归一的共享产物（同一 head 同一批截图），不按项目分区。 |
+| `review_assets` | `(repo_full_name, pr_number, head_sha, position)`；`label`；`source_url`；`storage_path`；`mime_type`；`size_bytes` | 视觉审查截图：PR 描述里的图片链接经截图下载面（`NewReviewMediaService`）下载后本地落盘。内容是仓库归一的共享产物（同一 head 同一批截图），不按项目分区。 |
 | `review_debounces` | PK `(project_id, repo_full_name, pr_number)`；`head_sha/action/installation_id/pr_title/pr_url/base_ref/head_ref`；`fire_at` | 防抖窗口。窗口内新推送只更新 head 并推后 `fire_at`；固定 60s，不提供配置。 |
 | `review_seen_shas` | PK `(project_id, repo_full_name, pr_number, head_sha)`；`pr_updated_at`；`accepted_at` | 某项目已受理过的 head SHA：force-push 回旧 SHA 不再开轮。按项目分区——接管后新项目对同仓库同一 SHA 重新受理。 |
 
@@ -298,20 +298,48 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 
 1. 所有代码运行 `completed`（无 failed/timed_out/cancelled）且无 P0/P1/P2；
 2. 配置了视觉组合（0 个则永不启动，也不设 `视觉审查` 状态）；
-3. PR 描述里有截图——Markdown 图片 `![alt](url)`、`<img src>`、
-   `github.com/user-attachments/...` 或 `user-images.githubusercontent.com/...`
-   裸链接，系统判断；
+3. **至少一张截图下载成功**（下载面见下；描述里的截图引用数只是前置）；
 4. 至少一个代码运行 `ui_changed=true`；
 5. 截图集合有变化（URL 指纹 ≠ `visual_screens_fingerprint`），或任一代码
    运行 `ui_changed_since_last_visual=true`。
+
+「其余判据都成立」包含条件 5：只有本轮真的要开视觉（截图指纹变了，或上轮
+视觉后又有 UI 改动）才实际去**探测**下载——避免每次同步都拉图，也避免把
+截图未变的沿用/带过路径误写成「截图不可用」。探测按描述顺序逐张试，第一张
+成功即停（成功图已落盘缓存，视觉运行时直接命中），不写 `review_assets`
+——资产行仍由视觉运行时的 `ensureAssets` 落账，可用性只看当前描述里的 URL，
+不按资产行计数（已不在描述里的陈旧资产不算可用截图）。探测有 30s 总时限
+（含同 URL 下载锁上的等待——等待吃 ctx，不会被前一请求的 45s 客户端超时
+拖穿）：它跑在共享同步循环里，图床挂死时不能把其它 PR 的同步一起拖满。
+
+全部下载失败时**不建视觉运行**，`视觉审查` 写一条明确的 failure（「截图无法
+下载，未做视觉审查：<原因>」，原因为中文可读文案，网络层英文报错只进日志），
+且**不写指纹**。这里的重试发生在**下一次同步事件**（新推送产生新 SHA、或
+手动重跑；reopened 对同一 SHA 不会再次进入同步——webhook 把已有运行的事件
+一律忽略），系统不为「截图不可用」单独排定时重试；每次事件都写当前原因，
+不沿用上一轮的旧描述。
 
 条件 5 不满足（截图没变）且上一轮视觉审查有 blocker / worth fixing：**不新
 开视觉轮**，把上一轮的 failure 结论带到新 HEAD 的 `视觉审查` status，并在
 代码审查结论里加「截图复核意见尚未处理」。
 
 截图素材：系统解析 PR 描述收集截图 URL（去重保序，label 取 alt 或「截图 N」），
-经 `githubmedia` 媒体代理下载落盘为 `review_assets`；同一 (repo, pr, head)
-已有 asset 行复用。指纹 = 排序后 URL 列表的 SHA-256 前 16 位。
+由**独立的截图下载面**（`githubmedia.NewReviewMediaService`，与
+`/api/github/media-proxy` 的 GitHub 白名单面是两个实例）下载落盘为
+`review_assets`；同一 (repo, pr, head) 已有 asset 行复用，失败的行保留
+中文原因在 `review_assets.error` 并在下次 ensure 重试。下载面允许**任意公网
+https** 主机，内容只收位图：`image/*`（svg 即使标着 `image/svg+xml` 也不收），
+或 `application/octet-stream` 且 URL 是位图扩展名；上游没有 Content-Type 时
+同样按位图扩展名回退——URL 是位图扩展名才收，否则拒；视频不收。防 SSRF 不靠
+域名白名单，
+而在拨号时校验解析出的 IP（`net.Dialer.Control`，因此这条下载面不走
+`HTTPS_PROXY` 等环境代理——走代理时校验到的会是代理 IP 而非目标 IP）——
+回环/内网/链路本地/CGNAT/NAT64·6to4·Teredo 内嵌的 IPv4 等地址直接拒连
+（其中 `64:ff9b:1::/48` 是 NAT64 local-use 前缀，**整体拒绝**——该前缀的
+布局不可安全解码，内嵌公网地址的也一并拒，宁可错拒不可放过），
+重定向目标与 DNS 重绑定的每次建连同样被拦。App 安装令牌（bearer）只发往
+GitHub 媒体域：外部图床匿名失败即止，不重试令牌。指纹 = 排序后 URL 列表的
+SHA-256 前 16 位。
 
 ## 工作区回收
 
@@ -431,10 +459,18 @@ options canonical JSON` 判重（同一搭配不同思考强度算不同组合�
   重复派发与重复写状态（唯一索引只保证运行行唯一）。
 - **fork PR 不审**：head repo ≠ base repo 一律忽略，fork 仓库的 PR 永远
   不会进入审查。
-- **私有仓库截图下载仍可能失败**：附件由 Fast Ship 经媒体代理下载——
-  匿名优先，失败且有安装 id 时带 App 安装令牌重试一次；仍拉不到的截图
-  不会出现在 `review_assets`，视觉审查只审下载成功的部分（图片端点对
-  缺失资产 404）。下载失败的资产行保留 `error`，下一次 ensure 会重试。
+- **私有仓库截图下载仍可能失败**：截图由独立的截图下载面拉取——匿名优先，
+  失败且有安装 id 时带 App 安装令牌重试一次（App 令牌只对 GitHub 附件有
+  意义，外部图床始终匿名）；仍拉不到的截图不会进入审查素材，视觉审查只审
+  下载成功的部分（图片端点对缺失资产 404）。下载失败的资产行保留中文
+  `error` 原因，下一次 ensure 会重试；描述里的截图**全部**下载失败时不建
+  视觉运行（见「视觉审查衔接」），且系统不为「截图不可用」单独排定时重试
+  ——只有下一次同步事件（新推送产生新 SHA、或手动重跑）才会再次探测。
+- **截图数量不设上限**：取材范围就是描述里的全部图片引用，不做截断；探测
+  有 30s 总时限且第一张成功即停，逐张串行下载不会拖满同步循环。
+- **截图下载面不走环境代理**：拨号校验目标 IP 与 `HTTPS_PROXY` 互斥
+  （走代理时校验到的是代理 IP），这条面选择直连；GitHub 媒体代理面仍走
+  环境代理。
 - **本地分支残留**：`git worktree remove` 不删本地分支，T3 也没有删分支的
   RPC——每次代码审查残留一个本地分支引用，由 `t3-worktree-gc` 脚本兜底清理。
 - **令牌重放窗口**：`expires_at = deadline_at + 5min`，窗口内无效令牌重放

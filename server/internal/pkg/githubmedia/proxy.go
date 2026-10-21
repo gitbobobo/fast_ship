@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/html"
@@ -26,6 +28,7 @@ import (
 const ProxyPath = "/api/github/media-proxy"
 
 const (
+	defaultCacheSubdir     = "github-media-cache"
 	defaultCacheTTL        = 24 * time.Hour
 	defaultMaxCacheBytes   = 256 << 20
 	defaultRequestTimeout  = 45 * time.Second
@@ -33,8 +36,14 @@ const (
 )
 
 var (
-	ErrInvalidMediaURL          = errors.New("invalid github media url")
-	ErrUnsupportedUpstreamMedia = errors.New("unsupported upstream media content")
+	// 错误文案会原样落到 review_assets.error 与 status 描述里，写成用户能
+	// 看懂的中文原因；/api/github/media-proxy 的对外文案由 handler 固定生成，
+	// 不经过这里。
+	ErrInvalidMediaURL          = errors.New("不支持的图片地址")
+	ErrUnsupportedUpstreamMedia = errors.New("上游返回的不是图片")
+	ErrBlockedUpstreamAddress   = errors.New("图片地址指向内网或保留地址")
+	ErrEmptyUpstreamMedia       = errors.New("上游返回空内容")
+	ErrMediaTooLarge            = errors.New("图片超过大小上限")
 )
 
 type UpstreamStatusError struct {
@@ -42,7 +51,7 @@ type UpstreamStatusError struct {
 }
 
 func (e *UpstreamStatusError) Error() string {
-	return fmt.Sprintf("upstream returned status %d", e.StatusCode)
+	return fmt.Sprintf("上游返回状态码 %d", e.StatusCode)
 }
 
 type cacheEntry struct {
@@ -65,6 +74,15 @@ type CachedMedia struct {
 	Path     string
 }
 
+// CachedImage 用给定元数据构造 CachedMedia。cacheEntry 未导出，service 层的
+// 测试桩无法直接填 Metadata，统一走这个构造（仅测试与内部装配用，别扩大）。
+func CachedImage(path, contentType string, size int64) *CachedMedia {
+	return &CachedMedia{
+		Metadata: cacheEntry{ContentType: contentType, Size: size},
+		Path:     path,
+	}
+}
+
 type PassThroughResponse struct {
 	StatusCode int
 	Header     http.Header
@@ -77,47 +95,248 @@ type ProxyService struct {
 	cacheTTL          time.Duration
 	maxCacheEntrySize int64
 	allowURL          func(*url.URL) bool
+	// requireHTTPS 只接受 https 上游（截图面）；imagesOnly 只收图片内容。
+	// GitHub 媒体面两者全关：白名单语义 + 图片视频都收，与截图面是两套准入。
+	requireHTTPS bool
+	imagesOnly   bool
 
-	mu       sync.Mutex
-	download map[string]*sync.Mutex
+	mu sync.Mutex
+	// download 每 URL 一把容量 1 的信号量（发送即持有、接收即释放）：同 URL
+	// 下载串行，但等待必须吃 ctx——sync.Mutex 锁不来取消，30s 探测时限会被
+	// 同 URL 前一请求的 45s 客户端超时拖穿。
+	download map[string]chan struct{}
 }
 
+// serviceConfig newService 的装配参数；零值字段按 GitHub 媒体代理语义兜底。
+type serviceConfig struct {
+	cacheSubdir       string
+	cacheTTL          time.Duration
+	maxCacheEntrySize int64
+	client            *http.Client
+	allowURL          func(*url.URL) bool
+	requireHTTPS      bool
+	imagesOnly        bool
+	guardAddress      bool
+}
+
+// NewProxyService GitHub 媒体代理面：GitHub 域名白名单、图片视频都收，
+// 服务 /api/github/media-proxy。
 func NewProxyService(cacheRoot string) *ProxyService {
-	return newProxyService(cacheRoot, defaultCacheTTL, defaultMaxCacheBytes, nil, isAllowedGitHubMediaURL)
+	return newService(cacheRoot, serviceConfig{
+		cacheSubdir: defaultCacheSubdir,
+		allowURL:    isAllowedGitHubMediaURL,
+	})
 }
 
-func newProxyService(cacheRoot string, cacheTTL time.Duration, maxCacheEntrySize int64, client *http.Client, allowURL func(*url.URL) bool) *ProxyService {
-	if cacheTTL <= 0 {
-		cacheTTL = defaultCacheTTL
+// NewReviewMediaService PR 审查截图下载面：放行任意公网 https 图片，SSRF
+// 防线不在域名白名单，而在拨号时校验解析出的 IP——重定向与 DNS 重绑定
+// 的每次建连都会被拦。与 NewProxyService 是两个独立实例，别混用。
+func NewReviewMediaService(cacheRoot string) *ProxyService {
+	return newService(cacheRoot, serviceConfig{
+		cacheSubdir:  "review-screenshot-cache",
+		allowURL:     allowPublicImageHost,
+		requireHTTPS: true,
+		imagesOnly:   true,
+		guardAddress: true,
+	})
+}
+
+// allowPublicImageHost 截图面的 host 准入：任意非空 host 即放行（真正的
+// SSRF 防线在 guardAddress 的拨号校验）。
+func allowPublicImageHost(parsed *url.URL) bool {
+	return parsed != nil && strings.TrimSpace(parsed.Hostname()) != ""
+}
+
+func newService(cacheRoot string, cfg serviceConfig) *ProxyService {
+	if cfg.cacheSubdir == "" {
+		cfg.cacheSubdir = defaultCacheSubdir
 	}
-	if maxCacheEntrySize <= 0 {
-		maxCacheEntrySize = defaultMaxCacheBytes
+	if cfg.cacheTTL <= 0 {
+		cfg.cacheTTL = defaultCacheTTL
 	}
-	if client == nil {
-		client = &http.Client{
-			Timeout: defaultRequestTimeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return errors.New("too many redirects")
-				}
-				if !isAllowedGitHubMediaURL(req.URL) {
-					return ErrInvalidMediaURL
-				}
-				return nil
-			},
-		}
+	if cfg.maxCacheEntrySize <= 0 {
+		cfg.maxCacheEntrySize = defaultMaxCacheBytes
 	}
-	if allowURL == nil {
-		allowURL = isAllowedGitHubMediaURL
+	if cfg.allowURL == nil {
+		cfg.allowURL = isAllowedGitHubMediaURL
+	}
+	if cfg.client == nil {
+		cfg.client = newGuardedClient(cfg.requireHTTPS, cfg.allowURL, cfg.guardAddress)
 	}
 	return &ProxyService{
-		client:            client,
-		cacheDir:          filepath.Join(cacheRoot, "github-media-cache"),
+		client:            cfg.client,
+		cacheDir:          filepath.Join(cacheRoot, cfg.cacheSubdir),
+		cacheTTL:          cfg.cacheTTL,
+		maxCacheEntrySize: cfg.maxCacheEntrySize,
+		allowURL:          cfg.allowURL,
+		requireHTTPS:      cfg.requireHTTPS,
+		imagesOnly:        cfg.imagesOnly,
+		download:          make(map[string]chan struct{}),
+	}
+}
+
+// newProxyService 旧内部构造（GitHub 媒体面语义：允许 http/https、图片视频
+// 都收、不拨号校验），保留给现有测试。
+func newProxyService(cacheRoot string, cacheTTL time.Duration, maxCacheEntrySize int64, client *http.Client, allowURL func(*url.URL) bool) *ProxyService {
+	return newService(cacheRoot, serviceConfig{
+		cacheSubdir:       defaultCacheSubdir,
 		cacheTTL:          cacheTTL,
 		maxCacheEntrySize: maxCacheEntrySize,
+		client:            client,
 		allowURL:          allowURL,
-		download:          make(map[string]*sync.Mutex),
+	})
+}
+
+// newGuardedClient 默认客户端：重定向按实例自身的 allowURL/requireHTTPS 复检
+// （旧实现写死 GitHub 白名单，截图面会拦错/放错）；guardAddress 时在拨号
+// 前校验解析 IP。Transport 克隆自 DefaultTransport，保留连接池参数。
+func newGuardedClient(requireHTTPS bool, allowURL func(*url.URL) bool, guardAddress bool) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if guardAddress {
+		// 必须自己拨到目标才能校验目标 IP：走环境代理时校验到的会是代理地址
+		// （公网代理→防线失效，回环代理→全部误拒）。代价是这条下载面不支持
+		// HTTPS_PROXY 等环境代理；GitHub 媒体面不 guard，仍走环境代理。
+		transport.Proxy = nil
+		transport.DialContext = (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Control:   guardDialControl,
+		}).DialContext
 	}
+	return &http.Client{
+		Timeout:   defaultRequestTimeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("重定向次数过多")
+			}
+			if requireHTTPS && req.URL.Scheme != "https" {
+				return ErrInvalidMediaURL
+			}
+			if !allowURL(req.URL) {
+				return ErrInvalidMediaURL
+			}
+			return nil
+		},
+	}
+}
+
+// guardDialControl 拨号前校验已解析的上游地址。net.Dialer.Control 在 DNS
+// 解析之后、建连之前被调用（address 已是「IP:port」），因此每次建连——
+// 含重定向后的再连接、DNS 重绑定后的第二次解析——都会被这里拦一遍。
+func guardDialControl(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("解析上游地址 %q 失败: %w", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("上游地址 %q 不是合法 IP", host)
+	}
+	if isBlockedIP(ip) {
+		return ErrBlockedUpstreamAddress
+	}
+	return nil
+}
+
+// isBlockedIP SSRF 地址判定：拒绝回环、RFC1918 私网、IPv6 ULA/链路本地/
+// 多播/未指定地址，以及 169.254.0.0/16、100.64.0.0/10（CGNAT）、0.0.0.0/8、
+// 198.18.0.0/15（基准测试）、240.0.0.0/4（保留段，含广播）地址；IPv6 还要
+// 解出内嵌 IPv4 再判一遍（NAT64 local-use /48 例外，见下：整体拒绝）；公网
+// 地址放行。
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		// 169.254.0.0/16 已由 IsLinkLocalUnicast 覆盖；下面几段标准判定没有。
+		switch {
+		case ip4[0] == 100 && ip4[1] >= 64 && ip4[1] < 128: // 100.64.0.0/10 CGNAT
+			return true
+		case ip4[0] == 0: // 0.0.0.0/8
+			return true
+		case ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19: // 198.18.0.0/15 基准测试
+			return true
+		case ip4[0] >= 240: // 240.0.0.0/4 保留（含广播 255.255.255.255）
+			return true
+		}
+		return false
+	}
+	// NAT64/6to4/Teredo 等前缀本身是公网单播，能内嵌任意 IPv4——载荷是
+	// 内网地址时同样要拒，否则「看起来是公网」的 IPv6 就绕过了上面的判定。
+	// RFC 8215 的 NAT64 local-use 前缀（64:ff9b:1::/48）整体拒绝，包括内嵌
+	// 公网地址的：RFC 6052 的转换布局随前缀长度变化（IPv4 高低 16 位被 u
+	// 八位组隔开，只有 well-known /96 恰落在末 4 字节），local-use 前缀的
+	// 实际布局按 RFC 8215 §5 还可由网络自行选择，按任何固定偏移都解不出
+	// 可靠的内嵌 IPv4。这个前缀只该出现在本地转换域内，公网图床不该用
+	// ——宁可错拒不可放过，有意保守。
+	if ipv6 := ip.To16(); ipv6 != nil &&
+		ipv6[0] == 0 && ipv6[1] == 0x64 && ipv6[2] == 0xff && ipv6[3] == 0x9b &&
+		ipv6[4] == 0 && ipv6[5] == 0x01 {
+		return true
+	}
+	if v4 := embeddedIPv4(ip); v4 != nil && isBlockedIP(v4) {
+		return true
+	}
+	return false
+}
+
+// embeddedIPv4 解出 IPv6 地址里内嵌的 IPv4；不是内嵌形态返回 nil。解出的
+// 地址仍要过一遍 isBlockedIP（递归到此为止：IPv4 不会再内嵌）。
+//
+// 各前缀的内嵌位置（16 字节形式，下标从 0 起，这是本函数唯一的正确性依据）：
+//   - 2001:0000::/32 Teredo（RFC 4380）：0-3 前缀、4-7 服务器 IPv4、8-9
+//     flags、10-11 混淆 UDP 端口、12-15 客户端 IPv4。客户端 IPv4 按位取反
+//     存储（混淆字段，防止中间设备按内容过滤），取反回来才是真实地址。
+//   - 2002::/16 6to4（RFC 3056）：内嵌 IPv4 在 2-5。
+//   - 64:ff9b::/96 NAT64 well-known（RFC 6052 §2.1）：4-11 全零，内嵌 IPv4
+//     恰好落在末 4 字节。
+//   - 64:ff9b:1::/48 NAT64 local-use（RFC 8215）：不在这里解码。RFC 6052
+//     §2.2 的非末位布局把 IPv4 高 16 位放在 6-7、u 八位组在 8、低 16 位在
+//     9-10，且实际布局还随前缀长度与网络配置变化——按末 4 字节解出的不是
+//     内嵌地址。整个 /48 由 isBlockedIP 整体拒绝，不走这里。
+//   - ::/96 已废弃的 IPv4-compatible（RFC 4291）：前 12 字节全零，内嵌
+//     IPv4 在 12-15。::ffff: 映射段 10-11 是 ff，已被 To4() 收走，不会落到
+//     这里。
+func embeddedIPv4(ip net.IP) net.IP {
+	ipv6 := ip.To16()
+	if ipv6 == nil || ip.To4() != nil {
+		return nil
+	}
+	// Teredo 客户端 IPv4 在 12-15 且按位取反。
+	if ipv6[0] == 0x20 && ipv6[1] == 0x01 && ipv6[2] == 0 && ipv6[3] == 0 {
+		out := make(net.IP, 4)
+		for i := 0; i < 4; i++ {
+			out[i] = ^ipv6[12+i]
+		}
+		return out
+	}
+	// 6to4 内嵌 IPv4 在 2-5。
+	if ipv6[0] == 0x20 && ipv6[1] == 0x02 {
+		return net.IP(ipv6[2:6])
+	}
+	zero := func(b []byte) bool {
+		for _, v := range b {
+			if v != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	// NAT64 well-known 前缀与 IPv4-compatible 的内嵌 IPv4 都在末 4 字节。
+	// local-use 前缀（bytes 4-5 = 00 01）不满足零校验，到这里返回 nil，由
+	// isBlockedIP 按整体拒绝处理。
+	prefix := string(ipv6[:4]) == "\x00\x64\xff\x9b"
+	nat64 := prefix && zero(ipv6[4:12])
+	compatible := zero(ipv6[:12])
+	if nat64 || compatible {
+		return net.IP(ipv6[12:16])
+	}
+	return nil
 }
 
 func BuildProxyURL(rawURL string) string {
@@ -214,8 +433,14 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	}
 
 	lock := s.acquireDownloadLock(normalized)
-	lock.Lock()
-	defer lock.Unlock()
+	select {
+	case lock <- struct{}{}:
+	case <-ctx.Done():
+		// 同 URL 已有下载在跑：等待必须吃 ctx。探测的 30s 时限是总时限，
+		// 不能被同 URL 前一请求的 45s 客户端超时拖穿。
+		return nil, ctx.Err()
+	}
+	defer func() { <-lock }()
 
 	if cached, ok, err := s.getCachedNormalized(normalized); err != nil {
 		return nil, err
@@ -233,7 +458,9 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	}
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("User-Agent", "fast-ship-media-proxy/1.0")
-	if bearer != "" {
+	// Bearer 令牌是仓库凭证，只对 GitHub 媒体域有意义；截图面放行任意公网
+	// host，把令牌发给外部图床等于把 App 安装凭证送出去。
+	if bearer != "" && IsGitHubMediaURL(normalized) {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 
@@ -248,12 +475,14 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	}
 
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
-	if !isAllowedMediaContentType(contentType, normalized) {
+	if !s.isAllowedContentType(contentType, normalized) {
 		return nil, ErrUnsupportedUpstreamMedia
 	}
 
-	if contentLength := resp.ContentLength; contentLength <= 0 || contentLength > s.maxCacheEntrySize {
-		return nil, &UpstreamStatusError{StatusCode: http.StatusRequestEntityTooLarge}
+	// 已知长度超限直接拒；未知长度（分块响应的 Content-Length 为 -1）不算
+	// 超限，交给下面的 io.LimitReader + written 复核兜底。
+	if contentLength := resp.ContentLength; contentLength > s.maxCacheEntrySize {
+		return nil, ErrMediaTooLarge
 	}
 
 	tempFile, err := os.CreateTemp(s.cacheDir, defaultTempFilePattern)
@@ -273,8 +502,13 @@ func (s *ProxyService) fetchAndCache(ctx context.Context, rawURL, bearer string)
 	if err != nil {
 		return nil, err
 	}
+	// 200 + 0 字节（已知长度或分块空 body）不是可用的截图，落盘会变成一张
+	// 「下载成功」的空缓存，直接拒。
+	if written == 0 {
+		return nil, ErrEmptyUpstreamMedia
+	}
 	if written > s.maxCacheEntrySize {
-		return nil, &UpstreamStatusError{StatusCode: http.StatusRequestEntityTooLarge}
+		return nil, ErrMediaTooLarge
 	}
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -352,7 +586,18 @@ func (s *ProxyService) ProxyPass(ctx context.Context, rawURL, rangeHeader string
 }
 
 func (s *ProxyService) normalize(rawURL string) (string, error) {
-	return normalizeAllowedURL(rawURL, s.allowURL)
+	normalized, err := normalizeAllowedURL(rawURL, s.allowURL)
+	if err != nil {
+		return "", err
+	}
+	// 截图面只走 https：公网明文图片既不可信也不必要。
+	if s.requireHTTPS {
+		parsed, err := url.Parse(normalized)
+		if err != nil || parsed.Scheme != "https" {
+			return "", ErrInvalidMediaURL
+		}
+	}
+	return normalized, nil
 }
 
 func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, bool, error) {
@@ -396,13 +641,16 @@ func (s *ProxyService) getCachedNormalized(normalized string) (*CachedMedia, boo
 	}, true, nil
 }
 
-func (s *ProxyService) acquireDownloadLock(key string) *sync.Mutex {
+// acquireDownloadLock 返回该 URL 的下载闸（容量 1 信号量）：发送成功即持有，
+// 下载完成后 <-lock 收回。条目创建在 s.mu 下做，是否等待、等多久由调用方
+// 结合 ctx 决定。
+func (s *ProxyService) acquireDownloadLock(key string) chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	lock, ok := s.download[key]
 	if !ok {
-		lock = &sync.Mutex{}
+		lock = make(chan struct{}, 1)
 		s.download[key] = lock
 	}
 	return lock
@@ -453,6 +701,17 @@ func normalizeMediaURL(rawURL string) (string, error) {
 	return normalizeAllowedURL(rawURL, isAllowedGitHubMediaURL)
 }
 
+// IsGitHubMediaURL URL 是否属于 GitHub 媒体域（与 media-proxy 白名单同一
+// 口径）。service 层用它决定下载失败后是否值得带 App 安装令牌重试——外部
+// 图床拿了令牌等于拿到仓库凭证。
+func IsGitHubMediaURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return isAllowedGitHubMediaURL(parsed)
+}
+
 func isAllowedGitHubMediaURL(parsed *url.URL) bool {
 	if parsed == nil {
 		return false
@@ -478,33 +737,64 @@ func isAllowedGitHubMediaURL(parsed *url.URL) bool {
 	}
 }
 
-func isAllowedMediaContentType(contentType string, rawURL string) bool {
+// isAllowedContentType 内容类型准入：GitHub 媒体面收图片与视频；截图面
+// （imagesOnly）只收位图——octet-stream 时按扩展名回退，svg 即使标着
+// image/* 也拒（视觉审查只吃位图）。
+func (s *ProxyService) isAllowedContentType(contentType string, rawURL string) bool {
 	if contentType == "" {
-		return hasMediaExtension(rawURL)
+		if s.imagesOnly {
+			return hasBitmapExtension(rawURL)
+		}
+		return hasGitHubMediaExtension(rawURL)
 	}
 
 	baseType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	if s.imagesOnly {
+		if baseType == "image/svg+xml" {
+			return false
+		}
+		return strings.HasPrefix(baseType, "image/") ||
+			(baseType == "application/octet-stream" && hasBitmapExtension(rawURL))
+	}
 	if strings.HasPrefix(baseType, "image/") || strings.HasPrefix(baseType, "video/") {
 		return true
 	}
 	if baseType == "application/octet-stream" {
-		return hasMediaExtension(rawURL)
+		return hasGitHubMediaExtension(rawURL)
 	}
 	return false
 }
 
-func hasMediaExtension(rawURL string) bool {
+var (
+	// bitmapExtensions 视觉审查能吃的位图。svg 是矢量图，不在此列——截图
+	// 面既不按扩展名收它，也不收 image/svg+xml。
+	bitmapExtensions = map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+		".webp": true, ".bmp": true,
+	}
+	// vectorExtensions GitHub 媒体面额外收 svg。
+	vectorExtensions = map[string]bool{".svg": true}
+	videoExtensions  = map[string]bool{
+		".mp4": true, ".mov": true, ".webm": true, ".m4v": true,
+	}
+)
+
+// hasGitHubMediaExtension GitHub 媒体面的扩展名集合 = 位图 + svg + 视频。
+func hasGitHubMediaExtension(rawURL string) bool {
+	ext := urlPathExtension(rawURL)
+	return bitmapExtensions[ext] || vectorExtensions[ext] || videoExtensions[ext]
+}
+
+func hasBitmapExtension(rawURL string) bool {
+	return bitmapExtensions[urlPathExtension(rawURL)]
+}
+
+func urlPathExtension(rawURL string) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return false
+		return ""
 	}
-	ext := strings.ToLower(path.Ext(parsed.Path))
-	switch ext {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".mp4", ".mov", ".webm", ".m4v":
-		return true
-	default:
-		return false
-	}
+	return strings.ToLower(path.Ext(parsed.Path))
 }
 
 func buildCacheControl(ttl time.Duration) string {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -66,9 +68,13 @@ func (f *fakeReviewT3) ArchiveThread(_ context.Context, _, _, threadID string) e
 	return f.archiveErr
 }
 
-// withT3 在共享测试库上组装一个带 T3/媒体桩的 ReviewService。
+// withT3 在共享测试库上组装一个带 T3/媒体桩的 ReviewService。media 传 nil
+// 时用环境的默认成功桩（没有截图引用的 PR 不受影响）。
 func (e *reviewEngineEnv) withT3(t3 reviewT3, media reviewMedia,
 	bearer func(context.Context, int64) (string, error)) *ReviewService {
+	if media == nil {
+		media = e.media
+	}
 	return NewReviewService(e.svc.db, e.svc.projectRepo,
 		repository.NewGitHubWebhookDeliveryRepository(e.svc.db),
 		NewNotificationSink(e.svc.db),
@@ -404,16 +410,32 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 	}
 }
 
-// fakeReviewMedia 截图下载桩：匿名/Bearer 两路分开计数与注入错误。
+// fakeReviewMedia 截图下载桩：匿名/Bearer 两路分开计数与注入错误。failURLs
+// 按 URL 注入失败（其余成功），覆盖「部分截图可用」的场景。
 type fakeReviewMedia struct {
 	cached                 *githubmedia.CachedMedia
+	failURLs               map[string]error
 	anonErr, bearerErr     error
 	anonCalls, bearerCalls int
 	lastBearer             string
 }
 
-func (f *fakeReviewMedia) FetchAndCache(context.Context, string) (*githubmedia.CachedMedia, error) {
+// fakeScreenshotMedia 恒成功的截图下载桩：临时目录里落一个最小 PNG 当缓存
+// 产物（CachedImage 由 githubmedia 提供，cacheEntry 未导出、外部填不了）。
+func fakeScreenshotMedia(t *testing.T) *fakeReviewMedia {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("\x89PNG\r\n\x1a\nfake"), 0o600); err != nil {
+		t.Fatalf("write fake png: %v", err)
+	}
+	return &fakeReviewMedia{cached: githubmedia.CachedImage(path, "image/png", 15)}
+}
+
+func (f *fakeReviewMedia) FetchAndCache(_ context.Context, url string) (*githubmedia.CachedMedia, error) {
 	f.anonCalls++
+	if err, bad := f.failURLs[url]; bad {
+		return nil, err
+	}
 	if f.anonErr != nil {
 		return nil, f.anonErr
 	}

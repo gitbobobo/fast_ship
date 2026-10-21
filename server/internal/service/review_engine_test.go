@@ -25,12 +25,14 @@ import (
 // INT-135 1c 执行引擎测试：webhook 触发/过滤、delivery 幂等、防抖消费开轮、
 // 排队提升并发上限、超时、结果校验、汇总文案与视觉衔接判定。
 
-// reviewEngineEnv 一套可用的审查执行测试环境（不落 T3/媒体面——派发不在
-// 本文件范围；GitHub 侧用 githubapp.Fake）。
+// reviewEngineEnv 一套可用的审查执行测试环境（不落 T3——派发不在本文件
+// 范围；GitHub 侧用 githubapp.Fake；media 默认恒成功的截图下载桩，需要
+// 失败场景的测试自己换桩）。
 type reviewEngineEnv struct {
 	svc     *testServices
 	review  *ReviewService
 	fake    *githubapp.Fake
+	media   *fakeReviewMedia
 	user    *model.User
 	project *model.Project
 }
@@ -39,16 +41,17 @@ func newReviewEngineEnv(t *testing.T) *reviewEngineEnv {
 	t.Helper()
 	svc := setupTestServices(t)
 	fake := githubapp.NewFake()
+	media := fakeScreenshotMedia(t)
 	review := NewReviewService(svc.db, svc.projectRepo,
 		repository.NewGitHubWebhookDeliveryRepository(svc.db),
 		NewNotificationSink(svc.db),
 		githubapp.StaticClients{Client: fake},
 		fakeReviewAppSource{ok: true},
 		fakeReviewPublicURL("https://fs.example.com"),
-		nil, nil, nil, svc.cfg, zap.NewNop())
+		nil, media, nil, svc.cfg, zap.NewNop())
 	user := createTestUser(t, svc.db, "reviewer")
 	project := createTestProject(t, svc.db, user.ID)
-	return &reviewEngineEnv{svc: svc, review: review, fake: fake, user: user, project: project}
+	return &reviewEngineEnv{svc: svc, review: review, fake: fake, media: media, user: user, project: project}
 }
 
 // enableReview 直接落启用设置（绕过绑定校验——执行路径只读落库 JSON）。
@@ -586,6 +589,7 @@ func TestDecideVisual(t *testing.T) {
 		{"无视觉组合", func(in *visualDecisionInput) { in.HasVisualCombos = false }, visualNone},
 		{"无截图", func(in *visualDecisionInput) { in.HasScreenshots = false }, visualNone},
 		{"无 UI 变化", func(in *visualDecisionInput) { in.AnyUIChanged = false }, visualNone},
+		{"截图全部下载失败", func(in *visualDecisionInput) { in.ScreensUnavailable = true }, visualScreensUnavailable},
 		{"截图变了", func(in *visualDecisionInput) { in.ScreensChanged = true }, visualStart},
 		{"上轮后又有 UI 改动", func(in *visualDecisionInput) { in.AnyUIChangedSinceLastVisual = true }, visualStart},
 		{"截图未变且遗留", func(in *visualDecisionInput) { in.PriorVisualFailed = true }, visualCarryFailure},

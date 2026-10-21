@@ -57,8 +57,9 @@ func (h *GitHubMediaProxyHandler) Proxy(c *gin.Context) {
 		return
 	}
 
-	var upstreamErr *githubmedia.UpstreamStatusError
-	if errors.As(err, &upstreamErr) && upstreamErr.StatusCode == http.StatusRequestEntityTooLarge {
+	// 本地超限（拉到的图超过缓存上限）转 ProxyPass 兜底，把流式响应直接回给
+	// 客户端；上游自己回的 413 不是本地超限，走下面的常规错误分支。
+	if errors.Is(err, githubmedia.ErrMediaTooLarge) {
 		resp, passErr := h.service.ProxyPass(c.Request.Context(), rawURL, "", false)
 		if passErr != nil {
 			writeMediaProxyError(c, passErr)
