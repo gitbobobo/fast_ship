@@ -33,8 +33,10 @@ var (
 	mdImageRe = regexp.MustCompile(`!\[([^\]]*)\]\(\s*<?([^\s>)]+)>?[^)]*\)`)
 	// HTML <img src="...">。
 	htmlImgRe = regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*>`)
-	// 裸的 GitHub 附件 URL（用户直接粘贴，没有图片语法）。
-	bareAttachRe = regexp.MustCompile(`https://(?:github\.com/user-attachments/assets|user-images\.githubusercontent\.com)/[^\s)<>"'\]]+`)
+	// 裸链接（用户直接粘贴、没有图片语法）：任意 https URL 粗筛，收集时再按
+	// 位图扩展名过滤（GitHub 附件之外的外链图床裸贴同样要能被收集）。集合与
+	// 下载面 imagesOnly 同源（githubmedia.HasBitmapExtension），不收 svg/视频。
+	bareURLRe = regexp.MustCompile(`https://[^\s)<>"'\]]+`)
 )
 
 // collectScreenshotURLs 按出现顺序提取 PR 描述里的图片引用；同 URL 只取首次，
@@ -54,8 +56,13 @@ func collectScreenshotURLs(body string) []screenshotRef {
 		url := strings.TrimSpace(body[m[2]:m[3]])
 		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})
 	}
-	for _, m := range bareAttachRe.FindAllStringIndex(body, -1) {
+	for _, m := range bareURLRe.FindAllStringIndex(body, -1) {
 		url := body[m[0]:m[1]]
+		// 只有位图扩展名的裸链接才算截图引用：普通网页链接、行内代码里的
+		// https 地址不收（按扩展名结尾判定，接受这个启发式的误收）。
+		if !githubmedia.HasBitmapExtension(url) {
+			continue
+		}
 		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})
 	}
 	// 两个来源按原文位置合并排序（HTML 与 Markdown 混用时顺序不乱）。
@@ -289,9 +296,14 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 		if err == nil {
 			return true, ""
 		}
+		text := screenshotErrorText(err)
 		if reason == "" {
-			reason = screenshotErrorText(err)
+			reason = text
 		}
+		// 逐张失败记日志：status 只带第一条原因，其余各张的失败（含网络层
+		// 原始英文文案）只有这里能留下排查线索。
+		s.logger.Warn("截图探测失败", zap.String("url", ref.URL),
+			zap.String("reason", text), zap.Error(err))
 		if ctx.Err() != nil {
 			break
 		}

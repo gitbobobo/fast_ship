@@ -279,10 +279,13 @@ func guardDialControl(_, address string, _ syscall.RawConn) error {
 
 // isBlockedIP SSRF 地址判定：拒绝回环、RFC1918 私网、IPv6 ULA/链路本地/
 // 多播/未指定/已废弃 site-local（fec0::/10，见下）地址，以及 169.254.0.0/16、
-// 100.64.0.0/10（CGNAT）、0.0.0.0/8、198.18.0.0/15（基准测试）、240.0.0.0/4
-// （保留段，含广播）地址；IPv6 还要解出内嵌 IPv4 再判一遍（NAT64 只有
-// well-known /96 解码，/32 内其余前缀长度与 local-use /96 整体拒绝，见下）；
-// 公网地址放行。
+// 100.64.0.0/10（CGNAT）、0.0.0.0/8、192.0.0.0/24（IETF 协议分配，含
+// .9/.10 anycast）、192.88.99.0/24（已废弃 6to4 relay anycast）、
+// 198.18.0.0/15（基准测试）、240.0.0.0/4（保留段，含广播）地址；文档示例
+// 网段（192.0.2.0/24、198.51.100.0/24、203.0.113.0/24）不在此列——它们是
+// 公网可路由空间里的教学地址，有意放行。IPv6 还要解出内嵌 IPv4 再判一遍
+// （NAT64 只有 well-known /96 解码，/32 内其余前缀长度与 local-use /96 整体
+// 拒绝，见下）；公网地址放行。
 func isBlockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -297,6 +300,10 @@ func isBlockedIP(ip net.IP) bool {
 		case ip4[0] == 100 && ip4[1] >= 64 && ip4[1] < 128: // 100.64.0.0/10 CGNAT
 			return true
 		case ip4[0] == 0: // 0.0.0.0/8
+			return true
+		case ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0: // 192.0.0.0/24 IETF 协议分配（含 .9/.10 anycast）
+			return true
+		case ip4[0] == 192 && ip4[1] == 88 && ip4[2] == 99: // 192.88.99.0/24 已废弃 6to4 relay anycast
 			return true
 		case ip4[0] == 198 && ip4[1] >= 18 && ip4[1] <= 19: // 198.18.0.0/15 基准测试
 			return true
@@ -868,6 +875,13 @@ func hasGitHubMediaExtension(rawURL string) bool {
 
 func hasBitmapExtension(rawURL string) bool {
 	return bitmapExtensions[urlPathExtension(rawURL)]
+}
+
+// HasBitmapExtension URL 路径是否以位图扩展名（.png .jpg .jpeg .gif .webp
+// .bmp）结尾。导出给 service 层做 PR 描述裸链接收集的过滤——收集口径与下载
+// 面 imagesOnly 的扩展名集合必须同源，两边各写一份迟早漂移。
+func HasBitmapExtension(rawURL string) bool {
+	return hasBitmapExtension(rawURL)
 }
 
 func urlPathExtension(rawURL string) string {

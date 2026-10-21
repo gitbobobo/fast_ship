@@ -341,12 +341,16 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				return nil
 			}
 			ledger.VisualStatus = "failure"
-			// 账本里已有视觉评论（上一轮 carry 分支发的「沿用上一轮（截图未
-			// 变化）」）时必须改写：新 head 的截图集合已换且全部下不来，「截图
-			// 未变化」的说法不再成立。没有旧评论就不新发——从未做过视觉审查
-			// 的 head 不值得多一条只有说明的评论（status 已表达结论）。上一轮
-			// 没有视觉运行时无从渲染「上一轮意见」，保留原评论不动。
-			if ledger.VisualCommentID != 0 && len(priorVisuals) > 0 {
+			// 上一轮有视觉运行就说明 PR 上应有视觉评论（上一轮结论/carry 分支
+			// 发过）：必须改写——新 head 的截图集合已换且全部下不来，「截图未
+			// 变化」的说法不再成立。只看 priorVisuals 而不看账本 id：id 写回
+			// 失败（upsertPRComment 末尾的 Update 不查错误）会留下
+			// VisualCommentID == 0，按 VisualCommentID 短路会让旧评论原样留下，
+			// 与 failure status 互相矛盾；savedID 为 0 时 upsertPRComment 按
+			// marker 找回既有评论改写，找不到才创建，正是想要的语义。没有上一
+			// 轮视觉运行时不新发——从未做过视觉审查的 head 不值得多一条只有
+			// 说明的评论（status 已表达结论）。
+			if len(priorVisuals) > 0 {
 				if ok, err := s.ledgerEpochCurrent(ledger, epoch); err != nil {
 					return errs.New(errs.ErrInternal.Code, "复核同步 epoch 失败: "+err.Error())
 				} else if !ok {

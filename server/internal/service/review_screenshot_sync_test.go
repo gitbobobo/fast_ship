@@ -66,6 +66,58 @@ func (e *reviewEngineEnv) setLedgerPending(t *testing.T, repo string, prNumber i
 	}
 }
 
+// 裸贴的外链图床链接（没有 ![]() / <img> 包裹）也要被收集——旧实现只收 GitHub
+// 域的裸附件链接，PR 描述里直接粘贴 https://uiv…/f/x.png 这类裸外链收集不到
+// → HasScreenshots=false → 静默不开视觉轮，连 failure status 都没有。判据是
+// 「路径以位图扩展名结尾」，与下载面 imagesOnly 同一集合（不收 svg/视频）。
+func TestCollectScreenshotURLsBareImageLinks(t *testing.T) {
+	// 裸外链被收集，label 回退「截图 N」。
+	refs := collectScreenshotURLs("验证截图 https://uiv.frp.musiver.cn/f/a.png 如上")
+	if len(refs) != 1 {
+		t.Fatalf("refs = %+v, want 1 条裸链接被收集", refs)
+	}
+	if refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
+		t.Fatalf("url = %q, want 裸链接原样收集", refs[0].URL)
+	}
+	if refs[0].Label != "截图 1" {
+		t.Fatalf("label = %q, want 回退「截图 1」", refs[0].Label)
+	}
+
+	// 无位图扩展名的普通网页链接不收。
+	if refs := collectScreenshotURLs("看这个页面 https://example.com/page 谢谢"); len(refs) != 0 {
+		t.Fatalf("refs = %+v, want 非位图链接不收集", refs)
+	}
+	// svg / 视频扩展名不收（视觉审查只吃位图）。
+	if refs := collectScreenshotURLs("https://example.com/a.svg https://example.com/b.mp4"); len(refs) != 0 {
+		t.Fatalf("refs = %+v, want svg/视频不收集", refs)
+	}
+
+	// Markdown + 裸链 + HTML 混排：按原文位置排序，同 URL 只取首次（带 label
+	// 的 Markdown 引用优先于裸链）。
+	body := "![首图](https://uiv.frp.musiver.cn/f/one.png) 然后裸贴 https://uiv.frp.musiver.cn/f/two.jpg " +
+		"再贴一次同图 https://uiv.frp.musiver.cn/f/one.png 末尾 <img src=\"https://uiv.frp.musiver.cn/f/three.png\">"
+	refs = collectScreenshotURLs(body)
+	wantURLs := []string{
+		"https://uiv.frp.musiver.cn/f/one.png",
+		"https://uiv.frp.musiver.cn/f/two.jpg",
+		"https://uiv.frp.musiver.cn/f/three.png",
+	}
+	if len(refs) != len(wantURLs) {
+		t.Fatalf("refs = %+v, want %d 条（去重后）", refs, len(wantURLs))
+	}
+	for i, want := range wantURLs {
+		if refs[i].URL != want {
+			t.Fatalf("refs[%d].url = %q, want %q（按原文位置排序）", i, refs[i].URL, want)
+		}
+	}
+	if refs[0].Label != "首图" {
+		t.Fatalf("refs[0].label = %q, want Markdown alt 文本优先", refs[0].Label)
+	}
+	if refs[1].Label != "截图 2" || refs[2].Label != "截图 3" {
+		t.Fatalf("labels = %q/%q, want 回退「截图 2/3」", refs[1].Label, refs[2].Label)
+	}
+}
+
 func TestVisualSyncScreensUnavailable(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -408,6 +460,98 @@ func TestVisualSyncScreensUnavailableUpdatesExistingVisualComment(t *testing.T) 
 	}
 	if len(visuals) != 1 {
 		t.Fatalf("visual comments = %d, want 1（更新既有评论而不是新发）", len(visuals))
+	}
+	comment := visuals[0]
+	if strings.Contains(comment, "截图未变化") {
+		t.Fatalf("comment = %q, 不应再宣称「截图未变化」", comment)
+	}
+	if !strings.Contains(comment, "全部无法下载") || !strings.Contains(comment, "未做视觉审查") {
+		t.Fatalf("comment = %q, want 「截图全部无法下载，未做视觉审查」语义", comment)
+	}
+	if !strings.Contains(comment, "按钮叠在文字上") {
+		t.Fatalf("comment = %q, want 保留上一轮 finding 文本", comment)
+	}
+}
+
+// G4 回归：upsertPRComment 末尾写回 visual_comment_id 失败（账本 id 被留成
+// 0，PR 上评论其实已发出）时，「截图无法下载」分支旧实现按
+// VisualCommentID != 0 短路，跳过改写——上一轮 carry 发的「截图未变化」评论
+// 原样留在 PR 上，与「截图无法下载」的 failure status 互相矛盾。新实现只看
+// 上一轮有无视觉运行，savedID 为 0 时按 marker 找回既有评论改写。
+func TestVisualSyncScreensUnavailableRewritesCarryCommentWithoutLedgerID(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	body := "![界面](https://uiv.frp.musiver.cn/f/x.png)"
+	e.fake.SetPR(repo, 91, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 91, HeadSHA: "sha-lr", Body: body,
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+	})
+	visualCombos, err := marshalCombinations([]api.ReviewCombination{testCombo("env-lr")})
+	if err != nil {
+		t.Fatalf("marshal combos: %v", err)
+	}
+	e.enableReview(t, func(s *model.ProjectReviewSettings) {
+		s.VisualCombinationsJSON = visualCombos
+	})
+	// 上一轮（round 1）视觉发现 blocker。
+	prior := e.seedRun(t, repo, 91, "sha-prev", model.ReviewRunCompleted, now.Add(-time.Hour))
+	e.svc.db.Model(prior).Updates(map[string]any{
+		"kind": model.ReviewKindVisual, "round_number": 1,
+		"result_json": `{"summary":"有阻断问题","findings":[{"severity":"blocker","screenshot":"界面","dimension":"hierarchy","body":"按钮叠在文字上","fix":"调整层级"}],"prior":[],"unmeasurable":[]}`,
+	})
+	// 本轮（round 2）：截图指纹未变 → 第一次同步走 carry 分支发出「沿用上一
+	// 轮」评论，账本记 visual_comment_id。
+	run := e.seedRun(t, repo, 91, "sha-lr", model.ReviewRunCompleted, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"round_number": 2, "summary": "干净",
+		"result_json": `{"summary":"干净","findings":[],"prior":[],"ui_changed":true,"ui_changed_since_last_visual":false}`,
+	})
+	fp := screenshotFingerprint(collectScreenshotURLs(body))
+	if err := e.svc.db.Create(&model.ReviewPullRequest{
+		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 91, UserID: e.user.ID,
+		InstallationID: 1, HeadSHA: "sha-lr", RoundNumber: 2,
+		VisualScreensFingerprint: fp, SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	e.review.syncPendingPRs(now)
+
+	// carry 评论已发出，但模拟写回失败：账本 visual_comment_id 被留成 0。
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 91", repo)
+	if ledger.VisualCommentID == 0 {
+		t.Fatal("carry 同步后账本应有 visual_comment_id（场景前置不成立）")
+	}
+	if err := e.svc.db.Model(&model.ReviewPullRequest{}).
+		Where("project_id = ? AND repo_full_name = ? AND pr_number = ?",
+			e.project.ID, repo, 91).
+		Update("visual_comment_id", 0).Error; err != nil {
+		t.Fatalf("清零 visual_comment_id: %v", err)
+	}
+
+	// 第二次同步事件：PR 描述换成新截图集合（指纹变化、head 不变），新截图
+	// 全部下载失败。
+	e.fake.SetPR(repo, 91, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 91, HeadSHA: "sha-lr",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		Body: "![新界面](https://uiv.frp.musiver.cn/f/new.png)",
+	})
+	e.media.anonErr = errors.New("connection refused")
+	e.setLedgerPending(t, repo, 91)
+	e.review.syncPendingPRs(now.Add(time.Second))
+
+	// PR 上那条 carry 评论被改写：仍只有一条（按 marker 找回更新而非新发），
+	// 不再有「截图未变化」，换成「截图全部无法下载」语义并保留上一轮 finding。
+	var visuals []string
+	for _, c := range e.fake.Comments(repo, 91) {
+		if strings.Contains(c, reviewVisualCommentMarker) {
+			visuals = append(visuals, c)
+		}
+	}
+	if len(visuals) != 1 {
+		t.Fatalf("visual comments = %d, want 1（按 marker 找回既有评论更新）", len(visuals))
 	}
 	comment := visuals[0]
 	if strings.Contains(comment, "截图未变化") {
