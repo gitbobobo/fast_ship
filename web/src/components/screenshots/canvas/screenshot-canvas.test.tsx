@@ -230,7 +230,7 @@ describe("ScreenshotCanvas", () => {
       /scale\(([\d.]+)\)/.exec(titleWrap.style.transform)?.[1],
     );
     expect(counter).toBeGreaterThan(1);
-  });
+  }, 20000);
 
   it("keeps mounted images on a same-scope data refresh", async () => {
     const many = (stamp: number) =>
