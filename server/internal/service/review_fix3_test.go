@@ -913,7 +913,6 @@ func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	var runID string
 	t3 := &fakeReviewT3{
-		listQueue: [][]string{{}, {"/ws/wt-af"}},
 		createFn: func(_ context.Context, _, _ string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
 			// Agent 先读了端点：dispatched_at 已被补写。
 			if err := e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", runID).
@@ -934,8 +933,8 @@ func TestLaunchPersistsWorkspaceRootAfterAgentFirstAuth(t *testing.T) {
 	if after.WorkspaceRoot != "/ws" || after.T3ProjectID != "t3p" {
 		t.Fatalf("workspace_root/t3_project_id = %q/%q, want /ws/t3p", after.WorkspaceRoot, after.T3ProjectID)
 	}
-	if after.WorktreePath != "/ws/wt-af" {
-		t.Fatalf("worktree_path = %q", after.WorktreePath)
+	if after.WorktreePath != "" {
+		t.Fatalf("worktree_path = %q, want 空（回收时按线程投影取真值）", after.WorktreePath)
 	}
 }
 

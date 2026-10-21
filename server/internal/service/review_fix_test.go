@@ -18,19 +18,28 @@ import (
 )
 
 // fakeReviewT3 线程/工作区执行面的内存桩：记录调用、可注入错误。
-// listQueue 按调用次序出队（优先于 worktrees）；createFn 非空时代替默认桩。
+// ThreadWorktree 按 threadID 查 threadWorktreeErrs（单线程错误优先）、
+// threadWorktrees（未命中回 threadWTDefault）；全局 threadWTErrs 按调用次序
+// 出队，取完后回 threadWTErr。createFn 非空时代替默认桩。
 type fakeReviewT3 struct {
-	worktrees  []string
-	listErr    error
-	listQueue  [][]string
-	stopped    []string
-	removed    []string
-	removedCwd []string
-	removeErr  error
-	archived   []string
-	archiveErr error
-	createFn   func(context.Context, string, string, *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
-	created    []*T3CreateThreadRequest
+	threadWorktrees    map[string]T3ThreadWorktree
+	threadWorktreeErrs map[string]error
+	threadWTDefault    T3ThreadWorktree
+	threadWTErrs       []error
+	threadWTErr        error
+	threadWTCalls      []string
+	worktrees          []T3Worktree
+	listErr            error
+	listCalls          int
+	listCwds           []string
+	stopped            []string
+	removed            []string
+	removedCwd         []string
+	removeErr          error
+	archived           []string
+	archiveErr         error
+	createFn           func(context.Context, string, string, *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
+	created            []*T3CreateThreadRequest
 }
 
 func (f *fakeReviewT3) CreateThreadForAgent(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
@@ -46,12 +55,30 @@ func (f *fakeReviewT3) StopThread(_ context.Context, _, _, threadID string) (*T3
 	return &T3ThreadStopResult{}, nil
 }
 
-func (f *fakeReviewT3) ListWorktreePaths(context.Context, string, string, string) ([]string, error) {
-	if len(f.listQueue) > 0 {
-		out := f.listQueue[0]
-		f.listQueue = f.listQueue[1:]
-		return out, nil
+func (f *fakeReviewT3) ThreadWorktree(_ context.Context, _, _, threadID string) (*T3ThreadWorktree, error) {
+	f.threadWTCalls = append(f.threadWTCalls, threadID)
+	if err, ok := f.threadWorktreeErrs[threadID]; ok {
+		return nil, err
 	}
+	if len(f.threadWTErrs) > 0 {
+		err := f.threadWTErrs[0]
+		f.threadWTErrs = f.threadWTErrs[1:]
+		return nil, err
+	}
+	if f.threadWTErr != nil {
+		return nil, f.threadWTErr
+	}
+	if wt, ok := f.threadWorktrees[threadID]; ok {
+		out := wt
+		return &out, nil
+	}
+	out := f.threadWTDefault
+	return &out, nil
+}
+
+func (f *fakeReviewT3) ListWorktrees(_ context.Context, _, _, cwd string) ([]T3Worktree, error) {
+	f.listCalls++
+	f.listCwds = append(f.listCwds, cwd)
 	return f.worktrees, f.listErr
 }
 
@@ -108,7 +135,21 @@ func (e *reviewEngineEnv) cleanupFailedCount(t *testing.T) int64 {
 	return n
 }
 
-// TestReviewCleanupOwnership F1：空路径不再差集猜、删除前核验归属。
+// seedCleanableRun 落一条已归档终态代码运行：环境换成真实 env 并带
+// t3_project_id，worktree_path 可空（正常流转下行里就是空的，回收时按
+// 线程投影真值写回）。
+func (e *reviewEngineEnv) seedCleanableRun(t *testing.T, repo string, pr int,
+	env *model.T3Environment, status model.ReviewRunStatus, worktreePath string, now time.Time) *model.ReviewRun {
+	t.Helper()
+	run := e.seedDispatchedRun(t, repo, pr, model.ReviewKindCode, status, worktreePath, true, now)
+	e.svc.db.Model(run).Updates(map[string]any{
+		"environment_id": env.ID, "t3_project_id": "t3p",
+	})
+	run.EnvironmentID, run.T3ProjectID = env.ID, "t3p"
+	return run
+}
+
+// TestReviewCleanupOwnership F1：工作区真值只认线程投影；删除前核验归属。
 func TestReviewCleanupOwnership(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -120,36 +161,49 @@ func TestReviewCleanupOwnership(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-c")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 
-	// 空 worktree_path：直接 failed + 通知，绝不列举/删除任何路径。
+	// 线程投影没有工作区路径：有限重试到上限后按「无工作区可清」removed——
+	// 不通知、不列举、不删任何路径。
 	r1 := e.seedDispatchedRun(t, repo, 1, model.ReviewKindCode, model.ReviewRunFailed, "", true, now)
-	review.cleanupRunWorktree(r1, now)
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.cleanupRunWorktree(r1, now)
+	}
 	var after1 model.ReviewRun
 	e.svc.db.First(&after1, "id = ?", r1.ID)
-	if after1.WorktreeState != model.ReviewWorktreeFailed || after1.WorktreeError == "" {
-		t.Fatalf("empty-path worktree = %q/%q", after1.WorktreeState, after1.WorktreeError)
+	if after1.WorktreeState != model.ReviewWorktreeRemoved {
+		t.Fatalf("empty-path worktree = %q, want removed", after1.WorktreeState)
 	}
-	if len(t3.removed) != 0 || len(t3.worktrees) != 0 {
-		t.Fatal("空路径不得做任何列举与删除")
+	if len(t3.removed) != 0 || t3.listCalls != 0 {
+		t.Fatal("线程无工作区不得做登记列举与删除")
 	}
-	if e.cleanupFailedCount(t) != 1 {
-		t.Fatal("空路径应发清理失败通知")
+	if got := len(t3.threadWTCalls); got != reviewWorktreeMaxTries {
+		t.Fatalf("thread reads = %d, want %d（空路径有限重试）", got, reviewWorktreeMaxTries)
+	}
+	if e.cleanupFailedCount(t) != 0 {
+		t.Fatal("线程确认无工作区不应发失败通知")
 	}
 
-	// 正常路径：核验通过 → 删除 → removed。
-	r2 := e.seedDispatchedRun(t, repo, 1, model.ReviewKindCode, model.ReviewRunCompleted, "/wt/owned", true, now)
-	e.svc.db.Model(r2).Update("environment_id", env.ID)
-	r2.EnvironmentID = env.ID
+	// 线程真值正常：路径写回行 + listRefs 核验通过 → 删除 → removed。
+	r2 := e.seedCleanableRun(t, repo, 1, env, model.ReviewRunCompleted, "", now)
+	t3.threadWorktrees = map[string]T3ThreadWorktree{
+		r2.ThreadID: {Path: "/wt/owned", Branch: "br-owned"},
+	}
+	t3.worktrees = []T3Worktree{{Path: "/wt/owned", RefNames: []string{"br-owned"}}}
 	review.cleanupRunWorktree(r2, now)
 	var after2 model.ReviewRun
 	e.svc.db.First(&after2, "id = ?", r2.ID)
 	if after2.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 || t3.removed[0] != "/wt/owned" {
 		t.Fatalf("owned worktree = %q removed=%v", after2.WorktreeState, t3.removed)
 	}
+	if after2.WorktreePath != "/wt/owned" {
+		t.Fatalf("worktree_path = %q，应写回线程真值 /wt/owned", after2.WorktreePath)
+	}
 
 	// 路径被其他运行认领：failed + 不删。
 	other := e.seedRun(t, repo, 1, "sha-c", model.ReviewRunRunning, now)
 	e.svc.db.Model(other).Update("worktree_path", "/wt/shared")
-	r3 := e.seedDispatchedRun(t, repo, 1, model.ReviewKindCode, model.ReviewRunCompleted, "/wt/shared", true, now)
+	r3 := e.seedCleanableRun(t, repo, 1, env, model.ReviewRunCompleted, "", now)
+	t3.threadWorktrees[r3.ThreadID] = T3ThreadWorktree{Path: "/wt/shared", Branch: "br-shared"}
+	t3.worktrees = append(t3.worktrees, T3Worktree{Path: "/wt/shared", RefNames: []string{"br-shared"}})
 	removedBefore := len(t3.removed)
 	review.cleanupRunWorktree(r3, now)
 	var after3 model.ReviewRun
@@ -165,6 +219,260 @@ func TestReviewCleanupOwnership(t *testing.T) {
 	e.svc.db.First(&after4, "id = ?", r4.ID)
 	if after4.WorktreeState != model.ReviewWorktreeNone || len(t3.removed) != removedBefore {
 		t.Fatalf("unarchived worktree = %q removed=%v", after4.WorktreeState, t3.removed)
+	}
+}
+
+// TestCleanupConcurrentRunsAllRemoved INT-142 回归：多组合连发的代码运行
+// 回收——行里 worktree_path 全空，各线程投影给出不同的 {Path,Branch}，
+// listRefs 里三条都以同名 ref 登记；三条全部 removed 且路径/线程一一对应。
+func TestCleanupConcurrentRunsAllRemoved(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-burst")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	threadWT := map[string]T3ThreadWorktree{}
+	var refs []T3Worktree
+	runs := make([]*model.ReviewRun, 3)
+	for i := range runs {
+		runs[i] = e.seedCleanableRun(t, repo, 40+i, env, model.ReviewRunCompleted, "", now)
+		path := fmt.Sprintf("/wt/burst-%d", i)
+		branch := fmt.Sprintf("br-burst-%d", i)
+		threadWT[runs[i].ThreadID] = T3ThreadWorktree{Path: path, Branch: branch}
+		refs = append(refs, T3Worktree{Path: path, RefNames: []string{branch}})
+	}
+	t3 := &fakeReviewT3{threadWorktrees: threadWT, worktrees: refs}
+	review := e.withT3(t3, nil, nil)
+
+	review.cleanupWorktrees(now)
+
+	if len(t3.removed) != len(runs) {
+		t.Fatalf("removed = %v, want %d 条", t3.removed, len(runs))
+	}
+	wantPaths := map[string]bool{}
+	for i := range runs {
+		wantPaths[fmt.Sprintf("/wt/burst-%d", i)] = true
+	}
+	for _, p := range t3.removed {
+		delete(wantPaths, p)
+	}
+	if len(wantPaths) != 0 {
+		t.Fatalf("删除路径与线程不一一对应，漏删: %v", wantPaths)
+	}
+	for i, run := range runs {
+		var after model.ReviewRun
+		e.svc.db.First(&after, "id = ?", run.ID)
+		if after.WorktreeState != model.ReviewWorktreeRemoved {
+			t.Fatalf("run %d worktree_state = %q, want removed", i, after.WorktreeState)
+		}
+		if want := fmt.Sprintf("/wt/burst-%d", i); after.WorktreePath != want {
+			t.Fatalf("run %d worktree_path = %q, want %q（线程真值写回）", i, after.WorktreePath, want)
+		}
+	}
+	if e.cleanupFailedCount(t) != 0 {
+		t.Fatal("多组合连发不应产生回收失败通知")
+	}
+}
+
+// TestCleanupThreadNotFoundRemoves 线程 404：可能来自 T3 重启/代理抖动，同样
+// 走有限重试——上限内不动状态，连续到上限才认定线程确已不存在：removed，
+// 不通知、不删。
+func TestCleanupThreadNotFoundRemoves(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-gone")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{threadWTErr: errT3ThreadNotFound}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 44, env, model.ReviewRunCompleted, "", now)
+	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
+		review.cleanupRunWorktree(run, now)
+		var mid model.ReviewRun
+		e.svc.db.First(&mid, "id = ?", run.ID)
+		if mid.WorktreeState != model.ReviewWorktreeNone {
+			t.Fatalf("404 重试中 worktree_state = %q, want none", mid.WorktreeState)
+		}
+	}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeRemoved {
+		t.Fatalf("worktree_state = %q, want removed", after.WorktreeState)
+	}
+	if len(t3.removed) != 0 || t3.listCalls != 0 {
+		t.Fatal("线程不存在不得列举/删除")
+	}
+	if e.cleanupFailedCount(t) != 0 {
+		t.Fatal("线程不存在按无工作区处理，不应通知")
+	}
+}
+
+// TestCleanupThreadReadErrorRetries 读线程工作区失败：上限内只重试不动状态，
+// 到上限 failed + 通知 + 不删。
+func TestCleanupThreadReadErrorRetries(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-flaky")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{threadWTErr: errors.New("upstream boom")}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 45, env, model.ReviewRunCompleted, "", now)
+	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
+		review.cleanupRunWorktree(run, now)
+	}
+	var mid model.ReviewRun
+	e.svc.db.First(&mid, "id = ?", run.ID)
+	if mid.WorktreeState != model.ReviewWorktreeNone {
+		t.Fatalf("重试中 worktree_state = %q, want none（不动状态）", mid.WorktreeState)
+	}
+	review.cleanupRunWorktree(run, now)
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		!strings.Contains(after.WorktreeError, "读取线程工作区失败") {
+		t.Fatalf("worktree = %q/%q, want failed+读失败原因", after.WorktreeState, after.WorktreeError)
+	}
+	if len(t3.removed) != 0 {
+		t.Fatal("读失败不得删除")
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("到上限应发一次失败通知")
+	}
+}
+
+// TestCleanupUnregisteredWorktreeSkipsDelete 线程记录的路径已不在项目登记中：
+// 视为无工作区可清，removed——不通知、不删。
+func TestCleanupUnregisteredWorktreeSkipsDelete(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-unreg")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{
+		worktrees: []T3Worktree{{Path: "/wt/someone-else", RefNames: []string{"br-x"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 46, env, model.ReviewRunCompleted, "", now)
+	t3.threadWorktrees = map[string]T3ThreadWorktree{
+		run.ThreadID: {Path: "/wt/gone", Branch: "br-gone"},
+	}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeRemoved {
+		t.Fatalf("worktree_state = %q, want removed", after.WorktreeState)
+	}
+	if len(t3.removed) != 0 {
+		t.Fatalf("未登记路径不得删除, removed=%v", t3.removed)
+	}
+	if e.cleanupFailedCount(t) != 0 {
+		t.Fatal("未登记按无工作区处理，不应通知")
+	}
+}
+
+// TestCleanupRefNameMismatchFails 登记 ref 名与线程分支不一致：failed + 通知，
+// 不删。
+func TestCleanupRefNameMismatchFails(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-refmis")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{
+		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"br-other"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 47, env, model.ReviewRunCompleted, "", now)
+	t3.threadWorktrees = map[string]T3ThreadWorktree{
+		run.ThreadID: {Path: "/wt/x", Branch: "br-thread"},
+	}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		!strings.Contains(after.WorktreeError, "分支与线程记录不一致") {
+		t.Fatalf("worktree = %q/%q, want failed+分支不一致", after.WorktreeState, after.WorktreeError)
+	}
+	if len(t3.removed) != 0 {
+		t.Fatal("分支不一致不得删除")
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("分支不一致应发失败通知")
+	}
+}
+
+// TestCleanupRowPathMismatchFails 行内旧快照路径与线程真值不一致：failed +
+// 通知，不删。
+func TestCleanupRowPathMismatchFails(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-rowmis")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{
+		worktrees: []T3Worktree{{Path: "/wt/new", RefNames: []string{"br-n"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 48, env, model.ReviewRunCompleted, "/wt/old", now)
+	t3.threadWorktrees = map[string]T3ThreadWorktree{
+		run.ThreadID: {Path: "/wt/new", Branch: "br-n"},
+	}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		!strings.Contains(after.WorktreeError, "工作区与线程记录不一致") {
+		t.Fatalf("worktree = %q/%q, want failed+路径不一致", after.WorktreeState, after.WorktreeError)
+	}
+	if len(t3.removed) != 0 {
+		t.Fatal("行与线程不一致不得删除")
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("路径不一致应发失败通知")
+	}
+}
+
+// TestCleanupListWorktreesErrorRetries 列举项目工作区登记失败：有限重试到
+// 上限后 failed + 通知 + 不删。
+func TestCleanupListWorktreesErrorRetries(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-listerr")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{listErr: errors.New("listRefs down")}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 49, env, model.ReviewRunCompleted, "", now)
+	t3.threadWorktrees = map[string]T3ThreadWorktree{
+		run.ThreadID: {Path: "/wt/x", Branch: "br-x"},
+	}
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.cleanupRunWorktree(run, now)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		!strings.Contains(after.WorktreeError, "读取项目工作区登记失败") {
+		t.Fatalf("worktree = %q/%q, want failed+登记读取失败", after.WorktreeState, after.WorktreeError)
+	}
+	if len(t3.removed) != 0 {
+		t.Fatal("登记读取失败不得删除")
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("到上限应发一次失败通知")
 	}
 }
 
@@ -549,5 +857,151 @@ func TestParseDiffRightLinesTrailingNewline(t *testing.T) {
 	got := valid["a.go"]
 	if len(got) != 2 || !got[1] || !got[2] {
 		t.Fatalf("valid lines = %v, want {1,2}", got)
+	}
+}
+
+// TestCleanupEmptyBranchMatchesByPath F4 回归：线程投影的 branch 可空——空时
+// 只凭「路径命中登记」认定归属，不再被 ref 名比较恒不等打成永久 failed。
+func TestCleanupEmptyBranchMatchesByPath(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-nobranch")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{
+		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"whatever"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 62, env, model.ReviewRunCompleted, "", now)
+	t3.threadWorktrees = map[string]T3ThreadWorktree{
+		run.ThreadID: {Path: "/wt/x"}, // branch 为空
+	}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 {
+		t.Fatalf("worktree = %q removed=%v, want removed 且删除（空分支按路径核验）",
+			after.WorktreeState, t3.removed)
+	}
+	if e.cleanupFailedCount(t) != 0 {
+		t.Fatal("空分支不应发失败通知")
+	}
+}
+
+// TestCleanupTerminalRowsNotClaimers F7 回归：removed/failed 行残留的
+// worktree_path 不再算认领者，同路径的后续合法属主正常回收。
+func TestCleanupTerminalRowsNotClaimers(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-staleclaim")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	// 历史终态行：同路径、已 removed——只是残留快照，不得当认领者。
+	e.seedDispatchedRun(t, repo, 63, model.ReviewKindCode, model.ReviewRunCompleted, "/wt/recycled", true, now)
+	e.svc.db.Model(&model.ReviewRun{}).Where("worktree_path = '/wt/recycled'").
+		Update("worktree_state", model.ReviewWorktreeRemoved)
+
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			// 当前运行复用同一路径（分支不同无妨，核验按 ref 名集合）。
+			"th-current": {Path: "/wt/recycled", Branch: "br-new"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/recycled", RefNames: []string{"br-new"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 64, env, model.ReviewRunCompleted, "", now)
+	e.svc.db.Model(run).Update("thread_id", "th-current")
+	run.ThreadID = "th-current"
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 {
+		t.Fatalf("worktree = %q removed=%v, want removed（终态行不算认领者）",
+			after.WorktreeState, t3.removed)
+	}
+}
+
+// TestCleanupTriesPerReason F8 回归：重试计数按原因独立——404 两次不占用
+// 「读失败」的宽限；若仍是单一计数，第 3 个 tick 就会提前落终态。
+func TestCleanupTriesPerReason(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-mixtry")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{
+		threadWTErrs: []error{errT3ThreadNotFound, errT3ThreadNotFound},
+		threadWTErr:  errors.New("upstream boom"),
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 65, env, model.ReviewRunCompleted, "", now)
+	// 两个 tick 404（notfound 计数）+ 一个 tick 读失败（thread 计数=1）：
+	// 任一原因都还没到上限，状态必须原样不动。
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.cleanupRunWorktree(run, now)
+		var mid model.ReviewRun
+		e.svc.db.First(&mid, "id = ?", run.ID)
+		if mid.WorktreeState != model.ReviewWorktreeNone {
+			t.Fatalf("tick %d worktree_state = %q, want none（原因混算会提前终态）", i+1, mid.WorktreeState)
+		}
+	}
+	// 再两次读失败到该原因上限：failed + 通知。
+	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
+		review.cleanupRunWorktree(run, now)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		!strings.Contains(after.WorktreeError, "读取线程工作区失败") {
+		t.Fatalf("worktree = %q/%q, want failed+读失败原因", after.WorktreeState, after.WorktreeError)
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("到上限应发一次失败通知")
+	}
+}
+
+// TestCleanupNotFoundCounterResetsAfterSuccess 404 计数按「连续失败」语义：
+// 中途成功读到线程投影就清零。否则「404 → 成功（但登记读失败）→ 404 → …」
+// 的交错序列会让累计 404 提前命中上限，把已确认存在的工作区静默标 removed。
+func TestCleanupNotFoundCounterResetsAfterSuccess(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-404reset")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	run := e.seedCleanableRun(t, repo, 66, env, model.ReviewRunCompleted, "", now)
+
+	t3 := &fakeReviewT3{
+		threadWTErrs: []error{errT3ThreadNotFound, errT3ThreadNotFound},
+		threadWorktrees: map[string]T3ThreadWorktree{
+			run.ThreadID: {Path: "/wt/404-reset", Branch: "br-404"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/404-reset", RefNames: []string{"br-404"}}},
+		listErr:   errors.New("registry down"),
+	}
+	review := e.withT3(t3, nil, nil)
+
+	// tick1/2：两个 404（累计 2，未到上限）。
+	review.cleanupRunWorktree(run, now)
+	review.cleanupRunWorktree(run, now)
+	// tick3：成功读到线程投影（404 计数应清零），登记读取失败进入 registry 重试。
+	review.cleanupRunWorktree(run, now)
+	// tick4：再一个 404。若 404 计数没随成功清零，这里就是第 3 次 → removed。
+	t3.threadWTErrs = []error{errT3ThreadNotFound}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeNone {
+		t.Fatalf("worktree_state = %q, want none（成功读取后 404 计数必须清零）", after.WorktreeState)
+	}
+	if len(t3.removed) != 0 {
+		t.Fatalf("不得删除，removed = %v", t3.removed)
 	}
 }

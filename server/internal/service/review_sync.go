@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -394,7 +396,17 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	} else if !ok {
 		return nil
 	}
-	codeBody := buildCodeComment(codeRuns, visualPending, visualCarry)
+	// diff 在 step 3 前读一次：顶层评论的「未行内标注」注记与 step 4 的行内
+	// review 共用同一份解析结果，不再两处各读一遍。
+	inlineLines, err := s.fetchInlineLines(ctx, client, ledger, codeRuns)
+	if err != nil {
+		return err
+	}
+	codeBody := buildCodeComment(reviewCommentMeta{
+		RepoFullName: ledger.RepoFullName,
+		HeadSHA:      ledger.HeadSHA,
+		RoundNumber:  ledger.RoundNumber,
+	}, codeRuns, inlineLines, visualPending, visualCarry)
 	if err := s.upsertPRComment(ctx, client, ledger, reviewCodeCommentMarker, codeBody, "code_comment_id", ledger.CodeCommentID); err != nil {
 		return err
 	}
@@ -405,7 +417,7 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	} else if !ok {
 		return nil
 	}
-	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, epoch, now); err != nil {
+	if err := s.postInlineReviews(ctx, client, ledger, codeRuns, inlineLines, epoch, now); err != nil {
 		return err
 	}
 
@@ -599,53 +611,259 @@ func summarizeVisualRuns(runs []model.ReviewRun) (state, description string) {
 	return "success", "审查通过"
 }
 
-// buildCodeComment 代码审查顶层评论正文：marker + 按组合分节 + 发现排序
-// P0→P1→P2→Note + 视觉待办/遗留提示 + 复审说明。
-func buildCodeComment(codeRuns []model.ReviewRun, visualPending, visualCarryFailure bool) string {
-	var b strings.Builder
-	b.WriteString(reviewCodeCommentMarker + "\n代码审查结论：\n\n")
-	allCompleted, hasFindings := true, false
-	for _, r := range codeRuns {
-		fmt.Fprintf(&b, "### %s\n", runCombinationLabel(&r))
+// reviewCommentMeta 顶层评论的定位信息：标题带短 SHA 与轮次，发现链接指向
+// head blob 的行锚点。
+type reviewCommentMeta struct {
+	RepoFullName string
+	HeadSHA      string
+	RoundNumber  int
+}
+
+// reviewRunStatusText 总览表的状态列文案：非终态一律「审查中」。
+func reviewRunStatusText(s model.ReviewRunStatus) string {
+	switch s {
+	case model.ReviewRunCompleted:
+		return "完成"
+	case model.ReviewRunFailed:
+		return "失败"
+	case model.ReviewRunTimedOut:
+		return "超时"
+	case model.ReviewRunCancelled:
+		return "已取消"
+	}
+	return "审查中"
+}
+
+// reviewBlobURL 指向 head 提交中文件行锚点的 GitHub 链接。文件路径按 `/`
+// 分段编码——路径里的括号/空格/`#` 不编码会断链（`#` 尤其会被当成锚点截断）；
+// repo/sha 只含 GitHub 合法字符，原样拼接。
+func reviewBlobURL(meta reviewCommentMeta, file string, line int) string {
+	segments := strings.Split(file, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return fmt.Sprintf("https://github.com/%s/blob/%s/%s#L%d",
+		meta.RepoFullName, meta.HeadSHA, strings.Join(segments, "/"), line)
+}
+
+// markdownLinkText 转义 Markdown 链接文本里的结构性字符：`[`、`]` 会截断
+// `[file:line](url)` 的文本段，反斜杠本身也要转义。
+func markdownLinkText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `[`, `\[`)
+	s = strings.ReplaceAll(s, `]`, `\]`)
+	return s
+}
+
+// markdownTableCell 把任意值放进 Markdown 表格单元格：换行会拆行破坏表格，
+// 先换成空格；`|` 会拆列，转义之。反斜杠必须先转义——否则输入里的 `\|`
+// 会变成 `\\|`，GFM 把 `\\` 当字面反斜杠、后面的 `|` 仍是裸分隔符。
+func markdownTableCell(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.ReplaceAll(s, "|", "\\|")
+}
+
+// writeCodeFinding 输出一条 P0–P2 发现：级别加粗开头，位置用指向 head blob
+// 行锚点的链接；行号缺失或不在 diff 右侧有效行内时注明「未行内标注」——
+// 该条没有对应的行内 review，作者只在顶层评论能看到。正文另起一行原样输出。
+func writeCodeFinding(b *strings.Builder, meta reviewCommentMeta, f api.ReviewCodeFinding, inlineLines map[string]map[int]bool) {
+	head := "**" + string(f.Level) + "** "
+	switch {
+	case f.Line != nil && *f.Line > 0:
+		head += fmt.Sprintf("[%s:%d](%s)", markdownLinkText(f.File), *f.Line, reviewBlobURL(meta, f.File, *f.Line))
+		// inlineLines == nil 表示本轮没读 diff（例如没有可标注的行内发现），
+		// 无从判断行号是否有效，不臆断加注。
+		if inlineLines != nil && !inlineLines[f.File][*f.Line] {
+			head += "（未行内标注）"
+		}
+	default:
+		head += f.File + "（未行内标注）"
+	}
+	fmt.Fprintf(b, "%s\n%s\n\n", head, f.Body)
+}
+
+// buildCodeComment 代码审查顶层评论正文：marker + 标题（短 SHA + 轮次）+
+// 一句话结论 + 组合总览表 + 按组合分节（模型 · 实例、选项小字、引用块摘要、
+// 按级别排序的发现、Note 折叠）+ 视觉待办/遗留提示 + 复审说明。
+// inlineLines 是 PR diff 右侧有效行（nil 表示本轮没读 diff）：有行号的
+// P0–P2 若不在其中，注明「未行内标注」提示作者该条只在评论里。
+func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool, visualPending, visualCarryFailure bool) string {
+	// 状态与计数先算一次：一句话结论与总览表共用，避免两处各解析一遍 result_json。
+	type comboStat struct {
+		status string         // 总览表状态列文案
+		counts map[string]int // nil = 未完成或 result_json 不可解析，总览表填 –
+	}
+	stats := make([]comboStat, len(codeRuns))
+	completed, unfinished := 0, 0
+	totals := map[string]int{"P0": 0, "P1": 0, "P2": 0}
+	for i := range codeRuns {
+		r := &codeRuns[i]
+		st := comboStat{status: reviewRunStatusText(r.Status)}
 		switch {
 		case r.Status == model.ReviewRunCompleted:
+			completed++
 			var result api.ReviewCodeResult
 			if json.Unmarshal([]byte(r.ResultJSON), &result) == nil {
-				if result.Summary != "" {
-					b.WriteString(result.Summary + "\n")
-				}
-				sort.SliceStable(result.Findings, func(i, j int) bool {
-					return codeLevelRank(result.Findings[i].Level) < codeLevelRank(result.Findings[j].Level)
-				})
+				c := map[string]int{"P0": 0, "P1": 0, "P2": 0, "Note": 0}
 				for _, f := range result.Findings {
-					hasFindings = hasFindings || f.Level != api.Note
-					loc := f.File
-					if f.Line != nil && *f.Line > 0 {
-						loc = fmt.Sprintf("%s:%d", f.File, *f.Line)
+					switch f.Level {
+					case api.P0:
+						c["P0"]++
+					case api.P1:
+						c["P1"]++
+					case api.P2:
+						c["P2"]++
+					case api.Note:
+						c["Note"]++
 					}
-					fmt.Fprintf(&b, "- %s %s %s\n", f.Level, loc, f.Body)
+				}
+				st.counts = c
+				for _, lvl := range []string{"P0", "P1", "P2"} {
+					totals[lvl] += c[lvl]
 				}
 			}
 		case r.Status.Terminal():
-			allCompleted = false
-			fmt.Fprintf(&b, "- 本组合未完成（%s）：%s\n", r.Status, r.ErrorMessage)
-		default:
-			allCompleted = false
-			b.WriteString("- 审查中…\n")
+			unfinished++
 		}
-		b.WriteString("\n")
+		stats[i] = st
 	}
-	if allCompleted && !hasFindings {
-		b.WriteString("本轮未发现 P0/P1/P2 问题。\n\n")
+
+	var b strings.Builder
+	b.WriteString(reviewCodeCommentMarker + "\n")
+	fmt.Fprintf(&b, "## 代码审查 · %s · 第 %d 轮\n\n", reviewShortSHA(meta.HeadSHA), meta.RoundNumber)
+
+	// 一句话结论：优先级 在途 → 未完成 → 全净 → 按级别计数（只列非零级别）。
+	switch {
+	case completed+unfinished < len(codeRuns):
+		fmt.Fprintf(&b, "审查进行中：%d/%d 个组合已完成。\n\n", completed, len(codeRuns))
+	case unfinished > 0:
+		fmt.Fprintf(&b, "%d 个组合未完成。\n\n", unfinished)
+	case totals["P0"]+totals["P1"]+totals["P2"] == 0:
+		b.WriteString("全部组合通过，未发现 P0–P2 问题。\n\n")
+	default:
+		var parts []string
+		for _, lvl := range []string{"P0", "P1", "P2"} {
+			if totals[lvl] > 0 {
+				parts = append(parts, fmt.Sprintf("%s %d 条", lvl, totals[lvl]))
+			}
+		}
+		fmt.Fprintf(&b, "发现 %s。\n\n", strings.Join(parts, "、"))
 	}
+
+	// 总览表：每组合一行；计数列只对 completed 且可解析的组合统计。
+	b.WriteString("| 组合 | 状态 | P0 | P1 | P2 | Note |\n| --- | --- | --- | --- | --- | --- |\n")
+	for i := range codeRuns {
+		// 未完成或不可解析的组合四个计数列各填一个 –。
+		cell := "– | – | – | –"
+		if c := stats[i].counts; c != nil {
+			cell = fmt.Sprintf("%d | %d | %d | %d", c["P0"], c["P1"], c["P2"], c["Note"])
+		}
+		// 组合名进表格：换行拆行、竖线拆列，都要处理。
+		fmt.Fprintf(&b, "| %s | %s | %s |\n",
+			markdownTableCell(runCombinationLabel(&codeRuns[i])), stats[i].status, cell)
+	}
+	b.WriteString("\n")
+
 	if visualPending {
 		b.WriteString("视觉审查尚未结束，将复核截图。\n\n")
 	}
 	if visualCarryFailure {
 		b.WriteString("截图复核意见尚未处理\n\n")
 	}
+
+	for i := range codeRuns {
+		r := &codeRuns[i]
+		fmt.Fprintf(&b, "### %s\n", runCombinationLabel(r))
+		if opts := runCombinationOptions(r); opts != "" {
+			// 选项串整体 HTML 转义：值来自项目配置，含 `<`/`&` 会破坏 <sub> 标签。
+			fmt.Fprintf(&b, "\n<sub>%s</sub>\n", html.EscapeString(opts))
+		}
+		b.WriteString("\n")
+		switch {
+		case r.Status == model.ReviewRunCompleted:
+			var result api.ReviewCodeResult
+			if json.Unmarshal([]byte(r.ResultJSON), &result) == nil {
+				if result.Summary != "" {
+					// 摘要用引用块：与发现的正文在视觉上分开，一眼可辨。
+					for _, line := range strings.Split(result.Summary, "\n") {
+						b.WriteString("> " + line + "\n")
+					}
+					b.WriteString("\n")
+				}
+				sort.SliceStable(result.Findings, func(i, j int) bool {
+					return codeLevelRank(result.Findings[i].Level) < codeLevelRank(result.Findings[j].Level)
+				})
+				var notes []api.ReviewCodeFinding
+				for _, f := range result.Findings {
+					if f.Level == api.Note {
+						notes = append(notes, f)
+						continue
+					}
+					writeCodeFinding(&b, meta, f, inlineLines)
+				}
+				if len(notes) > 0 {
+					// Note 不阻塞合并，折叠收起，让 P0–P2 保持一屏可见。
+					fmt.Fprintf(&b, "<details><summary>Note（%d 条）</summary>\n\n", len(notes))
+					for _, n := range notes {
+						if n.Line != nil && *n.Line > 0 {
+							fmt.Fprintf(&b, "- [%s:%d](%s) %s\n", markdownLinkText(n.File), *n.Line, reviewBlobURL(meta, n.File, *n.Line), n.Body)
+						} else {
+							fmt.Fprintf(&b, "- %s %s\n", n.File, n.Body)
+						}
+					}
+					b.WriteString("\n</details>\n")
+				}
+			}
+		case r.Status.Terminal():
+			// 上游错误文本可能含换行：压成单行，别让它拆开评论结构。
+			fmt.Fprintf(&b, "本组合未完成（%s）：%s\n", stats[i].status, singleLine(r.ErrorMessage))
+		default:
+			b.WriteString("审查中…\n")
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString("复审说明：推送新提交后会自动重新审查。")
 	return b.String()
+}
+
+// fetchInlineLines 读取 PR diff 并解析右侧有效行：顶层评论的「未行内标注」
+// 注记与行内 review 的行判定共用同一份结果，diff 只读一次。本轮没有已完成的
+// 带行号 P0–P2 发现时返回 nil、不读 diff——此时行内 review 也发不出任何
+// 意见，评论注记口径随之放宽（有行号的不加注，因为无从判断）。
+// 扫描范围刻意不收窄到「尚未行内标注过」的发现（PostedAt == nil）：每次
+// resync 都要重算整份注记（已发过的行内 review 不会撤销，注记必须随之保持
+// 准确），轻微多一次 diff 读取可接受。
+func (s *ReviewService) fetchInlineLines(ctx context.Context, client githubapi.GitHubClient,
+	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun) (map[string]map[int]bool, error) {
+	need := false
+	for i := range codeRuns {
+		if codeRuns[i].Status != model.ReviewRunCompleted {
+			continue
+		}
+		var result api.ReviewCodeResult
+		if json.Unmarshal([]byte(codeRuns[i].ResultJSON), &result) != nil {
+			continue
+		}
+		for _, f := range result.Findings {
+			if f.Line != nil && *f.Line > 0 && (f.Level == api.P0 || f.Level == api.P1 || f.Level == api.P2) {
+				need = true
+				break
+			}
+		}
+		if need {
+			break
+		}
+	}
+	if !need {
+		return nil, nil
+	}
+	diff, err := client.GetPullRequestDiff(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
+	if err != nil {
+		return nil, errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
+	}
+	return parseDiffRightLines(diff), nil
 }
 
 func codeLevelRank(level api.ReviewCodeFindingLevel) int {
@@ -706,8 +924,10 @@ func buildVisualComment(visualRuns, priorRuns []model.ReviewRun, carried bool) s
 
 // postInlineReviews 每个 completed 且 posted_at IS NULL 的代码运行：
 // P0–P2 且行号落在 diff 右侧有效行内 → SubmitReview；posted_at=now。
+// inlineLines 由调用方传入（fetchInlineLines 的结果），本函数不再自己读 diff
+// ——它与顶层评论的「未行内标注」注记同源，保证两处判定一致。
 func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.GitHubClient,
-	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, epoch int, now time.Time) error {
+	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun, inlineLines map[string]map[int]bool, epoch int, now time.Time) error {
 	var pending []model.ReviewRun
 	for _, r := range codeRuns {
 		if r.Status == model.ReviewRunCompleted && r.PostedAt == nil {
@@ -737,11 +957,8 @@ func (s *ReviewService) postInlineReviews(ctx context.Context, client githubapi.
 			posted[rev.Body] = append(posted[rev.Body], rev.ID)
 		}
 	}
-	diff, err := client.GetPullRequestDiff(ctx, ledger.InstallationID, ledger.RepoFullName, ledger.PRNumber)
-	if err != nil {
-		return errs.New(errs.ErrGitHubAPI.Code, "读取 diff 失败: "+err.Error())
-	}
-	valid := parseDiffRightLines(diff)
+	// nil map 与空结果同义：取不到有效行就不发任何行内意见（与原逻辑一致）。
+	valid := inlineLines
 	for _, r := range pending {
 		// 复核运行仍是 completed：同步期间新 SHA 会把旧运行置 cancelled，
 		// 内存里的 codeRuns 是快照，不能据此继续发旧结论。

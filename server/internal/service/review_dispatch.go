@@ -106,20 +106,12 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	}
 
 	// 工作区：代码审查开 worktree（基于 head 分支），视觉审查用主检出。
+	// 工作区路径不在 launch 时解析——createThread 确认时 worktree 常尚未建好，
+	// 回收阶段按线程投影的 worktreePath/branch 真值处理（见 cleanupRunWorktree）。
 	workspace := &api.T3ThreadWorkspace{Type: "root"}
 	if run.Kind == model.ReviewKindCode {
 		startOrigin := true
 		workspace = &api.T3ThreadWorkspace{Type: "worktree", BaseRef: &run.HeadRef, StartFromOrigin: &startOrigin}
-		// 记录 launch 前的已知 worktree 路径——只在紧随 launch 的有界窗口内
-		// 做「新增即本次」差集；窗口过后基线释放，回收阶段不再猜路径。
-		if paths, listErr := s.t3.ListWorktreePaths(ctx, run.UserID, run.EnvironmentID, binding.T3ProjectID); listErr == nil {
-			s.worktreeMu.Lock()
-			s.worktreeBaseline[run.ID] = paths
-			s.worktreeMu.Unlock()
-		} else {
-			s.logger.Warn("worktree 基线列举失败（本运行无法证明工作区归属）",
-				zap.String("run", run.ID), zap.Error(listErr))
-		}
 	}
 
 	req := &T3CreateThreadRequest{
@@ -167,66 +159,6 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 		s.logger.Error("更新审查运行派发状态失败", zap.String("run", run.ID), zap.Error(err))
 		return
 	}
-
-	// 代码审查：launch 确认后有界窗口内解析本次工作区路径（被取消的运行也要
-	// 解析，否则回收阶段无法证明归属、只能记失败）。
-	if run.Kind == model.ReviewKindCode {
-		s.resolveWorktreePath(ctx, &run, binding.T3ProjectID)
-	}
-}
-
-// reviewWorktreeResolveTries/Interval launch 确认后工作区路径解析的重试窗口：
-// T3 建 worktree 可能略滞后于 thread 创建确认，给 3 次、间隔 1.5s。
-const (
-	reviewWorktreeResolveTries    = 3
-	reviewWorktreeResolveInterval = 1500 * time.Millisecond
-)
-
-// resolveWorktreePath launch 后的工作区解析：launch 前基线差集，在有限重试
-// 窗口内写 worktree_path；窗口结束（无论成败）统一释放基线。解析不到就
-// 保持空——回收阶段不再猜路径，空路径即「无法证明归属」。
-func (s *ReviewService) resolveWorktreePath(ctx context.Context, run *model.ReviewRun, t3ProjectID string) {
-	defer s.releaseWorktreeState(run.ID)
-	if _, ok := s.baselineFor(run.ID); !ok {
-		return // launch 前列举已失败，差集无从算起
-	}
-	for attempt := 0; attempt < reviewWorktreeResolveTries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(reviewWorktreeResolveInterval):
-			}
-		}
-		paths, err := s.t3.ListWorktreePaths(ctx, run.UserID, run.EnvironmentID, t3ProjectID)
-		if err != nil {
-			s.logger.Warn("launch 后列举 worktree 失败", zap.String("run", run.ID), zap.Error(err))
-			continue
-		}
-		if path := s.diffWorktreePath(run.ID, paths); path != "" {
-			s.db.Model(&model.ReviewRun{}).
-				Where("id = ? AND worktree_path = ''", run.ID).
-				Updates(map[string]any{"worktree_path": path, "updated_at": time.Now().UTC()})
-			return
-		}
-	}
-}
-
-// baselineFor 取 launch 前基线（只读）。
-func (s *ReviewService) baselineFor(runID string) ([]string, bool) {
-	s.worktreeMu.Lock()
-	defer s.worktreeMu.Unlock()
-	b, ok := s.worktreeBaseline[runID]
-	return b, ok
-}
-
-// releaseWorktreeState 释放一个运行的进程内工作区状态（差集基线 + 回收
-// 重试计数）：解析成功、解析失败、终态回收结束都必须调用，防泄漏。
-func (s *ReviewService) releaseWorktreeState(runID string) {
-	s.worktreeMu.Lock()
-	defer s.worktreeMu.Unlock()
-	delete(s.worktreeBaseline, runID)
-	delete(s.worktreeTries, runID)
 }
 
 // projectIDForRun 读运行所属项目（读取失败返回空串，锁退化为按空串串行）。
@@ -234,30 +166,6 @@ func projectIDForRun(db *gorm.DB, runID string) string {
 	var projectID string
 	_ = db.Model(&model.ReviewRun{}).Where("id = ?", runID).Select("project_id").Scan(&projectID).Error
 	return projectID
-}
-
-// diffWorktreePath 计算 launch 后新增的唯一 worktree 路径；无新增或多个返回空。
-func (s *ReviewService) diffWorktreePath(runID string, current []string) string {
-	s.worktreeMu.Lock()
-	baseline, ok := s.worktreeBaseline[runID]
-	s.worktreeMu.Unlock()
-	if !ok {
-		return ""
-	}
-	base := map[string]struct{}{}
-	for _, p := range baseline {
-		base[p] = struct{}{}
-	}
-	var added []string
-	for _, p := range current {
-		if _, seen := base[p]; !seen {
-			added = append(added, p)
-		}
-	}
-	if len(added) == 1 {
-		return added[0]
-	}
-	return ""
 }
 
 // failRunDispatch 派发失败终态：failed + 消费令牌 + 置 PR sync_pending + 通知。

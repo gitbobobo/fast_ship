@@ -32,7 +32,8 @@ const reviewDeliveryRetention = 7 * 24 * time.Hour
 type reviewT3 interface {
 	CreateThreadForAgent(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
 	StopThread(ctx context.Context, userID, envID, threadID string) (*T3ThreadStopResult, error)
-	ListWorktreePaths(ctx context.Context, userID, envID, projectID string) ([]string, error)
+	ThreadWorktree(ctx context.Context, userID, envID, threadID string) (*T3ThreadWorktree, error)
+	ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error)
 	RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error
 	ArchiveThread(ctx context.Context, userID, envID, threadID string) error
 }
@@ -73,13 +74,10 @@ type ReviewService struct {
 	kickCh chan struct{}
 	cancel chan struct{}
 
-	// worktreeBaseline：launch 前的已知工作区路径集合，只在 launch 确认后的
-	// 有界窗口内做「新增即本次」差集（回收阶段不再用它猜路径）。
-	// worktreeTries：归档等回收阶段的有限重试计数。
-	// 两者进程内即可：进程重启后未解析的行按「无法证明归属」失败处理（不漏通知）。
-	worktreeMu       sync.Mutex
-	worktreeBaseline map[string][]string
-	worktreeTries    map[string]int
+	// worktreeTries：归档/工作区读取等回收阶段的有限重试计数（进程内即可：
+	// 进程重启后未完成的行下个 tick 重新计，上限内不会漏终态）。
+	worktreeMu    sync.Mutex
+	worktreeTries map[string]int
 
 	// prLocks 每 PR 一把进程内锁：同一 PR 的 GitHub 同步串行，避免并发重复写。
 	prLocksMu sync.Mutex
@@ -110,10 +108,9 @@ func NewReviewService(
 		sink: sink, gh: gh, appSource: appSource, publicURL: publicURL,
 		t3: t3, media: media, mediaBearer: mediaBearer,
 		cfg: cfg, logger: logger,
-		worktreeBaseline: map[string][]string{},
-		worktreeTries:    map[string]int{},
-		prLocks:          map[string]*sync.Mutex{},
-		projectLocks:     map[string]*sync.Mutex{},
+		worktreeTries: map[string]int{},
+		prLocks:       map[string]*sync.Mutex{},
+		projectLocks:  map[string]*sync.Mutex{},
 	}
 }
 
