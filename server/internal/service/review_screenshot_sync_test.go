@@ -502,6 +502,10 @@ func TestScreenshotErrorText(t *testing.T) {
 	}{
 		{"网络错误不给原文", urlErr, "无法连接图片服务器"},
 		{"包在 url.Error 里的超时也算超时", deadlineURL, "下载超时"},
+		// F30 回归：同步被新快照推进、进程关停、上层超时的取消都以
+		// context.Canceled 到达，不能落到兜底「无法连接图片服务器」。
+		{"包在 url.Error 里的取消算被取消", &url.Error{Op: "Get", URL: "https://uiv.example.com/f/x.png", Err: context.Canceled}, "下载被取消"},
+		{"裸 Canceled", fmt.Errorf("download: %w", context.Canceled), "下载被取消"},
 		{"裸 DeadlineExceeded", fmt.Errorf("download: %w", context.DeadlineExceeded), "下载超时"},
 		{"客户端超时（net.Error Timeout）", &url.Error{Op: "Get", URL: "https://uiv.example.com/f/x.png", Err: timeoutErr{}}, "下载超时"},
 		{"地址哨兵原样透出", githubmedia.ErrBlockedUpstreamAddress, "图片地址指向内网或保留地址"},

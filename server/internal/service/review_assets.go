@@ -115,6 +115,12 @@ func screenshotErrorText(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "下载超时"
 	}
+	// 同步被新快照推进、进程关停、以及探测 30s 时限之外的上层取消都以
+	// context.Canceled 到达，单独给文案——落到兜底「无法连接图片服务器」
+	// 会把一次正常取消和真实网络故障混在一起。
+	if errors.Is(err, context.Canceled) {
+		return "下载被取消"
+	}
 	// sentinel 命中后必须返回 sentinel 自己的文案：生产里 Dialer.Control、
 	// CheckRedirect 抛出的 sentinel 会被 *net.OpError → *url.Error 层层包住，
 	// 外层 err.Error() 是「Get https://…: dial tcp …: 中文文案」——英文网络

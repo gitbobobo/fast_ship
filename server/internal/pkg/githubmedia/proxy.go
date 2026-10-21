@@ -242,8 +242,8 @@ func guardDialControl(_, address string, _ syscall.RawConn) error {
 // isBlockedIP SSRF 地址判定：拒绝回环、RFC1918 私网、IPv6 ULA/链路本地/
 // 多播/未指定地址，以及 169.254.0.0/16、100.64.0.0/10（CGNAT）、0.0.0.0/8、
 // 198.18.0.0/15（基准测试）、240.0.0.0/4（保留段，含广播）地址；IPv6 还要
-// 解出内嵌 IPv4 再判一遍（NAT64 local-use /48 例外，见下：整体拒绝）；公网
-// 地址放行。
+// 解出内嵌 IPv4 再判一遍（NAT64 只有 well-known /96 解码，/32 内其余前缀
+// 长度整体拒绝，见下）；公网地址放行。
 func isBlockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -268,21 +268,40 @@ func isBlockedIP(ip net.IP) bool {
 	}
 	// NAT64/6to4/Teredo 等前缀本身是公网单播，能内嵌任意 IPv4——载荷是
 	// 内网地址时同样要拒，否则「看起来是公网」的 IPv6 就绕过了上面的判定。
-	// RFC 8215 的 NAT64 local-use 前缀（64:ff9b:1::/48）整体拒绝，包括内嵌
-	// 公网地址的：RFC 6052 的转换布局随前缀长度变化（IPv4 高低 16 位被 u
-	// 八位组隔开，只有 well-known /96 恰落在末 4 字节），local-use 前缀的
-	// 实际布局按 RFC 8215 §5 还可由网络自行选择，按任何固定偏移都解不出
-	// 可靠的内嵌 IPv4。这个前缀只该出现在本地转换域内，公网图床不该用
-	// ——宁可错拒不可放过，有意保守。
-	if ipv6 := ip.To16(); ipv6 != nil &&
-		ipv6[0] == 0 && ipv6[1] == 0x64 && ipv6[2] == 0xff && ipv6[3] == 0x9b &&
-		ipv6[4] == 0 && ipv6[5] == 0x01 {
+	// NAT64（64:ff9b::/32，RFC 6052/8215）统一成一条规则：只有 well-known
+	// /96（bytes 4-11 全零）按末 4 字节解出内嵌 IPv4 递归判定（内嵌公网
+	// 放行）；/32 内其余前缀长度——RFC 6052 §2.2 的 /40 /48 /56 /64 布局
+	// （IPv4 高低 16 位被 u 八位组隔开、位置随前缀长度变化，按任何固定偏移
+	// 都解不出可靠的内嵌 IPv4）与 RFC 8215 的 local-use /48（布局还可由
+	// 网络自行选择）——一律整体拒绝。这些前缀不该出现在公网图床上，宁可
+	// 错拒不可放过，有意保守。
+	if ipv6 := ip.To16(); ipv6 != nil && isNAT64Prefix(ipv6) {
+		if allZero(ipv6[4:12]) {
+			if v4 := embeddedIPv4(ip); v4 != nil && isBlockedIP(v4) {
+				return true
+			}
+			return false
+		}
 		return true
 	}
 	if v4 := embeddedIPv4(ip); v4 != nil && isBlockedIP(v4) {
 		return true
 	}
 	return false
+}
+
+// isNAT64Prefix 地址（16 字节形式）是否落在 NAT64 前缀 64:ff9b::/32 内。
+func isNAT64Prefix(ipv6 []byte) bool {
+	return ipv6[0] == 0 && ipv6[1] == 0x64 && ipv6[2] == 0xff && ipv6[3] == 0x9b
+}
+
+func allZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // embeddedIPv4 解出 IPv6 地址里内嵌的 IPv4；不是内嵌形态返回 nil。解出的
@@ -294,11 +313,10 @@ func isBlockedIP(ip net.IP) bool {
 //     存储（混淆字段，防止中间设备按内容过滤），取反回来才是真实地址。
 //   - 2002::/16 6to4（RFC 3056）：内嵌 IPv4 在 2-5。
 //   - 64:ff9b::/96 NAT64 well-known（RFC 6052 §2.1）：4-11 全零，内嵌 IPv4
-//     恰好落在末 4 字节。
-//   - 64:ff9b:1::/48 NAT64 local-use（RFC 8215）：不在这里解码。RFC 6052
-//     §2.2 的非末位布局把 IPv4 高 16 位放在 6-7、u 八位组在 8、低 16 位在
-//     9-10，且实际布局还随前缀长度与网络配置变化——按末 4 字节解出的不是
-//     内嵌地址。整个 /48 由 isBlockedIP 整体拒绝，不走这里。
+//     恰好落在末 4 字节。/32 内其余前缀长度（§2.2 的 /40 /48 /56 /64，含
+//     RFC 8215 的 local-use /48）不在这里解码：内嵌位置随前缀长度变化、
+//     IPv4 高低 16 位被 u 八位组隔开，按末 4 字节解出的不是内嵌地址——
+//     这类前缀由 isBlockedIP 整体拒绝，不会走到这里。
 //   - ::/96 已废弃的 IPv4-compatible（RFC 4291）：前 12 字节全零，内嵌
 //     IPv4 在 12-15。::ffff: 映射段 10-11 是 ff，已被 To4() 收走，不会落到
 //     这里。
@@ -319,20 +337,11 @@ func embeddedIPv4(ip net.IP) net.IP {
 	if ipv6[0] == 0x20 && ipv6[1] == 0x02 {
 		return net.IP(ipv6[2:6])
 	}
-	zero := func(b []byte) bool {
-		for _, v := range b {
-			if v != 0 {
-				return false
-			}
-		}
-		return true
-	}
 	// NAT64 well-known 前缀与 IPv4-compatible 的内嵌 IPv4 都在末 4 字节。
-	// local-use 前缀（bytes 4-5 = 00 01）不满足零校验，到这里返回 nil，由
-	// isBlockedIP 按整体拒绝处理。
-	prefix := string(ipv6[:4]) == "\x00\x64\xff\x9b"
-	nat64 := prefix && zero(ipv6[4:12])
-	compatible := zero(ipv6[:12])
+	// /32 内非 /96 布局（含 local-use /48）的 bytes 4-11 不全零，不满足零
+	// 校验，到这里返回 nil，由 isBlockedIP 按整体拒绝处理。
+	nat64 := isNAT64Prefix(ipv6) && allZero(ipv6[4:12])
+	compatible := allZero(ipv6[:12])
 	if nat64 || compatible {
 		return net.IP(ipv6[12:16])
 	}
