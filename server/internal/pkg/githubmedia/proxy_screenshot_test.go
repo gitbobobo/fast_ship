@@ -3,6 +3,7 @@ package githubmedia
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -137,6 +138,34 @@ func TestLocalCacheErrorWrapping(t *testing.T) {
 	}
 	if markLocalCacheErr(nil) != nil {
 		t.Fatal("markLocalCacheErr(nil) 应原样返回 nil")
+	}
+}
+
+// shortWriter 每次调用少写一个字节的桩 writer，模拟磁盘满/配额耗尽时部分
+// 文件系统的先兆短写（返回 n < len(p) 且无错误）。
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+// 短写也要打 ErrLocalCache：io.Copy 对写方短写会自行折成 io.ErrShortWrite
+// 返回，不经过 Write 的错误包装分支——不打标会落到 service 层兜底「无法连
+// 接图片服务器」，把磁盘故障说成网络故障。sentinel 与原始 io.ErrShortWrite
+// 都要在错误链上。
+func TestCacheFileWriterShortWriteTagged(t *testing.T) {
+	n, err := cacheFileWriter{w: shortWriter{}}.Write([]byte("png-data"))
+	if n != len("png-data")-1 {
+		t.Fatalf("n = %d, want len(p)-1（桩返回的字节数原样透出）", n)
+	}
+	if !errors.Is(err, ErrLocalCache) {
+		t.Fatalf("err = %v, want ErrLocalCache", err)
+	}
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("err = %v, want io.ErrShortWrite 仍在错误链上", err)
 	}
 }
 

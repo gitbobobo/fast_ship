@@ -73,13 +73,22 @@ func markLocalCacheErr(err error) error {
 // cacheFileWriter 写侧打标：io.Copy 的失败可能来自读网络 body（网络错误，
 // 原样外抛）或写本地临时文件（缓存故障）。包装后的 dst 不再实现 ReaderFrom
 // （*os.File 在 Linux 上的 splice/copy_file_range 快路径因此不会旁路这里），
-// 写失败必然经过 Write 被打上 ErrLocalCache。
+// 写失败必然经过 Write 被打上 ErrLocalCache；短写（写方返回 n < len(p) 且无
+// 错误）同样在 Write 里打标——io.Copy 会自行把它折成 io.ErrShortWrite 返回，
+// 不经过下面的 err 分支。
 type cacheFileWriter struct{ w io.Writer }
 
 func (c cacheFileWriter) Write(p []byte) (int, error) {
 	n, err := c.w.Write(p)
 	if err != nil {
 		return n, &localCacheError{err: err}
+	}
+	if n < len(p) {
+		// 短写（磁盘满/配额耗尽时部分文件系统先返回 n < len(p) 且无错误）：
+		// io.Copy 对此自行返回 io.ErrShortWrite，不走错误包装——在这里补
+		// 打标，短写才落到 ErrLocalCache 的「截图缓存写入失败」类，而不是
+		// service 层兜底「无法连接图片服务器」把磁盘故障说成网络故障。
+		return n, &localCacheError{err: io.ErrShortWrite}
 	}
 	return n, nil
 }

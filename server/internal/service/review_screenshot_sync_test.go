@@ -107,6 +107,34 @@ func TestCollectScreenshotURLsBareImageLinks(t *testing.T) {
 		t.Fatalf("refs = %+v, want 紧跟中文句号的链接被收集且不含「。」", refs)
 	}
 
+	// 半角句尾标点（. , ; : ! ?）与全角句读（；：！？…）、右侧引号粘在匹配
+	// 尾部不算资源本身：位图扩展名带尾标点判 false → 漏收 → HasScreenshots=
+	// false → 视觉轮静默不开；GitHub 附件形态带尾标点发请求 404 → 误写「截
+	// 图无法下载」。这些字符可能合法出现在 URL 中段/查询串里，不能进正则排
+	// 除类，只在匹配后裁尾部。
+	for _, p := range []string{".", ",", ";", ":", "!", "?", "；", "：", "！", "？", "…", "”"} {
+		refs = collectScreenshotURLs("see https://uiv.frp.musiver.cn/f/a.png" + p)
+		if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
+			t.Fatalf("refs = %+v (尾标点 %q), want 裁掉尾部标点后收集", refs, p)
+		}
+	}
+	// 只裁尾部不动中段：行中逗号后还有正文时，剥掉的也只是匹配尾部的逗号。
+	refs = collectScreenshotURLs("see https://uiv.frp.musiver.cn/f/a.png, and more")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
+		t.Fatalf("refs = %+v, want 行中逗号同样剥掉", refs)
+	}
+	// 带查询串的正常链接原样收集：结尾不是标点，裁剪不动查询串。
+	refs = collectScreenshotURLs("see https://uiv.frp.musiver.cn/f/a.png?raw=1")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png?raw=1" {
+		t.Fatalf("refs = %+v, want 查询串原样保留", refs)
+	}
+	// GitHub 附件形态的裸链同样剥尾标点：附件无扩展名也能收集，粘上 `.` 发
+	// 请求 404 会误写「截图无法下载」。
+	refs = collectScreenshotURLs("see https://github.com/user-attachments/assets/abc.")
+	if len(refs) != 1 || refs[0].URL != "https://github.com/user-attachments/assets/abc" {
+		t.Fatalf("refs = %+v, want 附件裸链收集且不含尾部 `.`", refs)
+	}
+
 	// 无位图扩展名的普通网页链接不收（github.com 的非附件路径同样不收——
 	// 豁免只给 user-attachments/assets）。
 	if refs := collectScreenshotURLs("看这个页面 https://example.com/page 谢谢"); len(refs) != 0 {

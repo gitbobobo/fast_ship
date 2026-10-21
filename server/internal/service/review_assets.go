@@ -34,14 +34,27 @@ var (
 	// HTML <img src="...">。
 	htmlImgRe = regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*>`)
 	// 裸链接（用户直接粘贴、没有图片语法）：任意 https URL 粗筛。排除 # 与
-	// 紧贴链接的中文/全角句读（。，、））——fragment 不是资源本身，下载面
-	// normalize 会拒、IsGitHubMediaURL 也因此判 false 导致 bearer 重试失效；
-	// 句读会把扩展名判定带歪。收集时按「GitHub 附件形态 ∪ 位图扩展名」准入：
-	// GitHub 拖入/粘贴附件的标准直链没有文件名扩展名，必须有扩展名会把它们
-	// 漏掉（HasScreenshots=false → 静默不开视觉轮）；其余外链图床仍按位图扩
-	// 展名过滤（集合与下载面 imagesOnly 同源，不收 svg/视频）。
+	// 紧贴链接的中文/全角句读（。，、）——fragment 不是资源本身，下载面
+	// normalize 会拒、IsGitHubMediaURL 也因此判 false 导致 bearer 重试失效。
+	// 其余句尾标点不能放进排除类——? : ! 等可能合法出现在 URL 中段/查询串
+	// 里——由 trimTrailingPunct 在匹配之后裁掉尾部。收集时按「GitHub 附件
+	// 形态 ∪ 位图扩展名」准入：GitHub 拖入/粘贴附件的标准直链没有文件名扩
+	// 展名，必须有扩展名会把它们漏掉（HasScreenshots=false → 静默不开视觉
+	// 轮）；其余外链图床仍按位图扩展名过滤（集合与下载面 imagesOnly 同源，
+	// 不收 svg/视频）。
 	bareURLRe = regexp.MustCompile(`https://[^\s)<>"'\]#。，、）]+`)
 )
+
+// trimTrailingPunct 剥掉裸链匹配尾部粘住的标点：半角句尾标点（. , ; : ! ?）
+// 与全角句读（；：！？…）、右侧引号会跟着正则一起被吃进匹配——位图扩展名
+// 带尾标点判 false 漏收（HasScreenshots=false → 视觉轮静默不开），GitHub 附
+// 件形态带尾标点发请求 404 误写「截图无法下载」。这些字符可能合法出现在 URL
+// 中段，不能进 bareURLRe 的排除类，只裁尾部不动中段；带查询串的正常链接结
+// 尾不是标点，不受影响。
+func trimTrailingPunct(u string) string {
+	const cutset = ".,;:!?。，、）；：！？…”’\"'"
+	return strings.TrimRight(u, cutset)
+}
 
 // collectScreenshotURLs 按出现顺序提取 PR 描述里的图片引用；同 URL 只取首次，
 // 标签取 alt 文本，缺省回退文件名。
@@ -61,7 +74,7 @@ func collectScreenshotURLs(body string) []screenshotRef {
 		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})
 	}
 	for _, m := range bareURLRe.FindAllStringIndex(body, -1) {
-		url := body[m[0]:m[1]]
+		url := trimTrailingPunct(body[m[0]:m[1]])
 		// GitHub 附件形态豁免扩展名要求（附件直链无扩展名）；其余裸链接只有
 		// 位图扩展名才收：普通网页链接、行内代码里的 https 地址不收（按扩展
 		// 名结尾判定，接受这个启发式的误收）。
