@@ -515,7 +515,7 @@ describe("BotScheduleSection", () => {
       queryKey: botKeys.scheduleTasks("A", "b1"),
     });
     await waitFor(() =>
-      expect(toast.success).toHaveBeenCalledWith("已停止该次运行"),
+      expect(toast.success).toHaveBeenCalledWith("已请求停止，等待运行收尾"),
     );
   });
 
@@ -551,6 +551,37 @@ describe("BotScheduleSection", () => {
           ?.map((r) => `${r.id}:${r.status}`),
       ).toEqual(["r-run:stopped", "r-done:completed"]),
     );
+    // 终态合并保留原行的定时运行字段（summary/task_id 等不被主线投影覆盖）。
+    const merged = client
+      .getQueryData<BotScheduleRun[]>(botKeys.scheduleTaskRuns("A", "b1", "t1"))
+      ?.find((r) => r.id === "r-run");
+    expect(merged?.summary).toBe(runningRun.summary);
+    expect(merged?.finished_at).toBe("2026-10-18T01:01:00Z");
+  });
+
+  it("停止受理（返回仍是 running）不整行覆盖运行记录缓存", async () => {
+    // 停止接口返回的是主线 run 投影：受理瞬间 status 仍是 running，且缺
+    // summary/task_id/scheduled_for 等字段——不能拿它替换定时运行行。
+    stopScheduleRun.mockResolvedValue({ ...runningRun });
+    mockRuns([runningRun, completedRun]);
+    const { client } = renderDialog();
+    client.setQueryData<BotScheduleRun[]>(
+      botKeys.scheduleTaskRuns("A", "b1", "t1"),
+      [runningRun, completedRun],
+    );
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "停止" }));
+
+    await waitFor(() => expect(stopScheduleRun).toHaveBeenCalled());
+    const rows = client.getQueryData<BotScheduleRun[]>(
+      botKeys.scheduleTaskRuns("A", "b1", "t1"),
+    );
+    expect(rows?.find((r) => r.id === "r-run")?.summary).toBe(
+      runningRun.summary,
+    );
+    expect(rows?.find((r) => r.id === "r-run")?.status).toBe("running");
   });
 
   it("停止失败给出可见反馈且不刷新", async () => {

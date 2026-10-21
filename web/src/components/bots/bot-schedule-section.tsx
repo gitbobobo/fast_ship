@@ -80,9 +80,11 @@ function runTime(run: BotScheduleRun) {
 }
 
 /**
- * 停止一次定时任务运行（INT-137）。成功后任务与运行记录两份缓存一并失效：
- * 任务行的「最近一次结果」与弹窗列表同时收敛到 stopped。运行记录按 15s
- * 轮询，先把返回的 run 投影就地写进缓存，停止按钮立刻消失不用等重取。
+ * 停止一次定时任务运行（INT-137）。停止接口返回的是**主线 run 投影**（受理瞬间
+ * 状态仍是 running，且没有 summary / task_id / scheduled_for / duration_ms），
+ * 不能整行替换运行记录缓存（会把摘要抹掉、手动触发显示成定时触发）。
+ * 只在返回已是终态时按 id 合并状态与时间，其余交给失效后的重取收敛；任务与
+ * 运行记录两份缓存都失效，「最近一次结果」随之更新。
  */
 function useStopScheduleRun(botId: string) {
   const queryClient = useQueryClient();
@@ -91,11 +93,21 @@ function useStopScheduleRun(botId: string) {
     mutationFn: ({ taskId, runId }: { taskId: string; runId: string }) =>
       botApi.stopScheduleRun(botId, taskId, runId),
     onSuccess: (run, { taskId }) => {
-      queryClient.setQueryData<BotScheduleRun[]>(
-        botKeys.scheduleTaskRuns(userId, botId, taskId),
-        (previous) =>
-          previous?.map((item) => (item.id === run.id ? run : item)),
-      );
+      if (run.status !== "running") {
+        queryClient.setQueryData<BotScheduleRun[]>(
+          botKeys.scheduleTaskRuns(userId, botId, taskId),
+          (previous) =>
+            previous?.map((item) =>
+              item.id === run.id
+                ? {
+                    ...item,
+                    status: run.status,
+                    finished_at: run.finished_at,
+                  }
+                : item,
+            ),
+        );
+      }
       void queryClient.invalidateQueries({
         queryKey: botKeys.scheduleTasks(userId, botId),
       });
@@ -317,7 +329,9 @@ export function BotScheduleTaskDialog({
     setStoppingRunId(run.id);
     try {
       await stopRun.mutateAsync({ taskId: task.id, runId: run.id });
-      toast.success("已停止该次运行");
+      // 受理只代表停止请求已落库：真正 stopped 由运行槽在安全点收尾，等重取
+      // 收敛，不在这里谎报「已停止」。
+      toast.success("已请求停止，等待运行收尾");
     } catch (err) {
       toast.error(
         err instanceof ApiRequestError && err.message
