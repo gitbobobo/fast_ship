@@ -52,8 +52,8 @@ type fakeReviewT3 struct {
 	retryCmdIDs []string
 	retryErr    error
 	// retryFn 非空时代替 retryErr：在重试 RPC 里执行（注入「RPC 期间运行被
-	// 并发终态化」等场景），返回值作为 RPC 结果。
-	retryFn  func(threadID string) error
+	// 并发终态化」「RPC 自己的上下文是否还有预算」等场景），返回值作为 RPC 结果。
+	retryFn  func(ctx context.Context, threadID string) error
 	createFn func(context.Context, string, string, *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
 	created  []*T3CreateThreadRequest
 }
@@ -123,12 +123,12 @@ func (f *fakeReviewT3) FailedPreparation(_ context.Context, _, _, threadID, mess
 	return nil, nil
 }
 
-func (f *fakeReviewT3) RetryPreparation(_ context.Context, _, _, threadID, t3RunID, commandID string) error {
+func (f *fakeReviewT3) RetryPreparation(ctx context.Context, _, _, threadID, t3RunID, commandID string) error {
 	f.retried = append(f.retried, threadID)
 	f.retryRunIDs = append(f.retryRunIDs, t3RunID)
 	f.retryCmdIDs = append(f.retryCmdIDs, commandID)
 	if f.retryFn != nil {
-		return f.retryFn(threadID)
+		return f.retryFn(ctx, threadID)
 	}
 	return f.retryErr
 }

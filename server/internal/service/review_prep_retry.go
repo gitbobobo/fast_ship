@@ -26,6 +26,11 @@ const (
 	// reviewPrepRetryGrace 失败条目出现满此时长才重试：避开与同一次 Git 锁
 	// 竞争的直接对抗（T3 自己也可能马上自愈）。
 	reviewPrepRetryGrace = 30 * time.Second
+	// reviewPrepRetryReadTimeout 单次线程投影读的超时；reviewPrepRetryRPCTimeout
+	// 是随后那次 prepared-run.retry 的超时。两者必须分开：投影读内部还有
+	// 25s 预算，共用同一个上下文会让慢读后的 RPC 只剩几秒。
+	reviewPrepRetryReadTimeout = 30 * time.Second
+	reviewPrepRetryRPCTimeout  = 30 * time.Second
 )
 
 // retryFailedPreparations 扫描在途代码运行中卡在「工作区准备失败」的运行并
@@ -133,10 +138,12 @@ func (s *ReviewService) allowPrepRetryQuery(runID string, now time.Time) bool {
 // 节流窗口会再试，commandId 随计数推进变化）。节流与阶段预算由调用方把关，
 // 本函数最多一次投影读加一次重试 RPC。
 func (s *ReviewService) retryFailedPreparation(run *model.ReviewRun, now time.Time) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	failed, err := s.t3.FailedPreparation(ctx, run.UserID, run.EnvironmentID, run.ThreadID, run.InitialMessageID)
+	// 投影读与重试 RPC 各用独立超时：线程详情读取本身有 25s 内部预算，共用
+	// 一个 30s 上下文会让慢读后的 RPC 只剩几秒。RPC 超时也会先把计数加上且
+	// 不回退，连三次慢读就会在 T3 从未受理重试的情况下误落 failed。
+	readCtx, readCancel := context.WithTimeout(context.Background(), s.prepRetryReadBudget())
+	failed, err := s.t3.FailedPreparation(readCtx, run.UserID, run.EnvironmentID, run.ThreadID, run.InitialMessageID)
+	readCancel()
 	if err != nil {
 		s.logger.Warn("读取审查线程准备失败状态出错", zap.String("run", run.ID), zap.Error(err))
 		return
@@ -175,7 +182,10 @@ func (s *ReviewService) retryFailedPreparation(run *model.ReviewRun, now time.Ti
 	}
 
 	commandID := fmt.Sprintf("fs-review-prep-retry-%s-%d", run.ID, run.PrepRetryCount+1)
-	if err := s.t3.RetryPreparation(ctx, run.UserID, run.EnvironmentID, run.ThreadID, failed.RunID, commandID); err != nil {
+	rpcCtx, rpcCancel := context.WithTimeout(context.Background(), s.prepRetryRPCBudget())
+	err = s.t3.RetryPreparation(rpcCtx, run.UserID, run.EnvironmentID, run.ThreadID, failed.RunID, commandID)
+	rpcCancel()
+	if err != nil {
 		s.logger.Warn("审查线程准备重试 RPC 失败", zap.String("run", run.ID), zap.Error(err))
 		return
 	}
@@ -207,6 +217,21 @@ func (s *ReviewService) retryFailedPreparation(run *model.ReviewRun, now time.Ti
 	}); err != nil {
 		s.logger.Error("重置准备重试 deadline 与令牌有效期失败", zap.String("run", run.ID), zap.Error(err))
 	}
+}
+
+// prepRetryReadBudget / prepRetryRPCBudget 取超时（零值回落默认常量，仅测试注入小值）。
+func (s *ReviewService) prepRetryReadBudget() time.Duration {
+	if s.prepRetryReadTimeout > 0 {
+		return s.prepRetryReadTimeout
+	}
+	return reviewPrepRetryReadTimeout
+}
+
+func (s *ReviewService) prepRetryRPCBudget() time.Duration {
+	if s.prepRetryRPCTimeout > 0 {
+		return s.prepRetryRPCTimeout
+	}
+	return reviewPrepRetryRPCTimeout
 }
 
 // parseT3Timestamp 解析 T3 投影里的 ISO 时间戳（RFC3339，容忍纳秒变体）。

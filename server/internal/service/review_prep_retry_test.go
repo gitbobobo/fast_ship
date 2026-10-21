@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -616,6 +617,44 @@ func TestPrepRetrySchedulerThrottlesQuery(t *testing.T) {
 	}
 }
 
+// TestPrepRetrySeparateReadAndRPCBudgets 投影读与重试 RPC 各用独立超时：慢读
+// 吃掉读预算的大部分后，RPC 仍拿到完整的一份。共用同一个上下文时 RPC 只剩
+// 残余时间，超时也会先加计数且不回退——连三次慢读就会在 T3 从未受理重试的
+// 情况下把运行误落 workspace_preparation_failed。
+func TestPrepRetrySeparateReadAndRPCBudgets(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	seedAt := time.Date(2026, 10, 22, 1, 0, 0, 0, time.UTC)
+	seedPrepRetryRun(t, e, repo, 80, seedAt)
+	failedAt := seedAt.Add(-time.Minute).Format(time.RFC3339)
+
+	var rpcRemaining time.Duration
+	t3 := &fakeReviewT3{
+		prepFn: func(string) (*T3FailedPreparation, error) {
+			// 读占掉读预算的 3/4；共用上下文时 RPC 只剩 1/4。
+			time.Sleep(30 * time.Millisecond)
+			return &T3FailedPreparation{RunID: "t3-run-1", FailedAt: failedAt, Message: prepT3FailureMessage}, nil
+		},
+		retryFn: func(ctx context.Context, _ string) error {
+			if deadline, ok := ctx.Deadline(); ok {
+				rpcRemaining = time.Until(deadline)
+			}
+			return nil
+		},
+	}
+	svc := e.withT3(t3, nil, nil)
+	svc.prepRetryReadTimeout = 40 * time.Millisecond
+	svc.prepRetryRPCTimeout = 40 * time.Millisecond
+
+	svc.retryFailedPreparations(seedAt)
+	if len(t3.retried) != 1 {
+		t.Fatalf("retried = %v, want 一次重试", t3.retried)
+	}
+	if rpcRemaining <= 25*time.Millisecond {
+		t.Fatalf("RPC 剩余预算 = %v，应有独立的完整预算（共用上下文会只剩残余）", rpcRemaining)
+	}
+}
+
 // TestPrepRetryThrottleIgnoresStaleTickTime 节流以**实际时刻**登记，不随 tick
 // 起点漂移：一个被慢投影读拖长的 tick 结束后，同一批队首不能因为「tick 时间
 // 差值已过 60s」就再次重新到期、反复吃满预算（那会让尾部饿到超时）。
@@ -711,7 +750,7 @@ func TestPrepRetryTerminalRunUntouched(t *testing.T) {
 			run.ThreadID: {RunID: "t3-run-1", FailedAt: seedAt.Add(-time.Minute).Format(time.RFC3339), Message: prepT3FailureMessage},
 		},
 		// retryFn 在重试 RPC 里把运行改成 cancelled：模拟受理期间被用户取消。
-		retryFn: func(string) error {
+		retryFn: func(context.Context, string) error {
 			return e.svc.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
 				Updates(map[string]any{"status": model.ReviewRunCancelled, "error_code": "user_cancelled"}).Error
 		},

@@ -276,7 +276,10 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 				Updates(map[string]any{
 					"sync_pending": false,
 					"sync_epoch":   gorm.Expr("sync_epoch + 1"),
-					"updated_at":   now,
+					// sync_error 一并清：外层成功收尾按进入时的旧 epoch 更新，
+					// 条件对不上，不清就会把上一次的失败文案永久留在账本上。
+					"sync_error": "",
+					"updated_at": now,
 				})
 			if res.Error != nil {
 				return res.Error

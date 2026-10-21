@@ -93,6 +93,10 @@ type ReviewService struct {
 	prepRetryMu      sync.Mutex
 	prepRetryChecked map[string]time.Time
 	prepRetryCursor  string
+	// prepRetryReadTimeout / prepRetryRPCTimeout 覆盖默认超时（零值用常量）：
+	// 测试注入小超时，验证「投影读与重试 RPC 各用独立预算」。
+	prepRetryReadTimeout time.Duration
+	prepRetryRPCTimeout  time.Duration
 
 	// prLocks 每 PR 一把进程内锁：同一 PR 的 GitHub 同步串行，避免并发重复写。
 	prLocksMu sync.Mutex

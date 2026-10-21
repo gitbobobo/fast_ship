@@ -235,7 +235,7 @@ func TestReviewClosedSyncWritesNothing(t *testing.T) {
 	e.svc.db.Create(&model.ReviewPullRequest{
 		ProjectID: e.project.ID, RepoFullName: repo, PRNumber: 56, UserID: e.user.ID,
 		InstallationID: 1, HeadSHA: "sha-c56", RoundNumber: 1,
-		SyncPending: true, SyncEpoch: 1, UpdatedAt: now,
+		SyncPending: true, SyncEpoch: 1, SyncError: "上一次同步失败：github 502", UpdatedAt: now,
 	})
 	run := e.seedRun(t, repo, 56, "sha-c56", model.ReviewRunRunning, now)
 	e.svc.db.Create(&model.ReviewRunToken{
@@ -254,6 +254,11 @@ func TestReviewClosedSyncWritesNothing(t *testing.T) {
 	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 56", repo)
 	if ledger.SyncPending || ledger.SyncEpoch != 2 {
 		t.Fatalf("pending=%v epoch=%d, want false/2", ledger.SyncPending, ledger.SyncEpoch)
+	}
+	// 关闭收尾必须顺手清 sync_error：外层成功收尾按旧 epoch 更新会匹配 0 行，
+	// pending 又已清、不会再进同步，残下的失败文案就永久留在账本上。
+	if ledger.SyncError != "" {
+		t.Fatalf("sync_error = %q, want 空", ledger.SyncError)
 	}
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
