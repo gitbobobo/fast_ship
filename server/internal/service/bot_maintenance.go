@@ -94,9 +94,10 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 	}
 
 	client := botNewClient(bot.BaseURL, apiKey)
-	// 总超时只是防泄漏的兜底（进程退出 / 上游无限挂住）：必须长于看门狗，
-	// 让首包/空闲看门狗先触发、错误分类保持 model_stream_timeout；再长出
-	// 一小段余量留给收尾读取。取 FirstChunk + Idle + 30s。
+	// 总超时是防泄漏的兜底（上游无限挂住/进程退出）：取 FirstChunk + Idle +
+	// 30s。空闲看门狗管「不再出片」，这条墙钟管「一直出片但永远不结束」——
+	// 持续正常出片超过该上限的辅助请求会被取消并记 provider_unavailable，
+	// 这是刻意保留的兜底（维护 worker 槽位不能被一条流长期占住）。
 	timeouts := s.botStreamTimeoutsOf()
 	callCtx, cancel := context.WithTimeout(ctx, timeouts.FirstChunk+timeouts.Idle+30*time.Second)
 	defer cancel()

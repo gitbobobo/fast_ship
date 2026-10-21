@@ -436,6 +436,9 @@ func (s *AIProviderService) Test(userID string, req *TestAIProviderRequest) (*Pr
 		matches, err := s.apiKeyMatchesStored(providerID, apiKey)
 		if err != nil {
 			s.logger.Warn("比对 provider 库存密钥失败", zap.String("provider_id", providerID), zap.Error(err))
+		} else if providerRow.BaseURL != baseURL {
+			// 探测的是另一个地址（用户正在改地址），不能据此认定已存配置可用。
+			s.logger.Info("探测地址与已存配置不一致，跳过清除熔断", zap.String("provider_id", providerID))
 		} else if matches {
 			// 条件更新：地址与配置版本必须仍是探测时那一份（迁移前创建的
 			// provider 没有版本，用 base_url 认定），否则放弃这次恢复动作。
