@@ -60,6 +60,7 @@ const GitHubCallbackPage = lazy(
 );
 const EnvironmentsPage = lazy(() => import("@/routes/settings/environments"));
 const ReviewsPage = lazy(() => import("@/routes/reviews/index"));
+const ReviewConfigPage = lazy(() => import("@/routes/reviews/config"));
 const ReviewProjectPage = lazy(() => import("@/routes/reviews/$projectId"));
 const NotificationsPage = lazy(() => import("@/routes/notifications/index"));
 const QuotaPage = lazy(() => import("@/routes/quota/index"));
@@ -252,6 +253,11 @@ export default function App() {
               <Route
                 path="/reviews"
                 element={<LazyPage render={<ReviewsPage />} />}
+              />
+              {/* 静态路由必须在 :projectId 之前，避免 "config" 被当成项目 id。 */}
+              <Route
+                path="/reviews/config"
+                element={<LazyPage render={<ReviewConfigPage />} />}
               />
               <Route
                 path="/reviews/:projectId"
