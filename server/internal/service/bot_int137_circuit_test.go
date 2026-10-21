@@ -195,7 +195,7 @@ func TestBotCircuitClearedByUpdate(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "circclear")
 	providerID := env.createProvider(t, userID, "sk-old-0000")
 	until := time.Now().UTC().Add(30 * time.Minute)
-	if err := repo.OpenCircuit(providerID, until, "provider_auth_failed"); err != nil {
+	if _, err := repo.OpenCircuit(providerID, until, "provider_auth_failed"); err != nil {
 		t.Fatalf("open circuit: %v", err)
 	}
 
@@ -216,7 +216,7 @@ func TestBotCircuitClearedByUpdate(t *testing.T) {
 	}
 
 	// 改 base_url（custom provider）：同样清除。
-	if err := repo.OpenCircuit(providerID, until, "provider_quota_exhausted"); err != nil {
+	if _, err := repo.OpenCircuit(providerID, until, "provider_quota_exhausted"); err != nil {
 		t.Fatalf("reopen circuit: %v", err)
 	}
 	if _, err := svc.Update(userID, providerID, &UpdateAIProviderRequest{BaseURL: strPtrBot("https://gw2.internal.example.com/v1")}); err != nil {
@@ -245,7 +245,7 @@ func TestBotCircuitClearedByTestSuccess(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "circtest")
 	providerID := env.createProviderAt(t, userID, srv.URL, "sk-x-0000")
 	until := time.Now().UTC().Add(30 * time.Minute)
-	if err := repo.OpenCircuit(providerID, until, "provider_auth_failed"); err != nil {
+	if _, err := repo.OpenCircuit(providerID, until, "provider_auth_failed"); err != nil {
 		t.Fatalf("open circuit: %v", err)
 	}
 

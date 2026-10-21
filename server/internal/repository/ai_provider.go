@@ -40,13 +40,21 @@ func (r *AIProviderRepository) GetByID(id string) (*model.AIProvider, error) {
 	return &p, nil
 }
 
-// OpenCircuit 打开/刷新定时任务熔断（INT-137）：until 之前该提供商的定时
-// 任务到点直接记 skipped。reason 记失败分类码（见 bot_model_errors.go）。
-func (r *AIProviderRepository) OpenCircuit(id string, until time.Time, reason string) error {
-	return r.db.Model(&model.AIProvider{}).Where("id = ?", id).Updates(map[string]interface{}{
-		"circuit_open_until": until,
-		"circuit_reason":     reason,
-	}).Error
+// OpenCircuit 打开定时任务熔断（INT-137）：until 之前该提供商的定时任务到点
+// 直接记 skipped。reason 记失败分类码（见 bot_model_errors.go）。窗口已开着
+// 时保持原 until 不变（不延长、不换去重键）——同一熔断窗口内的并行/重试失败
+// 不得产生新的去重键或第二条主线事件；返回是否真正打开了本次窗口。
+func (r *AIProviderRepository) OpenCircuit(id string, until time.Time, reason string) (bool, error) {
+	res := r.db.Model(&model.AIProvider{}).
+		Where("id = ? AND (circuit_open_until IS NULL OR circuit_open_until <= ?)", id, time.Now().UTC()).
+		Updates(map[string]interface{}{
+			"circuit_open_until": until,
+			"circuit_reason":     reason,
+		})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // ClearCircuit 清除熔断标记：用户更新凭证/地址或测试连接成功后调用。

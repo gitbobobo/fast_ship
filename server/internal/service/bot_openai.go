@@ -31,6 +31,10 @@ func botNewClient(baseURL, apiKey string) openai.Client {
 type botModelReply struct {
 	Text      string
 	ToolCalls []botModelToolCall
+	// SawOutput 报告本流是否出现过任何正文或工具调用片段（含未拼齐的半截
+	// 调用）：聚合处置位，不依赖 id/name 是否齐全。有过输出的失败不在重试
+	// 与强制压缩重试之列——上游可能已计费，重放还可能重复触发副作用（INT-137）。
+	SawOutput bool
 	// ProviderRequestID 是响应里的请求身份；拿不到为空。
 	ProviderRequestID string
 	FinishReason      string
@@ -135,6 +139,7 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 				reply.FinishReason = choice.FinishReason
 			}
 			if text := choice.Delta.Content; text != "" {
+				reply.SawOutput = true
 				if reply.FirstDeltaAt == nil {
 					// 只记首个非空正文片段：GenerationMs 衡量正文生成耗时。
 					now := time.Now().UTC()
@@ -144,6 +149,9 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 				if onDelta != nil {
 					onDelta(text)
 				}
+			}
+			if len(choice.Delta.ToolCalls) > 0 {
+				reply.SawOutput = true
 			}
 			for _, tc := range choice.Delta.ToolCalls {
 				part, ok := parts[tc.Index]

@@ -118,6 +118,19 @@ func (r *BotRunRepository) ListActive() ([]model.BotRun, error) {
 	return rows, err
 }
 
+// AdvanceInputThroughSeq 只升不降地推进 run 的输入消费水位：硬停止与主线循环
+// 并发写时，持有更旧 seq 的一方不得把已推进的水位覆盖回去（INT-137）。
+// 返回是否命中（水位已更高时落空）。
+func (r *BotRunRepository) AdvanceInputThroughSeq(runID string, seq int64) (bool, error) {
+	res := r.db.Model(&model.BotRun{}).
+		Where("id = ? AND input_through_seq < ?", runID, seq).
+		Update("input_through_seq", seq)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 // UpdateColumns 条件更新 run 列；返回是否命中（0 行 = 状态已被别人落定）。
 // where 值为 nil 渲染成 IS NULL（= NULL 永假，会让终态判定失灵）。
 func (r *BotRunRepository) UpdateColumns(runID string, where map[string]interface{}, cols map[string]interface{}) (bool, error) {
@@ -170,6 +183,17 @@ func (r *BotModelRequestRepository) NextOrdinalTx(tx *gorm.DB, runID string) (in
 		return 0, err
 	}
 	return ordinal + 1, nil
+}
+
+// MaxOrdinal 返回该 run 当前最大的模型请求序号（没有请求为 0）：停止宽限
+// 到期时比对它，判断 run 在受理停止之后是否又发起了新请求（INT-137）。
+func (r *BotModelRequestRepository) MaxOrdinal(runID string) (int64, error) {
+	var ordinal int64
+	if err := r.db.Model(&model.BotModelRequest{}).Where("run_id = ?", runID).
+		Select("COALESCE(MAX(ordinal), 0)").Scan(&ordinal).Error; err != nil {
+		return 0, err
+	}
+	return ordinal, nil
 }
 
 func (r *BotModelRequestRepository) CreateTx(tx *gorm.DB, req *model.BotModelRequest) error {

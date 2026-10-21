@@ -81,7 +81,8 @@ function runTime(run: BotScheduleRun) {
 
 /**
  * 停止一次定时任务运行（INT-137）。成功后任务与运行记录两份缓存一并失效：
- * 任务行的「最近一次结果」与弹窗列表同时收敛到 stopped。
+ * 任务行的「最近一次结果」与弹窗列表同时收敛到 stopped。运行记录按 15s
+ * 轮询，先把返回的 run 投影就地写进缓存，停止按钮立刻消失不用等重取。
  */
 function useStopScheduleRun(botId: string) {
   const queryClient = useQueryClient();
@@ -89,7 +90,12 @@ function useStopScheduleRun(botId: string) {
   return useMutation({
     mutationFn: ({ taskId, runId }: { taskId: string; runId: string }) =>
       botApi.stopScheduleRun(botId, taskId, runId),
-    onSuccess: (_run, { taskId }) => {
+    onSuccess: (run, { taskId }) => {
+      queryClient.setQueryData<BotScheduleRun[]>(
+        botKeys.scheduleTaskRuns(userId, botId, taskId),
+        (previous) =>
+          previous?.map((item) => (item.id === run.id ? run : item)),
+      );
       void queryClient.invalidateQueries({
         queryKey: botKeys.scheduleTasks(userId, botId),
       });

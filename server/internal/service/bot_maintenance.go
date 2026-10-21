@@ -94,18 +94,24 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 	}
 
 	client := botNewClient(bot.BaseURL, apiKey)
-	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	// 总超时只是防泄漏的兜底（进程退出 / 上游无限挂住）：必须长于看门狗，
+	// 让首包/空闲看门狗先触发、错误分类保持 model_stream_timeout；再长出
+	// 一小段余量留给收尾读取。取 FirstChunk + Idle + 30s。
+	timeouts := s.botStreamTimeoutsOf()
+	callCtx, cancel := context.WithTimeout(ctx, timeouts.FirstChunk+timeouts.Idle+30*time.Second)
 	defer cancel()
 	reply, callErr := botStreamChat(callCtx, &client, botStreamRequest{
 		Messages:            params,
 		Model:               modelName,
 		MaxCompletionTokens: maxOut,
-	}, s.botStreamTimeoutsOf(), nil)
+	}, timeouts, nil)
 
 	cols := map[string]interface{}{"finished_at": s.now()}
 	if callErr != nil {
+		// error_code 与主线同一分类口径：看门狗超时记 model_stream_timeout，
+		// 认证/额度/限流各自可区分（INT-137）。
 		cols["status"] = model.BotModelRequestFailed
-		cols["error_code"] = "maintenance_request_failed"
+		cols["error_code"] = botClassifyModelError(callErr).Code
 		cols["error_message"] = botErrMessage(callErr)
 	} else {
 		cols["status"] = model.BotModelRequestSucceeded

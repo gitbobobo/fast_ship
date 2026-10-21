@@ -362,16 +362,38 @@ func (s *BotService) appendCircuitScheduleEventTx(tx *gorm.DB, botID string, tas
 
 // openProviderCircuitOnFailure 在 schedule run 因认证失效/额度用完落 failed
 // 终态后打开 provider 熔断：窗口内该提供商的定时任务到点直接记 skipped，
-// 不再反复打一个注定失败的上游。打开失败只记日志，不改变已落的 run 终态。
-func (s *BotService) openProviderCircuitOnFailure(bot *model.Bot, code string) {
-	if !botCircuitTrippingCode(code) || bot.ProviderID == "" {
+// 不再反复打一个注定失败的上游。provider 取 run 派发时冻结的归属；打开前读
+// 一次 provider——运行期间用户已更新过凭证/地址（含测试连接/清除熔断）的话，
+// 这次失败针对的可能是已被换掉的旧配置，不再重新打开。窗口已开着时不延长、
+// 不换去重键；打开失败只记日志，不改变已落的 run 终态。
+func (s *BotService) openProviderCircuitOnFailure(bot *model.Bot, run *model.BotRun, code string) {
+	if !botCircuitTrippingCode(code) {
 		return
 	}
-	until := time.Now().UTC().Add(s.cfg.Bots.Runtime.ProviderCircuitWindow())
-	if err := s.providers.OpenCircuit(bot.ProviderID, until, code); err != nil {
-		s.logger.Warn("打开 provider 熔断失败",
-			zap.String("provider_id", bot.ProviderID), zap.Error(err))
+	providerID := runProviderIDOf(run, bot)
+	if providerID == "" {
+		return
 	}
+	p, err := s.providers.GetByID(providerID)
+	if err != nil {
+		// provider 行已删除：没有可熔断的对象，跳过即可。
+		return
+	}
+	if run.StartedAt != nil && p.UpdatedAt.After(*run.StartedAt) {
+		return
+	}
+	opened, err := s.providers.OpenCircuit(providerID, time.Now().UTC().Add(s.cfg.Bots.Runtime.ProviderCircuitWindow()), code)
+	if err != nil {
+		s.logger.Warn("打开 provider 熔断失败",
+			zap.String("provider_id", providerID), zap.Error(err))
+		return
+	}
+	if !opened {
+		// 同一熔断窗口内的并行/重试失败：窗口与去重键保持不变，不重复记录。
+		return
+	}
+	s.logger.Info("provider 熔断已打开",
+		zap.String("provider_id", providerID), zap.String("reason", code))
 }
 
 // botScheduleTaskNameFromContext 取派发时记下的任务名；缺失时给一个可读占位，
@@ -581,7 +603,7 @@ func (s *BotService) finishScheduleFailed(bot *model.Bot, run *model.BotRun, cod
 		return
 	}
 	if ok {
-		s.openProviderCircuitOnFailure(bot, code)
+		s.openProviderCircuitOnFailure(bot, run, code)
 		s.publishEvent(bot.ID)
 		return
 	}

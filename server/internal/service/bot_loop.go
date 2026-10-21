@@ -55,6 +55,7 @@ type botRunFreeze struct {
 	Model                 string
 	BaseURL               string
 	APIKeyEncrypted       []byte
+	ProviderID            string
 	SystemPromptText      string
 	PromptRevision        int64
 	PlatformPromptVersion int64
@@ -73,6 +74,7 @@ func captureRunFreeze(bot *model.Bot, run *model.BotRun) botRunFreeze {
 		Model:                 runModelOf(run, bot),
 		BaseURL:               runBaseURLOf(run, bot),
 		APIKeyEncrypted:       key,
+		ProviderID:            runProviderIDOf(run, bot),
 		SystemPromptText:      bot.SystemPromptText,
 		PromptRevision:        bot.PromptRevision,
 		PlatformPromptVersion: bot.PlatformPromptVersion,
@@ -85,6 +87,7 @@ func applyRunCredentialFreeze(bot *model.Bot, freeze botRunFreeze) {
 	bot.Model = freeze.Model
 	bot.BaseURL = freeze.BaseURL
 	bot.APIKeyEncrypted = freeze.APIKeyEncrypted
+	bot.ProviderID = freeze.ProviderID
 }
 
 func applyRunPromptFreeze(bot *model.Bot, freeze botRunFreeze) {
@@ -116,6 +119,9 @@ func (s *BotService) acceptCompactionBoundary(bot *model.Bot, freeze *botRunFree
 // 上下文构建、压缩（schedule 跳过）、记忆基线与收尾分支；重启边界的版本
 // 激活两种会话都在入口执行。
 func (s *BotService) botLoop(bot *model.Bot, run *model.BotRun, ctx context.Context) {
+	// 槽绑定先于一切收尾路径：硬停止（宽限到期 / 重复点击）取消前核对槽上
+	// 绑定的 run，槽已被重入换绑成新 run 时不得取消到别人的 context（INT-137）。
+	s.bindSlotRun(bot, run)
 	// 工具集/提示词激活先于冻结执行，主线与 schedule 一视同仁：激活在同一个
 	// 短事务里读行、判 stale、按该行人设重建提示词并写回，事务结束后副本与
 	// 库内行一致，freeze 捕获的才是本次 run 的最终提示词，schedule 会话也基于
@@ -295,7 +301,9 @@ runLoop:
 			// 上游上下文超限：强制压缩一次后恰好重试一次；其他错误
 			//（400 参数、429 限流等）不在此列。schedule 会话不压缩，超限
 			// 直接失败并记录。压缩后重建上下文，尝试计数一并归零。
-			if sched == nil && botIsContextLimitError(streamErr) && !contextLimitRetried {
+			// 已收到过片段的不压缩重试——那不是「没输出被拒」，是这轮对话
+			// 本身超窗，重放只会再次计费（INT-137）。
+			if sched == nil && botIsContextLimitError(streamErr) && !contextLimitRetried && !botReplyHasOutput(reply) {
 				contextLimitRetried = true
 				outcome, compErr := s.runCompactionCycle(ctx, bot, run, model.BotCompactionForced)
 				if compErr != nil {
@@ -401,6 +409,17 @@ func (s *BotService) markStyleCompactionDone(bot *model.Bot) {
 	}
 }
 
+// runProviderIDOf run 期间的 provider 归属：优先配置快照（熔断按 run 派发时
+// 的 provider 打开，用户中途换 provider 不漂移）。INT-137 之前的快照没有
+// provider_id 字段——空值回退 bot 当前值，兼容旧数据。
+func runProviderIDOf(run *model.BotRun, bot *model.Bot) string {
+	var snap botConfigSnapshot
+	if err := json.Unmarshal([]byte(run.ConfigSnapshotJSON), &snap); err == nil && snap.ProviderID != "" {
+		return snap.ProviderID
+	}
+	return bot.ProviderID
+}
+
 // runBaseURLOf run 期间的地址：优先配置快照。
 func runBaseURLOf(run *model.BotRun, bot *model.Bot) string {
 	var snap botConfigSnapshot
@@ -452,12 +471,14 @@ func (s *BotService) safePoint(run *model.BotRun) botSafePoint {
 
 // advanceInputWatermarks 推进 run 消费水位与 bot 的 offered 水位（已交给模型
 // 请求的输入不再自动重试）。offered 水位只由主线推进，schedule 会话不碰。
+// 两处写库都只升不降：硬停止与主线循环并发写时，持有更旧 seq 的一方不得把
+// 已推进的水位覆盖回去（INT-137）；run 的内存副本同步取 max。
 func (s *BotService) advanceInputWatermarks(run *model.BotRun, seq int64) {
 	if seq <= run.InputThroughSeq {
 		return
 	}
 	run.InputThroughSeq = seq
-	_, _ = s.runs.UpdateColumns(run.ID, nil, map[string]interface{}{"input_through_seq": seq})
+	_, _ = s.runs.AdvanceInputThroughSeq(run.ID, seq)
 	if run.SessionKind != model.BotSessionKindSchedule {
 		_ = s.bots.SetOfferedInputSeq(run.BotID, seq)
 	}
@@ -471,10 +492,12 @@ func (s *BotService) botStreamTimeoutsOf() botStreamTimeouts {
 	}
 }
 
-// botReplyHasOutput 报告本次尝试已收到正文或工具调用片段：有过输出的失败
-// 不在重试之列（上游可能已计费，重放还可能重复触发副作用）。
+// botReplyHasOutput 报告本次尝试已收到正文或工具调用片段：SawOutput 在聚合
+// 处置位（半截工具调用也算输出），Text/ToolCalls 兜底覆盖构造出 reply 的
+// 非流式路径。有过输出的失败不在重试与强制压缩重试之列（上游可能已计费，
+// 重放还可能重复触发副作用）。
 func botReplyHasOutput(reply *botModelReply) bool {
-	return reply != nil && (reply.Text != "" || len(reply.ToolCalls) > 0)
+	return reply != nil && (reply.SawOutput || reply.Text != "" || len(reply.ToolCalls) > 0)
 }
 
 // waitRetryBackoff 等待重试退避；ctx 取消（用户停止 / 关停）立即返回 false，

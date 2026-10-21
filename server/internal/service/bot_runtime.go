@@ -38,6 +38,9 @@ type botRuntimeState struct {
 
 type botActivation struct {
 	cancel context.CancelFunc
+	// runID 是当前绑定执行的 run：硬停止取消前核对它，槽被重入换成新 run
+	// 时不得取消到别人的 context（INT-137）。空值表示尚未绑定（不取消）。
+	runID string
 	// requeue 标记执行期间又有唤醒：主线循环退出后由收尾重启。
 	requeue bool
 	// pending 是重启循环要用的最新触发描述。
@@ -71,6 +74,26 @@ func (rt *botRuntimeState) setCancel(botID string, cancel context.CancelFunc) {
 	if a, ok := rt.active[botID]; ok {
 		a.cancel = cancel
 	}
+}
+
+// bindRun 记录执行槽当前绑定的 run：硬停止取消前按它核对目标（INT-137）。
+func (rt *botRuntimeState) bindRun(key, runID string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if a, ok := rt.active[key]; ok {
+		a.runID = runID
+	}
+}
+
+// bindSlotRun 把 run 绑定到它所在的执行槽（主线槽 key 是 botID，schedule 槽
+// key 是 "schedule:"+runID，与 cancelBotContext 同一映射）：botLoop 每次进入
+// 都重绑，槽重入新 run 时同步换绑，硬停止就不会取消到别人的 context。
+func (s *BotService) bindSlotRun(bot *model.Bot, run *model.BotRun) {
+	key := bot.ID
+	if run.SessionKind == model.BotSessionKindSchedule {
+		key = botScheduleSlotKey(run.ID)
+	}
+	s.rt.bindRun(key, run.ID)
 }
 
 // markRequeue 执行期间再收到唤醒时置位并记录触发描述。
@@ -353,7 +376,11 @@ func (s *BotService) ensureRun(bot *model.Bot, wake botWake) (*model.BotRun, boo
 		return nil, false, err
 	}
 	s.emitRunEvent(bot.ID, run, model.BotEventDelta, botEventEnvelope{
-		Kind: "run_started", Payload: map[string]interface{}{"trigger": string(wake.Trigger)},
+		Kind: "run_started",
+		Payload: map[string]interface{}{
+			"trigger":    string(wake.Trigger),
+			"created_at": run.CreatedAt.UTC().Format(time.RFC3339Nano),
+		},
 	})
 	return run, true, nil
 }
@@ -367,13 +394,16 @@ func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
 	return run, true
 }
 
-// hardStopRun 硬停止主线 run（停止宽限到期或重复请求）：先 CAS 置
-// stop_requested_at——run 已终态则直接放弃，绝不推进水位或取消别人的槽；
-// 再把「停止」消息标记为已消费（不这样做，run 落 stopped 后扫描器会因
-// 「未消费输入」立刻拉起新 run 处理「停止」文本；只推进到停止消息的 seq，
-// 之后到达的新消息不受影响），最后取消执行槽 context，循环在安全点落
-// stopped。
-func (s *BotService) hardStopRun(botID, runID string, stopSeq int64) {
+// hardStopRun 硬停止主线 run（停止宽限到期或重复请求）。acceptedOrdinal 是
+// 受理停止时该 run 的最大模型请求序号；-1 表示跳过进展判断（重复点击的立即
+// 硬取消）。流程：先 CAS 置 stop_requested_at——run 已终态则直接放弃，绝不
+// 推进水位或取消别人的槽；再重新读 run 做进展判断——受理停止之后 run 又发起
+// 了新请求（最大 ordinal 已增长）说明用户消息已随新上下文送出，此时不硬取消
+// （否则会把停止之后的新消息一起丢掉）；通过后把「停止」消息标记为已消费
+// （不这样做，run 落 stopped 后扫描器会因「未消费输入」立刻拉起新 run 处理
+// 「停止」文本；只推进到停止消息的 seq，之后到达的新消息不受影响），最后取消
+// 执行槽 context，循环在安全点落 stopped。
+func (s *BotService) hardStopRun(botID, runID string, stopSeq int64, acceptedOrdinal int64) {
 	ok, err := s.runs.UpdateColumns(runID, map[string]interface{}{"finished_at": nil},
 		map[string]interface{}{"stop_requested_at": time.Now().UTC()})
 	if err != nil || !ok {
@@ -382,6 +412,14 @@ func (s *BotService) hardStopRun(botID, runID string, stopSeq int64) {
 	run, err := s.runs.FindByID(runID)
 	if err != nil {
 		return
+	}
+	if acceptedOrdinal >= 0 {
+		latest, err := s.requests.MaxOrdinal(runID)
+		if err != nil || latest > acceptedOrdinal {
+			// 宽限期间已有进展：新请求已经发出，硬取消会把停止之后的输入
+			// 一起丢掉。run 是否继续由它的安全点与该请求的结果决定。
+			return
+		}
 	}
 	s.advanceInputWatermarks(run, stopSeq)
 	s.cancelBotContext(botID, run)
@@ -485,14 +523,20 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 			Key:     fmt.Sprintf("user_message:%d", msgSeq),
 			Context: fmt.Sprintf(`{"message_seq":%d,"client_message_id":%q,"kind":"stop"}`, msgSeq, clientMsgID),
 		})
-		// 宽限计时：到时 run 仍未结束则硬取消。计时器随进程重启丢失可接受
-		// ——重启恢复本就会把活动 run 置 failed，无需额外持久化。
+		// 宽限计时：到时 run 仍未结束则硬取消。记录受理时刻的最大模型请求
+		// 序号，到期时重读比对——宽限内 run 自然结束并带着停止消息发起了
+		// 新请求时不得硬取消，否则停止之后的新消息会永久丢失。计时器随进程
+		// 重启丢失可接受——重启恢复本就会把活动 run 置 failed，无需额外持久化。
+		acceptedOrdinal, ordErr := s.requests.MaxOrdinal(runID)
+		if ordErr != nil {
+			acceptedOrdinal = -1
+		}
 		time.AfterFunc(s.cfg.Bots.Runtime.StopGrace(), func() {
-			s.hardStopRun(botID, runID, msgSeq)
+			s.hardStopRun(botID, runID, msgSeq, acceptedOrdinal)
 		})
 	} else {
-		// 已受理过停止仍再次点击：不再等宽限，立即硬取消。
-		s.hardStopRun(botID, runID, msgSeq)
+		// 已受理过停止仍再次点击：不再等宽限、跳过进展判断，立即硬取消。
+		s.hardStopRun(botID, runID, msgSeq, -1)
 	}
 
 	fresh, err := s.runs.FindByID(runID)
@@ -505,7 +549,8 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 
 // cancelBotContext 按 run 的会话解析执行槽并取消（若在跑）：schedule run 的
 // 槽 key 是 "schedule:"+runID（见 wakeScheduleRun），主线 run 用 botID。取消
-// 当前的模型请求/同步工具调用，循环在安全点收尾。
+// 前核对槽绑定的 run：槽已被重入换绑成别的 run 时不得取消——硬停止与重入
+// 竞速时，取消别人的 context 会丢掉新 run 正在处理的输入（INT-137）。
 func (s *BotService) cancelBotContext(botID string, run *model.BotRun) {
 	key := botID
 	if run.SessionKind == model.BotSessionKindSchedule {
@@ -513,9 +558,14 @@ func (s *BotService) cancelBotContext(botID string, run *model.BotRun) {
 	}
 	s.rt.mu.Lock()
 	defer s.rt.mu.Unlock()
-	if a, ok := s.rt.active[key]; ok && a.cancel != nil {
-		a.cancel()
+	a, ok := s.rt.active[key]
+	if !ok || a.cancel == nil {
+		return
 	}
+	if a.runID != "" && a.runID != run.ID {
+		return
+	}
+	a.cancel()
 }
 
 // ---------- 响应投影 ----------

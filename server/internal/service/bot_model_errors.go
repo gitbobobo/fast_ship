@@ -123,6 +123,33 @@ func botClassifyModelError(err error) botModelErrorInfo {
 		}
 	}
 
+	// 文本兜底（INT-137）：部分兼容端点在 HTTP 200 里返回 {"error":...}，SDK
+	// 降级成普通 error，上面的结构化分支看不见。按同一批短语收敛；额度优先
+	// 于认证与模型判定，不匹配 billing（泛词误伤太多）。
+	lowerAll := strings.ToLower(err.Error())
+	switch {
+	case botLooksQuotaExhausted(lowerAll):
+		return botModelErrorInfo{
+			Code:    botModelErrQuotaExhausted,
+			Message: "AI 提供商额度已用完或余额不足，请充值或更换提供商",
+			Detail:  botErrMessage(err),
+			Action:  botAIProvidersAction(),
+		}
+	case botLooksAuthFailed(lowerAll):
+		return botModelErrorInfo{
+			Code:    botModelErrAuthFailed,
+			Message: "AI 提供商认证失败：密钥无效或已失效，请到设置页更新密钥",
+			Detail:  botErrMessage(err),
+			Action:  botAIProvidersAction(),
+		}
+	case botLooksModelMissing(lowerAll):
+		return botModelErrorInfo{
+			Code:    botModelErrModelNotFound,
+			Message: "模型不存在或当前账号不可用，请在机器人设置里更换模型",
+			Detail:  botErrMessage(err),
+		}
+	}
+
 	if botIsNetworkError(err) {
 		return botModelErrorInfo{
 			Code:    botModelErrUnavailable,
@@ -133,11 +160,26 @@ func botClassifyModelError(err error) botModelErrorInfo {
 	return botModelErrorInfo{Code: botModelErrRequestFailed, Message: "模型请求失败", Detail: botErrMessage(err)}
 }
 
-// botLooksQuotaExhausted 是额度文案判定：只认明确的额度/余额含义。
+// botLooksQuotaExhausted 是额度文案判定：只认明确的额度/余额含义。不带
+// billing / payment required 这类泛词——前者会误伤普通账务报错，后者已由
+// 402 状态码覆盖。
 func botLooksQuotaExhausted(lower string) bool {
 	for _, m := range []string{
-		"insufficient_quota", "insufficient quota", "quota exceeded", "exceeded your current quota",
-		"billing", "payment required", "credit balance", "余额不足", "额度不足", "额度已用完",
+		"insufficient_quota", "quota exceeded", "exceeded your current quota",
+		"credit balance", "余额不足", "额度不足", "额度已用完",
+	} {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// botLooksAuthFailed 是认证失效文案判定（文本兜底用）。
+func botLooksAuthFailed(lower string) bool {
+	for _, m := range []string{
+		"invalid api key", "incorrect api key", "invalid_api_key",
+		"unauthorized", "authentication", "api key not valid",
 	} {
 		if strings.Contains(lower, m) {
 			return true
@@ -188,14 +230,16 @@ func botCircuitTrippingCode(code string) bool {
 }
 
 // botShouldRetryModelError 报告「尚未输出任何片段」的失败是否值得重试，并
-// 返回上游要求的最小等待（Retry-After，封顶 60s；无则 0）。
+// 返回上游要求的最小等待（Retry-After，封顶 60s；无则 0）。判定先走错误
+// 分类：认证失效、额度用完、模型不存在与流超时再试也不会好，一律不重试
+// ——429 里混着 insufficient_quota 时状态码本身不可信（INT-137）；其余仍是
+// 限流、5xx、408 与网络中断可重试。
 func botShouldRetryModelError(err error) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
 	}
-	var timeout *botStreamTimeoutError
-	if errors.As(err, &timeout) {
-		// 已经等过整个超时窗口，重试只会再占一次槽位。
+	switch botClassifyModelError(err).Code {
+	case botModelErrAuthFailed, botModelErrQuotaExhausted, botModelErrModelNotFound, botModelErrStreamTimeout:
 		return 0, false
 	}
 	var apiErr *openai.Error

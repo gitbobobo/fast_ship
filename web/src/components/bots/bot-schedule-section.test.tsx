@@ -481,7 +481,7 @@ describe("BotScheduleSection", () => {
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    return { invalidate };
+    return { invalidate, client };
   }
 
   it("运行中的记录显示停止按钮，点击调用接口并刷新任务与运行记录", async () => {
@@ -516,6 +516,40 @@ describe("BotScheduleSection", () => {
     });
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith("已停止该次运行"),
+    );
+  });
+
+  it("停止成功后把返回的 run 就地写进运行记录缓存", async () => {
+    const stoppedRun: BotScheduleRun = {
+      ...runningRun,
+      status: "stopped",
+      finished_at: "2026-10-18T01:01:00Z",
+      duration_ms: 58_000,
+    };
+    stopScheduleRun.mockResolvedValue(stoppedRun);
+    mockRuns([runningRun, completedRun]);
+    const { client } = renderDialog();
+    // 运行记录按 15s 轮询；就地写回让停止按钮立刻消失，不等下次取数。
+    // 真实环境由 useBotScheduleTaskRuns 水合，这里 hook 被 mock，预置缓存。
+    client.setQueryData<BotScheduleRun[]>(
+      botKeys.scheduleTaskRuns("A", "b1", "t1"),
+      [runningRun, completedRun],
+    );
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", { name: "停止" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        client
+          .getQueryData<BotScheduleRun[]>(
+            botKeys.scheduleTaskRuns("A", "b1", "t1"),
+          )
+          ?.map((r) => `${r.id}:${r.status}`),
+      ).toEqual(["r-run:stopped", "r-done:completed"]),
     );
   });
 

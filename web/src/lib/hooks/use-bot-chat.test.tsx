@@ -3,7 +3,13 @@ import { StrictMode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useBotChat, foldStreamEvent, mergeCallSnapshots } from "./use-bot-chat";
+import {
+  useBotChat,
+  foldStreamEvent,
+  mergeCallSnapshots,
+  mergeRunSnapshots,
+  pickRunError,
+} from "./use-bot-chat";
 import { botKeys, useBots } from "./use-bots";
 import type {
   Bot,
@@ -844,16 +850,85 @@ describe("useBotChat", () => {
     ).toBeNull();
   });
 
-  it("sends a stop request without touching background calls", async () => {
+  it("stopRun 受理后 stopRequested 立即为 true（服务端宽限期间本地兜底）", async () => {
+    api.getChatSnapshot.mockResolvedValue(snapshotWith({ runs: [activeRun] }));
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.stopRequested).toBe(false);
+
+    // 首次受理只追加「停止」消息：响应里的 run 仍 stop_requested=false。
+    api.stopRun.mockResolvedValue({ ...activeRun, status: "running" });
+    await act(() => result.current.stopRun());
+    expect(api.stopRun).toHaveBeenCalledWith("b1", "r1");
+    // 本地记住本次 run 已受理软停止：按钮立即进入「强制停止」语义。
+    await waitFor(() => expect(result.current.stopRequested).toBe(true));
+  });
+
+  it("已受理停止后再次点击仍调用接口（服务端走立即硬取消）", async () => {
     api.getChatSnapshot.mockResolvedValue(snapshotWith({ runs: [activeRun] }));
     const { result } = hook();
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     api.stopRun.mockResolvedValue({ ...activeRun, status: "running" });
     await act(() => result.current.stopRun());
-    expect(api.stopRun).toHaveBeenCalledWith("b1", "r1");
-    // 停止等价于一条用户消息，服务端不再硬取消：本地不自造 stop_requested，
-    // 保持服务器权威值。
+    await waitFor(() => expect(result.current.stopRequested).toBe(true));
+
+    // stopRequested 不再是 guard：第二次点击到达服务端即硬取消。
+    await act(() => result.current.stopRun());
+    expect(api.stopRun).toHaveBeenCalledTimes(2);
+    expect(api.stopRun).toHaveBeenLastCalledWith("b1", "r1");
+  });
+
+  it("stopping 在飞期间拒绝重复提交", async () => {
+    api.getChatSnapshot.mockResolvedValue(snapshotWith({ runs: [activeRun] }));
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let resolve!: (run: BotRun) => void;
+    api.stopRun.mockImplementation(
+      () => new Promise<BotRun>((r) => (resolve = r)),
+    );
+    // 同步 act 只启动调用：回调不返回 promise，act 不等接口 resolve，
+    // 避免未完结的 act 作用域卡住后续渲染。
+    let first!: Promise<void>;
+    act(() => {
+      first = result.current.stopRun();
+    });
+    await waitFor(() => expect(result.current.stopping).toBe(true));
+
+    await act(() => result.current.stopRun());
+    expect(api.stopRun).toHaveBeenCalledTimes(1);
+
+    resolve({ ...activeRun });
+    await act(() => first);
+    await waitFor(() => expect(result.current.stopping).toBe(false));
+  });
+
+  it("run 结束后 stopRequested 回到 false，新 run 不继承软停止", async () => {
+    api.getChatSnapshot.mockResolvedValue(snapshotWith({ runs: [activeRun] }));
+    const { result } = hook();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    api.stopRun.mockResolvedValue({ ...activeRun, status: "running" });
+    await act(() => result.current.stopRun());
+    await waitFor(() => expect(result.current.stopRequested).toBe(true));
+
+    // run 结束：activeRun 消失，软停止标记随 run id 失配自然失效。
+    emit("done", { run_id: "r1", payload: { status: "completed" } }, 30);
+    await waitFor(() => expect(result.current.activeRun).toBeNull());
+    expect(result.current.stopRequested).toBe(false);
+
+    // 新 run 开始：不继承上一个 run 的软停止状态。
+    emit(
+      "delta",
+      {
+        kind: "run_started",
+        run_id: "r2",
+        payload: { created_at: "2026-10-15T00:10:00Z" },
+      },
+      31,
+    );
+    await waitFor(() => expect(result.current.activeRun?.id).toBe("r2"));
     expect(result.current.stopRequested).toBe(false);
   });
 
@@ -972,6 +1047,36 @@ describe("useBotChat", () => {
       11,
     );
     await waitFor(() => expect(result.current.runError).toBeNull());
+  });
+
+  it("run_started 携带 created_at 后，带时间戳的新 run 让旧错误条消失", async () => {
+    const { result } = hook();
+    await waitFor(() => expect(stream.subscribe).toHaveBeenCalled());
+
+    // 失败的 run 经 run_error 折叠进缓存。
+    emit(
+      "error",
+      {
+        run_id: "r-err",
+        payload: { code: "provider_auth_failed", message: "密钥无效" },
+      },
+      10,
+    );
+    await waitFor(() => expect(result.current.runError).not.toBeNull());
+
+    // 后续新 run 的 run_started 带服务端落库时刻：按时间判定「最新」，
+    // 旧失败不再永久驻留。
+    emit(
+      "delta",
+      {
+        kind: "run_started",
+        run_id: "r-2",
+        payload: { created_at: "2026-10-15T00:10:00Z" },
+      },
+      11,
+    );
+    await waitFor(() => expect(result.current.runError).toBeNull());
+    expect(result.current.activeRun?.id).toBe("r-2");
   });
 
   it("decides and cancels calls through the ledger endpoints", async () => {
@@ -1448,5 +1553,152 @@ describe("foldStreamEvent", () => {
     );
     expect(state.maintenanceProgress).toBeNull();
     expect(state.runs.map((r) => r.id)).toEqual(["r-1"]);
+  });
+
+  it("run_started 携带 created_at 时写进 run 缓存", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({
+          kind: "run_started",
+          run_id: "r-1",
+          payload: { created_at: "2026-10-15T00:00:30Z" },
+        }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.runs).toEqual([
+      expect.objectContaining({
+        id: "r-1",
+        status: "running",
+        created_at: "2026-10-15T00:00:30Z",
+      }),
+    ]);
+  });
+
+  it("run_started 缺 created_at 时不写假值", () => {
+    const { state, sinks: sinksObj } = sinks();
+    foldStreamEvent(
+      {
+        event: "delta",
+        data: JSON.stringify({ kind: "run_started", run_id: "r-1" }),
+        id: 21,
+      },
+      sinksObj,
+    );
+    expect(state.runs[0]?.created_at).toBeUndefined();
+  });
+});
+
+describe("mergeRunSnapshots", () => {
+  const baseRun: BotRun = {
+    id: "r1",
+    bot_id: "b1",
+    trigger_source: "user_message",
+    status: "failed",
+    stop_requested: false,
+    created_at: "2026-10-15T00:00:30Z",
+  };
+
+  it("同分快照合并：可变字段以快照为准，缓存缺的 created_at 回填", () => {
+    // SSE 折叠出的 run 缺 created_at 与 error 字段以外的元数据。
+    const cached = {
+      id: "r1",
+      status: "failed",
+      error_code: "provider_auth_failed",
+      error_message: "密钥无效",
+    } as unknown as BotRun;
+    const authoritative: BotRun = {
+      ...baseRun,
+      error_code: "provider_auth_failed",
+      error_message: "密钥无效",
+      error_action: null,
+      finished_at: "2026-10-15T00:01:00Z",
+    };
+    const merged = mergeRunSnapshots([cached], [authoritative]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].status).toBe("failed");
+    expect(merged[0].created_at).toBe("2026-10-15T00:00:30Z");
+    expect(merged[0].finished_at).toBe("2026-10-15T00:01:00Z");
+    expect(merged[0].error_code).toBe("provider_auth_failed");
+  });
+
+  it("同分快照合并：缓存已有的 created_at 不回拨", () => {
+    const authoritative: BotRun = {
+      ...baseRun,
+      created_at: "2026-10-15T00:00:31Z",
+    };
+    const merged = mergeRunSnapshots([baseRun], [authoritative]);
+    expect(merged[0].created_at).toBe("2026-10-15T00:00:30Z");
+  });
+
+  it("状态等级更高仍整行替换", () => {
+    const sseRun = {
+      id: "r1",
+      status: "running",
+      created_at: "2026-10-15T00:00:30Z",
+    } as unknown as BotRun;
+    const authoritative: BotRun = {
+      ...baseRun,
+      status: "completed",
+      finished_at: "2026-10-15T00:05:00Z",
+    };
+    const merged = mergeRunSnapshots([sseRun], [authoritative]);
+    expect(merged[0].status).toBe("completed");
+    expect(merged[0].finished_at).toBe("2026-10-15T00:05:00Z");
+  });
+});
+
+describe("pickRunError", () => {
+  const run = (overrides: Partial<BotRun>): BotRun =>
+    ({
+      id: "r1",
+      bot_id: "b1",
+      trigger_source: "user_message",
+      status: "completed",
+      stop_requested: false,
+      created_at: "2026-10-15T00:00:30Z",
+      ...overrides,
+    }) as BotRun;
+
+  const failedAuth = (id: string, created_at?: string): BotRun =>
+    run({
+      id,
+      status: "failed",
+      created_at,
+      error_code: "provider_auth_failed",
+      error_message: "密钥无效",
+    });
+
+  it("带时间戳的较新成功 run 让旧错误条消失", () => {
+    expect(
+      pickRunError([
+        failedAuth("r-err", "2026-10-15T00:00:30Z"),
+        run({ id: "r-ok", created_at: "2026-10-15T00:10:00Z" }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("缺时间戳的失败 run 不盖住带时间戳的成功 run", () => {
+    expect(
+      pickRunError([
+        run({ id: "r-ok", created_at: "2026-10-15T00:00:30Z" }),
+        failedAuth("r-err"),
+      ]),
+    ).toBeNull();
+  });
+
+  it("双方都缺时间戳时按追加次序取最新", () => {
+    // 不传 created_at 即缺省（undefined），等价于旧服务端事件折叠出的 run。
+    const first = failedAuth("r-1");
+    const second = failedAuth("r-2");
+    // 两个失败都缺时间戳：后追加的（r-2）是候选，错误条照常返回。
+    expect(pickRunError([first, second])?.code).toBe("provider_auth_failed");
+
+    const laterOk = run({ id: "r-ok", status: "completed", created_at: undefined });
+    // 后追加的缺时间戳成功 run 同样盖过前面的失败。
+    expect(pickRunError([first, laterOk])).toBeNull();
   });
 });

@@ -92,12 +92,14 @@ const AI_PROVIDERS_ACTION: BotRunErrorAction = {
 export function pickRunError(runs: BotRun[] | undefined): BotRunError | null {
   if (!runs?.length) return null;
   const latest = runs.reduce((newest, run) => {
-    // 缺时间戳的是 SSE 新追加的 run（mergeRun 追加在末尾），视为最新。
+    // 缺时间戳的 run（旧服务端来的 run_started 没有 created_at）只在双方都
+    // 缺时按追加次序胜出；一方带时间戳就以时间戳为准——否则永远赢过缓存里
+    // 已存在的 run，旧失败会盖住后续成功一直挂在顶上。
     const at = typeof run.created_at === "string" ? run.created_at : "";
     const newestAt =
       typeof newest.created_at === "string" ? newest.created_at : "";
-    if (at === "") return run;
-    if (newestAt === "") return newest;
+    if (at === "") return newestAt === "" ? run : newest;
+    if (newestAt === "") return run;
     return at >= newestAt ? run : newest;
   });
   if (latest.status !== "failed") return null;
@@ -239,6 +241,15 @@ export function mergeRunSnapshots(
       RUN_STATUS_RANK[run.status] > RUN_STATUS_RANK[cached.status]
     ) {
       merged.set(run.id, run);
+    } else if (RUN_STATUS_RANK[run.status] === RUN_STATUS_RANK[cached.status]) {
+      // 同分也合并：快照是权威，error_*/stop_requested 等可变字段以快照为准
+      // 补齐（SSE 折叠的记录常缺这些字段）；created_at 只在缓存缺省时回填，
+      // SSE run_started 已写入的创建时刻不回拨。
+      merged.set(run.id, {
+        ...cached,
+        ...run,
+        created_at: cached.created_at || run.created_at,
+      });
     }
   }
   return [...merged.values()];
@@ -421,9 +432,19 @@ export function foldStreamEvent(
       } else if (data.kind === "run_started" && data.run_id) {
         // 运行栏依赖 activeRun：run_started 到达即把 run 折叠进缓存；
         // 新 run 开始意味着上一段维护进度已过时，一并清掉。
+        // payload 携带服务端落库时刻 created_at（RFC3339）：写进缓存让
+        // 「最新 run」判定按时间比较，不再依赖数组追加次序。
         sinks.setMaintenanceProgress(null);
+        const payload = (data.payload ?? {}) as { created_at?: unknown };
         sinks.setRuns(
-          mergeRun(sinks.getRuns(), { id: data.run_id, status: "running" }),
+          mergeRun(sinks.getRuns(), {
+            id: data.run_id,
+            status: "running",
+            created_at:
+              typeof payload.created_at === "string"
+                ? payload.created_at
+                : undefined,
+          }),
         );
       } else if (data.message_id) {
         const text = (data.payload as { text?: string } | undefined)?.text;
@@ -515,6 +536,10 @@ export function useBotChat(botId: string) {
   const [sendError, setSendError] = useState<unknown>(null);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<unknown>(null);
+  // 本次 run 已受理软停止：服务端首次受理只追加「停止」消息，
+  // stop_requested 要等宽限兜底才落库；本地记住受理态让按钮立刻切到
+  // 「强制停止」。按 run id 匹配——run 结束或换 run 后旧 id 自然失效。
+  const [softStopRunId, setSoftStopRunId] = useState<string | null>(null);
   const [busyCallId, setBusyCallId] = useState<string | null>(null);
   const [callActionError, setCallActionError] = useState<unknown>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -778,13 +803,17 @@ export function useBotChat(botId: string) {
   const runError = useMemo(() => pickRunError(runsQuery.data), [runsQuery.data]);
 
   const stopRun = useCallback(async () => {
+    // stopping 期间仍挡重复提交；已受理后再点（stopRequested=true）刻意
+    // 放行——服务端对已有停止消息的同 client_message_id 请求会立即硬取消。
     if (!activeRun || stopping || !userId) return;
     setStopError(null);
     setStopping(true);
     try {
       // 「停止」等价于向机器人发一条「停止」消息：服务端不再硬取消当前回复，
-      // 是否结束由机器人决定。这里不回填 stop_requested，改为重读 run 收敛。
+      // 是否结束由机器人决定。stop_requested 要等宽限兜底才落库，受理成功后
+      // 本地先记下软停止态，让按钮立即进入「强制停止」语义。
       await botApi.stopRun(botId, activeRun.id);
+      setSoftStopRunId(activeRun.id);
       await queryClient.invalidateQueries({ queryKey: botKeys.runs(userId, botId) });
     } catch (err) {
       setStopError(err);
@@ -881,7 +910,8 @@ export function useBotChat(botId: string) {
     calls: callsQuery.data ?? [],
     activeRun,
     runActive: Boolean(activeRun),
-    stopRequested: Boolean(activeRun?.stop_requested),
+    stopRequested:
+      Boolean(activeRun?.stop_requested) || softStopRunId === activeRun?.id,
     /** 可操作错误条（auth/quota 失败）；其它失败为 null，视图不渲染。 */
     runError,
     backgroundCalls,

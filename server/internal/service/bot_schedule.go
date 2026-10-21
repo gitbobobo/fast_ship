@@ -114,7 +114,9 @@ func (s *BotService) buildScheduleRunContext(bot *model.Bot, run *model.BotRun, 
 	if err != nil {
 		return nil, errs.ErrInternal
 	}
-	projected, projRows, _, err := botProjectMessages(rows, botScheduleFoldMap(rows))
+	// schedule 会话无前缀缓存顾虑（独立短会话），旧 toolset_updated 恒按 user
+	// 投影（INT-137 R6）。
+	projected, projRows, _, err := botProjectMessages(rows, botScheduleFoldMap(rows), true)
 	if err != nil {
 		return nil, err
 	}

@@ -32,7 +32,7 @@ func TestBotToolsetUpdatedLifecycleRole(t *testing.T) {
 		{ID: "m1", Seq: 1, Kind: model.BotMessageKindLifecycle, ContentJSON: string(legacy)},
 		{ID: "m2", Seq: 2, Kind: model.BotMessageKindLifecycle, ContentJSON: string(fresh)},
 	}
-	msgs, _, _, err := botProjectMessages(rows, nil)
+	msgs, _, _, err := botProjectMessages(rows, nil, false)
 	if err != nil {
 		t.Fatalf("project messages: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestBotLegacyLifecycleProjectionStable(t *testing.T) {
 	rows := []model.BotMessage{
 		{ID: "m1", Seq: 1, Kind: model.BotMessageKindLifecycle, ContentJSON: raw},
 	}
-	msgs, _, _, err := botProjectMessages(rows, nil)
+	msgs, _, _, err := botProjectMessages(rows, nil, false)
 	if err != nil {
 		t.Fatalf("project messages: %v", err)
 	}

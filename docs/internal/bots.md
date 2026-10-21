@@ -598,11 +598,17 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   跳过）；读类调用（`botReadOnlyActions` 判定）允许执行完，已有结果不丢。
 - **停止按钮 = 用户消息**：`POST /runs/:id/stop` 追加一条「停止」用户消息并
   唤醒（`client_message_id=stop:<runID>` 幂等），是否结束由机器人结合上下文决定，
-  真正要停自己时仍可用 `fs_stop`。INT-137 起另加宽限兜底：受理停止后
-  `bots.runtime.stop_grace_seconds`（默认 15s）内 run 未自然结束即置
-  `stop_requested_at` 并硬取消执行槽 context；已受理过停止再点一次则立即硬
-  取消（前端此时按钮文案为「强制停止」）。硬取消会把停止消息标记为已消费，
-  避免扫描器随后为「停止」文本另起一 run。停止后的迟到结果不复活旧 run。
+  真正要停自己时仍可用 `fs_stop`。INT-137 起另加宽限兜底：受理停止时记下该
+  run 当时的最大模型请求序号，`bots.runtime.stop_grace_seconds`（默认 15s）内
+  run 未自然结束则重读比对——期间已发起过新请求（序号增长）说明停止消息已随
+  新上下文送出，**不硬取消**（否则停止之后的新输入会被一起丢掉）；否则置
+  `stop_requested_at` 并硬取消执行槽 context。已受理过停止再点一次则跳过宽限
+  与进展判断、立即硬取消（前端此时按钮文案为「强制停止」）。硬取消会把停止
+  消息标记为已消费，避免扫描器随后为「停止」文本另起一 run；水位推进一律
+  只升不降（`AdvanceInputThroughSeq` / `SetOfferedInputSeq` 带 `< ?` 条件），
+  并发写者持旧 seq 不得把水位覆盖回去。硬取消前核对执行槽绑定的 run id
+  （槽可能已被重入换绑成新 run），不取消别人的 context。停止后的迟到结果不
+  复活旧 run。
 - **Issue 写入保护**：`fs_issue update` / `replace_checklist` 支持
   `expected_updated_at` / `expected_checklist_updated_at`（先 `get` 读回）。
   不符时不写入，回 `conflict=true`、原因与目标最新内容，让机器人重新读取、
@@ -876,18 +882,29 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   超时。主线与摘要/归档等辅助请求（`bot_maintenance.go`）共用同一组阈值。
 - **未输出前的有限重试**（`bot_loop.go`）：只有「本次尝试尚未收到任何正文或
   工具调用片段」才重试，最多 `retry_max_attempts`（默认 2，负值关闭）；每次都
-  是独立的 `bot_model_requests` 行。退避取 `max(Retry-After, retry_base_delay_ms
-  << attempt)`，Retry-After 封顶 60s，退避期可被 ctx 取消打断。已输出片段的
-  失败、看门狗超时、普通 4xx 都不重试。
+  是独立的 `bot_model_requests` 行。是否重试先过错误分类：`provider_auth_failed`
+  / `provider_quota_exhausted` / `model_not_found` / `model_stream_timeout`
+  一律不重试——429 里混着 `insufficient_quota` 时状态码本身不可信。退避取
+  `max(Retry-After, retry_base_delay_ms << attempt)`，Retry-After 封顶 60s，
+  退避期可被 ctx 取消打断。已输出片段的失败（含半截工具调用，聚合处置位
+  `SawOutput`）、看门狗超时、普通 4xx 都不重试；上下文超限的强制压缩重试同样
+  以「未收到过任何片段」为前置。
 - **错误分类**（`bot_model_errors.go`）：把上游报错收敛为 `provider_auth_failed`
   / `provider_quota_exhausted` / `provider_rate_limited` / `provider_unavailable`
   / `model_not_found` / `model_stream_timeout` / `model_request_failed`。
+  结构化状态码之外有文本兜底：HTTP 200 里返回 `{"error":...}` 被 SDK 降级成
+  普通 error 的报错按同一批短语收敛（额度优先于认证与模型判定；不匹配
+  `billing`/`payment required` 这类泛词，402 已由状态码覆盖）。
   `finishModelFailed` 把这些 code、中文说明、上游 detail 与可选 action
   （`ai_providers_settings`）写进 run 行与 `run_error` 事件；前端据此显示
   错误条与「去设置」按钮（只对 auth/quota 显示，避免噪音）。分类同时是熔断
-  与重试判定的唯一事实源。
-- **硬停止**（`bot_runtime.go`）：见「读取完整性…」一节的停止语义。宽限计时
-  器随进程重启丢失，但重启恢复本就把活动 run 置 failed。
+  与重试判定的唯一事实源。辅助请求（摘要/归档/夜间整理）的失败记账共用同一
+  分类（流超时记 `model_stream_timeout`），总超时只作防泄漏兜底，取
+  FirstChunk + Idle + 30s，让看门狗先触发。
+- **硬停止**（`bot_runtime.go`）：见「读取完整性…」一节的停止语义。宽限期
+  「有进展则不硬杀」——受理停止时记最大模型请求 ordinal，到期重读比对，期间
+  又发起了新请求就不硬取消；重复点击跳过判断立即硬取消。宽限计时器随进程
+  重启丢失，但重启恢复本就把活动 run 置 failed。
 - **定时任务运行停止**：新增 `POST /api/bots/{id}/schedule-tasks/{taskId}/runs/
   {runId}/stop`（仅 JWT）。置 `stop_requested_at` + 取消执行槽；无槽的孤儿
   run 由补唤醒/5s 扫描带入安全点收尾。落 `stopped` 时不追加主线事件（用户
@@ -896,15 +913,22 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
   schedule run 因 `provider_auth_failed` 或 `provider_quota_exhausted` 落 failed
   时打开窗口（`bots.runtime.provider_circuit_minutes`，默认 30 分钟）。窗口
   内该 provider 的到期任务直接记 `skipped`（summary 写明原因、自动恢复时间与
-  手动恢复方式），同一熔断只往主线追加一条去重事件。窗口过后自动恢复；用户
-  更新密钥/地址或带 `provider_id` 的测试连接成功即清除。主线不熔断：用户可能
-  已充值，仍每次尝试并给出可操作错误。
+  手动恢复方式），同一熔断只往主线追加一条去重事件。熔断归属按 run 派发时
+  冻结的 `provider_id`（配置快照，`botRunFreeze` 一并应用）；打开前核对——
+  运行期间用户已更新过凭证/地址（`updated_at` 晚于 run.StartedAt，含测试
+  连接/清除熔断）则不再重新打开，迟到的旧密钥失败不抹掉恢复动作。窗口已开
+  时不延长 `until`（仓储层 `WHERE circuit_open_until IS NULL OR <= now`），
+  同一窗口内的并行/重试失败不产生新去重键、也不追加第二条主线事件。窗口
+  过后自动恢复；用户更新密钥/地址或带 `provider_id` 且密钥与库存一致的测试
+  连接成功即清除。主线不熔断：用户可能已充值，仍每次尝试并给出可操作错误。
 - **R6 toolset_updated 角色**：新追加的 `toolset_updated` lifecycle 消息在
   `content.render="user"`，投影为 user 角色 + `[平台事件]` 前缀；旧消息
   （无标记）保持 system 角色，既有会话的 `prefix_hash` 在下次压缩前不变。
-  旧消息到达压缩边界后随摘要归档离开投影（投影从 `summary_through_seq` 起读），
-  因此不需要改写不可变的账本。不可变账本与前缀缓存共同决定了「只能给新消息
-  打标记、不能回写旧消息」。
+  压缩发布是角色切换的边界闸门：`bot_context_states.lifecycle_render_version`
+  在任何一次发布（含 fold-only）后写 1，之后仍留在投影里的旧 `toolset_updated`
+  也按 user 角色发送——system 已不在消息序列开头，部分兼容后端会拒绝；发布
+  之前保持 system。定时会话无前缀缓存顾虑，恒按 user 投影。旧消息最终随
+  摘要归档离开投影（投影从 `summary_through_seq` 起读），不可变账本不回写。
 
 ## 边界与决策
 

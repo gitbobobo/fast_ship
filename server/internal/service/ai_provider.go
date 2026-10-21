@@ -418,10 +418,18 @@ func (s *AIProviderService) Test(userID string, req *TestAIProviderRequest) (*Pr
 
 	result := &ProviderTestResult{Ok: streamOK && toolOK, Checks: checks, Models: models}
 	if result.Ok && providerID != "" {
-		// 用户测通了凭证：恢复该 provider 的定时任务调度（清除熔断）。
-		// 清除失败只记日志，不回滚已成功的探测结果。
-		if err := s.providers.ClearCircuit(providerID); err != nil {
-			s.logger.Warn("清除 provider 熔断失败", zap.String("provider_id", providerID), zap.Error(err))
+		// 用户测通了凭证：恢复该 provider 的定时任务调度（清除熔断）。但只有
+		// 探测用的密钥与库存一致时才清——测的是新密钥（尚未保存）说明用户
+		// 正在排障，此时清掉熔断会让旧密钥的定时任务立刻恢复打上游；保存
+		// 路径（Update 提供 api_key）自会清除。清除失败只记日志，不回滚
+		// 已成功的探测结果。
+		matches, err := s.apiKeyMatchesStored(providerID, apiKey)
+		if err != nil {
+			s.logger.Warn("比对 provider 库存密钥失败", zap.String("provider_id", providerID), zap.Error(err))
+		} else if matches {
+			if err := s.providers.ClearCircuit(providerID); err != nil {
+				s.logger.Warn("清除 provider 熔断失败", zap.String("provider_id", providerID), zap.Error(err))
+			}
 		}
 	}
 	return result, nil
@@ -451,6 +459,20 @@ func providerValidBaseURL(raw string) bool {
 }
 
 // ---------- 密钥 ----------
+
+// apiKeyMatchesStored 报告明文 key 是否与库存密文解密后一致：测试连接仅在
+// 密钥与库存一致时才清除熔断（INT-137）。provider 不存在返回 false 与 NotFound。
+func (s *AIProviderService) apiKeyMatchesStored(providerID, plain string) (bool, error) {
+	p, err := s.providers.GetByID(providerID)
+	if err != nil {
+		return false, err
+	}
+	stored, err := crypto.Decrypt(p.APIKeyEncrypted, []byte(s.cfg.Encryption.Key))
+	if err != nil {
+		return false, err
+	}
+	return string(stored) == plain, nil
+}
 
 func (s *AIProviderService) encryptAPIKey(plain string) ([]byte, string, error) {
 	cipher, err := crypto.Encrypt([]byte(plain), []byte(s.cfg.Encryption.Key))
