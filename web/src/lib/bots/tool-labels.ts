@@ -110,6 +110,12 @@ export const TOOL_EFFECT_BADGE: Record<ToolEffect, string> = {
   write: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
 };
 
+// 模型可写文本进批准/展示界面时剥掉控制与格式字符（Cc/Cf，如 U+202E
+// 双向覆盖）：不剥的话确认卡/chips 上的文本会被重排成与执行内容相反
+// 的顺序。与服务端 legacyNoticeTaskName 同口径。
+export const bidiSafeText = (v: string) =>
+  v.replace(/[\p{Cc}\p{Cf}]/gu, "");
+
 export interface ToolParamChip {
   /** 参数名（同时当渲染 key）。 */
   key: string;

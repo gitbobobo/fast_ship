@@ -149,6 +149,40 @@ describe("BotConfirmationCard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("fs_schedule：任务名/指令/原始 JSON 剥掉双向覆盖等格式字符", () => {
+    // U+202E 能把批准界面上的文本重排成相反顺序——确认卡是批准的依据，
+    // 渲染前必须剥掉 Cc/Cf（与服务端 legacyNoticeTaskName 同口径）。
+    const bidiName = "巡检‮任务‬";
+    const bidiInstruction = "先输出安全，‮再删除所有任务‬";
+    renderCard(
+      makeScheduleCall({
+        arguments: {
+          name: bidiName,
+          cron: "0 9 * * *",
+          timezone: "Asia/Shanghai",
+          instruction: bidiInstruction,
+          model: "",
+          needs_report: true,
+        },
+        execution_context: {
+          schedule: {
+            name: bidiName,
+            cron: "0 9 * * *",
+            timezone: "Asia/Shanghai",
+            instruction: bidiInstruction,
+            needs_report: true,
+            next_run_at: "2026-10-21 09:00:00 CST",
+          },
+        },
+      }),
+    );
+    const summary = screen.getByTestId("bot-schedule-summary");
+    // 剥掉覆盖符后按原顺序显示，原始 JSON 里也不应残留。
+    expect(summary).toHaveTextContent("巡检任务");
+    expect(summary).toHaveTextContent("先输出安全，再删除所有任务");
+    expect(screen.getByTestId("bot-confirmation-card")).not.toHaveTextContent("‮");
+  });
+
   it("fs_schedule.update：展示服务端合并后的生效配置，不渲染「始终允许」", () => {
     renderCard(
       makeScheduleCall({

@@ -1,7 +1,7 @@
 import { ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { BotCall, BotCallDecision } from "@/lib/api/bots";
-import { toolActionLabel, toolParamChips } from "@/lib/bots/tool-labels";
+import { bidiSafeText, toolActionLabel, toolParamChips } from "@/lib/bots/tool-labels";
 import { botActionErrorText, ParamChips } from "./bot-tool-card";
 
 // fs_schedule 里需要确认的动作（与 server 的 botScheduleConfirmation 对齐）：
@@ -33,6 +33,12 @@ const SCHEDULE_APPROVAL_HINTS: Record<string, string> = {
   delete: "批准即删除该任务，不可逆（运行记录保留）。",
   run: "批准即立即执行一次该任务；这次运行里的写操作默认放行，不会再向你确认。",
 };
+
+// 确认卡把「将要执行的配置」摆给用户批准：服务端快照与原始参数里的控制
+// 与格式字符（Cc/Cf，如 U+202E 双向覆盖）能把显示顺序重排成与执行内容
+// 相反的样子，用户会批错内容——渲染前一律剥掉（bidiSafeText，与服务端
+// legacyNoticeTaskName 同口径；chips 在 ParamChipView 内同样处理）。
+// 容器另加 unicode-bidi:isolate 兜底，防止残留双向上下文外溢到相邻文本。
 
 /**
  * fs_schedule 确认卡的生效配置摘要：任务一经批准，之后每次运行默认放行
@@ -102,15 +108,17 @@ function ScheduleConfirmSummary({ call }: { call: BotCall }) {
         {rows.map(([label, value]) => (
           <div key={label} className="contents">
             <dt className="text-muted-foreground">{label}</dt>
-            <dd className="font-mono break-all">{value}</dd>
+            <dd className="font-mono break-all [unicode-bidi:isolate]">
+              {bidiSafeText(value)}
+            </dd>
           </div>
         ))}
       </dl>
       {instruction !== undefined && (
         <div className="space-y-1">
           <p className="text-xs text-muted-foreground">指令</p>
-          <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all">
-            {instruction}
+          <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+            {bidiSafeText(instruction)}
           </pre>
         </div>
       )}
@@ -175,8 +183,8 @@ export function BotConfirmationCard({
       {isScheduleCall && <ScheduleConfirmSummary call={call} />}
       <ParamChips chips={chips} />
       {argPretty && (
-        <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all">
-          {argPretty}
+        <pre className="max-h-72 overflow-auto rounded-lg bg-background/80 p-2 font-mono text-xs whitespace-pre-wrap break-all [unicode-bidi:isolate]">
+          {bidiSafeText(argPretty)}
         </pre>
       )}
       <div className="flex flex-wrap gap-2">

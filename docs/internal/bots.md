@@ -602,7 +602,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   合并直接复用执行器的纯函数 `applyScheduleTaskUpdate`，避免确认卡展示值与
   实际执行值各写一份而漂移）。
   前端不重新实现 cron 解析；卡片展示任务名/cron/时区/下次运行/模型/需汇报/
-  指令全文，并明写「批准即授权该任务以后每次运行默认放行写操作」。
+  指令全文，并明写「批准即授权该任务以后每次运行默认放行写操作」。卡片上
+  所有模型可写文本（快照值、chips、原始 JSON、错误与结果展示）渲染前经
+  `bidiSafeText` 剥掉 Cc/Cf 并套 `unicode-bidi:isolate`——U+202E 等双向
+  覆盖符能把批准界面的指令重排成相反顺序，看到的必须与执行的一致。
 - **授权范围**：`create` 的范围是机器人任务集合（`schedule_task_collection`+
   bot.ID），`update`/`run`/`enable`/`delete` 是单个任务（`schedule_task`+
   task_id），因此 `run` 的「始终允许」只对一个任务生效。
