@@ -69,6 +69,16 @@ describe("App routing defaults", () => {
     );
   });
 
+  it("registers the reviews config route", async () => {
+    browserEntries.splice(0, browserEntries.length, "/reviews/config");
+
+    render(<App />);
+
+    expect(await screen.findByTestId("navigate-target")).toHaveTextContent(
+      "/login",
+    );
+  });
+
   it("registers the notifications route", async () => {
     browserEntries.splice(0, browserEntries.length, "/notifications");
 

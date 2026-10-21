@@ -90,3 +90,53 @@ func (h *ReviewHandler) ListRecords(c *gin.Context) {
 	}
 	response.Success(c, gin.H{"items": items})
 }
+
+// ListPullRequests GET /api/reviews/pull-requests?project_id=&limit=&offset=
+// 跨项目 PR 审查动态（INT-141）：分组与进度由服务端算好。
+func (h *ReviewHandler) ListPullRequests(c *gin.Context) {
+	projectID := c.Query("project_id")
+	limit := 0 // 0 由 service 取默认 50
+	if raw := c.Query("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			response.BadRequest(c, 40001, "limit 必须是 1-200 的整数")
+			return
+		}
+		limit = parsed
+	}
+	offset := 0
+	if raw := c.Query("offset"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			response.BadRequest(c, 40001, "offset 必须是非负整数")
+			return
+		}
+		offset = parsed
+	}
+	page, err := h.reviewService.ListPullRequestActivity(c.Request.Context(), middleware.GetUserID(c), projectID, limit, offset)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, page)
+}
+
+// GetPullRequestDetail GET /api/reviews/pull-requests/:prNumber?project_id=
+func (h *ReviewHandler) GetPullRequestDetail(c *gin.Context) {
+	projectID := c.Query("project_id")
+	if projectID == "" {
+		response.BadRequest(c, 40001, "project_id 必填")
+		return
+	}
+	prNumber, err := strconv.Atoi(c.Param("prNumber"))
+	if err != nil || prNumber < 1 {
+		response.BadRequest(c, 40001, "pr_number 必须是 >=1 的整数")
+		return
+	}
+	rec, err := h.reviewService.GetPullRequestRecord(c.Request.Context(), middleware.GetUserID(c), projectID, prNumber)
+	if err != nil {
+		middleware.HandleAppError(c, err)
+		return
+	}
+	response.Success(c, rec)
+}

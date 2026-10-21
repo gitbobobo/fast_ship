@@ -1,65 +1,37 @@
 import { useState } from "react";
-import {
-  Link,
-  useParams,
-  useSearchParams,
-} from "react-router";
-import {
-  ChevronRight,
-  ExternalLink,
-  Plus,
-  RotateCw,
-} from "lucide-react";
+import { Link, useParams } from "react-router";
+import { Plus } from "lucide-react";
 import { toast } from "sonner";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Header } from "@/components/layout/header";
 import { CombinationRow } from "@/components/reviews/combination-row";
-import { ConclusionBadge } from "@/components/reviews/conclusion-badge";
 import { ApiRequestError } from "@/lib/api/client";
 import {
-  reviewRunStatusLabel,
   type ReviewCombination,
-  type ReviewPullRequestRecord,
-  type ReviewRoundRecord,
-  type ReviewRunSummary,
   type ReviewSettings,
   type ReviewSettingsInput,
 } from "@/lib/api/reviews";
 import { useEnvironments } from "@/lib/hooks/use-threads";
 import { useProject } from "@/lib/hooks/use-projects";
 import {
-  useReviewRecords,
   useReviewSettings,
-  useRerunReview,
   useUpdateReviewSettings,
 } from "@/lib/hooks/use-reviews";
-import { formatDate } from "@/lib/utils/format";
 import { cn } from "@/lib/utils";
 import { uuid } from "@/lib/uuid";
 
-// 项目审查页（INT-135）：单路由内两个分页——「设置」（开关、触发条件、
-// 代码/视觉组合）与「审查记录」（PR → 轮次 → 各组合运行）。分页由
-// ?tab=settings|records 驱动，刷新后保持。
+// 项目审查设置页（INT-135/INT-141）：开关、触发条件、代码/视觉组合。
+// 「审查记录」tab 已移除，PR 动态与详情改在 /reviews 首页与抽屉查看。
 
 const CODE_MAX = 5;
 const VISUAL_MAX = 3;
 
-type ReviewTab = "settings" | "records";
-
-function tabFromParam(value: string | null): ReviewTab {
-  return value === "records" ? "records" : "settings";
-}
-
 export default function ReviewProjectPage() {
   const { projectId = "" } = useParams();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const tab = tabFromParam(searchParams.get("tab"));
 
   const { data: project } = useProject(projectId);
   const { data: settings, isLoading } = useReviewSettings(projectId);
@@ -119,34 +91,19 @@ export default function ReviewProjectPage() {
     <div className="flex flex-col">
       <Header title={title} />
       <div className="mx-auto w-full max-w-3xl space-y-6 p-4 md:p-6">
-        <Tabs
-          value={tab}
-          onValueChange={(next) => setSearchParams({ tab: String(next) })}
-          className="space-y-4"
-        >
-          <TabsList>
-            <TabsTrigger value="settings">设置</TabsTrigger>
-            <TabsTrigger value="records">审查记录</TabsTrigger>
-          </TabsList>
-          <TabsContent value="settings">
-            {/* 审查实际盯的仓库：可与公开 Issue 仓库不同（项目设置里单独配代码仓库）。 */}
-            <p className="mb-4 text-sm text-muted-foreground">
-              审查仓库：
-              <span className="font-mono text-foreground">
-                {settings.repo_full_name || "—"}
-              </span>
-            </p>
-            {/* key 固定项目 id：保存后的 refetch 不重挂载表单、不清输入。 */}
-            <ReviewSettingsForm
-              key={settings.project_id}
-              projectId={settings.project_id}
-              settings={settings}
-            />
-          </TabsContent>
-          <TabsContent value="records">
-            <ReviewRecordsPanel projectId={projectId} />
-          </TabsContent>
-        </Tabs>
+        {/* 审查实际盯的仓库：可与公开 Issue 仓库不同（项目设置里单独配代码仓库）。 */}
+        <p className="text-sm text-muted-foreground">
+          审查仓库：
+          <span className="font-mono text-foreground">
+            {settings.repo_full_name || "—"}
+          </span>
+        </p>
+        {/* key 固定项目 id：保存后的 refetch 不重挂载表单、不清输入。 */}
+        <ReviewSettingsForm
+          key={settings.project_id}
+          projectId={settings.project_id}
+          settings={settings}
+        />
       </div>
     </div>
   );
@@ -406,30 +363,35 @@ function ReviewSettingsForm({
         </p>
       )}
 
-      <section className="space-y-2">
-        <h2 className="text-sm font-medium text-muted-foreground">前置条件</h2>
-        <ul className="space-y-1">
-          {(settings.prerequisites ?? []).map((p) => (
-            <li
-              key={p.code}
-              className={cn(
-                "text-sm",
-                p.missing ? "text-destructive" : "text-muted-foreground",
-              )}
-            >
-              {p.missing ? "✗" : "✓"} {p.label}
-              {p.missing && p.detail ? (
-                <span className="ml-1 text-xs">（{p.detail}）</span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
-        {hasMissing && (
+      {/* 前置条件全部满足时收成一行；有缺项才展开标红。 */}
+      {hasMissing ? (
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium text-muted-foreground">
+            前置条件
+          </h2>
+          <ul className="space-y-1">
+            {(settings.prerequisites ?? []).map((p) => (
+              <li
+                key={p.code}
+                className={cn(
+                  "text-sm",
+                  p.missing ? "text-destructive" : "text-muted-foreground",
+                )}
+              >
+                {p.missing ? "✗" : "✓"} {p.label}
+                {p.missing && p.detail ? (
+                  <span className="ml-1 text-xs">（{p.detail}）</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
           <p className="text-xs text-destructive">
             前置条件未全部满足，无法开启审查。
           </p>
-        )}
-      </section>
+        </section>
+      ) : (
+        <p className="text-sm text-muted-foreground">✓ 前置条件已满足</p>
+      )}
 
       <section className="space-y-3">
         <div className="flex items-center gap-2">
@@ -497,240 +459,6 @@ function ReviewSettingsForm({
       </div>
     </div>
   );
-}
-
-/* ---------------- 审查记录 ---------------- */
-
-function ReviewRecordsPanel({ projectId }: { projectId: string }) {
-  const { data: records, isLoading } = useReviewRecords(projectId);
-  const rerun = useRerunReview(projectId);
-  // 展开状态按 repo + PR 号区分：一个项目可能同时保留多个仓库的历史记录，
-  // 同名 PR 号不唯一。
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-
-  const toggle = (key: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
-
-  const handleRerun = async (prNumber: number, repoFullName: string) => {
-    try {
-      const res = await rerun.mutateAsync({ prNumber, repoFullName });
-      toast.success(
-        `已受理，第 ${res.data.round_number} 轮审查已排队`,
-      );
-    } catch (err) {
-      if (err instanceof ApiRequestError && err.status === 404) {
-        toast.error("重新审查暂不可用");
-        return;
-      }
-      toast.error(errMessage(err, "重新审查失败"));
-    }
-  };
-
-  if (isLoading) {
-    return (
-      <div className="space-y-2 py-2">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <Skeleton key={i} className="h-12 rounded" />
-        ))}
-      </div>
-    );
-  }
-
-  if (!records?.length) {
-    return (
-      <div className="rounded-lg border bg-muted/40 py-12 text-center">
-        <p className="text-sm text-muted-foreground">还没有审查记录</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          该项目的 PR 触发审查后会出现在这里
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-2">
-      {records.map((pr) => (
-        <PullRequestRecord
-          key={`${pr.repo_full_name}#${pr.pr_number}`}
-          record={pr}
-          expanded={expanded.has(`${pr.repo_full_name}#${pr.pr_number}`)}
-          onToggle={() => toggle(`${pr.repo_full_name}#${pr.pr_number}`)}
-          onRerun={() => void handleRerun(pr.pr_number, pr.repo_full_name)}
-          rerunning={rerun.isPending}
-        />
-      ))}
-    </div>
-  );
-}
-
-function PullRequestRecord({
-  record,
-  expanded,
-  onToggle,
-  onRerun,
-  rerunning,
-}: {
-  record: ReviewPullRequestRecord;
-  expanded: boolean;
-  onToggle: () => void;
-  onRerun: () => void;
-  rerunning: boolean;
-}) {
-  return (
-    <div className="rounded-lg border">
-      <div className="flex items-center gap-2 px-3 py-2">
-        <button
-          type="button"
-          aria-expanded={expanded}
-          aria-label={`${expanded ? "收起" : "展开"} PR #${record.pr_number}`}
-          onClick={onToggle}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-        >
-          <ChevronRight
-            className={cn("h-4 w-4 transition-transform", expanded && "rotate-90")}
-          />
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5">
-            <a
-              href={record.pr_url}
-              target="_blank"
-              rel="noreferrer"
-              className="truncate text-sm font-medium hover:underline"
-            >
-              #{record.pr_number} {record.pr_title}
-            </a>
-            <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground" />
-          </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span className="font-mono">{shortSHA(record.head_sha)}</span>
-            <ConclusionBadge label="代码" status={record.code_status} />
-            <ConclusionBadge label="视觉" status={record.visual_status} />
-            <span>{formatDate(record.updated_at)}</span>
-          </div>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={rerunning || !record.can_rerun}
-          onClick={onRerun}
-          title={
-            record.can_rerun
-              ? undefined
-              : "该记录属于历史仓库（项目仓库已变更），不能重跑"
-          }
-          aria-label={`重新审查 PR #${record.pr_number}`}
-        >
-          <RotateCw className="mr-1.5 h-3.5 w-3.5" />
-          重新审查
-        </Button>
-      </div>
-
-      {expanded && (
-        <div className="space-y-3 border-t px-3 py-3">
-          {record.rounds.map((round) => (
-            <RoundRecord key={round.round_number} round={round} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RoundRecord({ round }: { round: ReviewRoundRecord }) {
-  return (
-    <div className="space-y-1.5">
-      <p className="text-xs font-medium text-muted-foreground">
-        第 {round.round_number} 轮 ·{" "}
-        <span className="font-mono">{shortSHA(round.head_sha)}</span> ·{" "}
-        {formatDate(round.created_at)}
-      </p>
-      <div className="space-y-1">
-        {round.code_runs.map((run) => (
-          <RunRow key={run.id} run={run} kindLabel="代码审查" />
-        ))}
-        {round.visual_runs.map((run) => (
-          <RunRow key={run.id} run={run} kindLabel="视觉审查" />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function RunRow({
-  run,
-  kindLabel,
-}: {
-  run: ReviewRunSummary;
-  kindLabel: string;
-}) {
-  return (
-    <div className="rounded-md bg-muted/40 px-3 py-2">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-        <span className="text-muted-foreground">{kindLabel}</span>
-        <span className="font-medium">
-          {run.environment_name || run.environment_id}
-        </span>
-        <span className="text-muted-foreground">
-          {run.instance_id} · {run.model}
-          {run.options?.length
-            ? ` · ${run.options.map((o) => `${o.id}=${String(o.value)}`).join(", ")}`
-            : null}
-        </span>
-        <Badge variant={runStatusVariant(run.status)}>
-          {reviewRunStatusLabel(run.status)}
-        </Badge>
-        {typeof run.findings_count === "number" && run.findings_count > 0 && (
-          <span className="text-xs text-muted-foreground">
-            {run.findings_count} 条发现
-          </span>
-        )}
-        {run.thread_id && (
-          <a
-            className="ml-auto text-xs text-primary hover:underline"
-            href={`/threads/${run.environment_id}/${run.thread_id}`}
-          >
-            线程
-          </a>
-        )}
-      </div>
-      {(run.error_message || run.error_code) && (
-        <p className="mt-1 text-xs text-destructive">
-          {run.error_message || run.error_code}
-        </p>
-      )}
-      {run.summary && (
-        <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-          {run.summary}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function runStatusVariant(
-  status: ReviewRunSummary["status"],
-): "default" | "secondary" | "destructive" | "outline" {
-  switch (status) {
-    case "completed":
-      return "secondary";
-    case "failed":
-    case "timed_out":
-      return "destructive";
-    case "cancelled":
-      return "outline";
-    default:
-      return "default";
-  }
-}
-
-function shortSHA(sha: string): string {
-  return sha.length > 7 ? sha.slice(0, 7) : sha;
 }
 
 function errMessage(err: unknown, fallback: string): string {

@@ -241,7 +241,6 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 		PR   int
 	}
 	roundsByPR := map[prKey]map[int][]model.ReviewRun{}
-	metaByPR := map[prKey]*model.ReviewRun{}
 	for i := range runs {
 		r := &runs[i]
 		key := prKey{r.RepoFullName, r.PRNumber}
@@ -249,75 +248,94 @@ func (s *ReviewService) ListReviewRecords(ctx context.Context, userID, projectID
 			roundsByPR[key] = map[int][]model.ReviewRun{}
 		}
 		roundsByPR[key][r.RoundNumber] = append(roundsByPR[key][r.RoundNumber], *r)
-		// 最近一次运行带 PR 标题/URL 快照。
-		if metaByPR[key] == nil || r.CreatedAt.After(metaByPR[key].CreatedAt) {
-			metaByPR[key] = r
-		}
 	}
 
 	for _, pr := range prs {
 		key := prKey{pr.RepoFullName, pr.PRNumber}
-		rec := api.ReviewPullRequestRecord{
-			PrNumber:     pr.PRNumber,
-			RepoFullName: pr.RepoFullName,
-			HeadSha:      pr.HeadSHA,
-			UpdatedAt:    pr.UpdatedAt.UTC().Format(time.RFC3339Nano),
-			// 项目改过仓库后，旧仓库的记录只能查看：rerun 会按当前审查仓库
-			// 取 PR，同号的无关 PR 会被误审。
-			CanRerun: currentRepo != "" && strings.EqualFold(pr.RepoFullName, currentRepo),
-			Rounds:   []api.ReviewRoundRecord{},
-		}
-		if pr.CodeStatus != "" {
-			rec.CodeStatus = api.Ptr(pr.CodeStatus)
-		}
-		if pr.VisualStatus != "" {
-			rec.VisualStatus = api.Ptr(pr.VisualStatus)
-		}
-		if meta := metaByPR[key]; meta != nil {
-			rec.PrTitle = meta.PRTitle
-			rec.PrUrl = meta.PRURL
-		}
-		if rec.PrUrl == "" {
-			rec.PrUrl = "https://github.com/" + pr.RepoFullName + "/pull/" + strconv.Itoa(pr.PRNumber)
-		}
-
-		roundMap := roundsByPR[key]
-		numbers := make([]int, 0, len(roundMap))
-		for n := range roundMap {
-			numbers = append(numbers, n)
-		}
-		sort.Sort(sort.Reverse(sort.IntSlice(numbers)))
-		for _, n := range numbers {
-			rec.Rounds = append(rec.Rounds, buildRoundRecord(n, roundMap[n], envNames))
-		}
-		out = append(out, rec)
+		out = append(out, buildReviewPRRecord(&pr, roundsByPR[key], envNames, currentRepo))
 	}
 	return out, nil
 }
 
-// buildRoundRecord 一轮内的运行分 code/visual 两组输出（入参已按创建时间升序）。
+// buildReviewPRRecord 单条 PR 记录投影：PR 元信息 + 轮次列表（round_number
+// DESC）。records 列表与跨项目详情共用；currentRepo 是设置行的审查仓库
+// 快照（can_rerun 判定键），为空表示项目没有设置行。
+func buildReviewPRRecord(pr *model.ReviewPullRequest, roundMap map[int][]model.ReviewRun,
+	envNames map[string]string, currentRepo string) api.ReviewPullRequestRecord {
+	rec := api.ReviewPullRequestRecord{
+		PrNumber:     pr.PRNumber,
+		RepoFullName: pr.RepoFullName,
+		HeadSha:      pr.HeadSHA,
+		UpdatedAt:    pr.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		// 项目改过仓库后，旧仓库的记录只能查看：rerun 会按当前审查仓库
+		// 取 PR，同号的无关 PR 会被误审。
+		CanRerun: currentRepo != "" && strings.EqualFold(pr.RepoFullName, currentRepo),
+		Rounds:   []api.ReviewRoundRecord{},
+	}
+	if pr.CodeStatus != "" {
+		rec.CodeStatus = api.Ptr(pr.CodeStatus)
+	}
+	if pr.VisualStatus != "" {
+		rec.VisualStatus = api.Ptr(pr.VisualStatus)
+	}
+	// 最近一次运行带 PR 标题/URL 快照。
+	var meta *model.ReviewRun
+	for i := range roundMap {
+		for j := range roundMap[i] {
+			r := &roundMap[i][j]
+			if meta == nil || r.CreatedAt.After(meta.CreatedAt) {
+				meta = r
+			}
+		}
+	}
+	if meta != nil {
+		rec.PrTitle = meta.PRTitle
+		rec.PrUrl = meta.PRURL
+	}
+	if rec.PrUrl == "" {
+		rec.PrUrl = "https://github.com/" + pr.RepoFullName + "/pull/" + strconv.Itoa(pr.PRNumber)
+	}
+
+	numbers := make([]int, 0, len(roundMap))
+	for n := range roundMap {
+		numbers = append(numbers, n)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(numbers)))
+	for _, n := range numbers {
+		rec.Rounds = append(rec.Rounds, buildRoundRecord(n, roundMap[n], envNames))
+	}
+	return rec
+}
+
+// buildRoundRecord 一轮内的运行分 code/visual 两组输出（入参已按创建时间升序）；
+// trigger_action 取该轮第一条代码 run，没有代码 run 或为空时回退 unknown。
 func buildRoundRecord(roundNumber int, runs []model.ReviewRun, envNames map[string]string) api.ReviewRoundRecord {
 	round := api.ReviewRoundRecord{
-		RoundNumber: roundNumber,
-		CreatedAt:   runs[0].CreatedAt.UTC().Format(time.RFC3339Nano),
-		HeadSha:     runs[0].HeadSHA,
-		CodeRuns:    []api.ReviewRunSummary{},
-		VisualRuns:  []api.ReviewRunSummary{},
+		RoundNumber:   roundNumber,
+		CreatedAt:     runs[0].CreatedAt.UTC().Format(time.RFC3339Nano),
+		HeadSha:       runs[0].HeadSHA,
+		TriggerAction: api.ReviewRoundRecordTriggerActionUnknown,
+		CodeRuns:      []api.ReviewRunSummary{},
+		VisualRuns:    []api.ReviewRunSummary{},
 	}
 	for i := range runs {
 		r := &runs[i]
 		sum := runSummary(r, envNames)
 		if r.Kind == model.ReviewKindVisual {
 			round.VisualRuns = append(round.VisualRuns, sum)
-		} else {
-			round.CodeRuns = append(round.CodeRuns, sum)
+			continue
 		}
+		if round.TriggerAction == api.ReviewRoundRecordTriggerActionUnknown && r.TriggerAction != "" {
+			round.TriggerAction = api.ReviewRoundRecordTriggerAction(r.TriggerAction)
+		}
+		round.CodeRuns = append(round.CodeRuns, sum)
 	}
 	return round
 }
 
 // runSummary 一次运行的 API 投影：findings_count 从 result_json 解析
-// （代码计 P0/P1/P2，视觉计 blocker/worth_fixing）；ui_changed 仅代码结论有值。
+// （代码计 P0/P1/P2，视觉计 blocker/worth_fixing）；ui_changed 仅代码结论有值；
+// findings/unmeasurable 是完整发现列表（结论可解析时才有）。
 func runSummary(r *model.ReviewRun, envNames map[string]string) api.ReviewRunSummary {
 	sum := api.ReviewRunSummary{
 		Id:            r.ID,
@@ -368,8 +386,10 @@ func runSummary(r *model.ReviewRun, envNames map[string]string) api.ReviewRunSum
 			if f.Severity == api.Blocker || f.Severity == api.WorthFixing {
 				count++
 			}
+			sum.Findings = append(sum.Findings, reviewFindingFromVisual(&f))
 		}
 		sum.FindingsCount = api.Ptr(count)
+		sum.Unmeasurable = result.Unmeasurable
 		return sum
 	}
 	var result api.ReviewCodeResult
@@ -381,10 +401,31 @@ func runSummary(r *model.ReviewRun, envNames map[string]string) api.ReviewRunSum
 		if f.Level == api.P0 || f.Level == api.P1 || f.Level == api.P2 {
 			count++
 		}
+		sum.Findings = append(sum.Findings, reviewFindingFromCode(&f))
 	}
 	sum.FindingsCount = api.Ptr(count)
 	sum.UiChanged = api.Ptr(result.UiChanged)
 	return sum
+}
+
+// reviewFindingFromCode 代码发现 → 统一展示投影（级别原样，含 Note）。
+func reviewFindingFromCode(f *api.ReviewCodeFinding) api.ReviewFinding {
+	out := api.ReviewFinding{Level: string(f.Level), Body: f.Body, Line: f.Line}
+	if f.File != "" {
+		out.File = api.Ptr(f.File)
+	}
+	return out
+}
+
+// reviewFindingFromVisual 视觉发现 → 统一展示投影（severity → level）。
+func reviewFindingFromVisual(f *api.ReviewVisualFinding) api.ReviewFinding {
+	out := api.ReviewFinding{Level: string(f.Severity), Body: f.Body}
+	out.Screenshot = api.Ptr(f.Screenshot)
+	out.Dimension = api.Ptr(string(f.Dimension))
+	if f.Fix != "" {
+		out.Fix = api.Ptr(f.Fix)
+	}
+	return out
 }
 
 // reviewRunEnvNames 批量查运行涉及的环境名。

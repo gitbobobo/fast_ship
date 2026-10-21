@@ -533,31 +533,54 @@ SHA-256 前 16 位。
 
 ## 页面
 
-- 侧边栏「审查」`/reviews`（`web/src/routes/reviews/index.tsx`）：当前用户
-  所有已关联仓库（公开或代码仓库任一）的项目列表——项目名、仓库（实际审查
-  的代码仓库，未单独配置即公开仓库）、开关、代码/视觉组合数、
-  最近一次代码/视觉审查结论与时间；同仓库已被其他项目开启的行只读并显示
-  占用者登录名。旧 `/automations` 路由直接删除，不做重定向。
-- `/reviews/:projectId`（`web/src/routes/reviews/$projectId.tsx`）：单路由
-  内两个分页（`?tab=settings|records`）——
-  - **设置**：前置条件逐条 ✓/✗ 展示、开关、四个触发条件复选、代码审查组合
-    1–5 行（必填）、视觉审查组合 0–3 行。组合行
-    （`components/reviews/combination-row.tsx`）= 环境 `OptionSelect`
-    （只列已通过 `project_t3_bindings` 绑定该项目的环境）+ `ModelPicker`
-    + 每个选项描述符一个 `EffortChip`；切换环境清空该行下游选择。
-    `can_manage=false` 或 `taken_by` 非空时整页只读。
-  - **审查记录**：PR → 轮次 → `code_runs`/`visual_runs`（组合、环境、模型、
-    状态、结论摘要、错误），每行可跳 `/threads/:env/:threadId`；每个 PR 行
-    上「重新审查」按钮。
+- 侧边栏「审查」`/reviews`（`web/src/routes/reviews/index.tsx`）= PR 动态：
+  顶部按项目筛选（默认全部，`?project=` 保留筛选），右上角「⚙ 配置
+  （N 个项目已开启）」进入配置页。PR 按「你要做什么」分三组，**分组由服务端
+  算好**（`GET /api/reviews/pull-requests`），前端只负责展示：
+  - **进行中**：防抖中（「约 42 秒后开始」）、排队、审查中；行上写 PR 标题、
+    仓库 #号、第几轮、短 SHA、已用时长与两段进度（「代码审查 2/3 完成 →
+    视觉审查 等待代码审查」）。执行状态只看当前轮、当前 head 的运行，账本
+    `code_status/visual_status` 的 pending 不会把已终态的轮次判成进行中。
+  - **需要处理**：发现 P0/P1/P2（视觉 blocker/worth_fixing 单独写「视觉问题
+    ×N」），或审查未完成（逐条写组合与原因：派发失败 / 超时 / 审查失败 /
+    结论无法解析；账本 failure/error 在无更细证据时给保守兜底文案）。行上
+    直接放「重新审查」。
+  - **最近通过**：当前轮 runs 全部通过且完成时间在近 7 天内，默认折叠。
+  存在进行中的 PR 时前端 10s 轮询，否则不轮询；两种空状态（没有项目开启 →
+  引导去配置；已开启但无 PR → 「推送或打开 PR 后会出现在这里」）。
+- 点 PR 打开右侧抽屉（`components/reviews/pr-activity-drawer.tsx`）替代原
+  按项目的「审查记录」tab：顶部「在 GitHub 打开」；每轮写轮次、SHA、触发方式
+  （opened/synchronize/ready_for_review/reopened/manual）、时间；每个组合一行
+  结论（环境、模型、状态、summary、错误）并可跳 `/threads/:env/:threadId`；
+  发现列表按级别渲染（代码 `文件:行号`，视觉 `截图 · 维度` + 建议），视觉的
+  `unmeasurable` 单列「无法判断」；最新一轮展开，更早的轮折叠成一行灰字。
+  进行中的 PR 在抽屉打开期间同样 10s 刷新。
+- `/reviews/config`（`web/src/routes/reviews/config.tsx`）：配置页承接旧项目表
+  并瘦身——已开启项目在上（项目名、实际审查的 owner/repo、代码/视觉组合数、
+  最近结论、打开单项目设置）；未开启折叠为「其余 N 个项目未开启 · 展开」。
+  同仓库被其他项目占用时显示占用者登录名；旧 `/automations` 路由直接删除，
+  不做重定向。
+- `/reviews/:projectId`（`web/src/routes/reviews/$projectId.tsx`）：只保留设置
+  （不再有 `?tab=`）——前置条件全部满足时收成一行「✓ 前置条件已满足」，有
+  缺项才展开逐条标红；开关、四个触发条件复选、代码审查组合 1–5 行（必填）、
+  视觉审查组合 0–3 行。组合行（`components/reviews/combination-row.tsx`）= 环境
+  `OptionSelect`（只列已通过 `project_t3_bindings` 绑定该项目的环境）+
+  `ModelPicker` + 每个选项描述符一个 `EffortChip`；切换环境清空该行下游选择。
+  `can_manage=false` 或 `taken_by` 非空时整页只读。
+
+首页与配置页的项目元数据都来自 `GET /api/reviews`；PR 动态列表不返回旧仓库
+（项目换过审查仓库后，旧仓库账本只在 `/review-records` 接口可见）。
 
 ## HTTP API（JWT）
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/reviews` | 审查总览：每项目一行（仓库 = 实际审查的代码仓库、开关、组合数、最近 code/visual status、`last_review_at`）；同仓库被占用时 `taken_by` 带占用者登录名且 `can_manage=false`。 |
+| GET | `/api/reviews` | 审查总览（配置页与首页的项目元数据）：每项目一行（仓库 = 实际审查的代码仓库、开关、组合数、最近 code/visual status、`last_review_at`）；同仓库被占用时 `taken_by` 带占用者登录名且 `can_manage=false`。 |
+| GET | `/api/reviews/pull-requests` | 跨项目 PR 动态：`?project_id=&limit=&offset=`（limit 默认 50、上限 200）。以 `review_pull_requests` 为主，带当前轮各组合运行状态、防抖行、发现计数与未完成原因；**分组由服务端算好**（in_progress / needs_action / recently_passed），返回 `items[]`、`counts`、`total`。只返回已 enabled 且审核仓库 = 设置行快照的项目；当前 head 没有运行且没有防抖的账本不返回。 |
+| GET | `/api/reviews/pull-requests/{prNumber}` | PR 详情（抽屉）：`?project_id=` 必填。复用 review-records 结构并补每轮 `trigger_action`、每个运行的 `findings[]`（代码含 Note；视觉 severity/dimension/fix/screenshot）与视觉 `unmeasurable[]`。项目不属于当前用户 40401；账本不存在 40434。停用项目仍可看历史。 |
 | GET | `/api/projects/{id}/review-settings` | 设置 + `repo_full_name`（实际审查的代码仓库，原样大小写）+ `prerequisites[]`（缺项 `missing=true` + `detail`）+ `taken_by`。prerequisite 的 `github_app_installation` 每次实时调一次 GitHub。 |
 | PUT | `/api/projects/{id}/review-settings` | 全量保存。组合结构/归属/绑定/数量/重复问题 40001（只读会话的环境同样拒绝）；启用时前置条件缺项 41202（逐条写进 message）；同仓库占用 40922（带占用者）。`enabled=false` 跳过前置校验、允许零组合。 |
-| GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、时间）与每轮 `code_runs[]`/`visual_runs[]`。`?limit=` 默认 20、上限 100。 |
+| GET | `/api/projects/{id}/review-records` | 审查记录：`items[]` 每个 PR 一行，内嵌 `rounds[]`（轮次、head、触发方式、时间）与每轮 `code_runs[]`/`visual_runs[]`（含 `findings[]`/`unmeasurable[]`）。`?limit=` 默认 20、上限 100。首页改版后网页不再有入口，接口保留。 |
 | POST | `/api/projects/{id}/reviews/rerun` | 重新审查：body `{pr_number}`。项目必须 enabled（否则 40923）。rerun 没有 webhook installation 快照：先 `ResolveInstallation` 解析真实安装 id（解析不支持/失败直接报错，不拿 0 继续），再用安装令牌 `GetPullRequest` 实时取当前 head，走与 webhook 相同的「取消旧 SHA + 开轮」事务路径（`trigger_action=manual`，恒开新轮），安装 id 落进运行与总账。返回 `{accepted, head_sha, round_number}`。 |
 
 ## 开启前置与同仓库唯一
