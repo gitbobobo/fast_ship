@@ -385,7 +385,8 @@ func (s *BotService) openProviderCircuitOnFailure(bot *model.Bot, run *model.Bot
 		return
 	}
 	// 配置版本条件同样写进 OpenCircuit 的 WHERE（检查与写入原子）：上面
-	// 的预检只是快速路径，真正防竞态的是那句 updated_at <= 本 run 开始时刻。
+	// 的预检只是快速路径，真正防竞态的是那句 config_version_at <= 本 run
+	// 开始时刻。
 	configSince := time.Now().UTC()
 	if run.StartedAt != nil {
 		configSince = *run.StartedAt
