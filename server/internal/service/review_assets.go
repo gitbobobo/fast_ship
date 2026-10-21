@@ -33,10 +33,14 @@ var (
 	mdImageRe = regexp.MustCompile(`!\[([^\]]*)\]\(\s*<?([^\s>)]+)>?[^)]*\)`)
 	// HTML <img src="...">。
 	htmlImgRe = regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*>`)
-	// 裸链接（用户直接粘贴、没有图片语法）：任意 https URL 粗筛，收集时再按
-	// 位图扩展名过滤（GitHub 附件之外的外链图床裸贴同样要能被收集）。集合与
-	// 下载面 imagesOnly 同源（githubmedia.HasBitmapExtension），不收 svg/视频。
-	bareURLRe = regexp.MustCompile(`https://[^\s)<>"'\]]+`)
+	// 裸链接（用户直接粘贴、没有图片语法）：任意 https URL 粗筛。排除 # 与
+	// 紧贴链接的中文/全角句读（。，、））——fragment 不是资源本身，下载面
+	// normalize 会拒、IsGitHubMediaURL 也因此判 false 导致 bearer 重试失效；
+	// 句读会把扩展名判定带歪。收集时按「GitHub 附件形态 ∪ 位图扩展名」准入：
+	// GitHub 拖入/粘贴附件的标准直链没有文件名扩展名，必须有扩展名会把它们
+	// 漏掉（HasScreenshots=false → 静默不开视觉轮）；其余外链图床仍按位图扩
+	// 展名过滤（集合与下载面 imagesOnly 同源，不收 svg/视频）。
+	bareURLRe = regexp.MustCompile(`https://[^\s)<>"'\]#。，、）]+`)
 )
 
 // collectScreenshotURLs 按出现顺序提取 PR 描述里的图片引用；同 URL 只取首次，
@@ -58,9 +62,10 @@ func collectScreenshotURLs(body string) []screenshotRef {
 	}
 	for _, m := range bareURLRe.FindAllStringIndex(body, -1) {
 		url := body[m[0]:m[1]]
-		// 只有位图扩展名的裸链接才算截图引用：普通网页链接、行内代码里的
-		// https 地址不收（按扩展名结尾判定，接受这个启发式的误收）。
-		if !githubmedia.HasBitmapExtension(url) {
+		// GitHub 附件形态豁免扩展名要求（附件直链无扩展名）；其余裸链接只有
+		// 位图扩展名才收：普通网页链接、行内代码里的 https 地址不收（按扩展
+		// 名结尾判定，接受这个启发式的误收）。
+		if !githubmedia.IsGitHubAttachmentURL(url) && !githubmedia.HasBitmapExtension(url) {
 			continue
 		}
 		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})

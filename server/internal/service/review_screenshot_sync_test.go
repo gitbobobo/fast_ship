@@ -83,9 +83,37 @@ func TestCollectScreenshotURLsBareImageLinks(t *testing.T) {
 		t.Fatalf("label = %q, want 回退「截图 1」", refs[0].Label)
 	}
 
-	// 无位图扩展名的普通网页链接不收。
+	// GitHub 附件裸直链没有文件名扩展名（拖入/粘贴附件的标准形态），不要求
+	// 扩展名——按「必须有位图扩展名」过滤会把它们漏掉 → HasScreenshots=false
+	// → 静默不开视觉轮。
+	refs = collectScreenshotURLs("附件直贴 https://github.com/user-attachments/assets/abc-123 如上")
+	if len(refs) != 1 || refs[0].URL != "https://github.com/user-attachments/assets/abc-123" {
+		t.Fatalf("refs = %+v, want 无扩展名的 GitHub 附件裸链被收集", refs)
+	}
+	refs = collectScreenshotURLs("历史图床 https://user-images.githubusercontent.com/123/456 如上")
+	if len(refs) != 1 || refs[0].URL != "https://user-images.githubusercontent.com/123/456" {
+		t.Fatalf("refs = %+v, want 无扩展名的 user-images 裸链被收集", refs)
+	}
+
+	// # 与紧贴的中文句读不是资源的一部分：fragment 会被下载面 normalize 拒
+	// （IsGitHubMediaURL 也因此判 false，bearer 重试失效），句读会破坏扩展名
+	// 判定——收集时都要剥掉。
+	refs = collectScreenshotURLs("见 https://uiv.frp.musiver.cn/f/a.png#frag")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
+		t.Fatalf("refs = %+v, want 收集的 URL 不含 #frag", refs)
+	}
+	refs = collectScreenshotURLs("见 https://uiv.frp.musiver.cn/f/a.png。")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
+		t.Fatalf("refs = %+v, want 紧跟中文句号的链接被收集且不含「。」", refs)
+	}
+
+	// 无位图扩展名的普通网页链接不收（github.com 的非附件路径同样不收——
+	// 豁免只给 user-attachments/assets）。
 	if refs := collectScreenshotURLs("看这个页面 https://example.com/page 谢谢"); len(refs) != 0 {
 		t.Fatalf("refs = %+v, want 非位图链接不收集", refs)
+	}
+	if refs := collectScreenshotURLs("打开 https://github.com/owner/repo/pull/1 看看"); len(refs) != 0 {
+		t.Fatalf("refs = %+v, want github.com 非附件路径不收集", refs)
 	}
 	// svg / 视频扩展名不收（视觉审查只吃位图）。
 	if refs := collectScreenshotURLs("https://example.com/a.svg https://example.com/b.mp4"); len(refs) != 0 {

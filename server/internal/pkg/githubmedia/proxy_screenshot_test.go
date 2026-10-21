@@ -461,6 +461,36 @@ func TestIsGitHubMediaURL(t *testing.T) {
 	}
 }
 
+// IsGitHubAttachmentURL 只认附件形态（github.com 的 user-attachments/assets
+// 与 user-images.githubusercontent.com），不要求文件名扩展名——GitHub 拖入/
+// 粘贴附件的标准直链恰恰没有扩展名。其余 GitHub 域名与路径不算：service 层
+// 用它豁免裸链收集的位图扩展名要求，收得太宽会把普通网页链接误当截图。
+func TestIsGitHubAttachmentURL(t *testing.T) {
+	yes := []string{
+		"https://github.com/user-attachments/assets/abc-123",
+		"https://github.com/user-attachments/assets/abc.png", // 有扩展名同样算
+		"https://user-images.githubusercontent.com/123/456",
+		"https://USER-Images.GitHubUserContent.com/123/456", // host 判定大小写不敏感
+	}
+	no := []string{
+		"https://github.com/owner/repo/pull/1",       // github.com 但不是附件路径
+		"https://github.com/user-attachments/assets", // 缺 id 段
+		// host 是解析出来再判的：附件路径嵌在别人域名路径里不算。
+		"https://evil.example.com/github.com/user-attachments/assets/abc",
+		"", "not a url",
+	}
+	for _, raw := range yes {
+		if !IsGitHubAttachmentURL(raw) {
+			t.Fatalf("IsGitHubAttachmentURL(%q) = false, want true", raw)
+		}
+	}
+	for _, raw := range no {
+		if IsGitHubAttachmentURL(raw) {
+			t.Fatalf("IsGitHubAttachmentURL(%q) = true, want false", raw)
+		}
+	}
+}
+
 // 200 + 空响应体（已知 Content-Length: 0 与分块空 body 两种）都不是可用截图。
 func TestEmptyUpstreamMediaRejected(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

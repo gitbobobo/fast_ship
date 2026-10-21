@@ -800,6 +800,25 @@ func IsGitHubMediaURL(raw string) bool {
 	return isAllowedGitHubMediaURL(parsed)
 }
 
+// IsGitHubAttachmentURL URL 是否是 GitHub 附件形态的直链：github.com 的
+// user-attachments/assets 附件，或 user-images.githubusercontent.com 用户
+// 图片——GitHub 拖入/粘贴附件的标准形态，路径通常没有文件名扩展名。service
+// 层收集 PR 描述裸贴链接时用它豁免「必须有位图扩展名」的要求；能否发 App
+// 安装令牌仍由 IsGitHubMediaURL 按「可发请求的地址」把关，两个口径独立。
+// 按 URL 解析出 host 再判，前缀嵌在路径里的仿冒地址（evil.com/github.com/…）
+// 不算。
+func IsGitHubAttachmentURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed == nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "github.com" {
+		return strings.HasPrefix(parsed.EscapedPath(), "/user-attachments/assets/")
+	}
+	return host == "user-images.githubusercontent.com"
+}
+
 func isAllowedGitHubMediaURL(parsed *url.URL) bool {
 	if parsed == nil {
 		return false

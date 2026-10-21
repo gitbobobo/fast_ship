@@ -333,8 +333,11 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 
 截图素材：系统解析 PR 描述收集截图 URL（去重保序，label 取 alt 或「截图 N」）。
 收集认两种形态：`![]()` / `<img>` 图片语法，以及直接裸贴的 `https://` 链接
-（外链图床也认——按「路径以位图扩展名结尾」过滤，扩展名集合与下载面同一份，
-svg/视频不收；这个启发式会误收正文里恰好以 `.png` 结尾的普通链接，接受）。
+（GitHub 附件形态——`github.com/user-attachments/assets/…` 与
+`user-images.githubusercontent.com/…`，拖入/粘贴附件的标准直链——不要求扩
+展名；其余外链图床按「路径以位图扩展名结尾」过滤，扩展名集合与下载面同一
+份，svg/视频不收。链接里的 `#` 与紧贴的中文句读 `。，、）` 不算资源本身，
+收集时剥掉。这个启发式会误收正文里恰好以 `.png` 结尾的普通链接，接受）。
 由**独立的截图下载面**（`githubmedia.NewReviewMediaService`，与
 `/api/github/media-proxy` 的 GitHub 白名单面是两个实例）下载落盘为
 `review_assets`；同一 (repo, pr, head) 已有 asset 行复用，失败的行保留
