@@ -331,7 +331,7 @@ export function BotScheduleTaskDialog({
       await stopRun.mutateAsync({ taskId: task.id, runId: run.id });
       // 受理只代表停止请求已落库：真正 stopped 由运行槽在安全点收尾，等重取
       // 收敛，不在这里谎报「已停止」。
-      toast.success("已请求停止，等待运行收尾");
+      toast.success("已发出停止请求");
     } catch (err) {
       toast.error(
         err instanceof ApiRequestError && err.message
@@ -445,15 +445,19 @@ export function BotScheduleTaskDialog({
                             {formatDuration(run.duration_ms)}
                           </span>
                           {run.status === "running" && (
+                            // 行内停止按钮：放大到 h-8/px-3 的可点区域，与左侧
+                            // 时长之间留出间距，避免误触（视觉审查）。
                             <Button
                               type="button"
-                              size="xs"
+                              size="sm"
                               variant="destructive"
+                              className="ml-2 h-8 px-3"
+                              aria-label="停止该次运行"
                               disabled={stoppingRunId === run.id}
                               onClick={() => void handleStopRun(run)}
                             >
                               {stoppingRunId === run.id && (
-                                <Loader2 className="h-3 w-3 animate-spin" />
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
                               )}
                               停止
                             </Button>

@@ -496,10 +496,10 @@ describe("BotScheduleSection", () => {
     const dialog = await screen.findByRole("dialog");
     const rows = within(dialog).getAllByTestId("bot-schedule-run");
     expect(rows).toHaveLength(2);
-    const stopButton = within(rows[0]).getByRole("button", { name: "停止" });
+    const stopButton = within(rows[0]).getByRole("button", { name: "停止该次运行" });
     // 非 running 行没有停止按钮。
     expect(
-      within(rows[1]).queryByRole("button", { name: "停止" }),
+      within(rows[1]).queryByRole("button", { name: "停止该次运行" }),
     ).not.toBeInTheDocument();
 
     await user.click(stopButton);
@@ -515,7 +515,7 @@ describe("BotScheduleSection", () => {
       queryKey: botKeys.scheduleTasks("A", "b1"),
     });
     await waitFor(() =>
-      expect(toast.success).toHaveBeenCalledWith("已请求停止，等待运行收尾"),
+      expect(toast.success).toHaveBeenCalledWith("已发出停止请求"),
     );
   });
 
@@ -539,7 +539,7 @@ describe("BotScheduleSection", () => {
 
     const dialog = await screen.findByRole("dialog");
     await user.click(
-      within(dialog).getByRole("button", { name: "停止" }),
+      within(dialog).getByRole("button", { name: "停止该次运行" }),
     );
 
     await waitFor(() =>
@@ -572,7 +572,7 @@ describe("BotScheduleSection", () => {
     const user = userEvent.setup();
 
     const dialog = await screen.findByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "停止" }));
+    await user.click(within(dialog).getByRole("button", { name: "停止该次运行" }));
 
     await waitFor(() => expect(stopScheduleRun).toHaveBeenCalled());
     const rows = client.getQueryData<BotScheduleRun[]>(
@@ -594,7 +594,7 @@ describe("BotScheduleSection", () => {
 
     const dialog = await screen.findByRole("dialog");
     await user.click(
-      within(dialog).getByRole("button", { name: "停止" }),
+      within(dialog).getByRole("button", { name: "停止该次运行" }),
     );
 
     await waitFor(() =>
