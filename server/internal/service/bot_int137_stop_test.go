@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,15 @@ func TestBotStopHardCancelDropsDraftAndFailsModelRequest(t *testing.T) {
 		Where("run_id = ? AND status = ?", runID, model.BotModelRequestFailed).Count(&failed)
 	if failed == 0 {
 		t.Fatalf("被中断的模型请求应记 failed")
+	}
+	// 视觉审查：丢弃草稿后时间线要有可见提示，不能停在用户的「停止」上。
+	var notice model.BotMessage
+	if err := env.db.Where("bot_id = ? AND kind = ? AND content_json LIKE ?",
+		bot.ID, model.BotMessageKindLifecycle, "%run_interrupted%").First(&notice).Error; err != nil {
+		t.Fatalf("硬取消后应追加强制停止提示: %v", err)
+	}
+	if !strings.Contains(notice.ContentJSON, "已强制停止") {
+		t.Fatalf("提示应说明回复已丢弃: %s", notice.ContentJSON)
 	}
 }
 

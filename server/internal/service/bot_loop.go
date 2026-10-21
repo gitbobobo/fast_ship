@@ -301,6 +301,9 @@ runLoop:
 			deltas.discard()
 			s.finishModelRequest(requestRow, reply, streamErr)
 			if input := s.safePoint(run); input.StopRequested {
+				// 被停止打断的流已经丢弃草稿：补一条可见的 lifecycle 提示，否则
+				// 时间线停在用户的「停止」上，看不出半截回复去哪了（视觉审查）。
+				s.appendForcedStopNotice(bot.ID, run.ID)
 				s.finishStopped(bot, run)
 				return
 			}
@@ -841,6 +844,52 @@ func (s *BotService) appendCompactionFailedNotice(botID string, generation, thro
 	if err != nil {
 		// 消息追加失败不改变 run 终态，只记日志。
 		s.logger.Warn("追加压缩失败消息失败", zap.String("bot_id", botID), zap.Error(err))
+		return
+	}
+	s.publishEvent(botID)
+}
+
+// appendForcedStopNotice 在硬取消丢弃草稿后追加一条可见的 lifecycle 提示
+// （INT-137 视觉审查）：时间线不能停在用户发的「停止」上什么也不说——用户
+// 需要知道半截回复是被主动停止了，而不是机器人没回应。按 run 幂等。
+func (s *BotService) appendForcedStopNotice(botID, runID string) {
+	content := botLifecycleContent{
+		Event:  "run_interrupted",
+		Detail: json.RawMessage(`{"note":"已强制停止，未完成的回复已丢弃"}`),
+	}
+	dedup := "stop_notice:" + runID
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		txMsgs := repository.NewBotMessageRepository(tx)
+		if _, err := txMsgs.FindByDedupKey(botID, dedup); err == nil {
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		seq, err := s.bots.NextMessageSeqTx(tx, botID)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(content)
+		if err != nil {
+			return err
+		}
+		msgID := uuid.NewString()
+		msg := &model.BotMessage{
+			ID: msgID, BotID: botID, Seq: seq,
+			Kind: model.BotMessageKindLifecycle, ContentJSON: string(raw),
+			DedupKey: &dedup, CreatedAt: time.Now().UTC(),
+		}
+		if err := txMsgs.AppendTx(tx, msg); err != nil {
+			return err
+		}
+		return s.appendEventTx(tx, botID, nil, "", model.BotEventDelta, botEventEnvelope{
+			Kind:    "lifecycle",
+			Payload: map[string]interface{}{"event": "run_interrupted", "message_id": msgID},
+		})
+	})
+	if err != nil {
+		// 提示追加失败不改变 run 终态，只记日志。
+		s.logger.Warn("追加强制停止提示失败", zap.String("bot_id", botID), zap.Error(err))
 		return
 	}
 	s.publishEvent(botID)
