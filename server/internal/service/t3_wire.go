@@ -108,6 +108,8 @@ type t3AppThread struct {
 	ProjectID              string           `json:"projectId"`
 	Title                  string           `json:"title"`
 	ActiveProviderThreadId *string          `json:"activeProviderThreadId"`
+	Branch                 *string          `json:"branch"`
+	WorktreePath           *string          `json:"worktreePath"`
 	Lineage                *t3ThreadLineage `json:"lineage"`
 	ArchivedAt             *string          `json:"archivedAt"`
 	UpdatedAt              string           `json:"updatedAt"`

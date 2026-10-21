@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
@@ -14,9 +15,10 @@ import (
 // ArchiveThread，成功写 archived_at；失败按有限计数重试，超限置 archived_at
 // 防无限重试并发通知，代码运行同时置 worktree_state=failed。
 //
-// 工作区删除（cleanupWorktrees）：只对「已归档完成」的代码运行执行，且
-// 删除前核验行快照仍属本运行、路径未被其他运行认领。worktree_path 为空
-// 不再用差集猜路径——无法证明归属时一律 failed + 通知，不删任何路径。
+// 工作区删除（cleanupWorktrees）：只对「已归档完成」的代码运行执行。工作区
+// 真值只认线程投影的 worktreePath/branch（launch 窗口差集推断已废弃），
+// 删除前再经 listRefs 登记 + ref 名一致性、行快照与认领核验；任何不确定都
+// 只重试或记失败，绝不删未经证明的路径。
 
 // reviewWorktreeMaxTries 归档等回收动作的有限重试次数（tick 数）。
 const reviewWorktreeMaxTries = 3
@@ -61,7 +63,7 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 	if err := s.t3.ArchiveThread(ctx, run.UserID, run.EnvironmentID, run.ThreadID); err == nil {
 		s.db.Model(&model.ReviewRun{}).Where("id = ? AND archived_at IS NULL", run.ID).
 			Updates(map[string]any{"archived_at": now, "updated_at": now})
-		s.releaseWorktreeState(run.ID)
+		s.releaseWorktreeTries(run.ID)
 		return
 	} else {
 		s.logger.Info("审查线程归档未成功（有限重试）", zap.String("run", run.ID), zap.Error(err))
@@ -76,7 +78,7 @@ func (s *ReviewService) archiveRunThread(run *model.ReviewRun, now time.Time) {
 			updates["worktree_error"] = msg + "，工作区未删除"
 		}
 		s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).Updates(updates)
-		s.releaseWorktreeState(run.ID)
+		s.releaseWorktreeTries(run.ID)
 		s.publishReviewNotification(run, model.NotificationReviewCleanupFailed, msg, now)
 	}
 }
@@ -103,7 +105,11 @@ func (s *ReviewService) cleanupWorktrees(now time.Time) {
 }
 
 // cleanupRunWorktree 单条运行的工作区回收：终态收尾 + 释放进程内状态。
-// 不删的任何失败都记 worktree_state=failed + worktree_error + 通知。
+// 路径真值来自线程投影（worktreePath/branch）；行里可能还是空的——launch
+// 阶段不再解析路径。删除前依次核验：线程仍登记该 worktree、登记 ref 名与
+// 线程分支一致、行快照仍属本运行且路径未被其他运行认领。不删的任何失败都
+// 记 worktree_state=failed + worktree_error + 通知；读真值/登记的失败走
+// 有限重试，重试中的分支不调 finish（否则计数被释放）。
 func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -111,7 +117,7 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 	finish := func(state model.ReviewWorktreeState, errMsg string, notify bool) {
 		s.db.Model(&model.ReviewRun{}).Where("id = ?", run.ID).
 			Updates(map[string]any{"worktree_state": state, "worktree_error": errMsg, "updated_at": now})
-		s.releaseWorktreeState(run.ID)
+		s.releaseWorktreeTries(run.ID)
 		if notify {
 			s.publishReviewNotification(run, model.NotificationReviewCleanupFailed, errMsg, now)
 		}
@@ -132,12 +138,45 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 	if run.ArchivedAt == nil {
 		return
 	}
-	// worktree_path 为空：不再差集猜路径——无法证明归属，不删任何路径。
-	path := run.WorktreePath
-	if path == "" {
-		finish(model.ReviewWorktreeFailed, "无法证明工作区归属：launch 窗口内未解析到本运行的工作区路径，未执行删除", true)
+
+	// 线程投影是工作区归属的唯一真值：线程没了即没有工作区可清；读不到真值
+	// （T3 建 worktree 滞后于线程创建、上游暂时性失败）都按有限重试处理。
+	threadWT, err := s.t3.ThreadWorktree(ctx, run.UserID, run.EnvironmentID, run.ThreadID)
+	if err != nil {
+		if errors.Is(err, errT3ThreadNotFound) {
+			finish(model.ReviewWorktreeRemoved, "", false)
+			return
+		}
+		if tries := s.bumpWorktreeTries(run.ID); tries < reviewWorktreeMaxTries {
+			return
+		}
+		finish(model.ReviewWorktreeFailed, "读取线程工作区失败: "+err.Error(), true)
 		return
 	}
+	path, branch := "", ""
+	if threadWT != nil {
+		path, branch = threadWT.Path, threadWT.Branch
+	}
+	if path == "" {
+		if tries := s.bumpWorktreeTries(run.ID); tries < reviewWorktreeMaxTries {
+			return
+		}
+		// 线程确实没有 worktree（如视觉式 root 工作区）：没有可清的。
+		finish(model.ReviewWorktreeRemoved, "", false)
+		return
+	}
+	// 行内旧快照与线程真值冲突：可能是行被并发改写或线程被复用，不删。
+	if run.WorktreePath != "" && run.WorktreePath != path {
+		finish(model.ReviewWorktreeFailed, "运行记录的工作区与线程记录不一致，未执行删除", true)
+		return
+	}
+	// 把线程真值写回运行行（只在仍为空时补，不覆盖其他写入）。
+	if run.WorktreePath == "" {
+		s.db.Model(&model.ReviewRun{}).
+			Where("id = ? AND worktree_path = ''", run.ID).
+			Updates(map[string]any{"worktree_path": path, "updated_at": now})
+	}
+
 	// 删除前核验：行快照仍属本运行（repo/pr/head/thread/path），且该路径
 	// 未被其他运行认领。任一不符都不得删除。
 	var cur model.ReviewRun
@@ -154,6 +193,43 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 		cur.HeadSHA != run.HeadSHA || cur.ThreadID != run.ThreadID ||
 		cur.WorktreePath != path || other > 0 {
 		finish(model.ReviewWorktreeFailed, "工作区归属核验未通过，未执行删除", true)
+		return
+	}
+
+	// 登记核验：该 worktree 必须仍登记在 launch 时的 T3 项目下，且登记 ref 名
+	// 与线程分支一致——防误删已被另作他用的同路径工作区。
+	t3ProjectID := run.T3ProjectID
+	if t3ProjectID == "" {
+		if binding := s.bindingFor(run); binding != nil {
+			t3ProjectID = binding.T3ProjectID
+		}
+	}
+	if t3ProjectID == "" {
+		finish(model.ReviewWorktreeFailed, "无法定位项目工作区登记", true)
+		return
+	}
+	registered, err := s.t3.ListWorktrees(ctx, run.UserID, run.EnvironmentID, t3ProjectID)
+	if err != nil {
+		if tries := s.bumpWorktreeTries(run.ID); tries < reviewWorktreeMaxTries {
+			return
+		}
+		finish(model.ReviewWorktreeFailed, "读取项目工作区登记失败: "+err.Error(), true)
+		return
+	}
+	var refName *string
+	for i := range registered {
+		if registered[i].Path == path {
+			refName = &registered[i].RefName
+			break
+		}
+	}
+	if refName == nil {
+		// 已不在登记中（被用户或其他途径删掉）：没有可清的。
+		finish(model.ReviewWorktreeRemoved, "", false)
+		return
+	}
+	if *refName != branch {
+		finish(model.ReviewWorktreeFailed, "工作区分支与线程记录不一致，未执行删除", true)
 		return
 	}
 	// 删除 worktree：cwd 优先用 launch 时快照的 workspace_root——绑定之后被
@@ -192,6 +268,14 @@ func (s *ReviewService) bumpWorktreeTries(runID string) int {
 	defer s.worktreeMu.Unlock()
 	s.worktreeTries[runID]++
 	return s.worktreeTries[runID]
+}
+
+// releaseWorktreeTries 释放一个运行的回收重试计数：归档/回收走到终态时调用，
+// 防泄漏。重试中的分支不得调用（否则下个 tick 重新计，上限形同虚设）。
+func (s *ReviewService) releaseWorktreeTries(runID string) {
+	s.worktreeMu.Lock()
+	defer s.worktreeMu.Unlock()
+	delete(s.worktreeTries, runID)
 }
 
 // CleanupBeforeProjectDelete 删除项目前尽力清理远端资源：项目删除会 CASCADE
@@ -247,7 +331,17 @@ func (s *ReviewService) CleanupBeforeProjectDelete(ctx context.Context, projectI
 		if err := s.t3.ArchiveThread(callCtx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
 			s.logger.Warn("删除项目前归档审查线程失败", zap.String("run", run.ID), zap.Error(err))
 		}
-		if run.Kind == model.ReviewKindCode && run.WorktreePath != "" {
+		// 行里还没有路径时按线程投影取真值：launch 阶段不再解析路径，尚未走到
+		// 回收阶段的运行行内 worktree_path 就是空的（归档不会清掉线程记录）。
+		worktreePath := run.WorktreePath
+		if run.Kind == model.ReviewKindCode && worktreePath == "" {
+			if wt, err := s.t3.ThreadWorktree(callCtx, run.UserID, run.EnvironmentID, run.ThreadID); err != nil {
+				s.logger.Warn("删除项目前读取审查线程工作区失败", zap.String("run", run.ID), zap.Error(err))
+			} else if wt != nil {
+				worktreePath = wt.Path
+			}
+		}
+		if run.Kind == model.ReviewKindCode && worktreePath != "" {
 			cwd := run.WorkspaceRoot
 			if cwd == "" {
 				if binding := s.bindingFor(run); binding != nil {
@@ -258,7 +352,7 @@ func (s *ReviewService) CleanupBeforeProjectDelete(ctx context.Context, projectI
 				}
 			}
 			if cwd != "" {
-				if err := s.t3.RemoveWorktree(callCtx, run.UserID, run.EnvironmentID, cwd, run.WorktreePath, true); err != nil {
+				if err := s.t3.RemoveWorktree(callCtx, run.UserID, run.EnvironmentID, cwd, worktreePath, true); err != nil {
 					s.logger.Warn("删除项目前回收审查工作区失败", zap.String("run", run.ID), zap.Error(err))
 				}
 			}
