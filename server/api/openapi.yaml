@@ -6042,9 +6042,11 @@ paths:
     delete:
       tags: [screenshots]
       operationId: deleteScreenshotScreen
-      summary: 删除截图及其文件与全部标注（仅 JWT）
+      summary: 删除截图及其文件与全部标注
+      description: "支持 Authorization 头携带 JWT 或 API Key。删除为硬删除：级联删除该截图上的全部标注（FK CASCADE），并在事务提交后清理磁盘文件；截图不存在或属于其他用户时一律按不存在处理（40413）。"
       security:
         - jwtAuth: []
+        - apiKeyAuth: []
       parameters:
         - $ref: '#/components/parameters/ScreenshotScreenId'
       responses:
@@ -6052,8 +6054,6 @@ paths:
           $ref: '#/components/responses/EmptySuccess'
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':

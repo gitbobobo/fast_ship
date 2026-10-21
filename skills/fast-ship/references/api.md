@@ -5216,9 +5216,11 @@ platform 非法长度、locale 非法 BCP 47、theme 非 light|dark 返回 40001
 
 <!-- operationId: deleteScreenshotScreen -->
 
-删除截图及其文件与全部标注（仅 JWT）
+删除截图及其文件与全部标注
 
-**鉴权**：仅 JWT
+支持 Authorization 头携带 JWT 或 API Key。删除为硬删除：级联删除该截图上的全部标注（FK CASCADE），并在事务提交后清理磁盘文件；截图不存在或属于其他用户时一律按不存在处理（40413）。
+
+**鉴权**：JWT+API Key
 
 **路径参数**
 
@@ -5237,7 +5239,6 @@ platform 非法长度、locale 非法 BCP 47、theme 非 light|dark 返回 40001
 | HTTP | 说明 |
 | --- | --- |
 | 401 | 未提供或提供无效凭证（40100-40199） |
-| 403 | 已认证但无权限（40300-40399；40301=API Key 越权，40303=仅限 API Key） |
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 

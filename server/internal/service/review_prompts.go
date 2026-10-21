@@ -56,14 +56,15 @@ head 提交 {{head_sha}}（{{pr_url}}）。工作区已经按该 PR 的 head 分
 - ` + "`GET {{public_url}}/api/review-agent/history`" + ` → 历史上下文（Markdown，可能为空）
 - ` + "`POST {{public_url}}/api/review-agent/result`" + ` → 提交结论，请求体：
   {
-    "summary": "一段话总结本轮结论",
-    "findings": [{"level":"P1","file":"server/x.go","line":42,"body":"问题与改法"}],
+    "summary": "不超过两句：第一句本轮结论，第二句关键影响",
+    "findings": [{"level":"P1","file":"server/x.go","line":42,"body":"问题 / 影响 / 建议"}],
     "prior": [{"level":"P1","file":"server/x.go","line":42,"body":"原发现摘要","status":"fixed"}],
     "ui_changed": false,
     "ui_changed_since_last_visual": false
   }
-  ` + "`line`" + ` 是当前 HEAD 右侧代码行号，可省略；` + "`prior.status`" + ` 取 fixed / rejected / open，
-  rejected 必须写 ` + "`reason`" + `。提交成功即结束，不需要再调用其它接口。`
+  ` + "`body`" + ` 按「问题 / 影响 / 建议」组织，用短句或分号分隔，不要复述 summary；
+  ` + "`line`" + ` 是当前 HEAD 右侧代码行号，无法定位到 HEAD 行时省略（顶层评论会注明未行内标注）；
+  ` + "`prior.status`" + ` 取 fixed / rejected / open，rejected 必须写 ` + "`reason`" + `。提交成功即结束，不需要再调用其它接口。`
 
 const reviewVisualSystemPrompt = `你是 Fast Ship 的视觉审查员。本次审查对象是 {{repo}} 的 PR #{{pr_number}}「{{pr_title}}」，
 head 提交 {{head_sha}}。你只通过接口读取截图，不接触代码，也不改代码。

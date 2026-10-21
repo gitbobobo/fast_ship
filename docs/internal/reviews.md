@@ -199,6 +199,9 @@ seen SHA、取消旧轮全部失效）。
   `ui_changed` 与 `ui_changed_since_last_visual`；视觉审查按层级/间距/排版/
   颜色/交互/文案/可访问性七维度、blocker/worth_fixing/minor 三级。两份都
   明确「只读审查、不发评论、不改 PR 状态，结论只能经 `/result` 提交」。
+  代码审查另约束产出形态：`summary` ≤2 句（结论 + 关键影响），finding
+  按「问题 / 影响 / 建议」组织，`line` 无法定位到 HEAD 行时省略（顶层评论
+  会注明未行内标注）。
 
 ## 运行令牌与 Agent 端点（`/api/review-agent/*`）
 
@@ -275,11 +278,19 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
 ### 顶层评论（各一条，隐藏标记找回）
 
 - 代码审查：标记 `<!-- fast-ship-code-review -->`（`FindPullRequestComment`
-  找回 → `Update`/`Create`）。标题「代码审查结论：」，按组合分节、按
-  P0→P1→P2→Note 列出、带 `文件:行号`；没有 P0/P1/P2 时写「本轮未发现
-  P0/P1/P2 问题。」；将启动视觉审查时在复审说明之前加「视觉审查尚未结束，
-  将复核截图。」；截图复核遗留时加「截图复核意见尚未处理」；末尾固定复审
-  说明（推送后自动复审）。
+  找回 → `Update`/`Create`）。结构（`buildCodeComment`）：
+  - 标题 `## 代码审查 · <短SHA> · 第 N 轮`，下一行一句话结论（通过 /
+    P0–P2 计数 / 审查进行中 / N 个组合未完成）。
+  - 总览表 `组合 | 状态 | P0 | P1 | P2 | Note`：组合列是 `模型 · 实例`，
+    计数只对 completed 且结论可解析的组合统计，其余填 `–`。
+  - 按组合分节：`### 模型 · 实例` + 一行 `<sub>k=v · k=v</sub>`（选项去
+    JSON 引号，只截断选项本身、不截模型/实例），summary 用引用块。
+  - P0→P1→P2 每条：`**级别** [file:line](HEAD blob 行锚点)` 换行正文；
+    无法行内标注（无行号，或行号不在本次 diff 右侧有效行）的条目在位置后
+    注明「未行内标注」。Note 全部折叠进 `<details>`。
+  - 视觉待办/截图遗留提示在表格之后，末尾固定复审说明（推送后自动复审）。
+  - 行内标注判定与行内 review 共用一次 `GetPullRequestDiff` + 右侧有效行
+    集合（`fetchInlineLines`），不再重复拉取。
 - 视觉审查：标记 `<!-- fast-ship-visual-review -->`，标题「视觉审查意见：」，
   按严重度排序，每条带截图标签、维度、改法；不发行内评论。
 
@@ -435,19 +446,32 @@ SHA-256 前 16 位。
   按进程内计数有限重试（3 个 tick），超限置 `archived_at` 防无限重试
   并发 `review_cleanup_failed` 通知，代码运行同时置
   `worktree_state=failed`。
-- **删除**（`cleanupWorktrees` 阶段）：只处理已归档完成的代码运行，且
-  删除前核验——行快照仍属本运行（repo/pr/head/thread/path 一致）、
-  `worktree_path` 非空、且没有其他运行认领同一路径。任一不符一律
-  `failed` + `worktree_error` + `review_cleanup_failed` 通知，
-  **不删任何路径**。核验通过后
-  `vcs.removeWorktree{cwd: 项目 workspace_root, path: worktree_path,
-  force:true}`（T3 WS RPC，`git worktree remove --force`）。成功
-  `removed`。不重试、不影响审查结论。
-- worktree 路径只在 launch 确认后的有界窗口内解析：launch 前记录已知
-  路径集合，launch 后 3 次 ×1.5s 内取 `vcs.listRefs` 差集，新增的唯一
-  非空 `worktreePath` 即本次工作区并写库。**回收阶段不再差集猜路径**
-  ——窗口内解析不到就保持空，回收时按「无法证明归属」failed + 通知，
-  绝不误删。
+- **删除**（`cleanupWorktrees` 阶段）：只处理已归档完成的代码运行。工作区
+  的**唯一真值来自线程投影**（`GET /api/orchestration/threads/:id` 的
+  `projection.thread.worktreePath` / `.branch`，已归档线程同样可读）：
+  launch 确认时 T3 往往还没建好 worktree，启动前后做差集推断必然歧义，
+  该方案已废弃，`launchRun` 不再解析路径。
+  - 线程 404、读线程失败、线程 `worktreePath` 为空（T3 仍在准备）、登记读取
+    失败各自独立计数、有限重试（3 个 tick），成功一次即清零该原因的计数
+    （按「连续失败」而非累计）：404 连续 3 次都读不到才 `removed`（T3 删线程
+    后的磁盘工作区归 T3 生命周期管）；读线程失败到上限 → `failed` + 通知；
+    空路径到上限 → `removed`（无工作区）。
+  - 行内旧 `worktree_path` 与线程真值不一致 → `failed` + 通知，不删。
+  - 读到的路径写回运行行，然后逐项核验（核验与删除用**同一个 cwd**，即
+    launch 快照的 `workspace_root`；绑定/项目表变化不改变证明对象）：行快照
+    仍属本运行（repo/pr/head/thread/path 一致）、没有仍待回收的运行认领同一
+    路径（只看 `worktree_state=none`）、该路径仍登记在项目 `vcs.listRefs`
+    且登记 ref 名里含线程 `branch`（`branch` 为空时只要求登记命中）。
+  - 登记列表必须完整：`vcs.listRefs` 分页未耗完（超过页数上限）按上游错误
+    重试，绝不把不完整列表当成「未登记」。未登记（已被别处删掉）→
+    `removed`，不调用删除；ref 名不一致 → `failed` + 通知；列举失败 →
+    有限重试后 `failed` + 通知。
+  - 核验通过才 `vcs.removeWorktree{cwd: launch 时快照的 workspace_root,
+    path: worktree_path, force:true}`（T3 WS RPC，`git worktree remove
+    --force`），成功 `removed`。任何不确定都不删，不影响审查结论。
+- 删除项目时的 best-effort 回收与常规回收共用同一套归属核验：只有线程投影
+  成功读到、且与行内快照一致时才继续，读不到/路径冲突/核验不过都只记日志
+  跳过——项目行 CASCADE 后没有重试机会，宁缺毋滥。
 - 视觉运行 `worktree_state` 恒 `none`，只归档线程、无工作区可删。
 
 ## 页面

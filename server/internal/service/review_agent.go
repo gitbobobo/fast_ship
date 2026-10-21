@@ -166,7 +166,12 @@ func (s *ReviewService) codeHistory(ctx context.Context, run *model.ReviewRun) (
 		}
 		fmt.Fprintf(&b, "## 上一轮（轮次 %d，head %s）\n", run.RoundNumber-1, reviewShortSHA(prevRuns[0].HeadSHA))
 		for _, r := range prevRuns {
-			fmt.Fprintf(&b, "### 组合 %s\n", runCombinationLabel(&r))
+			// 历史上下文是纯文本：选项拼在标题行，不用 <sub>（那是渲染层的小字）。
+			label := runCombinationLabel(&r)
+			if opts := runCombinationOptions(&r); opts != "" {
+				label += " · " + opts
+			}
+			fmt.Fprintf(&b, "### 组合 %s\n", label)
 			if r.Status == model.ReviewRunCompleted && r.ResultJSON != "" {
 				var result api.ReviewCodeResult
 				if json.Unmarshal([]byte(r.ResultJSON), &result) == nil {
@@ -314,27 +319,53 @@ func reviewShortSHA(sha string) string {
 	return sha
 }
 
-// reviewLabelMaxRunes 组合显示名上限（字符）：model/options/instance 取自
-// 项目配置，长度不可控——标签会进 commit status 描述与评论分节标题，超
-// 长输入截断防止灌爆。
-const reviewLabelMaxRunes = 60
+// reviewOptionsMaxRunes 组合选项串上限（字符）：选项取自项目配置，长度不可控
+// ——只截选项串自身；实例名是分节标题里最有用的部分，不参与截断。
+const reviewOptionsMaxRunes = 80
 
-// runCombinationLabel 组合显示名：model[opt=val,...] / instance（沿用历史
-// 上下文与评论分节的同一标签），截断到 reviewLabelMaxRunes。
+// singleLine 把可能来自配置/上游的显示文本压成一行：换行会拆开标题、表格和
+// 评论结构，统一换成空格后由各消费点再做自己的转义（表格转义竖线等）。
+func singleLine(s string) string {
+	s = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(s)
+	return strings.TrimSpace(s)
+}
+
+// runCombinationLabel 组合显示名：模型 · 实例。不拼选项也不截断——选项另有
+// runCombinationOptions 单独展示（评论 <sub> 小字、历史标题纯文本），避免
+// 整体截断后把信息量最低的模型名前缀留下、最有用的实例名被截掉。模型/实例
+// 来自项目配置，可能含换行，压成单行后再拼。
 func runCombinationLabel(run *model.ReviewRun) string {
-	label := run.Model
-	if run.ModelOptionsJSON != "" && run.ModelOptionsJSON != "null" {
-		var opts []api.ReviewModelOption
-		if json.Unmarshal([]byte(run.ModelOptionsJSON), &opts) == nil && len(opts) > 0 {
-			parts := make([]string, 0, len(opts))
-			for _, o := range opts {
-				raw, _ := json.Marshal(o.Value)
-				parts = append(parts, fmt.Sprintf("%s=%s", o.Id, raw))
+	return singleLine(run.Model) + " · " + singleLine(run.InstanceID)
+}
+
+// runCombinationOptions 组合选项串：k=v · k=v。值取 JSON 解码后的原生形态：
+// 字符串原样（不加引号）、null 输出 "null"（%v 会输出 <nil>）、其余类型走
+// json.Marshal（bool/number 稳定可读），整体截断到 reviewOptionsMaxRunes；
+// 无选项或选项 JSON 损坏返回空串。HTML 转义在渲染层做（见 buildCodeComment）。
+func runCombinationOptions(run *model.ReviewRun) string {
+	if run.ModelOptionsJSON == "" || run.ModelOptionsJSON == "null" {
+		return ""
+	}
+	var opts []api.ReviewModelOption
+	if json.Unmarshal([]byte(run.ModelOptionsJSON), &opts) != nil || len(opts) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(opts))
+	for _, o := range opts {
+		switch v := o.Value.(type) {
+		case nil:
+			parts = append(parts, o.Id+"=null")
+		case string:
+			parts = append(parts, o.Id+"="+v)
+		default:
+			encoded, err := json.Marshal(v)
+			if err != nil {
+				encoded = []byte(fmt.Sprintf("%v", v))
 			}
-			label += "[" + strings.Join(parts, ",") + "]"
+			parts = append(parts, o.Id+"="+string(encoded))
 		}
 	}
-	return truncateRunes(label+" / "+run.InstanceID, reviewLabelMaxRunes)
+	return truncateRunes(strings.Join(parts, " · "), reviewOptionsMaxRunes)
 }
 
 // AgentSubmitResult POST /api/review-agent/result：结构化结论的校验与落地。

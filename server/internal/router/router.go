@@ -231,13 +231,14 @@ func Setup(
 		api.DELETE("/attachments/:aid", middleware.RequireAuth(cfg, apiKeyRepo, authService), issueAttachmentHandler.Delete)
 		api.GET("/attachments/:aid/download", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), issueAttachmentHandler.Download)
 
-		// 截图库 —— 上传与读 JWT / API Key 均可；标题/维度修改与删除仅 JWT；content 支持 ?token= 供 <img> 直链
+		// 截图库 —— 上传、读与删除 JWT / API Key 均可（归属校验在 service 内按凭证用户走同一条链）；
+		// 标题/维度修改仅 JWT；content 支持 ?token= 供 <img> 直链
 		api.POST("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.Upload)
 		api.GET("/projects/:id/screenshots", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.List)
 		api.GET("/screenshot-screens/:sid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
 		api.HEAD("/screenshot-screens/:sid/content", middleware.RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token"), screenshotHandler.Content)
 		api.PATCH("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.Update)
-		api.DELETE("/screenshot-screens/:sid", middleware.RequireJWT(cfg, authService), screenshotHandler.DeleteScreen)
+		api.DELETE("/screenshot-screens/:sid", middleware.RequireAuth(cfg, apiKeyRepo, authService), screenshotHandler.DeleteScreen)
 
 		// 截图标注 —— 列表与裁剪图 JWT / API Key 均可；新建、删除与批量动作仅 JWT；
 		// PUT 两类凭证均可，service 内再按凭证限制 API Key 只能置 resolved；crop 支持 ?token= 直链。
