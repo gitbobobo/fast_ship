@@ -262,6 +262,39 @@ func (s *ReviewService) doSyncPR(ctx context.Context, ledger *model.ReviewPullRe
 	if err := s.syncTargetStillCurrent(ledger, epoch); err != nil {
 		return err
 	}
+	// PR 已关闭/合并：不写任何 GitHub 产出（合并后 head 不再变化，下面的
+	// SHA 让路判断不会拦住写入，必须先判关闭）。同一事务清 pending、推进
+	// epoch 并取消在途运行——与 webhook closed 分支同口径；ledger 更新带
+	// epoch 守卫：同步期间账本被新事件推进（如 reopened 已开新轮）时不动，
+	// 交给新 epoch 的下一轮。
+	if !prReviewable(pr) {
+		var done bool
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			res := tx.Model(&model.ReviewPullRequest{}).
+				Where("project_id = ? AND repo_full_name = ? AND pr_number = ? AND sync_epoch = ?",
+					ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, epoch).
+				Updates(map[string]any{
+					"sync_pending": false,
+					"sync_epoch":   gorm.Expr("sync_epoch + 1"),
+					"updated_at":   now,
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return nil
+			}
+			done = true
+			return s.supersedePRRunsTx(tx, ledger.ProjectID, ledger.RepoFullName, ledger.PRNumber, now)
+		})
+		if err != nil {
+			return errs.New(errs.ErrInternal.Code, "PR 关闭收尾失败: "+err.Error())
+		}
+		if !done {
+			return errReviewSyncAbandoned
+		}
+		return nil
+	}
 	// GitHub 上已经前进、但 webhook 还没处理时，账本与运行仍是旧 SHA：此时
 	// 不能拿新 PR 描述/SHA 去发布旧轮结论或建视觉运行。保留 pending 等 webhook
 	// 推进（webhook 会清 pending 并推进 head）。

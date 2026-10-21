@@ -41,6 +41,7 @@ func TestReviewRepoCaseNormalization(t *testing.T) {
 	e.svc.db.Model(&model.ReviewDebounce{}).
 		Where("repo_full_name = ? AND pr_number = 91", repo).
 		Update("fire_at", now.Add(-time.Second))
+	e.fake.SetPR(repo, 91, &githubapi.PullRequest{HeadSHA: "sha-c1"})
 	e.review.processDueDebounces(now.Add(time.Second))
 
 	// 第二次推送：把首个 seen 行的 pr_updated_at 改旧，防过期 SHA 判定吞掉。
@@ -53,6 +54,7 @@ func TestReviewRepoCaseNormalization(t *testing.T) {
 	e.svc.db.Model(&model.ReviewDebounce{}).
 		Where("repo_full_name = ? AND pr_number = 91", repo).
 		Update("fire_at", now.Add(-time.Second))
+	e.fake.SetPR(repo, 91, &githubapi.PullRequest{HeadSHA: "sha-c2"})
 	e.review.processDueDebounces(now.Add(2 * time.Second))
 
 	// 只有一本账，键全小写，轮次连续推进到 2。
@@ -256,6 +258,7 @@ func TestReviewLaunchRunSuccess(t *testing.T) {
 
 	run := e.seedRun(t, repo, 33, "sha-d", model.ReviewRunDispatched, now)
 	e.svc.db.Model(run).Update("environment_id", env.ID)
+	e.fake.SetPR(repo, 33, &githubapi.PullRequest{HeadSHA: "sha-d"})
 
 	review.launchRun(context.Background(), run.ID, now)
 
@@ -390,6 +393,7 @@ func TestReviewLaunchCancelledDuringPrepareStillRecordsThread(t *testing.T) {
 	run := e.seedRun(t, repo, 34, "sha-race", model.ReviewRunDispatched, now)
 	runID = run.ID
 	e.svc.db.Model(run).Update("environment_id", env.ID)
+	e.fake.SetPR(repo, 34, &githubapi.PullRequest{HeadSHA: "sha-race"})
 
 	review.launchRun(context.Background(), run.ID, now)
 

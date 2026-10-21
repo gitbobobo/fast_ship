@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/api"
+	"github.com/godbobo/fast_ship/server/internal/githubapi"
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -85,6 +86,28 @@ func (s *ReviewService) launchRun(ctx context.Context, runID string, now time.Ti
 	}
 	if publicURL == "" {
 		fail("public_url 未配置")
+		return
+	}
+
+	// 建线程前最后一道关卡：PR 实况必须还是 open（覆盖「排队期间 PR 被关、
+	// closed 投递丢失」——closed 有意不进重投，对账不会补）。已关闭/合并
+	// 直接落 cancelled/pr_closed 终态，不建线程。检查必须在签发令牌之前：
+	// 只有从未签发的运行才会被 dispatchRuns 的认领超窗重新认领——读 PR 失败
+	// 时同样不落终态、不签令牌，留给下一轮。
+	prCtx, prCancel := context.WithTimeout(ctx, 30*time.Second)
+	client, clientErr := s.ghClient(prCtx)
+	var pr *githubapi.PullRequest
+	if clientErr == nil {
+		pr, clientErr = client.GetPullRequest(prCtx, run.InstallationID, run.RepoFullName, run.PRNumber)
+	}
+	prCancel()
+	if clientErr != nil {
+		s.logger.Warn("派发前读取 PR 失败，运行等待重新认领",
+			zap.String("run", run.ID), zap.Error(clientErr))
+		return
+	}
+	if !prReviewable(pr) {
+		s.cancelRunPRClosed(&run, now)
 		return
 	}
 
@@ -199,6 +222,38 @@ func (s *ReviewService) failRunDispatch(runID, code, msg string, now time.Time) 
 		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
 	})
 	s.publishReviewNotification(&run, model.NotificationReviewDispatchFailed, msg, now)
+}
+
+// cancelRunPRClosed PR 已关闭时把运行落终态：cancelled + error_code=pr_closed
+// + 消费令牌 + 置 PR sync_pending。与 failRunDispatch 同构但不是派发失败——
+// PR 关闭是正常终局，不发 dispatch_failed 通知。
+func (s *ReviewService) cancelRunPRClosed(run *model.ReviewRun, now time.Time) {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.ReviewRun{}).
+			Where("id = ? AND status IN ?", run.ID,
+				[]model.ReviewRunStatus{model.ReviewRunQueued, model.ReviewRunDispatched, model.ReviewRunRunning}).
+			Updates(map[string]any{
+				"status":      model.ReviewRunCancelled,
+				"error_code":  "pr_closed",
+				"finished_at": now,
+				"updated_at":  now,
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		if err := tx.Model(&model.ReviewRunToken{}).
+			Where("run_id = ? AND consumed_at IS NULL", run.ID).
+			Update("consumed_at", now).Error; err != nil {
+			return err
+		}
+		return s.markPRSyncPendingByRepoTx(tx, run.ProjectID, run.RepoFullName, run.PRNumber, now)
+	})
+	if err != nil {
+		s.logger.Error("PR 关闭收尾运行失败", zap.String("run", run.ID), zap.Error(err))
+	}
 }
 
 // markPRSyncPendingByRepoTx 本项目总账置 sync_pending（不重取项目——行已

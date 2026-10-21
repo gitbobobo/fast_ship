@@ -25,6 +25,18 @@ import (
 // reviewWorktreeMaxTries 归档等回收动作的有限重试次数（tick 数）。
 const reviewWorktreeMaxTries = 3
 
+// reviewRunNeverLaunched 「确定没有建成线程」的谓词。pr_closed 一定是未建
+// 线程：该取消发生在 launchRun 的 PR 实况关卡（CreateThreadForAgent 之前），
+// 运行落 cancelled 时启动请求从未发出；dispatch_failed 是请求帧未写出，
+// 线程同样未建。archiveRuns 与 cleanupRunWorktree 用同一份判定，避免一处
+// 漏改把「无线程可停/可归档」误判成「回收失败」发假告警。不要泛化到所有
+// dispatched_at 为空的运行——结果未确认（请求已发出）的运行线程可能实际
+// 已建成，仍要尝试停掉/归档，否则线程永久游离。
+func reviewRunNeverLaunched(run *model.ReviewRun) bool {
+	return run.DispatchedAt == nil &&
+		(run.ErrorCode == "dispatch_failed" || run.ErrorCode == "pr_closed")
+}
+
 // 回收阶段的有限重试按原因独立计数（archive/线程读取/空路径/404/登记）：
 // 混用同一个计数会让混合失败序列里某个原因的实际宽限缩水。
 const (
@@ -38,7 +50,9 @@ const (
 // archiveRuns 调度阶段：挑线程「可能已建成」的终态运行逐条归档——
 // dispatch_started_at 非空即可能已发出启动，包括 dispatched_at 为空
 // （请求已发出但响应丢失、随后超时）的运行：这些线程同样需要停掉/归档，
-// 否则会永久游离。明确 dispatch_failed（请求帧未发出）的跳过。
+// 否则会永久游离。确定无线程的运行跳过（reviewRunNeverLaunched：请求帧未
+// 发出的 dispatch_failed、建线程前就被 PR 关闭关卡拦下的 pr_closed）；SQL
+// 条件与该谓词同口径，谓词改动须同步此处。
 func (s *ReviewService) archiveRuns(now time.Time) {
 	if s.t3 == nil {
 		return
@@ -46,7 +60,8 @@ func (s *ReviewService) archiveRuns(now time.Time) {
 	var runs []model.ReviewRun
 	if err := s.db.
 		Where(`dispatch_started_at IS NOT NULL AND archived_at IS NULL AND status IN ?
-			AND error_code <> 'dispatch_failed'`,
+			AND (dispatched_at IS NOT NULL OR
+				(COALESCE(error_code, '') <> 'dispatch_failed' AND COALESCE(error_code, '') <> 'pr_closed'))`,
 			[]model.ReviewRunStatus{model.ReviewRunCompleted, model.ReviewRunFailed,
 				model.ReviewRunTimedOut, model.ReviewRunCancelled}).
 		Order("finished_at ASC").Limit(reviewStageBatch).Find(&runs).Error; err != nil {
@@ -139,8 +154,9 @@ func (s *ReviewService) cleanupRunWorktree(run *model.ReviewRun, now time.Time) 
 		finish(model.ReviewWorktreeRemoved, "", false)
 		return
 	}
-	// 派发在写请求帧之前失败（dispatch_failed）：线程与工作区都未建成。
-	if run.DispatchedAt == nil && run.ErrorCode == "dispatch_failed" {
+	// 确定没有建成线程的（dispatch_failed 请求帧未发出、pr_closed 建线程前
+	// 就被拦下）：线程与工作区都未建成，无可停、无可归、无可删。
+	if reviewRunNeverLaunched(run) {
 		finish(model.ReviewWorktreeRemoved, "", false)
 		return
 	}

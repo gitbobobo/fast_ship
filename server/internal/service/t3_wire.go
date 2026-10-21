@@ -112,6 +112,7 @@ type t3AppThread struct {
 	WorktreePath           *string          `json:"worktreePath"`
 	Lineage                *t3ThreadLineage `json:"lineage"`
 	ArchivedAt             *string          `json:"archivedAt"`
+	DeletedAt              *string          `json:"deletedAt"`
 	UpdatedAt              string           `json:"updatedAt"`
 }
 
@@ -133,16 +134,19 @@ type t3ThreadProjection struct {
 	VisibleTurnItems []t3ProjectedTurnRow `json:"visibleTurnItems"`
 }
 
-// t3Run 是投影里的 run 行（只解码派生队列/活动用到的字段）。
+// t3Run 是投影里的 run 行（只解码派生队列/活动用到的字段）。WorkspacePreparation
+// 只判存在（非空指针即带该字段）：它是 T3 侧「工作区准备」run 的标记，重试
+// 判定要求目标 run 携带它，字段本体 Fast Ship 不建模。
 type t3Run struct {
-	ID               string  `json:"id"`
-	Ordinal          int     `json:"ordinal"`
-	Status           string  `json:"status"`
-	QueuePosition    *int    `json:"queuePosition"`
-	QueueHeld        *bool   `json:"queueHeld"`
-	UserMessageID    string  `json:"userMessageId"`
-	ProviderThreadID *string `json:"providerThreadId"`
-	ActiveAttemptID  *string `json:"activeAttemptId"`
+	ID                   string           `json:"id"`
+	Ordinal              int              `json:"ordinal"`
+	Status               string           `json:"status"`
+	QueuePosition        *int             `json:"queuePosition"`
+	QueueHeld            *bool            `json:"queueHeld"`
+	UserMessageID        string           `json:"userMessageId"`
+	ProviderThreadID     *string          `json:"providerThreadId"`
+	ActiveAttemptID      *string          `json:"activeAttemptId"`
+	WorkspacePreparation *json.RawMessage `json:"workspacePreparation"`
 }
 
 // t3Message 是投影里的会话消息行（排队消息的正文/附件来源）。

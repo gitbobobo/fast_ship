@@ -123,6 +123,10 @@ type ReviewRun struct {
 	FinishedAt   *time.Time `gorm:"index" json:"finished_at,omitempty"`
 	DeadlineAt   time.Time  `gorm:"column:deadline_at;not null" json:"deadline_at"`
 
+	// PrepRetryCount T3 工作区准备失败后的自动重试次数（INT-147）：重试前先
+	// 条件加一再发 RPC；达到上限后运行落 failed 终态，不再发第 4 次。
+	PrepRetryCount int `gorm:"column:prep_retry_count;not null;default:0" json:"prep_retry_count"`
+
 	ErrorCode    string `gorm:"column:error_code;type:text" json:"error_code,omitempty"`
 	ErrorMessage string `gorm:"column:error_message;type:text" json:"error_message,omitempty"`
 	Summary      string `gorm:"type:text" json:"summary,omitempty"`

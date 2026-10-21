@@ -22,7 +22,8 @@ import (
 // fakeReviewT3 线程/工作区执行面的内存桩：记录调用、可注入错误。
 // ThreadWorktree 按 threadID 查 threadWorktreeErrs（单线程错误优先）、
 // threadWorktrees（未命中回 threadWTDefault）；全局 threadWTErrs 按调用次序
-// 出队，取完后回 threadWTErr。createFn 非空时代替默认桩。
+// 出队，取完后回 threadWTErr。createFn 非空时代替默认桩。准备失败判定
+// （INT-147）按 threadID 查 prepFailed，缺 key 回 (nil, nil)。
 type fakeReviewT3 struct {
 	threadWorktrees    map[string]T3ThreadWorktree
 	threadWorktreeErrs map[string]error
@@ -40,8 +41,21 @@ type fakeReviewT3 struct {
 	removeErr          error
 	archived           []string
 	archiveErr         error
-	createFn           func(context.Context, string, string, *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
-	created            []*T3CreateThreadRequest
+	prepFailed         map[string]*T3FailedPreparation
+	prepErr            error
+	prepCalls          []string // threadID:messageID
+	// prepFn 非空时代替 prepFailed/prepErr：在投影读里执行（测试用假时钟注入
+	// 「慢投影读」的耗时，确定性验证阶段预算与轮转）。
+	prepFn      func(threadID string) (*T3FailedPreparation, error)
+	retried     []string // threadID
+	retryRunIDs []string
+	retryCmdIDs []string
+	retryErr    error
+	// retryFn 非空时代替 retryErr：在重试 RPC 里执行（注入「RPC 期间运行被
+	// 并发终态化」等场景），返回值作为 RPC 结果。
+	retryFn  func(threadID string) error
+	createFn func(context.Context, string, string, *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
+	created  []*T3CreateThreadRequest
 }
 
 func (f *fakeReviewT3) CreateThreadForAgent(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error) {
@@ -93,6 +107,30 @@ func (f *fakeReviewT3) RemoveWorktree(_ context.Context, _, _, cwd, path string,
 func (f *fakeReviewT3) ArchiveThread(_ context.Context, _, _, threadID string) error {
 	f.archived = append(f.archived, threadID)
 	return f.archiveErr
+}
+
+func (f *fakeReviewT3) FailedPreparation(_ context.Context, _, _, threadID, messageID string) (*T3FailedPreparation, error) {
+	f.prepCalls = append(f.prepCalls, threadID+":"+messageID)
+	if f.prepFn != nil {
+		return f.prepFn(threadID)
+	}
+	if f.prepErr != nil {
+		return nil, f.prepErr
+	}
+	if out, ok := f.prepFailed[threadID]; ok {
+		return out, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeReviewT3) RetryPreparation(_ context.Context, _, _, threadID, t3RunID, commandID string) error {
+	f.retried = append(f.retried, threadID)
+	f.retryRunIDs = append(f.retryRunIDs, t3RunID)
+	f.retryCmdIDs = append(f.retryCmdIDs, commandID)
+	if f.retryFn != nil {
+		return f.retryFn(threadID)
+	}
+	return f.retryErr
 }
 
 // withT3 在共享测试库上组装一个带 T3/媒体桩的 ReviewService。media 传 nil
