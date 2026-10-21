@@ -38,11 +38,12 @@ type reviewT3 interface {
 	ArchiveThread(ctx context.Context, userID, envID, threadID string) error
 }
 
-// reviewMedia 视觉截图下载面；*githubmedia.ProxyService 实现（白名单+磁盘缓存，
-// 匿名与 Bearer 两路）。
+// reviewMedia 截图下载面：任意公网 https 图片、只收图片、拨号校验 IP；磁盘
+// 缓存。*githubmedia.ProxyService（NewReviewMediaService 构造）实现，匿名与
+// Bearer 两路。
 type reviewMedia interface {
 	FetchAndCache(ctx context.Context, rawURL string) (*githubmedia.CachedMedia, error)
-	FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer string) (*githubmedia.CachedMedia, error)
+	FetchAndCacheWithBearer(ctx context.Context, rawURL, bearer, scope string) (*githubmedia.CachedMedia, error)
 }
 
 // ReviewService PR 审查协调面：webhook 事务（幂等登记与防抖写库）与调度循环
