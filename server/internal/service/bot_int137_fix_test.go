@@ -530,3 +530,26 @@ func TestBotEOFWithoutFinishReasonFails(t *testing.T) {
 		t.Fatalf("半截回复不得提交为 assistant 消息，实得 %d 条", assistants)
 	}
 }
+
+// 请求登记参与停止协议：run 已请求停止时不得再登记新请求（否则停止 UPDATE
+// 命中后仍会发起请求并推进水位，停止之后的新输入就再没人处理）。
+func TestBotBeginModelRequestRefusesAfterStop(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "stopreg")
+	bot := env.createBot(t, userID)
+	run := seedMainRun(t, env, bot.ID)
+	now := time.Now().UTC()
+	if err := env.db.Model(&model.BotRun{}).Where("id = ?", run.ID).
+		Update("stop_requested_at", now).Error; err != nil {
+		t.Fatalf("mark stop: %v", err)
+	}
+	built := &botBuiltContext{InputThroughSeq: 1}
+	if _, err := env.bots.beginModelRequest(mustBotOf(t, env, bot.ID), run, built); !errors.Is(err, errBotRunStopBeforeRequest) {
+		t.Fatalf("已请求停止时登记请求应被拒绝，实得 %v", err)
+	}
+	var n int64
+	env.db.Model(&model.BotModelRequest{}).Where("run_id = ?", run.ID).Count(&n)
+	if n != 0 {
+		t.Fatalf("被拒绝的登记不得落请求行，实得 %d", n)
+	}
+}

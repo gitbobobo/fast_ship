@@ -179,7 +179,7 @@ func botLooksQuotaExhausted(lower string) bool {
 func botLooksAuthFailed(lower string) bool {
 	for _, m := range []string{
 		"invalid api key", "incorrect api key", "invalid_api_key",
-		"unauthorized", "authentication", "api key not valid",
+		"api key not valid", "incorrect api key provided", "authenticationerror",
 	} {
 		if strings.Contains(lower, m) {
 			return true
@@ -191,7 +191,7 @@ func botLooksAuthFailed(lower string) bool {
 // botLooksModelMissing 是模型不存在文案判定。
 func botLooksModelMissing(lower string) bool {
 	for _, m := range []string{
-		"model_not_found", "model not found", "no such model", "does not exist", "unknown model",
+		"model_not_found", "model not found", "no such model", "unknown model",
 		"invalid model", "unsupported model",
 	} {
 		if strings.Contains(lower, m) {

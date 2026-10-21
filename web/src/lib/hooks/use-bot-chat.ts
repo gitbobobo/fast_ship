@@ -93,10 +93,27 @@ const AI_PROVIDERS_ACTION: BotRunErrorAction = {
  * 服务端 created_at 是 RFC3339Nano，小数位不固定（`.1Z` / `.11Z` / 无小数），
  * 字符串比较会排错，统一解析成毫秒时间戳再比。
  */
-function runCreatedAtMs(run: BotRun): number {
-  if (typeof run.created_at !== "string" || run.created_at === "") return NaN;
-  const parsed = Date.parse(run.created_at);
-  return Number.isNaN(parsed) ? NaN : parsed;
+function runCreatedAtKey(run: BotRun): { ms: number; frac: string } | null {
+  if (typeof run.created_at !== "string" || run.created_at === "") return null;
+  const ms = Date.parse(run.created_at);
+  if (Number.isNaN(ms)) return null;
+  // Date.parse 只保留毫秒；RFC3339Nano 的小数位可以到纳秒，取出来做同毫秒
+  // 的次级比较（.1239 晚于 .1234，字符串比较会判反）。
+  const matched = /\.(\d+)/.exec(run.created_at);
+  const frac = (matched?.[1] ?? "").padEnd(9, "0").slice(0, 9);
+  return { ms, frac };
+}
+
+function compareRunCreatedAt(a: BotRun, b: BotRun): number {
+  const left = runCreatedAtKey(a);
+  const right = runCreatedAtKey(b);
+  if (left && right) {
+    if (left.ms !== right.ms) return left.ms - right.ms;
+    return left.frac.localeCompare(right.frac);
+  }
+  if (left) return 1;
+  if (right) return -1;
+  return 0;
 }
 
 export function pickRunError(runs: BotRun[] | undefined): BotRunError | null {
@@ -105,11 +122,7 @@ export function pickRunError(runs: BotRun[] | undefined): BotRunError | null {
     // 缺时间戳的 run（旧服务端来的 run_started 没有 created_at）只在双方都
     // 缺时按追加次序胜出；一方带时间戳就以时间戳为准——否则永远赢过缓存里
     // 已存在的 run，旧失败会盖住后续成功一直挂在顶上。
-    const at = runCreatedAtMs(run);
-    const newestAt = runCreatedAtMs(newest);
-    if (Number.isNaN(at)) return Number.isNaN(newestAt) ? run : newest;
-    if (Number.isNaN(newestAt)) return run;
-    return at >= newestAt ? run : newest;
+    return compareRunCreatedAt(run, newest) >= 0 ? run : newest;
   });
   if (latest.status !== "failed") return null;
   const code = latest.error_code ?? "";

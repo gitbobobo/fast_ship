@@ -1722,6 +1722,16 @@ describe("pickRunError", () => {
     ).toBeNull();
   });
 
+  it("同毫秒的纳秒小数位也能分出先后", () => {
+    // 数组按新到旧排列：.1239 的成功比 .1234 的失败晚，错误条应消失。
+    expect(
+      pickRunError([
+        run({ id: "r-ok", created_at: "2026-10-15T00:00:00.1239Z" }),
+        failedAuth("r-err", "2026-10-15T00:00:00.1234Z"),
+      ]),
+    ).toBeNull();
+  });
+
   it("双方都缺时间戳时按追加次序取最新", () => {
     // 不传 created_at 即缺省（undefined），等价于旧服务端事件折叠出的 run。
     const first = failedAuth("r-1");

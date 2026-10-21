@@ -379,14 +379,10 @@ func (s *BotService) openProviderCircuitOnFailure(bot *model.Bot, run *model.Bot
 		// provider 行已删除：没有可熔断的对象，跳过即可。
 		return
 	}
-	if run.StartedAt != nil {
-		configAt := p.ConfigVersionAt
-		if configAt == nil {
-			configAt = &p.UpdatedAt
-		}
-		if configAt.After(*run.StartedAt) {
-			return
-		}
+	if run.StartedAt != nil && p.ConfigVersionAt != nil && p.ConfigVersionAt.After(*run.StartedAt) {
+		// 版本号为空的旧记录不参与判断（OpenCircuit 的 WHERE 同样放行 NULL）：
+		// 用 updated_at 兜底会让「只改名字」也阻止熔断。
+		return
 	}
 	// 配置版本条件同样写进 OpenCircuit 的 WHERE（检查与写入原子）：上面
 	// 的预检只是快速路径，真正防竞态的是那句 updated_at <= 本 run 开始时刻。

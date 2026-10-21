@@ -245,8 +245,10 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 			})
 			writeChunk(string(usageRaw))
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		if !turn.NoFinish {
+			fmt.Fprint(w, "data: [DONE]\n\n")
+			flusher.Flush()
+		}
 	}))
 	t.Cleanup(f.srv.Close)
 	t.Cleanup(func() { close(f.shutdown) })

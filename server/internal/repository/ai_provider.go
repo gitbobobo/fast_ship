@@ -102,13 +102,26 @@ func (r *AIProviderRepository) UpdateConfigTx(tx *gorm.DB, p *model.AIProvider, 
 }
 
 // MarkConfigVerified 记录「当前配置在此时刻被验证可用」（INT-137）：测试连接
-// 用与库存一致的密钥探通时调用，同时清除熔断。迟到的旧凭证失败不会再次熔断。
-func (r *AIProviderRepository) MarkConfigVerified(id string, now time.Time) error {
-	return r.db.Model(&model.AIProvider{}).Where("id = ?", id).Updates(map[string]interface{}{
+// 用与库存一致的密钥探通时调用，同时清除熔断。条件更新把「验证的是哪份配置」
+// 写进 WHERE：探测期间用户改了地址或换了凭证，这次结果就作废（0 行），不会
+// 把另一份未经探测的配置标成已验证。expectedConfigAt 为 nil 时只认还没有
+// 版本号的旧记录。
+func (r *AIProviderRepository) MarkConfigVerified(id, expectedBaseURL string, expectedConfigAt *time.Time, now time.Time) (bool, error) {
+	q := r.db.Model(&model.AIProvider{}).Where("id = ? AND base_url = ?", id, expectedBaseURL)
+	if expectedConfigAt == nil {
+		q = q.Where("config_version_at IS NULL")
+	} else {
+		q = q.Where("config_version_at IS ?", *expectedConfigAt)
+	}
+	res := q.Updates(map[string]interface{}{
 		"circuit_open_until": nil,
 		"circuit_reason":     "",
 		"config_version_at":  now,
-	}).Error
+	})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // Delete 删除一行；行不存在返回 gorm.ErrRecordNotFound。

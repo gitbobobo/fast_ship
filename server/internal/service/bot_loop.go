@@ -277,6 +277,12 @@ runLoop:
 		for attempt := 0; ; attempt++ {
 			requestRow, err = s.beginModelRequest(bot, run, built)
 			if err != nil {
+				if errors.Is(err, errBotRunStopBeforeRequest) {
+					// 停止/结束先落库：不再发请求，也不推进水位（停止之后的新输入
+					// 留给下一次 run），直接收尾。
+					s.finishStopped(bot, run)
+					return
+				}
 				s.finishFailed(bot, run, "request_record_failed", err)
 				return
 			}
@@ -348,7 +354,9 @@ runLoop:
 		}
 		s.accumulateRunUsage(run, reply)
 
-		calls, err := s.commitAssistantTurn(bot, run, requestRow, reply, assistantMsgID)
+		// 用 = 而不是 :=：外层 calls 保留给循环顶部的 closeUnstartedSyncCalls，
+		// 不留一个永远为 nil 的变量（INT-137 复审顺手清理）。
+		calls, err = s.commitAssistantTurn(bot, run, requestRow, reply, assistantMsgID)
 		if err != nil {
 			s.finishFailed(bot, run, "commit_failed", err)
 			return
@@ -669,9 +677,24 @@ func (s *BotService) finishFailedDetail(bot *model.Bot, run *model.BotRun, code,
 
 // ---------- 模型请求记录 ----------
 
+// errBotRunStopBeforeRequest 表示登记请求前发现 run 已请求停止或已结束：这时
+// 不能再发起模型请求——否则停止 UPDATE 已经命中（没有更新的请求）之后，本条
+// 请求仍会登记并推进输入水位，随后被取消，停止之后的新输入就再也没人处理。
+// 停止标记与请求登记都走数据库，MaxOpenConns(1) 下两个事务串行：要么停止先
+// 落库（这里看见标记直接收尾），要么请求先登记（停止的条件 UPDATE 看见更高
+// ordinal 而落空），不存在两者都成功却互相不知道的交错。
+var errBotRunStopBeforeRequest = errors.New("bot run stopped before model request")
+
 func (s *BotService) beginModelRequest(bot *model.Bot, run *model.BotRun, built *botBuiltContext) (*model.BotModelRequest, error) {
 	var row *model.BotModelRequest
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		fresh, err := repository.NewBotRunRepository(tx).FindByID(run.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.FinishedAt != nil || fresh.StopRequestedAt != nil {
+			return errBotRunStopBeforeRequest
+		}
 		ordinal, err := repository.NewBotModelRequestRepository(tx).NextOrdinalTx(tx, run.ID)
 		if err != nil {
 			return err

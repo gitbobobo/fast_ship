@@ -355,13 +355,18 @@ func (s *AIProviderService) responseOf(p *model.AIProvider, botCount int64) AIPr
 // provider 的定时任务熔断（INT-137）；不给 provider_id 保持纯探测。
 func (s *AIProviderService) Test(userID string, req *TestAIProviderRequest) (*ProviderTestResult, error) {
 	providerID := strings.TrimSpace(derefOr(req.ProviderID))
+	// providerRow 是「本次探测实际验证的那份已存配置」：探测成功后只在它没被
+	// 用户改动时清除熔断 / 标记已验证，避免迟到的探测结果作用到另一份配置。
+	var providerRow *model.AIProvider
 	if providerID != "" {
-		if _, err := s.providers.FindByIDAndUser(providerID, userID); err != nil {
+		p, err := s.providers.FindByIDAndUser(providerID, userID)
+		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, errs.ErrAIProviderNotFound
 			}
 			return nil, errs.ErrInternal
 		}
+		providerRow = p
 	}
 	apiKey := strings.TrimSpace(derefOr(req.APIKey))
 	if apiKey == "" {
@@ -432,8 +437,13 @@ func (s *AIProviderService) Test(userID string, req *TestAIProviderRequest) (*Pr
 		if err != nil {
 			s.logger.Warn("比对 provider 库存密钥失败", zap.String("provider_id", providerID), zap.Error(err))
 		} else if matches {
-			if err := s.providers.MarkConfigVerified(providerID, time.Now().UTC()); err != nil {
+			// 条件更新：地址与配置版本必须仍是探测时那一份（迁移前创建的
+			// provider 没有版本，用 base_url 认定），否则放弃这次恢复动作。
+			ok, err := s.providers.MarkConfigVerified(providerID, providerRow.BaseURL, providerRow.ConfigVersionAt, time.Now().UTC())
+			if err != nil {
 				s.logger.Warn("清除 provider 熔断失败", zap.String("provider_id", providerID), zap.Error(err))
+			} else if !ok {
+				s.logger.Info("探测期间 provider 配置已变更，跳过清除熔断", zap.String("provider_id", providerID))
 			}
 		}
 	}
