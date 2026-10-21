@@ -50,12 +50,13 @@ type reviewMedia interface {
 // 驱动共用。事务内零 GitHub/T3 调用；提交后非阻塞 kick。1b 起的审查设置/
 // 记录查询也挂在本服务上：gh、appSource、publicURL 服务于读/写面与 GitHub 产出。
 type ReviewService struct {
-	db         *gorm.DB
-	projects   *repository.ProjectRepository
-	deliveries *repository.GitHubWebhookDeliveryRepository
-	sink       *NotificationSink
-	cfg        *config.Config
-	logger     *zap.Logger
+	db           *gorm.DB
+	projects     *repository.ProjectRepository
+	deliveries   *repository.GitHubWebhookDeliveryRepository
+	redeliveries *repository.GitHubWebhookRedeliveryRepository
+	sink         *NotificationSink
+	cfg          *config.Config
+	logger       *zap.Logger
 
 	// gh 是 App 安装令牌访问面；appSource 回答部署是否配置了 App 身份；
 	// publicURL 回答部署对外地址。三者均可为 nil——对应前置条件按缺失处理。
@@ -88,10 +89,6 @@ type ReviewService struct {
 	// 避免「清理时线程还没确认、清理后线程才建成」的孤儿线程。
 	projectLocksMu sync.Mutex
 	projectLocks   map[string]*sync.Mutex
-
-	// redeliveryNextAt 投递失败对账的下次执行时刻（节流用；只由调度循环
-	// goroutine 读写，不需要锁）。
-	redeliveryNextAt time.Time
 }
 
 func NewReviewService(
@@ -110,7 +107,8 @@ func NewReviewService(
 ) *ReviewService {
 	return &ReviewService{
 		db: db, projects: projects, deliveries: deliveries,
-		sink: sink, gh: gh, appSource: appSource, publicURL: publicURL,
+		redeliveries: repository.NewGitHubWebhookRedeliveryRepository(db),
+		sink:         sink, gh: gh, appSource: appSource, publicURL: publicURL,
 		t3: t3, media: media, mediaBearer: mediaBearer,
 		cfg: cfg, logger: logger,
 		worktreeTries: map[string]int{},

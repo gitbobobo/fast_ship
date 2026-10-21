@@ -130,7 +130,7 @@ seen SHA、取消旧轮全部失效）。
 事务内零 GitHub/T3 调用；提交后非阻塞 kick 调度循环。
 
 投递本身也可能失败：GitHub 发出但没送达（公网隧道超时/502）时 GitHub App
-不会自动重试，这次推送就永远不会进入上面的任何一步。调度循环里的低频对账
+不会自动重试，这次推送就永远不会进入上面的任何一步。独立低频循环里的对账
 兜底这一层，见「投递失败对账」。
 
 ## 调度循环（`review_scheduler.go`）
@@ -163,20 +163,22 @@ seen SHA、取消旧轮全部失效）。
 7. **工作区回收**：见「工作区回收」。
 8. 取消运行的线程中断：`cancelled` 且已派发且 `stop_attempted_at` 为空 →
    先条件占标记，再 `StopThread`（`run.interrupt`，每运行只尝试一次）。
-9. **投递失败对账**：低频（自带 5 分钟节流，不是每 tick 都跑）对账 GitHub
-   App 投递记录并重投失败的 `pull_request` 投递，见「投递失败对账」；
-   与其他阶段独立容错，失败只记日志，不影响其余阶段。
 
 所有网络调用在事务外；DB 落库用条件 UPDATE（影响 0 行 = 状态已被并发改写）。
+
+投递失败对账不在本循环里：它在独立 goroutine 低频跑（`redeliveryLoop`），
+GitHub 变慢时对账会长时间占住网络调用，不能拖住防抖消费/派发/超时，
+见「投递失败对账」。
 
 ### 投递失败对账（`review_redelivery.go`）
 
 GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次失败就是这次推送
-永远不被审查；对账在调度循环末尾低频兜底（INT-146）。机制：
+永远不被审查；对账在**独立低频循环**里兜底（INT-146）。机制：
 
-- **5 分钟一次**（`reviewRedeliverySweepEvery`，自节制流：先推进
-  `redeliveryNextAt` 再干活，失败也等下一轮，不打爆 GitHub），单次兜底
-  超时 2 分钟。
+- **独立 goroutine**（`redeliveryLoop`，与调度循环共用同一个 cancel）：自带
+  ticker 每 **5 分钟**一轮（`reviewRedeliverySweepEvery`），**启动即先跑一
+  轮**（进程刚起来时补上停机期间漏掉的投递），单次兜底超时 90 秒——独立
+  循环不阻塞调度，但仍要有界，避免 GitHub 半挂时无限拖。
 - 拉近 **24 小时**（`reviewRedeliveryLookback`；GitHub 只保留约 3 天投递
   记录）的投递记录，只处理 `pull_request` 事件里**会开轮的 action**
   （opened/synchronize/ready_for_review/reopened，`reviewTriggerableAction`
@@ -184,31 +186,35 @@ GitHub App 投递失败（公网隧道超时/502）不会自动重试，一次�
   closed 投递不会导致「推送没被审查」，而重投回去会无条件取消该 PR 当前
   有效的审查运行（webhook 的 closed 分支在任何时间戳判定之前执行）。
 - 每个 guid 汇总成一行状态（`groupHookDeliveries` 纯函数）：任一行 2xx =
-  已送达；`redelivery=true` 行数 = 已重投次数——GitHub 每次重投以同一 guid
-  追加一行记录，次数从列表本身推导，不另建表。**只处理窗口内还有原始行
-  （`redelivery=false`）的 guid**：24h 滚动窗口下只剩重投行的组，计数至少
-  少 1，不完整——整组放弃，不重投也不发通知。
+  已送达；列表里 `redelivery=true` 的行数只是**列表可见的近期重投次数**
+  （兜底），**总次数以持久化的重投次数账为准**（`github_webhook_redeliveries`
+  表，guid 主键）：投递列表只保留约 3 天，原始行滑出 24h 窗口后从列表推
+  导的次数会变少——可能重复重投或漏发超限通知，所以每次成功重投都 upsert
+  记账（attempts+1），账按与幂等账相同的 7 天保留期清理，丢了顶多退化回
+  列表推导的近期次数。有效次数取 `max(账, 列表)`。
 - 重投前两路去重，先查幂等账再判超限（本地账一次查全，含超限组——否则
   「GitHub 侧三次都超时、但某次实际已在本地落库」的 guid 会被误报故障）：
   本地 `github_webhook_deliveries` 幂等账已有该 guid（说明投递其实已送达，
-  只是 GitHub 侧记录滞后）→ 跳过；同 guid 任一行 2xx（含成功的重投）→
-  跳过。
+  只是 GitHub 侧记录滞后）→ 跳过（不重投、不通知、不记账）；同 guid 任一行
+  2xx（含成功的重投）→ 跳过。
 - 通过 `POST /app/hook/deliveries/{id}/attempts`（App JWT 端点，访问面
   `githubapp.HookDeliveries`，不进安装令牌的 `GitHubClient` 接口）让 GitHub
   重投：请求与原始投递相同，`X-GitHub-Delivery` 也相同，webhook 的幂等登记
-  保证不重复处理。**一轮最多发 20 个重投请求**
-  （`reviewRedeliveryMaxPerSweep`，剩余留到下一轮，不突发几百个 POST）；
-  遇 **403/429 立即停止本轮**（GitHub 明确要求限流后停止请求并退避，5 分钟
-  后自然再来），其他错误逐条跳过。
+  保证不重复处理。**只对成功的重投记账**（请求被拒时 GitHub 没产生投递
+  记录，下一轮会再试）。**一轮最多发 20 个重投请求**
+  （`reviewRedeliveryMaxPerSweep`，按「尝试」计、失败也占名额——只按成功
+  计数的话接口持续 5xx 时上限形同虚设；剩余留到下一轮，不突发几百个
+  POST）；遇 **403/429 立即停止本轮**（GitHub 明确要求限流后停止请求并
+  退避，5 分钟后 ticker 自然再来），其他错误逐条跳过。
 - 同一 guid 最多重投 **3 次**，超限不再重试，发 `review_redelivery_failed`
-  站内通知：投递记录是 App 维度、映射不到具体项目，发给所有启用审查的用户
-  （`project_review_settings.enabled` 的 distinct user），dedup 键含 guid，
-  重复对账只推进 `last_seen_at` 不刷屏。
+  站内通知（正文写实际次数）：投递记录是 App 维度、映射不到具体项目，发给
+  所有启用审查的用户（`project_review_settings.enabled` 的 distinct user），
+  dedup 键含 guid，重复对账只推进 `last_seen_at` 不刷屏。
 - 没有启用审查的项目、App 未配置（或实现没有投递访问面，如静态令牌）时
   整步跳过。列表翻页、重投请求的复杂度收在 `pkg/githubapp` 适配器里，
   service 层只做分组与决策。
 - 列表翻页走响应头 `Link` 的 rel="next"：**超过页数上限（10 页）仍有下一页
-  时按错误处理**（`ErrDeliveriesTruncated`）——部分账本会把重投次数算少，
+  时按错误处理**（`ErrDeliveriesTruncated`）——部分账本会漏掉投递，
   对账本轮放弃；**跟随 next 前校验同源**（scheme 与 host 必须与 API base
   一致），Link 来自响应头，不能把显式设置的 App JWT 带到别的地址，异源
   当作没有下一页。

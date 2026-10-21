@@ -16,9 +16,13 @@ import (
 
 // 投递失败对账（INT-146）：GitHub 发出但没送达本服务的投递（公网隧道超时/502）
 // GitHub App 不会自动重试，webhook 侧也没有别的对账入口——不做这一步，一次
-// 投递失败就意味着这次推送永远不会被审查。调度循环低频拉投递记录、按 guid
-// 推导已重投次数并重投；复杂度收在 pkg/githubapp 适配器里，本文件只做分组
-// 与决策。
+// 投递失败就意味着这次推送永远不会被审查。独立低频循环（redeliveryLoop，不
+// 占 10s 调度 tick）拉投递记录、按 guid 分组并重投；复杂度收在 pkg/githubapp
+// 适配器里，本文件只做分组与决策。
+//
+// 已重投次数持久化在 github_webhook_redeliveries（重投次数账）：投递列表只
+// 保留约 3 天，原始行滑出 24h 回看窗口后从列表推导的次数会变少——可能重复
+// 重投或漏发超限通知；账丢了（被清/恢复丢失）顶多退化回列表推导的近期次数。
 
 const (
 	// reviewRedeliverySweepEvery 对账频率：远低于 10s 调度 tick——投递失败是
@@ -30,37 +34,33 @@ const (
 	// reviewRedeliveryMaxAttempts 同一 guid 的重投上限：超出即认定入口持续
 	// 不可达（服务停机/隧道下线），继续重投只会空转。
 	reviewRedeliveryMaxAttempts = 3
-	// reviewRedeliveryTimeout 单次对账的兜底超时：列表 + 若干次重投的总额，
-	// 防止 GitHub 挂死把调度循环这一轮拖满。
-	reviewRedeliveryTimeout = 2 * time.Minute
-	// reviewRedeliveryMaxPerSweep 一轮对账内最多发出的重投请求数：到顶就停，
-	// 剩余留到下一轮（5 分钟后），避免一次扫描内突发几百个 POST 打爆 GitHub
-	// 或本服务的 webhook 入口。
+	// reviewRedeliveryTimeout 单轮对账的兜底超时：列表 + 若干次重投的总额。
+	// 独立循环不阻塞调度，但仍要有界，避免 GitHub 半挂时无限拖。
+	reviewRedeliveryTimeout = 90 * time.Second
+	// reviewRedeliveryMaxPerSweep 一轮对账内最多发出的重投请求数（按「尝试」
+	// 计，失败也占名额）：到顶就停，剩余留到下一轮（5 分钟后）。不按成功计
+	// 是因为接口持续 5xx / 404 时请求同样在打 GitHub 与本服务的 webhook 入口，
+	// 只按成功计数会让上限形同虚设。
 	reviewRedeliveryMaxPerSweep = 20
 )
 
 // hookDeliveryState 同一 guid 的投递汇总：原始投递与每次重投各占一行（GitHub
-// 追加记录），去重和次数上限都从这里推。
+// 追加记录），去重和次数兜底计数都从这里推。
 type hookDeliveryState struct {
-	GUID        string
-	Event       string
-	Action      string
-	Delivered   bool // 任一行 2xx
-	Attempts    int  // redelivery=true 的行数（已重投次数）
-	HasOriginal bool // 窗口内见过 redelivery=false 的原始行
-	TargetID    int64
-	TargetAt    time.Time
+	GUID      string
+	Event     string
+	Action    string
+	Delivered bool // 任一行 2xx
+	Attempts  int  // redelivery=true 的行数（列表可见的近期重投次数）
+	TargetID  int64
+	TargetAt  time.Time
 }
 
-// reconcileWebhookDeliveries 低频对账 GitHub App 的投递记录：GitHub 发出但没
-// 送达本服务的 pull_request 投递（隧道超时/502）会被重投，避免一次投递失败
-// 就让这次推送永远不会被审查。超上限后不再重试并发站内通知。
+// reconcileWebhookDeliveries 一轮投递失败对账：GitHub 发出但没送达本服务的
+// pull_request 投递（隧道超时/502）会被重投，避免一次投递失败就让这次推送
+// 永远不会被审查。节流由 redeliveryLoop 的 ticker 负责，本函数不做节流。
+// 超上限后不再重试并发站内通知。
 func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
-	if now.Before(s.redeliveryNextAt) {
-		return
-	}
-	// 先推进节流时刻再干活：失败也等下一轮，避免打爆 GitHub。
-	s.redeliveryNextAt = now.Add(reviewRedeliverySweepEvery)
 	if s.gh == nil {
 		return
 	}
@@ -94,12 +94,9 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		return
 	}
 	states := groupHookDeliveries(items)
-	// 只处理「窗口内还有原始行」的失败 guid：24h 滚动窗口下只剩重投行的组，
-	// 原始行已滑出窗口、已重投次数的计数不完整（至少少 1），继续重投或发
-	// 通知都可能误判，整组放弃。
 	pending := make([]hookDeliveryState, 0, len(states))
 	for _, st := range states {
-		if st.Delivered || !st.HasOriginal {
+		if st.Delivered {
 			continue
 		}
 		pending = append(pending, st)
@@ -118,7 +115,15 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		s.logger.Error("查询本地投递幂等账失败", zap.Error(err))
 		return
 	}
-	sent := 0
+	// 重投次数账一次查全：有效次数取 max(账, 列表)——列表里 redelivery=true
+	// 的行数只是兜底（DB 行被清/恢复丢失时列表还能反映近期尝试），账是跨
+	// 24h 窗口的真相（原始行滑出窗口后列表推不出总次数）。
+	dbAttempts, err := s.redeliveries.AttemptsFor(s.db, guids)
+	if err != nil {
+		s.logger.Error("查询 webhook 重投次数账失败", zap.Error(err))
+		return
+	}
+	tried := 0
 	for _, st := range pending {
 		if ctx.Err() != nil {
 			break // 总超时到了，别再发请求
@@ -126,15 +131,21 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 		if existing[st.GUID] {
 			continue // 已送达（GitHub 侧记录滞后于本地登记），不重投
 		}
-		if st.Attempts >= reviewRedeliveryMaxAttempts {
-			s.notifyRedeliveryExhausted(userIDs, st)
+		attempts := dbAttempts[st.GUID]
+		if st.Attempts > attempts {
+			attempts = st.Attempts
+		}
+		if attempts >= reviewRedeliveryMaxAttempts {
+			s.notifyRedeliveryExhausted(userIDs, st, attempts)
 			continue
 		}
-		if sent >= reviewRedeliveryMaxPerSweep {
+		if tried >= reviewRedeliveryMaxPerSweep {
 			s.logger.Info("本轮重投请求数已达上限，剩余留到下一轮",
 				zap.Int("limit", reviewRedeliveryMaxPerSweep))
 			break
 		}
+		// 先占名额再请求：被拒的尝试同样消耗一轮的预算（见常量注释）。
+		tried++
 		err := hooks.RedeliverHookDelivery(ctx, st.TargetID)
 		if err != nil {
 			s.logger.Warn("投递重投请求失败",
@@ -142,15 +153,20 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 			var statusErr *githubapi.StatusError
 			if errors.As(err, &statusErr) &&
 				(statusErr.StatusCode == http.StatusForbidden || statusErr.StatusCode == http.StatusTooManyRequests) {
-				// 被限流：GitHub 明确要求停止请求并退避；本轮已先推进
-				// redeliveryNextAt，5 分钟后自然再来。
+				// 被限流：GitHub 明确要求停止请求并退避；本轮停止，5 分钟后
+				// ticker 自然再来。
 				s.logger.Warn("投递重投被限流，本轮对账停止",
 					zap.String("guid", st.GUID), zap.Int("status", statusErr.StatusCode))
 				break
 			}
 			continue
 		}
-		sent++
+		// 只记成功的重投：请求被拒时 GitHub 没产生投递记录，下一轮会再试；
+		// 记账失败只留日志，不影响后续组（顶多少计一次，靠列表兜底）。
+		if err := s.redeliveries.RecordAttempt(s.db, st.GUID, time.Now().UTC()); err != nil {
+			s.logger.Error("记录 webhook 重投次数失败",
+				zap.String("guid", st.GUID), zap.Error(err))
+		}
 		s.logger.Info("已请求 GitHub 重投 webhook 投递",
 			zap.String("guid", st.GUID), zap.Int64("delivery", st.TargetID))
 	}
@@ -158,13 +174,13 @@ func (s *ReviewService) reconcileWebhookDeliveries(now time.Time) {
 
 // notifyRedeliveryExhausted 同一 guid 重投超上限仍未送达：给每个启用审查的
 // 用户发一条通知。dedup 键含 guid——重复对账只推进 last_seen_at，不刷屏。
-func (s *ReviewService) notifyRedeliveryExhausted(userIDs []string, st hookDeliveryState) {
+func (s *ReviewService) notifyRedeliveryExhausted(userIDs []string, st hookDeliveryState, attempts int) {
 	if s.sink == nil {
 		return
 	}
 	title := fmt.Sprintf("PR 审查投递重投失败：%s/%s", st.Event, st.Action)
 	body := fmt.Sprintf("GitHub 的 %s/%s 投递在 %d 次重投后仍未送达本服务（guid %s），这次推送可能没有被审查；请检查公网入口与隧道。",
-		st.Event, st.Action, reviewRedeliveryMaxAttempts, st.GUID)
+		st.Event, st.Action, attempts, st.GUID)
 	for _, userID := range userIDs {
 		err := s.sink.Publish(NotificationInput{
 			UserID:     userID,
@@ -185,8 +201,8 @@ func (s *ReviewService) notifyRedeliveryExhausted(userIDs []string, st hookDeliv
 // 回去会无条件取消该 PR 当前有效的审查运行（webhook 的 closed 分支在任何
 // 时间戳判定之前执行），破坏面比收益大，有意不重投。重投目标取最早一条
 // 失败行的 delivery id；输出按 TargetAt 升序（GUID 兜同刻排序），保证对账
-// 行为确定。HasOriginal 标记窗口内是否见过原始行：24h 滚动窗口可能只剩某
-// guid 的重投行，那样的组计数不完整，由调用方整组放弃。
+// 行为确定。Attempts 只数列表可见的重投行——原始行滑出回看窗口后它不再等
+// 于总次数，调用方须以重投次数账为准。
 func groupHookDeliveries(items []githubapp.HookDelivery) []hookDeliveryState {
 	byGUID := map[string]*hookDeliveryState{}
 	for _, it := range items {
@@ -197,9 +213,6 @@ func groupHookDeliveries(items []githubapp.HookDelivery) []hookDeliveryState {
 		if !ok {
 			st = &hookDeliveryState{GUID: it.GUID, Event: it.Event, Action: it.Action}
 			byGUID[it.GUID] = st
-		}
-		if !it.Redelivery {
-			st.HasOriginal = true // 原始行出现过（失败或成功都算）
 		}
 		if it.Delivered() {
 			st.Delivered = true
