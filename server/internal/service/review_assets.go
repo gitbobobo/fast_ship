@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -87,9 +89,13 @@ func collectScreenshotURLs(body string) []screenshotRef {
 // 查网络，而真正的原因是本部署不支持截图审查。
 var errReviewMediaUnconfigured = errors.New("截图下载面未配置")
 
-// downloadScreenshot 单张截图下载：匿名优先；匿名失败且目标是 GitHub 媒体域
-// 时才带 App 安装令牌重试——令牌是仓库凭证，外部图床一律不发（防止 PR 描述
-// 里的外链图床靠回 403 换走安装令牌）。media 未配置视为该部署不支持截图审查。
+// downloadScreenshot 单张截图下载：匿名优先；匿名失败且失败是「可能靠令牌
+// 解决」的（GitHub 媒体域的 401/403/404——私有仓库附件对匿名请求正是回
+// 404/403，GitHub 不区分不存在与无权限）才带 App 安装令牌重试一次。协议
+// 不支持、内容不是图片、超过大小上限、内网地址这类确定性失败换令牌也一样
+// 失败，不白铸令牌（每次同步都会重来，探测路径还占预算）。令牌是仓库凭证，
+// 外部图床一律不发（防止 PR 描述里的外链图床靠回 403 换走安装令牌）。media
+// 未配置视为该部署不支持截图审查。
 func (s *ReviewService) downloadScreenshot(ctx context.Context, installationID int64, url string) (*githubmedia.CachedMedia, error) {
 	if s.media == nil {
 		return nil, errReviewMediaUnconfigured
@@ -97,6 +103,15 @@ func (s *ReviewService) downloadScreenshot(ctx context.Context, installationID i
 	cached, err := s.media.FetchAndCache(ctx, url)
 	if err == nil {
 		return cached, nil
+	}
+	var upstream *githubmedia.UpstreamStatusError
+	if !errors.As(err, &upstream) {
+		return nil, err
+	}
+	switch upstream.StatusCode {
+	case 401, 403, 404:
+	default:
+		return nil, err
 	}
 	if !githubmedia.IsGitHubMediaURL(url) || s.mediaBearer == nil || installationID == 0 {
 		return nil, err
@@ -146,6 +161,15 @@ func screenshotErrorText(err error) string {
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return "下载超时"
+	}
+	// 本地磁盘/缓存写入失败（磁盘满、权限、缓存目录损坏）不是网络故障，落到
+	// 兜底「无法连接图片服务器」会把用户引向查网络。fetchAndCache 的
+	// MkdirAll/CreateTemp/io.Copy（写本地临时文件）都以 *fs.PathError 到达，
+	// 权限类错误（fs.ErrPermission）包在 PathError.Err 里，随之覆盖。
+	var pathErr *fs.PathError
+	var sysErr *os.SyscallError
+	if errors.As(err, &pathErr) || errors.As(err, &sysErr) {
+		return "截图缓存写入失败"
 	}
 	return "无法连接图片服务器"
 }
@@ -234,8 +258,14 @@ func (s *ReviewService) ensureAssets(ctx context.Context, repo string, prNumber 
 
 // screenshotProbeTimeout 截图探测的总时限。探测跑在共享同步循环里，图床挂死
 // 时不能把同一批其它 PR 的同步一起拖满——单请求客户端超时 45s 比这更长，
-// 所以探测必须有更紧的总时限。
-const screenshotProbeTimeout = 30 * time.Second
+// 所以探测必须有更紧的总时限。var 是为了让测试缩短等待。
+var screenshotProbeTimeout = 30 * time.Second
+
+// screenshotProbeAttemptTimeout 单张截图的探测时限，必须显著小于总预算：
+// 否则描述里靠前的地址黑洞（握手挂起、连不上）会用一张挂死图吃满总预算，
+// 后面的可用截图一次都轮不到，决策落入「截图无法下载」，且每次同步按同样
+// 顺序重复同一张挂死图。var 是为了让测试缩短等待。
+var screenshotProbeAttemptTimeout = 10 * time.Second
 
 // probeScreenshots 试下载 PR 描述里的截图，第一张成功即停：成功图已落盘缓存
 // （视觉运行时直接命中），全部失败返回第一条失败原因（可能为空串，由调用方
@@ -252,14 +282,17 @@ func (s *ReviewService) probeScreenshots(ctx context.Context, installationID int
 	defer cancel()
 	reason := ""
 	for _, ref := range refs {
-		_, err := s.downloadScreenshot(ctx, installationID, ref.URL)
+		// 单张限时：挂死图只吃掉自己的时限，还有剩余预算就继续试下一张；
+		// 总预算吃满才放弃（剩下的引用继续探测只会继续超时，同步循环还在等）。
+		attemptCtx, cancel := context.WithTimeout(ctx, screenshotProbeAttemptTimeout)
+		_, err := s.downloadScreenshot(attemptCtx, installationID, ref.URL)
+		cancel()
 		if err == nil {
 			return true, ""
 		}
 		if reason == "" {
 			reason = screenshotErrorText(err)
 		}
-		// 时限吃满就放弃：剩下的引用继续探测只会继续超时，同步循环还在等。
 		if ctx.Err() != nil {
 			break
 		}

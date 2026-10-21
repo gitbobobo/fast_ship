@@ -411,10 +411,12 @@ func TestReviewWebhookUncheckedAction(t *testing.T) {
 }
 
 // fakeReviewMedia 截图下载桩：匿名/Bearer 两路分开计数与注入错误。failURLs
-// 按 URL 注入失败（其余成功），覆盖「部分截图可用」的场景。
+// 按 URL 注入失败（其余成功），覆盖「部分截图可用」的场景；blockURLs 的
+// URL 阻塞到 ctx.Done 再失败，模拟靠前地址握手挂起的黑洞（F32）。
 type fakeReviewMedia struct {
 	cached                 *githubmedia.CachedMedia
 	failURLs               map[string]error
+	blockURLs              map[string]bool
 	anonErr, bearerErr     error
 	anonCalls, bearerCalls int
 	lastBearer             string
@@ -431,8 +433,12 @@ func fakeScreenshotMedia(t *testing.T) *fakeReviewMedia {
 	return &fakeReviewMedia{cached: githubmedia.CachedImage(path, "image/png", 15)}
 }
 
-func (f *fakeReviewMedia) FetchAndCache(_ context.Context, url string) (*githubmedia.CachedMedia, error) {
+func (f *fakeReviewMedia) FetchAndCache(ctx context.Context, url string) (*githubmedia.CachedMedia, error) {
 	f.anonCalls++
+	if f.blockURLs[url] {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if err, bad := f.failURLs[url]; bad {
 		return nil, err
 	}
@@ -451,14 +457,14 @@ func (f *fakeReviewMedia) FetchAndCacheWithBearer(_ context.Context, _, bearer s
 	return f.cached, nil
 }
 
-// TestReviewAssetsBearerRetry F10：匿名失败 → 带 App 令牌重试；失败资产行
-// 下次 ensure 重试并更新原行。
+// TestReviewAssetsBearerRetry F10：匿名 404（私有附件对匿名请求的回法）→
+// 带 App 令牌重试；失败资产行下次 ensure 重试并更新原行。
 func TestReviewAssetsBearerRetry(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
 	ctx := context.Background()
 	cached := &githubmedia.CachedMedia{Path: "/cache/shot.png"}
-	media := &fakeReviewMedia{cached: cached, anonErr: errors.New("forbidden anon")}
+	media := &fakeReviewMedia{cached: cached, anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404}}
 	review := e.withT3(nil, media, func(context.Context, int64) (string, error) {
 		return "installation-token-1", nil
 	})

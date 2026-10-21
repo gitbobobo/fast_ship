@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -425,6 +427,76 @@ func TestVisualSyncScreensUnavailableSkipsCommentWithoutPrior(t *testing.T) {
 	}
 }
 
+// F32 回归：单张探测时限必须短于总预算。第一个 URL 黑洞（阻塞到 ctx.Done），
+// 第二个可用——旧实现没有单张时限，第一张吃满总预算后探测放弃，第二张永远
+// 轮不到，决策落入「截图无法下载」且每次同步重复同一张挂死图；新实现单张
+// 超时后用剩余预算继续试下一张。
+func TestProbeScreenshotsAttemptTimeoutLetsLaterScreensThrough(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	hangURL := "https://uiv.frp.musiver.cn/f/hang.png"
+	okURL := "https://uiv.frp.musiver.cn/f/ok.png"
+	e.media.blockURLs = map[string]bool{hangURL: true}
+
+	origAttempt, origTotal := screenshotProbeAttemptTimeout, screenshotProbeTimeout
+	screenshotProbeAttemptTimeout = 100 * time.Millisecond
+	screenshotProbeTimeout = 1 * time.Second
+	defer func() {
+		screenshotProbeAttemptTimeout, screenshotProbeTimeout = origAttempt, origTotal
+	}()
+
+	body := "![a](" + hangURL + ") ![b](" + okURL + ")"
+	start := time.Now()
+	ok, reason := review.probeScreenshots(context.Background(), 1, body)
+	elapsed := time.Since(start)
+
+	if !ok {
+		t.Fatalf("ok = false (reason %q), want true——第一张挂死不应饿死后面的可用图", reason)
+	}
+	if e.media.anonCalls != 2 {
+		t.Fatalf("anonCalls = %d, want 2（第二张必须被尝试）", e.media.anonCalls)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("elapsed = %v, want 远小于总预算", elapsed)
+	}
+}
+
+// F32：所有 URL 都黑洞时，探测必须在总预算附近返回失败与非空原因，不能
+// 无限等待。
+func TestProbeScreenshotsAllBlockedStopsAtBudget(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	review := e.withT3(nil, e.media, nil)
+	e.media.blockURLs = map[string]bool{}
+	var refs []string
+	for i := 0; i < 15; i++ {
+		u := fmt.Sprintf("https://uiv.frp.musiver.cn/f/hang%d.png", i)
+		e.media.blockURLs[u] = true
+		refs = append(refs, fmt.Sprintf("![s%d](%s)", i, u))
+	}
+
+	origAttempt, origTotal := screenshotProbeAttemptTimeout, screenshotProbeTimeout
+	screenshotProbeAttemptTimeout = 100 * time.Millisecond
+	screenshotProbeTimeout = 1 * time.Second
+	defer func() {
+		screenshotProbeAttemptTimeout, screenshotProbeTimeout = origAttempt, origTotal
+	}()
+
+	start := time.Now()
+	ok, reason := review.probeScreenshots(context.Background(), 1, strings.Join(refs, " "))
+	elapsed := time.Since(start)
+
+	if ok {
+		t.Fatal("ok = true, want false（全部挂死）")
+	}
+	if reason == "" {
+		t.Fatal("reason 为空, want 非空（下载超时）")
+	}
+	// 15 张 × 100ms 单张时限本会拖 1.5s，总预算 1s 必须截停。
+	if elapsed >= 2*time.Second {
+		t.Fatalf("elapsed = %v, want 在总预算（1s）附近返回而不是无限等待", elapsed)
+	}
+}
+
 // 外部图床（非 GitHub 域名）匿名失败后不再带 App 令牌重试：bearer 是仓库
 // 凭证，不能发给 PR 描述里的任意 host。
 func TestReviewAssetsNoBearerForExternalHost(t *testing.T) {
@@ -475,6 +547,54 @@ func TestDownloadScreenshotUnconfiguredMedia(t *testing.T) {
 	}
 }
 
+// F33：bearer 重试只发生在「可能靠令牌解决」的匿名失败上——GitHub 媒体域的
+// 401/403/404（私有附件对匿名请求正是 404/403）。确定性失败（协议不支持、
+// 内容不是图片、超过大小上限、内网地址、其它状态码）换令牌也一样失败，
+// 不白铸令牌。
+func TestDownloadScreenshotBearerRetryOnlyOnAuthFailure(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	mediaURL := "https://github.com/user-attachments/assets/xyz"
+	bearer := func(context.Context, int64) (string, error) { return "installation-token-1", nil }
+
+	deterministic := []struct {
+		name string
+		err  error
+	}{
+		{"协议不支持", githubmedia.ErrInvalidMediaURL},
+		{"内容不是图片", githubmedia.ErrUnsupportedUpstreamMedia},
+		{"超过大小上限", githubmedia.ErrMediaTooLarge},
+		{"内网地址", githubmedia.ErrBlockedUpstreamAddress},
+		{"其它状态码", &githubmedia.UpstreamStatusError{StatusCode: 503}},
+	}
+	for _, c := range deterministic {
+		media := &fakeReviewMedia{cached: &githubmedia.CachedMedia{Path: "/cache/shot.png"}, anonErr: c.err}
+		review := e.withT3(nil, media, bearer)
+		if _, err := review.downloadScreenshot(context.Background(), 42, mediaURL); !errors.Is(err, c.err) {
+			t.Fatalf("%s: err = %v, want 原样返回匿名错误", c.name, err)
+		}
+		if media.anonCalls != 1 || media.bearerCalls != 0 {
+			t.Fatalf("%s: calls = anon:%d bearer:%d, want anon:1 bearer:0（不铸令牌）",
+				c.name, media.anonCalls, media.bearerCalls)
+		}
+	}
+
+	// 私有附件匿名 404：带令牌重试，令牌传到下载面那一路。
+	media := &fakeReviewMedia{cached: &githubmedia.CachedMedia{Path: "/cache/shot.png"},
+		anonErr: &githubmedia.UpstreamStatusError{StatusCode: 404}}
+	review := e.withT3(nil, media, bearer)
+	got, err := review.downloadScreenshot(context.Background(), 42, mediaURL)
+	if err != nil {
+		t.Fatalf("404 + bearer 重试: %v", err)
+	}
+	if media.anonCalls != 1 || media.bearerCalls != 1 || media.lastBearer != "installation-token-1" {
+		t.Fatalf("calls = anon:%d bearer:%d(%q), want anon:1 bearer:1 且带令牌",
+			media.anonCalls, media.bearerCalls, media.lastBearer)
+	}
+	if got.Path != "/cache/shot.png" {
+		t.Fatalf("cached = %+v", got)
+	}
+}
+
 // timeoutErr 假 net.Error：45s 客户端超时以 Timeout() 形态到达（*httpError
 // 没有 Unwrap，errors.Is 认不出 context.DeadlineExceeded）。
 type timeoutErr struct{}
@@ -515,6 +635,10 @@ func TestScreenshotErrorText(t *testing.T) {
 		{"超限哨兵", githubmedia.ErrMediaTooLarge, "图片超过大小上限"},
 		{"下载面未配置", errReviewMediaUnconfigured, "截图下载面未配置"},
 		{"上游状态码", &githubmedia.UpstreamStatusError{StatusCode: 503}, "上游返回状态码 503"},
+		// F34 回归：本地磁盘/缓存写入失败（磁盘满）不落兜底「无法连接图片
+		// 服务器」——那会把用户引向查网络。
+		{"磁盘写入失败", &fs.PathError{Op: "open", Path: "/var/x", Err: syscall.ENOSPC}, "截图缓存写入失败"},
+		{"包在 url.Error 里的缓存写入失败仍按写入失败归类", &url.Error{Op: "Get", URL: "https://uiv.example.com/f/x.png", Err: &fs.PathError{Op: "write", Path: "/cache/x.part", Err: syscall.ENOSPC}}, "截图缓存写入失败"},
 	}
 	for _, c := range cases {
 		if got := screenshotErrorText(c.err); got != c.want {
