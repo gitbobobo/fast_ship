@@ -135,16 +135,18 @@ func legacyScheduleReviewDetail(tasks []model.BotScheduleTask) map[string]interf
 	}
 }
 
-// legacyNoticeTaskName 收敛模型可写的存量任务名给人看：剥掉控制字符/
-// 换行与「」（夹带的「」能伪造提示文案的边界），截断 40 字符，全空白
-// 退回占位名。detail.tasks 里给模型引用的原名不受影响（模型侧已围栏）。
+// legacyNoticeTaskName 收敛模型可写的存量任务名给人看：剥掉控制与格式
+// 字符（Cc/Cf——U+202E 等双向覆盖符属 Cf，IsControl 不盖，留进 note 会让
+// 浏览器按 bidi 重排提示文案）、「」（夹带的「」能伪造文案边界），截断
+// 40 字符，全空白退回占位名。detail.tasks 里给模型引用的原名不受影响
+// （模型侧已围栏）。
 func legacyNoticeTaskName(name string) string {
 	out := make([]rune, 0, len(name))
 	for _, r := range name {
 		if len(out) >= 40 {
 			break
 		}
-		if unicode.IsControl(r) || r == '「' || r == '」' {
+		if unicode.In(r, unicode.Cc, unicode.Cf) || r == '「' || r == '」' {
 			continue
 		}
 		out = append(out, r)

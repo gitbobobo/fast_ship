@@ -72,9 +72,10 @@ func (s *BotService) newScheduleSession(bot *model.Bot, run *model.BotRun) (*bot
 		}
 		return nil, errs.ErrInternal
 	}
-	// 手动 run 的确认卡批准的是受理时那一版：建 run 与加载会话之间若任务又被
-	// 改过，就按 task_changed 失败，避免拿旧授权跑新指令（cron 触发按最新配置
-	// 执行是预期语义，不受此限）。
+	// 手动 run 的确认卡批准的是受理时那一版：建 run 与加载会话之间若敏感
+	// 配置（指令/模型/汇报开关）又被改过，就按 task_changed 失败，避免拿旧
+	// 授权跑新指令；name/cron 等良性改动不阻断（cron 触发按最新配置执行是
+	// 预期语义，本就不受此限）。
 	if run.TriggerSource == model.BotTriggerManual {
 		if err := botScheduleRunRevisionChanged(run, task); err != nil {
 			return nil, err
@@ -96,22 +97,46 @@ func (s *BotService) newScheduleSession(bot *model.Bot, run *model.BotRun) (*bot
 	}, nil
 }
 
-// botScheduleRunRevisionChanged 核对手动 run 的任务修订是否仍是受理时那一版。
-// 修订水位在建 run 的事务里写进 trigger context，与确认卡的 task_updated_at
-// 同源；两处不一致说明任务在受理之后被改过。
+// botScheduleSensitiveSHA 是任务敏感配置的指纹：instruction/model/
+// needs_report 任一变更都会改哈希。run 的修订比对只关心这三项——name/
+// cron/timezone/enabled 的改动本身不需要确认，批准后发生也不该让已受理
+// 的 run 以「确认期间被修改」失败。
+func botScheduleSensitiveSHA(task *model.BotScheduleTask) string {
+	needs := "0"
+	if task.NeedsReport {
+		needs = "1"
+	}
+	sum := sha256.Sum256([]byte(task.Instruction + "\x00" + task.Model + "\x00" + needs))
+	return hex.EncodeToString(sum[:])
+}
+
+// botScheduleRunRevisionChanged 核对手动 run 的敏感配置是否仍是建 run 时那
+// 一版：确认卡的受理→执行窗口由 worker 事务里的 task_updated_at 比对把关，
+// 这里守的是建 run→会话加载的窗口——只比对敏感指纹，批准后的良性改动
+// （改名/改 cron/停用）不再误杀已批准的 run。存量 run 没有指纹字段时回落
+// 到 task_updated_at 整行比对。
 func botScheduleRunRevisionChanged(run *model.BotRun, task *model.BotScheduleTask) error {
 	if run == nil || task == nil {
 		return nil
 	}
 	var ctx struct {
 		TaskUpdatedAt string `json:"task_updated_at"`
+		TaskConfigSHA string `json:"task_config_sha"`
 	}
-	if err := json.Unmarshal([]byte(run.TriggerContextJSON), &ctx); err != nil || ctx.TaskUpdatedAt == "" {
+	if err := json.Unmarshal([]byte(run.TriggerContextJSON), &ctx); err != nil {
 		return nil
 	}
-	if task.UpdatedAt.UTC().Format(time.RFC3339Nano) != ctx.TaskUpdatedAt {
-		return errs.New(errs.ErrInvalidParams.Code,
-			"任务在确认期间被修改，本次未执行：请重新查看任务配置后再操作")
+	switch {
+	case ctx.TaskConfigSHA != "":
+		if botScheduleSensitiveSHA(task) != ctx.TaskConfigSHA {
+			return errs.New(errs.ErrInvalidParams.Code,
+				"任务的指令或模型在受理后被修改，本次未执行：请重新查看任务配置后再操作")
+		}
+	case ctx.TaskUpdatedAt != "":
+		if task.UpdatedAt.UTC().Format(time.RFC3339Nano) != ctx.TaskUpdatedAt {
+			return errs.New(errs.ErrInvalidParams.Code,
+				"任务在确认期间被修改，本次未执行：请重新查看任务配置后再操作")
+		}
 	}
 	return nil
 }
@@ -1130,8 +1155,9 @@ func (s *BotService) manuallyStartScheduleRun(botID string, task *model.BotSched
 			TriggerContextJSON: marshalJSONString(map[string]interface{}{
 				"task_id": current.ID, "task_name": current.Name,
 				"needs_report": current.NeedsReport, "trigger": "manual",
-				// 冻结受理时的任务修订：会话加载时核对，防止旧授权跑新指令。
-				"task_updated_at": current.UpdatedAt.UTC().Format(time.RFC3339Nano),
+				// 冻结建 run 时的敏感配置指纹：会话加载时核对，防止旧授权
+				// 跑新指令；name/cron 等良性改动不阻断（见 RunRevisionChanged）。
+				"task_config_sha": botScheduleSensitiveSHA(current),
 			}),
 			CreatedAt: now,
 		}

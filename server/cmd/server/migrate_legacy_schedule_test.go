@@ -123,6 +123,11 @@ func TestLegacyNoticeTaskNameSanitized(t *testing.T) {
 	if got := legacyNoticeTaskName("带\n换行\t与\x00控制"); got != "带换行与控制" {
 		t.Fatalf("控制字符应剥掉: %q", got)
 	}
+	// U+202E 等双向覆盖符属 Cf（IsControl 不盖），留进 note 会被浏览器
+	// 按 bidi 重排——安全提示文案可显示成相反意思，必须一并剥掉。
+	if got := legacyNoticeTaskName("正常‮任务‬"); got != "正常任务" {
+		t.Fatalf("双向覆盖符应剥掉: %q", got)
+	}
 	if got := legacyNoticeTaskName(strings.Repeat("字", 50)); len([]rune(got)) != 40 {
 		t.Fatalf("应截断 40 字符: %q", got)
 	}

@@ -1367,3 +1367,70 @@ func TestBotInt136UnconfirmedEnableBlocked(t *testing.T) {
 		t.Fatalf("已复核任务普通启用不应受限: %v", err)
 	}
 }
+
+// 大小写变体键不能绕过敏感字段判定：受理端 unknown-field 白名单
+// （botArgKeys 精确比对结构体 JSON tag）先于敏感判定与执行端 unmarshal
+// 运行，"Instruction"/"DRY_RUN" 等变体一律 40001——这道白名单是 INT-136
+// 的承重墙，回归测试把它钉死。
+func TestBotInt136CaseVariantKeysRejected(t *testing.T) {
+	for _, v := range []int64{3, 5, 6, 7} {
+		ts := botToolsetVersionOf(v)
+		for _, args := range []string{
+			`{"action":"update","task_id":"t","Instruction":"evil"}`,
+			`{"action":"update","task_id":"t","NEEDS_REPORT":false}`,
+			`{"action":"update","task_id":"t","Model":"gpt-x"}`,
+			`{"action":"run","task_id":"t","DRY_RUN":true}`,
+			`{"action":"create","name":"n","Cron":"0 9 * * *","instruction":"x"}`,
+		} {
+			if _, err := botPrepareToolCall(ts, "fs_schedule", args); err == nil {
+				t.Fatalf("v%d 变体键应被拒: %s", v, args)
+			}
+		}
+	}
+}
+
+// 建 run→会话加载窗口的修订比对只覆盖敏感配置：批准后改名/改 cron/停用
+// 这类良性改动不再误杀已批准的 run；instruction/model/needs_report 变更
+// 仍按 task_changed 拒绝。
+func TestBotInt136RunRevisionSensitiveScope(t *testing.T) {
+	task := &model.BotScheduleTask{
+		Name: "原名", Instruction: "原指令", Model: "gpt-a", NeedsReport: true,
+	}
+	run := &model.BotRun{TriggerContextJSON: marshalJSONString(map[string]interface{}{
+		"task_config_sha": botScheduleSensitiveSHA(task),
+	})}
+
+	// 良性改动：name/cron/timezone/enabled 变化不阻断。
+	benign := *task
+	benign.Name = "改名"
+	benign.CronExpression = "0 8 * * *"
+	benign.Enabled = false
+	if err := botScheduleRunRevisionChanged(run, &benign); err != nil {
+		t.Fatalf("良性改动不应被拒: %v", err)
+	}
+	// 敏感改动：instruction/model/needs_report 任一变化即拒绝。
+	for _, mutate := range []func(*model.BotScheduleTask){
+		func(tk *model.BotScheduleTask) { tk.Instruction = "新指令" },
+		func(tk *model.BotScheduleTask) { tk.Model = "gpt-b" },
+		func(tk *model.BotScheduleTask) { tk.NeedsReport = false },
+	} {
+		changed := *task
+		mutate(&changed)
+		err := botScheduleRunRevisionChanged(run, &changed)
+		if err == nil || !strings.Contains(err.Error(), "被修改") {
+			t.Fatalf("敏感改动应被拒: %+v %v", changed, err)
+		}
+	}
+	// 存量 run（只有 task_updated_at）回退到整行比对，行为不变。
+	legacy := &model.BotRun{TriggerContextJSON: marshalJSONString(map[string]interface{}{
+		"task_updated_at": task.UpdatedAt.UTC().Format(time.RFC3339Nano),
+	})}
+	if err := botScheduleRunRevisionChanged(legacy, task); err != nil {
+		t.Fatalf("水位一致不应拒: %v", err)
+	}
+	older := *task
+	older.UpdatedAt = task.UpdatedAt.Add(time.Second)
+	if err := botScheduleRunRevisionChanged(legacy, &older); err == nil {
+		t.Fatalf("存量 run 的整行比对应仍生效")
+	}
+}

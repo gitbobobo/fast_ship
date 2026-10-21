@@ -549,7 +549,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   批准后 queued → worker 执行，结果以【平台后台结果】送达。
 - **受理期校验**：会弹卡的 create/敏感 update 先把 cron/时区（执行层同一
   解析路径）与 name/instruction 长度（同一组上限常量）校验完，不合法直接
-  40001——不给一个必然失败的调用弹确认卡。
+  40001——不给一个必然失败的调用弹确认卡。参数键名必须是规范小写：
+  `botPrepareToolCall` 的 unknown-field 白名单（`botArgKeys` 按结构体 JSON
+  tag 精确比对）先于敏感判定与执行端 unmarshal 运行，`"Instruction"` 等
+  大小写变体一律 40001——这道白名单是确认语义的承重墙，有回归测试钉死。
 - **确认后不再接受配置漂移（TOCTOU）**：`update`/`run`/`enable`/`delete` 在执行时才读
   库里的任务，确认卡上展示的是受理那一刻的配置。受理时把任务的 `updated_at`
   记进 `execution_context.schedule.task_updated_at`，执行器在**自己的事务内**
@@ -557,7 +560,10 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   用户重新看一眼再决定，而不是拿旧卡执行新指令（与 fs_issue 的
   `expected_updated_at` 同一口径）。`updated_at` 只表示配置修订：状态写入与
   调度推进 `next_run_at` 都显式保持原值（`gorm.Expr("updated_at")`），一次
-  cron 触发不会被算成「任务被改过」。
+  cron 触发不会被算成「任务被改过」。手动 run 在建 run→会话加载之间还有
+  第二次比对，但只比对敏感配置指纹 `task_config_sha`（instruction/model/
+  needs_report 的 SHA-256）——批准后改名/改 cron/停用这类良性改动不再
+  误杀已批准的 run（存量 run 没有指纹字段时回退到整行 `task_updated_at`）。
 - **`run`/`enable`/`delete` 只收 `task_id`**：执行器按 `task_id` 读库里的任务
   配置，模型传的 `name`/`cron`/`timezone`/`instruction`/`model`/`needs_report`
   一概不生效，受理端直接拒绝，避免确认卡被参数遮住真正执行的那份配置。
@@ -619,8 +625,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   `legacy_schedule_review:int136`，dedup_key 无唯一索引，读库非
   RecordNotFound 错误必须回滚重试而非吞掉），列出仍在武装的任务名请
   用户复核/停用——只提示不阻断。任务名属存量模型可写文本：note 里给
-  人看的名字经 `legacyNoticeTaskName` 收敛（剥控制字符与「」、截断
-  40 字）；模型侧投影则把整条 detail 走 `source="lifecycle"` 围栏，
+  人看的名字经 `legacyNoticeTaskName` 收敛（剥控制与双向覆盖等格式
+  字符 Cc/Cf 及「」、截断 40 字）；模型侧投影则把整条 detail 走
+  `source="lifecycle"` 围栏，
   不借平台前缀取得指令权。
   **未复核任务不允许经 REST 面板开关启用**（`setScheduleTaskEnabled` 内部
   门槛：启用且本次调用未经确认卡、任务又未复核时回 40934）——否则右栏
@@ -682,7 +689,9 @@ CAS 为 queued；reject：置 rejected 并落唯一终态；always_allow：同�
   大小写——载荷多是 `json.Marshal` 产物，正文里的闭合标签常以 `\u003c`
   形态存在，模型按转义还原后同样能闭合围栏。吃掉一个 `\u003c` 形态时
   若其前已连续写出奇数个反斜杠（`\\u003c` 里 `\\` 是合法转义），补一
-  个反斜杠保住 JSON 转义对——落单的 `\` 会让载荷变非法 JSON。
+  个反斜杠保住 JSON 转义对——落单的 `\` 会让载荷变非法 JSON。已知保真
+  折衷：同一转义函数也用于记忆/摘要这类原始文本，其中的转义序列字样会
+  按 JSON 口径改写（方向保守，内容始终在围栏内）。
   围栏在**渲染时**加在账本原文上，所以升级前的旧工具结果也会被围上。
 - **平台前缀带 nonce**：后台结果 `[平台后台结果 nonce=…]`、记忆快照
   `[记忆快照 nonce=…]`、摘要 `[会话摘要 nonce=…]`、生命周期
