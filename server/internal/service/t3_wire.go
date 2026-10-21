@@ -346,11 +346,12 @@ func t3PullRequestCount(shell *t3ThreadShell) int {
 
 // normalizeT3ThreadDetail 把 HTTP 投影 + 可信 WS shell 组装成线程详情。
 //
-// 投影的 thread 是 AppThread（orchestrationV2.ts:363），不带运行态字段；
-// 运行态与元数据（title/provider/model/branch/PR 数/project_name）取该线程
-// 的 ThreadShell（WS 快照侧由 threadShellFromProjection 派生），与列表共用
-// 同一状态映射，不扫描历史 runs。shell 由调用方按线程 ID 在活跃/归档快照中
-// 找出（含子代理子线程），找不到时调用方明确失败，不假 idle。
+// 投影的 thread 是 AppThread（orchestrationV2.ts:363）：branch/worktreePath
+// 就挂在 AppThread 上（已实测，工作区回收真值即取自那里），缺的只是运行态
+// 字段。详情的运行态与摘要元数据（provider/model/branch/PR 数/project_name）
+// 取该线程的 ThreadShell（WS 快照侧由 threadShellFromProjection 派生），与
+// 列表共用同一状态映射，不扫描历史 runs。shell 由调用方按线程 ID 在活跃/
+// 归档快照中找出（含子代理子线程），找不到时调用方明确失败，不假 idle。
 // 审批/提问条目按投影 runtimeRequests 补齐状态；queue/activity 由投影
 // runs/messages/会话能力派生（口径对齐 T3 deriveThreadQueueWorkflowState）。
 func normalizeT3ThreadDetail(env *model.T3Environment, projection json.RawMessage, shell *t3ThreadShell, projectNames map[string]string) (*T3ThreadDetail, error) {

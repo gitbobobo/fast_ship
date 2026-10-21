@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/godbobo/fast_ship/server/internal/pkg/errs"
@@ -14,13 +15,17 @@ import (
 // 核验与回收、线程归档。除线程投影走 HTTP 外都是一次性 WS 会话（探测 → 拨号
 // → RPC → 断开），与写路径同一口径。
 
-// T3Worktree 是 vcs.listRefs 登记的一条工作区项：路径 + ref 名（分支）。
+// T3Worktree 是 vcs.listRefs 登记的一条工作区项：路径 + 该路径下聚合的全部
+// ref 名。同一路径可能登记在多个 ref 下（分支/标签各自指过来），只取首个
+// ref 名会把合法属主误判成分支不一致，所以按路径聚合去重。
 type T3Worktree struct {
-	Path    string
-	RefName string
+	Path     string
+	RefNames []string
 }
 
 // T3ThreadWorktree 是线程投影里的工作区真值：worktreePath 与 branch。
+// 两者在 AppThread 投影上都是可空字段（视觉式 root 工作区、主检出线程），
+// 缺省即空串。
 type T3ThreadWorktree struct {
 	Path   string
 	Branch string
@@ -53,21 +58,84 @@ func (s *T3ThreadsService) ThreadWorktree(ctx context.Context, userID, envID, th
 	if err != nil {
 		return nil, s.upstreamError(fmt.Errorf("线程投影解析失败: %w", err))
 	}
-	out := &T3ThreadWorktree{}
-	if parsed.Thread.WorktreePath != nil {
-		out.Path = *parsed.Thread.WorktreePath
+	out := threadWorktreeFromProjection(parsed)
+	return &out, nil
+}
+
+// threadWorktreeFromProjection 从线程投影提取工作区真值（纯函数，便于用真实
+// 形状的 projection fixture 钉住字段层级契约）：branch/worktreePath 挂在
+// projection.thread（AppThread）下，可空，缺省解析为空串。
+func threadWorktreeFromProjection(p *t3ThreadProjection) T3ThreadWorktree {
+	var out T3ThreadWorktree
+	if p.Thread.WorktreePath != nil {
+		out.Path = *p.Thread.WorktreePath
 	}
-	if parsed.Thread.Branch != nil {
-		out.Branch = *parsed.Thread.Branch
+	if p.Thread.Branch != nil {
+		out.Branch = *p.Thread.Branch
+	}
+	return out
+}
+
+// t3WorktreesPage 是 vcs.listRefs 单页响应里登记核验用到的字段。
+type t3WorktreesPage struct {
+	Refs []struct {
+		Name         string  `json:"name"`
+		WorktreePath *string `json:"worktreePath"`
+	} `json:"refs"`
+	NextCursor *int `json:"nextCursor"`
+}
+
+// reviewWorktreeMaxRefPages 登记收集的分页上限。
+const reviewWorktreeMaxRefPages = 8
+
+// collectWorktrees 分页收集 vcs.listRefs 的 worktree 项（纯函数，fetch 取一页
+// 并透传 cursor）：同一路径聚合全部 ref 名去重，结果按路径排序。到达页数上限
+// 仍有 NextCursor 时返回上游错误、绝不返回不完整列表——核验把「不在列表」当
+// 「已无此登记」，截断列表会造成漏删或归属误判。
+func collectWorktrees(fetch func(cursor *int) (t3WorktreesPage, error)) ([]T3Worktree, error) {
+	byPath := map[string][]string{}
+	var nextCursor *int
+	for page := 0; page < reviewWorktreeMaxRefPages; page++ {
+		p, err := fetch(nextCursor)
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range p.Refs {
+			if ref.WorktreePath == nil || *ref.WorktreePath == "" {
+				continue
+			}
+			if !slices.Contains(byPath[*ref.WorktreePath], ref.Name) {
+				byPath[*ref.WorktreePath] = append(byPath[*ref.WorktreePath], ref.Name)
+			}
+		}
+		if p.NextCursor == nil {
+			nextCursor = nil
+			break
+		}
+		nextCursor = p.NextCursor
+	}
+	if nextCursor != nil {
+		return nil, errs.New(errs.ErrT3Upstream.Code,
+			fmt.Sprintf("引用列表分页超过上限（%d 页），拒绝在不完整列表上核验工作区归属", reviewWorktreeMaxRefPages))
+	}
+	paths := make([]string, 0, len(byPath))
+	for path := range byPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]T3Worktree, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, T3Worktree{Path: path, RefNames: byPath[path]})
 	}
 	return out, nil
 }
 
-// ListWorktrees 列出一个 T3 项目当前登记的全部工作区（vcs.listRefs 的
-// worktreePath 非空项），每条带 ref 名，供回收前的登记核验。同一路径可能在
-// 多个 ref 下出现，按路径去重保留首个 ref 名。cwd 从上游项目表
-// workspaceRoot 解析（与 createThread 同口径）。
-func (s *T3ThreadsService) ListWorktrees(ctx context.Context, userID, envID, projectID string) ([]T3Worktree, error) {
+// ListWorktrees 列出一个 T3 工作区根目录（cwd）当前登记的全部 worktree
+// （vcs.listRefs 的 worktreePath 非空项），每条带聚合后的 ref 名集合，供回收
+// 前的登记核验。cwd 由调用方给定且必须与随后的删除同源——从 T3 项目表现查
+// workspace_root 会在绑定变更后对着另一个 repo 核验。不做服务端 query 过滤：
+// 核验需要完整集合判定「未登记」。
+func (s *T3ThreadsService) ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error) {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {
 		return nil, err
@@ -79,76 +147,31 @@ func (s *T3ThreadsService) ListWorktrees(ctx context.Context, userID, envID, pro
 	if err != nil {
 		return nil, errs.New(errs.ErrT3Upstream.Code, "环境凭证不可用，请重新配对")
 	}
-	projectShells, err := s.http.fetchProjectSnapshot(ctx, env.Address, token)
-	if err != nil {
-		return nil, s.upstreamError(err)
-	}
-	var workspaceRoot string
-	for _, project := range projectShells {
-		if project.ID == projectID && project.WorkspaceRoot != nil {
-			workspaceRoot = *project.WorkspaceRoot
-		}
-	}
-	if workspaceRoot == "" {
-		return nil, errs.New(40401, "T3 项目不在该环境（或项目缺少 workspaceRoot）")
-	}
-
 	session, err := dialT3RPC(ctx, wsBaseOf(env.Address), token)
 	if err != nil {
 		return nil, s.upstreamError(err)
 	}
 	defer session.Close()
 
-	type listRefsPage struct {
-		Refs []struct {
-			Name         string  `json:"name"`
-			WorktreePath *string `json:"worktreePath"`
-		} `json:"refs"`
-		NextCursor *int `json:"nextCursor"`
-	}
-	listInput := map[string]any{"cwd": workspaceRoot, "refKind": "all"}
-	seen := map[string]string{}
-	const maxRefPages = 8
-	var nextCursor *int
-	for page := 0; page < maxRefPages; page++ {
-		if nextCursor != nil {
-			listInput["cursor"] = *nextCursor
+	listInput := map[string]any{"cwd": cwd, "refKind": "all"}
+	return collectWorktrees(func(cursor *int) (t3WorktreesPage, error) {
+		if cursor != nil {
+			listInput["cursor"] = *cursor
 		}
 		value, err := session.call(ctx, "vcs.listRefs", listInput)
 		if err != nil {
-			return nil, s.upstreamError(err)
+			return t3WorktreesPage{}, s.upstreamError(err)
 		}
-		var p listRefsPage
+		var p t3WorktreesPage
 		if err := json.Unmarshal(value, &p); err != nil {
-			return nil, errs.New(errs.ErrT3Upstream.Code, "引用列表解析失败: "+shortenT3Error(err))
+			return t3WorktreesPage{}, errs.New(errs.ErrT3Upstream.Code, "引用列表解析失败: "+shortenT3Error(err))
 		}
-		for _, ref := range p.Refs {
-			if ref.WorktreePath == nil || *ref.WorktreePath == "" {
-				continue
-			}
-			if _, dup := seen[*ref.WorktreePath]; !dup {
-				seen[*ref.WorktreePath] = ref.Name
-			}
-		}
-		if p.NextCursor == nil {
-			break
-		}
-		nextCursor = p.NextCursor
-	}
-	paths := make([]string, 0, len(seen))
-	for path := range seen {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	out := make([]T3Worktree, 0, len(paths))
-	for _, path := range paths {
-		out = append(out, T3Worktree{Path: path, RefName: seen[path]})
-	}
-	return out, nil
+		return p, nil
+	})
 }
 
 // RemoveWorktree 删除一个已登记的 worktree（vcs.removeWorktree，force 由调用方给）。
-// cwd 用项目绑定里快照的 workspace_root。
+// cwd 由调用方给定（launch 快照优先），核验与删除必须同源。
 func (s *T3ThreadsService) RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error {
 	env, err := s.loadEnvForWrite(ctx, userID, envID)
 	if err != nil {

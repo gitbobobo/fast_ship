@@ -33,7 +33,7 @@ type reviewT3 interface {
 	CreateThreadForAgent(ctx context.Context, userID, envID string, req *T3CreateThreadRequest) (*T3ThreadLaunchResult, bool, error)
 	StopThread(ctx context.Context, userID, envID, threadID string) (*T3ThreadStopResult, error)
 	ThreadWorktree(ctx context.Context, userID, envID, threadID string) (*T3ThreadWorktree, error)
-	ListWorktrees(ctx context.Context, userID, envID, projectID string) ([]T3Worktree, error)
+	ListWorktrees(ctx context.Context, userID, envID, cwd string) ([]T3Worktree, error)
 	RemoveWorktree(ctx context.Context, userID, envID, cwd, path string, force bool) error
 	ArchiveThread(ctx context.Context, userID, envID, threadID string) error
 }

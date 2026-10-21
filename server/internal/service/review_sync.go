@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -632,9 +634,33 @@ func reviewRunStatusText(s model.ReviewRunStatus) string {
 	return "审查中"
 }
 
-// reviewBlobURL 指向 head 提交中文件行锚点的 GitHub 链接。
+// reviewBlobURL 指向 head 提交中文件行锚点的 GitHub 链接。文件路径按 `/`
+// 分段编码——路径里的括号/空格/`#` 不编码会断链（`#` 尤其会被当成锚点截断）；
+// repo/sha 只含 GitHub 合法字符，原样拼接。
 func reviewBlobURL(meta reviewCommentMeta, file string, line int) string {
-	return fmt.Sprintf("https://github.com/%s/blob/%s/%s#L%d", meta.RepoFullName, meta.HeadSHA, file, line)
+	segments := strings.Split(file, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	return fmt.Sprintf("https://github.com/%s/blob/%s/%s#L%d",
+		meta.RepoFullName, meta.HeadSHA, strings.Join(segments, "/"), line)
+}
+
+// markdownLinkText 转义 Markdown 链接文本里的结构性字符：`[`、`]` 会截断
+// `[file:line](url)` 的文本段，反斜杠本身也要转义。
+func markdownLinkText(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `[`, `\[`)
+	s = strings.ReplaceAll(s, `]`, `\]`)
+	return s
+}
+
+// markdownTableCell 把任意值放进 Markdown 表格单元格：换行会拆行破坏表格，
+// 先换成空格；`|` 会拆列，转义之。
+func markdownTableCell(s string) string {
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.ReplaceAll(s, "|", "\\|")
 }
 
 // writeCodeFinding 输出一条 P0–P2 发现：级别加粗开头，位置用指向 head blob
@@ -644,7 +670,7 @@ func writeCodeFinding(b *strings.Builder, meta reviewCommentMeta, f api.ReviewCo
 	head := "**" + string(f.Level) + "** "
 	switch {
 	case f.Line != nil && *f.Line > 0:
-		head += fmt.Sprintf("[%s:%d](%s)", f.File, *f.Line, reviewBlobURL(meta, f.File, *f.Line))
+		head += fmt.Sprintf("[%s:%d](%s)", markdownLinkText(f.File), *f.Line, reviewBlobURL(meta, f.File, *f.Line))
 		// inlineLines == nil 表示本轮没读 diff（例如没有可标注的行内发现），
 		// 无从判断行号是否有效，不臆断加注。
 		if inlineLines != nil && !inlineLines[f.File][*f.Line] {
@@ -732,9 +758,9 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 		if c := stats[i].counts; c != nil {
 			cell = fmt.Sprintf("%d | %d | %d | %d", c["P0"], c["P1"], c["P2"], c["Note"])
 		}
-		// 组合名进表格需转义竖线，否则会被拆成多余列。
+		// 组合名进表格：换行拆行、竖线拆列，都要处理。
 		fmt.Fprintf(&b, "| %s | %s | %s |\n",
-			strings.ReplaceAll(runCombinationLabel(&codeRuns[i]), "|", "\\|"), stats[i].status, cell)
+			markdownTableCell(runCombinationLabel(&codeRuns[i])), stats[i].status, cell)
 	}
 	b.WriteString("\n")
 
@@ -749,7 +775,8 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 		r := &codeRuns[i]
 		fmt.Fprintf(&b, "### %s\n", runCombinationLabel(r))
 		if opts := runCombinationOptions(r); opts != "" {
-			fmt.Fprintf(&b, "\n<sub>%s</sub>\n", opts)
+			// 选项串整体 HTML 转义：值来自项目配置，含 `<`/`&` 会破坏 <sub> 标签。
+			fmt.Fprintf(&b, "\n<sub>%s</sub>\n", html.EscapeString(opts))
 		}
 		b.WriteString("\n")
 		switch {
@@ -779,7 +806,7 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 					fmt.Fprintf(&b, "<details><summary>Note（%d 条）</summary>\n\n", len(notes))
 					for _, n := range notes {
 						if n.Line != nil && *n.Line > 0 {
-							fmt.Fprintf(&b, "- [%s:%d](%s) %s\n", n.File, *n.Line, reviewBlobURL(meta, n.File, *n.Line), n.Body)
+							fmt.Fprintf(&b, "- [%s:%d](%s) %s\n", markdownLinkText(n.File), *n.Line, reviewBlobURL(meta, n.File, *n.Line), n.Body)
 						} else {
 							fmt.Fprintf(&b, "- %s %s\n", n.File, n.Body)
 						}
@@ -802,6 +829,9 @@ func buildCodeComment(meta reviewCommentMeta, codeRuns []model.ReviewRun, inline
 // 注记与行内 review 的行判定共用同一份结果，diff 只读一次。本轮没有已完成的
 // 带行号 P0–P2 发现时返回 nil、不读 diff——此时行内 review 也发不出任何
 // 意见，评论注记口径随之放宽（有行号的不加注，因为无从判断）。
+// 扫描范围刻意不收窄到「尚未行内标注过」的发现（PostedAt == nil）：每次
+// resync 都要重算整份注记（已发过的行内 review 不会撤销，注记必须随之保持
+// 准确），轻微多一次 diff 读取可接受。
 func (s *ReviewService) fetchInlineLines(ctx context.Context, client githubapi.GitHubClient,
 	ledger *model.ReviewPullRequest, codeRuns []model.ReviewRun) (map[string]map[int]bool, error) {
 	need := false

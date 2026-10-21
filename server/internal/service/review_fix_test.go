@@ -30,6 +30,7 @@ type fakeReviewT3 struct {
 	worktrees       []T3Worktree
 	listErr         error
 	listCalls       int
+	listCwds        []string
 	stopped         []string
 	removed         []string
 	removedCwd      []string
@@ -71,8 +72,9 @@ func (f *fakeReviewT3) ThreadWorktree(_ context.Context, _, _, threadID string) 
 	return &out, nil
 }
 
-func (f *fakeReviewT3) ListWorktrees(context.Context, string, string, string) ([]T3Worktree, error) {
+func (f *fakeReviewT3) ListWorktrees(_ context.Context, _, _, cwd string) ([]T3Worktree, error) {
 	f.listCalls++
+	f.listCwds = append(f.listCwds, cwd)
 	return f.worktrees, f.listErr
 }
 
@@ -181,7 +183,7 @@ func TestReviewCleanupOwnership(t *testing.T) {
 	t3.threadWorktrees = map[string]T3ThreadWorktree{
 		r2.ThreadID: {Path: "/wt/owned", Branch: "br-owned"},
 	}
-	t3.worktrees = []T3Worktree{{Path: "/wt/owned", RefName: "br-owned"}}
+	t3.worktrees = []T3Worktree{{Path: "/wt/owned", RefNames: []string{"br-owned"}}}
 	review.cleanupRunWorktree(r2, now)
 	var after2 model.ReviewRun
 	e.svc.db.First(&after2, "id = ?", r2.ID)
@@ -197,7 +199,7 @@ func TestReviewCleanupOwnership(t *testing.T) {
 	e.svc.db.Model(other).Update("worktree_path", "/wt/shared")
 	r3 := e.seedCleanableRun(t, repo, 1, env, model.ReviewRunCompleted, "", now)
 	t3.threadWorktrees[r3.ThreadID] = T3ThreadWorktree{Path: "/wt/shared", Branch: "br-shared"}
-	t3.worktrees = append(t3.worktrees, T3Worktree{Path: "/wt/shared", RefName: "br-shared"})
+	t3.worktrees = append(t3.worktrees, T3Worktree{Path: "/wt/shared", RefNames: []string{"br-shared"}})
 	removedBefore := len(t3.removed)
 	review.cleanupRunWorktree(r3, now)
 	var after3 model.ReviewRun
@@ -234,7 +236,7 @@ func TestCleanupConcurrentRunsAllRemoved(t *testing.T) {
 		path := fmt.Sprintf("/wt/burst-%d", i)
 		branch := fmt.Sprintf("br-burst-%d", i)
 		threadWT[runs[i].ThreadID] = T3ThreadWorktree{Path: path, Branch: branch}
-		refs = append(refs, T3Worktree{Path: path, RefName: branch})
+		refs = append(refs, T3Worktree{Path: path, RefNames: []string{branch}})
 	}
 	t3 := &fakeReviewT3{threadWorktrees: threadWT, worktrees: refs}
 	review := e.withT3(t3, nil, nil)
@@ -269,8 +271,9 @@ func TestCleanupConcurrentRunsAllRemoved(t *testing.T) {
 	}
 }
 
-// TestCleanupThreadNotFoundRemoves 线程已不存在：没有工作区可清，直接
-// removed——不通知、不删。
+// TestCleanupThreadNotFoundRemoves 线程 404：可能来自 T3 重启/代理抖动，同样
+// 走有限重试——上限内不动状态，连续到上限才认定线程确已不存在：removed，
+// 不通知、不删。
 func TestCleanupThreadNotFoundRemoves(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -281,6 +284,14 @@ func TestCleanupThreadNotFoundRemoves(t *testing.T) {
 	review := e.withT3(t3, nil, nil)
 
 	run := e.seedCleanableRun(t, repo, 44, env, model.ReviewRunCompleted, "", now)
+	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
+		review.cleanupRunWorktree(run, now)
+		var mid model.ReviewRun
+		e.svc.db.First(&mid, "id = ?", run.ID)
+		if mid.WorktreeState != model.ReviewWorktreeNone {
+			t.Fatalf("404 重试中 worktree_state = %q, want none", mid.WorktreeState)
+		}
+	}
 	review.cleanupRunWorktree(run, now)
 
 	var after model.ReviewRun
@@ -340,7 +351,7 @@ func TestCleanupUnregisteredWorktreeSkipsDelete(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-unreg")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{
-		worktrees: []T3Worktree{{Path: "/wt/someone-else", RefName: "br-x"}},
+		worktrees: []T3Worktree{{Path: "/wt/someone-else", RefNames: []string{"br-x"}}},
 	}
 	review := e.withT3(t3, nil, nil)
 
@@ -372,7 +383,7 @@ func TestCleanupRefNameMismatchFails(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-refmis")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{
-		worktrees: []T3Worktree{{Path: "/wt/x", RefName: "br-other"}},
+		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"br-other"}}},
 	}
 	review := e.withT3(t3, nil, nil)
 
@@ -405,7 +416,7 @@ func TestCleanupRowPathMismatchFails(t *testing.T) {
 	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-rowmis")
 	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
 	t3 := &fakeReviewT3{
-		worktrees: []T3Worktree{{Path: "/wt/new", RefName: "br-n"}},
+		worktrees: []T3Worktree{{Path: "/wt/new", RefNames: []string{"br-n"}}},
 	}
 	review := e.withT3(t3, nil, nil)
 
@@ -842,5 +853,111 @@ func TestParseDiffRightLinesTrailingNewline(t *testing.T) {
 	got := valid["a.go"]
 	if len(got) != 2 || !got[1] || !got[2] {
 		t.Fatalf("valid lines = %v, want {1,2}", got)
+	}
+}
+
+// TestCleanupEmptyBranchMatchesByPath F4 回归：线程投影的 branch 可空——空时
+// 只凭「路径命中登记」认定归属，不再被 ref 名比较恒不等打成永久 failed。
+func TestCleanupEmptyBranchMatchesByPath(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-nobranch")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{
+		worktrees: []T3Worktree{{Path: "/wt/x", RefNames: []string{"whatever"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 62, env, model.ReviewRunCompleted, "", now)
+	t3.threadWorktrees = map[string]T3ThreadWorktree{
+		run.ThreadID: {Path: "/wt/x"}, // branch 为空
+	}
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 {
+		t.Fatalf("worktree = %q removed=%v, want removed 且删除（空分支按路径核验）",
+			after.WorktreeState, t3.removed)
+	}
+	if e.cleanupFailedCount(t) != 0 {
+		t.Fatal("空分支不应发失败通知")
+	}
+}
+
+// TestCleanupTerminalRowsNotClaimers F7 回归：removed/failed 行残留的
+// worktree_path 不再算认领者，同路径的后续合法属主正常回收。
+func TestCleanupTerminalRowsNotClaimers(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-staleclaim")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	// 历史终态行：同路径、已 removed——只是残留快照，不得当认领者。
+	e.seedDispatchedRun(t, repo, 63, model.ReviewKindCode, model.ReviewRunCompleted, "/wt/recycled", true, now)
+	e.svc.db.Model(&model.ReviewRun{}).Where("worktree_path = '/wt/recycled'").
+		Update("worktree_state", model.ReviewWorktreeRemoved)
+
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			// 当前运行复用同一路径（分支不同无妨，核验按 ref 名集合）。
+			"th-current": {Path: "/wt/recycled", Branch: "br-new"},
+		},
+		worktrees: []T3Worktree{{Path: "/wt/recycled", RefNames: []string{"br-new"}}},
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 64, env, model.ReviewRunCompleted, "", now)
+	e.svc.db.Model(run).Update("thread_id", "th-current")
+	run.ThreadID = "th-current"
+	review.cleanupRunWorktree(run, now)
+
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeRemoved || len(t3.removed) != 1 {
+		t.Fatalf("worktree = %q removed=%v, want removed（终态行不算认领者）",
+			after.WorktreeState, t3.removed)
+	}
+}
+
+// TestCleanupTriesPerReason F8 回归：重试计数按原因独立——404 两次不占用
+// 「读失败」的宽限；若仍是单一计数，第 3 个 tick 就会提前落终态。
+func TestCleanupTriesPerReason(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-mixtry")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+	t3 := &fakeReviewT3{
+		threadWTErrs: []error{errT3ThreadNotFound, errT3ThreadNotFound},
+		threadWTErr:  errors.New("upstream boom"),
+	}
+	review := e.withT3(t3, nil, nil)
+
+	run := e.seedCleanableRun(t, repo, 65, env, model.ReviewRunCompleted, "", now)
+	// 两个 tick 404（notfound 计数）+ 一个 tick 读失败（thread 计数=1）：
+	// 任一原因都还没到上限，状态必须原样不动。
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.cleanupRunWorktree(run, now)
+		var mid model.ReviewRun
+		e.svc.db.First(&mid, "id = ?", run.ID)
+		if mid.WorktreeState != model.ReviewWorktreeNone {
+			t.Fatalf("tick %d worktree_state = %q, want none（原因混算会提前终态）", i+1, mid.WorktreeState)
+		}
+	}
+	// 再两次读失败到该原因上限：failed + 通知。
+	for i := 0; i < reviewWorktreeMaxTries-1; i++ {
+		review.cleanupRunWorktree(run, now)
+	}
+	var after model.ReviewRun
+	e.svc.db.First(&after, "id = ?", run.ID)
+	if after.WorktreeState != model.ReviewWorktreeFailed ||
+		!strings.Contains(after.WorktreeError, "读取线程工作区失败") {
+		t.Fatalf("worktree = %q/%q, want failed+读失败原因", after.WorktreeState, after.WorktreeError)
+	}
+	if e.cleanupFailedCount(t) != 1 {
+		t.Fatal("到上限应发一次失败通知")
 	}
 }

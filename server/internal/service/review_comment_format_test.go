@@ -185,3 +185,52 @@ func TestRunCombinationOptions(t *testing.T) {
 		t.Fatalf("超长选项应以省略号结尾: %q", opts)
 	}
 }
+
+// TestBuildCodeCommentEscaping F5 回归：文件路径与链接文本、表格单元格、
+// <sub> 选项值里的结构性字符都要转义，否则断链/破表/破标签。
+func TestBuildCodeCommentEscaping(t *testing.T) {
+	result := `{"findings":[` +
+		`{"level":"P1","file":"src/(app)/page.tsx","line":10,"body":"括号路径"},` +
+		`{"level":"P2","file":"docs/release notes.md","line":3,"body":"空格路径"},` +
+		`{"level":"P0","file":"a#b.go","line":5,"body":"井号路径"},` +
+		`{"level":"P1","file":"x[y].go","line":8,"body":"方括号文本"}` +
+		`],"prior":[],"summary":"s","ui_changed":false,"ui_changed_since_last_visual":false}`
+	run := fmtTestRun(model.ReviewRunCompleted, result)
+	// 组合名自带换行（拆行）与竖线（拆列）；选项值带 <（破标签）与 nil。
+	run.Model = "m|odel\nsecond"
+	run.InstanceID = "in\"stance"
+	run.ModelOptionsJSON = `[{"id":"tag","value":"<b>&amp;"},{"id":"off","value":null}]`
+	meta := reviewCommentMeta{RepoFullName: "o/r", HeadSHA: "abcdef1234567890", RoundNumber: 1}
+	body := buildCodeComment(meta, []model.ReviewRun{run}, map[string]map[int]bool{}, false, false)
+
+	// 路径分段编码：括号/空格/# 都不能裸出现在 URL 里，行锚点仍在。
+	for _, want := range []string{
+		"https://github.com/o/r/blob/abcdef1234567890/src/%28app%29/page.tsx#L10",
+		"https://github.com/o/r/blob/abcdef1234567890/docs/release%20notes.md#L3",
+		"https://github.com/o/r/blob/abcdef1234567890/a%23b.go#L5",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing encoded blob URL %s in:\n%s", want, body)
+		}
+	}
+	// 链接文本转义方括号，Markdown 结构不被文件名破坏。
+	if !strings.Contains(body, "[x\\[y\\].go:8]") {
+		t.Fatalf("missing escaped link text: %s", body)
+	}
+	// 表格单元格：换行变空格、竖线转义——整行仍是一行且列数不变。
+	if !strings.Contains(body, "| m\\|odel second · in\"stance | 完成 |") {
+		t.Fatalf("table cell not sanitized: %s", body)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "| m") {
+			// 结构性竖线应为 7 个：原始计数减去转义出现的次数。
+			if n := strings.Count(line, "|") - strings.Count(line, "\\|"); n != 7 {
+				t.Fatalf("table row column count broken (want 7 structural pipes): %q", line)
+			}
+		}
+	}
+	// <sub> 选项整体转义：<、& 不再能构成标签；nil 值输出 null。
+	if !strings.Contains(body, "<sub>tag=&lt;b&gt;&amp;amp; · off=null</sub>") {
+		t.Fatalf("sub options not escaped: %s", body)
+	}
+}

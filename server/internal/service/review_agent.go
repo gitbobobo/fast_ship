@@ -330,9 +330,10 @@ func runCombinationLabel(run *model.ReviewRun) string {
 	return run.Model + " · " + run.InstanceID
 }
 
-// runCombinationOptions 组合选项串：k=v · k=v。值取 JSON 解码后的原生形态
-// （字符串不加引号、布尔/数字原样），整体截断到 reviewOptionsMaxRunes；
-// 无选项或选项 JSON 损坏返回空串。
+// runCombinationOptions 组合选项串：k=v · k=v。值取 JSON 解码后的原生形态：
+// 字符串原样（不加引号）、null 输出 "null"（%v 会输出 <nil>）、其余类型走
+// json.Marshal（bool/number 稳定可读），整体截断到 reviewOptionsMaxRunes；
+// 无选项或选项 JSON 损坏返回空串。HTML 转义在渲染层做（见 buildCodeComment）。
 func runCombinationOptions(run *model.ReviewRun) string {
 	if run.ModelOptionsJSON == "" || run.ModelOptionsJSON == "null" {
 		return ""
@@ -343,11 +344,18 @@ func runCombinationOptions(run *model.ReviewRun) string {
 	}
 	parts := make([]string, 0, len(opts))
 	for _, o := range opts {
-		if o.Value == nil {
-			parts = append(parts, o.Id+"=")
-			continue
+		switch v := o.Value.(type) {
+		case nil:
+			parts = append(parts, o.Id+"=null")
+		case string:
+			parts = append(parts, o.Id+"="+v)
+		default:
+			encoded, err := json.Marshal(v)
+			if err != nil {
+				encoded = []byte(fmt.Sprintf("%v", v))
+			}
+			parts = append(parts, o.Id+"="+string(encoded))
 		}
-		parts = append(parts, fmt.Sprintf("%s=%v", o.Id, o.Value))
 	}
 	return truncateRunes(strings.Join(parts, " · "), reviewOptionsMaxRunes)
 }

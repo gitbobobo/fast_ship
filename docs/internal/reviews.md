@@ -338,18 +338,26 @@ rune 截断加 `...`，不劈断多字节字符）；状态未变不重复调用
   `projection.thread.worktreePath` / `.branch`，已归档线程同样可读）：
   launch 确认时 T3 往往还没建好 worktree，启动前后做差集推断必然歧义，
   该方案已废弃，`launchRun` 不再解析路径。
-  - 线程 404 → 没有工作区可清，直接 `removed`（不通知）。
-  - 读线程失败或线程 `worktreePath` 为空（T3 仍在准备）→ 有限重试
-    （3 个 tick）；到上限分别 `failed`+通知 / `removed`（无工作区）。
+  - 线程 404、读线程失败、线程 `worktreePath` 为空（T3 仍在准备）各自独立
+    计数、有限重试（3 个 tick）：404 连续 3 次都读不到才 `removed`（T3 删
+    线程后的磁盘工作区归 T3 生命周期管）；读线程失败到上限 → `failed` +
+    通知；空路径到上限 → `removed`（无工作区）。
   - 行内旧 `worktree_path` 与线程真值不一致 → `failed` + 通知，不删。
-  - 读到的路径写回运行行，然后逐项核验：行快照仍属本运行
-    （repo/pr/head/thread/path 一致）、没有其他运行认领同一路径、该路径
-    仍登记在项目 `vcs.listRefs` 且登记 ref 名 = 线程 `branch`。
-  - 未登记（已被别处删掉）→ `removed`，不调用删除；ref 名不一致 →
-    `failed` + 通知；登记列举失败 → 有限重试后 `failed` + 通知。
+  - 读到的路径写回运行行，然后逐项核验（核验与删除用**同一个 cwd**，即
+    launch 快照的 `workspace_root`；绑定/项目表变化不改变证明对象）：行快照
+    仍属本运行（repo/pr/head/thread/path 一致）、没有仍待回收的运行认领同一
+    路径（只看 `worktree_state=none`）、该路径仍登记在项目 `vcs.listRefs`
+    且登记 ref 名里含线程 `branch`（`branch` 为空时只要求登记命中）。
+  - 登记列表必须完整：`vcs.listRefs` 分页未耗完（超过页数上限）按上游错误
+    重试，绝不把不完整列表当成「未登记」。未登记（已被别处删掉）→
+    `removed`，不调用删除；ref 名不一致 → `failed` + 通知；列举失败 →
+    有限重试后 `failed` + 通知。
   - 核验通过才 `vcs.removeWorktree{cwd: launch 时快照的 workspace_root,
     path: worktree_path, force:true}`（T3 WS RPC，`git worktree remove
     --force`），成功 `removed`。任何不确定都不删，不影响审查结论。
+- 删除项目时的 best-effort 回收与常规回收共用同一套归属核验，核验不过只
+  记日志跳过（项目行 CASCADE 后不再有调度机会；未走到回收阶段的运行按
+  线程投影取路径，避免把工作区一起漏掉）。
 - 视觉运行 `worktree_state` 恒 `none`，只归档线程、无工作区可删。
 
 ## 页面

@@ -284,7 +284,8 @@ func TestReviewLaunchRunSuccess(t *testing.T) {
 }
 
 // TestReviewCleanupCancelledNoDelete N2：取消且派发未确认的运行——线程实际
-// 未建成（投影 404），按「无工作区可清」removed，绝不调用 RemoveWorktree。
+// 未建成（投影 404），按有限重试走完后再按「无工作区可清」removed，绝不调用
+// RemoveWorktree。
 func TestReviewCleanupCancelledNoDelete(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
@@ -306,7 +307,9 @@ func TestReviewCleanupCancelledNoDelete(t *testing.T) {
 	run.DispatchStartedAt, run.FinishedAt, run.ArchivedAt, run.ErrorCode, run.EnvironmentID =
 		&now, &now, &now, "superseded", env.ID
 
-	review.cleanupRunWorktree(run, now)
+	for i := 0; i < reviewWorktreeMaxTries; i++ {
+		review.cleanupRunWorktree(run, now)
+	}
 
 	var after model.ReviewRun
 	e.svc.db.First(&after, "id = ?", run.ID)
@@ -434,9 +437,16 @@ func TestCleanupBeforeProjectDelete(t *testing.T) {
 	unresolved := e.seedDispatchedRun(t, repo, 54, model.ReviewKindCode, model.ReviewRunCompleted, "", false, finished)
 	e.svc.db.Model(unresolved).Update("environment_id", env.ID)
 
-	t3 := &fakeReviewT3{threadWorktrees: map[string]T3ThreadWorktree{
-		unresolved.ThreadID: {Path: "/ws/wt-thread", Branch: "br-del"},
-	}}
+	t3 := &fakeReviewT3{
+		threadWorktrees: map[string]T3ThreadWorktree{
+			unresolved.ThreadID: {Path: "/ws/wt-thread", Branch: "br-del"},
+		},
+		// 项目删除入口同样要过归属核验：两条路径都得登记在案才可删。
+		worktrees: []T3Worktree{
+			{Path: "/ws/wt-del"},
+			{Path: "/ws/wt-thread", RefNames: []string{"br-del"}},
+		},
+	}
 	review := e.withT3(t3, nil, nil)
 	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
 
@@ -456,6 +466,43 @@ func TestCleanupBeforeProjectDelete(t *testing.T) {
 	}
 	if len(t3.removed) != 2 || t3.removed[0] != "/ws/wt-del" || t3.removed[1] != "/ws/wt-thread" {
 		t.Fatalf("removed = %v, want [/ws/wt-del /ws/wt-thread]", t3.removed)
+	}
+}
+
+// 项目删除入口不得绕过归属核验：未登记（gone）与被其他运行认领（mismatch）
+// 的路径一律不删——常规回收会拒绝的路径，从删除入口同样删不掉。
+func TestCleanupBeforeProjectDeleteVerifiesOwnership(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := strings.ToLower(e.project.GithubOwner + "/" + e.project.GithubRepo)
+	now := time.Now().UTC()
+	env := createT3TestEnv(t, e.svc.db, e.user.ID, "env-delown")
+	createTestT3Binding(t, e.svc.db, e.project.ID, env.ID, "t3p")
+
+	// 行内路径未登记：gone → 不删。
+	gone := e.seedDispatchedRun(t, repo, 55, model.ReviewKindCode, model.ReviewRunCompleted, "/ws/wt-gone", true, now)
+	e.svc.db.Model(gone).Update("environment_id", env.ID)
+	// 行内路径被另一条仍在回收流程（state=none）的运行认领：mismatch → 不删。
+	clainer := e.seedRun(t, repo, 56, "sha-claim", model.ReviewRunRunning, now)
+	e.svc.db.Model(clainer).Updates(map[string]any{
+		"worktree_path": "/ws/wt-claimed", "worktree_state": model.ReviewWorktreeNone,
+	})
+	claimed := e.seedDispatchedRun(t, repo, 57, model.ReviewKindCode, model.ReviewRunCompleted, "/ws/wt-claimed", true, now)
+	e.svc.db.Model(claimed).Update("environment_id", env.ID)
+	// 认领行是历史终态（removed）：不算认领者 → 可删。
+	stale := e.seedDispatchedRun(t, repo, 58, model.ReviewKindCode, model.ReviewRunCompleted, "/ws/wt-free", true, now)
+	e.svc.db.Model(stale).Update("worktree_state", model.ReviewWorktreeRemoved)
+	released := e.seedDispatchedRun(t, repo, 59, model.ReviewKindCode, model.ReviewRunCompleted, "/ws/wt-free", true, now)
+	e.svc.db.Model(released).Update("environment_id", env.ID)
+
+	t3 := &fakeReviewT3{worktrees: []T3Worktree{
+		{Path: "/ws/wt-claimed"},
+		{Path: "/ws/wt-free"},
+	}}
+	review := e.withT3(t3, nil, nil)
+	review.CleanupBeforeProjectDelete(context.Background(), e.project.ID)
+
+	if len(t3.removed) != 1 || t3.removed[0] != "/ws/wt-free" {
+		t.Fatalf("removed = %v, want 仅 [/ws/wt-free]（gone/mismatch 不删）", t3.removed)
 	}
 }
 
@@ -481,7 +528,7 @@ func TestCleanupUsesLaunchWorkspaceRoot(t *testing.T) {
 		threadWorktrees: map[string]T3ThreadWorktree{
 			run.ThreadID: {Path: "/ws/wt-snap", Branch: "br-ws"},
 		},
-		worktrees: []T3Worktree{{Path: "/ws/wt-snap", RefName: "br-ws"}},
+		worktrees: []T3Worktree{{Path: "/ws/wt-snap", RefNames: []string{"br-ws"}}},
 	}
 	review := e.withT3(t3, nil, nil)
 	review.cleanupWorktrees(now)
@@ -491,6 +538,11 @@ func TestCleanupUsesLaunchWorkspaceRoot(t *testing.T) {
 	}
 	if len(t3.removedCwd) != 1 || t3.removedCwd[0] != "/launch-time-root" {
 		t.Fatalf("removed cwd = %v, want [/launch-time-root]", t3.removedCwd)
+	}
+	// 核验与删除必须同源：登记列举拿到的也是 launch 快照的 workspace_root，
+	// 而不是当前绑定或 T3 项目表现查的值。
+	if len(t3.listCwds) != 1 || t3.listCwds[0] != "/launch-time-root" {
+		t.Fatalf("list cwd = %v, want [/launch-time-root]", t3.listCwds)
 	}
 }
 
