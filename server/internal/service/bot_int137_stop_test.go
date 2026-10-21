@@ -244,3 +244,46 @@ func TestBotScheduleRunStop(t *testing.T) {
 		t.Fatalf("已终态 run 应 409，实得 %v", err)
 	}
 }
+
+// 定时任务运行在流式生成中被停止：走的是同一条 discard 路径，但不得把
+// 「已强制停止」lifecycle 写进主线（用户是从运行记录停的，主线不应多出
+// 无关提示，也不进入后续主线上下文）。
+func TestBotScheduleRunStopNoMainlineNotice(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "定时任务正文", StallAfterText: 30 * time.Second})
+	userID := createBotTestUser(t, env.db, "int137schednotice")
+	bot := env.createBot(t, userID)
+	task, err := env.bots.createScheduleTask(bot.ID, "长任务", "0 9 * * *", "Asia/Shanghai", "写点东西", "", false)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	now := time.Now().UTC()
+	taskID := task.ID
+	run := &model.BotRun{
+		ID: uuid.NewString(), BotID: bot.ID,
+		TriggerSource: model.BotTriggerSchedule, TriggerKey: "int137-schedule-notice",
+		TriggerContextJSON: `{"task_id":"` + task.ID + `","task_name":"长任务"}`,
+		Status:             model.BotRunStatusRunning,
+		SessionKind:        model.BotSessionKindSchedule, ScheduleTaskID: &taskID,
+		ConfigSnapshotJSON: "{}", CreatedAt: now, StartedAt: &now,
+	}
+	if err := env.bots.runs.CreateTx(env.db, run); err != nil {
+		t.Fatalf("seed schedule run: %v", err)
+	}
+	env.bots.wakeScheduleRun(bot.ID, run.ID)
+	env.fake.nextRequest(t, 10*time.Second)
+
+	if _, err := env.bots.StopScheduleRun(userID, bot.ID, task.ID, run.ID); err != nil {
+		t.Fatalf("stop schedule run: %v", err)
+	}
+	waitForBot(t, "schedule run stopped", 15*time.Second, func() bool {
+		status, finished := runStatusOf(t, env.db, run.ID)
+		return status == model.BotRunStatusStopped && finished != nil
+	})
+	var notices int64
+	env.db.Model(&model.BotMessage{}).
+		Where("bot_id = ? AND kind = ? AND content_json LIKE ?",
+			bot.ID, model.BotMessageKindLifecycle, "%run_interrupted%").Count(&notices)
+	if notices != 0 {
+		t.Fatalf("定时任务停止不得往主线写强制停止提示，实得 %d 条", notices)
+	}
+}

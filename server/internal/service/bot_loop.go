@@ -301,9 +301,13 @@ runLoop:
 			deltas.discard()
 			s.finishModelRequest(requestRow, reply, streamErr)
 			if input := s.safePoint(run); input.StopRequested {
-				// 被停止打断的流已经丢弃草稿：补一条可见的 lifecycle 提示，否则
-				// 时间线停在用户的「停止」上，看不出半截回复去哪了（视觉审查）。
-				s.appendForcedStopNotice(bot.ID, run.ID)
+				// 被停止打断的流已经丢弃草稿：主线补一条可见的 lifecycle 提示，
+				// 否则时间线停在用户的「停止」上，看不出半截回复去哪了（视觉
+				// 审查）。定时任务 run 不写主线消息——用户是从运行记录停的，主线
+				// 不该多出一条无关提示（也不进入后续主线上下文）。
+				if run.SessionKind != model.BotSessionKindSchedule {
+					s.appendForcedStopNotice(bot.ID, run.ID)
+				}
 				s.finishStopped(bot, run)
 				return
 			}
