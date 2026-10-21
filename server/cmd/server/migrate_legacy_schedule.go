@@ -64,8 +64,11 @@ func migrateLegacyScheduleNotice(db *gorm.DB, logger *zap.Logger) error {
 			seq, err := repository.NewBotRepository(tx).NextMessageSeqTx(tx, botID)
 			if err != nil {
 				// 取号失败的行（如消息水位异常为 0）跳过提示即可：这是
-				// 告知性迁移，不该为一个机器人拖垮整个启动。
+				// 告知性迁移，不该为一个机器人拖垮整个启动。但跳过会反复
+				// 扫描该机器人（dedup 标记从未写入），必须留痕。
 				if errors.Is(err, gorm.ErrRecordNotFound) {
+					logger.Warn("存量定时任务复核提示跳过：消息序号水位异常",
+						zap.String("bot_id", botID))
 					return nil
 				}
 				return err

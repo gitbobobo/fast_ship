@@ -1434,3 +1434,69 @@ func TestBotInt136RunRevisionSensitiveScope(t *testing.T) {
 		t.Fatalf("存量 run 的整行比对应仍生效")
 	}
 }
+
+// 顶层重复键会让「确认卡看到的」与「执行的」分叉：map 解析取末次值
+// （instruction:null → 未提供 → 卡片展示存量指令），结构体解析对 null
+// 做 no-op 还原（instruction:"evil" 留在规范化参数里）——批准旧指令实际
+// 执行新指令。受理端必须在任何解析之前拒绝重复键。
+func TestBotInt136DuplicateKeysRejected(t *testing.T) {
+	v7 := botToolsetVersionOf(7)
+	for _, args := range []string{
+		`{"action":"update","task_id":"t","instruction":"evil","instruction":null}`,
+		`{"action":"update","task_id":"t","instruction":null,"instruction":"evil"}`,
+		`{"action":"update","task_id":"t","needs_report":true,"needs_report":false}`,
+		`{"action":"run","task_id":"t","dry_run":false,"dry_run":true}`,
+	} {
+		prepared, err := botPrepareToolCall(v7, "fs_schedule", args)
+		if err == nil {
+			t.Fatalf("重复键应被拒: %s -> %+v", args, prepared)
+		}
+		if !strings.Contains(err.Error(), "重复字段") {
+			t.Fatalf("错误应指明重复字段: %s -> %v", args, err)
+		}
+	}
+	// 良性载荷不受影响（含显式 null）。
+	if _, err := botPrepareToolCall(v7, "fs_schedule",
+		`{"action":"update","task_id":"t","model":null}`); err != nil {
+		t.Fatalf("显式 null 单键应被受理: %v", err)
+	}
+}
+
+// ---------- 7. 未识别动作 fail closed ----------
+
+// 分类是对动作名的枚举：未来给工具集加动作却漏更新分类表时，默认必须落向
+// 最严一侧——受理端要求确认（而不是免确认同步执行），schedule 会话直接拒绝。
+// 这是 INT-136 的护栏对新动作的延伸：宁可多弹卡，不能静默放行持久化写。
+func TestBotInt136UnknownActionFailsClosed(t *testing.T) {
+	needs, err := botScheduleConfirmation("pause", map[string]json.RawMessage{})
+	if err != nil || !needs {
+		t.Fatalf("未识别动作应按需要确认处理: needs=%v err=%v", needs, err)
+	}
+	if err := botScheduleManageDenied(&botPreparedCall{
+		ToolName: "fs_schedule", Action: "pause",
+	}); err == nil {
+		t.Fatal("未识别动作应在定时任务会话被拒绝")
+	}
+	// 已知动作口径不变：只读/降权动作免确认、schedule 会话可用（status 是
+	// v2 冻结工具集里 list 的旧名，同样只读）。
+	for _, a := range []string{"list", "runs", "state_get", "state_set", "disable", "status"} {
+		needs, err := botScheduleConfirmation(a, map[string]json.RawMessage{})
+		if err != nil || needs {
+			t.Fatalf("%s 应保持免确认: needs=%v err=%v", a, needs, err)
+		}
+	}
+	for _, a := range []string{"list", "runs", "state_get", "state_set", "status"} {
+		if err := botScheduleManageDenied(&botPreparedCall{
+			ToolName: "fs_schedule", Action: a,
+		}); err != nil {
+			t.Fatalf("%s 应在定时任务会话可用: %v", a, err)
+		}
+	}
+	for _, a := range []string{"create", "update", "run", "enable", "delete"} {
+		if err := botScheduleManageDenied(&botPreparedCall{
+			ToolName: "fs_schedule", Action: a,
+		}); err == nil {
+			t.Fatalf("%s 应在定时任务会话被拒绝", a)
+		}
+	}
+}

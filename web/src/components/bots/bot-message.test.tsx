@@ -43,7 +43,8 @@ describe("BotMessageView schedule_event", () => {
   it("渲染为安静的事件行：任务名 + 状态 + 摘要，不是 assistant 气泡", () => {
     const { container } = renderMessage(completedEvent);
 
-    const line = screen.getByText(/定时任务「每日汇总」已完成/);
+    const line = screen.getByText(/定时任务「/);
+    expect(line).toHaveTextContent("定时任务「每日汇总」已完成");
     expect(line).toHaveTextContent("已汇总 3 条变化");
     // 不落 assistant 分支：没有气泡容器，也没有空占位块。
     expect(container.querySelector(".bg-muted.rounded-2xl")).toBeNull();
@@ -62,9 +63,28 @@ describe("BotMessageView schedule_event", () => {
       },
     });
 
-    const line = screen.getByText(/定时任务「每日汇总」已失败/);
+    const line = screen.getByText(/定时任务「/);
+    expect(line).toHaveTextContent("定时任务「每日汇总」已失败");
     expect(line).toHaveClass("text-destructive");
     expect(line).toHaveTextContent("model_request_failed: 上游 502");
+  });
+
+  // 任务名是模型可写数据（建/改任务只 trim+限长），summary 是模型最终汇报：
+  // 双向覆盖符（U+202E）能把事件行重排成相反意思，渲染前必须剥掉。
+  it("任务名/摘要/错误里的双向覆盖与控制字符被剥离", () => {
+    renderMessage({
+      ...completedEvent,
+      content: {
+        ...completedEvent.content,
+        task_name: "每日\u202E置倒",
+        summary: "已汇总\u202E3 条",
+      },
+    });
+
+    const line = screen.getByText(/定时任务「/);
+    expect(line).toHaveTextContent("每日置倒");
+    expect(line).toHaveTextContent("已汇总3 条");
+    expect(line.textContent ?? "").not.toMatch(/[\u202B-\u202E]/);
   });
 });
 

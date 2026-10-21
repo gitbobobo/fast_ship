@@ -61,8 +61,15 @@ func botScheduleConfirmation(action string, raw map[string]json.RawMessage) (boo
 		return !dryRun, nil
 	case "enable", "delete":
 		return true, nil
+	case "list", "runs", "state_get", "state_set", "disable", "status":
+		// 只读动作与 disable（收紧权限、可逆）同步免确认；status 是 v2 冻结
+		// 工具集里 list 的旧名，同样只读。
+		return false, nil
 	}
-	return false, nil
+	// 未识别动作按「需要确认」处理（fail closed）：未来给工具集加动作却漏
+	// 更新本表时，宁可多弹确认卡、由 worker 显式拒绝，也不能让新动作继承
+	// 免确认默认值、静默放行持久化写。
+	return true, nil
 }
 
 // botValidateScheduleAcceptArgs 是需要确认的 create/update 的受理期参数校验：
@@ -101,11 +108,16 @@ func botScheduleManageDenied(prepared *botPreparedCall) error {
 		return nil
 	}
 	switch prepared.Action {
-	case "create", "update", "run", "enable", "disable", "delete":
-		return errs.New(errs.ErrInvalidParams.Code,
-			"定时任务运行中不能创建/修改/启停/删除/手动运行定时任务（防止绕过写操作确认），请在主线对话里操作")
+	case "list", "runs", "state_get", "state_set", "status":
+		// 只读查询与本任务小状态是定时任务会话的正常能力；status 是 v2
+		// 冻结工具集里 list 的旧名。
+		return nil
 	}
-	return nil
+	// 管理动作（create/update/run/enable/disable/delete）一律拒绝；未识别
+	// 动作同样拒绝（fail closed）：未来新动作默认不允许在定时任务会话里
+	// 使用，等明确分类后再放行。
+	return errs.New(errs.ErrInvalidParams.Code,
+		"定时任务运行中不能创建/修改/启停/删除/手动运行定时任务（防止绕过写操作确认），请在主线对话里操作")
 }
 
 // ---------- fs_schedule 确认受理（INT-136）：范围、确认卡预览与异步执行 ----------

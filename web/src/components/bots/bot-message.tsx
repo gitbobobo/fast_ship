@@ -7,6 +7,7 @@ import type {
   BotScheduleRunStatus,
 } from "@/lib/api/bots";
 import { botScheduleRunStatusLabel } from "@/lib/api/bots";
+import { bidiSafeText } from "@/lib/bots/tool-labels";
 import { cn } from "@/lib/utils";
 import { BotConfirmationCard } from "./bot-confirmation-card";
 import { BotMarkdown } from "./bot-markdown";
@@ -95,19 +96,20 @@ export function BotMessageView({
     if (message.content.event === "compaction_failed") {
       // 压缩失败（INT-115）：note 是服务端给的中文原因。不能只显示英文
       // 事件名——要告诉用户发生了什么、以及可以直接继续发新消息。
+      // 远端错误文本可能落到 detail.message，渲染前剥双向/控制字符。
       const reason = detail.note || detail.message || "上下文压缩未成功";
       return (
         <p
           data-testid="bot-compaction-failed-note"
           className="mx-auto max-w-[85%] rounded-lg bg-muted/40 px-3 py-1.5 text-center text-xs text-muted-foreground"
         >
-          上下文压缩失败：{reason}。这条消息已停止自动重试，直接继续发新消息即可。
+          上下文压缩失败：{bidiSafeText(reason)}。这条消息已停止自动重试，直接继续发新消息即可。
         </p>
       );
     }
     return (
-      <p className="text-center text-xs text-muted-foreground">
-        {detail.note || message.content.event || ""}
+      <p className="text-center text-xs text-muted-foreground [unicode-bidi:isolate]">
+        {bidiSafeText(detail.note || message.content.event || "")}
       </p>
     );
   }
@@ -123,6 +125,8 @@ export function BotMessageView({
   }
 
   if (message.kind === "background_result") {
+    // summary 是模型的最终汇报、error_message 可能含远端错误文本——
+    // 都是模型可写串，渲染前剥双向/控制字符并隔离。
     return (
       <section className="space-y-1.5 rounded-xl border border-dashed bg-muted/20 px-3.5 py-2.5 text-sm">
         <p className="text-xs font-medium text-muted-foreground">
@@ -130,12 +134,14 @@ export function BotMessageView({
           {message.content.call_id ? ` · ${message.content.call_id.slice(0, 8)}` : ""}
         </p>
         {message.content.summary && (
-          <p className="break-words whitespace-pre-wrap">{message.content.summary}</p>
+          <p className="break-words whitespace-pre-wrap [unicode-bidi:isolate]">
+            {bidiSafeText(message.content.summary)}
+          </p>
         )}
         {message.content.error_message && (
-          <p className="text-xs text-destructive">
-            {message.content.error_code ? `${message.content.error_code}: ` : ""}
-            {message.content.error_message}
+          <p className="text-xs text-destructive [unicode-bidi:isolate]">
+            {message.content.error_code ? `${bidiSafeText(message.content.error_code)}: ` : ""}
+            {bidiSafeText(message.content.error_message)}
           </p>
         )}
       </section>
@@ -150,6 +156,9 @@ export function BotMessageView({
       botScheduleRunStatusLabel(message.content.status as BotScheduleRunStatus) ??
       message.content.status ??
       "";
+    // task_name 是模型可写数据（建/改任务时只 trim+限长，不过滤字符），
+    // summary/error_message 同理——渲染前一律剥双向/控制字符并隔离，
+    // 与确认卡、后台结果同口径（bidiSafeText + unicode-bidi:isolate）。
     return (
       <p
         className={cn(
@@ -158,13 +167,22 @@ export function BotMessageView({
         )}
       >
         定时任务「
-        {message.content.task_name || message.content.task_id || "未命名任务"}」
+        <span className="[unicode-bidi:isolate]">
+          {bidiSafeText(
+            message.content.task_name || message.content.task_id || "未命名任务",
+          )}
+        </span>
+        」
         {statusLabel}
-        {message.content.summary ? `：${message.content.summary}` : ""}
+        {message.content.summary && (
+          <span className="[unicode-bidi:isolate]">
+            {`：${bidiSafeText(message.content.summary)}`}
+          </span>
+        )}
         {message.content.error_message && (
-          <span className="block">
-            {message.content.error_code ? `${message.content.error_code}: ` : ""}
-            {message.content.error_message}
+          <span className="block [unicode-bidi:isolate]">
+            {message.content.error_code ? `${bidiSafeText(message.content.error_code)}: ` : ""}
+            {bidiSafeText(message.content.error_message)}
           </span>
         )}
       </p>
@@ -174,8 +192,8 @@ export function BotMessageView({
   if (message.kind === "tool_reply") {
     // 能关联到工具卡的回执已由卡片吸收；关联不到的退化成协议回复提示行。
     return (
-      <p className="text-xs text-muted-foreground">
-        {message.content.content || "工具已受理"}
+      <p className="text-xs text-muted-foreground [unicode-bidi:isolate]">
+        {bidiSafeText(message.content.content || "工具已受理")}
       </p>
     );
   }

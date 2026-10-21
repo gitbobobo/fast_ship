@@ -544,7 +544,15 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   `run` 除 `dry_run` 解析为布尔 true（只读预览）外都要确认；`enable`（重新
   武装一个运行内默认放行写操作的任务）与 `delete`（不可逆地抹掉任务）也要
   确认。`disable` 与 `list`/`runs`/`state_get`/`state_set` 保持同步——disable
-  是收紧权限、随时可逆（enable 要确认），拦它只会拖慢止血。受影响动作在受理
+  是收紧权限、随时可逆（enable 要确认），拦它只会拖慢止血。**未识别动作
+  一律按需要确认处理（fail closed）**：分类是对动作名的枚举，未来给工具集
+  加动作却漏更新本表时，宁可多弹确认卡、由 worker 显式拒绝，也不能让新动作
+  继承免确认默认值、静默放行持久化写。同一 fail-closed 口径贯穿全链：
+  `botScheduleManageDenied` 只显式放行 `list`/`runs`/`state_get`/`state_set`
+  （以及 v2 旧名 `status`），未识别动作在定时任务会话里默认拒绝；
+  `DecideCall` 的「始终允许」只允许
+  `run`，未识别动作默认拒绝豁免；`runScheduleWrite`/`execScheduleTool`/
+  `botReadOnlyActions` 本身就是显式枚举+默认拒绝/按写处理。受影响动作在受理
   时改判为 async + RequiresConfirmation：回执 `status=pending_confirmation`，
   批准后 queued → worker 执行，结果以【平台后台结果】送达。
 - **受理期校验**：会弹卡的 create/敏感 update 先把 cron/时区（执行层同一
@@ -553,6 +561,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   `botPrepareToolCall` 的 unknown-field 白名单（`botArgKeys` 按结构体 JSON
   tag 精确比对）先于敏感判定与执行端 unmarshal 运行，`"Instruction"` 等
   大小写变体一律 40001——这道白名单是确认语义的承重墙，有回归测试钉死。
+  顶层重复键同样 40001（`botJSONTopLevelKeysUnique`）：map 解析取末次值、
+  结构体解析对 null 做 no-op 还原，重复键会让「确认卡看到的」与「执行的」
+  分叉成两份解释——展示与执行必须同源。
 - **确认后不再接受配置漂移（TOCTOU）**：`update`/`run`/`enable`/`delete` 在执行时才读
   库里的任务，确认卡上展示的是受理那一刻的配置。受理时把任务的 `updated_at`
   记进 `execution_context.schedule.task_updated_at`，执行器在**自己的事务内**
@@ -564,6 +575,9 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   第二次比对，但只比对敏感配置指纹 `task_config_sha`（instruction/model/
   needs_report 的 SHA-256）——批准后改名/改 cron/停用这类良性改动不再
   误杀已批准的 run（存量 run 没有指纹字段时回退到整行 `task_updated_at`）。
+  注意收窄只覆盖建 run 后的秒级窗口：确认卡挂起期间（可能数天）的比对仍是
+  整行 `task_updated_at`，此时改名也会让待执行的 run/enable/delete 以
+  「任务在确认期间被修改」拒绝——方向安全，重新看一眼再批准即可。
 - **`run`/`enable`/`delete` 只收 `task_id`**：执行器按 `task_id` 读库里的任务
   配置，模型传的 `name`/`cron`/`timezone`/`instruction`/`model`/`needs_report`
   一概不生效，受理端直接拒绝，避免确认卡被参数遮住真正执行的那份配置。
@@ -606,7 +620,11 @@ path→version，无新笔记的空成功不会让次日重跑全部 daily。恢
   所有模型可写文本（快照值、chips、原始 JSON、错误与结果展示）渲染前经
   `bidiSafeText` 剥掉 Cf 与除换行/制表外的 Cc 并套 `unicode-bidi:isolate`
   ——U+202E 等双向覆盖符能把批准界面的指令重排成相反顺序，看到的必须与
-  执行的一致；\n/\t 保留，多行指令的行结构本身是被批准的内容。
+  执行的一致；\n/\t 保留，多行指令的行结构本身是被批准的内容。同一渲染
+  口径覆盖消息时间线上的模型可写串：`schedule_event` 的 task_name（建/改
+  任务只 trim+限长，不过滤字符）/summary/error_*、`background_result` 的
+  summary/error_*、lifecycle 的 `detail.note`/`detail.message` 与 tool_reply
+  正文——同一串在提示、卡片、事件行三处不能三种待遇。
 - **授权范围**：`create` 的范围是机器人任务集合（`schedule_task_collection`+
   bot.ID），`update`/`run`/`enable`/`delete` 是单个任务（`schedule_task`+
   task_id），因此 `run` 的「始终允许」只对一个任务生效。

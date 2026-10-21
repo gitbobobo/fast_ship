@@ -1010,6 +1010,12 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 	if err := json.Unmarshal([]byte(rawArguments), &rawMap); err != nil {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
 	}
+	// 重复键必须在任何解析之前拒绝：map 解析取末次值、结构体解析对 null
+	// 做 no-op 还原，同一载荷会得到两份不一致的解释（确认卡按末次 null
+	// 显示「未提供」、执行按先前值生效），展示与执行必须同源。
+	if err := botJSONTopLevelKeysUnique(rawArguments); err != nil {
+		return nil, err
+	}
 	// 改名/移除动作过渡期：action 从原始参数探出（参数形态可能已不属于
 	// 本工具声明的字段集，字段白名单会先一步拒绝），先查静态映射回结构
 	// 化提示，不偷执行新动作。冻结工具集里仍存在的动作不受映射影响
@@ -1091,6 +1097,36 @@ func botPrepareToolCall(ts *botToolsetHolder, toolName, rawArguments string) (*b
 		}
 	}
 	return prepared, nil
+}
+
+// botJSONTopLevelKeysUnique 拒绝顶层重复键：Go 的 map 解析取末次值，
+// 结构体解析按出现顺序赋值且对 null 做 no-op 还原——`{"x":"a","x":null}`
+// 在 map 里是 null、在结构体里是 "a"，受理判定/确认卡按 map 解释、执行
+// 按结构体解释，两份解释必须一致。非对象形态留给参数校验兜底。
+func botJSONTopLevelKeysUnique(raw string) error {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	t, err := dec.Token()
+	if err != nil || t != json.Delim('{') {
+		return nil
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+		}
+		key, _ := keyTok.(string)
+		if seen[key] {
+			return errs.New(errs.ErrInvalidParams.Code,
+				fmt.Sprintf("工具参数包含重复字段 %s", key))
+		}
+		seen[key] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return errs.New(errs.ErrInvalidParams.Code, "工具参数不是有效 JSON 对象")
+		}
+	}
+	return nil
 }
 
 // botArgKeys 收集参数结构体声明的 JSON 键。
