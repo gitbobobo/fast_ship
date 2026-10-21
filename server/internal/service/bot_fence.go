@@ -133,6 +133,9 @@ func botFenceTagOpenLenAt(s string, i int) int {
 		j++
 	} else if botFoldPrefixAt(s, j, `\u002f`) {
 		j += len(`\u002f`)
+	} else if j+1 < len(s) && s[j] == '\\' && s[j+1] == '/' {
+		// \/ 也是 JSON 合法转义，模型解码后同样是闭合斜杠。
+		j += 2
 	}
 	if !botFenceTagNameAt(s, j) {
 		return 0
@@ -153,9 +156,13 @@ func botFenceTagNameAt(s string, i int) bool {
 			i++
 			continue
 		}
-		if botFoldPrefixAt(s, i, `\u00`) && i+6 <= len(s) && botUnhexByte(s[i+4], s[i+5]) == want {
-			i += 6
-			continue
+		if botFoldPrefixAt(s, i, `\u00`) && i+6 <= len(s) {
+			// 解码字节与字面分支同一大小写折叠：\u0055 还原成 'U' 后仍是
+			// 大写变体写法，不折叠会漏拦。
+			if d := botUnhexByte(s[i+4], s[i+5]); d == want || (d >= 'A' && d <= 'Z' && d+'a'-'A' == want) {
+				i += 6
+				continue
+			}
 		}
 		return false
 	}
