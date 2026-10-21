@@ -174,6 +174,141 @@ func TestCollectScreenshotURLsBareImageLinks(t *testing.T) {
 	}
 }
 
+// J1 回归：PR 描述只有 svg 徽章这类结构上不可下载的引用时，收集结果为空 →
+// HasScreenshots=false → visualNone——不建视觉运行，也不写「截图无法下载」
+// failure（visual_status 保持空）。旧实现 `![]()`/`<img>` 无差别收集，徽章
+// 探测必然全败，每个同步事件都写一次 failure，永远收敛不到「没有截图」。
+func TestVisualSyncBadgeOnlySkipsScreenshotFlow(t *testing.T) {
+	e := newReviewEngineEnv(t)
+	repo := e.project.GithubOwner + "/" + e.project.GithubRepo
+	now := time.Now().UTC()
+	seedVisualSyncEnv(t, e, repo, 92, "sha-b", now)
+	e.fake.SetPR(repo, 92, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 92, HeadSHA: "sha-b",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		Body: "![badge](https://img.shields.io/badge/build-passing.svg) " +
+			"<img src=\"https://img.shields.io/badge/coverage-90%25.svg\">",
+	})
+
+	media := e.media
+	media.anonErr = errors.New("connection refused")
+	e.review.syncPendingPRs(now)
+
+	var visual int64
+	e.svc.db.Model(&model.ReviewRun{}).Where("kind = ?", model.ReviewKindVisual).Count(&visual)
+	if visual != 0 {
+		t.Fatalf("visual runs = %d, want 0（无可用截图引用不开视觉轮）", visual)
+	}
+	if got := e.fake.StatusesForContext(reviewVisualStatusContext); len(got) != 0 {
+		t.Fatalf("statuses = %+v, want 0（收集为空走 visualNone，不写「截图无法下载」failure）", got)
+	}
+	var ledger model.ReviewPullRequest
+	e.svc.db.First(&ledger, "repo_full_name = ? AND pr_number = 92", repo)
+	if ledger.VisualStatus != "" {
+		t.Fatalf("visual_status = %q, want 空（没有截图 ≠ 截图无法下载）", ledger.VisualStatus)
+	}
+
+	// 描述换成真实可下载的截图后，下一次同步事件照常开轮——结构准入没有把
+	// 该收的也挡掉。
+	e.fake.SetPR(repo, 92, &githubapi.PullRequest{
+		RepoFullName: repo, Number: 92, HeadSHA: "sha-b",
+		Title: "t", HTMLURL: "u", BaseRef: "main", HeadRef: "feature",
+		Body: "![界面](https://uiv.frp.musiver.cn/f/x.png)",
+	})
+	media.anonErr = nil
+	e.setLedgerPending(t, repo, 92)
+	e.review.syncPendingPRs(now.Add(time.Second))
+	var visualRuns []model.ReviewRun
+	e.svc.db.Where("repo_full_name = ? AND pr_number = ? AND kind = ?", repo, 92, model.ReviewKindVisual).Find(&visualRuns)
+	if len(visualRuns) == 0 {
+		t.Fatal("描述换成真实截图后应开视觉轮")
+	}
+}
+
+// J1：结构准入对三个来源（`![]()`、`<img>`、裸链）统一——只排除「下载面必
+// 然拒绝」的形态。旧实现只有裸链过准入，PR 描述只有 svg 徽章 / http 图 /
+// data: URI / 指向网页的 `![]()` 时探测必然全败，每次同步都写一次「截图无法
+// 下载」failure，永远收敛不到「没有截图」。
+func TestCollectScreenshotURLsAdmitsDownloadableOnly(t *testing.T) {
+	// 下载面必然拒绝的形态不收：非 https、相对路径、非位图扩展名（svg 徽章、
+	// 网页 .html、视频 .mp4、文本 .txt）。
+	for _, body := range []string{
+		"![badge](https://img.shields.io/badge/x.svg)",
+		"<img src=\"https://img.shields.io/badge/x.svg\">",
+		"![图](http://uiv.frp.musiver.cn/f/x.png)",
+		"<img src=\"http://uiv.frp.musiver.cn/f/x.png\">",
+		"![内联](data:image/png;base64,iVBORw0KGgo=)",
+		"<img src=\"data:image/png;base64,iVBORw0KGgo=\">",
+		"![相对](images/shot.png)",
+		"<img src=\"images/shot.png\">",
+		"![网页](https://example.com/docs/page.html)",
+		"<img src=\"https://example.com/docs/page.html\">",
+		"![视频](https://example.com/demo.mp4)",
+		"![文本](https://example.com/notes.txt)",
+	} {
+		if refs := collectScreenshotURLs(body); len(refs) != 0 {
+			t.Fatalf("body %q: refs = %+v, want 空（下载面必然拒绝的形态不收）", body, refs)
+		}
+	}
+
+	// 无扩展名的 https 图片（可能是 image/* 直链）与 GitHub 附件形态（附件
+	// 直链本就没有扩展名）仍被收集。
+	for _, body := range []string{
+		"![图](https://images.example.com/abc123)",
+		"<img src=\"https://images.example.com/abc123\">",
+		"![附件](https://github.com/user-attachments/assets/uuid-1)",
+		"<img src=\"https://user-images.githubusercontent.com/1/2\">",
+	} {
+		if refs := collectScreenshotURLs(body); len(refs) != 1 {
+			t.Fatalf("body %q: refs = %+v, want 无扩展名 https 图片被收集", body, refs)
+		}
+	}
+}
+
+// J2：包法符号（反引号、中文直角引号、Markdown 强调符）粘在匹配尾部要被裁
+// 掉——它们可能合法出现在 URL 中段，进不了粗筛正则的排除类，只在匹配后裁
+// 尾部；不裁会破坏扩展名判定 → 漏收 → 视觉轮静默不开。裁剪只作用于匹配尾
+// 部：闭合一侧后面紧跟无空白正文时（如「url」说明）粗筛会把整段吃进匹配，
+// 这是裸链启发式的既有边界，不属本轮口径。
+func TestCollectScreenshotURLsTrimsWrappingPunct(t *testing.T) {
+	for _, body := range []string{
+		"看 `https://uiv.frp.musiver.cn/f/a.png` 这段",
+		"见「https://uiv.frp.musiver.cn/f/a.png」 这段",
+		"书名『https://uiv.frp.musiver.cn/f/a.png』 完",
+		"重点 *https://uiv.frp.musiver.cn/f/a.png* 收尾",
+	} {
+		refs := collectScreenshotURLs(body)
+		if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
+			t.Fatalf("body %q: refs = %+v, want 裁掉包法符号后收集且结果不含包法符号", body, refs)
+		}
+	}
+}
+
+// J3：md/HTML 引用里的 #fragment 统一剥掉——fragment 不是资源本身，下载面
+// normalize 会拒、IsGitHubMediaURL 也因此判 false，私有附件带 fragment 时
+// 不会触发 bearer 重试；收集结果与后续指纹都用去 fragment 后的 URL。
+func TestCollectScreenshotURLsStripsFragmentFromMarkup(t *testing.T) {
+	refs := collectScreenshotURLs("![附件](https://github.com/user-attachments/assets/uuid#frag)")
+	if len(refs) != 1 || refs[0].URL != "https://github.com/user-attachments/assets/uuid" {
+		t.Fatalf("refs = %+v, want md 引用收集的 URL 不含 #frag", refs)
+	}
+	refs = collectScreenshotURLs("<img src=\"https://uiv.frp.musiver.cn/f/a.png#y\">")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/a.png" {
+		t.Fatalf("refs = %+v, want <img> 引用收集的 URL 不含 #y", refs)
+	}
+	// fragment 之后粘的句读同样剥干净（md 捕获会一路吃到 `)` 前）。
+	refs = collectScreenshotURLs("![附件](https://github.com/user-attachments/assets/uuid#frag。)")
+	if len(refs) != 1 || refs[0].URL != "https://github.com/user-attachments/assets/uuid" {
+		t.Fatalf("refs = %+v, want fragment 与尾标点都剥掉", refs)
+	}
+	// 带/不带 fragment 的同 URL 规整后视为同一张：去重按规整后的 URL，只留
+	// 首次出现（label 取先到的 alt）。
+	refs = collectScreenshotURLs("![a](https://uiv.frp.musiver.cn/f/one.png#f1) ![b](https://uiv.frp.musiver.cn/f/one.png)")
+	if len(refs) != 1 || refs[0].URL != "https://uiv.frp.musiver.cn/f/one.png" || refs[0].Label != "a" {
+		t.Fatalf("refs = %+v, want 规整后去重只留一条且 label 取先到的 alt", refs)
+	}
+}
+
 func TestVisualSyncScreensUnavailable(t *testing.T) {
 	e := newReviewEngineEnv(t)
 	repo := e.project.GithubOwner + "/" + e.project.GithubRepo

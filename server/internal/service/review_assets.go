@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -34,26 +36,58 @@ var (
 	// HTML <img src="...">。
 	htmlImgRe = regexp.MustCompile(`<img[^>]+src=["']([^"']+)["'][^>]*>`)
 	// 裸链接（用户直接粘贴、没有图片语法）：任意 https URL 粗筛。排除 # 与
-	// 紧贴链接的中文/全角句读（。，、）——fragment 不是资源本身，下载面
-	// normalize 会拒、IsGitHubMediaURL 也因此判 false 导致 bearer 重试失效。
-	// 其余句尾标点不能放进排除类——? : ! 等可能合法出现在 URL 中段/查询串
-	// 里——由 trimTrailingPunct 在匹配之后裁掉尾部。收集时按「GitHub 附件
-	// 形态 ∪ 位图扩展名」准入：GitHub 拖入/粘贴附件的标准直链没有文件名扩
-	// 展名，必须有扩展名会把它们漏掉（HasScreenshots=false → 静默不开视觉
-	// 轮）；其余外链图床仍按位图扩展名过滤（集合与下载面 imagesOnly 同源，
-	// 不收 svg/视频）。
+	// 紧贴链接的中文/全角句读（。，、）——fragment 不是资源本身，句读会破
+	// 坏扩展名判定；# 在粗筛排除，三个来源的引用再由 normalizeRefURL 统一剥
+	// 一次兜底（md/HTML 的捕获正则不排除 #）。其余句尾标点不能放进排除类
+	// ——? : ! 等可能合法出现在 URL 中段/查询串里——由 normalizeRefURL 在
+	// 匹配之后规整。裸链没有图片语法背书，收集时额外按「GitHub 附件形态 ∪
+	// 位图扩展名」准入（见 collectScreenshotURLs 内注），三来源共用的结构
+	// 准入见 admitScreenshotURL。
 	bareURLRe = regexp.MustCompile(`https://[^\s)<>"'\]#。，、）]+`)
 )
 
-// trimTrailingPunct 剥掉裸链匹配尾部粘住的标点：半角句尾标点（. , ; : ! ?）
-// 与全角句读（；：！？…）、右侧引号会跟着正则一起被吃进匹配——位图扩展名
-// 带尾标点判 false 漏收（HasScreenshots=false → 视觉轮静默不开），GitHub 附
-// 件形态带尾标点发请求 404 误写「截图无法下载」。这些字符可能合法出现在 URL
-// 中段，不能进 bareURLRe 的排除类，只裁尾部不动中段；带查询串的正常链接结
-// 尾不是标点，不受影响。
+// trimTrailingPunct 剥掉引用匹配尾部粘住的标点：半角句尾标点（. , ; : ! ?）
+// 与全角句读（；：！？…）、右侧引号、反引号与中文直角引号（代码/引用包
+// 法）、Markdown 强调符（*）会跟着正则一起被吃进匹配——位图扩展名带尾标点
+// 判 false 漏收（HasScreenshots=false → 视觉轮静默不开），GitHub 附件形态带
+// 尾标点发请求 404 误写「截图无法下载」。这些字符可能合法出现在 URL 中段，
+// 不能进 bareURLRe 的排除类，只裁尾部不动中段；带查询串的正常链接结尾不是
+// 标点，不受影响。
 func trimTrailingPunct(u string) string {
-	const cutset = ".,;:!?。，、）；：！？…”’\"'"
+	const cutset = ".,;:!?。，、）；：！？…”’\"'`」』*"
 	return strings.TrimRight(u, cutset)
+}
+
+// normalizeRefURL 收集层的引用 URL 规整，三个来源统一：先剥 #fragment（不是
+// 资源本身——下载面 normalize 会拒 fragment，IsGitHubMediaURL 也因此判
+// false，私有附件带 fragment 时 bearer 重试失效），再裁掉匹配尾部粘住的标
+// 点。收集结果与后续指纹都用规整后的 URL。
+func normalizeRefURL(u string) string {
+	if head, _, ok := strings.Cut(u, "#"); ok {
+		u = head
+	}
+	return trimTrailingPunct(u)
+}
+
+// admitScreenshotURL 结构准入，三个来源统一过一遍（只排除「下载面必然拒
+// 绝」的形态）：scheme 必须 https 且 host 非空（http、data:、相对路径发不
+// 出请求，下载面 normalize 同样要求）；路径带扩展名时必须是位图扩展名（集
+// 合与下载面 imagesOnly 同源，svg/视频/网页不收），无扩展名保留——可能是
+// image/* 直链，GitHub 附件直链本就没有扩展名。![]()/<img> 此前无差别收集，
+// 描述里只有 svg 徽章 / http 图 / data: URI / 网页链接时探测必然全败，每次
+// 同步都写一次「截图无法下载」failure，永远收敛不到「没有截图」。
+func admitScreenshotURL(u string) bool {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed == nil {
+		return false
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" {
+		return false
+	}
+	if path.Ext(parsed.Path) == "" {
+		return true
+	}
+	return githubmedia.HasBitmapExtension(u)
 }
 
 // collectScreenshotURLs 按出现顺序提取 PR 描述里的图片引用；同 URL 只取首次，
@@ -65,25 +99,26 @@ func collectScreenshotURLs(body string) []screenshotRef {
 	}
 	var hits []hit
 	for _, m := range mdImageRe.FindAllStringSubmatchIndex(body, -1) {
-		url := strings.TrimSpace(body[m[4]:m[5]])
+		url := normalizeRefURL(strings.TrimSpace(body[m[4]:m[5]]))
 		label := strings.TrimSpace(body[m[2]:m[3]])
 		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url, Label: label}})
 	}
 	for _, m := range htmlImgRe.FindAllStringSubmatchIndex(body, -1) {
-		url := strings.TrimSpace(body[m[2]:m[3]])
+		url := normalizeRefURL(strings.TrimSpace(body[m[2]:m[3]]))
 		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})
 	}
 	for _, m := range bareURLRe.FindAllStringIndex(body, -1) {
-		url := trimTrailingPunct(body[m[0]:m[1]])
-		// GitHub 附件形态豁免扩展名要求（附件直链无扩展名）；其余裸链接只有
-		// 位图扩展名才收：普通网页链接、行内代码里的 https 地址不收（按扩展
-		// 名结尾判定，接受这个启发式的误收）。
+		url := normalizeRefURL(body[m[0]:m[1]])
+		// 裸链没有图片语法背书，在结构准入之外额外要求「GitHub 附件形态
+		// （附件直链无扩展名）∪ 位图扩展名」：无扩展名的任意 https 链接都
+		// 收会把描述里每个网页链接当成截图（按扩展名结尾判定，接受这个启
+		// 发式的误收）。
 		if !githubmedia.IsGitHubAttachmentURL(url) && !githubmedia.HasBitmapExtension(url) {
 			continue
 		}
 		hits = append(hits, hit{pos: m[0], ref: screenshotRef{URL: url}})
 	}
-	// 两个来源按原文位置合并排序（HTML 与 Markdown 混用时顺序不乱）。
+	// 三个来源按原文位置合并排序（HTML 与 Markdown 混用时顺序不乱）。
 	for i := 1; i < len(hits); i++ {
 		for j := i; j > 0 && hits[j-1].pos > hits[j].pos; j-- {
 			hits[j-1], hits[j] = hits[j], hits[j-1]
@@ -93,6 +128,13 @@ func collectScreenshotURLs(body string) []screenshotRef {
 	var refs []screenshotRef
 	for _, h := range hits {
 		if h.ref.URL == "" {
+			continue
+		}
+		// 结构准入在去重前对三来源统一过一遍：下载面必然拒绝的形态不进收
+		// 集结果——否则探测必然全败，每次同步都写「截图无法下载」failure；
+		// 准入后 refs 为空 → HasScreenshots=false → visualNone。同 URL 带/
+		// 不带 fragment 规整后也按同一张去重。
+		if !admitScreenshotURL(h.ref.URL) {
 			continue
 		}
 		if _, dup := seen[h.ref.URL]; dup {
