@@ -176,7 +176,7 @@ func TestRouterScreenshotAPIKeyPermissions(t *testing.T) {
 		}
 	}
 
-	// API Key 调 PATCH / DELETE / 标注创建 / 批量一律 403（仅 JWT）
+	// API Key 调 PATCH / 标注创建 / 批量一律 403（仅 JWT）；删截图已对 API Key 开放，见 TestRouterScreenshotAPIKeyDelete
 	patchReq := httptest.NewRequest(http.MethodPatch, "/api/screenshot-screens/"+uploaded.Screen.ID, bytes.NewReader([]byte(`{"title":"x"}`)))
 	patchReq.Header.Set("Content-Type", "application/json")
 	patchReq.Header.Set("Authorization", apiKeyAuth)
@@ -191,7 +191,6 @@ func TestRouterScreenshotAPIKeyPermissions(t *testing.T) {
 		path   string
 		body   string
 	}{
-		{http.MethodDelete, "/api/screenshot-screens/" + uploaded.Screen.ID, ""},
 		{http.MethodPost, "/api/screenshot-screens/" + uploaded.Screen.ID + "/annotations", `{"x":0.1,"y":0.1,"width":0.2,"height":0.2,"body":"x"}`},
 		{http.MethodPost, "/api/projects/" + project.ID + "/screenshot-annotations/batch", `{"action":"resolve"}`},
 	} {
@@ -235,5 +234,129 @@ func TestRouterScreenshotScreenNotFound(t *testing.T) {
 	env.router.ServeHTTP(deleteRec, deleteReq)
 	if deleteRec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing screen delete, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+}
+
+// INT-145：界面可能增减，过时截图允许凭 API Key 删除——与 JWT 同语义（级联标注），
+// 跨用户仍按不存在处理（40413），归属校验沿用凭证解析出的用户。
+func TestRouterScreenshotAPIKeyDelete(t *testing.T) {
+	env := setupRouterTestEnv(t)
+	auth := registerAndLoginRouterUser(t, env.router, "shotdelowner", "shotdelowner@example.com", "Password123")
+	project := createRouterTestProject(t, env.db, auth.UserID)
+	apiKeyAuth := createRouterScreenshotAPIKey(t, env, auth.UserID, "CI-Del", "DELOWNERKEY1234567890")
+
+	otherAuth := registerAndLoginInvitedRouterUser(t, env.router, auth.Token, "shotdelother", "shotdelother@example.com", "Password123")
+	otherKeyAuth := createRouterScreenshotAPIKey(t, env, otherAuth.UserID, "CI-Other-Del", "DELSTRANGER1234567890")
+
+	screenID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
+
+	// 删除前先建一条标注（JWT），API Key 删截图后应随之级联消失
+	annBody := []byte(`{"x":0.1,"y":0.1,"width":0.2,"height":0.2,"body":"删除级联"}`)
+	createRec := routerServeJSON(t, env, http.MethodPost, "/api/screenshot-screens/"+screenID+"/annotations", "Bearer "+auth.Token, annBody)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create annotation: %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeRouterEnvelope(t, createRec, &created)
+	if created.ID == "" {
+		t.Fatalf("expected annotation id, got %s", createRec.Body.String())
+	}
+
+	// 其他用户的 API Key 删他人截图 → 404（40413），不 200/500，也不误删
+	foreignRec := routerServeJSON(t, env, http.MethodDelete, "/api/screenshot-screens/"+screenID, otherKeyAuth, nil)
+	if foreignRec.Code != http.StatusNotFound {
+		t.Fatalf("foreign api key delete: expected 404, got %d: %s", foreignRec.Code, foreignRec.Body.String())
+	}
+	var foreignEnv routerEnvelope
+	if err := json.Unmarshal(foreignRec.Body.Bytes(), &foreignEnv); err != nil {
+		t.Fatalf("decode foreign delete error: %v", err)
+	}
+	if foreignEnv.Code != 40413 {
+		t.Fatalf("expected foreign delete code 40413, got %d", foreignEnv.Code)
+	}
+
+	survivorRec := routerServeJSON(t, env, http.MethodGet, "/api/projects/"+project.ID+"/screenshots", "Bearer "+auth.Token, nil)
+	if survivorRec.Code != http.StatusOK {
+		t.Fatalf("list after foreign delete: %d: %s", survivorRec.Code, survivorRec.Body.String())
+	}
+	var survivorList struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	decodeRouterEnvelope(t, survivorRec, &survivorList)
+	if len(survivorList.Items) != 1 || survivorList.Items[0].ID != screenID {
+		t.Fatalf("expected screen to survive foreign delete, got %+v", survivorList.Items)
+	}
+
+	// 本人 API Key 删除自己的截图 → 200
+	delRec := routerServeJSON(t, env, http.MethodDelete, "/api/screenshot-screens/"+screenID, apiKeyAuth, nil)
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("api key delete: expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+
+	// content → 404（40413）
+	contentRec := routerServeJSON(t, env, http.MethodGet, "/api/screenshot-screens/"+screenID+"/content", apiKeyAuth, nil)
+	if contentRec.Code != http.StatusNotFound {
+		t.Fatalf("content after delete: expected 404, got %d: %s", contentRec.Code, contentRec.Body.String())
+	}
+	var contentEnv routerEnvelope
+	if err := json.Unmarshal(contentRec.Body.Bytes(), &contentEnv); err != nil {
+		t.Fatalf("decode content error: %v", err)
+	}
+	if contentEnv.Code != 40413 {
+		t.Fatalf("expected content code 40413, got %d", contentEnv.Code)
+	}
+
+	// 项目截图列表里消失
+	listRec := routerServeJSON(t, env, http.MethodGet, "/api/projects/"+project.ID+"/screenshots", apiKeyAuth, nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list after delete: %d: %s", listRec.Code, listRec.Body.String())
+	}
+	var list struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	decodeRouterEnvelope(t, listRec, &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected empty list after delete, got %+v", list.Items)
+	}
+
+	// 级联断言：标注列表不再包含被删截图上的标注
+	annRec := routerServeJSON(t, env, http.MethodGet, "/api/projects/"+project.ID+"/screenshot-annotations", apiKeyAuth, nil)
+	if annRec.Code != http.StatusOK {
+		t.Fatalf("annotation list after delete: %d: %s", annRec.Code, annRec.Body.String())
+	}
+	var annList struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	decodeRouterEnvelope(t, annRec, &annList)
+	if len(annList.Items) != 0 {
+		t.Fatalf("expected annotations cascaded away, got %+v", annList.Items)
+	}
+
+	// JWT 删除同样要活着：前端删除按钮走的就是这条路径，双凭证契约两个方向都钉住
+	jwtScreenID := uploadRouterScreenshot(t, env, auth.Token, project.ID, makeRouterTestPNG(t, 100, 50))
+	jwtDelRec := routerServeJSON(t, env, http.MethodDelete, "/api/screenshot-screens/"+jwtScreenID, "Bearer "+auth.Token, nil)
+	if jwtDelRec.Code != http.StatusOK {
+		t.Fatalf("jwt delete: expected 200, got %d: %s", jwtDelRec.Code, jwtDelRec.Body.String())
+	}
+	afterJWTDelRec := routerServeJSON(t, env, http.MethodGet, "/api/projects/"+project.ID+"/screenshots", "Bearer "+auth.Token, nil)
+	if afterJWTDelRec.Code != http.StatusOK {
+		t.Fatalf("list after jwt delete: %d: %s", afterJWTDelRec.Code, afterJWTDelRec.Body.String())
+	}
+	var afterJWTDelList struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	decodeRouterEnvelope(t, afterJWTDelRec, &afterJWTDelList)
+	if len(afterJWTDelList.Items) != 0 {
+		t.Fatalf("expected empty list after jwt delete, got %+v", afterJWTDelList.Items)
 	}
 }

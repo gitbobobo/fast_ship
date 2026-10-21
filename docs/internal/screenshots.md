@@ -72,7 +72,7 @@
 | POST | `/api/projects/:pid/screenshots` | JWT / API Key | multipart 上传：`file`、`screen_key` 必填，`title`/`platform`/`locale`/`theme` 可选；响应 `{screen}` |
 | GET | `/api/projects/:pid/screenshots` | JWT / API Key | `{items: [...]}`，query `platform`/`locale`/`theme`（逗号多值，`__none__` = 未标注桶）过滤，按 `uploaded_at` 倒序 |
 | PATCH | `/api/screenshot-screens/:sid` | **仅 JWT** | `{"title"?, "platform"?, "locale"?, "theme"?}` 指针语义（维度空串清除）；改出的变体组合撞唯一约束 → 409（40921） |
-| DELETE | `/api/screenshot-screens/:sid` | **仅 JWT** | 删截图行 + 磁盘文件，标注级联 |
+| DELETE | `/api/screenshot-screens/:sid` | JWT / API Key | 删截图行 + 磁盘文件，标注级联；界面可能随版本增减，过时截图允许凭 API Key 清理 |
 | GET / HEAD | `/api/screenshot-screens/:sid/content` | JWT / API Key / `?token=` | 输出图片字节，`Content-Type` 用存储的 `mime_type`，`Content-Disposition: inline` |
 | GET | `/api/projects/:pid/screenshot-annotations` | JWT / API Key | `{items:[...]}`，query `status`/`outdated`/`issue_id`/`screen_id` + `platform`/`locale`/`theme`（逗号多值）过滤 |
 | POST | `/api/projects/:pid/screenshot-annotations/batch` | **仅 JWT** | `{action:"confirm"|"resolve", filter:{platform?,locale?,theme?,status?,outdated?,screen_id?}}`，作用于过滤集（两者都只作用于 open 标注），返回 `{updated}`；API Key 无批量能力（40301） |
@@ -81,7 +81,7 @@
 | DELETE | `/api/screenshot-annotations/:aid` | **仅 JWT** | 删标注行 |
 | GET / HEAD | `/api/screenshot-annotations/:aid/crop` | JWT / API Key / `?token=` | 输出框选区域裁剪图，统一 PNG，外边距 = 矩形短边 15%（最小 8px，不出图界）；原图超过解码像素上限（约 64MP）返回 40004 |
 
-写操作 PATCH/DELETE/batch/创建标注走 `RequireJWT` 分组（API Key 返回 40301），上传与读走 `RequireAuth`，content 与 crop 挂 `RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token")` 支持 `<img>` 直链。标注 PUT 两类凭证都进 service，由 service 按 `!middleware.IsJWTAuth(c)` 再收紧 API Key 只允许置 resolved——与 issue 内嵌写操作的惯例一致（路由放通、service 判凭证）。
+写操作 PATCH/batch/创建标注/删标注走 `RequireJWT` 分组（API Key 返回 40301），删截图与上传、读走 `RequireAuth`，content 与 crop 挂 `RequireAuthWithQueryToken(cfg, apiKeyRepo, authService, "token")` 支持 `<img>` 直链。标注 PUT 两类凭证都进 service，由 service 按 `!middleware.IsJWTAuth(c)` 再收紧 API Key 只允许置 resolved——与 issue 内嵌写操作的惯例一致（路由放通、service 判凭证）。
 
 归属校验沿 `screen → project → user_id` 链：项目不属于当前用户时 screen/annotation 一律按「不存在」返回，不区分「不存在」与「无权限」。错误码：`ErrScreenshotScreenNotFound`（40413）、`ErrScreenshotAnnotationNotFound`（40416）、`ErrScreenshotVariantExists`（40921）；参数/格式/大小非法用 `ErrInvalidParams`（40001）。
 
@@ -110,7 +110,7 @@ mime 以内容嗅探为准：先读 512 字节 `http.DetectContentType`，仅收
 
 ## 删除语义
 
-- 删截图：DB 行删除（标注由 FK `OnDelete: CASCADE` 一并删除）后删磁盘文件。
+- 删截图：DB 行删除（标注由 FK `OnDelete: CASCADE` 一并删除）后删磁盘文件；JWT 与 API Key 语义完全一致（同样级联标注、同样清理磁盘文件），归属校验都按凭证解析出的用户走 `loadAccessibleScreen` 同一条链。
 - 删 Issue：标注保留，仅 `issue_id` 置空（FK `OnDelete: SET NULL`）。
 - FK 兜底项目级联：删项目连截图与标注一起消失。
 
