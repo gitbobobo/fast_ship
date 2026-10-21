@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"time"
 
@@ -190,6 +191,13 @@ func botStreamChat(ctx context.Context, client *openai.Client, req botStreamRequ
 			return reply, &botStreamTimeoutError{Phase: phase, Timeout: took}
 		}
 		return reply, err
+	}
+	// 正常结束但协议没有完成信号（无 finish_reason 也无 usage）：上游在输出
+	// 中途关闭了连接，SDK 把普通 HTTP EOF 当成正常结束。半截回复、尤其是
+	// 半截摘要不能当成功提交（摘要会推进水位，丢掉未总结的内容），统一按
+	// 断流失败处理；已输出片段时调用方不会重试（INT-137）。
+	if reply.FinishReason == "" && !reply.UsageComplete {
+		return reply, io.ErrUnexpectedEOF
 	}
 	return reply, nil
 }

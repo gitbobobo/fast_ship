@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"time"
+
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
 )
@@ -116,6 +118,23 @@ func (r *BotRunRepository) ListActive() ([]model.BotRun, error) {
 	var rows []model.BotRun
 	err := r.db.Where("finished_at IS NULL").Find(&rows).Error
 	return rows, err
+}
+
+// MarkStopRequested 原子地请求停止一个 run：条件是 run 未结束且（
+// acceptedOrdinal < 0 或「受理后没有新模型请求」）。判定与写入在同一条
+// UPDATE 里完成——硬停止与主线循环发新请求竞速时，新请求一旦插入，本
+// 语句就落空，绝不会取消已经带上新输入的请求（INT-137）。返回是否命中。
+func (r *BotRunRepository) MarkStopRequested(runID string, acceptedOrdinal int64, now time.Time) (bool, error) {
+	q := r.db.Model(&model.BotRun{}).Where("id = ? AND finished_at IS NULL", runID)
+	if acceptedOrdinal >= 0 {
+		q = q.Where("NOT EXISTS (SELECT 1 FROM bot_model_requests WHERE run_id = ? AND ordinal > ?)",
+			runID, acceptedOrdinal)
+	}
+	res := q.Update("stop_requested_at", now)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // AdvanceInputThroughSeq 只升不降地推进 run 的输入消费水位：硬停止与主线循环

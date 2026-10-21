@@ -396,30 +396,21 @@ func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
 
 // hardStopRun 硬停止主线 run（停止宽限到期或重复请求）。acceptedOrdinal 是
 // 受理停止时该 run 的最大模型请求序号；-1 表示跳过进展判断（重复点击的立即
-// 硬取消）。流程：先 CAS 置 stop_requested_at——run 已终态则直接放弃，绝不
-// 推进水位或取消别人的槽；再重新读 run 做进展判断——受理停止之后 run 又发起
-// 了新请求（最大 ordinal 已增长）说明用户消息已随新上下文送出，此时不硬取消
-// （否则会把停止之后的新消息一起丢掉）；通过后把「停止」消息标记为已消费
-// （不这样做，run 落 stopped 后扫描器会因「未消费输入」立刻拉起新 run 处理
-// 「停止」文本；只推进到停止消息的 seq，之后到达的新消息不受影响），最后取消
-// 执行槽 context，循环在安全点落 stopped。
+// 硬取消）。「条件写停止标记」在一条 UPDATE 里同时要求「run 未结束」与
+// 「受理后没有新请求（NOT EXISTS ordinal > accepted）」——判定与写入原子，
+// 宽限期间 run 已带着停止消息发起新请求时落空：用户消息已随新上下文送出，
+// 此时硬取消会把停止之后的新消息一起丢掉。命中后把「停止」消息标记为已
+// 消费（不这样做，run 落 stopped 后扫描器会因「未消费输入」立刻拉起新 run
+// 处理「停止」文本；只推进到停止消息的 seq，之后到达的新消息不受影响），
+// 最后取消执行槽 context，循环在安全点落 stopped。
 func (s *BotService) hardStopRun(botID, runID string, stopSeq int64, acceptedOrdinal int64) {
-	ok, err := s.runs.UpdateColumns(runID, map[string]interface{}{"finished_at": nil},
-		map[string]interface{}{"stop_requested_at": time.Now().UTC()})
+	ok, err := s.runs.MarkStopRequested(runID, acceptedOrdinal, time.Now().UTC())
 	if err != nil || !ok {
 		return
 	}
 	run, err := s.runs.FindByID(runID)
 	if err != nil {
 		return
-	}
-	if acceptedOrdinal >= 0 {
-		latest, err := s.requests.MaxOrdinal(runID)
-		if err != nil || latest > acceptedOrdinal {
-			// 宽限期间已有进展：新请求已经发出，硬取消会把停止之后的输入
-			// 一起丢掉。run 是否继续由它的安全点与该请求的结果决定。
-			return
-		}
 	}
 	s.advanceInputWatermarks(run, stopSeq)
 	s.cancelBotContext(botID, run)
@@ -517,20 +508,20 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 		return nil, errs.ErrInternal
 	}
 	if !already {
+		// 宽限计时：到时 run 仍未结束则硬取消。序号基准必须在**追加停止消息
+		// 之前**采样（这里在唤醒之前，避免新请求被算进基准）：之后任何一次
+		// 新请求都必然包含这条停止消息，正是「已有进展」的定义。计时器随进程
+		// 重启丢失可接受——重启恢复本就会把活动 run 置 failed。
+		acceptedOrdinal, ordErr := s.requests.MaxOrdinal(runID)
+		if ordErr != nil {
+			acceptedOrdinal = -1
+		}
 		s.publishEvent(botID)
 		s.wakeRuntime(botID, botWake{
 			Trigger: model.BotTriggerUserMessage,
 			Key:     fmt.Sprintf("user_message:%d", msgSeq),
 			Context: fmt.Sprintf(`{"message_seq":%d,"client_message_id":%q,"kind":"stop"}`, msgSeq, clientMsgID),
 		})
-		// 宽限计时：到时 run 仍未结束则硬取消。记录受理时刻的最大模型请求
-		// 序号，到期时重读比对——宽限内 run 自然结束并带着停止消息发起了
-		// 新请求时不得硬取消，否则停止之后的新消息会永久丢失。计时器随进程
-		// 重启丢失可接受——重启恢复本就会把活动 run 置 failed，无需额外持久化。
-		acceptedOrdinal, ordErr := s.requests.MaxOrdinal(runID)
-		if ordErr != nil {
-			acceptedOrdinal = -1
-		}
 		time.AfterFunc(s.cfg.Bots.Runtime.StopGrace(), func() {
 			s.hardStopRun(botID, runID, msgSeq, acceptedOrdinal)
 		})
@@ -562,7 +553,9 @@ func (s *BotService) cancelBotContext(botID string, run *model.BotRun) {
 	if !ok || a.cancel == nil {
 		return
 	}
-	if a.runID != "" && a.runID != run.ID {
+	if a.runID != run.ID {
+		// 只有槽明确绑定着同一个 run 才取消：绑定前（空值）与已换绑成新 run
+		// 都不能取消——旧停止晚到一步时，绝不能打中别人的 context。
 		return
 	}
 	a.cancel()

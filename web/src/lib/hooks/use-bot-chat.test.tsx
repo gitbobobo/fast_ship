@@ -1634,6 +1634,21 @@ describe("mergeRunSnapshots", () => {
     expect(merged[0].created_at).toBe("2026-10-15T00:00:30Z");
   });
 
+  it("同分快照不回退已受理的停止态（stop_requested 单调）", () => {
+    const cached = {
+      ...baseRun,
+      status: "running",
+      stop_requested: true,
+    } as BotRun;
+    const stale: BotRun = {
+      ...baseRun,
+      status: "running",
+      stop_requested: false,
+    };
+    const merged = mergeRunSnapshots([cached], [stale]);
+    expect(merged[0].stop_requested).toBe(true);
+  });
+
   it("状态等级更高仍整行替换", () => {
     const sseRun = {
       id: "r1",
@@ -1686,6 +1701,23 @@ describe("pickRunError", () => {
       pickRunError([
         run({ id: "r-ok", created_at: "2026-10-15T00:00:30Z" }),
         failedAuth("r-err"),
+      ]),
+    ).toBeNull();
+  });
+
+  it("RFC3339Nano 小数位不同也按真实时间排序", () => {
+    // 字符串比较会把 .1Z 排在 .11Z 之后（'Z' > '1'），必须按时间解析。
+    expect(
+      pickRunError([
+        failedAuth("r-err", "2026-10-15T00:00:00.1Z"),
+        run({ id: "r-ok", created_at: "2026-10-15T00:00:00.11Z" }),
+      ]),
+    ).toBeNull();
+    // 不带小数秒的较早时间也不能被误判为最新。
+    expect(
+      pickRunError([
+        failedAuth("r-err", "2026-10-15T00:00:00Z"),
+        run({ id: "r-ok", created_at: "2026-10-15T00:00:00.5Z" }),
       ]),
     ).toBeNull();
   });

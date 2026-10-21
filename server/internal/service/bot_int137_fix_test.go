@@ -156,6 +156,9 @@ func TestBotHardStopGraceSkippedWhenProgressMade(t *testing.T) {
 	if fresh.InputThroughSeq != 0 {
 		t.Fatalf("未硬杀时不得推进水位，实得 %d", fresh.InputThroughSeq)
 	}
+	if fresh.StopRequestedAt != nil {
+		t.Fatalf("已有新请求时不得写 stop_requested（原子条件应落空）: %+v", fresh)
+	}
 
 	// 重复点击（acceptedOrdinal=-1）：跳过进展判断，立即硬取消并消费停止消息。
 	env.bots.hardStopRun(bot.ID, run.ID, 1, -1)
@@ -309,9 +312,10 @@ func TestBotCircuitNotReopenedAfterCredentialUpdate(t *testing.T) {
 	task := seedScheduleTask(t, env, bot.ID, nil)
 	run := seedScheduleRun(t, env, bot.ID, task.ID)
 
-	// 模拟用户在 run 开始后更新了凭证/地址（含测试连接、清除熔断的路径）。
+	// 模拟用户在 run 开始后更新了凭证/地址（含测试连接、清除熔断的路径）：
+	// 配置版本前移到 run 开始之后，迟到的旧凭证失败不得再熔断。
 	if err := env.db.Model(&model.AIProvider{}).Where("id = ?", providerID).
-		Update("updated_at", time.Now().UTC().Add(2*time.Second)).Error; err != nil {
+		Update("config_version_at", time.Now().UTC().Add(2*time.Second)).Error; err != nil {
 		t.Fatalf("touch provider: %v", err)
 	}
 	env.bots.openProviderCircuitOnFailure(botRow, run, "provider_auth_failed")
@@ -382,7 +386,7 @@ func TestBotCircuitTestWithDifferentKeyDoesNotClear(t *testing.T) {
 	userID := createBotTestUser(t, env.db, "circtestkey")
 	providerID := env.createProviderAt(t, userID, srv.URL(), "sk-stored-0000")
 	until := time.Now().UTC().Add(30 * time.Minute)
-	if _, err := repo.OpenCircuit(providerID, until, "provider_auth_failed"); err != nil {
+	if _, err := repo.OpenCircuit(providerID, until, "provider_auth_failed", time.Now().UTC()); err != nil {
 		t.Fatalf("open circuit: %v", err)
 	}
 
@@ -473,5 +477,56 @@ func TestBotPublishTxOpensLifecycleRenderGate(t *testing.T) {
 	}
 	if state.LifecycleRenderVersion != 1 {
 		t.Fatalf("更新发布后 LifecycleRenderVersion 应为 1，实得 %d", state.LifecycleRenderVersion)
+	}
+}
+
+// 槽尚未绑定 run（bindSlotRun 之前的窗口）时，取消指令必须落空——旧停止晚到
+// 一步不能取消刚装上、还没绑定的新 context。
+func TestBotCancelBotContextSkipsUnboundSlot(t *testing.T) {
+	env := setupBotTestEnv(t)
+	userID := createBotTestUser(t, env.db, "stopunbound")
+	bot := env.createBot(t, userID)
+	run := &model.BotRun{ID: uuid.NewString(), BotID: bot.ID, SessionKind: model.BotSessionKindMain}
+
+	cancelCalled := false
+	if env.bots.rt.acquire(bot.ID, nil) == nil {
+		t.Fatalf("acquire slot")
+	}
+	env.bots.rt.setCancel(bot.ID, context.CancelFunc(func() { cancelCalled = true }))
+	env.bots.cancelBotContext(bot.ID, run)
+	if cancelCalled {
+		t.Fatalf("槽还没绑定 run 时不得取消：晚到的停止不能打中新 context")
+	}
+}
+
+// 上游正常关闭但没有 finish_reason：按断流失败处理。已输出正文时不得重试，
+// 半截回复不得提交为成功（INT-137 补齐普通 EOF 验收）。
+func TestBotEOFWithoutFinishReasonFails(t *testing.T) {
+	env := setupBotTestEnv(t, fakeModelTurn{Text: "半截回答", NoFinish: true})
+	userID := createBotTestUser(t, env.db, "eofnofinish")
+	bot := env.createBot(t, userID)
+
+	if _, err := env.bots.SendMessage(userID, bot.ID, &SendMessageRequest{Text: "你好", ClientMessageID: "eof1"}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	waitForBot(t, "eof run settled", 10*time.Second, func() bool { return env.botSettled(bot.ID) })
+
+	runs, err := env.bots.ListRuns(userID, bot.ID, 5)
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("list runs: %v", err)
+	}
+	run := runs[0]
+	if run.Status != string(model.BotRunStatusFailed) || run.ErrorCode == nil || *run.ErrorCode != botModelErrUnavailable {
+		t.Fatalf("无完成标记的 EOF 应失败为 provider_unavailable，实得 %s %v", run.Status, run.ErrorCode)
+	}
+	var requests int64
+	env.db.Model(&model.BotModelRequest{}).Where("run_id = ?", run.ID).Count(&requests)
+	if requests != 1 {
+		t.Fatalf("已输出片段后不得重试，实得 %d 条请求", requests)
+	}
+	var assistants int64
+	env.db.Model(&model.BotMessage{}).Where("bot_id = ? AND kind = ?", bot.ID, model.BotMessageKindAssistant).Count(&assistants)
+	if assistants != 0 {
+		t.Fatalf("半截回复不得提交为 assistant 消息，实得 %d 条", assistants)
 	}
 }

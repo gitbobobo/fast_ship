@@ -165,7 +165,7 @@ func botClassifyModelError(err error) botModelErrorInfo {
 // 402 状态码覆盖。
 func botLooksQuotaExhausted(lower string) bool {
 	for _, m := range []string{
-		"insufficient_quota", "quota exceeded", "exceeded your current quota",
+		"insufficient_quota", "insufficient quota", "quota exceeded", "exceeded your current quota",
 		"credit balance", "余额不足", "额度不足", "额度已用完",
 	} {
 		if strings.Contains(lower, m) {

@@ -217,6 +217,7 @@ func (s *AIProviderService) Create(userID string, req *CreateAIProviderRequest) 
 		APIKeyLast4:     last4,
 		CreatedAt:       now,
 		UpdatedAt:       now,
+		ConfigVersionAt: &now,
 	}
 	if err := s.providers.Create(p); err != nil {
 		return nil, errs.ErrInternal
@@ -253,6 +254,7 @@ func (s *AIProviderService) Update(userID, id string, req *UpdateAIProviderReque
 			}
 			return errs.ErrInternal
 		}
+		baseURLBefore := p.BaseURL
 		if req.Name != nil {
 			name := strings.TrimSpace(*req.Name)
 			if name == "" {
@@ -272,12 +274,15 @@ func (s *AIProviderService) Update(userID, id string, req *UpdateAIProviderReque
 			p.APIKeyLast4 = newLast4
 		}
 		p.UpdatedAt = time.Now().UTC()
-		if err := repo.UpdateConfigTx(tx, p, req.APIKey != nil); err != nil {
+		// 只有真正改了凭证/地址才算「配置变更」：只为改名字提交 base_url 不
+		// 推进配置版本（也就不会放过旧凭证的迟到失败）。
+		credsChanged := req.APIKey != nil || (req.BaseURL != nil && p.BaseURL != baseURLBefore)
+		if err := repo.UpdateConfigTx(tx, p, req.APIKey != nil, credsChanged); err != nil {
 			return errs.ErrInternal
 		}
 		// 改了凭证或地址即视为恢复动作（INT-137）：与更新同一事务清除定时
 		// 任务熔断，下一次到点正常派发。
-		if req.APIKey != nil || req.BaseURL != nil {
+		if credsChanged {
 			if err := repo.ClearCircuitTx(tx, id); err != nil {
 				return errs.ErrInternal
 			}
@@ -427,7 +432,7 @@ func (s *AIProviderService) Test(userID string, req *TestAIProviderRequest) (*Pr
 		if err != nil {
 			s.logger.Warn("比对 provider 库存密钥失败", zap.String("provider_id", providerID), zap.Error(err))
 		} else if matches {
-			if err := s.providers.ClearCircuit(providerID); err != nil {
+			if err := s.providers.MarkConfigVerified(providerID, time.Now().UTC()); err != nil {
 				s.logger.Warn("清除 provider 熔断失败", zap.String("provider_id", providerID), zap.Error(err))
 			}
 		}

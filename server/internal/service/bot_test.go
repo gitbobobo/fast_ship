@@ -56,6 +56,9 @@ type fakeModelTurn struct {
 	BreakAfterText bool
 	// FinishReason 覆盖默认 stop/tool_calls，供摘要 length 截断等场景。
 	FinishReason string
+	// NoFinish 为真时不输出 finish_reason chunk（直接 [DONE] 收尾）：模拟上游
+	// 正常关闭但协议没有完成信号，适配器应按断流失败处理（INT-137）。
+	NoFinish bool
 	// Status 非 0 时以该状态码直接返回 JSON 错误体，不输出流：脚本化
 	// 401/429/500 等 HTTP 失败。
 	Status int
@@ -224,7 +227,9 @@ func newFakeModelServer(t *testing.T, turns ...fakeModelTurn) *fakeModelServer {
 				"function": map[string]interface{}{"name": tc.Name, "arguments": tc.Args},
 			}}, ""))
 		}
-		writeChunk(chunk("", nil, finish))
+		if !turn.NoFinish {
+			writeChunk(chunk("", nil, finish))
+		}
 		if turn.Usage != nil {
 			// cached_tokens 在 prompt_tokens_details 下（与上游 wire 格式一致）。
 			usageRaw, _ := json.Marshal(map[string]interface{}{

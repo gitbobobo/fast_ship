@@ -379,10 +379,22 @@ func (s *BotService) openProviderCircuitOnFailure(bot *model.Bot, run *model.Bot
 		// provider 行已删除：没有可熔断的对象，跳过即可。
 		return
 	}
-	if run.StartedAt != nil && p.UpdatedAt.After(*run.StartedAt) {
-		return
+	if run.StartedAt != nil {
+		configAt := p.ConfigVersionAt
+		if configAt == nil {
+			configAt = &p.UpdatedAt
+		}
+		if configAt.After(*run.StartedAt) {
+			return
+		}
 	}
-	opened, err := s.providers.OpenCircuit(providerID, time.Now().UTC().Add(s.cfg.Bots.Runtime.ProviderCircuitWindow()), code)
+	// 配置版本条件同样写进 OpenCircuit 的 WHERE（检查与写入原子）：上面
+	// 的预检只是快速路径，真正防竞态的是那句 updated_at <= 本 run 开始时刻。
+	configSince := time.Now().UTC()
+	if run.StartedAt != nil {
+		configSince = *run.StartedAt
+	}
+	opened, err := s.providers.OpenCircuit(providerID, time.Now().UTC().Add(s.cfg.Bots.Runtime.ProviderCircuitWindow()), code, configSince)
 	if err != nil {
 		s.logger.Warn("打开 provider 熔断失败",
 			zap.String("provider_id", providerID), zap.Error(err))

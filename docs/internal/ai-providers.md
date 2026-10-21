@@ -19,6 +19,7 @@
 | `api_key_encrypted` | AES-GCM 密文（`crypto` 包，与用户级 AI 配置同一口径） |
 | `api_key_last4` | 只用于展示的末四位 |
 | `circuit_open_until` / `circuit_reason` | 定时任务熔断（INT-137）：认证失效或额度用完时打开，窗口内该 provider 的定时任务到点直接记 `skipped`；窗口过后自动恢复，更新密钥/地址或测试连接成功（密钥与库存一致）也清除。窗口已开着时不延长（同一窗口只对应一个去重键、一条主线事件）。内部调度状态，不出现在任何 API 投影 |
+| `config_version_at` | 当前凭证/地址配置的生效时刻：创建、换 key/地址、以及测试连接确认现有密钥可用时前移。打开熔断的 UPDATE 同时要求 `config_version_at <= run.started_at`，用户修好后迟到的旧凭证失败不会重新熔断；迟到失败与凭证更新之间没有检查-写入间隙 |
 
 `bots` 侧（INT-133）：
 
