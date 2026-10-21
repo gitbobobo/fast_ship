@@ -1726,6 +1726,9 @@ func (s *BotService) tellToolsetTx(tx *gorm.DB, bot *model.Bot) error {
 	note = "（内部信息：不需要向用户转述，也不需要逐项验证）" + note
 	content := botLifecycleContent{
 		Event: "toolset_updated",
+		// 新消息按 user 角色投影（INT-137 R6）：部分 OpenAI 兼容后端的 chat
+		// 模板要求 system 只能出现在开头，而这条事件会一直留在历史里。
+		Render: "user",
 		Detail: json.RawMessage(fmt.Sprintf(
 			`{"from_version":%d,"to_version":%d,"note":%s,"activation":"next_compaction_or_restart"}`,
 			from, botToolsetVersion, jsonString(note))),

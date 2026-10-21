@@ -9343,6 +9343,63 @@ stopped。已持久化调用中缺少协议回复的会补「已被中断」；�
 | 404 | 资源不存在（40400-40499） |
 | 500 | 服务器内部错误（50000） |
 
+### POST `/api/bots/{id}/schedule-tasks/{taskId}/runs/{runId}/stop`
+
+<!-- operationId: stopBotScheduleTaskRun -->
+
+停止定时任务运行
+
+置 stop_requested 并取消该 run 的执行槽 context，循环在安全点收尾为
+stopped，不追加主线事件（用户主动停止不是需要汇报的运行结果）。没有
+执行槽的运行由补唤醒或 5s 扫描进入收尾。run 已终态返回 40928；run 不
+属于该机器人或该任务返回 404。
+
+**鉴权**：仅 JWT
+
+**路径参数**
+
+| 名称 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 | API Key ID |
+| `taskId` | string | 是 |  |
+| `runId` | string | 是 |  |
+
+**成功响应**
+
+**200** 停止已请求（run 状态以响应为准）
+
+`data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | string | 是 |  |
+| `bot_id` | string | 是 |  |
+| `trigger_source` | string | 是 | user_message / tool_result / recovery / schedule / manual |
+| `trigger_key` | string | 是 |  |
+| `status` | string | 是 | queued / running / completed / failed / stopped |
+| `config_snapshot` | string | 是 | 本次模型/地址/提示词版本快照 JSON；不含明文 key |
+| `input_through_seq` | integer（int64） | 是 |  |
+| `stop_requested` | boolean | 是 |  |
+| `prompt_tokens` | integer（int64，可空） | 否 |  |
+| `completion_tokens` | integer（int64，可空） | 否 |  |
+| `total_tokens` | integer（int64，可空） | 否 |  |
+| `cached_tokens` | integer（int64，可空） | 否 |  |
+| `usage_complete` | boolean | 是 | false 表示上游未报 usage（缺失与零严格区分） |
+| `error_code` | string（可空） | 否 |  |
+| `error_message` | string（可空） | 否 |  |
+| `created_at` | string（date-time） | 是 |  |
+| `started_at` | string（date-time，可空） | 否 |  |
+| `finished_at` | string（date-time，可空） | 否 |  |
+
+**错误**
+
+| HTTP | 说明 |
+| --- | --- |
+| 401 | 未提供或提供无效凭证（40100-40199） |
+| 404 | 资源不存在（40400-40499） |
+| 409 | 运行状态已变化（40928） |
+| 500 | 服务器内部错误（50000） |
+
 ### PUT `/api/bots/{id}/schedule-tasks/{taskId}/enabled`
 
 <!-- operationId: setBotScheduleTaskEnabled -->
@@ -9965,6 +10022,7 @@ models 为 /models 列表尽力拉取的模型 id（拉取失败不填充，不�
 | `base_url` | string | 否 | custom / 缺省 catalog_id 时必填 |
 | `api_key` | string | 是 |  |
 | `model` | string | 否 | 缺省用目录里第一个模型；custom 必须提供 |
+| `provider_id` | string | 否 | 已存提供商 id（可选）：测试通过时服务端清除该提供商的定时任务熔断 |
 
 **成功响应**
 

@@ -101,6 +101,9 @@ type TestAIProviderRequest struct {
 	BaseURL   *string `json:"base_url,omitempty"`
 	APIKey    *string `json:"api_key"`
 	Model     *string `json:"model,omitempty"`
+	// ProviderID 可选：指向一条已存在的 provider 时校验归属，探测成功后清除
+	// 该 provider 的定时任务熔断（INT-137）。探测参数仍只来自请求体。
+	ProviderID *string `json:"provider_id,omitempty"`
 }
 
 // ---------- 目录 ----------
@@ -272,6 +275,13 @@ func (s *AIProviderService) Update(userID, id string, req *UpdateAIProviderReque
 		if err := repo.UpdateConfigTx(tx, p, req.APIKey != nil); err != nil {
 			return errs.ErrInternal
 		}
+		// 改了凭证或地址即视为恢复动作（INT-137）：与更新同一事务清除定时
+		// 任务熔断，下一次到点正常派发。
+		if req.APIKey != nil || req.BaseURL != nil {
+			if err := repo.ClearCircuitTx(tx, id); err != nil {
+				return errs.ErrInternal
+			}
+		}
 		updated = p
 		return nil
 	})
@@ -335,7 +345,19 @@ func (s *AIProviderService) responseOf(p *model.AIProvider, botCount int64) AIPr
 // 不写入主线、不落任何配置。目录提供商的地址由目录决定；model 缺省用目录里
 // 第一个模型，custom 必须显式给 model。探测不涉及任何用户数据，端点仅以 JWT
 // 做准入。
-func (s *AIProviderService) Test(req *TestAIProviderRequest) (*ProviderTestResult, error) {
+//
+// 请求带 provider_id 时先校验归属（非本用户即 404），探测成功则清除该
+// provider 的定时任务熔断（INT-137）；不给 provider_id 保持纯探测。
+func (s *AIProviderService) Test(userID string, req *TestAIProviderRequest) (*ProviderTestResult, error) {
+	providerID := strings.TrimSpace(derefOr(req.ProviderID))
+	if providerID != "" {
+		if _, err := s.providers.FindByIDAndUser(providerID, userID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errs.ErrAIProviderNotFound
+			}
+			return nil, errs.ErrInternal
+		}
+	}
 	apiKey := strings.TrimSpace(derefOr(req.APIKey))
 	if apiKey == "" {
 		return nil, errs.New(errs.ErrInvalidParams.Code, "api_key 必填")
@@ -394,7 +416,15 @@ func (s *AIProviderService) Test(req *TestAIProviderRequest) (*ProviderTestResul
 	checks = append(checks, ConnectionCheckResult{Name: "streaming", Passed: streamOK, Detail: streamDetail})
 	checks = append(checks, ConnectionCheckResult{Name: "tool_call", Passed: toolOK, Detail: toolDetail})
 
-	return &ProviderTestResult{Ok: streamOK && toolOK, Checks: checks, Models: models}, nil
+	result := &ProviderTestResult{Ok: streamOK && toolOK, Checks: checks, Models: models}
+	if result.Ok && providerID != "" {
+		// 用户测通了凭证：恢复该 provider 的定时任务调度（清除熔断）。
+		// 清除失败只记日志，不回滚已成功的探测结果。
+		if err := s.providers.ClearCircuit(providerID); err != nil {
+			s.logger.Warn("清除 provider 熔断失败", zap.String("provider_id", providerID), zap.Error(err))
+		}
+	}
+	return result, nil
 }
 
 // providerProbeModelIDs 尽力拉取 {baseURL}/models 的模型 id 列表，仅用于测试

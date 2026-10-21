@@ -100,7 +100,7 @@ func (s *BotService) auxModelRequest(ctx context.Context, bot *model.Bot, maintR
 		Messages:            params,
 		Model:               modelName,
 		MaxCompletionTokens: maxOut,
-	}, nil)
+	}, s.botStreamTimeoutsOf(), nil)
 
 	cols := map[string]interface{}{"finished_at": s.now()}
 	if callErr != nil {

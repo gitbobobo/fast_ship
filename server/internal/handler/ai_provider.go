@@ -81,7 +81,7 @@ func (h *AIProviderHandler) TestConnection(c *gin.Context) {
 		response.BadRequest(c, 40001, "请求参数无效: "+err.Error())
 		return
 	}
-	result, err := h.providers.Test(&req)
+	result, err := h.providers.Test(middleware.GetUserID(c), &req)
 	if err != nil {
 		middleware.HandleAppError(c, err)
 		return

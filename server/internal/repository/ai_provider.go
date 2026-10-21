@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"time"
 
 	"github.com/godbobo/fast_ship/server/internal/model"
 	"gorm.io/gorm"
@@ -27,6 +28,38 @@ func (r *AIProviderRepository) FindByIDAndUser(id, userID string) (*model.AIProv
 		return nil, err
 	}
 	return &p, nil
+}
+
+// GetByID 按主键读 provider，不做用户隔离——调度器等内部路径用；用户面查询
+// 一律走 FindByIDAndUser。
+func (r *AIProviderRepository) GetByID(id string) (*model.AIProvider, error) {
+	var p model.AIProvider
+	if err := r.db.Where("id = ?", id).First(&p).Error; err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// OpenCircuit 打开/刷新定时任务熔断（INT-137）：until 之前该提供商的定时
+// 任务到点直接记 skipped。reason 记失败分类码（见 bot_model_errors.go）。
+func (r *AIProviderRepository) OpenCircuit(id string, until time.Time, reason string) error {
+	return r.db.Model(&model.AIProvider{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"circuit_open_until": until,
+		"circuit_reason":     reason,
+	}).Error
+}
+
+// ClearCircuit 清除熔断标记：用户更新凭证/地址或测试连接成功后调用。
+func (r *AIProviderRepository) ClearCircuit(id string) error {
+	return r.ClearCircuitTx(r.db, id)
+}
+
+// ClearCircuitTx 在调用方事务内清除熔断标记：更新凭证与恢复调度保持原子。
+func (r *AIProviderRepository) ClearCircuitTx(tx *gorm.DB, id string) error {
+	return tx.Model(&model.AIProvider{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"circuit_open_until": nil,
+		"circuit_reason":     "",
+	}).Error
 }
 
 func (r *AIProviderRepository) ListByUser(userID string) ([]model.AIProvider, error) {

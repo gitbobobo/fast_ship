@@ -19,6 +19,14 @@ type AIProvider struct {
 	APIKeyEncrypted []byte `gorm:"type:blob;not null" json:"-"`
 	APIKeyLast4     string `gorm:"type:text;not null" json:"api_key_last4"`
 
+	// CircuitOpenUntil / CircuitReason 是定时任务熔断标记（INT-137）：
+	// schedule run 因认证失效或额度用完失败时打开，CircuitOpenUntil 晚于当前
+	// 即熔断中——该提供商的定时任务到点直接记 skipped，不再发起模型请求。
+	// 窗口过后自动恢复；用户更新密钥/地址或测试连接成功也会清除。内部调度
+	// 状态，不进任何 API 投影（json:"-"）。
+	CircuitOpenUntil *time.Time `json:"-"`
+	CircuitReason    string     `gorm:"type:text;not null;default:''" json:"-"`
+
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 

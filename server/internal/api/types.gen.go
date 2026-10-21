@@ -4531,6 +4531,9 @@ type TestAIProviderRequest struct {
 
 	// Model 缺省用目录里第一个模型；custom 必须提供
 	Model *string `json:"model,omitempty"`
+
+	// ProviderId 已存提供商 id（可选）：测试通过时服务端清除该提供商的定时任务熔断
+	ProviderId *string `json:"provider_id,omitempty"`
 }
 
 // TestBotConnectionRequest 地址与密钥一律取 provider（INT-133）；model 显式提供时优先，否则沿用 bot_id 的已保存模型（两者都没有时 40001）
@@ -5553,6 +5556,16 @@ type ListBotScheduleTaskRuns200JSONResponseBody struct {
 	// Code 业务错误码；0 表示成功
 	Code int                                              `json:"code"`
 	Data *ListBotScheduleTaskRuns200JSONResponseBody_Data `json:"data,omitempty"`
+
+	// Message 人类可读信息；成功时为 "success"
+	Message string `json:"message"`
+}
+
+// StopBotScheduleTaskRun200JSONResponseBody defines parameters for StopBotScheduleTaskRun.
+type StopBotScheduleTaskRun200JSONResponseBody struct {
+	// Code 业务错误码；0 表示成功
+	Code int     `json:"code"`
+	Data *BotRun `json:"data,omitempty"`
 
 	// Message 人类可读信息；成功时为 "success"
 	Message string `json:"message"`

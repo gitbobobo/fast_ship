@@ -388,6 +388,9 @@ func Setup(
 		bots.GET("/:id/schedule-tasks", botHandler.ListScheduleTasks)
 		bots.GET("/:id/schedule-tasks/:taskId", botHandler.GetScheduleTask)
 		bots.GET("/:id/schedule-tasks/:taskId/runs", botHandler.ListScheduleTaskRuns)
+		// 定时任务运行停止（INT-137）：置 stop_requested 并取消执行槽，run 在
+		// 安全点收尾 stopped，不追加主线事件。
+		bots.POST("/:id/schedule-tasks/:taskId/runs/:runId/stop", botHandler.StopScheduleRun)
 		bots.PUT("/:id/schedule-tasks/:taskId/enabled", botHandler.SetScheduleTaskEnabled)
 		bots.DELETE("/:id/schedule-tasks/:taskId/state", botHandler.ClearScheduleTaskState)
 	}

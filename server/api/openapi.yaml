@@ -8113,6 +8113,55 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /api/bots/{id}/schedule-tasks/{taskId}/runs/{runId}/stop:
+    post:
+      tags: [bots]
+      operationId: stopBotScheduleTaskRun
+      summary: 停止定时任务运行
+      description: |
+        置 stop_requested 并取消该 run 的执行槽 context，循环在安全点收尾为
+        stopped，不追加主线事件（用户主动停止不是需要汇报的运行结果）。没有
+        执行槽的运行由补唤醒或 5s 扫描进入收尾。run 已终态返回 40928；run 不
+        属于该机器人或该任务返回 404。
+      security:
+        - jwtAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectOrKeyId'
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 停止已请求（run 状态以响应为准）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Envelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BotRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 运行状态已变化（40928）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /api/bots/{id}/schedule-tasks/{taskId}/enabled:
     put:
       tags: [bots]
@@ -13377,6 +13426,9 @@ components:
         model:
           type: string
           description: 缺省用目录里第一个模型；custom 必须提供
+        provider_id:
+          type: string
+          description: 已存提供商 id（可选）：测试通过时服务端清除该提供商的定时任务熔断
 
     AIProviderTestResult:
       type: object

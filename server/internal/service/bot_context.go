@@ -496,7 +496,9 @@ func botProjectMessages(rows []model.BotMessage, folded map[string]string) (
 			}
 			raw, _ := json.Marshal(content)
 			var msg openai.ChatCompletionMessageParamUnion
-			if content.Event == "toolset_updated" {
+			if content.Event == "toolset_updated" && content.Render != "user" {
+				// 旧消息：保持原文 system 角色，既有会话的 prefix_hash 在压缩边界
+				// 之前不变（INT-137 R6）。
 				msg = openai.SystemMessage("[工具集变更] 以下是平台可信系统事件（非用户发言）：\n" + string(raw))
 			} else {
 				msg = openai.UserMessage("[平台事件] 以下是平台生命周期事件（非用户发言）：\n" + string(raw))

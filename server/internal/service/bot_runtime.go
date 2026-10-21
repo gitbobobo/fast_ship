@@ -367,12 +367,32 @@ func (s *BotService) activeRunOf(botID string) (*model.BotRun, bool) {
 	return run, true
 }
 
-// RequestStop 停止主线：置 stop_requested 并取消当前模型/同步调用 context；
-// 已受理后台调用继续存在，可逐项取消。
-// RequestStop 把「停止」入口当作一条用户输入：追加一条「停止」消息并唤醒
-// 机器人，由它结合上下文决定后续动作（继续、调整或结束）。不再硬编码为
-// 取消当前回复、全部后台调用或远端线程——那些由机器人按目标决定；真正要
-// 结束自身运行时它仍可用 fs_stop。已结束的 run 不接受停止输入（409）。
+// hardStopRun 硬停止主线 run（停止宽限到期或重复请求）：先 CAS 置
+// stop_requested_at——run 已终态则直接放弃，绝不推进水位或取消别人的槽；
+// 再把「停止」消息标记为已消费（不这样做，run 落 stopped 后扫描器会因
+// 「未消费输入」立刻拉起新 run 处理「停止」文本；只推进到停止消息的 seq，
+// 之后到达的新消息不受影响），最后取消执行槽 context，循环在安全点落
+// stopped。
+func (s *BotService) hardStopRun(botID, runID string, stopSeq int64) {
+	ok, err := s.runs.UpdateColumns(runID, map[string]interface{}{"finished_at": nil},
+		map[string]interface{}{"stop_requested_at": time.Now().UTC()})
+	if err != nil || !ok {
+		return
+	}
+	run, err := s.runs.FindByID(runID)
+	if err != nil {
+		return
+	}
+	s.advanceInputWatermarks(run, stopSeq)
+	s.cancelBotContext(botID, run)
+}
+
+// RequestStop 停止主线：追加一条「停止」消息并唤醒机器人，由它结合上下文
+// 决定后续动作（继续、调整或结束）；宽限期（stop_grace）内 run 未自然到达
+// 安全点，或已受理过停止仍再次点击，则硬取消当前模型/同步调用 context，
+// 循环在安全点落 stopped。不再硬编码为取消全部后台调用或远端线程——那些由
+// 机器人按目标决定；真正要结束自身运行时它仍可用 fs_stop。已结束的 run 不
+// 接受停止输入（409）。
 func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, error) {
 	if _, err := s.bots.FindByIDAndUser(botID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -465,6 +485,14 @@ func (s *BotService) RequestStop(userID, botID, runID string) (*BotRunResponse, 
 			Key:     fmt.Sprintf("user_message:%d", msgSeq),
 			Context: fmt.Sprintf(`{"message_seq":%d,"client_message_id":%q,"kind":"stop"}`, msgSeq, clientMsgID),
 		})
+		// 宽限计时：到时 run 仍未结束则硬取消。计时器随进程重启丢失可接受
+		// ——重启恢复本就会把活动 run 置 failed，无需额外持久化。
+		time.AfterFunc(s.cfg.Bots.Runtime.StopGrace(), func() {
+			s.hardStopRun(botID, runID, msgSeq)
+		})
+	} else {
+		// 已受理过停止仍再次点击：不再等宽限，立即硬取消。
+		s.hardStopRun(botID, runID, msgSeq)
 	}
 
 	fresh, err := s.runs.FindByID(runID)
@@ -620,7 +648,12 @@ type botDecisionContent struct {
 }
 
 type botLifecycleContent struct {
-	Event  string          `json:"event"`
+	Event string `json:"event"`
+	// Render 是事件投影的渲染标记（INT-137 R6）："user" 表示按 user 角色 +
+	// [平台事件] 前缀进请求。缺省为空表示旧消息——部分兼容后端要求 system
+	// 只能出现在开头，但不能改写已有会话的前缀（prefix_hash），所以只有新追加
+	// 的消息带标记；旧消息保持 system 角色，随压缩归档离开投影。
+	Render string          `json:"render,omitempty"`
 	Detail json.RawMessage `json:"detail,omitempty"`
 }
 

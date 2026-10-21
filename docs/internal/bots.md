@@ -12,7 +12,8 @@ service/bot_runtime.go     唤醒、每机器人串行执行槽、run 生命周�
 service/bot_loop.go        核心工具循环（安全点 → 构建 → 流式 → 提交 → 执行/受理 → 收尾）
 service/bot_context.go     账本 → Chat Completions 投影、前缀/工具哈希、运行时上下文
 service/bot_prompt.go      固定平台规则与版本
-service/bot_openai.go      官方 openai-go 适配（流式聚合、usage、连接探测）
+service/bot_openai.go      官方 openai-go 适配（流式聚合、看门狗、usage、连接探测）
+service/bot_model_errors.go 上游错误分类（认证/额度/限流/不可用/模型缺失/流超时）与重试判定
 service/bot_tools.go       固定工具注册表（v1：10 工具/29 action；v2：11/38；v3：11/44）、schema 生成、参数校验
 service/bot_compaction.go  压缩计划、安全切点、折叠、滚动摘要、工具集激活
 service/bot_window.go      模型窗口能力：/models 探测、缓存、manual>detected>fallback 解析
@@ -596,9 +597,12 @@ CAS 终结；running 记录取消并取消 context，worker 落唯一终态且
   worker 认领的异步写走后台结果（CAS `queued→not_executed`，认领竞速失败即
   跳过）；读类调用（`botReadOnlyActions` 判定）允许执行完，已有结果不丢。
 - **停止按钮 = 用户消息**：`POST /runs/:id/stop` 追加一条「停止」用户消息并
-  唤醒（`client_message_id=stop:<runID>` 幂等），不再硬取消当前回复、后台
-  调用或远端线程；是否结束由机器人结合上下文决定，真正要停自己时仍可用
-  `fs_stop`。停止后的迟到结果不复活旧 run。
+  唤醒（`client_message_id=stop:<runID>` 幂等），是否结束由机器人结合上下文决定，
+  真正要停自己时仍可用 `fs_stop`。INT-137 起另加宽限兜底：受理停止后
+  `bots.runtime.stop_grace_seconds`（默认 15s）内 run 未自然结束即置
+  `stop_requested_at` 并硬取消执行槽 context；已受理过停止再点一次则立即硬
+  取消（前端此时按钮文案为「强制停止」）。硬取消会把停止消息标记为已消费，
+  避免扫描器随后为「停止」文本另起一 run。停止后的迟到结果不复活旧 run。
 - **Issue 写入保护**：`fs_issue update` / `replace_checklist` 支持
   `expected_updated_at` / `expected_checklist_updated_at`（先 `get` 读回）。
   不符时不写入，回 `conflict=true`、原因与目标最新内容，让机器人重新读取、
@@ -859,6 +863,48 @@ null），给三栏工作台的左侧列表当预览列。语义与约束：
 - **刻意没做的**：参考截图里的「添加标签」「资料库 / 电脑」tab 没有对应数据
   模型，不实现；定时任务仍是只读 + 启停，不新增任务增删改入口（服务端只有
   `enabled` 写端点）。
+
+## 运行超时、硬停止与失败处理（INT-137）
+
+本机/自建提供商卡住时不能让主线槽一直占着，失败也要给出用户能直接行动的理由。
+
+- **流式看门狗**（`bot_openai.go`）：`botStreamChat` 派生独立 context，首包超时
+  `bots.runtime.stream_first_chunk_timeout_seconds`（默认 90s）、片段间空闲
+  `stream_idle_timeout_seconds`（默认 120s）；每次收到 chunk（含纯工具调用
+  chunk）重置为空闲阈值。超时只取消本条流，以 `*botStreamTimeoutError` 返回
+  `model_stream_timeout`；父 ctx 的取消（用户停止/关停）原样透传，不改写成
+  超时。主线与摘要/归档等辅助请求（`bot_maintenance.go`）共用同一组阈值。
+- **未输出前的有限重试**（`bot_loop.go`）：只有「本次尝试尚未收到任何正文或
+  工具调用片段」才重试，最多 `retry_max_attempts`（默认 2，负值关闭）；每次都
+  是独立的 `bot_model_requests` 行。退避取 `max(Retry-After, retry_base_delay_ms
+  << attempt)`，Retry-After 封顶 60s，退避期可被 ctx 取消打断。已输出片段的
+  失败、看门狗超时、普通 4xx 都不重试。
+- **错误分类**（`bot_model_errors.go`）：把上游报错收敛为 `provider_auth_failed`
+  / `provider_quota_exhausted` / `provider_rate_limited` / `provider_unavailable`
+  / `model_not_found` / `model_stream_timeout` / `model_request_failed`。
+  `finishModelFailed` 把这些 code、中文说明、上游 detail 与可选 action
+  （`ai_providers_settings`）写进 run 行与 `run_error` 事件；前端据此显示
+  错误条与「去设置」按钮（只对 auth/quota 显示，避免噪音）。分类同时是熔断
+  与重试判定的唯一事实源。
+- **硬停止**（`bot_runtime.go`）：见「读取完整性…」一节的停止语义。宽限计时
+  器随进程重启丢失，但重启恢复本就把活动 run 置 failed。
+- **定时任务运行停止**：新增 `POST /api/bots/{id}/schedule-tasks/{taskId}/runs/
+  {runId}/stop`（仅 JWT）。置 `stop_requested_at` + 取消执行槽；无槽的孤儿
+  run 由补唤醒/5s 扫描带入安全点收尾。落 `stopped` 时不追加主线事件（用户
+  主动停止不是需要汇报的结果）。归属不符一律 404，已终态 409。
+- **provider 熔断**（`ai_providers.circuit_open_until` / `circuit_reason`）：
+  schedule run 因 `provider_auth_failed` 或 `provider_quota_exhausted` 落 failed
+  时打开窗口（`bots.runtime.provider_circuit_minutes`，默认 30 分钟）。窗口
+  内该 provider 的到期任务直接记 `skipped`（summary 写明原因、自动恢复时间与
+  手动恢复方式），同一熔断只往主线追加一条去重事件。窗口过后自动恢复；用户
+  更新密钥/地址或带 `provider_id` 的测试连接成功即清除。主线不熔断：用户可能
+  已充值，仍每次尝试并给出可操作错误。
+- **R6 toolset_updated 角色**：新追加的 `toolset_updated` lifecycle 消息在
+  `content.render="user"`，投影为 user 角色 + `[平台事件]` 前缀；旧消息
+  （无标记）保持 system 角色，既有会话的 `prefix_hash` 在下次压缩前不变。
+  旧消息到达压缩边界后随摘要归档离开投影（投影从 `summary_through_seq` 起读），
+  因此不需要改写不可变的账本。不可变账本与前缀缓存共同决定了「只能给新消息
+  打标记、不能回写旧消息」。
 
 ## 边界与决策
 
